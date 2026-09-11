@@ -37,6 +37,19 @@ class FakeChannel implements SshChannel {
       .filter((f) => f.t === 'data')
       .reduce((n, f) => n + Buffer.from(f.b64 as string, 'base64').length, 0);
   }
+  /** The door's output as sent so far, in frame order. */
+  echoed(): Buffer {
+    return Buffer.concat(this.sent.filter((f) => f.t === 'data').map((f) => Buffer.from(f.b64 as string, 'base64')));
+  }
+  /** Every data frame's offset is the running total of the frames before it. */
+  contiguous(): boolean {
+    let expected = 0;
+    for (const f of this.sent.filter((f) => f.t === 'data')) {
+      if (f.off !== expected) return false;
+      expected += Buffer.from(f.b64 as string, 'base64').length;
+    }
+    return true;
+  }
 }
 
 const OPEN: SshOpen = {
@@ -110,11 +123,15 @@ afterEach(async () => {
 
 describe('openStream', () => {
   it('registers the target before the first byte reaches the door, then echoes both ways with credit', async () => {
-    let registeredAtFirstByte: boolean | undefined;
+    let lookupAtFirstByte: DoorStream | undefined;
     let doorSaw = Buffer.alloc(0);
     const port = await listen((socket) => {
+      const from = socket.remotePort ?? -1;
       socket.once('data', () => {
-        registeredAtFirstByte = door.lookupTarget(socket.remotePort ?? -1) !== undefined;
+        // The door's first byte goes into the same sequence log as the registrations:
+        // their order, not timing, is what the test asserts.
+        registrations.push(`first-byte:${from}`);
+        lookupAtFirstByte = door.lookupTarget(from);
       });
       socket.on('data', (chunk: Buffer) => {
         doorSaw = Buffer.concat([doorSaw, chunk]);
@@ -124,30 +141,30 @@ describe('openStream', () => {
     const { channel, handler, log } = start(port);
     // Bytes that arrive before the connection is up wait for it.
     handler.onFrame(data(0, Buffer.from('SSH-2.0-terminal\r\n')));
-    await until(() => channel.sent.some((f) => f.t === 'credit'));
-    expect(registeredAtFirstByte).toBe(true);
-    expect(registrations).toHaveLength(1);
+    await until(() => registrations.some((entry) => entry.startsWith('first-byte:')));
     const sourcePort = Number(registrations[0].split(':')[1]);
-    expect(door.lookupTarget(sourcePort)).toEqual({
+    expect(registrations).toEqual([`register:${sourcePort}`, `first-byte:${sourcePort}`]);
+    const record = {
       stream: OPEN.stream,
       target: { account: 'alice' },
       source: { ip: '2001:db8::1', port: 4242 },
       openedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
-    });
+    };
+    expect(lookupAtFirstByte).toEqual(record);
+    expect(door.lookupTarget(sourcePort)).toEqual(record);
     expect(log).toHaveBeenCalledWith({ event: 'stream_open', stream: OPEN.stream, account: 'alice', sourcePort });
-    expect(channel.sent).toContainEqual({ t: 'credit', ack: 18 });
+    // Credit follows once the door took the bytes; the echo comes back with contiguous offsets.
+    await until(() => channel.sent.some((f) => f.t === 'credit' && f.ack === 18));
     await until(() => channel.bytesOut() === 18);
-    expect(channel.sent.find((f) => f.t === 'data')).toEqual({
-      t: 'data',
-      off: 0,
-      b64: Buffer.from('SSH-2.0-terminal\r\n').toString('base64'),
-    });
+    expect(channel.echoed().toString()).toBe('SSH-2.0-terminal\r\n');
+    expect(channel.contiguous()).toBe(true);
     expect(doorSaw.toString()).toBe('SSH-2.0-terminal\r\n');
     // More bytes after the connection: contiguous offsets, credit per delivered chunk.
     handler.onFrame(data(18, Buffer.from('more')));
     await until(() => channel.sent.some((f) => f.t === 'credit' && f.ack === 22));
     await until(() => channel.bytesOut() === 22);
-    expect(channel.sent.filter((f) => f.t === 'data').map((f) => f.off)).toEqual([0, 18]);
+    expect(channel.echoed().toString()).toBe('SSH-2.0-terminal\r\nmore');
+    expect(channel.contiguous()).toBe(true);
     handler.onFrame(frame('credit', { ack: 22 }));
     // The far end finishes: our half-close reaches the door, whose echo ends, and close follows once acknowledged.
     handler.onFrame(frame('end'));
@@ -155,7 +172,7 @@ describe('openStream', () => {
     expect(channel.types().slice(-2)).toEqual(['end', 'close']);
     expect(channel.sent.at(-1)).toEqual({ t: 'close' });
     expect(channel.released).toBe(1);
-    expect(registrations).toEqual([`register:${sourcePort}`, `unregister:${sourcePort}`]);
+    expect(registrations).toEqual([`register:${sourcePort}`, `first-byte:${sourcePort}`, `unregister:${sourcePort}`]);
     expect(door.lookupTarget(sourcePort)).toBeUndefined();
     expect(log).toHaveBeenCalledWith({
       event: 'stream_closed',
@@ -216,7 +233,11 @@ describe('openStream', () => {
     expect(channel.bytesOut()).toBe(WINDOW_BYTES);
     const sizes = () =>
       channel.sent.filter((f) => f.t === 'data').map((f) => Buffer.from(f.b64 as string, 'base64').length);
-    expect(sizes()).toEqual([CHUNK_BYTES, CHUNK_BYTES, CHUNK_BYTES, CHUNK_BYTES]);
+    // Whatever has arrived goes out at once, in chunks of at most 16 KiB, until exactly the window is in flight.
+    expect(sizes().every((size) => size >= 1 && size <= CHUNK_BYTES)).toBe(true);
+    expect(sizes().length).toBeGreaterThanOrEqual(WINDOW_BYTES / CHUNK_BYTES);
+    expect(sizes().reduce((n, s) => n + s, 0)).toBe(WINDOW_BYTES);
+    expect(channel.contiguous()).toBe(true);
     handler.onFrame(frame('credit', { ack: CHUNK_BYTES }));
     await until(() => channel.bytesOut() === WINDOW_BYTES + CHUNK_BYTES);
     await sleep(20);
