@@ -29,6 +29,7 @@ import { isValidTimezone } from '../../timezone.js';
 import type { AgentGroup, Session } from '../../types.js';
 import { resolveAttachForGroup } from '../attach-resolve.js';
 import { registerResource } from '../crud.js';
+import { remoteOperations } from './sandboxes-remote.js';
 
 /**
  * The first-ever spawn of a brand-new group is the slow path — a cold session
@@ -287,5 +288,6 @@ registerResource({
         return resolveAttachForGroup(group);
       },
     },
+    ...remoteOperations,
   },
 });
