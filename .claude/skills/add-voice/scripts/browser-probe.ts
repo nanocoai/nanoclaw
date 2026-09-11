@@ -22,7 +22,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import type { InboundMessage } from '../../../../src/channels/adapter.js';
-import { createGptLiveAdapter } from '../../../../src/channels/gpt-live.js';
+import { createGptLiveAdapter } from '../../../../src/channels/voice.js';
 import { resolveOpenAiKey } from '../../../../src/channels/gpt-live-keychain.js';
 import { readEnvFile } from '../../../../src/env.js';
 import { registerWebhookHandler } from '../../../../src/webhook-server.js';

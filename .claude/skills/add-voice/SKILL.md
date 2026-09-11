@@ -39,16 +39,18 @@ the voice prompt composer, the call page, and their tests into place
 (overwrite — the branch is canonical):
 
 ```nc:copy from-branch:channels
-src/channels/gpt-live.ts
+src/channels/voice.ts
 src/channels/gpt-live-session.ts
 src/channels/gpt-live-prompt.ts
 src/channels/gpt-live-call-page.ts
 src/channels/gpt-live-keychain.ts
 src/channels/gpt-live-sideband.ts
+src/channels/voice-adapter.test.ts
+src/channels/voice-registration.test.ts
 src/channels/gpt-live-session.test.ts
-src/channels/gpt-live-adapter.test.ts
 src/channels/gpt-live-keychain.test.ts
-src/channels/gpt-live-registration.test.ts
+src/channels/gpt-live-call-page.test.ts
+container/skills/voice-formatting/SKILL.md
 ```
 
 ### 2. Register the adapter
@@ -57,7 +59,7 @@ Append the self-registration import to the channel barrel (skipped if present).
 This one line is the skill's only reach-in into the channel core:
 
 ```nc:append to:src/channels/index.ts
-import './gpt-live.js';
+import './voice.js';
 ```
 
 ### 3. Teach agents to write for the ear
@@ -67,9 +69,6 @@ answers a call in short plain prose. `container/skills/` is mounted read-only
 into every agent container; the skill only changes behaviour when a message
 arrives from the `voice` channel:
 
-```nc:copy
-container-skills/voice-formatting/SKILL.md -> container/skills/voice-formatting/SKILL.md
-```
 
 ### 4. Build
 
@@ -87,13 +86,13 @@ Run the registration test, the session state-machine tests, and the adapter
 integration test (a fake OpenAI behind the real webhook server):
 
 ```nc:run effect:test
-pnpm exec vitest run src/channels/gpt-live-registration.test.ts src/channels/gpt-live-session.test.ts src/channels/gpt-live-adapter.test.ts src/channels/gpt-live-keychain.test.ts
+pnpm exec vitest run src/channels/voice-registration.test.ts src/channels/voice-adapter.test.ts src/channels/gpt-live-session.test.ts src/channels/gpt-live-keychain.test.ts src/channels/gpt-live-call-page.test.ts
 ```
 
-`gpt-live-registration.test.ts` imports the real channel barrel and asserts the
+`voice-registration.test.ts` imports the real channel barrel and asserts the
 registry contains `voice` — it goes red if the import line drifts.
 `gpt-live-session.test.ts` covers the delegation bookkeeping (transcript cut,
-chunking, barge-in). `gpt-live-adapter.test.ts` drives the call page and SDP
+chunking, barge-in). `voice-adapter.test.ts` drives the call page and SDP
 routes over HTTP, checks the session is created in client-delegation mode with
 the wired agent's name, and round-trips a delegation to an inbound message and
 a reply to spoken commentary over the sideband. A real call is verified
@@ -274,6 +273,55 @@ else, append another token to `GPT_LIVE_LINK_TOKEN` (comma-separated), restart,
 derive its line id the same way, and wire `voice:<that line id>`.
 
 To uninstall: see [REMOVE.md](REMOVE.md).
+
+## The call page
+
+The page callers open is a small React app kept under [ui/](ui/) in this skill:
+Teenage Engineering inspired, one screen beside a rail of keys, a dot-matrix
+display that shows the caller's voice in white, thinking in orange and the
+agent's voice in orange, captions that fade in word by word, and three device
+finishes. It ships as one self-contained document inside
+`src/channels/gpt-live-call-page.ts` (generated, do not edit by hand), so the
+host build, the copy list and the routes never change when the look does.
+
+Change the look without a rebuild with one `.env` key holding a JSON object,
+injected into the page when it is served:
+
+```
+GPT_LIVE_UI={"colorway":"field","presence":"matrix","brand":"Casa line"}
+```
+
+| key | values | default |
+| --- | --- | --- |
+| `skin` | `te` (device), `nanoclaw` (card) | `te` |
+| `colorway` | `auto` (follows light/dark), `ivory`, `field`, `rabbit` | `auto` |
+| `layout` | `rail` (screen beside keys), `stack` | `rail` |
+| `presence` | `matrix`, `bars` | `matrix` |
+| `brand` | header name, up to 60 characters | `NanoClaw Voice` |
+| `footer` | footer line; `{agent}` becomes the wired agent's name | `Voice by GPT-Live-1 · answers by {agent}` |
+| `shortcuts` | print `esc` and `space` on the keys (desktop) | `true` |
+| `timestamps` | time into the call on each transcript turn | `true` |
+| `colorwayPicker` | let callers pick a finish from the page | `true` |
+
+Callers can also switch the finish from the three dots under the transcript;
+the choice stays in their browser. To change the components themselves, edit
+`ui/src`, then from `ui/` run `pnpm install --frozen-lockfile && pnpm build`; the
+build regenerates the module and stamps it with a hash of the sources, which the
+channel tests check. The folder is its own pnpm root with the repository's
+supply-chain policy mirrored in its `pnpm-workspace.yaml`. Try the page without a
+microphone or an agent by adding `&demo=1` to any call link: it plays a scripted
+call and connects to nothing.
+
+## Channel Info
+
+- **type**: `voice`
+- **terminology**: a "line" is one call link; whoever opens it talks to the wired agent. Calls are 1:1 conversations, there are no groups.
+- **platform-id-format**: `voice:{line id}` where the line id is the first 12 hex characters of SHA-256 of the link token (never the token itself). The caller's user id is the same string.
+- **how-to-find-id**: derive it from the token in `.env`: `node -e "console.log(require('crypto').createHash('sha256').update(process.argv[1]).digest('hex').slice(0,12))" "$GPT_LIVE_LINK_TOKEN"`; the wiring step in this skill does that for you.
+- **instances**: one adapter; several lines by listing several tokens in `GPT_LIVE_LINK_TOKEN` (comma-separated), each wired on its own.
+- **supports-threads**: no
+- **typical-use**: a spoken conversation with one agent from a browser, for the people you hand a link to
+- **default-isolation**: one line per person; a shared line means a shared session. Use a separate agent group for a demo line.
 
 ## Troubleshooting
 
