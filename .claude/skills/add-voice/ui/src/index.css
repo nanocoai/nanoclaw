@@ -478,7 +478,7 @@
   --font-display: "Archivo Narrow", "Archivo", system-ui, sans-serif;
 }
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) .voice-page[data-skin="te"] {
+  :root:not([data-theme="light"]) .voice-page[data-skin="te"]:not([data-colorway]) {
     --background: #0e0e0e;
     --foreground: #f1efe9;
     --card: #1c1c1c;
@@ -499,7 +499,7 @@
     --shadow: 0 18px 44px rgba(0, 0, 0, 0.5);
   }
 }
-:root[data-theme="dark"] .voice-page[data-skin="te"] {
+:root[data-theme="dark"] .voice-page[data-skin="te"]:not([data-colorway]) {
   --background: #0e0e0e;
   --foreground: #f1efe9;
   --card: #1c1c1c;
