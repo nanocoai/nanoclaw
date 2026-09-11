@@ -67,10 +67,7 @@ export function formatNoteLink(url: string): string | null {
  * <url>" in dim) so the user has a copy-paste path right next to the
  * action button without needing to scroll back up to the card.
  */
-export async function confirmThenOpen(
-  url: string,
-  message = 'Press Enter to open your browser',
-): Promise<void> {
+export async function confirmThenOpen(url: string, message = 'Press Enter to open your browser'): Promise<void> {
   if (isHeadless()) {
     // No browser to open here — ALWAYS surface the URL itself, and print it
     // RAW on stdout: clack notes wrap long lines and inject gutter pipes and

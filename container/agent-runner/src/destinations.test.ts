@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 
-import { closeSessionDb, getInboundDb, initTestSessionDb } from './db/connection.js';
+import { closeSessionDb, getInboundDb, initTestSessionDb } from './mailbox/sqlite/connection.js';
 import { buildSystemPromptAddendum } from './destinations.js';
 
 beforeEach(() => {
@@ -72,5 +72,40 @@ describe('buildSystemPromptAddendum — multi-destination routing guidance', () 
     expect(prompt).toContain('Only notify someone when the task asks');
     expect(prompt).not.toContain('<message to=');
     expect(prompt).not.toContain('default to addressing');
+  });
+
+  it("defaults task escalation to the agent's own channel instead of its parent agent", () => {
+    seedDestination('casa', 'Casa', 'whatsapp', 'group-1@g.us');
+    getInboundDb()
+      .prepare(
+        `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+         VALUES ('parent', 'Parent', 'agent', NULL, NULL, 'ag-parent')`,
+      )
+      .run();
+
+    const prompt = buildSystemPromptAddendum('Casa', { kind: 'task', taskId: 'weekly-report' });
+
+    expect(prompt).toContain(
+      'For user-visible escalation output, default to your own channel destination(s): `casa`',
+    );
+    expect(prompt).toContain(
+      'Use an agent-type destination like `parent` only when the task explicitly calls for routing through another agent, not as your default escalation path.',
+    );
+    expect(prompt).not.toContain('default to `parent`');
+  });
+
+  it('keeps generic task guidance when no channel destination exists', () => {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+         VALUES ('parent', 'Parent', 'agent', NULL, NULL, 'ag-parent')`,
+      )
+      .run();
+
+    const prompt = buildSystemPromptAddendum('Casa', { kind: 'task', taskId: 'weekly-report' });
+
+    expect(prompt).toContain('Always pass the explicit named destination.');
+    expect(prompt).not.toContain('For user-visible escalation output, default to');
+    expect(prompt).not.toContain('your own channel destination(s):');
   });
 });

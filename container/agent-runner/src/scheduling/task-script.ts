@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { MessageInRow } from '../db/messages-in.js';
-import { touchHeartbeat } from '../db/connection.js';
+import { touchHeartbeat } from '../heartbeat.js';
 
 const SCRIPT_TIMEOUT_MS = 30_000;
 const SCRIPT_MAX_BUFFER = 1024 * 1024;
@@ -16,7 +16,11 @@ function log(msg: string): void {
   console.error(`[task-script] ${msg}`);
 }
 
-export async function runScript(script: string, taskId: string): Promise<ScriptResult | null> {
+export async function runScript(
+  script: string,
+  taskId: string,
+  timeoutMs: number = SCRIPT_TIMEOUT_MS,
+): Promise<ScriptResult | null> {
   const scriptPath = path.join('/tmp', `task-script-${taskId}.sh`);
   fs.writeFileSync(scriptPath, script, { mode: 0o755 });
 
@@ -24,7 +28,7 @@ export async function runScript(script: string, taskId: string): Promise<ScriptR
     execFile(
       'bash',
       [scriptPath],
-      { timeout: SCRIPT_TIMEOUT_MS, maxBuffer: SCRIPT_MAX_BUFFER, env: process.env },
+      { timeout: timeoutMs, maxBuffer: SCRIPT_MAX_BUFFER, env: process.env },
       (error, stdout, stderr) => {
         try {
           fs.unlinkSync(scriptPath);
@@ -37,7 +41,15 @@ export async function runScript(script: string, taskId: string): Promise<ScriptR
         }
 
         if (error) {
-          log(`[${taskId}] error: ${error.message}`);
+          // execFile kills on timeout, so a script that ran too long arrives
+          // here as a generic "Command failed" — indistinguishable from one
+          // that exited non-zero on its first line. `killed` is what separates
+          // them; say which happened, and name the ceiling that was hit.
+          if ((error as { killed?: boolean }).killed) {
+            log(`[${taskId}] timed out after ${timeoutMs}ms and was killed; output discarded`);
+          } else {
+            log(`[${taskId}] error: ${error.message}`);
+          }
           return resolve(null);
         }
 
@@ -112,7 +124,7 @@ export async function applyPreTaskScripts(messages: MessageInRow[]): Promise<Tas
 
     if (!result || !result.wakeAgent) {
       const reason: ScriptSkipReason = result ? 'gated' : 'error';
-      log(`task ${msg.id} skipped: ${reason === 'gated' ? 'wakeAgent=false' : 'script error/no output'}`);
+      log(`task ${msg.id} skipped: ${reason === 'gated' ? 'wakeAgent=false' : 'script error, timeout, or no output'}`);
       skipped.push({ id: msg.id, reason });
       continue;
     }

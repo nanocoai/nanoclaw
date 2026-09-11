@@ -103,6 +103,8 @@ When an existing group was selected, append its exact id:
   --agent-group-id "${AGENT_GROUP_ID}"
 ```
 
+When the channel runs a named adapter instance (e.g. a second Telegram bot registered as `telegram-mega`), append `--instance "${INSTANCE}"` with the registry key (never the short name) so the DM row, the wiring and the welcome all target that bot; omitted = the channel's default instance.
+
 The new group is created on the instance default provider (`DEFAULT_AGENT_PROVIDER` in `.env`, or `claude` when unset). To put it on a different provider, switch after creation with `ncl groups config update --id <group-id> --provider <name>`. Add `--welcome "System instruction: ..."` to override the default welcome prompt.
 
 The script:

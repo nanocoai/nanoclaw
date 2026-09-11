@@ -23,6 +23,29 @@ A release is cut by a maintainer publishing it. The trigger is a release PR that
 - **Minor items** as single plain bullets at the bottom of the entry, no bold lead-in.
 - **No PR numbers** in the user-facing prose. PR references can live in the GitHub Release's `## Contributors` section.
 
+## Harvesting release notes from merged pull requests
+
+The v2 pull request template (`<!-- nanoclaw-pr-template:v2 -->`) carries an optional fenced
+```release-note``` block: one user-facing line, written by the contributor who knows what changed.
+`scripts/release-notes.mjs` collects those blocks across a merge range and prints a draft for you
+to edit:
+
+```bash
+node scripts/release-notes.mjs draft                      # since the last tag reachable from HEAD
+node scripts/release-notes.mjs draft --since v2.3.0        # explicit range start
+node scripts/release-notes.mjs draft --until <sha> --json  # machine-readable
+```
+
+It reads pull request bodies and labels through `gh api graphql`, so an authenticated `gh` is
+required. Harvested notes are grouped by the PR's `kind/*` label — the same managed vocabulary
+`.github/workflows/label-pr.yml` applies — and each bullet carries its PR link and author so you can
+go back to the source. Pull requests whose block is absent or still holds the template prompt are
+listed under **Needs a line** instead of being dropped silently; write a line for the user-visible
+ones and ignore the rest.
+
+The draft is a starting point, not the entry. Curate it into the shape described above, then paste
+what you keep under `## [Unreleased]`. The tool prints to stdout and never writes `CHANGELOG.md`.
+
 ## Publishing the release
 
 Before any release run, a repository administrator must configure and re-check its external safety controls:

@@ -5,7 +5,8 @@
 import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { INBOUND_SCHEMA } from '../../db/schema.js';
+import { INBOUND_SCHEMA } from '../../mailbox/sqlite/schema.js';
+import { wrapSqliteInbound } from '../../mailbox/sqlite/index.js';
 import { ECHO_BACKLOG_CAP, ECHO_CHANNEL_TYPE, ECHO_MAX_AGE_DAYS } from './config.js';
 import { pruneEchoBacklog } from './prune.js';
 
@@ -44,7 +45,7 @@ describe('pruneEchoBacklog', () => {
     const total = ECHO_BACKLOG_CAP + 5;
     for (let i = 0; i < total; i++) insertRow({ id: `e-${i}`, seq: i * 2 + 2 });
 
-    const pruned = pruneEchoBacklog(db, { now: NOW });
+    const pruned = pruneEchoBacklog(wrapSqliteInbound(db), { now: NOW });
     expect(pruned).toBe(5);
 
     const ids = remainingIds();
@@ -58,7 +59,7 @@ describe('pruneEchoBacklog', () => {
     insertRow({ id: 'old', seq: 2, ageMs: (ECHO_MAX_AGE_DAYS * 24 + 1) * 60 * 60 * 1000 });
     insertRow({ id: 'fresh', seq: 4, ageMs: 60_000 });
 
-    expect(pruneEchoBacklog(db, { now: NOW })).toBe(1);
+    expect(pruneEchoBacklog(wrapSqliteInbound(db), { now: NOW })).toBe(1);
     expect(remainingIds()).toEqual(['fresh']);
   });
 
@@ -69,7 +70,7 @@ describe('pruneEchoBacklog', () => {
     // Overflow of pending echoes to prove the delete fires while sparing the above.
     for (let i = 0; i < ECHO_BACKLOG_CAP + 1; i++) insertRow({ id: `e-${i}`, seq: 100 + i * 2 });
 
-    expect(pruneEchoBacklog(db, { now: NOW })).toBe(1);
+    expect(pruneEchoBacklog(wrapSqliteInbound(db), { now: NOW })).toBe(1);
     const ids = remainingIds();
     expect(ids).toContain('chat');
     expect(ids).toContain('done-echo');
@@ -77,6 +78,6 @@ describe('pruneEchoBacklog', () => {
   });
 
   it('returns 0 on an empty session', () => {
-    expect(pruneEchoBacklog(db, { now: NOW })).toBe(0);
+    expect(pruneEchoBacklog(wrapSqliteInbound(db), { now: NOW })).toBe(0);
   });
 });

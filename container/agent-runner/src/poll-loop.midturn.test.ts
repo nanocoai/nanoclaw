@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
-import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './db/connection.js';
+import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './mailbox/sqlite/connection.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { processQuery } from './poll-loop.js';
 import { MockProvider } from './providers/mock.js';
@@ -16,7 +16,7 @@ afterEach(() => {
 
 // --- Mid-turn <message> block delivery ---
 // The SDK's final result carries only the LAST assistant text. For providers
-// declaring emitsMidTurnText, a wrapped reply composed between tool calls is
+// declaring `textDelivery: 'mid-turn-complete'`, a wrapped reply composed between tool calls is
 // delivered from the 'text' event stream at parse time; the final result
 // structurally STRIPS complete blocks (they already streamed, so they were
 // already delivered — no runtime record consulted), and a bare final text
@@ -325,11 +325,11 @@ describe('mid-turn <message> block delivery', () => {
   });
 });
 
-// Providers that do NOT declare emitsMidTurnText keep the old single-door
+// Providers that do NOT declare mid-turn delivery keep the old single-door
 // behavior: text events are delivery-inert and <message> blocks deliver from
 // the final result. The capability is a static fact of the provider, threaded
 // into processQuery by runPollLoop — never inferred from runtime events.
-describe('provider without emitsMidTurnText: result door unchanged', () => {
+describe('provider without mid-turn delivery: result door unchanged', () => {
   it('ignores text events and delivers the result block exactly once', async () => {
     seedDest();
     const block = '<message to="discord-main">The answer is 4.</message>';
@@ -358,7 +358,7 @@ describe('provider without emitsMidTurnText: result door unchanged', () => {
     const block = '<message to="discord-main">Result-door delivery.</message>';
     // A real MockProvider stream (text segment, then a result repeating the
     // block), but driven the way runPollLoop drives a provider that does not
-    // declare emitsMidTurnText.
+    // declare mid-turn delivery.
     const provider = new MockProvider(
       {},
       () => block,
@@ -376,10 +376,6 @@ describe('provider without emitsMidTurnText: result door unchanged', () => {
 });
 
 describe('mock provider mid-turn text events', () => {
-  it('declares the emitsMidTurnText capability', () => {
-    expect(new MockProvider().emitsMidTurnText).toBe(true);
-  });
-
   it('emits configured text events before each result', async () => {
     const provider = new MockProvider(
       {},
@@ -412,8 +408,7 @@ describe('mock provider mid-turn text events', () => {
       events.push(event);
     }
     // The real SDK's result only repeats the final assistant text, which
-    // already streamed — a mock declaring emitsMidTurnText must match that,
-    // or the result-door strip would remove blocks that never delivered.
+    // already streamed.
     const texts = events.filter((e) => e.type === 'text');
     expect(texts).toHaveLength(1);
     expect(texts[0].text).toBe('ok');

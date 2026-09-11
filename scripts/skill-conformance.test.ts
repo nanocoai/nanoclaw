@@ -188,13 +188,47 @@ describe('retired mechanisms', () => {
   });
 });
 
+describe('add-dial ↔ add-dial-tool agent-scope duplication', () => {
+  // The consent warning and the dial_agents prompt exist verbatim in BOTH
+  // skills: the parent asks (it owns the terminal; a nested step's stdout is a
+  // pipe) and hands the answer down via --input, the child re-asks only when
+  // run standalone. Duplication is deliberate — the shared-helper-file version
+  // was a shell-injection vector — but drift between the copies means the
+  // parent can accept an answer the child's validate-at-bind rejects, bouncing
+  // the operator three steps after they answered. Pin the copies together.
+  const dirs = (name: string) => parseDirectives(readFileSync(join(SKILLS_DIR, name, 'SKILL.md'), 'utf8'));
+  const parent = dirs('add-dial');
+  const child = dirs('add-dial-tool');
+
+  it('the dial_agents prompt matches: validate, flags, normalize, question text', () => {
+    const promptOf = (ds: Directive[]) => ds.find((d) => d.kind === 'prompt' && promptVar(d) === 'dial_agents');
+    const pp = promptOf(parent);
+    const cp = promptOf(child);
+    expect(pp).toBeDefined();
+    expect(cp).toBeDefined();
+    for (const attr of ['validate', 'flags', 'normalize'] as const) expect(pp!.attrs[attr]).toBe(cp!.attrs[attr]);
+    expect(pp!.body).toEqual(cp!.body);
+  });
+
+  it('the consent warning matches', () => {
+    const warnOf = (ds: Directive[]) =>
+      ds.find((d) => d.kind === 'operator' && d.body.join('\n').includes('Giving an agent Dial'));
+    const pw = warnOf(parent);
+    expect(pw).toBeDefined();
+    expect(pw!.body).toEqual(warnOf(child)?.body);
+  });
+});
+
 describe.each(SKILLS)('%s', (name) => {
   const dir = join(SKILLS_DIR, name);
   const md = readFileSync(join(dir, 'SKILL.md'), 'utf8');
   const directives = parseDirectives(md);
   const byLine = new Map(directives.map((d) => [d.line, d]));
   const promptVars = new Set(
-    directives.filter((d) => d.kind === 'prompt').map((d) => promptVar(d)).filter(isString),
+    directives
+      .filter((d) => d.kind === 'prompt')
+      .map((d) => promptVar(d))
+      .filter(isString),
   );
   const guards = [...new Set(directives.map((d) => d.attrs.when).filter(isString))];
   const fixture = loadFixture(name);
@@ -220,7 +254,10 @@ describe.each(SKILLS)('%s', (name) => {
       .filter(isString);
     for (const sc of fixture?.scenarios ?? []) {
       for (const k of Object.keys(sc.inputs ?? {})) {
-        expect(promptVars.has(k), `scenario "${sc.name}" supplies input "${k}" which is not a prompt var of ${name} — stale fixture?`).toBe(true);
+        expect(
+          promptVars.has(k),
+          `scenario "${sc.name}" supplies input "${k}" which is not a prompt var of ${name} — stale fixture?`,
+        ).toBe(true);
       }
       for (const v of unguarded) {
         expect(
@@ -250,7 +287,10 @@ describe.each(SKILLS)('%s', (name) => {
     // exec/stepFields fixture entry is missing (bindCapture binds '' when the
     // stub returned nothing and no validate: catches it).
     for (const [k, v] of Object.entries(res.vars)) {
-      expect(v, `resolved {{${k}}} is empty in scenario "${sc.name}" — add/fix the exec or stepFields fixture entry answering that capture`).not.toBe('');
+      expect(
+        v,
+        `resolved {{${k}}} is empty in scenario "${sc.name}" — add/fix the exec or stepFields fixture entry answering that capture`,
+      ).not.toBe('');
     }
   });
 
@@ -283,7 +323,9 @@ describe.each(SKILLS)('%s', (name) => {
     if (firstBuild >= 0) {
       directives.forEach((d, i) => {
         if (['copy', 'append', 'dep', 'json-merge'].includes(d.kind)) {
-          expect(i, `${d.kind} at line ${d.line} lands after the build — the build would not see it`).toBeLessThan(firstBuild);
+          expect(i, `${d.kind} at line ${d.line} lands after the build — the build would not see it`).toBeLessThan(
+            firstBuild,
+          );
         }
       });
     }

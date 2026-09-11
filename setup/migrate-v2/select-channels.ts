@@ -15,18 +15,18 @@ import * as p from '@clack/prompts';
 import { styleText } from 'node:util';
 
 const CHANNELS = [
-  { value: 'telegram',       label: 'Telegram' },
-  { value: 'discord',        label: 'Discord' },
-  { value: 'slack',          label: 'Slack' },
-  { value: 'whatsapp',       label: 'WhatsApp' },
-  { value: 'teams',          label: 'Microsoft Teams' },
-  { value: 'matrix',         label: 'Matrix' },
-  { value: 'imessage',       label: 'iMessage' },
-  { value: 'webex',          label: 'Webex' },
-  { value: 'gchat',          label: 'Google Chat' },
-  { value: 'resend',         label: 'Resend (email)' },
-  { value: 'github',         label: 'GitHub' },
-  { value: 'linear',         label: 'Linear' },
+  { value: 'telegram', label: 'Telegram' },
+  { value: 'discord', label: 'Discord' },
+  { value: 'slack', label: 'Slack' },
+  { value: 'whatsapp', label: 'WhatsApp' },
+  { value: 'teams', label: 'Microsoft Teams' },
+  { value: 'matrix', label: 'Matrix' },
+  { value: 'imessage', label: 'iMessage' },
+  { value: 'webex', label: 'Webex' },
+  { value: 'gchat', label: 'Google Chat' },
+  { value: 'resend', label: 'Resend (email)' },
+  { value: 'github', label: 'GitHub' },
+  { value: 'linear', label: 'Linear' },
   { value: 'whatsapp-cloud', label: 'WhatsApp Cloud API' },
 ];
 
@@ -42,7 +42,10 @@ async function main(): Promise<void> {
   // Non-interactive: NANOCLAW_CHANNELS="telegram,discord"
   const envChannels = process.env.NANOCLAW_CHANNELS?.trim();
   if (envChannels) {
-    const names = envChannels.split(',').map((s) => s.trim()).filter((s) => VALID_NAMES.has(s));
+    const names = envChannels
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => VALID_NAMES.has(s));
     fs.writeFileSync(outFile, names.join('\n') + '\n');
     return;
   }
