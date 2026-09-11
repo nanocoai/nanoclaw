@@ -4,6 +4,8 @@ import { onDeliveryAdapterReady } from '../delivery.js';
 import { onHostShutdown } from '../host-lifecycle.js';
 import { startCodeBoundaryWatcher, stopCodeBoundaryWatcher } from '../modules/approvals/code-boundary.js';
 import { registerMigration } from '../db/migrations/index.js';
+// The remote terminal door registers its own host lifecycle hooks.
+import './door/index.js';
 
 registerMigration({
   version: 1,
