@@ -3,11 +3,13 @@
  * mouth and ears of a call, with the NanoClaw agent as the brain.
  *
  * Shape: native adapter (no Chat SDK bridge). A *voice line* is one
- * conversation: its platform id is `gpt-live:<link token>`, the same id the
- * router namespaces for this channel, so the messaging group and its wiring
- * are created once (by the skill) and every call on that link lands in the
- * same agent session — the agent remembers the last call. There are no
- * threads. One call is active per line at a time.
+ * conversation: its platform id is `gpt-live:<line id>`, where the line id is
+ * the first 12 hex characters of the link token's SHA-256 — the router
+ * namespaces ids for this channel that way, and the token itself never
+ * reaches the database, the logs or the agent's messages. The messaging group
+ * and its wiring are created once (by the skill) and every call on that link
+ * lands in the same agent session — the agent remembers the last call. There
+ * are no threads. One call is active per line at a time.
  *
  * The live session is created in *client delegation* mode. Whenever the
  * voice model decides a turn needs facts, memory or tools it emits a
@@ -29,8 +31,10 @@
  * Credentials: `OPENAI_API_KEY` is read from `.env` on the host, like other
  * channel adapters read their tokens. The agent container never sees it.
  * The link token gates the HTTP routes: a request without a known `t` gets
- * a 403 before any session (and any billing) starts.
+ * a 403 before any session (and any billing) starts. The token is never
+ * logged or stored; everything NanoClaw keeps is keyed by the line id.
  */
+import { createHash } from 'node:crypto';
 import type http from 'node:http';
 
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage, OutboundMessage } from './adapter.js';
@@ -94,8 +98,13 @@ interface LiveCall {
   socket: SidebandSocket | null;
 }
 
-export function platformIdForToken(token: string): string {
-  return `${CHANNEL_TYPE}:${token}`;
+/**
+ * The line id for a link token: `gpt-live:` + the first 12 hex characters of
+ * the token's SHA-256. It is the platform id, the sender id and what the logs
+ * show; the token itself stays in the adapter's allow-list and the call link.
+ */
+export function lineIdForToken(token: string): string {
+  return `${CHANNEL_TYPE}:${createHash('sha256').update(token).digest('hex').slice(0, 12)}`;
 }
 
 export function createGptLiveAdapter(config: GptLiveConfig): ChannelAdapter {
@@ -172,7 +181,7 @@ export function createGptLiveAdapter(config: GptLiveConfig): ChannelAdapter {
     });
 
   const openCall = async (token: string, sessionId: string): Promise<LiveCall> => {
-    const platformId = platformIdForToken(token);
+    const platformId = lineIdForToken(token);
     const previous = lines.get(platformId);
     if (previous) {
       previous.session.close();
@@ -239,7 +248,7 @@ export function createGptLiveAdapter(config: GptLiveConfig): ChannelAdapter {
       if (route === 'sdp') {
         const offer = await readBody(req);
         if (!offer.trim().startsWith('v=')) return reply(res, 400, 'Body must be an SDP offer');
-        const platformId = platformIdForToken(token);
+        const platformId = lineIdForToken(token);
         const agent = (await resolveAgent(platformId)) ?? { name: config.fallbackAgentName };
         const { sessionId, answer } = await createWebRtcSession(offer, agent);
         log.info('gpt-live: session created', { platformId, sessionId, agent: agent.name });
@@ -248,7 +257,7 @@ export function createGptLiveAdapter(config: GptLiveConfig): ChannelAdapter {
         return;
       }
       if (route === 'hangup') {
-        const call = lines.get(platformIdForToken(token));
+        const call = lines.get(lineIdForToken(token));
         if (call) {
           call.session.close();
           endCall(call, 'hangup');

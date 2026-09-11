@@ -16,7 +16,9 @@ tests in from the `channels` branch.
 
 A **voice line** is one call link, `…/webhook/gpt-live/call?t=<token>`, wired to
 one agent group. Every call on the link lands in the same agent session, so the
-agent remembers the previous call. This skill sets up one line for a browser.
+agent remembers the previous call. Inside NanoClaw the line goes by a *line id*,
+a hash of the token, so the token itself stays in the link and never reaches the
+database, the logs or the agent. This skill sets up one line for a browser.
 Phone calls over SIP are a later step.
 
 Costs money: OpenAI bills voice sessions at $0.05 per minute, per second, plus
@@ -160,6 +162,14 @@ grep -s '^GPT_LIVE_LINK_TOKEN=' .env | cut -d= -f2- | cut -d, -f1 | grep -E '^[0
 GPT_LIVE_LINK_TOKEN={{link_token}}
 ```
 
+The line id is what NanoClaw calls this link (`gpt-live:<line id>`): the first
+twelve hex characters of the token's SHA-256, derived the same way the adapter
+derives it, so the token itself is never written anywhere but `.env`:
+
+```nc:run capture:line_id validate:^[0-9a-f]{12}$ effect:fetch
+printf '%s' '{{link_token}}' | node -e "let d='';process.stdin.on('data',(c)=>{d+=c}).on('end',()=>console.log(require('crypto').createHash('sha256').update(d).digest('hex').slice(0,12)))"
+```
+
 ## Choose the agent
 
 The line is wired to one agent group. List them (the NanoClaw service must be
@@ -197,8 +207,8 @@ channel's DM defaults — every delegated turn engages the agent, and the link
 holder is the line's user:
 
 ```nc:run effect:wire
-ncl messaging-groups list --json | jq -e --arg p "gpt-live:{{link_token}}" '.data[] | select(.platform_id==$p)' >/dev/null || ncl messaging-groups create --channel-type gpt-live --platform-id "gpt-live:{{link_token}}" --name "Voice line" --is-group 0
-ncl wirings create --channel-type gpt-live --platform-id "gpt-live:{{link_token}}" --agent-group "{{agent_folder}}" --session-mode shared
+ncl messaging-groups list --json | jq -e --arg p "gpt-live:{{line_id}}" '.data[] | select(.platform_id==$p)' >/dev/null || ncl messaging-groups create --channel-type gpt-live --platform-id "gpt-live:{{line_id}}" --name "Voice line" --is-group 0
+ncl wirings create --channel-type gpt-live --platform-id "gpt-live:{{line_id}}" --agent-group "{{agent_folder}}" --session-mode shared
 ```
 
 Tell the user where to call from:
@@ -243,7 +253,7 @@ Callers talk to the voice model; anything needing the agent is handed over and
 the answer is spoken back. Session ids are logged in `logs/nanoclaw.log`; quote
 one if you need OpenAI's help with a call. To add a second line for someone
 else, append another token to `GPT_LIVE_LINK_TOKEN` (comma-separated), restart,
-and wire `gpt-live:<that token>` the same way.
+derive its line id the same way, and wire `gpt-live:<that line id>`.
 
 Phone calls over SIP are the next step: an inbound trunk pointed at
 `sip:<PROJECT_ID>@sip.api.openai.com;transport=tls` and a public webhook URL.

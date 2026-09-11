@@ -20,7 +20,10 @@ import type { Duplex } from 'node:stream';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import type { ChannelAdapter, InboundMessage } from './adapter.js';
-import { createGptLiveAdapter } from './gpt-live.js';
+import { createGptLiveAdapter, lineIdForToken } from './gpt-live.js';
+
+/** What NanoClaw calls the line: a hash of the token, never the token. */
+const LINE = lineIdForToken('tok123');
 import { stopWebhookServer } from '../webhook-server.js';
 
 // ---------------------------------------------------------------------------
@@ -260,7 +263,9 @@ describe('gpt-live adapter (fake OpenAI, real webhook server)', () => {
 
     await vi.waitFor(() => expect(inbound).toHaveLength(1), { timeout: 5000 });
     const { platformId, threadId, message } = inbound[0];
-    expect(platformId).toBe('gpt-live:tok123');
+    expect(platformId).toBe(LINE);
+    expect(LINE).toMatch(/^gpt-live:[0-9a-f]{12}$/);
+    expect(JSON.stringify(message.content)).not.toContain('tok123');
     expect(threadId).toBeNull();
     expect(message.kind).toBe('chat');
     expect(message.isMention).toBe(true);
@@ -268,7 +273,7 @@ describe('gpt-live adapter (fake OpenAI, real webhook server)', () => {
     expect(message.content).toMatchObject({
       text: 'Assistant: Hi, how can I help?\nCaller: What is on my calendar tomorrow?',
       sender: 'Voice line',
-      senderId: 'gpt-live:tok123',
+      senderId: LINE,
       gptLive: { sessionId: 'live_fake1', delegationId: 'item_1', supersedes: null },
     });
 
@@ -278,7 +283,7 @@ describe('gpt-live adapter (fake OpenAI, real webhook server)', () => {
   });
 
   it('speaks the agent reply as commentary on the open delegation', async () => {
-    const id = await adapter.deliver('gpt-live:tok123', null, {
+    const id = await adapter.deliver(LINE, null, {
       kind: 'chat',
       content: { text: 'Two meetings: standup at nine and lunch with Dana.' },
     });
@@ -292,7 +297,7 @@ describe('gpt-live adapter (fake OpenAI, real webhook server)', () => {
   });
 
   it('maps typing to a silent thinking note', async () => {
-    await adapter.setTyping?.('gpt-live:tok123', null, 'Checking the calendar');
+    await adapter.setTyping?.(LINE, null, 'Checking the calendar');
     await vi.waitFor(() =>
       expect(fake.received.filter((e) => e.type === 'session.thinking.append').map((e) => e.content)).toContain(
         'Checking the calendar',
@@ -306,7 +311,7 @@ describe('gpt-live adapter (fake OpenAI, real webhook server)', () => {
     await vi.waitFor(() => expect(fake.received.some((e) => e.type === 'session.close')).toBe(true));
     await vi.waitFor(() => expect(fake.closedByClient).toBe(true));
 
-    const id = await adapter.deliver('gpt-live:tok123', null, { kind: 'chat', content: { text: 'too late' } });
+    const id = await adapter.deliver(LINE, null, { kind: 'chat', content: { text: 'too late' } });
     expect(id).toBeUndefined();
   });
 });
