@@ -128,7 +128,10 @@ a stream for a named sandbox attaches that sandbox, waking it if it went
 cold. `ssh <address> ls` prints the sandbox list instead of landing. Detach
 with **Ctrl-b, then d**; the session keeps running. A connection the Host
 did not relay (for example a direct loopback connection) is refused after
-authentication.
+authentication. While remote access is enabled, `ncl sandboxes new` also
+registers the new sandbox's name with the account so it gets an address of
+its own, and deleting the group frees it; both are best effort and never get
+in the way of the sandbox itself.
 
 ### Streams
 

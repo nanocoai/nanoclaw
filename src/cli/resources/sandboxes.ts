@@ -16,6 +16,7 @@
  */
 import { randomUUID } from 'crypto';
 
+import { registerSandbox } from '../../code-mode/remote/sandboxes.js';
 import {
   archiveSandboxChannel,
   bindSandboxChannel,
@@ -229,6 +230,11 @@ registerResource({
           ...(permissionMode !== undefined ? { permission_mode: permissionMode } : {}),
           ...(timezone !== undefined ? { timezone } : {}),
         });
+
+        // On a host with remote access enabled the sandbox gets an address of
+        // its own from the account. Best effort by contract: never in the
+        // verb's way, and a plain sandbox whenever it cannot happen.
+        void registerSandbox(folder);
 
         const { session } = await resolveSandboxSession(id);
 
