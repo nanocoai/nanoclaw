@@ -25,6 +25,14 @@ Costs money: OpenAI bills voice sessions at $0.05 per minute, per second, plus
 the agent's own model usage. The link token is the only thing between the
 internet and that bill — treat the link like a password.
 
+## Stack-chan body integration
+
+When combining this channel with a Stack-chan robot, read
+[references/stackchan.md](references/stackchan.md) first. It records the merged
+Autonomous OS motion contract, the existing firmware work, and the missing
+robot audio transport. The browser call remains the implemented voice path;
+this reference does not enable robot movement or audio during skill setup.
+
 ## Apply
 
 ### 1. Copy the adapter and tests
@@ -142,6 +150,18 @@ Give the origin a caller's browser reaches it at — `http://localhost:3000` for
 a local try, a tailnet or tunnel URL to call from a phone's browser. Browsers
 allow the microphone only on `localhost` or HTTPS. Set-if-absent, so a re-run
 keeps your value:
+
+On a tailnet, `tailscale serve` gives the host an HTTPS name with a valid
+certificate. Mount the webhook path on it; the target repeats the path because
+serve strips the mount prefix before proxying (run as root or a Tailscale
+operator; an existing mount at `/` for another service is unaffected):
+
+```bash
+tailscale serve --bg --set-path=/webhook http://127.0.0.1:3000/webhook
+```
+
+The origin is then `https://<host>.<tailnet>.ts.net` and the call page lives at
+`…/webhook/gpt-live/call?t=<token>`.
 
 ```nc:prompt public_url validate:^https?://\S+$ normalize:rstrip-slash
 What origin can a caller's browser reach this NanoClaw host at? (e.g. http://localhost:3000 or https://nanoclaw.example.ts.net)
