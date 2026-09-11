@@ -18,12 +18,14 @@
  */
 import path from 'node:path';
 
-import { findSandboxSessions } from '../../db/sessions.js';
+import { getChannelAdapter } from '../../channels/channel-registry.js';
+import { getMessagingGroup } from '../../db/messaging-groups.js';
+import { findSandboxSessions, SANDBOX_SYSTEM_THREAD_ID } from '../../db/sessions.js';
 import { onHostShutdown, onHostStart } from '../../host-lifecycle.js';
 import { log } from '../../log.js';
-import { sessionDir } from '../../session-manager.js';
+import { registerSessionRoutingResolver, sessionDir } from '../../session-manager.js';
 import type { AgentGroup } from '../../types.js';
-import { bindSessionChannel, type BoundSessionChannel } from './binding.js';
+import { bindSessionChannel, SESSION_CHANNEL_TYPE, type BoundSessionChannel, type ChannelAddress } from './binding.js';
 import { resolveBotIdentity, type BotIdentity } from './bot-identity.js';
 import { isUnavailable, SessionChannelClient, type ChannelRecord } from './client.js';
 import {
@@ -49,6 +51,22 @@ export interface SessionChannelDeps {
   createClient(credentials: SessionChannelCredentials): SessionChannelClient;
   /** The host's own bot identity for the channel invite; null when unknown (bot-identity.ts). */
   resolveBotIdentity(credentials: SessionChannelCredentials): Promise<BotIdentity | null>;
+  /**
+   * How the LIVE chat adapter names a channel — a builder from a conversation
+   * id to its platform id spelling and instance key — so the wiring row is
+   * the one inbound resolves. Null when no adapter for the platform is
+   * running (nothing could deliver).
+   */
+  channelAddressing(): ((conversationId: string) => ChannelAddress) | null;
+}
+
+/** The running adapter for the platform, when it can spell conversation ids. */
+function liveChannelAddressing(): ((conversationId: string) => ChannelAddress) | null {
+  const adapter = getChannelAdapter(SESSION_CHANNEL_TYPE);
+  const spell = adapter?.conversationPlatformId;
+  if (!adapter || !spell) return null;
+  const instance = adapter.instance ?? adapter.channelType;
+  return (conversationId) => ({ platformId: spell.call(adapter, conversationId), instance });
 }
 
 const defaultDeps: SessionChannelDeps = {
@@ -61,10 +79,24 @@ const defaultDeps: SessionChannelDeps = {
       appId: credentials.appId,
       ...(credentials.botToken ? { botToken: credentials.botToken } : {}),
     }),
+  channelAddressing: liveChannelAddressing,
 };
 
 let deps: SessionChannelDeps = defaultDeps;
 let runtime: SessionChannelRuntime | null = null;
+
+// A coding session has no origin chat of its own; once bound, its channel is
+// its default outbound route: a reply and a standalone `ncl outbox send`
+// both post at the channel's top level (thread null — the adapter posts a
+// null thread at the conversation itself).
+registerSessionRoutingResolver(async (session) => {
+  if (session.thread_id !== SANDBOX_SYSTEM_THREAD_ID) return null;
+  const row = await getSessionChannelByGroup(session.agent_group_id);
+  if (!row || row.archived_at || !row.messaging_group_id) return null;
+  const mg = await getMessagingGroup(row.messaging_group_id);
+  if (!mg) return null;
+  return { channelType: mg.channel_type, platformId: mg.platform_id, threadId: null };
+});
 
 export function setSessionChannelDeps(overrides: Partial<SessionChannelDeps> | null): void {
   deps = overrides ? { ...defaultDeps, ...overrides } : defaultDeps;
@@ -157,11 +189,23 @@ export async function bindSandboxChannel(
     return null;
   }
   if (!credentials) return null;
+  // The wiring row must carry the adapter's spelling of the channel, and only
+  // the running adapter knows it. Without one, nothing could deliver anyway —
+  // no channel is opened rather than one nothing will ever route.
+  const address = deps.channelAddressing();
+  if (!address) {
+    log.warn('Session channel: the chat adapter is not running — sandbox continues without a channel', {
+      agentGroupId: group.id,
+      channelType: SESSION_CHANNEL_TYPE,
+    });
+    return null;
+  }
   try {
     const bound = await bindSessionChannel({
       group,
       credentials,
       client: deps.createClient(credentials),
+      address,
       resolveBotIdentity: () => deps.resolveBotIdentity(credentials),
       ...(options.title ? { title: options.title } : {}),
     });

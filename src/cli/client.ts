@@ -18,7 +18,7 @@
 import { spawnSync } from 'child_process';
 import { randomUUID } from 'crypto';
 
-import { resolveAttachExec } from './attach-exec.js';
+import { attachWarnings, resolveAttachExec } from './attach-exec.js';
 import { formatResponse } from './format.js';
 import type { RequestFrame } from './frame.js';
 import { parseArgv } from './parse-argv.js';
@@ -75,6 +75,10 @@ async function main(): Promise<void> {
   // TTY, so the interactive exec has to happen here (`ncl groups attach`).
   const attach = resolveAttachExec(res, json, process.stdin.isTTY === true);
   if (attach) {
+    // Anything the verb wants said before the terminal is handed over (a
+    // sandbox name the account refused, say) rides as `warnings`; once the
+    // exec starts, nothing printed here would be seen.
+    for (const warning of attachWarnings(res)) process.stderr.write(`warning: ${warning}\n`);
     const result = spawnSync(attach.bin, attach.args, { stdio: 'inherit' });
     process.exit(result.status ?? 1);
   }

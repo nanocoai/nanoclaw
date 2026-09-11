@@ -36,3 +36,15 @@ export function resolveAttachExec(
   const { bin, argsTty, argsPlain } = res.data.attachExec;
   return { bin, args: stdinIsTty ? argsTty : argsPlain };
 }
+
+/**
+ * Warnings a verb attached to its response for the client to print before
+ * the terminal is handed over (an attach response prints nothing else).
+ * Only an array of non-empty strings counts; anything else is no warnings.
+ */
+export function attachWarnings(res: ResponseFrame): string[] {
+  if (!res.ok || typeof res.data !== 'object' || res.data === null) return [];
+  const warnings = (res.data as { warnings?: unknown }).warnings;
+  if (!Array.isArray(warnings)) return [];
+  return warnings.filter((w): w is string => typeof w === 'string' && w.trim().length > 0);
+}

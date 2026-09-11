@@ -9,8 +9,10 @@ Channel messages arrive in the terminal when you are idle. While you work, a
 notice at a tool boundary reports waiting messages. Use `ncl inbox read` to
 read them, or `--peek` to leave them unread.
 
-Use `ncl outbox send --text "..."` to reply on the channel. Terminal output
-is visible to attached operators and is not delivered as a channel message.
+Use `ncl outbox send --text "..."` to post on the channel: with no
+`--reply-to` it posts to your session channel; with `--reply-to <inbound-id>`
+it answers that message in its thread. Terminal output is visible to attached
+operators and is not delivered as a channel message.
 
 ## Tools and credentials
 

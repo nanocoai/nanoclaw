@@ -35,7 +35,9 @@ What the channel shows:
 
 - **Messages both ways.** A message in the channel is delivered into the
   coding session like any other chat message; the agent's replies
-  (`ncl outbox send`) come back to the channel. No mention is needed.
+  (`ncl outbox send`) come back to the channel. No mention is needed. The
+  channel is also the session's default outbound route: a send with no
+  `--reply-to` posts to it, a send with one answers in that message's thread.
 - **Status.** The channel shows the session as working while a turn runs,
   idle between turns, and suspended when the session container has been
   retired by the idle lease. It resumes when the next message wakes it.

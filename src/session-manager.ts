@@ -24,7 +24,7 @@ import {
   updateSession,
 } from './db/sessions.js';
 import { log } from './log.js';
-import { getAgentMailbox, type InboundMessage, type MailboxSession } from './mailbox/index.js';
+import { getAgentMailbox, type InboundMessage, type MailboxSession, type SessionRouting } from './mailbox/index.js';
 import { enqueueSessionReconcile } from './reconcile-feeds.js';
 import type { MessagingGroupAgent, Session } from './types.js';
 
@@ -267,24 +267,40 @@ export async function writeSessionRouting(agentGroupId: string, sessionId: strin
   const session = await getSession(sessionId);
   if (!session) return;
 
-  let channelType: string | null = null;
-  let platformId: string | null = null;
+  let routing: SessionRouting = { channelType: null, platformId: null, threadId: session.thread_id };
   if (session.messaging_group_id) {
     const mg = await getMessagingGroup(session.messaging_group_id);
-    if (mg) {
-      channelType = mg.channel_type;
-      platformId = mg.platform_id;
+    if (mg) routing = { ...routing, channelType: mg.channel_type, platformId: mg.platform_id };
+  } else {
+    // A session with no origin chat of its own may still have a chat surface
+    // (a coding session's channel): the module that bound it answers here.
+    for (const resolve of sessionRoutingResolvers) {
+      const resolved = await resolve(session);
+      if (resolved) {
+        routing = resolved;
+        break;
+      }
     }
   }
 
   await withMailboxSession(agentGroupId, sessionId, (mailbox) => {
-    mailbox.setRouting({
-      channelType,
-      platformId,
-      threadId: session.thread_id,
-    });
+    mailbox.setRouting(routing);
   });
-  log.debug('Session routing written', { sessionId, channelType, platformId, threadId: session.thread_id });
+  log.debug('Session routing written', { sessionId, ...routing });
+}
+
+/**
+ * Routing for a session that has no messaging group of its own — consulted by
+ * writeSessionRouting for system sessions (task, sandbox) so a module that
+ * gave such a session a chat surface can point its default outbound route at
+ * it. First non-null answer wins; null means "not mine".
+ */
+export type SessionRoutingResolver = (session: Session) => Promise<SessionRouting | null>;
+
+const sessionRoutingResolvers: SessionRoutingResolver[] = [];
+
+export function registerSessionRoutingResolver(resolver: SessionRoutingResolver): void {
+  sessionRoutingResolvers.push(resolver);
 }
 
 /**

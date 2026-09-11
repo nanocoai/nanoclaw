@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from 'vitest';
 
-import { isAttachResponse, resolveAttachExec } from './attach-exec.js';
+import { attachWarnings, isAttachResponse, resolveAttachExec } from './attach-exec.js';
 import type { ResponseFrame } from './frame.js';
 
 const attachData = {
@@ -44,5 +44,24 @@ describe('resolveAttachExec', () => {
     expect(resolveAttachExec(okFrame(attachData), true, true)).toBeUndefined();
     expect(resolveAttachExec(errFrame, false, true)).toBeUndefined();
     expect(resolveAttachExec(okFrame({ groups: [] }), false, true)).toBeUndefined();
+  });
+
+  it('an attach response may carry warnings the client prints before handing the terminal over', () => {
+    const withWarnings = {
+      ...attachData,
+      warnings: ['name reserved for addresses; sandbox created without its own address'],
+    };
+    expect(resolveAttachExec(okFrame(withWarnings), false, true)?.bin).toBe('docker');
+    expect(attachWarnings(okFrame(withWarnings))).toEqual([
+      'name reserved for addresses; sandbox created without its own address',
+    ]);
+  });
+
+  it('warnings are only non-empty strings in an array; anything else is none', () => {
+    expect(attachWarnings(okFrame(attachData))).toEqual([]);
+    expect(attachWarnings(okFrame({ ...attachData, warnings: 'one' }))).toEqual([]);
+    expect(attachWarnings(okFrame({ ...attachData, warnings: ['ok', '', 3, null] }))).toEqual(['ok']);
+    expect(attachWarnings(errFrame)).toEqual([]);
+    expect(attachWarnings(okFrame(null))).toEqual([]);
   });
 });

@@ -15,8 +15,10 @@
  * caller before a handler runs — the identity story is unchanged.
  */
 import { randomUUID } from 'crypto';
+import { setTimeout } from 'node:timers/promises';
 
-import { registerSandbox } from '../../code-mode/remote/sandboxes.js';
+import { registerSandbox, type SandboxAddressOutcome } from '../../code-mode/remote/sandboxes.js';
+import { log } from '../../log.js';
 import {
   archiveSandboxChannel,
   bindSandboxChannel,
@@ -43,6 +45,13 @@ import { remoteOperations } from './sandboxes-remote.js';
  * attach wait — so `new` waits longer than plain attach.
  */
 const NEW_SANDBOX_WAKE_WAIT_MS = 30_000;
+
+/**
+ * How long `new` waits for the account's answer on the sandbox's address
+ * before moving on. A refused name is worth a warning in the verb's own
+ * output; a slow service is not worth holding the terminal for.
+ */
+const ADDRESS_ANSWER_WAIT_MS = 4_000;
 
 const GENERATED_NAME_BASE = 'sandbox';
 
@@ -233,8 +242,34 @@ registerResource({
 
         // On a host with remote access enabled the sandbox gets an address of
         // its own from the account. Best effort by contract: never in the
-        // verb's way, and a plain sandbox whenever it cannot happen.
-        void registerSandbox(folder);
+        // verb's way, and a plain sandbox whenever it cannot happen — but a
+        // name the account REFUSES is the operator's to hear about, so the
+        // verb waits a moment for that answer and carries it as a warning.
+        const warnings: string[] = [];
+        const registration = registerSandbox(folder);
+        const address = await Promise.race([
+          registration,
+          setTimeout(ADDRESS_ANSWER_WAIT_MS, null as SandboxAddressOutcome | null),
+        ]);
+        const reservedWarning = (outcome: SandboxAddressOutcome): string | null =>
+          outcome.code === 'invalid_name'
+            ? `sandbox name '${folder}' is reserved for addresses — sandbox created without its own address`
+            : null;
+        if (address) {
+          const warning = reservedWarning(address);
+          if (warning) {
+            warnings.push(warning);
+            log.warn('Sandbox name refused for an address', { sandbox: folder, code: address.code });
+          }
+        } else {
+          // The answer came after the verb moved on: still loud, just late.
+          registration
+            .then((outcome) => {
+              const warning = reservedWarning(outcome);
+              if (warning) log.warn(`Sandbox name refused for an address — ${warning}`, { sandbox: folder });
+            })
+            .catch(() => {});
+        }
 
         const { session } = await resolveSandboxSession(id);
 
@@ -253,9 +288,12 @@ registerResource({
             sessionId: session.id,
             attach: `ncl sandboxes attach ${folder}`,
             channel: channel ? { channelId: channel.row.channel_id, created: channel.created } : null,
+            ...(warnings.length > 0 ? { warnings } : {}),
           };
         }
-        return resolveAttachForGroup(group, { wakeWaitMs: NEW_SANDBOX_WAKE_WAIT_MS });
+        const attach = await resolveAttachForGroup(group, { wakeWaitMs: NEW_SANDBOX_WAKE_WAIT_MS });
+        // The client prints warnings before it hands the terminal over.
+        return warnings.length > 0 ? { ...attach, warnings } : attach;
       },
     },
     'channel status': {

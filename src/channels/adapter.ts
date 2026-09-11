@@ -237,6 +237,16 @@ export interface ChannelAdapter {
     statusKind?: 'auto' | 'agent',
   ): Promise<void>;
   syncConversations?(): Promise<ConversationInfo[]>;
+  /**
+   * The platform id this adapter would stamp on inbound messages from a
+   * conversation the platform names `conversationId` (a Slack channel id, a
+   * Telegram chat id, …). The host uses it when IT learns of a conversation
+   * first — a channel opened on the host's behalf — so the messaging_groups
+   * row it writes is the one the adapter's inbound path resolves, not a
+   * near-duplicate in a different spelling. Adapters that encode platform
+   * ids expose this; callers without it cannot pre-register conversations.
+   */
+  conversationPlatformId?(conversationId: string): string;
   /** Resolve conversation type and human-readable metadata for host UI. */
   resolveConversation?(platformId: string): Promise<ResolvedConversation | null>;
   /** Legacy name-only resolver for adapters without richer conversation metadata. */

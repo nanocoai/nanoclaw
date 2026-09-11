@@ -29,6 +29,13 @@ vi.mock('../../config.js', async (importOriginal) => {
   };
 });
 
+// The sandbox's own address is the account service's business; here it only
+// answers (not enabled, or a refused name) so the verb's warning can be seen.
+vi.mock('../../code-mode/remote/sandboxes.js', () => ({
+  registerSandbox: vi.fn(async () => ({ done: false, code: 'not_enabled' })),
+  unregisterSandbox: vi.fn(async () => ({ done: false, code: 'not_enabled' })),
+}));
+
 const TEST_ROOT = '/tmp/nanoclaw-test-sandboxes-channel';
 
 import {
@@ -42,6 +49,7 @@ import {
   type ChannelRecord,
   type SessionChannelClient,
 } from '../../code-mode/session-channel/client.js';
+import { registerSandbox } from '../../code-mode/remote/sandboxes.js';
 import { SessionChannelRuntime } from '../../code-mode/session-channel/runtime.js';
 import { getAgentGroupByFolder } from '../../db/agent-groups.js';
 import { closeDb, initTestDb, runMigrations } from '../../db/index.js';
@@ -114,9 +122,13 @@ beforeEach(async () => {
     watchSessions: () => ({ stop: () => {} }),
   } as unknown as SessionEventsDriver);
   client = fakeClient();
+  vi.mocked(registerSandbox).mockReset();
+  vi.mocked(registerSandbox).mockResolvedValue({ done: false, code: 'not_enabled' });
   setSessionChannelDeps({
     readCredentials: async () => CREDS,
     createClient: () => client as unknown as SessionChannelClient,
+    // The live adapter's spelling of a channel, as the Slack chat adapter encodes it.
+    channelAddressing: () => (id) => ({ platformId: `slack:${id}`, instance: 'slack' }),
   });
 });
 
@@ -150,12 +162,24 @@ describe('sandboxes new — chat surface', () => {
 
     const row = await getSessionChannelByGroup(res.id);
     expect(row).toMatchObject({ channel_id: 'C1', title: 't1', service_base: CREDS.serviceBase });
-    const mg = await getMessagingGroupByPlatform('slack', 'C1', 'slack');
+    // The wiring row carries the adapter's spelling of the channel, never the bare id.
+    const mg = await getMessagingGroupByPlatform('slack', 'slack:C1', 'slack');
     expect((await getMessagingGroupAgents(mg!.id))[0]).toMatchObject({
       agent_group_id: res.id,
       session_mode: 'sandbox',
     });
+    expect(await getMessagingGroupByPlatform('slack', 'C1', 'slack')).toBeUndefined();
     expect(runtime.has(res.id)).toBe(true);
+  });
+
+  it('without a running chat adapter nothing is asked of the service: the sandbox has no channel', async () => {
+    setSessionChannelDeps({ channelAddressing: () => null });
+    const res = dataOf<{ id: string; channel: unknown }>(
+      await call('sandboxes-new', { name: 't1a', 'no-attach': true }),
+    );
+    expect(res.channel).toBeNull();
+    expect(client.create).not.toHaveBeenCalled();
+    expect(await getAgentGroupByFolder('t1a')).toBeTruthy();
   });
 
   it('--no-channel leaves a plain sandbox even with an install', async () => {
@@ -194,6 +218,32 @@ describe('sandboxes new — chat surface', () => {
     );
     expect(res.channel).toBeNull();
     expect(await getAgentGroupByFolder('t5')).toBeTruthy();
+  });
+});
+
+describe('sandboxes new — the address', () => {
+  it('a name the account reserves for addresses is a warning in the verb, not a silent log', async () => {
+    vi.mocked(registerSandbox).mockResolvedValue({ done: false, code: 'invalid_name' });
+    const res = dataOf<{ id: string; warnings?: string[] }>(
+      await call('sandboxes-new', { name: 'terminal', 'no-attach': true, 'no-channel': true }),
+    );
+    expect(res.warnings).toEqual([
+      "sandbox name 'terminal' is reserved for addresses — sandbox created without its own address",
+    ]);
+    expect(await getAgentGroupByFolder('terminal')).toBeTruthy(); // the sandbox itself is fine
+  });
+
+  it('an address that lands (or is simply not enabled) adds no warning', async () => {
+    vi.mocked(registerSandbox).mockResolvedValue({ done: true, address: 'box.example.test' });
+    const ok = dataOf<{ warnings?: string[] }>(
+      await call('sandboxes-new', { name: 't8', 'no-attach': true, 'no-channel': true }),
+    );
+    expect(ok.warnings).toBeUndefined();
+    vi.mocked(registerSandbox).mockResolvedValue({ done: false, code: 'not_enabled' });
+    const plain = dataOf<{ warnings?: string[] }>(
+      await call('sandboxes-new', { name: 't9', 'no-attach': true, 'no-channel': true }),
+    );
+    expect(plain.warnings).toBeUndefined();
   });
 });
 

@@ -242,7 +242,9 @@ export async function inboxRead(args: Record<string, unknown>): Promise<Frame> {
  * `ncl outbox send --text "..." [--reply-to <inbound-id>]` — write one
  * outbound chat row. Routing: --reply-to copies the triggering inbound
  * message's routing (and sets inReplyTo for the a2a return path); otherwise
- * the session routing (the session's origin chat).
+ * the session routing — the session's origin chat, or for a coding session
+ * the channel bound to it (the host writes that route when it binds one), so
+ * a standalone send posts to the session channel.
  */
 export async function outboxSend(args: Record<string, unknown>): Promise<Frame> {
   if (args.help === true) return ok(OUTBOX_USAGE, OUTBOX_USAGE);
@@ -270,7 +272,7 @@ export async function outboxSend(args: Record<string, unknown>): Promise<Frame> 
     } else {
       const routing = getSessionRouting();
       if (!routing.platform_id && !routing.channel_type) {
-        return err('no session routing — nothing to send to (use --reply-to <inbound-id>)');
+        return err('no session routing — this session has no chat of its own to post to (use --reply-to <inbound-id>)');
       }
       channelType = routing.channel_type;
       platformId = routing.platform_id;
