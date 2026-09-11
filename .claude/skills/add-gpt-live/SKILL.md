@@ -120,7 +120,7 @@ input at 128 characters (project keys are longer); `-T` lets the `security`
 tool read the item back without a dialog. Tell the user:
 
 ```nc:operator when:key_source=keychain
-Run this in a terminal, then paste the key at the hidden prompt and press Enter: read -s KEY && security add-generic-password -U -s nanoclaw-openai -a "$USER" -T /usr/bin/security -w "$KEY"; unset KEY
+Run this in a terminal; when it says "Paste the OpenAI key", paste it (nothing is echoed) and press Enter: printf 'Paste the OpenAI key, then press Enter: '; read -s KEY; echo; security add-generic-password -U -s nanoclaw-openai -a "$USER" -T /usr/bin/security -w "$KEY"; unset KEY
 ```
 ```nc:env-set when:key_source=keychain
 GPT_LIVE_KEYCHAIN_SERVICE=nanoclaw-openai
@@ -288,7 +288,9 @@ was added with `security … -w` and typed at `security`'s own prompt, the key
 was cut at 128 characters (that prompt's limit; project keys are longer).
 Check with `security find-generic-password -s nanoclaw-openai -a "$USER" -w |
 tr -d '\n' | wc -c` — exactly 128 means truncated. Re-add it with the
-`read -s KEY && …` command above.
+`printf … read -s KEY …` command above. A stored value that starts with
+`read -s` or `printf` means the command itself was pasted at the silent
+prompt — run it again and paste only the key when asked.
 
 **`Keychain lookup failed` in the logs.** The item is missing, named
 differently, or stored for another account. `security find-generic-password
