@@ -32,8 +32,8 @@ function renderSummary(data: unknown): string {
     if (s.host) lines.push(`  address     ssh ${s.host}`);
     if (s.previousName) lines.push(`  renamed     from "${s.previousName}" — your address changed`);
     lines.push(
-      `  door        127.0.0.1:${s.doorPort} — ${door.running ? `running (pid ${door.pid})` : 'not running'}${
-        'failure' in door && door.failure ? ` — ${door.failure}` : ''
+      `  door        127.0.0.1:${s.doorPort} — ${
+        door.running ? `listening, ${door.sessions} session${door.sessions === 1 ? '' : 's'}` : 'not running'
       }`,
       ...(s.host
         ? []

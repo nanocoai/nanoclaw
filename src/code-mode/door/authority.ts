@@ -1,13 +1,13 @@
 /**
- * Who may land — the host-side authority the door socket answers from.
+ * Who may land — the host-side authority the door's sessions ask.
  *
  * Two sources of approval are honoured: keys the operator approved on this
  * machine (`data/door/keys.json`, with their public keys) and fingerprints
  * the account service approved in the browser, which arrive with every
  * snapshot push through `applyMirror()`. The authority also owns the
  * waiting rooms (capped per machine, pending records rate-limited in the
- * store), the long-poll waiters a room releases on approval, and the
- * landing sessions registered per fingerprint so a revocation ends them.
+ * store), the waiters a room releases on approval, and the live sessions
+ * registered per fingerprint so a revocation ends them.
  */
 import { EventEmitter } from 'node:events';
 
@@ -25,8 +25,16 @@ import {
   type KeyStore,
   type ParsedPublicKey,
 } from './keys.js';
-import type { AuthorizeStatus, PendingRequest, SessionRequest } from './host-socket.js';
 import type { DoorSource } from './target-map.js';
+
+export type AuthorizeStatus = 'approved' | 'unknown' | 'disabled';
+
+export interface PendingRequest {
+  fingerprint: string;
+  keyType: string;
+  /** The key blob (base64) or the full `<type> <base64>` line. */
+  publicKey: string;
+}
 
 /** Waiting rooms open at once on this machine. */
 export const ROOM_LIMIT = 4;
@@ -47,11 +55,9 @@ export interface MirrorDelta {
 let file: string | undefined;
 let store: KeyStore = emptyKeyStore();
 const rooms = new Map<string, number>();
-const sessions = new Map<string, Set<number>>();
+const sessions = new Map<string, Set<() => void>>();
 const changes = new EventEmitter();
 changes.setMaxListeners(0);
-
-let killer: (pid: number, signal: NodeJS.Signals) => void = (pid, signal) => process.kill(pid, signal);
 
 export async function initAuthority(keyStoreFile: string): Promise<void> {
   file = keyStoreFile;
@@ -59,13 +65,12 @@ export async function initAuthority(keyStoreFile: string): Promise<void> {
 }
 
 /** Tests only: forget everything in memory. */
-export function resetAuthority(kill?: typeof killer): void {
+export function resetAuthority(): void {
   file = undefined;
   store = emptyKeyStore();
   rooms.clear();
   sessions.clear();
   changes.removeAllListeners();
-  killer = kill ?? ((pid, signal) => process.kill(pid, signal));
 }
 
 async function persist(): Promise<void> {
@@ -92,7 +97,7 @@ function pruneRooms(now: number): void {
 /**
  * Open (or refresh) a waiting room for an unknown key. `limit` when the
  * machine already has its share of rooms or the store's pending rate limit
- * is reached; the room then prints its message and exits.
+ * is reached; the room then prints its message and ends.
  */
 export async function openRoom(
   request: PendingRequest,
@@ -161,48 +166,57 @@ export async function revokeKey(fingerprint: string): Promise<void> {
   store = revokeInStore(store, fingerprint);
   await persist();
   rooms.delete(fingerprint);
-  if (!mirrored) killSessions(fingerprint);
+  if (!mirrored) endSessions(fingerprint);
 }
 
 /**
  * Apply the account service's view (fingerprints only). Newly approved
  * fingerprints release their waiting rooms; fingerprints that left are
- * revoked here and their registered landings are ended.
+ * revoked here and their live sessions are ended.
  */
 export async function applyMirror(terminal: MirrorTerminal | undefined): Promise<MirrorDelta> {
   const next = new Set((terminal?.keys ?? []).map((k) => k.fingerprint));
   const previous = new Set(store.mirror?.fingerprints ?? []);
   const approved = [...next].filter((f) => !previous.has(f));
   const revoked = [...previous].filter((f) => !next.has(f));
+  const hadMirror = store.mirror !== undefined;
   store = { ...store, mirror: { fingerprints: [...next], updatedAt: new Date().toISOString() } };
-  if (approved.length || revoked.length || !store.mirror) await persist();
+  if (approved.length || revoked.length || !hadMirror) await persist();
   for (const fingerprint of approved) released(fingerprint);
   for (const fingerprint of revoked) {
-    if (!store.approved.some((k) => k.fingerprint === fingerprint)) killSessions(fingerprint);
+    if (!store.approved.some((k) => k.fingerprint === fingerprint)) endSessions(fingerprint);
   }
   return { approved, revoked };
 }
 
-export function registerSession(request: SessionRequest): void {
-  let pids = sessions.get(request.fingerprint);
-  if (!pids) sessions.set(request.fingerprint, (pids = new Set()));
-  pids.add(request.pid);
+/** Register a way to end a live session under its key; returns the unregister. */
+export function registerSession(fingerprint: string, end: () => void): () => void {
+  let ends = sessions.get(fingerprint);
+  if (!ends) sessions.set(fingerprint, (ends = new Set()));
+  ends.add(end);
+  return () => {
+    const current = sessions.get(fingerprint);
+    current?.delete(end);
+    if (current && current.size === 0) sessions.delete(fingerprint);
+  };
 }
 
-/** SIGHUP every landing registered under the fingerprint, as the server does when a connection drops. */
-export function killSessions(fingerprint: string): number {
-  const pids = sessions.get(fingerprint);
+/** End every live session under the fingerprint; returns how many were ended. */
+export function endSessions(fingerprint: string): number {
+  const ends = sessions.get(fingerprint);
   sessions.delete(fingerprint);
   let ended = 0;
-  for (const pid of pids ?? []) {
-    try {
-      killer(pid, 'SIGHUP');
-      ended += 1;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
-    }
+  for (const end of ends ?? []) {
+    end();
+    ended += 1;
   }
   return ended;
+}
+
+export function liveSessions(): number {
+  let total = 0;
+  for (const ends of sessions.values()) total += ends.size;
+  return total;
 }
 
 export function openRooms(now: number = Date.now()): number {

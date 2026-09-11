@@ -64,9 +64,10 @@ resumes. A Host with no managed Slack app skips all of this silently.
 ## Remote terminal
 
 Remote terminal access lets an approved SSH key land in a sandbox on this
-Host from another machine. The Host runs a dedicated OpenSSH listener on
-loopback, with its own host key, public keys only, a PTY and nothing else:
-no shell, no forwarding, no password. Reachability comes from the account
+Host from another machine. The Host runs its own SSH server, in-process, on
+loopback: its own host key, public keys only, any username (the key decides,
+not the login name), a terminal and nothing else — no shell, no forwarding,
+no file transfer, no password. Reachability comes from the account
 link, not from a listener of its own: the Host never listens on the network,
 and every stream that reaches the listener was relayed by the Host (see
 Streams below).
@@ -86,11 +87,12 @@ lands in. When the account link is connected the account confirms or assigns
 the name (omit `--name` to let it choose) and the command prints the address
 to use; a name renamed later in the browser is reported as a changed address.
 Without the link, pass `--name`. Enabling generates the host key once under
-`data/door/`, takes the first free loopback port in 33022–33121, writes an
-`sshd_config`, starts the listener under the Host, and keeps it running
-across Host restarts until you disable it. Disabling keeps the host key and
-the approved keys. The Host needs an OpenSSH server binary (`sshd`) and
-`ssh-keygen`; set `NANOCLAW_SSHD` if the binary is somewhere unusual.
+`data/door/`, takes the first free loopback port in 33022–33121, starts the
+server inside the Host, and keeps it running across Host restarts until you
+disable it. Disabling ends open sessions and keeps the host key and the
+approved keys. Nothing has to be installed on the Host for this: the server
+is part of the Host process, and the terminal comes from a small native
+module the Host ships with.
 
 ### Keys and pairing
 
@@ -171,9 +173,10 @@ snapshot over the same link.
 
 Code mode uses the existing agent image, Claude Code installation, and mailbox.
 The image adds the distribution's `tmux` package. Remote terminal access
-needs an OpenSSH client on the terminal machine and the OpenSSH server
-(`sshd`, `ssh-keygen`) on the Host; it depends only on Node built-ins.
-`NANOCLAW_SSHD` names the server binary when it is not on the usual paths;
+needs an SSH client on the terminal machine; the Host side is the Host
+process itself (the `ssh2` protocol library and the `node-pty` terminal
+module, the latter a prebuilt native module like the Host's database
+driver).
 `NANOCLAW_TERMINAL_APPROVAL_URL` is the approval page the waiting room shows.
 
 `NANOCLAW_CODE_PERMISSION_MODE` defaults to `auto`. A group's

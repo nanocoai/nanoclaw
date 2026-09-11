@@ -1,7 +1,7 @@
 /**
- * The host-side authority: waiting-room caps and pending records, long-poll
- * release on approval from any source, revocation ending registered
- * sessions, and the browser mirror.
+ * The host-side authority: waiting-room caps and pending records, waiters
+ * released on approval from any source, revocation ending live sessions,
+ * and the browser mirror.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -12,10 +12,11 @@ import {
   applyMirror,
   approveKey,
   authorizeStatus,
+  endSessions,
   initAuthority,
   isKeyApproved,
   keyStore,
-  killSessions,
+  liveSessions,
   openRoom,
   openRooms,
   registerSession,
@@ -43,13 +44,10 @@ function syntheticKey(index: number) {
   return { ...parsed, request: { fingerprint: parsed.fingerprint, keyType: parsed.type, publicKey: parsed.base64 } };
 }
 
-let kill: ReturnType<typeof vi.fn>;
-
 beforeEach(async () => {
   fs.rmSync(DIR, { recursive: true, force: true });
   fs.mkdirSync(DIR, { recursive: true, mode: 0o700 });
-  kill = vi.fn();
-  resetAuthority(kill as unknown as (pid: number, signal: NodeJS.Signals) => void);
+  resetAuthority();
   await initAuthority(FILE);
 });
 
@@ -72,6 +70,12 @@ describe('waiting rooms', () => {
     expect(pending.map((k) => k.fingerprint)).toContain(syntheticKey(1).fingerprint);
     expect(pending.find((k) => k.fingerprint === syntheticKey(1).fingerprint)?.source).toBe('203.0.113.5');
   });
+
+  it('accepts the full public key line as well as the bare blob', async () => {
+    const key = syntheticKey(9);
+    expect(await openRoom({ ...key.request, publicKey: key.publicKey }, undefined, T0)).toBe('ok');
+    expect(keyStore().pending[0].publicKey).toBe(key.publicKey);
+  });
 });
 
 describe('approval', () => {
@@ -84,7 +88,7 @@ describe('approval', () => {
     expect((await readKeyStore(FILE)).approved[0].label).toBe('laptop');
   });
 
-  it('releases a long-poll when the key is approved on this machine', async () => {
+  it('releases a waiter when the key is approved on this machine', async () => {
     const key = syntheticKey(2);
     await openRoom(key.request, undefined, T0);
     expect(await waitForApproval(key.fingerprint, 50)).toBe(false);
@@ -97,7 +101,7 @@ describe('approval', () => {
     expect(await waitForApproval(key.fingerprint, 0)).toBe(true);
   });
 
-  it('releases a long-poll when the browser approves it (mirror), and honours mirror fingerprints', async () => {
+  it('releases a waiter when the browser approves it (mirror), and honours mirror fingerprints', async () => {
     const key = syntheticKey(3);
     const waiting = waitForApproval(key.fingerprint, 5000);
     expect(await applyMirror({ keys: [{ fingerprint: key.fingerprint }] })).toEqual({
@@ -112,19 +116,22 @@ describe('approval', () => {
 });
 
 describe('revocation', () => {
-  it('ends registered sessions when a local key is revoked, tolerating gone processes', async () => {
+  it('ends live sessions when a local key is revoked, and forgets unregistered ones', async () => {
     const key = syntheticKey(4);
     await addKey(key, 'laptop');
-    registerSession({ pid: 111, fingerprint: key.fingerprint });
-    registerSession({ pid: 222, fingerprint: key.fingerprint, port: 5 });
-    kill.mockImplementationOnce(() => {
-      throw Object.assign(new Error('gone'), { code: 'ESRCH' });
-    });
+    const first = vi.fn();
+    const second = vi.fn();
+    const unregisterFirst = registerSession(key.fingerprint, first);
+    registerSession(key.fingerprint, second);
+    expect(liveSessions()).toBe(2);
+    unregisterFirst();
+    expect(liveSessions()).toBe(1);
     await revokeKey(key.fingerprint);
-    expect(kill).toHaveBeenCalledTimes(2);
-    expect(kill).toHaveBeenCalledWith(222, 'SIGHUP');
+    expect(first).not.toHaveBeenCalled();
+    expect(second).toHaveBeenCalledTimes(1);
     expect(isKeyApproved(key.fingerprint)).toBe(false);
-    expect(killSessions(key.fingerprint)).toBe(0);
+    expect(endSessions(key.fingerprint)).toBe(0);
+    expect(liveSessions()).toBe(0);
     await expect(revokeKey(key.fingerprint)).rejects.toThrow(/no key/);
   });
 
@@ -132,12 +139,13 @@ describe('revocation', () => {
     const a = syntheticKey(5);
     const b = syntheticKey(6);
     await applyMirror({ keys: [{ fingerprint: a.fingerprint }, { fingerprint: b.fingerprint }] });
-    registerSession({ pid: 333, fingerprint: b.fingerprint });
+    const end = vi.fn();
+    registerSession(b.fingerprint, end);
     expect(await applyMirror({ keys: [{ fingerprint: a.fingerprint }] })).toEqual({
       approved: [],
       revoked: [b.fingerprint],
     });
-    expect(kill).toHaveBeenCalledWith(333, 'SIGHUP');
+    expect(end).toHaveBeenCalledTimes(1);
     expect(isKeyApproved(b.fingerprint)).toBe(false);
     expect(isKeyApproved(a.fingerprint)).toBe(true);
     // A key also approved here survives a browser revocation.

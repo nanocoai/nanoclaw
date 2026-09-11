@@ -4,16 +4,15 @@
  * the account service approved in the browser (mirrored from snapshots),
  * and the pending record of unknown keys that entered the waiting room.
  *
- * Every presented key is admitted to exactly one forced program: an approved
+ * Every presented key is admitted to exactly one program: an approved
  * fingerprint lands in a sandbox, an unknown one enters the waiting room.
- * The waiting room is the only surface a stranger reaches behind the OpenSSH
+ * The waiting room is the only surface a stranger reaches behind the SSH
  * handshake, so pending records are rate-limited; past the limit the room is
  * refused.
  */
 import { createHash } from 'node:crypto';
 
 import { readJson, writePrivate } from '../../community-portal/private-file.js';
-import { forcedCommandOption, resolveEntry } from './paths.js';
 
 export interface ApprovedKey {
   fingerprint: string;
@@ -153,25 +152,6 @@ export function admitKey(
     ...(source ? { source } : {}),
   });
   return { verdict: 'pending', store: { ...store, pending }, changed: true };
-}
-
-/**
- * The authorized_keys line the server receives for an admitted key: every
- * option `restrict` implies (no forwarding, no user rc), a PTY, and a forced
- * program that receives the door directory and the fingerprint (the waiting
- * room also gets the key itself, to register it as pending). `undefined`
- * means refuse — print nothing.
- */
-export function authorizedKeysLine(
-  verdict: Admission,
-  key: Pick<ParsedPublicKey, 'publicKey' | 'fingerprint' | 'type' | 'base64'>,
-  doorDir: string,
-  execPath: string = process.execPath,
-): string | undefined {
-  if (verdict === 'refused') return undefined;
-  const program = resolveEntry(verdict === 'approved' ? 'landing' : 'waiting-room', execPath);
-  const args = verdict === 'approved' ? [doorDir, key.fingerprint] : [doorDir, key.fingerprint, key.type, key.base64];
-  return `restrict,pty,${forcedCommandOption([...program, ...args])} ${key.publicKey}`;
 }
 
 // --- operator verbs over the store ------------------------------------------

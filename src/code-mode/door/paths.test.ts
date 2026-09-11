@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-import { doorFiles, forcedCommandOption, resolveEntry, shellQuote, sshdConfigArg } from './paths.js';
+import { doorFiles } from './paths.js';
 import { accountNameError, validateAccountName } from './name.js';
 
 describe('door paths', () => {
@@ -9,28 +9,9 @@ describe('door paths', () => {
     const files = doorFiles('/srv/host/data/door');
     expect(Object.values(files).every((f) => f.startsWith('/srv/host/data/door'))).toBe(true);
     expect(path.basename(files.keyStore)).toBe('keys.json');
-    expect(path.basename(files.hostSocket)).toBe('host.sock');
-  });
-
-  it('resolves an entry to the running tree with the given Node binary', () => {
-    const argv = resolveEntry('landing', '/opt/node/bin/node');
-    expect(argv[0]).toBe('/opt/node/bin/node');
-    expect(argv.every((a) => path.isAbsolute(a))).toBe(true);
-    expect(argv[argv.length - 1]).toMatch(/[\\/]code-mode[\\/]door[\\/]landing\.[jt]s$/);
-  });
-
-  it('quotes for the login shell and for the authorized_keys option layer', () => {
-    expect(shellQuote(`it's`)).toBe(`'it'\\''s'`);
-    expect(forcedCommandOption(['/bin/prog', 'a b', 'say "hi"'])).toBe(`command="'/bin/prog' 'a b' 'say \\"hi\\"'"`);
-    expect(() => forcedCommandOption(['/bin/prog', 'two\nlines'])).toThrow(/line breaks/);
-  });
-
-  it('quotes sshd_config arguments and refuses what the server cannot carry', () => {
-    expect(sshdConfigArg('/srv/with space/x')).toBe('"/srv/with space/x"');
-    expect(sshdConfigArg('/srv/50%')).toBe('"/srv/50%%"');
-    expect(() => sshdConfigArg('/srv/"x"')).toThrow();
-    expect(() => sshdConfigArg('/srv/back\\slash')).toThrow();
-    expect(() => sshdConfigArg('/srv/tab\tx')).toThrow();
+    expect(path.basename(files.hostKey)).toBe('host_ed25519');
+    expect(path.basename(files.hostKeyPublic)).toBe('host_ed25519.pub');
+    expect(path.basename(files.state)).toBe('state.json');
   });
 });
 

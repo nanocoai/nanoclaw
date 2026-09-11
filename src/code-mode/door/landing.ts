@@ -1,155 +1,89 @@
 /**
- * The landing program — the forced command an approved key runs.
+ * The landing — what an approved connection does once it is in.
  *
- * Reads its client port from `SSH_CONNECTION`, asks the host over the door
- * socket what the relayed stream is for, registers itself so a revocation
- * can end it, then attaches through the host's own sandbox verbs over the
- * ncl socket: `sandboxes attach` for an existing sandbox (cold ones wake),
- * `sandboxes new` for an account whose default sandbox does not exist yet.
- * The exec spec the host returns is run with the terminal handed over,
- * exactly as the ncl client does. Detach is tmux's Ctrl-b then d; there is
- * no shell on this path. `ssh <address> ls` lists the sandboxes instead.
+ * The relayed stream behind the connection's source port says where it is
+ * for; the host's own sandbox verbs do the rest: `sandboxes attach` for an
+ * existing sandbox (cold ones wake), `sandboxes new` for an account whose
+ * default sandbox does not exist yet, and the terminal is handed to the
+ * attach program the host composes. `ls` lists the sandboxes instead. There
+ * is no shell on this path; detach is tmux's Ctrl-b then d.
  */
-import { resolveAttachExec } from '../../cli/attach-exec.js';
-import type { ResponseFrame } from '../../cli/frame.js';
-import { fetchTarget, postSession } from './door-client.js';
-import { runForeground } from './foreground.js';
-import { sendHostFrame } from './host-client.js';
-import type { SessionRequest } from './host-socket.js';
 import { decideLanding } from './landing-decision.js';
-import { doorFiles, isMainModule } from './paths.js';
-import { readDoorState } from './state.js';
 import type { DoorStream } from './target-map.js';
 
+/** The exec spec the host composes for an attach (see cli/attach-exec.ts). */
+export interface AttachExec {
+  bin: string;
+  argsTty: string[];
+  argsPlain: string[];
+}
+
+export interface SandboxListing {
+  names: string[];
+  /** The host's rendered table. */
+  human: string;
+}
+
+/** The host's sandbox verbs as the door calls them; errors carry the verb's own message. */
+export interface SandboxVerbs {
+  list(): Promise<SandboxListing>;
+  attach(name: string): Promise<AttachExec>;
+  create(name: string): Promise<AttachExec>;
+}
+
 export interface LandingIo {
-  env: NodeJS.ProcessEnv;
-  pid: number;
-  stdinIsTty: boolean;
-  write: (text: string) => void;
-  fail: (text: string) => void;
-  exec: (bin: string, args: string[], env: NodeJS.ProcessEnv) => Promise<number> | number;
-  fetchTarget: (socketPath: string, port: number) => Promise<DoorStream | undefined>;
-  postSession: (socketPath: string, request: SessionRequest) => Promise<void>;
-  sendFrame: (socketPath: string, command: string, args: Record<string, unknown>) => Promise<ResponseFrame>;
+  write(text: string): void;
+  fail(text: string): void;
 }
 
-/** `SSH_CONNECTION` is `<client ip> <client port> <server ip> <server port>`. */
-export function clientPortFromSshConnection(value: string | undefined): number | undefined {
-  const fields = (value ?? '').trim().split(/\s+/);
-  const port = Number(fields[1]);
-  return fields.length >= 4 && Number.isInteger(port) && port > 0 && port <= 65535 ? port : undefined;
+export interface LandingDeps {
+  stream: DoorStream | undefined;
+  /** The exec command, when the client sent one instead of asking for a shell. */
+  command?: string;
+  sandboxes: SandboxVerbs;
+  io: LandingIo;
+  /** Hand the terminal to the attach program; resolves with its exit code. */
+  spawn(exec: AttachExec): Promise<number>;
 }
 
-function parsePreset(json: string | undefined): DoorStream | undefined {
-  if (!json) return undefined;
-  const stream = JSON.parse(json) as DoorStream;
-  return typeof stream?.target?.account === 'string' ? stream : undefined;
-}
-
-function message(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-export async function runLanding(argv: string[], io: LandingIo): Promise<number> {
-  const [doorDir, fingerprint, presetJson] = argv;
-  if (!doorDir || !fingerprint) {
-    io.fail('landing: usage: landing <doorDir> <fingerprint> [<stream json>]\n');
-    return 2;
-  }
-  const state = await readDoorState(doorFiles(doorDir).state);
-  if (!state?.enabled) {
-    io.fail('Remote access is disabled on this machine.\n');
-    return 1;
-  }
-
-  // The waiting room resolves the stream when the connection arrives and
-  // hands it over, so a long approval wait cannot outlive the map's TTL.
-  const port = clientPortFromSshConnection(io.env.SSH_CONNECTION);
-  let stream = parsePreset(presetJson);
-  if (!stream && port !== undefined) {
+export async function runLanding(deps: LandingDeps): Promise<number> {
+  const { stream, command, sandboxes, io } = deps;
+  // Only an account target (or a listing) needs the sandbox list; no stream
+  // and a named sandbox decide without it.
+  let listing: SandboxListing | undefined;
+  if (stream && (!stream.target.sandbox || command)) {
     try {
-      stream = await io.fetchTarget(state.hostSocketPath, port);
+      listing = await sandboxes.list();
     } catch (error) {
       if (!(error instanceof Error)) throw error;
-      io.fail(`Could not resolve this connection's target: ${error.message}\n`);
+      io.fail(`The host could not list sandboxes: ${error.message}\n`);
       return 1;
     }
   }
-  if (stream) {
-    // Best effort: lets a revocation end this session. Never worth refusing over.
-    await io.postSession(state.hostSocketPath, { pid: io.pid, fingerprint, ...(port ? { port } : {}) }).catch(() => {});
+  const decision = decideLanding(stream, listing?.names ?? [], command);
+  if (decision.verb === 'refuse') {
+    io.fail(`${decision.reason}\n`);
+    return decision.code;
   }
-  const original = io.env.SSH_ORIGINAL_COMMAND;
-  let response: ResponseFrame;
+  if (decision.verb === 'list') {
+    io.write(`${listing?.human ?? ''}\n`);
+    return 0;
+  }
+  io.write(
+    decision.verb === 'new'
+      ? `Creating sandbox ${decision.name} — detach with Ctrl-b then d.\n`
+      : `Attaching to sandbox ${decision.name} — detach with Ctrl-b then d.\n`,
+  );
+  let exec;
   try {
-    // Only an account target (or a listing) needs the host's sandbox list;
-    // no stream and a named sandbox decide without contacting the host.
-    let list: ResponseFrame | undefined;
-    if (stream && (!stream.target.sandbox || original)) {
-      list = await io.sendFrame(state.socketPath, 'sandboxes-list', {});
-    }
-    const existing =
-      list?.ok && Array.isArray(list.data)
-        ? list.data.map((row) => String((row as { sandbox?: unknown }).sandbox ?? ''))
-        : [];
-    const decision = decideLanding(stream, existing, original);
-    if (decision.verb === 'refuse') {
-      io.fail(`${decision.reason}\n`);
-      return decision.code;
-    }
-    if (decision.verb === 'list') {
-      if (!list?.ok) {
-        io.fail(`${list ? list.error.message : 'The host did not answer.'}\n`);
-        return 1;
-      }
-      io.write(`${list.human ?? JSON.stringify(list.data, null, 2)}\n`);
-      return 0;
-    }
-    io.write(
-      decision.verb === 'new'
-        ? `Creating sandbox ${decision.name} — detach with Ctrl-b then d.\n`
-        : `Attaching to sandbox ${decision.name} — detach with Ctrl-b then d.\n`,
-    );
-    response = await io.sendFrame(
-      state.socketPath,
-      `sandboxes-${decision.verb}`,
-      decision.verb === 'attach' ? { id: decision.name } : { name: decision.name },
-    );
-    if (!response.ok && decision.verb === 'attach' && /^no sandbox /.test(response.error.message)) {
-      io.fail(`sandbox ${decision.name} no longer exists\n`);
-      return 1;
-    }
+    exec = decision.verb === 'attach' ? await sandboxes.attach(decision.name) : await sandboxes.create(decision.name);
   } catch (error) {
     if (!(error instanceof Error)) throw error;
-    io.fail(`The host is not reachable: ${error.message}\n`);
+    const text = error.message;
+    io.fail(
+      `${decision.verb === 'attach' && /^no sandbox /.test(text) ? `sandbox ${decision.name} no longer exists` : text}\n`,
+    );
     return 1;
   }
-  const attach = resolveAttachExec(response, false, io.stdinIsTty);
-  if (!attach) {
-    io.fail(`${response.ok ? 'The host did not return a terminal to attach.' : response.error.message}\n`);
-    return 1;
-  }
-  // The server hands its children a minimal PATH; the attach argv names the
-  // container runtime by bare command, so the host's PATH is restored.
-  return io.exec(attach.bin, attach.args, { ...io.env, PATH: state.path || io.env.PATH || '' });
-}
-
-if (isMainModule(import.meta.url)) {
-  runLanding(process.argv.slice(2), {
-    env: process.env,
-    pid: process.pid,
-    stdinIsTty: process.stdin.isTTY === true,
-    write: (text) => process.stdout.write(text),
-    fail: (text) => process.stderr.write(text),
-    exec: (bin, args, env) => runForeground(bin, args, env),
-    fetchTarget: (socketPath, port) => fetchTarget(socketPath, port),
-    postSession: (socketPath, request) => postSession(socketPath, request),
-    sendFrame: (socketPath, command, args) => sendHostFrame(socketPath, command, args),
-  }).then(
-    (code) => process.exit(code),
-    (error) => {
-      process.stderr.write(`landing: ${message(error)}\n`);
-      process.exit(1);
-    },
-  );
+  return deps.spawn(exec);
 }

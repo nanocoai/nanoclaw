@@ -1,35 +1,38 @@
 /**
- * The door: a loopback OpenSSH server the host supervises so a remote
- * terminal, once the account link relays it, lands in a code-mode sandbox.
+ * The door: an SSH server the host runs in-process on loopback so a remote
+ * terminal, relayed by the account link, lands in a code-mode sandbox.
  *
  * `ncl sandboxes remote enable [--name <name>]` generates the host key once,
  * asks the account link to confirm or assign the name, takes a loopback
- * port, renders sshd_config, starts the server and journals the decision;
- * the host restarts the door on every start while it is enabled. Approval
- * has two sources — keys the operator approved here and fingerprints the
- * service approved in the browser, applied from each snapshot — and the
- * host answers the forced commands over the door socket.
+ * port, starts the server and journals the decision; the host restarts the
+ * door on every start while it is enabled. Any username is accepted; the
+ * key decides. Approval has two sources — keys the operator approved here
+ * and fingerprints the service approved in the browser, applied from each
+ * snapshot — and an unknown key waits in-session until one of them arrives.
  *
  * The exported API is what the account link builds on: enableDoor /
- * disableDoor / startDoor / stopDoor / doorStatus, the target map, the
- * mirror application and the seam. Nothing here imports link code.
+ * disableDoor / startDoor / stopDoor / doorStatus, the target map keyed by
+ * the loopback source port each relayed stream connects from, the mirror
+ * application and the seam. Nothing here imports link code.
  */
-import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 
-import { DEFAULT_SOCKET_PATH } from '../../cli/socket-client.js';
+import { isAttachResponse } from '../../cli/attach-exec.js';
+import type { ResponseFrame } from '../../cli/frame.js';
 import { DATA_DIR } from '../../config.js';
 import { onHostStart, onHostShutdown } from '../../host-lifecycle.js';
 import { log } from '../../log.js';
 import * as authority from './authority.js';
-import { startHostSocket, stopHostSocket, type HostSocketDeps } from './host-socket.js';
+import { ensureHostKey } from './host-key.js';
 import { parsePublicKey, type ApprovedKey, type KeyStore } from './keys.js';
+import type { AttachExec, SandboxVerbs } from './landing.js';
 import { validateAccountName } from './name.js';
-import { doorFiles, resolveEntry } from './paths.js';
+import { doorFiles } from './paths.js';
 import {
   enableTerminal,
   PENDING_APPROVAL_TTL_MS,
@@ -37,9 +40,9 @@ import {
   reportTerminalState,
   type TerminalState,
 } from './report.js';
-import { renderSshdConfig } from './sshd-config.js';
+import { DoorServer, type DoorServerStatus } from './server.js';
+import { handleConnection, type SessionDeps } from './session.js';
 import { DEFAULT_APPROVAL_URL, readDoorState, writeDoorState, type DoorState } from './state.js';
-import { DoorSupervisor, type DoorSupervisorStatus } from './supervisor.js';
 import { lookupTarget } from './target-map.js';
 
 export {
@@ -64,24 +67,14 @@ export type { MirrorDelta, MirrorTerminal } from './authority.js';
 export const DOOR_DIR = path.join(DATA_DIR, 'door');
 const files = doorFiles(DOOR_DIR);
 
-/**
- * The server insists that its AuthorizedKeysCommand binary and every
- * directory above it are root-owned. `/usr/bin/env` is on every platform the
- * host runs on, and execs the host's own Node with the door's script; that
- * changes nothing about who is trusted — the config file, the key store and
- * the server process itself all belong to the host user already.
- */
-const ENV_TRAMPOLINE = '/usr/bin/env';
-
-const SSHD_CANDIDATES = ['/usr/sbin/sshd', '/usr/local/sbin/sshd', '/opt/homebrew/sbin/sshd', '/usr/bin/sshd'];
-
 /** The door's loopback port range: the first free port in it is taken at enable and kept. */
 export const DOOR_PORT_RANGE: readonly [number, number] = [33022, 33121];
 
-let supervisor: DoorSupervisor | undefined;
+let server: DoorServer | undefined;
 /** The journal the running door was brought up from; undefined while down. */
 let running: DoorState | undefined;
 let authorityReady = false;
+let liveSessions = 0;
 
 /** The shape the account link journals beside its own state. */
 export interface TerminalJournal {
@@ -103,18 +96,8 @@ export interface DoorSummary {
   hostKeyFingerprint?: string;
   approvalUrl: string;
   terminal: TerminalJournal;
-  door: DoorSupervisorStatus | { running: false };
+  door: (DoorServerStatus & { sessions: number }) | { running: false };
   keys: { approved: number; browser: number; pending: number; rooms: number };
-}
-
-function executable(file: string): boolean {
-  return fs.existsSync(file) && (fs.statSync(file).mode & 0o111) !== 0;
-}
-
-/** The OpenSSH server binary: `NANOCLAW_SSHD`, the usual locations, then PATH. */
-export function findSshd(env: NodeJS.ProcessEnv = process.env): string | undefined {
-  const fromPath = (env.PATH ?? '').split(path.delimiter).map((dir) => path.join(dir, 'sshd'));
-  return [env.NANOCLAW_SSHD, ...SSHD_CANDIDATES, ...fromPath].find((file) => file && executable(file));
 }
 
 function approvalUrl(): string {
@@ -134,21 +117,6 @@ async function freeDoorPort(): Promise<number> {
     if (await portFree(port)) return port;
   }
   throw new Error(`no free loopback port in ${DOOR_PORT_RANGE[0]}–${DOOR_PORT_RANGE[1]} for the door`);
-}
-
-async function ensureHostKey(): Promise<{ publicKey: string; fingerprint: string }> {
-  await fs.promises.mkdir(DOOR_DIR, { recursive: true, mode: 0o700 });
-  if (!fs.existsSync(files.hostKey)) {
-    await new Promise<void>((resolve, reject) => {
-      const args = ['-q', '-t', 'ed25519', '-N', '', '-C', 'nanoclaw-door', '-f', files.hostKey];
-      execFile('ssh-keygen', args, (error, _stdout, stderr) => {
-        if (!error) return resolve();
-        reject(new Error(`could not generate the door host key: ${stderr.trim() || error.message}`, { cause: error }));
-      });
-    });
-  }
-  const key = parsePublicKey(await readFile(files.hostKeyPublic, 'utf8'));
-  return { publicKey: key.publicKey, fingerprint: key.fingerprint };
 }
 
 async function ensureAuthority(): Promise<void> {
@@ -185,103 +153,114 @@ function journal(state: DoorState): TerminalJournal {
 }
 
 function baseState(): DoorState {
-  return {
-    version: 1,
-    enabled: false,
-    approvalUrl: approvalUrl(),
-    socketPath: DEFAULT_SOCKET_PATH,
-    hostSocketPath: files.hostSocket,
-    path: process.env.PATH ?? '',
-    updatedAt: new Date().toISOString(),
-  };
+  return { version: 1, enabled: false, approvalUrl: approvalUrl(), updatedAt: new Date().toISOString() };
 }
 
-const socketDeps: HostSocketDeps = {
+// --- the host's sandbox verbs, as the landing calls them --------------------
+
+async function callHost(command: string, args: Record<string, unknown>): Promise<ResponseFrame> {
+  // The dispatcher is the host's own; loaded on first use so the door module
+  // stays importable on its own.
+  const { dispatch } = await import('../../cli/dispatch.js');
+  return dispatch({ id: randomUUID(), command, args }, { caller: 'host' });
+}
+
+function attachFrom(response: ResponseFrame): AttachExec {
+  if (!response.ok) throw new Error(response.error.message);
+  if (!isAttachResponse(response.data)) throw new Error('the host did not return a terminal to attach');
+  return response.data.attachExec;
+}
+
+const sandboxVerbs: SandboxVerbs = {
+  async list() {
+    const response = await callHost('sandboxes-list', {});
+    if (!response.ok) throw new Error(response.error.message);
+    const rows = Array.isArray(response.data) ? response.data : [];
+    return {
+      names: rows.map((row) => String((row as { sandbox?: unknown }).sandbox ?? '')),
+      human: response.human ?? JSON.stringify(response.data, null, 2),
+    };
+  },
+  attach: async (name) => attachFrom(await callHost('sandboxes-attach', { id: name })),
+  create: async (name) => attachFrom(await callHost('sandboxes-new', { name })),
+};
+
+const sessionDeps: SessionDeps = {
+  authority: {
+    status: (fingerprint) => authority.authorizeStatus(fingerprint, running?.enabled === true),
+    openRoom: (request, source) => authority.openRoom(request, source),
+    waitForApproval: (fingerprint, waitMs) => authority.waitForApproval(fingerprint, waitMs),
+    registerSession: (fingerprint, end) => authority.registerSession(fingerprint, end),
+  },
   lookupTarget,
-  authorize: (fingerprint) => authority.authorizeStatus(fingerprint, running?.enabled === true),
   pending: async (request) => {
-    const stream = request.port !== undefined ? lookupTarget(request.port) : undefined;
-    if ((await authority.openRoom(request, stream?.source)) === 'limit') return 'limit';
-    const at = new Date().toISOString();
-    const url = running?.approvalUrl ?? approvalUrl();
     try {
-      return await reportPendingKey({
-        fingerprint: request.fingerprint,
-        keyType: request.keyType,
-        publicKey: request.publicKey,
-        ...(stream?.source ? { source: stream.source } : {}),
-        at,
-        approvalUrl: url,
-      });
+      return await reportPendingKey(request);
     } catch (error) {
       if (!(error instanceof Error)) throw error;
       // The room still works with an approval from this machine.
       log.warn('Pending terminal key could not be reported', { err: error });
-      return { url, expiresAt: new Date(Date.now() + PENDING_APPROVAL_TTL_MS).toISOString() };
+      return { url: request.approvalUrl, expiresAt: new Date(Date.now() + PENDING_APPROVAL_TTL_MS).toISOString() };
     }
   },
-  waitApproval: (fingerprint, waitMs) => authority.waitForApproval(fingerprint, waitMs),
-  registerSession: (request) => authority.registerSession(request),
+  approvalUrl: () => running?.approvalUrl ?? approvalUrl(),
+  sandboxes: sandboxVerbs,
+  sessions: {
+    count: () => liveSessions,
+    track: () => {
+      liveSessions += 1;
+      let done = false;
+      return () => {
+        if (done) return;
+        done = true;
+        liveSessions -= 1;
+      };
+    },
+  },
+  log: (level, message, data) => log[level](message, data),
 };
 
-/**
- * Render the config from the current process (Node binary, PATH, socket
- * paths may all have changed since the last start), journal, serve the door
- * socket and start the supervised sshd.
- */
+/** Journal from the current process, then listen. */
 async function bringUp(state: DoorState): Promise<DoorState> {
   if (!state.doorPort) throw new Error('the door has no port; run ncl sandboxes remote enable');
-  const sshd = findSshd();
-  if (!sshd) {
-    throw new Error('OpenSSH server (sshd) not found — install the openssh-server package or set NANOCLAW_SSHD');
-  }
-  if (!executable(ENV_TRAMPOLINE)) throw new Error(`${ENV_TRAMPOLINE} is required to run the door`);
   await ensureAuthority();
+  const hostKey = await ensureHostKey(files);
   const refreshed: DoorState = {
     ...state,
+    hostKey: hostKey.publicKey,
+    hostKeyFingerprint: hostKey.fingerprint,
     approvalUrl: approvalUrl(),
-    socketPath: DEFAULT_SOCKET_PATH,
-    hostSocketPath: files.hostSocket,
-    path: process.env.PATH ?? '',
     updatedAt: new Date().toISOString(),
   };
-  const config = renderSshdConfig({
-    port: state.doorPort,
-    hostKeyFile: files.hostKey,
-    user: os.userInfo().username,
-    authorizedKeysCommand: [ENV_TRAMPOLINE, ...resolveEntry('authorized-keys'), DOOR_DIR],
-  });
-  await fs.promises.writeFile(files.sshdConfig, config, { mode: 0o600 });
   await writeDoorState(files.state, refreshed);
   running = refreshed;
-  await startHostSocket(files.hostSocket, socketDeps);
-  supervisor ??= new DoorSupervisor({
-    sshd,
-    configFile: files.sshdConfig,
+  server ??= new DoorServer({
     port: state.doorPort,
-    wrapper: resolveEntry('sshd-wrapper'),
+    hostKey: hostKey.privateKey,
+    onConnection: (client, info) => handleConnection(client, info, sessionDeps),
     log: (level, message, data) => log[level](message, data),
   });
   try {
-    await supervisor.start();
+    await server.start();
   } catch (error) {
     running = undefined;
+    server = undefined;
     throw error;
   }
   return refreshed;
 }
 
 async function takeDown(): Promise<void> {
-  const current = supervisor;
-  supervisor = undefined;
+  const current = server;
+  server = undefined;
   running = undefined;
   await current?.stop();
-  await stopHostSocket();
 }
 
 async function summarize(state: DoorState): Promise<DoorSummary> {
   await ensureAuthority();
   const store = authority.keyStore();
+  const status = server?.status();
   return {
     enabled: state.enabled,
     ...(state.name ? { name: state.name } : {}),
@@ -293,7 +272,7 @@ async function summarize(state: DoorState): Promise<DoorSummary> {
     ...(state.hostKeyFingerprint ? { hostKeyFingerprint: state.hostKeyFingerprint } : {}),
     approvalUrl: state.approvalUrl,
     terminal: journal(state),
-    door: supervisor?.status() ?? { running: false },
+    door: status?.running ? { ...status, sessions: liveSessions } : { running: false },
     keys: {
       approved: store.approved.length,
       browser: store.mirror?.fingerprints.length ?? 0,
@@ -311,7 +290,7 @@ async function summarize(state: DoorState): Promise<DoorSummary> {
 export async function enableDoor(options: { name?: string } = {}): Promise<DoorSummary> {
   const requested = options.name === undefined ? undefined : validateAccountName(options.name);
   const previous = await readDoorState(files.state);
-  const hostKey = await ensureHostKey();
+  const hostKey = await ensureHostKey(files);
   const assigned = await enableTerminal({
     ...(requested ? { name: requested } : {}),
     hostKey: hostKey.publicKey,

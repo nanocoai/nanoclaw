@@ -10,7 +10,6 @@ import {
   addApprovedKey,
   admitKey,
   approvePendingKey,
-  authorizedKeysLine,
   emptyKeyStore,
   isApproved,
   parsePublicKey,
@@ -119,34 +118,6 @@ describe('admitKey', () => {
     const stale = admitKey(emptyKeyStore(), syntheticKey(1), T0).store;
     const result = admitKey(stale, syntheticKey(2), at(PENDING_RETENTION_MS + 1));
     expect(result.store.pending.map((k) => k.fingerprint)).toEqual([syntheticKey(2).fingerprint]);
-  });
-});
-
-describe('authorizedKeysLine', () => {
-  const key = parsePublicKey(ED25519.line);
-
-  it('pins an approved key to the landing program with restrict and pty', () => {
-    const line = authorizedKeysLine('approved', key, '/srv/host/data/door', '/opt/node/bin/node');
-    expect(line).toMatch(
-      /^restrict,pty,command="'\/opt\/node\/bin\/node' .*landing\.[jt]s' '\/srv\/host\/data\/door' 'SHA256:/,
-    );
-    expect(line?.endsWith(` ${key.publicKey}`)).toBe(true);
-    expect(line).not.toContain('waiting-room');
-  });
-
-  it('pins an unknown key to the waiting room with the key itself, and prints nothing for a refused key', () => {
-    const line = authorizedKeysLine('pending', key, '/srv/host/data/door');
-    expect(line).toContain('waiting-room');
-    expect(line).toContain(`'${key.fingerprint}' 'ssh-ed25519' '${key.base64}'`);
-    expect(line).not.toContain('landing');
-    expect(authorizedKeysLine('refused', key, '/srv/host/data/door')).toBeUndefined();
-  });
-
-  it('escapes the option layer so a quote in the door path cannot break out', () => {
-    const line = authorizedKeysLine('approved', key, `/srv/it's "here"`);
-    // Shell single-quote for the apostrophe (`'\''`), then the option layer
-    // doubles the backslash and escapes the double quotes.
-    expect(line).toContain(`'/srv/it'\\\\''s \\"here\\"'`);
   });
 });
 

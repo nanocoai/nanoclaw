@@ -46,7 +46,7 @@ const summary = {
   hostKeyFingerprint: 'SHA256:abc',
   approvalUrl: 'https://example.test/terminals',
   terminal: { enabled: true, name: 'alice', hostKeyFingerprint: 'SHA256:abc', doorPort: 33022, updatedAt: 't' },
-  door: { running: true, pid: 4242, port: 33022, restarts: 0 },
+  door: { running: true, port: 33022, connections: 1, sessions: 1 },
   keys: { approved: 0, browser: 0, pending: 1, rooms: 1 },
 };
 
@@ -144,7 +144,7 @@ describe('sandboxes remote disable / status', () => {
     const status = await call('sandboxes-remote-status');
     expect(status.ok).toBe(true);
     expect(doorStatus).toHaveBeenCalledTimes(1);
-    expect(human(status)).toContain('running (pid 4242)');
+    expect(human(status)).toContain('listening, 1 session');
   });
 });
 
