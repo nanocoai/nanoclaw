@@ -22,7 +22,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 
-import { isAttachResponse } from '../../cli/attach-exec.js';
+import type { AttachTarget as ResolvedAttachTarget } from '../../cli/attach-resolve.js';
 import type { ResponseFrame } from '../../cli/frame.js';
 import { DATA_DIR } from '../../config.js';
 import { onHostStart, onHostShutdown } from '../../host-lifecycle.js';
@@ -30,7 +30,7 @@ import { log } from '../../log.js';
 import * as authority from './authority.js';
 import { ensureHostKey } from './host-key.js';
 import { parsePublicKey, type ApprovedKey, type KeyStore } from './keys.js';
-import type { AttachExec, SandboxVerbs } from './landing.js';
+import type { AttachTarget, SandboxVerbs } from './landing.js';
 import { validateAccountName } from './name.js';
 import { doorFiles } from './paths.js';
 import {
@@ -165,10 +165,27 @@ async function callHost(command: string, args: Record<string, unknown>): Promise
   return dispatch({ id: randomUUID(), command, args }, { caller: 'host' });
 }
 
-function attachFrom(response: ResponseFrame): AttachExec {
-  if (!response.ok) throw new Error(response.error.message);
-  if (!isAttachResponse(response.data)) throw new Error('the host did not return a terminal to attach');
-  return response.data.attachExec;
+/** A brand-new sandbox's first spawn can take a while (image pull, cold runtime). */
+const NEW_SANDBOX_WAKE_WAIT_MS = 30_000;
+
+function attachTarget(resolved: ResolvedAttachTarget): AttachTarget {
+  const { handle } = resolved;
+  return {
+    containerName: resolved.containerName,
+    command: resolved.command,
+    ...(handle.execStream ? { execStream: (command, options) => handle.execStream!(command, options) } : {}),
+  };
+}
+
+async function resolveTarget(name: string, wakeWaitMs?: number): Promise<AttachTarget> {
+  const [{ getAgentGroup, getAgentGroupByFolder }, { resolveAttachTargetForGroup }] = await Promise.all([
+    import('../../db/agent-groups.js'),
+    import('../../cli/attach-resolve.js'),
+  ]);
+  // id-first, then folder — the attach verb's own resolution order and text.
+  const group = (await getAgentGroup(name)) ?? (await getAgentGroupByFolder(name));
+  if (!group) throw new Error(`no sandbox '${name}' — create it: ncl sandboxes new --name ${name}`);
+  return attachTarget(await resolveAttachTargetForGroup(group, wakeWaitMs === undefined ? undefined : { wakeWaitMs }));
 }
 
 const sandboxVerbs: SandboxVerbs = {
@@ -181,8 +198,14 @@ const sandboxVerbs: SandboxVerbs = {
       human: response.human ?? JSON.stringify(response.data, null, 2),
     };
   },
-  attach: async (name) => attachFrom(await callHost('sandboxes-attach', { id: name })),
-  create: async (name) => attachFrom(await callHost('sandboxes-new', { name })),
+  attach: (name) => resolveTarget(name),
+  async create(name) {
+    // The creation half of `sandboxes new`, exactly; the attach half is held
+    // here, since the door owns the terminal's bytes rather than a client.
+    const created = await callHost('sandboxes-new', { name, 'no-attach': true });
+    if (!created.ok) throw new Error(created.error.message);
+    return resolveTarget(name, NEW_SANDBOX_WAKE_WAIT_MS);
+  },
 };
 
 const sessionDeps: SessionDeps = {

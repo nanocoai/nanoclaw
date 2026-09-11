@@ -5,17 +5,19 @@
  * for; the host's own sandbox verbs do the rest: `sandboxes attach` for an
  * existing sandbox (cold ones wake), `sandboxes new` for an account whose
  * default sandbox does not exist yet, and the terminal is handed to the
- * attach program the host composes. `ls` lists the sandboxes instead. There
- * is no shell on this path; detach is tmux's Ctrl-b then d.
+ * attach command inside the session's container. `ls` lists the sandboxes
+ * instead. There is no shell on this path; detach is tmux's Ctrl-b then d.
  */
+import type { SessionExecOptions, SessionExecStream } from '../../drivers/types.js';
 import { decideLanding } from './landing-decision.js';
 import type { DoorStream } from './target-map.js';
 
-/** The exec spec the host composes for an attach (see cli/attach-exec.ts). */
-export interface AttachExec {
-  bin: string;
-  argsTty: string[];
-  argsPlain: string[];
+/** A live session and the attach command to run inside it (cli/attach-resolve.ts). */
+export interface AttachTarget {
+  containerName: string;
+  command: string[];
+  /** Absent when the session's runtime can only describe attaches, not hold their stream. */
+  execStream?: (command: string[], options: SessionExecOptions) => Promise<SessionExecStream>;
 }
 
 export interface SandboxListing {
@@ -27,8 +29,8 @@ export interface SandboxListing {
 /** The host's sandbox verbs as the door calls them; errors carry the verb's own message. */
 export interface SandboxVerbs {
   list(): Promise<SandboxListing>;
-  attach(name: string): Promise<AttachExec>;
-  create(name: string): Promise<AttachExec>;
+  attach(name: string): Promise<AttachTarget>;
+  create(name: string): Promise<AttachTarget>;
 }
 
 export interface LandingIo {
@@ -42,8 +44,8 @@ export interface LandingDeps {
   command?: string;
   sandboxes: SandboxVerbs;
   io: LandingIo;
-  /** Hand the terminal to the attach program; resolves with its exit code. */
-  spawn(exec: AttachExec): Promise<number>;
+  /** Hand the terminal to the attach command; resolves with its exit code. */
+  run(target: AttachTarget): Promise<number>;
 }
 
 export async function runLanding(deps: LandingDeps): Promise<number> {
@@ -74,9 +76,9 @@ export async function runLanding(deps: LandingDeps): Promise<number> {
       ? `Creating sandbox ${decision.name} — detach with Ctrl-b then d.\n`
       : `Attaching to sandbox ${decision.name} — detach with Ctrl-b then d.\n`,
   );
-  let exec;
+  let target: AttachTarget;
   try {
-    exec = decision.verb === 'attach' ? await sandboxes.attach(decision.name) : await sandboxes.create(decision.name);
+    target = decision.verb === 'attach' ? await sandboxes.attach(decision.name) : await sandboxes.create(decision.name);
   } catch (error) {
     if (!(error instanceof Error)) throw error;
     const text = error.message;
@@ -85,5 +87,5 @@ export async function runLanding(deps: LandingDeps): Promise<number> {
     );
     return 1;
   }
-  return deps.spawn(exec);
+  return deps.run(target);
 }

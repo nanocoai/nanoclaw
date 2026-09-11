@@ -57,6 +57,14 @@ export interface AttachResolution {
   containerName: string;
 }
 
+/** The live handle and the command behind an attach — for a caller that holds the bytes itself. */
+export interface AttachTarget {
+  handle: SessionHandle;
+  command: string[];
+  group: string;
+  containerName: string;
+}
+
 /**
  * Resolve the live runtime handle for the first of `sessions` that has one.
  * Resolution goes through the session driver's own discovery (the adoption
@@ -89,6 +97,22 @@ export async function resolveAttachForGroup(
   group: AgentGroup,
   opts?: { wakeWaitMs?: number },
 ): Promise<AttachResolution> {
+  const target = await resolveAttachTargetForGroup(group, opts);
+  // The client (which owns the terminal) execs this; policy — which
+  // container, which entry — is decided here, host-side. The argv comes
+  // from the driver's handle: only the driver knows its exec dialect.
+  return {
+    attachExec: target.handle.execSpec(target.command),
+    group: target.group,
+    containerName: target.containerName,
+  };
+}
+
+/** The resolution behind `resolveAttachForGroup`, stopping short of the argv. */
+export async function resolveAttachTargetForGroup(
+  group: AgentGroup,
+  opts?: { wakeWaitMs?: number },
+): Promise<AttachTarget> {
   const cfg = await getContainerConfig(group.id);
   if (cfg?.code_mode !== 1) {
     throw new Error(
@@ -124,9 +148,6 @@ export async function resolveAttachForGroup(
         : `${group.name}'s session container did not come up — check the host logs, then re-attach`,
     );
   }
-  // The client (which owns the terminal) execs this; policy — which
-  // container, which entry — is decided here, host-side. The argv comes
-  // from the driver's handle: only the driver knows its exec dialect.
   // The tmux client's own environment is the exec transport's, not the
   // operator's: an exec transport may forward neither TERM nor the locale, so a
   // bare `tmux attach` announces TERM=xterm (no 256-color/truecolor output)
@@ -145,7 +166,8 @@ export async function resolveAttachForGroup(
     'agent',
   ];
   return {
-    attachExec: live.execSpec(withAttachActivityStamp(clientCmd)),
+    handle: live,
+    command: withAttachActivityStamp(clientCmd),
     group: group.name,
     containerName: live.name,
   };

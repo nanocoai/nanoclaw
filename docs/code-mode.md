@@ -92,9 +92,9 @@ server inside the Host, and keeps it running across Host restarts until you
 disable it. Disabling ends open sessions and keeps the host key and the
 approved keys. Nothing has to be installed or configured on the Host for
 this: no OpenSSH server, no extra account, no membership in any system group
-such as `tty`. The server is part of the Host process, and the terminal is
-allocated by a small native module the Host ships with, as the user the Host
-runs as.
+such as `tty`, no native module. The server is part of the Host process, and
+the terminal a session gets is the container runtime's own, opened through
+the same runtime API the Host already manages sessions with.
 
 ### Keys and pairing
 
@@ -176,9 +176,8 @@ snapshot over the same link.
 Code mode uses the existing agent image, Claude Code installation, and mailbox.
 The image adds the distribution's `tmux` package. Remote terminal access
 needs an SSH client on the terminal machine; the Host side is the Host
-process itself (the `ssh2` protocol library and the `node-pty` terminal
-module, the latter a prebuilt native module like the Host's database
-driver).
+process itself (the `ssh2` protocol library) and the container runtime's
+exec API, which the Host already uses to run sessions.
 `NANOCLAW_TERMINAL_APPROVAL_URL` is the approval page the waiting room shows.
 
 `NANOCLAW_CODE_PERMISSION_MODE` defaults to `auto`. A group's

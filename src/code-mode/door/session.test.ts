@@ -3,15 +3,17 @@
  * the authentication decisions (public key only, any username, signatures
  * checked, unknown keys admitted), the session requests (PTY, resize,
  * shell, exec, refused forwarding and subsystems), the waiting room in
- * session, the session cap, and revocation ending a live session.
+ * session, the session cap, and revocation ending a live session. The
+ * container runtime's exec stream is faked with a pair of streams.
  */
 import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import ssh2, { type ClientInfo, type Connection, type ParsedKey, type Session } from 'ssh2';
 import { describe, expect, it, vi } from 'vitest';
 
+import type { SessionExecOptions, SessionExecStream } from '../../drivers/types.js';
 import { fingerprintOf } from './keys.js';
-import type { AttachExec } from './landing.js';
-import type { TerminalProgram } from './pty.js';
+import type { AttachTarget } from './landing.js';
 import { handleConnection, MAX_SESSIONS, type SessionDeps } from './session.js';
 import type { DoorStream } from './target-map.js';
 
@@ -48,29 +50,29 @@ class FakeClient extends EventEmitter {
   }
 }
 
-class FakeProgram implements TerminalProgram {
-  data = new EventEmitter();
-  written = '';
+/** A fake runtime exec: what the command "prints" goes into `stdout`, what the session sends lands in `input`. */
+class FakeExec implements SessionExecStream {
+  stdin = new PassThrough();
+  stdout = new PassThrough();
+  stderr?: PassThrough;
+  input = '';
   resized: [number, number][] = [];
-  killed: string[] = [];
-  write(data: Buffer | string): void {
-    this.written += String(data);
+  closed = false;
+  private finish!: (code: number) => void;
+  exited = new Promise<number>((resolve) => (this.finish = resolve));
+  constructor(tty: boolean) {
+    if (!tty) this.stderr = new PassThrough();
+    this.stdin.on('data', (data: Buffer) => (this.input += data.toString()));
   }
-  end(): void {}
-  resize(cols: number, rows: number): void {
+  resize = vi.fn(async (cols: number, rows: number) => {
     this.resized.push([cols, rows]);
+  });
+  close(): void {
+    this.closed = true;
+    this.finish(129);
   }
-  kill(signal?: NodeJS.Signals): void {
-    this.killed.push(signal ?? 'SIGTERM');
-  }
-  pause(): void {}
-  resume(): void {}
-  onData(listener: (data: Buffer | string) => void): void {
-    this.data.on('data', listener);
-  }
-  onStderr(): void {}
-  onExit(listener: (code: number) => void): void {
-    this.data.on('exit', listener);
+  exit(code: number): void {
+    this.finish(code);
   }
 }
 
@@ -86,7 +88,7 @@ function keyPair(): { key: ParsedKey; blob: Buffer; fingerprint: string } {
 
 function authContext(method: string, username: string, key?: ReturnType<typeof keyPair>, sign = true) {
   const blob = Buffer.from('session-id-and-request');
-  const ctx = {
+  return {
     method,
     username,
     service: 'ssh-connection',
@@ -97,22 +99,34 @@ function authContext(method: string, username: string, key?: ReturnType<typeof k
     accept: vi.fn(),
     reject: vi.fn(),
   };
-  return ctx;
 }
 
-const exec = (name: string): AttachExec => ({
-  bin: 'docker',
-  argsTty: ['exec', '-it', name, 'tmux'],
-  argsPlain: ['exec', '-i', name, 'tmux'],
-});
-
-function deps(overrides: Partial<SessionDeps> & { approved?: string[]; streams?: Record<number, DoorStream> } = {}) {
+function deps(
+  overrides: Partial<SessionDeps> & {
+    approved?: string[];
+    streams?: Record<number, DoorStream>;
+    noStream?: boolean;
+  } = {},
+) {
   const approved = new Set(overrides.approved ?? []);
   const ends = new Map<string, () => void>();
-  const programs: FakeProgram[] = [];
+  const execs: { exec: FakeExec; command: string[]; options: SessionExecOptions }[] = [];
   const logs: { level: string; message: string; data?: Record<string, unknown> }[] = [];
   let live = 0;
   let waiters: ((approved: boolean) => void)[] = [];
+  const targetFor = (name: string): AttachTarget => ({
+    containerName: `ncl-${name}`,
+    command: ['tmux', 'attach', name],
+    ...(overrides.noStream
+      ? {}
+      : {
+          execStream: async (command: string[], options: SessionExecOptions) => {
+            const exec = new FakeExec(options.tty);
+            execs.push({ exec, command, options });
+            return exec;
+          },
+        }),
+  });
   const d: SessionDeps = {
     authority: {
       status: (fp) => (approved.has(fp) ? 'approved' : 'unknown'),
@@ -134,8 +148,8 @@ function deps(overrides: Partial<SessionDeps> & { approved?: string[]; streams?:
     approvalUrl: () => 'https://example.test/terminals',
     sandboxes: {
       list: vi.fn(async () => ({ names: ['alice'], human: 'SANDBOX\nalice' })),
-      attach: vi.fn(async (name: string) => exec(name)),
-      create: vi.fn(async (name: string) => exec(name)),
+      attach: vi.fn(async (name: string) => targetFor(name)),
+      create: vi.fn(async (name: string) => targetFor(name)),
     },
     sessions: {
       count: () => live,
@@ -147,16 +161,6 @@ function deps(overrides: Partial<SessionDeps> & { approved?: string[]; streams?:
       },
     },
     log: (level, message, data) => logs.push({ level, message, data }),
-    spawnPty: vi.fn(async () => {
-      const program = new FakeProgram();
-      programs.push(program);
-      return program;
-    }),
-    spawnPlain: vi.fn(() => {
-      const program = new FakeProgram();
-      programs.push(program);
-      return program;
-    }),
     ...overrides,
   };
   return {
@@ -168,7 +172,7 @@ function deps(overrides: Partial<SessionDeps> & { approved?: string[]; streams?:
       for (const resolve of pending) resolve(true);
     },
     ends,
-    programs,
+    execs,
     logs,
     live: () => live,
   };
@@ -205,9 +209,9 @@ const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve,
 
 describe('authentication', () => {
   it('offers public key only and ignores the username', () => {
-    const d = deps().deps;
+    const f = deps();
     const client = new FakeClient();
-    handleConnection(client as unknown as Connection, INFO, d);
+    handleConnection(client as unknown as Connection, INFO, f.deps);
     for (const method of ['none', 'password', 'keyboard-interactive']) {
       const ctx = authContext(method, 'root');
       client.emit('authentication', ctx);
@@ -221,6 +225,8 @@ describe('authentication', () => {
       expect(ctx.accept).toHaveBeenCalledTimes(1);
       expect(ctx.reject).not.toHaveBeenCalled();
     }
+    client.emit('ready');
+    expect(f.logs.at(-1)).toMatchObject({ message: 'Remote terminal login', data: { username: 'anything-at-all' } });
   });
 
   it('accepts the key query, rejects a bad signature, and rejects everything while disabled', () => {
@@ -247,7 +253,7 @@ describe('authentication', () => {
 });
 
 describe('sessions', () => {
-  it('lands an approved key in its stream’s sandbox under a PTY, resizes, and exits with the program', async () => {
+  it('lands an approved key in its stream’s sandbox on a sized TTY exec, resizes, pumps bytes, and exits with it', async () => {
     const key = keyPair();
     const f = deps({
       approved: [key.fingerprint],
@@ -255,31 +261,31 @@ describe('sessions', () => {
     });
     const { session, client } = connect(f.deps, 'whoever', key);
     const channel = shell(session);
-    await vi.waitFor(() => expect(f.programs).toHaveLength(1));
-    expect(f.deps.spawnPty).toHaveBeenCalledWith(
-      expect.objectContaining({ bin: 'docker', args: ['exec', '-it', 'demo', 'tmux'] }),
-      { cols: 120, rows: 40, term: 'xterm-256color' },
-    );
+    await vi.waitFor(() => expect(f.execs).toHaveLength(1));
+    const { exec, command, options } = f.execs[0];
+    expect(command).toEqual(['tmux', 'attach', 'demo']);
+    expect(options).toEqual({ tty: true, cols: 120, rows: 40 });
     expect(channel.out).toContain('Attaching to sandbox demo — detach with Ctrl-b then d.\r\n');
     expect(f.live()).toBe(1);
 
     session.emit('window-change', vi.fn(), vi.fn(), { cols: 200, rows: 50, width: 0, height: 0 });
-    expect(f.programs[0].resized).toEqual([[200, 50]]);
+    await settle();
+    expect(exec.resized).toEqual([[200, 50]]);
     channel.emit('data', Buffer.from('ls\r'));
-    expect(f.programs[0].written).toBe('ls\r');
-    f.programs[0].data.emit('data', 'hello from tmux');
+    await settle();
+    expect(exec.input).toBe('ls\r');
+    exec.stdout.write('hello from tmux');
+    await settle();
     expect(channel.out).toContain('hello from tmux');
 
-    f.programs[0].data.emit('exit', 3);
-    await settle();
-    expect(channel.exitCode).toBe(3);
+    exec.exit(3);
+    await vi.waitFor(() => expect(channel.exitCode).toBe(3));
     expect(channel.ended).toBe(true);
     expect(f.live()).toBe(0);
-    expect(f.logs.some((l) => l.message === 'Remote terminal login' && l.data?.username === 'whoever')).toBe(true);
     expect(client.ended).toBe(false);
   });
 
-  it('runs `ls` as an exec without a PTY and refuses other commands', async () => {
+  it('runs `ls` as an exec without a TTY and refuses other commands', async () => {
     const key = keyPair();
     const f = deps({
       approved: [key.fingerprint],
@@ -290,13 +296,35 @@ describe('sessions', () => {
     session.emit('exec', () => channel, vi.fn(), { command: 'ls' });
     await vi.waitFor(() => expect(channel.exitCode).toBe(0));
     expect(channel.out).toBe('SANDBOX\nalice\n');
-    expect(f.programs).toHaveLength(0);
+    expect(f.execs).toHaveLength(0);
 
     const { session: again } = connect(f.deps, 'x', key);
     const other = new FakeChannel();
     again.emit('exec', () => other, vi.fn(), { command: 'bash' });
     await vi.waitFor(() => expect(other.exitCode).toBe(2));
     expect(other.err).toMatch(/usage/);
+  });
+
+  it('attaches without a TTY as a plain exec, keeping stderr apart and passing EOF through', async () => {
+    const key = keyPair();
+    const f = deps({
+      approved: [key.fingerprint],
+      streams: { 50562: { target: { account: 'alice' }, openedAt: 't' } },
+    });
+    const { session } = connect(f.deps, 'x', key);
+    const channel = shell(session, false);
+    await vi.waitFor(() => expect(f.execs).toHaveLength(1));
+    const { exec, options } = f.execs[0];
+    expect(options).toEqual({ tty: false });
+    expect(channel.out).toContain('Attaching to sandbox alice — detach with Ctrl-b then d.\n');
+    exec.stderr!.write('warning');
+    await settle();
+    expect(channel.err).toContain('warning');
+    const ended = new Promise<void>((resolve) => exec.stdin.on('end', () => resolve()));
+    channel.emit('eof');
+    await ended;
+    exec.exit(0);
+    await vi.waitFor(() => expect(channel.exitCode).toBe(0));
   });
 
   it('holds an unknown key in the waiting room and lands it in the same session once approved', async () => {
@@ -314,21 +342,31 @@ describe('sessions', () => {
       { fingerprint: key.fingerprint, keyType: 'ssh-ed25519', publicKey: `ssh-ed25519 ${key.blob.toString('base64')}` },
       { ip: '203.0.113.5', port: 4242 },
     );
-    expect(f.programs).toHaveLength(0);
+    expect(f.execs).toHaveLength(0);
 
     f.approve(key.fingerprint);
-    await vi.waitFor(() => expect(f.programs).toHaveLength(1));
+    await vi.waitFor(() => expect(f.execs).toHaveLength(1));
     expect(channel.out).toContain('Approved. Connecting…\r\n');
     expect(channel.out).toContain('Attaching to sandbox alice');
   });
 
-  it('refuses a connection the host relayed no stream for, after authentication', async () => {
+  it('refuses a connection the host relayed no stream for, and a runtime that cannot hand over a terminal', async () => {
     const key = keyPair();
     const f = deps({ approved: [key.fingerprint] });
     const { session } = connect(f.deps, 'x', key);
     const channel = shell(session);
     await vi.waitFor(() => expect(channel.exitCode).toBe(1));
     expect(channel.err).toMatch(/no target/);
+
+    const g = deps({
+      approved: [key.fingerprint],
+      noStream: true,
+      streams: { 50562: { target: { account: 'alice' }, openedAt: 't' } },
+    });
+    const { session: other } = connect(g.deps, 'x', key);
+    const plain = shell(other);
+    await vi.waitFor(() => expect(plain.exitCode).toBe(1));
+    expect(plain.err).toMatch(/cannot hand over a terminal/);
   });
 
   it(`caps sessions at ${MAX_SESSIONS} and ends a live session when its key is revoked`, async () => {
@@ -339,7 +377,7 @@ describe('sessions', () => {
     });
     const channels: FakeChannel[] = [];
     for (let i = 0; i < MAX_SESSIONS; i++) channels.push(shell(connect(f.deps, 'x', key).session));
-    await vi.waitFor(() => expect(f.programs).toHaveLength(MAX_SESSIONS));
+    await vi.waitFor(() => expect(f.execs).toHaveLength(MAX_SESSIONS));
     const { session, client } = connect(f.deps, 'x', key);
     const overflow = shell(session);
     await vi.waitFor(() => expect(overflow.exitCode).toBe(1));
@@ -350,11 +388,11 @@ describe('sessions', () => {
     const ended = channels.filter((c) => c.ended);
     expect(ended.length).toBeGreaterThanOrEqual(1);
     expect(ended[0].err).toMatch(/revoked/);
-    expect(f.programs.some((p) => p.killed.includes('SIGHUP'))).toBe(true);
+    expect(f.execs.some((e) => e.exec.closed)).toBe(true);
     expect(client.ended).toBe(false);
   });
 
-  it('rejects forwarding, subsystems and a second program on the same session', async () => {
+  it('hangs the exec up when the channel closes, and rejects forwarding, subsystems and a second program', async () => {
     const key = keyPair();
     const f = deps({
       approved: [key.fingerprint],
@@ -371,8 +409,12 @@ describe('sessions', () => {
     session.emit('auth-agent', vi.fn(), reject);
     session.emit('env', vi.fn(), reject, { key: 'X', val: 'y' });
     expect(reject).toHaveBeenCalledTimes(8);
-    shell(session);
+    const channel = shell(session);
     session.emit('shell', vi.fn(), reject);
     expect(reject).toHaveBeenCalledTimes(9);
+    await vi.waitFor(() => expect(f.execs).toHaveLength(1));
+    channel.emit('close');
+    await settle();
+    expect(f.execs[0].exec.closed).toBe(true);
   });
 });

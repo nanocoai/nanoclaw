@@ -1,20 +1,24 @@
 /**
- * One SSH connection to the door, from authentication to the program the
- * terminal is handed to.
+ * One SSH connection to the door, from authentication to the terminal the
+ * session is handed.
  *
  * Authentication: public key only, any username (the account and the
- * relayed stream decide where a connection lands, not the login name). A
- * key the host has not approved is admitted too — into the waiting room,
- * which becomes the landing in the same session once the key is approved.
- * Sessions: a PTY if asked, then `shell` (land) or `exec` (`ls` lists;
- * anything else is refused with usage). No forwarding of any kind, no
+ * relayed stream decide where a connection lands, not the login name; the
+ * name is logged). A key the host has not approved is admitted too — into
+ * the waiting room, which becomes the landing in the same session once the
+ * key is approved. Sessions: a PTY if asked, then `shell` (land) or `exec`
+ * (`ls` lists; anything else is refused with usage). The terminal itself is
+ * the container runtime's: the attach command runs inside the session's
+ * container over the runtime's own exec stream, sized from the client's
+ * `pty-req` and every `window-change`. No forwarding of any kind, no
  * subsystems. A revocation ends the session; so does stopping the door.
  */
+// ssh2 is a CommonJS module: only its default export is reachable from Node ESM.
 import ssh2, { type ClientInfo, type Connection, type ServerChannel, type Session } from 'ssh2';
 
+import type { SessionExecStream } from '../../drivers/types.js';
 import { fingerprintOf } from './keys.js';
-import { runLanding, type AttachExec, type LandingIo, type SandboxVerbs } from './landing.js';
-import { spawnPlain, spawnPty, type SpawnSpec, type TerminalProgram, type TerminalSize } from './pty.js';
+import { runLanding, type AttachTarget, type LandingIo, type SandboxVerbs } from './landing.js';
 import type { PendingKeyRequest, PendingKeyResult } from './report.js';
 import type { DoorLog } from './server.js';
 import type { DoorSource, DoorStream } from './target-map.js';
@@ -45,9 +49,6 @@ export interface SessionDeps {
   sessions: { count(): number; track(): () => void };
   maxSessions?: number;
   log: DoorLog;
-  env?: NodeJS.ProcessEnv;
-  spawnPty?: typeof spawnPty;
-  spawnPlain?: typeof spawnPlain;
   now?: () => Date;
 }
 
@@ -59,6 +60,12 @@ interface Identity {
   keyType: string;
   /** `<type> <base64>` */
   publicKey: string;
+}
+
+interface TerminalSize {
+  cols: number;
+  rows: number;
+  term: string;
 }
 
 export function handleConnection(client: Connection, info: ClientInfo, deps: SessionDeps): void {
@@ -109,7 +116,7 @@ export function handleConnection(client: Connection, info: ClientInfo, deps: Ses
 
   function handleSession(session: Session): void {
     let size: TerminalSize | undefined;
-    let program: TerminalProgram | undefined;
+    let exec: SessionExecStream | undefined;
     let started = false;
 
     session.on('pty', (accept, _reject, ptyInfo) => {
@@ -118,12 +125,13 @@ export function handleConnection(client: Connection, info: ClientInfo, deps: Ses
     });
     session.on('window-change', (accept, _reject, change) => {
       if (size) size = { ...size, cols: change.cols, rows: change.rows };
-      program?.resize(change.cols, change.rows);
+      exec?.resize(change.cols, change.rows).catch(() => {});
       accept?.();
     });
-    session.on('signal', (accept, _reject, signal) => {
-      program?.kill(`SIG${signal.name}` as NodeJS.Signals);
-      accept?.();
+    session.on('signal', (accept, reject) => {
+      // The runtime's exec has no signal channel; a hang-up ends it (see close).
+      if (exec) accept?.();
+      else reject?.();
     });
     session.on('env', (_accept, reject) => reject?.());
     session.on('x11', (_accept, reject) => reject?.());
@@ -135,15 +143,15 @@ export function handleConnection(client: Connection, info: ClientInfo, deps: Ses
       started = true;
       void run(accept(), undefined);
     });
-    session.on('exec', (accept, reject, exec) => {
+    session.on('exec', (accept, reject, request) => {
       if (started) return reject();
       started = true;
-      void run(accept(), exec.command);
+      void run(accept(), request.command);
     });
 
     async function run(channel: ServerChannel, command: string | undefined): Promise<void> {
       // Text the door writes itself needs the carriage returns a terminal
-      // would add; a program's own output already has them.
+      // would add; the attach command's own output already has them.
       const text = (value: string): string => (size ? value.replace(/\r?\n/g, '\r\n') : value);
       const io: LandingIo = {
         write: (value) => void channel.write(text(value)),
@@ -165,7 +173,7 @@ export function handleConnection(client: Connection, info: ClientInfo, deps: Ses
       };
       channel.on('close', () => {
         closed = true;
-        program?.kill('SIGHUP');
+        exec?.close();
         finish(0);
       });
 
@@ -178,7 +186,7 @@ export function handleConnection(client: Connection, info: ClientInfo, deps: Ses
       const { fingerprint } = identity;
       unregister = deps.authority.registerSession(fingerprint, () => {
         io.fail('\nAccess to this machine was revoked.\n');
-        program?.kill('SIGHUP');
+        exec?.close();
         finish(1);
         client.end();
       });
@@ -206,41 +214,51 @@ export function handleConnection(client: Connection, info: ClientInfo, deps: Ses
         ...(command !== undefined ? { command } : {}),
         sandboxes: deps.sandboxes,
         io,
-        spawn: (exec) => runProgram(channel, exec),
+        run: (target) => attach(channel, target),
       });
       finish(code);
     }
 
-    async function runProgram(channel: ServerChannel, exec: AttachExec): Promise<number> {
-      const spec: SpawnSpec = {
-        bin: exec.bin,
-        args: size ? exec.argsTty : exec.argsPlain,
-        env: deps.env ?? process.env,
-      };
-      try {
-        program = size ? await (deps.spawnPty ?? spawnPty)(spec, size) : (deps.spawnPlain ?? spawnPlain)(spec);
-      } catch (error) {
-        if (!(error instanceof Error)) throw error;
-        deps.log('error', 'Remote terminal could not start the attach program', { err: error });
-        channel.stderr.write(`The terminal could not be started: ${error.message}\r\n`);
+    /** Pump the channel into the attach command's stream inside the container and back. */
+    async function attach(channel: ServerChannel, target: AttachTarget): Promise<number> {
+      if (!target.execStream) {
+        channel.stderr.write(text("This session's runtime cannot hand over a terminal.\n"));
         return 1;
       }
-      const running = program;
-      return new Promise<number>((resolve) => {
-        running.onData((data) => {
-          if (!channel.write(data)) {
-            running.pause();
-            channel.once('drain', () => running.resume());
-          }
+      let running: SessionExecStream;
+      try {
+        running = await target.execStream(
+          target.command,
+          size ? { tty: true, cols: size.cols, rows: size.rows } : { tty: false },
+        );
+      } catch (error) {
+        if (!(error instanceof Error)) throw error;
+        deps.log('error', 'Remote terminal could not start the attach command', {
+          container: target.containerName,
+          err: error,
         });
-        running.onStderr((data) => void channel.stderr.write(data));
-        channel.on('data', (data: Buffer) => running.write(data));
-        channel.on('eof', () => running.end());
-        running.onExit((code) => {
-          if (program === running) program = undefined;
-          resolve(code);
-        });
+        channel.stderr.write(text(`The terminal could not be started: ${error.message}\n`));
+        return 1;
+      }
+      exec = running;
+      running.stdout.on('data', (data: Buffer) => {
+        if (!channel.write(data)) {
+          running.stdout.pause();
+          channel.once('drain', () => running.stdout.resume());
+        }
       });
+      running.stderr?.on('data', (data: Buffer) => void channel.stderr.write(data));
+      channel.on('data', (data: Buffer) => void running.stdin.write(data));
+      // Without a terminal the client's EOF is the command's EOF; a terminal
+      // ends when its program does (detach), never on a half-close.
+      if (!size) channel.on('eof', () => running.stdin.end());
+      const code = await running.exited;
+      if (exec === running) exec = undefined;
+      return code;
+
+      function text(value: string): string {
+        return size ? value.replace(/\r?\n/g, '\r\n') : value;
+      }
     }
   }
 }

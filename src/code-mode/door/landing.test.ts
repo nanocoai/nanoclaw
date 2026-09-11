@@ -5,22 +5,18 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { decideLanding } from './landing-decision.js';
-import { runLanding, type AttachExec, type LandingIo, type SandboxVerbs } from './landing.js';
+import { runLanding, type AttachTarget, type LandingIo, type SandboxVerbs } from './landing.js';
 import type { DoorStream, DoorTarget } from './target-map.js';
 
 const streamFor = (target: DoorTarget): DoorStream => ({ target, openedAt: '2026-09-11T12:00:00.000Z' });
-const exec = (name: string): AttachExec => ({
-  bin: 'docker',
-  argsTty: ['exec', '-it', name, 'tmux'],
-  argsPlain: ['exec', '-i', name, 'tmux'],
-});
+const targetFor = (name: string): AttachTarget => ({ containerName: `ncl-${name}`, command: ['tmux', 'attach'] });
 
 interface Fakes {
   io: LandingIo;
   out: string[];
   err: string[];
   sandboxes: SandboxVerbs;
-  spawn: (exec: AttachExec) => Promise<number>;
+  run: (target: AttachTarget) => Promise<number>;
 }
 
 function fakes(names: string[] = [], failAttach?: string): Fakes {
@@ -29,16 +25,16 @@ function fakes(names: string[] = [], failAttach?: string): Fakes {
     err: [],
     io: undefined as unknown as LandingIo,
     sandboxes: undefined as unknown as SandboxVerbs,
-    spawn: vi.fn(async (_exec: AttachExec) => 7),
+    run: vi.fn(async (_target: AttachTarget) => 7),
   };
   f.io = { write: (t) => f.out.push(t), fail: (t) => f.err.push(t) };
   f.sandboxes = {
     list: vi.fn(async () => ({ names, human: `SANDBOX\n${names.join('\n')}` })),
     attach: vi.fn(async (name: string) => {
       if (failAttach) throw new Error(failAttach);
-      return exec(name);
+      return targetFor(name);
     }),
-    create: vi.fn(async (name: string) => exec(name)),
+    create: vi.fn(async (name: string) => targetFor(name)),
   };
   return f;
 }
@@ -73,7 +69,7 @@ describe('runLanding', () => {
     expect(await runLanding({ stream: streamFor({ account: 'alice', sandbox: 'demo' }), ...f })).toBe(7);
     expect(f.sandboxes.list).not.toHaveBeenCalled();
     expect(f.sandboxes.attach).toHaveBeenCalledWith('demo');
-    expect(f.spawn).toHaveBeenCalledWith(exec('demo'));
+    expect(f.run).toHaveBeenCalledWith(targetFor('demo'));
     expect(f.out.join('')).toContain('Attaching to sandbox demo');
   });
 
@@ -94,7 +90,7 @@ describe('runLanding', () => {
     expect(await runLanding({ stream: undefined, ...f })).toBe(1);
     expect(f.err.join('')).toMatch(/no target/);
     expect(f.sandboxes.list).not.toHaveBeenCalled();
-    expect(f.spawn).not.toHaveBeenCalled();
+    expect(f.run).not.toHaveBeenCalled();
   });
 
   it('lists for `ls` and refuses other commands with usage', async () => {
@@ -103,7 +99,7 @@ describe('runLanding', () => {
       0,
     );
     expect(ls.out.join('')).toBe('SANDBOX\nalice\ndemo\n');
-    expect(ls.spawn).not.toHaveBeenCalled();
+    expect(ls.run).not.toHaveBeenCalled();
 
     const other = fakes(['alice']);
     expect(await runLanding({ stream: streamFor({ account: 'alice' }), command: 'bash -i', ...other })).toBe(2);

@@ -6,13 +6,15 @@
  * means nothing here. An unknown key gets the waiting room, an approval on
  * the host releases it into the landing, which creates the account's
  * default sandbox through the real `sandboxes new` path against a fake
- * container driver whose "attach" prints a marker. Then `ssh … ls` lists,
+ * container driver whose exec stream prints a marker with the terminal size
+ * it was given. Then `ssh … ls` lists, a plain attach runs without a TTY,
  * and password authentication is refused. Skips cleanly without the tools.
  */
 import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
+import { PassThrough } from 'node:stream';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 const ROOT = vi.hoisted(() => `/tmp/nanoclaw-door-e2e-${process.pid}`);
@@ -34,7 +36,7 @@ import { wakeContainer } from '../../container-runner.js';
 import { closeDb, initTestDb, runMigrations } from '../../db/index.js';
 import { getSessionDriver } from '../../drivers/index.js';
 import type { SessionEventsDriver } from '../../drivers/session-events.js';
-import type { SessionHandle, SessionStatus } from '../../drivers/types.js';
+import type { SessionExecOptions, SessionExecStream, SessionHandle, SessionStatus } from '../../drivers/types.js';
 import type { Session } from '../../types.js';
 // Registers the sandbox verbs and the code-mode migrations the landing uses.
 import '../../cli/resources/sandboxes.js';
@@ -51,7 +53,7 @@ const hasTools = ['ssh', 'ssh-keygen'].every((tool) => {
   }
 });
 
-/** The fake driver's attach: a shell that prints a marker and exits. */
+/** The fake driver's attach: an exec stream that prints a marker (with the size it got) and exits 0. */
 function handleFor(agentGroupId: string, sessionId: string, name: string): SessionHandle {
   return {
     key: { installSlug: 'test-install', agentGroupId, sessionId },
@@ -59,11 +61,24 @@ function handleFor(agentGroupId: string, sessionId: string, name: string): Sessi
     start: async () => {},
     status: async () => ({ phase: 'running' }) as SessionStatus,
     stop: async () => {},
-    execSpec: () => ({
-      bin: '/bin/sh',
-      argsTty: ['-c', 'printf "LANDED-TTY %s in %s\\n" "$1" "$(tty)"', 'sh', name],
-      argsPlain: ['-c', 'printf "LANDED-PLAIN %s\\n" "$1"', 'sh', name],
+    execSpec: (command) => ({
+      bin: 'docker',
+      argsTty: ['exec', '-it', name, ...command],
+      argsPlain: ['exec', '-i', name, ...command],
     }),
+    execStream: async (command: string[], options: SessionExecOptions): Promise<SessionExecStream> => {
+      const stdout = new PassThrough();
+      const stdin = new PassThrough();
+      const exited = new Promise<number>((resolve) => stdout.on('end', () => resolve(0)));
+      setTimeout(() => {
+        stdout.end(
+          options.tty
+            ? `LANDED-TTY ${name} ${options.cols}x${options.rows} ${command.at(-1)}\r\n`
+            : `LANDED-PLAIN ${name} ${command.at(-1)}\n`,
+        );
+      }, 50);
+      return { stdin, stdout, resize: async () => {}, exited, close: () => stdout.end() };
+    },
   };
 }
 
@@ -190,8 +205,8 @@ describe.skipIf(!hasTools)('door e2e (real ssh client)', () => {
     expect(result.output).toContain('from   203.0.113.5');
     expect(result.output).toContain('Approved. Connecting');
     expect(result.output).toContain('Creating sandbox e2e-box');
-    // The fake driver names its container after the session; the marker proves the attach ran on a real terminal.
-    expect(result.output).toMatch(/LANDED-TTY ncl-sess-\S+ in \/dev\//);
+    // The fake driver names its container after the session; the marker carries the size the exec was given.
+    expect(result.output).toMatch(/LANDED-TTY ncl-sess-\S+ \d+x\d+ agent/);
     expect(result.code).toBe(0);
     expect((await listDoorKeys()).approved.map((k) => k.label)).toEqual(['e2e']);
   }, 60_000);
