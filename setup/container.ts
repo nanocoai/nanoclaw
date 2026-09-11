@@ -155,7 +155,7 @@ function imageDigest(image: string, expectRepo?: string): string {
 
 /**
  * What the image must satisfy for a spawn to work, mirroring what
- * `buildContainerArgs` produces: `--entrypoint bash`, an arbitrary uid on
+ * the session spec and its Docker realization produce: `--entrypoint bash`, an arbitrary uid on
  * macOS, HOME forced to /home/node. The caller pre-creates /workspace/group in
  * the scratch mount the way the host owns a real session dir, so this asserts
  * the image can use it, not that the daemon can conjure it.
@@ -236,17 +236,15 @@ export async function run(args: string[]): Promise<void> {
       }
 
       log.info('Re-executing container step under `sg docker`');
-      const res = spawnSync(
-        'sg',
-        ['docker', '-c', 'pnpm exec tsx setup/index.ts --step container'],
-        { cwd: projectRoot, stdio: 'inherit' },
-      );
+      const res = spawnSync('sg', ['docker', '-c', 'pnpm exec tsx setup/index.ts --step container'], {
+        cwd: projectRoot,
+        stdio: 'inherit',
+      });
       process.exit(res.status ?? 1);
     }
 
     if (status !== 'ok') {
-      const error =
-        status === 'no-permission' ? 'docker_group_not_active' : 'runtime_not_available';
+      const error = status === 'no-permission' ? 'docker_group_not_active' : 'runtime_not_available';
       emitStatus('SETUP_CONTAINER', {
         RUNTIME: runtime,
         IMAGE: image,
@@ -271,7 +269,10 @@ export async function run(args: string[]): Promise<void> {
     const envPath = path.join(projectRoot, '.env');
     if (fs.existsSync(envPath)) {
       const match = fs.readFileSync(envPath, 'utf-8').match(/^INSTALL_CJK_FONTS=(.+)$/m);
-      const val = match?.[1].trim().replace(/^["']|["']$/g, '').toLowerCase();
+      const val = match?.[1]
+        .trim()
+        .replace(/^["']|["']$/g, '')
+        .toLowerCase();
       if (val === 'true') buildArgs.push('--build-arg INSTALL_CJK_FONTS=true');
     }
   } catch {
@@ -282,10 +283,7 @@ export async function run(args: string[]): Promise<void> {
   // `image`, so everything past this point is identical either way. The other
   // rebuild paths refuse when this is set, because `docker build -t <slug>:latest`
   // would replace the pinned image in place with nothing downstream able to tell.
-  const source =
-    readSetting(projectRoot, 'NANOCLAW_HARDENED_IMAGE')?.toLowerCase() === 'true'
-      ? 'pull'
-      : 'build';
+  const source = readSetting(projectRoot, 'NANOCLAW_HARDENED_IMAGE')?.toLowerCase() === 'true' ? 'pull' : 'build';
 
   // Build — stdio inherit so the parent setup runner can tail docker's
   // per-step output and render it in a rolling window. Previously we used
@@ -306,7 +304,10 @@ export async function run(args: string[]): Promise<void> {
       // The pinned ref names the repository we pulled from; pass it so the
       // reported digest is that repository's and not some other one the same
       // bytes also live in.
-      digest = imageDigest(image, readSetting(projectRoot, 'NANOCLAW_AGENT_IMAGE_REF')?.split('@')[0] ?? pinnedRepo(projectRoot));
+      digest = imageDigest(
+        image,
+        readSetting(projectRoot, 'NANOCLAW_AGENT_IMAGE_REF')?.split('@')[0] ?? pinnedRepo(projectRoot),
+      );
       log.info('Container image acquired', { image, digest });
 
       // Retagging the slug tag does nothing for an agent group pinned to its
@@ -340,13 +341,7 @@ export async function run(args: string[]): Promise<void> {
     log.info('Building container', { runtime, buildArgs });
     const buildRes = spawnSync(
       buildCmd.split(' ')[0],
-      [
-        ...buildCmd.split(' ').slice(1),
-        ...buildArgs.flatMap((a) => a.split(' ')),
-        '-t',
-        image,
-        '.',
-      ],
+      [...buildCmd.split(' ').slice(1), ...buildArgs.flatMap((a) => a.split(' ')), '-t', image, '.'],
       {
         cwd: path.join(projectRoot, 'container'),
         stdio: 'inherit',

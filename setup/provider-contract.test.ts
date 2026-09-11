@@ -94,7 +94,8 @@ describe('codex installs from its hard-wired /add-codex skill in-process', () =>
   it('setup/auto.ts installs the picked provider in-process via applyProviderSkill', () => {
     const src = read('setup/auto.ts');
     expect(src).toContain('applyProviderSkill');
-    expect(src).toContain('.claude/skills/add-${agentProvider}');
+    expect(src).toContain('providerDescriptor.skillDir');
+    expect(src).toContain('listInstallableProviderDescriptors()');
     // No shell-out to a per-provider install script.
     expect(src).not.toContain('setup/add-${agentProvider}.sh');
     // The removed branch-enumeration machinery must not creep back in.
@@ -105,6 +106,18 @@ describe('codex installs from its hard-wired /add-codex skill in-process', () =>
   it('setup/provider-auth.ts installs the picked provider in-process via applyProviderSkill', () => {
     const src = read('setup/provider-auth.ts');
     expect(src).toContain('applyProviderSkill');
+    expect(src).toContain('getInstallableProviderDescriptor(name)?.skillDir');
     expect(src).not.toContain('setup/add-codex.sh');
+  });
+
+  it('setup owns the shared provider verifier instead of running the skill directive twice', () => {
+    const src = read('setup/providers/install.ts');
+    const flowOwned = src.slice(src.indexOf('function isFlowOwnedCommand'), src.indexOf('export interface'));
+    expect(flowOwned).toContain('/provider-contract-verifier/.test(cmd)');
+    expect(src).toContain('verifyProviderContracts');
+    expect(src).toContain("verification.status === 'failed'");
+    // The installed provider must declare its contract; unrelated pre-contract
+    // payloads already in the install must not abort setup.
+    expect(src).toContain('requiredDeclaredProviders: [installedProviderName(skillDir, projectRoot)]');
   });
 });

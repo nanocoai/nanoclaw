@@ -3,21 +3,22 @@
  *
  * Every sweep tick, find `messages_in` rows that are `completed` AND still
  * have a `recurrence` cron expression. For each, compute the next run via
- * cron-parser, insert a fresh pending row (copying series_id forward), then
- * clear the recurrence on the original so it isn't re-cloned next tick.
+ * cron-parser, then arm the next occurrence atomically (insert a fresh
+ * pending row copying series_id forward + clear the recurrence on the
+ * original, one durable step via `armNextTask`) so a crash between the two
+ * writes can never leave the series both armed and re-clonable.
  *
- * Called from `src/host-sweep.ts` inside `MODULE-HOOK:scheduling-recurrence`.
+ * Called from `src/reconcile-session.ts` inside `MODULE-HOOK:scheduling-recurrence`.
  * When scheduling ships inline (current state through PR #7), the hook is a
  * direct dynamic import. When scheduling moves to the modules branch in
  * PR #8, the install skill re-fills the marker on install.
  */
-import type Database from 'better-sqlite3';
 import { CronExpressionParser } from 'cron-parser';
 
 import { resolveGroupTimezone } from '../../container-config.js';
 import { log } from '../../log.js';
 import type { Session } from '../../types.js';
-import { clearRecurrence, getCompletedRecurring, insertRecurrence, trailingFailedRuns } from './db.js';
+import type { InboundMailbox } from '../../mailbox/index.js';
 import { appendRunLog } from './run-log.js';
 
 // Consecutive pre-task-script failures (the series' trailing FAILED runs —
@@ -39,20 +40,20 @@ export function scriptBackoffMinutes(fails: number): number {
  *  appendRunLog helper (one writer format); appendRunLog throws on a bad
  *  series charset or a missing agent group, and the sweep must not crash
  *  over a log line, so failures are logged and swallowed. */
-function appendHostTaskNote(agentGroupId: string, seriesId: string, note: string): void {
+async function appendHostTaskNote(agentGroupId: string, seriesId: string, note: string): Promise<void> {
   try {
-    appendRunLog(agentGroupId, seriesId, note);
+    await appendRunLog(agentGroupId, seriesId, note);
   } catch (err) {
     log.warn('Could not append host task note to run log', { agentGroupId, seriesId, err });
   }
 }
 
-export async function handleRecurrence(inDb: Database.Database, session: Session): Promise<void> {
-  const recurring = getCompletedRecurring(inDb);
+export async function handleRecurrence(inDb: InboundMailbox, session: Session): Promise<void> {
+  const recurring = inDb.getCompletedRecurring();
   // Resolved per call, not cached at module load: a group timezone change
   // (approved `groups config update --timezone`) must shift the series from
   // the very next re-arm.
-  const tz = resolveGroupTimezone(session.agent_group_id);
+  const tz = await resolveGroupTimezone(session.agent_group_id);
 
   for (const msg of recurring) {
     try {
@@ -64,20 +65,26 @@ export async function handleRecurrence(inDb: Database.Database, session: Session
       const cronNext = interval.next().toDate();
       const newId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-      const scriptFails = trailingFailedRuns(inDb, msg.series_id ?? msg.id);
+      const scriptFails = inDb.trailingFailedRuns(msg.seriesId);
 
       if (scriptFails >= SCRIPT_FAIL_PAUSE_CAP) {
         // Re-arm PAUSED at the cron time so `ncl tasks resume` revives the
         // series in place; leave the why in the run log.
-        insertRecurrence(inDb, msg, newId, cronNext.toISOString(), 'paused');
-        clearRecurrence(inDb, msg.id);
-        appendHostTaskNote(
+        await inDb.armNextTask(msg.id, {
+          id: newId,
+          seriesId: msg.seriesId,
+          processAfter: cronNext.toISOString(),
+          recurrence: msg.recurrence,
+          content: msg.content,
+          status: 'paused',
+        });
+        await appendHostTaskNote(
           session.agent_group_id,
-          msg.series_id,
-          `auto-paused after ${scriptFails} consecutive script failures (host); fix the script, then \`ncl tasks resume ${msg.series_id}\``,
+          msg.seriesId,
+          `auto-paused after ${scriptFails} consecutive script failures (host); fix the script, then \`ncl tasks resume ${msg.seriesId}\``,
         );
         log.warn('Task series auto-paused: script keeps failing', {
-          seriesId: msg.series_id,
+          seriesId: msg.seriesId,
           scriptFails,
           sessionId: session.id,
         });
@@ -87,13 +94,18 @@ export async function handleRecurrence(inDb: Database.Database, session: Session
       const backoffAt = scriptFails > 0 ? Date.now() + scriptBackoffMinutes(scriptFails) * 60_000 : 0;
       const nextRun = new Date(Math.max(cronNext.getTime(), backoffAt)).toISOString();
 
-      insertRecurrence(inDb, msg, newId, nextRun);
-      clearRecurrence(inDb, msg.id);
+      await inDb.armNextTask(msg.id, {
+        id: newId,
+        seriesId: msg.seriesId,
+        processAfter: nextRun,
+        recurrence: msg.recurrence,
+        content: msg.content,
+      });
 
       log.info('Inserted next recurrence', {
         originalId: msg.id,
         newId,
-        seriesId: msg.series_id,
+        seriesId: msg.seriesId,
         nextRun,
         ...(scriptFails > 0 && { scriptFails, backoffMin: scriptBackoffMinutes(scriptFails) }),
         sessionId: session.id,

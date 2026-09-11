@@ -78,6 +78,26 @@ For a fence-carrying skill, conformance means:
 - **The lint passes**: `pnpm exec tsx scripts/skill-directives.ts .claude/skills/<name>/SKILL.md`. Retired presentation attrs (`min:`/`error:`/`open:`/`gate`/`label:`/`on-fail:`) are errors; the reference floor — a `## Troubleshooting` section on any skill with a secret prompt or interactive step — is a warning worth honoring regardless of fences.
 - **Directives are idempotent** by construction (`copy` overwrites, `append` skips-if-present, `env-set` sets-if-absent, …) — which is the same re-runnable-apply rule every skill already has.
 
+### Provider skill frontmatter (`nanoclaw-provider-*`)
+
+A provider install skill (`/add-codex`, `/add-opencode`) also declares how the setup wizard should treat the provider. The declaration lives in the SKILL.md frontmatter under `metadata:` and is parsed by `setup/providers/skill-descriptor.ts`; nothing about the offer is hard-coded in setup. Every key is required once `nanoclaw-provider` is present, and every key is read by setup code:
+
+| Key | Allowed values | Read by |
+|-----|----------------|---------|
+| `nanoclaw-provider` | lowercase kebab-case provider name (`codex`) | descriptor identity; `setup/providers/install.ts` passes it to the contract verifier as the provider that must be declared |
+| `nanoclaw-provider-label` | display text | the provider picker in `setup/auto.ts` (`askAgentProviderChoice`) |
+| `nanoclaw-provider-hint` | display text | the picker's hint column (suffixed "— installs now") |
+| `nanoclaw-provider-offered` | `'true'` \| `'false'` (quoted strings) | `listInstallableProviderDescriptors` — only `'true'` reaches the picker's "installs now" list and `--step provider-auth <name>`. `'false'` marks a skill-only provider that never appears in setup (OpenCode today) |
+| `nanoclaw-provider-image` | `local-required` \| `hardened-compatible` | `providerImagePolicy` — whether picking the provider forces a locally built sandbox image instead of the pre-built one |
+
+The skill directory itself is the install skill setup applies in-process (`applyProviderSkill`); there is no key for it, and a leftover `nanoclaw-provider-install-skill` is rejected. `nanoclaw-provider-label` and `nanoclaw-provider-hint` must match the `label`/`hint` of the provider's `setup/providers/<name>.ts` entry once it is installed — the descriptor labels the offer before install, the entry labels it after, and `setup/providers/skill-descriptor.test.ts` fails on drift.
+
+A skill-only provider (`offered: 'false'`) must not copy a `setup/providers/<name>.ts` or append to the `setup/providers/index.ts` barrel — that barrel is the second way a provider reaches the picker.
+
+**Conformance test.** Every provider that declares a runtime contract proves it from its own `container/agent-runner/src/providers/<name>.conformance.test.ts`, calling `defineProviderConformance(name, contract, { probes? })` with the probe fixtures its resolves need — that knowledge is the provider's, so core runs no generic sweep over registered contracts, and Claude proves its own the same way. The file is part of the payload a provider skill copies; the install verifier (`scripts/provider-contract-verifier.ts`) runs it and fails when a declared provider ships none.
+
+**Merge order.** The provider payload branch must carry the files a provider skill copies (including the `provider-contracts/<name>.ts` declarations and the `<name>.conformance.test.ts`) before the trunk change that lists them lands, otherwise `/add-<name>` fails at its copy step; `scripts/test-registry-skills.ts --combined-providers` fails CI when trunk carries provider skills whose payload is not on the registry branch.
+
 ---
 
 ## Integration points

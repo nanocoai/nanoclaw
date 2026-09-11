@@ -18,11 +18,7 @@ rm -f src/channels/wechat.ts src/channels/wechat-registration.test.ts
 
 ## 2. Remove credentials
 
-Remove `WECHAT_ENABLED` from `.env`, then re-sync to the container:
-
-```bash
-mkdir -p data/env && cp .env data/env/env
-```
+Remove `WECHAT_ENABLED` from `.env`.
 
 ## 3. Remove the package
 

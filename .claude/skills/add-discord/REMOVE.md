@@ -18,11 +18,7 @@ rm -f src/channels/discord.ts src/channels/discord-registration.test.ts
 
 ## 2. Remove credentials
 
-Remove `DISCORD_BOT_TOKEN`, `DISCORD_APPLICATION_ID`, and `DISCORD_PUBLIC_KEY` from `.env`, then re-sync to the container:
-
-```bash
-mkdir -p data/env && cp .env data/env/env
-```
+Remove `DISCORD_BOT_TOKEN`, `DISCORD_APPLICATION_ID`, and `DISCORD_PUBLIC_KEY` from `.env`.
 
 ## 3. Remove the package
 
