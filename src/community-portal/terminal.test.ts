@@ -86,7 +86,12 @@ it('shapes the report and the journal entry from the door state', () => {
     hostKeyFingerprint: 'SHA256:h',
     doorPort: 33022,
   };
-  expect(terminalReportOf(state)).toEqual({ enabled: true, hostKey: 'ssh-ed25519 AAAA', authorizedFingerprints: [] });
+  expect(terminalReportOf(state)).toEqual({
+    enabled: true,
+    hostKey: 'ssh-ed25519 AAAA',
+    doorPort: 33022,
+    authorizedFingerprints: [],
+  });
   expect(terminalReportOf({ ...state, authorizedFingerprints: ['SHA256:a'] }).authorizedFingerprints).toEqual([
     'SHA256:a',
   ]);
@@ -177,7 +182,7 @@ it('journals the door state and reports it over the bearer route', async () => {
       method: 'PUT',
       route: '/api/v1/terminal/host',
       authorization: 'Bearer tok',
-      body: { enabled: true, hostKey: 'ssh-ed25519 AAAA', authorizedFingerprints: ['SHA256:a'] },
+      body: { enabled: true, hostKey: 'ssh-ed25519 AAAA', doorPort: 33022, authorizedFingerprints: ['SHA256:a'] },
     },
   ]);
   expect((await journal()).terminal).toEqual({
@@ -192,7 +197,7 @@ it('journals the door state and reports it over the bearer route', async () => {
   expect(
     await reportTerminalState({ enabled: false, doorPort: 33022 }, { root, homeDir: home, now: () => 1000 }),
   ).toEqual({ journaled: true, reported: true });
-  expect(seen.at(-1)?.body).toEqual({ enabled: false, authorizedFingerprints: [] });
+  expect(seen.at(-1)?.body).toEqual({ enabled: false, doorPort: 33022, authorizedFingerprints: [] });
   expect((await journal()).terminal).toEqual({
     enabled: false,
     doorPort: 33022,

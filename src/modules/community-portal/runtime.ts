@@ -218,6 +218,7 @@ export function startPortalRuntime({
           await client.reportTerminal({
             enabled: true,
             ...(doorState.hostKey ? { hostKey: doorState.hostKey } : {}),
+            ...(doorState.port === undefined ? {} : { doorPort: doorState.port }),
             authorizedFingerprints: doorState.authorizedFingerprints,
           });
           nextTerminalReport = Date.now() + terminalReportMs;

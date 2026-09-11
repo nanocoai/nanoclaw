@@ -258,7 +258,7 @@ it('announces ssh while the door is enabled, pipes streams into it, forwards the
     method: 'PUT',
     route: '/api/v1/terminal/host',
     authorization: 'Bearer tok',
-    body: { enabled: true, authorizedFingerprints: [] },
+    body: { enabled: true, doorPort, authorizedFingerprints: [] },
   });
   // The snapshot's terminal section reaches the door, and the next report names its keys.
   const terminal = { enabled: true, keys: [{ fingerprint: 'SHA256:a' }], pending: [], sandboxes: [] };
@@ -270,6 +270,7 @@ it('announces ssh while the door is enabled, pipes streams into it, forwards the
   await until(() => seen.filter((r) => r.route === '/api/v1/terminal/host').length >= 2);
   expect(seen.filter((r) => r.route === '/api/v1/terminal/host').at(-1)?.body).toEqual({
     enabled: true,
+    doorPort,
     authorizedFingerprints: ['SHA256:a'],
   });
   // A stream the cell opens is piped into the door and echoed back, with credit for what the door took.
@@ -296,7 +297,7 @@ it('announces ssh while the door is enabled, pipes streams into it, forwards the
     journaled: true,
     reported: true,
   });
-  expect(seen.at(-1)?.body).toEqual({ enabled: false, authorizedFingerprints: [] });
+  expect(seen.at(-1)?.body).toEqual({ enabled: false, doorPort, authorizedFingerprints: [] });
   await until(() => FakeSocket.instances.length === 2);
   expect(socket.readyState).toBe(3);
   expect(log).toHaveBeenCalledWith(expect.objectContaining({ event: 'stream_closed', stream: 's1', by: 'link' }));

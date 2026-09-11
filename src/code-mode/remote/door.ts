@@ -20,12 +20,8 @@
 import * as doorModule from '../door/index.js';
 import type { DoorStream } from '../door/index.js';
 import {
-  DeviceClient,
-  readDeviceKey,
-  readInstallIdentity,
-  readJson,
+  checkoutClient,
   reportTerminalState,
-  type Journal,
   type LinkLog,
   type TerminalSnapshot,
 } from '../../community-portal/index.js';
@@ -90,18 +86,9 @@ export function wireDoor({
   module = doorModule,
   now = Date.now,
 }: WireDoorOptions = {}): Door {
-  const file = `${root}/data/community-portal.json`;
   let lastEnableAt: number | undefined;
-
   /** A bearer client for the checkout, or undefined while it is not set up with the account service. */
-  async function client(): Promise<DeviceClient | undefined> {
-    const journal = await readJson<Partial<Journal>>(file);
-    if (!journal?.origin || !journal.deviceId) return undefined;
-    const account = await readInstallIdentity({ homeDir });
-    if (!account) return undefined;
-    const deviceKey = readDeviceKey({ homeDir }) ?? undefined;
-    return new DeviceClient({ origin: journal.origin, file, identity: account, deviceKey, log });
-  }
+  const client = () => checkoutClient({ root, homeDir, log });
 
   module.setTerminalSeam({
     async enable(request) {
@@ -119,11 +106,11 @@ export function wireDoor({
         ...(request.name ? { name: request.name } : {}),
         hostKey: request.hostKey,
       });
+      // A rename reaches the door through the mirror (`previousName`), not through this answer.
       return {
         name: result.name,
         ...(result.address ? { address: result.address } : {}),
         ...(result.host ? { host: result.host } : {}),
-        ...(result.previousName ? { previousName: result.previousName } : {}),
       };
     },
     async report(state) {
@@ -136,15 +123,10 @@ export function wireDoor({
         expiresAt: new Date(Date.parse(request.at) + PENDING_APPROVAL_TTL_MS).toISOString(),
       };
       const portal = await client();
-      if (!portal) return fallback;
+      // The service records where the key came from; a connection the host did not relay has no source.
+      if (!portal || !request.source) return fallback;
       const { fingerprint, keyType, publicKey, source, at } = request;
-      const result = await portal.terminalPending({
-        fingerprint,
-        keyType,
-        publicKey,
-        ...(source ? { source } : {}),
-        at,
-      });
+      const result = await portal.terminalPending({ fingerprint, keyType, publicKey, source, at });
       return {
         ...(result.code ? { code: result.code } : {}),
         url: result.url || fallback.url,

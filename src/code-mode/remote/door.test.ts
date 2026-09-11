@@ -199,7 +199,7 @@ it('answers the door standalone while the checkout is not set up with the accoun
   expect(await seam.enable({ name: 'mine', hostKey: 'k', hostKeyFingerprint: 'f' })).toEqual({ name: 'mine' });
   await seam.report({ enabled: true, name: 'mine', doorPort: 33022, authorizedFingerprints: ['SHA256:a'] });
   expect(seen.map((r) => [r.method, r.route])).toEqual([['PUT', '/api/v1/terminal/host']]);
-  expect(seen[0].body).toEqual({ enabled: true, authorizedFingerprints: ['SHA256:a'] });
+  expect(seen[0].body).toEqual({ enabled: true, doorPort: 33022, authorizedFingerprints: ['SHA256:a'] });
   expect(onReported).toHaveBeenCalledTimes(2);
 });
 
@@ -208,9 +208,7 @@ it('carries enable, report and pending keys to the account service once the chec
   answers['/api/v1/terminal/enable'] = {
     name: 'alice',
     address: '2001:db8::5:0:0:1',
-    host: 'alice.example.test',
     hostKeyFingerprint: 'SHA256:h',
-    previousName: 'bob',
   };
   answers['/api/v1/terminal/keys/pending'] = {
     code: 'ABCD-EFGH',
@@ -224,8 +222,6 @@ it('carries enable, report and pending keys to the account service once the chec
   expect(await seam.enable({ hostKey: 'ssh-ed25519 AAAA', hostKeyFingerprint: 'SHA256:h' })).toEqual({
     name: 'alice',
     address: '2001:db8::5:0:0:1',
-    host: 'alice.example.test',
-    previousName: 'bob',
   });
   expect(seen[0]).toEqual({
     method: 'POST',
@@ -234,7 +230,13 @@ it('carries enable, report and pending keys to the account service once the chec
     proofValid: true,
     body: { hostKey: 'ssh-ed25519 AAAA' },
   });
-  await seam.enable({ name: 'alice', hostKey: 'ssh-ed25519 AAAA', hostKeyFingerprint: 'SHA256:h' });
+  // A host name is passed on when the service composes one; a rename never comes this way.
+  answers['/api/v1/terminal/enable'] = { name: 'alice', address: '2001:db8::5:0:0:1', host: 'alice.example.test' };
+  expect(await seam.enable({ name: 'alice', hostKey: 'ssh-ed25519 AAAA', hostKeyFingerprint: 'SHA256:h' })).toEqual({
+    name: 'alice',
+    address: '2001:db8::5:0:0:1',
+    host: 'alice.example.test',
+  });
   expect(seen[1].body).toEqual({ name: 'alice', hostKey: 'ssh-ed25519 AAAA' });
   await seam.report({
     enabled: true,
@@ -247,7 +249,7 @@ it('carries enable, report and pending keys to the account service once the chec
     method: 'PUT',
     route: '/api/v1/terminal/host',
     authorization: 'Bearer tok',
-    body: { enabled: true, authorizedFingerprints: ['SHA256:a'] },
+    body: { enabled: true, doorPort: 33022, authorizedFingerprints: ['SHA256:a'] },
   });
   expect(onReported).toHaveBeenCalledOnce();
   const journal = JSON.parse(await readFile(journalFile(), 'utf8')) as { terminal: unknown };
@@ -291,6 +293,7 @@ it('carries enable, report and pending keys to the account service once the chec
       fingerprint: 'SHA256:p',
       keyType: 'ssh-ed25519',
       publicKey: 'ssh-ed25519 BBBB',
+      source: { ip: '2001:db8::9', port: 4243 },
       at: '2026-09-11T10:00:00.000Z',
       approvalUrl: 'https://approve.example.test/terminals',
     }),
@@ -299,4 +302,16 @@ it('carries enable, report and pending keys to the account service once the chec
     url: 'https://approve.example.test/terminals',
     expiresAt: '2026-09-11T10:10:00.000Z',
   });
+  // A key without a source (a connection the host did not relay) is not reported at all.
+  expect(seen).toHaveLength(5);
+  expect(
+    await seam.pending({
+      fingerprint: 'SHA256:p',
+      keyType: 'ssh-ed25519',
+      publicKey: 'ssh-ed25519 BBBB',
+      at: '2026-09-11T10:00:00.000Z',
+      approvalUrl: 'https://approve.example.test/terminals',
+    }),
+  ).toEqual({ url: 'https://approve.example.test/terminals', expiresAt: '2026-09-11T10:10:00.000Z' });
+  expect(seen).toHaveLength(5);
 });

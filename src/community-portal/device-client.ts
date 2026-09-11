@@ -13,6 +13,8 @@ import type {
   TerminalPendingRequest,
   TerminalPendingResult,
   TerminalReport,
+  TerminalReportResult,
+  TerminalSandboxResult,
 } from './terminal.js';
 
 /**
@@ -253,8 +255,8 @@ export class DeviceClient {
   }
 
   /** The door's state: on every door start, every fifteen minutes while enabled, and on disable. */
-  reportTerminal(report: TerminalReport, signal?: AbortSignal): Promise<{ ok: boolean }> {
-    return this.call<{ ok: boolean }>('PUT', '/api/v1/terminal/host', { body: report, signal });
+  reportTerminal(report: TerminalReport, signal?: AbortSignal): Promise<TerminalReportResult> {
+    return this.call<TerminalReportResult>('PUT', '/api/v1/terminal/host', { body: report, signal });
   }
 
   /** Enable remote access, proved with the device key: the service confirms or assigns the name and the address. */
@@ -265,6 +267,23 @@ export class DeviceClient {
   /** A key waiting in the door's waiting room: the service records it and mints the approval code. */
   terminalPending(request: TerminalPendingRequest, signal?: AbortSignal): Promise<TerminalPendingResult> {
     return this.call<TerminalPendingResult>('POST', '/api/v1/terminal/keys/pending', { body: request, signal });
+  }
+
+  /** A sandbox created while remote access is enabled: the service gives it an address of its own. */
+  terminalSandboxAdd(name: string, signal?: AbortSignal): Promise<TerminalSandboxResult> {
+    return this.call<TerminalSandboxResult>('POST', '/api/v1/terminal/sandboxes', { body: { name }, signal });
+  }
+
+  /** The reverse: the sandbox is gone and its address is freed. */
+  terminalSandboxRemove(name: string, signal?: AbortSignal): Promise<{ ok: boolean }> {
+    return this.call<{ ok: boolean }>('DELETE', `/api/v1/terminal/sandboxes/${encodeURIComponent(name)}`, {
+      signal,
+    });
+  }
+
+  /** The account's terminal section as the mirror carries it. */
+  terminalKeys(signal?: AbortSignal): Promise<unknown> {
+    return this.call<unknown>('GET', '/api/v1/terminal/keys', { signal });
   }
 
   protected async call<T>(

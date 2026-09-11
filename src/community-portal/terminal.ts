@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { DeviceClient, type Journal } from './device-client.js';
+import { readDeviceKey } from './device-key.js';
 import { errorCode } from './errors.js';
 import { readInstallIdentity } from './install-identity.js';
 import type { LinkLog } from './link.js';
@@ -46,6 +47,7 @@ export interface TerminalSnapshot {
   name?: string;
   /** Set for a while after a rename in the browser. */
   previousName?: string;
+  renamedAt?: string;
   address?: string;
   deviceId?: string;
   hostKeyFingerprint?: string;
@@ -75,42 +77,64 @@ export interface TerminalState {
   authorizedFingerprints?: string[];
 }
 
-/** Body of `PUT /api/v1/terminal/host`. */
+/** Body of `PUT /api/v1/terminal/host`; the service answers with its own view of `enabled`. */
 export interface TerminalReport {
   enabled: boolean;
   hostKey?: string;
+  doorPort?: number;
   authorizedFingerprints: string[];
 }
 
-/** Body of `POST /api/v1/terminal/enable`; the name is omitted when the service should assign one. */
+export interface TerminalReportResult {
+  ok: boolean;
+  /** The service's view: `false` here disables; `true` never re-enables. */
+  enabled: boolean;
+}
+
+/**
+ * Body of `POST /api/v1/terminal/enable`. The name is omitted when the
+ * service should assign one, and ignored once the account has one; the host
+ * key is the door's public key line.
+ */
 export interface TerminalEnableRequest {
   name?: string;
-  hostKey: string;
+  hostKey?: string;
 }
 
 export interface TerminalEnableResult {
   /** The name the account now carries, assigned or confirmed by the service. */
   name: string;
+  /** The machine's address. */
   address?: string;
+  /** `SHA256:<base64 without padding>` of the host key the service holds; null when it holds none. */
+  hostKeyFingerprint?: string | null;
+  /** The host name to connect to, when the service composes it. */
   host?: string;
-  hostKeyFingerprint?: string;
-  previousName?: string;
 }
 
-/** Body of `POST /api/v1/terminal/keys/pending`. */
+/** Body of `POST /api/v1/terminal/keys/pending`: a key waiting in the door's waiting room and where it came from. */
 export interface TerminalPendingRequest {
+  /** `SHA256:<base64 without padding>`; must match the blob. */
   fingerprint: string;
   keyType: string;
+  /** The key blob as the server hands it to the door, or the full public key line. */
   publicKey: string;
-  source?: { ip: string; port: number };
-  at: string;
+  source: { ip: string; port: number };
+  at?: string;
 }
 
 export interface TerminalPendingResult {
-  /** The short code the approval page asks for. */
+  /** The short code the approval page asks for, as `XXXX-XXXX`. */
   code?: string;
   url: string;
   expiresAt: string;
+}
+
+/** Answer of `POST /api/v1/terminal/sandboxes`: the sandbox's own address. */
+export interface TerminalSandboxResult {
+  name: string;
+  address: string;
+  host?: string;
 }
 
 export interface ReportTerminalOptions {
@@ -189,6 +213,7 @@ export function terminalSnapshotOf(snapshot: unknown): TerminalSnapshot | undefi
     enabled: t.enabled === true,
     ...opt('name', str(t.name)),
     ...opt('previousName', str(t.previousName)),
+    ...opt('renamedAt', str(t.renamedAt)),
     ...opt('address', str(t.address)),
     ...opt('deviceId', str(t.deviceId)),
     ...opt('hostKeyFingerprint', str(t.hostKeyFingerprint)),
@@ -204,6 +229,7 @@ export function terminalReportOf(state: TerminalState): TerminalReport {
   return {
     enabled: state.enabled,
     ...opt('hostKey', state.hostKey),
+    ...opt('doorPort', state.doorPort),
     authorizedFingerprints: [...(state.authorizedFingerprints ?? [])],
   };
 }
@@ -217,6 +243,34 @@ export function journalTerminalOf(state: TerminalState, now: () => number = Date
     ...opt('doorPort', state.doorPort),
     updatedAt: new Date(now()).toISOString(),
   };
+}
+
+export interface CheckoutClientOptions {
+  root?: string;
+  homeDir?: string;
+  log?: LinkLog;
+  signal?: AbortSignal;
+}
+
+/**
+ * A bearer client for this checkout from its saved identity (the journal's
+ * origin and device id, the sign-in's install token, and the device key when
+ * the machine has one), or undefined while the checkout is not set up with
+ * the account service. Takes no journal lock: for requests, not for writes.
+ */
+export async function checkoutClient({
+  root = process.cwd(),
+  homeDir,
+  log = () => {},
+  signal,
+}: CheckoutClientOptions = {}): Promise<DeviceClient | undefined> {
+  const file = path.join(root, 'data/community-portal.json');
+  const journal = await readJson<Partial<Journal>>(file);
+  if (!journal?.origin || !journal.deviceId) return undefined;
+  const identity = await readInstallIdentity({ homeDir });
+  if (!identity) return undefined;
+  const deviceKey = readDeviceKey({ homeDir }) ?? undefined;
+  return new DeviceClient({ origin: journal.origin, file, identity, deviceKey, log, signal });
 }
 
 /**
