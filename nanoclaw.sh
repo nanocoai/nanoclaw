@@ -423,10 +423,17 @@ fi
 # wipe it.
 export NANOCLAW_BOOTSTRAPPED=1
 
-# setup.sh may have just installed pnpm via npm into a prefix that's not on
-# our PATH (custom `npm config set prefix`, or the default prefix missing
-# from the shell's login PATH). Its PATH mutation doesn't propagate back
-# to us — so replay the same lookup here before the exec.
+# setup.sh may have just installed Node/npm/pnpm under ~/.local/bin via
+# uvx-nodeenv. Its PATH mutation doesn't propagate back to this parent shell,
+# so make that standard user bin directory discoverable before probing npm.
+# Keep an existing PATH entry in place rather than adding duplicates.
+case ":$PATH:" in
+  *":$HOME/.local/bin:"*) ;;
+  *) export PATH="$HOME/.local/bin:$PATH" ;;
+esac
+
+# pnpm may instead have landed in npm's configured global prefix. Replay that
+# lookup here as a second recovery path before the final exec.
 if ! command -v pnpm >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
   NPM_PREFIX="$(npm config get prefix 2>/dev/null)"
   if [ -n "$NPM_PREFIX" ] && [ -x "$NPM_PREFIX/bin/pnpm" ]; then
