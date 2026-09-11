@@ -8,6 +8,7 @@
  * approval code). Until then the defaults keep the door usable on its own:
  * an explicit `--name`, a log line, and the configured approval page.
  */
+import { reportTerminalState as reportToAccount } from '../../community-portal/terminal.js';
 import { log } from '../../log.js';
 import type { DoorSource } from './target-map.js';
 
@@ -73,6 +74,9 @@ const defaults: TerminalSeam = {
   },
   async report(state) {
     log.info('Remote terminal state', { ...state });
+    // Journals the `terminal` section and reports to the account service in one
+    // place; the link's wiring adds only the wake-up of its runtime on top.
+    await reportToAccount(state);
   },
   async pending(request) {
     const expiresAt = new Date(Date.parse(request.at) + PENDING_APPROVAL_TTL_MS).toISOString();

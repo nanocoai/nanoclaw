@@ -297,9 +297,12 @@ describe('openStream', () => {
     });
   });
 
-  it('answers a door that resets the connection with close peer', async () => {
-    const port = await listen((socket) => socket.resetAndDestroy());
-    const { channel } = start(port);
+  it('answers a door that resets an established connection with close peer', async () => {
+    // The reset follows the first byte, so it cannot race the connection itself (that would be unavailable).
+    const port = await listen((socket) => socket.once('data', () => socket.resetAndDestroy()));
+    const { channel, handler } = start(port);
+    await until(() => registrations.length === 1);
+    handler.onFrame(data(0, Buffer.from('x')));
     await until(() => channel.types().includes('close'));
     expect(channel.sent.at(-1)).toEqual({ t: 'close', reason: 'peer' });
   });
