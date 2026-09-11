@@ -8,11 +8,11 @@
  * settings (default: the current directory).
  *
  * Opens a primary WebSocket session in client-delegation mode with the same
- * voice prompt the adapter composes, attaches the production sideband to
- * that session, streams a short caller clip (synthesized with macOS `say`
+ * voice prompt the adapter composes, streams a short caller clip (synthesized with macOS `say`
  * unless --clip points at a mono 16-bit 24 kHz WAV), answers the resulting
- * delegation over the sideband the way the adapter would, and waits for the
- * voice model to speak the answer back. Exit code 0 when the reply was
+ * delegation the way the adapter would, and waits for the voice model to
+ * speak the answer back. (A sideband cannot attach to a WebSocket-transport
+ * session — that path is exercised by browser-probe.ts on a WebRTC call.) Exit code 0 when the reply was
  * spoken, 1 otherwise. Costs a few cents (voice minutes are billed per
  * second).
  *
@@ -32,7 +32,7 @@ import { attachSideband, type SidebandSocket } from '../../../../src/channels/gp
 const WS_BASE = 'wss://api.openai.com/v1';
 const REPLY = 'Tomorrow you have two things: standup at nine, and lunch with Dana at half past twelve.';
 const REPLY_MARKER = /Dana|standup|half past/i;
-const OVERALL_TIMEOUT_MS = 75_000;
+const OVERALL_TIMEOUT_MS = 60_000;
 
 function arg(name: string, fallback: string): string {
   const i = process.argv.indexOf(name);
@@ -104,6 +104,7 @@ const state = {
   acked: false,
   audioDeltaBytes: 0,
   lastError: '',
+  nudged: false,
   seen: new Map<string, number>(),
   closed: false,
 };
@@ -132,12 +133,12 @@ function finish(reason: string): void {
     const spoke = REPLY_MARKER.test(state.outputTx);
     console.log('\n===== SUMMARY');
     console.log(`session.started       ${state.sessionId ? 'yes  id=' + state.sessionId : 'NO'}`);
-    console.log(`sideband attached     ${state.sidebandOpen ? 'yes' : 'NO'}`);
+    console.log(`sideband attached     ${state.sidebandOpen ? 'yes' : 'n/a — WebSocket transport (attach is for WebRTC/SIP sessions; see browser-probe.ts)'}`);
     console.log(`caller transcript     ${state.inputTx ? JSON.stringify(state.inputTx.trim()) : 'NONE'}`);
     console.log(`delegation.created    ${state.delegationId ? 'yes  id=' + state.delegationId : 'NO'}`);
     console.log(`commentary.appended   ${state.acked ? 'yes' : 'NO'}`);
     console.log(`assistant transcript  ${state.outputTx ? JSON.stringify(state.outputTx.trim()) : 'NONE'}`);
-    console.log(`spoke the reply       ${spoke ? 'yes' : 'NO'}`);
+    console.log(`spoke the reply       ${spoke ? (state.nudged ? 'yes, after a nudge' : 'yes') : 'NO'}`);
     console.log(`output audio          ${state.audioDeltaBytes} base64 bytes`);
     console.log(`events: ${[...state.seen.entries()].map(([k, v]) => `${k}×${v}`).join(', ') || 'none'}`);
     if (state.lastError) {
@@ -179,7 +180,7 @@ function handle(source: 'primary' | 'sideband', e: Record<string, unknown>): voi
           streamAudio();
         })
         .catch((err) => {
-          line(`[sideband] attach FAILED: ${(err as Error).message}`);
+          line(`[sideband] attach not available on a WebSocket-transport session (${(err as Error).message}); results go over the primary socket`);
           streamAudio();
         });
       return;
@@ -204,6 +205,13 @@ function handle(source: 'primary' | 'sideband', e: Record<string, unknown>): voi
       if (state.delegationId || !d?.id) return;
       state.delegationId = d.id;
       const out = sideband ?? { send: (data: string) => primary.send(data) };
+      // A nudge if nothing is voiced within 15 s of the result: the ack is not proof of speech.
+      setTimeout(() => {
+        if (state.closed || REPLY_MARKER.test(state.outputTx)) return;
+        state.nudged = true;
+        out.send(JSON.stringify({ type: 'session.instructions.append', event_id: 'probe_nudge_1', delegation_id: null, content: 'You have the backend result now. Tell the caller what it says, in your own words.' }));
+        line('[nudge] result not voiced after 15 s — sent instructions.append');
+      }, 1200 + 15000);
       setTimeout(() => {
         out.send(
           JSON.stringify({ type: 'session.thinking.append', event_id: 'probe_think_1', delegation_id: d.id, content: 'Checking the calendar.' }),
@@ -211,7 +219,7 @@ function handle(source: 'primary' | 'sideband', e: Record<string, unknown>): voi
         out.send(JSON.stringify({ type: 'session.commentary.append', event_id: 'probe_reply_1', delegation_id: d.id, content: REPLY }));
         state.replied = true;
         line(`[${sideband ? 'sideband' : 'primary'}] sent thinking.append + commentary.append for ${d.id}`);
-      }, 400);
+      }, 1200);
       return;
     }
     case 'session.commentary.appended':
@@ -241,18 +249,28 @@ function handle(source: 'primary' | 'sideband', e: Record<string, unknown>): voi
 }
 
 function streamAudio(): void {
-  // 100 ms chunks at 24 kHz PCM16 mono = 4,800 bytes, paced in real time, then 1.5 s of silence.
+  // 100 ms chunks at 24 kHz PCM16 mono = 4,800 bytes, paced in real time. After the
+  // clip, keep sending silence: a full-duplex session takes its turns from the
+  // continuous input stream, and a stalled stream leaves the model waiting.
   const CHUNK = 4800;
-  const all = Buffer.concat([pcm, Buffer.alloc(CHUNK * 15)]);
+  const silence = Buffer.alloc(CHUNK);
   let off = 0;
+  let announced = false;
   const timer = setInterval(() => {
-    if (off >= all.length) {
+    if (state.closed) {
       clearInterval(timer);
-      line('caller clip fully sent (plus 1.5 s of silence)');
       return;
     }
-    send({ type: 'session.input_audio.append', audio: all.subarray(off, off + CHUNK).toString('base64') });
-    off += CHUNK;
+    if (off < pcm.length) {
+      send({ type: 'session.input_audio.append', audio: pcm.subarray(off, off + CHUNK).toString('base64') });
+      off += CHUNK;
+      return;
+    }
+    if (!announced) {
+      announced = true;
+      line('caller clip fully sent; streaming silence to keep the line open');
+    }
+    send({ type: 'session.input_audio.append', audio: silence.toString('base64') });
   }, 100);
 }
 

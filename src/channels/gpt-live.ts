@@ -39,7 +39,12 @@ import { callPageHtml } from './gpt-live-call-page.js';
 import { resolveOpenAiKey } from './gpt-live-keychain.js';
 import { attachSideband, type SidebandSocket } from './gpt-live-sideband.js';
 import { resolveWiredAgent, sessionConfig, type VoiceAgent } from './gpt-live-prompt.js';
-import { GptLiveSession, type DelegationRequest, type LiveClientEvent } from './gpt-live-session.js';
+import {
+  GptLiveSession,
+  type DelegationRequest,
+  type LiveClientEvent,
+  type LiveServerEvent,
+} from './gpt-live-session.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 import { registerWebhookHandler } from '../webhook-server.js';
@@ -77,6 +82,8 @@ export interface GptLiveConfig {
   wsBase?: string;
   /** Looks up the agent wired to a line; defaults to the central-DB lookup. */
   resolveAgent?: (platformId: string) => Promise<VoiceAgent | null>;
+  /** Observability tap: every sideband server event, before the state machine sees it. */
+  onSidebandEvent?: (sessionId: string, event: LiveServerEvent) => void;
 }
 
 export type { SidebandSocket } from './gpt-live-sideband.js';
@@ -154,7 +161,10 @@ export function createGptLiveAdapter(config: GptLiveConfig): ChannelAdapter {
       wsBase,
       apiKey: config.apiKey,
       sessionId: call.session.sessionId,
-      onEvent: (event) => call.session.handle(event),
+      onEvent: (event) => {
+        config.onSidebandEvent?.(call.session.sessionId, event);
+        call.session.handle(event);
+      },
       onClose: (code, reason) => {
         // The server closing the sideband means the session is over for us.
         if (!call.session.isClosed()) call.session.handle({ type: 'session.closed', code, reason });

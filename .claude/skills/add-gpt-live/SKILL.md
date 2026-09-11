@@ -220,10 +220,22 @@ It costs a few cents of voice time:
 pnpm exec tsx .claude/skills/add-gpt-live/scripts/live-probe.ts
 ```
 
-Every line of the summary should read `yes`. `session.start rejected` with
-`output_creation_failed` on an account where `gpt-live-1` lists fine means
-the project has no prepaid credits (see Troubleshooting). On Linux pass
-`--clip <mono 16-bit 24 kHz WAV>` instead of relying on `say`.
+Every line of the summary should read `yes` (the sideband line reads `n/a`:
+a sideband cannot attach to a WebSocket-transport session). `session.start
+rejected` with `output_creation_failed` on an account where `gpt-live-1` lists
+fine means the project has no prepaid credits (see Troubleshooting). On Linux
+pass `--clip <mono 16-bit 24 kHz WAV>` instead of relying on `say`.
+
+The second probe exercises the production path itself — the adapter, its
+`sdp` route, the sideband attach on a real WebRTC session — with a synthesized
+caller and a canned backend reply, so no NanoClaw agent is needed:
+
+```bash
+pnpm exec tsx .claude/skills/add-gpt-live/scripts/browser-probe.ts
+```
+
+Open the printed URL in a browser and press Start. The terminal shows the
+sideband log; the line `>>> the backend reply is being spoken` is the pass.
 
 ## Done
 
