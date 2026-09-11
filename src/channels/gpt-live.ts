@@ -2,109 +2,111 @@
  * GPT-Live channel — OpenAI's full-duplex voice model (`gpt-live-1`) as the
  * mouth and ears of a call, with the NanoClaw agent as the brain.
  *
- * Shape: native adapter (no Chat SDK bridge). One live voice session is one
- * conversation: `platformId` is the OpenAI session id, there are no threads.
- * The session is created in *client delegation* mode, so whenever the voice
- * model decides a turn needs facts, memory or tools it emits a delegation
- * event; the adapter turns the transcript since the last delegation into an
- * inbound message and the agent's reply comes back as spoken commentary.
+ * Shape: native adapter (no Chat SDK bridge). A *voice line* is one
+ * conversation: its platform id is `gpt-live:<link token>`, the same id the
+ * router namespaces for this channel, so the messaging group and its wiring
+ * are created once (by the skill) and every call on that link lands in the
+ * same agent session — the agent remembers the last call. There are no
+ * threads. One call is active per line at a time.
  *
- * Transports, in delivery order:
- *  - WebRTC (browser): the call page at `/webhook/gpt-live/call` posts its
- *    SDP offer to `/webhook/gpt-live/sdp`; the host creates the session and
- *    returns the answer. Needs only a URL the caller's browser can reach.
- *  - SIP (phone): OpenAI posts `realtime.call.incoming` to
- *    `/webhook/gpt-live/sip`; the host accepts or rejects. Needs a trunk and
- *    a public webhook URL. Not wired yet (GL-11).
+ * The live session is created in *client delegation* mode. Whenever the
+ * voice model decides a turn needs facts, memory or tools it emits a
+ * delegation event; the adapter turns the transcript since the last
+ * delegation into an inbound message, and the agent's reply comes back as
+ * spoken commentary.
  *
- * Both transports end in the same place: a server-side *sideband* WebSocket
- * attached to the session, which is where transcripts and delegations arrive
- * and where results are pushed. Protocol details and sources:
- * the board's protocol reference page.
+ * Transports:
+ *  - WebRTC (browser), this version: the call page at
+ *    `/webhook/gpt-live/call?t=<token>` posts its SDP offer to `…/sdp`; the
+ *    host creates the session, attaches the sideband, and returns the answer.
+ *  - SIP (phone), next: OpenAI posts `realtime.call.incoming` to `…/sip`.
  *
- * Credentials: `OPENAI_API_KEY` is read from `.env` on the host, the same
- * way other channel adapters read their tokens. The agent container never
- * sees it — it has no reason to call OpenAI.
+ * Both end in the same place: a server-side *sideband* WebSocket attached
+ * to the session (`/v1/live/sessions/{id}/attach`, bearer auth — the URL the
+ * OpenAI SDK builds), where transcripts and delegations arrive and results
+ * are pushed. Node's built-in WebSocket client and fetch are used; no SDK.
  *
- * Scaffold status: registration, defaults, config, HTTP routes and the
- * session bookkeeping are in place; `connectSideband` is the remaining
- * piece (GL-03) and throws until then.
+ * Credentials: `OPENAI_API_KEY` is read from `.env` on the host, like other
+ * channel adapters read their tokens. The agent container never sees it.
+ * The link token gates the HTTP routes: a request without a known `t` gets
+ * a 403 before any session (and any billing) starts.
  */
 import type http from 'node:http';
 
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage, OutboundMessage } from './adapter.js';
 import { registerChannelAdapter } from './channel-registry.js';
-import { GptLiveSession, type LiveClientEvent, type DelegationRequest } from './gpt-live-session.js';
+import { callPageHtml } from './gpt-live-call-page.js';
+import { resolveOpenAiKey } from './gpt-live-keychain.js';
+import { resolveWiredAgent, sessionConfig, type VoiceAgent } from './gpt-live-prompt.js';
+import { GptLiveSession, type DelegationRequest, type LiveClientEvent } from './gpt-live-session.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 import { registerWebhookHandler } from '../webhook-server.js';
 
-export const GPT_LIVE_MODEL = 'gpt-live-1';
-const OPENAI_API = 'https://api.openai.com/v1';
+export const CHANNEL_TYPE = 'gpt-live';
+const DEFAULT_API_BASE = 'https://api.openai.com/v1';
+const DEFAULT_WS_BASE = 'wss://api.openai.com/v1';
 
 /**
- * A voice call is DM-shaped: everything the caller says that the voice model
- * delegates is for the agent (pattern '.'), there are no threads and no
- * platform mention concept. Unknown callers are declined politely and the
- * owner gets a one-line FYI — for SIP this becomes a reject before the
- * session (and its billing) starts.
+ * A voice line is DM-shaped: everything the voice model delegates is for the
+ * agent (pattern '.'), there are no threads and no platform mention concept.
+ * The link token is the credential — whoever holds the link is the line's
+ * user — so the DM context is 'public'. Group context is unused; declared
+ * strict so a stray group-shaped row never opens the line.
  */
 const GPT_LIVE_DEFAULTS: ChannelDefaults = {
-  dm: { engageMode: 'pattern', engagePattern: '.', threads: false, unknownSenderPolicy: 'decline_notify' },
-  group: { engageMode: 'pattern', engagePattern: '.', threads: false, unknownSenderPolicy: 'decline_notify' },
+  dm: { engageMode: 'pattern', engagePattern: '.', threads: false, unknownSenderPolicy: 'public' },
+  group: { engageMode: 'pattern', engagePattern: '.', threads: false, unknownSenderPolicy: 'strict' },
   mentions: 'dm-only',
 };
 
 export interface GptLiveConfig {
   apiKey: string;
-  /** Origin the caller's browser (or OpenAI's webhook sender) can reach the host at. */
+  /** Origin the caller's browser reaches the host at (for the call link). */
   publicUrl: string;
-  /** Default voice for new sessions. */
+  /** Voice for new sessions. */
   voice: string;
+  /** Link tokens accepted on the HTTP routes; each is one voice line. */
+  linkTokens: string[];
+  /** Name used when no agent is wired to the line yet. */
+  fallbackAgentName: string;
+  /** REST base; overridable for tests. */
+  apiBase?: string;
+  /** WebSocket base; overridable for tests. */
+  wsBase?: string;
+  /** Looks up the agent wired to a line; defaults to the central-DB lookup. */
+  resolveAgent?: (platformId: string) => Promise<VoiceAgent | null>;
 }
 
-/** Minimal socket surface the adapter needs; satisfied by Node's built-in WebSocket. */
+/** The socket surface the adapter needs; Node's built-in WebSocket provides it. */
 export interface SidebandSocket {
   send(data: string): void;
   close(): void;
 }
 
 interface LiveCall {
+  platformId: string;
   session: GptLiveSession;
   socket: SidebandSocket | null;
-  /** Who is on the line: `gpt-live:<handle>` — a link token for browser calls, E.164 for SIP. */
-  callerHandle: string;
 }
 
-/** Voice-side instructions. GL-06 replaces this with a composer over the agent group's personality. */
-export function voiceInstructions(agentName: string): string {
-  return [
-    `You are ${agentName}, speaking on a live call.`,
-    'Keep the conversation natural and brief.',
-    'Delegate anything that needs facts, memory, tools, scheduling or actions to the backend; do not guess.',
-    'While the backend works, keep the caller company with short acknowledgements, never invented answers.',
-    'Speak results plainly; no markdown, no lists read aloud as symbols.',
-  ].join(' ');
-}
-
-/** Build the session config for a new call in client-delegation mode. */
-export function sessionConfig(agentName: string, voice: string): Record<string, unknown> {
-  return {
-    model: GPT_LIVE_MODEL,
-    instructions: voiceInstructions(agentName),
-    audio: { output: { voice } },
-    delegation: { type: 'client' },
-  };
+export function platformIdForToken(token: string): string {
+  return `${CHANNEL_TYPE}:${token}`;
 }
 
 export function createGptLiveAdapter(config: GptLiveConfig): ChannelAdapter {
-  const calls = new Map<string, LiveCall>();
+  const apiBase = (config.apiBase ?? DEFAULT_API_BASE).replace(/\/+$/, '');
+  const wsBase = (config.wsBase ?? DEFAULT_WS_BASE).replace(/\/+$/, '');
+  const tokens = new Set(config.linkTokens.map((t) => t.trim()).filter(Boolean));
+  const resolveAgent = config.resolveAgent ?? ((platformId: string) => resolveWiredAgent(platformId));
+  /** Active call per voice line, keyed by platform id. */
+  const lines = new Map<string, LiveCall>();
   let setup: ChannelSetup | null = null;
   let connected = false;
 
   const sendEvent = (call: LiveCall, event: LiveClientEvent): void => {
     if (!call.socket) {
-      log.warn('gpt-live: no sideband for session; dropping client event', {
+      log.warn('gpt-live: no sideband for this call; dropping client event', {
         sessionId: call.session.sessionId,
         type: event.type,
       });
@@ -114,66 +116,109 @@ export function createGptLiveAdapter(config: GptLiveConfig): ChannelAdapter {
   };
 
   const onDelegation = (req: DelegationRequest): void => {
-    if (!setup) return;
-    const call = calls.get(req.sessionId);
-    if (!call) return;
+    const call = [...lines.values()].find((c) => c.session.sessionId === req.sessionId);
+    if (!call || !setup) return;
     const message: InboundMessage = {
       id: `${req.sessionId}:${req.delegationId}`,
       kind: 'chat',
       content: {
         text: req.transcript,
-        sender: call.callerHandle,
-        gptLive: { delegationId: req.delegationId, offsetMs: req.offsetMs, supersedes: req.supersedes },
+        sender: 'Voice line',
+        senderId: call.platformId,
+        gptLive: {
+          sessionId: req.sessionId,
+          delegationId: req.delegationId,
+          offsetMs: req.offsetMs,
+          supersedes: req.supersedes,
+        },
       },
       timestamp: new Date().toISOString(),
       isMention: true,
       isGroup: false,
     };
-    // Let the voice model know work started; the agent's reply lands via deliver().
+    // Tell the voice model work has started; the reply lands through deliver().
     call.session.think('Working on it.');
-    void setup.onInbound(req.sessionId, null, message);
+    void Promise.resolve(setup.onInbound(call.platformId, null, message)).catch((err) => {
+      log.error('gpt-live: onInbound threw', { platformId: call.platformId, err });
+    });
   };
 
-  const openCall = (sessionId: string, callerHandle: string): LiveCall => {
-    const call: LiveCall = { socket: null, callerHandle, session: null as unknown as GptLiveSession };
-    call.session = new GptLiveSession(sessionId, {
-      send: (event) => sendEvent(call, event),
-      onDelegation,
-      onClosed: (reason) => {
-        log.info('gpt-live: session closed', { sessionId, reason });
-        call.socket?.close();
-        calls.delete(sessionId);
-      },
-    });
-    calls.set(sessionId, call);
-    return call;
+  const endCall = (call: LiveCall, reason: string): void => {
+    if (lines.get(call.platformId) === call) lines.delete(call.platformId);
+    const socket = call.socket;
+    call.socket = null;
+    socket?.close();
+    log.info('gpt-live: call ended', { platformId: call.platformId, sessionId: call.session.sessionId, reason });
   };
 
   /**
-   * Attach the server-side sideband to a session and pump its events into the
-   * state machine. GL-03: implement with Node's built-in WebSocket against
-   * `wss://api.openai.com/v1/live/sessions/{id}/attach` (Authorization: Bearer),
-   * parse each message as JSON and call `call.session.handle(event)`. GL-15
-   * verifies the attach URL against the SDK on a real session first.
+   * Attach the server-side sideband to a session and pump its events into
+   * the call's state machine. Resolves once the socket is open.
    */
-  const connectSideband = async (_call: LiveCall): Promise<SidebandSocket> => {
-    throw new Error('gpt-live: sideband attach not implemented yet (GL-03)');
+  const connectSideband = (call: LiveCall): Promise<SidebandSocket> =>
+    new Promise((resolve, reject) => {
+      const url = `${wsBase}/live/sessions/${encodeURIComponent(call.session.sessionId)}/attach`;
+      const ws = new WebSocket(url, { headers: { Authorization: `Bearer ${config.apiKey}` } });
+      let opened = false;
+      ws.addEventListener('open', () => {
+        opened = true;
+        log.info('gpt-live: sideband attached', { sessionId: call.session.sessionId });
+        resolve({ send: (data) => ws.send(data), close: () => ws.close() });
+      });
+      ws.addEventListener('message', (ev: MessageEvent) => {
+        if (typeof ev.data !== 'string') return;
+        let event: { type?: unknown } & Record<string, unknown>;
+        try {
+          event = JSON.parse(ev.data) as { type?: unknown } & Record<string, unknown>;
+        } catch (err) {
+          log.warn('gpt-live: unparseable sideband frame', { sessionId: call.session.sessionId, err });
+          return;
+        }
+        if (typeof event.type !== 'string') return;
+        if (event.type === 'error')
+          log.warn('gpt-live: session error event', { sessionId: call.session.sessionId, error: event.error });
+        call.session.handle({ ...event, type: event.type });
+      });
+      ws.addEventListener('error', () => {
+        if (!opened) reject(new Error('gpt-live: sideband attach failed'));
+        else log.warn('gpt-live: sideband socket error', { sessionId: call.session.sessionId });
+      });
+      ws.addEventListener('close', (ev: { code: number; reason: string }) => {
+        if (!opened) return;
+        // The server closing the sideband means the session is over for us.
+        if (!call.session.isClosed()) call.session.handle({ type: 'session.closed', code: ev.code, reason: ev.reason });
+      });
+    });
+
+  const openCall = async (token: string, sessionId: string): Promise<LiveCall> => {
+    const platformId = platformIdForToken(token);
+    const previous = lines.get(platformId);
+    if (previous) {
+      previous.session.close();
+      endCall(previous, 'replaced by a new call');
+    }
+    const call: LiveCall = { platformId, socket: null, session: null as unknown as GptLiveSession };
+    call.session = new GptLiveSession(sessionId, {
+      send: (event) => sendEvent(call, event),
+      onDelegation,
+      onClosed: (reason) => endCall(call, reason),
+    });
+    lines.set(platformId, call);
+    call.socket = await connectSideband(call);
+    return call;
   };
 
   /** Create a WebRTC session from the browser's SDP offer; returns the SDP answer. */
   const createWebRtcSession = async (
     offer: string,
-    agentName: string,
+    agent: VoiceAgent,
   ): Promise<{ sessionId: string; answer: string }> => {
-    const res = await fetch(`${OPENAI_API}/live/sessions`, {
+    const res = await fetch(`${apiBase}/live/sessions`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        session: sessionConfig(agentName, config.voice),
-        transport: { type: 'webrtc', sdp: offer },
-      }),
+      body: JSON.stringify({ session: sessionConfig(agent, config.voice), transport: { type: 'webrtc', sdp: offer } }),
     });
-    if (!res.ok) throw new Error(`gpt-live: session create failed: ${res.status} ${(await res.text()).slice(0, 200)}`);
+    if (!res.ok) throw new Error(`gpt-live: session create failed: ${res.status} ${(await res.text()).slice(0, 300)}`);
     const body = (await res.json()) as { session?: { id?: string }; transport?: { sdp?: string } };
     if (!body.session?.id || !body.transport?.sdp) throw new Error('gpt-live: session create returned no id/sdp');
     return { sessionId: body.session.id, answer: body.transport.sdp };
@@ -185,61 +230,86 @@ export function createGptLiveAdapter(config: GptLiveConfig): ChannelAdapter {
     return Buffer.concat(chunks).toString('utf8');
   };
 
+  const reply = (
+    res: http.ServerResponse,
+    status: number,
+    body: string,
+    headers: Record<string, string> = {},
+  ): void => {
+    res.writeHead(status, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', ...headers });
+    res.end(body);
+  };
+
   /** HTTP routes under /webhook/gpt-live/… on the shared webhook server. */
   const handleHttp = async (req: http.IncomingMessage, res: http.ServerResponse): Promise<void> => {
-    const url = new URL(req.url ?? '/', config.publicUrl);
-    const route = url.pathname.replace(/^\/webhook\/gpt-live\/?/, '');
+    const url = new URL(req.url ?? '/', 'http://localhost');
+    const route = url.pathname.replace(/^\/webhook\/gpt-live\/?/, '').replace(/\/+$/, '');
+    const token = url.searchParams.get('t') ?? '';
     try {
       if (req.method === 'GET' && route === 'call') {
-        // GL-05: serve the browser call page (getUserMedia → RTCPeerConnection → POST sdp).
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-        res.end('<!doctype html><title>NanoClaw voice</title><p>Call page not built yet (GL-05).</p>');
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end(callPageHtml());
         return;
       }
-      if (req.method === 'POST' && route === 'sdp') {
+      if (route === 'sdp' || route === 'hangup') {
+        if (req.method !== 'POST') return reply(res, 405, 'POST only');
+        if (!tokens.has(token)) return reply(res, 403, 'Unknown call link');
+      }
+      if (route === 'sdp') {
         const offer = await readBody(req);
-        const token = url.searchParams.get('t') ?? 'anonymous';
-        const { sessionId, answer } = await createWebRtcSession(offer, 'NanoClaw');
-        const call = openCall(sessionId, `gpt-live:${token}`);
-        call.socket = await connectSideband(call);
-        res.writeHead(200, { 'Content-Type': 'application/sdp' });
-        res.end(answer);
+        if (!offer.trim().startsWith('v=')) return reply(res, 400, 'Body must be an SDP offer');
+        const platformId = platformIdForToken(token);
+        const agent = (await resolveAgent(platformId)) ?? { name: config.fallbackAgentName };
+        const { sessionId, answer } = await createWebRtcSession(offer, agent);
+        log.info('gpt-live: session created', { platformId, sessionId, agent: agent.name });
+        await openCall(token, sessionId);
+        reply(res, 200, answer, { 'Content-Type': 'application/sdp', 'X-GPT-Live-Session': sessionId });
+        return;
+      }
+      if (route === 'hangup') {
+        const call = lines.get(platformIdForToken(token));
+        if (call) {
+          call.session.close();
+          endCall(call, 'hangup');
+        }
+        reply(res, 204, '');
         return;
       }
       if (req.method === 'POST' && route === 'sip') {
-        // GL-11: realtime.call.incoming → accept (session config) or reject (603) by unknown-sender policy.
-        res.writeHead(501, { 'Content-Type': 'text/plain' });
-        res.end('SIP not wired yet (GL-11)');
-        return;
+        // Next phase: realtime.call.incoming → accept (session config) or reject (603).
+        return reply(res, 501, 'SIP calls are not wired yet');
       }
-      res.writeHead(404);
-      res.end();
+      reply(res, 404, 'Not found');
     } catch (err) {
+      // The shared webhook server has no other way to answer the browser.
       log.error('gpt-live: http route failed', { route, err });
-      if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'text/plain' });
-      res.end('gpt-live error');
+      if (!res.headersSent) reply(res, 500, 'gpt-live error');
+      else res.end();
     }
   };
 
   return {
-    name: 'gpt-live',
-    channelType: 'gpt-live',
+    name: CHANNEL_TYPE,
+    channelType: CHANNEL_TYPE,
     supportsThreads: false,
     defaults: GPT_LIVE_DEFAULTS,
 
     async setup(cfg: ChannelSetup): Promise<void> {
       setup = cfg;
-      registerWebhookHandler('gpt-live', handleHttp);
+      registerWebhookHandler(CHANNEL_TYPE, handleHttp);
       connected = true;
-      log.info('gpt-live: ready', { callUrl: `${config.publicUrl}/webhook/gpt-live/call`, voice: config.voice });
+      log.info('gpt-live: ready', {
+        callUrl: `${config.publicUrl}/webhook/gpt-live/call?t=<link token>`,
+        lines: tokens.size,
+        voice: config.voice,
+      });
     },
 
     async teardown(): Promise<void> {
-      for (const call of calls.values()) {
+      for (const call of [...lines.values()]) {
         call.session.close();
-        call.socket?.close();
+        endCall(call, 'teardown');
       }
-      calls.clear();
       connected = false;
     },
 
@@ -248,9 +318,9 @@ export function createGptLiveAdapter(config: GptLiveConfig): ChannelAdapter {
     },
 
     async deliver(platformId: string, _threadId: string | null, message: OutboundMessage): Promise<string | undefined> {
-      const call = calls.get(platformId);
+      const call = lines.get(platformId);
       if (!call) {
-        log.warn('gpt-live: deliver to unknown or ended session; dropping', { platformId });
+        log.warn('gpt-live: no active call on this line; dropping reply', { platformId });
         return undefined;
       }
       const content = message.content as { text?: unknown } | string;
@@ -261,21 +331,37 @@ export function createGptLiveAdapter(config: GptLiveConfig): ChannelAdapter {
     },
 
     async setTyping(platformId: string, _threadId: string | null, status?: string): Promise<void> {
-      const call = calls.get(platformId);
+      const call = lines.get(platformId);
       if (!call) return;
       call.session.think(status?.trim() || 'Still working on it.');
     },
   };
 }
 
-registerChannelAdapter('gpt-live', {
+registerChannelAdapter(CHANNEL_TYPE, {
   factory: () => {
-    const env = readEnvFile(['OPENAI_API_KEY', 'GPT_LIVE_PUBLIC_URL', 'GPT_LIVE_VOICE']);
-    if (!env.OPENAI_API_KEY) return null;
+    const env = readEnvFile([
+      'OPENAI_API_KEY',
+      'GPT_LIVE_KEYCHAIN_SERVICE',
+      'GPT_LIVE_KEYCHAIN_ACCOUNT',
+      'GPT_LIVE_PUBLIC_URL',
+      'GPT_LIVE_VOICE',
+      'GPT_LIVE_LINK_TOKEN',
+      'GPT_LIVE_AGENT_NAME',
+    ]);
+    const key = resolveOpenAiKey(env);
+    if (!key) return null;
+    if (!env.GPT_LIVE_LINK_TOKEN) {
+      log.warn('gpt-live: GPT_LIVE_LINK_TOKEN is not set; the channel stays offline');
+      return null;
+    }
+    log.info('gpt-live: OpenAI key loaded', { source: key.source });
     return createGptLiveAdapter({
-      apiKey: env.OPENAI_API_KEY,
+      apiKey: key.key,
       publicUrl: (env.GPT_LIVE_PUBLIC_URL || 'http://localhost:3000').replace(/\/+$/, ''),
       voice: env.GPT_LIVE_VOICE || 'marin',
+      linkTokens: env.GPT_LIVE_LINK_TOKEN.split(','),
+      fallbackAgentName: env.GPT_LIVE_AGENT_NAME || 'the assistant',
     });
   },
   defaults: GPT_LIVE_DEFAULTS,

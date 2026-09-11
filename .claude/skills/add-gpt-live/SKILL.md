@@ -1,6 +1,6 @@
 ---
 name: add-gpt-live
-description: Add the GPT-Live channel — OpenAI's full-duplex voice model (gpt-live-1) as the mouth and ears of a browser or phone call, with the NanoClaw agent as the brain. Native adapter, client-delegation mode, no Chat SDK bridge. Use when the user wants to talk to an agent by voice, give an agent a phone presence, or try GPT-Live-1 with NanoClaw.
+description: Add the GPT-Live channel — OpenAI's full-duplex voice model (gpt-live-1) as the mouth and ears of a browser call, with the NanoClaw agent as the brain. Native adapter, client-delegation mode, no Chat SDK bridge, no new package. Use when the user wants to talk to an agent by voice, give an agent a phone presence, or try GPT-Live-1 with NanoClaw.
 ---
 
 # Add GPT-Live Channel
@@ -14,24 +14,32 @@ delegations to inbound messages and agent replies to spoken commentary.
 NanoClaw doesn't ship channels in trunk — this skill copies the adapter and its
 tests in from the `channels` branch.
 
-Two ways to call the agent. **Browser** (this skill): a call page served by the
-host; needs only a URL the caller's browser can reach. **Phone** (SIP, a later
-step): a SIP trunk pointed at OpenAI plus a public webhook URL.
+A **voice line** is one call link, `…/webhook/gpt-live/call?t=<token>`, wired to
+one agent group. Every call on the link lands in the same agent session, so the
+agent remembers the previous call. This skill sets up one line for a browser.
+Phone calls over SIP are a later step.
 
-Costs money: OpenAI bills voice sessions at $0.05 per minute, per second,
-plus the agent's own model usage.
+Costs money: OpenAI bills voice sessions at $0.05 per minute, per second, plus
+the agent's own model usage. The link token is the only thing between the
+internet and that bill — treat the link like a password.
 
 ## Apply
 
 ### 1. Copy the adapter and tests
 
 Fetch the `channels` branch and copy the adapter, its session state machine,
-and their tests into place (overwrite — the branch is canonical):
+the voice prompt composer, the call page, and their tests into place
+(overwrite — the branch is canonical):
 
 ```nc:copy from-branch:channels
 src/channels/gpt-live.ts
 src/channels/gpt-live-session.ts
+src/channels/gpt-live-prompt.ts
+src/channels/gpt-live-call-page.ts
+src/channels/gpt-live-keychain.ts
 src/channels/gpt-live-session.test.ts
+src/channels/gpt-live-adapter.test.ts
+src/channels/gpt-live-keychain.test.ts
 src/channels/gpt-live-registration.test.ts
 ```
 
@@ -67,37 +75,69 @@ pnpm run build
 
 ### 5. Validate
 
-Run the registration test and the session state-machine tests:
+Run the registration test, the session state-machine tests, and the adapter
+integration test (a fake OpenAI behind the real webhook server):
 
 ```nc:run effect:test
-pnpm exec vitest run src/channels/gpt-live-registration.test.ts src/channels/gpt-live-session.test.ts
+pnpm exec vitest run src/channels/gpt-live-registration.test.ts src/channels/gpt-live-session.test.ts src/channels/gpt-live-adapter.test.ts src/channels/gpt-live-keychain.test.ts
 ```
 
 `gpt-live-registration.test.ts` imports the real channel barrel and asserts the
 registry contains `gpt-live` — it goes red if the import line drifts.
 `gpt-live-session.test.ts` covers the delegation bookkeeping (transcript cut,
-chunking, barge-in). A real call is verified manually once the service runs.
+chunking, barge-in). `gpt-live-adapter.test.ts` drives the call page and SDP
+routes over HTTP, checks the session is created in client-delegation mode with
+the wired agent's name, and round-trips a delegation to an inbound message and
+a reply to spoken commentary over the sideband. A real call is verified
+manually once the service runs.
 
 ## Connect to OpenAI
 
 ### API key
 
-The adapter needs an OpenAI API key with access to `gpt-live-1`. It is read from
-`.env` on the host; the agent container never sees it.
+The adapter needs an OpenAI API key with access to `gpt-live-1`. It is read on
+the host only; the agent container never sees it. Two places it can live:
+pasted into `.env`, or (macOS) in your login Keychain, where `.env` only names
+the item and the host reads it at startup with the system `security` tool.
 
-```nc:prompt openai_api_key secret validate:^sk-.{20,}$ normalize:trim
+```nc:prompt key_source validate:^(paste|keychain)$ normalize:lower
+Where should the OpenAI key live? "paste" writes it to .env; "keychain" (macOS) keeps it in your login Keychain and .env only names the item. (paste/keychain)
+```
+
+**Paste** — collected as a secret and written to `.env`:
+
+```nc:prompt openai_api_key secret validate:^sk-.{20,}$ normalize:trim when:key_source=paste
 Paste an OpenAI API key with access to gpt-live-1 (starts with sk-). Create one at https://platform.openai.com/api-keys
 ```
-```nc:env-set
+```nc:env-set when:key_source=paste
 OPENAI_API_KEY={{openai_api_key}}
+```
+
+**Keychain** — the user adds the item in their own terminal, so the key never
+passes through this setup or their shell history (`-w` with no value prompts
+for it; `-T` lets the `security` tool read it back without a dialog). Tell the
+user:
+
+```nc:operator when:key_source=keychain
+Run this in a terminal and paste the key at the prompt: security add-generic-password -U -s nanoclaw-openai -a "$USER" -T /usr/bin/security -w
+```
+```nc:env-set when:key_source=keychain
+GPT_LIVE_KEYCHAIN_SERVICE=nanoclaw-openai
+```
+
+Check the item reads back before going on (the value goes nowhere):
+
+```nc:run effect:check when:key_source=keychain
+security find-generic-password -s nanoclaw-openai -a "$USER" -w >/dev/null
 ```
 
 ### Public URL
 
 The call page and the SDP handshake are served by the host's webhook server.
 Give the origin a caller's browser reaches it at — `http://localhost:3000` for
-a local try, a tailnet or tunnel URL to call from a phone's browser. Set-if-absent,
-so a re-run keeps your value:
+a local try, a tailnet or tunnel URL to call from a phone's browser. Browsers
+allow the microphone only on `localhost` or HTTPS. Set-if-absent, so a re-run
+keeps your value:
 
 ```nc:prompt public_url validate:^https?://\S+$ normalize:rstrip-slash
 What origin can a caller's browser reach this NanoClaw host at? (e.g. http://localhost:3000 or https://nanoclaw.example.ts.net)
@@ -107,29 +147,72 @@ GPT_LIVE_PUBLIC_URL={{public_url}}
 GPT_LIVE_VOICE=marin
 ```
 
+### Link token
+
+The voice line's secret. Reuse the one already in `.env` on a re-run, otherwise
+mint a fresh one:
+
+```nc:run capture:link_token validate:^[0-9a-f]{16}$ effect:fetch
+grep -s '^GPT_LIVE_LINK_TOKEN=' .env | cut -d= -f2- | cut -d, -f1 | grep -E '^[0-9a-f]{16}$' || openssl rand -hex 8
+```
+```nc:env-set
+GPT_LIVE_LINK_TOKEN={{link_token}}
+```
+
+## Choose the agent
+
+The line is wired to one agent group. List them (the NanoClaw service must be
+running — `ncl` talks to it over its socket):
+
+```nc:run capture:agent_groups effect:fetch
+ncl groups list --json | jq -r 'if (.data|length)==0 then "no agent groups yet — run /init-first-agent first" else [.data[] | "\(.folder) (\(.name))"] | join(", ") end'
+```
+```nc:operator
+Agent groups on this install: {{agent_groups}}. The voice line is wired to one of them; the voice model introduces itself with that agent's name and hands it every question that needs memory or tools.
+```
+```nc:prompt agent_folder validate:^[A-Za-z0-9_-]+$ normalize:trim
+Which agent group answers the voice line? Enter its folder name (the first column above).
+```
+
+The folder must be a real agent group — a typo must not wire the line to
+nothing:
+
+```nc:run effect:check
+ncl groups list --json | jq -e --arg f '{{agent_folder}}' '.data[] | select(.folder==$f)' >/dev/null || { echo "unknown agent group folder '{{agent_folder}}' — see: ncl groups list" >&2; exit 1; }
+```
+
 ## Restart and wire
 
-Restart the service so the adapter registers its routes:
+Restart the service so the adapter registers its routes and the channel type
+is known to `ncl`:
 
 ```nc:run effect:restart
 bash setup/lib/restart.sh
 ```
 
-Then wire the channel to an agent group the same way as any other channel —
-run `/manage-channels` and pick `gpt-live`. Unknown callers are declined
-politely and the owner gets a one-line FYI; grant access with `ncl members add`.
+Create the line's messaging group (skipped when it exists) and wire it to the
+chosen agent group. `wirings create` is idempotent on the pair and applies the
+channel's DM defaults — every delegated turn engages the agent, and the link
+holder is the line's user:
+
+```nc:run effect:wire
+ncl messaging-groups list --json | jq -e --arg p "gpt-live:{{link_token}}" '.data[] | select(.platform_id==$p)' >/dev/null || ncl messaging-groups create --channel-type gpt-live --platform-id "gpt-live:{{link_token}}" --name "Voice line" --is-group 0
+ncl wirings create --channel-type gpt-live --platform-id "gpt-live:{{link_token}}" --agent-group "{{agent_folder}}" --session-mode shared
+```
 
 Tell the user where to call from:
 
 ```nc:operator
-The call page is at {{public_url}}/webhook/gpt-live/call. Open it in a browser, allow the microphone, and say hello. Ask something that needs memory ("what did we decide about the launch date?") to see the agent get involved.
+The call link is {{public_url}}/webhook/gpt-live/call?t={{link_token}} — keep it private, anyone holding it can talk to {{agent_folder}} on your OpenAI bill. Open it in a browser, allow the microphone, press Call and say hello. Ask something that needs memory ("what did we decide about the launch date?") to see the agent get involved; the page shows captions when the call carries them.
 ```
 
 ## Done
 
 Callers talk to the voice model; anything needing the agent is handed over and
 the answer is spoken back. Session ids are logged in `logs/nanoclaw.log`; quote
-one if you need OpenAI's help with a call.
+one if you need OpenAI's help with a call. To add a second line for someone
+else, append another token to `GPT_LIVE_LINK_TOKEN` (comma-separated), restart,
+and wire `gpt-live:<that token>` the same way.
 
 Phone calls over SIP are the next step: an inbound trunk pointed at
 `sip:<PROJECT_ID>@sip.api.openai.com;transport=tls` and a public webhook URL.
@@ -137,20 +220,44 @@ To uninstall: see [REMOVE.md](REMOVE.md).
 
 ## Troubleshooting
 
-**The call page loads but nothing happens after allowing the microphone.**
-Check `logs/nanoclaw.error.log` for `gpt-live: session create failed`. A `401`
-means the key in `.env` is wrong or lacks `gpt-live-1` access; a `429` means the
-project's concurrent-session limit is reached.
+**`Unknown call link` on the page.** The `t` in the URL is not in
+`GPT_LIVE_LINK_TOKEN`. Copy the link from the operator note above, or check
+`.env`.
+
+**The page says the microphone was refused.** Browsers only grant the
+microphone on `localhost` or HTTPS. Use a tailnet HTTPS URL or a tunnel for
+anything but a local try.
+
+**`Could not start the call: gpt-live: session create failed: 401`.** The key
+in `.env` is wrong or lacks `gpt-live-1` access. `429` means the project's
+concurrent-session limit is reached; `400` usually means the session config
+was rejected — the error text names the field.
+
+**`sideband attach failed`.** The session was created but the host could not
+open the server-side socket. Check outbound WebSocket access from the host
+(a proxy that strips `Upgrade` headers) in `logs/nanoclaw.error.log`.
 
 **The agent never gets involved.** The voice model delegates only when its
-instructions tell it to. Ask something it cannot know (your calendar, a past
-decision). If it still answers alone, the delegation event is not reaching the
-host: look for `gpt-live: sideband` lines in `logs/nanoclaw.error.log`.
+instructions say so. Ask something it cannot know (your calendar, a past
+decision). If it still answers alone, check `logs/nanoclaw.log` for
+`gpt-live: sideband attached` — without it no delegation reaches the host.
+
+**Delegations arrive but nothing is spoken back.** The line is not wired:
+look for `MESSAGE DROPPED — no agent groups wired` in the logs and re-run the
+wiring step. If the owner got a channel-request card instead, approving it
+wires the line too.
 
 **The caller hears the answer twice.** The agent repeated the voice model's own
 words. The transcript marks them as `Assistant:` lines; the formatting skill
 tells the agent not to echo them — check it is present under
 `container/skills/gpt-live-formatting/`.
 
-**`gpt-live` is missing from `ncl` channel lists.** The factory returned null
-because `OPENAI_API_KEY` is absent from `.env`. Set it and restart.
+**`gpt-live` is missing from `ncl` channel lists.** The factory returned null:
+neither `OPENAI_API_KEY` nor `GPT_LIVE_KEYCHAIN_SERVICE` is in `.env`, or
+`GPT_LIVE_LINK_TOKEN` is missing. Set them and restart.
+
+**`Keychain lookup failed` in the logs.** The item is missing, named
+differently, or stored for another account. `security find-generic-password
+-s nanoclaw-openai -a "$USER" -w >/dev/null` must succeed in a terminal as the
+user the service runs as. A locked login keychain (service started before the
+user logged in) fails the same way — restart the service after logging in.
