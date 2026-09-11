@@ -96,6 +96,29 @@ export interface GptLiveConfig {
 
 export type { SidebandSocket } from './gpt-live-sideband.js';
 
+/** An OpenAI-side failure the caller should hear about: the route answers 502 with the message. */
+export class UpstreamError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+    options?: { cause?: unknown },
+  ) {
+    super(message, options);
+    this.name = 'UpstreamError';
+  }
+}
+
+/** Request body over the cap; the route answers 413. */
+export class BodyTooLargeError extends Error {
+  constructor() {
+    super('gpt-live: request body too large');
+    this.name = 'BodyTooLargeError';
+  }
+}
+
+/** SDP offers are a few kilobytes; anything near this is not an offer. */
+export const MAX_BODY_BYTES = 64 * 1024;
+
 /** Thrown to the HTTP route when a newer call on the same line replaced this one mid-attach. */
 export class CallReplacedError extends Error {
   constructor(readonly platformId: string) {
@@ -228,7 +251,7 @@ export function createGptLiveAdapter(config: GptLiveConfig): ChannelAdapter {
       socket = await connectSideband(call);
     } catch (err) {
       endCall(call, 'sideband attach failed');
-      throw err;
+      throw new UpstreamError(502, 'gpt-live: sideband attach failed', { cause: err });
     }
     if (lines.get(platformId) !== call) {
       socket.send(JSON.stringify({ type: 'session.close' }));
@@ -250,15 +273,26 @@ export function createGptLiveAdapter(config: GptLiveConfig): ChannelAdapter {
       headers: { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ session: sessionConfig(agent, config.voice), transport: { type: 'webrtc', sdp: offer } }),
     });
-    if (!res.ok) throw new Error(`gpt-live: session create failed: ${res.status} ${(await res.text()).slice(0, 300)}`);
+    if (!res.ok) {
+      throw new UpstreamError(
+        res.status,
+        `gpt-live: session create failed: ${res.status} ${(await res.text()).slice(0, 300)}`,
+      );
+    }
     const body = (await res.json()) as { session?: { id?: string }; transport?: { sdp?: string } };
-    if (!body.session?.id || !body.transport?.sdp) throw new Error('gpt-live: session create returned no id/sdp');
+    if (!body.session?.id || !body.transport?.sdp)
+      throw new UpstreamError(502, 'gpt-live: session create returned no id/sdp');
     return { sessionId: body.session.id, answer: body.transport.sdp };
   };
 
   const readBody = async (req: http.IncomingMessage): Promise<string> => {
     const chunks: Buffer[] = [];
-    for await (const chunk of req) chunks.push(chunk as Buffer);
+    let total = 0;
+    for await (const chunk of req) {
+      total += (chunk as Buffer).length;
+      if (total > MAX_BODY_BYTES) throw new BodyTooLargeError();
+      chunks.push(chunk as Buffer);
+    }
     return Buffer.concat(chunks).toString('utf8');
   };
 
@@ -278,6 +312,9 @@ export function createGptLiveAdapter(config: GptLiveConfig): ChannelAdapter {
     const route = url.pathname.replace(/^\/webhook\/gpt-live\/?/, '').replace(/\/+$/, '');
     const token = url.searchParams.get('t') ?? '';
     try {
+      // The shared webhook server has no unregister; after teardown the routes stay reachable
+      // and must refuse rather than start sessions for a channel that is no longer running.
+      if (!connected || !setup) return reply(res, 503, 'gpt-live is not running');
       if (req.method === 'GET' && route === 'call') {
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
         res.end(callPageHtml());
@@ -318,6 +355,18 @@ export function createGptLiveAdapter(config: GptLiveConfig): ChannelAdapter {
       }
       reply(res, 404, 'Not found');
     } catch (err) {
+      if (err instanceof BodyTooLargeError) {
+        // Drain what is left so the 413 reaches the client, then let the connection close.
+        req.resume();
+        return reply(res, 413, 'SDP offer too large', { Connection: 'close' });
+      }
+      if (err instanceof UpstreamError) {
+        // The caller sees why (a 401 or a credit problem is actionable); the log keeps the detail.
+        log.warn('gpt-live: upstream failure on the sdp route', { route, status: err.status, err });
+        if (!res.headersSent) return reply(res, 502, err.message.slice(0, 300));
+        res.end();
+        return;
+      }
       // The shared webhook server has no other way to answer the browser.
       log.error('gpt-live: http route failed', { route, err });
       if (!res.headersSent) reply(res, 500, 'gpt-live error');
@@ -348,6 +397,7 @@ export function createGptLiveAdapter(config: GptLiveConfig): ChannelAdapter {
         endCall(call, 'teardown');
       }
       connected = false;
+      setup = null;
     },
 
     isConnected(): boolean {

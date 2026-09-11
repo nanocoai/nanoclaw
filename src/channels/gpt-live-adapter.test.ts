@@ -130,9 +130,19 @@ function startFakeOpenAI(): Promise<FakeOpenAI> {
     req.on('data', (c: Buffer) => chunks.push(c));
     req.on('end', () => {
       if (req.method === 'POST' && req.url === '/v1/live/sessions') {
+        const raw = Buffer.concat(chunks).toString('utf8');
+        if (raw.includes('fail-me')) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              error: { message: 'Incorrect API key provided: sk-****', type: 'invalid_request_error' },
+            }),
+          );
+          return;
+        }
         fake.sessionCreates.push({
           auth: req.headers.authorization,
-          body: JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>,
+          body: JSON.parse(raw) as Record<string, unknown>,
         });
         sessions += 1;
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -413,5 +423,42 @@ describe('gpt-live adapter (fake OpenAI, real webhook server)', () => {
         true,
       ),
     );
+  });
+
+  it('refuses an oversized SDP body with 413 before touching OpenAI', async () => {
+    const creates = fake.sessionCreates.length;
+    const res = await fetch(`${base}/sdp?t=tok123`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/sdp' },
+      body: 'v=0\r\n' + 'a'.repeat(70 * 1024),
+    });
+    expect(res.status).toBe(413);
+    expect(fake.sessionCreates.length).toBe(creates);
+  });
+
+  it('answers 502 with the upstream message when OpenAI refuses the session', async () => {
+    const res = await fetch(`${base}/sdp?t=tok123`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/sdp' },
+      body: 'v=0\r\nfail-me',
+    });
+    expect(res.status).toBe(502);
+    const text = await res.text();
+    expect(text).toContain('session create failed: 401');
+    expect(text).toContain('Incorrect API key');
+  });
+
+  it('the call page hangs up with a keepalive request so a closing tab still reaches the host', async () => {
+    const html = await (await fetch(`${base}/call?t=tok123`)).text();
+    expect(html).toContain('keepalive: true');
+  });
+
+  it('after teardown every route answers 503 and starts nothing', async () => {
+    await adapter.teardown();
+    const creates = fake.sessionCreates.length;
+    expect((await fetch(`${base}/call?t=tok123`)).status).toBe(503);
+    const sdp = await fetch(`${base}/sdp?t=tok123`, { method: 'POST', body: 'v=0\r\noffer' });
+    expect(sdp.status).toBe(503);
+    expect(fake.sessionCreates.length).toBe(creates);
   });
 });

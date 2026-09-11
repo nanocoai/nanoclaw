@@ -112,7 +112,7 @@ export function callPageHtml(): string {
   }
   function hangup(tellHost) {
     if (tellHost !== false && token) {
-      fetch(new URL('hangup?t=' + encodeURIComponent(token), location.href), { method: 'POST' }).catch(function () {});
+      fetch(new URL('hangup?t=' + encodeURIComponent(token), location.href), { method: 'POST', keepalive: true }).catch(function () {});
     }
     if (pc) { try { pc.close(); } catch (e) {} pc = null; }
     if (stream) { stream.getTracks().forEach(function (t) { t.stop(); }); stream = null; }
