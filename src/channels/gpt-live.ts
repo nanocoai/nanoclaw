@@ -320,6 +320,15 @@ export function createGptLiveAdapter(config: GptLiveConfig): ChannelAdapter {
         res.end(callPageHtml());
         return;
       }
+      if (route === 'info') {
+        // Who answers this line, so the page can greet by name before the call.
+        if (req.method !== 'GET') return reply(res, 405, 'GET only');
+        if (!tokens.has(token)) return reply(res, 403, 'Unknown call link');
+        const agent = (await resolveAgent(lineIdForToken(token))) ?? { name: config.fallbackAgentName };
+        return reply(res, 200, JSON.stringify({ agent: agent.name }), {
+          'Content-Type': 'application/json; charset=utf-8',
+        });
+      }
       if (route === 'sdp' || route === 'hangup') {
         if (req.method !== 'POST') return reply(res, 405, 'POST only');
         if (!tokens.has(token)) return reply(res, 403, 'Unknown call link');
@@ -337,7 +346,11 @@ export function createGptLiveAdapter(config: GptLiveConfig): ChannelAdapter {
           if (err instanceof CallReplacedError) return reply(res, 409, 'A newer call replaced this one');
           throw err;
         }
-        reply(res, 200, answer, { 'Content-Type': 'application/sdp', 'X-GPT-Live-Session': sessionId });
+        reply(res, 200, answer, {
+          'Content-Type': 'application/sdp',
+          'X-GPT-Live-Session': sessionId,
+          'X-GPT-Live-Agent': agent.name,
+        });
         return;
       }
       if (route === 'hangup') {

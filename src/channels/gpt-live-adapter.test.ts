@@ -278,6 +278,13 @@ describe('gpt-live adapter (fake OpenAI, real webhook server)', () => {
     expect(fake.sessionCreates).toHaveLength(0);
   });
 
+  it('tells the page who answers the line, only with a known token', async () => {
+    const ok = await fetch(`${base}/info?t=tok123`);
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({ agent: 'Andy' });
+    expect((await fetch(`${base}/info?t=nope`)).status).toBe(403);
+  });
+
   it('creates the session in client-delegation mode with the wired agent, and attaches the sideband', async () => {
     const res = await fetch(`${base}/sdp?t=tok123`, {
       method: 'POST',
@@ -286,6 +293,7 @@ describe('gpt-live adapter (fake OpenAI, real webhook server)', () => {
     });
     expect(res.status).toBe(200);
     expect(res.headers.get('x-gpt-live-session')).toBe('live_fake1');
+    expect(res.headers.get('x-gpt-live-agent')).toBe('Andy');
     expect(await res.text()).toBe('v=0\r\nanswer');
 
     expect(fake.sessionCreates).toHaveLength(1);
