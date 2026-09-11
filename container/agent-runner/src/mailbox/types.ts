@@ -64,6 +64,14 @@ export interface MailboxOperations {
   setContainerToolInFlight(tool: string, declaredTimeoutMs: number | null): void;
   clearContainerToolInFlight(): void;
   clearStaleProcessingAcks(): void;
+  /**
+   * Give 'processing' claims back so the rows become fetchable again — the
+   * contract-correct retry at a life boundary. Deliberately NOT
+   * markMessages(ids, 'failed'): the host maps a container 'failed' ack
+   * through its complete statement to a TERMINAL 'completed', which drops
+   * mail instead of retrying it.
+   */
+  releaseProcessingClaims(ids: string[]): void;
 }
 
 export interface AgentMailbox {
