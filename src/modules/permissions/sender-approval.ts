@@ -47,6 +47,7 @@ import {
 } from './db/pending-sender-approvals.js';
 import { getOwners } from './db/user-roles.js';
 import { getUser } from './db/users.js';
+import { AGENT_ACCESS_SCOPE_WARNING } from './channel-approval.js';
 
 const APPROVAL_OPTIONS: RawOption[] = [
   { label: 'Allow', selectedLabel: '✅ Allowed', value: 'approve', style: 'primary' },
@@ -72,11 +73,11 @@ export async function requestSenderApproval(input: RequestSenderApprovalInput): 
   // request_approval) occupies the UNIQUE(messaging_group_id, sender_identity)
   // key this flow needs — clear it so the in-flight check and the row insert
   // see a clean slate.
-  clearDeclineStamp(messagingGroupId, senderIdentity);
+  await clearDeclineStamp(messagingGroupId, senderIdentity);
 
   // In-flight dedup: don't spam the admin if the same unknown sender
   // retries while a card is already pending.
-  if (hasInFlightSenderApproval(messagingGroupId, senderIdentity)) {
+  if (await hasInFlightSenderApproval(messagingGroupId, senderIdentity)) {
     log.debug('Unknown-sender approval already in flight — dropping retry', {
       messagingGroupId,
       senderIdentity,
@@ -84,7 +85,7 @@ export async function requestSenderApproval(input: RequestSenderApprovalInput): 
     return;
   }
 
-  const approvers = pickApprover(agentGroupId);
+  const approvers = await pickApprover(agentGroupId);
   if (approvers.length === 0) {
     log.warn('Unknown-sender approval skipped — no owner or admin configured', {
       messagingGroupId,
@@ -94,9 +95,9 @@ export async function requestSenderApproval(input: RequestSenderApprovalInput): 
     return;
   }
 
-  const originMg = getMessagingGroup(messagingGroupId);
+  const originMg = await getMessagingGroup(messagingGroupId);
   const originChannelType = originMg?.channel_type ?? '';
-  const target = await pickApprovalDelivery(approvers, originChannelType);
+  const target = await pickApprovalDelivery(approvers, originChannelType, originMg?.instance);
   if (!target) {
     log.warn('Unknown-sender approval skipped — no DM channel for any approver', {
       messagingGroupId,
@@ -111,10 +112,10 @@ export async function requestSenderApproval(input: RequestSenderApprovalInput): 
   const originName = originMg?.name ?? `a ${originChannelType} channel`;
 
   const title = '👤 New sender';
-  const question = `${senderDisplay} wants to talk to your agent in ${originName}. Allow?`;
+  const question = `${senderDisplay} wants to talk to your agent in ${originName}. ${AGENT_ACCESS_SCOPE_WARNING} Allow?`;
   const options = normalizeOptions(APPROVAL_OPTIONS);
 
-  createPendingSenderApproval({
+  await createPendingSenderApproval({
     id: approvalId,
     messaging_group_id: messagingGroupId,
     agent_group_id: agentGroupId,
@@ -152,6 +153,8 @@ export async function requestSenderApproval(input: RequestSenderApprovalInput): 
         question,
         options,
       }),
+      undefined,
+      target.messagingGroup.instance,
     );
     log.info('Unknown-sender approval card delivered', {
       approvalId,
@@ -185,9 +188,9 @@ export const DECLINE_NOTIFY_DEDUPE_MS = 24 * 60 * 60 * 1000;
 const UNKNOWN_SENDER_KEY = 'unknown';
 
 /** First owner with a display_name, for the decline copy. */
-function ownerDisplayName(): string | null {
-  for (const owner of getOwners()) {
-    const name = getUser(owner.user_id)?.display_name;
+async function ownerDisplayName(): Promise<string | null> {
+  for (const owner of await getOwners()) {
+    const name = (await getUser(owner.user_id))?.display_name;
     if (name && name.length > 0) return name;
   }
   return null;
@@ -200,6 +203,12 @@ export interface DeclineAndNotifyInput {
   senderIdentity: string | null; // namespaced user id, when resolvable
   senderName: string | null;
   event: InboundEvent;
+  /** Override when the decline is scoped to the conversation, not the sender. */
+  dedupeKey?: string;
+  /** Override the sender-facing decline copy. */
+  declineText?: string;
+  /** Override the owner-facing FYI copy. */
+  fyiText?: string;
 }
 
 /**
@@ -214,8 +223,8 @@ export async function declineAndNotify(input: DeclineAndNotifyInput): Promise<vo
   const { messagingGroupId, agentGroupId, senderIdentity, senderName, event } = input;
 
   // Dedupe: at most one decline + FYI per (sender, messaging group) per 24h.
-  const senderKey = senderIdentity ?? UNKNOWN_SENDER_KEY;
-  const stampedAt = getDeclineStampAt(messagingGroupId, senderKey);
+  const senderKey = input.dedupeKey ?? senderIdentity ?? UNKNOWN_SENDER_KEY;
+  const stampedAt = await getDeclineStampAt(messagingGroupId, senderKey);
   if (stampedAt && Date.now() - new Date(stampedAt).getTime() < DECLINE_NOTIFY_DEDUPE_MS) {
     log.debug('decline_notify deduped — declined within the last 24h', { messagingGroupId, senderIdentity });
     return;
@@ -232,9 +241,9 @@ export async function declineAndNotify(input: DeclineAndNotifyInput): Promise<vo
   // fall back to the first one (same reference-group pattern as the channel
   // card flow); with zero agent groups the stamp is skipped (no dedupe, rare
   // bootstrap state) but the decline still goes out.
-  const stampAgentGroupId = agentGroupId ?? getAllAgentGroups()[0]?.id;
+  const stampAgentGroupId = agentGroupId ?? (await getAllAgentGroups())[0]?.id;
   if (stampAgentGroupId) {
-    upsertDeclineStamp({
+    await upsertDeclineStamp({
       messaging_group_id: messagingGroupId,
       agent_group_id: stampAgentGroupId,
       sender_identity: senderKey,
@@ -245,13 +254,13 @@ export async function declineAndNotify(input: DeclineAndNotifyInput): Promise<vo
     log.debug('decline_notify stamp skipped — no agent groups exist', { messagingGroupId });
   }
 
-  const originMg = getMessagingGroup(messagingGroupId);
+  const originMg = await getMessagingGroup(messagingGroupId);
 
   // (a) Polite decline in the sender's DM, as the bot. Instance-addressed so
   // a per-agent bot identity registered as its own adapter instance
   // answers as itself.
-  const owner = ownerDisplayName();
-  const declineText = `I'm ${owner ?? 'my owner'}'s personal agent — I can't help you directly.`;
+  const owner = await ownerDisplayName();
+  const declineText = input.declineText ?? `I'm ${owner ?? 'my owner'}'s personal agent — I can't help you directly.`;
   try {
     await adapter.deliver(
       event.channelType,
@@ -268,12 +277,12 @@ export async function declineAndNotify(input: DeclineAndNotifyInput): Promise<vo
 
   // (b) Owner FYI — informational one-liner through the same approver-DM
   // resolution the card flows use.
-  const approvers = pickApprover(agentGroupId);
+  const approvers = await pickApprover(agentGroupId);
   if (approvers.length === 0) {
     log.warn('decline_notify FYI skipped — no owner or admin configured', { messagingGroupId, senderIdentity });
     return;
   }
-  const target = await pickApprovalDelivery(approvers, event.channelType);
+  const target = await pickApprovalDelivery(approvers, event.channelType, originMg?.instance ?? event.instance);
   if (!target) {
     log.warn('decline_notify FYI skipped — no DM channel for any approver', { messagingGroupId, senderIdentity });
     return;
@@ -282,7 +291,9 @@ export async function declineAndNotify(input: DeclineAndNotifyInput): Promise<vo
   const senderDisplay = senderName && senderName.length > 0 ? senderName : (senderIdentity ?? 'An unknown sender');
   const who =
     senderIdentity && senderDisplay !== senderIdentity ? `${senderDisplay} (${senderIdentity})` : senderDisplay;
-  const fyiText = `FYI: ${who} DMed your agent on ${event.channelType} — I sent a polite decline. Allow them any time with \`ncl members add\`.`;
+  const fyiText =
+    input.fyiText ??
+    `FYI: ${who} DMed your agent on ${event.channelType} — I sent a polite decline. Allow them any time with \`ncl members add\`.`;
   try {
     await adapter.deliver(
       target.messagingGroup.channel_type,
@@ -290,6 +301,8 @@ export async function declineAndNotify(input: DeclineAndNotifyInput): Promise<vo
       null,
       'chat-sdk',
       JSON.stringify({ text: fyiText }),
+      undefined,
+      target.messagingGroup.instance,
     );
     log.info('decline_notify handled — decline sent, owner notified', {
       messagingGroupId,

@@ -8,11 +8,19 @@
  * - Normal messages: pass through unchanged
  */
 import { hasAdminPrivilege } from './modules/permissions/db/user-roles.js';
+import './provider-contracts/index.js';
+import { listProviderHostContracts } from './provider-contracts/registry.js';
 
 export type GateResult = { action: 'pass' } | { action: 'filter' } | { action: 'deny'; command: string };
 
-const FILTERED_COMMANDS = new Set(['/start', '/help', '/login', '/logout', '/doctor', '/config', '/remote-control']);
-const ADMIN_COMMANDS = new Set(['/clear', '/compact', '/context', '/cost', '/files', '/upload-trace']);
+const FILTERED_COMMANDS = new Set(
+  listProviderHostContracts().flatMap((contract) => contract.commands?.nativeFiltered ?? []),
+);
+const ADMIN_COMMANDS = new Set([
+  '/clear',
+  '/upload-trace',
+  ...listProviderHostContracts().flatMap((contract) => contract.commands?.nativeAdmin ?? []),
+]);
 
 /**
  * Classify a message and decide whether it should reach the container.
@@ -20,7 +28,7 @@ const ADMIN_COMMANDS = new Set(['/clear', '/compact', '/context', '/cost', '/fil
  * 'filter' for silently-dropped commands, 'deny' for unauthorized
  * admin commands.
  */
-export function gateCommand(content: string, userId: string | null, agentGroupId: string): GateResult {
+export async function gateCommand(content: string, userId: string | null, agentGroupId: string): Promise<GateResult> {
   let text: string;
   try {
     const parsed = JSON.parse(content);
@@ -36,7 +44,7 @@ export function gateCommand(content: string, userId: string | null, agentGroupId
   if (FILTERED_COMMANDS.has(command)) return { action: 'filter' };
 
   if (ADMIN_COMMANDS.has(command)) {
-    if (isAdmin(userId, agentGroupId)) {
+    if (await isAdmin(userId, agentGroupId)) {
       return { action: 'pass' };
     }
     return { action: 'deny', command };
@@ -46,7 +54,7 @@ export function gateCommand(content: string, userId: string | null, agentGroupId
   return { action: 'pass' };
 }
 
-function isAdmin(userId: string | null, agentGroupId: string): boolean {
+async function isAdmin(userId: string | null, agentGroupId: string): Promise<boolean> {
   if (!userId) return false;
   return hasAdminPrivilege(userId, agentGroupId);
 }

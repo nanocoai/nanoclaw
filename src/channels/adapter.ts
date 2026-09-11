@@ -44,8 +44,9 @@ export interface DeliveryAddress {
  */
 export interface InboundEvent {
   channelType: string;
-  /** Receiving adapter instance; stamped host-side (src/index.ts onInbound).
-   *  Absent (e.g. CLI onInboundEvent) means the default instance (= channelType). */
+  /** Receiving adapter instance; stamped host-side (src/index.ts onInbound) or
+   *  carried by the CLI admin transport's `to.instance`. Absent means the
+   *  default instance (= channelType). */
   instance?: string;
   platformId: string;
   threadId: string | null;
@@ -109,6 +110,16 @@ export interface ConversationInfo {
   platformId: string;
   name: string;
   isGroup: boolean;
+}
+
+/** Human-readable conversation metadata resolved by an adapter. */
+export interface ResolvedConversation {
+  type: 'direct' | 'group_dm' | 'channel';
+  name: string | null;
+  /** Parallel to participantIds (same length and order) when both are present. */
+  participantNames?: string[];
+  /** Parallel to participantNames (same length and order) when both are present. */
+  participantIds?: string[];
 }
 
 /** Wiring/mg defaults for one conversation context (DM vs group/channel). */
@@ -226,6 +237,9 @@ export interface ChannelAdapter {
     statusKind?: 'auto' | 'agent',
   ): Promise<void>;
   syncConversations?(): Promise<ConversationInfo[]>;
+  /** Resolve conversation type and human-readable metadata for host UI. */
+  resolveConversation?(platformId: string): Promise<ResolvedConversation | null>;
+  /** Legacy name-only resolver for adapters without richer conversation metadata. */
   resolveChannelName?(platformId: string): Promise<string | null>;
 
   /**

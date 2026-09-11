@@ -92,7 +92,7 @@ afterEach(async () => {
   await teardownChannelAdapters();
   const { closeDb } = await import('../db/index.js');
   try {
-    closeDb();
+    await closeDb();
   } catch {
     // Test didn't open a DB.
   }
@@ -188,14 +188,14 @@ describe('wiring creation — resolved defaults persist onto the row', () => {
   /** In-memory central DB + one agent group and messaging group. */
   async function seedDb(channelType: string, isGroup = false) {
     const { initTestDb, runMigrations } = await import('../db/index.js');
-    const db = initTestDb();
-    runMigrations(db);
+    const db = await initTestDb();
+    await runMigrations(db);
 
     const { createAgentGroup } = await import('../db/agent-groups.js');
     const { createMessagingGroup } = await import('../db/messaging-groups.js');
     const now = new Date().toISOString();
     const ag: AgentGroup = { id: 'ag-1', name: 'Nano', folder: 'nano', agent_provider: null, created_at: now };
-    createAgentGroup(ag);
+    await createAgentGroup(ag);
     const mg: MessagingGroup = {
       id: 'mg-1',
       channel_type: channelType,
@@ -205,7 +205,7 @@ describe('wiring creation — resolved defaults persist onto the row', () => {
       unknown_sender_policy: 'strict',
       created_at: now,
     };
-    createMessagingGroup(mg);
+    await createMessagingGroup(mg);
     return { db, ag, mg, now };
   }
 
@@ -224,7 +224,7 @@ describe('wiring creation — resolved defaults persist onto the row', () => {
     },
   ): Promise<MessagingGroupAgent> {
     const { createMessagingGroupAgent, getMessagingGroupAgent } = await import('../db/messaging-groups.js');
-    createMessagingGroupAgent({
+    await createMessagingGroupAgent({
       id: 'mga-1',
       messaging_group_id: mg.id,
       agent_group_id: ag.id,
@@ -237,7 +237,7 @@ describe('wiring creation — resolved defaults persist onto the row', () => {
       priority: 0,
       created_at: now,
     });
-    return getMessagingGroupAgent('mga-1')!;
+    return (await getMessagingGroupAgent('mga-1'))!;
   }
 
   it('declared per-thread DM defaults flow into the created wiring', async () => {
@@ -283,7 +283,7 @@ describe('wiring creation — resolved defaults persist onto the row', () => {
     await wire(mg, ag, now, resolved);
 
     const { updateMessagingGroupAgent, getMessagingGroupAgent } = await import('../db/messaging-groups.js');
-    updateMessagingGroupAgent('mga-1', { threads: 0 });
-    expect(getMessagingGroupAgent('mga-1')!.threads).toBe(0);
+    await updateMessagingGroupAgent('mga-1', { threads: 0 });
+    expect((await getMessagingGroupAgent('mga-1'))!.threads).toBe(0);
   });
 });

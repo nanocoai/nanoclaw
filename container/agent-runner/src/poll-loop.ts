@@ -7,14 +7,17 @@ import {
   markFailed,
   type MessageInRow,
 } from './db/messages-in.js';
-import { writeMessageOut } from './db/messages-out.js';
-import { getInboundDb, getOutboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
+import { getUndeliveredMessages, writeMessageOut } from './db/messages-out.js';
+import { clearStaleProcessingAcks } from './db/container-state.js';
+import { resolveDestinationThread } from './db/session-routing.js';
+import { touchHeartbeat } from './heartbeat.js';
+import { getAgentMailbox } from './mailbox/index.js';
 import {
   clearContinuation,
-  clearCurrentInReplyTo,
+  clearCurrentReplyRoute,
   migrateLegacyContinuation,
   setContinuation,
-  setCurrentInReplyTo,
+  setCurrentReplyRoute,
 } from './db/session-state.js';
 import {
   formatMessages,
@@ -29,33 +32,13 @@ import {
 import { stripHarnessTagArtifacts } from './harness-tag-strip.js';
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
+import type { ProviderRuntimeContract } from './provider-contracts/registry.js';
 
 const POLL_INTERVAL_MS = 1000;
 const ACTIVE_POLL_INTERVAL_MS = 500;
 
-/**
- * Number of consecutive `database disk image is malformed` errors after which
- * the follow-up poll gives up and exits the process. At ACTIVE_POLL_INTERVAL_MS
- * = 500ms this is roughly 5 seconds — long enough to dodge a transient torn
- * read during a host write, short enough to recover quickly from a poisoned
- * page cache (host-sweep then respawns with a fresh mount).
- */
-const CORRUPTION_STREAK_EXIT = 10;
-
-/**
- * True for SQLite errors that indicate a corrupt READ view — almost always a
- * cross-mount page-cache coherency issue on Docker Desktop macOS rather than
- * actual file damage (host-side integrity_check passes). Reopening the DB
- * handle inside this process does NOT recover; only a fresh container mount
- * does. Caller's job is to exit so host-sweep respawns the container.
- */
-export function isCorruptionError(msg: string): boolean {
-  return (
-    msg.includes('database disk image is malformed') ||
-    msg.includes('SQLITE_CORRUPT') ||
-    msg.includes('file is not a database')
-  );
-}
+/** Consecutive driver-classified failures before a fresh runner is required. */
+const MAILBOX_FAILURE_STREAK_EXIT = 10;
 
 function log(msg: string): void {
   console.error(`[poll-loop] ${msg}`);
@@ -67,6 +50,8 @@ function generateId(): string {
 
 export interface PollLoopConfig {
   provider: AgentProvider;
+  /** Declared provider runtime behavior. Contractless providers keep legacy defaults. */
+  providerContract?: Pick<ProviderRuntimeContract, 'textDelivery' | 'commands'>;
   /**
    * Name of the provider (e.g. "claude", "codex", "opencode"). Used to key
    * the stored continuation per-provider so flipping providers doesn't
@@ -88,14 +73,24 @@ export interface PollLoopConfig {
 /**
  * Main poll loop. Runs indefinitely until the process is killed.
  *
- * 1. Poll messages_in for pending rows
+ * 1. Poll the mailbox for pending messages
  * 2. Format into prompt, call provider.query()
  * 3. While query active: continue polling, push new messages via provider.push()
- * 4. On result: write messages_out
+ * 4. On result: write outbound messages
  * 5. Mark messages completed
  * 6. Loop
  */
 export async function runPollLoop(config: PollLoopConfig): Promise<void> {
+  // Contract providers declare these; a contractless (legacy payload)
+  // provider keeps declaring them as instance flags, exactly as before.
+  const legacy = config.provider as { supportsNativeSlashCommands?: boolean; emitsMidTurnText?: boolean };
+  const nativeSlashCommands = config.providerContract
+    ? config.providerContract.commands.formatting === 'native'
+    : (legacy.supportsNativeSlashCommands ?? false);
+  const midTurnCompleteDelivery = config.providerContract
+    ? config.providerContract.textDelivery === 'mid-turn-complete'
+    : (legacy.emitsMidTurnText ?? false);
+
   // Resume the agent's prior session from a previous container run if one
   // was persisted. The continuation is opaque to the poll-loop — the
   // provider decides how to use it (Claude resumes a .jsonl transcript,
@@ -123,6 +118,8 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
   // Clear leftover 'processing' acks from a previous crashed container.
   // This lets the new container re-process those messages.
   clearStaleProcessingAcks();
+  // Same for the reply stamp a killed container left behind (see session-state.ts).
+  clearCurrentReplyRoute();
 
   let pollCount = 0;
   let isFirstPoll = true;
@@ -150,7 +147,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // query. Without this gate, a warm container keeps processing
     // (and potentially responding to) every accumulate-only batch, defeating
     // the "store as context, don't engage" contract. Host-side countDueMessages
-    // gates the same way for wake-from-cold (see src/db/session-db.ts).
+    // gates the same way for wake-from-cold through countDueMessages().
     if (!messages.some((m) => m.trigger === 1)) {
       await sleep(POLL_INTERVAL_MS);
       continue;
@@ -172,7 +169,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         log('Clearing session (resetting continuation)');
         continuation = undefined;
         clearContinuation(config.providerName);
-        writeMessageOut({
+        await writeMessageOut({
           id: generateId(),
           kind: 'chat',
           platform_id: routing.platformId,
@@ -187,13 +184,13 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       // ambient context, never a runner command (isClearCommand self-guards).
       if ((msg.kind === 'chat' || msg.kind === 'chat-sdk') && !isSessionEcho(msg) && isUploadTraceCommand(msg)) {
         log('Uploading session trace to Hugging Face');
-        writeMessageOut({
+        await writeMessageOut({
           id: generateId(),
           kind: 'chat',
           platform_id: routing.platformId,
           channel_type: routing.channelType,
           thread_id: routing.threadId,
-          content: JSON.stringify({ text: uploadTrace() }),
+          content: JSON.stringify({ text: uploadTrace(config.providerName) }),
         });
         commandIds.push(msg.id);
         continue;
@@ -237,7 +234,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     // Format messages: passthrough commands get raw text (only if the
     // provider natively handles slash commands), others get XML.
-    const prompt = formatMessagesWithCommands(keep, config.provider.supportsNativeSlashCommands);
+    const prompt = formatMessagesWithCommands(keep, nativeSlashCommands, config.providerName);
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 
@@ -247,13 +244,14 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       cwd: config.cwd,
       systemContext: config.systemContext,
     });
-
     // Process the query while concurrently polling for new messages
     const skippedSet = new Set(skipped.map((s) => s.id));
     const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
-    // Publish the batch's in_reply_to so MCP tools (send_message, send_file)
-    // can stamp it on outbound rows — needed for a2a return-path routing.
-    setCurrentInReplyTo(routing.inReplyTo);
+    // Publish the batch's route so MCP tools (send_message, send_file) thread
+    // replies into the conversation being answered and stamp in_reply_to for
+    // a2a return-path routing. Re-published at every turn boundary inside
+    // processQuery as later messages are answered.
+    publishReplyRoute(routing);
     // Forward a loop stop to the ACTIVE query. The stream deliberately stays
     // open between turns, so the loop can be parked inside processQuery when
     // config.signal fires; without this, the "stopped" loop's query — and its
@@ -274,7 +272,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         config.provider.onExchangeComplete?.bind(config.provider),
         prompt,
         continuation,
-        config.provider.emitsMidTurnText === true,
+        midTurnCompleteDelivery,
       );
       if (result.continuation && result.continuation !== continuation) {
         continuation = result.continuation;
@@ -300,11 +298,11 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         // dropped by delivery.ts's routing-field guard. Route it the same
         // door a successful task run's final text uses instead, and fail
         // the run so `ncl tasks list` and recurrence backoff both see it.
-        autoAppendTaskLog(`Run FAILED: ${errMsg}`);
+        await autoAppendTaskLog(`Run FAILED: ${errMsg}`);
         taskRunErrored = true;
       } else {
         // Write error response so the user knows something went wrong
-        writeMessageOut({
+        await writeMessageOut({
           id: generateId(),
           kind: 'chat',
           platform_id: routing.platformId,
@@ -320,7 +318,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         `Errored batch will be acked ${taskRunErrored ? 'failed' : 'completed'} — ${processingIds.length} message(s), no redelivery`,
       );
     } finally {
-      clearCurrentInReplyTo();
+      clearCurrentReplyRoute();
       config.signal?.removeEventListener('abort', abortActiveQuery);
     }
 
@@ -342,13 +340,17 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
  * passthrough commands are sent raw (no XML wrapping) so the SDK can
  * dispatch them. Otherwise they fall through to standard XML formatting.
  */
-function formatMessagesWithCommands(messages: MessageInRow[], nativeSlashCommands: boolean): string {
+function formatMessagesWithCommands(
+  messages: MessageInRow[],
+  nativeSlashCommands: boolean,
+  providerName: string,
+): string {
   const parts: string[] = [];
   const normalBatch: MessageInRow[] = [];
 
   for (const msg of messages) {
     if (nativeSlashCommands && (msg.kind === 'chat' || msg.kind === 'chat-sdk')) {
-      const cmdInfo = categorizeMessage(msg);
+      const cmdInfo = categorizeMessage(msg, providerName);
       if (cmdInfo.category === 'passthrough' || cmdInfo.category === 'admin') {
         // Flush normal batch first
         if (normalBatch.length > 0) {
@@ -383,16 +385,19 @@ export async function processQuery(
   initialPrompt: string,
   initialContinuation: string | undefined,
   /**
-   * The provider's declared `emitsMidTurnText` capability (see
-   * providers/types.ts). True → mid-turn streaming is the single content
+   * The provider contract's `textDelivery: 'mid-turn-complete'`. True →
+   * mid-turn streaming is the single content
    * door: complete <message> blocks deliver exactly once, at parse time from
    * streamed 'text' events (with cross-segment assembly of split blocks),
    * and the final result never delivers content — it only surfaces error
    * results and decides the wrap-nudge. False → text events are
    * delivery-inert and the final result stays the single delivery door.
    */
-  emitsMidTurnText = false,
+  midTurnCompleteDelivery = false,
 ): Promise<QueryResult> {
+  // adoptTurn mutates routing in place; copy so the caller's batch routing
+  // (used for the query error notice) stays the first message's.
+  routing = { ...routing };
   let queryContinuation: string | undefined;
   let done = false;
   let unwrappedNudged = false;
@@ -400,7 +405,7 @@ export async function processQuery(
   // nudge — mirrors unwrappedNudged for chat turns.
   let taskBlockNudged = false;
   // How many <message> blocks were delivered from 'text' events this turn
-  // (chat runs, emitsMidTurnText providers only). A frame-local count, never
+  // (chat runs, mid-turn delivery providers only). A frame-local count, never
   // keyed by content: it feeds the result door's nudge decision ("did this
   // turn deliver anything?"). Reset at the turn boundary (the 'result'
   // event) — NOT at the follow-up push seam: query.push() does not end the
@@ -430,10 +435,37 @@ export async function processQuery(
   // closes anywhere is the wrap-nudge's job, not the buffer's.
   let midTurnTail = '';
   // Prompt queue for the exchange hook — each result event consumes the
-  // oldest unanswered prompt, except a wrapping-retry result, which answers
-  // the same prompt again. Unused (and unmaintained) when the provider
-  // doesn't implement `onExchangeComplete`.
-  const archivePrompts: string[] = [initialPrompt];
+  // oldest unanswered prompt. Retries append the original user prompt at
+  // their position in the provider input queue.
+  const archivePrompts: string[] = initialPrompt ? [initialPrompt] : [];
+  // Where replies go is a property of the TURN, not the query. The query
+  // stays open across turns (below), so a message pushed after the previous
+  // answer finished is a new turn and replies go to ITS thread; a message
+  // pushed while an answer is still streaming waits its turn — the in-flight
+  // answer keeps the destination it started with. Pushed routes queue in
+  // push order (including retries) and advance at every result, mirroring
+  // archivePrompts. An empty initial prompt (a pre-warmed query) starts idle.
+  let answering = initialPrompt !== '';
+  type QueuedTurn = {
+    routing: RoutingContext;
+    unwrappedNudged: boolean;
+    taskBlockNudged: boolean;
+  };
+  const queuedTurns: QueuedTurn[] = [];
+  const adoptTurn = (next: QueuedTurn): void => {
+    Object.assign(routing, next.routing);
+    unwrappedNudged = next.unwrappedNudged;
+    taskBlockNudged = next.taskBlockNudged;
+    publishReplyRoute(routing);
+    answering = true;
+  };
+  // A retry is another provider input, behind any follow-ups already pushed.
+  // Preserve its original route, prompt and retry guards until it is answered.
+  const pushRetry = (prompt: string): void => {
+    query.push(prompt);
+    queuedTurns.push({ routing: { ...routing }, unwrappedNudged, taskBlockNudged });
+    archivePrompts.push(archivePrompts[0] ?? initialPrompt);
+  };
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
   // We do NOT force-end the stream on silence — keeping the query open avoids
@@ -446,7 +478,7 @@ export async function processQuery(
   // will kill the container and messages get reset to pending.
   let pollInFlight = false;
   let endedForCommand = false;
-  let corruptionStreak = 0;
+  let mailboxFailureStreak = 0;
   const pollHandle = setInterval(() => {
     if (done || pollInFlight || endedForCommand) return;
     pollInFlight = true;
@@ -465,7 +497,7 @@ export async function processQuery(
         // not end: end() lets an in-flight turn run to completion, which
         // can block the command (e.g. /clear during a long task) for as
         // long as the turn takes.
-        if (pending.some((m) => isRunnerCommand(m))) {
+        if (pending.some((m) => isRunnerCommand(m, providerName))) {
           log('Pending slash command — aborting active stream so outer loop can process');
           endedForCommand = true;
           query.abort();
@@ -521,10 +553,15 @@ export async function processQuery(
         const keptIds = keep.map((m) => m.id);
         const prompt = formatMessages(keep);
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
-        unwrappedNudged = false;
-        taskBlockNudged = false;
         query.push(prompt);
         archivePrompts.push(prompt);
+        const next: QueuedTurn = {
+          routing: extractRouting(keep),
+          unwrappedNudged: false,
+          taskBlockNudged: false,
+        };
+        if (answering) queuedTurns.push(next);
+        else adoptTurn(next);
         markCompleted(keptIds);
       } catch (err) {
         // Without this catch the rejection escapes the void IIFE and Node
@@ -534,18 +571,12 @@ export async function processQuery(
         const errMsg = err instanceof Error ? err.message : String(err);
         log(`Follow-up poll error: ${errMsg}`);
 
-        // Detect SQLite cross-mount corruption (Docker Desktop macOS virtiofs /
-        // gRPC-FUSE coherency bug — the kernel page cache for the inbound.db
-        // bind mount can latch a torn snapshot mid-host-write, after which
-        // every fresh openInboundDb() in this process sees the same broken
-        // view. Reopening inside the container does NOT recover; only a fresh
-        // container mount does. Exit so the host sweep respawns us.
-        if (isCorruptionError(errMsg)) {
-          corruptionStreak += 1;
-          if (corruptionStreak >= CORRUPTION_STREAK_EXIT) {
+        if (getAgentMailbox().shouldRestartAfter?.(err)) {
+          mailboxFailureStreak += 1;
+          if (mailboxFailureStreak >= MAILBOX_FAILURE_STREAK_EXIT) {
             log(
-              `Follow-up poll: ${corruptionStreak} consecutive '${errMsg}' errors — ` +
-                `inbound.db page cache is poisoned. Exiting so host respawns with a fresh mount.`,
+              `Follow-up poll: ${mailboxFailureStreak} consecutive '${errMsg}' errors — ` +
+                `mailbox driver requested a fresh runner. Exiting so the host respawns it.`,
             );
             // Stop touching the heartbeat so host-sweep stale detection fires
             // promptly even if exit() races with in-flight async work.
@@ -556,7 +587,7 @@ export async function processQuery(
             setTimeout(() => process.exit(75), 100);
           }
         } else {
-          corruptionStreak = 0;
+          mailboxFailureStreak = 0;
         }
       } finally {
         pollInFlight = false;
@@ -583,11 +614,11 @@ export async function processQuery(
         // final result only carries the LAST assistant text, so complete
         // <message> blocks composed here would otherwise be lost — deliver
         // them now (chat runs only; task runs stay one-door). Gated on the
-        // provider's static capability: for a provider that does not declare
-        // emitsMidTurnText the result stays the only delivery door, so a
-        // stray text event must not open a second one.
-        if (emitsMidTurnText) {
-          const scan = deliverMidTurnBlocks(event.text, routing, turnStartSeq, midTurnTail);
+        // provider contract: for a provider that does not declare mid-turn
+        // delivery the result stays the only delivery door, so a stray text
+        // event must not open a second one.
+        if (midTurnCompleteDelivery) {
+          const scan = await deliverMidTurnBlocks(event.text, routing, turnStartSeq, midTurnTail);
           midTurnSent += scan.delivered;
           midTurnTail = scan.tail;
         }
@@ -600,20 +631,20 @@ export async function processQuery(
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
         if (event.text) {
-          const { sent, hasUnwrapped, taskBlocks, resultBlocks } = dispatchResultText(event.text, routing, {
+          const { sent, hasUnwrapped, taskBlocks, resultBlocks } = await dispatchResultText(event.text, routing, {
             midTurnSent,
-            // For emitsMidTurnText providers the result door NEVER delivers
+            // For mid-turn delivery providers the result door NEVER delivers
             // content (error results excepted, below): mid-turn streaming is
             // the single content door. The result door's remaining job is
             // the nudge decision — see turnDelivered.
-            suppressDelivery: emitsMidTurnText,
+            suppressDelivery: midTurnCompleteDelivery,
             // "Did anything user-visible go out this turn?" — door
             // deliveries (midTurnSent) plus any chat row written since the
             // turn boundary (which also sees MCP send_message calls the
             // frame-local count can't). When false and the result still
             // carries content, the wrap-nudge fires so the model re-sends
             // and the retry streams through the mid-turn door.
-            turnDelivered: emitsMidTurnText ? midTurnSent > 0 || chatRowWrittenSince(turnStartSeq) : undefined,
+            turnDelivered: midTurnCompleteDelivery ? midTurnSent > 0 || chatRowWrittenSince(turnStartSeq) : undefined,
           });
           const willRetryTaskBlocks = shouldNudgeTaskBlocks(routing.taskRun, taskBlocks, taskBlockNudged);
           // One-door task delivery: the final text becomes the run log entry
@@ -621,13 +652,13 @@ export async function processQuery(
           // Errors included: a failed run's text belongs in its log, not chat.
           // A corrective retry handles delivery only; its result is not a
           // second run summary.
-          if (routing.taskRun && !taskBlockNudged) autoAppendTaskLog(event.text);
+          if (routing.taskRun && !taskBlockNudged) await autoAppendTaskLog(event.text);
           if (resultBlocks === 0 && event.isError === true && !routing.taskRun) {
             // Non-retryable error turn (e.g. a 403 billing_error) with no
             // <message> envelope: deliver the notice instead of dropping it as
             // scratchpad, and skip the re-wrap nudge — it would just re-hammer
             // the failing gateway turn after turn.
-            deliverErrorResult(event.text, routing);
+            await deliverErrorResult(event.text, routing);
             notifyExchangeComplete(onExchangeComplete, {
               prompt: archivePrompts[0] ?? initialPrompt,
               result: event.text,
@@ -653,7 +684,7 @@ export async function processQuery(
               unwrappedNudged = true;
               const destinations = getAllDestinations();
               const names = destinations.map((d) => d.name).join(', ');
-              query.push(
+              pushRetry(
                 `<system>Your response was not delivered — it was not wrapped in <message to="name">...</message> blocks. ` +
                   `All output must be wrapped: use <message to="name"> for content to send, or <internal> for scratchpad. ` +
                   `Your destinations: ${names}. ` +
@@ -665,12 +696,11 @@ export async function processQuery(
               const names = getAllDestinations()
                 .map((d) => d.name)
                 .join(', ');
-              query.push(buildTaskBlockNudge(taskBlocks, names));
+              pushRetry(buildTaskBlockNudge(taskBlocks, names));
             }
-            // A retry result (wrapping or task-block nudge) answers the SAME
-            // user prompt — keep it queued so the retry archives against it,
-            // not the nudge text.
-            if (!willRetryWrapping && !willRetryTaskBlocks) archivePrompts.shift();
+            // Each result consumes one input; retries carry their original
+            // user prompt at their own position in the FIFO queue.
+            archivePrompts.shift();
           }
         } else archivePrompts.shift();
         // Turn boundary: reset the per-turn sent count after the result's
@@ -685,6 +715,9 @@ export async function processQuery(
         midTurnSent = 0;
         turnStartSeq = maxOutboundSeq();
         midTurnTail = '';
+        const next = queuedTurns.shift();
+        if (next) adoptTurn(next);
+        else answering = false;
       }
     }
   } catch (err) {
@@ -742,9 +775,9 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
  * This is the same user-facing write the outer catch block does, minus the
  * `Error:` prefix — the provider's text is already a user-facing message.
  */
-function deliverErrorResult(text: string, routing: RoutingContext): void {
+async function deliverErrorResult(text: string, routing: RoutingContext): Promise<void> {
   log('Error result with no <message> envelope — delivering to channel');
-  writeMessageOut({
+  await writeMessageOut({
     id: generateId(),
     in_reply_to: routing.inReplyTo,
     kind: 'chat',
@@ -778,7 +811,7 @@ export interface ResultDispatchOptions {
    */
   midTurnSent?: number;
   /**
-   * Providers declaring `emitsMidTurnText`: the result door NEVER delivers
+   * Providers declaring `textDelivery: 'mid-turn-complete'`: the result door NEVER delivers
    * content. Mid-turn streaming (parse-time block delivery plus cross-
    * segment assembly) is the single content door; a complete <message>
    * block in the result text is at best a repeat of a mid-turn delivery and
@@ -847,12 +880,12 @@ export interface MidTurnScanResult {
   tail: string;
 }
 
-export function deliverMidTurnBlocks(
+export async function deliverMidTurnBlocks(
   text: string,
   routing: RoutingContext,
   turnStartSeq?: number,
   carry = '',
-): MidTurnScanResult {
+): Promise<MidTurnScanResult> {
   if (routing.taskRun) return { delivered: 0, tail: '' };
   const input = carry + text;
   const tailStart = unresolvedTailStart(input);
@@ -896,7 +929,7 @@ export function deliverMidTurnBlocks(
       log(`Mid-turn <message to="${toName}"> is a verbatim repeat of a message already sent this turn — skipped`);
       continue;
     }
-    sendToDestination(dest, body, routing);
+    await sendToDestination(dest, body, routing);
     delivered++;
     log(`Mid-turn delivery: <message to="${toName}"> (${body.length} chars)`);
   }
@@ -957,7 +990,7 @@ function trailingTagPrefixStart(masked: string): number {
 
 /** Current outbound seq high-water mark (0 when the table is empty). */
 function maxOutboundSeq(): number {
-  return (getOutboundDb().prepare('SELECT COALESCE(MAX(seq), 0) AS m FROM messages_out').get() as { m: number }).m;
+  return getUndeliveredMessages().reduce((max, message) => Math.max(max, message.seq ?? 0), 0);
 }
 
 /**
@@ -970,10 +1003,8 @@ function maxOutboundSeq(): number {
  */
 function chatRowWrittenSince(afterSeq: number): boolean {
   try {
-    const row = getOutboundDb()
-      .prepare("SELECT 1 AS hit FROM messages_out WHERE seq > ? AND kind = 'chat' LIMIT 1")
-      .get(afterSeq);
-    return row !== undefined && row !== null;
+    // ponytail: reuse the existing semantic read; add a cursor operation only if history scans show up in profiles.
+    return getUndeliveredMessages().some((message) => (message.seq ?? 0) > afterSeq && message.kind === 'chat');
   } catch (err) {
     log(`chatRowWrittenSince failed: ${err instanceof Error ? err.message : String(err)}`);
     return false;
@@ -993,15 +1024,16 @@ function wasWrittenInSeqWindow(dest: DestinationEntry, body: string, afterSeq: n
   try {
     const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
     const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
-    const row = getOutboundDb()
-      .prepare(
-        `SELECT 1 AS hit FROM messages_out
-         WHERE seq > ? AND seq <= ? AND kind = 'chat'
-           AND platform_id = ? AND channel_type = ? AND content = ?
-         LIMIT 1`,
-      )
-      .get(afterSeq, uptoSeq, platformId, channelType, JSON.stringify({ text: body }));
-    return row !== undefined && row !== null;
+    const content = JSON.stringify({ text: body });
+    return getUndeliveredMessages().some(
+      (message) =>
+        (message.seq ?? 0) > afterSeq &&
+        (message.seq ?? 0) <= uptoSeq &&
+        message.kind === 'chat' &&
+        message.platform_id === platformId &&
+        message.channel_type === channelType &&
+        message.content === content,
+    );
   } catch (err) {
     // The guard is an anti-duplication refinement; if the lookup itself
     // fails, fall through to delivery (the write will surface any real DB
@@ -1011,11 +1043,11 @@ function wasWrittenInSeqWindow(dest: DestinationEntry, body: string, afterSeq: n
   }
 }
 
-export function dispatchResultText(
+export async function dispatchResultText(
   text: string,
   routing: RoutingContext,
   options?: ResultDispatchOptions,
-): { sent: number; hasUnwrapped: boolean; taskBlocks: TaskMessageBlock[]; resultBlocks: number } {
+): Promise<{ sent: number; hasUnwrapped: boolean; taskBlocks: TaskMessageBlock[]; resultBlocks: number }> {
   // <internal> spans are not-for-delivery scratchpad. Remove them BEFORE block
   // extraction so a <message> drafted inside one is never delivered from the
   // final text either — the mid-turn seam already guarantees this; without the
@@ -1075,7 +1107,7 @@ export function dispatchResultText(
       scratchpadParts.push(`[not delivered — empty after sanitization; to="${toName}"]`);
       continue;
     }
-    // One content door: with an emitsMidTurnText provider the result door
+    // One content door: with a mid-turn delivery provider the result door
     // never sends. A deliverable block here is either a repeat of a mid-turn
     // delivery (turnDelivered — keep it out of the scratchpad so it does not
     // read as an undelivered reply) or content the streaming door missed —
@@ -1086,12 +1118,14 @@ export function dispatchResultText(
       if (options.turnDelivered) {
         log(`<message to="${toName}"> in final result after a same-turn delivery — repeat, result door does not send`);
       } else {
-        log(`<message to="${toName}"> in final result but nothing was delivered this turn — nudging for a mid-turn resend`);
+        log(
+          `<message to="${toName}"> in final result but nothing was delivered this turn — nudging for a mid-turn resend`,
+        );
         scratchpadParts.push(`[not delivered — the result door does not send; to="${toName}"] ${body}`);
       }
       continue;
     }
-    sendToDestination(dest, body, routing);
+    await sendToDestination(dest, body, routing);
     sent++;
   }
   if (lastIndex < text.length) {
@@ -1157,7 +1191,7 @@ function escapePromptXml(value: string): string {
  * `task_log` outbound row; the host appends it to the series' tasks/<id>.md
  * with its usual timestamp stamp. Never delivered to anyone.
  */
-export function autoAppendTaskLog(text: string): void {
+export async function autoAppendTaskLog(text: string): Promise<void> {
   // Run-log hygiene: an inert <message to> block never belongs in the log as
   // raw XML — replace each with its inner text, marked undelivered, so the
   // log stays readable prose.
@@ -1167,7 +1201,7 @@ export function autoAppendTaskLog(text: string): void {
   );
   const line = stripInternalTags(prose).replace(/\s+/g, ' ').trim().slice(0, 500);
   if (!line) return;
-  writeMessageOut({
+  await writeMessageOut({
     id: generateId(),
     kind: 'task_log',
     content: JSON.stringify({ text: line }),
@@ -1175,15 +1209,16 @@ export function autoAppendTaskLog(text: string): void {
   log('Task run log auto-appended from final text');
 }
 
-function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): void {
+async function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): Promise<void> {
   const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
   const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
-  // Resolve thread_id per-destination from the most recent inbound message
-  // that came from this same channel+platform. In agent-shared sessions,
-  // different destinations have different thread contexts — using a single
-  // routing.threadId would stamp one channel's thread onto another.
-  const destRouting = resolveDestinationThread(channelType, platformId);
-  writeMessageOut({
+  // Thread per destination: the batch's own thread when the destination is the
+  // channel being answered, else that channel's latest inbound thread. In
+  // agent-shared sessions different destinations have different thread
+  // contexts — stamping routing.threadId on every send would put one channel's
+  // thread onto another.
+  const destRouting = resolveDestinationThread(channelType, platformId, routing);
+  await writeMessageOut({
     id: generateId(),
     in_reply_to: destRouting?.inReplyTo ?? routing.inReplyTo,
     kind: 'chat',
@@ -1194,28 +1229,18 @@ function sendToDestination(dest: DestinationEntry, body: string, routing: Routin
   });
 }
 
-/**
- * Find the thread_id and message id from the most recent inbound message
- * matching the given channel+platform. Returns null if no match found.
- */
-function resolveDestinationThread(
-  channelType: string,
-  platformId: string,
-): { threadId: string | null; inReplyTo: string | null } | null {
-  try {
-    const db = getInboundDb();
-    const row = db
-      .prepare(
-        `SELECT thread_id, id FROM messages_in
-         WHERE channel_type = ? AND platform_id = ?
-         ORDER BY seq DESC LIMIT 1`,
-      )
-      .get(channelType, platformId) as { thread_id: string | null; id: string } | undefined;
-    if (row) return { threadId: row.thread_id, inReplyTo: row.id };
-  } catch (err) {
-    log(`resolveDestinationThread error: ${err instanceof Error ? err.message : String(err)}`);
-  }
-  return null;
+/** Publish `routing` as the reply stamp the MCP tools read (null route clears it). */
+function publishReplyRoute(routing: RoutingContext): void {
+  setCurrentReplyRoute(
+    routing.inReplyTo
+      ? {
+          inReplyTo: routing.inReplyTo,
+          channelType: routing.channelType,
+          platformId: routing.platformId,
+          threadId: routing.threadId,
+        }
+      : null,
+  );
 }
 
 function sleep(ms: number): Promise<void> {

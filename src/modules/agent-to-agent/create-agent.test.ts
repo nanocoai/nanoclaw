@@ -9,9 +9,20 @@
  * delivery action (the only reachable path) and the approve continuation's
  * grant-carrying re-entry.
  */
+import fs from 'fs';
+import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { PendingApproval, Session } from '../../types.js';
+
+// The folder-dedupe loop is disk-aware (A4): point GROUPS_DIR at a temp root
+// so the residue-skip test controls what is on disk. Absent for every other
+// test, so their behavior is unchanged.
+const A2A_TEST_ROOT = '/tmp/nanoclaw-test-a2a-create-agent';
+vi.mock('../../config.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../config.js')>()),
+  GROUPS_DIR: '/tmp/nanoclaw-test-a2a-create-agent/groups',
+}));
 
 // Mocks for the collaborators the branch decides between / depends on.
 // vi.hoisted: the module barrel import below runs before this file's const
@@ -74,7 +85,6 @@ vi.mock('../../session-manager.js', () => ({
   readOutboxFiles: vi.fn().mockReturnValue([]),
   resolveSession: vi.fn(),
   sessionDir: vi.fn().mockReturnValue('/tmp/nowhere'),
-  inboundDbPath: vi.fn().mockReturnValue('/tmp/nowhere/inbound.db'),
 }));
 vi.mock('../../container-runner.js', () => ({
   wakeContainer: vi.fn().mockResolvedValue(undefined),
@@ -97,7 +107,7 @@ const SESSION = { id: 'sess-1', agent_group_id: 'ag-1' } as Session;
 async function runCreateAgent(content: Record<string, unknown>): Promise<void> {
   const wrapped = getDeliveryAction('create_agent');
   expect(wrapped).toBeDefined();
-  await wrapped!(content, SESSION, undefined as never);
+  await wrapped!(content, SESSION);
 }
 
 function liveGrant(approvalId: string, payload: Record<string, unknown>): PendingApproval {
@@ -207,6 +217,23 @@ describe('create_agent — guard-based authorization (wrapped delivery action)',
 
     expect(mockRequestApproval).not.toHaveBeenCalled();
     expect(mockCreateAgentGroup).not.toHaveBeenCalled();
+  });
+
+  it('skips deleted-group residue on disk when minting the folder (A4)', async () => {
+    // groups/scout exists on disk but no DB row claims it (the mocked
+    // getAgentGroupByFolder always returns undefined) — exactly the state
+    // `ncl groups delete` leaves behind. The dedupe loop must treat disk
+    // presence as taken and mint scout-2, never adopt the residue.
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+    fs.mkdirSync(path.join(A2A_TEST_ROOT, 'groups', 'scout'), { recursive: true });
+    try {
+      await runCreateAgent({ name: 'Scout', instructions: 'help' });
+
+      expect(mockCreateAgentGroup).toHaveBeenCalledTimes(1);
+      expect(mockCreateAgentGroup.mock.calls[0][0]).toMatchObject({ folder: 'scout-2' });
+    } finally {
+      fs.rmSync(A2A_TEST_ROOT, { recursive: true, force: true });
+    }
   });
 });
 

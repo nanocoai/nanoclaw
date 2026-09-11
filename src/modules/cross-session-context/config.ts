@@ -36,3 +36,8 @@ export const ECHO_MAX_AGE_DAYS = 7;
 /** Backfill prelude surface: THIS DM's preceding timeline (first-class
  *  conversation history), distinct from live cross-thread fan echoes. */
 export const ECHO_TIMELINE_SURFACE = 'dm-timeline';
+
+/** Backfill prelude surface for group conversations: group surfaces can be
+ *  per-thread too, so a new thread session is seeded with the channel's
+ *  top-level timeline — same messaging group means the same audience. */
+export const ECHO_CHANNEL_TIMELINE_SURFACE = 'channel-timeline';

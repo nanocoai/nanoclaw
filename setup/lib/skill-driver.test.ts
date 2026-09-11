@@ -1,10 +1,24 @@
 import { describe, it, expect, vi } from 'vitest';
+import * as p from '@clack/prompts';
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { runSkill, hostExec, hostExecStream, labelOrdinals, literalChoices, promptValidator, clackResolveInput, type RunSkillOptions } from './skill-driver.js';
-import { fullyApplied, type ApplyEvent } from '../../scripts/skill-apply.js';
+import {
+  runSkill,
+  hostExec,
+  hostExecStream,
+  labelOrdinals,
+  literalChoices,
+  promptValidator,
+  clackResolveInput,
+  applyOutcome,
+  plainDuration,
+  parseDriverArgv,
+  unknownInputKeys,
+  type RunSkillOptions,
+} from './skill-driver.js';
+import { fullyApplied, type ApplyEvent, type ApplyResult } from '../../scripts/skill-apply.js';
 
 // Shared test state for the clack + claude-handoff mocks (hoisted so the vi.mock
 // factories — which run before imports — can close over it). `answers` is the
@@ -98,7 +112,11 @@ describe('thin skill driver', () => {
   it('runs fully from inputs — resolveInput never touched', async () => {
     const { root, skill } = scratch();
     const ran: string[] = [];
-    const res = await runSkill(skill, { projectRoot: root, inputs: { token: 'FROM-INPUTS' }, exec: (c) => void ran.push(c) });
+    const res = await runSkill(skill, {
+      projectRoot: root,
+      inputs: { token: 'FROM-INPUTS' },
+      exec: (c) => void ran.push(c),
+    });
     expect(fullyApplied(res)).toBe(true);
     expect(ran).toContain('ncl wire --token FROM-INPUTS');
   });
@@ -512,5 +530,97 @@ describe('labelOrdinals (repeated-caption disambiguation)', () => {
     const suffixes = [...labelOrdinals(md).values()];
     expect(suffixes).toContain(' (1/2)');
     expect(suffixes).toContain(' (2/2)');
+  });
+});
+
+describe('applyOutcome (the CLI verdict a nesting effect:step reads)', () => {
+  const base: ApplyResult = {
+    deferred: [],
+    agentTasks: [],
+    journal: [],
+    vars: {},
+    operatorMessages: [],
+  } as unknown as ApplyResult;
+
+  it('a full apply is success / exit 0', () => {
+    expect(applyOutcome(base)).toEqual({ status: 'success', exitCode: 0 });
+  });
+
+  it('deferred input or a bounced directive is failed / exit 1 — never a silent success to the caller', () => {
+    expect(applyOutcome({ ...base, deferred: ['token'] })).toEqual({ status: 'failed', exitCode: 1 });
+    expect(
+      applyOutcome({
+        ...base,
+        agentTasks: [{ line: 3, kind: 'run', reason: 'exit 1: boom' }] as ApplyResult['agentTasks'],
+      }),
+    ).toEqual({ status: 'failed', exitCode: 1 });
+  });
+});
+
+describe('non-TTY step lines (CI logs, a nested apply under the parent driver)', () => {
+  it('plainDuration mirrors the spinner suffix', () => {
+    expect(plainDuration(400)).toBe('(0s)');
+    expect(plainDuration(3_200)).toBe('(3s)');
+    expect(plainDuration(102_000)).toBe('(1m 42s)');
+  });
+
+  it('prints one plain line per finished step when stdout is not a TTY, instead of silence', async () => {
+    // vitest's stdout is a pipe, so the default handler takes the non-TTY path.
+    expect(process.stdout.isTTY).toBeFalsy();
+    const root = mkdtempSync(join(tmpdir(), 'sd-plain-'));
+    const skill = join(root, '.claude/skills/plain');
+    mkdirSync(skill, { recursive: true });
+    writeFileSync(join(root, 'package.json'), '{"name":"scratch"}\n');
+    writeFileSync(
+      join(skill, 'SKILL.md'),
+      ['# Plain', '', '## Build the image', '', '```nc:run effect:build', 'echo build', '```', ''].join('\n'),
+    );
+    const success = vi.spyOn(p.log, 'success').mockImplementation(() => {});
+    const res = await runSkill(skill, { projectRoot: root, exec: () => '' });
+    expect(fullyApplied(res)).toBe(true);
+    expect(success).toHaveBeenCalledTimes(1);
+    expect(success.mock.calls[0][0]).toMatch(/^Build the image \(\d+s\)$/);
+    success.mockRestore();
+  });
+});
+
+describe('parseDriverArgv (the CLI argv contract behind nested `--input` handoffs)', () => {
+  it('parses the skill dir and repeated --input pairs, keeping later `=` in the value', () => {
+    expect(parseDriverArgv(['skills/x', '--input', 'a=1', '--input', 'b=k=v'])).toEqual({
+      skillDir: 'skills/x',
+      inputs: { a: '1', b: 'k=v' },
+    });
+    expect(parseDriverArgv(['skills/x'])).toEqual({ skillDir: 'skills/x', inputs: {} });
+  });
+
+  it('refuses a bare argument — the orphaned half of an unquoted, word-split --input', () => {
+    expect(parseDriverArgv(['skills/x', 'ag-b'])).toEqual({ error: 'unexpected argument: ag-b' });
+    expect(parseDriverArgv(['skills/x', '--input', 'dial_agents=ag-a', 'ag-b'])).toEqual({
+      error: 'unexpected argument: ag-b',
+    });
+  });
+
+  it('refuses --input with a missing or malformed pair', () => {
+    expect(parseDriverArgv(['skills/x', '--input'])).toEqual({ error: '--input expects key=value, got nothing' });
+    expect(parseDriverArgv(['skills/x', '--input', 'novalue'])).toEqual({
+      error: '--input expects key=value, got: novalue',
+    });
+    expect(parseDriverArgv(['skills/x', '--input', '=v'])).toEqual({ error: '--input expects key=value, got: =v' });
+    expect(parseDriverArgv([])).toEqual({ error: 'missing <skill-dir>' });
+  });
+});
+
+describe('unknownInputKeys (a typoed --input key must refuse, not fall through to a piped prompt)', () => {
+  it('flags keys naming no nc:prompt var and accepts ones that do', () => {
+    const skill = mkdtempSync(join(tmpdir(), 'driver-keys-'));
+    writeFileSync(
+      join(skill, 'SKILL.md'),
+      ['# Keys', '', '## Ask', '', '```nc:prompt dial_agents validate:^(all|none)$', 'Which agents?', '```', ''].join(
+        '\n',
+      ),
+    );
+    expect(unknownInputKeys(skill, { dial_agents: 'all' })).toEqual([]);
+    expect(unknownInputKeys(skill, { dail_agents: 'all' })).toEqual(['dail_agents']);
+    expect(unknownInputKeys(skill, { dial_agents: 'all', extra: 'x' })).toEqual(['extra']);
   });
 });

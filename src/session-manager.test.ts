@@ -8,6 +8,7 @@
  * open call reverts to the readonly form.
  */
 import fs from 'fs';
+import path from 'path';
 import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -17,13 +18,16 @@ vi.mock('./config.js', async () => {
 });
 
 import {
+  destroySessionMailbox,
   initSessionFolder,
-  inboundDbPath,
-  outboundDbPath,
+  sessionContextPath,
   sessionDir,
+  withMailboxSession,
   writeOutboundDirect,
+  writeSessionContext,
   writeSessionMessage,
 } from './session-manager.js';
+import { inboundDbPath, outboundDbPath } from './mailbox/sqlite/paths.js';
 import { initTestDb, closeDb, runMigrations, createAgentGroup } from './db/index.js';
 import { createSession } from './db/sessions.js';
 import type { Session } from './types.js';
@@ -56,10 +60,55 @@ afterEach(() => {
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
 });
 
+describe('withMailboxSession', () => {
+  it('rejects same-key nesting and allows different keys', async () => {
+    await expect(withMailboxSession(AG, SESS, () => withMailboxSession(AG, SESS, () => undefined))).rejects.toThrow(
+      `Nested mailbox session for ${AG}/${SESS}`,
+    );
+
+    await expect(
+      withMailboxSession(AG, SESS, () => withMailboxSession(AG, `${SESS}-other`, () => undefined)),
+    ).resolves.toBeUndefined();
+  });
+
+  it('destroys only mailbox-owned files', async () => {
+    const workspaceFile = path.join(sessionDir(AG, SESS), 'workspace.txt');
+    fs.writeFileSync(workspaceFile, 'keep');
+
+    await destroySessionMailbox(AG, SESS);
+
+    expect(fs.existsSync(inboundDbPath(AG, SESS))).toBe(false);
+    expect(fs.existsSync(outboundDbPath(AG, SESS))).toBe(false);
+    expect(fs.readFileSync(workspaceFile, 'utf8')).toBe('keep');
+  });
+});
+
+describe('writeSessionContext', () => {
+  it('writes from a host-owned path even if the agent plants the old session path', () => {
+    const plantedPath = path.join(sessionDir(AG, SESS), '.nanoclaw-session.json');
+    const victimPath = path.join(TEST_DIR, 'victim.json');
+    fs.writeFileSync(victimPath, 'unchanged');
+    fs.symlinkSync(victimPath, plantedPath);
+
+    writeSessionContext(AG, SESS, { implementation: 'test' });
+
+    const contextPath = sessionContextPath(AG, SESS);
+    expect(contextPath.startsWith(`${sessionDir(AG, SESS)}${path.sep}`)).toBe(false);
+    expect(fs.readFileSync(victimPath, 'utf8')).toBe('unchanged');
+    expect(fs.lstatSync(plantedPath).isSymbolicLink()).toBe(true);
+    expect(JSON.parse(fs.readFileSync(contextPath, 'utf8'))).toEqual({
+      agentGroupId: AG,
+      sessionId: SESS,
+      mailbox: { implementation: 'test' },
+    });
+    expect(fs.statSync(contextPath).mode & 0o777).toBe(0o600);
+  });
+});
+
 describe('writeOutboundDirect', () => {
-  it('inserts into messages_out with an even host-side seq (requires a writable outbound.db)', () => {
+  it('inserts into messages_out with an even host-side seq (requires a writable outbound.db)', async () => {
     // With a readonly open this very call throws SQLITE_READONLY.
-    writeOutboundDirect(AG, SESS, {
+    await writeOutboundDirect(AG, SESS, {
       id: 'denial-1',
       kind: 'chat',
       platformId: 'slack:C1',
@@ -76,8 +125,8 @@ describe('writeOutboundDirect', () => {
     expect(JSON.parse(rows[0].content).text).toBe('Admin commands are restricted.');
   });
 
-  it('keeps host seq numbers even across multiple writes and ignores duplicate ids', () => {
-    writeOutboundDirect(AG, SESS, {
+  it('keeps host seq numbers even across multiple writes and ignores duplicate ids', async () => {
+    await writeOutboundDirect(AG, SESS, {
       id: 'denial-1',
       kind: 'chat',
       platformId: null,
@@ -85,7 +134,7 @@ describe('writeOutboundDirect', () => {
       threadId: null,
       content: '{"text":"first"}',
     });
-    writeOutboundDirect(AG, SESS, {
+    await writeOutboundDirect(AG, SESS, {
       id: 'denial-2',
       kind: 'chat',
       platformId: null,
@@ -94,7 +143,7 @@ describe('writeOutboundDirect', () => {
       content: '{"text":"second"}',
     });
     // INSERT OR IGNORE — a delivery retry with the same id must not throw or duplicate.
-    writeOutboundDirect(AG, SESS, {
+    await writeOutboundDirect(AG, SESS, {
       id: 'denial-1',
       kind: 'chat',
       platformId: null,
@@ -107,6 +156,45 @@ describe('writeOutboundDirect', () => {
     expect(rows.map((r) => r.id)).toEqual(['denial-1', 'denial-2']);
     expect(rows.map((r) => r.seq)).toEqual([2, 4]);
   });
+
+  it('allocates even sequences per file — inbound writes never read outbound.db', async () => {
+    // Sequences are per-file (matching v1): host inbound seqs scan only
+    // messages_in, direct outbound seqs scan only messages_out. A shared
+    // cross-file space would make every router insert read the
+    // container-owned outbound.db across the mount — the lock coupling the
+    // two-DB split exists to prevent. Parity (host even / runner odd) is the
+    // only cross-file invariant.
+    const insert = (id: string) =>
+      withMailboxSession(AG, SESS, (mailbox) =>
+        mailbox.insertMessage({
+          id,
+          kind: 'chat',
+          timestamp: new Date().toISOString(),
+          platformId: null,
+          channelType: null,
+          threadId: null,
+          content: '{}',
+          processAfter: null,
+          recurrence: null,
+        }),
+      );
+    await insert('in-1');
+    await writeOutboundDirect(AG, SESS, {
+      id: 'out-1',
+      kind: 'chat',
+      platformId: null,
+      channelType: null,
+      threadId: null,
+      content: '{}',
+    });
+    await insert('in-2');
+
+    const inbound = new Database(inboundDbPath(AG, SESS), { readonly: true });
+    const inboundSeq = inbound.prepare('SELECT seq FROM messages_in ORDER BY seq').all() as Array<{ seq: number }>;
+    inbound.close();
+    expect(inboundSeq.map(({ seq }) => seq)).toEqual([2, 4]);
+    expect(readMessagesOut().map(({ seq }) => seq)).toEqual([2]);
+  });
 });
 
 /**
@@ -117,10 +205,10 @@ describe('writeOutboundDirect', () => {
  * message is logged-and-dropped forever — the reset silently kills the chat.
  */
 describe('writeSessionMessage re-provisions a deleted session folder', () => {
-  beforeEach(() => {
-    const db = initTestDb();
-    runMigrations(db);
-    createAgentGroup({
+  beforeEach(async () => {
+    const db = await initTestDb();
+    await runMigrations(db);
+    await createAgentGroup({
       id: AG,
       name: 'Reset',
       folder: 'reset',
@@ -138,19 +226,19 @@ describe('writeSessionMessage re-provisions a deleted session folder', () => {
       last_active: null,
       created_at: new Date().toISOString(),
     };
-    createSession(sess);
+    await createSession(sess);
   });
 
-  afterEach(() => {
-    closeDb();
+  afterEach(async () => {
+    await closeDb();
   });
 
-  it('re-creates the folder + inbound.db and does not throw when the row still exists', () => {
+  it('re-creates the folder + inbound.db and does not throw when the row still exists', async () => {
     // Operator resets a stuck session by deleting its folder; the row survives.
     fs.rmSync(sessionDir(AG, SESS), { recursive: true, force: true });
     expect(fs.existsSync(inboundDbPath(AG, SESS))).toBe(false);
 
-    expect(() =>
+    await expect(
       writeSessionMessage(AG, SESS, {
         id: 'after-reset-1',
         kind: 'chat',
@@ -160,7 +248,7 @@ describe('writeSessionMessage re-provisions a deleted session folder', () => {
         threadId: null,
         content: JSON.stringify({ text: 'still here?' }),
       }),
-    ).not.toThrow();
+    ).resolves.toBeUndefined();
 
     // The folder + inbound.db are back and the message landed.
     expect(fs.existsSync(inboundDbPath(AG, SESS))).toBe(true);

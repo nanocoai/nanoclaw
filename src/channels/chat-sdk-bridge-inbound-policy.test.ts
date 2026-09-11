@@ -97,12 +97,12 @@ function makeHostConfig(): { hostConfig: ChannelSetup; calls: InboundCall[] } {
 beforeEach(async () => {
   const { initTestDb } = await import('../db/connection.js');
   const { runMigrations } = await import('../db/migrations/index.js');
-  runMigrations(initTestDb());
+  await runMigrations(await initTestDb());
 });
 
 afterEach(async () => {
   const { closeDb } = await import('../db/connection.js');
-  closeDb();
+  await closeDb();
 });
 
 // One policy for the whole file (module-level registry, one per channelType):

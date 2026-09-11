@@ -150,7 +150,7 @@ Send a message to the agent. Then confirm:
 curl -s http://localhost:11434/api/ps | grep '"name"'
 
 # Container has the right env vars
-CTR=$(docker ps --filter "name=nanoclaw-v2-<FOLDER>" --format "{{.Names}}" | head -1)
+CTR=$(docker ps --filter "label=nanoclaw-group-folder=<FOLDER>" --format "{{.Names}}" | head -1)
 docker inspect "$CTR" --format '{{json .HostConfig.ExtraHosts}}'
 docker exec "$CTR" env | grep ANTHROPIC
 ```

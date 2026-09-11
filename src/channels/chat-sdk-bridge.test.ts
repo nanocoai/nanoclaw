@@ -145,24 +145,27 @@ describe('createChatSdkBridge.setup — webhook route and state namespace', () =
   // StateAdapter (chat_sdk_* tables) and an adapter.initialize — nothing
   // platform-side. registerWebhookAdapter is mocked at module level so we
   // can assert the (chat, adapterName, routingPath) triple.
-  function setupStubAdapter(): Adapter {
-    return stubAdapter({
-      name: 'slack',
-      initialize: async () => {},
-    } as unknown as Partial<Adapter>);
+  // runtimeMode is assigned inside initialize(), as the Telegram adapter does
+  // when mode 'auto' resolves: a guard that reads it earlier sees undefined.
+  function setupStubAdapter(runtimeMode?: 'webhook' | 'polling'): Adapter {
+    const adapter = stubAdapter({ name: 'slack' }) as Adapter & { runtimeMode?: string };
+    adapter.initialize = async () => {
+      adapter.runtimeMode = runtimeMode;
+    };
+    return adapter;
   }
 
   beforeEach(async () => {
     const { initTestDb } = await import('../db/connection.js');
     const { runMigrations } = await import('../db/migrations/index.js');
-    runMigrations(initTestDb());
+    await runMigrations(await initTestDb());
     const { registerWebhookAdapter } = await import('../webhook-server.js');
     vi.mocked(registerWebhookAdapter).mockClear();
   });
 
   afterEach(async () => {
     const { closeDb } = await import('../db/connection.js');
-    closeDb();
+    await closeDb();
   });
 
   const hostConfig = {
@@ -197,6 +200,34 @@ describe('createChatSdkBridge.setup — webhook route and state namespace', () =
     await bridge.teardown();
   });
 
+  // Polling adapters (Telegram) pull updates themselves; a registered route
+  // would lazily bind the shared webhook port, and a busy port then crashes a
+  // Telegram-only host. Kill condition: delete the `runtimeMode === 'polling'`
+  // branch in setup() and the polling case goes red.
+  it('polling adapter (mode resolved inside initialize) registers no webhook route', async () => {
+    const { registerWebhookAdapter } = await import('../webhook-server.js');
+    const bridge = createChatSdkBridge({ adapter: setupStubAdapter('polling'), supportsThreads: true });
+    await bridge.setup(hostConfig);
+    expect(registerWebhookAdapter).not.toHaveBeenCalled();
+    await bridge.teardown();
+  });
+
+  it('webhook adapter registers the route', async () => {
+    const { registerWebhookAdapter } = await import('../webhook-server.js');
+    const bridge = createChatSdkBridge({ adapter: setupStubAdapter('webhook'), supportsThreads: true });
+    await bridge.setup(hostConfig);
+    expect(registerWebhookAdapter).toHaveBeenCalledTimes(1);
+    await bridge.teardown();
+  });
+
+  it('adapter without runtimeMode registers the route (non-Telegram adapters declare none)', async () => {
+    const { registerWebhookAdapter } = await import('../webhook-server.js');
+    const bridge = createChatSdkBridge({ adapter: setupStubAdapter(), supportsThreads: true });
+    await bridge.setup(hostConfig);
+    expect(registerWebhookAdapter).toHaveBeenCalledTimes(1);
+    await bridge.teardown();
+  });
+
   it('named instance namespaces Chat SDK state; default stays unprefixed (live-install constraint)', async () => {
     const { getDb } = await import('../db/connection.js');
 
@@ -212,9 +243,9 @@ describe('createChatSdkBridge.setup — webhook route and state namespace', () =
     await def.setup(hostConfig);
     await def.subscribe!('slack:C1', 'slack:T1');
 
-    const rows = getDb().prepare('SELECT thread_id FROM chat_sdk_subscriptions ORDER BY thread_id').all() as Array<{
-      thread_id: string;
-    }>;
+    const rows = await getDb().all<{ thread_id: string }>(
+      'SELECT thread_id FROM chat_sdk_subscriptions ORDER BY thread_id',
+    );
     expect(rows.map((r) => r.thread_id)).toEqual(['slack-tester:slack:T1', 'slack:T1']);
 
     await named.teardown();
@@ -230,9 +261,7 @@ describe('createChatSdkBridge.setup — webhook route and state namespace', () =
     });
     await bridge.setup(hostConfig);
     await bridge.subscribe!('slack:C1', 'slack:T9');
-    const rows = getDb().prepare('SELECT thread_id FROM chat_sdk_subscriptions').all() as Array<{
-      thread_id: string;
-    }>;
+    const rows = await getDb().all<{ thread_id: string }>('SELECT thread_id FROM chat_sdk_subscriptions');
     expect(rows.map((r) => r.thread_id)).toEqual(['slack:T9']);
     await bridge.teardown();
   });
@@ -428,6 +457,60 @@ describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
     expect(buttons).toHaveLength(1);
     expect(buttons[0].type).toBe('link-button');
     expect(buttons[0].url).toBe('https://example.com');
+  });
+
+  it('survives a null action instead of throwing on a property read', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+    });
+    await bridge.deliver('discord:guild:chan', null, {
+      kind: 'chat-sdk',
+      content: {
+        type: 'card',
+        card: {
+          title: 'Docs',
+          actions: [null, { label: 'Open', url: 'https://example.com' }],
+        },
+      },
+    });
+    const msg = calls[0].message as {
+      card?: { children?: Array<{ type?: string; children?: Array<{ type?: string; url?: string }> }> };
+    };
+    const buttons = msg.card?.children?.find((c) => c.type === 'actions')?.children ?? [];
+    expect(buttons).toHaveLength(1);
+    expect(buttons[0].url).toBe('https://example.com');
+  });
+
+  it('renders an unknown style as the default button style rather than dropping the action', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+    });
+    await bridge.deliver('discord:guild:chan', null, {
+      kind: 'chat-sdk',
+      content: {
+        type: 'card',
+        card: {
+          title: 'Docs',
+          actions: [
+            { label: 'Open', url: 'https://example.com', style: 'chartreuse' },
+            { label: 'Also', url: 'https://example.org', style: null },
+          ],
+        },
+      },
+    });
+    const msg = calls[0].message as {
+      card?: {
+        children?: Array<{ type?: string; children?: Array<{ type?: string; url?: string; style?: string }> }>;
+      };
+    };
+    const buttons = msg.card?.children?.find((c) => c.type === 'actions')?.children ?? [];
+    expect(buttons).toHaveLength(2);
+    expect(buttons[0].style).toBeUndefined();
+    expect(buttons[1].style).toBeUndefined();
   });
 
   it('skips delivery when the card has neither title nor body content', async () => {

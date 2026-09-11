@@ -122,7 +122,9 @@ export function extendTool(name: string, extension: ToolExtension): void {
   }
 }
 
-export async function startMcpServer(): Promise<void> {
+export async function startMcpServer(
+  run: <T>(action: () => T | Promise<T>) => Promise<T> = async (action) => action(),
+): Promise<void> {
   const server = new Server({ name: 'nanoclaw', version: '2.0.0' }, { capabilities: { tools: {} } });
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -135,7 +137,7 @@ export async function startMcpServer(): Promise<void> {
     if (!tool) {
       return { content: [{ type: 'text', text: `Unknown tool: ${name}` }] };
     }
-    return tool.handler(args ?? {});
+    return run(() => tool.handler(args ?? {}));
   });
 
   const transport = new StdioServerTransport();

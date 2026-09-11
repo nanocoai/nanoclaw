@@ -131,7 +131,7 @@ NanoClaw는 설정 파일을 사용하지 않습니다. 변경하려면 Claude C
 ## 요구 사항
 
 - macOS 또는 Linux (Windows는 WSL2 경유)
-- Node.js 20+ 및 pnpm 10+ (설치 프로그램이 누락 시 둘 다 설치합니다)
+- Node.js 22+ 및 pnpm 10+ (설치 프로그램이 누락 시 둘 다 설치합니다)
 - [Docker Desktop](https://docker.com/products/docker-desktop) (macOS/Windows) 또는 Docker Engine (Linux)
 - `/customize`, `/debug`, 설정 중 오류 복구, 그리고 모든 `/add-<channel>` 스킬을 위한 [Claude Code](https://claude.ai/download)
 

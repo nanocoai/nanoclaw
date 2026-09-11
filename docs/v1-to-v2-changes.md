@@ -68,7 +68,7 @@ Message history (v1 `messages` table, v1 `chats` table) is **not migrated**. The
 - `series_id` — groups recurring occurrences; set to the task id on first insert
 - `status` — `pending` | `processing` | `completed` | `failed` | `paused`
 
-The public API is `insertTask()` in `src/modules/scheduling/db.ts`. Recurrence is computed in the user's TZ via `cron-parser` (see `src/modules/scheduling/recurrence.ts`). The migration maps v1's `schedule_type`+`schedule_value` pair into a single cron string before calling `insertTask()`.
+The public task API is the mailbox contract. The SQLite implementation lives in `src/mailbox/sqlite/tasks.ts`. Recurrence is computed in the user's TZ via `cron-parser` (see `src/modules/scheduling/recurrence.ts`).
 
 Tasks can exist before a session is awake — the host sweep creates/wakes the container on the first due tick.
 
@@ -123,7 +123,7 @@ Owner gets seeded during the `/migrate-from-v1` skill's interview phase ("Which 
 **v1:** `groups/<folder>/CLAUDE.md` and optional `logs/`. `CLAUDE.md` was a plain instruction file, group-specific.
 
 **v2:** each group still lives at `groups/<folder>/`, but the shape is richer:
-- `CLAUDE.md` or `AGENTS.md` — **composed at container spawn** from the provider's shared base, standing instructions, and capability fragments. **Don't edit it directly.**
+- `CLAUDE.md` or `AGENTS.md` — **composed at container spawn** from the provider's shared base, standing instructions, and capability instructions, all inlined into one flat file. **Don't edit it directly.**
 - `instructions.prepend.md` — provider-neutral standing role, personality, and behavior.
 - `memory/` — provider-neutral durable memory. Its index and system definition are injected when a context window starts.
 - `CLAUDE.local.md` — legacy staging only. The deterministic v1 migration writes the old `CLAUDE.md` here; `/migrate-from-v1` invokes `/migrate-memory` to move and distill it.

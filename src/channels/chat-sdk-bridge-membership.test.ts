@@ -41,19 +41,23 @@ function lastRegisteredChat(): Chat {
 /** Drive a Chat process* dispatcher and await its internal task. */
 async function dispatch(fire: (options: { waitUntil: (p: Promise<unknown>) => void }) => void): Promise<void> {
   let task: Promise<unknown> | undefined;
-  fire({ waitUntil: (p) => (task = p) });
+  fire({
+    waitUntil: (p) => {
+      task = p;
+    },
+  });
   await task;
 }
 
 beforeEach(async () => {
   const { initTestDb } = await import('../db/connection.js');
   const { runMigrations } = await import('../db/migrations/index.js');
-  runMigrations(initTestDb());
+  await runMigrations(await initTestDb());
 });
 
 afterEach(async () => {
   const { closeDb } = await import('../db/connection.js');
-  closeDb();
+  await closeDb();
   vi.restoreAllMocks();
 });
 
