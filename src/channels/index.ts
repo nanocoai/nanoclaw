@@ -70,3 +70,6 @@ import './local-web.js';
 
 // deltachat (native, no Chat SDK)
 // import './deltachat.js'
+
+// voice (OpenAI GPT-Live-1 as a full-duplex voice channel)
+import './voice.js';
