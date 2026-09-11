@@ -15,7 +15,9 @@ export interface QuestionRender {
   options: NormalizedOption[];
 }
 
-export type QuestionRenderResolver = (questionId: string) => QuestionRender | undefined;
+export type QuestionRenderResolver = (
+  questionId: string,
+) => QuestionRender | undefined | Promise<QuestionRender | undefined>;
 
 const resolvers: QuestionRenderResolver[] = [];
 
@@ -23,11 +25,11 @@ export function registerQuestionRenderResolver(resolver: QuestionRenderResolver)
   resolvers.push(resolver);
 }
 
-export function resolveQuestionRender(questionId: string): QuestionRender | undefined {
+export async function resolveQuestionRender(questionId: string): Promise<QuestionRender | undefined> {
   for (const resolver of [...resolvers]) {
     /* eslint-disable no-catch-all/no-catch-all -- one optional resolver must not block later resolvers or the built-in fallback */
     try {
-      const render = resolver(questionId);
+      const render = await resolver(questionId);
       if (render) return render;
     } catch (err) {
       log.error('Question render resolver threw', { err });

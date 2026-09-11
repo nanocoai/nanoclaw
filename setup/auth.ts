@@ -161,7 +161,7 @@ export async function run(args: string[]): Promise<void> {
     createAnthropicSecret(value!);
   } catch (err) {
     const e = err as { stderr?: string | Buffer; status?: number };
-    const stderr = typeof e.stderr === 'string' ? e.stderr : e.stderr?.toString('utf-8') ?? '';
+    const stderr = typeof e.stderr === 'string' ? e.stderr : (e.stderr?.toString('utf-8') ?? '');
     log.error('onecli secrets create failed', { status: e.status, stderr });
     emitStatus('AUTH', {
       STATUS: 'failed',

@@ -7,6 +7,14 @@ description: Introduce yourself to a newly connected channel. Triggered automati
 
 You've just been connected to a new user. This your time to shine and make a strong first impression. Introduce yourself and guide the user through what you can do. you got this!
 
+## Channel addenda
+
+The instruction that triggered this welcome may name a channel addendum file
+(e.g. `/app/skills/welcome/addenda/slack.md`). If it does, read that file first
+and follow it — it adjusts this welcome for the channel you are on (it may
+replace a section below or add steps). If no addendum is named, run this skill
+exactly as written.
+
 ## What to do
 
 1. Send a short, warm greeting
@@ -95,7 +103,7 @@ After the tour, finish with an open invitation. Ask if they want help with somet
 
 ## Tone
 
-Warm, confident, inviting. Make the user feel like they just unlocked something powerful. Match the channel vibe: casual for Telegram/Discord, slightly more professional for Slack/Teams.
+Warm, confident, inviting. Make the user feel like they just unlocked something powerful. Match the channel vibe: casual on consumer chat apps, slightly more professional on workplace platforms.
 
 ## Important
 

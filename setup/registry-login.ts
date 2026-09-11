@@ -145,13 +145,13 @@ export interface AccountCredential {
  * Deliberately not a field on `AccountCredential`: that shape is written to
  * disk, and a marketing preference has no business in a credential file.
  */
-interface EnrollResult {
+export interface EnrollResult {
   credential: AccountCredential;
   emailUpdates: boolean | null;
 }
 
 /** Sign-in failure with a sentence for the user and, where possible, a way out. */
-class LoginError extends Error {
+export class LoginError extends Error {
   constructor(
     message: string,
     readonly hint?: string,
@@ -167,6 +167,15 @@ interface Options {
   interactive: boolean;
   /** Sign in again even when a valid credential is already on disk. */
   force: boolean;
+  /**
+   * Only exit 0 for a credential this run actually verified against the
+   * service. Off by default: the image pull tolerates an unverified
+   * credential because a cached image needs no round trip at all, so a
+   * transient outage there costs nothing. A caller that is about to spend
+   * the token cannot make that trade — for it, "could not check" and "not
+   * signed in" are the same answer, and only the exit code carries it.
+   */
+  requireVerified: boolean;
   api?: string;
   code?: string;
 }
@@ -348,7 +357,10 @@ function readAccountCredential(): AccountCredential | undefined {
  */
 function resolveRegistryHost(fromBroker: string | undefined): string | undefined {
   if (fromBroker) {
-    return fromBroker.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').split('/')[0].toLowerCase();
+    return fromBroker
+      .replace(/^[a-z][a-z0-9+.-]*:\/\//i, '')
+      .split('/')[0]
+      .toLowerCase();
   }
   const first = readAgentImagePin()?.split('/')[0];
   return first && (first.includes('.') || first.includes(':')) ? first.toLowerCase() : undefined;
@@ -361,7 +373,7 @@ function resolveRegistryHost(fromBroker: string | undefined): string | undefined
  * worth trusting. Any cached password the helper stashed there is dropped: a
  * new token invalidates it.
  */
-function persistCredential(cred: AccountCredential): void {
+export function persistCredential(cred: AccountCredential): void {
   const record: AccountCredential = { ...cred, registry: resolveRegistryHost(cred.registry) };
   writeSecretFile(ACCOUNT_FILE, `${JSON.stringify(record, null, 2)}\n`);
   ensureHostId();
@@ -415,7 +427,7 @@ function wireDockerCredentialHelper(registry?: string): void {
 // ---------------------------------------------------------------------------
 // Broker
 
-function resolveApiBase(override?: string): string {
+export function resolveApiBase(override?: string): string {
   // process.env, then .env, then the default — same order and same key as
   // setup/lib/registry-state.ts, which states outright that the two must stay
   // in lockstep. A process.env-only read diverges the moment an operator sets
@@ -431,7 +443,7 @@ interface ClientRecord {
   host_id: string;
 }
 
-function clientRecord(): ClientRecord {
+export function clientRecord(): ClientRecord {
   let version = 'unknown';
   try {
     const pkg: unknown = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'package.json'), 'utf-8'));
@@ -468,7 +480,7 @@ async function probeSession(api: string, token: string): Promise<ProbeState> {
   };
 }
 
-type EnrollBody =
+export type EnrollBody =
   | { method: 'code'; code: string; client: ClientRecord }
   | { method: 'idp'; provider: 'workos'; access_token: string; client: ClientRecord };
 
@@ -487,7 +499,7 @@ function enrollWire(body: EnrollBody): Record<string, unknown> {
   return body.method === 'idp' ? { ...common, workos_token: body.access_token } : common;
 }
 
-async function enroll(api: string, body: EnrollBody): Promise<EnrollResult> {
+export async function enroll(api: string, body: EnrollBody): Promise<EnrollResult> {
   let res: HttpResult;
   try {
     res = await http(`${api}/v1/enroll`, json(enrollWire(body)), HTTP_TIMEOUT_MS);
@@ -596,7 +608,7 @@ function enrollFailure(api: string, method: 'code' | 'idp', res: HttpResult): Lo
 // ---------------------------------------------------------------------------
 // Device flow
 
-interface IdpConfig {
+export interface IdpConfig {
   clientId: string;
   deviceEndpoint: string;
   tokenEndpoint: string;
@@ -619,12 +631,12 @@ interface IdpConfig {
  * and answers 404 from the marketing site, so "unreachable" is not a safe proxy
  * for "misconfigured" either.
  */
-type BrokerProbe =
+export type BrokerProbe =
   | { kind: 'idp'; config: IdpConfig }
   | { kind: 'no-idp' }
   | { kind: 'not-a-broker'; detail: string };
 
-async function probeBroker(api: string): Promise<BrokerProbe> {
+export async function probeBroker(api: string): Promise<BrokerProbe> {
   const fromEnv = str(process.env[ENV.clientId]);
   if (fromEnv) {
     return {
@@ -639,7 +651,11 @@ async function probeBroker(api: string): Promise<BrokerProbe> {
 
   let res;
   try {
-    res = await http(`${api}/v1/auth-config`, { method: 'GET', headers: { accept: 'application/json' } }, PROBE_TIMEOUT_MS);
+    res = await http(
+      `${api}/v1/auth-config`,
+      { method: 'GET', headers: { accept: 'application/json' } },
+      PROBE_TIMEOUT_MS,
+    );
   } catch (err) {
     return { kind: 'not-a-broker', detail: message(err) };
   }
@@ -672,16 +688,18 @@ function misconfiguredClient(): LoginError {
   );
 }
 
-interface DeviceAuthorization {
+export interface DeviceAuthorization {
   deviceCode: string;
   userCode: string;
   verificationUri: string;
   verificationUriComplete?: string;
   expiresInS: number;
+  /** ISO stamp of `expiresInS` from the moment the code was issued. */
+  expiresAt: string;
   intervalS: number;
 }
 
-async function requestDeviceAuthorization(cfg: IdpConfig): Promise<DeviceAuthorization> {
+export async function requestDeviceAuthorization(cfg: IdpConfig): Promise<DeviceAuthorization> {
   let res: HttpResult;
   try {
     res = await http(cfg.deviceEndpoint, form({ client_id: cfg.clientId }), HTTP_TIMEOUT_MS);
@@ -704,13 +722,15 @@ async function requestDeviceAuthorization(cfg: IdpConfig): Promise<DeviceAuthori
   if (!deviceCode || !userCode || !verificationUri) {
     throw new LoginError('The sign-in provider returned an incomplete device authorization response.');
   }
+  // Defaults are RFC 8628's own; a provider that omits them is unusual, not fatal.
+  const expiresInS = num(res.body?.expires_in) ?? 300;
   return {
     deviceCode,
     userCode,
     verificationUri,
     verificationUriComplete: str(res.body?.verification_uri_complete),
-    // Defaults are RFC 8628's own; a provider that omits them is unusual, not fatal.
-    expiresInS: num(res.body?.expires_in) ?? 300,
+    expiresInS,
+    expiresAt: new Date(Date.now() + expiresInS * 1000).toISOString(),
     intervalS: Math.max(1, num(res.body?.interval) ?? 5),
   };
 }
@@ -772,17 +792,14 @@ function openInBrowser(url: string): void {
   }
 }
 
-async function pollForIdpToken(cfg: IdpConfig, device: DeviceAuthorization): Promise<string> {
+export async function pollForIdpToken(cfg: IdpConfig, device: DeviceAuthorization): Promise<string> {
   let intervalMs = device.intervalS * 1000;
   const deadline = Date.now() + Math.min(device.expiresInS * 1000, MAX_DEVICE_WAIT_MS);
   let transportFailures = 0;
 
   for (;;) {
     if (Date.now() >= deadline) {
-      throw new LoginError(
-        'Timed out waiting for the sign-in to be approved.',
-        'Re-run setup to get a fresh code.',
-      );
+      throw new LoginError('Timed out waiting for the sign-in to be approved.', 'Re-run setup to get a fresh code.');
     }
     await sleep(intervalMs);
 
@@ -816,15 +833,9 @@ async function pollForIdpToken(cfg: IdpConfig, device: DeviceAuthorization): Pro
         intervalMs += SLOW_DOWN_STEP_MS;
         continue;
       case 'expired_token':
-        throw new LoginError(
-          'That sign-in code expired before it was approved.',
-          'Re-run setup to get a fresh code.',
-        );
+        throw new LoginError('That sign-in code expired before it was approved.', 'Re-run setup to get a fresh code.');
       case 'access_denied':
-        throw new LoginError(
-          'The sign-in was declined in the browser.',
-          'Re-run setup if that was a mistake.',
-        );
+        throw new LoginError('The sign-in was declined in the browser.', 'Re-run setup if that was a mistake.');
       case 'invalid_client':
       case 'unauthorized_client':
         throw misconfiguredClient();
@@ -846,6 +857,57 @@ async function pollForIdpToken(cfg: IdpConfig, device: DeviceAuthorization): Pro
   }
 }
 
+function notABroker(api: string, detail: string): LoginError {
+  return new LoginError(
+    `No NanoClaw registry at ${api} (${detail}).`,
+    `Nothing at that address answers as a NanoClaw registry. If ${ENV.api} is set, check it points at one — unset, this reaches the hosted service. Either way \`./container/build.sh\` builds the image locally and needs no account.`,
+  );
+}
+
+/** A device flow in progress: where to poll and what the user must approve. */
+export interface DeviceFlow {
+  api: string;
+  idp: IdpConfig;
+  device: DeviceAuthorization;
+}
+
+/**
+ * The device flow's first step for a caller that presents the code its own
+ * way (setup/portal.ts folds sign-in into the portal's own page): probe the
+ * broker and request a device authorization. Prints and opens nothing. Every
+ * refusal is a LoginError worded as the standalone run would word it.
+ */
+export async function startDeviceFlow(apiOverride?: string): Promise<DeviceFlow> {
+  const api = resolveApiBase(apiOverride);
+  const probe = await probeBroker(api);
+  if (probe.kind === 'not-a-broker') throw notABroker(api, probe.detail);
+  if (probe.kind === 'no-idp') {
+    throw new LoginError(
+      'Browser authentication is not configured for this registry.',
+      'Run setup/registry-login.sh to sign in with an enrollment code instead.',
+    );
+  }
+  return { api, idp: probe.config, device: await requestDeviceAuthorization(probe.config) };
+}
+
+/**
+ * The rest of that flow: poll the token endpoint until the sign-in is approved
+ * (RFC 8628 §3.5 back-off), enroll at the broker, and persist the credential
+ * exactly as a standalone sign-in does (account.json, registry-auth.json, the
+ * docker credential helper).
+ */
+export async function finishDeviceFlow({ api, idp, device }: DeviceFlow): Promise<AccountCredential> {
+  const idpToken = await pollForIdpToken(idp, device);
+  const { credential } = await enroll(api, {
+    method: 'idp',
+    provider: 'workos',
+    access_token: idpToken,
+    client: clientRecord(),
+  });
+  persistCredential(credential);
+  return credential;
+}
+
 async function deviceLogin(api: string, cfg: IdpConfig): Promise<EnrollResult> {
   const device = await requestDeviceAuthorization(cfg);
   const headless = isHeadless();
@@ -860,7 +922,7 @@ async function deviceLogin(api: string, cfg: IdpConfig): Promise<EnrollResult> {
 // Entry
 
 function parseArgs(argv: string[]): Options {
-  const opts: Options = { interactive: Boolean(process.stdin.isTTY), force: false };
+  const opts: Options = { interactive: Boolean(process.stdin.isTTY), force: false, requireVerified: false };
   for (let i = 0; i < argv.length; i++) {
     switch (argv[i]) {
       case '--non-interactive':
@@ -868,6 +930,9 @@ function parseArgs(argv: string[]): Options {
         break;
       case '--force':
         opts.force = true;
+        break;
+      case '--require-verified':
+        opts.requireVerified = true;
         break;
       case '--api':
         opts.api = argv[++i];
@@ -892,10 +957,12 @@ function parseArgs(argv: string[]): Options {
 function printHelp(): void {
   console.log(
     [
-      'Usage: setup/registry-login.sh [--non-interactive] [--force] [--api <url>] [--code <code>]',
+      'Usage: setup/registry-login.sh [--non-interactive] [--force] [--require-verified] [--api <url>] [--code <code>]',
       '',
       '  --non-interactive  Never prompt. Uses only the environment; exits 2 if nothing is set.',
       '  --force            Sign in again even if a valid credential is already stored.',
+      '  --require-verified Exit 2 rather than 0 when a stored credential could not be',
+      '                     checked against the service. For callers that spend the token.',
       `  --api <url>        Account service base URL (default ${DEFAULT_BROKER_URL}).`,
       '  --code <code>      Enrollment code, instead of the browser sign-in.',
       '',
@@ -963,11 +1030,7 @@ const CONSENT_TEXT = CONSENT_LINES.join(' ');
  * withdrawal path a one-shot terminal prompt cannot offer; until it exists the
  * unsubscribe link in every email is that path.
  */
-async function maybeAskEmailConsent(
-  api: string,
-  cred: AccountCredential,
-  current: boolean | null,
-): Promise<void> {
+async function maybeAskEmailConsent(api: string, cred: AccountCredential, current: boolean | null): Promise<void> {
   if (current !== null) return;
 
   // clack rather than this file's own readline, so the question looks like the
@@ -1067,6 +1130,23 @@ export async function run(argv: string[]): Promise<void> {
       return;
     }
     if (probe.state === 'unreachable') {
+      // `unreachable` is broader than "offline": probeSession reports it for
+      // every status that is not 200/401/403, so a gateway 404, a proxy error
+      // and a credential the service no longer knows all land here. Keeping
+      // the credential is therefore a guess, and which way to guess depends
+      // on what the caller does next.
+      //
+      // It is also the only outcome a stale credential can reach without
+      // being caught: the `existing.api !== api` check above cannot fire on
+      // a record written before that field existed, because
+      // `readAccountCredential` fills the gap with the current target.
+      if (opts.requireVerified) {
+        reportSkipped(
+          'unverified',
+          `Couldn't reach the account service (${probe.reason}); the stored sign-in could not be checked.`,
+        );
+        return;
+      }
       // Offline is not a reason to discard a working credential — the pull that
       // needs it may well be served from the local image cache anyway.
       console.log(`Couldn't reach the account service (${probe.reason}); keeping the stored sign-in.`);
@@ -1125,12 +1205,7 @@ export async function run(argv: string[]): Promise<void> {
   }
 
   const probe = await probeBroker(api);
-  if (probe.kind === 'not-a-broker') {
-    throw new LoginError(
-      `No NanoClaw registry at ${api} (${probe.detail}).`,
-      `Nothing at that address answers as a NanoClaw registry. If ${ENV.api} is set, check it points at one — unset, this reaches the hosted service. Either way \`./container/build.sh\` builds the image locally and needs no account.`,
-    );
-  }
+  if (probe.kind === 'not-a-broker') throw notABroker(api, probe.detail);
   const idp = probe.kind === 'idp' ? probe.config : undefined;
   if (!idp) {
     // A real registry with no identity provider. Supported: the enrollment-code
@@ -1155,9 +1230,7 @@ export async function run(argv: string[]): Promise<void> {
   // Bare newline rather than a lead-in sentence: the prompt below says what
   // pressing Enter does, and the spacing keeps it off whatever printed last.
   console.log('');
-  const typed = await askLine(
-    '   Press Enter to open your browser and authenticate, or paste an enrollment code: ',
-  );
+  const typed = await askLine('   Press Enter to open your browser and authenticate, or paste an enrollment code: ');
   if (typed === undefined) {
     reportSkipped('declined');
     return;

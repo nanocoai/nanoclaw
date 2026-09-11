@@ -13,15 +13,7 @@ import { log } from '../src/log.js';
 import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
 import { writeUpgradeState } from '../src/upgrade-state.js';
 import { cleanupUnhealthyPeers } from './peer-cleanup.js';
-import {
-  commandExists,
-  getPlatform,
-  getNodePath,
-  getServiceManager,
-  hasSystemd,
-  isRoot,
-  isWSL,
-} from './platform.js';
+import { commandExists, getPlatform, getNodePath, getServiceManager, hasSystemd, isRoot, isWSL } from './platform.js';
 import { emitStatus } from './status.js';
 
 export async function run(_args: string[]): Promise<void> {
@@ -131,20 +123,11 @@ function installCliSymlink(projectRoot: string, homeDir: string): void {
   }
 }
 
-function setupLaunchd(
-  projectRoot: string,
-  nodePath: string,
-  homeDir: string,
-): void {
+function setupLaunchd(projectRoot: string, nodePath: string, homeDir: string): void {
   // Per-checkout service label so multiple NanoClaw installs can coexist
   // without clobbering each other's plist.
   const label = getLaunchdLabel(projectRoot);
-  const plistPath = path.join(
-    homeDir,
-    'Library',
-    'LaunchAgents',
-    `${label}.plist`,
-  );
+  const plistPath = path.join(homeDir, 'Library', 'LaunchAgents', `${label}.plist`);
   fs.mkdirSync(path.dirname(plistPath), { recursive: true });
 
   const plist = `<?xml version="1.0" encoding="UTF-8"?>
@@ -238,11 +221,7 @@ function setupLaunchd(
   });
 }
 
-function setupLinux(
-  projectRoot: string,
-  nodePath: string,
-  homeDir: string,
-): void {
+function setupLinux(projectRoot: string, nodePath: string, homeDir: string): void {
   const serviceManager = getServiceManager();
 
   if (serviceManager === 'systemd') {
@@ -295,11 +274,7 @@ function checkDockerGroupStale(): boolean {
   }
 }
 
-function setupSystemd(
-  projectRoot: string,
-  nodePath: string,
-  homeDir: string,
-): void {
+function setupSystemd(projectRoot: string, nodePath: string, homeDir: string): void {
   const runningAsRoot = isRoot();
   const unitName = getSystemdUnit(projectRoot);
   const unitFileName = `${unitName}.service`;
@@ -317,9 +292,7 @@ function setupSystemd(
     try {
       execSync('systemctl --user daemon-reload', { stdio: 'pipe' });
     } catch {
-      log.warn(
-        'systemd user session not available — falling back to nohup wrapper',
-      );
+      log.warn('systemd user session not available — falling back to nohup wrapper');
       setupNohupFallback(projectRoot, nodePath, homeDir);
       return;
     }
@@ -360,18 +333,14 @@ WantedBy=${runningAsRoot ? 'multi-user.target' : 'default.target'}`;
   // normal group perms apply again).
   let dockerGroupStale = !runningAsRoot && checkDockerGroupStale();
   if (dockerGroupStale) {
-    log.warn(
-      'Docker group not active in systemd session — user was likely added to docker group mid-session',
-    );
+    log.warn('Docker group not active in systemd session — user was likely added to docker group mid-session');
     if (commandExists('setfacl')) {
       const user = execSync('whoami', { encoding: 'utf-8' }).trim();
       try {
         execSync(`sudo setfacl -m u:${user}:rw /var/run/docker.sock`, {
           stdio: 'inherit',
         });
-        log.info(
-          'Applied temporary ACL to /var/run/docker.sock (resets on docker restart or reboot)',
-        );
+        log.info('Applied temporary ACL to /var/run/docker.sock (resets on docker restart or reboot)');
         dockerGroupStale = false;
       } catch (err) {
         log.warn('Failed to apply setfacl workaround', { err });
@@ -391,10 +360,7 @@ WantedBy=${runningAsRoot ? 'multi-user.target' : 'default.target'}`;
       execSync('loginctl enable-linger', { stdio: 'ignore' });
       log.info('Enabled loginctl linger for current user');
     } catch (err) {
-      log.warn(
-        'loginctl enable-linger failed — service may stop on SSH logout',
-        { err },
-      );
+      log.warn('loginctl enable-linger failed — service may stop on SSH logout', { err });
     }
   }
 
@@ -445,11 +411,7 @@ WantedBy=${runningAsRoot ? 'multi-user.target' : 'default.target'}`;
   });
 }
 
-function setupNohupFallback(
-  projectRoot: string,
-  nodePath: string,
-  homeDir: string,
-): void {
+function setupNohupFallback(projectRoot: string, nodePath: string, homeDir: string): void {
   log.warn('No systemd detected — generating nohup wrapper script');
 
   const wrapperPath = path.join(projectRoot, 'start-nanoclaw.sh');

@@ -12,7 +12,10 @@
 
 import { parseDirectives, promptVar } from './skill-directives.js';
 
-export function inputsFromEnv(md: string, env: Record<string, string | undefined> = process.env): Record<string, string> {
+export function inputsFromEnv(
+  md: string,
+  env: Record<string, string | undefined> = process.env,
+): Record<string, string> {
   const inputs: Record<string, string> = {};
   const byKey = new Map<string, string>(); // NC_INPUT_<VAR> → the prompt var that claimed it
   for (const d of parseDirectives(md)) {
@@ -22,7 +25,9 @@ export function inputsFromEnv(md: string, env: Record<string, string | undefined
     const key = `NC_INPUT_${v.toUpperCase()}`;
     const prior = byKey.get(key);
     if (prior !== undefined && prior !== v) {
-      throw new Error(`inputsFromEnv: prompt vars "${prior}" and "${v}" both map to ${key} — rename one (var names must be case-insensitively unique)`);
+      throw new Error(
+        `inputsFromEnv: prompt vars "${prior}" and "${v}" both map to ${key} — rename one (var names must be case-insensitively unique)`,
+      );
     }
     byKey.set(key, v);
     const val = env[key];
