@@ -909,3 +909,17 @@
 .error-line { color: var(--coral); font-size: 13px; margin: 0; }
 .voice-page[data-skin="te"] .console .error-line { font-family: var(--font-mono); font-size: 12px; padding: 8px 2px; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* The mute column keeps one width whatever its label says, so the row never shifts. */
+.voice-page[data-skin="te"] .control-bar { grid-template-columns: auto minmax(0, 1fr) 124px; }
+.voice-page[data-skin="te"] .key-mute { width: 124px; }
+.voice-page[data-skin="te"] .key-mute .cap { width: 100%; min-width: 0; }
+.voice-page[data-skin="te"] .key .label { min-width: 100%; justify-content: center; }
+@media (max-width: 600px) {
+  .voice-page[data-skin="te"] aside.rail { grid-template-columns: minmax(0, 1fr) 124px; }
+}
+@media (max-width: 440px) {
+  .voice-page[data-skin="te"] .control-bar { grid-template-columns: minmax(0, 1fr) 124px; }
+}
+.voice-page[data-skin="te"] aside.rail .key-mute { width: 100%; }
+.btn-mute { min-width: 124px; }

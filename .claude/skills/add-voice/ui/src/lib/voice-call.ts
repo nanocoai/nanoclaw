@@ -112,6 +112,7 @@ export function useVoiceCall(token: string, fallbackAgent = "your agent"): Voice
   const streamingRef = useRef<number | null>(null)
   const inputLevel = useRef(0)
   const outputLevel = useRef(0)
+  const generation = useRef(0)
 
   const setPhase = useCallback((p: Phase) => {
     phaseRef.current = p
@@ -158,6 +159,7 @@ export function useVoiceCall(token: string, fallbackAgent = "your agent"): Voice
 
   const teardown = useCallback(
     (tellHost: boolean) => {
+      generation.current++
       if (tellHost && token) {
         fetch(new URL("hangup?t=" + encodeURIComponent(token), location.href), { method: "POST", keepalive: true }).catch(() => {})
       }
@@ -239,8 +241,14 @@ export function useVoiceCall(token: string, fallbackAgent = "your agent"): Voice
     setStreaming(null)
     setElapsed(0)
     setPhase("connecting")
+    const mine = ++generation.current
+    const cancelled = () => generation.current !== mine
     try {
       const s = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } })
+      if (cancelled()) {
+        s.getTracks().forEach((t) => t.stop())
+        return
+      }
       stream.current = s
       const ctx = new AudioContext()
       actx.current = ctx
@@ -275,19 +283,23 @@ export function useVoiceCall(token: string, fallbackAgent = "your agent"): Voice
         }
       }
       const offer = await conn.createOffer()
+      if (cancelled()) return
       await conn.setLocalDescription(offer)
       await waitForIce(conn)
+      if (cancelled()) return
       const res = await fetch(new URL("sdp?t=" + encodeURIComponent(token), location.href), {
         method: "POST",
         headers: { "Content-Type": "application/sdp" },
         body: conn.localDescription?.sdp ?? "",
       })
       const body = await res.text()
+      if (cancelled()) return
       if (!res.ok) throw new Error(errorText(res.status, body))
       const named = res.headers.get("x-voice-agent")
       if (named && named.trim()) setAgentName(named.trim())
       await conn.setRemoteDescription({ type: "answer", sdp: body })
     } catch (err) {
+      if (cancelled()) return
       const msg =
         err instanceof DOMException && err.name === "NotAllowedError"
           ? "Microphone permission was refused."

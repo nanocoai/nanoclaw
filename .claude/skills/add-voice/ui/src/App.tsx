@@ -128,6 +128,16 @@ export default function App() {
   // Matrix levels ~20 times a second, badge glow every tick; both read the hook's refs.
   const [levels, setLevels] = useState<number[]>(() => Array(MATRIX_COLS).fill(0))
   const [glow, setGlow] = useState(1)
+  // Right after "call" the same key would read "end"; ignore taps for a moment so a double tap cannot cancel.
+  const [cancelArmed, setCancelArmed] = useState(false)
+  useEffect(() => {
+    if (phase !== "connecting") {
+      setCancelArmed(false)
+      return
+    }
+    const t = window.setTimeout(() => setCancelArmed(true), 700)
+    return () => window.clearTimeout(t)
+  }, [phase])
   const phaseRef = useRef(phase)
   phaseRef.current = phase
   const lastLevelsAt = useRef(0)
@@ -189,7 +199,9 @@ export default function App() {
       : muted && live
         ? "Your microphone is muted."
         : phase === "ended"
-          ? `${pad(Math.floor(elapsed / 60))}:${pad(elapsed % 60)} · ${lines.length} ${lines.length === 1 ? "turn" : "turns"} · ${endedText ?? HINT.ended}`
+          ? `${pad(Math.floor(elapsed / 60))}:${pad(elapsed % 60)} · ${lines.length} ${lines.length === 1 ? "turn" : "turns"} · ${
+              endedText && endedText !== "Call ended." ? endedText.replace(/\.$/, "").toLowerCase() : "thanks for calling"
+            }.`
           : HINT[phase]
 
   const stage =
@@ -262,7 +274,8 @@ export default function App() {
     </Conversation>
   )
 
-  const primaryLabel = live || phase === "connecting" ? "End" : phase === "ended" || phase === "error" ? "Call again" : "Call"
+  const primaryLabel = live ? "End" : phase === "connecting" ? "Cancel" : phase === "ended" || phase === "error" ? "Call again" : "Call"
+  const primaryDisabled = !token || (phase === "connecting" && !cancelArmed)
   const onPrimary = live || phase === "connecting" ? call.end : call.start
 
   const keys =
@@ -276,7 +289,7 @@ export default function App() {
           </span>
         </div>
         <div className="key key-end">
-          <button type="button" className="cap orange" onClick={onPrimary} disabled={!token}>
+          <button type="button" className="cap orange" onClick={onPrimary} disabled={primaryDisabled}>
             {primaryLabel}
           </button>
           <span className="label">
@@ -303,8 +316,8 @@ export default function App() {
           {live ? `${pad(Math.floor(elapsed / 60))}:${pad(elapsed % 60)}` : ""}
         </span>
         {live || phase === "connecting" ? (
-          <Button size="lg" className="btn-hangup h-12 w-full rounded-full text-[15px] font-semibold" onClick={call.end}>
-            Hang up
+          <Button size="lg" className="btn-hangup h-12 w-full rounded-full text-[15px] font-semibold" onClick={call.end} disabled={primaryDisabled}>
+            {phase === "connecting" ? "Cancel" : "Hang up"}
           </Button>
         ) : (
           <Button size="lg" className="btn-call h-12 w-full rounded-full text-[15px] font-semibold" onClick={call.start} disabled={!token}>
