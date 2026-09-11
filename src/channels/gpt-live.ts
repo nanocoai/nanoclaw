@@ -92,6 +92,14 @@ export interface GptLiveConfig {
 
 export type { SidebandSocket } from './gpt-live-sideband.js';
 
+/** Thrown to the HTTP route when a newer call on the same line replaced this one mid-attach. */
+export class CallReplacedError extends Error {
+  constructor(readonly platformId: string) {
+    super('gpt-live: a newer call replaced this one');
+    this.name = 'CallReplacedError';
+  }
+}
+
 interface LiveCall {
   platformId: string;
   session: GptLiveSession;
@@ -180,6 +188,13 @@ export function createGptLiveAdapter(config: GptLiveConfig): ChannelAdapter {
       },
     });
 
+  /**
+   * Open a call on a line. Newest wins: a call already on the line is ended
+   * first. Two requests can overlap while the sideband attaches, so once the
+   * socket is open the call checks it still owns the line; if a newer call
+   * took it meanwhile, this one closes the session it just attached to (so
+   * it stops billing) and its request is refused with a CallReplacedError.
+   */
   const openCall = async (token: string, sessionId: string): Promise<LiveCall> => {
     const platformId = lineIdForToken(token);
     const previous = lines.get(platformId);
@@ -194,7 +209,20 @@ export function createGptLiveAdapter(config: GptLiveConfig): ChannelAdapter {
       onClosed: (reason) => endCall(call, reason),
     });
     lines.set(platformId, call);
-    call.socket = await connectSideband(call);
+    let socket: SidebandSocket;
+    try {
+      socket = await connectSideband(call);
+    } catch (err) {
+      endCall(call, 'sideband attach failed');
+      throw err;
+    }
+    if (lines.get(platformId) !== call) {
+      socket.send(JSON.stringify({ type: 'session.close' }));
+      socket.close();
+      log.info('gpt-live: call refused, a newer call took the line while attaching', { platformId, sessionId });
+      throw new CallReplacedError(platformId);
+    }
+    call.socket = socket;
     return call;
   };
 
@@ -252,7 +280,12 @@ export function createGptLiveAdapter(config: GptLiveConfig): ChannelAdapter {
         const agent = (await resolveAgent(platformId)) ?? { name: config.fallbackAgentName };
         const { sessionId, answer } = await createWebRtcSession(offer, agent);
         log.info('gpt-live: session created', { platformId, sessionId, agent: agent.name });
-        await openCall(token, sessionId);
+        try {
+          await openCall(token, sessionId);
+        } catch (err) {
+          if (err instanceof CallReplacedError) return reply(res, 409, 'A newer call replaced this one');
+          throw err;
+        }
         reply(res, 200, answer, { 'Content-Type': 'application/sdp', 'X-GPT-Live-Session': sessionId });
         return;
       }

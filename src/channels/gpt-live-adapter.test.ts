@@ -86,23 +86,40 @@ function decodeFrames(input: Buffer): { frames: Array<{ opcode: number; payload:
 // Fake OpenAI Live API
 // ---------------------------------------------------------------------------
 
+interface FakeAttach {
+  sessionId: string;
+  auth: string | undefined;
+  path: string | undefined;
+  socket: Duplex;
+  received: Array<Record<string, unknown>>;
+  closedByClient: boolean;
+}
+
 interface FakeOpenAI {
   port: number;
   sessionCreates: Array<{ auth: string | undefined; body: Record<string, unknown> }>;
+  /** Every sideband attach in order; `attach` is the latest. */
+  attaches: FakeAttach[];
   attach: { auth?: string; path?: string; socket?: Duplex };
+  /** Frames from every attach, in arrival order. */
   received: Array<Record<string, unknown>>;
   closedByClient: boolean;
+  /** Delay the next attach's 101 by this many ms (consumed once) — lets two calls overlap. */
+  nextAttachDelayMs: number;
   push(event: Record<string, unknown>): void;
   close(): Promise<void>;
 }
 
 function startFakeOpenAI(): Promise<FakeOpenAI> {
+  let sessions = 0;
   const fake: FakeOpenAI = {
     port: 0,
     sessionCreates: [],
+    attaches: [],
     attach: {},
     received: [],
     closedByClient: false,
+    nextAttachDelayMs: 0,
     push(event) {
       fake.attach.socket?.write(encodeFrame(0x1, Buffer.from(JSON.stringify(event))));
     },
@@ -117,8 +134,14 @@ function startFakeOpenAI(): Promise<FakeOpenAI> {
           auth: req.headers.authorization,
           body: JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>,
         });
+        sessions += 1;
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ session: { id: 'live_fake1' }, transport: { type: 'webrtc', sdp: 'v=0\r\nanswer' } }));
+        res.end(
+          JSON.stringify({
+            session: { id: `live_fake${sessions}` },
+            transport: { type: 'webrtc', sdp: 'v=0\r\nanswer' },
+          }),
+        );
         return;
       }
       res.writeHead(404);
@@ -127,19 +150,37 @@ function startFakeOpenAI(): Promise<FakeOpenAI> {
   });
   server.on('upgrade', (req, socket) => {
     const key = req.headers['sec-websocket-key'] as string;
-    fake.attach = { auth: req.headers.authorization, path: req.url, socket };
-    socket.write(
-      'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n' +
-        `Sec-WebSocket-Accept: ${acceptKey(key)}\r\n\r\n`,
-    );
+    const sessionId = /\/v1\/live\/sessions\/([^/]+)\/attach/.exec(req.url ?? '')?.[1] ?? '';
+    const delay = fake.nextAttachDelayMs;
+    fake.nextAttachDelayMs = 0;
+    const a: FakeAttach = {
+      sessionId,
+      auth: req.headers.authorization,
+      path: req.url,
+      socket,
+      received: [],
+      closedByClient: false,
+    };
+    setTimeout(() => {
+      fake.attaches.push(a);
+      fake.attach = { auth: a.auth, path: a.path, socket };
+      socket.write(
+        'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n' +
+          `Sec-WebSocket-Accept: ${acceptKey(key)}\r\n\r\n`,
+      );
+    }, delay);
     let pending: Buffer = Buffer.alloc(0);
     socket.on('data', (chunk: Buffer) => {
       pending = Buffer.concat([pending, chunk]);
       const { frames, rest } = decodeFrames(pending);
       pending = rest;
       for (const f of frames) {
-        if (f.opcode === 0x1) fake.received.push(JSON.parse(f.payload.toString('utf8')) as Record<string, unknown>);
-        else if (f.opcode === 0x8) {
+        if (f.opcode === 0x1) {
+          const ev = JSON.parse(f.payload.toString('utf8')) as Record<string, unknown>;
+          a.received.push(ev);
+          fake.received.push(ev);
+        } else if (f.opcode === 0x8) {
+          a.closedByClient = true;
           fake.closedByClient = true;
           socket.write(encodeFrame(0x8, f.payload.subarray(0, 2)));
           socket.end();
@@ -153,7 +194,7 @@ function startFakeOpenAI(): Promise<FakeOpenAI> {
       fake.port = (server.address() as AddressInfo).port;
       fake.close = () =>
         new Promise((r) => {
-          fake.attach.socket?.destroy();
+          for (const a of fake.attaches) a.socket.destroy();
           server.close(() => r());
         });
       resolve(fake);
@@ -313,5 +354,47 @@ describe('gpt-live adapter (fake OpenAI, real webhook server)', () => {
 
     const id = await adapter.deliver(LINE, null, { kind: 'chat', content: { text: 'too late' } });
     expect(id).toBeUndefined();
+  });
+
+  it('two calls in flight on one link: the newest wins, the older is refused and its session closed', async () => {
+    const before = fake.sessionCreates.length;
+    const loserId = `live_fake${before + 1}`;
+    const winnerId = `live_fake${before + 2}`;
+    fake.nextAttachDelayMs = 400; // the first call's sideband attaches slowly
+
+    const first = fetch(`${base}/sdp?t=tok123`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/sdp' },
+      body: 'v=0\r\noffer-a',
+    });
+    await new Promise((r) => setTimeout(r, 120)); // first call has its session and is mid-attach
+    const second = await fetch(`${base}/sdp?t=tok123`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/sdp' },
+      body: 'v=0\r\noffer-b',
+    });
+    expect(second.status).toBe(200);
+    expect(second.headers.get('x-gpt-live-session')).toBe(winnerId);
+
+    const firstRes = await first;
+    expect(firstRes.status).toBe(409);
+
+    // The loser's session was closed over its own sideband, and that sideband is gone.
+    await vi.waitFor(() => {
+      const loser = fake.attaches.find((a) => a.sessionId === loserId);
+      expect(loser?.received.some((e) => e.type === 'session.close')).toBe(true);
+      expect(loser?.closedByClient).toBe(true);
+    });
+    const winner = fake.attaches.find((a) => a.sessionId === winnerId);
+    expect(winner?.closedByClient).toBe(false);
+
+    // The line delivers to the winner.
+    const id = await adapter.deliver(LINE, null, { kind: 'chat', content: { text: 'Still here.' } });
+    expect(id).toBeTruthy();
+    await vi.waitFor(() =>
+      expect(winner?.received.some((e) => e.type === 'session.commentary.append' && e.content === 'Still here.')).toBe(
+        true,
+      ),
+    );
   });
 });
