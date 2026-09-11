@@ -90,9 +90,11 @@ Without the link, pass `--name`. Enabling generates the host key once under
 `data/door/`, takes the first free loopback port in 33022–33121, starts the
 server inside the Host, and keeps it running across Host restarts until you
 disable it. Disabling ends open sessions and keeps the host key and the
-approved keys. Nothing has to be installed on the Host for this: the server
-is part of the Host process, and the terminal comes from a small native
-module the Host ships with.
+approved keys. Nothing has to be installed or configured on the Host for
+this: no OpenSSH server, no extra account, no membership in any system group
+such as `tty`. The server is part of the Host process, and the terminal is
+allocated by a small native module the Host ships with, as the user the Host
+runs as.
 
 ### Keys and pairing
 

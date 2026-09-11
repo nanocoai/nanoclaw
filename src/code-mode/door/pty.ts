@@ -92,7 +92,8 @@ export async function spawnPty(spec: SpawnSpec, size: TerminalSize): Promise<Ter
     resume: () => term.resume(),
     onData: (listener) => term.onData(listener),
     onStderr: () => {},
-    onExit: (listener) => term.onExit(({ exitCode }) => listener(exitCode)),
+    // A death by signal arrives as exit code 0 plus the signal number; report it the way shells do.
+    onExit: (listener) => term.onExit(({ exitCode, signal }) => listener(signal ? 128 + signal : exitCode)),
   };
 }
 
