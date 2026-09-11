@@ -11,6 +11,12 @@
  *
  * Storage is a JSON file at data/telegram-pairings.json — single-process,
  * read-modify-write under an in-process mutex.
+ *
+ * Records are instance-bound: a code is created for one adapter instance
+ * ('telegram' for the default bot, 'telegram-<name>' for a named one) and only
+ * that bot's interceptor can consume it; a wrong guess sent to one bot
+ * invalidates only that bot's pending codes. Records written before instances
+ * existed carry no `instance` field and read as the default bot.
  */
 import { randomInt } from 'node:crypto';
 import fs from 'fs';
@@ -40,6 +46,8 @@ export interface PairingAttempt {
 export interface PairingRecord {
   code: string;
   intent: PairingIntent;
+  /** Adapter instance the code pairs on. Absent on legacy records: the default bot. */
+  instance?: string;
   createdAt: string;
   status: Exclude<PairingStatus, 'unknown'>;
   consumed?: ConsumedDetails;
@@ -48,6 +56,9 @@ export interface PairingRecord {
 }
 
 const MAX_ATTEMPTS_PER_RECORD = 10;
+/** Registry key of the default bot; also what a record with no `instance` means. */
+const DEFAULT_INSTANCE = 'telegram';
+const onInstance = (r: PairingRecord, instance: string) => (r.instance ?? DEFAULT_INSTANCE) === instance;
 
 function intentEquals(a: PairingIntent, b: PairingIntent): boolean {
   if (a === 'main' || b === 'main') return a === b;
@@ -117,29 +128,33 @@ function generateCode(active: Set<string>): string {
   throw new Error('Could not allocate a free pairing code (too many active).');
 }
 
-export async function createPairing(intent: PairingIntent): Promise<PairingRecord> {
+export async function createPairing(
+  intent: PairingIntent,
+  instance: string = DEFAULT_INSTANCE,
+): Promise<PairingRecord> {
   return withLock(() => {
     const store = readStore();
     sweep(store);
     // Replace-by-default: a new pairing for an intent supersedes any existing
-    // pending pairing for the same intent. Old waitForPairing calls observe
-    // `invalidated` and exit on their own.
+    // pending pairing for the same intent on the same instance. Old
+    // waitForPairing calls observe `invalidated` and exit on their own.
     for (const r of store.pairings) {
-      if (r.status === 'pending' && intentEquals(r.intent, intent)) {
+      if (r.status === 'pending' && intentEquals(r.intent, intent) && onInstance(r, instance)) {
         r.status = 'invalidated';
-        log.info('Pairing superseded by new request', { code: r.code, intent });
+        log.info('Pairing superseded by new request', { code: r.code, intent, instance });
       }
     }
     const active = new Set(store.pairings.filter((r) => r.status === 'pending').map((r) => r.code));
     const record: PairingRecord = {
       code: generateCode(active),
       intent,
+      instance,
       createdAt: new Date().toISOString(),
       status: 'pending',
     };
     store.pairings.push(record);
     writeStore(store);
-    log.info('Pairing created', { code: record.code, intent });
+    log.info('Pairing created', { code: record.code, intent, instance });
     return record;
   });
 }
@@ -151,6 +166,8 @@ export interface ConsumeInput {
   isGroup: boolean;
   name?: string | null;
   adminUserId?: string | null;
+  /** Adapter instance that observed the message. Omitted: the default bot. */
+  instance?: string;
 }
 
 /** Strip leading @botname and return the trimmed remainder, or null if not addressed. */
@@ -184,14 +201,17 @@ export function extractCode(text: string, botUsername: string): string | null {
 export async function tryConsume(input: ConsumeInput): Promise<PairingRecord | null> {
   const code = extractCode(input.text, input.botUsername);
   if (!code) return null;
+  const instance = input.instance ?? DEFAULT_INSTANCE;
   return withLock(() => {
     const store = readStore();
     const now = Date.now();
     sweep(store);
-    const record = store.pairings.find((r) => r.code === code && r.status === 'pending');
+    const record = store.pairings.find((r) => r.code === code && r.status === 'pending' && onInstance(r, instance));
     if (!record) {
-      // Miss: record the attempt on every currently-pending record so each
-      // waitForPairing caller can surface it as user feedback.
+      // Miss: record the attempt on every record pending on THIS instance so
+      // each waitForPairing caller can surface it as user feedback. Sibling
+      // bots' pendings are untouched: a wrong guess (or another bot's code)
+      // sent to one bot must not cancel a pairing in flight on another.
       const attempt: PairingAttempt = {
         candidate: code,
         platformId: input.platformId,
@@ -200,7 +220,7 @@ export async function tryConsume(input: ConsumeInput): Promise<PairingRecord | n
       };
       let recorded = false;
       for (const r of store.pairings) {
-        if (r.status !== 'pending') continue;
+        if (r.status !== 'pending' || !onInstance(r, instance)) continue;
         r.attempts = [...(r.attempts ?? []), attempt].slice(-MAX_ATTEMPTS_PER_RECORD);
         // One attempt per code. A wrong guess invalidates the pairing
         // immediately — pair-telegram observes the `invalidated` signal and
@@ -210,7 +230,7 @@ export async function tryConsume(input: ConsumeInput): Promise<PairingRecord | n
       }
       writeStore(store);
       if (recorded) {
-        log.info('Pairing invalidated by wrong attempt', { candidate: code, platformId: input.platformId });
+        log.info('Pairing invalidated by wrong attempt', { candidate: code, platformId: input.platformId, instance });
       }
       return null;
     }
@@ -227,7 +247,7 @@ export async function tryConsume(input: ConsumeInput): Promise<PairingRecord | n
       { candidate: code, platformId: input.platformId, at: new Date(now).toISOString(), matched: true },
     ].slice(-MAX_ATTEMPTS_PER_RECORD);
     writeStore(store);
-    log.info('Pairing consumed', { code, platformId: input.platformId, intent: record.intent });
+    log.info('Pairing consumed', { code, platformId: input.platformId, intent: record.intent, instance });
     return record;
   });
 }

@@ -21,10 +21,12 @@
     "setup:auto": "tsx setup/auto.ts",
     "ncl": "tsx src/cli/client.ts",
     "chat": "tsx scripts/chat.ts",
+    "local-web": "tsx scripts/local-web-url.ts",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:mattermost-live": "MATTERMOST_LAB_REQUIRED=1 vitest run src/channels/mattermost-live.test.ts"
   },
   "dependencies": {
     "@beeper/chat-adapter-matrix": "^0.2.0",
@@ -47,18 +49,20 @@
     "better-sqlite3": "11.10.0",
     "chat": "4.29.0",
     "chat-adapter-imessage": "^0.1.1",
-    "chat-adapter-mattermost": "^1.1.3",
     "cron-parser": "5.5.0",
     "kleur": "^4.1.5",
+    "markdown-it": "15.0.0",
     "pino": "^9.6.0",
     "qrcode": "^1.5.4",
     "wechat-ilink-client": "^0.1.0",
+    "ws": "8.21.3",
     "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.35.0",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.10.0",
+    "@types/ws": "8.18.1",
     "eslint": "^9.35.0",
     "eslint-plugin-no-catch-all": "^1.1.0",
     "globals": "^15.12.0",

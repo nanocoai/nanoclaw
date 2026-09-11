@@ -60,7 +60,7 @@ describe('Telegram /connect_group', () => {
     await addRole('42', 'owner');
     await addRole('43', 'admin');
     const hostOnInbound = vi.fn();
-    const intercept = createTelegramInboundInterceptor(Promise.resolve(botUsername), hostOnInbound, token);
+    const intercept = createTelegramInboundInterceptor(Promise.resolve(botUsername), hostOnInbound, token, 'telegram');
 
     await intercept('telegram:42', null, message('/connect_group', '42'));
     await intercept('telegram:43', null, message('/connect_group@nanoclawbot', '43'));
@@ -90,7 +90,7 @@ describe('Telegram /connect_group', () => {
     });
     await addRole('98', 'admin', 'agent-1');
     const hostOnInbound = vi.fn();
-    const intercept = createTelegramInboundInterceptor(Promise.resolve(botUsername), hostOnInbound, token);
+    const intercept = createTelegramInboundInterceptor(Promise.resolve(botUsername), hostOnInbound, token, 'telegram');
 
     await intercept('telegram:98', null, message('/connect_group', '98'));
     await intercept('telegram:99', null, message('/connect_group', '99'));
@@ -105,7 +105,7 @@ describe('Telegram /connect_group', () => {
   it('leaves group messages and near-matches on the normal inbound path', async () => {
     await addRole('42', 'owner');
     const hostOnInbound = vi.fn();
-    const intercept = createTelegramInboundInterceptor(Promise.resolve(botUsername), hostOnInbound, token);
+    const intercept = createTelegramInboundInterceptor(Promise.resolve(botUsername), hostOnInbound, token, 'telegram');
 
     await intercept('telegram:-100', null, message('/connect_group', '42'));
     await intercept('telegram:42', null, message('/connect_group now', '42'));
@@ -116,7 +116,7 @@ describe('Telegram /connect_group', () => {
 
   it('turns the group-picker start command into a routed welcome prompt', async () => {
     const hostOnInbound = vi.fn();
-    const intercept = createTelegramInboundInterceptor(Promise.resolve(botUsername), hostOnInbound, token);
+    const intercept = createTelegramInboundInterceptor(Promise.resolve(botUsername), hostOnInbound, token, 'telegram');
     const inbound = message('/start@NanoClawBot connect', '42');
 
     await intercept('telegram:-100', null, inbound);
@@ -141,7 +141,7 @@ describe('Telegram /connect_group', () => {
       return new Response(JSON.stringify(result), { status: 200 });
     });
     const hostOnInbound = vi.fn();
-    const intercept = createTelegramInboundInterceptor(Promise.resolve(null), hostOnInbound, token);
+    const intercept = createTelegramInboundInterceptor(Promise.resolve(null), hostOnInbound, token, 'telegram');
 
     await intercept('telegram:42', null, message('/connect_group', '42'));
     await intercept('telegram:-100', null, message('/start@NanoClawBot connect', '42'));

@@ -1,0 +1,468 @@
+/* Agent navigation and creation. The chat document remains in local-web-chat.css. */
+
+.app-shell {
+  display: grid;
+  grid-template-columns: 17rem minmax(0, 1fr);
+  width: 100%;
+  height: 100dvh;
+  overflow: hidden;
+  background: var(--paper);
+}
+
+.agent-sidebar {
+  position: relative;
+  z-index: 4;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  gap: 1.1rem;
+  min-width: 0;
+  padding: max(1.25rem, env(safe-area-inset-top)) 0.9rem max(1.1rem, env(safe-area-inset-bottom));
+  border-right: 1px solid var(--hairline);
+  background: color-mix(in oklab, var(--ground) 88%, var(--paper));
+}
+
+.sidebar-brand {
+  padding: 0.25rem 0.65rem 0.1rem;
+}
+
+.sidebar-brand .logotype {
+  width: 8.4rem;
+}
+
+.create-agent-button,
+.agent-row,
+.primary-button,
+.secondary-button {
+  font-family: inherit;
+  touch-action: manipulation;
+}
+
+.create-agent-button {
+  width: 100%;
+  padding: 0.72rem 0.85rem;
+  border: 1px solid var(--action);
+  border-radius: 0.8rem;
+  color: var(--on-action);
+  background: var(--action);
+  font-size: 0.88rem;
+  font-weight: 700;
+  line-height: 1;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    transform 100ms var(--ease-out),
+    background 160ms var(--ease-out);
+}
+
+.create-agent-button::before {
+  content: '+';
+  display: inline-block;
+  width: 1.2rem;
+  font-size: 1.1rem;
+  font-weight: 500;
+}
+
+.create-agent-button:hover {
+  background: color-mix(in oklab, var(--action) 88%, var(--ink));
+}
+
+.create-agent-button:active,
+.agent-row:active,
+.primary-button:active,
+.secondary-button:active {
+  transform: scale(0.97);
+}
+
+.agent-list {
+  display: grid;
+  align-content: start;
+  gap: 0.28rem;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.agent-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 0.65rem;
+  align-items: center;
+  width: 100%;
+  padding: 0.68rem 0.62rem;
+  border: 1px solid transparent;
+  border-radius: 0.85rem;
+  color: var(--ink-body);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    transform 100ms var(--ease-out),
+    background 160ms var(--ease-out),
+    border-color 160ms var(--ease-out);
+}
+
+.agent-row:hover {
+  background: color-mix(in oklab, var(--paper) 62%, transparent);
+}
+
+.agent-row[aria-current='true'] {
+  border-color: color-mix(in oklab, var(--action) 28%, var(--hairline));
+  background: color-mix(in oklab, var(--brand) 12%, var(--paper));
+  color: var(--ink);
+}
+
+.agent-avatar {
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  border: 1px solid var(--hairline);
+  border-radius: 50%;
+  color: var(--ink);
+  background: var(--paper);
+  font-size: 0.72rem;
+  font-weight: 750;
+  letter-spacing: 0.02em;
+}
+
+.agent-row-copy {
+  display: grid;
+  gap: 0.16rem;
+  min-width: 0;
+}
+
+.agent-row-name {
+  overflow: hidden;
+  font-size: 0.88rem;
+  font-weight: 680;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-row-runtime,
+.sidebar-local,
+.agent-runtime,
+.single-provider,
+.inheritance-summary {
+  color: var(--ink-muted);
+  font-size: 0.75rem;
+  line-height: 1.35;
+}
+
+.agent-row-state {
+  width: 0.44rem;
+  height: 0.44rem;
+  border-radius: 50%;
+  background: var(--rule);
+}
+
+.agent-row[aria-current='true'] .agent-row-state {
+  background: var(--brand);
+}
+
+.sidebar-local {
+  margin: 0;
+  padding: 0.2rem 0.65rem 0;
+  letter-spacing: 0.01em;
+}
+
+.header-identity {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.icon-button.agents-toggle {
+  display: none;
+  flex: 0 0 auto;
+}
+
+#agent-title {
+  margin: 0.15rem 0 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: clamp(1.2rem, 2vw, 1.45rem);
+  font-weight: 730;
+  line-height: 1.1;
+  letter-spacing: -0.018em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-runtime {
+  margin: 0.25rem 0 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-scrim {
+  display: none;
+}
+
+.sidebar-scrim[hidden] {
+  display: none;
+}
+
+.create-agent-dialog {
+  width: min(31rem, calc(100vw - 2rem));
+  max-height: min(44rem, calc(100dvh - 2rem));
+  padding: 0;
+  border: 0;
+  border-radius: 1.4rem;
+  color: var(--ink-body);
+  background: var(--paper);
+  box-shadow: 0 1.5rem 4rem rgb(26 22 18 / 24%);
+}
+
+.create-agent-dialog::backdrop {
+  background: rgb(0 0 0 / 34%);
+  backdrop-filter: blur(0.35rem);
+}
+
+.create-agent-dialog form {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1rem;
+  padding: 1.35rem;
+  border: 0;
+  border-radius: inherit;
+  box-shadow: none;
+}
+
+.create-agent-dialog form:focus-within {
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.dialog-heading,
+.dialog-actions,
+.inheritance-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.dialog-heading h2 {
+  margin: 0.15rem 0 0;
+  color: var(--ink);
+  font-size: 1.5rem;
+  line-height: 1.15;
+  letter-spacing: -0.025em;
+}
+
+.dialog-kicker {
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: 0.72rem;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.form-field {
+  display: grid;
+  gap: 0.42rem;
+}
+
+.form-field[hidden] {
+  display: none;
+}
+
+.form-field > span {
+  color: var(--ink-muted);
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.form-field input,
+.form-field select {
+  width: 100%;
+  min-height: 2.75rem;
+  padding: 0.68rem 0.75rem;
+  border: 1px solid var(--hairline);
+  border-radius: 0.7rem;
+  color: var(--ink);
+  background: var(--wash);
+  font: inherit;
+  font-size: 0.94rem;
+}
+
+.form-field input:focus-visible,
+.form-field select:focus-visible {
+  border-color: var(--action);
+  outline: 3px solid var(--ring);
+  outline-offset: 1px;
+}
+
+.inheritance-summary {
+  align-items: flex-start;
+  padding: 0.8rem 0.85rem;
+  border: 1px solid var(--hairline);
+  border-radius: 0.8rem;
+  background: var(--linen-soft);
+}
+
+.inheritance-summary strong {
+  color: var(--ink);
+}
+
+.single-provider {
+  margin: -0.35rem 0 0;
+}
+
+.advanced-options {
+  border-top: 1px solid var(--hairline);
+  padding-top: 0.85rem;
+}
+
+.advanced-options summary {
+  color: var(--action);
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.advanced-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(8rem, 0.65fr);
+  gap: 0.85rem;
+  margin-top: 0.9rem;
+}
+
+.form-error {
+  margin: 0;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid color-mix(in oklab, var(--highlight) 42%, var(--hairline));
+  border-radius: 0.7rem;
+  color: var(--highlight);
+  background: color-mix(in oklab, var(--highlight) 8%, var(--paper));
+  font-size: 0.84rem;
+  line-height: 1.4;
+}
+
+.dialog-actions {
+  justify-content: flex-end;
+  margin-top: 0.25rem;
+}
+
+.primary-button,
+.secondary-button {
+  min-height: 2.6rem;
+  padding: 0.7rem 1rem;
+  border-radius: 0.7rem;
+  font-size: 0.88rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: transform 100ms var(--ease-out);
+}
+
+.primary-button {
+  border: 1px solid var(--action);
+  color: var(--on-action);
+  background: var(--action);
+}
+
+.secondary-button {
+  border: 1px solid var(--hairline);
+  color: var(--ink);
+  background: var(--paper);
+}
+
+.primary-button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+@media (max-width: 780px) {
+  .app-shell {
+    display: block;
+  }
+
+  .agent-sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    width: min(86vw, 20rem);
+    border-right: 1px solid var(--hairline);
+    background: color-mix(in oklab, var(--paper) 94%, var(--ground));
+    box-shadow: 1rem 0 3rem rgb(26 22 18 / 20%);
+    transform: translate3d(-104%, 0, 0);
+    transition: transform 220ms cubic-bezier(0.22, 0.61, 0.36, 1);
+    will-change: transform;
+  }
+
+  .app-shell.sidebar-open .agent-sidebar {
+    transform: translate3d(0, 0, 0);
+  }
+
+  .sidebar-scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 3;
+    display: block;
+    border: 0;
+    background: rgb(0 0 0 / 30%);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 220ms ease-out;
+  }
+
+  .app-shell.sidebar-open .sidebar-scrim {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .icon-button.agents-toggle {
+    display: grid;
+  }
+}
+
+@media (max-width: 520px) {
+  .advanced-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .inheritance-summary {
+    display: grid;
+  }
+
+  .create-agent-dialog form {
+    padding: 1.1rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-sidebar,
+  .sidebar-scrim,
+  .create-agent-button,
+  .agent-row,
+  .primary-button,
+  .secondary-button {
+    transition: none;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .agent-sidebar,
+  .create-agent-dialog,
+  .create-agent-dialog::backdrop {
+    backdrop-filter: none;
+  }
+
+  .agent-sidebar,
+  .create-agent-dialog {
+    background: var(--paper);
+  }
+}
+
+@media (prefers-contrast: more) {
+  .agent-sidebar,
+  .agent-row[aria-current='true'],
+  .create-agent-dialog,
+  .form-field input,
+  .form-field select {
+    border-color: var(--ink);
+  }
+}

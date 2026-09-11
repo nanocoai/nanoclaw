@@ -1,54 +1,63 @@
-/**
- * Mattermost channel adapter (v2) — uses Chat SDK bridge.
- * Self-registers on import.
- *
- * Wraps the community `chat-adapter-mattermost` package. Mattermost, like
- * Slack, models replies as optional threads within a channel (a thread id
- * with no root post is the channel itself; a thread id with a root post is
- * a specific reply-thread) — so this follows the Slack shape, not
- * Telegram's channel-is-the-only-conversation model.
- */
-import { createMattermostAdapter } from 'chat-adapter-mattermost';
+/** Mattermost channel adapter — Chat SDK bridge registration. */
+import { MattermostAdapter } from './mattermost-adapter/index.js';
 
 import { readEnvFile } from '../env.js';
 import type { ChannelDefaults } from './adapter.js';
 import { createChatSdkBridge } from './chat-sdk-bridge.js';
 import { registerChannelAdapter } from './channel-registry.js';
 
-/**
- * Dedicated bot account on a threaded platform. group threads:true keeps
- * mention-sticky bounded — engagement sticks per-thread, not forever.
- * dm.threads:false mirrors Slack's policy: DM sub-threads collapse into the
- * one DM session unless a wiring overrides it.
- */
-const MATTERMOST_DEFAULTS: ChannelDefaults = {
+export const MATTERMOST_DEFAULTS: ChannelDefaults = {
   dm: { engageMode: 'pattern', engagePattern: '.', threads: false, unknownSenderPolicy: 'request_approval' },
   group: { engageMode: 'mention-sticky', threads: true, unknownSenderPolicy: 'request_approval' },
   mentions: 'platform',
 };
 
+export interface MattermostAdapterConfig {
+  baseUrl: string;
+  botToken: string;
+  callbackUrl?: string;
+  callbackSecret?: string;
+}
+
+/** Exported for live integration tests; construction has no network side effects. */
+export function buildMattermostAdapter(config: MattermostAdapterConfig): MattermostAdapter {
+  return new MattermostAdapter({
+    url: config.baseUrl,
+    token: config.botToken,
+    ...(config.callbackUrl ? { callbackUrl: config.callbackUrl } : {}),
+    ...(config.callbackSecret ? { callbackSecret: config.callbackSecret } : {}),
+  });
+}
+
 registerChannelAdapter('mattermost', {
   factory: () => {
-    const env = readEnvFile(['MATTERMOST_BASE_URL', 'MATTERMOST_BOT_TOKEN']);
+    const env = readEnvFile([
+      'MATTERMOST_BASE_URL',
+      'MATTERMOST_BOT_TOKEN',
+      'MATTERMOST_CALLBACK_URL',
+      'MATTERMOST_CALLBACK_SECRET',
+    ]);
     if (!env.MATTERMOST_BASE_URL || !env.MATTERMOST_BOT_TOKEN) return null;
 
-    const mattermostAdapter = createMattermostAdapter({
+    const adapter = buildMattermostAdapter({
       baseUrl: env.MATTERMOST_BASE_URL,
       botToken: env.MATTERMOST_BOT_TOKEN,
+      callbackUrl: env.MATTERMOST_CALLBACK_URL,
+      callbackSecret: env.MATTERMOST_CALLBACK_SECRET,
     });
 
     const bridge = createChatSdkBridge({
-      adapter: mattermostAdapter,
+      adapter,
       concurrency: 'concurrent',
       supportsThreads: true,
       defaults: MATTERMOST_DEFAULTS,
     });
     bridge.resolveChannelName = async (platformId: string) => {
       try {
-        const info = await mattermostAdapter.fetchThread(platformId);
-        return info.channelName ?? null;
-      } catch {
-        return null;
+        return (await adapter.fetchThread(platformId)).channelName ?? null;
+      } catch (err) {
+        if (err instanceof Error) return null;
+        throw err;
       }
     };
     return bridge;

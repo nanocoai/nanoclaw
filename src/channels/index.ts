@@ -65,5 +65,8 @@ import './dial.js';
 // emacs (native HTTP bridge, no Chat SDK)
 // import './emacs.js';
 
+// local web (native loopback HTTP, no Chat SDK)
+import './local-web.js';
+
 // deltachat (native, no Chat SDK)
 // import './deltachat.js'
