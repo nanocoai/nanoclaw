@@ -42,11 +42,12 @@ const human = (res: ResponseFrame): string | undefined => (res.ok ? res.human : 
 const summary = {
   enabled: true,
   name: 'alice',
-  port: 45000,
+  doorPort: 33022,
   hostKeyFingerprint: 'SHA256:abc',
   approvalUrl: 'https://example.test/terminals',
-  door: { running: true, pid: 4242, port: 45000, restarts: 0 },
-  keys: { approved: 0, pending: 1 },
+  terminal: { enabled: true, name: 'alice', hostKeyFingerprint: 'SHA256:abc', doorPort: 33022, updatedAt: 't' },
+  door: { running: true, pid: 4242, port: 33022, restarts: 0 },
+  keys: { approved: 0, browser: 0, pending: 1, rooms: 1 },
 };
 
 beforeEach(async () => {
@@ -91,7 +92,6 @@ describe('sandboxes remote — operator-only surface', () => {
 describe('sandboxes remote enable', () => {
   it('validates the account name before the door is touched', async () => {
     for (const [args, pattern] of [
-      [{}, /usage/],
       [{ name: 'ab' }, /3–32/],
       [{ name: 'My-Box' }, /lowercase/],
       [{ id: '-abc' }, /hyphen/],
@@ -108,14 +108,30 @@ describe('sandboxes remote enable', () => {
     expect(flagged.ok).toBe(true);
     expect(enableDoor).toHaveBeenLastCalledWith({ name: 'alice' });
     expect(human(flagged)).toContain('enabled for "alice"');
-    expect(human(flagged)).toContain('127.0.0.1:45000');
+    expect(human(flagged)).toContain('127.0.0.1:33022');
     expect(human(flagged)).toContain('SHA256:abc');
-    expect(human(flagged)).toContain('0 approved, 1 pending');
+    expect(human(flagged)).toContain('0 approved here, 0 approved in the browser, 1 pending');
 
     // `ncl sandboxes remote enable bob` arrives as the trailing positional.
     const positional = await call('sandboxes-remote-enable-bob');
     expect(positional.ok).toBe(true);
     expect(enableDoor).toHaveBeenLastCalledWith({ name: 'bob' });
+  });
+
+  it('enables without a name (the account assigns one) and prints the address and a rename', async () => {
+    vi.mocked(enableDoor).mockResolvedValueOnce({
+      ...summary,
+      name: 'alice-2',
+      host: 'alice-2.example.test',
+      previousName: 'alice',
+    });
+    const res = await call('sandboxes-remote-enable');
+    expect(res.ok).toBe(true);
+    expect(enableDoor).toHaveBeenLastCalledWith({});
+    expect(human(res)).toContain('enabled for "alice-2"');
+    expect(human(res)).toContain('ssh alice-2.example.test');
+    expect(human(res)).toContain('from "alice" — your address changed');
+    expect(human(res)).not.toContain('loopback only');
   });
 });
 

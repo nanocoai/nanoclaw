@@ -134,9 +134,10 @@ describe('authorizedKeysLine', () => {
     expect(line).not.toContain('waiting-room');
   });
 
-  it('pins an unknown key to the waiting room, and prints nothing for a refused key', () => {
+  it('pins an unknown key to the waiting room with the key itself, and prints nothing for a refused key', () => {
     const line = authorizedKeysLine('pending', key, '/srv/host/data/door');
     expect(line).toContain('waiting-room');
+    expect(line).toContain(`'${key.fingerprint}' 'ssh-ed25519' '${key.base64}'`);
     expect(line).not.toContain('landing');
     expect(authorizedKeysLine('refused', key, '/srv/host/data/door')).toBeUndefined();
   });
@@ -166,6 +167,12 @@ describe('operator verbs', () => {
     ]);
     expect(isApproved(store, key.fingerprint)).toBe(true);
     expect(() => approvePendingKey(emptyKeyStore(), 'SHA256:nope')).toThrow(/no pending key/);
+  });
+
+  it('counts a fingerprint the browser approved (mirror) as approved', () => {
+    const store: KeyStore = { ...emptyKeyStore(), mirror: { fingerprints: ['SHA256:browser'], updatedAt: 't' } };
+    expect(isApproved(store, 'SHA256:browser')).toBe(true);
+    expect(isApproved(store, 'SHA256:other')).toBe(false);
   });
 
   it('adds a key directly with the comment as the default label, and revokes by fingerprint', () => {

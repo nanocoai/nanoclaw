@@ -1,14 +1,14 @@
 /**
- * The approved-keys store the host owns (`data/door/keys.json`) and the
- * admission decision the AuthorizedKeysCommand makes from it.
+ * The approved-keys store the host owns (`data/door/keys.json`): keys the
+ * operator approved on this machine (with their public keys), fingerprints
+ * the account service approved in the browser (mirrored from snapshots),
+ * and the pending record of unknown keys that entered the waiting room.
  *
  * Every presented key is admitted to exactly one forced program: an approved
- * fingerprint lands in a sandbox, an unknown one enters the waiting room and
- * is recorded as pending so the operator (or the approval page, once wired)
- * can approve it by fingerprint. The waiting room is the only surface a
- * stranger reaches behind the OpenSSH handshake, so pending admissions are
- * rate-limited; past the limit the key is refused outright and the client
- * sees an ordinary "Permission denied (publickey)".
+ * fingerprint lands in a sandbox, an unknown one enters the waiting room.
+ * The waiting room is the only surface a stranger reaches behind the OpenSSH
+ * handshake, so pending records are rate-limited; past the limit the room is
+ * refused.
  */
 import { createHash } from 'node:crypto';
 
@@ -34,6 +34,8 @@ export interface KeyStore {
   version: 1;
   approved: ApprovedKey[];
   pending: PendingKey[];
+  /** Fingerprints approved in the browser, as the account service last reported them. */
+  mirror?: { fingerprints: string[]; updatedAt: string };
 }
 
 export interface ParsedPublicKey {
@@ -99,6 +101,7 @@ export async function readKeyStore(file: string): Promise<KeyStore> {
   if (!store || store.version !== 1 || !Array.isArray(store.approved) || !Array.isArray(store.pending)) {
     return emptyKeyStore();
   }
+  if (store.mirror && !Array.isArray(store.mirror.fingerprints)) delete store.mirror;
   return store;
 }
 
@@ -155,18 +158,20 @@ export function admitKey(
 /**
  * The authorized_keys line the server receives for an admitted key: every
  * option `restrict` implies (no forwarding, no user rc), a PTY, and a forced
- * program that receives the door directory and the fingerprint as its only
- * arguments. `undefined` means refuse — print nothing.
+ * program that receives the door directory and the fingerprint (the waiting
+ * room also gets the key itself, to register it as pending). `undefined`
+ * means refuse — print nothing.
  */
 export function authorizedKeysLine(
   verdict: Admission,
-  key: Pick<ParsedPublicKey, 'publicKey' | 'fingerprint'>,
+  key: Pick<ParsedPublicKey, 'publicKey' | 'fingerprint' | 'type' | 'base64'>,
   doorDir: string,
   execPath: string = process.execPath,
 ): string | undefined {
   if (verdict === 'refused') return undefined;
   const program = resolveEntry(verdict === 'approved' ? 'landing' : 'waiting-room', execPath);
-  return `restrict,pty,${forcedCommandOption([...program, doorDir, key.fingerprint])} ${key.publicKey}`;
+  const args = verdict === 'approved' ? [doorDir, key.fingerprint] : [doorDir, key.fingerprint, key.type, key.base64];
+  return `restrict,pty,${forcedCommandOption([...program, ...args])} ${key.publicKey}`;
 }
 
 // --- operator verbs over the store ------------------------------------------
@@ -213,6 +218,10 @@ export function revokeKey(store: KeyStore, fingerprint: string): KeyStore {
   return { ...store, approved, pending };
 }
 
+/** Approved on this machine or in the browser. */
 export function isApproved(store: KeyStore, fingerprint: string): boolean {
-  return store.approved.some((k) => k.fingerprint === fingerprint);
+  return (
+    store.approved.some((k) => k.fingerprint === fingerprint) ||
+    store.mirror?.fingerprints.includes(fingerprint) === true
+  );
 }

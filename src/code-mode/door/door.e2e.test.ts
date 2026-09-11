@@ -52,7 +52,7 @@ describe.skipIf(!hasTools)('door e2e (real sshd)', () => {
     expect(enabled.enabled).toBe(true);
     expect(enabled.door.running).toBe(true);
     expect(enabled.hostKeyFingerprint).toMatch(/^SHA256:/);
-    port = enabled.port!;
+    port = enabled.doorPort!;
     expect((await doorStatus()).door.running).toBe(true);
 
     const ssh = spawn(
@@ -96,13 +96,15 @@ describe.skipIf(!hasTools)('door e2e (real sshd)', () => {
     expect(output).toContain(expectedFingerprint);
     expect(output).toContain('from   remote');
     expect(output).toContain(enabled.approvalUrl);
+    expect((await doorStatus()).keys.rooms).toBe(1);
 
     const pending = (await listDoorKeys()).pending;
     expect(pending.map((k) => k.fingerprint)).toEqual([expectedFingerprint]);
     expect(pending[0].publicKey).toBe(clientPub.split(' ').slice(0, 2).join(' '));
 
     await approveDoorKey(expectedFingerprint, 'e2e');
-    await waitFor(/Approved\. Connecting/, 10_000);
+    // The room long-polls the host; approval releases it at once.
+    await waitFor(/Approved\. Connecting/, 5_000);
     // No relayed stream registered this connection's source port: the landing refuses.
     await waitFor(/no target/, 20_000);
     expect(await exit).not.toBe(0);

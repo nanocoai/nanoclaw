@@ -2,32 +2,34 @@
  * The landing program — the forced command an approved key runs.
  *
  * Reads its client port from `SSH_CONNECTION`, asks the host over the door
- * socket what the relayed stream is for, then attaches through the host's
- * own sandbox verbs over the ncl socket: `sandboxes attach` for an existing
- * sandbox (cold ones wake), `sandboxes new` for an account whose default
- * sandbox does not exist yet. The exec spec the host returns is run with the
- * terminal handed over, exactly as the ncl client does. Detach is tmux's
- * Ctrl-b then d; there is no shell on this path. `ssh <address> ls` lists
- * the sandboxes instead of landing.
+ * socket what the relayed stream is for, registers itself so a revocation
+ * can end it, then attaches through the host's own sandbox verbs over the
+ * ncl socket: `sandboxes attach` for an existing sandbox (cold ones wake),
+ * `sandboxes new` for an account whose default sandbox does not exist yet.
+ * The exec spec the host returns is run with the terminal handed over,
+ * exactly as the ncl client does. Detach is tmux's Ctrl-b then d; there is
+ * no shell on this path. `ssh <address> ls` lists the sandboxes instead.
  */
-import { spawnSync } from 'node:child_process';
-
 import { resolveAttachExec } from '../../cli/attach-exec.js';
 import type { ResponseFrame } from '../../cli/frame.js';
+import { fetchTarget, postSession } from './door-client.js';
+import { runForeground } from './foreground.js';
 import { sendHostFrame } from './host-client.js';
+import type { SessionRequest } from './host-socket.js';
 import { decideLanding } from './landing-decision.js';
 import { doorFiles, isMainModule } from './paths.js';
 import { readDoorState } from './state.js';
-import { fetchTarget } from './target-client.js';
 import type { DoorStream } from './target-map.js';
 
 export interface LandingIo {
   env: NodeJS.ProcessEnv;
+  pid: number;
   stdinIsTty: boolean;
   write: (text: string) => void;
   fail: (text: string) => void;
-  exec: (bin: string, args: string[], env: NodeJS.ProcessEnv) => number;
+  exec: (bin: string, args: string[], env: NodeJS.ProcessEnv) => Promise<number> | number;
   fetchTarget: (socketPath: string, port: number) => Promise<DoorStream | undefined>;
+  postSession: (socketPath: string, request: SessionRequest) => Promise<void>;
   sendFrame: (socketPath: string, command: string, args: Record<string, unknown>) => Promise<ResponseFrame>;
 }
 
@@ -62,18 +64,20 @@ export async function runLanding(argv: string[], io: LandingIo): Promise<number>
 
   // The waiting room resolves the stream when the connection arrives and
   // hands it over, so a long approval wait cannot outlive the map's TTL.
+  const port = clientPortFromSshConnection(io.env.SSH_CONNECTION);
   let stream = parsePreset(presetJson);
-  if (!stream) {
-    const port = clientPortFromSshConnection(io.env.SSH_CONNECTION);
-    if (port !== undefined) {
-      try {
-        stream = await io.fetchTarget(state.hostSocketPath, port);
-      } catch (error) {
-        if (!(error instanceof Error)) throw error;
-        io.fail(`Could not resolve this connection's target: ${error.message}\n`);
-        return 1;
-      }
+  if (!stream && port !== undefined) {
+    try {
+      stream = await io.fetchTarget(state.hostSocketPath, port);
+    } catch (error) {
+      if (!(error instanceof Error)) throw error;
+      io.fail(`Could not resolve this connection's target: ${error.message}\n`);
+      return 1;
     }
+  }
+  if (stream) {
+    // Best effort: lets a revocation end this session. Never worth refusing over.
+    await io.postSession(state.hostSocketPath, { pid: io.pid, fingerprint, ...(port ? { port } : {}) }).catch(() => {});
   }
   const original = io.env.SSH_ORIGINAL_COMMAND;
   let response: ResponseFrame;
@@ -133,11 +137,13 @@ export async function runLanding(argv: string[], io: LandingIo): Promise<number>
 if (isMainModule(import.meta.url)) {
   runLanding(process.argv.slice(2), {
     env: process.env,
+    pid: process.pid,
     stdinIsTty: process.stdin.isTTY === true,
     write: (text) => process.stdout.write(text),
     fail: (text) => process.stderr.write(text),
-    exec: (bin, args, env) => spawnSync(bin, args, { stdio: 'inherit', env }).status ?? 1,
+    exec: (bin, args, env) => runForeground(bin, args, env),
     fetchTarget: (socketPath, port) => fetchTarget(socketPath, port),
+    postSession: (socketPath, request) => postSession(socketPath, request),
     sendFrame: (socketPath, command, args) => sendHostFrame(socketPath, command, args),
   }).then(
     (code) => process.exit(code),

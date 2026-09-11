@@ -22,22 +22,27 @@ function positional(args: Record<string, unknown>, flag: string): string | undef
   return value === undefined || value === true ? undefined : String(value);
 }
 
-function renderSummary(data: unknown, headline?: string): string {
+function renderSummary(data: unknown): string {
   const s = data as DoorSummary;
   const door = s.door;
   const lines = [
-    headline ??
-      (s.enabled ? `Remote terminal access is enabled for "${s.name}".` : 'Remote terminal access is disabled.'),
+    s.enabled ? `Remote terminal access is enabled for "${s.name}".` : 'Remote terminal access is disabled.',
   ];
   if (s.enabled) {
+    if (s.host) lines.push(`  address     ssh ${s.host}`);
+    if (s.previousName) lines.push(`  renamed     from "${s.previousName}" — your address changed`);
     lines.push(
-      `  door        127.0.0.1:${s.port} — ${door.running ? `running (pid ${door.pid})` : 'not running'}${
+      `  door        127.0.0.1:${s.doorPort} — ${door.running ? `running (pid ${door.pid})` : 'not running'}${
         'failure' in door && door.failure ? ` — ${door.failure}` : ''
       }`,
-      '              loopback only; reachable over the network once the account link relays terminals',
+      ...(s.host
+        ? []
+        : ['              loopback only; reachable over the network once the account link relays terminals']),
       `  host key    ${s.hostKeyFingerprint} (ed25519)`,
-      `  keys        ${s.keys.approved} approved, ${s.keys.pending} pending` +
-        (s.keys.approved === 0 ? ' — add one: ncl sandboxes remote keys add ~/.ssh/id_ed25519.pub' : ''),
+      `  keys        ${s.keys.approved} approved here, ${s.keys.browser} approved in the browser, ${s.keys.pending} pending` +
+        (s.keys.approved + s.keys.browser === 0
+          ? ' — add one: ncl sandboxes remote keys add ~/.ssh/id_ed25519.pub'
+          : ''),
       `  approvals   ${s.approvalUrl}`,
     );
   }
@@ -46,13 +51,18 @@ function renderSummary(data: unknown, headline?: string): string {
 
 function renderKeys(data: unknown): string {
   const store = data as KeyStore;
-  if (store.approved.length === 0 && store.pending.length === 0) {
+  const browser = store.mirror?.fingerprints ?? [];
+  if (store.approved.length === 0 && store.pending.length === 0 && browser.length === 0) {
     return 'no terminal keys — add one: ncl sandboxes remote keys add ~/.ssh/id_ed25519.pub';
   }
   const lines: string[] = [];
   if (store.approved.length) {
     lines.push('APPROVED');
     for (const k of store.approved) lines.push(`  ${k.fingerprint}  ${k.label}  since ${k.approvedAt}`);
+  }
+  if (browser.length) {
+    lines.push('APPROVED IN THE BROWSER');
+    for (const fingerprint of browser) lines.push(`  ${fingerprint}`);
   }
   if (store.pending.length) {
     lines.push('PENDING (approve with: ncl sandboxes remote keys approve <fingerprint>)');
@@ -68,17 +78,17 @@ export const remoteOperations: Record<string, CustomOperation> = {
     hostOnly: true,
     description:
       'Enable remote terminal access to this machine’s sandboxes (host operators only).\n' +
-      'Usage: ncl sandboxes remote enable --name <account-name>. The name (3–32 lowercase letters, digits ' +
-      'and hyphens) becomes this machine’s address once the account link relays terminals, and names the ' +
-      'default sandbox a remote terminal lands in. Generates a host key once, starts a loopback OpenSSH ' +
-      'listener owned by the host, and keeps it running across host restarts until `remote disable`.',
-    examples: ['ncl sandboxes remote enable --name my-machine'],
+      'Usage: ncl sandboxes remote enable [--name <account-name>]. The name (3–32 lowercase letters, digits ' +
+      'and single hyphens) becomes this machine’s address and names the default sandbox a remote terminal ' +
+      'lands in; when omitted, the account assigns one and the command prints the address. Generates a host ' +
+      'key once, starts a loopback OpenSSH listener owned by the host, and keeps it running across host ' +
+      'restarts until `remote disable`.',
+    examples: ['ncl sandboxes remote enable', 'ncl sandboxes remote enable --name my-machine'],
     handler: async (args) => {
       const name = positional(args, 'name');
-      if (!name) throw new Error('usage: ncl sandboxes remote enable --name <account-name>');
-      return enableDoor({ name: validateAccountName(name) });
+      return enableDoor(name === undefined ? {} : { name: validateAccountName(name) });
     },
-    formatHuman: (data) => renderSummary(data),
+    formatHuman: renderSummary,
   },
   'remote disable': {
     access: 'open',
@@ -87,14 +97,14 @@ export const remoteOperations: Record<string, CustomOperation> = {
       'Disable remote terminal access: stop the loopback listener and keep it stopped across restarts ' +
       '(host operators only). Approved keys are kept.\nUsage: ncl sandboxes remote disable',
     handler: async () => disableDoor(),
-    formatHuman: (data) => renderSummary(data),
+    formatHuman: renderSummary,
   },
   'remote status': {
     access: 'open',
     hostOnly: true,
     description: 'Show remote terminal access state, the listener, and key counts (host operators only).',
     handler: async () => doorStatus(),
-    formatHuman: (data) => renderSummary(data),
+    formatHuman: renderSummary,
   },
   'remote keys list': {
     access: 'open',
@@ -137,7 +147,8 @@ export const remoteOperations: Record<string, CustomOperation> = {
     access: 'open',
     hostOnly: true,
     description:
-      'Revoke a terminal key; its next connection lands in the waiting room again (host operators only).\n' +
+      'Revoke a key approved on this machine and end its sessions; its next connection lands in the ' +
+      'waiting room again (host operators only). Keys approved in the browser are revoked there.\n' +
       'Usage: ncl sandboxes remote keys revoke <fingerprint>',
     handler: async (args) => {
       const fingerprint = positional(args, 'fingerprint');

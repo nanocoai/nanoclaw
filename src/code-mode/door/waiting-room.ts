@@ -1,37 +1,45 @@
 /**
  * The waiting room — the forced command an unknown key runs. Deliberately
  * tiny: it is the surface strangers reach behind the OpenSSH handshake.
- * Prints the fingerprint, where the connection came from, the time and the
- * approval page, then polls the approved-keys store; approval hands the
- * terminal to the landing program, a timeout ends the session.
+ * Registers the key as pending with the host (which caps rooms and, through
+ * the account link, mints the approval code), prints the fingerprint, where
+ * the connection came from, the time and the approval page, then long-polls
+ * the host; approval hands the terminal to the landing program in the same
+ * session, a timeout ends it.
  */
-import { spawnSync } from 'node:child_process';
-
-import { isApproved, readKeyStore } from './keys.js';
+import { fetchTarget, postPending, waitApproval } from './door-client.js';
+import { runForeground } from './foreground.js';
 import { clientPortFromSshConnection } from './landing.js';
 import { doorFiles, isMainModule, resolveEntry } from './paths.js';
 import { readDoorState } from './state.js';
-import { fetchTarget } from './target-client.js';
 import type { DoorStream } from './target-map.js';
 
 export const WAITING_ROOM_TIMEOUT_MS = 10 * 60_000;
-export const WAITING_ROOM_POLL_MS = 2_000;
+/** One long-poll round at the host. */
+export const WAITING_ROOM_POLL_S = 25;
+const RETRY_AFTER_ERROR_MS = 2_000;
 
 export interface WaitingRoomDeps {
   fingerprint: string;
   source: string;
   approvalUrl: string;
+  code?: string;
   now: () => Date;
-  sleep: (ms: number) => Promise<void>;
-  isApproved: () => Promise<boolean>;
+  /** One long-poll round; resolves true once the key is approved. */
+  waitApproval: () => Promise<boolean>;
   write: (text: string) => void;
   /** Hand the terminal to the landing program; resolves with its exit code. */
   exec: () => Promise<number> | number;
   timeoutMs?: number;
-  pollMs?: number;
 }
 
-export function waitingRoomBanner(fingerprint: string, source: string, at: Date, approvalUrl: string): string {
+export function waitingRoomBanner(
+  fingerprint: string,
+  source: string,
+  at: Date,
+  approvalUrl: string,
+  code?: string,
+): string {
   return [
     '',
     'This terminal is not approved for remote access yet.',
@@ -39,6 +47,7 @@ export function waitingRoomBanner(fingerprint: string, source: string, at: Date,
     `  key    ${fingerprint}`,
     `  from   ${source}`,
     `  at     ${at.toISOString()}`,
+    ...(code ? [`  code   ${code}`] : []),
     '',
     `Approve it in your browser: ${approvalUrl}`,
     `or on the machine:          ncl sandboxes remote keys approve ${fingerprint}`,
@@ -50,11 +59,10 @@ export function waitingRoomBanner(fingerprint: string, source: string, at: Date,
 
 export async function runWaitingRoom(deps: WaitingRoomDeps): Promise<number> {
   const timeoutMs = deps.timeoutMs ?? WAITING_ROOM_TIMEOUT_MS;
-  const pollMs = deps.pollMs ?? WAITING_ROOM_POLL_MS;
   const started = deps.now();
-  deps.write(waitingRoomBanner(deps.fingerprint, deps.source, started, deps.approvalUrl));
+  deps.write(waitingRoomBanner(deps.fingerprint, deps.source, started, deps.approvalUrl, deps.code));
   for (;;) {
-    if (await deps.isApproved()) {
+    if (await deps.waitApproval()) {
       deps.write('Approved. Connecting…\n');
       return deps.exec();
     }
@@ -62,14 +70,15 @@ export async function runWaitingRoom(deps: WaitingRoomDeps): Promise<number> {
       deps.write('Not approved within 10 minutes. Approve the key, then connect again.\n');
       return 1;
     }
-    await deps.sleep(pollMs);
   }
 }
 
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
 async function main(argv: string[]): Promise<number> {
-  const [doorDir, fingerprint] = argv;
-  if (!doorDir || !fingerprint) {
-    process.stderr.write('waiting-room: usage: waiting-room <doorDir> <fingerprint>\n');
+  const [doorDir, fingerprint, keyType, publicKey] = argv;
+  if (!doorDir || !fingerprint || !keyType || !publicKey) {
+    process.stderr.write('waiting-room: usage: waiting-room <doorDir> <fingerprint> <key type> <key>\n');
     return 2;
   }
   const files = doorFiles(doorDir);
@@ -78,8 +87,8 @@ async function main(argv: string[]): Promise<number> {
     process.stderr.write('Remote access is disabled on this machine.\n');
     return 1;
   }
-  let stream: DoorStream | undefined;
   const port = clientPortFromSshConnection(process.env.SSH_CONNECTION);
+  let stream: DoorStream | undefined;
   if (port !== undefined) {
     try {
       stream = await fetchTarget(state.hostSocketPath, port);
@@ -88,16 +97,36 @@ async function main(argv: string[]): Promise<number> {
       stream = undefined;
     }
   }
+  let pending;
+  try {
+    pending = await postPending(state.hostSocketPath, { fingerprint, keyType, publicKey, port });
+  } catch (error) {
+    if (!(error instanceof Error)) throw error;
+    process.stderr.write(`The host is not reachable: ${error.message}\n`);
+    return 1;
+  }
+  if (pending === 'limit') {
+    process.stderr.write('Too many pending approvals on this machine; try again in a few minutes.\n');
+    return 1;
+  }
   const landing = [...resolveEntry('landing'), doorDir, fingerprint, ...(stream ? [JSON.stringify(stream)] : [])];
   return runWaitingRoom({
     fingerprint,
     source: stream?.source?.ip ?? 'remote',
-    approvalUrl: state.approvalUrl,
+    approvalUrl: pending.url,
+    code: pending.code,
     now: () => new Date(),
-    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-    isApproved: async () => isApproved(await readKeyStore(files.keyStore), fingerprint),
+    waitApproval: async () => {
+      try {
+        return await waitApproval(state.hostSocketPath, fingerprint, WAITING_ROOM_POLL_S);
+      } catch (error) {
+        if (!(error instanceof Error)) throw error;
+        await sleep(RETRY_AFTER_ERROR_MS);
+        return false;
+      }
+    },
     write: (text) => process.stdout.write(text),
-    exec: () => spawnSync(landing[0], landing.slice(1), { stdio: 'inherit' }).status ?? 1,
+    exec: () => runForeground(landing[0], landing.slice(1)),
   });
 }
 

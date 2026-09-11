@@ -20,7 +20,7 @@ const state: DoorState = {
   version: 1,
   enabled: true,
   name: 'alice',
-  port: 45000,
+  doorPort: 33022,
   approvalUrl: 'https://example.test/terminals',
   socketPath: '/srv/host/data/ncl.sock',
   hostSocketPath: files.hostSocket,
@@ -70,6 +70,7 @@ function fakes(opts: {
   const f: Fakes = { out: [], err: [], frames: [], execs: [], io: undefined as unknown as LandingIo };
   f.io = {
     env: opts.env ?? { SSH_CONNECTION: '127.0.0.1 50562 127.0.0.1 45000', PATH: '/usr/bin:/bin' },
+    pid: 4242,
     stdinIsTty: opts.tty ?? true,
     write: (t) => f.out.push(t),
     fail: (t) => f.err.push(t),
@@ -81,6 +82,7 @@ function fakes(opts: {
       if (opts.target instanceof Error) throw opts.target;
       return opts.target && streamFor(opts.target);
     }),
+    postSession: vi.fn(async () => {}),
     sendFrame: vi.fn(async (_socket, command, args) => {
       f.frames.push({ command, args });
       if (command === 'sandboxes-list') return listFrame(opts.sandboxes ?? [], opts.listHuman);
@@ -136,6 +138,7 @@ describe('runLanding', () => {
     const f = fakes({ target: { account: 'alice', sandbox: 'demo' } });
     expect(await runLanding([DIR, FP], f.io)).toBe(7);
     expect(f.io.fetchTarget).toHaveBeenCalledWith(files.hostSocket, 50562);
+    expect(f.io.postSession).toHaveBeenCalledWith(files.hostSocket, { pid: 4242, fingerprint: FP, port: 50562 });
     expect(f.frames).toEqual([{ command: 'sandboxes-attach', args: { id: 'demo' } }]);
     expect(f.execs).toEqual([
       { bin: 'docker', args: ['exec', '-it', 'demo', 'tmux'], env: expect.objectContaining({ PATH: state.path }) },
@@ -155,8 +158,9 @@ describe('runLanding', () => {
     expect(again.frames.map((f) => f.command)).toEqual(['sandboxes-list', 'sandboxes-attach']);
   });
 
-  it('prefers a target handed over by the waiting room and uses plain argv without a TTY', async () => {
+  it('prefers a target handed over by the waiting room, survives a failed session registration, and uses plain argv without a TTY', async () => {
     const f = fakes({ target: new Error('must not be asked'), tty: false });
+    vi.mocked(f.io.postSession).mockRejectedValue(new Error('socket gone'));
     expect(await runLanding([DIR, FP, JSON.stringify(streamFor({ account: 'alice', sandbox: 'demo' }))], f.io)).toBe(7);
     expect(f.io.fetchTarget).not.toHaveBeenCalled();
     expect(f.execs[0].args).toEqual(['exec', '-i', 'demo', 'tmux']);
@@ -168,6 +172,7 @@ describe('runLanding', () => {
     expect(f.err.join('')).toMatch(/no target/);
     expect(f.frames).toEqual([]);
     expect(f.execs).toEqual([]);
+    expect(f.io.postSession).not.toHaveBeenCalled();
   });
 
   it('reports a target lookup failure, a host error frame, and an unreachable host', async () => {

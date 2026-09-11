@@ -12,10 +12,15 @@ export const DEFAULT_APPROVAL_URL = 'https://portal.nanoclaw.dev/terminals';
 export interface DoorState {
   version: 1;
   enabled: boolean;
-  /** The account name chosen at enable — the DNS label and the default sandbox name. */
+  /** The account name the service confirmed or assigned — the DNS label and the default sandbox name. */
   name?: string;
+  /** The machine's address and host name once allocated. */
+  address?: string;
+  host?: string;
+  /** The name before a rename, so the operator learns the address changed. */
+  previousName?: string;
   /** Loopback port the door listens on; chosen once, kept across restarts. */
-  port?: number;
+  doorPort?: number;
   hostKey?: string;
   hostKeyFingerprint?: string;
   approvalUrl: string;

@@ -34,7 +34,7 @@ reaches it is expected to be relayed by the Host.
 ### Enabling
 
 ```sh
-bin/ncl sandboxes remote enable --name my-machine
+bin/ncl sandboxes remote enable [--name my-machine]
 bin/ncl sandboxes remote status
 bin/ncl sandboxes remote disable
 ```
@@ -42,12 +42,15 @@ bin/ncl sandboxes remote disable
 The name is a DNS label: 3–32 lowercase letters, digits and single hyphens,
 with a few common words reserved. It becomes this machine's address once the
 link relays terminals, and it names the default sandbox a remote terminal
-lands in. Enabling generates the host key once under `data/door/`, takes the
-first free loopback port in 33022–33121, writes an `sshd_config`, starts the
-listener under the Host, and keeps it running across Host restarts until you
-disable it. Disabling keeps the host key and the approved keys. The Host
-needs an OpenSSH server binary (`sshd`) and `ssh-keygen`; set
-`NANOCLAW_SSHD` if the binary is somewhere unusual.
+lands in. When the account link is connected the account confirms or assigns
+the name (omit `--name` to let it choose) and the command prints the address
+to use; a name renamed later in the browser is reported as a changed address.
+Without the link, pass `--name`. Enabling generates the host key once under
+`data/door/`, takes the first free loopback port in 33022–33121, writes an
+`sshd_config`, starts the listener under the Host, and keeps it running
+across Host restarts until you disable it. Disabling keeps the host key and
+the approved keys. The Host needs an OpenSSH server binary (`sshd`) and
+`ssh-keygen`; set `NANOCLAW_SSHD` if the binary is somewhere unusual.
 
 ### Keys and pairing
 
@@ -55,11 +58,12 @@ Every key the listener sees is admitted to exactly one program:
 
 - an approved key lands in a sandbox (next section);
 - an unknown key enters the waiting room, which prints the key's
-  fingerprint, where the connection came from, the time and the approval
-  page, then waits up to ten minutes. Approve it from the Host and the same
-  session continues into the sandbox without reconnecting. Unknown keys are
-  recorded as pending, at most ten per ten minutes; beyond that the listener
-  refuses them.
+  fingerprint, where the connection came from, the time, the approval page
+  and (through the account link) a short approval code, then waits up to
+  ten minutes. Approve it from the Host or in the browser and the same
+  session continues into the sandbox without reconnecting. A machine holds
+  at most four waiting rooms at once and records at most ten pending keys per
+  ten minutes; beyond that the room says so and ends.
 
 ```sh
 bin/ncl sandboxes remote keys add ~/.ssh/id_ed25519.pub --label laptop
@@ -68,11 +72,13 @@ bin/ncl sandboxes remote keys approve SHA256:…
 bin/ncl sandboxes remote keys revoke SHA256:…
 ```
 
-Fingerprints are the `SHA256:…` form `ssh-keygen -lf` prints. A revoked key
-returns to the waiting room on its next connection. The approval page shown
-in the waiting room is `NANOCLAW_TERMINAL_APPROVAL_URL` (default
-`https://portal.nanoclaw.dev/terminals`); approving from the browser arrives
-with the link work, approving from the Host works today.
+Fingerprints are the `SHA256:…` form `ssh-keygen -lf` prints. Revoking a
+key ends its open sessions and sends it back to the waiting room on its next
+connection. Keys approved in the browser reach the Host with the account's
+snapshot and are revoked there; `keys list` shows them separately. The
+approval page shown in the waiting room is `NANOCLAW_TERMINAL_APPROVAL_URL`
+(default `https://portal.nanoclaw.dev/terminals`) until the account link
+supplies the page and code.
 
 ### Landing
 
