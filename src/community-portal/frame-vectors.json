@@ -43,7 +43,46 @@
       "frame": { "v": 1, "ch": 1, "seq": 3, "t": "error", "code": "unsupported" }
     },
     { "raw": "{\"v\":1,\"ch\":1,\"seq\":4,\"t\":\"end\"}", "frame": { "v": 1, "ch": 1, "seq": 4, "t": "end" } },
-    { "raw": "{\"v\":1,\"ch\":1,\"seq\":5,\"t\":\"close\"}", "frame": { "v": 1, "ch": 1, "seq": 5, "t": "close" } }
+    { "raw": "{\"v\":1,\"ch\":1,\"seq\":5,\"t\":\"close\"}", "frame": { "v": 1, "ch": 1, "seq": 5, "t": "close" } },
+    {
+      "raw": "{\"v\":1,\"ch\":0,\"seq\":1,\"t\":\"hello\",\"leg\":\"host\",\"caps\":[\"perks\",\"ssh\"]}",
+      "frame": { "v": 1, "ch": 0, "seq": 1, "t": "hello", "leg": "host", "caps": ["perks", "ssh"] }
+    },
+    {
+      "raw": "{\"v\":1,\"ch\":0,\"seq\":3,\"t\":\"renew\",\"ticket\":\"eyJhbGciOiJFUzI1NiJ9.e30.c2ln\"}",
+      "frame": { "v": 1, "ch": 0, "seq": 3, "t": "renew", "ticket": "eyJhbGciOiJFUzI1NiJ9.e30.c2ln" }
+    },
+    {
+      "raw": "{\"v\":1,\"ch\":0,\"seq\":6,\"t\":\"renewed\",\"exp\":1757600000}",
+      "frame": { "v": 1, "ch": 0, "seq": 6, "t": "renewed", "exp": 1757600000 }
+    },
+    {
+      "raw": "{\"v\":1,\"ch\":2,\"seq\":1,\"t\":\"open\",\"kind\":\"ssh\",\"stream\":\"q7Xk1m2n3o4p5r6s7t8u9v\",\"target\":{\"account\":\"alice\",\"sandbox\":\"api\"},\"source\":{\"ip\":\"2001:db8::1\",\"port\":54321},\"ticket\":\"jti_0123456789abcdef\"}",
+      "frame": {
+        "v": 1,
+        "ch": 2,
+        "seq": 1,
+        "t": "open",
+        "kind": "ssh",
+        "stream": "q7Xk1m2n3o4p5r6s7t8u9v",
+        "target": { "account": "alice", "sandbox": "api" },
+        "source": { "ip": "2001:db8::1", "port": 54321 },
+        "ticket": "jti_0123456789abcdef"
+      }
+    },
+    {
+      "raw": "{\"v\":1,\"ch\":2,\"seq\":2,\"t\":\"data\",\"off\":0,\"b64\":\"U1NILTIuMC1PcGVuU1NIXzkuOQ0K\"}",
+      "frame": { "v": 1, "ch": 2, "seq": 2, "t": "data", "off": 0, "b64": "U1NILTIuMC1PcGVuU1NIXzkuOQ0K" }
+    },
+    {
+      "raw": "{\"v\":1,\"ch\":2,\"seq\":3,\"t\":\"credit\",\"ack\":21}",
+      "frame": { "v": 1, "ch": 2, "seq": 3, "t": "credit", "ack": 21 }
+    },
+    { "raw": "{\"v\":1,\"ch\":2,\"seq\":4,\"t\":\"end\"}", "frame": { "v": 1, "ch": 2, "seq": 4, "t": "end" } },
+    {
+      "raw": "{\"v\":1,\"ch\":2,\"seq\":5,\"t\":\"close\",\"reason\":\"peer\"}",
+      "frame": { "v": 1, "ch": 2, "seq": 5, "t": "close", "reason": "peer" }
+    }
   ],
   "invalid": [
     "{not json",
@@ -64,6 +103,9 @@
     "{\"v\":1,\"ch\":2,\"seq\":1,\"t\":\"hello\"}",
     "{\"v\":1,\"ch\":2,\"seq\":1,\"t\":\"ping\"}",
     "{\"v\":1,\"ch\":2,\"seq\":1,\"t\":\"perks.changed\"}",
+    "{\"v\":1,\"ch\":2,\"seq\":1,\"t\":\"renew\",\"ticket\":\"t\"}",
+    "{\"v\":1,\"ch\":2,\"seq\":1,\"t\":\"renewed\",\"exp\":1}",
+    "{\"v\":1,\"ch\":0,\"seq\":1,\"t\":\"credit\",\"ack\":0}",
     "{\"type\":\"pong\"}",
     "{\"type\":\"perks.changed\"}"
   ]
