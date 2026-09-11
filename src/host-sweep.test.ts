@@ -6,50 +6,52 @@
 import Database from 'better-sqlite3';
 import { describe, expect, it } from 'vitest';
 
-import { deleteOrphanProcessingClaims, getProcessingClaims } from './db/session-db.js';
 import {
   ABSOLUTE_CEILING_MS,
   CLAIM_STUCK_MS,
   _resetStuckProcessingRowsForTesting,
   decideStuckAction,
-  parseSqliteUtc,
   shouldCloseTaskSession,
 } from './host-sweep.js';
 import type { Session } from './types.js';
+import { parseIsoTimestamp } from './mailbox/model.js';
+import { wrapSqliteInbound, wrapSqliteOutbound } from './mailbox/sqlite/index.js';
 
 const BASE = Date.parse('2026-04-20T12:00:00.000Z');
+const JUST_WITHIN_CEILING_MS = ABSOLUTE_CEILING_MS - 1;
+const JUST_OVER_CEILING_MS = ABSOLUTE_CEILING_MS + 1;
 
 function claim(id: string, offsetMs: number) {
-  return { message_id: id, status_changed: new Date(BASE - offsetMs).toISOString() };
+  return { messageId: id, statusChanged: new Date(BASE - offsetMs).toISOString() };
 }
 
 describe('decideStuckAction', () => {
-  it('returns ok when heartbeat is fresh and no claims', () => {
+  it('returns ok when heartbeat is within the absolute ceiling', () => {
     expect(
       decideStuckAction({
         now: BASE,
-        heartbeatMtimeMs: BASE - 5_000,
+        heartbeatMtimeMs: BASE - JUST_WITHIN_CEILING_MS,
         containerState: null,
         claims: [],
       }),
     ).toEqual({ action: 'ok' });
   });
 
-  it('returns kill-ceiling when heartbeat older than 30 min', () => {
-    const heartbeatMtimeMs = BASE - ABSOLUTE_CEILING_MS - 1_000;
+  it('returns kill-ceiling when heartbeat exceeds the absolute ceiling', () => {
     const res = decideStuckAction({
       now: BASE,
-      heartbeatMtimeMs,
+      heartbeatMtimeMs: BASE - JUST_OVER_CEILING_MS,
       containerState: null,
       claims: [],
     });
-    expect(res.action).toBe('kill-ceiling');
-    if (res.action !== 'kill-ceiling') return;
-    expect(res.ceilingMs).toBe(ABSOLUTE_CEILING_MS);
-    expect(res.heartbeatAgeMs).toBeGreaterThan(ABSOLUTE_CEILING_MS);
+    expect(res).toEqual({
+      action: 'kill-ceiling',
+      heartbeatAgeMs: JUST_OVER_CEILING_MS,
+      ceilingMs: ABSOLUTE_CEILING_MS,
+    });
   });
 
-  it('skips the ceiling check when no heartbeat file exists (fresh container not yet ticked)', () => {
+  it('skips the ceiling check when no heartbeat file exists and no fallback is known', () => {
     // A freshly-spawned container hasn't produced any SDK events yet, so no
     // heartbeat. Prior behavior treated this as infinitely stale and killed
     // every container within seconds of spawn. With no claims either, we
@@ -57,6 +59,46 @@ describe('decideStuckAction', () => {
     const res = decideStuckAction({
       now: BASE,
       heartbeatMtimeMs: 0,
+      containerState: null,
+      claims: [],
+    });
+    expect(res.action).toBe('ok');
+  });
+
+  it('does not kill a spawn within the absolute ceiling when heartbeat is absent', () => {
+    const res = decideStuckAction({
+      now: BASE,
+      heartbeatMtimeMs: 0,
+      containerStartedAtMs: BASE - JUST_WITHIN_CEILING_MS,
+      containerState: null,
+      claims: [],
+    });
+    expect(res.action).toBe('ok');
+  });
+
+  it('kills on ceiling using container spawn time when heartbeat never ticked', () => {
+    // Regression: a container spawns, finds nothing that warrants an SDK
+    // event, and sits idle indefinitely with no heartbeat file ever created.
+    // Prior behavior exempted it from the ceiling check forever.
+    const res = decideStuckAction({
+      now: BASE,
+      heartbeatMtimeMs: 0,
+      containerStartedAtMs: BASE - JUST_OVER_CEILING_MS,
+      containerState: null,
+      claims: [],
+    });
+    expect(res).toEqual({
+      action: 'kill-ceiling',
+      heartbeatAgeMs: JUST_OVER_CEILING_MS,
+      ceilingMs: ABSOLUTE_CEILING_MS,
+    });
+  });
+
+  it('prefers a heartbeat over the container spawn time', () => {
+    const res = decideStuckAction({
+      now: BASE,
+      heartbeatMtimeMs: BASE - JUST_WITHIN_CEILING_MS,
+      containerStartedAtMs: BASE - JUST_OVER_CEILING_MS,
       containerState: null,
       claims: [],
     });
@@ -84,9 +126,9 @@ describe('decideStuckAction', () => {
       // 45 min — over the default ceiling, but under the Bash timeout
       heartbeatMtimeMs: BASE - 45 * 60 * 1000,
       containerState: {
-        current_tool: 'Bash',
-        tool_declared_timeout_ms: twoHrMs,
-        tool_started_at: new Date(BASE - 45 * 60 * 1000).toISOString(),
+        currentTool: 'Bash',
+        toolDeclaredTimeoutMs: twoHrMs,
+        toolStartedAt: parseIsoTimestamp(new Date(BASE - 45 * 60 * 1000).toISOString()),
       },
       claims: [],
     });
@@ -135,9 +177,9 @@ describe('decideStuckAction', () => {
       // 5 min since claim, over the 60s default but under the declared Bash timeout
       heartbeatMtimeMs: BASE - 5 * 60 * 1000 - 5_000,
       containerState: {
-        current_tool: 'Bash',
-        tool_declared_timeout_ms: tenMinMs,
-        tool_started_at: new Date(BASE - 5 * 60 * 1000).toISOString(),
+        currentTool: 'Bash',
+        toolDeclaredTimeoutMs: tenMinMs,
+        toolStartedAt: parseIsoTimestamp(new Date(BASE - 5 * 60 * 1000).toISOString()),
       },
       claims: [claim('msg-1', 5 * 60 * 1000)],
     });
@@ -149,7 +191,7 @@ describe('decideStuckAction', () => {
       now: BASE,
       heartbeatMtimeMs: BASE - 5_000,
       containerState: null,
-      claims: [{ message_id: 'x', status_changed: 'not-a-date' }],
+      claims: [{ messageId: 'x', statusChanged: 'not-a-date' }],
     });
     expect(res.action).toBe('ok');
   });
@@ -168,9 +210,9 @@ describe('decideStuckAction', () => {
 // container, breaking the loop atomically.
 // ─────────────────────────────────────────────────────────────────────────────
 
-function makeSessionDbs(): { inDb: Database.Database; outDb: Database.Database } {
-  const inDb = new Database(':memory:');
-  inDb.exec(`
+function makeSessionDbs() {
+  const rawIn = new Database(':memory:');
+  rawIn.exec(`
     CREATE TABLE messages_in (
       id            TEXT PRIMARY KEY,
       seq           INTEGER UNIQUE,
@@ -188,15 +230,18 @@ function makeSessionDbs(): { inDb: Database.Database; outDb: Database.Database }
       content       TEXT NOT NULL
     );
   `);
-  const outDb = new Database(':memory:');
-  outDb.exec(`
+  const rawOut = new Database(':memory:');
+  rawOut.exec(`
     CREATE TABLE processing_ack (
       message_id     TEXT PRIMARY KEY,
       status         TEXT NOT NULL,
       status_changed TEXT NOT NULL
     );
   `);
-  return { inDb, outDb };
+  return {
+    inDb: Object.assign(wrapSqliteInbound(rawIn), { prepare: rawIn.prepare.bind(rawIn) }),
+    outDb: Object.assign(wrapSqliteOutbound(rawOut), { prepare: rawOut.prepare.bind(rawOut) }),
+  };
 }
 
 function fakeSession(): Session {
@@ -221,7 +266,7 @@ describe('deleteOrphanProcessingClaims', () => {
     outDb.prepare("INSERT INTO processing_ack VALUES ('m-done', 'completed', ?)").run(ts);
     outDb.prepare("INSERT INTO processing_ack VALUES ('m-fail', 'failed', ?)").run(ts);
 
-    const removed = deleteOrphanProcessingClaims(outDb);
+    const removed = outDb.deleteOrphanProcessingClaims();
 
     expect(removed).toBe(1);
     const remaining = outDb.prepare('SELECT message_id, status FROM processing_ack ORDER BY message_id').all();
@@ -233,7 +278,7 @@ describe('deleteOrphanProcessingClaims', () => {
 
   it('returns 0 when nothing to clear', () => {
     const { outDb } = makeSessionDbs();
-    expect(deleteOrphanProcessingClaims(outDb)).toBe(0);
+    expect(outDb.deleteOrphanProcessingClaims()).toBe(0);
   });
 });
 
@@ -253,13 +298,13 @@ describe('resetStuckProcessingRows — orphan claim cleanup', () => {
     outDb.prepare("INSERT INTO processing_ack VALUES ('m-1', 'processing', ?)").run(claimedAt);
 
     // Sanity: the orphan claim is what would trip claim-stuck.
-    expect(getProcessingClaims(outDb)).toHaveLength(1);
+    expect(outDb.getProcessingClaims()).toHaveLength(1);
 
     _resetStuckProcessingRowsForTesting(inDb, outDb, fakeSession(), 'absolute-ceiling');
 
     // Regression assertion: orphan claim is gone — next sweep tick will see
     // an empty claims list and not kill the freshly respawned container.
-    expect(getProcessingClaims(outDb)).toEqual([]);
+    expect(outDb.getProcessingClaims()).toEqual([]);
 
     // And the message itself was rescheduled with backoff (existing behavior).
     const row = inDb.prepare('SELECT status, tries, process_after FROM messages_in WHERE id = ?').get('m-1') as {
@@ -289,50 +334,9 @@ describe('resetStuckProcessingRows — orphan claim cleanup', () => {
 
     _resetStuckProcessingRowsForTesting(inDb, outDb, fakeSession(), 'claim-stuck');
 
-    expect(getProcessingClaims(outDb)).toEqual([]);
+    expect(outDb.getProcessingClaims()).toEqual([]);
     const row = inDb.prepare('SELECT tries FROM messages_in WHERE id = ?').get('m-2') as { tries: number };
     expect(row.tries).toBe(1); // not bumped, the skip path held
-  });
-});
-
-describe('parseSqliteUtc', () => {
-  // Regression: SQLite TIMESTAMP strings have no zone marker, but Date.parse
-  // treats those as local time. On non-UTC hosts this made every claim look
-  // (TZ offset) hours stale and tripped kill-claim on freshly-claimed messages.
-  // The helper appends "Z" only when no marker is present, so parsing is
-  // always anchored to UTC regardless of host timezone.
-
-  const utcMs = Date.parse('2026-04-20T12:00:00.000Z');
-
-  it('treats a SQLite-style timestamp (no zone) as UTC', () => {
-    expect(parseSqliteUtc('2026-04-20 12:00:00')).toBe(utcMs);
-    expect(parseSqliteUtc('2026-04-20T12:00:00')).toBe(utcMs);
-    expect(parseSqliteUtc('2026-04-20T12:00:00.000')).toBe(utcMs);
-  });
-
-  it('preserves an explicit Z marker', () => {
-    expect(parseSqliteUtc('2026-04-20T12:00:00.000Z')).toBe(utcMs);
-    expect(parseSqliteUtc('2026-04-20T12:00:00z')).toBe(utcMs);
-  });
-
-  it('preserves an explicit numeric offset', () => {
-    // 14:00+02:00 == 12:00 UTC
-    expect(parseSqliteUtc('2026-04-20T14:00:00+02:00')).toBe(utcMs);
-    expect(parseSqliteUtc('2026-04-20T14:00:00+0200')).toBe(utcMs);
-    // 07:00-05:00 == 12:00 UTC
-    expect(parseSqliteUtc('2026-04-20T07:00:00-05:00')).toBe(utcMs);
-  });
-
-  it('returns NaN for unparseable input', () => {
-    expect(Number.isNaN(parseSqliteUtc('not a date'))).toBe(true);
-  });
-
-  it('does not drift across host timezones for SQLite-style input', () => {
-    // The helper itself is timezone-independent because it forces UTC parsing.
-    // (Verifying the regex branch — without the helper, `Date.parse` of the
-    // bare string returns different values depending on the host TZ.)
-    const bare = '2026-04-20T12:00:00';
-    expect(parseSqliteUtc(bare)).toBe(Date.parse(bare + 'Z'));
   });
 });
 

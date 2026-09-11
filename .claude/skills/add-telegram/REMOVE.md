@@ -16,7 +16,8 @@ Then delete the copied adapter, helpers, tests, registration test, and setup ste
 rm -f src/channels/telegram.ts src/channels/telegram-registration.test.ts \
   src/channels/telegram-pairing.ts src/channels/telegram-markdown-sanitize.ts \
   src/channels/telegram-pairing.test.ts src/channels/telegram-markdown-sanitize.test.ts \
-  setup/pair-telegram.ts
+  src/channels/telegram-instances-registration.test.ts src/channels/telegram-pairing-interceptor.test.ts \
+  src/channels/telegram-connect-group.test.ts setup/pair-telegram.ts
 ```
 
 ## 2. Remove the setup step
@@ -29,11 +30,7 @@ Delete this entry from the `STEPS` map in `setup/index.ts` (skip if already gone
 
 ## 3. Remove credentials
 
-Remove `TELEGRAM_BOT_TOKEN` from `.env`, then re-sync to the container:
-
-```bash
-mkdir -p data/env && cp .env data/env/env
-```
+Remove `TELEGRAM_BOT_TOKEN` from `.env`, and, if you added more bots, `TELEGRAM_INSTANCES` and every `TELEGRAM_BOT_TOKEN_<NAME>` line.
 
 ## 4. Remove the package
 

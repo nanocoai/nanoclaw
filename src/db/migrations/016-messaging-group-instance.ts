@@ -31,6 +31,7 @@ import type { Migration } from './index.js';
 export const migration016: Migration = {
   version: 16,
   name: 'messaging-group-instance',
+  sqliteOnly: true,
   disableForeignKeys: true,
   up: (db: Database.Database) => {
     // Idempotency guard per the 012 pattern.

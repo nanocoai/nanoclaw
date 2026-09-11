@@ -13,6 +13,8 @@
  */
 import { spawn } from 'child_process';
 
+export const PING_AGENT_FOLDER = 'ping_test';
+
 export type PingResult = 'ok' | 'no_reply' | 'socket_error' | 'auth_error';
 
 export function classifyPingResult(exitCode: number | null, stdout: string, stderr = ''): PingResult {

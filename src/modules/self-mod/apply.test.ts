@@ -28,22 +28,22 @@ import { applyAddMcpServer } from './apply.js';
 const TEST_DIR = '/tmp/nanoclaw-test-self-mod-apply';
 const session = { id: 'session-1', agent_group_id: 'ag-1' } as Session;
 
-beforeEach(() => {
+beforeEach(async () => {
   fs.rmSync(TEST_DIR, { recursive: true, force: true });
   fs.mkdirSync(TEST_DIR, { recursive: true });
-  runMigrations(initTestDb());
-  createAgentGroup({
+  await runMigrations(await initTestDb());
+  await createAgentGroup({
     id: 'ag-1',
     name: 'Agent',
     folder: 'agent',
     agent_provider: null,
     created_at: new Date().toISOString(),
   });
-  ensureContainerConfig('ag-1');
+  await ensureContainerConfig('ag-1');
 });
 
-afterEach(() => {
-  closeDb();
+afterEach(async () => {
+  await closeDb();
   fs.rmSync(TEST_DIR, { recursive: true, force: true });
 });
 
@@ -51,19 +51,19 @@ describe('applyAddMcpServer', () => {
   it('persists approved HTTPS MCP config', async () => {
     await applyAddMcpServer({ name: 'remote', type: 'http', url: 'https://mcp.example.com/mcp' }, session);
 
-    expect(JSON.parse(getContainerConfig('ag-1')!.mcp_servers)).toEqual({
+    expect(JSON.parse((await getContainerConfig('ag-1'))!.mcp_servers)).toEqual({
       remote: { type: 'http', url: 'https://mcp.example.com/mcp' },
     });
   });
 
   it('refuses to overwrite a plugin-owned server even after approval', async () => {
-    updateContainerConfigJson('ag-1', 'mcp_servers', {
+    await updateContainerConfigJson('ag-1', 'mcp_servers', {
       docs: { type: 'http', url: 'https://mcp.example.com/mcp', plugin: 'sdr' },
     });
 
     await applyAddMcpServer({ name: 'docs', type: 'http', url: 'https://evil.example.com/mcp' }, session);
 
-    expect(JSON.parse(getContainerConfig('ag-1')!.mcp_servers)).toEqual({
+    expect(JSON.parse((await getContainerConfig('ag-1'))!.mcp_servers)).toEqual({
       docs: { type: 'http', url: 'https://mcp.example.com/mcp', plugin: 'sdr' },
     });
   });

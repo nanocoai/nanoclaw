@@ -31,7 +31,7 @@ A skill carries everything it needs:
 
 - **Its code**: the files it adds (see "Where a skill's files live").
 - **Apply and remove.** Apply installs it; remove uninstalls it. Uninstall isn't a separate problem; it ships with the skill. (Remove is required exactly when apply leaves anything behind. A pure instruction-only skill that changes nothing needs none.)
-- **Its tests**: see "A test for every integration point." The tests *are* the verification. If they pass against the composed project, the skill applied correctly and works; there is no separate "verify" step.
+- **Its tests**: see "A test for every integration point." The tests _are_ the verification. If they pass against the composed project, the skill applied correctly and works; there is no separate "verify" step.
 - **Its recipe entry**: how it composes with the others.
 
 Apply must be safe to re-run. Upgrades re-run skills, so a skill that half-applies twice is a bug.
@@ -51,7 +51,7 @@ One honest exception: a bug fix that genuinely changes an existing line can't al
 
 ## What makes a good skill
 
-A good skill mostly just *adds* things:
+A good skill mostly just _adds_ things:
 
 - Adds new files.
 - Adds a line to an existing file (an import, an entry, a line in `.env`).
@@ -60,7 +60,7 @@ A good skill mostly just *adds* things:
 
 These never really break.
 
-The one risky move is when a skill has to *reach into* existing code and wire something in at a specific spot. That's the only part that breaks when we change the code later. Keep these rare, and keep them to a line or two that just *calls* code living in the skill's own files, not big chunks of logic inline.
+The one risky move is when a skill has to _reach into_ existing code and wire something in at a specific spot. That's the only part that breaks when we change the code later. Keep these rare, and keep them to a line or two that just _calls_ code living in the skill's own files, not big chunks of logic inline.
 
 Rule of thumb: aim for skills that are almost all "adds." Not 100%; some reach-ins are fine. But a skill full of reach-ins is a smell, and a sign that spot in the core should become a proper hook.
 
@@ -72,27 +72,27 @@ The files a skill adds live in the skill's own folder, and the skill copies them
 
 The exception is skills that plug into a registry: channels and providers. Their code is larger, multi-file, and has to stay in sync with the core as it changes over time. That code lives on a long-lived **registry branch** (`channels`, `providers`) that we forward-merge against main, and the skill fetches it from there (`git show origin/channels:path > path`). A frozen copy in a skill folder would go stale.
 
-This fetch is **additive, never a merge**. The skill copies in the files it needs; it does *not* `git merge` the branch. Merging a registry branch into a customized install is exactly the conflict fight this model exists to avoid. A skill's **tests live on the branch alongside its code** and are fetched the same way; a channel's adapter travels with its registration test. A provider is the multi-point case: its code spans the host *and* container trees plus a Dockerfile edit, so it fetches files into both trees and ships a registration test per tree. See the provider archetype in [skill-guidelines.md](skill-guidelines.md).
+This fetch is **additive, never a merge**. The skill copies in the files it needs; it does _not_ `git merge` the branch. Merging a registry branch into a customized install is exactly the conflict fight this model exists to avoid. A skill's **tests live on the branch alongside its code** and are fetched the same way; a channel's adapter travels with its registration test. A provider is the multi-point case: its code spans the host _and_ container trees plus a Dockerfile edit, so it fetches files into both trees and ships a registration test per tree. See the provider archetype in [skill-guidelines.md](skill-guidelines.md).
 
 Either way the skill brings its own code, from its folder or from its branch.
 
 ## A test for every integration point
 
-The tests a skill *must* ship are the ones that prove it integrates with the core and keeps working as the core changes. That's the whole point. Tests of a skill's own internal logic, or of its behavior against an external service, are fine but optional: the creator's call, because they don't guard against upstream changes. A pure-add skill that touches nothing existing needs no required integration test at all.
+The tests a skill _must_ ship are the ones that prove it integrates with the core and keeps working as the core changes. That's the whole point. Tests of a skill's own internal logic, or of its behavior against an external service, are fine but optional: the creator's call, because they don't guard against upstream changes. A pure-add skill that touches nothing existing needs no required integration test at all.
 
 The places that break on upgrade are the **integration points**: wherever a skill reaches into the existing system. That's not just the obvious code edit. An appended import, a config entry, a Dockerfile change, a mount, an installed dependency, and a direct read of the core's data all count. Each gets a guard that goes **red if it breaks or goes missing**:
 
 - **A behavior or structural test of the wiring.** Prefer behavior when the seam is queryable at runtime: a channel's registration test imports the real barrel and asserts the registry contains it. Fall back to a structural test only for wiring with no invocable seam.
 - **The build / typecheck.** Always on. It catches the drift a runtime test can't: a renamed symbol, a moved module, a changed signature.
-- **Coverage of how an added file consumes the core.** When a skill's own file reaches into core APIs or data, a test must exercise that consumption against the *real* core. That's the leg that catches core drift.
+- **Coverage of how an added file consumes the core.** When a skill's own file reaches into core APIs or data, a test must exercise that consumption against the _real_ core. That's the leg that catches core drift.
 
 Why points and not whole skills: a skill can have several, and each is a separate way to break. The count is honest signal: a skill's integration points are exactly its upgrade risk. Pure-add skills have zero and stay cheap.
 
-This is what makes upgrades cheap to fix: when we move something in the core, the integration-point tests are exactly what fail, and that failing list *is* the set of skills to update.
+This is what makes upgrades cheap to fix: when we move something in the core, the integration-point tests are exactly what fail, and that failing list _is_ the set of skills to update.
 
-**Tests travel with the skill.** They're files kept with the skill, in its folder or on its branch, and applying the skill copies them into the project's test tree. An integration-point test has to run against the *composed* system, so it only means anything once the skill is applied.
+**Tests travel with the skill.** They're files kept with the skill, in its folder or on its branch, and applying the skill copies them into the project's test tree. An integration-point test has to run against the _composed_ system, so it only means anything once the skill is applied.
 
-**The recipe tests the stack.** A single skill's tests prove that skill works alone. The recipe carries tests that run the skills *together*, in order. That's where you catch two skills that collide.
+**The recipe tests the stack.** A single skill's tests prove that skill works alone. The recipe carries tests that run the skills _together_, in order. That's where you catch two skills that collide.
 
 The full testing doctrine (how to pick the test type per point, the archetypes, the dependency cases) is in [skill-guidelines.md](skill-guidelines.md).
 
@@ -110,15 +110,23 @@ Two different moves, two different rules. Your **fork pulls trunk**: that's a no
 
 The update takes one of two paths:
 
-**Normal upgrade: pull and fix what breaks.** Most of the time it pulls the latest upstream, resolves the occasional small conflict, runs the tests, and fixes whatever they flag. This stays cheap *because* the changes are small self-contained skills with tests: conflicts are rare, and when something does break, the failing test points at the exact skill and the fix is local.
+**Normal upgrade: pull and fix what breaks.** Most of the time it pulls the latest upstream, resolves the occasional small conflict, runs the tests, and fixes whatever they flag. This stays cheap _because_ the changes are small self-contained skills with tests: conflicts are rare, and when something does break, the failing test points at the exact skill and the fix is local.
 
 **Rebuild from the recipe: the rare path.** Take fresh upstream and apply every skill from scratch. The command flags this when you've fallen far behind across many breaking changes (a clean rebuild beats catching up step by step). It's also how you hand your entire fork to someone else.
 
 Around both:
 
 - **The update skill updates itself first.** The first thing it does is fetch the latest version of the upgrade process. Otherwise you're upgrading with stale instructions.
-- **Snapshot first, restore on failure.** The upgrade sets a rollback point before it starts: today a git backup branch and tag; the model calls for a full project snapshot (code, database, data, files) so anything that fails rolls back and retries. Until that snapshot lands, a migration that touches data makes its own data backup. Nothing in the upgrade needs its own undo logic.
-- **Broken skills don't block you.** If a core change broke a skill, its test tells you, but the skill is usually still usable, and an agent fixes it at apply time. Skills are fixed lazily, when applied, not ahead of time for every core version.
+- **Snapshot first, restore on failure.** The update transaction stages code in
+  an isolated worktree, then snapshots the database, data, group files, store,
+  and local configuration before cutover. A failed build or health gate restores
+  that mutable state together with Git. External components still carry their
+  own recorded rollback instruction.
+- **Installed payloads fail closed during upgrades.** The updater refreshes each
+  installed channel/provider through its structured apply contract. A missing,
+  prose-only, or partially applied refresh blocks cutover instead of stamping a
+  checkout whose installed integration is stale. Uninstalled skills remain
+  independent and can still be fixed when they are applied.
 
 ## Migrations
 
@@ -126,9 +134,13 @@ Migrations are core, not an afterthought. Every breaking change ships with its m
 
 Migrations are **forward-only**. They don't need reverse scripts; the rollback point in front of the upgrade is the undo. If one fails, restore and retry.
 
-A **startup tripwire** keeps installs on the supported path. Every sanctioned update path (install, update, migrate) stamps a marker with the version it reached; at startup the host checks that marker against the running code. If it's missing or doesn't match, because someone pulled by hand, the host stops, loudly, with the exact command to fix it instead of silently breaking.
+A **startup tripwire** keeps installs on the supported path. Every sanctioned
+update path stamps the exact version, Git commit, and tree it reached; at
+startup the host checks that identity against the running checkout. If it is
+missing or differs, including a raw pull between commits that share one package
+version, the host stops with the supported recovery command.
 
-The tripwire doesn't reason about *which* changes are breaking; it just enforces that the path was used. (DB schema migrations already run automatically at startup, so they aren't its concern; it guards everything else a raw `git pull` leaves undone.) To override, you stamp the marker yourself: an explicit "I know what I'm doing," not a deletion. If you have your **own** upgrade flow (a deploy script, a CI job), make stamping the last step after it succeeds: `pnpm exec tsx scripts/upgrade-state.ts set`. See [upgrade-recovery.md](upgrade-recovery.md).
+The tripwire doesn't reason about _which_ changes are breaking; it just enforces that the path was used. (DB schema migrations already run automatically at startup, so they aren't its concern; it guards everything else a raw `git pull` leaves undone.) To override, you stamp the marker yourself: an explicit "I know what I'm doing," not a deletion. If you have your **own** upgrade flow (a deploy script, a CI job), make stamping the last step after it succeeds: `pnpm exec tsx scripts/upgrade-state.ts set`. See [upgrade-recovery.md](upgrade-recovery.md).
 
 ## The maintainer's side of the deal
 

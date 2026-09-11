@@ -1,0 +1,5 @@
+# Raw capture transcripts stay local: they are full SDK payloads and can
+# embed machine-local text (e.g. a scenario that ran `ls /tmp`). The
+# committed, reviewed subset lives in src/providers/__fixtures__/ via
+# extract-fixtures.ts.
+recordings/

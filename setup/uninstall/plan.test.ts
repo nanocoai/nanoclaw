@@ -54,9 +54,7 @@ describe('buildRemovalPlan ordering invariants', () => {
   it('removes .env only via the atomic backup action, never a bare delete', () => {
     const actions = buildRemovalPlan(inventory(), allYes());
     expect(actions.filter((a) => a.kind === 'backup-env')).toHaveLength(1);
-    expect(
-      actions.some((a) => a.kind === 'delete-path' && a.item.path === '/proj/.env'),
-    ).toBe(false);
+    expect(actions.some((a) => a.kind === 'delete-path' && a.item.path === '/proj/.env')).toBe(false);
   });
 
   it('puts the runtime tail strictly last, with node_modules final', () => {
@@ -69,17 +67,13 @@ describe('buildRemovalPlan ordering invariants', () => {
     ]);
     // No non-tail action after the first runtime delete.
     const firstTailIdx = actions.findIndex((a) => a.kind === 'delete-runtime-path');
-    expect(
-      actions.slice(firstTailIdx).every((a) => a.kind === 'delete-runtime-path'),
-    ).toBe(true);
+    expect(actions.slice(firstTailIdx).every((a) => a.kind === 'delete-runtime-path')).toBe(true);
   });
 
   it('deletes OneCLI agents before the data group (which removes data/v2.db)', () => {
     const actions = buildRemovalPlan(inventory(), allYes([agent('u-1', 'ag-mine')]));
     const onecliIdx = actions.findIndex((a) => a.kind === 'delete-onecli-agent');
-    const dataIdx = actions.findIndex(
-      (a) => a.kind === 'delete-path' && a.item.path === '/proj/data',
-    );
+    const dataIdx = actions.findIndex((a) => a.kind === 'delete-path' && a.item.path === '/proj/data');
     expect(onecliIdx).toBeGreaterThanOrEqual(0);
     expect(dataIdx).toBeGreaterThan(onecliIdx);
   });
@@ -104,9 +98,7 @@ describe('buildRemovalPlan declined groups', () => {
     });
     expect(kinds(actions)).not.toContain('backup-env');
     expect(kinds(actions)).not.toContain('delete-runtime-path');
-    expect(
-      actions.some((a) => a.kind === 'delete-path' && a.item.path.startsWith('/proj/data')),
-    ).toBe(false);
+    expect(actions.some((a) => a.kind === 'delete-path' && a.item.path.startsWith('/proj/data'))).toBe(false);
   });
 
   it('all declined yields an empty plan', () => {
@@ -149,8 +141,6 @@ describe('buildRemovalPlan conditional actions', () => {
     // scan never saw. Removal re-lists by install label, not scan-time ids.
     expect(actionKinds).toContain('pkill-host');
     const rm = actions.find((a) => a.kind === 'rm-containers');
-    expect(rm && rm.kind === 'rm-containers' ? rm.labelFilter : '').toBe(
-      'nanoclaw-install=abcd1234',
-    );
+    expect(rm && rm.kind === 'rm-containers' ? rm.labelFilter : '').toBe('nanoclaw-install=abcd1234');
   });
 });

@@ -1,22 +1,25 @@
-import fs from 'fs';
-import os from 'os';
-import path from 'path';
-
 import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 
-import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/connection.js';
+import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/container-state.js';
 import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
-import { TIMEZONE, formatLocalStamp } from '../timezone.js';
-import { shimCwd } from './cwd-shim.js';
+import type { ResolvedRuntimeConfiguration } from '../provider-contracts/registry.js';
+// The execution-policy, inference, MCP, and memory derivations live in
+// claude-config.ts. The runtime contract (provider-contracts/claude.ts)
+// declares them; core calls them and hands the results to this provider's
+// constructor and registerMemorySessionHook. This module never imports the
+// contract — registration is two-step so it compiles on a core without one.
+import {
+  SDK_DISALLOWED_TOOLS,
+  type resolveClaudeExecutionPolicy,
+  type resolveClaudeInference,
+  type resolveClaudeMcpServers,
+  type resolveClaudeMemoryRuntime,
+} from './claude-config.js';
+// Transcript archiving and rotation are this provider's own concern: both
+// read the SDK's on-disk .jsonl, which no other provider has.
+import { archiveClaudeTranscript, rotateClaudeContinuation } from './claude-history.js';
 import { registerProvider } from './provider-registry.js';
-import type {
-  AgentProvider,
-  AgentQuery,
-  McpServerConfig,
-  ProviderEvent,
-  ProviderOptions,
-  QueryInput,
-} from './types.js';
+import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
 function log(msg: string): void {
   console.error(`[claude-provider] ${msg}`);
@@ -65,73 +68,7 @@ export function classifyRateLimitEvent(
   };
 }
 
-// Deferred SDK builtins that either sidestep nanoclaw's own scheduling or
-// don't fit our async message-passing model (they're designed for Claude
-// Code's interactive UI and would hang here).
-//
-// - CronCreate / CronDelete / CronList / ScheduleWakeup: we have durable
-//   scheduling via `ncl tasks`.
-// - AskUserQuestion: SDK returns a placeholder instead of blocking on a
-//   real answer — we have mcp__nanoclaw__ask_user_question that persists
-//   the question and blocks on the real reply.
-// - SendMessage: addresses Claude Code's own in-session subagents, which are
-//   unrelated to NanoClaw agent groups — but the name reads as the obvious
-//   way to message another agent, so an agent that just called
-//   mcp__nanoclaw__create_agent reaches for it and gets "No agent named 'x'
-//   is currently addressable". mcp__nanoclaw__send_message is the real
-//   agent-to-agent path (it resolves the destination map in inbound.db).
-// - EnterPlanMode / ExitPlanMode / EnterWorktree / ExitWorktree: Claude
-//   Code UI affordances; in a headless container they'd appear stuck.
-// - DesignSync: desktop design-tool integration — nothing to sync with in a
-//   headless container (~9.3KB/turn schema).
-// - ReportFindings: code-review-reporting UI affordance with no headless
-//   host surface to receive it (~1.9KB/turn schema).
-export const SDK_DISALLOWED_TOOLS = [
-  'CronCreate',
-  'CronDelete',
-  'CronList',
-  'ScheduleWakeup',
-  'AskUserQuestion',
-  'SendMessage',
-  'EnterPlanMode',
-  'ExitPlanMode',
-  'EnterWorktree',
-  'ExitWorktree',
-  'DesignSync',
-  'ReportFindings',
-];
-
-// Tool allowlist for NanoClaw agent containers. MCP-tool entries are derived
-// at the call site from the registered `mcpServers` map so that any server
-// added via `add_mcp_server` (or wired in container.json directly) is
-// reachable to the agent — without this, the SDK's allowedTools filter
-// silently drops every MCP namespace not listed here.
-export const TOOL_ALLOWLIST = [
-  'Bash',
-  'Read',
-  'Write',
-  'Edit',
-  'Glob',
-  'Grep',
-  'WebSearch',
-  'WebFetch',
-  'Task',
-  'TaskOutput',
-  'TaskStop',
-  'TeamCreate',
-  'TeamDelete',
-  'TodoWrite',
-  'ToolSearch',
-  'Skill',
-  'NotebookEdit',
-];
-
-// MCP server names are sanitized by the SDK when forming tool prefixes:
-// any character outside [A-Za-z0-9_-] becomes '_'. Mirror that here so our
-// allowlist patterns match what the SDK actually exposes.
-function mcpAllowPattern(serverName: string): string {
-  return `mcp__${serverName.replace(/[^a-zA-Z0-9_-]/g, '_')}__*`;
-}
+export { SDK_DISALLOWED_TOOLS, TOOL_ALLOWLIST } from './claude-config.js';
 
 interface SDKUserMessage {
   type: 'user';
@@ -177,57 +114,6 @@ class MessageStream {
   }
 }
 
-// ── Transcript archiving (PreCompact hook) ──
-
-interface ParsedMessage {
-  role: 'user' | 'assistant';
-  content: string;
-}
-
-function parseTranscript(content: string): ParsedMessage[] {
-  const messages: ParsedMessage[] = [];
-  for (const line of content.split('\n')) {
-    if (!line.trim()) continue;
-    try {
-      const entry = JSON.parse(line);
-      if (entry.type === 'user' && entry.message?.content) {
-        const text =
-          typeof entry.message.content === 'string'
-            ? entry.message.content
-            : entry.message.content.map((c: { text?: string }) => c.text || '').join('');
-        if (text) messages.push({ role: 'user', content: text });
-      } else if (entry.type === 'assistant' && entry.message?.content) {
-        const textParts = entry.message.content
-          .filter((c: { type: string }) => c.type === 'text')
-          .map((c: { text: string }) => c.text);
-        const text = textParts.join('');
-        if (text) messages.push({ role: 'assistant', content: text });
-      }
-    } catch {
-      /* skip unparseable lines */
-    }
-  }
-  return messages;
-}
-
-function formatTranscriptMarkdown(messages: ParsedMessage[], title?: string | null, assistantName?: string): string {
-  const now = new Date();
-  const dateStr = now.toLocaleString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-    hour12: true,
-  });
-  const lines = [`# ${title || 'Conversation'}`, '', `Archived: ${dateStr}`, '', '---', ''];
-  for (const msg of messages) {
-    const sender = msg.role === 'user' ? 'User' : assistantName || 'Assistant';
-    const content = msg.content.length > 2000 ? msg.content.slice(0, 2000) + '...' : msg.content;
-    lines.push(`**${sender}**: ${content}`, '');
-  }
-  return lines.join('\n');
-}
-
 /**
  * PreToolUse hook: record the current tool + its declared timeout so the host
  * sweep can widen its stuck tolerance while Bash is running a long-declared
@@ -265,180 +151,25 @@ const postToolUseHook: HookCallback = async () => {
   return { continue: true };
 };
 
-/**
- * Read a Claude transcript .jsonl, render a markdown summary, and drop it into
- * the agent's `conversations/` folder so context survives a compaction or a
- * session rotation. Best-effort: returns false (and logs) on any failure.
- */
-function archiveTranscriptFile(
-  transcriptPath: string | undefined,
-  sessionId: string | undefined,
-  assistantName?: string,
-): boolean {
-  if (!transcriptPath || !fs.existsSync(transcriptPath)) {
-    log('No transcript found for archiving');
-    return false;
-  }
+/** The real clock for archive names and rotation stamps; tests hand the history functions a fixed one. */
+const REAL_CLOCK = { now: () => Date.now() };
 
-  try {
-    const content = fs.readFileSync(transcriptPath, 'utf-8');
-    const messages = parseTranscript(content);
-    if (messages.length === 0) return false;
-
-    // Try to get summary from sessions index
-    let summary: string | undefined;
-    const indexPath = path.join(path.dirname(transcriptPath), 'sessions-index.json');
-    if (fs.existsSync(indexPath)) {
-      try {
-        const index = JSON.parse(fs.readFileSync(indexPath, 'utf-8'));
-        summary = index.entries?.find(
-          (e: { sessionId: string; summary?: string }) => e.sessionId === sessionId,
-        )?.summary;
-      } catch {
-        /* ignore */
-      }
-    }
-
-    const name = summary
-      ? summary
-          .toLowerCase()
-          .replace(/[^a-z0-9]+/g, '-')
-          .replace(/^-+|-+$/g, '')
-          .slice(0, 50)
-      : `conversation-${new Date().getHours().toString().padStart(2, '0')}${new Date().getMinutes().toString().padStart(2, '0')}`;
-
-    const conversationsDir = process.env.NANOCLAW_CONVERSATIONS_DIR || '/workspace/agent/conversations';
-    fs.mkdirSync(conversationsDir, { recursive: true });
-    // Local calendar date — the fallback `name` above already uses local
-    // hours, and the agent navigates conversations/ by these date prefixes.
-    const filename = `${formatLocalStamp(new Date(), TIMEZONE).slice(0, 10)}-${name}.md`;
-    fs.writeFileSync(path.join(conversationsDir, filename), formatTranscriptMarkdown(messages, summary, assistantName));
-    log(`Archived conversation to ${filename}`);
-    return true;
-  } catch (err) {
-    log(`Failed to archive transcript: ${err instanceof Error ? err.message : String(err)}`);
-    return false;
-  }
-}
-
+// The PreCompact hook is provider-originated: the SDK raises it from inside
+// the query, and the archive it triggers reads the SDK's own transcript.
 function createPreCompactHook(assistantName?: string): HookCallback {
   return async (input) => {
     const preCompact = input as PreCompactHookInput;
-    archiveTranscriptFile(preCompact.transcript_path, preCompact.session_id, assistantName);
+    archiveClaudeTranscript(
+      {
+        transcriptPath: preCompact.transcript_path,
+        sessionId: preCompact.session_id,
+        assistantName,
+        log,
+      },
+      REAL_CLOCK,
+    );
     return {};
   };
-}
-
-// ── Continuation rotation (cold-resume guard) ──
-
-/**
- * Resume cost is dominated by transcript size. Past this many bytes a fresh
- * cold container can't reload the .jsonl before the host's 30-min idle ceiling
- * fires, so the session is dropped and started clean. Operator-overridable.
- */
-function transcriptRotateBytes(): number {
-  return Number(process.env.CLAUDE_TRANSCRIPT_ROTATE_BYTES) || 12 * 1024 * 1024;
-}
-
-/**
- * Secondary age trigger, measured from the transcript's first entry. 0 (or a
- * non-positive value) disables the age check; size alone then governs.
- */
-function transcriptRotateAgeMs(): number {
-  const raw = process.env.CLAUDE_TRANSCRIPT_ROTATE_AGE_DAYS;
-  if (raw === undefined || raw.trim() === '') return 14 * 86_400_000;
-  const days = Number(raw);
-  if (!Number.isFinite(days)) return 14 * 86_400_000;
-  // Explicit non-positive override disables the age check; size alone governs.
-  return days > 0 ? days * 86_400_000 : Infinity;
-}
-
-function claudeProjectsDir(): string {
-  return path.join(claudeConfigDir(), 'projects');
-}
-
-function claudeConfigDir(): string {
-  return process.env.CLAUDE_CONFIG_DIR || path.join(process.env.HOME || os.homedir(), '.claude');
-}
-
-function writeMemorySessionHook(hook: MemorySessionHookRegistration): void {
-  const configDir = claudeConfigDir();
-  const settingsFile = path.join(configDir, 'settings.json');
-  fs.mkdirSync(configDir, { recursive: true });
-
-  const parsed: unknown = fs.existsSync(settingsFile) ? JSON.parse(fs.readFileSync(settingsFile, 'utf-8')) : {};
-  if (!isRecord(parsed)) throw new Error(`${settingsFile} must contain a JSON object`);
-
-  const hooks = parsed.hooks === undefined ? {} : parsed.hooks;
-  if (!isRecord(hooks)) throw new Error(`${settingsFile} hooks must be a JSON object`);
-
-  const sessionStart = hooks.SessionStart === undefined ? [] : hooks.SessionStart;
-  if (!Array.isArray(sessionStart)) throw new Error(`${settingsFile} hooks.SessionStart must be an array`);
-
-  const memoryCommands = new Set([hook.command, ...hook.legacyCommands]);
-  const nextSessionStart = sessionStart
-    .map((entry) => removeMemoryCommands(entry, memoryCommands))
-    .filter((entry) => entry !== undefined);
-  nextSessionStart.push({
-    matcher: hook.sources.join('|'),
-    hooks: [{ type: 'command', command: hook.command, timeout: 10 }],
-  });
-
-  hooks.SessionStart = nextSessionStart;
-  parsed.hooks = hooks;
-  fs.writeFileSync(settingsFile, JSON.stringify(parsed, null, 2) + '\n');
-}
-
-function removeMemoryCommands(value: unknown, commands: ReadonlySet<string>): unknown {
-  if (!isRecord(value) || !Array.isArray(value.hooks)) return value;
-  const hooks = value.hooks.filter((hook) => {
-    if (!isRecord(hook)) return true;
-    return typeof hook.command !== 'string' || !commands.has(hook.command);
-  });
-  return hooks.length > 0 ? { ...value, hooks } : undefined;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-/**
- * Locate the .jsonl backing a session id. The SDK names project dirs by a
- * mangled cwd; rather than reproduce that convention we scan project dirs for
- * `<sessionId>.jsonl` (session ids are UUIDs, so this is unambiguous).
- */
-function findTranscriptPath(sessionId: string): string | null {
-  const projects = claudeProjectsDir();
-  let dirs: string[];
-  try {
-    dirs = fs.readdirSync(projects);
-  } catch {
-    return null;
-  }
-  for (const dir of dirs) {
-    const candidate = path.join(projects, dir, `${sessionId}.jsonl`);
-    if (fs.existsSync(candidate)) return candidate;
-  }
-  return null;
-}
-
-/** Epoch-ms of the first transcript entry, or null if unreadable. */
-function transcriptStartMs(transcriptPath: string): number | null {
-  try {
-    const fd = fs.openSync(transcriptPath, 'r');
-    try {
-      const buf = Buffer.alloc(4096);
-      const n = fs.readSync(fd, buf, 0, buf.length, 0);
-      const firstLine = buf.toString('utf-8', 0, n).split('\n', 1)[0];
-      const ts = JSON.parse(firstLine)?.timestamp;
-      const ms = ts ? Date.parse(ts) : NaN;
-      return Number.isNaN(ms) ? null : ms;
-    } finally {
-      fs.closeSync(fd);
-    }
-  } catch {
-    return null;
-  }
 }
 
 // ── Provider ──
@@ -461,34 +192,42 @@ const CLAUDE_CODE_AUTO_COMPACT_WINDOW = process.env.CLAUDE_CODE_AUTO_COMPACT_WIN
 const STALE_SESSION_RE = /no conversation found|ENOENT.*\.jsonl|session.*not found/i;
 
 export class ClaudeProvider implements AgentProvider {
-  readonly supportsNativeSlashCommands = true;
-
   private assistantName?: string;
-  private mcpServers: Record<string, McpServerConfig>;
+  private mcp: ReturnType<typeof resolveClaudeMcpServers>;
+  private inference: ReturnType<typeof resolveClaudeInference>;
+  private executionPolicy: ReturnType<typeof resolveClaudeExecutionPolicy>;
   private env: Record<string, string | undefined>;
   private additionalDirectories?: string[];
-  private model?: string;
-  private effort?: string;
   private memorySessionHook?: MemorySessionHookRegistration;
 
-  constructor(options: ProviderOptions = {}) {
+  /**
+   * `configuration` is the contract's configuration as resolved by core
+   * (createProvider): execution policy, inference, and MCP servers. This
+   * provider does not call the resolves itself.
+   */
+  constructor(options: ProviderOptions, configuration: ResolvedRuntimeConfiguration) {
     this.assistantName = options.assistantName;
-    this.mcpServers = Object.fromEntries(
-      Object.entries(options.mcpServers ?? {}).map(([name, server]) => [name, shimCwd(server)]),
-    );
+    this.mcp = configuration.mcpServers as ReturnType<typeof resolveClaudeMcpServers>;
     this.additionalDirectories = options.additionalDirectories;
-    this.model = options.model;
-    this.effort = options.effort;
+    this.inference = configuration.inference as ReturnType<typeof resolveClaudeInference>;
+    this.executionPolicy = configuration.executionPolicy as ReturnType<typeof resolveClaudeExecutionPolicy>;
     this.env = {
       ...(options.env ?? {}),
       CLAUDE_CODE_AUTO_COMPACT_WINDOW,
-      CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
     };
   }
 
-  registerMemorySessionHook(hook: MemorySessionHookRegistration): void {
-    writeMemorySessionHook(hook);
+  /**
+   * `memory` is the contract's resolved memory capability (the runtime env
+   * that keeps the SDK's own auto-memory off). Core registers the hook before
+   * any query, so the SDK sees the same env it always did.
+   */
+  registerMemorySessionHook(hook: MemorySessionHookRegistration, memory?: unknown): void {
     this.memorySessionHook = hook;
+    this.env = {
+      ...this.env,
+      ...((memory as ReturnType<typeof resolveClaudeMemoryRuntime> | undefined) ?? {}),
+    };
   }
 
   isSessionInvalid(err: unknown): boolean {
@@ -496,39 +235,12 @@ export class ClaudeProvider implements AgentProvider {
     return STALE_SESSION_RE.test(msg);
   }
 
-  maybeRotateContinuation(continuation: string): string | null {
-    const transcriptPath = findTranscriptPath(continuation);
-    if (!transcriptPath) return null;
-
-    let size: number;
-    try {
-      size = fs.statSync(transcriptPath).size;
-    } catch {
-      return null;
-    }
-
-    const maxBytes = transcriptRotateBytes();
-    const startMs = transcriptStartMs(transcriptPath);
-    const ageMs = startMs === null ? 0 : Date.now() - startMs;
-    const maxAgeMs = transcriptRotateAgeMs();
-
-    let reason: string | null = null;
-    if (size > maxBytes) {
-      reason = `transcript ${(size / 1_048_576).toFixed(1)}MB > ${(maxBytes / 1_048_576).toFixed(0)}MB cap`;
-    } else if (startMs !== null && ageMs > maxAgeMs) {
-      reason = `transcript ${(ageMs / 86_400_000).toFixed(1)}d old > ${(maxAgeMs / 86_400_000).toFixed(0)}d cap`;
-    }
-    if (!reason) return null;
-
-    // Preserve a readable summary, then move the heavy .jsonl out of the
-    // resume path so the SDK starts a fresh session and the disk is reclaimed.
-    archiveTranscriptFile(transcriptPath, continuation, this.assistantName);
-    try {
-      fs.renameSync(transcriptPath, `${transcriptPath}.rotated-${Date.now()}`);
-    } catch (err) {
-      log(`Failed to move rotated transcript aside: ${err instanceof Error ? err.message : String(err)}`);
-    }
-    return reason;
+  /**
+   * Pre-resume maintenance: drop a transcript too large or too old to
+   * cold-resume within the host's idle ceiling (see claude-history.ts).
+   */
+  maybeRotateContinuation(continuation: string, _cwd: string): string | null {
+    return rotateClaudeContinuation({ continuation, assistantName: this.assistantName, log }, REAL_CLOCK);
   }
 
   query(input: QueryInput): AgentQuery {
@@ -548,16 +260,20 @@ export class ClaudeProvider implements AgentProvider {
         systemPrompt: instructions
           ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions }
           : undefined,
-        allowedTools: [...TOOL_ALLOWLIST, ...Object.keys(this.mcpServers).map(mcpAllowPattern)],
-        disallowedTools: SDK_DISALLOWED_TOOLS,
+        allowedTools: [...this.mcp.allowedTools],
+        disallowedTools: [...this.executionPolicy.disallowedTools],
         env: this.env,
-        model: this.model,
+        model: this.inference.model,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        effort: this.effort as any,
-        permissionMode: 'bypassPermissions',
-        allowDangerouslySkipPermissions: true,
+        effort: this.inference.effort as any,
+        permissionMode: this.executionPolicy.permissionMode,
+        allowDangerouslySkipPermissions: this.executionPolicy.allowDangerouslySkipPermissions,
         settingSources: ['project', 'user', 'local'],
-        mcpServers: this.mcpServers,
+        // Only sent when enabled, so an install that never turns it on passes
+        // exactly the options it always did. `fastMode` is a Settings member
+        // rather than a query option, which is why it rides `settings`.
+        ...(this.inference.settings ? { settings: this.inference.settings } : {}),
+        mcpServers: this.mcp.mcpServers,
         hooks: {
           PreToolUse: [{ hooks: [preToolUseHook] }],
           PostToolUse: [{ hooks: [postToolUseHook] }],
@@ -580,6 +296,32 @@ export class ClaudeProvider implements AgentProvider {
 
         if (message.type === 'system' && message.subtype === 'init') {
           yield { type: 'init', continuation: message.session_id };
+        } else if (message.type === 'assistant') {
+          // Surface each assistant message's text as it streams in. The final
+          // `result` event only carries the LAST assistant text — a wrapped
+          // <message> block composed between tool calls would otherwise be
+          // invisible to the poll-loop and silently lost.
+          //
+          // ONE text event per assistant message, joining its text blocks in
+          // content order ('' separator — the blocks are adjacent output).
+          // Emitting per-BLOCK events would hand the poll-loop's block parser
+          // fragments: a <message> block (or an <internal> span) spanning two
+          // text blocks of the same assistant message would look unterminated
+          // in each event, while the turn's result text — which reports the
+          // final message's text as a whole — could still contain it complete.
+          // Joining pins the containment premise at the granularity the
+          // result reports. Blocks split across ASSISTANT MESSAGES (a tool
+          // call between them) remain unparseable mid-turn by design; the
+          // poll-loop's midTurnSent===0 fallback and wrap-nudge cover that.
+          const content = (message as { message?: { content?: Array<{ type?: string; text?: string }> } }).message
+            ?.content;
+          if (Array.isArray(content)) {
+            const text = content
+              .filter((block) => block.type === 'text' && block.text)
+              .map((block) => block.text)
+              .join('');
+            if (text) yield { type: 'text', text };
+          }
         } else if (message.type === 'result') {
           // `result` text exists only on subtype:"success"; error subtypes
           // (e.g. a non-retryable 403 billing_error) carry their message in
@@ -647,4 +389,12 @@ export class ClaudeProvider implements AgentProvider {
   }
 }
 
-registerProvider('claude', (opts) => new ClaudeProvider(opts));
+// Function-form registration only; the runtime contract attaches itself from
+// provider-contracts/claude.ts through the same two-step path any
+// skill-installed provider uses.
+registerProvider('claude', (opts, configuration) => {
+  if (!configuration) {
+    throw new Error('Claude provider requires its runtime contract; construct it through createProvider');
+  }
+  return new ClaudeProvider(opts, configuration);
+});

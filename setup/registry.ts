@@ -54,8 +54,7 @@ const MODE_FLAGS: Record<string, Mode> = {
 
 // One line: the step's own failures are rendered through setup/index.ts's
 // catch, which puts the message in an ERROR field of a line-oriented block.
-const USAGE =
-  'Usage: --step registry -- [--status | --refresh | --opt-out | --logout] [--non-interactive]';
+const USAGE = 'Usage: --step registry -- [--status | --refresh | --opt-out | --logout] [--non-interactive]';
 
 /**
  * The block name has to be `stepName.toUpperCase()`: on a thrown error
@@ -121,10 +120,7 @@ async function status(say: (line?: string) => void): Promise<void> {
   // `unknown` covers three different states — unpinned, not a digest ref, and
   // docker unreachable — and none of them is a mismatch. Only claim drift when
   // both sides answered.
-  const pinMatch =
-    !pinnedDigest || !image.registryDigest
-      ? 'unknown'
-      : String(pinnedDigest === image.registryDigest);
+  const pinMatch = !pinnedDigest || !image.registryDigest ? 'unknown' : String(pinnedDigest === image.registryDigest);
 
   const row = (label: string, value: string): void => say(`${(label + ':').padEnd(18)}${value}`);
   row('Image source', source === 'hardened' ? 'pull a pinned image' : 'build here');
@@ -286,7 +282,7 @@ async function refresh(say: (line?: string) => void): Promise<void> {
   let foreign = 0;
   try {
     const { reconcileDerivedImages } = await import('./registry-reconcile.js');
-    const result = reconcileDerivedImages();
+    const result = await reconcileDerivedImages();
     cleared = result.cleared.length;
     removed = result.removed.length;
     foreign = result.foreign.length;

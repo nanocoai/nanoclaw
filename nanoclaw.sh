@@ -25,6 +25,20 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_ROOT"
 
+# ─── --slack-agents: former testing flag, accepted and ignored ─────────
+# The managed Slack experience is simply the default; the flag that once
+# enabled it is swallowed so older invocations keep working.
+_filtered_args=()
+for arg in "$@"; do
+  if [ "$arg" = "--slack-agents" ]; then
+    :
+  else
+    _filtered_args+=("$arg")
+  fi
+done
+set -- ${_filtered_args[@]+"${_filtered_args[@]}"}
+unset _filtered_args
+
 # ─── --help: show usage without bootstrapping ──────────────────────────
 for arg in "$@"; do
   if [ "$arg" = "--help" ] || [ "$arg" = "-h" ]; then
@@ -33,7 +47,7 @@ for arg in "$@"; do
     fi
     echo "Usage: bash nanoclaw.sh [options]"
     echo ""
-    echo "  --template-path <ref>  Create the first agent from templates/<ref>"
+    echo "  --template-path <ref>  Create or update an agent from templates/<ref>"
     echo "  --uninstall            Uninstall this NanoClaw copy"
     echo "  --help, -h             Show this help without installing dependencies"
     exit 0
@@ -72,6 +86,7 @@ for arg in "$@"; do
     echo "  $UNINSTALL_RUNTIME ps -aq --filter label=nanoclaw-install=$(_nanoclaw_install_slug) | xargs -r $UNINSTALL_RUNTIME rm -f"
     echo "  $UNINSTALL_RUNTIME rmi $(container_image_base):latest"
     echo "  rm -f ~/.local/bin/ncl    # only if it points at this folder"
+    echo "  rm -rf \"$(dirname "$PROJECT_ROOT")/.nanoclaw-updates/$(_nanoclaw_install_slug)\""
     echo ""
     echo "Then back up $PROJECT_ROOT/.env if you need the keys, and delete the folder."
     exit 1

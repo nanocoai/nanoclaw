@@ -21,10 +21,6 @@ continuation token to resume, the working directory, and system context to injec
 
 ```typescript
 interface AgentProvider {
-  /** True if the SDK handles slash commands natively and wants them passed
-   *  through raw. When false, the poll-loop formats them like any chat message. */
-  readonly supportsNativeSlashCommands: boolean;
-
   /** Register shared memory through the provider's native session-start mechanism. */
   registerMemorySessionHook(hook: MemorySessionHookRegistration): void;
 
@@ -113,6 +109,61 @@ type ProviderEvent =
 - **`progress`** — optional, for logging. The agent-runner logs these but doesn't act on them.
 - **`activity`** — a liveness signal. Providers MUST yield it on every underlying SDK event (tool call, thinking, partial message) so the poll-loop's idle timer stays honest during long tool runs.
 
+## Runtime provider contract
+
+Besides implementing `AgentProvider`, every provider declares a **runtime contract**
+(`container/agent-runner/src/provider-contracts/`). The contract is not a description
+core reads once and forgets — each field is consumed by core at a specific moment.
+
+What a provider declares:
+
+- `configuration` — `executionPolicy` (mandatory), and optionally `inference`, `memory`,
+  `mcpServers`. All four share one shape, `Capability<I>`: either a function
+  `(input, env) => answer` of the core-owned input, or a declared constant
+  `{ constant: answer }`. **Core calls the functions, not the provider.** `createProvider`
+  resolves `executionPolicy`, `inference` and `mcpServers` and passes the result to the
+  provider factory as its second argument; `memory` is resolved when core registers the
+  memory session hook and passed as the second argument of `registerMemorySessionHook`.
+  The core-owned inputs are named types in `provider-contracts/registry.ts` —
+  `RuntimeInferenceInput` for `inference`, `RuntimeMemoryHookInput` for `memory`, the
+  `McpServerConfig` map for `mcpServers` — and a provider's resolve names them rather
+  than restating the shape, so a field core adds reaches every provider through the type.
+- `lifecycle` — `memorySessionHookRegistration` (runs when core registers the memory hook)
+  and `beforeQuery` (runs before each query).
+- `history` — `afterExchange` (the factory wraps `onExchangeComplete` with it) and
+  `readTrace` (what `/upload-trace` uploads). Anything else a provider does with its own
+  transcript — Claude's pre-compact archive and continuation rotation, for example — is
+  provider-internal code (`providers/claude-history.ts`), not a contract field.
+- `textDelivery`, `commands` — read by the poll-loop and formatter. The formatter's
+  native command lists and `/upload-trace` read the **active** provider's contract only;
+  other registered contracts are never consulted.
+
+Registration is **two-step** and order-independent. The provider module calls
+`registerProvider(name, factory)`; the contract module calls
+`registerProviderContract(name, contract)`. Neither file imports the other, so a
+skill-installed provider still compiles on a core that predates the contract seam (the
+contract file is simply not imported there). Barrels: `providers/index.ts` and
+`provider-contracts/index.ts` — a skill appends one import line to each. Claude and the
+test-double `mock` register exactly this way; no provider is special-cased.
+
+A provider without a contract keeps working: the poll-loop falls back to the legacy
+instance flags (`supportsNativeSlashCommands`, `emitsMidTurnText`).
+
+Conformance: `provider-contracts/testing/conformance.ts` exports
+`defineProviderConformance(name, contract, options?)`, which registers the shape checks and
+the "does each function capability respond to its input" probes as `bun:test` cases.
+Constants are not probed. When the default probe inputs cannot exercise a function (an
+env-gated resolve, say), pass `options.probes` — e.g.
+`{ inference: { a, b, environment? } }`. Probe fixtures live with the tests, never on the
+contract. Every provider ships `providers/<name>.conformance.test.ts` calling
+`defineProviderConformance` for its own contract — Claude and the test-double `mock`
+included; no provider is special-cased. Core runs no generic sweep over the registered
+contracts: which probe fixtures a contract needs is provider knowledge (a provider whose
+inference is environment-provisioned does not vary on `model`, say), so only the provider's
+own test file can supply them. The install-time verifier requires the file for every
+declared provider. `bun src/provider-contracts/names.ts` lists registered providers and
+contracts.
+
 ## Provider Implementations
 
 Only the `claude` provider ships in trunk. The Codex and OpenCode sections below document the provider interface for reference and for skills that install additional providers — they are not baked into the core image.
@@ -127,7 +178,6 @@ only reads the per-turn `QueryInput`.
 
 ```typescript
 class ClaudeProvider implements AgentProvider {
-  readonly supportsNativeSlashCommands = true;
   // ...constructor stores options.mcpServers, .env, .additionalDirectories,
   //    .model, .effort, .assistantName...
 
@@ -504,7 +554,7 @@ processing_ack: (no row) → processing → completed
 
 The agent-runner runs an MCP server (stdio) that exposes NanoClaw tools to the agent. The
 tool modules use the same two-DB connection layer as the rest of the runner
-(`container/agent-runner/src/db/connection.ts`): they read the host-written `inbound.db`
+(`container/agent-runner/src/mailbox/sqlite/connection.ts`): they read the host-written `inbound.db`
 at `/workspace/inbound.db` **read-only** (destinations, session routing, question
 responses, task lists) and write to the container-owned `outbound.db` at
 `/workspace/outbound.db`. There is no shared single-file connection and no WAL — both files
@@ -522,17 +572,22 @@ written by the host) resolves the name to routing fields.
   name: 'send_message',
   params: {
     text: string,    // message content (required)
-    to?: string,     // destination name (e.g. "family", "worker-1").
-                     // Optional when the agent has exactly one destination.
+    to: string,      // destination name (e.g. "family", "worker-1") (required —
+                     // the agent always addresses a destination explicitly)
   }
 }
 ```
 
-Implementation: `resolveRouting(to)` looks up the destination. With no `to`, it defaults to
-the session's own reply routing (`session_routing`); if the destination resolves to the same
-channel the session is bound to, the session's `thread_id` is preserved so the reply lands
-in-thread, otherwise `thread_id` is null. The tool then writes a `messages_out` row with
-`kind: 'chat'` and content `{ text }`, and returns the new `seq` as the message id.
+Implementation: `resolveRouting(to)` looks up the destination. A channel destination gets its
+`thread_id` from `resolveDestinationThread` (`db/session-routing.ts`): the thread of the message
+being answered (the reply stamp the poll loop publishes in `session_state` at batch start and again at
+every turn boundary, since the query stays open and later messages are pushed into it) when that message came from the destination channel; otherwise the latest
+`messages_in` row from that channel. The poll loop's `<message to>` deliveries use the same resolver with the batch's routing
+context, so all explicit sends thread identically, and a message arriving mid-turn from another
+thread cannot pull the reply away. `session_routing.thread_id` is never consulted — it is null for
+every session that isn't per-thread. An agent destination always gets a null `thread_id`. The tool
+then writes a `messages_out` row with `kind: 'chat'` and content `{ text }`, and returns the new
+`seq` as the message id.
 
 #### send_file
 
@@ -543,7 +598,7 @@ Send a file to a named destination (same destination model as `send_message`).
   name: 'send_file',
   params: {
     path: string,          // file path (relative to /workspace/agent/ or absolute) (required)
-    to?: string,           // destination name; optional if the agent has one destination
+    to: string,            // destination name (required)
     text?: string,         // optional accompanying message
     filename?: string,     // display name (default: basename of path)
   }
@@ -556,21 +611,46 @@ Implementation:
 3. Copy the file into that outbox directory
 4. Write a `messages_out` row (`kind: 'chat'`) with content `{ text, files: [filename] }`
 
+`send_card` and `ask_user_question` go to the chat the session is bound to (`session_routing`), threaded like
+`send_message` / `send_file`: `resolveDestinationThread` with the published reply stamp — the
+thread of the message being answered, else the chat's latest `messages_in` thread. The bound
+`thread_id` is the last resort, when that yields no thread (a per-thread session stays in it).
+
 #### send_card
 
-Send a structured card (interactive or display-only).
+Send a display card and continue without waiting for a response. `send_card`
+supports display content and URL link buttons only; use `ask_user_question` for
+callback buttons and choices.
 
 ```typescript
 {
   name: 'send_card',
   params: {
-    card: CardElement,     // card structure (title, children, actions)
-    fallbackText?: string, // text fallback for platforms without card support
+    card: {                // title/description, text children, URL link actions
+      title?: string,
+      description?: string,
+      children?: (string | { text: string })[],
+      actions?: { label: string; url: string; style?: string }[], // 'primary' | 'danger' | 'default'; anything else renders as default
+    },
+    fallbackText?: string, // plain-text rendering of the card, unrelated to buttons
   }
 }
 ```
 
-Implementation: write a `messages_out` row with `kind: 'chat-sdk'` and the card structure in content.
+Implementation: write a `messages_out` row with `kind: 'chat-sdk'` and the card
+structure in content. One schema — `LINK_ACTION_SCHEMA` in
+`container/agent-runner/src/mcp-tools/interactive.ts` — is both advertised in
+the tool's `inputSchema` and compiled once as the validator the handler runs, so
+invalid actions are filtered out before the row is written and the reported
+dropped count matches what was stored. Every link action needs a non-empty
+`label` and a `url` that is a web link — `http://` or `https://`, with a host.
+Those are the only schemes every adapter can render as a button, and the agent
+does not pick the channel, so the tool promises no more than that: `#`,
+`mailto:` and the rest are dropped and the agent is pointed at
+`ask_user_question`. The bridge does not re-apply that rule. It drops an action
+only when `label` or `url` is not a non-empty string. Any producer can write
+this payload. Nested action blocks and callback actions are not supported by
+this tool.
 
 #### ask_user_question
 
@@ -762,7 +842,7 @@ The agent-runner receives configuration via:
 
 - **`container.json`:** The provider name, model, assistant name, MCP servers, and other NanoClaw config are read from `/workspace/agent/container.json` (materialized by the host from the `container_configs` table), not from environment variables. See `container/agent-runner/src/config.ts`.
 - **Environment variables:** provider-specific vars only (API keys, model overrides), `TZ`.
-- **Fixed mount paths:** Host-written `inbound.db` (read-only) at `/workspace/inbound.db` and container-owned `outbound.db` at `/workspace/outbound.db`. Agent group folder at `/workspace/agent/`. System prompt from `/workspace/agent/CLAUDE.md` and `/workspace/global/CLAUDE.md`.
+- **Fixed mount paths:** Host-written `inbound.db` (read-only) at `/workspace/inbound.db` and container-owned `outbound.db` at `/workspace/outbound.db`. Agent group folder at `/workspace/agent/`. The project document is a single composed file at `/workspace/agent/CLAUDE.md`.
 
 The agent-runner reads config, creates the provider, and enters the poll loop. No stdin, no initial prompt — messages are already in the session DB.
 
@@ -787,7 +867,7 @@ The provider name comes from the `provider` key in `/workspace/agent/container.j
 
 - MCP servers are local processes or remote Streamable HTTP endpoints managed by the provider via `mcpServers`
 - The MCP server binary is shared across providers — same tools, same DB access
-- CLAUDE.md loading (global + per-group) — agent-runner reads and passes as `systemPrompt`
+- Project-document loading — the host composes `/workspace/agent/CLAUDE.md` and Claude Code loads it via the `project` setting source; the agent-runner contributes only the runtime addendum from `buildSystemPromptAddendum`
 - Additional directories discovery (`/workspace/extra/*`)
 - Logging via stderr (`[agent-runner] ...`)
 

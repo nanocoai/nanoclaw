@@ -18,11 +18,7 @@ rm -f src/channels/gchat.ts src/channels/gchat-registration.test.ts
 
 ## 2. Remove credentials
 
-Remove `GCHAT_CREDENTIALS` from `.env`, then re-sync to the container:
-
-```bash
-mkdir -p data/env && cp .env data/env/env
-```
+Remove `GCHAT_CREDENTIALS` from `.env`.
 
 ## 3. Remove the package
 
