@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 /**
  * The browser side of a Live Voice call, as one hook.
@@ -37,6 +37,9 @@ export interface VoiceCall {
   error: string | null
   /** Why the last call ended, for the readout. */
   endedText: string | null
+  /** The caller's microphone and the agent's audio, for visualisers that analyse a stream. */
+  micStream: MediaStream | null
+  remoteStream: MediaStream | null
   start: () => void
   end: () => void
   toggleMute: () => void
@@ -47,6 +50,9 @@ export interface VoiceCall {
 }
 
 export const LIVE_PHASES: ReadonlySet<Phase> = new Set(["listening", "thinking", "talking"])
+
+/** How long a WebRTC "disconnected" may last before the call is treated as dropped. */
+const DISCONNECT_GRACE_MS = 6000
 
 function errorText(status: number, body: string): string {
   if (status === 403) return "This call link is not valid."
@@ -93,6 +99,8 @@ export function useVoiceCall(token: string, fallbackAgent = "your agent"): Voice
   const [agentName, setAgentName] = useState(fallbackAgent)
   const [elapsed, setElapsed] = useState(0)
   const [muted, setMutedState] = useState(false)
+  const [micStream, setMicStream] = useState<MediaStream | null>(null)
+  const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null)
 
   const phaseRef = useRef<Phase>(phase)
   const mutedRef = useRef(false)
@@ -113,6 +121,7 @@ export function useVoiceCall(token: string, fallbackAgent = "your agent"): Voice
   const inputLevel = useRef(0)
   const outputLevel = useRef(0)
   const generation = useRef(0)
+  const disconnectTimer = useRef<number | null>(null)
 
   const setPhase = useCallback((p: Phase) => {
     phaseRef.current = p
@@ -157,12 +166,19 @@ export function useVoiceCall(token: string, fallbackAgent = "your agent"): Voice
     [setStreaming]
   )
 
+  const hangupHost = useCallback(() => {
+    if (!token) return
+    fetch(new URL("hangup?t=" + encodeURIComponent(token), location.href), { method: "POST", keepalive: true }).catch(() => {})
+  }, [token])
+
   const teardown = useCallback(
     (tellHost: boolean) => {
       generation.current++
-      if (tellHost && token) {
-        fetch(new URL("hangup?t=" + encodeURIComponent(token), location.href), { method: "POST", keepalive: true }).catch(() => {})
+      if (disconnectTimer.current !== null) {
+        window.clearTimeout(disconnectTimer.current)
+        disconnectTimer.current = null
       }
+      if (tellHost) hangupHost()
       if (pc.current) {
         try {
           pc.current.close()
@@ -185,9 +201,11 @@ export function useVoiceCall(token: string, fallbackAgent = "your agent"): Voice
       if (audioRef.current) audioRef.current.srcObject = null
       mutedRef.current = false
       setMutedState(false)
+      setMicStream(null)
+      setRemoteStream(null)
       setStreaming(null)
     },
-    [token, setStreaming]
+    [hangupHost, setStreaming]
   )
 
   const end = useCallback(
@@ -243,6 +261,10 @@ export function useVoiceCall(token: string, fallbackAgent = "your agent"): Voice
     setPhase("connecting")
     const mine = ++generation.current
     const cancelled = () => generation.current !== mine
+    // Created inside the click, before any await: Safari starts a context made later suspended.
+    const ctx = new AudioContext()
+    actx.current = ctx
+    let answered = false
     try {
       const s = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } })
       if (cancelled()) {
@@ -250,8 +272,8 @@ export function useVoiceCall(token: string, fallbackAgent = "your agent"): Voice
         return
       }
       stream.current = s
-      const ctx = new AudioContext()
-      actx.current = ctx
+      setMicStream(s)
+      if (ctx.state === "suspended") ctx.resume().catch(() => {})
       const an = ctx.createAnalyser()
       an.fftSize = 512
       ctx.createMediaStreamSource(s).connect(an)
@@ -260,12 +282,14 @@ export function useVoiceCall(token: string, fallbackAgent = "your agent"): Voice
       const conn = new RTCPeerConnection()
       pc.current = conn
       conn.ontrack = (e) => {
-        if (audioRef.current) audioRef.current.srcObject = e.streams[0]
+        const remote = e.streams[0] ?? new MediaStream([e.track])
+        if (audioRef.current) audioRef.current.srcObject = remote
         receiver.current = e.receiver
+        setRemoteStream(remote)
         try {
           const a2 = ctx.createAnalyser()
           a2.fftSize = 512
-          ctx.createMediaStreamSource(e.streams[0]).connect(a2)
+          ctx.createMediaStreamSource(remote).connect(a2)
           agentAn.current = a2
         } catch {
           /* some browsers refuse remote streams here; the receiver's audio level covers it */
@@ -274,11 +298,29 @@ export function useVoiceCall(token: string, fallbackAgent = "your agent"): Voice
       s.getTracks().forEach((t) => conn.addTrack(t, s))
       const dc = conn.createDataChannel("oai-events")
       dc.onmessage = (e) => onEvent(String(e.data))
+      dc.onclose = () => {
+        if (!cancelled() && LIVE_PHASES.has(phaseRef.current)) end(true, "The call ended.")
+      }
       conn.onconnectionstatechange = () => {
-        if (conn.connectionState === "connected" && phaseRef.current === "connecting") {
-          startedAt.current = Date.now()
-          setPhase("listening")
-        } else if (conn.connectionState === "failed") {
+        if (cancelled()) return
+        const state = conn.connectionState
+        if (state === "connected") {
+          if (disconnectTimer.current !== null) {
+            window.clearTimeout(disconnectTimer.current)
+            disconnectTimer.current = null
+          }
+          if (phaseRef.current === "connecting") {
+            startedAt.current = Date.now()
+            setPhase("listening")
+          }
+        } else if (state === "disconnected") {
+          if (disconnectTimer.current === null) {
+            disconnectTimer.current = window.setTimeout(() => {
+              disconnectTimer.current = null
+              end(true, "The connection dropped.")
+            }, DISCONNECT_GRACE_MS)
+          }
+        } else if (state === "failed") {
           end(true, "The connection dropped.")
         }
       }
@@ -292,8 +334,13 @@ export function useVoiceCall(token: string, fallbackAgent = "your agent"): Voice
         headers: { "Content-Type": "application/sdp" },
         body: conn.localDescription?.sdp ?? "",
       })
+      answered = res.ok
       const body = await res.text()
-      if (cancelled()) return
+      if (cancelled()) {
+        // The host already has a live session for this cancelled attempt; end it.
+        if (answered) hangupHost()
+        return
+      }
       if (!res.ok) throw new Error(errorText(res.status, body))
       const named = res.headers.get("x-voice-agent")
       if (named && named.trim()) setAgentName(named.trim())
@@ -306,11 +353,12 @@ export function useVoiceCall(token: string, fallbackAgent = "your agent"): Voice
           : err instanceof Error
             ? err.message
             : String(err)
-      teardown(false)
+      // If the host answered, it holds a session for us: tell it to hang up.
+      teardown(answered)
       setError(msg)
       setPhase("error")
     }
-  }, [token, onEvent, end, teardown, setPhase, setStreaming])
+  }, [token, onEvent, end, teardown, setPhase, setStreaming, hangupHost])
 
   const endCall = useCallback(() => end(true, "Call ended."), [end])
 
@@ -334,10 +382,11 @@ export function useVoiceCall(token: string, fallbackAgent = "your agent"): Voice
 
   // Levels every frame: the agent's from the WebRTC receiver (works where Web Audio
   // cannot read a remote stream), yours from the microphone analyser. The output
-  // level also drives listening/talking when transcripts lag the audio.
+  // level also drives listening/talking when transcripts lag the audio. A wall-clock
+  // interval backs the loop so timeouts still fire while the tab is in the background.
   useEffect(() => {
     let raf = 0
-    const tick = () => {
+    const step = () => {
       const p = phaseRef.current
       const live = LIVE_PHASES.has(p)
       let out = 0
@@ -367,10 +416,17 @@ export function useVoiceCall(token: string, fallbackAgent = "your agent"): Voice
         setPhase("listening")
       }
       if (streamingRef.current !== null && Date.now() - lastDeltaAt.current > 700) setStreaming(null)
+    }
+    const tick = () => {
+      step()
       raf = requestAnimationFrame(tick)
     }
     raf = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(raf)
+    const backstop = window.setInterval(step, 250)
+    return () => {
+      cancelAnimationFrame(raf)
+      window.clearInterval(backstop)
+    }
   }, [setPhase, setStreaming])
 
   // A closing tab still tells the host to hang up.
@@ -382,22 +438,29 @@ export function useVoiceCall(token: string, fallbackAgent = "your agent"): Voice
     return () => window.removeEventListener("pagehide", onHide)
   }, [teardown])
 
-  return {
-    phase,
-    lines,
-    streamingId,
-    agentName,
-    elapsed,
-    muted,
-    error,
-    endedText,
-    start: () => {
-      void start()
-    },
-    end: endCall,
-    toggleMute,
-    inputLevel,
-    outputLevel,
-    audioRef,
-  }
+  const startVoid = useCallback(() => {
+    void start()
+  }, [start])
+
+  return useMemo(
+    () => ({
+      phase,
+      lines,
+      streamingId,
+      agentName,
+      elapsed,
+      muted,
+      error,
+      endedText,
+      micStream,
+      remoteStream,
+      start: startVoid,
+      end: endCall,
+      toggleMute,
+      inputLevel,
+      outputLevel,
+      audioRef,
+    }),
+    [phase, lines, streamingId, agentName, elapsed, muted, error, endedText, micStream, remoteStream, startVoid, endCall, toggleMute]
+  )
 }

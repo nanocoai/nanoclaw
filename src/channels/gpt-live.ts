@@ -446,12 +446,30 @@ export function createGptLiveAdapter(config: GptLiveConfig): ChannelAdapter {
   };
 }
 
+const UI_CONFIG_KEYS = [
+  'skin',
+  'colorway',
+  'layout',
+  'presence',
+  'brand',
+  'footer',
+  'shortcuts',
+  'timestamps',
+  'colorwayPicker',
+] as const;
+
 /** GPT_LIVE_UI is a JSON object; anything unparsable falls back to the page defaults with a warning. */
 export function parseUiConfig(raw: string | undefined): VoiceUiConfig | undefined {
   if (!raw || !raw.trim()) return undefined;
   try {
     const parsed: unknown = JSON.parse(raw);
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as VoiceUiConfig;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      // Only the documented keys travel to the page; the page validates values.
+      const src = parsed as Record<string, unknown>;
+      const out: Record<string, unknown> = {};
+      for (const key of UI_CONFIG_KEYS) if (key in src) out[key] = src[key];
+      return out as VoiceUiConfig;
+    }
     log.warn('gpt-live: GPT_LIVE_UI must be a JSON object; using the default look');
   } catch (err) {
     log.warn('gpt-live: GPT_LIVE_UI is not valid JSON; using the default look', { err });

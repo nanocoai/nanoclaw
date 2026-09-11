@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from "react"
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Mic, MicOff } from "lucide-react"
 import { BarVisualizer, type AgentState as BarState } from "@/components/ui/bar-visualizer"
 import { Matrix, digits, loader, wave, type Frame } from "@/components/ui/matrix"
@@ -8,10 +8,12 @@ import { ShimmeringText } from "@/components/ui/shimmering-text"
 import { Button } from "@/components/ui/button"
 import { StreamText } from "@/components/StreamText"
 import { readConfig, type VoiceUiConfig } from "@/lib/config"
-import { LIVE_PHASES, useVoiceCall, type Phase } from "@/lib/voice-call"
+import { LIVE_PHASES, useVoiceCall, type Phase, type Speaker, type VoiceCall } from "@/lib/voice-call"
+import { useDemoCall } from "@/lib/demo-call"
 import logo from "@/assets/nanoclaw-logo.png"
 
 type Colorway = NonNullable<VoiceUiConfig["colorway"]>
+const COLORWAYS: Colorway[] = ["ivory", "field", "rabbit"]
 
 const MATRIX_ROWS = 7
 const MATRIX_COLS = 14
@@ -45,7 +47,7 @@ const CLAW_CLOSED = clawFrame(false)
 const MATRIX_ON: Record<Phase, string> = {
   idle: "var(--muted-foreground)",
   connecting: "var(--muted-foreground)",
-  listening: "var(--amber)",
+  listening: "var(--dot-you)",
   thinking: "var(--think)",
   talking: "var(--teal)",
   ended: "var(--muted-foreground)",
@@ -76,36 +78,197 @@ function pad(n: number) {
   return n < 10 ? `0${n}` : String(n)
 }
 
-// Call timer as four segment digits on tiny Matrix grids, the way a hardware readout shows it.
+function useReducedMotion(): boolean {
+  const [reduced, setReduced] = useState(() => (typeof matchMedia === "function" ? matchMedia("(prefers-reduced-motion: reduce)").matches : false))
+  useEffect(() => {
+    if (typeof matchMedia !== "function") return
+    const mq = matchMedia("(prefers-reduced-motion: reduce)")
+    const onChange = (e: MediaQueryListEvent) => setReduced(e.matches)
+    mq.addEventListener("change", onChange)
+    return () => mq.removeEventListener("change", onChange)
+  }, [])
+  return reduced
+}
+
+// Level and glow samples ~20 times a second, read from the call's refs. Only the
+// component that calls this re-renders, so the transcript and keys stay still.
+function useLevelTicker(call: VoiceCall, phase: Phase, wantLevels: boolean, reduced: boolean) {
+  const [levels, setLevels] = useState<number[]>(() => Array(MATRIX_COLS).fill(0))
+  const [glow, setGlow] = useState(1)
+  const phaseRef = useRef(phase)
+  phaseRef.current = phase
+  const lastAt = useRef(0)
+  useEffect(() => {
+    let raf = 0
+    const tick = () => {
+      const now = performance.now()
+      if (now - lastAt.current > 50) {
+        lastAt.current = now
+        const t = now / 1000
+        const p = phaseRef.current
+        if (wantLevels) {
+          const base = p === "talking" ? call.outputLevel.current : p === "listening" ? call.inputLevel.current : 0
+          setLevels(
+            Array.from({ length: MATRIX_COLS }, (_, i) => {
+              const shape = 0.5 + 0.5 * Math.abs(Math.sin(t * 5.2 + i * 0.9)) * (0.6 + 0.4 * Math.abs(Math.cos(t * 2.3 - i * 0.4)))
+              return Math.max(0, Math.min(1, base * 1.35 * shape))
+            })
+          )
+        }
+        setGlow(
+          reduced
+            ? 1
+            : p === "connecting" || p === "idle"
+              ? 0.55 + 0.35 * (0.5 + 0.5 * Math.sin(t * 2.2))
+              : p === "talking"
+                ? 0.6 + 0.4 * Math.min(1, call.outputLevel.current * 1.4)
+                : 1
+        )
+      }
+      raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [call.inputLevel, call.outputLevel, wantLevels, reduced])
+  return { levels, glow }
+}
+
+// Call timer as four segment digits on tiny Matrix grids; the text version is for assistive tech.
 function SegmentTimer({ seconds, live }: { seconds: number; live: boolean }) {
   const m = Math.floor(seconds / 60)
   const sec = seconds % 60
   const ds = [Math.floor(m / 10) % 10, m % 10, Math.floor(sec / 10), sec % 10]
   return (
-    <span className="segment" role="timer" aria-label={`Call duration ${pad(m)}:${pad(sec)}`}>
-      {ds.map((d, i) => (
-        <Fragment key={i}>
-          {i === 2 && (
-            <span className="colon" aria-hidden="true">
-              <i />
-              <i />
-            </span>
-          )}
-          <Matrix rows={7} cols={5} pattern={digits[d]} size={4} gap={1} brightness={live ? 1 : 0.3} palette={{ on: "var(--te-orange)", off: "var(--dot-off)" }} ariaLabel="" />
-        </Fragment>
-      ))}
+    <span className="segment" role="timer" aria-label="Call duration">
+      <span className="sr-only">{`${pad(m)}:${pad(sec)}`}</span>
+      <span aria-hidden="true" style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
+        {ds.map((d, i) => (
+          <Fragment key={i}>
+            {i === 2 && (
+              <span className="colon">
+                <i />
+                <i />
+              </span>
+            )}
+            <Matrix rows={7} cols={5} pattern={digits[d]} size={4} gap={1} brightness={live ? 1 : 0.3} palette={{ on: "var(--te-orange)", off: "var(--dot-off)" }} ariaLabel="" />
+          </Fragment>
+        ))}
+      </span>
     </span>
   )
 }
 
+const Badge = memo(function Badge({ call, phase, live, reduced }: { call: VoiceCall; phase: Phase; live: boolean; reduced: boolean }) {
+  const { glow } = useLevelTicker(call, phase, false, reduced)
+  return (
+    <div className="badge" aria-hidden="true">
+      <Matrix rows={9} cols={9} pattern={live ? CLAW_OPEN : CLAW_CLOSED} size={3} gap={1} brightness={glow} palette={{ on: "var(--te-orange)", off: "#1d1d1d" }} ariaLabel="" />
+      <span className={`presence${live ? " live" : ""}`} />
+    </div>
+  )
+})
+
+const Stage = memo(function Stage({
+  call,
+  phase,
+  live,
+  presence,
+  reduced,
+  demo,
+}: {
+  call: VoiceCall
+  phase: Phase
+  live: boolean
+  presence: "matrix" | "bars"
+  reduced: boolean
+  demo: boolean
+}) {
+  const { levels, glow } = useLevelTicker(call, phase, presence === "matrix", reduced)
+  if (presence === "bars") {
+    const stream = phase === "talking" ? call.remoteStream : call.micStream
+    return (
+      <div className={`bars-wrap${phase === "listening" ? " you" : ""}`}>
+        <BarVisualizer demo={demo && live} state={BAR_STATE[phase]} mediaStream={stream ?? undefined} barCount={12} centerAlign minHeight={12} className="h-full w-full gap-2 rounded-none bg-transparent p-0" />
+      </div>
+    )
+  }
+  const palette = { on: MATRIX_ON[phase], off: "var(--dot-off)" }
+  return (
+    <div className="matrix-wrap">
+      {phase === "thinking" ? (
+        reduced ? (
+          <Matrix rows={MATRIX_ROWS} cols={MATRIX_COLS} pattern={loader[0]} size={12} gap={3} palette={palette} ariaLabel="Agent is thinking" />
+        ) : (
+          <Matrix rows={MATRIX_ROWS} cols={MATRIX_COLS} frames={loader} fps={12} size={12} gap={3} palette={palette} ariaLabel="Agent is thinking" />
+        )
+      ) : phase === "connecting" ? (
+        reduced ? (
+          <Matrix rows={MATRIX_ROWS} cols={MATRIX_COLS} pattern={wave[0]} size={12} gap={3} brightness={glow} palette={palette} ariaLabel="Connecting" />
+        ) : (
+          <Matrix rows={MATRIX_ROWS} cols={MATRIX_COLS} frames={wave} fps={20} size={12} gap={3} brightness={glow} palette={palette} ariaLabel="Connecting" />
+        )
+      ) : live ? (
+        <Matrix rows={MATRIX_ROWS} cols={MATRIX_COLS} mode="vu" levels={levels} size={12} gap={3} palette={palette} ariaLabel="Voice level" />
+      ) : (
+        <Matrix rows={MATRIX_ROWS} cols={MATRIX_COLS} pattern={MATRIX_OFF} size={12} gap={3} brightness={glow} palette={palette} ariaLabel="Idle" />
+      )}
+    </div>
+  )
+})
+
+const TranscriptLine = memo(function TranscriptLine({
+  from,
+  text,
+  at,
+  isLast,
+  isStreaming,
+  agentName,
+  showTs,
+}: {
+  from: Speaker
+  text: string
+  at: number
+  isLast: boolean
+  isStreaming: boolean
+  agentName: string
+  showTs: boolean
+}) {
+  return (
+    <Message from={from} className={`py-1.5 ${isLast ? "is-live" : "is-history"}`}>
+      <MessageContent className={`${from === "user" ? "bubble-you" : "bubble-agent"}${isStreaming ? " is-streaming" : ""}`}>
+        <span className="speaker">
+          {from === "user" ? "You" : agentName}
+          {showTs && <span className="ts">{`${Math.floor(at / 60)}:${pad(at % 60)}`}</span>}
+        </span>
+        <p>
+          <StreamText text={text} />
+        </p>
+      </MessageContent>
+    </Message>
+  )
+})
+
+function isTypingTarget(t: EventTarget | null): boolean {
+  const el = t as HTMLElement | null
+  if (!el || typeof el.closest !== "function") return false
+  return !!el.closest("button, a, input, textarea, select, [contenteditable], [role='radio'], [role='button']")
+}
+
 export default function App() {
   const cfg = useMemo(readConfig, [])
-  const token = useMemo(() => new URLSearchParams(location.search).get("t") || "", [])
-  const call = useVoiceCall(token, "your agent")
+  const params = useMemo(() => new URLSearchParams(location.search), [])
+  const token = params.get("t") || ""
+  const demo = params.get("demo") === "1"
+  const realCall = useVoiceCall(demo ? "" : token, "your agent")
+  const demoCall = useDemoCall(demo)
+  const call = demo ? demoCall : realCall
   const { phase, lines, streamingId, agentName, elapsed, muted, error, endedText } = call
   const live = LIVE_PHASES.has(phase)
   const skin = cfg.skin
   const rail = skin === "te" && cfg.layout === "rail"
+  const reduced = useReducedMotion()
+  const phaseRef = useRef(phase)
+  phaseRef.current = phase
 
   const [colorway, setColorway] = useState<Colorway>(() => {
     try {
@@ -124,10 +287,20 @@ export default function App() {
       /* storage may be unavailable */
     }
   }, [colorway, cfg.colorway])
+  const onColorwayKey = useCallback(
+    (e: React.KeyboardEvent<HTMLButtonElement>, current: Colorway) => {
+      const i = COLORWAYS.indexOf(current)
+      if (e.key === "ArrowRight" || e.key === "ArrowDown") {
+        e.preventDefault()
+        setColorway(COLORWAYS[(i + 1) % COLORWAYS.length])
+      } else if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+        e.preventDefault()
+        setColorway(COLORWAYS[(i - 1 + COLORWAYS.length) % COLORWAYS.length])
+      }
+    },
+    []
+  )
 
-  // Matrix levels ~20 times a second, badge glow every tick; both read the hook's refs.
-  const [levels, setLevels] = useState<number[]>(() => Array(MATRIX_COLS).fill(0))
-  const [glow, setGlow] = useState(1)
   // Right after "call" the same key would read "end"; ignore taps for a moment so a double tap cannot cancel.
   const [cancelArmed, setCancelArmed] = useState(false)
   useEffect(() => {
@@ -138,58 +311,24 @@ export default function App() {
     const t = window.setTimeout(() => setCancelArmed(true), 700)
     return () => window.clearTimeout(t)
   }, [phase])
-  const phaseRef = useRef(phase)
-  phaseRef.current = phase
-  const lastLevelsAt = useRef(0)
-  const presence = cfg.presence
-  useEffect(() => {
-    let raf = 0
-    const tick = () => {
-      const now = performance.now()
-      if (now - lastLevelsAt.current > 50) {
-        lastLevelsAt.current = now
-        const t = now / 1000
-        const p = phaseRef.current
-        if (presence === "matrix") {
-          const base = p === "talking" ? call.outputLevel.current : p === "listening" ? call.inputLevel.current : 0
-          setLevels(
-            Array.from({ length: MATRIX_COLS }, (_, i) => {
-              const shape = 0.5 + 0.5 * Math.abs(Math.sin(t * 5.2 + i * 0.9)) * (0.6 + 0.4 * Math.abs(Math.cos(t * 2.3 - i * 0.4)))
-              return Math.max(0, Math.min(1, base * 1.35 * shape))
-            })
-          )
-        }
-        setGlow(
-          p === "connecting" || p === "idle"
-            ? 0.55 + 0.35 * (0.5 + 0.5 * Math.sin(t * 2.2))
-            : p === "talking"
-              ? 0.6 + 0.4 * Math.min(1, call.outputLevel.current * 1.4)
-              : 1
-        )
-      }
-      raf = requestAnimationFrame(tick)
-    }
-    raf = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(raf)
-  }, [presence, call.inputLevel, call.outputLevel])
 
-  // Keyboard: space toggles the microphone, escape ends the call.
+  // Keyboard: space toggles the microphone, escape ends the call. Never while a control has focus.
+  const { toggleMute, end: endCall, start: startCall } = call
   useEffect(() => {
     if (!cfg.shortcuts) return
     const onKey = (e: KeyboardEvent) => {
-      const t = e.target as HTMLElement | null
-      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return
+      if (e.repeat || isTypingTarget(e.target)) return
       const p = phaseRef.current
       if (e.code === "Space" && LIVE_PHASES.has(p)) {
         e.preventDefault()
-        call.toggleMute()
+        toggleMute()
       } else if (e.key === "Escape" && (LIVE_PHASES.has(p) || p === "connecting")) {
-        call.end()
+        endCall()
       }
     }
     window.addEventListener("keydown", onKey)
     return () => window.removeEventListener("keydown", onKey)
-  }, [cfg.shortcuts, call])
+  }, [cfg.shortcuts, toggleMute, endCall])
 
   const chipClass =
     phase === "idle" ? "idle" : phase === "ended" ? "ended" : phase === "error" ? "err" : phase === "listening" ? "you" : phase === "thinking" ? "think" : ""
@@ -204,30 +343,15 @@ export default function App() {
             }.`
           : HINT[phase]
 
-  const stage =
-    presence === "bars" ? (
-      <div className={`bars-wrap${phase === "listening" ? " you" : ""}`}>
-        <BarVisualizer demo={false} state={BAR_STATE[phase]} barCount={12} centerAlign minHeight={12} className="h-full w-full gap-2 rounded-none bg-transparent p-0" />
-      </div>
-    ) : (
-      <div className="matrix-wrap">
-        {phase === "thinking" ? (
-          <Matrix rows={MATRIX_ROWS} cols={MATRIX_COLS} frames={loader} fps={12} size={12} gap={3} palette={{ on: MATRIX_ON[phase], off: "var(--dot-off)" }} ariaLabel="Agent is thinking" />
-        ) : phase === "connecting" ? (
-          <Matrix rows={MATRIX_ROWS} cols={MATRIX_COLS} frames={wave} fps={20} size={12} gap={3} brightness={glow} palette={{ on: MATRIX_ON[phase], off: "var(--dot-off)" }} ariaLabel="Connecting" />
-        ) : live ? (
-          <Matrix rows={MATRIX_ROWS} cols={MATRIX_COLS} mode="vu" levels={levels} size={12} gap={3} palette={{ on: MATRIX_ON[phase], off: "var(--dot-off)" }} ariaLabel="Voice level" />
-        ) : (
-          <Matrix rows={MATRIX_ROWS} cols={MATRIX_COLS} pattern={MATRIX_OFF} size={12} gap={3} brightness={glow} palette={{ on: MATRIX_ON[phase], off: "var(--dot-off)" }} ariaLabel="Idle" />
-        )}
-      </div>
-    )
-
   const readout = (
     <span className={`state-chip ${chipClass}`} role="status" aria-live="polite">
       {live && phase !== "connecting" && <span className="pulse" aria-hidden="true" />}
       {phase === "thinking" ? (
-        <ShimmeringText text={`Asking ${agentName}…`} duration={1.4} />
+        reduced ? (
+          `Asking ${agentName}…`
+        ) : (
+          <ShimmeringText text={`Asking ${agentName}…`} duration={1.4} />
+        )
       ) : phase === "idle" ? (
         "Ready"
       ) : phase === "connecting" ? (
@@ -244,30 +368,21 @@ export default function App() {
     </span>
   )
 
+  const showTs = skin === "te" && cfg.timestamps
   const transcript = (
     <Conversation className="transcript-box">
       <ConversationContent className="flex flex-col gap-1 p-1">
-        {error && <p className="error-line" role="alert">{error}</p>}
+        {error && (
+          <p className="error-line" role="alert">
+            {error}
+          </p>
+        )}
         {lines.length === 0 && !error ? (
-          <ConversationEmptyState title="Nothing said yet" description={live ? "Say hello to start." : phase === "ended" ? "Call again to keep talking." : "Press call to talk to " + agentName + "."} />
+          <ConversationEmptyState title="Nothing said yet" description={live ? "Say hello to start." : phase === "ended" ? "Call again to keep talking." : `Press call to talk to ${agentName}.`} />
         ) : (
-          lines.map((l, i) => {
-            const isLast = i === lines.length - 1
-            const isStreaming = l.id === streamingId
-            return (
-              <Message key={l.id} from={l.from} className={`py-1.5 ${isLast ? "is-live" : "is-history"}`}>
-                <MessageContent className={`${l.from === "user" ? "bubble-you" : "bubble-agent"}${isStreaming ? " is-streaming" : ""}`}>
-                  <span className="speaker">
-                    {l.from === "user" ? "You" : agentName}
-                    {skin === "te" && cfg.timestamps && <span className="ts">{`${Math.floor(l.at / 60)}:${pad(l.at % 60)}`}</span>}
-                  </span>
-                  <p>
-                    <StreamText text={l.text} animate={isStreaming} />
-                  </p>
-                </MessageContent>
-              </Message>
-            )
-          })
+          lines.map((l, i) => (
+            <TranscriptLine key={l.id} from={l.from} text={l.text} at={l.at} isLast={i === lines.length - 1} isStreaming={l.id === streamingId} agentName={agentName} showTs={showTs} />
+          ))
         )}
       </ConversationContent>
       <ConversationScrollButton />
@@ -275,8 +390,8 @@ export default function App() {
   )
 
   const primaryLabel = live ? "End" : phase === "connecting" ? "Cancel" : phase === "ended" || phase === "error" ? "Call again" : "Call"
-  const primaryDisabled = !token || (phase === "connecting" && !cancelArmed)
-  const onPrimary = live || phase === "connecting" ? call.end : call.start
+  const primaryDisabled = (!token && !demo) || (phase === "connecting" && !cancelArmed)
+  const onPrimary = live || phase === "connecting" ? endCall : startCall
 
   const keys =
     skin === "te" ? (
@@ -289,7 +404,7 @@ export default function App() {
           </span>
         </div>
         <div className="key key-end">
-          <button type="button" className="cap orange" onClick={onPrimary} disabled={primaryDisabled}>
+          <button type="button" className="cap orange" onClick={onPrimary} aria-disabled={primaryDisabled} disabled={primaryDisabled}>
             {primaryLabel}
           </button>
           <span className="label">
@@ -299,7 +414,7 @@ export default function App() {
           </span>
         </div>
         <div className="key key-mute">
-          <button type="button" className={`cap${muted ? " dark" : ""}`} disabled={!live} aria-pressed={muted} onClick={call.toggleMute}>
+          <button type="button" className={`cap${muted ? " dark" : ""}`} disabled={!live} aria-pressed={muted} onClick={toggleMute}>
             {muted ? <MicOff size={15} aria-hidden="true" /> : <Mic size={15} aria-hidden="true" />}
             Mute
           </button>
@@ -315,33 +430,24 @@ export default function App() {
         <span className="timer" role="timer" aria-label="Call duration">
           {live ? `${pad(Math.floor(elapsed / 60))}:${pad(elapsed % 60)}` : ""}
         </span>
-        {live || phase === "connecting" ? (
-          <Button size="lg" className="btn-hangup h-12 w-full rounded-full text-[15px] font-semibold" onClick={call.end} disabled={primaryDisabled}>
-            {phase === "connecting" ? "Cancel" : "Hang up"}
-          </Button>
-        ) : (
-          <Button size="lg" className="btn-call h-12 w-full rounded-full text-[15px] font-semibold" onClick={call.start} disabled={!token}>
-            {primaryLabel}
-          </Button>
-        )}
-        <Button size="lg" variant="secondary" className={`btn-mute h-12 rounded-full ${muted ? "on" : ""}`} disabled={!live} aria-pressed={muted} onClick={call.toggleMute}>
+        <Button size="lg" className={`${live || phase === "connecting" ? "btn-hangup" : "btn-call"} h-12 w-full rounded-full text-[15px] font-semibold`} onClick={onPrimary} disabled={primaryDisabled}>
+          {live ? "Hang up" : primaryLabel}
+        </Button>
+        <Button size="lg" variant="secondary" className={`btn-mute h-12 rounded-full ${muted ? "on" : ""}`} disabled={!live} aria-pressed={muted} onClick={toggleMute}>
           {muted ? <MicOff size={16} aria-hidden="true" /> : <Mic size={16} aria-hidden="true" />}
           {muted ? "Unmute" : "Mute"}
         </Button>
       </>
     )
 
-  const footer = cfg.footer.replace("{agent}", agentName)
+  const footer = cfg.footer.split("{agent}").join(agentName)
 
   return (
     <div className="voice-page" data-skin={skin} data-layout={rail ? "rail" : "stack"} data-colorway={skin === "te" && colorway !== "auto" ? colorway : undefined}>
       <main className={`call-card${rail ? " layout-rail" : ""}`} aria-label="Voice call">
         <header className="brand-row">
           {skin === "te" ? (
-            <div className="badge" aria-hidden="true">
-              <Matrix rows={9} cols={9} pattern={live ? CLAW_OPEN : CLAW_CLOSED} size={3} gap={1} brightness={glow} palette={{ on: "var(--te-orange)", off: "#1d1d1d" }} ariaLabel="" />
-              <span className={`presence${live ? " live" : ""}`} />
-            </div>
+            <Badge call={call} phase={phase} live={live} reduced={reduced} />
           ) : (
             <div className="tile">
               <img src={logo} alt="" />
@@ -360,7 +466,9 @@ export default function App() {
         {rail ? (
           <div className="device">
             <section className="screen" aria-label="Screen">
-              <div className="screen-top">{stage}</div>
+              <div className="screen-top">
+                <Stage call={call} phase={phase} live={live} presence={cfg.presence} reduced={reduced} demo={demo} />
+              </div>
               <div className="screen-readout">
                 {readout}
                 <span className="screen-hint">{hintText}</span>
@@ -376,7 +484,9 @@ export default function App() {
         ) : (
           <>
             <section className="stage" aria-label="Agent presence">
-              <div className="presence-stage">{stage}</div>
+              <div className="presence-stage">
+                <Stage call={call} phase={phase} live={live} presence={cfg.presence} reduced={reduced} demo={demo} />
+              </div>
               {readout}
               <p className="hint">{hintText}</p>
             </section>
@@ -391,21 +501,26 @@ export default function App() {
         )}
 
         <div className="foot">
-          <p className="footer-line">{footer}</p>
+          <p className="footer-line">{demo ? "Demo call. Nothing is connected." : footer}</p>
           {skin === "te" && cfg.colorwayPicker && (
             <div className="colorways" role="radiogroup" aria-label="Colorway">
-              {(["ivory", "field", "rabbit"] as Colorway[]).map((c) => (
-                <button
-                  key={c}
-                  type="button"
-                  role="radio"
-                  aria-checked={colorway === c}
-                  aria-label={c}
-                  title={c}
-                  className={`swatch ${c}${colorway === c ? " on" : ""}`}
-                  onClick={() => setColorway(colorway === c ? cfg.colorway : c)}
-                />
-              ))}
+              {COLORWAYS.map((c) => {
+                const checked = colorway === c
+                return (
+                  <button
+                    key={c}
+                    type="button"
+                    role="radio"
+                    aria-checked={checked}
+                    aria-label={c}
+                    title={c}
+                    tabIndex={checked || (colorway === "auto" && c === COLORWAYS[0]) ? 0 : -1}
+                    className={`swatch ${c}${checked ? " on" : ""}`}
+                    onClick={() => setColorway(c)}
+                    onKeyDown={(e) => onColorwayKey(e, checked ? c : COLORWAYS[0])}
+                  />
+                )
+              })}
             </div>
           )}
         </div>

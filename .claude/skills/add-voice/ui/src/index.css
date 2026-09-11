@@ -1,6 +1,29 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
+@font-face {
+  font-family: "Hanken Grotesk";
+  font-style: normal;
+  font-weight: 300 600;
+  font-display: swap;
+  src: url("./assets/fonts/HankenGrotesk.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("./assets/fonts/IBMPlexMono-400.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("./assets/fonts/IBMPlexMono-500.woff2") format("woff2");
+}
+
+
 /* Dark variant that follows the viewer's three theme states:
    an explicit data-theme wins, otherwise the OS preference decides. */
 @custom-variant dark {
@@ -15,8 +38,8 @@
 }
 
 @theme inline {
-  --font-sans: "Instrument Sans", "SF Pro Text", "Segoe UI", system-ui, sans-serif;
-  --font-display: "Bricolage Grotesque", "Instrument Sans", system-ui, sans-serif;
+  --font-sans: "Hanken Grotesk", "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+  --font-display: "Hanken Grotesk", "SF Pro Display", system-ui, sans-serif;
   --font-mono: "IBM Plex Mono", "SF Mono", Menlo, monospace;
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
@@ -86,6 +109,7 @@
   --orb-ring: #e2e9ec;
   --orb-well: #f6f9fa;
   --dot-off: #e6ecef;
+  --dot-you: var(--amber);
   --shadow: 0 24px 60px rgba(18, 24, 28, 0.10);
 }
 
@@ -122,6 +146,8 @@
     --orb-ring: #1b232a;
     --orb-well: #0e1317;
     --dot-off: #1d252c;
+  --dot-you: var(--amber);
+    --dot-you: var(--amber);
     --shadow: 0 24px 64px rgba(0, 0, 0, 0.45);
   }
 }
@@ -473,9 +499,10 @@
   --te-orange-edge: #b83812;
   --te-led-off: #b4b0a8;
   --dot-off: #2b2b2b;
+  --dot-you: #f1efe9;
   --shadow: 0 18px 40px rgba(20, 20, 20, 0.16);
-  --font-sans: "Archivo", "Instrument Sans", system-ui, sans-serif;
-  --font-display: "Archivo Narrow", "Archivo", system-ui, sans-serif;
+  --font-sans: "Hanken Grotesk", system-ui, sans-serif;
+  --font-display: "Hanken Grotesk", system-ui, sans-serif;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) .voice-page[data-skin="te"]:not([data-colorway]) {
@@ -841,6 +868,7 @@
 }
 /* rabbit: the R1's orange body, black screen, black and cream keys */
 .voice-page[data-skin="te"][data-colorway="rabbit"] {
+  --dot-you: #fff1e6;
   --background: #e9e1d8; --foreground: #1a0e08; --card: #ff5a22; --card-foreground: #1a0e08;
   --secondary: rgba(26, 14, 8, 0.12); --muted: rgba(26, 14, 8, 0.12); --muted-foreground: rgba(26, 14, 8, 0.66); --border: rgba(26, 14, 8, 0.22);
   --amber: #fff1e6; --amber-soft: rgba(255, 241, 230, 0.12); --orb-ring: #c9421a; --orb-well: #0b0b0b;

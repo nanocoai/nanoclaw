@@ -307,8 +307,12 @@ GPT_LIVE_UI={"colorway":"field","presence":"matrix","brand":"Casa line"}
 
 Callers can also switch the finish from the three dots under the transcript;
 the choice stays in their browser. To change the components themselves, edit
-`ui/src`, then from `ui/` run `pnpm install --ignore-workspace && pnpm build`;
-the build regenerates the module, and the channel tests check it.
+`ui/src`, then from `ui/` run `pnpm install --frozen-lockfile && pnpm build`; the
+build regenerates the module and stamps it with a hash of the sources, which the
+channel tests check. The folder is its own pnpm root with the repository's
+supply-chain policy mirrored in its `pnpm-workspace.yaml`. Try the page without a
+microphone or an agent by adding `&demo=1` to any call link: it plays a scripted
+call and connects to nothing.
 
 ## Troubleshooting
 
