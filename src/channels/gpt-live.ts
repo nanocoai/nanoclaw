@@ -56,6 +56,8 @@ import { registerWebhookHandler } from '../webhook-server.js';
 export const CHANNEL_TYPE = 'gpt-live';
 const DEFAULT_API_BASE = 'https://api.openai.com/v1';
 const DEFAULT_WS_BASE = 'wss://api.openai.com/v1';
+/** Silent "still working" notes to the voice model go out at most this often while a reply is pending. */
+export const THINK_INTERVAL_MS = 20_000;
 
 /**
  * A voice line is DM-shaped: everything the voice model delegates is for the
@@ -88,6 +90,8 @@ export interface GptLiveConfig {
   resolveAgent?: (platformId: string) => Promise<VoiceAgent | null>;
   /** Observability tap: every sideband server event, before the state machine sees it. */
   onSidebandEvent?: (sessionId: string, event: LiveServerEvent) => void;
+  /** Clock, overridable for tests. */
+  now?: () => number;
 }
 
 export type { SidebandSocket } from './gpt-live-sideband.js';
@@ -104,6 +108,10 @@ interface LiveCall {
   platformId: string;
   session: GptLiveSession;
   socket: SidebandSocket | null;
+  /** A delegation is waiting on the agent; typing ticks may become thinking notes. */
+  pendingReply: boolean;
+  /** When the last thinking note went out (config clock). */
+  lastThinkAt: number;
 }
 
 /**
@@ -120,6 +128,7 @@ export function createGptLiveAdapter(config: GptLiveConfig): ChannelAdapter {
   const wsBase = (config.wsBase ?? DEFAULT_WS_BASE).replace(/\/+$/, '');
   const tokens = new Set(config.linkTokens.map((t) => t.trim()).filter(Boolean));
   const resolveAgent = config.resolveAgent ?? ((platformId: string) => resolveWiredAgent(platformId));
+  const now = config.now ?? (() => Date.now());
   /** Active call per voice line, keyed by platform id. */
   const lines = new Map<string, LiveCall>();
   let setup: ChannelSetup | null = null;
@@ -157,7 +166,10 @@ export function createGptLiveAdapter(config: GptLiveConfig): ChannelAdapter {
       isMention: true,
       isGroup: false,
     };
-    // Tell the voice model work has started; the reply lands through deliver().
+    // Tell the voice model work has started; the reply lands through deliver(). Later typing
+    // ticks are throttled against this note (setTyping below).
+    call.pendingReply = true;
+    call.lastThinkAt = now();
     call.session.think('Working on it.');
     void Promise.resolve(setup.onInbound(call.platformId, null, message)).catch((err) => {
       log.error('gpt-live: onInbound threw', { platformId: call.platformId, err });
@@ -202,7 +214,13 @@ export function createGptLiveAdapter(config: GptLiveConfig): ChannelAdapter {
       previous.session.close();
       endCall(previous, 'replaced by a new call');
     }
-    const call: LiveCall = { platformId, socket: null, session: null as unknown as GptLiveSession };
+    const call: LiveCall = {
+      platformId,
+      socket: null,
+      session: null as unknown as GptLiveSession,
+      pendingReply: false,
+      lastThinkAt: 0,
+    };
     call.session = new GptLiveSession(sessionId, {
       send: (event) => sendEvent(call, event),
       onDelegation,
@@ -350,12 +368,19 @@ export function createGptLiveAdapter(config: GptLiveConfig): ChannelAdapter {
       const text = typeof content === 'string' ? content : typeof content?.text === 'string' ? content.text : '';
       if (!text.trim()) return undefined;
       const ids = call.session.speak(text);
+      call.pendingReply = false;
       return ids.at(-1);
     },
 
     async setTyping(platformId: string, _threadId: string | null, status?: string): Promise<void> {
+      // The host re-fires typing every few seconds for as long as the agent works. The voice
+      // model needs one quiet note now and then, not a drumbeat: at most one per
+      // THINK_INTERVAL_MS while a reply is pending, none once the reply went out.
       const call = lines.get(platformId);
-      if (!call) return;
+      if (!call || !call.pendingReply) return;
+      const t = now();
+      if (t - call.lastThinkAt < THINK_INTERVAL_MS) return;
+      call.lastThinkAt = t;
       call.session.think(status?.trim() || 'Still working on it.');
     },
   };

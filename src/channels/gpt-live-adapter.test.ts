@@ -218,6 +218,7 @@ describe('gpt-live adapter (fake OpenAI, real webhook server)', () => {
   let fake: FakeOpenAI;
   let adapter: ChannelAdapter;
   let base: string;
+  const clock = { now: Date.now() };
   const inbound: Array<{ platformId: string; threadId: string | null; message: InboundMessage }> = [];
 
   beforeAll(async () => {
@@ -234,6 +235,7 @@ describe('gpt-live adapter (fake OpenAI, real webhook server)', () => {
       apiBase: `http://127.0.0.1:${fake.port}/v1`,
       wsBase: `ws://127.0.0.1:${fake.port}/v1`,
       resolveAgent: async () => ({ name: 'Andy', personality: 'Dry humour, precise.' }),
+      now: () => clock.now,
     });
     await adapter.setup({
       onInbound: (platformId, threadId, message) => {
@@ -323,6 +325,21 @@ describe('gpt-live adapter (fake OpenAI, real webhook server)', () => {
     expect(ack).toMatchObject({ delegation_id: 'item_1', content: 'Working on it.' });
   });
 
+  it('rate-limits typing notes: one per 20 s while a reply is pending', async () => {
+    const thinking = () => fake.received.filter((e) => e.type === 'session.thinking.append').map((e) => e.content);
+    const before = thinking().length; // 'Working on it.' from the delegation, sent just now
+    await adapter.setTyping?.(LINE, null, 'Checking the calendar');
+    await new Promise((r) => setTimeout(r, 150));
+    expect(thinking().length).toBe(before); // within 20 s of the last note: suppressed
+    clock.now += 21_000;
+    await adapter.setTyping?.(LINE, null, 'Checking the calendar');
+    await vi.waitFor(() => expect(thinking().length).toBe(before + 1));
+    expect(thinking().at(-1)).toBe('Checking the calendar');
+    await adapter.setTyping?.(LINE, null, 'Checking the calendar');
+    await new Promise((r) => setTimeout(r, 150));
+    expect(thinking().length).toBe(before + 1); // again within 20 s: suppressed
+  });
+
   it('speaks the agent reply as commentary on the open delegation', async () => {
     const id = await adapter.deliver(LINE, null, {
       kind: 'chat',
@@ -337,13 +354,13 @@ describe('gpt-live adapter (fake OpenAI, real webhook server)', () => {
     });
   });
 
-  it('maps typing to a silent thinking note', async () => {
-    await adapter.setTyping?.(LINE, null, 'Checking the calendar');
-    await vi.waitFor(() =>
-      expect(fake.received.filter((e) => e.type === 'session.thinking.append').map((e) => e.content)).toContain(
-        'Checking the calendar',
-      ),
-    );
+  it('sends no typing notes once the reply went out', async () => {
+    const count = () => fake.received.filter((e) => e.type === 'session.thinking.append').length;
+    const before = count();
+    clock.now += 60_000;
+    await adapter.setTyping?.(LINE, null, 'Still checking');
+    await new Promise((r) => setTimeout(r, 150));
+    expect(count()).toBe(before);
   });
 
   it('hangs up: closes the session, and later replies are dropped', async () => {
