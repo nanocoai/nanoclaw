@@ -108,8 +108,6 @@ interface LiveCall {
   platformId: string;
   session: GptLiveSession;
   socket: SidebandSocket | null;
-  /** A delegation is waiting on the agent; typing ticks may become thinking notes. */
-  pendingReply: boolean;
   /** When the last thinking note went out (config clock). */
   lastThinkAt: number;
 }
@@ -168,7 +166,6 @@ export function createGptLiveAdapter(config: GptLiveConfig): ChannelAdapter {
     };
     // Tell the voice model work has started; the reply lands through deliver(). Later typing
     // ticks are throttled against this note (setTyping below).
-    call.pendingReply = true;
     call.lastThinkAt = now();
     call.session.think('Working on it.');
     void Promise.resolve(setup.onInbound(call.platformId, null, message)).catch((err) => {
@@ -218,7 +215,6 @@ export function createGptLiveAdapter(config: GptLiveConfig): ChannelAdapter {
       platformId,
       socket: null,
       session: null as unknown as GptLiveSession,
-      pendingReply: false,
       lastThinkAt: 0,
     };
     call.session = new GptLiveSession(sessionId, {
@@ -368,7 +364,6 @@ export function createGptLiveAdapter(config: GptLiveConfig): ChannelAdapter {
       const text = typeof content === 'string' ? content : typeof content?.text === 'string' ? content.text : '';
       if (!text.trim()) return undefined;
       const ids = call.session.speak(text);
-      call.pendingReply = false;
       return ids.at(-1);
     },
 
@@ -377,7 +372,7 @@ export function createGptLiveAdapter(config: GptLiveConfig): ChannelAdapter {
       // model needs one quiet note now and then, not a drumbeat: at most one per
       // THINK_INTERVAL_MS while a reply is pending, none once the reply went out.
       const call = lines.get(platformId);
-      if (!call || !call.pendingReply) return;
+      if (!call || call.session.pendingDelegations().length === 0) return;
       const t = now();
       if (t - call.lastThinkAt < THINK_INTERVAL_MS) return;
       call.lastThinkAt = t;

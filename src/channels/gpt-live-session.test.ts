@@ -86,7 +86,7 @@ describe('GptLiveSession', () => {
     expect(sent.map((e) => (e.type === 'session.commentary.append' ? e.content : '')).join(' ')).toBe(long);
   });
 
-  it('a barge-in delegation supersedes the open one and only carries the newer turns', () => {
+  it('queues a barge-in: the newer delegation carries only the newer turns, and replies answer in order', () => {
     const { session, delegations, sent } = recorder();
     callerSays(session, 'Book me a table for two.');
     delegate(session, 'item_1');
@@ -96,14 +96,47 @@ describe('GptLiveSession', () => {
 
     expect(delegations[1]).toMatchObject({ delegationId: 'item_2', supersedes: 'item_1' });
     expect(delegations[1].transcript).toBe('Caller: Actually, make it four.');
-    expect(session.currentDelegation()).toBe('item_2');
+    expect(session.pendingDelegations()).toEqual(['item_1', 'item_2']);
+    expect(session.currentDelegation()).toBe('item_1');
 
-    // A late result for the superseded task is still sent, addressed to its own id.
-    session.speak('Found three places for two.', 'item_1');
-    const last = sent.at(-1);
-    expect(last).toMatchObject({ type: 'session.commentary.append', delegation_id: 'item_1' });
+    // The agent answers in order: first reply retires item_1, second retires item_2.
+    session.speak('Found three places for two.');
+    expect(sent.at(-1)).toMatchObject({ type: 'session.commentary.append', delegation_id: 'item_1' });
+    expect(session.pendingDelegations()).toEqual(['item_2']);
+    session.speak('Table for four booked.');
+    expect(sent.at(-1)).toMatchObject({ type: 'session.commentary.append', delegation_id: 'item_2' });
+    expect(session.pendingDelegations()).toEqual([]);
+
+    // An explicit id still wins, e.g. a late result the adapter attributes itself.
+    session.speak('One more option came in.', 'item_1');
+    expect(sent.at(-1)).toMatchObject({ delegation_id: 'item_1' });
   });
 
+  it('a reply after the answer went out carries no delegation id', () => {
+    const { session, sent } = recorder();
+    callerSays(session, 'What time is it?');
+    delegate(session, 'item_1');
+    session.speak('Ten past three.');
+    session.speak("By the way, your two o'clock moved to four.");
+    expect(sent.at(-1)).toMatchObject({ type: 'session.commentary.append', delegation_id: null });
+    expect(session.currentDelegation()).toBeNull();
+  });
+
+  it('thinking notes point at the oldest unanswered delegation without retiring it', () => {
+    const { session, sent } = recorder();
+    delegate(session, 'item_1');
+    delegate(session, 'item_2');
+    session.think('Checking.');
+    expect(sent.at(-1)).toMatchObject({ type: 'session.thinking.append', delegation_id: 'item_1' });
+    expect(session.pendingDelegations()).toEqual(['item_1', 'item_2']);
+  });
+
+  it('an empty reply retires nothing', () => {
+    const { session } = recorder();
+    delegate(session, 'item_1');
+    expect(session.speak('   ')).toEqual([]);
+    expect(session.pendingDelegations()).toEqual(['item_1']);
+  });
   it('speaks with a null delegation id when nothing is delegated (proactive message)', () => {
     const { session, sent } = recorder();
     session.speak('Reminder: your call with Dana starts in five minutes.');

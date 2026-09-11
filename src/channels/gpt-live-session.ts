@@ -17,9 +17,9 @@
  *  - `session.commentary.append` (spoken) and `session.thinking.append`
  *    (silent) each take at most 500 tokens per append; longer text is
  *    split into several appends that share one `delegation_id`.
- *  - A caller interruption never cancels backend work. A newer delegation
- *    supersedes the open one; results for a superseded id are still sent
- *    and the voice model decides whether to voice them.
+ *  - A caller interruption never cancels backend work. Delegations queue up
+ *    in arrival order; each reply answers the oldest unanswered one, and a
+ *    reply with nothing pending (a reminder, a follow-up) carries no id.
  */
 
 /** Any server event from the sideband. Only `type` is load-bearing here. */
@@ -43,7 +43,7 @@ export interface DelegationRequest {
   transcript: string;
   /** Position on the session timeline, ms from session start. */
   offsetMs: number;
-  /** The delegation id this one supersedes, when the caller barged in mid-task. */
+  /** The oldest delegation still unanswered when this one arrived (a barge-in), else null. */
   supersedes: string | null;
 }
 
@@ -87,7 +87,8 @@ export class GptLiveSession {
   private readonly lines: string[] = [];
   private speaker: typeof CALLER | typeof ASSISTANT | null = null;
   private partial = '';
-  private openDelegation: string | null = null;
+  /** Unanswered delegation ids, oldest first. */
+  private readonly pending: string[] = [];
   private closed = false;
   private seq = 0;
 
@@ -96,9 +97,14 @@ export class GptLiveSession {
     private readonly sink: SessionSink,
   ) {}
 
-  /** The delegation the voice model is currently waiting on, if any. */
+  /** The delegation the next reply answers: the oldest unanswered one, if any. */
   currentDelegation(): string | null {
-    return this.openDelegation;
+    return this.pending[0] ?? null;
+  }
+
+  /** Every unanswered delegation, oldest first. */
+  pendingDelegations(): string[] {
+    return [...this.pending];
   }
 
   isClosed(): boolean {
@@ -132,17 +138,21 @@ export class GptLiveSession {
 
   /**
    * Speak `text` to the caller. Chunked under the per-append cap; every chunk
-   * carries the same delegation id — the open one unless the adapter names a
-   * specific (possibly superseded) delegation the reply belongs to.
-   * Returns the event ids sent, in order.
+   * carries the same delegation id. Without an explicit id the reply answers
+   * the oldest unanswered delegation and retires it; with nothing pending it
+   * goes out with no id. Returns the event ids sent, in order.
    */
-  speak(text: string, delegationId: string | null = this.openDelegation): string[] {
-    return this.emit('session.commentary.append', text, delegationId);
+  speak(text: string, delegationId?: string | null): string[] {
+    const chunks = chunkForAppend(text);
+    if (this.closed || chunks.length === 0) return [];
+    const id = delegationId === undefined ? (this.pending.shift() ?? null) : delegationId;
+    return this.emitChunks('session.commentary.append', chunks, id);
   }
 
-  /** Silent progress note for the voice model ("still working"). */
-  think(text: string, delegationId: string | null = this.openDelegation): string[] {
-    return this.emit('session.thinking.append', text, delegationId);
+  /** Silent progress note for the voice model ("still working"), about the oldest pending delegation. */
+  think(text: string, delegationId?: string | null): string[] {
+    const id = delegationId === undefined ? this.currentDelegation() : delegationId;
+    return this.emit('session.thinking.append', text, id);
   }
 
   /** Steer the voice model; may interrupt its current speech. */
@@ -162,8 +172,16 @@ export class GptLiveSession {
     delegationId: string | null,
   ): string[] {
     if (this.closed) return [];
+    return this.emitChunks(type, chunkForAppend(text), delegationId);
+  }
+
+  private emitChunks(
+    type: 'session.commentary.append' | 'session.thinking.append' | 'session.instructions.append',
+    chunks: string[],
+    delegationId: string | null,
+  ): string[] {
     const ids: string[] = [];
-    for (const content of chunkForAppend(text)) {
+    for (const content of chunks) {
       const event_id = this.nextEventId();
       ids.push(event_id);
       this.sink.send({ type, event_id, delegation_id: delegationId, content });
@@ -197,8 +215,8 @@ export class GptLiveSession {
     this.flushPartial();
     const transcript = this.lines.join('\n');
     this.lines.length = 0;
-    const supersedes = this.openDelegation;
-    this.openDelegation = id;
+    const supersedes = this.pending[0] ?? null;
+    this.pending.push(id);
     this.sink.onDelegation({
       sessionId: this.sessionId,
       delegationId: id,
