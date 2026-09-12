@@ -1,5 +1,17 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { CLOSE_FORBIDDEN, CellLink, computeBackoffDelay, type LinkSocket } from './link.js';
+import {
+  CLOSE_FORBIDDEN,
+  CellLink,
+  MAX_STREAMS,
+  computeBackoffDelay,
+  hostCaps,
+  parseSshOpen,
+  type LinkSocket,
+  type SshChannel,
+  type SshOpen,
+  type SshOpener,
+} from './link.js';
+import type { Frame } from './mux.js';
 
 type Listener = (event: { data: unknown; code?: number }) => void;
 
@@ -136,14 +148,35 @@ it('dials with the ticket as a subprotocol, says hello as the host leg first, an
   expect(link.connected).toBe(false);
 });
 
-it('refuses channel kinds it does not support and ignores their data', async () => {
+/** A stream opener the test drives by hand: records every open and the frames each channel receives. */
+function fakeOpener() {
+  const opened: { open: SshOpen; channel: SshChannel; frames: Frame[]; torn: number }[] = [];
+  const ssh: SshOpener = (open, channel) => {
+    const entry = { open, channel, frames: [] as Frame[], torn: 0 };
+    opened.push(entry);
+    return { onFrame: (frame) => entry.frames.push(frame), onTeardown: () => entry.torn++ };
+  };
+  return { ssh, opened };
+}
+const sshOpen = (stream: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+  kind: 'ssh',
+  stream,
+  target: { account: 'alice' },
+  source: { ip: '2001:db8::1', port: 4242 },
+  ...extra,
+});
+
+it('refuses channel kinds it does not support, ssh included while no opener is installed, and ignores their data', async () => {
   const { link, onSnapshot } = connect();
   link.start();
   await settle();
   const socket = FakeSocket.instances[0];
   socket.open();
-  socket.frame(2, 'open', { kind: 'ssh' });
+  expect(socket.frames()[0]).toMatchObject({ t: 'hello', caps: ['perks'] });
+  socket.frame(2, 'open', sshOpen('s1'));
   expect(socket.frames().at(-1)).toEqual({ v: 1, ch: 2, seq: 1, t: 'error', code: 'unsupported' });
+  socket.frame(3, 'open', { kind: 'files' });
+  expect(socket.frames().at(-1)).toEqual({ v: 1, ch: 3, seq: 1, t: 'error', code: 'unsupported' });
   socket.frame(2, 'data', { snapshot: {}, presence: [] });
   expect(onSnapshot).not.toHaveBeenCalled();
   socket.frame(1, 'open', { kind: 'perks' });
@@ -306,6 +339,139 @@ it('reconnects on 4401 and 4008/4009 (logging the latter as a bug) and stops on 
   link.start();
   await settle();
   expect(FakeSocket.instances).toHaveLength(4);
+});
+
+it('announces ssh with an opener installed and hands every ssh open to it with its target and source', async () => {
+  const { ssh, opened } = fakeOpener();
+  const { link, log } = connect({ ssh });
+  link.start();
+  await settle();
+  const socket = FakeSocket.instances[0];
+  socket.open();
+  expect(socket.frames()[0]).toEqual({ v: 1, ch: 0, seq: 1, t: 'hello', leg: 'host', caps: ['perks', 'ssh'] });
+  socket.frame(1, 'open', { kind: 'perks' });
+  socket.frame(2, 'open', sshOpen('s1', { target: { account: 'alice', sandbox: 'api' }, ticket: 'jti1' }));
+  expect(opened).toHaveLength(1);
+  expect(opened[0].open).toEqual({
+    stream: 's1',
+    target: { account: 'alice', sandbox: 'api' },
+    source: { ip: '2001:db8::1', port: 4242 },
+    ticket: 'jti1',
+  });
+  expect(opened[0].channel.ch).toBe(2);
+  expect(link.streams).toBe(1);
+  // Frames on the channel reach its handler untouched.
+  socket.frame(2, 'data', { off: 0, b64: 'AAECAw==' });
+  socket.frame(2, 'credit', { ack: 4 });
+  expect(opened[0].frames.map((f) => [f.t, f.off ?? f.ack])).toEqual([
+    ['data', 0],
+    ['credit', 4],
+  ]);
+  // The channel sends with the ssh allowance: a full 16 KiB chunk fits.
+  const chunk = Buffer.alloc(16_384, 1).toString('base64');
+  expect(opened[0].channel.send('data', { off: 0, b64: chunk })).toBe(true);
+  expect(socket.frames().at(-1)).toMatchObject({ ch: 2, seq: 1, t: 'data', off: 0 });
+  expect(opened[0].channel.send('credit', { ack: 4 })).toBe(true);
+  expect(socket.frames().at(-1)).toEqual({ v: 1, ch: 2, seq: 2, t: 'credit', ack: 4 });
+  // A second open on a channel already open is ignored.
+  socket.frame(2, 'open', sshOpen('s2'));
+  expect(opened).toHaveLength(1);
+  // release forgets the channel and tears its handler down exactly once; later frames go nowhere.
+  opened[0].channel.release();
+  opened[0].channel.release();
+  expect(opened[0].torn).toBe(1);
+  expect(link.streams).toBe(0);
+  socket.frame(2, 'data', { off: 4, b64: 'AA==' });
+  expect(opened[0].frames).toHaveLength(2);
+  // An open that is off the contract is refused with close protocol and never reaches the opener.
+  socket.frame(3, 'open', { kind: 'ssh', stream: 's3' });
+  expect(socket.frames().at(-1)).toEqual({ v: 1, ch: 3, seq: 1, t: 'close', reason: 'protocol' });
+  expect(log).toHaveBeenCalledWith({ event: 'stream_refused', reason: 'protocol' });
+  expect(opened).toHaveLength(1);
+  // A link drop tears every open stream down without sending anything.
+  socket.frame(4, 'open', sshOpen('s4'));
+  expect(opened).toHaveLength(2);
+  const sentBefore = socket.sent.length;
+  socket.lost();
+  expect(opened[1].torn).toBe(1);
+  expect(socket.sent).toHaveLength(sentBefore);
+  expect(link.streams).toBe(0);
+});
+
+it('refuses a ninth stream with close busy and accepts another once a slot frees', async () => {
+  const { ssh, opened } = fakeOpener();
+  const { link, log } = connect({ ssh });
+  link.start();
+  await settle();
+  const socket = FakeSocket.instances[0];
+  socket.open();
+  for (let ch = 2; ch < 2 + MAX_STREAMS; ch++) socket.frame(ch, 'open', sshOpen(`s${ch}`));
+  expect(opened).toHaveLength(MAX_STREAMS);
+  expect(link.streams).toBe(MAX_STREAMS);
+  socket.frame(20, 'open', sshOpen('s20'));
+  expect(socket.frames().at(-1)).toEqual({ v: 1, ch: 20, seq: 1, t: 'close', reason: 'busy' });
+  expect(log).toHaveBeenCalledWith({ event: 'stream_refused', reason: 'busy', stream: 's20' });
+  expect(opened).toHaveLength(MAX_STREAMS);
+  // The far end closes one stream; its pipe releases the channel and the slot is free again.
+  socket.frame(3, 'close', { reason: 'peer' });
+  expect(opened[1].frames.at(-1)).toMatchObject({ t: 'close', reason: 'peer' });
+  opened[1].channel.release();
+  expect(link.streams).toBe(MAX_STREAMS - 1);
+  socket.frame(21, 'open', sshOpen('s21'));
+  expect(opened).toHaveLength(MAX_STREAMS + 1);
+  expect(opened.at(-1)?.open.stream).toBe('s21');
+});
+
+it('renews its ticket into every socket and again after each renewed, leaving expiry as the failure path', async () => {
+  vi.useFakeTimers();
+  const { link, getTicket, log } = connect({ renewMs: 1_000, renewJitterMs: 0 });
+  link.start();
+  await settle();
+  const socket = FakeSocket.instances[0];
+  socket.open();
+  await vi.advanceTimersByTimeAsync(999);
+  expect(getTicket).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(getTicket).toHaveBeenCalledTimes(2);
+  expect(socket.frames().at(-1)).toEqual({ v: 1, ch: 0, seq: 2, t: 'renew', ticket: 'tkt.2' });
+  // Nothing more until the cell confirms.
+  await vi.advanceTimersByTimeAsync(2_000);
+  expect(getTicket).toHaveBeenCalledTimes(2);
+  socket.frame(0, 'renewed', { exp: 1_757_600_000 });
+  expect(log).toHaveBeenCalledWith({ event: 'renewed', exp: 1_757_600_000 });
+  await vi.advanceTimersByTimeAsync(1_000);
+  expect(getTicket).toHaveBeenCalledTimes(3);
+  expect(socket.frames().at(-1)).toEqual({ v: 1, ch: 0, seq: 3, t: 'renew', ticket: 'tkt.3' });
+  socket.frame(0, 'renewed', { exp: 1_757_600_900 });
+  // A ticket that cannot be fetched is logged; the socket stays up and the cell's expiry close redials.
+  getTicket.mockRejectedValueOnce(Object.assign(new Error('offline'), { code: 'ECONNREFUSED' }));
+  await vi.advanceTimersByTimeAsync(1_000);
+  expect(log).toHaveBeenCalledWith({ event: 'renew_failed', code: 'ECONNREFUSED' });
+  expect(socket.closed).toBe(false);
+  expect(socket.frames().filter((f) => f.t === 'renew')).toHaveLength(2);
+  // A socket that is gone is never renewed; stop clears the timer.
+  socket.frame(0, 'renewed', { exp: 1 });
+  link.stop();
+  await vi.advanceTimersByTimeAsync(5_000);
+  expect(getTicket).toHaveBeenCalledTimes(4);
+});
+
+it('jitters the renewal and keeps its caps explicit', () => {
+  expect(hostCaps()).toEqual(['perks']);
+  expect(hostCaps({ ssh: true })).toEqual(['perks', 'ssh']);
+  expect(hostCaps({ ssh: false })).toEqual(['perks']);
+  const frame = (fields: Record<string, unknown>): Frame => ({ v: 1, ch: 2, seq: 1, t: 'open', ...fields });
+  expect(parseSshOpen(frame(sshOpen('s1')))).toEqual({
+    stream: 's1',
+    target: { account: 'alice' },
+    source: { ip: '2001:db8::1', port: 4242 },
+  });
+  expect(parseSshOpen(frame(sshOpen('s1', { ticket: 7 })))?.ticket).toBeUndefined();
+  expect(parseSshOpen(frame(sshOpen('')))).toBeNull();
+  expect(parseSshOpen(frame(sshOpen('s1', { target: {} })))).toBeNull();
+  expect(parseSshOpen(frame(sshOpen('s1', { target: { account: 'alice', sandbox: '' } })))).toBeNull();
+  expect(parseSshOpen(frame(sshOpen('s1', { source: { ip: '::1' } })))).toBeNull();
+  expect(parseSshOpen(frame(sshOpen('s1', { source: { ip: 1, port: 2 } })))).toBeNull();
 });
 
 it('computes the jittered exponential backoff of the reference module', () => {

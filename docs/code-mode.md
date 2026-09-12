@@ -155,6 +155,123 @@ the next healthy tick, three times, before that turn is given up with a
 log line. A clean tree is not a failure: it settles the turn with nothing
 sent.
 
+### Over the account service
+
+The community-portal module ships one provider: a remote implementation
+over the service that manages the host's chat app (the same service and
+install token the portal setup uses). It knows no chat platform. A
+platform's module registers its half with
+`registerSurfacePlatform(kind, { spell, botIdentity?, install? })` from
+`src/modules/community-portal/surface/`: how the adapter spells a
+conversation as a messaging-group row and, optionally, which bot this host
+is on the platform. For every registered platform with a managed install
+and a sign-in, the provider is registered under the platform's channel
+type at Host start. Whether a session actually gets a surface is the
+service's answer: a workspace or deployment that cannot open one leaves
+the sandbox plain, with a log line and nothing else.
+
+What the surface shows: the session's status (working, idle, suspended by
+the idle lease), the diff after each turn, messages both ways, a Stop that
+interrupts the turn, and — on a Host with remote terminal access — the
+sandbox's address, so a `/terminal` typed on the surface is answered from
+the member row. A sandbox created before remote access was enabled learns
+its address when `remote enable` runs.
+
+A surface opens automatically: when the account service offers one for a
+platform this Host serves, every `sandboxes new` gets a surface and the
+session's status and diffs are mirrored to it from then on. Remote terminal
+access is different — it is off until an operator runs `remote enable`
+(next section). `bin/ncl sandboxes surface disable` stops opening surfaces
+for new sandboxes on this Host, kept across restarts; surfaces already open
+are untouched, and `surface enable` turns it back on.
+
+```sh
+bin/ncl sandboxes surface status my-project
+bin/ncl sandboxes surface archive my-project --summary "Shipped the page."
+bin/ncl sandboxes surface disable
+bin/ncl sandboxes surface enable
+```
+
+Archiving is always explicit; neither a Stop nor deleting the sandbox
+archives the surface.
+
+## Remote terminal
+
+Remote terminal access lets an approved SSH key land in a sandbox on this
+Host from another machine. The Host runs its own SSH server, in-process, on
+loopback: its own host key, public keys only, any username (the key decides,
+not the login name), a terminal and nothing else — no shell, no forwarding,
+no file transfer, no password. Reachability comes from the account link,
+not from a listener of its own: the Host never listens on the network, and
+every stream that reaches the server was relayed by the Host itself (see
+[the community portal](community-portal.md#remote-terminal)). It lives in
+the community-portal module and is off until an operator enables it.
+
+### Enabling
+
+```sh
+bin/ncl sandboxes remote enable [--name my-machine]
+bin/ncl sandboxes remote status
+bin/ncl sandboxes remote disable
+```
+
+The name is a DNS label: 3–32 lowercase letters, digits and single hyphens,
+with a few common words reserved (the account service has the last word).
+It becomes this machine's address once the link relays terminals, and it
+names the default sandbox a remote terminal lands in. When the Host is
+signed in the account confirms or assigns the name (omit `--name` to let it
+choose) and the command prints the address to use; a name renamed later in
+the browser is reported as a changed address. Without a sign-in, pass
+`--name`. Enabling generates the host key once under `data/door/`, takes
+the first free loopback port in 33022–33121, starts the server inside the
+Host process, and keeps it running across Host restarts until you disable
+it. Disabling ends open sessions and keeps the host key and the approved
+keys. Nothing has to be installed on the Host for this: no OpenSSH server,
+no extra account, no system group, no native module. The terminal a
+session gets is the container runtime's own, opened through the same
+runtime API the Host already manages sessions with.
+
+### Keys and pairing
+
+Every key the server sees is admitted to exactly one program:
+
+- an approved key lands in a sandbox (next section);
+- an unknown key enters the waiting room, which prints the key's
+  fingerprint, where the connection came from, the time, the approval page
+  and (through the account link) a short approval code, then waits up to
+  ten minutes. Approve it from the Host or in the browser and the same
+  session continues into the sandbox without reconnecting. A machine holds
+  at most four waiting rooms at once and records at most ten pending keys
+  per ten minutes; beyond that the room says so and ends.
+
+```sh
+bin/ncl sandboxes remote keys add ~/.ssh/id_ed25519.pub --label laptop
+bin/ncl sandboxes remote keys list
+bin/ncl sandboxes remote keys approve SHA256:…
+bin/ncl sandboxes remote keys revoke SHA256:…
+```
+
+Fingerprints are the `SHA256:…` form `ssh-keygen -lf` prints. Revoking a
+key ends its open sessions and sends it back to the waiting room on its next
+connection. Keys approved in the browser reach the Host with the account's
+snapshot and are revoked there; `keys list` shows them separately. The
+approval page the waiting room shows is the enrolled portal's, or
+`NANOCLAW_TERMINAL_APPROVAL_URL` when set; a Host that never enrolled with
+a portal approves keys on the machine only.
+
+### Landing
+
+The Host records what each relayed stream is for. A stream for the account
+lands in the default sandbox named after the account, created on first use;
+a stream for a named sandbox attaches that sandbox, waking it if it went
+cold. `ssh <address> ls` prints the sandbox list instead of landing. Detach
+with **Ctrl-b, then d**; the session keeps running. A connection the Host
+did not relay (for example a direct loopback connection) is refused after
+authentication. While remote access is enabled, `sandboxes new` also
+registers the new sandbox's name with the account so it gets an address of
+its own (`<sandbox>.<name>.<zone>`), and deleting the group frees it; both
+are best effort and never get in the way of the sandbox itself.
+
 ## Configuration and dependencies
 
 Code mode uses the existing agent image, Claude Code installation, and
@@ -169,6 +286,11 @@ of typing it; unset, mail is typed into the terminal when the agent is
 idle. `NANOCLAW_CODE_ENV` is a JSON object of extra environment variables
 for code-mode containers; it never overrides the provider's credential
 lane.
+
+Remote terminal access needs an SSH client on the terminal machine; the
+Host side is the Host process itself (the `ssh2` protocol library, loaded
+only once remote access is enabled) and the container runtime's exec API,
+which the Host already uses to run sessions.
 
 Code mode currently supports the `claude` provider only.
 

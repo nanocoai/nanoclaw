@@ -1,15 +1,22 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import type { DoorStream } from './door/index.js';
+import type { Door } from './remote/door.js';
 import {
   DEVICE_PROOF_HEADER,
   ensureDeviceKey,
+  readJson,
+  reportTerminalState,
   verifyDeviceProof,
   writePrivate,
+  type Journal,
   type LinkSocket,
+  type TerminalSnapshot,
 } from '../../community-portal/index.js';
 import { startPortalRuntime } from './runtime.js';
 
@@ -59,6 +66,7 @@ interface Seen {
   route: string;
   authorization?: string;
   proofValid?: boolean;
+  body?: unknown;
 }
 let server: Server;
 let origin: string;
@@ -70,11 +78,11 @@ const DEVICE_ID = 'dev_0123456789abcdef01234567';
 const state = { grants: [] as unknown[] };
 
 async function serve(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  for await (const _chunk of req) {
-    /* drain */
-  }
+  let text = '';
+  for await (const chunk of req) text += chunk;
   const route = new URL(req.url ?? '/', origin).pathname;
   const record: Seen = { method: req.method ?? '', route, authorization: req.headers.authorization };
+  if (text) record.body = JSON.parse(text);
   const proof = req.headers[DEVICE_PROOF_HEADER];
   if (typeof proof === 'string') {
     const key = ensureDeviceKey({ homeDir: home });
@@ -98,6 +106,10 @@ async function serve(req: IncomingMessage, res: ServerResponse): Promise<void> {
   }
   if (route === '/api/v1/device/state') {
     res.end(JSON.stringify(state));
+    return;
+  }
+  if (route === '/api/v1/terminal/host') {
+    res.end(JSON.stringify({ ok: true }));
     return;
   }
   res.writeHead(404);
@@ -161,6 +173,7 @@ it('stays idle without a registered device, then dials with a proofed ticket and
     route: '/api/v1/cell-ticket',
     authorization: 'Bearer tok',
     proofValid: true,
+    body: {},
   });
   await until(() => seen.some((r) => r.route === '/api/v1/device/state'));
   expect(seen.find((r) => r.route === '/api/v1/device/state')).toEqual({
@@ -185,6 +198,125 @@ it('stays idle without a registered device, then dials with a proofed ticket and
   expect(seen.filter((r) => r.route === '/api/v1/cell-ticket')).toHaveLength(1);
   await runtime.stop();
   expect(socket.readyState).toBe(3);
+});
+
+it('announces ssh while the door is enabled, pipes streams into it, forwards the terminal snapshot and reports the door', async () => {
+  const log = vi.fn();
+  await signIn();
+  ensureDeviceKey({ homeDir: home });
+  // A loopback echo server stands in for the door.
+  const echo = net.createServer({ allowHalfOpen: true }, (socket) => socket.pipe(socket));
+  await new Promise<void>((resolve) => echo.listen(0, '127.0.0.1', resolve));
+  const doorPort = (echo.address() as net.AddressInfo).port;
+  await writePrivate(journalFile(), {
+    origin,
+    deviceId: DEVICE_ID,
+    credentials: {},
+    operations: {},
+    terminal: { enabled: true, name: 'alice', doorPort, updatedAt: 'x' },
+  });
+  // A door as the link sees it: enabled and the port from the journal, targets in memory, the last snapshot kept.
+  const applied: (TerminalSnapshot | undefined)[] = [];
+  const targets = new Map<number, DoorStream>();
+  const door: Door = {
+    status: async () => {
+      const saved = (await readJson<Partial<Journal>>(journalFile()))?.terminal;
+      const port = saved?.enabled && saved.doorPort ? saved.doorPort : undefined;
+      return {
+        enabled: port !== undefined,
+        ...(port === undefined ? {} : { port }),
+        authorizedFingerprints: applied.at(-1)?.keys.map((key) => key.fingerprint) ?? [],
+      };
+    },
+    registerTarget: (port, entry) => {
+      targets.set(port, { ...entry, openedAt: entry.openedAt ?? 'now' });
+    },
+    unregisterTarget: (port) => {
+      targets.delete(port);
+    },
+    lookupTarget: (port) => targets.get(port),
+    applyTerminalSnapshot: async (terminal) => {
+      applied.push(terminal);
+    },
+  };
+  const runtime = startPortalRuntime({
+    root,
+    homeDir: home,
+    log,
+    intervalMs: 50,
+    Socket: FakeSocket,
+    door,
+    terminalReportMs: 100,
+  });
+  await until(() => FakeSocket.instances.length === 1);
+  const socket = FakeSocket.instances[0];
+  socket.open();
+  expect(JSON.parse(socket.sent[0])).toEqual({ v: 1, ch: 0, seq: 1, t: 'hello', leg: 'host', caps: ['perks', 'ssh'] });
+  // The door's state goes to the service with the first reconcile.
+  await until(() => seen.some((r) => r.route === '/api/v1/terminal/host'));
+  expect(seen.find((r) => r.route === '/api/v1/terminal/host')).toEqual({
+    method: 'PUT',
+    route: '/api/v1/terminal/host',
+    authorization: 'Bearer tok',
+    body: { enabled: true, doorPort, authorizedFingerprints: [] },
+  });
+  // The snapshot's terminal section reaches the door, and the next report names its keys.
+  const terminal = { enabled: true, keys: [{ fingerprint: 'SHA256:a' }], pending: [], sandboxes: [] };
+  socket.frame(1, 1, 'open', { kind: 'perks' });
+  socket.frame(1, 2, 'data', { snapshot: { revision: 2, terminal }, presence: [] });
+  expect(applied).toEqual([terminal]);
+  await sleep(120);
+  socket.frame(1, 3, 'data', { snapshot: { revision: 3, terminal }, presence: [] });
+  await until(() => seen.filter((r) => r.route === '/api/v1/terminal/host').length >= 2);
+  expect(seen.filter((r) => r.route === '/api/v1/terminal/host').at(-1)?.body).toEqual({
+    enabled: true,
+    doorPort,
+    authorizedFingerprints: ['SHA256:a'],
+  });
+  // A stream the cell opens is piped into the door and echoed back, with credit for what the door took.
+  const onStream = (): Record<string, unknown>[] =>
+    socket.sent.map((raw) => JSON.parse(raw) as Record<string, unknown>).filter((f) => f.ch === 2);
+  socket.frame(2, 1, 'open', {
+    kind: 'ssh',
+    stream: 's1',
+    target: { account: 'alice' },
+    source: { ip: '::1', port: 1 },
+  });
+  socket.frame(2, 2, 'data', { off: 0, b64: Buffer.from('hi').toString('base64') });
+  await until(() => onStream().some((f) => f.t === 'credit') && onStream().some((f) => f.t === 'data'));
+  expect(onStream().find((f) => f.t === 'credit')).toMatchObject({ ack: 2 });
+  expect(onStream().find((f) => f.t === 'data')).toMatchObject({ off: 0, b64: Buffer.from('hi').toString('base64') });
+  expect(log).toHaveBeenCalledWith(
+    expect.objectContaining({ event: 'stream_open', stream: 's1', account: 'alice', deviceId: DEVICE_ID }),
+  );
+  expect([...targets.values()]).toEqual([
+    { stream: 's1', target: { account: 'alice' }, source: { ip: '::1', port: 1 }, openedAt: expect.any(String) },
+  ]);
+  // Disabling the door restarts the link without the cap; the open stream is torn down and ssh opens are refused.
+  expect(await reportTerminalState({ enabled: false, doorPort }, { root, homeDir: home })).toEqual({
+    journaled: true,
+    reported: true,
+  });
+  expect(seen.at(-1)?.body).toEqual({ enabled: false, doorPort, authorizedFingerprints: [] });
+  await until(() => FakeSocket.instances.length === 2);
+  expect(socket.readyState).toBe(3);
+  expect(log).toHaveBeenCalledWith(expect.objectContaining({ event: 'stream_closed', stream: 's1', by: 'link' }));
+  expect(targets.size).toBe(0);
+  const second = FakeSocket.instances[1];
+  second.open();
+  expect(JSON.parse(second.sent[0])).toEqual({ v: 1, ch: 0, seq: 1, t: 'hello', leg: 'host', caps: ['perks'] });
+  second.frame(2, 1, 'open', {
+    kind: 'ssh',
+    stream: 's2',
+    target: { account: 'alice' },
+    source: { ip: '::1', port: 1 },
+  });
+  expect(JSON.parse(second.sent.at(-1) ?? '{}')).toEqual({ v: 1, ch: 2, seq: 1, t: 'error', code: 'unsupported' });
+  const reports = seen.filter((r) => r.route === '/api/v1/terminal/host').length;
+  await sleep(150);
+  expect(seen.filter((r) => r.route === '/api/v1/terminal/host')).toHaveLength(reports);
+  await runtime.stop();
+  await new Promise<void>((resolve) => echo.close(() => resolve()));
 });
 
 it('reports sign_in_required and clears local credentials when the portal refuses the device', async () => {

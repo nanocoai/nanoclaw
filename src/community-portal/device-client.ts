@@ -6,6 +6,16 @@ import type { InstallIdentity } from './install-identity.js';
 import type { CellTicket, LinkLog } from './link.js';
 import { readJson, writePrivate } from './private-file.js';
 import { processLock } from './process-lock.js';
+import type {
+  JournalTerminal,
+  TerminalEnableRequest,
+  TerminalEnableResult,
+  TerminalPendingRequest,
+  TerminalPendingResult,
+  TerminalReport,
+  TerminalReportResult,
+  TerminalSandboxResult,
+} from './terminal.js';
 
 /**
  * A checkout's client for the community portal's HTTP API. Every request
@@ -75,6 +85,8 @@ export interface Journal {
   slackSetup?: SlackSetup;
   reminders?: Partial<Record<string, boolean>>;
   reminderPending?: Partial<Record<string, boolean>>;
+  /** The loopback door's state, written by `remote enable|disable`; read by the running host. */
+  terminal?: JournalTerminal;
 }
 
 export interface DeviceRegistration {
@@ -240,6 +252,38 @@ export class DeviceClient {
   /** A short-lived ticket for the cell link, proved with the device key. */
   ticket(signal?: AbortSignal): Promise<CellTicket> {
     return this.call<CellTicket>('POST', '/api/v1/cell-ticket', { body: {}, signal, proof: true });
+  }
+
+  /** The door's state: on every door start, every fifteen minutes while enabled, and on disable. */
+  reportTerminal(report: TerminalReport, signal?: AbortSignal): Promise<TerminalReportResult> {
+    return this.call<TerminalReportResult>('PUT', '/api/v1/terminal/host', { body: report, signal });
+  }
+
+  /** Enable remote access, proved with the device key: the service confirms or assigns the name and the address. */
+  terminalEnable(request: TerminalEnableRequest, signal?: AbortSignal): Promise<TerminalEnableResult> {
+    return this.call<TerminalEnableResult>('POST', '/api/v1/terminal/enable', { body: request, signal, proof: true });
+  }
+
+  /** A key waiting in the door's waiting room: the service records it and mints the approval code. */
+  terminalPending(request: TerminalPendingRequest, signal?: AbortSignal): Promise<TerminalPendingResult> {
+    return this.call<TerminalPendingResult>('POST', '/api/v1/terminal/keys/pending', { body: request, signal });
+  }
+
+  /** A sandbox created while remote access is enabled: the service gives it an address of its own. */
+  terminalSandboxAdd(name: string, signal?: AbortSignal): Promise<TerminalSandboxResult> {
+    return this.call<TerminalSandboxResult>('POST', '/api/v1/terminal/sandboxes', { body: { name }, signal });
+  }
+
+  /** The reverse: the sandbox is gone and its address is freed. */
+  terminalSandboxRemove(name: string, signal?: AbortSignal): Promise<{ ok: boolean }> {
+    return this.call<{ ok: boolean }>('DELETE', `/api/v1/terminal/sandboxes/${encodeURIComponent(name)}`, {
+      signal,
+    });
+  }
+
+  /** The account's terminal section as the mirror carries it. */
+  terminalKeys(signal?: AbortSignal): Promise<unknown> {
+    return this.call<unknown>('GET', '/api/v1/terminal/keys', { signal });
   }
 
   protected async call<T>(
