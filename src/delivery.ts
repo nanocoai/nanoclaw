@@ -25,7 +25,7 @@ import { fanOutboundMessage } from './modules/cross-session-context/index.js';
 import { log } from './log.js';
 import { normalizeOptions } from './channels/ask-question.js';
 import { clearOutbox, readOutboxFiles, withExistingMailboxSession } from './session-manager.js';
-import { pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typing/index.js';
+import { noteTurnState, pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typing/index.js';
 import type { OutboundFile } from './channels/adapter.js';
 import type { PendingApproval, Session } from './types.js';
 import type { OutboundMessage } from './mailbox/index.js';
@@ -109,6 +109,7 @@ export interface ChannelDeliveryAdapter {
     status?: string,
     statusKind?: 'auto' | 'agent',
   ): Promise<void>;
+  clearTyping?(channelType: string, platformId: string, threadId: string | null, instance?: string): Promise<void>;
 }
 
 let deliveryAdapter: ChannelDeliveryAdapter | null = null;
@@ -229,10 +230,21 @@ async function drainSession(session: Session): Promise<void> {
       return {
         delivered,
         pending: mailbox.getDueMessages(delivered).filter((candidate) => !delivered.has(candidate.id)),
+        // Read the runner's turn report on the same poll — no new session,
+        // no new poll. Drives the typing indicator (see noteTurnState).
+        containerState: mailbox.getContainerState(),
       };
     });
     if (!existing) return;
     ({ delivered, pending } = existing);
+    // Typing follows the runner's turn state. Null-safe: a missing record or a
+    // null turn (older runner) reads as "not reported" and the typing module
+    // keeps its heartbeat-file fallback for that session.
+    const containerState = existing.containerState;
+    noteTurnState(session.id, {
+      turn: containerState?.turn ?? null,
+      updatedAtMs: containerState ? Date.parse(containerState.updatedAt) : null,
+    });
   } catch (err) {
     log.error('Session mailbox delivery failed', {
       agentGroupId: agentGroup.id,

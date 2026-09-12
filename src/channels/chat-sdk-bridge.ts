@@ -966,6 +966,25 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       await adapter.startTyping(tid);
     },
 
+    // The Chat SDK adapter contract has startTyping and no stop, so clearing
+    // is platform-specific. Slack's assistant status has no expiry and is
+    // cleared by setting it to empty; the Slack adapter exposes
+    // setAssistantStatus(channel, threadTs, status) and decodeThreadId
+    // publicly. Call it only when the adapter has both and the decoded thread
+    // carries a threadTs; otherwise there is nothing to clear.
+    async clearTyping(platformId: string, threadId: string | null) {
+      const clearable = adapter as Partial<{
+        setAssistantStatus(channelId: string, threadTs: string, status: string): Promise<void>;
+        decodeThreadId(threadId: string): { channel?: string; threadTs?: string };
+      }>;
+      if (typeof clearable.setAssistantStatus !== 'function' || typeof clearable.decodeThreadId !== 'function') return;
+      const tid = threadId ?? platformId;
+      const decoded = clearable.decodeThreadId(tid);
+      const channel = decoded?.channel ?? adapter.channelIdFromThreadId(tid);
+      if (!decoded?.threadTs || !channel) return;
+      await clearable.setAssistantStatus(channel, decoded.threadTs, '');
+    },
+
     async teardown() {
       gatewayAbort?.abort();
       await chat.shutdown();

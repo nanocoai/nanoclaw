@@ -39,6 +39,7 @@ import {
 import { createChannelDeliveryAdapter } from './channels/channel-registry.js';
 import { createDestination } from './modules/agent-to-agent/db/agent-destinations.js';
 import { getAgentMailbox } from './mailbox/index.js';
+import * as typing from './modules/typing/index.js';
 import { log } from './log.js';
 
 function openInboundDb(agentGroupId: string, sessionId: string): Database.Database {
@@ -74,6 +75,16 @@ function insertOutbound(agentGroupId: string, sessionId: string, msgId: string):
     `INSERT INTO messages_out (id, timestamp, kind, platform_id, channel_type, content)
      VALUES (?, datetime('now'), 'chat', 'telegram:123', 'telegram', ?)`,
   ).run(msgId, JSON.stringify({ text: 'hello' }));
+  db.close();
+}
+
+function setContainerTurn(agentGroupId: string, sessionId: string, turn: string, updatedAt: string): void {
+  const db = new Database(outboundDbPath(agentGroupId, sessionId));
+  db.prepare(
+    `INSERT INTO container_state (id, current_tool, tool_declared_timeout_ms, tool_started_at, turn, updated_at)
+     VALUES (1, NULL, NULL, NULL, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET turn = excluded.turn, updated_at = excluded.updated_at`,
+  ).run(turn, updatedAt);
   db.close();
 }
 
@@ -134,6 +145,44 @@ describe('deliverSessionMessages — concurrent invocations', () => {
     await Promise.all([deliverSessionMessages(session), deliverSessionMessages(session)]);
 
     expect(calls).toHaveLength(1);
+  });
+
+  it('reads the runner turn report on the poll and forwards it to the typing module', async () => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    const updatedAt = new Date().toISOString();
+    setContainerTurn('ag-1', session.id, 'working', updatedAt);
+    setDeliveryAdapter({
+      async deliver() {
+        return undefined;
+      },
+    });
+
+    const spy = vi.spyOn(typing, 'noteTurnState');
+    try {
+      await deliverSessionMessages(session);
+      expect(spy).toHaveBeenCalledWith(session.id, { turn: 'working', updatedAtMs: Date.parse(updatedAt) });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('forwards a not-reported turn (no container_state row) as null', async () => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    setDeliveryAdapter({
+      async deliver() {
+        return undefined;
+      },
+    });
+
+    const spy = vi.spyOn(typing, 'noteTurnState');
+    try {
+      await deliverSessionMessages(session);
+      expect(spy).toHaveBeenCalledWith(session.id, { turn: null, updatedAtMs: null });
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('still delivers on a subsequent call after the first finishes', async () => {
