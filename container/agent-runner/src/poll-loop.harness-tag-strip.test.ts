@@ -120,8 +120,9 @@ describe('harness tag artifacts stripped from deliveries (wiring)', () => {
   it('sanitizes bare error-result text before it reaches messages_out', async () => {
     const { query, pushes } = makeResultQuery({
       type: 'result',
-      text: 'Spending limit reached.\n<dispatch>',
+      text: 'raw provider diagnostic',
       isError: true,
+      error: 'Spending limit reached.\n<dispatch>',
     });
 
     await processQuery(query, ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);

@@ -10,6 +10,7 @@
  * The host re-validates on the delivery side against the central DB,
  * so even if this table is stale the host's enforcement is authoritative.
  */
+import type { DeliveryMode } from './config.js';
 import { getAgentMailbox } from './mailbox/index.js';
 import type { Destination } from './mailbox/types.js';
 
@@ -60,25 +61,38 @@ export function findByRouting(
  * per-agent-group and changes when the operator renames an agent, while
  * the shared base is identical across all agents.
  */
-export function buildSystemPromptAddendum(assistantName?: string, mode: SessionMode = { kind: 'chat' }): string {
+export function buildSystemPromptAddendum(
+  assistantName?: string,
+  mode: SessionMode = { kind: 'chat' },
+  deliveryMode: DeliveryMode = 'envelope',
+): string {
   const sections: string[] = [];
 
   if (assistantName) {
-    sections.push(['# You are ' + assistantName, '', `Your name is **${assistantName}**. Use it when the channel asks who you are, when introducing yourself, and when signing any message that explicitly calls for a signature.`].join('\n'));
+    sections.push(
+      [
+        '# You are ' + assistantName,
+        '',
+        `Your name is **${assistantName}**. Use it when the channel asks who you are, when introducing yourself, and when signing any message that explicitly calls for a signature.`,
+      ].join('\n'),
+    );
   }
 
-  sections.push(buildDestinationsSection(mode));
+  sections.push(buildDestinationsSection(mode, deliveryMode));
 
   return sections.join('\n\n');
 }
 
-function buildDestinationsSection(mode: SessionMode): string {
+function buildDestinationsSection(mode: SessionMode, deliveryMode: DeliveryMode): string {
   const all = getAllDestinations();
   const lines = ['## Sending messages', ''];
 
   if (all.length === 0) {
     lines.push('You currently have no configured destinations. You cannot send messages until an admin wires one up.');
-    if (mode.kind === 'chat') return lines.join('\n');
+    // A tools-only group still needs the contract spelled out. Without it the
+    // only delivery instruction the agent ever sees is "you have none", and it
+    // falls back to writing envelopes the moment a destination appears.
+    if (mode.kind === 'chat' && deliveryMode !== 'tools-only') return lines.join('\n');
   } else if (all.length === 1) {
     const d = all[0];
     lines.push(`Your destination is \`${d.name}\`${destinationLabel(d)}.`);
@@ -110,17 +124,33 @@ function buildDestinationsSection(mode: SessionMode): string {
     return lines.join('\n');
   }
 
-  lines.push(
-    'Wrap each delivered message in a `<message to="name">…</message>` block; include several blocks in one response to address several destinations. `<internal>…</internal>` marks thinking you don\'t want sent.',
-  );
+  if (deliveryMode === 'tools-only') {
+    lines.push(
+      'Everything you write in a response is a private scratchpad — it is never delivered to anyone. The only way to reach a destination is to call an outbound tool: `send_message`, `send_file`, `send_card`, or `ask_user_question`. Always pass the explicit `to` destination.',
+    );
+    lines.push('');
+    lines.push(
+      'A `<message to="name">…</message>` block delivers nothing here, and so does text shaped like a tool call — writing the markup is not calling the tool. If you want the user to read it, it goes through `send_message`.',
+    );
+  } else {
+    lines.push(
+      'Wrap each delivered message in a `<message to="name">…</message>` block; include several blocks in one response to address several destinations. `<internal>…</internal>` marks thinking you don\'t want sent.',
+    );
+  }
   lines.push('');
   lines.push(
     'When replying to an incoming message, default to addressing the destination it came `from` (every inbound `<message>` tag carries a `from="name"` attribute). Pick a different destination when the request asks for it (e.g., "tell Laura that…").',
   );
   lines.push('');
-  lines.push(
-    'The `send_message` MCP tool is the same delivery, available mid-turn — handy for a quick acknowledgment ("on it") before a slow tool call. Always pass its explicit `to` destination. Each `send_message` call and each final-response `<message>` block lands as its own message in the conversation, so they read as a sequence rather than as one combined reply.',
-  );
+  if (deliveryMode === 'tools-only') {
+    lines.push(
+      'The tools are available mid-turn — handy for a quick acknowledgment ("on it") before a slow tool call. Each call lands as its own message in the conversation, so several calls read as a sequence rather than as one combined reply.',
+    );
+  } else {
+    lines.push(
+      'The `send_message` MCP tool is the same delivery, available mid-turn — handy for a quick acknowledgment ("on it") before a slow tool call. Always pass its explicit `to` destination. Each `send_message` call and each final-response `<message>` block lands as its own message in the conversation, so they read as a sequence rather than as one combined reply.',
+    );
+  }
   lines.push('');
   lines.push(
     'For a short turn, do not narrate. For longer work, send one acknowledgment and then updates only at meaningful milestones, especially before slow operations. Never narrate micro-steps; finish with the outcome, not a play-by-play.',

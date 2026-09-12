@@ -448,6 +448,47 @@ Everything below is handled by the agent-runner, not the provider.
 
 The agent-runner signals "busy" status to the host. The mechanism for this is provider-specific — for Claude, the query AsyncGenerator is still yielding events. For others, the agent-runner can write a heartbeat or status indicator to the session DB that the host checks before killing.
 
+### Delivery Modes
+
+Each agent group has a `delivery_mode` in its container config, set with
+`ncl groups config update --delivery-mode envelope|tools-only` and materialized
+into `container.json` for the runner:
+
+- **`envelope`** (default) — final-text `<message to="name">` blocks deliver;
+  other response text is scratchpad. An unwrapped turn is nudged once. This is
+  the behavior existing groups had before the setting was added.
+- **`tools-only`** — only outbound tool calls such as `send_message`,
+  `send_file`, `send_card`, and `ask_user_question` deliver. Envelopes,
+  tool-shaped markup, plain prose, and provider error text stay in the
+  scratchpad. The system prompt and post-compaction reminder teach this
+  contract.
+
+Task runs keep their existing one-door task path in either mode: outbound tools
+deliver and final text becomes the run log summary.
+
+For tools-only chat turns, the runner reads delivery from `messages_out`. Each
+human-triggered inbound row creates a reply obligation with its full address and
+`in_reply_to` id. At each provider result, the runner settles obligations from
+new outbound rows, using an exact request stamp first and the destination address
+otherwise. It judges only requests whose provider prompt has run, so a follow-up
+pushed during an active turn waits for its own result. A dry request gets one
+correction; if the correction is also dry, the runner sends a neutral placeholder
+to that request's address. Agent-channel wakes receive the same bounded correction
+but remain silent after it because they have no human endpoint. Webhook wakes do
+not create a reply obligation.
+
+The runner publishes `current_reply_route` and a separate outbound-sequence turn
+baseline whenever a queued exchange becomes active. The route keeps tool replies
+on the request and thread being answered. The baseline also limits
+`send_message` to one plain message per destination per tools-only turn, which
+prevents small models from sending several paraphrases after a successful call;
+the next user turn receives a fresh budget. Envelope mode keeps the existing
+unlimited tool behavior.
+
+This accounting assumes one provider `result` for each pushed prompt. The runner
+logs extra results and prompts that end without a result. Tests live in
+`delivery-mode.test.ts` and `delivery-mode.followup.test.ts`.
+
 ### Message Formatting
 
 The agent-runner transforms messages_in rows into a prompt string. The provider receives a ready-to-send string — it doesn't know about message kinds or routing.

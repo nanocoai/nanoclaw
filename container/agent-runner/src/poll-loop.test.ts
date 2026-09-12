@@ -220,7 +220,13 @@ describe('origin metadata (from= attribute)', () => {
       .run(name, name, channelType, platformId);
   }
 
-  function insertWithRouting(id: string, kind: string, content: object, channelType: string | null, platformId: string | null): void {
+  function insertWithRouting(
+    id: string,
+    kind: string,
+    content: object,
+    channelType: string | null,
+    platformId: string | null,
+  ): void {
     getInboundDb()
       .prepare(
         `INSERT INTO messages_in (id, kind, timestamp, status, platform_id, channel_type, content)
@@ -442,9 +448,14 @@ it('does not push accumulated-only follow-ups into an active query', async () =>
 });
 
 describe('error result with no <message> envelope', () => {
-  it('delivers a budget/billing error to the triggering channel and does not nudge', async () => {
+  it('delivers a provider-owned budget/billing error to the triggering channel and does not nudge', async () => {
     const budgetText = 'Spending limit reached. Add your own key at https://example.com/keys';
-    const { query, pushes } = makeResultQuery({ type: 'result', text: budgetText, isError: true });
+    const { query, pushes } = makeResultQuery({
+      type: 'result',
+      text: 'raw provider diagnostic',
+      isError: true,
+      error: budgetText,
+    });
 
     await processQuery(query, ERR_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
 
@@ -454,6 +465,28 @@ describe('error result with no <message> envelope', () => {
     expect(out[0].platform_id).toBe('chan-1');
     expect(out[0].channel_type).toBe('discord');
     // No re-wrap nudge — an error result must not re-hammer the gateway.
+    expect(pushes).toHaveLength(0);
+  });
+
+  it('delivers a generic notice and completes the exchange when a provider error has no text', async () => {
+    const { query, pushes } = makeResultQuery({ type: 'result', text: null, isError: true });
+    const exchanges: Array<{ result: string | null; status: string }> = [];
+
+    await processQuery(
+      query,
+      ERR_ROUTING,
+      ['m1'],
+      'opencode',
+      (exchange) => exchanges.push(exchange),
+      'prompt',
+      undefined,
+    );
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0].content).text).toBe('The agent run failed. Check the logs for details.');
+    expect(exchanges).toHaveLength(1);
+    expect(exchanges[0]).toMatchObject({ result: '', status: 'error' });
     expect(pushes).toHaveLength(0);
   });
 
@@ -483,9 +516,9 @@ const TASK_ROUTING = {
 
 function taskLogRows(): Array<{ text: string }> {
   return (
-    getOutboundDb()
-      .prepare("SELECT content FROM messages_out WHERE kind = 'task_log' ORDER BY seq")
-      .all() as Array<{ content: string }>
+    getOutboundDb().prepare("SELECT content FROM messages_out WHERE kind = 'task_log' ORDER BY seq").all() as Array<{
+      content: string;
+    }>
   ).map((r) => JSON.parse(r.content) as { text: string });
 }
 
