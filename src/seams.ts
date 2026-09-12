@@ -30,12 +30,7 @@ const refusals: SeamRefusal[] = [];
  * otherwise the refusal is logged and recorded, and the caller must drop the
  * registration.
  */
-export function seamAccepted(
-  registry: string,
-  registrant: string,
-  wanted: number,
-  got: number | undefined,
-): boolean {
+export function seamAccepted(registry: string, registrant: string, wanted: number, got: number | undefined): boolean {
   if (got === wanted) return true;
   const refusal: SeamRefusal = { registry, registrant, wanted, got };
   refusals.push(refusal);

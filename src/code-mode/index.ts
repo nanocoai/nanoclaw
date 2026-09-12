@@ -13,6 +13,10 @@ import { registerMigration } from '../db/migrations/index.js';
 import { onDeliveryAdapterReady } from '../delivery.js';
 import { onHostShutdown } from '../host-lifecycle.js';
 import { startCodeBoundaryWatcher, stopCodeBoundaryWatcher } from '../modules/approvals/code-boundary.js';
+// The chat surface for a coding session: its own table migration (a new
+// table, independent of the columns below), the routing resolver, the
+// sandbox-created hook and the host lifecycle of the mirror.
+import './surface/index.js';
 
 registerMigration({
   version: 1,

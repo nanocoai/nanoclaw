@@ -24,9 +24,9 @@ import {
   updateSession,
 } from './db/sessions.js';
 import { log } from './log.js';
-import { getAgentMailbox, type InboundMessage, type MailboxSession } from './mailbox/index.js';
+import { getAgentMailbox, type InboundMessage, type MailboxSession, type SessionRouting } from './mailbox/index.js';
 import { enqueueSessionReconcile } from './reconcile-feeds.js';
-import type { Session } from './types.js';
+import type { MessagingGroupAgent, Session } from './types.js';
 
 /** Root directory for all session data. */
 export function sessionsBaseDir(): string {
@@ -83,13 +83,16 @@ async function withSessionCreationLock<T>(key: string, fn: () => Promise<T>): Pr
   }
 }
 
+type SessionMode = MessagingGroupAgent['session_mode'];
+
 function sessionCreationKey(
   agentGroupId: string,
   messagingGroupId: string | null,
   threadId: string | null,
-  sessionMode: 'shared' | 'per-thread' | 'agent-shared',
+  sessionMode: SessionMode,
 ): string {
   if (sessionMode === 'agent-shared') return `agent\0${agentGroupId}`;
+  if (sessionMode === 'sandbox') return `system\0${agentGroupId}\0${SANDBOX_SYSTEM_THREAD_ID}`;
   return `route\0${agentGroupId}\0${messagingGroupId ?? ''}\0${sessionMode === 'shared' ? '' : (threadId ?? '')}`;
 }
 
@@ -101,15 +104,19 @@ function sessionCreationKey(
  * - 'per-thread': one session per (messaging group, thread)
  * - 'agent-shared': one session per agent group — all messaging groups
  *   wired with this mode share a single session (e.g. GitHub + Slack)
+ * - 'sandbox': the agent group's coding session (resolveSandboxSession) —
+ *   the wiring is a chat surface for that session, never a session of its
+ *   own; messaging group and thread are ignored
  */
 export async function resolveSession(
   agentGroupId: string,
   messagingGroupId: string | null,
   threadId: string | null,
-  sessionMode: 'shared' | 'per-thread' | 'agent-shared',
+  sessionMode: SessionMode,
 ): Promise<{ session: Session; created: boolean }> {
   const key = sessionCreationKey(agentGroupId, messagingGroupId, threadId, sessionMode);
   return withSessionCreationLock(key, async () => {
+    if (sessionMode === 'sandbox') return resolveSandboxSession(agentGroupId);
     // agent-shared: single session per agent group, regardless of messaging group
     if (sessionMode === 'agent-shared') {
       const existing = await findSessionByAgentGroup(agentGroupId);
@@ -259,24 +266,40 @@ export async function writeSessionRouting(agentGroupId: string, sessionId: strin
   const session = await getSession(sessionId);
   if (!session) return;
 
-  let channelType: string | null = null;
-  let platformId: string | null = null;
+  let routing: SessionRouting = { channelType: null, platformId: null, threadId: session.thread_id };
   if (session.messaging_group_id) {
     const mg = await getMessagingGroup(session.messaging_group_id);
-    if (mg) {
-      channelType = mg.channel_type;
-      platformId = mg.platform_id;
+    if (mg) routing = { ...routing, channelType: mg.channel_type, platformId: mg.platform_id };
+  } else {
+    // A session with no origin chat of its own may still have a chat surface
+    // (a coding session's): the module that bound it answers here.
+    for (const resolve of sessionRoutingResolvers) {
+      const resolved = await resolve(session);
+      if (resolved) {
+        routing = resolved;
+        break;
+      }
     }
   }
 
   await withMailboxSession(agentGroupId, sessionId, (mailbox) => {
-    mailbox.setRouting({
-      channelType,
-      platformId,
-      threadId: session.thread_id,
-    });
+    mailbox.setRouting(routing);
   });
-  log.debug('Session routing written', { sessionId, channelType, platformId, threadId: session.thread_id });
+  log.debug('Session routing written', { sessionId, ...routing });
+}
+
+/**
+ * Routing for a session that has no messaging group of its own — consulted by
+ * writeSessionRouting for system sessions (task, sandbox) so a module that
+ * gave such a session a chat surface can point its default outbound route at
+ * it. First non-null answer wins; null means "not mine".
+ */
+export type SessionRoutingResolver = (session: Session) => Promise<SessionRouting | null>;
+
+const sessionRoutingResolvers: SessionRoutingResolver[] = [];
+
+export function registerSessionRoutingResolver(resolver: SessionRoutingResolver): void {
+  sessionRoutingResolvers.push(resolver);
 }
 
 /**

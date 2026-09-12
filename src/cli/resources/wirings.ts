@@ -8,6 +8,7 @@ import {
 import { hasDeclaredChannelDefaults } from '../../channels/channel-registry.js';
 import { getAgentGroup, getAgentGroupByFolder } from '../../db/agent-groups.js';
 import { getDb } from '../../db/connection.js';
+import { getContainerConfig } from '../../db/container-configs.js';
 import {
   ensureAgentDestinationForWiring,
   getMessagingGroup,
@@ -28,8 +29,24 @@ const CREATE_ENUMS: Record<string, string[]> = {
   engage_mode: ['pattern', 'mention', 'mention-sticky'],
   sender_scope: ['all', 'known'],
   ignored_message_policy: ['drop', 'accumulate'],
-  session_mode: ['shared', 'per-thread', 'agent-shared'],
+  session_mode: ['shared', 'per-thread', 'agent-shared', 'sandbox'],
 };
+
+/**
+ * Session mode 'sandbox' routes into a coding session, which only a
+ * code-mode group has; a chat group wired that way would have no session
+ * to land in. The binding (code-mode/surface) writes such wirings for a
+ * sandbox it just opened; an operator may too, for a code-mode group only.
+ */
+async function requireCodeModeGroup(agentGroupId: unknown): Promise<void> {
+  const cfg = await getContainerConfig(String(agentGroupId));
+  if (cfg?.code_mode !== 1) {
+    throw new Error(
+      "session_mode 'sandbox' needs a code-mode group (the wiring is a chat surface for its coding session) — " +
+        'flip the group with: ncl groups config update --id <group> --code-mode true',
+    );
+  }
+}
 
 async function requireMessagingGroup(id: unknown): Promise<MessagingGroup> {
   const mg = await getMessagingGroup(String(id));
@@ -105,8 +122,8 @@ registerResource({
       name: 'session_mode',
       type: 'string',
       description:
-        '"shared" — one session per (agent, messaging group). "per-thread" — separate session per thread/topic; requires the wiring to honor thread ids (rejected when its thread policy resolves off — pair with --threads true where the channel context does not honor them). "agent-shared" — one session across all messaging groups wired to this agent. Note: threaded adapters in group chats force per-thread regardless of this setting.',
-      enum: ['shared', 'per-thread', 'agent-shared'],
+        '"shared" — one session per (agent, messaging group). "per-thread" — separate session per thread/topic; requires the wiring to honor thread ids (rejected when its thread policy resolves off — pair with --threads true where the channel context does not honor them). "agent-shared" — one session across all messaging groups wired to this agent. "sandbox" — the agent\'s coding session (code mode): the chat is a surface for that session, never a session of its own. Note: threaded adapters in group chats force per-thread regardless of this setting (except sandbox).',
+      enum: ['shared', 'per-thread', 'agent-shared', 'sandbox'],
       default: 'shared',
       updatable: true,
     },
@@ -136,6 +153,7 @@ registerResource({
   operations: { list: 'open', get: 'open', update: 'approval', delete: 'approval' },
   preUpdate: async (updates, current) => {
     const mg = await requireMessagingGroup(current.messaging_group_id);
+    if (updates.session_mode === 'sandbox') await requireCodeModeGroup(current.agent_group_id);
     if (updates.threads !== undefined) updates.threads = normalizeThreads(updates.threads);
 
     const merged: EngageValues = { ...current, ...updates };
@@ -255,6 +273,7 @@ registerResource({
         if (values.sender_scope === undefined) values.sender_scope = 'all';
         if (values.ignored_message_policy === undefined) values.ignored_message_policy = 'drop';
         if (values.session_mode === undefined) values.session_mode = 'shared';
+        if (values.session_mode === 'sandbox') await requireCodeModeGroup(values.agent_group_id);
         if (values.priority === undefined) values.priority = 0;
 
         // postCreate parity, in one transaction with the INSERT (a throw rolls

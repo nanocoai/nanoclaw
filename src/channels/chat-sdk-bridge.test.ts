@@ -95,6 +95,24 @@ describe('createChatSdkBridge', () => {
     });
     expect(typeof bridge.subscribe).toBe('function');
   });
+
+  it("spells a conversation's platform id through the adapter's own encoder, as inbound stores it", () => {
+    const seen: string[] = [];
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({
+        // The Slack adapter's shape: "<adapter>:<channel>[:<thread>]" in, "<adapter>:<channel>" out.
+        channelIdFromThreadId: (threadId: string) => {
+          seen.push(threadId);
+          const [adapter, channel] = threadId.split(':');
+          return `${adapter}:${channel}`;
+        },
+      }),
+      supportsThreads: true,
+    });
+    expect(bridge.conversationPlatformId!('C0123456789')).toBe('stub:C0123456789');
+    // The adapter's name is the prefix — nothing here hardcodes a platform.
+    expect(seen).toEqual(['stub:C0123456789']);
+  });
 });
 
 describe('createChatSdkBridge — instance identity', () => {

@@ -18,6 +18,9 @@ import {
   type SandboxListRow,
 } from '../../code-mode/sandboxes.js';
 import { renderSeamRefusals } from '../../seams.js';
+import { collectSandboxDiff } from '../../code-mode/surface/diff-view.js';
+import { sandboxStatus, type SandboxStatus } from '../../code-mode/surface/index.js';
+import { interruptCodingSession } from '../../code-mode/surface/stop.js';
 import type { AgentGroup } from '../../types.js';
 import { resolveAttachForGroup } from '../attach-resolve.js';
 import { registerResource } from '../crud.js';
@@ -139,6 +142,85 @@ registerResource({
       handler: async (args) => {
         if (!args.id) throw new Error('usage: ncl sandboxes attach <name-or-id>');
         return resolveAttachForGroup(await resolveSandboxGroup(args.id, 'attach'));
+      },
+    },
+    status: {
+      access: 'open',
+      hostOnly: true,
+      description:
+        "Show a sandbox's session state (host operators only).\n" +
+        'Usage: ncl sandboxes status <name-or-id>. Reports what the host reads for the coding session — ' +
+        'active (idle between turns), processing (a turn is running) or suspended (the container was ' +
+        'retired by the idle lease) — the last turn stamp, and the chat surface bound to it, if any.',
+      handler: async (args) => sandboxStatus(await resolveSandboxGroup(args.id, 'status')),
+      formatHuman: (data) => {
+        const d = data as SandboxStatus;
+        const lines = [
+          `${d.sandbox}: ${d.status}${d.running ? '' : ' (container not running)'}`,
+          `  turn:     ${d.turn ? `${d.turn.state} #${d.turn.seq} at ${d.turn.at}` : '-'}`,
+        ];
+        if (d.surface) {
+          lines.push(
+            `  surface:  ${d.surface.provider} ${d.surface.surfaceId} (${d.surface.title})` +
+              `${d.surface.archivedAt ? ' archived' : d.surface.stoppedAt ? ' stopped by the user' : ''}`,
+            `  mirrored: ${d.surface.mirrored ? 'yes' : 'no'}; last sent ${d.surface.lastStatus ?? '-'}` +
+              `${d.surface.lastStatusAt ? ` at ${d.surface.lastStatusAt}` : ''}`,
+          );
+        } else {
+          lines.push('  surface:  none');
+        }
+        return lines.join('\n');
+      },
+    },
+    diff: {
+      access: 'open',
+      hostOnly: true,
+      description:
+        "Show what changed in a sandbox's working tree (host operators only).\n" +
+        'Usage: ncl sandboxes diff <name-or-id>. The same view a chat surface gets after each turn: ' +
+        'tracked changes and new files against HEAD, bounded in size, read by git inside the running ' +
+        'session. Empty when the tree is clean; a workspace that is not a git repository says so; a ' +
+        'sandbox whose container is not running has no diff until it wakes.',
+      handler: async (args) => {
+        const group = await resolveSandboxGroup(args.id, 'diff');
+        const result = await collectSandboxDiff(group.id);
+        if (!result.live)
+          return { sandbox: group.folder, running: false, repository: false, content: '', truncated: false };
+        if (!result.ok) {
+          const message = result.error instanceof Error ? result.error.message : String(result.error);
+          throw new Error(`${group.folder}: the diff could not be read in the session — ${message}`);
+        }
+        const { view } = result;
+        return {
+          sandbox: group.folder,
+          running: true,
+          repository: view !== null,
+          ...(view ?? { content: '', truncated: false }),
+        };
+      },
+      formatHuman: (data) => {
+        const d = data as { sandbox: string; running: boolean; repository: boolean; content: string };
+        if (!d.running) return `${d.sandbox}: the session is not running — no diff collected (attach to wake it)`;
+        if (!d.repository) return `${d.sandbox}: the workspace is not a git repository`;
+        return d.content || `${d.sandbox}: no changes`;
+      },
+    },
+    stop: {
+      access: 'open',
+      hostOnly: true,
+      description:
+        "Interrupt a sandbox's current turn (host operators only).\n" +
+        'Usage: ncl sandboxes stop <name-or-id>. Presses Escape in the coding session, exactly as a human ' +
+        'at the terminal or a Stop on its chat surface would: the action in flight stops, the session ' +
+        'stays, and the next message resumes it. A sandbox with no running container has nothing to stop.',
+      handler: async (args) => {
+        const group = await resolveSandboxGroup(args.id, 'stop');
+        const interrupted = await interruptCodingSession(group.id);
+        return { sandbox: group.folder, interrupted };
+      },
+      formatHuman: (data) => {
+        const d = data as { sandbox: string; interrupted: boolean };
+        return d.interrupted ? `${d.sandbox}: interrupted` : `${d.sandbox}: not running — nothing to interrupt`;
       },
     },
   },
