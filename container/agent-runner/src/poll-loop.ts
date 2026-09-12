@@ -283,7 +283,8 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // Where outbound stood before the turn ran, so the tools can tell what this
     // turn has already written. Handed over with each queued follow-up below;
     // the route and the numeric delivery boundary remain separate facts.
-    setTurnOutboundBaseline(getMaxOutboundSeq());
+    const outerTurnStartSeq = getMaxOutboundSeq();
+    setTurnOutboundBaseline(outerTurnStartSeq);
     try {
       const result = await processQuery(
         query,
@@ -313,15 +314,34 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         clearContinuation(config.providerName);
       }
 
-      // Write error response so the user knows something went wrong
-      await writeMessageOut({
-        id: generateId(),
-        kind: 'chat',
-        platform_id: routing.platformId,
-        channel_type: routing.channelType,
-        thread_id: routing.threadId,
-        content: JSON.stringify({ text: `Error: ${errMsg}` }),
-      });
+      if ((config.deliveryMode ?? 'envelope') === 'tools-only') {
+        // A provider can throw before it emits a result event (native server
+        // setup/prompt failures are one real path). That bypasses
+        // processQuery's error-result handling, but it must preserve the same
+        // tools-only contract: raw diagnostics stay in the log, a person who
+        // is still waiting gets the fixed notice, and a successful tool send
+        // earlier in the turn is not followed by a duplicate error.
+        const outstanding = (routing.replyTargets ?? []).map((target) => ({
+          target,
+          nudged: false,
+          exchange: 0,
+        }));
+        settleDeliveries(outstanding, new Map(), getDeliveriesSince(outerTurnStartSeq).deliveries, 0);
+        await handleToolsOnlyError(
+          errMsg,
+          outstanding.flatMap((entry) => (entry.target ? [entry.target] : [])),
+        );
+      } else {
+        // Preserve the existing envelope-mode error behavior.
+        await writeMessageOut({
+          id: generateId(),
+          kind: 'chat',
+          platform_id: routing.platformId,
+          channel_type: routing.channelType,
+          thread_id: routing.threadId,
+          content: JSON.stringify({ text: `Error: ${errMsg}` }),
+        });
+      }
 
       // The batch is still acked completed below (no redelivery). Without
       // this line the only log trace of the errored turn is "Query error"

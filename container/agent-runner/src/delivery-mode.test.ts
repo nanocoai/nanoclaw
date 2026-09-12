@@ -23,10 +23,11 @@ import {
   dispatchResultText,
   looksLikeToolMarkup,
   processQuery,
+  runPollLoop,
   TOOLS_ONLY_ERROR_NOTICE,
   TOOLS_ONLY_PLACEHOLDER,
 } from './poll-loop.js';
-import type { AgentQuery, ProviderEvent } from './providers/types.js';
+import type { AgentProvider, AgentQuery, ProviderEvent } from './providers/types.js';
 
 /** A person is waiting on this one. */
 const CHAT_ROUTING: RoutingContext = {
@@ -995,6 +996,68 @@ describe('outstanding questions are a queue', () => {
 // ── Provider errors ──
 
 describe('provider errors', () => {
+  it('masks a provider exception thrown before any result event', async () => {
+    const diagnostic = 'OpenCode prompt failed: upstream secret sk-live-abc';
+    insertChat('m1', 'make a request');
+    const controller = new AbortController();
+    const provider: AgentProvider = {
+      query: () => {
+        async function* events(): AsyncGenerator<ProviderEvent> {
+          yield { type: 'init', continuation: 's1' };
+          throw new Error(diagnostic);
+        }
+        return { push: () => {}, end: () => {}, events: events(), abort: () => {} };
+      },
+      isSessionInvalid: () => false,
+    };
+    setTimeout(() => controller.abort(), 50);
+
+    await runPollLoop({
+      provider,
+      providerName: 'mock',
+      cwd: '/workspace/agent',
+      deliveryMode: 'tools-only',
+      signal: controller.signal,
+    });
+
+    expect(userTexts()).toEqual([TOOLS_ONLY_ERROR_NOTICE]);
+    expect(userTexts()[0]).not.toContain('sk-live-abc');
+  });
+
+  it('does not add a thrown-provider notice after the tool already answered', async () => {
+    insertChat('m1', 'make a request');
+    const controller = new AbortController();
+    const provider: AgentProvider = {
+      query: () => {
+        async function* events(): AsyncGenerator<ProviderEvent> {
+          yield { type: 'init', continuation: 's1' };
+          await writeMessageOut({
+            id: 'tool-1',
+            in_reply_to: 'm1',
+            kind: 'chat',
+            platform_id: 'chan-1',
+            channel_type: 'discord',
+            content: JSON.stringify({ text: 'already answered' }),
+          });
+          throw new Error('provider failed after the send');
+        }
+        return { push: () => {}, end: () => {}, events: events(), abort: () => {} };
+      },
+      isSessionInvalid: () => false,
+    };
+    setTimeout(() => controller.abort(), 50);
+
+    await runPollLoop({
+      provider,
+      providerName: 'mock',
+      cwd: '/workspace/agent',
+      deliveryMode: 'tools-only',
+      signal: controller.signal,
+    });
+
+    expect(userTexts()).toEqual(['already answered']);
+  });
+
   it('never forwards the provider error text, and says something instead', async () => {
     const leaky = 'Upstream said: <internal>key sk-live-abc</internal> <call:retry()</call:retry>';
     const { query, pushes } = makeQuery({
