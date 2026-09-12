@@ -205,9 +205,9 @@ describe('retirementNotice', () => {
 });
 
 describe('resolveAttachIdleTtlMs', () => {
-  it('defaults to 4 hours when unset', () => {
+  it('defaults to a day when unset', () => {
     expect(resolveAttachIdleTtlMs({})).toBe(DEFAULT_ATTACH_IDLE_TTL_MS);
-    expect(DEFAULT_ATTACH_IDLE_TTL_MS).toBe(4 * 60 * 60_000);
+    expect(DEFAULT_ATTACH_IDLE_TTL_MS).toBe(24 * 60 * 60_000);
   });
 
   it('honors a valid NANOCLAW_CODE_ATTACH_IDLE_TTL_MS', () => {

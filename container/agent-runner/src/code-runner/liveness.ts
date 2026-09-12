@@ -27,9 +27,16 @@
  * process.exit.
  */
 
+/** How long a session with nobody attached stays up after its last activity. */
 export const DEFAULT_IDLE_TTL_MS = 30 * 60_000;
 
-export const DEFAULT_ATTACH_IDLE_TTL_MS = 4 * 60 * 60_000;
+/**
+ * How long a session keeps an attached-but-silent client before retiring:
+ * a day, so an operator who leaves a terminal open overnight finds it in
+ * the morning rather than a dropped connection. Retiring detaches the
+ * client cleanly with a notice first (index.ts).
+ */
+export const DEFAULT_ATTACH_IDLE_TTL_MS = 24 * 60 * 60_000;
 
 export interface LivenessInput {
   now: number;
