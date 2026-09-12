@@ -157,6 +157,21 @@ Process requirements one at a time.
 - For OneCLI pin moves, follow `docs/onecli-upgrades.md`; record the exact old
   version or rollback command because OneCLI is outside the Git snapshot.
 
+Reinstall the `ncl` CLI symlink so it stays on PATH across this upgrade (the
+fresh-install `service` step isn't part of this flow, so it wouldn't
+otherwise run again):
+
+- `pnpm exec tsx scripts/install-cli-symlink.ts`
+
+Tell the user:
+
+- To rollback: `git reset --hard <backup-tag-from-step-1>`
+- Backup branch also exists: `backup/pre-update-<HASH>-<TIMESTAMP>`
+- Restart the service to apply changes. The unit/label names are per-install — derive them with `setup/lib/install-slug.sh`. Run from your NanoClaw project root:
+  - **macOS (Darwin)**: `source setup/lib/install-slug.sh && launchctl kickstart -k gui/$(id -u)/$(launchd_label)`
+  - **Linux**: `source setup/lib/install-slug.sh && systemctl --user restart $(systemd_unit)` (or, if you want to confirm the unit name first: `systemctl --user list-units --type=service | grep "$(. setup/lib/install-slug.sh && systemd_unit)"`)
+  - **Manual** (no service found): restart `pnpm run dev`
+
 If a migration intentionally changes tracked files, review and commit those
 changes before acknowledging it. Finish refuses a dirty cut-over checkout.
 
