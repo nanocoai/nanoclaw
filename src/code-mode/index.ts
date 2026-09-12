@@ -3,11 +3,16 @@
  * (the code runner) instead of the chat loop.
  *
  * Registered here: the two container_configs columns the feature reads at
- * spawn. Behaviour changes only for groups whose config sets code_mode;
- * every other group is untouched by this import.
+ * spawn, and the host half of the sandbox boundary confirm (it follows the
+ * delivery lifecycle: cards need an adapter). Behaviour changes only for
+ * groups whose config sets code_mode; every other group is untouched by
+ * this import.
  */
 import type { DbDriver } from '../db/driver.js';
 import { registerMigration } from '../db/migrations/index.js';
+import { onDeliveryAdapterReady } from '../delivery.js';
+import { onHostShutdown } from '../host-lifecycle.js';
+import { startCodeBoundaryWatcher, stopCodeBoundaryWatcher } from '../modules/approvals/code-boundary.js';
 
 registerMigration({
   version: 1,
@@ -27,4 +32,13 @@ registerMigration({
     // validates, and configFromDb reads anything unrecognized as absent.
     await db.exec(`ALTER TABLE container_configs ADD COLUMN permission_mode TEXT`);
   },
+});
+
+/** Detached boundary confirmation follows the Host delivery lifecycle. */
+onDeliveryAdapterReady((adapter) => {
+  startCodeBoundaryWatcher(adapter);
+});
+
+onHostShutdown(() => {
+  stopCodeBoundaryWatcher();
 });
