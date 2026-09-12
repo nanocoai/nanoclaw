@@ -9,7 +9,7 @@
  * `print` probe's exit code, so all three states are exercised: loaded,
  * unloaded-but-installed, and never-installed.
  */
-import { execFileSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -44,7 +44,11 @@ afterEach(() => {
  * @param printExit exit code of `launchctl print` (0 = service loaded)
  * @param plistInstalled whether the plist file exists on disk
  */
-function runRestartDarwin(printExit: number, plistInstalled: boolean): string[] {
+function runRestartDarwin(
+  printExit: number,
+  plistInstalled: boolean,
+  actionExit = 0,
+): { calls: string[]; status: number | null } {
   const binDir = path.join(tmpDir, 'bin');
   const home = path.join(tmpDir, 'home');
   const callLog = path.join(tmpDir, 'calls.log');
@@ -59,34 +63,39 @@ function runRestartDarwin(printExit: number, plistInstalled: boolean): string[] 
   const stub = `#!/usr/bin/env bash
 echo "$@" >> ${JSON.stringify(callLog)}
 if [ "$1" = "print" ]; then exit ${printExit}; fi
-exit 0
+exit ${actionExit}
 `;
   fs.writeFileSync(path.join(binDir, 'launchctl'), stub, { mode: 0o755 });
 
   const script = `
-    set -u
+    set -eu
     launchd_label() { printf '%s' ${JSON.stringify(label)}; }
     ${extractRestartDarwin()}
     restart_darwin
   `;
-  execFileSync('bash', ['-c', script], {
+  const result = spawnSync('bash', ['-c', script], {
     env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, HOME: home },
     stdio: 'ignore',
   });
 
-  return fs.existsSync(callLog) ? fs.readFileSync(callLog, 'utf8').trim().split('\n') : [];
+  return {
+    calls: fs.existsSync(callLog) ? fs.readFileSync(callLog, 'utf8').trim().split('\n') : [],
+    status: result.status,
+  };
 }
 
 describe('restart.sh restart_darwin', () => {
   it('kickstarts -k when the service is loaded (previous behavior preserved)', () => {
-    const calls = runRestartDarwin(0, true);
+    const { calls, status } = runRestartDarwin(0, true);
+    expect(status).toBe(0);
     expect(calls[0]).toMatch(/^print gui\//);
     expect(calls[1]).toMatch(/^kickstart -k gui\/.*com\.nanoclaw-v2-testslug$/);
     expect(calls).toHaveLength(2);
   });
 
   it('bootstraps the plist then kickstarts when unloaded but installed — the #2583 state', () => {
-    const calls = runRestartDarwin(113, true);
+    const { calls, status } = runRestartDarwin(113, true);
+    expect(status).toBe(0);
     expect(calls[0]).toMatch(/^print gui\//);
     expect(calls[1]).toMatch(/^bootstrap gui\/\d+ .*com\.nanoclaw-v2-testslug\.plist$/);
     expect(calls[2]).toMatch(/^kickstart gui\/.*com\.nanoclaw-v2-testslug$/);
@@ -95,9 +104,14 @@ describe('restart.sh restart_darwin', () => {
     expect(calls[2]).not.toContain('-k');
   });
 
-  it('does nothing beyond the probe when the service was never installed', () => {
-    const calls = runRestartDarwin(113, false);
+  it('reports failure when the service was never installed', () => {
+    const { calls, status } = runRestartDarwin(113, false);
+    expect(status).toBe(1);
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatch(/^print gui\//);
+  });
+
+  it.each([0, 113])('propagates a restart/bootstrap failure (print exit %s)', (printExit) => {
+    expect(runRestartDarwin(printExit, true, 5).status).toBe(5);
   });
 });
