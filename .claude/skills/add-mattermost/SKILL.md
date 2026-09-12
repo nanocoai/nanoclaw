@@ -317,7 +317,15 @@ pnpm exec vitest run src/channels/mattermost-registration.test.ts src/channels/m
 Restart NanoClaw so the channel and credentials load.
 
 ```nc:run effect:restart
-bash setup/lib/restart.sh
+bash setup/lib/restart.sh --channel mattermost
+```
+
+Verify the new host loaded the selected bot and owner, opened their DM, and
+serves an authenticated Mattermost callback route. This check reads the saved
+settings without printing credentials.
+
+```nc:run effect:test
+pnpm exec tsx .claude/skills/add-mattermost/scripts/verify-runtime.ts "{{bot_user_id}}" "{{owner_user_id}}" "{{platform_id}}"
 ```
 
 ## Next steps
