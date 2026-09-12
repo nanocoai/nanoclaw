@@ -10,6 +10,7 @@ import { getUndeliveredMessages, writeMessageOut } from './db/messages-out.js';
 import { clearStaleProcessingAcks } from './db/container-state.js';
 import { resolveDestinationThread } from './db/session-routing.js';
 import { touchHeartbeat } from './heartbeat.js';
+import { parseStreamKeepAliveMs, shouldKeepAliveTouch } from './stream-keepalive.js';
 import { getAgentMailbox } from './mailbox/index.js';
 import {
   clearContinuation,
@@ -460,6 +461,13 @@ export async function processQuery(
   let pollInFlight = false;
   let endedForCommand = false;
   let mailboxFailureStreak = 0;
+  // Stream keep-alive (opt-in, bounded — see stream-keepalive.ts): while the
+  // last provider event is younger than the cap, this poll tick vouches for
+  // the container by touching the heartbeat, so a slow model decoding
+  // between events is not read as stuck. Silent past the cap, the heartbeat
+  // ages normally and the host's turn ceiling still fires.
+  const streamKeepAliveMs = parseStreamKeepAliveMs(process.env.NANOCLAW_STREAM_KEEPALIVE_MS);
+  let lastProviderEventMs = Date.now();
   const pollHandle = setInterval(() => {
     if (done || pollInFlight || endedForCommand) return;
     pollInFlight = true;
@@ -467,6 +475,12 @@ export async function processQuery(
     void (async () => {
       try {
         const pending = getPendingMessages();
+        // A successful mailbox read just proved the event loop AND the
+        // session DB are alive — safe to vouch. Placed after the read so a
+        // wedged mailbox driver never keeps the container looking healthy.
+        if (shouldKeepAliveTouch(Date.now(), lastProviderEventMs, streamKeepAliveMs)) {
+          touchHeartbeat();
+        }
 
         // Slash commands need a fresh query: /clear resets the SDK's
         // resume id (fixed at sdkQuery() time); admin/passthrough commands
@@ -580,6 +594,7 @@ export async function processQuery(
     for await (const event of query.events) {
       handleEvent(event, routing);
       touchHeartbeat();
+      lastProviderEventMs = Date.now();
 
       if (event.type === 'init') {
         queryContinuation = event.continuation;
