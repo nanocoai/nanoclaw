@@ -8,4 +8,4 @@
  * appends its import here — the host and the command then agree on what
  * "current" means.
  */
-export {};
+import '../../code-mode/index.js';

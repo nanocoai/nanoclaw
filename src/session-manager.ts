@@ -14,6 +14,7 @@ import { ensureContainedInboxDir, isPathInside } from './inbox-safety.js';
 import { getMessagingGroup } from './db/messaging-groups.js';
 import { isUniqueViolation } from './db/errors.js';
 import {
+  SANDBOX_SYSTEM_THREAD_ID,
   createSession,
   findSystemSession,
   findSessionByAgentGroup,
@@ -198,6 +199,37 @@ export async function resolveTaskSession(
   });
 }
 
+/**
+ * Find or create a group's sandbox session (thread `system:sandbox`) — the
+ * session `ncl sandboxes new` lands in. Mirrors resolveTaskSession:
+ * messaging_group_id NULL keeps it invisible to chat routing
+ * (findSessionByAgentGroup filters system threads), and the explicit thread
+ * id keeps it from ever being adopted as an agent-shared channel session.
+ */
+export async function resolveSandboxSession(agentGroupId: string): Promise<{ session: Session; created: boolean }> {
+  const existing = await findSystemSession(agentGroupId, SANDBOX_SYSTEM_THREAD_ID);
+  if (existing) return { session: existing, created: false };
+
+  const id = generateId();
+  const session: Session = {
+    id,
+    agent_group_id: agentGroupId,
+    messaging_group_id: null,
+    thread_id: SANDBOX_SYSTEM_THREAD_ID,
+    agent_provider: null,
+    status: 'active',
+    container_status: 'stopped',
+    last_active: null,
+    created_at: new Date().toISOString(),
+  };
+
+  await createSession(session);
+  initSessionFolder(agentGroupId, id);
+  log.info('Sandbox session created', { id, agentGroupId });
+
+  return { session, created: true };
+}
+
 /** Create the workspace folders and synchronously prepare the registered mailbox. */
 export function initSessionFolder(agentGroupId: string, sessionId: string): void {
   const dir = sessionDir(agentGroupId, sessionId);
@@ -215,10 +247,8 @@ export async function destroySessionMailbox(agentGroupId: string, sessionId: str
 /**
  * Write the current chat/thread routing for a session into its inbound mailbox.
  *
- * The container reads this for tools that take no destination (`ask_user_question`,
- * `send_card`) and to detect a task session (`system:tasks:<id>` thread). Reply
- * threads are not resolved from here — thread_id is null for every session that
- * isn't per-thread — but from the latest messages_in row for the channel.
+ * The container uses this to preserve thread_id when an explicitly named
+ * destination resolves to the conversation this session is bound to.
  * Derived from session.messaging_group_id → messaging_groups row + session.thread_id.
  *
  * Called on every container wake alongside the agent-to-agent module's
