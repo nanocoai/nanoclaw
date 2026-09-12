@@ -161,12 +161,12 @@ export interface AgentQuery {
 export type ProviderEvent =
   | { type: 'init'; continuation: string }
   /**
-   * A completed turn. `isError` is set when the underlying SDK flagged the
-   * turn as an error (e.g. a non-retryable Anthropic 403 billing_error). The
-   * poll-loop uses it to surface the result text to the user instead of
-   * dropping it as un-wrapped scratchpad, and to skip the re-wrap nudge.
+   * A completed turn. `isError` marks a failed turn and prevents retries.
+   * `text` is model output; `error` is an optional user-facing provider error
+   * kept separate from model scratchpad and raw diagnostics. Failures without
+   * `error` receive a generic notice.
    */
-  | { type: 'result'; text: string | null; isError?: boolean }
+  | { type: 'result'; text: string | null; isError?: boolean; error?: string }
   /**
    * An assistant text segment emitted mid-turn (e.g. between tool calls).
    * The SDK's final `result` carries only the LAST assistant text, so a

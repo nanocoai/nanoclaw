@@ -878,7 +878,9 @@ export async function processQuery(
               'more than once per prompt, and the per-exchange accounting below is now one exchange off',
           );
         }
-        if (toolsOnly && event.isError === true) {
+        const resultText = event.text ?? '';
+        const failed = event.isError === true;
+        if (toolsOnly && failed) {
           // Only the requests this exchange answered get the notice — after
           // settling, so a send that landed before the failure is not doubled
           // up on. A follow-up whose prompt is still queued runs afterwards
@@ -890,15 +892,15 @@ export async function processQuery(
           if (failed.length > 0 && targets.length === 0) {
             log('Errored tools-only turn had no human endpoint — no notice sent');
           }
-          for (const seq of await handleToolsOnlyError(event.text ?? '', targets)) loopWritten.add(seq);
+          for (const seq of await handleToolsOnlyError(resultText, targets)) loopWritten.add(seq);
           notifyExchangeComplete(onExchangeComplete, {
             prompt: promptOf(exchange),
-            result: event.text,
+            result: [resultText, event.error].filter(Boolean).join('\n'),
             continuation: queryContinuation ?? initialContinuation,
             status: 'error',
           });
-        } else if (event.text) {
-          const { hasUnwrapped, taskBlocks, resultBlocks } = await dispatchResultText(event.text, routing, {
+        } else if (resultText || failed) {
+          const { hasUnwrapped, taskBlocks } = await dispatchResultText(resultText, routing, {
             midTurnSent,
             // For mid-turn delivery providers the result door NEVER delivers
             // content (error results excepted, below): mid-turn streaming is
@@ -914,27 +916,22 @@ export async function processQuery(
             turnDelivered: midTurnCompleteDelivery ? midTurnSent > 0 || chatRowWrittenSince(turnStartSeq) : undefined,
             deliveryMode,
           });
-          const willRetryTaskBlocks = shouldNudgeTaskBlocks(routing.taskRun, taskBlocks, taskBlockNudged);
+          const willRetryTaskBlocks = !failed && shouldNudgeTaskBlocks(routing.taskRun, taskBlocks, taskBlockNudged);
           // One-door task delivery: the final text becomes the run log entry
           // while explicit append-log calls remain optional additive notes.
           // Errors included: a failed run's text belongs in its log, not chat.
           // A corrective retry handles delivery only; its result is not a
           // second run summary.
-          if (routing.taskRun && !taskBlockNudged) await autoAppendTaskLog(event.text);
-          if (resultBlocks === 0 && event.isError === true && !routing.taskRun) {
-            // Non-retryable error turn (e.g. a 403 billing_error) with no
-            // <message> envelope: deliver the notice instead of dropping it as
-            // scratchpad, and skip the re-wrap nudge — it would just re-hammer
-            // the failing gateway turn after turn.
-            await deliverErrorResult(event.text, routing);
-            notifyExchangeComplete(onExchangeComplete, {
-              prompt: promptOf(exchange),
-              result: event.text,
-              continuation: queryContinuation ?? initialContinuation,
-              status: 'error',
-            });
-          } else if (toolsOnly) {
-            await judgeToolsOnlyResult(exchange, event.text, taskBlocks);
+          const archivedResult = [resultText, failed ? event.error : undefined].filter(Boolean).join('\n');
+          if (routing.taskRun && !taskBlockNudged) await autoAppendTaskLog(archivedResult);
+          if (failed && !routing.taskRun) {
+            // A failed turn needs a visible notice even after partial output.
+            // Only the provider's dedicated error field is channel content;
+            // unwrapped model output and raw diagnostics remain private.
+            await deliverErrorResult(event.error ?? 'The agent run failed. Check the logs for details.', routing);
+          }
+          if (toolsOnly) {
+            await judgeToolsOnlyResult(exchange, resultText, taskBlocks);
           } else {
             // An unwrapped final text only warrants the wrap-nudge when NOTHING
             // was delivered this turn — hasUnwrapped already folds in the
@@ -942,7 +939,7 @@ export async function processQuery(
             // mid-turn block, the unwrapped tail is a self-summary; nudging
             // coaxes a redundant second message (live-observed). It stays in
             // the scratchpad log.
-            const willRetryWrapping = hasUnwrapped && !unwrappedNudged;
+            const willRetryWrapping = !failed && hasUnwrapped && !unwrappedNudged;
             // Envelope mode has no never-silent fallback: an unwrapped turn is
             // nudged once and then stays scratchpad, exactly as on main. The
             // never-silent guarantee is a tools-only feature (correction, then
@@ -951,9 +948,9 @@ export async function processQuery(
             // `bare text produces no outbound messages` asserts it.
             notifyExchangeComplete(onExchangeComplete, {
               prompt: promptOf(exchange),
-              result: event.text,
+              result: archivedResult,
               continuation: queryContinuation ?? initialContinuation,
-              status: hasUnwrapped || willRetryTaskBlocks ? 'undelivered' : 'completed',
+              status: failed ? 'error' : hasUnwrapped || willRetryTaskBlocks ? 'undelivered' : 'completed',
             });
             if (willRetryWrapping) {
               unwrappedNudged = true;
@@ -1060,14 +1057,12 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
 }
 
 /**
- * Deliver a turn's text straight to the channel the batch arrived on. Used when
- * a turn ends in a provider error (e.g. a non-retryable 403 billing_error) with
- * no <message> envelope: the notice would otherwise be dropped as scratchpad.
- * This is the same user-facing write the outer catch block does, minus the
- * `Error:` prefix — the provider's text is already a user-facing message.
+ * Deliver a provider-owned user-facing error, or the generic fallback selected
+ * by the caller, straight to the channel the batch arrived on. Model output and
+ * raw provider diagnostics never enter this path.
  */
 async function deliverErrorResult(text: string, routing: RoutingContext): Promise<void> {
-  log('Error result with no <message> envelope — delivering to channel');
+  log('Provider error result — delivering safe notice to channel');
   await writeMessageOut({
     id: generateId(),
     in_reply_to: routing.inReplyTo,

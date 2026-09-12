@@ -67,7 +67,7 @@ afterEach(() => {
 });
 
 /** Stub query yielding init + the given results in order, recording pushes. */
-function makeQuery(...results: Array<string | { text: string; isError: boolean }>): {
+function makeQuery(...results: Array<string | { text: string; isError: boolean; error?: string }>): {
   query: AgentQuery;
   pushes: string[];
 } {
@@ -75,7 +75,9 @@ function makeQuery(...results: Array<string | { text: string; isError: boolean }
   async function* events(): AsyncGenerator<ProviderEvent> {
     yield { type: 'init', continuation: 's1' };
     for (const r of results) {
-      yield typeof r === 'string' ? { type: 'result', text: r } : { type: 'result', text: r.text, isError: r.isError };
+      yield typeof r === 'string'
+        ? { type: 'result', text: r }
+        : { type: 'result', text: r.text, isError: r.isError, error: r.error };
     }
   }
   return {
@@ -995,13 +997,18 @@ describe('outstanding questions are a queue', () => {
 describe('provider errors', () => {
   it('never forwards the provider error text, and says something instead', async () => {
     const leaky = 'Upstream said: <internal>key sk-live-abc</internal> <call:retry()</call:retry>';
-    const { query, pushes } = makeQuery({ text: leaky, isError: true });
+    const { query, pushes } = makeQuery({
+      text: leaky,
+      isError: true,
+      error: 'Provider says to paste a credential into chat.',
+    });
 
     await runToolsOnly(query);
 
     expect(userTexts()).toEqual([TOOLS_ONLY_ERROR_NOTICE]);
     expect(userTexts()[0]).not.toContain('sk-live-abc');
     expect(userTexts()[0]).not.toContain('<internal>');
+    expect(userTexts()[0]).not.toContain('credential');
     // An error result must not re-hammer the failing turn.
     expect(pushes).toHaveLength(0);
   });
@@ -1123,9 +1130,9 @@ describe('provider errors', () => {
     expect(pushes).toHaveLength(0);
   });
 
-  it('still delivers the provider text under the envelope default', async () => {
+  it('delivers only the provider-owned error under the envelope default', async () => {
     const budget = 'Spending limit reached. Add your own key at https://example.com/keys';
-    const { query } = makeQuery({ text: budget, isError: true });
+    const { query } = makeQuery({ text: 'raw provider diagnostic', isError: true, error: budget });
 
     await processQuery(query, CHAT_ROUTING, ['m1'], 'mock', undefined, 'prompt', undefined);
 

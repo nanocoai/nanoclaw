@@ -59,9 +59,9 @@ function insertMessage(id: string, kind: string, content: object): void {
 
 function taskLogRows(): Array<{ text: string }> {
   return (
-    getOutboundDb()
-      .prepare("SELECT content FROM messages_out WHERE kind = 'task_log' ORDER BY seq")
-      .all() as Array<{ content: string }>
+    getOutboundDb().prepare("SELECT content FROM messages_out WHERE kind = 'task_log' ORDER BY seq").all() as Array<{
+      content: string;
+    }>
   ).map((r) => JSON.parse(r.content) as { text: string });
 }
 
@@ -263,7 +263,7 @@ describe('mid-turn <message> block delivery', () => {
     async function* events(): AsyncGenerator<ProviderEvent> {
       yield { type: 'init', continuation: 's1' };
       yield { type: 'text', text: '<message to="discord-main">Started on it.</message>' };
-      yield { type: 'result', text: errText, isError: true };
+      yield { type: 'result', text: 'raw provider diagnostic', isError: true, error: errText };
     }
     const { query, pushes } = makeStubQuery(events());
 
@@ -276,7 +276,7 @@ describe('mid-turn <message> block delivery', () => {
     expect(pushes).toHaveLength(0);
   });
 
-  it('an error result that only repeats the streamed block is not delivered again', async () => {
+  it('an error result that repeats the streamed block adds only the safe error notice', async () => {
     seedDest();
     const block = '<message to="discord-main">Partial progress report.</message>';
     async function* events(): AsyncGenerator<ProviderEvent> {
@@ -288,7 +288,10 @@ describe('mid-turn <message> block delivery', () => {
 
     await processQuery(query, CHAT_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined, true);
 
-    expect(getUndeliveredMessages()).toHaveLength(1);
+    expect(getUndeliveredMessages().map((row) => (JSON.parse(row.content) as { text: string }).text)).toEqual([
+      'Partial progress report.',
+      'The agent run failed. Check the logs for details.',
+    ]);
     expect(pushes).toHaveLength(0);
   });
 
