@@ -12,6 +12,7 @@ import {
   decideLiveness,
   resolveAttachIdleTtlMs,
   resolveIdleTtlMs,
+  retirementNotice,
   type LivenessInput,
 } from './liveness.js';
 
@@ -189,6 +190,17 @@ describe('resolveIdleTtlMs', () => {
     expect(resolveIdleTtlMs({ NANOCLAW_CODE_IDLE_TTL_MS: 'soon' })).toBe(DEFAULT_IDLE_TTL_MS);
     expect(resolveIdleTtlMs({ NANOCLAW_CODE_IDLE_TTL_MS: '-5' })).toBe(DEFAULT_IDLE_TTL_MS);
     expect(resolveIdleTtlMs({ NANOCLAW_CODE_IDLE_TTL_MS: '0' })).toBe(DEFAULT_IDLE_TTL_MS);
+  });
+});
+
+describe('retirementNotice', () => {
+  it('names the idle span coarsely and says reconnecting wakes the session', () => {
+    expect(retirementNotice(4 * 60 * 60_000)).toBe('[nanoclaw] session retired after 4h idle; reconnect to wake it');
+    expect(retirementNotice(4 * 60 * 60_000 + 11 * 60_000)).toBe(
+      '[nanoclaw] session retired after 4.2h idle; reconnect to wake it',
+    );
+    expect(retirementNotice(35 * 60_000)).toBe('[nanoclaw] session retired after 35m idle; reconnect to wake it');
+    expect(retirementNotice(90 * 60_000)).toBe('[nanoclaw] session retired after 1.5h idle; reconnect to wake it');
   });
 });
 

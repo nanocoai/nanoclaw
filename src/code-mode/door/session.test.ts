@@ -3,8 +3,9 @@
  * the authentication decisions (public key only, any username, signatures
  * checked, unknown keys admitted), the session requests (PTY, resize,
  * shell, exec, refused forwarding and subsystems), the waiting room in
- * session, the session cap, and revocation ending a live session. The
- * container runtime's exec stream is faked with a pair of streams.
+ * session, the session cap, revocation ending a live session, and the
+ * terminal put back in order (with a word why) when the exec ends under the
+ * client. The container runtime's exec stream is faked with a pair of streams.
  */
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
@@ -16,6 +17,7 @@ import { fingerprintOf } from './keys.js';
 import type { AttachTarget } from './landing.js';
 import { handleConnection, MAX_SESSIONS, type SessionDeps } from './session.js';
 import type { DoorStream } from './target-map.js';
+import { TERMINAL_RESET, terminalEnded } from './terminal-reset.js';
 
 const { utils } = ssh2;
 
@@ -59,7 +61,11 @@ class FakeExec implements SessionExecStream {
   resized: [number, number][] = [];
   closed = false;
   private finish!: (code: number) => void;
-  exited = new Promise<number>((resolve) => (this.finish = resolve));
+  private fail!: (error: Error) => void;
+  exited = new Promise<number>((resolve, reject) => {
+    this.finish = resolve;
+    this.fail = reject;
+  });
   constructor(tty: boolean) {
     if (!tty) this.stderr = new PassThrough();
     this.stdin.on('data', (data: Buffer) => (this.input += data.toString()));
@@ -73,6 +79,10 @@ class FakeExec implements SessionExecStream {
   }
   exit(code: number): void {
     this.finish(code);
+  }
+  /** The stream broke: no exit code will ever be known. */
+  break(): void {
+    this.fail(new Error('stream broke'));
   }
 }
 
@@ -106,6 +116,8 @@ function deps(
     approved?: string[];
     streams?: Record<number, DoorStream>;
     noStream?: boolean;
+    /** The runtime's answer to whether the session still runs, once its exec ended. */
+    alive?: () => Promise<boolean>;
   } = {},
 ) {
   const approved = new Set(overrides.approved ?? []);
@@ -126,6 +138,7 @@ function deps(
             return exec;
           },
         }),
+    ...(overrides.alive ? { alive: overrides.alive } : {}),
   });
   const d: SessionDeps = {
     authority: {
@@ -281,8 +294,70 @@ describe('sessions', () => {
     exec.exit(3);
     await vi.waitFor(() => expect(channel.exitCode).toBe(3));
     expect(channel.ended).toBe(true);
+    // The program's last bytes, then the terminal put back, then the word why.
+    expect(channel.out.endsWith(`hello from tmux${terminalEnded('exit code 3')}`)).toBe(true);
     expect(f.live()).toBe(0);
     expect(client.ended).toBe(false);
+  });
+
+  it('puts the terminal back and says the container stopped when the exec dies under the client', async () => {
+    const key = keyPair();
+    const f = deps({
+      approved: [key.fingerprint],
+      streams: { 50562: { target: { account: 'alice', sandbox: 'demo' }, openedAt: 't' } },
+      alive: async () => false,
+    });
+    const { session } = connect(f.deps, 'x', key);
+    const channel = shell(session);
+    await vi.waitFor(() => expect(f.execs).toHaveLength(1));
+    const { exec } = f.execs[0];
+    exec.stdout.write('\x1b[?1000h\x1b[?2004hlast frame');
+    await settle();
+    exec.exit(137);
+    await vi.waitFor(() => expect(channel.exitCode).toBe(137));
+    expect(channel.ended).toBe(true);
+    const reset = channel.out.indexOf(TERMINAL_RESET);
+    const why = channel.out.indexOf('[nanoclaw] session ended: container stopped');
+    expect(channel.out.indexOf('last frame')).toBeLessThan(reset);
+    expect(reset).toBeGreaterThan(-1);
+    expect(why).toBeGreaterThan(reset);
+    expect(channel.out.endsWith(terminalEnded('container stopped'))).toBe(true);
+    expect(channel.out.split(TERMINAL_RESET)).toHaveLength(2);
+  });
+
+  it('reports the exit code when the runtime still runs or cannot say, and a broken stream as closed', async () => {
+    const key = keyPair();
+    const stream: DoorStream = { target: { account: 'alice', sandbox: 'demo' }, openedAt: 't' };
+    const running = deps({ approved: [key.fingerprint], streams: { 50562: stream }, alive: async () => true });
+    const { session } = connect(running.deps, 'x', key);
+    const channel = shell(session);
+    await vi.waitFor(() => expect(running.execs).toHaveLength(1));
+    running.execs[0].exec.exit(130);
+    await vi.waitFor(() => expect(channel.exitCode).toBe(130));
+    expect(channel.out.endsWith(terminalEnded('exit code 130'))).toBe(true);
+
+    const unsure = deps({
+      approved: [key.fingerprint],
+      streams: { 50562: stream },
+      alive: async () => {
+        throw new Error('no daemon');
+      },
+    });
+    const { session: second } = connect(unsure.deps, 'x', key);
+    const other = shell(second);
+    await vi.waitFor(() => expect(unsure.execs).toHaveLength(1));
+    unsure.execs[0].exec.exit(137);
+    await vi.waitFor(() => expect(other.exitCode).toBe(137));
+    expect(other.out.endsWith(terminalEnded('exit code 137'))).toBe(true);
+
+    const broken = deps({ approved: [key.fingerprint], streams: { 50562: stream }, alive: async () => false });
+    const { session: third } = connect(broken.deps, 'x', key);
+    const last = shell(third);
+    await vi.waitFor(() => expect(broken.execs).toHaveLength(1));
+    broken.execs[0].exec.break();
+    await vi.waitFor(() => expect(last.exitCode).toBe(1));
+    expect(last.out.endsWith(terminalEnded('stream closed'))).toBe(true);
+    expect(last.ended).toBe(true);
   });
 
   it('runs `ls` as an exec without a TTY and refuses other commands', async () => {
@@ -325,6 +400,9 @@ describe('sessions', () => {
     await ended;
     exec.exit(0);
     await vi.waitFor(() => expect(channel.exitCode).toBe(0));
+    // No terminal, nothing to put back.
+    expect(channel.out).not.toContain(TERMINAL_RESET);
+    expect(channel.out).not.toContain('[nanoclaw] session ended');
   });
 
   it('holds an unknown key in the waiting room and lands it in the same session once approved', async () => {
@@ -388,6 +466,10 @@ describe('sessions', () => {
     const ended = channels.filter((c) => c.ended);
     expect(ended.length).toBeGreaterThanOrEqual(1);
     expect(ended[0].err).toMatch(/revoked/);
+    // The door hung the terminal's program up itself: the terminal is put back, once.
+    expect(ended[0].out.split(TERMINAL_RESET)).toHaveLength(2);
+    await settle();
+    expect(ended[0].out).not.toContain('[nanoclaw] session ended');
     expect(f.execs.some((e) => e.exec.closed)).toBe(true);
     expect(client.ended).toBe(false);
   });
@@ -416,5 +498,9 @@ describe('sessions', () => {
     channel.emit('close');
     await settle();
     expect(f.execs[0].exec.closed).toBe(true);
+    // The client left first: there is nobody to put a terminal back for.
+    await settle();
+    expect(channel.out).not.toContain(TERMINAL_RESET);
+    expect(channel.out).not.toContain('[nanoclaw] session ended');
   });
 });

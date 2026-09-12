@@ -18,6 +18,8 @@ export interface AttachTarget {
   command: string[];
   /** Absent when the session's runtime can only describe attaches, not hold their stream. */
   execStream?: (command: string[], options: SessionExecOptions) => Promise<SessionExecStream>;
+  /** Whether the session's runtime still runs — to say why a terminal ended. Absent: unknown. */
+  alive?: () => Promise<boolean>;
 }
 
 export interface SandboxListing {

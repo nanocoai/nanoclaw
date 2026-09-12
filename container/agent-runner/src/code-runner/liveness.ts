@@ -101,6 +101,20 @@ export function decideLiveness(input: LivenessInput): { alive: boolean; reason: 
   return { alive: false, reason: `agent not busy, idle ${idleMs}ms ≥ ttl ${idleTtlMs}ms (${clientCount} client(s))` };
 }
 
+/**
+ * The line a client detached by a retiring runner reads on its terminal: how
+ * long it sat idle, coarsely, and that reconnecting wakes the session.
+ */
+export function retirementNotice(idleMs: number): string {
+  return `[nanoclaw] session retired after ${describeIdle(idleMs)} idle; reconnect to wake it`;
+}
+
+function describeIdle(ms: number): string {
+  const minutes = Math.round(Math.max(0, ms) / 60_000);
+  if (minutes < 60) return `${minutes}m`;
+  return `${Math.round(ms / 360_000) / 10}h`;
+}
+
 /** NANOCLAW_CODE_IDLE_TTL_MS overrides the default; invalid or non-positive values are ignored. */
 export function resolveIdleTtlMs(env: Record<string, string | undefined> = process.env): number {
   const parsed = parseInt(env.NANOCLAW_CODE_IDLE_TTL_MS ?? '', 10);

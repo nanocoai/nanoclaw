@@ -20,7 +20,7 @@ import { channelArgs, ensureChannelMcpConfig, ensureProjectMcpConsent, resolveCh
 import { claudeArgs, resolvePermissionMode, resumeArgs } from './claude-args.js';
 import { ensureClaudeState, hasResumableSession } from './claude-state.js';
 import { heartbeatPath, touchHeartbeat } from './heartbeat-lease.js';
-import { decideLiveness, resolveAttachIdleTtlMs, resolveIdleTtlMs } from './liveness.js';
+import { decideLiveness, resolveAttachIdleTtlMs, resolveIdleTtlMs, retirementNotice } from './liveness.js';
 import { BUSY_STALE_MS, MailboxDeliveryLoop } from './mailbox.js';
 import { ensureMailboxHooks, ensureTerminalDefaults } from './settings-hooks.js';
 import { SESSION_TERM_ENV } from './term-env.js';
@@ -189,7 +189,8 @@ async function main(): Promise<void> {
   // observably in use, else exit 0 and let the host respawn on demand .
   const idleTtlMs = resolveIdleTtlMs();
   const attachIdleTtlMs = resolveAttachIdleTtlMs();
-  setInterval(() => {
+  let retiring = false;
+  const lease = setInterval(() => {
     // Freshness heartbeat for the attach stamp: a stamp only ever written on
     // connect/disconnect goes stale during a long quiet attach, and the
     // boundary hook treats a stale stamp as detached (ATTACH_STAMP_FRESH_MS).
@@ -218,10 +219,25 @@ async function main(): Promise<void> {
     });
     if (decision.alive) {
       beat();
-    } else {
-      console.log(`[code-runner] idle lease expired (${decision.reason}) — exiting`);
-      exitAfterMailboxFlush(agentMailbox, 0);
+      return;
     }
+    if (retiring) return;
+    retiring = true;
+    clearInterval(lease);
+    console.log(`[code-runner] idle lease expired (${decision.reason}) — exiting`);
+    // An operator still attached would otherwise watch the container vanish
+    // under the terminal: mouse reporting left on, no word why. Detach the
+    // clients cleanly first, the reason on their terminal; bounded, and the
+    // exit does not depend on it.
+    const retire =
+      presence.clientCount > 0
+        ? session
+            .detachClients(retirementNotice(liveClientAt !== undefined ? now - liveClientAt : idleTtlMs))
+            .then((gone) => {
+              if (!gone) console.error('[code-runner] attached clients did not detach in time — exiting anyway');
+            })
+        : Promise.resolve();
+    void retire.finally(() => exitAfterMailboxFlush(agentMailbox, 0));
   }, 30_000);
 
   const shutdown = (signal: string) => {

@@ -174,6 +174,7 @@ function attachTarget(resolved: ResolvedAttachTarget): AttachTarget {
     containerName: resolved.containerName,
     command: resolved.command,
     ...(handle.execStream ? { execStream: (command, options) => handle.execStream!(command, options) } : {}),
+    alive: async () => (await handle.status()).phase === 'running',
   };
 }
 

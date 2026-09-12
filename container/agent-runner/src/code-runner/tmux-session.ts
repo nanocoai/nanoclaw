@@ -223,6 +223,42 @@ export class TmuxSession {
     void this.tmux(['kill-server']);
   }
 
+  /**
+   * Detach every attached client cleanly, leaving `notice` on its terminal —
+   * for a runner retiring under a still-attached operator. tmux's own detach
+   * restores the client's terminal (mouse reporting, bracketed paste, the
+   * alternate screen), which a client killed with the container never gets
+   * to do, and `-E` runs a command in the detached client's place, so the
+   * line lands on the operator's terminal after tmux has put it back. A tmux
+   * without `-E` gets a plain detach. Best-effort and bounded: true once no
+   * client is listed, false once `timeoutMs` passes; never throws.
+   */
+  async detachClients(notice: string, timeoutMs = 2_000): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), timeoutMs);
+    });
+    const work = (async (): Promise<boolean> => {
+      const farewell = `printf '%s\\n' ${shQuote(notice)}`;
+      const detach = await this.tmux(['detach-client', '-s', TMUX_SESSION_NAME, '-E', farewell]);
+      if (detach.exitCode !== 0) await this.tmux(['detach-client', '-s', TMUX_SESSION_NAME]);
+      // detach-client returns once the server has told the clients; each
+      // still has to restore its terminal and print. Wait for them to go.
+      while (Date.now() < deadline) {
+        const clients = await this.tmux(['list-clients', '-t', TMUX_SESSION_NAME]);
+        if (clients.exitCode !== 0 || clients.stdout.trim() === '') return true;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      return false;
+    })();
+    try {
+      return await Promise.race([work.catch(() => false), late]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   private tmux(args: string[], opts?: { env?: Record<string, string> }): Promise<TmuxExecResult> {
     return this.opts.exec(['tmux', '-S', this.opts.socketPath, ...args], opts);
   }

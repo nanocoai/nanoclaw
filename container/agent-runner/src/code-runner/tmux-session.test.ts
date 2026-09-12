@@ -21,14 +21,14 @@ interface FakeExec {
   exec: TmuxExec;
   calls: string[][];
   envs: (Record<string, string> | undefined)[];
-  /** Override the response for a subcommand (matched on argv[2]). */
-  respond: (subcommand: string, result: TmuxExecResult) => void;
+  /** Override the response for a subcommand (matched on argv[2]); a function answers per call. */
+  respond: (subcommand: string, result: TmuxExecResult | (() => TmuxExecResult)) => void;
 }
 
 function fakeExec(): FakeExec {
   const calls: string[][] = [];
   const envs: (Record<string, string> | undefined)[] = [];
-  const responses = new Map<string, TmuxExecResult>();
+  const responses = new Map<string, TmuxExecResult | (() => TmuxExecResult)>();
   return {
     calls,
     envs,
@@ -39,7 +39,8 @@ function fakeExec(): FakeExec {
       // argv = ['tmux', '-S', sock, <subcommand>, ...] — new-session rides
       // behind '-f conf', so scan for the first non-flag token after the sock.
       const subcommand = argv.slice(3).find((a) => !a.startsWith('-') && !a.endsWith('.conf'));
-      return responses.get(subcommand ?? '') ?? OK;
+      const response = responses.get(subcommand ?? '') ?? OK;
+      return typeof response === 'function' ? response() : response;
     },
   };
 }
@@ -199,6 +200,66 @@ describe('TmuxSession (fake exec)', () => {
     expect(s.running).toBe(true);
   });
 
+  test('detachClients detaches every client with the notice in its place, then waits for them to go', async () => {
+    const fake = fakeExec();
+    const dir = tempDir();
+    const s = session(fake, dir);
+    disposables.push(s);
+    await s.start();
+    fake.calls.length = 0;
+    // Still listed on the first look (the client is restoring its terminal), gone on the second.
+    let looks = 0;
+    fake.respond('list-clients', () =>
+      looks++ === 0 ? { exitCode: 0, stdout: '/dev/pts/3: agent\n', stderr: '' } : OK,
+    );
+    await expect(s.detachClients("retired; it's over")).resolves.toBe(true);
+    const sock = path.join(dir, 'tmux.sock');
+    // The life watcher's own list-panes polls interleave; only the detach's calls matter here.
+    const calls = fake.calls.filter((c) => c[3] !== 'list-panes');
+    expect(calls[0]).toEqual([
+      'tmux',
+      '-S',
+      sock,
+      'detach-client',
+      '-s',
+      'agent',
+      '-E',
+      `printf '%s\\n' 'retired; it'\\''s over'`,
+    ]);
+    expect(calls.slice(1)).toEqual([
+      ['tmux', '-S', sock, 'list-clients', '-t', 'agent'],
+      ['tmux', '-S', sock, 'list-clients', '-t', 'agent'],
+    ]);
+  });
+
+  test('detachClients gives up after its timeout and falls back to a plain detach when -E is refused', async () => {
+    const fake = fakeExec();
+    const dir = tempDir();
+    const s = session(fake, dir);
+    disposables.push(s);
+    await s.start();
+    fake.calls.length = 0;
+    fake.respond('detach-client', {
+      exitCode: 1,
+      stdout: '',
+      stderr: 'usage: detach-client [-aP] [-s target-session] [-t target-client]',
+    });
+    fake.respond('list-clients', { exitCode: 0, stdout: '/dev/pts/3: agent\n', stderr: '' });
+    const started = Date.now();
+    await expect(s.detachClients('retired', 250)).resolves.toBe(false);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(200);
+    const detaches = fake.calls.filter((c) => c[3] === 'detach-client');
+    expect(detaches).toHaveLength(2);
+    expect(detaches[0]).toContain('-E');
+    expect(detaches[1]).toEqual(['tmux', '-S', path.join(dir, 'tmux.sock'), 'detach-client', '-s', 'agent']);
+    // Polling stops with the timeout.
+    const looks = () => fake.calls.filter((c) => c[3] === 'list-clients').length;
+    const polled = looks();
+    expect(polled).toBeGreaterThanOrEqual(2);
+    await new Promise((r) => setTimeout(r, 250));
+    expect(looks()).toBe(polled);
+  });
+
   test('dispose kills the server and stops writes', async () => {
     const fake = fakeExec();
     const s = session(fake, tempDir());
@@ -269,5 +330,61 @@ describe.if(tmuxAvailable)('TmuxSession (real tmux)', () => {
     }
     expect(s.lastSpawnAt).toBeGreaterThan(firstSpawnAt);
     expect(s.running).toBe(true);
+  }, 20_000);
+
+  test('detachClients puts an attached client back on its own terminal with the notice', async () => {
+    const dir = tempDir();
+    const sock = path.join(dir, 'tmux.sock');
+    const s = new TmuxSession({
+      command: 'sleep',
+      args: ['60'],
+      cwd: dir,
+      env: { ...process.env } as Record<string, string>,
+      socketPath: sock,
+      confPath: path.join(dir, 'tmux.conf'),
+      restartDelayMs: 50,
+      pollMs: 50,
+    });
+    disposables.push(s);
+    await s.start();
+    // A second tmux server stands in for the operator's terminal: its pane is
+    // the pty the client attaches from, and what the client leaves behind
+    // after detaching is what the operator would read.
+    const outer = path.join(dir, 'outer.sock');
+    const exitFile = path.join(dir, 'client-exit');
+    const run = async (argv: string[]): Promise<string> => {
+      const proc = Bun.spawn(['tmux', '-S', outer, ...argv], { stdout: 'pipe', stderr: 'pipe', stdin: 'ignore' });
+      const [out] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+      return out;
+    };
+    const client =
+      `unset TMUX; tmux -S ${shQuote(sock)} attach-session -t agent; ` +
+      `echo "exit=$?" > ${shQuote(exitFile)}; sleep 30`;
+    await run(['new-session', '-d', '-s', 'outer', '-x', '80', '-y', '24', client]);
+    try {
+      const attached = Date.now() + 5_000;
+      let listed = '';
+      while (!listed.trim() && Date.now() < attached) {
+        const proc = Bun.spawn(['tmux', '-S', sock, 'list-clients'], {
+          stdout: 'pipe',
+          stderr: 'pipe',
+          stdin: 'ignore',
+        });
+        [listed] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+        if (!listed.trim()) await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(listed.trim()).not.toBe('');
+
+      const notice = '[nanoclaw] session retired after 4h idle; reconnect to wake it';
+      expect(await s.detachClients(notice)).toBe(true);
+
+      const exited = Date.now() + 5_000;
+      while (!fs.existsSync(exitFile) && Date.now() < exited) await new Promise((r) => setTimeout(r, 50));
+      expect(fs.readFileSync(exitFile, 'utf8').trim()).toBe('exit=0');
+      const screen = await run(['capture-pane', '-p', '-t', 'outer']);
+      expect(screen).toContain(notice);
+    } finally {
+      await run(['kill-server']);
+    }
   }, 20_000);
 });

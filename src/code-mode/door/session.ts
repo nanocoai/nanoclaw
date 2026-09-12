@@ -12,6 +12,9 @@
  * container over the runtime's own exec stream, sized from the client's
  * `pty-req` and every `window-change`. No forwarding of any kind, no
  * subsystems. A revocation ends the session; so does stopping the door.
+ * A terminal whose program ended under it — the container retired, the
+ * stream torn down — is put back in order and told why before the channel
+ * closes (terminal-reset.ts).
  */
 // ssh2 is a CommonJS module: only its default export is reachable from Node ESM.
 import ssh2, { type ClientInfo, type Connection, type ServerChannel, type Session } from 'ssh2';
@@ -22,6 +25,7 @@ import { runLanding, type AttachTarget, type LandingIo, type SandboxVerbs } from
 import type { PendingKeyRequest, PendingKeyResult } from './report.js';
 import type { DoorLog } from './server.js';
 import type { DoorSource, DoorStream } from './target-map.js';
+import { TERMINAL_RESET, terminalEnded } from './terminal-reset.js';
 import { runWaitingRoom } from './waiting-room.js';
 
 const { utils } = ssh2;
@@ -53,6 +57,9 @@ export interface SessionDeps {
 }
 
 export const MAX_SESSIONS = 8;
+
+/** How long naming the end of a terminal may wait on the runtime's status. */
+const ALIVE_PROBE_MS = 1_000;
 
 interface Identity {
   username: string;
@@ -185,6 +192,9 @@ export function handleConnection(client: Connection, info: ClientInfo, deps: Ses
       untrack = deps.sessions.track();
       const { fingerprint } = identity;
       unregister = deps.authority.registerSession(fingerprint, () => {
+        // The door hangs the terminal's program up itself here; put the
+        // terminal back first so the message lands on a clean screen.
+        if (size && exec) channel.write(TERMINAL_RESET);
         io.fail('\nAccess to this machine was revoked.\n');
         exec?.close();
         finish(1);
@@ -214,13 +224,17 @@ export function handleConnection(client: Connection, info: ClientInfo, deps: Ses
         ...(command !== undefined ? { command } : {}),
         sandboxes: deps.sandboxes,
         io,
-        run: (target) => attach(channel, target),
+        run: (target) => attach(channel, target, () => !closed && !finished),
       });
       finish(code);
     }
 
-    /** Pump the channel into the attach command's stream inside the container and back. */
-    async function attach(channel: ServerChannel, target: AttachTarget): Promise<number> {
+    /**
+     * Pump the channel into the attach command's stream inside the container
+     * and back. `open` says whether the client is still there to write to
+     * once the stream ends.
+     */
+    async function attach(channel: ServerChannel, target: AttachTarget, open: () => boolean): Promise<number> {
       if (!target.execStream) {
         channel.stderr.write(text("This session's runtime cannot hand over a terminal.\n"));
         return 1;
@@ -252,13 +266,47 @@ export function handleConnection(client: Connection, info: ClientInfo, deps: Ses
       // Without a terminal the client's EOF is the command's EOF; a terminal
       // ends when its program does (detach), never on a half-close.
       if (!size) channel.on('eof', () => running.stdin.end());
-      const code = await running.exited;
+      let code: number;
+      let reason: string;
+      try {
+        code = await running.exited;
+        reason = `exit code ${code}`;
+        // A non-zero end with the runtime gone is the container stopping
+        // under the client — say that, not the code of a killed tmux client.
+        if (code !== 0 && target.alive && !(await stillAlive(target.alive))) reason = 'container stopped';
+      } catch (error) {
+        if (!(error instanceof Error)) throw error;
+        deps.log('warn', 'Remote terminal stream ended without an exit code', {
+          container: target.containerName,
+          err: error,
+        });
+        code = 1;
+        reason = 'stream closed';
+      }
       if (exec === running) exec = undefined;
+      // A program restores its terminal on a clean exit; one ended under
+      // the client leaves mouse reporting and the rest on. Put the terminal
+      // back and say why, before the channel ends — unless the client left
+      // first, in which case there is nobody to write to.
+      if (size && open()) channel.write(terminalEnded(reason));
       return code;
 
       function text(value: string): string {
         return size ? value.replace(/\r?\n/g, '\r\n') : value;
       }
     }
+  }
+}
+
+/** The runtime's word on whether it still runs; unknown (late, failed) reads as alive. */
+async function stillAlive(alive: () => Promise<boolean>): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => resolve(true), ALIVE_PROBE_MS);
+  });
+  try {
+    return await Promise.race([alive().catch(() => true), late]);
+  } finally {
+    clearTimeout(timer);
   }
 }
