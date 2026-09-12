@@ -325,6 +325,27 @@ describe('sessions', () => {
     expect(channel.out.split(TERMINAL_RESET)).toHaveLength(2);
   });
 
+  it('a clean detach puts the terminal back without a word, once', async () => {
+    const key = keyPair();
+    const f = deps({
+      approved: [key.fingerprint],
+      streams: { 50562: { target: { account: 'alice', sandbox: 'demo' }, openedAt: 't' } },
+      alive: async () => false,
+    });
+    const { session } = connect(f.deps, 'x', key);
+    const channel = shell(session);
+    await vi.waitFor(() => expect(f.execs).toHaveLength(1));
+    const { exec } = f.execs[0];
+    exec.stdout.write('[detached (from session agent)]\r\n');
+    await settle();
+    exec.exit(0);
+    await vi.waitFor(() => expect(channel.exitCode).toBe(0));
+    expect(channel.ended).toBe(true);
+    expect(channel.out.endsWith(`[detached (from session agent)]\r\n${TERMINAL_RESET}`)).toBe(true);
+    expect(channel.out.split(TERMINAL_RESET)).toHaveLength(2);
+    expect(channel.out).not.toContain('[nanoclaw] session ended');
+  });
+
   it('reports the exit code when the runtime still runs or cannot say, and a broken stream as closed', async () => {
     const key = keyPair();
     const stream: DoorStream = { target: { account: 'alice', sandbox: 'demo' }, openedAt: 't' };

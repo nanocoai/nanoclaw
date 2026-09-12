@@ -26,7 +26,8 @@ export const TERMINAL_RESET =
   '\x1b[?25h' + // cursor
   '\x1b[0m'; // attributes
 
-/** The reset, then why the session ended, on its own line. */
+/** The reset, then why the session ended, on its own line — for an end that
+ * was not a clean detach; a clean one gets the bare reset and looks like one. */
 export function terminalEnded(reason: string): string {
   return `${TERMINAL_RESET}\r\n[nanoclaw] session ended: ${reason}\r\n`;
 }

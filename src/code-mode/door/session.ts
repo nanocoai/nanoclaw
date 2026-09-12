@@ -267,13 +267,16 @@ export function handleConnection(client: Connection, info: ClientInfo, deps: Ses
       // ends when its program does (detach), never on a half-close.
       if (!size) channel.on('eof', () => running.stdin.end());
       let code: number;
-      let reason: string;
+      // Why the terminal ended, when that is worth a line: a clean exit is a
+      // detach and should look like one. A non-zero end with the runtime
+      // gone is the container stopping under the client — say that, not the
+      // code of a killed tmux client.
+      let reason: string | undefined;
       try {
         code = await running.exited;
-        reason = `exit code ${code}`;
-        // A non-zero end with the runtime gone is the container stopping
-        // under the client — say that, not the code of a killed tmux client.
-        if (code !== 0 && target.alive && !(await stillAlive(target.alive))) reason = 'container stopped';
+        if (code !== 0) {
+          reason = target.alive && !(await stillAlive(target.alive)) ? 'container stopped' : `exit code ${code}`;
+        }
       } catch (error) {
         if (!(error instanceof Error)) throw error;
         deps.log('warn', 'Remote terminal stream ended without an exit code', {
@@ -286,9 +289,10 @@ export function handleConnection(client: Connection, info: ClientInfo, deps: Ses
       if (exec === running) exec = undefined;
       // A program restores its terminal on a clean exit; one ended under
       // the client leaves mouse reporting and the rest on. Put the terminal
-      // back and say why, before the channel ends — unless the client left
-      // first, in which case there is nobody to write to.
-      if (size && open()) channel.write(terminalEnded(reason));
+      // back (and say why, when there is a why) before the channel ends —
+      // unless the client left first, in which case there is nobody to
+      // write to.
+      if (size && open()) channel.write(reason === undefined ? TERMINAL_RESET : terminalEnded(reason));
       return code;
 
       function text(value: string): string {
