@@ -8,10 +8,13 @@
  * route byte-identical. Conventions follow PR #2617: real HTTP server on a
  * fixed WEBHOOK_PORT, real fetch.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import http from 'http';
+
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 import type { Chat } from 'chat';
 
+import { log } from './log.js';
 import { registerWebhookAdapter, stopWebhookServer } from './webhook-server.js';
 
 const PORT = 3917;
@@ -102,5 +105,30 @@ describe('registerWebhookAdapter — route/handler split', () => {
     registerWebhookAdapter(chat, 'slack');
     const res = await post('/webhook/nope', 'x');
     expect(res.status).toBe(404);
+  });
+});
+
+describe('registerWebhookAdapter — bind failure', () => {
+  it('EADDRINUSE is logged, not thrown as an uncaught exception that kills the host', async () => {
+    // Occupy the port the webhook server will try to bind.
+    const blocker = http.createServer();
+    await new Promise<void>((resolve) => blocker.listen(PORT, '0.0.0.0', resolve));
+    const errSpy = vi.spyOn(log, 'error').mockImplementation(() => {});
+
+    try {
+      registerWebhookAdapter(stubChat('doomed').chat, 'slack');
+
+      // The 'error' event fires asynchronously after listen(); wait for it.
+      for (let i = 0; i < 40 && errSpy.mock.calls.length === 0; i++) {
+        await new Promise((r) => setTimeout(r, 25));
+      }
+
+      expect(errSpy).toHaveBeenCalled();
+      const [, ctx] = errSpy.mock.calls[0] as [string, { code?: string }];
+      expect(ctx.code).toBe('EADDRINUSE');
+    } finally {
+      errSpy.mockRestore();
+      await new Promise<void>((resolve) => blocker.close(() => resolve()));
+    }
   });
 });
