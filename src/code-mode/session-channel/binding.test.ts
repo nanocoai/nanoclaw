@@ -43,10 +43,24 @@ const CREDS = { serviceBase: 'https://slack.example.test', appId: 'A1' };
 /** The adapter's spelling, as the Slack chat adapter encodes a channel: `<adapter>:<channel>`. */
 const address = (channelId: string): ChannelAddress => ({ platformId: `slack:${channelId}`, instance: 'slack' });
 
-type CreateInput = { appId: string; sessionId: string; title: string; botUserId?: string; teamId?: string };
+type CreateInput = {
+  appId: string;
+  sessionId: string;
+  title: string;
+  botUserId?: string;
+  teamId?: string;
+  sandboxName?: string;
+  terminalAddress?: string;
+};
+type MemberUpdate = {
+  channelId: string;
+  botUserId: string;
+  fields: { terminalAddress?: string; sandboxName?: string };
+};
 
 function fakeCreate() {
   const calls: CreateInput[] = [];
+  const updates: MemberUpdate[] = [];
   let n = 0;
   const client = {
     create: vi.fn(async (input: CreateInput) => {
@@ -55,13 +69,26 @@ function fakeCreate() {
       const channel: ChannelRecord = { channelId: `C${n}`, sessionId: input.sessionId, status: 'active' };
       return { channel, created: true };
     }),
+    // The record names the owner's bot, as the service's GET does.
+    get: vi.fn(async (channelId: string): Promise<ChannelRecord> => {
+      return { channelId, sessionId: GROUP.id, status: 'active', botUserId: 'U0OWNER' };
+    }),
+    updateMember: vi.fn(async (channelId: string, botUserId: string, fields: MemberUpdate['fields']) => {
+      updates.push({ channelId, botUserId, fields });
+      return { channelId, member: { botUserId, role: 'owner', ...fields } };
+    }),
   };
-  return { client, calls };
+  return { client, calls, updates };
 }
 
 function bind(extra: Partial<Parameters<typeof bindSessionChannel>[0]> = {}) {
-  const { client, calls } = fakeCreate();
-  return { calls, run: () => bindSessionChannel({ group: GROUP, credentials: CREDS, client, address, ...extra }) };
+  const { client, calls, updates } = fakeCreate();
+  return {
+    calls,
+    updates,
+    client,
+    run: () => bindSessionChannel({ group: GROUP, credentials: CREDS, client, address, ...extra }),
+  };
 }
 
 /** The default outbound route the host wrote into a session's mailbox (the row the runner's `outbox send` reads). */
@@ -290,5 +317,77 @@ describe('bindSessionChannel — the bot identity on create', () => {
     const result = await again();
     expect(result.created).toBe(false);
     expect(resolveBotIdentity).not.toHaveBeenCalled();
+  });
+});
+
+describe('bindSessionChannel — the terminal address', () => {
+  const FIELDS = { sandboxName: 'box', terminalAddress: 'box.alice.example.test' };
+
+  it('an address the host has rides the create with the sandbox label', async () => {
+    const resolveTerminalAddress = vi.fn(async (sandbox: string) => ({ ...FIELDS, sandboxName: sandbox }));
+    const { run, calls, updates } = bind({ resolveTerminalAddress });
+    await run();
+    expect(resolveTerminalAddress).toHaveBeenCalledWith('box');
+    expect(calls).toEqual([{ appId: 'A1', sessionId: 'ag-bind-1', title: 'box', ...FIELDS }]);
+    // The create carried it; nothing to update afterwards.
+    expect(updates).toEqual([]);
+  });
+
+  it('no address (remote access off) or a failing lookup leaves the create as it was', async () => {
+    const { run, calls } = bind({ resolveTerminalAddress: async () => undefined });
+    await run();
+    expect(calls[0]).toEqual({ appId: 'A1', sessionId: 'ag-bind-1', title: 'box' });
+
+    await updateSessionChannel(GROUP.id, { archived_at: '2026-09-11T12:00:00.000Z' });
+    const { run: rerun, calls: recalls } = bind({
+      resolveTerminalAddress: async () => {
+        throw new Error('door state unreadable');
+      },
+    });
+    expect((await rerun()).created).toBe(true);
+    expect(recalls[0]).not.toHaveProperty('terminalAddress');
+  });
+
+  it('an existing channel learns the address through its member row, keyed by the identity when known', async () => {
+    const { run } = bind();
+    await run();
+    const resolveBotIdentity = vi.fn(async () => ({ botUserId: 'U0BOT1' }));
+    const {
+      run: again,
+      calls,
+      updates,
+      client,
+    } = bind({ resolveTerminalAddress: async () => FIELDS, resolveBotIdentity });
+    const result = await again();
+    expect(result.created).toBe(false);
+    expect(calls).toEqual([]);
+    expect(updates).toEqual([{ channelId: 'C1', botUserId: 'U0BOT1', fields: FIELDS }]);
+    expect(client.get).not.toHaveBeenCalled();
+  });
+
+  it('without an identity the channel record names the bot; a refusal never fails the bind', async () => {
+    const { run } = bind();
+    await run();
+    const { run: again, updates, client } = bind({ resolveTerminalAddress: async () => FIELDS });
+    await again();
+    expect(client.get).toHaveBeenCalledWith('C1');
+    expect(updates).toEqual([{ channelId: 'C1', botUserId: 'U0OWNER', fields: FIELDS }]);
+
+    const { run: once, client: refusing } = bind({ resolveTerminalAddress: async () => FIELDS });
+    refusing.updateMember.mockRejectedValueOnce(new Error('service down'));
+    const result = await once();
+    expect(result.created).toBe(false);
+    expect(result.row.channel_id).toBe('C1');
+  });
+
+  it('an existing channel with no address to report consults neither the identity nor the service', async () => {
+    const { run } = bind();
+    await run();
+    const resolveBotIdentity = vi.fn(async () => ({ botUserId: 'U0BOT1' }));
+    const { run: again, updates, client } = bind({ resolveTerminalAddress: async () => undefined, resolveBotIdentity });
+    await again();
+    expect(resolveBotIdentity).not.toHaveBeenCalled();
+    expect(client.get).not.toHaveBeenCalled();
+    expect(updates).toEqual([]);
   });
 });

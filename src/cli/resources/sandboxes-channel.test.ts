@@ -31,14 +31,20 @@ vi.mock('../../config.js', async (importOriginal) => {
 
 // The sandbox's own address is the account service's business; here it only
 // answers (not enabled, or a refused name) so the verb's warning can be seen.
-vi.mock('../../code-mode/remote/sandboxes.js', () => ({
-  registerSandbox: vi.fn(async () => ({ done: false, code: 'not_enabled' })),
-  unregisterSandbox: vi.fn(async () => ({ done: false, code: 'not_enabled' })),
-}));
+// Composing the address from the door's state is pure and stays real.
+vi.mock('../../code-mode/remote/sandboxes.js', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('../../code-mode/remote/sandboxes.js')>();
+  return {
+    ...orig,
+    registerSandbox: vi.fn(async () => ({ done: false, code: 'not_enabled' })),
+    unregisterSandbox: vi.fn(async () => ({ done: false, code: 'not_enabled' })),
+  };
+});
 
 const TEST_ROOT = '/tmp/nanoclaw-test-sandboxes-channel';
 
 import {
+  announceTerminalAddresses,
   getSessionChannelByGroup,
   getSessionChannelRuntime,
   setSessionChannelDeps,
@@ -106,6 +112,12 @@ function fakeClient() {
     setStatus: vi.fn(async () => ({})),
     putView: vi.fn(async () => ({})),
     events: vi.fn(async () => ({ events: [], cursor: null })),
+    updateMember: vi.fn(
+      async (channelId: string, botUserId: string, fields: { terminalAddress?: string; sandboxName?: string }) => ({
+        channelId,
+        member: { botUserId, role: 'owner', ...fields },
+      }),
+    ),
   };
   return client;
 }
@@ -124,13 +136,21 @@ beforeEach(async () => {
   client = fakeClient();
   vi.mocked(registerSandbox).mockReset();
   vi.mocked(registerSandbox).mockResolvedValue({ done: false, code: 'not_enabled' });
+  installDeps();
+});
+
+/** The seams for a host with an install and a running adapter; setSessionChannelDeps replaces, so pass the whole set. */
+function installDeps(extra: Parameters<typeof setSessionChannelDeps>[0] = {}): void {
   setSessionChannelDeps({
     readCredentials: async () => CREDS,
     createClient: () => client as unknown as SessionChannelClient,
     // The live adapter's spelling of a channel, as the Slack chat adapter encodes it.
     channelAddressing: () => (id) => ({ platformId: `slack:${id}`, instance: 'slack' }),
+    // Remote access off unless a test turns it on: no sandbox has an address.
+    doorState: async () => ({ enabled: false }),
+    ...extra,
   });
-});
+}
 
 afterEach(async () => {
   await getSessionChannelRuntime()?.stop();
@@ -303,5 +323,59 @@ describe('sandboxes channel status / archive', () => {
       expect(res.ok).toBe(false);
       if (!res.ok) expect(res.error.message).toMatch(/operator-only/);
     }
+  });
+});
+
+describe('the terminal address on the channel', () => {
+  const DOOR = { enabled: true, name: 'alice', host: 'alice.example.test' };
+
+  it('with remote access enabled the create names the sandbox and its address; off, it does not', async () => {
+    installDeps({ doorState: async () => DOOR });
+    const res = dataOf<{ id: string }>(await call('sandboxes-new', { name: 'Web-App', 'no-attach': true }));
+    expect(client.create).toHaveBeenCalledWith({
+      appId: 'A1',
+      sessionId: res.id,
+      title: 'Web-App',
+      sandboxName: 'web-app',
+      terminalAddress: 'web-app.alice.example.test',
+    });
+    expect(client.updateMember).not.toHaveBeenCalled();
+
+    installDeps({ doorState: async () => ({ enabled: false }) });
+    const plain = dataOf<{ id: string }>(await call('sandboxes-new', { name: 't10', 'no-attach': true }));
+    expect(client.create).toHaveBeenLastCalledWith({ appId: 'A1', sessionId: plain.id, title: 't10' });
+  });
+
+  it('remote access enabled after the channels exist: every open binding learns its address', async () => {
+    const first = dataOf<{ id: string }>(await call('sandboxes-new', { name: 'api', 'no-attach': true }));
+    const second = dataOf<{ id: string }>(await call('sandboxes-new', { name: 'my_box', 'no-attach': true }));
+    await call('sandboxes-new', { name: 'plain', 'no-attach': true, 'no-channel': true });
+    const archived = dataOf<{ id: string }>(await call('sandboxes-new', { name: 'old', 'no-attach': true }));
+    await call('sandboxes-channel-archive', { id: archived.id });
+    expect(client.create.mock.calls.every(([input]) => !('terminalAddress' in input))).toBe(true);
+
+    // The door is up now; the host knows its bot.
+    installDeps({ doorState: async () => DOOR, resolveBotIdentity: async () => ({ botUserId: 'U0BOT1' }) });
+    expect(await announceTerminalAddresses()).toEqual({ announced: 1, skipped: 1, failed: 0 });
+    // `api` is a label and gets its address; `my_box` is not and is skipped;
+    // the plain sandbox has no channel and the archived one is history.
+    expect(client.updateMember.mock.calls).toEqual([
+      ['C1', 'U0BOT1', { sandboxName: 'api', terminalAddress: 'api.alice.example.test' }],
+    ]);
+    expect((await getSessionChannelByGroup(first.id))!.channel_id).toBe('C1');
+    expect((await getSessionChannelByGroup(second.id))!.channel_id).toBe('C2');
+
+    // Without an identity the channel record names the bot; a record that
+    // names none is a skip-with-a-log, never an error.
+    installDeps({ doorState: async () => DOOR, resolveBotIdentity: async () => null });
+    expect(await announceTerminalAddresses()).toEqual({ announced: 0, skipped: 1, failed: 1 });
+    expect(client.get).toHaveBeenCalledWith('C1');
+  });
+
+  it('the sweep is a quiet no-op while remote access is off or nothing is bound', async () => {
+    expect(await announceTerminalAddresses()).toEqual({ announced: 0, skipped: 0, failed: 0 });
+    await call('sandboxes-new', { name: 'api', 'no-attach': true });
+    expect(await announceTerminalAddresses()).toEqual({ announced: 0, skipped: 0, failed: 0 });
+    expect(client.updateMember).not.toHaveBeenCalled();
   });
 });

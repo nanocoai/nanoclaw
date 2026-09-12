@@ -19,12 +19,15 @@
 import path from 'node:path';
 
 import { getChannelAdapter } from '../../channels/channel-registry.js';
+import { getAgentGroup } from '../../db/agent-groups.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
 import { findSandboxSessions, SANDBOX_SYSTEM_THREAD_ID } from '../../db/sessions.js';
 import { onHostShutdown, onHostStart } from '../../host-lifecycle.js';
 import { log } from '../../log.js';
 import { registerSessionRoutingResolver, sessionDir } from '../../session-manager.js';
 import type { AgentGroup } from '../../types.js';
+import { doorStatus, type DoorSummary } from '../door/index.js';
+import { sandboxTerminalAddress } from '../remote/sandboxes.js';
 import { bindSessionChannel, SESSION_CHANNEL_TYPE, type BoundSessionChannel, type ChannelAddress } from './binding.js';
 import { resolveBotIdentity, type BotIdentity } from './bot-identity.js';
 import { isUnavailable, SessionChannelClient, type ChannelRecord } from './client.js';
@@ -39,11 +42,19 @@ import { readSessionChannelCredentials, type SessionChannelCredentials } from '.
 import type { MirrorObservation, TurnStamp } from './mapper.js';
 import { SessionChannelRuntime, type SessionChannelRuntimeDeps } from './runtime.js';
 import { interruptCodingSession } from './stop.js';
+import {
+  announceTerminalAddresses as sweepTerminalAddresses,
+  type AnnounceSweepOutcome,
+  type TerminalAddressFields,
+} from './terminal-address.js';
 import { readTurnStamp, TURN_STAMP_SUBDIR } from './turn-stamp.js';
 import './db.js';
 
 export { SESSION_CHANNEL_TYPE } from './binding.js';
 export type { SessionChannelRow } from './db.js';
+
+/** What the address helper needs to know about the door. */
+export type DoorAddressState = Pick<DoorSummary, 'enabled' | 'name' | 'host'>;
 
 /** Seams the sandbox verbs go through; tests swap them (setSessionChannelDeps). */
 export interface SessionChannelDeps {
@@ -58,6 +69,14 @@ export interface SessionChannelDeps {
    * running (nothing could deliver).
    */
   channelAddressing(): ((conversationId: string) => ChannelAddress) | null;
+  /** The remote terminal door's journaled state: whether a sandbox here has an address at all. */
+  doorState(): Promise<DoorAddressState>;
+}
+
+/** The member fields for a sandbox on this host, or undefined when it has no address. */
+function terminalAddressFields(sandbox: string, door: DoorAddressState): TerminalAddressFields | undefined {
+  const found = sandboxTerminalAddress(sandbox, door);
+  return found ? { sandboxName: found.sandbox, terminalAddress: found.address } : undefined;
 }
 
 /** The running adapter for the platform, when it can spell conversation ids. */
@@ -80,6 +99,7 @@ const defaultDeps: SessionChannelDeps = {
       ...(credentials.botToken ? { botToken: credentials.botToken } : {}),
     }),
   channelAddressing: liveChannelAddressing,
+  doorState: () => doorStatus(),
 };
 
 let deps: SessionChannelDeps = defaultDeps;
@@ -207,6 +227,7 @@ export async function bindSandboxChannel(
       client: deps.createClient(credentials),
       address,
       resolveBotIdentity: () => deps.resolveBotIdentity(credentials),
+      resolveTerminalAddress: async (sandbox) => terminalAddressFields(sandbox, await deps.doorState()),
       ...(options.title ? { title: options.title } : {}),
     });
     const active = runtime;
@@ -228,6 +249,46 @@ export async function bindSandboxChannel(
     }
     log.warn('Session channel not opened — sandbox continues without one', { agentGroupId: group.id, err });
     return null;
+  }
+}
+
+/**
+ * Every open binding on this host reports its sandbox's terminal address —
+ * run after `remote enable`, so channels opened before remote access was on
+ * learn where a terminal reaches them. Best effort throughout: no
+ * credentials, no bindings, or a door without a host name is a quiet no-op,
+ * and a refusal is a log line per channel. Never throws.
+ */
+export async function announceTerminalAddresses(): Promise<AnnounceSweepOutcome> {
+  const none: AnnounceSweepOutcome = { announced: 0, skipped: 0, failed: 0 };
+  try {
+    const credentials = await deps.readCredentials();
+    if (!credentials) return none;
+    const door = await deps.doorState();
+    if (!door.enabled || !door.host) return none;
+    const identity = await deps.resolveBotIdentity(credentials).catch(() => null);
+    const clients = new Map<string, SessionChannelClient>();
+    const outcome = await sweepTerminalAddresses({
+      listBindings: listOpenSessionChannels,
+      sandboxNameOf: async (agentGroupId) => (await getAgentGroup(agentGroupId))?.folder,
+      fieldsOf: (sandbox) => terminalAddressFields(sandbox, door),
+      clientFor: (row) => {
+        let client = clients.get(row.service_base);
+        if (!client) {
+          client = deps.createClient({ ...credentials, serviceBase: row.service_base });
+          clients.set(row.service_base, client);
+        }
+        return client;
+      },
+      botUserId: identity?.botUserId,
+    });
+    if (outcome.announced || outcome.failed) {
+      log.info('Session channels told their terminal addresses', { ...outcome });
+    }
+    return outcome;
+  } catch (err) {
+    log.warn('Session channels: terminal addresses not announced', { err });
+    return none;
   }
 }
 

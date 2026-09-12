@@ -5,7 +5,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { DoorSummary } from '../door/index.js';
 import { writePrivate } from '../../community-portal/index.js';
-import { registerSandbox, unregisterSandbox } from './sandboxes.js';
+import { registerSandbox, sandboxTerminalAddress, unregisterSandbox } from './sandboxes.js';
 
 /**
  * Sandbox registration against a loopback stand-in for the account service:
@@ -147,4 +147,26 @@ it('frees the address of a deleted sandbox whenever the account ever named this 
     done: false,
     code: 'not_found',
   });
+});
+
+it("composes a sandbox's terminal address from the door's name and host name, and nothing without them", () => {
+  const door = { enabled: true, name: 'alice', host: 'alice.example.test' };
+  expect(sandboxTerminalAddress('api', door)).toEqual({ sandbox: 'api', address: 'api.alice.example.test' });
+  // The default sandbox is the account's own address.
+  expect(sandboxTerminalAddress('alice', door)).toEqual({ sandbox: 'alice', address: 'alice.example.test' });
+  // Lower-cased, as the address space is.
+  expect(sandboxTerminalAddress('Api', door)).toEqual({ sandbox: 'api', address: 'api.alice.example.test' });
+  // A host name recorded before a rename still yields the current name's address.
+  expect(sandboxTerminalAddress('api', { ...door, name: 'bob' })).toEqual({
+    sandbox: 'api',
+    address: 'api.bob.example.test',
+  });
+  // Not a DNS label: such a sandbox never got an address.
+  expect(sandboxTerminalAddress('my_box', door)).toBeUndefined();
+  expect(sandboxTerminalAddress('-api', door)).toBeUndefined();
+  // Off, unnamed, or no host name yet (the account has not answered): nothing to report.
+  expect(sandboxTerminalAddress('api', { ...door, enabled: false })).toBeUndefined();
+  expect(sandboxTerminalAddress('api', { enabled: true, name: 'alice' })).toBeUndefined();
+  expect(sandboxTerminalAddress('api', { enabled: true, host: 'alice.example.test' })).toBeUndefined();
+  expect(sandboxTerminalAddress('api', { enabled: true, name: 'alice', host: 'alice' })).toBeUndefined();
 });

@@ -51,6 +51,7 @@ import {
 } from './db.js';
 import type { BotIdentity } from './bot-identity.js';
 import type { SessionChannelCredentials } from './install.js';
+import { announceTerminalAddress, type TerminalAddressFields } from './terminal-address.js';
 
 /** The chat platform whose channel this is — the one adapter key the wiring names. */
 export const SESSION_CHANNEL_TYPE = 'slack';
@@ -64,17 +65,25 @@ export interface ChannelAddress {
 export interface BindSessionChannelInput {
   group: Pick<AgentGroup, 'id' | 'name' | 'folder'>;
   credentials: Pick<SessionChannelCredentials, 'serviceBase' | 'appId'>;
-  client: Pick<SessionChannelClient, 'create'>;
+  client: Pick<SessionChannelClient, 'create' | 'updateMember' | 'get'>;
   /** The adapter's spelling of a channel id (index.ts asks the live adapter). */
   address: (channelId: string) => ChannelAddress;
   /** Channel title; defaults to the sandbox name. */
   title?: string;
   /**
    * The host's own bot identity for the invite (bot-identity.ts), consulted
-   * only when a channel is actually created. Null or absent: the create goes
-   * without it and the service names the bot from its own record.
+   * when a channel is actually created — and when an existing channel has an
+   * address to learn. Null or absent: the create goes without it and the
+   * service names the bot from its own record.
    */
   resolveBotIdentity?: () => Promise<BotIdentity | null>;
+  /**
+   * The address a terminal reaches this sandbox at while remote access is
+   * enabled on the host (remote/sandboxes.ts), with the sandbox's label. It
+   * rides the create, or reaches an existing channel through the member
+   * update. Undefined or absent: no address is reported. Never a gate.
+   */
+  resolveTerminalAddress?: (sandbox: string) => Promise<TerminalAddressFields | undefined>;
 }
 
 export interface BoundSessionChannel {
@@ -174,6 +183,31 @@ export async function refreshSandboxRouting(agentGroupId: string): Promise<void>
   }
 }
 
+/** The host's bot identity, when the caller can name it; a failed lookup is a log line, never a gate. */
+async function resolveIdentity(input: BindSessionChannelInput, what: string): Promise<BotIdentity | null> {
+  if (!input.resolveBotIdentity) return null;
+  try {
+    return await input.resolveBotIdentity();
+  } catch (err) {
+    log.warn(`Session channel: bot identity lookup failed — ${what}`, { agentGroupId: input.group.id, err });
+    return null;
+  }
+}
+
+/** The sandbox's terminal address, when the host has one to report; a failed lookup is a log line, never a gate. */
+async function resolveTerminalAddress(input: BindSessionChannelInput): Promise<TerminalAddressFields | undefined> {
+  if (!input.resolveTerminalAddress) return undefined;
+  try {
+    return await input.resolveTerminalAddress(input.group.folder);
+  } catch (err) {
+    log.warn('Session channel: terminal address lookup failed — binding without it', {
+      agentGroupId: input.group.id,
+      err,
+    });
+    return undefined;
+  }
+}
+
 /** Create-or-get the channel for a sandbox and wire the group to it. */
 export async function bindSessionChannel(input: BindSessionChannelInput): Promise<BoundSessionChannel> {
   const { group, credentials, client } = input;
@@ -192,6 +226,13 @@ export async function bindSessionChannel(input: BindSessionChannelInput): Promis
       existing.messaging_group_id = mg.id;
     }
     await refreshSandboxRouting(group.id);
+    // A channel that exists learns the address through its member row; the
+    // identity is consulted only when there is an address to report.
+    const fields = await resolveTerminalAddress(input);
+    if (fields) {
+      const identity = await resolveIdentity(input, 'the channel record names the bot instead');
+      await announceTerminalAddress({ client, row: existing, fields, botUserId: identity?.botUserId });
+    }
     return { row: existing, created: false };
   }
 
@@ -201,21 +242,18 @@ export async function bindSessionChannel(input: BindSessionChannelInput): Promis
   // crash between create and insert converges on the same channel.
   const sessionId = existing?.archived_at ? `${group.id}.${Date.parse(existing.archived_at).toString(36)}` : group.id;
   // Belt and braces for the invite: name the bot ourselves when we can.
-  // Resolved only here, on the create path, so the once-per-install lookup
-  // never runs for a sandbox that already has its channel.
-  let identity: BotIdentity | null = null;
-  if (input.resolveBotIdentity) {
-    try {
-      identity = await input.resolveBotIdentity();
-    } catch (err) {
-      log.warn('Session channel: bot identity lookup failed — creating without it', { agentGroupId: group.id, err });
-    }
-  }
+  // Resolved on the create path, so the once-per-install lookup never runs
+  // for a sandbox that already has its channel and nothing to tell it.
+  const identity = await resolveIdentity(input, 'creating without it');
+  // The sandbox's address, when the host has one: the channel's first member
+  // carries it from the start.
+  const fields = await resolveTerminalAddress(input);
   const { channel, created } = await client.create({
     appId: credentials.appId,
     sessionId,
     title,
     ...(identity ? { botUserId: identity.botUserId, ...(identity.teamId ? { teamId: identity.teamId } : {}) } : {}),
+    ...(fields ?? {}),
   });
   // The binding row before the wiring: a crash between the two leaves a row
   // the next bind completes, never a channel nothing remembers.

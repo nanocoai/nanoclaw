@@ -34,14 +34,44 @@ export const LONG_POLL_MAX_SECONDS = 25;
 /** Notification type the service relays when the user stops the session from the channel. */
 export const STOPPED_EVENT = 'code_channel.stopped';
 
+/**
+ * Notification type the service relays for a slash command typed in the
+ * channel (`command` is the slash word, `text` what followed it). The service
+ * answers the ones it can itself; the host is told so it may react.
+ */
+export const COMMAND_EVENT = 'code_channel.command';
+
+/** The one command the service answers on its own, from the members' terminal addresses. */
+export const TERMINAL_COMMAND = '/terminal';
+
+/** A sandbox on the channel: the creating one (`owner`) and any that joined. */
+export interface ChannelMember {
+  botUserId: string;
+  appId?: string;
+  accountId?: string;
+  role: 'owner' | 'member' | string;
+  sessionId?: string | null;
+  sandboxName?: string | null;
+  /** The address a terminal connects to for this member's sandbox, when its host reported one. */
+  terminalAddress?: string | null;
+  joinedAt?: string;
+  updatedAt?: string;
+}
+
 export interface ChannelRecord {
   channelId: string;
   sessionId: string;
   teamId?: string;
   appId?: string;
+  /** The owner's bot user — the member id this host updates through updateMember. */
+  botUserId?: string | null;
   title?: string;
   /** The service's own view: active | processing | suspended | closed | stopped. */
   status: string;
+  sandboxName?: string | null;
+  terminalAddress?: string | null;
+  /** Present on a GET, owner first. */
+  members?: ChannelMember[];
   createdAt?: string;
   updatedAt?: string;
   stoppedAt?: string | null;
@@ -58,6 +88,17 @@ export interface ChannelEvent {
   ts: string;
   threadTs?: string;
   user?: string;
+  /** COMMAND_EVENT only: the slash word and the text after it. */
+  command?: string;
+  text?: string;
+}
+
+/** What a host reports about its own sandbox on a channel: fields the service keeps on the member row. */
+export interface MemberFields {
+  /** A DNS name a terminal connects to; the service lower-cases and validates it. */
+  terminalAddress?: string;
+  /** One DNS label — the sandbox as the channel names it. */
+  sandboxName?: string;
 }
 
 export interface EventsPage {
@@ -180,15 +221,21 @@ export class SessionChannelClient {
     this.timeoutMs = options.timeoutMs ?? 30_000;
   }
 
-  /** Create the channel for a session, or return the existing one (idempotent on sessionId). */
-  async create(input: {
-    appId: string;
-    sessionId: string;
-    title: string;
-    teamId?: string;
-    botUserId?: string;
-    origin?: { channel: string; ts: string };
-  }): Promise<{ channel: ChannelRecord; created: boolean }> {
+  /**
+   * Create the channel for a session, or return the existing one (idempotent
+   * on sessionId). The member fields describe the creating sandbox — the
+   * channel's first member — and are optional.
+   */
+  async create(
+    input: {
+      appId: string;
+      sessionId: string;
+      title: string;
+      teamId?: string;
+      botUserId?: string;
+      origin?: { channel: string; ts: string };
+    } & MemberFields,
+  ): Promise<{ channel: ChannelRecord; created: boolean }> {
     const body = await this.request<ChannelRecord & { created?: boolean }>('POST', '/v1/code-channels', input);
     const { created, ...channel } = body;
     return { channel, created: created === true };
@@ -196,6 +243,23 @@ export class SessionChannelClient {
 
   get(channelId: string): Promise<ChannelRecord> {
     return this.request<ChannelRecord>('GET', `/v1/code-channels/${encodeURIComponent(channelId)}`);
+  }
+
+  /**
+   * Fill in or change this host's member fields on a channel that already
+   * exists — a terminal address learned after the channel was opened. The
+   * member is keyed by its bot user; at least one field must be sent.
+   */
+  updateMember(
+    channelId: string,
+    botUserId: string,
+    fields: MemberFields,
+  ): Promise<{ channelId: string; member: ChannelMember }> {
+    return this.request(
+      'PUT',
+      `/v1/code-channels/${encodeURIComponent(channelId)}/members/${encodeURIComponent(botUserId)}`,
+      fields,
+    );
   }
 
   setStatus(

@@ -330,3 +330,37 @@ describe('event loop', () => {
     await h.runtime.stop();
   });
 });
+
+describe('event loop — events that are not a stop', () => {
+  it('a slash command, a thread stop and an unknown type are logged and dropped: no interrupt, cursor advances', async () => {
+    const base = { channelId: 'C1', sessionId: 'ag-1', ts: iso(T0) };
+    const page: ChannelEvent[] = [
+      { ...base, cursor: 'EVT#1', type: 'code_channel.command', command: '/terminal', text: '', user: 'U1' },
+      { ...base, cursor: 'EVT#2', type: 'code_channel.command', command: '/deploy', text: 'staging', user: 'U1' },
+      { ...base, cursor: 'EVT#3', type: 'code_channel.stopped', threadTs: '1700000000.000100', user: 'U1' },
+      { ...base, cursor: 'EVT#4', type: 'code_channel.something_newer' },
+    ];
+    let polls = 0;
+    const events = async (_channel: string, opts: { since?: string | null; signal?: AbortSignal }) => {
+      polls += 1;
+      if (polls === 1) return { events: page, cursor: 'EVT#4' };
+      await new Promise<void>((r) => opts.signal?.addEventListener('abort', () => r(), { once: true }));
+      throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+    };
+    const pollingClient = { setStatus: async () => ({}), putView: async () => ({}), events };
+    const h = harness([row()], {
+      watchEvents: true,
+      pollWaitSeconds: 1,
+      clientFor: () => pollingClient as unknown as SessionChannelClient,
+    });
+    await h.runtime.start();
+    const cursorPersisted = () => h.patches.some(([, p]) => p.events_cursor === 'EVT#4');
+    for (let i = 0; i < 200 && !cursorPersisted(); i++) await new Promise((r) => setTimeout(r, 10));
+    expect(cursorPersisted()).toBe(true);
+    expect(h.interrupt).not.toHaveBeenCalled();
+    expect(h.patches.some(([, p]) => 'stopped_at' in p)).toBe(false);
+    // The binding is still live: nothing in that page was a reason to drop it.
+    expect(h.runtime.has('ag-1')).toBe(true);
+    await h.runtime.stop();
+  });
+});

@@ -46,6 +46,10 @@ What the channel shows:
 - **Stop.** Stopping the session from the channel interrupts the current
   turn in the terminal. The session stays attached and the channel stays
   open; the next message from the channel or the terminal resumes it.
+- **Terminal.** On a Host with remote terminal access enabled (below), the
+  channel knows the sandbox's address, and `/terminal` typed in the channel
+  answers with the `ssh` line to reach it. A sandbox created before remote
+  access was enabled learns its address when `remote enable` runs.
 
 The Host mirrors the session by reading a small state file the session's
 hooks write into the workspace, so a session that was attached before the

@@ -76,6 +76,14 @@ function fakeClient() {
       const channel: ChannelRecord = { channelId: `C${n}`, sessionId: input.sessionId, status: 'active' };
       return { channel, created: true };
     }),
+    // Neither is reached here: no terminal address is offered to these binds.
+    get: vi.fn(
+      async (channelId: string): Promise<ChannelRecord> => ({ channelId, sessionId: GROUP.id, status: 'active' }),
+    ),
+    updateMember: vi.fn(async (channelId: string, botUserId: string) => ({
+      channelId,
+      member: { botUserId, role: 'owner' },
+    })),
   };
 }
 

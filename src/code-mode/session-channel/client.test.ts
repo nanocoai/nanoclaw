@@ -89,25 +89,46 @@ describe('routes', () => {
     expect((await c.client.create({ appId: 'A1', sessionId: 'ag-1', title: 'box' })).created).toBe(false);
   });
 
-  it('get / status / view / properties / archive hit their paths with their bodies', async () => {
+  it('create carries the member fields for the creating sandbox when given', async () => {
+    const c = client([{ status: 201, body: { channelId: 'C1', sessionId: 'ag-1', status: 'active', created: true } }]);
+    await c.client.create({
+      appId: 'A1',
+      sessionId: 'ag-1',
+      title: 'box',
+      sandboxName: 'box',
+      terminalAddress: 'box.alice.example.test',
+    });
+    expect(c.calls[0].body).toEqual({
+      appId: 'A1',
+      sessionId: 'ag-1',
+      title: 'box',
+      sandboxName: 'box',
+      terminalAddress: 'box.alice.example.test',
+    });
+  });
+
+  it('get / status / view / properties / archive / member update hit their paths with their bodies', async () => {
     const c = client([
       { status: 200, body: { channelId: 'C1', sessionId: 'ag-1', status: 'active' } },
       { status: 200, body: { channelId: 'C1', sessionId: 'ag-1', status: 'processing', resumed: true } },
       { status: 200, body: { channelId: 'C1', viewKey: 'diff', type: 'diff', views: 1 } },
       { status: 200, body: { channelId: 'C1', contextBarItems: [] } },
       { status: 200, body: { channelId: 'C1', sessionId: 'ag-1', status: 'closed', archived: true, archivedAt: 't' } },
+      { status: 200, body: { channelId: 'C1', member: { botUserId: 'U0BOT1', role: 'owner' } } },
     ]);
     await c.client.get('C1');
     await c.client.setStatus('C1', 'processing', { resume: true });
     await c.client.putView('C1', 'diff', { type: 'diff', content: '--- a\n+++ b\n', name: 'Changes' });
     await c.client.putProperties('C1', { contextBarItems: [{ key: 'repo', label: 'box' }] });
     await c.client.archive('C1', { summary: 'done' });
+    await c.client.updateMember('C1', 'U0BOT1', { terminalAddress: 'box.alice.example.test', sandboxName: 'box' });
     expect(c.calls.map((x) => [x.method, x.url.slice(BASE.length), x.body])).toEqual([
       ['GET', '/v1/code-channels/C1', undefined],
       ['POST', '/v1/code-channels/C1/status', { status: 'processing', resume: true }],
       ['PUT', '/v1/code-channels/C1/views/diff', { type: 'diff', content: '--- a\n+++ b\n', name: 'Changes' }],
       ['PUT', '/v1/code-channels/C1/properties', { contextBarItems: [{ key: 'repo', label: 'box' }] }],
       ['POST', '/v1/code-channels/C1/archive', { summary: 'done' }],
+      ['PUT', '/v1/code-channels/C1/members/U0BOT1', { terminalAddress: 'box.alice.example.test', sandboxName: 'box' }],
     ]);
   });
 

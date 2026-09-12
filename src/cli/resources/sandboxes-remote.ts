@@ -15,6 +15,7 @@ import {
 } from '../../code-mode/door/index.js';
 import type { KeyStore } from '../../code-mode/door/keys.js';
 import { validateAccountName } from '../../code-mode/door/name.js';
+import { announceTerminalAddresses } from '../../code-mode/session-channel/index.js';
 import type { CustomOperation } from '../crud.js';
 
 function positional(args: Record<string, unknown>, flag: string): string | undefined {
@@ -86,7 +87,12 @@ export const remoteOperations: Record<string, CustomOperation> = {
     examples: ['ncl sandboxes remote enable', 'ncl sandboxes remote enable --name my-machine'],
     handler: async (args) => {
       const name = positional(args, 'name');
-      return enableDoor(name === undefined ? {} : { name: validateAccountName(name) });
+      const summary = await enableDoor(name === undefined ? {} : { name: validateAccountName(name) });
+      // Sandboxes that already have a chat surface tell it their address now
+      // that they have one. Best effort and never in the verb's way: the
+      // sweep logs what it did and never rejects.
+      void announceTerminalAddresses();
+      return summary;
     },
     formatHuman: renderSummary,
   },

@@ -22,10 +22,13 @@
 import { log } from '../../log.js';
 import {
   backoff,
+  COMMAND_EVENT,
   isChannelGone,
   isSessionStopped,
   isUnavailable,
   LONG_POLL_MAX_SECONDS,
+  STOPPED_EVENT,
+  TERMINAL_COMMAND,
   type ChannelEvent,
   type SessionChannelClient,
 } from './client.js';
@@ -280,6 +283,33 @@ export class SessionChannelRuntime {
     });
   }
 
+  /**
+   * One host-bound notification. A channel-wide Stop is the one event the
+   * host acts on. A slash command is the service's to answer — `/terminal`
+   * it answers from the members' addresses, so nothing happens here; any
+   * other command is noted and ignored. A thread-scoped stop and any type
+   * this host does not know are logged and dropped, never raised: the queue
+   * may carry events newer than this host, and none of them is a message
+   * for the session.
+   */
+  private async handleEvent(state: BindingState, event: ChannelEvent): Promise<void> {
+    const agentGroupId = state.row.agent_group_id;
+    if (event.type === STOPPED_EVENT) {
+      if (isStopEvent(event)) await this.handleStop(agentGroupId, event);
+      else log.debug('Session channel thread stop relayed only', { agentGroupId, threadTs: event.threadTs });
+      return;
+    }
+    if (event.type === COMMAND_EVENT) {
+      if (event.command === TERMINAL_COMMAND) {
+        log.debug('Session channel command answered by the service', { agentGroupId, command: event.command });
+      } else {
+        log.info('Session channel command ignored', { agentGroupId, command: event.command, user: event.user });
+      }
+      return;
+    }
+    log.info('Session channel event ignored', { agentGroupId, type: event.type });
+  }
+
   private watch(state: BindingState): void {
     const abort = new AbortController();
     state.watcher = abort;
@@ -295,9 +325,7 @@ export class SessionChannelRuntime {
             signal: abort.signal,
           });
           attempt = 0;
-          for (const event of page.events) {
-            if (isStopEvent(event)) await this.handleStop(id, event);
-          }
+          for (const event of page.events) await this.handleEvent(state, event);
           if (page.cursor && page.cursor !== state.row.events_cursor) {
             state.row.events_cursor = page.cursor;
             await this.deps.persist(id, { events_cursor: page.cursor });

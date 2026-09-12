@@ -31,6 +31,38 @@ export interface SandboxAddressOutcome {
   code?: string;
 }
 
+/** One DNS label: what a sandbox name must be to take part in an address. */
+const DNS_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+export interface SandboxTerminalAddress {
+  /** The sandbox's label in the address (its name, lower-cased). */
+  sandbox: string;
+  /** `<sandbox>.<account-name>.<zone>` — or the account's own address for the default sandbox. */
+  address: string;
+}
+
+/**
+ * The address a terminal connects to for a sandbox on this host, composed
+ * from what `remote enable` journaled: the account name and the machine's
+ * host name (`<account-name>.<zone>`). The zone is what follows the host
+ * name's first label, so a name renamed since the host name was recorded
+ * still yields the current address. Undefined while remote access is off,
+ * before the account has answered with a host name, or for a sandbox whose
+ * name is not a DNS label (such a sandbox never got an address).
+ */
+export function sandboxTerminalAddress(
+  name: string,
+  door: Pick<doorModule.DoorSummary, 'enabled' | 'name' | 'host'>,
+): SandboxTerminalAddress | undefined {
+  if (!door.enabled || !door.name || !door.host) return undefined;
+  const zone = door.host.split('.').slice(1).join('.');
+  if (!zone) return undefined;
+  const sandbox = name.toLowerCase();
+  if (!DNS_LABEL.test(sandbox)) return undefined;
+  const account = `${door.name}.${zone}`;
+  return { sandbox, address: sandbox === door.name ? account : `${sandbox}.${account}` };
+}
+
 /** Register a sandbox's name with the account; it gets an address of its own. */
 export async function registerSandbox(
   name: string,
