@@ -32,6 +32,7 @@ import { groupFolderExistsOnDisk, isValidGroupFolder } from '../group-folder.js'
 import { initGroupFilesystem } from '../group-init.js';
 import { getInstallSlug } from '../install-slug.js';
 import { log } from '../log.js';
+import { fireSandboxCreated } from './hooks.js';
 import { resolveSandboxSession } from '../session-manager.js';
 import { isValidTimezone } from '../timezone.js';
 import type { AgentGroup, Session } from '../types.js';
@@ -222,6 +223,9 @@ export async function createSandbox(input: CreateSandboxInput = {}): Promise<Cre
     throw error;
   }
   log.info('Sandbox created', { sandbox: folder, agentGroupId: id, sessionId: session.id });
+  // Modules learn of the new sandbox here — after the rows exist and before
+  // the first wake. A listener that throws is logged, never the verb's problem.
+  await fireSandboxCreated(group);
   return { group, session };
 }
 

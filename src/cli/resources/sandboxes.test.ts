@@ -56,7 +56,15 @@ import type { CallerContext, RequestFrame, ResponseFrame } from '../frame.js';
 // Side-effect imports: register the sandboxes-* commands and the code-mode
 // migrations (the code_mode / permission_mode columns the verbs write).
 import './sandboxes.js';
+import './groups.js';
 import '../../code-mode/index.js';
+import {
+  SANDBOX_HOOKS_SEAM,
+  onSandboxCreated,
+  onSandboxRemoved,
+  resetSandboxHooksForTesting,
+} from '../../code-mode/hooks.js';
+import { resetSeamRefusalsForTesting, seamAccepted } from '../../seams.js';
 
 const HOST: CallerContext = { caller: 'host' };
 const AGENT: CallerContext = {
@@ -386,5 +394,58 @@ describe('sandboxes attach', () => {
     expect(res.ok).toBe(false);
     expect(errMsg(res)).toContain("no sandbox 'nope'");
     expect(errMsg(res)).toContain('ncl sandboxes new --name nope');
+  });
+});
+
+describe('sandbox lifecycle hooks', () => {
+  afterEach(() => {
+    resetSandboxHooksForTesting();
+    resetSeamRefusalsForTesting();
+  });
+
+  it('`new` fires onSandboxCreated after the rows exist; `groups delete` fires onSandboxRemoved after they are gone', async () => {
+    const events: string[] = [];
+    onSandboxCreated(
+      't',
+      async (g) => {
+        // The group and its config are already there for a listener to read.
+        expect((await getContainerConfig(g.id))?.code_mode).toBe(1);
+        events.push(`created:${g.folder}`);
+      },
+      { seam: SANDBOX_HOOKS_SEAM },
+    );
+    onSandboxRemoved(
+      't',
+      async (g) => {
+        expect(await getAgentGroupByFolder(g.folder)).toBeUndefined();
+        events.push(`removed:${g.folder}`);
+      },
+      { seam: SANDBOX_HOOKS_SEAM },
+    );
+    const created = await call('sandboxes-new', { name: 't1', 'no-attach': true });
+    const { id } = dataOf<{ id: string }>(created);
+    const deleted = await call('groups-delete', { id });
+    expect(deleted.ok).toBe(true);
+    expect(events).toEqual(['created:t1', 'removed:t1']);
+  });
+
+  it('a listener that throws never fails the verb', async () => {
+    onSandboxCreated(
+      'boom',
+      () => {
+        throw new Error('listener broke');
+      },
+      { seam: SANDBOX_HOOKS_SEAM },
+    );
+    const res = await call('sandboxes-new', { name: 't1', 'no-attach': true });
+    expect(res.ok).toBe(true);
+  });
+
+  it('`list` repeats a seam refusal above the table so the operator sees the module that did not load', async () => {
+    seamAccepted('sandbox-hooks', 'created:old-module', SANDBOX_HOOKS_SEAM, SANDBOX_HOOKS_SEAM + 1);
+    const res = await call('sandboxes-list');
+    expect(res.ok).toBe(true);
+    const human = (res as { human?: string }).human ?? '';
+    expect(human.split('\n')[0]).toContain("sandbox-hooks refused 'created:old-module'");
   });
 });

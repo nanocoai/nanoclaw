@@ -10,6 +10,7 @@ import {
 import { buildAgentGroupImage, killContainer } from '../../container-runner.js';
 import { requestWake } from '../../request-wake.js';
 import { restartAgentGroupContainers } from '../../container-restart.js';
+import { fireSandboxRemoved } from '../../code-mode/hooks.js';
 import { createAgentGroup, getAgentGroup, getAgentGroupByFolder } from '../../db/agent-groups.js';
 import { getDb, hasTable } from '../../db/connection.js';
 import { getSession } from '../../db/sessions.js';
@@ -240,6 +241,9 @@ registerResource({
         // genericDelete behaviour of throwing "not found" for unknown IDs.
         const exists = await db.get('SELECT 1 FROM agent_groups WHERE id = ? LIMIT 1', id);
         if (!exists) throw new Error(`group not found: ${id}`);
+        // A code-mode group is a sandbox; modules that attached state to it
+        // are told once its rows are gone (code-mode/hooks.ts).
+        const sandbox = (await getContainerConfig(id))?.code_mode === 1 ? await getAgentGroup(id) : undefined;
 
         const hasAgentDestinations = await hasTable(db, 'agent_destinations');
         const hasPendingApprovals = await hasTable(db, 'pending_approvals');
@@ -310,6 +314,7 @@ registerResource({
           return counts;
         });
 
+        if (sandbox) await fireSandboxRemoved(sandbox);
         return { deleted: id, removed };
       },
     },

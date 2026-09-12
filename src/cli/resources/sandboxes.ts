@@ -17,6 +17,7 @@ import {
   NEW_SANDBOX_WAKE_WAIT_MS,
   type SandboxListRow,
 } from '../../code-mode/sandboxes.js';
+import { renderSeamRefusals } from '../../seams.js';
 import type { AgentGroup } from '../../types.js';
 import { resolveAttachForGroup } from '../attach-resolve.js';
 import { registerResource } from '../crud.js';
@@ -31,6 +32,14 @@ export async function resolveSandboxGroup(raw: unknown, verb: string): Promise<A
 }
 
 function renderSandboxTable(rows: SandboxListRow[]): string {
+  // A module this host refused (seam mismatch) is an operator's fact: it
+  // shows here, above the table, until the module is rebuilt.
+  const refused = renderSeamRefusals();
+  const table = renderSandboxRows(rows);
+  return refused.length > 0 ? [...refused, table].join('\n') : table;
+}
+
+function renderSandboxRows(rows: SandboxListRow[]): string {
   if (rows.length === 0) return 'no sandboxes — create one: ncl sandboxes new [--name <name>]';
   const header = ['SANDBOX', 'STATUS', 'SESSIONS', 'LAST-ACTIVE', 'ID'];
   const cells = rows.map((r) => [r.sandbox, r.status, String(r.sessions), r.last_active ?? '-', r.id]);
