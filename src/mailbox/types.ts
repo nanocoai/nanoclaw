@@ -28,6 +28,7 @@ export type {
   StateRecord,
   TaskStatus,
   TaskWrite,
+  TurnState,
 } from './model.js';
 
 export interface MailboxSessionKey {
@@ -52,7 +53,11 @@ export interface ProcessingClaim {
   statusChanged: string;
 }
 
-export type ContainerState = Omit<ContainerRecord, 'updatedAt'>;
+/**
+ * The container's state row as the host reads it: tool in flight (sweep
+ * tolerance) plus the runner's turn report and its stamp (typing indicator).
+ */
+export type ContainerState = ContainerRecord;
 export type OutboundMessage = OutboundDelivery;
 export type Task = TaskWrite;
 

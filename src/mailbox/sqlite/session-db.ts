@@ -191,24 +191,36 @@ export interface ContainerState {
   current_tool: string | null;
   tool_declared_timeout_ms: number | null;
   tool_started_at: string | null;
+  /** Runner turn report ('working' | 'idle'); null when absent or never written. */
+  turn: string | null;
   updated_at: string;
 }
 
 /**
- * Read the container's current tool-in-flight state, if any. Returns null
- * when either the table doesn't exist yet (older session DB) or no tool is
- * active. Host sweep reads this to widen stuck-detection tolerance while
- * Bash is running with a long declared timeout.
+ * Read the container's current state row, if any: the tool in flight (the
+ * host sweep widens its stuck tolerance while Bash runs with a long declared
+ * timeout) and the runner's turn report (the typing indicator follows it).
+ * Returns null when the table doesn't exist yet (older session DB) or the
+ * row was never written.
+ *
+ * `turn` was added after the table first shipped. The runner owns this file
+ * and adds the column on its next start, but an older runner never will, so
+ * the read tolerates its absence: `SELECT *` plus a per-field pick, never a
+ * column list that fails on the old shape.
  */
 export function getContainerState(outDb: Database.Database): ContainerState | null {
   try {
-    const row = outDb
-      .prepare(
-        `SELECT current_tool, tool_declared_timeout_ms, tool_started_at, updated_at
-           FROM container_state WHERE id = 1`,
-      )
-      .get() as ContainerState | undefined;
-    return row ?? null;
+    const row = outDb.prepare('SELECT * FROM container_state WHERE id = 1').get() as
+      | (Partial<ContainerState> & { updated_at: string })
+      | undefined;
+    if (!row) return null;
+    return {
+      current_tool: row.current_tool ?? null,
+      tool_declared_timeout_ms: row.tool_declared_timeout_ms ?? null,
+      tool_started_at: row.tool_started_at ?? null,
+      turn: row.turn ?? null,
+      updated_at: row.updated_at,
+    };
   } catch {
     // Table not present on older session DBs — treat as "no tool in flight".
     return null;

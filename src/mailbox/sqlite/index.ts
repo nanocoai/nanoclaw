@@ -338,12 +338,15 @@ export function wrapSqliteOutbound(
         currentTool: row.current_tool,
         toolDeclaredTimeoutMs: row.tool_declared_timeout_ms,
         toolStartedAt: row.tool_started_at === null ? null : sqliteTimestamp(row.tool_started_at),
+        turn: row.turn,
         updatedAt: sqliteTimestamp(row.updated_at),
       });
       return {
         currentTool: record.currentTool,
         toolDeclaredTimeoutMs: record.toolDeclaredTimeoutMs,
         toolStartedAt: record.toolStartedAt,
+        turn: record.turn,
+        updatedAt: record.updatedAt,
       };
     },
     getDueMessages: (excludeIds) =>

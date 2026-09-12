@@ -41,4 +41,5 @@ export type {
   TaskRecord,
   TaskStats,
   TaskUpdate,
+  TurnState,
 } from './types.js';

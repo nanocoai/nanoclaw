@@ -96,14 +96,16 @@ describe('SQLite mailbox canonical serialization', () => {
     outboundDb
       .prepare(
         `INSERT INTO container_state
-           (id, current_tool, tool_declared_timeout_ms, tool_started_at, updated_at)
-         VALUES (1, ?, ?, ?, ?)`,
+           (id, current_tool, tool_declared_timeout_ms, tool_started_at, turn, updated_at)
+         VALUES (1, ?, ?, ?, ?, ?)`,
       )
-      .run('Bash', 30_000, '2026-01-01 00:00:00', '2026-01-01 00:00:01');
+      .run('Bash', 30_000, '2026-01-01 00:00:00', 'working', '2026-01-01 00:00:01');
     expect(outbound.getContainerState()).toEqual({
       currentTool: 'Bash',
       toolDeclaredTimeoutMs: 30_000,
       toolStartedAt: '2026-01-01T00:00:00.000Z',
+      turn: 'working',
+      updatedAt: '2026-01-01T00:00:01.000Z',
     });
 
     await outbound.writeDirect({
@@ -171,5 +173,58 @@ describe('SQLite mailbox canonical serialization', () => {
     expect(wrapSqliteOutbound(outboundDb).getTopLevelOutbound(10)).toEqual([
       { timestamp: '2026-01-01T00:00:04.000Z', content: '{"text":"top level"}' },
     ]);
+  });
+});
+
+describe('SQLite mailbox container state', () => {
+  const databases: Database.Database[] = [];
+
+  afterEach(() => {
+    for (const database of databases.splice(0)) database.close();
+  });
+
+  it('reads a container_state row written before the turn column existed', () => {
+    // An outbound.db owned by an older runner: the table predates `turn` and
+    // that runner will never add the column. The host read must still work.
+    const outboundDb = new Database(':memory:');
+    databases.push(outboundDb);
+    outboundDb.exec(`
+      CREATE TABLE container_state (
+        id                       INTEGER PRIMARY KEY CHECK (id = 1),
+        current_tool             TEXT,
+        tool_declared_timeout_ms INTEGER,
+        tool_started_at          TEXT,
+        updated_at               TEXT NOT NULL
+      );
+    `);
+    outboundDb
+      .prepare(
+        'INSERT INTO container_state (id, current_tool, tool_declared_timeout_ms, tool_started_at, updated_at) VALUES (1, ?, ?, ?, ?)',
+      )
+      .run('Bash', null, '2026-01-01 00:00:00', '2026-01-01 00:00:01');
+    const outbound = wrapSqliteOutbound(
+      () => outboundDb,
+      () => outboundDb,
+      () => 2,
+    );
+    expect(outbound.getContainerState()).toEqual({
+      currentTool: 'Bash',
+      toolDeclaredTimeoutMs: null,
+      toolStartedAt: '2026-01-01T00:00:00.000Z',
+      turn: null,
+      updatedAt: '2026-01-01T00:00:01.000Z',
+    });
+  });
+
+  it('returns null when the row was never written', () => {
+    const outboundDb = new Database(':memory:');
+    databases.push(outboundDb);
+    outboundDb.exec(OUTBOUND_SCHEMA);
+    const outbound = wrapSqliteOutbound(
+      () => outboundDb,
+      () => outboundDb,
+      () => 2,
+    );
+    expect(outbound.getContainerState()).toBeNull();
   });
 });

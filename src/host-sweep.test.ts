@@ -129,6 +129,8 @@ describe('decideStuckAction', () => {
         currentTool: 'Bash',
         toolDeclaredTimeoutMs: twoHrMs,
         toolStartedAt: parseIsoTimestamp(new Date(BASE - 45 * 60 * 1000).toISOString()),
+        turn: null,
+        updatedAt: parseIsoTimestamp(new Date(BASE - 45 * 60 * 1000).toISOString()),
       },
       claims: [],
     });
@@ -180,6 +182,8 @@ describe('decideStuckAction', () => {
         currentTool: 'Bash',
         toolDeclaredTimeoutMs: tenMinMs,
         toolStartedAt: parseIsoTimestamp(new Date(BASE - 5 * 60 * 1000).toISOString()),
+        turn: null,
+        updatedAt: parseIsoTimestamp(new Date(BASE - 5 * 60 * 1000).toISOString()),
       },
       claims: [claim('msg-1', 5 * 60 * 1000)],
     });
