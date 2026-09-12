@@ -227,6 +227,27 @@ export function getContainerState(outDb: Database.Database): ContainerState | nu
   }
 }
 
+export interface SessionStateRow {
+  value: string;
+  updated_at: string;
+}
+
+/**
+ * Read one runner-written session_state row. Returns undefined when the key
+ * is absent or the table does not exist yet (outbound.db files created
+ * before session_state shipped; the runner creates it on its next start).
+ */
+export function getSessionState(outDb: Database.Database, key: string): SessionStateRow | undefined {
+  try {
+    return outDb.prepare('SELECT value, updated_at FROM session_state WHERE key = ?').get(key) as
+      | SessionStateRow
+      | undefined;
+  } catch {
+    // Table not present on older session DBs — nothing reported.
+    return undefined;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // messages_out (read-only from host)
 // ---------------------------------------------------------------------------

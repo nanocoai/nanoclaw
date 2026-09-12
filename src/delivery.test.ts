@@ -78,6 +78,16 @@ function insertOutbound(agentGroupId: string, sessionId: string, msgId: string):
   db.close();
 }
 
+function setLiveStatus(agentGroupId: string, sessionId: string, text: string, updatedAt: string): void {
+  const db = new Database(outboundDbPath(agentGroupId, sessionId));
+  db.prepare('INSERT OR REPLACE INTO session_state (key, value, updated_at) VALUES (?, ?, ?)').run(
+    'live_status',
+    text,
+    updatedAt,
+  );
+  db.close();
+}
+
 function setContainerTurn(agentGroupId: string, sessionId: string, turn: string, updatedAt: string): void {
   const db = new Database(outboundDbPath(agentGroupId, sessionId));
   db.prepare(
@@ -158,10 +168,59 @@ describe('deliverSessionMessages — concurrent invocations', () => {
       },
     });
 
-    const spy = vi.spyOn(typing, 'noteTurnState');
+    const spy = vi.spyOn(typing, 'notePresence');
     try {
       await deliverSessionMessages(session);
-      expect(spy).toHaveBeenCalledWith(session.id, { turn: 'working', updatedAtMs: Date.parse(updatedAt) });
+      expect(spy).toHaveBeenCalledWith(session.id, {
+        turn: 'working',
+        updatedAtMs: Date.parse(updatedAt),
+        status: null,
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('forwards the runner status line beside the turn as one presence report', async () => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    const turnAt = new Date().toISOString();
+    const statusAt = new Date(Date.now() + 1).toISOString();
+    setContainerTurn('ag-1', session.id, 'working', turnAt);
+    setLiveStatus('ag-1', session.id, '  Reading the thread  ', statusAt);
+    setDeliveryAdapter({
+      async deliver() {
+        return undefined;
+      },
+    });
+
+    const spy = vi.spyOn(typing, 'notePresence');
+    try {
+      await deliverSessionMessages(session);
+      expect(spy).toHaveBeenCalledWith(session.id, {
+        turn: 'working',
+        updatedAtMs: Date.parse(turnAt),
+        status: { text: 'Reading the thread', atMs: Date.parse(statusAt) },
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('a blank status line reads as no status', async () => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    setLiveStatus('ag-1', session.id, '   ', new Date().toISOString());
+    setDeliveryAdapter({
+      async deliver() {
+        return undefined;
+      },
+    });
+
+    const spy = vi.spyOn(typing, 'notePresence');
+    try {
+      await deliverSessionMessages(session);
+      expect(spy).toHaveBeenCalledWith(session.id, { turn: null, updatedAtMs: null, status: null });
     } finally {
       spy.mockRestore();
     }
@@ -176,10 +235,10 @@ describe('deliverSessionMessages — concurrent invocations', () => {
       },
     });
 
-    const spy = vi.spyOn(typing, 'noteTurnState');
+    const spy = vi.spyOn(typing, 'notePresence');
     try {
       await deliverSessionMessages(session);
-      expect(spy).toHaveBeenCalledWith(session.id, { turn: null, updatedAtMs: null });
+      expect(spy).toHaveBeenCalledWith(session.id, { turn: null, updatedAtMs: null, status: null });
     } finally {
       spy.mockRestore();
     }

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Adapter, AdapterPostableMessage, RawMessage } from 'chat';
 
-import { createChatSdkBridge, splitForLimit } from './chat-sdk-bridge.js';
+import { createChatSdkBridge, normalizeStatusText, splitForLimit } from './chat-sdk-bridge.js';
 
 vi.mock('../webhook-server.js', () => ({
   registerWebhookAdapter: vi.fn(),
@@ -94,6 +94,34 @@ describe('createChatSdkBridge', () => {
       supportsThreads: true,
     });
     expect(typeof bridge.subscribe).toBe('function');
+  });
+
+  it('setTyping passes a status line to startTyping, normalized to one trimmed line', async () => {
+    const typingCalls: Array<{ threadId: string; status?: string }> = [];
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({
+        startTyping: async (threadId: string, status?: string) => {
+          typingCalls.push({ threadId, status });
+        },
+      }),
+      supportsThreads: true,
+    });
+    await bridge.setTyping!('C123', 'C123:1700000000.000100');
+    await bridge.setTyping!('C123', 'C123:1700000000.000100', '  Reading\nthe   thread  ', 'agent');
+    await bridge.setTyping!('C123', 'C123:1700000000.000100', '   ');
+    expect(typingCalls).toEqual([
+      { threadId: 'C123:1700000000.000100', status: undefined },
+      { threadId: 'C123:1700000000.000100', status: 'Reading the thread' },
+      { threadId: 'C123:1700000000.000100', status: undefined },
+    ]);
+  });
+
+  it('normalizeStatusText caps an over-long line', () => {
+    const long = 'x'.repeat(500);
+    const out = normalizeStatusText(long);
+    expect(out.length).toBe(200);
+    expect(out.endsWith('…')).toBe(true);
+    expect(normalizeStatusText('short line')).toBe('short line');
   });
 
   it('clearTyping clears a Slack-shaped assistant status with an empty string', async () => {

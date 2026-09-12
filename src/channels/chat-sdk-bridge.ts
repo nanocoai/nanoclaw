@@ -38,6 +38,18 @@ interface GatewayAdapter extends Adapter {
   ): Promise<Response>;
 }
 
+/**
+ * Longest status line the bridge will hand to an adapter. Slack renders the
+ * assistant status as one line and documents no limit; the cap is defensive.
+ */
+const MAX_STATUS_TEXT_LENGTH = 200;
+
+/** One line, trimmed, capped — the shape every adapter can show. */
+export function normalizeStatusText(status: string): string {
+  const oneLine = status.replace(/\s+/g, ' ').trim();
+  return oneLine.length > MAX_STATUS_TEXT_LENGTH ? `${oneLine.slice(0, MAX_STATUS_TEXT_LENGTH - 1)}…` : oneLine;
+}
+
 /** Reply context extracted from a platform's raw message. */
 export interface ReplyContext {
   text: string;
@@ -961,14 +973,21 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       }
     },
 
-    async setTyping(platformId: string, threadId: string | null) {
+    async setTyping(platformId: string, threadId: string | null, status?: string) {
       const tid = threadId ?? platformId;
-      await adapter.startTyping(tid);
+      // The Chat SDK's startTyping takes an optional status line; the Slack
+      // adapter shows it as the thread's assistant status (a single line).
+      // Neither the adapter nor Slack documents a length limit and the
+      // adapter passes the text through untouched, so normalize here:
+      // one line, trimmed, capped.
+      const text = status ? normalizeStatusText(status) : undefined;
+      await adapter.startTyping(tid, text || undefined);
     },
 
     // The Chat SDK adapter contract has startTyping and no stop, so clearing
-    // is platform-specific. Slack's assistant status has no expiry and is
-    // cleared by setting it to empty; the Slack adapter exposes
+    // is platform-specific. Slack's assistant status persists until a post, an
+    // explicit clear, or a two-minute timeout, and is cleared by setting it to
+    // empty; the Slack adapter exposes
     // setAssistantStatus(channel, threadTs, status) and decodeThreadId
     // publicly. Call it only when the adapter has both and the decoded thread
     // carries a threadTs; otherwise there is nothing to clear.

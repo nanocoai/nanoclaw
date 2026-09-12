@@ -6,6 +6,7 @@ import type {
   OutboundDelivery,
   ProcessingAckRecord,
   SessionRoutingRecord,
+  StateRecord,
   TaskRecord as CanonicalTaskRecord,
   TaskWrite,
 } from './model.js';
@@ -58,6 +59,8 @@ export interface ProcessingClaim {
  * tolerance) plus the runner's turn report and its stamp (typing indicator).
  */
 export type ContainerState = ContainerRecord;
+/** One runner-written `session_state` row as the host reads it (the key is the lookup). */
+export type StateValue = Omit<StateRecord, 'key'>;
 export type OutboundMessage = OutboundDelivery;
 export type Task = TaskWrite;
 
@@ -143,6 +146,14 @@ export interface OutboundMailbox {
   getProcessingClaims(): ProcessingClaim[];
   deleteOrphanProcessingClaims(): number;
   getContainerState(): ContainerState | null;
+  /**
+   * Read one runner-written session_state row (the runner's generic
+   * per-session state, e.g. its `live_status` text). Undefined when the key
+   * is absent or the table does not exist yet (older session DB). Optional
+   * so mailbox implementations that carry no runner state still conform;
+   * readers call it as `getState?.(key)`.
+   */
+  getState?(key: string): StateValue | undefined;
   getDueMessages(excludeIds?: ReadonlySet<string>): OutboundMessage[];
   writeDirect(message: DirectOutboundMessage): Promise<void>;
   getOutboundHistory(limit: number): MailboxHistoryMessage[];

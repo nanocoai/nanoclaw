@@ -19,14 +19,21 @@ import path from 'path';
 
 import { heartbeatPath } from '../../session-manager.js';
 import {
-  noteTurnState,
+  notePresence,
   pauseTypingRefreshAfterDelivery,
   setTypingAdapter,
   startTypingRefresh,
   stopTypingRefresh,
 } from './index.js';
 
-type Call = { channelType: string; platformId: string; threadId: string | null; instance?: string };
+type Call = {
+  channelType: string;
+  platformId: string;
+  threadId: string | null;
+  instance?: string;
+  status?: string;
+  statusKind?: 'auto' | 'agent';
+};
 
 function captureAdapter() {
   const calls: Call[] = [];
@@ -43,8 +50,8 @@ function captureSetAndClear() {
   const sets: Call[] = [];
   const clears: Call[] = [];
   setTypingAdapter({
-    async setTyping(channelType, platformId, threadId, instance) {
-      sets.push({ channelType, platformId, threadId, instance });
+    async setTyping(channelType, platformId, threadId, instance, status, statusKind) {
+      sets.push({ channelType, platformId, threadId, instance, status, statusKind });
     },
     async clearTyping(channelType, platformId, threadId, instance) {
       clears.push({ channelType, platformId, threadId, instance });
@@ -166,7 +173,7 @@ describe('typing follows the runner turn state', () => {
   /** Advance past the 15s grace, keeping a working report live throughout. */
   async function advancePastGraceWorking(): Promise<void> {
     for (let elapsed = 0; elapsed < 20_000; elapsed += 4_000) {
-      noteTurnState(SESS, { turn: 'working', updatedAtMs: Date.now() });
+      notePresence(SESS, { turn: 'working', updatedAtMs: Date.now(), status: null });
       await vi.advanceTimersByTimeAsync(4_000);
     }
   }
@@ -181,7 +188,7 @@ describe('typing follows the runner turn state', () => {
     expect(setsWhileWorking).toBeGreaterThan(1); // still refreshing past grace
 
     // Turn ends without delivering anything.
-    noteTurnState(SESS, { turn: 'idle', updatedAtMs: Date.now() });
+    notePresence(SESS, { turn: 'idle', updatedAtMs: Date.now(), status: null });
     await vi.advanceTimersByTimeAsync(4_000);
 
     expect(clears).toHaveLength(1);
@@ -203,27 +210,27 @@ describe('typing follows the runner turn state', () => {
     // First delivery pauses the refresh; ticks inside the pause skip setTyping.
     pauseTypingRefreshAfterDelivery(SESS);
     let before = sets.length;
-    noteTurnState(SESS, { turn: 'working', updatedAtMs: Date.now() });
+    notePresence(SESS, { turn: 'working', updatedAtMs: Date.now(), status: null });
     await vi.advanceTimersByTimeAsync(8_000); // inside the 10s pause
     expect(sets.length).toBe(before); // no refresh while paused
 
     // Pause expires; a live working report resumes refreshing.
-    noteTurnState(SESS, { turn: 'working', updatedAtMs: Date.now() });
+    notePresence(SESS, { turn: 'working', updatedAtMs: Date.now(), status: null });
     await vi.advanceTimersByTimeAsync(4_000);
     expect(sets.length).toBeGreaterThan(before);
 
     // Second delivery pauses again.
     pauseTypingRefreshAfterDelivery(SESS);
     before = sets.length;
-    noteTurnState(SESS, { turn: 'working', updatedAtMs: Date.now() });
+    notePresence(SESS, { turn: 'working', updatedAtMs: Date.now(), status: null });
     await vi.advanceTimersByTimeAsync(8_000);
     expect(sets.length).toBe(before);
-    noteTurnState(SESS, { turn: 'working', updatedAtMs: Date.now() });
+    notePresence(SESS, { turn: 'working', updatedAtMs: Date.now(), status: null });
     await vi.advanceTimersByTimeAsync(4_000);
     expect(sets.length).toBeGreaterThan(before);
 
     // Turn ends: exactly one clear across the whole turn.
-    noteTurnState(SESS, { turn: 'idle', updatedAtMs: Date.now() });
+    notePresence(SESS, { turn: 'idle', updatedAtMs: Date.now(), status: null });
     await vi.advanceTimersByTimeAsync(4_000);
     expect(clears).toHaveLength(1);
   });
@@ -237,7 +244,7 @@ describe('typing follows the runner turn state', () => {
     // The runner dies: the last working report stops advancing. It stays live
     // for TURN_STALE_MS, then the next tick ends the refresh.
     const setsBeforeDeath = sets.length;
-    noteTurnState(SESS, { turn: 'working', updatedAtMs: Date.now() });
+    notePresence(SESS, { turn: 'working', updatedAtMs: Date.now(), status: null });
     // Under the stale window: still refreshing.
     await vi.advanceTimersByTimeAsync(12_000);
     expect(sets.length).toBeGreaterThan(setsBeforeDeath);
@@ -257,7 +264,7 @@ describe('typing follows the runner turn state', () => {
     startTypingRefresh(SESS, AG, 'slack', 'C1', 'T1', 'slack-inst');
     await vi.advanceTimersByTimeAsync(0);
 
-    // Never call noteTurnState. Past grace, a fresh heartbeat keeps typing on.
+    // Never call notePresence. Past grace, a fresh heartbeat keeps typing on.
     for (let elapsed = 0; elapsed < 20_000; elapsed += 4_000) {
       touchHeartbeat(AG, SESS);
       await vi.advanceTimersByTimeAsync(4_000);
@@ -286,10 +293,143 @@ describe('typing follows the runner turn state', () => {
     expect(clears).toHaveLength(1);
   });
 
-  it('noteTurnState with no active refresher creates none', async () => {
+  it('notePresence with no active refresher creates none', async () => {
     const { sets } = captureSetAndClear();
-    noteTurnState('sess-never', { turn: 'working', updatedAtMs: Date.now() });
+    notePresence('sess-never', { turn: 'working', updatedAtMs: Date.now(), status: null });
     await vi.advanceTimersByTimeAsync(8_000);
     expect(sets).toHaveLength(0);
+  });
+});
+
+describe('presence: runner status text rides on the typing indicator', () => {
+  const SESS = 'sess-turn';
+  const AG = 'ag-turn';
+  const working = (text: string | null) => {
+    notePresence(SESS, {
+      turn: 'working',
+      updatedAtMs: Date.now(),
+      status: text === null ? null : { text, atMs: Date.now() },
+    });
+  };
+  /** Ticks from a fresh refresher until the grace window is behind us. */
+  async function runPastGrace(text: string | null): Promise<void> {
+    for (let elapsed = 0; elapsed < 20_000; elapsed += 4_000) {
+      working(text);
+      await vi.advanceTimersByTimeAsync(4_000);
+    }
+  }
+  const withText = (sets: Call[]) => sets.filter((c) => c.status !== undefined);
+  const plain = (sets: Call[]) => sets.filter((c) => c.status === undefined);
+
+  it('sends the status text (statusKind agent) while working, instead of plain typing', async () => {
+    const { sets } = captureSetAndClear();
+    startTypingRefresh(SESS, AG, 'slack', 'C1', 'T1', 'slack-inst');
+    await vi.advanceTimersByTimeAsync(0);
+    const plainAtStart = plain(sets).length; // the immediate inbound tick is plain
+
+    await runPastGrace('Reading the thread');
+    const texted = withText(sets);
+    expect(texted.length).toBeGreaterThanOrEqual(1);
+    expect(texted[0]).toEqual({
+      channelType: 'slack',
+      platformId: 'C1',
+      threadId: 'T1',
+      instance: 'slack-inst',
+      status: 'Reading the thread',
+      statusKind: 'agent',
+    });
+    // Once text is showing, no plain typing calls are interleaved.
+    expect(plain(sets).length).toBe(plainAtStart);
+  });
+
+  it("re-sends unchanged text on every tick — the cadence is plain typing's", async () => {
+    const { sets } = captureSetAndClear();
+    startTypingRefresh(SESS, AG, 'slack', 'C1', 'T1', 'slack-inst');
+    await vi.advanceTimersByTimeAsync(0);
+    await runPastGrace('Reading the thread');
+    const before = withText(sets).length;
+
+    working('Reading the thread');
+    await vi.advanceTimersByTimeAsync(8_000); // two 4s ticks
+    const after = withText(sets);
+    expect(after.length).toBe(before + 2);
+    for (const c of after) expect(c.status).toBe('Reading the thread');
+  });
+
+  it('changed text shows on the next tick', async () => {
+    const { sets } = captureSetAndClear();
+    startTypingRefresh(SESS, AG, 'slack', 'C1', 'T1', 'slack-inst');
+    await vi.advanceTimersByTimeAsync(0);
+    await runPastGrace('Reading the thread');
+    const before = withText(sets).length;
+
+    working('Drafting a reply');
+    await vi.advanceTimersByTimeAsync(4_000);
+    const texted = withText(sets);
+    expect(texted).toHaveLength(before + 1);
+    expect(texted[texted.length - 1].status).toBe('Drafting a reply');
+  });
+
+  it('pauses after a delivery and sends the text again once the pause ends', async () => {
+    const { sets } = captureSetAndClear();
+    startTypingRefresh(SESS, AG, 'slack', 'C1', 'T1', 'slack-inst');
+    await vi.advanceTimersByTimeAsync(0);
+    await runPastGrace('Reading the thread');
+    const before = withText(sets).length;
+
+    // A reply goes out: the platform drops the status; ticks pause for 10s.
+    pauseTypingRefreshAfterDelivery(SESS);
+    working('Reading the thread');
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(withText(sets)).toHaveLength(before); // paused: nothing sent
+
+    // Pause over: the next tick shows the text again.
+    working('Reading the thread');
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(withText(sets)).toHaveLength(before + 1);
+  });
+
+  it('with no text, plain typing fires every tick as before', async () => {
+    const { sets } = captureSetAndClear();
+    startTypingRefresh(SESS, AG, 'slack', 'C1', 'T1', 'slack-inst');
+    await vi.advanceTimersByTimeAsync(0);
+    await runPastGrace(null);
+    expect(withText(sets)).toHaveLength(0);
+    const before = plain(sets).length;
+    working(null);
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(plain(sets).length).toBe(before + 2);
+    for (const c of sets) expect(c.statusKind).toBeUndefined();
+  });
+
+  it('idle ends the refresh with one clear even while text is showing', async () => {
+    const { sets, clears } = captureSetAndClear();
+    startTypingRefresh(SESS, AG, 'slack', 'C1', 'T1', 'slack-inst');
+    await vi.advanceTimersByTimeAsync(0);
+    await runPastGrace('Reading the thread');
+    expect(withText(sets).length).toBeGreaterThanOrEqual(1);
+
+    notePresence(SESS, {
+      turn: 'idle',
+      updatedAtMs: Date.now(),
+      status: { text: 'Reading the thread', atMs: 0 },
+    });
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(clears).toHaveLength(1);
+    const setsAtEnd = sets.length;
+    await vi.advanceTimersByTimeAsync(12_000);
+    expect(sets.length).toBe(setsAtEnd);
+    expect(clears).toHaveLength(1);
+  });
+
+  it('text is not shown before the runner is provably in the turn (grace with no working report)', async () => {
+    const { sets } = captureSetAndClear();
+    startTypingRefresh(SESS, AG, 'slack', 'C1', 'T1', 'slack-inst');
+    await vi.advanceTimersByTimeAsync(0);
+    // A stale status row from an earlier turn arrives before any turn report.
+    notePresence(SESS, { turn: null, updatedAtMs: null, status: { text: 'Old line', atMs: 0 } });
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(withText(sets)).toHaveLength(0);
+    expect(plain(sets).length).toBeGreaterThanOrEqual(2);
   });
 });

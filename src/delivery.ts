@@ -25,7 +25,7 @@ import { fanOutboundMessage } from './modules/cross-session-context/index.js';
 import { log } from './log.js';
 import { normalizeOptions } from './channels/ask-question.js';
 import { clearOutbox, readOutboxFiles, withExistingMailboxSession } from './session-manager.js';
-import { noteTurnState, pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typing/index.js';
+import { notePresence, pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typing/index.js';
 import type { OutboundFile } from './channels/adapter.js';
 import type { PendingApproval, Session } from './types.js';
 import type { OutboundMessage } from './mailbox/index.js';
@@ -230,20 +230,26 @@ async function drainSession(session: Session): Promise<void> {
       return {
         delivered,
         pending: mailbox.getDueMessages(delivered).filter((candidate) => !delivered.has(candidate.id)),
-        // Read the runner's turn report on the same poll — no new session,
-        // no new poll. Drives the typing indicator (see noteTurnState).
+        // Read the runner's presence on the same poll — no new session, no
+        // new poll: its turn report from the container record and the
+        // optional status line it publishes under the `live_status` state
+        // key. Both drive the typing indicator (see notePresence).
         containerState: mailbox.getContainerState(),
+        liveStatus: mailbox.getState?.('live_status'),
       };
     });
     if (!existing) return;
     ({ delivered, pending } = existing);
-    // Typing follows the runner's turn state. Null-safe: a missing record or a
+    // Typing follows the runner's presence. Null-safe: a missing record or a
     // null turn (older runner) reads as "not reported" and the typing module
-    // keeps its heartbeat-file fallback for that session.
-    const containerState = existing.containerState;
-    noteTurnState(session.id, {
+    // keeps its heartbeat-file fallback for that session; no status row, or
+    // a blank one, means plain typing.
+    const { containerState, liveStatus } = existing;
+    const statusText = liveStatus?.value.trim();
+    notePresence(session.id, {
       turn: containerState?.turn ?? null,
       updatedAtMs: containerState ? Date.parse(containerState.updatedAt) : null,
+      status: liveStatus && statusText ? { text: statusText, atMs: Date.parse(liveStatus.updatedAt) } : null,
     });
   } catch (err) {
     log.error('Session mailbox delivery failed', {

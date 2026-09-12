@@ -228,3 +228,48 @@ describe('SQLite mailbox container state', () => {
     expect(outbound.getContainerState()).toBeNull();
   });
 });
+
+describe('SQLite mailbox session state read', () => {
+  const databases: Database.Database[] = [];
+
+  afterEach(() => {
+    for (const database of databases.splice(0)) database.close();
+  });
+
+  it('reads a runner-written state row with its stamp normalized', () => {
+    const outboundDb = new Database(':memory:');
+    databases.push(outboundDb);
+    outboundDb.exec(OUTBOUND_SCHEMA);
+    outboundDb
+      .prepare('INSERT INTO session_state (key, value, updated_at) VALUES (?, ?, ?)')
+      .run('live_status', 'Reading the thread', '2026-01-01 00:00:05');
+    const outbound = wrapSqliteOutbound(
+      () => outboundDb,
+      () => outboundDb,
+      () => 2,
+    );
+    expect(outbound.getState!('live_status')).toEqual({
+      value: 'Reading the thread',
+      updatedAt: '2026-01-01T00:00:05.000Z',
+    });
+    expect(outbound.getState!('other')).toBeUndefined();
+  });
+
+  it('returns undefined on an outbound DB created before session_state existed', () => {
+    const outboundDb = new Database(':memory:');
+    databases.push(outboundDb);
+    outboundDb.exec(`
+      CREATE TABLE messages_out (
+        id TEXT PRIMARY KEY, seq INTEGER UNIQUE, in_reply_to TEXT, timestamp TEXT NOT NULL,
+        deliver_after TEXT, recurrence TEXT, kind TEXT NOT NULL, platform_id TEXT, channel_type TEXT,
+        thread_id TEXT, content TEXT NOT NULL
+      );
+    `);
+    const outbound = wrapSqliteOutbound(
+      () => outboundDb,
+      () => outboundDb,
+      () => 2,
+    );
+    expect(outbound.getState!('live_status')).toBeUndefined();
+  });
+});
