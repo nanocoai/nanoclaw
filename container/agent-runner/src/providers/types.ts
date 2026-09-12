@@ -64,7 +64,12 @@ export interface ProviderExchange {
   result: string | null;
   /** Continuation/thread id in effect for the exchange, if any. */
   continuation?: string;
-  status: 'completed' | 'undelivered' | 'error';
+  /**
+   * Terminal result for this exchange. `fallback` means a tools-only turn
+   * stayed dry after one correction and the runner supplied its neutral
+   * placeholder (or stayed silent because the wake had no human endpoint).
+   */
+  status: 'completed' | 'undelivered' | 'fallback' | 'error';
 }
 
 /**

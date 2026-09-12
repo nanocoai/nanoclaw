@@ -84,12 +84,12 @@ export interface ReplyRoute {
 }
 
 /**
- * The reply stamp: the route of the first inbound message in the batch the
- * agent is currently processing. The poll loop publishes it at batch start;
- * MCP tools (`send_message`, `send_file`) read it to thread a reply into the
- * conversation being answered and to stamp `in_reply_to` onto outbound rows so
- * the host's a2a return-path routing can correlate replies back to the
- * originating session.
+ * The current reply route: the inbound message the provider is answering now.
+ * The poll loop publishes it at batch start and hands it over when a queued
+ * follow-up begins. MCP tools (`send_message`, `send_file`) read it to thread a
+ * reply into the conversation being answered and to stamp `in_reply_to` onto
+ * outbound rows so the host's a2a return-path routing can correlate replies
+ * back to the originating session.
  *
  * This lives in mailbox state because the MCP server runs as a separate stdio
  * subprocess; module state set by the poll loop is invisible to it.
@@ -133,4 +133,37 @@ export function getCurrentReplyRoute(): ReplyRoute | null {
 
 export function getCurrentInReplyTo(): string | null {
   return getCurrentReplyRoute()?.inReplyTo ?? null;
+}
+
+/**
+ * Where outbound seq stood when the current turn began. Published by the poll
+ * loop at batch start and handed over with each queued follow-up, so "written
+ * during this turn" is answerable as `seq > baseline`. The reply route says
+ * which request a send answers; this numeric boundary independently says
+ * whether that send happened during the current turn.
+ *
+ * Same subprocess reasoning as the stamp above — the MCP server is a separate
+ * process and can only see this through the shared DB. Stored as a string
+ * because session_state values are text.
+ */
+const TURN_BASELINE_KEY = 'turn_outbound_baseline';
+
+export function setTurnOutboundBaseline(seq: number): void {
+  setValue(TURN_BASELINE_KEY, String(seq));
+}
+
+export function clearTurnOutboundBaseline(): void {
+  deleteValue(TURN_BASELINE_KEY);
+}
+
+/**
+ * Null when no turn is in progress. The poll loop clears leftovers at startup
+ * and in its query-finally path, using the same lifecycle as the reply route.
+ * A real turn may run for hours, so age is not a validity signal.
+ */
+export function getTurnOutboundBaseline(): number | null {
+  const value = getValue(TURN_BASELINE_KEY);
+  if (value === undefined) return null;
+  const seq = Number(value);
+  return Number.isFinite(seq) ? seq : null;
 }
