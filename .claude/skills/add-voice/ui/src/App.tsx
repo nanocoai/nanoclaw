@@ -17,6 +17,7 @@ const COLORWAYS: Colorway[] = ["ivory", "field", "rabbit"]
 
 const MATRIX_ROWS = 7
 const MATRIX_COLS = 14
+const BAR_COUNT = 12
 const MATRIX_OFF: Frame = Array.from({ length: MATRIX_ROWS }, () => Array(MATRIX_COLS).fill(0))
 
 // The mascot as a pincer drawn in dots: a disc with a notch that opens while the call is live.
@@ -92,13 +93,17 @@ function useReducedMotion(): boolean {
 
 // Level and glow samples ~20 times a second, read from the call's refs. Only the
 // component that calls this re-renders, so the transcript and keys stay still.
-function useLevelTicker(call: VoiceCall, phase: Phase, wantLevels: boolean, reduced: boolean) {
-  const [levels, setLevels] = useState<number[]>(() => Array(MATRIX_COLS).fill(0))
+function useLevelTicker(call: VoiceCall, phase: Phase, wantLevels: boolean, reduced: boolean, count = MATRIX_COLS) {
+  const [levels, setLevels] = useState<number[]>(() => Array(count).fill(0))
   const [glow, setGlow] = useState(1)
   const phaseRef = useRef(phase)
   phaseRef.current = phase
   const lastAt = useRef(0)
+  const wasZero = useRef(true)
+  // Nothing moves on the ended and error screens, so the loop stops there.
+  const running = phase !== "ended" && phase !== "error"
   useEffect(() => {
+    if (!running) return
     let raf = 0
     const tick = () => {
       const now = performance.now()
@@ -108,12 +113,17 @@ function useLevelTicker(call: VoiceCall, phase: Phase, wantLevels: boolean, redu
         const p = phaseRef.current
         if (wantLevels) {
           const base = p === "talking" ? call.outputLevel.current : p === "listening" ? call.inputLevel.current : 0
-          setLevels(
-            Array.from({ length: MATRIX_COLS }, (_, i) => {
-              const shape = 0.5 + 0.5 * Math.abs(Math.sin(t * 5.2 + i * 0.9)) * (0.6 + 0.4 * Math.abs(Math.cos(t * 2.3 - i * 0.4)))
-              return Math.max(0, Math.min(1, base * 1.35 * shape))
-            })
-          )
+          // A silent stage is already drawn: re-publishing an all-zero array every
+          // tick would re-render the whole dot grid for no visible change.
+          if (base > 0.001 || !wasZero.current) {
+            wasZero.current = base <= 0.001
+            setLevels(
+              Array.from({ length: count }, (_, i) => {
+                const shape = 0.5 + 0.5 * Math.abs(Math.sin(t * 5.2 + i * 0.9)) * (0.6 + 0.4 * Math.abs(Math.cos(t * 2.3 - i * 0.4)))
+                return Math.max(0, Math.min(1, base * 1.35 * shape))
+              })
+            )
+          }
         }
         setGlow(
           reduced
@@ -129,7 +139,7 @@ function useLevelTicker(call: VoiceCall, phase: Phase, wantLevels: boolean, redu
     }
     raf = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(raf)
-  }, [call.inputLevel, call.outputLevel, wantLevels, reduced])
+  }, [call.inputLevel, call.outputLevel, wantLevels, reduced, running, count])
   return { levels, glow }
 }
 
@@ -174,21 +184,22 @@ const Stage = memo(function Stage({
   live,
   presence,
   reduced,
-  demo,
 }: {
   call: VoiceCall
   phase: Phase
   live: boolean
   presence: "matrix" | "bars"
   reduced: boolean
-  demo: boolean
 }) {
-  const { levels, glow } = useLevelTicker(call, phase, presence === "matrix", reduced)
-  if (presence === "bars") {
-    const stream = phase === "talking" ? call.remoteStream : call.micStream
+  const bars = presence === "bars"
+  const { levels, glow } = useLevelTicker(call, phase, true, reduced, bars ? BAR_COUNT : MATRIX_COLS)
+  if (bars) {
+    // The bars read the same metering as the matrix. Handing the component a
+    // MediaStream instead would open an AudioContext on the call's own microphone,
+    // which silences the outgoing track on iOS Safari.
     return (
       <div className={`bars-wrap${phase === "listening" ? " you" : ""}`}>
-        <BarVisualizer demo={demo && live} state={BAR_STATE[phase]} mediaStream={stream ?? undefined} barCount={12} centerAlign minHeight={12} className="h-full w-full gap-2 rounded-none bg-transparent p-0" />
+        <BarVisualizer state={BAR_STATE[phase]} volumeBands={levels} barCount={BAR_COUNT} centerAlign minHeight={12} className="h-full w-full gap-2 rounded-none bg-transparent p-0" />
       </div>
     )
   }
@@ -467,7 +478,7 @@ export default function App() {
           <div className="device">
             <section className="screen" aria-label="Screen">
               <div className="screen-top">
-                <Stage call={call} phase={phase} live={live} presence={cfg.presence} reduced={reduced} demo={demo} />
+                <Stage call={call} phase={phase} live={live} presence={cfg.presence} reduced={reduced} />
               </div>
               <div className="screen-readout">
                 {readout}
@@ -485,7 +496,7 @@ export default function App() {
           <>
             <section className="stage" aria-label="Agent presence">
               <div className="presence-stage">
-                <Stage call={call} phase={phase} live={live} presence={cfg.presence} reduced={reduced} demo={demo} />
+                <Stage call={call} phase={phase} live={live} presence={cfg.presence} reduced={reduced} />
               </div>
               {readout}
               <p className="hint">{hintText}</p>

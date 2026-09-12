@@ -351,6 +351,13 @@ export interface BarVisualizerProps extends HTMLAttributes<HTMLDivElement> {
   maxHeight?: number
   /** Enable demo mode with fake audio data */
   demo?: boolean
+  /**
+   * Levels to draw, one per bar, 0..1. When given, the component draws these and
+   * never opens an AudioContext: attaching Web Audio to a captured microphone
+   * starves the same track on a peer connection in iOS Safari, so a page that is
+   * already metering the call should pass its own levels rather than the stream.
+   */
+  volumeBands?: number[]
   /** Align bars from center instead of bottom */
   centerAlign?: boolean
 }
@@ -364,6 +371,7 @@ const BarVisualizerComponent = forwardRef<HTMLDivElement, BarVisualizerProps>(
       minHeight = 20,
       maxHeight = 100,
       demo = false,
+      volumeBands: suppliedBands,
       centerAlign = false,
       className,
       style,
@@ -372,7 +380,8 @@ const BarVisualizerComponent = forwardRef<HTMLDivElement, BarVisualizerProps>(
     ref
   ) => {
     // Audio processing
-    const realVolumeBands = useMultibandVolume(mediaStream, {
+    // A null stream keeps useMultibandVolume from constructing an AudioContext.
+    const realVolumeBands = useMultibandVolume(suppliedBands ? null : mediaStream, {
       bands: barCount,
       loPass: 100,
       hiPass: 200,
@@ -443,8 +452,8 @@ const BarVisualizerComponent = forwardRef<HTMLDivElement, BarVisualizerProps>(
 
     // Use fake or real volume data based on demo mode
     const volumeBands = useMemo(
-      () => (demo ? fakeVolumeBands : realVolumeBands),
-      [demo, fakeVolumeBands, realVolumeBands]
+      () => suppliedBands ?? (demo ? fakeVolumeBands : realVolumeBands),
+      [suppliedBands, demo, fakeVolumeBands, realVolumeBands]
     )
 
     // Animation sequencing
