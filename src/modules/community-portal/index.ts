@@ -19,6 +19,9 @@ import { startPortalRuntime } from './runtime.js';
 import './door/index.js';
 import './door/verbs.js';
 import './remote/index.js';
+// A chat surface for each coding session, over the service, for every
+// platform that registered its half.
+import './surface/index.js';
 
 let runtime: ReturnType<typeof startPortalRuntime> | undefined;
 
