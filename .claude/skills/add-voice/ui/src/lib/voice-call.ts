@@ -78,16 +78,37 @@ function waitForIce(pc: RTCPeerConnection): Promise<void> {
   })
 }
 
-const buf = new Uint8Array(512)
-function rms(an: AnalyserNode | null): number {
-  if (!an) return 0
-  an.getByteTimeDomainData(buf)
-  let s = 0
-  for (let i = 0; i < buf.length; i++) {
-    const v = (buf[i] - 128) / 128
-    s += v * v
+/**
+ * Why the caller's own level comes from `getStats()` and not from a Web Audio
+ * analyser: on iOS Safari, tapping a captured microphone stream with
+ * `createMediaStreamSource` starves the same track on the peer connection, so
+ * the model receives silence while the page still looks connected. The sender's
+ * `media-source` report gives the same number with nothing attached to the track.
+ */
+function levelsFromStats(report: RTCStatsReport): { mic: number | null; agent: number | null } {
+  let mic: number | null = null
+  let agent: number | null = null
+  report.forEach((entry) => {
+    const s = entry as { type?: string; kind?: string; audioLevel?: unknown }
+    if (typeof s.audioLevel !== "number" || s.kind !== "audio") return
+    if (s.type === "media-source") mic = s.audioLevel
+    else if (s.type === "inbound-rtp") agent = s.audioLevel
+  })
+  return { mic, agent }
+}
+
+/** What went wrong reaching the microphone, in words a caller can act on. */
+function micErrorText(err: unknown): string | null {
+  if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+    return location.protocol === "https:" || location.hostname === "localhost"
+      ? "This browser will not give a page access to the microphone."
+      : "A browser only shares the microphone over a secure connection. This link needs to start with https."
   }
-  return Math.min(1, Math.sqrt(s / buf.length) * 3.2)
+  const name = err instanceof DOMException ? err.name : ""
+  if (name === "NotAllowedError" || name === "SecurityError") return "Microphone permission was refused."
+  if (name === "NotFoundError" || name === "OverconstrainedError") return "No microphone is available on this device."
+  if (name === "NotReadableError") return "The microphone is busy in another app. Close it and try again."
+  return null
 }
 
 export function useVoiceCall(token: string, fallbackAgent = "your agent"): VoiceCall {
@@ -106,9 +127,8 @@ export function useVoiceCall(token: string, fallbackAgent = "your agent"): Voice
   const mutedRef = useRef(false)
   const pc = useRef<RTCPeerConnection | null>(null)
   const stream = useRef<MediaStream | null>(null)
-  const actx = useRef<AudioContext | null>(null)
-  const micAn = useRef<AnalyserNode | null>(null)
-  const agentAn = useRef<AnalyserNode | null>(null)
+  const micRaw = useRef(0)
+  const agentRaw = useRef(0)
   const receiver = useRef<RTCRtpReceiver | null>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const startedAt = useRef(0)
@@ -191,12 +211,10 @@ export function useVoiceCall(token: string, fallbackAgent = "your agent"): Voice
         stream.current.getTracks().forEach((t) => t.stop())
         stream.current = null
       }
-      if (actx.current) {
-        actx.current.close().catch(() => {})
-        actx.current = null
-      }
-      micAn.current = null
-      agentAn.current = null
+      micRaw.current = 0
+      agentRaw.current = 0
+      inputLevel.current = 0
+      outputLevel.current = 0
       receiver.current = null
       if (audioRef.current) audioRef.current.srcObject = null
       mutedRef.current = false
@@ -261,9 +279,9 @@ export function useVoiceCall(token: string, fallbackAgent = "your agent"): Voice
     setPhase("connecting")
     const mine = ++generation.current
     const cancelled = () => generation.current !== mine
-    // Created inside the click, before any await: Safari starts a context made later suspended.
-    const ctx = new AudioContext()
-    actx.current = ctx
+    // Inside the click, before any await: iOS only lets an element start playing
+    // from a gesture, and the agent's audio arrives several awaits from here.
+    audioRef.current?.play().catch(() => {})
     let answered = false
     try {
       const s = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } })
@@ -273,11 +291,6 @@ export function useVoiceCall(token: string, fallbackAgent = "your agent"): Voice
       }
       stream.current = s
       setMicStream(s)
-      if (ctx.state === "suspended") ctx.resume().catch(() => {})
-      const an = ctx.createAnalyser()
-      an.fftSize = 512
-      ctx.createMediaStreamSource(s).connect(an)
-      micAn.current = an
 
       const conn = new RTCPeerConnection()
       pc.current = conn
@@ -286,14 +299,7 @@ export function useVoiceCall(token: string, fallbackAgent = "your agent"): Voice
         if (audioRef.current) audioRef.current.srcObject = remote
         receiver.current = e.receiver
         setRemoteStream(remote)
-        try {
-          const a2 = ctx.createAnalyser()
-          a2.fftSize = 512
-          ctx.createMediaStreamSource(remote).connect(a2)
-          agentAn.current = a2
-        } catch {
-          /* some browsers refuse remote streams here; the receiver's audio level covers it */
-        }
+        audioRef.current?.play().catch(() => {})
       }
       s.getTracks().forEach((t) => conn.addTrack(t, s))
       const dc = conn.createDataChannel("oai-events")
@@ -347,12 +353,7 @@ export function useVoiceCall(token: string, fallbackAgent = "your agent"): Voice
       await conn.setRemoteDescription({ type: "answer", sdp: body })
     } catch (err) {
       if (cancelled()) return
-      const msg =
-        err instanceof DOMException && err.name === "NotAllowedError"
-          ? "Microphone permission was refused."
-          : err instanceof Error
-            ? err.message
-            : String(err)
+      const msg = micErrorText(err) ?? (err instanceof Error ? err.message : String(err))
       // If the host answered, it holds a session for us: tell it to hang up.
       teardown(answered)
       setError(msg)
@@ -380,12 +381,28 @@ export function useVoiceCall(token: string, fallbackAgent = "your agent"): Voice
     return () => window.clearInterval(t)
   }, [phase])
 
-  // Levels every frame: the agent's from the WebRTC receiver (works where Web Audio
-  // cannot read a remote stream), yours from the microphone analyser. The output
-  // level also drives listening/talking when transcripts lag the audio. A wall-clock
-  // interval backs the loop so timeouts still fire while the tab is in the background.
+  // Levels while a call is live, both read from the peer connection: the agent's
+  // from the receiver (with the inbound report as a fallback), yours from the
+  // sender's media-source report. Nothing taps the microphone track itself — see
+  // levelsFromStats. The smoothing runs on a frame loop; the reports are polled
+  // ten times a second, which is as often as they change. Idle and ended pages
+  // run no loop at all.
   useEffect(() => {
+    if (!LIVE_PHASES.has(phase) && phase !== "connecting") return
     let raf = 0
+    let stopped = false
+    const poll = async () => {
+      const conn = pc.current
+      if (!conn || stopped) return
+      try {
+        const { mic, agent } = levelsFromStats(await conn.getStats())
+        if (stopped) return
+        if (mic !== null) micRaw.current = mic
+        if (agent !== null) agentRaw.current = agent
+      } catch {
+        /* the connection closed under us; the next tick decays to zero */
+      }
+    }
     const step = () => {
       const p = phaseRef.current
       const live = LIVE_PHASES.has(p)
@@ -404,10 +421,10 @@ export function useVoiceCall(token: string, fallbackAgent = "your agent"): Voice
         } catch {
           got = false
         }
-        if (!got) out = rms(agentAn.current)
+        if (!got) out = Math.min(1, agentRaw.current * 3)
       }
       outputLevel.current += (out - outputLevel.current) * 0.3
-      const inp = live && !mutedRef.current ? rms(micAn.current) : 0
+      const inp = live && !mutedRef.current ? Math.min(1, micRaw.current * 5) : 0
       inputLevel.current += (inp - inputLevel.current) * 0.35
       if (live && outputLevel.current > 0.05 && p !== "thinking") {
         if (p !== "talking") setPhase("talking")
@@ -422,12 +439,21 @@ export function useVoiceCall(token: string, fallbackAgent = "your agent"): Voice
       raf = requestAnimationFrame(tick)
     }
     raf = requestAnimationFrame(tick)
+    // A wall-clock interval so timeouts still fire while the tab is in the background.
     const backstop = window.setInterval(step, 250)
+    const stats = window.setInterval(() => void poll(), 100)
+    void poll()
     return () => {
+      stopped = true
       cancelAnimationFrame(raf)
       window.clearInterval(backstop)
+      window.clearInterval(stats)
+      micRaw.current = 0
+      agentRaw.current = 0
+      inputLevel.current = 0
+      outputLevel.current = 0
     }
-  }, [setPhase, setStreaming])
+  }, [phase, setPhase, setStreaming])
 
   // A closing tab still tells the host to hang up.
   useEffect(() => {
