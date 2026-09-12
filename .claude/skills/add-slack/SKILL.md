@@ -16,6 +16,9 @@ This is the base Slack experience: one bot, DM and channel chat. The Slack
 canvases, DM onboarding — ships separately in `/slack-a2a-rooms` +
 `/slack-agent-flow`; the setup wizard applies them automatically when run with
 `--slack-agents`, and they can be applied on top of this install at any time.
+Coding-session surfaces — a Slack channel per sandbox on a host with a managed
+Slack app, mirroring the session's status and diff — ship in
+`/slack-code-surfaces`, applied on top of this install.
 
 ## Apply
 
@@ -26,6 +29,8 @@ Fetch the `channels` branch and copy the payload into place (overwrite — the b
 src/channels/slack.ts
 src/channels/slack-lib.ts
 src/channels/slack-lib.test.ts
+src/channels/slack-raw-text.ts
+src/channels/slack-raw-text.test.ts
 src/channels/slack-a2a-guard.ts
 src/channels/slack-a2a-guard.test.ts
 src/channels/slack-registration.test.ts
@@ -35,8 +40,8 @@ src/provisioning/slack-app.test.ts
 container/skills/slack-formatting/SKILL.md
 ```
 
-- **Adapter + shared lib** (`slack.ts`, `slack-lib.ts`): bridge registration, wiring defaults, conversation resolver, the native `SLACK_INSTANCES` loop — pinned by the two registration tests.
-- **Bot-inbound guard** (`slack-a2a-guard.ts`): drops bot-authored inbound at the bridge by default; feature skills register a narrower admission policy on its seam.
+- **Adapter + shared lib** (`slack.ts`, `slack-lib.ts`, `slack-raw-text.ts`): bridge registration, wiring defaults, conversation resolver, the raw-text extractor the adapter imports, the native `SLACK_INSTANCES` loop — pinned by the two registration tests.
+- **Bot-inbound guard** (`slack-a2a-guard.ts`): drops bot-authored inbound at the bridge by default; feature skills register narrower admission policies on its chain (`/slack-a2a-rooms` for allowlisted rooms, `/slack-code-surfaces` for coding-session channels), consulted in order, the first to admit winning.
 - **Provisioning core** (`src/provisioning/slack-app.ts`): manifest template, scope/event constants, and the broker + manager-token transports for creating a Slack app programmatically. Nothing on the adapter path imports it — the setup wizard's auto-provision pre-step and feature skills do.
 - **Container skills**: `slack-formatting/` (mrkdwn syntax; synced to `~/.claude/skills`).
 
@@ -72,7 +77,7 @@ loop), the guard, the shared lib, and the provisioning core.
 pnpm run build
 ```
 ```nc:run effect:test
-pnpm exec vitest run src/channels/slack-registration.test.ts src/channels/slack-instances-registration.test.ts src/channels/slack-lib.test.ts src/channels/slack-a2a-guard.test.ts src/provisioning/slack-app.test.ts
+pnpm exec vitest run src/channels/slack-registration.test.ts src/channels/slack-instances-registration.test.ts src/channels/slack-lib.test.ts src/channels/slack-raw-text.test.ts src/channels/slack-a2a-guard.test.ts src/provisioning/slack-app.test.ts
 ```
 
 ## Credentials
@@ -183,7 +188,8 @@ Mid-`/setup`: return to the setup flow. Otherwise wire the channel with `/init-f
 (or `/manage-channels`). For the Slack agents feature (child bots from
 `create_agent`, shared rooms, canvases), apply `/slack-a2a-rooms` then
 `/slack-agent-flow` — the setup wizard does both automatically when run with
-`--slack-agents`.
+`--slack-agents`. For a Slack channel per coding session (code mode on a host
+with a managed Slack app), apply `/slack-code-surfaces`.
 
 ## Channel Info
 
