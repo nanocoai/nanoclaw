@@ -351,7 +351,10 @@ export function createGptLiveAdapter(config: GptLiveConfig): ChannelAdapter {
         reply(res, 200, answer, {
           'Content-Type': 'application/sdp',
           'X-Voice-Session': sessionId,
-          'X-Voice-Agent': agent.name,
+          // Node rejects non-Latin-1 response header values. Keep the header
+          // ASCII-safe so a display name cannot throw after the billed live
+          // session has already started; /info still returns the raw name.
+          'X-Voice-Agent': encodeURIComponent(agent.name),
         });
         return;
       }

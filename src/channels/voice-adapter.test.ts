@@ -244,7 +244,7 @@ describe('gpt-live adapter (fake OpenAI, real webhook server)', () => {
       fallbackAgentName: 'the assistant',
       apiBase: `http://127.0.0.1:${fake.port}/v1`,
       wsBase: `ws://127.0.0.1:${fake.port}/v1`,
-      resolveAgent: async () => ({ name: 'Andy', personality: 'Dry humour, precise.' }),
+      resolveAgent: async () => ({ name: 'Andy 🐾', personality: 'Dry humour, precise.' }),
       now: () => clock.now,
     });
     await adapter.setup({
@@ -281,7 +281,7 @@ describe('gpt-live adapter (fake OpenAI, real webhook server)', () => {
   it('tells the page who answers the line, only with a known token', async () => {
     const ok = await fetch(`${base}/info?t=tok123`);
     expect(ok.status).toBe(200);
-    expect(await ok.json()).toEqual({ agent: 'Andy' });
+    expect(await ok.json()).toEqual({ agent: 'Andy 🐾' });
     expect((await fetch(`${base}/info?t=nope`)).status).toBe(403);
   });
 
@@ -293,7 +293,7 @@ describe('gpt-live adapter (fake OpenAI, real webhook server)', () => {
     });
     expect(res.status).toBe(200);
     expect(res.headers.get('x-voice-session')).toBe('live_fake1');
-    expect(res.headers.get('x-voice-agent')).toBe('Andy');
+    expect(res.headers.get('x-voice-agent')).toBe(encodeURIComponent('Andy 🐾'));
     expect(await res.text()).toBe('v=0\r\nanswer');
 
     expect(fake.sessionCreates).toHaveLength(1);
@@ -302,7 +302,7 @@ describe('gpt-live adapter (fake OpenAI, real webhook server)', () => {
     const session = create.body.session as Record<string, unknown>;
     expect(session.model).toBe('gpt-live-1');
     expect(session.delegation).toEqual({ type: 'client' });
-    expect(session.instructions).toContain('You are Andy');
+    expect(session.instructions).toContain('You are Andy 🐾');
     expect(session.instructions).toContain('Dry humour');
     expect(create.body.transport).toEqual({ type: 'webrtc', sdp: 'v=0\r\noffer' });
 
