@@ -229,16 +229,12 @@ Now create a Mattermost bot for NanoClaw:
 5. Keep the token secret. If you lose the token, create a replacement. Deactivate the old token after the replacement works.
 ```
 
-```nc:prompt bot_token secret normalize:trim validate:^[A-Za-z0-9_-]{20,}$
+```nc:prompt bot_token secret reuse:MATTERMOST_BOT_TOKEN normalize:trim validate:^[A-Za-z0-9_-]{20,}$
 Mattermost bot access token (20 or more letters, digits, underscores, or hyphens).
 ```
 
-Confirm the credential and capture the bot identity. A failure means the URL,
-token, or bot-account status is wrong.
-
-```nc:run capture:bot_user_id=.id,bot_username=.username effect:fetch
-curl -sf "{{base_url}}/api/v4/users/me" -H "Authorization: Bearer {{bot_token}}"
-```
+The configuration helper below authenticates this token and captures the bot
+identity before it saves any settings.
 
 ### 5. Configure authenticated card callbacks
 
@@ -246,30 +242,18 @@ Approvals require Mattermost itself—not the browser—to reach NanoClaw. Ask f
 a URL routable from the Mattermost server. It may be NanoClaw's base URL or the
 full `/webhook/mattermost` route; the adapter normalizes either form.
 
-```nc:prompt callback_url normalize:rstrip-slash validate:^https?://.+
+```nc:prompt callback_url reuse:MATTERMOST_CALLBACK_URL normalize:rstrip-slash validate:^https?://(?:[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])(?::[0-9]{1,5})?(?:/[A-Za-z0-9._~%+-]+)*$
 Callback URL reachable from Mattermost, such as `https://nanoclaw.example.com` or `http://host.docker.internal:3000/webhook/mattermost`.
 ```
 
-Mattermost does not sign action callbacks. Generate a random shared secret for
-the server-only callback context.
+Save the selected server, authenticated bot token, and callback URL. On a rerun,
+offer to reuse each existing setting; save replacements when the operator
+chooses them. Mattermost does not sign action callbacks, so the helper creates
+a random shared secret locally on first setup. It preserves that secret on
+reruns so existing approval cards keep working. Never print the secret.
 
-```nc:run capture:callback_secret effect:external validate:^[a-f0-9]{64}$
-openssl rand -hex 32
-```
-
-Update `MATTERMOST_BASE_URL` on each run. This update lets the user select a
-different server. Do not change existing credentials.
-
-```nc:run effect:external remove:.claude/skills/add-mattermost/scripts/remove-base-url.mjs
-pnpm exec tsx setup/index.ts --step set-env -- --key MATTERMOST_BASE_URL --value "{{base_url}}"
-```
-
-Store the other channel settings. Do not replace existing credentials.
-
-```nc:env-set
-MATTERMOST_BOT_TOKEN={{bot_token}}
-MATTERMOST_CALLBACK_URL={{callback_url}}
-MATTERMOST_CALLBACK_SECRET={{callback_secret}}
+```nc:run capture:bot_user_id=.id,bot_username=.username effect:external remove:.claude/skills/add-mattermost/scripts/remove-config.mjs
+pnpm exec tsx .claude/skills/add-mattermost/scripts/configure.ts "{{base_url}}" "{{bot_token}}" "{{callback_url}}"
 ```
 
 Tell the operator:
