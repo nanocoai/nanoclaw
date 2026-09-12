@@ -107,4 +107,45 @@ describe('runCodexLoginAuth', () => {
     // The isolated dir holds a live credential — gone once vaulted.
     expect(fs.existsSync(codexHome!)).toBe(false);
   });
+
+  it('runs the manifest-pinned CLI through npx when codex is not installed on the host', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-auth-bootstrap-'));
+    fs.mkdirSync(path.join(root, 'container'), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, 'container', 'cli-tools.json'),
+      JSON.stringify([{ name: '@openai/codex', version: '0.146.0' }]),
+    );
+    mockSpawnSync
+      .mockReturnValueOnce({ status: 1, stdout: '', stderr: 'not found' })
+      .mockReturnValueOnce({ status: 0, stdout: 'codex-cli 0.146.0', stderr: '' });
+    mockExecFileSync.mockReturnValue('');
+
+    mockSpawn.mockImplementation((...args: unknown[]) => {
+      const opts = args[2] as { env?: NodeJS.ProcessEnv };
+      fs.writeFileSync(path.join(opts.env!.CODEX_HOME!, 'auth.json'), '{"tokens":{}}');
+      const child = new EventEmitter();
+      setImmediate(() => child.emit('close', 0));
+      return child;
+    });
+
+    try {
+      await runCodexLoginAuth('device', root);
+
+      expect(mockSpawnSync).toHaveBeenCalledWith(
+        'npx',
+        ['--yes', '@openai/codex@0.146.0', '--version'],
+        expect.objectContaining({ stdio: ['ignore', 'pipe', 'pipe'] }),
+      );
+      expect(mockSpawn).toHaveBeenCalledWith(
+        'npx',
+        ['--yes', '@openai/codex@0.146.0', 'login', '--device-auth'],
+        expect.objectContaining({
+          stdio: 'inherit',
+          env: expect.objectContaining({ CODEX_HOME: expect.any(String) }),
+        }),
+      );
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

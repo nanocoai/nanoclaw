@@ -179,12 +179,43 @@ async function runCodexApiKeyAuth(): Promise<void> {
   p.log.success(brandBody('OpenAI account connected.'));
 }
 
-export async function runCodexLoginAuth(method: 'browser' | 'device'): Promise<void> {
+interface CodexCliInvocation {
+  command: string;
+  prefixArgs: string[];
+}
+
+function resolveCodexCli(projectRoot: string): CodexCliInvocation | undefined {
   const codexCheck = spawnSync('codex', ['--version'], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] });
-  if (codexCheck.status !== 0) {
+  if (codexCheck.status === 0) return { command: 'codex', prefixArgs: [] };
+
+  const manifestPath = path.join(projectRoot, 'container', 'cli-tools.json');
+  let version: string | undefined;
+  try {
+    const tools = JSON.parse(fs.readFileSync(manifestPath, 'utf-8')) as Array<{ name?: string; version?: string }>;
+    version = tools.find((tool) => tool.name === '@openai/codex')?.version;
+  } catch {
+    return undefined;
+  }
+  if (!version || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(version)) return undefined;
+
+  const packageSpec = `@openai/codex@${version}`;
+  p.log.step(brandBody(`Preparing the pinned Codex CLI (${version}) for sign-in…`));
+  const npxCheck = spawnSync('npx', ['--yes', packageSpec, '--version'], {
+    encoding: 'utf-8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  return npxCheck.status === 0 ? { command: 'npx', prefixArgs: ['--yes', packageSpec] } : undefined;
+}
+
+export async function runCodexLoginAuth(
+  method: 'browser' | 'device',
+  projectRoot = process.cwd(),
+): Promise<void> {
+  const cli = resolveCodexCli(projectRoot);
+  if (!cli) {
     p.log.error(
       brandBody(
-        'The Codex CLI is not installed on this machine. Install it with `npm install -g @openai/codex`, then re-run setup — or choose the API key option instead.',
+        "Couldn't run the Codex CLI on this machine. Setup tried the provider's pinned CLI with npx. Check npm and network access, then retry — or choose the API key option instead.",
       ),
     );
     setupLog.step('auth', 'failed', 0, { PROVIDER: 'codex', METHOD: method, ERROR: 'codex_cli_missing' });
@@ -211,7 +242,7 @@ export async function runCodexLoginAuth(method: 'browser' | 'device'): Promise<v
 
   const args = method === 'device' ? ['login', '--device-auth'] : ['login'];
   const start = Date.now();
-  const code = await runInherit('codex', args, { CODEX_HOME: loginHome });
+  const code = await runInherit(cli.command, [...cli.prefixArgs, ...args], { CODEX_HOME: loginHome });
   const durationMs = Date.now() - start;
   console.log();
 
