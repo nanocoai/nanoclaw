@@ -1,5 +1,5 @@
 {
-  "notes": "Fake values only. API responses and callback-secret generation are stubbed.",
+  "notes": "Fake values only. API responses and the configuration helper are stubbed.",
   "scenarios": [
     {
       "name": "self-hosted-bot",
@@ -20,14 +20,22 @@
           "match": "select-server.mjs enter",
           "stdout": "{\"base_url\":\"https://mattermost.example.test\",\"config_access\":\"unavailable\",\"mattermost_container\":\"none\"}"
         },
-        { "match": "/api/v4/config/client?format=old", "stdout": "https://mattermost.example.test\n\n" },
-        { "match": "/api/v4/users/me", "stdout": "{\"id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbb\",\"username\":\"nanoclaw\"}" },
         {
-          "match": "openssl rand -hex 32",
-          "stdout": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          "match": "/api/v4/config/client?format=old",
+          "stdout": "https://mattermost.example.test\n\n"
         },
-        { "match": "/api/v4/users/username/owner.test", "stdout": "{\"id\":\"oooooooooooooooooooooooooo\"}" },
-        { "match": "/api/v4/channels/direct", "stdout": "mattermost:dddddddddddddddddddddddddd" }
+        {
+          "match": "scripts/configure.ts",
+          "stdout": "{\"id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbb\",\"username\":\"nanoclaw\"}"
+        },
+        {
+          "match": "/api/v4/users/username/owner.test",
+          "stdout": "{\"id\":\"oooooooooooooooooooooooooo\"}"
+        },
+        {
+          "match": "/api/v4/channels/direct",
+          "stdout": "mattermost:dddddddddddddddddddddddddd"
+        }
       ]
     },
     {
@@ -41,13 +49,30 @@
         "owner_username": "owner.test"
       },
       "exec": [
-        { "match": "discover-server.mjs", "stdout": "{\"discovery\":\"found\",\"base_url\":\"http://localhost:8065\",\"config_access\":\"host\",\"mattermost_container\":\"none\"}" },
-        { "match": "select-server.mjs enter", "stdout": "{\"base_url\":\"https://other.example.test\",\"config_access\":\"unavailable\",\"mattermost_container\":\"none\"}" },
-        { "match": "/api/v4/config/client?format=old", "stdout": "https://other.example.test\n\n" },
-        { "match": "/api/v4/users/me", "stdout": "{\"id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbb\",\"username\":\"nanoclaw\"}" },
-        { "match": "openssl rand -hex 32", "stdout": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" },
-        { "match": "/api/v4/users/username/owner.test", "stdout": "{\"id\":\"oooooooooooooooooooooooooo\"}" },
-        { "match": "/api/v4/channels/direct", "stdout": "mattermost:dddddddddddddddddddddddddd" }
+        {
+          "match": "discover-server.mjs",
+          "stdout": "{\"discovery\":\"found\",\"base_url\":\"http://localhost:8065\",\"config_access\":\"host\",\"mattermost_container\":\"none\"}"
+        },
+        {
+          "match": "select-server.mjs enter",
+          "stdout": "{\"base_url\":\"https://other.example.test\",\"config_access\":\"unavailable\",\"mattermost_container\":\"none\"}"
+        },
+        {
+          "match": "/api/v4/config/client?format=old",
+          "stdout": "https://other.example.test\n\n"
+        },
+        {
+          "match": "scripts/configure.ts",
+          "stdout": "{\"id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbb\",\"username\":\"nanoclaw\"}"
+        },
+        {
+          "match": "/api/v4/users/username/owner.test",
+          "stdout": "{\"id\":\"oooooooooooooooooooooooooo\"}"
+        },
+        {
+          "match": "/api/v4/channels/direct",
+          "stdout": "mattermost:dddddddddddddddddddddddddd"
+        }
       ]
     },
     {
@@ -60,14 +85,34 @@
         "owner_username": "owner.test"
       },
       "exec": [
-        { "match": "discover-server.mjs", "stdout": "{\"discovery\":\"found\",\"base_url\":\"https://detected.example.test\",\"config_access\":\"unavailable\",\"mattermost_container\":\"none\"}" },
-        { "match": "printf 'yes", "stdout": "yes" },
-        { "match": "select-server.mjs create", "stdout": "{\"base_url\":\"http://localhost:8065\",\"config_access\":\"managed\",\"mattermost_container\":\"nanoclaw-mattermost-mattermost-1\"}" },
-        { "match": "/api/v4/config/client?format=old", "stdout": "http://localhost:8065\n\n" },
-        { "match": "/api/v4/users/me", "stdout": "{\"id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbb\",\"username\":\"nanoclaw\"}" },
-        { "match": "openssl rand -hex 32", "stdout": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" },
-        { "match": "/api/v4/users/username/owner.test", "stdout": "{\"id\":\"oooooooooooooooooooooooooo\"}" },
-        { "match": "/api/v4/channels/direct", "stdout": "mattermost:dddddddddddddddddddddddddd" }
+        {
+          "match": "discover-server.mjs",
+          "stdout": "{\"discovery\":\"found\",\"base_url\":\"https://detected.example.test\",\"config_access\":\"unavailable\",\"mattermost_container\":\"none\"}"
+        },
+        {
+          "match": "printf 'yes",
+          "stdout": "yes"
+        },
+        {
+          "match": "select-server.mjs create",
+          "stdout": "{\"base_url\":\"http://localhost:8065\",\"config_access\":\"managed\",\"mattermost_container\":\"nanoclaw-mattermost-mattermost-1\"}"
+        },
+        {
+          "match": "/api/v4/config/client?format=old",
+          "stdout": "http://localhost:8065\n\n"
+        },
+        {
+          "match": "scripts/configure.ts",
+          "stdout": "{\"id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbb\",\"username\":\"nanoclaw\"}"
+        },
+        {
+          "match": "/api/v4/users/username/owner.test",
+          "stdout": "{\"id\":\"oooooooooooooooooooooooooo\"}"
+        },
+        {
+          "match": "/api/v4/channels/direct",
+          "stdout": "mattermost:dddddddddddddddddddddddddd"
+        }
       ]
     },
     {
@@ -80,14 +125,34 @@
         "owner_username": "owner.test"
       },
       "exec": [
-        { "match": "discover-server.mjs", "stdout": "{\"discovery\":\"none\",\"base_url\":\"none\",\"config_access\":\"unavailable\",\"mattermost_container\":\"none\"}" },
-        { "match": "printf 'yes", "stdout": "yes" },
-        { "match": "select-server.mjs create", "stdout": "{\"base_url\":\"http://localhost:8065\",\"config_access\":\"managed\",\"mattermost_container\":\"nanoclaw-mattermost-mattermost-1\"}" },
-        { "match": "/api/v4/config/client?format=old", "stdout": "http://localhost:8065\n\n" },
-        { "match": "/api/v4/users/me", "stdout": "{\"id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbb\",\"username\":\"nanoclaw\"}" },
-        { "match": "openssl rand -hex 32", "stdout": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" },
-        { "match": "/api/v4/users/username/owner.test", "stdout": "{\"id\":\"oooooooooooooooooooooooooo\"}" },
-        { "match": "/api/v4/channels/direct", "stdout": "mattermost:dddddddddddddddddddddddddd" }
+        {
+          "match": "discover-server.mjs",
+          "stdout": "{\"discovery\":\"none\",\"base_url\":\"none\",\"config_access\":\"unavailable\",\"mattermost_container\":\"none\"}"
+        },
+        {
+          "match": "printf 'yes",
+          "stdout": "yes"
+        },
+        {
+          "match": "select-server.mjs create",
+          "stdout": "{\"base_url\":\"http://localhost:8065\",\"config_access\":\"managed\",\"mattermost_container\":\"nanoclaw-mattermost-mattermost-1\"}"
+        },
+        {
+          "match": "/api/v4/config/client?format=old",
+          "stdout": "http://localhost:8065\n\n"
+        },
+        {
+          "match": "scripts/configure.ts",
+          "stdout": "{\"id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbb\",\"username\":\"nanoclaw\"}"
+        },
+        {
+          "match": "/api/v4/users/username/owner.test",
+          "stdout": "{\"id\":\"oooooooooooooooooooooooooo\"}"
+        },
+        {
+          "match": "/api/v4/channels/direct",
+          "stdout": "mattermost:dddddddddddddddddddddddddd"
+        }
       ]
     },
     {
@@ -108,14 +173,22 @@
           "match": "select-server.mjs use",
           "stdout": "{\"base_url\":\"http://localhost:8065\",\"config_access\":\"host\",\"mattermost_container\":\"none\"}"
         },
-        { "match": "/api/v4/config/client?format=old", "stdout": "http://localhost:8065\n\n" },
-        { "match": "/api/v4/users/me", "stdout": "{\"id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbb\",\"username\":\"nanoclaw\"}" },
         {
-          "match": "openssl rand -hex 32",
-          "stdout": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          "match": "/api/v4/config/client?format=old",
+          "stdout": "http://localhost:8065\n\n"
         },
-        { "match": "/api/v4/users/username/owner.test", "stdout": "{\"id\":\"oooooooooooooooooooooooooo\"}" },
-        { "match": "/api/v4/channels/direct", "stdout": "mattermost:dddddddddddddddddddddddddd" }
+        {
+          "match": "scripts/configure.ts",
+          "stdout": "{\"id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbb\",\"username\":\"nanoclaw\"}"
+        },
+        {
+          "match": "/api/v4/users/username/owner.test",
+          "stdout": "{\"id\":\"oooooooooooooooooooooooooo\"}"
+        },
+        {
+          "match": "/api/v4/channels/direct",
+          "stdout": "mattermost:dddddddddddddddddddddddddd"
+        }
       ]
     },
     {
@@ -136,14 +209,22 @@
           "match": "select-server.mjs use",
           "stdout": "{\"base_url\":\"http://localhost:8065\",\"config_access\":\"docker\",\"mattermost_container\":\"nanoclaw-mattermost-mattermost-1\"}"
         },
-        { "match": "/api/v4/config/client?format=old", "stdout": "http://localhost:8065\n\n" },
-        { "match": "/api/v4/users/me", "stdout": "{\"id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbb\",\"username\":\"nanoclaw\"}" },
         {
-          "match": "openssl rand -hex 32",
-          "stdout": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          "match": "/api/v4/config/client?format=old",
+          "stdout": "http://localhost:8065\n\n"
         },
-        { "match": "/api/v4/users/username/owner.test", "stdout": "{\"id\":\"oooooooooooooooooooooooooo\"}" },
-        { "match": "/api/v4/channels/direct", "stdout": "mattermost:dddddddddddddddddddddddddd" }
+        {
+          "match": "scripts/configure.ts",
+          "stdout": "{\"id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbb\",\"username\":\"nanoclaw\"}"
+        },
+        {
+          "match": "/api/v4/users/username/owner.test",
+          "stdout": "{\"id\":\"oooooooooooooooooooooooooo\"}"
+        },
+        {
+          "match": "/api/v4/channels/direct",
+          "stdout": "mattermost:dddddddddddddddddddddddddd"
+        }
       ]
     }
   ]
