@@ -59,7 +59,12 @@ export const TMUX_SESSION_NAME = 'agent';
 
 const GENERATED_NAME_BASE = 'sandbox';
 
-/** The live handle and the command behind an attach — for a caller that holds the bytes itself. */
+/**
+ * The live handle and the command behind an attach — for a caller that holds
+ * the bytes itself. `handle.execSpec(command)` is the argv a client program
+ * runs; `handle.execStream?.(command, …)` is the same exec held in-process,
+ * when the driver offers it (drivers/types.ts SessionExecStream).
+ */
 export interface AttachTarget {
   handle: SessionHandle;
   /** The argv to run inside the session: the attach-activity stamp, then the tmux client. */
