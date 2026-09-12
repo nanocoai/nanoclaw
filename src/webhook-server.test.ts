@@ -103,4 +103,19 @@ describe('registerWebhookAdapter — route/handler split', () => {
     const res = await post('/webhook/nope', 'x');
     expect(res.status).toBe(404);
   });
+
+  it('WEBHOOK_HOST restricts the bind address; loopback still serves', async () => {
+    process.env.WEBHOOK_HOST = '127.0.0.1';
+    try {
+      const { chat, calls } = stubChat('loopback');
+      registerWebhookAdapter(chat, 'slack');
+
+      const res = await post('/webhook/slack', 'payload-loopback');
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ via: 'loopback' });
+      expect(calls).toEqual(['payload-loopback']);
+    } finally {
+      delete process.env.WEBHOOK_HOST;
+    }
+  });
 });
