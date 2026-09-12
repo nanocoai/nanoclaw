@@ -91,6 +91,32 @@ that stays silent for 65 seconds. Over the link the host receives only the accou
 snapshot and device presence; it sends nothing about your agents, messages or files. Foreground
 setup can hold the journal while the host stays connected; the service need not stop.
 
+## Remote terminal
+
+With remote terminal access enabled (`bin/ncl sandboxes remote enable`, see
+[code mode](code-mode.md#remote-terminal)), the same link carries terminals. The host announces
+the `ssh` capability, and every terminal the account relays arrives as one `ssh` channel: the
+host connects to its own loopback SSH server from a distinct source port, records which account
+or sandbox that port is for, and pipes bytes both ways in 16 KiB chunks under a 64 KiB
+per-direction window, acknowledging a chunk only once the server has taken it. The last bytes of
+a session are acknowledged before the stream closes; a dropped link tears every stream down, and
+the terminal reconnects into the same tmux session. Enabling or disabling remote access restarts
+the link so the capability is re-announced, the host renews its link ticket every ten minutes so
+streams outlive it, and at most eight streams are open at once.
+
+The door's state — enabled, its port, the fingerprints it honours — is reported to the portal
+(`PUT /api/v1/terminal/host`) on every start and disable and every fifteen minutes, and journaled
+under `terminal` in `data/community-portal.json`. Keys approved or revoked in the browser, a
+rename, and a disable reach the host inside the perks snapshot's `terminal` section. Public keys
+never travel down the link; fingerprints do. Sandboxes created while remote access is enabled
+are registered with the account (`POST /api/v1/terminal/sandboxes`) so each gets an address of
+its own; deleting the group frees it.
+
+A host that has a managed chat app also opens a chat surface for each coding session through the
+service that manages the app (`/v1/code-channels`, bearer = the install token); see
+[code mode](code-mode.md#a-chat-surface-for-a-coding-session). A sandbox's terminal address is
+reported on its surface's member row so the surface can answer `/terminal` itself.
+
 ## Signing a machine out
 
 Forget the machine under **Devices** in the portal. Its install token stops working at the
