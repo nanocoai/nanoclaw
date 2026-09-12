@@ -25,6 +25,7 @@ import {
   lintGateAmbiguity,
   lintReferenceFloor,
   parseDirectives,
+  registryBranches,
   resolveChatCoreVersion,
   validate,
 } from './skill-directives.js';
@@ -153,13 +154,7 @@ function discover(skillsRoot = SKILLS_ROOT): RegistrySkill[] {
       const markdown = readFileSync(path, 'utf8');
       if (![...markdown.matchAll(REGISTRY_MENTION)].length) return [];
       const directives = parseDirectives(markdown);
-      const branches = [
-        ...new Set(
-          directives
-            .filter((d) => d.kind === 'copy' && typeof d.attrs['from-branch'] === 'string')
-            .map((d) => String(d.attrs['from-branch'])),
-        ),
-      ].sort();
+      const branches = registryBranches(directives);
       if (branches.some((branch) => !REGISTRY_BRANCHES.has(branch))) return [];
       return [
         {

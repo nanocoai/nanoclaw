@@ -10,6 +10,7 @@
  */
 import { defineGuardedAction, type GuardedAction } from '../guard/index.js';
 import { commandGuardSpec } from './guard.js';
+import type { GuardActor } from '../guard/index.js';
 import type { CallerContext } from './frame.js';
 
 /**
@@ -20,6 +21,15 @@ import type { CallerContext } from './frame.js';
 export const GROUP_SCOPE_RESOURCES = new Set(['groups', 'sessions', 'destinations', 'members', 'tasks']);
 
 export type Access = 'open' | 'approval' | 'hidden';
+
+/**
+ * What a handler receives: the caller's identity plus `defer(run)` for work
+ * that must wait until the reply has left the host — a service restart would
+ * kill the reply. Dispatch collects the deferred work and returns it with the
+ * response as `afterReply`; the transport that carried the reply runs it after
+ * its own egress, and the approval flow runs it once the approval is resolved.
+ */
+export type HandlerContext = CallerContext & { defer: (run: () => void) => void };
 
 export type CommandDef<TArgs = unknown, TData = unknown> = {
   name: string;
@@ -54,9 +64,20 @@ export type CommandDef<TArgs = unknown, TData = unknown> = {
    * Custom operations return ad-hoc shapes and leave this undefined.
    */
   generic?: 'list' | 'get';
+  /**
+   * Agent callers only, consulted before a hold: return a reason to deny the
+   * request outright (nothing is carded), or undefined to proceed. Runs again
+   * on the approved replay (`replay: true`). Return a reason rather than
+   * throwing — a throw fails closed as an opaque guard error.
+   */
+  refuse?: (
+    args: Record<string, unknown>,
+    actor: GuardActor,
+    ctx: { replay: boolean },
+  ) => Promise<string | undefined> | string | undefined;
   /** Validates `frame.args` and produces the typed handler input. Throws on invalid. */
   parseArgs: (raw: Record<string, unknown>) => TArgs;
-  handler: (args: TArgs, ctx: CallerContext) => Promise<TData>;
+  handler: (args: TArgs, ctx: HandlerContext) => Promise<TData>;
   /**
    * Optional presentational renderer. When set, dispatch attaches its output
    * as the response frame's `human` field (server-rendered once, printed

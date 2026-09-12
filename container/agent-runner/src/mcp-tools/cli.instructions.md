@@ -27,7 +27,7 @@ Run `ncl help` for the full list. Common resources:
 | tasks        | list, get, create, update, cancel, pause, resume, delete, append-log                                                                      | Scheduled tasks for your agent group                    |
 | wirings      | get, update                                                                                                                               | Response policy for the current chat                    |
 
-Additional resources (available under `global` scope only): messaging-groups, users, roles, user-dms, dropped-messages, approvals.
+Additional resources (available under `global` scope only): messaging-groups, users, roles, user-dms, dropped-messages, approvals, skills (see below).
 
 Under `group` scope, `wirings get/update` always targets the current chat. Updates may only change `engage_mode` and `engage_pattern` and require human approval.
 
@@ -86,6 +86,16 @@ ncl groups config add-package --npm some-package
 ncl members add --user telegram:jane
 ncl wirings update --engage-mode pattern --engage-pattern "."
 ```
+
+### Installing a capability (global scope only)
+
+When the user asks for a new channel, provider, or tool, do not edit source or send them to a terminal:
+
+1. `ncl skills list` — find the install skill.
+2. `ncl skills plan <name>` — preview its steps and inputs.
+3. `ncl skills apply <name> --restart` — request the install (approval-gated, like any write). Answer non-secret prompts with `--inputs '{"var":"value"}'`.
+
+Never pass tokens or passwords — secret inputs are refused. A `needs-setup` result means code was installed but credentials, external setup, pairing, or wiring remain pending. Relay the missing inputs, pending commands, and `.claude/skills/<name>/SKILL.md` to the operator to finish at the host terminal; do not run credential or interactive setup from chat or claim the capability is ready. The host is not restarted while setup is pending. Packaged or source-install-disabled deployments must use their release workflow.
 
 ### Important
 

@@ -1685,3 +1685,94 @@ describe('referenceProse (reference-floor slice)', () => {
     expect(res.referenceProse).not.toContain('## Apply');
   });
 });
+
+describe('failure recovery and shared checkout locking', () => {
+  it('restores an overwritten file when a later file in the same copy block fails', async () => {
+    const original = Buffer.from([0, 1, 255, 10]);
+    writeFileSync(join(root, 'src/sample.ts'), original, { mode: 0o750 });
+    writeFileSync(join(skillDir, 'SKILL.md'), '```nc:copy\nresources/sample.ts -> src/sample.ts\nmissing.ts -> src/missing.ts\n```');
+    const result = await applySkill(skillDir, root, { exec: () => {}, rollbackOnFailure: true });
+    expect(result.agentTasks).toHaveLength(1);
+    expect(result.rollback).toEqual({});
+    expect(readFileSync(join(root, 'src/sample.ts'))).toEqual(original);
+    expect(existsSync(join(root, 'src/missing.ts'))).toBe(false);
+  });
+
+  it('records a remote copy before a failed command can truncate the destination', async () => {
+    writeFileSync(join(root, 'src/sample.ts'), 'original');
+    writeFileSync(join(skillDir, 'SKILL.md'), '```nc:copy from-branch:payload\nsample.ts -> src/sample.ts\nmissing.ts -> src/missing.ts\n```');
+    const result = await applySkill(skillDir, root, {
+      rollbackOnFailure: true,
+      resolveRemote: () => 'origin',
+      exec: (cmd) => {
+        if (cmd.startsWith('git show')) {
+          writeFileSync(join(root, 'src/sample.ts'), '');
+          throw new Error('git show failed after redirection');
+        }
+      },
+    });
+    expect(result.rollback).toEqual({});
+    expect(readFileSync(join(root, 'src/sample.ts'), 'utf8')).toBe('original');
+  });
+
+  it('restores exact text and absence, including files without a final newline', async () => {
+    writeFileSync(join(root, 'src/barrel.ts'), '// existing');
+    rmSync(join(root, '.env'));
+    writeFileSync(join(skillDir, 'SKILL.md'), SKILL);
+    const result = await applySkill(skillDir, root, {
+      inputs: { token: 'secret' }, exec: () => {}, rollbackOnFailure: true,
+    });
+    expect(result.rollback).toEqual({});
+    expect(readFileSync(join(root, 'src/barrel.ts'), 'utf8')).toBe('// existing');
+    expect(existsSync(join(root, '.env'))).toBe(false);
+  });
+
+  it('restores manifests after a partial dependency failure and keeps restoring if reinstall fails', async () => {
+    const manifest = '{"dependencies":{"demo":"1.0.0"}}\n';
+    writeFileSync(join(root, 'package.json'), manifest);
+    writeFileSync(join(root, 'pnpm-lock.yaml'), 'original lock\n');
+    writeFileSync(join(skillDir, 'SKILL.md'), '```nc:copy\nresources/sample.ts -> src/sample.ts\n```\n```nc:dep\ndemo@2.0.0\n```');
+    const commands: string[] = [];
+    const result = await applySkill(skillDir, root, {
+      rollbackOnFailure: true, mode: 'refresh',
+      exec: (cmd) => {
+        commands.push(cmd);
+        if (cmd.includes(' install ')) {
+          expect(readFileSync(join(root, 'package.json'), 'utf8')).toBe(manifest);
+          expect(readFileSync(join(root, 'pnpm-lock.yaml'), 'utf8')).toBe('original lock\n');
+        }
+        writeFileSync(join(root, 'package.json'), 'partial change');
+        writeFileSync(join(root, 'pnpm-lock.yaml'), 'partial lock');
+        throw new Error('package manager failed');
+      },
+    });
+    expect(result.rollback?.error).toMatch(/package manager failed/);
+    expect(commands).toEqual(['pnpm add demo@2.0.0', 'pnpm install --frozen-lockfile']);
+    expect(readFileSync(join(root, 'package.json'), 'utf8')).toBe(manifest);
+    expect(readFileSync(join(root, 'pnpm-lock.yaml'), 'utf8')).toBe('original lock\n');
+    expect(existsSync(join(root, 'src/sample.ts'))).toBe(false);
+  });
+
+  it('holds the shared lock through rollback and rejects a direct engine caller', async () => {
+    writeFileSync(join(skillDir, 'SKILL.md'), '```nc:dep\ndemo@2.0.0\n```');
+    let entered!: () => void;
+    const rollingBack = new Promise<void>((resolve) => { entered = resolve; });
+    let release!: () => void;
+    const resume = new Promise<void>((resolve) => { release = resolve; });
+    const first = applySkill(skillDir, root, {
+      rollbackOnFailure: true,
+      exec: async (cmd) => {
+        if (cmd.includes(' add ')) throw new Error('partial install');
+        entered();
+        await resume;
+      },
+    });
+    await rollingBack;
+    try {
+      await expect(applySkill(skillDir, root, { exec: () => {} })).rejects.toThrow(/another skill apply/);
+      await expect(removeSkill(root, [])).rejects.toThrow(/another skill apply/);
+    } finally { release(); }
+    expect((await first).rollback).toEqual({});
+    await expect(applySkill(skillDir, root, { exec: () => {} })).resolves.toBeDefined();
+  });
+});

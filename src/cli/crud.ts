@@ -11,7 +11,7 @@ import { randomUUID } from 'crypto';
 import { getDb } from '../db/connection.js';
 import { isUniqueViolation } from '../db/errors.js';
 import { renderVerbHelp } from './help-render.js';
-import { register } from './registry.js';
+import { register, type CommandDef, type HandlerContext } from './registry.js';
 import type { Access } from './registry.js';
 import type { CallerContext } from './frame.js';
 
@@ -53,7 +53,9 @@ export interface CustomOperation {
   examples?: string[];
   /** Operator-only: never runnable from inside a container (see CommandDef.hostOnly). */
   hostOnly?: boolean;
-  handler: (args: Record<string, unknown>, ctx: CallerContext) => Promise<unknown>;
+  /** Refuse the request before a hold (see CommandDef.refuse). */
+  refuse?: CommandDef['refuse'];
+  handler: (args: Record<string, unknown>, ctx: HandlerContext) => Promise<unknown>;
   /** Presentational renderer for human mode — see CommandDef.formatHuman. */
   formatHuman?: (data: unknown) => string;
 }
@@ -63,12 +65,16 @@ export interface ResourceDef {
   name: string;
   /** Plural name: 'groups'. Used in command names. */
   plural: string;
-  /** DB table name. */
-  table: string;
+  /**
+   * DB table backing the generic CRUD verbs. Optional for a resource that
+   * declares only custom operations (e.g. `skills`, which fronts the skill
+   * engine, not a table); registering a generic verb without one throws.
+   */
+  table?: string;
   /** One-line description shown in help. */
   description: string;
-  /** Primary key column name. */
-  idColumn: string;
+  /** Primary key column name. Required with `table`, i.e. for the generic verbs. */
+  idColumn?: string;
   /**
    * Column that carries the agent group ID for group-scope enforcement.
    * Required on every resource in the CLI whitelist (groups, sessions,
@@ -186,7 +192,9 @@ function coerceListFilter(column: ColumnDef, value: unknown): unknown {
 function listOrder(def: ResourceDef): string {
   if (def.listOrder) return def.listOrder;
   const timestamp = def.columns.find((column) => column.name.endsWith('_at'))?.name;
-  return timestamp ? `${timestamp} DESC, ${def.idColumn}` : def.idColumn;
+  // Generic verbs are registered only with an idColumn (registerResource enforces it).
+  const id = def.idColumn as string;
+  return timestamp ? `${timestamp} DESC, ${id}` : id;
 }
 
 function genericList(def: ResourceDef) {
@@ -457,6 +465,12 @@ export function validateArgs(
 // ---------------------------------------------------------------------------
 
 export function registerResource(def: ResourceDef): void {
+  const generic = Object.keys(def.operations).filter((verb) => def.operations[verb as keyof typeof def.operations]);
+  if (generic.length > 0 && (!def.table || !def.idColumn)) {
+    throw new Error(
+      `resource "${def.plural}" declares generic verbs (${generic.join(', ')}) but no table and idColumn`,
+    );
+  }
   resources.set(def.plural, def);
 
   if (def.operations.list) {
@@ -533,6 +547,7 @@ export function registerResource(def: ResourceDef): void {
         description: op.description,
         access: op.access,
         hostOnly: op.hostOnly,
+        refuse: op.refuse,
         resource: def.plural,
         parseArgs: declared
           ? (raw) => {

@@ -116,8 +116,11 @@ ncl help
 | user-dms | list | Cold-DM cache (read-only) |
 | dropped-messages | list | Messages from unregistered senders (read-only) |
 | approvals | list, get | Pending approval requests (read-only) |
+| skills | list, plan, apply | Install skills for channels, providers, tools. `apply` runs the `nc:` steps on the host; restarts and interactive steps are reported, not run. Global scope; agents need approval and cannot pass secrets |
 
-Key files: `src/cli/dispatch.ts` (dispatcher + approval handler), `src/cli/crud.ts` (generic CRUD registration), `src/cli/resources/` (per-resource definitions).
+Key files: `src/cli/dispatch.ts` (dispatcher + approval handler), `src/cli/crud.ts` (generic CRUD registration), `src/cli/resources/` (per-resource definitions). `ncl skills` runs the headless engine `scripts/skill-headless.ts` (list / plan / apply as JSON, rollback on failure) as a child process via `src/cli/skill-runner.ts`.
+
+`ncl skills apply` is disabled by default. A source-checkout operator must explicitly set `NANOCLAW_SOURCE_INSTALL=enabled` in the host service environment (or the terminal environment for the headless script). Packaged deployments use their release workflow. Agent approval cannot enable this capability; the setup wizard and build-time composition keep their existing path. `needs-setup` means code was installed but the operator must finish the reported credentials or interactive steps at the host terminal, following `.claude/skills/<name>/SKILL.md`. The headless script exits nonzero, and the host is not restarted. Failed installs restore journaled files and dependency manifests under the shared checkout lock; arbitrary command effects and generated build output are not a full-system snapshot. A crash leaves a lock for the operator to clear after verifying no installer is running.
 
 ## Channels and Providers (skill-installed)
 

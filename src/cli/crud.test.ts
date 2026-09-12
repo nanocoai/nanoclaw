@@ -42,7 +42,7 @@ import { lookup } from './registry.js';
 import '../cli/resources/groups.js';
 import '../cli/resources/wirings.js';
 
-const hostCtx = { caller: 'host' as const };
+const hostCtx = { caller: 'host' as const, defer: (run: () => void) => run() };
 
 // Synthetic resource exercising the two-pass create: pass 1 collects explicit
 // args, pass 2 runs the resolveDefaults hook, pass 3 fills static defaults.

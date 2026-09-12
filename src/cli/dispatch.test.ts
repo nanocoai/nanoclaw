@@ -635,7 +635,8 @@ describe('CLI scope enforcement', () => {
       notify: vi.fn(),
     });
 
-    expect(approvalState.observedContexts).toEqual([ctx]);
+    // The identity is the original agent context; dispatch adds only its per-request `defer` sink.
+    expect(approvalState.observedContexts).toEqual([expect.objectContaining(ctx)]);
     expect(approvalState.requestApproval).toHaveBeenCalledTimes(1);
   });
 

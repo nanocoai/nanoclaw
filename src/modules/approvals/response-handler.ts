@@ -117,8 +117,9 @@ async function handleRegisteredApproval(
   }
 
   const payload = JSON.parse(approval.payload);
+  let afterResolved: (() => void) | undefined;
   try {
-    await handler({ session, payload, approval, userId, notify });
+    afterResolved = (await handler({ session, payload, approval, userId, notify }))?.afterResolved;
     log.info('Approval handled', { approvalId: approval.approval_id, action: approval.action, userId });
   } catch (err) {
     log.error('Approval handler threw', { approvalId: approval.approval_id, action: approval.action, err });
@@ -130,6 +131,15 @@ async function handleRegisteredApproval(
   await deletePendingApproval(approval.approval_id);
   await notifyApprovalResolved({ approval, session, outcome: 'approve', userId });
   await requestWake(session, 'approval-response');
+  // Work the handler deferred until resolution is complete — a host restart
+  // must not cut the row delete, the resolution notice, or the wake.
+  if (afterResolved) {
+    try {
+      afterResolved();
+    } catch (err) {
+      log.error('Post-resolution work failed', { approvalId: approval.approval_id, action: approval.action, err });
+    }
+  }
 }
 
 function namespacedUserId(payload: ResponsePayload): string | null {

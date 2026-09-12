@@ -99,6 +99,11 @@ async function commandDecide(cmd: CommandDef, input: GuardInput) {
     }
   }
 
+  if (cmd.refuse) {
+    const reason = await cmd.refuse(args, actor, { replay: input.grant != null });
+    if (reason) return DENY(reason);
+  }
+
   if (cmd.access === 'approval') {
     return HOLD(`agent-initiated "${cmd.name}" requires admin approval`);
   }

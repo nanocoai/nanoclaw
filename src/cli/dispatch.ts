@@ -22,13 +22,37 @@ import type { PendingApproval } from '../types.js';
 import type { CallerContext, ErrorCode, RequestFrame, ResponseFrame } from './frame.js';
 import { localizeIsoTimestamps } from './format.js';
 import { getResource } from './crud.js';
+import { log } from '../log.js';
 import { listVerbs, renderVerbHelp } from './help-render.js';
-import { commandGuard, listCommands, lookup } from './registry.js';
+import { commandGuard, listCommands, lookup, type HandlerContext } from './registry.js';
 
 type DispatchOptions = {
   /** Verified approval row when a command is replayed after approval. */
   grant?: PendingApproval;
 };
+
+/**
+ * A response frame plus the work its handler deferred until the reply has
+ * left (HandlerContext.defer). `afterReply` is a function, so JSON.stringify
+ * keeps it off the wire.
+ */
+export type DispatchResult = ResponseFrame & { afterReply?: () => void };
+
+function withDeferred(frame: ResponseFrame, deferred: Array<() => void>, command: string): DispatchResult {
+  if (deferred.length === 0) return frame;
+  return {
+    ...frame,
+    afterReply: () => {
+      for (const run of deferred) {
+        try {
+          run();
+        } catch (err) {
+          log.error('Deferred post-reply work failed', { command, err });
+        }
+      }
+    },
+  };
+}
 
 function actorFor(ctx: CallerContext): GuardActor {
   return ctx.caller === 'host'
@@ -40,7 +64,7 @@ export async function dispatch(
   req: RequestFrame,
   ctx: CallerContext,
   opts: DispatchOptions = {},
-): Promise<ResponseFrame> {
+): Promise<DispatchResult> {
   let cmd = lookup(req.command);
 
   // Fallback: if the full command isn't registered, find the LONGEST registered
@@ -150,7 +174,7 @@ export async function dispatch(
     const agentName = agentGroup?.name ?? ctx.agentGroupId;
 
     const argSummary = Object.entries(req.args)
-      .map(([k, v]) => `--${k} ${v}`)
+      .map(([k, v]) => `--${k} ${typeof v === 'string' ? v : JSON.stringify(v)}`)
       .join(' ');
 
     await requestApproval({
@@ -172,8 +196,10 @@ export async function dispatch(
     return err(req.id, 'invalid-args', errMsg(e));
   }
 
+  const deferred: Array<() => void> = [];
+  const handlerCtx: HandlerContext = { ...ctx, defer: (run) => deferred.push(run) };
   try {
-    let data = await cmd.handler(parsed, ctx);
+    let data = await cmd.handler(parsed, handlerCtx);
 
     // Post-handler group-scope enforcement. Applies only to the auto-generated
     // `list` / `get` handlers (`cmd.generic`), which return raw DB rows carrying
@@ -218,12 +244,12 @@ export async function dispatch(
     // formatter degrades to plain `data`, never fails the response.
     if (cmd.formatHuman) {
       try {
-        return { id: req.id, ok: true, data, human: cmd.formatHuman(data) };
+        return withDeferred({ id: req.id, ok: true, data, human: cmd.formatHuman(data) }, deferred, cmd.name);
       } catch {
         // fall through to the plain frame
       }
     }
-    return { id: req.id, ok: true, data };
+    return withDeferred({ id: req.id, ok: true, data }, deferred, cmd.name);
   } catch (e) {
     return err(req.id, 'handler-error', errMsg(e));
   }
@@ -241,6 +267,8 @@ registerApprovalHandler('cli_command', async ({ payload, approval, notify }) => 
   } else {
     await notify(`Your \`ncl ${frame.command}\` request was approved but failed: ${response.error.message}`);
   }
+  // Deferred work runs once the approval is fully resolved (HandlerContext.defer).
+  return { afterResolved: response.afterReply };
 });
 
 function parseCallerContext(value: unknown): CallerContext | undefined {

@@ -13,6 +13,8 @@
  * conservative charset. Unset = today's behavior, byte-identical.
  */
 import { createHash } from 'crypto';
+import os from 'os';
+import path from 'path';
 
 const INSTALL_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 
@@ -35,6 +37,20 @@ export function getLaunchdLabel(projectRoot?: string): string {
 /** systemd unit name (no .service suffix). e.g. `nanoclaw-v2-ab12cd34`. */
 export function getSystemdUnit(projectRoot?: string): string {
   return `nanoclaw-v2-${getInstallSlug(projectRoot)}`;
+}
+
+/**
+ * Where this checkout's service definition lives when one exists: the launchd
+ * plist on macOS, the user or system systemd unit elsewhere.
+ */
+export function serviceDefinitionPaths(projectRoot?: string): string[] {
+  const home = os.homedir();
+  return process.platform === 'darwin'
+    ? [path.join(home, 'Library', 'LaunchAgents', `${getLaunchdLabel(projectRoot)}.plist`)]
+    : [
+        path.join(home, '.config', 'systemd', 'user', `${getSystemdUnit(projectRoot)}.service`),
+        `/etc/systemd/system/${getSystemdUnit(projectRoot)}.service`,
+      ];
 }
 
 /** Docker image base (no tag). e.g. `nanoclaw-agent-v2-ab12cd34`. */
