@@ -27,8 +27,15 @@ unknown container can lose non-persisted configuration.
 
 Before proceeding, tell the user this creates a Mattermost Team Edition
 container, PostgreSQL container, named data volumes, a Docker network, and a
-host listener on port 8065. Confirm Docker and Compose are available and port
-8065 is free, then obtain approval.
+host listener on port 8065. The pinned Mattermost 11.10.0 image supports
+Linux AMD64 only. On ARM64, connect NanoClaw to an existing Mattermost server
+or use an AMD64 Docker host. Do not force emulation or create a partial stack.
+Confirm Docker and Compose are available and port 8065 is free, then obtain
+approval. Run the platform preflight before creating any directories or resources:
+
+```bash
+node .claude/skills/add-mattermost/scripts/preflight-local.mjs
+```
 
 Copy the bundled template into a user-visible project directory so future
 configuration changes remain reproducible:
