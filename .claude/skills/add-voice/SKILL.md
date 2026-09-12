@@ -325,6 +325,15 @@ call and connects to nothing.
 
 ## Troubleshooting
 
+**The first answer on a call takes about ten seconds.** That wait is the host
+creating the agent's session and starting its container, not the voice model.
+Ask a second question in the same call and the reply comes back quickly, because
+the container is already running. The call page says so while it waits, rather
+than leaving the caller looking at a silent screen. Containers are reclaimed
+when a session goes idle, so the next call pays the same first-answer cost.
+
+
+
 **`Unknown call link` on the page.** The `t` in the URL is not in
 `GPT_LIVE_LINK_TOKEN`. Copy the link from the operator note above, or check
 `.env`.

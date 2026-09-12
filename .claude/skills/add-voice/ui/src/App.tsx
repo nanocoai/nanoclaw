@@ -75,6 +75,33 @@ const HINT: Record<Phase, string> = {
   error: "Try again, or ask for a fresh link.",
 }
 
+/**
+ * A first answer on a call is slower than the ones after it: the host has to
+ * create the agent's session and start its container before anything can be
+ * asked. That is invisible from here, and a caller who is told only "working on
+ * it" assumes the call has stalled. After a few seconds of the first wait the
+ * readout says what is actually happening; later waits, which are the agent
+ * genuinely thinking, get a plainer note and a longer fuse.
+ */
+function useSlowAnswerNote(phase: Phase): string | null {
+  const [slow, setSlow] = useState(false)
+  const waits = useRef(0)
+  useEffect(() => {
+    if (phase === "idle" || phase === "connecting") waits.current = 0
+    if (phase !== "thinking") {
+      setSlow(false)
+      return
+    }
+    waits.current += 1
+    const t = window.setTimeout(() => setSlow(true), waits.current === 1 ? 3500 : 9000)
+    return () => window.clearTimeout(t)
+  }, [phase])
+  if (!slow) return null
+  return waits.current === 1
+    ? "Starting your agent. The first answer on a call takes a moment."
+    : "Still working on it."
+}
+
 function pad(n: number) {
   return n < 10 ? `0${n}` : String(n)
 }
@@ -341,6 +368,7 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey)
   }, [cfg.shortcuts, toggleMute, endCall])
 
+  const slowNote = useSlowAnswerNote(phase)
   const chipClass =
     phase === "idle" ? "idle" : phase === "ended" ? "ended" : phase === "error" ? "err" : phase === "listening" ? "you" : phase === "thinking" ? "think" : ""
   const hintText =
@@ -352,7 +380,9 @@ export default function App() {
           ? `${pad(Math.floor(elapsed / 60))}:${pad(elapsed % 60)} · ${lines.length} ${lines.length === 1 ? "turn" : "turns"} · ${
               endedText && endedText !== "Call ended." ? endedText.replace(/\.$/, "").toLowerCase() : "thanks for calling"
             }.`
-          : HINT[phase]
+          : phase === "thinking" && slowNote
+            ? slowNote
+            : HINT[phase]
 
   const readout = (
     <span className={`state-chip ${chipClass}`} role="status" aria-live="polite">
