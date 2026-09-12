@@ -23,12 +23,19 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { log } from '../log.js';
 import type { ChannelSetup, InboundMessage } from './adapter.js';
 import {
+  addBotInboundPolicy,
+  assertBotInboundPolicy,
+  BOT_INBOUND_POLICY_SEAM,
   botAuthorOf,
+  botInboundPolicyNames,
+  botInboundPolicyRefusals,
   registerSlackBotGuard,
+  resetBotInboundPoliciesForTesting,
   setBotInboundPolicy,
   wrapSlackBotGuard,
   type SlackBotInboundContext,
   type SlackBotInboundDecision,
+  type SlackInboundContext,
 } from './slack-a2a-guard.js';
 
 vi.mock('../log.js', () => ({
@@ -88,6 +95,7 @@ function makeSetup(onInbound?: ChannelSetup['onInbound']): { setup: ChannelSetup
 
 afterEach(() => {
   setBotInboundPolicy(null);
+  resetBotInboundPoliciesForTesting();
   vi.clearAllMocks();
 });
 
@@ -234,7 +242,7 @@ describe('wrapSlackBotGuard — admission-policy seam', () => {
     expect(calls).toHaveLength(0);
     expect(log.debug).toHaveBeenCalledWith(
       expect.stringContaining('dropped by policy'),
-      expect.objectContaining({ reason: 'room not allowlisted' }),
+      expect.objectContaining({ reasons: ['set-bot-inbound-policy: room not allowlisted'] }),
     );
   });
 
@@ -304,6 +312,343 @@ describe('wrapSlackBotGuard — admission-policy seam', () => {
     expect(log.warn).not.toHaveBeenCalled();
     setBotInboundPolicy({ decideBotInbound: () => ({ action: 'drop' }) });
     expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('policy overwritten'));
+  });
+});
+
+describe('wrapSlackBotGuard — the policy chain', () => {
+  const seam = { seam: BOT_INBOUND_POLICY_SEAM };
+  const admit = (): SlackBotInboundDecision => ({ action: 'admit' });
+  const drop = (reason: string) => (): SlackBotInboundDecision => ({ action: 'drop', reason });
+
+  it('asks policies in registration order and the first admit wins', async () => {
+    const { setup, calls } = makeSetup();
+    const wrapped = wrapSlackBotGuard(setup, 'slack');
+    const order: string[] = [];
+    addBotInboundPolicy(
+      'first',
+      {
+        decideBotInbound: () => {
+          order.push('first');
+          return { action: 'drop', reason: 'not mine' };
+        },
+      },
+      seam,
+    );
+    addBotInboundPolicy(
+      'second',
+      {
+        decideBotInbound: (ctx) => {
+          order.push('second');
+          return { action: 'admit', senderId: `slack:bot:${ctx.botId}` };
+        },
+      },
+      seam,
+    );
+    addBotInboundPolicy(
+      'third',
+      {
+        decideBotInbound: () => {
+          order.push('third');
+          return { action: 'admit' };
+        },
+      },
+      seam,
+    );
+
+    await wrapped.onInbound('slack:C1', null, botMessage('B0X'));
+
+    expect(order).toEqual(['first', 'second']); // the third was never asked (a 'drop' answer is a pass)
+    expect(calls).toHaveLength(1);
+    expect((calls[0].message.content as Record<string, unknown>).senderId).toBe('slack:bot:B0X');
+    expect(botInboundPolicyNames()).toEqual(['first', 'second', 'third']);
+  });
+
+  it('drops when every policy passes, logging every reason in chain order', async () => {
+    const { setup, calls } = makeSetup();
+    const wrapped = wrapSlackBotGuard(setup, 'slack');
+    addBotInboundPolicy('a', { decideBotInbound: drop('room not allowlisted') }, seam);
+    addBotInboundPolicy('b', { decideBotInbound: () => ({ action: 'pass', reason: 'not a surface member' }) }, seam);
+
+    await wrapped.onInbound('slack:C1', null, botMessage());
+
+    expect(calls).toHaveLength(0);
+    expect(log.debug).toHaveBeenCalledWith(
+      expect.stringContaining('dropped by policy'),
+      expect.objectContaining({ reasons: ['a: room not allowlisted', 'b: not a surface member'] }),
+    );
+  });
+
+  it('a deny is final: a later policy that would admit is never asked, and the denial is logged with its name', async () => {
+    for (const order of [
+      ['deny', 'admit'],
+      ['pass', 'deny', 'admit'],
+    ]) {
+      resetBotInboundPoliciesForTesting();
+      vi.clearAllMocks();
+      const { setup, calls } = makeSetup();
+      const wrapped = wrapSlackBotGuard(setup, 'slack');
+      const asked: string[] = [];
+      for (const kind of order) {
+        addBotInboundPolicy(
+          kind,
+          {
+            decideBotInbound: () => {
+              asked.push(kind);
+              if (kind === 'deny') return { action: 'deny', reason: 'the manager is never admitted' };
+              return kind === 'admit' ? { action: 'admit' } : { action: 'pass' };
+            },
+          },
+          seam,
+        );
+      }
+
+      await wrapped.onInbound('slack:C0SURF', null, botMessage('U0MANAGER'));
+
+      expect(calls).toHaveLength(0);
+      expect(asked).toEqual(order.slice(0, order.indexOf('deny') + 1));
+      expect(log.info).toHaveBeenCalledWith(
+        expect.stringContaining('denied by policy'),
+        expect.objectContaining({ policy: 'deny', reason: 'the manager is never admitted' }),
+      );
+    }
+  });
+
+  it('an admit before a deny still wins — whichever final answer comes first', async () => {
+    const { setup, calls } = makeSetup();
+    const wrapped = wrapSlackBotGuard(setup, 'slack');
+    addBotInboundPolicy('rooms', { decideBotInbound: admit }, seam);
+    addBotInboundPolicy('surface', { decideBotInbound: () => ({ action: 'deny' }) }, seam);
+
+    await wrapped.onInbound('slack:C0SURF', null, botMessage());
+
+    expect(calls).toHaveLength(1);
+  });
+
+  it('calls onFailed (not onAccepted) when downstream throws, so a reserved budget is released', async () => {
+    const onAccepted = vi.fn();
+    const onFailed = vi.fn();
+    const { setup } = makeSetup(async () => {
+      throw new Error('router exploded');
+    });
+    const wrapped = wrapSlackBotGuard(setup, 'slack');
+    addBotInboundPolicy('p', { decideBotInbound: () => ({ action: 'admit', onAccepted, onFailed }) }, seam);
+
+    await expect(wrapped.onInbound('slack:C1', null, botMessage())).rejects.toThrow('router exploded');
+
+    expect(onFailed).toHaveBeenCalledTimes(1);
+    expect(onAccepted).not.toHaveBeenCalled();
+  });
+
+  it('a policy that throws is a pass for itself only — the next policy is still asked', async () => {
+    const { setup, calls } = makeSetup();
+    const wrapped = wrapSlackBotGuard(setup, 'slack');
+    addBotInboundPolicy(
+      'buggy',
+      {
+        decideBotInbound: () => {
+          throw new Error('policy bug');
+        },
+      },
+      seam,
+    );
+    addBotInboundPolicy('healthy', { decideBotInbound: admit }, seam);
+
+    await wrapped.onInbound('slack:C1', null, botMessage());
+
+    expect(calls).toHaveLength(1);
+    expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('admission policy threw'), expect.anything());
+  });
+
+  it('the single-slot form takes its place in the chain and coexists with named policies', async () => {
+    const { setup, calls } = makeSetup();
+    const wrapped = wrapSlackBotGuard(setup, 'slack');
+    setBotInboundPolicy({
+      decideBotInbound: (ctx) => (ctx.platformId === 'slack:G0ROOM' ? { action: 'admit' } : { action: 'drop' }),
+    });
+    addBotInboundPolicy(
+      'surface',
+      {
+        decideBotInbound: (ctx) => (ctx.platformId === 'slack:C0SURF' ? { action: 'admit' } : { action: 'drop' }),
+      },
+      seam,
+    );
+
+    await wrapped.onInbound('slack:G0ROOM', null, botMessage());
+    await wrapped.onInbound('slack:C0SURF', null, botMessage());
+    await wrapped.onInbound('slack:C0OTHER', null, botMessage());
+
+    expect(calls.map((c) => c.platformId)).toEqual(['slack:G0ROOM', 'slack:C0SURF']);
+
+    // Clearing the slot leaves the named policy in place.
+    setBotInboundPolicy(null);
+    await wrapped.onInbound('slack:G0ROOM', null, botMessage());
+    await wrapped.onInbound('slack:C0SURF', null, botMessage());
+    expect(calls.map((c) => c.platformId)).toEqual(['slack:G0ROOM', 'slack:C0SURF', 'slack:C0SURF']);
+  });
+
+  it('the undo removes the policy; the rest of the chain is untouched', async () => {
+    const { setup, calls } = makeSetup();
+    const wrapped = wrapSlackBotGuard(setup, 'slack');
+    const undo = addBotInboundPolicy('gone', { decideBotInbound: admit }, seam);
+    addBotInboundPolicy('stays', { decideBotInbound: drop('no') }, seam);
+
+    undo();
+
+    await wrapped.onInbound('slack:C1', null, botMessage());
+    expect(calls).toHaveLength(0);
+    expect(botInboundPolicyNames()).toEqual(['stays']);
+  });
+
+  it('refuses a seam-version mismatch: logged, recorded, never installed, never thrown', async () => {
+    const { setup, calls } = makeSetup();
+    const wrapped = wrapSlackBotGuard(setup, 'slack');
+    const undo = addBotInboundPolicy('old-shape', { decideBotInbound: admit }, { seam: BOT_INBOUND_POLICY_SEAM - 1 });
+
+    await wrapped.onInbound('slack:C1', null, botMessage());
+
+    expect(calls).toHaveLength(0);
+    expect(botInboundPolicyNames()).toEqual([]);
+    expect(botInboundPolicyRefusals()).toEqual([
+      { name: 'old-shape', wanted: BOT_INBOUND_POLICY_SEAM, got: BOT_INBOUND_POLICY_SEAM - 1 },
+    ]);
+    expect(log.error).toHaveBeenCalledWith(expect.stringContaining('seam version mismatch'), expect.anything());
+    expect(() => undo()).not.toThrow();
+  });
+
+  it('refuses a second policy of the same name instead of overwriting', async () => {
+    const { setup, calls } = makeSetup();
+    const wrapped = wrapSlackBotGuard(setup, 'slack');
+    addBotInboundPolicy('dup', { decideBotInbound: drop('first wins') }, seam);
+    addBotInboundPolicy('dup', { decideBotInbound: admit }, seam);
+
+    await wrapped.onInbound('slack:C1', null, botMessage());
+
+    expect(calls).toHaveLength(0);
+    expect(botInboundPolicyNames()).toEqual(['dup']);
+    expect(log.error).toHaveBeenCalledWith(expect.stringContaining('already registered'), expect.anything());
+  });
+
+  it('assertBotInboundPolicy passes for a registered name and names the refusal otherwise', () => {
+    addBotInboundPolicy('present', { decideBotInbound: admit }, seam);
+    addBotInboundPolicy('refused', { decideBotInbound: admit }, { seam: 99 });
+
+    expect(() => assertBotInboundPolicy('present')).not.toThrow();
+    expect(() => assertBotInboundPolicy('absent')).toThrow(/no bot inbound policy named 'absent'/);
+    expect(() => assertBotInboundPolicy('refused')).toThrow(/seam 2 expected, 99 given/);
+  });
+
+  it('every policy observes human messages; the message still passes', async () => {
+    const { setup, calls } = makeSetup();
+    const wrapped = wrapSlackBotGuard(setup, 'slack');
+    const seen: string[] = [];
+    addBotInboundPolicy('a', { decideBotInbound: admit, onHumanInbound: () => seen.push('a') }, seam);
+    addBotInboundPolicy(
+      'b',
+      {
+        decideBotInbound: admit,
+        onHumanInbound: () => {
+          throw new Error('observer bug');
+        },
+      },
+      seam,
+    );
+    addBotInboundPolicy('c', { decideBotInbound: admit, onHumanInbound: () => seen.push('c') }, seam);
+
+    await wrapped.onInbound('slack:C1', null, humanMessage());
+
+    expect(seen).toEqual(['a', 'c']);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('drops a non-bot message a policy names as a notice, before it reaches the host', async () => {
+    const { setup, calls } = makeSetup();
+    const wrapped = wrapSlackBotGuard(setup, 'slack');
+    const observed: SlackInboundContext[] = [];
+    addBotInboundPolicy(
+      'surface',
+      {
+        decideBotInbound: drop('no'),
+        noticeOf: (ctx) =>
+          (ctx.message.content as { author?: { userId?: string } }).author?.userId === 'U0MANAGER'
+            ? { reason: 'manager notice' }
+            : null,
+        onHumanInbound: (ctx) => observed.push(ctx),
+      },
+      seam,
+    );
+
+    await wrapped.onInbound('slack:C1', null, makeInbound({ userId: 'U0MANAGER', isBot: false }, 'added view'));
+    await wrapped.onInbound('slack:C1', null, humanMessage());
+
+    expect(calls).toHaveLength(1); // only the human message
+    expect(observed).toHaveLength(1); // a notice is not observed as a human message
+    expect(log.debug).toHaveBeenCalledWith(
+      expect.stringContaining('notice dropped by policy'),
+      expect.objectContaining({ policy: 'surface', reason: 'manager notice' }),
+    );
+  });
+
+  it('a noticeOf that throws names nothing — the message goes on as human', async () => {
+    const { setup, calls } = makeSetup();
+    const wrapped = wrapSlackBotGuard(setup, 'slack');
+    addBotInboundPolicy(
+      'buggy',
+      {
+        decideBotInbound: drop('no'),
+        noticeOf: () => {
+          throw new Error('bug');
+        },
+      },
+      seam,
+    );
+
+    await wrapped.onInbound('slack:C1', null, humanMessage());
+
+    expect(calls).toHaveLength(1);
+    expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('noticeOf threw'), expect.anything());
+  });
+
+  it('awaits an asynchronous decision and an asynchronous noticeOf', async () => {
+    const { setup, calls } = makeSetup();
+    const wrapped = wrapSlackBotGuard(setup, 'slack');
+    addBotInboundPolicy(
+      'async',
+      {
+        decideBotInbound: async (ctx) => ({ action: 'admit', senderId: `slack:bot:${ctx.botId}` }),
+        noticeOf: async (ctx) =>
+          (ctx.message.content as { text?: string }).text === 'added view' ? { reason: 'notice' } : null,
+      },
+      seam,
+    );
+
+    await wrapped.onInbound('slack:C1', null, botMessage('U0SIB'));
+    await wrapped.onInbound('slack:C1', null, humanMessage('added view'));
+    await wrapped.onInbound('slack:C1', null, humanMessage('hi'));
+
+    expect(calls.map((c) => (c.message.content as { text: string }).text)).toEqual(['beep', 'hi']);
+    expect((calls[0].message.content as Record<string, unknown>).senderId).toBe('slack:bot:U0SIB');
+  });
+
+  it('a rejected decision is a drop for that policy only', async () => {
+    const { setup, calls } = makeSetup();
+    const wrapped = wrapSlackBotGuard(setup, 'slack');
+    addBotInboundPolicy('rejects', { decideBotInbound: async () => Promise.reject(new Error('down')) }, seam);
+    addBotInboundPolicy('healthy', { decideBotInbound: admit }, seam);
+
+    await wrapped.onInbound('slack:C1', null, botMessage());
+
+    expect(calls).toHaveLength(1);
+  });
+
+  it('never asks noticeOf about a bot-authored message', async () => {
+    const { setup } = makeSetup();
+    const wrapped = wrapSlackBotGuard(setup, 'slack');
+    const noticeOf = vi.fn(() => null);
+    addBotInboundPolicy('p', { decideBotInbound: drop('no'), noticeOf }, seam);
+
+    await wrapped.onInbound('slack:C1', null, botMessage());
+
+    expect(noticeOf).not.toHaveBeenCalled();
   });
 });
 

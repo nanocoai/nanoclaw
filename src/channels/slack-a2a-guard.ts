@@ -18,13 +18,28 @@
  * debug log — the safe default every Slack install wants. Human-authored
  * messages are never touched.
  *
- * Extension seam: an optional admission policy (`setBotInboundPolicy`) can
- * selectively admit bot traffic under its own rules — e.g. the
- * slack-a2a-rooms skill's allowlist + hop-limit + `slack:bot:<bot_id>`
- * re-attribution. The policy decides *which* bot messages pass and how they
- * are attributed; the guard owns the mechanics (default drop, human
- * pass-through, senderId rewrite, accept accounting). Without a policy,
- * everything bot-authored is dropped.
+ * Extension seam: admission policies (`addBotInboundPolicy`) can selectively
+ * admit bot traffic under their own rules — e.g. the slack-a2a-rooms skill's
+ * allowlist + hop-limit + `slack:bot:<bot_id>` re-attribution, or a coding
+ * session's surface admitting its fellow members. Policies form a chain in
+ * registration order and each answers one of three ways: `admit` (final),
+ * `deny` (final — the chain stops, nothing later can re-admit) or `pass`
+ * (not this policy's conversation; the next one is asked). A message every
+ * policy passes on is dropped. A policy decides *which* bot messages pass
+ * and how they are attributed; the guard owns the mechanics (default drop,
+ * human pass-through, senderId rewrite, accept accounting). Without any
+ * policy, everything bot-authored is dropped. `setBotInboundPolicy` remains
+ * as the single-slot form of the same seam for policies written against it;
+ * their `drop` answer is a pass.
+ *
+ * One narrow widening: a platform can deliver an app's system notice (a
+ * "view added" line the channel's manager app posts) WITHOUT a `bot_id`, so
+ * it looks human to `botAuthorOf`. A policy that knows a conversation may
+ * name such a message a notice (`noticeOf`) and the guard drops it before it
+ * becomes mail. The human guarantee therefore reads: a non-bot-authored
+ * message always reaches the host, except one from a user the service names
+ * as a bot in a coding session's surface channel. A policy that throws there
+ * names nothing, so a human message is never lost to a policy bug.
  *
  * Registration: the guard registers itself for the `slack` channel type via
  * the bridge's inbound-policy seam (`registerBridgeInboundPolicy`) on barrel
@@ -82,9 +97,14 @@ export interface SlackBotInboundContext extends SlackInboundContext {
   botId: string;
 }
 
-/** Admission decision for one bot-authored inbound message. */
+/**
+ * Admission decision for one bot-authored inbound message. `pass` (and its
+ * older spelling `drop`) means "not mine — ask the next policy"; `deny` is
+ * final and no later policy is asked; `admit` is final too.
+ */
 export type SlackBotInboundDecision =
-  | { action: 'drop'; reason?: string }
+  | { action: 'pass' | 'drop'; reason?: string }
+  | { action: 'deny'; reason?: string }
   | {
       action: 'admit';
       /**
@@ -101,35 +121,220 @@ export type SlackBotInboundDecision =
        * reached a session.
        */
       onAccepted?: () => void;
+      /**
+       * Called when downstream threw (the message never reached a session),
+       * so a budget reserved at admit time can be released.
+       */
+      onFailed?: () => void;
     };
+
+/** A non-bot-authored message a policy recognises as a platform or app notice, not a person. */
+export interface SlackInboundNotice {
+  reason: string;
+}
 
 /**
  * The narrow surface a feature module (e.g. slack-a2a-rooms) implements to
  * selectively admit bot traffic. Humans are structurally outside the policy's
  * power: `onHumanInbound` is observe-only (e.g. to reset hop counters) and
  * cannot drop or mutate — human pass-through is guaranteed by the guard,
- * not by policy good behavior.
+ * not by policy good behavior. The one exception is a message the policy
+ * can positively name as a notice (`noticeOf`); see the module comment.
  */
 export interface SlackBotInboundPolicy {
-  /** Decide one bot-authored inbound message. A throw is treated as drop. */
-  decideBotInbound(ctx: SlackBotInboundContext): SlackBotInboundDecision;
+  /** Decide one bot-authored inbound message, synchronously or not. A throw (or rejection) is treated as pass. */
+  decideBotInbound(ctx: SlackBotInboundContext): SlackBotInboundDecision | Promise<SlackBotInboundDecision>;
   /** Observe a human-authored inbound message. Cannot affect delivery. */
   onHumanInbound?(ctx: SlackInboundContext): void;
+  /**
+   * Name a non-bot-authored message as a notice the guard should drop (a
+   * system line the platform posts on an app's behalf, without a `bot_id`).
+   * Null (or a throw) means "not one I know": the message goes on as human.
+   */
+  noticeOf?(ctx: SlackInboundContext): SlackInboundNotice | null | Promise<SlackInboundNotice | null>;
 }
 
-let botInboundPolicy: SlackBotInboundPolicy | null = null;
+/**
+ * The seam version a registrar passes with `addBotInboundPolicy`. Bumped only
+ * on a breaking change to the policy shape; a mismatch refuses the
+ * registration (logged, never thrown) so a policy built against another
+ * shape costs itself and not the channel. Version 2: the chain with
+ * tri-state decisions (admit / deny / pass), `noticeOf`, `onFailed`, and
+ * decisions that may be promises.
+ */
+export const BOT_INBOUND_POLICY_SEAM = 2;
+
+/** Undo a registration. */
+export type Unregister = () => void;
+
+interface PolicyEntry {
+  name: string;
+  policy: SlackBotInboundPolicy;
+}
+
+/** A refused registration, for the contract helper and operator surfaces. */
+export interface BotInboundPolicyRefusal {
+  name: string;
+  wanted: number;
+  got: number | undefined;
+}
+
+const policyChain: PolicyEntry[] = [];
+const refusals: BotInboundPolicyRefusal[] = [];
+
+/** The name the single-slot form registers under. */
+const SINGLE_SLOT = 'set-bot-inbound-policy';
 
 /**
- * Install THE admission policy for bot-authored Slack inbound (single
- * provider — a second installation overwrites with a warning, mirroring the
- * bridge registry's hook discipline). Pass null to clear and restore the
- * default drop-everything behavior.
+ * Add an admission policy to the chain under a name (one entry per name; a
+ * second registration under the same name is refused and logged, never
+ * overwritten). Policies are consulted in registration order; the first to
+ * admit wins. Returns the undo.
+ */
+export function addBotInboundPolicy(
+  name: string,
+  policy: SlackBotInboundPolicy,
+  registration: { seam: number },
+): Unregister {
+  if (registration.seam !== BOT_INBOUND_POLICY_SEAM) {
+    refusals.push({ name, wanted: BOT_INBOUND_POLICY_SEAM, got: registration.seam });
+    log.error('slack-a2a-guard: bot inbound policy refused — seam version mismatch', {
+      name,
+      expected: BOT_INBOUND_POLICY_SEAM,
+      received: registration.seam,
+    });
+    return () => {};
+  }
+  if (policyChain.some((entry) => entry.name === name)) {
+    log.error('slack-a2a-guard: bot inbound policy refused — a policy of this name is already registered', { name });
+    return () => {};
+  }
+  const entry: PolicyEntry = { name, policy };
+  policyChain.push(entry);
+  log.info('slack-a2a-guard: bot inbound policy registered', { name, position: policyChain.length });
+  return () => {
+    const at = policyChain.indexOf(entry);
+    if (at !== -1) policyChain.splice(at, 1);
+  };
+}
+
+/**
+ * The single-slot form of the seam, kept for policies written against it:
+ * installs THE policy of that slot (a second call overwrites with a warning,
+ * as before), taking its place in the chain when first set. Pass null to
+ * clear the slot and, with no other policy registered, restore the default
+ * drop-everything behavior.
  */
 export function setBotInboundPolicy(policy: SlackBotInboundPolicy | null): void {
-  if (policy && botInboundPolicy) {
+  const at = policyChain.findIndex((entry) => entry.name === SINGLE_SLOT);
+  if (policy && at !== -1) {
     log.warn('slack-a2a-guard: bot inbound policy overwritten');
+    policyChain[at] = { name: SINGLE_SLOT, policy };
+    return;
   }
-  botInboundPolicy = policy;
+  if (policy) {
+    policyChain.push({ name: SINGLE_SLOT, policy });
+    return;
+  }
+  if (at !== -1) policyChain.splice(at, 1);
+}
+
+/** The registered policy names, in chain order. */
+export function botInboundPolicyNames(): string[] {
+  return policyChain.map((entry) => entry.name);
+}
+
+/** Every refused registration this process recorded, oldest first. */
+export function botInboundPolicyRefusals(): readonly BotInboundPolicyRefusal[] {
+  return [...refusals];
+}
+
+/**
+ * Contract-test helper: a payload's test imports the real channel barrel and
+ * asserts its policy is on the chain, with the refusal's reason when not.
+ */
+export function assertBotInboundPolicy(name: string): void {
+  if (policyChain.some((entry) => entry.name === name)) return;
+  const refused = refusals.find((r) => r.name === name);
+  throw new Error(
+    `no bot inbound policy named '${name}' is registered` +
+      (refused ? ` (refused: seam ${refused.wanted} expected, ${refused.got ?? 'none'} given)` : ''),
+  );
+}
+
+/** Test seam. */
+export function resetBotInboundPoliciesForTesting(): void {
+  policyChain.length = 0;
+  refusals.length = 0;
+}
+
+/** Ask each policy, in order, to name the message a notice; the first answer wins. */
+async function noticeOf(ctx: SlackInboundContext): Promise<{ name: string; notice: SlackInboundNotice } | null> {
+  for (const { name, policy } of [...policyChain]) {
+    if (!policy.noticeOf) continue;
+    try {
+      const notice = await policy.noticeOf(ctx);
+      if (notice) return { name, notice };
+    } catch (err) {
+      // A policy that cannot decide names nothing: the message goes on as human.
+      log.warn('slack-a2a-guard: noticeOf threw — message treated as human', { name, platformId: ctx.platformId, err });
+    }
+  }
+  return null;
+}
+
+/** Let every policy observe a human message; an observer's throw is logged and ignored. */
+function observeHuman(ctx: SlackInboundContext): void {
+  for (const { name, policy } of [...policyChain]) {
+    if (!policy.onHumanInbound) continue;
+    try {
+      policy.onHumanInbound(ctx);
+    } catch (err) {
+      log.warn('slack-a2a-guard: onHumanInbound observer threw — human message unaffected', {
+        name,
+        instanceKey: ctx.instanceKey,
+        platformId: ctx.platformId,
+        err,
+      });
+    }
+  }
+}
+
+/**
+ * Walk the chain for one bot-authored message: `admit` and `deny` are final,
+ * `pass` (or the older `drop`) hands the message to the next policy, and a
+ * policy that throws passes (fail-closed for itself; it cannot admit by
+ * accident, and it cannot veto what it could not decide). A message every
+ * policy passed on is dropped with every reason, in chain order.
+ */
+type ChainOutcome =
+  | { kind: 'admit'; admit: Extract<SlackBotInboundDecision, { action: 'admit' }>; name: string }
+  | { kind: 'deny'; name: string; reason?: string }
+  | { kind: 'unclaimed'; reasons: string[] };
+
+async function decideBot(ctx: SlackBotInboundContext): Promise<ChainOutcome> {
+  const reasons: string[] = [];
+  for (const { name, policy } of [...policyChain]) {
+    let decision: SlackBotInboundDecision;
+    try {
+      decision = await policy.decideBotInbound(ctx);
+    } catch (err) {
+      log.warn('slack-a2a-guard: admission policy threw — dropping bot-authored inbound for this policy', {
+        name,
+        instanceKey: ctx.instanceKey,
+        platformId: ctx.platformId,
+        botId: ctx.botId,
+        err,
+      });
+      reasons.push(`${name}: threw`);
+      continue;
+    }
+    if (decision.action === 'admit') return { kind: 'admit', admit: decision, name };
+    if (decision.action === 'deny')
+      return { kind: 'deny', name, ...(decision.reason ? { reason: decision.reason } : {}) };
+    reasons.push(`${name}: ${decision.reason ?? 'pass'}`);
+  }
+  return { kind: 'unclaimed', reasons };
 }
 
 // ---------------------------------------------------------------------------
@@ -149,23 +354,27 @@ export function wrapSlackBotGuard(setup: ChannelSetup, instanceKey: string): Cha
       const bot = botAuthorOf(message);
 
       if (!bot) {
-        // Human message — pass through untouched. The policy may observe it
-        // (hop-counter resets), but can neither drop nor mutate it.
-        if (botInboundPolicy?.onHumanInbound) {
-          try {
-            botInboundPolicy.onHumanInbound({ instanceKey, platformId, threadId, message });
-          } catch (err) {
-            log.warn('slack-a2a-guard: onHumanInbound observer threw — human message unaffected', {
-              instanceKey,
-              platformId,
-              err,
-            });
-          }
+        const ctx: SlackInboundContext = { instanceKey, platformId, threadId, message };
+        // A notice the platform posted on an app's behalf, without a bot_id:
+        // a policy that knows the conversation may name it; dropped before it
+        // becomes mail. Nothing else about a non-bot message is up to policy.
+        const named = await noticeOf(ctx);
+        if (named) {
+          log.debug('slack-a2a-guard: notice dropped by policy', {
+            instanceKey,
+            platformId,
+            policy: named.name,
+            reason: named.notice.reason,
+          });
+          return;
         }
+        // Human message — pass through untouched. Policies may observe it
+        // (hop-counter resets), but can neither drop nor mutate it.
+        observeHuman(ctx);
         return setup.onInbound(platformId, threadId, message);
       }
 
-      if (!botInboundPolicy) {
+      if (policyChain.length === 0) {
         log.debug('slack-a2a-guard: bot-authored inbound dropped — no admission policy installed', {
           instanceKey,
           platformId,
@@ -174,38 +383,41 @@ export function wrapSlackBotGuard(setup: ChannelSetup, instanceKey: string): Cha
         return;
       }
 
-      let decision: SlackBotInboundDecision;
-      try {
-        decision = botInboundPolicy.decideBotInbound({ instanceKey, platformId, threadId, message, botId: bot.botId });
-      } catch (err) {
-        // Fail closed: a buggy policy must not fail open into approval spam.
-        log.warn('slack-a2a-guard: admission policy threw — dropping bot-authored inbound', {
+      const outcome = await decideBot({ instanceKey, platformId, threadId, message, botId: bot.botId });
+      if (outcome.kind === 'deny') {
+        log.info('slack-a2a-guard: bot-authored inbound denied by policy', {
           instanceKey,
           platformId,
           botId: bot.botId,
-          err,
+          policy: outcome.name,
+          reason: outcome.reason,
         });
         return;
       }
-
-      if (decision.action !== 'admit') {
+      if (outcome.kind === 'unclaimed') {
         log.debug('slack-a2a-guard: bot-authored inbound dropped by policy', {
           instanceKey,
           platformId,
           botId: bot.botId,
-          reason: decision.reason,
+          reasons: outcome.reasons,
         });
         return;
       }
 
+      const decision = outcome.admit;
       if (decision.senderId) {
         (message.content as Record<string, unknown>).senderId = decision.senderId;
       }
       // Report acceptance only after downstream accepted it — a throw in the
-      // host's onInbound must not count a message that never reached a session.
-      const result = await setup.onInbound(platformId, threadId, message);
+      // host's onInbound must not count a message that never reached a session
+      // (and releases whatever the policy reserved when it admitted).
+      try {
+        await setup.onInbound(platformId, threadId, message);
+      } catch (err) {
+        decision.onFailed?.();
+        throw err;
+      }
       decision.onAccepted?.();
-      return result;
     },
   };
 }
