@@ -5,11 +5,17 @@
  *   { "v":1, "ch":<int>, "seq":<int>, "t":"<type>", ...fields }
  *
  * - ch 0 is the control channel: "hello", "status", "ping"/"pong",
- *   "perks.changed" and "error".
+ *   "renew"/"renewed", "perks.changed" and "error".
  * - ch > 0 are data channels, opened by the cell with "open" {kind, ...};
- *   "data", "end", "error" {code, msg} and "close" follow on the same ch.
+ *   "data", "credit", "end", "error" {code, msg} and "close" follow on the
+ *   same ch.
  * - seq is per channel, per sender, starts at 1, increments by 1. Receivers
  *   tolerate gaps.
+ *
+ * Frames a client leg sends are at most 4096 characters, except on an open
+ * `ssh` channel, where a 16 KiB chunk needs room: 24 000 characters. The mux
+ * knows each open channel's kind and refuses (logs and drops) anything the
+ * cell would close the socket for.
  *
  * Nothing in this file may log payload contents; envelope metadata only.
  */
@@ -17,13 +23,17 @@ export const PROTOCOL_VERSION = 1 as const;
 export const CONTROL_CHANNEL = 0;
 /** Frames from client legs are at most this long. */
 export const MAX_CLIENT_FRAME_CHARS = 4096;
+/** Frames on one of the socket's open `ssh` channels may be this long instead. */
+export const MAX_SSH_FRAME_CHARS = 24_000;
 /** The cell may send larger frames (a snapshot), up to this long. */
 export const MAX_CELL_FRAME_CHARS = 512_000;
+/** The channel kind that carries one relayed terminal stream. */
+export const SSH_KIND = 'ssh';
 
 /** Frame types valid on the control channel (ch 0). */
-export const CONTROL_TYPES = ['hello', 'status', 'ping', 'pong', 'perks.changed', 'error'] as const;
+export const CONTROL_TYPES = ['hello', 'status', 'ping', 'pong', 'renew', 'renewed', 'perks.changed', 'error'] as const;
 /** Frame types valid on data channels (ch > 0). */
-export const DATA_TYPES = ['open', 'data', 'end', 'error', 'close'] as const;
+export const DATA_TYPES = ['open', 'data', 'credit', 'end', 'error', 'close'] as const;
 
 export interface Frame {
   v: typeof PROTOCOL_VERSION;
@@ -34,6 +44,11 @@ export interface Frame {
 }
 
 export type MuxLog = (event: { event: string; [field: string]: unknown }) => void;
+
+/** How long a client frame may be on a channel of `kind` (`undefined`: the control channel). */
+export function frameAllowance(kind: string | undefined): number {
+  return kind === SSH_KIND ? MAX_SSH_FRAME_CHARS : MAX_CLIENT_FRAME_CHARS;
+}
 
 /** Serialize a frame to the single-JSON-text wire form. */
 export function encodeFrame(frame: Frame): string {
@@ -75,36 +90,58 @@ export interface ChannelHandler {
   onTeardown(): void;
 }
 
+interface Channel {
+  handler: ChannelHandler;
+  kind?: string;
+}
+
 /**
  * Per-connection multiplexer: outbound seq counters, inbound seq gap
- * tracking, and the registry of open data channels. One Mux per WebSocket;
- * throw it away (reset()) when the socket drops.
+ * tracking, and the registry of open data channels with their kinds. One Mux
+ * per WebSocket; throw it away (reset()) when the socket drops.
  */
 export class Mux {
   private readonly outSeq = new Map<number, number>();
   private readonly inSeq = new Map<number, number>();
-  private readonly channels = new Map<number, ChannelHandler>();
+  private readonly channels = new Map<number, Channel>();
 
   constructor(
     private readonly sendRaw: (raw: string) => void,
     private readonly log: MuxLog = () => {},
   ) {}
 
-  /** Send a frame on `ch`, stamping the next per-channel outbound seq. */
-  send(ch: number, t: string, fields: Record<string, unknown> = {}): void {
+  /**
+   * Send a frame on `ch`, stamping the next per-channel outbound seq. A frame
+   * longer than the channel's allowance is dropped and logged instead of sent
+   * (the cell would close the socket 4009); returns whether it went out.
+   */
+  send(ch: number, t: string, fields: Record<string, unknown> = {}): boolean {
     const seq = (this.outSeq.get(ch) ?? 0) + 1;
     this.outSeq.set(ch, seq);
-    this.sendRaw(encodeFrame({ ...fields, v: PROTOCOL_VERSION, ch, seq, t }));
+    const raw = encodeFrame({ ...fields, v: PROTOCOL_VERSION, ch, seq, t });
+    const allowance = this.allowance(ch);
+    if (raw.length > allowance) {
+      this.log({ event: 'dropped_oversize_frame', ch, t, chars: raw.length, allowance });
+      return false;
+    }
+    this.sendRaw(raw);
+    return true;
   }
 
   /**
    * Decode + seq-track one raw inbound message. Invalid frames are dropped
-   * (logged without payload). Seq gaps are tolerated but logged.
+   * (logged without payload), as is a frame on an `ssh` channel longer than
+   * that kind's allowance. Seq gaps are tolerated but logged.
    */
   receive(raw: unknown): Frame | null {
     const frame = decodeFrame(raw);
     if (frame === null) {
       this.log({ event: 'dropped_invalid_frame', bytes: typeof raw === 'string' ? raw.length : -1 });
+      return null;
+    }
+    const chars = (raw as string).length;
+    if (frame.ch !== CONTROL_CHANNEL && this.kindOf(frame.ch) === SSH_KIND && chars > MAX_SSH_FRAME_CHARS) {
+      this.log({ event: 'dropped_oversize_frame', ch: frame.ch, t: frame.t, chars, allowance: MAX_SSH_FRAME_CHARS });
       return null;
     }
     const last = this.inSeq.get(frame.ch) ?? 0;
@@ -114,19 +151,34 @@ export class Mux {
     return frame;
   }
 
-  openChannel(ch: number, handler: ChannelHandler): void {
-    this.channels.set(ch, handler);
+  /** Register a data channel the cell opened; `kind` decides its frame allowance. */
+  openChannel(ch: number, handler: ChannelHandler, kind?: string): void {
+    this.channels.set(ch, { handler, ...(kind === undefined ? {} : { kind }) });
   }
 
   handlerFor(ch: number): ChannelHandler | undefined {
-    return this.channels.get(ch);
+    return this.channels.get(ch)?.handler;
+  }
+
+  kindOf(ch: number): string | undefined {
+    return this.channels.get(ch)?.kind;
+  }
+
+  /** The open channels of one kind, in opening order. */
+  channelsOfKind(kind: string): number[] {
+    return [...this.channels].filter(([, channel]) => channel.kind === kind).map(([ch]) => ch);
+  }
+
+  /** The longest frame this end may send on `ch`. */
+  allowance(ch: number): number {
+    return ch === CONTROL_CHANNEL ? MAX_CLIENT_FRAME_CHARS : frameAllowance(this.kindOf(ch));
   }
 
   /** Remove + tear down one channel. Safe to call for unknown channels. */
   closeChannel(ch: number): void {
-    const handler = this.channels.get(ch);
+    const channel = this.channels.get(ch);
     this.channels.delete(ch);
-    handler?.onTeardown();
+    channel?.handler.onTeardown();
   }
 
   /** Tear down every channel and forget all seq state (socket dropped). */

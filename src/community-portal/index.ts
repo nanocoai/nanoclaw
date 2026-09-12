@@ -17,3 +17,4 @@ export * from './mux.js';
 export * from './private-file.js';
 export * from './process-lock.js';
 export * from './setup-client.js';
+export * from './terminal.js';

@@ -14,9 +14,11 @@
 import { onHostStart, onHostShutdown } from '../../host-lifecycle.js';
 import { log } from '../../log.js';
 import { startPortalRuntime } from './runtime.js';
-// The door registers its host lifecycle; the verbs extend `ncl sandboxes`.
+// The door registers its host lifecycle; the verbs extend `ncl sandboxes`;
+// the address registration listens on the sandbox lifecycle.
 import './door/index.js';
 import './door/verbs.js';
+import './remote/index.js';
 
 let runtime: ReturnType<typeof startPortalRuntime> | undefined;
 

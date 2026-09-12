@@ -1,5 +1,5 @@
 import { errorCode, portalError } from './errors.js';
-import { CONTROL_CHANNEL, MAX_CELL_FRAME_CHARS, Mux, type Frame } from './mux.js';
+import { CONTROL_CHANNEL, MAX_CELL_FRAME_CHARS, Mux, SSH_KIND, type ChannelHandler, type Frame } from './mux.js';
 
 /**
  * The host's link to its account cell (wss://<portal>/cell/link): the
@@ -7,11 +7,19 @@ import { CONTROL_CHANNEL, MAX_CELL_FRAME_CHARS, Mux, type Frame } from './mux.js
  * Node 22. Every dial asks for a fresh ticket, says hello as the host leg,
  * pings every 20 s, drops a socket that stays silent for 60 s or does not open
  * within 10 s, and reconnects with jittered exponential backoff (1 s base,
- * 30 s cap). The cell opens a `perks` data channel whose `data` frames carry
- * the perks snapshot and device presence; any other channel kind is refused
- * with `error unsupported`. The `data` frame is the source of truth and
- * `perks.changed` only a hint, acted on when no data frame preceded it. The
- * host sends nothing but hello, ping, and error/close on a data channel. A
+ * 30 s cap). Ten minutes into each socket the host asks for another ticket
+ * and sends `renew` on the control channel, so open streams outlive the
+ * ticket; the expiry close (4401) stays the failure path.
+ *
+ * The cell opens a `perks` data channel whose `data` frames carry the perks
+ * snapshot and device presence. With a stream opener installed (the host's
+ * loopback door is enabled) the host also announces the `ssh` cap and accepts
+ * `open { kind: "ssh" }`: each such channel is one relayed terminal stream,
+ * handed to the opener with its target and source; at most eight are open at
+ * once, a ninth is refused with `close busy`. Any other channel kind, and
+ * `ssh` while no opener is installed, is refused with `error unsupported`.
+ * The `data` frame on the perks channel is the source of truth and
+ * `perks.changed` only a hint, acted on when no data frame preceded it. A
  * close with 4403 (device forgotten) means "sign in required": the link stops
  * dialling until it is started again; 4008/4009 are the host's own protocol
  * bugs and are logged before the ordinary backoff. The socket constructor is
@@ -36,6 +44,30 @@ export interface PerksData {
   presence: unknown;
 }
 
+/** The cell's `open { kind: "ssh" }` payload: one terminal stream bound for the door. */
+export interface SshOpen {
+  /** The stream id the service minted (16 random bytes, base64url). */
+  stream: string;
+  /** The account name (not id) and, for a sandbox address, the sandbox. */
+  target: { account: string; sandbox?: string };
+  /** The terminal's public address as the relay saw it. */
+  source: { ip: string; port: number };
+  /** The admission ticket's id, for audit correlation only. */
+  ticket?: string;
+}
+
+/** The link's side of one open `ssh` channel, handed to the stream opener. */
+export interface SshChannel {
+  readonly ch: number;
+  /** Send `data`, `credit`, `end` or `close`; false when the frame exceeded the channel's allowance. */
+  send(t: 'data' | 'credit' | 'end' | 'close', fields?: Record<string, unknown>): boolean;
+  /** Forget the channel once `close` went out or came in; tears the handler down exactly once. */
+  release(): void;
+}
+
+/** Pipes one stream to the door; returns the handler that receives the channel's frames. */
+export type SshOpener = (open: SshOpen, channel: SshChannel) => ChannelHandler;
+
 export interface LinkSocket {
   readonly readyState: number;
   send(data: string): void;
@@ -48,7 +80,7 @@ export type LinkSocketConstructor = new (url: URL, protocols: string[]) => LinkS
 
 export interface CellLinkOptions {
   origin: string;
-  /** A fresh ticket for every dial. */
+  /** A fresh ticket for every dial and every renewal. */
   getTicket(signal: AbortSignal): Promise<CellTicket>;
   /** Every `data` frame on the perks channel: right after hello and on every mirror change. */
   onSnapshot?: (data: PerksData) => void;
@@ -56,12 +88,16 @@ export interface CellLinkOptions {
   onChange?: () => void;
   /** The cell closed with 4403: this device was forgotten. The link stays down until `start()`. */
   onForbidden?: () => void;
+  /** Accept `ssh` channels and announce the cap; absent while the door is disabled. */
+  ssh?: SshOpener;
   log?: LinkLog;
   caps?: string[];
   ver?: string;
   pingMs?: number;
   pongTimeoutMs?: number;
   handshakeMs?: number;
+  renewMs?: number;
+  renewJitterMs?: number;
   backoffBaseMs?: number;
   backoffCapMs?: number;
   Socket?: LinkSocketConstructor;
@@ -72,12 +108,18 @@ export interface CellLinkOptions {
 export const PING_INTERVAL_MS = 20_000;
 export const PONG_TIMEOUT_MS = 60_000;
 export const HANDSHAKE_TIMEOUT_MS = 10_000;
+/** The host renews its 15-minute ticket this far into every socket, give or take the jitter. */
+export const RENEW_INTERVAL_MS = 10 * 60_000;
+export const RENEW_JITTER_MS = 30_000;
 export const BACKOFF_BASE_MS = 1_000;
 export const BACKOFF_CAP_MS = 30_000;
 /** A socket that stayed open this long resets the backoff counter when it drops. */
 export const STABLE_RESET_MS = 30_000;
 export const CELL_PATH = '/cell/link';
 export const HOST_CAPS = ['perks'];
+export const SSH_CAP = SSH_KIND;
+/** Open `ssh` channels per account; the host refuses the next `open` with `close busy`. */
+export const MAX_STREAMS = 8;
 /** Close codes the cell uses (its WebSocket layer permits only 1000 and 3000–4999). */
 export const CLOSE_EXPIRED = 4401;
 export const CLOSE_FORBIDDEN = 4403;
@@ -85,6 +127,11 @@ export const CLOSE_PROTOCOL = 4008;
 export const CLOSE_OVERSIZE = 4009;
 
 const OPEN = 1;
+
+/** The caps a host announces: `ssh` only while its door accepts streams. */
+export function hostCaps({ ssh = false }: { ssh?: boolean } = {}): string[] {
+  return ssh ? [...HOST_CAPS, SSH_CAP] : [...HOST_CAPS];
+}
 
 /**
  * Jittered exponential backoff: the window is base * 2^attempt capped at
@@ -98,6 +145,22 @@ export function computeBackoffDelay(
   return Math.floor(window / 2 + random() * (window / 2));
 }
 
+/** The `open { kind: "ssh" }` fields the host relies on, or null when the payload is off-contract. */
+export function parseSshOpen(frame: Frame): SshOpen | null {
+  const target = frame.target as { account?: unknown; sandbox?: unknown } | undefined;
+  const source = frame.source as { ip?: unknown; port?: unknown } | undefined;
+  if (typeof frame.stream !== 'string' || !frame.stream) return null;
+  if (typeof target?.account !== 'string' || !target.account) return null;
+  if (target.sandbox !== undefined && (typeof target.sandbox !== 'string' || !target.sandbox)) return null;
+  if (typeof source?.ip !== 'string' || !Number.isInteger(source.port)) return null;
+  return {
+    stream: frame.stream,
+    target: { account: target.account, ...(target.sandbox === undefined ? {} : { sandbox: target.sandbox }) },
+    source: { ip: source.ip, port: source.port as number },
+    ...(typeof frame.ticket === 'string' ? { ticket: frame.ticket } : {}),
+  };
+}
+
 export class CellLink {
   connected = false;
   private readonly origin: string;
@@ -105,12 +168,15 @@ export class CellLink {
   private readonly onSnapshot: (data: PerksData) => void;
   private readonly onChange: () => void;
   private readonly onForbidden: () => void;
+  private readonly ssh?: SshOpener;
   private readonly log: LinkLog;
   private readonly caps: string[];
   private readonly ver?: string;
   private readonly pingMs: number;
   private readonly pongTimeoutMs: number;
   private readonly handshakeMs: number;
+  private readonly renewMs: number;
+  private readonly renewJitterMs: number;
   private readonly backoffBaseMs: number;
   private readonly backoffCapMs: number;
   private readonly Socket: LinkSocketConstructor;
@@ -128,6 +194,7 @@ export class CellLink {
   private abort = new AbortController();
   private pinger?: NodeJS.Timeout;
   private handshake?: NodeJS.Timeout;
+  private renewal?: NodeJS.Timeout;
   private reconnect?: NodeJS.Timeout;
 
   constructor({
@@ -136,12 +203,15 @@ export class CellLink {
     onSnapshot = () => {},
     onChange = () => {},
     onForbidden = () => {},
+    ssh,
     log = () => {},
-    caps = HOST_CAPS,
+    caps = hostCaps({ ssh: ssh !== undefined }),
     ver,
     pingMs = PING_INTERVAL_MS,
     pongTimeoutMs = PONG_TIMEOUT_MS,
     handshakeMs = HANDSHAKE_TIMEOUT_MS,
+    renewMs = RENEW_INTERVAL_MS,
+    renewJitterMs = RENEW_JITTER_MS,
     backoffBaseMs = BACKOFF_BASE_MS,
     backoffCapMs = BACKOFF_CAP_MS,
     Socket = globalThis.WebSocket as unknown as LinkSocketConstructor,
@@ -153,12 +223,15 @@ export class CellLink {
     this.onSnapshot = onSnapshot;
     this.onChange = onChange;
     this.onForbidden = onForbidden;
+    this.ssh = ssh;
     this.log = log;
     this.caps = caps;
     this.ver = ver;
     this.pingMs = pingMs;
     this.pongTimeoutMs = pongTimeoutMs;
     this.handshakeMs = handshakeMs;
+    this.renewMs = renewMs;
+    this.renewJitterMs = renewJitterMs;
     this.backoffBaseMs = backoffBaseMs;
     this.backoffCapMs = backoffCapMs;
     this.Socket = Socket;
@@ -181,6 +254,11 @@ export class CellLink {
     const socket = this.socket;
     this.detach();
     if (socket) closeQuietly(socket, 1000, 'shutdown');
+  }
+
+  /** Open terminal streams on the current socket. */
+  get streams(): number {
+    return this.mux?.channelsOfKind(SSH_KIND).length ?? 0;
   }
 
   private async connect(): Promise<void> {
@@ -238,6 +316,7 @@ export class CellLink {
       this.connected = true;
       mux.send(CONTROL_CHANNEL, 'hello', { leg: 'host', caps: this.caps, ...(this.ver ? { ver: this.ver } : {}) });
       this.pinger = setInterval(() => this.beat(socket, mux), this.pingMs);
+      this.scheduleRenewal(socket, mux);
       this.log({ event: 'connected' });
     });
     socket.addEventListener('message', (event) => {
@@ -263,28 +342,69 @@ export class CellLink {
     mux.send(CONTROL_CHANNEL, 'ping');
   }
 
+  private scheduleRenewal(socket: LinkSocket, mux: Mux): void {
+    clearTimeout(this.renewal);
+    const delay = Math.max(0, this.renewMs + (2 * this.random() - 1) * this.renewJitterMs);
+    this.renewal = setTimeout(() => void this.renew(socket, mux), delay);
+  }
+
+  /** A fresh ticket for the same device, sent as `renew`; the cell answers `renewed` and moves the expiry. */
+  private async renew(socket: LinkSocket, mux: Mux): Promise<void> {
+    try {
+      const { ticket } = await this.getTicket(this.abort.signal);
+      if (this.socket !== socket || socket.readyState !== OPEN) return;
+      mux.send(CONTROL_CHANNEL, 'renew', { ticket });
+    } catch (error) {
+      // The expiry close and the redial that follows it remain the failure path.
+      if (this.socket === socket) this.log({ event: 'renew_failed', code: errorCode(error) });
+    }
+  }
+
   private handleFrame(mux: Mux, frame: Frame): void {
     if (frame.ch === CONTROL_CHANNEL) {
       if (frame.t === 'pong') this.lastPong = this.now();
-      else if (frame.t === 'perks.changed') {
+      else if (frame.t === 'renewed') {
+        this.log({ event: 'renewed', ...(typeof frame.exp === 'number' ? { exp: frame.exp } : {}) });
+        if (this.socket) this.scheduleRenewal(this.socket, mux);
+      } else if (frame.t === 'perks.changed') {
         if (!this.snapshotSeen) this.onChange();
         this.snapshotSeen = false;
       } else if (frame.t === 'error') this.log({ event: 'cell_error', code: String(frame.code ?? 'unknown') });
       // hello, status (presence) and a ping need no host action; the cell answers
-      // anything but hello, ping and data-channel error/close with `read_only`.
+      // anything but hello, ping, renew and data-channel frames with `read_only`.
       return;
     }
     const handler = mux.handlerFor(frame.ch);
     if (frame.t === 'open') {
       if (handler) return;
-      if (frame.kind !== 'perks') {
-        mux.send(frame.ch, 'error', { code: 'unsupported' });
-        return;
-      }
-      mux.openChannel(frame.ch, { onFrame: (data) => this.perksFrame(mux, data), onTeardown: () => {} });
+      if (frame.kind === 'perks')
+        mux.openChannel(frame.ch, { onFrame: (data) => this.perksFrame(mux, data), onTeardown: () => {} }, 'perks');
+      else if (frame.kind === SSH_KIND && this.ssh) this.openStream(mux, frame, this.ssh);
+      else mux.send(frame.ch, 'error', { code: 'unsupported' });
       return;
     }
     handler?.onFrame(frame);
+  }
+
+  private openStream(mux: Mux, frame: Frame, opener: SshOpener): void {
+    const ch = frame.ch;
+    const open = parseSshOpen(frame);
+    if (!open) {
+      this.log({ event: 'stream_refused', reason: 'protocol' });
+      mux.send(ch, 'close', { reason: 'protocol' });
+      return;
+    }
+    if (mux.channelsOfKind(SSH_KIND).length >= MAX_STREAMS) {
+      this.log({ event: 'stream_refused', reason: 'busy', stream: open.stream });
+      mux.send(ch, 'close', { reason: 'busy' });
+      return;
+    }
+    const channel: SshChannel = {
+      ch,
+      send: (t, fields) => mux.send(ch, t, fields),
+      release: () => mux.closeChannel(ch),
+    };
+    mux.openChannel(ch, opener(open, channel), SSH_KIND);
   }
 
   private perksFrame(mux: Mux, frame: Frame): void {
@@ -323,8 +443,11 @@ export class CellLink {
   private detach(): void {
     clearInterval(this.pinger);
     clearTimeout(this.handshake);
+    clearTimeout(this.renewal);
     this.pinger = undefined;
     this.handshake = undefined;
+    this.renewal = undefined;
+    // Tears every channel down, so open streams destroy their door sockets.
     this.mux?.reset();
     this.mux = undefined;
     this.socket = undefined;
