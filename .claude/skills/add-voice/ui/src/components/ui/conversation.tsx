@@ -1,7 +1,7 @@
 "use client"
 
 import type { ComponentProps } from "react"
-import { useCallback } from "react"
+import { useCallback, useEffect, useRef } from "react"
 import { ArrowDownIcon } from "lucide-react"
 import { StickToBottom, useStickToBottomContext } from "use-stick-to-bottom"
 
@@ -70,6 +70,27 @@ export const ConversationEmptyState = ({
 )
 
 export type ConversationScrollButtonProps = ComponentProps<typeof Button>
+
+/**
+ * Pins the view to the newest line. A touch anywhere in the scroller detaches
+ * the stick-to-bottom behaviour, which on a phone happens the moment a thumb
+ * rests on the transcript, and nothing re-attaches it — so a call quietly stops
+ * following itself. Re-anchoring on each new line, rather than on every streamed
+ * word, keeps the conversation in view without fighting a reader who scrolled up
+ * to re-read something while an utterance is still arriving.
+ */
+export const ConversationAutoStick = ({ trigger }: { trigger: unknown }) => {
+  const { scrollToBottom } = useStickToBottomContext()
+  const first = useRef(true)
+  useEffect(() => {
+    if (first.current) {
+      first.current = false
+      return
+    }
+    void scrollToBottom()
+  }, [trigger, scrollToBottom])
+  return null
+}
 
 export const ConversationScrollButton = ({
   className,

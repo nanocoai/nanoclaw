@@ -2,7 +2,7 @@ import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } fro
 import { Mic, MicOff } from "lucide-react"
 import { BarVisualizer, type AgentState as BarState } from "@/components/ui/bar-visualizer"
 import { Matrix, digits, loader, wave, type Frame } from "@/components/ui/matrix"
-import { Conversation, ConversationContent, ConversationEmptyState, ConversationScrollButton } from "@/components/ui/conversation"
+import { Conversation, ConversationAutoStick, ConversationContent, ConversationEmptyState, ConversationScrollButton } from "@/components/ui/conversation"
 import { Message, MessageContent } from "@/components/ui/message"
 import { ShimmeringText } from "@/components/ui/shimmering-text"
 import { Button } from "@/components/ui/button"
@@ -396,6 +396,7 @@ export default function App() {
           ))
         )}
       </ConversationContent>
+      <ConversationAutoStick trigger={lines.length} />
       <ConversationScrollButton />
     </Conversation>
   )

@@ -89,10 +89,13 @@ function levelsFromStats(report: RTCStatsReport): { mic: number | null; agent: n
   let mic: number | null = null
   let agent: number | null = null
   report.forEach((entry) => {
-    const s = entry as { type?: string; kind?: string; audioLevel?: unknown }
-    if (typeof s.audioLevel !== "number" || s.kind !== "audio") return
-    if (s.type === "media-source") mic = s.audioLevel
-    else if (s.type === "inbound-rtp") agent = s.audioLevel
+    const s = entry as { type?: string; audioLevel?: unknown }
+    // Only audio reports carry audioLevel, so its presence is the test. Safari
+    // omits `kind` on media-source, and requiring it left the caller's own
+    // meter reading zero for the whole call on iOS.
+    if (typeof s.audioLevel !== "number") return
+    if (s.type === "media-source" || s.type === "outbound-rtp") mic = s.audioLevel
+    else if (s.type === "inbound-rtp" || s.type === "remote-outbound-rtp") agent = s.audioLevel
   })
   return { mic, agent }
 }
@@ -136,6 +139,11 @@ export function useVoiceCall(token: string, fallbackAgent = "your agent"): Voice
   const lastLineId = useRef<number | null>(null)
   const nextId = useRef(1)
   const lastAgentDelta = useRef(0)
+  // True between a delegation and the reply our host sends back for it. The
+  // voice model speaks its own holding line first ("one moment…"), which ends a
+  // talking run long before the answer exists; without this the page drops to
+  // "listening" and tells the caller to go ahead while the agent is still working.
+  const awaitingAnswer = useRef(false)
   const lastDeltaAt = useRef(0)
   const streamingRef = useRef<number | null>(null)
   const inputLevel = useRef(0)
@@ -230,6 +238,7 @@ export function useVoiceCall(token: string, fallbackAgent = "your agent"): Voice
     (tellHost: boolean, text: string) => {
       const p = phaseRef.current
       if (p === "idle" || p === "ended") return
+      awaitingAnswer.current = false
       teardown(tellHost)
       setEndedText(text)
       setPhase("ended")
@@ -248,6 +257,8 @@ export function useVoiceCall(token: string, fallbackAgent = "your agent"): Voice
       const p = phaseRef.current
       if (ev.type === "session.input_transcript.delta") {
         caption("user", ev.delta ?? "")
+        // A new question supersedes whatever the agent still owed.
+        awaitingAnswer.current = false
         if (p === "listening" || p === "talking") setPhase("listening")
       } else if (ev.type === "session.output_transcript.delta") {
         caption("assistant", ev.delta ?? "")
@@ -255,8 +266,13 @@ export function useVoiceCall(token: string, fallbackAgent = "your agent"): Voice
         if (p !== "thinking" || ev.delta) setPhase("talking")
       } else if (ev.type === "session.delegation.created") {
         lastWho.current = ""
+        awaitingAnswer.current = true
         setPhase("thinking")
       } else if (ev.type === "session.commentary.appended") {
+        // Commentary is the host's own reply reaching the model, so the
+        // delegation is answered. The model's holding line is not commentary:
+        // it arrives as plain output transcript and must not end the wait.
+        awaitingAnswer.current = false
         if (p === "thinking") setPhase("listening")
       } else if (ev.type === "session.closed") {
         end(false, "The call ended.")
@@ -430,7 +446,7 @@ export function useVoiceCall(token: string, fallbackAgent = "your agent"): Voice
         if (p !== "talking") setPhase("talking")
         lastAgentDelta.current = Date.now()
       } else if (p === "talking" && Date.now() - lastAgentDelta.current > 900) {
-        setPhase("listening")
+        setPhase(awaitingAnswer.current ? "thinking" : "listening")
       }
       if (streamingRef.current !== null && Date.now() - lastDeltaAt.current > 700) setStreaming(null)
     }
