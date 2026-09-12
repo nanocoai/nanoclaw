@@ -449,3 +449,30 @@ describe('sandbox lifecycle hooks', () => {
     expect(human.split('\n')[0]).toContain("sandbox-hooks refused 'created:old-module'");
   });
 });
+
+describe('a checkout without the instruction bundle is loud', () => {
+  it('`new` carries the warnings for the client to print, and `list` repeats them above the table', async () => {
+    const emptyRoot = path.join(TEST_ROOT, 'empty-install');
+    fs.mkdirSync(emptyRoot, { recursive: true });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(emptyRoot);
+    try {
+      const created = await call('sandboxes-new', { name: 't1', 'no-attach': true });
+      const { warnings } = dataOf<{ warnings?: string[] }>(created);
+      expect(warnings).toHaveLength(2);
+      expect(warnings![0]).toContain('operating manual is missing');
+      const listed = await call('sandboxes-list');
+      const human = (listed as { human?: string }).human ?? '';
+      expect(human.split('\n')[0]).toMatch(/^warning: code mode: the operating manual is missing/);
+      expect(human).toContain('SANDBOX');
+    } finally {
+      cwdSpy.mockRestore();
+    }
+  });
+
+  it('the checked-in tree yields no warning on either verb', async () => {
+    const created = await call('sandboxes-new', { name: 't1', 'no-attach': true });
+    expect(dataOf<{ warnings?: string[] }>(created).warnings).toBeUndefined();
+    const listed = await call('sandboxes-list');
+    expect((listed as { human?: string }).human?.startsWith('SANDBOX')).toBe(true);
+  });
+});

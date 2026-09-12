@@ -25,6 +25,63 @@ import type { VolumeMount } from '../providers/provider-container-registry.js';
 /** The code runner's session cwd (code-runner/index.ts `WORKSPACE_DIR`). */
 export const CODE_WORKSPACE_DIR = '/workspace/group';
 
+/** The bundle's home in the install tree: the manual beside a `skills/` dir of skill dirs. */
+export const CODE_MODE_BUNDLE_DIR = path.join('container', 'code-mode');
+
+/** The skills the bundle ships; a tree missing one of these is degraded. */
+export const BUNDLED_DEV_SKILLS: readonly string[] = ['dev-git', 'dev-toolchains'];
+
+export interface CodeModeBundleStatus {
+  /** container/code-mode/CLAUDE.md is present. */
+  manual: boolean;
+  /** Skill dirs present under container/code-mode/skills/. */
+  skills: string[];
+  /** Bundled skills the tree lacks. */
+  missingSkills: string[];
+}
+
+/**
+ * What of the instruction surface this install tree carries. The stamping
+ * below is fail-open by design (an instruction file is never worth a
+ * session), so a tree without the bundle must be LOUD somewhere else: the
+ * sandbox verbs read this and warn (`sandboxes new`, `sandboxes list`).
+ */
+export function codeModeBundleStatus(root: string = process.cwd()): CodeModeBundleStatus {
+  const manual = fs.existsSync(path.join(root, CODE_MODE_BUNDLE_DIR, 'CLAUDE.md'));
+  let skills: string[] = [];
+  try {
+    skills = fs
+      .readdirSync(path.join(root, CODE_MODE_BUNDLE_DIR, 'skills'), { withFileTypes: true })
+      .filter(
+        (entry) =>
+          entry.isDirectory() && fs.existsSync(path.join(root, CODE_MODE_BUNDLE_DIR, 'skills', entry.name, 'SKILL.md')),
+      )
+      .map((entry) => entry.name)
+      .sort();
+  } catch {
+    // No skills dir at all: reported as every bundled skill missing.
+  }
+  return { manual, skills, missingSkills: BUNDLED_DEV_SKILLS.filter((name) => !skills.includes(name)) };
+}
+
+/** One operator-facing line per missing piece; empty when the bundle is whole. */
+export function codeModeBundleWarnings(status: CodeModeBundleStatus = codeModeBundleStatus()): string[] {
+  const warnings: string[] = [];
+  if (!status.manual) {
+    warnings.push(
+      `code mode: the operating manual is missing from this checkout (${CODE_MODE_BUNDLE_DIR}/CLAUDE.md) — ` +
+        'the agent boots without instructions; restore the file or update the checkout',
+    );
+  }
+  if (status.missingSkills.length > 0) {
+    warnings.push(
+      `code mode: dev skills missing from this checkout (${status.missingSkills.join(', ')} under ` +
+        `${CODE_MODE_BUNDLE_DIR}/skills/) — the agent boots without them`,
+    );
+  }
+  return warnings;
+}
+
 /** Host-side name of the stamped manual, inside the session's stamp dir. */
 export const DEV_INSTRUCTION_FILE = 'code-mode-CLAUDE.md';
 
@@ -90,8 +147,12 @@ export function devInstructionMounts(sessDir: string, scope: string): VolumeMoun
     log.debug('Code mode: workspace dir not created by the host', { sessDir, error: String(error) });
   }
   const mounts: VolumeMount[] = [];
-  const source = path.join(process.cwd(), 'container', 'code-mode', 'CLAUDE.md');
-  if (fs.existsSync(source)) {
+  const source = path.join(process.cwd(), CODE_MODE_BUNDLE_DIR, 'CLAUDE.md');
+  if (!fs.existsSync(source)) {
+    // Fail-open, but never silent: the spawn goes on and the log says why
+    // the agent has no manual (the sandbox verbs repeat it to the operator).
+    log.warn('Code mode: operating manual missing from the install tree — the agent boots without it', { source });
+  } else {
     const stamped = path.join(devStampDir(sessDir), DEV_INSTRUCTION_FILE);
     try {
       fs.mkdirSync(devStampDir(sessDir), { recursive: true });
@@ -131,7 +192,7 @@ export function devInstructionMounts(sessDir: string, scope: string): VolumeMoun
  * unexpected costs that skill's mount (logged), never the session.
  */
 export function devSkillMounts(sessDir: string, scope: string): VolumeMount[] {
-  const source = path.join(process.cwd(), 'container', 'code-mode', 'skills');
+  const source = path.join(process.cwd(), CODE_MODE_BUNDLE_DIR, 'skills');
   let names: string[];
   try {
     names = fs
@@ -140,7 +201,8 @@ export function devSkillMounts(sessDir: string, scope: string): VolumeMount[] {
       .map((entry) => entry.name);
   } catch {
     // An install tree without the bundle is a degraded install, not a failed
-    // session — older release artifacts simply don't carry the dir.
+    // session — but a loud one (the sandbox verbs repeat this to the operator).
+    log.warn('Code mode: dev skill bundle missing from the install tree — the agent boots without it', { source });
     return [];
   }
   const mounts: VolumeMount[] = [];

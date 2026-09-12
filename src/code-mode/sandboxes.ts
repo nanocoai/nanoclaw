@@ -32,6 +32,7 @@ import { groupFolderExistsOnDisk, isValidGroupFolder } from '../group-folder.js'
 import { initGroupFilesystem } from '../group-init.js';
 import { getInstallSlug } from '../install-slug.js';
 import { log } from '../log.js';
+import { codeModeBundleWarnings } from './compose.js';
 import { fireSandboxCreated } from './hooks.js';
 import { resolveSandboxSession } from '../session-manager.js';
 import { isValidTimezone } from '../timezone.js';
@@ -87,6 +88,8 @@ export interface CreateSandboxInput {
 export interface CreatedSandbox {
   group: AgentGroup;
   session: Session;
+  /** What the operator should hear before the terminal is handed over (a degraded install tree). */
+  warnings: string[];
 }
 
 export interface SandboxListRow {
@@ -223,10 +226,14 @@ export async function createSandbox(input: CreateSandboxInput = {}): Promise<Cre
     throw error;
   }
   log.info('Sandbox created', { sandbox: folder, agentGroupId: id, sessionId: session.id });
+  // The instruction surface is stamped fail-open at spawn; a checkout
+  // without it must be loud HERE, where the operator is looking.
+  const warnings = codeModeBundleWarnings();
+  for (const warning of warnings) log.warn(warning, { sandbox: folder });
   // Modules learn of the new sandbox here — after the rows exist and before
   // the first wake. A listener that throws is logged, never the verb's problem.
   await fireSandboxCreated(group);
-  return { group, session };
+  return { group, session, warnings };
 }
 
 function newestActivity(sessions: Session[]): { container_status: string | null; last_active: string | null } {

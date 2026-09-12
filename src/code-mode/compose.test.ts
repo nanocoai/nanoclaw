@@ -19,6 +19,7 @@ vi.mock('../log.js', () => ({
 }));
 
 import { composeGroupProjectDoc } from '../project-doc-compose.js';
+import { log } from '../log.js';
 import { DATA_DIR, GROUPS_DIR, INSTALL_SLUG } from '../config.js';
 import { configFromDb, type ContainerConfig } from '../container-config.js';
 import { buildMounts, composeSessionSpec, toMountSpecs } from '../container-runner.js';
@@ -33,8 +34,11 @@ import {
   composeManagedSettings,
 } from './permissions.js';
 import {
+  BUNDLED_DEV_SKILLS,
   DEV_INSTRUCTION_FILE,
   DEV_SKILLS_STAMP_DIR,
+  codeModeBundleStatus,
+  codeModeBundleWarnings,
   devInstructionMounts,
   devSkillMounts,
   devStampDir,
@@ -510,5 +514,58 @@ describe('the dev skill bundle', () => {
       stopGraceSeconds: 1,
     };
     expect(() => validateSpec(spec, mountPolicy())).not.toThrow();
+  });
+});
+
+describe('the bundle is loud when missing', () => {
+  it('the checked-in tree carries the manual and every bundled skill — no warnings', () => {
+    const status = codeModeBundleStatus();
+    expect(status.manual).toBe(true);
+    expect(status.missingSkills).toEqual([]);
+    for (const name of BUNDLED_DEV_SKILLS) expect(status.skills).toContain(name);
+    expect(codeModeBundleWarnings(status)).toEqual([]);
+  });
+
+  it('a tree without the bundle names each missing piece, and the spawn logs it', () => {
+    const fixtureRoot = path.join(DATA_DIR, 'fixture-install-empty');
+    fs.mkdirSync(fixtureRoot, { recursive: true });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(fixtureRoot);
+    try {
+      const status = codeModeBundleStatus();
+      expect(status).toEqual({ manual: false, skills: [], missingSkills: [...BUNDLED_DEV_SKILLS] });
+      const warnings = codeModeBundleWarnings(status);
+      expect(warnings).toHaveLength(2);
+      expect(warnings[0]).toContain('operating manual is missing');
+      expect(warnings[1]).toContain('dev-git, dev-toolchains');
+      // The stamp helpers still boot the session — and say why it has no manual.
+      expect(devInstructionMounts(sessDir, GROUP_ID)).toEqual([]);
+      expect(log.warn).toHaveBeenCalledWith(
+        'Code mode: operating manual missing from the install tree — the agent boots without it',
+        expect.anything(),
+      );
+      expect(log.warn).toHaveBeenCalledWith(
+        'Code mode: dev skill bundle missing from the install tree — the agent boots without it',
+        expect.anything(),
+      );
+    } finally {
+      cwdSpy.mockRestore();
+      fs.rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('a partial bundle reports only what is missing', () => {
+    const fixtureRoot = path.join(DATA_DIR, 'fixture-install-partial');
+    const skills = path.join(fixtureRoot, 'container', 'code-mode', 'skills');
+    fs.mkdirSync(path.join(skills, 'dev-git'), { recursive: true });
+    fs.writeFileSync(path.join(skills, 'dev-git', 'SKILL.md'), '# dev-git');
+    fs.mkdirSync(path.join(skills, 'no-skill-file'));
+    fs.writeFileSync(path.join(fixtureRoot, 'container', 'code-mode', 'CLAUDE.md'), '# manual');
+    try {
+      const status = codeModeBundleStatus(fixtureRoot);
+      expect(status).toEqual({ manual: true, skills: ['dev-git'], missingSkills: ['dev-toolchains'] });
+      expect(codeModeBundleWarnings(status)).toHaveLength(1);
+    } finally {
+      fs.rmSync(fixtureRoot, { recursive: true, force: true });
+    }
   });
 });

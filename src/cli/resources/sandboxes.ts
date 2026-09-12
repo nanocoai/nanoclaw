@@ -18,6 +18,7 @@ import {
   type SandboxListRow,
 } from '../../code-mode/sandboxes.js';
 import { renderSeamRefusals } from '../../seams.js';
+import { codeModeBundleWarnings } from '../../code-mode/compose.js';
 import { collectSandboxDiff } from '../../code-mode/surface/diff-view.js';
 import { sandboxStatus, type SandboxStatus } from '../../code-mode/surface/index.js';
 import { interruptCodingSession } from '../../code-mode/surface/stop.js';
@@ -35,11 +36,12 @@ export async function resolveSandboxGroup(raw: unknown, verb: string): Promise<A
 }
 
 function renderSandboxTable(rows: SandboxListRow[]): string {
-  // A module this host refused (seam mismatch) is an operator's fact: it
-  // shows here, above the table, until the module is rebuilt.
-  const refused = renderSeamRefusals();
+  // Two operator facts show here, above the table, until they are fixed: a
+  // module this host refused (seam mismatch) and an install tree missing
+  // the instruction bundle the agent reads.
+  const notices = [...renderSeamRefusals(), ...codeModeBundleWarnings().map((w) => `warning: ${w}`)];
   const table = renderSandboxRows(rows);
-  return refused.length > 0 ? [...refused, table].join('\n') : table;
+  return notices.length > 0 ? [...notices, table].join('\n') : table;
 }
 
 function renderSandboxRows(rows: SandboxListRow[]): string {
@@ -102,22 +104,26 @@ registerResource({
         }
         const name = flagged ?? positional;
         const permissionMode = args['permission-mode'] ?? args.permission_mode;
-        const { group, session } = await createSandbox({
+        const { group, session, warnings } = await createSandbox({
           ...(name !== undefined ? { name } : {}),
           ...(args.provider !== undefined ? { provider: String(args.provider) } : {}),
           ...(permissionMode !== undefined ? { permissionMode: String(permissionMode) } : {}),
           ...(args.timezone !== undefined ? { timezone: String(args.timezone) } : {}),
         });
 
+        // The client prints `warnings` before it hands the terminal over
+        // (cli/attach-exec.ts); a --no-attach caller gets them in the data.
+        const warned = warnings.length > 0 ? { warnings } : {};
         if (args['no-attach'] === true || args.no_attach === true) {
           return {
             sandbox: group.folder,
             id: group.id,
             sessionId: session.id,
             attach: `ncl sandboxes attach ${group.folder}`,
+            ...warned,
           };
         }
-        return resolveAttachForGroup(group, { wakeWaitMs: NEW_SANDBOX_WAKE_WAIT_MS });
+        return { ...(await resolveAttachForGroup(group, { wakeWaitMs: NEW_SANDBOX_WAKE_WAIT_MS })), ...warned };
       },
     },
     list: {
