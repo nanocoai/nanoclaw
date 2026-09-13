@@ -824,7 +824,18 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       }
 
       if (content.operation === 'reaction' && content.messageId && content.emoji) {
-        await adapter.addReaction(tid, content.messageId as string, content.emoji as string);
+        // Reactions are cosmetic: a platform rejecting one (e.g. an emoji outside
+        // its allowed set, like Telegram's fixed reaction list) must not fail
+        // delivery or trigger retries. Best-effort — log and move on.
+        try {
+          await adapter.addReaction(tid, content.messageId as string, content.emoji as string);
+        } catch (err) {
+          log.warn('Reaction not applied (best-effort)', {
+            adapter: adapter.name,
+            emoji: content.emoji,
+            err: err instanceof Error ? err.message : String(err),
+          });
+        }
         return;
       }
 
