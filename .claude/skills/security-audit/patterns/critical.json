@@ -1,0 +1,84 @@
+{
+  "patterns": [
+    {
+      "id": "cred-exfil-fetch",
+      "category": "credential-exfiltration",
+      "severity": "CRITICAL",
+      "regex": "fetch\\([^)]*process\\.env",
+      "message": "Credential exfiltration detected: process.env sent via fetch()",
+      "remediation": "Remove external network calls that transmit environment variables. If telemetry is needed, document it explicitly in SKILL.md and request user consent."
+    },
+    {
+      "id": "cred-exfil-axios",
+      "category": "credential-exfiltration",
+      "severity": "CRITICAL",
+      "regex": "axios\\.(post|put|patch)\\([^)]*\\b(secrets|process\\.env|API_KEY|TOKEN)",
+      "message": "Credential exfiltration detected: secrets sent via axios",
+      "remediation": "Remove external API calls that transmit credentials."
+    },
+    {
+      "id": "cred-write-file",
+      "category": "credential-exfiltration",
+      "severity": "CRITICAL",
+      "regex": "fs\\.writeFile(Sync)?\\([^)]*process\\.env",
+      "message": "Credential exfiltration detected: environment variables written to file",
+      "remediation": "Remove file writes that persist environment variables or secrets."
+    },
+    {
+      "id": "eval-base64",
+      "category": "obfuscation",
+      "severity": "CRITICAL",
+      "regex": "eval\\(.*atob\\(|eval\\(.*Buffer\\.from\\([^)]+,\\s*['\"]base64",
+      "message": "Obfuscated code execution: Base64-encoded payload executed via eval()",
+      "remediation": "Replace with explicit, readable code. Obfuscation is not acceptable in auditable skills."
+    },
+    {
+      "id": "function-constructor-obfuscation",
+      "category": "obfuscation",
+      "severity": "CRITICAL",
+      "regex": "new\\s+Function\\(.*\\+|Function\\(\\.*(atob|Buffer\\.from)",
+      "message": "Obfuscated code execution: Dynamic code construction via Function constructor",
+      "remediation": "Use explicit function definitions instead of dynamic code generation."
+    },
+    {
+      "id": "exec-cred-interpolation",
+      "category": "process-injection",
+      "severity": "CRITICAL",
+      "regex": "(exec|spawn|execSync|spawnSync)\\([^)]*\\$\\{.*\\b(secrets|process\\.env|API_KEY|TOKEN)",
+      "message": "Process injection with credentials: Secrets passed to shell command",
+      "remediation": "Never pass credentials as command-line arguments. Use environment variables or stdin instead."
+    },
+    {
+      "id": "file-traversal-secrets",
+      "category": "filesystem",
+      "severity": "CRITICAL",
+      "regex": "fs\\.(read|readFile)(Sync)?\\(['\"]?\\.\\./.*\\b(secret|env|token|key|password)",
+      "message": "Directory traversal to secrets: Attempting to read sensitive files outside workspace",
+      "remediation": "Remove directory traversal patterns. Skills should only access workspace files."
+    },
+    {
+      "id": "system-file-modification",
+      "category": "filesystem",
+      "severity": "CRITICAL",
+      "regex": "fs\\.(write|writeFile|unlink|rm|rmdir)(Sync)?\\(['\"]?/(etc|bin|usr|var|sys|proc)",
+      "message": "System file modification: Attempting to modify system directories",
+      "remediation": "Skills should never modify system files. Remove this code."
+    },
+    {
+      "id": "curl-cred-exfil",
+      "category": "credential-exfiltration",
+      "severity": "CRITICAL",
+      "regex": "(exec|spawn).*curl\\s+.*\\$\\{.*\\b(secrets|process\\.env|API_KEY|TOKEN)",
+      "message": "Credential exfiltration via curl: Secrets sent via shell command",
+      "remediation": "Remove external data transmission of credentials."
+    },
+    {
+      "id": "wget-cred-exfil",
+      "category": "credential-exfiltration",
+      "severity": "CRITICAL",
+      "regex": "(exec|spawn).*wget\\s+.*\\$\\{.*\\b(secrets|process\\.env|API_KEY|TOKEN)",
+      "message": "Credential exfiltration via wget: Secrets sent via shell command",
+      "remediation": "Remove external data transmission of credentials."
+    }
+  ]
+}
