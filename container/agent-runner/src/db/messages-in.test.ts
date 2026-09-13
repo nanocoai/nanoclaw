@@ -52,6 +52,21 @@ function insertContextRow(id: string, seq: number, text: string): void {
 }
 
 describe('trigger=1 rows never crowded out', () => {
+  it('stale system rows do not consume the wake-message cap', () => {
+    for (let i = 1; i <= CAP; i++) {
+      insertMessage(`system-${i}`, i * 2, 'system', {
+        type: 'question_response',
+        questionId: `expired-${i}`,
+      });
+    }
+    insertMessage('chat-new', (CAP + 1) * 2, 'chat', { sender: 'A', text: 'real message' });
+
+    const batch = getPendingMessages();
+    expect(batch).toHaveLength(CAP);
+    const turnMessages = batch.filter((m) => m.kind !== 'system');
+    expect(turnMessages.map((m) => m.id)).toEqual(['chat-new']);
+  });
+
   it('a due task row survives 12 newer context rows at cap 10', () => {
     insertMessage('task-1', 2, 'task', { prompt: 'daily digest' });
     for (let i = 1; i <= 12; i++) {
