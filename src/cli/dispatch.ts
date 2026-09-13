@@ -19,6 +19,7 @@ import { getSession } from '../db/sessions.js';
 import { guard, type GuardActor } from '../guard/index.js';
 import { registerApprovalHandler, requestApproval } from '../modules/approvals/index.js';
 import type { PendingApproval } from '../types.js';
+import { buildApprovalCard } from './approval-cards.js';
 import type { CallerContext, ErrorCode, RequestFrame, ResponseFrame } from './frame.js';
 import { localizeIsoTimestamps } from './format.js';
 import { getResource } from './crud.js';
@@ -149,6 +150,10 @@ export async function dispatch(
     const agentGroup = await getAgentGroup(ctx.agentGroupId);
     const agentName = agentGroup?.name ?? ctx.agentGroupId;
 
+    // Sensitive commands (role changes, …) supply a structured, human-readable
+    // card via the approval-card hook. Everything else falls back to echoing the
+    // raw command line. Action stays 'cli_command' so the same handler executes.
+    const card = buildApprovalCard({ command: req.command, args: req.args, agentName, session });
     const argSummary = Object.entries(req.args)
       .map(([k, v]) => `--${k} ${v}`)
       .join(' ');
@@ -158,8 +163,10 @@ export async function dispatch(
       agentName,
       action: 'cli_command',
       payload: { frame: { id: req.id, command: req.command, args: req.args }, callerContext: ctx },
-      title: `CLI: ${req.command}`,
-      question: `Agent "${agentName}" wants to run:\n\`ncl ${req.command}${argSummary ? ' ' + argSummary : ''}\``,
+      title: card?.title ?? `CLI: ${req.command}`,
+      question:
+        card?.question ??
+        `Agent "${agentName}" wants to run:\n\`ncl ${req.command}${argSummary ? ' ' + argSummary : ''}\``,
     });
 
     return err(req.id, 'approval-pending', 'Approval request sent to admin. You will be notified of the result.');
