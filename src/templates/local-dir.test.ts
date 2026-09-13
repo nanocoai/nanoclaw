@@ -4,7 +4,7 @@ import path from 'path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { resolveLocalTemplate } from './local-dir.js';
+import { isValidTemplateRef, resolveLocalTemplate } from './local-dir.js';
 
 let base: string;
 
@@ -51,5 +51,31 @@ describe('resolveLocalTemplate', () => {
 
   it('throws when the ref is a file, not a directory', () => {
     expect(() => resolveLocalTemplate('afile.md', base)).toThrow(/not found/i);
+  });
+});
+
+describe('isValidTemplateRef', () => {
+  it.each(['sales/sdr', 'sdr', 'a.b/c-d_e', 'a/b/c'])('accepts %j', (ref) => {
+    expect(isValidTemplateRef(ref)).toBe(true);
+  });
+
+  it.each([
+    '',
+    ' x',
+    'x ',
+    '/abs',
+    '~x',
+    '~/x',
+    'a/../b',
+    '..',
+    '.',
+    'a//b',
+    'a/',
+    '/a',
+    'a\\b',
+    'a b',
+    'a'.repeat(129),
+  ])('rejects %j', (ref) => {
+    expect(isValidTemplateRef(ref)).toBe(false);
   });
 });

@@ -223,7 +223,7 @@ describe('extendTool — fixture extension of create_agent (end to end)', () => 
     });
 
     const props = schemaProps(createAgent);
-    expect(Object.keys(props).sort()).toEqual(['instructions', 'name', 'purpose']);
+    expect(Object.keys(props).sort()).toEqual(['instructions', 'name', 'purpose', 'template']);
     expect(createAgent.tool.description?.endsWith('The purpose line is shown publicly.')).toBe(true);
 
     await createAgent.handler({ name: 'Scout', purpose: 'Deep research' });

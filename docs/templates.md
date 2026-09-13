@@ -21,13 +21,15 @@ consequences:
   agent group with its skills and MCP servers; the NanoClaw-only slots stay
   empty and the group is named after the folder.
 
-Templates are purely additive and require no DB migration. **Templates
-are stamped only from a local directory**: `templates/` at the
-project root by default (committed but shipped empty), or whatever
-`NANOCLAW_TEMPLATES_DIR` points at (a local path only). The public registry
+Templates are purely additive and require no DB migration. **Stamping always
+reads a local directory**: `templates/` at the project root by default
+(committed but shipped empty), or whatever `NANOCLAW_TEMPLATES_DIR` points at
+(a local path only). The public registry
 ([`nanocoai/nanoclaw-templates`](https://github.com/nanocoai/nanoclaw-templates))
-is a copy source: setup can fetch a chosen template into that local directory,
-or you can populate it yourself.
+is a copy source: setup and [creation from chat](#creating-from-chat) fetch a
+chosen template into that local directory first, or you can populate it
+yourself. `ncl groups create --template` never fetches; see
+[The template ref](#the-template-ref).
 
 > **Migrating from the pre-plugin layout?** The old format (a bare
 > `context/instructions.md` marker, `.mcp.json`) is no longer read; stamping
@@ -91,11 +93,73 @@ its manifest `name` is just `sdr`.
 
 For safety the ref must stay inside the templates directory: absolute paths, a
 leading `~`, and `../` escapes are rejected. There is no `--source`, no git URL,
-and no remote fetch at `ncl` time. Populate `templates/` first by hand or with
-setup's library picker, then stamp.
+and no remote fetch at `ncl` time: the stamping engine is local-only, and that
+stays true no matter who calls it. Populate `templates/` first by hand, with
+setup's library picker, or by asking an agent to create from a registry ref
+(the host fetches, then calls this same local-only engine).
 
 `NANOCLAW_TEMPLATES_DIR` may point the library at another **local** directory; it
 is never a URL and never changes at runtime.
+
+## Creating from chat
+
+An agent that can create other agents can stamp them from a template: its
+`create_agent` tool takes an optional `template` ref alongside `name`. The
+agent offers the option in one line whenever creation comes up and only lists
+templates once the user shows interest — local templates first in their own
+section, then registry results narrowed to the use case, always names and
+descriptions, never versions. A plain create still needs no template.
+
+When `template` is set it supplies the whole persona: `instructions` passed
+alongside are **ignored**, and a templated hold carries no instructions, so an
+approving admin never signs off on text that would not apply. Customize a
+stamped agent afterwards — message it, or edit its `instructions.prepend.md`.
+
+### Discovering refs
+
+```bash
+ncl templates list                                   # local templates/ dir, no network
+ncl templates list --registry --category sales --limit 10
+```
+
+The local listing is a directory read. `--registry` makes the **host** GET one
+fixed URL (the registry's `index.json`, grouped by category), cached for a few
+minutes and bounded by `--limit` (default 20, max 100) so the reply fits the
+container's single-frame CLI transport; `--category` filters on the ref's
+first segment, and both flags require `--registry`. The verb is read-only,
+needs no approval, and sends no request-derived data. The container needs no
+GitHub egress; a failed fetch is the "no registry access" signal the agent
+reports.
+
+### Authorization, fetch, provenance
+
+A templated create rides exactly the same `agents.create` decision as a plain
+one — an agent with global scope creates immediately, a confined group still
+gets today's hold. The ref is part of the held payload, so the card names it
+and says whether it will be **fetched from the public registry** or stamped
+from an **existing local copy**, and the grant is bound to that ref: a grant
+for one template (or a plain create) never covers another. A malformed ref is
+rejected before any hold.
+
+After authorization the host materializes the ref into the local templates
+directory: an existing local copy wins — never overwritten, never compared
+against the registry (refreshing is manual) — otherwise the host
+shallow-clones and copies just that ref, with a timeout, serialized per ref.
+The fetch precedes every database write, so a failed or denied create leaves
+nothing behind. Stamping then runs the ordinary local engine — same hardened
+copier, same `templateReport`, same paused tasks — and the new agent
+**inherits the creating agent's provider**.
+
+The requester's confirmation names the template and its source: the registry
+commit SHA ("created from template `sales/sdr` (commit 1a2b3c4)") or "local
+copy". The SHA is provenance only — no version display, no pinning, no
+update-from-chat; restamping stays an `ncl` operation (see
+[Updating a stamped agent](#updating-a-stamped-agent)).
+
+> **Skill-installed wrappers:** any installed skill that overrides
+> `create_agent` must be refreshed to carry new hold fields. A stale copy
+> holds templated creates with a payload that lacks the ref, so the approved
+> replay creates a plain agent. Run `/update-skills` after updating.
 
 ## What's in a template
 
@@ -426,3 +490,14 @@ persona at `ai.nanoco.nanoclaw/context/instructions.md`, run that repo's
 any predefined tasks appear under `ncl tasks list --status paused`, confirm no
 secrets are committed, and open a PR. The repo's README has the full anatomy,
 category conventions, and checklist.
+
+The repo also carries `index.json`, the listing `ncl templates list --registry`
+reads: entries grouped by category (the ref's first segment), category keys and
+entries sorted, so the file reads in a stable order and filters by key. It is
+**generated** from the templates' `plugin.json` files and never hand-edited:
+CI regenerates it and fails any PR whose committed index is stale, and fails
+any PR that changes a template's files without bumping that template's
+version. Its `schema` field (currently `1`) is the index format version, so a
+future breaking reshape is detectable by older installs; additive fields never
+bump it. The index is advisory only. Nothing in it is trusted at stamp time;
+the install re-validates the fetched template in full.

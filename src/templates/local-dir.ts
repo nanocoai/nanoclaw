@@ -4,6 +4,21 @@ import path from 'path';
 import { TEMPLATES_DIR } from '../config.js';
 
 /**
+ * Pure grammar check for a template ref, usable before any filesystem or
+ * network work: relative, `/`-separated, every segment a plain
+ * [A-Za-z0-9._-]+ name (no `.`/`..`), 128 chars max. Strictly narrower than
+ * what resolveLocalTemplate accepts — a ref passing this can never escape the
+ * templates base.
+ */
+export function isValidTemplateRef(ref: string): boolean {
+  if (!ref || ref !== ref.trim() || ref.length > 128) return false;
+  if (path.isAbsolute(ref) || ref.startsWith('~') || ref.includes('\\')) return false;
+  return ref
+    .split('/')
+    .every((segment) => segment.length > 0 && segment !== '.' && segment !== '..' && /^[A-Za-z0-9._-]+$/.test(segment));
+}
+
+/**
  * Resolve a LOCAL template ref to an absolute directory under `base`
  * (TEMPLATES_DIR by default). Lexical containment only — no realpathSync, no
  * symlink resolution (out of threat model). Mirrors ensureWithinBase() in

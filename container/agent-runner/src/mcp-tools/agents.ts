@@ -35,12 +35,18 @@ export const createAgent: McpToolDefinition = {
   tool: {
     name: 'create_agent',
     description:
-      'Create a long-lived companion sub-agent (research assistant, task manager, specialist) — the name becomes your destination for it. May require admin approval before the agent is created. Fire-and-forget.',
+      'Create a long-lived companion sub-agent (research assistant, task manager, specialist) — the name becomes your destination for it. May require admin approval before the agent is created. Fire-and-forget. ' +
+      'When and how to offer templates is covered in your create_agent instructions.',
     inputSchema: {
       type: 'object' as const,
       properties: {
         name: { type: 'string', description: 'Human-readable name (also becomes your destination name for this agent)' },
         instructions: { type: 'string', description: 'CLAUDE.md content for the new agent (personality, role, instructions)' },
+        template: {
+          type: 'string',
+          description:
+            'Optional template ref (e.g. "sales/sdr") to stamp the agent from. Discover refs with `ncl templates list` (local) and `ncl templates list --registry [--category <c>]` (public library). When template is set, the template supplies the new agent\'s persona and `instructions` is ignored.',
+        },
       },
       required: ['name'],
     },
@@ -58,6 +64,7 @@ export const createAgent: McpToolDefinition = {
         requestId,
         name,
         instructions: (args.instructions as string) || null,
+        ...(typeof args.template === 'string' && args.template ? { template: args.template } : {}),
       }),
     });
 
