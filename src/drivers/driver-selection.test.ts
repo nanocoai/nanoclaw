@@ -76,6 +76,8 @@ beforeEach(() => {
 afterEach(() => {
   resetSessionDriver(null);
   process.chdir(previous);
+  // Remove the temp cwd too — chdir'ing away leaves it behind, one per case.
+  fs.rmSync(cwd, { recursive: true, force: true });
 });
 
 describe('configuredDriverKind', () => {

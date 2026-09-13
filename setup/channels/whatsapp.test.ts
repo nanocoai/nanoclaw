@@ -10,7 +10,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { parseDirectives, type Directive } from '../../scripts/skill-directives.js';
 
@@ -35,7 +35,10 @@ function bash(body: string[], vars: Record<string, string>, cwd: string): string
 
 describe('self-chat engage pattern fence', () => {
   const fence = runFence((d) => d.attrs.capture === 'engage_pattern');
+  // Built once and shared by every case below, so it is reclaimed in afterAll
+  // rather than afterEach — per-test removal would delete a live fixture.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-engage-'));
+  afterAll(() => fs.rmSync(dir, { recursive: true, force: true }));
   const patternFor = (name: string): string => bash(fence.body, { agent_name: name }, dir).trim();
 
   it('matches messages starting with @<name> and nothing else', () => {
