@@ -1,0 +1,35 @@
+# pr-factory-core — files this component owns outright: the host module,
+# the pr_threads DB layer + migration, the container MCP tools, and the ten
+# guard tests. The two barrel lines (src/modules/index.ts, container
+# mcp-tools/index.ts), the migrations-barrel insert, the sessions.ts
+# four-helper append, and the undici dependency are applied as edits per
+# SKILL.md, not as file copies.
+src/modules/pr-factory/index.ts
+src/modules/pr-factory/bootstrap.ts
+src/modules/pr-factory/handler.ts
+src/modules/pr-factory/webhook.ts
+src/modules/pr-factory/orchestrator.ts
+src/modules/pr-factory/testing-approval.ts
+src/modules/pr-factory/skill-edit-approval.ts
+src/modules/pr-factory/dismiss-approvals.ts
+src/modules/pr-factory/reactions.ts
+src/modules/pr-factory/activity-log.ts
+src/modules/pr-factory/defaults.ts
+src/modules/pr-factory/supervisor.ts
+src/modules/pr-factory/worker-instructions.ts
+src/modules/pr-factory/canvas.ts
+src/modules/pr-factory/test-orchestration.ts
+src/modules/pr-factory/gh-action.ts
+src/db/pr-threads.ts
+src/db/migrations/module-pr-factory-pr-threads-v2.ts
+container/agent-runner/src/mcp-tools/pr-factory.ts
+src/modules/pr-factory/bootstrap.test.ts
+src/modules/pr-factory/webhook.test.ts
+src/modules/pr-factory/registration.test.ts
+src/modules/pr-factory/handler.test.ts
+src/modules/pr-factory/orchestrator.test.ts
+src/modules/approvals/response-handler-reject.test.ts
+src/db/pr-threads.test.ts
+src/db/sessions-approval-helpers.test.ts
+container/agent-runner/src/mcp-tools/pr-factory-registration.test.ts
+container/agent-runner/src/mcp-tools/pr-factory-tools.test.ts
