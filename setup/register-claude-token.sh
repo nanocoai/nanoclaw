@@ -24,6 +24,16 @@ set -euo pipefail
 SECRET_NAME="${SECRET_NAME:-Anthropic}"
 HOST_PATTERN="${HOST_PATTERN:-api.anthropic.com}"
 
+# ~/.local/bin joins PATH FIRST: onecli (and often claude) install there, and
+# a non-login shell — headless ssh command, systemd unit — doesn't have it on
+# PATH. The guard below used to run before any PATH fix, so a perfectly good
+# install failed with "onecli not found" whenever setup ran non-interactively
+# (#3354 bug 2). The later claude-branch copy of this fix stays for the
+# freshly-installed-binary case (hash -r matters there).
+if [ -d "$HOME/.local/bin" ] && [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+  export PATH="$HOME/.local/bin:$PATH"
+fi
+
 command -v onecli >/dev/null \
   || { echo "onecli not found. Install it first (see /setup §4)." >&2; exit 1; }
 
