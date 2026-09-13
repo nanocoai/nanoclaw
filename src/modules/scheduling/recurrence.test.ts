@@ -238,7 +238,7 @@ describe('handleRecurrence — script-failure backoff (streak derived from faile
     const logFile = path.join(TEST_DIR, 'groups', 'g-test', 'tasks', 'task-s-0.md');
     expect(fs.existsSync(logFile)).toBe(true);
     const content = fs.readFileSync(logFile, 'utf8');
-    expect(content).toContain('auto-paused after 8 consecutive script failures');
+    expect(content).toContain('auto-paused after 8 consecutive failed runs');
     expect(content).toContain('ncl tasks resume task-s-0');
     expect(content).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2} — /m); // appendRunLog's local-time stamp
   });

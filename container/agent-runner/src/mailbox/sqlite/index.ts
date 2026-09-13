@@ -126,6 +126,10 @@ export class SqliteAgentMailbox implements AgentMailbox {
     else sqliteMarkScriptSkipped(ids.map((id) => ({ id, reason: 'error' })));
   }
 
+  markFailed(id: string): boolean {
+    return sqliteMarkFailed(id);
+  }
+
   markScriptSkipped(skips: Array<{ id: string; reason: string }>): void {
     sqliteMarkScriptSkipped(skips);
   }
