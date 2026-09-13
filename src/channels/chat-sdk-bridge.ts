@@ -392,6 +392,15 @@ function resolveSelectedOption(
     const idx = Number(candidate);
     if (render.options[idx]) return render.options[idx].value;
   }
+  // Render metadata missing (DB lock, or already swept) but candidate looks
+  // like an index — we can't resolve it to the real option value. Surface
+  // this rather than silently treating a bare index as a value downstream.
+  if (!render && /^\d+$/.test(candidate)) {
+    log.warn('Cannot resolve option index without render metadata', {
+      candidate,
+      reason: 'render was undefined',
+    });
+  }
   return candidate;
 }
 
@@ -848,9 +857,13 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
               // long values (e.g. ISO datetimes, URLs) push the JSON payload
               // well past that. The onAction handlers resolve the index back
               // to the real value via resolveQuestionRender(questionId).
-              options.map((opt, idx) =>
-                Button({ id: `ncq:${questionId}:${idx}`, label: opt.label, value: String(idx), style: opt.style }),
-              ),
+              // The Discord Chat SDK adapter concatenates `id` and `value`
+              // with a newline when both are set on the same button, so a
+              // redundant `value: String(idx)` here corrupted the resolved
+              // custom_id (e.g. "ncq:...:0\n0" instead of "ncq:...:0"),
+              // silently mis-mapping every click to the wrong option index.
+              // `id` alone already carries the routing info.
+              options.map((opt, idx) => Button({ id: `ncq:${questionId}:${idx}`, label: opt.label, style: opt.style })),
             ),
           ],
         });
