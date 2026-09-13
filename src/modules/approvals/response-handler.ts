@@ -24,6 +24,7 @@ import {
 } from '../../db/sessions.js';
 import type { ResponsePayload } from '../../response-registry.js';
 import { log } from '../../log.js';
+import { namespacedUserId } from '../../platform-id.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import type { PendingApproval } from '../../types.js';
 import { hasAdminPrivilege, isGlobalAdmin, isOwner } from '../permissions/db/user-roles.js';
@@ -56,7 +57,7 @@ export async function handleApprovalsResponse(payload: ResponsePayload): Promise
     return true;
   }
 
-  await handleRegisteredApproval(approval, payload.value, namespacedUserId(payload) ?? '');
+  await handleRegisteredApproval(approval, payload.value, clickerUserId(payload) ?? '');
   return true;
 }
 
@@ -132,13 +133,13 @@ async function handleRegisteredApproval(
   await requestWake(session, 'approval-response');
 }
 
-function namespacedUserId(payload: ResponsePayload): string | null {
+function clickerUserId(payload: ResponsePayload): string | null {
   if (!payload.userId) return null;
-  return payload.userId.includes(':') ? payload.userId : `${payload.channelType}:${payload.userId}`;
+  return namespacedUserId(payload.channelType, payload.userId);
 }
 
 async function isAuthorizedApprovalClick(approval: PendingApproval, payload: ResponsePayload): Promise<boolean> {
-  const userId = namespacedUserId(payload);
+  const userId = clickerUserId(payload);
   if (!userId) return false;
 
   // An approval may name a specific approver; only that exact user may resolve it.

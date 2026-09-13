@@ -21,6 +21,7 @@ import {
   type Message as ChatMessage,
 } from 'chat';
 import { log } from '../log.js';
+import { namespacedUserId } from '../platform-id.js';
 import { SqliteStateAdapter } from '../state-sqlite.js';
 import { registerWebhookAdapter } from '../webhook-server.js';
 import { normalizeOptions, type NormalizedOption } from './ask-question.js';
@@ -528,7 +529,13 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     const author = serialized.author as { userId?: string; fullName?: string; userName?: string } | undefined;
     if (author) {
       const name = author.fullName ?? author.userName;
-      serialized.senderId = author.userId;
+      // Namespace here rather than leaving it to extractAndUpsertUser: that
+      // resolver treats any colon as "already namespaced", which is true for
+      // the ids most adapters emit but not for Teams ("29:xxx"). Left bare,
+      // a Teams sender resolves to a second user row carrying none of the
+      // roles granted to the namespaced one. Adapters whose ids have no colon
+      // are unaffected — they end up prefixed either way.
+      serialized.senderId = author.userId ? namespacedUserId(adapter.name, author.userId) : author.userId;
       serialized.sender = name;
       serialized.senderName = name;
     }
