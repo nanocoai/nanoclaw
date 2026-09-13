@@ -10,7 +10,8 @@ import {
 import { buildAgentGroupImage, killContainer } from '../../container-runner.js';
 import { requestWake } from '../../request-wake.js';
 import { restartAgentGroupContainers } from '../../container-restart.js';
-import { createAgentGroup, getAgentGroupByFolder } from '../../db/agent-groups.js';
+import { fireSandboxRemoved } from '../../code-mode/hooks.js';
+import { createAgentGroup, getAgentGroup, getAgentGroupByFolder } from '../../db/agent-groups.js';
 import { getDb, hasTable } from '../../db/connection.js';
 import { getSession } from '../../db/sessions.js';
 import { writeSessionMessage } from '../../session-manager.js';
@@ -33,6 +34,7 @@ import {
 } from '../../templates/restamp.js';
 import { isValidTimezone } from '../../timezone.js';
 import type { AgentGroup, ContainerConfigRow } from '../../types.js';
+import { resolveAttachForGroup } from '../attach-resolve.js';
 import { registerResource } from '../crud.js';
 import { localizeIsoTimestamps } from '../format.js';
 
@@ -86,6 +88,8 @@ function presentConfig(row: ContainerConfigRow): Record<string, unknown> {
     packages_npm: JSON.parse(row.packages_npm),
     additional_mounts: JSON.parse(row.additional_mounts),
     cli_scope: row.cli_scope,
+    code_mode: row.code_mode === 1,
+    permission_mode: row.permission_mode ?? null,
     timezone: row.timezone,
     updated_at: row.updated_at,
   };
@@ -237,6 +241,9 @@ registerResource({
         // genericDelete behaviour of throwing "not found" for unknown IDs.
         const exists = await db.get('SELECT 1 FROM agent_groups WHERE id = ? LIMIT 1', id);
         if (!exists) throw new Error(`group not found: ${id}`);
+        // A code-mode group is a sandbox; modules that attached state to it
+        // are told once its rows are gone (code-mode/hooks.ts).
+        const sandbox = (await getContainerConfig(id))?.code_mode === 1 ? await getAgentGroup(id) : undefined;
 
         const hasAgentDestinations = await hasTable(db, 'agent_destinations');
         const hasPendingApprovals = await hasTable(db, 'pending_approvals');
@@ -307,7 +314,26 @@ registerResource({
           return counts;
         });
 
+        if (sandbox) await fireSandboxRemoved(sandbox);
         return { deleted: id, removed };
+      },
+    },
+    attach: {
+      access: 'open',
+      hostOnly: true,
+      description:
+        "Attach this terminal to a code-mode agent's interactive session (host operators only).\n" +
+        'Usage: ncl groups attach <group-id-or-folder>. The host resolves the live session container ' +
+        'and the ncl client execs the attach client into it — every connection is host-mediated. ' +
+        'Detach with Ctrl-b then d; the session keeps running.',
+      handler: async (args) => {
+        const id = args.id as string;
+        if (!id) throw new Error('usage: ncl groups attach <group-id-or-folder>');
+        const group = (await getAgentGroup(id)) ?? (await getAgentGroupByFolder(id));
+        if (!group) throw new Error(`No agent group: ${id}`);
+        // Everything from the code-mode gate to the exec spec is shared with
+        // the sandbox verbs — code-mode/sandboxes.ts owns the policy.
+        return resolveAttachForGroup(group);
       },
     },
     restart: {
@@ -391,6 +417,8 @@ registerResource({
         'Update container config scalar fields. Changes are saved but do NOT take effect until you run `ncl groups restart`. ' +
         'Use --id <group-id> and any of: --provider, --model, --effort, --speed, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, ' +
         '--speed must be one of the speed tiers the group\'s provider declares (Claude: "standard", "fast"), or "" to follow the install default; a provider that declares none accepts only "". ' +
+        '--code-mode (true|false — the agent runs as an interactive coding session instead of the chat loop; takes effect on respawn), ' +
+        '--permission-mode (auto|bypass — code-mode permission posture override: auto keeps the CLI prompting, bypass skips prompts when explicitly selected; "" clears back to the deployment default; takes effect on respawn), ' +
         '--timezone (IANA id like "Europe/Lisbon"; "" clears back to the install default; scheduled-task times follow it immediately, message display after restart).',
       handler: async (args) => {
         const id = args.id as string;
@@ -410,6 +438,8 @@ registerResource({
             | 'max_messages_per_prompt'
             | 'cli_scope'
             | 'timezone'
+            | 'code_mode'
+            | 'permission_mode'
           >
         > = {};
         if (args.provider !== undefined) updates.provider = args.provider as string;
@@ -436,10 +466,24 @@ registerResource({
           }
           updates.cli_scope = scope;
         }
+        if (args['code-mode'] !== undefined || args.code_mode !== undefined) {
+          const mode = String(args['code-mode'] ?? args.code_mode);
+          if (mode !== 'true' && mode !== 'false') {
+            throw new Error('--code-mode must be true or false');
+          }
+          updates.code_mode = mode === 'true' ? 1 : 0;
+        }
+        if (args['permission-mode'] !== undefined || args.permission_mode !== undefined) {
+          const mode = String(args['permission-mode'] ?? args.permission_mode);
+          if (mode !== 'auto' && mode !== 'bypass' && mode !== '') {
+            throw new Error('--permission-mode must be auto, bypass, or "" to follow the deployment default');
+          }
+          updates.permission_mode = mode === '' ? null : mode;
+        }
 
         if (Object.keys(updates).length === 0) {
           throw new Error(
-            'Nothing to update — provide at least one of: --provider, --model, --effort, --speed, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --timezone',
+            'Nothing to update — provide at least one of: --provider, --model, --effort, --speed, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --code-mode, --permission-mode, --timezone',
           );
         }
 

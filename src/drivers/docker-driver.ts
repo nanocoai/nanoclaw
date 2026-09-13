@@ -23,6 +23,7 @@ import fs from 'fs';
 import { log } from '../log.js';
 
 import { realCli, validateRuntimeName, type Cli, type SupervisedProcess } from './cli.js';
+import { dockerExecStream, resolveDockerSocket } from './docker-api.js';
 import { JsonDocumentStream } from './json-stream.js';
 import {
   LABELS,
@@ -36,7 +37,9 @@ import {
   type MountSpec,
   type SessionDriver,
   type SessionEvent,
+  type SessionExecOptions,
   type SessionExecSpec,
+  type SessionExecStream,
   type SessionFailure,
   type SessionHandle,
   type SessionKey,
@@ -49,6 +52,8 @@ import {
 
 export interface DockerDriverOptions extends MountPolicy {
   cli?: Cli;
+  /** The daemon's unix socket for interactive execs; resolved from the environment when omitted. */
+  dockerSocket?: string;
   /** Docker network the session's containers attach to, resolved by the overlay. */
   networkArgsFor?: (spec: SessionSpec) => string[];
 }
@@ -76,10 +81,18 @@ export class DockerSessionDriver implements SessionDriver {
    */
   readonly #knownKeys = new Map<string, Map<string, SessionKey>>();
 
+  #socketPath?: string;
+
   constructor(private readonly opts: DockerDriverOptions) {
     this.#cli = opts.cli ?? realCli('docker');
     this.#policy = opts;
   }
+
+  /** Resolved once, on first interactive exec. */
+  readonly #dockerSocket = (): string => {
+    this.#socketPath ??= this.opts.dockerSocket ?? resolveDockerSocket({ cli: this.#cli });
+    return this.#socketPath;
+  };
 
   capabilities(): DriverCapabilities {
     return {
@@ -126,7 +139,7 @@ export class DockerSessionDriver implements SessionDriver {
 
     // Idempotency on key: an existing live container for this key is the session.
     if (this.#existingSession(name, spec.key)) {
-      return new DockerHandle(spec.key, name, this.#cli, null, this.#emit);
+      return new DockerHandle(spec.key, name, this.#cli, null, this.#emit, this.#dockerSocket);
     }
 
     // Composition existsSync-gates mount sources; re-check here so a
@@ -171,7 +184,7 @@ export class DockerSessionDriver implements SessionDriver {
       }
       throw normalizeDockerError(error);
     }
-    return new DockerHandle(spec.key, name, this.#cli, spec, this.#emit);
+    return new DockerHandle(spec.key, name, this.#cli, spec, this.#emit, this.#dockerSocket);
   }
 
   async listSessions(installSlug: string): Promise<SessionSnapshot[]> {
@@ -203,7 +216,7 @@ export class DockerSessionDriver implements SessionDriver {
         const key: SessionKey = { installSlug, agentGroupId, sessionId };
         this.#remember(key);
         return {
-          handle: new DockerHandle(key, name, this.#cli, null, this.#emit),
+          handle: new DockerHandle(key, name, this.#cli, null, this.#emit, this.#dockerSocket),
           phase: dockerStatePhase(state),
         };
       });
@@ -455,6 +468,7 @@ class DockerHandle implements SessionHandle {
     /** Present only between prepare and start; null for an adopted handle. */
     private readonly pendingSpec: SessionSpec | null,
     private readonly emit: (event: SessionEvent) => void,
+    private readonly dockerSocket: () => string,
   ) {}
 
   async start(): Promise<void> {
@@ -546,6 +560,11 @@ class DockerHandle implements SessionHandle {
       argsTty: ['exec', '-it', this.name, ...command],
       argsPlain: ['exec', '-i', this.name, ...command],
     };
+  }
+
+  /** The same exec, held by the caller: created and hijacked through the daemon's API. */
+  execStream(command: string[], options: SessionExecOptions): Promise<SessionExecStream> {
+    return dockerExecStream(this.dockerSocket(), this.name, command, options);
   }
 }
 

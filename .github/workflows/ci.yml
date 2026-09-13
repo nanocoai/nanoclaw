@@ -41,6 +41,12 @@ jobs:
       - name: Host tests
         run: pnpm exec vitest run
 
+      - name: Install tmux for the container tests
+        # The code runner's tmux suites drive a real tmux server. They are
+        # describe.if-gated on the binary, so without it they would skip
+        # silently rather than fail; install it so they actually run.
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends tmux
+
       - name: Container tests
         working-directory: container/agent-runner
         run: bun test

@@ -35,6 +35,11 @@ export interface ContainerConfigRow {
   cli_scope: string; // 'disabled' | 'group' | 'global'
   timezone: string | null; // IANA id; NULL = follow the install-global timezone
   speed: ContainerSpeed | null; // NULL = install/provider default
+  /** 0|1. Column added by the module:code-mode migration — absent (undefined) reads as off. */
+  code_mode?: number;
+  /** 'auto' | 'bypass' | NULL. Column added by the module:code-mode permission-mode
+   *  migration — NULL/absent means "follow the deployment default". */
+  permission_mode?: string | null;
   /**
    * Session isolation tier ('container' | 'vm') — see SessionSpec.runtimeTier.
    * Optional on the TS type because the trunk schema does not carry the
@@ -146,7 +151,13 @@ export interface MessagingGroupAgent {
   engage_pattern: string | null;
   sender_scope: SenderScope;
   ignored_message_policy: IgnoredMessagePolicy;
-  session_mode: 'shared' | 'per-thread' | 'agent-shared';
+  /**
+   * 'sandbox' routes the wiring into the agent group's coding session (the
+   * `system:sandbox` thread `ncl sandboxes new` lands in) instead of a chat
+   * session of its own — the chat surface bound to a coding session
+   * (src/code-mode/surface). Threads never apply to it.
+   */
+  session_mode: 'shared' | 'per-thread' | 'agent-shared' | 'sandbox';
   priority: number;
   /**
    * Per-wiring thread-policy override (migration 019). NULL = inherit the

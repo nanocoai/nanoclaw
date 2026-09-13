@@ -37,6 +37,12 @@ import {
   ensureContainerConfig,
   updateContainerConfigScalars,
 } from './index.js';
+import {
+  SANDBOX_SYSTEM_THREAD_ID,
+  findAttachableSessions,
+  findSandboxSessions,
+  findSessionByAgentGroup,
+} from './sessions.js';
 
 function now() {
   return new Date().toISOString();
@@ -396,6 +402,33 @@ describe('sessions', () => {
     await createSession(sess());
     await deleteSession('sess-1');
     expect(await getSession('sess-1')).toBeUndefined();
+  });
+
+  it('sandbox sessions: found by the scoped query, appended to the attach view', async () => {
+    await createSession({
+      ...sess(),
+      id: 'sess-sandbox',
+      messaging_group_id: null,
+      thread_id: SANDBOX_SYSTEM_THREAD_ID,
+    });
+    await createSession(sess()); // channel-wired
+    expect((await findSandboxSessions('ag-1')).map((s) => s.id)).toEqual(['sess-sandbox']);
+    // The channel-wired session keeps winning the wake choice (index 0);
+    // the sandbox session is appended, never mixed in.
+    expect((await findAttachableSessions('ag-1')).map((s) => s.id)).toEqual(['sess-1', 'sess-sandbox']);
+  });
+
+  it('sandbox sessions: invisible to chat routing (agent-shared resolution)', async () => {
+    await createSession({
+      ...sess(),
+      id: 'sess-sandbox',
+      messaging_group_id: null,
+      thread_id: SANDBOX_SYSTEM_THREAD_ID,
+    });
+    // A sandbox-only group must attach, yet look sessionless to resolveSession's
+    // agent-shared path — the composed-query pattern keeps the filter intact.
+    expect(await findSessionByAgentGroup('ag-1')).toBeUndefined();
+    expect((await findAttachableSessions('ag-1')).map((s) => s.id)).toEqual(['sess-sandbox']);
   });
 });
 

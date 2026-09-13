@@ -25,6 +25,14 @@ import {
   TIMEZONE,
 } from './config.js';
 import { CONTAINER_PLUGINS_DIR, materializeContainerJson } from './container-config.js';
+import { devInstructionMounts } from './code-mode/compose.js';
+import {
+  boundaryDecisionMounts,
+  deploymentPermissionMode,
+  managedSettingsMounts,
+  resolveCodePermissionMode,
+} from './code-mode/permissions.js';
+import { readEnvFile } from './env.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { updateContainerConfigScalars } from './db/container-configs.js';
 import { CONTAINER_RUNTIME_BIN } from './container-runtime.js';
@@ -820,6 +828,12 @@ export async function buildMounts(
   // Undeclared payloads stay on the legacy capability gate. Declared payloads
   // are realized below from their contract.
   const defaultSurfaces = !contract && !providerProvidesAgentSurfaces(provider);
+  // Code mode strips chat COMPOSITION, not capabilities: the composed project
+  // document, stamped plugins, skill views and the shared skills tree stay
+  // host-side, while provider state volumes (settings, credential state) still
+  // mount — the coding agent is still a provider session. Its own instruction
+  // surface is stamped below (code-mode/compose.ts).
+  const chatSurfaces = containerConfig.codeMode !== true;
 
   const groupDir = path.resolve(GROUPS_DIR, agentGroup.folder);
   const claudeDir = path.join(DATA_DIR, 'v2-sessions', agentGroup.id, '.claude-shared');
@@ -829,7 +843,7 @@ export async function buildMounts(
   const lateStateVolumeMounts = new Map<string, VolumeMount>();
   const lateSkillViewMounts = new Map<string, VolumeMount[]>();
   let skillBackingPaths = new Map<string, string>();
-  if (contract) {
+  if (contract && chatSurfaces) {
     providerSurfaces ??= await realizeProviderSpawnSurfaces(
       provider,
       contract,
@@ -843,7 +857,7 @@ export async function buildMounts(
       },
     );
     skillBackingPaths = providerSurfaces.skillBackingPaths;
-  } else if (defaultSurfaces) {
+  } else if (defaultSurfaces && chatSurfaces) {
     syncSkillSymlinks(claudeDir, containerConfig);
 
     // Compose CLAUDE.md fresh every spawn: every instruction source inlined
@@ -852,6 +866,10 @@ export async function buildMounts(
   }
 
   const mounts: VolumeMount[] = [];
+  // The code runner's cwd (/workspace/group) must exist host-side before the
+  // runtime would create it as root. Prepared in every mode, so a group later
+  // flipped to code mode keeps a directory the host can still write into.
+  fs.mkdirSync(path.join(sessDir, 'group'), { recursive: true });
   const scope = agentGroup.id;
 
   // Session workspace: mailbox-selected state plus outbox and heartbeat files.
@@ -898,19 +916,25 @@ export async function buildMounts(
   // whose read-only rule is enforced instead of chosen. It lives under the
   // group folder rather than an install root, so the mount policy pins it
   // through the group-folder label — see `stampedPluginsRoot`.
-  mounts.push({
-    hostPath: path.join(groupDir, 'plugins'),
-    containerPath: CONTAINER_PLUGINS_DIR,
-    readonly: true,
-    mountClass: 'install-surface',
-    scope,
-  });
+  //
+  // Chat surfaces only: stamped plugins are chat-agent composition (skills,
+  // MCP servers, persona); code mode strips them with the rest of the composed
+  // surface, while plugin-data/ stays reachable through the group mount.
+  if (chatSurfaces) {
+    mounts.push({
+      hostPath: path.join(groupDir, 'plugins'),
+      containerPath: CONTAINER_PLUGINS_DIR,
+      readonly: true,
+      mountClass: 'install-surface',
+      scope,
+    });
+  }
 
   // The composed project document — one nested RO mount on top of the RW group
   // dir, holding the full text of every instruction source. `container/CLAUDE.md`
   // is read on the host at compose time, so nothing needs it inside the container.
   const composedProjectDocument = path.join(groupDir, projectDocument?.fileName ?? DEFAULT_PROJECT_DOC.fileName);
-  if ((projectDocument || defaultSurfaces) && fs.existsSync(composedProjectDocument)) {
+  if (chatSurfaces && (projectDocument || defaultSurfaces) && fs.existsSync(composedProjectDocument)) {
     const mount = {
       hostPath: composedProjectDocument,
       containerPath: projectDocument?.containerPath ?? '/workspace/agent/CLAUDE.md',
@@ -920,6 +944,22 @@ export async function buildMounts(
     } satisfies VolumeMount;
     if (mount.mountClass === 'allowlisted-extra') lateProjectDocumentMount = mount;
     else mounts.push(mount);
+  }
+
+  // Code-mode surfaces: the operating manual and dev skills the interactive
+  // CLI reads at its cwd, the host-owned permission policy at the CLI's admin
+  // tier, and the boundary decision dir the agent can read but never write.
+  // Every helper stamps outside the RW workspace and never throws.
+  if (containerConfig.codeMode) {
+    mounts.push(...devInstructionMounts(sessDir, scope));
+    mounts.push(
+      ...managedSettingsMounts(
+        sessDir,
+        scope,
+        resolveCodePermissionMode(containerConfig.codePermissionMode, deploymentPermissionMode()),
+      ),
+    );
+    mounts.push(...boundaryDecisionMounts(sessDir, scope));
   }
 
   // Per-group .claude-shared at /home/node/.claude (provider state, settings,
@@ -937,7 +977,7 @@ export async function buildMounts(
       if (mount.mountClass === 'allowlisted-extra') lateStateVolumeMounts.set(volume.id, mount);
       else mounts.push(mount);
     }
-    for (const view of contract.skillViews) {
+    for (const view of chatSurfaces ? contract.skillViews : []) {
       const hostPath = skillBackingPaths.get(view.backingId);
       if (!hostPath)
         throw new Error(`Provider '${provider}' skill view references unknown backing '${view.backingId}'`);
@@ -978,7 +1018,7 @@ export async function buildMounts(
 
   // Shared skills — read-only, symlinks in .claude-shared/skills/ point here.
   const skillsSrc = path.join(projectRoot, 'container', 'skills');
-  if (fs.existsSync(skillsSrc)) {
+  if (chatSurfaces && fs.existsSync(skillsSrc)) {
     mounts.push({
       hostPath: skillsSrc,
       containerPath: '/app/skills',
@@ -1001,7 +1041,7 @@ export async function buildMounts(
       const mount = lateStateVolumeMounts.get(volume.id);
       if (mount) mounts.push(mount);
     }
-    for (const backing of contract.skillBackings) {
+    for (const backing of chatSurfaces ? contract.skillBackings : []) {
       mounts.push(...(lateSkillViewMounts.get(backing.id) ?? []));
     }
     if (lateProjectDocumentMount) mounts.push(lateProjectDocumentMount);
@@ -1028,6 +1068,13 @@ export function toMountSpecs(mounts: readonly VolumeMount[], defaultScope: strin
     groupScope: mount.scope ?? defaultScope,
   }));
 }
+
+/**
+ * The code runner's start line: the runner package's named script, run from
+ * the image's package root (`/app` holds the baked package.json and
+ * node_modules; `/app/src` is the host-mounted source both runners share).
+ */
+export const CODE_RUNNER_START = 'cd /app && exec bun run start:code';
 
 export interface ComposeSessionSpecInput {
   agentGroup: AgentGroup;
@@ -1082,6 +1129,53 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
     ...(gateway.env ?? {}),
   };
 
+  // Code-mode configuration, forwarded to the code runner. The gateway
+  // provider owns credential placeholders; extra env never enters that lane
+  // and never overrides a key already set.
+  if (containerConfig.codeMode) {
+    if (containerConfig.provider && containerConfig.provider !== 'claude') {
+      throw new Error('code mode currently supports only Claude Code; set the group provider to claude');
+    }
+    const settings = [
+      'NANOCLAW_CODE_IDLE_TTL_MS',
+      'NANOCLAW_CODE_ATTACH_IDLE_TTL_MS',
+      'NANOCLAW_CODE_PERMISSION_MODE',
+      'NANOCLAW_CODE_CHANNELS',
+      'NANOCLAW_CODE_ENV',
+    ] as const;
+    const fromFile = readEnvFile([...settings]);
+    const setting = (name: (typeof settings)[number]): string | undefined =>
+      process.env[name]?.trim() || fromFile[name]?.trim() || undefined;
+    for (const name of settings) {
+      if (name === 'NANOCLAW_CODE_ENV') continue;
+      const value =
+        name === 'NANOCLAW_CODE_PERMISSION_MODE'
+          ? (containerConfig.codePermissionMode ?? setting(name))
+          : setting(name);
+      if (value) env[name] = value;
+    }
+    const extra = setting('NANOCLAW_CODE_ENV');
+    if (extra) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(extra);
+      } catch (error) {
+        throw new Error('NANOCLAW_CODE_ENV must be valid JSON', { cause: error });
+      }
+      if (
+        !parsed ||
+        typeof parsed !== 'object' ||
+        Array.isArray(parsed) ||
+        Object.values(parsed).some((value) => typeof value !== 'string')
+      ) {
+        throw new Error('NANOCLAW_CODE_ENV must be a JSON object of strings');
+      }
+      for (const [key, value] of Object.entries(parsed as Record<string, string>)) {
+        if (!(key in env)) env[key] = value;
+      }
+    }
+  }
+
   const hostUid = process.getuid?.();
   const hostGid = process.getgid?.();
   // The spec contract (drivers/types.ts, `runAs`): the identity that must read
@@ -1105,8 +1199,12 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
     env,
     // Run the v2 entry point directly (no tsc, no stdin). The driver maps the
     // 'standard' posture's PID-1 requirement onto this: Docker adds `--init`.
+    // Runner-type selection happens here and nowhere else: both runners ride
+    // the same image and the same /app/src mount. A code-mode group starts
+    // the runner package's `start:code` script (container/agent-runner
+    // package.json names both runners); the chat runner's line is untouched.
     command: ['bash', '-c'],
-    args: ['exec bun run /app/src/index.ts'],
+    args: [containerConfig.codeMode ? CODE_RUNNER_START : 'exec bun run /app/src/index.ts'],
     mounts: mergeMounts(toMountSpecs(mounts, agentGroup.id), gateway.mounts ?? []),
     contributedEnv,
   };

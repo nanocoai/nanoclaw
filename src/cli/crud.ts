@@ -8,10 +8,12 @@
  */
 import { randomUUID } from 'crypto';
 
+import { seamAccepted } from '../seams.js';
 import { getDb } from '../db/connection.js';
 import { isUniqueViolation } from '../db/errors.js';
+import { log } from '../log.js';
 import { renderVerbHelp } from './help-render.js';
-import { register } from './registry.js';
+import { lookup, register } from './registry.js';
 import type { Access } from './registry.js';
 import type { CallerContext } from './frame.js';
 
@@ -524,30 +526,96 @@ export function registerResource(def: ResourceDef): void {
   // Custom operations. Declaring `args` opts the verb into strict validation;
   // every failure carries the verb's usage block so a caller (human or agent)
   // can fix the invocation without a second help round-trip.
-  if (def.customOperations) {
-    for (const [verb, op] of Object.entries(def.customOperations)) {
-      const declared = op.args;
-      register({
-        name: `${def.plural}-${verb.replace(/ /g, '-')}`,
-        action: `${def.plural}.${verb.replace(/ /g, '.')}`,
-        description: op.description,
-        access: op.access,
-        hostOnly: op.hostOnly,
-        resource: def.plural,
-        parseArgs: declared
-          ? (raw) => {
-              try {
-                return validateArgs(declared, normalizeArgs(raw));
-              } catch (e) {
-                const usage = renderVerbHelp(def, verb);
-                const msg = e instanceof Error ? e.message : String(e);
-                throw new Error(usage ? `${msg}\n\n${usage}` : msg, { cause: e });
-              }
-            }
-          : (raw) => normalizeArgs(raw),
-        handler: async (args, ctx) => op.handler(args as Record<string, unknown>, ctx),
-        formatHuman: op.formatHuman,
-      });
-    }
+  if (def.customOperations) registerCustomOperations(def, def.customOperations);
+
+  // Sub-verbs a module queued for this resource before it registered. The
+  // resource's own verbs are already in; a queued verb that collides with
+  // one is refused here (logged), never thrown — an extension must not be
+  // able to kill the boot of the resource it extends.
+  const queued = pendingExtensions.get(def.plural);
+  if (queued) {
+    pendingExtensions.delete(def.plural);
+    for (const ops of queued) registerCustomOperations(def, ops, { extension: true });
   }
+}
+
+function registerCustomOperations(
+  def: ResourceDef,
+  ops: Record<string, CustomOperation>,
+  { extension = false }: { extension?: boolean } = {},
+): void {
+  for (const [verb, op] of Object.entries(ops)) {
+    if (extension && lookup(`${def.plural}-${verb.replace(/ /g, '-')}`)) {
+      log.error('Resource extension refused: verb already registered', { resource: def.plural, verb });
+      continue;
+    }
+    const declared = op.args;
+    register({
+      name: `${def.plural}-${verb.replace(/ /g, '-')}`,
+      action: `${def.plural}.${verb.replace(/ /g, '.')}`,
+      description: op.description,
+      access: op.access,
+      hostOnly: op.hostOnly,
+      resource: def.plural,
+      parseArgs: declared
+        ? (raw) => {
+            try {
+              return validateArgs(declared, normalizeArgs(raw));
+            } catch (e) {
+              const usage = renderVerbHelp(def, verb);
+              const msg = e instanceof Error ? e.message : String(e);
+              throw new Error(usage ? `${msg}\n\n${usage}` : msg, { cause: e });
+            }
+          }
+        : (raw) => normalizeArgs(raw),
+      handler: async (args, ctx) => op.handler(args as Record<string, unknown>, ctx),
+      formatHuman: op.formatHuman,
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Resource extension — sub-verbs a module adds to a resource it does not own
+// ---------------------------------------------------------------------------
+
+/** Bump only on a breaking change to CustomOperation or to how verbs are named. */
+export const RESOURCE_EXTENSION_SEAM = 1;
+
+const pendingExtensions = new Map<string, Record<string, CustomOperation>[]>();
+
+/**
+ * Add sub-verbs to an existing resource (`extendResource('sandboxes', {
+ * 'remote enable': … })` registers `ncl sandboxes remote enable`) without
+ * editing the resource's own definition. Order-independent: registered at
+ * once when the resource exists, queued until it does otherwise. The verbs
+ * are ordinary custom operations — same help, same guard, same host-only
+ * rule. A verb the resource (or an earlier extension) already has is
+ * refused and logged, never overwritten; so is a registration whose
+ * `seam` is not this host's.
+ */
+export function extendResource(
+  plural: string,
+  ops: Record<string, CustomOperation>,
+  registration: { seam: number },
+): void {
+  const verbs = Object.keys(ops);
+  if (!seamAccepted('resource-extension', `${plural} ${verbs.join(', ')}`, RESOURCE_EXTENSION_SEAM, registration.seam))
+    return;
+  const accepted: Record<string, CustomOperation> = {};
+  for (const verb of verbs) {
+    const name = `${plural}-${verb.replace(/ /g, '-')}`;
+    if (lookup(name)) {
+      log.error('Resource extension refused: verb already registered', { resource: plural, verb });
+      continue;
+    }
+    accepted[verb] = ops[verb];
+  }
+  const def = resources.get(plural);
+  if (def) {
+    registerCustomOperations(def, accepted, { extension: true });
+    return;
+  }
+  const queue = pendingExtensions.get(plural) ?? [];
+  queue.push(accepted);
+  pendingExtensions.set(plural, queue);
 }

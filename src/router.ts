@@ -528,10 +528,16 @@ async function deliverToAgent(
   // AND adapter capability — resolveThreadPolicy at fanout): thread-enabled
   // wiring in a group chat → per-thread session regardless of wiring
   // session_mode. agent-shared preserved (it's a cross-channel directive the
-  // adapter doesn't know about). DMs collapse sub-threads to one session
-  // (is_group=0 short-circuit).
+  // adapter doesn't know about), and so is sandbox (the wiring IS the coding
+  // session's chat surface — there is exactly one session to land in). DMs
+  // collapse sub-threads to one session (is_group=0 short-circuit).
   let effectiveSessionMode = agent.session_mode;
-  if (threadsEnabled && effectiveSessionMode !== 'agent-shared' && mg.is_group !== 0) {
+  if (
+    threadsEnabled &&
+    effectiveSessionMode !== 'agent-shared' &&
+    effectiveSessionMode !== 'sandbox' &&
+    mg.is_group !== 0
+  ) {
     effectiveSessionMode = 'per-thread';
   }
 

@@ -5,6 +5,8 @@
   "description": "Container-side agent runner for NanoClaw",
   "scripts": {
     "start": "bun src/index.ts",
+    "start:chat": "bun src/index.ts",
+    "start:code": "bun src/code-runner/index.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test"
   },
