@@ -83,10 +83,12 @@ export interface TaskUpdate {
   script?: string | null;
   recurrence?: string | null;
   processAfter?: string;
+  /** Tri-state: omit to leave the series' current setting alone. */
+  freshSession?: boolean;
 }
 
-// Merges content JSON in-place so callers can update prompt/script without
-// clobbering other fields. Matches by id OR series_id so the live next
+// Merges content JSON in-place so callers can update prompt/script/freshSession
+// without clobbering other fields. Matches by id OR series_id so the live next
 // occurrence of a recurring task is updated, not just the completed row the
 // agent last saw. Due occurrences are already execution candidates and remain
 // immutable; only future pending or paused occurrences are updated. Returns
@@ -105,7 +107,7 @@ export function updateTask(db: Database.Database, taskId: string, update: TaskUp
 
   const setProcessAfter = update.processAfter !== undefined;
   const setRecurrence = update.recurrence !== undefined;
-  const mergeContent = update.prompt !== undefined || update.script !== undefined;
+  const mergeContent = update.prompt !== undefined || update.script !== undefined || update.freshSession !== undefined;
 
   const tx = db.transaction(() => {
     for (const row of rows) {
@@ -114,6 +116,10 @@ export function updateTask(db: Database.Database, taskId: string, update: TaskUp
         const parsed = JSON.parse(row.content) as Record<string, unknown>;
         if (update.prompt !== undefined) parsed.prompt = update.prompt;
         if (update.script !== undefined) parsed.script = update.script;
+        // Undefined leaves the stored value alone — omitting the flag on an
+        // update must not silently turn a stateless series back into a
+        // resuming one.
+        if (update.freshSession !== undefined) parsed.freshSession = update.freshSession;
         content = JSON.stringify(parsed);
       }
 

@@ -79,6 +79,40 @@ export interface PollLoopConfig {
  * 5. Mark messages completed
  * 6. Loop
  */
+/**
+ * True for a task row whose content asks each occurrence to start a fresh
+ * agent conversation. Tolerates legacy plain-string task content (pre-JSON
+ * envelope), which never carries the flag.
+ */
+/**
+ * Whether this batch should start a fresh conversation.
+ *
+ * Separate from `wantsFreshSession` and exported deliberately: the reset's
+ * effect is BATCH-WIDE (`clearContinuation` drops the conversation for
+ * everything being processed), so the decision is a property of the batch, not
+ * of any one row. Testing the predicate alone proves nothing about it — an
+ * earlier version of these tests asserted `some`/`every` on a local array and
+ * passed identically against the unfixed code.
+ *
+ * `every`, not `some`: a fresh-session task row co-batched with chat messages
+ * would otherwise answer those with no history and discard the user's context
+ * without saying so. Task sessions are normally one row at a time, but a task
+ * row created into a chat session makes the mixed batch reachable, and when it
+ * happens, resuming is the safe side of the trade.
+ */
+export function shouldStartFreshSession(batch: MessageInRow[]): boolean {
+  return batch.length > 0 && batch.every(wantsFreshSession);
+}
+
+export function wantsFreshSession(msg: MessageInRow): boolean {
+  if (msg.kind !== 'task') return false;
+  try {
+    return (JSON.parse(msg.content) as { freshSession?: unknown }).freshSession === true;
+  } catch {
+    return false;
+  }
+}
+
 export async function runPollLoop(config: PollLoopConfig): Promise<void> {
   // Contract providers declare these; a contractless (legacy payload)
   // provider keeps declaring them as instance flags, exactly as before.
@@ -229,6 +263,27 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     if (keep.length === 0) {
       log(`All ${normalMessages.length} non-command message(s) gated by script, skipping query`);
       continue;
+    }
+
+    // Opt-in stateless task occurrences (`ncl tasks create --fresh-session`).
+    // A recurring series' session is never closed, so by default every fire
+    // resumes the previous one and re-sends the whole prior conversation.
+    // Checked after the pre-task gate so a fire the script skipped costs
+    // nothing. Same reset the /clear path performs, plus a chance for the
+    // provider to retire the transcript we are walking away from — nothing
+    // else ever rotates it.
+    //
+    // Scoped to batches that are ENTIRELY fresh-session task rows. Dropping the
+    // continuation is batch-wide, so a task row co-batched with chat messages
+    // would answer those with no history and discard the user's context without
+    // saying so. Task sessions are normally one row at a time, but a task row
+    // created into a chat session makes the mixed batch reachable; when it
+    // happens, resuming is the safe side of the trade.
+    if (continuation && shouldStartFreshSession(keep)) {
+      log('Fresh-session task: starting a new conversation instead of resuming');
+      config.provider.abandonContinuation?.(continuation, 'fresh-session task occurrence');
+      continuation = undefined;
+      clearContinuation(config.providerName);
     }
 
     // Format messages: passthrough commands get raw text (only if the
