@@ -442,6 +442,39 @@ describe('router', () => {
     expect(wakeContainer).toHaveBeenCalled();
   });
 
+  it('routes a message whose content is primitive JSON (not an object) as raw text', async () => {
+    // Without the safeParseContent object-guard, JSON.parse('"hi"') returns a
+    // bare string, callers read `.text` off it as undefined, and the message
+    // loses its text. The guard falls back to { text: raw }, so it still routes.
+    const { routeInbound } = await import('./router.js');
+    const { wakeContainer } = await import('./container-runner.js');
+    (wakeContainer as unknown as ReturnType<typeof vi.fn>).mockClear();
+
+    const event: InboundEvent = {
+      channelType: 'discord',
+      platformId: 'chan-123',
+      threadId: null,
+      message: {
+        id: 'msg-primitive-json',
+        kind: 'chat',
+        content: JSON.stringify('hello from a primitive'),
+        timestamp: now(),
+      },
+    };
+
+    await routeInbound(event);
+
+    const session = findSession('mg-1', null);
+    expect(session).toBeDefined();
+    expect(wakeContainer).toHaveBeenCalledTimes(1);
+
+    const db = new Database(inboundDbPath('ag-1', session!.id));
+    const rows = db.prepare('SELECT id, content FROM messages_in').all() as Array<{ id: string; content: string }>;
+    db.close();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].content).toBe(JSON.stringify('hello from a primitive'));
+  });
+
   it('auto-creates messaging group only when the bot is addressed (mention/DM)', async () => {
     // The router's no-mg branch is escalation-gated: plain chatter on an
     // unknown channel stays silent (no DB writes) so a bot that sits in
