@@ -173,7 +173,7 @@ Test your contribution on a fresh clone before submitting. For skills, run the s
 | `kind/cleanup` | Refactor or cleanup with no behavior change |
 | `kind/hardening` | Defense-in-depth improvement; not an exploitable vulnerability |
 
-   Check one box, not several — with zero or multiple boxes checked, the workflow falls back to your PR title's [conventional-commit](https://www.conventionalcommits.org/) prefix (`fix:` → `kind/bug`, `feat:` → `kind/feature`, `docs:` → `kind/documentation`, `refactor:`/`chore:` → `kind/cleanup`). If that is ambiguous too, no kind is applied and a maintainer classifies the PR at triage; nothing is auto-closed.
+   Check one box, not several — with zero or multiple boxes checked, the workflow preserves a single existing managed kind, then falls back to your PR title's [conventional-commit](https://www.conventionalcommits.org/) prefix (`fix:` → `kind/bug`, `feat:` → `kind/feature`, `docs:` → `kind/documentation`, `refactor:`/`chore:` → `kind/cleanup`). If that is ambiguous too, no kind is applied and a maintainer classifies the PR at triage; nothing is auto-closed.
 
 5. **Skill delivery is separate from kind.** If your PR ships a skill, check the skill box in the Skill delivery section — a skill can be a feature, a fix, or a docs change, and the checkbox adds `delivery/skill` without changing the kind.
 
@@ -181,7 +181,24 @@ Test your contribution on a fresh clone before submitting. For skills, run the s
 
 7. **Opening PRs from the CLI or API** (`gh pr create`, agents): GitHub does not apply the template there, so paste `.github/PULL_REQUEST_TEMPLATE.md` into the body — or at minimum use a conventional-commit title so the kind fallback can classify the PR.
 
-Area labels (`area/*`) are applied automatically from the files your PR touches; you don't pick one.
+Automatic classification uses one `kind/*` label, optional `delivery/skill`, and
+one primary `area/*`. The area comes from `.github/pr-label-areas.json`: each
+changed file votes for its most-specific matching path; the area with the most
+votes wins. Ties use path specificity, then the area name. Pushes recalculate the
+area, so broad changes do not accumulate subsystem labels. Paths with no mapping
+receive no area label.
+
+The area rules support exact paths, a trailing `*` within one path segment, and
+`/**` for descendants. Keep label names identical to the repository's existing
+labels. Provider contracts and bundled provider skills map to `area/providers`.
+
+One metadata-only workflow owns classification and uses targeted label changes,
+so unrelated maintainer labels survive concurrent updates. The old `PR: *` twins,
+`core-team`, and `follows-guidelines` are removed on the next normal PR event;
+there is no bulk relabeling of existing PRs. Old PR templates still classify into
+the modern labels. An explicit kind checkbox wins; without one, a single existing
+kind is preserved before falling back to the title. Unclassifiable conflicting
+kind labels are cleared for the report-only compliance check to flag.
 
 **Changelog:** `CHANGELOG.md` is maintainer-owned — don't edit it in your PR. If your change is user-visible, put one user-facing line in the template's `release-note` block; it's optional raw material that maintainers harvest at release time. Skip it and a maintainer writes the line. For a breaking change, the release note must cover detect, why, fix/migration, and rollback.
 

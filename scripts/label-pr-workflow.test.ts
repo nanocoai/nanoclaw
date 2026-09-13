@@ -1,403 +1,505 @@
-/**
- * Fixture tests for the PR labeling decision logic (CI-04 acceptance
- * criteria). The logic ships inline in .github/workflows/label-pr.yml (the
- * pull_request_target workflow is metadata-only and never checks out the
- * repo, so it cannot read a script file at runtime); these tests extract the
- * exact code between the NANOCLAW-LABEL-LOGIC markers from the workflow file
- * and evaluate it, so the tested function and the shipped function cannot
- * drift.
- */
+/** Exercise the exact metadata-only script shipped by the privileged workflow. */
 import fs from 'node:fs';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { parse } from 'yaml';
 
+type ChangedFile = string | { filename: string; status?: string; previous_filename?: string };
+type AreaRules = Record<string, string[]>;
 interface LabelDecision {
   add: string[];
   remove: string[];
-  coreTeam: boolean;
 }
-
-type ComputeLabels = (args: {
+interface LabelInput {
   body?: string | null;
   title?: string | null;
-  author?: string | null;
   currentLabels?: string[];
-}) => LabelDecision;
-
-type DecideCompliance = (args: {
-  body?: string | null;
-  add: string[];
-  currentLabels?: string[];
-}) => { state: 'success' | 'failure' | null };
-
-type ShouldPostComplianceComment = (state: string | null, existingCommentBodies: Array<string | null>) => boolean;
-
-interface ExtractedLogic {
-  computeLabels: ComputeLabels;
-  decideCompliance: DecideCompliance;
-  shouldPostComplianceComment: ShouldPostComplianceComment;
+  files?: ChangedFile[];
+  areaRules?: AreaRules;
 }
-
-function extractLogic(): ExtractedLogic {
-  const workflow = fs.readFileSync(
-    path.join(__dirname, '..', '.github', 'workflows', 'label-pr.yml'),
-    'utf8',
-  );
-  const start = workflow.indexOf('NANOCLAW-LABEL-LOGIC-START');
-  const end = workflow.indexOf('NANOCLAW-LABEL-LOGIC-END');
-  if (start === -1 || end === -1 || end <= start) {
-    throw new Error('NANOCLAW-LABEL-LOGIC markers not found in label-pr.yml');
-  }
-  const block = workflow.slice(start, end);
-  // Strip the YAML block-scalar indentation so the code parses standalone.
-  const code = block
-    .split('\n')
-    .slice(1) // drop the START marker line itself
-    .map((line) => line.replace(/^ {12}/, ''))
-    .join('\n');
-  return new Function(
-    `${code}\nreturn { computeLabels, decideCompliance, shouldPostComplianceComment };`,
-  )() as ExtractedLogic;
-}
-
-const { computeLabels, decideCompliance, shouldPostComplianceComment } = extractLogic();
-
-/** Full pipeline as the driver runs it: parse, then judge compliance. */
-function complianceFor(body: string, title: string, currentLabels: string[] = []) {
-  const { add } = computeLabels({ body, title, author: 'drive-by-contributor', currentLabels });
-  return decideCompliance({ body, add, currentLabels });
-}
-
-/** Raw workflow text, for fixtures that couple prose promises to parser behavior. */
-function workflowText(): string {
-  return fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'label-pr.yml'), 'utf8');
-}
-
+const root = path.join(__dirname, '..');
+const workflowText = fs.readFileSync(path.join(root, '.github/workflows/label-pr.yml'), 'utf8');
+const workflow = parse(workflowText);
+const script = workflow.jobs.label.steps.find((step: { with?: { script?: string } }) => step.with?.script).with
+  .script as string;
+const start = script.indexOf('// NANOCLAW-LABEL-LOGIC-START');
+const end = script.indexOf('// NANOCLAW-LABEL-LOGIC-END');
+if (start < 0 || end <= start) throw new Error('Missing labeling logic markers');
+const { computeLabels, selectPrimaryArea, decideCompliance, shouldPostComplianceComment } = new Function(
+  `${script.slice(start, end)}\nreturn { computeLabels, selectPrimaryArea, decideCompliance, shouldPostComplianceComment };`,
+)() as {
+  computeLabels: (input: LabelInput) => LabelDecision;
+  selectPrimaryArea: (files: ChangedFile[], rules: AreaRules) => string | null;
+  decideCompliance: (input: { body?: string | null; add: string[]; currentLabels?: string[] }) => {
+    state: string | null;
+  };
+  shouldPostComplianceComment: (state: string | null, bodies: Array<string | null>) => boolean;
+};
+const areaRules: AreaRules = JSON.parse(fs.readFileSync(path.join(root, '.github/pr-label-areas.json'), 'utf8'));
 const V2 = '<!-- nanoclaw-pr-template:v2 -->\n';
-/** The kind boxes the PR template offers, i.e. every kind a verdict can name. */
-const TEMPLATE_KINDS = ['kind/bug', 'kind/feature', 'kind/documentation', 'kind/cleanup', 'kind/hardening'];
-// Blank template: no kind box, neither skill box. `skill: true` checks the
-// Skill box; `notSkill: true` checks the "Not a skill" box.
-const v2Body = (kinds: string[], opts: { skill?: boolean; notSkill?: boolean } = {}) =>
-  V2 +
-  '## Change kind\n' +
-  TEMPLATE_KINDS
-    .map((k) => `- [${kinds.includes(k) ? 'x' : ' '}] \`${k}\``)
-    .join('\n') +
-  '\n## Skill delivery\n' +
-  `- [${opts.notSkill ? 'x' : ' '}] Not a skill\n` +
-  `- [${opts.skill ? 'x' : ' '}] Skill: apply/remove footprint and fresh-clone verification are described above\n`;
+const kinds = ['kind/bug', 'kind/feature', 'kind/documentation', 'kind/cleanup', 'kind/hardening'];
+const retired = ['PR: Fix', 'PR: Feature', 'PR: Docs', 'PR: Refactor', 'PR: Skill', 'core-team', 'follows-guidelines'];
+function body(selected: string[] = [], delivery: 'skill' | 'none' | 'both' | 'blank' = 'blank') {
+  return (
+    V2 +
+    kinds.map((kind) => `- [${selected.includes(kind) ? 'x' : ' '}] \`${kind}\``).join('\n') +
+    `\n- [${delivery === 'skill' || delivery === 'both' ? 'x' : ' '}] Skill: apply/remove footprint\n` +
+    `- [${delivery === 'none' || delivery === 'both' ? 'x' : ' '}] Not a skill\n`
+  );
+}
+function apply(current: string[], result: LabelDecision) {
+  return [...new Set([...current.filter((label) => !result.remove.includes(label)), ...result.add])].sort();
+}
+const opencodeFiles = [
+  '.claude/skills/add-opencode/SKILL.md',
+  '.claude/skills/add-opencode/REMOVE.md',
+  '.claude/skills/add-opencode/files/container/agent-runner/src/providers/opencode.ts',
+  'container/agent-runner/src/providers/types.ts',
+  'container/agent-runner/src/provider-contracts/active-provider.test.ts',
+  'container/Dockerfile',
+  'scripts/ci-provider-combined.ts',
+];
 
-const FORK_AUTHOR = 'drive-by-contributor';
-const LEGACY_TWINS = ['PR: Fix', 'PR: Feature', 'PR: Docs', 'PR: Refactor'];
-
-describe('v2 bodies — explicit checkbox verdicts', () => {
-  it('one checked kind: adds it + its legacy twin, reconciles BOTH vocabularies', () => {
-    const res = computeLabels({ body: v2Body(['kind/bug']), title: 'anything', author: FORK_AUTHOR });
-    expect(res.add).toContain('kind/bug');
-    expect(res.add).toContain('PR: Fix');
-    expect(res.add).toContain('follows-guidelines');
-    expect(res.remove).toEqual(
-      expect.arrayContaining(['kind/feature', 'kind/documentation', 'kind/cleanup', 'kind/hardening']),
-    );
-    // B2: the stale kinds' legacy twins go too — no PR: Fix + PR: Refactor pileup.
-    expect(res.remove).toEqual(expect.arrayContaining(['PR: Feature', 'PR: Docs', 'PR: Refactor']));
-    expect(res.remove).not.toContain('kind/bug');
-    expect(res.remove).not.toContain('PR: Fix');
-  });
-
-  it('reclassifying bug -> cleanup removes kind/bug AND PR: Fix in the same pass', () => {
-    const res = computeLabels({
-      body: v2Body(['kind/cleanup']),
-      title: 'x',
-      author: FORK_AUTHOR,
-      currentLabels: ['kind/bug', 'PR: Fix'],
+describe('managed label reconciliation', () => {
+  it('collapses the OpenCode skill collision to one kind, skill delivery, and one primary area', () => {
+    const current = [
+      ...retired,
+      'kind/feature',
+      'delivery/skill',
+      'area/providers',
+      'area/agent-runner',
+      'area/containers',
+      'area/skills',
+    ];
+    const result = computeLabels({
+      body: body(['kind/feature'], 'skill'),
+      currentLabels: current,
+      files: opencodeFiles,
+      areaRules,
     });
-    expect(res.add).toEqual(expect.arrayContaining(['kind/cleanup', 'PR: Refactor']));
-    expect(res.remove).toContain('kind/bug');
-    expect(res.remove).toContain('PR: Fix');
+    expect(apply(current, result)).toEqual(['area/providers', 'delivery/skill', 'kind/feature']);
+    expect(result.add.some((label) => retired.includes(label))).toBe(false);
   });
 
-  it('kind/hardening has no legacy PR:* twin, added or removed', () => {
-    const res = computeLabels({ body: v2Body(['kind/hardening']), title: 'x', author: FORK_AUTHOR });
-    expect(res.add).toContain('kind/hardening');
-    expect(res.add.filter((l) => l.startsWith('PR: '))).toEqual([]);
-    expect(res.remove).toEqual(expect.arrayContaining(LEGACY_TWINS));
-  });
-
-  it('skill checkbox adds delivery/skill + PR: Skill; "Not a skill" removes both; neither box changes nothing', () => {
-    const on = computeLabels({ body: v2Body(['kind/bug'], { skill: true }), title: 'x', author: FORK_AUTHOR });
-    expect(on.add).toEqual(expect.arrayContaining(['delivery/skill', 'PR: Skill']));
-
-    const off = computeLabels({ body: v2Body(['kind/bug'], { notSkill: true }), title: 'x', author: FORK_AUTHOR });
-    expect(off.remove).toEqual(expect.arrayContaining(['delivery/skill', 'PR: Skill']));
-
-    const blank = computeLabels({ body: v2Body(['kind/bug']), title: 'x', author: FORK_AUTHOR });
-    expect(blank.add).not.toContain('delivery/skill');
-    expect(blank.remove).not.toContain('delivery/skill');
-  });
-});
-
-describe('v2 bodies — advisory title fallback (B1: never removes, never overrules)', () => {
-  it('zero boxes + mappable title + no existing kind: adds kind + twin, removes NOTHING', () => {
-    const res = computeLabels({
-      body: v2Body([]),
-      title: 'fix(host-sweep): make the ceiling configurable',
-      author: FORK_AUTHOR,
-      currentLabels: [],
+  it('reclassifies a PR without deleting unrelated manual or unfamiliar namespaced labels', () => {
+    const manual = ['priority/high', 'triage/ready', 'release/blocker', 'kind/security', 'area/custom', 'PR: Special'];
+    const current = [...manual, 'kind/bug', 'PR: Fix', 'area/skills'];
+    const result = computeLabels({
+      body: body(['kind/cleanup']),
+      currentLabels: current,
+      files: ['src/providers/claude.ts'],
+      areaRules,
     });
-    expect(res.add).toEqual(expect.arrayContaining(['kind/bug', 'PR: Fix']));
-    expect(res.remove).toEqual([]);
+    expect(apply(current, result)).toEqual([...manual, 'area/providers', 'kind/cleanup'].sort());
+    expect(result.remove.every((label) => current.includes(label))).toBe(true);
   });
 
-  it("maintainer reclassification survives a later edited event: fallback adds nothing when a managed kind is present", () => {
-    // PR titled fix:, no box checked; maintainer set kind/cleanup at triage.
-    const res = computeLabels({
-      body: v2Body([]),
-      title: 'fix: something',
-      author: FORK_AUTHOR,
-      currentLabels: ['kind/cleanup', 'PR: Refactor'],
-    });
-    expect(res.add.filter((l) => l.startsWith('kind/') || l.startsWith('PR: '))).toEqual([]);
-    expect(res.remove).toEqual([]);
+  it.each(kinds)('an explicit %s selection overrides existing kinds and a conflicting title', (kind) => {
+    const current = [...kinds, ...retired];
+    const result = computeLabels({ body: body([kind]), title: 'feat: conflicting title', currentLabels: current });
+    expect(apply(current, result)).toEqual([kind]);
   });
 
-  it('multiple checked boxes: no checkbox verdict — title is advisory, no removals', () => {
-    const res = computeLabels({
-      body: v2Body(['kind/bug', 'kind/feature']),
-      title: 'docs: fix a typo',
-      author: FORK_AUTHOR,
-      currentLabels: [],
-    });
-    expect(res.add).toContain('kind/documentation');
-    expect(res.add).not.toContain('kind/bug');
-    expect(res.remove).toEqual([]);
-  });
-
-  it('still ambiguous (no boxes, unmappable title): applies no kind and removes nothing', () => {
-    const res = computeLabels({ body: v2Body([]), title: 'Update stuff', author: FORK_AUTHOR });
-    expect(res.add.filter((l) => l.startsWith('kind/'))).toEqual([]);
-    expect(res.remove).toEqual([]);
-  });
-
-  it('repo-convention prefixes ci/test/build/style/perf map to kind/cleanup, chore/refactor too', () => {
-    for (const title of ['ci(labels): x', 'test: y', 'build(deps): z', 'style: w', 'perf: v', 'chore(deps): u', 'refactor: t']) {
-      const res = computeLabels({ body: v2Body([]), title, author: FORK_AUTHOR, currentLabels: [] });
-      expect(res.add, title).toContain('kind/cleanup');
+  it('keeps a single maintainer classification ahead of the title on an ambiguous body', () => {
+    const current = ['kind/hardening', 'PR: Fix'];
+    for (const selected of [[], ['kind/bug', 'kind/feature']]) {
+      expect(
+        apply(current, computeLabels({ body: body(selected), title: 'fix: example', currentLabels: current })),
+      ).toEqual(['kind/hardening']);
     }
   });
 
-  it('follows-guidelines is earned only by a checkbox verdict, not by the bare marker or the fallback', () => {
-    const unfilled = computeLabels({ body: v2Body([]), title: 'fix: x', author: FORK_AUTHOR });
-    expect(unfilled.add).not.toContain('follows-guidelines');
-    const filled = computeLabels({ body: v2Body(['kind/bug']), title: 'x', author: FORK_AUTHOR });
-    expect(filled.add).toContain('follows-guidelines');
-  });
-});
-
-describe('v2 bodies — token robustness', () => {
-  it('marker requires the exact HTML comment: a prose mention stays on the v1 path', () => {
-    const res = computeLabels({
-      body: 'I copied nanoclaw-pr-template:v2 from docs\n- [x] `kind/bug`',
-      title: 'feat: x',
-      author: FORK_AUTHOR,
-    });
-    // v1 path: backticked kind tokens mean nothing there, and no v1 boxes are checked.
-    expect(res.add.filter((l) => l.startsWith('kind/') || l.startsWith('PR: '))).toEqual([]);
-    expect(res.remove).toEqual([]);
-  });
-
-  it('checkbox tokens must start the line: inline and indented mentions do not register', () => {
-    const body =
-      V2 +
-      'see - [x] `kind/bug` discussed inline\n' +
-      '  - [x] `kind/feature` (indented, quoted from another PR)\n';
-    const res = computeLabels({ body, title: 'Update stuff', author: FORK_AUTHOR });
-    expect(res.add.filter((l) => l.startsWith('kind/'))).toEqual([]);
-  });
-
-  it('checkbox case: [X] counts as checked', () => {
-    const body = V2 + '- [X] `kind/feature`\n';
-    const res = computeLabels({ body, title: 'x', author: FORK_AUTHOR });
-    expect(res.add).toContain('kind/feature');
-  });
-
-  it('a filled release-note block carries no label semantics', () => {
-    const note =
-      '## User and release impact\n' +
-      '- [x] User-visible change — release note below\n' +
-      '```release-note\n' +
-      'Fixes `kind/bug` handling.\n' +
-      '- [x] `kind/feature`\n' +
-      '```\n';
-    const res = computeLabels({ body: v2Body(['kind/cleanup']) + note, title: 'x', author: FORK_AUTHOR });
-    expect(res.add.filter((l) => l.startsWith('kind/'))).toEqual(['kind/cleanup']);
-    expect(res.remove).toContain('kind/bug');
-    expect(res.remove).toContain('PR: Fix');
-  });
-
-  it('~~~ fences hide checkbox-looking text too', () => {
-    const body = v2Body(['kind/cleanup']) + '~~~\n- [x] `kind/bug`\n~~~\n';
-    const res = computeLabels({ body, title: 'x', author: FORK_AUTHOR });
-    expect(res.add.filter((l) => l.startsWith('kind/'))).toEqual(['kind/cleanup']);
-  });
-
-  it('an unterminated fence hides everything after it', () => {
-    const body = v2Body([]) + '```\n- [x] `kind/bug`\n';
-    const res = computeLabels({ body, title: 'Update stuff', author: FORK_AUTHOR });
-    expect(res.add.filter((l) => l.startsWith('kind/'))).toEqual([]);
-  });
-
-  it('the Validation test-coverage checkbox carries no label semantics', () => {
-    const validation =
-      '## Validation\n' +
-      '- [x] Tests cover the changed behavior (or Validation says why not)\n';
-    const withKind = computeLabels({ body: v2Body(['kind/bug']) + validation, title: 'x', author: FORK_AUTHOR });
-    expect(withKind.add.filter((l) => l.startsWith('kind/'))).toEqual(['kind/bug']);
-    expect(withKind.add).not.toContain('delivery/skill');
-
-    // Checked with no kind box: still no verdict from it — title fallback decides.
-    const alone = computeLabels({ body: v2Body([]) + validation, title: 'docs: x', author: FORK_AUTHOR });
-    expect(alone.add).toContain('kind/documentation');
-  });
-
-  it('AI-assistance checkboxes carry no label semantics and do not confuse the kind parser', () => {
-    const ai =
-      '## AI assistance\n' +
-      '- [x] AI tools or agents helped produce this change\n' +
-      '- [x] A human has reviewed this PR and stands behind every change\n';
-    const withKind = computeLabels({ body: v2Body(['kind/bug']) + ai, title: 'x', author: FORK_AUTHOR });
-    expect(withKind.add.filter((l) => l.startsWith('kind/'))).toEqual(['kind/bug']);
-    expect(withKind.add).not.toContain('delivery/skill');
-  });
-
-  it('never emits a label outside the fixed vocabularies', () => {
-    const KNOWN = new Set([
-      'kind/bug', 'kind/feature', 'kind/documentation', 'kind/cleanup', 'kind/hardening',
-      'PR: Fix', 'PR: Feature', 'PR: Docs', 'PR: Refactor', 'PR: Skill',
-      'delivery/skill', 'follows-guidelines', 'core-team',
+  it('resolves multiple existing kinds with the title, or removes ambiguity if no verdict exists', () => {
+    const current = ['kind/bug', 'kind/feature'];
+    expect(apply(current, computeLabels({ body: body(), title: 'docs: example', currentLabels: current }))).toEqual([
+      'kind/documentation',
     ]);
-    for (const body of [v2Body(['kind/bug'], { skill: true }), v2Body([]), v2Body(['kind/hardening'], { notSkill: true })]) {
-      const res = computeLabels({ body, title: 'feat!: breaking', author: 'glifocat' });
-      for (const label of [...res.add, ...res.remove]) {
-        expect(KNOWN.has(label), label).toBe(true);
-      }
+    expect(apply(current, computeLabels({ body: body(), title: 'Update stuff', currentLabels: current }))).toEqual([]);
+  });
+
+  it.each([
+    ['fix(scope)!: x', 'kind/bug'],
+    ['feat!: x', 'kind/feature'],
+    ['docs: x', 'kind/documentation'],
+    ...['refactor', 'chore', 'ci', 'test', 'build', 'style', 'perf'].map((prefix) => [`${prefix}: x`, 'kind/cleanup']),
+  ])('classifies %s without a completed template', (title, kind) => {
+    for (const prBody of [body(), 'Hand-written description', null]) {
+      expect(computeLabels({ body: prBody, title }).add).toEqual([kind]);
     }
   });
+
+  it.each(['constructor: example', '__proto__: example', 'toString: example'])(
+    'does not interpret object properties as conventional kinds: %s',
+    (title) => {
+      expect(computeLabels({ body: body(), title }).add).toEqual([]);
+    },
+  );
+
+  it('handles missing content and still retires obsolete labels', () => {
+    expect(computeLabels({ body: null, title: null })).toEqual({ add: [], remove: [] });
+    expect(apply(retired, computeLabels({ currentLabels: retired }))).toEqual([]);
+  });
+
+  it('switches skill delivery explicitly, preserving it when both or neither box is checked', () => {
+    const current = ['delivery/skill', 'PR: Skill'];
+    expect(apply([], computeLabels({ body: body([], 'skill') }))).toEqual(['delivery/skill']);
+    expect(apply(current, computeLabels({ body: body([], 'none'), currentLabels: current }))).toEqual([]);
+    for (const delivery of ['both', 'blank'] as const) {
+      expect(apply(current, computeLabels({ body: body([], delivery), currentLabels: current }))).toEqual([
+        'delivery/skill',
+      ]);
+      expect(computeLabels({ body: body([], delivery) }).add).toEqual([]);
+    }
+  });
+
+  it('converges after one reconciliation, including cleanup of stale areas and legacy twins', () => {
+    const input = { body: body(['kind/feature'], 'skill'), files: opencodeFiles, areaRules };
+    const current = ['kind/bug', ...retired, 'area/containers', 'priority/high'];
+    const once = apply(current, computeLabels({ ...input, currentLabels: current }));
+    const again = computeLabels({ ...input, currentLabels: once });
+    expect(again.remove).toEqual([]);
+    expect(apply(once, again)).toEqual(once);
+  });
 });
 
-describe('v1 bodies (frozen pre-v2 behavior)', () => {
-  it('checkbox substring adds both vocabularies, add-only', () => {
-    const res = computeLabels({ body: '<!-- contributing-guide: v1 -->\n- [x] **Fix** - bug fix', title: 'x', author: FORK_AUTHOR });
-    expect(res.add).toContain('PR: Fix');
-    expect(res.add).toContain('kind/bug');
-    expect(res.add).toContain('follows-guidelines');
-    expect(res.remove).toEqual([]);
+describe('template parsing compatibility', () => {
+  it('requires the exact marker and flush-left stable checkbox tokens', () => {
+    expect(computeLabels({ body: 'nanoclaw-pr-template:v2\n- [x] `kind/bug`', title: 'feat: x' }).add).toEqual([
+      'kind/feature',
+    ]);
+    expect(computeLabels({ body: V2 + 'See - [x] `kind/bug`\n  - [x] `kind/feature`' }).add).toEqual([]);
+    expect(computeLabels({ body: V2 + '- [X] `kind/hardening`' }).add).toEqual(['kind/hardening']);
   });
 
-  it('feature skill emits the full four-label set', () => {
-    const res = computeLabels({ body: '- [x] **Feature skill** - adds a channel', title: 'x', author: FORK_AUTHOR });
-    expect(res.add).toEqual(expect.arrayContaining(['PR: Skill', 'PR: Feature', 'kind/feature', 'delivery/skill']));
+  it.each([
+    '```release-note\n- [x] `kind/bug`\n```\n',
+    '~~~\n- [x] `kind/bug`\n~~~\n',
+    '```\n- [x] `kind/bug`\n',
+    '~~~\n```\n- [x] `kind/bug`\n~~~\n',
+  ])('ignores checkbox-looking code including unclosed and mixed fences', (fence) => {
+    expect(computeLabels({ body: body(['kind/cleanup']) + fence }).add).toEqual(['kind/cleanup']);
   });
 
-  it('first checked box wins, exactly as before', () => {
-    const res = computeLabels({
-      body: '- [x] **Fix** - bug fix\n- [x] **Documentation** - docs only',
-      title: 'x',
-      author: FORK_AUTHOR,
+  it('does not classify validation or AI assistance checkboxes', () => {
+    const extra =
+      '- [x] Tests cover the changed behavior\n- [x] AI tools or agents helped produce this change\n- [x] A human has reviewed this PR and stands behind every change\n';
+    expect(computeLabels({ body: body() + extra }).add).toEqual([]);
+  });
+
+  it.each([
+    ['Feature skill', ['delivery/skill', 'kind/feature']],
+    ['Utility skill', ['delivery/skill', 'kind/feature']],
+    ['Operational/container skill', ['delivery/skill', 'kind/feature']],
+    ['Fix', ['kind/bug']],
+    ['Simplification', ['kind/cleanup']],
+    ['Documentation', ['kind/documentation']],
+  ])('maps the old %s checkbox only to modern labels', (label, expected) => {
+    const result = computeLabels({
+      body: `<!-- contributing-guide: v1 -->\n- [x] **${label}**`,
+      currentLabels: retired,
     });
-    expect(res.add).toContain('PR: Fix');
-    expect(res.add).not.toContain('PR: Docs');
+    expect(apply(retired, result)).toEqual(expected);
   });
 
-  it('v1 matching stays case-sensitive: [X] is not recognized', () => {
-    const res = computeLabels({ body: '- [X] **Fix** - bug fix', title: 'x', author: FORK_AUTHOR });
-    expect(res.add.filter((l) => l.startsWith('PR: '))).toEqual([]);
-  });
-
-  it('missing body: no labels, no removals, no crash', () => {
-    const res = computeLabels({ body: null, title: null, author: FORK_AUTHOR });
-    expect(res.add).toEqual([]);
-    expect(res.remove).toEqual([]);
+  it('retains legacy first-match and case-sensitive parsing and preserves unaddressed skill delivery', () => {
+    expect(computeLabels({ body: '- [x] **Documentation**\n- [x] **Fix**' }).add).toEqual(['kind/bug']);
+    expect(computeLabels({ body: '- [X] **Fix**' }).add).toEqual([]);
+    expect(
+      apply(['delivery/skill'], computeLabels({ body: '- [x] **Fix**', currentLabels: ['delivery/skill'] })),
+    ).toEqual(['delivery/skill', 'kind/bug']);
   });
 });
 
-describe('template-compliance (report-only)', () => {
-  it('v2 body with zero kind verdict: failing status', () => {
-    expect(complianceFor(v2Body([]), 'Update stuff').state).toBe('failure');
+describe('primary area ownership', () => {
+  it.each([
+    'container/agent-runner/src/providers/opencode.ts',
+    '.claude/skills/add-opencode/SKILL.md',
+    'src/provider-surfaces.test.ts',
+    'src/provider-contracts/conformance.test.ts',
+    'container/agent-runner/src/provider-contracts/active-provider.test.ts',
+  ])('assigns provider-specific paths to providers: %s', (filename) => {
+    expect(selectPrimaryArea([filename], areaRules)).toBe('area/providers');
   });
 
-  it('good bodies are green: checkbox verdict, title fallback, or an already-applied kind', () => {
-    expect(complianceFor(v2Body(['kind/bug']), 'x').state).toBe('success');
-    expect(complianceFor(v2Body([]), 'fix: something').state).toBe('success');
-    // Maintainer classified at triage; blank body must NOT go red.
-    expect(complianceFor(v2Body([]), 'Update stuff', ['kind/cleanup']).state).toBe('success');
+  it('gives each file only its most specific matching owner before counting the majority', () => {
+    const rules = { 'area/broad': ['src/**'], 'area/provider': ['src/providers/**'], 'area/docs': ['docs/**'] };
+    expect(selectPrimaryArea(['src/providers/a.ts', 'src/providers/b.ts', 'src/host.ts'], rules)).toBe('area/provider');
+    expect(selectPrimaryArea(['src/providers/a.ts', 'src/a.ts', 'src/b.ts'], rules)).toBe('area/broad');
+    expect(selectPrimaryArea(['src/providers/a.ts', 'docs/a.md', 'docs/b.md'], rules)).toBe('area/docs');
   });
 
-  it('v1 and no-marker bodies are untouched: no status at all', () => {
-    expect(complianceFor('<!-- contributing-guide: v1 -->\n- [x] **Fix** - bug fix', 'x').state).toBeNull();
-    expect(complianceFor('just a hand-written body', 'fix: x').state).toBeNull();
+  it('breaks tied file counts by specificity and then lexical area, independent of input order', () => {
+    const rules = { 'area/zeta': ['src/providers/**'], 'area/alpha': ['src/providers/**'], 'area/docs': ['docs/**'] };
+    const files = ['docs/a.md', 'src/providers/a.ts'];
+    expect(selectPrimaryArea(files, rules)).toBe('area/alpha');
+    expect(selectPrimaryArea([...files].reverse(), Object.fromEntries(Object.entries(rules).reverse()))).toBe(
+      'area/alpha',
+    );
   });
 
-  it('the fix comment posts once, ever — idempotent across pushes', () => {
-    // First failing push: no comments yet -> post.
-    expect(shouldPostComplianceComment('failure', [])).toBe(true);
-    // Later pushes: our marker comment exists -> never repeat.
-    const marked = ['<!-- nanoclaw-template-compliance -->\nThis PR uses the v2 template…'];
-    expect(shouldPostComplianceComment('failure', marked)).toBe(false);
-    // Unrelated comments do not suppress it.
+  it('supports exact, segment prefix, and descendant patterns without sibling-prefix leakage', () => {
+    const rules = {
+      'area/exact': ['docs/provider.md'],
+      'area/prefix': ['src/config*'],
+      'area/tree': ['src/providers/**'],
+    };
+    expect(selectPrimaryArea(['docs/provider.md'], rules)).toBe('area/exact');
+    expect(selectPrimaryArea(['src/config.test.ts'], rules)).toBe('area/prefix');
+    expect(selectPrimaryArea(['src/providers/nested/a.ts'], rules)).toBe('area/tree');
+    for (const filename of ['docs/provider.md.bak', 'src/config/nested.ts', 'src/providers-extra/a.ts', 'unknown']) {
+      expect(selectPrimaryArea([filename], rules)).toBeFalsy();
+    }
+  });
+
+  it('counts renamed files only at their destination, and includes removed files', () => {
+    const rules = { 'area/docs': ['docs/**'], 'area/providers': ['src/providers/**'] };
+    expect(
+      selectPrimaryArea(
+        [
+          { filename: 'docs/a.md', previous_filename: 'src/providers/a.ts', status: 'renamed' },
+          { filename: 'docs/b.md', status: 'removed' },
+          { filename: 'src/providers/c.ts', status: 'modified' },
+        ],
+        rules,
+      ),
+    ).toBe('area/docs');
+  });
+
+  it('removes a stale managed area when no changed file has a known owner', () => {
+    const current = ['area/providers', 'area/manual'];
+    expect(apply(current, computeLabels({ files: ['unmapped.file'], currentLabels: current, areaRules }))).toEqual([
+      'area/manual',
+    ]);
+  });
+});
+
+function complianceFor(prBody: string, title = '', currentLabels: string[] = []) {
+  const { add } = computeLabels({ body: prBody, title, currentLabels });
+  return decideCompliance({ body: prBody, add, currentLabels }).state;
+}
+describe('report-only template compliance', () => {
+  it('accepts all template kinds, title fallback, and existing triage, but reports unclassified v2 bodies', () => {
+    for (const kind of kinds) {
+      expect(complianceFor(body([kind]))).toBe('success');
+      expect(complianceFor(body(), '', [kind])).toBe('success');
+    }
+    expect(complianceFor(body(), 'fix: x')).toBe('success');
+    expect(complianceFor(body(), 'Update stuff')).toBe('failure');
+    expect(complianceFor('<!-- contributing-guide: v1 -->')).toBeNull();
+    expect(complianceFor('Hand-written', 'fix: x')).toBeNull();
+  });
+
+  it('posts fix instructions once across pushes and ignores unrelated comments', () => {
     expect(shouldPostComplianceComment('failure', ['LGTM', null])).toBe(true);
-    // Green states never comment.
+    expect(shouldPostComplianceComment('failure', ['<!-- nanoclaw-template-compliance -->\nInstructions'])).toBe(false);
     expect(shouldPostComplianceComment('success', [])).toBe(false);
     expect(shouldPostComplianceComment(null, [])).toBe(false);
   });
 
-  it('decideCompliance recognizes every kind computeLabels can emit', () => {
-    // computeLabels and decideCompliance share one MANAGED_KINDS declaration.
-    // This pins the property that declaration exists to protect: a kind the
-    // parser can emit must also count as a classification, so an honestly
-    // filled-in template can never leave the status red.
-    for (const kind of TEMPLATE_KINDS) {
-      const res = computeLabels({ body: v2Body([kind]), title: 'Update stuff', author: FORK_AUTHOR });
-      expect(res.add).toContain(kind);
-      expect(complianceFor(v2Body([kind]), 'Update stuff').state).toBe('success');
-      // Same kind arriving as maintainer triage rather than a checkbox.
-      expect(complianceFor(v2Body([]), 'Update stuff', [kind]).state).toBe('success');
-    }
-  });
-
-  it('every conventional-commit prefix the fix comment promises actually maps to a kind', () => {
-    // The comment tells contributors a conventional-commit title will classify
-    // the PR, and names the prefixes. Read them back out of that sentence so
-    // the promise cannot drift away from what the parser accepts.
-    const line = workflowText()
-      .split('\n')
-      .find((l) => l.includes('give the PR a conventional-commit title'));
-    expect(line, 'fix-comment prefix sentence not found in label-pr.yml').toBeDefined();
-    const promised = [...(line as string).matchAll(/`([a-z]+):`/g)].map((m) => m[1]);
-    expect(promised).toEqual(['fix', 'feat', 'docs', 'refactor', 'chore', 'ci', 'test', 'build', 'style', 'perf']);
-    for (const prefix of promised) {
-      const res = computeLabels({
-        body: v2Body([]),
-        title: `${prefix}: something`,
-        author: FORK_AUTHOR,
-        currentLabels: [],
-      });
-      expect(res.add.filter((l) => l.startsWith('kind/')), `prefix ${prefix}: promised a kind, got none`).toHaveLength(1);
-    }
+  it('supports every conventional prefix promised by the fix comment', () => {
+    const line = script.split('\n').find((line) => line.includes('give the PR a conventional-commit title'));
+    expect(line).toBeDefined();
+    const prefixes = [...line!.matchAll(/`([a-z]+):`/g)].map((match) => match[1]);
+    expect(prefixes).toEqual(['fix', 'feat', 'docs', 'refactor', 'chore', 'ci', 'test', 'build', 'style', 'perf']);
+    for (const prefix of prefixes) expect(complianceFor(body(), `${prefix}: x`)).toBe('success');
   });
 });
 
-describe('author handling (both paths)', () => {
-  it('fork-authored PR gets no core-team label', () => {
-    const res = computeLabels({ body: v2Body(['kind/bug']), title: 'x', author: FORK_AUTHOR });
-    expect(res.add).not.toContain('core-team');
-    expect(res.coreTeam).toBe(false);
+/** API harness runs the entire shipped script; all external writes stay mocked. */
+function driverFixture(
+  options: {
+    current?: string[];
+    prBody?: string;
+    files?: ChangedFile[];
+    comments?: Array<{ body: string | null }>;
+  } = {},
+) {
+  const liveLabels = new Set(options.current ?? []);
+  const pr = {
+    number: 17,
+    changed_files: (options.files ?? opencodeFiles).length,
+    title: 'Update stuff',
+    body: options.prBody ?? body(['kind/feature'], 'skill'),
+    head: { sha: 'fresh-head' },
+    user: { login: 'contributor' },
+    labels: [...liveLabels].map((name) => ({ name })),
+  };
+  const files = options.files ?? opencodeFiles;
+  const github = {
+    rest: {
+      pulls: { get: vi.fn(async () => ({ data: pr })), listFiles: vi.fn() },
+      repos: {
+        getContent: vi.fn(async () => ({
+          data: {
+            type: 'file',
+            encoding: 'base64',
+            content: Buffer.from(JSON.stringify(areaRules)).toString('base64'),
+          },
+        })),
+        createCommitStatus: vi.fn(async () => ({})),
+      },
+      issues: {
+        addLabels: vi.fn(async ({ labels }: { labels: string[] }) => {
+          labels.forEach((label) => liveLabels.add(label));
+        }),
+        removeLabel: vi.fn(async ({ name }: { name: string }) => {
+          liveLabels.delete(name);
+        }),
+        setLabels: vi.fn(async () => {
+          throw new Error('Wholesale label replacement is forbidden');
+        }),
+        listComments: vi.fn(),
+        createComment: vi.fn(async () => ({})),
+      },
+    },
+    paginate: vi.fn(async (method: unknown) => {
+      if (method === github.rest.pulls.listFiles)
+        return [files.slice(0, 2), files.slice(2)]
+          .flat()
+          .map((file) => (typeof file === 'string' ? { filename: file } : file));
+      if (method === github.rest.issues.listComments) return options.comments ?? [];
+      throw new Error('Unexpected pagination endpoint');
+    }),
+  };
+  const context = {
+    repo: { owner: 'example', repo: 'repo' },
+    sha: 'trusted-base-sha',
+    payload: {
+      action: 'synchronize',
+      pull_request: { ...pr, body: body(['kind/bug']), head: { sha: 'stale-head' }, labels: [{ name: 'kind/bug' }] },
+    },
+  };
+  const core = { info: vi.fn(), warning: vi.fn(), setFailed: vi.fn(), debug: vi.fn() };
+  const run = () =>
+    new Function('github', 'context', 'core', `return (async () => {\n${script}\n})();`)(
+      github,
+      context,
+      core,
+    ) as Promise<void>;
+  return { github, context, core, liveLabels, run };
+}
+
+describe('workflow driver', () => {
+  it('reconciles synchronize events using fresh PR state, all file pages, and trusted base configuration', async () => {
+    const fixture = driverFixture({
+      current: ['priority/high', 'kind/feature', 'delivery/skill', 'area/skills', 'PR: Feature'],
+    });
+    await fixture.run();
+    const { github, liveLabels } = fixture;
+    expect([...liveLabels].sort()).toEqual(['area/providers', 'delivery/skill', 'kind/feature', 'priority/high']);
+    expect(github.rest.pulls.get).toHaveBeenCalledWith(expect.objectContaining({ pull_number: 17 }));
+    expect(github.paginate).toHaveBeenCalledWith(
+      github.rest.pulls.listFiles,
+      expect.objectContaining({ pull_number: 17, per_page: 100 }),
+    );
+    expect(github.rest.repos.getContent).toHaveBeenCalledWith(
+      expect.objectContaining({ path: '.github/pr-label-areas.json', ref: 'trusted-base-sha' }),
+    );
+    expect(github.rest.issues.addLabels).toHaveBeenCalledWith(expect.objectContaining({ labels: ['area/providers'] }));
+    expect(github.rest.issues.setLabels).not.toHaveBeenCalled();
+    expect(github.rest.repos.createCommitStatus).toHaveBeenCalledWith(
+      expect.objectContaining({ sha: 'fresh-head', state: 'success', context: 'template-compliance' }),
+    );
   });
 
-  it('core-team roster match is case-insensitive on the login', () => {
-    const res = computeLabels({ body: v2Body(['kind/bug']), title: 'x', author: 'Glifocat' });
-    expect(res.add).toContain('core-team');
-    expect(res.coreTeam).toBe(true);
+  it('makes no label writes when the existing labels are already correct', async () => {
+    const fixture = driverFixture({ current: ['kind/feature', 'delivery/skill', 'area/providers', 'priority/high'] });
+    await fixture.run();
+    expect(fixture.github.rest.issues.addLabels).not.toHaveBeenCalled();
+    expect(fixture.github.rest.issues.removeLabel).not.toHaveBeenCalled();
+    expect(fixture.github.rest.issues.setLabels).not.toHaveBeenCalled();
+  });
+
+  it('preserves a manual label added concurrently after the fresh read', async () => {
+    const fixture = driverFixture({ current: ['kind/bug'] });
+    fixture.github.rest.pulls.get.mockImplementationOnce(async () => {
+      fixture.liveLabels.add('triage/ready');
+      return { data: { ...fixture.context.payload.pull_request, body: body(['kind/feature'], 'skill') } };
+    });
+    await fixture.run();
+    expect(fixture.liveLabels.has('triage/ready')).toBe(true);
+    expect(fixture.github.rest.issues.setLabels).not.toHaveBeenCalled();
+  });
+
+  it('fails closed before label writes when trusted configuration is unavailable', async () => {
+    const fixture = driverFixture({ current: ['kind/bug', 'area/skills'] });
+    fixture.github.rest.repos.getContent.mockRejectedValueOnce(new Error('Configuration unavailable'));
+    await expect(fixture.run()).rejects.toThrow('Configuration unavailable');
+    expect(fixture.github.rest.issues.addLabels).not.toHaveBeenCalled();
+    expect(fixture.github.rest.issues.removeLabel).not.toHaveBeenCalled();
+  });
+
+  it('refuses an incomplete file list before any label mutation', async () => {
+    const fixture = driverFixture({ current: ['kind/bug', 'area/skills'] });
+    fixture.github.rest.pulls.get.mockResolvedValueOnce({
+      data: {
+        ...fixture.context.payload.pull_request,
+        changed_files: 3001,
+      },
+    });
+    await expect(fixture.run()).rejects.toThrow('Incomplete PR file list');
+    expect(fixture.github.rest.issues.addLabels).not.toHaveBeenCalled();
+    expect(fixture.github.rest.issues.removeLabel).not.toHaveBeenCalled();
+  });
+
+  it('rejects invalid trusted rules without partially reclassifying a PR', async () => {
+    const fixture = driverFixture({ current: ['kind/bug'] });
+    fixture.github.rest.repos.getContent.mockResolvedValueOnce({
+      data: {
+        type: 'file',
+        encoding: 'base64',
+        content: Buffer.from(JSON.stringify({ 'area/providers': ['../untrusted/**'] })).toString('base64'),
+      },
+    });
+    await expect(fixture.run()).rejects.toThrow('Unsupported primary-area path pattern');
+    expect(fixture.github.rest.issues.addLabels).not.toHaveBeenCalled();
+    expect(fixture.github.rest.issues.removeLabel).not.toHaveBeenCalled();
+  });
+
+  it('judges compliance after removing multiple unresolved kinds', async () => {
+    const fixture = driverFixture({ current: ['kind/bug', 'kind/feature'], prBody: body(), files: [] });
+    await fixture.run();
+    expect(fixture.github.rest.repos.createCommitStatus).toHaveBeenCalledWith(
+      expect.objectContaining({ state: 'failure' }),
+    );
+    expect(fixture.github.rest.issues.createComment).toHaveBeenCalledOnce();
+    expect([...fixture.liveLabels]).toEqual([]);
+  });
+
+  it('retains report-only failure and paginates existing comments before posting instructions', async () => {
+    const fixture = driverFixture({
+      prBody: body(),
+      files: [],
+      comments: [
+        ...Array.from({ length: 100 }, () => ({ body: 'Earlier discussion' })),
+        { body: '<!-- nanoclaw-template-compliance -->\nAlready posted' },
+      ],
+    });
+    await fixture.run();
+    expect(fixture.github.rest.repos.createCommitStatus).toHaveBeenCalledWith(
+      expect.objectContaining({ state: 'failure' }),
+    );
+    expect(fixture.github.paginate).toHaveBeenCalledWith(
+      fixture.github.rest.issues.listComments,
+      expect.objectContaining({ per_page: 100 }),
+    );
+    expect(fixture.github.rest.issues.createComment).not.toHaveBeenCalled();
+    expect(fixture.core.setFailed).not.toHaveBeenCalled();
+  });
+
+  it('keeps the privileged workflow metadata-only and has a single serialized label writer', () => {
+    expect(workflow.on.pull_request_target.types).toContain('synchronize');
+    expect(workflow.concurrency['cancel-in-progress']).toBe(false);
+    expect(workflow.concurrency.group).toContain('github.event.pull_request.number');
+    expect(
+      workflow.jobs.label.steps.every(
+        (step: { uses?: string; run?: string }) =>
+          !step.run && /^actions\/github-script@[a-f0-9]{40}$/.test(step.uses ?? ''),
+      ),
+    ).toBe(true);
+    expect(script).not.toContain('${{');
+    expect(script).not.toMatch(/(?:child_process|@actions\/exec)/);
+    expect(script).not.toMatch(/\b(?:eval|execSync|spawn|spawnSync|setLabels)\s*\(/);
+    expect(fs.existsSync(path.join(root, '.github/workflows/label-area.yml'))).toBe(false);
   });
 });
