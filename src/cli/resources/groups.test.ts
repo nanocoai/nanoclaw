@@ -340,6 +340,71 @@ describe('groups config (host-only)', () => {
     expect(JSON.parse((await getContainerConfig(GID))!.additional_mounts)).toEqual([]);
   });
 
+  // Regression tests for #3690 — `--ro` was the only flag, so it produced either
+  // `readonly: true` or (when omitted) no key at all. `validateMount` treats an
+  // absent key exactly like `readonly: true`, which made `--ro` a no-op and left
+  // no sanctioned way to create a read-write mount. `--rw` is the opt-in; the
+  // conservative default is unchanged.
+  describe('add-mount readonly flags (#3690)', () => {
+    const GID = 'ag-mount-rw';
+    const mountsOf = async () => JSON.parse((await getContainerConfig(GID))!.additional_mounts);
+    const addMount = (id: string, extra: Record<string, unknown>) =>
+      dispatch(
+        {
+          id,
+          command: 'groups-config-add-mount',
+          args: { id: GID, host: '/data/shared', container: 'shared', ...extra },
+        },
+        { caller: 'host' },
+      );
+
+    beforeEach(async () => {
+      await createAgentGroup({ id: GID, name: 'mrw', folder: 'mrw', agent_provider: null, created_at: now() });
+      await ensureContainerConfig(GID);
+    });
+
+    it('--rw stores readonly: false, the only value mount-security reads as a read-write request', async () => {
+      const res = await addMount('rw-1', { rw: true });
+      expect(res.ok).toBe(true);
+      expect(await mountsOf()).toEqual([{ hostPath: '/data/shared', containerPath: 'shared', readonly: false }]);
+    });
+
+    it('with neither flag stores no readonly key — the conservative default, unchanged', async () => {
+      const res = await addMount('def-1', {});
+      expect(res.ok).toBe(true);
+      const mounts = await mountsOf();
+      expect(mounts).toEqual([{ hostPath: '/data/shared', containerPath: 'shared' }]);
+      expect('readonly' in mounts[0]).toBe(false);
+    });
+
+    it('--ro stores readonly: true', async () => {
+      const res = await addMount('ro-1', { ro: true });
+      expect(res.ok).toBe(true);
+      expect(await mountsOf()).toEqual([{ hostPath: '/data/shared', containerPath: 'shared', readonly: true }]);
+    });
+
+    it('flips an existing mount to read-write instead of silently doing nothing', async () => {
+      // The likeliest first use of --rw: a mount added read-only that now needs
+      // writes. The dedupe used to skip the write and still report success, so the
+      // operator restarted and got a still-read-only mount with nothing to say why.
+      expect((await addMount('flip-1', {})).ok).toBe(true);
+      expect((await mountsOf())[0].readonly).toBeUndefined();
+
+      const res = await addMount('flip-2', { rw: true });
+      expect(res.ok).toBe(true);
+      const mounts = await mountsOf();
+      expect(mounts).toHaveLength(1);
+      expect(mounts[0].readonly).toBe(false);
+    });
+
+    it('rejects --ro together with --rw and writes nothing', async () => {
+      const res = await addMount('both-1', { ro: true, rw: true });
+      expect(res.ok).toBe(false);
+      expect(errorMessage(res)).toBe('--ro and --rw are mutually exclusive');
+      expect(await mountsOf()).toEqual([]);
+    });
+  });
+
   describe("--speed validates against the tiers the group's provider declares", () => {
     const GID = 'ag-speed';
     const speedOf = async (): Promise<string | null> => (await getContainerConfig(GID))!.speed;
