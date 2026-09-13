@@ -1,0 +1,12 @@
+# This folder is its own pnpm root so the repository's supply-chain policy applies here too.
+# Mirror of the values in ../../../../pnpm-workspace.yaml; keep them in step.
+packages:
+  - .
+# New package versions must exist on the registry for 3 days before pnpm resolves them.
+minimumReleaseAge: 4320
+# esbuild (pulled in by vite) is the only dependency here allowed to run a build script,
+# as at the repository root. pnpm 11 reads allowBuilds; older pnpm reads onlyBuiltDependencies.
+allowBuilds:
+  esbuild: true
+onlyBuiltDependencies:
+  - esbuild

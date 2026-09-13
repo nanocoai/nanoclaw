@@ -1,0 +1,32 @@
+{
+  "notes": "Conformance fixtures for scripts/skill-conformance.test.ts — shaped fake values only, never real credentials. Two scenarios cover the key-source branches: (1) paste the key into .env, (2) keep it in the macOS Keychain (the `security find-generic-password` check needs no stub: an unstubbed check passes). Exec stubs answer the three captures: `openssl rand -hex 8` mints the link token, the node `createHash` one-liner derives the line id, and the `ncl groups list` jq `join(\", \")` lists the agent groups; the restart and the two ncl wiring runs need no stdout.",
+  "scenarios": [
+    {
+      "name": "paste-key",
+      "inputs": {
+        "key_source": "paste",
+        "openai_api_key": "sk-proj-FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE0000",
+        "public_url": "http://localhost:3000",
+        "agent_folder": "main"
+      },
+      "exec": [
+        { "match": "openssl rand -hex 8", "stdout": "0123456789abcdef" },
+        { "match": "createHash('sha256')", "stdout": "5fdb6c84438e" },
+        { "match": "join(\", \")", "stdout": "main (Andy)" }
+      ]
+    },
+    {
+      "name": "keychain-key",
+      "inputs": {
+        "key_source": "keychain",
+        "public_url": "https://nanoclaw.example.ts.net",
+        "agent_folder": "main"
+      },
+      "exec": [
+        { "match": "openssl rand -hex 8", "stdout": "0123456789abcdef" },
+        { "match": "createHash('sha256')", "stdout": "5fdb6c84438e" },
+        { "match": "join(\", \")", "stdout": "main (Andy)" }
+      ]
+    }
+  ]
+}
