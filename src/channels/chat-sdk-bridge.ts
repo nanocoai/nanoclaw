@@ -13,6 +13,7 @@ import {
   Actions,
   Button,
   LinkButton,
+  defaultEmojiResolver,
   type CardChild,
   type Adapter,
   type AssistantContextChangedEvent,
@@ -420,6 +421,27 @@ function terminalApprovalMessage(spec: TerminalApprovalCard) {
   };
 }
 
+/**
+ * Normalize an agent-supplied reaction emoji into the form the target
+ * platform expects. Agents emit either a raw emoji character ("👍") or a
+ * shortcode name ("thumbs_up") — the MCP schema historically asked for
+ * shortcodes, so both arrive on the wire. Every Chat SDK adapter except
+ * Slack expects the unicode character; Slack expects the shortcode name.
+ *
+ * The Chat SDK's defaultEmojiResolver already knows both directions:
+ * `fromSlack` maps a shortcode to a normalized EmojiValue, `fromGChat`
+ * maps a unicode char, and `toSlack` / `toDiscord` render the normalized
+ * value in each target form. Unmapped input passes through verbatim on
+ * every path, so custom platform emoji keep working unchanged.
+ */
+export function normalizeReactionEmoji(raw: string, adapterName: string): string {
+  const resolver = defaultEmojiResolver;
+  // Unicode input normalizes via the GChat path (GChat's wire form is
+  // unicode); anything else is treated as a shortcode via the Slack path.
+  const normalized = /\p{Extended_Pictographic}/u.test(raw) ? resolver.fromGChat(raw) : resolver.fromSlack(raw);
+  return adapterName === 'slack' ? resolver.toSlack(normalized) : resolver.toDiscord(normalized);
+}
+
 export function splitForLimit(text: string, limit: number): string[] {
   if (text.length <= limit) return [text];
   const chunks: string[] = [];
@@ -824,7 +846,12 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       }
 
       if (content.operation === 'reaction' && content.messageId && content.emoji) {
-        await adapter.addReaction(tid, content.messageId as string, content.emoji as string);
+        // Agents send either unicode ("👍") or a shortcode ("thumbs_up");
+        // platforms disagree about which they accept. Normalize here — the
+        // single seam every Chat SDK reaction passes through — so the agent
+        // never has to know which platform it is targeting.
+        const emoji = normalizeReactionEmoji(content.emoji as string, adapter.name);
+        await adapter.addReaction(tid, content.messageId as string, emoji);
         return;
       }
 
