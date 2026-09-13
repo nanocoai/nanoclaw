@@ -16,6 +16,8 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { AppleContainerSessionDriver } from './apple-container-driver.js';
+import type { Cli } from './cli.js';
 import { DockerSessionDriver } from './docker-driver.js';
 import { FakeCli } from './fake-cli.js';
 import { withSessionEvents, type SessionEventsDriver } from './session-events.js';
@@ -100,10 +102,121 @@ function dockerHarness(): Harness {
   };
 }
 
+/**
+ * Apple Container harness — the same cases, realized by the `container` CLI.
+ *
+ * The cases program `h.cli` in Docker's stub grammar (`inspect` pipe rows,
+ * `ps -a` pipe rows) because that grammar IS the suite's neutral fixture
+ * vocabulary. This harness owns the translation the suite's header promises
+ * ("the translation layer that lets one assertion cover every driver"): a
+ * `Cli` wrapper hands the Apple driver's list/inspect queries to the same
+ * programmed stubs and re-shapes their answers into the JSON the real
+ * `container` CLI produces. Assertions on issued argv still see every real
+ * call (`create`, `rm --force`, `start --attach`) verbatim.
+ */
+function appleContainerHarness(): Harness {
+  const cli = new FakeCli('container');
+  cli.responses = [{ match: /^inspect /, throws: new Error('no such container') }];
+
+  const appleEntry = (name: string, state: string, group: string, session: string): unknown => ({
+    status: { state },
+    configuration: {
+      id: name,
+      labels: {
+        [LABELS.install]: 'spike',
+        [LABELS.role]: 'agent',
+        [LABELS.group]: group,
+        [LABELS.session]: session,
+      },
+    },
+  });
+
+  const translating: Cli = {
+    bin: 'container',
+    run(args, opts) {
+      if (args[0] === 'list') {
+        // Real CLI: `list --all --format json`. The stubs speak `ps -a` pipe
+        // rows (name|state|group|session); re-shape them.
+        const rows = cli.run(['ps', '-a'], opts);
+        const entries = rows
+          .trim()
+          .split('\n')
+          .filter(Boolean)
+          .map((row) => {
+            const [name, state, group, session] = row.split('|');
+            return appleEntry(name, state, group, session);
+          });
+        return JSON.stringify(entries);
+      }
+      if (args[0] === 'inspect') {
+        // Real CLI: JSON array. The stubs speak `install|group|session`.
+        const out = cli.run(['inspect', args[1]], opts);
+        const [install, group, session] = out.trim().split('|');
+        return JSON.stringify([
+          {
+            status: { state: 'running' },
+            configuration: {
+              id: args[1],
+              labels: { [LABELS.install]: install, [LABELS.group]: group, [LABELS.session]: session },
+            },
+          },
+        ]);
+      }
+      return cli.run(args, opts);
+    },
+    start(args) {
+      return cli.start(args);
+    },
+  };
+
+  const driver = withSessionEvents(new AppleContainerSessionDriver({ ...FIXTURE_POLICY, cli: translating }));
+  return {
+    name: 'apple-container',
+    driver,
+    cli,
+    async realize(spec) {
+      await driver.prepare(spec);
+      const create = cli.callMatching(/^create /)!.args;
+      const env: Record<string, string> = {};
+      const mounts: Realized['containers'][number]['mounts'] = [];
+      const labels: Record<string, string> = {};
+      for (let i = 0; i < create.length; i++) {
+        if (create[i] === '-e') {
+          const eq = create[i + 1].indexOf('=');
+          env[create[i + 1].slice(0, eq)] = create[i + 1].slice(eq + 1);
+        }
+        if (create[i] === '-v') {
+          const parts = create[i + 1].split(':');
+          mounts.push({ hostPath: parts[0], containerPath: parts[1], ro: parts[2] === 'ro' });
+        }
+        if (create[i] === '--label') {
+          const eq = create[i + 1].indexOf('=');
+          labels[create[i + 1].slice(0, eq)] = create[i + 1].slice(eq + 1);
+        }
+      }
+      const agent = spec.containers.find((c) => c.role === 'agent')!;
+      return { containers: [{ role: 'agent', image: agent.image, env, mounts }], labels };
+    },
+    failWith(message) {
+      // Each runtime fails in its own words; the case names the failure CLASS
+      // through Docker's canonical message, and the harness realizes that
+      // class in this runtime's real vocabulary.
+      const appleMessage =
+        message === 'Cannot connect to the Docker daemon'
+          ? 'XPC connection error: Connection refused - if system services are not running, start them'
+          : message;
+      cli.responses = [
+        { match: /^inspect /, throws: new Error('no such container') },
+        { match: /^create /, throws: new Error(appleMessage) },
+      ];
+    },
+  };
+}
+
 let harnesses: Harness[];
 beforeEach(() => {
   vi.clearAllMocks();
-  harnesses = [dockerHarness()];
+  harnesses = [dockerHarness(), appleContainerHarness()];
 });
 
 /**
