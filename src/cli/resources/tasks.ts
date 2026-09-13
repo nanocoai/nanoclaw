@@ -27,6 +27,7 @@ import {
 import { destroySessionMailbox, sessionDir, withExistingMailboxSession } from '../../session-manager.js';
 import { registerResource } from '../crud.js';
 import { appendRunLog, deleteRunLog } from '../../modules/scheduling/run-log.js';
+import { enqueueSessionReconcile } from '../../reconcile-feeds.js';
 import { formatTasksTable } from '../format-tasks.js';
 import type { CallerContext } from '../frame.js';
 import type { InboundMailbox } from '../../mailbox/index.js';
@@ -409,7 +410,13 @@ async function runTaskCommand(args: Record<string, unknown>, ctx: CallerContext)
       });
       return { series_id: seriesKey, row_id: rowId, status: 'pending' };
     });
-    if (fired) return fired;
+    if (fired) {
+      // The row is due now. Ask for a prompt reconcile, as an inbound message
+      // does, so the run starts within the queue's cadence instead of at the
+      // next resync tick. No-op when the sweep isn't running.
+      enqueueSessionReconcile(session.id);
+      return fired;
+    }
   }
   throw new Error(`task not found: ${id}`);
 }
