@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# wsp — thin pass-through to the Web Search Plus engine CLI (engine/search.py).
+#
+# The engine is pure-stdlib Python (no pip, no venv); the only runtime
+# requirement is a python3 interpreter, installed via container/Dockerfile.
+#
+# Env handling:
+#   - Sources the per-group key file (default /workspace/agent/.wsp.env,
+#     override with WSP_ENV_FILE) so provider keys never live in the shared
+#     read-only skill mount. The engine additionally auto-loads a .env next
+#     to engine/ if one exists (host-side / standalone use).
+#   - Sets WSP_CACHE_DIR explicitly: without it the engine writes .cache/
+#     next to engine/, which is a read-only mount inside the container.
+set -euo pipefail
+
+SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+ENV_FILE="${WSP_ENV_FILE:-/workspace/agent/.wsp.env}"
+if [ -f "$ENV_FILE" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+  set +a
+fi
+
+if [ -z "${WSP_CACHE_DIR:-}" ]; then
+  if [ -d /workspace/agent ] && [ -w /workspace/agent ]; then
+    WSP_CACHE_DIR=/workspace/agent/.wsp-cache   # persists across container restarts
+  else
+    WSP_CACHE_DIR="${HOME}/.wsp-cache"          # host-side / standalone fallback
+  fi
+fi
+export WSP_CACHE_DIR
+
+cd "$SKILL_DIR/engine"
+
+cmd="${1:-}"
+shift || true
+case "$cmd" in
+  search)  exec python3 search.py -q "$@" ;;
+  explain) exec python3 search.py --explain-routing -q "$@" ;;
+  extract) exec python3 search.py --extract-urls "$@" ;;
+  doctor)  exec python3 search.py doctor "$@" ;;
+  *)
+    echo "usage: wsp search <query> [flags] | wsp explain <query> | wsp extract <url>... | wsp doctor" >&2
+    exit 2
+    ;;
+esac
