@@ -12,20 +12,56 @@ const KEY_COLOR = '\x1b[35m';
 const MSG_COLOR = '\x1b[36m';
 const RESET = '\x1b[39m';
 const FULL_RESET = '\x1b[0m';
+const REDACTED = '[REDACTED]';
+const OMITTED = '[OMITTED]';
+const TRUNCATED = '[TRUNCATED]';
+const SENSITIVE_KEY = /(?:authorization|cookie|credential|password|secret|token|api[_-]?key)/i;
+const PAYLOAD_KEY = /^(?:args?|arguments?|body|content|input|payload|progress|result|taskContext)$/i;
 
 const threshold = LEVELS[(process.env.LOG_LEVEL as Level) || 'info'] ?? LEVELS.info;
 
-function formatErr(err: unknown): string {
-  if (err instanceof Error) {
-    return `{ type: "${err.constructor.name}", message: "${err.message}", stack: ${err.stack} }`;
+function redactText(value: string): string {
+  return value
+    .replace(/\bBearer\s+[^\s,;]+/gi, `Bearer ${REDACTED}`)
+    .replace(
+      /\b(authorization|cookie|credential|password|secret|token|api[_-]?key)\b(\s*[:=]\s*)(["']?)[^,\s}"']+/gi,
+      `$1$2$3${REDACTED}`,
+    );
+}
+
+function redactValue(value: unknown, key: string, depth: number, seen: WeakSet<object>): unknown {
+  if (SENSITIVE_KEY.test(key)) return REDACTED;
+  if (PAYLOAD_KEY.test(key)) return OMITTED;
+  if (typeof value === 'string') return redactText(value);
+  if (value === null || typeof value !== 'object') return value;
+  if (depth >= 5) return TRUNCATED;
+  if (seen.has(value)) return '[CIRCULAR]';
+  seen.add(value);
+  if (value instanceof Error) {
+    return {
+      type: value.constructor.name,
+      message: redactText(value.message),
+      stack: value.stack ? redactText(value.stack) : undefined,
+    };
   }
-  return JSON.stringify(err);
+  if (Array.isArray(value)) return value.map((item) => redactValue(item, '', depth + 1, seen));
+  return Object.fromEntries(
+    Object.entries(value).map(([nestedKey, nestedValue]) => [
+      nestedKey,
+      redactValue(nestedValue, nestedKey, depth + 1, seen),
+    ]),
+  );
+}
+
+export function redactLogData(data: Record<string, unknown>): Record<string, unknown> {
+  const seen = new WeakSet<object>();
+  return Object.fromEntries(Object.entries(data).map(([key, value]) => [key, redactValue(value, key, 0, seen)]));
 }
 
 function formatData(data: Record<string, unknown>): string {
   const parts: string[] = [];
-  for (const [k, v] of Object.entries(data)) {
-    parts.push(`${KEY_COLOR}${k}${RESET}=${k === 'err' ? formatErr(v) : JSON.stringify(v)}`);
+  for (const [k, v] of Object.entries(redactLogData(data))) {
+    parts.push(`${KEY_COLOR}${k}${RESET}=${JSON.stringify(v)}`);
   }
   return parts.length ? ' ' + parts.join(' ') : '';
 }
