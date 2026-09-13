@@ -33,6 +33,10 @@ describe('setup flow consumes the registry (structural)', () => {
     expect(src).toContain('listSetupProviders()');
     expect(src).toContain("import './providers/index.js'");
     expect(src).toContain('NANOCLAW_AGENT_PROVIDER');
+    // The instance default controls the highlighted option. Only an explicit
+    // per-run preset may bypass the interactive picker.
+    expect(src).toMatch(/if \(preset\) \{/);
+    expect(src).not.toContain("DEFAULT_AGENT_PROVIDER === 'claude'");
     // The capability-keyed branch — a provider's own auth runs iff it declares one.
     expect(src).toMatch(/providerEntry\?\.runAuth/);
   });
