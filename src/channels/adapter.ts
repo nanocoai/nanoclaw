@@ -62,6 +62,13 @@ export interface InboundEvent {
     isMention?: boolean;
     /** True when the source is a group/channel thread, false for DMs. */
     isGroup?: boolean;
+    /**
+     * Deferred delivery content — see `InboundMessage.resolveContent`. The
+     * host wraps the adapter's object-returning resolver into one that
+     * returns the JSON blob, so the router can drop the result straight
+     * into `content`. Absent means `content` is already complete.
+     */
+    resolveContent?: () => Promise<string>;
   };
   replyTo?: DeliveryAddress;
 }
@@ -90,6 +97,26 @@ export interface InboundMessage {
   isMention?: boolean;
   /** True when the source is a group/channel thread, false for DMs. */
   isGroup?: boolean;
+  /**
+   * Optional deferred content resolver, for adapters whose full content is
+   * expensive to build — the WhatsApp adapter downloads attachment bytes
+   * from WhatsApp's CDN, and most inbound traffic arrives in chats no agent
+   * is wired to, or fails the wiring's engage test.
+   *
+   * Split of responsibilities when set:
+   *   - `content` is the ROUTING view: cheap, always present, and complete
+   *     enough for every routing decision (text for pattern matching, sender,
+   *     plus attachment metadata with no `data`).
+   *   - `resolveContent()` returns the DELIVERY view: the same object with
+   *     the expensive parts filled in (attachment bytes, and any text the
+   *     adapter can only append once the fetch has been attempted).
+   *
+   * The router calls it at most once per message, only when at least one
+   * agent will actually receive it, and persists the result instead of
+   * `content`. It must be safe to never call. Adapters that leave it
+   * undefined are unaffected — `content` is delivered as-is.
+   */
+  resolveContent?: () => Promise<unknown>;
 }
 
 /** A file attachment to deliver alongside a message. */
