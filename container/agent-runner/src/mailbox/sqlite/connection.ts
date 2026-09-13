@@ -153,12 +153,54 @@ export function sqliteClearContainerToolInFlight(): void {
 }
 
 /**
- * Clear stale processing_ack entries on container startup.
- * If the previous container crashed, 'processing' entries are leftover.
- * Clearing them lets the new container re-process those messages.
+ * Clear stale processing_ack entries on container startup. Two kinds:
+ *
+ * 1. 'processing' entries left behind by a container that crashed mid-turn.
+ *    Clearing them lets the new container re-process those messages.
+ *
+ * 2. Entries whose message no longer exists in messages_in. An ack's only job
+ *    is to keep one message from being processed twice; once its row is gone
+ *    the ack can never be consumed, and it becomes a landmine — because
+ *    `sqliteGetPendingMessages` filters pending messages against every ack row
+ *    ever written, with no time bound. A platform whose message ids restart
+ *    (a recreated bot, a re-added integration, any channel numbering per
+ *    conversation) then produces a *new* message carrying an id an old ack
+ *    already holds, and it is dropped before the agent sees it. The host
+ *    marks it completed from the same stale row, so nothing errors and nothing
+ *    reaches the dropped-message log: the message is silently swallowed.
+ *
+ *    This is not hypothetical, and the workaround — send it again — is what
+ *    keeps it unreported. A recreated Telegram bot restarted its per-DM
+ *    counter; a later message reusing id 32 matched an ack written sixteen
+ *    days earlier and was never delivered. Asked about it, the agent
+ *    truthfully said nothing had arrived, so the loss read as a flaky network.
+ *
+ *    It also bounds a table that otherwise grows for the life of a session:
+ *    the host prunes messages_in (expired and overflow `pending` rows), and
+ *    every prune leaves acks behind with nothing to sweep them.
  */
 export function sqliteClearStaleProcessingAcks(): void {
-  getOutboundDb().prepare("DELETE FROM processing_ack WHERE status = 'processing'").run();
+  const outbound = getOutboundDb();
+  outbound.prepare("DELETE FROM processing_ack WHERE status = 'processing'").run();
+
+  const inbound = openInboundDb();
+  try {
+    const live = new Set(
+      (inbound.prepare('SELECT id FROM messages_in').all() as Array<{ id: string }>).map(({ id }) => id),
+    );
+    const orphans = (
+      outbound.prepare('SELECT message_id FROM processing_ack').all() as Array<{ message_id: string }>
+    )
+      .map(({ message_id }) => message_id)
+      .filter((id) => !live.has(id));
+    if (orphans.length === 0) return;
+    const remove = outbound.prepare('DELETE FROM processing_ack WHERE message_id = ?');
+    outbound.transaction(() => {
+      for (const id of orphans) remove.run(id);
+    })();
+  } finally {
+    inbound.close();
+  }
 }
 
 /** For tests — creates in-memory DBs with the session schemas. */
