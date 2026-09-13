@@ -370,3 +370,63 @@ describe('wrapper shape', () => {
     expect(wrapped.kind).toBe('fake');
   });
 });
+
+describe('a watch feed that cannot run is inert, never fatal', () => {
+  it('does not invent watchSessions for a driver that lacks it', () => {
+    const driver = new FakeDriver();
+    (driver as { watchSessions?: unknown }).watchSessions = undefined;
+    const wrapped = withSessionEvents(driver);
+
+    // host-sweep's feed arming probes the driver with `typeof` — a wrapper that
+    // advertises a method the inner driver has not got sends that probe
+    // straight into a TypeError.
+    expect(wrapped.watchSessions).toBeUndefined();
+  });
+
+  it('keeps arming when the watch backend refuses to subscribe', async () => {
+    const driver = new FakeDriver();
+    driver.watchSessions = () => {
+      throw new Error('events stream unavailable');
+    };
+    const { inner, handle, hub } = await prepared(driver, 's1');
+    const terminal = vi.fn();
+
+    // Arming rides the adoption path (`adoptRunningSessions`) and the spawn
+    // path (`armSessionLifecycle`); a throw here would take down host startup
+    // over a feed that only ever buys latency.
+    expect(() => handle.onTerminal(terminal)).not.toThrow();
+
+    // And the session stays supervised: the end still reaches the host through
+    // the source that never needed the stream.
+    driver.snapshots = [{ handle: inner, phase: 'terminal' }];
+    await hub.resync('spike');
+    expect(terminal).toHaveBeenCalledExactlyOnceWith(undefined);
+  });
+
+  it('re-attempts the subscription on the next arm instead of caching the failure', async () => {
+    const driver = new FakeDriver();
+    const subscribe = driver.watchSessions.bind(driver);
+    let failNext = true;
+    driver.watchSessions = (installSlug, onEvent) => {
+      if (failNext) {
+        failNext = false;
+        throw new Error('events stream unavailable');
+      }
+      return subscribe(installSlug, onEvent);
+    };
+
+    const first = await prepared(driver, 's1');
+    first.handle.onTerminal(vi.fn()); // subscribe throws — nothing cached
+
+    const secondInner = new FakeHandle(makeKey('s2'));
+    driver.nextPrepared = secondInner;
+    const handle = await first.hub.prepare(fixtureSpec());
+    const terminal = vi.fn();
+    handle.onTerminal(terminal); // second arm subscribes for real
+
+    secondInner.statusValue = { phase: 'stopped' };
+    driver.emit({ key: secondInner.key, kind: 'terminal' });
+    await settled();
+    expect(terminal).toHaveBeenCalledExactlyOnceWith(undefined);
+  });
+});
