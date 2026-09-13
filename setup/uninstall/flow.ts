@@ -24,8 +24,8 @@ import { emit as phEmit } from '../lib/diagnostics.js';
 import { note } from '../lib/theme.js';
 import * as setupLog from '../logs.js';
 import { resolveOnecliDeletions, type RunCommand, type VaultAgent } from './onecli-agents.js';
-import { buildRemovalPlan, type Decisions } from './plan.js';
-import { executePlan, type ExecDeps } from './remove.js';
+import { buildRemovalPlan, validateDecisions, type Decisions } from './plan.js';
+import { executePlan, type ExecDeps, type UninstallActionResult } from './remove.js';
 import { scanInstall, tilde, type Inventory } from './scan.js';
 
 const GROUPS = {
@@ -52,7 +52,11 @@ const GROUPS = {
 
 const runCommand: RunCommand = (cmd, args) => {
   const res = spawnSync(cmd, args, { encoding: 'utf-8' });
-  return { status: res.status, stdout: res.stdout ?? '' };
+  return {
+    status: res.status,
+    stdout: res.stdout ?? '',
+    stderr: res.stderr ?? '',
+  };
 };
 
 export async function runUninstallFlow(opts: {
@@ -71,6 +75,13 @@ export async function runUninstallFlow(opts: {
 
   const projectRoot = process.cwd();
   const home = os.homedir();
+  const scan = (): Inventory =>
+    scanInstall({
+      projectRoot,
+      home,
+      platform: process.platform,
+      runCommand,
+    });
 
   p.intro(k.bold(`Uninstall NanoClaw`));
   // persistId: false — the emit must not create data/install-id, which would
@@ -80,19 +91,23 @@ export async function runUninstallFlow(opts: {
 
   const spinner = p.spinner();
   spinner.start('Checking what exists for this copy…');
-  const inv = scanInstall({
-    projectRoot,
-    home,
-    platform: process.platform,
-    runCommand,
-  });
+  const inv = scan();
   spinner.stop(`Scanned copy ${inv.slug} at ${tilde(projectRoot, home)}.`);
 
   const svcRows = serviceRows(inv, home);
   const dataRows = [...inv.data, ...inv.runtime].map(({ what, where }) => ({ what, where }));
   const userRows = inv.user.map(({ what, where }) => ({ what, where }));
+  const serviceDecisionRows =
+    svcRows.length > 0 || (dataRows.length === 0 && userRows.length === 0)
+      ? svcRows
+      : [
+          {
+            what: 'Checkout-owned processes',
+            where: `install ${inv.slug} (if running)`,
+          },
+        ];
   const totalFound =
-    svcRows.length + dataRows.length + userRows.length + inv.onecli.mine.length + inv.onecli.orphans.length;
+    serviceDecisionRows.length + dataRows.length + userRows.length + inv.onecli.mine.length + inv.onecli.orphans.length;
 
   if (totalFound === 0) {
     p.outro(
@@ -104,7 +119,9 @@ export async function runUninstallFlow(opts: {
 
   if (dryRun) {
     p.log.message(k.cyan('PREVIEW ONLY — this shows what would be deleted and changes nothing.'));
-    if (svcRows.length > 0) note(groupBody(GROUPS.service.desc, svcRows), GROUPS.service.title);
+    if (serviceDecisionRows.length > 0) {
+      note(groupBody(GROUPS.service.desc, serviceDecisionRows), GROUPS.service.title);
+    }
     if (dataRows.length > 0) note(groupBody(GROUPS.data.desc, dataRows), GROUPS.data.title);
     if (userRows.length > 0) note(groupBody(GROUPS.user.desc, userRows), GROUPS.user.title);
     if (inv.onecli.mine.length > 0 || inv.onecli.orphans.length > 0) {
@@ -117,7 +134,7 @@ export async function runUninstallFlow(opts: {
       if (inv.onecli.orphans.length === 0) lines.push('  (none)');
       note(lines.join('\n'), GROUPS.onecli.title);
     }
-    const empty = emptyGroupTitles(svcRows.length, dataRows.length, userRows.length, inv);
+    const empty = emptyGroupTitles(serviceDecisionRows.length, dataRows.length, userRows.length, inv);
     if (empty.length > 0) p.log.message(k.dim(`Nothing found for: ${empty.join(', ')}`));
     for (const n of inv.notes) p.log.message(k.dim(`• ${n}`));
     p.outro('Preview complete. Nothing was changed.');
@@ -137,8 +154,8 @@ export async function runUninstallFlow(opts: {
   // ── confirm phase — nothing is deleted until every decision is made ──
 
   let serviceYes = false;
-  if (svcRows.length > 0) {
-    note(groupBody(GROUPS.service.desc, svcRows), GROUPS.service.title);
+  if (serviceDecisionRows.length > 0) {
+    note(groupBody(GROUPS.service.desc, serviceDecisionRows), GROUPS.service.title);
     serviceYes = await confirmGroup(GROUPS.service.prompt, yes);
   }
 
@@ -154,12 +171,28 @@ export async function runUninstallFlow(opts: {
     userYes = await confirmGroup(GROUPS.user.prompt, yes);
   }
 
-  const keptNotes: string[] = [];
-  if (!serviceYes && svcRows.length > 0) keptNotes.push(`${GROUPS.service.title}: kept by your choice.`);
+  const keptNotes = inv.envBackups.map((backup) => `${backup.what}: ${backup.where} kept.`);
+  if (!serviceYes && serviceDecisionRows.length > 0) {
+    keptNotes.push(`${GROUPS.service.title}: kept by your choice.`);
+  }
   if (!dataYes && dataRows.length > 0) keptNotes.push(`${GROUPS.data.title}: kept by your choice.`);
   if (!userYes && userRows.length > 0) keptNotes.push(`${GROUPS.user.title}: kept by your choice.`);
 
   const onecliDelete = await decideOnecli(inv, yes, keptNotes);
+
+  const selectionError = uninstallSelectionError(inv, {
+    service: serviceYes,
+    data: dataYes,
+    user: userYes,
+  });
+  if (selectionError) {
+    p.log.error(selectionError);
+    process.exit(1);
+  }
+  if (!sameOwnershipSelectors(inv, scan())) {
+    p.log.error('This NanoClaw checkout changed after it was scanned. Nothing was removed; rerun uninstall.');
+    process.exit(1);
+  }
 
   // Record the decisions before execution can delete logs/ — but only into
   // an existing logs/ (userInput would otherwise mkdir it back into
@@ -207,21 +240,62 @@ export async function runUninstallFlow(opts: {
   // modules we're running from are gone.
   const head = actions.filter((a) => a.kind !== 'delete-runtime-path');
   const tail = actions.filter((a) => a.kind === 'delete-runtime-path');
+  const destructiveStart = head.findIndex((action) => action.kind === 'backup-env' || action.kind === 'delete-path');
+  const prerequisites = destructiveStart === -1 ? head : head.slice(0, destructiveStart);
+  const destructive = destructiveStart === -1 ? [] : head.slice(destructiveStart);
 
   const deps: ExecDeps = {
     runCommand,
     log: (line) => p.log.message(line),
     isRoot: process.getuid?.() === 0,
   };
-  const { notes: execNotes } = executePlan(head, deps);
-
-  printLeftAlone([...inv.notes, ...keptNotes, ...execNotes]);
-
-  const { notes: tailNotes } = executePlan(tail, {
+  const prerequisiteResult = executePlan(prerequisites, deps);
+  const onecliFailed = prerequisites.some(
+    (action, index) =>
+      action.kind === 'delete-onecli-agent' &&
+      ['failed', 'untouched'].includes(prerequisiteResult.results[index]?.outcome ?? 'failed'),
+  );
+  const prerequisiteError =
+    onecliFailed && !prerequisiteResult.prerequisiteFailed
+      ? {
+          code: 'credential_prerequisite_failed',
+          message: 'OneCLI agent cleanup failed, so app data was left for a safe retry.',
+        }
+      : undefined;
+  const destructiveResult = executePlan(destructive, {
     ...deps,
+    prerequisiteFailed: prerequisiteResult.prerequisiteFailed || onecliFailed,
+    ...(prerequisiteError ? { prerequisiteError } : {}),
+  });
+
+  printLeftAlone([...inv.notes, ...keptNotes, ...prerequisiteResult.notes, ...destructiveResult.notes]);
+
+  const headIncomplete = uninstallIncomplete([...prerequisiteResult.results, ...destructiveResult.results]);
+  const tailResult = executePlan(tail, {
+    ...deps,
+    prerequisiteFailed: headIncomplete,
+    ...(headIncomplete
+      ? {
+          prerequisiteError: {
+            code: 'removal_incomplete',
+            message: 'Earlier cleanup was incomplete, so runtime files were left for a safe retry.',
+          },
+        }
+      : {}),
     log: (line) => console.log(`  ${line}`),
   });
-  for (const n of tailNotes) console.log(`  • ${n}`);
+  for (const n of tailResult.notes) console.log(`  • ${n}`);
+
+  const incomplete = uninstallIncomplete([
+    ...prerequisiteResult.results,
+    ...destructiveResult.results,
+    ...tailResult.results,
+  ]);
+  if (incomplete) {
+    console.error(`\n! Uninstall incomplete for NanoClaw copy ${inv.slug}. Review the items left alone and rerun.`);
+    process.exit(1);
+  }
+
   console.log(`\n✓ Done. NanoClaw copy ${inv.slug} has been uninstalled.`);
   process.exit(0);
 }
@@ -304,6 +378,12 @@ function serviceRows(inv: Inventory, home: string): { what: string; where: strin
   if (s.systemdUserUnit) rows.push({ what: 'Background service', where: tilde(s.systemdUserUnit, home) });
   if (s.systemdSystemUnit) rows.push({ what: 'Background service (system)', where: s.systemdSystemUnit });
   if (s.pidFile) rows.push({ what: 'Running process', where: 'nanoclaw.pid' });
+  if (s.hostProcessIds && s.hostProcessIds.length > 0) {
+    rows.push({
+      what: 'Running host processes',
+      where: `${s.hostProcessIds.length} process(es)`,
+    });
+  }
   if (s.containerIds.length > 0) {
     rows.push({ what: 'Running containers', where: `${s.containerIds.length} container(s)` });
   }
@@ -339,4 +419,37 @@ function printLeftAlone(notes: string[]): void {
     ...notes.map((n) => `• ${n}`),
   ];
   note(lines.join('\n'), 'Left alone (shared / not ours)');
+}
+
+export function uninstallSelectionError(
+  inventory: Pick<Inventory, 'onecli'>,
+  decisions: Pick<Decisions, 'service' | 'data' | 'user'>,
+): string | undefined {
+  return (
+    validateDecisions(decisions) ??
+    (!inventory.onecli.available && decisions.data
+      ? 'OneCLI agents could not be inspected. Restore OneCLI and rerun uninstall before deleting app data.'
+      : undefined)
+  );
+}
+
+export function uninstallIncomplete(results: readonly Pick<UninstallActionResult, 'outcome'>[]): boolean {
+  return results.some((result) => ['failed', 'untouched'].includes(result.outcome));
+}
+
+export function sameOwnershipSelectors(before: Inventory, after: Inventory): boolean {
+  const beforeIdentity = before.identity;
+  const afterIdentity = after.identity;
+  return (
+    path.resolve(before.projectRoot) === path.resolve(after.projectRoot) &&
+    before.slug === after.slug &&
+    before.containerRuntime === after.containerRuntime &&
+    Boolean(beforeIdentity?.root) &&
+    Boolean(afterIdentity?.root) &&
+    beforeIdentity?.root === afterIdentity?.root &&
+    Object.values(beforeIdentity?.exactPaths ?? {}).every(Boolean) &&
+    beforeIdentity?.containerSelector === afterIdentity?.containerSelector &&
+    Object.values(beforeIdentity?.scopedRoots ?? {}).every(Boolean) &&
+    JSON.stringify(beforeIdentity?.scopedRoots) === JSON.stringify(afterIdentity?.scopedRoots)
+  );
 }
