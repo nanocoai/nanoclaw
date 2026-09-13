@@ -35,6 +35,7 @@ export interface ContainerConfigRow {
   cli_scope: string; // 'disabled' | 'group' | 'global'
   timezone: string | null; // IANA id; NULL = follow the install-global timezone
   speed: ContainerSpeed | null; // NULL = install/provider default
+  delivery_mode: string | null; // NULL (= envelope) | envelope | tools-only
   /**
    * Session isolation tier ('container' | 'vm') — see SessionSpec.runtimeTier.
    * Optional on the TS type because the trunk schema does not carry the
