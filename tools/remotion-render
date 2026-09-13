@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# remotion-render — wrapper for Remotion Lambda rendering
+set -euo pipefail
+
+COMPOSITION="${1:?Usage: remotion-render <CompositionId> <output-path>}"
+OUTPUT="${2:?Usage: remotion-render <CompositionId> <output-path>}"
+REMOTION_DIR="${NANOCLAW_DIR:-/workspace/group/remotion}"
+FPL="${REMOTION_FRAMES_PER_LAMBDA:-60}"
+
+cd "$REMOTION_DIR"
+
+if [ -z "${REMOTION_SERVE_URL:-}" ]; then
+  echo "No REMOTION_SERVE_URL set, deploying site bundle..." >&2
+  SERVE_URL=$(npx remotion lambda sites create src/index.ts --site-name=nanoclaw-main 2>&1 | grep -E 'https://' | tail -1)
+  export REMOTION_SERVE_URL="$SERVE_URL"
+  echo "Deployed: $REMOTION_SERVE_URL" >&2
+fi
+
+echo "Rendering $COMPOSITION via Lambda (--frames-per-lambda=$FPL)..." >&2
+S3_URL=$(npx remotion lambda render "$REMOTION_SERVE_URL" "$COMPOSITION" \
+  --frames-per-lambda="$FPL" 2>&1 | grep -E '^https://' | tail -1)
+
+echo "Downloading from S3..." >&2
+mkdir -p "$(dirname "$OUTPUT")"
+curl -sSL "$S3_URL" -o "$OUTPUT"
+echo "$OUTPUT"
