@@ -95,7 +95,7 @@ printf 'yes\n'
 Explain what the installation creates. Give the user time to review the details. Then get approval.
 
 ```nc:operator when:create_requested=yes
-The local evaluation server runs Mattermost Team Edition and PostgreSQL in containers. The installation creates a Docker network and named volumes. It saves configuration files in .nanoclaw/mattermost. It binds the server to 127.0.0.1:8065. You need Docker and Docker Compose. Port 8065 must be free. If the port is in use, the installation stops and makes no changes.
+The local evaluation server runs Mattermost Team Edition and PostgreSQL in containers. The installation creates a Docker network and named volumes. It saves configuration files in .nanoclaw/mattermost. It binds the server to 127.0.0.1:8065. The bundled image requires a Linux AMD64 Docker daemon and Docker Compose. On ARM64, enter the URL of an existing Mattermost server or use an AMD64 Docker host. Port 8065 must be free. Unsupported platforms and occupied ports stop installation before resources are created.
 ```
 
 ```nc:prompt local_install_approval when:create_requested=yes normalize:lower validate:^install$
@@ -107,7 +107,7 @@ maximum of 60 seconds for Mattermost. If the operation fails, show the last
 100 service log lines and stop.
 
 ```nc:run effect:external when:local_install_approval=install
-docker info >/dev/null && docker compose version >/dev/null
+node .claude/skills/add-mattermost/scripts/preflight-local.mjs
 node -e 'const net=require("node:net");const s=net.createServer();s.once("error",()=>process.exit(1));s.listen(8065,"127.0.0.1",()=>s.close())'
 mkdir -p .nanoclaw/mattermost
 cp .claude/skills/add-mattermost/assets/compose.yml .nanoclaw/mattermost/compose.yml

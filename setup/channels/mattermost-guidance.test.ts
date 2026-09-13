@@ -74,7 +74,7 @@ describe('Mattermost bot setup guidance', () => {
       (directive) => directive.kind === 'run' && directive.body.some((line) => line.includes('for attempt in')),
     );
     expect(install?.body).toHaveLength(7);
-    expect(install?.body[0]).toContain('docker info >/dev/null && docker compose version >/dev/null');
+    expect(install?.body[0]).toBe('node .claude/skills/add-mattermost/scripts/preflight-local.mjs');
     expect(install?.body).not.toContain('umask 077');
     expect(install?.body).not.toContain('exit 1');
 
