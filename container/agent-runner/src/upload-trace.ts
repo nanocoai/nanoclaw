@@ -25,6 +25,7 @@ import { readProviderTrace } from './provider-contracts/realize.js';
  * (no LLM turn). Admin-gated by the host router before it reaches the container.
  */
 export function isUploadTraceCommand(msg: MessageInRow): boolean {
+  if (msg.channel_type === 'agent') return false; // sibling-agent rows are never runner commands
   let text = '';
   try {
     text = (JSON.parse(msg.content)?.text ?? '').trim();
