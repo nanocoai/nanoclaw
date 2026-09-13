@@ -12,7 +12,7 @@ ncl help
 
 ### Scope
 
-Your CLI access may be scoped. Run `ncl help` to see which resources are available and whether args are auto-filled. Under `group` scope (the default), `--id` and group-related args are auto-filled to your agent group — you don't need to pass them.
+Your CLI access may be scoped. Run `ncl help` to see which resources are available and whether args are auto-filled. Under `group` scope (the default), `--agent-group-id`, `--group`, and `--id` (where it identifies a group-scoped resource, e.g. groups/destinations) are **locked** to your agent group, not just defaulted: passing a different value will silently use your own group's id — the provided value is dropped without warning. To act on another group, that group's agent must submit the request from its own CLI under its own scope; admin approval then routes the change to the right group.
 
 ### Resources
 
