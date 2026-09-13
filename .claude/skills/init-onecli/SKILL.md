@@ -1,6 +1,6 @@
 ---
 name: init-onecli
-description: Install and initialize OneCLI Agent Vault. Migrates existing .env credentials to the vault. Use after /update-nanoclaw brings in OneCLI as a breaking change, or for first-time OneCLI setup.
+description: Install and initialize OneCLI Agent Vault. Migrates existing .env credentials (including Google OAuth) to the vault. Use after /update-nanoclaw brings in OneCLI as a breaking change, or for first-time OneCLI setup.
 ---
 
 # Initialize OneCLI Agent Vault
@@ -227,6 +227,166 @@ Ask them to let you know when done.
 **If the user's response happens to contain a token or key** (starts with `sk-ant-` or looks like a token): handle it gracefully — run the `onecli secrets create` command with that value on their behalf.
 
 **After user confirms:** verify with `onecli secrets list` that an Anthropic secret exists. If not, ask again.
+
+## Phase 3.5: Migrate Google OAuth credentials (Gmail, Calendar)
+
+> **Requires:** OneCLI `google_oauth` secret type (see [onecli/onecli#123](https://github.com/onecli/onecli/pull/123)). If the OneCLI version doesn't support `google_oauth`, skip this phase and tell the user their Gmail/Calendar MCP servers will continue using credentials mounted directly from the host.
+
+### Detect Google OAuth credential directories
+
+Scan the user's home directory for Gmail and Calendar MCP credential directories:
+
+```bash
+ls -d ~/.gmail-mcp* ~/.calendar-mcp 2>/dev/null
+```
+
+Each directory typically contains:
+- `credentials.json` — OAuth tokens (access_token, **refresh_token**)
+- `gcp-oauth.keys.json` — OAuth app keys (**client_secret**, client_id)
+
+If no directories are found, skip this phase.
+
+### Explain the security benefit
+
+Tell the user: "Your Gmail/Calendar MCP servers store long-lived OAuth credentials (`refresh_token` and `client_secret`) in files that are mounted into containers. If a container were compromised, these credentials could be exfiltrated and used to access your Google account indefinitely.
+
+OneCLI can secure these by:
+1. Replacing the real values in container-mounted files with **placeholders**
+2. Transparently injecting real values at the gateway when the MCP server refreshes its access token
+3. Containers only ever see short-lived access tokens (1 hour)"
+
+AskUserQuestion:
+1. **Migrate Google credentials** — description: "Secure refresh tokens and client secrets in the OneCLI vault."
+2. **Skip** — description: "Keep Google credentials mounted directly. You can migrate later."
+
+If they skip, proceed to Phase 4.
+
+### For each credential directory found
+
+For each directory found (e.g., `~/.gmail-mcp`, `~/.gmail-mcp-secondary`, `~/.calendar-mcp`):
+
+#### 1. Read the real credentials
+
+```bash
+cat <dir>/credentials.json
+cat <dir>/gcp-oauth.keys.json
+```
+
+Extract:
+- `refresh_token` from `credentials.json`
+- `client_id` and `client_secret` from `gcp-oauth.keys.json` (under the `installed` or `web` key)
+
+#### 2. Register the google_oauth secret in OneCLI
+
+Use the OneCLI API to create a `google_oauth` secret. The value is the refresh token; `client_id` and `client_secret` are passed via `injectionConfig`:
+
+```bash
+curl -s -X POST http://localhost:10254/api/secrets \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "<descriptive name, e.g. Gmail (Personal)>",
+    "type": "google_oauth",
+    "value": "<refresh_token>",
+    "hostPattern": "oauth2.googleapis.com",
+    "pathPattern": "/token",
+    "injectionConfig": {
+      "clientId": "<client_id>",
+      "clientSecret": "<client_secret>"
+    }
+  }'
+```
+
+Verify it was created successfully (response has an `id` field).
+
+#### 3. Create container-stripped credential files
+
+Create copies of the credential files with placeholder values that the gateway will replace:
+
+**`<dir>/container-credentials.json`** — copy of `credentials.json` with:
+- `refresh_token` replaced with `1//ONECLI_PROXY_PLACEHOLDER_TOKEN`
+- `access_token` kept as-is (short-lived, needed for MCP server startup)
+- All other fields kept as-is
+
+**`<dir>/container-gcp-oauth.keys.json`** — copy of `gcp-oauth.keys.json` with:
+- `client_secret` replaced with `GOCSPX-onecli_proxy_placeholder`
+- `client_id` kept as-is (public value, not a secret)
+- All other fields kept as-is
+
+Use Node.js to create these files:
+
+```bash
+node -e "
+const fs = require('fs');
+const dir = '<dir>';
+
+// Stripped credentials
+const creds = JSON.parse(fs.readFileSync(dir + '/credentials.json', 'utf8'));
+creds.refresh_token = '1//ONECLI_PROXY_PLACEHOLDER_TOKEN';
+fs.writeFileSync(dir + '/container-credentials.json', JSON.stringify(creds, null, 2));
+
+// Stripped OAuth keys
+const keys = JSON.parse(fs.readFileSync(dir + '/gcp-oauth.keys.json', 'utf8'));
+const k = keys.installed || keys.web;
+k.client_secret = 'GOCSPX-onecli_proxy_placeholder';
+fs.writeFileSync(dir + '/container-gcp-oauth.keys.json', JSON.stringify(keys, null, 2));
+"
+```
+
+#### 4. Update container mount logic
+
+If the Gmail/Calendar skill's container mount code mounts the credential directory directly (e.g., mounting `~/.gmail-mcp` as a volume), update it to mount the container-stripped files instead:
+
+- Mount `container-credentials.json` as `credentials.json` inside the container
+- Mount `container-gcp-oauth.keys.json` as `gcp-oauth.keys.json` inside the container
+- Keep a fallback: if stripped files don't exist, mount the full directory (backwards compatibility)
+
+Example mount logic pattern:
+
+```typescript
+const containerCreds = path.join(dir, 'container-credentials.json');
+const containerKeys = path.join(dir, 'container-gcp-oauth.keys.json');
+if (fs.existsSync(containerCreds) && fs.existsSync(containerKeys)) {
+  // Mount stripped files — gateway injects real values during OAuth refresh
+  mounts.push({ hostPath: containerCreds, containerPath: `<mcp-dir>/credentials.json`, readonly: false });
+  mounts.push({ hostPath: containerKeys, containerPath: `<mcp-dir>/gcp-oauth.keys.json`, readonly: true });
+} else {
+  // Fallback: mount entire directory (no OneCLI)
+  mounts.push({ hostPath: dir, containerPath: `<mcp-dir>`, readonly: false });
+}
+```
+
+### Assign secrets to agents
+
+If there are multiple Google OAuth secrets (e.g., different Gmail accounts for different groups), each agent should only have access to its own secrets. Switch agents from `secretMode: "all"` to `"selective"` and assign the correct secrets:
+
+```bash
+# Set agent to selective mode
+curl -s -X PATCH "http://localhost:10254/api/agents/<agentId>/secret-mode" \
+  -H "Content-Type: application/json" \
+  -d '{"mode": "selective"}'
+
+# Assign specific secrets to the agent
+curl -s -X PUT "http://localhost:10254/api/agents/<agentId>/secrets" \
+  -H "Content-Type: application/json" \
+  -d '{"secretIds": ["<anthropic-secret-id>", "<gmail-secret-id>", "<calendar-secret-id>"]}'
+```
+
+Every agent needs the Anthropic secret. Only assign Google OAuth secrets to agents whose groups process email or use the calendar.
+
+### Verify
+
+For each migrated credential, verify the end-to-end flow:
+
+```bash
+# Check that the container-stripped files have placeholders
+grep -o '"refresh_token":"[^"]*"' <dir>/container-credentials.json
+# Should show: "refresh_token":"1//ONECLI_PROXY_PLACEHOLDER_TOKEN"
+
+grep -o '"client_secret":"[^"]*"' <dir>/container-gcp-oauth.keys.json
+# Should show: "client_secret":"GOCSPX-onecli_proxy_placeholder"
+```
+
+Tell the user: "Google OAuth credentials have been migrated to the OneCLI vault. Containers will receive placeholder values and the gateway will transparently inject real credentials during OAuth token refresh. Your original credential files are preserved (not modified)."
 
 ## Phase 4: Build and restart
 
