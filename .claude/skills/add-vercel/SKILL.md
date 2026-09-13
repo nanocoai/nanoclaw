@@ -85,19 +85,23 @@ Verify:
 onecli secrets list | grep -i vercel
 ```
 
-### Assign the secret to all agents
+### Assign the secret to selective-mode agents
 
-OneCLI uses selective secret mode — secrets must be explicitly assigned to each agent. Get the Vercel secret ID from the output above, then assign it to every agent:
+Agents in `secretMode: "all"` already auto-receive every secret whose host pattern matches — no assignment needed (and calling `set-secrets` on them would flip them to `selective` and strip that auto-access). Only `selective`-mode agents need explicit assignment. `set-secrets` REPLACES the entire list, so read-then-merge per agent:
 
 ```bash
-# set-secrets replaces the entire list — read and merge for each agent.
-VERCEL_SECRET_ID=$(onecli secrets list | jq -r '.data[] | select(.name | test("(?i)vercel")) | .id' | head -1)
-for agent in $(onecli agents list | jq -r '.data[].id'); do
-  CURRENT=$(onecli agents secrets --id "$agent" | jq -r '[.data[]] | join(",")')
-  MERGED=$(printf '%s' "$CURRENT,$VERCEL_SECRET_ID" | tr ',' '\n' | sort -u | paste -sd ',' -)
-  onecli agents set-secrets --id "$agent" --secret-ids "$MERGED"
+VERCEL_SECRET_ID=$(onecli secrets list | jq -r '.[] | select(.name | test("(?i)vercel")) | .id' | head -1)
+
+onecli agents list | jq -r '.[] | select(.secretMode=="selective") | "\(.id)\t\(.name)"' | \
+while IFS=$'\t' read -r agent name; do
+  CURRENT=$(onecli agents secrets --id "$agent" | jq -r '.[]')
+  MERGED=$(printf '%s\n%s\n' "$CURRENT" "$VERCEL_SECRET_ID" | grep -v '^$' | sort -u | paste -sd ',' -)
+  STATUS=$(onecli agents set-secrets --id "$agent" --secret-ids "$MERGED" | jq -r '.status')
+  echo "$name ($agent): $STATUS"
 done
 ```
+
+If only specific teams should have Vercel, narrow the jq filter — e.g., `select(.secretMode=="selective" and (.identifier // "" | test("mediamate|launchmate")))` matches by NanoClaw agent_group folder slug.
 
 ## Phase 4: Ensure Vercel CLI in Container Image
 
