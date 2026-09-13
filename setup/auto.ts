@@ -74,6 +74,7 @@ import {
 import { upsertEnvVar } from './set-env.js';
 import { applyToEnv, parseFlags, printHelp, readFromEnv } from './lib/setup-config-parse.js';
 import { runAdvancedScreen } from './lib/setup-config-screen.js';
+import { CONFIG, envVarFor, validateHttpUrl } from './lib/setup-config.js';
 import { runWindowedStep } from './lib/windowed-runner.js';
 import { runUninstallFlow } from './uninstall/flow.js';
 import { detectExistingInstall } from './uninstall/scan.js';
@@ -1703,8 +1704,13 @@ async function runPasteAuth(method: 'oauth' | 'api'): Promise<void> {
  */
 async function runCustomEndpointAuth(baseUrl: string, token: string): Promise<void> {
   let host: string;
+  let canonicalBaseUrl: string;
   try {
-    host = new URL(baseUrl).hostname;
+    const invalid = validateHttpUrl(baseUrl);
+    if (invalid) throw new Error(invalid);
+    const parsed = new URL(baseUrl);
+    host = parsed.hostname;
+    canonicalBaseUrl = parsed.toString();
   } catch {
     await fail('auth', `Invalid Anthropic base URL: ${baseUrl}`, 'Check --anthropic-base-url and retry.');
     return;
@@ -1750,7 +1756,7 @@ async function runCustomEndpointAuth(baseUrl: string, token: string): Promise<vo
   // ANTHROPIC_BASE_URL has to be in .env so the runtime provider config
   // reads it when building container env. The token is *not* written —
   // OneCLI holds it.
-  writeEnvLine('ANTHROPIC_BASE_URL', baseUrl);
+  writeEnvLine('ANTHROPIC_BASE_URL', canonicalBaseUrl);
 
   // Register the claude provider so the runtime passes ANTHROPIC_BASE_URL
   // and the placeholder bearer into the container. Only appended when the
