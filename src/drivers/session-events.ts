@@ -22,6 +22,8 @@
  *   buffered per key and delivered on registration, so adoption cannot lose
  *   an end that lands between `listSessions()` and arming.
  */
+import { log } from '../log.js';
+
 import type {
   SessionDriver,
   SessionEvent,
@@ -145,10 +147,19 @@ class SessionEventsHub {
     if (this.#watches.has(installSlug)) return;
     // Minimal test fakes may lack watchSessions; the hub must not crash on them.
     if (typeof this.driver.watchSessions !== 'function') return;
-    this.#watches.set(
-      installSlug,
-      this.driver.watchSessions(installSlug, (event) => this.#onEvent(event)),
-    );
+    /* eslint-disable no-catch-all/no-catch-all -- a watch backend that cannot subscribe costs latency (adoption's resync and the sweep's floor cover it), never the arming that keeps a session supervised */
+    try {
+      this.#watches.set(
+        installSlug,
+        this.driver.watchSessions(installSlug, (event) => this.#onEvent(event)),
+      );
+    } catch (err) {
+      // Deliberately not cached: the next arm for this install re-attempts the
+      // subscription, and until one succeeds terminals still reach the host
+      // through handle-observed ends and adoption's resync.
+      log.warn('Session watch feed unavailable — terminals fall back to resync', { installSlug, err });
+    }
+    /* eslint-enable no-catch-all/no-catch-all */
   }
 
   #onEvent(event: SessionEvent): void {
@@ -250,6 +261,11 @@ export function withSessionEvents(driver: SessionDriver): SessionEventsDriver {
     watchSessions: (installSlug, onEvent) => driver.watchSessions(installSlug, onEvent),
     resync: (installSlug) => hub.resync(installSlug),
   };
+  // `watchSessions` is contract-required, so it is mirrored inline above — but
+  // a minimal fake may still lack it, and consumers probe with `typeof`
+  // (host-sweep's feed arming, the hub itself). Mirror its absence too, or the
+  // probe passes on the wrapper and calls straight into `undefined`.
+  if (typeof driver.watchSessions !== 'function') delete (wrapped as Partial<SessionEventsDriver>).watchSessions;
   if (driver.ensureReady) wrapped.ensureReady = (): Promise<void> => driver.ensureReady!();
   if (driver.reapResidue) wrapped.reapResidue = (installSlug): Promise<void> => driver.reapResidue!(installSlug);
   return wrapped;
