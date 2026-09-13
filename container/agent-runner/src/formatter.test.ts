@@ -154,6 +154,36 @@ describe('structured chat links', () => {
   });
 });
 
+describe('attachment rendering', () => {
+  it('escapes XML special characters in the attachment type', () => {
+    insertMessage('m1', 'chat', {
+      sender: 'Alice',
+      text: 'see attached',
+      attachments: [{ type: 'text/x & <special>', name: 'report.txt', localPath: 'inbox/report.txt' }],
+    });
+
+    const result = formatMessages(getPendingMessages());
+
+    expect(result).toContain('[text/x &amp; &lt;special&gt;: report.txt — saved to /workspace/inbox/report.txt]');
+  });
+
+  it('escapes the type on the url and bare variants too', () => {
+    insertMessage('m1', 'chat', {
+      sender: 'Alice',
+      text: 'two more',
+      attachments: [
+        { type: 'a<b', name: 'linked.txt', url: 'https://example.com/f' },
+        { type: 'c&d', name: 'bare.txt' },
+      ],
+    });
+
+    const result = formatMessages(getPendingMessages());
+
+    expect(result).toContain('[a&lt;b: linked.txt (https://example.com/f)]');
+    expect(result).toContain('[c&amp;d: bare.txt]');
+  });
+});
+
 describe('timestamp formatting', () => {
   it('renders time via formatLocalTime (user TZ)', () => {
     // 2026-06-15T12:00:00Z — timezone-agnostic assertions (year is stable)
