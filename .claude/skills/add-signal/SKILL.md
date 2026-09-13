@@ -184,11 +184,13 @@ this channel with `/init-first-agent` (or `/manage-channels`).
 
 - Markdown formatting — `**bold**`, `*italic*` / `_italic_`, `` `code` ``, ` ```code fence``` `, `~~strike~~`, `||spoiler||` (converted to Signal's offset-based text styles).
 - Quoted replies — `replyTo*` fields populated from Signal quotes.
-- Typing indicators — DMs only (Signal doesn't support group typing).
+- Typing indicators — DMs and groups.
 - Note to Self — messages you send to your own account from another device route to the agent as inbound with `isFromMe: true`.
 - Voice attachments — detected but not transcribed by default; the agent receives a `[Voice Message]` placeholder. Run `/add-voice-transcription` for local transcription.
+- Inbound image/file attachments — forwarded to the agent the same way every other chat adapter does. See Troubleshooting below if your copy predates the fix.
+- Outbound reactions — the agent can react to a message with `{"operation": "reaction", "emoji": "👍", "targetAuthorNumber": "+1555...", "targetTimestamp": 1716900000000}` as the outbound content, where `targetTimestamp` is the Signal message's own timestamp. Works in DMs and groups; reacting again with the same emoji toggles it off.
 
-Not supported yet: outbound file attachments (logged and dropped), edit/delete messages, reactions.
+Not supported yet: outbound file attachments (logged and dropped), edit/delete messages, inbound reactions (silently dropped).
 
 ## Alternatives
 
@@ -296,6 +298,14 @@ If you see `Signal daemon failed to start. Is signal-cli installed and your acco
 
 If you see `Signal daemon not reachable at 127.0.0.1:7583` and `SIGNAL_MANAGE_DAEMON=false`, start the daemon yourself: `signal-cli -a +YOURNUMBER daemon --tcp 127.0.0.1:7583`.
 
+### Incoming messages silently stop arriving after a while
+
+**Symptom:** `Signal channel connected` still logs fine and outbound sends still work, but no incoming messages route through anymore — no `Signal message received` lines at all.
+
+**Root cause:** Signal-side protocol changes have broken this twice already on an aging signal-cli: a `NullPointerException` decoding sealed-sender envelopes on 0.14.4.x, and (separately) a `subscribeReceive` handshake that signal-cli ≥0.14.x started requiring before it will push anything. The adapter handles both today, but only if signal-cli itself is reasonably current — this class of breakage recurs every few months as upstream Signal changes the wire protocol, so don't leave signal-cli pinned to an old version.
+
+**Fix:** Upgrade signal-cli to the latest release and restart the service.
+
 ### Bot not responding
 
 1. Channel initialized: `grep "Signal channel connected" logs/nanoclaw.log | tail -1`
@@ -306,6 +316,14 @@ If you see `Signal daemon not reachable at 127.0.0.1:7583` and `SIGNAL_MANAGE_DA
 ### Messages delivered but never arrive (null platformMsgId)
 
 Signal responses show `platformMsgId=undefined` in the main log. This means the delivery poll ran but found no adapter — likely a duplicate service instance issue (see above). Affected messages cannot be retried; the user must resend.
+
+### Images and file attachments not reaching the agent
+
+**Symptom:** Voice messages transcribe fine, but images sent over Signal are never seen by the agent, and other attachments (PDFs, text files, documents) are silently ignored — no error, no placeholder text, nothing in the response referencing them.
+
+**Root cause:** An earlier version of the adapter spliced an unmounted local path into the message text for image attachments only, which the agent's Read tool could never open; every other attachment type was dropped before that point with no path emitted at all.
+
+**Fix:** Attachments are read from disk and forwarded as base64 through the same inbound-attachment mechanism the other chat adapters already use (see `whatsapp.ts` or `discord.ts` for the pattern). If your copy of `src/channels/signal.ts` predates this, re-copy it and rebuild — see **Copy the adapter and its registration test** above.
 
 ### Lost connection mid-session
 
@@ -331,6 +349,14 @@ signal-cli holds an exclusive lock on its data directory while the daemon is run
 
 Modern Signal groups use GroupV2. The adapter must extract the group ID from `envelope?.dataMessage?.groupV2?.id` — not `groupInfo?.groupId`, which is GroupV1/legacy. If group messages are routing as DMs, check `src/channels/signal.ts` and confirm the groupId extraction falls through to `groupV2.id`.
 
+### Bot doesn't recognize a quote-reply as a mention in groups
+
+Modern signal-cli identifies contacts primarily by UUID (ACI), so a quote-reply envelope's `quote.authorNumber` field can come back empty even though the reply clearly targets the bot. The mention check needs to also match `quote.authorUuid` against the bot's own UUID, not just the phone number. Already handled in `src/channels/signal.ts`'s `isMention` check — if this regresses after a signal-cli upgrade, that's the fallback to check first.
+
 ### QR / linking URL expired
 
 The `sgnl://linkdevice…` URL (and the Path A registration captcha) expire after a few minutes. Re-run the device-link step to get a fresh QR.
+
+### Trunk updated but wiring defaults unchanged (stale adapter copy)
+
+`src/channels/signal.ts` declares its own `SIGNAL_DEFAULTS` (engage mode, threading, unknown-sender policy) — that lives in the adapter copy installed from the `channels` branch, not in trunk. Running `/update-nanoclaw` without the follow-up skill-update step leaves the old adapter copy in place, so trunk-level behavior changes documented there silently don't apply to Signal. Fix: re-run `/add-signal` (or `/update-skills`) to pull the current adapter, then restart the service.
