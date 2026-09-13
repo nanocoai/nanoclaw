@@ -18,6 +18,34 @@ import { getPlatform, getServiceManager, hasSystemd, isRoot } from './platform.j
 import { emitStatus } from './status.js';
 import { readSlackJob, slackJobStatus, type SlackJob } from '../src/community-portal/slack-job.js';
 
+/**
+ * Credential env vars that mark a channel as configured.
+ *
+ * Exported so a test can neutralise exactly these — `has()` below reads
+ * `process.env` before the install's own `.env`, so any of them present in the
+ * ambient environment makes verify report a channel the install has not
+ * configured. `GITHUB_TOKEN` is the one that bites in practice: CI runners and
+ * plenty of developer shells export it for the `gh` CLI.
+ */
+export const CHANNEL_ENV_KEYS = [
+  'TELEGRAM_BOT_TOKEN',
+  'SLACK_BOT_TOKEN',
+  'SLACK_APP_TOKEN',
+  'DISCORD_BOT_TOKEN',
+  'GITHUB_TOKEN',
+  'LINEAR_API_KEY',
+  'GCHAT_CREDENTIALS',
+  'TEAMS_APP_ID',
+  'TEAMS_APP_PASSWORD',
+  'WEBEX_BOT_TOKEN',
+  'MATRIX_ACCESS_TOKEN',
+  'RESEND_API_KEY',
+  'WHATSAPP_ACCESS_TOKEN',
+  'IMESSAGE_ENABLED',
+  'PHOTON_PROJECT_ID',
+  'PHOTON_PROJECT_SECRET',
+] as const;
+
 export async function run(_args: string[]): Promise<void> {
   const projectRoot = process.cwd();
   const platform = getPlatform();
@@ -135,24 +163,7 @@ export async function run(_args: string[]): Promise<void> {
   }
 
   // 4. Check channel auth (detect configured channels by credentials)
-  const envVars = readEnvFile([
-    'TELEGRAM_BOT_TOKEN',
-    'SLACK_BOT_TOKEN',
-    'SLACK_APP_TOKEN',
-    'DISCORD_BOT_TOKEN',
-    'GITHUB_TOKEN',
-    'LINEAR_API_KEY',
-    'GCHAT_CREDENTIALS',
-    'TEAMS_APP_ID',
-    'TEAMS_APP_PASSWORD',
-    'WEBEX_BOT_TOKEN',
-    'MATRIX_ACCESS_TOKEN',
-    'RESEND_API_KEY',
-    'WHATSAPP_ACCESS_TOKEN',
-    'IMESSAGE_ENABLED',
-    'PHOTON_PROJECT_ID',
-    'PHOTON_PROJECT_SECRET',
-  ]);
+  const envVars = readEnvFile([...CHANNEL_ENV_KEYS]);
 
   const has = (key: string) => !!(process.env[key] || envVars[key]);
   const channelAuth: Record<string, string> = {};
