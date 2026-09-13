@@ -75,7 +75,7 @@ bash migrate-v2.sh
 
 ## 지원 기능
 
-- **멀티 채널 메시징** — WhatsApp, Telegram, Discord, Slack, Microsoft Teams, iMessage, Matrix, Google Chat, Webex, Linear, GitHub, WeChat, 그리고 Resend를 통한 이메일. `/add-<channel>` 스킬로 필요할 때 설치합니다. 하나 또는 여러 개를 동시에 실행할 수 있습니다.
+- **멀티 채널 메시징** — WhatsApp, Telegram, Discord, Slack, Microsoft Teams, iMessage, Dial(SMS와 음성 통화를 위한 실제 전화번호), Matrix, Google Chat, Webex, Linear, GitHub, WeChat, 그리고 Resend를 통한 이메일. `/add-<channel>` 스킬로 필요할 때 설치합니다. 하나 또는 여러 개를 동시에 실행할 수 있습니다.
 - **유연한 격리** — 완전한 프라이버시를 위해 각 채널을 자체 에이전트에 연결하거나, 대화는 분리하되 메모리는 통합하기 위해 하나의 에이전트를 여러 채널에서 공유하거나, 여러 채널을 하나의 공유 세션으로 묶어 하나의 대화가 여러 채널에 걸쳐 이어지도록 할 수 있습니다. `/manage-channels`로 채널별로 선택하세요. [docs/isolation-model.md](docs/isolation-model.md)를 참고하세요.
 - **에이전트별 작업 공간** — 각 에이전트 그룹은 자체 `CLAUDE.md`, 자체 메모리, 자체 컨테이너, 그리고 여러분이 허용한 마운트만 갖습니다. 직접 연결하지 않는 한 경계를 넘는 것은 아무것도 없습니다.
 - **예약 작업** — Claude를 실행하고 여러분에게 다시 메시지를 보낼 수 있는 반복 작업
