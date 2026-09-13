@@ -1,0 +1,22 @@
+skill: nostr
+version: 1.0.0
+description: "Nostr encrypted DM channel via NIP-17/NIP-44/NIP-59"
+core_version: 0.1.0
+adds:
+  - src/channels/nostr.ts
+  - src/channels/nostr.test.ts
+modifies:
+  - src/index.ts
+  - src/config.ts
+  - src/routing.test.ts
+structured:
+  npm_dependencies:
+    nostr-tools: "^2.23.1"
+  env_additions:
+    - NOSTR_PRIVATE_KEY
+    - NOSTR_USER_PUBKEY
+    - NOSTR_RELAYS
+    - NOSTR_ONLY
+conflicts: []
+depends: []
+test: "npx vitest run src/channels/nostr.test.ts"
