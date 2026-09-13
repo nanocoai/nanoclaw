@@ -37,8 +37,10 @@ export type {
   ProcessingAck,
   RecurringMessage,
   SessionRouting,
+  StateValue,
   Task,
   TaskRecord,
   TaskStats,
   TaskUpdate,
+  TurnState,
 } from './types.js';

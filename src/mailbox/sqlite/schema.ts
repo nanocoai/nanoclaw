@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS container_state (
   current_tool             TEXT,
   tool_declared_timeout_ms INTEGER,
   tool_started_at          TEXT,
+  turn                     TEXT,
   updated_at               TEXT NOT NULL
 );
 `;

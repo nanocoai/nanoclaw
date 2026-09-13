@@ -96,6 +96,8 @@ describe('SQLite runner mailbox canonical serialization', () => {
         tool_declared_timeout_ms: null,
       });
     }
+    // A tool-in-flight write leaves the turn alone.
+    expect(outbound.prepare('SELECT turn FROM container_state').get()).toEqual({ turn: null });
 
     expect(
       await mailbox.writeMessageOut({
@@ -156,5 +158,47 @@ describe('SQLite runner mailbox canonical serialization', () => {
 
     const mailbox = new SqliteAgentMailbox();
     expect(mailbox.getPendingMessages(10, false)).toEqual([]);
+  });
+});
+
+describe('SQLite runner mailbox turn state', () => {
+  test('marks the turn and stamps updated_at without touching the tool in flight', async () => {
+    const { outbound } = initTestSessionDb();
+    const mailbox = new SqliteAgentMailbox();
+    const read = () =>
+      outbound
+        .prepare('SELECT current_tool, tool_declared_timeout_ms, turn, updated_at FROM container_state')
+        .get() as {
+        current_tool: string | null;
+        tool_declared_timeout_ms: number | null;
+        turn: string | null;
+        updated_at: string;
+      };
+
+    // First write creates the row.
+    mailbox.markContainerTurn('working');
+    const first = read();
+    expect(first).toMatchObject({ current_tool: null, tool_declared_timeout_ms: null, turn: 'working' });
+    expect(new Date(first.updated_at).toISOString()).toBe(first.updated_at);
+
+    // A tool starts mid-turn; a re-mark must not clear it.
+    mailbox.setContainerToolInFlight('Bash', 30_000);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    mailbox.markContainerTurn('working');
+    const remarked = read();
+    expect(remarked).toMatchObject({ current_tool: 'Bash', tool_declared_timeout_ms: 30_000, turn: 'working' });
+    expect(Date.parse(remarked.updated_at)).toBeGreaterThan(Date.parse(first.updated_at));
+
+    // Clearing the tool keeps the turn; ending the turn keeps the (cleared) tool.
+    mailbox.clearContainerToolInFlight();
+    expect(read()).toMatchObject({ current_tool: null, turn: 'working' });
+    mailbox.markContainerTurn('idle');
+    expect(read()).toMatchObject({ current_tool: null, tool_declared_timeout_ms: null, turn: 'idle' });
+  });
+
+  test('rejects a turn outside the contract before it reaches the row', () => {
+    initTestSessionDb();
+    const mailbox = new SqliteAgentMailbox();
+    expect(() => mailbox.markContainerTurn('busy' as never)).toThrow('invalid mailbox field turn');
   });
 });

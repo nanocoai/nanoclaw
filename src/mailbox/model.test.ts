@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import {
   createInboundRecord,
   createOutboundRecord,
+  parseContainerRecord,
   parseDestinationRecord,
   parseDirectOutboundWrite,
   parseInboundRecord,
@@ -212,5 +213,30 @@ describe('canonical mailbox model', () => {
         agentGroupId: null,
       }),
     ).toThrow('agent routing fields');
+  });
+});
+
+describe('container record turn state', () => {
+  const base = {
+    currentTool: 'Bash',
+    toolDeclaredTimeoutMs: 30_000,
+    toolStartedAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:01.000Z',
+  };
+
+  it('parses a reported turn', () => {
+    expect(parseContainerRecord({ ...base, turn: 'working' }).turn).toBe('working');
+    expect(parseContainerRecord({ ...base, turn: 'idle' }).turn).toBe('idle');
+  });
+
+  it('reads a record persisted before the field existed as "not reported"', () => {
+    expect(parseContainerRecord(base)).toEqual({ ...base, turn: null });
+    expect(parseContainerRecord({ ...base, turn: null }).turn).toBeNull();
+    expect(parseContainerRecord({ ...base, turn: undefined }).turn).toBeNull();
+  });
+
+  it('rejects a turn outside the contract', () => {
+    expect(() => parseContainerRecord({ ...base, turn: 'busy' })).toThrow('invalid mailbox field turn');
+    expect(() => parseContainerRecord({ ...base, turn: 1 })).toThrow('invalid mailbox field turn');
   });
 });

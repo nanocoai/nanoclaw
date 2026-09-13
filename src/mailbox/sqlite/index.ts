@@ -9,6 +9,7 @@ import {
   deleteOrphanProcessingClaims,
   ensureSchema,
   getContainerState,
+  getSessionState,
   getDeliveredIds,
   getDueOutboundMessages,
   getInboundSourceSessionId,
@@ -32,6 +33,7 @@ import {
   createDirectOutboundRecord,
   outboundDelivery,
   parseContainerRecord,
+  parseStateRecord,
   parseDestinationRecord,
   parseOutboundRecord,
   parseProcessingAckRecord,
@@ -338,13 +340,22 @@ export function wrapSqliteOutbound(
         currentTool: row.current_tool,
         toolDeclaredTimeoutMs: row.tool_declared_timeout_ms,
         toolStartedAt: row.tool_started_at === null ? null : sqliteTimestamp(row.tool_started_at),
+        turn: row.turn,
         updatedAt: sqliteTimestamp(row.updated_at),
       });
       return {
         currentTool: record.currentTool,
         toolDeclaredTimeoutMs: record.toolDeclaredTimeoutMs,
         toolStartedAt: record.toolStartedAt,
+        turn: record.turn,
+        updatedAt: record.updatedAt,
       };
+    },
+    getState: (key) => {
+      const row = getSessionState(readable(), key);
+      if (!row) return undefined;
+      const record = parseStateRecord({ key, value: row.value, updatedAt: sqliteTimestamp(row.updated_at) });
+      return { value: record.value, updatedAt: record.updatedAt };
     },
     getDueMessages: (excludeIds) =>
       getDueOutboundMessages(readable())

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Adapter, AdapterPostableMessage, RawMessage } from 'chat';
 
-import { createChatSdkBridge, splitForLimit } from './chat-sdk-bridge.js';
+import { createChatSdkBridge, normalizeStatusText, splitForLimit } from './chat-sdk-bridge.js';
 
 vi.mock('../webhook-server.js', () => ({
   registerWebhookAdapter: vi.fn(),
@@ -94,6 +94,76 @@ describe('createChatSdkBridge', () => {
       supportsThreads: true,
     });
     expect(typeof bridge.subscribe).toBe('function');
+  });
+
+  it('setTyping passes a status line to startTyping, normalized to one trimmed line', async () => {
+    const typingCalls: Array<{ threadId: string; status?: string }> = [];
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({
+        startTyping: async (threadId: string, status?: string) => {
+          typingCalls.push({ threadId, status });
+        },
+      }),
+      supportsThreads: true,
+    });
+    await bridge.setTyping!('C123', 'C123:1700000000.000100');
+    await bridge.setTyping!('C123', 'C123:1700000000.000100', '  Reading\nthe   thread  ', 'agent');
+    await bridge.setTyping!('C123', 'C123:1700000000.000100', '   ');
+    expect(typingCalls).toEqual([
+      { threadId: 'C123:1700000000.000100', status: undefined },
+      { threadId: 'C123:1700000000.000100', status: 'Reading the thread' },
+      { threadId: 'C123:1700000000.000100', status: undefined },
+    ]);
+  });
+
+  it('normalizeStatusText caps an over-long line', () => {
+    const long = 'x'.repeat(500);
+    const out = normalizeStatusText(long);
+    expect(out.length).toBe(200);
+    expect(out.endsWith('…')).toBe(true);
+    expect(normalizeStatusText('short line')).toBe('short line');
+  });
+
+  it('clearTyping clears a Slack-shaped assistant status with an empty string', async () => {
+    const statusCalls: Array<{ channelId: string; threadTs: string; status: string }> = [];
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({
+        decodeThreadId: (threadId: string) => {
+          const [channel, threadTs] = threadId.split(':');
+          return { channel, threadTs };
+        },
+        setAssistantStatus: async (channelId: string, threadTs: string, status: string) => {
+          statusCalls.push({ channelId, threadTs, status });
+        },
+      } as unknown as Partial<Adapter>),
+      supportsThreads: true,
+    });
+    await bridge.clearTyping!('C123', 'C123:1700000000.000100');
+    expect(statusCalls).toEqual([{ channelId: 'C123', threadTs: '1700000000.000100', status: '' }]);
+  });
+
+  it('clearTyping is a no-op when the adapter cannot clear (no setAssistantStatus)', async () => {
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({}),
+      supportsThreads: true,
+    });
+    // No throw, nothing to assert beyond "does not reject".
+    await expect(bridge.clearTyping!('C123', 'thread-1')).resolves.toBeUndefined();
+  });
+
+  it('clearTyping is a no-op when the decoded thread has no threadTs', async () => {
+    const statusCalls: string[] = [];
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({
+        decodeThreadId: (_threadId: string) => ({ channel: 'C123' }),
+        setAssistantStatus: async (_channelId: string, _threadTs: string, _status: string) => {
+          statusCalls.push('called');
+        },
+      } as unknown as Partial<Adapter>),
+      supportsThreads: true,
+    });
+    await bridge.clearTyping!('C123', 'C123');
+    expect(statusCalls).toHaveLength(0);
   });
 });
 

@@ -6,6 +6,7 @@ import type {
   ProcessingStatus,
   SessionRoutingRecord,
   StateRecord,
+  TurnState,
 } from './model.generated.js';
 
 export type {
@@ -27,6 +28,7 @@ export type {
   TaskRecord,
   TaskStatus,
   TaskWrite,
+  TurnState,
 } from './model.generated.js';
 
 export interface MailboxSessionKey {
@@ -63,6 +65,12 @@ export interface MailboxOperations {
   findDestinationByRouting(channelType: string, platformId: string): Destination | undefined;
   setContainerToolInFlight(tool: string, declaredTimeoutMs: number | null): void;
   clearContainerToolInFlight(): void;
+  /**
+   * Record whether the runner is inside a turn. Writes `turn` and stamps
+   * `updated_at`; the tool-in-flight fields are left as they are. The host
+   * reads it on its delivery poll to drive the typing indicator.
+   */
+  markContainerTurn(turn: TurnState): void;
   clearStaleProcessingAcks(): void;
 }
 
