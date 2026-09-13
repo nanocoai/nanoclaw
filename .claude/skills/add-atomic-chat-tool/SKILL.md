@@ -54,6 +54,13 @@ cp $S/atomic-chat-env.ts              src/atomic-chat-env.ts
 cp $S/atomic-chat-wiring.test.ts      src/atomic-chat-wiring.test.ts
 ```
 
+```nc:copy
+atomic-chat-mcp-stdio.ts -> container/agent-runner/src/atomic-chat-mcp-stdio.ts
+atomic-chat-registration.test.ts -> container/agent-runner/src/atomic-chat-registration.test.ts
+atomic-chat-env.ts -> src/atomic-chat-env.ts
+atomic-chat-wiring.test.ts -> src/atomic-chat-wiring.test.ts
+```
+
 ### Register the MCP server in the agent-runner
 
 Edit `container/agent-runner/src/index.ts`. Find the `mcpServers` object that currently looks like this:
@@ -140,6 +147,10 @@ Replace the `log.debug` line with a prefix branch (leave the stderr-tail lines i
     });
 ```
 
+```nc:run
+bash .claude/skills/add-atomic-chat-tool/apply.sh
+```
+
 ### Add env-var stubs to `.env.example`
 
 Append to `.env.example`:
@@ -154,6 +165,15 @@ Append to `.env.example`:
 # ATOMIC_CHAT_API_KEY=
 ```
 
+```nc:append to:.env.example
+# Atomic Chat MCP tool (.claude/skills/add-atomic-chat-tool)
+# Override the host where Atomic Chat exposes its OpenAI-compatible API.
+# Default: http://host.docker.internal:1337 (with fallback to localhost)
+# ATOMIC_CHAT_HOST=http://host.docker.internal:1337
+# Optional API key. Leave unset for a local Atomic Chat install — it does not require auth.
+# ATOMIC_CHAT_API_KEY=
+```
+
 ### Validate code changes
 
 ```bash
@@ -164,6 +184,17 @@ pnpm exec vitest run src/atomic-chat-wiring.test.ts
 # Container tree: index.ts registration
 (cd container/agent-runner && bun test src/atomic-chat-registration.test.ts)
 ./container/build.sh
+```
+
+```nc:run effect:build
+pnpm run build
+pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit
+./container/build.sh
+```
+
+```nc:run effect:test
+pnpm exec vitest run src/atomic-chat-wiring.test.ts
+cd container/agent-runner && bun test src/atomic-chat-registration.test.ts
 ```
 
 All must be clean before proceeding. The wiring and registration tests confirm the two
