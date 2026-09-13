@@ -52,24 +52,53 @@ function cliPath(): string {
 }
 
 /**
- * Query signal-cli for currently linked accounts. Empty array if none
- * configured, no binary, or the call fails for any other reason.
+ * How long the synchronous signal-cli probes may run. signal-cli serializes
+ * access to its config directory with an exclusive file lock; when the
+ * NanoClaw service is already running, its `signal-cli daemon` holds that
+ * lock indefinitely and a bare `listAccounts` blocks forever (it logs
+ * "Config file is in use by another instance, waiting…" and waits). Without
+ * a timeout the whole setup wizard hangs at the Signal step with no
+ * diagnostic (#2582). Overridable for tests.
  */
-function listAccounts(): string[] {
+function probeTimeoutMs(): number {
+  return Number(process.env.NANOCLAW_SIGNAL_PROBE_TIMEOUT_MS) || 15_000;
+}
+
+export interface ListAccountsResult {
+  accounts: string[];
+  /** True when the probe hit PROBE_TIMEOUT_MS — almost always the daemon lock. */
+  timedOut: boolean;
+}
+
+/**
+ * Query signal-cli for currently linked accounts. Empty account list if none
+ * configured, no binary, or the call fails for any other reason; `timedOut`
+ * distinguishes the config-lock deadlock so the caller can name the real
+ * cause instead of hanging.
+ */
+export function listAccounts(): ListAccountsResult {
   const cli = cliPath();
   try {
     const res = spawnSync(cli, ['-o', 'json', 'listAccounts'], {
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: probeTimeoutMs(),
+      killSignal: 'SIGKILL',
     });
-    if (res.status !== 0) return [];
+    if (res.error && (res.error as NodeJS.ErrnoException).code === 'ETIMEDOUT') {
+      return { accounts: [], timedOut: true };
+    }
+    if (res.status !== 0) return { accounts: [], timedOut: false };
     const parsed = JSON.parse(res.stdout || '[]') as SignalAccount[];
-    return parsed
-      .filter((a) => a.registered !== false)
-      .map((a) => a.number ?? a.account ?? '')
-      .filter(Boolean);
+    return {
+      timedOut: false,
+      accounts: parsed
+        .filter((a) => a.registered !== false)
+        .map((a) => a.number ?? a.account ?? '')
+        .filter(Boolean),
+    };
   } catch {
-    return [];
+    return { accounts: [], timedOut: false };
   }
 }
 
@@ -107,6 +136,8 @@ export async function run(_args: string[]): Promise<void> {
   // The driver checks too, but this keeps the step honest when run alone.
   const probe = spawnSync(cli, ['--version'], {
     stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: probeTimeoutMs(),
+    killSignal: 'SIGKILL',
   });
   if (probe.error || probe.status !== 0) {
     emitStatus('SIGNAL_AUTH', {
@@ -117,10 +148,23 @@ export async function run(_args: string[]): Promise<void> {
   }
 
   const existing = listAccounts();
-  if (existing.length > 0) {
+  if (existing.timedOut) {
+    // The daemon-lock deadlock (#2582): the running NanoClaw service's
+    // signal-cli daemon holds the config-file lock, so any other signal-cli
+    // invocation waits on it forever. Fail with the actual remedy instead
+    // of hanging the wizard at "Starting Signal link…".
+    emitStatus('SIGNAL_AUTH', {
+      STATUS: 'failed',
+      ERROR:
+        'signal-cli is locked by another instance (the running NanoClaw service holds it). ' +
+        'Stop the NanoClaw service, re-run setup, then start the service again.',
+    });
+    return;
+  }
+  if (existing.accounts.length > 0) {
     emitStatus('SIGNAL_AUTH', {
       STATUS: 'skipped',
-      ACCOUNT: existing[0],
+      ACCOUNT: existing.accounts[0],
       REASON: 'already-authenticated',
     });
     return;
