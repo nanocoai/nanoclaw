@@ -75,10 +75,11 @@ an older local skill still executes the newest safety code before any mutation.
 # symlinked argv defeats Node's import.meta main-module guard — the controller
 # then exits 0 having done NOTHING. Canonicalize before use.
 controller_dir="$(cd "$(mktemp -d)" && pwd -P)"
-git archive "$upstream_ref" \
-  scripts/update-nanoclaw.ts scripts/update scripts/update-skills.ts \
-  scripts/skill-apply.ts scripts/skill-directives.ts src/install-slug.ts \
-  | tar -x -C "$controller_dir"
+# Extract all of scripts/, not a hand-listed subset: the controller's import
+# graph reaches across that tree, and a list has to be edited every time a
+# module it loads gains a sibling import. src/install-slug.ts is the one file
+# outside scripts/ that the controller imports.
+git archive "$upstream_ref" scripts src/install-slug.ts | tar -x -C "$controller_dir"
 ```
 
 ## 2. Choose the Git strategy and prepare
