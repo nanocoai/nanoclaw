@@ -125,6 +125,26 @@ describe('apply engine lifecycle', () => {
     expect(readFileSync(join(root, 'src/sample.ts'), 'utf8')).toBe('// local customization\n');
   });
 
+  it('skips a registry fetch if the missing files arrive before the copy step', async () => {
+    writeFileSync(join(skillDir, 'SKILL.md'), '```nc:copy from-branch:providers\nsrc/sample.ts\nsrc/missing.ts\n```\n');
+    writeFileSync(join(root, 'src/sample.ts'), '// local customization\n');
+    const { cmds, exec } = recordingExec();
+    const result = await applySkill(skillDir, root, {
+      exec,
+      resolveRemote: () => 'fixture',
+      onEvent: async (event) => {
+        if (event.type === 'step-start' && event.kind === 'copy') {
+          writeFileSync(join(root, 'src/missing.ts'), '// installed before copy\n');
+        }
+      },
+    });
+    expect(fullyApplied(result)).toBe(true);
+    expect(cmds).toEqual([]);
+    expect(result.journal).toEqual([]);
+    expect(readFileSync(join(root, 'src/sample.ts'), 'utf8')).toBe('// local customization\n');
+    expect(readFileSync(join(root, 'src/missing.ts'), 'utf8')).toBe('// installed before copy\n');
+  });
+
   it('refresh mode overwrites an installed payload instead of treating presence as current', async () => {
     await applySkill(skillDir, root, { resolveInput: headless({ token: 'sekret-123' }), exec: () => {} });
     writeFileSync(join(skillDir, 'resources/sample.ts'), 'export const sample = "refreshed";\n');

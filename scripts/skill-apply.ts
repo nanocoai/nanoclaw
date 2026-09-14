@@ -652,6 +652,7 @@ async function applyOne(
       // Install fills gaps; only an explicit refresh replaces existing files.
       // The block can contain both, so honor selfStatus's per-file decision.
       const lines = d.body.filter((line) => ctx.mode === 'refresh' || !has(root, destOf(line)));
+      if (lines.length === 0) break;
       if (d.attrs['from-branch']) {
         const b = String(d.attrs['from-branch']);
         const remote = ctx.resolveRemote(b);
