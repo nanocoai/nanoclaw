@@ -5,12 +5,12 @@ import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
 import type { OpenCodeMessage, OpenCodeSessionClient } from './opencode-turn.js';
+import type { OpenCodeMemorySessionHook } from './opencode-memory.js';
 
 import {
   destroySharedRuntime,
   OpenCodeProvider,
   setSharedRuntimeDepsForTesting,
-  type OpenCodeMemorySessionHook,
   type OpenCodeSharedRuntimeDeps,
   type QuestionClient,
 } from './opencode.js';
@@ -560,6 +560,27 @@ describe('isSessionInvalid', () => {
 });
 
 describe('abort and watchdog', () => {
+  it('suppresses a runtime startup error after the query was aborted', async () => {
+    let rejectRuntime!: (error: Error) => void;
+    const provider = new OpenCodeProvider(
+      {},
+      {
+        getRuntime: () =>
+          new Promise((_, reject) => {
+            rejectRuntime = reject;
+          }),
+      },
+    );
+    provider.registerMemorySessionHook(MEMORY_HOOK);
+    const query = provider.query({ prompt: 'work', cwd: CWD });
+    const first = query.events[Symbol.asyncIterator]().next();
+
+    query.abort();
+    rejectRuntime(new Error('server startup failed'));
+
+    await expect(first).resolves.toEqual({ done: true, value: undefined });
+  });
+
   it('abort() stops the in-flight session and keeps the shared server', async () => {
     const server = fakeServer(() => {});
     const { spawnServer } = installDeps([server]);

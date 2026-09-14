@@ -13,13 +13,11 @@ import { createOpencodeClient as createOpencodeQuestionClient } from '@opencode-
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 import { buildOpenCodeConfig, buildOpenCodeServerEnv } from './opencode-config.js';
-export { buildOpenCodeConfig } from './opencode-config.js';
 import { buildDeliverySentences } from '../compact-instructions.js';
 import type { ResolvedRuntimeConfiguration } from '../provider-contracts/registry.js';
 import { getTaskSeriesId } from '../db/session-routing.js';
 import { getAllDestinations } from '../destinations.js';
 import { prepareOpenCodeMemory, type OpenCodeMemorySessionHook } from './opencode-memory.js';
-export { runMemorySessionHook, type OpenCodeMemorySessionHook } from './opencode-memory.js';
 import {
   boundedOpenCodeCall,
   executeOpenCodeTurn,
@@ -592,6 +590,21 @@ export async function autoAnswerQuestion(
  */
 const DRAIN_PENDING_QUESTIONS_TIMEOUT_MS = 10_000;
 
+async function waitForQuestionResponse(operation: Promise<void>, timeoutMs: number, context: string): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<true>((resolve) => {
+    timer = setTimeout(() => resolve(true), timeoutMs);
+  });
+
+  try {
+    if (await Promise.race([operation.then(() => false as const), timedOut])) {
+      log(`Timed out after ${timeoutMs}ms ${context}`);
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Handle a `question.asked` SSE event: always answer it, regardless of which
  * session raised it. The `question: 'deny'` config above should stop this
@@ -604,12 +617,10 @@ const DRAIN_PENDING_QUESTIONS_TIMEOUT_MS = 10_000;
  * `drainPendingQuestions`, so behavior does not depend on which path sees a
  * question first.
  *
- * Bounded the same way `drainPendingQuestions` bounds its own await: this is
- * called inline from the turn's event loop (the `question.asked` case
- * below), so a `reply()` that never resolves would stall the turn, not just
- * startup. `timeoutMs` is injectable so tests don't wait out the real
- * default; on timeout this logs one line and returns, fail-open, same as the
- * drain path.
+ * The event pump starts this handler without awaiting it, so a hung reply
+ * cannot block event consumption. A bounded wait still reports a stalled
+ * question and releases this handler. On timeout it logs and returns,
+ * fail-open, like the startup drain. Tests can inject a shorter budget.
  */
 export async function handleQuestionAsked(
   questionClient: QuestionClient,
@@ -618,18 +629,11 @@ export async function handleQuestionAsked(
 ): Promise<void> {
   log(`Auto-answering question ${req.id ?? '(no id)'} (sessionID=${req.sessionID ?? 'unknown'})`);
 
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timedOut = new Promise<true>((resolve) => {
-    timer = setTimeout(() => resolve(true), timeoutMs);
-  });
-
-  try {
-    if (await Promise.race([autoAnswerQuestion(questionClient, req).then(() => false as const), timedOut])) {
-      log(`Timed out after ${timeoutMs}ms auto-answering question ${req.id ?? '(no id)'}; continuing`);
-    }
-  } finally {
-    clearTimeout(timer);
-  }
+  await waitForQuestionResponse(
+    autoAnswerQuestion(questionClient, req),
+    timeoutMs,
+    `auto-answering question ${req.id ?? '(no id)'}; continuing`,
+  );
 }
 
 /**
@@ -665,21 +669,7 @@ export async function drainPendingQuestions(
     }
   })();
 
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timedOut = new Promise<true>((resolve) => {
-    timer = setTimeout(() => resolve(true), timeoutMs);
-  });
-
-  try {
-    if (await Promise.race([drain.then(() => false as const), timedOut])) {
-      log(`Timed out after ${timeoutMs}ms draining pending questions; continuing startup`);
-    }
-  } finally {
-    // A fast drain resolves before the timer fires, but the timer stays live
-    // until it does — clear it here so it can't hold this call alive or fire
-    // spuriously into a `timedOut` promise no one is racing against anymore.
-    clearTimeout(timer);
-  }
+  await waitForQuestionResponse(drain, timeoutMs, 'draining pending questions; continuing startup');
 }
 
 const runtimePumps = new WeakMap<OpenCodeRuntimeHandle, OpenCodeEventPump>();
@@ -743,11 +733,11 @@ export class OpenCodeProvider implements AgentProvider {
     async function* gen(): AsyncGenerator<ProviderEvent> {
       let sessionId = input.continuation;
       let initialized = false;
-      const runtime = self.runtime
-        ? await self.runtime.getRuntime(self.options, input.cwd)
-        : await ensureSharedRuntime(self.options, input.cwd, self.configuration);
-      const pump = eventPump(runtime);
       try {
+        const runtime = self.runtime
+          ? await self.runtime.getRuntime(self.options, input.cwd)
+          : await ensureSharedRuntime(self.options, input.cwd, self.configuration);
+        const pump = eventPump(runtime);
         while (!abort.signal.aborted) {
           while (!pending.length && !ended && !abort.signal.aborted) {
             await new Promise<void>((resolve) => {
