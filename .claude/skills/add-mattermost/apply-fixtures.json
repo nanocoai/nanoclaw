@@ -34,6 +34,10 @@
         {
           "match": "/api/v4/channels/direct",
           "stdout": "mattermost:dddddddddddddddddddddddddd"
+        },
+        {
+          "match": "scripts/verify-runtime.ts",
+          "stdout": "Mattermost runtime verification passed."
         }
       ]
     },
@@ -71,6 +75,10 @@
         {
           "match": "/api/v4/channels/direct",
           "stdout": "mattermost:dddddddddddddddddddddddddd"
+        },
+        {
+          "match": "scripts/verify-runtime.ts",
+          "stdout": "Mattermost runtime verification passed."
         }
       ]
     },
@@ -107,6 +115,10 @@
         {
           "match": "/api/v4/channels/direct",
           "stdout": "mattermost:dddddddddddddddddddddddddd"
+        },
+        {
+          "match": "scripts/verify-runtime.ts",
+          "stdout": "Mattermost runtime verification passed."
         }
       ]
     },
@@ -143,6 +155,10 @@
         {
           "match": "/api/v4/channels/direct",
           "stdout": "mattermost:dddddddddddddddddddddddddd"
+        },
+        {
+          "match": "scripts/verify-runtime.ts",
+          "stdout": "Mattermost runtime verification passed."
         }
       ]
     }

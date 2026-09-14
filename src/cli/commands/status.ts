@@ -2,6 +2,7 @@ import { realpathSync } from 'node:fs';
 
 import { getActiveAdapters } from '../../channels/channel-registry.js';
 import { getHostInstanceId } from '../../host-instance.js';
+import { getWebhookStatus } from '../../webhook-server.js';
 import { register } from '../registry.js';
 
 // Served over the existing host-only local ncl socket after startup completes.
@@ -18,6 +19,7 @@ register({
     started_at: new Date(performance.timeOrigin).toISOString(),
     instance_id: getHostInstanceId(),
     project_root: realpathSync(process.cwd()),
+    webhook: getWebhookStatus(),
     channels: getActiveAdapters().map((adapter) => ({
       instance: adapter.instance ?? adapter.channelType,
       type: adapter.channelType,

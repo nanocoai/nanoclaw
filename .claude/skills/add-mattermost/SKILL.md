@@ -128,6 +128,9 @@ curl -fsS "{{base_url}}/api/v4/config/client?format=old" | node .claude/skills/a
 ### 3. Copy and register the channel
 
 Copy the canonical adapter and registration test from the `channels` branch.
+The payload must include authenticated transport liveness and setup callback
+probes. Existing files are preserved by installation; on an older installation,
+run `/update-skills` to refresh Mattermost before rerunning this skill.
 
 ```nc:copy from-branch:channels
 src/channels/mattermost.ts
@@ -252,7 +255,18 @@ pnpm exec vitest run src/channels/mattermost-registration.test.ts src/channels/m
 Restart NanoClaw so the channel and credentials load.
 
 ```nc:run effect:restart
-bash setup/lib/restart.sh
+bash setup/lib/restart.sh --channel mattermost
+```
+
+Verify the new host loaded the selected bot and settings, and that the selected
+bot and owner belong to the DM. The helper checks the host's actual listener,
+then creates a temporary diagnostic card in that DM and invokes its action
+through Mattermost. It requires receipt by this host and deletes the diagnostic
+card afterward. This exercises Mattermost's outbound routing and TLS policy.
+It reads the saved settings without printing credentials.
+
+```nc:run effect:wire
+pnpm exec tsx .claude/skills/add-mattermost/scripts/verify-runtime.ts "{{bot_user_id}}" "{{owner_user_id}}" "{{platform_id}}"
 ```
 
 ## Next steps
@@ -264,8 +278,9 @@ Send the bot a DM and mention it in a joined channel. The first mention in an
 unwired channel sends an approval card to the owner's bot DM. Approve it there;
 NanoClaw replays the held message after creating the wiring.
 
-Click a real approval card to verify callbacks. Success replaces the buttons
-with the chosen result. An unsigned probe must return `401`:
+Click a real approval card to verify the approval workflow beyond the automated
+callback transport check. Success replaces the buttons with the chosen result.
+An unsigned probe must return `401` (alone this does not identify the host):
 
 ```bash
 curl -sS -o /dev/null -w '%{http_code}\n' -X POST \
@@ -304,9 +319,14 @@ the WebSocket Origin. Use the same host name in the Desktop server URL,
 not allowed`. Do not change `ServiceSettings.AllowCorsFrom` to correct this
 error. For a container installation, set SiteURL in the server configuration.
 
-**Cards render but clicks do nothing.** From the Mattermost server, POST to the
-callback URL. A `401` proves the path reaches NanoClaw; timeout or refusal means
-routing or firewall failure. Mattermost logs report blocked hosts and TLS errors.
+**Cards render but clicks do nothing.** Rerun the runtime helper above. It binds
+the listener and callback receipt to this host; a `401` alone cannot do that.
+Mattermost logs report blocked hosts and TLS errors. If a verification request
+times out after creating a card, remove that diagnostic card from the owner DM.
+
+**Runtime verification requests a payload refresh.** Run `/update-skills` for
+Mattermost, rebuild, and rerun this skill. The normal install path preserves
+existing adapter files; old payloads cannot prove the running configuration.
 
 **The adapter repeatedly reconnects.** Confirm `/api/v4/websocket` supports
 WebSocket upgrades through every reverse proxy and that idle connections live
