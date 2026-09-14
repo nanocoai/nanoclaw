@@ -103,6 +103,8 @@ export interface ApprovalResolvedEvent {
   outcome: 'approve' | 'reject';
   /** Namespaced user ID (`<channel>:<handle>`) of the resolving admin. Empty string if unknown. */
   userId: string;
+  /** Admin's rejection reason, when one was captured. */
+  reason?: string;
 }
 
 export type ApprovalResolvedHandler = (event: ApprovalResolvedEvent) => Promise<void> | void;
@@ -220,29 +222,32 @@ export interface RequestApprovalOptions {
   approverUserId?: string;
 }
 
+export type ApprovalRequestResult =
+  | { requested: true; approvalId: string; approverUserId: string }
+  | { requested: false; reason: string };
+
 /**
  * Queue an approval request. Picks an approver, delivers the card to their
- * DM, and records the pending_approvals row. Fire-and-forget from the
- * caller's perspective — the admin's response kicks off the registered
- * approval handler for this action via the response dispatcher.
+ * DM, and records the pending_approvals row. The admin's response kicks off
+ * the registered approval handler for this action via the response
+ * dispatcher. The requesting agent is told about a failure here; the result
+ * lets the caller tell its own audience too.
  */
-export async function requestApproval(opts: RequestApprovalOptions): Promise<void> {
+export async function requestApproval(opts: RequestApprovalOptions): Promise<ApprovalRequestResult> {
   const { session, action, payload, title, question, agentName, approverUserId } = opts;
+  const fail = async (reason: string): Promise<ApprovalRequestResult> => {
+    await notifyAgent(session, `${action} failed: ${reason}.`);
+    return { requested: false, reason };
+  };
 
   const approvers = approverUserId ? [approverUserId] : await pickApprover(session.agent_group_id);
-  if (approvers.length === 0) {
-    await notifyAgent(session, `${action} failed: no owner or admin configured to approve.`);
-    return;
-  }
+  if (approvers.length === 0) return fail('no owner or admin configured to approve');
 
   const origin = session.messaging_group_id ? await getMessagingGroup(session.messaging_group_id) : undefined;
   const originChannelType = origin?.channel_type ?? '';
 
   const target = await pickApprovalDelivery(approvers, originChannelType, origin?.instance);
-  if (!target) {
-    await notifyAgent(session, `${action} failed: no DM channel found for any eligible approver.`);
-    return;
-  }
+  if (!target) return fail('no DM channel found for any eligible approver');
 
   const approvalId = `appr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const normalizedOptions = normalizeOptions(APPROVAL_OPTIONS);
@@ -287,10 +292,10 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
       // The single delivery target never saw the card — remove the row so it
       // can't linger as a pending approval nobody can act on.
       await deletePendingApproval(approvalId);
-      await notifyAgent(session, `${action} failed: could not deliver approval request to ${target.userId}.`);
-      return;
+      return fail(`could not deliver approval request to ${target.userId}`);
     }
   }
 
   log.info('Approval requested', { action, approvalId, agentName, approver: target.userId });
+  return { requested: true, approvalId, approverUserId: target.userId };
 }

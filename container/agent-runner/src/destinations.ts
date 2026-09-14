@@ -119,6 +119,10 @@ function buildDestinationsSection(mode: SessionMode): string {
   );
   lines.push('');
   lines.push(
+    'When an agent message you send is blocked, held for approval, unanswerable, or fails, you get a system notice; the attached chat, if any, gets the same notice.',
+  );
+  lines.push('');
+  lines.push(
     'The `send_message` MCP tool is the same delivery, available mid-turn — handy for a quick acknowledgment ("on it") before a slow tool call. Always pass its explicit `to` destination. Each `send_message` call and each final-response `<message>` block lands as its own message in the conversation, so they read as a sequence rather than as one combined reply.',
   );
   lines.push('');

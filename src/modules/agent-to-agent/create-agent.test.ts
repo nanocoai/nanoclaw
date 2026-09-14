@@ -53,6 +53,7 @@ vi.mock('../approvals/index.js', () => ({
   registerApprovalHandler: (action: string, handler: (ctx: Record<string, unknown>) => Promise<void>) => {
     approvalHandlers.set(action, handler);
   },
+  registerApprovalResolvedHandler: vi.fn(),
 }));
 vi.mock('../../db/container-configs.js', () => ({
   getContainerConfig: (...a: unknown[]) => mockGetContainerConfig(...a),

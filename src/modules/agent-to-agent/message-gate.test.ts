@@ -24,7 +24,12 @@ vi.mock('../../container-runner.js', () => ({
 
 vi.mock('../approvals/index.js', async (importActual) => {
   const actual = await importActual<typeof import('../approvals/index.js')>();
-  return { ...actual, requestApproval: vi.fn().mockResolvedValue(undefined) };
+  return {
+    ...actual,
+    requestApproval: vi
+      .fn()
+      .mockResolvedValue({ requested: true, approvalId: 'appr-mock', approverUserId: 'telegram:dana' }),
+  };
 });
 
 vi.mock('../../config.js', async () => {
@@ -187,9 +192,10 @@ describe('agent message policies', () => {
     await deleteDestination(A, 'b'); // removes A→B — the destination ACL now denies
     await setMessagePolicy(A, B, 'telegram:dana', now()); // ...but a stale policy row remains
 
-    await expect(
-      routeAgentMessage({ id: 'ghost', platform_id: B, content: JSON.stringify({ text: 'x' }), in_reply_to: null }, SA),
-    ).rejects.toThrow(/unauthorized agent-to-agent/);
+    await routeAgentMessage(
+      { id: 'ghost', platform_id: B, content: JSON.stringify({ text: 'x' }), in_reply_to: null },
+      SA,
+    );
     expect(requestApproval).not.toHaveBeenCalled();
     expect(readInbound(B, SB.id)).toHaveLength(0);
   });
