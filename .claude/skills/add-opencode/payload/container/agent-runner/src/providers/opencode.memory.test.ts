@@ -3,13 +3,14 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
+import { OpenCodeProvider } from './opencode.js';
+import { buildOpenCodeConfig } from './opencode-config.js';
 import {
-  OpenCodeProvider,
-  buildOpenCodeConfig,
+  prepareOpenCodeMemory,
+  openCodeInstructionsPath,
   runMemorySessionHook,
   type OpenCodeMemorySessionHook,
-} from './opencode.js';
-import { prepareOpenCodeMemory, openCodeInstructionsPath } from './opencode-memory.js';
+} from './opencode-memory.js';
 
 // The same registered renderer used by other providers supplies a turn-start
 // snapshot. Native OpenCode rereads its output file during that turn.

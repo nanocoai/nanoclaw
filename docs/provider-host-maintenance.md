@@ -34,8 +34,9 @@ pnpm exec tsx scripts/opencode-host.ts --update
 
 An existing `opencode` executable can also run directly in the checkout. It
 natively discovers `.claude/skills`, including debugging and update instructions.
-Host credentials and model configuration remain native to OpenCode, independent
-of the container's OneCLI gateway. Existing native settings are preserved.
+Host credentials and model configuration remain native to OpenCode, separate
+from the container's gateway-managed credentials. Existing native settings are
+preserved.
 The helper requires stable OpenCode 1.18.25 or newer with the `--prompt` option.
 It selects the newest compatible installation it finds, so an older managed copy
 does not shadow a newer native CLI.
@@ -49,7 +50,8 @@ runtime provider contract does not need it.
 Before every `opencode serve` start, including a server restart in the same
 container, the provider writes fixed `onecli-managed` placeholders to its own
 session volume at `$XDG_DATA_HOME/opencode/auth.json`. No host auth-file bind or
-host stub is required. Real tokens and account metadata stay in OneCLI.
+host stub is required. Real tokens and account metadata stay in the credential
+gateway.
 
 The provider replaces the auth file atomically without following a file symlink.
 API-key mode clears stale OAuth state before server startup. This file controls
@@ -65,14 +67,17 @@ container uses it. Host-native OpenCode auth files must be preserved.
 
 ## Container startup configuration
 
-The generated container configuration is authoritative. The provider uses an
-empty configuration directory shipped under the existing read-only `/app/src`
-mount, while data, cache, and state remain writable. Native OpenCode skips npm
-installation in read-only config directories; the local memory plugin has no
-runtime package imports. Startup therefore does not need npm registry access.
-`.opencode` project configuration is disabled in this managed container; model,
-permission, and MCP settings come from NanoClaw. Host-native OpenCode configuration
-and plugins are unaffected.
+The provider passes NanoClaw's model, permission, MCP, and instruction settings
+through `OPENCODE_CONFIG_CONTENT`. It sets `OPENCODE_DISABLE_PROJECT_CONFIG=true`
+to disable project `.opencode` configuration in the managed container.
+
+Before each turn, the registered memory renderer runs with the `startup` source.
+The provider combines its output with the turn's instructions and delivery
+reminder, then atomically writes `$XDG_DATA_HOME/nanoclaw-instructions.md`.
+OpenCode's instructions list includes that file and the agent's `CLAUDE.md` and
+`CLAUDE.local.md`. Native continuation steps, compaction continuations, and child
+tasks reread these files through OpenCode's instructions pipeline. Host-native
+OpenCode configuration and plugins are unaffected.
 
 ## Installation and refresh
 
@@ -88,10 +93,11 @@ and uses the existing portable Bun resolver.
 
 OpenAI-compatible custom endpoints ask whether a key is required before listing
 models. A newly entered key is used as a bearer only for that configured models
-request; redirects are refused. The key is saved in OneCLI only after model
-selection succeeds, and provider defaults are saved after vaulting succeeds.
+request; redirects are refused. The key is saved in the credential gateway only
+after model selection succeeds, and provider defaults are saved after vaulting
+succeeds.
 
-Keeping an existing key leaves the secret in OneCLI and offers manual model
+Keeping an existing key leaves the secret in the gateway and offers manual model
 entry. Re-entering the key enables discovery. A gateway reachability probe is a
 separate potential enhancement. Neither behavior requires a core setup or
 runtime contract extension.

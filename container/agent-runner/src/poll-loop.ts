@@ -368,13 +368,9 @@ export async function processQuery(
    * results and decides the wrap-nudge. False → text events are
    * delivery-inert and the final result stays the single delivery door.
    */
-  contractOrMidTurnDelivery: boolean | Pick<ProviderRuntimeContract, 'textDelivery'> = false,
+  midTurnCompleteDelivery = false,
   signal?: AbortSignal,
 ): Promise<QueryResult> {
-  const midTurnCompleteDelivery =
-    typeof contractOrMidTurnDelivery === 'boolean'
-      ? contractOrMidTurnDelivery
-      : contractOrMidTurnDelivery.textDelivery === 'mid-turn-complete';
   // adoptTurn mutates routing in place; keep the caller's batch route intact.
   routing = { ...routing };
   let queryContinuation: string | undefined;
@@ -1048,7 +1044,7 @@ export async function dispatchResultText(
   text: string,
   routing: RoutingContext,
   options?: ResultDispatchOptions,
-): Promise<{ sent: number; hasUnwrapped: boolean; taskBlocks: TaskMessageBlock[]; resultBlocks: number }> {
+): Promise<{ sent: number; hasUnwrapped: boolean; taskBlocks: TaskMessageBlock[] }> {
   // <internal> spans are not-for-delivery scratchpad. Remove them BEFORE block
   // extraction so a <message> drafted inside one is never delivered from the
   // final text either — the mid-turn seam already guarantees this; without the
@@ -1063,10 +1059,6 @@ export async function dispatchResultText(
   // text with no (new) blocks after a mid-turn delivery is scratchpad, not an
   // undelivered reply.
   let sent = options?.midTurnSent ?? 0;
-  // <message> blocks present in THIS result text (delivered, stripped, task
-  // or dropped alike) — drives the bare-error-text delivery gate, which must
-  // key on the error result itself, not on earlier mid-turn deliveries.
-  let resultBlocks = 0;
   // <message to> blocks left inert in a task run — drives the same-turn
   // "use send_message" nudge in processQuery.
   const taskBlocks: TaskMessageBlock[] = [];
@@ -1080,7 +1072,6 @@ export async function dispatchResultText(
     const toName = match[1];
     const body = stripHarnessTagArtifacts(match[2].trim());
     lastIndex = MESSAGE_RE.lastIndex;
-    resultBlocks++;
 
     // One-door delivery in task sessions: only the send_message tool delivers.
     // A final-text <message to> block here is either an echo of a tool send the
@@ -1149,7 +1140,7 @@ export async function dispatchResultText(
   if (hasUnwrapped) {
     log(`WARNING: agent output had no <message to="..."> blocks — nothing was sent`);
   }
-  return { sent, hasUnwrapped, taskBlocks, resultBlocks };
+  return { sent, hasUnwrapped, taskBlocks };
 }
 
 /**

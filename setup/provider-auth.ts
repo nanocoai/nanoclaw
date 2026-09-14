@@ -40,7 +40,8 @@ export async function run(args: string[]): Promise<void> {
   const skillDir = getInstallableProviderDescriptor(name)?.skillDir;
   if (refresh && !skillDir) throw new Error(`Provider '${name}' has no install skill to refresh.`);
   if (skillDir && (!entry || refresh)) {
-    if (providerImagePolicy(name) === 'local-required' && readImageSource() === 'hardened') {
+    const switchToLocal = providerImagePolicy(name) === 'local-required' && readImageSource() === 'hardened';
+    if (switchToLocal) {
       if (process.env[HARDENED_IMAGE_ENV_KEY]?.trim().toLowerCase() === 'true') {
         throw new Error(
           `Unset exported ${HARDENED_IMAGE_ENV_KEY} before installing a provider that requires a local image.`,
@@ -52,7 +53,6 @@ export async function run(args: string[]): Promise<void> {
       });
       if (p.isCancel(local) || !local)
         throw new Error('Provider installation cancelled; the existing image and payload are unchanged.');
-      writeImageSource('local');
     }
     // Already registered providers authenticate directly unless refresh was
     // requested. That keeps reauthentication usable without registry/build
@@ -65,6 +65,7 @@ export async function run(args: string[]): Promise<void> {
       console.error(`Couldn't install ${name}: ${blockers.join('; ')}`);
       process.exit(1);
     }
+    if (switchToLocal) writeImageSource('local');
     if (changed) {
       console.log('Provider payload installed — rebuilding the container image…');
       const rebuild = buildContainerImage();

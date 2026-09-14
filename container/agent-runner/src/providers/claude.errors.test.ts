@@ -71,7 +71,7 @@ it.each([false, true])('delivers the Claude SDK billing error once, with prior r
     (exchange) => exchanges.push(exchange),
     'continue',
     undefined,
-    claudeRuntimeContract,
+    claudeRuntimeContract.textDelivery === 'mid-turn-complete',
   );
 
   expect(getUndeliveredMessages().map((row) => JSON.parse(row.content).text)).toEqual([
@@ -100,7 +100,7 @@ it('keeps a Claude task billing failure in its task log and out of chat', async 
     undefined,
     'scheduled work',
     undefined,
-    claudeRuntimeContract,
+    claudeRuntimeContract.textDelivery === 'mid-turn-complete',
   );
 
   const rows = getUndeliveredMessages();

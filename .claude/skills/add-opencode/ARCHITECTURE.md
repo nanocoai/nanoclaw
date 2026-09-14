@@ -54,13 +54,21 @@ routing, without retaining a previous turn's stale memory.
 The container supplies generated configuration and disables `.opencode` project
 configuration with `OPENCODE_DISABLE_PROJECT_CONFIG`. It declares no plugin and
 uses normal writable native config locations; there is no managed config tree,
-XDG override, or config symlink. Host-native configuration remains separate.
+managed `XDG_CONFIG_HOME` override, or config symlink. The host still supplies
+per-session `XDG_DATA_HOME` for persisted native state and the rendered memory
+file. Host-native configuration remains separate.
 
 Pinned OpenCode may attempt its own background authoring-dependency install in
 a writable config directory. With no declared plugin, server startup does not
 wait for it. Offline native tests establish that model turns, compaction and
 Task children work without a package-registry response. Existing containers must
 be recreated after refresh to discard config symlinks from the earlier payload.
+
+## MCP timing
+
+MCP calls allow 330 seconds, covering the core's five-minute human question
+window plus transport overhead. Cancelling a turn cancels its active tool wait;
+a question already posted to chat remains visible.
 
 ## Credentials and installation
 
@@ -86,7 +94,8 @@ payload edits must be backed up first.
 An exact seam-version predicate guards all skill mutations during installation
 and refresh. The install flow skips build, test, and external skill effects because
 its caller owns those steps. Missing or mismatched host Bun uses the container's
-pinned version through pnpm. Removal lists every installed file and registration.
+pinned version through pnpm. Removal derives copied-file destinations from the
+skill declarations and reverses every registration and dependency change.
 
 The lightweight authentication check uses the skill planner to detect missing
 copy, append, dependency, or CLI declarations. Since install mode deliberately

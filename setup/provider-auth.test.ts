@@ -110,10 +110,10 @@ describe('standalone provider setup flow', () => {
     expect(fixture.installModes).toEqual([{ mode: 'install' }]);
     expect(fixture.check).toHaveBeenCalledTimes(1);
   });
-  it('resolves a local image before payload changes, then builds before auth', async () => {
+  it('persists the local image choice after successful apply, then builds before auth', async () => {
     fixture.image = 'hardened';
     await run(['opencode', '--refresh']);
-    expect(fixture.order).toEqual(['local-image', 'install', 'build', 'auth']);
+    expect(fixture.order).toEqual(['install', 'local-image', 'build', 'auth']);
     expect(fixture.installModes).toEqual([{ mode: 'refresh' }]);
     expect(fixture.check).toHaveBeenCalledTimes(1);
   });
@@ -130,6 +130,18 @@ describe('standalone provider setup flow', () => {
     vi.stubEnv('NANOCLAW_HARDENED_IMAGE', 'true');
     await expect(run(['opencode', '--refresh'])).rejects.toThrow('Unset exported');
     expect(fixture.order).toEqual([]);
+  });
+  it.each(['blocked', 'throws'])('preserves hardened image selection when provider apply %s', async (failure) => {
+    fixture.image = 'hardened';
+    fixture.blockers = failure === 'blocked' ? ['incompatible core'] : [];
+    fixture.offline = failure === 'throws';
+    await expect(run(['opencode', '--refresh'])).rejects.toThrow(
+      failure === 'blocked' ? 'setup stopped' : 'Registry and build dependencies are unavailable',
+    );
+    expect(fixture.image).toBe('hardened');
+    expect(fixture.order).toEqual(['install']);
+    expect(fixture.auth).not.toHaveBeenCalled();
+    expect(fixture.check).not.toHaveBeenCalled();
   });
   it('does not authenticate when installation or image building fails', async () => {
     fixture.blockers = ['incompatible core'];

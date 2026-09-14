@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'bun:test';
 
-import { buildOpenCodeConfig } from './opencode.js';
+import { buildOpenCodeConfig } from './opencode-config.js';
 
 const ENV_KEYS = [
   'OPENCODE_PROVIDER',

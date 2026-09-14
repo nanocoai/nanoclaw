@@ -110,13 +110,10 @@ describe('handleQuestionAsked', () => {
     expect(replyCalls.map((c) => c.requestID)).toEqual(['que_no_session']);
   });
 
-  it('gives up after its timeout and logs, so a never-resolving reply cannot stall the turn', async () => {
-    // Mirrors drainPendingQuestions' own timeout test: `.reply()` here never
-    // resolves, simulating a hung round-trip on the per-turn event path.
-    // handleQuestionAsked is awaited inline from the `question.asked` case in
-    // the provider's event loop, so it must return on its own timeout budget
-    // rather than stall the turn forever. A short budget keeps this
-    // deterministic instead of waiting out the real 10s production default.
+  it('returns after its timeout and logs a never-resolving reply', async () => {
+    // The event pump does not await this handler. Its own bounded wait
+    // still reports a hung reply and returns without throwing. A short
+    // budget avoids waiting out the real 10s production default.
     const client: QuestionClient = {
       question: {
         reply: () => new Promise(() => {}),

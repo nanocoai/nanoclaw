@@ -190,7 +190,8 @@ append `--refresh` only when intentionally replacing its payload and pins. Choos
 ChatGPT sign-in, a local OpenAI-compatible endpoint, OpenRouter, DeepSeek, or a
 supported native backend. Automatic API-key configuration supports OpenAI,
 OpenRouter, DeepSeek, Google, and Anthropic; other native authentication schemes
-require separate integration. The command stores credentials in OneCLI and backend defaults in
+require separate integration. The command stores credentials in the configured
+credential gateway (the current adapter uses OneCLI) and backend defaults in
 `.env`. The full setup wizard also offers this flow and selects OpenCode for
 new groups only after configuration succeeds. The standalone command leaves the
 instance default unchanged.
@@ -223,21 +224,19 @@ ncl groups restart --id <group-id>
 ```
 
 Send a message and verify a reply, then send a second message to check session
-continuation. The test requires a reachable backend and the correct OneCLI
+continuation. The test requires a reachable backend and the correct gateway
 secret grant. No provider is switched by the install steps alone. If memory
 needs to move from another provider, follow `/migrate-memory` before switching.
 
 ## Recover a ChatGPT login
 
-NanoClaw currently pins OneCLI 1.41.0, which cannot refresh these OAuth tokens
-after expiry because its refresh request omits the required client ID. Use manual
-reauthentication when that happens. Reliable unattended ChatGPT operation requires
-a separately validated gateway refresh fix; upgrading to OneCLI 1.43.1 also
-requires migrating its removed agent-grant API.
+OAuth refresh belongs to the credential gateway. Installs using OneCLI 1.41.0
+require manual reauthentication after expiry; see [OneCLI compatibility](ONECLI-LEGACY.md)
+for the version-specific limitation and upgrade constraints.
 
-The container uses only the fixed sentinel; do not implement token refresh in the provider or copy live
-credentials into a group. A saved credential is not proof that authentication
-still works.
+The container uses only a fixed sentinel. Do not implement token refresh in the
+provider or copy live credentials into a group. A saved credential is not proof
+that authentication still works.
 
 If a request fails because the login expired or was revoked, run on the host:
 
@@ -312,31 +311,9 @@ Put comments on separate lines. These settings affect only OpenCode containers.
   optional limits for already-staged structured attachments. Upstream channel
   attachment transport remains text-only until that separate feature lands.
 
-Custom model limits and modalities apply only to the main model. MCP servers
-come from the core's resolved runner configuration. Before each external turn,
-the shared hook renders memory into one instruction file under writable XDG data,
-alongside current core instructions and delivery wording. Native continuation
-after compaction and Task children reread that file. Compaction uses the
-turn-start memory snapshot; the next external turn refreshes it.
-
-The container gets model, permission, and MCP configuration from NanoClaw and
-keeps `OPENCODE_DISABLE_PROJECT_CONFIG` enabled. It declares no plugin and uses
-normal writable native config locations. Upstream may attempt a background
-authoring-dependency install, but startup does not wait for it. Offline native
-tests verify turns without registry access. Host OpenCode keeps its native
-configuration and plugin support.
-
-OpenCode keeps one server and continuously read event subscription per container.
-Prompts are serialized and completion comes from the native prompt response plus
-its stored messages. A stale idle event cannot complete a new turn. Failed or
-uncertain turns are never automatically replayed. Aborts stop native execution;
-if completion cannot be confirmed within the cleanup bound, the server is stopped
-and the next query resumes from persisted state. Effective configuration changes
-restart the shared server.
-
-MCP calls allow 330 seconds, covering the core's five-minute human question
-window plus transport overhead. Cancelling a turn cancels its active tool wait;
-a question already posted to chat remains visible.
+Custom model limits and modalities apply only to the main model. NanoClaw supplies
+MCP configuration and container policy. See [ARCHITECTURE.md](ARCHITECTURE.md) for
+turn completion, memory snapshots, offline startup, cancellation, and MCP timeouts.
 
 For reproducible native integration coverage, download the official OpenCode
 1.18.25 binary and run from `container/agent-runner`:
