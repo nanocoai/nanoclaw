@@ -70,14 +70,13 @@ describe('Mattermost bot setup guidance', () => {
     expect(serverSetup).toContain('Mattermost labels this path for testing and evaluation rather than production');
   });
 
-  it('journals removal for the refreshed base URL', () => {
+  it('journals removal for the selected settings', () => {
     const baseUrlUpdate = directives.find(
-      (directive) =>
-        directive.kind === 'run' && directive.body.some((line) => line.includes('--key MATTERMOST_BASE_URL')),
+      (directive) => directive.kind === 'run' && directive.body.some((line) => line.includes('scripts/configure.ts')),
     );
     const envSet = directives.find((directive) => directive.kind === 'env-set');
-    expect(baseUrlUpdate?.attrs.remove).toBe('.claude/skills/add-mattermost/scripts/remove-base-url.mjs');
-    expect(envSet?.body.some((line) => line.startsWith('MATTERMOST_BASE_URL='))).toBe(false);
+    expect(baseUrlUpdate?.attrs.remove).toBe('.claude/skills/add-mattermost/scripts/remove-config.mjs');
+    expect(envSet).toBeUndefined();
 
     const root = mkdtempSync(join(tmpdir(), 'nanoclaw-mattermost-remove-'));
     try {
@@ -94,7 +93,7 @@ describe('Mattermost bot setup guidance', () => {
     expect(skill).toContain('/api/v4/config/client?format=old');
     expect(skill).toContain('ServiceSettings.AllowCorsFrom');
     expect(directives.some((directive) => directive.attrs.when === 'config_access=docker')).toBe(true);
-    expect(skill).toContain('setup/index.ts --step set-env -- --key MATTERMOST_BASE_URL --value "{{base_url}}"');
+    expect(skill).toContain('scripts/configure.ts "{{base_url}}" "{{bot_token}}" "{{callback_url}}"');
   });
 
   it('binds the generic wizard owner handle to the resolved Mattermost user ID', () => {

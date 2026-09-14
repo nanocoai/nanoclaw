@@ -1,5 +1,5 @@
 {
-  "notes": "Fake values only. API responses and callback-secret generation are stubbed.",
+  "notes": "Fake values only. API responses and the configuration helper are stubbed.",
   "scenarios": [
     {
       "name": "self-hosted-bot",
@@ -24,12 +24,8 @@
           "stdout": "https://mattermost.example.test\n\n"
         },
         {
-          "match": "/api/v4/users/me",
+          "match": "scripts/configure.ts",
           "stdout": "{\"id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbb\",\"username\":\"nanoclaw\"}"
-        },
-        {
-          "match": "openssl rand -hex 32",
-          "stdout": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         },
         {
           "match": "/api/v4/users/username/owner.test",
@@ -65,12 +61,8 @@
           "stdout": "https://other.example.test\n\n"
         },
         {
-          "match": "/api/v4/users/me",
+          "match": "scripts/configure.ts",
           "stdout": "{\"id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbb\",\"username\":\"nanoclaw\"}"
-        },
-        {
-          "match": "openssl rand -hex 32",
-          "stdout": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         },
         {
           "match": "/api/v4/users/username/owner.test",
@@ -105,12 +97,8 @@
           "stdout": "http://localhost:8065\n\n"
         },
         {
-          "match": "/api/v4/users/me",
+          "match": "scripts/configure.ts",
           "stdout": "{\"id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbb\",\"username\":\"nanoclaw\"}"
-        },
-        {
-          "match": "openssl rand -hex 32",
-          "stdout": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         },
         {
           "match": "/api/v4/users/username/owner.test",
@@ -145,12 +133,8 @@
           "stdout": "http://localhost:8065\n\n"
         },
         {
-          "match": "/api/v4/users/me",
+          "match": "scripts/configure.ts",
           "stdout": "{\"id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbb\",\"username\":\"nanoclaw\"}"
-        },
-        {
-          "match": "openssl rand -hex 32",
-          "stdout": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         },
         {
           "match": "/api/v4/users/username/owner.test",
