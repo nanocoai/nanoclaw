@@ -1,10 +1,12 @@
 ---
 name: agent-browser
-description: Browse the web for any task — research topics, read articles, interact with web apps, fill forms, take screenshots, extract data, and test web pages. Use whenever a browser would be useful, not just when the user explicitly asks.
+description: Automate an interactive browser for web apps, forms, screenshots, visual checks, and pages that require navigation or client-side interaction. For ordinary web research or reading a public URL, prefer the provider's direct Web Search or Web Fetch tools when available; use this skill when interaction is required or direct tools cannot complete the task.
 allowed-tools: Bash(agent-browser:*)
 ---
 
 # Browser Automation with agent-browser
+
+Use the provider's direct Web Search or Web Fetch tools first for ordinary research, article reading, and extracting text from a public URL. Use `agent-browser` when the task needs clicks, typing, login state, screenshots, visual inspection, or a direct tool failed to access the page.
 
 ## Quick start
 
@@ -99,7 +101,7 @@ when you must wait on a custom JS condition (e.g. a spinner disappearing or a
 "Send" button re-enabling in a chat UI).
 
 **Never write an unbounded wait loop.** A bare `until … do sleep; done` that
-polls a page condition will loop *forever* if the condition never becomes true
+polls a page condition will loop _forever_ if the condition never becomes true
 (page failed to load, selector changed, network stalled). That does not just
 fail the command — it wedges the entire agent turn: the runner keeps the model
 stream open, later messages get silently swallowed, and the container can hang

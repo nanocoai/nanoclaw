@@ -1,182 +1,125 @@
 ---
 name: add-ollama-provider
-description: Route a NanoClaw agent group to a local Ollama model instead of the Anthropic API. Ollama speaks the Anthropic API natively (v1/messages), so no provider code changes are needed — just env var overrides and a model setting. Use when the user wants to run their agent locally, cut API costs, or experiment with open-weight models. See docs/ollama.md for background.
+description: Route NanoClaw agent groups through a local Ollama daemon using the Claude Agent SDK and Ollama's Anthropic-compatible API. Use for local models, offline inference, or the `ollama launch nanoclaw` setup.
+metadata:
+  nanoclaw-provider: ollama
+  nanoclaw-provider-label: Ollama
+  nanoclaw-provider-hint: Local models through the Ollama daemon
+  nanoclaw-provider-offered: 'false'
+  nanoclaw-provider-image: hardened-compatible
 ---
 
-# Add Ollama Provider
+# Add Ollama provider
 
-Routes an agent group to a local Ollama instance instead of the Anthropic API.
-See `docs/ollama.md` for how this works and the tradeoffs involved.
+Install an `ollama` provider that reuses NanoClaw's Claude runtime while routing
+requests to the local Ollama daemon. Selectable per agent group; other groups
+keep their provider. It stays out of the setup picker: `/setup-ollama-launch`
+installs it.
 
-## Prerequisites
+## Apply
 
-1. **Ollama is installed and running** on the host — verify: `curl -s http://localhost:11434/api/tags`
-2. **A model is pulled** — e.g. `ollama pull gemma4` or `ollama pull qwen3-coder`
-3. **The agent group already exists** — run `/init-first-agent` first if needed
+### 1. Copy the payload
 
-## 1. Check source support
+Fetch the `providers` branch and copy the host and container halves: the two
+provider modules, their host and runtime contracts, the direct web tools, and
+their tests. The registry branch is canonical, so re-applying overwrites these.
 
-The feature requires two fields in `ContainerConfig` (`env` and `blockedHosts`) and their
-corresponding wiring in `container-runner.ts`. Check if already present:
-
-```bash
-grep -c 'blockedHosts' src/container-config.ts src/container-runner.ts
+```nc:copy from-branch:providers
+src/providers/ollama.ts
+src/providers/ollama.test.ts
+src/providers/ollama-registration.test.ts
+src/provider-contracts/ollama.ts
+container/agent-runner/src/providers/ollama.ts
+container/agent-runner/src/providers/ollama.test.ts
+container/agent-runner/src/providers/ollama-registration.test.ts
+container/agent-runner/src/providers/ollama-tool-policy.test.ts
+container/agent-runner/src/providers/ollama.conformance.test.ts
+container/agent-runner/src/provider-contracts/ollama.ts
+container/agent-runner/src/mcp-tools/ollama-web.ts
+container/agent-runner/src/mcp-tools/ollama-web.test.ts
 ```
 
-If either count is 0, apply the changes in steps 1a and 1b. Otherwise skip to step 2.
+### 2. Wire the barrels
 
-### 1a. Extend ContainerConfig
+Provider registration and contract registration are separate imports, so each
+tree takes its own line (skipped if already present).
 
-In `src/container-config.ts`, add to the `ContainerConfig` interface:
-
-```typescript
-env?: Record<string, string>;
-blockedHosts?: string[];
+```nc:append to:src/providers/index.ts
+import './ollama.js';
 ```
 
-And in `readContainerConfig`, add inside the returned object:
-
-```typescript
-env: raw.env,
-blockedHosts: raw.blockedHosts,
+```nc:append to:src/provider-contracts/index.ts
+import './ollama.js';
 ```
 
-### 1b. Wire into container-runner
-
-In `src/container-runner.ts`, after the `NANOCLAW_MCP_SERVERS` block, add:
-
-```typescript
-// Per-agent-group env overrides — applied last to win over OneCLI values.
-if (containerConfig.env) {
-  for (const [key, value] of Object.entries(containerConfig.env)) {
-    args.push('-e', `${key}=${value}`);
-  }
-}
-
-// Blocked hosts: resolve to 0.0.0.0 so they are unreachable inside the container.
-if (containerConfig.blockedHosts) {
-  for (const host of containerConfig.blockedHosts) {
-    args.push('--add-host', `${host}:0.0.0.0`);
-  }
-}
+```nc:append to:container/agent-runner/src/providers/index.ts
+import './ollama.js';
 ```
 
-### 1c. Fix home directory permissions (if not already done)
-
-The container may run as your host uid (not uid 1000). Check the Dockerfile:
-
-```bash
-grep 'chmod.*home/node' container/Dockerfile
+```nc:append to:container/agent-runner/src/provider-contracts/index.ts
+import './ollama.js';
 ```
 
-If it shows `chmod 755`, change it to `chmod 777` so any uid can write there.
-Then rebuild the container image: `./container/build.sh`
-
-## 2. Identify the setup
-
-Ask the user (plain text, not AskUserQuestion):
-
-1. **Which agent group?** List available groups: `pnpm exec tsx scripts/q.ts data/v2.db "SELECT folder, name FROM agent_groups;"`
-2. **Which Ollama model?** List available: `curl -s http://localhost:11434/api/tags | grep '"name"'`
-3. **Block Anthropic API?** Recommended yes — prevents accidental spend if config drifts.
-
-Record as `FOLDER`, `MODEL`, and `BLOCK_ANTHROPIC`.
-
-## 3. Configure container.json
-
-Read `groups/<FOLDER>/container.json`. Add (or merge into) an `env` block and optionally `blockedHosts`:
-
-```json
-{
-  "env": {
-    "ANTHROPIC_BASE_URL": "http://host.docker.internal:11434",
-    "ANTHROPIC_API_KEY": "ollama",
-    "NO_PROXY": "host.docker.internal",
-    "no_proxy": "host.docker.internal"
-  },
-  "blockedHosts": ["api.anthropic.com"]
-}
+```nc:append to:container/agent-runner/src/mcp-tools/index.ts
+import './ollama-web.js';
 ```
 
-Omit `blockedHosts` if the user declined step 2.
+### 3. Build and validate
 
-**Why these vars:** `ANTHROPIC_BASE_URL` redirects the Anthropic SDK to Ollama.
-`ANTHROPIC_API_KEY=ollama` satisfies the SDK's key requirement (Ollama ignores it).
-`NO_PROXY` bypasses the OneCLI HTTPS proxy for requests to `host.docker.internal`
-so they reach Ollama directly instead of going through the credential gateway.
-
-## 4. Set the model
-
-Read the agent group's shared Claude settings:
-
-```bash
-# Find the agent group ID
-AG_ID=$(pnpm exec tsx scripts/q.ts data/v2.db "SELECT id FROM agent_groups WHERE folder='<FOLDER>';")
-SETTINGS=data/v2-sessions/$AG_ID/.claude-shared/settings.json
-```
-
-Add `"model": "<MODEL>"` to that settings file. Create the file if it doesn't exist:
-
-```json
-{
-  "model": "gemma4:latest"
-}
-```
-
-If the file already has content, merge the `model` key in — don't overwrite existing keys.
-
-**Why here and not container.json:** Claude Code reads its model from its own settings
-file, not from env vars. This file is bind-mounted into the container as `~/.claude/settings.json`.
-
-## 5. Build and restart
-
-Run from your NanoClaw project root:
-
-```bash
-export PATH="/opt/homebrew/bin:$PATH"
+```nc:run effect:build
 pnpm run build
-source setup/lib/install-slug.sh
-launchctl unload ~/Library/LaunchAgents/$(launchd_label).plist
-launchctl load   ~/Library/LaunchAgents/$(launchd_label).plist
-# Linux: systemctl --user restart $(systemd_unit)
+pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit
 ```
 
-## 6. Verify
+```nc:run effect:test
+pnpm exec vitest run src/providers/ollama.test.ts src/providers/ollama-registration.test.ts src/container-runner.test.ts
+```
 
-Send a message to the agent. Then confirm:
+```nc:run effect:test
+cd container/agent-runner && bun test src/providers/ollama.test.ts src/providers/ollama-registration.test.ts src/providers/ollama-tool-policy.test.ts src/providers/ollama.conformance.test.ts src/mcp-tools/ollama-web.test.ts
+```
+
+## Configure an agent group
+
+The default endpoint is `http://host.docker.internal:11434`. For another
+host-visible endpoint, convert loopback to a container-reachable address and
+persist it before restarting NanoClaw:
 
 ```bash
-# Ollama shows the model as active
-curl -s http://localhost:11434/api/ps | grep '"name"'
-
-# Container has the right env vars
-CTR=$(docker ps --filter "label=nanoclaw-group-folder=<FOLDER>" --format "{{.Names}}" | head -1)
-docker inspect "$CTR" --format '{{json .HostConfig.ExtraHosts}}'
-docker exec "$CTR" env | grep ANTHROPIC
+pnpm exec tsx setup/index.ts --step set-env -- --key OLLAMA_BASE_URL --value http://host.docker.internal:11434
 ```
 
-Expected: `api.anthropic.com:0.0.0.0` in ExtraHosts, `ANTHROPIC_BASE_URL=http://host.docker.internal:11434`.
+Then set the provider and the exact model name and restart the group:
 
-## Reverting to Claude
+```bash
+ncl groups config update --id <agent-group-id> --provider ollama --model <model>
+ncl groups restart --id <agent-group-id>
+```
 
-To switch back to the Anthropic API:
+Nothing else needs editing: no group `container.json`, Claude settings file,
+proxy, or API key. The provider sends a placeholder token to the daemon, blocks
+the Anthropic and Claude service hosts, turns reasoning off when the group sets
+no effort, and disables Claude Code's cloud-only integrations and background
+traffic.
 
-1. Remove the `env` and `blockedHosts` keys from `groups/<FOLDER>/container.json`
-2. Remove `"model"` from the shared settings file
-3. Restart the service
+Web browsing is off by default. With `OLLAMA_WEB_BROWSING=enabled`, two MCP
+tools call the daemon's signed Ollama Web Search and Web Fetch endpoints
+directly instead of the slower model-orchestrated server-tool path, which stays
+disabled; NanoClaw never receives an Ollama API key. The provider tells the
+agent to use search for finding URLs, fetch for reading one, and to reserve
+`agent-browser` for clicks, forms, sign-in state, and screenshots.
 
-No rebuild needed — both files are read at container spawn time.
+The provider instructions also make `approval-pending` a hard wait point (the
+agent acknowledges, ends the turn, and resumes on the real result) and state
+that an acknowledgment starts no background job, so a receiving agent finishes
+the work before ending its turn. Agent creation and messaging stay
+provider-neutral and never force the turn to end.
+
+Behavior details, including the `WebFetch` preflight skip and the
+runaway-generation caps: `docs/ollama.md`.
 
 ## Troubleshooting
 
-**Agent hangs, no response:** Ollama may be loading the model cold (large models take 10–30s).
-Watch `curl -s http://localhost:11434/api/ps` — the model appears once loaded.
-
-**"model not found" error in container logs:** The model name in settings.json doesn't match
-what Ollama has. Run `ollama list` on the host and use the exact name shown.
-
-**Responses claim to be Claude:** The model was trained on data that includes Claude conversations.
-Add a line to `groups/<FOLDER>/CLAUDE.md` telling it what model it runs on.
-
-**Agent responds but Ollama shows no activity:** `NO_PROXY` may not have taken effect for
-`http_proxy` (lowercase). Add both `NO_PROXY` and `no_proxy` to the env block.
+- **No response:** verify `curl -sf http://localhost:11434/api/tags` succeeds on the host.
+- **Model not found:** use the exact name from `ollama list`.
+- **Container calls Anthropic:** confirm the group's provider is `ollama` with `ncl groups config get --id <agent-group-id>`.

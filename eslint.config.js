@@ -1,7 +1,7 @@
-import globals from 'globals'
-import pluginJs from '@eslint/js'
-import tseslint from 'typescript-eslint'
-import noCatchAll from 'eslint-plugin-no-catch-all'
+import globals from 'globals';
+import pluginJs from '@eslint/js';
+import tseslint from 'typescript-eslint';
+import noCatchAll from 'eslint-plugin-no-catch-all';
 
 export default [
   { ignores: ['node_modules/', 'dist/', 'container/', 'groups/'] },
@@ -40,4 +40,12 @@ export default [
       '@typescript-eslint/await-thenable': 'error',
     },
   },
-]
+  // A channel adapter may ship a browser asset beside its TypeScript (served to
+  // the page, never imported by the host). tsconfig does not include it, so the
+  // typed rules have no program for it.
+  {
+    files: ['src/channels/*-page.js', 'src/channels/*-ui.js'],
+    ...tseslint.configs.disableTypeChecked,
+    languageOptions: { parserOptions: { projectService: false } },
+  },
+];

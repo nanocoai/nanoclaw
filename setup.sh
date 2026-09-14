@@ -84,6 +84,12 @@ install_deps() {
   # the script since we redirect stdout/stderr to the log file — the prompt
   # is invisible but corepack still blocks on stdin. Auto-accept.
   export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+  # pnpm 10's default self-switcher shells out to another pnpm while keeping
+  # PWD pointed at this checkout. In a fresh HOME that child rediscovers the
+  # same packageManager pin and recurses forever. Bootstrap already reads the
+  # exact pin below, so keep this process and every descendant on the selected
+  # executable instead of asking pnpm to install itself.
+  export npm_config_manage_package_manager_versions=false
 
   # Preferred path: enable corepack so `pnpm` shim lands on PATH.
   if command -v corepack >/dev/null 2>&1; then
