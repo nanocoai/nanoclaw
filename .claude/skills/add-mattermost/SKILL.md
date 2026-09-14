@@ -171,7 +171,7 @@ Use the public client configuration endpoint to verify the settings. The
 command must print `{{base_url}}` and then a blank line.
 
 ```nc:run effect:fetch
-curl -fsS "{{base_url}}/api/v4/config/client?format=old" | jq -er --arg url "{{base_url}}" '(.SiteURL == $url and (.WebsocketURL // "") == "") as $ok | if $ok then .SiteURL, (.WebsocketURL // "") else error("Mattermost SiteURL/WebsocketURL mismatch") end'
+curl -fsS "{{base_url}}/api/v4/config/client?format=old" | node .claude/skills/add-mattermost/scripts/read-response.mjs config "{{base_url}}"
 ```
 
 ### 3. Copy and register the channel
@@ -293,7 +293,7 @@ curl -sf "{{base_url}}/api/v4/users/username/{{owner_username}}" -H "Authorizati
 ```
 
 ```nc:run capture:platform_id effect:fetch validate:^mattermost:[a-z0-9]{26}$
-curl -sf -X POST "{{base_url}}/api/v4/channels/direct" -H "Authorization: Bearer {{bot_token}}" -H "Content-Type: application/json" -d '["{{owner_user_id}}","{{bot_user_id}}"]' | jq -er '"mattermost:" + .id'
+curl -sf -X POST "{{base_url}}/api/v4/channels/direct" -H "Authorization: Bearer {{bot_token}}" -H "Content-Type: application/json" -d '["{{owner_user_id}}","{{bot_user_id}}"]' | node .claude/skills/add-mattermost/scripts/read-response.mjs dm
 ```
 
 The resolved `platform_id`, `owner_handle`, and `owner_username` are used by
