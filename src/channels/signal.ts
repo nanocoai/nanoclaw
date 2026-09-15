@@ -597,6 +597,8 @@ export function createSignalAdapter(config: {
           isMention: true,
           isGroup: false,
           timestamp,
+          isMention: true,
+          isGroup: false,
         };
         await setup.onInbound(platformId, null, msg);
         return;
@@ -696,6 +698,8 @@ export function createSignalAdapter(config: {
       isMention: computeSignalIsMention(config.account, isGroup, dataMessage.mentions),
       isGroup,
       timestamp,
+      isMention: !isGroup,
+      isGroup,
     };
     await setup.onInbound(platformId, null, msg);
 
