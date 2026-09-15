@@ -95,6 +95,56 @@ describe('apply engine lifecycle', () => {
     expect(second.skipped.length).toBeGreaterThanOrEqual(3);
   });
 
+  it('fills missing local payload files without overwriting installed files in the same copy block', async () => {
+    writeFileSync(
+      join(skillDir, 'SKILL.md'),
+      '```nc:copy\nresources/sample.ts -> src/sample.ts\nresources/sample.ts -> src/missing.ts\n```\n',
+    );
+    writeFileSync(join(root, 'src/sample.ts'), '// local customization\n');
+    const result = await applySkill(skillDir, root, {});
+    expect(fullyApplied(result)).toBe(true);
+    expect(readFileSync(join(root, 'src/sample.ts'), 'utf8')).toBe('// local customization\n');
+    expect(readFileSync(join(root, 'src/missing.ts'), 'utf8')).toBe('export const sample = true;\n');
+    expect(result.journal).toEqual([{ op: 'wrote', path: 'src/missing.ts' }]);
+    await removeSkill(root, result.journal, () => {});
+    expect(readFileSync(join(root, 'src/sample.ts'), 'utf8')).toBe('// local customization\n');
+    expect(existsSync(join(root, 'src/missing.ts'))).toBe(false);
+  });
+
+  it('fetches only missing registry payload files during install', async () => {
+    writeFileSync(join(skillDir, 'SKILL.md'), '```nc:copy from-branch:providers\nsrc/sample.ts\nsrc/missing.ts\n```\n');
+    writeFileSync(join(root, 'src/sample.ts'), '// local customization\n');
+    const { cmds, exec } = recordingExec();
+    const result = await applySkill(skillDir, root, { exec, resolveRemote: () => 'fixture' });
+    expect(fullyApplied(result)).toBe(true);
+    expect(cmds).toHaveLength(2);
+    expect(cmds[0]).toBe("git fetch 'fixture' '+refs/heads/providers:refs/remotes/fixture/providers'");
+    expect(cmds[1]).toContain("git show 'refs/remotes/fixture/providers:src/missing.ts'");
+    expect(cmds[1]).not.toContain('src/sample.ts');
+    expect(result.journal).toEqual([{ op: 'wrote', path: 'src/missing.ts' }]);
+    expect(readFileSync(join(root, 'src/sample.ts'), 'utf8')).toBe('// local customization\n');
+  });
+
+  it('skips a registry fetch if the missing files arrive before the copy step', async () => {
+    writeFileSync(join(skillDir, 'SKILL.md'), '```nc:copy from-branch:providers\nsrc/sample.ts\nsrc/missing.ts\n```\n');
+    writeFileSync(join(root, 'src/sample.ts'), '// local customization\n');
+    const { cmds, exec } = recordingExec();
+    const result = await applySkill(skillDir, root, {
+      exec,
+      resolveRemote: () => 'fixture',
+      onEvent: async (event) => {
+        if (event.type === 'step-start' && event.kind === 'copy') {
+          writeFileSync(join(root, 'src/missing.ts'), '// installed before copy\n');
+        }
+      },
+    });
+    expect(fullyApplied(result)).toBe(true);
+    expect(cmds).toEqual([]);
+    expect(result.journal).toEqual([]);
+    expect(readFileSync(join(root, 'src/sample.ts'), 'utf8')).toBe('// local customization\n');
+    expect(readFileSync(join(root, 'src/missing.ts'), 'utf8')).toBe('// installed before copy\n');
+  });
+
   it('refresh mode overwrites an installed payload instead of treating presence as current', async () => {
     await applySkill(skillDir, root, { resolveInput: headless({ token: 'sekret-123' }), exec: () => {} });
     writeFileSync(join(skillDir, 'resources/sample.ts'), 'export const sample = "refreshed";\n');
@@ -215,9 +265,9 @@ describe('from-branch copy apply path', () => {
     // (mocked here) would not fail with ENOENT on a real run
     expect(existsSync(join(froot, 'container/skills/demo-formatting'))).toBe(true);
     expect(cmds).toContain("git fetch 'origin' '+refs/heads/channels:refs/remotes/origin/channels'");
-    expect(cmds.some((c) => c.includes("git show 'refs/remotes/origin/channels:container/skills/demo-formatting/SKILL.md'"))).toBe(
-      true,
-    );
+    expect(
+      cmds.some((c) => c.includes("git show 'refs/remotes/origin/channels:container/skills/demo-formatting/SKILL.md'")),
+    ).toBe(true);
     expect(res.journal).toContainEqual({ op: 'wrote', path: 'container/skills/demo-formatting/SKILL.md' });
 
     rmSync(fskill, { recursive: true, force: true });
