@@ -117,6 +117,7 @@ const CODEX_ENV_ALLOWLIST = new Set([
 
 export interface ThreadParams {
   model?: string;
+  personality?: string;
   cwd: string;
   baseInstructions?: string;
   developerInstructions?: string;
@@ -273,6 +274,11 @@ export async function initializeCodexAppServer(server: AppServer): Promise<void>
   sendCodexNotification(server, 'initialized');
 }
 
+export const codexTone = {
+  default: 'friendly',
+  toSettings: (tone: string) => ({ personality: tone }),
+};
+
 export async function startOrResumeCodexThread(
   server: AppServer,
   threadId: string | undefined,
@@ -287,7 +293,7 @@ export async function startOrResumeCodexThread(
     config: { bypass_hook_trust: true },
     baseInstructions: params.baseInstructions,
     developerInstructions: params.developerInstructions,
-    personality: 'friendly',
+    personality: params.personality ?? codexTone.default,
     persistExtendedHistory: false,
   };
 

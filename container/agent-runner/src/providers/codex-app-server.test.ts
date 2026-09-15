@@ -339,6 +339,7 @@ describe('Codex thread SessionStart source', () => {
     await startOrResumeCodexThread(server, undefined, { cwd: '/workspace/agent' });
 
     expect(requests[0].method).toBe('thread/start');
+    expect(requests[0].params.personality).toBe('friendly');
     expect(requests[0].params.config).toEqual({ bypass_hook_trust: true });
     expect(requests[0].params.sessionStartSource).toBe('startup');
   });
@@ -346,9 +347,10 @@ describe('Codex thread SessionStart source', () => {
   it('does not send startup when resuming', async () => {
     const { server, requests } = autoRespondingServer();
 
-    await startOrResumeCodexThread(server, 'thread-existing', { cwd: '/workspace/agent' });
+    await startOrResumeCodexThread(server, 'thread-existing', { cwd: '/workspace/agent', personality: 'pragmatic' });
 
     expect(requests[0].method).toBe('thread/resume');
+    expect(requests[0].params.personality).toBe('pragmatic');
     expect(requests[0].params.config).toEqual({ bypass_hook_trust: true });
     expect(requests[0].params.sessionStartSource).toBeUndefined();
   });

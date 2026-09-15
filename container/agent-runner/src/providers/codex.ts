@@ -24,6 +24,7 @@ import {
   attachCodexAutoApproval,
   codexInferenceSection,
   codexRuntimeOwnership,
+  codexTone,
   initializeCodexAppServer,
   interruptCodexTurn,
   killCodexAppServer,
@@ -58,6 +59,7 @@ export interface CodexResolvedConfiguration {
   executionPolicy?: unknown;
   inference?: unknown;
   mcpServers?: unknown;
+  tone?: unknown;
 }
 
 /**
@@ -104,6 +106,7 @@ export class CodexProvider implements AgentProvider {
 
   private readonly mcpServers: Record<string, McpServerConfig>;
   private readonly inference: CodexConfigPlan['inference'];
+  private readonly tone: ReturnType<typeof codexTone.toSettings>;
   private readonly runtime: CodexRuntimeDeps;
   private memorySessionHook?: CodexMemorySessionHook;
 
@@ -119,6 +122,7 @@ export class CodexProvider implements AgentProvider {
     configuration?: CodexResolvedConfiguration,
   ) {
     this.runtime = runtime;
+    this.tone = (configuration?.tone as typeof this.tone | undefined) ?? codexTone.toSettings(codexTone.default);
     if (configuration) {
       this.inference = configuration.inference as CodexConfigPlan['inference'];
       this.mcpServers = configuration.mcpServers as Record<string, McpServerConfig>;
@@ -189,6 +193,7 @@ export class CodexProvider implements AgentProvider {
         await self.runtime.initializeCodexAppServer(server);
         threadId = await self.runtime.startOrResumeCodexThread(server, threadId, {
           model: self.inference.model,
+          ...self.tone,
           cwd: input.cwd,
           baseInstructions: input.systemContext?.instructions,
         });

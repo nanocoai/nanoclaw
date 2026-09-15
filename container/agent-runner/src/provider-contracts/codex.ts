@@ -4,6 +4,7 @@ import {
   codexMcpServersSection,
   codexMemorySection,
   codexRuntimeOwnership,
+  codexTone,
   type CodexMemorySessionHook,
   writeCodexConfigToml,
 } from '../providers/codex-app-server.js';
@@ -27,11 +28,15 @@ const RUNTIME_SEAM_VERSION = 1;
 // files would be written twice per query.
 codexRuntimeOwnership.contractOwnsRuntimeFiles = true;
 
-export const codexRuntimeContract: ProviderRuntimeContract = {
+// Keep the payload compatible with cores that predate the optional tone field.
+export const codexRuntimeContract: ProviderRuntimeContract & {
+  configuration: { tone: typeof codexTone };
+} = {
   seamVersion: RUNTIME_SEAM_VERSION,
   configuration: {
     executionPolicy: { constant: codexExecutionPolicySection() },
     inference: codexInferenceSection,
+    tone: codexTone,
     // Codex's native memory stays off whatever hook core registers, so the
     // section is a declared constant, not a function of the hook.
     memory: { constant: codexMemorySection() },

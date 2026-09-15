@@ -111,4 +111,21 @@ describe('CodexProvider', () => {
       codexRuntimeOwnership.contractOwnsRuntimeFiles = previous;
     }
   });
+
+  it.each([undefined, 'pragmatic'])('passes resolved tone to thread settings (%j)', async (personality) => {
+    const { runtime } = recordingRuntime();
+    runtime.initializeCodexAppServer = async () => {};
+    runtime.startOrResumeCodexThread = async (_server, _thread, settings) => {
+      expect(settings.personality).toBe(personality ?? 'friendly');
+      throw new Error('thread settings captured');
+    };
+    const provider = new CodexProvider({}, runtime, {
+      inference: {},
+      mcpServers: {},
+      ...(personality ? { tone: { personality } } : {}),
+    });
+    provider.registerMemorySessionHook(MEMORY_HOOK);
+    const query = provider.query({ prompt: 'hi', cwd: '/workspace/agent' });
+    await expect(query.events.next()).rejects.toThrow('thread settings captured');
+  });
 });
