@@ -186,11 +186,16 @@ A gateway skill is any `.claude/skills/<name>/` directory containing a
 `gateway.json`:
 
 ```json
-{ "kind": "iron-proxy", "label": "Iron Proxy", "description": "…", "default": true }
+{ "kind": "onecli", "label": "OneCLI", "description": "…", "default": true }
 ```
 
 `setup/gateways/catalog.ts` discovers them by that file and requires exactly one
-`default`. `setup/gateways/install.ts` applies the chosen skill through the
+`default`. OneCLI is currently the default and appears first in the advanced
+setup picker; simple setup keeps it without an extra choice. Existing installs
+retain their selected gateway. Changing the manifest default can change the
+fresh-install preference later without changing provider login.
+
+`setup/gateways/install.ts` applies the chosen skill through the
 normal skill engine — same `nc:` directives, same journal — and stamps
 `NANOCLAW_GATEWAY_PROVIDER`. The skill's `scripts/detect.ts` prints `installed`
 or `absent`, which is what lets `/update-nanoclaw` recognise an install that
@@ -275,7 +280,7 @@ closed. These fields are display-only and cannot alter authorization.
 
 Adapters must supply only safe display metadata: no raw request bodies,
 headers, credentials or query strings. OneCLI uses its native action summary
-when available; raw body previews are not forwarded. Iron reuses the same pinned OneCLI summarizer, including its application registry
+when available; raw body previews are not forwarded. Iron’s NanoClaw front reuses the same pinned OneCLI summarizer, including its application registry
 and generic fallback. HTTP POST alone is not evidence of a specific write action.
 The common card states that approval applies to one request and does not
 connect an account or expand credential permissions.
@@ -288,9 +293,16 @@ own per-site descriptions or special cases. Both installed adapters normalize
 OneCLI-shaped summaries through `normalizeGatewayApprovalSummary` and use the
 same renderer. Identity validation, routing and decisions remain core-owned.
 
-OneCLI supplies its native summary. Iron runs the same pinned OneCLI summary
-modules and provider registry inside its own trusted boundary, before credential
-injection. Its helper receives a 16 KiB body prefix and no authorization headers;
+OneCLI supplies its native summary. The Iron adapter runs the same pinned OneCLI summary
+modules and provider registry inside its NanoClaw-owned approval front, before
+forwarding approved requests to unmodified upstream Iron for credential injection.
+The front authenticates session identities and checks every request inside HTTPS
+tunnels. Only explicit continue decisions are accepted; bridge outages, malformed
+responses, timeouts and session revocation fail closed. Iron listens only on
+loopback in the same container, with dial-time loopback restrictions preventing
+backend access through DNS aliases. Control-plane sync cannot replace the front.
+Credentialed application traffic uses HTTPS; the Iron adapter preserves the
+request scheme and rejects plaintext HTTP rather than treating it as HTTPS. Its helper receives a 16 KiB body prefix and no authorization headers;
 only the resulting summary crosses the approval channel. The original request
 stream is preserved. The source is checksum-verified, its upstream tests run in
 the image build, and a version mismatch against OneCLI's gateway pin fails the

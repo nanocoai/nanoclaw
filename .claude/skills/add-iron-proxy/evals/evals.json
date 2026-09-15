@@ -1,0 +1,17 @@
+{
+  "skill_name": "add-iron-proxy",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Install Iron Proxy with its official management UI in a fresh local NanoClaw copy. Describe the supported steps and the result I can verify. Do not actually install anything in this evaluation.",
+      "expected_output": "Use the pinned official control-plane service, preserve approval checks and private credentials, report the actual console URL and its real capabilities.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "Refresh my existing local Iron install with its console on port 18443. Keep my saved credentials and grants, and explain how to add GitHub REST access through the official UI. Do not actually change services in this evaluation.",
+      "expected_output": "Reuse state and keys, respect the configured port, scope a secret with request rules and a grant through the supported API helper, keep the separate egress allowlist.",
+      "files": []
+    }
+  ]
+}
