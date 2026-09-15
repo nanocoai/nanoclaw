@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 // --- Mocks ---
 
@@ -368,8 +370,20 @@ describe('SignalAdapter', () => {
       await adapter.teardown();
     });
 
-    it('forwards image attachments as [Image: <path>] plus structured attachments array', async () => {
-      const adapter = createAdapter();
+    it('reads non-audio attachments from disk and forwards them as base64', async () => {
+      const dataDir = join('/tmp', `signal-cli-test-data-${Date.now()}`);
+      mkdirSync(join(dataDir, 'attachments'), { recursive: true });
+      const attId = 'att123abc';
+      writeFileSync(join(dataDir, 'attachments', attId), Buffer.from('fake jpeg bytes'));
+
+      const adapter = createSignalAdapter({
+        cliPath: 'signal-cli',
+        account: '+15551234567',
+        tcpHost: '127.0.0.1',
+        tcpPort: 7583,
+        manageDaemon: false,
+        signalDataDir: dataDir,
+      });
       const cfg = createMockSetup();
       await adapter.setup(cfg);
 
@@ -378,7 +392,7 @@ describe('SignalAdapter', () => {
         sourceName: 'Alice',
         dataMessage: {
           timestamp: 1700000000000,
-          attachments: [{ id: 'att123abc', contentType: 'image/jpeg', size: 50000 }],
+          attachments: [{ id: attId, contentType: 'image/jpeg', filename: 'photo.jpg', size: 15 }],
         },
       });
 
@@ -388,11 +402,46 @@ describe('SignalAdapter', () => {
         null,
         expect.objectContaining({
           content: expect.objectContaining({
-            text: expect.stringMatching(/^\[Image: .+att123abc\]$/),
-            attachments: [expect.objectContaining({ contentType: 'image/jpeg' })],
+            attachments: [
+              expect.objectContaining({
+                type: 'image',
+                name: 'photo.jpg',
+                mimeType: 'image/jpeg',
+                data: Buffer.from('fake jpeg bytes').toString('base64'),
+              }),
+            ],
           }),
         }),
       );
+
+      await adapter.teardown();
+      rmSync(dataDir, { recursive: true, force: true });
+    });
+
+    it('falls back to a placeholder when a non-audio attachment file is missing on disk', async () => {
+      const adapter = createAdapter();
+      const cfg = createMockSetup();
+      await adapter.setup(cfg);
+
+      pushEvent({
+        sourceNumber: '+15555550123',
+        sourceName: 'Alice',
+        dataMessage: {
+          timestamp: 1700000000000,
+          attachments: [{ id: 'missing-att', contentType: 'application/pdf', filename: 'doc.pdf', size: 999 }],
+        },
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      expect(cfg.onInbound).toHaveBeenCalledWith(
+        '+15555550123',
+        null,
+        expect.objectContaining({
+          content: expect.objectContaining({ text: '[Attachment not found]' }),
+        }),
+      );
+      const call = (cfg.onInbound as ReturnType<typeof vi.fn>).mock.calls.find((c) => c[0] === '+15555550123');
+      expect(call?.[2].content.attachments).toBeUndefined();
 
       await adapter.teardown();
     });
