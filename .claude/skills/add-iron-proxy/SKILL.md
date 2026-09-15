@@ -76,7 +76,7 @@ pnpm run build
 ```
 
 ```nc:run effect:test
-pnpm exec vitest run src/gateway-providers/iron-proxy.test.ts src/gateway-providers/iron-proxy-approval.test.ts src/gateway-providers/gateway-provider-registry.test.ts src/gateway-approval-coordinator.test.ts .claude/skills/add-iron-proxy/scripts/control.test.ts .claude/skills/add-iron-proxy/scripts/install-command.test.ts
+pnpm exec vitest run src/gateway-providers/iron-proxy.test.ts src/gateway-providers/iron-proxy-approval.test.ts src/gateway-providers/gateway-provider-registry.test.ts src/gateway-approval-coordinator.test.ts .claude/skills/add-iron-proxy/scripts/control.test.ts .claude/skills/add-iron-proxy/scripts/provider-credentials.test.ts .claude/skills/add-iron-proxy/scripts/credential-isolation.test.ts .claude/skills/add-iron-proxy/scripts/install-command.test.ts
 ```
 
 The setup consumer writes `NANOCLAW_GATEWAY_PROVIDER=iron-proxy` only after every directive succeeds. Restart only this copy's NanoClaw service after an upgrade so its session contribution and approval bridge match the new installation. Check the proxy has synced its assigned principal before reporting the gateway ready.
@@ -122,6 +122,44 @@ Codex credentials. The setup flow and provider picker stay unchanged.
 pnpm exec tsx setup/index.ts --step provider-auth codex
 ```
 
+## OpenCode authentication
+
+After installing `/add-opencode`, use the same provider-auth entry point:
+
+```bash
+pnpm exec tsx setup/index.ts --step provider-auth opencode
+```
+
+The OpenCode setup flow supports ChatGPT sign-in and API keys through Iron
+Control. It installs no OneCLI service and needs no OneCLI management settings.
+ChatGPT refresh uses OpenCode's own OAuth client in Iron's native broker; the
+agent sees only placeholders. Initial sign-in and reauthentication wait for the
+native broker to refresh successfully (up to two minutes) before setup continues. API keys use each backend's declared header
+scheme. Setup grants the secrets to this install's principal and permits the
+model hostname. Rotation and reauthentication keep IDs and grants. Moving a key
+to another host requires confirmation and re-entering its value.
+
+Native backends and custom/keyless HTTPS endpoints on port 443 are supported.
+Use a DNS name and TLS for local models; plaintext HTTP endpoints fail during
+setup. Follow the OpenCode skill to restart the host and test a real reply.
+
 ## Remove
 
 Follow [REMOVE.md](REMOVE.md). Stop only this copy's proxy and console services. Keep the database volume and encryption keys together when preserving data.
+
+### Provider credentials on shared model hosts
+
+OpenCode and Codex use distinct non-secret markers. Iron replaces only the matching
+header marker, so each runtime retains its own account on a shared HTTPS host.
+Claude's managed model marker remains distinct. These replacements use
+`require: false`: a request from another provider must pass without substitution.
+The upstream API still rejects an unavailable or unmatched placeholder.
+
+Refresh the installed provider payloads and rebuild the agent image before using
+this version. Reconnect older Codex credentials to replace their host-wide injection
+rules. If setup identifies a conflicting legacy or manual grant, reconnect that
+provider with this version (including Claude's model credential), or remove the
+conflicting grant in Iron Control. Stored secrets are write-only and are not
+silently rewritten. Setup checks direct and role grants, including inactive OAuth
+brokers. The installation's Iron principal remains the authorization boundary;
+these markers select credentials, not permissions for separate untrusted tenants.

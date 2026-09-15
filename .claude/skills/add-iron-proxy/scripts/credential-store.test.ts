@@ -13,6 +13,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
+vi.mock('./credential-isolation.js', async (original) => ({
+  ...(await original<typeof import('./credential-isolation.js')>()),
+  assertCredentialIsolation: vi.fn(async () => {}),
+}));
 const mocks = vi.hoisted(() => ({ request: vi.fn(), grant: vi.fn(), run: vi.fn() }));
 vi.mock('./control.js', () => ({
   controlPaths: (root: string) => ({ directory: root, registration: path.join(root, 'registration.json') }),
@@ -46,6 +50,8 @@ it('stores an API key only in Iron and records credential-free local metadata', 
     'PUT',
     expect.objectContaining({
       source: { source_type: 'control_plane', secret: 'fixture-sensitive', config: {} },
+      inject_config: {},
+      replace_config: { proxy_value: 'nc-codex-token-v1', match_headers: ['Authorization'], require: false },
       rules: [{ host: 'api.openai.com', http_methods: ['*'] }],
     }),
   );
@@ -106,4 +112,11 @@ it('does not mark authentication complete when proxy refresh fails', async () =>
     'fixture unavailable',
   );
   expect(fs.existsSync(path.join(root, 'codex.json'))).toBe(false);
+});
+
+it('requires reconnection of legacy Codex host-wide credentials', async () => {
+  const root = fixture();
+  fs.writeFileSync(path.join(root, 'codex.json'), JSON.stringify({ secretIds: ['legacy'] }));
+  mocks.request.mockResolvedValue({ inject_config: { header: 'Authorization' } });
+  expect(await createCredentialStore(root).has('codex')).toBe(false);
 });

@@ -52,7 +52,7 @@ describe('buildOpenCodeConfig provider transport', () => {
     process.env.OPENCODE_MODEL = 'anthropic/claude-sonnet-4-6';
     delete process.env.ANTHROPIC_BASE_URL;
     const config = buildOpenCodeConfig({});
-    expect(config.provider).toMatchObject({ anthropic: { options: { apiKey: 'placeholder' } } });
+    expect(config.provider).toMatchObject({ anthropic: { options: { apiKey: 'nc-opencode-token-v1' } } });
   });
 
   it('custom base URL pins the Chat Completions transport', () => {
@@ -62,7 +62,7 @@ describe('buildOpenCodeConfig provider transport', () => {
     const config = buildOpenCodeConfig({});
     const entry = (config.provider as Record<string, Record<string, unknown>>).openai;
     expect(entry.npm).toBe('@ai-sdk/openai-compatible');
-    expect(entry.options).toEqual({ apiKey: 'placeholder', baseURL: 'https://inference.example.test/v1' });
+    expect(entry.options).toEqual({ apiKey: 'nc-opencode-token-v1', baseURL: 'https://inference.example.test/v1' });
   });
 
   it('no base URL keeps the native transport and still passes inference overrides', () => {
@@ -71,7 +71,7 @@ describe('buildOpenCodeConfig provider transport', () => {
     delete process.env.ANTHROPIC_BASE_URL;
     const config = buildOpenCodeConfig({ effort: 'high' });
     const entry = (config.provider as Record<string, Record<string, unknown>>).openai;
-    expect(entry.options).toEqual({ apiKey: 'placeholder' });
+    expect(entry.options).toEqual({ apiKey: 'nc-opencode-token-v1' });
     expect(entry.npm).toBeUndefined();
     expect(entry.models).toMatchObject({ 'gpt-5.2': { options: { reasoningEffort: 'high' } } });
   });
@@ -355,7 +355,7 @@ describe('provider-owned endpoint defaults', () => {
     process.env.OPENCODE_MODEL_OUTPUT_LIMIT = '4096';
     const config = buildOpenCodeConfig({ model: 'openai/test', effort: 'high' });
     const entry = (config.provider as Record<string, Record<string, unknown>>).openai;
-    expect(entry.options).toEqual({ apiKey: 'placeholder' });
+    expect(entry.options).toEqual({ apiKey: 'nc-opencode-token-v1' });
     expect(entry.npm).toBeUndefined();
     expect(entry.models).toMatchObject({
       test: { limit: { context: 32768, output: 4096 }, options: { reasoningEffort: 'high' } },

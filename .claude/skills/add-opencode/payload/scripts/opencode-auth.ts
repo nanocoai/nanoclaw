@@ -8,6 +8,7 @@ import path from 'path';
 
 import * as p from '@clack/prompts';
 
+import { getCredentialStore } from '../setup/gateways/credential-store.js';
 import { brightSelect } from '../setup/lib/bright-select.js';
 import { brandBody } from '../setup/lib/theme.js';
 import * as setupLog from '../setup/logs.js';
@@ -18,7 +19,7 @@ import { CONTAINER_IMAGE } from '../src/config.js';
 import { CONTAINER_RUNTIME_BIN } from '../src/container-runtime.js';
 import { chooseOpenCodeModel, discoverRuntimeModels, discoverLocalModelIds } from './opencode-model-config.js';
 export { discoverLocalModelIds } from './opencode-model-config.js';
-import { apiKeyInjection, CHATGPT_SECRET, createOpenCodeVault, findOpenCodeSecret } from './opencode-vault.js';
+import { apiKeyInjection, CHATGPT_SECRET, createOpenCodeVault } from './opencode-vault.js';
 
 type Backend = 'chatgpt' | 'local' | 'openrouter' | 'deepseek' | 'custom' | 'skip';
 type ChatGptLoginMethod = 'browser' | 'device';
@@ -107,17 +108,10 @@ export function buildOpenCodeLoginArgs(
   ];
 }
 
-/**
- * Translate OpenCode's `auth.json` into the Codex-shaped OAuth record OneCLI recognises.
- *
- * OneCLI's ingest classifier and its gateway injector both key off
- * `tokens.access_token` / `tokens.refresh_token`; OpenCode writes
- * `openai.access` / `openai.refresh` / `openai.accountId` instead. Vaulting the
- * OpenCode file verbatim is classified as an opaque api-key, so the gateway
- * injects the whole JSON blob as a bearer and never refreshes it. Emitting this
- * shape instead is what makes the ChatGPT credential an `oauth` secret.
- */
-export function buildOneCliOAuthSecret(authJson: unknown, now: Date = new Date()): Record<string, unknown> {
+/** Validate the native OAuth result without choosing a credential gateway. */
+export function readOpenCodeOAuth(
+  authJson: unknown,
+): import('../setup/gateways/credential-store.js').GatewayOAuthCredential {
   if (!authJson || typeof authJson !== 'object') throw new Error('OpenCode auth.json is not an object');
   const openai = (authJson as Record<string, unknown>).openai;
   if (!openai || typeof openai !== 'object') throw new Error('OpenCode auth.json has no OpenAI entry');
@@ -136,38 +130,35 @@ export function buildOneCliOAuthSecret(authJson: unknown, now: Date = new Date()
     // ChatGPT request fails auth. Fail loudly rather than vault a broken record.
     throw new Error('OpenCode ChatGPT credential has no account id — sign in again and pick a ChatGPT plan');
   }
+  if ([record.access, record.refresh, record.accountId].some((value) => /[\r\n]/.test(value as string)))
+    throw new Error('OpenCode returned a multiline OAuth credential; sign in again.');
   return {
-    tokens: {
-      access_token: record.access,
-      refresh_token: record.refresh,
-      account_id: record.accountId,
-    },
-    OPENAI_API_KEY: null,
-    last_refresh: now.toISOString(),
+    accessToken: record.access,
+    refreshToken: record.refresh,
+    accountId: record.accountId,
   };
 }
 
-/** Reject unavailable/ambiguous metadata rather than creating duplicate credentials. */
-export function findChatGptSecret(payload: unknown): string | null {
-  return findOpenCodeSecret(payload, CHATGPT_SECRET);
-}
-
 export interface ChatGptVault {
+  readonly canKeep?: boolean;
   find: () => Promise<string | null>;
-  save: (secret: Record<string, unknown>, existingId: string | null) => Promise<void>;
+  keep?: (existingId: string) => Promise<void>;
+  save: (
+    secret: import('../setup/gateways/credential-store.js').GatewayOAuthCredential,
+    existingId: string | null,
+  ) => Promise<void>;
 }
 
-/** Host-only management API; use the same gateway and key as NanoClaw's runtime. */
-export function createChatGptVault(
-  url?: string,
-  apiKey?: string,
-  fetchImpl: typeof fetch = globalThis.fetch,
-): ChatGptVault {
-  const vault = createOpenCodeVault(CHATGPT_SECRET, url, apiKey, fetchImpl);
+export function createChatGptVault(root = process.cwd()): ChatGptVault {
+  const vault = createOpenCodeVault(CHATGPT_SECRET, root);
   return {
+    get canKeep() {
+      return vault.canKeep;
+    },
     find: vault.find,
+    keep: vault.keep,
     save: async (secret, existingId) => {
-      await vault.save(JSON.stringify(secret), existingId);
+      await vault.save(secret, existingId);
     },
   };
 }
@@ -181,12 +172,13 @@ export interface ChatGptAuthDeps {
 
 export async function runOpenCodeChatGptAuth(method: ChatGptLoginMethod, deps: ChatGptAuthDeps = {}): Promise<void> {
   const root = deps.root ?? process.cwd();
-  const vault = deps.vault ?? createChatGptVault();
+  const vault = deps.vault ?? createChatGptVault(root);
   const existingId = await vault.find();
-  if (existingId && !deps.reauth) {
+  if (existingId && !deps.reauth && vault.canKeep !== false) {
+    await vault.keep?.(existingId);
     p.log.info(
       brandBody(
-        'A ChatGPT credential exists in OneCLI; sign-in skipped. To replace an expired or revoked login, run: pnpm exec tsx scripts/opencode-auth.ts --reauth',
+        'A ChatGPT credential exists in the selected gateway; sign-in skipped. To replace an expired or revoked login, run: pnpm exec tsx scripts/opencode-auth.ts --reauth',
       ),
     );
     return;
@@ -217,12 +209,12 @@ async function performChatGptSignIn(
     } catch {
       throw new Error('OpenCode wrote an unreadable credential file. Sign in again.');
     }
-    const secret = buildOneCliOAuthSecret(authJson);
+    const secret = readOpenCodeOAuth(authJson);
     // Delete native token files before any network wait. A Ctrl-C during vault
     // lookup or save must not strand them when the process exits immediately.
     fs.rmSync(loginDir, { recursive: true, force: true });
     if ((await vault.find()) !== existingId)
-      throw new Error('The ChatGPT vault entry changed during sign-in. Retry after checking OneCLI.');
+      throw new Error('The ChatGPT vault entry changed during sign-in. Retry after checking the selected gateway.');
     await vault.save(secret, existingId);
   } finally {
     fs.rmSync(loginDir, { recursive: true, force: true });
@@ -242,7 +234,7 @@ export async function runOpenCodeAuthCli(args: string[]): Promise<void> {
   await runOpenCodeChatGptAuth(method, { reauth: true });
   p.log.success(
     brandBody(
-      'ChatGPT credential saved in OneCLI. Existing agent permissions and model settings are preserved. Retry the failed request.',
+      'ChatGPT credential saved in the selected gateway. Existing agent permissions and model settings are preserved. Retry the failed request.',
     ),
   );
 }
@@ -262,8 +254,8 @@ export async function runOpenCodeAuthStep(options: { allowSkip?: boolean } = {})
           label: 'Local or self-hosted',
           hint: 'vLLM, llama.cpp, or another OpenAI-compatible endpoint',
         },
-        { value: 'openrouter', label: 'OpenRouter', hint: 'API key stored in OneCLI' },
-        { value: 'deepseek', label: 'DeepSeek', hint: 'API key stored in OneCLI' },
+        { value: 'openrouter', label: 'OpenRouter', hint: 'API key stored in the selected gateway' },
+        { value: 'deepseek', label: 'DeepSeek', hint: 'API key stored in the selected gateway' },
         {
           value: 'custom',
           label: 'Something else',
@@ -370,6 +362,7 @@ export async function runOpenCodeAuthStep(options: { allowSkip?: boolean } = {})
     OPENCODE_AUTH_MODE: backend === 'chatgpt' ? 'chatgpt' : undefined,
   };
   checkExportedDefaults(defaults);
+  const endpoint = (await getCredentialStore()).modelEndpoint?.(baseUrl || `https://${host}`);
 
   // Guarded model catalogs need the newly entered key before discovery.
   // Keeping a vaulted key never reads it back into the host setup process.
@@ -398,7 +391,7 @@ export async function runOpenCodeAuthStep(options: { allowSkip?: boolean } = {})
     if (pendingKey?.keepExisting) {
       p.log.info(
         brandBody(
-          'Your existing key stays in OneCLI. Enter the model id manually, or rerun setup and enter a key to list models.',
+          'Your existing key stays in the selected gateway. Enter the model id manually, or rerun setup and enter a key to list models.',
         ),
       );
     }
@@ -414,6 +407,8 @@ export async function runOpenCodeAuthStep(options: { allowSkip?: boolean } = {})
     await (pendingKey ?? (await promptOpenCodeApiKey(provider, baseUrl, host))).save();
   }
 
+  await endpoint?.configure();
+
   // Commit defaults only after prompts and vaulting succeed. Preserve other
   // providers' endpoint settings, including the old shared variable.
   for (const [name, value] of Object.entries(defaults)) {
@@ -422,7 +417,7 @@ export async function runOpenCodeAuthStep(options: { allowSkip?: boolean } = {})
   }
 
   setupLog.step('auth', 'success', 0, { PROVIDER: 'opencode', BACKEND: backend });
-  p.log.success(brandBody('OpenCode configured. Credentials, when supplied, live in OneCLI.'));
+  p.log.success(brandBody('OpenCode configured. Credentials, when supplied, live in the selected gateway.'));
 }
 
 /** Prepare credentials without changing the vault or saved defaults. */
@@ -448,9 +443,9 @@ async function promptOpenCodeApiKey(provider: string, baseUrl: string, host: str
   if (keyless) return { key: undefined, keepExisting: false, save: async () => {} };
   const vault = createOpenCodeVault({
     name: `OpenCode ${provider}`,
-    type: 'generic',
-    hostPattern: host,
-    injectionConfig: apiKeyInjection(provider),
+    kind: 'api-key',
+    host,
+    injection: apiKeyInjection(provider),
   });
   const existingId = await vault.find({
     confirmHostChange: async (previous, next) =>
@@ -464,12 +459,14 @@ async function promptOpenCodeApiKey(provider: string, baseUrl: string, host: str
   const key = normalizeOptionalInput(
     answer(
       await p.password({
-        message: existingId ? 'API key (leave blank to keep the existing credential)' : 'API key',
-        validate: (value) => (existingId || String(value ?? '').trim() ? undefined : 'Required.'),
+        message:
+          existingId && vault.canKeep !== false ? 'API key (leave blank to keep the existing credential)' : 'API key',
+        validate: (value) =>
+          (existingId && vault.canKeep !== false) || String(value ?? '').trim() ? undefined : 'Required.',
       }),
     ),
   );
-  if (!key && !existingId) throw new Error('An API key is required for this backend.');
+  if (!key && (!existingId || vault.canKeep === false)) throw new Error('An API key is required for this backend.');
   return {
     key: key || undefined,
     keepExisting: !key,
@@ -478,7 +475,7 @@ async function promptOpenCodeApiKey(provider: string, baseUrl: string, host: str
         const id = await vault.save(key, existingId);
         p.log.info(
           brandBody(
-            `OneCLI credential ${id} ${existingId ? 'updated; existing grants preserved' : 'created; grant it to selective agents before use'}.`,
+            `Gateway credential ${id} ${existingId ? 'updated; existing grants preserved' : 'created; grant it to selective agents before use'}.`,
           ),
         );
       } else {

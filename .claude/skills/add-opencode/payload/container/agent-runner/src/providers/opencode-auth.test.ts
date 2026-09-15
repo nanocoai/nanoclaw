@@ -20,7 +20,13 @@ describe('container-owned OpenCode auth state', () => {
     const auth = path.join(directory, 'opencode/auth.json');
     initializeOpenCodeAuth(directory, 'chatgpt');
     const expected = {
-      openai: { type: 'oauth', access: 'onecli-managed', refresh: 'onecli-managed', expires: Date.UTC(2100, 0, 1) },
+      openai: {
+        type: 'oauth',
+        access: 'nc-opencode-token-v1',
+        refresh: 'nc-opencode-token-v1',
+        accountId: 'nc-opencode-token-v1',
+        expires: Date.UTC(2100, 0, 1),
+      },
     };
     expect(JSON.parse(fs.readFileSync(auth, 'utf8'))).toEqual(expected);
     fs.writeFileSync(auth, '{corrupt or stale');

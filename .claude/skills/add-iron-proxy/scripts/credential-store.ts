@@ -1,3 +1,4 @@
+import { createIronCredentialConnection, ironModelEndpoint } from './provider-credentials.js';
 import { getProviderModelEndpoint } from '../../../../src/provider-contracts/index.js';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -6,6 +7,7 @@ import type { ProviderCredentialStore } from '../../../../setup/gateways/credent
 import { getInstallSlug } from '../../../../src/install-slug.js';
 import { controlPaths, controlRequest, grantSecret } from './control.js';
 import { run, statePaths } from './setup.js';
+import { assertCredentialIsolation, ironHeaderName } from './credential-isolation.js';
 
 export function createCredentialStore(root = process.cwd()): ProviderCredentialStore {
   const namespace = getInstallSlug(root);
@@ -15,23 +17,44 @@ export function createCredentialStore(root = process.cwd()): ProviderCredentialS
     if (!fs.existsSync(controlPaths(root).registration))
       throw new Error('Install Iron Control before connecting Codex.');
   };
+  const isolate = (host: string) =>
+    assertCredentialIsolation(root, {
+      host,
+      headers: ['Authorization', 'ChatGPT-Account-Id'],
+      proxyValue: 'nc-codex-token-v1',
+      ownedForeignIds: ['codex-api', 'codex-chatgpt', 'codex-account'],
+    });
   const saveSecret = async (id: string, source: unknown, host: string, header: string) => {
     const secret = await controlRequest(root, `static_secrets/${id}`, 'PUT', {
       namespace,
       name: `Codex ${header}`,
       source,
-      inject_config: { header, ...(header === 'Authorization' ? { formatter: 'Bearer {{ .Value }}' } : {}) },
+      inject_config: {},
+      replace_config: { proxy_value: 'nc-codex-token-v1', match_headers: [ironHeaderName(header)], require: false },
       rules: [{ host, http_methods: ['*'] }],
     });
     await grantSecret('static', secret.id, root);
     return secret.id;
   };
   return {
+    modelEndpoint: (url) => ironModelEndpoint(url, root),
+    connection: (target) => createIronCredentialConnection(target, root),
     async has(provider) {
       check(provider);
       if (!fs.existsSync(metadata)) return false;
       const state = JSON.parse(fs.readFileSync(metadata, 'utf8'));
-      for (const id of state.secretIds) await controlRequest(root, `static_secrets/${id}`);
+      for (const id of state.secretIds) {
+        const secret = await controlRequest(root, `static_secrets/${id}`);
+        // Old host-wide injection needs reconnection; values cannot be read back.
+        if (
+          Object.keys(secret.inject_config ?? {}).length ||
+          secret.replace_config?.proxy_value !== 'nc-codex-token-v1' ||
+          secret.replace_config?.require !== false ||
+          secret.replace_config?.match_headers?.some((h: string) => h !== ironHeaderName(h))
+        )
+          return false;
+        for (const rule of secret.rules ?? []) await isolate(rule.host);
+      }
       if (state.brokerId) {
         const broker = await controlRequest(root, `broker_credentials/${state.brokerId}`);
         if (broker.dead) return false;
@@ -45,6 +68,7 @@ export function createCredentialStore(root = process.cwd()): ProviderCredentialS
       if (credential.kind === 'api-key') {
         mode = 'api';
         host = new URL(getProviderModelEndpoint(provider, 'api')).hostname;
+        await isolate(host);
         secretIds.push(
           await saveSecret(
             'codex-api',
@@ -56,6 +80,7 @@ export function createCredentialStore(root = process.cwd()): ProviderCredentialS
       } else {
         mode = 'chatgpt';
         host = new URL(getProviderModelEndpoint(provider, 'subscription')).hostname;
+        await isolate(host);
         const auth = JSON.parse(fs.readFileSync(credential.file, 'utf8'));
         const tokens = auth.tokens;
         if (!tokens?.refresh_token || !tokens?.account_id || !tokens?.id_token)

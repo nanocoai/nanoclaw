@@ -11,6 +11,7 @@ import { controlPaths, controlRequest, grantSecret, IronControlRequestError } fr
 import { getInstallSlug } from '../../../../src/install-slug.js';
 import { upsertEnvVar } from '../../../../setup/set-env.js';
 import { configureCredential, statePaths } from './setup.js';
+import { assertCredentialIsolation, ironHeaderName } from './credential-isolation.js';
 
 type Method = 'subscription' | 'oauth' | 'api' | 'skip';
 
@@ -23,11 +24,28 @@ export async function existingCredential(root = process.cwd()): Promise<boolean>
   if (fs.existsSync(controlPaths(root).registration)) {
     let credential;
     try {
-      credential = await controlRequest(root, `static_secrets/lookup/${encodeURIComponent(getInstallSlug(root))}/nanoclaw-model`);
+      credential = await controlRequest(
+        root,
+        `static_secrets/lookup/${encodeURIComponent(getInstallSlug(root))}/nanoclaw-model`,
+      );
     } catch (error) {
       if (error instanceof IronControlRequestError && error.status === 404) return false;
       throw error; // A control outage is not a missing login.
     }
+    if (
+      Object.keys(credential.inject_config ?? {}).length ||
+      credential.replace_config?.proxy_value !== 'gateway-managed' ||
+      credential.replace_config?.require !== false ||
+      credential.replace_config?.match_headers?.some((h: string) => h !== ironHeaderName(h))
+    )
+      return false;
+    for (const rule of credential.rules ?? [])
+      await assertCredentialIsolation(root, {
+        host: rule.host,
+        headers: ['Authorization', 'x-api-key'],
+        proxyValue: 'gateway-managed',
+        ownedForeignIds: ['nanoclaw-model'],
+      });
     // The auth mode is stored with the secret, so a retry after a failed grant
     // can finish without asking the user to authorize again.
     const mode = /^NanoClaw model \((ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|CLAUDE_CODE_OAUTH_TOKEN)\)$/.exec(
