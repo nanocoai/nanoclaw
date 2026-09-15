@@ -1,5 +1,5 @@
 /**
- * Agent-facing room actions: `create_room` and `add_to_room`
+ * Agent-facing room actions: `create_room`, `add_to_room`, and `handoff`
  * delivery-action bodies over the already-N-capable ensureAgentRoom.
  *
  * `create_room` is the "team room" primitive — the multi-agent pattern is N
@@ -40,6 +40,7 @@ import {
   normalizeName,
 } from '../agent-to-agent/db/agent-destinations.js';
 import { botTokenKeyForInstance, slackAuthTest, slackConversationsMembers } from '../../channels/slack-lib.js';
+import { getDeliveryAdapter } from '../../delivery.js';
 import { notifyAgent, requestApproval } from '../approvals/index.js';
 import { readEnvValue } from './env-file.js';
 import { ensureAgentRoom, publicPurpose, resolveOperatorSlackUserId, type RoomParticipant } from './orchestrate.js';
@@ -151,14 +152,6 @@ async function callerRoomDestination(
   const roomMg = await getMessagingGroupByPlatform('slack', `slack:${roomChannelId}`, callerInstanceKey);
   const dest = roomMg ? await getDestinationByTarget(callerGroupId, 'channel', roomMg.id) : undefined;
   return dest?.local_name ?? normalizeName(roomName);
-}
-
-/** `<@U…>, <@U…>` mention tags for every participant except the caller. */
-function mentionTags(participants: RoomParticipant[], excludeGroupId: string): string {
-  return participants
-    .filter((p) => p.agentGroupId !== excludeGroupId)
-    .map((p) => `<@${p.botUserId}>`)
-    .join(', ');
 }
 
 // ── create_room ──
@@ -274,10 +267,9 @@ export async function handleCreateRoom(content: Record<string, unknown>, session
       await notifyAgent(
         session,
         `Room "${name}" is live (${roomChannelId}) with you, the operator, and ${memberNames}. ` +
-          `Post a brief introduction there now via send_message({ to: "${roomDest}", ... }): ` +
-          `1-2 lines in your own voice on what this room is for, tagging each agent literally ` +
-          `(${mentionTags(participants, session.agent_group_id)}) — the tags render as mentions and are how you ` +
-          `engage them there. Just the intro — no mechanics, no member lists.`,
+          `No agent was engaged automatically. Use ` +
+          `handoff({ room: "${roomDest}", to: ["agent-name"], text: "..." }) to choose who responds; ` +
+          `never write raw Slack mentions.`,
       );
     }
     log.info('create_room completed', { roomChannelId, created, participantCount: participants.length });
@@ -285,6 +277,118 @@ export async function handleCreateRoom(content: Record<string, unknown>, session
     const message = err instanceof Error ? err.message : String(err);
     await notifyAgent(session, `create_room failed: ${message}`);
     log.error('create_room failed', { name, err: message });
+  }
+}
+
+// ── handoff ──
+
+/** Resolve the caller's current room, or an explicitly named room destination. */
+async function resolveHandoffRoom(
+  content: Record<string, unknown>,
+  session: Session,
+): Promise<{ room: MessagingGroup; threadId: string | null }> {
+  const current = session.messaging_group_id ? await getMessagingGroup(session.messaging_group_id) : undefined;
+  const roomName = typeof content.room === 'string' ? content.room.trim() : '';
+  let room = current;
+
+  if (roomName) {
+    const dest = await getDestinationByName(session.agent_group_id, normalizeName(roomName));
+    if (!dest || dest.target_type !== 'channel') {
+      throw new RoomActionError(`unknown room destination "${roomName}"`);
+    }
+    room = await getMessagingGroup(dest.target_id);
+  }
+
+  if (!room) throw new RoomActionError('handoff needs a current Slack room or an explicit room destination');
+  if (room.channel_type !== 'slack' || room.is_group !== 1) {
+    throw new RoomActionError(
+      `handoff needs a shared Slack surface ("${room.name ?? room.platform_id}" is not one); ` +
+        'use send_message for private A2A or pass an explicit room destination',
+    );
+  }
+  if (room.denied_at || room.detached_at) {
+    throw new RoomActionError(`room "${room.name ?? room.platform_id}" is no longer active`);
+  }
+  const callerWired = (await getMessagingGroupAgents(room.id)).some(
+    (wiring) => wiring.agent_group_id === session.agent_group_id,
+  );
+  if (!callerWired) throw new RoomActionError(`you are not wired to room "${room.name ?? room.platform_id}"`);
+
+  return { room, threadId: current?.id === room.id ? session.thread_id : null };
+}
+
+/**
+ * Deliver one room message with exactly one real Slack mention per selected
+ * sibling. The container supplies intent; every authority/room check is
+ * repeated here because the container is untrusted.
+ */
+export async function handleHandoff(content: Record<string, unknown>, session: Session): Promise<void> {
+  const targetNames = typeof content.to === 'string' ? [content.to] : Array.isArray(content.to) ? content.to : [];
+  const text = typeof content.text === 'string' ? content.text.trim() : '';
+
+  try {
+    if (targetNames.length === 0 || !targetNames.every((name) => typeof name === 'string' && name.trim())) {
+      throw new RoomActionError('to must be one agent name or a non-empty list of agent names');
+    }
+    if (!text) throw new RoomActionError('text is required');
+    if (/<(?:@|!)[^>]+>/.test(text)) {
+      throw new RoomActionError('text must not contain raw Slack mention markup');
+    }
+
+    const caller = await getAgentGroup(session.agent_group_id);
+    if (!caller) throw new RoomActionError('source agent group not found');
+    const { room, threadId } = await resolveHandoffRoom(content, session);
+    const recipients: ResolvedParticipant[] = [];
+    const seen = new Set<string>();
+
+    for (const rawName of targetNames) {
+      const name = (rawName as string).trim();
+      if (normalizeName(name) === normalizeName(caller.name)) {
+        throw new RoomActionError(`cannot hand off to yourself ("${name}")`);
+      }
+      const group = await resolveAgentByName(session.agent_group_id, name);
+      if (group.id === session.agent_group_id) throw new RoomActionError(`cannot hand off to yourself ("${name}")`);
+      if (seen.has(group.id)) throw new RoomActionError(`duplicate handoff target "${name}"`);
+      seen.add(group.id);
+
+      const targetRoom = (await getMessagingGroupsByAgentGroup(group.id)).find(
+        (mg) =>
+          mg.channel_type === 'slack' &&
+          mg.platform_id === room.platform_id &&
+          mg.is_group === 1 &&
+          !mg.denied_at &&
+          !mg.detached_at,
+      );
+      if (!targetRoom) {
+        throw new RoomActionError(
+          `agent "${group.name}" is not wired to room "${room.name ?? room.platform_id}"; ` +
+            'use send_message to relay privately or add/invite the agent before handing off',
+        );
+      }
+      recipients.push(await participantForInstance(group, targetRoom.instance ?? 'slack', process.cwd()));
+    }
+
+    const adapter = getDeliveryAdapter();
+    if (!adapter) throw new RoomActionError('channel delivery adapter is not ready');
+    const message = `${text}\n${recipients.map((recipient) => `<@${recipient.botUserId}>`).join(' ')}`;
+    await adapter.deliver(
+      'slack',
+      room.platform_id,
+      threadId,
+      'chat',
+      JSON.stringify({ text: message }),
+      undefined,
+      room.instance ?? 'slack',
+    );
+    log.info('handoff completed', {
+      roomPlatformId: room.platform_id,
+      recipientCount: recipients.length,
+      agentGroupId: session.agent_group_id,
+    });
+  } catch (err) {
+    if (!(err instanceof RoomActionError)) throw err;
+    await notifyAgent(session, `handoff failed: ${err.message}`);
+    log.warn('handoff rejected', { agentGroupId: session.agent_group_id, err: err.message });
   }
 }
 

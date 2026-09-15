@@ -18,6 +18,9 @@ for the sibling half:
   voice: say what the new agent is for and tag them with their `<@bot-user-id>` mention
   (send it literally; it renders as a mention). No mechanics, no member lists — the room's
   canvas tab already holds that.
+- **Choose responders explicitly.** Use `handoff` for visible shared-surface replies and
+  `send_message` for private or cross-surface A2A. The shared-room tool instructions carry
+  the full routing rules. Room creation never chooses a first speaker or wakes everyone.
 - **Bot-to-bot hop budget.** The platform may cap consecutive bot-to-bot messages (~6)
   until a human speaks again, but do not rely on it — self-limit. Don't ping-pong with
   siblings: do the work, converge, hand back to the human.

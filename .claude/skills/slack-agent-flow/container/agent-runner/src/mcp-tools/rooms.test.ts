@@ -1,16 +1,16 @@
 /**
- * Room MCP tool tests: create_room / add_to_room arg validation and
- * system-action row shape, plus the extendTool-based create_agent extension
- * (schema/description growth + purpose/allow_guests/room payload
- * passthrough) — all fire-and-forget writes to messages_out (authorization
- * is host-side). Importing ./rooms.js applies the extension, so these tests
- * exercise the same wiring the barrel produces.
+ * Room MCP tool tests: create_room / add_to_room / handoff arg validation and
+ * system-action row shape, plus the extendTool-based send_message and
+ * create_agent extensions — all fire-and-forget writes to messages_out
+ * (authorization is host-side). Importing ./rooms.js applies the extensions,
+ * so these tests exercise the same wiring the barrel produces.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getOutboundDb } from '../mailbox/sqlite/connection.js';
+import { sendMessage } from './core.js';
 import { createAgent } from './agents.js';
-import { addToRoom, createRoom } from './rooms.js';
+import { addToRoom, createRoom, handoff } from './rooms.js';
 
 function outboundActions(): Array<{ id: string; kind: string; content: Record<string, unknown> }> {
   return (
@@ -95,6 +95,48 @@ describe('add_to_room', () => {
     expect(rows[0].kind).toBe('system');
     expect(rows[0].content).toMatchObject({ action: 'add_to_room', room: 'Website Team', agent: 'Devin' });
     expect(rows[0].content.requestId).toBe(rows[0].id);
+  });
+});
+
+describe('handoff', () => {
+  it('describes natural shared-surface intent and keeps private A2A on send_message', () => {
+    expect(handoff.tool.description).toContain('even if they say "ask"');
+    expect(handoff.tool.description).toContain('use send_message for private or cross-surface A2A');
+    expect(sendMessage.tool.description).toContain('use handoff when an agent should respond visibly');
+  });
+
+  it('accepts one target or several and writes explicit recipient lists', async () => {
+    await handoff.handler({ to: ' Pixel ', text: ' Please review. ' });
+    await handoff.handler({ room: ' Website Team ', to: ['Pixel', 'Devin'], text: 'Please both review.' });
+
+    const rows = outboundActions();
+    expect(rows[0].content).toMatchObject({
+      action: 'handoff',
+      to: ['Pixel'],
+      text: 'Please review.',
+    });
+    expect(rows[0].content.room).toBeUndefined();
+    expect(rows[1].content).toMatchObject({
+      action: 'handoff',
+      room: 'Website Team',
+      to: ['Pixel', 'Devin'],
+      text: 'Please both review.',
+    });
+    expect(rows[0].content.requestId).toBe(rows[0].id);
+    expect(rows[1].content.requestId).toBe(rows[1].id);
+  });
+
+  it('rejects missing recipients, missing text, and raw Slack mentions', async () => {
+    for (const args of [
+      { to: [], text: 'Review.' },
+      { to: ['  '], text: 'Review.' },
+      { to: ['Pixel'], text: '  ' },
+      { to: ['Pixel'], text: 'Review this <@U0OTHER>.' },
+      { to: ['Pixel'], text: 'Attention <!here>.' },
+    ]) {
+      expect((await handoff.handler(args)).isError).toBe(true);
+    }
+    expect(outboundActions()).toHaveLength(0);
   });
 });
 

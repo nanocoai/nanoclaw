@@ -1,17 +1,8 @@
 /**
- * Room management MCP tools: create_room, add_to_room.
+ * Slack room MCP tools: create_room, add_to_room, handoff.
  *
- * A "room" is one Slack group conversation shared by the user and N agents.
- * create_room is the team primitive — the multi-agent pattern is N
- * create_agent calls with room:'none', then ONE create_room naming all of
- * them. Both tools are fire-and-forget (create_agent pattern): they write an
- * outbound system row and return; the host resolves names, opens the
- * conversation, wires everyone, and reports back as a system note.
- *
- * Authorization is enforced host-side by the guard (same trust split as
- * create_agent: trusted global-scope groups act directly, confined groups
- * hold for admin approval) — the container is untrusted and cannot be relied
- * on to gate itself.
+ * Each writes an outbound system action for the trusted host to validate and
+ * execute. The container performs argument validation only.
  *
  * This module also extends the base `create_agent` tool (see the extendTool
  * call at the bottom): the Slack flow adds `purpose` / `allow_guests` /
@@ -126,7 +117,62 @@ export const addToRoom: McpToolDefinition = {
   },
 };
 
-registerTools([createRoom, addToRoom]);
+export const handoff: McpToolDefinition = {
+  tool: {
+    name: 'handoff',
+    description:
+      'Post one visible Slack message that engages exactly the named sibling agent(s). Use when the user wants room members to respond there, even if they say "ask"; use send_message for private or cross-surface A2A. Omit room on the current shared surface to preserve its thread, or pass a named room from another session. Never write raw <@...> mentions yourself.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        to: {
+          oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' }, minItems: 1 }],
+          description: 'One agent destination name, or an explicit list of agent destination names.',
+        },
+        text: { type: 'string', description: 'The message for the selected agents, without raw Slack mentions.' },
+        room: {
+          type: 'string',
+          description:
+            'Optional room destination name. Omit inside the room; provide it when handing off from another session.',
+        },
+      },
+      required: ['to', 'text'],
+    },
+  },
+  async handler(args) {
+    const to = typeof args.to === 'string' ? [args.to] : Array.isArray(args.to) ? args.to : [];
+    if (to.length === 0 || !to.every((name) => typeof name === 'string' && name.trim())) {
+      return err('to must be one agent name or a non-empty list of agent names');
+    }
+    const text = typeof args.text === 'string' ? args.text.trim() : '';
+    if (!text) return err('text is required');
+    if (/<(?:@|!)[^>]+>/.test(text)) return err('text must not contain raw Slack mention markup');
+    const room = typeof args.room === 'string' ? args.room.trim() : '';
+
+    const requestId = generateId();
+    await writeMessageOut({
+      id: requestId,
+      kind: 'system',
+      content: JSON.stringify({
+        action: 'handoff',
+        requestId,
+        to: to.map((name) => (name as string).trim()),
+        text,
+        ...(room ? { room } : {}),
+      }),
+    });
+
+    log(`handoff: ${requestId} → ${to.length} agent(s)`);
+    return ok(`Handing off to ${to.length} agent${to.length === 1 ? '' : 's'}.`);
+  },
+};
+
+registerTools([createRoom, addToRoom, handoff]);
+
+extendTool('send_message', {
+  descriptionSuffix:
+    'In a Slack construct, use handoff when an agent should respond visibly on a shared surface; use send_message for private or cross-surface A2A.',
+});
 
 // ── create_agent extension (Slack agent flow) ──
 //
