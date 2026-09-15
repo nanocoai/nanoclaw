@@ -31,10 +31,16 @@ function now() {
 function createMockAdapter(
   channelType: string,
   instance?: string,
-): ChannelAdapter & { delivered: OutboundMessage[]; inbound: InboundMessage[]; setupTimes: number[] } {
+): ChannelAdapter & {
+  delivered: OutboundMessage[];
+  inbound: InboundMessage[];
+  setupTimes: number[];
+  clears: Array<{ platformId: string; threadId: string | null }>;
+} {
   const delivered: OutboundMessage[] = [];
   const inbound: InboundMessage[] = [];
   const setupTimes: number[] = [];
+  const clears: Array<{ platformId: string; threadId: string | null }> = [];
   let setupConfig: ChannelSetup | null = null;
 
   return {
@@ -45,6 +51,7 @@ function createMockAdapter(
     delivered,
     inbound,
     setupTimes,
+    clears,
 
     async setup(config: ChannelSetup) {
       setupTimes.push(Date.now());
@@ -69,6 +76,10 @@ function createMockAdapter(
     },
 
     async setTyping() {},
+
+    async clearTyping(platformId: string, threadId: string | null) {
+      clears.push({ platformId, threadId });
+    },
   };
 }
 
@@ -237,6 +248,21 @@ describe('channel registry — instance keying', () => {
       'slack-tester',
     );
     expect(tester.delivered).toHaveLength(1);
+  });
+
+  it('dispatches clearTyping to the exact adapter instance, like setTyping', async () => {
+    const reg = await import('./channel-registry.js');
+    const tester = createMockAdapter('slack', 'slack-tester');
+    const worker = createMockAdapter('slack', 'slack-worker');
+    reg.registerChannelAdapter('slack-tester', { factory: () => tester });
+    reg.registerChannelAdapter('slack-worker', { factory: () => worker });
+    await reg.initChannelAdapters(mockSetup);
+
+    const bridge = reg.createChannelDeliveryAdapter();
+    await bridge.clearTyping!('slack', 'slack:C1', 'T1', 'slack-tester');
+
+    expect(tester.clears).toEqual([{ platformId: 'slack:C1', threadId: 'T1' }]);
+    expect(worker.clears).toHaveLength(0);
   });
 });
 

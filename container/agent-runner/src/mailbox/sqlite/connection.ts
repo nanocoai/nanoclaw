@@ -102,16 +102,26 @@ export function getOutboundDb(): Database {
     _outbound.exec(`UPDATE session_state SET updated_at = '1970-01-01T00:00:00.000Z' WHERE updated_at = ''`);
     // container_state: tracks the current tool in flight (if any) so the host
     // sweep can widen its stuck tolerance when Bash is running with a user-
-    // declared long timeout. Forward-compat for older outbound.db files.
+    // declared long timeout, and the runner's turn report (working/idle) that
+    // the host's typing indicator follows. Forward-compat for older
+    // outbound.db files: create the table, then add `turn` where an earlier
+    // revision of the table exists without it.
     _outbound.exec(`
       CREATE TABLE IF NOT EXISTS container_state (
         id                       INTEGER PRIMARY KEY CHECK (id = 1),
         current_tool             TEXT,
         tool_declared_timeout_ms INTEGER,
         tool_started_at          TEXT,
+        turn                     TEXT,
         updated_at               TEXT NOT NULL
       );
     `);
+    const containerCols = new Set(
+      (_outbound.prepare("PRAGMA table_info('container_state')").all() as Array<{ name: string }>).map((c) => c.name),
+    );
+    if (!containerCols.has('turn')) {
+      _outbound.exec('ALTER TABLE container_state ADD COLUMN turn TEXT');
+    }
   }
   return _outbound;
 }
@@ -134,6 +144,24 @@ export function sqliteSetContainerToolInFlight(tool: string, declaredTimeoutMs: 
          updated_at = excluded.updated_at`,
     )
     .run(tool, declaredTimeoutMs, now, now);
+}
+
+/**
+ * Record the runner's turn state. Only `turn` and `updated_at` move: the
+ * tool-in-flight fields belong to the PreToolUse/PostToolUse hooks and must
+ * survive a turn re-mark that lands while a tool is running.
+ */
+export function sqliteMarkContainerTurn(turn: 'working' | 'idle'): void {
+  const now = new Date().toISOString();
+  getOutboundDb()
+    .prepare(
+      `INSERT INTO container_state (id, current_tool, tool_declared_timeout_ms, tool_started_at, turn, updated_at)
+       VALUES (1, NULL, NULL, NULL, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         turn = excluded.turn,
+         updated_at = excluded.updated_at`,
+    )
+    .run(turn, now);
 }
 
 /** Clear the in-flight tool — called on PostToolUse / PostToolUseFailure. */
@@ -231,6 +259,7 @@ export function initTestSessionDb(): { inbound: Database; outbound: Database } {
       current_tool             TEXT,
       tool_declared_timeout_ms INTEGER,
       tool_started_at          TEXT,
+      turn                     TEXT,
       updated_at               TEXT NOT NULL
     );
   `);

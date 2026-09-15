@@ -27,6 +27,16 @@ const INBOUND_KINDS = ['chat', 'chat-sdk', 'task', 'webhook', 'system'] as const
 
 export type InboundKind = (typeof INBOUND_KINDS)[number];
 
+const TURN_STATES = ['working', 'idle'] as const;
+
+/**
+ * The runner's own report of whether it is inside a turn. `working` is
+ * re-marked periodically while a turn runs; `idle` is written when the turn
+ * ends. Runners that predate the field never write it, so a record without
+ * one carries `null` — "not reported", not "idle".
+ */
+export type TurnState = (typeof TURN_STATES)[number];
+
 export interface InboundWrite {
   id: string;
   kind: InboundKind;
@@ -154,6 +164,7 @@ export interface ContainerRecord {
   currentTool: string | null;
   toolDeclaredTimeoutMs: number | null;
   toolStartedAt: IsoTimestamp | null;
+  turn: TurnState | null;
   updatedAt: IsoTimestamp;
 }
 
@@ -282,6 +293,16 @@ function oneOf<const T extends readonly string[]>(record: UnknownRecord, key: st
   if (typeof value !== 'string' || !values.includes(value))
     throw new Error(`invalid mailbox field ${key}: unexpected value`);
   return value as T[number];
+}
+
+/** A field added after records were first persisted: absent or null both read as null. */
+function optionalNullableOneOf<const T extends readonly string[]>(
+  record: UnknownRecord,
+  key: string,
+  values: T,
+): T[number] | null {
+  if (!(key in record) || record[key] === undefined || record[key] === null) return null;
+  return oneOf(record, key, values);
 }
 
 export function parseInboundWrite(value: unknown): InboundWrite {
@@ -515,12 +536,15 @@ export function parseContainerRecord(value: unknown): ContainerRecord {
     'currentTool',
     'toolDeclaredTimeoutMs',
     'toolStartedAt',
+    'turn',
     'updatedAt',
   ]);
   return {
     currentTool: nullableText(record, 'currentTool'),
     toolDeclaredTimeoutMs: nullableNonNegativeInteger(record, 'toolDeclaredTimeoutMs'),
     toolStartedAt: nullableTimestamp(record, 'toolStartedAt'),
+    // Older runners never wrote `turn`; their persisted records still parse.
+    turn: optionalNullableOneOf(record, 'turn', TURN_STATES),
     updatedAt: timestamp(record, 'updatedAt'),
   };
 }

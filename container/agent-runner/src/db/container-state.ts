@@ -8,6 +8,10 @@ export function clearContainerToolInFlight(): void {
   getAgentMailbox().operations.clearContainerToolInFlight();
 }
 
+export function markContainerTurn(turn: 'working' | 'idle'): void {
+  getAgentMailbox().operations.markContainerTurn(turn);
+}
+
 export function clearStaleProcessingAcks(): void {
   getAgentMailbox().operations.clearStaleProcessingAcks();
 }

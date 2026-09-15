@@ -236,6 +236,14 @@ export interface ChannelAdapter {
     status?: string,
     statusKind?: 'auto' | 'agent',
   ): Promise<void>;
+  /**
+   * Clear the typing indicator. Only implemented by platforms whose
+   * indicator does not expire on its own within a turn (e.g. Slack's
+   * assistant status, which persists until a post in the thread, an
+   * explicit clear, or a two-minute timeout). Everyone else omits it and
+   * callers no-op via optional chaining.
+   */
+  clearTyping?(platformId: string, threadId: string | null): Promise<void>;
   syncConversations?(): Promise<ConversationInfo[]>;
   /** Resolve conversation type and human-readable metadata for host UI. */
   resolveConversation?(platformId: string): Promise<ResolvedConversation | null>;
