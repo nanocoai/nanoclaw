@@ -119,6 +119,20 @@ export interface SlackBotInboundPolicy {
 
 let botInboundPolicy: SlackBotInboundPolicy | null = null;
 
+type SlackAuthorIsBotResolver = (userId: string) => Promise<boolean | null>;
+const authorIsBotResolvers = new Map<string, SlackAuthorIsBotResolver>();
+
+/**
+ * Resolve ambiguous Slack authors through the adapter's user directory.
+ * Some delegated file uploads carry both a human `user` and an app `bot_id`,
+ * which Chat SDK currently serializes as `isBot: true` for the human user.
+ * Missing lookups and errors stay bot-authored so the guard fails closed.
+ */
+export function setSlackAuthorIsBotResolver(instanceKey: string, resolver: SlackAuthorIsBotResolver | null): void {
+  if (resolver) authorIsBotResolvers.set(instanceKey, resolver);
+  else authorIsBotResolvers.delete(instanceKey);
+}
+
 /**
  * Install THE admission policy for bot-authored Slack inbound (single
  * provider — a second installation overwrites with a warning, mirroring the
@@ -146,7 +160,19 @@ export function wrapSlackBotGuard(setup: ChannelSetup, instanceKey: string): Cha
   return {
     ...setup,
     async onInbound(platformId: string, threadId: string | null, message: InboundMessage) {
-      const bot = botAuthorOf(message);
+      let bot = botAuthorOf(message);
+      const resolveAuthorIsBot = bot && /^[UW]/.test(bot.botId) && authorIsBotResolvers.get(instanceKey);
+      if (bot && resolveAuthorIsBot) {
+        try {
+          if ((await resolveAuthorIsBot(bot.botId)) === false) bot = null;
+        } catch (err) {
+          log.warn('slack-a2a-guard: author lookup failed — keeping bot classification', {
+            instanceKey,
+            platformId,
+            err,
+          });
+        }
+      }
 
       if (!bot) {
         // Human message — pass through untouched. The policy may observe it
