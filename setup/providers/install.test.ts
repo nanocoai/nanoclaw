@@ -102,7 +102,10 @@ describe('OpenCode setup installation and refresh', () => {
     const directives = parseDirectives(fs.readFileSync(path.join(codexSkill, 'SKILL.md'), 'utf8'));
     for (const directive of directives) {
       if (directive.kind === 'copy') {
-        for (const file of directive.body) {
+        for (const mapping of directive.body) {
+          // Bundled provider hooks use SRC -> DST; the installed fixture must
+          // populate destinations, just like registry copies without mapping.
+          const file = (mapping.split('->')[1] ?? mapping).trim();
           fs.mkdirSync(path.dirname(path.join(directory, file)), { recursive: true });
           fs.writeFileSync(path.join(directory, file), `// installed local customization: ${file}\n`);
         }

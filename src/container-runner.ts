@@ -47,7 +47,15 @@ import { getSessionDriver, isSessionEventsDriver } from './drivers/index.js';
 import type { SupervisedHandle, SupervisedSnapshot } from './drivers/session-events.js';
 import { GROUP_FOLDER_LABEL, labelValueLegal, specInvalid } from './drivers/types.js';
 import type { ContainerSpec, MountSpec, SessionFailure, SessionSpec } from './drivers/types.js';
-import { getGatewayProvider, type GatewayContribution } from './gateway-providers/index.js';
+import {
+  gatewayRuntimeIdentity,
+  getGatewayProvider,
+  selectGatewayAgentSkills,
+  type GatewayContribution,
+  type GatewaySessionInput,
+  type GatewaySessionLease,
+} from './gateway-providers/index.js';
+import { releaseGatewaySession, type GatewaySessionControl } from './gateway-session-lifecycle.js';
 import { initGroupFilesystem } from './group-init.js';
 import { getAgentMailbox } from './mailbox/index.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
@@ -102,6 +110,7 @@ interface ActiveSessionRuntime {
    * docker CLI inexpressible.
    */
   handle: SupervisedHandle;
+  gateway: GatewaySessionControl;
   containerName: string;
   /**
    * When this host started tracking the runtime. Backs the sweep's ceiling
@@ -120,6 +129,7 @@ interface ActiveSessionRuntime {
   finishedPromise: Promise<void>;
   resolveFinished: () => void;
   stopReason?: string;
+  teardownIncomplete?: boolean;
   /** Incarnation this process shadow-claimed in session_claims, if the write landed. */
   claimIncarnation?: number;
   /** A deferred fenced finalization is already queued for this runtime. */
@@ -127,6 +137,7 @@ interface ActiveSessionRuntime {
 }
 
 const activeContainers = new Map<string, ActiveSessionRuntime>();
+let gatewayUnavailableReason: string | undefined;
 
 // Claimant identity for the session_claims rows: the host's durable lease
 // instance id when the lease is running, else a process-scoped fallback
@@ -207,6 +218,37 @@ export function getContainerStartedAtMs(sessionId: string): number | undefined {
   return activeContainers.get(sessionId)?.startedAtMs;
 }
 
+/** Stop host-local observation without revoking resources that may survive restart. */
+export async function abortGatewaySessionObservers(reason = 'host-shutdown'): Promise<void> {
+  await Promise.all(
+    [...activeContainers.values()].map(async (runtime) => {
+      try {
+        await releaseGatewaySession(runtime.gateway, { kind: 'host-detached', reason });
+      } catch (err) {
+        log.error('Gateway session detachment failed', { containerName: runtime.containerName, err });
+      }
+    }),
+  );
+}
+
+/** Fail closed when the selected gateway can no longer authorize requests. */
+export function stopGatewaySessionsForUnavailability(reason: string): void {
+  gatewayUnavailableReason = reason;
+  log.error('Gateway unavailable; stopping active sessions', { reason, sessions: activeContainers.size });
+  for (const sessionId of activeContainers.keys()) killContainer(sessionId, 'gateway-unavailable');
+}
+
+/**
+ * Reopen admission once the gateway can authorize again. Closure is a
+ * fail-closed state, not a terminal one: without this the host stays up while
+ * silently refusing every session, and only a service restart clears it.
+ */
+export function resumeGatewaySessionAdmission(): void {
+  if (!gatewayUnavailableReason) return;
+  log.info('Gateway available again; reopening session admission', { previousReason: gatewayUnavailableReason });
+  gatewayUnavailableReason = undefined;
+}
+
 /**
  * Sessions whose running container could not be claim-fenced at adoption (the
  * store was unreachable). They are deliberately NOT in the registry — nothing
@@ -241,12 +283,32 @@ async function retryPendingAdoption(session: Session): Promise<boolean> {
       `session ${session.id} is claimed by another live host process — not adopting or spawning a duplicate`,
     );
   }
-  const runtime = registerRuntime(session.id, snapshot.handle, snapshot.handle.name, true);
+  let gatewaySession: GatewaySessionControl;
+  try {
+    const group = await getAgentGroup(session.agent_group_id);
+    if (!group) throw new Error(`Agent group ${session.agent_group_id} no longer exists`);
+    gatewaySession = await ensureGatewaySession({
+      disposition: 'adopt',
+      key: snapshot.handle.key,
+      runtimeIdentity: gatewayRuntimeIdentity(snapshot.handle.key),
+      groupName: group.name,
+      containerName: snapshot.handle.name,
+      capabilities: driver.capabilities(),
+    });
+  } catch (err) {
+    await releaseClaimQuietly(session.id, claimIncarnation);
+    throw err;
+  }
+  const runtime = registerRuntime(session.id, snapshot.handle, gatewaySession, snapshot.handle.name, true);
   runtime.claimIncarnation = claimIncarnation;
   runtime.stopReason = undefined;
   snapshot.handle.onTerminal((failure) => {
     void finishAndResolve(session.id, runtime, failure);
   });
+  if (armGatewayAvailability(session.id, gatewaySession)) {
+    await runtime.finishedPromise;
+    return false;
+  }
   await markContainerRunning(session.id);
   pendingAdoptions.delete(session.id);
   log.info('Adopted surviving container on retry after a failed claim write', { sessionId: session.id });
@@ -258,7 +320,7 @@ async function retryPendingAdoption(session: Session): Promise<boolean> {
  * (the in-flight wake promise is reused).
  *
  * Contract: never throws. Returns `true` on successful spawn, `false` on
- * transient spawn failure (e.g. OneCLI gateway unreachable). Callers don't
+ * transient spawn failure (e.g. the selected gateway is unreachable). Callers don't
  * need to wrap — the inbound row stays pending and host-sweep retries on its
  * next tick.
  */
@@ -323,91 +385,106 @@ async function spawnContainer(session: Session): Promise<void> {
   // buildMounts and buildContainerArgs so side effects (mkdir, etc.) fire once.
   const { provider, contribution, surfaces } = await resolveProviderContribution(session, agentGroup, containerConfig);
 
-  const mounts = await buildMounts(agentGroup, session, containerConfig, provider, contribution, surfaces);
   const containerName = `nanoclaw-v2-${agentGroup.folder}-${Date.now()}`;
+  const mounts = await buildMounts(agentGroup, session, containerConfig, provider, contribution, surfaces);
   const mailboxEnvironment = await mailbox.runnerEnvironment(mailboxKey);
 
   const driver = getSessionDriver();
-  // The gateway's per-session contribution — typed env and mounts (and, on a
-  // driver that manages them, auxiliary containers), merged into the spec
-  // BEFORE validation so admission sees the whole session. Fail-closed exactly
-  // as the old wiring was: contribute() throwing aborts the spawn, the inbound
-  // row stays pending, and the sweep retries. Network selection is NOT here —
-  // topology is driver-private (see `drivers/index.ts`).
-  const gateway = await getGatewayProvider().contribute({
+  // Core calls the same idempotent provider operation for new and surviving
+  // sessions. The returned typed contribution enters driver validation whole.
+  const gatewaySession = await ensureGatewaySession({
+    disposition: 'create',
     key: { installSlug: INSTALL_SLUG, agentGroupId: agentGroup.id, sessionId: session.id },
+    runtimeIdentity: gatewayRuntimeIdentity({
+      installSlug: INSTALL_SLUG,
+      agentGroupId: agentGroup.id,
+      sessionId: session.id,
+    }),
     groupName: agentGroup.name,
     containerName,
     capabilities: driver.capabilities(),
   });
-  if (gateway.containers?.length && !driver.capabilities().auxiliaryContainers) {
-    // Named at composition, where the error can say which side to change —
-    // not left for the driver's refusal backstop to discover.
-    throw specInvalid(
-      `gateway provider composed auxiliary containers, but driver '${driver.kind}' does not manage them ` +
-        `(capabilities().auxiliaryContainers is false)`,
-    );
+  const gateway = gatewaySession.lease.contribution;
+  let spec: SessionSpec;
+  let claimIncarnation: number | null = null;
+  try {
+    if (gateway.containers?.length && !driver.capabilities().auxiliaryContainers) {
+      // Named at composition, where the error can say which side to change —
+      // not left for the driver's refusal backstop to discover.
+      throw specInvalid(
+        `gateway provider composed auxiliary containers, but driver '${driver.kind}' does not manage them ` +
+          `(capabilities().auxiliaryContainers is false)`,
+      );
+    }
+
+    spec = composeSessionSpec({
+      agentGroup,
+      session,
+      containerName,
+      mounts,
+      containerConfig,
+      contribution,
+      gateway,
+      mailboxEnvironment,
+    });
+
+    log.info('Spawning session', { sessionId: session.id, agentGroup: agentGroup.name, containerName });
+
+    // Claim before touching runtime state. Another host may already own the session.
+    claimIncarnation = await claimSessionRun(session.id, containerName);
+    if (claimIncarnation === null) {
+      throw new Error(`session ${session.id} is claimed by another live host process — not spawning a duplicate`);
+    }
+
+    // Clear any orphan heartbeat from a previous container instance — the sweep's
+    // ceiling check treats a missing file as "fresh spawn, give grace". Without
+    // this, the stale mtime can trigger an immediate kill before the new container
+    // touches the file itself.
+    fs.rmSync(heartbeatPath(agentGroup.id, session.id), { force: true });
+  } catch (err) {
+    if (claimIncarnation !== null) await releaseClaimQuietly(session.id, claimIncarnation);
+    await releaseGatewaySession(gatewaySession, { kind: 'session-ended', reason: 'spawn-failed' });
+    throw err;
   }
 
-  const spec = composeSessionSpec({
-    agentGroup,
-    session,
-    containerName,
-    mounts,
-    containerConfig,
-    contribution,
-    gateway,
-    mailboxEnvironment,
-  });
-
-  log.info('Spawning session', { sessionId: session.id, agentGroup: agentGroup.name, containerName });
-
-  // The claim is the cross-process spawn fence: winning it is what licenses
-  // touching the session's runtime state (the heartbeat clear below included).
-  // Losing it means another live claimant runs this session — abort; the wake
-  // contract turns the throw into `false` and the sweep re-checks next tick.
-  const claimIncarnation = await claimSessionRun(session.id, containerName);
-  if (claimIncarnation === null) {
-    throw new Error(`session ${session.id} is claimed by another live host process — not spawning a duplicate`);
-  }
-
-  // Clear any orphan heartbeat from a previous container instance — the sweep's
-  // ceiling check treats a missing file as "fresh spawn, give grace". Without
-  // this, the stale mtime can trigger an immediate kill before the new container
-  // touches the file itself.
-  fs.rmSync(heartbeatPath(agentGroup.id, session.id), { force: true });
-
-  let handle;
+  let handle: SupervisedHandle;
   try {
     handle = await driver.prepare(spec);
   } catch (err) {
     await releaseClaimQuietly(session.id, claimIncarnation);
+    await releaseGatewaySession(gatewaySession, { kind: 'session-ended', reason: 'driver-prepare-failed' });
     throw err;
   }
-
-  const runtime = registerRuntime(session.id, handle, containerName, false);
+  const runtime = registerRuntime(session.id, handle, gatewaySession, containerName, false);
   runtime.claimIncarnation = claimIncarnation;
 
-  try {
-    await armSessionLifecycle({
-      handle,
-      onTerminal: (failure) => {
-        void finishAndResolve(session.id, runtime, failure);
-      },
-      afterStart: () => {
-        return markContainerRunning(session.id);
-      },
-    });
-  } catch (err) {
-    if (activeContainers.get(session.id) === runtime && !runtime.finished) {
-      activeContainers.delete(session.id);
-      runtime.resolveFinished();
-      await releaseClaimQuietly(session.id, claimIncarnation);
-    } else {
+  await armSessionLifecycle({
+    handle,
+    onTerminal: (failure) => {
+      void finishAndResolve(session.id, runtime, failure);
+    },
+    afterStart: () => {
+      return markContainerRunning(session.id);
+    },
+    beforeStart: () => {
+      if (armGatewayAvailability(session.id, gatewaySession)) {
+        throw new Error('Gateway session became unavailable before agent start');
+      }
+    },
+    onFailure: async () => {
+      if (!runtime.stopReason) {
+        runtime.stopReason = 'start-failed';
+        try {
+          await handle.stop('start-failed');
+        } catch (err) {
+          runtime.teardownIncomplete = true;
+          log.error('Failed to clean up session after start failure', { sessionId: session.id, err });
+        }
+      }
+      if (!runtime.finished) await finishAndResolve(session.id, runtime);
       await runtime.finishedPromise;
-    }
-    throw err;
-  }
+    },
+  });
 }
 
 /**
@@ -422,16 +499,25 @@ async function spawnContainer(session: Session): Promise<void> {
 export async function armSessionLifecycle(deps: {
   handle: Pick<SupervisedHandle, 'onTerminal' | 'start'>;
   onTerminal: (failure?: SessionFailure) => void;
+  beforeStart?: () => void | Promise<void>;
   afterStart?: () => void | Promise<void>;
+  onFailure?: () => void | Promise<void>;
 }): Promise<void> {
   deps.handle.onTerminal(deps.onTerminal);
-  await deps.handle.start();
-  await deps.afterStart?.();
+  try {
+    await deps.beforeStart?.();
+    await deps.handle.start();
+    await deps.afterStart?.();
+  } catch (err) {
+    await deps.onFailure?.();
+    throw err;
+  }
 }
 
 function registerRuntime(
   sessionId: string,
   handle: SupervisedHandle,
+  gateway: GatewaySessionControl,
   containerName: string,
   adopted: boolean,
 ): ActiveSessionRuntime {
@@ -441,6 +527,7 @@ function registerRuntime(
   });
   const runtime: ActiveSessionRuntime = {
     handle,
+    gateway,
     containerName,
     startedAtMs: Date.now(),
     adopted,
@@ -451,6 +538,42 @@ function registerRuntime(
   };
   activeContainers.set(sessionId, runtime);
   return runtime;
+}
+
+/** Returns true when registration reports an already-unavailable lease synchronously. */
+function armGatewayAvailability(sessionId: string, gateway: GatewaySessionControl): boolean {
+  return watchGatewayAvailability(gateway.lease, gateway.controller.signal, (reason) => {
+    log.error('Gateway session became unavailable; stopping agent runtime', { sessionId, reason });
+    killContainer(sessionId, 'gateway-unavailable');
+  });
+}
+
+/** Returns true when a lease reports unavailability during callback registration. */
+export function watchGatewayAvailability(
+  gateway: GatewaySessionLease,
+  signal: AbortSignal,
+  onUnavailable: (reason: string) => void,
+): boolean {
+  let unavailable = false;
+  gateway.onUnavailable?.((reason) => {
+    if (signal.aborted) return;
+    unavailable = true;
+    onUnavailable(reason);
+  });
+  return unavailable;
+}
+
+async function ensureGatewaySession(input: GatewaySessionInput): Promise<GatewaySessionControl> {
+  if (gatewayUnavailableReason) {
+    throw new Error(`Gateway session admission is closed: ${gatewayUnavailableReason}`);
+  }
+  const controller = new AbortController();
+  try {
+    return { lease: await getGatewayProvider().sessions.ensure(input, controller.signal), controller };
+  } catch (err) {
+    controller.abort('ensure-failed');
+    throw err;
+  }
 }
 
 /**
@@ -585,6 +708,14 @@ async function finish(sessionId: string, runtime: ActiveSessionRuntime, failure?
   if (runtime.claimIncarnation !== undefined) {
     await releaseClaimQuietly(sessionId, runtime.claimIncarnation);
   }
+  try {
+    await releaseGatewaySession(runtime.gateway, {
+      kind: runtime.teardownIncomplete ? 'host-detached' : 'session-ended',
+      reason: runtime.stopReason ?? (failure ? `runtime-${failure.kind}` : 'runtime-ended'),
+    });
+  } catch (err) {
+    log.error('Gateway session release failed', { sessionId, containerName, err });
+  }
   for (const callback of runtime.exitCallbacks) {
     try {
       callback();
@@ -613,6 +744,7 @@ export function killContainer(sessionId: string, reason: string, onExit?: () => 
       if (!entry.finished) void finishAndResolve(sessionId, entry, undefined);
     },
     (err: unknown) => {
+      entry.teardownIncomplete = true;
       log.error('Failed to stop session', { sessionId, reason, err });
       if (!entry.finished) void finishAndResolve(sessionId, entry, undefined);
     },
@@ -624,7 +756,7 @@ export function killContainer(sessionId: string, reason: string, onExit?: () => 
  *
  * This replaces the old reap-everything `cleanupOrphans()`. A surviving session
  * used to be destroyed on every host restart and its work recovered only
- * through the DB; now the host re-registers it and delivery resumes. The OneCLI
+ * through the DB; now the host re-registers it and delivery resumes. The
  * gateway resolves credentials per request on the host side, so an adopted
  * session's egress keeps working without any per-process state to rebuild.
  */
@@ -642,11 +774,12 @@ export async function adoptRunningSessions(): Promise<{ adopted: number; stopped
   let stopped = 0;
   for (const { handle, phase } of snapshots) {
     const session = handle.key.sessionId ? await getSession(handle.key.sessionId) : undefined;
+    const agentGroup = session ? await getAgentGroup(session.agent_group_id) : undefined;
     // The snapshot's phase is the listing's own truth: a corpse arrives as
     // 'terminal' (or not at all), so telling adoptable sessions apart needs
     // no per-handle status() round trip. `stop()` on a corpse is still full
     // teardown — a self-exited runtime needs its residue cleaned up.
-    if (!session || session.status !== 'active' || phase !== 'running') {
+    if (!session || !agentGroup || session.status !== 'active' || phase !== 'running') {
       await handle.stop('orphan-at-startup').catch(() => {});
       stopped += 1;
       continue;
@@ -676,16 +809,39 @@ export async function adoptRunningSessions(): Promise<{ adopted: number; stopped
       continue;
     }
     pendingAdoptions.delete(session.id);
-    const runtime = registerRuntime(session.id, handle, handle.name, true);
+    let gatewaySession: GatewaySessionControl;
+    try {
+      gatewaySession = await ensureGatewaySession({
+        disposition: 'adopt',
+        key: handle.key,
+        runtimeIdentity: gatewayRuntimeIdentity(handle.key),
+        groupName: agentGroup.name,
+        containerName: handle.name,
+        capabilities: driver.capabilities(),
+      });
+    } catch (err) {
+      log.error('Gateway could not adopt running session; stopping it', { sessionId: session.id, err });
+      await handle.stop('gateway-adoption-failed').catch(() => {});
+      await releaseClaimQuietly(session.id, claimIncarnation);
+      stopped += 1;
+      continue;
+    }
+    const runtime = registerRuntime(session.id, handle, gatewaySession, handle.name, true);
     runtime.claimIncarnation = claimIncarnation;
     runtime.stopReason = undefined;
     handle.onTerminal((failure) => {
       void finishAndResolve(session.id, runtime, failure);
     });
+    if (armGatewayAvailability(session.id, gatewaySession)) {
+      await runtime.finishedPromise;
+      stopped += 1;
+      continue;
+    }
     await markContainerRunning(session.id);
     adopted += 1;
   }
 
+  await getGatewayProvider().sessions.reapOrphans?.();
   await driver.reapResidue?.(INSTALL_SLUG).catch?.(() => {});
   // Reconcile terminals the watch stream missed while no host was listening —
   // adoption is the one place a full re-list is already cheap, so the hub's
@@ -839,7 +995,8 @@ export async function buildMounts(
       selectedSkillNames(containerConfig),
       {
         legacyOverlay: async () => providerContribution,
-        composeProjectDocument: (spec) => composeGroupProjectDoc(agentGroup, groupDir, spec),
+        composeProjectDocument: (spec) =>
+          composeGroupProjectDoc(agentGroup, groupDir, spec, selectedSkillNames(containerConfig)),
       },
     );
     skillBackingPaths = providerSurfaces.skillBackingPaths;
@@ -848,7 +1005,7 @@ export async function buildMounts(
 
     // Compose CLAUDE.md fresh every spawn: every instruction source inlined
     // into one flat file. See `project-doc-compose.ts`.
-    await composeGroupProjectDoc(agentGroup, groupDir, DEFAULT_PROJECT_DOC);
+    await composeGroupProjectDoc(agentGroup, groupDir, DEFAULT_PROJECT_DOC, selectedSkillNames(containerConfig));
   }
 
   const mounts: VolumeMount[] = [];
@@ -1134,11 +1291,12 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
 
   return {
     key: { installSlug: INSTALL_SLUG, agentGroupId: agentGroup.id, sessionId: session.id },
-    labels: { 'nanoclaw-container-name': containerName, [GROUP_FOLDER_LABEL]: agentGroup.folder },
+    labels: { ...gateway.labels, 'nanoclaw-container-name': containerName, [GROUP_FOLDER_LABEL]: agentGroup.folder },
     // The gateway's auxiliary containers ride beside the agent; capability-
     // gated in the spawn path before composition ever runs.
     containers: [agent, ...(gateway.containers ?? [])],
     network: 'shared-private',
+    networkAccess: gateway.networkAccess,
     hardening: 'standard',
     resources: {
       cpus: CONTAINER_CPU_LIMIT || undefined,
@@ -1209,7 +1367,7 @@ export function parsePidsLimit(value: string): number | undefined {
 export function syncSkillSymlinks(
   claudeDir: string,
   containerConfig: import('./container-config.js').ContainerConfig,
-): void {
+): string[] {
   const skillsDir = path.join(claudeDir, 'skills');
   if (!fs.existsSync(skillsDir)) {
     fs.mkdirSync(skillsDir, { recursive: true });
@@ -1219,7 +1377,9 @@ export function syncSkillSymlinks(
   // either a template overlay (intentional; see src/group-skills.ts) or a stale
   // pre-refactor skill copy that shadows the shared skill (#3001), so the
   // skip is surfaced as a warning.
-  syncSharedSkillLinks(skillsDir, selectedSkillNames(containerConfig), true);
+  const selected = selectedSkillNames(containerConfig);
+  syncSharedSkillLinks(skillsDir, selected, true);
+  return selected;
 }
 
 /**
@@ -1227,9 +1387,8 @@ export function syncSkillSymlinks(
  * from `container/skills/` so newly-added upstream skills appear automatically.
  */
 function selectedSkillNames(containerConfig: import('./container-config.js').ContainerConfig): string[] {
-  if (containerConfig.skills !== 'all') return containerConfig.skills;
   const sharedSkillsDir = path.join(process.cwd(), 'container', 'skills');
-  return fs.existsSync(sharedSkillsDir)
+  const available = fs.existsSync(sharedSkillsDir)
     ? fs.readdirSync(sharedSkillsDir).filter((e) => {
         try {
           return fs.statSync(path.join(sharedSkillsDir, e)).isDirectory();
@@ -1238,6 +1397,8 @@ function selectedSkillNames(containerConfig: import('./container-config.js').Con
         }
       })
     : [];
+  const selected = containerConfig.skills === 'all' ? available : containerConfig.skills;
+  return selectGatewayAgentSkills(selected);
 }
 
 const execAsync = promisify(exec);

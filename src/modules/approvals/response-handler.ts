@@ -9,8 +9,6 @@
  *      "Reject with reason…" we hold the row and capture the admin's next DM as
  *      a one-line reason (see reason-capture.ts). Reject finalization is shared
  *      via finalizeReject.
- *   2. OneCLI credential approvals (`action = 'onecli_credential'`). Resolved
- *      via an in-memory Promise — see onecli-approvals.ts.
  *
  * The response handler is registered via core's `registerResponseHandler`;
  * core iterates handlers and the first one to return `true` claims the response.
@@ -28,7 +26,6 @@ import { writeSessionMessage } from '../../session-manager.js';
 import type { PendingApproval } from '../../types.js';
 import { hasAdminPrivilege, isGlobalAdmin, isOwner } from '../permissions/db/user-roles.js';
 import { finalizeReject } from './finalize.js';
-import { ONECLI_ACTION, resolveOneCLIApproval } from './onecli-approvals.js';
 import { getApprovalHandler, notifyApprovalResolved, REJECT_WITH_REASON_VALUE } from './primitive.js';
 import { armReasonCapture } from './reason-capture.js';
 
@@ -43,16 +40,6 @@ export async function handleApprovalsResponse(payload: ResponsePayload): Promise
       userId: payload.userId,
       channelType: payload.channelType,
     });
-    return true;
-  }
-
-  if (approval.action === ONECLI_ACTION) {
-    if (await resolveOneCLIApproval(payload.questionId, payload.value)) {
-      return true;
-    }
-    // Row exists but the in-memory resolver is gone (timer fired or the process
-    // was in a weird state). Nothing to do — just drop the row.
-    await deletePendingApproval(payload.questionId);
     return true;
   }
 
@@ -132,12 +119,12 @@ async function handleRegisteredApproval(
   await requestWake(session, 'approval-response');
 }
 
-function namespacedUserId(payload: ResponsePayload): string | null {
+export function namespacedUserId(payload: ResponsePayload): string | null {
   if (!payload.userId) return null;
   return payload.userId.includes(':') ? payload.userId : `${payload.channelType}:${payload.userId}`;
 }
 
-async function isAuthorizedApprovalClick(approval: PendingApproval, payload: ResponsePayload): Promise<boolean> {
+export async function isAuthorizedApprovalClick(approval: PendingApproval, payload: ResponsePayload): Promise<boolean> {
   const userId = namespacedUserId(payload);
   if (!userId) return false;
 

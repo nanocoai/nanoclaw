@@ -7,7 +7,12 @@
 import { backfillContainerConfigs } from './backfill-container-configs.js';
 import { CENTRAL_DB_PATH } from './config.js';
 import { enforceStartupBackoff, resetCircuitBreaker } from './circuit-breaker.js';
-import { adoptRunningSessions } from './container-runner.js';
+import {
+  abortGatewaySessionObservers,
+  adoptRunningSessions,
+  resumeGatewaySessionAdmission,
+  stopGatewaySessionsForUnavailability,
+} from './container-runner.js';
 import { closeDb, initDb } from './db/connection.js';
 import { runMigrations } from './db/migrations/index.js';
 import { getSessionDriver } from './drivers/index.js';
@@ -15,6 +20,9 @@ import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, st
 import { startHostInstanceLease, stopHostInstanceLease } from './host-instance.js';
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
 import { startHostModules, stopHostModules } from './host-lifecycle.js';
+import { startGatewayApprovalCoordinator, stopGatewayApprovalCoordinator } from './gateway-approval-coordinator.js';
+import { startGatewayAvailabilityMonitor } from './gateway-availability.js';
+import { getGatewayProvider } from './gateway-providers/index.js';
 import { routeInbound } from './router.js';
 import { log } from './log.js';
 import { enforceUpgradeTripwire } from './upgrade-state.js';
@@ -60,6 +68,8 @@ import {
   createChannelDeliveryAdapter,
 } from './channels/channel-registry.js';
 
+let stopGatewayAvailabilityMonitor: (() => void) | undefined;
+
 async function main(): Promise<void> {
   log.info('NanoClaw starting');
 
@@ -70,23 +80,30 @@ async function main(): Promise<void> {
   // outside the sanctioned path (raw `git pull` instead of /update-nanoclaw).
   enforceUpgradeTripwire();
 
+  // Select once and fail before serving if the configured package is absent.
+  const gatewayProvider = getGatewayProvider();
+
   // 1. Init central DB
   const db = await initDb(CENTRAL_DB_PATH, { role: 'host' });
   await runMigrations(db, undefined, { mode: 'auto' });
   log.info('Central DB ready', { dialect: db.dialect });
+  stopGatewayAvailabilityMonitor = await startGatewayAvailabilityMonitor(
+    gatewayProvider,
+    stopGatewaySessionsForUnavailability,
+    resumeGatewaySessionAdmission,
+  );
 
   // 1b. Backfill container_configs from legacy container.json files.
   // Idempotent — skips groups that already have a config row.
   if (db.dialect === 'sqlite') await backfillContainerConfigs();
   else log.info('Skipping local container.json backfill for non-local central DB');
 
-  // 2. Session runtime: prove it is reachable, then reconcile what survived a
-  // restart. Adoption replaces the old reap-everything cleanup — a session that
-  // is still running keeps running, and only true orphans are stopped.
+  // Reconcile surviving sessions before channel setup can deliver inbound messages.
   await getSessionDriver().ensureReady?.();
+  await startHostInstanceLease();
   await adoptRunningSessions();
 
-  // 3. Channel adapters
+  // 2. Channel adapters
   await initChannelAdapters((adapter: ChannelAdapter): ChannelSetup => {
     return {
       onInbound(platformId, threadId, message) {
@@ -126,17 +143,16 @@ async function main(): Promise<void> {
           isGroup,
         });
       },
-      onAction(questionId, selectedOption, userId) {
+      onAction(questionId, selectedOption, userId, address) {
         dispatchResponse({
           questionId,
           value: selectedOption,
           userId,
           channelType: adapter.channelType,
-          // platformId/threadId aren't surfaced by the current onAction
-          // signature — registered handlers look them up from the
-          // pending_question / pending_approval row.
-          platformId: '',
-          threadId: null,
+          instance: address?.instance ?? adapter.instance ?? adapter.channelType,
+          messageId: address?.messageId,
+          platformId: address?.platformId ?? '',
+          threadId: address?.threadId ?? null,
         }).catch((err) => {
           log.error('Failed to handle question response', { questionId, err });
         });
@@ -144,30 +160,33 @@ async function main(): Promise<void> {
     };
   });
 
-  // 4. Delivery adapter bridge — dispatches to channel adapters by EXACT
+  // 3. Delivery adapter bridge — dispatches to channel adapters by EXACT
   // registry key (instance ?? channelType): a named instance with an
   // offline adapter is never rerouted through a sibling bot. See
   // createChannelDeliveryAdapter in channels/channel-registry.ts.
-  setDeliveryAdapter(createChannelDeliveryAdapter());
+  const deliveryAdapter = createChannelDeliveryAdapter();
+  setDeliveryAdapter(deliveryAdapter);
 
-  // 5. Start registered host modules. Imports only registered callbacks; the
+  // 4. Core starts the selected gateway's normalized approval subscription
+  // only after persistence and delivery are ready.
+  await startGatewayApprovalCoordinator(gatewayProvider, deliveryAdapter, stopGatewaySessionsForUnavailability, {
+    onAvailable: resumeGatewaySessionAdmission,
+  });
+
+  // 6. Start registered host modules. Imports only registered callbacks; the
   // actual work begins here, after DB + delivery are ready and before polls.
-  await startHostModules({ db, signal: hostAbortController.signal });
-
-  // 5b. Register this host process in durable state and keep its lease fresh
-  // (shadow state — observability across restarts, no behavior reads it).
-  await startHostInstanceLease();
+  await startHostModules({ db, deliveryAdapter, signal: hostAbortController.signal });
 
   // 6. Start delivery polls
   startActiveDeliveryPoll();
   startSweepDeliveryPoll();
   log.info('Delivery polls started');
 
-  // 7. Start host sweep
+  // 8. Start host sweep
   startHostSweep();
   log.info('Host sweep started');
 
-  // 8. Start the `ncl` CLI socket server (data/ncl.sock).
+  // 9. Start the `ncl` CLI socket server (data/ncl.sock).
   await startCliServer();
 
   log.info('NanoClaw running');
@@ -177,6 +196,9 @@ async function main(): Promise<void> {
 async function shutdown(signal: string): Promise<void> {
   log.info('Shutdown signal received', { signal });
   hostAbortController.abort();
+  stopGatewayAvailabilityMonitor?.();
+  await stopGatewayApprovalCoordinator();
+  await abortGatewaySessionObservers();
   await stopHostModules();
   // Stamp the durable stop before the DB closes below.
   await stopHostInstanceLease();

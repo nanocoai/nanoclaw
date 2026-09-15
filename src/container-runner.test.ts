@@ -10,7 +10,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { CONTAINER_CPU_LIMIT, CONTAINER_MEMORY_LIMIT } from './config.js';
 import type { ContainerConfig } from './container-config.js';
@@ -22,8 +22,10 @@ import {
   resolveProviderName,
   syncSkillSymlinks,
   toMountSpecs,
+  watchGatewayAvailability,
 } from './container-runner.js';
 import type { SupervisedHandle } from './drivers/session-events.js';
+import { resetGatewayProvider } from './gateway-providers/index.js';
 import { log } from './log.js';
 import type { VolumeMount } from './providers/provider-container-registry.js';
 import type { AgentGroup, Session } from './types.js';
@@ -31,6 +33,8 @@ import type { AgentGroup, Session } from './types.js';
 vi.mock('./log.js', () => ({
   log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn() },
 }));
+
+afterEach(() => resetGatewayProvider());
 
 describe('resolveProviderName', () => {
   it('prefers session over container config', () => {
@@ -115,7 +119,10 @@ function compose(
     containerConfig: overrides.containerConfig ?? containerConfig,
     mailboxEnvironment: { NANOCLAW_MAILBOX_BACKEND: 'sqlite' },
     contribution: (overrides.contribution ?? {}) as never,
-    gateway: (overrides.gateway ?? {}) as never,
+    gateway: {
+      networkAccess: { endpoint: 'localhost', target: { kind: 'host' } },
+      ...(overrides.gateway ?? {}),
+    } as never,
   });
 }
 
@@ -128,11 +135,24 @@ function composeWithFolder(folder: string) {
     containerConfig,
     mailboxEnvironment: { NANOCLAW_MAILBOX_BACKEND: 'sqlite' },
     contribution: {} as never,
-    gateway: {} as never,
+    gateway: { networkAccess: { endpoint: 'localhost', target: { kind: 'host' } } },
   });
 }
 
 describe('composeSessionSpec', () => {
+  it('carries gateway lineage without overriding reserved host labels', () => {
+    const spec = compose({
+      gateway: {
+        labels: {
+          'provider-channel-id': 'channel-123',
+          'nanoclaw-container-name': 'wrong-runtime',
+        },
+      },
+    });
+    expect(spec.labels['provider-channel-id']).toBe('channel-123');
+    expect(spec.labels['nanoclaw-container-name']).toBe('nanoclaw-v2-agent-one-1700000000000');
+  });
+
   it('keys the session by install, group and session id', () => {
     expect(compose().key).toMatchObject({ agentGroupId: 'agent-1', sessionId: 'session-1' });
   });
@@ -178,7 +198,7 @@ describe('composeSessionSpec', () => {
           {
             class: 'allowlisted-extra',
             hostPath: '/tmp/ca.pem',
-            containerPath: '/tmp/onecli-ca.pem',
+            containerPath: '/tmp/gateway-ca.pem',
             mode: 'ro',
             groupScope: 'agent-1',
           },
@@ -188,13 +208,14 @@ describe('composeSessionSpec', () => {
     const targets = spec.containers[0].mounts.map((m) => m.containerPath);
     expect(targets.filter((t) => t === '/workspace')).toHaveLength(1);
     expect(spec.containers[0].mounts.find((m) => m.containerPath === '/workspace')?.hostPath).toBe('/tmp/stub');
-    expect(targets).toContain('/tmp/onecli-ca.pem');
+    expect(targets).toContain('/tmp/gateway-ca.pem');
   });
 
   it('gateway containers ride beside the agent', () => {
     const spec = compose({
       gateway: {
         containers: [{ role: 'egress-proxy', image: 'proxy:1', env: {}, mounts: [] }],
+        networkAccess: { endpoint: 'egress-proxy', target: { kind: 'session-container', role: 'egress-proxy' } },
       },
     });
     expect(spec.containers.map((c) => c.role)).toEqual(['agent', 'egress-proxy']);
@@ -258,6 +279,7 @@ describe('composeSessionSpec', () => {
   it('asks for a shared-private network and the standard posture', () => {
     const spec = compose();
     expect(spec.network).toBe('shared-private');
+    expect(spec.networkAccess).toEqual({ endpoint: 'localhost', target: { kind: 'host' } });
     expect(spec.hardening).toBe('standard');
     expect(spec.runtimeTier).toBe('container');
     expect(spec.stopGraceSeconds).toBe(1);
@@ -424,6 +446,9 @@ describe('armSessionLifecycle', () => {
     await armSessionLifecycle({
       handle,
       onTerminal: () => {},
+      beforeStart: () => {
+        order.push('gateway');
+      },
       afterStart: () => {
         order.push('afterStart');
       },
@@ -432,7 +457,7 @@ describe('armSessionLifecycle', () => {
     // A failure landing during startup must find a runtime that already knows
     // how to finalize; recording "running" before the session exists would
     // mark a session running that never started.
-    expect(order).toEqual(['onTerminal', 'start', 'afterStart']);
+    expect(order).toEqual(['onTerminal', 'gateway', 'start', 'afterStart']);
   });
 
   it('never runs the post-start bookkeeping when the start fails', async () => {
@@ -451,6 +476,54 @@ describe('armSessionLifecycle', () => {
     ).rejects.toThrow('image-unavailable');
 
     expect(order).toEqual(['onTerminal', 'start']);
+  });
+
+  it('runs failure cleanup before propagating a start failure', async () => {
+    const { handle, order } = fakeHandle(async () => {
+      throw new Error('start-failed');
+    });
+
+    await expect(
+      armSessionLifecycle({
+        handle,
+        onTerminal: () => {},
+        onFailure: async () => {
+          order.push('cleanup');
+        },
+      }),
+    ).rejects.toThrow('start-failed');
+
+    expect(order).toEqual(['onTerminal', 'start', 'cleanup']);
+  });
+});
+
+describe('gateway availability', () => {
+  it('stops the affected runtime when its lease becomes unavailable', () => {
+    const stop = vi.fn();
+    const gateway = {
+      contribution: { networkAccess: { endpoint: 'localhost', target: { kind: 'host' as const } } },
+      onUnavailable(callback: (reason: string) => void) {
+        callback('gateway-lost');
+      },
+    };
+    expect(watchGatewayAvailability(gateway, new AbortController().signal, stop)).toBe(true);
+    expect(stop).toHaveBeenCalledWith('gateway-lost');
+  });
+
+  it('ignores reports after core cancels local observation', () => {
+    const stop = vi.fn();
+    let report!: (reason: string) => void;
+    const controller = new AbortController();
+    const gateway = {
+      contribution: { networkAccess: { endpoint: 'localhost', target: { kind: 'host' as const } } },
+      onUnavailable(callback: (reason: string) => void) {
+        report = callback;
+      },
+    };
+    watchGatewayAvailability(gateway, controller.signal, stop);
+    controller.abort();
+    report('late-loss');
+    expect(stop).not.toHaveBeenCalled();
   });
 });
 

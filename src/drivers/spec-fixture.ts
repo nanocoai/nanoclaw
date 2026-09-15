@@ -8,10 +8,9 @@
  *
  * `fixtureSpec()` is the agent-only session this tree's realization actually
  * runs. `fixtureSpecWithAux()` adds an overlay-composed auxiliary container:
- * it exercises the multi-container contract rules (identity-material custody,
- * per-role mount checks) through `validateSpec`, and the refusal rule on
- * drivers that do not manage auxiliary containers — a driver never realizes a
- * subset of a spec.
+ * it exercises the multi-container contract rules (identity-material custody
+ * and per-role mount checks) through `validateSpec` and each driver's declared
+ * auxiliary-container capability.
  */
 import type { ContainerSpec, MountPolicy, SessionSpec } from './types.js';
 
@@ -20,6 +19,7 @@ export const FIXTURE_POLICY: MountPolicy = {
   dataRoot: '/install/data',
   surfaceRoots: ['/install/container/agent-runner/src', '/install/container/skills', '/install/container/CLAUDE.md'],
   materialsRoot: '/install/data/session-materials',
+  gatewayTrustRoot: '/install/data/gateway-trust',
 };
 
 export function fixtureSpec(overrides: Partial<SessionSpec> = {}): SessionSpec {
@@ -64,6 +64,7 @@ export function fixtureSpec(overrides: Partial<SessionSpec> = {}): SessionSpec {
       },
     ],
     network: 'shared-private',
+    networkAccess: { endpoint: 'host.internal', target: { kind: 'host' } },
     hardening: 'standard',
     resources: { shmSizeMb: 1024, pidsLimit: 2048 },
     runtimeTier: 'container',
@@ -110,7 +111,10 @@ export function fixtureAuxContainer(): ContainerSpec {
 
 /** The two-container session an overlay composes; see the module comment. */
 export function fixtureSpecWithAux(overrides: Partial<SessionSpec> = {}): SessionSpec {
-  const spec = fixtureSpec(overrides);
+  const spec = fixtureSpec({
+    networkAccess: { endpoint: 'egress-proxy', target: { kind: 'session-container', role: 'egress-proxy' } },
+    ...overrides,
+  });
   spec.containers = [...spec.containers, fixtureAuxContainer()];
   return spec;
 }

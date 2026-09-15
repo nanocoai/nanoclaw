@@ -17,7 +17,21 @@ vi.mock('./drivers/index.js', () => ({
   isSessionEventsDriver: () => false,
 }));
 
-import { adoptRunningSessions, isContainerRunning, killContainer } from './container-runner.js';
+import {
+  abortGatewaySessionObservers,
+  adoptRunningSessions,
+  isContainerRunning,
+  killContainer,
+} from './container-runner.js';
+import { type GatewaySessionInput, resetGatewayProvider } from './gateway-providers/index.js';
+const release = vi.fn(async () => {});
+const ensure = vi.fn(async (_input: GatewaySessionInput) => ({
+  contribution: {
+    networkAccess: { endpoint: 'http://proxy:8080', target: { kind: 'runtime' as const, identity: 'proxy' } },
+  },
+  release,
+}));
+const reapOrphans = vi.fn(async () => {});
 import { getSessionClaim } from './db/coordination.js';
 import { initTestDb, closeDb, runMigrations, createAgentGroup, createSession } from './db/index.js';
 
@@ -45,6 +59,15 @@ function fakeHandle(sessionId: string, name: string): SupervisedHandle {
 
 beforeEach(async () => {
   snapshots.length = 0;
+  release.mockClear();
+  ensure.mockClear();
+  reapOrphans.mockClear();
+  resetGatewayProvider({
+    kind: 'test-lifecycle',
+    agentSkills: [],
+    sessions: { ensure, reapOrphans },
+    approvals: { subscribe: async () => {} },
+  });
   const db = await initTestDb();
   await runMigrations(db);
   await createAgentGroup({
@@ -73,6 +96,7 @@ afterEach(async () => {
     killContainer('sess-1', 'test-teardown');
     await vi.waitFor(() => expect(isContainerRunning('sess-1')).toBe(false));
   }
+  resetGatewayProvider();
   await closeDb();
 });
 
@@ -81,6 +105,8 @@ describe('session claim lifecycle', () => {
     snapshots.push({ handle: fakeHandle('sess-1', 'container-a'), phase: 'running' } as SupervisedSnapshot);
     const { adopted } = await adoptRunningSessions();
     expect(adopted).toBe(1);
+    expect(ensure.mock.calls[0]?.[0]).toEqual(expect.objectContaining({ disposition: 'adopt' }));
+    expect(reapOrphans).toHaveBeenCalledOnce();
 
     const claim = await getSessionClaim('sess-1');
     expect(claim?.incarnation).toBe(1);
@@ -93,6 +119,7 @@ describe('session claim lifecycle', () => {
       expect(released?.claimed_by).toBeNull();
       expect(released?.incarnation).toBe(1);
     });
+    await vi.waitFor(() => expect(release).toHaveBeenCalledWith({ kind: 'session-ended', reason: 'test-stop' }));
   });
 
   it('a re-adopted session bumps the incarnation via CAS', async () => {
@@ -107,5 +134,23 @@ describe('session claim lifecycle', () => {
     const claim = await getSessionClaim('sess-1');
     expect(claim?.incarnation).toBe(2);
     expect(claim?.container_ref).toBe('container-b');
+  });
+  it('detaches when a runtime stop fails, instead of revoking a potentially live identity', async () => {
+    const handle = fakeHandle('sess-1', 'container-a');
+    handle.stop = async () => {
+      throw new Error('runtime unavailable');
+    };
+    snapshots.push({ handle, phase: 'running' } as SupervisedSnapshot);
+    await adoptRunningSessions();
+    killContainer('sess-1', 'test-stop');
+    await vi.waitFor(() => expect(release).toHaveBeenCalledWith({ kind: 'host-detached', reason: 'test-stop' }));
+  });
+
+  it('awaits detachment on host replacement while leaving the session running', async () => {
+    snapshots.push({ handle: fakeHandle('sess-1', 'container-a'), phase: 'running' } as SupervisedSnapshot);
+    await adoptRunningSessions();
+    await abortGatewaySessionObservers();
+    expect(release).toHaveBeenCalledWith({ kind: 'host-detached', reason: 'host-shutdown' });
+    expect(isContainerRunning('sess-1')).toBe(true);
   });
 });
