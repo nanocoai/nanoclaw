@@ -38,8 +38,6 @@ import {
 } from '@whiskeysockets/baileys';
 import type { GroupMetadata, WAMessageKey, WAMessage, WASocket } from '@whiskeysockets/baileys';
 
-import { isSafeAttachmentName } from '../attachment-safety.js';
-import { DATA_DIR } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 import { registerChannelAdapter } from './channel-registry.js';
@@ -340,6 +338,40 @@ export function appendMediaFailureNote(content: string, failures: string[]): str
   return content ? `${content}\n${note}` : note;
 }
 
+type InboundAttachment = {
+  type: string;
+  name?: string;
+  mimeType?: string;
+  size: number;
+  data: string;
+};
+
+/**
+ * Build the attachment entry for one inbound media message.
+ *
+ * The bytes ride along as base64 instead of being written to disk here: the
+ * adapter sees one message, but the router fans it out to every engaged
+ * session, so there is no session dir to write into yet. The host's
+ * `extractAttachmentFiles` decodes `data` into `inbox/<message_id>/`, which is
+ * what the container reads — a path built here instead resolves to nothing,
+ * since /workspace is the session dir, not `data/`. `name` stays raw for the
+ * host to sanitize at the write site, and `mimetype` is what lets it derive an
+ * extension for the images and voice notes WhatsApp sends unnamed.
+ */
+export function buildAttachmentEntry(
+  type: string,
+  media: { fileName?: string | null; mimetype?: string | null } | undefined,
+  buffer: Buffer,
+): InboundAttachment {
+  return {
+    type,
+    ...(media?.fileName ? { name: media.fileName } : {}),
+    ...(media?.mimetype ? { mimeType: media.mimetype } : {}),
+    size: buffer.length,
+    data: buffer.toString('base64'),
+  };
+}
+
 /** Map file extension to Baileys media message type. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function buildMediaMessage(data: Buffer, filename: string, ext: string, caption?: string): any {
@@ -567,24 +599,24 @@ registerChannelAdapter('whatsapp', {
       }
     }
 
-    /** Download media from an inbound message, save to /workspace/attachments/. */
+    /** Download media from an inbound message for the host to stage into the session inbox. */
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     async function downloadInboundMedia(
       msg: WAMessage,
       normalized: any,
     ): Promise<{
-      attachments: Array<{ type: string; name: string; localPath: string }>;
+      attachments: InboundAttachment[];
       failures: string[];
     }> {
-      const mediaTypes: Array<{ key: string; type: string; ext: string }> = [
-        { key: 'imageMessage', type: 'image', ext: '.jpg' },
-        { key: 'videoMessage', type: 'video', ext: '.mp4' },
-        { key: 'audioMessage', type: 'audio', ext: '.ogg' },
-        { key: 'documentMessage', type: 'document', ext: '' },
+      const mediaTypes: Array<{ key: string; type: string }> = [
+        { key: 'imageMessage', type: 'image' },
+        { key: 'videoMessage', type: 'video' },
+        { key: 'audioMessage', type: 'audio' },
+        { key: 'documentMessage', type: 'document' },
       ];
-      const results: Array<{ type: string; name: string; localPath: string }> = [];
+      const results: InboundAttachment[] = [];
       const failures: string[] = [];
-      for (const { key, type, ext } of mediaTypes) {
+      for (const { key, type } of mediaTypes) {
         if (!normalized[key]) continue;
         try {
           // Pass reuploadRequest so Baileys can ask WhatsApp to re-upload the
@@ -597,24 +629,8 @@ registerChannelAdapter('whatsapp', {
             {},
             { reuploadRequest: sock.updateMediaMessage, logger: baileysLogger },
           );
-          // documentMessage.fileName is attacker-controlled and rides through
-          // WhatsApp's E2E channel — Meta can't sanitize it server-side. Without
-          // this guard, a `..`-laden fileName escapes attachDir on path.join.
-          const rawFilename = normalized[key].fileName;
-          const fallback = `${type}-${Date.now()}${ext}`;
-          const filename = isSafeAttachmentName(rawFilename) ? rawFilename : fallback;
-          if (rawFilename && filename !== rawFilename) {
-            log.warn('Refused unsafe attachment filename — would escape attachments dir', {
-              rawFilename,
-              replacement: filename,
-            });
-          }
-          const attachDir = path.join(DATA_DIR, 'attachments');
-          fs.mkdirSync(attachDir, { recursive: true });
-          const filePath = path.join(attachDir, filename);
-          fs.writeFileSync(filePath, buffer);
-          results.push({ type, name: filename, localPath: `attachments/${filename}` });
-          log.info('Media downloaded', { type, filename });
+          results.push(buildAttachmentEntry(type, normalized[key], buffer));
+          log.info('Media downloaded', { type, size: buffer.length });
         } catch (err) {
           log.warn('Failed to download media', { type, err });
           failures.push(type);
