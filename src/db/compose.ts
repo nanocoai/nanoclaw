@@ -16,6 +16,13 @@ registerDbDriver((config, options) => {
   if (!options.readonly) fs.mkdirSync(path.dirname(config.path), { recursive: true });
   const raw = new Database(config.path, options.readonly ? { readonly: true, fileMustExist: true } : undefined);
   if (!options.readonly) raw.pragma('journal_mode = WAL');
+  // Without this, any momentary lock contention on the central DB (two
+  // processes touching it at once) throws immediately instead of waiting
+  // briefly and retrying — which looks identical to real corruption from the
+  // caller's side (see `ncl tasks list`/`ncl tasks run` failures). The
+  // session DBs (inbound.db/outbound.db) already carry this same protection
+  // — see container/agent-runner/src/cli/ncl.ts — the central DB never did.
+  raw.pragma('busy_timeout = 5000');
   raw.pragma('foreign_keys = ON');
   return new SqliteDriver(raw);
 });
