@@ -97,6 +97,12 @@ async function commandDecide(cmd: CommandDef, input: GuardInput) {
     if (args.cli_scope !== undefined || args['cli-scope'] !== undefined) {
       return DENY('Cannot change cli_scope from a group-scoped agent.');
     }
+
+    // An agent must not widen its own delivery path from tools-only to
+    // envelope mode. Keep this operator-owned, just like cli_scope.
+    if (args.delivery_mode !== undefined || args['delivery-mode'] !== undefined) {
+      return DENY('Cannot change delivery_mode from a group-scoped agent.');
+    }
   }
 
   if (cmd.access === 'approval') {
