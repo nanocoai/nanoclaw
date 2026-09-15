@@ -9,9 +9,10 @@
 import fs from 'fs';
 import path from 'path';
 
+import { loadConfig } from '../config.js';
 import { findByName, getAllDestinations } from '../destinations.js';
-import { getMessageIdBySeq, getRoutingBySeq, writeMessageOut } from '../db/messages-out.js';
-import { getCurrentInReplyTo, getCurrentReplyRoute } from '../db/session-state.js';
+import { findChatSendSince, getMessageIdBySeq, getRoutingBySeq, writeMessageOut } from '../db/messages-out.js';
+import { getCurrentInReplyTo, getCurrentReplyRoute, getTurnOutboundBaseline } from '../db/session-state.js';
 import { resolveDestinationThread } from '../db/session-routing.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
@@ -66,7 +67,8 @@ function resolveRouting(
 export const sendMessage: McpToolDefinition = {
   tool: {
     name: 'send_message',
-    description: 'Send a message to a named destination.',
+    description:
+      'Send one user-facing response to a named destination. In tools-only mode, call at most once per destination per turn.',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -88,10 +90,37 @@ export const sendMessage: McpToolDefinition = {
     const routing = resolveRouting(to);
     if ('error' in routing) return err(routing.error);
 
+    const inReplyTo = getCurrentInReplyTo();
+
+    // Small models can continue after a successful tool result and issue several
+    // paraphrases of the same answer. Exact-text dedupe cannot contain that loop
+    // and a "send different text" response actively teaches it to paraphrase.
+    // In tools-only mode, permit one plain send_message write per destination per
+    // turn. The poll loop republishes the baseline on a pushed follow-up, so the
+    // next user message receives a fresh budget. Other destinations and outbound
+    // tool kinds remain independent. With no baseline, and in envelope mode, the
+    // historical behavior is unchanged.
+    const toolsOnly = loadConfig().deliveryMode === 'tools-only';
+    const turnBaseline = toolsOnly ? getTurnOutboundBaseline() : null;
+    if (turnBaseline !== null) {
+      const priorSeq = findChatSendSince({
+        sinceSeq: turnBaseline,
+        platformId: routing.platform_id,
+        channelType: routing.channel_type,
+        threadId: routing.thread_id,
+      });
+      if (priorSeq !== null) {
+        log(`send_message: turn budget already used by #${priorSeq} → ${routing.resolvedName}, not sent`);
+        return ok(
+          `Not sent: a user-facing message was already delivered to ${routing.resolvedName} this turn (id: ${priorSeq}). Stop this turn now. Do not retry, rephrase, or call send_message again until another user message arrives.`,
+        );
+      }
+    }
+
     const id = generateId();
     const seq = await writeMessageOut({
       id,
-      in_reply_to: getCurrentInReplyTo(),
+      in_reply_to: inReplyTo,
       kind: 'chat',
       platform_id: routing.platform_id,
       channel_type: routing.channel_type,
@@ -100,7 +129,11 @@ export const sendMessage: McpToolDefinition = {
     });
 
     log(`send_message: #${seq} → ${routing.resolvedName}`);
-    return ok(`Message sent to ${routing.resolvedName} (id: ${seq})`);
+    return ok(
+      toolsOnly
+        ? `Message sent to ${routing.resolvedName} (id: ${seq}). The user-facing response is delivered. Stop this turn now; do not call send_message again for this destination until another user message arrives.`
+        : `Message sent to ${routing.resolvedName} (id: ${seq})`,
+    );
   },
 };
 

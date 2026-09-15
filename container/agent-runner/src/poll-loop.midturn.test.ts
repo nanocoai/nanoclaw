@@ -263,7 +263,7 @@ describe('mid-turn <message> block delivery', () => {
     async function* events(): AsyncGenerator<ProviderEvent> {
       yield { type: 'init', continuation: 's1' };
       yield { type: 'text', text: '<message to="discord-main">Started on it.</message>' };
-      yield { type: 'result', text: errText, isError: true };
+      yield { type: 'result', text: 'raw provider diagnostic', isError: true, error: errText };
     }
     const { query, pushes } = makeStubQuery(events());
 
@@ -272,7 +272,7 @@ describe('mid-turn <message> block delivery', () => {
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(2);
     expect(JSON.parse(out[0].content).text).toBe('Started on it.');
-    expect(JSON.parse(out[1].content).text).toBe('The agent run failed. Check the logs for details.');
+    expect(JSON.parse(out[1].content).text).toBe(errText);
     expect(pushes).toHaveLength(0);
   });
 

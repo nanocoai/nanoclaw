@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { ChildProcess } from 'child_process';
 import { EventEmitter } from 'events';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdtempSync, readFileSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
 import type { OpenCodeMessage, OpenCodeSessionClient } from './opencode-turn.js';
-import type { OpenCodeMemorySessionHook } from './opencode-memory.js';
+import { openCodeInstructionsPath, type OpenCodeMemorySessionHook } from './opencode-memory.js';
 
 import {
   destroySharedRuntime,
@@ -17,6 +17,7 @@ import {
 import { initTestSessionDb, closeSessionDb, getInboundDb } from '../mailbox/sqlite/connection.js';
 import { getUndeliveredMessages } from '../db/messages-out.js';
 import { processQuery } from '../poll-loop.js';
+import { loadConfig } from '../config.js';
 import { registerAgentMailbox, resetAgentMailboxForTesting } from '../mailbox/index.js';
 import { SqliteAgentMailbox } from '../mailbox/sqlite/index.js';
 import { createProvider } from './factory.js';
@@ -740,6 +741,42 @@ describe('SDK stream cleanup', () => {
 });
 
 describe('runtime contract consumption', () => {
+  const deliveryModeTest = 'deliveryMode' in loadConfig() ? it : it.skip;
+  for (const deliveryMode of ['envelope', 'tools-only'] as const) {
+    deliveryModeTest(`renders ${deliveryMode} delivery instructions into native turn memory`, async () => {
+      const configuration = loadConfig();
+      if (!('deliveryMode' in configuration)) throw new Error('This core does not support configured delivery modes');
+      const previousMode = configuration.deliveryMode;
+      configuration.deliveryMode = deliveryMode;
+      try {
+        getInboundDb()
+          .prepare(
+            `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+             VALUES ('main', 'main', 'channel', 'discord', 'chan-1', NULL)`,
+          )
+          .run();
+        const server = fakeServer((sid) => server.reply(sid, 'done'));
+        installDeps([server]);
+        await runOneTurn(newProvider());
+
+        const instructions = readFileSync(openCodeInstructionsPath(), 'utf8');
+        expect(instructions).toContain('Available destinations: `main`.');
+        if (deliveryMode === 'tools-only') {
+          expect(instructions).toContain(
+            'Only send_message, send_file, send_card and ask_user_question deliver anything.',
+          );
+          expect(instructions).toContain('Everything you write in a response is a private scratchpad');
+          expect(instructions).not.toContain('You MUST wrap all responses');
+        } else {
+          expect(instructions).toContain('You MUST wrap all responses in <message to="name">...</message> blocks.');
+          expect(instructions).not.toContain('Everything you write in a response is a private scratchpad');
+        }
+      } finally {
+        configuration.deliveryMode = previousMode;
+      }
+    });
+  }
+
   it('uses the core-resolved configuration even if environment defaults change before query', async () => {
     const server = fakeServer((sid) => server.reply(sid, 'configured'));
     const { spawnServer } = installDeps([server]);
