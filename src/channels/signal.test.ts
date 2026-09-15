@@ -60,8 +60,12 @@ vi.mock('node:net', () => ({
   }),
 }));
 
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import type { ChannelSetup } from './adapter.js';
-import { computeSignalIsMention, createSignalAdapter } from './signal.js';
+import { computeSignalIsMention, createSignalAdapter, signalAttachmentType } from './signal.js';
 
 // --- Test helpers ---
 
@@ -74,15 +78,31 @@ function createMockSetup() {
   };
 }
 
-function createAdapter() {
+// Inbound attachment staging reads real bytes off disk, so each test gets a
+// real signal-cli data dir rather than an fs mock.
+let dataDir = '';
+
+function writeAttachment(id: string, contents: Buffer | string): void {
+  mkdirSync(join(dataDir, 'attachments'), { recursive: true });
+  writeFileSync(join(dataDir, 'attachments', id), contents);
+}
+
+function createAdapter(overrides: { maxInlineAttachmentBytes?: number } = {}) {
   return createSignalAdapter({
     cliPath: 'signal-cli',
     account: '+15551234567',
     tcpHost: '127.0.0.1',
     tcpPort: 7583,
     manageDaemon: false,
-    signalDataDir: '/tmp/signal-cli-test-data',
+    signalDataDir: dataDir,
+    maxInlineAttachmentBytes: overrides.maxInlineAttachmentBytes ?? 20 * 1024 * 1024,
   });
+}
+
+/** The content object handed to onInbound by the most recent call. */
+function lastInboundContent(cfg: ReturnType<typeof createMockSetup>): any {
+  const calls = (cfg.onInbound as unknown as { mock: { calls: any[][] } }).mock.calls;
+  return calls[calls.length - 1][2].content;
 }
 
 function getRpcCalls(): Array<{
@@ -126,6 +146,7 @@ describe('SignalAdapter', () => {
     tcpRef.fakeSocket = null;
     tcpRef.rpcResponses.set('send', { timestamp: 1234567890 });
     tcpRef.rpcResponses.set('sendTyping', {});
+    dataDir = mkdtempSync(join(tmpdir(), 'signal-cli-test-'));
   });
 
   afterEach(() => {
@@ -134,6 +155,7 @@ describe('SignalAdapter', () => {
     } catch {
       // already closed
     }
+    if (dataDir) rmSync(dataDir, { recursive: true, force: true });
   });
 
   // --- Connection lifecycle ---
@@ -331,6 +353,88 @@ describe('SignalAdapter', () => {
       await adapter.teardown();
     });
 
+    it('stages a Note to Self attachment sent with no caption', async () => {
+      const adapter = createAdapter();
+      const cfg = createMockSetup();
+      await adapter.setup(cfg);
+      writeAttachment('selfpdf', '%PDF-1.4 noted');
+
+      pushEvent({
+        sourceNumber: '+15551234567',
+        syncMessage: {
+          sentMessage: {
+            timestamp: 1700000000010,
+            destinationNumber: '+15551234567',
+            attachments: [{ id: 'selfpdf', contentType: 'application/pdf', filename: 'notes.pdf', size: 14 }],
+          },
+        },
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      expect(cfg.onInbound).toHaveBeenCalled();
+      const content = lastInboundContent(cfg);
+      expect(content.isFromMe).toBe(true);
+      expect(content.attachments).toEqual([
+        {
+          type: 'file',
+          name: 'notes.pdf',
+          mimeType: 'application/pdf',
+          size: 14,
+          data: Buffer.from('%PDF-1.4 noted').toString('base64'),
+        },
+      ]);
+
+      await adapter.teardown();
+    });
+
+    it('keeps the caption alongside a Note to Self attachment', async () => {
+      const adapter = createAdapter();
+      const cfg = createMockSetup();
+      await adapter.setup(cfg);
+      writeAttachment('selfimg', 'JPEGBYTES');
+
+      pushEvent({
+        sourceNumber: '+15551234567',
+        syncMessage: {
+          sentMessage: {
+            timestamp: 1700000000011,
+            message: 'read this later',
+            destinationNumber: '+15551234567',
+            attachments: [{ id: 'selfimg', contentType: 'image/jpeg', size: 9 }],
+          },
+        },
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      const content = lastInboundContent(cfg);
+      expect(content.text).toBe('read this later');
+      expect(content.attachments).toHaveLength(1);
+
+      await adapter.teardown();
+    });
+
+    it('notes an unreadable Note to Self attachment instead of dropping the message', async () => {
+      const adapter = createAdapter();
+      const cfg = createMockSetup();
+      await adapter.setup(cfg);
+
+      pushEvent({
+        sourceNumber: '+15551234567',
+        syncMessage: {
+          sentMessage: {
+            timestamp: 1700000000012,
+            destinationNumber: '+15551234567',
+            attachments: [{ id: 'vanished', contentType: 'application/pdf', filename: 'ghost.pdf' }],
+          },
+        },
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      expect(lastInboundContent(cfg).text).toBe('[ghost.pdf could not be read]');
+
+      await adapter.teardown();
+    });
+
     it('skips empty messages', async () => {
       const adapter = createAdapter();
       const cfg = createMockSetup();
@@ -368,31 +472,177 @@ describe('SignalAdapter', () => {
       await adapter.teardown();
     });
 
-    it('forwards image attachments as [Image: <path>] plus structured attachments array', async () => {
+    it('stages an image as base64 data for the host inbox, never a host path', async () => {
       const adapter = createAdapter();
       const cfg = createMockSetup();
       await adapter.setup(cfg);
+      writeAttachment('att123abc', Buffer.from([0xff, 0xd8, 0xff, 0xe0]));
 
       pushEvent({
         sourceNumber: '+15555550123',
         sourceName: 'Alice',
         dataMessage: {
           timestamp: 1700000000000,
-          attachments: [{ id: 'att123abc', contentType: 'image/jpeg', size: 50000 }],
+          attachments: [{ id: 'att123abc', contentType: 'image/jpeg', size: 4 }],
         },
       });
 
       await new Promise((r) => setTimeout(r, 50));
-      expect(cfg.onInbound).toHaveBeenCalledWith(
-        '+15555550123',
-        null,
-        expect.objectContaining({
-          content: expect.objectContaining({
-            text: expect.stringMatching(/^\[Image: .+att123abc\]$/),
-            attachments: [expect.objectContaining({ contentType: 'image/jpeg' })],
-          }),
-        }),
-      );
+      const content = lastInboundContent(cfg);
+      expect(content.attachments).toEqual([
+        {
+          type: 'image',
+          mimeType: 'image/jpeg',
+          size: 4,
+          data: Buffer.from([0xff, 0xd8, 0xff, 0xe0]).toString('base64'),
+        },
+      ]);
+      // The signal-cli attachments dir is not mounted into agent containers,
+      // so a host path in the text would be a dead reference.
+      expect(content.text).not.toContain(dataDir);
+
+      await adapter.teardown();
+    });
+
+    it('stages a document sent with no text, and wakes the agent for it', async () => {
+      const adapter = createAdapter();
+      const cfg = createMockSetup();
+      await adapter.setup(cfg);
+      writeAttachment('pdf001', '%PDF-1.7 fake');
+
+      pushEvent({
+        sourceNumber: '+15555550123',
+        dataMessage: {
+          timestamp: 1700000000001,
+          attachments: [{ id: 'pdf001', contentType: 'application/pdf', filename: 'report.pdf', size: 13 }],
+        },
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      expect(cfg.onInbound).toHaveBeenCalled();
+      expect(lastInboundContent(cfg).attachments).toEqual([
+        {
+          type: 'file',
+          name: 'report.pdf',
+          mimeType: 'application/pdf',
+          size: 13,
+          data: Buffer.from('%PDF-1.7 fake').toString('base64'),
+        },
+      ]);
+
+      await adapter.teardown();
+    });
+
+    it('keeps the text and stages the document when both are present', async () => {
+      const adapter = createAdapter();
+      const cfg = createMockSetup();
+      await adapter.setup(cfg);
+      writeAttachment('doc002', 'body');
+
+      pushEvent({
+        sourceNumber: '+15555550123',
+        dataMessage: {
+          timestamp: 1700000000002,
+          message: 'have a look at this',
+          attachments: [{ id: 'doc002', contentType: 'application/pdf', filename: 'q3.pdf', size: 4 }],
+        },
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      const content = lastInboundContent(cfg);
+      expect(content.text).toBe('have a look at this');
+      expect(content.attachments).toHaveLength(1);
+
+      await adapter.teardown();
+    });
+
+    it('notes an attachment whose file is missing instead of dropping it silently', async () => {
+      const adapter = createAdapter();
+      const cfg = createMockSetup();
+      await adapter.setup(cfg);
+      // No writeAttachment — signal-cli reported it but the file is not there.
+
+      pushEvent({
+        sourceNumber: '+15555550123',
+        dataMessage: {
+          timestamp: 1700000000003,
+          message: 'see attached',
+          attachments: [{ id: 'gone', contentType: 'application/pdf', filename: 'missing.pdf' }],
+        },
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      const content = lastInboundContent(cfg);
+      expect(content.text).toBe('see attached\n[missing.pdf could not be read]');
+      expect(content.attachments).toBeUndefined();
+
+      await adapter.teardown();
+    });
+
+    it('skips an attachment over the inline cap and says so', async () => {
+      const adapter = createAdapter({ maxInlineAttachmentBytes: 8 });
+      const cfg = createMockSetup();
+      await adapter.setup(cfg);
+      writeAttachment('big', Buffer.alloc(64));
+
+      pushEvent({
+        sourceNumber: '+15555550123',
+        dataMessage: {
+          timestamp: 1700000000004,
+          attachments: [{ id: 'big', contentType: 'video/mp4', filename: 'clip.mp4', size: 64 }],
+        },
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      const content = lastInboundContent(cfg);
+      expect(content.attachments).toBeUndefined();
+      expect(content.text).toBe('[clip.mp4 could not be read]');
+
+      await adapter.teardown();
+    });
+
+    it('labels a voice note so the host derives an audio extension', async () => {
+      const adapter = createAdapter();
+      const cfg = createMockSetup();
+      await adapter.setup(cfg);
+      writeAttachment('voice01', 'OggS');
+
+      pushEvent({
+        sourceNumber: '+15555550123',
+        dataMessage: {
+          timestamp: 1700000000005,
+          attachments: [{ id: 'voice01', contentType: 'audio/ogg', size: 4 }],
+        },
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      const [staged] = lastInboundContent(cfg).attachments;
+      expect(staged.type).toBe('voice');
+      expect(staged.name).toBeUndefined();
+
+      await adapter.teardown();
+    });
+
+    it('stages every attachment when several arrive together', async () => {
+      const adapter = createAdapter();
+      const cfg = createMockSetup();
+      await adapter.setup(cfg);
+      writeAttachment('m1', 'one');
+      writeAttachment('m2', 'two');
+
+      pushEvent({
+        sourceNumber: '+15555550123',
+        dataMessage: {
+          timestamp: 1700000000006,
+          attachments: [
+            { id: 'm1', contentType: 'image/png', size: 3 },
+            { id: 'm2', contentType: 'application/zip', filename: 'bundle.zip', size: 3 },
+          ],
+        },
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      expect(lastInboundContent(cfg).attachments.map((a: any) => a.type)).toEqual(['image', 'file']);
 
       await adapter.teardown();
     });
@@ -1012,5 +1262,15 @@ describe('computeSignalIsMention', () => {
   it('is undefined in groups without mentions', () => {
     expect(computeSignalIsMention(account, true)).toBeUndefined();
     expect(computeSignalIsMention(account, true, [])).toBeUndefined();
+  });
+});
+
+describe('signalAttachmentType', () => {
+  it('maps content types to the coarse media class the host keys on', () => {
+    expect(signalAttachmentType('image/png')).toBe('image');
+    expect(signalAttachmentType('video/mp4')).toBe('video');
+    expect(signalAttachmentType('audio/ogg')).toBe('audio');
+    expect(signalAttachmentType('application/pdf')).toBe('file');
+    expect(signalAttachmentType(undefined)).toBe('file');
   });
 });

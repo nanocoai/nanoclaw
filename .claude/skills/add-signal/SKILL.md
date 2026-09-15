@@ -278,6 +278,11 @@ SIGNAL_MANAGE_DAEMON=true
 
 # signal-cli data directory (default: ~/.local/share/signal-cli)
 SIGNAL_DATA_DIR=~/.local/share/signal-cli
+
+# Largest inbound attachment staged into the agent's inbox, in bytes
+# (default: 20971520, i.e. 20MB). Attachments above this are skipped with a
+# note in the message rather than carried through the session DB.
+SIGNAL_MAX_INLINE_ATTACHMENT_BYTES=20971520
 ```
 
 **Security note:** keep the TCP host on `127.0.0.1`. The daemon has no auth — binding it to a public interface would expose your full Signal account to the network.
