@@ -18,6 +18,7 @@ import {
   getMessagingGroupByPlatform,
   getMessagingGroupForOwnDestination,
 } from './db/messaging-groups.js';
+import { ChannelAdapterOfflineError } from './channels/channel-registry.js';
 import { clearDeliveryAttempt, recordDeliveryAttempt } from './db/coordination.js';
 import { runGuarded, type DeliveryGuardSpec, type GuardedDeliveryHandler } from './delivery-guard.js';
 import { isUnguarded, type Unguarded } from './guard/index.js';
@@ -286,6 +287,11 @@ async function drainSession(session: Session): Promise<void> {
         }
       }
     } catch (err) {
+      if (err instanceof ChannelAdapterOfflineError) {
+        // Nothing was sent, so this is not an attempt. The row waits for the adapter.
+        log.debug('Channel adapter offline; message waits', { messageId: msg.id, sessionId: session.id, key: err.key });
+        continue;
+      }
       const attempts = await recordAttemptRow(msg.id, session.id, err);
       if (attempts !== null && attempts >= MAX_DELIVERY_ATTEMPTS) {
         log.error('Message delivery failed permanently, giving up', {
