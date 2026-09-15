@@ -75,7 +75,9 @@ export interface MattermostAdapterConfig extends Partial<Omit<MattermostAdapterO
  * Falls back to `MATTERMOST_URL`, `MATTERMOST_BOT_TOKEN`,
  * `MATTERMOST_CALLBACK_URL`, `MATTERMOST_CALLBACK_SECRET` and
  * `MATTERMOST_TEAM` (all but the first two optional) for anything `config`
- * leaves out.
+ * leaves out. MATTERMOST_ALLOW_UNAUTHENTICATED_CALLBACKS=true is the
+ * environment form of the isolated-local-test opt-out. Explicit false wins.
+ * A configured callback URL without a nonblank secret throws.
  *
  * Returns `null` when the URL or the bot token is absent from both sources,
  * per the NanoClaw channel-registry contract (spec §7) — an unconfigured
@@ -85,7 +87,7 @@ export interface MattermostAdapterConfig extends Partial<Omit<MattermostAdapterO
  */
 export function createMattermostAdapter(config: MattermostAdapterConfig = {}): MattermostAdapter | null {
   const env = process.env;
-  const { botToken, callbackSecret, callbackUrl, team, url, ...rest } = config;
+  const { allowUnauthenticatedCallbacks, botToken, callbackSecret, callbackUrl, team, url, ...rest } = config;
   const resolvedUrl = url || env.MATTERMOST_URL;
   const resolvedToken = botToken || env.MATTERMOST_BOT_TOKEN;
   if (!resolvedUrl || !resolvedToken) {
@@ -93,8 +95,10 @@ export function createMattermostAdapter(config: MattermostAdapterConfig = {}): M
   }
 
   const resolvedCallbackUrl = callbackUrl || env.MATTERMOST_CALLBACK_URL;
-  const resolvedCallbackSecret = callbackSecret || env.MATTERMOST_CALLBACK_SECRET;
+  const resolvedCallbackSecret = callbackSecret?.trim() ? callbackSecret : env.MATTERMOST_CALLBACK_SECRET;
   const resolvedTeam = team || env.MATTERMOST_TEAM;
+  const resolvedAllowUnauthenticated =
+    allowUnauthenticatedCallbacks ?? env.MATTERMOST_ALLOW_UNAUTHENTICATED_CALLBACKS === 'true';
 
   return new MattermostAdapter({
     ...rest,
@@ -103,5 +107,6 @@ export function createMattermostAdapter(config: MattermostAdapterConfig = {}): M
     ...(resolvedCallbackUrl ? { callbackUrl: resolvedCallbackUrl } : {}),
     ...(resolvedCallbackSecret ? { callbackSecret: resolvedCallbackSecret } : {}),
     ...(resolvedTeam ? { team: resolvedTeam } : {}),
+    ...(resolvedAllowUnauthenticated === true ? { allowUnauthenticatedCallbacks: true } : {}),
   });
 }

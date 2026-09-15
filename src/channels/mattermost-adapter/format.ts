@@ -235,17 +235,18 @@ const ROUTE_SAFE_ACTION_ID = /^[A-Za-z0-9]+$/;
  */
 function buttonToAction(button: ButtonElement, callbackUrl: string, secret: string | undefined): MattermostPostAction {
   const style = toActionStyle(button.style);
+  const url = button.callbackUrl || callbackUrl;
   return {
     ...(ROUTE_SAFE_ACTION_ID.test(button.id) ? { id: button.id } : {}),
     name: emojify(button.label),
     type: 'button',
     ...(style ? { style } : {}),
     integration: {
-      url: button.callbackUrl || callbackUrl,
+      url,
       context: {
         action_id: button.id,
         ...(button.value === undefined ? {} : { value: button.value }),
-        ...secretContext(secret),
+        ...(isAdapterCallbackUrl(url, callbackUrl) ? secretContext(secret) : {}),
       },
     },
   };
@@ -260,12 +261,20 @@ function buttonToAction(button: ButtonElement, callbackUrl: string, secret: stri
  * (live-verified; see `PostActionIntegrationRequest`), so the context is a
  * server-to-adapter channel and a secret placed in it never reaches a
  * browser. `handleWebhook` rejects callbacks whose context lacks the
- * configured secret.
+ * configured secret. External per-button URLs never receive this credential.
  */
 export const CALLBACK_SECRET_KEY = 'callback_token';
 
 function secretContext(secret: string | undefined): Record<string, string> {
   return secret ? { [CALLBACK_SECRET_KEY]: secret } : {};
+}
+
+/** Only the adapter route and its accepted /actions variant may receive its secret. */
+function isAdapterCallbackUrl(url: string, adapterCallbackUrl: string): boolean {
+  const strip = (value: string) => value.replace(/\/+$/, '');
+  const ours = strip(adapterCallbackUrl);
+  const theirs = strip(url);
+  return theirs === ours || theirs === `${ours}/actions`;
 }
 
 /**

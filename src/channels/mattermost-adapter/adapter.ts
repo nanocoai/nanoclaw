@@ -90,12 +90,38 @@ const MATTERMOST_ID = /^[a-z0-9]{26}$/;
  */
 const WEBHOOK_PATH = '/webhook/mattermost';
 
+/** Compare UTF-8 bytes only after checking their lengths. */
+function secretMatches(presented: unknown, expected: string): boolean {
+  if (typeof presented !== 'string') return false;
+  const actual = Buffer.from(presented);
+  const configured = Buffer.from(expected);
+  return actual.length === configured.length && timingSafeEqual(actual, configured);
+}
+
+function requireCallbackSecret(options: MattermostAdapterOptions): string | undefined {
+  const secret = options.callbackSecret;
+  if (secret !== undefined && secret.trim() !== '') return secret;
+  if (options.callbackUrl && options.allowUnauthenticatedCallbacks !== true) {
+    throw new Error(
+      'MattermostAdapter: callbackUrl is set but callbackSecret is missing or blank. ' +
+        'Set callbackSecret (MATTERMOST_CALLBACK_SECRET) to authenticate interactive clicks. ' +
+        'Only isolated local tests may set allowUnauthenticatedCallbacks: true.',
+    );
+  }
+  return undefined;
+}
+
 export interface MattermostAdapterOptions {
   /**
-   * Shared secret every interactive action carries back in its context.
-   * When set, `handleWebhook` rejects callbacks that do not present it —
-   * the only authentication Mattermost's action callbacks can have. Cards
-   * posted before the secret was configured stop being clickable.
+   * Permit unauthenticated actions only in isolated local tests. Off by
+   * default; never enable where untrusted clients can reach the callback.
+   * A configured secret is still enforced when this option is true.
+   */
+  allowUnauthenticatedCallbacks?: boolean;
+  /**
+   * Shared secret for actions addressed to this adapter. Required and
+   * nonblank whenever callbackUrl is configured, unless explicitly opted
+   * out for local tests. Old cards need reissuing when the secret changes.
    */
   callbackSecret?: string;
   /** Externally reachable base URL Mattermost POSTs button clicks to. */
@@ -223,6 +249,7 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
   readonly rest: MattermostRestClient;
 
   private readonly setupCallbacks = new Set<string>();
+  private readonly allowUnauthenticatedCallbacks: boolean;
   private readonly callbackSecret: string | undefined;
   private readonly callbackUrl: string | undefined;
   /**
@@ -267,7 +294,8 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
   constructor(options: MattermostAdapterOptions) {
     this.options = { ...options, url: normalizeBaseUrl(options.url) };
     this.callbackUrl = options.callbackUrl;
-    this.callbackSecret = options.callbackSecret;
+    this.callbackSecret = requireCallbackSecret(options);
+    this.allowUnauthenticatedCallbacks = options.allowUnauthenticatedCallbacks === true;
     this.logger = new ConsoleLogger('info', 'mattermost');
     this.rest = new MattermostRestClient({
       baseUrl: this.options.url,
@@ -284,6 +312,11 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
   async initialize(chat: ChatInstance): Promise<void> {
     this.chat = chat;
     this.logger = chat.getLogger('mattermost');
+    if (this.allowUnauthenticatedCallbacks && this.callbackSecret === undefined) {
+      this.logger.warn(
+        'Mattermost action callbacks are unauthenticated: allowUnauthenticatedCallbacks is enabled without a callbackSecret. Anyone who can reach the route can trigger actions.',
+      );
+    }
 
     try {
       const me = await this.rest.getMe();
@@ -912,10 +945,10 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
    * Socket Mode, this is a real inbound HTTP route, served by the host's
    * webhook server at `/webhook/mattermost`.
    *
-   * Mattermost signs nothing on this request. When a `callbackSecret` is
-   * configured, the click must present it in `context` (where
-   * `cardToAttachment` put it and where no client can read it); a callback
-   * without it is refused with 401 before anything is dispatched.
+   * Mattermost signs nothing on this request. Actions must present the
+   * configured callbackSecret in context, or receive 401 before dispatch.
+   * Without a secret, only an explicit local-test opt-out permits actions.
+   * Setup proofs below use a separate credential and never dispatch actions.
    *
    * The dispatch is fire-and-forget, mirroring Slack's `handleBlockActions`:
    * `chat.processAction` is started and the 200 goes back immediately, because
@@ -942,6 +975,10 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
       return new Response('Invalid JSON', { status: 400 });
     }
 
+    if (!payload || typeof payload !== 'object') {
+      return new Response('Invalid JSON', { status: 400 });
+    }
+
     // A setup action uses a one-purpose proof, not the long-lived callback
     // secret: a mistyped callback destination cannot receive that secret.
     const setupNonce = payload.context?.nanoclaw_setup_action;
@@ -962,13 +999,16 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
 
     if (this.callbackSecret !== undefined) {
       const presented = payload.context?.[CALLBACK_SECRET_KEY];
-      if (presented !== this.callbackSecret) {
+      if (!secretMatches(presented, this.callbackSecret)) {
         this.logger.warn('Mattermost action callback rejected: missing or wrong callback secret', {
           postId: payload.post_id,
           userId: payload.user_id,
         });
         return new Response('Unauthorized', { status: 401 });
       }
+    } else if (!this.allowUnauthenticatedCallbacks) {
+      this.logger.warn('Mattermost action callback rejected: no callbackSecret is configured');
+      return new Response('Unauthorized', { status: 401 });
     }
 
     // A setup challenge checks this initialized adapter without delivering an
