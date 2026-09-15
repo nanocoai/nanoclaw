@@ -48,8 +48,8 @@ export const STEP_FILES: Record<string, string[]> = {
   bootstrap: ['setup.sh', 'setup/install-node.sh', 'nanoclaw.sh'],
   environment: ['setup/environment.ts'],
   container: ['setup/container.ts', 'setup/install-docker.sh', 'container/Dockerfile'],
-  onecli: ['setup/onecli.ts'],
-  auth: ['setup/auth.ts', 'setup/register-claude-token.sh', 'setup/install-claude.sh'],
+  gateway: ['setup/gateways/install.ts', 'setup/gateways/catalog.ts'],
+  auth: ['setup/gateways/auth-step.ts', 'setup/gateways/install.ts'],
   mounts: ['setup/mounts.ts'],
   service: ['setup/service.ts'],
   'cli-agent': ['setup/cli-agent.ts', 'scripts/init-cli-agent.ts'],
@@ -183,7 +183,7 @@ export async function ensureClaudeReady(projectRoot: string): Promise<boolean> {
     // Run under script(1) to capture the OAuth token from PTY output
     // while preserving interactive TTY for the browser OAuth flow.
     // Same approach as register-claude-token.sh, but we set the env var
-    // instead of writing to OneCLI.
+    // instead of writing through the selected gateway.
     const tmpfile = path.join(os.tmpdir(), `claude-setup-token-${process.pid}`);
     try {
       const isUtilLinux = (() => {

@@ -23,11 +23,11 @@ import { emitStatus } from './status.js';
  * steps still write directly) so flows don't invent grep/sed pipelines (which
  * can't be allowlisted tightly).
  */
-export function upsertEnvVar(key: string, value: string): { existed: boolean } {
+export function upsertEnvVar(key: string, value: string, projectRoot = process.cwd()): { existed: boolean } {
   if (!/^[A-Z][A-Z0-9_]*$/.test(key)) {
     throw new Error(`Invalid env key: ${key} (must be UPPER_SNAKE_CASE)`);
   }
-  const envFile = path.join(process.cwd(), '.env');
+  const envFile = path.join(projectRoot, '.env');
   let content = '';
   if (fs.existsSync(envFile)) {
     content = fs.readFileSync(envFile, 'utf-8');

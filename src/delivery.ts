@@ -118,7 +118,7 @@ let sweepPolling = false;
 /**
  * Callbacks fired when the delivery adapter is first set (and again if it's
  * replaced). Lets modules that need the adapter at boot (e.g. approvals →
- * OneCLI handler) hook in without core calling into the module directly.
+ * gateway approval handlers) hook in without core calling into the module directly.
  *
  * Not a general-purpose registry — narrow lifecycle hook only.
  */

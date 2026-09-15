@@ -100,11 +100,11 @@ else
   script -q "$tmpfile" $cmd
 fi
 
-# Extract the token via the shared PTY-capture parser (setup/lib/captured-token.ts),
+# Extract the token via NanoClaw's shared PTY-capture parser,
 # so this script and setup/lib/claude-assist.ts stay in lockstep on the
 # normalization rules (ANSI/control stripping, un-wrapping the token).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-token=$(pnpm exec tsx "$SCRIPT_DIR/lib/captured-token.ts" claude "$tmpfile" || true)
+token=$(pnpm exec tsx setup/lib/captured-token.ts claude "$tmpfile" || true)
 
 if [ -z "$token" ]; then
   keep=$(mktemp -t claude-setup-token-log.XXXXXX)

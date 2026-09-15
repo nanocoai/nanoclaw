@@ -280,7 +280,7 @@ tasks.
 The script is passed unchanged to NanoClaw's normal task creation and execution
 path. See [Scheduled Tasks](scheduled-tasks.md#script-gates) for the script
 contract, testing workflow, frequency limit, and failure behavior. Avoid putting
-secrets directly in scripts; prefer runtime credential injection through OneCLI.
+secrets directly in scripts; prefer runtime credential injection through the installed gateway.
 
 Tasks start **paused**, so stamping a template never starts background work
 without user consent. Until the setup welcome flow offers activation, inspect
@@ -357,7 +357,7 @@ directories must exist in the shipped plugin.
 Credentials are held by the **credentials proxy** and injected into outbound
 HTTPS calls at the proxy boundary, matched by API host, at request time. The key
 never sits in `mcp.json`, the container env, or chat context. See
-[the credentials proxy section in CLAUDE.md](../CLAUDE.md#secrets--credentials--onecli)
+[the credentials section in CLAUDE.md](../CLAUDE.md#secrets--credentials--gateways)
 for the model.
 
 Two ways a credential gets connected:
