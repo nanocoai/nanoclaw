@@ -20,10 +20,21 @@ function gateway(root: string, name: string, manifest: object): void {
 }
 
 describe('gateway skill discovery', () => {
-  it('uses OneCLI as the installed catalog default', () => {
+  it('keeps OneCLI first and default with Iron Proxy selectable', () => {
     const catalog = loadGatewayCatalog();
     expect(catalog.default).toBe('onecli');
-    expect(catalog.gateways.map((entry) => entry.kind)).toEqual(expect.arrayContaining(['onecli']));
+    expect(catalog.gateways[0].kind).toBe('onecli');
+    expect(catalog.gateways.map((entry) => entry.kind)).toEqual(expect.arrayContaining(['iron-proxy', 'onecli']));
+  });
+
+  it('puts a future default first without hardcoding a gateway name', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-catalog-'));
+    roots.push(root);
+    gateway(root, 'add-first', { kind: 'first', label: 'First', description: 'First gateway' });
+    gateway(root, 'add-next', { kind: 'next', label: 'Next', description: 'Next gateway', default: true });
+    const catalog = loadGatewayCatalog(root);
+    expect(catalog.default).toBe('next');
+    expect(catalog.gateways.map((entry) => entry.kind)).toEqual(['next', 'first']);
   });
 
   it('loads self-described skills and requires one default', () => {
