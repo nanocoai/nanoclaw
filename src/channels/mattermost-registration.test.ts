@@ -25,10 +25,15 @@
 import { describe, it, expect } from 'vitest';
 
 import { getRegisteredChannelNames } from './channel-registry.js';
+import { MATTERMOST_DEFAULTS } from './mattermost.js';
 import './index.js'; // the real barrel — triggers every channel's self-registration
 
 describe('mattermost channel registration', () => {
   it('registers mattermost via the channel barrel', () => {
     expect(getRegisteredChannelNames()).toContain('mattermost');
+  });
+
+  it('activates a group thread on mention and keeps its later replies active', () => {
+    expect(MATTERMOST_DEFAULTS.group).toMatchObject({ engageMode: 'mention-sticky', threads: true });
   });
 });

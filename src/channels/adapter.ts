@@ -61,6 +61,13 @@ export interface InboundEvent {
     isMention?: boolean;
     /** True when the source is a group/channel thread, false for DMs. */
     isGroup?: boolean;
+    /**
+     * Whether the platform transport delivered this through a persisted
+     * thread subscription. Chat SDK bridges set this explicitly for every
+     * message so mention-sticky can distinguish an activated thread from a
+     * silent session created only to accumulate context.
+     */
+    isSubscribed?: boolean;
   };
   replyTo?: DeliveryAddress;
 }
@@ -89,6 +96,13 @@ export interface InboundMessage {
   isMention?: boolean;
   /** True when the source is a group/channel thread, false for DMs. */
   isGroup?: boolean;
+  /**
+   * True when the platform transport delivered this from a persisted thread
+   * subscription; false when it came through an unsubscribed handler.
+   * Native and legacy adapters may omit it to retain their existing
+   * session-based mention-sticky behavior.
+   */
+  isSubscribed?: boolean;
 }
 
 /** A file attachment to deliver alongside a message. */

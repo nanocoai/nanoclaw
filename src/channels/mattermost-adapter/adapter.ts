@@ -323,6 +323,11 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
     this.socket = undefined;
   }
 
+  /** Whether the authenticated WebSocket transport is currently usable. */
+  isConnected(): boolean {
+    return this.socket?.connected === true;
+  }
+
   // =========================================================================
   // Thread id codecs
   // =========================================================================
@@ -831,11 +836,11 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
     // former. Failure is tolerated — the handle is still a fine name.
     await this.ensureUserResolved(post.user_id);
 
-    const threadId = threadIdForPost(post);
+    const isMention = isExplicitMention(event.data, this.botUserId);
+    const isDirect = data?.channel_type === 'D' || this.channelTypes.get(post.channel_id) === 'D';
+    const threadId = threadIdForPost(post, !isDirect);
     const message = this.toMessage(post, threadId);
-    // Mattermost puts the other participant in `data.mentions` on every DM
-    // post, so only non-DM channels can report an explicit @-mention.
-    message.isMention = isExplicitMention(event.data, this.botUserId);
+    message.isMention = isMention;
 
     void chat.processMessage(this, threadId, message);
   }
@@ -1479,15 +1484,20 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
 }
 
 /**
- * Thread id a post belongs to: the channel for a top-level post, the root
- * post's thread for a reply. A top-level post does **not** open a thread of
- * its own — that would make every channel message its own conversation and
- * leave the agent with no context between two consecutive posts.
+ * Thread id a post belongs to: an existing root for a reply, the post itself
+ * for any top-level group post, or the channel for a DM timeline.
+ *
+ * This matches Slack's conversation shape: each top-level channel message is
+ * the root of one isolated thread, whether or not it engages the bot. It keeps
+ * mention-sticky bounded to the mentioned thread and prevents an accumulated
+ * channel-level session from activating unrelated top-level chatter. The host
+ * can still collapse this id when a wiring disables threads.
  */
-function threadIdForPost(post: MattermostPost): string {
+function threadIdForPost(post: MattermostPost, rootTopLevel = false): string {
+  const rootId = post.root_id || (rootTopLevel ? post.id : undefined);
   return encodeThreadId({
     channelId: post.channel_id,
-    rootId: post.root_id || undefined,
+    ...(rootId ? { rootId } : {}),
   });
 }
 

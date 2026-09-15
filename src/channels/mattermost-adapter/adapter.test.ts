@@ -5,6 +5,7 @@ import type { ChatInstance } from 'chat';
 import { describe, expect, it, vi } from 'vitest';
 
 import { MattermostAdapter } from './adapter.js';
+import type { MattermostPost, MattermostWebSocketEvent } from './types.js';
 
 const BOT_ID = '7g4f95dymtrjmqnoozdyi57xbw';
 const USER_ID = '7mx5jdcrnby18yrpnzont8ggwo';
@@ -32,6 +33,155 @@ function callbackRequest(): Request {
     }),
   });
 }
+
+function postedEvent(options: {
+  channelType?: 'D' | 'O';
+  id?: string;
+  mentions?: string[];
+  rootId?: string;
+}): MattermostWebSocketEvent {
+  const post: MattermostPost = {
+    channel_id: CHANNEL_ID,
+    create_at: 1,
+    id: options.id ?? POST_ID,
+    message: options.mentions?.includes(BOT_ID) ? '@nanoclaw-bot hello' : 'hello',
+    ...(options.rootId ? { root_id: options.rootId } : {}),
+    user_id: USER_ID,
+  };
+  return {
+    broadcast: { channel_id: CHANNEL_ID },
+    data: {
+      channel_type: options.channelType ?? 'O',
+      mentions: JSON.stringify(options.mentions ?? []),
+      post: JSON.stringify(post),
+      sender_name: '@operator',
+    },
+    event: 'posted',
+  };
+}
+
+async function initializePostedHarness(): Promise<{
+  adapter: MattermostAdapter;
+  processMessage: ReturnType<typeof vi.fn>;
+}> {
+  const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.endsWith('/users/me')) {
+      return response({ id: BOT_ID, is_bot: true, username: 'nanoclaw-bot' });
+    }
+    if (url.endsWith(`/users/${USER_ID}`)) {
+      return response({ id: USER_ID, is_bot: false, username: 'operator' });
+    }
+    return response({ message: 'not found' }, 404);
+  }) as unknown as typeof fetch;
+  const processMessage = vi.fn();
+  const logger = {
+    child: () => logger,
+    debug: vi.fn(),
+    error: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+  };
+  const adapter = new MattermostAdapter({
+    fetchImpl,
+    skipSocket: true,
+    token: 'bot-token',
+    url: 'https://mattermost.example.com',
+  });
+  await adapter.initialize({ getLogger: () => logger, processMessage } as unknown as ChatInstance);
+  return { adapter, processMessage };
+}
+
+describe('Mattermost posted-message threads', () => {
+  it('reports no live transport when initialized without a socket', async () => {
+    const { adapter } = await initializePostedHarness();
+    expect(adapter.isConnected()).toBe(false);
+  });
+
+  it('keeps fetched-message thread identity stable as DM state warms', async () => {
+    const { adapter, processMessage } = await initializePostedHarness();
+    const event = postedEvent({ mentions: [BOT_ID] });
+    const post = JSON.parse(String(event.data?.post ?? '{}')) as MattermostPost;
+
+    const cold = adapter.parseMessage(post);
+    expect(cold.threadId).toBe(`mattermost:${CHANNEL_ID}`);
+    expect(cold.isMention).toBe(true);
+
+    adapter.handleSocketEvent(postedEvent({ channelType: 'D' }));
+    await vi.waitFor(() => expect(processMessage).toHaveBeenCalledOnce());
+
+    const warm = adapter.parseMessage(post);
+    expect(warm.threadId).toBe(`mattermost:${CHANNEL_ID}`);
+    expect(warm.isMention).toBe(false);
+  });
+
+  it('opens a thread rooted at a top-level post that mentions the bot', async () => {
+    const { adapter, processMessage } = await initializePostedHarness();
+
+    adapter.handleSocketEvent(postedEvent({ mentions: [BOT_ID] }));
+
+    await vi.waitFor(() => expect(processMessage).toHaveBeenCalledOnce());
+    expect(processMessage).toHaveBeenCalledWith(
+      adapter,
+      `mattermost:${CHANNEL_ID}:${POST_ID}`,
+      expect.objectContaining({
+        id: POST_ID,
+        isMention: true,
+        threadId: `mattermost:${CHANNEL_ID}:${POST_ID}`,
+      }),
+    );
+  });
+
+  it('gives ordinary top-level group chatter its own inactive thread identity', async () => {
+    const { adapter, processMessage } = await initializePostedHarness();
+
+    adapter.handleSocketEvent(postedEvent({}));
+
+    await vi.waitFor(() => expect(processMessage).toHaveBeenCalledOnce());
+    expect(processMessage).toHaveBeenCalledWith(
+      adapter,
+      `mattermost:${CHANNEL_ID}:${POST_ID}`,
+      expect.objectContaining({
+        id: POST_ID,
+        isMention: false,
+        threadId: `mattermost:${CHANNEL_ID}:${POST_ID}`,
+      }),
+    );
+  });
+
+  it('does not open a thread for the implicit mention on a DM post', async () => {
+    const { adapter, processMessage } = await initializePostedHarness();
+
+    adapter.handleSocketEvent(postedEvent({ channelType: 'D', mentions: [BOT_ID] }));
+
+    await vi.waitFor(() => expect(processMessage).toHaveBeenCalledOnce());
+    expect(processMessage).toHaveBeenCalledWith(
+      adapter,
+      `mattermost:${CHANNEL_ID}`,
+      expect.objectContaining({
+        id: POST_ID,
+        isMention: false,
+        threadId: `mattermost:${CHANNEL_ID}`,
+      }),
+    );
+  });
+
+  it('preserves the existing root for a reply that also mentions the bot', async () => {
+    const { adapter, processMessage } = await initializePostedHarness();
+
+    adapter.handleSocketEvent(postedEvent({ id: 'c7ad5obm3fn7byqnhqskc3b8so', mentions: [BOT_ID], rootId: ROOT_ID }));
+
+    await vi.waitFor(() => expect(processMessage).toHaveBeenCalledOnce());
+    expect(processMessage).toHaveBeenCalledWith(
+      adapter,
+      `mattermost:${CHANNEL_ID}:${ROOT_ID}`,
+      expect.objectContaining({
+        isMention: true,
+        threadId: `mattermost:${CHANNEL_ID}:${ROOT_ID}`,
+      }),
+    );
+  });
+});
 
 describe('Mattermost action callbacks', () => {
   it('recovers a card thread and props after a process restart', async () => {

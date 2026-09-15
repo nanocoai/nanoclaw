@@ -231,6 +231,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   }
 
   const isMention = event.message.isMention === true;
+  const isSubscribed = event.message.isSubscribed;
 
   // 1. Combined lookup: messaging_group row + count of wired agents in a
   //    single query. Cheap short-circuit for the common "unwired channel"
@@ -381,7 +382,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     );
     const effectiveThreadId = threadsEnabled ? event.threadId : null;
 
-    const engages = evaluateEngage(agent, messageText, isMention, mg, effectiveThreadId);
+    const engages = evaluateEngage(agent, messageText, isMention, isSubscribed, mg, effectiveThreadId);
 
     const accessOk = engages && (!accessGate || accessGate(event, userId, mg, agent.agent_group_id).allowed);
     const scopeOk = engages && (!senderScopeGate || senderScopeGate(event, userId, mg, agent).allowed);
@@ -459,16 +460,17 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
  *                      user wants to disambiguate between multiple agents
  *                      wired to one chat, use engage_mode='pattern' with
  *                      the disambiguator as the regex.
- *   'mention-sticky' — platform mention OR an active per-thread session
- *                      already exists for this (agent, mg, thread). The
- *                      session existence IS our subscription state; once
- *                      a thread has engaged us once, follow-ups arrive
- *                      with no mention and should still fire.
+ *   'mention-sticky' — platform mention OR a message delivered through a
+ *                      persisted platform-thread subscription. Chat SDK
+ *                      bridges mark both subscribed and unsubscribed paths
+ *                      explicitly. Legacy adapters that omit the signal keep
+ *                      the historical active-session fallback.
  */
 function evaluateEngage(
   agent: MessagingGroupAgent,
   text: string,
   isMention: boolean,
+  isSubscribed: boolean | undefined,
   mg: MessagingGroup,
   threadId: string | null,
 ): boolean {
@@ -487,9 +489,14 @@ function evaluateEngage(
       return isMention;
     case 'mention-sticky': {
       if (isMention) return true;
-      // Sticky follow-up: session already exists for this (agent, mg, thread)
-      // — the thread was activated before, keep firing.
       if (mg.is_group === 0) return false; // DMs never use mention-sticky sensibly
+      // The Chat SDK's persisted subscription is the authoritative activated
+      // state. A session can also exist because ignored_message_policy was
+      // `accumulate`; that must not turn an unmentioned thread sticky.
+      if (isSubscribed !== undefined) return isSubscribed;
+      // Native and legacy adapters do not yet expose subscription state. Keep
+      // their previous session-based behavior rather than changing them as a
+      // side effect of tightening the Chat SDK path.
       const existing = findSessionForAgent(agent.agent_group_id, mg.id, threadId);
       return existing !== undefined;
     }

@@ -12,20 +12,23 @@
  * What it proves, end to end and with no mocks below the HTTP/WS boundary:
  *   1. adapter + bridge initialize (REST auth resolves the bot, WS connects)
  *   2. a channel message that @-mentions the bot reaches `onInbound` with the
- *      right platform id, thread id, text and mention flag
- *   3. a reply pushed through `bridge.deliver` exists in Mattermost
- *   4. the same round trip inside a DM
- *   5. (P1) an ask_question card renders as real message-attachment actions,
+ *      right platform id, mention-rooted thread id, text and mention flag
+ *   3. after subscribing that thread, an unmentioned human reply reaches
+ *      `onInbound` on the same root (the transport half of mention-sticky)
+ *   4. a reply pushed through `bridge.deliver` exists in that Mattermost
+ *      thread
+ *   5. the same round trip inside a DM
+ *   6. (P1) an ask_question card renders as real message-attachment actions,
  *      and a server-mediated click on one reaches `onAction` and drives the
  *      card to its terminal state
- *   6. (P2) identity: the author id `onInbound` carries and the user id
+ *   7. (P2) identity: the author id `onInbound` carries and the user id
  *      `onAction` carries are the same string for the same human
- *   7. (P2) threads: a reply under a root post arrives rooted, and a reply
+ *   8. (P2) threads: a reply under a root post arrives rooted, and a reply
  *      pushed back through that thread id lands as a real threaded reply
- *   8. (P2) attachments, both ways: an outbound file is uploaded and bound to
+ *   9. (P2) attachments, both ways: an outbound file is uploaded and bound to
  *      the post that carries the text, and an inbound file arrives with its
  *      bytes already downloaded
- *   9. (P2) a select renders as a real dropdown and a server-mediated
+ *  10. (P2) a select renders as a real dropdown and a server-mediated
  *      selection reaches `onAction` carrying the chosen value
  *
  * No click is simulated: they go through `POST
@@ -274,6 +277,8 @@ let adapter: any;
 let dmChannelId = '';
 let webhookPort = 0;
 const stamp = Date.now();
+let channelMentionRootId = '';
+let channelMentionThreadId = '';
 
 describe.skipIf(!HAS_LAB)('mattermost live round trip', () => {
   beforeAll(async () => {
@@ -332,7 +337,7 @@ describe.skipIf(!HAS_LAB)('mattermost live round trip', () => {
     expect(bridge.name).toBe('mattermost');
   });
 
-  it('b. a channel @mention reaches onInbound with the right ids, text and mention flag', async () => {
+  it('b. a channel @mention opens a thread rooted at the mentioned post', async () => {
     const marker = `p0-channel-in-${stamp}`;
     const sent = await asUser<Post>('POST', '/posts', {
       channel_id: CHANNEL_ID,
@@ -340,12 +345,10 @@ describe.skipIf(!HAS_LAB)('mattermost live round trip', () => {
     });
 
     const received = await waitForInbound(marker);
+    channelMentionRootId = sent.id;
+    channelMentionThreadId = tid(CHANNEL_ID, sent.id);
     expect(received.platformId).toBe(tid(CHANNEL_ID));
-    // A top-level channel post belongs to the channel's thread, not to a
-    // thread of its own: with group defaults threads:true, rooting every
-    // message on itself would give the agent no context between two
-    // consecutive posts in a channel.
-    expect(received.threadId).toBe(tid(CHANNEL_ID));
+    expect(received.threadId).toBe(channelMentionThreadId);
     expect(received.message.id).toBe(sent.id);
     expect(received.message.kind).toBe('chat-sdk');
     expect(received.message.isMention).toBe(true);
@@ -356,9 +359,27 @@ describe.skipIf(!HAS_LAB)('mattermost live round trip', () => {
     expect(content.sender).toBe(USER_LOGIN);
   }, 60_000);
 
-  it('c. an outbound reply through bridge.deliver lands in the channel', async () => {
+  it('c. a subscribed mention thread forwards a later reply without another mention', async () => {
+    await bridge.subscribe(tid(CHANNEL_ID), channelMentionThreadId);
+
+    const marker = `p0-channel-followup-${stamp}`;
+    const sent = await asUser<Post>('POST', '/posts', {
+      channel_id: CHANNEL_ID,
+      root_id: channelMentionRootId,
+      message: `follow-up without mention ${marker}`,
+    });
+
+    const received = await waitForInbound(marker);
+    expect(received.platformId).toBe(tid(CHANNEL_ID));
+    expect(received.threadId).toBe(channelMentionThreadId);
+    expect(received.message.id).toBe(sent.id);
+    expect(received.message.isMention).toBe(false);
+    expect(received.message.isGroup).toBe(true);
+  }, 60_000);
+
+  it('d. an outbound reply through bridge.deliver lands in the mention thread', async () => {
     const marker = `p0-channel-out-${stamp}`;
-    const postId = await bridge.deliver(tid(CHANNEL_ID), tid(CHANNEL_ID), {
+    const postId = await bridge.deliver(tid(CHANNEL_ID), channelMentionThreadId, {
       kind: 'text',
       content: { text: `channel reply ${marker}` },
     });
@@ -366,18 +387,21 @@ describe.skipIf(!HAS_LAB)('mattermost live round trip', () => {
 
     const post = await asBot<Post>(`/posts/${postId}`);
     expect(post.channel_id).toBe(CHANNEL_ID);
+    expect(post.root_id).toBe(channelMentionRootId);
     expect(post.user_id).toBe(BOT_ID);
     expect(post.message).toBe(`channel reply ${marker}`);
+    const thread = await asBot<{ order: string[] }>(`/posts/${channelMentionRootId}/thread`);
+    expect(thread.order).toContain(postId);
   }, 60_000);
 
-  it('d. isDM is false for a DM channel the adapter has never observed (cold cache)', () => {
+  it('e. isDM is false for a DM channel the adapter has never observed (cold cache)', () => {
     // Documents the known P0 caveat: isDM is synchronous and answers from a
     // cache primed by inbound frames, fetchThread and openDM. This DM channel
     // was created out of band by the test user, so nothing has primed it yet.
     expect(adapter.isDM(tid(dmChannelId))).toBe(false);
   });
 
-  it('e. a DM reaches onInbound over the DM path, and primes the isDM cache', async () => {
+  it('f. a DM reaches onInbound over the DM path, and primes the isDM cache', async () => {
     const marker = `p0-dm-in-${stamp}`;
     const sent = await asUser<Post>('POST', '/posts', {
       channel_id: dmChannelId,
@@ -389,8 +413,9 @@ describe.skipIf(!HAS_LAB)('mattermost live round trip', () => {
     expect(received.threadId).toBe(tid(dmChannelId));
     expect(received.message.id).toBe(sent.id);
     // The DM branch of the bridge: DMs count as addressed to the bot, and are
-    // not group messages — so the host applies DM defaults, not mention-sticky.
-    // This must hold on a COLD channel (d) proved nothing had primed it): the
+    // not group messages — so the host applies DM defaults, not the group
+    // mention policy.
+    // This must hold on a COLD channel (e proved nothing had primed it): the
     // adapter reads channel_type 'D' off the posted frame and caches it before
     // dispatching, so even the very first DM takes the DM branch.
     expect(received.message.isMention).toBe(true);
@@ -399,7 +424,7 @@ describe.skipIf(!HAS_LAB)('mattermost live round trip', () => {
     expect(adapter.isDM(tid(dmChannelId))).toBe(true);
   }, 60_000);
 
-  it('f. an outbound reply through bridge.deliver lands in the DM', async () => {
+  it('g. an outbound reply through bridge.deliver lands in the DM', async () => {
     const marker = `p0-dm-out-${stamp}`;
     const postId = await bridge.deliver(tid(dmChannelId), tid(dmChannelId), {
       kind: 'text',
@@ -423,7 +448,7 @@ describe.skipIf(!HAS_LAB)('mattermost live round trip', () => {
   let cardPostId = '';
   let approveActionId = '';
 
-  it('g. an ask_question card lands as a message attachment with real actions', async () => {
+  it('h. an ask_question card lands as a message attachment with real actions', async () => {
     // The render row is what the bridge resolves the clicked index back
     // through; the host writes it when it delivers the question.
     // `pending_approvals` rather than `pending_questions` only because the
@@ -470,7 +495,7 @@ describe.skipIf(!HAS_LAB)('mattermost live round trip', () => {
     expect(approveActionId).toBeTruthy();
   }, 60_000);
 
-  it('h. a server-mediated click reaches onAction and resolves the card', async () => {
+  it('i. a server-mediated click reaches onAction and resolves the card', async () => {
     // DoPostAction — the same endpoint the webapp calls on a real click. The
     // server then POSTs the callback to our webhook, from inside its container.
     const response = await fetch(`${LAB_URL}/api/v4/posts/${cardPostId}/actions/${approveActionId}`, {
@@ -520,7 +545,7 @@ describe.skipIf(!HAS_LAB)('mattermost live round trip', () => {
 
   // --- P2: identity, threads, attachments, selects --------------------------
 
-  it('i. the click identity and the inbound author identity are the same string', async () => {
+  it('j. the click identity and the inbound author identity are the same string', async () => {
     // The invariant the host depends on: modules/permissions keys a sender as
     // `mattermost:<author.userId>` on the way in, and re-derives the same
     // string from `ActionEvent.user.userId` to authorize a card click. If the
@@ -543,7 +568,7 @@ describe.skipIf(!HAS_LAB)('mattermost live round trip', () => {
 
   let threadRootId = '';
 
-  it('j. a threaded reply arrives rooted on its root post', async () => {
+  it('k. a threaded reply arrives rooted on its root post', async () => {
     const marker = `p2-thread-in-${stamp}`;
     const root = await asUser<Post>('POST', '/posts', {
       channel_id: CHANNEL_ID,
@@ -565,7 +590,7 @@ describe.skipIf(!HAS_LAB)('mattermost live round trip', () => {
     expect(received.message.id).toBe(reply.id);
   }, 60_000);
 
-  it('k. an outbound reply through that thread id lands as a real threaded reply', async () => {
+  it('l. an outbound reply through that thread id lands as a real threaded reply', async () => {
     const marker = `p2-thread-out-${stamp}`;
     const postId = await bridge.deliver(tid(CHANNEL_ID), tid(CHANNEL_ID, threadRootId), {
       kind: 'text',
@@ -582,7 +607,7 @@ describe.skipIf(!HAS_LAB)('mattermost live round trip', () => {
     expect(thread.order).toContain(postId);
   }, 60_000);
 
-  it('l. an outbound file is uploaded and bound to the post carrying the text', async () => {
+  it('m. an outbound file is uploaded and bound to the post carrying the text', async () => {
     const marker = `p2-file-out-${stamp}`;
     const body = `outbound attachment ${stamp}\n`;
     const postId = await bridge.deliver(tid(CHANNEL_ID), tid(CHANNEL_ID), {
@@ -605,7 +630,7 @@ describe.skipIf(!HAS_LAB)('mattermost live round trip', () => {
     expect(await botFileBytes(uploadedId)).toBe(body);
   }, 60_000);
 
-  it('m. an inbound file reaches onInbound with its bytes already downloaded', async () => {
+  it('n. an inbound file reaches onInbound with its bytes already downloaded', async () => {
     const marker = `p2-file-in-${stamp}`;
     const body = `inbound attachment ${stamp}\n`;
     const fileId = await uploadAsUser(CHANNEL_ID, `inbound-${stamp}.txt`, body);
@@ -632,7 +657,7 @@ describe.skipIf(!HAS_LAB)('mattermost live round trip', () => {
     expect(Buffer.from(attachment.data!, 'base64').toString()).toBe(body);
   }, 60_000);
 
-  it('n. a select renders as a real dropdown and a selection reaches onAction', async () => {
+  it('o. a select renders as a real dropdown and a selection reaches onAction', async () => {
     // Selects are not on the bridge's ask_question path (that one builds
     // buttons), so the card is posted through the adapter directly. The click
     // still travels the full host route: DoPostAction → Mattermost → our

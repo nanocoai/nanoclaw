@@ -37,6 +37,11 @@ interface GatewayAdapter extends Adapter {
   ): Promise<Response>;
 }
 
+/** Adapter that can expose authenticated transport liveness to host status. */
+interface ConnectionAwareAdapter extends Adapter {
+  isConnected?(): boolean;
+}
+
 /** Reply context extracted from a platform's raw message. */
 export interface ReplyContext {
   text: string;
@@ -446,6 +451,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     message: ChatMessage,
     isMention: boolean,
     isGroup?: boolean,
+    isSubscribed?: boolean,
   ): Promise<InboundMessage> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const serialized = message.toJSON() as Record<string, any>;
@@ -504,6 +510,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       timestamp: message.metadata.dateSent.toISOString(),
       isMention,
       isGroup,
+      isSubscribed,
     };
   }
 
@@ -542,8 +549,8 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       // engage / accumulate / drop / subscribe decisions live in the host
       // router (src/router.ts routeInbound / evaluateEngage). The bridge
       // only resolves channel ids and sets the platform-confirmed isMention
-      // flag that routeInbound evaluates; the router calls back into
-      // bridge.subscribe(...) when a mention-sticky wiring engages.
+      // and isSubscribed flags that routeInbound evaluates; the router calls
+      // back into bridge.subscribe(...) when a mention-sticky wiring engages.
 
       // Subscribed threads — every message in a thread we've previously
       // engaged. Carry the SDK's `message.isMention` through so mention-mode
@@ -553,14 +560,14 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         await setupConfig.onInbound(
           channelId,
           thread.id,
-          await messageToInbound(message, message.isMention === true, true),
+          await messageToInbound(message, message.isMention === true, true, true),
         );
       });
 
       // @mention in an unsubscribed thread — SDK-confirmed bot mention.
       chat.onNewMention(async (thread, message) => {
         const channelId = adapter.channelIdFromThreadId(thread.id);
-        await setupConfig.onInbound(channelId, thread.id, await messageToInbound(message, true, true));
+        await setupConfig.onInbound(channelId, thread.id, await messageToInbound(message, true, true, false));
       });
 
       // DMs — by definition addressed to the bot. Thread id flows through
@@ -577,7 +584,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           sender: (message.author as any)?.fullName ?? (message.author as any)?.userId ?? 'unknown',
           threadId: thread.id,
         });
-        const inbound = await messageToInbound(message, true, false);
+        const inbound = await messageToInbound(message, true, false, false);
         // Agent-mode app context: DM-only by platform design.
         attachAppContext(
           inbound.content as Record<string, unknown>,
@@ -602,7 +609,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       // flood gate.
       chat.onNewMessage(/[\s\S]*/, async (thread, message) => {
         const channelId = adapter.channelIdFromThreadId(thread.id);
-        await setupConfig.onInbound(channelId, thread.id, await messageToInbound(message, false, true));
+        await setupConfig.onInbound(channelId, thread.id, await messageToInbound(message, false, true, false));
       });
 
       // Agent-mode assistant context: cache the latest "what the user is
@@ -919,7 +926,8 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     },
 
     isConnected() {
-      return true;
+      const probe = (adapter as ConnectionAwareAdapter).isConnected;
+      return probe ? probe.call(adapter) : true;
     },
 
     async subscribe(_platformId: string, threadId: string) {

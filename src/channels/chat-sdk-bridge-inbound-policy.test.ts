@@ -140,6 +140,23 @@ describe('registerBridgeInboundPolicy', () => {
     const content = calls[0].message.content as Record<string, unknown>;
     expect(content.text).toBe('hello there');
     expect(content.policyTag).toBe('wrapped:slack');
+    expect(calls[0].message.isSubscribed).toBe(false);
+
+    await bridge.teardown();
+  });
+
+  it('marks only the persisted subscription dispatch path as subscribed', async () => {
+    const { adapter, chat } = makeStubAdapter('slack');
+    const { hostConfig, calls } = makeHostConfig();
+    const bridge = createChatSdkBridge({ adapter, supportsThreads: true });
+    await bridge.setup(hostConfig);
+
+    await chat().processMessage(adapter, 'slack:C1:T1', makeMessage('before activation'));
+    expect(calls.at(-1)?.message.isSubscribed).toBe(false);
+
+    await bridge.subscribe!('slack:C1', 'slack:C1:T1');
+    await chat().processMessage(adapter, 'slack:C1:T1', makeMessage('after activation'));
+    expect(calls.at(-1)?.message.isSubscribed).toBe(true);
 
     await bridge.teardown();
   });
