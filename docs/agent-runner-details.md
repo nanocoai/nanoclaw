@@ -128,6 +128,13 @@ What a provider declares:
   `RuntimeInferenceInput` for `inference`, `RuntimeMemoryHookInput` for `memory`, the
   `McpServerConfig` map for `mcpServers` — and a provider's resolve names them rather
   than restating the shape, so a field core adds reaches every provider through the type.
+- `configuration.tone` (optional) — `{ default, toSettings(tone) }`. Core maps the
+  declared default into provider-native settings and passes them to the factory as
+  `configuration.tone`. Claude declares `Concise` → `outputStyle` and seeds it only
+  when absent in the group's native user `settings.json` during session-hook setup.
+  Existing values are preserved; project/local settings retain native precedence.
+  Claude sends no tone override through SDK query settings. Codex declares `friendly`
+  → thread `personality`. Providers that omit tone keep their existing behavior.
 - `lifecycle` — `memorySessionHookRegistration` (runs when core registers the memory hook)
   and `beforeQuery` (runs before each query).
 - `history` — `afterExchange` (the factory wraps `onExchangeComplete` with it) and

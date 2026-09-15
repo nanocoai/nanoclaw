@@ -138,6 +138,12 @@ describe('provider runtime contracts', () => {
     registerCheckedProvider(contractName('configuration-optional', 'valid'), contract);
   });
 
+  it.each([null, {}, { default: '' }, { default: 'friendly' }])('rejects invalid tone declarations %j', (tone) => {
+    const contract = emptyContract();
+    contract.configuration.tone = tone as NonNullable<ProviderRuntimeContract['configuration']['tone']>;
+    expect(() => assertProviderRuntimeContractShape('invalid-tone', contract)).toThrow(/configuration\.tone\./);
+  });
+
   it('rejects declared capabilities that are neither a function nor a constant', () => {
     const contract = emptyContract();
     contract.configuration.inference = {} as unknown as Capability<RuntimeInferenceInput>;
