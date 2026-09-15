@@ -16,7 +16,7 @@ vi.mock('./selection.js', () => ({
 }));
 vi.mock('./catalog.js', () => ({
   loadGatewayCatalog: () => ({
-    default: 'iron-proxy',
+    default: 'onecli',
     gateways: [
       { kind: 'iron-proxy', label: 'Iron Proxy', description: 'Iron', skillPath: '/skills/iron-proxy' },
       { kind: 'onecli', label: 'OneCLI', description: 'OneCLI', skillPath: '/skills/onecli' },
@@ -33,14 +33,21 @@ beforeEach(() => {
 });
 
 describe('gateway installation', () => {
+  it('installs the catalog default for standard setup on a fresh copy', async () => {
+    await installGateway(undefined, '/install');
+
+    expect(mocks.runSkill).toHaveBeenCalledWith('/skills/onecli', expect.objectContaining({ mode: 'install' }));
+    expect(mocks.upsertEnvVar).toHaveBeenCalledWith('NANOCLAW_GATEWAY_PROVIDER', 'onecli', '/install');
+  });
+
   it('preserves a detected gateway instead of replacing it with the catalog default', async () => {
-    mocks.detectInstalledGateway.mockReturnValue('onecli');
+    mocks.detectInstalledGateway.mockReturnValue('iron-proxy');
     mocks.isGatewayInstalled.mockReturnValue(true);
 
     await installGateway(undefined, '/install');
 
     expect(mocks.runSkill.mock.calls.map(([, options]) => options.mode)).toEqual(['refresh', 'install']);
-    expect(mocks.upsertEnvVar).toHaveBeenCalledWith('NANOCLAW_GATEWAY_PROVIDER', 'onecli', '/install');
+    expect(mocks.upsertEnvVar).toHaveBeenCalledWith('NANOCLAW_GATEWAY_PROVIDER', 'iron-proxy', '/install');
   });
 
   it('runs the full install path when the selected gateway is absent', async () => {
