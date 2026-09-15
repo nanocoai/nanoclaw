@@ -230,16 +230,33 @@ setAccessGate((event, userId, mg, agentGroupId): AccessGateResult => {
 });
 
 /**
+ * Telegram broadcast-channel posts carry no individual sender — the Bot API
+ * attributes them to the channel itself (`sender_chat`, no `from`), which
+ * `@chat-adapter/telegram` maps to author userId `chat:<chatId>` (see its
+ * `toReactionActorAuthor`). That identity is the channel's own posting
+ * identity, not an unknown third party, so a wiring on that same messaging
+ * group should treat it as trusted even under `sender_scope='known'` —
+ * otherwise a channel wiring can never engage (#2991).
+ */
+function isChannelSelfSender(userId: string, mg: MessagingGroup): boolean {
+  if (mg.channel_type !== 'telegram' || !userId.startsWith('chat:')) return false;
+  const chatId = userId.slice('chat:'.length);
+  return mg.platform_id.split(':').pop() === chatId;
+}
+
+/**
  * Per-wiring sender-scope enforcement. Stricter than the messaging-group
  * `unknown_sender_policy` — a wiring can require `sender_scope='known'`
  * (explicit owner / admin / member) even on a 'public' messaging group.
  *
  * 'all' is a no-op; any sender passes. 'known' requires a userId that
- * canAccessAgentGroup accepts (owner, admin, or group member).
+ * canAccessAgentGroup accepts (owner, admin, or group member), or the
+ * channel's own posting identity on an anonymous channel post.
  */
 setSenderScopeGate(
-  (_event: InboundEvent, userId: string | null, _mg: MessagingGroup, agent: MessagingGroupAgent): AccessGateResult => {
+  (_event: InboundEvent, userId: string | null, mg: MessagingGroup, agent: MessagingGroupAgent): AccessGateResult => {
     if (agent.sender_scope === 'all') return { allowed: true };
+    if (userId && isChannelSelfSender(userId, mg)) return { allowed: true };
     if (!userId) return { allowed: false, reason: 'unknown_user_scope' };
     const decision = canAccessAgentGroup(userId, agent.agent_group_id);
     if (decision.allowed) return { allowed: true };
