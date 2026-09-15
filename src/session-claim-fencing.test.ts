@@ -28,6 +28,7 @@ import {
 } from './container-runner.js';
 import { getSessionClaim, setStopIntent, tryClaimSession } from './db/coordination.js';
 import { initTestDb, closeDb, runMigrations, createAgentGroup, createSession, getSession } from './db/index.js';
+import { resetGatewayProvider } from './gateway-providers/index.js';
 import type { Session } from './types.js';
 
 function now(): string {
@@ -82,6 +83,14 @@ async function seedSession(id = 'sess-1'): Promise<void> {
 }
 
 beforeEach(async () => {
+  resetGatewayProvider({
+    kind: 'fixture',
+    agentSkills: [],
+    sessions: {
+      ensure: async () => ({ contribution: { networkAccess: { endpoint: 'localhost', target: { kind: 'host' } } } }),
+    },
+    approvals: { subscribe: async () => {} },
+  });
   snapshots.length = 0;
   _resetAdoptionRetryStateForTesting();
   _setFinishFenceScheduleForTesting();

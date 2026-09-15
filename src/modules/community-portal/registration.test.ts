@@ -17,7 +17,7 @@ it('the real modules barrel registers the portal connection with host start and 
   await import('../index.js');
   expect(runtime.start).not.toHaveBeenCalled();
   const signal = new AbortController().signal;
-  await lifecycle.getHostStartCallbacks().at(-1)!({ signal, db: {} as never });
+  await lifecycle.getHostStartCallbacks().at(-1)!({ signal, db: {} as never, deliveryAdapter: {} as never });
   expect(runtime.start).toHaveBeenCalledWith({ signal, log: expect.any(Function) });
   await lifecycle.getHostShutdownCallbacks().at(-1)!();
   expect(runtime.stop).toHaveBeenCalledOnce();

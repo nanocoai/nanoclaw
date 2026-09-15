@@ -1,3 +1,4 @@
+import { connectGatewayAccount } from '../../gateway-connections.js';
 import { randomUUID } from 'crypto';
 
 import {
@@ -123,6 +124,16 @@ registerResource({
   // DELETE violates FK constraints (#2525).
   operations: { list: 'open', get: 'open', update: 'approval' },
   customOperations: {
+    connect: {
+      access: 'open',
+      description:
+        'Get the selected gateway’s account-connection step for any --host. Does not grant credentials or change policy.',
+      handler: async (args, ctx) => {
+        const id = ctx.caller === 'agent' ? ctx.agentGroupId : String(args.id ?? '');
+        if (!id) throw new Error('--id is required on the host');
+        return connectGatewayAccount(id, String(args.host ?? ''));
+      },
+    },
     create: {
       access: 'approval',
       description:

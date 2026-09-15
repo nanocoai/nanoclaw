@@ -321,3 +321,12 @@ export async function getAskQuestionRender(id: string): Promise<
 
   return undefined;
 }
+
+/** Bind the delivered platform card after its approval row is durable. */
+export async function bindPendingApprovalMessage(approvalId: string, messageId: string): Promise<void> {
+  await getDb().run(
+    'UPDATE pending_approvals SET platform_message_id = ? WHERE approval_id = ?',
+    messageId,
+    approvalId,
+  );
+}

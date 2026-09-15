@@ -117,6 +117,10 @@ export interface ProviderInferenceDeclaration {
 }
 
 export interface ProviderHostContract {
+  /** HTTPS domains used by this runtime, exempt from default gateway approval. */
+  modelDomains?: readonly string[];
+  /** Provider-owned HTTPS URLs used by gateway credential adapters. */
+  modelEndpoints?: Partial<Record<'api' | 'subscription' | 'token', string>>;
   seamVersion: number;
   /** Core-composed project document carrying the provider's standing instructions. */
   projectDocument: ProviderProjectDocument;
@@ -150,6 +154,22 @@ export function registerProviderHostContract(name: string, contract: ProviderHos
 
 export function getProviderHostContract(name: string | null | undefined): ProviderHostContract | undefined {
   return name ? registry.get(name.toLowerCase()) : undefined;
+}
+
+export function getProviderModelEndpoint(name: string, kind: 'api' | 'subscription' | 'token'): string {
+  const url = getProviderHostContract(name)?.modelEndpoints?.[kind];
+  if (!url) throw new Error(`Provider ${name} does not declare its ${kind} endpoint`);
+  return url;
+}
+
+export function providerModelAllowedHosts(): string[] {
+  return [
+    ...new Set(
+      listProviderHostContracts().flatMap((contract) =>
+        (contract.modelDomains ?? []).flatMap((domain) => [domain, `*.${domain}`]),
+      ),
+    ),
+  ].sort();
 }
 
 export function hasDeclaredProviderContract(name: string | null | undefined): boolean {
@@ -201,6 +221,40 @@ export function assertProviderHostContractShape(provider: string, contract: Prov
   assertCommandArray(contract.commands?.nativeFiltered, `${provider}.commands.nativeFiltered`);
   unique(contract.commands?.nativeAdmin ?? [], `${provider}.commands.nativeAdmin`);
   unique(contract.commands?.nativeFiltered ?? [], `${provider}.commands.nativeFiltered`);
+  if (contract.modelDomains !== undefined) {
+    assertArray(contract.modelDomains, `${provider}.modelDomains`);
+    for (const domain of contract.modelDomains) {
+      if (typeof domain !== 'string' || !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/.test(domain)) {
+        throw new Error(`${provider}.modelDomains must contain lowercase DNS domains`);
+      }
+    }
+  }
+  if (contract.modelEndpoints !== undefined) {
+    if (
+      !contract.modelEndpoints ||
+      typeof contract.modelEndpoints !== 'object' ||
+      Array.isArray(contract.modelEndpoints)
+    ) {
+      throw new Error(`${provider}.modelEndpoints must be an object`);
+    }
+    for (const [kind, value] of Object.entries(contract.modelEndpoints)) {
+      if (!['api', 'subscription', 'token'].includes(kind) || typeof value !== 'string') {
+        throw new Error(`${provider}.modelEndpoints contains an invalid endpoint`);
+      }
+      const url = new URL(value);
+      if (
+        url.protocol !== 'https:' ||
+        url.username ||
+        url.password ||
+        url.hash ||
+        url.search ||
+        url.port ||
+        !(contract.modelDomains ?? []).some((domain) => url.hostname === domain || url.hostname.endsWith(`.${domain}`))
+      ) {
+        throw new Error(`${provider}.modelEndpoints must use HTTPS within declared modelDomains`);
+      }
+    }
+  }
   if (contract.inference !== undefined) {
     if (contract.inference === null || typeof contract.inference !== 'object') {
       throw new Error(`${provider}.inference must be an object`);

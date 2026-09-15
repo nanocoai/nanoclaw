@@ -241,7 +241,7 @@ export interface PendingApproval {
   instance: string | null;
   platform_message_id: string | null;
   /**
-   * For OneCLI credential rows, the gateway's request TTL. For a module
+   * For gateway approval rows, the provider request TTL. For a module
    * approval held by "Reject with reason…", the deadline after which the
    * host sweep finalizes a plain reject (set by markApprovalAwaitingReason).
    */
