@@ -48,5 +48,6 @@ export function loadGatewayCatalog(projectRoot = process.cwd()): GatewayCatalog 
   }
   const defaults = gateways.filter((gateway) => gateway.default);
   if (defaults.length !== 1) throw new Error(`Expected exactly one default gateway, found ${defaults.length}`);
+  gateways.sort((a, b) => Number(Boolean(b.default)) - Number(Boolean(a.default)) || a.label.localeCompare(b.label));
   return { default: defaults[0].kind, gateways };
 }
