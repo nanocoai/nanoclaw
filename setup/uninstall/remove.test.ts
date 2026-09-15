@@ -3,9 +3,9 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import type { RunCommand } from './onecli-agents.js';
 import type { RemovalAction } from './plan.js';
 import { backupEnv, executePlan, type ExecDeps } from './remove.js';
+import type { RunCommand } from './scan.js';
 
 let tempDir: string;
 
@@ -172,38 +172,5 @@ describe('executePlan', () => {
       deps({ runCommand: () => ({ status: null, stdout: '' }) }),
     );
     expect(notes.some((n) => n.includes('xargs -r docker rm -f'))).toBe(true);
-  });
-
-  it('notes a manual delete when onecli itself cannot be run', () => {
-    const { notes } = executePlan(
-      [
-        {
-          kind: 'delete-onecli-agent',
-          agent: { uuid: 'u-123', identifier: 'ag-mine', name: 'Mine' },
-        },
-      ],
-      deps({ runCommand: () => ({ status: null, stdout: '' }) }),
-    );
-    expect(notes.some((n) => n.includes('onecli agents delete --id u-123'))).toBe(true);
-  });
-
-  it('deletes OneCLI agents by vault uuid, never by identifier', () => {
-    const calls: string[][] = [];
-    const recorder: RunCommand = (cmd, args) => {
-      calls.push([cmd, ...args]);
-      return { status: 0, stdout: '' };
-    };
-
-    executePlan(
-      [
-        {
-          kind: 'delete-onecli-agent',
-          agent: { uuid: 'u-123', identifier: 'ag-mine', name: 'Mine' },
-        },
-      ],
-      deps({ runCommand: recorder }),
-    );
-
-    expect(calls).toEqual([['onecli', 'agents', 'delete', '--id', 'u-123']]);
   });
 });

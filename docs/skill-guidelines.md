@@ -205,7 +205,7 @@ Each with its fix. These are patterns to remove, not to test around: a drift-pro
 2. **REMOVE.md soft-disable** (comments out an import; leaves copied files behind). DELETE the import line and `rm` every file the skill copied.
 3. **REMOVE.md incomplete** (misses env vars, the package uninstall, copied tests). Reverse *every* change; read the env vars from the skill's own credentials section, don't guess.
 4. **Raw SQL against a core DB** (read or write). Use a core helper or an `ncl` verb; the in-tree query wrapper is the sanctioned last resort. Never the `sqlite3` binary.
-5. **Credential threading** (`-e KEY=…` or a stdin secrets payload into the container). OneCLI gateway only; it injects credentials per request.
+5. **Credential threading** (`-e KEY=…` or a stdin secrets payload into the container). The credential gateway only; it injects credentials per request.
 6. **Branch-merge install** (`git merge` of a registry branch or any code branch). Install by additive fetch: `git fetch origin <branch>`, then `git show origin/<branch>:path > path` per file. For an update/reapply workflow, re-run each installed skill's additive apply, never merge.
 7. **Diff-against-past framing** ("earlier versions…", "this is now redundant") and **documenting non-steps** ("no X needed"). Write present-tense DO steps only. A skill reads as a standalone artifact with no memory of its own edits.
 8. **Stale reach-in targets** (an edit aimed at code that no longer exists; a reach-in already shipped in trunk). Verify the target exists *before* instructing the edit; reconcile already-in-trunk ones to a no-op. Before appending to an allowlist or list, check how it's consumed; the entry may already be derived from a registry, making the edit dead.

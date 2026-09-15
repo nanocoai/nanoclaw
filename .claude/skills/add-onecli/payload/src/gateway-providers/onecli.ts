@@ -1,23 +1,16 @@
 import { normalizeGatewayApprovalSummary } from '../gateway-approval-summary.js';
-/**
- * OneCLI native-protocol adapter for the generic gateway contract.
- *
- * The SDK's apply surface emits argv, so this provider parses it at the
- * boundary. The grammar is closed and known from the SDK source: with
- * `addHostMapping: false` it emits exactly `-e KEY=VALUE` pairs (proxy env, CA
- * bundle pointers) and `-v host:container[:ro]` mounts (the CA certificate,
- * credential stub FILES — stubs never ride env). Anything else refuses the
- * spawn: nothing gets to ride raw argv around the spec. A typed SDK config
- * surface is the successor that deletes this parser.
- */
-import { OneCLI, type ApprovalRequest } from '@onecli-sh/sdk';
+/** OneCLI typed configuration and supervised native approval adapter. */
+import { OneCLI, ApprovalClient, type ContainerConfig, type ApprovalRequest } from '@onecli-sh/sdk';
 
+import { DATA_DIR } from '../config.js';
+import { combinedCaBundle, stageOnecliFile } from './onecli-files.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 
 import {
   registerGatewayProvider,
   type GatewayApprovalRequest,
+  type GatewayApprovalScope,
   type GatewayContribution,
   type GatewaySessionInput,
   type GatewaySessionLease,
@@ -43,35 +36,32 @@ let probing = false;
 type OneCLIContribution = Omit<GatewayContribution, 'networkAccess'>;
 type GatewayMount = NonNullable<GatewayContribution['mounts']>[number];
 
-/** Argv → typed contribution. Exported for its tests; the grammar is closed. */
-export function contributionFromArgs(args: readonly string[], groupScope: string): OneCLIContribution {
-  const env: Record<string, string> = {};
+/** Stage immutable per-content files; SDK temporary basenames are shared across agents. */
+export function contributionFromConfig(
+  config: ContainerConfig,
+  groupScope: string,
+  dataDir = DATA_DIR,
+): OneCLIContribution {
+  const env = { ...config.env };
   const mounts: GatewayMount[] = [];
-  for (let i = 0; i < args.length; i += 2) {
-    const flag = args[i];
-    const value = args[i + 1];
-    if (flag === '-e' && value?.includes('=')) {
-      const eq = value.indexOf('=');
-      env[value.slice(0, eq)] = value.slice(eq + 1);
-      continue;
-    }
-    if (flag === '-v' && value) {
-      const parts = value.split(':');
-      if (parts.length >= 2 && parts.length <= 3 && (parts[2] === undefined || parts[2] === 'ro')) {
-        mounts.push({
-          class: 'allowlisted-extra',
-          hostPath: parts[0],
-          containerPath: parts[1],
-          mode: parts[2] === 'ro' ? 'ro' : 'rw',
-          groupScope,
-        });
-        continue;
-      }
-    }
-    // Fail-closed on grammar drift: an SDK that starts emitting a flag this
-    // parser cannot type must break the spawn loudly, not smuggle argv.
-    throw new Error(`OneCLI gateway emitted argv this seam cannot type: '${flag} ${value ?? ''}'`);
+  const mount = (kind: 'ca' | 'combined' | 'stub', content: string, containerPath: string) => {
+    mounts.push({
+      class: 'allowlisted-extra',
+      hostPath: stageOnecliFile(dataDir, kind, content),
+      containerPath,
+      mode: 'ro',
+      groupScope,
+    });
+  };
+  mount('ca', config.caCertificate, config.caCertificateContainerPath);
+  const combined = combinedCaBundle(config.caCertificate);
+  if (combined) {
+    const target = '/tmp/onecli-combined-ca.pem';
+    mount('combined', combined, target);
+    env.SSL_CERT_FILE = target;
+    env.DENO_CERT = target;
   }
+  for (const stub of config.credentialStubs ?? []) mount('stub', stub.content, stub.containerPath);
   return { env, mounts };
 }
 
@@ -132,17 +122,12 @@ async function ensureSession(input: GatewaySessionInput, signal: AbortSignal): P
   // The OneCLI agent identifier is always the agent group id — stable across
   // sessions and reversible via getAgentGroup() for approval routing.
   await onecli.ensureAgent({ name: input.groupName, identifier: input.key.agentGroupId });
-  const args: string[] = [];
-  const applied = await onecli.applyContainerConfig(args, {
-    addHostMapping: false,
-    agent: input.key.agentGroupId,
-  });
-  if (!applied) throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
+  const config = await onecli.getContainerConfig({ agent: input.key.agentGroupId });
   log.info('OneCLI gateway applied', { agentGroupId: input.key.agentGroupId, sessionId: input.key.sessionId });
   return {
     ...monitorLease(signal),
     contribution: {
-      ...withProviderEnv(contributionFromArgs(args, input.key.agentGroupId)),
+      ...withProviderEnv(contributionFromConfig(config, input.key.agentGroupId)),
       networkAccess: {
         endpoint: 'host.docker.internal',
         target: { kind: 'runtime', identity: gatewayContainer },
@@ -154,25 +139,48 @@ async function ensureSession(input: GatewaySessionInput, signal: AbortSignal): P
 async function subscribeApprovals(
   decide: (request: GatewayApprovalRequest) => Promise<'approve' | 'deny'>,
   signal: AbortSignal,
+  _resolved?: (requestId: string) => Promise<void>,
+  scope?: GatewayApprovalScope,
 ): Promise<void> {
+  if (!scope) throw new Error('OneCLI approval subscription requires installation ownership scope');
   const subscribedAt = Date.now();
-  const handle = onecli.configureManualApproval(async (request: ApprovalRequest) => {
-    if (Date.parse(request.createdAt) < subscribedAt) return 'deny';
-    try {
-      return await decide(toGatewayApprovalRequest(request));
-    } catch (err) {
-      log.error('OneCLI approval translation failed closed', { requestId: request.id, err });
-      return 'deny';
+  const client = new ApprovalClient(
+    onecliUrl || 'https://api.onecli.sh',
+    onecliApiKey || '',
+    process.env.ONECLI_GATEWAY_URL || null,
+    process.env.ONECLI_PROJECT_ID || null,
+  );
+  let stopped = false;
+  const stop = () => {
+    if (!stopped) {
+      stopped = true;
+      client.stop();
     }
-  });
-  await new Promise<void>((resolve) => {
-    const stop = () => {
-      handle.stop();
-      resolve();
-    };
-    if (signal.aborted) stop();
-    else signal.addEventListener('abort', stop, { once: true });
-  });
+  };
+  if (signal.aborted) return;
+  signal.addEventListener('abort', stop, { once: true });
+  try {
+    // Unlike configureManualApproval, start exposes gateway-URL discovery failures.
+    await client.start(async (request: ApprovalRequest) => {
+      // The local gateway poll is shared by installations. Throwing from the
+      // pinned SDK callback submits no decision and leaves the request pending.
+      // Keep this outside the deny-on-translation-error block, even for stale
+      // requests: this copy has no authority over another copy's requests.
+      if (!(await scope.ownsAgentGroup(request.agent?.externalId ?? ''))) {
+        throw new Error('OneCLI approval belongs to another installation');
+      }
+      if (signal.aborted || Date.parse(request.createdAt) < subscribedAt) return 'deny';
+      try {
+        return await decide(toGatewayApprovalRequest(request));
+      } catch (err) {
+        log.error('OneCLI approval translation failed closed', { requestId: request.id, err });
+        return 'deny';
+      }
+    });
+  } finally {
+    signal.removeEventListener('abort', stop);
+    stop();
+  }
 }
 
 function toGatewayApprovalRequest(request: ApprovalRequest): GatewayApprovalRequest {

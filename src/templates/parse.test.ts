@@ -350,7 +350,7 @@ describe('parseTemplate', () => {
 
     it('warns (but keeps the server) on a secret-shaped key with an unrecognized value', () => {
       writeManifest();
-      writeMcp({ crm: { type: 'stdio', command: 'server', env: { EXA_API_KEY: 'onecli-managed' } } });
+      writeMcp({ crm: { type: 'stdio', command: 'server', env: { EXA_API_KEY: 'gateway-managed' } } });
 
       const tpl = parseTemplate(dir);
 

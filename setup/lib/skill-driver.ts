@@ -487,6 +487,8 @@ export function channelsRemote(projectRoot: string): () => string {
 
 export interface RunSkillOptions {
   projectRoot?: string;
+  /** Refresh reapplies code/dependency directives before the normal install/validation pass. */
+  mode?: 'install' | 'refresh';
   /** Pre-supplied prompt answers — pass them all for a fully programmatic run. */
   inputs?: Record<string, string>;
   /**
@@ -568,6 +570,7 @@ export async function runSkill(skillDir: string, opts: RunSkillOptions = {}): Pr
     writeFileSync(rawLog, `# skill ${basename(skillDir)} — ${new Date().toISOString()}\n\n`);
   }
   return applySkill(skillDir, projectRoot, {
+    mode: opts.mode,
     inputs,
     resolveInput: opts.resolveInput ?? clackResolveInput({ channel: opts.channel, step: opts.step }),
     onEvent: opts.onEvent ?? defaultOnEvent(md, confirm, open),

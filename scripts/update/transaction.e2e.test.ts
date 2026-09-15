@@ -55,7 +55,7 @@ interface Fixture {
   upstreamHead: string;
 }
 
-function createForkFixture(options: { breaking?: boolean; externalPinMove?: boolean } = {}): Fixture {
+function createForkFixture(options: { breaking?: boolean; gatewayExtraction?: boolean } = {}): Fixture {
   const seed = temp('nanoclaw-update-seed-');
   exec(seed, 'git', ['init', '-b', 'main']);
   write(seed, 'package.json', '{"name":"nanoclaw-test","version":"2.1.54"}\n');
@@ -67,7 +67,7 @@ function createForkFixture(options: { breaking?: boolean; externalPinMove?: bool
   write(seed, 'src/channels/index.ts', "import './cli.js';\n");
   write(seed, 'src/providers/index.ts', '');
   write(seed, 'container/agent-runner/src/providers/index.ts', "import './claude.js';\n");
-  write(seed, 'versions.json', '{"onecli-gateway":"1.0.0","onecli-cli":"1.0.0"}\n');
+  write(seed, 'versions.json', '{"agent-image":"example@sha256:old"}\n');
   write(seed, 'CHANGELOG.md', '# Changelog\n');
   write(seed, 'src/value.ts', 'export const value = "old";\n');
   commit(seed, 'base');
@@ -87,8 +87,42 @@ function createForkFixture(options: { breaking?: boolean; externalPinMove?: bool
     );
     write(seed, 'docs/test-migration.md', '# Test migration\n');
   }
-  if (options.externalPinMove) {
-    write(seed, 'versions.json', '{"onecli-gateway":"2.0.0","onecli-cli":"1.0.0"}\n');
+  if (options.gatewayExtraction) {
+    write(seed, 'src/gateway-providers/installed.ts', '// Installed gateway providers.\n');
+    write(
+      seed,
+      '.claude/skills/add-onecli/gateway.json',
+      '{"kind":"onecli","label":"OneCLI","description":"Gateway","default":true}\n',
+    );
+    write(
+      seed,
+      '.claude/skills/add-onecli/SKILL.md',
+      [
+        '---',
+        'name: add-onecli',
+        'description: Test gateway extraction.',
+        '---',
+        '',
+        '```nc:copy',
+        'payload/src/gateway-providers/onecli.ts -> src/gateway-providers/onecli.ts',
+        '```',
+        '',
+        '```nc:append to:src/gateway-providers/installed.ts',
+        "import './onecli.js';",
+        '```',
+        '',
+      ].join('\n'),
+    );
+    write(
+      seed,
+      '.claude/skills/add-onecli/scripts/detect.ts',
+      "import fs from 'node:fs'; console.log(fs.readFileSync('.env', 'utf8').includes('ONECLI_URL=') ? 'installed' : 'absent');\n",
+    );
+    write(
+      seed,
+      '.claude/skills/add-onecli/payload/src/gateway-providers/onecli.ts',
+      "export const gateway = 'onecli';\n",
+    );
   }
   const upstreamHead = commit(seed, 'upstream update at same package version');
   exec(seed, 'git', ['remote', 'add', 'publish', official]);
@@ -105,6 +139,7 @@ function createForkFixture(options: { breaking?: boolean; externalPinMove?: bool
   const originalHead = commit(install, 'local customization');
   write(install, 'data/v2.db', 'old-schema');
   write(install, '.env', 'EXAMPLE=old\n');
+  if (options.gatewayExtraction) fs.appendFileSync(path.join(install, '.env'), 'ONECLI_URL=http://127.0.0.1:10254\n');
   write(install, 'start-nanoclaw.sh', '#!/bin/bash\nnode dist/index.js\n');
   write(install, 'nanoclaw.pid', '1234\n');
   return { install, originalHead, upstreamHead };
@@ -176,6 +211,38 @@ afterEach(() => {
 });
 
 describe('update-nanoclaw transaction end to end', () => {
+  it('applies an implicit OneCLI skill before stamping the extracted gateway selection', async () => {
+    const fixture = createForkFixture({ gatewayExtraction: true });
+    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    const bin = temp('nanoclaw-update-bin-');
+    const pnpm = path.join(bin, 'pnpm');
+    write(bin, 'pnpm', `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} "$3"\n`);
+    fs.chmodSync(pnpm, 0o755);
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${previousPath ?? ''}`;
+    const { runtime } = fakeRuntime(fixture.install);
+
+    try {
+      let state = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+      state = await validateUpdate(fixture.install, state.id, runtime);
+      state = await cutoverUpdate(fixture.install, state.id, runtime);
+
+      expect(state.phase).toBe('cutover');
+      expect(fs.readFileSync(path.join(fixture.install, 'src/gateway-providers/installed.ts'), 'utf8')).toContain(
+        "import './onecli.js';",
+      );
+      expect(fs.readFileSync(path.join(fixture.install, 'src/gateway-providers/onecli.ts'), 'utf8')).toContain(
+        "gateway = 'onecli'",
+      );
+      expect(fs.readFileSync(path.join(fixture.install, '.env'), 'utf8')).toContain('NANOCLAW_GATEWAY_PROVIDER=onecli');
+      state = await finishUpdate(fixture.install, state.id, runtime);
+      expect(state.phase).toBe('complete');
+    } finally {
+      process.env.PATH = previousPath;
+    }
+  });
+
   it('stages through official upstream, gates a migration, completes, and can restore code plus mutable state', async () => {
     const fixture = createForkFixture({ breaking: true });
     previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
@@ -441,33 +508,6 @@ describe('update-nanoclaw transaction end to end', () => {
     expect(fs.readFileSync(path.join(fixture.install, 'data/v2.db'), 'utf8')).toBe('old-schema');
     expect(fs.existsSync(path.join(fixture.install, 'data/upgrade-state.json'))).toBe(false);
   });
-
-  it('gates external version-pin moves and retains an exact rollback target', async () => {
-    const fixture = createForkFixture({ externalPinMove: true });
-    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
-    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
-    const { runtime } = fakeRuntime(fixture.install);
-
-    let state = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
-    state = await validateUpdate(fixture.install, state.id, runtime);
-    state = await cutoverUpdate(fixture.install, state.id, runtime);
-
-    expect(state.requirements).toMatchObject([
-      {
-        type: 'external-component',
-        description: 'onecli-gateway: 1.0.0 → 2.0.0',
-        status: 'pending',
-        rollback: 'Restore onecli-gateway to 1.0.0',
-      },
-    ]);
-    await expect(finishUpdate(fixture.install, state.id, runtime)).rejects.toThrow('Unresolved migrations');
-
-    state = acknowledgeRequirement(fixture.install, state.id, state.requirements[0].id, 'succeeded', undefined);
-    state = await finishUpdate(fixture.install, state.id, runtime);
-    expect(state.phase).toBe('complete');
-    expect(state.requirements[0].rollback).toBe('Restore onecli-gateway to 1.0.0');
-  });
-
   it('rolls back even though cutover already stopped the service (stale handle must not be re-stopped)', async () => {
     const fixture = createForkFixture();
     previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;

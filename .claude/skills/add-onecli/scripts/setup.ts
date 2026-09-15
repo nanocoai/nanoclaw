@@ -15,10 +15,10 @@ import { execFileSync, execSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { fileURLToPath } from 'url';
 
-import { log } from '../src/log.js';
-import { readVersionPin } from './lib/version-pins.js';
-import { emitStatus } from './status.js';
+import { log } from '../../../../src/log.js';
+import { emitStatus } from '../../../../setup/status.js';
 
 const LOCAL_BIN = path.join(os.homedir(), '.local', 'bin');
 
@@ -87,16 +87,17 @@ function ensureShellProfilePath(): void {
   }
 }
 
-function writeEnvVar(name: string, value: string): void {
-  const envFile = path.join(process.cwd(), '.env');
-  let content = fs.existsSync(envFile) ? fs.readFileSync(envFile, 'utf-8') : '';
+export function withEnvVar(content: string, name: string, value: string): string {
   const re = new RegExp(`^${name}=.*$`, 'm');
   if (re.test(content)) {
-    content = content.replace(re, `${name}=${value}`);
-  } else {
-    content = content.trimEnd() + (content ? '\n' : '') + `${name}=${value}\n`;
+    return content.replace(re, `${name}=${value}`);
   }
-  fs.writeFileSync(envFile, content);
+  return content.trimEnd() + (content ? '\n' : '') + `${name}=${value}\n`;
+}
+
+function writeEnvVar(name: string, value: string, envFile = path.join(process.cwd(), '.env')): void {
+  const content = fs.existsSync(envFile) ? fs.readFileSync(envFile, 'utf-8') : '';
+  fs.writeFileSync(envFile, withEnvVar(content, name, value));
 }
 
 function writeEnvOnecliUrl(url: string): void {
@@ -109,10 +110,13 @@ function writeEnvOnecliUrl(url: string): void {
 // docs/onecli-upgrades.md during /update-nanoclaw. The pin lives in
 // versions.json ("onecli-gateway") so that flow can diff it across updates and
 // route the agent to the doc; bump it there deliberately on a new release.
-const ONECLI_GATEWAY_VERSION = readVersionPin('onecli-gateway');
+const pins = JSON.parse(
+  fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'versions.json'), 'utf8'),
+) as Record<string, string>;
+const ONECLI_GATEWAY_VERSION = pins['onecli-gateway'];
 // The CLI binary follows the same convention: installed at its pin
 // ("onecli-cli" in versions.json), never at whatever "latest" means today.
-const ONECLI_CLI_VERSION = readVersionPin('onecli-cli');
+const ONECLI_CLI_VERSION = pins['onecli-cli'];
 const ONECLI_CLI_REPO = 'onecli/onecli-cli';
 
 // Remove containers in the "onecli" compose project whose service name isn't
@@ -138,12 +142,38 @@ function removeLegacyOnecliContainers(): string {
     if (!name || !service || v2Services.has(service)) continue;
     out.push(`Removing legacy OneCLI container: ${name} (service=${service})`);
     try {
-      execSync(`docker rm -f ${JSON.stringify(name)}`, { stdio: ['ignore', 'pipe', 'pipe'] });
+      execSync(`docker rm -f ${JSON.stringify(name)}`, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
     } catch (err) {
       out.push(`  rm failed (continuing): ${(err as Error).message}`);
     }
   }
   return out.join('\n');
+}
+
+export function withLinuxHostGateway(compose: string, platform = process.platform): string {
+  if (platform !== 'linux' || compose.includes('host.docker.internal:host-gateway')) {
+    return compose;
+  }
+  const marker = '    container_name: onecli\n';
+  if (!compose.includes(marker)) {
+    throw new Error('OneCLI compose file has no onecli service marker');
+  }
+  return compose.replace(marker, `${marker}    extra_hosts:\n      - "host.docker.internal:host-gateway"\n`);
+}
+
+function ensureLocalGatewayHostAccess(): void {
+  if (process.platform !== 'linux') return;
+  const composeFile = path.join(os.homedir(), '.onecli', 'docker-compose.yml');
+  const current = fs.readFileSync(composeFile, 'utf8');
+  const next = withLinuxHostGateway(current);
+  if (next === current) return;
+  fs.writeFileSync(composeFile, next);
+  execFileSync('docker', ['compose', '-f', composeFile, 'up', '-d', 'onecli'], {
+    cwd: path.dirname(composeFile),
+    stdio: 'ignore',
+  });
 }
 
 function installOnecli(): { stdout: string; ok: boolean } {
@@ -163,6 +193,17 @@ function installOnecli(): { stdout: string; ok: boolean } {
     log.error('OneCLI gateway install failed', { stderr: gw.stderr });
     return { stdout: stdout + (gw.stderr ?? ''), ok: false };
   }
+  try {
+    const gatewayUrl = extractUrlFromOutput(gw.stdout);
+    if (!gatewayUrl) throw new Error('OneCLI installer did not report its URL');
+    const onecliEnv = path.join(os.homedir(), '.onecli', '.env');
+    writeEnvVar('ONECLI_VERSION', ONECLI_GATEWAY_VERSION, onecliEnv);
+    writeEnvVar('ONECLI_BIND_HOST', new URL(gatewayUrl).hostname, onecliEnv);
+    ensureLocalGatewayHostAccess();
+  } catch (err) {
+    log.error('OneCLI gateway host mapping failed', { err });
+    return { stdout, ok: false };
+  }
 
   const cli = installOnecliCliDirect();
   stdout += cli.stdout;
@@ -173,7 +214,11 @@ function installOnecli(): { stdout: string; ok: boolean } {
   return { stdout, ok: true };
 }
 
-function runInstall(cmd: string): { stdout: string; stderr?: string; ok: boolean } {
+function runInstall(cmd: string): {
+  stdout: string;
+  stderr?: string;
+  ok: boolean;
+} {
   try {
     const stdout = execSync(cmd, {
       encoding: 'utf-8',
@@ -260,7 +305,9 @@ export async function verifyGatewayV1(
   fetchImpl: typeof fetch = fetch,
 ): Promise<'ok' | 'incompatible' | 'unreachable'> {
   try {
-    const res = await fetchImpl(`${url}/v1/health`, { signal: AbortSignal.timeout(5000) });
+    const res = await fetchImpl(`${url}/v1/health`, {
+      signal: AbortSignal.timeout(5000),
+    });
     return res.ok ? 'ok' : 'incompatible';
   } catch {
     return 'unreachable';
@@ -280,6 +327,13 @@ function gatewayV1Hint(result: 'ok' | 'incompatible' | 'unreachable'): string | 
   return 'OneCLI gateway lacks the /v1 API @onecli-sh/sdk 2.x requires — upgrade it: docs/onecli-upgrades.md';
 }
 
+export function gatewayReadinessError(result: 'ok' | 'incompatible' | 'unreachable'): string | null {
+  if (result === 'ok') return null;
+  return result === 'incompatible'
+    ? 'OneCLI gateway lacks the /v1 API required by the installed SDK'
+    : 'OneCLI gateway /v1 API is unreachable';
+}
+
 export async function pollHealth(url: string, timeoutMs: number): Promise<boolean> {
   // `/api/health` matches the path probe.sh uses — keep them aligned.
   const deadline = Date.now() + timeoutMs;
@@ -296,7 +350,9 @@ export async function pollHealth(url: string, timeoutMs: number): Promise<boolea
 }
 
 export async function run(args: string[]): Promise<void> {
-  const reuse = args.includes('--reuse');
+  const requestedRemote = process.env.NANOCLAW_ONECLI_API_HOST?.trim();
+  if (requestedRemote && !args.includes('--remote-url')) args = [...args, '--remote-url', requestedRemote];
+  const reuse = args.includes('--reuse') || (!requestedRemote && !!onecliVersion() && !!getOnecliApiHost());
   const remoteUrlIdx = args.indexOf('--remote-url');
   const remoteUrl = remoteUrlIdx !== -1 ? args[remoteUrlIdx + 1] : null;
   ensureShellProfilePath();
@@ -344,16 +400,20 @@ export async function run(args: string[]): Promise<void> {
       log.info('Wrote ONECLI_API_KEY to .env');
     }
     const healthy = await pollHealth(remoteUrl, 5000);
-    const v1Hint = healthy ? gatewayV1Hint(await verifyGatewayV1(remoteUrl)) : null;
+    const v1Status = await verifyGatewayV1(remoteUrl);
+    const v1Hint = gatewayV1Hint(v1Status);
+    const readinessError = gatewayReadinessError(v1Status);
     emitStatus('ONECLI', {
       INSTALLED: true,
       REMOTE: true,
       ONECLI_URL: remoteUrl,
       HEALTHY: healthy,
-      STATUS: 'success',
+      STATUS: readinessError ? 'failed' : 'success',
+      ...(readinessError ? { ERROR: 'gateway_not_ready', HINT: readinessError } : {}),
       ...(v1Hint ? { GATEWAY_HINT: v1Hint } : {}),
       LOG: 'logs/setup.log',
     });
+    if (readinessError) throw new Error(readinessError);
     return;
   }
 
@@ -385,16 +445,20 @@ export async function run(args: string[]): Promise<void> {
     writeEnvOnecliUrl(url);
     log.info('Reusing existing OneCLI', { url });
     const healthy = await pollHealth(url, 5000);
-    const v1Hint = healthy ? gatewayV1Hint(await verifyGatewayV1(url)) : null;
+    const v1Status = await verifyGatewayV1(url);
+    const v1Hint = gatewayV1Hint(v1Status);
+    const readinessError = gatewayReadinessError(v1Status);
     emitStatus('ONECLI', {
       INSTALLED: true,
       REUSED: true,
       ONECLI_URL: url,
       HEALTHY: healthy,
-      STATUS: 'success',
+      STATUS: readinessError ? 'failed' : 'success',
+      ...(readinessError ? { ERROR: 'gateway_not_ready', HINT: readinessError } : {}),
       ...(v1Hint ? { GATEWAY_HINT: v1Hint } : {}),
       LOG: 'logs/setup.log',
     });
+    if (readinessError) throw new Error(readinessError);
     return;
   }
 
@@ -445,17 +509,16 @@ export async function run(args: string[]): Promise<void> {
   log.info('Wrote ONECLI_URL to .env', { url });
 
   const healthy = await pollHealth(url, 15000);
-  const v1Hint = healthy ? gatewayV1Hint(await verifyGatewayV1(url)) : null;
+  const v1Status = await verifyGatewayV1(url);
+  const v1Hint = gatewayV1Hint(v1Status);
+  const readinessError = gatewayReadinessError(v1Status);
 
   emitStatus('ONECLI', {
     INSTALLED: true,
     ONECLI_URL: url,
     HEALTHY: healthy,
-    // Install succeeded regardless — a failed health poll often just means
-    // the endpoint is auth-gated or the gateway hasn't finished warming up.
-    // The next step (auth) will surface a genuinely broken gateway via
-    // `onecli secrets list`, so don't trigger rescue attempts from here.
-    STATUS: 'success',
+    STATUS: readinessError ? 'failed' : 'success',
+    ...(readinessError ? { ERROR: 'gateway_not_ready', HINT: readinessError } : {}),
     ...(v1Hint ? { GATEWAY_HINT: v1Hint } : {}),
     ...(healthy
       ? {}
@@ -465,4 +528,9 @@ export async function run(args: string[]): Promise<void> {
         }),
     LOG: 'logs/setup.log',
   });
+  if (readinessError) throw new Error(readinessError);
+}
+
+if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
+  void run(process.argv.slice(2));
 }

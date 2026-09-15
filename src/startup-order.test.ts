@@ -28,7 +28,7 @@ vi.mock('./container-runner.js', () => ({
   stopGatewaySessionsForUnavailability: vi.fn(),
 }));
 vi.mock('./host-instance.js', () => ({ startHostInstanceLease: vi.fn(), stopHostInstanceLease: vi.fn() }));
-vi.mock('./gateway-providers/index.js', () => ({ getGatewayProvider: () => ({}) }));
+vi.mock('./gateway-providers/index.js', () => ({ getGatewayProvider: () => ({}), resetGatewayProvider: vi.fn() }));
 vi.mock('./gateway-availability.js', () => ({
   startGatewayAvailabilityMonitor: async () => {
     expect(state.approvalReady).toBe(true);

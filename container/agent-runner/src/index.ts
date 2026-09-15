@@ -4,7 +4,7 @@
  * Runs inside a container. All message IO goes through the registered mailbox.
  *
  * Config is read from /workspace/agent/container.json (mounted RO).
- * Only TZ and OneCLI networking vars come from env.
+ * Only TZ and gateway networking vars come from env.
  *
  * Mount structure:
  *   /workspace/
