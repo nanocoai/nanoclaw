@@ -99,27 +99,49 @@ describe('WEBHOOK_PORT configuration (#2901)', () => {
     vi.stubEnv('WEBHOOK_PORT', String(address.port));
     const webhook = await import('./webhook-server.js');
     stopWebhookServer = webhook.stopWebhookServer;
+    const { log } = await import('./log.js');
+    const failed = vi.spyOn(log, 'error');
+    const started = vi.spyOn(log, 'info');
     webhook.registerWebhookHandler('busy-port', (_req, res) => {
       res.end('busy');
     });
 
-    const recoveryPort = 21000 + Math.floor(Math.random() * 20000);
-    vi.stubEnv('WEBHOOK_PORT', String(recoveryPort));
     try {
+      await vi.waitFor(() =>
+        expect(failed).toHaveBeenCalledWith(
+          'Webhook server error',
+          expect.objectContaining({
+            port: address.port,
+            err: expect.objectContaining({ code: 'EADDRINUSE' }),
+          }),
+        ),
+      );
+      // Release the port this test owns, then retry that same port. A random
+      // second port can belong to another test (or an ephemeral HTTP client),
+      // which turns a recovery test into a permanent EADDRINUSE failure.
+      await new Promise<void>((resolve, reject) => occupied.close((err) => (err ? reject(err) : resolve())));
       await vi.waitFor(
-        async () => {
+        () => {
           webhook.registerWebhookHandler('recovered-port', (_req, res) => {
             res.end('ready');
           });
-          const response = await fetch(`http://127.0.0.1:${recoveryPort}/webhook/recovered-port`, {
-            signal: AbortSignal.timeout(500),
-          });
-          expect(await response.text()).toBe('ready');
+          // Wait for listen before opening an HTTP client; the connection's
+          // ephemeral source port must not steal the port we are about to bind.
+          expect(started).toHaveBeenCalledWith(
+            'Webhook server started',
+            expect.objectContaining({ port: address.port }),
+          );
         },
         { timeout: 2000, interval: 25 },
       );
+      const response = await fetch(`http://127.0.0.1:${address.port}/webhook/recovered-port`, {
+        signal: AbortSignal.timeout(500),
+      });
+      expect(await response.text()).toBe('ready');
     } finally {
-      await new Promise<void>((resolve, reject) => occupied.close((err) => (err ? reject(err) : resolve())));
+      started.mockRestore();
+      failed.mockRestore();
+      if (occupied.listening) await new Promise<void>((resolve) => occupied.close(() => resolve()));
     }
   });
 
