@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, expect, it } from 'vitest';
-import { getCredentialStore } from './credential-store.js';
+import { getCredentialStore, getCredentialConnection } from './credential-store.js';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -21,10 +21,16 @@ it('loads an arbitrary selected gateway without a provider-specific switch', asy
   );
   fs.writeFileSync(
     path.join(skill, 'scripts/credential-store.ts'),
-    'export function createCredentialStore(){return {has: async p=>p==="codex", save: async ()=>{}}}',
+    'export function createCredentialStore(){return {has: async p=>p==="codex", save: async ()=>{}, connection: target=>({find: async()=>target.name, save: async()=>"example-saved", keep: async()=>{}})}}',
   );
   process.env.NANOCLAW_GATEWAY_PROVIDER = 'example';
   expect(await (await getCredentialStore(root)).has('codex')).toBe(true);
+  const connection = await getCredentialConnection(
+    { name: 'provider-credential', kind: 'api-key', host: 'models.example.test' },
+    root,
+  );
+  expect(await connection.find()).toBe('provider-credential');
+  expect(await connection.save('fixture', null)).toBe('example-saved');
   process.env.NANOCLAW_GATEWAY_PROVIDER = 'missing';
   await expect(getCredentialStore(root)).rejects.toThrow('Unknown gateway');
 });
