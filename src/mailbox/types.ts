@@ -61,6 +61,8 @@ export interface TaskUpdate {
   script?: string | null;
   recurrence?: string | null;
   processAfter?: string;
+  /** Tri-state: omit to leave the series' current setting alone. */
+  freshSession?: boolean;
 }
 
 export type TaskRecord = CanonicalTaskRecord;
