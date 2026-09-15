@@ -336,7 +336,14 @@ registerResource({
                 '--rebuild cannot run here — image changes must be built and imported out of band',
             };
           }
-          await buildAgentGroupImage(id);
+          const configRow = await getContainerConfig(id);
+          const hasPackages =
+            !!configRow &&
+            ((JSON.parse(configRow.packages_apt) as string[]).length > 0 ||
+              (JSON.parse(configRow.packages_npm) as string[]).length > 0);
+          if (hasPackages) {
+            await buildAgentGroupImage(id);
+          }
         }
         const message = args.message as string | undefined;
 
