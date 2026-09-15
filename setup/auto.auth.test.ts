@@ -62,7 +62,7 @@ beforeEach(() => {
   vi.stubEnv('DEFAULT_AGENT_PROVIDER', 'claude');
   vi.stubEnv(
     'NANOCLAW_SKIP',
-    'environment,container,onecli,mounts,service,cli-agent,timezone,channel,verify,first-chat',
+    'environment,container,gateway,mounts,service,cli-agent,timezone,channel,verify,first-chat',
   );
   fixture.runAuth.mockResolvedValue(undefined);
   fixture.runInstallCheck.mockResolvedValue(undefined);
