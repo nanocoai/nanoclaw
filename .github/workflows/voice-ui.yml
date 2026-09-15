@@ -1,0 +1,75 @@
+name: Voice payload
+
+on:
+  pull_request:
+    branches: [channels]
+    paths:
+      - '.claude/skills/add-voice/ui/**'
+      - 'container/skills/voice-formatting/**'
+      - 'src/channels/voice*'
+      - 'src/channels/gpt-live*'
+      - '.github/workflows/voice-ui.yml'
+  push:
+    branches: [channels]
+    paths:
+      - '.claude/skills/add-voice/ui/**'
+      - 'container/skills/voice-formatting/**'
+      - 'src/channels/voice*'
+      - 'src/channels/gpt-live*'
+      - '.github/workflows/voice-ui.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  voice:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Verify the committed payload and its source hash
+        run: pnpm exec vitest run src/channels/voice-adapter.test.ts src/channels/voice-browser.test.ts src/channels/gpt-live-session.test.ts src/channels/gpt-live-sideband.test.ts src/channels/gpt-live-keychain.test.ts src/channels/gpt-live-call-page.test.ts
+      - name: Install the UI without dependency scripts
+        working-directory: .claude/skills/add-voice/ui
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Rebuild the page and require a clean diff
+        working-directory: .claude/skills/add-voice/ui
+        run: |
+          pnpm build
+          git diff --exit-code -- ../../../../src/channels/gpt-live-call-page.ts
+
+  installed-on-main:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        node-version: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: installed
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - name: Install the registry payload on current core
+        run: |
+          cp src/channels/voice.ts src/channels/voice-adapter.test.ts src/channels/voice-registration.test.ts src/channels/gpt-live*.ts installed/src/channels/
+          printf "\nimport './voice.js';\n" >> installed/src/channels/index.ts
+          mkdir -p installed/container/skills/voice-formatting
+          cp container/skills/voice-formatting/SKILL.md installed/container/skills/voice-formatting/
+      - run: pnpm install --frozen-lockfile
+        working-directory: installed
+      - run: pnpm run build
+        working-directory: installed
+      - name: Verify adapter registration, real permissions and lifecycle
+        working-directory: installed
+        run: pnpm exec vitest run src/channels/voice-registration.test.ts src/channels/voice-adapter.test.ts src/channels/gpt-live-access.test.ts src/channels/gpt-live-session.test.ts src/channels/gpt-live-sideband.test.ts src/channels/gpt-live-keychain.test.ts src/channels/gpt-live-call-page.test.ts

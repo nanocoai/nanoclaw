@@ -1,0 +1,8 @@
+# Standalone build for the registry payload. Same 3-day release-age gate as the host.
+packages:
+  - .
+minimumReleaseAge: 4320
+# The platform esbuild binary is an optional package; no install scripts are needed.
+allowBuilds:
+  esbuild: false
+onlyBuiltDependencies: []
