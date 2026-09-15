@@ -6,7 +6,7 @@ import { getUndeliveredMessages } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
 import { processQuery } from './poll-loop.js';
 import { MockProvider } from './providers/mock.js';
-import type { AgentQuery, ProviderEvent } from './providers/types.js';
+import type { AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
 
 beforeEach(() => {
   initTestSessionDb();
@@ -448,7 +448,7 @@ it('does not push accumulated-only follow-ups into an active query', async () =>
 });
 
 describe('error result with no <message> envelope', () => {
-  it('delivers a provider-owned budget/billing error to the triggering channel and does not nudge', async () => {
+  it('delivers the dedicated safe error field without forwarding model diagnostics', async () => {
     const budgetText = 'Spending limit reached. Add your own key at https://example.com/keys';
     const { query, pushes } = makeResultQuery({
       type: 'result',
@@ -468,25 +468,20 @@ describe('error result with no <message> envelope', () => {
     expect(pushes).toHaveLength(0);
   });
 
-  it('delivers a generic notice and completes the exchange when a provider error has no text', async () => {
-    const { query, pushes } = makeResultQuery({ type: 'result', text: null, isError: true });
-    const exchanges: Array<{ result: string | null; status: string }> = [];
-
-    await processQuery(
-      query,
-      ERR_ROUTING,
-      ['m1'],
-      'opencode',
-      (exchange) => exchanges.push(exchange),
-      'prompt',
-      undefined,
-    );
-
-    const out = getUndeliveredMessages();
-    expect(out).toHaveLength(1);
-    expect(JSON.parse(out[0].content).text).toBe('The agent run failed. Check the logs for details.');
+  it.each([
+    '<internal>PRIVATE THOUGHTS</internal>\n\nOpenCode prompt failed: {"responseHeaders":{"authorization":"fixture-secret"}}',
+    'Unwrapped private reasoning\n\n{"responseBody":"fixture-secret"}',
+    '',
+  ])('keeps failed-turn scratchpad and diagnostics out of chat: %s', async (text) => {
+    const { query, pushes } = makeResultQuery({ type: 'result', text, isError: true });
+    const exchanges: ProviderExchange[] = [];
+    await processQuery(query, ERR_ROUTING, ['m1'], 'mock', (exchange) => exchanges.push(exchange), 'prompt', undefined);
+    expect(getUndeliveredMessages().map((row) => JSON.parse(row.content).text)).toEqual([
+      'The agent run failed. Check the logs for details.',
+    ]);
     expect(exchanges).toHaveLength(1);
-    expect(exchanges[0]).toMatchObject({ result: '', status: 'error' });
+    expect(exchanges[0].status).toBe('error');
+    expect(exchanges[0].result).toBe(text);
     expect(pushes).toHaveLength(0);
   });
 
@@ -499,6 +494,27 @@ describe('error result with no <message> envelope', () => {
     expect(pushes).toHaveLength(1);
     expect(pushes[0]).toContain('was not delivered');
   });
+});
+
+it('delivers completed wrapped text while recording the failed turn exactly once', async () => {
+  getInboundDb()
+    .prepare(
+      `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+     VALUES ('main', 'main', 'channel', 'discord', 'chan-1', NULL)`,
+    )
+    .run();
+  const text = '<message to="main">Completed before failure.</message>\n\nBackend failed.';
+  const { query, pushes } = makeResultQuery({ type: 'result', text, isError: true });
+  const exchanges: ProviderExchange[] = [];
+
+  await processQuery(query, ERR_ROUTING, ['m1'], 'mock', (exchange) => exchanges.push(exchange), 'prompt', undefined);
+
+  expect(getUndeliveredMessages().map((row) => JSON.parse(row.content).text)).toEqual([
+    'Completed before failure.',
+    'The agent run failed. Check the logs for details.',
+  ]);
+  expect(exchanges).toEqual([{ prompt: 'prompt', result: text, continuation: 'sess-1', status: 'error' }]);
+  expect(pushes).toHaveLength(0);
 });
 
 // --- Task-run turn wiring: the REAL processQuery path (one-door) ---
@@ -523,6 +539,27 @@ function taskLogRows(): Array<{ text: string }> {
 }
 
 describe('task-run turn wiring (real processQuery)', () => {
+  it('logs a failed task with inert message blocks once and does not retry delivery', async () => {
+    const text = '<message to="main">Completed before failure.</message>\n\nBackend failed.';
+    const { query, pushes } = makeResultQuery({ type: 'result', text, isError: true });
+    const exchanges: ProviderExchange[] = [];
+
+    await processQuery(
+      query,
+      TASK_ROUTING,
+      ['t1'],
+      'mock',
+      (exchange) => exchanges.push(exchange),
+      'prompt',
+      undefined,
+    );
+
+    expect(taskLogRows()).toEqual([{ text: '[undelivered → main] Completed before failure. Backend failed.' }]);
+    expect(getUndeliveredMessages().filter((row) => row.kind === 'chat')).toHaveLength(0);
+    expect(exchanges).toEqual([{ prompt: 'prompt', result: text, continuation: 'sess-1', status: 'error' }]);
+    expect(pushes).toHaveLength(0);
+  });
+
   it('auto-appends the final text as a task_log row', async () => {
     async function* events(): AsyncGenerator<ProviderEvent> {
       yield { type: 'init', continuation: 's1' };

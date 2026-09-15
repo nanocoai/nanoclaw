@@ -144,17 +144,17 @@ function buildDestinationsSection(mode: SessionMode, deliveryMode: DeliveryMode)
   lines.push('');
   if (deliveryMode === 'tools-only') {
     lines.push(
-      'The tools are available mid-turn — handy for a quick acknowledgment ("on it") before a slow tool call. Each call lands as its own message in the conversation, so several calls read as a sequence rather than as one combined reply.',
+      'Each turn permits one plain `send_message` per destination. Reserve it for the outcome; do not spend it on an acknowledgment or progress update. Other outbound tool kinds remain available as needed.',
     );
   } else {
     lines.push(
       'The `send_message` MCP tool is the same delivery, available mid-turn — handy for a quick acknowledgment ("on it") before a slow tool call. Always pass its explicit `to` destination. Each `send_message` call and each final-response `<message>` block lands as its own message in the conversation, so they read as a sequence rather than as one combined reply.',
     );
+    lines.push('');
+    lines.push(
+      'For a short turn, do not narrate. For longer work, send one acknowledgment and then updates only at meaningful milestones, especially before slow operations. Never narrate micro-steps; finish with the outcome, not a play-by-play.',
+    );
   }
-  lines.push('');
-  lines.push(
-    'For a short turn, do not narrate. For longer work, send one acknowledgment and then updates only at meaningful milestones, especially before slow operations. Never narrate micro-steps; finish with the outcome, not a play-by-play.',
-  );
   return lines.join('\n');
 }
 

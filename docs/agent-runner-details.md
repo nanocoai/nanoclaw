@@ -451,8 +451,8 @@ The agent-runner signals "busy" status to the host. The mechanism for this is pr
 ### Delivery Modes
 
 Each agent group has a `delivery_mode` in its container config, set with
-`ncl groups config update --delivery-mode envelope|tools-only` and materialized
-into `container.json` for the runner:
+`ncl groups config update --id <group-id> --delivery-mode envelope|tools-only` and materialized
+into `container.json` for the runner. Restart the group to load a changed mode:
 
 - **`envelope`** (default) — final-text `<message to="name">` blocks deliver;
   other response text is scratchpad. An unwrapped turn is nudged once. This is
@@ -460,8 +460,8 @@ into `container.json` for the runner:
 - **`tools-only`** — only outbound tool calls such as `send_message`,
   `send_file`, `send_card`, and `ask_user_question` deliver. Envelopes,
   tool-shaped markup, plain prose, and provider error text stay in the
-  scratchpad. The system prompt and post-compaction reminder teach this
-  contract.
+  scratchpad. The system prompt, compaction instructions, and OpenCode turn-memory
+  snapshot teach this contract.
 
 Task runs keep their existing one-door task path in either mode: outbound tools
 deliver and final text becomes the run log summary.
@@ -487,7 +487,11 @@ unlimited tool behavior.
 
 This accounting assumes one provider `result` for each pushed prompt. The runner
 logs extra results and prompts that end without a result. Tests live in
-`delivery-mode.test.ts` and `delivery-mode.followup.test.ts`.
+`delivery-mode.test.ts`, `delivery-mode.followup.test.ts`, and
+`delivery-mode.thrown-followup.test.ts`. A thrown provider failure sends a generic
+notice to each unanswered tools-only destination; a completed tool reply suppresses
+that notice. Envelope mode still reports unfinished turns after partial output.
+Explicit cancellation does not produce a provider-failure notice in either mode.
 
 ### Message Formatting
 

@@ -10,11 +10,12 @@
  *
  * The envelope contract is the default and is asserted here to be untouched.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './mailbox/sqlite/connection.js';
 import { getDeliveriesSince, getUndeliveredMessages, writeMessageOut } from './db/messages-out.js';
 import { getPendingMessages } from './db/messages-in.js';
+import { getAgentMailbox } from './mailbox/index.js';
 import { buildCompactInstructions } from './compact-instructions.js';
 import { buildSystemPromptAddendum } from './destinations.js';
 import { extractRouting, isUserChannelTrigger, replyTargetsFor, type RoutingContext } from './formatter.js';
@@ -27,7 +28,7 @@ import {
   TOOLS_ONLY_ERROR_NOTICE,
   TOOLS_ONLY_PLACEHOLDER,
 } from './poll-loop.js';
-import type { AgentProvider, AgentQuery, ProviderEvent } from './providers/types.js';
+import type { AgentProvider, AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
 
 /** A person is waiting on this one. */
 const CHAT_ROUTING: RoutingContext = {
@@ -1058,56 +1059,48 @@ describe('provider errors', () => {
     expect(userTexts()).toEqual(['already answered']);
   });
 
-  it('notices a queued follow-up when the provider throws after accepting it', async () => {
-    insertChat('m1', 'first question');
-    const controller = new AbortController();
-    const pushes: string[] = [];
-    const provider: AgentProvider = {
-      query: () => {
-        async function* events(): AsyncGenerator<ProviderEvent> {
-          yield { type: 'init', continuation: 's1' };
-          await writeMessageOut({
-            id: 'tool-1',
-            in_reply_to: 'm1',
-            kind: 'chat',
-            platform_id: 'chan-1',
-            channel_type: 'discord',
-            thread_id: null,
-            content: JSON.stringify({ text: 'first answer' }),
-          });
-          insertChat('m2', 'second question', { threadId: 'thread-2' });
-          const deadline = Date.now() + 3000;
-          while (!pushes.some((text) => text.includes('second question')) && Date.now() < deadline) {
-            await new Promise((resolve) => setTimeout(resolve, 25));
-          }
-          if (!pushes.some((text) => text.includes('second question'))) {
-            throw new Error('follow-up was not pushed before the test deadline');
-          }
-          throw new Error('provider failed after accepting the follow-up');
-        }
-        return {
-          push: (text) => pushes.push(text),
-          end: () => {},
-          events: events(),
-          abort: () => {},
-        };
-      },
-      isSessionInvalid: () => false,
+  it('keeps the provider failure and notices the next destination when the first notice write fails', async () => {
+    const diagnostic = 'Provider stopped with a private diagnostic';
+    const providerError = 'Provider failure detail';
+    const { query, pushes } = makeQuery({ text: diagnostic, isError: true, error: providerError });
+    const exchanges: ProviderExchange[] = [];
+    const routing: RoutingContext = {
+      ...CHAT_ROUTING,
+      replyTargets: [
+        ...CHAT_ROUTING.replyTargets!,
+        { platformId: 'chan-2', channelType: 'discord', threadId: 'thread-2', inReplyTo: 'm2' },
+      ],
     };
-    setTimeout(() => controller.abort(), 1000);
+    const write = spyOn(getAgentMailbox().operations, 'writeMessageOut').mockRejectedValueOnce(
+      new Error('Private mailbox notice failure'),
+    );
 
-    await runPollLoop({
-      provider,
-      providerName: 'mock',
-      cwd: '/workspace/agent',
-      deliveryMode: 'tools-only',
-      signal: controller.signal,
-    });
+    try {
+      await processQuery(
+        query,
+        routing,
+        ['m1', 'm2'],
+        'mock',
+        (exchange) => exchanges.push(exchange),
+        'prompt',
+        undefined,
+        'tools-only',
+      );
 
-    const rows = getUndeliveredMessages().filter((row) => row.kind === 'chat');
-    expect(rows.map((row) => JSON.parse(row.content).text)).toEqual(['first answer', TOOLS_ONLY_ERROR_NOTICE]);
-    expect(rows.map((row) => row.in_reply_to)).toEqual(['m1', 'm2']);
-    expect(rows.map((row) => row.thread_id)).toEqual([null, 'thread-2']);
+      expect(write).toHaveBeenCalledTimes(2);
+      const rows = getUndeliveredMessages().filter((row) => row.kind === 'chat');
+      expect(rows).toHaveLength(1);
+      expect(rows[0].platform_id).toBe('chan-2');
+      expect(rows[0].thread_id).toBe('thread-2');
+      expect(rows[0].in_reply_to).toBe('m2');
+      expect(userTexts()).toEqual([TOOLS_ONLY_ERROR_NOTICE]);
+      expect(exchanges).toEqual([
+        { prompt: 'prompt', result: diagnostic + '\n' + providerError, continuation: 's1', status: 'error' },
+      ]);
+      expect(pushes).toEqual([]);
+    } finally {
+      write.mockRestore();
+    }
   });
 
   it('never forwards the provider error text, and says something instead', async () => {
@@ -1390,7 +1383,12 @@ describe('prompt contract', () => {
     const prompt = buildSystemPromptAddendum('Casa', { kind: 'chat' }, 'tools-only');
 
     expect(prompt).toContain('private scratchpad');
-    expect(prompt).toContain('send_message');
+    expect(prompt).toContain('one plain `send_message` per destination');
+    expect(prompt).toContain('Reserve it for the outcome');
+    expect(prompt).toContain('do not spend it on an acknowledgment or progress update');
+    expect(prompt).toContain('Other outbound tool kinds remain available');
+    expect(prompt).not.toContain('quick acknowledgment');
+    expect(prompt).not.toContain('send one acknowledgment');
     expect(prompt).not.toContain('Wrap each delivered message');
   });
 
@@ -1404,7 +1402,10 @@ describe('prompt contract', () => {
   });
 
   it('keeps the envelope wording by default, including with no destinations', () => {
-    expect(buildSystemPromptAddendum('Casa')).toContain('Wrap each delivered message');
+    const prompt = buildSystemPromptAddendum('Casa');
+    expect(prompt).toContain('Wrap each delivered message');
+    expect(prompt).toContain('quick acknowledgment');
+    expect(prompt).toContain('send one acknowledgment');
 
     getInboundDb().prepare('DELETE FROM destinations').run();
     const empty = buildSystemPromptAddendum('Casa');

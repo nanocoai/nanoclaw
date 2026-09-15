@@ -333,7 +333,7 @@ CREATE TABLE container_configs (
 );
 ```
 
-`delivery_mode` picks the container's delivery contract for chat turns: `envelope` (default, `<message to>` blocks in the final text) or `tools-only` (only outbound tool calls deliver). Set via `ncl groups config update --delivery-mode <mode>`; an unreadable value resolves to `envelope` so a bad row never widens delivery. The column and its plumbing land first; the runner-side enforcement of `tools-only` follows in a separate change, so until then every group delivers as `envelope` whatever the column says.
+`delivery_mode` picks the container's delivery contract for chat turns: `envelope` (default, `<message to>` blocks in the final text) or `tools-only` (only outbound tool calls deliver). Set via `ncl groups config update --delivery-mode <mode>`; an unreadable value resolves to `envelope` so a bad row never widens delivery. Restart the group after changing its mode so the runner loads the updated configuration.
 
 `timezone` overrides the install-global timezone for one agent group: host-side scheduling (cron interpretation, `--process-after`, run-log stamps) resolves it live via `resolveGroupTimezone` (`src/container-config.ts`); the container gets it as its `TZ` env on next respawn. Set via `ncl groups config update --timezone <IANA>` (`""` clears back to NULL) or `ncl groups create --timezone`.
 

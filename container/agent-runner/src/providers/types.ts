@@ -163,8 +163,8 @@ export type ProviderEvent =
   /**
    * A completed turn. `isError` marks a failed turn and prevents retries.
    * `text` is model output; `error` is an optional user-facing provider error
-   * kept separate from model scratchpad and raw diagnostics. Failures without
-   * `error` receive a generic notice.
+   * (e.g. a billing/quota notice), kept separate from model scratchpad and
+   * raw diagnostics. Failures without `error` receive a generic notice.
    */
   | { type: 'result'; text: string | null; isError?: boolean; error?: string }
   /**

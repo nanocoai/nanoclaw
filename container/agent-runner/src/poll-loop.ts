@@ -60,24 +60,6 @@ function generateId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-/**
- * Preserve the live tools-only obligations on the original provider error.
- * A WeakMap keeps the provider's error identity intact for isSessionInvalid()
- * while letting the outer loop notify follow-ups that processQuery accepted
- * after the opening batch.
- */
-const toolsOnlyFailureTargets = new WeakMap<object, ReplyTarget[]>();
-
-function rememberToolsOnlyFailure(error: unknown, targets: ReplyTarget[]): unknown {
-  if ((typeof error === 'object' && error !== null) || typeof error === 'function') {
-    toolsOnlyFailureTargets.set(error as object, targets);
-    return error;
-  }
-  const wrapped = new Error(String(error));
-  toolsOnlyFailureTargets.set(wrapped, targets);
-  return wrapped;
-}
-
 export interface PollLoopConfig {
   provider: AgentProvider;
   /** Declared provider runtime behavior. Contractless providers keep legacy defaults. */
@@ -301,8 +283,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // Where outbound stood before the turn ran, so the tools can tell what this
     // turn has already written. Handed over with each queued follow-up below;
     // the route and the numeric delivery boundary remain separate facts.
-    const outerTurnStartSeq = getMaxOutboundSeq();
-    setTurnOutboundBaseline(outerTurnStartSeq);
+    setTurnOutboundBaseline(getMaxOutboundSeq());
     try {
       const result = await processQuery(
         query,
@@ -314,6 +295,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         continuation,
         midTurnCompleteDelivery,
         config.deliveryMode ?? 'envelope',
+        config.signal,
       );
       if (result.continuation && result.continuation !== continuation) {
         continuation = result.continuation;
@@ -332,37 +314,9 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         clearContinuation(config.providerName);
       }
 
-      if ((config.deliveryMode ?? 'envelope') === 'tools-only') {
-        // A provider can throw before it emits a result event (native server
-        // setup/prompt failures are one real path). processQuery records its
-        // live obligations before rethrowing so a follow-up accepted while the
-        // stream was open is not lost. Errors thrown before that accounting is
-        // initialized retain the opening-batch fallback.
-        let targets =
-          (typeof err === 'object' && err !== null) || typeof err === 'function'
-            ? toolsOnlyFailureTargets.get(err as object)
-            : undefined;
-        if (targets === undefined) {
-          const opening = (routing.replyTargets ?? []).map((target) => ({
-            target,
-            nudged: false,
-            exchange: 0,
-          }));
-          settleDeliveries(opening, new Map(), getDeliveriesSince(outerTurnStartSeq).deliveries, 0);
-          targets = opening.flatMap((entry) => (entry.target ? [entry.target] : []));
-        }
-        await handleToolsOnlyError(errMsg, targets);
-      } else {
-        // Preserve the existing envelope-mode error behavior.
-        await writeMessageOut({
-          id: generateId(),
-          kind: 'chat',
-          platform_id: routing.platformId,
-          channel_type: routing.channelType,
-          thread_id: routing.threadId,
-          content: JSON.stringify({ text: `Error: ${errMsg}` }),
-        });
-      }
+      // processQuery owns failure delivery because it also owns the requests
+      // queued during this query. Reconstructing the initial batch here would
+      // lose those follow-ups, which the active poll has already completed.
 
       // The batch is still acked completed below (no redelivery). Without
       // this line the only log trace of the errored turn is "Query error"
@@ -462,12 +416,12 @@ export async function processQuery(
    */
   modeOrEmitsMidTurnText: DeliveryMode | boolean = 'envelope',
   explicitDeliveryMode: DeliveryMode = 'envelope',
+  signal?: AbortSignal,
 ): Promise<QueryResult> {
-  const midTurnCompleteDelivery = typeof modeOrEmitsMidTurnText === 'boolean' ? modeOrEmitsMidTurnText : false;
+  const midTurnCompleteDelivery = modeOrEmitsMidTurnText === true;
   const deliveryMode = typeof modeOrEmitsMidTurnText === 'string' ? modeOrEmitsMidTurnText : explicitDeliveryMode;
   // The active route changes when a long-lived query advances to a pushed
-  // follow-up. Copy it so the caller's batch route (used by its outer error
-  // notice) stays unchanged.
+  // follow-up. Copy it so the caller's batch route stays unchanged.
   routing = { ...routing };
   // Task runs already deliver through tools only, with the final text reserved
   // for the run log — they keep that path whatever the group's mode is, so the
@@ -1047,6 +1001,13 @@ export async function processQuery(
       }
     }
   } catch (err) {
+    // Stop accepting follow-ups before awaiting notices. Every prompt already
+    // pushed is abandoned by this throw, including ones whose result never
+    // arrived; their requests must not disappear with the closed query.
+    done = true;
+    // Capture before the exchange hook: observers may stop the loop after
+    // recording a genuine failure, which must still notify its recipients.
+    const cancelled = endedForCommand || signal?.aborted;
     const errMsg = err instanceof Error ? err.message : String(err);
     notifyExchangeComplete(onExchangeComplete, {
       prompt: promptOf(resultsSeen),
@@ -1054,17 +1015,54 @@ export async function processQuery(
       continuation: queryContinuation ?? initialContinuation,
       status: 'error',
     });
-    if (toolsOnly) {
-      // A thrown provider error ends the whole stream, including prompts that
-      // were already pushed but had not reached their own result. Settle any
-      // sends from the active exchange, then hand every remaining human
-      // obligation to runPollLoop for one masked notice per address.
-      settle(resultsSeen);
-      throw rememberToolsOnlyFailure(
-        err,
-        outstanding.flatMap((entry) => (entry.target ? [entry.target] : [])),
-      );
+    if (!cancelled) {
+      try {
+        const targets: ReplyTarget[] = [];
+        if (toolsOnly) {
+          settle(resultsSeen);
+          targets.push(...outstanding.flatMap((entry) => (entry.target ? [entry.target] : [])));
+        } else {
+          // Envelope mode still reports unfinished turns after partial output.
+          // Completed exchanges are excluded; each active or queued exchange
+          // retains the route main used for its failure notice.
+          for (const [ordinal, exchange] of exchanges) {
+            const target = exchange.routing;
+            if (
+              ordinal < resultsSeen ||
+              target.taskRun ||
+              !target.platformId ||
+              !target.channelType ||
+              target.channelType === 'agent'
+            )
+              continue;
+            targets.push(target);
+          }
+        }
+        const notice = toolsOnly ? TOOLS_ONLY_ERROR_NOTICE : 'The agent run failed. Check the logs for details.';
+        const noticed: ReplyTarget[] = [];
+        for (const target of targets) {
+          if (noticed.some((done) => sameDestination(done, target))) continue;
+          noticed.push(target);
+          try {
+            await writeToReplyTarget(target, notice);
+          } catch (noticeError) {
+            // A failed write must not replace the provider exception or
+            // prevent an independent recipient from receiving their notice.
+            log(
+              `Failed to deliver query error notice: ${noticeError instanceof Error ? noticeError.message : String(noticeError)}`,
+            );
+          }
+        }
+      } catch (deliveryError) {
+        // Without a delivery read, outstanding targets cannot be reconciled
+        // safely. Preserve the provider failure for continuation recovery.
+        log(
+          `Failed to reconcile delivery after query error: ${deliveryError instanceof Error ? deliveryError.message : String(deliveryError)}`,
+        );
+      }
     }
+    // Keep the original failure available to the provider's continuation
+    // recovery policy. The outer loop logs and recovers, without sending again.
     throw err;
   } finally {
     done = true;
@@ -1389,7 +1387,7 @@ export async function dispatchResultText(
   text: string,
   routing: RoutingContext,
   options?: ResultDispatchOptions | DeliveryMode,
-): Promise<{ sent: number; hasUnwrapped: boolean; taskBlocks: TaskMessageBlock[]; resultBlocks: number }> {
+): Promise<{ sent: number; hasUnwrapped: boolean; taskBlocks: TaskMessageBlock[] }> {
   const dispatchOptions = typeof options === 'string' ? { deliveryMode: options } : options;
   const deliveryMode = dispatchOptions?.deliveryMode ?? 'envelope';
   // <internal> spans are not-for-delivery scratchpad. Remove them BEFORE block
@@ -1406,10 +1404,6 @@ export async function dispatchResultText(
   // text with no (new) blocks after a mid-turn delivery is scratchpad, not an
   // undelivered reply.
   let sent = dispatchOptions?.midTurnSent ?? 0;
-  // <message> blocks present in THIS result text (delivered, stripped, task
-  // or dropped alike) — drives the bare-error-text delivery gate, which must
-  // key on the error result itself, not on earlier mid-turn deliveries.
-  let resultBlocks = 0;
   // <message to> blocks left inert in a task run — drives the same-turn
   // "use send_message" nudge in processQuery.
   const taskBlocks: TaskMessageBlock[] = [];
@@ -1423,7 +1417,6 @@ export async function dispatchResultText(
     const toName = match[1];
     const body = stripHarnessTagArtifacts(match[2].trim());
     lastIndex = MESSAGE_RE.lastIndex;
-    resultBlocks++;
 
     // One-door delivery in task sessions: only the send_message tool delivers.
     // A final-text <message to> block here is either an echo of a tool send the
@@ -1508,7 +1501,7 @@ export async function dispatchResultText(
   if (hasUnwrapped) {
     log(`WARNING: agent output had no <message to="..."> blocks — nothing was sent`);
   }
-  return { sent, hasUnwrapped, taskBlocks, resultBlocks };
+  return { sent, hasUnwrapped, taskBlocks };
 }
 
 /**
@@ -1611,7 +1604,15 @@ export async function handleToolsOnlyError(text: string, targets: ReplyTarget[])
   for (const target of targets) {
     if (noticed.some((done) => sameDestination(done, target))) continue;
     noticed.push(target);
-    written.push(await writeToReplyTarget(target, TOOLS_ONLY_ERROR_NOTICE));
+    try {
+      written.push(await writeToReplyTarget(target, TOOLS_ONLY_ERROR_NOTICE));
+    } catch (noticeError) {
+      // One mailbox failure must not hide the provider result or prevent an
+      // independent recipient from receiving the safe notice.
+      log(
+        `Failed to deliver tools-only error notice: ${noticeError instanceof Error ? noticeError.message : String(noticeError)}`,
+      );
+    }
   }
   return written;
 }
