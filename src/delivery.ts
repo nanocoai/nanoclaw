@@ -2,6 +2,13 @@
  * Poll outbound mailboxes and deliver undelivered messages through channel adapters.
  * SQLite reads runner-owned outbound state read-only and records delivery in
  * host-owned inbound state; other implementations preserve that ownership.
+ *
+ * Two poll loops share one body (`deliverToSessions`): the active poll every
+ * ~1s over sessions with a running/idle container, the sweep poll every ~60s
+ * over every active session. Each visits up to DELIVERY_CONCURRENCY sessions
+ * at once and re-arms at a fixed rate measured from the tick's START, so a
+ * slow tick (remote mailbox, many sessions) neither serializes every
+ * session's latency nor adds a full interval of dead time after it.
  */
 import {
   getRunningSessions,
@@ -21,6 +28,7 @@ import {
 import { clearDeliveryAttempt, recordDeliveryAttempt } from './db/coordination.js';
 import { runGuarded, type DeliveryGuardSpec, type GuardedDeliveryHandler } from './delivery-guard.js';
 import { isUnguarded, type Unguarded } from './guard/index.js';
+import { mapConcurrent } from './concurrency.js';
 import { fanOutboundMessage } from './modules/cross-session-context/index.js';
 import { log } from './log.js';
 import { normalizeOptions } from './channels/ask-question.js';
@@ -33,6 +41,16 @@ import type { OutboundMessage } from './mailbox/index.js';
 const ACTIVE_POLL_MS = 1000;
 const SWEEP_POLL_MS = 60_000;
 const MAX_DELIVERY_ATTEMPTS = 3;
+/**
+ * Sessions drained in parallel per poll tick. A visit is one mailbox round
+ * trip (read the queue) plus the channel sends; serially, a tick scaled as
+ * sessions × mailbox latency, so ~12 running sessions on a 40 ms/hop remote
+ * mailbox already overran the 1 s active interval. Sessions are independent
+ * (per-session re-entry is guarded by `inflightDeliveries`; the two polls
+ * already interleave across sessions), and message order WITHIN a session is
+ * unchanged — drainSession still delivers its rows one by one.
+ */
+const DELIVERY_CONCURRENCY = 8;
 
 /**
  * Attempt counts live in the `delivery_attempts` table, so they survive a
@@ -170,32 +188,55 @@ export function startSweepDeliveryPoll(): void {
 
 async function pollActive(): Promise<void> {
   if (!activePolling) return;
+  const startedAt = Date.now();
 
   try {
-    const sessions = await getRunningSessions();
-    for (const session of sessions) {
-      await deliverSessionMessages(session);
-    }
+    await deliverToSessions(await getRunningSessions());
   } catch (err) {
     log.error('Active delivery poll error', { err });
   }
 
-  setTimeout(() => void pollActive(), ACTIVE_POLL_MS);
+  if (!activePolling) return;
+  setTimeout(() => void pollActive(), nextTickDelay(startedAt, ACTIVE_POLL_MS));
 }
 
 async function pollSweep(): Promise<void> {
   if (!sweepPolling) return;
+  const startedAt = Date.now();
 
   try {
-    const sessions = await getActiveSessions();
-    for (const session of sessions) {
-      await deliverSessionMessages(session);
-    }
+    await deliverToSessions(await getActiveSessions());
   } catch (err) {
     log.error('Sweep delivery poll error', { err });
   }
 
-  setTimeout(() => void pollSweep(), SWEEP_POLL_MS);
+  if (!sweepPolling) return;
+  setTimeout(() => void pollSweep(), nextTickDelay(startedAt, SWEEP_POLL_MS));
+}
+
+/**
+ * Fixed-rate cadence: the next tick starts `intervalMs` after this one
+ * STARTED, never before this one ended (ticks don't overlap — the same
+ * promise chain arms the next). A tick that overran its interval re-arms
+ * after a short breather (a tenth of the interval) rather than spinning.
+ */
+function nextTickDelay(startedAt: number, intervalMs: number): number {
+  return Math.max(Math.floor(intervalMs / 10), intervalMs - (Date.now() - startedAt));
+}
+
+/**
+ * One poll tick's body: drain every listed session, DELIVERY_CONCURRENCY at a
+ * time. A session whose drain throws (central lookup failed, mailbox
+ * unavailable) is logged and skipped; it never costs the other sessions
+ * their turn this tick.
+ */
+export async function deliverToSessions(sessions: readonly Session[]): Promise<void> {
+  const results = await mapConcurrent(sessions, DELIVERY_CONCURRENCY, (session) => deliverSessionMessages(session));
+  results.forEach((result, i) => {
+    if (result.status === 'rejected') {
+      log.error('Session delivery failed', { sessionId: sessions[i].id, err: result.reason });
+    }
+  });
 }
 
 export async function deliverSessionMessages(session: Session): Promise<void> {
