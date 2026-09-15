@@ -55,14 +55,25 @@ async function withRetry<T>(fn: () => Promise<T>, label: string, maxAttempts = 5
   throw lastErr;
 }
 
+function normalizeTelegramUsername(username: unknown): string | null {
+  if (typeof username !== 'string') return null;
+  const normalized = username.trim().replace(/^@/, '').toLowerCase();
+  return normalized || null;
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function extractReplyContext(raw: Record<string, any>): ReplyContext | null {
+export function extractTelegramReplyContext(raw: Record<string, any>, botUsername: string | null): ReplyContext | null {
   if (!raw.reply_to_message) return null;
   const reply = raw.reply_to_message;
-  return {
+  const from = reply.from;
+  const expectedUsername = normalizeTelegramUsername(botUsername);
+  const replyUsername = normalizeTelegramUsername(from?.username);
+  const context: ReplyContext & { isReplyToBot: boolean } = {
     text: reply.text || reply.caption || '',
-    sender: reply.from?.first_name || reply.from?.username || 'Unknown',
+    sender: from?.first_name || from?.username || 'Unknown',
+    isReplyToBot: from?.is_bot === true && expectedUsername !== null && replyUsername === expectedUsername,
   };
+  return context;
 }
 
 /** Look up the bot username via Telegram getMe. Cached after first call. */
@@ -379,11 +390,16 @@ export function createTelegramBridge(options: TelegramBridgeOptions = {}): Chann
     botToken: token,
     mode: 'polling',
   });
+  const identity: { username: string | null } = { username: null };
+  const botUsernamePromise = fetchBotUsername(token).then((username) => {
+    identity.username = username;
+    return username;
+  });
   const bridge = createChatSdkBridge({
     adapter: telegramAdapter,
     instance: options.instanceKey, // undefined ⇒ default instance (keyed by channelType)
     concurrency: 'concurrent',
-    extractReplyContext,
+    extractReplyContext: (raw) => extractTelegramReplyContext(raw, identity.username),
     supportsThreads: false,
     defaults: TELEGRAM_DEFAULTS,
     // No transformOutboundText: @chat-adapter/telegram >= 4.29 parses
@@ -393,8 +409,6 @@ export function createTelegramBridge(options: TelegramBridgeOptions = {}): Chann
     // adapter then parsed as emphasis and rendered as _italic_.
     maxTextLength: 4000,
   });
-
-  const botUsernamePromise = fetchBotUsername(token);
 
   const wrapped: ChannelAdapter = {
     ...bridge,
@@ -414,6 +428,10 @@ export function createTelegramBridge(options: TelegramBridgeOptions = {}): Chann
       }
     },
     async setup(hostConfig: ChannelSetup) {
+      // Resolve this bridge's identity before polling starts so even the
+      // first inbound reply is classified deterministically. getMe failures
+      // resolve to null and therefore fail closed without blocking setup.
+      await botUsernamePromise;
       const intercepted: ChannelSetup = {
         ...hostConfig,
         onInbound: createTelegramInboundInterceptor(botUsernamePromise, hostConfig.onInbound, token, instanceKey),
