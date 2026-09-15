@@ -127,6 +127,51 @@ describe('SQLite runner mailbox canonical serialization', () => {
     ]);
   });
 
+  test('releaseProcessingClaims returns processing claims for retry and leaves acknowledged rows alone', async () => {
+    const { outbound } = initTestSessionDb();
+    const mailbox = new SqliteAgentMailbox();
+    await mailbox.start({ agentGroupId: 'agent', sessionId: 'session', mailbox: null });
+    mailbox.markMessages(['in-1', 'in-2'], 'processing');
+    mailbox.markMessages(['in-3'], 'completed');
+    const statuses = () =>
+      (
+        outbound.prepare('SELECT message_id, status FROM processing_ack ORDER BY message_id').all() as Array<{
+          message_id: string;
+          status: string;
+        }>
+      ).map((row) => `${row.message_id}:${row.status}`);
+    expect(statuses()).toEqual(['in-1:processing', 'in-2:processing', 'in-3:completed']);
+
+    mailbox.releaseProcessingClaims([]);
+    expect(statuses()).toEqual(['in-1:processing', 'in-2:processing', 'in-3:completed']);
+
+    // Only the named processing claims go; a completed ack is terminal and stays.
+    mailbox.releaseProcessingClaims(['in-1', 'in-3', 'unknown']);
+    expect(statuses()).toEqual(['in-2:processing', 'in-3:completed']);
+  });
+
+  test('a processing claim never downgrades an ack already on the row', async () => {
+    const { outbound } = initTestSessionDb();
+    const mailbox = new SqliteAgentMailbox();
+    await mailbox.start({ agentGroupId: 'agent', sessionId: 'session', mailbox: null });
+    mailbox.markMessages(['in-1'], 'completed');
+    mailbox.markMessages(['in-2'], 'processing');
+    // The race: a reader acked in-1 'completed'; a late claim for the same batch must not reopen it.
+    mailbox.markMessages(['in-1', 'in-2', 'in-3'], 'processing');
+    const statuses = (
+      outbound.prepare('SELECT message_id, status FROM processing_ack ORDER BY message_id').all() as Array<{
+        message_id: string;
+        status: string;
+      }>
+    ).map((row) => `${row.message_id}:${row.status}`);
+    expect(statuses).toEqual(['in-1:completed', 'in-2:processing', 'in-3:processing']);
+    // The final word still overwrites a claim.
+    mailbox.markMessages(['in-2'], 'completed');
+    expect(outbound.prepare("SELECT status FROM processing_ack WHERE message_id = 'in-2'").get()).toEqual({
+      status: 'completed',
+    });
+  });
+
   test('skips malformed pending inbound rows instead of crashing the runner', () => {
     const { inbound } = initTestSessionDb();
     inbound

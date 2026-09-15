@@ -219,6 +219,32 @@ export interface SessionExecSpec {
   argsPlain: string[];
 }
 
+export interface SessionExecOptions {
+  /** Allocate a terminal for the command (one merged stream) or keep stdout and stderr apart. */
+  tty: boolean;
+  cols?: number;
+  rows?: number;
+  /** Extra `NAME=value` entries for the command's environment. */
+  env?: string[];
+}
+
+/**
+ * A command running interactively inside the session, its bytes held by the
+ * caller rather than a spawned client program — what a remote terminal the
+ * host relays needs. With a terminal the output is one raw stream and
+ * `resize` follows the far terminal; without one, stderr arrives apart.
+ */
+export interface SessionExecStream {
+  stdin: import('node:stream').Writable;
+  stdout: import('node:stream').Readable;
+  stderr?: import('node:stream').Readable;
+  resize(cols: number, rows: number): Promise<void>;
+  /** The command's exit code, once it ends. */
+  exited: Promise<number>;
+  /** Hang up: closes the stream; a command on a terminal is hung up. */
+  close(): void;
+}
+
 export interface SessionHandle {
   key: SessionKey;
   /** Stable runtime name for logs and operator commands. */
@@ -241,6 +267,13 @@ export interface SessionHandle {
    * not a lie from this layer.
    */
   execSpec(command: string[]): SessionExecSpec;
+  /**
+   * Run `command` interactively inside the live session and hand its stream
+   * to the caller — see `SessionExecStream`. Optional: a driver that only
+   * describes attaches (`execSpec`) still satisfies the contract; a caller
+   * that needs the stream and finds none reports that.
+   */
+  execStream?(command: string[], options: SessionExecOptions): Promise<SessionExecStream>;
 }
 
 export interface DriverCapabilities {

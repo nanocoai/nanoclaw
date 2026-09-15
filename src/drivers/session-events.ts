@@ -218,6 +218,10 @@ class HubHandle implements SupervisedHandle {
   execSpec(command: string[]): SessionExecSpec {
     return this.inner.execSpec(command);
   }
+  get execStream(): SessionHandle['execStream'] {
+    const inner = this.inner;
+    return inner.execStream ? (command, options) => inner.execStream!(command, options) : undefined;
+  }
   stop(reason: string): Promise<void> {
     this.hub.markStopIntent(this.inner.key);
     return this.inner.stop(reason);

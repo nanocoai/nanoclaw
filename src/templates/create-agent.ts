@@ -107,6 +107,9 @@ export async function createAgentFromTemplate(ref: string, opts?: CreateAgentOpt
   const group: AgentGroup = { id, name, folder, agent_provider: null, created_at: new Date().toISOString() };
   await createAgentGroup(group);
   await ensureContainerConfig(id);
+  if (tpl.codeMode !== undefined) {
+    await updateContainerConfigScalars(id, { code_mode: tpl.codeMode ? 1 : 0 });
+  }
   if (timezone) await updateContainerConfigScalars(id, { timezone });
 
   // group-init.ts owns the mkdir at first spawn, but it isn't called here — so we

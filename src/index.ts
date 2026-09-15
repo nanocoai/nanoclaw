@@ -47,6 +47,10 @@ import './channels/index.js';
 // mailbox composition slot. Imported for side effects.
 import './modules/index.js';
 
+// Code mode — registers the group-flag migration; behavior changes only for
+// groups whose config sets code_mode.
+import './code-mode/index.js';
+
 // CLI command barrel — populates the `ncl` registry before the CLI server
 // accepts connections.
 import './cli/commands/index.js';

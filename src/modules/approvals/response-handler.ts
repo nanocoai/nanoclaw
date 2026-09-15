@@ -27,6 +27,7 @@ import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import type { PendingApproval } from '../../types.js';
 import { hasAdminPrivilege, isGlobalAdmin, isOwner } from '../permissions/db/user-roles.js';
+import { CODE_BOUNDARY_ACTION, resolveCodeBoundaryApproval } from './code-boundary.js';
 import { finalizeReject } from './finalize.js';
 import { ONECLI_ACTION, resolveOneCLIApproval } from './onecli-approvals.js';
 import { getApprovalHandler, notifyApprovalResolved, REJECT_WITH_REASON_VALUE } from './primitive.js';
@@ -52,6 +53,16 @@ export async function handleApprovalsResponse(payload: ResponsePayload): Promise
     }
     // Row exists but the in-memory resolver is gone (timer fired or the process
     // was in a weird state). Nothing to do — just drop the row.
+    await deletePendingApproval(payload.questionId);
+    return true;
+  }
+
+  if (approval.action === CODE_BOUNDARY_ACTION) {
+    // Same in-memory shape as OneCLI, but resolution writes the container's
+    // decision FILE (the hook is polling it) instead of releasing a Promise.
+    if (await resolveCodeBoundaryApproval(payload.questionId, payload.value)) {
+      return true;
+    }
     await deletePendingApproval(payload.questionId);
     return true;
   }

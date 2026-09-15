@@ -1,0 +1,408 @@
+/**
+ * TmuxSession unit tests drive the CLI seam with a fake exec; the
+ * integration suite at the bottom exercises real tmux (skipped where the
+ * binary is absent — the image installs it, dev machines usually have it).
+ */
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+
+import { afterEach, describe, expect, test } from 'bun:test';
+
+import { shQuote, TmuxSession, type TmuxExec, type TmuxExecResult } from './tmux-session.js';
+
+const OK: TmuxExecResult = { exitCode: 0, stdout: '', stderr: '' };
+
+function tempDir(): string {
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'tmux-session-test-'));
+}
+
+interface FakeExec {
+  exec: TmuxExec;
+  calls: string[][];
+  envs: (Record<string, string> | undefined)[];
+  /** Override the response for a subcommand (matched on argv[2]); a function answers per call. */
+  respond: (subcommand: string, result: TmuxExecResult | (() => TmuxExecResult)) => void;
+}
+
+function fakeExec(): FakeExec {
+  const calls: string[][] = [];
+  const envs: (Record<string, string> | undefined)[] = [];
+  const responses = new Map<string, TmuxExecResult | (() => TmuxExecResult)>();
+  return {
+    calls,
+    envs,
+    respond: (subcommand, result) => void responses.set(subcommand, result),
+    exec: async (argv, opts) => {
+      calls.push(argv);
+      envs.push(opts?.env);
+      // argv = ['tmux', '-S', sock, <subcommand>, ...] — new-session rides
+      // behind '-f conf', so scan for the first non-flag token after the sock.
+      const subcommand = argv.slice(3).find((a) => !a.startsWith('-') && !a.endsWith('.conf'));
+      const response = responses.get(subcommand ?? '') ?? OK;
+      return typeof response === 'function' ? response() : response;
+    },
+  };
+}
+
+function session(fake: FakeExec, dir: string, overrides: Partial<ConstructorParameters<typeof TmuxSession>[0]> = {}) {
+  return new TmuxSession({
+    command: 'claude',
+    args: ['--model', 'sonnet'],
+    cwd: '/workspace/group',
+    env: { PATH: '/bin', SECRET: 'x' },
+    socketPath: path.join(dir, 'tmux.sock'),
+    confPath: path.join(dir, 'tmux.conf'),
+    restartDelayMs: 20,
+    maxRestartDelayMs: 80,
+    healthyRunMs: 10_000,
+    pollMs: 30,
+    exec: fake.exec,
+    ...overrides,
+  });
+}
+
+const disposables: TmuxSession[] = [];
+afterEach(() => {
+  for (const s of disposables.splice(0)) s.dispose();
+});
+
+describe('shQuote', () => {
+  test('wraps and escapes for the shell round trip tmux makes', () => {
+    expect(shQuote('plain')).toBe(`'plain'`);
+    expect(shQuote(`it's`)).toBe(`'it'\\''s'`);
+    expect(shQuote('a b')).toBe(`'a b'`);
+  });
+});
+
+describe('TmuxSession (fake exec)', () => {
+  test('start creates a detached session with quoted command, geometry, cwd — and env only there', async () => {
+    const fake = fakeExec();
+    const dir = tempDir();
+    const s = session(fake, dir);
+    disposables.push(s);
+    await s.start();
+
+    const create = fake.calls[0];
+    expect(create.slice(0, 3)).toEqual(['tmux', '-S', path.join(dir, 'tmux.sock')]);
+    expect(create).toContain('new-session');
+    expect(create).toContain('-d');
+    expect(create[create.indexOf('-s') + 1]).toBe('agent');
+    expect(create[create.indexOf('-c') + 1]).toBe('/workspace/group');
+    expect(create[create.length - 1]).toBe(`'claude' '--model' 'sonnet'`);
+    expect(fake.envs[0]).toMatchObject({ SECRET: 'x' });
+    expect(s.running).toBe(true);
+    expect(s.lastSpawnAt).toBeGreaterThan(0);
+    // The generated conf carries the technical floor.
+    const conf = fs.readFileSync(path.join(dir, 'tmux.conf'), 'utf8');
+    expect(conf).toContain('remain-on-exit on');
+    expect(conf).toContain('terminal-overrides ",*:RGB"');
+  });
+
+  test('onSpawn fires per life and a failed create throws', async () => {
+    const fake = fakeExec();
+    fake.respond('new-session', { exitCode: 1, stdout: '', stderr: 'duplicate session' });
+    const spawns: number[] = [];
+    const s = session(fake, tempDir(), { onSpawn: (at) => spawns.push(at) });
+    disposables.push(s);
+    await expect(s.start()).rejects.toThrow('duplicate session');
+    expect(spawns).toHaveLength(0);
+  });
+
+  test('write sends hex octets in order and chunks long payloads', async () => {
+    const fake = fakeExec();
+    const s = session(fake, tempDir());
+    disposables.push(s);
+    await s.start();
+    fake.calls.length = 0;
+
+    const paste = `\x1b[200~${'a'.repeat(300)}\x1b[201~\r`;
+    s.write(paste);
+    // Drain the write chain.
+    await new Promise((r) => setTimeout(r, 20));
+
+    const sends = fake.calls.filter((c) => c.includes('send-keys'));
+    expect(sends.length).toBeGreaterThan(1); // >256 octets → chunked
+    const octets = sends.flatMap((c) => c.slice(c.indexOf('-H') + 1));
+    const rebuilt = Buffer.from(octets.map((h) => parseInt(h, 16)));
+    expect(rebuilt.toString('utf8')).toBe(paste); // byte-faithful, ordered
+  });
+
+  test('a dead pane respawns with backoff, onSpawn re-fires, lastSpawnAt moves', async () => {
+    const fake = fakeExec();
+    const spawns: number[] = [];
+    const s = session(fake, tempDir(), { onSpawn: (at) => spawns.push(at) });
+    disposables.push(s);
+    await s.start();
+    const firstSpawn = s.lastSpawnAt;
+
+    fake.respond('list-panes', { exitCode: 0, stdout: '1\n', stderr: '' });
+    await new Promise((r) => setTimeout(r, 40)); // one poll observes the death
+    expect(s.running).toBe(false);
+    fake.respond('list-panes', { exitCode: 0, stdout: '0\n', stderr: '' });
+    await new Promise((r) => setTimeout(r, 60)); // backoff elapses, respawn-pane runs
+
+    expect(fake.calls.some((c) => c.includes('respawn-pane'))).toBe(true);
+    expect(spawns).toHaveLength(2);
+    expect(s.lastSpawnAt).toBeGreaterThanOrEqual(firstSpawn);
+    expect(s.running).toBe(true);
+  });
+
+  test('the argv is resolved for every life, and respawn carries the resolved command explicitly', async () => {
+    const fake = fakeExec();
+    const lives: Array<{ life: number; previousLifeHealthy: boolean | null }> = [];
+    const s = session(fake, tempDir(), {
+      args: (ctx) => {
+        lives.push(ctx);
+        return ctx.life === 1 ? ['--session-id', 'c1'] : ['--resume', 'c1'];
+      },
+    });
+    disposables.push(s);
+    await s.start();
+    const create = fake.calls.find((c) => c.includes('new-session'))!;
+    expect(create[create.length - 1]).toBe("'claude' '--session-id' 'c1'");
+    expect(lives).toEqual([{ life: 1, previousLifeHealthy: null }]);
+
+    fake.respond('list-panes', { exitCode: 0, stdout: '1\n', stderr: '' });
+    await new Promise((r) => setTimeout(r, 40)); // one poll observes the death
+    fake.respond('list-panes', { exitCode: 0, stdout: '0\n', stderr: '' });
+    await new Promise((r) => setTimeout(r, 60)); // backoff elapses, respawn-pane runs
+
+    // A bare respawn-pane would re-run the create-time argv; the second
+    // life's own command rides along instead.
+    const respawn = fake.calls.find((c) => c.includes('respawn-pane'))!;
+    expect(respawn[respawn.length - 1]).toBe("'claude' '--resume' 'c1'");
+    expect(lives).toEqual([
+      { life: 1, previousLifeHealthy: null },
+      { life: 2, previousLifeHealthy: false }, // died inside healthyRunMs (10 s here)
+    ]);
+    expect(s.running).toBe(true);
+  });
+
+  test('a life that outlives healthyRunMs is reported healthy to the next resolver call', async () => {
+    const fake = fakeExec();
+    const lives: Array<{ life: number; previousLifeHealthy: boolean | null }> = [];
+    const s = session(fake, tempDir(), {
+      healthyRunMs: 0,
+      args: (ctx) => {
+        lives.push(ctx);
+        return [];
+      },
+    });
+    disposables.push(s);
+    await s.start();
+
+    fake.respond('list-panes', { exitCode: 0, stdout: '1\n', stderr: '' });
+    await new Promise((r) => setTimeout(r, 40));
+    fake.respond('list-panes', { exitCode: 0, stdout: '0\n', stderr: '' });
+    await new Promise((r) => setTimeout(r, 60));
+
+    expect(lives.at(-1)).toEqual({ life: 2, previousLifeHealthy: true });
+    const respawn = fake.calls.find((c) => c.includes('respawn-pane'))!;
+    expect(respawn[respawn.length - 1]).toBe("'claude'");
+  });
+
+  test('a vanished server falls back to a full new-session respawn', async () => {
+    const fake = fakeExec();
+    const s = session(fake, tempDir());
+    disposables.push(s);
+    await s.start();
+    fake.calls.length = 0;
+
+    fake.respond('list-panes', { exitCode: 1, stdout: '', stderr: 'no server running' });
+    await new Promise((r) => setTimeout(r, 40));
+    fake.respond('list-panes', OK);
+    await new Promise((r) => setTimeout(r, 60));
+
+    expect(fake.calls.filter((c) => c.includes('new-session')).length).toBe(1);
+    expect(s.running).toBe(true);
+  });
+
+  test('detachClients detaches every client with the notice in its place, then waits for them to go', async () => {
+    const fake = fakeExec();
+    const dir = tempDir();
+    const s = session(fake, dir);
+    disposables.push(s);
+    await s.start();
+    fake.calls.length = 0;
+    // Still listed on the first look (the client is restoring its terminal), gone on the second.
+    let looks = 0;
+    fake.respond('list-clients', () =>
+      looks++ === 0 ? { exitCode: 0, stdout: '/dev/pts/3: agent\n', stderr: '' } : OK,
+    );
+    await expect(s.detachClients("retired; it's over")).resolves.toBe(true);
+    const sock = path.join(dir, 'tmux.sock');
+    // The life watcher's own list-panes polls interleave; only the detach's calls matter here.
+    const calls = fake.calls.filter((c) => c[3] !== 'list-panes');
+    expect(calls[0]).toEqual([
+      'tmux',
+      '-S',
+      sock,
+      'detach-client',
+      '-s',
+      'agent',
+      '-E',
+      `printf '%s\\n' 'retired; it'\\''s over'`,
+    ]);
+    expect(calls.slice(1)).toEqual([
+      ['tmux', '-S', sock, 'list-clients', '-t', 'agent'],
+      ['tmux', '-S', sock, 'list-clients', '-t', 'agent'],
+    ]);
+  });
+
+  test('detachClients gives up after its timeout and falls back to a plain detach when -E is refused', async () => {
+    const fake = fakeExec();
+    const dir = tempDir();
+    const s = session(fake, dir);
+    disposables.push(s);
+    await s.start();
+    fake.calls.length = 0;
+    fake.respond('detach-client', {
+      exitCode: 1,
+      stdout: '',
+      stderr: 'usage: detach-client [-aP] [-s target-session] [-t target-client]',
+    });
+    fake.respond('list-clients', { exitCode: 0, stdout: '/dev/pts/3: agent\n', stderr: '' });
+    const started = Date.now();
+    await expect(s.detachClients('retired', 250)).resolves.toBe(false);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(200);
+    const detaches = fake.calls.filter((c) => c[3] === 'detach-client');
+    expect(detaches).toHaveLength(2);
+    expect(detaches[0]).toContain('-E');
+    expect(detaches[1]).toEqual(['tmux', '-S', path.join(dir, 'tmux.sock'), 'detach-client', '-s', 'agent']);
+    // Polling stops with the timeout.
+    const looks = () => fake.calls.filter((c) => c[3] === 'list-clients').length;
+    const polled = looks();
+    expect(polled).toBeGreaterThanOrEqual(2);
+    await new Promise((r) => setTimeout(r, 250));
+    expect(looks()).toBe(polled);
+  });
+
+  test('dispose kills the server and stops writes', async () => {
+    const fake = fakeExec();
+    const s = session(fake, tempDir());
+    await s.start();
+    s.dispose();
+    const kills = fake.calls.filter((c) => c.includes('kill-server'));
+    expect(kills).toHaveLength(1);
+    fake.calls.length = 0;
+    s.write('after');
+    await new Promise((r) => setTimeout(r, 20));
+    expect(fake.calls).toHaveLength(0);
+  });
+});
+
+const tmuxAvailable = Bun.which('tmux') !== null;
+
+describe.if(tmuxAvailable)('TmuxSession (real tmux)', () => {
+  test('bytes reach the pane process verbatim and a killed child respawns', async () => {
+    const dir = tempDir();
+    const rx = path.join(dir, 'rx');
+    const pidFile = path.join(dir, 'pid');
+    // stty raw -echo: the pane tty must not cook our bytes — the paste
+    // wrapper and CR are the payload under test. The pid file is written
+    // AFTER stty so its existence proves raw mode is up: bytes written
+    // before that land in a cooked tty and the test would race itself.
+    const s = new TmuxSession({
+      command: 'sh',
+      args: ['-c', `stty raw -echo; echo $$ > ${pidFile}; exec cat > ${rx}`],
+      cwd: dir,
+      env: { ...process.env } as Record<string, string>,
+      socketPath: path.join(dir, 'tmux.sock'),
+      confPath: path.join(dir, 'tmux.conf'),
+      restartDelayMs: 50,
+      pollMs: 50,
+    });
+    disposables.push(s);
+    await s.start();
+    const readyDeadline = Date.now() + 5_000;
+    while (!fs.existsSync(pidFile) && Date.now() < readyDeadline) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    expect(fs.existsSync(pidFile)).toBe(true);
+
+    const paste = `\x1b[200~hello over tmux\x1b[201~\r`;
+    s.write(paste);
+    const deadline = Date.now() + 5_000;
+    let got = '';
+    while (Date.now() < deadline) {
+      try {
+        got = fs.readFileSync(rx, 'utf8');
+        if (got.length >= paste.length) break;
+      } catch {
+        // pane still booting
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    expect(got).toBe(paste);
+
+    // Kill the child; remain-on-exit holds the pane and the watcher respawns.
+    const firstPid = fs.readFileSync(pidFile, 'utf8').trim();
+    const firstSpawnAt = s.lastSpawnAt;
+    process.kill(Number(firstPid), 'SIGKILL');
+    const respawnDeadline = Date.now() + 8_000;
+    while (Date.now() < respawnDeadline) {
+      const pid = fs.existsSync(pidFile) ? fs.readFileSync(pidFile, 'utf8').trim() : firstPid;
+      if (pid !== firstPid && s.lastSpawnAt > firstSpawnAt && s.running) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    expect(s.lastSpawnAt).toBeGreaterThan(firstSpawnAt);
+    expect(s.running).toBe(true);
+  }, 20_000);
+
+  test('detachClients puts an attached client back on its own terminal with the notice', async () => {
+    const dir = tempDir();
+    const sock = path.join(dir, 'tmux.sock');
+    const s = new TmuxSession({
+      command: 'sleep',
+      args: ['60'],
+      cwd: dir,
+      env: { ...process.env } as Record<string, string>,
+      socketPath: sock,
+      confPath: path.join(dir, 'tmux.conf'),
+      restartDelayMs: 50,
+      pollMs: 50,
+    });
+    disposables.push(s);
+    await s.start();
+    // A second tmux server stands in for the operator's terminal: its pane is
+    // the pty the client attaches from, and what the client leaves behind
+    // after detaching is what the operator would read.
+    const outer = path.join(dir, 'outer.sock');
+    const exitFile = path.join(dir, 'client-exit');
+    const run = async (argv: string[]): Promise<string> => {
+      const proc = Bun.spawn(['tmux', '-S', outer, ...argv], { stdout: 'pipe', stderr: 'pipe', stdin: 'ignore' });
+      const [out] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+      return out;
+    };
+    const client =
+      `unset TMUX; tmux -S ${shQuote(sock)} attach-session -t agent; ` +
+      `echo "exit=$?" > ${shQuote(exitFile)}; sleep 30`;
+    await run(['new-session', '-d', '-s', 'outer', '-x', '80', '-y', '24', client]);
+    try {
+      const attached = Date.now() + 5_000;
+      let listed = '';
+      while (!listed.trim() && Date.now() < attached) {
+        const proc = Bun.spawn(['tmux', '-S', sock, 'list-clients'], {
+          stdout: 'pipe',
+          stderr: 'pipe',
+          stdin: 'ignore',
+        });
+        [listed] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+        if (!listed.trim()) await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(listed.trim()).not.toBe('');
+
+      const notice = '[nanoclaw] session retired after 4h idle; reconnect to wake it';
+      expect(await s.detachClients(notice)).toBe(true);
+
+      const exited = Date.now() + 5_000;
+      while (!fs.existsSync(exitFile) && Date.now() < exited) await new Promise((r) => setTimeout(r, 50));
+      expect(fs.readFileSync(exitFile, 'utf8').trim()).toBe('exit=0');
+      const screen = await run(['capture-pane', '-p', '-t', 'outer']);
+      expect(screen).toContain(notice);
+    } finally {
+      await run(['kill-server']);
+    }
+  }, 20_000);
+});

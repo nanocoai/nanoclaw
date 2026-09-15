@@ -19,6 +19,7 @@ import { readTasks, type TemplateTask } from './tasks.js';
 export const NANOCLAW_EXTENSION_NS = 'ai.nanoco.nanoclaw';
 
 export interface NanoclawExtension {
+  codeMode?: boolean;
   /** Display name for the stamped agent group; folder-leaf fallback applies when absent. */
   agentName?: string;
   /** Persona from <ns>/context/instructions.md — optional by decision; registries may require it by policy. */
@@ -40,11 +41,18 @@ export function readNanoclawExtension(
   const report: string[] = [];
 
   let agentName: string | undefined;
+  let codeMode: boolean | undefined;
   const ours = manifestExtensions[NANOCLAW_EXTENSION_NS];
   if (ours !== undefined) {
     if (!isPlainObject(ours)) {
       report.push(`plugin.json: extensions["${NANOCLAW_EXTENSION_NS}"] is not an object; ignored`);
     } else {
+      if (ours.codeMode !== undefined) {
+        if (typeof ours.codeMode !== 'boolean') {
+          throw new Error('plugin.json: codeMode must be a boolean');
+        }
+        codeMode = ours.codeMode;
+      }
       const value = ours.agentName;
       if (value !== undefined) {
         if (typeof value === 'string' && value.trim()) agentName = value.trim();
@@ -54,7 +62,7 @@ export function readNanoclawExtension(
           );
       }
       for (const key of Object.keys(ours)) {
-        if (key !== 'agentName') {
+        if (key !== 'agentName' && key !== 'codeMode') {
           report.push(`plugin.json: extensions["${NANOCLAW_EXTENSION_NS}"].${key} is not recognized; ignored`);
         }
       }
@@ -74,6 +82,7 @@ export function readNanoclawExtension(
 
   return {
     ...(agentName === undefined ? {} : { agentName }),
+    ...(codeMode === undefined ? {} : { codeMode }),
     ...(instructions === undefined ? {} : { instructions }),
     contextExtras: readContextExtras(contextDir),
     tasks: readTasks(path.join(extDir, 'tasks'), `${NANOCLAW_EXTENSION_NS}/tasks`),

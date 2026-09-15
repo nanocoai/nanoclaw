@@ -58,8 +58,14 @@ export function sqliteGetPendingMessages(isFirstPoll: boolean, limit: number): M
 
 function mark(ids: string[], status: string): void {
   if (ids.length === 0) return;
+  // A processing CLAIM only ever fills an empty slot: a row already carrying
+  // an ack (completed, failed, skipped) is terminal and must not be
+  // downgraded by a claim that raced it — the reader that acked has already
+  // consumed the message. Every other status is a write of the final word.
   const statement = getOutboundDb().prepare(
-    'INSERT OR REPLACE INTO processing_ack (message_id, status, status_changed) VALUES (?, ?, ?)',
+    status === 'processing'
+      ? 'INSERT OR IGNORE INTO processing_ack (message_id, status, status_changed) VALUES (?, ?, ?)'
+      : 'INSERT OR REPLACE INTO processing_ack (message_id, status, status_changed) VALUES (?, ?, ?)',
   );
   getOutboundDb().transaction(() => {
     for (const id of ids) statement.run(id, status, new Date().toISOString());

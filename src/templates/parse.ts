@@ -24,6 +24,7 @@ export type { TemplateTask } from './tasks.js';
 
 /** A parsed plugin directory. */
 export interface Template {
+  codeMode?: boolean;
   /** The manifest's machine name — also the folder the plugin is stamped under. */
   name: string;
   /** Display name from extensions["ai.nanoco.nanoclaw"].agentName, when given. */
@@ -76,6 +77,7 @@ export function parseTemplate(dir: string): Template {
   return {
     name: manifest.name,
     ...(extension.agentName === undefined ? {} : { agentName: extension.agentName }),
+    ...(extension.codeMode === undefined ? {} : { codeMode: extension.codeMode }),
     mcpServers: servers,
     ...(extension.instructions === undefined ? {} : { instructions: extension.instructions }),
     contextExtras: extension.contextExtras,

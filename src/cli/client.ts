@@ -15,8 +15,10 @@
  *   ncl help
  *   ncl groups help
  */
+import { spawnSync } from 'child_process';
 import { randomUUID } from 'crypto';
 
+import { attachWarnings, resolveAttachExec } from './attach-exec.js';
 import { formatResponse } from './format.js';
 import type { RequestFrame } from './frame.js';
 import { parseArgv } from './parse-argv.js';
@@ -66,6 +68,22 @@ async function main(): Promise<void> {
   } catch (e) {
     process.stderr.write(formatTransportError(e));
     process.exit(2);
+  }
+
+  // Attach responses hand the terminal over instead of printing: the server
+  // decided which container and which entry (policy); this client owns the
+  // TTY, so the interactive exec has to happen here (`ncl groups attach`).
+  const attach = resolveAttachExec(res, json, process.stdin.isTTY === true);
+  if (attach) {
+    // Anything the verb wants said before the terminal is handed over (a
+    // sandbox name the account refused, say) rides as `warnings`; once the
+    // exec starts, nothing printed here would be seen.
+    for (const warning of attachWarnings(res)) process.stderr.write(`warning: ${warning}\n`);
+    const result = spawnSync(attach.bin, attach.args, { stdio: 'inherit' });
+    // A client that could not even start (runtime binary missing, not
+    // executable) has no exit status; say what went wrong instead of a bare 1.
+    if (result.error) process.stderr.write(`ncl: attach failed to start ${attach.bin}: ${result.error.message}\n`);
+    process.exit(result.status ?? 1);
   }
 
   const output =

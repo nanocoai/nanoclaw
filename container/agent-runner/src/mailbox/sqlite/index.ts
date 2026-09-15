@@ -27,6 +27,7 @@ import {
   sqliteTimestamp,
   sqliteWriteMessageOut,
 } from './operations.js';
+import { releaseProcessingClaims as sqliteReleaseProcessingClaims } from './release.js';
 import type { MessageInRow } from '../../db/messages-in.js';
 import type { MessageOutRow } from '../../db/messages-out.js';
 import {
@@ -224,4 +225,5 @@ export class SqliteAgentMailbox implements AgentMailbox {
 
   clearContainerToolInFlight = sqliteClearContainerToolInFlight;
   clearStaleProcessingAcks = sqliteClearStaleProcessingAcks;
+  releaseProcessingClaims = sqliteReleaseProcessingClaims;
 }

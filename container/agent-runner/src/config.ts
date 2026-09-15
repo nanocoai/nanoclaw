@@ -9,7 +9,9 @@ import fs from 'fs';
 
 import type { McpServerConfig, ProviderSpeed } from './providers/types.js';
 
-const CONFIG_PATH = '/workspace/agent/container.json';
+// The path is fixed in production; the env override is a test seam for the
+// code runner's hook scripts, which run as claude subprocesses.
+const CONFIG_PATH = process.env.NANOCLAW_CONTAINER_JSON || '/workspace/agent/container.json';
 
 export interface RunnerConfig {
   provider: string;
@@ -20,6 +22,8 @@ export interface RunnerConfig {
   mcpServers: Record<string, McpServerConfig>;
   model?: string;
   effort?: string;
+  /** The group runs the code runner instead of the chat runner (host-selected at spawn). */
+  codeMode?: boolean;
   speed?: ProviderSpeed;
 }
 
@@ -57,6 +61,7 @@ export function runnerConfigFromRaw(raw: Record<string, unknown>): RunnerConfig 
     mcpServers: (raw.mcpServers as RunnerConfig['mcpServers']) || {},
     model: (raw.model as string) || undefined,
     effort: (raw.effort as string) || undefined,
+    codeMode: raw.codeMode === true || undefined,
     speed: readSpeed(raw),
   };
 }

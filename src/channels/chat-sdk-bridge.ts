@@ -1003,6 +1003,16 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     };
   }
 
+  // The platform id of a conversation the host names first (a channel opened
+  // on its behalf): built by the SAME encoder onInbound stores through —
+  // adapter.channelIdFromThreadId over a channel-level thread id in the SDK's
+  // `<adapter>:<conversation>` form — so the messaging_groups row the host
+  // writes is exactly the one inbound resolves. The adapter's own decoder
+  // validates the spelling; a conversation id it rejects throws here rather
+  // than yielding a row nothing will ever match.
+  bridge.conversationPlatformId = (conversationId: string): string =>
+    adapter.channelIdFromThreadId(`${adapter.name}:${conversationId}`);
+
   return bridge;
 }
 
