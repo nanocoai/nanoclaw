@@ -1,6 +1,41 @@
+vi.mock('../setup/gateways/credential-store.js', async () => {
+  const { createProviderCredentialConnection } =
+    await import('../.claude/skills/add-onecli/scripts/provider-credentials.js');
+  const { ironModelEndpoint } = await import('../.claude/skills/add-iron-proxy/scripts/provider-credentials.js');
+  return {
+    getCredentialStore: async () =>
+      fixture.gateway === 'iron-proxy'
+        ? {
+            modelEndpoint: (url: string) => {
+              ironModelEndpoint(url, process.cwd());
+              return {
+                configure: async () => {
+                  fixture.gatewayEndpoints.push(url);
+                },
+              };
+            },
+          }
+        : {},
+    getCredentialConnection: async (target: any) =>
+      fixture.gateway === 'iron-proxy'
+        ? {
+            find: async () => null,
+            keep: async () => {},
+            save: async (key: string) => {
+              if (fixture.failVault) throw new Error('Iron unavailable');
+              fixture.ironKeys.push(key);
+              return 'iron-fixture-id';
+            },
+          }
+        : createProviderCredentialConnection(target),
+  };
+});
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const fixture = vi.hoisted(() => ({
+  gateway: 'onecli',
+  gatewayEndpoints: [] as string[],
+  ironKeys: [] as string[],
   writes: [] as Array<[string, string | null]>,
   requests: [] as RequestInit[],
   vaultUrls: [] as string[],
@@ -75,6 +110,9 @@ import { runOpenCodeAuthStep, runOpenCodeSetupAuth } from './opencode-auth.js';
 
 beforeEach(() => {
   Object.assign(fixture, {
+    gateway: 'onecli',
+    gatewayEndpoints: [],
+    ironKeys: [],
     writes: [],
     requests: [],
     vaultUrls: [],
@@ -334,5 +372,46 @@ describe('backend authentication changes', () => {
     await expect(runOpenCodeAuthStep()).rejects.toThrow(outcome === 'decline' ? 'host change cancelled' : 'cancelled');
     expect(fixture.requests.map((request) => request.method)).toEqual(['GET']);
     expect(fixture.writes).toEqual([]);
+  });
+});
+
+describe('OpenCode setup with Iron selected', () => {
+  beforeEach(() => {
+    fixture.gateway = 'iron-proxy';
+    vi.stubEnv('ONECLI_URL', undefined);
+    vi.stubEnv('ONECLI_API_KEY', undefined);
+  });
+  it('connects a native backend without reading OneCLI or changing gateway selection', async () => {
+    await runOpenCodeSetupAuth();
+    expect(fixture.ironKeys).toEqual(['fixture-key']);
+    expect(fixture.vaultUrls).toEqual([]);
+    expect(fixture.gatewayEndpoints).toEqual(['https://openrouter.ai']);
+    expect(fixture.writes).toContainEqual(['OPENCODE_PROVIDER', 'openrouter']);
+    expect(fixture.writes.every(([key]) => key.startsWith('OPENCODE_'))).toBe(true);
+  });
+  it('configures a keyless HTTPS model route without creating a credential', async () => {
+    fixture.backend = 'local';
+    fixture.keyless = true;
+    await runOpenCodeSetupAuth();
+    expect(fixture.ironKeys).toEqual([]);
+    expect(fixture.passwords).toBe(0);
+    expect(fixture.gatewayEndpoints).toEqual(['https://models.example/v1']);
+    expect(fixture.vaultUrls).toEqual([]);
+  });
+  it('rejects a plaintext local endpoint before requesting keys or discovering models', async () => {
+    fixture.backend = 'local';
+    fixture.baseUrl = 'http://models.example:8000/v1';
+    await expect(runOpenCodeSetupAuth()).rejects.toThrow('HTTPS model endpoint');
+    expect(fixture.passwords).toBe(0);
+    expect(fixture.catalogs).toBe(0);
+    expect(fixture.modelRequests).toEqual([]);
+    expect(fixture.writes).toEqual([]);
+  });
+  it('does not fall back to OneCLI or save defaults after an Iron failure', async () => {
+    fixture.failVault = true;
+    await expect(runOpenCodeSetupAuth()).rejects.toThrow('Iron unavailable');
+    expect(fixture.vaultUrls).toEqual([]);
+    expect(fixture.writes).toEqual([]);
+    expect(fixture.gatewayEndpoints).toEqual([]);
   });
 });

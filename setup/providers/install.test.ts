@@ -33,7 +33,7 @@ import { execSync } from 'node:child_process';
 
 const roots: string[] = [];
 const skill = path.join('.claude', 'skills', 'add-opencode');
-function root(seam = 1) {
+function root(seam = 1, credentialSeam = 1) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'opencode-setup-install-'));
   roots.push(root);
   fs.cpSync(path.join(process.cwd(), skill), path.join(root, skill), { recursive: true });
@@ -50,6 +50,11 @@ function root(seam = 1) {
   fs.writeFileSync(
     path.join(root, 'src/provider-contracts/registry.ts'),
     `export const PROVIDER_HOST_CONTRACT_SEAM_VERSION = ${seam};\n`,
+  );
+  fs.mkdirSync(path.join(root, 'setup/gateways'), { recursive: true });
+  fs.writeFileSync(
+    path.join(root, 'setup/gateways/credential-store.ts'),
+    `export const PROVIDER_CREDENTIAL_CONNECTION_SEAM_VERSION = ${credentialSeam};\n`,
   );
   fs.writeFileSync(path.join(root, 'container/cli-tools.json'), '[]\n');
   fs.writeFileSync(path.join(root, 'container/agent-runner/package.json'), '{"dependencies":{}}\n');
@@ -77,6 +82,14 @@ afterEach(() => {
 });
 
 describe('OpenCode setup installation and refresh', () => {
+  it('refuses a core without credential connections before changing its payload or dependencies', async () => {
+    const directory = root(1, 0);
+    const before = tree(directory);
+    const result = await applyProviderSkill(skill, directory);
+    expect(result.blockers.length).toBeGreaterThan(0);
+    expect(tree(directory)).toEqual(before);
+    expect(fixture.commands).toHaveLength(1);
+  });
   it('does not count its compatibility predicate as a payload change on an installed provider', async () => {
     const directory = root();
     await applyProviderSkill(skill, directory);

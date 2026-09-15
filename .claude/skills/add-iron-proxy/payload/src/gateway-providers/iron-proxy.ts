@@ -43,6 +43,7 @@ const SETTINGS = [
 ] as const;
 
 const PLACEHOLDER = 'gateway-managed';
+const CODEX_PLACEHOLDER = 'nc-codex-token-v1';
 const PROXY_HOST = 'iron-proxy';
 const CA_CERT_PATH = '/etc/iron-proxy/ca.crt';
 const CA_KEY_PATH = '/etc/iron-proxy/ca.key';
@@ -184,7 +185,11 @@ export function ironProxyConfig(settings: IronProxySettings): string {
                 secrets: [
                   {
                     source: { type: 'file', path: SECRET_PATH, ttl: '1s', failure_ttl: '1s' },
-                    replace: { proxy_value: PLACEHOLDER, match_headers: ['Authorization', 'x-api-key'], require: true },
+                    replace: {
+                      proxy_value: PLACEHOLDER,
+                      match_headers: ['Authorization', 'X-Api-Key'],
+                      require: false,
+                    },
                     rules: [{ host: settings.modelHost, methods: METHODS }],
                   },
                 ],
@@ -274,16 +279,16 @@ export function signedWorkloadToken(identity: string, key: Buffer): string {
 
 /** Synthetic login data only; real tokens and account headers stay inside Iron. */
 export function codexPlaceholder(mode: 'api' | 'chatgpt'): string {
-  if (mode === 'api') return JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: PLACEHOLDER });
+  if (mode === 'api') return JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: CODEX_PLACEHOLDER });
   const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
   const token = `${encode({ alg: 'none' })}.${encode({
-    sub: PLACEHOLDER,
-    'https://api.openai.com/auth': { chatgpt_account_id: PLACEHOLDER, chatgpt_plan_type: 'plus' },
+    sub: CODEX_PLACEHOLDER,
+    'https://api.openai.com/auth': { chatgpt_account_id: CODEX_PLACEHOLDER, chatgpt_plan_type: 'plus' },
   })}.cGxhY2Vob2xkZXI`;
   return JSON.stringify({
     auth_mode: 'chatgpt',
     OPENAI_API_KEY: null,
-    tokens: { id_token: token, access_token: PLACEHOLDER, refresh_token: '', account_id: PLACEHOLDER },
+    tokens: { id_token: token, access_token: CODEX_PLACEHOLDER, refresh_token: '', account_id: CODEX_PLACEHOLDER },
     last_refresh: new Date().toISOString(),
   });
 }

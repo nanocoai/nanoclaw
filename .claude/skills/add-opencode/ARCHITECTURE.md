@@ -72,19 +72,37 @@ a question already posted to chat remains visible.
 
 ## Credentials and installation
 
-Authentication uses this NanoClaw installation's OneCLI management URL, API key,
-and optional project ID. Secret metadata is checked before prompting for a key.
-Rotation updates the same secret ID to preserve grants. Moving an API key to a
-different exact host requires explicit confirmation; the existing value may be
-kept or replaced. The original metadata is rechecked before writing. Ambiguous names, wildcard hosts, inherited
-secrets, and incompatible credential types stop the flow. Supported API-key providers declare their
-actual header scheme, including Google's `x-goog-api-key`. Unknown schemes require
-an explicit adapter rather than guessing a bearer header. Local keyless endpoints
-need no vault access. Provider defaults are saved only after authentication succeeds.
-Exported setting conflicts are checked before credential prompts or keyed model
-discovery. If a custom endpoint's model is exported, setup offers current/manual
-model selection before credential work. Metadata failures identify mismatched
-field names without exposing their values.
+OpenCode owns login, model selection, endpoint names, and API header schemes.
+Core's credential-store lookup resolves the selected gateway; gateway skills own
+native storage, grants, refresh, and endpoint constraints. The provider contains
+no OneCLI management client and does not fall back to OneCLI when Iron fails.
+This extends the existing credential-store seam instead of teaching core about
+OpenCode's backends or implementing a second token-refresh loop in the runtime.
+
+Metadata is checked before prompting for a key and rechecked before writing.
+Rotation preserves the credential ID and existing grants. Moving a key to another
+exact host requires explicit confirmation. OneCLI can keep its stored value;
+Iron requires re-entry because its update API replaces the source alongside the
+rules. Ambiguous or incompatible entries fail without exposing their values.
+
+Iron uses install-scoped native foreign IDs. ChatGPT creates a broker with
+OpenCode's pinned public OAuth client, a broker-backed bearer secret, and a
+separate account-header secret. Reauthentication preserves all three IDs.
+Missing grants are reconciled without extracting values. Broker refresh activity
+may continue during login; changes to its client binding or secret rules stop
+setup. Partial saves can be retried using those same owned IDs. The native login
+file is removed before network waits and on failure; agents receive only fixed
+placeholders. Existing OneCLI credential names and formats remain compatible.
+
+Gateway endpoint validation happens before key prompts or catalog requests.
+Iron requires HTTPS on port 443 and DNS names; this includes keyless endpoints.
+The gateway permits the model destination only after prompts complete. Native
+model domains and an operator-configured HTTPS model host are declared by the
+OpenCode host contract on startup; explicit gateway policy holds remain in force.
+Restart the host after changing backend settings. Defaults are saved only after
+credentials and routing succeed. Exported setting conflicts are checked before
+credential prompts or keyed discovery. Keeping a key never extracts it to list
+models; the operator can enter a model ID manually.
 
 Fresh setup applies the skill, verifies contracts, builds the local image, and
 then authenticates through a lazily loaded setup adapter. Normal re-authentication

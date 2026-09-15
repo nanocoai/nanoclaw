@@ -72,11 +72,11 @@ const input: GatewaySessionInput = {
 describe('Iron Proxy provider', () => {
   it('creates only synthetic Codex login data for either auth mode', () => {
     const api = JSON.parse(codexPlaceholder('api'));
-    expect(api.OPENAI_API_KEY).toBe('gateway-managed');
+    expect(api.OPENAI_API_KEY).toBe('nc-codex-token-v1');
     const chatgpt = JSON.parse(codexPlaceholder('chatgpt'));
-    expect(chatgpt.tokens.access_token).toBe('gateway-managed');
+    expect(chatgpt.tokens.access_token).toBe('nc-codex-token-v1');
     expect(chatgpt.tokens.refresh_token).toBe('');
-    expect(chatgpt.tokens.account_id).toBe('gateway-managed');
+    expect(chatgpt.tokens.account_id).toBe('nc-codex-token-v1');
     expect(chatgpt.tokens.id_token.split('.')).toHaveLength(3);
   });
 

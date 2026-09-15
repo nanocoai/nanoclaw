@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
+import { assertCredentialIsolation } from './credential-isolation.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { installCommand } from './install-command.js';
@@ -223,11 +224,18 @@ export async function grantSecret(kind: string, id: string, root = process.cwd()
 }
 
 export async function storeModelCredential(value: string, host: string, root: string, authEnv?: string): Promise<void> {
+  await assertCredentialIsolation(root, {
+    host,
+    headers: ['Authorization', 'x-api-key'],
+    proxyValue: 'gateway-managed',
+    ownedForeignIds: ['nanoclaw-model'],
+  });
   const credential = await controlRequest(root, 'static_secrets/nanoclaw-model', 'PUT', {
     namespace: getInstallSlug(root),
     name: authEnv ? `NanoClaw model (${authEnv})` : 'NanoClaw model',
     source: { source_type: 'control_plane', secret: value, config: {} },
-    replace_config: { proxy_value: 'gateway-managed', match_headers: ['Authorization', 'x-api-key'], require: true },
+    inject_config: {},
+    replace_config: { proxy_value: 'gateway-managed', match_headers: ['Authorization', 'X-Api-Key'], require: false },
     // CONNECT establishes the tunnel before the SDK sends its auth header.
     // Require replacement only on the inner HTTP requests.
     rules: [{ host, http_methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'] }],
