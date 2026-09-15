@@ -6,11 +6,15 @@ import { fullyApplied } from '../../scripts/skill-apply.js';
 import { runSkill } from '../lib/skill-driver.js';
 import { upsertEnvVar } from '../set-env.js';
 import { loadGatewayCatalog, type GatewayCatalogEntry } from './catalog.js';
-import { detectInstalledGateway, isGatewayInstalled } from './selection.js';
+import { configuredGatewayKind, detectInstalledGateway, isGatewayInstalled } from './selection.js';
 
 function selectedEntry(kind: string | undefined, projectRoot: string): GatewayCatalogEntry {
   const catalog = loadGatewayCatalog(projectRoot);
-  const selected = kind?.trim().toLowerCase() || detectInstalledGateway(projectRoot) || catalog.default;
+  const selected =
+    kind?.trim().toLowerCase() ||
+    configuredGatewayKind(projectRoot) ||
+    detectInstalledGateway(projectRoot) ||
+    catalog.default;
   const entry = catalog.gateways.find((candidate) => candidate.kind === selected);
   if (!entry) throw new Error(`Unknown gateway provider: ${selected}`);
   return entry;

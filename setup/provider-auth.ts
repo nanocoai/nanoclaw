@@ -18,7 +18,7 @@ import { buildContainerImage } from './lib/container-build.js';
 import * as p from '@clack/prompts';
 import { HARDENED_IMAGE_ENV_KEY, readImageSource, writeImageSource } from './lib/registry-state.js';
 import { getSetupProvider, listSetupProviders } from './providers/registry.js';
-import { applyProviderSkill } from './providers/install.js';
+import { applyProviderSkill, loadHostContractModules } from './providers/install.js';
 import { getInstallableProviderDescriptor, providerImagePolicy } from './providers/skill-descriptor.js';
 // Provider payloads self-register on import.
 import './providers/index.js';
@@ -58,7 +58,7 @@ export async function run(args: string[]): Promise<void> {
     // requested. That keeps reauthentication usable without registry/build
     // access and preserves the operator's installed payload and pins.
     console.log(`${refresh ? 'Refreshing' : 'Installing'} ${name}…`);
-    const { changed, blockers } = await applyProviderSkill(skillDir, process.cwd(), {
+    const { changed, blockers, hostContractModules } = await applyProviderSkill(skillDir, process.cwd(), {
       mode: refresh ? 'refresh' : 'install',
     });
     if (blockers.length) {
@@ -77,6 +77,11 @@ export async function run(args: string[]): Promise<void> {
         process.exit(1);
       }
     }
+    // This process imported src/provider-contracts/index.ts at startup, and
+    // ESM caches the barrel, so a line appended to it now never evaluates
+    // here; load the contract module directly before the auth step asks the
+    // gateway store for model endpoints.
+    await loadHostContractModules(hostContractModules);
     if (!entry) {
       // Resolve after installation; a bundler's static glob cannot include a
       // provider module that was absent when this setup module first loaded.

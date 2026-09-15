@@ -48,7 +48,7 @@ import { runInheritScript } from './lib/inherit-script.js';
 import { offerPortalReminder, portalEnabled, runImagePortal } from './portal.js';
 import { pingCliAgent, PING_AGENT_FOLDER, type PingResult } from './lib/agent-ping.js';
 import { getSetupProvider, listSetupProviders } from './providers/registry.js';
-import { applyProviderSkill } from './providers/install.js';
+import { applyProviderSkill, loadHostContractModules } from './providers/install.js';
 import {
   getInstallableProviderDescriptor,
   listInstallableProviderDescriptors,
@@ -401,8 +401,9 @@ async function main(): Promise<void> {
       const s = p.spinner();
       s.start(`Installing ${agentProvider}…`);
       let blockers: string[];
+      let hostContractModules: string[];
       try {
-        ({ blockers } = await applyProviderSkill(skillDir, process.cwd()));
+        ({ blockers, hostContractModules } = await applyProviderSkill(skillDir, process.cwd()));
       } catch (err) {
         s.stop(`Couldn't install ${agentProvider}.`, 1);
         const message = err instanceof Error ? err.message : String(err);
@@ -426,6 +427,11 @@ async function main(): Promise<void> {
           rebuild.hint,
         );
       }
+      // This process imported src/provider-contracts/index.ts at startup, and
+      // ESM caches the barrel, so a line appended to it now never evaluates
+      // here; load the contract module directly before the auth step asks the
+      // gateway store for model endpoints.
+      await loadHostContractModules(hostContractModules);
       await import(`./providers/${agentProvider}.js`);
       providerEntry = getSetupProvider(agentProvider);
     }

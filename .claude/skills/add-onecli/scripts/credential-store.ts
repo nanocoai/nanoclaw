@@ -1,3 +1,4 @@
+import { createProviderCredentialConnection } from './provider-credentials.js';
 import { getProviderModelEndpoint } from '../../../../src/provider-contracts/index.js';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -6,11 +7,12 @@ import path from 'node:path';
 
 import type { ProviderCredentialStore } from '../../../../setup/gateways/credential-store.js';
 
-export function createCredentialStore(): ProviderCredentialStore {
+export function createCredentialStore(root = process.cwd()): ProviderCredentialStore {
   const check = (provider: string) => {
     if (provider !== 'codex') throw new Error(`OneCLI credential adapter does not support ${provider}`);
   };
   return {
+    connection: (target) => createProviderCredentialConnection(target, root),
     async has(provider) {
       check(provider);
       try {
