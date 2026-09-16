@@ -30,6 +30,13 @@ case "$(uname -s)" in
     brew install --cask docker
     ;;
   Linux)
+    # Non-interactive apt: setup pipes this script's output to a log, so an
+    # interactive prompt is invisible and hangs the whole run. get.docker.com
+    # drives apt underneath, and needrestart's post-install whiptail dialog
+    # blocks on stdin even when nobody can see it (#2514) —
+    # NEEDRESTART_SUSPEND defers it; DEBIAN_FRONTEND silences the rest.
+    export DEBIAN_FRONTEND=noninteractive
+    export NEEDRESTART_SUSPEND=1
     echo "STEP: docker-get-script"
     # /bin/sh by absolute path: a foreign `sh` first on PATH must not run the installer.
     curl -fsSL https://get.docker.com | /bin/sh
