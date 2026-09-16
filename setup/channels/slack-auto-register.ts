@@ -14,12 +14,14 @@
  * alone is the base experience (one bot, DM/channel chat); the agents
  * feature — child bots provisioned from `create_agent`, shared a2a rooms,
  * canvases, DM onboarding — ships in the `slack-a2a-rooms` and
- * `slack-agent-flow` skills on the channels branch. Declaring them HERE, at
- * wizard boot, is load-bearing: the wizard imports the companion registry
- * once, so a registration appended to the registry file mid-run is invisible
- * to the process that would apply it. The channel flow materializes the
- * skill directories from the channels branch when this checkout doesn't
- * carry them.
+ * `slack-agent-flow` skills, in-tree under `.claude/skills/` (their canonical
+ * home; the channels branch keeps a compatibility copy for older checkouts).
+ * Declaring them HERE, at wizard boot, is load-bearing: the wizard imports
+ * the companion registry once, so a registration appended to the registry
+ * file mid-run is invisible to the process that would apply it. The channel
+ * flow applies each declared companion straight from the checkout — a
+ * missing directory is warned about and skipped, never fetched from
+ * elsewhere.
  *
  * The register functions are injected by the caller (companions.ts passes
  * `registerChannelPreStep` / `registerCompanionSkills`) so this module has
@@ -37,9 +39,11 @@ export function registerSlackAutoProvision(
   register: (channel: string, step: ChannelPreStep) => void,
   registerCompanions: (channel: string, skills: readonly string[]) => void,
 ): void {
-  register('slack', async (agentName) => {
+  register('slack', async (agentName, options) => {
     const { maybeAutoProvisionSlack } = await import('./slack-auto.js');
-    return maybeAutoProvisionSlack(agentName);
+    return options?.browserConsent
+      ? maybeAutoProvisionSlack(agentName, { browserConsent: true })
+      : maybeAutoProvisionSlack(agentName);
   });
   registerCompanions('slack', SLACK_AGENTS_COMPANION_SKILLS);
 }

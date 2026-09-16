@@ -25,6 +25,7 @@
 import type {
   SessionDriver,
   SessionEvent,
+  SessionExecSpec,
   SessionFailure,
   SessionHandle,
   SessionKey,
@@ -213,6 +214,9 @@ class HubHandle implements SupervisedHandle {
   }
   status(): Promise<SessionStatus> {
     return this.inner.status();
+  }
+  execSpec(command: string[]): SessionExecSpec {
+    return this.inner.execSpec(command);
   }
   stop(reason: string): Promise<void> {
     this.hub.markStopIntent(this.inner.key);

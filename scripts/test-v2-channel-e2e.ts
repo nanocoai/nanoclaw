@@ -162,7 +162,7 @@ await routeInbound({
     id: 'msg-chan-1',
     kind: 'chat',
     content: JSON.stringify({
-      sender: 'Gavriel',
+      sender: 'Alex',
       text: 'Call the send_message tool 3 times: text="Update 1", text="Update 2", text="Update 3". Make each call separately. After all 3, say "Done".',
     }),
     timestamp: new Date().toISOString(),

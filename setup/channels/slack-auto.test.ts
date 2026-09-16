@@ -6,6 +6,8 @@ import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const state = vi.hoisted(() => ({
+  portalEnabled: vi.fn(() => false),
+  runSlackPortal: vi.fn(),
   account: undefined as { api?: string; token: string } | undefined,
   installToken: undefined as string | undefined,
   selectLabels: [] as string[],
@@ -33,6 +35,8 @@ const state = vi.hoisted(() => ({
     installUrl: '',
   })),
 }));
+
+vi.mock('../portal.js', () => ({ portalEnabled: state.portalEnabled, runSlackPortal: state.runSlackPortal }));
 
 vi.mock('@clack/prompts', () => ({
   note: vi.fn((message: string, title: string) => state.notes.push({ message, title })),
@@ -72,6 +76,7 @@ vi.mock('../lib/registry-state.js', () => ({
 vi.mock('../lib/runner.js', () => ({ ensureAnswer: <T>(answer: T): T => answer }));
 vi.mock('../lib/theme.js', () => ({ wrapForGutter: (message: string): string => message }));
 
+import { brightSelect } from '../lib/bright-select.js';
 import {
   PROVISIONING_MODULE,
   loadProvisioningCore,
@@ -185,8 +190,8 @@ describe('provisioning-core bootstrap', () => {
     expect(exec.mock.calls.map(([c]) => c)).toEqual([
       'git remote',
       'git ls-remote --heads origin channels',
-      'git fetch origin channels',
-      `git show origin/channels:${PROVISIONING_MODULE} > ${PROVISIONING_MODULE}`,
+      "git fetch 'origin' '+refs/heads/channels:refs/remotes/origin/channels'",
+      expect.stringContaining(`git show 'refs/remotes/origin/channels:${PROVISIONING_MODULE}'`),
     ]);
     // the parent directory exists before the git show redirect runs
     expect(fs.existsSync(path.join(root, 'src/provisioning'))).toBe(true);
@@ -240,6 +245,29 @@ describe('provisioning-core bootstrap', () => {
     const result = spawnSync(tsxBin, [probePath], { encoding: 'utf-8' });
     expect(result.status).toBe(0);
     expect(result.stdout).toBe('loaded-ts');
+  });
+});
+
+describe('setup rerun credential reuse', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.infos.length = 0;
+  });
+
+  it('reuses a saved bot token without loading or offering automatic provisioning again', async () => {
+    const root = track(rootWithModule());
+    fs.writeFileSync(path.join(root, '.env'), 'SLACK_BOT_TOKEN=xoxb-existing\n');
+    const importModule = vi.fn(async () => {
+      throw new Error('provisioning core must not load on a rerun');
+    });
+
+    await expect(maybeAutoProvisionSlack('Hubert', { root, importModule })).resolves.toBeUndefined();
+
+    expect(brightSelect).not.toHaveBeenCalled();
+    expect(importModule).not.toHaveBeenCalled();
+    expect(state.infos).toEqual([
+      'Hubert already has a Slack app connected from a previous run — reusing its saved credentials instead of creating a new one.',
+    ]);
   });
 });
 
@@ -773,5 +801,24 @@ describe('a workspace that has to approve the install', () => {
     expect(state.confirmThenOpen).not.toHaveBeenCalled();
     expect(result).toMatchObject({ connection: 'provisioned', app_token: 'xapp-test' });
     expect(result).not.toHaveProperty('bot_token');
+  });
+});
+
+
+describe('community portal entry point', () => {
+  it('uses browser setup for an unenrolled installation without legacy login or provisioning', async () => {
+    state.portalEnabled.mockReturnValue(true);
+    state.runSlackPortal.mockResolvedValue({ __portal_skip: 'slack' });
+    const root = track(rootWithModule());
+    const core = fakeCore();
+    state.installToken = undefined;
+    state.runInheritScript.mockClear(); state.brokerProvision.mockClear();
+    try {
+      const result = await maybeAutoProvisionSlack('Nano', { root, importModule: async () => core });
+      expect(result).toEqual({ __portal_skip: 'slack' });
+      expect(state.runSlackPortal).toHaveBeenCalledWith(core, 'Nano', undefined);
+      expect(state.runInheritScript).not.toHaveBeenCalled();
+      expect(state.brokerProvision).not.toHaveBeenCalled();
+    } finally { state.portalEnabled.mockReturnValue(false); }
   });
 });

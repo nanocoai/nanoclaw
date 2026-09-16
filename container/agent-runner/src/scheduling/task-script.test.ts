@@ -15,7 +15,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '../mailbox/sqlite/connection.js';
 import { getPendingMessages, markScriptSkipped } from '../db/messages-in.js';
-import { applyPreTaskScripts } from './task-script.js';
+import { applyPreTaskScripts, runScript } from './task-script.js';
 
 beforeEach(() => {
   initTestSessionDb();
@@ -35,8 +35,11 @@ function insertTask(id: string, script: string) {
 }
 
 const ackStatus = (id: string): string | undefined =>
-  (getOutboundDb().prepare('SELECT status FROM processing_ack WHERE message_id = ?').get(id) as { status: string } | undefined)
-    ?.status;
+  (
+    getOutboundDb().prepare('SELECT status FROM processing_ack WHERE message_id = ?').get(id) as
+      | { status: string }
+      | undefined
+  )?.status;
 
 describe('script-skip ack chain (container leg)', () => {
   it('an erroring script skips with reason "error" and acks script-skip:error', async () => {
@@ -68,5 +71,47 @@ describe('script-skip ack chain (container leg)', () => {
     expect(skipped).toHaveLength(0);
     expect(keep).toHaveLength(1);
     expect(JSON.parse(keep[0].content).scriptOutput).toEqual({ alerts: 2 });
+  });
+});
+
+describe('a timed-out script is reported as a timeout', () => {
+  /**
+   * execFile kills on timeout, so the callback receives a generic
+   * "Command failed" — the same shape a script that exited non-zero produces.
+   * `killed` is the only thing that tells them apart. Without it the log said
+   * `error: Command failed: bash /tmp/task-script-<id>.sh` for a script that
+   * ran too long, which reads as a broken script and sends whoever is
+   * debugging it looking for a bug that isn't there.
+   */
+  const captureLogs = async (fn: () => Promise<unknown>): Promise<string[]> => {
+    const lines: string[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => void lines.push(args.map(String).join(' '));
+    try {
+      await fn();
+    } finally {
+      console.error = original;
+    }
+    return lines;
+  };
+
+  it('names the timeout and the ceiling it hit, not a generic command failure', async () => {
+    const lines = await captureLogs(() => runScript('sleep 5', 't-timeout', 150));
+    const joined = lines.join('\n');
+    expect(joined).toContain('[t-timeout] timed out after 150ms');
+    expect(joined).not.toContain('error: Command failed');
+  });
+
+  it('still resolves null, so the task is skipped exactly as before', async () => {
+    await captureLogs(async () => {
+      expect(await runScript('sleep 5', 't-timeout-null', 150)).toBeNull();
+    });
+  });
+
+  it('leaves a genuine non-zero exit reported as an error', async () => {
+    const lines = await captureLogs(() => runScript('exit 3', 't-exit', 5000));
+    const joined = lines.join('\n');
+    expect(joined).toContain('error: Command failed');
+    expect(joined).not.toContain('timed out');
   });
 });

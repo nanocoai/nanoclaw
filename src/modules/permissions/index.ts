@@ -66,6 +66,7 @@ interface PendingNameInput {
   channelMgId: string;
   dmChannelType: string;
   dmPlatformId: string;
+  dmInstance: string;
 }
 const awaitingNameInput = new Map<string, PendingNameInput>();
 
@@ -490,7 +491,10 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
 
   // ── Choose existing agent — send agent-selection follow-up card ──
   if (payload.value === CHOOSE_EXISTING_VALUE) {
-    const approverDm = await ensureUserDm(row.approver_user_id);
+    const origin = await getMessagingGroup(row.messaging_group_id);
+    const approverDm = await ensureUserDm(row.approver_user_id, {
+      instance: payload.channelType === origin?.channel_type ? origin.instance : undefined,
+    });
     if (!approverDm) {
       log.error('Channel registration: no DM channel for approver', {
         messagingGroupId: row.messaging_group_id,
@@ -521,6 +525,8 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
           question,
           options,
         }),
+        undefined,
+        approverDm.instance,
       );
     } catch (err) {
       log.error('Channel registration: agent-selection card delivery failed', {
@@ -533,7 +539,10 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
 
   // ── Create new agent — prompt for free-text name ──
   if (payload.value === NEW_AGENT_VALUE) {
-    const approverDm = await ensureUserDm(row.approver_user_id);
+    const origin = await getMessagingGroup(row.messaging_group_id);
+    const approverDm = await ensureUserDm(row.approver_user_id, {
+      instance: payload.channelType === origin?.channel_type ? origin.instance : undefined,
+    });
     if (!approverDm) {
       log.error('Channel registration: no DM channel for approver', {
         messagingGroupId: row.messaging_group_id,
@@ -549,11 +558,11 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
       });
       return true;
     }
-
     awaitingNameInput.set(row.approver_user_id, {
       channelMgId: row.messaging_group_id,
       dmChannelType: approverDm.channel_type,
       dmPlatformId: approverDm.platform_id,
+      dmInstance: approverDm.instance ?? approverDm.channel_type,
     });
 
     try {
@@ -563,6 +572,8 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
         null,
         'chat-sdk',
         JSON.stringify({ text: 'Reply with the name for your new agent:' }),
+        undefined,
+        approverDm.instance,
       );
     } catch (err) {
       log.error('Channel registration: name prompt delivery failed', {
@@ -622,6 +633,7 @@ registerMessageInterceptor(async (event: InboundEvent): Promise<boolean> => {
   const pending = awaitingNameInput.get(userId);
   if (!pending) return false;
   if (event.channelType !== pending.dmChannelType || event.platformId !== pending.dmPlatformId) return false;
+  if ((event.instance ?? event.channelType) !== pending.dmInstance) return false;
 
   awaitingNameInput.delete(userId);
 
@@ -653,22 +665,21 @@ registerMessageInterceptor(async (event: InboundEvent): Promise<boolean> => {
 
   const adapter = getDeliveryAdapter();
   if (adapter) {
-    const dm = await ensureUserDm(row.approver_user_id);
-    if (dm) {
-      adapter
-        .deliver(
-          dm.channel_type,
-          dm.platform_id,
-          null,
-          'chat-sdk',
-          JSON.stringify({
-            text: wired
-              ? `✅ Agent "${ag.name}" created and connected.`
-              : `⚠️ Agent "${ag.name}" was created but the channel couldn't be connected — check the host logs.`,
-          }),
-        )
-        .catch(() => {});
-    }
+    adapter
+      .deliver(
+        event.channelType,
+        event.platformId,
+        null,
+        'chat-sdk',
+        JSON.stringify({
+          text: wired
+            ? `✅ Agent "${ag.name}" created and connected.`
+            : `⚠️ Agent "${ag.name}" was created but the channel couldn't be connected — check the host logs.`,
+        }),
+        undefined,
+        event.instance,
+      )
+      .catch(() => {});
   }
   return true;
 });

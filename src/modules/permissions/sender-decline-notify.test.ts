@@ -99,7 +99,7 @@ beforeEach(async () => {
   });
 
   // Owner user (with display name — feeds the decline copy) + their DM.
-  await upsertUser({ id: 'telegram:owner', kind: 'telegram', display_name: 'Gavriel', created_at: now() });
+  await upsertUser({ id: 'telegram:owner', kind: 'telegram', display_name: 'Alex', created_at: now() });
   await grantRole({
     user_id: 'telegram:owner',
     role: 'owner',
@@ -204,7 +204,7 @@ describe('unknown-sender decline_notify flow', () => {
     expect(dThread).toBeNull();
     expect(dKind).toBe('chat-sdk');
     const decline = JSON.parse(dContent as string);
-    expect(decline.text).toBe("I'm Gavriel's personal agent — I can't help you directly.");
+    expect(decline.text).toBe("I'm Alex's personal agent — I can't help you directly.");
     expect(decline.options).toBeUndefined(); // plain text, no buttons
 
     // (b) One-line FYI to the owner's DM — informational, not a card.

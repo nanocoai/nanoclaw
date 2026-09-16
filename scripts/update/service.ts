@@ -16,6 +16,11 @@ export function createCommandRunner(): CommandRunner {
       cwd,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
+      // Node's default maxBuffer is 1 MiB; a full vitest run on a large repo
+      // exceeds it and the whole validate step dies as `spawnSync pnpm
+      // ENOBUFS` with the tests never judged. 64 MiB is far above any real
+      // build/test output while still bounding a runaway.
+      maxBuffer: 64 * 1024 * 1024,
     }).trim();
   return {
     run,
@@ -133,16 +138,36 @@ export function detectService(projectRoot: string, env: ServiceEnvironment): Ser
   return { mode: 'none', active: false };
 }
 
+/**
+ * Idempotent per mode: stopping an already-stopped service is success, in the
+ * service manager's own vocabulary — `launchctl bootout` fails a not-loaded
+ * job with "No such process", `process.kill` raises ESRCH, and `systemctl
+ * stop` of a stopped-but-loaded unit already exits 0. The rollback path stops
+ * a handle captured before cutover (which stopped the service itself), so
+ * without this the restore died on its own stop and left the live checkout on
+ * the target commit with the service down. Any OTHER stop failure still
+ * throws: a service that is genuinely still running must abort the caller
+ * before anything is destroyed.
+ */
 export async function stopService(handle: ServiceHandle, env: ServiceEnvironment): Promise<void> {
   if (!handle.active) return;
   if (handle.mode === 'launchd') {
-    env.runner.run('launchctl', ['bootout', `gui/${env.uid}/${handle.name}`]);
+    try {
+      env.runner.run('launchctl', ['bootout', `gui/${env.uid}/${handle.name}`]);
+    } catch (err) {
+      if (!/No such process/i.test(err instanceof Error ? err.message : String(err))) throw err;
+    }
   } else if (handle.mode === 'systemd-user') {
     env.runner.run('systemctl', ['--user', 'stop', handle.name!]);
   } else if (handle.mode === 'systemd-system') {
     env.runner.run('systemctl', ['stop', handle.name!]);
   } else if (handle.mode === 'nohup' && handle.pid) {
-    process.kill(handle.pid, 'SIGTERM');
+    try {
+      process.kill(handle.pid, 'SIGTERM');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ESRCH') throw err;
+      return;
+    }
     for (let i = 0; i < 60 && processExists(handle.pid); i += 1) await env.sleep(500);
     if (processExists(handle.pid)) throw new Error(`NanoClaw process ${handle.pid} did not stop`);
   } else if (handle.mode === 'unmanaged') {

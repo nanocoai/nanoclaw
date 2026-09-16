@@ -5,6 +5,7 @@
 import fs from 'fs';
 import path from 'path';
 
+import { envValue } from '../src/env.js';
 import { log } from '../src/log.js';
 import { inspectCentralDb } from './central-db-inspection.js';
 import { commandExists, getPlatform, isHeadless, isWSL } from './platform.js';
@@ -12,26 +13,13 @@ import { emitStatus } from './status.js';
 
 /**
  * Read a single key from `.env` on disk (not process.env).
- * Returns the trimmed value or null if the key isn't set / file doesn't exist.
+ * Returns the value or null if the key isn't set / file doesn't exist.
+ *
+ * Delegates to the host's parser so both readers agree — notably on quoted
+ * values, which this one used to return with the quotes still attached.
  */
 export function readEnvKey(key: string, projectRoot?: string): string | null {
-  const envPath = path.join(projectRoot ?? process.cwd(), '.env');
-  let content: string;
-  try {
-    content = fs.readFileSync(envPath, 'utf-8');
-  } catch {
-    return null;
-  }
-  for (const line of content.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    const eq = trimmed.indexOf('=');
-    if (eq < 1) continue;
-    if (trimmed.slice(0, eq) === key) {
-      return trimmed.slice(eq + 1).trim() || null;
-    }
-  }
-  return null;
+  return envValue(key, projectRoot) ?? null;
 }
 
 /**

@@ -57,8 +57,8 @@ If `@onecli-sh/sdk` is NOT in package.json, the codebase hasn't been updated to 
 ### Install the gateway and CLI
 
 ```bash
-curl -fsSL onecli.sh/install | sh
-curl -fsSL onecli.sh/cli/install | sh
+curl -fsSL onecli.sh/install | /bin/sh
+curl -fsSL onecli.sh/cli/install | /bin/sh
 ```
 
 Verify: `onecli version`

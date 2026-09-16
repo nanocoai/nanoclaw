@@ -25,8 +25,8 @@ const SKIP_NAMES = new Set(['CLAUDE.md', 'logs', '.git', '.DS_Store', 'node_modu
  * container-side paths like `.claude-shared.md → /app/CLAUDE.md` that
  * don't resolve on the host. Following them with `fs.copyFileSync` would
  * crash ENOENT on a broken target and abort the rest of the traversal.
- * v2 uses composed CLAUDE.md fragments anyway — these v1 symlinks have no
- * v2 meaning and don't need to be carried forward.
+ * v2 composes one flat project document with no symlinks, so these v1 links
+ * have no v2 meaning and don't need to be carried forward.
  */
 function copyTree(src: string, dst: string): number {
   let written = 0;

@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -117,6 +118,26 @@ async function main(): Promise<void> {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+/**
+ * Realpath BOTH sides of the main-module check: `import.meta.url` is already
+ * realpathed by the loader, but a symlink-spelled argv (macOS `mktemp -d`
+ * lives under the /var → /private/var symlink) is not — the guard was false
+ * and the controller exited 0 having done NOTHING, which reads as success to
+ * whatever invoked it. Fixed here, not only in the recipe, so it rides the
+ * self-update seam to every existing install.
+ */
+function isMainModule(): boolean {
+  const argv = process.argv[1];
+  if (!argv) return false;
+  try {
+    return import.meta.url === pathToFileURL(fs.realpathSync(path.resolve(argv))).href;
+  } catch {
+    // realpath can only fail if the argv path is gone; fall back to the
+    // plain comparison rather than silently deciding "not main" on error.
+    return import.meta.url === pathToFileURL(path.resolve(argv)).href;
+  }
+}
+
+if (isMainModule()) {
   void main();
 }

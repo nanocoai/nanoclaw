@@ -8,11 +8,19 @@
  * - Normal messages: pass through unchanged
  */
 import { hasAdminPrivilege } from './modules/permissions/db/user-roles.js';
+import './provider-contracts/index.js';
+import { listProviderHostContracts } from './provider-contracts/registry.js';
 
 export type GateResult = { action: 'pass' } | { action: 'filter' } | { action: 'deny'; command: string };
 
-const FILTERED_COMMANDS = new Set(['/start', '/help', '/login', '/logout', '/doctor', '/config', '/remote-control']);
-const ADMIN_COMMANDS = new Set(['/clear', '/compact', '/context', '/cost', '/files', '/upload-trace']);
+const FILTERED_COMMANDS = new Set(
+  listProviderHostContracts().flatMap((contract) => contract.commands?.nativeFiltered ?? []),
+);
+const ADMIN_COMMANDS = new Set([
+  '/clear',
+  '/upload-trace',
+  ...listProviderHostContracts().flatMap((contract) => contract.commands?.nativeAdmin ?? []),
+]);
 
 /**
  * Classify a message and decide whether it should reach the container.

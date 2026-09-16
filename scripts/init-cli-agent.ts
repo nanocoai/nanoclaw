@@ -15,7 +15,7 @@
  *
  * Usage:
  *   pnpm exec tsx scripts/init-cli-agent.ts \
- *     --display-name "Gavriel" \
+ *     --display-name "Alex" \
  *     [--agent-name "Andy"]
  */
 // Registration-only: makes the in-tree cli adapter's declared defaults

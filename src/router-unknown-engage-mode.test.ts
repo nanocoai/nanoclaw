@@ -123,7 +123,7 @@ async function inbound(id: string, text: string): Promise<void> {
     message: {
       id,
       kind: 'chat-sdk',
-      content: JSON.stringify({ sender: 'Gavriel', senderId: 'U1', text }),
+      content: JSON.stringify({ sender: 'Alex', senderId: 'U1', text }),
       timestamp: now(),
       isMention: true,
       isGroup: false,

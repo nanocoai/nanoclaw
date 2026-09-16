@@ -33,12 +33,14 @@ afterEach(async () => {
 async function mountMockAdapter(
   channelType: string,
   openDM?: (handle: string) => Promise<string>,
+  instance: string = channelType,
 ): Promise<{ delivered: OutboundMessage[]; openDMCalls: string[] }> {
   const delivered: OutboundMessage[] = [];
   const openDMCalls: string[] = [];
   const adapter: ChannelAdapter = {
-    name: channelType,
+    name: instance,
     channelType,
+    instance,
     supportsThreads: false,
     async setup() {},
     async teardown() {},
@@ -57,7 +59,7 @@ async function mountMockAdapter(
       return openDM(handle);
     };
   }
-  registerChannelAdapter(channelType, { factory: () => adapter });
+  registerChannelAdapter(instance, { factory: () => adapter });
   await initChannelAdapters(() => ({
     conversations: [],
     onInbound: () => {},
@@ -142,5 +144,20 @@ describe('pickApprovalDelivery', () => {
   it('returns null when nobody is reachable', async () => {
     await seedUser('telegram:111', 'telegram');
     expect(await pickApprovalDelivery(['telegram:111'], 'telegram')).toBeNull();
+  });
+
+  it('resolves a named origin through its own bot instead of a cached sibling', async () => {
+    const primary = await mountMockAdapter('slack', async (handle) => `D-primary-${handle}`);
+    const secondary = await mountMockAdapter('slack', async (handle) => `D-secondary-${handle}`, 'slack-secondary');
+    await seedUser('slack:admin', 'slack');
+
+    const cached = await pickApprovalDelivery(['slack:admin'], 'slack');
+    expect(cached?.messagingGroup.platform_id).toBe('D-primary-admin');
+
+    const exact = await pickApprovalDelivery(['slack:admin'], 'slack', 'slack-secondary');
+    expect(exact?.messagingGroup.platform_id).toBe('D-secondary-admin');
+    expect(exact?.messagingGroup.instance).toBe('slack-secondary');
+    expect(primary.openDMCalls).toEqual(['admin']);
+    expect(secondary.openDMCalls).toEqual(['admin']);
   });
 });

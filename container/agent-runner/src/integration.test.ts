@@ -9,6 +9,11 @@ import { MockProvider } from './providers/mock.js';
 import type { ProviderExchange } from './providers/types.js';
 import { runPollLoop } from './poll-loop.js';
 
+const MOCK_PROVIDER_CONTRACT = {
+  textDelivery: 'mid-turn-complete',
+  commands: { formatting: 'xml' },
+} as const;
+
 beforeEach(() => {
   initTestSessionDb();
   // Seed a destination so output parsing can resolve "discord-test" → routing
@@ -24,7 +29,11 @@ afterEach(() => {
   closeSessionDb();
 });
 
-function insertMessage(id: string, content: object, opts?: { platformId?: string; channelType?: string; threadId?: string }) {
+function insertMessage(
+  id: string,
+  content: object,
+  opts?: { platformId?: string; channelType?: string; threadId?: string },
+) {
   getInboundDb()
     .prepare(
       `INSERT INTO messages_in (id, kind, timestamp, status, platform_id, channel_type, thread_id, content)
@@ -42,7 +51,11 @@ describe('poll loop integration', () => {
   });
 
   it('should pick up a message, process it, and write a response', async () => {
-    insertMessage('m1', { sender: 'Alice', text: 'What is the meaning of life?' }, { platformId: 'chan-1', channelType: 'discord', threadId: 'thread-1' });
+    insertMessage(
+      'm1',
+      { sender: 'Alice', text: 'What is the meaning of life?' },
+      { platformId: 'chan-1', channelType: 'discord', threadId: 'thread-1' },
+    );
 
     const provider = new MockProvider({}, () => '<message to="discord-test">42</message>');
 
@@ -94,12 +107,21 @@ describe('poll loop integration', () => {
       .run();
 
     // Insert messages from each destination with distinct thread IDs
-    insertMessage('m-discord', { sender: 'Alice', text: 'from discord' }, { platformId: 'chan-1', channelType: 'discord', threadId: 'discord-thread-1' });
-    insertMessage('m-slack', { sender: 'Bob', text: 'from slack' }, { platformId: 'chan-2', channelType: 'slack', threadId: 'slack-thread-99' });
+    insertMessage(
+      'm-discord',
+      { sender: 'Alice', text: 'from discord' },
+      { platformId: 'chan-1', channelType: 'discord', threadId: 'discord-thread-1' },
+    );
+    insertMessage(
+      'm-slack',
+      { sender: 'Bob', text: 'from slack' },
+      { platformId: 'chan-2', channelType: 'slack', threadId: 'slack-thread-99' },
+    );
 
     // Agent replies to both destinations
-    const provider = new MockProvider({}, () =>
-      '<message to="discord-test">reply-d</message><message to="slack-test">reply-s</message>',
+    const provider = new MockProvider(
+      {},
+      () => '<message to="discord-test">reply-d</message><message to="slack-test">reply-s</message>',
     );
     const controller = new AbortController();
     const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
@@ -204,7 +226,11 @@ describe('poll loop integration', () => {
       .run();
 
     // Only insert a message from discord — slack-new has never sent anything
-    insertMessage('m1', { sender: 'Alice', text: 'tell slack' }, { platformId: 'chan-1', channelType: 'discord', threadId: 'discord-thread' });
+    insertMessage(
+      'm1',
+      { sender: 'Alice', text: 'tell slack' },
+      { platformId: 'chan-1', channelType: 'discord', threadId: 'discord-thread' },
+    );
 
     const provider = new MockProvider({}, () => '<message to="slack-new">hello slack</message>');
     const controller = new AbortController();
@@ -221,10 +247,19 @@ describe('poll loop integration', () => {
     await loopPromise.catch(() => {});
   });
 
-  it('resolves most recent thread_id when destination has multiple inbound messages', async () => {
-    // Two messages from same destination, different threads
-    insertMessage('m-old', { sender: 'Alice', text: 'old' }, { platformId: 'chan-1', channelType: 'discord', threadId: 'thread-old' });
-    insertMessage('m-new', { sender: 'Alice', text: 'new' }, { platformId: 'chan-1', channelType: 'discord', threadId: 'thread-new' });
+  it('replies in the thread of the message the batch is answering when the batch spans threads', async () => {
+    // Two messages from the same channel, different threads, one batch. The
+    // reply goes where in_reply_to points: the first non-echo message.
+    insertMessage(
+      'm-old',
+      { sender: 'Alice', text: 'old' },
+      { platformId: 'chan-1', channelType: 'discord', threadId: 'thread-old' },
+    );
+    insertMessage(
+      'm-new',
+      { sender: 'Alice', text: 'new' },
+      { platformId: 'chan-1', channelType: 'discord', threadId: 'thread-new' },
+    );
 
     const provider = new MockProvider({}, () => '<message to="discord-test">reply</message>');
     const controller = new AbortController();
@@ -235,8 +270,8 @@ describe('poll loop integration', () => {
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(out[0].thread_id).toBe('thread-new');
-    expect(out[0].in_reply_to).toBe('m-new');
+    expect(out[0].thread_id).toBe('thread-old');
+    expect(out[0].in_reply_to).toBe('m-old');
 
     await loopPromise.catch(() => {});
   });
@@ -264,7 +299,8 @@ describe('poll loop integration', () => {
 
     const provider = new MockProvider(
       {},
-      () => '<internal>thinking about this...</internal><message to="discord-test">answer</message><internal>done thinking</internal>',
+      () =>
+        '<internal>thinking about this...</internal><message to="discord-test">answer</message><internal>done thinking</internal>',
     );
     const controller = new AbortController();
     const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
@@ -303,7 +339,6 @@ describe('poll loop integration', () => {
 
     await loopPromise.catch(() => {});
   });
-
 });
 
 // Helper: run poll loop until aborted or timeout
@@ -311,6 +346,7 @@ async function runPollLoopWithTimeout(provider: MockProvider, signal: AbortSigna
   return Promise.race([
     runPollLoop({
       provider,
+      providerContract: MOCK_PROVIDER_CONTRACT,
       providerName: 'mock',
       cwd: '/tmp',
       signal,
@@ -347,7 +383,11 @@ describe('poll loop — exchange hook (onExchangeComplete)', () => {
   }
 
   it('reports each exchange to a provider that declares the hook', async () => {
-    insertMessage('m1', { sender: 'Alice', text: 'please archive this' }, { platformId: 'chan-1', channelType: 'discord' });
+    insertMessage(
+      'm1',
+      { sender: 'Alice', text: 'please archive this' },
+      { platformId: 'chan-1', channelType: 'discord' },
+    );
 
     const provider = new HookedMockProvider({}, () => '<message to="discord-test">archived answer</message>');
     const controller = new AbortController();
@@ -392,7 +432,11 @@ describe('poll loop — exchange hook (onExchangeComplete)', () => {
   });
 
   it('a throwing hook never breaks delivery', async () => {
-    insertMessage('m1', { sender: 'Alice', text: 'still deliver this' }, { platformId: 'chan-1', channelType: 'discord' });
+    insertMessage(
+      'm1',
+      { sender: 'Alice', text: 'still deliver this' },
+      { platformId: 'chan-1', channelType: 'discord' },
+    );
 
     class ThrowingHookProvider extends MockProvider {
       onExchangeComplete(): void {
@@ -415,7 +459,7 @@ describe('poll loop — exchange hook (onExchangeComplete)', () => {
 });
 
 describe('poll loop — provider error recovery', () => {
-  it('writes error to outbound and continues loop on provider throw', async () => {
+  it('writes a safe error notice to outbound and continues loop on provider throw', async () => {
     insertMessage('m1', { sender: 'Alice', text: 'trigger error' }, { platformId: 'chan-1', channelType: 'discord' });
 
     const provider = new ThrowingProvider('API rate limit exceeded');
@@ -427,8 +471,8 @@ describe('poll loop — provider error recovery', () => {
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(JSON.parse(out[0].content).text).toContain('Error:');
-    expect(JSON.parse(out[0].content).text).toContain('API rate limit exceeded');
+    expect(JSON.parse(out[0].content).text).toBe('The agent run failed. Check the logs for details.');
+    expect(out[0].content).not.toContain('API rate limit exceeded');
 
     // Input message should be marked completed despite the error
     const pending = getPendingMessages();
@@ -453,10 +497,11 @@ describe('poll loop — stale session recovery', () => {
     await waitFor(() => getUndeliveredMessages().length > 0, 2000);
     controller.abort();
 
-    // Error was written to outbound
+    // A safe notice reaches the user; the provider diagnostic stays private.
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(JSON.parse(out[0].content).text).toContain('Error:');
+    expect(JSON.parse(out[0].content).text).toBe('The agent run failed. Check the logs for details.');
+    expect(out[0].content).not.toContain('session not found');
 
     // Continuation was cleared (isSessionInvalid returned true)
     expect(getContinuation('mock')).toBeUndefined();
@@ -505,7 +550,6 @@ describe('poll loop — /clear command', () => {
  * Provider that throws on every query, simulating API failures.
  */
 class ThrowingProvider {
-  readonly supportsNativeSlashCommands = false;
   private errorMessage: string;
 
   constructor(errorMessage: string) {
@@ -534,8 +578,6 @@ class ThrowingProvider {
  * First emits an init event (setting continuation), then throws.
  */
 class InvalidSessionProvider {
-  readonly supportsNativeSlashCommands = false;
-
   isSessionInvalid(): boolean {
     return true;
   }
@@ -561,10 +603,12 @@ describe('poll loop — slash command during active query', () => {
   // linux/amd64 — all on bun 1.3.12.
   // TODO: reproduce with in-loop diagnostics (pending rows + ack states per
   // tick) on a throwaway branch and fix the underlying race, then un-skip.
-  it.skip(
-    'aborts the active query when /clear arrives as a follow-up',
-    async () => {
-    insertMessage('m-active', { sender: 'Alice', text: 'long running request' }, { platformId: 'chan-1', channelType: 'discord' });
+  it.skip('aborts the active query when /clear arrives as a follow-up', async () => {
+    insertMessage(
+      'm-active',
+      { sender: 'Alice', text: 'long running request' },
+      { platformId: 'chan-1', channelType: 'discord' },
+    );
 
     const provider = new BlockingProvider();
     const controller = new AbortController();
@@ -576,7 +620,11 @@ describe('poll loop — slash command during active query', () => {
     const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 20000);
 
     await waitFor(() => provider.queries === 1, 15000);
-    insertMessage('m-clear-active', { sender: 'Alice', text: '/clear' }, { platformId: 'chan-1', channelType: 'discord' });
+    insertMessage(
+      'm-clear-active',
+      { sender: 'Alice', text: '/clear' },
+      { platformId: 'chan-1', channelType: 'discord' },
+    );
 
     await waitFor(() => provider.aborts === 1, 15000);
     await waitFor(
@@ -590,9 +638,7 @@ describe('poll loop — slash command during active query', () => {
     expect(getPendingMessages()).toHaveLength(0);
 
     await loopPromise.catch(() => {});
-    },
-    30000,
-  );
+  }, 30000);
 });
 
 /**
@@ -600,7 +646,6 @@ describe('poll loop — slash command during active query', () => {
  * the loop interrupts an active stream.
  */
 class BlockingProvider {
-  readonly supportsNativeSlashCommands = false;
   queries = 0;
   aborts = 0;
   ends = 0;

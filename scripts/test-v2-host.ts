@@ -81,7 +81,7 @@ await routeInbound({
     id: 'msg-e2e-1',
     kind: 'chat',
     content: JSON.stringify({
-      sender: 'Gavriel',
+      sender: 'Alex',
       text: 'Say "E2E works!" and nothing else. Do not use any tools.',
     }),
     timestamp: new Date().toISOString(),

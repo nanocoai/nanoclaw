@@ -322,7 +322,13 @@ async function deleteTaskCommand(args: Record<string, unknown>, ctx: CallerConte
 async function updateTaskCommand(args: Record<string, unknown>, ctx: CallerContext) {
   const id = taskId(args);
   const update: TaskUpdate = {};
-  if (typeof args.prompt === 'string') update.prompt = args.prompt;
+  if (typeof args.prompt === 'string') {
+    // `create` refuses an empty prompt; `update` must too, or a shell
+    // substitution over a missing file (`--prompt "$(cat gone.txt)"`) silently
+    // blanks a live task and the next run wakes the agent with no instruction.
+    if (!args.prompt.trim()) throw new Error('--prompt must not be empty; omit it to keep the current prompt');
+    update.prompt = args.prompt;
+  }
   const recurrence = normalizeNullableString(args.recurrence);
   const script = normalizeNullableString(args.script);
 

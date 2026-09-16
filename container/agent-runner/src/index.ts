@@ -12,8 +12,8 @@
  *     .heartbeat        ← container touches for liveness detection
  *     outbox/           ← outbound files
  *     agent/            ← agent group folder (CLAUDE.md, container.json, working files)
+ *       CLAUDE.md       ← composed project document (RO nested mount)
  *       container.json  ← per-group config (RO nested mount)
- *     global/           ← shared global memory (RO)
  *   /app/src/           ← shared agent-runner source (RO)
  *   /app/skills/        ← shared skills (RO)
  *   /home/node/.claude/ ← Claude SDK state + skill symlinks (RW)
@@ -34,8 +34,14 @@ import { getAgentMailbox, readMailboxContext } from './mailbox/index.js';
 // Providers barrel — each enabled provider self-registers on import.
 // Provider skills append imports to providers/index.ts.
 import './providers/index.js';
-import { createProvider, type ProviderName } from './providers/factory.js';
+// Provider-contracts barrel — each provider's runtime contract attaches to its
+// registration on import. Provider skills append imports to
+// provider-contracts/index.ts alongside the providers barrel line.
+import './provider-contracts/index.js';
+import { createProvider } from './providers/factory.js';
+import { getProviderRuntimeContract, requireProviderName } from './providers/provider-registry.js';
 import { resolvePluginServer } from './plugin-mcp.js';
+import { registerProviderMemorySessionHook } from './provider-contracts/realize.js';
 import type { McpServerConfig } from './providers/types.js';
 import { runPollLoop } from './poll-loop.js';
 
@@ -47,7 +53,7 @@ const CWD = '/workspace/agent';
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const providerName = config.provider.toLowerCase() as ProviderName;
+  const providerName = requireProviderName(config.provider);
   const mailbox = getAgentMailbox();
   await mailbox.start(await readMailboxContext());
 
@@ -60,9 +66,9 @@ async function main(): Promise<void> {
   // Runtime-generated system-prompt addendum: agent identity (name) plus
   // the live destinations map. Everything else (capabilities, per-module
   // instructions, per-channel formatting) is loaded by Claude Code from
-  // /workspace/agent/CLAUDE.md — the composed entry imports the shared
-  // base (/app/CLAUDE.md) and each enabled module's fragment. Memory is
-  // supplied separately by each provider's native lifecycle hook.
+  // /workspace/agent/CLAUDE.md — one flat file the host composes per spawn
+  // with every instruction source inlined, no imports. Memory is supplied
+  // separately by each provider's native lifecycle hook.
   const taskId = getTaskSeriesId();
   const instructions = buildSystemPromptAddendum(
     config.assistantName || undefined,
@@ -115,12 +121,14 @@ async function main(): Promise<void> {
     additionalDirectories: additionalDirectories.length > 0 ? additionalDirectories : undefined,
     model: config.model,
     effort: config.effort,
+    speed: config.speed,
   });
-  provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
+  registerProviderMemorySessionHook(providerName, provider, MEMORY_SESSION_HOOK);
 
   try {
     await runPollLoop({
       provider,
+      providerContract: getProviderRuntimeContract(providerName),
       providerName,
       cwd: CWD,
       systemContext: { instructions },

@@ -17,8 +17,10 @@ import {
   validateMcpServerName,
   type McpServerConfig,
 } from '../../container-config.js';
-import { buildAgentGroupImage, killContainer, wakeContainer } from '../../container-runner.js';
+import { buildAgentGroupImage, killContainer } from '../../container-runner.js';
+import { requestWake } from '../../request-wake.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
+import { setStopIntent, shadowWrite } from '../../db/coordination.js';
 import { getContainerConfig, updateContainerConfigJson } from '../../db/container-configs.js';
 import { getSession } from '../../db/sessions.js';
 import { log } from '../../log.js';
@@ -28,7 +30,13 @@ import { notifyAgent } from '../approvals/index.js';
 
 async function wakeSessionById(sessionId: string): Promise<void> {
   const session = await getSession(sessionId);
-  if (session) await wakeContainer(session);
+  if (session) await requestWake(session, 'self-mod-apply');
+  await shadowWrite('stop-intent-clear', () => setStopIntent(sessionId, null, new Date().toISOString()));
+}
+
+/** Shadow the respawn plan durably before a kill-with-respawn; on_wake stays authoritative. */
+async function shadowRespawnIntent(sessionId: string): Promise<void> {
+  await shadowWrite('stop-intent', () => setStopIntent(sessionId, 'respawn_after_stop', new Date().toISOString()));
 }
 
 export async function applyInstallPackages(payload: Record<string, unknown>, session: Session): Promise<void> {
@@ -81,6 +89,7 @@ export async function applyInstallPackages(payload: Record<string, unknown>, ses
       }),
       onWake: true,
     });
+    await shadowRespawnIntent(session.id);
     killContainer(session.id, 'rebuild applied', () => {
       void wakeSessionById(session.id);
     });
@@ -154,6 +163,7 @@ export async function applyAddMcpServer(payload: Record<string, unknown>, sessio
     }),
     onWake: true,
   });
+  await shadowRespawnIntent(session.id);
   killContainer(session.id, 'mcp server added', () => {
     void wakeSessionById(session.id);
   });

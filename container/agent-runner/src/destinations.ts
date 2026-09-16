@@ -94,6 +94,16 @@ function buildDestinationsSection(mode: SessionMode): string {
   if (mode.kind === 'task') {
     lines.push(
       'This is an isolated task run with no attached chat. Only notify someone when the task asks you to. For a user-visible message, call `send_message({ to: "name", text: "..." })`; for a file, call `send_file` with `to`. Always pass the explicit named destination.',
+    );
+    const channelDestinations = all.filter((destination) => destination.type === 'channel');
+    if (channelDestinations.length > 0) {
+      const channelNames = channelDestinations.map((destination) => `\`${destination.name}\``).join(', ');
+      lines.push(
+        '',
+        `For user-visible escalation output, default to your own channel destination(s): ${channelNames} — that's the operator's actual conversation with you. Use an agent-type destination like \`parent\` only when the task explicitly calls for routing through another agent, not as your default escalation path.`,
+      );
+    }
+    lines.push(
       '',
       `Your final output is not sent to the user. End with a concise work-log summary. It is recorded automatically in \`tasks/${mode.taskId}.md\`. Read that file when you need context from earlier runs. Use \`ncl tasks append-log --msg "…"\` only for optional mid-run notes.`,
     );

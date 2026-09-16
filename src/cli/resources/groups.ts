@@ -7,7 +7,8 @@ import {
   type AdditionalMountConfig,
   type McpServerConfig,
 } from '../../container-config.js';
-import { buildAgentGroupImage, killContainer, wakeContainer } from '../../container-runner.js';
+import { buildAgentGroupImage, killContainer } from '../../container-runner.js';
+import { requestWake } from '../../request-wake.js';
 import { restartAgentGroupContainers } from '../../container-restart.js';
 import { createAgentGroup, getAgentGroupByFolder } from '../../db/agent-groups.js';
 import { getDb, hasTable } from '../../db/connection.js';
@@ -22,6 +23,8 @@ import { getSessionDriver } from '../../drivers/index.js';
 import { assertValidGroupFolder, groupFolderExistsOnDisk } from '../../group-folder.js';
 import { initGroupFilesystem } from '../../group-init.js';
 import { isValidContainerPath } from '../../modules/mount-security/index.js';
+import { getProviderHostContract } from '../../provider-contracts/registry.js';
+import { resolveProviderName } from '../../providers/provider-name.js';
 import { createAgentFromTemplate } from '../../templates/create-agent.js';
 import {
   formatRestampResult,
@@ -52,6 +55,21 @@ function parseTimezoneFlag(value: unknown): string | null | undefined {
   return tz;
 }
 
+/**
+ * `--speed` vocabulary is provider-declared (`inference.speedTiers` on the host
+ * contract). Core only checks membership and stores the name; `""` (clear) is
+ * handled by the caller and never reaches here.
+ */
+function assertDeclaredSpeedTier(speed: string, provider: string): void {
+  const tiers = getProviderHostContract(provider)?.inference?.speedTiers;
+  if (tiers === undefined) {
+    throw new Error(`provider "${provider}" declares no speed tiers; --speed accepts only "" (clear)`);
+  }
+  if (!tiers.includes(speed)) {
+    throw new Error(`--speed "${speed}" is not a speed tier of provider "${provider}" (declared: ${tiers.join(', ')})`);
+  }
+}
+
 /** Deserialize JSON columns for display. */
 function presentConfig(row: ContainerConfigRow): Record<string, unknown> {
   return {
@@ -59,6 +77,7 @@ function presentConfig(row: ContainerConfigRow): Record<string, unknown> {
     provider: row.provider,
     model: row.model,
     effort: row.effort,
+    speed: row.speed,
     image_tag: row.image_tag,
     assistant_name: row.assistant_name,
     max_messages_per_prompt: row.max_messages_per_prompt,
@@ -343,7 +362,7 @@ registerResource({
               ? () => {
                   void (async () => {
                     const s = await getSession(ctx.sessionId);
-                    if (s) await wakeContainer(s);
+                    if (s) await requestWake(s, 'cli');
                   })();
                 }
               : undefined,
@@ -371,7 +390,8 @@ registerResource({
       access: 'approval',
       description:
         'Update container config scalar fields. Changes are saved but do NOT take effect until you run `ncl groups restart`. ' +
-        'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, ' +
+        'Use --id <group-id> and any of: --provider, --model, --effort, --speed, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, ' +
+        '--speed must be one of the speed tiers the group\'s provider declares (Claude: "standard", "fast"), or "" to follow the install default; a provider that declares none accepts only "". ' +
         '--timezone (IANA id like "Europe/Lisbon"; "" clears back to the install default; scheduled-task times follow it immediately, message display after restart).',
       handler: async (args) => {
         const id = args.id as string;
@@ -385,6 +405,7 @@ registerResource({
             | 'provider'
             | 'model'
             | 'effort'
+            | 'speed'
             | 'image_tag'
             | 'assistant_name'
             | 'max_messages_per_prompt'
@@ -397,6 +418,14 @@ registerResource({
         if (timezone !== undefined) updates.timezone = timezone;
         if (args.model !== undefined) updates.model = args.model as string;
         if (args.effort !== undefined) updates.effort = args.effort as string;
+        if (args.speed !== undefined) {
+          const speed = args.speed as string;
+          // Validate against the provider the group will actually run on —
+          // the same rule spawn applies, with a `--provider` in this command
+          // taking precedence over the stored one.
+          if (speed !== '') assertDeclaredSpeedTier(speed, resolveProviderName(updates.provider, row.provider));
+          updates.speed = speed || null;
+        }
         if (args.image_tag !== undefined) updates.image_tag = args.image_tag as string;
         if (args.assistant_name !== undefined) updates.assistant_name = args.assistant_name as string;
         if (args.max_messages_per_prompt !== undefined)
@@ -411,7 +440,7 @@ registerResource({
 
         if (Object.keys(updates).length === 0) {
           throw new Error(
-            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --timezone',
+            'Nothing to update — provide at least one of: --provider, --model, --effort, --speed, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --timezone',
           );
         }
 

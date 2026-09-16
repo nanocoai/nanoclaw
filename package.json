@@ -1,6 +1,6 @@
 {
   "name": "nanoclaw",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "Personal AI assistant. Lightweight, secure, customizable.",
   "type": "module",
   "packageManager": "pnpm@10.34.5",
@@ -25,6 +25,7 @@
     "setup:auto": "tsx setup/auto.ts",
     "ncl": "tsx src/cli/client.ts",
     "migrate": "tsx scripts/migrate.ts",
+    "release-notes": "node scripts/release-notes.mjs",
     "chat": "tsx scripts/chat.ts",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",

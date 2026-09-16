@@ -25,13 +25,17 @@
  */
 
 import { registerSlackAutoProvision } from './slack-auto-register.js';
+import { registerTelegramPreStep } from './telegram-pre-step.js';
 
 /**
  * A channel's auto-provision pre-step. `agentName` is the operator's resolved
  * assistant name. Resolves to the skill inputs to pre-bind, or undefined for
  * the manual walkthrough.
  */
-export type ChannelPreStep = (agentName: string) => Promise<Record<string, string> | undefined>;
+export type ChannelPreStep = (
+  agentName: string,
+  options?: { browserConsent?: boolean },
+) => Promise<Record<string, string> | undefined>;
 
 const preSteps = new Map<string, ChannelPreStep>();
 const companionSkills = new Map<string, readonly string[]>();
@@ -59,8 +63,7 @@ export function getCompanionSkills(channel: string): readonly string[] {
 
 // ── Feature self-registration imports (appended by channel install skills) ──
 
-// Env-gated registrations shipped with trunk. Each shim checks its opt-in
-// flag and returns without touching the registries when it is off; the
-// register function is passed in (rather than the shim importing it) so the
-// shim stays cycle-free and evaluates nothing beyond the flag check.
+// Registrations shipped with trunk. The register function is passed in
+// (rather than the shim importing it) so each shim stays cycle-free.
 registerSlackAutoProvision(registerChannelPreStep, registerCompanionSkills);
+registerTelegramPreStep(registerChannelPreStep);

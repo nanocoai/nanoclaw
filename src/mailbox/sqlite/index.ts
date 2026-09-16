@@ -217,6 +217,13 @@ export function wrapSqliteInbound(db: Database.Database, nextSequence = () => ne
     getInboundSourceSessionId: (messageId) => getInboundSourceSessionId(db, messageId),
     getMostRecentPeerSourceSessionId: (peerAgentGroupId) => getMostRecentPeerSourceSessionId(db, peerAgentGroupId),
     insertTask: async (task) => insertTaskRow(db, task, nextSequence()),
+    armNextTask: async (originalId, task) => {
+      const sequence = nextSequence();
+      db.transaction(() => {
+        insertTaskRow(db, task, sequence);
+        clearRecurrence(db, originalId);
+      })();
+    },
     cancelTask: (taskId) => (taskId === undefined ? cancelAllTasks(db) : cancelTask(db, taskId)),
     pauseTask: (taskId) => pauseTask(db, taskId),
     resumeTask: (taskId) => resumeTask(db, taskId),

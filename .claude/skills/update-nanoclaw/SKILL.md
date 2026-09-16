@@ -71,7 +71,10 @@ Materialize the newest controller from that ref. This is the self-update seam:
 an older local skill still executes the newest safety code before any mutation.
 
 ```bash
-controller_dir="$(mktemp -d)"
+# pwd -P: on macOS mktemp returns a path through the /var symlink, and a
+# symlinked argv defeats Node's import.meta main-module guard — the controller
+# then exits 0 having done NOTHING. Canonicalize before use.
+controller_dir="$(cd "$(mktemp -d)" && pwd -P)"
 git archive "$upstream_ref" \
   scripts/update-nanoclaw.ts scripts/update scripts/update-skills.ts \
   scripts/skill-apply.ts scripts/skill-directives.ts src/install-slug.ts \

@@ -132,6 +132,12 @@ describe('host module lifecycle registry', () => {
 });
 
 describe('host lifecycle orchestration', () => {
+  it('does not validate provider host conformance during startup', () => {
+    const source = fs.readFileSync(path.join(process.cwd(), 'src', 'index.ts'), 'utf8');
+
+    expect(source).not.toContain('assertProviderHostConformance()');
+  });
+
   it('starts after delivery is ready and before delivery polling', () => {
     const source = fs.readFileSync(path.join(process.cwd(), 'src', 'index.ts'), 'utf8');
     const deliveryReady = source.indexOf('setDeliveryAdapter(createChannelDeliveryAdapter())');

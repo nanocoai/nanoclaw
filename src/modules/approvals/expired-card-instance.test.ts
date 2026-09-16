@@ -114,14 +114,14 @@ describe('expired OneCLI card edits carry the posting instance', () => {
   });
 
   it('round-trips the instance through the row — a swept card resolves the same identity', async () => {
-    await seedPending({ instance: 'slack-mickey' });
+    await seedPending({ instance: 'slack-secondary' });
 
     // What sweepStaleApprovals does: re-read the persisted row, then edit.
     const persisted = await getPendingApproval('oa-test0001');
-    expect(persisted?.instance).toBe('slack-mickey');
+    expect(persisted?.instance).toBe('slack-secondary');
     await editCardExpired(persisted!, 'host restarted');
 
-    expect(delivered[0].instance).toBe('slack-mickey');
+    expect(delivered[0].instance).toBe('slack-secondary');
   });
 
   it('a NULL instance falls back to the channel type', async () => {

@@ -10,7 +10,7 @@
  * Kept in its own leaf file so both response-handler.ts and reason-capture.ts
  * can import it without an import cycle (finalize → primitive only).
  */
-import { wakeContainer } from '../../container-runner.js';
+import { requestWake } from '../../request-wake.js';
 import { deletePendingApproval, transitionPendingApprovalStatus } from '../../db/sessions.js';
 import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
@@ -58,6 +58,6 @@ export async function finalizeReject(
 
   await deletePendingApproval(approval.approval_id);
   await notifyApprovalResolved({ approval, session, outcome: 'reject', userId });
-  await wakeContainer(session);
+  await requestWake(session, 'approval-response');
   return true;
 }

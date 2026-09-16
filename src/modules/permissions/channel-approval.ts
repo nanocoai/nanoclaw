@@ -53,7 +53,7 @@ import { getDeliveryAdapter } from '../../delivery.js';
 import { groupFolderExistsOnDisk } from '../../group-folder.js';
 import { initGroupFilesystem } from '../../group-init.js';
 import { log } from '../../log.js';
-import type { InboundEvent } from '../../channels/adapter.js';
+import type { InboundEvent, ResolvedConversation } from '../../channels/adapter.js';
 import type { AgentGroup, MessagingGroup } from '../../types.js';
 import { pickApprovalDelivery, pickApprover } from '../approvals/primitive.js';
 import { createPendingChannelApproval, hasInFlightChannelApproval } from './db/pending-channel-approvals.js';
@@ -150,19 +150,38 @@ async function buildApprovalOptions(agentGroups: AgentGroup[], approverUserId?: 
 }
 
 function buildQuestionText(
-  isGroup: boolean,
+  conversationType: ResolvedConversation['type'],
   senderName: string | undefined,
+  senderId: string | undefined,
   channelName: string | null,
   channelType: string,
   ruleNote: string | null,
+  resolvedConversation: ResolvedConversation | null,
 ): string {
   const who = senderName ?? 'Someone';
   const note = ruleNote ? ` If connected, the agent ${ruleNote}.` : '';
-  if (isGroup) {
+  if (conversationType === 'channel') {
     const where = channelName ? `${channelName} on ${channelType}` : `a ${channelType} channel`;
     return `${who} mentioned your bot in ${where}.${note} ${AGENT_ACCESS_SCOPE_WARNING} How would you like to handle this channel?`;
   }
+  if (conversationType === 'group_dm') {
+    const participantNames = resolvedConversation?.participantNames ?? [];
+    const participantIds = resolvedConversation?.participantIds;
+    const useParticipantIds = Boolean(senderId) && participantIds?.length === participantNames.length;
+    const otherParticipants = participantNames.filter((name, index) =>
+      useParticipantIds ? participantIds![index] !== senderId : name.toLowerCase() !== senderName?.toLowerCase(),
+    );
+    const participants = formatParticipantList(otherParticipants);
+    const withParticipants = participants ? ` with ${participants}` : '';
+    return `${who} mentioned your bot in a group chat${withParticipants} on ${channelType}.${note} ${AGENT_ACCESS_SCOPE_WARNING} How would you like to handle this group chat?`;
+  }
   return `${who} sent your bot a DM on ${channelType}.${note} ${AGENT_ACCESS_SCOPE_WARNING} How would you like to handle it?`;
+}
+
+function formatParticipantList(names: string[]): string {
+  if (names.length < 2) return names[0] ?? '';
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  return `${names.slice(0, -1).join(', ')}, and ${names.at(-1)}`;
 }
 
 /**
@@ -247,11 +266,23 @@ export async function requestChannelApproval(input: RequestChannelApprovalInput)
 
   const originChannelType = originMg?.channel_type ?? '';
 
-  // Resolve channel name if not yet persisted. Key by instance so a named
-  // instance's own adapter (and bot identity) does the lookup.
-  if (originMg && !originMg.name) {
+  // Resolve conversation metadata and, when needed, its legacy name. Key by
+  // instance so a named instance's own adapter (and bot identity) does the lookup.
+  let resolvedConversation: ResolvedConversation | null = null;
+  if (originMg) {
     const channelAdapter = getChannelAdapter(originMg.instance ?? originMg.channel_type);
-    if (channelAdapter?.resolveChannelName) {
+    if (channelAdapter?.resolveConversation) {
+      try {
+        resolvedConversation = await channelAdapter.resolveConversation(originMg.platform_id);
+        if (resolvedConversation?.name && !originMg.name) {
+          await updateMessagingGroup(originMg.id, { name: resolvedConversation.name });
+          originMg.name = resolvedConversation.name;
+        }
+      } catch {
+        /* non-critical */
+      }
+    }
+    if (!originMg.name && channelAdapter?.resolveChannelName) {
       try {
         const name = await channelAdapter.resolveChannelName(originMg.platform_id);
         if (name) {
@@ -264,7 +295,7 @@ export async function requestChannelApproval(input: RequestChannelApprovalInput)
     }
   }
 
-  const delivery = await pickApprovalDelivery(approvers, originChannelType);
+  const delivery = await pickApprovalDelivery(approvers, originChannelType, originMg?.instance);
   if (!delivery) {
     log.warn('Channel registration skipped — no DM channel for any approver', {
       messagingGroupId,
@@ -276,15 +307,23 @@ export async function requestChannelApproval(input: RequestChannelApprovalInput)
   const isGroup = event.message?.isGroup ?? originMg?.is_group === 1;
 
   let senderName: string | undefined;
+  let senderId: string | undefined;
   try {
     const parsed = JSON.parse(event.message.content) as Record<string, unknown>;
     senderName = (parsed.senderName ?? parsed.sender) as string | undefined;
+    senderId = parsed.senderId as string | undefined;
   } catch {
     // non-critical
   }
 
+  const conversationType = resolvedConversation?.type ?? (isGroup ? 'channel' : 'direct');
   const channelName = originMg?.name ?? null;
-  const title = isGroup ? '📣 Bot mentioned in new channel' : '💬 New direct message';
+  const title =
+    conversationType === 'channel'
+      ? '📣 Bot mentioned in new channel'
+      : conversationType === 'group_dm'
+        ? '👥 Bot mentioned in new group chat'
+        : '💬 New direct message';
   // Preview the engage rule an approval would create. The reference group's
   // name only feeds {name} pattern substitution — a best-effort preview when
   // the approver ends up picking a different agent.
@@ -294,7 +333,15 @@ export async function requestChannelApproval(input: RequestChannelApprovalInput)
     referenceGroup.name,
     originChannelType,
   );
-  const question = buildQuestionText(isGroup, senderName, channelName, originChannelType, ruleNote);
+  const question = buildQuestionText(
+    conversationType,
+    senderName,
+    senderId,
+    channelName,
+    originChannelType,
+    ruleNote,
+    resolvedConversation,
+  );
   const options = normalizeOptions(await buildApprovalOptions(agentGroups, delivery.userId));
 
   await createPendingChannelApproval({
@@ -327,6 +374,8 @@ export async function requestChannelApproval(input: RequestChannelApprovalInput)
         question,
         options,
       }),
+      undefined,
+      delivery.messagingGroup.instance,
     );
     log.info('Channel registration card delivered', {
       messagingGroupId,

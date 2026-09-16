@@ -13,12 +13,15 @@ const envConfig = readEnvFile([
   'ONECLI_API_KEY',
   'TZ',
   'DEFAULT_AGENT_PROVIDER',
+  'NANOCLAW_DEFAULT_MODEL',
+  'NANOCLAW_FAST_MODE',
   'CONTAINER_CPU_LIMIT',
   'CONTAINER_MEMORY_LIMIT',
   'CONTAINER_PIDS_LIMIT',
   'NANOCLAW_EGRESS_LOCKDOWN',
   'NANOCLAW_EGRESS_NETWORK',
   'ONECLI_GATEWAY_CONTAINER',
+  'WEBHOOK_PORT',
 ]);
 
 /**
@@ -38,6 +41,20 @@ export const DEFAULT_AGENT_PROVIDER = (
   envConfig.DEFAULT_AGENT_PROVIDER ||
   'claude'
 ).toLowerCase();
+
+// Instance-wide default model for agent containers, applied when the group has
+// no model of its own. Unset means the provider SDK's own default, which is
+// what every existing install gets. Unlike DEFAULT_AGENT_PROVIDER this is read
+// at spawn rather than stamped at creation, so changing it takes effect on the
+// next container start for every group that has not set one.
+export const DEFAULT_MODEL = process.env.NANOCLAW_DEFAULT_MODEL || envConfig.NANOCLAW_DEFAULT_MODEL || '';
+
+// Fast serving tier for every agent container: faster output at a higher
+// per-token price. Off unless explicitly turned on, and only by '1' or 'true' —
+// a typo must not silently start charging the faster rate.
+export const FAST_MODE = ['1', 'true'].includes(
+  (process.env.NANOCLAW_FAST_MODE || envConfig.NANOCLAW_FAST_MODE || '').toLowerCase(),
+);
 
 /**
  * @deprecated WhatsApp adapter copies now read the ASSISTANT_HAS_OWN_NUMBER
@@ -96,6 +113,16 @@ export const EGRESS_NETWORK =
   process.env.NANOCLAW_EGRESS_NETWORK || envConfig.NANOCLAW_EGRESS_NETWORK || 'nanoclaw-egress';
 export const ONECLI_GATEWAY_CONTAINER =
   process.env.ONECLI_GATEWAY_CONTAINER || envConfig.ONECLI_GATEWAY_CONTAINER || 'onecli';
+
+// Resolve when the listener starts so a late process override still wins.
+export function getWebhookPort(): number {
+  const raw = process.env.WEBHOOK_PORT || envConfig.WEBHOOK_PORT || '3000';
+  const port = Number(raw);
+  if (!/^[1-9]\d*$/.test(raw) || !Number.isInteger(port) || port > 65_535) {
+    throw new Error(`Invalid WEBHOOK_PORT ${JSON.stringify(raw)}: expected an integer from 1 to 65535`);
+  }
+  return port;
+}
 
 // Timezone for scheduled tasks, message formatting, etc.
 // Validates each candidate is a real IANA identifier before accepting.

@@ -3,10 +3,12 @@
  *
  * Every sweep tick, find `messages_in` rows that are `completed` AND still
  * have a `recurrence` cron expression. For each, compute the next run via
- * cron-parser, insert a fresh pending row (copying series_id forward), then
- * clear the recurrence on the original so it isn't re-cloned next tick.
+ * cron-parser, then arm the next occurrence atomically (insert a fresh
+ * pending row copying series_id forward + clear the recurrence on the
+ * original, one durable step via `armNextTask`) so a crash between the two
+ * writes can never leave the series both armed and re-clonable.
  *
- * Called from `src/host-sweep.ts` inside `MODULE-HOOK:scheduling-recurrence`.
+ * Called from `src/reconcile-session.ts` inside `MODULE-HOOK:scheduling-recurrence`.
  * When scheduling ships inline (current state through PR #7), the hook is a
  * direct dynamic import. When scheduling moves to the modules branch in
  * PR #8, the install skill re-fills the marker on install.
@@ -68,7 +70,7 @@ export async function handleRecurrence(inDb: InboundMailbox, session: Session): 
       if (scriptFails >= SCRIPT_FAIL_PAUSE_CAP) {
         // Re-arm PAUSED at the cron time so `ncl tasks resume` revives the
         // series in place; leave the why in the run log.
-        await inDb.insertTask({
+        await inDb.armNextTask(msg.id, {
           id: newId,
           seriesId: msg.seriesId,
           processAfter: cronNext.toISOString(),
@@ -76,7 +78,6 @@ export async function handleRecurrence(inDb: InboundMailbox, session: Session): 
           content: msg.content,
           status: 'paused',
         });
-        inDb.clearRecurrence(msg.id);
         await appendHostTaskNote(
           session.agent_group_id,
           msg.seriesId,
@@ -93,14 +94,13 @@ export async function handleRecurrence(inDb: InboundMailbox, session: Session): 
       const backoffAt = scriptFails > 0 ? Date.now() + scriptBackoffMinutes(scriptFails) * 60_000 : 0;
       const nextRun = new Date(Math.max(cronNext.getTime(), backoffAt)).toISOString();
 
-      await inDb.insertTask({
+      await inDb.armNextTask(msg.id, {
         id: newId,
         seriesId: msg.seriesId,
         processAfter: nextRun,
         recurrence: msg.recurrence,
         content: msg.content,
       });
-      inDb.clearRecurrence(msg.id);
 
       log.info('Inserted next recurrence', {
         originalId: msg.id,

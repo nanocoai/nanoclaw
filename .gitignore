@@ -14,11 +14,15 @@ logs/
 # Groups - per-installation state, not tracked
 groups/*
 
-# Composer-managed CLAUDE.md artifacts (regenerated every spawn) and
-# per-group memory (CLAUDE.local.md) must never be committed.
+# The same roots when an operator points them at external storage with a
+# symlink. A trailing slash matches directories only, so a symlink named
+# `data` is untracked, and `assertClean` then refuses the update cutover.
+data
+store
+groups
+
+# Per-group memory (CLAUDE.local.md) must never be committed.
 **/CLAUDE.local.md
-**/.claude-shared.md
-**/.claude-fragments/
 
 # Secrets
 *.keys.json
@@ -51,3 +55,4 @@ AGENTS.md
 docs/maintainer-guide.md
 docs/drafts/
 forks.md
+.worktrees/

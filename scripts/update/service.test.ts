@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -6,6 +7,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
+  createCommandRunner,
   detectService,
   drainContainers,
   startService,
@@ -161,5 +163,85 @@ describe('drain and health gates', () => {
       10,
     );
     expect(healthy).toBe(true);
+  });
+});
+
+describe('command runner output capacity', () => {
+  it('captures well over the 1 MiB default maxBuffer (ENOBUFS regression)', () => {
+    // A full vitest run on a large repo exceeds Node's 1 MiB spawnSync default
+    // and killed validate as `spawnSync pnpm ENOBUFS` before the tests were
+    // ever judged.
+    const runner = createCommandRunner();
+    const out = runner.run('node', ['-e', 'process.stdout.write("x".repeat(2 * 1024 * 1024))']);
+    expect(out.length).toBe(2 * 1024 * 1024);
+  });
+});
+
+describe('controller main-module guard', () => {
+  it('runs when invoked through a symlink-spelled path (macOS mktemp lives under /var → /private/var)', () => {
+    // Before the realpath in the guard, a symlinked argv made the guard false
+    // and the controller exited 0 having done nothing — silent success.
+    const linkRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'guard-link-'));
+    const link = path.join(linkRoot, 'repo');
+    fs.symlinkSync(path.resolve(__dirname, '..', '..'), link);
+    try {
+      const result = spawnSync('pnpm', ['exec', 'tsx', path.join(link, 'scripts', 'update-nanoclaw.ts')], {
+        cwd: path.resolve(__dirname, '..', '..'),
+        encoding: 'utf8',
+        timeout: 60_000,
+      });
+      // Reaching main() at all means the guard held: no arguments is a loud
+      // usage error (exit 1 + error JSON), never a silent empty exit 0.
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('nanoclaw-update-error/v1');
+      expect(result.stderr).toContain('Missing command');
+    } finally {
+      fs.rmSync(linkRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('stopService idempotency (already-stopped is success, per mode)', () => {
+  const env = (runner: CommandRunner): ServiceEnvironment => ({
+    platform: 'darwin',
+    home: os.homedir(),
+    uid: 501,
+    runner,
+    sleep: async () => {},
+  });
+
+  it('tolerates launchd bootout of a not-loaded job, in launchctl own words', async () => {
+    const runner: CommandRunner = {
+      run() {
+        throw new Error('Command failed: launchctl bootout gui/501/x\nBoot-out failed: 3: No such process');
+      },
+      tryRun: () => ({ ok: true, stdout: '' }),
+    };
+    await expect(stopService({ mode: 'launchd', active: true, name: 'x' }, env(runner))).resolves.toBeUndefined();
+  });
+
+  it('still throws for any other launchd stop failure — the caller must abort before destroying anything', async () => {
+    const runner: CommandRunner = {
+      run() {
+        throw new Error('Boot-out failed: 5: Input/output error');
+      },
+      tryRun: () => ({ ok: true, stdout: '' }),
+    };
+    await expect(stopService({ mode: 'launchd', active: true, name: 'x' }, env(runner))).rejects.toThrow(
+      /Input\/output error/,
+    );
+  });
+
+  it('tolerates ESRCH for a nohup pid that already exited', async () => {
+    // A freshly-exited real pid; if the OS reused it in the microseconds
+    // since spawnSync returned, kill() raises no ESRCH and the wait loop
+    // fails loudly rather than the test passing vacuously.
+    const dead = spawnSync('node', ['-e', '']);
+    await expect(
+      stopService(
+        { mode: 'nohup', active: true, pid: dead.pid },
+        env({ run: () => '', tryRun: () => ({ ok: true, stdout: '' }) }),
+      ),
+    ).resolves.toBeUndefined();
   });
 });

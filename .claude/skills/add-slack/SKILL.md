@@ -14,8 +14,10 @@ directives); all idempotent.
 This is the base Slack experience: one bot, DM and channel chat. The Slack
 **agents** feature — child bots provisioned from `create_agent`, shared rooms,
 canvases, DM onboarding — ships separately in `/slack-a2a-rooms` +
-`/slack-agent-flow`; the setup wizard applies them automatically, and they can be applied on top
-of this install at any time.
+`/slack-agent-flow`, in-tree under `.claude/skills/` (their canonical home;
+the channels branch keeps a compatibility copy for older checkouts). The
+setup wizard applies them automatically, and they can be applied on top of
+this install at any time.
 Existing classic installs that want the Slack agents experience should use
 `/migrate-slack-agents` rather than re-running this skill (classic keeps
 working; that migration is optional).
@@ -31,6 +33,8 @@ src/channels/slack-lib.ts
 src/channels/slack-lib.test.ts
 src/channels/slack-a2a-guard.ts
 src/channels/slack-a2a-guard.test.ts
+src/channels/slack-raw-text.ts
+src/channels/slack-raw-text.test.ts
 src/channels/slack-registration.test.ts
 src/channels/slack-instances-registration.test.ts
 src/provisioning/slack-app.ts
@@ -40,6 +44,7 @@ container/skills/slack-formatting/SKILL.md
 
 - **Adapter + shared lib** (`slack.ts`, `slack-lib.ts`): bridge registration, wiring defaults, conversation resolver, the native `SLACK_INSTANCES` loop — pinned by the two registration tests.
 - **Bot-inbound guard** (`slack-a2a-guard.ts`): drops bot-authored inbound at the bridge by default; feature skills register a narrower admission policy on its seam.
+- **Raw-text recovery** (`slack-raw-text.ts`): recovers pasted tables, which Slack delivers as attachment blocks in `message.raw` rather than as text — `slack.ts` imports it directly, so it travels with the adapter.
 - **Provisioning core** (`src/provisioning/slack-app.ts`): manifest template, scope/event constants, and the broker + manager-token transports for creating a Slack app programmatically. Nothing on the adapter path imports it — the setup wizard's auto-provision pre-step and feature skills do.
 - **Container skills**: `slack-formatting/` (mrkdwn syntax; synced to `~/.claude/skills`).
 
@@ -184,8 +189,8 @@ bash setup/lib/restart.sh
 
 Mid-`/setup`: return to the setup flow. Otherwise wire the channel with `/init-first-agent`
 (or `/manage-channels`). For the Slack agents feature (child bots from
-`create_agent`, shared rooms, canvases), apply `/slack-a2a-rooms` then
-`/slack-agent-flow` — the setup wizard does both automatically by default.
+`create_agent`, shared rooms, canvases), apply the in-tree `/slack-a2a-rooms`
+then `/slack-agent-flow` — the setup wizard does both automatically by default.
 
 ## Channel Info
 

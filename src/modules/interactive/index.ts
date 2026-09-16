@@ -12,7 +12,7 @@
  */
 import { getDb, hasTable } from '../../db/connection.js';
 import { deletePendingQuestion, getPendingQuestion, getSession } from '../../db/sessions.js';
-import { wakeContainer } from '../../container-runner.js';
+import { requestWake } from '../../request-wake.js';
 import { registerResponseHandler, type ResponsePayload } from '../../response-registry.js';
 import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
@@ -52,7 +52,7 @@ async function handleInteractiveResponse(payload: ResponsePayload): Promise<bool
     sessionId: session.id,
   });
 
-  await wakeContainer(session);
+  await requestWake(session, 'interactive');
   return true;
 }
 

@@ -15,14 +15,18 @@
  */
 import fs from 'fs';
 import path from 'path';
-import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { initTestDb, closeDb, runMigrations, getDb } from '../../db/index.js';
 import { createAgentGroup } from '../../db/agent-groups.js';
 import { AGENT_ACCESS_SCOPE_WARNING, createNewAgentGroup } from './channel-approval.js';
 import { createMessagingGroup, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
-import { registerChannelAdapter } from '../../channels/channel-registry.js';
-import type { ChannelDefaults } from '../../channels/adapter.js';
+import {
+  initChannelAdapters,
+  registerChannelAdapter,
+  teardownChannelAdapters,
+} from '../../channels/channel-registry.js';
+import type { ChannelAdapter, ChannelDefaults, ResolvedConversation } from '../../channels/adapter.js';
 import { upsertUser } from './db/users.js';
 import { grantRole } from './db/user-roles.js';
 
@@ -37,6 +41,24 @@ const telegramDefaults: ChannelDefaults = {
   mentions: 'platform',
 };
 registerChannelAdapter('telegram', { factory: () => null, defaults: telegramDefaults });
+
+const resolveConversationMock = vi.fn(async (_platformId: string): Promise<ResolvedConversation | null> => null);
+const resolveChannelNameMock = vi.fn(async (_platformId: string): Promise<string | null> => null);
+const slackAdapter: ChannelAdapter = {
+  name: 'slack',
+  channelType: 'slack',
+  supportsThreads: true,
+  async setup() {},
+  async teardown() {},
+  isConnected: () => true,
+  async deliver() {
+    return undefined;
+  },
+  resolveConversation: resolveConversationMock,
+  resolveChannelName: resolveChannelNameMock,
+  defaults: telegramDefaults,
+};
+registerChannelAdapter('slack', { factory: () => slackAdapter, defaults: telegramDefaults });
 
 // Mock container runner — prevent actual docker spawn.
 vi.mock('../../container-runner.js', () => ({
@@ -77,6 +99,19 @@ vi.mock('../../config.js', async () => {
 });
 
 const TEST_DIR = '/tmp/nanoclaw-test-channel-approval';
+
+beforeAll(async () => {
+  await initChannelAdapters(() => ({
+    onInbound() {},
+    onInboundEvent() {},
+    onMetadata() {},
+    onAction() {},
+  }));
+});
+
+afterAll(async () => {
+  await teardownChannelAdapters();
+});
 
 function now() {
   return new Date().toISOString();
@@ -134,6 +169,8 @@ beforeEach(async () => {
   );
 
   deliverMock.mockClear();
+  resolveConversationMock.mockReset().mockResolvedValue(null);
+  resolveChannelNameMock.mockReset().mockResolvedValue(null);
 });
 
 afterEach(async () => {
@@ -172,6 +209,27 @@ function dmEvent(platformId: string, text = 'hello') {
   };
 }
 
+function slackGroupMention(platformId: string) {
+  return {
+    channelType: 'slack',
+    platformId,
+    threadId: 'thread-1',
+    message: {
+      id: `msg-${Math.random().toString(36).slice(2, 8)}`,
+      kind: 'chat-sdk' as const,
+      content: JSON.stringify({
+        senderId: 'U_ALICE',
+        sender: 'Alice Doe',
+        senderName: 'Alice Doe',
+        text: '<@bot> hello',
+      }),
+      timestamp: now(),
+      isMention: true,
+      isGroup: true,
+    },
+  };
+}
+
 describe('unknown-channel registration flow', () => {
   it('delivers an approval card on mention into an unwired group', async () => {
     const { routeInbound } = await import('../../router.js');
@@ -185,6 +243,10 @@ describe('unknown-channel registration flow', () => {
     expect(kind).toBe('chat-sdk');
     const payload = JSON.parse(content as string);
     expect(payload.type).toBe('ask_question');
+    expect(payload.title).toBe('📣 Bot mentioned in new channel');
+    expect(payload.question).toBe(
+      `Caller mentioned your bot in a telegram channel. If connected, the agent will respond to @-mentions in this group. ${AGENT_ACCESS_SCOPE_WARNING} How would you like to handle this channel?`,
+    );
     // Card tells the approver the resolved engage rule.
     expect(payload.question).toContain('will respond to @-mentions in this group');
     expect(payload.question).toContain(AGENT_ACCESS_SCOPE_WARNING);
@@ -197,6 +259,42 @@ describe('unknown-channel registration flow', () => {
     expect(rows).toHaveLength(1);
   });
 
+  it('renders Slack MPDMs as participant-based group chats without leaking the internal slug', async () => {
+    resolveConversationMock.mockResolvedValueOnce({
+      type: 'group_dm',
+      name: null,
+      participantNames: ['alice', 'Bob', 'Carol'],
+      participantIds: ['U_ALICE', 'U_BOB', 'U_CAROL'],
+    });
+    resolveChannelNameMock.mockResolvedValueOnce('mpdm-alice--bob--carol-1');
+
+    const { routeInbound } = await import('../../router.js');
+    await expectAsyncDelivery(() => routeInbound(slackGroupMention('mpdm-alice--bob--carol-1')));
+
+    const payload = JSON.parse(deliverMock.mock.calls[0][4] as string) as { title: string; question: string };
+    expect(payload.title).toBe('👥 Bot mentioned in new group chat');
+    expect(payload.question).toContain('Alice Doe mentioned your bot in a group chat with Bob and Carol on slack.');
+    expect(payload.question).toContain(AGENT_ACCESS_SCOPE_WARNING);
+    expect(payload.question).toContain('How would you like to handle this group chat?');
+    expect(payload.question).not.toContain('mpdm-');
+    expect(resolveConversationMock).toHaveBeenCalledWith('mpdm-alice--bob--carol-1');
+  });
+
+  it('persists a rich-resolved Slack channel name and skips the legacy resolver', async () => {
+    resolveConversationMock.mockResolvedValueOnce({ type: 'channel', name: 'growth-team' });
+    resolveChannelNameMock.mockResolvedValueOnce('legacy-name');
+
+    const { routeInbound } = await import('../../router.js');
+    await expectAsyncDelivery(() => routeInbound(slackGroupMention('C_GROWTH')));
+
+    const payload = JSON.parse(deliverMock.mock.calls[0][4] as string) as { title: string; question: string };
+    expect(payload.title).toBe('📣 Bot mentioned in new channel');
+    expect(payload.question).toContain('Alice Doe mentioned your bot in growth-team on slack.');
+    expect(payload.question).toContain('How would you like to handle this channel?');
+    expect(resolveChannelNameMock).not.toHaveBeenCalled();
+    expect((await getMessagingGroupByPlatform('slack', 'C_GROWTH'))?.name).toBe('growth-team');
+  });
+
   it('delivers a card on DM too (non-threaded event)', async () => {
     const { routeInbound } = await import('../../router.js');
     await expectAsyncDelivery(() => routeInbound(dmEvent('dm-new-user')));
@@ -204,6 +302,7 @@ describe('unknown-channel registration flow', () => {
     expect(deliverMock).toHaveBeenCalledTimes(1);
     const payload = JSON.parse(deliverMock.mock.calls[0][4] as string) as { question: string };
     expect(payload.question).toContain('will respond to all messages');
+    expect(payload.question).toContain(AGENT_ACCESS_SCOPE_WARNING);
     const count = await countRows('SELECT COUNT(*) AS c FROM pending_channel_approvals');
     expect(count).toBe(1);
   });

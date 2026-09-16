@@ -16,7 +16,7 @@ afterEach(() => {
 
 // --- Mid-turn <message> block delivery ---
 // The SDK's final result carries only the LAST assistant text. For providers
-// declaring emitsMidTurnText, a wrapped reply composed between tool calls is
+// declaring `textDelivery: 'mid-turn-complete'`, a wrapped reply composed between tool calls is
 // delivered from the 'text' event stream at parse time; the final result
 // structurally STRIPS complete blocks (they already streamed, so they were
 // already delivered — no runtime record consulted), and a bare final text
@@ -59,9 +59,9 @@ function insertMessage(id: string, kind: string, content: object): void {
 
 function taskLogRows(): Array<{ text: string }> {
   return (
-    getOutboundDb()
-      .prepare("SELECT content FROM messages_out WHERE kind = 'task_log' ORDER BY seq")
-      .all() as Array<{ content: string }>
+    getOutboundDb().prepare("SELECT content FROM messages_out WHERE kind = 'task_log' ORDER BY seq").all() as Array<{
+      content: string;
+    }>
   ).map((r) => JSON.parse(r.content) as { text: string });
 }
 
@@ -257,7 +257,7 @@ describe('mid-turn <message> block delivery', () => {
     expect(pushes.filter((p) => p.includes('was not delivered'))).toHaveLength(1);
   });
 
-  it('delivers a bare error result even after a mid-turn delivery in the same turn', async () => {
+  it('delivers a safe failure notice after a mid-turn delivery in the same turn', async () => {
     seedDest();
     const errText = 'Spending limit reached. Add your own key at https://example.com/keys';
     async function* events(): AsyncGenerator<ProviderEvent> {
@@ -272,11 +272,11 @@ describe('mid-turn <message> block delivery', () => {
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(2);
     expect(JSON.parse(out[0].content).text).toBe('Started on it.');
-    expect(JSON.parse(out[1].content).text).toBe(errText);
+    expect(JSON.parse(out[1].content).text).toBe('The agent run failed. Check the logs for details.');
     expect(pushes).toHaveLength(0);
   });
 
-  it('an error result that only repeats the streamed block is not delivered again', async () => {
+  it('does not repeat partial text but still reports the failed turn', async () => {
     seedDest();
     const block = '<message to="discord-main">Partial progress report.</message>';
     async function* events(): AsyncGenerator<ProviderEvent> {
@@ -288,7 +288,10 @@ describe('mid-turn <message> block delivery', () => {
 
     await processQuery(query, CHAT_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined, true);
 
-    expect(getUndeliveredMessages()).toHaveLength(1);
+    expect(getUndeliveredMessages().map((row) => JSON.parse(row.content).text)).toEqual([
+      'Partial progress report.',
+      'The agent run failed. Check the logs for details.',
+    ]);
     expect(pushes).toHaveLength(0);
   });
 
@@ -325,11 +328,11 @@ describe('mid-turn <message> block delivery', () => {
   });
 });
 
-// Providers that do NOT declare emitsMidTurnText keep the old single-door
+// Providers that do NOT declare mid-turn delivery keep the old single-door
 // behavior: text events are delivery-inert and <message> blocks deliver from
 // the final result. The capability is a static fact of the provider, threaded
 // into processQuery by runPollLoop — never inferred from runtime events.
-describe('provider without emitsMidTurnText: result door unchanged', () => {
+describe('provider without mid-turn delivery: result door unchanged', () => {
   it('ignores text events and delivers the result block exactly once', async () => {
     seedDest();
     const block = '<message to="discord-main">The answer is 4.</message>';
@@ -358,7 +361,7 @@ describe('provider without emitsMidTurnText: result door unchanged', () => {
     const block = '<message to="discord-main">Result-door delivery.</message>';
     // A real MockProvider stream (text segment, then a result repeating the
     // block), but driven the way runPollLoop drives a provider that does not
-    // declare emitsMidTurnText.
+    // declare mid-turn delivery.
     const provider = new MockProvider(
       {},
       () => block,
@@ -376,10 +379,6 @@ describe('provider without emitsMidTurnText: result door unchanged', () => {
 });
 
 describe('mock provider mid-turn text events', () => {
-  it('declares the emitsMidTurnText capability', () => {
-    expect(new MockProvider().emitsMidTurnText).toBe(true);
-  });
-
   it('emits configured text events before each result', async () => {
     const provider = new MockProvider(
       {},
@@ -412,8 +411,7 @@ describe('mock provider mid-turn text events', () => {
       events.push(event);
     }
     // The real SDK's result only repeats the final assistant text, which
-    // already streamed — a mock declaring emitsMidTurnText must match that,
-    // or the result-door strip would remove blocks that never delivered.
+    // already streamed.
     const texts = events.filter((e) => e.type === 'text');
     expect(texts).toHaveLength(1);
     expect(texts[0].text).toBe('ok');

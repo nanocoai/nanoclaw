@@ -31,6 +31,7 @@ export interface UpdateRequirement {
 export interface SnapshotEntry {
   relativePath: string;
   existed: boolean;
+  symlinkTarget?: string;
 }
 
 export interface UpdateState {
@@ -107,12 +108,32 @@ function statePath(transactionRoot: string): string {
   return path.join(transactionRoot, 'state.json');
 }
 
+/**
+ * Resolve to a canonical physical path. `path.resolve` alone is not enough on
+ * macOS, where `os.tmpdir()` and `/var` are symlinks into `/private` — one
+ * side of a comparison records the symlinked spelling and the other the real
+ * one, and every equality check below then refuses a perfectly matched state.
+ */
+function realResolve(p: string): string {
+  const resolved = path.resolve(p);
+  try {
+    return fs.realpathSync(resolved);
+  } catch {
+    // The leaf may legitimately not exist (a cleaned-up stage worktree in a
+    // terminal transaction). Canonicalize the nearest existing ancestor and
+    // re-append, so /var vs /private/var still compares equal.
+    const parent = path.dirname(resolved);
+    if (parent === resolved) return resolved;
+    return path.join(realResolve(parent), path.basename(resolved));
+  }
+}
+
 function hasSafeStatePaths(state: UpdateState, projectRoot: string, transactionRoot: string, id: string): boolean {
   return (
     state.id === id &&
-    path.resolve(state.projectRoot) === path.resolve(projectRoot) &&
-    path.resolve(state.transactionRoot) === path.resolve(transactionRoot) &&
-    path.resolve(state.stageRoot) === path.join(path.resolve(transactionRoot), 'worktree') &&
+    realResolve(state.projectRoot) === realResolve(projectRoot) &&
+    realResolve(state.transactionRoot) === realResolve(transactionRoot) &&
+    realResolve(state.stageRoot) === path.join(realResolve(transactionRoot), 'worktree') &&
     state.stageBranch === `update-nanoclaw/${id}` &&
     /^backup\/pre-update-[0-9a-f]{8}-\d{14}-[0-9a-f]{8}$/.test(state.backupBranch) &&
     /^pre-update-[0-9a-f]{8}-\d{14}-[0-9a-f]{8}$/.test(state.backupTag)
@@ -128,7 +149,10 @@ function saveState(state: UpdateState): void {
 }
 
 export function loadState(projectRoot: string, id: string): UpdateState {
-  const expectedTransactionRoot = path.join(defaultTransactionsRoot(path.resolve(projectRoot)), id);
+  // Same canonicalization as the safety comparisons: the slug is derived from
+  // the path's spelling, so a symlink-spelled --project-root must land on the
+  // root the (realpathed) prepare wrote under, not an ENOENT sibling.
+  const expectedTransactionRoot = path.join(defaultTransactionsRoot(realResolve(projectRoot)), id);
   const target = statePath(expectedTransactionRoot);
   const state = JSON.parse(fs.readFileSync(target, 'utf8')) as UpdateState;
   if (state.schema !== 'nanoclaw-update/v1') throw new Error(`Unsupported update state in ${target}`);
@@ -311,6 +335,9 @@ export async function validateUpdate(
     refreshPreparedState(state, runtime);
 
     const checks: string[] = [];
+    // Cheap, and it names the offending path while nothing is stopped yet.
+    assertMutableRootsResolvable(state.projectRoot);
+    checks.push('mutable-state roots resolvable');
     runtime.runner.run('pnpm', ['install', '--frozen-lockfile'], state.stageRoot);
     checks.push('host dependencies');
     runtime.runner.run('pnpm', ['run', 'build'], state.stageRoot);
@@ -350,8 +377,27 @@ export async function validateUpdate(
 
 const MUTABLE_PATHS = ['.env', 'data', 'groups', 'store', 'start-nanoclaw.sh', 'nanoclaw.pid'];
 
-function copyEntry(source: string, destination: string): void {
-  const stat = fs.lstatSync(source);
+// A mutable root that is a symlink to nowhere makes the snapshot walk throw a
+// bare ENOENT. Report it by name up front so the operator is not told merely
+// that a path does not exist, after a stop/drain cycle has already run.
+function assertMutableRootsResolvable(projectRoot: string): void {
+  for (const relativePath of MUTABLE_PATHS) {
+    const source = path.join(projectRoot, relativePath);
+    const stat = lstatIfExists(source);
+    if (stat?.isSymbolicLink() !== true) continue;
+    if (!fs.existsSync(source)) {
+      throw new Error(`Mutable-state symlink points at a missing target: ${source} -> ${fs.readlinkSync(source)}`);
+    }
+  }
+}
+
+function lstatIfExists(source: string): fs.Stats | undefined {
+  return fs.lstatSync(source, { throwIfNoEntry: false });
+}
+
+function copyEntry(source: string, destination: string, dereferenceRoot = false): void {
+  const linkStat = fs.lstatSync(source);
+  const stat = dereferenceRoot && linkStat.isSymbolicLink() ? fs.statSync(source) : linkStat;
   if (stat.isDirectory()) {
     fs.mkdirSync(destination, { recursive: true, mode: stat.mode });
     for (const entry of fs.readdirSync(source)) copyEntry(path.join(source, entry), path.join(destination, entry));
@@ -369,12 +415,32 @@ function copyEntry(source: string, destination: string): void {
 
 function createSnapshot(state: UpdateState): SnapshotEntry[] {
   const snapshotRoot = path.join(state.transactionRoot, 'snapshot');
-  fs.mkdirSync(snapshotRoot, { recursive: true, mode: 0o700 });
+  // Complete-or-old BY CONSTRUCTION: the copy builds into `snapshot.new` and
+  // is renamed into place only after it finishes, so the literal `snapshot/`
+  // directory — the one every restore path reads — is only ever a completed
+  // copy (this attempt's or a prior one's), never partial. That holds across
+  // in-process failures AND hard crashes mid-copy: a retried cutover whose
+  // persisted entry list still points at `snapshot/` can never feed a partial
+  // copy to the automatic rollback, which would delete live mutable state and
+  // then report the rollback as a success. (Also the fix for plain retry:
+  // copyFileSync cannot overwrite files a previous attempt copied read-only —
+  // git pack files are 0444 — so copy-in-place died with EACCES.)
+  const buildRoot = `${snapshotRoot}.new`;
+  const supersededRoot = `${snapshotRoot}.prev`;
+  fs.rmSync(buildRoot, { recursive: true, force: true });
+  // Self-heal the rename window: a crash between the two renames leaves
+  // `snapshot/` absent with the complete prior copy still in `.prev` — put it
+  // back rather than deleting the only complete copy on disk.
+  if (!fs.existsSync(snapshotRoot) && fs.existsSync(supersededRoot)) {
+    fs.renameSync(supersededRoot, snapshotRoot);
+  }
+  fs.rmSync(supersededRoot, { recursive: true, force: true });
+  fs.mkdirSync(buildRoot, { recursive: true, mode: 0o700 });
   const bytesNeeded = MUTABLE_PATHS.reduce((total, relativePath) => {
     const source = path.join(state.projectRoot, relativePath);
-    return total + (fs.existsSync(source) ? entrySize(source) : 0);
+    return total + (lstatIfExists(source) ? entrySize(source, true) : 0);
   }, 0);
-  const disk = fs.statfsSync(snapshotRoot);
+  const disk = fs.statfsSync(buildRoot);
   const bytesAvailable = Number(disk.bavail) * Number(disk.bsize);
   const reserve = 256 * 1024 * 1024;
   if (bytesAvailable < bytesNeeded + reserve) {
@@ -382,28 +448,71 @@ function createSnapshot(state: UpdateState): SnapshotEntry[] {
       `Not enough free space for mutable-state snapshot: need ${bytesNeeded + reserve}, have ${bytesAvailable}`,
     );
   }
-  return MUTABLE_PATHS.map((relativePath) => {
+  const entries = MUTABLE_PATHS.map((relativePath) => {
     const source = path.join(state.projectRoot, relativePath);
-    const existed = fs.existsSync(source);
-    if (existed) copyEntry(source, path.join(snapshotRoot, relativePath));
-    return { relativePath, existed };
+    const sourceStat = lstatIfExists(source);
+    const existed = sourceStat !== undefined;
+    const symlinkTarget = sourceStat?.isSymbolicLink() ? fs.readlinkSync(source) : undefined;
+    if (existed) copyEntry(source, path.join(buildRoot, relativePath), true);
+    return { relativePath, existed, ...(symlinkTarget === undefined ? {} : { symlinkTarget }) };
   });
+  if (fs.existsSync(snapshotRoot)) fs.renameSync(snapshotRoot, supersededRoot);
+  fs.renameSync(buildRoot, snapshotRoot);
+  fs.rmSync(supersededRoot, { recursive: true, force: true });
+  return entries;
 }
 
-function entrySize(source: string): number {
-  const stat = fs.lstatSync(source);
+function entrySize(source: string, dereferenceRoot = false): number {
+  const linkStat = fs.lstatSync(source);
+  const stat = dereferenceRoot && linkStat.isSymbolicLink() ? fs.statSync(source) : linkStat;
   if (stat.isFile()) return stat.size;
   if (!stat.isDirectory()) return 0;
   return fs.readdirSync(source).reduce((total, entry) => total + entrySize(path.join(source, entry)), 0);
 }
 
-function restoreSnapshot(state: UpdateState): void {
+// Every reason a restore cannot proceed, checked without touching live state.
+// `rollbackLocal` runs this BEFORE it stops the service or resets the checkout,
+// so an unrestorable rollback fails with the service still up and the code
+// still at the new head, rather than stranding a stopped service on old code
+// with a forward-migrated database.
+function assertSnapshotRestorable(state: UpdateState): void {
   if (!state.snapshot) throw new Error('No mutable-state snapshot exists');
   const snapshotRoot = path.join(state.transactionRoot, 'snapshot');
+  // Abort BEFORE touching live state when the snapshot is gone — discovering
+  // it entry-by-entry would delete live targets and then fail anyway.
+  if (!fs.existsSync(snapshotRoot)) throw new Error(`Mutable-state snapshot missing: ${snapshotRoot}`);
   for (const entry of state.snapshot) {
+    if (entry.symlinkTarget === undefined) continue;
     const target = path.join(state.projectRoot, entry.relativePath);
-    fs.rmSync(target, { recursive: true, force: true });
-    if (entry.existed) copyEntry(path.join(snapshotRoot, entry.relativePath), target);
+    // A deleted link is a changed link: `undefined` must reach the descriptive
+    // error below rather than throwing a bare ENOENT from `lstatSync`.
+    const stat = lstatIfExists(target);
+    if (stat?.isSymbolicLink() !== true || fs.readlinkSync(target) !== entry.symlinkTarget) {
+      throw new Error(`Mutable-state symlink changed after snapshot: ${target}`);
+    }
+  }
+}
+
+function restoreSnapshot(state: UpdateState): void {
+  assertSnapshotRestorable(state);
+  const snapshotRoot = path.join(state.transactionRoot, 'snapshot');
+  for (const entry of state.snapshot ?? []) {
+    const target = path.join(state.projectRoot, entry.relativePath);
+    const restoreTarget =
+      entry.symlinkTarget === undefined ? target : realResolve(path.resolve(path.dirname(target), entry.symlinkTarget));
+    // A symlinked root's target is the operator's directory, not ours: it may be
+    // a mount point or sit under a parent we cannot write, so removing the
+    // directory inode itself can fail AFTER its contents are gone. Empty it in
+    // place and restore into it, preserving the inode, mode, and ownership.
+    const keepDirectory = entry.symlinkTarget !== undefined && lstatIfExists(restoreTarget)?.isDirectory() === true;
+    if (keepDirectory) {
+      for (const child of fs.readdirSync(restoreTarget)) {
+        fs.rmSync(path.join(restoreTarget, child), { recursive: true, force: true });
+      }
+    } else {
+      fs.rmSync(restoreTarget, { recursive: true, force: true });
+    }
+    if (entry.existed) copyEntry(path.join(snapshotRoot, entry.relativePath), restoreTarget);
   }
 }
 
@@ -420,6 +529,18 @@ function installAndBuild(root: string, state: UpdateState, runtime: UpdateRuntim
 
 async function rollbackLocal(state: UpdateState, runtime: UpdateRuntime): Promise<void> {
   if (!state.service) throw new Error('Update state has no captured service handle for rollback');
+  // Fail closed while the service is still up and the checkout still at the new
+  // head: a missing snapshot or a repointed symlink cannot be fixed by anything
+  // below, and discovering it after the stop/reset leaves the operator with a
+  // stopped service on old code and a forward-migrated database.
+  assertSnapshotRestorable(state);
+  // On the cutover failure path the service was already stopped by cutover
+  // itself; `stopService` is idempotent per mode (already-stopped is success
+  // in the manager's own vocabulary — see its header), so this cannot abort
+  // the restore for a service that is simply gone, while a service that is
+  // genuinely still running still aborts loudly BEFORE anything is destroyed.
+  // Deliberately not a fresh detection: an under-reporting detection would
+  // skip the stop and reset the checkout under a live service.
   await runtime.stopService(state.service);
   git(runtime, state.projectRoot, ['reset', '--hard', state.originalHead]);
   restoreSnapshot(state);
@@ -447,6 +568,9 @@ export async function cutoverUpdate(
   if (git(runtime, state.projectRoot, ['rev-parse', 'HEAD']) !== state.originalHead) {
     throw new Error('Live checkout moved after the update was staged');
   }
+  // Re-check here too: validation may have run long ago, and this is the last
+  // point before the stop/drain cycle that the snapshot walk depends on.
+  assertMutableRootsResolvable(state.projectRoot);
 
   state.service = runtime.detectService(state.projectRoot);
   await runtime.stopService(state.service);
@@ -582,7 +706,7 @@ export function pruneTransactions(
   runtime = createUpdateRuntime(),
 ): PruneReport {
   const resolvedProjectRoot = fs.realpathSync(projectRoot);
-  const root = path.resolve(defaultTransactionsRoot(resolvedProjectRoot));
+  const root = realResolve(defaultTransactionsRoot(resolvedProjectRoot));
   const filesystemRoot = path.parse(root).root;
   if (root === filesystemRoot || root === resolvedProjectRoot || resolvedProjectRoot.startsWith(`${root}${path.sep}`)) {
     throw new Error(`Unsafe transaction root: ${root}`);

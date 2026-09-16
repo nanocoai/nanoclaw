@@ -8,13 +8,18 @@
  * raw routes must coexist with Chat SDK adapter routes on the same
  * server, and stopWebhookServer must clear them.
  */
-import { afterAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import type { Chat } from 'chat';
 
+import { allocateFreePort } from './test-utils/free-port.js';
 import { registerWebhookAdapter, registerWebhookHandler, stopWebhookServer } from './webhook-server.js';
 
-const PORT = 21000 + Math.floor(Math.random() * 20000);
+let PORT: number;
+
+beforeAll(async () => {
+  PORT = await allocateFreePort();
+});
 
 async function post(path: string, body = '{}'): Promise<globalThis.Response> {
   for (let attempt = 0; ; attempt++) {

@@ -30,7 +30,7 @@ const FOREIGN_AGENT: CallerContext = {
   messagingGroupId: 'mg-y',
 };
 
-async function writeInbound(id: string, timestamp: string, text: string, sender = 'Gavriel'): Promise<void> {
+async function writeInbound(id: string, timestamp: string, text: string, sender = 'Alex'): Promise<void> {
   await writeSessionMessage(AG, SESS, {
     id,
     kind: 'chat',
@@ -93,7 +93,7 @@ describe('sessionHistory', () => {
       timestamp: '2026-08-01T10:00:00.000Z',
       direction: 'in',
       kind: 'chat',
-      sender: 'Gavriel',
+      sender: 'Alex',
       text: 'hello there',
     });
     expect(rows[1].text).toBe('second message');
@@ -106,7 +106,7 @@ describe('sessionHistory', () => {
   it('formatHistoryLines renders pipe lines with localized stamps and capped cells', async () => {
     await writeInbound('in-1', '2026-08-01T10:00:00.000Z', 'hello there');
     const lines = formatHistoryLines(await sessionHistory({ id: SESS }, HOST), 'UTC').split('\n');
-    expect(lines).toEqual(['2026-08-01 10:00|in|chat|Gavriel|hello there']);
+    expect(lines).toEqual(['2026-08-01 10:00|in|chat|Alex|hello there']);
     // A non-UTC install timezone shifts the human stamp; data stays ISO.
     const berlin = formatHistoryLines(await sessionHistory({ id: SESS }, HOST), 'Europe/Berlin');
     expect(berlin.startsWith('2026-08-01 12:00|')).toBe(true);

@@ -9,6 +9,14 @@ export interface AgentGroup {
   created_at: string;
 }
 
+/**
+ * A provider-declared speed tier name (`inference.speedTiers` on the provider's
+ * host contract; `standard` | `fast` for Claude). Validated at `ncl groups
+ * config update --speed` time against the group's provider, then stored and
+ * passed through by core as an opaque token.
+ */
+export type ContainerSpeed = string;
+
 /** Per-agent-group container runtime config. Source of truth in the DB;
  *  materialized to `groups/<folder>/container.json` at spawn time. */
 export interface ContainerConfigRow {
@@ -26,6 +34,14 @@ export interface ContainerConfigRow {
   additional_mounts: string; // JSON: AdditionalMountConfig[]
   cli_scope: string; // 'disabled' | 'group' | 'global'
   timezone: string | null; // IANA id; NULL = follow the install-global timezone
+  speed: ContainerSpeed | null; // NULL = install/provider default
+  /**
+   * Session isolation tier ('container' | 'vm') — see SessionSpec.runtimeTier.
+   * Optional on the TS type because the trunk schema does not carry the
+   * column: a deployment whose driver realizes more than one tier adds it,
+   * and `SELECT *` rows surface it here. Absent means the default tier.
+   */
+  runtime_tier?: string | null;
   updated_at: string;
 }
 

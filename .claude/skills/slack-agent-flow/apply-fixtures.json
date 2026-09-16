@@ -1,0 +1,9 @@
+{
+  "notes": "Conformance fixtures for scripts/skill-conformance.test.ts — this skill declares no prompts and captures nothing, so one default scenario with no inputs covers the whole document (the two effect:check gates and the build/test/restart runs are exec-stubbed).",
+  "scenarios": [
+    {
+      "name": "default",
+      "inputs": {}
+    }
+  ]
+}

@@ -16,7 +16,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { InboundEvent } from '../../channels/adapter.js';
 import { initTestDb, closeDb, runMigrations } from '../../db/index.js';
 import { createAgentGroup } from '../../db/agent-groups.js';
-import { createMessagingGroup } from '../../db/messaging-groups.js';
 import {
   createSession,
   createPendingApproval,
@@ -27,7 +26,6 @@ import {
 import { setDeliveryAdapter, type ChannelDeliveryAdapter } from '../../delivery.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import { upsertUser } from '../permissions/db/users.js';
-import { upsertUserDm } from '../permissions/db/user-dms.js';
 import { grantRole } from '../permissions/db/user-roles.js';
 import { REJECT_WITH_REASON_VALUE } from './primitive.js';
 
@@ -48,16 +46,17 @@ vi.mock('../../session-manager.js', async () => {
 const TEST_DIR = '/tmp/nanoclaw-test-reject-reason';
 const DM_CHANNEL = 'slack';
 const DM_PLATFORM = 'D-admin-1';
+const DM_INSTANCE = 'slack-secondary';
 
 function now(): string {
   return new Date().toISOString();
 }
 
-let delivered: Array<{ channelType: string; platformId: string; content: string }>;
+let delivered: Array<{ channelType: string; platformId: string; content: string; instance?: string }>;
 
 const fakeAdapter: ChannelDeliveryAdapter = {
-  async deliver(channelType, platformId, _threadId, _kind, content) {
-    delivered.push({ channelType, platformId, content });
+  async deliver(channelType, platformId, _threadId, _kind, content, _files, instance) {
+    delivered.push({ channelType, platformId, content, instance });
     return 'pm-1';
   },
 };
@@ -70,6 +69,9 @@ async function seedApproval(approvalId: string, action = 'create_agent'): Promis
     action,
     payload: JSON.stringify({ name: 'child' }),
     created_at: now(),
+    channel_type: DM_CHANNEL,
+    platform_id: DM_PLATFORM,
+    instance: DM_INSTANCE,
     title: 'Approval',
     options_json: JSON.stringify([]),
   });
@@ -80,6 +82,7 @@ function dmReply(text?: string): InboundEvent {
   if (text !== undefined) content.text = text;
   return {
     channelType: DM_CHANNEL,
+    instance: DM_INSTANCE,
     platformId: DM_PLATFORM,
     threadId: null,
     message: { id: 'm-1', kind: 'chat', content: JSON.stringify(content), timestamp: now() },
@@ -94,7 +97,7 @@ async function clickRejectWithReason(approvalId: string): Promise<void> {
     value: REJECT_WITH_REASON_VALUE,
     userId: 'admin-1',
     channelType: DM_CHANNEL,
-    platformId: '', // not surfaced by the click payload — resolved via ensureUserDm
+    platformId: DM_PLATFORM,
     threadId: null,
   });
 }
@@ -127,8 +130,7 @@ beforeEach(async () => {
     created_at: now(),
   });
 
-  // Authorized approver + a cached DM so ensureUserDm resolves without a
-  // platform openDM call.
+  // Authorized approver for the stored delivery address.
   await upsertUser({ id: 'slack:admin-1', kind: 'slack', display_name: 'Admin', created_at: now() });
   await grantRole({
     user_id: 'slack:admin-1',
@@ -137,22 +139,6 @@ beforeEach(async () => {
     granted_by: null,
     granted_at: now(),
   });
-  await createMessagingGroup({
-    id: 'mg-dm-1',
-    channel_type: DM_CHANNEL,
-    platform_id: DM_PLATFORM,
-    name: 'Admin DM',
-    is_group: 0,
-    unknown_sender_policy: 'strict',
-    created_at: now(),
-  });
-  await upsertUserDm({
-    user_id: 'slack:admin-1',
-    channel_type: DM_CHANNEL,
-    messaging_group_id: 'mg-dm-1',
-    resolved_at: now(),
-  });
-
   setDeliveryAdapter(fakeAdapter);
 });
 
@@ -174,6 +160,7 @@ describe('reject with reason', () => {
     expect(delivered).toHaveLength(1);
     expect(delivered[0].channelType).toBe(DM_CHANNEL);
     expect(delivered[0].platformId).toBe(DM_PLATFORM);
+    expect(delivered[0].instance).toBe(DM_INSTANCE);
     expect((JSON.parse(delivered[0].content) as { text: string }).text).toMatch(/reason/i);
 
     // Agent is not notified yet — the hold is still open.

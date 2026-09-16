@@ -25,6 +25,7 @@ import { SqliteStateAdapter } from '../state-sqlite.js';
 import { registerWebhookAdapter } from '../webhook-server.js';
 import { normalizeOptions, type NormalizedOption } from './ask-question.js';
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage } from './adapter.js';
+import { INSTANCE_KEY_RE } from './channel-registry.js';
 import { resolveQuestionRender } from './question-render-registry.js';
 
 /** Adapter with optional gateway support (e.g., Discord). */
@@ -35,6 +36,11 @@ interface GatewayAdapter extends Adapter {
     abortSignal?: AbortSignal,
     webhookUrl?: string,
   ): Promise<Response>;
+}
+
+/** Adapter that can expose authenticated transport liveness to host status. */
+interface ConnectionAwareAdapter extends Adapter {
+  isConnected?(): boolean;
 }
 
 /** Reply context extracted from a platform's raw message. */
@@ -205,6 +211,17 @@ export function normalizeDmThreadId(threadId: string, messageId: string): string
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type ReplyContextExtractor = (raw: Record<string, any>) => ReplyContext | null;
 
+/**
+ * Recover readable content a platform adapter left only in `message.raw`.
+ *
+ * The bridge drops `raw` before persisting (it can be very large), so anything
+ * the adapter did not project into `Message.toJSON()` is lost at that point.
+ * A platform that carries readable content outside the normal text — Slack
+ * puts pasted tables in `attachments[].blocks[]` — returns it here as text.
+ * Return null when there is nothing to recover.
+ */
+export type RawTextExtractor = (raw: Record<string, unknown>) => string | null;
+
 // ---------------------------------------------------------------------------
 // Membership hook
 // ---------------------------------------------------------------------------
@@ -321,6 +338,12 @@ export interface ChatSdkBridgeConfig {
   /** Platform-specific reply context extraction. */
   extractReplyContext?: ReplyContextExtractor;
   /**
+   * Recover readable content the platform adapter left only in `message.raw`.
+   * The returned text is appended to the message body and persisted; the raw
+   * provider payload is still dropped.
+   */
+  extractRawText?: RawTextExtractor;
+  /**
    * Whether this platform uses threads as the primary conversation unit.
    * See `ChannelAdapter.supportsThreads`. Declared by the calling channel
    * skill, not inferred, because some platforms (Discord) can be used either
@@ -418,6 +441,22 @@ export function splitForLimit(text: string, limit: number): string[] {
   return chunks;
 }
 
+/**
+ * Append platform-rescued text to the serialized body, before `raw` is dropped.
+ * No extractor, or nothing recovered, leaves the body byte-identical.
+ */
+export function appendRawText(
+  serialized: Record<string, unknown>,
+  raw: Record<string, unknown>,
+  extract?: RawTextExtractor,
+): void {
+  if (!extract) return;
+  const extra = extract(raw);
+  if (!extra) return;
+  const text = typeof serialized.text === 'string' ? serialized.text : '';
+  serialized.text = text ? `${text}\n\n${extra}` : extra;
+}
+
 export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter {
   const { adapter } = config;
   // The instance name becomes a webhook route segment (the route regex is
@@ -427,7 +466,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
   // whitespace-only names, which are config bugs — '' is falsy, so it
   // would skip a truthiness guard, dead-end the webhook route, and
   // collapse the state namespace into the default instance's keyspace.
-  if (config.instance !== undefined && !/^[A-Za-z0-9._-]+$/.test(config.instance)) {
+  if (config.instance !== undefined && !INSTANCE_KEY_RE.test(config.instance)) {
     throw new Error(
       `chat-sdk bridge instance ${JSON.stringify(config.instance)} must be URL-safe: ` +
         `non-empty, only letters, digits, '.', '_' or '-'`,
@@ -474,6 +513,11 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         enriched.push(entry);
       }
       serialized.attachments = enriched;
+    }
+
+    // Recover platform content the Chat SDK omitted, while raw is still here.
+    if (message.raw) {
+      appendRawText(serialized, message.raw as Record<string, unknown>, config.extractRawText);
     }
 
     // Extract reply context via platform-specific hook
@@ -740,6 +784,11 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         };
         startGateway();
         log.info('Gateway listener started', { adapter: adapter.name });
+      } else if ('runtimeMode' in adapter && adapter.runtimeMode === 'polling') {
+        // Polling adapters (Telegram) pull updates themselves; a route here
+        // would only bind the shared webhook port for nothing. Read after
+        // initialize(): the adapter resolves mode 'auto' there.
+        log.info('Polling adapter: no webhook route registered', { adapter: adapter.name });
       } else {
         // Non-gateway adapters (Slack, Teams, GitHub, etc.) — register on the
         // shared webhook server. The handler key stays adapter.name (the
@@ -820,6 +869,8 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       // Display card (send_card MCP tool) — returns immediately, no callback flow.
       // Non-URL actions are dropped: send_card's contract is fire-and-forget, so a
       // callback button would have nowhere to land. URL actions render as link buttons.
+      // The runner filters these against LINK_ACTION_SCHEMA before writing the row;
+      // the checks below still stand because any producer can write this payload.
       if (content.type === 'card' && content.card && typeof content.card === 'object') {
         const cardSpec = content.card as Record<string, unknown>;
         const title = (cardSpec.title as string) || '';
@@ -843,8 +894,16 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           }
         }
         if (Array.isArray(cardSpec.actions)) {
-          const linkButtons = (cardSpec.actions as Array<Record<string, unknown>>)
-            .filter((a) => typeof a.url === 'string' && a.url && typeof a.label === 'string' && a.label)
+          const linkButtons = (cardSpec.actions as Array<Record<string, unknown> | null | undefined>)
+            .filter(
+              (a): a is Record<string, unknown> =>
+                !!a &&
+                typeof a === 'object' &&
+                typeof a.url === 'string' &&
+                !!a.url &&
+                typeof a.label === 'string' &&
+                !!a.label,
+            )
             .map((a) => {
               const style = a.style;
               const safeStyle: 'primary' | 'danger' | 'default' | undefined =
@@ -919,7 +978,8 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     },
 
     isConnected() {
-      return true;
+      const probe = (adapter as ConnectionAwareAdapter).isConnected;
+      return probe ? probe.call(adapter) : true;
     },
 
     async subscribe(_platformId: string, threadId: string) {

@@ -36,6 +36,8 @@ import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 
+import { gitFetchBranchCommand } from '../../scripts/git-fetch-branch.js';
+import { gitShowToFileCommand } from '../../scripts/git-show-to-file.js';
 import * as setupLog from '../logs.js';
 import { brightSelect } from '../lib/bright-select.js';
 import { confirmThenOpen } from '../lib/browser.js';
@@ -50,6 +52,7 @@ import {
   writeImageSource,
 } from '../lib/registry-state.js';
 import { ensureAnswer } from '../lib/runner.js';
+import { portalEnabled, runSlackPortal } from '../portal.js';
 import { wrapForGutter } from '../lib/theme.js';
 
 // Both browser round-trips this file waits on — connecting a workspace, and
@@ -126,10 +129,23 @@ export interface ProvisioningCore {
 
 /** Injection seam for tests — the bootstrap never touches git or the loader in a unit test. */
 export interface BootstrapDeps {
+  browserConsent?: boolean;
   root?: string;
   /** Run a shell command at root; returns stdout, throws on failure. */
   exec?: (command: string) => string;
   importModule?: (fileUrl: string) => Promise<ProvisioningCore>;
+}
+
+/** Whether an earlier setup run already saved this install's Slack app credentials. */
+function hasSavedSlackBotToken(root: string): boolean {
+  try {
+    return fs
+      .readFileSync(path.join(root, '.env'), 'utf8')
+      .split('\n')
+      .some((line) => /^\s*SLACK_BOT_TOKEN\s*=\s*\S/.test(line));
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -189,9 +205,9 @@ export async function loadProvisioningCore(deps: BootstrapDeps = {}): Promise<Pr
   try {
     if (!fs.existsSync(modulePath)) {
       const remote = resolveChannelsRemote(exec);
-      exec(`git fetch ${remote} ${CHANNELS_BRANCH}`);
+      exec(gitFetchBranchCommand(remote, CHANNELS_BRANCH));
       fs.mkdirSync(path.dirname(modulePath), { recursive: true });
-      exec(`git show ${remote}/${CHANNELS_BRANCH}:${PROVISIONING_MODULE} > ${PROVISIONING_MODULE}`);
+      exec(gitShowToFileCommand(`refs/remotes/${remote}/${CHANNELS_BRANCH}`, PROVISIONING_MODULE, PROVISIONING_MODULE));
       setupLog.step('slack-provision-bootstrap', 'success', Date.now() - start, { REMOTE: remote });
     }
     return await importModule(pathToFileURL(modulePath).href);
@@ -212,6 +228,13 @@ export async function maybeAutoProvisionSlack(
   agentName: string,
   deps: BootstrapDeps = {},
 ): Promise<Record<string, string> | undefined> {
+  if (hasSavedSlackBotToken(deps.root ?? process.cwd())) {
+    p.log.info(
+      `${agentName} already has a Slack app connected from a previous run — reusing its saved credentials instead of creating a new one.`,
+    );
+    return undefined;
+  }
+
   const core = await loadProvisioningCore(deps);
   if (!core) {
     p.log.warn("Couldn't load the Slack provisioning module — walking through manual app creation instead.");
@@ -222,9 +245,15 @@ export async function maybeAutoProvisionSlack(
   // Offered even when not enrolled yet — signing in is a step of the flow,
   // not a precondition for seeing it. Hidden only when this copy has no way
   // to auto-provision at all.
-  if (!managerToken && !installToken && !loginScriptAvailable()) return undefined;
+  if (!portalEnabled() && !managerToken && !installToken && !loginScriptAvailable()) return undefined;
 
   const needsSignIn = !managerToken && !installToken;
+  if (portalEnabled() && !managerToken) {
+    const version = hostVersion(deps.root ?? process.cwd());
+    return deps.browserConsent
+      ? runSlackPortal(core, agentName, version, { browserConsent: true })
+      : runSlackPortal(core, agentName, version);
+  }
   // Automatic provisioning leads as the default; supplying your own bot
   // token stays available as the explicit, advanced alternative.
   const mode = ensureAnswer(

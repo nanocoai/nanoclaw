@@ -120,7 +120,7 @@ async function inbound(id: string, threadId: string | null, text: string, isMent
     message: {
       id,
       kind: 'chat-sdk',
-      content: JSON.stringify({ sender: 'Gavriel', senderId: 'U1', text }),
+      content: JSON.stringify({ sender: 'Alex', senderId: 'U1', text }),
       timestamp: now(),
       isMention,
       isGroup: false,

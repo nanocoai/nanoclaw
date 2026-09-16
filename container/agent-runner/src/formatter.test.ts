@@ -24,6 +24,11 @@ afterEach(() => {
   closeSessionDb();
 });
 
+// Production always assigns seq (the host writer); a NULL seq makes both the
+// query's ORDER BY and getPendingMessages' final sort ties, so multi-row
+// ordering becomes whatever SQLite returns — the source of a long flake.
+let nextSeq = 1;
+
 function insertMessage(
   id: string,
   kind: string,
@@ -33,10 +38,10 @@ function insertMessage(
   const timestamp = opts?.timestamp ?? new Date().toISOString();
   getInboundDb()
     .prepare(
-      `INSERT INTO messages_in (id, kind, timestamp, status, process_after, content)
-       VALUES (?, ?, ?, 'pending', ?, ?)`,
+      `INSERT INTO messages_in (id, kind, timestamp, status, process_after, content, seq)
+       VALUES (?, ?, ?, 'pending', ?, ?, ?)`,
     )
-    .run(id, kind, timestamp, opts?.processAfter ?? null, JSON.stringify(content));
+    .run(id, kind, timestamp, opts?.processAfter ?? null, JSON.stringify(content), nextSeq++);
 }
 
 describe('context timezone header', () => {

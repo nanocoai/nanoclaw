@@ -104,7 +104,20 @@ export function isUpgradeCurrent(projectRoot: string = process.cwd()): boolean {
   if (state === null) return false;
   try {
     const code = getCodeIdentity(projectRoot);
-    return state.version === code.version && state.commit === code.commit && state.tree === code.tree;
+    if (state.version !== code.version) return false;
+    if (code.commit === 'unknown' || code.tree === 'unknown') {
+      // Git cannot identify this checkout (no git binary, or a tree
+      // exported/mounted without .git). Commit and tree cannot strengthen
+      // the check here — the sanctioned recovery path in this world records
+      // 'unknown' for both — so the version match is the whole signal.
+      // Accept it, loudly, rather than making the tripwire a permanent
+      // boot-stop wherever Git is absent.
+      log.warn('Upgrade marker accepted on version match alone — Git cannot identify this checkout', {
+        version: code.version,
+      });
+      return true;
+    }
+    return state.commit === code.commit && state.tree === code.tree;
   } catch (err) {
     log.warn('Could not resolve running code identity; upgrade marker fails closed', {
       err: String(err),

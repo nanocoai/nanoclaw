@@ -97,7 +97,7 @@ export async function requestSenderApproval(input: RequestSenderApprovalInput): 
 
   const originMg = await getMessagingGroup(messagingGroupId);
   const originChannelType = originMg?.channel_type ?? '';
-  const target = await pickApprovalDelivery(approvers, originChannelType);
+  const target = await pickApprovalDelivery(approvers, originChannelType, originMg?.instance);
   if (!target) {
     log.warn('Unknown-sender approval skipped — no DM channel for any approver', {
       messagingGroupId,
@@ -153,6 +153,8 @@ export async function requestSenderApproval(input: RequestSenderApprovalInput): 
         question,
         options,
       }),
+      undefined,
+      target.messagingGroup.instance,
     );
     log.info('Unknown-sender approval card delivered', {
       approvalId,
@@ -280,7 +282,7 @@ export async function declineAndNotify(input: DeclineAndNotifyInput): Promise<vo
     log.warn('decline_notify FYI skipped — no owner or admin configured', { messagingGroupId, senderIdentity });
     return;
   }
-  const target = await pickApprovalDelivery(approvers, event.channelType);
+  const target = await pickApprovalDelivery(approvers, event.channelType, originMg?.instance ?? event.instance);
   if (!target) {
     log.warn('decline_notify FYI skipped — no DM channel for any approver', { messagingGroupId, senderIdentity });
     return;
@@ -299,6 +301,8 @@ export async function declineAndNotify(input: DeclineAndNotifyInput): Promise<vo
       null,
       'chat-sdk',
       JSON.stringify({ text: fyiText }),
+      undefined,
+      target.messagingGroup.instance,
     );
     log.info('decline_notify handled — decline sent, owner notified', {
       messagingGroupId,

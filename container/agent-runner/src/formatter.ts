@@ -1,6 +1,9 @@
 import { findByRouting } from './destinations.js';
 import type { MessageInRow } from './db/messages-in.js';
 import { TIMEZONE, formatLocalTime, formatLocalStamp } from './timezone.js';
+import './providers/index.js';
+import './provider-contracts/index.js';
+import { getProviderRuntimeContract } from './providers/provider-registry.js';
 
 /**
  * channel_type marking cross-session context copies (accumulate fan-out from
@@ -23,8 +26,41 @@ export function isSessionEcho(msg: MessageInRow): boolean {
  */
 export type CommandCategory = 'admin' | 'filtered' | 'passthrough' | 'none';
 
-const ADMIN_COMMANDS = new Set(['/remote-control', '/clear', '/compact', '/context', '/cost', '/files', '/upload-trace']);
-const FILTERED_COMMANDS = new Set(['/help', '/login', '/logout', '/doctor', '/config', '/start']);
+/** Commands the runner itself handles, whatever provider is active. */
+const RUNNER_ADMIN_COMMANDS = ['/clear', '/upload-trace'];
+
+interface CommandSets {
+  admin: ReadonlySet<string>;
+  filtered: ReadonlySet<string>;
+}
+
+const commandSetsByProvider = new Map<string, CommandSets>();
+
+/**
+ * The command lists for the ACTIVE provider: the runner's own commands plus
+ * the native admin/filtered commands its contract declares. Another
+ * registered contract's lists are never consulted — a session runs exactly
+ * one provider. A provider without a contract contributes nothing.
+ */
+// What the formatter applied to every provider before runtime contracts
+// existed. Only the contractless fallback reads these; a declared contract
+// supplies its own lists.
+const LEGACY_NATIVE_ADMIN_COMMANDS = ['/remote-control', '/compact', '/context', '/cost', '/files'];
+const LEGACY_NATIVE_FILTERED_COMMANDS = ['/help', '/login', '/logout', '/doctor', '/config', '/start'];
+
+function commandSets(providerName: string): CommandSets {
+  const cached = commandSetsByProvider.get(providerName);
+  if (cached) return cached;
+  const contract = getProviderRuntimeContract(providerName);
+  const sets: CommandSets = {
+    // A provider with no contract keeps the lists the formatter hard-coded
+    // before contracts existed, so a pre-contract payload sees no change.
+    admin: new Set([...RUNNER_ADMIN_COMMANDS, ...(contract?.commands.nativeAdmin ?? LEGACY_NATIVE_ADMIN_COMMANDS)]),
+    filtered: new Set(contract?.commands.nativeFiltered ?? LEGACY_NATIVE_FILTERED_COMMANDS),
+  };
+  commandSetsByProvider.set(providerName, sets);
+  return sets;
+}
 
 export interface CommandInfo {
   category: CommandCategory;
@@ -35,7 +71,8 @@ export interface CommandInfo {
 
 /**
  * Categorize a message as a command or not.
- * Only applies to chat/chat-sdk messages.
+ * Only applies to chat/chat-sdk messages. `providerName` is the active
+ * provider whose contract supplies the native command lists.
  *
  * The extracted `senderId` is compared against `NANOCLAW_ADMIN_USER_IDS`
  * which stores ids in the namespaced form `<channel_type>:<raw>` (see
@@ -44,7 +81,7 @@ export interface CommandInfo {
  * contains a `:` we assume it's pre-namespaced (non-chat-sdk adapters
  * that populate `senderId` directly) and leave it alone.
  */
-export function categorizeMessage(msg: MessageInRow): CommandInfo {
+export function categorizeMessage(msg: MessageInRow, providerName: string): CommandInfo {
   const content = parseContent(msg.content);
   const text = (content.text || '').trim();
   const senderId = extractSenderId(msg, content);
@@ -58,11 +95,12 @@ export function categorizeMessage(msg: MessageInRow): CommandInfo {
   // Extract the command name (e.g., '/clear' from '/clear some args')
   const command = text.split(/\s/)[0].toLowerCase();
 
-  if (ADMIN_COMMANDS.has(command)) {
+  const commands = commandSets(providerName);
+  if (commands.admin.has(command)) {
     return { category: 'admin', command, text, senderId };
   }
 
-  if (FILTERED_COMMANDS.has(command)) {
+  if (commands.filtered.has(command)) {
     return { category: 'filtered', command, text, senderId };
   }
 
@@ -87,9 +125,9 @@ export function isClearCommand(msg: MessageInRow): boolean {
  * a query's first input. Used by the follow-up poller to bail out and let
  * the outer loop reopen the query.
  */
-export function isRunnerCommand(msg: MessageInRow): boolean {
+export function isRunnerCommand(msg: MessageInRow, providerName: string): boolean {
   if (msg.kind !== 'chat' && msg.kind !== 'chat-sdk') return false;
-  const cat = categorizeMessage(msg).category;
+  const cat = categorizeMessage(msg, providerName).category;
   return cat === 'admin' || cat === 'passthrough';
 }
 
@@ -136,9 +174,7 @@ export function extractRouting(messages: MessageInRow[]): RoutingContext {
     inReplyTo: first?.id ?? null,
     // Echo rows riding along with a task must not disable one-door delivery:
     // taskRun as long as at least one task row and no non-task/non-echo row.
-    taskRun:
-      messages.some((m) => m.kind === 'task') &&
-      messages.every((m) => m.kind === 'task' || isSessionEcho(m)),
+    taskRun: messages.some((m) => m.kind === 'task') && messages.every((m) => m.kind === 'task' || isSessionEcho(m)),
   };
 }
 

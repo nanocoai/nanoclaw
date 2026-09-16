@@ -245,6 +245,28 @@ describe('tasks CLI resource', () => {
     if (!upd.ok) expect(upd.error.message).toContain('this task has not been scheduled');
   });
 
+  it('update rejects an empty --prompt instead of blanking the task', async () => {
+    const created = await dispatch(
+      { id: 'c', command: 'tasks-create', args: { prompt: 'keep me', name: 'blank-guard', recurrence: '0 9 * * *' } },
+      agentCtx(),
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const seriesId = (created.data as { series_id: string }).series_id;
+
+    for (const prompt of ['', '   \n']) {
+      const upd = await dispatch({ id: 'u', command: 'tasks-update', args: { id: seriesId, prompt } }, agentCtx());
+      expect(upd.ok).toBe(false);
+      if (!upd.ok) expect(upd.error.message).toContain('--prompt must not be empty');
+    }
+
+    const listed = await dispatch({ id: 'l', command: 'tasks-list', args: {} }, agentCtx());
+    expect(listed.ok).toBe(true);
+    if (!listed.ok) return;
+    const row = (listed.data as Array<{ row_id: string; prompt: string }>).find((t) => t.row_id === seriesId);
+    expect(row?.prompt).toBe('keep me');
+  });
+
   it('tasks create --help carries the script contract and the frequency-limit caveat', async () => {
     // --help and `tasks help create` render the same deep verb help.
     const resp = await dispatch({ id: 'h', command: 'tasks-create', args: { help: true } }, agentCtx());

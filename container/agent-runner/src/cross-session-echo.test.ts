@@ -192,7 +192,7 @@ describe('command classification', () => {
 
     const [msg] = getPendingMessages();
     expect(isSessionEcho(msg)).toBe(true);
-    expect(categorizeMessage(msg).category).toBe('none');
+    expect(categorizeMessage(msg, 'claude').category).toBe('none');
   });
 
   it('echoed /clear and /compact are never runner commands', () => {
@@ -201,7 +201,7 @@ describe('command classification', () => {
 
     const messages = getPendingMessages();
     expect(messages.some((m) => isClearCommand(m))).toBe(false);
-    expect(messages.some((m) => isRunnerCommand(m))).toBe(false);
+    expect(messages.some((m) => isRunnerCommand(m, 'claude'))).toBe(false);
   });
 
   it('a real /clear in the same batch still classifies normally', () => {

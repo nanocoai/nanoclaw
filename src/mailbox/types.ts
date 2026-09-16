@@ -116,6 +116,15 @@ export interface InboundMailbox {
   getCompletedRecurring(): RecurringMessage[];
   trailingFailedRuns(seriesId: string): number;
   clearRecurrence(messageId: string): void;
+  /**
+   * Atomically insert a series' next occurrence and clear the recurrence on
+   * the completed original — one durable step. Split writes tear on a crash:
+   * an inserted next occurrence with the original's recurrence intact
+   * re-clones the series on the following tick (duplicate runs), while the
+   * reverse order silently kills the series. Durable when the promise
+   * resolves, like insertTask.
+   */
+  armNextTask(originalId: string, task: Task): Promise<void>;
   countLiveTasks(): number;
   prunePendingMessages(channelType: string, before: string, keep: number): number;
   getInboundHistory(limit: number): MailboxHistoryMessage[];

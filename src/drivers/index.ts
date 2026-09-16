@@ -43,6 +43,8 @@ import { DATA_DIR, GROUPS_DIR } from '../config.js';
 import { EGRESS_NETWORK, egressNetworkArgs, ensureEgressNetwork } from '../egress-lockdown.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
+import '../provider-contracts/index.js';
+import { protectedProviderDocumentSourcePaths } from '../provider-contracts/realize.js';
 
 import { DockerSessionDriver, agentContainerName } from './docker-driver.js';
 import {
@@ -109,7 +111,10 @@ export function mountPolicy(env: NodeJS.ProcessEnv = process.env): MountPolicy {
     surfaceRoots: [
       path.join(projectRoot, 'container', 'agent-runner', 'src'),
       path.join(projectRoot, 'container', 'skills'),
-      path.join(projectRoot, 'container', 'CLAUDE.md'),
+      // Base documents are read by the host composer, not mounted. Declared
+      // protected sources stay here so an overlapping operator mount cannot
+      // make prompt-defining install content writable.
+      ...protectedProviderDocumentSourcePaths(projectRoot),
     ],
     // Must resolve to the same path an egress overlay's provisioner writes
     // material to, and a provisioner reads this key from `.env`. Reading it
@@ -148,6 +153,16 @@ export function createSessionDriver(kind: DriverKind, overrides: Partial<MountPo
   // Boot-scoped marker; see the crash-loop caveat at the top of this file.
   log.info('Session runtime driver selected', { driver: driver.kind, capabilities: driver.capabilities() });
   return driver;
+}
+
+/**
+ * The already-selected driver, or null — never instantiates. For consumers
+ * that must arm only when a runtime is actually in use: the boot sequence
+ * selects the driver before the sweep starts, while a unit suite that never
+ * selected one sees null instead of triggering selection as a side effect.
+ */
+export function peekSessionDriver(): SessionEventsDriver | null {
+  return installed;
 }
 
 /** Test seam: drop the memoized driver so a suite can select another one. */

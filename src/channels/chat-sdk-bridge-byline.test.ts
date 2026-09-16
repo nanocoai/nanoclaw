@@ -112,32 +112,32 @@ afterEach(async () => {
 
 describe('chat-sdk-bridge approval-card terminal state', () => {
   it('retains the body, removes actions, and shows the acting user', async () => {
-    const { edits, actions } = await fireAction({ userId: 'U1', userName: 'gavriel', fullName: 'Gavriel C' });
+    const { edits, actions } = await fireAction({ userId: 'U1', userName: 'alex', fullName: 'Alex C' });
 
     expect(edits).toHaveLength(1);
     expect(edits[0].threadId).toBe('T-1');
     expect(edits[0].messageId).toBe('msg-1');
     expect(terminalText(edits[0])).toEqual([
       { type: 'text', content: 'Keep these full request details.' },
-      { type: 'text', content: '✅ Approved by gavriel', style: 'muted' },
+      { type: 'text', content: '✅ Approved by alex', style: 'muted' },
     ]);
     expect(terminalText(edits[0]).some((child) => child.type === 'actions')).toBe(false);
     expect(actions).toEqual(['q-1:approve:U1']);
   });
 
   it('falls back to fullName when userName is missing', async () => {
-    const { edits } = await fireAction({ userId: 'U2', fullName: 'Gavriel C' });
+    const { edits } = await fireAction({ userId: 'U2', fullName: 'Alex C' });
 
     expect(edits).toHaveLength(1);
-    expect(terminalText(edits[0]).at(-1)?.content).toBe('✅ Approved by Gavriel C');
+    expect(terminalText(edits[0]).at(-1)?.content).toBe('✅ Approved by Alex C');
   });
 
   it('renders a rejected decision with the actor and original body', async () => {
-    const { edits, actions } = await fireAction({ userId: 'U4', userName: 'daniel' }, 'reject');
+    const { edits, actions } = await fireAction({ userId: 'U4', userName: 'reviewer' }, 'reject');
 
     expect(terminalText(edits[0])).toEqual([
       { type: 'text', content: 'Keep these full request details.' },
-      { type: 'text', content: '❌ Rejected by daniel', style: 'muted' },
+      { type: 'text', content: '❌ Rejected by reviewer', style: 'muted' },
     ]);
     expect(actions).toEqual(['q-1:reject:U4']);
   });

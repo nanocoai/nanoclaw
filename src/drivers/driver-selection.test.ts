@@ -205,6 +205,10 @@ describe('mountPolicy', () => {
     expect(policy.surfaceRoots).toHaveLength(3);
     expect(policy.surfaceRoots.every((root) => root.includes(`${path.sep}container${path.sep}`))).toBe(true);
     expect(policy.surfaceRoots.some((root) => root === policy.dataRoot)).toBe(false);
+    // Named, not just counted: nothing mounts container/CLAUDE.md any more, so
+    // the only thing keeping an operator additionalMount of it read-only is its
+    // presence here. A bare length check would be "fixed" by editing the number.
+    expect(policy.surfaceRoots).toContain(path.join(process.cwd(), 'container', 'CLAUDE.md'));
   });
 });
 
