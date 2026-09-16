@@ -47,14 +47,14 @@ const MEMORY_HOOK_TIMEOUT_MS = 10_000;
  * triggers it, and a synchronous spin is immune to every timeout we own.
  * The event-loop path reaps normally and lets our own deadline fire.
  */
-function runHookCommand(
+export function runHookCommand(
   command: string,
   input: string,
+  timeoutMs = MEMORY_HOOK_TIMEOUT_MS,
 ): Promise<{ status: number | null; stdout: string; error?: Error }> {
   return new Promise((resolve) => {
     const stdout: Buffer[] = [];
     let settled = false;
-    let timedOut = false;
     const settle = (result: { status: number | null; error?: Error }) => {
       if (settled) return;
       settled = true;
@@ -63,19 +63,19 @@ function runHookCommand(
     };
     const child = spawn(command, { shell: true, stdio: ['pipe', 'pipe', 'ignore'] });
     const deadline = setTimeout(() => {
-      timedOut = true;
+      // Settle now rather than on `close`: a hook that ignores SIGTERM, or
+      // leaves a background child holding stdout, must not hold the turn lock.
+      // spawnSync's timeout closed the pipes the same way.
       child.kill('SIGTERM');
-    }, MEMORY_HOOK_TIMEOUT_MS);
+      child.stdin.destroy();
+      child.stdout.destroy();
+      child.unref();
+      settle({ status: null, error: new Error(`timed out after ${timeoutMs}ms`) });
+    }, timeoutMs);
     child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
     child.on('error', (error) => settle({ status: null, error }));
     child.on('close', (status, signal) =>
-      settle(
-        timedOut
-          ? { status, error: new Error(`timed out after ${MEMORY_HOOK_TIMEOUT_MS}ms`) }
-          : signal
-            ? { status, error: new Error(`killed by ${signal}`) }
-            : { status },
-      ),
+      settle(signal ? { status, error: new Error(`killed by ${signal}`) } : { status }),
     );
     // A hook that never reads stdin (or exits early) closes the pipe under us.
     child.stdin.on('error', () => {});
