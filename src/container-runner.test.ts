@@ -10,13 +10,14 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { CONTAINER_CPU_LIMIT, CONTAINER_MEMORY_LIMIT } from './config.js';
 import type { ContainerConfig } from './container-config.js';
 import {
   armSessionLifecycle,
   composeSessionSpec,
+  maxOutputTokensFor,
   parseMemoryMb,
   parsePidsLimit,
   resolveProviderName,
@@ -154,6 +155,32 @@ describe('composeSessionSpec', () => {
 
   it('passes non-secret mailbox environment on the composed lane', () => {
     expect(compose().containers[0].env.NANOCLAW_MAILBOX_BACKEND).toBe('sqlite');
+  });
+
+  it('raises the Claude SDK output-token ceiling for the default (claude) provider', () => {
+    // Default model (unset) is a current Opus/Sonnet — full 128K ceiling.
+    expect(compose().containers[0].env.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe('128000');
+  });
+
+  it('caps the ceiling at 64K for Haiku-configured groups (overshooting is a 400)', () => {
+    const spec = compose({
+      containerConfig: { ...containerConfig, model: 'claude-haiku-4-5' } as ContainerConfig,
+    });
+    expect(spec.containers[0].env.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe('64000');
+  });
+
+  it('omits the variable entirely for non-claude providers', () => {
+    const spec = composeSessionSpec({
+      agentGroup,
+      session: { ...session, agent_provider: 'opencode' },
+      containerName: 'nanoclaw-v2-agent-one-1700000000000',
+      mounts,
+      containerConfig,
+      mailboxEnvironment: { NANOCLAW_MAILBOX_BACKEND: 'sqlite' },
+      contribution: {} as never,
+      gateway: {} as never,
+    });
+    expect(spec.containers[0].env.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBeUndefined();
   });
 
   it('the gateway contribution fills the contributed lane last and wins a collision', () => {
@@ -490,5 +517,41 @@ describe('syncSkillSymlinks', () => {
       expect.stringContaining('Shared skill not symlinked'),
       expect.objectContaining({ skill: 'welcome' }),
     );
+  });
+});
+
+describe('maxOutputTokensFor', () => {
+  afterEach(() => {
+    delete process.env.NANOCLAW_MAX_OUTPUT_TOKENS;
+  });
+
+  it('gives current Opus/Sonnet models (and the unset default) the 128K ceiling', () => {
+    expect(maxOutputTokensFor(null)).toBe(128_000);
+    expect(maxOutputTokensFor(undefined)).toBe(128_000);
+    expect(maxOutputTokensFor('claude-opus-4-6')).toBe(128_000);
+    expect(maxOutputTokensFor('claude-sonnet-4-6')).toBe(128_000);
+  });
+
+  it('gives Haiku models 64K (their real ceiling; higher is a 400)', () => {
+    expect(maxOutputTokensFor('claude-haiku-4-5')).toBe(64_000);
+  });
+
+  it('falls back to 64K for unknown/custom model strings instead of guessing high', () => {
+    expect(maxOutputTokensFor('deepseek/deepseek-v4-pro')).toBe(64_000);
+    expect(maxOutputTokensFor('my-custom-endpoint-model')).toBe(64_000);
+  });
+
+  it('honors a positive NANOCLAW_MAX_OUTPUT_TOKENS override', () => {
+    process.env.NANOCLAW_MAX_OUTPUT_TOKENS = '48000';
+    expect(maxOutputTokensFor('claude-opus-4-6')).toBe(48_000);
+  });
+
+  it('ignores non-numeric and non-positive overrides', () => {
+    process.env.NANOCLAW_MAX_OUTPUT_TOKENS = 'unlimited';
+    expect(maxOutputTokensFor(null)).toBe(128_000);
+    process.env.NANOCLAW_MAX_OUTPUT_TOKENS = '0';
+    expect(maxOutputTokensFor(null)).toBe(128_000);
+    process.env.NANOCLAW_MAX_OUTPUT_TOKENS = '-5';
+    expect(maxOutputTokensFor(null)).toBe(128_000);
   });
 });
