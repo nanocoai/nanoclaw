@@ -2,12 +2,13 @@
  * Determine whether a platform ID needs a channel-type prefix.
  *
  * Chat SDK adapters (Telegram, Discord, Slack, Teams, etc.) namespace their
- * platform IDs with a channel prefix: "telegram:123456", "discord:guild:chan".
- * The router stores channel_type and platform_id in separate columns, but
- * Chat SDK adapters send the prefixed form as the platform_id — so any code
- * that writes messaging_groups rows must produce the same shape the adapter
- * will later emit as event.platformId, or router lookups miss and messages
- * get silently dropped.
+ * platform IDs with a chat-sdk-side prefix: "telegram:123456", "discord:guild:chan".
+ * That prefix comes from the underlying chat-sdk adapter's name and is NOT
+ * necessarily the same as NanoClaw's channel registry key — if one chat-sdk
+ * adapter is registered under multiple channel keys (e.g. two Telegram bots
+ * on keys `telegram` and `telegram-2`), the underlying SDK still emits
+ * `telegram:<id>` for both. So any `<prefix>:<id>`-shaped value is trusted
+ * as-is; only bare ids get the channel prefix appended.
  *
  * Native adapters (Signal, WhatsApp, iMessage, DeltaChat) use their own ID
  * formats and send them as-is — no channel prefix. WhatsApp/iMessage emit
@@ -17,9 +18,9 @@
  * later emits.
  */
 export function namespacedPlatformId(channel: string, raw: string): string {
-  if (raw.startsWith(`${channel}:`)) return raw;
   if (raw.includes('@')) return raw;
   if (raw.startsWith('+') || raw.startsWith('group:')) return raw;
   if (channel === 'deltachat') return raw;
+  if (/^[a-z][a-z0-9_-]*:/i.test(raw)) return raw;
   return `${channel}:${raw}`;
 }
