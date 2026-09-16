@@ -61,10 +61,12 @@ function getMaxMessagesPerPrompt(): number {
  * Fetch pending messages that are due for processing.
  * Fetch pending messages while excluding work already claimed by this runner.
  *
- * Selection is two-phase so accumulated context can never crowd a wake row
- * out of the batch: all due trigger=1 rows come first (oldest-first, up to
- * `maxMessagesPerPrompt`), then remaining slots fill with the NEWEST due
- * trigger=0 rows. Without this, ≥cap accumulated context rows (e.g.
+ * Selection is priority-based so accumulated context can never crowd a wake row
+ * out of the batch: all due non-system trigger=1 rows come first
+ * (oldest-first, up to `maxMessagesPerPrompt`), then remaining slots fill with
+ * the NEWEST due trigger=0 rows. System control responses only use slots left
+ * after turn messages because the poll loop filters them before prompting.
+ * Without this, ≥cap accumulated context rows (e.g.
  * non-engaged group messages) newer than a due task row would push the task
  * itself out of the batch. The combined batch is returned in chronological
  * order (oldest first). Host's countDueMessages gates waking on trigger=1
