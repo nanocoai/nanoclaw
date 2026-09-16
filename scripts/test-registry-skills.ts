@@ -133,13 +133,32 @@ function materializeSkill(commit: string, skill: string, skillsRoot: string): Re
   return meta;
 }
 
+// No single skill step legitimately runs this long (the image build is the
+// slowest at a few minutes). A step that does is wedged — nanoclaw#3839 was a
+// `bun test` spinning inside Bun's spawnSync until GitHub's 6-hour cancel —
+// and SIGKILL is the only signal a synchronous spin honours.
+const COMMAND_TIMEOUT_MS = 15 * 60 * 1000;
+
 function command(cmd: string, cwd: string, quiet = false): string {
   if (!quiet) console.log(`  $ ${cmd}`);
-  const result = spawnSync(cmd, { cwd, shell: true, encoding: 'utf8', maxBuffer: 50 * 1024 * 1024 });
+  const result = spawnSync(cmd, {
+    cwd,
+    shell: true,
+    encoding: 'utf8',
+    maxBuffer: 50 * 1024 * 1024,
+    timeout: COMMAND_TIMEOUT_MS,
+    killSignal: 'SIGKILL',
+  });
   if (result.status !== 0) {
     if (result.stdout) process.stdout.write(result.stdout);
     if (result.stderr) process.stderr.write(result.stderr);
-    throw new Error(`command exited ${result.status}: ${cmd}`);
+    const why =
+      result.error?.code === 'ETIMEDOUT'
+        ? `timed out after ${COMMAND_TIMEOUT_MS / 1000}s`
+        : result.error
+          ? `failed: ${result.error.message}`
+          : `exited ${result.status}`;
+    throw new Error(`command ${why}: ${cmd}`);
   }
   return result.stdout ?? '';
 }
