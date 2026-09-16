@@ -157,6 +157,31 @@ describe('handleRecurrence', () => {
     const count = (db.prepare(`SELECT COUNT(*) AS c FROM messages_in`).get() as { c: number }).c;
     expect(count).toBe(1);
   });
+
+  it('clears a malformed cron string instead of re-erroring on every sweep tick', async () => {
+    const db = freshDb();
+    insertTaskRow(db, {
+      id: 'task-1',
+      seriesId: 'task-1',
+      processAfter: '2020-01-01T00:00:00.000Z',
+      // cron-parser rejects min>max ranges ("21-5") — the string observed in
+      // the wild after an agent hand-wrote a wrap-around range.
+      recurrence: '0 21-5 * * *',
+      content: JSON.stringify({ prompt: 'night shift' }),
+    });
+    db.prepare(`UPDATE messages_in SET status='completed' WHERE id='task-1'`).run();
+
+    await handleRecurrence(db, fakeSession());
+
+    // The dead string is retired in place: no clone inserted, recurrence
+    // cleared — the next sweep tick won't parse (and error on) it again.
+    const count = (db.prepare(`SELECT COUNT(*) AS c FROM messages_in`).get() as { c: number }).c;
+    expect(count).toBe(1);
+    const row = db.prepare(`SELECT recurrence FROM messages_in WHERE id='task-1'`).get() as {
+      recurrence: string | null;
+    };
+    expect(row.recurrence).toBeNull();
+  });
 });
 
 describe('handleRecurrence — script-failure backoff (streak derived from failed runs)', () => {
