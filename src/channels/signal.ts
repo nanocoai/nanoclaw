@@ -8,15 +8,41 @@
  * Ported from v1 — see v1 source for commit history.
  */
 import { execFileSync, execSync, spawn } from 'node:child_process';
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createConnection, type Socket } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage, OutboundMessage } from './adapter.js';
+import { normalizeOptions, type NormalizedOption } from './ask-question.js';
 import { registerChannelAdapter } from './channel-registry.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
+
+const PENDING_QUESTIONS_MAX = 64;
+
+/** Normalize an option label to a slash command: "Approve" → "/approve" */
+function optionToCommand(option: string): string {
+  return '/' + option.toLowerCase().replace(/\s+/g, '-');
+}
+
+/**
+ * Inbound attachments are carried base64-inline through the session DB, so a
+ * very large file would bloat the row before the host ever stages it. 20MB
+ * matches the iMessage adapter's cap and covers ordinary documents and
+ * photos. Override with SIGNAL_MAX_INLINE_ATTACHMENT_BYTES.
+ */
+const DEFAULT_MAX_INLINE_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+
+/**
+ * DB-stored DM platform IDs are 'signal:'-prefixed (see the platformId
+ * computation in handleEnvelope and openDM below), but signal-cli itself
+ * wants the bare UUID/number as the recipient. Idempotent on already-bare
+ * input, so callers can pass through values of either shape.
+ */
+function stripSignalPrefix(id: string): string {
+  return id.startsWith('signal:') ? id.slice('signal:'.length) : id;
+}
 
 // ---------------------------------------------------------------------------
 // Signal CLI daemon management
@@ -395,7 +421,9 @@ async function transcribeAudioOptional(filePath: string): Promise<string | null>
       try {
         unlinkSync(wavPath);
         unlinkSync(`${wavPath}.txt`);
-      } catch {}
+      } catch (cleanupErr) {
+        log.debug('Signal: whisper temp file cleanup failed', { cleanupErr });
+      }
       const text = out.replace(/\[[^\]]*\]/g, '').trim();
       if (text) return text;
     } catch (err) {
@@ -545,14 +573,100 @@ export function createSignalAdapter(config: {
   tcpPort: number;
   manageDaemon: boolean;
   signalDataDir: string;
+  /** Inbound attachments over this size are skipped with a note rather than
+   * read into the base64 payload. Defaults to DEFAULT_MAX_INLINE_ATTACHMENT_BYTES. */
+  maxInlineAttachmentBytes?: number;
 }): ChannelAdapter {
+  const maxInlineAttachmentBytes = config.maxInlineAttachmentBytes ?? DEFAULT_MAX_INLINE_ATTACHMENT_BYTES;
   let daemon: DaemonHandle | null = null;
   let tcp: SignalTcpClient | null = null;
   let connected = false;
   const echoCache = new EchoCache();
+  // Pending questions: platformId → { questionId, options }
+  // User replies with /approve, /reject, etc. to answer
+  const pendingQuestions = new Map<string, { questionId: string; options: NormalizedOption[] }>();
   let setup: ChannelSetup | null = null;
 
+  // Outbound sends attempted while disconnected are queued here and flushed
+  // once the TCP connection to signal-cli is (re)established, instead of
+  // being silently dropped.
+  type QueuedSend =
+    | { kind: 'text'; platformId: string; text: string }
+    | { kind: 'attachments'; platformId: string; files: { filename: string; data: Buffer }[] };
+  const outgoingQueue: QueuedSend[] = [];
+  let flushingOutgoingQueue = false;
+
   // -- inbound handling --
+
+  /**
+   * Read one downloaded signal-cli attachment into a base64 payload. Returns
+   * null when the file is missing, unreadable, or over the inline cap — the
+   * caller turns that into a visible `[<name> could not be read]` note
+   * instead of silently dropping the attachment.
+   */
+  function readAttachment(
+    att: { id?: string; contentType?: string; filename?: string; size?: number },
+    typeHint?: string,
+  ): { type: string; name?: string; mimeType?: string; size: number; data: string } | null {
+    if (!att.id) return null;
+    const attachmentPath = join(config.signalDataDir, 'attachments', att.id);
+    if (!existsSync(attachmentPath)) {
+      log.warn('Signal: attachment file not found', { id: att.id, path: attachmentPath });
+      return null;
+    }
+    let bytes: Buffer;
+    try {
+      const { size } = statSync(attachmentPath);
+      if (size > maxInlineAttachmentBytes) {
+        log.warn('Signal: inbound attachment over inline cap, skipping', {
+          id: att.id,
+          size,
+          cap: maxInlineAttachmentBytes,
+        });
+        return null;
+      }
+      bytes = readFileSync(attachmentPath);
+    } catch (err) {
+      log.warn('Signal: failed to read inbound attachment', { id: att.id, err });
+      return null;
+    }
+    return {
+      type: typeHint ?? (att.contentType?.startsWith('image/') ? 'image' : 'file'),
+      ...(att.filename ? { name: att.filename } : {}),
+      ...(att.contentType ? { mimeType: att.contentType } : {}),
+      size: bytes.length,
+      data: bytes.toString('base64'),
+    };
+  }
+
+  /**
+   * Read every attachment on a message into base64 `data`. The host stages
+   * the bytes into the session inbox (session-manager's
+   * extractAttachmentFiles) and rewrites each entry to a `localPath` the
+   * container can read — the same contract every other channel adapter
+   * follows. Shared by the normal inbound path and the Note-to-Self sync
+   * path, which both carry attachments the agent should see.
+   */
+  function stageAttachments(
+    raw: Array<{ id?: string; contentType?: string; filename?: string; size?: number }>,
+    voiceAttachment?: { id?: string },
+  ): {
+    attachments: Array<{ type: string; name?: string; mimeType?: string; size: number; data: string }>;
+    note: string;
+  } {
+    const attachments: Array<{ type: string; name?: string; mimeType?: string; size: number; data: string }> = [];
+    const failures: string[] = [];
+    for (const att of raw) {
+      const isVoice = voiceAttachment !== undefined && att.id === voiceAttachment.id;
+      const staged = readAttachment(att, isVoice ? 'voice' : undefined);
+      if (staged) attachments.push(staged);
+      else failures.push(isVoice ? 'voice message' : att.filename || 'attachment');
+    }
+    // Surface unreadable attachments rather than dropping them silently — the
+    // agent should be able to say "that file didn't come through".
+    const note = failures.map((f) => `[${f} could not be read]`).join(' ');
+    return { attachments, note };
+  }
 
   function handleNotification(method: string, params: unknown): void {
     if (method === 'receive') {
@@ -575,22 +689,30 @@ export function createSignalAdapter(config: {
       // "Note to Self" — destination is our own account
       if (dest === config.account) {
         const text = (syncSent.message ?? '').trim();
-        if (!text) return;
-        const platformId = config.account;
-        if (echoCache.isEcho(platformId, text)) return;
+        // A file noted to self carries no caption, so text alone is not the
+        // right test for whether there's anything here worth waking the
+        // agent for — attachments-only self-notes used to be dropped here.
+        const syncAttachments = syncSent.attachments?.filter((a) => a.id) ?? [];
+        if (!text && syncAttachments.length === 0) return;
+        const platformId = `signal:${config.account}`;
+        if (text && echoCache.isEcho(platformId, text)) return;
         const timestamp = syncSent.timestamp ? new Date(syncSent.timestamp).toISOString() : new Date().toISOString();
 
         setup.onMetadata(platformId, 'Note to Self', false);
+
+        const { attachments: syncRefs, note: syncNote } = stageAttachments(syncAttachments);
+        const syncText = syncNote ? (text ? `${text}\n${syncNote}` : syncNote) : text;
 
         const msg: InboundMessage = {
           id: String(syncSent.timestamp ?? Date.now()),
           kind: 'chat',
           content: {
-            text,
+            text: syncText,
             sender: config.account,
             senderId: `signal:${config.account}`,
             senderName: 'Me',
             isFromMe: true,
+            ...(syncRefs.length > 0 ? { attachments: syncRefs } : {}),
             ...(syncSent.quote ? quoteToContent(syncSent.quote) : {}),
           },
           // Note-to-self is a DM with ourselves: same DM→mention rule.
@@ -611,11 +733,15 @@ export function createSignalAdapter(config: {
     const rawText = (dataMessage.message ?? '').trim();
     const text = rawText ? resolveMentions(rawText, dataMessage.mentions) : '';
 
-    const audioAttachment = dataMessage.attachments?.find((a) => a.contentType?.startsWith('audio/') && a.id);
-    const imageAttachments = dataMessage.attachments?.filter((a) => a.contentType?.startsWith('image/') && a.id) ?? [];
+    // Every attachment signal-cli downloaded, whatever its type. Filtering
+    // audio out of the non-voice set used to silently drop an audio
+    // attachment sent alongside a caption (hasVoice is only true when there's
+    // no text), and filtering to image/audio only used to drop documents.
+    const attachments = dataMessage.attachments?.filter((a) => a.id) ?? [];
+    const audioAttachment = attachments.find((a) => a.contentType?.startsWith('audio/'));
     const hasVoice = !text && !!audioAttachment;
 
-    if (!text && !hasVoice && imageAttachments.length === 0) return;
+    if (!text && attachments.length === 0) return;
 
     const sender = (envelope.sourceNumber ?? envelope.sourceUuid ?? envelope.source ?? '').trim();
     if (!sender) return;
@@ -629,7 +755,28 @@ export function createSignalAdapter(config: {
     const groupId = dataMessage.groupV2?.id ?? groupInfo?.groupId;
     const isGroup = Boolean(groupId);
 
-    const platformId = isGroup ? `group:${groupId}` : sender;
+    // DB-stored DM platform_ids are 'signal:'-prefixed to disambiguate from
+    // group:-prefixed group ids and to match what openDM (below) returns for
+    // cold-DM'd messaging_groups — see stripSignalPrefix's doc comment.
+    const platformId = isGroup ? `group:${groupId}` : `signal:${sender}`;
+
+    // Check if this reply answers a pending question via slash command
+    const pending = pendingQuestions.get(platformId);
+    if (pending && text.startsWith('/')) {
+      const cmd = text.trim().toLowerCase();
+      const matched = pending.options.find((o) => optionToCommand(o.label) === cmd);
+      if (matched) {
+        setup.onAction(pending.questionId, matched.value, sender);
+        pendingQuestions.delete(platformId);
+        await sendText(platformId, `${matched.selectedLabel} by ${senderName}`);
+        log.info('Signal: question answered', {
+          questionId: pending.questionId,
+          value: matched.value,
+          voterName: senderName,
+        });
+        return;
+      }
+    }
 
     if (text && echoCache.isEcho(platformId, text)) {
       log.debug('Signal: skipping echo', { platformId });
@@ -644,16 +791,15 @@ export function createSignalAdapter(config: {
     let content = text;
 
     // Voice attachment — try transcription if WHISPER_BIN or OPENAI_API_KEY
-    // is configured; otherwise fall back to the original placeholder so
-    // operators who don't want transcription get the same UX as before.
+    // is configured; otherwise fall back to a placeholder. The raw audio is
+    // staged below (via stageAttachments, alongside every other attachment)
+    // so a human — or a future transcription pass — can still get at it when
+    // transcription is unavailable or fails, instead of losing the message
+    // content entirely.
     if (hasVoice && audioAttachment?.id) {
       const attachmentPath = join(config.signalDataDir, 'attachments', audioAttachment.id);
       if (existsSync(attachmentPath)) {
-        log.info('Signal: voice attachment received', {
-          platformId,
-          attachmentId: audioAttachment.id,
-          path: attachmentPath,
-        });
+        log.info('Signal: voice attachment received', { platformId, attachmentId: audioAttachment.id });
         const transcript = await transcribeAudioOptional(attachmentPath);
         if (transcript) {
           content = `[Voice: ${transcript}]`;
@@ -661,26 +807,21 @@ export function createSignalAdapter(config: {
         } else {
           content = '[Voice Message]';
         }
-      } else {
-        log.warn('Signal: voice attachment file not found', {
-          id: audioAttachment.id,
-          path: attachmentPath,
-        });
-        content = '[Voice Message - file not found]';
       }
+      // No marker written here when the file is missing: the staging read
+      // below fails on the same missing file and contributes one failure
+      // note ("[voice message could not be read]") for the message.
     }
 
-    // Image attachments — emit `[Image: <path>]` lines so the agent's Read
-    // tool can pick them up, and surface the structured `attachments` array
-    // for consumers that prefer that shape. Without this, vision-capable
-    // models never see images sent over Signal.
-    const attachmentRefs: Array<{ path: string; contentType: string }> = [];
-    for (const img of imageAttachments) {
-      const imagePath = join(config.signalDataDir, 'attachments', img.id!);
-      const imageLine = `[Image: ${imagePath}]`;
-      content = content ? `${content}\n${imageLine}` : imageLine;
-      attachmentRefs.push({ path: imagePath, contentType: img.contentType || 'image/jpeg' });
-    }
+    // Every attachment (images, documents, voice, etc.) is read and handed to
+    // the generic inbound-attachment mechanism (extractAttachmentFiles in
+    // session-manager.ts), same as every other channel. That writes the bytes
+    // into the session's inbox dir, which *is* mounted into the container, so
+    // the agent's Read tool can actually open the file — unlike the previous
+    // approach of splicing a `/workspace/extra/signal-attachments/<id>` path
+    // directly into the message text, which was never mounted anywhere.
+    const { attachments: fileEntries, note } = stageAttachments(attachments, hasVoice ? audioAttachment : undefined);
+    if (note) content = content ? `${content}\n${note}` : note;
 
     const msg: InboundMessage = {
       id: String(dataMessage.timestamp ?? Date.now()),
@@ -690,7 +831,7 @@ export function createSignalAdapter(config: {
         sender,
         senderId: `signal:${sender}`,
         senderName,
-        ...(attachmentRefs.length > 0 ? { attachments: attachmentRefs } : {}),
+        ...(fileEntries.length > 0 ? { attachments: fileEntries } : {}),
         ...(dataMessage.quote ? quoteToContent(dataMessage.quote) : {}),
       },
       isMention: computeSignalIsMention(config.account, isGroup, dataMessage.mentions),
@@ -727,7 +868,16 @@ export function createSignalAdapter(config: {
   // -- send helpers --
 
   async function sendText(platformId: string, text: string): Promise<void> {
-    if (!connected || !tcp) return;
+    if (!connected || !tcp) {
+      outgoingQueue.push({ kind: 'text', platformId, text });
+      log.info('Signal disconnected, queued outbound message', { platformId, queueSize: outgoingQueue.length });
+      return;
+    }
+    await sendTextNow(platformId, text);
+  }
+
+  async function sendTextNow(platformId: string, text: string): Promise<void> {
+    if (!tcp) return;
 
     echoCache.remember(platformId, text);
 
@@ -746,7 +896,9 @@ export function createSignalAdapter(config: {
         if (platformId.startsWith('group:')) {
           params.groupId = platformId.slice('group:'.length);
         } else {
-          params.recipient = [platformId];
+          // DB-stored DM platform_ids carry a 'signal:' prefix; signal-cli
+          // wants the raw UUID/number.
+          params.recipient = [stripSignalPrefix(platformId)];
         }
 
         try {
@@ -780,8 +932,17 @@ export function createSignalAdapter(config: {
    * caption colliding with signal-cli's per-message size limits.
    */
   async function sendAttachments(platformId: string, files: { filename: string; data: Buffer }[]): Promise<void> {
-    if (!connected || !tcp) return;
     if (files.length === 0) return;
+    if (!connected || !tcp) {
+      outgoingQueue.push({ kind: 'attachments', platformId, files });
+      log.info('Signal disconnected, queued outbound attachments', { platformId, queueSize: outgoingQueue.length });
+      return;
+    }
+    await sendAttachmentsNow(platformId, files);
+  }
+
+  async function sendAttachmentsNow(platformId: string, files: { filename: string; data: Buffer }[]): Promise<void> {
+    if (!tcp || files.length === 0) return;
 
     const tempPaths: string[] = [];
     for (const file of files) {
@@ -797,7 +958,7 @@ export function createSignalAdapter(config: {
       if (platformId.startsWith('group:')) {
         params.groupId = platformId.slice('group:'.length);
       } else {
-        params.recipient = [platformId];
+        params.recipient = [stripSignalPrefix(platformId)];
       }
       await tcp.rpc('send', params);
       log.info('Signal attachments sent', { platformId, count: files.length, filenames: files.map((f) => f.filename) });
@@ -811,6 +972,35 @@ export function createSignalAdapter(config: {
           /* best-effort cleanup */
         }
       }
+    }
+  }
+
+  async function flushOutgoingQueue(): Promise<void> {
+    if (flushingOutgoingQueue || outgoingQueue.length === 0) return;
+    flushingOutgoingQueue = true;
+    try {
+      log.info('Signal: flushing queued outbound sends', { count: outgoingQueue.length });
+      while (outgoingQueue.length > 0) {
+        if (!connected || !tcp) break;
+        const item = outgoingQueue.shift()!;
+        try {
+          if (item.kind === 'text') {
+            await sendTextNow(item.platformId, item.text);
+          } else {
+            await sendAttachmentsNow(item.platformId, item.files);
+          }
+        } catch (err) {
+          log.error('Signal: failed to flush queued send, re-queueing', {
+            kind: item.kind,
+            platformId: item.platformId,
+            err,
+          });
+          outgoingQueue.unshift(item);
+          break;
+        }
+      }
+    } finally {
+      flushingOutgoingQueue = false;
     }
   }
 
@@ -899,6 +1089,7 @@ export function createSignalAdapter(config: {
         host: config.tcpHost,
         port: config.tcpPort,
       });
+      void flushOutgoingQueue();
     },
 
     async teardown(): Promise<void> {
@@ -919,6 +1110,34 @@ export function createSignalAdapter(config: {
 
     async deliver(platformId: string, _threadId: string | null, message: OutboundMessage): Promise<string | undefined> {
       const content = message.content as Record<string, unknown> | string | undefined;
+
+      // Ask question → text with slash command replies
+      if (
+        content &&
+        typeof content === 'object' &&
+        content.type === 'ask_question' &&
+        content.questionId &&
+        content.options
+      ) {
+        const questionId = content.questionId as string;
+        const title = content.title as string;
+        const question = content.question as string | undefined;
+        if (!title) {
+          log.error('Signal: ask_question missing required title — skipping delivery', { questionId });
+          return undefined;
+        }
+        const options: NormalizedOption[] = normalizeOptions(content.options as never);
+        const optionLines = options.map((o) => `  ${optionToCommand(o.label)}`).join('\n');
+        const text = `*${title}*\n\n${question ?? ''}\n\nReply with:\n${optionLines}`;
+        await sendText(platformId, text);
+        pendingQuestions.set(platformId, { questionId, options });
+        if (pendingQuestions.size > PENDING_QUESTIONS_MAX) {
+          const oldest = pendingQuestions.keys().next().value!;
+          pendingQuestions.delete(oldest);
+        }
+        return undefined;
+      }
+
       let text: string | null = null;
       if (typeof content === 'string') {
         text = content;
@@ -941,12 +1160,26 @@ export function createSignalAdapter(config: {
       if (platformId.startsWith('group:')) return;
 
       try {
-        const params: Record<string, unknown> = { recipient: [platformId] };
+        const params: Record<string, unknown> = { recipient: [stripSignalPrefix(platformId)] };
         if (config.account) params.account = config.account;
         await tcp.rpc('sendTyping', params);
       } catch (err) {
         log.debug('Signal: typing indicator failed', { platformId, err });
       }
+    },
+
+    /**
+     * Without this, ensureUserDm (src/modules/permissions/user-dm.ts) treats
+     * Signal as direct-addressable and uses the bare user handle (UUID/number,
+     * no prefix) as the DM's platform_id. That mismatches the `signal:`-prefixed
+     * platformId every real inbound message from that same user carries
+     * (handleEnvelope's dataMessage path — see stripSignalPrefix), so a
+     * cold-DM'd card (e.g. an unknown-sender approval) would render fine but
+     * its pendingQuestions entry would be keyed under a platform_id the
+     * user's real reply never arrives under.
+     */
+    async openDM(userHandle: string): Promise<string> {
+      return `signal:${userHandle}`;
     },
   };
 
@@ -983,6 +1216,7 @@ registerChannelAdapter('signal', {
       'SIGNAL_CLI_PATH',
       'SIGNAL_MANAGE_DAEMON',
       'SIGNAL_DATA_DIR',
+      'SIGNAL_MAX_INLINE_ATTACHMENT_BYTES',
     ]);
 
     const account = process.env.SIGNAL_ACCOUNT || envVars.SIGNAL_ACCOUNT || '';
@@ -998,6 +1232,10 @@ registerChannelAdapter('signal', {
 
     const signalDataDir =
       process.env.SIGNAL_DATA_DIR || envVars.SIGNAL_DATA_DIR || join(homedir(), '.local', 'share', 'signal-cli');
+
+    const maxInlineAttachmentBytes =
+      Number(process.env.SIGNAL_MAX_INLINE_ATTACHMENT_BYTES || envVars.SIGNAL_MAX_INLINE_ATTACHMENT_BYTES) ||
+      DEFAULT_MAX_INLINE_ATTACHMENT_BYTES;
 
     // Only check for `signal-cli` on PATH when the operator left cliPath at
     // the default AND asked us to manage the daemon. A custom absolute path
@@ -1018,6 +1256,7 @@ registerChannelAdapter('signal', {
       tcpPort,
       manageDaemon,
       signalDataDir,
+      maxInlineAttachmentBytes,
     });
   },
   defaults: SIGNAL_DEFAULTS,
