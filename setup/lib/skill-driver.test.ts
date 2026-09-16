@@ -1,8 +1,26 @@
-import { describe, it, expect, vi } from 'vitest';
+import { afterAll, describe, it, expect, vi } from 'vitest';
 import * as p from '@clack/prompts';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, chmodSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+
+/**
+ * Every temp dir this file creates, removed once the file finishes — the cases
+ * below mkdtemp a project root (and often a skill dir) apiece and none of them
+ * cleaned up, leaving ~30 directories in the OS temp dir per run.
+ *
+ * `afterAll` rather than `afterEach`: the roots built at module scope are
+ * shared by the cases that reference them.
+ */
+const tempRoots: string[] = [];
+function tempDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  tempRoots.push(dir);
+  return dir;
+}
+afterAll(() => {
+  while (tempRoots.length) rmSync(tempRoots.pop()!, { recursive: true, force: true });
+});
 
 import {
   runSkill,
@@ -76,8 +94,8 @@ ncl wire --token {{token}}
 `;
 
 function scratch(): { root: string; skill: string } {
-  const root = mkdtempSync(join(tmpdir(), 'driver-'));
-  const skill = mkdtempSync(join(tmpdir(), 'driver-skill-'));
+  const root = tempDir('driver-');
+  const skill = tempDir('driver-skill-');
   writeFileSync(join(root, 'package.json'), '{"name":"scratch"}');
   writeFileSync(join(root, '.env'), '');
   writeFileSync(join(skill, 'SKILL.md'), SKILL);
@@ -138,7 +156,7 @@ describe('thin skill driver', () => {
   });
 
   it('hostExec puts the project bin/ on PATH so a bare command resolves to it', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'driver-bin-'));
+    const root = tempDir('driver-bin-');
     mkdirSync(join(root, 'bin'));
     writeFileSync(join(root, 'bin/greet'), '#!/usr/bin/env bash\necho hi-from-bin\n');
     chmodSync(join(root, 'bin/greet'), 0o755);
@@ -147,19 +165,19 @@ describe('thin skill driver', () => {
   });
 
   it('hostExec returns stdout so a capture run can bind it', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'driver-cap-'));
+    const root = tempDir('driver-cap-');
     expect(String(await hostExec(root)('echo D0CHANNEL')).trim()).toBe('D0CHANNEL');
   });
 
   it('hostExec recomposes a failure as `exit <code>: <first stderr line>` with the full stderr kept below', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'driver-fail-'));
+    const root = tempDir('driver-fail-');
     const run = (): Promise<string> => hostExec(root)('echo "boom: first line" >&2; echo "stack line two" >&2; exit 7');
     await expect(run).rejects.toThrow(/^exit 7: boom: first line/); // one-line consumers read this
     await expect(run).rejects.toThrow(/stack line two/); // full stderr survives for the agentTask reason
   });
 
   it('hostExec tees each command + stdout/stderr to the raw log, success and failure alike', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'driver-tee-'));
+    const root = tempDir('driver-tee-');
     const rawLog = join(root, 'raw.log');
     const exec = hostExec(root, rawLog);
     await exec('echo out-line; echo warn-line >&2');
@@ -205,7 +223,7 @@ printf '%s' '{{token}}'; printf '%s' '{{token}}' >&2; exit ${exit}
   });
 
   it('hostExecStream runs a step and captures the terminal status block fields (for effect:step)', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'driver-step-'));
+    const root = tempDir('driver-step-');
     const out = await hostExecStream(root)(
       'echo show-this-to-the-operator; echo "=== NANOCLAW SETUP: PAIR ==="; echo "STATUS: success"; echo "PLATFORM_ID: telegram:42"; echo "=== END ==="',
     );
@@ -214,7 +232,7 @@ printf '%s' '{{token}}'; printf '%s' '{{token}}' >&2; exit ${exit}
   });
 
   it('hostExecStream children run with LOG_LEVEL=warn — host logger info noise stays off the wizard', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'driver-loglevel-'));
+    const root = tempDir('driver-loglevel-');
     const prev = process.env.LOG_LEVEL;
     delete process.env.LOG_LEVEL; // simulate an operator who didn't set one
     try {
@@ -228,8 +246,8 @@ printf '%s' '{{token}}'; printf '%s' '{{token}}' >&2; exit ${exit}
   });
 
   function reuseScratch(): { root: string; skill: string } {
-    const root = mkdtempSync(join(tmpdir(), 'reuse-'));
-    const skill = mkdtempSync(join(tmpdir(), 'reuse-skill-'));
+    const root = tempDir('reuse-');
+    const skill = tempDir('reuse-skill-');
     writeFileSync(join(root, 'package.json'), '{"name":"scratch"}');
     writeFileSync(join(root, '.env'), 'SLACK_BOT_TOKEN=xoxb-existing-token\n');
     // a skill whose env-set maps bot_token → SLACK_BOT_TOKEN (the reuse linkage)
@@ -280,8 +298,8 @@ printf '%s' '{{token}}'; printf '%s' '{{token}}' >&2; exit ${exit}
   // env-set→ENV_KEY linkage to infer. An explicit `nc:prompt … reuse:<ENV_KEY>`
   // restores the masked reuse offer — the imessage Photon case.
   function helperReuseScratch(): { root: string; skill: string } {
-    const root = mkdtempSync(join(tmpdir(), 'reuse-helper-'));
-    const skill = mkdtempSync(join(tmpdir(), 'reuse-helper-skill-'));
+    const root = tempDir('reuse-helper-');
+    const skill = tempDir('reuse-helper-skill-');
     writeFileSync(join(root, 'package.json'), '{"name":"scratch"}');
     // present in .env, but NOT written by any nc:env-set in the skill below
     writeFileSync(join(root, '.env'), 'IMESSAGE_SERVER_URL=https://photon.example.com\n');
@@ -319,8 +337,8 @@ printf '%s' '{{token}}'; printf '%s' '{{token}}' >&2; exit ${exit}
   // validate-at-bind is NEVER offered — the operator is prompted fresh instead
   // of the reused input rejecting loudly with no interactive recovery.
   it('reuse: a stale .env value failing the prompt validate is never offered — prompted fresh', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'reuse-stale-'));
-    const skill = mkdtempSync(join(tmpdir(), 'reuse-stale-skill-'));
+    const root = tempDir('reuse-stale-');
+    const skill = tempDir('reuse-stale-skill-');
     writeFileSync(join(root, 'package.json'), '{"name":"scratch"}');
     writeFileSync(join(root, '.env'), 'SLACK_BOT_TOKEN=legacy-not-a-bot-token\n'); // fails ^xoxb-
     writeFileSync(
@@ -348,8 +366,8 @@ printf '%s' '{{token}}'; printf '%s' '{{token}}' >&2; exit ${exit}
   });
 
   it('reuse pre-filter mirrors bind order: normalize-then-validate, so a normalizable value still offers', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'reuse-norm-'));
-    const skill = mkdtempSync(join(tmpdir(), 'reuse-norm-skill-'));
+    const root = tempDir('reuse-norm-');
+    const skill = tempDir('reuse-norm-skill-');
     writeFileSync(join(root, 'package.json'), '{"name":"scratch"}');
     writeFileSync(join(root, '.env'), 'BASE_URL=https://x.example/\n'); // trailing slash — valid only after rstrip-slash
     writeFileSync(
@@ -375,8 +393,8 @@ printf '%s' '{{token}}'; printf '%s' '{{token}}' >&2; exit ${exit}
   // would replace the policy, §5.0): note → URL offer (confirm → openUrl) →
   // natural-barrier confirm, all through the injectable confirm/openUrl seams.
   it('default handler: offers the operator-body URL, then the barrier confirm — in that order', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'offer-'));
-    const skill = mkdtempSync(join(tmpdir(), 'offer-skill-'));
+    const root = tempDir('offer-');
+    const skill = tempDir('offer-skill-');
     writeFileSync(join(root, 'package.json'), '{"name":"scratch"}');
     writeFileSync(
       join(skill, 'SKILL.md'),
@@ -402,8 +420,8 @@ printf '%s' '{{token}}'; printf '%s' '{{token}}' >&2; exit ${exit}
   });
 
   it('default handler: readiness flavor before an effect:step; decline = proceed (never an abort)', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'gate-step-'));
-    const skill = mkdtempSync(join(tmpdir(), 'gate-step-skill-'));
+    const root = tempDir('gate-step-');
+    const skill = tempDir('gate-step-skill-');
     writeFileSync(join(root, 'package.json'), '{"name":"scratch"}');
     writeFileSync(
       join(skill, 'SKILL.md'),
@@ -426,8 +444,8 @@ printf '%s' '{{token}}'; printf '%s' '{{token}}' >&2; exit ${exit}
   });
 
   it('default handler: declining the URL offer skips the open', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'offer-no-'));
-    const skill = mkdtempSync(join(tmpdir(), 'offer-no-skill-'));
+    const root = tempDir('offer-no-');
+    const skill = tempDir('offer-no-skill-');
     writeFileSync(join(root, 'package.json'), '{"name":"scratch"}');
     writeFileSync(
       join(skill, 'SKILL.md'),
@@ -600,7 +618,7 @@ describe('non-TTY step lines (CI logs, a nested apply under the parent driver)',
   it('prints one plain line per finished step when stdout is not a TTY, instead of silence', async () => {
     // vitest's stdout is a pipe, so the default handler takes the non-TTY path.
     expect(process.stdout.isTTY).toBeFalsy();
-    const root = mkdtempSync(join(tmpdir(), 'sd-plain-'));
+    const root = tempDir('sd-plain-');
     const skill = join(root, '.claude/skills/plain');
     mkdirSync(skill, { recursive: true });
     writeFileSync(join(root, 'package.json'), '{"name":"scratch"}\n');
@@ -645,7 +663,7 @@ describe('parseDriverArgv (the CLI argv contract behind nested `--input` handoff
 
 describe('unknownInputKeys (a typoed --input key must refuse, not fall through to a piped prompt)', () => {
   it('flags keys naming no nc:prompt var and accepts ones that do', () => {
-    const skill = mkdtempSync(join(tmpdir(), 'driver-keys-'));
+    const skill = tempDir('driver-keys-');
     writeFileSync(
       join(skill, 'SKILL.md'),
       ['# Keys', '', '## Ask', '', '```nc:prompt dial_agents validate:^(all|none)$', 'Which agents?', '```', ''].join(
