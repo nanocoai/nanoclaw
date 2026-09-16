@@ -361,6 +361,22 @@ function buildMediaMessage(data: Buffer, filename: string, ext: string, caption?
 }
 
 /**
+ * Chat JIDs that are not conversations and must never be routed.
+ *
+ * `status@broadcast` carries status updates. `@newsletter` is a WhatsApp
+ * Channel: a read-only broadcast the bot cannot reply to, delivered on the
+ * same messages.upsert stream as real chats. A newsletter JID is neither
+ * `@g.us` nor `@s.whatsapp.net`, so `isGroup` is false downstream and each
+ * broadcast is taken for a fresh DM — creating a messaging_groups row and a
+ * channel-approval card per channel, again every time it publishes.
+ *
+ * Exported for unit testing both suffixes.
+ */
+export function isIgnorableChatJid(jid: string): boolean {
+  return jid === 'status@broadcast' || jid.endsWith('@newsletter');
+}
+
+/**
  * Shared vs dedicated number mode. Only an explicit ASSISTANT_HAS_OWN_NUMBER=true
  * means the bot has its own number (dedicated); anything else — absent, empty,
  * 'false', any other string — means the bot rides the operator's personal
@@ -833,7 +849,7 @@ registerChannelAdapter('whatsapp', {
             const normalized = normalizeMessageContent(msg.message);
             if (!normalized) continue;
             const rawJid = msg.key.remoteJid;
-            if (!rawJid || rawJid === 'status@broadcast') continue;
+            if (!rawJid || isIgnorableChatJid(rawJid)) continue;
 
             // Translate LID → phone JID using v7's alt JID from extractAddressingContext
             const chatJid = await translateJid(rawJid, msg.key.remoteJidAlt);

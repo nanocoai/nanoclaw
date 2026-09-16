@@ -20,6 +20,7 @@ import {
   hasMentionPills,
   isBotMentionedInGroup,
   isBotTypedMention,
+  isIgnorableChatJid,
   parseWhatsAppMentions,
   resolveSharedMode,
   rewriteBotLidMention,
@@ -329,5 +330,31 @@ describe('appendMediaFailureNote', () => {
     expect(appendMediaFailureNote('', ['image', 'document'])).toBe(
       '[image could not be downloaded] [document could not be downloaded]',
     );
+  });
+});
+
+describe('isIgnorableChatJid', () => {
+  it('ignores status broadcasts', () => {
+    expect(isIgnorableChatJid('status@broadcast')).toBe(true);
+  });
+
+  it('ignores WhatsApp Channel (newsletter) broadcasts', () => {
+    // Regression guard for the real failure: a newsletter JID is neither
+    // @g.us nor @s.whatsapp.net, so routing one takes it for a DM and opens a
+    // channel-approval card per broadcast — endlessly, since a channel keeps
+    // publishing and the bot can never reply to it.
+    expect(isIgnorableChatJid('120363144038483540@newsletter')).toBe(true);
+  });
+
+  it('routes group chats', () => {
+    expect(isIgnorableChatJid('120363410609152463@g.us')).toBe(false);
+  });
+
+  it('routes direct messages', () => {
+    expect(isIgnorableChatJid('15550009999@s.whatsapp.net')).toBe(false);
+  });
+
+  it('does not ignore a JID that merely contains the word newsletter', () => {
+    expect(isIgnorableChatJid('newsletter@s.whatsapp.net')).toBe(false);
   });
 });
