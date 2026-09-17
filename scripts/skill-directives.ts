@@ -45,8 +45,9 @@
 //        a non-zero exit bounces to an agent (degrade, not crash) and, via the
 //        run-health gate, blocks the dangerous side effects that follow it (a
 //        restart, a pairing/QR step, a wire). An unresolved {{var}} defers.
-//   prompt <var> [secret] [validate:<re>] [flags:<re-flags>]
+//   prompt <var> [secret] [multiselect] [validate:<re>] [flags:<re-flags>]
 //          [normalize:trim|rstrip-slash|lower] [reuse:<ENV_KEY>]
+//          [choices:<value>|<value>...]
 //        body: the question → binds {{var}}                       skip if satisfied
 //        validate:<re> is a regex enforced AT BIND for EVERY value — `inputs` and
 //        interactive answers alike (e.g. validate:^xoxb- to require a Slack bot
@@ -120,7 +121,7 @@ const RETIRED: Record<string, string> = {
   'env-sync':
     'nc:env-sync was retired — nothing reads the data/env/env mirror (and it copied live tokens); delete the fence, the adapter reads .env directly',
 };
-const PROMPT_FLAGS = new Set(['secret']);
+const PROMPT_FLAGS = new Set(['secret', 'multiselect']);
 
 export function parseDirectives(markdown: string): Directive[] {
   const lines = markdown.split('\n');
@@ -186,6 +187,12 @@ function referencedVars(d: Directive): string[] {
   return found;
 }
 
+/** `{{var}}` names referenced by the prompt's dynamic choices attribute. */
+function referencedChoiceVars(d: Directive): string[] {
+  if (typeof d.attrs.choices !== 'string') return [];
+  return [...d.attrs.choices.matchAll(VAR_REF)].map((match) => match[1]);
+}
+
 /**
  * The resolved `chat` core version from our lockfile — the single source of
  * truth a `@chat-adapter/*` adapter pin must match (the adapter and the core
@@ -207,6 +214,7 @@ export function resolveChatCoreVersion(root: string): string | undefined {
 export function validate(directives: Directive[], ctx?: { chatVersion?: string }): Problem[] {
   const problems: Problem[] = [];
   const defined = new Set<string>();
+  const secret = new Set<string>();
   const flag = (d: Directive, message: string) => problems.push({ line: d.line, kind: d.kind, message });
   for (const d of directives) {
     if (RETIRED[d.kind]) flag(d, RETIRED[d.kind]);
@@ -288,6 +296,21 @@ export function validate(directives: Directive[], ctx?: { chatVersion?: string }
         if (typeof d.attrs.reuse === 'string' && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(d.attrs.reuse)) {
           flag(d, `prompt reuse:${d.attrs.reuse} must be a valid ENV_KEY`);
         }
+        if (d.args.includes('multiselect') && typeof d.attrs.choices !== 'string') {
+          flag(d, 'prompt multiselect requires choices:<value>|<value>...');
+        }
+        if (d.args.includes('multiselect') && d.attrs.choices === '') {
+          flag(d, 'prompt multiselect choices must not be empty');
+        }
+        if (d.args.includes('multiselect') && typeof d.attrs.choices === 'string' && !d.attrs.choices.includes('{{')) {
+          const choices = d.attrs.choices.split('|');
+          if (choices.some((choice) => choice.length === 0) || new Set(choices).size !== choices.length) {
+            flag(d, 'prompt multiselect choices must be non-empty and unique');
+          }
+        }
+        if (d.args.includes('multiselect') && d.args.includes('secret')) {
+          flag(d, 'prompt multiselect cannot be secret');
+        }
         break;
       }
       case 'operator':
@@ -314,6 +337,11 @@ export function validate(directives: Directive[], ctx?: { chatVersion?: string }
     for (const ref of referencedVars(d)) {
       if (!defined.has(ref)) flag(d, `references {{${ref}}} but no earlier nc:prompt or nc:run capture defined it`);
     }
+    for (const ref of referencedChoiceVars(d)) {
+      if (!defined.has(ref))
+        flag(d, `choices references {{${ref}}} but no earlier nc:prompt or nc:run capture defined it`);
+      else if (secret.has(ref)) flag(d, `choices must not reference secret variable {{${ref}}}`);
+    }
     // A `when:<var>=<value>` guard references an earlier-defined var by bare name.
     if (typeof d.attrs.when === 'string') {
       const eq = d.attrs.when.indexOf('=');
@@ -327,7 +355,10 @@ export function validate(directives: Directive[], ctx?: { chatVersion?: string }
     }
     if (d.kind === 'prompt') {
       const v = promptVar(d);
-      if (v) defined.add(v);
+      if (v) {
+        defined.add(v);
+        if (d.args.includes('secret')) secret.add(v);
+      }
     }
     // capture:<var> binds stdout; capture:<var>=<FIELD>,… binds step block fields.
     if (d.kind === 'run' && typeof d.attrs.capture === 'string') {
