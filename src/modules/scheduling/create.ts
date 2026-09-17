@@ -28,6 +28,8 @@ export interface PreparedScheduledTask {
   recurrence: string | null;
   script: string | null;
   processAfter: string;
+  /** Opt-in: each occurrence starts a fresh agent conversation. Default false. */
+  freshSession?: boolean;
 }
 
 export type ScheduledTaskRow = TaskRecord;
@@ -108,6 +110,7 @@ export function prepareScheduledTask(input: {
   script?: string | null;
   dangerouslyOverrideRecurrenceLimit?: boolean;
   timezone?: string;
+  freshSession?: boolean;
 }): PreparedScheduledTask {
   if (!input.prompt) throw new Error('--prompt is required');
   const recurrence = input.recurrence ?? null;
@@ -125,7 +128,14 @@ export function prepareScheduledTask(input: {
     processAfter = parseProcessAfter(input.processAfter, tz);
   }
 
-  return { name: input.name, prompt: input.prompt, recurrence, script, processAfter };
+  return {
+    name: input.name,
+    prompt: input.prompt,
+    recurrence,
+    script,
+    processAfter,
+    freshSession: input.freshSession === true,
+  };
 }
 
 /** Persist a prepared task through NanoClaw's single task/session representation. */
@@ -147,6 +157,9 @@ export async function createScheduledTask(
         prompt: task.prompt,
         script: task.script,
         originSessionId: options?.originSessionId ?? null,
+        // `armNextTask` copies `content` forward verbatim, so the flag rides
+        // along to every future occurrence with no schema change.
+        freshSession: task.freshSession === true,
       }),
       status: options?.status ?? 'pending',
     });

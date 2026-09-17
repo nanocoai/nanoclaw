@@ -132,3 +132,24 @@ describe('claude maybeRotateContinuation', () => {
     expect(provider.maybeRotateContinuation!('does-not-exist', CWD)).toBeNull();
   });
 });
+
+describe('claude abandonContinuation', () => {
+  // A --fresh-session task occurrence drops a perfectly resumable
+  // continuation on purpose. maybeRotateContinuation only ever inspects the
+  // transcript it is about to resume, so nothing else would ever retire this
+  // one and the projects dir would grow a .jsonl per occurrence, forever.
+  it('archives and moves the abandoned transcript out of the resume path', () => {
+    const p = writeTranscript('sess-abandoned', 4096);
+    const provider = createProvider('claude');
+    provider.abandonContinuation!('sess-abandoned', 'fresh-session task occurrence');
+    expect(fs.existsSync(p)).toBe(false);
+    const dir = path.dirname(p);
+    expect(fs.readdirSync(dir).some((f) => f.startsWith('sess-abandoned.jsonl.rotated-'))).toBe(true);
+    expect(fs.readdirSync(path.join(tmp, 'conversations')).length).toBeGreaterThan(0);
+  });
+
+  it('is a no-op for an unknown session id', () => {
+    const provider = createProvider('claude');
+    expect(() => provider.abandonContinuation!('does-not-exist', 'why')).not.toThrow();
+  });
+});

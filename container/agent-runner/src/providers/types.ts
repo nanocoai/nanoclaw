@@ -55,6 +55,17 @@ export interface AgentProvider {
    * before it ever replies. Providers without an on-disk transcript omit this.
    */
   maybeRotateContinuation?(continuation: string, cwd: string): string | null;
+
+  /**
+   * Optional. Called when the caller drops a still-valid continuation on
+   * purpose — e.g. a `--fresh-session` task occurrence that must not resume
+   * the previous run. Gives the provider a chance to archive and retire the
+   * abandoned transcript; `maybeRotateContinuation` only ever inspects the
+   * transcript it is about to resume, so without this the abandoned .jsonl is
+   * never rotated and the transcript directory grows without bound.
+   * Best-effort: implementations must not throw.
+   */
+  abandonContinuation?(continuation: string, reason: string): void;
 }
 
 /** One prompt/result round-trip, as reported to `onExchangeComplete`. */

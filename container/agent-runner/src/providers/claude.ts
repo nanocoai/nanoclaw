@@ -17,7 +17,7 @@ import {
 } from './claude-config.js';
 // Transcript archiving and rotation are this provider's own concern: both
 // read the SDK's on-disk .jsonl, which no other provider has.
-import { archiveClaudeTranscript, rotateClaudeContinuation } from './claude-history.js';
+import { archiveClaudeTranscript, retireClaudeContinuation, rotateClaudeContinuation } from './claude-history.js';
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
@@ -241,6 +241,15 @@ export class ClaudeProvider implements AgentProvider {
    */
   maybeRotateContinuation(continuation: string, _cwd: string): string | null {
     return rotateClaudeContinuation({ continuation, assistantName: this.assistantName, log }, REAL_CLOCK);
+  }
+
+  /**
+   * Walk away from a resumable continuation on purpose (a `--fresh-session`
+   * task occurrence). Rotation only ever inspects the transcript it is about
+   * to resume, so without this the abandoned `.jsonl` would never be retired.
+   */
+  abandonContinuation(continuation: string, reason: string): void {
+    retireClaudeContinuation({ continuation, assistantName: this.assistantName, log }, REAL_CLOCK, reason);
   }
 
   query(input: QueryInput): AgentQuery {
