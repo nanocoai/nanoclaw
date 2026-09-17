@@ -49,6 +49,43 @@ mkdir -p tools
 cp -R .claude/skills/add-clidash/add/tools/clidash tools/clidash
 ```
 
+```nc:copy
+add/tools/clidash/README.md -> tools/clidash/README.md
+add/tools/clidash/activity.js -> tools/clidash/activity.js
+add/tools/clidash/clidash.config.example.json -> tools/clidash/clidash.config.example.json
+add/tools/clidash/docs.js -> tools/clidash/docs.js
+add/tools/clidash/logs.js -> tools/clidash/logs.js
+add/tools/clidash/package.json -> tools/clidash/package.json
+add/tools/clidash/parsers.js -> tools/clidash/parsers.js
+add/tools/clidash/public/app.js -> tools/clidash/public/app.js
+add/tools/clidash/public/apple-touch-icon.png -> tools/clidash/public/apple-touch-icon.png
+add/tools/clidash/public/favicon.ico -> tools/clidash/public/favicon.ico
+add/tools/clidash/public/favicon.svg -> tools/clidash/public/favicon.svg
+add/tools/clidash/public/icon-192.png -> tools/clidash/public/icon-192.png
+add/tools/clidash/public/icon-512.png -> tools/clidash/public/icon-512.png
+add/tools/clidash/public/index.html -> tools/clidash/public/index.html
+add/tools/clidash/public/md.js -> tools/clidash/public/md.js
+add/tools/clidash/public/site.webmanifest -> tools/clidash/public/site.webmanifest
+add/tools/clidash/public/style.css -> tools/clidash/public/style.css
+add/tools/clidash/server.js -> tools/clidash/server.js
+add/tools/clidash/test/activity-server.test.js -> tools/clidash/test/activity-server.test.js
+add/tools/clidash/test/activity.test.js -> tools/clidash/test/activity.test.js
+add/tools/clidash/test/cmd.test.js -> tools/clidash/test/cmd.test.js
+add/tools/clidash/test/css.test.js -> tools/clidash/test/css.test.js
+add/tools/clidash/test/docs-server.test.js -> tools/clidash/test/docs-server.test.js
+add/tools/clidash/test/docs.test.js -> tools/clidash/test/docs.test.js
+add/tools/clidash/test/fixtures/ncl-help.txt -> tools/clidash/test/fixtures/ncl-help.txt
+add/tools/clidash/test/fixtures/stub-cli.js -> tools/clidash/test/fixtures/stub-cli.js
+add/tools/clidash/test/help.test.js -> tools/clidash/test/help.test.js
+add/tools/clidash/test/logs.test.js -> tools/clidash/test/logs.test.js
+add/tools/clidash/test/md.test.js -> tools/clidash/test/md.test.js
+add/tools/clidash/test/ncl-overview.test.js -> tools/clidash/test/ncl-overview.test.js
+add/tools/clidash/test/parsers.test.js -> tools/clidash/test/parsers.test.js
+add/tools/clidash/test/server.test.js -> tools/clidash/test/server.test.js
+add/tools/clidash/test/smoke.sh -> tools/clidash/test/smoke.sh
+add/tools/clidash/views/ncl-overview.js -> tools/clidash/views/ncl-overview.js
+```
+
 That is the only file change this skill makes. Nothing in NanoClaw `src/` is
 touched, no dependency is added.
 
@@ -60,6 +97,10 @@ root, so it works as-is when you run clidash from `tools/clidash/`:
 ```bash
 cd tools/clidash
 cp clidash.config.example.json clidash.config.json
+```
+
+```nc:copy
+add/tools/clidash/clidash.config.example.json -> tools/clidash/clidash.config.json
 ```
 
 `clidash.config.json` is your local config — add it to `.gitignore` if you
@@ -78,6 +119,10 @@ Tests use a stub CLI — no real `ncl` or `docker` needed:
 
 ```bash
 npm test
+```
+
+```nc:run effect:test
+cd tools/clidash && npm test
 ```
 
 All tests should pass (Node ≥ 22.5, `node:test`, zero dependencies).

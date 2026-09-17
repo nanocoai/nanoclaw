@@ -25,7 +25,11 @@ NanoClaw (pusher)              Dashboard (npm package)
 ### 1. Install the npm package
 
 ```bash
-pnpm install @nanoco/nanoclaw-dashboard
+pnpm install @nanoco/nanoclaw-dashboard@0.3.0
+```
+
+```nc:dep
+@nanoco/nanoclaw-dashboard@0.3.0
 ```
 
 ### 2. Copy the pusher module and its tests
@@ -36,6 +40,12 @@ Copy all three resource files into `src/`. The tests ship with the skill and run
 .claude/skills/add-dashboard/resources/dashboard-pusher.ts       → src/dashboard-pusher.ts
 .claude/skills/add-dashboard/resources/dashboard-pusher.test.ts  → src/dashboard-pusher.test.ts
 .claude/skills/add-dashboard/resources/dashboard-wiring.test.ts  → src/dashboard-wiring.test.ts
+```
+
+```nc:copy
+resources/dashboard-pusher.ts -> src/dashboard-pusher.ts
+resources/dashboard-pusher.test.ts -> src/dashboard-pusher.test.ts
+resources/dashboard-wiring.test.ts -> src/dashboard-wiring.test.ts
 ```
 
 - `dashboard-pusher.test.ts` — behavior: starts the pusher, posts a real snapshot to a fake dashboard.
@@ -51,6 +61,10 @@ Add this block inside `main()`, just before the `log.info('NanoClaw running')` l
   // Dashboard (optional; no-ops without DASHBOARD_SECRET)
   const { startDashboard } = await import('./dashboard-pusher.js');
   await startDashboard();
+```
+
+```nc:run
+bash .claude/skills/add-dashboard/apply.sh
 ```
 
 `startDashboard()` reads `DASHBOARD_SECRET`/`DASHBOARD_PORT` itself and no-ops if the secret is unset, so nothing else in core needs to change.
@@ -74,6 +88,14 @@ pnpm exec vitest run src/dashboard-pusher.test.ts src/dashboard-wiring.test.ts  
 source setup/lib/install-slug.sh
 systemctl --user restart $(systemd_unit)              # Linux
 # or: launchctl kickstart -k gui/$(id -u)/$(launchd_label)  # macOS
+```
+
+```nc:run effect:build
+pnpm run build
+```
+
+```nc:run effect:test
+pnpm exec vitest run src/dashboard-pusher.test.ts src/dashboard-wiring.test.ts
 ```
 
 Run `build` **before** the tests: it's what guards the `@nanoco/nanoclaw-dashboard` dependency. `dashboard-pusher.ts` reaches the package through `await import('@nanoco/nanoclaw-dashboard')`, so if step 4 was skipped, `pnpm run build` fails with `TS2307: Cannot find module`. The behavior test deliberately *mocks* that package — its `startDashboard` binds a real dashboard port, a side effect we don't want in a test — so the test alone would pass with the dependency missing. Build is therefore the leg that verifies the dependency is installed; keep it ahead of the tests in the validate step.
