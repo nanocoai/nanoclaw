@@ -182,6 +182,55 @@ describe('spec realization', () => {
     expect(image).toBeGreaterThan(network);
   });
 
+  it('attaches every additional network between create and start', async () => {
+    // `docker create` takes one --network, so a second attachment can only be
+    // a `network connect` — and it has to land before the container starts, or
+    // the process comes up without the route its spec declares.
+    const d = new DockerSessionDriver({
+      ...FIXTURE_POLICY,
+      cli,
+      networkArgsFor: () => ['--network', 'nanoclaw-egress'],
+      extraNetworksFor: (spec) => (spec.network === 'shared-private+direct' ? ['nanoclaw-browser-egress'] : []),
+    });
+    const handle = await d.prepare(fixtureSpec({ network: 'shared-private+direct' }));
+
+    const create = cli.callMatching(/^create /)!;
+    const connect = cli.callMatching(/^network connect /)!;
+    expect(connect.args).toEqual(['network', 'connect', 'nanoclaw-browser-egress', 'ncl-spike-s1']);
+    expect(connect.seq).toBeGreaterThan(create.seq);
+    // The gateway attachment is still the one `create` makes: the second
+    // network is additive, never a replacement.
+    expect(create.args).toContain('nanoclaw-egress');
+    expect(handle.name).toBe('ncl-spike-s1');
+  });
+
+  it('attaches nothing extra for a gateway-only session', async () => {
+    const d = new DockerSessionDriver({
+      ...FIXTURE_POLICY,
+      cli,
+      networkArgsFor: () => ['--network', 'nanoclaw-egress'],
+      extraNetworksFor: (spec) => (spec.network === 'shared-private+direct' ? ['nanoclaw-browser-egress'] : []),
+    });
+    await d.prepare(fixtureSpec());
+    expect(cli.callMatching(/^network connect /)).toBeUndefined();
+  });
+
+  it('tears the container down when an additional attachment fails', async () => {
+    // prepare is allocate-all-or-nothing. A container left created but
+    // unattached would start later with an egress posture its spec denies.
+    cli.responses = [
+      { match: /^inspect /, throws: new Error('No such object') },
+      { match: /^network connect /, throws: new Error('network not found') },
+    ];
+    const d = new DockerSessionDriver({
+      ...FIXTURE_POLICY,
+      cli,
+      extraNetworksFor: () => ['nanoclaw-browser-egress'],
+    });
+    await expect(d.prepare(fixtureSpec({ network: 'shared-private+direct' }))).rejects.toThrow();
+    expect(cli.callMatching(/^rm --force /)).toBeDefined();
+  });
+
   it('emits contributed env after composed env, so the contributed value wins last-wins', async () => {
     // The contract's override rule (ContainerSpec.contributedEnv), realized in
     // Docker vocabulary: the later `-e` wins.

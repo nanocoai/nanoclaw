@@ -132,6 +132,48 @@ function composeWithFolder(folder: string) {
   });
 }
 
+describe('composeSessionSpec — direct browser egress', () => {
+  const optedIn = { ...containerConfig, directBrowserEgress: true } as ContainerConfig;
+
+  it('composes the gateway-only topology for a group that did not opt in', () => {
+    // The whole feature is opt-in: the default composition must be the exact
+    // one every group gets today, mount and PATH included.
+    const spec = compose();
+    expect(spec.network).toBe('shared-private');
+    expect(spec.containers[0].args).toEqual(['exec bun run /app/src/index.ts']);
+    expect(spec.containers[0].mounts.some((m) => m.containerPath.includes('browser-direct-egress'))).toBe(false);
+  });
+
+  it('declares the direct topology only for an opted-in group', () => {
+    expect(compose({ containerConfig: optedIn }).network).toBe('shared-private+direct');
+  });
+
+  it('puts the shim ahead of the image PATH for an opted-in group', () => {
+    const spec = compose({ containerConfig: optedIn });
+    expect(spec.containers[0].args?.[0]).toMatch(/^export PATH="\/opt\/nanoclaw\/browser-direct-egress:\$PATH"; /);
+    expect(spec.containers[0].args?.[0]).toContain('exec bun run /app/src/index.ts');
+  });
+
+  it('mounts the shim read-only', () => {
+    const shim = compose({ containerConfig: optedIn }).containers[0].mounts.find(
+      (m) => m.containerPath === '/opt/nanoclaw/browser-direct-egress/agent-browser',
+    );
+    expect(shim).toBeDefined();
+    // It is code the agent executes; rw would make the un-proxying editable
+    // from inside the very container it is supposed to constrain.
+    expect(shim!.mode).toBe('ro');
+  });
+
+  it('never touches the container-wide proxy env', () => {
+    // The gateway lane must survive verbatim: this is how the agent's own
+    // model calls get their credential injected.
+    const gateway = { env: { HTTPS_PROXY: 'http://gateway:10255' } };
+    const spec = compose({ containerConfig: optedIn, gateway });
+    expect(spec.containers[0].contributedEnv).toMatchObject({ HTTPS_PROXY: 'http://gateway:10255' });
+    expect(spec.containers[0].env.HTTPS_PROXY).toBeUndefined();
+  });
+});
+
 describe('composeSessionSpec', () => {
   it('keys the session by install, group and session id', () => {
     expect(compose().key).toMatchObject({ agentGroupId: 'agent-1', sessionId: 'session-1' });

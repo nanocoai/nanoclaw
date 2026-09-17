@@ -51,6 +51,15 @@ export interface DockerDriverOptions extends MountPolicy {
   cli?: Cli;
   /** Docker network the session's containers attach to, resolved by the overlay. */
   networkArgsFor?: (spec: SessionSpec) => string[];
+  /**
+   * Networks to attach IN ADDITION to the one `networkArgsFor` names. `docker
+   * create` takes a single `--network`, so a second attachment can only be a
+   * `network connect` — and it has to land between create and start, which is
+   * the window `prepare` owns. Same injection point and same rule as
+   * `networkArgsFor`: topology is driver-private, resolved at registration,
+   * never carried as argv across the seam.
+   */
+  extraNetworksFor?: (spec: SessionSpec) => string[];
 }
 
 /** Watch reconnection: bounded backoff, never give up (see `watchSessions`). */
@@ -163,6 +172,13 @@ export class DockerSessionDriver implements SessionDriver {
 
     try {
       this.#cli.run(args);
+      // Additional attachments, inside the same allocate-all-or-nothing block:
+      // a container that starts with only some of the networks its spec
+      // declares is a container whose egress posture silently disagrees with
+      // what the host composed.
+      for (const network of this.opts.extraNetworksFor?.(spec) ?? []) {
+        this.#cli.run(['network', 'connect', validateRuntimeName(network, 'network'), name]);
+      }
     } catch (error) {
       try {
         this.#cli.run(['rm', '--force', name]);

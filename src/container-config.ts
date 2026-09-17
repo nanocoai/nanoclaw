@@ -254,6 +254,13 @@ export interface ContainerConfig {
   timezone?: string;
   /** Session isolation tier for the group's containers; absent = the composer's default ('container'). */
   runtimeTier?: 'container' | 'vm';
+  /**
+   * Opt-in to direct browser egress: the group's containers additionally
+   * attach to a non-internal network and `agent-browser` runs with the gateway
+   * proxy stripped. Absent/false = gateway-only egress, which is every group's
+   * behavior unless an operator turned this on. See src/browser-direct-egress.ts.
+   */
+  directBrowserEgress?: boolean;
 }
 
 /**
@@ -377,6 +384,11 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
     fastMode: FAST_MODE || undefined,
     timezone: row.timezone && isValidTimezone(row.timezone) ? row.timezone : undefined,
     runtimeTier: parseRuntimeTier(row.runtime_tier, group.name),
+    // Strictly `=== 1`, and omitted rather than `false` when off. This flag
+    // only ever REMOVES a confinement, so unlike runtime_tier there is nothing
+    // to fail closed *to* — the safe reading of an absent, NULL or corrupt
+    // value is simply "not opted in", which is the perimeter intact.
+    directBrowserEgress: row.direct_browser_egress === 1 || undefined,
   };
 }
 

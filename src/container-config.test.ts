@@ -90,6 +90,26 @@ describe('resolveGroupTimezone', () => {
     );
     expect(configFromDb({ ...row, runtime_tier: null }, GROUP).runtimeTier).toBeUndefined();
   });
+
+  it('configFromDb reads direct browser egress as opted-in only on an exact 1', async () => {
+    // The one flag in this row that REMOVES a confinement. Every reading other
+    // than a literal 1 — the migration default, NULL, a hand-edited string, a
+    // pre-migration row with no column at all — must land on 'not opted in',
+    // which is the perimeter intact.
+    const row = (await getContainerConfig(GROUP.id))!;
+    expect(configFromDb(row, GROUP).directBrowserEgress).toBeUndefined();
+    expect(configFromDb({ ...row, direct_browser_egress: 1 }, GROUP).directBrowserEgress).toBe(true);
+    expect(configFromDb({ ...row, direct_browser_egress: 0 }, GROUP).directBrowserEgress).toBeUndefined();
+    expect(configFromDb({ ...row, direct_browser_egress: null }, GROUP).directBrowserEgress).toBeUndefined();
+    expect(
+      configFromDb({ ...row, direct_browser_egress: 'true' as unknown as number }, GROUP).directBrowserEgress,
+    ).toBeUndefined();
+  });
+
+  it('the migration defaults every existing group to gateway-only egress', async () => {
+    const row = (await getContainerConfig(GROUP.id))!;
+    expect(row.direct_browser_egress).toBe(0);
+  });
 });
 
 describe('parseMcpServerConfig', () => {

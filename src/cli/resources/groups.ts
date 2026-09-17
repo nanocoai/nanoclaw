@@ -68,6 +68,7 @@ function presentConfig(row: ContainerConfigRow): Record<string, unknown> {
     packages_npm: JSON.parse(row.packages_npm),
     additional_mounts: JSON.parse(row.additional_mounts),
     cli_scope: row.cli_scope,
+    direct_browser_egress: row.direct_browser_egress === 1,
     timezone: row.timezone,
     updated_at: row.updated_at,
   };
@@ -419,6 +420,41 @@ registerResource({
 
         const updated = (await getContainerConfig(id))!;
         return presentConfig(updated);
+      },
+    },
+    'config set-browser-egress': {
+      access: 'approval',
+      hostOnly: true,
+      description:
+        'Turn direct browser egress on or off for a group. OPERATOR-ONLY — never runnable from ' +
+        "inside a container (it loosens that container's own network perimeter). When ON, the " +
+        "group's containers also attach to a non-internal Docker network and `agent-browser` runs " +
+        'with the gateway proxy stripped, so BROWSER TRAFFIC BYPASSES the OneCLI gateway entirely — ' +
+        'no credential injection, no rules, no audit trail — and reaches the internet directly. ' +
+        'Everything else in the container keeps using the gateway. Requires `ncl groups restart` to ' +
+        'take effect. Use --id <group-id> --enabled true|false. See docs/SECURITY.md §7.',
+      handler: async (args) => {
+        const id = args.id as string;
+        if (!id) throw new Error('--id is required');
+        const raw = args.enabled;
+        if (raw === undefined) throw new Error('--enabled true|false is required');
+        const value = String(raw).toLowerCase();
+        // No truthiness coercion: a typo must not decide a security posture.
+        if (!['true', 'false', '1', '0'].includes(value)) {
+          throw new Error('--enabled must be true or false');
+        }
+        const enabled = value === 'true' || value === '1';
+        const row = await getContainerConfig(id);
+        if (!row) throw new Error(`No container config for group: ${id}`);
+        await updateContainerConfigScalars(id, { direct_browser_egress: enabled ? 1 : 0 });
+        return {
+          agent_group_id: id,
+          direct_browser_egress: enabled,
+          note: enabled
+            ? `Browser traffic for this group will BYPASS the OneCLI gateway (no credential injection or audit). ` +
+              `Run \`ncl groups restart --id ${id}\` to apply.`
+            : `Browser traffic returns to gateway-only egress. Run \`ncl groups restart --id ${id}\` to apply.`,
+        };
       },
     },
     'config add-mcp-server': {

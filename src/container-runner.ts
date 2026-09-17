@@ -24,6 +24,7 @@ import {
   INSTALL_SLUG,
   TIMEZONE,
 } from './config.js';
+import { browserShimMount, withBrowserShimOnPath } from './browser-direct-egress.js';
 import { CONTAINER_PLUGINS_DIR, materializeContainerJson } from './container-config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { updateContainerConfigScalars } from './db/container-configs.js';
@@ -995,6 +996,15 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
   const runAs = hostUid != null && hostUid !== 0 ? { uid: hostUid, gid: hostGid ?? hostUid } : undefined;
   if (runAs) env.HOME = '/home/node';
 
+  // Opt-in, per group, operator-set: `agent-browser` is put behind a shim that
+  // drops the gateway proxy env, and PID 1's own shell puts that shim ahead of
+  // `/pnpm` on PATH. Nothing else in the container is touched — every other
+  // client still reads the container-wide proxy env and still gets its
+  // credentials injected by the gateway. See src/browser-direct-egress.ts.
+  const directBrowserEgress = containerConfig.directBrowserEgress === true;
+  const composedMounts = toMountSpecs(mounts, agentGroup.id);
+  if (directBrowserEgress) composedMounts.push(browserShimMount(agentGroup.id));
+
   const agent: ContainerSpec = {
     role: 'agent',
     // Composition resolves the image; drivers never build and never resolve.
@@ -1003,8 +1013,10 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
     // Run the v2 entry point directly (no tsc, no stdin). The driver maps the
     // 'standard' posture's PID-1 requirement onto this: Docker adds `--init`.
     command: ['bash', '-c'],
-    args: ['exec bun run /app/src/index.ts'],
-    mounts: mergeMounts(toMountSpecs(mounts, agentGroup.id), gateway.mounts ?? []),
+    args: directBrowserEgress
+      ? withBrowserShimOnPath(['exec bun run /app/src/index.ts'])
+      : ['exec bun run /app/src/index.ts'],
+    mounts: mergeMounts(composedMounts, gateway.mounts ?? []),
     contributedEnv,
   };
 
@@ -1035,7 +1047,7 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
     // The gateway's auxiliary containers ride beside the agent; capability-
     // gated in the spawn path before composition ever runs.
     containers: [agent, ...(gateway.containers ?? [])],
-    network: 'shared-private',
+    network: directBrowserEgress ? 'shared-private+direct' : 'shared-private',
     hardening: 'standard',
     resources: {
       cpus: CONTAINER_CPU_LIMIT || undefined,

@@ -306,3 +306,68 @@ describe('groups config add-mount / remove-mount (host-only)', () => {
     expect(JSON.parse((await getContainerConfig(GID))!.additional_mounts)).toEqual([]);
   });
 });
+
+describe('groups config set-browser-egress (host-only)', () => {
+  beforeEach(async () => {
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+    fs.mkdirSync(TEST_DIR, { recursive: true });
+    await runMigrations(await initTestDb());
+  });
+  afterEach(async () => {
+    await closeDb();
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+  });
+
+  async function group(id: string): Promise<void> {
+    await createAgentGroup({ id, name: id, folder: id, agent_provider: null, created_at: now() });
+    await ensureContainerConfig(id);
+  }
+
+  it('turns the flag on and back off for a host caller', async () => {
+    const GID = 'ag-egress';
+    await group(GID);
+    expect((await getContainerConfig(GID))!.direct_browser_egress).toBe(0);
+
+    const on = await dispatch(
+      { id: 'r1', command: 'groups-config-set-browser-egress', args: { id: GID, enabled: 'true' } },
+      { caller: 'host' },
+    );
+    expect(on.ok).toBe(true);
+    expect((await getContainerConfig(GID))!.direct_browser_egress).toBe(1);
+
+    const off = await dispatch(
+      { id: 'r2', command: 'groups-config-set-browser-egress', args: { id: GID, enabled: 'false' } },
+      { caller: 'host' },
+    );
+    expect(off.ok).toBe(true);
+    expect((await getContainerConfig(GID))!.direct_browser_egress).toBe(0);
+  });
+
+  it('refuses anything that is not plainly true or false', async () => {
+    // No truthiness coercion: `--enabled yes` silently meaning ON is how a
+    // perimeter gets opened by a typo.
+    const GID = 'ag-egress-bad';
+    await group(GID);
+    for (const enabled of ['yes', 'on', '', 'TRUE!']) {
+      const resp = await dispatch(
+        { id: `r-${enabled}`, command: 'groups-config-set-browser-egress', args: { id: GID, enabled } },
+        { caller: 'host' },
+      );
+      expect(resp.ok).toBe(false);
+    }
+    expect((await getContainerConfig(GID))!.direct_browser_egress).toBe(0);
+  });
+
+  it('is refused for an agent caller, approval or not', async () => {
+    // The boundary an agent runs inside must never be widenable from inside it
+    // — the same rule mount management gets.
+    const GID = 'ag-egress-agent';
+    await group(GID);
+    const resp = await dispatch(
+      { id: 'r9', command: 'groups-config-set-browser-egress', args: { id: GID, enabled: 'true' } },
+      { caller: 'agent', sessionId: 's1', agentGroupId: GID, messagingGroupId: 'mg1' },
+    );
+    expect(resp.ok).toBe(false);
+    expect((await getContainerConfig(GID))!.direct_browser_egress).toBe(0);
+  });
+});
