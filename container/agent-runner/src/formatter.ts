@@ -155,6 +155,65 @@ export interface RoutingContext {
    *  delivers from a task session; final-text `<message to>` blocks are inert
    *  and the final text auto-appends to the series run log. */
   taskRun: boolean;
+  /**
+   * One entry per row in the batch that someone is waiting on, oldest first.
+   * Deliberately not the batch address above, which comes from the FIRST row: a
+   * batch mixing a host notice with a user question would otherwise send the
+   * user's answer into the agent channel, and collapsing the batch to a single
+   * target would leave a second question in the same batch unanswerable.
+   * Empty when no row in the batch has a human endpoint.
+   */
+  replyTargets?: ReplyTarget[];
+  /**
+   * The batch's only wake-eligible rows arrived over an agent channel: a host
+   * notice (approval outcome, restart, self-modification) or peer traffic.
+   * There is a correspondent, so the model can still be corrected — but there
+   * is no human endpoint, so nothing is emitted toward it.
+   */
+  agentWake?: boolean;
+}
+
+/** Everything needed to address one outbound message back at its origin. */
+export interface ReplyTarget {
+  platformId: string | null;
+  channelType: string | null;
+  threadId: string | null;
+  inReplyTo: string | null;
+}
+
+/** Wake-eligible conversational rows — the ones that put someone on the hook. */
+function isTriggerMessage(msg: MessageInRow): boolean {
+  return (msg.kind === 'chat' || msg.kind === 'chat-sdk') && msg.trigger === 1;
+}
+
+/**
+ * True when this row is a person's message addressed to the agent, i.e. someone
+ * is on the other end waiting to be answered.
+ *
+ * Agent-channel rows are excluded. Those cover peer traffic AND the host's own
+ * notices, which are written into the user's session as `agent` chat rows — a
+ * correspondent worth answering, but not one an emitted message can reach. A
+ * row with no channel has nowhere to send anything either.
+ */
+export function isUserChannelTrigger(msg: MessageInRow): boolean {
+  return isTriggerMessage(msg) && msg.channel_type !== null && msg.channel_type !== 'agent';
+}
+
+/** Wake-eligible rows arriving over an agent channel (host notices, peers). */
+export function isAgentChannelTrigger(msg: MessageInRow): boolean {
+  return isTriggerMessage(msg) && msg.channel_type === 'agent';
+}
+
+/**
+ * Every row in the batch a person is waiting on, oldest first — one per row,
+ * each addressed at its own origin. Two questions arriving in the same poll
+ * batch are two separate things owed, and a single collapsed target would make
+ * the second one impossible to answer or chase.
+ */
+export function replyTargetsFor(messages: MessageInRow[]): ReplyTarget[] {
+  return messages
+    .filter(isUserChannelTrigger)
+    .map((m) => ({ platformId: m.platform_id, channelType: m.channel_type, threadId: m.thread_id, inReplyTo: m.id }));
 }
 
 /**
@@ -167,6 +226,7 @@ export interface RoutingContext {
  */
 export function extractRouting(messages: MessageInRow[]): RoutingContext {
   const first = messages.find((m) => !isSessionEcho(m)) ?? messages[0];
+  const replyTargets = replyTargetsFor(messages);
   return {
     platformId: first?.platform_id ?? null,
     channelType: first?.channel_type ?? null,
@@ -175,6 +235,8 @@ export function extractRouting(messages: MessageInRow[]): RoutingContext {
     // Echo rows riding along with a task must not disable one-door delivery:
     // taskRun as long as at least one task row and no non-task/non-echo row.
     taskRun: messages.some((m) => m.kind === 'task') && messages.every((m) => m.kind === 'task' || isSessionEcho(m)),
+    replyTargets,
+    agentWake: replyTargets.length === 0 && messages.some(isAgentChannelTrigger),
   };
 }
 

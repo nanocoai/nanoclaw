@@ -14,6 +14,7 @@ import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 import { buildOpenCodeConfig, buildOpenCodeServerEnv } from './opencode-config.js';
 import { buildDeliverySentences } from '../compact-instructions.js';
+import { loadConfig } from '../config.js';
 import type { ResolvedRuntimeConfiguration } from '../provider-contracts/registry.js';
 import { getTaskSeriesId } from '../db/session-routing.js';
 import { getAllDestinations } from '../destinations.js';
@@ -45,6 +46,14 @@ const DEFAULT_NATIVE_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
 
 /** Native session lookup errors invalidate a stored continuation; backend/network failures do not. */
 const STALE_SESSION_RE = /"name":"NotFoundError"/;
+
+// Older seam-v1 cores take only names and taskId and retain envelope delivery.
+// An optional third parameter accepts that callable without changing its behavior.
+const renderDeliverySentences: (
+  names: string[],
+  taskId: string | null,
+  deliveryMode?: 'envelope' | 'tools-only',
+) => string[] = buildDeliverySentences;
 
 function killProcessTree(proc: ChildProcess): void {
   if (proc.pid) {
@@ -767,12 +776,18 @@ export class OpenCodeProvider implements AgentProvider {
             sessionId,
             parts: buildPromptParts(turn.text, turn.attachments),
             prepare: () => {
+              const runnerConfig = loadConfig();
+              const deliveryMode =
+                'deliveryMode' in runnerConfig && runnerConfig.deliveryMode === 'tools-only'
+                  ? 'tools-only'
+                  : 'envelope';
               prepareOpenCodeMemory(
                 self.memorySessionHook!,
                 input.systemContext?.instructions,
-                buildDeliverySentences(
+                renderDeliverySentences(
                   getAllDestinations().map((destination) => destination.name),
                   getTaskSeriesId(),
+                  deliveryMode,
                 ).join(' '),
               );
             },
