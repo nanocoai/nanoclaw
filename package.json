@@ -35,6 +35,7 @@
   "dependencies": {
     "@clack/core": "^1.2.0",
     "@clack/prompts": "^1.2.0",
+    "@nanoco/nanoclaw-dashboard": "^0.3.0",
     "@onecli-sh/sdk": "2.2.1",
     "better-sqlite3": "13.0.3",
     "chat": "4.29.0",
