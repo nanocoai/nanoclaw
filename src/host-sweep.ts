@@ -110,6 +110,12 @@ export function startHostSweep(): void {
         } catch (err) {
           log.error('Reject-with-reason sweep failed', { err });
         }
+        try {
+          const { sweepStaleApprovals } = await import('./modules/approvals/index.js');
+          await sweepStaleApprovals();
+        } catch (err) {
+          log.error('Stale approval sweep failed', { err });
+        }
       },
       // MODULE-HOOK:approvals-reason-sweep:end
     },
