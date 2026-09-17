@@ -63,6 +63,35 @@ const STALE_SESSION_RE =
   /no conversation found|ENOENT.*\.jsonl|session.*not found|NotFoundError|connection reset|ECONNRESET|404|event timeout/i;
 
 /**
+ * The session's PERSISTED history can no longer be serialized into a request
+ * the model accepts, so the session is dead rather than slow.
+ *
+ * Gemini enforces strict turn ordering: a functionCall turn must follow a user
+ * turn or a functionResponse turn. When a stored history ends up with an
+ * assistant tool call in leading position, every request built from it opens on
+ * a `model` functionCall and comes back 400. Nothing about the next turn changes
+ * that, because the offending message is on disk, so retrying the same
+ * continuation fails identically forever and the session never answers again.
+ *
+ * Live case: OpenCode's compaction tail split a turn that exceeded the preserve
+ * budget and anchored the tail on an assistant tool call. That particular split
+ * is no longer reachable on current OpenCode, but a history the provider refuses
+ * to serialize is a class of failure worth recovering from generically, not one
+ * bug — and it is the one stale-session shape the patterns above cannot see,
+ * since the transport is healthy and the session id is valid.
+ *
+ * Deliberately narrow: the turn-ordering rejection only. Arbitrary 400s can be
+ * transient or specific to one prompt, and discarding a good continuation costs
+ * the user their whole in-context history.
+ */
+const UNUSABLE_HISTORY_RE = /function call turn (?:comes|must come) immediately after/i;
+
+export function isUnusableHistoryError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return UNUSABLE_HISTORY_RE.test(msg);
+}
+
+/**
  * Codex `startOrResumeCodexThread` starts a fresh thread when `thread/resume`
  * reports the id gone. OpenCode's equivalent failure is quieter: a poisoned
  * session accepts `promptAsync`, emits `session.idle` at step 0 with no
@@ -863,6 +892,14 @@ export class OpenCodeProvider implements AgentProvider {
 
   isSessionInvalid(err: unknown): boolean {
     const msg = err instanceof Error ? err.message : String(err);
+    // A history the provider refuses to serialize is unrecoverable on this
+    // session — see UNUSABLE_HISTORY_RE. Reporting it invalid is what lets the
+    // runner drop the continuation so the next turn opens a fresh session
+    // instead of rebuilding the same rejected payload forever.
+    if (isUnusableHistoryError(err)) {
+      log('Provider rejected the stored history (turn ordering) — session is unrecoverable, clearing continuation');
+      return true;
+    }
     return STALE_SESSION_RE.test(msg);
   }
 
