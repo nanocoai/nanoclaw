@@ -766,8 +766,8 @@ export class OpenCodeProvider implements AgentProvider {
             pump,
             sessionId,
             parts: buildPromptParts(turn.text, turn.attachments),
-            prepare: () => {
-              prepareOpenCodeMemory(
+            prepare: async () => {
+              await prepareOpenCodeMemory(
                 self.memorySessionHook!,
                 input.systemContext?.instructions,
                 buildDeliverySentences(

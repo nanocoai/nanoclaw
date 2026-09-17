@@ -8,6 +8,7 @@ import { buildOpenCodeConfig } from './opencode-config.js';
 import {
   prepareOpenCodeMemory,
   openCodeInstructionsPath,
+  runHookCommand,
   runMemorySessionHook,
   type OpenCodeMemorySessionHook,
 } from './opencode-memory.js';
@@ -64,68 +65,78 @@ afterEach(() => {
 });
 
 describe('runMemorySessionHook', () => {
-  it('feeds the hook the SessionStart lifecycle payload for the source it runs', () => {
+  it('feeds the hook the SessionStart lifecycle payload for the source it runs', async () => {
     const hook = fakeHook();
-    expect(runMemorySessionHook(hook, 'startup')).toBe(MARKER);
-    expect(runMemorySessionHook(hook, 'compact')).toBe(MARKER);
+    expect(await runMemorySessionHook(hook, 'startup')).toBe(MARKER);
+    expect(await runMemorySessionHook(hook, 'compact')).toBe(MARKER);
     expect(invocations()).toEqual([
       '{"hook_event_name":"SessionStart","source":"startup"}',
       '{"hook_event_name":"SessionStart","source":"compact"}',
     ]);
   });
 
-  it('injects the command output verbatim — truncation belongs to the shared renderer', () => {
+  it('injects the command output verbatim — truncation belongs to the shared renderer', async () => {
     // Far past the shared renderer's 16k-per-file budget: whatever the command
     // decided to print is what gets injected, uncut, so the caps live in one
     // place instead of being re-implemented (and double-applied) here.
     const big = 'x'.repeat(40_000);
-    const out = runMemorySessionHook(fakeHook({ body: big }), 'startup');
+    const out = await runMemorySessionHook(fakeHook({ body: big }), 'startup');
     expect(out).toBe(big);
     expect(out).toHaveLength(40_000);
   });
 
-  it('distinguishes renderer failure from successfully empty output', () => {
-    expect(runMemorySessionHook(fakeHook({ exitCode: 3 }), 'startup')).toBeUndefined();
-    expect(runMemorySessionHook(fakeHook({ body: '' }), 'startup')).toBe('');
-    expect(runMemorySessionHook(undefined, 'startup')).toBeUndefined();
+  it('distinguishes renderer failure from successfully empty output', async () => {
+    expect(await runMemorySessionHook(fakeHook({ exitCode: 3 }), 'startup')).toBeUndefined();
+    expect(await runMemorySessionHook(fakeHook({ body: '' }), 'startup')).toBe('');
+    expect(await runMemorySessionHook(undefined, 'startup')).toBeUndefined();
     expect(
-      runMemorySessionHook(
+      await runMemorySessionHook(
         { command: path.join(dir, 'does-not-exist.sh'), legacyCommands: [], sources: ['startup'] },
         'startup',
       ),
     ).toBeUndefined();
   });
 
-  it('skips a source the registration does not declare', () => {
+  it('gives up at the deadline even when a background child keeps stdout open', async () => {
+    // spawnSync closed the pipes on timeout; the async path must not wait for
+    // `close` behind a lingering grandchild (or a hook that ignores SIGTERM).
+    const started = Date.now();
+    const res = await runHookCommand('sleep 5 & echo partial; wait', '{}', 150);
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(res.error?.message).toBe('timed out after 150ms');
+    expect(res.stdout).toBe('partial\n');
+  });
+
+  it('skips a source the registration does not declare', async () => {
     const hook = { ...fakeHook(), sources: ['startup'] as const };
-    expect(runMemorySessionHook(hook, 'compact')).toBeUndefined();
+    expect(await runMemorySessionHook(hook, 'compact')).toBeUndefined();
     expect(invocations()).toEqual([]);
   });
 });
 
 describe('rendered turn instructions', () => {
-  it('writes rendered memory, core instructions and delivery wording into one private file', () => {
+  it('writes rendered memory, core instructions and delivery wording into one private file', async () => {
     const file = path.join(dir, 'turn.md');
-    prepareOpenCodeMemory(fakeHook(), 'CORE', 'ROUTING', file);
+    await prepareOpenCodeMemory(fakeHook(), 'CORE', 'ROUTING', file);
     expect(fs.readFileSync(file, 'utf8')).toBe(`${MARKER}\n\nCORE\n\nROUTING`);
     expect(fs.statSync(file).mode & 0o777).toBe(0o600);
     expect(invocations()).toEqual(['{"hook_event_name":"SessionStart","source":"startup"}']);
   });
 
-  it('refreshes the same file on each external turn, including a resumed session', () => {
+  it('refreshes the same file on each external turn, including a resumed session', async () => {
     const file = path.join(dir, 'turn.md');
-    prepareOpenCodeMemory(fakeHook(), 'OLD', 'OLD ROUTING', file);
-    prepareOpenCodeMemory(fakeHook({ body: 'FRESH' }), 'CURRENT', 'ROUTING', file);
+    await prepareOpenCodeMemory(fakeHook(), 'OLD', 'OLD ROUTING', file);
+    await prepareOpenCodeMemory(fakeHook({ body: 'FRESH' }), 'CURRENT', 'ROUTING', file);
     expect(fs.readFileSync(file, 'utf8')).toBe('FRESH\n\nCURRENT\n\nROUTING');
     expect(invocations()).toHaveLength(2);
   });
 
-  it('keeps current instructions when rendering fails and does not resurrect stale memory', () => {
+  it('keeps current instructions when rendering fails and does not resurrect stale memory', async () => {
     const file = path.join(dir, 'turn.md');
-    prepareOpenCodeMemory(fakeHook(), 'OLD', '', file);
-    prepareOpenCodeMemory(fakeHook({ exitCode: 1 }), 'CURRENT', 'ROUTING', file);
+    await prepareOpenCodeMemory(fakeHook(), 'OLD', '', file);
+    await prepareOpenCodeMemory(fakeHook({ exitCode: 1 }), 'CURRENT', 'ROUTING', file);
     expect(fs.readFileSync(file, 'utf8')).toBe('CURRENT\n\nROUTING');
-    prepareOpenCodeMemory(fakeHook({ body: '' }), 'NEW', '', file);
+    await prepareOpenCodeMemory(fakeHook({ body: '' }), 'NEW', '', file);
     expect(fs.readFileSync(file, 'utf8')).toBe('NEW');
   });
 });
