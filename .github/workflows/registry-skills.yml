@@ -74,6 +74,7 @@ jobs:
   test:
     needs: discover
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       max-parallel: 4
@@ -102,6 +103,7 @@ jobs:
   combined-providers:
     needs: discover
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -124,6 +126,7 @@ jobs:
   pre-contract-providers:
     needs: discover
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -143,6 +146,7 @@ jobs:
   old-provider-refresh:
     needs: discover
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
