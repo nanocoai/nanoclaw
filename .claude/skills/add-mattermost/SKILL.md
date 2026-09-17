@@ -9,6 +9,27 @@ Adds Mattermost DMs, channels, threads, files, reactions, and interactive
 approval cards. Messages arrive over Mattermost's WebSocket; card clicks return
 to NanoClaw over an authenticated HTTP callback. Every step is safe to re-run.
 
+## Callback security upgrade
+
+For an existing Mattermost installation, back up its adapter and private `.env`
+before refreshing it. Updated callbacks require a nonblank
+`MATTERMOST_CALLBACK_SECRET`: Mattermost does not sign clicks, so missing
+credentials now stop callback-enabled startup instead of allowing forged actions.
+
+- **Configure:** if the secret is missing or blank, remove only its blank entry
+  and rerun step 5 below to generate it locally. Preserve a nonblank secret; never
+  print it or enable unauthenticated callbacks on an exposed route.
+- **Refresh and verify:** run `/update-skills` for the installed adapter, then
+  follow step 7 and the real-card check below. An unsigned callback must return
+  401, and an authenticated click must reach the expected action.
+- **Existing cards:** external button URLs no longer receive the adapter secret,
+  but old posts retain their original context. Review prior external integrations;
+  rotate an exposed secret. Reissue cards created without a secret or before
+  rotation. Removing only the callback URL does not disable old authenticated
+  cards while their secret remains valid.
+- **Rollback:** restore the backed-up adapter and rebuild, keeping the callback
+  route isolated until the fix is reapplied. Do not restore an exposed secret.
+
 ## Discover the server first
 
 Do this before installing the adapter or asking for a URL. The goal is to
