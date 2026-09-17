@@ -70,6 +70,14 @@ vi.mock('../modules/approvals/index.js', () => ({
   requestApproval: approvalState.requestApproval,
 }));
 
+// The approval-card hook is exercised in its own suite; here we mock it to
+// assert dispatch wires its structured card into requestApproval and falls
+// back to the generic raw-command card when the hook returns nothing.
+const mockBuildApprovalCard = vi.fn();
+vi.mock('./approval-cards.js', () => ({
+  buildApprovalCard: (...args: unknown[]) => mockBuildApprovalCard(...args),
+}));
+
 // Register a test command so dispatch has something to find
 import { register } from './registry.js';
 
@@ -268,8 +276,20 @@ register({
   handler: async (args) => ({ echo: args }),
 });
 
+// An approval-gated command (like `roles-grant`) to exercise the approval branch
+// and the structured approval-card wiring.
+register({
+  name: 'roles-grant',
+  description: 'test approval command',
+  resource: 'roles',
+  access: 'approval',
+  parseArgs: (raw) => raw,
+  handler: async (args) => ({ echo: args }),
+});
+
 import { dispatch } from './dispatch.js';
 import type { CallerContext } from './frame.js';
+import { requestApproval } from '../modules/approvals/index.js';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -1097,5 +1117,48 @@ describe('formatHuman hook', () => {
 
     expect(resp.ok).toBe(true);
     if (resp.ok) expect(resp.human).toBeUndefined();
+  });
+});
+
+describe('approval card wiring', () => {
+  beforeEach(() => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' }); // roles isn't group-whitelisted
+    mockGetSession.mockReturnValue({ id: 's1', agent_group_id: 'g1', messaging_group_id: 'mg1' });
+    mockGetAgentGroup.mockReturnValue({ id: 'g1', name: 'corp-bot' });
+  });
+
+  it('uses the structured card from the hook when one is returned', async () => {
+    mockBuildApprovalCard.mockReturnValue({ title: 'Role grant: admin', question: 'structured body' });
+
+    const resp = await dispatch(
+      { id: '1', command: 'roles-grant', args: { user: 'slack:U0', role: 'admin' } },
+      agentCtx(),
+    );
+
+    expect(resp.ok).toBe(false);
+    if (!resp.ok) expect(resp.error.code).toBe('approval-pending');
+    expect(mockBuildApprovalCard).toHaveBeenCalledWith(
+      expect.objectContaining({ command: 'roles-grant', agentName: 'corp-bot' }),
+    );
+    expect(requestApproval).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'cli_command',
+        title: 'Role grant: admin',
+        question: 'structured body',
+      }),
+    );
+  });
+
+  it('falls back to the generic raw-command card when the hook returns nothing', async () => {
+    mockBuildApprovalCard.mockReturnValue(undefined);
+
+    await dispatch({ id: '1', command: 'roles-grant', args: { user: 'slack:U0', role: 'admin' } }, agentCtx());
+
+    expect(requestApproval).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'CLI: roles-grant',
+        question: expect.stringContaining('ncl roles-grant --user slack:U0 --role admin'),
+      }),
+    );
   });
 });
