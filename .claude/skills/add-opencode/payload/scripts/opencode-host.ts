@@ -128,7 +128,7 @@ export const hostOpenCode = {
         'OpenCode on the host uses its own native credentials and model configuration.',
         'In OpenCode, use /connect to sign in, then /models to choose a model.',
         'For a custom endpoint, follow https://opencode.ai/docs/providers/#custom-provider.',
-        'NanoClaw container credentials remain in OneCLI. Host maintenance works independently of that gateway.',
+        'NanoClaw container credentials remain in the selected gateway. Host maintenance works independently of it.',
         'Exit OpenCode to return here.',
       ].join('\n'),
       'Configure host OpenCode',

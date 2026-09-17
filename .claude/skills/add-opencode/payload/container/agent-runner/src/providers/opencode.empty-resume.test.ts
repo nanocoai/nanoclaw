@@ -133,6 +133,26 @@ async function prompted(f: ReturnType<typeof fixture>, count = 1) {
   expect(f.prompts.length).toBe(count);
 }
 
+describe('configured model on every prompt', () => {
+  it('names the configured model in the prompt body so a resumed session follows configuration changes', async () => {
+    const f = fixture();
+    const done = collect(f.run(undefined, { model: { providerID: 'openai', modelID: 'gpt-5.6-sol' } }));
+    await prompted(f);
+    expect(f.prompts[0]?.body.model).toEqual({ providerID: 'openai', modelID: 'gpt-5.6-sol' });
+    f.complete();
+    expect(await done).toBe('answer');
+  });
+
+  it('omits the model when none is configured, leaving OpenCode its default', async () => {
+    const f = fixture();
+    const done = collect(f.run());
+    await prompted(f);
+    expect(f.prompts[0]?.body).not.toHaveProperty('model');
+    f.complete();
+    expect(await done).toBe('answer');
+  });
+});
+
 describe('verified OpenCode turn completion', () => {
   it('starts the lazy SSE subscription before the first prompt and preserves native ID shape', async () => {
     const f = fixture();

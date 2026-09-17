@@ -12,7 +12,12 @@ import { createOpencodeClient as createOpencodeQuestionClient } from '@opencode-
 
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
-import { buildOpenCodeConfig, buildOpenCodeServerEnv } from './opencode-config.js';
+import {
+  buildOpenCodeConfig,
+  buildOpenCodeServerEnv,
+  resolveOpenCodeInference,
+  resolveOpenCodePromptModel,
+} from './opencode-config.js';
 import { buildDeliverySentences } from '../compact-instructions.js';
 import type { ResolvedRuntimeConfiguration } from '../provider-contracts/registry.js';
 import { getTaskSeriesId } from '../db/session-routing.js';
@@ -738,6 +743,12 @@ export class OpenCodeProvider implements AgentProvider {
           ? await self.runtime.getRuntime(self.options, input.cwd)
           : await ensureSharedRuntime(self.options, input.cwd, self.configuration);
         const pump = eventPump(runtime);
+        const promptModel = resolveOpenCodePromptModel(
+          (self.configuration?.inference ?? resolveOpenCodeInference(self.options, process.env)) as Record<
+            string,
+            unknown
+          >,
+        );
         while (!abort.signal.aborted) {
           while (!pending.length && !ended && !abort.signal.aborted) {
             await new Promise<void>((resolve) => {
@@ -766,6 +777,7 @@ export class OpenCodeProvider implements AgentProvider {
             pump,
             sessionId,
             parts: buildPromptParts(turn.text, turn.attachments),
+            model: promptModel,
             prepare: () => {
               prepareOpenCodeMemory(
                 self.memorySessionHook!,

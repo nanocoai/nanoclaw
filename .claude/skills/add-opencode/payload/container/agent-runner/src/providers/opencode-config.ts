@@ -2,6 +2,7 @@ import type { ProviderOptions } from './types.js';
 import type { ResolvedRuntimeConfiguration, RuntimeInferenceInput } from '../provider-contracts/registry.js';
 import { mcpServersToOpenCodeConfig } from './mcp-to-opencode.js';
 import { openCodeInstructionsPath } from './opencode-memory.js';
+import { OPENCODE_CREDENTIAL_PLACEHOLDER } from './opencode-auth.js';
 const MODEL_INPUT_MODALITIES = ['text', 'audio', 'image', 'video', 'pdf'] as const;
 const AGENT_DIR = '/workspace/agent';
 
@@ -103,7 +104,7 @@ export function resolveOpenCodeInference(
     requestedModalities.length > 0 ? { input: ['text', ...requestedModalities], output: ['text'] } : undefined;
 
   // Native API providers also need a placeholder to become connected before
-  // any HTTP request reaches OneCLI. Model options do not depend on baseURL.
+  // any HTTP request reaches the selected gateway. Model options do not depend on baseURL.
   const providerOptions: Record<string, unknown> = {
     [provider]: {
       // A custom base URL on the `openai` provider means a self-hosted
@@ -115,7 +116,7 @@ export function resolveOpenCodeInference(
       // documented OpenRouter config) ship their own native ai-sdk
       // package and must keep OpenCode's default transport resolution.
       ...(provider === 'openai' && proxyUrl ? { npm: '@ai-sdk/openai-compatible' } : {}),
-      options: { apiKey: 'placeholder', ...(proxyUrl ? { baseURL: proxyUrl } : {}) },
+      options: { apiKey: OPENCODE_CREDENTIAL_PLACEHOLDER, ...(proxyUrl ? { baseURL: proxyUrl } : {}) },
       ...(modelsToRegister.length > 0
         ? {
             models: Object.fromEntries(
@@ -152,6 +153,23 @@ export function resolveOpenCodeInference(
     enabled_providers: [provider],
     provider: providerOptions,
   };
+}
+
+/**
+ * The configured `provider/model` as the prompt API names it. OpenCode stores
+ * the model a session was created with and reuses it on resume, so a group
+ * whose backend or model changed would keep prompting the old one and fail
+ * with "Model not found"; naming the model on every prompt makes the current
+ * configuration apply to the next turn. Undefined leaves OpenCode's default.
+ */
+export function resolveOpenCodePromptModel(
+  inference: Record<string, unknown>,
+): { providerID: string; modelID: string } | undefined {
+  const model = inference.model;
+  if (typeof model !== 'string') return undefined;
+  const slash = model.indexOf('/');
+  if (slash <= 0 || slash === model.length - 1) return undefined;
+  return { providerID: model.slice(0, slash), modelID: model.slice(slash + 1) };
 }
 
 // OpenCode's interactive question tool cannot wait for an answer in a headless runner.

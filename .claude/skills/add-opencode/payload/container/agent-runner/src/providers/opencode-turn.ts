@@ -22,11 +22,17 @@ export interface OpenCodeTurnResult {
   isError?: boolean;
 }
 
+/** The configured model as OpenCode's prompt API names it. */
+export interface OpenCodePromptModel {
+  providerID: string;
+  modelID: string;
+}
+
 export interface OpenCodeSessionClient {
   create(params?: { signal?: AbortSignal }): Promise<{ data?: { id?: string }; error?: unknown }>;
   prompt(params: {
     path: { id: string };
-    body: { messageID: string; parts: unknown[] };
+    body: { messageID: string; parts: unknown[]; model?: OpenCodePromptModel };
     signal?: AbortSignal;
   }): Promise<{ data?: OpenCodeMessage; error?: unknown }>;
   messages(params: {
@@ -164,6 +170,8 @@ export async function* executeOpenCodeTurn(options: {
   pump: OpenCodeEventPump;
   sessionId: string;
   parts: unknown[];
+  /** Sent with every prompt: a resumed session otherwise keeps the model it was created with. */
+  model?: OpenCodePromptModel;
   signal: AbortSignal;
   silenceMs: number;
   idleMs: number;
@@ -229,7 +237,7 @@ export async function* executeOpenCodeTurn(options: {
     started = true;
     promptRequest = client.prompt({
       path: { id: sessionId },
-      body: { messageID: messageId, parts: options.parts },
+      body: { messageID: messageId, parts: options.parts, ...(options.model ? { model: options.model } : {}) },
       signal: request.signal,
     });
     void promptRequest.then(

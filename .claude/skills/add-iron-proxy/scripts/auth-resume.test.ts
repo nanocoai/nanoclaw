@@ -23,7 +23,7 @@ afterEach(async () => {
 
 async function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'iron-auth-resume-'));
-  let credential: { id: string; name: string } | undefined;
+  let credential: any;
   let granted = false;
   let unavailable = false;
   let failGrant = false;
@@ -39,7 +39,7 @@ async function fixture() {
     }
     if (resource === '/api/v1/static_secrets/nanoclaw-model' && req.method === 'PUT') {
       const value = JSON.parse(Buffer.concat(chunks).toString()).data;
-      credential = { id: 'model-id', name: value.name };
+      credential = { ...value, id: 'model-id', foreign_id: 'nanoclaw-model', source: undefined };
       data = credential;
     } else if (resource?.startsWith('/api/v1/static_secrets/lookup/') && resource.endsWith('/nanoclaw-model')) {
       if (!credential) {
@@ -48,7 +48,9 @@ async function fixture() {
         return;
       }
       data = credential;
-    } else if (resource?.startsWith('/api/v1/principals/principal/grants'))
+    } else if (resource === '/api/v1/principals/principal/roles') data = [];
+    else if (resource === '/api/v1/static_secrets/model-id') data = credential;
+    else if (resource?.startsWith('/api/v1/principals/principal/grants'))
       data = granted ? [{ static_secret_id: 'model-id' }] : [];
     else if (resource === '/api/v1/grants') {
       if (failGrant) {
@@ -68,7 +70,10 @@ async function fixture() {
     res.end(JSON.stringify({ data }));
   });
   await new Promise<void>((resolve, reject) => {
-    server.once('error', (error) => { fs.rmSync(root, { recursive: true, force: true }); reject(error); });
+    server.once('error', (error) => {
+      fs.rmSync(root, { recursive: true, force: true });
+      reject(error);
+    });
     server.listen(0, '127.0.0.1', resolve);
   });
   const port = (server.address() as { port: number }).port;

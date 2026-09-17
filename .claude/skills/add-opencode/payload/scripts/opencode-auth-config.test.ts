@@ -1,6 +1,86 @@
+// Both installed gateways run their real seam adapters here. Only the
+// gateway selection and the transports beneath the adapters are stubbed, so
+// OpenCode is exercised against OneCLI's and Iron's actual translation and
+// failure paths rather than a hand-written stand-in.
+vi.mock('../setup/gateways/credential-store.js', async () => {
+  const { createProviderCredentialConnection } =
+    await import('../.claude/skills/add-onecli/scripts/provider-credentials.js');
+  const { createIronCredentialConnection, ironModelEndpoint } =
+    await import('../.claude/skills/add-iron-proxy/scripts/provider-credentials.js');
+  const { IronControlRequestError } = await import('../.claude/skills/add-iron-proxy/scripts/control.js');
+  const ironRequest = async (resource: string, method = 'GET', data?: any) => {
+    if (fixture.failVault) throw new IronControlRequestError('Iron unavailable', 503);
+    const [kind, action, namespace, id] = resource.split('/');
+    const key = kind + '/' + (method === 'GET' ? id : action);
+    if (method === 'GET') {
+      const record = fixture.iron.records.get(key);
+      if (!record || record.namespace !== namespace) throw new IronControlRequestError('fixture', 404);
+      const response = structuredClone(record);
+      if (kind === 'broker_credentials') Object.assign(response, { status: 'live', last_refresh: 'refreshed' });
+      return response;
+    }
+    const record = {
+      ...data,
+      id: fixture.iron.records.get(key)?.id ?? 'id-' + fixture.iron.records.size,
+      foreign_id: action,
+    };
+    if (kind === 'static_secrets') {
+      if (data.source.secret !== undefined) fixture.iron.values.set(record.id, data.source.secret);
+      record.source = { source_type: data.source.source_type, config: data.source.config };
+      record.inject_config ??= {};
+    } else {
+      fixture.iron.values.set(record.id, record.refresh_token);
+      delete record.refresh_token;
+      record.dead = false;
+    }
+    fixture.iron.records.set(key, record);
+    return structuredClone(record);
+  };
+  return {
+    getCredentialStore: async () => ({
+      has: async () => false,
+      save: async () => {},
+      ...(fixture.gateway === 'iron-proxy'
+        ? {
+            modelEndpoint: (url: string) => {
+              ironModelEndpoint(url, fixture.iron.root);
+              return {
+                configure: async () => {
+                  fixture.gatewayEndpoints.push(url);
+                },
+              };
+            },
+            connection: (target: any) =>
+              createIronCredentialConnection(target, fixture.iron.root, {
+                request: ironRequest,
+                grant: async (id: string) => {
+                  fixture.iron.grants.add(id);
+                },
+                allowHost: async (host: string) => {
+                  fixture.iron.allowed.push(host);
+                },
+                checkIsolation: async () => {},
+              }),
+          }
+        : { connection: (target: any) => createProviderCredentialConnection(target) }),
+    }),
+  };
+});
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 const fixture = vi.hoisted(() => ({
+  gateway: 'onecli',
+  gatewayEndpoints: [] as string[],
+  iron: {
+    root: '',
+    records: new Map<string, any>(),
+    values: new Map<string, string>(),
+    grants: new Set<string>(),
+    allowed: [] as string[],
+  },
   writes: [] as Array<[string, string | null]>,
   requests: [] as RequestInit[],
   vaultUrls: [] as string[],
@@ -75,6 +155,9 @@ import { runOpenCodeAuthStep, runOpenCodeSetupAuth } from './opencode-auth.js';
 
 beforeEach(() => {
   Object.assign(fixture, {
+    gateway: 'onecli',
+    gatewayEndpoints: [],
+    iron: { root: fixture.iron.root, records: new Map(), values: new Map(), grants: new Set(), allowed: [] },
     writes: [],
     requests: [],
     vaultUrls: [],
@@ -334,5 +417,92 @@ describe('backend authentication changes', () => {
     await expect(runOpenCodeAuthStep()).rejects.toThrow(outcome === 'decline' ? 'host change cancelled' : 'cancelled');
     expect(fixture.requests.map((request) => request.method)).toEqual(['GET']);
     expect(fixture.writes).toEqual([]);
+  });
+});
+
+describe('OpenCode setup with Iron selected', () => {
+  const roots: string[] = [];
+  beforeEach(async () => {
+    fixture.gateway = 'iron-proxy';
+    vi.stubEnv('ONECLI_URL', undefined);
+    vi.stubEnv('ONECLI_API_KEY', undefined);
+    // The real Iron adapter refuses to touch credentials before Iron Control is registered.
+    const { controlPaths } = await import('../.claude/skills/add-iron-proxy/scripts/control.js');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'opencode-iron-setup-'));
+    roots.push(root);
+    fs.mkdirSync(path.dirname(controlPaths(root).registration), { recursive: true });
+    fs.writeFileSync(controlPaths(root).registration, '{}');
+    fixture.iron.root = root;
+  });
+  afterEach(() => {
+    for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+  });
+  const storedValues = () => [...fixture.iron.values.values()];
+  it('connects a native backend without reading OneCLI or changing gateway selection', async () => {
+    await runOpenCodeSetupAuth();
+    expect(storedValues()).toEqual(['fixture-key']);
+    expect(fixture.iron.grants.size).toBe(1);
+    expect(fixture.iron.allowed).toContain('openrouter.ai');
+    expect(fixture.vaultUrls).toEqual([]);
+    expect(fixture.gatewayEndpoints).toEqual(['https://openrouter.ai']);
+    expect(fixture.writes).toContainEqual(['OPENCODE_PROVIDER', 'openrouter']);
+    expect(fixture.writes.every(([key]) => key.startsWith('OPENCODE_'))).toBe(true);
+    const [record] = fixture.iron.records.values();
+    expect(record.replace_config).toEqual({
+      proxy_value: 'nc-opencode-token-v1',
+      match_headers: ['Authorization'],
+      require: false,
+    });
+    expect(JSON.stringify([...fixture.iron.records.values()])).not.toContain('fixture-key');
+  });
+  it('keeps an Iron key on a blank answer and rotates it under the same native id', async () => {
+    await runOpenCodeSetupAuth();
+    const [id] = fixture.iron.values.keys();
+    fixture.key = '';
+    fixture.writes = [];
+    await runOpenCodeSetupAuth();
+    expect(storedValues()).toEqual(['fixture-key']);
+    expect(fixture.writes).toContainEqual(['OPENCODE_PROVIDER', 'openrouter']);
+    fixture.key = 'rotated-fixture';
+    await runOpenCodeSetupAuth();
+    expect([...fixture.iron.values.entries()]).toEqual([[id, 'rotated-fixture']]);
+    expect(fixture.iron.grants.size).toBe(1);
+  });
+  it('requires a value after an Iron host move because Iron cannot keep a moved key', async () => {
+    fixture.backend = 'local';
+    await runOpenCodeSetupAuth();
+    fixture.baseUrl = 'https://moved.example/v1';
+    fixture.key = '';
+    fixture.writes = [];
+    await expect(runOpenCodeSetupAuth()).rejects.toThrow('API key is required');
+    expect(fixture.hostConfirmations).toBe(1);
+    expect(storedValues()).toEqual(['fixture-key']);
+    expect(fixture.writes).toEqual([]);
+  });
+  it('configures a keyless HTTPS model route without creating a credential', async () => {
+    fixture.backend = 'local';
+    fixture.keyless = true;
+    await runOpenCodeSetupAuth();
+    expect(storedValues()).toEqual([]);
+    expect(fixture.passwords).toBe(0);
+    expect(fixture.gatewayEndpoints).toEqual(['https://models.example/v1']);
+    expect(fixture.vaultUrls).toEqual([]);
+  });
+  it('rejects a plaintext local endpoint before requesting keys or discovering models', async () => {
+    fixture.backend = 'local';
+    fixture.baseUrl = 'http://models.example:8000/v1';
+    await expect(runOpenCodeSetupAuth()).rejects.toThrow('HTTPS model endpoint');
+    expect(fixture.passwords).toBe(0);
+    expect(fixture.catalogs).toBe(0);
+    expect(fixture.modelRequests).toEqual([]);
+    expect(fixture.writes).toEqual([]);
+  });
+  it('does not fall back to OneCLI or save defaults after an Iron failure', async () => {
+    fixture.failVault = true;
+    await expect(runOpenCodeSetupAuth()).rejects.toThrow('Iron unavailable');
+    expect(fixture.vaultUrls).toEqual([]);
+    expect(fixture.passwords).toBe(0);
+    expect(fixture.writes).toEqual([]);
+    expect(fixture.gatewayEndpoints).toEqual([]);
   });
 });
