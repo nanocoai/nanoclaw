@@ -1,0 +1,100 @@
+import { getProviderModelEndpoint } from '../../../../src/provider-contracts/index.js';
+import fs from 'node:fs';
+import path from 'node:path';
+
+import type { ProviderCredentialStore } from '../../../../setup/gateways/credential-store.js';
+import { getInstallSlug } from '../../../../src/install-slug.js';
+import { controlPaths, controlRequest, grantSecret } from './control.js';
+import { run, statePaths } from './setup.js';
+
+export function createCredentialStore(root = process.cwd()): ProviderCredentialStore {
+  const namespace = getInstallSlug(root);
+  const metadata = path.join(controlPaths(root).directory, 'codex.json');
+  const check = (provider: string) => {
+    if (provider !== 'codex') throw new Error(`Iron credential adapter does not support ${provider}`);
+    if (!fs.existsSync(controlPaths(root).registration))
+      throw new Error('Install Iron Control before connecting Codex.');
+  };
+  const saveSecret = async (id: string, source: unknown, host: string, header: string) => {
+    const secret = await controlRequest(root, `static_secrets/${id}`, 'PUT', {
+      namespace,
+      name: `Codex ${header}`,
+      source,
+      inject_config: { header, ...(header === 'Authorization' ? { formatter: 'Bearer {{ .Value }}' } : {}) },
+      rules: [{ host, http_methods: ['*'] }],
+    });
+    await grantSecret('static', secret.id, root);
+    return secret.id;
+  };
+  return {
+    async has(provider) {
+      check(provider);
+      if (!fs.existsSync(metadata)) return false;
+      const state = JSON.parse(fs.readFileSync(metadata, 'utf8'));
+      for (const id of state.secretIds) await controlRequest(root, `static_secrets/${id}`);
+      if (state.brokerId) {
+        const broker = await controlRequest(root, `broker_credentials/${state.brokerId}`);
+        if (broker.dead) return false;
+      }
+      return true;
+    },
+    async save(provider, credential) {
+      check(provider);
+      let mode: 'api' | 'chatgpt', host: string, brokerId: string | undefined;
+      const secretIds: string[] = [];
+      if (credential.kind === 'api-key') {
+        mode = 'api';
+        host = new URL(getProviderModelEndpoint(provider, 'api')).hostname;
+        secretIds.push(
+          await saveSecret(
+            'codex-api',
+            { source_type: 'control_plane', secret: credential.value, config: {} },
+            host,
+            'Authorization',
+          ),
+        );
+      } else {
+        mode = 'chatgpt';
+        host = new URL(getProviderModelEndpoint(provider, 'subscription')).hostname;
+        const auth = JSON.parse(fs.readFileSync(credential.file, 'utf8'));
+        const tokens = auth.tokens;
+        if (!tokens?.refresh_token || !tokens?.account_id || !tokens?.id_token)
+          throw new Error('Codex login did not produce a complete ChatGPT session.');
+        const claims = JSON.parse(Buffer.from(tokens.id_token.split('.')[1], 'base64url').toString());
+        const clientId = typeof claims.aud === 'string' ? claims.aud : claims.aud?.[0];
+        if (!clientId) throw new Error('Codex login did not identify its OAuth client.');
+        const broker = await controlRequest(root, 'broker_credentials/codex', 'PUT', {
+          namespace,
+          name: 'Codex ChatGPT',
+          token_endpoint: getProviderModelEndpoint(provider, 'token'),
+          client_id: clientId,
+          refresh_token: tokens.refresh_token,
+        });
+        brokerId = broker.id;
+        secretIds.push(
+          await saveSecret(
+            'codex-chatgpt',
+            { source_type: 'token_broker', config: { credential_id: broker.id } },
+            host,
+            'Authorization',
+          ),
+        );
+        secretIds.push(
+          await saveSecret(
+            'codex-account',
+            { source_type: 'control_plane', secret: tokens.account_id, config: {} },
+            host,
+            'ChatGPT-Account-Id',
+          ),
+        );
+      }
+      const paths = statePaths(root);
+      const allowed = JSON.parse(fs.readFileSync(paths.allowedHosts, 'utf8')) as string[];
+      fs.writeFileSync(paths.allowedHosts, JSON.stringify([...new Set([...allowed, host])]), { mode: 0o600 });
+      await run([], root);
+      // Mark setup complete only after the proxy has accepted its new configuration.
+      // Record only non-secret IDs and mode. Iron owns all token refreshes.
+      fs.writeFileSync(metadata, JSON.stringify({ mode, brokerId, secretIds }) + '\n', { mode: 0o600 });
+    },
+  };
+}

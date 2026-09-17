@@ -1,6 +1,6 @@
 # OneCLI approval compatibility
 
-OneCLI's pinned local gateway is the reference for approval summaries. Iron runs
+OneCLI's pinned local gateway is the reference for approval summaries. The Iron adapter’s NanoClaw front runs
 that same implementation inside its proxy boundary. NanoClaw does not maintain
 an app rule catalog or a second Gmail/MIME parser.
 
