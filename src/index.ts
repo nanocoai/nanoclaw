@@ -8,7 +8,7 @@ import { backfillContainerConfigs } from './backfill-container-configs.js';
 import { CENTRAL_DB_PATH } from './config.js';
 import { enforceStartupBackoff, resetCircuitBreaker } from './circuit-breaker.js';
 import { adoptRunningSessions } from './container-runner.js';
-import { closeDb, initDb } from './db/connection.js';
+import { closeDb, getDb, hasTable, initDb } from './db/connection.js';
 import { runMigrations } from './db/migrations/index.js';
 import { getSessionDriver } from './drivers/index.js';
 import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, stopDeliveryPolls } from './delivery.js';
@@ -79,6 +79,16 @@ async function main(): Promise<void> {
   // Idempotent — skips groups that already have a config row.
   if (db.dialect === 'sqlite') await backfillContainerConfigs();
   else log.info('Skipping local container.json backfill for non-local central DB');
+
+  // 1c. Sweep destination rows whose target no longer resolves (deleted
+  // messaging/agent groups). Projection silently skips dangling rows, so
+  // without this the central table keeps ghosts that drop at send time.
+  // Idempotent; no-op when the agent-to-agent module isn't installed.
+  if (db.dialect === 'sqlite' && (await hasTable(getDb(), 'agent_destinations'))) {
+    const { sweepDanglingDestinations } = await import('./modules/agent-to-agent/db/agent-destinations.js');
+    const swept = await sweepDanglingDestinations();
+    if (swept > 0) log.info('Swept dangling destinations', { count: swept });
+  }
 
   // 2. Session runtime: prove it is reachable, then reconcile what survived a
   // restart. Adoption replaces the old reap-everything cleanup — a session that
