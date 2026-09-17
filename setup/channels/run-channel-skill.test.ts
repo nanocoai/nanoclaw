@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach, vi } from 'vitest';
+import { describe, it, expect, afterAll, afterEach, vi } from 'vitest';
 import { execSync } from 'node:child_process';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -23,6 +23,21 @@ vi.mock('../lib/bright-select.js', async (importActual) => {
 
 afterEach(() => delete process.env.NANOCLAW_TEMPLATE_AGENT_ID);
 
+// Every case builds a scratch checkout under the OS temp dir. Route them
+// through one recorder and drop the lot at the end of the file, the way
+// skill-apply.test.ts does: afterAll rather than afterEach because several
+// roots outlive the case that created them (the exec recorders close over
+// them), so per-test removal would delete a fixture still in use.
+const tempRoots: string[] = [];
+function tempDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  tempRoots.push(dir);
+  return dir;
+}
+afterAll(() => {
+  while (tempRoots.length) rmSync(tempRoots.pop()!, { recursive: true, force: true });
+});
+
 // Drives the real add-slack skill through the adapter with every side effect
 // injected (no real ncl/git/clack/init-first-agent): confirms it runs the skill
 // (install + creds + resolve), reads the resolved owner_handle + platform_id from
@@ -30,7 +45,7 @@ afterEach(() => delete process.env.NANOCLAW_TEMPLATE_AGENT_ID);
 describe('runChannelSkill adapter (Option A)', () => {
   it('resolves via the skill, then wires through init-first-agent', async () => {
     process.env.NANOCLAW_TEMPLATE_AGENT_ID = 'ag-template';
-    const root = mkdtempSync(join(tmpdir(), 'rcs-'));
+    const root = tempDir('rcs-');
     mkdirSync(join(root, 'src/channels'), { recursive: true });
     writeFileSync(join(root, 'src/channels/index.ts'), '// barrel\n');
     writeFileSync(join(root, '.env'), '');
@@ -98,7 +113,7 @@ describe('runChannelSkill adapter (Option A)', () => {
   // the install-link operator — is when:-skipped, the wire inputs stay
   // unresolved, and the run drops through to restart without wiring.
   it('wireIfResolved (Teams): existing credentials skip the whole CLI create flow, never reach the shared wire', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'rcs-teams-'));
+    const root = tempDir('rcs-teams-');
     mkdirSync(join(root, 'src/channels'), { recursive: true });
     writeFileSync(join(root, 'src/channels/index.ts'), '// barrel\n');
     writeFileSync(join(root, '.env'), 'TEAMS_APP_ID=existing\nTEAMS_APP_PASSWORD=existing-password\n');
@@ -175,7 +190,7 @@ describe('runChannelSkill adapter (Option A)', () => {
       [null, 'no'], // no .env at all
     ];
     for (const [env, expected] of cases) {
-      const dir = mkdtempSync(join(tmpdir(), 'rcs-probe-'));
+      const dir = tempDir('rcs-probe-');
       if (env !== null) writeFileSync(join(dir, '.env'), env);
       const out = execSync(cmd, { cwd: dir, shell: '/bin/bash', encoding: 'utf8' }).trim();
       expect(out, `env=${JSON.stringify(env)}`).toBe(expected);
@@ -189,7 +204,7 @@ describe('runChannelSkill adapter (Option A)', () => {
   // CLI-first chain end-to-end: login step → create's JSON multi-capture → the
   // env writes → the substituted install link surviving into the URL offer.
   it('Teams fresh create: login step + JSON capture drive the env writes and the install-link offer', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'rcs-teams-create-'));
+    const root = tempDir('rcs-teams-create-');
     mkdirSync(join(root, 'src/channels'), { recursive: true });
     writeFileSync(join(root, 'src/channels/index.ts'), '// barrel\n');
     writeFileSync(join(root, '.env'), '');
@@ -308,7 +323,7 @@ describe('runChannelSkill adapter (Option A)', () => {
   // account's), and the wire inputs resolve to that person — the assistant
   // messages the desired user first. There is no skip: someone is always wired.
   it('Teams fresh create, wiring another account by Entra object ID: the chain runs against the target user', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'rcs-teams-target-'));
+    const root = tempDir('rcs-teams-target-');
     mkdirSync(join(root, 'src/channels'), { recursive: true });
     writeFileSync(join(root, 'src/channels/index.ts'), '// barrel\n');
     writeFileSync(join(root, '.env'), '');
@@ -369,7 +384,7 @@ describe('runChannelSkill adapter (Option A)', () => {
   // branch back to yes with the CLI account's own id — same outcome as a yes
   // at the first ask, no ID ever typed or shown.
   it('Teams fresh create, no then logged-in-account: the chain runs against the CLI account', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'rcs-teams-loggedin-'));
+    const root = tempDir('rcs-teams-loggedin-');
     mkdirSync(join(root, 'src/channels'), { recursive: true });
     writeFileSync(join(root, 'src/channels/index.ts'), '// barrel\n');
     writeFileSync(join(root, '.env'), '');
@@ -432,7 +447,7 @@ describe('runChannelSkill adapter (Option A)', () => {
   afterEach(() => rmSync(wireSkillDir, { recursive: true, force: true }));
 
   it('wireIfResolved: a run that resolves owner_handle + platform_id wires through init-first-agent', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'rcs-wiretest-'));
+    const root = tempDir('rcs-wiretest-');
     writeFileSync(join(root, 'package.json'), '{"name":"scratch"}');
     writeFileSync(join(root, '.env'), '');
     mkdirSync(wireSkillDir, { recursive: true });
@@ -503,7 +518,7 @@ describe('runChannelSkill adapter (Option A)', () => {
   // prose becomes the dimmed hint (which fail() also forwards to the Claude
   // handoff). Asserted via an injected fail spy (the real fail() process.exits).
   it('threads the bounced step prose into fail() when the skill does not fully apply', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'rcs-fail-'));
+    const root = tempDir('rcs-fail-');
     writeFileSync(join(root, 'package.json'), '{"name":"scratch"}');
     writeFileSync(join(root, '.env'), '');
     // A skill whose only directive bounces — the engine has no handler for
@@ -598,7 +613,7 @@ describe('backGate (first-prompt back-to-channel-selection)', () => {
 });
 
 describe('companionSkillPresent (in-tree presence check)', () => {
-  const makeRoot = (): string => mkdtempSync(join(tmpdir(), 'nc-companion-'));
+  const makeRoot = (): string => tempDir('nc-companion-');
 
   it('SKILL.md in the checkout: true', async () => {
     const { companionSkillPresent } = await import('./run-channel-skill.js');
