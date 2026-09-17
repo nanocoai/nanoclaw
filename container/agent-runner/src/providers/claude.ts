@@ -9,17 +9,18 @@ import type { ResolvedRuntimeConfiguration } from '../provider-contracts/registr
 // constructor and registerMemorySessionHook. This module never imports the
 // contract — registration is two-step so it compiles on a core without one.
 import {
+  resolveClaudeExecutionPolicy,
+  resolveClaudeMcpServers,
   SDK_DISALLOWED_TOOLS,
-  type resolveClaudeExecutionPolicy,
+  TOOL_ALLOWLIST,
   type resolveClaudeInference,
-  type resolveClaudeMcpServers,
   type resolveClaudeMemoryRuntime,
 } from './claude-config.js';
 // Transcript archiving and rotation are this provider's own concern: both
 // read the SDK's on-disk .jsonl, which no other provider has.
 import { archiveClaudeTranscript, rotateClaudeContinuation } from './claude-history.js';
 import { registerProvider } from './provider-registry.js';
-import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
+import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
 function log(msg: string): void {
   console.error(`[claude-provider] ${msg}`);
@@ -69,6 +70,26 @@ export function classifyRateLimitEvent(
 }
 
 export { SDK_DISALLOWED_TOOLS, TOOL_ALLOWLIST } from './claude-config.js';
+
+/** Pure tool-policy derivation for a raw mcpServers map — used by tests to verify enforcement in isolation. */
+export function buildClaudeToolPolicy(
+  mcpServers: Record<string, McpServerConfig>,
+  builtinToolMode?: 'mcp-only',
+  webSearchMode?: 'disabled',
+): {
+  allowedTools: string[];
+  disallowedTools: string[];
+} {
+  const mcp = resolveClaudeMcpServers(mcpServers, {});
+  const executionPolicy = resolveClaudeExecutionPolicy();
+  const allowedTools = (
+    builtinToolMode === 'mcp-only' ? mcp.allowedTools.filter((tool) => !TOOL_ALLOWLIST.includes(tool)) : mcp.allowedTools
+  ).filter((tool) => webSearchMode !== 'disabled' || tool !== 'WebSearch');
+  return {
+    allowedTools,
+    disallowedTools: [...executionPolicy.disallowedTools, ...mcp.disallowedTools],
+  };
+}
 
 interface SDKUserMessage {
   type: 'user';
@@ -198,6 +219,8 @@ export class ClaudeProvider implements AgentProvider {
   private executionPolicy: ReturnType<typeof resolveClaudeExecutionPolicy>;
   private env: Record<string, string | undefined>;
   private additionalDirectories?: string[];
+  private builtinToolMode?: 'mcp-only';
+  private webSearchMode?: 'disabled';
   private memorySessionHook?: MemorySessionHookRegistration;
 
   /**
@@ -211,6 +234,8 @@ export class ClaudeProvider implements AgentProvider {
     this.additionalDirectories = options.additionalDirectories;
     this.inference = configuration.inference as ReturnType<typeof resolveClaudeInference>;
     this.executionPolicy = configuration.executionPolicy as ReturnType<typeof resolveClaudeExecutionPolicy>;
+    this.builtinToolMode = options.builtinToolMode;
+    this.webSearchMode = options.webSearchMode;
     this.env = {
       ...(options.env ?? {}),
       CLAUDE_CODE_AUTO_COMPACT_WINDOW,
@@ -250,6 +275,11 @@ export class ClaudeProvider implements AgentProvider {
 
     const instructions = input.systemContext?.instructions;
 
+    const allowedTools = (
+      this.builtinToolMode === 'mcp-only'
+        ? this.mcp.allowedTools.filter((tool) => !TOOL_ALLOWLIST.includes(tool))
+        : this.mcp.allowedTools
+    ).filter((tool) => this.webSearchMode !== 'disabled' || tool !== 'WebSearch');
     const sdkResult = sdkQuery({
       prompt: stream,
       options: {
@@ -260,8 +290,8 @@ export class ClaudeProvider implements AgentProvider {
         systemPrompt: instructions
           ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions }
           : undefined,
-        allowedTools: [...this.mcp.allowedTools],
-        disallowedTools: [...this.executionPolicy.disallowedTools],
+        allowedTools,
+        disallowedTools: [...this.executionPolicy.disallowedTools, ...this.mcp.disallowedTools],
         env: this.env,
         model: this.inference.model,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
