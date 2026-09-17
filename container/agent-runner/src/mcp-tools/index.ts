@@ -10,6 +10,7 @@ import './checklist.js';
 import './interactive.js';
 import './agents.js';
 import './self-mod.js';
+import './bureaucracy-automation.js';
 // Module barrel — loads registration modules, including the singular mailbox slot.
 import '../modules/index.js';
 import { getAgentMailbox, readMailboxContext } from '../mailbox/index.js';
