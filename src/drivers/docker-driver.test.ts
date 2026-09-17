@@ -10,10 +10,15 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { DockerSessionDriver, dockerEventToSessionEvent, ensureDockerRunning } from './docker-driver.js';
+import {
+  DockerSessionDriver,
+  auxiliaryNetworkArgs,
+  dockerEventToSessionEvent,
+  ensureDockerRunning,
+} from './docker-driver.js';
 import { FakeCli } from './fake-cli.js';
 import { withSessionEvents } from './session-events.js';
-import { FIXTURE_POLICY, fixtureSpec } from './spec-fixture.js';
+import { FIXTURE_POLICY, fixtureSpec, fixtureSpecWithAux } from './spec-fixture.js';
 import { LABELS, type SessionEvent } from './types.js';
 
 vi.mock('../log.js', () => ({
@@ -193,6 +198,44 @@ describe('spec realization', () => {
     const proxies = args.filter((a) => a.startsWith('HTTPS_PROXY='));
     expect(proxies).toHaveLength(2);
     expect(proxies.at(-1)).toBe('HTTPS_PROXY=http://gateway-must-win:15001');
+  });
+
+  it('realizes an auxiliary gateway on an isolated session network', async () => {
+    const handle = await driver().prepare(fixtureSpecWithAux());
+    const calls = cli.joined();
+    const auxiliary = cli.calls.find((call) => call.args[0] === 'create' && call.args[3]?.endsWith('egress-proxy'))!;
+    const agent = cli.calls.find((call) => call.args[0] === 'create' && call.args[3] === 'ncl-spike-s1')!;
+
+    expect(calls).toEqual(expect.arrayContaining([expect.stringContaining('network create --internal')]));
+    expect(calls).toContain('network connect --alias egress-proxy ncl-spike-s1-private ncl-spike-s1-egress-proxy');
+    expect(auxiliary.args).toContain('--read-only');
+    expect(auxiliary.args).toContain('bridge');
+    expect(auxiliary.args).toContain(
+      '/install/data/session-materials/channel-abc-XXXX/session-key.pem:/run/session/session-key.pem:ro',
+    );
+    expect(agent.args).toContain('ncl-spike-s1-private');
+    expect(agent.args.join(' ')).not.toContain('session-key.pem');
+
+    await handle.start();
+    const auxiliaryStart = cli.calls.find((call) => call.args.join(' ') === 'start ncl-spike-s1-egress-proxy')!;
+    const agentStart = cli.started.find((started) => started.args.join(' ') === 'start --attach ncl-spike-s1')!;
+    expect(auxiliaryStart.seq).toBeLessThan(agentStart.seq);
+
+    await handle.stop('test');
+    const agentStop = cli.calls.find((call) => call.args.join(' ') === 'stop -t 1 ncl-spike-s1')!;
+    const auxiliaryStop = cli.calls.find((call) => call.args.join(' ') === 'stop -t 1 ncl-spike-s1-egress-proxy')!;
+    const networkRemove = cli.calls.find((call) => call.args.join(' ') === 'network rm ncl-spike-s1-private')!;
+    expect(agentStop.seq).toBeLessThan(auxiliaryStop.seq);
+    expect(auxiliaryStop.seq).toBeLessThan(networkRemove.seq);
+  });
+
+  it('lets Linux auxiliary gateways reach explicitly configured host services', () => {
+    expect(auxiliaryNetworkArgs('linux')).toEqual([
+      '--network',
+      'bridge',
+      '--add-host=host.docker.internal:host-gateway',
+    ]);
+    expect(auxiliaryNetworkArgs('darwin')).toEqual(['--network', 'bridge']);
   });
 
   it('refuses to invent a missing mount source — Docker would mount a fresh empty directory', async () => {
@@ -395,6 +438,20 @@ describe('lifecycle', () => {
       failure: { kind: 'started-then-died', retryable: false, exitCode: 137 },
     });
   });
+
+  it('reports a dead auxiliary container as a failed session', async () => {
+    const handle = await driver().prepare(fixtureSpecWithAux());
+    await handle.start();
+    cli.responses = [
+      { match: /^inspect .* ncl-spike-s1$/, output: 'running|0' },
+      { match: /^inspect .* ncl-spike-s1-egress-proxy$/, output: 'exited|9' },
+    ];
+
+    expect(await handle.status()).toEqual({
+      phase: 'failed',
+      failure: { kind: 'started-then-died', retryable: false, exitCode: 9 },
+    });
+  });
 });
 
 describe('idempotency and adoption', () => {
@@ -476,17 +533,23 @@ describe('idempotency and adoption', () => {
     ]);
   });
 
-  it('stops pre-seam containers, which carry the install label but no session label', async () => {
+  it('stops pre-seam containers but preserves a gateway-owned role', async () => {
     // Containers spawned before the seam cannot be adopted (no session label to
     // rebuild a handle from) and cannot be matched to a session — left running
     // they would race a freshly-named replacement for the same session
     // directory. The old cleanupOrphans() stopped them on every start; this is
     // that behavior, scoped to exactly the containers adoption cannot claim.
-    cli.responses = [{ match: /^ps --filter/, output: 'nanoclaw-v2-agent-one-1700000000000|\nncl-spike-s1|s1\n' }];
+    cli.responses = [
+      {
+        match: /^ps --filter/,
+        output: 'nanoclaw-v2-agent-one-1700000000000||\nnanoclaw-gateway||gateway\nncl-spike-s1|s1|agent\n',
+      },
+    ];
 
     await driver().reapResidue('spike');
 
     expect(cli.joined()).toContain('rm --force nanoclaw-v2-agent-one-1700000000000');
+    expect(cli.joined().some((c) => c === 'rm --force nanoclaw-gateway')).toBe(false);
     expect(cli.joined().some((c) => c === 'rm --force ncl-spike-s1')).toBe(false);
   });
 
@@ -510,7 +573,7 @@ describe('idempotency and adoption', () => {
 });
 
 describe('watchSessions', () => {
-  function dieEvent(sessionId: string, action = 'die'): string {
+  function dieEvent(sessionId: string, action = 'die', role = 'agent'): string {
     return JSON.stringify({
       status: action,
       Type: 'container',
@@ -522,7 +585,7 @@ describe('watchSessions', () => {
           [LABELS.install]: 'spike',
           [LABELS.group]: 'g1',
           [LABELS.session]: sessionId,
-          [LABELS.role]: 'agent',
+          [LABELS.role]: role,
         },
       },
     });
@@ -541,7 +604,7 @@ describe('watchSessions', () => {
     expect(events).toHaveLength(1);
     const argv = events[0].args.join(' ');
     expect(argv).toContain(`label=${LABELS.install}=spike`);
-    expect(argv).toContain(`label=${LABELS.role}=agent`);
+    expect(argv).not.toContain(`label=${LABELS.role}=agent`);
   });
 
   it('emits terminal hints keyed from the labels the event carries', async () => {
@@ -550,11 +613,12 @@ describe('watchSessions', () => {
     d.watchSessions('spike', (e) => seen.push(e));
 
     const proc = cli.started.find((s) => s.args[0] === 'events')!.proc;
-    proc.emitStdout(`${dieEvent('s1')}\n${dieEvent('s2', 'start')}\n`);
+    proc.emitStdout(`${dieEvent('s1')}\n${dieEvent('s2', 'start')}\n${dieEvent('s3', 'die', 'egress-proxy')}\n`);
 
     expect(seen).toEqual([
       { key: { installSlug: 'spike', agentGroupId: 'g1', sessionId: 's1' }, kind: 'terminal' },
       { key: { installSlug: 'spike', agentGroupId: 'g1', sessionId: 's2' }, kind: 'phase' },
+      { key: { installSlug: 'spike', agentGroupId: 'g1', sessionId: 's3' }, kind: 'terminal' },
     ]);
   });
 
@@ -671,4 +735,17 @@ describe('ensureDockerRunning', () => {
     expect(() => ensureDockerRunning(cli)).toThrow('Container runtime is required but failed to start');
     expect(log.error).toHaveBeenCalled();
   });
+});
+
+it('refuses a session-container target without its auxiliary before creating containers', async () => {
+  const spec = fixtureSpec();
+  spec.networkAccess = { endpoint: 'gateway', target: { kind: 'session-container', role: 'egress-sidecar' } };
+  await expect(driver().prepare(spec)).rejects.toThrow('must name an auxiliary');
+  expect(cli.callMatching(/^create /)).toBeUndefined();
+});
+
+it('does not report successful teardown when the Docker daemon refuses removal', async () => {
+  const handle = await driver().prepare(fixtureSpec());
+  cli.responses.unshift({ match: /^(stop|rm|ps) /, throws: new Error('Cannot connect to the Docker daemon') });
+  await expect(handle.stop('shutdown')).rejects.toMatchObject({ kind: 'runtime-unavailable' });
 });

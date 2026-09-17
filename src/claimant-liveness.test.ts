@@ -21,6 +21,8 @@ vi.mock('./drivers/index.js', () => ({
   isSessionEventsDriver: () => false,
 }));
 
+import { resetGatewayProvider } from './gateway-providers/index.js';
+
 import { adoptRunningSessions, isContainerRunning, killContainer } from './container-runner.js';
 import { getSessionClaim, registerHostInstance, tryClaimSession } from './db/coordination.js';
 import { startHostInstanceLease, stopHostInstanceLease } from './host-instance.js';
@@ -48,6 +50,14 @@ const FALLBACK_ID = `${os.hostname()}:${process.pid}`;
 
 beforeEach(async () => {
   snapshots.length = 0;
+  resetGatewayProvider({
+    kind: 'fixture',
+    agentSkills: [],
+    sessions: {
+      ensure: async () => ({ contribution: { networkAccess: { endpoint: 'localhost', target: { kind: 'host' } } } }),
+    },
+    approvals: { subscribe: async () => {} },
+  });
   const db = await initTestDb();
   await runMigrations(db);
   await createAgentGroup({

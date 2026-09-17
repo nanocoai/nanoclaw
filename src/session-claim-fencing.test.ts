@@ -28,6 +28,7 @@ import {
 } from './container-runner.js';
 import { getSessionClaim, setStopIntent, tryClaimSession } from './db/coordination.js';
 import { initTestDb, closeDb, runMigrations, createAgentGroup, createSession, getSession } from './db/index.js';
+import { resetGatewayProvider } from './gateway-providers/index.js';
 import type { Session } from './types.js';
 
 function now(): string {
@@ -82,6 +83,14 @@ async function seedSession(id = 'sess-1'): Promise<void> {
 }
 
 beforeEach(async () => {
+  resetGatewayProvider({
+    kind: 'fixture',
+    agentSkills: [],
+    sessions: {
+      ensure: async () => ({ contribution: { networkAccess: { endpoint: 'localhost', target: { kind: 'host' } } } }),
+    },
+    approvals: { subscribe: async () => {} },
+  });
   snapshots.length = 0;
   _resetAdoptionRetryStateForTesting();
   _setFinishFenceScheduleForTesting();
@@ -326,4 +335,59 @@ describe('fail-closed finish', () => {
     expect((await getSessionClaim('sess-1'))?.claimed_by).toBeNull();
     fenceSpy.mockRestore();
   });
+});
+
+it('rejects a late lease after admission closes while ensure is pending', async () => {
+  const runner = await import('./container-runner.js');
+  let complete!: () => void;
+  const release = vi.fn(async () => {});
+  const ensure = vi.fn(async () => {
+    await new Promise<void>((resolve) => {
+      complete = resolve;
+    });
+    return { contribution: { networkAccess: { endpoint: 'localhost', target: { kind: 'host' as const } } }, release };
+  });
+  resetGatewayProvider({
+    kind: 'fixture',
+    agentSkills: [],
+    sessions: { ensure },
+    approvals: { subscribe: async () => {} },
+  });
+  const controls = fakeHandle('sess-1', 'late-lease');
+  snapshots.push({ handle: controls.handle, phase: 'running' } as SupervisedSnapshot);
+  const adopting = adoptRunningSessions();
+  await vi.waitFor(() => expect(ensure).toHaveBeenCalled());
+  runner.stopGatewaySessionsForUnavailability('bridge lost');
+  complete();
+  expect((await adopting).adopted).toBe(0);
+  expect(release).toHaveBeenCalledWith({ kind: 'host-detached', reason: 'admission-closed' });
+  expect(isContainerRunning('sess-1')).toBe(false);
+  runner.resumeGatewaySessionAdmission();
+});
+
+it('keeps the lease and claim when full session teardown fails, then retries', async () => {
+  _setFinishFenceScheduleForTesting([], 10);
+  const release = vi.fn(async () => {});
+  resetGatewayProvider({
+    kind: 'fixture',
+    agentSkills: [],
+    sessions: {
+      ensure: async () => ({
+        contribution: { networkAccess: { endpoint: 'localhost', target: { kind: 'host' as const } } },
+        release,
+      }),
+    },
+    approvals: { subscribe: async () => {} },
+  });
+  const controls = fakeHandle('sess-1', 'multi-container');
+  const stop = vi.spyOn(controls.handle, 'stop').mockRejectedValue(new Error('daemon unavailable'));
+  snapshots.push({ handle: controls.handle, phase: 'running' } as SupervisedSnapshot);
+  await adoptRunningSessions();
+  controls.fireTerminal();
+  await vi.waitFor(() => expect(stop).toHaveBeenCalled());
+  expect(release).not.toHaveBeenCalled();
+  expect((await getSessionClaim('sess-1'))?.claimed_by).not.toBeNull();
+  stop.mockResolvedValue(undefined);
+  await vi.waitFor(() => expect(release).toHaveBeenCalledWith({ kind: 'session-ended', reason: 'runtime-ended' }));
+  expect(isContainerRunning('sess-1')).toBe(false);
 });

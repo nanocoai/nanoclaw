@@ -1,0 +1,102 @@
+[
+  {
+    "name": "gmail",
+    "request": {
+      "host": "gmail.googleapis.com",
+      "method": "POST",
+      "path": "/gmail/v1/users/me/messages/send",
+      "content_type": "application/json",
+      "body": "eyJyYXciOiAiVkc4NklISmxZV1JsY2tCbGVHRnRjR3hsTG5SbGMzUU5DbE4xWW1wbFkzUTZJRUZ3Y0hKdmRtRnNJSFJsYzNRTkNrTnZiblJsYm5RdFZIbHdaVG9nZEdWNGRDOXdiR0ZwYmcwS0RRcElaV3hzYnlCbWNtOXRJSFJvWlNCMFpYTjBMZyJ9"
+    },
+    "summary": {
+      "action": "Send email",
+      "details": [
+        {
+          "label": "To",
+          "value": "reader@example.test"
+        },
+        {
+          "label": "Subject",
+          "value": "Approval test"
+        },
+        {
+          "label": "Body",
+          "value": "Hello from the test"
+        }
+      ]
+    }
+  },
+  {
+    "name": "calendar",
+    "request": {
+      "host": "www.googleapis.com",
+      "method": "POST",
+      "path": "/calendar/v3/calendars/primary/events",
+      "content_type": "application/json",
+      "body": "eyJzdW1tYXJ5IjogIlBsYW5uaW5nIiwgInN0YXJ0IjogeyJkYXRlVGltZSI6ICIyMDI2LTA5LTE0VDEwOjAwOjAwWiJ9LCAiZW5kIjogeyJkYXRlVGltZSI6ICIyMDI2LTA5LTE0VDExOjAwOjAwWiJ9fQ=="
+    },
+    "summary": {
+      "action": "Create calendar event",
+      "details": [
+        {
+          "label": "Title",
+          "value": "Planning"
+        },
+        {
+          "label": "Start",
+          "value": "2026-09-14T10:00:00Z"
+        },
+        {
+          "label": "End",
+          "value": "2026-09-14T11:00:00Z"
+        }
+      ]
+    }
+  },
+  {
+    "name": "github",
+    "request": {
+      "host": "api.github.com",
+      "method": "POST",
+      "path": "/repos/example/repo/issues/1/comments",
+      "content_type": "application/json",
+      "body": "eyJib2R5IjogImhlbGxvIiwgInRva2VuIjogImRvLW5vdC1zaG93In0="
+    },
+    "summary": {
+      "action": "POST request",
+      "details": [
+        {
+          "label": "Endpoint",
+          "value": "/repos/example/repo/issues/1/comments"
+        },
+        {
+          "label": "Body",
+          "value": "{\"body\":\"hello\",\"token\":\"***\"}"
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown",
+    "request": {
+      "host": "unknown.example.test",
+      "method": "POST",
+      "path": "/items",
+      "content_type": "application/json",
+      "body": "eyJuYW1lIjogInNhbXBsZSIsICJwYXNzd29yZCI6ICJkby1ub3Qtc2hvdyJ9"
+    },
+    "summary": {
+      "action": "POST request",
+      "details": [
+        {
+          "label": "Endpoint",
+          "value": "/items"
+        },
+        {
+          "label": "Body",
+          "value": "{\"name\":\"sample\",\"password\":\"***\"}"
+        }
+      ]
+    }
+  }
+]

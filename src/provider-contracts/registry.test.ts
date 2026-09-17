@@ -4,6 +4,8 @@ import './index.js';
 import {
   PROVIDER_HOST_CONTRACT_SEAM_VERSION,
   getProviderHostContract,
+  getProviderModelEndpoint,
+  providerModelAllowedHosts,
   hasDeclaredProviderContract,
   listProviderHostContractNames,
   registerProviderHostContract,
@@ -466,5 +468,34 @@ describe('provider host contracts', () => {
     expect(() =>
       registerProviderHostContract(contractName(`path-${_label}`, 'invalid'), claudeContractWith(field, value)),
     ).toThrow(expected);
+  });
+});
+
+describe('provider model destinations', () => {
+  it('derives endpoint URLs and network destinations from a new provider declaration', () => {
+    registerProviderHostContract('model-destination-fixture', {
+      ...emptyContract(),
+      modelDomains: ['models.example.test'],
+      modelEndpoints: { api: 'https://api.models.example.test/v1', token: 'https://models.example.test/oauth/token' },
+    });
+    expect(getProviderModelEndpoint('model-destination-fixture', 'api')).toBe('https://api.models.example.test/v1');
+    expect(providerModelAllowedHosts()).toContain('*.models.example.test');
+    expect(() => getProviderModelEndpoint('model-destination-fixture', 'subscription')).toThrow('does not declare');
+  });
+
+  it.each([
+    'https://evil.test',
+    'http://models.example.test',
+    'https://user:secret@models.example.test',
+    'https://models.example.test:8443',
+    'https://models.example.test/?token=secret',
+  ])('rejects an endpoint outside the declared HTTPS boundary: %s', (api) => {
+    expect(() =>
+      registerProviderHostContract('invalid-model-endpoint', {
+        ...emptyContract(),
+        modelDomains: ['models.example.test'],
+        modelEndpoints: { api },
+      }),
+    ).toThrow();
   });
 });
