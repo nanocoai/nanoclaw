@@ -107,6 +107,8 @@ export class CodexProvider implements AgentProvider {
   private readonly mcpServers: Record<string, McpServerConfig>;
   private readonly inference: CodexConfigPlan['inference'];
   private readonly tone: ReturnType<typeof codexTone.toSettings>;
+  private readonly webSearchMode?: 'disabled';
+  private readonly builtinToolMode?: 'mcp-only';
   private readonly runtime: CodexRuntimeDeps;
   private memorySessionHook?: CodexMemorySessionHook;
 
@@ -123,6 +125,8 @@ export class CodexProvider implements AgentProvider {
   ) {
     this.runtime = runtime;
     this.tone = (configuration?.tone as typeof this.tone | undefined) ?? codexTone.toSettings(codexTone.default);
+    this.webSearchMode = options.webSearchMode;
+    this.builtinToolMode = options.builtinToolMode;
     if (configuration) {
       this.inference = configuration.inference as CodexConfigPlan['inference'];
       this.mcpServers = configuration.mcpServers as Record<string, McpServerConfig>;
@@ -180,7 +184,11 @@ export class CodexProvider implements AgentProvider {
       // config.toml and hooks.json for this query (see codexRuntimeOwnership);
       // this direct write is the pre-contract core's path only.
       if (!codexRuntimeOwnership.contractOwnsRuntimeFiles) {
-        self.runtime.writeCodexConfigToml(self.mcpServers, memorySessionHook, self.inference);
+        self.runtime.writeCodexConfigToml(self.mcpServers, memorySessionHook, {
+          ...self.inference,
+          webSearchMode: self.webSearchMode,
+          builtinToolMode: self.builtinToolMode,
+        });
       }
       const server = self.runtime.spawnCodexAppServer();
       activeServer = server;
@@ -196,6 +204,7 @@ export class CodexProvider implements AgentProvider {
           ...self.tone,
           cwd: input.cwd,
           baseInstructions: input.systemContext?.instructions,
+          builtinToolMode: self.builtinToolMode,
         });
         activeThreadId = threadId;
 
@@ -216,6 +225,7 @@ export class CodexProvider implements AgentProvider {
             self.inference.model,
             self.inference.effort,
             input.cwd,
+            self.builtinToolMode,
             (turnId) => {
               activeTurnId = turnId;
             },
@@ -268,6 +278,7 @@ async function* runOneTurn(
   model: string | undefined,
   effort: string | undefined,
   cwd: string,
+  builtinToolMode: 'mcp-only' | undefined,
   setActiveTurn: (turnId: string) => void,
   clearActiveTurn: () => void,
   hasInit: () => boolean,
@@ -396,6 +407,7 @@ async function* runOneTurn(
       model,
       effort,
       cwd,
+      builtinToolMode,
     });
     setActiveTurn(turnId);
     const imagesBefore = listGeneratedImages(threadId);

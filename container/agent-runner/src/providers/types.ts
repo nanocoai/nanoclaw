@@ -25,6 +25,12 @@ export interface ProviderOptions {
   mcpServers?: Record<string, McpServerConfig>;
   env?: Record<string, string | undefined>;
   additionalDirectories?: string[];
+  model?: string;
+  effort?: string;
+  /** Provider-neutral request to remove provider-native web search. */
+  webSearchMode?: 'disabled';
+  /** Remove provider-native tools; only configured MCP tools remain model-visible. */
+  builtinToolMode?: 'mcp-only';
 }
 
 export interface QueryInput {
@@ -69,8 +75,16 @@ export type McpServerConfig =
        * (cwd-shim.ts) or drop it — never launch in the wrong directory.
        */
       cwd?: string;
+      enabledTools?: string[];
+      disabledTools?: string[];
     }
-  | { type: 'http'; url: string; headers?: Record<string, string> };
+  | {
+      type: 'http';
+      url: string;
+      headers?: Record<string, string>;
+      enabledTools?: string[];
+      disabledTools?: string[];
+    };
 
 export interface AgentQuery {
   /** Push a follow-up message into the active query. */

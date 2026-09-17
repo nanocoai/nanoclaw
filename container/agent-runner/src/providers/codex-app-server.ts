@@ -121,6 +121,7 @@ export interface ThreadParams {
   cwd: string;
   baseInstructions?: string;
   developerInstructions?: string;
+  builtinToolMode?: 'mcp-only';
 }
 
 export interface TurnParams {
@@ -129,6 +130,7 @@ export interface TurnParams {
   model?: string;
   effort?: string;
   cwd?: string;
+  builtinToolMode?: 'mcp-only';
 }
 
 export function spawnCodexAppServer(): AppServer {
@@ -312,6 +314,9 @@ export async function startOrResumeCodexThread(
 
   const resp = await sendCodexRequest(server, 'thread/start', {
     ...commonParams,
+    // thread/resume does not accept environments in Codex 0.146. New threads
+    // get the sticky default here; every turn also carries the override.
+    environments: params.builtinToolMode === 'mcp-only' ? [] : undefined,
     sessionStartSource: 'startup',
     experimentalRawEvents: false,
   });
@@ -330,6 +335,7 @@ export async function startCodexTurn(server: AppServer, params: TurnParams): Pro
     model: params.model,
     effort: params.effort,
     cwd: params.cwd,
+    environments: params.builtinToolMode === 'mcp-only' ? [] : undefined,
   });
   if (resp.error) throw new Error(`turn/start failed: ${resp.error.message}`);
   const result = resp.result as { turn?: { id?: string } } | undefined;
@@ -407,7 +413,13 @@ export const codexRuntimeOwnership = { contractOwnsRuntimeFiles: false };
 export function writeCodexConfigToml(
   servers: Record<string, McpServerConfig>,
   memorySessionHook: CodexMemorySessionHook,
-  opts: { model?: string; effort?: string; fastMode?: boolean } = {},
+  opts: {
+    model?: string;
+    effort?: string;
+    fastMode?: boolean;
+    webSearchMode?: 'disabled';
+    builtinToolMode?: 'mcp-only';
+  } = {},
 ): void {
   const codexConfigDir = path.join(process.env.HOME || '/home/node', '.codex');
   fs.mkdirSync(codexConfigDir, { recursive: true });
@@ -432,7 +444,13 @@ export interface CodexConfigPlan {
     approvalPolicy: string;
     projectDocumentMaxBytes: number;
   };
-  inference: { model?: string; effort?: string; fastMode?: boolean };
+  inference: {
+    model?: string;
+    effort?: string;
+    fastMode?: boolean;
+    webSearchMode?: 'disabled';
+    builtinToolMode?: 'mcp-only';
+  };
   memory: { memories: false; useMemories: false; generateMemories: false };
   mcpServers: Record<string, McpServerConfig>;
 }
@@ -475,7 +493,13 @@ export function codexMcpServersSection(input: Record<string, McpServerConfig>): 
 
 export function buildCodexConfigPlan(
   servers: Record<string, McpServerConfig>,
-  opts: { model?: string; effort?: string; fastMode?: boolean } = {},
+  opts: {
+    model?: string;
+    effort?: string;
+    fastMode?: boolean;
+    webSearchMode?: 'disabled';
+    builtinToolMode?: 'mcp-only';
+  } = {},
 ): CodexConfigPlan {
   return {
     executionPolicy: codexExecutionPolicySection(),
@@ -491,16 +515,47 @@ export function renderCodexConfigToml(plan: CodexConfigPlan): string {
     `sandbox_mode = ${tomlBasicString(plan.executionPolicy.sandboxMode)}`,
     `approval_policy = ${tomlBasicString(plan.executionPolicy.approvalPolicy)}`,
     `project_doc_max_bytes = ${plan.executionPolicy.projectDocumentMaxBytes}`,
+    'respect_system_proxy = true',
   ];
   if (plan.inference.model) lines.push(`model = ${tomlBasicString(plan.inference.model)}`);
   if (plan.inference.effort) lines.push(`model_reasoning_effort = ${tomlBasicString(plan.inference.effort)}`);
   if (plan.inference.fastMode) lines.push('service_tier = "fast"');
+  if (plan.inference.webSearchMode === 'disabled') lines.push('web_search = "disabled"');
   lines.push('');
 
   // NanoClaw owns persistent memory across providers. Keep Codex's native
   // memory disabled even if its defaults or a user-level config change.
   lines.push('[features]');
   lines.push(`memories = ${plan.memory.memories}`);
+  if (plan.inference.builtinToolMode === 'mcp-only') {
+    for (const feature of [
+      'shell_tool',
+      'unified_exec',
+      'code_mode',
+      'code_mode_only',
+      'js_repl',
+      'js_repl_tools_only',
+      'browser_use',
+      'browser_use_external',
+      'in_app_browser',
+      'computer_use',
+      'apps',
+      'connectors',
+      'plugins',
+      'remote_plugin',
+      'tool_search',
+      'search_tool',
+      'standalone_web_search',
+      'web_search',
+      'image_generation',
+      'multi_agent',
+      'apply_patch_freeform',
+      'workspace_dependencies',
+      'goals',
+    ]) {
+      lines.push(`${feature} = false`);
+    }
+  }
   lines.push('');
   lines.push('[memories]');
   lines.push(`use_memories = ${plan.memory.useMemories}`);
@@ -510,6 +565,12 @@ export function renderCodexConfigToml(plan: CodexConfigPlan): string {
   for (const [name, config] of Object.entries(plan.mcpServers)) {
     const tomlName = tomlKey(name);
     lines.push(`[mcp_servers.${tomlName}]`);
+    if (config.enabledTools?.length) {
+      lines.push(`enabled_tools = [${config.enabledTools.map(tomlBasicString).join(', ')}]`);
+    }
+    if (config.disabledTools?.length) {
+      lines.push(`disabled_tools = [${config.disabledTools.map(tomlBasicString).join(', ')}]`);
+    }
     if (config.type === 'http') {
       lines.push(`url = ${tomlBasicString(config.url)}`);
       if (config.headers && Object.keys(config.headers).length > 0) {

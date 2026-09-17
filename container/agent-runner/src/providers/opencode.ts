@@ -849,6 +849,9 @@ export class OpenCodeProvider implements AgentProvider {
   private memorySessionHook?: OpenCodeMemorySessionHook;
 
   constructor(options: ProviderOptions = {}, runtime?: OpenCodeRuntimeDeps) {
+    if (options.builtinToolMode === 'mcp-only') {
+      throw new Error('OpenCode does not support builtinToolMode=mcp-only; refusing to ignore the group tool boundary');
+    }
     this.options = options;
     this.runtime = runtime;
   }
