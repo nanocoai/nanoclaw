@@ -15,6 +15,12 @@ import { register } from './registry.js';
 import type { Access } from './registry.js';
 import type { CallerContext } from './frame.js';
 
+function letterLeadingId(): string {
+  let id = randomUUID();
+  while (!/^[a-z]/.test(id)) id = randomUUID();
+  return id;
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -235,7 +241,11 @@ function genericCreate(def: ResourceDef) {
     for (const col of def.columns) {
       if (col.generated) {
         if (col.name === def.idColumn) {
-          values[col.name] = randomUUID();
+          // Generated IDs are used as the OneCLI agent identifier
+          // (container-runner.ts), which must start with a letter. Raw
+          // randomUUID() starts with a hex digit ~60% of the time and is
+          // rejected by OneCLI with a 400, breaking container spawn.
+          values[col.name] = letterLeadingId();
         } else if (col.name.endsWith('_at')) {
           values[col.name] = new Date().toISOString();
         }
