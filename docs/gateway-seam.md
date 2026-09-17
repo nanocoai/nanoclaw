@@ -216,15 +216,65 @@ See [api-details.md](api-details.md) for the full mount taxonomy.
 
 Provider login prompts stay in the provider's existing `runAuth` hook. A
 provider calls `getCredentialStore()` to resolve the selected gateway's
-`scripts/credential-store.ts`; it never shells out to a named gateway.
-The gateway module exports `createCredentialStore(root)` with `has(provider)`
-and `save(provider, credential)`. Credentials are either an API key or a
-protected file from a dedicated OAuth login. The provider deletes temporary
-login files after transfer. The gateway owns storage, refresh, grants, and
-its credential-free session contribution. Missing adapters fail explicitly;
-there is no fallback to a different gateway. This changes neither setup's
-screens nor its step sequence.
+`scripts/credential-store.ts`; it never shells out to a named gateway, never
+imports a gateway's implementation files, and never reads a gateway's
+management settings. Missing adapters fail explicitly; there is no fallback to
+a different gateway. This changes neither setup's screens nor its step sequence.
 
+The store offers two ways to hand a credential to the gateway. Both come from
+the one `getCredentialStore()` call; a gateway implements the second by
+translating the caller's description into its own native record.
+
+**Provider-named** — `has(provider)` and `save(provider, credential)`. The
+gateway owns the whole description: it derives the host from the provider's
+`modelEndpoints`, picks the record name and type, and receives the provider's
+native login file, which it stores in whatever shape its own refresh
+understands. Codex uses this path; its OAuth file is stored verbatim by OneCLI
+and parsed by Iron.
+
+**Caller-described** — `connection(target)`. For a provider whose credential
+cannot be named by the provider alone. OpenCode is the case in point: one
+install may hold keys for several backends, each on a host the operator chose,
+each with its own header scheme. The target carries only the facts the provider
+owns:
+
+- `name` — one connection per name;
+- `host` — the exact DNS hostname the credential is scoped to;
+- `proxyValue` — the non-secret marker the runtime presents in place of the
+  credential, which gateways doing selective replacement match on;
+- for `kind: 'api-key'`, the `injection` header scheme;
+- for `kind: 'oauth'`, the `profile` plus the provider's public OAuth `clientId`
+  and `tokenEndpoint`.
+
+The connection has three verbs. `find()` is read-only and reports whether an
+entry exists and whether `keep()` can complete it; an entry stored for a
+different host is offered through `confirmHostChange`, and without a
+confirmation the lookup fails so a caller cannot move a credential by
+forgetting to ask. `save(value)` stores or replaces the value of the entry
+`find()` observed. `keep()` reconciles that entry with no new value. Native ids,
+the create-versus-update choice, grant mechanics, stored formats, and refresh
+scheduling never cross the seam; both writes re-read native metadata and refuse
+an entry that changed since `find()`.
+
+**The only OAuth profile is `chatgpt`.** Every installed gateway can hold
+OpenAI's ChatGPT subscription login — refresh at a public token endpoint with a
+public client id, a bearer access token, and an account id the gateway presents
+in its own header — and nothing else. The seam names that profile rather than
+describing OAuth in general; a gateway rejects any other profile. OneCLI stores
+it as its native `openai` record, re-encoding OpenCode's parsed login into the
+Codex file shape that record expects. Iron stores it as a token broker plus a
+separate account-header secret. Parsing a provider's own login file stays in
+the provider; converting to a gateway's storage format stays in the gateway.
+
+`modelEndpoint(url)` is the one network hook. It validates an endpoint before
+setup prompts for anything, and its `configure()` routes the endpoint through
+the gateway once prompts complete. Iron uses it to permit the model host in its
+front proxy — needed even for a keyless local model, which creates no
+credential — and to refuse plaintext endpoints early. OneCLI declares nothing.
+
+`PROVIDER_CREDENTIAL_CONNECTION_SEAM_VERSION` gates a provider skill whose
+install needs `connection()`; an older core's store lacks it and the skill must
+refuse before copying any payload.
 
 ## Account connection is separate from request approval
 
@@ -244,7 +294,6 @@ provide a single-use account onboarding link; this contract does not pretend it 
 OneCLI can return its configured `ONECLI_CONSOLE_URL`; native connect_url responses
 remain valid. No dashboard location is guessed from an API server address.
 
-
 ### Operator-approved REST reads
 
 `NANOCLAW_GATEWAY_READ_ONLY_HOSTS` is a comma-separated list of exact API
@@ -261,7 +310,6 @@ GraphQL POSTs, subdomains, nonstandard ports and malformed configuration do not
 match. Changing `.env` applies to subsequent requests; restart the host when
 changing a process-environment override. OneCLI's explicit native policy holds
 remain authoritative.
-
 
 ### Approval presentation
 
