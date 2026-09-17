@@ -1,0 +1,12 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "maintainer",
+  "version": "0.1.0",
+  "description": "A repository maintainer's assistant: triages issues, routes pull requests, finds duplicates and ranks the backlog. Every classification, ranking and yes/no judgment comes from TypeSafe's Jev model through the typesafe-judge container tool; the agent reasons and writes around those answers. Never merges, never closes.",
+  "keywords": ["github", "triage", "maintainer", "typesafe"],
+  "extensions": {
+    "ai.nanoco.nanoclaw": {
+      "agentName": "Maintainer"
+    }
+  }
+}

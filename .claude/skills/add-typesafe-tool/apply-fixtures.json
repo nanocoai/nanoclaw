@@ -1,0 +1,25 @@
+{
+  "notes": "Conformance fixtures for scripts/skill-conformance.test.ts — shaped fake values only, never real credentials. The skill has no prompts; its one capture (`gateway`, read from .env) selects the OneCLI or Iron Proxy branch, so one scenario per branch covers every when: guard. The credential checks and the OneCLI wire run against the stubbed exec and capture nothing.",
+  "scenarios": [
+    {
+      "name": "onecli",
+      "inputs": {},
+      "exec": [
+        {
+          "match": "NANOCLAW_GATEWAY_PROVIDER",
+          "stdout": "onecli"
+        }
+      ]
+    },
+    {
+      "name": "iron-proxy",
+      "inputs": {},
+      "exec": [
+        {
+          "match": "NANOCLAW_GATEWAY_PROVIDER",
+          "stdout": "iron-proxy"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,62 @@
+{
+  "_comment": "Rubrics for TypeSafe questions over nanocoai/nanoclaw labels. Derived from the repo's label descriptions (`gh label list`), CLAUDE.md, docs/ and .github/labeler.yml. One line per option; keep them in sync with the label set. Gates measured on real items: area/kind 0.6, priority 0.6, noul 0.7 as proposal floors.",
+  "area": {
+    "type": "choice",
+    "criteria": {
+      "area/agent-memory": "Persistent per-agent-group memory: the Markdown memory tree, memory migration, memory hooks and memory add-ons (container/agent-runner/src/memory, docs/memory.md, migrate-memory, add-mnemon, add-karpathy-llm-wiki).",
+      "area/agent-runner": "The Bun agent-runner inside the container: poll loop, prompt formatting, provider abstraction, media handling, status management (container/agent-runner/**, docs/agent-runner-details.md, docs/SDK_DEEP_DIVE.md).",
+      "area/channels": "Messaging platform adapters and channel install skills: Slack, Discord, Telegram, WhatsApp, Signal, iMessage, Teams, Matrix, GitHub, Linear, email, interactive and typing modules, channel pairing/auth setup (src/channels, setup/channels, add-<channel>).",
+      "area/configuration": "Host and container configuration: env parsing, container_configs, group folder and persona scaffolding, project-doc composition, timezone, .env.example, config examples, the customize skill (src/config*, src/container-config*, src/project-doc-compose*).",
+      "area/containers": "Docker/container runtime: Dockerfile, image build and pull, container-runner spawn and restart, mounts, drivers, egress lockdown, self-mod apply, image workflows (container/Dockerfile, container/build.sh, src/container-runner*, src/drivers, manage-mounts).",
+      "area/core": "Host orchestration core: entry point, inbound router, outbound delivery and delivery guard, host sweep, lifecycle, circuit breaker, webhook server, mailbox and DB layer, agent-to-agent, cross-session context (src/index, src/router, src/delivery*, src/host-sweep, src/db, src/mailbox).",
+      "area/credentials": "Credential gateway seam and gateway providers: OneCLI/Iron Proxy integration, vault, credential helper, registry login, gateway approvals bridge (src/gateway-providers, setup/onecli*, container/skills/onecli-gateway, docs/onecli-upgrades.md).",
+      "area/ncl-cli": "The ncl admin CLI and its socket/session transport, command gate, resource definitions, query helper script (src/cli, src/command-gate*, container/agent-runner/src/cli, bin/ncl, scripts/q*).",
+      "area/providers": "Agent providers and their selection/auth: Claude, OpenCode, Codex, Ollama provider config, provider migration (src/providers, container/agent-runner/src/providers, setup/providers, setup/provider-auth*, add-codex, add-opencode, add-ollama-provider).",
+      "area/repository-maintenance": "Repository plumbing rather than product behavior: GitHub workflows and templates, husky, lint/tsconfig/vitest config, package.json and lockfiles, READMEs, CHANGELOG, CONTRIBUTING, release scripts, versions.json, CLAUDE.md/AGENTS.md (.github/**, package.json, README*, scripts/release*).",
+      "area/scheduled-tasks": "Scheduled and recurring tasks: cron recurrence, task runs, ncl tasks resource, scheduling modules (src/modules/scheduling, container/agent-runner/src/scheduling, docs/scheduled-tasks.md).",
+      "area/security": "Privileged-action guard, approvals, permissions and access resolution, mount security, attachment and inbox safety, harness tag stripping, SECURITY.md (src/guard, src/modules/approvals, src/modules/permissions, src/modules/mount-security).",
+      "area/sessions": "Session resolution and lifecycle: session manager, sessions table, per-session inbound/outbound DB files, session cleanup (src/session-manager*, src/db/sessions*, docs/db-session.md).",
+      "area/setup-installation": "Setup wizard and installation lifecycle: nanoclaw.sh, setup/ steps, service (launchd/systemd), bootstrap, install slug, upgrade state, update-nanoclaw, v1/OpenClaw migration, init-first-agent, debug skill (setup/**, nanoclaw.sh, migrate-v2.sh, scripts/update*, launchd/**).",
+      "area/skills": "The skills system itself and skill packaging: skill directives engine, skill apply/lint, registry skills workflow, group skills, container skills directory, skill guidelines docs, or a new/changed operator skill with no more specific area (.claude/skills/**, scripts/skill-*, docs/skills-model.md).",
+      "area/tools": "Tools the agent calls from inside the container: MCP tool server, plugin MCP, agent-browser, frontend-engineer, and tool add-on skills such as add-vercel, add-rtk, add-tavily-tool, add-ollama-tool, add-dashboard, add-clidash (container/agent-runner/src/mcp-tools, .mcp.json)."
+    }
+  },
+  "kind": {
+    "type": "choice",
+    "criteria": {
+      "kind/bug": "Something is not working as expected: a defect, crash, hang, wrong output or regression.",
+      "kind/feature": "New capability or improvement: adds behavior, an option, a channel, provider or skill.",
+      "kind/documentation": "Documentation is wrong, missing or unclear; the change is to docs, comments or guidance text.",
+      "kind/question": "Usage or design question; asks how something works or should work rather than reporting or changing it.",
+      "kind/security": "Exploitable vulnerability crossing a trust boundary on a correctly configured install.",
+      "kind/hardening": "Defense-in-depth improvement that is not exploitable across a trust boundary; reduces blast radius or tightens defaults.",
+      "kind/cleanup": "Refactor, tidy-up, test-only or tooling change with no user-visible behavior change."
+    }
+  },
+  "priority": {
+    "type": "score",
+    "labels": ["priority/low", "priority/medium", "priority/high", "priority/critical"],
+    "criteria": [
+      "Low: cosmetic, rare, or easily worked around; affects an optional path or one unusual setup; no data loss and no security impact.",
+      "Medium: a real defect or gap on a supported configuration that has a workaround, or a well-scoped improvement most operators would notice; can wait for a normal release.",
+      "High: breaks a core flow (install, message routing, container spawn, delivery, scheduled runs) for many users with no clean workaround, or a hardening gap that is actively being discussed.",
+      "Critical: data loss, credential or secret exposure, an exploitable trust-boundary vulnerability, or the service cannot start or run for everyone; must be fixed before the next release."
+    ]
+  },
+  "needs_repro": {
+    "type": "noul",
+    "instructions": "Does this issue, judging from `body`, lack reproduction steps or a concrete failing case: no command sequence or configuration that reproduces it, no exact error output, failing test, or log excerpt?",
+    "criteria": {
+      "true": "The report describes the problem abstractly; a maintainer could not reproduce it from what is written.",
+      "false": "The report includes concrete steps, a failing command, exact error text, a log excerpt, or a pointer to a failing run."
+    }
+  },
+  "pr_ready": {
+    "type": "noul",
+    "instructions": "Is this pull request ready for maintainer review: the required template sections in `template.sections` (Summary, Change kind, Validation, Security and trust boundaries, AI assistance) are `filled` with real content rather than placeholders, `body` describes tests or validation or gives a reason none is needed, and `changed_files` match the scope stated in `title`? Sections marked `omitted` are optional ones the template allows deleting and do not count against readiness.",
+    "criteria": {
+      "true": "Required sections filled, validation or an explicit reason for none, and the change matches its title.",
+      "false": "A required section is missing or left as placeholders, no validation evidence and no reason given, or the diff is broader or narrower than the title."
+    }
+  }
+}

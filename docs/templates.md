@@ -413,6 +413,16 @@ already wired; see
 and the [`sales/sdr` template README](https://github.com/nanocoai/nanoclaw-templates/blob/main/sales/sdr/README.md)
 for a worked example.
 
+## Example: the `maintainer` template
+
+`templates/maintainer/` in this repo is a worked example of a template whose
+skills delegate every classification, ranking, and yes/no call to a decision
+model (TypeSafe Jev via the `typesafe-judge` container tool from
+`/add-typesafe-tool`) while the agent reasons and writes. It shows a persona
+with an explicit act/propose/withhold policy, four skills, a shared helper
+script and rubric file at the plugin root, and a paused recurring task. See
+[typesafe-judge.md](typesafe-judge.md).
+
 ## Contributing a template
 
 Templates ship in the separate
