@@ -172,6 +172,21 @@ describe('composeSessionSpec — direct browser egress', () => {
     expect(spec.containers[0].contributedEnv).toMatchObject({ HTTPS_PROXY: 'http://gateway:10255' });
     expect(spec.containers[0].env.HTTPS_PROXY).toBeUndefined();
   });
+
+  it('persists agent-browser state and sets a per-group encryption key when opted in', () => {
+    const spec = compose({ containerConfig: optedIn });
+    const stateMount = spec.containers[0].mounts.find((m) => m.containerPath === '/home/node/.agent-browser');
+    expect(stateMount).toBeDefined();
+    expect(stateMount!.class).toBe('group-state');
+    expect(stateMount!.mode).toBe('rw');
+    expect(spec.containers[0].contributedEnv?.AGENT_BROWSER_ENCRYPTION_KEY).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('does not persist agent-browser state for a group that did not opt in', () => {
+    const spec = compose();
+    expect(spec.containers[0].mounts.some((m) => m.containerPath === '/home/node/.agent-browser')).toBe(false);
+    expect(spec.containers[0].contributedEnv?.AGENT_BROWSER_ENCRYPTION_KEY).toBeUndefined();
+  });
 });
 
 describe('composeSessionSpec', () => {

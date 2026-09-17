@@ -24,6 +24,7 @@ import {
   INSTALL_SLUG,
   TIMEZONE,
 } from './config.js';
+import { agentBrowserEncryptionKey, agentBrowserStateMount } from './agent-browser-state.js';
 import { browserShimMount, withBrowserShimOnPath } from './browser-direct-egress.js';
 import { CONTAINER_PLUGINS_DIR, materializeContainerJson } from './container-config.js';
 import { getContainerConfig } from './db/container-configs.js';
@@ -1003,7 +1004,11 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
   // credentials injected by the gateway. See src/browser-direct-egress.ts.
   const directBrowserEgress = containerConfig.directBrowserEgress === true;
   const composedMounts = toMountSpecs(mounts, agentGroup.id);
-  if (directBrowserEgress) composedMounts.push(browserShimMount(agentGroup.id));
+  if (directBrowserEgress) {
+    composedMounts.push(browserShimMount(agentGroup.id));
+    composedMounts.push(agentBrowserStateMount(agentGroup.id));
+    contributedEnv.AGENT_BROWSER_ENCRYPTION_KEY = agentBrowserEncryptionKey(agentGroup.id);
+  }
 
   const agent: ContainerSpec = {
     role: 'agent',
