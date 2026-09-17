@@ -153,6 +153,10 @@ agent-browser state load auth.json
 agent-browser open https://app.example.com/dashboard
 ```
 
+### Bureaucracy automation (this install's extensions)
+
+This install adds credential setup, two-factor code handling, and submission approval gates beyond the built-in authentication workflows. See references/bureaucracy-automation.md for details.
+
 ### Cookies & Storage
 
 ```bash
