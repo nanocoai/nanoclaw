@@ -3,6 +3,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { getInstallSlug } from '../../src/install-slug.js';
+import { installGateway } from '../../setup/gateways/install.js';
+import { resolveGatewaySelection } from '../../setup/gateways/selection.js';
+import { upsertEnvVar } from '../../setup/set-env.js';
 import { refreshInstalledSkills, type SkillsRefreshReport } from '../update-skills.js';
 import {
   createCommandRunner,
@@ -21,7 +24,7 @@ export type UpdatePhase = 'conflict' | 'prepared' | 'validated' | 'cutover' | 'c
 
 export interface UpdateRequirement {
   id: string;
-  type: 'breaking-change' | 'external-component';
+  type: 'breaking-change';
   description: string;
   source: string;
   status: 'pending' | 'succeeded' | 'failed';
@@ -54,6 +57,7 @@ export interface UpdateState {
   service?: ServiceHandle;
   snapshot?: SnapshotEntry[];
   validation?: string[];
+  gatewaySelection?: string;
   lastError?: string;
   createdAt: string;
   completedAt?: string;
@@ -152,11 +156,12 @@ export function loadState(projectRoot: string, id: string): UpdateState {
   // Same canonicalization as the safety comparisons: the slug is derived from
   // the path's spelling, so a symlink-spelled --project-root must land on the
   // root the (realpathed) prepare wrote under, not an ENOENT sibling.
-  const expectedTransactionRoot = path.join(defaultTransactionsRoot(realResolve(projectRoot)), id);
+  const resolvedProjectRoot = realResolve(projectRoot);
+  const expectedTransactionRoot = path.join(defaultTransactionsRoot(resolvedProjectRoot), id);
   const target = statePath(expectedTransactionRoot);
   const state = JSON.parse(fs.readFileSync(target, 'utf8')) as UpdateState;
   if (state.schema !== 'nanoclaw-update/v1') throw new Error(`Unsupported update state in ${target}`);
-  if (!hasSafeStatePaths(state, projectRoot, expectedTransactionRoot, id)) {
+  if (!hasSafeStatePaths(state, resolvedProjectRoot, expectedTransactionRoot, id)) {
     throw new Error('Update state contains mismatched or unsafe paths');
   }
   return state;
@@ -191,40 +196,13 @@ function breakingRequirements(runtime: UpdateRuntime, root: string, from: string
     }));
 }
 
-function jsonAt(runtime: UpdateRuntime, root: string, rev: string, file: string): Record<string, unknown> {
-  const result = tryGit(runtime, root, ['show', `${rev}:${file}`]);
-  if (!result.ok || !result.stdout) return {};
-  return JSON.parse(result.stdout) as Record<string, unknown>;
-}
-
-function externalRequirements(runtime: UpdateRuntime, root: string, from: string, to: string): UpdateRequirement[] {
-  const before = jsonAt(runtime, root, from, 'versions.json');
-  const after = jsonAt(runtime, root, to, 'versions.json');
-  return ['onecli-gateway', 'onecli-cli']
-    .filter((name) => before[name] !== after[name])
-    .map((name) => {
-      const description = `${name}: ${String(before[name] ?? 'absent')} → ${String(after[name] ?? 'absent')}`;
-      return {
-        id: requirementId('external-component', description),
-        type: 'external-component' as const,
-        description,
-        source: 'docs/onecli-upgrades.md',
-        status: 'pending' as const,
-        rollback: `Restore ${name} to ${String(before[name] ?? 'the previously installed version')}`,
-      };
-    });
-}
-
 function refreshPreparedState(state: UpdateState, runtime: UpdateRuntime): void {
   assertClean(runtime, state.stageRoot, 'Staging worktree');
   state.targetHead = git(runtime, state.stageRoot, ['rev-parse', 'HEAD']);
   state.changedFiles = git(runtime, state.stageRoot, ['diff', '--name-only', state.originalHead, state.targetHead])
     .split('\n')
     .filter(Boolean);
-  state.requirements = [
-    ...breakingRequirements(runtime, state.stageRoot, state.originalHead, state.targetHead),
-    ...externalRequirements(runtime, state.stageRoot, state.originalHead, state.targetHead),
-  ];
+  state.requirements = [...breakingRequirements(runtime, state.stageRoot, state.originalHead, state.targetHead)];
   state.phase = 'prepared';
   state.lastError = undefined;
   saveState(state);
@@ -333,6 +311,17 @@ export async function validateUpdate(
     if (!state.skillRefresh.success) throw new Error('One or more installed skills failed to refresh');
     commitStageChanges(state, runtime, 'chore: refresh installed skill payloads');
     refreshPreparedState(state, runtime);
+
+    if (hasChanged(state, 'src/gateway-providers') || hasChanged(state, 'setup/gateways')) {
+      state.gatewaySelection = resolveGatewaySelection(
+        state.projectRoot,
+        undefined,
+        path.join(state.stageRoot, '.claude', 'skills'),
+      );
+      await installGateway(state.gatewaySelection, state.stageRoot, { mode: 'refresh', stamp: false });
+      commitStageChanges(state, runtime, 'chore: materialize selected gateway');
+      refreshPreparedState(state, runtime);
+    }
 
     const checks: string[] = [];
     // Cheap, and it names the offending path while nothing is stopped yet.
@@ -580,6 +569,7 @@ export async function cutoverUpdate(
     saveState(state);
     git(runtime, state.projectRoot, ['reset', '--hard', state.targetHead]);
     installAndBuild(state.projectRoot, state, runtime);
+    if (state.gatewaySelection) upsertEnvVar('NANOCLAW_GATEWAY_PROVIDER', state.gatewaySelection, state.projectRoot);
     state.phase = 'cutover';
     state.lastError = undefined;
     saveState(state);
@@ -604,9 +594,6 @@ export function acknowledgeRequirement(
   if (state.phase !== 'cutover') throw new Error(`Cannot acknowledge requirements from ${state.phase}`);
   const requirement = state.requirements.find((item) => item.id === requirementIdValue);
   if (!requirement) throw new Error(`Unknown requirement: ${requirementIdValue}`);
-  if (requirement.type === 'external-component' && status === 'succeeded' && !rollback && !requirement.rollback) {
-    throw new Error(`External requirement ${requirementIdValue} needs an exact rollback instruction`);
-  }
   requirement.status = status;
   if (rollback) requirement.rollback = rollback;
   saveState(state);

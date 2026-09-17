@@ -28,7 +28,7 @@ Two invariants follow, and both are non-negotiable:
 - `key:value` tokens are attributes.
 - The body's meaning is per-kind.
 
-`prompt` only *acquires* a value and binds it to a name; a separate directive *applies* it, referenced as `{{name}}`. That keeps "ask the human" decoupled from "what you do with the answer" (env, `ncl`, the OneCLI vault, a file).
+`prompt` only *acquires* a value and binds it to a name; a separate directive *applies* it, referenced as `{{name}}`. That keeps "ask the human" decoupled from "what you do with the answer" (env, `ncl`, the credential gateway, a file).
 
 ## The eight kinds
 

@@ -85,6 +85,22 @@ function scratch(): { root: string; skill: string } {
 }
 
 describe('thin skill driver', () => {
+  it('forwards refresh mode so materialized payload updates replace installed files', async () => {
+    const { root, skill } = scratch();
+    mkdirSync(join(skill, 'payload'));
+    writeFileSync(join(skill, 'payload', 'provider.ts'), 'new provider\n');
+    writeFileSync(join(root, 'provider.ts'), 'old provider\n');
+    writeFileSync(
+      join(skill, 'SKILL.md'),
+      '# refresh demo\n\n```nc:copy\npayload/provider.ts -> provider.ts\n```\n',
+    );
+
+    const res = await runSkill(skill, { projectRoot: root, mode: 'refresh', exec: () => '' });
+
+    expect(fullyApplied(res)).toBe(true);
+    expect(readFileSync(join(root, 'provider.ts'), 'utf8')).toBe('new provider\n');
+  });
+
   it('resolves prompts via resolveInput, emits operator events, and execs wiring', async () => {
     const { root, skill } = scratch();
     const asked: Array<{ name: string; secret: boolean }> = [];
