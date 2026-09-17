@@ -243,44 +243,52 @@ export class ClaudeProvider implements AgentProvider {
     return rotateClaudeContinuation({ continuation, assistantName: this.assistantName, log }, REAL_CLOCK);
   }
 
+  /**
+   * The exact SDK options a query runs with. Public so the context-preview
+   * tool (scripts/context-preview.ts) can render the agent-visible
+   * configuration without spawning the SDK subprocess.
+   */
+  buildQueryOptions(input: QueryInput): NonNullable<Parameters<typeof sdkQuery>[0]['options']> {
+    const instructions = input.systemContext?.instructions;
+    return {
+      cwd: input.cwd,
+      additionalDirectories: this.additionalDirectories,
+      resume: input.continuation,
+      pathToClaudeCodeExecutable: '/pnpm/claude',
+      systemPrompt: instructions
+        ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions }
+        : undefined,
+      allowedTools: [...this.mcp.allowedTools],
+      disallowedTools: [...this.executionPolicy.disallowedTools],
+      env: this.env,
+      model: this.inference.model,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      effort: this.inference.effort as any,
+      permissionMode: this.executionPolicy.permissionMode,
+      allowDangerouslySkipPermissions: this.executionPolicy.allowDangerouslySkipPermissions,
+      settingSources: ['project', 'user', 'local'],
+      // Only sent when enabled, so an install that never turns it on passes
+      // exactly the options it always did. `fastMode` is a Settings member
+      // rather than a query option, which is why it rides `settings`.
+      ...(this.inference.settings ? { settings: this.inference.settings } : {}),
+      mcpServers: this.mcp.mcpServers,
+      hooks: {
+        PreToolUse: [{ hooks: [preToolUseHook] }],
+        PostToolUse: [{ hooks: [postToolUseHook] }],
+        PostToolUseFailure: [{ hooks: [postToolUseHook] }],
+        PreCompact: [{ hooks: [createPreCompactHook(this.assistantName)] }],
+      },
+    };
+  }
+
   query(input: QueryInput): AgentQuery {
     if (!this.memorySessionHook) throw new Error('Claude memory session hook was not registered');
     const stream = new MessageStream();
     stream.push(input.prompt);
 
-    const instructions = input.systemContext?.instructions;
-
     const sdkResult = sdkQuery({
       prompt: stream,
-      options: {
-        cwd: input.cwd,
-        additionalDirectories: this.additionalDirectories,
-        resume: input.continuation,
-        pathToClaudeCodeExecutable: '/pnpm/claude',
-        systemPrompt: instructions
-          ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions }
-          : undefined,
-        allowedTools: [...this.mcp.allowedTools],
-        disallowedTools: [...this.executionPolicy.disallowedTools],
-        env: this.env,
-        model: this.inference.model,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        effort: this.inference.effort as any,
-        permissionMode: this.executionPolicy.permissionMode,
-        allowDangerouslySkipPermissions: this.executionPolicy.allowDangerouslySkipPermissions,
-        settingSources: ['project', 'user', 'local'],
-        // Only sent when enabled, so an install that never turns it on passes
-        // exactly the options it always did. `fastMode` is a Settings member
-        // rather than a query option, which is why it rides `settings`.
-        ...(this.inference.settings ? { settings: this.inference.settings } : {}),
-        mcpServers: this.mcp.mcpServers,
-        hooks: {
-          PreToolUse: [{ hooks: [preToolUseHook] }],
-          PostToolUse: [{ hooks: [postToolUseHook] }],
-          PostToolUseFailure: [{ hooks: [postToolUseHook] }],
-          PreCompact: [{ hooks: [createPreCompactHook(this.assistantName)] }],
-        },
-      },
+      options: this.buildQueryOptions(input),
     });
 
     let aborted = false;
