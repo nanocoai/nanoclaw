@@ -1,7 +1,7 @@
 # Bureaucracy automation (this install's extensions)
 
 Beyond agent-browser's own auth vault and session persistence (see
-references/authentication.md), this install adds three things:
+`agent-browser skills get authentication`), this install adds three things:
 
 ## Setting up a new site
 
