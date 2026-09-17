@@ -1,0 +1,22 @@
+{
+  "notes": "Conformance fixtures for scripts/skill-conformance.test.ts — shaped fake values only, never real credentials. One scenario: the paid-plan confirmation, a Bridge login already done by the operator, and the owner's own address. The vault-editor stubs answer the bridge_password / primary_email captures (a 22-char unpadded-base64 shape and an address); the echo stub answers the platform_id/owner_handle captures; docker and the port wait are stubbed to succeed.",
+  "scenarios": [
+    {
+      "name": "paid-plan",
+      "inputs": {
+        "plan_ok": "yes",
+        "proton_address": "assistant@proton.me",
+        "owner_email": "owner@example.com"
+      },
+      "exec": [
+        { "match": "docker info", "stdout": "" },
+        { "match": "docker build", "stdout": "" },
+        { "match": "\"BridgePass\"", "stdout": "ZmFrZS1icmlkZ2UtcGFzc3dvcmQ" },
+        { "match": "\"PrimaryEmail\"", "stdout": "assistant@pm.me" },
+        { "match": "docker run", "stdout": "0123456789abcdef" },
+        { "match": "/dev/tcp/127.0.0.1/1143", "stdout": "* OK [CAPABILITY IMAP4rev1] Proton Mail Bridge" },
+        { "match": "owner@example.com", "stdout": "owner@example.com" }
+      ]
+    }
+  ]
+}
