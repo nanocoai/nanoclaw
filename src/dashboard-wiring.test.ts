@@ -70,7 +70,9 @@ describe('add-dashboard wiring in src/index.ts', () => {
     const migrateIdx = stmts.findIndex((s) => s.getText(sf).includes('runMigrations('));
     const runningIdx = stmts.findIndex((s) => s.getText(sf).includes("log.info('NanoClaw running')"));
 
-    expect(importIdx, "dynamic import('./dashboard-pusher.js') must be a statement of main()").toBeGreaterThanOrEqual(0);
+    expect(importIdx, "dynamic import('./dashboard-pusher.js') must be a statement of main()").toBeGreaterThanOrEqual(
+      0,
+    );
     expect(callIdx, 'await startDashboard() must be a statement of main()').toBeGreaterThanOrEqual(0);
     expect(migrateIdx, 'runMigrations() anchor not found').toBeGreaterThanOrEqual(0);
     expect(runningIdx, 'boot-complete log anchor not found').toBeGreaterThanOrEqual(0);
