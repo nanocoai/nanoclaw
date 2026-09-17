@@ -95,6 +95,7 @@ private_key, .secret
 - The real path is rejected if it matches a blocked pattern, and rejected unless it sits under one of `allowedRoots`.
 - The container path is validated: relative, non-empty, no `..`, no leading `/`, no `:` (blocks Docker `-v` option injection). It is mounted under `/workspace/extra/`.
 - **Read-write is granted only when the mount requests it (`readonly: false`) *and* the matched root has `allowReadWrite: true`.** Otherwise the mount is forced read-only.
+  Both halves are expressible from the CLI: `ncl groups config add-mount --rw` records `readonly: false` (omitting it, or passing `--ro`, keeps the mount read-only), and the root gate still decides whether that request is honored.
 
 ### 3. Session Isolation
 
