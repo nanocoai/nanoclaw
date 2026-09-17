@@ -1,9 +1,69 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, mock, test } from 'bun:test';
+
+mock.module('../../config.js', () => ({
+  loadConfig: () => ({ agentGroupId: 'ag-1111111111111-aaaaaa' }),
+}));
 
 import { closeSessionDb, initTestSessionDb } from './connection.js';
 import { SqliteAgentMailbox } from './index.js';
+import { stripAgentGroupSuffix } from './operations.js';
 
 afterEach(() => closeSessionDb());
+
+describe('stripAgentGroupSuffix', () => {
+  test('strips a bare Slack-style timestamp suffix', () => {
+    expect(stripAgentGroupSuffix('1234567890.123456:ag-1111111111111-aaaaaa', 'ag-1111111111111-aaaaaa')).toBe(
+      '1234567890.123456',
+    );
+  });
+
+  test('strips the suffix off an id that itself contains a colon (Telegram chatId:messageId)', () => {
+    expect(stripAgentGroupSuffix('6037840640:42:ag-1111111111111-aaaaaa', 'ag-1111111111111-aaaaaa')).toBe(
+      '6037840640:42',
+    );
+  });
+
+  test('leaves an id without the suffix untouched', () => {
+    expect(stripAgentGroupSuffix('1234567890.123456', 'ag-1111111111111-aaaaaa')).toBe('1234567890.123456');
+  });
+
+  test('does not strip when the agent group id does not match the suffix', () => {
+    expect(stripAgentGroupSuffix('1234567890.123456:ag-other', 'ag-1111111111111-aaaaaa')).toBe(
+      '1234567890.123456:ag-other',
+    );
+  });
+
+  test('returns the id unchanged when agentGroupId is empty', () => {
+    expect(stripAgentGroupSuffix('1234567890.123456:ag-1111111111111-aaaaaa', '')).toBe(
+      '1234567890.123456:ag-1111111111111-aaaaaa',
+    );
+  });
+});
+
+describe('getMessageIdBySeq — inbound suffix stripping', () => {
+  function seedInbound(id: string, seq: number): void {
+    const { inbound } = initTestSessionDb();
+    inbound
+      .prepare(
+        `INSERT INTO messages_in (id, seq, kind, timestamp, content) VALUES (?, ?, 'text', '2026-01-01T00:00:00Z', '{}')`,
+      )
+      .run(id, seq);
+  }
+
+  test('returns the bare platform id for an inbound row, round-trippable to addReaction/editMessage', () => {
+    seedInbound('1234567890.123456:ag-1111111111111-aaaaaa', 7);
+
+    const mailbox = new SqliteAgentMailbox();
+    expect(mailbox.getMessageIdBySeq(7)).toBe('1234567890.123456');
+  });
+
+  test('correctly strips the suffix from a Telegram-style id containing its own colon', () => {
+    seedInbound('6037840640:42:ag-1111111111111-aaaaaa', 9);
+
+    const mailbox = new SqliteAgentMailbox();
+    expect(mailbox.getMessageIdBySeq(9)).toBe('6037840640:42');
+  });
+});
 
 describe('SQLite runner mailbox canonical serialization', () => {
   test('classifies only corruption errors as requiring a fresh runner', () => {
