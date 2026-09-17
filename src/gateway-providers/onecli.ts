@@ -67,6 +67,30 @@ function onecliApprovalSource(): GatewayApprovalSource {
   };
 }
 
+/**
+ * Hosts the container must reach WITHOUT the gateway. The SDK injects
+ * HTTP_PROXY/HTTPS_PROXY pointing at the OneCLI gateway container, and Bun
+ * (so Claude Code's MCP client) honours them for plain-http URLs too — but
+ * the gateway cannot resolve `host.docker.internal` from inside its own
+ * network, so every plain-HTTP MCP server on the host (the documented
+ * `parseMcpServerConfig` case: smtp relay, calendar service) fails with
+ * ECONNRESET. Local hops carry no credentials, so nothing is lost by
+ * bypassing. Honoured by Bun, Node (NODE_USE_ENV_PROXY), curl and git.
+ */
+export const LOCAL_PROXY_BYPASS = 'host.docker.internal,localhost,127.0.0.1';
+
+/** Add NO_PROXY/no_proxy for local hops unless the SDK already set one. */
+export function withLocalProxyBypass(env: Record<string, string>): Record<string, string> {
+  const hasProxy = Object.keys(env).some((k) => /^https?_proxy$/i.test(k));
+  if (!hasProxy) return env;
+  const out = { ...env };
+  if (!('NO_PROXY' in out) && !('no_proxy' in out)) {
+    out.NO_PROXY = LOCAL_PROXY_BYPASS;
+    out.no_proxy = LOCAL_PROXY_BYPASS;
+  }
+  return out;
+}
+
 registerGatewayProvider('onecli', () => ({
   kind: 'onecli',
   approvals: onecliApprovalSource,
@@ -77,6 +101,6 @@ registerGatewayProvider('onecli', () => ({
     const config = await onecli.getContainerConfig({ agent: key.agentGroupId });
     const contribution = contributionFromConfig(config, key.agentGroupId);
     log.info('OneCLI gateway applied', { agentGroupId: key.agentGroupId, sessionId: key.sessionId });
-    return contribution;
+    return { ...contribution, env: withLocalProxyBypass(contribution.env ?? {}) };
   },
 }));

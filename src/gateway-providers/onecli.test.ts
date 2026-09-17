@@ -23,7 +23,7 @@ vi.mock('../config.js', () => ({
 }));
 
 import { getGatewayProviderFactory, type GatewayProviderInput } from './gateway-provider-registry.js';
-import './onecli.js';
+import { LOCAL_PROXY_BYPASS, withLocalProxyBypass } from './onecli.js';
 
 const input: GatewayProviderInput = {
   key: { installSlug: 'test', agentGroupId: 'group-1', sessionId: 'session-1' },
@@ -102,6 +102,8 @@ describe('OneCLI gateway contribution', () => {
       HTTPS_PROXY: 'http://example.invalid:15001',
       SSL_CERT_FILE: '/tmp/onecli-combined-ca.pem',
       DENO_CERT: '/tmp/onecli-combined-ca.pem',
+      NO_PROXY: LOCAL_PROXY_BYPASS,
+      no_proxy: LOCAL_PROXY_BYPASS,
     });
     const bundle = result.mounts!.find((m) => m.containerPath === '/tmp/onecli-combined-ca.pem')!;
     expect(fs.readFileSync(bundle.hostPath, 'utf8')).toBe('SYSTEM CA\nSYNTHETIC CA\n');
@@ -116,7 +118,7 @@ describe('OneCLI gateway contribution', () => {
       return Reflect.apply(read, fs, [file, ...args]);
     }) as typeof fs.readFileSync);
     const result = await provider().contribute(input);
-    expect(result.env).toEqual(config.env);
+    expect(result.env).toEqual({ ...config.env, NO_PROXY: LOCAL_PROXY_BYPASS, no_proxy: LOCAL_PROXY_BYPASS });
     expect(result.mounts).toHaveLength(1);
   });
 
@@ -160,5 +162,24 @@ describe('OneCLI gateway contribution', () => {
     fs.writeFileSync(path.join(dir, 'data', 'onecli'), 'unrelated');
     await expect(provider().contribute(input)).rejects.toThrow();
     expect(fs.readFileSync(path.join(dir, 'data', 'onecli'), 'utf8')).toBe('unrelated');
+  });
+});
+
+describe('withLocalProxyBypass', () => {
+  it('adds NO_PROXY for local hops when the SDK injected a proxy', () => {
+    const env = withLocalProxyBypass({
+      HTTPS_PROXY: 'http://host.docker.internal:10255',
+      HTTP_PROXY: 'http://host.docker.internal:10255',
+    });
+    expect(env.NO_PROXY).toBe(LOCAL_PROXY_BYPASS);
+    expect(env.no_proxy).toBe(LOCAL_PROXY_BYPASS);
+    expect(LOCAL_PROXY_BYPASS.split(',')).toContain('host.docker.internal');
+  });
+
+  it('leaves env alone when there is no proxy, and never overrides an SDK-set NO_PROXY', () => {
+    expect(withLocalProxyBypass({ SSL_CERT_FILE: '/tmp/ca.pem' })).toEqual({ SSL_CERT_FILE: '/tmp/ca.pem' });
+    const env = withLocalProxyBypass({ HTTP_PROXY: 'http://gw:1', NO_PROXY: 'example.internal' });
+    expect(env.NO_PROXY).toBe('example.internal');
+    expect(env.no_proxy).toBeUndefined();
   });
 });
