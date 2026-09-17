@@ -49,7 +49,7 @@ import './teams.js';
 Pinned to an exact version — the supply-chain policy rejects ranges and `latest`:
 
 ```nc:dep
-@chat-adapter/teams@4.29.0
+@chat-adapter/teams@4.38.1
 ```
 
 ### 4. Build and validate
