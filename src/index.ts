@@ -104,6 +104,11 @@ async function main(): Promise<void> {
             timestamp: message.timestamp,
             isMention: message.isMention,
             isGroup: message.isGroup,
+            // Adapters resolve to a content object; the session DB stores a
+            // JSON blob. Same stringify seam as `content` above, deferred.
+            resolveContent: message.resolveContent
+              ? async () => JSON.stringify(await message.resolveContent!())
+              : undefined,
           },
         }).catch((err) => {
           log.error('Failed to route inbound message', { channelType: adapter.channelType, err });
