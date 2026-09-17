@@ -103,6 +103,40 @@ describe('runtime terminal-event feed', () => {
     expect(watchHandler).toBeNull();
   });
 
+  it('keeps sweeping when the selected driver has no watch feed', async () => {
+    vi.mocked(peekSessionDriver).mockReturnValue({} as ReturnType<typeof peekSessionDriver>);
+    vi.mocked(getActiveSessions).mockResolvedValue([{ id: 's-4' } as never]);
+
+    await startAndDrainFirstTick();
+
+    expect(watchHandler).toBeNull();
+    await vi.waitFor(() => {
+      expect(reconcileSession).toHaveBeenCalledWith('s-4');
+    });
+  });
+
+  it('keeps sweeping when the watch backend refuses to subscribe', async () => {
+    vi.mocked(peekSessionDriver).mockReturnValue({
+      watchSessions: () => {
+        throw new Error('events stream unavailable');
+      },
+    } as unknown as ReturnType<typeof peekSessionDriver>);
+    vi.mocked(getActiveSessions).mockResolvedValue([{ id: 's-5' } as never]);
+
+    // The resync floor is the point: a feed that cannot subscribe costs
+    // latency, never the tick — and never the boot.
+    await startAndDrainFirstTick();
+    await vi.waitFor(() => {
+      expect(reconcileSession).toHaveBeenCalledWith('s-5');
+    });
+
+    enqueueSessionReconcile('s-6');
+    await vi.waitFor(() => {
+      expect(reconcileSession).toHaveBeenCalledWith('s-6');
+    });
+    expect(() => stopHostSweep()).not.toThrow();
+  });
+
   it('stops the watch and drops feed enqueues once the sweep stops', async () => {
     vi.mocked(peekSessionDriver).mockReturnValue(fakeWatchingDriver());
     await startAndDrainFirstTick();
