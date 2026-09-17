@@ -157,4 +157,41 @@ export async function handleCredentialCaptureReply(text: string): Promise<boolea
   return true;
 }
 
-registerTools([requestCredentialSetup]);
+export const requestSubmissionApproval: McpToolDefinition = {
+  tool: {
+    name: 'request_submission_approval',
+    description:
+      'Ask an admin to approve a pending agent-browser action before it submits anything (a form, a claim, a payment). Fire-and-forget — you will get a chat message telling you to run `agent-browser confirm <actionId>` once approved, or that it was denied. NEVER call `agent-browser confirm` on a submission-shaped action without this approval first.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        actionId: {
+          type: 'string',
+          description: 'The pending action id agent-browser reported (from its confirm/deny gate)',
+        },
+        site: { type: 'string', description: 'Which site this is for' },
+        summary: {
+          type: 'string',
+          description:
+            'Human-readable summary of exactly what will be submitted — every field and value you filled, in plain language',
+        },
+      },
+      required: ['actionId', 'site', 'summary'],
+    },
+  },
+  async handler(args) {
+    const actionId = args.actionId as string;
+    const site = args.site as string;
+    const summary = args.summary as string;
+    if (!actionId || !site || !summary) return err('actionId, site, and summary are required');
+
+    await writeMessageOut({
+      id: `sub-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      kind: 'system',
+      content: JSON.stringify({ action: 'bureaucracy_submit', actionId, site, summary }),
+    });
+    return ok('Submitted for admin approval. You will be notified when approved or denied.');
+  },
+};
+
+registerTools([requestCredentialSetup, requestSubmissionApproval]);
