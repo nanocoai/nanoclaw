@@ -28,6 +28,7 @@ vi.mock('./config.js', async () => {
 });
 
 import { initTestDb, closeDb, runMigrations, createAgentGroup } from './db/index.js';
+import { openInboundDb } from './db/session-db.js';
 import { createSession } from './db/sessions.js';
 import { initSessionFolder, sessionDir, writeSessionMessage } from './session-manager.js';
 import type { Session } from './types.js';
@@ -99,5 +100,112 @@ describe('extractAttachmentFiles — inbox-root symlink containment (#2828 sibli
     const escaped = path.join(canaryDir, 'evil-inbox-root', 'pwn.txt');
     expect(fs.existsSync(escaped)).toBe(false);
     expect(fs.readdirSync(canaryDir)).toHaveLength(0);
+  });
+});
+
+describe('extractAttachmentFiles — scoped message ids keep colon-free inbox dirs', () => {
+  // Message ids can carry a per-agent scope suffix (`<id>:ag-<groupId>`).
+  // A colon inside the inbox path segment breaks downstream consumers that
+  // parse `path:line` (agent read tools) or split mount specs on `:` (docker
+  // CLI). The id itself must stay untouched; only the directory name is
+  // sanitized. Seen live on 2026-07-25: an agent reported an uploaded file
+  // missing while it sat readable in its container, because its read tool
+  // split the metadata path at the colon.
+  it('writes the attachment under a sanitized dir and points localPath at it', () => {
+    const scopedId = 'web-1784959140240-i:ag-6e9d6f1b-77e1-4cbf-b86c-e9fd062a2c19';
+    const content = JSON.stringify({
+      text: 'md upload',
+      attachments: [{ name: 'plan.md', mimeType: 'text/plain', data: Buffer.from('# plan\n').toString('base64') }],
+    });
+
+    writeSessionMessage(AG, SESS, {
+      id: scopedId,
+      kind: 'chat',
+      timestamp: now(),
+      platformId: 'web:local',
+      channelType: 'web',
+      threadId: null,
+      content,
+    });
+
+    const sanitized = scopedId.replace(/:/g, '-');
+    const written = path.join(sessionDir(AG, SESS), 'inbox', sanitized, 'plan.md');
+    expect(fs.existsSync(written)).toBe(true);
+    expect(fs.readFileSync(written, 'utf8')).toBe('# plan\n');
+
+    const inboxEntries = fs.readdirSync(path.join(sessionDir(AG, SESS), 'inbox'));
+    for (const entry of inboxEntries) expect(entry.includes(':')).toBe(false);
+
+    const db = openInboundDb(path.join(sessionDir(AG, SESS), 'inbound.db'));
+    const row = db.prepare('SELECT content FROM messages_in WHERE id = ?').get(scopedId) as
+      | { content: string }
+      | undefined;
+    db.close();
+    expect(row).toBeDefined();
+    const att = JSON.parse(row!.content).attachments[0];
+    expect(att.localPath).toBe(`inbox/${sanitized}/plan.md`);
+    expect(att.localPath.includes(':')).toBe(false);
+  });
+
+  it('leaves an already-clean message id byte-for-byte unchanged', () => {
+    const cleanId = 'web-1784959140240-0';
+    const content = JSON.stringify({
+      text: 'clean id',
+      attachments: [{ name: 'a.md', mimeType: 'text/plain', data: Buffer.from('a\n').toString('base64') }],
+    });
+    writeSessionMessage(AG, SESS, {
+      id: cleanId,
+      kind: 'chat',
+      timestamp: now(),
+      platformId: 'web:local',
+      channelType: 'web',
+      threadId: null,
+      content,
+    });
+    expect(fs.existsSync(path.join(sessionDir(AG, SESS), 'inbox', cleanId, 'a.md'))).toBe(true);
+  });
+
+  it('sanitizes the whole consumer-hostile class, not just one colon', () => {
+    const uglyId = 'id:with:many colons and spaces';
+    const content = JSON.stringify({
+      text: 'ugly id',
+      attachments: [{ name: 'b.md', mimeType: 'text/plain', data: Buffer.from('b\n').toString('base64') }],
+    });
+    writeSessionMessage(AG, SESS, {
+      id: uglyId,
+      kind: 'chat',
+      timestamp: now(),
+      platformId: 'web:local',
+      channelType: 'web',
+      threadId: null,
+      content,
+    });
+    const dir = 'id-with-many-colons-and-spaces';
+    expect(fs.existsSync(path.join(sessionDir(AG, SESS), 'inbox', dir, 'b.md'))).toBe(true);
+  });
+
+  it('sanitizes attachment FILENAMES carrying the same class', () => {
+    const id = 'web-1784959140240-1';
+    const content = JSON.stringify({
+      text: 'colon filename',
+      attachments: [{ name: 'foo:bar.md', mimeType: 'text/plain', data: Buffer.from('fb\n').toString('base64') }],
+    });
+    writeSessionMessage(AG, SESS, {
+      id,
+      kind: 'chat',
+      timestamp: now(),
+      platformId: 'web:local',
+      channelType: 'web',
+      threadId: null,
+      content,
+    });
+    const written = path.join(sessionDir(AG, SESS), 'inbox', id, 'foo-bar.md');
+    expect(fs.existsSync(written)).toBe(true);
+    const db2 = openInboundDb(path.join(sessionDir(AG, SESS), 'inbound.db'));
+    const row2 = db2.prepare('SELECT content FROM messages_in WHERE id = ?').get(id) as { content: string };
+    db2.close();
+    const att2 = JSON.parse(row2.content).attachments[0];
+    expect(att2.name).toBe('foo-bar.md');
+    expect(att2.localPath).toBe(`inbox/${id}/foo-bar.md`);
   });
 });
