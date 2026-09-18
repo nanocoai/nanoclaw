@@ -64,7 +64,7 @@ Run the script directly, not from inside a Claude session — the deterministic 
 
 **What it does:** merges `.env`, seeds the v2 DB from `registered_groups`, copies group folders + session data + scheduled tasks, installs the channel adapters you select, copies channel auth state (including the Baileys keystore for WhatsApp — LID mapping is now resolved per-message by the Baileys v7 adapter, not migrated), builds the agent container.
 
-**What it doesn't:** flip the system service. Pick *"switch to v2"* at the prompt, or do it manually after testing — your v1 install is left untouched.
+**What it doesn't:** flip the system service. Pick _"switch to v2"_ at the prompt, or do it manually after testing — your v1 install is left untouched.
 
 See [docs/v1-to-v2-changes.md](docs/v1-to-v2-changes.md) for what's different and [docs/migration-dev.md](docs/migration-dev.md) for development notes.
 
@@ -145,6 +145,7 @@ Talk to your assistant with the trigger word (default: `@Andy`):
 ```
 
 From a channel you own or administer, you can manage groups and tasks:
+
 ```
 @Andy list all scheduled tasks across groups
 @Andy pause the Monday briefing task
@@ -196,6 +197,7 @@ Two SQLite files per session, each with exactly one writer — no cross-mount co
 For the full architecture writeup see [docs/architecture.md](docs/architecture.md); for the three-level isolation model see [docs/isolation-model.md](docs/isolation-model.md).
 
 Key files:
+
 - `src/index.ts` — entry point: DB init, channel adapters, delivery polls, sweep
 - `src/router.ts` — inbound routing: messaging group → agent group → session → `inbound.db`
 - `src/delivery.ts` — polls `outbound.db`, delivers via adapter, handles system actions
@@ -207,6 +209,45 @@ Key files:
 - `src/providers/` — host-side provider config (`claude` baked in; others via skills)
 - `container/agent-runner/` — Bun agent-runner: poll loop, MCP tools, provider abstraction
 - `groups/<folder>/` — per-agent-group filesystem (`CLAUDE.md`, skills, container config)
+
+### Local patch: Codex HTTP/SSE transport
+
+Branch: `fix/codex-http-sse-transport`
+
+This fork can disable the Responses WebSocket transport for the Codex provider
+and use HTTP/SSE instead. Set `NANOCLAW_CODEX_TRANSPORT=http` in `.env`; unset it
+or use `auto` to retain Codex's native WebSocket behavior. It works around intermittent stalled turns where Codex's
+internal WebSocket retry is invisible to NanoClaw until the turn timeout. The
+symptom is a live, idle container that accepts follow-up messages but produces
+no response until it is stopped and its `continuation:codex` session pointer is
+cleared. See [NanoClaw issue #3338](https://github.com/nanocoai/nanoclaw/issues/3338)
+and [Codex issue #19821](https://github.com/openai/codex/issues/19821).
+
+In `http` mode the patch defines a custom `onecli_openai` model provider in the
+generated Codex `config.toml`, retains OneCLI-managed OpenAI authentication and
+normal Codex thread continuation, and sets `supports_websockets = false`. The implementation
+and regression coverage live in:
+
+- `container/agent-runner/src/providers/codex-app-server.ts`
+- `container/agent-runner/src/providers/codex-app-server.test.ts`
+
+Agent-runner source is bind-mounted into new containers, so no image rebuild is
+needed for source-only changes. The patch was initially verified with 23 focused
+Codex provider tests and a live Lilith turn using OneCLI API-key authentication.
+
+After updating NanoClaw, rebase this branch onto the updated private `main`:
+
+```bash
+git switch main
+git pull --ff-only
+git switch fix/codex-http-sse-transport
+git rebase main
+```
+
+Then rerun the focused tests inside the local NanoClaw image and send a small
+message to a Codex-backed agent. If upstream fixes the transport stall, this
+patch can be removed by using updated `main` directly. To roll back without
+rewriting history, revert this branch's patch commit.
 
 ## FAQ
 

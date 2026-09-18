@@ -7,3 +7,4 @@
 // contract (./mock.ts) is imported by the tests that register the mock.
 
 import './claude.js';
+import './codex.js';

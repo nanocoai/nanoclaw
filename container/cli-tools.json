@@ -8,5 +8,9 @@
     "name": "@anthropic-ai/claude-code",
     "version": "2.1.257",
     "onlyBuilt": true
+  },
+  {
+    "name": "@openai/codex",
+    "version": "0.154.0"
   }
 ]
