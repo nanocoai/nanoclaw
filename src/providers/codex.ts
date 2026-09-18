@@ -31,6 +31,7 @@ import path from 'path';
 
 import { DATA_DIR } from '../config.js';
 import { getAgentGroup } from '../db/agent-groups.js';
+import { readEnvFile } from '../env.js';
 import { materializeTemplateSkills } from '../group-skills.js';
 import { composeGroupAgentsMd } from './codex-agents-md.js';
 import { registerProviderContainerConfig } from './provider-container-registry.js';
@@ -38,8 +39,15 @@ import { registerProviderContainerConfig } from './provider-container-registry.j
 registerProviderContainerConfig(
   'codex',
   async (ctx) => {
+    const configuredTransport =
+      ctx.hostEnv.NANOCLAW_CODEX_TRANSPORT || readEnvFile(['NANOCLAW_CODEX_TRANSPORT']).NANOCLAW_CODEX_TRANSPORT;
+    const transport = configuredTransport?.trim().toLowerCase() || 'auto';
+    if (transport !== 'auto' && transport !== 'http') {
+      throw new Error(`NANOCLAW_CODEX_TRANSPORT must be "auto" or "http", got "${configuredTransport}"`);
+    }
+    const env = { NANOCLAW_CODEX_TRANSPORT: transport };
     const coreOwnsProviderSurfaces = (ctx as typeof ctx & { coreOwnsProviderSurfaces?: true }).coreOwnsProviderSurfaces;
-    if (coreOwnsProviderSurfaces) return {};
+    if (coreOwnsProviderSurfaces) return { env };
 
     // Per-group codex state (config.toml, thread metadata).
     const codexDir = path.join(DATA_DIR, 'v2-sessions', ctx.agentGroupId, '.codex-shared');
@@ -89,7 +97,7 @@ registerProviderContainerConfig(
       mounts.push({ hostPath: agentsDir, containerPath: '/home/node/.agents', readonly: true });
     }
 
-    return { mounts };
+    return { mounts, env };
   },
   { providesAgentSurfaces: true },
 );

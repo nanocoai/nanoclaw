@@ -24,9 +24,12 @@ const MEMORY_SESSION_HOOK = {
 
 let tmpHome: string | null = null;
 const originalHome = process.env.HOME;
+const originalTransport = process.env.NANOCLAW_CODEX_TRANSPORT;
 
 afterEach(() => {
   process.env.HOME = originalHome;
+  if (originalTransport === undefined) delete process.env.NANOCLAW_CODEX_TRANSPORT;
+  else process.env.NANOCLAW_CODEX_TRANSPORT = originalTransport;
   if (tmpHome) {
     fs.rmSync(tmpHome, { recursive: true, force: true });
     tmpHome = null;
@@ -35,6 +38,7 @@ afterEach(() => {
 
 describe('Codex config TOML', () => {
   it('builds every declared configuration capability before rendering', () => {
+    delete process.env.NANOCLAW_CODEX_TRANSPORT;
     const mcpServers = { nanoclaw: { command: 'bun', args: ['run', 'server.ts'] } };
     const plan = buildCodexConfigPlan(mcpServers, { model: 'gpt-5', effort: 'medium', fastMode: true });
 
@@ -45,6 +49,12 @@ describe('Codex config TOML', () => {
         projectDocumentMaxBytes: 32768,
       },
       inference: { model: 'gpt-5', effort: 'medium', fastMode: true },
+      transport: {
+        mode: 'auto',
+        provider: 'onecli_openai',
+        baseUrl: 'https://api.openai.com/v1',
+        supportsWebsockets: false,
+      },
       memory: { memories: false, useMemories: false, generateMemories: false },
       mcpServers,
     });
@@ -52,6 +62,7 @@ describe('Codex config TOML', () => {
   });
 
   it('renders the exact bytes, pinning line order and the trailing newline', () => {
+    process.env.NANOCLAW_CODEX_TRANSPORT = 'http';
     const content = renderCodexConfigToml(
       buildCodexConfigPlan(
         {
@@ -66,9 +77,17 @@ describe('Codex config TOML', () => {
         'sandbox_mode = "danger-full-access"',
         'approval_policy = "never"',
         'project_doc_max_bytes = 32768',
+        'model_provider = "onecli_openai"',
         'model = "gpt-5"',
         'model_reasoning_effort = "medium"',
         'service_tier = "fast"',
+        '',
+        '[model_providers.onecli_openai]',
+        'name = "OpenAI via OneCLI (HTTP/SSE)"',
+        'base_url = "https://api.openai.com/v1"',
+        'wire_api = "responses"',
+        'requires_openai_auth = true',
+        'supports_websockets = false',
         '',
         '[features]',
         'memories = false',
@@ -90,6 +109,23 @@ describe('Codex config TOML', () => {
         '',
       ].join('\n'),
     );
+  });
+
+  it('keeps native transport by default and emits the custom provider only in http mode', () => {
+    delete process.env.NANOCLAW_CODEX_TRANSPORT;
+    const automatic = renderCodexConfigToml(buildCodexConfigPlan({}, {}));
+    expect(automatic).not.toContain('model_provider =');
+    expect(automatic).not.toContain('[model_providers.onecli_openai]');
+
+    process.env.NANOCLAW_CODEX_TRANSPORT = 'http';
+    const http = renderCodexConfigToml(buildCodexConfigPlan({}, {}));
+    expect(http).toContain('model_provider = "onecli_openai"');
+    expect(http).toContain('supports_websockets = false');
+  });
+
+  it('rejects an invalid transport value', () => {
+    process.env.NANOCLAW_CODEX_TRANSPORT = 'websockets-off-ish';
+    expect(() => buildCodexConfigPlan({}, {})).toThrow(/must be "auto" or "http"/);
   });
 
   // Core's speed property → Codex's service tier. `fast` is the only value
@@ -137,6 +173,7 @@ describe('Codex config TOML', () => {
   });
 
   it('hardcodes danger-full-access + never and writes model, effort, fast mode, and MCP servers', () => {
+    process.env.NANOCLAW_CODEX_TRANSPORT = 'http';
     tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-home-'));
     process.env.HOME = tmpHome;
 
@@ -161,6 +198,10 @@ describe('Codex config TOML', () => {
     expect(content).toContain('sandbox_mode = "danger-full-access"');
     expect(content).toContain('approval_policy = "never"');
     expect(content).toContain('project_doc_max_bytes = 32768');
+    expect(content).toContain('model_provider = "onecli_openai"');
+    expect(content).toContain('[model_providers.onecli_openai]');
+    expect(content).toContain('requires_openai_auth = true');
+    expect(content).toContain('supports_websockets = false');
     expect(content).toContain('model = "gpt-5"');
     expect(content).toContain('model_reasoning_effort = "medium"');
     expect(content).toContain('service_tier = "fast"');
