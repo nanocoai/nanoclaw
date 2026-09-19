@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.116",
+    "@earendil-works/pi-coding-agent": "0.85.1",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "@opencode-ai/sdk": "^1.4.3",
     "cron-parser": "^5.0.0",
