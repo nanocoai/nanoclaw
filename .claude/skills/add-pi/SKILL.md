@@ -32,6 +32,12 @@ If all of the following are already present, skip to **Configuration**:
 
 Missing pieces — continue below. All steps are idempotent; re-running is safe.
 
+Also check the **auth template** the host seeds from (fix before continuing if missing):
+
+```bash
+ls ~/.pi/agent/auth.json 2>/dev/null || echo "MISSING: run pi once on the host (/login), or set PI_TEMPLATE_AGENT_DIR to a populated agentDir"
+```
+
 ### 1. Fetch the branch that carries the pi payload
 
 ```bash
@@ -165,9 +171,19 @@ Unlike OpenCode, there are **no `PI_*` model/env knobs** — model selection liv
 
 ### Per group / per session
 
-Set `"provider": "pi"` in the group's **`container.json`** (`groups/<folder>/container.json`) — the in-container runner reads `provider` from there, not from the DB. The DB columns **`agent_groups.agent_provider`** and **`sessions.agent_provider`** (session overrides group) only drive host-side provider contribution — for pi that is the `/pi-agent` mount and the `PI_AGENT_DIR` env — and do not propagate into `container.json` at spawn time. The host-side resolver falls back through session → group → `container.json` → `'claude'`.
+**The official path is the `ncl` CLI** — it updates both sides of the provider split in one command:
 
-> ⚠️ For pi the split matters more than for OpenCode: if you only edit `container.json` and leave the DB at the default, the container spawns with the pi runner but **without** `PI_AGENT_DIR` — pi then falls back to `<cwd>/.pi/agent` inside the workspace, finds no `auth.json` there, and every turn fails with a model-auth error. Set the DB columns too (or accept the fallback and seed `<cwd>/.pi/agent` yourself).
+```bash
+pnpm exec tsx src/cli/client.ts groups config update --provider pi --id <agent-group-id>
+pnpm exec tsx src/cli/client.ts groups restart --id <agent-group-id>   # changes take effect on restart
+```
+
+Why both sides matter — v2 keeps the provider in **two places**:
+
+- **`container_configs.provider`** (DB) → the host materializes `groups/<folder>/container.json` from it at every spawn (`materializeContainerJson()`), and the in-container runner reads `provider` from that file. **This is what the agent actually runs.**
+- **`agent_groups.agent_provider`** (DB) → drives host-side provider contribution only (for pi: the `/pi-agent` mount and `PI_AGENT_DIR` env).
+
+`ncl groups config update --provider` writes both. If you edit tables by hand instead, update **both** — flipping only `agent_groups` (or only `container.json`) leaves the runner launching the wrong provider: the failure signature is a first reply of `"The agent run failed"` with `continuation:claude` in the session's `outbound.db` `session_state` table (see **Verify**). The host-side resolver falls back through session → group → `'claude'`.
 
 Extra MCP servers still come from **`NANOCLAW_MCP_SERVERS`** / `container_config.mcpServers` on the host; the runner merges them into the same `mcpServers` object the bridge consumes. stdio servers are spawned in process by the bridge (native `cwd` support — no shim); http servers speak **Streamable HTTP** only (no legacy SSE fallback).
 
@@ -178,6 +194,15 @@ Extra MCP servers still come from **`NANOCLAW_MCP_SERVERS`** / `container_config
 - **abort()** tears down in process (`session.abort()` + dispose) — there is no serve process tree to SIGKILL. Mid-turn `push()` rides pi's native follow-up queue.
 - Memory hook runs on new-session openings only, fail-closed (a failed hook logs and skips injection, never kills the turn). pi compacts in place, so there is no post-compaction re-arm step.
 - Slash commands stay XML-wrapped by the runner (`supportsNativeSlashCommands = false`): pi's native commands (/compact, /theme, …) are interactive-TUI semantics and unwanted headless.
+
+### Fresh-install path (setup and pi)
+
+On a machine where setup has not run yet:
+
+- **The setup provider picker lives in the `auth` step and does not list pi** — that picker is for runtimes with their own auth flow. pi needs none (credentials come from the agentDir template). Complete setup with the default Claude pick or skip the step; you do **not** need an Anthropic login for pi.
+- **Do not skip the `onecli` step.** The OneCLI local vault is a spawn prerequisite regardless of provider: without it, every container spawn fails with `OneCLIRequestError 401` (against `api.onecli.sh`) and messages accumulate undelivered. If you skipped it during setup: `pnpm exec tsx setup/index.ts --step onecli`.
+- The setup epilogue warning *"Your Claude account isn't connected"* is expected on a pi-only install — pi never reads Anthropic credentials.
+- Then switch the group(s) to pi as in **Per group / per session** above.
 
 ## Verify
 
@@ -198,3 +223,29 @@ cd container/agent-runner && bun -e 'await import("./src/providers/pi.js"); cons
 ```
 
 Expected output: `pi provider constructs: PiProvider`. A first end-to-end turn then requires a seeded agentDir (see **Configuration** above) with working credentials for the model named in `settings.json`.
+
+End-to-end check (the definitive one) — with the host service running and a group switched to pi:
+
+```bash
+pnpm run chat "reply with exactly: PI_E2E_OK"        # Terminal Agent via the cli channel
+
+# Then confirm pi actually ran that turn — not just that a reply came back:
+node -e '
+const D = require("better-sqlite3");
+const dir = require("fs").readdirSync("data/v2-sessions/<agent-group-id>");
+// pick the newest session dir, open its outbound.db, read session_state keys
+' # → must contain  "continuation:pi"
+```
+
+`continuation:pi` in the session's `outbound.db` → `session_state` table is the ground truth: the poll-loop keys continuations by provider name, so this row proves the pi provider executed the turn. A healthy first reply takes **~15s including container cold start** — a long pause there is normal, not a hang.
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| First reply is `"The agent run failed. Check the logs."`; `outbound.db` `session_state` shows `continuation:claude` | Provider switch never reached `container_configs` — the runner defaulted to claude (no Anthropic auth → fail) | `ncl groups config update --provider pi --id <group>` + `ncl groups restart --id <group>`; see **Per group / per session** |
+| Spawns fail with `OneCLIRequestError … api.onecli.sh … 401` | The `onecli` setup step was skipped — the local vault is a spawn prerequisite for every provider | `pnpm exec tsx setup/index.ts --step onecli`, then restart the service |
+| Setup epilogue: *"Your Claude account isn't connected"* | Expected on pi-only installs — pi reads no Anthropic credentials | None; ignore |
+| `pnpm install` fails compiling `better-sqlite3` (`make: *** better_sqlite3.o 错误 1`, Node 26 ABI) | The pinned better-sqlite3 predates your Node's ABI (host env issue, not pi-specific) | Use Node 22 LTS (matches the agent image); upstream tracks newer-Node fixes on `fix/better-sqlite3-node24` |
+| `docker build`: `the --mount option requires BuildKit` | Docker CLI lacks the buildx plugin (common on Docker 27+ without desktop) | `mkdir -p ~/.docker/cli-plugins && curl -L https://github.com/docker/buildx/releases/download/v0.37.1/buildx-v0.37.1.linux-amd64 -o ~/.docker/cli-plugins/docker-buildx && chmod +x ~/.docker/cli-plugins/docker-buildx` |
+| Every pi turn fails with a model-auth error; container logs show pi found no `auth.json` | Template dir missing/empty (no `~/.pi/agent`), so seeding copied nothing | Run pi once on the host (`/login`), or point `PI_TEMPLATE_AGENT_DIR` at a populated agentDir; then delete the session's `pi-agent` dir to force a reseed |
