@@ -237,7 +237,7 @@ export class ClaudeProvider implements AgentProvider {
 
   /**
    * Pre-resume maintenance: drop a transcript too large or too old to
-   * cold-resume within the host's idle ceiling (see claude-history.ts).
+   * cold-resume within the host's idle timeout (see claude-history.ts).
    */
   maybeRotateContinuation(continuation: string, _cwd: string): string | null {
     return rotateClaudeContinuation({ continuation, assistantName: this.assistantName, log }, REAL_CLOCK);

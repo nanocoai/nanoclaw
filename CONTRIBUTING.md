@@ -211,22 +211,22 @@ One pair, same facts, the shape is the difference.
 
 Hard to review:
 
-> The host sweep's ABSOLUTE_CEILING_MS was a hardcoded 30 minutes, so a slow
-> local-model backend that legitimately spends longer decoding one turn gets
-> cold-killed mid-turn, and this change makes the ceiling configurable by
-> resolving it per group from the new turn_ceiling_ms column added by
-> migration 024, falling back to the NANOCLAW_TURN_CEILING_MS env var and
-> then the built-in default, while invalid values fall through a level and
-> values below 60s are refused and a declared Bash timeout still extends
-> whatever ceiling wins.
+> The host sweep's IDLE_TIMEOUT_MS was a hardcoded 30 minutes, so a slow
+> local-model backend that legitimately goes quiet for longer than that while
+> decoding one turn gets cold-killed mid-turn, and this change makes the
+> timeout configurable by reading the NANOCLAW_IDLE_TIMEOUT_MS env var and
+> falling back to the built-in default, while invalid or out-of-range values
+> are refused with a warning and a declared Bash timeout still extends
+> whatever timeout wins, and the same value also widens the per-message
+> claim tolerance so the heartbeat path and the claim path agree.
 
 Easy to review:
 
-> **Problem**: `ABSOLUTE_CEILING_MS` is a hardcoded 30 minutes — slow
-> local-model turns get cold-killed mid-decode.
+> **Problem**: `IDLE_TIMEOUT_MS` is a hardcoded 30 minutes — slow
+> local-model turns that go quiet longer than that get cold-killed mid-decode.
 >
-> **Fix**: ceiling resolved per group: (1) `turn_ceiling_ms` (migration 024),
-> (2) `NANOCLAW_TURN_CEILING_MS`, (3) the unchanged 30-minute default.
+> **Fix**: `NANOCLAW_IDLE_TIMEOUT_MS` raises it install-wide; unset keeps the
+> 30-minute default. Both kill paths honour it (heartbeat + claim tolerance).
 >
-> **Guardrails**: invalid values fall through a level; sub-60s refused; a
-> declared Bash timeout still extends whatever ceiling wins.
+> **Guardrails**: range 2 min to 24 h; anything else refused with a warning; a
+> declared Bash timeout still extends whatever timeout wins.

@@ -210,7 +210,7 @@ function formatTranscriptMarkdown(
 
 /**
  * Before resuming, drop a transcript that has grown too large or too old to
- * cold-resume within the host's idle ceiling. Archives what it can, moves the
+ * cold-resume within the host's idle timeout. Archives what it can, moves the
  * `.jsonl` aside, and returns the reason; null keeps resuming.
  */
 export function rotateClaudeContinuation(

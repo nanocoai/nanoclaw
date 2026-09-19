@@ -5,18 +5,24 @@
  * src/reconcile.ts: level-triggered, reads current state, a missing or
  * closed session is a clean no-op.
  *
- * Stuck / idle detection (replaces the old IDLE_TIMEOUT setTimeout + 10-min
- * heartbeat threshold):
+ * Stuck / idle detection (replaces v1's keep-alive `IDLE_TIMEOUT` setTimeout
+ * + 10-min heartbeat threshold — note that v1's IDLE_TIMEOUT was the opposite
+ * mechanism, holding a container open after its last result; the idle timeout
+ * here decides when to kill one):
  *
  *   If the container isn't running and there are 'processing' rows left over
  *   (e.g. it crashed mid-turn) → reset them to pending with backoff +
  *   tries++. Existing retry machinery does the rest.
  *
  *   If the container IS running:
- *     1. Absolute ceiling: heartbeat age > max(30 min, current_bash_timeout)
- *        → kill. Covers the "alive but silent for 30 min" case. Extended
- *        only while Bash is declared as running longer, honouring the
- *        user's own timeout directive. Kill then resets processing rows.
+ *     1. Idle timeout: heartbeat age > max(idle timeout, current_bash_timeout)
+ *        where the idle timeout is 30 min unless NANOCLAW_IDLE_TIMEOUT_MS
+ *        raises it → kill. The heartbeat is touched on every stream event, so
+ *        this measures silence — no output and no tool calls — not elapsed
+ *        turn time; a turn that keeps producing is never killed here, however
+ *        long it runs. Extended only while Bash is declared as running longer,
+ *        honouring the user's own timeout directive. Kill then resets
+ *        processing rows.
  *        When no heartbeat file exists yet, falls back to the tracked
  *        container spawn time so a container that goes idle without ever
  *        reaching an SDK event —
@@ -24,7 +30,8 @@
  *        living forever (see decideStuckAction's grace-period comment).
  *
  *     2. Message-scoped stuck: for each 'processing' row, tolerance =
- *        max(60s, current_bash_timeout_ms_if_Bash_running). If
+ *        max(60s, current_bash_timeout_ms_if_Bash_running, an explicit
+ *        NANOCLAW_IDLE_TIMEOUT_MS). If
  *        (claim_age > tolerance) AND (heartbeat_mtime <= status_changed)
  *        → kill + reset this message + tries++. Semantics: "container
  *        claimed a message and went quiet past tolerance since the claim."
@@ -38,13 +45,26 @@ import { log } from './log.js';
 import { heartbeatPath, withExistingMailboxSession } from './session-manager.js';
 import { getContainerStartedAtMs, isContainerRunning, killContainer } from './container-runner.js';
 import { requestWake } from './request-wake.js';
+import { IDLE_TIMEOUT_MS_RAW } from './config.js';
+import { parseIdleTimeoutMs, resolveIdleTimeoutMs } from './idle-timeout.js';
 import type { Session } from './types.js';
 import type { ContainerState, InboundMailbox, OutboundMailbox } from './mailbox/index.js';
 
-// Absolute idle ceiling for a running container. If the heartbeat file hasn't
-// been touched in this long, the container is either stuck or doing genuinely
-// nothing — kill and restart on the next inbound.
-export const ABSOLUTE_CEILING_MS = 30 * 60 * 1000;
+// How long a running container may go with no output and no tool calls before
+// it is killed. The heartbeat file is touched on every stream event, so this
+// times silence, not turn length: a turn still producing tokens or calling
+// tools never trips it, however long it takes. If nothing has touched the
+// heartbeat in this long the container is either stuck or doing genuinely
+// nothing — kill and restart on the next inbound. 30 minutes unless
+// NANOCLAW_IDLE_TIMEOUT_MS raises it, because a slow local-model backend can
+// legitimately go longer than 30 min between stream events while actively
+// decoding (#3643). Read once at startup: changing it needs a host restart,
+// like every other env var.
+export const IDLE_TIMEOUT_MS = resolveIdleTimeoutMs(IDLE_TIMEOUT_MS_RAW);
+// The operator's explicit setting, or undefined when they set nothing valid.
+// Kept apart from IDLE_TIMEOUT_MS so the claim-stuck tolerance below can honour
+// a deliberate override without the built-in default silently widening it.
+export const IDLE_TIMEOUT_OVERRIDE_MS = parseIdleTimeoutMs(IDLE_TIMEOUT_MS_RAW);
 // Stuck tolerance window applied per 'processing' claim — "did we see any
 // signs of life since this message was claimed?"
 export const CLAIM_STUCK_MS = 60 * 1000;
@@ -53,7 +73,7 @@ const BACKOFF_BASE_MS = 5000;
 
 export type StuckDecision =
   | { action: 'ok' }
-  | { action: 'kill-ceiling'; heartbeatAgeMs: number; ceilingMs: number }
+  | { action: 'kill-idle-timeout'; heartbeatAgeMs: number; idleTimeoutMs: number }
   | { action: 'kill-claim'; messageId: string; claimAgeMs: number; toleranceMs: number };
 
 /**
@@ -71,7 +91,7 @@ export function decideStuckAction(args: {
   const { now, heartbeatMtimeMs, containerStartedAtMs, containerState, claims } = args;
   const declaredBashMs = bashTimeoutMs(containerState);
 
-  // Ceiling check prefers the heartbeat file's mtime. A freshly-spawned
+  // Idle-timeout check prefers the heartbeat file's mtime. A freshly-spawned
   // container hasn't had any SDK activity yet so no heartbeat file exists —
   // if we treated that as infinitely stale we'd kill every container within
   // seconds of spawn. But "no heartbeat file" isn't only a spawn-grace-period
@@ -90,13 +110,21 @@ export function decideStuckAction(args: {
   const effectiveHeartbeatMs = heartbeatMtimeMs !== 0 ? heartbeatMtimeMs : (containerStartedAtMs ?? 0);
   if (effectiveHeartbeatMs !== 0) {
     const heartbeatAge = now - effectiveHeartbeatMs;
-    const ceiling = Math.max(ABSOLUTE_CEILING_MS, declaredBashMs ?? 0);
-    if (heartbeatAge > ceiling) {
-      return { action: 'kill-ceiling', heartbeatAgeMs: heartbeatAge, ceilingMs: ceiling };
+    const idleTimeout = Math.max(IDLE_TIMEOUT_MS, declaredBashMs ?? 0);
+    if (heartbeatAge > idleTimeout) {
+      return { action: 'kill-idle-timeout', heartbeatAgeMs: heartbeatAge, idleTimeoutMs: idleTimeout };
     }
   }
 
-  const tolerance = Math.max(CLAIM_STUCK_MS, declaredBashMs ?? 0);
+  // An operator who raises the idle timeout is telling us this backend goes
+  // quiet for longer. That applies to a claimed message just as much as to the
+  // heartbeat — in fact more so, because the heartbeat is only touched from
+  // inside the provider's stream loop, so a backend still doing prompt
+  // processing has claimed the message and written no heartbeat at all. Left
+  // at a flat 60s this check would kill exactly the containers the raised
+  // timeout was meant to protect. Only the explicit override counts, so an
+  // install that sets nothing keeps the original 60s tolerance untouched.
+  const tolerance = Math.max(CLAIM_STUCK_MS, declaredBashMs ?? 0, IDLE_TIMEOUT_OVERRIDE_MS ?? 0);
   for (const claim of claims) {
     const claimedAt = Date.parse(claim.statusChanged);
     if (Number.isNaN(claimedAt)) continue;
@@ -258,14 +286,14 @@ async function enforceRunningContainerSla(
 
   if (decision.action === 'ok') return;
 
-  if (decision.action === 'kill-ceiling') {
-    log.warn('Killing container past absolute ceiling', {
+  if (decision.action === 'kill-idle-timeout') {
+    log.warn('Killing container — no output or tool calls past the idle timeout', {
       sessionId: session.id,
       heartbeatAgeMs: decision.heartbeatAgeMs,
-      ceilingMs: decision.ceilingMs,
+      idleTimeoutMs: decision.idleTimeoutMs,
     });
-    killContainer(session.id, 'absolute-ceiling');
-    resetStuckProcessingRows(inDb, outDb, session, 'absolute-ceiling');
+    killContainer(session.id, 'idle-timeout');
+    resetStuckProcessingRows(inDb, outDb, session, 'idle-timeout');
     return;
   }
 

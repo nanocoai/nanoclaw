@@ -151,6 +151,27 @@ Three files need to support this feature. See `/add-ollama-provider` for the exa
 
 For personal automation on capable hardware, the tradeoff favors local. For complex multi-step tasks requiring large context or high reliability, Claude is still ahead.
 
+## If Containers Get Killed Mid-Turn
+
+The host sweep kills a container that has produced no output and made no tool
+calls for 30 minutes, on the assumption that a provider emitting nothing for
+that long is stuck. The clock is reset by stream events, so it does not cap how
+long a turn may run — but a local model can genuinely go quiet for longer than
+the default while it decodes a long turn or chews through prompt processing on a
+large context, and the sweep cannot tell that apart from a hang.
+
+The symptom is a container dying mid-turn with `Killing container — no output or
+tool calls past the idle timeout` in `logs/nanoclaw.log`. Give the backend more
+headroom in `.env`, then restart the host:
+
+```bash
+NANOCLAW_IDLE_TIMEOUT_MS=7200000   # 2 hours
+```
+
+The accepted range is 2 minutes to 24 hours. An unparseable or out-of-range
+value is refused with a warning in the log and the 30-minute default is used, so
+check the log after changing it.
+
 ## Reverting to Claude
 
 Remove the `env` and `blockedHosts` keys from `groups/<folder>/container.json`, remove `"model"` from the shared settings file, and restart the service. No rebuild needed.
