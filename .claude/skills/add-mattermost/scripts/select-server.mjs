@@ -12,13 +12,7 @@ function validUrl(value) {
 }
 
 let selection;
-if (mode === 'create') {
-  selection = {
-    base_url: 'http://localhost:8065',
-    config_access: 'managed',
-    mattermost_container: 'nanoclaw-mattermost-mattermost-1',
-  };
-} else if (mode === 'enter' && validUrl(baseUrl)) {
+if (mode === 'enter' && validUrl(baseUrl)) {
   selection = { base_url: baseUrl, config_access: 'unavailable', mattermost_container: 'none' };
 } else if (
   mode === 'use' &&

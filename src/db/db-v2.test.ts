@@ -34,6 +34,8 @@ import {
   deletePendingQuestion,
   getContainerConfig,
   createContainerConfig,
+  ensureContainerConfig,
+  updateContainerConfigScalars,
 } from './index.js';
 
 function now() {
@@ -477,10 +479,22 @@ describe('container configs', () => {
       additional_mounts: '[]',
       cli_scope: 'global',
       timezone: null,
+      speed: null,
       updated_at: now(),
     });
     const row = await getContainerConfig('ag-full');
     expect(row).toBeDefined();
     expect(row!.cli_scope).toBe('global');
+  });
+
+  it('round-trips the speed scalar', async () => {
+    await createAgentGroup({ id: 'ag-speed', name: 'Speed', folder: 'speed', agent_provider: null, created_at: now() });
+    await ensureContainerConfig('ag-speed');
+    await updateContainerConfigScalars('ag-speed', { speed: 'fast' });
+    const row = await getContainerConfig('ag-speed');
+    expect(row!.speed).toBe('fast');
+    await updateContainerConfigScalars('ag-speed', { speed: null });
+    const cleared = await getContainerConfig('ag-speed');
+    expect(cleared!.speed).toBeNull();
   });
 });

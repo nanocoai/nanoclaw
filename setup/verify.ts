@@ -16,6 +16,7 @@ import { inspectCentralDb } from './central-db-inspection.js';
 import { inspectAgentImage, readImageSource } from './lib/registry-state.js';
 import { getPlatform, getServiceManager, hasSystemd, isRoot } from './platform.js';
 import { emitStatus } from './status.js';
+import { readSlackJob, slackJobStatus, type SlackJob } from '../src/community-portal/slack-job.js';
 
 export async function run(_args: string[]): Promise<void> {
   const projectRoot = process.cwd();
@@ -84,8 +85,14 @@ export async function run(_args: string[]): Promise<void> {
         // systemctl not available
       }
     }
-  } else {
-    // Check for nohup PID file
+  }
+
+  // Nohup wrapper (setup/service.ts setupNohupFallback). Reached two ways:
+  // no service manager at all, or systemd is PID 1 but the user instance is
+  // unreachable (`systemctl --user` → "Failed to connect to bus") — the case
+  // service.ts already falls back from. Consult the pid file whenever the
+  // manager branch found nothing, so both detectors agree.
+  if (service === 'not_found') {
     const pidFile = path.join(projectRoot, 'nanoclaw.pid');
     if (fs.existsSync(pidFile)) {
       try {
@@ -215,6 +222,11 @@ export async function run(_args: string[]): Promise<void> {
     configuredChannels.length > 0 &&
     configuredChannels.every((c) => DEFER_WIRE_CHANNELS.has(c));
 
+  // The detached Slack worker applies the channel after foreground setup
+  // releases its checkout lock. No credentials/groups yet is expected here.
+  const slackInstall = slackJobStatus(await readSlackJob(projectRoot));
+  const slackWiringPending = registeredGroups === 0 && canDeferSlackWiring(slackInstall, configuredChannels);
+
   // Determine overall status. The cli-agent step earlier in setup already
   // proved the agent round-trip works; verify is a static health check.
   const status = determineVerifyStatus({
@@ -222,12 +234,15 @@ export async function run(_args: string[]): Promise<void> {
     credentials,
     registeredGroups,
     wiringPending,
+    slackInstall,
+    configuredChannels,
   });
 
   log.info('Verification complete', {
     status,
     channelAuth,
     wiringPending,
+    slackInstall,
     imageSource,
     imageSourceActual: image.source,
     derivedGroups,
@@ -253,7 +268,8 @@ export async function run(_args: string[]): Promise<void> {
     // versions.json. Empty for a locally built image — it has never had one.
     IMAGE_DIGEST: image.registryDigest ?? '',
     DERIVED_GROUPS: derivedGroups,
-    ...(wiringPending ? { WIRING: 'pending_first_dm' } : {}),
+    ...(slackInstall ? { SLACK_INSTALL: slackInstall } : {}),
+    ...(slackWiringPending ? { WIRING: 'pending_slack_install' } : wiringPending ? { WIRING: 'pending_first_dm' } : {}),
     STATUS: status,
     LOG: 'logs/setup.log',
   });
@@ -270,16 +286,29 @@ export async function run(_args: string[]): Promise<void> {
  */
 export const DEFER_WIRE_CHANNELS = new Set(['teams']);
 
+function canDeferSlackWiring(slackInstall: SlackJob['status'] | undefined, configuredChannels: string[]): boolean {
+  return (
+    (slackInstall === 'awaiting_approval' || slackInstall === 'installing') &&
+    configuredChannels.every((c) => c === 'slack' || DEFER_WIRE_CHANNELS.has(c))
+  );
+}
+
 export function determineVerifyStatus(input: {
   service: 'not_found' | 'stopped' | 'running' | 'running_other_checkout';
   credentials: string;
   registeredGroups: number;
   /** Zero groups but every configured channel defers wiring to the first DM. */
   wiringPending?: boolean;
+  slackInstall?: SlackJob['status'];
+  configuredChannels?: string[];
 }): 'success' | 'failed' {
   return input.service === 'running' &&
     input.credentials !== 'missing' &&
-    (input.registeredGroups > 0 || input.wiringPending === true)
+    input.slackInstall !== 'failed' &&
+    input.slackInstall !== 'expired' &&
+    (input.registeredGroups > 0 ||
+      input.wiringPending === true ||
+      canDeferSlackWiring(input.slackInstall, input.configuredChannels ?? []))
     ? 'success'
     : 'failed';
 }

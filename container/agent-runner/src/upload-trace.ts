@@ -1,16 +1,19 @@
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 
 import type { MessageInRow } from './db/messages-in.js';
+import './providers/index.js';
+import './provider-contracts/index.js';
+import { readProviderTrace } from './provider-contracts/realize.js';
 
 /**
- * `/upload-trace` command: upload this session's Claude Code transcript to the user's
+ * `/upload-trace` command: upload this session's transcript to the user's
  * own private `{hf_user}/nanoclaw-traces` dataset, browsable in the HF Agent
- * Trace Viewer. The transcript the Claude provider keeps under
- * `~/.claude/projects/<dir>/<sessionId>.jsonl` is already in the format the
- * viewer auto-detects, so this just locates the newest one and pushes it.
+ * Trace Viewer. The active provider's contract locates the trace
+ * (`history.readTrace`); for Claude that is the newest
+ * `~/.claude/projects/<dir>/<sessionId>.jsonl`, already in the format the
+ * viewer auto-detects, so this just pushes it.
  *
  * Auth is the OneCLI gateway's job: curl goes out through the injected
  * HTTPS_PROXY, which adds the user's HF token. We never see the raw token, and
@@ -29,33 +32,6 @@ export function isUploadTraceCommand(msg: MessageInRow): boolean {
     return false; // non-JSON content is never a command
   }
   return text.toLowerCase().startsWith('/upload-trace');
-}
-
-/** Newest Claude Code transcript jsonl (the current session). */
-function newestTranscript(): string | null {
-  const projects = path.join(os.homedir(), '.claude', 'projects');
-  let best: { p: string; m: number } | null = null;
-  let dirs: string[];
-  try {
-    dirs = fs.readdirSync(projects);
-  } catch {
-    return null;
-  }
-  for (const dir of dirs) {
-    let files: string[];
-    try {
-      files = fs.readdirSync(path.join(projects, dir));
-    } catch {
-      continue;
-    }
-    for (const f of files) {
-      if (!f.endsWith('.jsonl')) continue;
-      const p = path.join(projects, dir, f);
-      const m = fs.statSync(p).mtimeMs;
-      if (!best || m > best.m) best = { p, m };
-    }
-  }
-  return best?.p ?? null;
 }
 
 function curl(args: string[], input?: string): { ok: boolean; out: string } {
@@ -101,9 +77,9 @@ function notSignedInMessage(body: string): string {
   return lines.join('\n');
 }
 
-/** Returns a user-facing status line. Never throws. */
-export function uploadTrace(): string {
-  const file = newestTranscript();
+/** Returns a user-facing status line. Never throws. `providerName` is the session's active provider. */
+export function uploadTrace(providerName: string): string {
+  const file = readProviderTrace(providerName);
   if (!file) return 'No transcript to upload for this session yet.';
 
   // whoami, capturing the body + HTTP status (no -f, so the gateway's error

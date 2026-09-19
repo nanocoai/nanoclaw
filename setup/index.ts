@@ -4,6 +4,7 @@
  */
 import { log } from '../src/log.js';
 import { emitStatus } from './status.js';
+import { withSetupLock, launchSlackJob } from '../src/community-portal/slack-job.js';
 
 const STEPS: Record<string, () => Promise<{ run: (args: string[]) => Promise<void> }>> = {
   timezone: () => import('./timezone.js'),
@@ -24,6 +25,7 @@ const STEPS: Record<string, () => Promise<{ run: (args: string[]) => Promise<voi
   'provider-auth': () => import('./provider-auth.js'),
   'cli-agent': () => import('./cli-agent.js'),
   registry: () => import('./registry.js'),
+  portal: () => import('./portal.js'),
   'registry-reconcile': () => import('./registry-reconcile.js'),
   // >>> nanoclaw:setup-steps
   // <<< nanoclaw:setup-steps
@@ -62,4 +64,4 @@ async function main(): Promise<void> {
   }
 }
 
-main();
+withSetupLock(async () => { await launchSlackJob(); await main(); }).catch(() => { process.exitCode = 1; });

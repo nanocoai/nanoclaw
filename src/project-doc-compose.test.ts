@@ -16,12 +16,18 @@ import {
 import { closeDb, createAgentGroup, getDb, initTestDb, runMigrations } from './db/index.js';
 import { PERSONA_PREPEND_FILE } from './group-persona.js';
 import { log } from './log.js';
-import { composeGroupProjectDoc, DEFAULT_PROJECT_DOC, type ProjectDocSpec } from './project-doc-compose.js';
+import {
+  BASE_INSTRUCTIONS_PATH,
+  composeGroupProjectDoc,
+  DEFAULT_PROJECT_DOC,
+  MEMORY_NOTE_PLACEHOLDER,
+  renderBaseInstructions,
+  type ProjectDocSpec,
+} from './project-doc-compose.js';
 import type { AgentGroup } from './types.js';
 
 const CLAUDE_SPEC: ProjectDocSpec = {
   fileName: 'CLAUDE.md',
-  baseDocPath: path.join('container', 'CLAUDE.md'),
 };
 
 function group(id: string, folder: string): AgentGroup {
@@ -92,7 +98,7 @@ describe('composeGroupProjectDoc delivery', () => {
     // emitted, only the body proves the file was read, and reading the source
     // here means adding a paragraph to it cannot break this test.
     const read = (...p: string[]): string => fs.readFileSync(path.join(process.cwd(), ...p), 'utf-8').trim();
-    expect(doc).toContain(read('container', 'CLAUDE.md'));
+    expect(doc).toContain(renderBaseInstructions(read('container', 'CLAUDE.md')));
     expect(doc).toContain(read('container', 'skills', 'onecli-gateway', 'instructions.md'));
     expect(doc).toContain(read('container', 'agent-runner', 'src', 'mcp-tools', 'cli.instructions.md'));
     expect(doc).toContain(read('container', 'agent-runner', 'src', 'mcp-tools', 'core.instructions.md'));
@@ -292,32 +298,82 @@ describe('composeGroupProjectDoc cli_scope', () => {
 });
 
 describe('composeGroupProjectDoc spec', () => {
-  it('places extra sections after the base document and before the module sections', async () => {
-    const ag = await seed('ag-extra', 'extra-group');
-
-    const doc = await compose(ag, {
-      ...CLAUDE_SPEC,
-      extraSections: [{ name: 'Memory System', body: 'memory pointer body' }],
-    });
-
-    expect(doc.indexOf('# NanoClaw Runtime Contract')).toBeLessThan(doc.indexOf('# Memory System'));
-    expect(doc.indexOf('# Memory System')).toBeLessThan(doc.indexOf('# NanoClaw Module: agents'));
+  // The instruction prose is core-owned canon: with no provider facts the
+  // rendered base must be byte-identical to the template minus its placeholder
+  // paragraph, so the Claude document never changes when facts are added for
+  // other providers.
+  it('renders the canonical base byte-identically when no provider facts are declared', () => {
+    const template = fs.readFileSync(path.join(process.cwd(), BASE_INSTRUCTIONS_PATH), 'utf-8');
+    expect(template.split(MEMORY_NOTE_PLACEHOLDER)).toHaveLength(2);
+    expect(renderBaseInstructions(template)).toBe(template.replace(`\n\n${MEMORY_NOTE_PLACEHOLDER}`, ''));
+    expect(renderBaseInstructions(template)).not.toContain(MEMORY_NOTE_PLACEHOLDER);
   });
 
-  // Tolerated so a partial payload install still spawns, but never silent: an
-  // absent runtime contract is the same shape as the bug this replaced, and it
-  // is what a wrong-cwd host looks like. Red if the warn is dropped.
+  it('renders provider facts as canonical prose in the declared slots', async () => {
+    const ag = await seed('ag-facts', 'facts-group');
+
+    const doc = await compose(ag, {
+      fileName: 'AGENTS.md',
+      instructions: {
+        nativeOverrideFiles: ['AGENTS.local.md', 'AGENTS.override.md'],
+        nativeSkills: {
+          discoveryPath: '/workspace/agent/.agents/skills',
+          sharedSource: '/app/skills',
+          selfAuthoredHome: '~/.codex/skills',
+          persistentRoots: ['~/.codex', '~/.agents'],
+          ruleBearingInlined: true,
+        },
+      },
+    });
+
+    expect(doc).toContain('Do not use `AGENTS.local.md` or `AGENTS.override.md` for memory.');
+    expect(doc).not.toContain(MEMORY_NOTE_PLACEHOLDER);
+    expect(doc).toContain('provider-native skills at `/workspace/agent/.agents/skills`');
+    expect(doc).toContain('`~/.codex/skills/<name>/SKILL.md`');
+    expect(doc).toContain('inlined as `NanoClaw Skill:` sections');
+    expect(doc.indexOf('# NanoClaw Runtime Contract')).toBeLessThan(doc.indexOf('# Native Runtime Skills'));
+    expect(doc.indexOf('# Native Runtime Skills')).toBeLessThan(doc.indexOf('# NanoClaw Module: agents'));
+  });
+
+  it('keeps pre-contract payload base documents and sections working', async () => {
+    const ag = await seed('ag-legacy-spec', 'legacy-spec-group');
+    const baseDocPath = path.join(TEST_ROOT, 'legacy-base.md');
+    fs.writeFileSync(baseDocPath, 'legacy provider instructions');
+
+    const doc = await compose(ag, {
+      fileName: 'AGENTS.md',
+      baseDocPath,
+      extraSections: [{ name: 'Legacy Pointer', body: 'legacy pointer text' }],
+    });
+
+    expect(doc).toContain('# NanoClaw Runtime Contract\n\nlegacy provider instructions');
+    expect(doc).toContain('# Legacy Pointer\n\nlegacy pointer text');
+  });
+
+  // Tolerated so a partial checkout still spawns, but never silent: an absent
+  // runtime contract is the same shape as the bug this replaced, and it is
+  // what a wrong-cwd host looks like. Red if the warn is dropped.
   it('writes the file named by the spec and warns loudly on a missing base document', async () => {
     const ag = await seed('ag-nobase', 'nobase-group');
+    const root = fs.mkdtempSync(path.join(TEST_ROOT, 'nobase-root-'));
+    fs.mkdirSync(path.join(root, 'container'));
+    fs.symlinkSync(path.join(process.cwd(), 'container', 'agent-runner'), path.join(root, 'container', 'agent-runner'));
+    fs.symlinkSync(path.join(process.cwd(), 'container', 'skills'), path.join(root, 'container', 'skills'));
+    const previousCwd = process.cwd();
+    process.chdir(root);
 
-    const doc = await compose(ag, { fileName: 'AGENTS.md', baseDocPath: path.join('container', 'nope.md') });
+    try {
+      const doc = await compose(ag, { fileName: 'AGENTS.md' });
 
-    expect(doc).not.toContain('# NanoClaw Runtime Contract');
-    expect(doc).toContain('# NanoClaw Module: core');
-    expect(log.warn).toHaveBeenCalledWith(
-      'Project document composed without its base document',
-      expect.objectContaining({ file: 'AGENTS.md' }),
-    );
+      expect(doc).not.toContain('# NanoClaw Runtime Contract');
+      expect(doc).toContain('# NanoClaw Module: core');
+      expect(log.warn).toHaveBeenCalledWith(
+        'Project document composed without its base document',
+        expect.objectContaining({ file: 'AGENTS.md' }),
+      );
+    } finally {
+      process.chdir(previousCwd);
+    }
   });
 });
 

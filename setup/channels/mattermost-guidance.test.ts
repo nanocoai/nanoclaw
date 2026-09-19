@@ -1,14 +1,5 @@
-import { execFileSync, spawnSync } from 'node:child_process';
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -18,18 +9,15 @@ import { upsertEnvVar } from '../set-env.js';
 import { channelDmLabel, initialChannelOptions, runInitialChannel } from './initial-setup.js';
 
 const skill = readFileSync('.claude/skills/add-mattermost/SKILL.md', 'utf8');
-const localServer = readFileSync('.claude/skills/add-mattermost/LOCAL_SERVER.md', 'utf8');
-const compose = readFileSync('.claude/skills/add-mattermost/assets/compose.yml', 'utf8');
+const serverSetup = readFileSync('.claude/skills/add-mattermost/SERVER_SETUP.md', 'utf8');
+const fixtureReadme = readFileSync('setup/channels/fixtures/mattermost/README.md', 'utf8');
+const compose = readFileSync('setup/channels/fixtures/mattermost/compose.yml', 'utf8');
 const directives = parseDirectives(skill);
 
 describe('Mattermost bot setup guidance', () => {
   it('distinguishes enabling bot creation from creating the bot', () => {
-    expect(skill).toContain(
-      'System Console → Integrations → Bot Accounts. Turn on Enable Bot Account Creation',
-    );
-    expect(skill).toContain(
-      'Open Product menu → Integrations → Bot Accounts. Select Add Bot Account',
-    );
+    expect(skill).toContain('System Console → Integrations → Bot Accounts. Turn on Enable Bot Account Creation');
+    expect(skill).toContain('Open Product menu → Integrations → Bot Accounts. Select Add Bot Account');
   });
 
   it('requires both team and channel membership', () => {
@@ -40,7 +28,7 @@ describe('Mattermost bot setup guidance', () => {
     expect(initialChannelOptions()).toContainEqual({
       value: 'mattermost',
       label: 'Yes, connect Mattermost',
-      hint: 'use your server or create an evaluation server',
+      hint: 'connect your server or get setup guidance',
     });
     const calls: unknown[][] = [];
     await runInitialChannel('mattermost', 'Ethan', async (...args) => {
@@ -58,93 +46,42 @@ describe('Mattermost bot setup guidance', () => {
     );
   });
 
-  it('requires the operator to choose how a detected server is used', () => {
+  it('selects an existing server without offering NanoClaw-managed installation', () => {
     const choice = directives.find(
       (directive) => directive.kind === 'prompt' && directive.args.includes('server_choice'),
     );
-    const install = directives.find(
-      (directive) => directive.kind === 'prompt' && directive.args.includes('local_install_approval'),
+    const missingServerUrl = directives.find(
+      (directive) => directive.kind === 'prompt' && directive.args.includes('entered_url_new'),
     );
-    expect(choice?.attrs.validate).toBe('^(use|enter|create)$');
-    expect(install?.attrs.validate).toBe('^install$');
+    expect(choice?.attrs.validate).toBe('^(use|enter)$');
+    expect(missingServerUrl?.attrs.when).toBe('discovery=none');
+    expect(directives.some((directive) => directive.args.includes('local_install_approval'))).toBe(false);
+    expect(skill).not.toContain('docker compose');
+    expect(skill).not.toContain('select-server.mjs create');
   });
 
-  it('keeps every evaluation-server command self-contained and preserves shell control flow', () => {
-    const install = directives.find(
-      (directive) => directive.kind === 'run' && directive.body.some((line) => line.includes('for attempt in')),
+  it('offers maintained Mattermost server guidance when discovery finds nothing', () => {
+    const guidance = directives.find(
+      (directive) => directive.kind === 'operator' && directive.attrs.when === 'discovery=none',
     );
-    expect(install?.body).toHaveLength(7);
-    expect(install?.body[0]).toContain('docker info >/dev/null && docker compose version >/dev/null');
-    expect(install?.body).not.toContain('umask 077');
-    expect(install?.body).not.toContain('exit 1');
-
-    const envCommand = install?.body.find((line) => line.includes('MATTERMOST_DB_PASSWORD'));
-    const retryCommand = install?.body.find((line) => line.includes('for attempt in'));
-    expect(envCommand).toContain('{ umask 077;');
-    expect(retryCommand).toContain('done; docker compose');
-    expect(retryCommand).toMatch(/; exit 1$/);
-
-    const root = mkdtempSync(join(tmpdir(), 'nanoclaw-mattermost-shell-'));
-    const bin = join(root, 'bin');
-    const log = join(root, 'docker.log');
-    mkdirSync(join(root, '.nanoclaw/mattermost'), { recursive: true });
-    mkdirSync(bin);
-    const fake = (name: string, body: string) => {
-      const path = join(bin, name);
-      writeFileSync(path, `#!/bin/sh\n${body}\n`);
-      chmodSync(path, 0o755);
-    };
-
-    try {
-      fake('openssl', "printf '0123456789abcdef0123456789abcdef0123456789abcdef'");
-      fake('seq', "printf '1\\n2\\n'");
-      fake('sleep', 'exit 0');
-      fake('docker', 'printf "logs\\n" >> "$MM_TEST_LOG"');
-      fake('curl', 'exit "${MM_CURL_EXIT:-0}"');
-      const env = { ...process.env, PATH: bin, MM_TEST_LOG: log };
-
-      execFileSync('/bin/sh', ['-c', envCommand!], { cwd: root, env });
-      expect(statSync(join(root, '.nanoclaw/mattermost/.env')).mode & 0o777).toBe(0o600);
-
-      execFileSync('/bin/sh', ['-c', retryCommand!], { cwd: root, env: { ...env, MM_CURL_EXIT: '0' } });
-      expect(existsSync(log)).toBe(false);
-
-      const failed = spawnSync('/bin/sh', ['-c', retryCommand!], {
-        cwd: root,
-        env: { ...env, MM_CURL_EXIT: '1' },
-      });
-      expect(failed.status).toBe(1);
-      expect(readFileSync(log, 'utf8')).toBe('logs\n');
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
+    expect(guidance?.body.join(' ')).toContain('https://docs.mattermost.com/deployment-guide/quick-start-evaluation');
+    expect(guidance?.body.join(' ')).toContain('https://docs.mattermost.com/deployment-guide/server/deploy-server');
+    expect(serverSetup).toContain('NanoClaw connects to a Mattermost server');
+    expect(serverSetup).toContain('Mattermost labels this path for testing and evaluation rather than production');
   });
 
-  it('consumes the managed SiteURL state and journals removal for the refreshed base URL', () => {
-    const managed = directives.find(
-      (directive) => directive.kind === 'operator' && directive.attrs.when === 'config_access=managed',
-    );
+  it('journals removal for the selected settings', () => {
     const baseUrlUpdate = directives.find(
-      (directive) =>
-        directive.kind === 'run' && directive.body.some((line) => line.includes('--key MATTERMOST_BASE_URL')),
+      (directive) => directive.kind === 'run' && directive.body.some((line) => line.includes('scripts/configure.ts')),
     );
     const envSet = directives.find((directive) => directive.kind === 'env-set');
-    expect(managed).toBeDefined();
-    expect(baseUrlUpdate?.attrs.remove).toBe(
-      '.claude/skills/add-mattermost/scripts/remove-base-url.mjs',
-    );
-    expect(envSet?.body.some((line) => line.startsWith('MATTERMOST_BASE_URL='))).toBe(false);
+    expect(baseUrlUpdate?.attrs.remove).toBe('.claude/skills/add-mattermost/scripts/remove-config.mjs');
+    expect(envSet).toBeUndefined();
 
     const root = mkdtempSync(join(tmpdir(), 'nanoclaw-mattermost-remove-'));
     try {
-      writeFileSync(
-        join(root, '.env'),
-        'MATTERMOST_BASE_URL=http://localhost:8065\nMATTERMOST_BOT_TOKEN=keep-me\n',
-      );
-      execFileSync(
-        join(process.cwd(), '.claude/skills/add-mattermost/scripts/remove-base-url.mjs'),
-        { cwd: root },
-      );
+      writeFileSync(join(root, '.env'), 'MATTERMOST_BASE_URL=http://localhost:8065\nMATTERMOST_BOT_TOKEN=keep-me\n');
+      execFileSync(join(process.cwd(), '.claude/skills/add-mattermost/scripts/remove-base-url.mjs'), { cwd: root });
       expect(readFileSync(join(root, '.env'), 'utf8')).toBe('MATTERMOST_BOT_TOKEN=keep-me\n');
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -156,9 +93,7 @@ describe('Mattermost bot setup guidance', () => {
     expect(skill).toContain('/api/v4/config/client?format=old');
     expect(skill).toContain('ServiceSettings.AllowCorsFrom');
     expect(directives.some((directive) => directive.attrs.when === 'config_access=docker')).toBe(true);
-    expect(skill).toContain(
-      'setup/index.ts --step set-env -- --key MATTERMOST_BASE_URL --value "{{base_url}}"',
-    );
+    expect(skill).toContain('scripts/configure.ts "{{base_url}}" "{{bot_token}}" "{{callback_url}}"');
   });
 
   it('binds the generic wizard owner handle to the resolved Mattermost user ID', () => {
@@ -194,10 +129,13 @@ describe('Mattermost bot setup guidance', () => {
     }
   });
 
-  it('keeps the evaluation server canonical and declarative', () => {
+  it('keeps the real-server E2E fixture outside the user-facing skill', () => {
+    expect(fixtureReadme).toContain('development and E2E only');
+    expect(fixtureReadme.replace(/\s+/g, ' ')).toContain(
+      'The `/add-mattermost` skill does not install, start, or manage it',
+    );
     expect(compose).toContain('MM_SERVICESETTINGS_SITEURL: "http://localhost:8065"');
     expect(compose).not.toContain('MM_SERVICESETTINGS_ALLOWCORSFROM');
-    expect(localServer).toContain('Keep `WebsocketURL` blank');
-    expect(localServer).toContain('/api/v4/config/client?format=old');
+    expect(skill).not.toContain('setup/channels/fixtures/mattermost');
   });
 });

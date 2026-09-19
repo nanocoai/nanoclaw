@@ -58,6 +58,13 @@ export interface ProviderContainerContext {
   selectedSkills: string[];
   /** `process.env` at spawn time — pull passthrough values from here. */
   hostEnv: NodeJS.ProcessEnv;
+  /**
+   * Mixed-version handshake. Present only when this host loaded a declaration
+   * and will realize its surfaces. Updated legacy callbacks keep returning env
+   * but suppress their old filesystem/mount work when this is true. Old hosts
+   * omit the field, so refreshed payloads retain their old behavior.
+   */
+  coreOwnsProviderSurfaces?: true;
 }
 
 export interface ProviderContainerContribution {

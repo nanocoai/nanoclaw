@@ -38,11 +38,45 @@ import { createSession } from '../../db/sessions.js';
 import { dispatch } from '../dispatch.js';
 import { ensureContainerConfig, getContainerConfig } from '../../db/container-configs.js';
 import { restartAgentGroupContainers } from '../../container-restart.js';
+import { configFromDb } from '../../container-config.js';
+import type { ContainerConfig } from '../../container-config.js';
 // Side-effect import: registers the `groups-*` commands (including delete).
 import './groups.js';
+// Side-effect import: registers Claude's host contract (the `--speed` vocabulary source).
+import '../../provider-contracts/index.js';
+import {
+  PROVIDER_HOST_CONTRACT_SEAM_VERSION,
+  registerProviderHostContract,
+} from '../../provider-contracts/registry.js';
+
+/** A provider whose only speed tier is one Claude never declared. */
+const TURBO_PROVIDER = 'turbo-test-provider';
+registerProviderHostContract(TURBO_PROVIDER, {
+  seamVersion: PROVIDER_HOST_CONTRACT_SEAM_VERSION,
+  projectDocument: { fileName: 'AGENTS.md', containerPath: '/workspace/agent/AGENTS.md', mountClass: 'group-state' },
+  stateVolumes: [],
+  skillBackings: [],
+  skillViews: [],
+  files: [],
+  inference: { speedTiers: ['turbo'] },
+});
+/** A provider with a host contract but no inference declaration. */
+const TIERLESS_PROVIDER = 'tierless-test-provider';
+registerProviderHostContract(TIERLESS_PROVIDER, {
+  seamVersion: PROVIDER_HOST_CONTRACT_SEAM_VERSION,
+  projectDocument: { fileName: 'AGENTS.md', containerPath: '/workspace/agent/AGENTS.md', mountClass: 'group-state' },
+  stateVolumes: [],
+  skillBackings: [],
+  skillViews: [],
+  files: [],
+});
 
 function now(): string {
   return new Date().toISOString();
+}
+
+function errorMessage(res: Awaited<ReturnType<typeof dispatch>>): string | undefined {
+  return res.ok ? undefined : res.error.message;
 }
 
 async function count(sql: string, ...params: unknown[]): Promise<number> {
@@ -267,7 +301,7 @@ describe('groups CLI delete cascades dependent rows (#2525)', () => {
   });
 });
 
-describe('groups config add-mount / remove-mount (host-only)', () => {
+describe('groups config (host-only)', () => {
   beforeEach(async () => {
     if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
     fs.mkdirSync(TEST_DIR, { recursive: true });
@@ -304,5 +338,103 @@ describe('groups config add-mount / remove-mount (host-only)', () => {
     );
     expect(rm.ok).toBe(true);
     expect(JSON.parse((await getContainerConfig(GID))!.additional_mounts)).toEqual([]);
+  });
+
+  describe("--speed validates against the tiers the group's provider declares", () => {
+    const GID = 'ag-speed';
+    const speedOf = async (): Promise<string | null> => (await getContainerConfig(GID))!.speed;
+    const setSpeed = (speed: string, extra: Record<string, unknown> = {}) =>
+      dispatch(
+        { id: `speed-${speed}`, command: 'groups-config-update', args: { id: GID, speed, ...extra } },
+        { caller: 'host' },
+      );
+
+    beforeEach(async () => {
+      await createAgentGroup({ id: GID, name: 's', folder: 's', agent_provider: null, created_at: now() });
+      await ensureContainerConfig(GID);
+    });
+
+    it('accepts each tier Claude declares for a group on the default provider', async () => {
+      for (const speed of ['standard', 'fast']) {
+        expect((await setSpeed(speed)).ok).toBe(true);
+        expect(await speedOf()).toBe(speed);
+      }
+    });
+
+    it('rejects an undeclared tier, names the provider and its tiers, and writes nothing', async () => {
+      await setSpeed('fast');
+      const rejected = await setSpeed('turbo');
+      expect(rejected.ok).toBe(false);
+      expect(errorMessage(rejected)).toBe(
+        '--speed "turbo" is not a speed tier of provider "claude" (declared: standard, fast)',
+      );
+      expect(await speedOf()).toBe('fast');
+    });
+
+    it('clears to NULL on "" for any provider', async () => {
+      await setSpeed('fast');
+      expect((await setSpeed('')).ok).toBe(true);
+      expect(await speedOf()).toBeNull();
+
+      await dispatch(
+        { id: 'p', command: 'groups-config-update', args: { id: GID, provider: TIERLESS_PROVIDER } },
+        { caller: 'host' },
+      );
+      expect((await setSpeed('')).ok).toBe(true);
+      expect(await speedOf()).toBeNull();
+    });
+
+    it('rejects every non-empty value for a provider with no host contract', async () => {
+      await dispatch(
+        { id: 'p', command: 'groups-config-update', args: { id: GID, provider: 'no-such-provider' } },
+        { caller: 'host' },
+      );
+      for (const speed of ['standard', 'fast', 'turbo']) {
+        const rejected = await setSpeed(speed);
+        expect(rejected.ok).toBe(false);
+        expect(errorMessage(rejected)).toBe(
+          'provider "no-such-provider" declares no speed tiers; --speed accepts only "" (clear)',
+        );
+      }
+      expect(await speedOf()).toBeNull();
+    });
+
+    it('rejects every non-empty value for a provider whose contract declares no inference', async () => {
+      await dispatch(
+        { id: 'p', command: 'groups-config-update', args: { id: GID, provider: TIERLESS_PROVIDER } },
+        { caller: 'host' },
+      );
+      const rejected = await setSpeed('fast');
+      expect(rejected.ok).toBe(false);
+      expect(errorMessage(rejected)).toBe(
+        `provider "${TIERLESS_PROVIDER}" declares no speed tiers; --speed accepts only "" (clear)`,
+      );
+      expect(await speedOf()).toBeNull();
+    });
+
+    it('validates --provider X --speed Y against X and passes a provider-specific tier through to container.json', async () => {
+      // Claude does not know `turbo`, so the new provider must be the one consulted.
+      const switched = await setSpeed('turbo', { provider: TURBO_PROVIDER });
+      expect(switched.ok).toBe(true);
+      const row = (await getContainerConfig(GID))!;
+      expect(row.provider).toBe(TURBO_PROVIDER);
+      expect(row.speed).toBe('turbo');
+
+      // Stored → materialized: the tier lands in container.json verbatim, and
+      // the legacy `fastMode` mirror is written only for `fast`.
+      const group = { id: GID, name: 's', folder: 's', agent_provider: null, created_at: now() };
+      const materialized = JSON.parse(JSON.stringify(configFromDb(row, group))) as ContainerConfig;
+      expect(materialized.speed).toBe('turbo');
+      expect(Object.keys(materialized)).not.toContain('fastMode');
+
+      // And the other direction: switching to Claude in the same command re-validates against Claude.
+      const back = await setSpeed('turbo', { provider: 'claude' });
+      expect(back.ok).toBe(false);
+      expect(errorMessage(back)).toBe(
+        '--speed "turbo" is not a speed tier of provider "claude" (declared: standard, fast)',
+      );
+      expect((await getContainerConfig(GID))!.provider).toBe(TURBO_PROVIDER);
+      expect(await speedOf()).toBe('turbo');
+    });
   });
 });

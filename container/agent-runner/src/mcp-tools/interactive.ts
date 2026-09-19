@@ -5,10 +5,12 @@
  * with a question card, then polls messages_in for the response.
  */
 import { AjvJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/ajv';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 import { findQuestionResponse, markCompleted } from '../db/messages-in.js';
 import { writeMessageOut } from '../db/messages-out.js';
-import { getSessionRouting } from '../db/session-routing.js';
+import { getSessionRouting, resolveDestinationThread } from '../db/session-routing.js';
+import { getCurrentReplyRoute } from '../db/session-state.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
 
@@ -20,8 +22,18 @@ function generateId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+/**
+ * Cards thread like send_message / send_file (see resolveDestinationThread),
+ * except that the bound thread is the last resort where the send tools use
+ * none: it is what a per-thread session should stay in.
+ */
 function routing() {
-  return getSessionRouting();
+  const session = getSessionRouting();
+  const thread =
+    session.channel_type && session.platform_id
+      ? resolveDestinationThread(session.channel_type, session.platform_id, getCurrentReplyRoute())
+      : null;
+  return { ...session, thread_id: thread?.threadId ?? session.thread_id };
 }
 
 /**
@@ -95,10 +107,6 @@ function err(text: string) {
   return { content: [{ type: 'text' as const, text: `Error: ${text}` }], isError: true };
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 export const askUserQuestion: McpToolDefinition = {
   tool: {
     name: 'ask_user_question',
@@ -132,7 +140,8 @@ export const askUserQuestion: McpToolDefinition = {
       required: ['title', 'question', 'options'],
     },
   },
-  async handler(args) {
+  async handler(args, context) {
+    if (context?.signal.aborted) return err('Question cancelled');
     const title = args.title as string;
     const question = args.question as string;
     const rawOptions = args.options as unknown[];
@@ -175,6 +184,7 @@ export const askUserQuestion: McpToolDefinition = {
     // Poll for response in inbound.db (host writes the response there)
     const deadline = Date.now() + timeout;
     while (Date.now() < deadline) {
+      if (context?.signal.aborted) return err('Question cancelled');
       const response = findQuestionResponse(questionId);
 
       if (response) {
@@ -186,7 +196,12 @@ export const askUserQuestion: McpToolDefinition = {
         return ok(parsed.selectedOption);
       }
 
-      await sleep(1000);
+      try {
+        await sleep(1000, undefined, { signal: context?.signal });
+      } catch (error) {
+        if (context?.signal.aborted) return err('Question cancelled');
+        throw error;
+      }
     }
 
     log(`ask_user_question timeout: ${questionId}`);

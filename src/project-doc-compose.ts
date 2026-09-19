@@ -35,19 +35,92 @@ interface ProjectDocSection {
   droppable: boolean;
 }
 
+/**
+ * Typed provider variables rendered into the canonical instruction template.
+ * The template prose is core-owned (`container/CLAUDE.md` is the canon);
+ * providers supply only the facts below — paths, filenames, and flags — never
+ * their own instruction text, so every provider's agent reads the same ideas.
+ */
+export interface ProviderInstructionFacts {
+  /**
+   * Provider-native override files agents must not use for memory storage
+   * (e.g. files the provider's own runtime auto-loads). Rendered as one
+   * canonical sentence inside the Memory section.
+   */
+  nativeOverrideFiles?: readonly string[];
+  /**
+   * Provider-native skill discovery, rendered as the canonical runtime-skills
+   * section. Absent when the provider's runtime discovers the shared skills
+   * without document guidance.
+   */
+  nativeSkills?: {
+    /** Where the selected runtime skills appear inside the container. */
+    discoveryPath: string;
+    /** The read-only shared skill source the entries point back to. */
+    sharedSource: string;
+    /** Where agent-authored skills go, e.g. `~/.codex/skills`. */
+    selfAuthoredHome: string;
+    /** The only roots where skills persist and are discovered. */
+    persistentRoots: readonly string[];
+    /** Whether rule-bearing skills arrive inlined as sections of this document. */
+    ruleBearingInlined?: boolean;
+  };
+}
+
 /** Everything that differs between providers. The composition itself does not. */
 export interface ProjectDocSpec {
   /** File written into the group directory, e.g. `CLAUDE.md`. */
   fileName: string;
-  /** Shared base document, relative to the project root. A missing file is not an error. */
-  baseDocPath: string;
-  /**
-   * Provider-owned blocks, emitted after the base document and before the
-   * capability sections. Never droppable, which is why they carry no flag.
-   */
+  /** Provider variables for the canonical instruction template. */
+  instructions?: ProviderInstructionFacts;
+  /** @deprecated Pre-contract payload input; new contracts use the core-owned canon. */
+  baseDocPath?: string;
+  /** @deprecated Pre-contract payload input; new contracts use typed instruction facts. */
   extraSections?: { name: string; body: string }[];
   /** Hard byte cap. Undefined means no cap and no degradation ladder. */
   maxBytes?: number;
+}
+
+/** The canonical instruction template, relative to the project root. */
+export const BASE_INSTRUCTIONS_PATH = path.join('container', 'CLAUDE.md');
+
+/** Placeholder inside the canon's Memory section for the provider override-files note. */
+export const MEMORY_NOTE_PLACEHOLDER = '{{provider-memory-note}}';
+
+/**
+ * Render the canonical base instructions with the provider's memory note
+ * substituted (or the placeholder stripped without a trace). The no-facts
+ * render is byte-identical to the template minus the placeholder paragraph.
+ */
+export function renderBaseInstructions(template: string, facts?: ProviderInstructionFacts): string {
+  const files = facts?.nativeOverrideFiles ?? [];
+  const note =
+    files.length > 0 ? `Do not use ${files.map((file) => `\`${file}\``).join(' or ')} for memory.` : undefined;
+  return template.replace(`\n\n${MEMORY_NOTE_PLACEHOLDER}`, note ? `\n\n${note}` : '');
+}
+
+/**
+ * Render the canonical runtime-skills section from the provider's declared
+ * discovery facts. One prose for every provider; only the paths differ.
+ */
+export function renderNativeSkillsSection(
+  facts?: ProviderInstructionFacts,
+): { name: string; body: string } | undefined {
+  const skills = facts?.nativeSkills;
+  if (!skills) return undefined;
+  const roots = skills.persistentRoots.map((root) => `\`${root}\``).join(' and ');
+  return {
+    name: 'Native Runtime Skills',
+    body: [
+      `Selected NanoClaw runtime skills are available as provider-native skills at \`${skills.discoveryPath}\`.`,
+      `Each skill directory contains a \`SKILL.md\` with its trigger description plus any supporting files, and points to the read-only shared skill source under \`${skills.sharedSource}\`.`,
+      'Use skill discovery to load these skills only when their descriptions match the task.' +
+        (skills.ruleBearingInlined
+          ? ' A skill whose rules must hold before the task is recognised ships an `instructions.md` instead, and those arrive inlined as `NanoClaw Skill:` sections of this document.'
+          : ''),
+      `Skills YOU author or install yourself go in \`${skills.selfAuthoredHome}/<name>/SKILL.md\` — persistent across sessions and discovered automatically. Never write skills elsewhere: paths outside ${roots} are ephemeral or not discovered.`,
+    ].join('\n\n'),
+  };
 }
 
 /**
@@ -63,7 +136,6 @@ const CLAUDE_PROJECT_DOC_MAX_BYTES = 4 * 1024 * 1024;
 /** The spec for any provider that has not declared its own agent surfaces. */
 export const DEFAULT_PROJECT_DOC: ProjectDocSpec = {
   fileName: 'CLAUDE.md',
-  baseDocPath: path.join('container', 'CLAUDE.md'),
   maxBytes: CLAUDE_PROJECT_DOC_MAX_BYTES,
 };
 
@@ -114,14 +186,15 @@ export async function composeGroupProjectDoc(group: AgentGroup, groupDir: string
   const persona = readGroupPersona(groupDir);
   if (persona) push('Persona', persona);
 
-  const baseDoc = path.resolve(process.cwd(), spec.baseDocPath);
+  const legacySpec = spec.baseDocPath !== undefined;
+  const baseDoc = path.resolve(process.cwd(), spec.baseDocPath ?? BASE_INSTRUCTIONS_PATH);
   if (fs.existsSync(baseDoc)) {
-    push(BASE_DOC_SECTION, fs.readFileSync(baseDoc, 'utf-8'));
+    const template = fs.readFileSync(baseDoc, 'utf-8');
+    push(BASE_DOC_SECTION, legacySpec ? template : renderBaseInstructions(template, spec.instructions));
   } else {
-    // Tolerated (a partial payload install has no base document yet) but never
-    // silent: losing the runtime contract with no signal is the exact shape of
-    // the bug this composer replaced, and it is also what a wrong-cwd host
-    // looks like.
+    // Tolerated (a partial checkout has no template yet) but never silent:
+    // losing the runtime contract with no signal is the exact shape of the bug
+    // this composer replaced, and it is also what a wrong-cwd host looks like.
     log.warn('Project document composed without its base document', {
       file: spec.fileName,
       group: group.name,
@@ -129,7 +202,10 @@ export async function composeGroupProjectDoc(group: AgentGroup, groupDir: string
     });
   }
 
-  for (const extra of spec.extraSections ?? []) push(extra.name, extra.body);
+  for (const section of spec.extraSections ?? []) push(section.name, section.body);
+
+  const nativeSkills = renderNativeSkillsSection(spec.instructions);
+  if (nativeSkills) push(nativeSkills.name, nativeSkills.body);
 
   // Module instructions — every MCP/CLI module shipping a sibling
   // `<name>.instructions.md`, describing how to use that module's tools.

@@ -3,9 +3,9 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './mailbox/sqlite/connection.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { processQuery } from './poll-loop.js';
-import type { AgentQuery, ProviderEvent } from './providers/types.js';
+import type { AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
 
-// Adversarial verification of the one-door contract for emitsMidTurnText
+// Adversarial verification of the one-door contract for mid-turn delivery
 // providers: mid-turn streaming is the SINGLE content door. The result door
 // NEVER writes content to messages_out (error results excepted) — its only
 // other job is the nudge decision: a turn that delivered nothing (no door
@@ -206,37 +206,93 @@ describe('multi-segment turns: result overlap never re-delivers', () => {
 // ── Error and interrupted turns ──
 
 describe('error and interrupted turns', () => {
-  it('error result whose block never streamed (errors[] shape), nothing sent mid-turn: no write, nudge fires', async () => {
+  it('records an unstreamed error block as failed without retrying native work', async () => {
     seedDest();
     async function* events(): AsyncGenerator<ProviderEvent> {
       yield { type: 'init', continuation: 's1' };
       yield { type: 'text', text: 'partial progress narration, unwrapped' };
       // The claude provider builds error-result text from the SDK's errors[]
       // field — content that NEVER streamed. The result door still does not
-      // send it as a block; with nothing delivered this turn the nudge asks
-      // for a proper re-send instead.
+      // send it as a block. With nothing sent, surface a failure notice while
+      // keeping the failure status and avoiding another native request.
       yield { type: 'result', text: '<message to="discord-main">Run aborted: quota.</message>', isError: true };
     }
     const { query, pushes } = makeStubQuery(events());
+    const exchanges: ProviderExchange[] = [];
 
-    await processQuery(query, CHAT_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined, true);
+    await processQuery(
+      query,
+      CHAT_ROUTING,
+      ['m1'],
+      'claude',
+      (exchange) => exchanges.push(exchange),
+      'prompt',
+      undefined,
+      true,
+    );
 
-    expect(deliveredTexts()).toEqual([]);
-    expect(nudges(pushes)).toHaveLength(1);
+    expect(deliveredTexts()).toEqual(['The agent run failed. Check the logs for details.']);
+    expect(pushes).toHaveLength(0);
+    expect(exchanges).toHaveLength(1);
+    expect(exchanges[0].status).toBe('error');
   });
 
-  it('a bare (blockless) error result still surfaces via deliverErrorResult — the errors exception', async () => {
+  it.each(['stream', 'tool'])('does not replay a wrapped error result after prior %s delivery', async (delivery) => {
+    seedDest();
+    const block = '<message to="discord-main">Sent before failure.</message>';
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      if (delivery === 'stream') yield { type: 'text', text: block };
+      else {
+        const { writeMessageOut } = await import('./db/messages-out.js');
+        await writeMessageOut({
+          id: 'mcp-before-error',
+          kind: 'chat',
+          platform_id: 'chan-1',
+          channel_type: 'discord',
+          thread_id: null,
+          content: JSON.stringify({ text: 'Sent before failure.' }),
+        });
+      }
+      yield { type: 'result', text: `${block}\n\nBackend failed.`, isError: true };
+    }
+    const { query, pushes } = makeStubQuery(events());
+    const exchanges: ProviderExchange[] = [];
+
+    await processQuery(
+      query,
+      CHAT_ROUTING,
+      ['m1'],
+      'claude',
+      (exchange) => exchanges.push(exchange),
+      'prompt',
+      undefined,
+      true,
+    );
+
+    expect(deliveredTexts()).toEqual(['Sent before failure.', 'The agent run failed. Check the logs for details.']);
+    expect(pushes).toHaveLength(0);
+    expect(exchanges).toHaveLength(1);
+    expect(exchanges[0].status).toBe('error');
+  });
+
+  it.each([false, true])('a bare error still surfaces after prior progress: %s', async (progress) => {
     seedDest();
     const errText = 'Spending limit reached. Add your own key at https://example.com/keys';
     async function* events(): AsyncGenerator<ProviderEvent> {
       yield { type: 'init', continuation: 's1' };
+      if (progress) yield { type: 'text', text: '<message to="discord-main">Progress before failure.</message>' };
       yield { type: 'result', text: errText, isError: true };
     }
     const { query, pushes } = makeStubQuery(events());
 
     await processQuery(query, CHAT_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined, true);
 
-    expect(deliveredTexts()).toEqual([errText]);
+    expect(deliveredTexts()).toEqual(
+      progress
+        ? ['Progress before failure.', 'The agent run failed. Check the logs for details.']
+        : ['The agent run failed. Check the logs for details.'],
+    );
     expect(pushes).toHaveLength(0);
   });
 
@@ -254,7 +310,7 @@ describe('error and interrupted turns', () => {
     ).rejects.toThrow('SDK stream died');
 
     // The mid-turn write is durable — an interrupted turn cannot claw it back.
-    expect(deliveredTexts()).toEqual(['Sent before the crash.']);
+    expect(deliveredTexts()).toEqual(['Sent before the crash.', 'The agent run failed. Check the logs for details.']);
   });
 });
 

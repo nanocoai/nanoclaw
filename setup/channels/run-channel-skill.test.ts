@@ -624,3 +624,21 @@ describe('companionSkillPresent (in-tree presence check)', () => {
     rmSync(root, { recursive: true, force: true });
   });
 });
+
+it('background Slack setup refuses to report ready when a required companion is missing', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'rcs-background-'));
+  try {
+    mkdirSync(join(root, 'src/channels'), { recursive: true });
+    writeFileSync(join(root, 'src/channels/index.ts'), '// barrel\n');
+    writeFileSync(join(root, '.env'), '');
+    writeFileSync(join(root, 'package.json'), '{"name":"scratch"}');
+    const wire = vi.fn(async () => true);
+    await expect(runChannelSkill('slack', 'User', {
+      projectRoot: root, agentName: 'Nova', role: 'owner', requireCompanions: true,
+      inputs: { connection: 'provisioned', bot_token: 'xoxb-test', app_token: 'xapp-test', owner_handle: 'U123456789' },
+      exec: async command => command.includes('auth.test') ? '@bot in Test' : command.includes('conversations.open') ? 'slack:D123456789' : '',
+      resolveRemote: () => 'origin', wire,
+    })).rejects.toThrow('companion installation needs attention');
+    expect(wire).not.toHaveBeenCalled();
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

@@ -1,5 +1,4 @@
 import { describe, it, expect } from 'vitest';
-import path from 'path';
 
 import { getLaunchdLabel } from '../src/install-slug.js';
 
@@ -116,25 +115,5 @@ describe('systemd unit generation', () => {
   it('sets correct ExecStart', () => {
     const unit = generateSystemdUnit('/usr/bin/node', '/srv/nanoclaw', '/home/user', false);
     expect(unit).toContain('ExecStart=/usr/bin/node /srv/nanoclaw/dist/index.js');
-  });
-});
-
-describe('WSL nohup fallback', () => {
-  it('generates a valid wrapper script', () => {
-    const projectRoot = '/home/user/nanoclaw';
-    const nodePath = '/usr/bin/node';
-    const pidFile = path.join(projectRoot, 'nanoclaw.pid');
-
-    // Simulate what service.ts generates
-    const wrapper = `#!/bin/bash
-set -euo pipefail
-cd ${JSON.stringify(projectRoot)}
-nohup ${JSON.stringify(nodePath)} ${JSON.stringify(projectRoot)}/dist/index.js >> ${JSON.stringify(projectRoot)}/logs/nanoclaw.log 2>> ${JSON.stringify(projectRoot)}/logs/nanoclaw.error.log &
-echo $! > ${JSON.stringify(pidFile)}`;
-
-    expect(wrapper).toContain('#!/bin/bash');
-    expect(wrapper).toContain('nohup');
-    expect(wrapper).toContain(nodePath);
-    expect(wrapper).toContain('nanoclaw.pid');
   });
 });

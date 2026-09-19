@@ -3,6 +3,8 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
+import type { ProviderOptions } from './types.js';
+
 // `fastMode` is a Settings member, not a query option, so the provider has to
 // hand it to the SDK through `options.settings`. The failure this pins is the
 // quiet one: passing it as a bare option typechecks nowhere and would simply
@@ -23,7 +25,9 @@ mock.module('@anthropic-ai/claude-agent-sdk', () => ({
   },
 }));
 
-const { ClaudeProvider } = await import('./claude.js');
+await import('./index.js');
+await import('../provider-contracts/index.js');
+const { createProvider } = await import('./factory.js');
 const { MEMORY_SESSION_HOOK } = await import('../memory/session-hook.js');
 
 let tmp: string;
@@ -42,8 +46,8 @@ afterEach(() => {
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
-async function drive(options: ConstructorParameters<typeof ClaudeProvider>[0]): Promise<void> {
-  const provider = new ClaudeProvider(options);
+async function drive(options: ProviderOptions): Promise<void> {
+  const provider = createProvider('claude', options);
   provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
   const q = provider.query({ prompt: 'hi', cwd: tmp });
   for await (const _ of q.events) {
@@ -53,7 +57,7 @@ async function drive(options: ConstructorParameters<typeof ClaudeProvider>[0]): 
 
 describe('fast mode reaches the SDK through settings', () => {
   it('sends settings.fastMode when enabled', async () => {
-    await drive({ fastMode: true });
+    await drive({ speed: 'fast' });
     expect(lastOptions?.settings).toEqual({ fastMode: true });
   });
 
@@ -62,13 +66,13 @@ describe('fast mode reaches the SDK through settings', () => {
     expect(lastOptions && 'settings' in lastOptions).toBe(false);
   });
 
-  it('sends no settings key when explicitly false', async () => {
-    await drive({ fastMode: false });
+  it('sends no settings key for standard speed', async () => {
+    await drive({ speed: 'standard' });
     expect(lastOptions && 'settings' in lastOptions).toBe(false);
   });
 
   it('leaves the settingSources chain untouched either way', async () => {
-    await drive({ fastMode: true });
+    await drive({ speed: 'fast' });
     expect(lastOptions?.settingSources).toEqual(['project', 'user', 'local']);
     await drive({});
     expect(lastOptions?.settingSources).toEqual(['project', 'user', 'local']);

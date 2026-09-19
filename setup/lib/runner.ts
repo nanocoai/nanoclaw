@@ -373,16 +373,16 @@ export async function fail(stepName: string, msg: string, hint?: string, rawLogP
   if (hint) p.log.message(k.dim(hint));
   p.log.message(k.dim('Logs: logs/setup.log · Raw: logs/setup-steps/'));
 
-  const ranFix = await offerClaudeOnFailure({ stepName, msg, hint, rawLogPath });
+  const assisted = await offerClaudeOnFailure({ stepName, msg, hint, rawLogPath });
 
-  // If the user just ran a Claude-suggested fix, offer to resume the flow
-  // at the step that failed instead of aborting. We re-exec via spawnSync
+  // Returning from assistance does not prove that the failure was repaired.
+  // Offer to verify by resuming the failed step. We re-exec via spawnSync
   // and pass NANOCLAW_SKIP with every step that already completed so the
   // child skips them and picks up where we left off.
-  if (ranFix) {
+  if (assisted) {
     const retry = ensureAnswer(
       await p.confirm({
-        message: `Fix applied. Retry the ${stepName} step?`,
+        message: `Retry the ${stepName} step to check whether the problem is resolved?`,
         initialValue: true,
       }),
     );

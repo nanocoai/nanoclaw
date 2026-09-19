@@ -1,4 +1,10 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
+# The BuildKit frontend above is pinned by digest, so a build fetches it by
+# content address and never asks Docker Hub to resolve the `1.7` tag first. The
+# tag lookup is the HEAD request that returned 500 and took two registry-skills
+# legs down on 2026-09-07 with the code untouched. Resolved with
+# `crane digest docker/dockerfile:1.7` (docker buildx imagetools inspect agrees).
+# Bump the tag and digest together.
 # NanoClaw Agent Container
 # Runs Claude Agent SDK in isolated Linux VM with browser automation.
 #
