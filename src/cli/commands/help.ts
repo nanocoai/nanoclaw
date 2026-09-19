@@ -30,6 +30,10 @@ register({
 
     const lines: string[] = [];
 
+    lines.push('Note: `ncl health` is a special local command — see `ncl --help`. It works');
+    lines.push('even when the host process behind this connection is down.');
+    lines.push('');
+
     if (cliScope === 'group') {
       lines.push('CLI scope: group (--id and group args are auto-filled to your agent group)');
       lines.push('');
