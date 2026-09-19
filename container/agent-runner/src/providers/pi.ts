@@ -7,6 +7,7 @@ import {
   SessionManager,
   type AgentSession,
   type AgentSessionEvent,
+  type ModelRuntime,
   type ToolDefinition,
 } from '@earendil-works/pi-coding-agent';
 
@@ -207,11 +208,19 @@ export class PiProvider implements AgentProvider {
 
   private readonly mcpServers: Record<string, McpServerConfig>;
   private readonly env: Record<string, string | undefined>;
+  /**
+   * Optional test seam, mirroring the OpenCode/Codex providers' second
+   * constructor argument: a caller-supplied model/auth runtime handed straight
+   * to createAgentSession so tests can script model turns. Production wiring
+   * never passes it and pi builds its own runtime from agentDir.
+   */
+  private readonly modelRuntime?: ModelRuntime;
   private memorySessionHook?: PiMemorySessionHook;
 
-  constructor(options: ProviderOptions = {}) {
+  constructor(options: ProviderOptions = {}, modelRuntime?: ModelRuntime) {
     this.mcpServers = options.mcpServers ?? {};
     this.env = options.env ?? {};
+    this.modelRuntime = modelRuntime;
   }
 
   /**
@@ -246,9 +255,11 @@ export class PiProvider implements AgentProvider {
     // is the session file's absolute path, and it has to survive container
     // restarts (poll-loop persists it in the DB; the file must still exist).
     const sessionsDir = path.join(cwd, '.pi', 'sessions');
-    // pi's global config dir — also kept inside the RW workspace so pi never
-    // needs a writable HOME to read its (possibly absent) settings/models.
-    const agentDir = path.join(cwd, '.pi', 'agent');
+    // pi's global config dir. The host-side provider config (src/providers/pi.ts)
+    // mounts a per-session seeded agentDir at /pi-agent and points PI_AGENT_DIR
+    // at it — prefer that when present. Fallback (bare/test environments):
+    // inside the RW workspace so pi never needs a writable HOME.
+    const agentDir = process.env.PI_AGENT_DIR || path.join(cwd, '.pi', 'agent');
 
     const systemInstructions = input.systemContext?.instructions;
     const originalPrompt = input.prompt;
@@ -295,6 +306,14 @@ export class PiProvider implements AgentProvider {
       resumePath: string | undefined,
     ): Promise<{ session: AgentSession; continuation: string }> => {
       const tools = await loadCustomTools();
+      // Injected runtime (tests) wins; production lets pi resolve auth/models
+      // from agentDir. Spread keeps the payload identical when unset.
+      const sessionOptions = {
+        cwd,
+        agentDir,
+        customTools: tools,
+        ...(self.modelRuntime ? { modelRuntime: self.modelRuntime } : {}),
+      };
       let created: AgentSession;
       if (resumePath) {
         if (!fs.existsSync(resumePath)) {
@@ -306,16 +325,11 @@ export class PiProvider implements AgentProvider {
         } catch (err) {
           throw new Error(`pi session file corrupt: ${resumePath}: ${errorMessage(err)}`);
         }
-        created = (await createAgentSession({ cwd, agentDir, sessionManager: manager, customTools: tools })).session;
+        created = (await createAgentSession({ ...sessionOptions, sessionManager: manager })).session;
       } else {
         fs.mkdirSync(sessionsDir, { recursive: true });
         created = (
-          await createAgentSession({
-            cwd,
-            agentDir,
-            sessionManager: SessionManager.create(cwd, sessionsDir),
-            customTools: tools,
-          })
+          await createAgentSession({ ...sessionOptions, sessionManager: SessionManager.create(cwd, sessionsDir) })
         ).session;
       }
       const file = created.sessionFile;

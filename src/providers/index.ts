@@ -7,3 +7,4 @@
 
 import './codex.js';
 import './opencode.js';
+import './pi.js';
