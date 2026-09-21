@@ -34,10 +34,12 @@ matches nothing, remove the dependencies:
 pnpm uninstall ws @types/ws
 ```
 
-## 5. Optional local server
+## 5. Legacy NanoClaw evaluation server
 
-The evaluation server is deliberately not removed automatically because its
-volumes contain Mattermost data. Stopping it keeps that data:
+Current NanoClaw setup does not create or manage a Mattermost server. Older
+versions could create one at `.nanoclaw/mattermost/compose.yml`. If that file
+exists, it is deliberately not removed automatically because its volumes can
+contain Mattermost data. Stopping it keeps that data:
 
 ```bash
 docker compose -f .nanoclaw/mattermost/compose.yml down

@@ -87,7 +87,7 @@ A provider install skill (`/add-codex`, `/add-opencode`) also declares how the s
 | `nanoclaw-provider` | lowercase kebab-case provider name (`codex`) | descriptor identity; `setup/providers/install.ts` passes it to the contract verifier as the provider that must be declared |
 | `nanoclaw-provider-label` | display text | the provider picker in `setup/auto.ts` (`askAgentProviderChoice`) |
 | `nanoclaw-provider-hint` | display text | the picker's hint column (suffixed "— installs now") |
-| `nanoclaw-provider-offered` | `'true'` \| `'false'` (quoted strings) | `listInstallableProviderDescriptors` — only `'true'` reaches the picker's "installs now" list and `--step provider-auth <name>`. `'false'` marks a skill-only provider that never appears in setup (OpenCode today) |
+| `nanoclaw-provider-offered` | `'true'` \| `'false'` (quoted strings) | `listInstallableProviderDescriptors` — only `'true'` reaches the picker's "installs now" list and `--step provider-auth <name>`. `'false'` marks a skill-only provider that never appears in setup |
 | `nanoclaw-provider-image` | `local-required` \| `hardened-compatible` | `providerImagePolicy` — whether picking the provider forces a locally built sandbox image instead of the pre-built one |
 
 The skill directory itself is the install skill setup applies in-process (`applyProviderSkill`); there is no key for it, and a leftover `nanoclaw-provider-install-skill` is rejected. `nanoclaw-provider-label` and `nanoclaw-provider-hint` must match the `label`/`hint` of the provider's `setup/providers/<name>.ts` entry once it is installed — the descriptor labels the offer before install, the entry labels it after, and `setup/providers/skill-descriptor.test.ts` fails on drift.
@@ -99,6 +99,20 @@ A skill-only provider (`offered: 'false'`) must not copy a `setup/providers/<nam
 **Merge order.** The provider payload branch must carry the files a provider skill copies (including the `provider-contracts/<name>.ts` declarations and the `<name>.conformance.test.ts`) before the trunk change that lists them lands, otherwise `/add-<name>` fails at its copy step; `scripts/test-registry-skills.ts --combined-providers` fails CI when trunk carries provider skills whose payload is not on the registry branch.
 
 ---
+
+### Provider setup help
+
+Provider-owned setup help belongs in the installed setup entry's existing
+`offerFailureAssist` hook. Post-install verification uses `runInstallCheck`.
+A helper that runs before payload installation is an optional setup extension,
+not a requirement of the runtime contract. See [OpenCode host help](provider-host-maintenance.md).
+
+The setup installer skips the skill's build, test, and external command fences
+and runs the provider contract verifier. For optional host-helper coverage in
+that path, name the installed test `scripts/<provider>-host.test.ts`, using a
+lowercase kebab-case provider name. The verifier discovers these files and runs
+them with its host checks. Also include the test in the skill's prose and
+`nc:run effect:test` command so ordinary skill application runs it.
 
 ## Integration points
 

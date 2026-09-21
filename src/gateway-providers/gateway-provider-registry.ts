@@ -42,6 +42,8 @@ export interface GatewayProviderInput {
   key: SessionKey;
   /** The agent group's display name — gateway-side agent registration wants it. */
   groupName: string;
+  /** The runtime container this session runs in, as the driver named it; providers key per-session resources on it. */
+  containerName: string;
   /**
    * The selected driver's capabilities. `sharedNetworkNamespace` decides the
    * proxy URL shape a contribution puts in the agent's env; a provider that

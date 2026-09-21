@@ -4,6 +4,19 @@ Last updated: 2026-07-10
 
 ## What's Done
 
+### Linux fallback service startup
+
+When systemd is absent or its user session is unavailable, the service setup
+step writes and runs `start-nanoclaw.sh`. It reports success after the process
+is alive and `data/ncl.sock` accepts connections (up to 30 seconds). Startup
+failure makes the setup step fail; inspect `logs/nanoclaw.error.log`.
+
+Re-running the launcher stops the recorded host from this checkout and waits
+up to 10 seconds for it to exit before starting a replacement. A stale PID
+belonging to another process is ignored. The launcher uses Linux `setsid` to
+detach the host from the setup terminal so it survives that terminal exiting.
+It does not provide automatic restart or boot persistence.
+
 ### Two-DB Split (session DB write isolation)
 - Session DB split into `inbound.db` (host-owned) and `outbound.db` (container-owned)
 - Each file has exactly one writer — eliminates SQLite write contention across host-container mount

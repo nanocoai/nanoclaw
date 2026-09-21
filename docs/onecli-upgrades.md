@@ -81,3 +81,21 @@ onecli --version                                            # verify: must match
 ```
 
 To roll back, run the same block after reverting `versions.json` (or checking out the previous NanoClaw version). The CLI is stateless — vault data lives in the gateway, so swapping the binary in either direction loses nothing.
+
+## Certificate and credential-stub files
+
+The OneCLI provider fetches fresh typed container configuration on every spawn
+and stages its CA, optional combined system trust bundle, and credential stubs
+under `data/onecli/`. It mounts individual files read-only; the directory stays
+private to the host user (mode `0700`), and credential stubs use mode `0600`.
+The SDK's shared temporary paths are not used, so clearing `/tmp` or restarting
+WSL does not remove the bind sources. Existing temporary files or directories
+are left untouched.
+
+Files are named by kind and content hash. Unchanged configuration reuses the
+same files; a rotated CA or stub gets a new path so existing sessions retain
+their original bytes. Old versions are retained because another session may
+still mount them. Do not remove these files while agent containers are running.
+An unexpected file type, owner, permissions, or content stops the spawn instead
+of replacing existing data. A gateway fetch or staging failure also stops the
+spawn; the provider never falls back to a cached credential configuration.

@@ -459,7 +459,7 @@ describe('poll loop — exchange hook (onExchangeComplete)', () => {
 });
 
 describe('poll loop — provider error recovery', () => {
-  it('writes error to outbound and continues loop on provider throw', async () => {
+  it('writes a safe error notice to outbound and continues loop on provider throw', async () => {
     insertMessage('m1', { sender: 'Alice', text: 'trigger error' }, { platformId: 'chan-1', channelType: 'discord' });
 
     const provider = new ThrowingProvider('API rate limit exceeded');
@@ -471,8 +471,8 @@ describe('poll loop — provider error recovery', () => {
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(JSON.parse(out[0].content).text).toContain('Error:');
-    expect(JSON.parse(out[0].content).text).toContain('API rate limit exceeded');
+    expect(JSON.parse(out[0].content).text).toBe('The agent run failed. Check the logs for details.');
+    expect(out[0].content).not.toContain('API rate limit exceeded');
 
     // Input message should be marked completed despite the error
     const pending = getPendingMessages();
@@ -542,10 +542,11 @@ describe('poll loop — stale session recovery', () => {
     await waitFor(() => getUndeliveredMessages().length > 0, 2000);
     controller.abort();
 
-    // Error was written to outbound
+    // A safe notice reaches the user; the provider diagnostic stays private.
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(JSON.parse(out[0].content).text).toContain('Error:');
+    expect(JSON.parse(out[0].content).text).toBe('The agent run failed. Check the logs for details.');
+    expect(out[0].content).not.toContain('session not found');
 
     // Continuation was cleared (isSessionInvalid returned true)
     expect(getContinuation('mock')).toBeUndefined();

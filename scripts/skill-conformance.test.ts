@@ -186,6 +186,7 @@ describe('retired mechanisms', () => {
     const offenders = SKILL_DOCS.filter((d) => d.text.includes('data/env')).map((d) => d.doc);
     expect(offenders).toEqual([]);
   });
+
 });
 
 describe('add-dial ↔ add-dial-tool agent-scope duplication', () => {

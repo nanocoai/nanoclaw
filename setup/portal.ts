@@ -90,8 +90,7 @@ function skippedSignIn(error: unknown): void {
 /**
  * The not-enrolled path: start the device flow without opening its page,
  * start the stage anonymously with the user code, print and open the single
- * portal link (plus the code and the provider's page on their own lines for
- * headless users), wait for the sign-in, persist it, then register and claim.
+ * portal link, wait for the sign-in, persist it, then register and claim.
  * Declined, expired or failed → null; the stage is skipped and nothing else
  * happens.
  */
@@ -106,15 +105,12 @@ async function signInThroughPortal(client: SetupClient, stage: PortalStage, name
   const verificationUri = flow.device.verificationUriComplete ?? flow.device.verificationUri;
   const setup = await client.start(stage, name, { verification: { userCode: flow.device.userCode, verificationUri } });
   p.log.info(
-    'Open the link below to sign in and approve this terminal. Setup continues automatically as soon as your perk is enabled.',
+    'Open the link below to sign in, approve this terminal, and choose your perk. Setup continues automatically once you decide.',
   );
-  // Keep the URL unwrapped so it stays clickable and copyable. The code and
-  // the sign-in page are only for a machine without a browser: the portal page
-  // opens that sign-in itself.
+  // Keep the URL unwrapped so it stays clickable and copyable. It is the only
+  // link: the portal page carries the user code and opens the sign-in itself,
+  // from any device. A bare sign-in link would leave the perk undecided.
   process.stdout.write(`\n${setup.url}\n\n`);
-  process.stdout.write(
-    `No browser on this machine? Sign in from another device instead:\nCode: ${flow.device.userCode}\n${verificationUri}\n\n`,
-  );
   openUrl(setup.url);
   try {
     await finishDeviceFlow(flow);

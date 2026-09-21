@@ -198,8 +198,9 @@ describe('browser setup handoffs', () => {
     });
     expect(mock.open).toHaveBeenCalledExactlyOnceWith('https://portal.example.test/?setup=test');
     expect(stdout.join('')).toContain('https://portal.example.test/?setup=test\n');
-    expect(stdout.join('')).toContain('ABCD-EFGH\n');
-    expect(stdout.join('')).toContain(`${DEVICE_FLOW.device.verificationUriComplete}\n`);
+    // One link only: a bare sign-in link signs in and then leaves the perk undecided.
+    expect(stdout.join('')).not.toContain('ABCD-EFGH');
+    expect(stdout.join('')).not.toContain(DEVICE_FLOW.device.verificationUriComplete);
     expect(stdout.join('')).not.toContain('device-secret');
     expect(mock.deviceFinish).toHaveBeenCalledExactlyOnceWith(DEVICE_FLOW);
     expect(mock.open.mock.invocationCallOrder[0]).toBeLessThan(mock.deviceFinish.mock.invocationCallOrder[0]);

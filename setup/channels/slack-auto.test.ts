@@ -190,8 +190,8 @@ describe('provisioning-core bootstrap', () => {
     expect(exec.mock.calls.map(([c]) => c)).toEqual([
       'git remote',
       'git ls-remote --heads origin channels',
-      'git fetch origin channels',
-      `git show origin/channels:${PROVISIONING_MODULE} > ${PROVISIONING_MODULE}`,
+      "git fetch 'origin' '+refs/heads/channels:refs/remotes/origin/channels'",
+      expect.stringContaining(`git show 'refs/remotes/origin/channels:${PROVISIONING_MODULE}'`),
     ]);
     // the parent directory exists before the git show redirect runs
     expect(fs.existsSync(path.join(root, 'src/provisioning'))).toBe(true);

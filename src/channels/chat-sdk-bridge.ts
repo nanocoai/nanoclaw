@@ -38,6 +38,11 @@ interface GatewayAdapter extends Adapter {
   ): Promise<Response>;
 }
 
+/** Adapter that can expose authenticated transport liveness to host status. */
+interface ConnectionAwareAdapter extends Adapter {
+  isConnected?(): boolean;
+}
+
 /** Reply context extracted from a platform's raw message. */
 export interface ReplyContext {
   text: string;
@@ -973,7 +978,8 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     },
 
     isConnected() {
-      return true;
+      const probe = (adapter as ConnectionAwareAdapter).isConnected;
+      return probe ? probe.call(adapter) : true;
     },
 
     async subscribe(_platformId: string, threadId: string) {
