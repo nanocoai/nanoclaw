@@ -371,6 +371,20 @@ export function resolveSharedMode(assistantHasOwnNumber: string | undefined): bo
 }
 
 /**
+ * Normalize a Baileys group subject into the name the host stores on
+ * `messaging_groups.name`. Groups only — a DM JID has no subject, and
+ * returning the phone number there would put a bare number on the
+ * registration card. Blank/whitespace subjects collapse to null so the
+ * card falls back to its generic wording.
+ *
+ * Exported for unit testing; the adapter's resolveChannelName wraps it.
+ */
+export function resolveGroupSubject(platformId: string, subject: string | null | undefined): string | null {
+  if (!platformId.endsWith('@g.us')) return null;
+  return subject?.trim() || null;
+}
+
+/**
  * Shared vs dedicated number changes every default, so the declaration is
  * computed once at module load from the adapter's own env:
  *  - shared (ASSISTANT_HAS_OWN_NUMBER unset/false): the operator's personal
@@ -1090,6 +1104,33 @@ registerChannelAdapter('whatsapp', {
 
       isConnected() {
         return connected;
+      },
+
+      /**
+       * Resolve a group's subject for the host UI.
+       *
+       * `requestChannelApproval` asks the adapter for a name before building
+       * the unknown-channel registration card, and persists it on
+       * `messaging_groups.name`. Without this hook the name is never learned:
+       * the card reads "a whatsapp channel" and the row stays nameless in
+       * ncl, the dashboard and destination listings.
+       *
+       * The 24h syncGroupMetadata sweep does not cover this — it reports
+       * subjects through `onMetadata`, which the host only logs.
+       *
+       * Name only, deliberately not `resolveConversation`: the richer hook
+       * also drives the card's conversation type, title and question text.
+       */
+      async resolveChannelName(platformId: string): Promise<string | null> {
+        if (!connected) return null;
+        if (!platformId.endsWith('@g.us')) return null;
+        try {
+          const metadata = await getNormalizedGroupMetadata(platformId);
+          return resolveGroupSubject(platformId, metadata?.subject);
+        } catch (err) {
+          log.debug('Failed to resolve WhatsApp group name', { platformId, err });
+          return null;
+        }
       },
 
       async syncConversations(): Promise<ConversationInfo[]> {
