@@ -84,17 +84,15 @@ export interface HandoffContext {
  */
 export async function offerClaudeHandoff(ctx: HandoffContext): Promise<boolean> {
   if (!isClaudeUsable()) {
-    p.log.warn(
-      brandBody("Claude isn't installed yet — can't hand you off here. Finish setup first, then retry."),
-    );
+    p.log.warn(brandBody("Claude isn't installed yet — can't hand you off here. Finish setup first, then retry."));
     return false;
   }
 
   note(
     [
       "I'm handing you off to Claude in interactive mode.",
-      "It has the context of where you are in setup.",
-      "",
+      'It has the context of where you are in setup.',
+      '',
       k.dim("Type /exit (or press Ctrl-D) when you're ready to come back to setup."),
     ].join('\n'),
     'Handing off to Claude',
@@ -117,20 +115,9 @@ let handoffSessionStarted = false;
  * the setup driver.
  */
 function spawnInteractiveClaude(prompt: string): Promise<boolean> {
-  const sessionArgs = handoffSessionStarted
-    ? ['--resume', handoffSessionId]
-    : ['--session-id', handoffSessionId];
+  const sessionArgs = handoffSessionStarted ? ['--resume', handoffSessionId] : ['--session-id', handoffSessionId];
   return new Promise<boolean>((resolve) => {
-    const child = spawn(
-      'claude',
-      [
-        prompt,
-        '--permission-mode',
-        'auto',
-        ...sessionArgs,
-      ],
-      { stdio: 'inherit' },
-    );
+    const child = spawn('claude', [prompt, '--permission-mode', 'auto', ...sessionArgs], { stdio: 'inherit' });
     child.on('close', () => {
       handoffSessionStarted = true;
       p.log.success(brandBody("Back from Claude. Let's continue."));
@@ -251,10 +238,7 @@ function buildHandoffPrompt(ctx: HandoffContext): string {
  *
  * Drop-in replacement for `offerClaudeAssist` at failure call sites.
  */
-export async function offerClaudeOnFailure(
-  ctx: AssistContext,
-  projectRoot: string = process.cwd(),
-): Promise<boolean> {
+export async function offerClaudeOnFailure(ctx: AssistContext, projectRoot: string = process.cwd()): Promise<boolean> {
   if (process.env.NANOCLAW_SKIP_CLAUDE_ASSIST === '1') return false;
 
   const provider = getPickedProvider();
@@ -291,10 +275,7 @@ export async function offerClaudeOnFailure(
  * Returns `true` if Claude was launched (the user may have fixed
  * things during the session), `false` if skipped/declined/unavailable.
  */
-async function offerFailureHandoff(
-  ctx: AssistContext,
-  projectRoot: string,
-): Promise<boolean> {
+async function offerFailureHandoff(ctx: AssistContext, projectRoot: string): Promise<boolean> {
   if (process.env.NANOCLAW_SKIP_CLAUDE_ASSIST === '1') return false;
   if (!(await ensureClaudeReady(projectRoot))) return false;
 
@@ -308,9 +289,9 @@ async function offerFailureHandoff(
 
   note(
     [
-      "Launching Claude to help debug this failure.",
-      "It has the context of what went wrong.",
-      "",
+      'Launching Claude to help debug this failure.',
+      'It has the context of what went wrong.',
+      '',
       k.dim("Type /exit (or press Ctrl-D) when you're ready to come back to setup."),
     ].join('\n'),
     'Handing off to Claude',
@@ -325,9 +306,7 @@ function buildFailurePrompt(ctx: AssistContext, projectRoot: string): string {
     ...BIG_PICTURE_FILES,
     ...stepRefs,
     'logs/setup.log',
-    ctx.rawLogPath
-      ? path.relative(projectRoot, ctx.rawLogPath)
-      : 'logs/setup-steps/',
+    ctx.rawLogPath ? path.relative(projectRoot, ctx.rawLogPath) : 'logs/setup-steps/',
   ].filter((v, i, a) => a.indexOf(v) === i);
 
   const lines: string[] = [

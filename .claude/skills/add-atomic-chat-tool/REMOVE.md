@@ -15,11 +15,11 @@ rm -f container/agent-runner/src/atomic-chat-mcp-stdio.ts \
 
 In `container/agent-runner/src/index.ts`, remove the `atomic_chat: { … }` entry from the `mcpServers` object (leave `nanoclaw` and any other entries).
 
-## 3. Revert the host-side edits in `src/container-runner.ts`
+## 3. Revert the host-side edits
 
-- Remove the `import { atomicChatEnvArgs } from './atomic-chat-env.js';` import.
-- Remove the `args.push(...atomicChatEnvArgs());` line that follows the `TZ` env line.
-- Restore the `container.stderr` logger to its single-line `log.debug(line, …)` form (remove the `[ATOMIC]` info-level branch).
+- Remove the `import { atomicChatEnv } from './atomic-chat-env.js';` import.
+- Remove the `...atomicChatEnv(),` spread from the `contributedEnv` literal in `composeSessionSpec`.
+- In `src/drivers/docker-driver.ts`, restore the driver's stderr handler to its single `log.debug(line, …)` form (remove the `[ATOMIC]` info-level branch; keep the stderr-tail lines).
 
 ## 4. Remove env vars
 

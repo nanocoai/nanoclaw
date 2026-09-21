@@ -97,9 +97,7 @@ export function flushStdin(windowMs = 50): Promise<void> {
  * the result through `ensureAnswer(...)` the same way they do for
  * `p.select`.
  */
-export async function brightSelect<T>(
-  opts: BrightSelectOptions<T>,
-): Promise<T | symbol> {
+export async function brightSelect<T>(opts: BrightSelectOptions<T>): Promise<T | symbol> {
   const { message, options, initialValue } = opts;
 
   await flushStdin();
@@ -117,13 +115,9 @@ export async function brightSelect<T>(
       lines.push(`${headerIcon(st)}  ${message}`);
 
       if (st === 'submit' || st === 'cancel') {
-        const selected =
-          options.find((o) => o.value === this.value)?.label ??
-          String(this.value ?? '');
+        const selected = options.find((o) => o.value === this.value)?.label ?? String(this.value ?? '');
         const shown =
-          st === 'cancel'
-            ? styleText(['strikethrough', 'dim'], selected)
-            : styleText('dim', brandBody(selected));
+          st === 'cancel' ? styleText(['strikethrough', 'dim'], selected) : styleText('dim', brandBody(selected));
         lines.push(`${grayBar}  ${shown}`);
         return lines.join('\n');
       }
@@ -133,9 +127,7 @@ export async function brightSelect<T>(
         const label = opt.label ?? String(opt.value);
         const hint = opt.hint ? ` ${styleText('dim', `(${opt.hint})`)}` : '';
         const isActive = idx === cursor;
-        const marker = isActive
-          ? styleText('green', BULLET_ACTIVE)
-          : styleText('dim', BULLET_INACTIVE);
+        const marker = isActive ? styleText('green', BULLET_ACTIVE) : styleText('dim', BULLET_INACTIVE);
         const shownLabel = isActive ? brandBody(label) : label;
         lines.push(`${bar}  ${marker} ${shownLabel}${hint}`);
       });

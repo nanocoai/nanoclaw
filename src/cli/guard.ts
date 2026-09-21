@@ -45,7 +45,7 @@ export function commandGuardSpec(cmd: CommandDef): GuardedActionSpec {
   };
 }
 
-function commandDecide(cmd: CommandDef, input: GuardInput) {
+async function commandDecide(cmd: CommandDef, input: GuardInput) {
   const { actor } = input;
   if (actor.kind === 'host') return ALLOW('host caller (trusted socket)');
   if (actor.kind !== 'agent') return DENY('CLI commands accept host or agent callers only.');
@@ -59,7 +59,7 @@ function commandDecide(cmd: CommandDef, input: GuardInput) {
   }
 
   const args = input.payload;
-  const cliScope = getContainerConfig(actor.agentGroupId)?.cli_scope ?? 'group';
+  const cliScope = (await getContainerConfig(actor.agentGroupId))?.cli_scope ?? 'group';
 
   if (cliScope === 'disabled') {
     return DENY('CLI access is disabled for this agent group.');

@@ -23,6 +23,7 @@ import type { Migration } from './index.js';
 export const migration012: Migration = {
   version: 12,
   name: 'channel-registration',
+  sqliteOnly: true,
   up: (db: Database.Database) => {
     // 1. Add denied_at to messaging_groups. Idempotent guard in case the
     //    column was added by some other path before this migration ran.

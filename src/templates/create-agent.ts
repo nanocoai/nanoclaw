@@ -86,7 +86,7 @@ export function markPluginServers(
  * Returns the created group + the reader's report; the caller wires the group
  * to a channel as usual.
  */
-export function createAgentFromTemplate(ref: string, opts?: CreateAgentOptions): CreateAgentResult {
+export async function createAgentFromTemplate(ref: string, opts?: CreateAgentOptions): Promise<CreateAgentResult> {
   const dir = resolveLocalTemplate(ref);
   const tpl = parseTemplate(dir);
   // The group doesn't exist yet, so resolveGroupTimezone can't apply — the
@@ -105,9 +105,9 @@ export function createAgentFromTemplate(ref: string, opts?: CreateAgentOptions):
   if (fs.existsSync(resolveGroupFolderPath(folder))) folder = `${folder}-${randomUUID().slice(0, 8)}`;
 
   const group: AgentGroup = { id, name, folder, agent_provider: null, created_at: new Date().toISOString() };
-  createAgentGroup(group);
-  ensureContainerConfig(id);
-  if (timezone) updateContainerConfigScalars(id, { timezone });
+  await createAgentGroup(group);
+  await ensureContainerConfig(id);
+  if (timezone) await updateContainerConfigScalars(id, { timezone });
 
   // group-init.ts owns the mkdir at first spawn, but it isn't called here — so we
   // create the dir ourselves to land instructions.prepend.md + context/.
@@ -140,7 +140,7 @@ export function createAgentFromTemplate(ref: string, opts?: CreateAgentOptions):
     fs.mkdirSync(path.join(groupDir, 'plugin-data', tpl.name, sub), { recursive: true });
   }
 
-  updateContainerConfigJson(id, 'mcp_servers', markPluginServers(tpl.mcpServers, tpl.name));
+  await updateContainerConfigJson(id, 'mcp_servers', markPluginServers(tpl.mcpServers, tpl.name));
 
   // Per-group skills overlay — keyed by group id, never shared. Copied through
   // the hardened copier like everything else that leaves the plugin.
@@ -151,7 +151,7 @@ export function createAgentFromTemplate(ref: string, opts?: CreateAgentOptions):
 
   // Template tasks require explicit activation. The later welcome flow can
   // present these exact paused tasks and resume only the ones the user accepts.
-  for (const task of tasks.values()) createScheduledTask(id, task, { status: 'paused' });
+  for (const task of tasks.values()) await createScheduledTask(id, task, { status: 'paused' });
 
   for (const line of tpl.report) log.warn('Template reader notice', { ref, notice: line });
 

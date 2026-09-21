@@ -38,12 +38,15 @@ registerResource({
         const addedBy = (args.added_by as string) ?? null;
         if (!userId) throw new Error('--user is required');
         if (!groupId) throw new Error('--group is required');
-        getDb()
-          .prepare(
-            `INSERT OR IGNORE INTO agent_group_members (user_id, agent_group_id, added_by, added_at)
-             VALUES (?, ?, ?, ?)`,
-          )
-          .run(userId, groupId, addedBy, new Date().toISOString());
+        await getDb().run(
+          `INSERT INTO agent_group_members (user_id, agent_group_id, added_by, added_at)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT (user_id, agent_group_id) DO NOTHING`,
+          userId,
+          groupId,
+          addedBy,
+          new Date().toISOString(),
+        );
         return { user_id: userId, agent_group_id: groupId };
       },
     },
@@ -55,9 +58,11 @@ registerResource({
         const groupId = args.group as string;
         if (!userId) throw new Error('--user is required');
         if (!groupId) throw new Error('--group is required');
-        const result = getDb()
-          .prepare('DELETE FROM agent_group_members WHERE user_id = ? AND agent_group_id = ?')
-          .run(userId, groupId);
+        const result = await getDb().run(
+          'DELETE FROM agent_group_members WHERE user_id = ? AND agent_group_id = ?',
+          userId,
+          groupId,
+        );
         if (result.changes === 0) throw new Error('member not found');
         return { removed: { user_id: userId, agent_group_id: groupId } };
       },

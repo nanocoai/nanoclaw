@@ -26,13 +26,14 @@ vi.mock('./db/sessions.js', () => ({
 const mockWriteSessionMessage = vi.fn();
 vi.mock('./session-manager.js', () => ({
   writeSessionMessage: (...args: unknown[]) => mockWriteSessionMessage(...args),
-  openInboundDb: () => ({}),
+  withExistingMailboxSession: (
+    _agentGroupId: string,
+    _sessionId: string,
+    action: (mailbox: { countDueMessages(): number }) => unknown,
+  ) => action({ countDueMessages: () => mockCountDueMessages() }),
 }));
 
 const mockCountDueMessages = vi.fn((..._args: unknown[]) => 0);
-vi.mock('./db/session-db.js', () => ({
-  countDueMessages: (...args: unknown[]) => mockCountDueMessages(...args),
-}));
 
 import { restartAgentGroupContainers } from './container-restart.js';
 
@@ -49,60 +50,60 @@ function makeSession(id: string, agentGroupId: string, status = 'active') {
 // --- Tests ---
 
 describe('restartAgentGroupContainers', () => {
-  it('skips sessions without a running container', () => {
+  it('skips sessions without a running container', async () => {
     mockGetSessionsByAgentGroup.mockReturnValue([makeSession('s1', 'g1'), makeSession('s2', 'g1')]);
     mockIsContainerRunning.mockReturnValue(false);
 
-    const count = restartAgentGroupContainers('g1', 'test');
+    const count = await restartAgentGroupContainers('g1', 'test');
 
     expect(count).toBe(0);
     expect(mockKillContainer).not.toHaveBeenCalled();
     expect(mockWriteSessionMessage).not.toHaveBeenCalled();
   });
 
-  it('skips non-active sessions', () => {
+  it('skips non-active sessions', async () => {
     mockGetSessionsByAgentGroup.mockReturnValue([makeSession('s1', 'g1', 'closed')]);
     mockIsContainerRunning.mockReturnValue(true);
 
-    const count = restartAgentGroupContainers('g1', 'test');
+    const count = await restartAgentGroupContainers('g1', 'test');
 
     expect(count).toBe(0);
     expect(mockKillContainer).not.toHaveBeenCalled();
   });
 
-  it('kills running containers and returns count', () => {
+  it('kills running containers and returns count', async () => {
     mockGetSessionsByAgentGroup.mockReturnValue([makeSession('s1', 'g1'), makeSession('s2', 'g1')]);
     mockIsContainerRunning.mockImplementation((id) => id === 's1');
 
-    const count = restartAgentGroupContainers('g1', 'test');
+    const count = await restartAgentGroupContainers('g1', 'test');
 
     expect(count).toBe(1);
     expect(mockKillContainer).toHaveBeenCalledTimes(1);
     expect(mockKillContainer).toHaveBeenCalledWith('s1', 'test', undefined);
   });
 
-  it('does not write wake message when wakeMessage is omitted', () => {
+  it('does not write wake message when wakeMessage is omitted', async () => {
     mockGetSessionsByAgentGroup.mockReturnValue([makeSession('s1', 'g1')]);
     mockIsContainerRunning.mockReturnValue(true);
 
-    restartAgentGroupContainers('g1', 'test');
+    await restartAgentGroupContainers('g1', 'test');
 
     expect(mockWriteSessionMessage).not.toHaveBeenCalled();
     expect(mockKillContainer).toHaveBeenCalledWith('s1', 'test', undefined);
   });
 
-  it('writes on_wake message and passes onExit callback when wakeMessage is provided', () => {
+  it('writes on_wake message and passes onExit callback when wakeMessage is provided', async () => {
     mockGetSessionsByAgentGroup.mockReturnValue([makeSession('s1', 'g1')]);
     mockIsContainerRunning.mockReturnValue(true);
 
-    restartAgentGroupContainers('g1', 'test', 'Resuming.');
+    await restartAgentGroupContainers('g1', 'test', 'Resuming.');
 
     // Should write an on-wake message
     expect(mockWriteSessionMessage).toHaveBeenCalledTimes(1);
     const [agentGroupId, sessionId, msg] = mockWriteSessionMessage.mock.calls[0];
     expect(agentGroupId).toBe('g1');
     expect(sessionId).toBe('s1');
-    expect(msg.onWake).toBe(1);
+    expect(msg.onWake).toBe(true);
     expect(JSON.parse(msg.content).text).toBe('Resuming.');
 
     // Should pass an onExit callback to killContainer
@@ -111,28 +112,28 @@ describe('restartAgentGroupContainers', () => {
     expect(typeof onExit).toBe('function');
   });
 
-  it('onExit callback calls wakeContainer with refreshed session', () => {
+  it('onExit callback calls wakeContainer with refreshed session', async () => {
     mockGetSessionsByAgentGroup.mockReturnValue([makeSession('s1', 'g1')]);
     mockIsContainerRunning.mockReturnValue(true);
     const freshSession = makeSession('s1', 'g1');
     mockGetSession.mockReturnValue(freshSession);
 
-    restartAgentGroupContainers('g1', 'test', 'Resuming.');
+    await restartAgentGroupContainers('g1', 'test', 'Resuming.');
 
     // Simulate container exit by calling the onExit callback
     const onExit = mockKillContainer.mock.calls[0][2] as () => void;
     onExit();
 
     expect(mockGetSession).toHaveBeenCalledWith('s1');
-    expect(mockWakeContainer).toHaveBeenCalledWith(freshSession);
+    await vi.waitFor(() => expect(mockWakeContainer).toHaveBeenCalledWith(freshSession));
   });
 
-  it('onExit callback does not wake if session no longer exists', () => {
+  it('onExit callback does not wake if session no longer exists', async () => {
     mockGetSessionsByAgentGroup.mockReturnValue([makeSession('s1', 'g1')]);
     mockIsContainerRunning.mockReturnValue(true);
     mockGetSession.mockReturnValue(undefined);
 
-    restartAgentGroupContainers('g1', 'test', 'Resuming.');
+    await restartAgentGroupContainers('g1', 'test', 'Resuming.');
 
     const onExit = mockKillContainer.mock.calls[0][2] as () => void;
     onExit();
@@ -140,11 +141,11 @@ describe('restartAgentGroupContainers', () => {
     expect(mockWakeContainer).not.toHaveBeenCalled();
   });
 
-  it('handles multiple running sessions with wake message', () => {
+  it('handles multiple running sessions with wake message', async () => {
     mockGetSessionsByAgentGroup.mockReturnValue([makeSession('s1', 'g1'), makeSession('s2', 'g1')]);
     mockIsContainerRunning.mockReturnValue(true);
 
-    const count = restartAgentGroupContainers('g1', 'test', 'Config updated.');
+    const count = await restartAgentGroupContainers('g1', 'test', 'Config updated.');
 
     expect(count).toBe(2);
     expect(mockKillContainer).toHaveBeenCalledTimes(2);
@@ -155,7 +156,7 @@ describe('restartAgentGroupContainers', () => {
     expect(mockWriteSessionMessage.mock.calls[1][1]).toBe('s2');
   });
 
-  it('wakes even without a wake message when in-flight messages are pending', () => {
+  it('wakes even without a wake message when in-flight messages are pending', async () => {
     // A provider switch mid-conversation kills a container holding claimed
     // messages — without an immediate respawn those messages stay dark until
     // the next inbound or a slow sweep backoff.
@@ -163,12 +164,12 @@ describe('restartAgentGroupContainers', () => {
     mockIsContainerRunning.mockReturnValue(true);
     mockCountDueMessages.mockReturnValue(2);
 
-    restartAgentGroupContainers('ag1', 'provider switch');
+    await restartAgentGroupContainers('ag1', 'provider switch');
 
     const onExit = mockKillContainer.mock.calls[0][2] as () => void;
     expect(typeof onExit).toBe('function');
     mockGetSession.mockReturnValue(makeSession('s1', 'ag1'));
     onExit();
-    expect(mockWakeContainer).toHaveBeenCalled();
+    await vi.waitFor(() => expect(mockWakeContainer).toHaveBeenCalled());
   });
 });

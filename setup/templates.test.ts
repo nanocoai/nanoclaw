@@ -31,26 +31,35 @@ vi.mock('../src/log.js', () => ({
   log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn() },
 }));
 
-import { closeDb, initTestDb, runMigrations } from '../src/db/index.js';
+import {
+  closeDb,
+  createMessagingGroup,
+  createMessagingGroupAgent,
+  initTestDb,
+  runMigrations,
+} from '../src/db/index.js';
 import { MCP_SCHEMA_URL, PLUGIN_SCHEMA_URL } from '../src/templates/manifest.js';
 import { NANOCLAW_EXTENSION_NS } from '../src/templates/extension.js';
 import { dispatch } from '../src/cli/dispatch.js';
 // Side-effect import: registers the `groups-*` commands for the contract test.
 import '../src/cli/resources/groups.js';
+import '../src/cli/resources/wirings.js';
 import type { AgentGroup } from '../src/types.js';
 import {
   applyTemplatePick,
   clearTemplatePick,
   copyTemplate,
   installTemplateAgent,
+  listTemplateAgents,
   listTemplatesFromDir,
+  validateNewTemplateAgentName,
   type TemplateReplacePlan,
 } from './templates.js';
 
 describe('setup template library', () => {
   let root: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     root = fs.mkdtempSync(path.join(os.tmpdir(), 'setup-templates-'));
   });
 
@@ -87,6 +96,22 @@ describe('setup template library', () => {
     expect(() => listTemplatesFromDir(source)).toThrow(/predate the plugin format.*sales\/sdr.*Re-fetch/s);
   });
 
+  it('requires a distinct name only when setup creates another template agent', () => {
+    const agents: AgentGroup[] = [
+      {
+        id: 'ag-existing',
+        name: 'EMEA Sales',
+        folder: 'emea-sales',
+        agent_provider: null,
+        created_at: '2026-01-01T00:00:00.000Z',
+      },
+    ];
+
+    expect(validateNewTemplateAgentName('', agents)).toBe('Required');
+    expect(validateNewTemplateAgentName('  emea sales  ', agents)).toContain('different name');
+    expect(validateNewTemplateAgentName('US Sales', agents)).toBeUndefined();
+  });
+
   it('creates through ncl and applies the provider', async () => {
     const created: AgentGroup = {
       id: 'ag-new',
@@ -98,6 +123,7 @@ describe('setup template library', () => {
     const calls: Array<{ command: string; args: Record<string, unknown> }> = [];
     const result = await installTemplateAgent({
       ref: 'sales/sdr',
+      operation: { kind: 'create' },
       name: 'SDR',
       timezone: 'Asia/Jerusalem',
       provider: 'codex',
@@ -115,7 +141,7 @@ describe('setup template library', () => {
     expect(calls).toEqual([
       {
         command: 'groups-create',
-        args: { template: 'sales/sdr', name: 'SDR', timezone: 'Asia/Jerusalem' },
+        args: { template: 'sales/sdr', new: true, name: 'SDR', timezone: 'Asia/Jerusalem' },
       },
       {
         command: 'groups-config-update',
@@ -143,10 +169,11 @@ describe('setup template library', () => {
     };
     const calls: Array<{ command: string; args: Record<string, unknown> }> = [];
     let confirmed: TemplateReplacePlan | undefined;
-    // No operator name: the create call must omit it entirely so the CLI's
-    // fallback to the template's own agentName stays reachable.
+    // Restamping must ignore create-only settings, including provider.
     const result = await installTemplateAgent({
       ref: 'sales/sdr',
+      operation: { kind: 'restamp', agentGroupId: 'ag-old' },
+      provider: 'codex',
       runNcl: async (command, args) => {
         calls.push({ command, args });
         if (command === 'groups-create') return args.yes ? { ...plan, applied: true } : plan;
@@ -161,16 +188,15 @@ describe('setup template library', () => {
     expect(result).toEqual({ status: 'updated', group: stamped });
     expect(confirmed?.changes).toEqual(plan.changes);
     expect(calls).toEqual([
-      { command: 'groups-create', args: { template: 'sales/sdr' } },
+      { command: 'groups-create', args: { template: 'sales/sdr', id: 'ag-old' } },
       { command: 'groups-create', args: { template: 'sales/sdr', id: 'ag-old', yes: true } },
       { command: 'groups-restart', args: { id: 'ag-old' } },
     ]);
   });
 
-  // Declining the reset keeps the customized group untouched but still
-  // returns it, so the wizard wires it as-is instead of orphaning it. No
-  // apply, no provider update, no restart — declining means zero mutations.
-  it('keeps the group untouched (and usable) when the update plan is declined', async () => {
+  // Declining is a real cancel: the existing group must not be returned as a
+  // newly-created agent for the channel step to consume.
+  it('cancels without mutating or returning the existing group when the update is declined', async () => {
     const stamped: AgentGroup = {
       id: 'ag-old',
       name: 'SDR',
@@ -181,6 +207,7 @@ describe('setup template library', () => {
     const calls: string[] = [];
     const result = await installTemplateAgent({
       ref: 'sales/sdr',
+      operation: { kind: 'restamp', agentGroupId: 'ag-old' },
       name: 'SDR',
       provider: 'claude',
       runNcl: async (command) => {
@@ -190,7 +217,7 @@ describe('setup template library', () => {
       confirmReplace: async () => false,
     });
 
-    expect(result).toEqual({ status: 'kept', group: stamped });
+    expect(result).toEqual({ status: 'cancelled' });
     expect(calls).toEqual(['groups-create']);
   });
 
@@ -241,7 +268,7 @@ describe('template pick persistence', () => {
 });
 
 describe('setup templates ncl contract (real dispatch)', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     fs.rmSync(CONTRACT_ROOT, { recursive: true, force: true });
     const tpl = path.join(CONTRACT_ROOT, 'templates', 'sales', 'sdr');
     fs.mkdirSync(path.join(tpl, NANOCLAW_EXTENSION_NS, 'context'), { recursive: true });
@@ -254,11 +281,11 @@ describe('setup templates ncl contract (real dispatch)', () => {
         mcpServers: { docs: { type: 'streamable-http', url: 'https://mcp.example.com/mcp' } },
       }),
     );
-    runMigrations(initTestDb());
+    await runMigrations(await initTestDb());
   });
 
-  afterEach(() => {
-    closeDb();
+  afterEach(async () => {
+    await closeDb();
     fs.rmSync(CONTRACT_ROOT, { recursive: true, force: true });
   });
 
@@ -275,6 +302,7 @@ describe('setup templates ncl contract (real dispatch)', () => {
   it('parses the real create result and the real rerun update plan', async () => {
     const fresh = await installTemplateAgent({
       ref: 'sales/sdr',
+      operation: { kind: 'create' },
       name: 'SDR',
       runNcl,
       confirmReplace: async () => {
@@ -287,6 +315,7 @@ describe('setup templates ncl contract (real dispatch)', () => {
     let plan: TemplateReplacePlan | undefined;
     const rerun = await installTemplateAgent({
       ref: 'sales/sdr',
+      operation: { kind: 'restamp', agentGroupId: fresh.group.id },
       name: 'SDR',
       runNcl,
       confirmReplace: async (p) => {
@@ -297,5 +326,78 @@ describe('setup templates ncl contract (real dispatch)', () => {
     expect(rerun).toMatchObject({ status: 'updated', group: { id: fresh.group.id } });
     expect(plan?.group.id).toBe(fresh.group.id);
     expect(plan?.changes.length).toBeGreaterThan(0);
+  });
+
+  it('lists every matching agent with wiring state so setup can connect, restamp, or create another', async () => {
+    const first = await installTemplateAgent({
+      ref: 'sales/sdr',
+      operation: { kind: 'create' },
+      runNcl,
+      confirmReplace: async () => {
+        throw new Error('no plan expected on create');
+      },
+    });
+    const second = await installTemplateAgent({
+      ref: 'sales/sdr',
+      operation: { kind: 'create' },
+      runNcl,
+      confirmReplace: async () => {
+        throw new Error('no plan expected on create');
+      },
+    });
+    if (first.status !== 'installed' || second.status !== 'installed') {
+      throw new Error('expected two installed agents');
+    }
+
+    let carriers = await listTemplateAgents('sales/sdr', runNcl);
+    expect(new Map(carriers.map((group) => [group.id, group.isWired]))).toEqual(
+      new Map([
+        [first.group.id, false],
+        [second.group.id, false],
+      ]),
+    );
+
+    await createMessagingGroup({
+      id: 'mg-template-test',
+      channel_type: 'test',
+      platform_id: 'test:owner',
+      name: 'Owner',
+      is_group: 0,
+      unknown_sender_policy: 'strict',
+      created_at: '2026-01-03T00:00:00.000Z',
+    });
+    await createMessagingGroupAgent({
+      id: 'mga-template-test',
+      messaging_group_id: 'mg-template-test',
+      agent_group_id: second.group.id,
+      engage_mode: 'mention',
+      engage_pattern: null,
+      sender_scope: 'all',
+      ignored_message_policy: 'drop',
+      session_mode: 'shared',
+      priority: 0,
+      created_at: '2026-01-03T00:00:00.000Z',
+    });
+
+    carriers = await listTemplateAgents('sales/sdr', runNcl);
+    expect(new Map(carriers.map((group) => [group.id, group.isWired]))).toEqual(
+      new Map([
+        [first.group.id, false],
+        [second.group.id, true],
+      ]),
+    );
+
+    let target: string | undefined;
+    const updated = await installTemplateAgent({
+      ref: 'sales/sdr',
+      operation: { kind: 'restamp', agentGroupId: second.group.id },
+      runNcl,
+      confirmReplace: async (plan) => {
+        target = plan.group.id;
+        return true;
+      },
+    });
+    expect(updated).toMatchObject({ status: 'updated', group: { id: second.group.id } });
+    expect(target).toBe(second.group.id);
   });
 });

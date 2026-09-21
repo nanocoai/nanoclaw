@@ -4,6 +4,19 @@ Last updated: 2026-07-10
 
 ## What's Done
 
+### Linux fallback service startup
+
+When systemd is absent or its user session is unavailable, the service setup
+step writes and runs `start-nanoclaw.sh`. It reports success after the process
+is alive and `data/ncl.sock` accepts connections (up to 30 seconds). Startup
+failure makes the setup step fail; inspect `logs/nanoclaw.error.log`.
+
+Re-running the launcher stops the recorded host from this checkout and waits
+up to 10 seconds for it to exit before starting a replacement. A stale PID
+belonging to another process is ignored. The launcher uses Linux `setsid` to
+detach the host from the setup terminal so it survives that terminal exiting.
+It does not provide automatic restart or boot persistence.
+
 ### Two-DB Split (session DB write isolation)
 - Session DB split into `inbound.db` (host-owned) and `outbound.db` (container-owned)
 - Each file has exactly one writer — eliminates SQLite write contention across host-container mount
@@ -12,7 +25,7 @@ Last updated: 2026-07-10
 - Scheduling MCP tools emit system actions via messages_out; host applies them to inbound.db in `delivery.ts:handleSystemAction()`
 - Host sweep reads `processing_ack` table + heartbeat file mtime for stale detection
 - Container clears stale `processing_ack` entries on startup (crash recovery)
-- Files: `src/db/schema.ts` (INBOUND_SCHEMA + OUTBOUND_SCHEMA), `src/session-manager.ts`, `src/delivery.ts`, `src/host-sweep.ts`, `container/agent-runner/src/db/connection.ts`, `messages-in.ts`, `messages-out.ts`, `poll-loop.ts`, `mcp-tools/scheduling.ts`, `mcp-tools/interactive.ts`
+- Files: `src/mailbox/sqlite/schema.ts`, `src/session-manager.ts`, `src/delivery.ts`, `src/host-sweep.ts`, `container/agent-runner/src/mailbox/sqlite/connection.ts`, `db/messages-in.ts`, `db/messages-out.ts`, `poll-loop.ts`, `mcp-tools/scheduling.ts`, `mcp-tools/interactive.ts`
 - Container image rebuilt with tsconfig (`container/agent-runner/tsconfig.json`)
 - E2E verified: host → Docker container → agent responds → "E2E works!" ✓
 
@@ -112,4 +125,4 @@ Channel adapter → routeInbound() → resolve messaging_group → resolve agent
 | `setup/register.ts` | Creates entities (agent_group, messaging_group, wiring) |
 | `setup/templates.ts` | Template discovery + first-agent stamping through `ncl groups create --template` |
 | `setup/verify.ts` | Checks central DB for registered groups |
-| `container/agent-runner/src/db/connection.ts` | Two-DB connection layer (inbound read-only, outbound read-write) |
+| `container/agent-runner/src/mailbox/sqlite/connection.ts` | SQLite driver's two-DB connection layer |

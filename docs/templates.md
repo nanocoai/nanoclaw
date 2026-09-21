@@ -38,26 +38,34 @@ or you can populate it yourself.
 
 ## Using a template
 
-**During installation:** run `bash nanoclaw.sh`. Before the sandbox build, setup
-offers a fresh agent, the public template library, or templates already in your
-local `templates/` directory. A library choice is copied locally first, then
-setup stamps the agent through the same `ncl groups create --template` command
-used below. The agent is created even when channel setup is skipped or cannot
-finish wiring yet. When a channel is ready, setup wires that existing agent and
-sends the welcome message. The selected provider remains separate from the
-template.
+**During installation or later:** run `bash nanoclaw.sh`. Before the sandbox
+build, setup offers a fresh agent, the public template library, or templates
+already in your local `templates/` directory. On an existing install, the first
+option becomes **No template changes**. A library choice is copied locally
+first, then setup stamps through the same `ncl groups create --template`
+command used below.
 
-If a group already carries this template's plugin (a rerun over a partial
-install), setup shows the in-place update plan — how many plugin-owned
+When the chosen template is already in use, setup offers **Update** for each
+matching agent, **Connect** for each agent that has no channel wiring, **Create
+another agent**, and **Cancel**. Each option shows the agent's unique
+`groups/<folder>` path. Choosing **Create another agent** then asks for a new,
+unique display name; update and connect never ask for a new name.
+
+A new agent is created even when channel setup is skipped. Its id is not saved
+as an implicit target for a future setup run: wire it manually with `ncl`, or
+select the template later and explicitly choose **Connect**. If it was already
+wired manually, setup reads that wiring from `ncl` and no longer offers it as
+unconnected. Restamping keeps the existing agent's provider, memory, chats,
+and wiring, and does not enter channel setup.
+
+For an in-place update, setup shows the dry-run plan — how many plugin-owned
 surfaces reset, and how many carry local edits that would be lost — and asks
-before applying. **Yes** updates that agent in place; memory, chats, and
-wiring are kept. **No** cancels only the template installation and continues
-setup without it.
+before applying. **Yes** updates and restarts that agent. **No** leaves it
+untouched and continues setup without a template operation.
 
-Advanced setup can preset a local ref with **First-agent template**. The same
-setting is available as `--template-path sales/sdr` or
-`NANOCLAW_TEMPLATE_PATH=sales/sdr`. Existing installs do not see the template
-picker automatically, but an explicit template path is still installed.
+Advanced setup can preset a local ref with **Agent template**. The same setting
+is available as `--template-path sales/sdr` or
+`NANOCLAW_TEMPLATE_PATH=sales/sdr`.
 
 **Anytime, via the CLI:**
 

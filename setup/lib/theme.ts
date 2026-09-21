@@ -15,9 +15,7 @@ import * as p from '@clack/prompts';
 import k from 'kleur';
 
 const USE_ANSI = Boolean(process.stdout.isTTY) && !process.env.NO_COLOR;
-const TRUECOLOR =
-  USE_ANSI &&
-  (process.env.COLORTERM === 'truecolor' || process.env.COLORTERM === '24bit');
+const TRUECOLOR = USE_ANSI && (process.env.COLORTERM === 'truecolor' || process.env.COLORTERM === '24bit');
 
 export function brand(s: string): string {
   if (!USE_ANSI) return s;

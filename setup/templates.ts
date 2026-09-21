@@ -5,20 +5,17 @@ import os from 'os';
 import path from 'path';
 
 import { resolveLocalTemplate } from '../src/templates/local-dir.js';
+import { groupsCarryingPlugin } from '../src/templates/restamp.js';
 import type { AgentGroup } from '../src/types.js';
 import { upsertEnvVar } from './set-env.js';
 
 export const DEFAULT_TEMPLATES_SOURCE = 'https://github.com/nanocoai/nanoclaw-templates';
 
 // The template pick lives in process.env for this run AND in .env for the
-// next: the wizard re-execs itself (`sg docker`, fail-retry) and a rerun over
-// a partial install must not lose the choice. It deliberately survives stamp
-// success, channel skip, and any failure — only the wire that consumes the
-// stamped agent (run-channel-skill), the operator declining it, or an invalid
-// preset clears it. The agent group id itself is never persisted: each run
-// re-derives it from the pick (`groups create --template` resolves the
-// existing group through its plugin carrier — groupsCarryingPlugin — instead
-// of creating a duplicate), so a stale id can never override a fresh choice.
+// next: the wizard can re-exec itself (`sg docker`, fail-retry) before the
+// selected operation runs. Every completed operation clears the pick; setup
+// derives later connect/update choices from ncl instead of persisting an agent
+// id that could accidentally target a future setup run.
 export function applyTemplatePick(ref: string): void {
   process.env.NANOCLAW_TEMPLATE_PATH = ref;
   upsertEnvVar('NANOCLAW_TEMPLATE_PATH', ref);
@@ -44,8 +41,11 @@ type RunNcl = (command: string, args: Record<string, unknown>) => Promise<unknow
 export type TemplateAgentInstallResult =
   | { status: 'installed'; group: AgentGroup }
   | { status: 'updated'; group: AgentGroup }
-  /** Update plan declined: the stamped group is untouched but still usable. */
-  | { status: 'kept'; group: AgentGroup };
+  | { status: 'cancelled' };
+
+export type TemplateOperation = { kind: 'create' } | { kind: 'restamp'; agentGroupId: string };
+
+export type SetupTemplateAgent = AgentGroup & { isWired: boolean };
 
 /** One plugin-owned surface from the dry-run update plan `groups create --template` returns. */
 export interface TemplateChange {
@@ -64,12 +64,38 @@ export interface TemplateReplacePlan {
 
 export interface TemplateAgentInstallOptions {
   ref: string;
+  operation: TemplateOperation;
   /** Explicit operator name. Omit to let the CLI fall back to the template's own agentName. */
   name?: string;
   timezone?: string;
   provider?: string;
   runNcl: RunNcl;
   confirmReplace: (plan: TemplateReplacePlan) => Promise<boolean>;
+}
+
+/** Resolve template agents and their wiring state through canonical ncl data. */
+export async function listTemplateAgents(ref: string, runNcl: RunNcl): Promise<SetupTemplateAgent[]> {
+  const groupRows = await runNcl('groups-list', { limit: Number.MAX_SAFE_INTEGER });
+  if (!Array.isArray(groupRows)) throw new Error('ncl returned an invalid agent group list');
+  const wiringRows = await runNcl('wirings-list', { limit: Number.MAX_SAFE_INTEGER });
+  if (!Array.isArray(wiringRows)) throw new Error('ncl returned an invalid wiring list');
+
+  const wiredAgentIds = new Set(wiringRows.map(parseWiringAgentGroupId));
+  const groups = await groupsCarryingPlugin(ref, groupRows.map(parseAgentGroup));
+  return groups.map((group) => ({ ...group, isWired: wiredAgentIds.has(group.id) }));
+}
+
+/** Validation used only after the operator chooses "Create another agent". */
+export function validateNewTemplateAgentName(
+  value: string | undefined,
+  agents: readonly AgentGroup[],
+): string | undefined {
+  const name = (value ?? '').trim();
+  if (!name) return 'Required';
+  if (agents.some((agent) => agent.name.toLowerCase() === name.toLowerCase())) {
+    return 'Choose a different name so you can tell these agents apart';
+  }
+  return undefined;
 }
 
 // A directory is a template iff it is an Agent Plugins directory — the
@@ -95,9 +121,7 @@ export function cloneRegistry(): ClonedRegistry {
 export function listTemplatesFromDir(dir: string): TemplateEntry[] {
   if (!fs.existsSync(dir)) return [];
   const rootName = path.basename(path.resolve(dir));
-  const rels = (fs.readdirSync(dir, { recursive: true }) as string[]).map((entry) =>
-    entry.split(path.sep).join('/'),
-  );
+  const rels = (fs.readdirSync(dir, { recursive: true }) as string[]).map((entry) => entry.split(path.sep).join('/'));
 
   const refs = new Set<string>();
   for (const rel of rels) {
@@ -147,42 +171,43 @@ export function copyTemplate(srcDir: string, ref: string, destDir: string): stri
 
 /**
  * Stamp the setup-selected template through the same ncl command used after
- * setup. `groups create --template` decides what happens: a fresh stamp when
- * no group carries the plugin, or (on a rerun over a partial install) a
- * dry-run update plan for the group that does. The plan goes to
- * `confirmReplace`; on yes, the same command applies it with --yes and the
- * group restarts so skill/MCP changes take effect. In-place updates never
- * touch memory, sessions, wiring, or anything else the plugin does not own.
+ * setup. The caller supplies an explicit create or targeted-restamp operation;
+ * the CLI remains the sole owner of applying it. Restamps dry-run first, apply
+ * only after confirmation, and restart so skill/MCP changes take effect.
  */
 export async function installTemplateAgent(options: TemplateAgentInstallOptions): Promise<TemplateAgentInstallResult> {
+  if (options.operation.kind === 'create') {
+    const created = await options.runNcl('groups-create', {
+      template: options.ref,
+      new: true,
+      ...(options.name ? { name: options.name } : {}),
+      ...(options.timezone ? { timezone: options.timezone } : {}),
+    });
+    if (parseReplacePlan(created)) throw new Error('ncl returned an update plan for a new template agent');
+    const group = parseAgentGroup(created);
+    if (options.provider) {
+      await options.runNcl('groups-config-update', { id: group.id, provider: options.provider });
+    }
+    return { status: 'installed', group };
+  }
+
   const first = await options.runNcl('groups-create', {
     template: options.ref,
-    ...(options.name ? { name: options.name } : {}),
-    ...(options.timezone ? { timezone: options.timezone } : {}),
+    id: options.operation.agentGroupId,
   });
-
-  let group: AgentGroup;
   const plan = parseReplacePlan(first);
-  if (plan) {
-    // Declining the reset means "don't touch my edits", not "abandon my
-    // agent": the untouched group is returned so the wizard can wire it as-is
-    // (provider update and restart are skipped — those are mutations too).
-    if (!(await options.confirmReplace(plan))) return { status: 'kept', group: plan.group };
-    const applied = parseReplacePlan(
-      await options.runNcl('groups-create', { template: options.ref, id: plan.group.id, yes: true }),
-    );
-    if (!applied?.applied) throw new Error('ncl did not apply the template update');
-    group = applied.group;
-  } else {
-    group = parseAgentGroup(first);
+  if (!plan || plan.group.id !== options.operation.agentGroupId) {
+    throw new Error('ncl did not return the requested template update plan');
   }
+  if (!(await options.confirmReplace(plan))) return { status: 'cancelled' };
 
-  if (options.provider) {
-    await options.runNcl('groups-config-update', { id: group.id, provider: options.provider });
-  }
-  if (plan) await options.runNcl('groups-restart', { id: group.id });
+  const applied = parseReplacePlan(
+    await options.runNcl('groups-create', { template: options.ref, id: plan.group.id, yes: true }),
+  );
+  if (!applied?.applied) throw new Error('ncl did not apply the template update');
+  await options.runNcl('groups-restart', { id: applied.group.id });
 
-  return { status: plan ? 'updated' : 'installed', group };
+  return { status: 'updated', group: applied.group };
 }
 
 /**
@@ -227,6 +252,13 @@ function parseAgentGroup(value: unknown): AgentGroup {
     throw new Error('ncl returned an invalid agent group');
   }
   return { id, name, folder, agent_provider: provider ?? null, created_at: createdAt };
+}
+
+function parseWiringAgentGroupId(value: unknown): string {
+  if (!isRecord(value) || typeof value.agent_group_id !== 'string') {
+    throw new Error('ncl returned an invalid wiring');
+  }
+  return value.agent_group_id;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -268,8 +268,7 @@ function probeSystemdPeer(unit: string): PeerStatus | null {
     const restartsStr = /^NRestarts=(\d+)/m.exec(output)?.[1];
     const runs = restartsStr ? parseInt(restartsStr, 10) : 0;
 
-    const unhealthy =
-      activeState === 'failed' || (activeState !== 'active' && runs > UNHEALTHY_RUNS_THRESHOLD);
+    const unhealthy = activeState === 'failed' || (activeState !== 'active' && runs > UNHEALTHY_RUNS_THRESHOLD);
     return { label: unit, configPath: unitPath, state: activeState, runs, unhealthy };
   } catch {
     return null;

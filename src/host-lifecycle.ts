@@ -5,12 +5,11 @@
  * inert: startup work begins only after the database and delivery adapter are
  * ready, and shutdown work begins only from the host's graceful-shutdown path.
  */
-import type Database from 'better-sqlite3';
-
+import type { DbDriver } from './db/driver.js';
 import { log } from './log.js';
 
 export interface HostStartContext {
-  db: Database.Database;
+  db: DbDriver;
   signal: AbortSignal;
 }
 

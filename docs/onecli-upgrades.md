@@ -25,7 +25,7 @@ The gateway runs as a Docker service in `~/.onecli`. Upgrade just that container
 **Local gateway (the common case):**
 
 ```bash
-cd ~/.onecli && ONECLI_VERSION=<onecli-gateway pin from versions.json> docker compose pull onecli && docker compose up -d
+cd ~/.onecli && ONECLI_VERSION=<onecli-gateway pin from versions.json> docker compose pull onecli && ONECLI_VERSION=<onecli-gateway pin from versions.json> docker compose up -d
 ```
 
 **Remote gateway** — run the same command on the gateway's host (NanoClaw can't reach it over SSH).
@@ -45,7 +45,7 @@ docker run --rm --add-host=host.docker.internal:host-gateway \
   curlimages/curl -s -o /dev/null -w '%{http_code}' http://host.docker.internal:10254/v1/health
 ```
 
-This must print `200`. If it can't connect while the host-side check passed, set the bind address in `~/.onecli/.env` to the docker-bridge IP (or `0.0.0.0` on a host with a closed firewall) and `cd ~/.onecli && docker compose up -d`. Symptom if skipped: host log clean, agents fail all API calls.
+This must print `200`. If it can't connect while the host-side check passed, set the bind address in `~/.onecli/.env` to the docker-bridge IP (or `0.0.0.0` on a host with a closed firewall) and `cd ~/.onecli && ONECLI_VERSION=<onecli-gateway pin from versions.json> docker compose up -d`. Symptom if skipped: host log clean, agents fail all API calls.
 
 Finally, restart the NanoClaw service (per-install names — derive with `setup/lib/install-slug.sh`):
 
@@ -81,3 +81,21 @@ onecli --version                                            # verify: must match
 ```
 
 To roll back, run the same block after reverting `versions.json` (or checking out the previous NanoClaw version). The CLI is stateless — vault data lives in the gateway, so swapping the binary in either direction loses nothing.
+
+## Certificate and credential-stub files
+
+The OneCLI provider fetches fresh typed container configuration on every spawn
+and stages its CA, optional combined system trust bundle, and credential stubs
+under `data/onecli/`. It mounts individual files read-only; the directory stays
+private to the host user (mode `0700`), and credential stubs use mode `0600`.
+The SDK's shared temporary paths are not used, so clearing `/tmp` or restarting
+WSL does not remove the bind sources. Existing temporary files or directories
+are left untouched.
+
+Files are named by kind and content hash. Unchanged configuration reuses the
+same files; a rotated CA or stub gets a new path so existing sessions retain
+their original bytes. Old versions are retained because another session may
+still mount them. Do not remove these files while agent containers are running.
+An unexpected file type, owner, permissions, or content stops the spawn instead
+of replacing existing data. A gateway fetch or staging failure also stops the
+spawn; the provider never falls back to a cached credential configuration.

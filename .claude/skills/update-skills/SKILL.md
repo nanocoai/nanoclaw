@@ -1,105 +1,89 @@
 ---
 name: update-skills
-description: Re-apply your installed skills to pull their latest code from upstream.
+description: Refresh installed NanoClaw channel and provider payloads from their registry branches with fork-safe remote resolution and a blocking structured result. Use after updating NanoClaw or whenever installed channel/provider code may be stale.
 ---
 
-# About
+# Update installed skills
 
-Each skill is a self-installing additive unit: its folder under `.claude/skills/<name>/` carries its own apply steps (`SKILL.md`), and channel/provider skills fetch their code files from a long-lived upstream branch (`channels`, `providers`) with `git fetch origin <branch>` + `git show origin/<branch>:path > path`. Every apply is idempotent and safe to re-run.
+Refresh the code carried by installed channel and provider skills. This does
+not re-run credential setup, change `.env`, alter wiring, or restart services.
 
-Updating a skill means **re-running its own apply**. The apply re-fetches the latest files from upstream and overwrites the copied-in code, so newer versions land additively.
+Run from the NanoClaw project root. Use ordinary conversation for any choice;
+do not depend on a provider-specific question or skill-invocation tool.
 
-Run `/update-skills` in Claude Code.
+## 1. Preflight and selection
 
-## How it works
+Require a clean working tree:
 
-**Preflight**: checks for a clean working tree and the upstream remote.
+```bash
+git status --porcelain
+```
 
-**Detection**: reads the channel and provider barrels to list which skills have copied code into your tree, and lists the operational/utility skills present under `.claude/skills/`.
+If it is dirty, stop. Never mix a refresh with unrelated changes.
 
-**Selection**: presents the installed skills and lets you pick which to re-apply.
+The default is every installed channel/provider. If the user asked for a
+subset, pass its comma-separated names. Otherwise use `all`:
 
-**Re-apply**: invokes each selected skill's own apply (e.g. `/add-slack`), which fetches its latest files. Then validates with build + test.
+```bash
+pnpm exec tsx scripts/update-skills.ts --skills all
+# Example subset: --skills slack,opencode
+```
 
----
+The helper detects installed skills from the real channel/provider barrels. It
+resolves each registry branch by checking configured remotes, so a fork whose
+`origin` is the user's repo and whose official source is `upstream` works
+without special handling. `NANOCLAW_REGISTRY_REMOTE=<name>` is an explicit
+override and is validated before use.
 
-# Goal
-Help users pull the latest skill code from upstream by re-applying their installed skills, without losing local customizations and without merging any branch.
+## 2. Treat the JSON result as a gate
 
-# Operating principles
-- Never proceed with a dirty working tree.
-- Re-apply each skill through its own idempotent apply step — re-applying overwrites only that skill's code files; credentials, wiring, and DB state are untouched.
-- Keep token usage low: detect installed skills with `git` and barrel reads; let each skill's apply do its own fetching.
+The command prints `nanoclaw-skill-refresh/v1`-shaped JSON fields with one
+result per selected skill and exits nonzero unless every selected skill was
+fully refreshed.
 
-# Step 0: Preflight
+- Continue only when `success` is `true` and every status is `refreshed`.
+- A missing skill, missing structured apply contract, unresolved input, agent
+  fallback, fetch error, or dependency error is blocking.
+- Never record a failed skill and continue toward an upgrade completion stamp.
+- Preserve the full report in the update summary.
 
-Run:
-- `git status --porcelain`
+The refresh engine overwrites skill-owned registry files and advances exact
+dependency/CLI-manifest pins. It skips prompts, operator walkthroughs, `.env`
+writes, wiring, restarts, and ordinary build/test directives.
 
-If output is non-empty:
-- Tell the user to commit or stash first, then stop.
+## 3. Validate the composed checkout
 
-Check remotes:
-- `git remote -v`
+After a successful refresh:
 
-If `origin` does not point at a NanoClaw upstream (or you want to verify it has the skill branches), confirm with the user before continuing. The default upstream is `https://github.com/nanocoai/nanoclaw.git`.
+```bash
+pnpm run build
+pnpm test
+```
 
-Fetch the branches that carry skill code:
-- `git fetch origin channels providers --prune`
+If files under `container/agent-runner/src/` changed, also run:
 
-# Step 1: Detect installed skills
+```bash
+pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit
+```
 
-**Channels** — read `src/channels/index.ts` and collect each `import './<name>.js';` line, excluding `cli`. Each `<name>` maps to the `/add-<name>` skill.
+If anything under `container/` changed, update the install's agent image using
+the source mode already selected in `.env`:
 
-**Providers** — read `src/providers/index.ts` the same way; each imported provider maps to its `/add-<name>` skill.
+```bash
+if grep -q '^NANOCLAW_HARDENED_IMAGE=true$' .env 2>/dev/null; then
+  ./container/build.sh pull
+else
+  ./container/build.sh
+fi
+```
 
-**Operational and utility skills** — list the folders under `.claude/skills/`. These copy no code into the tree, so "re-applying" them just re-reads their instructions; only include them if the user specifically wants to re-run a workflow.
+Any validation or image failure is blocking. Do not restart or report success.
 
-Build the candidate list from the channels and providers actually wired into the barrels — those are the skills whose copied code can be refreshed from upstream.
+## 4. Report
 
-# Step 2: Present results
-
-If no channel or provider skills are installed:
-- Tell the user there are no code-carrying skills to update. List any operational skills present for reference.
-- Stop here.
-
-If installed channel/provider skills are found:
-- Show the list (e.g. `slack`, `discord`, `opencode`).
-- Use AskUserQuestion with `multiSelect: true` to let the user pick which skills to re-apply.
-  - One option per installed channel/provider (e.g. "Re-apply Slack (/add-slack)").
-  - Add an option: "Skip — don't update any skills now".
-- If the user selects Skip, stop here.
-
-# Step 3: Re-apply each selected skill
-
-For each selected skill (process one at a time):
-
-1. Tell the user which skill is being re-applied.
-2. Invoke the corresponding `/add-<name>` skill using the Skill tool.
-   - Its apply runs its own pre-flight, fetches the latest files from upstream (`git fetch origin <branch>` + `git show origin/<branch>:path > path`), overwrites the copied-in code, and installs any pinned dependency.
-   - Re-applying is additive: it refreshes only that skill's own files. The barrel import line is left in place if already present, and `.env` credentials and DB wiring are untouched.
-3. If a skill's apply reports a problem (a missing upstream file, a failing dependency install), record it and continue with the remaining skills.
-
-# Step 4: Validation
-
-After all selected skills are re-applied:
-- `pnpm run build`
-- `pnpm test` (do not fail the flow if tests are not configured)
-- If the re-apply changed any files under `container/` (`git diff --name-only -- container/` is non-empty), rebuild the agent image so new sessions pick up the new code: `./container/build.sh`. Skill code that lives in the container (e.g. a provider's runtime) keeps running the old image until this is done — the rebuild is what makes the fix live, not the file copy. If nothing under `container/` changed (e.g. only a channel adapter was re-applied), skip it.
-
-Each channel/provider skill copies in its own registration test; those run as part of `pnpm test` and assert the barrel still registers the adapter against the freshly fetched code.
-
-If build fails:
-- Show the error.
-- Only fix issues clearly caused by the refreshed code (missing imports, type mismatches).
-- Do not refactor unrelated code.
-- If unclear, ask the user.
-
-# Step 5: Summary
-
-Show:
-- Skills re-applied (list)
-- Skills skipped or that reported problems (if any)
-- New HEAD: `git rev-parse --short HEAD`
-
-If the service is running, remind the user to restart it to pick up the refreshed code.
+Show the selected skills, the registry remote used for each branch, changed
+files, validation results, and any blocking error. If this was a standalone
+refresh and the service was running, restart it through the service mode that
+actually owns this install and verify `data/ncl.sock` plus `bin/ncl groups
+list`. When called inside `/update-nanoclaw`, leave restart and health checking
+to that transaction.

@@ -1,6 +1,12 @@
 ---
 name: add-codex
 description: Use Codex (OpenAI's codex app-server) as a full agent provider — planning, tool orchestration, MCP tools, server-side history, session resume — alongside or instead of Claude. ChatGPT subscription or OpenAI API key, vault-only via OneCLI. Per-group via `ncl groups config update --provider codex`. Distinct from using OpenAI as an MCP tool (where Claude remains the planner).
+metadata:
+  nanoclaw-provider: codex
+  nanoclaw-provider-label: Codex
+  nanoclaw-provider-hint: OpenAI — ChatGPT subscription or API key
+  nanoclaw-provider-offered: 'true'
+  nanoclaw-provider-image: local-required
 ---
 
 # Codex agent provider
@@ -17,17 +23,20 @@ The mechanical steps under **Install** carry `nc:` directive fences: an agent re
 
 ### Pre-flight
 
+Requires `src/project-doc-compose.ts` on trunk. If it is missing, stop and tell
+the operator to run `/update-nanoclaw` first.
+
 Check whether the payload is already wired (a prior apply, or a trunk that still carries it). All of these present means installed — skip to **Authenticate**:
 
 - `src/providers/codex.ts` and `src/providers/codex-agents-md.ts`
 - `container/agent-runner/src/providers/codex.ts` and `codex-app-server.ts`
-- `setup/providers/codex.ts`
-- `import './codex.js';` in `src/providers/index.ts`, `container/agent-runner/src/providers/index.ts`, and `setup/providers/index.ts`
+- `setup/providers/codex.ts` and both `provider-contracts/codex.ts` declarations (host and container)
+- `import './codex.js';` in the three provider barrels and both contract barrels
 - an `@openai/codex` entry in `container/cli-tools.json`
 
 ### 1. Fetch and copy the payload
 
-Fetch the `providers` branch and copy the Codex payload into all three trees (additive — overwrite each file, never merge the branch). The host files are the provider contribution + AGENTS.md compose + their guards; the container files are the provider runtime (turn loop, JSON-RPC wrapper, native memory SessionStart hook, per-exchange archiver) + their guards; the setup file is the picker entry + vault auth walk-through; `container/AGENTS.md` is the runtime-contract base the composed AGENTS.md embeds.
+Fetch the `providers` branch and copy the Codex payload into all three trees (additive — overwrite each file, never merge the branch). The host files are the provider contribution + the AGENTS.md spec (composition itself lives in trunk's `src/project-doc-compose.ts`) + their guards; the container files are the provider runtime (turn loop, JSON-RPC wrapper, native memory SessionStart hook, per-exchange archiver) + their guards; the setup file is the picker entry + vault auth walk-through; `container/AGENTS.md` is the runtime-contract base the composed AGENTS.md embeds.
 
 ```nc:copy from-branch:providers
 src/providers/codex.ts
@@ -35,6 +44,7 @@ src/providers/codex-agents-md.ts
 src/providers/codex-registration.test.ts
 src/providers/codex-host-contribution.test.ts
 src/providers/codex-agents-md.test.ts
+src/provider-contracts/codex.ts
 container/agent-runner/src/providers/codex.ts
 container/agent-runner/src/providers/codex-app-server.ts
 container/agent-runner/src/providers/exchange-archive.ts
@@ -43,7 +53,10 @@ container/agent-runner/src/providers/codex-registration.test.ts
 container/agent-runner/src/providers/codex.factory.test.ts
 container/agent-runner/src/providers/codex.turns.test.ts
 container/agent-runner/src/providers/codex-app-server.test.ts
+container/agent-runner/src/providers/codex-contract-parity.test.ts
+container/agent-runner/src/providers/codex.conformance.test.ts
 container/agent-runner/src/providers/codex-cli-tools.test.ts
+container/agent-runner/src/provider-contracts/codex.ts
 setup/providers/codex.ts
 setup/providers/codex.test.ts
 setup/providers/codex-registration.test.ts
@@ -52,14 +65,24 @@ container/AGENTS.md
 
 ### 2. Wire the barrels
 
-Append the self-registration import to each of the three provider barrels (skipped if the line is already present). Each barrel-registration test imports its real barrel and asserts `codex` is registered — they go red the moment a barrel line is missing or drifts.
+Append the self-registration import to each provider and contract barrel (skipped if already present).
 
 ```nc:append to:src/providers/index.ts
 import './codex.js';
 ```
+
+```nc:append to:src/provider-contracts/index.ts
+import './codex.js';
+```
+
+```nc:append to:container/agent-runner/src/provider-contracts/index.ts
+import './codex.js';
+```
+
 ```nc:append to:container/agent-runner/src/providers/index.ts
 import './codex.js';
 ```
+
 ```nc:append to:setup/providers/index.ts
 import './codex.js';
 ```
@@ -69,10 +92,10 @@ import './codex.js';
 The agent's global Node CLIs install from `container/cli-tools.json` (a json-merge seam), not hand-edited Dockerfile layers. Add Codex by appending one entry — idempotent on `name`, so a re-run is a no-op. `@openai/codex` has no native postinstall, so no `onlyBuilt`. The Dockerfile already installs every manifest entry via pinned `pnpm install -g`; no Dockerfile edit is needed.
 
 ```nc:json-merge into:container/cli-tools.json key:name
-{ "name": "@openai/codex", "version": "0.138.0" }
+{ "name": "@openai/codex", "version": "0.146.0" }
 ```
 
-The version (`0.138.0`) is the canonical pin — this SKILL.md is the source of truth.
+The version (`0.146.0`) is the canonical pin — this SKILL.md is the source of truth.
 
 ### 4. Build
 
@@ -85,10 +108,7 @@ pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit
 ### 5. Validate
 
 ```nc:run effect:test
-pnpm vitest run src/providers/codex-registration.test.ts src/providers/codex-host-contribution.test.ts src/providers/codex-agents-md.test.ts setup/providers/
-```
-```nc:run effect:test
-cd container/agent-runner && bun test src/providers/
+pnpm exec tsx scripts/provider-contract-verifier.ts --required-declared codex
 ```
 
 The registration tests import only the real barrels — they go red if a barrel line is missing, a barrel fails to evaluate, or the payload is broken.

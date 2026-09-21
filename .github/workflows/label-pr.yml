@@ -5,37 +5,285 @@ name: Label PR
 # Keep it metadata-only — do NOT add actions/checkout or any step that
 # executes PR-supplied content (install scripts, build commands, etc.).
 # See https://securitylab.github.com/resources/github-actions-preventing-pwn-requests/
+#
+# The labeling logic lives inline between the NANOCLAW-LABEL-LOGIC markers as a
+# pure function; scripts/label-pr-workflow.test.ts extracts that exact block
+# from this file and runs fixture tests against it, so the tested code and the
+# shipped code cannot drift. Edit the function only between the markers.
 on:
   pull_request_target:
-    types: [opened, edited]
+    # `synchronize` is for the template-compliance status only (a commit
+    # status is per-SHA, so every push needs a fresh one). Label mutations
+    # stay gated off synchronize in the driver below, preserving the
+    # labels-only-on-body-events behavior.
+    types: [opened, edited, reopened, ready_for_review, synchronize]
+
+# Serialize runs per PR. Two events landing together (a push and a body edit)
+# would otherwise race on the check-then-act that posts the single fix comment,
+# and both runs could see no comment and post one. Queue rather than cancel:
+# a cancelled run leaves the commit status for its SHA unwritten.
+concurrency:
+  group: label-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
 
 jobs:
   label:
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
-      issues: write # createLabel — auto-provisions the core-team label
+      issues: write # createLabel (core-team, until Decision 4) + list/create the single compliance comment
+      statuses: write # report-only template-compliance commit status
     steps:
-      - uses: actions/github-script@v7
+      - uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
         with:
           script: |
-            const body = context.payload.pull_request.body || '';
-            const labels = [];
+            // NANOCLAW-LABEL-LOGIC-START
+            // Pure decision function. No API calls, no environment reads — the
+            // driver below feeds it payload fields and applies the result.
+            //
+            // Every label string emitted here must byte-match a label that
+            // already exists in the repo (`gh label list`): addLabels
+            // auto-creates unknown names with a random color and no
+            // description, so a typo silently invents a label. Never push a
+            // name that is not in the fixed vocabularies below.
+            //
+            // Two body contracts, selected by marker:
+            //   v2 (the exact HTML comment `<!-- nanoclaw-pr-template:v2 -->`):
+            //     stable-token parsing on flush-left checkbox lines, with
+            //     fenced blocks stripped first. Exactly one checked kind box
+            //     is an explicit verdict: it is added and the managed set is
+            //     reconciled — stale kinds AND their legacy `PR: *` twins are
+            //     removed, keeping the two vocabularies in lockstep. With
+            //     zero or several boxes, the conventional-commit title prefix
+            //     is an ADVISORY fallback: it only adds a kind when the PR
+            //     carries no managed kind at all, and it never removes
+            //     anything — so a maintainer's triage classification always
+            //     survives later edited/reopened/ready_for_review events.
+            //     Still ambiguous → apply nothing; the PR lands in triage.
+            //   v1 (`contributing-guide: v1`, or no marker): the pre-v2
+            //     behavior, byte-frozen — visible-substring checkbox matching,
+            //     add-only, emitting both the legacy `PR: *` vocabulary and
+            //     its `kind/*` equivalent.
+            // Both paths keep emitting `PR: *`; v2 earns `follows-guidelines`
+            // only from an explicit checkbox verdict (an unfilled template
+            // earns nothing). All of `PR: *`, `follows-guidelines`, and
+            // `core-team` stay until Decision 4 retires them.
 
-            if (body.includes('[x] **Feature skill**'))       { labels.push('PR: Skill'); labels.push('PR: Feature'); }
-            else if (body.includes('[x] **Utility skill**'))   labels.push('PR: Skill');
-            else if (body.includes('[x] **Operational/container skill**')) labels.push('PR: Skill');
-            else if (body.includes('[x] **Fix**'))             labels.push('PR: Fix');
-            else if (body.includes('[x] **Simplification**'))  labels.push('PR: Refactor');
-            else if (body.includes('[x] **Documentation**'))   labels.push('PR: Docs');
+            // Drop fenced code blocks (``` and ~~~, any info string). A line
+            // scanner rather than a regex so an UNTERMINATED fence hides
+            // everything after it instead of nothing, and so ``` cannot close
+            // a ~~~ fence. Fences must be flush-left, like the checkbox
+            // tokens they protect.
+            function stripFences(text) {
+              const out = [];
+              let fence = null;
+              for (const line of text.split('\n')) {
+                const open = /^(`{3,}|~{3,})/.exec(line);
+                if (open) {
+                  if (fence === null) {
+                    fence = open[1][0];
+                    continue;
+                  }
+                  if (line[0] === fence) {
+                    fence = null;
+                    continue;
+                  }
+                  continue; // a ``` line inside a ~~~ fence (or vice versa) stays hidden
+                }
+                if (fence === null) out.push(line);
+              }
+              return out.join('\n');
+            }
 
-            if (body.includes('contributing-guide: v1')) labels.push('follows-guidelines');
+            // The managed kind vocabulary, shared by the two functions that
+            // must agree on it: computeLabels emits from this set, and
+            // decideCompliance reads it to decide whether a PR is classified.
+            // One declaration, so the two can never drift apart.
+            const MANAGED_KINDS = ['kind/bug', 'kind/feature', 'kind/documentation', 'kind/cleanup', 'kind/hardening'];
 
-            // Lowercase GitHub logins; keep in sync with the core team roster.
-            const CORE_TEAM = ['gavrielc', 'koshkoshinsk', 'glifocat', 'gabi-simons', 'omri-maya', 'amit-shafnir', 'moshe-nanoco'];
-            const author = context.payload.pull_request.user.login.toLowerCase();
-            if (CORE_TEAM.includes(author)) {
-              labels.push('core-team');
+            function computeLabels({ body, title, author, currentLabels }) {
+              body = body || '';
+              title = title || '';
+              const current = new Set(currentLabels || []);
+              const add = [];
+              const remove = [];
+
+              // Legacy vocabulary kept in lockstep until Decision 4. Hardening
+              // has no PR:* equivalent, so none is emitted rather than
+              // guessing one.
+              const KIND_TO_LEGACY = {
+                'kind/bug': 'PR: Fix',
+                'kind/feature': 'PR: Feature',
+                'kind/documentation': 'PR: Docs',
+                'kind/cleanup': 'PR: Refactor',
+                'kind/hardening': null,
+              };
+              const TITLE_PREFIX_TO_KIND = {
+                fix: 'kind/bug',
+                feat: 'kind/feature',
+                docs: 'kind/documentation',
+                refactor: 'kind/cleanup',
+                chore: 'kind/cleanup',
+                ci: 'kind/cleanup',
+                test: 'kind/cleanup',
+                build: 'kind/cleanup',
+                style: 'kind/cleanup',
+                perf: 'kind/cleanup',
+              };
+
+              // Lowercase GitHub logins; keep in sync with the core team roster.
+              const CORE_TEAM = ['gavrielc', 'koshkoshinsk', 'glifocat', 'gabi-simons', 'omri-maya', 'amit-shafnir', 'moshe-nanoco', 'zvi-fried'];
+              const coreTeam = CORE_TEAM.includes((author || '').toLowerCase());
+              if (coreTeam) add.push('core-team');
+
+              if (body.includes('<!-- nanoclaw-pr-template:v2 -->')) {
+                // ── v2: stable-token parsing ──
+                const scanned = stripFences(body);
+                const checked = MANAGED_KINDS.filter((kind) =>
+                  new RegExp('^-\\s*\\[[xX]\\]\\s*`' + kind.replace('/', '\\/') + '`', 'm').test(scanned),
+                );
+
+                if (checked.length === 1) {
+                  // Explicit checkbox verdict: add, and reconcile BOTH
+                  // vocabularies so an edited selection swaps cleanly instead
+                  // of accumulating (kind/bug leaving and PR: Fix staying
+                  // would desync the legacy set the triage queue still reads).
+                  const kind = checked[0];
+                  add.push(kind);
+                  if (KIND_TO_LEGACY[kind]) add.push(KIND_TO_LEGACY[kind]);
+                  for (const stale of MANAGED_KINDS) {
+                    if (stale === kind) continue;
+                    remove.push(stale);
+                    if (KIND_TO_LEGACY[stale]) remove.push(KIND_TO_LEGACY[stale]);
+                  }
+                  add.push('follows-guidelines');
+                } else {
+                  // Zero or several boxes: the conventional-commit title
+                  // prefix is advisory — it fills a blank, never overrules.
+                  // No removals, and no addition when the PR already carries
+                  // a managed kind (maintainer triage wins).
+                  const m = /^([a-z]+)(\([^)]*\))?!?:/.exec(title.trim());
+                  const kind = m ? TITLE_PREFIX_TO_KIND[m[1]] : undefined;
+                  const hasManagedKind = MANAGED_KINDS.some((k) => current.has(k));
+                  if (kind !== undefined && !hasManagedKind) {
+                    add.push(kind);
+                    if (KIND_TO_LEGACY[kind]) add.push(KIND_TO_LEGACY[kind]);
+                  }
+                }
+
+                // Skill delivery: explicit checkbox verdicts only, kept in
+                // lockstep with its legacy twin. No box checked → no verdict,
+                // nothing changes.
+                if (/^-\s*\[[xX]\]\s*Skill:/m.test(scanned)) {
+                  add.push('delivery/skill');
+                  add.push('PR: Skill');
+                } else if (/^-\s*\[[xX]\]\s*Not a skill/m.test(scanned)) {
+                  remove.push('delivery/skill');
+                  remove.push('PR: Skill');
+                }
+              } else {
+                // ── v1: pre-v2 behavior, byte-frozen (add-only) ──
+                if (body.includes('[x] **Feature skill**'))       { add.push('PR: Skill'); add.push('PR: Feature'); add.push('kind/feature'); add.push('delivery/skill'); }
+                else if (body.includes('[x] **Utility skill**'))   { add.push('PR: Skill'); add.push('kind/feature'); add.push('delivery/skill'); }
+                else if (body.includes('[x] **Operational/container skill**')) { add.push('PR: Skill'); add.push('kind/feature'); add.push('delivery/skill'); }
+                else if (body.includes('[x] **Fix**'))             { add.push('PR: Fix'); add.push('kind/bug'); }
+                else if (body.includes('[x] **Simplification**'))  { add.push('PR: Refactor'); add.push('kind/cleanup'); }
+                else if (body.includes('[x] **Documentation**'))   { add.push('PR: Docs'); add.push('kind/documentation'); }
+
+                if (body.includes('contributing-guide: v1')) add.push('follows-guidelines');
+              }
+
+              return { add, remove, coreTeam };
+            }
+
+            // Report-only template compliance (CI-04: the classification
+            // check runs and reports long before it is ever required).
+            //   - v2-marker body with a kind classification (parser verdict,
+            //     title fallback, or an already-applied managed kind) →
+            //     'success'.
+            //   - v2-marker body with no classification at all → 'failure':
+            //     a red X on the commit status, deliberately NOT in the
+            //     required-checks list, so the PR stays mergeable and nothing
+            //     is ever auto-closed.
+            //   - v1 / no-marker bodies → null: untouched, no status at all.
+            function decideCompliance({ body, add, currentLabels }) {
+              if (!(body || '').includes('<!-- nanoclaw-pr-template:v2 -->')) return { state: null };
+              const classified =
+                add.some((l) => MANAGED_KINDS.includes(l)) ||
+                (currentLabels || []).some((l) => MANAGED_KINDS.includes(l));
+              return { state: classified ? 'success' : 'failure' };
+            }
+
+            // One fix-instructions comment per PR, ever — not one per push.
+            // The hidden marker identifies our comment; a marker hit from any
+            // earlier run suppresses a new one.
+            const COMPLIANCE_COMMENT_MARKER = '<!-- nanoclaw-template-compliance -->';
+            function shouldPostComplianceComment(state, existingCommentBodies) {
+              if (state !== 'failure') return false;
+              return !(existingCommentBodies || []).some((b) => (b || '').includes(COMPLIANCE_COMMENT_MARKER));
+            }
+            // NANOCLAW-LABEL-LOGIC-END
+
+            const pr = context.payload.pull_request;
+            const currentLabels = (pr.labels || []).map((l) => l.name);
+            const { add, remove, coreTeam } = computeLabels({
+              body: pr.body,
+              title: pr.title,
+              author: pr.user.login,
+              currentLabels,
+            });
+
+            // ── Report-only template-compliance status (every event) ──
+            const compliance = decideCompliance({ body: pr.body, add, currentLabels });
+            if (compliance.state !== null) {
+              await github.rest.repos.createCommitStatus({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                sha: pr.head.sha,
+                state: compliance.state,
+                context: 'template-compliance',
+                description:
+                  compliance.state === 'success'
+                    ? 'PR carries a kind classification'
+                    : 'No kind classification — check one kind/* box (report-only, does not block merge)',
+              });
+              if (compliance.state === 'failure') {
+                // Paginate: the 'one comment ever' guarantee is a check-then-act
+                // over the whole comment list, so reading only the first page
+                // would re-post on any PR whose discussion has outgrown it.
+                // github.paginate returns the flat array, not a { data } envelope.
+                const existing = await github.paginate(github.rest.issues.listComments, {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pr.number,
+                  per_page: 100,
+                });
+                if (shouldPostComplianceComment(compliance.state, existing.map((c) => c.body))) {
+                  // Static text only — never interpolate PR-controlled content
+                  // into a comment posted with write permissions.
+                  await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: pr.number,
+                    body: [
+                      COMPLIANCE_COMMENT_MARKER,
+                      'This PR uses the v2 template but has no kind classification, so the report-only `template-compliance` status is red. It does not block merging.',
+                      '',
+                      'To fix, either:',
+                      '- check exactly one box in the **Change kind** section (`kind/bug`, `kind/feature`, `kind/documentation`, `kind/cleanup`, or `kind/hardening`), or',
+                      '- give the PR a conventional-commit title (`fix:`, `feat:`, `docs:`, `refactor:`, `chore:`, `ci:`, `test:`, `build:`, `style:`, `perf:`) and edit the description to re-trigger labeling.',
+                      '',
+                      'A maintainer can also apply a `kind/*` label directly. Applying the label does not clear this status on its own: the status is recalculated on the next push or description edit.',
+                    ].join('\n'),
+                  });
+                }
+              }
+            }
+
+            // ── Label mutations: body events only, never on synchronize ──
+            if (context.payload.action === 'synchronize') return;
+
+            if (coreTeam) {
               try {
                 await github.rest.issues.createLabel({
                   owner: context.repo.owner,
@@ -49,11 +297,28 @@ jobs:
               }
             }
 
-            if (labels.length > 0) {
+            // Removals first, and only of labels actually on the PR, so an
+            // edited kind selection swaps cleanly instead of accumulating.
+            const current = new Set((pr.labels || []).map((l) => l.name));
+            for (const name of remove) {
+              if (!current.has(name)) continue;
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pr.number,
+                  name,
+                });
+              } catch (e) {
+                if (e.status !== 404) throw e; // 404: already gone
+              }
+            }
+
+            if (add.length > 0) {
               await github.rest.issues.addLabels({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                issue_number: context.payload.pull_request.number,
-                labels,
+                issue_number: pr.number,
+                labels: add,
               });
             }

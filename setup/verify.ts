@@ -2,27 +2,21 @@
  * Step: verify — End-to-end health check of the full installation.
  * Replaces 09-verify.sh
  *
- * Uses better-sqlite3 directly (no sqlite3 CLI), platform-aware service checks.
+ * Uses the configured central-DB driver and platform-aware service checks.
  */
 import { execSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import Database from 'better-sqlite3';
-
-import { DATA_DIR } from '../src/config.js';
 import { readEnvFile } from '../src/env.js';
 import { log } from '../src/log.js';
 import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
+import { inspectCentralDb } from './central-db-inspection.js';
 import { inspectAgentImage, readImageSource } from './lib/registry-state.js';
-import {
-  getPlatform,
-  getServiceManager,
-  hasSystemd,
-  isRoot,
-} from './platform.js';
+import { getPlatform, getServiceManager, hasSystemd, isRoot } from './platform.js';
 import { emitStatus } from './status.js';
+import { readSlackJob, slackJobStatus, type SlackJob } from '../src/community-portal/slack-job.js';
 
 export async function run(_args: string[]): Promise<void> {
   const projectRoot = process.cwd();
@@ -39,11 +33,7 @@ export async function run(_args: string[]): Promise<void> {
   // developers with multiple clones), nothing in this checkout is actually
   // wired up. Surface the mismatch directly so the user knows to point the
   // service at the right folder.
-  let service:
-    | 'not_found'
-    | 'stopped'
-    | 'running'
-    | 'running_other_checkout' = 'not_found';
+  let service: 'not_found' | 'stopped' | 'running' | 'running_other_checkout' = 'not_found';
   let runningFromPath: string | null = null;
   const mgr = getServiceManager();
 
@@ -75,10 +65,7 @@ export async function run(_args: string[]): Promise<void> {
       execSync(`${prefix} is-active ${systemdUnit}`, { stdio: 'ignore' });
       service = 'running';
       try {
-        const pidStr = execSync(
-          `${prefix} show ${systemdUnit} -p MainPID --value`,
-          { encoding: 'utf-8' },
-        ).trim();
+        const pidStr = execSync(`${prefix} show ${systemdUnit} -p MainPID --value`, { encoding: 'utf-8' }).trim();
         const pid = Number(pidStr);
         if (Number.isInteger(pid) && pid > 0) {
           runningFromPath = resolveBinaryScript(pid);
@@ -98,8 +85,14 @@ export async function run(_args: string[]): Promise<void> {
         // systemctl not available
       }
     }
-  } else {
-    // Check for nohup PID file
+  }
+
+  // Nohup wrapper (setup/service.ts setupNohupFallback). Reached two ways:
+  // no service manager at all, or systemd is PID 1 but the user instance is
+  // unreachable (`systemctl --user` → "Failed to connect to bus") — the case
+  // service.ts already falls back from. Consult the pid file whenever the
+  // manager branch found nothing, so both detectors agree.
+  if (service === 'not_found') {
     const pidFile = path.join(projectRoot, 'nanoclaw.pid');
     if (fs.existsSync(pidFile)) {
       try {
@@ -116,11 +109,7 @@ export async function run(_args: string[]): Promise<void> {
     }
   }
 
-  if (
-    service === 'running' &&
-    runningFromPath &&
-    !isPathInside(runningFromPath, projectRoot)
-  ) {
+  if (service === 'running' && runningFromPath && !isPathInside(runningFromPath, projectRoot)) {
     service = 'running_other_checkout';
   }
 
@@ -198,51 +187,11 @@ export async function run(_args: string[]): Promise<void> {
   //    plus how many agent groups pin an image of their own (reported in step 7).
   //    The two counts get their own try/catch: they read different tables, and a
   //    partially migrated DB must not hide one behind the other's failure.
-  let registeredGroups = 0;
-  let derivedGroups = 0;
-  const dbPath = path.join(DATA_DIR, 'v2.db');
-  if (fs.existsSync(dbPath)) {
-    let db: Database.Database | null = null;
-    try {
-      db = new Database(dbPath, { readonly: true });
-    } catch {
-      // Unreadable (permissions, or mid-migration) — leave both counts at 0
-      // rather than failing the health check on a transient condition.
-    }
-    if (db) {
-      try {
-        // Count agent groups that have at least one messaging group wired
-        const row = db
-          .prepare(
-            `SELECT COUNT(DISTINCT ag.id) as count FROM agent_groups ag
-             JOIN messaging_group_agents mga ON mga.agent_group_id = ag.id`,
-          )
-          .get() as { count: number };
-        registeredGroups = row.count;
-      } catch {
-        // Table might not exist (DB not migrated yet)
-      }
-      try {
-        const row = db
-          .prepare(
-            'SELECT COUNT(*) as count FROM container_configs WHERE image_tag IS NOT NULL',
-          )
-          .get() as { count: number };
-        derivedGroups = row.count;
-      } catch {
-        // Same: container_configs arrives with the migrations
-      }
-      db.close();
-    }
-  }
+  const { registeredGroups, derivedGroups } = await inspectCentralDb(projectRoot);
 
   // 6. Check mount allowlist
   let mountAllowlist = 'missing';
-  if (
-    fs.existsSync(
-      path.join(homeDir, '.config', 'nanoclaw', 'mount-allowlist.json'),
-    )
-  ) {
+  if (fs.existsSync(path.join(homeDir, '.config', 'nanoclaw', 'mount-allowlist.json'))) {
     mountAllowlist = 'configured';
   }
 
@@ -273,6 +222,11 @@ export async function run(_args: string[]): Promise<void> {
     configuredChannels.length > 0 &&
     configuredChannels.every((c) => DEFER_WIRE_CHANNELS.has(c));
 
+  // The detached Slack worker applies the channel after foreground setup
+  // releases its checkout lock. No credentials/groups yet is expected here.
+  const slackInstall = slackJobStatus(await readSlackJob(projectRoot));
+  const slackWiringPending = registeredGroups === 0 && canDeferSlackWiring(slackInstall, configuredChannels);
+
   // Determine overall status. The cli-agent step earlier in setup already
   // proved the agent round-trip works; verify is a static health check.
   const status = determineVerifyStatus({
@@ -280,12 +234,15 @@ export async function run(_args: string[]): Promise<void> {
     credentials,
     registeredGroups,
     wiringPending,
+    slackInstall,
+    configuredChannels,
   });
 
   log.info('Verification complete', {
     status,
     channelAuth,
     wiringPending,
+    slackInstall,
     imageSource,
     imageSourceActual: image.source,
     derivedGroups,
@@ -311,7 +268,8 @@ export async function run(_args: string[]): Promise<void> {
     // versions.json. Empty for a locally built image — it has never had one.
     IMAGE_DIGEST: image.registryDigest ?? '',
     DERIVED_GROUPS: derivedGroups,
-    ...(wiringPending ? { WIRING: 'pending_first_dm' } : {}),
+    ...(slackInstall ? { SLACK_INSTALL: slackInstall } : {}),
+    ...(slackWiringPending ? { WIRING: 'pending_slack_install' } : wiringPending ? { WIRING: 'pending_first_dm' } : {}),
     STATUS: status,
     LOG: 'logs/setup.log',
   });
@@ -328,16 +286,29 @@ export async function run(_args: string[]): Promise<void> {
  */
 export const DEFER_WIRE_CHANNELS = new Set(['teams']);
 
+function canDeferSlackWiring(slackInstall: SlackJob['status'] | undefined, configuredChannels: string[]): boolean {
+  return (
+    (slackInstall === 'awaiting_approval' || slackInstall === 'installing') &&
+    configuredChannels.every((c) => c === 'slack' || DEFER_WIRE_CHANNELS.has(c))
+  );
+}
+
 export function determineVerifyStatus(input: {
   service: 'not_found' | 'stopped' | 'running' | 'running_other_checkout';
   credentials: string;
   registeredGroups: number;
   /** Zero groups but every configured channel defers wiring to the first DM. */
   wiringPending?: boolean;
+  slackInstall?: SlackJob['status'];
+  configuredChannels?: string[];
 }): 'success' | 'failed' {
   return input.service === 'running' &&
     input.credentials !== 'missing' &&
-    (input.registeredGroups > 0 || input.wiringPending === true)
+    input.slackInstall !== 'failed' &&
+    input.slackInstall !== 'expired' &&
+    (input.registeredGroups > 0 ||
+      input.wiringPending === true ||
+      canDeferSlackWiring(input.slackInstall, input.configuredChannels ?? []))
     ? 'success'
     : 'failed';
 }

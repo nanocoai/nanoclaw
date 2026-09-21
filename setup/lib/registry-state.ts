@@ -26,7 +26,7 @@ import path from 'path';
 
 import { readEnvFile } from '../../src/env.js';
 import { getDefaultContainerImage } from '../../src/install-slug.js';
-import { upsertEnvVar } from '../set-env.js';
+import { removeEnvVar, upsertEnvVar } from '../set-env.js';
 import { readVersionPinValue } from './version-pins.js';
 
 /** `.env` key carrying the opt-in. Read by setup and by `container/build.sh`. */
@@ -103,6 +103,16 @@ export function imageSourceDecided(): boolean {
  */
 export function writeImageSource(source: ImageSource): void {
   upsertEnvVar(HARDENED_IMAGE_ENV_KEY, source === 'hardened' ? 'true' : 'false');
+}
+
+/**
+ * Put the question back: after this, `imageSourceDecided()` is false again and
+ * setup asks. For callers that ran the sign-in for a reason of their own and
+ * must not have it answer a question the operator has not been asked yet —
+ * writing `false` would be an answer too, and would suppress the prompt.
+ */
+export function clearImageSource(): void {
+  removeEnvVar(HARDENED_IMAGE_ENV_KEY);
 }
 
 /**
@@ -215,9 +225,7 @@ export function readRegistryHost(): string | undefined {
   const ref = readAgentImagePin();
   if (!ref || !ref.includes('/')) return undefined;
   const first = ref.slice(0, ref.indexOf('/'));
-  return first.includes('.') || first.includes(':') || first === 'localhost'
-    ? first
-    : undefined;
+  return first.includes('.') || first.includes(':') || first === 'localhost' ? first : undefined;
 }
 
 export interface AgentImageInspection {
@@ -284,10 +292,7 @@ interface DockerInspectEntry {
  * leaves it empty, a registry populates it. Only a fallback because a
  * `docker save`/`load` sneakernet image has none and would read as local.
  */
-function resolveActualSource(
-  labels: Record<string, string>,
-  registryDigest: string | undefined,
-): ActualImageSource {
+function resolveActualSource(labels: Record<string, string>, registryDigest: string | undefined): ActualImageSource {
   const declared = labels[IMAGE_SOURCE_LABEL];
   // `derived` is a per-group image built on top of one of the other two. It has
   // to be its own answer: it inherits the base's RepoDigest-derived provenance

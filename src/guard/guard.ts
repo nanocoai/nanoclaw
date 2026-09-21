@@ -26,7 +26,7 @@ import { log } from '../log.js';
 import { isGuardedAction, type GuardedAction } from './guard-actions.js';
 import { ALLOW, DENY, type GuardDecision, type GuardInput } from './types.js';
 
-export function guard(action: GuardedAction, input: GuardInput): GuardDecision {
+export async function guard(action: GuardedAction, input: GuardInput): Promise<GuardDecision> {
   if (!isGuardedAction(action)) {
     // JS-level backstop — the branded type already forbids this. A
     // hand-rolled object must not carry a decide fn never vetted at
@@ -39,7 +39,7 @@ export function guard(action: GuardedAction, input: GuardInput): GuardDecision {
 
   let decision: GuardDecision;
   try {
-    decision = action.decide(input);
+    decision = await action.decide(input);
   } catch (err) {
     log.error('Guard evaluation threw — failing closed', { action: action.action, err });
     return DENY('guard failure (failing closed)');
@@ -53,19 +53,19 @@ export function guard(action: GuardedAction, input: GuardInput): GuardDecision {
 
   // An invalid grant on a replay is a refusal, not a fresh hold — approved
   // replays must execute exactly once.
-  if (grantSatisfies(action, input)) {
+  if (await grantSatisfies(action, input)) {
     return ALLOW(`hold satisfied by approval ${input.grant.approval_id}`);
   }
   return DENY('replay carried an invalid or mismatched grant');
 }
 
-function grantSatisfies(action: GuardedAction, input: GuardInput): boolean {
+async function grantSatisfies(action: GuardedAction, input: GuardInput): Promise<boolean> {
   const grant = input.grant;
   if (!grant || !action.grantActionName) return false;
   if (grant.action !== action.grantActionName) return false;
   // The row must still be live — resolution deletes it, so a grant can only
   // execute once and a fabricated row object doesn't pass.
-  const live = getPendingApproval(grant.approval_id);
+  const live = await getPendingApproval(grant.approval_id);
   if (!live || live.action !== action.grantActionName) return false;
   if (action.grantCoversRequest && !action.grantCoversRequest(grant, input)) return false;
   return true;

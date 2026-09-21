@@ -9,12 +9,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-const VERSIONS_FILE = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  '..',
-  '..',
-  'versions.json',
-);
+const VERSIONS_FILE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'versions.json');
 
 /**
  * Returns the pinned version for a component, e.g.

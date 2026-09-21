@@ -4,13 +4,18 @@ If NanoClaw refuses to start with a message like *"update did not go through the
 
 ## What happened
 
-NanoClaw records the version it reached each time you upgrade through a supported path — `/setup`, `/update-nanoclaw`, or `/migrate-nanoclaw`. That record lives in `data/upgrade-state.json`.
+NanoClaw records the exact version, Git commit, and tree it reached through a
+supported path: `/setup`, `/update-nanoclaw`, or `/migrate-nanoclaw`. That
+record lives in `data/upgrade-state.json`. A same-version commit change still
+requires the supported update flow.
 
-At startup the host checks that record against the running code. If it's **missing** or its version **doesn't match** the code, the host stops. This almost always means the code was updated by a raw `git pull` instead of the supported flow — so migrations, dependency installs, or container rebuilds that the flow would have run may not have happened.
+At startup the host checks that identity against the running checkout. If it is
+missing or differs, the host stops. This almost always means code changed by a
+raw `git pull`, so migrations, dependency installs, or image work may be missing.
 
 ## If you just ran a supported upgrade
 
-If you reached this point by running `/update-nanoclaw`, `/migrate-nanoclaw`, or `/setup` and it **completed successfully**, this is expected the first time an existing install meets the tripwire (your previous version predated it). Clear it by stamping the current version:
+If you reached this point by running `/update-nanoclaw`, `/migrate-nanoclaw`, or `/setup` and it **completed successfully**, this is expected the first time an existing install meets the exact-code tripwire. Clear it by stamping the current checkout:
 
 ```bash
 pnpm exec tsx scripts/upgrade-state.ts set
@@ -30,9 +35,24 @@ Don't just clear the tripwire — that skips the work the supported flow does. I
 
 Once it finishes it stamps the marker for you, and the next start is clean.
 
+## If you committed a local customization
+
+An intentional local commit changes the checkout identity too. First verify the
+commit contains only the customization you intended and run the same build,
+tests, migrations, and image work that `/update-nanoclaw` would require. Then
+stamp the reviewed checkout with the override below. Do not run
+`/update-nanoclaw` just to erase or replace a local customization.
+
+## If Git is unavailable
+
+The override still works when `git` is missing or the checkout metadata cannot
+be read. It records the commit and tree as `unknown` so a verified install can
+start. Restore Git access when practical, repeat the relevant validation, and
+stamp again; the exact commit and tree will then be recorded normally.
+
 ## If you have your own upgrade flow
 
-If you've built your own way to upgrade — a custom skill, a deploy script, a CI job, a service that pulls and restarts — it won't stamp the marker, so the host will trip on the next start. Add the stamp as the **last step** of that flow, after the upgrade succeeds and before the restart:
+If you've built your own way to upgrade — a custom skill, a deploy script, a CI job, a service that pulls and restarts — it won't stamp the marker, so the host will trip on the next start. Add the stamp after validation and required migrations succeed, immediately before the health-gated restart:
 
 ```bash
 pnpm exec tsx scripts/upgrade-state.ts set

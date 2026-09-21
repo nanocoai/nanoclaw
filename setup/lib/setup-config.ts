@@ -59,8 +59,7 @@ interface IntEntry extends BaseEntry {
 
 export type Entry = StringEntry | EnumEntry | BoolEntry | IntEntry;
 
-const httpUrl = (v: string): string | undefined =>
-  /^https?:\/\/\S+/.test(v) ? undefined : 'Must be http(s)://…';
+const httpUrl = (v: string): string | undefined => (/^https?:\/\/\S+/.test(v) ? undefined : 'Must be http(s)://…');
 
 export const CONFIG: Entry[] = [
   {
@@ -107,8 +106,8 @@ export const CONFIG: Entry[] = [
   },
   {
     key: 'templatePath',
-    label: 'First-agent template',
-    help: 'Create the first agent from a local template ref under templates/ (for example, sales/sdr).',
+    label: 'Agent template',
+    help: 'Create or update an agent from a local template ref under templates/ (for example, sales/sdr).',
     surface: 'flag+ui',
     group: 'Agent',
     type: 'string',

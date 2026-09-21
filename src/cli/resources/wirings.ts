@@ -31,8 +31,8 @@ const CREATE_ENUMS: Record<string, string[]> = {
   session_mode: ['shared', 'per-thread', 'agent-shared'],
 };
 
-function requireMessagingGroup(id: unknown): MessagingGroup {
-  const mg = getMessagingGroup(String(id));
+async function requireMessagingGroup(id: unknown): Promise<MessagingGroup> {
+  const mg = await getMessagingGroup(String(id));
   if (!mg) throw new Error(`messaging group not found: ${id}`);
   return mg;
 }
@@ -96,7 +96,7 @@ registerResource({
       name: 'ignored_message_policy',
       type: 'string',
       description:
-        'What happens to messages that don\'t trigger engagement. "drop" — agent never sees them. "accumulate" — stored as background context (trigger=0) so the agent has prior context when eventually triggered.',
+        'What happens to messages that don\'t trigger engagement. "drop" — agent never sees them. "accumulate" — stored as background context so the agent has prior context when eventually triggered.',
       enum: ['drop', 'accumulate'],
       default: 'drop',
       updatable: true,
@@ -105,7 +105,7 @@ registerResource({
       name: 'session_mode',
       type: 'string',
       description:
-        '"shared" — one session per (agent, messaging group). "per-thread" — separate session per thread/topic. "agent-shared" — one session across all messaging groups wired to this agent. Note: threaded adapters in group chats force per-thread regardless of this setting.',
+        '"shared" — one session per (agent, messaging group). "per-thread" — separate session per thread/topic; requires the wiring to honor thread ids (rejected when its thread policy resolves off — pair with --threads true where the channel context does not honor them). "agent-shared" — one session across all messaging groups wired to this agent. Note: threaded adapters in group chats force per-thread regardless of this setting.',
       enum: ['shared', 'per-thread', 'agent-shared'],
       default: 'shared',
       updatable: true,
@@ -134,8 +134,8 @@ registerResource({
   // handler (declaration-aware defaults, companion destination row, live
   // session projection) — keep them in sync with genericCreate's semantics.
   operations: { list: 'open', get: 'open', update: 'approval', delete: 'approval' },
-  preUpdate: (updates, current) => {
-    const mg = requireMessagingGroup(current.messaging_group_id);
+  preUpdate: async (updates, current) => {
+    const mg = await requireMessagingGroup(current.messaging_group_id);
     if (updates.threads !== undefined) updates.threads = normalizeThreads(updates.threads);
 
     const merged: EngageValues = { ...current, ...updates };
@@ -149,6 +149,13 @@ registerResource({
       (merged.engage_pattern === undefined || merged.engage_pattern === null)
     ) {
       merged.engage_pattern = '.';
+    }
+    // Same treatment for the session/threads pairing: pre-existing rows may
+    // hold session_mode='per-thread' with a false-resolving thread policy
+    // (stamped before the coherence check existed). Don't reject unrelated
+    // updates to them — enforce only when either side of the pairing changes.
+    if (updates.session_mode === undefined && updates.threads === undefined) {
+      merged.session_mode = undefined;
     }
     validateEngageAgainstChannel(merged, mg);
     // Carry the sticky→mention coercion (if any) back into the update set.
@@ -170,7 +177,11 @@ registerResource({
           if (!channelType || !platformId) {
             throw new Error('provide --messaging-group-id, or --channel-type and --platform-id to resolve it');
           }
-          const mg = getMessagingGroupByPlatform(channelType, platformId, (args.instance as string) ?? channelType);
+          const mg = await getMessagingGroupByPlatform(
+            channelType,
+            platformId,
+            (args.instance as string) ?? channelType,
+          );
           if (!mg) throw new Error(`no messaging group for ${channelType} ${platformId} — create it first`);
           mgId = mg.id;
         }
@@ -180,14 +191,14 @@ registerResource({
         if (!agId) {
           const ref = args.agent_group as string;
           if (!ref) throw new Error('provide --agent-group-id or --agent-group <folder>');
-          const ag = getAgentGroup(ref) ?? getAgentGroupByFolder(ref);
+          const ag = (await getAgentGroup(ref)) ?? (await getAgentGroupByFolder(ref));
           if (!ag) throw new Error(`no agent group "${ref}" (by id or folder)`);
           agId = ag.id;
         }
 
         // Idempotent: a wiring for this pair already exists → return it
         // (defaults/validation/side-effects are skipped — nothing new is written).
-        const existing = getMessagingGroupAgentByPair(mgId, agId);
+        const existing = await getMessagingGroupAgentByPair(mgId, agId);
         if (existing) return existing;
 
         // Pass-1 parity: only defined keys enter `values` (an unset
@@ -211,7 +222,7 @@ registerResource({
         if (args.priority !== undefined) values.priority = Number(args.priority);
 
         // Pass-2 parity: context-aware defaults + cross-column validation.
-        const mg = requireMessagingGroup(values.messaging_group_id);
+        const mg = await requireMessagingGroup(values.messaging_group_id);
         if (values.threads !== undefined) values.threads = normalizeThreads(values.threads);
 
         const channelKey = mg.instance ?? mg.channel_type;
@@ -220,7 +231,7 @@ registerResource({
         // change ncl's creation defaults for adapters without a declaration.
         if (values.engage_mode === undefined) {
           if (hasDeclaredChannelDefaults(channelKey, mg.channel_type)) {
-            const ag = getAgentGroup(String(values.agent_group_id));
+            const ag = await getAgentGroup(String(values.agent_group_id));
             if (!ag) throw new Error(`agent group not found: ${values.agent_group_id}`);
             const resolved = resolveWiringDefaults(channelKey, mg.is_group === 1, ag.name, mg.channel_type);
             values.engage_mode = resolved.engage_mode;
@@ -257,12 +268,13 @@ registerResource({
         const colNames = Object.keys(values);
         const placeholders = colNames.map((c) => `@${c}`);
         const db = getDb();
-        db.transaction(() => {
-          db.prepare(
+        await db.transaction(async () => {
+          await db.run(
             `INSERT INTO messaging_group_agents (${colNames.join(', ')}) VALUES (${placeholders.join(', ')})`,
-          ).run(values);
-          ensureAgentDestinationForWiring(values as unknown as MessagingGroupAgent);
-        })();
+            values,
+          );
+          await ensureAgentDestinationForWiring(values as unknown as MessagingGroupAgent);
+        });
 
         // postCommit parity — live-refresh with `ncl destinations add`: the
         // transaction above only wrote the central `agent_destinations` row.

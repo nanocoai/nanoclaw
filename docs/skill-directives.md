@@ -36,15 +36,19 @@ Every directive is idempotent — apply is safe to re-run, per the skills model.
 
 ### `copy [from-branch:<b>]`
 
-Body: one path per line — `PATH` (source == destination) or `SRC -> DST`. Copies the file in; with `from-branch:` the source is fetched from a registry branch (`git show origin/<b>:<path>`). **Idempotency: skip when every destination is present; when any is missing, all listed files are (re)copied — copying overwrites.**
+Body: one path per line — `PATH` (source == destination) or `SRC -> DST`. Copies the file in; with `from-branch:` the source is fetched from a registry branch (`git show refs/remotes/<remote>/<b>:<path>`). **Idempotency: skip when every destination is present; when any is missing, all listed files are (re)copied — copying overwrites.**
+
+Registry copies explicitly fetch `+refs/heads/<b>:refs/remotes/<remote>/<b>` from the selected remote before reading it. This also works in single-branch clones and updates stale registry refs without changing the checkout or its configured fetch mapping. A failed fetch stops the copy; cached registry content is not used as a fallback.
 
 ### `append to:<file> [at:<marker>]`
 
 Body: the line(s) to add. Without `at:`, appends at end of file. With `at:<marker>`, inserts before the `// <<< <marker>` closing line of a dormant marker region (see `setup/index.ts`). **Idempotency: skip if already present.**
 
-### `dep [manager:pnpm]`
+### `dep [manager:pnpm|bun] [cwd:<dir>]`
 
-Body: `pkg@<exact-semver>` line(s). Exact pins only — ranges are a lint error. **Idempotency: reinstalling a present pin is a no-op.**
+Body: `pkg@<exact-semver>` line(s). Exact pins only — ranges are a lint error.
+`manager:` defaults to `pnpm`; `cwd:` targets a nested package tree such as
+`container/agent-runner`. **Idempotency: reinstalling a present pin is a no-op.**
 
 ### `run [effect:<e>] [capture:<spec>] [validate:<re>]`
 
@@ -62,6 +66,7 @@ Body: shell command(s), with `{{vars}}` substituted in. **Idempotency: the comma
 | `restart` | Restarts the service so following `ncl` runs reach it. A caller that owns the restart (a rebuild, or a setup that restarts once) skips it via `ApplyOptions.skipEffects` |
 | `step` | A long-running, operator-interactive step (a pairing code, a QR device-link) run through the streaming exec: its `=== NANOCLAW SETUP: … ===` status blocks render to the operator live. Degrades to an agent when no streaming exec is wired |
 | `check` | A shell **predicate** (a precondition gate): mutates nothing — no journal, no capture. Zero exit passes silently; non-zero bounces to an agent (degrade, not crash) and, via the run-health gate, blocks the dangerous side effects that follow it (a restart, a pairing/QR step, a wire). An unresolved `{{var}}` defers |
+| `refresh` | A non-interactive, idempotent maintenance command that is safe to run while refreshing installed skill code. Refresh mode skips every other run effect, plus prompts, operator steps, environment writes, and wiring |
 
 `capture:` binds command output into vars (the twin of `prompt`):
 

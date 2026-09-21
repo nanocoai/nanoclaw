@@ -222,7 +222,7 @@ account-takeover bugs happen — and there is no way to merge them today. Pick o
 |---|---|
 | `./container/build.sh` exits 3 | Pinned install. `pull` to refresh, `build` to force local. |
 | Setup never offers the pull option | The option needs a Claude install and an `agent-image` pin in `versions.json`. Existing installs can follow [the migration above](#existing-installs-switch-to-the-hardened-image). |
-| Pull fails: lockfile mismatch | The image was built against a different `container/agent-runner/bun.lock`. Refresh the pin or build locally. |
+| Pull warns: lockfile mismatch | The image was built against a different `container/agent-runner/bun.lock`. The pull proceeds — temporarily, while no published image carries the current lockfile. If the agent then dies on a missing module, run `./container/build.sh build`. |
 | Pull fails: architecture mismatch | The reference names one architecture and it isn't this daemon's. Use a multi-arch index, or the reference for this architecture. |
 | "No agent-image reference for linux/…" | The pin is per-platform and has no entry for this machine. Build locally, or set `NANOCLAW_AGENT_IMAGE_REF`. |
 | Pull fails: auth | `--status` shows whether the credential helper is wired; `--force` re-runs sign-in. |

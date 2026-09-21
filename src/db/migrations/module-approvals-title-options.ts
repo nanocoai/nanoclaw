@@ -18,6 +18,7 @@ import type { Migration } from './index.js';
 export const moduleApprovalsTitleOptions: Migration = {
   version: 7,
   name: 'pending-approvals-title-options',
+  sqliteOnly: true,
   up(db) {
     const addIfMissing = (col: string, sql: string): void => {
       try {

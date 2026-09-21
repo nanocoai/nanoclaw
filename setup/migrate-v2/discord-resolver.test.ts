@@ -31,13 +31,8 @@ describe('buildDiscordResolver', () => {
         { id: 'g1', name: 'Guild 1' },
         { id: 'g2', name: 'Guild 2' },
       ],
-      'https://discord.com/api/v10/guilds/g1/channels': [
-        { id: 'c1' },
-        { id: 'c2' },
-      ],
-      'https://discord.com/api/v10/guilds/g2/channels': [
-        { id: 'c3' },
-      ],
+      'https://discord.com/api/v10/guilds/g1/channels': [{ id: 'c1' }, { id: 'c2' }],
+      'https://discord.com/api/v10/guilds/g2/channels': [{ id: 'c3' }],
     });
 
     const r = await buildDiscordResolver('valid-token', [], fetchImpl);
@@ -123,11 +118,7 @@ describe('buildDiscordResolver', () => {
       'https://discord.com/api/v10/channels/groupDmId': { id: 'groupDmId', type: 3 },
     });
 
-    const r = await buildDiscordResolver(
-      'valid-token',
-      ['guild-chan', 'dmId', 'groupDmId'],
-      fetchImpl,
-    );
+    const r = await buildDiscordResolver('valid-token', ['guild-chan', 'dmId', 'groupDmId'], fetchImpl);
 
     expect(r.stats()).toEqual({ guilds: 1, channels: 1, dms: 2 });
     expect(r.resolve('guild-chan')).toBe('discord:g1:guild-chan');
@@ -152,11 +143,7 @@ describe('buildDiscordResolver', () => {
       },
     });
 
-    const r = await buildDiscordResolver(
-      'valid-token',
-      ['orphanId', 'leftoverGuildChan'],
-      fetchImpl,
-    );
+    const r = await buildDiscordResolver('valid-token', ['orphanId', 'leftoverGuildChan'], fetchImpl);
 
     expect(r.stats()).toEqual({ guilds: 0, channels: 0, dms: 0 });
     expect(r.resolve('orphanId')).toBeNull();
@@ -182,11 +169,7 @@ describe('buildDiscordResolver', () => {
 
     // 'guild-chan' is in the guild map (skip classify); 'dmId' appears twice
     // in the input (classify exactly once).
-    const r = await buildDiscordResolver(
-      'valid-token',
-      ['guild-chan', 'dmId', 'dmId'],
-      fetchImpl,
-    );
+    const r = await buildDiscordResolver('valid-token', ['guild-chan', 'dmId', 'dmId'], fetchImpl);
 
     expect(dmCallCount).toBe(1);
     expect(r.resolve('guild-chan')).toBe('discord:g1:guild-chan');

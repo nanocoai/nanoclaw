@@ -42,15 +42,13 @@ spawn. For the default (Claude) provider these are:
 | `/workspace` | `data/v2-sessions/<group>/<session>/` | RW | Session folder — `inbound.db`, `outbound.db`, `outbox/`, `.claude/` |
 | `/workspace/agent` | `groups/<folder>/` | RW | Agent working files, standing instructions, and shared memory tree |
 | `/workspace/agent/container.json` | group `container.json` | RO | Container config — readable, not writable |
-| `/workspace/agent/CLAUDE.md` | composed `CLAUDE.md` | RO | Regenerated every spawn; agent edits would be clobbered |
-| `/workspace/agent/.claude-fragments` | group `.claude-fragments/` | RO | Composer skill/MCP fragments |
-| `/app/CLAUDE.md` | `container/CLAUDE.md` | RO | Shared base doc imported by the composed entry point |
+| `/workspace/agent/CLAUDE.md` | composed `CLAUDE.md` | RO | The complete project document, every instruction source inlined; regenerated every spawn |
 | `/home/node/.claude` | `data/v2-sessions/<group>/.claude-shared/` | RW | Claude state, settings, skill symlinks |
 | `/app/src` | `container/agent-runner/src/` | RO | Shared agent-runner source (same for all groups) |
 | `/app/skills` | `container/skills/` | RO | Shared container skills |
 | `/workspace/extra/<name>` | allowlisted host dir | RO (RW only if allowed) | Operator-configured additional mounts |
 
-The config mounts (`container.json`, `CLAUDE.md`, `.claude-fragments`) are
+The config mounts (`container.json`, `CLAUDE.md`, `plugins/`) are
 **nested read-only mounts on top of the read-write group dir** — the agent can
 read its config but cannot modify it. The project root is **never mounted**: the
 container only ever sees the paths above plus any provider-contributed mounts
@@ -58,8 +56,10 @@ container only ever sees the paths above plus any provider-contributed mounts
 `package.json`) is not reachable.
 
 Shared memory content is read only by the provider's SessionStart hook inside
-the container. Host-side project-document composers emit pointers but never
-open `memory/index.md` or linked agent-controlled files. A memory symlink can
+the container. Host-side project-document composers inline the repository's own
+instruction sources, and read nothing the agent can author except
+`instructions.prepend.md` (opened with `O_NOFOLLOW`); they never open
+`memory/index.md` or linked agent-controlled files. A memory symlink can
 therefore reach only paths already visible inside that container, not arbitrary
 host files.
 

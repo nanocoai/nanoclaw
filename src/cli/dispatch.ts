@@ -6,7 +6,7 @@
  * Every command passes the guard before its handler runs — the decision
  * (allow / hold / deny) comes from the command's catalog entry, derived at
  * registration (see cli/guard.ts). Dispatch keeps the mechanics: arg
- * auto-fill, the sessions-get existence oracle, `--help` interception,
+ * auto-fill, the sessions-get/-history existence-oracle guard, `--help` interception,
  * parseArgs, and post-handler row filtering. An approved replay re-enters
  * here carrying the verified approval row as its grant — the guard re-checks
  * the structural checks live, and the `approved: true` boolean no longer
@@ -73,7 +73,7 @@ export async function dispatch(
   // Group-scope mechanics for agent callers (visibility, not policy — the
   // allow/hold/deny decisions live in the guard decision, cli/guard.ts).
   if (ctx.caller === 'agent') {
-    const configRow = getContainerConfig(ctx.agentGroupId);
+    const configRow = await getContainerConfig(ctx.agentGroupId);
     const cliScope = configRow?.cli_scope ?? 'group';
 
     if (cliScope === 'group') {
@@ -92,17 +92,22 @@ export async function dispatch(
       // Group-scoped agents may only inspect or update the wiring for the
       // conversation they are currently serving. Never trust a caller ID.
       if (req.args.help !== true && (req.command === 'wirings-get' || req.command === 'wirings-update')) {
-        const wiring = getMessagingGroupAgentByPair(ctx.messagingGroupId, ctx.agentGroupId);
+        const wiring = await getMessagingGroupAgentByPair(ctx.messagingGroupId, ctx.agentGroupId);
         if (!wiring) return err(req.id, 'forbidden', 'Wiring not found for this conversation.');
         fill.id = wiring.id;
       }
       req = { ...req, args: { ...req.args, ...fill } };
 
-      // Fail-closed pre-handler check for sessions-get: returns "not found"
-      // regardless of whether the UUID exists in another group, preventing an
-      // existence oracle across group boundaries.
-      if (cmd.resource === 'sessions' && req.command === 'sessions-get' && req.args.id) {
-        const s = getSession(req.args.id as string);
+      // Fail-closed pre-handler check for sessions-get/-history: returns
+      // "not found" regardless of whether the UUID exists in another group,
+      // preventing an existence oracle across group boundaries. (history
+      // also self-scopes in its handler — this is defense-in-depth.)
+      if (
+        cmd.resource === 'sessions' &&
+        (req.command === 'sessions-get' || req.command === 'sessions-history') &&
+        req.args.id
+      ) {
+        const s = await getSession(req.args.id as string);
         if (!s || s.agent_group_id !== ctx.agentGroupId) {
           return err(req.id, 'handler-error', `session not found: ${req.args.id}`);
         }
@@ -110,7 +115,7 @@ export async function dispatch(
     }
   }
 
-  const decision = guard(commandGuard(cmd.name), {
+  const decision = await guard(commandGuard(cmd.name), {
     actor: actorFor(ctx),
     payload: req.args,
     grant: opts.grant ?? null,
@@ -137,11 +142,11 @@ export async function dispatch(
       // fail closed rather than card a ghost.
       return err(req.id, 'forbidden', decision.reason);
     }
-    const session = getSession(ctx.sessionId);
+    const session = await getSession(ctx.sessionId);
     if (!session) {
       return err(req.id, 'handler-error', 'Session not found.');
     }
-    const agentGroup = getAgentGroup(ctx.agentGroupId);
+    const agentGroup = await getAgentGroup(ctx.agentGroupId);
     const agentName = agentGroup?.name ?? ctx.agentGroupId;
 
     const argSummary = Object.entries(req.args)
@@ -183,7 +188,7 @@ export async function dispatch(
     // pre-handler `--id` auto-fill (groups/destinations) or gated behind approval,
     // so they can't reach another group's data anyway.
     if (ctx.caller === 'agent' && cmd.resource && cmd.generic) {
-      const configRow = getContainerConfig(ctx.agentGroupId);
+      const configRow = await getContainerConfig(ctx.agentGroupId);
       if ((configRow?.cli_scope ?? 'group') === 'group') {
         const def = getResource(cmd.resource);
         const groupField = def?.scopeField;
@@ -232,9 +237,9 @@ registerApprovalHandler('cli_command', async ({ payload, approval, notify }) => 
   if (response.ok) {
     const localized = localizeIsoTimestamps(response.data);
     const data = typeof localized === 'string' ? localized : JSON.stringify(localized, null, 2);
-    notify(`Your \`ncl ${frame.command}\` request was approved and executed.\n\n${data}`);
+    await notify(`Your \`ncl ${frame.command}\` request was approved and executed.\n\n${data}`);
   } else {
-    notify(`Your \`ncl ${frame.command}\` request was approved but failed: ${response.error.message}`);
+    await notify(`Your \`ncl ${frame.command}\` request was approved but failed: ${response.error.message}`);
   }
 });
 

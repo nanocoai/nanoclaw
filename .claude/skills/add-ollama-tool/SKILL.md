@@ -106,52 +106,55 @@ Add an `ollama` entry alongside `nanoclaw`:
 
 The container receives `TZ` and OneCLI networking vars by default; any other host env
 var the MCP subprocess needs must be forwarded explicitly. The forwarding logic lives in
-the copied `src/ollama-env.ts` (`ollamaEnvArgs()`) — `OLLAMA_HOST` (the daemon base URL)
+the copied `src/ollama-env.ts` (`ollamaEnv()`) — `OLLAMA_HOST` (the daemon base URL)
 and `OLLAMA_ADMIN_TOOLS` (the library-management opt-in flag). Both are configuration, not
-credentials, so they are passed through plainly; Ollama itself is local and keyless.
+credentials (Ollama itself is local and keyless), so they belong on the composed `env`
+literal — a credential-NAMED key would need the `contributedEnv` lane instead (see
+`add-atomic-chat-tool` for that shape).
 
 Import it in `src/container-runner.ts` (alongside the other local imports):
 
 ```ts
-import { ollamaEnvArgs } from './ollama-env.js';
+import { ollamaEnv } from './ollama-env.js';
 ```
 
-Then, in `buildContainerArgs`, find the `TZ` env line and add the call right after it:
+Then, in `composeSessionSpec`, find the `env` literal (the `TZ` line) and spread the helper right after it:
 
 ```ts
-  args.push('-e', `TZ=${TIMEZONE}`);
-  args.push(...ollamaEnvArgs());
+  const env: Record<string, string> = {
+    TZ: containerConfig.timezone ?? TIMEZONE,
+    ...ollamaEnv(),
+  };
 ```
 
-`ollama-wiring.test.ts` asserts this `args.push(...ollamaEnvArgs())` call exists inside `buildContainerArgs`.
+`ollama-wiring.test.ts` asserts this `...ollamaEnv()` spread exists inside `composeSessionSpec`.
 
 ### Surface `[OLLAMA]` log lines at info level
 
-> **Shared block.** This rewrites the `container.stderr` logger, which other local-model tools (e.g. `add-atomic-chat-tool` for `[ATOMIC]`) also edit to surface their own prefix. Touch only the `[OLLAMA]` branch and leave the rest of the block intact, so the edits coexist and removal restores it cleanly.
+> **Shared block.** This rewrites the driver's container-stderr logger, which other local-model tools (e.g. `add-atomic-chat-tool` for `[ATOMIC]`) also edit to surface their own prefix. Touch only the `[OLLAMA]` branch and leave the rest of the block intact, so the edits coexist and removal restores it cleanly.
 
-In the same file, find the stderr logger:
+Container stderr now lands in the Docker driver: in `src/drivers/docker-driver.ts`, inside `DockerHandle.start()`, find the stderr handler:
 
 ```ts
-  container.stderr?.on('data', (data) => {
-    for (const line of data.toString().trim().split('\n')) {
-      if (line) log.debug(line, { container: agentGroup.folder });
-    }
-  });
+    proc.onStderr((line) => {
+      log.debug(line, { container: this.name });
+      this.#stderrTail.push(line);
+      if (this.#stderrTail.length > 10) this.#stderrTail.shift();
+    });
 ```
 
-Replace it with:
+Replace the `log.debug` line with a prefix branch (leave the stderr-tail lines intact — they feed the non-zero-exit warning):
 
 ```ts
-  container.stderr?.on('data', (data) => {
-    for (const line of data.toString().trim().split('\n')) {
-      if (!line) continue;
+    proc.onStderr((line) => {
       if (line.includes('[OLLAMA]')) {
-        log.info(line, { container: agentGroup.folder });
+        log.info(line, { container: this.name });
       } else {
-        log.debug(line, { container: agentGroup.folder });
+        log.debug(line, { container: this.name });
       }
-    }
-  });
+      this.#stderrTail.push(line);
+      if (this.#stderrTail.length > 10) this.#stderrTail.shift();
+    });
 ```
 
 If `add-atomic-chat-tool` (or another local-model tool) has already turned this into a
@@ -178,7 +181,7 @@ Append to `.env.example`:
 ```bash
 pnpm run build
 pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit
-# Host tree: buildContainerArgs wiring
+# Host tree: composeSessionSpec wiring
 pnpm exec vitest run src/ollama-wiring.test.ts
 # Container tree: index.ts registration
 (cd container/agent-runner && bun test src/ollama-registration.test.ts)
@@ -186,7 +189,7 @@ pnpm exec vitest run src/ollama-wiring.test.ts
 ```
 
 All must be clean before proceeding. The wiring and registration tests confirm the two
-integration points — the `buildContainerArgs` call and the `index.ts` registration — are
+integration points — the `composeSessionSpec` spread and the `index.ts` registration — are
 actually in place; a failure means one drifted. (The MCP server's own request/response
 behavior against the Ollama daemon is the author's build-time concern, not part of these
 tests — verify it manually in Phase 4.)

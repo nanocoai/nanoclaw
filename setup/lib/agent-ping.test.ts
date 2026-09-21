@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { classifyPingResult } from './agent-ping.js';
+import { isValidGroupFolder } from '../../src/group-folder.js';
+import { classifyPingResult, PING_AGENT_FOLDER } from './agent-ping.js';
+
+it('uses a runtime-safe folder for the setup ping agent', () => {
+  expect(isValidGroupFolder(PING_AGENT_FOLDER)).toBe(true);
+});
 
 describe('classifyPingResult', () => {
   it('treats a normal text reply as ok', () => {
@@ -21,12 +26,8 @@ describe('classifyPingResult', () => {
   });
 
   it('detects Claude Code login banners printed as a chat reply', () => {
-    expect(
-      classifyPingResult(0, 'Invalid API key · Please run /login'),
-    ).toBe('auth_error');
-    expect(
-      classifyPingResult(0, 'Not logged in · Please run /login'),
-    ).toBe('auth_error');
+    expect(classifyPingResult(0, 'Invalid API key · Please run /login')).toBe('auth_error');
+    expect(classifyPingResult(0, 'Not logged in · Please run /login')).toBe('auth_error');
   });
 
   it('preserves socket errors', () => {

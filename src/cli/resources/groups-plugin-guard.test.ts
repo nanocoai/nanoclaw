@@ -59,16 +59,16 @@ async function run(command: string, args: Record<string, unknown>) {
 
 let groupId: string;
 
-beforeEach(() => {
+beforeEach(async () => {
   fs.rmSync(TEST_ROOT, { recursive: true, force: true });
   fs.mkdirSync(TEST_ROOT, { recursive: true });
-  runMigrations(initTestDb());
+  await runMigrations(await initTestDb());
   writeTemplate();
-  groupId = createAgentFromTemplate('sdr', { name: 'SDR' }).group.id;
+  groupId = (await createAgentFromTemplate('sdr', { name: 'SDR' })).group.id;
 });
 
-afterEach(() => {
-  closeDb();
+afterEach(async () => {
+  await closeDb();
   fs.rmSync(TEST_ROOT, { recursive: true, force: true });
 });
 
@@ -81,14 +81,14 @@ describe('plugin-owned MCP server guard (ncl groups config)', () => {
     });
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.message).toMatch(/owned by plugin "sdr".*restamp/);
-    expect(JSON.parse(getContainerConfig(groupId)!.mcp_servers).docs.url).toBe('https://mcp.example.com/mcp');
+    expect(JSON.parse((await getContainerConfig(groupId))!.mcp_servers).docs.url).toBe('https://mcp.example.com/mcp');
   });
 
   it('refuses to remove a plugin-owned server', async () => {
     const res = await run('groups-config-remove-mcp-server', { id: groupId, name: 'docs' });
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.message).toMatch(/owned by plugin "sdr"/);
-    expect(JSON.parse(getContainerConfig(groupId)!.mcp_servers).docs).toBeDefined();
+    expect(JSON.parse((await getContainerConfig(groupId))!.mcp_servers).docs).toBeDefined();
   });
 
   it('leaves unmarked servers fully editable', async () => {
@@ -100,7 +100,7 @@ describe('plugin-owned MCP server guard (ncl groups config)', () => {
     expect(added.ok).toBe(true);
     const removed = await run('groups-config-remove-mcp-server', { id: groupId, name: 'mine' });
     expect(removed.ok).toBe(true);
-    expect(JSON.parse(getContainerConfig(groupId)!.mcp_servers).mine).toBeUndefined();
+    expect(JSON.parse((await getContainerConfig(groupId))!.mcp_servers).mine).toBeUndefined();
   });
 });
 
