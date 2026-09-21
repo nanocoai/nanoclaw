@@ -71,15 +71,24 @@ export async function verifyProviderContracts(
     await run('host dependencies', 'pnpm install --frozen-lockfile');
     await run('runtime dependencies', `${bun} install --frozen-lockfile`, runnerRoot);
     await run('host build', 'pnpm run build');
-    const optionalHostTests = fs.existsSync(path.join(root, 'src/opencode-cli-tools.test.ts'))
-      ? ' src/opencode-cli-tools.test.ts'
-      : '';
+    const optionalHostTests = [
+      'src/opencode-cli-tools.test.ts',
+      ...(fs.existsSync(path.join(root, 'scripts'))
+        ? fs
+            .readdirSync(path.join(root, 'scripts'))
+            .filter((file) => /^[a-z0-9]+(?:-[a-z0-9]+)*-host\.test\.ts$/.test(file))
+            .map((file) => `scripts/${file}`)
+        : []),
+    ]
+      .filter((file) => fs.existsSync(path.join(root, file)))
+      .map((file) => ` ${file}`)
+      .join('');
     await run(
       'host provider contract tests',
       `pnpm exec vitest run src/provider-contracts src/providers setup/provider-contract.test.ts setup/providers${optionalHostTests}`,
     );
     await run('runtime typecheck', 'pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit');
-    await run('runtime provider contract tests', `${bun} test src/provider-contracts src/providers`, runnerRoot);
+    await run('runtime provider contract tests', `${bun} run test src/provider-contracts src/providers`, runnerRoot);
 
     const host = JSON.parse(
       await run('host contract inventory', 'pnpm exec tsx scripts/provider-contract-names.ts'),
@@ -100,7 +109,7 @@ export async function verifyProviderContracts(
     // Every declared runtime contract proves itself from its own
     // providers/<name>.conformance.test.ts — the probe fixtures a contract
     // needs are provider knowledge, so core runs no generic sweep. The
-    // 'runtime provider contract tests' step above (`bun test
+    // 'runtime provider contract tests' step above (`bun run test
     // src/provider-contracts src/providers`) already executed the file;
     // this check is what makes a payload that forgot to ship it fail.
     for (const provider of runtime.contracts) {

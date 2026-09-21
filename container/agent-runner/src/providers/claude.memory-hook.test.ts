@@ -52,6 +52,7 @@ describe('Claude memory SessionStart registration', () => {
     registerProviderMemorySessionHook('claude', provider, MEMORY_SESSION_HOOK);
 
     const settings = JSON.parse(fs.readFileSync(settingsFile, 'utf-8'));
+    expect(settings.outputStyle).toBe('Concise');
     expect(settings.customValue).toBe('preserved');
     expect(settings.hooks.Stop).toEqual([{ hooks: [{ type: 'command', command: 'custom-stop' }] }]);
     expect(settings.hooks.SessionStart).toEqual([
@@ -62,5 +63,18 @@ describe('Claude memory SessionStart registration', () => {
         hooks: [{ type: 'command', command: 'bun /app/src/memory/hook.ts', timeout: 10 }],
       },
     ]);
+  });
+
+  it.each([undefined, 'Explanatory', 'My chat style'])('seeds tone without replacing %j', (outputStyle) => {
+    const settingsFile = path.join(configDir, 'settings.json');
+    if (outputStyle !== undefined) fs.writeFileSync(settingsFile, JSON.stringify({ outputStyle }));
+    const provider = createProvider('claude');
+    registerProviderMemorySessionHook('claude', provider, MEMORY_SESSION_HOOK);
+    expect(JSON.parse(fs.readFileSync(settingsFile, 'utf-8')).outputStyle).toBe(outputStyle ?? 'Concise');
+
+    const settings = JSON.parse(fs.readFileSync(settingsFile, 'utf-8'));
+    fs.writeFileSync(settingsFile, JSON.stringify({ ...settings, outputStyle: 'Learning' }));
+    registerProviderMemorySessionHook('claude', provider, MEMORY_SESSION_HOOK);
+    expect(JSON.parse(fs.readFileSync(settingsFile, 'utf-8')).outputStyle).toBe('Learning');
   });
 });

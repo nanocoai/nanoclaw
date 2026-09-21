@@ -258,7 +258,9 @@ async function main(): Promise<void> {
       brandBody(dimWrap('Your assistant lives in its own sandbox. It can only see what you explicitly share.', 4)),
     );
     // Asked before the step runs, because the step is what acts on the answer.
-    await chooseImageSource();
+    // An explicit "build it here" is a decision; the perk reminder for this
+    // question is only for installs that fell back to a local build unasked.
+    if ((await chooseImageSource()) === 'local') skip.add('echo-reminder');
     p.log.message(
       brandBody(
         dimWrap(
@@ -497,8 +499,16 @@ async function main(): Promise<void> {
       providerEntry = getSetupProvider(agentProvider);
     }
     if (providerEntry?.runAuth) {
-      await providerEntry.runAuth();
-      await providerEntry.runInstallCheck?.();
+      try {
+        await providerEntry.runAuth();
+        await providerEntry.runInstallCheck?.();
+      } catch (err) {
+        await fail(
+          'auth',
+          `Couldn't authenticate or verify ${agentProvider}.`,
+          err instanceof Error ? err.message : String(err),
+        );
+      }
     } else {
       await runAuthStep();
     }
@@ -744,6 +754,9 @@ async function main(): Promise<void> {
       }
       if (result === BACK_TO_CHANNEL_SELECTION) backed = true;
     }
+    // Any answer to the chooser is a decision. The perk reminder for this
+    // question is only for runs that never reached the chooser.
+    skip.add('slack-reminder');
   }
   // Deferred wire (Teams): verify passes with zero groups because the
   // platform id only exists after the first DM. Tracked here so the ENDING
@@ -1361,7 +1374,8 @@ async function askNewTemplateAgentName(agents: readonly AgentGroup[], initialVal
  * Returns having done nothing when the question is already settled, which also
  * covers `NANOCLAW_HARDENED_IMAGE=true` passed in by a packaged flow.
  */
-async function chooseImageSource(): Promise<void> {
+/** Resolves to the operator's pick when the question was asked, else undefined. */
+async function chooseImageSource(): Promise<ImageSource | undefined> {
   if (imageSourceDecided()) return;
 
   // The runtime pick happens later (the auth step), so this is the best signal
@@ -1438,7 +1452,7 @@ async function chooseImageSource(): Promise<void> {
   phEmit('image_source_chosen', { source: choice });
 
   writeImageSource(choice);
-  if (choice === 'local') return;
+  if (choice === 'local') return choice;
 
   if (!loginScriptAvailable()) {
     p.log.warn(brandBody(`This copy of NanoClaw has no ${REGISTRY_LOGIN_SCRIPT} — building the sandbox here instead.`));
@@ -1502,17 +1516,17 @@ async function askAgentProviderChoice(): Promise<string> {
       hint: note(prov.value, `${prov.hint} — installs now`),
     })),
   ];
+  // Only an explicit preset skips the picker (packaged flows). Every
+  // interactive install — fresh or re-run — is asked, so a non-Claude runtime
+  // is discoverable rather than something only a re-run with env vars reaches.
   const preset = process.env.NANOCLAW_AGENT_PROVIDER?.trim().toLowerCase();
-  // Fresh installs use Claude without another setup prompt. Explicit presets
-  // still win, and an existing non-Claude default keeps its provider picker.
-  const automatic = preset || (DEFAULT_AGENT_PROVIDER === 'claude' ? 'claude' : undefined);
-  if (automatic) {
-    if (!options.some((option) => option.value === automatic)) {
+  if (preset) {
+    if (!options.some((option) => option.value === preset)) {
       throw new Error(`NANOCLAW_AGENT_PROVIDER=${preset} is not available in this NanoClaw install`);
     }
-    setupLog.userInput('agent_provider', automatic);
-    phEmit('agent_provider_chosen', { provider: automatic, preset: Boolean(preset) });
-    return automatic;
+    setupLog.userInput('agent_provider', preset);
+    phEmit('agent_provider_chosen', { provider: preset, preset: true });
+    return preset;
   }
   // The pick is persisted as the instance default (DEFAULT_AGENT_PROVIDER), so
   // pre-select the current default — a re-run Enter-through then preserves it

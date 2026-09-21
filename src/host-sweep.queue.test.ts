@@ -1,7 +1,8 @@
 /**
  * The sweep drives the keyed workqueue: each tick enqueues the singleton
- * duties and every active session, runs each exactly once in the loop's
- * long-standing order, and re-arms only after the tick's work has drained.
+ * duties and every active session, STARTS each exactly once in the loop's
+ * long-standing order (up to RECONCILE_CONCURRENCY running at once), and
+ * re-arms only after the tick's work has drained.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -20,7 +21,7 @@ vi.mock('./modules/approvals/index.js', () => ({ sweepAwaitingReasonRejects: vi.
 
 import { getActiveSessions } from './db/sessions.js';
 import { ensureEgressNetwork } from './egress-lockdown.js';
-import { startHostSweep, stopHostSweep } from './host-sweep.js';
+import { RECONCILE_CONCURRENCY, startHostSweep, stopHostSweep } from './host-sweep.js';
 import { sweepAwaitingReasonRejects } from './modules/approvals/index.js';
 import { reconcileSession } from './reconcile-session.js';
 
@@ -98,6 +99,30 @@ describe('sweep over the workqueue', () => {
     // Next tick recovers.
     await runSweepTick();
     expect(reconcileSession).toHaveBeenCalledTimes(2);
+  });
+
+  it('reconciles up to RECONCILE_CONCURRENCY sessions at once, and never one key twice concurrently', async () => {
+    const ids = Array.from({ length: 20 }, (_, i) => `s-${i}`);
+    vi.mocked(getActiveSessions).mockResolvedValue(ids.map((id) => ({ id })) as never);
+    let inFlight = 0;
+    let peak = 0;
+    const running = new Set<string>();
+    let overlapped = false;
+    vi.mocked(reconcileSession).mockImplementation(async (id: string) => {
+      if (running.has(id)) overlapped = true;
+      running.add(id);
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      await new Promise((resolve) => realSetTimeout(resolve, 5));
+      inFlight--;
+      running.delete(id);
+    });
+
+    await runSweepTick();
+
+    expect(reconcileSession).toHaveBeenCalledTimes(20);
+    expect(peak).toBe(RECONCILE_CONCURRENCY);
+    expect(overlapped).toBe(false);
   });
 
   it('a throwing per-session reconcile does not block the rest of the tick', async () => {

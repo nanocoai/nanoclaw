@@ -266,13 +266,13 @@ One-shot and recurring tasks use the same tables — no separate scheduler.
 
 **Recurring:** Same, plus a `recurrence` cron expression. After the host marks a row as handled/delivered, if `recurrence` is set, it inserts a new row with `process_after`/`deliver_after` advanced to the next cron occurrence. Next time is computed from the scheduled time (not wall clock) to prevent drift.
 
-**Host sweep** (every ~60s across all sessions):
+**Host sweep** (every ~60s across all sessions, up to 8 reconciled concurrently through the keyed workqueue):
 - `inbound.db` → `messages_in WHERE status = 'pending' AND (process_after IS NULL OR process_after <= now())` → wake agent
 - A `processing_ack` (in `outbound.db`) whose claim, or the `.heartbeat` mtime, is older than the stale threshold → stale detection, increment tries, reschedule `process_after` with backoff
 - `outbound.db` → due `messages_out` rows not yet in the host's `delivered` table (in `inbound.db`) → deliver
 - After completing/delivering a row with `recurrence`, insert next occurrence
 
-**Active container poll** (~1s) checks the same conditions but only for sessions with running containers.
+**Active container poll** (~1s) checks the same conditions but only for sessions with running containers. Both delivery polls drain up to 8 sessions at a time and re-arm at a fixed rate from each tick's start, so many sessions on a slow mailbox don't serialize into one long tick.
 
 **Agent-runner creates schedules** by emitting a `messages_out` row with `kind: 'system'` and an `action` (`schedule_task`, `cancel_task`, …) — it cannot write host-owned `inbound.db` directly. The host applies the action during delivery (`src/modules/scheduling/actions.ts`), inserting/updating the `kind: 'task'` `messages_in` row with `process_after` and optionally `recurrence`.
 

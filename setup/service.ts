@@ -4,8 +4,9 @@
  *
  * Fixes: Root→system systemd, WSL nohup fallback, no `|| true` swallowing errors.
  */
-import { execSync } from 'child_process';
+import { execFileSync, execSync } from 'child_process';
 import fs from 'fs';
+import net from 'net';
 import os from 'os';
 import path from 'path';
 
@@ -13,7 +14,7 @@ import { log } from '../src/log.js';
 import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
 import { writeUpgradeState } from '../src/upgrade-state.js';
 import { cleanupUnhealthyPeers } from './peer-cleanup.js';
-import { commandExists, getPlatform, getNodePath, getServiceManager, hasSystemd, isRoot, isWSL } from './platform.js';
+import { commandExists, getPlatform, getNodePath, getServiceManager, isRoot } from './platform.js';
 import { emitStatus } from './status.js';
 
 export async function run(_args: string[]): Promise<void> {
@@ -74,7 +75,7 @@ export async function run(_args: string[]): Promise<void> {
   if (platform === 'macos') {
     setupLaunchd(projectRoot, nodePath, homeDir);
   } else if (platform === 'linux') {
-    setupLinux(projectRoot, nodePath, homeDir);
+    await setupLinux(projectRoot, nodePath, homeDir);
   } else {
     emitStatus('SETUP_SERVICE', {
       SERVICE_TYPE: 'unknown',
@@ -221,14 +222,14 @@ function setupLaunchd(projectRoot: string, nodePath: string, homeDir: string): v
   });
 }
 
-function setupLinux(projectRoot: string, nodePath: string, homeDir: string): void {
+async function setupLinux(projectRoot: string, nodePath: string, homeDir: string): Promise<void> {
   const serviceManager = getServiceManager();
 
   if (serviceManager === 'systemd') {
-    setupSystemd(projectRoot, nodePath, homeDir);
+    await setupSystemd(projectRoot, nodePath, homeDir);
   } else {
     // WSL without systemd or other Linux without systemd
-    setupNohupFallback(projectRoot, nodePath, homeDir);
+    await setupNohupFallback(projectRoot, nodePath);
   }
 }
 
@@ -274,7 +275,7 @@ function checkDockerGroupStale(): boolean {
   }
 }
 
-function setupSystemd(projectRoot: string, nodePath: string, homeDir: string): void {
+async function setupSystemd(projectRoot: string, nodePath: string, homeDir: string): Promise<void> {
   const runningAsRoot = isRoot();
   const unitName = getSystemdUnit(projectRoot);
   const unitFileName = `${unitName}.service`;
@@ -293,7 +294,7 @@ function setupSystemd(projectRoot: string, nodePath: string, homeDir: string): v
       execSync('systemctl --user daemon-reload', { stdio: 'pipe' });
     } catch {
       log.warn('systemd user session not available — falling back to nohup wrapper');
-      setupNohupFallback(projectRoot, nodePath, homeDir);
+      await setupNohupFallback(projectRoot, nodePath);
       return;
     }
     const unitDir = path.join(homeDir, '.config', 'systemd', 'user');
@@ -411,53 +412,130 @@ WantedBy=${runningAsRoot ? 'multi-user.target' : 'default.target'}`;
   });
 }
 
-function setupNohupFallback(projectRoot: string, nodePath: string, homeDir: string): void {
-  log.warn('No systemd detected — generating nohup wrapper script');
+// Single quotes keep checkout paths literal in the generated shell script.
+function shellQuote(value: string): string {
+  return "'" + value.replace(/'/g, "'\\''") + "'";
+}
+
+function processRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    // kill -0 also succeeds for an exited child waiting to be reaped on Linux.
+    return !/\) Z /.test(fs.readFileSync(`/proc/${pid}/stat`, 'utf8'));
+  } catch {
+    return false;
+  }
+}
+
+/** The admin socket opens at the end of host startup, after channels and polls. */
+export async function waitForNohupStartup(projectRoot: string, pid: number, timeoutMs = 30_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!processRunning(pid)) throw new Error('NanoClaw exited during startup');
+    const ready = await new Promise<boolean>((resolve) => {
+      // Do not probe cli.sock: connecting there replaces the interactive chat client.
+      const socket = net.createConnection(path.join(projectRoot, 'data', 'ncl.sock'));
+      const done = (connected: boolean): void => {
+        socket.destroy();
+        resolve(connected);
+      };
+      socket.once('connect', () => done(true));
+      socket.once('error', () => done(false));
+      socket.setTimeout(Math.min(500, Math.max(1, deadline - Date.now())), () => done(false));
+    });
+    if (ready && processRunning(pid)) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error('Timed out waiting for NanoClaw admin socket');
+}
+
+async function setupNohupFallback(projectRoot: string, nodePath: string): Promise<void> {
+  log.warn('No usable systemd service — starting with nohup');
 
   const wrapperPath = path.join(projectRoot, 'start-nanoclaw.sh');
   const pidFile = path.join(projectRoot, 'nanoclaw.pid');
+  const entrypoint = path.join(projectRoot, 'dist', 'index.js');
 
   const lines = [
     '#!/bin/bash',
     '# start-nanoclaw.sh — Start NanoClaw without systemd',
-    `# To stop: kill \\$(cat ${pidFile})`,
+    `# To stop: kill "$(cat ${shellQuote(pidFile)})"`,
     '',
     'set -euo pipefail',
+    `cd ${shellQuote(projectRoot)}`,
     '',
-    `cd ${JSON.stringify(projectRoot)}`,
-    '',
-    '# Stop existing instance if running',
-    `if [ -f ${JSON.stringify(pidFile)} ]; then`,
-    `  OLD_PID=$(cat ${JSON.stringify(pidFile)} 2>/dev/null || echo "")`,
-    '  if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then',
-    '    echo "Stopping existing NanoClaw (PID $OLD_PID)..."',
-    '    kill "$OLD_PID" 2>/dev/null || true',
-    '    sleep 2',
+    '# Only stop the recorded host from this checkout; a PID can be reused.',
+    'is_previous_host() {',
+    '  [[ "$OLD_PID" =~ ^[1-9][0-9]*$ ]] || return 1',
+    '  [ -r "/proc/$OLD_PID/cmdline" ] || return 1',
+    '  local -a args=()',
+    '  mapfile -d "" -t args < "/proc/$OLD_PID/cmdline" 2>/dev/null || return 1',
+    `  [ "\${args[1]:-}" = ${shellQuote(entrypoint)} ]`,
+    '}',
+    `OLD_PID=$(cat ${shellQuote(pidFile)} 2>/dev/null || true)`,
+    'if is_previous_host; then',
+    '  echo "Stopping existing NanoClaw (PID $OLD_PID)..."',
+    '  kill "$OLD_PID"',
+    '  for ((i=0; i<100; i++)); do',
+    '    is_previous_host || break',
+    '    sleep 0.1',
+    '  done',
+    '  if is_previous_host; then',
+    '    echo "Previous NanoClaw did not stop; refusing to start another host" >&2',
+    '    exit 1',
     '  fi',
     'fi',
     '',
-    'echo "Starting NanoClaw..."',
-    `nohup ${JSON.stringify(nodePath)} ${JSON.stringify(projectRoot + '/dist/index.js')} \\`,
-    `  >> ${JSON.stringify(projectRoot + '/logs/nanoclaw.log')} \\`,
-    `  2>> ${JSON.stringify(projectRoot + '/logs/nanoclaw.error.log')} &`,
+    '# A missing/stale PID file must not let an existing listener fake readiness.',
+    `${shellQuote(nodePath)} -e ${shellQuote(`
+const socket = require('net').createConnection(process.argv[1]);
+socket.once('connect', () => {
+  console.error('NanoClaw admin socket is already in use; stop the existing host first');
+  process.exit(1);
+});
+socket.once('error', (err) => {
+  if (err.code === 'ENOENT' || err.code === 'ECONNREFUSED') process.exit(0);
+  console.error('Cannot check NanoClaw admin socket:', err.message);
+  process.exit(1);
+});
+socket.setTimeout(1000, () => {
+  console.error('Timed out checking existing NanoClaw admin socket');
+  process.exit(1);
+});
+`)} ${shellQuote(path.join(projectRoot, 'data', 'ncl.sock'))}`,
     '',
-    `echo $! > ${JSON.stringify(pidFile)}`,
-    'echo "NanoClaw started (PID $!)"',
-    `echo "Logs: tail -f ${projectRoot}/logs/nanoclaw.log"`,
+    'echo "Starting NanoClaw..."',
+    // Node resets the inherited SIGHUP ignore; detach from the wizard terminal.
+    `setsid nohup ${shellQuote(nodePath)} ${shellQuote(entrypoint)} \\`,
+    `  >> ${shellQuote(projectRoot + '/logs/nanoclaw.log')} \\`,
+    `  2>> ${shellQuote(projectRoot + '/logs/nanoclaw.error.log')} < /dev/null &`,
+    `echo $! > ${shellQuote(pidFile)}`,
+    'echo "NanoClaw launched (PID $!)"',
   ];
-  const wrapper = lines.join('\n') + '\n';
-
-  fs.writeFileSync(wrapperPath, wrapper, { mode: 0o755 });
+  fs.writeFileSync(wrapperPath, lines.join('\n') + '\n', { mode: 0o755 });
   log.info('Wrote nohup wrapper script', { wrapperPath });
+
+  let failure: unknown;
+  try {
+    execFileSync('/bin/bash', [wrapperPath], { cwd: projectRoot, stdio: 'pipe', timeout: 15_000 });
+    const pid = Number(fs.readFileSync(pidFile, 'utf8').trim());
+    if (!Number.isInteger(pid) || pid <= 0) throw new Error('Invalid NanoClaw PID file');
+    await waitForNohupStartup(projectRoot, pid);
+  } catch (err) {
+    failure = err;
+    log.error('Nohup service failed to start; see logs/nanoclaw.error.log', { err });
+  }
 
   emitStatus('SETUP_SERVICE', {
     SERVICE_TYPE: 'nohup',
     NODE_PATH: nodePath,
     PROJECT_PATH: projectRoot,
     WRAPPER_PATH: wrapperPath,
-    SERVICE_LOADED: false,
-    FALLBACK: 'wsl_no_systemd',
-    STATUS: 'success',
+    SERVICE_LOADED: !failure,
+    FALLBACK: 'no_usable_systemd',
+    STATUS: failure ? 'failed' : 'success',
+    ...(failure ? { ERROR: 'service_start_failed' } : {}),
     LOG: 'logs/setup.log',
   });
+  if (failure) throw new Error('NanoClaw failed to start; see logs/nanoclaw.error.log', { cause: failure });
 }

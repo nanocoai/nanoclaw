@@ -337,6 +337,7 @@ async function spawnContainer(session: Session): Promise<void> {
   const gateway = await getGatewayProvider().contribute({
     key: { installSlug: INSTALL_SLUG, agentGroupId: agentGroup.id, sessionId: session.id },
     groupName: agentGroup.name,
+    containerName,
     capabilities: driver.capabilities(),
   });
   if (gateway.containers?.length && !driver.capabilities().auxiliaryContainers) {
