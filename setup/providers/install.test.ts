@@ -123,6 +123,20 @@ describe('OpenCode setup installation and refresh', () => {
     expect(tree(directory)).toEqual(before);
   });
 
+  // #3862: the setup process imported src/provider-contracts/index.ts before
+  // the install appended to it, so the caller needs the appended module's real
+  // path to import it directly. Nothing is reported for a payload that was
+  // already in the barrel: that one loaded with the barrel at startup.
+  it('reports the host contract module it appended to the contract barrel, once', async () => {
+    const directory = root();
+    const first = await applyProviderSkill(skill, directory);
+    expect(first.blockers).toEqual([]);
+    expect(first.hostContractModules).toEqual([path.join(directory, 'src/provider-contracts/opencode.ts')]);
+    expect(fs.existsSync(first.hostContractModules[0])).toBe(true);
+    const again = await applyProviderSkill(skill, directory);
+    expect(again.hostContractModules).toEqual([]);
+  });
+
   it('uses the pinned Bun when the host has a different version', async () => {
     fixture.bunVersion = '1.3.0';
     const result = await applyProviderSkill(skill, root());

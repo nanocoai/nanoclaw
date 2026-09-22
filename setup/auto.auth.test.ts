@@ -7,6 +7,8 @@ const fixture = vi.hoisted(() => ({
   upsertEnvVar: vi.fn(),
   brightSelect: vi.fn(),
   applyProviderSkill: vi.fn(),
+  loadHostContractModules: vi.fn(),
+  order: [] as string[],
   opencodeInstalled: true,
 }));
 vi.mock('./providers/index.js', () => ({}));
@@ -25,7 +27,16 @@ vi.mock('./providers/registry.js', () => {
     listSetupProviders: entries,
   };
 });
-vi.mock('./providers/install.js', () => ({ applyProviderSkill: fixture.applyProviderSkill }));
+vi.mock('./providers/install.js', () => ({
+  applyProviderSkill: fixture.applyProviderSkill,
+  loadHostContractModules: fixture.loadHostContractModules,
+}));
+vi.mock('./lib/container-build.js', () => ({
+  buildContainerImage: () => {
+    fixture.order.push('build');
+    return { ok: true };
+  },
+}));
 vi.mock('./lib/bright-select.js', () => ({ brightSelect: fixture.brightSelect }));
 vi.mock('./lib/registry-state.js', async (original) => ({
   ...(await original<typeof import('./lib/registry-state.js')>()),
@@ -49,7 +60,7 @@ vi.mock('@clack/prompts', () => ({
   cancel: vi.fn(),
   isCancel: (value: unknown) => typeof value === 'symbol',
   spinner: () => ({ start: vi.fn(), stop: vi.fn() }),
-  log: { error: vi.fn() },
+  log: { error: vi.fn(), info: vi.fn(), success: vi.fn(), warn: vi.fn(), step: vi.fn() },
 }));
 
 beforeEach(() => {
@@ -70,6 +81,10 @@ beforeEach(() => {
   fixture.opencodeInstalled = true;
   fixture.brightSelect.mockResolvedValue('opencode');
   fixture.applyProviderSkill.mockRejectedValue(new Error('installation boundary'));
+  fixture.loadHostContractModules.mockImplementation(async () => {
+    fixture.order.push('load-contracts');
+  });
+  fixture.order = [];
 });
 afterEach(() => {
   vi.restoreAllMocks();
@@ -167,5 +182,31 @@ describe('setup wizard interactive provider choice', () => {
     expect(fixture.fail).toHaveBeenCalledWith('add-opencode', "Couldn't install opencode.", 'installation boundary');
     expect(fixture.runAuth).not.toHaveBeenCalled();
     expect(fixture.upsertEnvVar).not.toHaveBeenCalled();
+  });
+
+  // #3862: after a fresh in-wizard install the contract barrel is already in
+  // this process's ESM cache, so the wizard hands the appended contract module
+  // to the loader right after the rebuild, before the payload's setup module
+  // and its auth step load. The loader throws here to end the run at that
+  // point: the payload's setup module does not exist in a clean checkout.
+  it('registers the installed host contract after the rebuild and before provider auth', async () => {
+    fixture.opencodeInstalled = false;
+    fixture.applyProviderSkill.mockResolvedValue({
+      blockers: [],
+      changed: true,
+      hostContractModules: ['/install/src/provider-contracts/opencode.ts'],
+    });
+    fixture.loadHostContractModules.mockImplementation(async () => {
+      fixture.order.push('load-contracts');
+      throw new Error('contract boundary');
+    });
+
+    await runWizardUntilExit();
+
+    expect(fixture.loadHostContractModules).toHaveBeenCalledWith(['/install/src/provider-contracts/opencode.ts']);
+    expect(fixture.order).toEqual(['build', 'load-contracts']);
+    expect(fixture.runAuth).not.toHaveBeenCalled();
+    expect(fixture.upsertEnvVar).not.toHaveBeenCalled();
+    expect(process.exit).toHaveBeenCalledWith(1);
   });
 });

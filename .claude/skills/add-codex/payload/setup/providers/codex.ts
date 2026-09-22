@@ -21,6 +21,27 @@ import { type FailureAssistResult, registerSetupProvider } from './registry.js';
 
 // ─── auth step ───────────────────────────────────────────────────────────
 
+/**
+ * The gateway adapter's own message, kept beside the friendly line so a store
+ * failure names its cause in logs/setup.log and on screen (#3862: the bare
+ * `gateway_store_failed` hid a stale provider-contract registry for a whole
+ * pairing session). Adapters throw plain messages, but a parse error quotes
+ * its input (a malformed auth.json would put token text in the message), so
+ * token-shaped runs are masked and the message is kept to its first line.
+ */
+export function storeFailureMessage(err: unknown): string {
+  // A JSON parse error quotes a short excerpt of its input (shorter than the
+  // token mask below); the store may be parsing a credential file, so keep the
+  // error class and drop the excerpt without naming the input.
+  if (err instanceof SyntaxError) return `${err.name}: a JSON input could not be parsed (excerpt withheld)`;
+  const raw = err instanceof Error ? err.message : String(err);
+  // Mask before cutting: a cut could shorten a token below the mask threshold.
+  return raw
+    .replace(/[A-Za-z0-9_-]{24,}/g, '[redacted]')
+    .split('\n')[0]
+    .slice(0, 300);
+}
+
 function ensureAnswer<T>(value: T | symbol): T {
   if (p.isCancel(value)) {
     p.cancel('Setup cancelled.');
@@ -87,7 +108,7 @@ export async function runCodexAuthStep(): Promise<void> {
   await runCodexLoginAuth(method, store);
 }
 
-async function runCodexApiKeyAuth(store: ProviderCredentialStore): Promise<void> {
+export async function runCodexApiKeyAuth(store: ProviderCredentialStore): Promise<void> {
   const key = ensureAnswer(
     await p.password({
       message: 'Paste your OpenAI API key (sk-…)',
@@ -98,8 +119,15 @@ async function runCodexApiKeyAuth(store: ProviderCredentialStore): Promise<void>
   try {
     await store.save('codex', { kind: 'api-key', value: key.trim() });
   } catch (err) {
-    setupLog.step('auth', 'failed', 0, { PROVIDER: 'codex', METHOD: 'api', ERROR: 'gateway_store_failed' });
+    const message = storeFailureMessage(err);
+    setupLog.step('auth', 'failed', 0, {
+      PROVIDER: 'codex',
+      METHOD: 'api',
+      ERROR: 'gateway_store_failed',
+      MESSAGE: message,
+    });
     p.log.error(brandBody("Couldn't save your OpenAI key to the vault. Check the selected gateway, then retry."));
+    console.log(k.dim(`   ${message}`));
     process.exit(1);
   }
   setupLog.step('auth', 'success', 0, { PROVIDER: 'codex', METHOD: 'api' });
@@ -168,10 +196,17 @@ export async function runCodexLoginAuth(method: 'browser' | 'device', store?: Pr
     await store.save('codex', { kind: 'oauth', file: authJsonPath });
   } catch (err) {
     removeLoginHome();
-    setupLog.step('auth', 'failed', durationMs, { PROVIDER: 'codex', METHOD: method, ERROR: 'gateway_store_failed' });
+    const message = storeFailureMessage(err);
+    setupLog.step('auth', 'failed', durationMs, {
+      PROVIDER: 'codex',
+      METHOD: method,
+      ERROR: 'gateway_store_failed',
+      MESSAGE: message,
+    });
     p.log.error(
       brandBody("Couldn't save your Codex credentials to the vault. Check the selected gateway, then retry."),
     );
+    console.log(k.dim(`   ${message}`));
     process.exit(1);
   }
   removeLoginHome();

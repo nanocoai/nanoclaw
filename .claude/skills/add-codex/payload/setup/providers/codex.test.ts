@@ -3,7 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 // Mock child_process so runCodexLoginAuth never spawns a real codex CLI; the
 // spawn stand-in plays `codex login` writing auth.json into whatever
@@ -20,7 +20,23 @@ vi.mock('child_process', () => ({
 // Keep the auth flow's structured logging out of logs/setup.log.
 vi.mock('../logs.js', () => ({ step: vi.fn(), userInput: vi.fn() }));
 
-import { buildCodexFailurePrompt, runCodexInstallCheck, runCodexLoginAuth, verifyCodexInstall } from './codex.js';
+// The API-key path reads the key through clack's masked prompt; everything
+// else in the module keeps the real clack rendering.
+const mockPassword = vi.fn();
+vi.mock('@clack/prompts', async (original) => ({
+  ...(await original<typeof import('@clack/prompts')>()),
+  password: (...args: unknown[]) => mockPassword(...args),
+}));
+
+import * as setupLog from '../logs.js';
+import {
+  buildCodexFailurePrompt,
+  runCodexApiKeyAuth,
+  runCodexInstallCheck,
+  runCodexLoginAuth,
+  storeFailureMessage,
+  verifyCodexInstall,
+} from './codex.js';
 
 // Structural guard for the codex payload wiring: provider files, both barrel
 // imports, and the pinned Dockerfile install. Goes red if any of them is
@@ -122,5 +138,124 @@ describe('runCodexLoginAuth', () => {
 
     // The isolated dir holds a live credential — gone once vaulted.
     expect(fs.existsSync(codexHome!)).toBe(false);
+  });
+});
+
+// #3862: a gateway store failure used to reach the operator and logs/setup.log
+// as the bare `gateway_store_failed`, hiding the adapter's own message (a stale
+// provider-contract registry, in the reported case) for a whole pairing
+// session. Both save paths now carry that message.
+describe('gateway store failures name their cause', () => {
+  const failure = new Error('Provider codex does not declare its subscription endpoint');
+
+  function stopOnExit(): { exit: ReturnType<typeof vi.spyOn>; log: ReturnType<typeof vi.spyOn> } {
+    const exit = vi.spyOn(process, 'exit').mockImplementation((() => {
+      throw new Error('setup stopped');
+    }) as typeof process.exit);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    return { exit, log };
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.mocked(setupLog.step).mockClear();
+  });
+
+  it('after a ChatGPT login, logs the adapter message and prints it under the friendly line', async () => {
+    mockSpawnSync.mockReturnValue({ status: 0, stdout: '', stderr: '' });
+    mockSpawn.mockImplementation((...args: unknown[]) => {
+      const opts = args[2] as { env?: NodeJS.ProcessEnv };
+      fs.writeFileSync(path.join(opts.env!.CODEX_HOME!, 'auth.json'), '{"tokens":{}}');
+      const child = new EventEmitter();
+      setImmediate(() => child.emit('close', 0));
+      return child;
+    });
+    const { exit, log } = stopOnExit();
+
+    const save = vi.fn(async () => {
+      throw failure;
+    });
+    await expect(runCodexLoginAuth('device', { has: async () => false, save })).rejects.toThrow('setup stopped');
+
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(setupLog.step).toHaveBeenCalledWith(
+      'auth',
+      'failed',
+      expect.any(Number),
+      expect.objectContaining({
+        PROVIDER: 'codex',
+        METHOD: 'device',
+        ERROR: 'gateway_store_failed',
+        MESSAGE: failure.message,
+      }),
+    );
+    expect(log.mock.calls.some((call) => String(call[0]).includes(failure.message))).toBe(true);
+  });
+
+  it('after an API key paste, logs the adapter message and prints it under the friendly line', async () => {
+    mockPassword.mockResolvedValue('sk-test-not-a-real-key');
+    const { exit, log } = stopOnExit();
+
+    const save = vi.fn(async () => {
+      throw failure;
+    });
+    await expect(runCodexApiKeyAuth({ has: async () => false, save })).rejects.toThrow('setup stopped');
+
+    expect(save).toHaveBeenCalledWith('codex', { kind: 'api-key', value: 'sk-test-not-a-real-key' });
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(setupLog.step).toHaveBeenCalledWith(
+      'auth',
+      'failed',
+      0,
+      expect.objectContaining({
+        PROVIDER: 'codex',
+        METHOD: 'api',
+        ERROR: 'gateway_store_failed',
+        MESSAGE: failure.message,
+      }),
+    );
+    expect(log.mock.calls.some((call) => String(call[0]).includes(failure.message))).toBe(true);
+  });
+});
+
+describe('storeFailureMessage', () => {
+  it('keeps a plain adapter message intact', () => {
+    expect(storeFailureMessage(new Error('Provider codex does not declare its subscription endpoint'))).toBe(
+      'Provider codex does not declare its subscription endpoint',
+    );
+    expect(storeFailureMessage('not an Error')).toBe('not an Error');
+  });
+
+  it('withholds the excerpt a real JSON parse error quotes from auth.json', () => {
+    let parse: unknown;
+    try {
+      JSON.parse('{"tokens":{"refresh_token":rt_FAKE_SECRET_VALUE}}');
+    } catch (err) {
+      parse = err;
+    }
+    const message = storeFailureMessage(parse);
+    expect(message).toContain('SyntaxError');
+    expect(message).not.toContain('rt_FAKE');
+    expect(message).not.toContain('refresh_token');
+    expect(message).not.toContain('sh_token');
+  });
+
+  it('masks token-shaped runs in any other message, and keeps one line', () => {
+    const token = 'eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0';
+    const parse = new Error(`Unexpected token 's', ..."refresh_token":${token}}... is not valid JSON\nstack line`);
+    const message = storeFailureMessage(parse);
+    expect(message).not.toContain(token);
+    expect(message).not.toContain('eyJhbGci');
+    expect(message).toContain('[redacted]');
+    expect(message).not.toContain('\n');
+    expect(message.length).toBeLessThanOrEqual(300);
+  });
+
+  it('masks a token that straddles the length cut', () => {
+    const key = `sk-proj-${'A'.repeat(64)}`;
+    const message = storeFailureMessage(new Error(`${'x '.repeat(146)}${key}`));
+    expect(message).not.toContain('sk-proj-AAAA');
+    expect(message).not.toContain('AAAAAAAA');
+    expect(message.length).toBeLessThanOrEqual(300);
   });
 });

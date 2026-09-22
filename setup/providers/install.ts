@@ -30,6 +30,7 @@
 import { execFileSync, execSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import { applySkill, type ApplyResult } from '../../scripts/skill-apply.js';
 import {
@@ -47,7 +48,20 @@ export interface ProviderInstallResult {
   /** Non-deterministic leftovers — non-empty means the install did not fully apply. */
   blockers: string[];
   verification: ProviderContractVerification;
+  /**
+   * Absolute paths of the host contract modules this apply appended to
+   * `src/provider-contracts/index.ts`. The setup process imported that barrel
+   * at startup, so the ESM cache never re-evaluates the new line; the caller
+   * passes these to `loadHostContractModules` so the running process registers
+   * the contract (a gateway credential store asks for the provider's model
+   * endpoints before the first vault write). Empty when nothing was appended —
+   * an already-installed payload was in the barrel when the process started.
+   */
+  hostContractModules: string[];
 }
+
+/** The one barrel whose appended entries the setup process must also load in place. */
+const HOST_CONTRACT_BARREL = 'src/provider-contracts/index.ts';
 
 export async function applyProviderSkill(
   skillDir: string,
@@ -100,7 +114,40 @@ export async function applyProviderSkill(
     changed: result.journal.some((entry) => entry.op !== 'ran' || entry.undo !== undefined),
     blockers,
     verification,
+    hostContractModules: blockers.length === 0 ? appendedHostContractModules(result, projectRoot) : [],
   };
+}
+
+/**
+ * Resolve each `import './<name>.js';` line the engine appended to the host
+ * provider-contracts barrel to the module file it names. Only that barrel is
+ * considered: the container barrel's entries run under Bun, not in this
+ * process. The `.js` specifier is mapped to the `.ts` source when only the
+ * source exists, so the returned path is a real file and not a resolver hint.
+ */
+export function appendedHostContractModules(result: ApplyResult, projectRoot: string): string[] {
+  const modules: string[] = [];
+  for (const entry of result.journal) {
+    if (entry.op !== 'appended' || path.normalize(entry.path) !== path.normalize(HOST_CONTRACT_BARREL)) continue;
+    const specifier = entry.line.match(/^\s*import\s+['"](\.\/[^'"]+)['"]/)?.[1];
+    if (!specifier) continue;
+    const resolved = path.resolve(projectRoot, path.dirname(HOST_CONTRACT_BARREL), specifier);
+    const source = resolved.replace(/\.js$/, '.ts');
+    const file = !fs.existsSync(resolved) && fs.existsSync(source) ? source : resolved;
+    if (!modules.includes(file)) modules.push(file);
+  }
+  return modules;
+}
+
+/**
+ * Import freshly appended host contract modules so their top-level
+ * `registerProviderHostContract` call runs in this process. Re-importing the
+ * barrel would not do it: its URL is already in the ESM cache with the
+ * pre-install body. Each module self-registers on import, exactly as it does
+ * when the barrel loads it at host start.
+ */
+export async function loadHostContractModules(modules: readonly string[]): Promise<void> {
+  for (const file of modules) await import(pathToFileURL(file).href);
 }
 
 /** The provider a `/add-<name>` skill installs, read from its `nanoclaw-provider` frontmatter. */
