@@ -12,12 +12,15 @@ import type { ChannelAdapter, ChannelDefaults } from '../../channels/adapter.js'
 import { registerChannelAdapter, startChannelAdapter } from '../../channels/channel-registry.js';
 import { SlackFlowError } from './types.js';
 
+/** The adapter's factory may resolve credentials asynchronously (channel credential provider) or synchronously. */
+type SlackInstanceBridgeResult = ChannelAdapter | null | Promise<ChannelAdapter | null>;
+
 export interface SlackChannelDeps {
-  slackInstanceBridgeFactory: (name: string) => ChannelAdapter | null;
+  slackInstanceBridgeFactory: (name: string) => SlackInstanceBridgeResult;
   SLACK_DEFAULTS: ChannelDefaults;
   registerChannelAdapter: (
     name: string,
-    registration: { factory: () => ChannelAdapter | null; defaults?: ChannelDefaults },
+    registration: { factory: () => SlackInstanceBridgeResult; defaults?: ChannelDefaults },
   ) => void;
   startChannelAdapter: (key: string) => Promise<'started' | 'already-active' | 'no-credentials'>;
 }
