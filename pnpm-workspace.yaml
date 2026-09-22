@@ -1,3 +1,10 @@
+allowBuilds:
+  '@whiskeysockets/baileys': false
+  better-sqlite3: true
+  esbuild: true
+  protobufjs: true
+  sharp: true
+
 onlyBuiltDependencies:
   - esbuild
   - protobufjs
