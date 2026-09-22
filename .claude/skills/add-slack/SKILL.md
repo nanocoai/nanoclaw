@@ -30,12 +30,13 @@ src/channels/slack-a2a-guard.ts
 src/channels/slack-a2a-guard.test.ts
 src/channels/slack-registration.test.ts
 src/channels/slack-instances-registration.test.ts
+src/channels/slack-instance-spec.test.ts
 src/provisioning/slack-app.ts
 src/provisioning/slack-app.test.ts
 container/skills/slack-formatting/SKILL.md
 ```
 
-- **Adapter + shared lib** (`slack.ts`, `slack-lib.ts`): bridge registration, wiring defaults, conversation resolver, the native `SLACK_INSTANCES` loop — pinned by the two registration tests.
+- **Adapter + shared lib** (`slack.ts`, `slack-lib.ts`): bridge registration, wiring defaults, conversation resolver, the native `SLACK_INSTANCES` loop, the spec-driven instance factory (credentials through the channel credential provider at start, per-instance workspace pin) — pinned by the two registration tests and the spec/pin test.
 - **Bot-inbound guard** (`slack-a2a-guard.ts`): drops bot-authored inbound at the bridge by default; feature skills register a narrower admission policy on its seam.
 - **Provisioning core** (`src/provisioning/slack-app.ts`): manifest template, scope/event constants, and the broker + manager-token transports for creating a Slack app programmatically. Nothing on the adapter path imports it — the setup wizard's auto-provision pre-step and feature skills do.
 - **Container skills**: `slack-formatting/` (mrkdwn syntax; synced to `~/.claude/skills`).
@@ -72,7 +73,7 @@ loop), the guard, the shared lib, and the provisioning core.
 pnpm run build
 ```
 ```nc:run effect:test
-pnpm exec vitest run src/channels/slack-registration.test.ts src/channels/slack-instances-registration.test.ts src/channels/slack-lib.test.ts src/channels/slack-a2a-guard.test.ts src/provisioning/slack-app.test.ts
+pnpm exec vitest run src/channels/slack-registration.test.ts src/channels/slack-instances-registration.test.ts src/channels/slack-instance-spec.test.ts src/channels/slack-lib.test.ts src/channels/slack-a2a-guard.test.ts src/provisioning/slack-app.test.ts
 ```
 
 ## Credentials

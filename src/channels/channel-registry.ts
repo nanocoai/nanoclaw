@@ -7,6 +7,165 @@
 import type { ChannelAdapter, ChannelDefaults, ChannelRegistration, ChannelSetup, OutboundFile } from './adapter.js';
 import type { ChannelDeliveryAdapter } from '../delivery.js';
 import { log } from '../log.js';
+import { unregisterWebhookRoute } from '../webhook-server.js';
+
+/** Adapter instance registry key shape: a webhook route segment and state-namespace key, so URL-safe only. */
+export const INSTANCE_KEY_RE = /^[A-Za-z0-9._-]+$/;
+
+/** Webhook routing path shape (the part after `/webhook/`): one or two URL-safe segments. */
+export const WEBHOOK_ROUTING_PATH_RE = /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)?$/;
+
+// ---------------------------------------------------------------------------
+// Adapter instance specs
+// ---------------------------------------------------------------------------
+
+/**
+ * One adapter instance, described independently of where its credentials
+ * live. An adapter module builds specs in env mode (from `SLACK_INSTANCES` /
+ * `TEAMS_INSTANCES`); an operator surface builds them from stored connection
+ * rows and hands them to registerChannelInstance. Credentials are NOT part of
+ * the spec: the channel's instance factory resolves them through the channel
+ * credential provider (credential-provider.ts) when the instance starts.
+ */
+export interface ChannelInstanceSpec {
+  /**
+   * Registry key of the instance — also the outbound routing key stored on
+   * messaging_groups.instance and the adapter's state namespace. URL-safe
+   * (INSTANCE_KEY_RE). A spec whose instance equals its channelType
+   * describes the platform's default instance.
+   */
+  instance: string;
+  channelType: 'slack' | 'teams';
+  /**
+   * The external scope this instance belongs to: a Slack team id (`T…`) or
+   * a Teams tenant id. When set, the adapter accepts only envelopes from
+   * that scope and acks-and-drops every other one. Unset ⇒ no pin, which is
+   * what env-mode instances get unless the operator configured one.
+   */
+  externalScope?: string;
+  /** `socket` needs an app-level token (Slack only); `webhook` needs the shared listener. */
+  transport: 'webhook' | 'socket';
+  /**
+   * Full request path on the webhook listener, e.g. `/webhook/slack/acme-hq`.
+   * Defaults to defaultWebhookPath(spec): `/webhook/<channelType>/<instance>`
+   * for a named instance, `/webhook/<channelType>` for the default one.
+   * Ignored by socket transport.
+   */
+  webhookPath?: string;
+}
+
+export const WEBHOOK_PATH_PREFIX = '/webhook/';
+
+/** The listener path an instance gets when its spec names none. */
+export function defaultWebhookPath(spec: Pick<ChannelInstanceSpec, 'channelType' | 'instance'>): string {
+  return spec.instance === spec.channelType
+    ? `${WEBHOOK_PATH_PREFIX}${spec.channelType}`
+    : `${WEBHOOK_PATH_PREFIX}${spec.channelType}/${spec.instance}`;
+}
+
+/**
+ * The routing path (after `/webhook/`) the bridge registers for a spec —
+ * `slack` for the default instance, `slack/acme-hq` for a connection, or
+ * whatever one- or two-segment path the spec names. Throws on any other
+ * shape so a bad connection row fails at registration, not at first webhook.
+ */
+export function webhookRoutingPath(
+  spec: Pick<ChannelInstanceSpec, 'channelType' | 'instance' | 'webhookPath'>,
+): string {
+  const full = spec.webhookPath ?? defaultWebhookPath(spec);
+  if (!full.startsWith(WEBHOOK_PATH_PREFIX)) {
+    throw new Error(
+      `channel instance '${spec.instance}': webhookPath must start with '${WEBHOOK_PATH_PREFIX}' (got ${JSON.stringify(full)})`,
+    );
+  }
+  const routing = full.slice(WEBHOOK_PATH_PREFIX.length);
+  if (!WEBHOOK_ROUTING_PATH_RE.test(routing)) {
+    throw new Error(
+      `channel instance '${spec.instance}': webhookPath must be '/webhook/<segment>' or ` +
+        `'/webhook/<segment>/<segment>' with URL-safe segments (got ${JSON.stringify(full)})`,
+    );
+  }
+  return routing;
+}
+
+/** Throws with an actionable message when a spec cannot describe a startable instance. */
+export function validateChannelInstanceSpec(spec: ChannelInstanceSpec): void {
+  if (typeof spec.instance !== 'string' || !INSTANCE_KEY_RE.test(spec.instance)) {
+    throw new Error(
+      `channel instance key ${JSON.stringify(spec.instance)} must be URL-safe: non-empty, only letters, digits, '.', '_' or '-'`,
+    );
+  }
+  if (typeof spec.channelType !== 'string' || !INSTANCE_KEY_RE.test(spec.channelType)) {
+    throw new Error(
+      `channel instance '${spec.instance}': channelType ${JSON.stringify(spec.channelType)} is not a channel type`,
+    );
+  }
+  if (spec.transport !== 'webhook' && spec.transport !== 'socket') {
+    throw new Error(
+      `channel instance '${spec.instance}': transport must be 'webhook' or 'socket' (got ${JSON.stringify(spec.transport)})`,
+    );
+  }
+  if (spec.externalScope !== undefined && (typeof spec.externalScope !== 'string' || spec.externalScope === '')) {
+    throw new Error(`channel instance '${spec.instance}': externalScope must be a non-empty string when set`);
+  }
+  webhookRoutingPath(spec);
+}
+
+/**
+ * Builds the registry entry for one spec of a channel type. Registered by the
+ * adapter module on import (`registerChannelInstanceFactory('slack', …)`), so
+ * an operator surface can turn a stored connection into a live instance
+ * without knowing how that platform's bridge is constructed. The returned
+ * registration's `factory` runs at instance start and is where credentials
+ * are resolved.
+ */
+export type ChannelInstanceFactory = (spec: ChannelInstanceSpec) => ChannelRegistration;
+
+const instanceFactories = new Map<string, ChannelInstanceFactory>();
+const instanceSpecs = new Map<string, ChannelInstanceSpec>();
+
+export function registerChannelInstanceFactory(channelType: string, factory: ChannelInstanceFactory): void {
+  if (instanceFactories.has(channelType)) {
+    log.warn('Channel instance factory overwritten', { channelType });
+  }
+  instanceFactories.set(channelType, factory);
+}
+
+export function getChannelInstanceFactory(channelType: string): ChannelInstanceFactory | undefined {
+  return instanceFactories.get(channelType);
+}
+
+/**
+ * Register (or re-register) an adapter instance from its spec under
+ * `spec.instance`. Validates the spec, builds the registration through the
+ * channel type's instance factory, and remembers the spec for
+ * getChannelInstanceSpec. Start it with startChannelAdapter(spec.instance);
+ * a re-registration of a live instance takes effect at its next start
+ * (stopChannelAdapter → startChannelAdapter).
+ */
+export function registerChannelInstance(spec: ChannelInstanceSpec): void {
+  validateChannelInstanceSpec(spec);
+  const factory = instanceFactories.get(spec.channelType);
+  if (!factory) {
+    throw new Error(
+      `registerChannelInstance: no instance factory for channel type '${spec.channelType}' — ` +
+        `is its adapter installed and imported by the channel barrel?`,
+    );
+  }
+  const frozen: ChannelInstanceSpec = { ...spec };
+  registerChannelAdapter(frozen.instance, factory(frozen));
+  instanceSpecs.set(frozen.instance, frozen);
+}
+
+/** The spec an instance was registered from (a copy), or undefined for registrations made without one. */
+export function getChannelInstanceSpec(key: string): ChannelInstanceSpec | undefined {
+  const spec = instanceSpecs.get(key);
+  return spec ? { ...spec } : undefined;
+}
+
+export function listChannelInstanceSpecs(): ChannelInstanceSpec[] {
+  return [...instanceSpecs.values()].map((spec) => ({ ...spec }));
+}
 
 const SETUP_RETRY_DELAYS_MS = [2000, 5000, 10000];
 
@@ -372,4 +531,46 @@ export async function startChannelAdapter(key: string): Promise<'started' | 'alr
   activeAdapters.set(activeKey, adapter);
   log.info('Channel adapter hot-started', { channel: key, type: adapter.channelType, instance: activeKey });
   return 'started';
+}
+
+/**
+ * Stop ONE active adapter by its exact registry key — the inverse of
+ * startChannelAdapter. The registration (and spec) stays, so the instance
+ * can be started again; unregisterChannelAdapter removes it for good.
+ * The active entry is dropped before teardown so delivery and typing stop
+ * resolving the instance while its transport (socket, webhook route) is
+ * released; a teardown failure still leaves it inactive, and is rethrown.
+ */
+export async function stopChannelAdapter(key: string): Promise<'stopped' | 'not-active'> {
+  const adapter = activeAdapters.get(key);
+  if (!adapter) return 'not-active';
+  activeAdapters.delete(key);
+  try {
+    await adapter.teardown();
+  } catch (err) {
+    log.error('Failed to stop channel adapter', { channel: key, err });
+    throw err;
+  }
+  log.info('Channel adapter stopped', { channel: key, type: adapter.channelType });
+  return 'stopped';
+}
+
+/**
+ * Remove a registration (and its spec) so nothing can start it again.
+ * Refuses while the instance is active — stopChannelAdapter first.
+ * A spec-registered instance also gives up its webhook route: a pending
+ * entry left by a start without credentials must not keep answering at the
+ * path of an instance that no longer exists. Returns false when no
+ * registration existed.
+ */
+export function unregisterChannelAdapter(key: string): boolean {
+  if (activeAdapters.has(key)) {
+    throw new Error(`unregisterChannelAdapter: '${key}' is active — stopChannelAdapter first`);
+  }
+  const spec = instanceSpecs.get(key);
+  if (spec) {
+    unregisterWebhookRoute(webhookRoutingPath(spec));
+    instanceSpecs.delete(key);
+  }
+  return registry.delete(key);
 }

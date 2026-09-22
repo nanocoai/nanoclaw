@@ -28,11 +28,20 @@ SLACK_INSTANCES=dana
 SLACK_BOT_TOKEN_DANA=xoxb-…
 SLACK_APP_TOKEN_DANA=xapp-…        # Socket Mode (omit for webhook delivery)
 SLACK_SIGNING_SECRET_DANA=…        # webhook delivery only
+SLACK_WORKSPACE_ID_DANA=T…         # optional workspace pin (see below)
 ```
 
 Registration is unconditional for every listed name, so a missing token set
 surfaces as the registry's "credentials missing, skipping" warning at boot
 rather than a silently absent bot.
+
+Tokens are read when the instance starts, through the channel credential
+provider (`src/channels/credential-provider.ts`, `.env` by default), so a
+rotated token is picked up at the next start. `SLACK_WORKSPACE_ID` (or
+`SLACK_WORKSPACE_ID_<NAME>` for one instance) pins an instance to a workspace
+(`T…` team id): envelopes from any other workspace are acked and dropped
+before they are processed. Unset, every installation's events are processed,
+the single-workspace default.
 
 Wire messaging groups to a named instance by setting the messaging group's
 `instance` to `slack-<name>`.

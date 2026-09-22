@@ -25,14 +25,16 @@ Portal is blocked.
 
 ## Apply
 
-### 1. Copy the adapter and its registration test
+### 1. Copy the adapter and its tests
 
-Fetch the `channels` branch and copy the Teams adapter and its registration test
-into `src/channels/` (overwrite — the branch is canonical):
+Fetch the `channels` branch and copy the Teams adapter and its tests into
+`src/channels/` (overwrite — the branch is canonical):
 
 ```nc:copy from-branch:channels
 src/channels/teams.ts
 src/channels/teams-registration.test.ts
+src/channels/teams-instances-registration.test.ts
+src/channels/teams-instance-spec.test.ts
 ```
 
 ### 2. Register the adapter
@@ -55,21 +57,23 @@ Pinned to an exact version — the supply-chain policy rejects ranges and `lates
 ### 4. Build and validate
 
 Build first: it guards the typed `createChatSdkBridge(...)` core call and proves
-the dependency is installed. Then run the one integration test.
+the dependency is installed. Then run the integration tests.
 
 ```nc:run effect:build
 pnpm run build
 ```
 ```nc:run effect:test
-pnpm exec vitest run src/channels/teams-registration.test.ts
+pnpm exec vitest run src/channels/teams-registration.test.ts src/channels/teams-instances-registration.test.ts src/channels/teams-instance-spec.test.ts
 ```
 
 `teams-registration.test.ts` imports the real channel barrel and asserts the
 registry contains `teams`. It goes red if the import line is deleted or drifts,
 if the barrel fails to evaluate, or if `@chat-adapter/teams` isn't installed (the
-import throws) — so it also covers the dependency from step 3. End-to-end
-delivery against a real Teams workspace is verified manually once the service
-runs.
+import throws) — so it also covers the dependency from step 3. The other two
+pin the `TEAMS_INSTANCES` loop, the spec-driven instance factory (credentials
+through the channel credential provider at start) and the per-instance tenant
+pin. End-to-end delivery against a real Teams workspace is verified manually
+once the service runs.
 
 ## Credentials
 

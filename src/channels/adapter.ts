@@ -283,8 +283,13 @@ export interface ChannelAdapter {
   defaults?: ChannelDefaults;
 }
 
-/** Factory function that creates a channel adapter (returns null if credentials missing). */
-export type ChannelAdapterFactory = () => ChannelAdapter | Promise<ChannelAdapter> | null;
+/**
+ * Factory function that creates a channel adapter (returns null if credentials
+ * missing). May be async: an adapter that resolves its credentials through the
+ * channel credential provider yields a Promise, and null is a valid settled
+ * value on that path too (the registry awaits, then applies the null check).
+ */
+export type ChannelAdapterFactory = () => ChannelAdapter | null | Promise<ChannelAdapter | null>;
 
 /** Registration entry for a channel adapter. */
 export interface ChannelRegistration {

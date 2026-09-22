@@ -15,11 +15,12 @@
  *     live adapter (fallback resolves threads to false).
  *  3. The shared factory — the per-name factory delegates to
  *     createSlackBridge, whose credential path is driven for real here: with
- *     no SLACK_BOT_TOKEN_<NAME> in .env the factory returns null (the
- *     registry's "credentials missing, skipping" path). The non-null leg —
- *     the typed createSlackBridge({envKeySuffix, instanceKey}) call — is
- *     guarded by the build, which fails if the factory export or its options
- *     shape drifts.
+ *     no SLACK_BOT_TOKEN_<NAME> in .env the factory resolves null (the
+ *     registry's "credentials missing, skipping" path). Credentials come
+ *     from the channel credential provider at start, so the factory is
+ *     async. The non-null leg — the typed createSlackBridge({instanceKey})
+ *     call — is guarded by the build, which fails if the factory export or
+ *     its options shape drifts.
  *
  * SLACK_INSTANCES is read from `.env` at module import (readEnvFile reads
  * process.cwd()/.env, never process.env), so the test chdirs into a temp dir
@@ -81,11 +82,11 @@ describe('instance factory (via the shared createSlackBridge)', () => {
   // registration loop as a side effect of this test file itself (with the
   // original cwd's .env) and mask a deleted barrel line. Via the barrel the
   // module is already in the cache, so this import is a no-op read.
-  it('returns null when the instance token set is absent — the registry "credentials missing" path', async () => {
+  it('resolves null when the instance token set is absent — the registry "credentials missing" path', async () => {
     const { slackInstanceBridgeFactory } = await import('./slack.js');
     // No SLACK_BOT_TOKEN_ALPHA in the temp .env: the shared factory must
     // report missing credentials rather than construct a token-less bridge.
-    expect(slackInstanceBridgeFactory('alpha')).toBeNull();
+    await expect(slackInstanceBridgeFactory('alpha')).resolves.toBeNull();
   });
 
   it('maps an instance name to its env-key suffix (uppercased, dashes → underscores)', async () => {
