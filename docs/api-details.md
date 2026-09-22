@@ -105,6 +105,47 @@ Never returns undefined. `hasDeclaredChannelDefaults()` reports whether tiers 1�
 
 **Runtime thread policy**: engage mode and sender policy are creation-time snapshots; threading is the one setting consulted live. `messaging_group_agents.threads` (migration 019) is the per-wiring override: `NULL` = inherit the adapter declaration for the wiring's context, `1`/`0` = explicit. `resolveThreadPolicy(wiring.threads, decl, isGroup, supportsThreads)` hard-ANDs the result with the adapter's raw capability — a wiring can opt out of threads on a threaded platform, never opt in on a non-threaded one. When the policy is off, event-derived thread ids are nulled at router fanout (sessions collapse, replies land top-level); `event.replyTo` is operator intent from the CLI transport and is never nulled.
 
+### Adapter Instances, Credentials, and Per-Instance Webhook Routes
+
+Three seams let an operator surface (an enterprise overlay, `ncl channels *`) turn a stored connection into a live adapter instance without a restart. Unused, trunk behaves exactly as before: adapters self-register at import, credentials come from `.env`, the default instance serves `/webhook/<channelType>`.
+
+```typescript
+// src/channels/credential-provider.ts — where an instance's credentials come from
+interface ChannelCredentialProvider {
+  get(instance: string, key: string): Promise<string | undefined>;
+}
+// keys: bot_token | signing_secret | app_token (Slack); app_id | app_password | tenant_id | app_type (Teams)
+// default: EnvFileCredentialProvider — SLACK_BOT_TOKEN, SLACK_BOT_TOKEN_<NAME> for `slack-<name>`,
+//          SLACK_BOT_TOKEN_<SLUG> for any other instance key (same suffix rule as SLACK_INSTANCES)
+setChannelCredentialProvider(provider | null); // null restores the .env default
+getChannelCredentialProvider();
+// Adapters resolve credentials when the instance STARTS (its registry factory runs), never at boot.
+
+// src/channels/channel-registry.ts — describing and driving one instance
+interface ChannelInstanceSpec {
+  instance: string; // registry key (= messaging_groups.instance); '<channelType>' means the default instance
+  channelType: 'slack' | 'teams';
+  externalScope?: string; // Slack team id / Teams tenant id — the adapter pins the instance to it
+  transport: 'webhook' | 'socket';
+  webhookPath?: string; // '/webhook/slack/acme-hq'; default '/webhook/<channelType>/<instance>'
+}
+registerChannelInstanceFactory(channelType, (spec) => ChannelRegistration); // adapter modules, at import
+registerChannelInstance(spec); // validate → factory(spec) → registerChannelAdapter(spec.instance, …)
+startChannelAdapter(spec.instance); // 'started' | 'already-active' | 'no-credentials'
+stopChannelAdapter(spec.instance); // 'stopped' | 'not-active' — registration and spec stay
+unregisterChannelAdapter(spec.instance); // removes both; refuses while active
+getChannelInstanceSpec(key); listChannelInstanceSpecs(); validateChannelInstanceSpec(spec); webhookRoutingPath(spec);
+
+// src/webhook-server.ts — routes are one or two segments under /webhook/
+registerWebhookAdapter(chat, adapterName, routingPath); // returns a disposer for this registration
+registerPendingWebhookRoute(routingPath); // credentials not available yet: echoes a Slack
+//   url_verification challenge with no signature check, acks (200) and drops everything else;
+//   consumed by the live registration at the same path
+unregisterWebhookRoute(routingPath); // adapter, raw, or pending entry
+```
+
+A two-segment request path (`/webhook/slack/acme-hq`) is tried first and only when such a route exists; otherwise the first segment routes as it always has. `ChatSdkBridgeConfig.webhookPath` carries the spec's routing path into the bridge, whose teardown releases only its own route, so `stopChannelAdapter` on one instance leaves its siblings serving.
+
 ### Chat SDK Bridge
 
 Wraps a Chat SDK adapter + Chat instance to conform to the NanoClaw ChannelAdapter interface. Trunk ships the bridge and the channel registry only — platform-specific Chat SDK adapters (Discord, Slack, Telegram, etc.) and native adapters (WhatsApp/Baileys) are installed by the `/add-<channel>` skills from the `channels` branch.

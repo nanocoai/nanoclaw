@@ -25,7 +25,7 @@ import { SqliteStateAdapter } from '../state-sqlite.js';
 import { registerWebhookAdapter } from '../webhook-server.js';
 import { normalizeOptions, type NormalizedOption } from './ask-question.js';
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage } from './adapter.js';
-import { INSTANCE_KEY_RE } from './channel-registry.js';
+import { INSTANCE_KEY_RE, WEBHOOK_ROUTING_PATH_RE } from './channel-registry.js';
 import { resolveQuestionRender } from './question-render-registry.js';
 
 /** Adapter with optional gateway support (e.g., Discord). */
@@ -332,6 +332,14 @@ export interface ChatSdkBridgeConfig {
    * Must be URL-safe: non-empty, only letters, digits, '.', '_' or '-'.
    */
   instance?: string;
+  /**
+   * Routing path under `/webhook/` for this bridge's inbound route, when it
+   * must differ from the instance key — e.g. `slack/acme-hq` for a
+   * connection-registered instance (see webhookRoutingPath in
+   * channel-registry.ts). One or two URL-safe segments. Defaults to
+   * `instance ?? adapter.name`, the historical route.
+   */
+  webhookPath?: string;
   concurrency?: ConcurrencyStrategy;
   /** Bot token for authenticating forwarded Gateway events (required for interaction handling). */
   botToken?: string;
@@ -473,6 +481,11 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     );
   }
   const transformText = (t: string): string => (config.transformOutboundText ? config.transformOutboundText(t) : t);
+  if (config.webhookPath !== undefined && !WEBHOOK_ROUTING_PATH_RE.test(config.webhookPath)) {
+    throw new Error(
+      `chat-sdk bridge webhookPath ${JSON.stringify(config.webhookPath)} must be one or two URL-safe segments`,
+    );
+  }
   /** Registry/routing key for this bridge — also the app-context cache
    *  namespace. Default instances key by the platform name. */
   const instanceKey = config.instance ?? adapter.name;
@@ -480,6 +493,8 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
   let state: SqliteStateAdapter;
   let setupConfig: ChannelSetup;
   let gatewayAbort: AbortController | null = null;
+  /** Removes this bridge's webhook route again; set only when one was registered. */
+  let unregisterWebhookRoute: (() => void) | null = null;
 
   async function messageToInbound(
     message: ChatMessage,
@@ -792,10 +807,17 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       } else {
         // Non-gateway adapters (Slack, Teams, GitHub, etc.) — register on the
         // shared webhook server. The handler key stays adapter.name (the
-        // Chat instance's webhooks map is keyed by it); the route segment is
-        // the instance, so each same-platform bridge gets its own URL (and
-        // its own signing secret — platforms sign per-app).
-        registerWebhookAdapter(chat, adapter.name, config.instance ?? adapter.name);
+        // Chat instance's webhooks map is keyed by it); the route is the
+        // instance (or the spec's webhookPath), so each same-platform bridge
+        // gets its own URL (and its own signing secret — platforms sign
+        // per-app). The disposer lets teardown release just this route, so
+        // one instance can stop while its siblings keep serving.
+        const disposer = registerWebhookAdapter(
+          chat,
+          adapter.name,
+          config.webhookPath ?? config.instance ?? adapter.name,
+        );
+        unregisterWebhookRoute = typeof disposer === 'function' ? disposer : null;
       }
 
       log.info('Chat SDK bridge initialized', { adapter: adapter.name });
@@ -973,6 +995,10 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
 
     async teardown() {
       gatewayAbort?.abort();
+      // Release the inbound route before the Chat instance goes away so no
+      // request dispatches into a shut-down adapter.
+      unregisterWebhookRoute?.();
+      unregisterWebhookRoute = null;
       await chat.shutdown();
       log.info('Chat SDK bridge shut down', { adapter: adapter.name });
     },

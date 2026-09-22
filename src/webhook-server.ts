@@ -2,13 +2,21 @@
  * Minimal HTTP server for Chat SDK adapter webhooks.
  *
  * Starts lazily on first adapter registration. Routes requests by path:
- *   /webhook/{adapterName} → chat.webhooks[adapterName](request)
- *   /webhook/{path}        → raw handler from registerWebhookHandler(path, ...)
+ *   /webhook/{adapterName}          → chat.webhooks[adapterName](request)
+ *   /webhook/{path}                 → raw handler from registerWebhookHandler(path, ...)
+ *   /webhook/{type}/{instance}      → a per-instance adapter route (two segments)
+ *   /webhook/{pending path}         → pending-instance answers (registerPendingWebhookRoute)
  *
  * Multiple Chat instances can register adapters — each adapter name maps
  * to its owning Chat instance. Raw routes let modules receive non-Chat-SDK
  * webhooks (GitHub, payment providers, health checks) on the same server
  * without editing this file or opening a second port.
+ *
+ * Routing paths are one or two URL segments. A request's two-segment path is
+ * tried first and only when such a route exists; otherwise the first segment
+ * routes exactly as it always has, so `/webhook/slack/<anything>` keeps
+ * reaching the default `slack` route until a `slack/<instance>` route is
+ * registered.
  */
 import http from 'http';
 import { randomUUID } from 'node:crypto';
@@ -28,6 +36,7 @@ export type RawWebhookHandler = (req: http.IncomingMessage, res: http.ServerResp
 
 const routes = new Map<string, WebhookEntry>();
 const rawRoutes = new Map<string, RawWebhookHandler>();
+const pendingRoutes = new Set<string>();
 let server: http.Server | null = null;
 let listenerId: string | null = null;
 
@@ -38,17 +47,21 @@ export function getWebhookStatus(): { id: string; port: number; paths: string[] 
   return {
     id: listenerId,
     port: address.port,
-    paths: [...new Set([...routes.keys(), ...rawRoutes.keys()])].map((p) => `/webhook/${p}`),
+    paths: [...new Set([...routes.keys(), ...rawRoutes.keys(), ...pendingRoutes])].map((p) => `/webhook/${p}`),
   };
 }
 
-/** Convert Node.js IncomingMessage to a Web API Request. */
-async function toWebRequest(req: http.IncomingMessage): Promise<Request> {
+async function readBody(req: http.IncomingMessage): Promise<Buffer> {
   const chunks: Buffer[] = [];
   for await (const chunk of req) {
     chunks.push(chunk as Buffer);
   }
-  const body = Buffer.concat(chunks);
+  return Buffer.concat(chunks);
+}
+
+/** Convert Node.js IncomingMessage to a Web API Request. */
+async function toWebRequest(req: http.IncomingMessage): Promise<Request> {
+  const body = await readBody(req);
 
   const host = req.headers.host || 'localhost';
   const url = `http://${host}${req.url}`;
@@ -89,18 +102,30 @@ async function fromWebResponse(webRes: Response, nodeRes: http.ServerResponse): 
  * Register a webhook adapter on the shared server.
  * Starts the server lazily on first call.
  *
- * `routingPath` is the URL segment (`/webhook/<routingPath>`); `adapterName`
- * stays the handler key into `chat.webhooks`. The split lets N instances of
- * one platform (each with its own Chat + signing secret) listen on distinct
- * URLs while dispatching to the same SDK adapter name. Defaulting
- * routingPath to adapterName keeps the historical single-instance route
- * byte-identical. Signature adopted verbatim from PR #2617 (@davekim917's
- * #1804 prototype) so the two changes converge textually.
+ * `routingPath` is the URL path under `/webhook/` (one or two segments);
+ * `adapterName` stays the handler key into `chat.webhooks`. The split lets N
+ * instances of one platform (each with its own Chat + signing secret) listen
+ * on distinct URLs while dispatching to the same SDK adapter name.
+ * Defaulting routingPath to adapterName keeps the historical single-instance
+ * route byte-identical. Signature adopted verbatim from PR #2617
+ * (@davekim917's #1804 prototype) so the two changes converge textually.
+ *
+ * A live registration consumes any pending entry at the same path. Returns a
+ * disposer that removes this registration (and only this one — a later
+ * registration at the same path is left alone).
  */
-export function registerWebhookAdapter(chat: Chat, adapterName: string, routingPath: string = adapterName): void {
-  routes.set(routingPath, { chat, adapterName });
+export function registerWebhookAdapter(chat: Chat, adapterName: string, routingPath: string = adapterName): () => void {
+  const entry: WebhookEntry = { chat, adapterName };
+  routes.set(routingPath, entry);
+  pendingRoutes.delete(routingPath);
   ensureServer();
   log.info('Webhook adapter registered', { adapter: adapterName, path: `/webhook/${routingPath}` });
+  return () => {
+    if (routes.get(routingPath) === entry) {
+      routes.delete(routingPath);
+      log.info('Webhook adapter unregistered', { adapter: adapterName, path: `/webhook/${routingPath}` });
+    }
+  };
 }
 
 /**
@@ -119,6 +144,70 @@ export function registerWebhookHandler(path: string, handler: RawWebhookHandler)
   log.info('Webhook handler registered', { path: `/webhook/${path}` });
 }
 
+/**
+ * Hold a route for an adapter instance that is registered but cannot start
+ * yet because its credentials are not available (a connection whose secrets
+ * are not sealed yet, or are being rotated). While pending, the route:
+ *  - answers a Slack `url_verification` by echoing the challenge, with NO
+ *    signature check — the instance has no signing secret to check with,
+ *    and the challenge is Slack's own public nonce, so nothing is trusted
+ *    by answering it. This lets an administrator save the Request URL in
+ *    Slack before the host holds the app's credentials;
+ *  - acknowledges every other request (200, empty) and drops it with one
+ *    warning line: nothing can be verified or processed without
+ *    credentials, and a non-2xx would make Slack retry and eventually
+ *    disable the app's event delivery, which the operator would then have to
+ *    re-enable by hand.
+ * The pending entry is consumed by the live registration at the same path
+ * (registerWebhookAdapter); unregisterWebhookRoute removes it explicitly.
+ * A live route at the same path always wins over a pending one.
+ * Starts the server lazily on first call.
+ */
+export function registerPendingWebhookRoute(routingPath: string): void {
+  pendingRoutes.add(routingPath);
+  ensureServer();
+  log.info('Webhook route pending (instance credentials not available yet)', { path: `/webhook/${routingPath}` });
+}
+
+/**
+ * Remove whatever is registered at a routing path — adapter, raw handler, or
+ * pending entry. Returns true when something was removed. The listener
+ * itself keeps running (stopWebhookServer shuts it down).
+ */
+export function unregisterWebhookRoute(routingPath: string): boolean {
+  const removed = routes.delete(routingPath) || rawRoutes.delete(routingPath) || pendingRoutes.delete(routingPath);
+  if (removed) log.info('Webhook route unregistered', { path: `/webhook/${routingPath}` });
+  return removed;
+}
+
+function hasRoute(routingPath: string): boolean {
+  return rawRoutes.has(routingPath) || routes.has(routingPath) || pendingRoutes.has(routingPath);
+}
+
+/** Answer a request at a pending route: echo a Slack url_verification challenge, ack and drop the rest. */
+async function answerPending(routingPath: string, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  const body = (await readBody(req)).toString('utf8');
+  let challenge: string | undefined;
+  try {
+    const parsed = JSON.parse(body) as { type?: unknown; challenge?: unknown };
+    if (parsed?.type === 'url_verification' && typeof parsed.challenge === 'string') challenge = parsed.challenge;
+  } catch {
+    // not JSON — nothing to echo
+  }
+  if (challenge !== undefined) {
+    log.info('Webhook pending route answered url_verification', { path: `/webhook/${routingPath}` });
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ challenge }));
+    return;
+  }
+  log.warn('Webhook pending route acknowledged and dropped a request (instance credentials not available)', {
+    path: `/webhook/${routingPath}`,
+    method: req.method,
+  });
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end();
+}
+
 function ensureServer(): void {
   if (server) return;
 
@@ -130,8 +219,8 @@ function ensureServer(): void {
     void (async () => {
       const url = req.url || '/';
 
-      // Route: /webhook/{adapterName}
-      const match = url.match(/^\/webhook\/([^/?]+)/);
+      // Route: /webhook/{adapterName} or /webhook/{type}/{instance}
+      const match = url.match(/^\/webhook\/([^/?]+)(?:\/([^/?]+))?/);
       if (!match) {
         res.writeHead(404, { 'Content-Type': 'text/plain' });
         res.end('Not found');
@@ -139,17 +228,23 @@ function ensureServer(): void {
       }
 
       const adapterName = match[1];
+      const twoSegment = match[2] !== undefined ? `${adapterName}/${match[2]}` : undefined;
+      const routingPath = twoSegment !== undefined && hasRoute(twoSegment) ? twoSegment : adapterName;
 
       try {
         // Raw routes take priority — the handler writes the response itself.
-        const rawHandler = rawRoutes.get(adapterName);
+        const rawHandler = rawRoutes.get(routingPath);
         if (rawHandler) {
           await rawHandler(req, res);
           return;
         }
 
-        const entry = routes.get(adapterName);
+        const entry = routes.get(routingPath);
         if (!entry) {
+          if (pendingRoutes.has(routingPath)) {
+            await answerPending(routingPath, req, res);
+            return;
+          }
           res.writeHead(404, { 'Content-Type': 'text/plain' });
           res.end(`Unknown adapter: ${adapterName}`);
           return;
@@ -166,7 +261,7 @@ function ensureServer(): void {
         });
         await fromWebResponse(webRes, res);
       } catch (err) {
-        log.error('Webhook handler error', { adapter: adapterName, url: req.url, err });
+        log.error('Webhook handler error', { adapter: routingPath, url: req.url, err });
         if (!res.headersSent) {
           res.writeHead(500, { 'Content-Type': 'text/plain' });
           res.end('Internal Server Error');
@@ -197,6 +292,7 @@ export async function stopWebhookServer(): Promise<void> {
     server = null;
     routes.clear();
     rawRoutes.clear();
+    pendingRoutes.clear();
     log.info('Webhook server stopped');
   }
 }
