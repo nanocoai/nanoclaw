@@ -7,6 +7,7 @@
 import type { ChannelAdapter, ChannelDefaults, ChannelRegistration, ChannelSetup, OutboundFile } from './adapter.js';
 import type { ChannelDeliveryAdapter } from '../delivery.js';
 import { log } from '../log.js';
+import { unregisterWebhookRoute } from '../webhook-server.js';
 
 /** Adapter instance registry key shape: a webhook route segment and state-namespace key, so URL-safe only. */
 export const INSTANCE_KEY_RE = /^[A-Za-z0-9._-]+$/;
@@ -557,12 +558,19 @@ export async function stopChannelAdapter(key: string): Promise<'stopped' | 'not-
 /**
  * Remove a registration (and its spec) so nothing can start it again.
  * Refuses while the instance is active — stopChannelAdapter first.
- * Returns false when no registration existed.
+ * A spec-registered instance also gives up its webhook route: a pending
+ * entry left by a start without credentials must not keep answering at the
+ * path of an instance that no longer exists. Returns false when no
+ * registration existed.
  */
 export function unregisterChannelAdapter(key: string): boolean {
   if (activeAdapters.has(key)) {
     throw new Error(`unregisterChannelAdapter: '${key}' is active — stopChannelAdapter first`);
   }
-  instanceSpecs.delete(key);
+  const spec = instanceSpecs.get(key);
+  if (spec) {
+    unregisterWebhookRoute(webhookRoutingPath(spec));
+    instanceSpecs.delete(key);
+  }
   return registry.delete(key);
 }

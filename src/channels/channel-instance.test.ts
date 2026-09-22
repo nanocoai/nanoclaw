@@ -11,6 +11,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ChannelAdapter, ChannelSetup } from './adapter.js';
 import type { ChannelInstanceSpec } from './channel-registry.js';
 
+// The registry drops a spec instance's webhook route on unregister; observe
+// that call instead of binding a real listener.
+vi.mock('../webhook-server.js', () => ({ unregisterWebhookRoute: vi.fn(() => true) }));
+
 function createFakeAdapter(
   channelType: string,
   instance?: string,
@@ -210,7 +214,11 @@ describe('registerChannelInstance → startChannelAdapter → stopChannelAdapter
 
     expect(() => reg.unregisterChannelAdapter('acme-hq')).toThrow(/is active/);
     await reg.stopChannelAdapter('acme-hq');
+    // Same module instance as the registry's import (both after this test's resetModules).
+    const webhookServer = await import('../webhook-server.js');
     expect(reg.unregisterChannelAdapter('acme-hq')).toBe(true);
+    // The instance's route (live or pending) goes with it.
+    expect(webhookServer.unregisterWebhookRoute).toHaveBeenCalledWith('slack/acme-hq');
     expect(reg.getRegisteredChannelNames()).not.toContain('acme-hq');
     expect(reg.getChannelInstanceSpec('acme-hq')).toBeUndefined();
     expect(reg.unregisterChannelAdapter('acme-hq')).toBe(false);
