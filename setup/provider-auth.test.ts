@@ -111,7 +111,7 @@ describe('standalone provider setup flow', () => {
     },
   );
 
-  // #3862: the contract barrel is in this process's ESM cache from startup, so
+  // The contract barrel is in this process's ESM cache from startup, so
   // the module the install appended is imported directly, after the rebuild
   // and before the payload's auth step asks the gateway store for endpoints.
   it('loads the host contract and the setup adapter after a fresh installation and image build', async () => {

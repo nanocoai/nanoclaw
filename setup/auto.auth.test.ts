@@ -184,7 +184,7 @@ describe('setup wizard interactive provider choice', () => {
     expect(fixture.upsertEnvVar).not.toHaveBeenCalled();
   });
 
-  // #3862: after a fresh in-wizard install the contract barrel is already in
+  // After a fresh in-wizard install the contract barrel is already in
   // this process's ESM cache, so the wizard hands the appended contract module
   // to the loader right after the rebuild, before the payload's setup module
   // and its auth step load. The loader throws here to end the run at that

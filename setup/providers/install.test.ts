@@ -123,7 +123,7 @@ describe('OpenCode setup installation and refresh', () => {
     expect(tree(directory)).toEqual(before);
   });
 
-  // #3862: the setup process imported src/provider-contracts/index.ts before
+  // The setup process imported src/provider-contracts/index.ts before
   // the install appended to it, so the caller needs the appended module's real
   // path to import it directly. Nothing is reported for a payload that was
   // already in the barrel: that one loaded with the barrel at startup.

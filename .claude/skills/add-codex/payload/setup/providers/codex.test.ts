@@ -141,10 +141,9 @@ describe('runCodexLoginAuth', () => {
   });
 });
 
-// #3862: a gateway store failure used to reach the operator and logs/setup.log
-// as the bare `gateway_store_failed`, hiding the adapter's own message (a stale
-// provider-contract registry, in the reported case) for a whole pairing
-// session. Both save paths now carry that message.
+// A gateway store failure carries the adapter's own message beside the bare
+// `gateway_store_failed` code, on both save paths, so the operator and
+// logs/setup.log see the cause.
 describe('gateway store failures name their cause', () => {
   const failure = new Error('Provider codex does not declare its subscription endpoint');
 

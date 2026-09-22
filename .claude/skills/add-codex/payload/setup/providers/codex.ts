@@ -23,9 +23,8 @@ import { type FailureAssistResult, registerSetupProvider } from './registry.js';
 
 /**
  * The gateway adapter's own message, kept beside the friendly line so a store
- * failure names its cause in logs/setup.log and on screen (#3862: the bare
- * `gateway_store_failed` hid a stale provider-contract registry for a whole
- * pairing session). Adapters throw plain messages, but a parse error quotes
+ * failure names its cause in logs/setup.log and on screen. Adapters throw
+ * plain messages, but a parse error quotes
  * its input (a malformed auth.json would put token text in the message), so
  * token-shaped runs are masked and the message is kept to its first line.
  */

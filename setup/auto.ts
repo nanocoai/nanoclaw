@@ -425,10 +425,10 @@ async function main(): Promise<void> {
           rebuild.hint,
         );
       }
-      // This process imported src/provider-contracts/index.ts at startup, so the
-      // barrel line the install appended never evaluates here; load the contract
-      // module itself before the auth step asks the gateway store for the
-      // provider's model endpoints (#3862).
+      // This process imported src/provider-contracts/index.ts at startup, and
+      // ESM caches the barrel, so a line appended to it now never evaluates
+      // here; load the contract module directly before the auth step asks the
+      // gateway store for model endpoints.
       await loadHostContractModules(hostContractModules);
       await import(`./providers/${agentProvider}.js`);
       providerEntry = getSetupProvider(agentProvider);

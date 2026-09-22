@@ -12,9 +12,9 @@ import { getProviderModelEndpoint } from '../../src/provider-contracts/index.js'
 import { appendedHostContractModules, loadHostContractModules } from './install.js';
 
 /**
- * ESM-cache-faithful reproduction of #3862. No `vi.resetModules()` anywhere in
- * this file: resetting the module cache is exactly what the wizard cannot do,
- * and doing it here would hide the bug the fix exists for. The temp barrel
+ * The wizard's module cache, as it is: no `vi.resetModules()` anywhere in
+ * this file, because resetting the cache is exactly what the wizard cannot do,
+ * and doing it here would let a stale barrel pass. The temp barrel
  * re-exports the real registry, so the probe contract lands where the gateway
  * credential store looks (`getProviderModelEndpoint` on the startup barrel).
  */
@@ -68,15 +68,15 @@ describe('host contract registration after an in-process provider install', () =
 
     const apply = installProbeContract(root);
 
-    // The bug: the barrel's URL is already cached, so re-importing it after the
-    // append evaluates nothing and the registry still lacks the provider.
+    // The barrel's URL is already cached, so re-importing it after the append
+    // evaluates nothing and the registry still lacks the provider.
     const again = await import(barrel);
     expect(again).toBe(startup);
     expect(() => getProviderModelEndpoint(PROBE, 'subscription')).toThrow(
       `Provider ${PROBE} does not declare its subscription endpoint`,
     );
 
-    // The fix: import what the install appended, by file, so it self-registers.
+    // Import what the install appended, by file, so it self-registers.
     const modules = appendedHostContractModules(apply as never, root);
     expect(modules).toEqual([path.join(root, `src/provider-contracts/${PROBE}.ts`)]);
     await loadHostContractModules(modules);

@@ -77,9 +77,10 @@ export async function run(args: string[]): Promise<void> {
         process.exit(1);
       }
     }
-    // The contract barrel was imported at startup; its appended line never
-    // evaluates in this process, so load the contract module directly before
-    // the auth step asks the gateway store for model endpoints (#3862).
+    // This process imported src/provider-contracts/index.ts at startup, and
+    // ESM caches the barrel, so a line appended to it now never evaluates
+    // here; load the contract module directly before the auth step asks the
+    // gateway store for model endpoints.
     await loadHostContractModules(hostContractModules);
     if (!entry) {
       // Resolve after installation; a bundler's static glob cannot include a
