@@ -333,6 +333,14 @@ Signal responses show `platformMsgId=undefined` in the main log. This means the 
 
 **Fix:** Both paths now stage every attachment through the same generic mechanism regardless of accompanying text. If your copy predates this, re-copy `src/channels/signal.ts` and rebuild — see **Copy the adapter and its registration test** above.
 
+### Duplicate `messaging_groups` rows / cold-DM approvals not resolving, after upgrading
+
+**Symptom:** After upgrading to a version where DM `platform_id`s are `signal:`-prefixed, some users' DM history appears to reset, or approval/pairing cards sent to a known user silently go nowhere even though their regular chat still works.
+
+**Root cause:** Older adapter copies used the bare handle in one or more code paths (raw `platform_id`, or — before `openDM()` existed — the cold-DM fallback in `ensureUserDm`) while other paths already used the `signal:`-prefixed form. That leaves two `messaging_groups` rows per identity: an older bare-handle row, and the `signal:`-prefixed one that's actually wired and holds history. `user_dms` can end up caching the unprefixed one, rerouting cold-DM lookups to a dead end.
+
+**Fix:** Query `messaging_groups` for `channel_type='signal'` and compare `platform_id` values per person — a wired row with active sessions vs. an unwired duplicate (with/without the `signal:` prefix) for the same handle/UUID. If you find a pair: confirm which is wired, repoint any `user_dms` row at it, then delete the unwired duplicate once nothing else references it (check `messaging_group_agents`, `sessions`, `pending_approvals`, `pending_sender_approvals`/`pending_channel_approvals`, `unregistered_senders`). There's no automatic migration for this yet — it's manual reconciliation until one exists.
+
 ### Lost connection mid-session
 
 If you see `Signal channel lost TCP connection to signal-cli daemon` in the logs, the daemon dropped the connection. Restart the service to re-establish.
