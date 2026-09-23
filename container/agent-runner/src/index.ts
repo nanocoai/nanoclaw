@@ -73,6 +73,7 @@ async function main(): Promise<void> {
   const instructions = buildSystemPromptAddendum(
     config.assistantName || undefined,
     taskId ? { kind: 'task', taskId } : { kind: 'chat' },
+    config.responseDeliveryMode,
   );
 
   // Discover additional directories mounted at /workspace/extra/*
@@ -100,6 +101,9 @@ async function main(): Promise<void> {
       command: 'bun',
       args: ['run', mcpServerPath],
       env: {},
+      ...(config.responseDeliveryMode === 'terminal' && !taskId
+        ? { disabledTools: ['send_message', 'send_file', 'edit_message', 'add_reaction'] }
+        : {}),
     },
   };
 
@@ -122,6 +126,9 @@ async function main(): Promise<void> {
     model: config.model,
     effort: config.effort,
     speed: config.speed,
+    webSearchMode: config.webSearchMode,
+    responseDeliveryMode: config.responseDeliveryMode,
+    builtinToolMode: config.builtinToolMode,
   });
   registerProviderMemorySessionHook(providerName, provider, MEMORY_SESSION_HOOK);
 

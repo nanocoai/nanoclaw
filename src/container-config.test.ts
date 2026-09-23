@@ -90,9 +90,55 @@ describe('resolveGroupTimezone', () => {
     );
     expect(configFromDb({ ...row, runtime_tier: null }, GROUP).runtimeTier).toBeUndefined();
   });
+
+  it('preserves default provider web search and materializes an explicit disable', async () => {
+    const row = (await getContainerConfig(GROUP.id))!;
+    expect(configFromDb(row, GROUP).webSearchMode).toBeUndefined();
+
+    await updateContainerConfigScalars(GROUP.id, { web_search_mode: 'disabled' });
+    expect(configFromDb((await getContainerConfig(GROUP.id))!, GROUP).webSearchMode).toBe('disabled');
+
+    await updateContainerConfigScalars(GROUP.id, { web_search_mode: null });
+    expect(configFromDb((await getContainerConfig(GROUP.id))!, GROUP).webSearchMode).toBeUndefined();
+
+    expect(() => configFromDb({ ...row, web_search_mode: 'live' }, GROUP)).toThrow(/invalid web_search_mode "live"/);
+  });
+
+  it('preserves default built-in tools and materializes an MCP-only policy', async () => {
+    const row = (await getContainerConfig(GROUP.id))!;
+    expect(configFromDb(row, GROUP).builtinToolMode).toBeUndefined();
+
+    await updateContainerConfigScalars(GROUP.id, { builtin_tool_mode: 'mcp-only' });
+    expect(configFromDb((await getContainerConfig(GROUP.id))!, GROUP).builtinToolMode).toBe('mcp-only');
+
+    await updateContainerConfigScalars(GROUP.id, { builtin_tool_mode: null });
+    expect(configFromDb((await getContainerConfig(GROUP.id))!, GROUP).builtinToolMode).toBeUndefined();
+
+    expect(() => configFromDb({ ...row, builtin_tool_mode: 'shell' }, GROUP)).toThrow(
+      /invalid builtin_tool_mode "shell"/,
+    );
+  });
 });
 
 describe('parseMcpServerConfig', () => {
+  it('preserves a bounded MCP tool allowlist', () => {
+    expect(
+      parseMcpServerConfig({
+        url: 'https://mcp.example.com/mcp',
+        enabledTools: ['search', 'extract', 'search'],
+      }),
+    ).toEqual({ type: 'http', url: 'https://mcp.example.com/mcp', enabledTools: ['search', 'extract'] });
+  });
+
+  it('rejects conflicting or unsafe MCP tool policies', () => {
+    expect(() =>
+      parseMcpServerConfig({ url: 'https://mcp.example.com/mcp', enabledTools: ['search'], disabledTools: ['crawl'] }),
+    ).toThrow(/mutually exclusive/);
+    expect(() => parseMcpServerConfig({ url: 'https://mcp.example.com/mcp', enabledTools: ['bad tool'] })).toThrow(
+      /safe MCP tool names/,
+    );
+  });
+
   it('preserves stdio config and accepts HTTPS Streamable HTTP config', () => {
     expect(parseMcpServerConfig({ command: 'pnpm', args: ['dlx', 'server'], env: { TOKEN: 'stub' } })).toEqual({
       command: 'pnpm',
