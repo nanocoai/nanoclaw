@@ -28,7 +28,7 @@ vi.mock('../../config.js', async () => {
   };
 });
 
-import { loadMountAllowlist, validateMount } from './index.js';
+import { isHostPathAllowlisted, loadMountAllowlist, validateMount } from './index.js';
 
 let tmpDir: string;
 let configFile: string;
@@ -115,5 +115,64 @@ describe('loadMountAllowlist', () => {
   it('returns null when the allowlist file is missing', () => {
     // No file written.
     expect(loadMountAllowlist()).toBeNull();
+  });
+});
+
+describe('isHostPathAllowlisted', () => {
+  it('allows a path under an allowed root — agreeing with validateMount', () => {
+    writeAllowlist({
+      allowedRoots: [{ path: projectsDir, allowReadWrite: false }],
+      blockedPatterns: [],
+    });
+
+    expect(isHostPathAllowlisted(repoDir).allowed).toBe(true);
+    // Same allowlist, same verdict as the existing per-mount check — this is
+    // the property the two functions must never drift apart on.
+    expect(validateMount({ hostPath: repoDir }).allowed).toBe(true);
+  });
+
+  it('rejects a path outside every allowed root', () => {
+    writeAllowlist({
+      allowedRoots: [{ path: projectsDir, allowReadWrite: false }],
+      blockedPatterns: [],
+    });
+
+    const outsideDir = path.join(tmpDir, 'not-allowed');
+    fs.mkdirSync(outsideDir, { recursive: true });
+
+    const result = isHostPathAllowlisted(outsideDir);
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toMatch(/not under any allowed root/);
+  });
+
+  it('rejects a path matching a blocked pattern even under an allowed root', () => {
+    const sshDir = path.join(repoDir, '.ssh');
+    fs.mkdirSync(sshDir, { recursive: true });
+    writeAllowlist({
+      allowedRoots: [{ path: projectsDir, allowReadWrite: false }],
+      blockedPatterns: [],
+    });
+
+    const result = isHostPathAllowlisted(sshDir);
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toMatch(/blocked pattern/);
+  });
+
+  it('fails closed when no allowlist is configured', () => {
+    // No file written.
+    const result = isHostPathAllowlisted(repoDir);
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toMatch(/No mount allowlist configured/);
+  });
+
+  it('rejects a host path that does not exist', () => {
+    writeAllowlist({
+      allowedRoots: [{ path: projectsDir, allowReadWrite: false }],
+      blockedPatterns: [],
+    });
+
+    const result = isHostPathAllowlisted(path.join(projectsDir, 'does-not-exist'));
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toMatch(/does not exist/);
   });
 });

@@ -31,6 +31,12 @@ function contributionFromConfig(config: ContainerConfig, groupScope: string): Ga
       containerPath,
       mode: 'ro',
       groupScope,
+      // This SDK's own CA-certificate and credential-stub files, never an
+      // operator-named path — there is no reason to expect either in the
+      // operator's mount-allowlist.json, and there should not be: an
+      // independent re-check of a fixed, vetted, in-tree contribution adds
+      // nothing an operator could act on. See `MountSpec.origin`.
+      origin: 'provider',
     });
   };
   mount('ca', config.caCertificate, config.caCertificateContainerPath);

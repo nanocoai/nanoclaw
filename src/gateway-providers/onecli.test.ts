@@ -106,6 +106,10 @@ describe('OneCLI gateway contribution', () => {
     const bundle = result.mounts!.find((m) => m.containerPath === '/tmp/onecli-combined-ca.pem')!;
     expect(fs.readFileSync(bundle.hostPath, 'utf8')).toBe('SYSTEM CA\nSYNTHETIC CA\n');
     expect(config.env.SSL_CERT_FILE).toBe(caPath);
+    // Every OneCLI-contributed mount is provider-controlled (fixed, vetted, in-tree
+    // content), never operator-named — the operator's mount-allowlist.json re-check
+    // must not re-deny it. See `MountSpec.origin`.
+    for (const mount of result.mounts!) expect(mount.origin).toBe('provider');
   });
 
   it('keeps the SDK fallback when no host system trust bundle can be read', async () => {
