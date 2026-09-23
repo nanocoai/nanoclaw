@@ -53,9 +53,15 @@ function fakeHook(opts: { body?: string; exitCode?: number } = {}): OpenCodeMemo
   const script = path.join(dir, `hook-${scriptSeq++}.sh`);
   fs.writeFileSync(
     script,
-    ['#!/bin/sh', `cat >> "${logPath()}"`, `echo "" >> "${logPath()}"`, `cat <<'EOF'`, body, 'EOF', `exit ${opts.exitCode ?? 0}`].join(
-      '\n',
-    ) + '\n',
+    [
+      '#!/bin/sh',
+      `cat >> "${logPath()}"`,
+      `echo "" >> "${logPath()}"`,
+      `cat <<'EOF'`,
+      body,
+      'EOF',
+      `exit ${opts.exitCode ?? 0}`,
+    ].join('\n') + '\n',
   );
   return { command: `sh ${script}`, legacyCommands: [], sources: ['startup', 'clear', 'compact'] };
 }
@@ -198,6 +204,12 @@ describe('OpenCodeProvider memory registration', () => {
 
     provider.query({ prompt: 'hi again', cwd: '/workspace', continuation: 'ses_existing' });
     expect(invocations()).toHaveLength(1);
+  });
+});
+
+describe('OpenCode built-in tool policy', () => {
+  it('fails closed instead of ignoring MCP-only mode', () => {
+    expect(() => new OpenCodeProvider({ builtinToolMode: 'mcp-only' })).toThrow(/does not support builtinToolMode/);
   });
 });
 
