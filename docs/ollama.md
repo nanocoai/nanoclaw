@@ -151,6 +151,10 @@ Three files need to support this feature. See `/add-ollama-provider` for the exa
 
 For personal automation on capable hardware, the tradeoff favors local. For complex multi-step tasks requiring large context or high reliability, Claude is still ahead.
 
+## If Containers Get Killed Mid-Turn
+
+The host sweep kills a container whose heartbeat has been silent for 30 minutes (`NANOCLAW_ABSOLUTE_CEILING_MS`) or that has sat on a claimed message with no sign of life for 60 seconds (`NANOCLAW_CLAIM_STUCK_MS`). A slow local model can legitimately exceed either while decoding a long turn; set the corresponding env var in `.env` to a larger number of milliseconds and restart the host. Out-of-range or unparseable values are logged and ignored.
+
 ## Reverting to Claude
 
 Remove the `env` and `blockedHosts` keys from `groups/<folder>/container.json`, remove `"model"` from the shared settings file, and restart the service. No rebuild needed.
