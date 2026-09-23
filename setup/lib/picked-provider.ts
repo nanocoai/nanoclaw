@@ -13,6 +13,8 @@
  * `'claude'` means no run-scoped pick; the creation scripts then fall back to
  * the install-wide default.
  */
+import { envValue } from '../../src/env.js';
+
 const ENV_KEY = 'NANOCLAW_PICKED_PROVIDER';
 
 export function setPickedProvider(provider: string | undefined): void {
@@ -26,4 +28,25 @@ export function setPickedProvider(provider: string | undefined): void {
 
 export function getPickedProvider(): string | undefined {
   return process.env[ENV_KEY]?.trim().toLowerCase() || undefined;
+}
+
+/**
+ * The agent runtime this setup run serves, for decisions taken before or
+ * after the picker: the run-scoped pick, else the preset that skips the
+ * picker (`NANOCLAW_AGENT_PROVIDER`), else the install-wide default an earlier
+ * run stamped into `.env`. Undefined when nothing has chosen a runtime yet.
+ */
+export function resolveSelectedProvider(projectRoot = process.cwd()): string | undefined {
+  return (
+    getPickedProvider() ||
+    process.env.NANOCLAW_AGENT_PROVIDER?.trim().toLowerCase() ||
+    envValue('DEFAULT_AGENT_PROVIDER', projectRoot)?.trim().toLowerCase() ||
+    undefined
+  );
+}
+
+/** True when this run serves a runtime other than Claude. */
+export function isNonClaudeInstall(projectRoot = process.cwd()): boolean {
+  const provider = resolveSelectedProvider(projectRoot);
+  return Boolean(provider) && provider !== 'claude';
 }

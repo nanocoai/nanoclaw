@@ -28,6 +28,7 @@ import * as p from '@clack/prompts';
 import k from 'kleur';
 
 import { extractClaudeOAuthToken } from './captured-token.js';
+import { isNonClaudeInstall, resolveSelectedProvider } from './picked-provider.js';
 import { ensureAnswer } from './runner.js';
 import { brandBody, fitToWidth, fmtDuration, note } from './theme.js';
 
@@ -141,12 +142,25 @@ function isClaudeAuthenticated(): boolean {
  * True when the Claude CLI is already installed AND signed in — the only
  * state in which a non-claude install may be offered a Claude debugger.
  * Unlike `ensureClaudeReady`, this never prompts and has no side effects.
+ * `ensureClaudeReady` applies the same rule itself, so every caller that
+ * reaches it on a non-claude install gets the guarded outcome.
  */
 export function isClaudeReady(): boolean {
   return isClaudeInstalled() && isClaudeAuthenticated();
 }
 
 export async function ensureClaudeReady(projectRoot: string): Promise<boolean> {
+  // A run that serves another runtime never installs or signs in Claude on
+  // the spot; Claude helps there only when it is already usable.
+  if (isNonClaudeInstall(projectRoot)) {
+    if (isClaudeReady()) return true;
+    p.log.warn(
+      brandBody(
+        `Skipping the Claude debug offer — this install uses ${resolveSelectedProvider(projectRoot)} and Claude isn't set up here. The failure details are in logs/setup.log.`,
+      ),
+    );
+    return false;
+  }
   if (!isClaudeInstalled()) {
     const install = ensureAnswer(
       await p.confirm({
