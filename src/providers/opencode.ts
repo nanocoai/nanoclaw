@@ -40,8 +40,9 @@ function mergeNoProxy(current: string | undefined, additions: string): string {
 }
 
 registerProviderContainerConfig('opencode', (ctx) => {
+  const coreOwnsProviderSurfaces = (ctx as typeof ctx & { coreOwnsProviderSurfaces?: true }).coreOwnsProviderSurfaces;
   const opencodeDir = path.join(ctx.sessionDir, 'opencode-xdg');
-  fs.mkdirSync(opencodeDir, { recursive: true });
+  if (!coreOwnsProviderSurfaces) fs.mkdirSync(opencodeDir, { recursive: true });
 
   const env: Record<string, string> = {
     XDG_DATA_HOME: '/opencode-xdg',
@@ -60,7 +61,9 @@ registerProviderContainerConfig('opencode', (ctx) => {
   }
 
   return {
-    mounts: [{ hostPath: opencodeDir, containerPath: '/opencode-xdg', readonly: false }],
+    mounts: coreOwnsProviderSurfaces
+      ? []
+      : [{ hostPath: opencodeDir, containerPath: '/opencode-xdg', readonly: false }],
     env,
   };
 });
