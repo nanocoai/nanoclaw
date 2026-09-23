@@ -36,6 +36,7 @@
  */
 import type { AgentDestination } from '../../../types.js';
 import { getDb } from '../../../db/connection.js';
+import { log } from '../../../log.js';
 import { deletePoliciesTouching, removeMessagePolicy } from './agent-message-policies.js';
 
 /**
@@ -152,6 +153,37 @@ export async function getDestinationReferencers(targetAgentGroupId: string): Pro
     targetAgentGroupId,
   );
   return rows.map((r) => r.agent_group_id);
+}
+
+/**
+ * Delete destination rows whose target no longer resolves — a channel target
+ * whose messaging group was deleted, or an agent target whose agent group is
+ * gone. Without this, projection silently skips the rows (write-destinations)
+ * while the central table keeps ghost entries that drop at send time.
+ * Idempotent; returns the number of rows removed.
+ */
+export async function sweepDanglingDestinations(): Promise<number> {
+  const dangling = await getDb().all<{ agent_group_id: string; local_name: string; target_type: string }>(
+    `SELECT ad.agent_group_id, ad.local_name, ad.target_type
+     FROM agent_destinations ad
+     LEFT JOIN messaging_groups mg ON ad.target_type = 'channel' AND ad.target_id = mg.id
+     LEFT JOIN agent_groups ag ON ad.target_type = 'agent' AND ad.target_id = ag.id
+     WHERE (ad.target_type = 'channel' AND mg.id IS NULL)
+        OR (ad.target_type = 'agent' AND ag.id IS NULL)`,
+  );
+  for (const row of dangling) {
+    await getDb().run(
+      'DELETE FROM agent_destinations WHERE agent_group_id = ? AND local_name = ?',
+      row.agent_group_id,
+      row.local_name,
+    );
+    log.warn('Swept dangling destination (target no longer resolves)', {
+      agentGroupId: row.agent_group_id,
+      localName: row.local_name,
+      targetType: row.target_type,
+    });
+  }
+  return dangling.length;
 }
 
 /** Normalize a human-readable name into a lowercase, dash-separated identifier. */
