@@ -3,8 +3,13 @@
  *
  * Dynamically finds and removes all rows referencing the agent group
  * (any table with an agent_group_id column), deletes the agent group
- * itself, and removes the groups/<folder>/ directory. Leaves the CLI
- * messaging group intact so it can be reused for a new agent.
+ * itself, stops and removes the group's container(s), and removes the
+ * groups/<folder>/ directory. Leaves the CLI messaging group intact so it
+ * can be reused for a new agent.
+ *
+ * Containers are stopped before the folder they mount is removed; the host
+ * keeps idle agent containers up between turns and is the only thing that
+ * stops them.
  *
  * Usage:
  *   pnpm exec tsx scripts/delete-cli-agent.ts --folder <folder-name>
@@ -12,11 +17,14 @@
 import fs from 'fs';
 import path from 'path';
 
-import { CENTRAL_DB_PATH, DATA_DIR } from '../src/config.js';
+import { CENTRAL_DB_PATH, DATA_DIR, INSTALL_SLUG } from '../src/config.js';
+import { CONTAINER_RUNTIME_BIN } from '../src/container-runtime.js';
 import { getAgentGroupByFolder, deleteAgentGroup } from '../src/db/agent-groups.js';
 import { closeDb, initDb } from '../src/db/connection.js';
 import { runMigrations } from '../src/db/migrations/index.js';
 import type { AgentGroup } from '../src/types.js';
+import { stopGroupContainers } from './update/group-containers.js';
+import { createCommandRunner } from './update/service.js';
 
 interface Args {
   folder: string;
@@ -61,6 +69,20 @@ try {
 if (!ag) {
   console.log(`No agent group with folder "${args.folder}" — nothing to delete.`);
   process.exit(0);
+}
+
+// Rows are gone, so the host cannot spawn a replacement before the stop.
+const containers = stopGroupContainers({
+  runtime: process.env.CONTAINER_RUNTIME ?? CONTAINER_RUNTIME_BIN,
+  installSlug: INSTALL_SLUG,
+  agentGroupId: ag.id,
+  runner: createCommandRunner(),
+});
+if (containers.listed.length > 0) {
+  console.log(`Stopped container(s) for ${args.folder}: ${containers.listed.join(', ')}`);
+}
+for (const failure of containers.failures) {
+  console.warn(`Could not clean up container(s) for ${args.folder}: ${failure}`);
 }
 
 // Remove the groups/<folder>/ directory.
