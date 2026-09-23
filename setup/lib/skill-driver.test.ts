@@ -27,8 +27,9 @@ import { fullyApplied, type ApplyEvent, type ApplyResult } from '../../scripts/s
 // the interactive Claude handoff; `lastValidate` captures the validate callback
 // the resolveInput impl handed clack so we can prove the `?` help-escape is wired.
 const ce = vi.hoisted(() => ({
+  cancel: Symbol('cancel'),
   handoffSpy: vi.fn(async (_ctx: { channel: string; step: string; stepDescription: string }) => true),
-  answers: [] as string[],
+  answers: [] as Array<string | string[] | symbol>,
   lastValidate: { fn: undefined as undefined | ((v: string) => string | Error | void | undefined) },
   lastSelectOptions: { values: undefined as undefined | string[] },
 }));
@@ -46,13 +47,26 @@ vi.mock('@clack/prompts', async (importActual) => {
   const actual = await importActual<typeof import('@clack/prompts')>();
   const fromQueue = async (o: { validate?: (v: string) => string | Error | void | undefined }): Promise<string> => {
     ce.lastValidate.fn = o?.validate;
-    return ce.answers.shift() ?? '';
+    return String(ce.answers.shift() ?? '');
   };
   const fromQueueSelect = async (o: { options: Array<{ value: string }> }): Promise<string> => {
     ce.lastSelectOptions.values = o.options.map((x) => x.value);
-    return ce.answers.shift() ?? o.options[0].value;
+    return String(ce.answers.shift() ?? o.options[0].value);
   };
-  return { ...actual, text: vi.fn(fromQueue), password: vi.fn(fromQueue), select: vi.fn(fromQueueSelect) };
+  const fromQueueMultiselect = async (o: { options: Array<{ value: string }> }): Promise<string[] | symbol> => {
+    ce.lastSelectOptions.values = o.options.map((x) => x.value);
+    const answer = ce.answers.shift();
+    if (typeof answer === 'symbol') return answer;
+    return Array.isArray(answer) ? answer : answer ? [String(answer)] : [o.options[0].value];
+  };
+  return {
+    ...actual,
+    text: vi.fn(fromQueue),
+    password: vi.fn(fromQueue),
+    select: vi.fn(fromQueueSelect),
+    multiselect: vi.fn(fromQueueMultiselect),
+    isCancel: vi.fn((value: unknown) => value === ce.cancel),
+  };
 });
 
 // A small SKILL.md exercising the three things the driver wires: an operator
@@ -480,6 +494,36 @@ printf '%s' '{{token}}'; printf '%s' '{{token}}' >&2; exit ${exit}
     });
     expect(ans).toBe('webhook');
     expect(ce.lastSelectOptions.values).toEqual(['socket', 'webhook']); // the options came from the regex
+  });
+
+  it('clackResolveInput renders declared multiple choices as toggles and binds a comma-separated value', async () => {
+    ce.answers = [['ag-three', 'ag-one']];
+    ce.lastSelectOptions.values = undefined;
+    const ans = await clackResolveInput()('groups', {
+      question: 'Which groups?',
+      secret: false,
+      choices: 'ag-one|ag-two|ag-three',
+      multiple: true,
+    });
+    expect(ans).toBe('ag-one,ag-three');
+    expect(ce.lastSelectOptions.values).toEqual(['ag-one', 'ag-two', 'ag-three']);
+  });
+
+  it('clackResolveInput defers a cancelled or empty-choice multiselect', async () => {
+    ce.answers = [ce.cancel];
+    await expect(
+      clackResolveInput()('groups', {
+        question: 'Which groups?',
+        secret: false,
+        choices: 'ag-one|ag-two',
+        multiple: true,
+      }),
+    ).resolves.toBeUndefined();
+
+    ce.answers = [];
+    await expect(
+      clackResolveInput()('groups', { question: 'Which groups?', secret: false, choices: '', multiple: true }),
+    ).resolves.toBeUndefined();
   });
 
   it('clackResolveInput passes a normal answer straight through — no handoff', async () => {
