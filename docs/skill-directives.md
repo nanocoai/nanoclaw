@@ -36,7 +36,9 @@ Every directive is idempotent — apply is safe to re-run, per the skills model.
 
 ### `copy [from-branch:<b>]`
 
-Body: one path per line — `PATH` (source == destination) or `SRC -> DST`. Copies the file in; with `from-branch:` the source is fetched from a registry branch (`git show origin/<b>:<path>`). **Idempotency: skip when every destination is present; when any is missing, all listed files are (re)copied — copying overwrites.**
+Body: one path per line — `PATH` (source == destination) or `SRC -> DST`. Copies the file in; with `from-branch:` the source is fetched from a registry branch (`git show refs/remotes/<remote>/<b>:<path>`). **Idempotency: skip when every destination is present; when any is missing, all listed files are (re)copied — copying overwrites.**
+
+Registry copies explicitly fetch `+refs/heads/<b>:refs/remotes/<remote>/<b>` from the selected remote before reading it. This also works in single-branch clones and updates stale registry refs without changing the checkout or its configured fetch mapping. A failed fetch stops the copy; cached registry content is not used as a fallback.
 
 ### `append to:<file> [at:<marker>]`
 

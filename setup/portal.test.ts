@@ -13,6 +13,8 @@ const mock = vi.hoisted(() => ({
   start: vi.fn(),
   stop: vi.fn(),
   image: vi.fn(),
+  clearImage: vi.fn(),
+  decided: true,
   deviceStart: vi.fn(),
   deviceFinish: vi.fn(),
   claim: vi.fn(),
@@ -106,7 +108,9 @@ vi.mock('./registry-login.js', () => ({
 vi.mock('./lib/registry-state.js', () => ({
   readRegistryAccount: mock.account,
   readImageSource: () => 'local',
+  imageSourceDecided: () => mock.decided,
   writeImageSource: mock.image,
+  clearImageSource: mock.clearImage,
 }));
 vi.mock('@clack/prompts', () => ({
   confirm: mock.confirm,
@@ -158,6 +162,7 @@ describe('browser setup handoffs', () => {
     mock.local = {};
     mock.saved = [];
     mock.options = [];
+    mock.decided = true;
     mock.account.mockReturnValue(ACCOUNT);
     mock.identity.mockResolvedValue(IDENTITY);
     mock.key.mockReturnValue(KEY);
@@ -198,8 +203,9 @@ describe('browser setup handoffs', () => {
     });
     expect(mock.open).toHaveBeenCalledExactlyOnceWith('https://portal.example.test/?setup=test');
     expect(stdout.join('')).toContain('https://portal.example.test/?setup=test\n');
-    expect(stdout.join('')).toContain('ABCD-EFGH\n');
-    expect(stdout.join('')).toContain(`${DEVICE_FLOW.device.verificationUriComplete}\n`);
+    // One link only: a bare sign-in link signs in and then leaves the perk undecided.
+    expect(stdout.join('')).not.toContain('ABCD-EFGH');
+    expect(stdout.join('')).not.toContain(DEVICE_FLOW.device.verificationUriComplete);
     expect(stdout.join('')).not.toContain('device-secret');
     expect(mock.deviceFinish).toHaveBeenCalledExactlyOnceWith(DEVICE_FLOW);
     expect(mock.open.mock.invocationCallOrder[0]).toBeLessThan(mock.deviceFinish.mock.invocationCallOrder[0]);
@@ -464,6 +470,22 @@ describe('browser setup handoffs', () => {
     expect(pull).toHaveBeenCalledOnce();
     expect(mock.local.reminderPending.echo).toBeUndefined();
     expect(mock.local.reminders.echo).toBe(true);
+  });
+
+  it('puts the question back, rather than answering it, if the late image pull fails before it was ever answered', async () => {
+    mock.decided = false;
+    mock.result.choice.imageSource = 'hardened';
+    const enable = () =>
+      runImagePortal({
+        browserConsent: true,
+        apply: async () => {
+          throw new Error('pull failed');
+        },
+      });
+    await expect(offerPortalReminder('echo', enable)).rejects.toThrow('pull failed');
+    expect(mock.image).toHaveBeenCalledExactlyOnceWith('hardened');
+    expect(mock.clearImage).toHaveBeenCalledOnce();
+    expect(mock.local.reminderPending.echo).toBe(true);
   });
 
   it('keeps core setup running when optional perk status is temporarily unavailable', async () => {

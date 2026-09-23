@@ -3,7 +3,13 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import * as p from '@clack/prompts';
 import { openUrl } from './lib/browser.js';
-import { readImageSource, readRegistryAccount, writeImageSource } from './lib/registry-state.js';
+import {
+  clearImageSource,
+  imageSourceDecided,
+  readImageSource,
+  readRegistryAccount,
+  writeImageSource,
+} from './lib/registry-state.js';
 import { LoginError, finishDeviceFlow, startDeviceFlow, type DeviceFlow } from './registry-login.js';
 import {
   SetupClient,
@@ -90,8 +96,7 @@ function skippedSignIn(error: unknown): void {
 /**
  * The not-enrolled path: start the device flow without opening its page,
  * start the stage anonymously with the user code, print and open the single
- * portal link (plus the code and the provider's page on their own lines for
- * headless users), wait for the sign-in, persist it, then register and claim.
+ * portal link, wait for the sign-in, persist it, then register and claim.
  * Declined, expired or failed → null; the stage is skipped and nothing else
  * happens.
  */
@@ -106,15 +111,12 @@ async function signInThroughPortal(client: SetupClient, stage: PortalStage, name
   const verificationUri = flow.device.verificationUriComplete ?? flow.device.verificationUri;
   const setup = await client.start(stage, name, { verification: { userCode: flow.device.userCode, verificationUri } });
   p.log.info(
-    'Open the link below to sign in and approve this terminal. Setup continues automatically as soon as your perk is enabled.',
+    'Open the link below to sign in, approve this terminal, and choose your perk. Setup continues automatically once you decide.',
   );
-  // Keep the URL unwrapped so it stays clickable and copyable. The code and
-  // the sign-in page are only for a machine without a browser: the portal page
-  // opens that sign-in itself.
+  // Keep the URL unwrapped so it stays clickable and copyable. It is the only
+  // link: the portal page carries the user code and opens the sign-in itself,
+  // from any device. A bare sign-in link would leave the perk undecided.
   process.stdout.write(`\n${setup.url}\n\n`);
-  process.stdout.write(
-    `No browser on this machine? Sign in from another device instead:\nCode: ${flow.device.userCode}\n${verificationUri}\n\n`,
-  );
   openUrl(setup.url);
   try {
     await finishDeviceFlow(flow);
@@ -249,7 +251,10 @@ export async function beginPortal(
 export async function runImagePortal(
   options: { browserConsent?: boolean; apply?: () => Promise<void> } = {},
 ): Promise<void> {
-  const previous = readImageSource();
+  // "Previous" includes "not decided yet": a failed late download must put
+  // the question back, not answer it — the wizard's reminder is only for a
+  // run whose question is still open, and the retry has to reach it.
+  const previous = imageSourceDecided() ? readImageSource() : undefined;
   const client = await beginPortal('echo', 'Nano', options);
   if (!client) {
     if (!options.apply) writeImageSource('local');
@@ -264,7 +269,8 @@ export async function runImagePortal(
       try {
         await options.apply?.();
       } catch (error) {
-        writeImageSource(previous);
+        if (previous) writeImageSource(previous);
+        else clearImageSource();
         await client.complete('failed').catch(() => {});
         throw error;
       }

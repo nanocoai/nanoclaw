@@ -95,6 +95,22 @@ describe('createChatSdkBridge', () => {
     });
     expect(typeof bridge.subscribe).toBe('function');
   });
+
+  it('reports an adapter transport probe when one is available', () => {
+    let connected = false;
+    const adapter = stubAdapter({}) as Adapter & { isConnected(): boolean };
+    adapter.isConnected = () => connected;
+    const bridge = createChatSdkBridge({ adapter, supportsThreads: true });
+
+    expect(bridge.isConnected()).toBe(false);
+    connected = true;
+    expect(bridge.isConnected()).toBe(true);
+  });
+
+  it('keeps adapters without a transport probe available after setup', () => {
+    const bridge = createChatSdkBridge({ adapter: stubAdapter({}), supportsThreads: true });
+    expect(bridge.isConnected()).toBe(true);
+  });
 });
 
 describe('createChatSdkBridge — instance identity', () => {

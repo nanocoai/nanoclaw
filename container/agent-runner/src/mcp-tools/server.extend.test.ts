@@ -14,10 +14,69 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { initTestSessionDb, closeSessionDb } from '../mailbox/sqlite/connection.js';
 import { getUndeliveredMessages, writeMessageOut } from '../db/messages-out.js';
 import { createAgent } from './agents.js';
-import { extendTool, registerTools } from './server.js';
+import { createMcpServer, extendTool, registerTools } from './server.js';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { McpToolDefinition } from './types.js';
 
 let fixtureCount = 0;
+
+describe('MCP cancellation forwarding', () => {
+  it('forwards native client cancellation through an extended tool to its active handler', async () => {
+    const name = `cancellation_fixture_${++fixtureCount}`;
+    let started!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let cancelled!: () => void;
+    const stopped = new Promise<void>((resolve) => {
+      cancelled = resolve;
+    });
+    registerTools([
+      {
+        tool: { name, inputSchema: { type: 'object', properties: { fixture: { type: 'string' } } } },
+        handler: async (_args, context) => {
+          expect(context?.signal).toBeInstanceOf(AbortSignal);
+          started();
+          await new Promise<void>((resolve) =>
+            context!.signal.addEventListener(
+              'abort',
+              () => {
+                cancelled();
+                resolve();
+              },
+              { once: true },
+            ),
+          );
+          return { content: [{ type: 'text', text: 'cancelled' }] };
+        },
+      },
+    ]);
+    extendTool(name, { passthroughKeys: ['fixture'] });
+    const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
+    const server = createMcpServer();
+    const client = new Client({ name: 'fixture', version: '1' });
+    try {
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      const controller = new AbortController();
+      const call = client.callTool({ name, arguments: { fixture: 'enabled' } }, undefined, {
+        signal: controller.signal,
+      });
+      const rejected = call.then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      await entered;
+      controller.abort();
+      await stopped;
+      expect(await rejected).toBeInstanceOf(Error);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+});
 
 /**
  * Register a fresh fixture tool that writes one system-action payload the

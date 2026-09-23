@@ -17,6 +17,7 @@ import {
 } from './registry.js';
 
 const provider = 'claude';
+const tone = { default: 'Concise', toSettings: (tone: string) => ({ outputStyle: tone }) };
 
 export const claudeRuntimeContract: ProviderRuntimeContract = {
   seamVersion: PROVIDER_RUNTIME_CONTRACT_SEAM_VERSION,
@@ -25,6 +26,7 @@ export const claudeRuntimeContract: ProviderRuntimeContract = {
     // the boundary — so it is declared as the constant it is.
     executionPolicy: { constant: resolveClaudeExecutionPolicy() },
     inference: resolveClaudeInference,
+    tone,
     // The memory runtime env is likewise fixed: auto-memory stays off whatever
     // hook core registers, so it is a constant, not a function of the hook.
     memory: { constant: resolveClaudeMemoryRuntime() },
@@ -68,7 +70,9 @@ function writeMemorySessionHook(hook: RuntimeMemoryHookInput): void {
 
   hooks.SessionStart = nextSessionStart;
   parsed.hooks = hooks;
-  fs.writeFileSync(filePath, JSON.stringify(parsed, null, 2) + '\n');
+  // Seed user defaults; existing values and higher-priority project/local settings win.
+  const settings = { ...tone.toSettings(tone.default), ...parsed };
+  fs.writeFileSync(filePath, JSON.stringify(settings, null, 2) + '\n');
 }
 
 function removeMemoryCommands(value: unknown, commands: ReadonlySet<string>): unknown {

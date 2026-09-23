@@ -53,6 +53,21 @@ afterEach(() => {
     query.abort();
 
     expect(query.events[Symbol.asyncIterator]).toBeFunction();
-    expect(provider.isSessionInvalid(new Error('session not found'))).toBe(true);
+    // A real missing native session must remain recoverable through both the
+    // historical payload and the current provider's stricter error classifier.
+    expect(
+      provider.isSessionInvalid(
+        new Error(
+          JSON.stringify({
+            name: 'NotFoundError',
+            data: { message: 'Session not found: ses_missing' },
+          }),
+        ),
+      ),
+    ).toBe(true);
+    // Exercise the shared historical contract here. The current payload's
+    // conformance suite owns its stricter structured-NotFoundError behavior;
+    // this probe also runs against the pinned pre-contract payload.
+    expect(provider.isSessionInvalid(new Error('unrelated backend failure'))).toBe(false);
   });
 });

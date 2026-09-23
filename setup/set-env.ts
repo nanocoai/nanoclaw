@@ -13,6 +13,7 @@
  */
 import fs from 'fs';
 import path from 'path';
+import { randomUUID } from 'node:crypto';
 
 import { log } from '../src/log.js';
 import { emitStatus } from './status.js';
@@ -24,25 +25,52 @@ import { emitStatus } from './status.js';
  * can't be allowlisted tightly).
  */
 export function upsertEnvVar(key: string, value: string): { existed: boolean } {
-  if (!/^[A-Z][A-Z0-9_]*$/.test(key)) {
-    throw new Error(`Invalid env key: ${key} (must be UPPER_SNAKE_CASE)`);
+  return { existed: upsertEnvVars({ [key]: value }).has(key) };
+}
+
+/** Commit related settings together, removing every assignment the reader accepts.
+ * A failed write or rename leaves the previous configuration intact. */
+export function upsertEnvVars(values: Record<string, string>): Set<string> {
+  for (const [key, value] of Object.entries(values)) {
+    if (!/^[A-Z][A-Z0-9_]*$/.test(key)) throw new Error(`Invalid env key: ${key} (must be UPPER_SNAKE_CASE)`);
+    if (/[\r\n\0]/.test(value)) throw new Error(`Invalid multiline env value for ${key}`);
   }
-  const envFile = path.join(process.cwd(), '.env');
-  let content = '';
-  if (fs.existsSync(envFile)) {
-    content = fs.readFileSync(envFile, 'utf-8');
+  const namedFile = path.join(process.cwd(), '.env');
+  const exists = fs.existsSync(namedFile);
+  // Keep an operator's .env symlink; replace its target, in the same directory.
+  const envFile = exists ? fs.realpathSync(namedFile) : namedFile;
+  const content = exists ? fs.readFileSync(envFile, 'utf8') : '';
+  const existed = new Set<string>();
+  const lines = content.split(/(?<=\n)/).map((line) => {
+    const trimmed = line.trim();
+    const eq = trimmed.indexOf('=');
+    const key = trimmed.slice(0, eq).trim();
+    if (trimmed.startsWith('#') || eq < 0 || !Object.hasOwn(values, key)) return line;
+    if (existed.has(key)) return '';
+    existed.add(key);
+    return `${key}=${values[key]}\n`;
+  });
+  let next = lines.join('');
+  if (next && !next.endsWith('\n')) next += '\n';
+  next += Object.entries(values)
+    .filter(([key]) => !existed.has(key))
+    .map(([key, value]) => `${key}=${value}\n`)
+    .join('');
+  const temporary = `${envFile}.${randomUUID()}.tmp`;
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(temporary, 'wx', 0o600);
+    fs.writeFileSync(fd, next);
+    if (exists) fs.fchmodSync(fd, fs.statSync(envFile).mode & 0o777);
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = undefined;
+    fs.renameSync(temporary, envFile);
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+    fs.rmSync(temporary, { force: true });
   }
-  const lineRegex = new RegExp(`^${key}=.*$`, 'm');
-  const existed = lineRegex.test(content);
-  const newLine = `${key}=${value}`;
-  if (existed) {
-    content = content.replace(lineRegex, newLine);
-  } else {
-    const sep = content && !content.endsWith('\n') ? '\n' : '';
-    content = content + sep + newLine + '\n';
-  }
-  fs.writeFileSync(envFile, content);
-  return { existed };
+  return existed;
 }
 
 /**
