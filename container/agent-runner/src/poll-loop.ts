@@ -272,8 +272,15 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         continuation,
         midTurnCompleteDelivery,
         config.signal,
+        config.provider.maybeRotateContinuation
+          ? (session) => config.provider.maybeRotateContinuation!(session, config.cwd)
+          : undefined,
       );
-      if (result.continuation && result.continuation !== continuation) {
+      if (result.rotationReason) {
+        log(`Rotated session — ${result.rotationReason}; starting fresh`);
+        clearContinuation(config.providerName);
+        continuation = undefined;
+      } else if (result.continuation && result.continuation !== continuation) {
         continuation = result.continuation;
         setContinuation(config.providerName, continuation);
       }
@@ -349,6 +356,11 @@ function formatMessagesWithCommands(
 
 interface QueryResult {
   continuation?: string;
+  /**
+   * A provider-owned transcript was rotated at an idle turn boundary. The
+   * caller must forget the continuation before processing the next message.
+   */
+  rotationReason?: string;
 }
 
 export async function processQuery(
@@ -370,11 +382,14 @@ export async function processQuery(
    */
   midTurnCompleteDelivery = false,
   signal?: AbortSignal,
+  onIdleContinuation?: (continuation: string) => string | null,
 ): Promise<QueryResult> {
   // adoptTurn mutates routing in place; keep the caller's batch route intact.
   routing = { ...routing };
   let queryContinuation: string | undefined;
   let done = false;
+  let rotationReason: string | undefined;
+  let idleAtTurnBoundary = false;
   let unwrappedNudged = false;
   // Once-per-turn guard for the task-run "<message> block was not delivered"
   // nudge — mirrors unwrappedNudged for chat turns.
@@ -433,6 +448,7 @@ export async function processQuery(
     taskBlockNudged = next.taskBlockNudged;
     publishReplyRoute(routing);
     answering = true;
+    idleAtTurnBoundary = false;
   };
   // A retry is another provider input, behind any follow-ups already pushed.
   // Preserve its original route, prompt and retry guards until it is answered.
@@ -454,6 +470,34 @@ export async function processQuery(
   let pollInFlight = false;
   let endedForCommand = false;
   let mailboxFailureStreak = 0;
+  const rotateAtIdleBoundary = (): boolean => {
+    if (!idleAtTurnBoundary || done || answering || queuedTurns.length > 0 || pollInFlight) return false;
+
+    const idleContinuation = queryContinuation ?? initialContinuation;
+    if (!idleContinuation || !onIdleContinuation) {
+      idleAtTurnBoundary = false;
+      return false;
+    }
+
+    try {
+      const reason = onIdleContinuation(idleContinuation);
+      idleAtTurnBoundary = false;
+      if (!reason) return false;
+
+      rotationReason = reason;
+      done = true;
+      try {
+        query.abort();
+      } catch (err) {
+        log(`Failed to stop rotated query: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      return true;
+    } catch (err) {
+      idleAtTurnBoundary = false;
+      log(`Idle continuation rotation check failed: ${err instanceof Error ? err.message : String(err)}`);
+      return false;
+    }
+  };
   const pollHandle = setInterval(() => {
     if (done || pollInFlight || endedForCommand) return;
     pollInFlight = true;
@@ -566,6 +610,7 @@ export async function processQuery(
         }
       } finally {
         pollInFlight = false;
+        if (rotateAtIdleBoundary()) clearInterval(pollHandle);
       }
     })();
   }, ACTIVE_POLL_INTERVAL_MS);
@@ -686,10 +731,21 @@ export async function processQuery(
         midTurnTail = '';
         const next = queuedTurns.shift();
         if (next) adoptTurn(next);
-        else answering = false;
+        else {
+          answering = false;
+          // If a mailbox poll is finishing now, let it push any claimed
+          // follow-up before rotating. Its finally block retries the check
+          // once the query is truly idle.
+          idleAtTurnBoundary = true;
+          if (rotateAtIdleBoundary()) break;
+        }
       }
     }
   } catch (err) {
+    if (rotationReason !== undefined) {
+      return { continuation: queryContinuation, rotationReason };
+    }
+
     // Freeze the queue before awaiting notices. Follow-ups have already been
     // acknowledged, so an abandoned queued turn cannot rely on redelivery.
     done = true;
@@ -737,7 +793,7 @@ export async function processQuery(
     clearInterval(pollHandle);
   }
 
-  return { continuation: queryContinuation };
+  return { continuation: queryContinuation, rotationReason };
 }
 
 function notifyExchangeComplete(
