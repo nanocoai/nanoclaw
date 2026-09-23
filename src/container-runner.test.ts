@@ -10,7 +10,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { describe, expect, it, vi } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 
 import { CONTAINER_CPU_LIMIT, CONTAINER_MEMORY_LIMIT } from './config.js';
 import type { ContainerConfig } from './container-config.js';
@@ -455,9 +455,17 @@ describe('armSessionLifecycle', () => {
 });
 
 describe('syncSkillSymlinks', () => {
+  // Each case gets a fresh dir; remove them when the block finishes rather
+  // than leaving one per case in the OS temp dir on every run.
+  const claudeDirs: string[] = [];
   function tmpClaudeDir(): string {
-    return fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-skills-'));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-skills-'));
+    claudeDirs.push(dir);
+    return dir;
   }
+  afterAll(() => {
+    while (claudeDirs.length) fs.rmSync(claudeDirs.pop()!, { recursive: true, force: true });
+  });
 
   it('links every selected skill to its container path', () => {
     const dir = tmpClaudeDir();
