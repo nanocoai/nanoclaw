@@ -305,6 +305,14 @@ export interface ChannelAdapter {
    * shared-number mode), but is immutable for the process lifetime.
    */
   defaults?: ChannelDefaults;
+
+  /**
+   * The name users see on this bot's messages, once the platform has said
+   * (set after setup; absent until then, or when the platform never says).
+   * The host prints it as the agent's own name for a group whose
+   * `assistant_name` is unset — see `botDisplayNameFor` in container-config.ts.
+   */
+  botDisplayName?: string;
 }
 
 /** Factory function that creates a channel adapter (returns null if credentials missing). */

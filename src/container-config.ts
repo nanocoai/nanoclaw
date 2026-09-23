@@ -14,6 +14,8 @@ import path from 'path';
 import { DEFAULT_MODEL, FAST_MODE, GROUPS_DIR, TIMEZONE } from './config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { getAgentGroup } from './db/agent-groups.js';
+import { getMessagingGroupsByAgentGroup } from './db/messaging-groups.js';
+import { getChannelAdapterExact } from './channels/channel-registry.js';
 import { isValidTimezone } from './timezone.js';
 import { log } from './log.js';
 import type { AgentGroup, ContainerConfigRow, ContainerSpeed } from './types.js';
@@ -359,8 +361,26 @@ export function parseSkillSelection(raw: string | undefined, groupName: string):
   return 'all';
 }
 
-/** Build a `ContainerConfig` from a DB row + agent group identity. */
-export function configFromDb(row: ContainerConfigRow, group: AgentGroup): ContainerConfig {
+/**
+ * The name users see on the bot this group speaks through, when every channel
+ * the group is wired to resolves to one such name. Two bots, or none known
+ * yet (adapter offline, platform never says), yields undefined so the group
+ * name stands in — the pre-existing behavior.
+ */
+export async function botDisplayNameFor(agentGroupId: string): Promise<string | undefined> {
+  const names = new Set<string>();
+  for (const mg of await getMessagingGroupsByAgentGroup(agentGroupId)) {
+    const name = getChannelAdapterExact(mg.instance ?? mg.channel_type)?.botDisplayName;
+    if (name) names.add(name);
+  }
+  return names.size === 1 ? [...names][0] : undefined;
+}
+
+/**
+ * Build a `ContainerConfig` from a DB row + agent group identity. The prompt
+ * name is `assistant_name`, else the bot's display name, else the group name.
+ */
+export function configFromDb(row: ContainerConfigRow, group: AgentGroup, botDisplayName?: string): ContainerConfig {
   return {
     mcpServers: sanitizeStoredMcpServers(JSON.parse(row.mcp_servers), group.name),
     packages: {
@@ -372,7 +392,7 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
     skills: parseSkillSelection(row.skills, group.name),
     provider: row.provider ?? undefined,
     groupName: group.name,
-    assistantName: row.assistant_name ?? group.name,
+    assistantName: row.assistant_name ?? botDisplayName ?? group.name,
     agentGroupId: group.id,
     maxMessagesPerPrompt: row.max_messages_per_prompt ?? undefined,
     // The group's own model wins; NANOCLAW_DEFAULT_MODEL fills in for groups
@@ -413,7 +433,7 @@ export async function materializeContainerJson(agentGroupId: string): Promise<Co
   const row = await getContainerConfig(agentGroupId);
   if (!row) throw new Error(`Container config not found for agent group: ${agentGroupId}`);
 
-  const config = configFromDb(row, group);
+  const config = configFromDb(row, group, await botDisplayNameFor(group.id));
 
   const p = path.join(GROUPS_DIR, group.folder, 'container.json');
   const dir = path.dirname(p);

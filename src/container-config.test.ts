@@ -11,8 +11,10 @@ import path from 'path';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 
 import { TIMEZONE } from './config.js';
+import { initChannelAdapters, registerChannelAdapter, teardownChannelAdapters } from './channels/channel-registry.js';
 import {
   CONTAINER_PLUGINS_DIR,
+  botDisplayNameFor,
   configFromDb,
   parseMcpServerConfig,
   resolveGroupTimezone,
@@ -22,6 +24,7 @@ import {
 import { createAgentGroup } from './db/agent-groups.js';
 import { closeDb, initTestDb } from './db/connection.js';
 import { ensureContainerConfig, getContainerConfig, updateContainerConfigScalars } from './db/container-configs.js';
+import { createMessagingGroup, createMessagingGroupAgent } from './db/messaging-groups.js';
 import { runMigrations } from './db/migrations/index.js';
 import type { AgentGroup } from './types.js';
 
@@ -89,6 +92,97 @@ describe('resolveGroupTimezone', () => {
       /invalid runtime_tier "hypervisor"/,
     );
     expect(configFromDb({ ...row, runtime_tier: null }, GROUP).runtimeTier).toBeUndefined();
+  });
+});
+
+describe('botDisplayNameFor', () => {
+  // The prompt-name chain: assistant_name → the one bot the group posts
+  // through → group name. A bot named differently from the group (one
+  // shared bot fronting several groups) used to leave the agent with a
+  // name its users never see.
+  const makeAdapter = (instance: string | undefined, botDisplayName?: string) => ({
+    name: instance ?? 'slack',
+    channelType: 'slack',
+    instance,
+    supportsThreads: true,
+    botDisplayName,
+    async setup() {},
+    async teardown() {},
+    isConnected: () => true,
+    async deliver() {
+      return undefined;
+    },
+  });
+  const noSetup = () => ({ onInbound: () => {}, onInboundEvent: () => {}, onMetadata: () => {}, onAction: () => {} });
+  const wire = async (mgId: string, instance?: string) => {
+    const now = new Date().toISOString();
+    await createMessagingGroup({
+      id: mgId,
+      channel_type: 'slack',
+      platform_id: `slack:${mgId}`,
+      instance,
+      name: mgId,
+      is_group: 0,
+      unknown_sender_policy: 'strict',
+      created_at: now,
+    });
+    await createMessagingGroupAgent({
+      id: `mga-${mgId}`,
+      messaging_group_id: mgId,
+      agent_group_id: GROUP.id,
+      engage_mode: 'pattern',
+      engage_pattern: '.',
+      sender_scope: 'all',
+      ignored_message_policy: 'drop',
+      session_mode: 'shared',
+      priority: 0,
+      created_at: now,
+    });
+  };
+
+  beforeEach(async () => {
+    await runMigrations(await initTestDb());
+    await createAgentGroup(GROUP);
+    await ensureContainerConfig(GROUP.id);
+  });
+  afterEach(async () => {
+    await teardownChannelAdapters();
+    await closeDb();
+  });
+
+  it('names the agent after the one bot it posts through; a set assistant_name still wins', async () => {
+    registerChannelAdapter('slack', { factory: () => makeAdapter(undefined, 'Front Desk') });
+    await initChannelAdapters(noSetup);
+    await wire('mg-dm');
+
+    expect(await botDisplayNameFor(GROUP.id)).toBe('Front Desk');
+    const row = (await getContainerConfig(GROUP.id))!;
+    expect(configFromDb(row, GROUP, await botDisplayNameFor(GROUP.id)).assistantName).toBe('Front Desk');
+
+    await updateContainerConfigScalars(GROUP.id, { assistant_name: 'Ada' });
+    expect(configFromDb((await getContainerConfig(GROUP.id))!, GROUP, 'Front Desk').assistantName).toBe('Ada');
+  });
+
+  it('keeps the group name when no bot name is known or the wired bots disagree', async () => {
+    const row = (await getContainerConfig(GROUP.id))!;
+    // Unwired group, no adapter: the pre-existing behavior.
+    expect(await botDisplayNameFor(GROUP.id)).toBeUndefined();
+    expect(configFromDb(row, GROUP, await botDisplayNameFor(GROUP.id)).assistantName).toBe(GROUP.name);
+
+    // Wired, but the platform never said (adapter carries no name).
+    registerChannelAdapter('slack', { factory: () => makeAdapter(undefined) });
+    registerChannelAdapter('slack-two', { factory: () => makeAdapter('slack-two', 'Back Office') });
+    await initChannelAdapters(noSetup);
+    await wire('mg-a');
+    expect(await botDisplayNameFor(GROUP.id)).toBeUndefined();
+
+    // Two bots with different names: ambiguous, so the group name stands.
+    await wire('mg-b', 'slack-two');
+    await teardownChannelAdapters();
+    registerChannelAdapter('slack', { factory: () => makeAdapter(undefined, 'Front Desk') });
+    await initChannelAdapters(noSetup);
+    expect(await botDisplayNameFor(GROUP.id)).toBeUndefined();
+    expect(configFromDb(row, GROUP, await botDisplayNameFor(GROUP.id)).assistantName).toBe(GROUP.name);
   });
 });
 

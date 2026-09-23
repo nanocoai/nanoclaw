@@ -338,6 +338,13 @@ export interface ChatSdkBridgeConfig {
   /** Platform-specific reply context extraction. */
   extractReplyContext?: ReplyContextExtractor;
   /**
+   * Read the bot's own display name — the name users see on its messages —
+   * from an inbound raw payload, for a platform whose adapter cannot look it
+   * up (Teams carries it as the activity's recipient). Consulted until a
+   * name is found; a platform that resolves it at connect leaves this unset.
+   */
+  extractBotDisplayName?: (raw: Record<string, unknown>) => string | undefined;
+  /**
    * Recover readable content the platform adapter left only in `message.raw`.
    * The returned text is appended to the message body and persisted; the raw
    * provider payload is still dropped.
@@ -457,6 +464,21 @@ export function appendRawText(
   serialized.text = text ? `${text}\n\n${extra}` : extra;
 }
 
+/** The bot's own profile name; undefined when the adapter cannot say or the lookup fails. */
+async function lookupBotDisplayName(adapter: Adapter): Promise<string | undefined> {
+  if (!adapter.botUserId || !adapter.getUser) return undefined;
+  try {
+    const user = await adapter.getUser(adapter.botUserId);
+    return user?.fullName || user?.userName || undefined;
+  } catch (err) {
+    log.warn('Bot display name lookup failed; the group name stands in', {
+      channel: adapter.name,
+      err: (err as Error).message,
+    });
+    return undefined;
+  }
+}
+
 export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter {
   const { adapter } = config;
   // The instance name becomes a webhook route segment (the route regex is
@@ -536,6 +558,12 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       serialized.senderId = author.userId;
       serialized.sender = name;
       serialized.senderName = name;
+    }
+
+    // The bot's own display name, when only the raw payload carries it.
+    if (!bridge.botDisplayName && config.extractBotDisplayName && message.raw) {
+      const name = config.extractBotDisplayName(message.raw as Record<string, unknown>);
+      if (name) bridge.botDisplayName = name;
     }
 
     // Drop raw to save DB space (can be very large)
@@ -732,6 +760,10 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       });
 
       await chat.initialize();
+
+      // The name users see on this bot's messages, when the platform can say
+      // (Slack: users.info on the bot's own id). Kept if a raw payload set it first.
+      bridge.botDisplayName ??= await lookupBotDisplayName(adapter);
 
       // Test seam: unit tests drive the SDK's public process* dispatchers
       // (processAssistantContextChanged, …) against the handlers registered
