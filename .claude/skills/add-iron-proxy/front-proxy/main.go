@@ -59,6 +59,12 @@ type gateway struct {
 	key       []byte
 	bridge    pb.TransformServiceClient
 	transport *http.Transport
+	// Stock Iron turns a backend tunnel into a raw relay for every upgrade
+	// request, whatever the origin answers. A pooled connection that carried a
+	// rejected upgrade would bypass Iron's transforms for every later request
+	// (the Codex CLI got unaudited 401s until the origin dropped it), so upgrades
+	// use connections that are never reused.
+	upgrades *http.Transport
 }
 
 func newGateway(cfg config, bridge pb.TransformServiceClient) (*gateway, error) {
@@ -106,7 +112,10 @@ func newGateway(cfg config, bridge pb.TransformServiceClient) (*gateway, error) 
 	// DisableCompression: the front never negotiates gzip on the client's behalf.
 	// Go's transparent decompression would strip Content-Length, and the tunnel
 	// then writes a body no client can delimit (the Codex CLI's reqwest hung there).
-	return &gateway{cfg: cfg, ca: ca, signer: signer, key: key, bridge: bridge, transport: &http.Transport{Proxy: http.ProxyURL(backend), TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}, ForceAttemptHTTP2: false, DisableCompression: true, ResponseHeaderTimeout: 5 * time.Minute, MaxIdleConns: 100, IdleConnTimeout: 90 * time.Second}}, nil
+	transport := &http.Transport{Proxy: http.ProxyURL(backend), TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}, ForceAttemptHTTP2: false, DisableCompression: true, ResponseHeaderTimeout: 5 * time.Minute, MaxIdleConns: 100, IdleConnTimeout: 90 * time.Second}
+	upgrades := transport.Clone()
+	upgrades.DisableKeepAlives = true
+	return &gateway{cfg: cfg, ca: ca, signer: signer, key: key, bridge: bridge, transport: transport, upgrades: upgrades}, nil
 }
 
 func (g *gateway) identity(r *http.Request) (string, error) {
@@ -294,11 +303,13 @@ func (g *gateway) forward(r *http.Request, identity, tunnel string) *http.Respon
 	out.RequestURI = ""
 	out.Header = r.Header.Clone()
 	stripHopHeaders(out.Header)
+	transport := g.transport
 	if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 		out.Header.Set("Connection", "Upgrade")
 		out.Header.Set("Upgrade", "websocket")
+		transport = g.upgrades
 	}
-	resp, err := g.transport.RoundTrip(out)
+	resp, err := transport.RoundTrip(out)
 	if err != nil {
 		return deny(r, 502)
 	}
@@ -633,6 +644,7 @@ func main() {
 	<-ctx.Done()
 	server.Close()
 	g.transport.CloseIdleConnections()
+	g.upgrades.CloseIdleConnections()
 	iron.Process.Signal(syscall.SIGTERM)
 	select {
 	case <-exited:

@@ -77,6 +77,7 @@ func fixture(t *testing.T, b *fixtureBridge, handler http.Handler) (*gateway, *h
 		t.Fatal(e)
 	}
 	t.Cleanup(g.transport.CloseIdleConnections)
+	t.Cleanup(g.upgrades.CloseIdleConnections)
 	return g, backend
 }
 func auth(g *gateway, identity string) string {
@@ -562,4 +563,62 @@ func TestTunnelOversizedHeaderRejectedBeforeBackend(t *testing.T) {
 	if e == nil && resp.StatusCode < 400 {
 		t.Fatal("accepted oversized header")
 	}
+}
+
+// Stock Iron relays a backend tunnel raw once it has seen an upgrade request,
+// even when the origin answers 401 instead of 101. Pooling that connection
+// sent every later request past Iron's credential injection (the Codex CLI
+// saw unaudited 401s until the origin closed the tunnel minutes later).
+func TestRejectedUpgradeConnectionIsNeverReused(t *testing.T) {
+	var conns []string
+	g, _ := fixture(t, &fixtureBridge{}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conns = append(conns, r.RemoteAddr)
+		if r.Header.Get("Upgrade") == "websocket" {
+			w.Header().Set("Content-Length", "12")
+			w.WriteHeader(401)
+			io.WriteString(w, "unauthorized")
+			return
+		}
+		io.WriteString(w, "ok")
+	}))
+	front := httptest.NewServer(g)
+	defer front.Close()
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(mustURL(front.URL)), DisableKeepAlives: true}}
+	for i, upgrade := range []bool{true, true, false} {
+		r, _ := http.NewRequest("GET", "http://api.example.test/socket", nil)
+		r.Header.Set("Proxy-Authorization", auth(g, "session-A"))
+		if upgrade {
+			r.Header.Set("Connection", "Upgrade")
+			r.Header.Set("Upgrade", "websocket")
+		}
+		resp, e := client.Do(r)
+		if e != nil {
+			t.Fatal(e)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		want := 200
+		if upgrade {
+			want = 401
+		}
+		if resp.StatusCode != want {
+			t.Fatalf("request%d status%d want%d", i, resp.StatusCode, want)
+		}
+	}
+	if len(conns) != 3 {
+		t.Fatalf("backend saw %d requests, want 3", len(conns))
+	}
+	for i := 1; i < len(conns); i++ {
+		if conns[i] == conns[i-1] {
+			t.Fatalf("request%d reused the backend connection of a rejected upgrade (%s)", i, conns[i])
+		}
+	}
+}
+
+func mustURL(raw string) *url.URL {
+	u, e := url.Parse(raw)
+	if e != nil {
+		panic(e)
+	}
+	return u
 }

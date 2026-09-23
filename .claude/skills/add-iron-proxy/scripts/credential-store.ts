@@ -7,6 +7,33 @@ import { getInstallSlug } from '../../../../src/install-slug.js';
 import { controlPaths, controlRequest, grantSecret } from './control.js';
 import { run, statePaths } from './setup.js';
 
+/**
+ * Iron Control seeds a broker credential with only the refresh token and mints
+ * its first access token on a once-a-minute poll. Until then the proxy injects
+ * no Authorization header and the first agent turn fails with 401, so setup
+ * waits for the broker to report a live token before it declares success.
+ */
+export async function waitForBrokerToken(
+  root: string,
+  brokerId: string,
+  { timeoutMs = 150_000, intervalMs = 2_000 } = {},
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const broker = await controlRequest(root, `broker_credentials/${brokerId}`);
+    if (broker.dead)
+      throw new Error(
+        'Iron Control could not refresh the Codex session; check the broker credential in the console and log in again.',
+      );
+    if (broker.status === 'live') return;
+    if (Date.now() >= deadline)
+      throw new Error(
+        'Iron Control has not minted a Codex access token yet; check the broker credential in the console and retry.',
+      );
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
 export function createCredentialStore(root = process.cwd()): ProviderCredentialStore {
   const namespace = getInstallSlug(root);
   const metadata = path.join(controlPaths(root).directory, 'codex.json');
@@ -71,6 +98,7 @@ export function createCredentialStore(root = process.cwd()): ProviderCredentialS
           refresh_token: tokens.refresh_token,
         });
         brokerId = broker.id;
+        await waitForBrokerToken(root, broker.id);
         secretIds.push(
           await saveSecret(
             'codex-chatgpt',
