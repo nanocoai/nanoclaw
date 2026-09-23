@@ -67,6 +67,7 @@ describe('Codex config TOML', () => {
         'sandbox_mode = "danger-full-access"',
         'approval_policy = "never"',
         'project_doc_max_bytes = 32768',
+        'respect_system_proxy = true',
         'model = "gpt-5"',
         'model_reasoning_effort = "medium"',
         'service_tier = "fast"',
