@@ -321,6 +321,13 @@ export interface ChatSdkBridgeConfig {
   /** Platform-specific reply context extraction. */
   extractReplyContext?: ReplyContextExtractor;
   /**
+   * Read the bot's own display name — the name users see on its messages —
+   * from an inbound raw payload, for a platform whose adapter cannot look it
+   * up (Teams carries it as the activity's recipient). Consulted until a
+   * name is found; a platform that resolves it at connect leaves this unset.
+   */
+  extractBotDisplayName?: (raw: Record<string, unknown>) => string | undefined;
+  /**
    * Whether this platform uses threads as the primary conversation unit.
    * See `ChannelAdapter.supportsThreads`. Declared by the calling channel
    * skill, not inferred, because some platforms (Discord) can be used either

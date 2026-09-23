@@ -19,6 +19,16 @@ const TEAMS_DEFAULTS: ChannelDefaults = {
   mentions: 'platform',
 };
 
+/**
+ * The bot's own display name, from an inbound Bot Framework activity: the
+ * activity's `recipient` is the bot, named as the tenant shows it. The Teams
+ * adapter cannot look its own profile up, so the bridge reads it from here.
+ */
+export function teamsBotDisplayName(raw: Record<string, unknown>): string | undefined {
+  const recipient = raw.recipient as { name?: unknown } | undefined;
+  return typeof recipient?.name === 'string' && recipient.name.trim() !== '' ? recipient.name : undefined;
+}
+
 registerChannelAdapter('teams', {
   factory: () => {
     const env = readEnvFile(['TEAMS_APP_ID', 'TEAMS_APP_PASSWORD', 'TEAMS_APP_TENANT_ID', 'TEAMS_APP_TYPE']);
@@ -34,6 +44,7 @@ registerChannelAdapter('teams', {
       concurrency: 'concurrent',
       supportsThreads: true,
       defaults: TEAMS_DEFAULTS,
+      extractBotDisplayName: teamsBotDisplayName,
     });
   },
   defaults: TEAMS_DEFAULTS,
