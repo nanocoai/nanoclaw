@@ -151,6 +151,9 @@ const postToolUseHook: HookCallback = async () => {
   return { continue: true };
 };
 
+/** Minimum spacing between `activity` frames derived from streaming deltas. */
+const STREAM_ACTIVITY_INTERVAL_MS = 1000;
+
 /** The real clock for archive names and rotation stamps; tests hand the history functions a fixed one. */
 const REAL_CLOCK = { now: () => Date.now() };
 
@@ -267,6 +270,15 @@ export class ClaudeProvider implements AgentProvider {
           : undefined,
         allowedTools: [...this.mcp.allowedTools],
         disallowedTools: [...this.executionPolicy.disallowedTools],
+        // Liveness while the model generates. The SDK emits one `assistant`
+        // message per COMPLETED content block, so a long single block (a
+        // 2 500-word answer, a long thinking block) is a silent window: no
+        // event, no heartbeat touch, and the host sweep kills the container
+        // at the idle ceiling mid-generation, then retries the same turn
+        // into the same wall. Streaming deltas are the SDK's liveness signal
+        // for that window; translateEvents surfaces them as throttled
+        // `activity` and nothing else.
+        includePartialMessages: true,
         env: this.env,
         model: this.inference.model,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -293,11 +305,22 @@ export class ClaudeProvider implements AgentProvider {
 
     async function* translateEvents(): AsyncGenerator<ProviderEvent> {
       let messageCount = 0;
+      let lastStreamActivityAt = 0;
       for await (const message of sdkResult) {
         if (aborted) return;
         messageCount++;
 
-        // Yield activity for every SDK event so the poll loop knows the agent is working
+        // Yield activity for every SDK event so the poll loop knows the agent
+        // is working. Streaming deltas (`stream_event`, opted in above) arrive
+        // per token; they carry no content for us, so they count as activity
+        // at most once per second — one heartbeat touch, not one per token.
+        if (message.type === 'stream_event') {
+          const now = Date.now();
+          if (now - lastStreamActivityAt < STREAM_ACTIVITY_INTERVAL_MS) continue;
+          lastStreamActivityAt = now;
+          yield { type: 'activity' };
+          continue;
+        }
         yield { type: 'activity' };
 
         if (message.type === 'system' && message.subtype === 'init') {
