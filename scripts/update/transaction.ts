@@ -573,6 +573,9 @@ export async function cutoverUpdate(
   assertMutableRootsResolvable(state.projectRoot);
 
   state.service = runtime.detectService(state.projectRoot);
+  // Service first, containers second: with the host down nothing can spawn a
+  // replacement, so the drain (which stops the labeled set itself) is
+  // race-free. If it fails the catch below restarts the old service.
   await runtime.stopService(state.service);
   try {
     await runtime.drainContainers(state.projectRoot);

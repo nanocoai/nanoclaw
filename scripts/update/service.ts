@@ -57,6 +57,8 @@ export interface ServiceEnvironment {
   uid: number;
   runner: CommandRunner;
   sleep(ms: number): Promise<void>;
+  /** Progress line for a wait the operator would otherwise read as a hang. */
+  log?(message: string): void;
 }
 
 export function defaultServiceEnvironment(runner = createCommandRunner()): ServiceEnvironment {
@@ -66,6 +68,8 @@ export function defaultServiceEnvironment(runner = createCommandRunner()): Servi
     uid: process.getuid?.() ?? 0,
     runner,
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    // stderr: stdout carries the controller's JSON result.
+    log: (message) => process.stderr.write(`[update] ${message}\n`),
   };
 }
 
@@ -191,20 +195,60 @@ export function startService(handle: ServiceHandle, projectRoot: string, env: Se
   }
 }
 
-export async function drainContainers(
-  projectRoot: string,
-  env: ServiceEnvironment,
-  timeoutMs = 300_000,
-): Promise<void> {
+/**
+ * Grace between cutover's `stop` and the runtime's SIGKILL. Longer than the
+ * host's own 1 s (`STOP_GRACE_SECONDS` in container-runner.ts): a customized
+ * image that does handle SIGTERM gets a real window to flush, and a stock one
+ * that ignores it costs nothing extra beyond these seconds.
+ */
+export const CUTOVER_STOP_GRACE_SECONDS = 10;
+
+/**
+ * Stop this install's containers, then wait until the runtime lists none.
+ *
+ * The host is the only thing that ever stops an idle agent container: it keeps
+ * them alive between turns by design, and its SIGTERM path leaves them running
+ * so the next start can adopt them. `cutoverUpdate` stops the host before
+ * calling this, so a poll-only drain waited on an exit nothing could produce
+ * and timed out five minutes later with the service already down (#3828).
+ *
+ * Stopping here, after the service is down, is race-free: nothing is left that
+ * could spawn a replacement (the manual `docker stop` before cutover was not).
+ * The filter is the install label alone — the set the host's own residue
+ * reaping and `setup/uninstall` act on: agent containers plus any per-session
+ * auxiliary. The OneCLI gateway is a separate compose project without this
+ * label and is never touched.
+ *
+ * A container mid-turn is stopped as well. The agent-runner has no SIGTERM
+ * handler and the controller cannot read turn state from outside the host
+ * DB, so waiting would not preserve the turn, and the update rebuilds the
+ * image that container came from anyway. A non-zero `stop` is not fatal on
+ * its own (a container that exited between the list and the stop makes
+ * `docker stop` fail for that id while the rest still stop); only a
+ * container still listed at the timeout is, and the caller restores the old
+ * service.
+ */
+export async function drainContainers(projectRoot: string, env: ServiceEnvironment, timeoutMs = 60_000): Promise<void> {
   const runtime = process.env.CONTAINER_RUNTIME ?? 'docker';
   const label = `nanoclaw-install=${getInstallSlug(projectRoot)}`;
+  const list = (): { ok: boolean; ids: string[] } => {
+    const listed = env.runner.tryRun(runtime, ['ps', '-q', '--filter', `label=${label}`]);
+    return { ok: listed.ok, ids: listed.stdout.split('\n').filter(Boolean) };
+  };
+  const initial = list();
+  if (!initial.ok) throw new Error(`Cannot inspect active NanoClaw containers with ${runtime}`);
+  if (initial.ids.length === 0) return;
+
+  env.log?.(`Stopping ${initial.ids.length} NanoClaw container(s) for cutover: ${initial.ids.join(', ')}`);
+  const stopped = env.runner.tryRun(runtime, ['stop', '-t', String(CUTOVER_STOP_GRACE_SECONDS), ...initial.ids]);
   const started = Date.now();
   while (true) {
-    const listed = env.runner.tryRun(runtime, ['ps', '-q', '--filter', `label=${label}`]);
-    if (!listed.ok) throw new Error(`Cannot inspect active NanoClaw containers with ${runtime}`);
-    if (!listed.stdout) return;
+    const current = list();
+    if (!current.ok) throw new Error(`Cannot inspect active NanoClaw containers with ${runtime}`);
+    if (current.ids.length === 0) return;
     if (Date.now() - started >= timeoutMs) {
-      throw new Error(`Timed out waiting for active NanoClaw containers: ${listed.stdout.split('\n').join(', ')}`);
+      const detail = stopped.ok ? '' : ` (${runtime} stop failed: ${stopped.stdout || 'no output'})`;
+      throw new Error(`Timed out waiting for NanoClaw containers to stop: ${current.ids.join(', ')}${detail}`);
     }
     await env.sleep(1_000);
   }

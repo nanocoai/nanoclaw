@@ -17,7 +17,8 @@ import {
   validateUpdate,
   type UpdateRuntime,
 } from './transaction.js';
-import { stopService } from './service.js';
+import { drainContainers, stopService } from './service.js';
+import { getInstallSlug } from '../../src/install-slug.js';
 import type { CommandRunner, ServiceHandle } from './service.js';
 
 const roots: string[] = [];
@@ -530,6 +531,73 @@ describe('update-nanoclaw transaction end to end', () => {
     expect(events.filter((event) => event === 'service stop')).toHaveLength(1);
     expect(events).toContain('service start');
     expect(running).toBe(true);
+  });
+
+  it("cutover stops the install's containers only after the service is down, and a container that will not stop restores the old service (#3828)", async () => {
+    const fixture = createForkFixture();
+    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    const { runtime, events } = fakeRuntime(fixture.install);
+    // The REAL drain under a docker-faithful runner: one idle agent container
+    // that only disappears once `docker stop` has been issued for it.
+    let stopIssued = false;
+    const docker: CommandRunner = {
+      run: () => '',
+      tryRun(command, args) {
+        events.push(`${command} ${args.join(' ')}`);
+        if (args[0] === 'stop') {
+          stopIssued = true;
+          return { ok: true, stdout: '' };
+        }
+        return { ok: true, stdout: stopIssued ? '' : 'idle111' };
+      },
+    };
+    runtime.drainContainers = (root) =>
+      drainContainers(root, {
+        platform: 'linux',
+        home: os.homedir(),
+        uid: 1000,
+        runner: docker,
+        sleep: async () => {},
+      });
+
+    const prepared = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+    await validateUpdate(fixture.install, prepared.id, runtime);
+    const cut = await cutoverUpdate(fixture.install, prepared.id, runtime);
+    expect(cut.phase).toBe('cutover');
+    // state.projectRoot is realpathed (macOS tmp lives under /var → /private/var), so derive the slug from it.
+    const slugValue = getInstallSlug(cut.projectRoot);
+    const ps = `docker ps -q --filter label=nanoclaw-install=${slugValue}`;
+    expect(events.indexOf('service stop')).toBeLessThan(events.indexOf(ps));
+    expect(events.filter((e) => e.startsWith('docker '))).toEqual([ps, 'docker stop -t 10 idle111', ps]);
+
+    // Failure path: a container that survives the stop. Same ordering, and the
+    // transaction must restart the old service with the state still validated.
+    const stuck = createForkFixture();
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    const stuckRun = fakeRuntime(stuck.install);
+    stuckRun.runtime.drainContainers = (root) =>
+      drainContainers(
+        root,
+        {
+          platform: 'linux',
+          home: os.homedir(),
+          uid: 1000,
+          runner: { run: () => '', tryRun: () => ({ ok: true, stdout: 'stuck222' }) },
+          sleep: async () => {},
+        },
+        0,
+      );
+    const stuckPrepared = prepareUpdate({ projectRoot: stuck.install, upstreamRef: 'upstream/main' }, stuckRun.runtime);
+    await validateUpdate(stuck.install, stuckPrepared.id, stuckRun.runtime);
+    await expect(cutoverUpdate(stuck.install, stuckPrepared.id, stuckRun.runtime)).rejects.toThrow(
+      'Timed out waiting for NanoClaw containers to stop: stuck222',
+    );
+    expect(stuckRun.events.slice(-2)).toEqual(['service stop', 'service start']);
+    const after = loadState(stuck.install, stuckPrepared.id);
+    expect(after.phase).toBe('validated');
+    expect(after.snapshot).toBeUndefined();
+    expect(exec(stuck.install, 'git', ['rev-parse', 'HEAD'])).toBe(stuckPrepared.originalHead);
   });
 
   it('re-runs cutover after a failed rollback left a populated snapshot (read-only files must not EACCES)', async () => {

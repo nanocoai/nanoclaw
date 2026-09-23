@@ -7,6 +7,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
+  CUTOVER_STOP_GRACE_SECONDS,
   createCommandRunner,
   detectService,
   drainContainers,
@@ -140,6 +141,78 @@ describe('drain and health gates', () => {
     });
 
     await drainContainers(root, env);
+    expect(calls).toEqual([`docker ps -q --filter label=${label}`]);
+  });
+
+  it('stops the labeled containers itself, then waits for the runtime to list none (#3828)', async () => {
+    // The host is stopped before the drain and its SIGTERM path leaves idle
+    // agent containers running on purpose, so a poll-only drain could never
+    // succeed: the drain must be the thing that stops them.
+    const root = temp();
+    const label = `nanoclaw-install=${slug(root)}`;
+    const ps = `docker ps -q --filter label=${label}`;
+    let listings = 0;
+    const { env, calls } = makeEnv('linux');
+    env.runner.tryRun = (command, args) => {
+      const key = `${command} ${args.join(' ')}`;
+      calls.push(key);
+      if (key === ps) {
+        listings += 1;
+        // Listed twice with both up (before the stop and on the first poll), then empty.
+        return { ok: true, stdout: listings <= 2 ? 'aaa111\nbbb222' : '' };
+      }
+      return { ok: true, stdout: '' };
+    };
+    const progress: string[] = [];
+    env.log = (message) => progress.push(message);
+
+    await drainContainers(root, env);
+    expect(calls).toEqual([ps, `docker stop -t ${CUTOVER_STOP_GRACE_SECONDS} aaa111 bbb222`, ps, ps]);
+    expect(progress).toEqual(['Stopping 2 NanoClaw container(s) for cutover: aaa111, bbb222']);
+  });
+
+  it('tolerates a failed stop when the containers are gone anyway (exited between list and stop)', async () => {
+    const root = temp();
+    const label = `nanoclaw-install=${slug(root)}`;
+    const ps = `docker ps -q --filter label=${label}`;
+    let listings = 0;
+    const { env, calls } = makeEnv('linux');
+    env.runner.tryRun = (command, args) => {
+      const key = `${command} ${args.join(' ')}`;
+      calls.push(key);
+      if (key === ps) {
+        listings += 1;
+        return { ok: true, stdout: listings === 1 ? 'aaa111' : '' };
+      }
+      if (args[0] === 'stop') return { ok: false, stdout: 'Error response from daemon: No such container: aaa111' };
+      return { ok: true, stdout: '' };
+    };
+
+    await expect(drainContainers(root, env)).resolves.toBeUndefined();
+    expect(calls).toEqual([ps, `docker stop -t ${CUTOVER_STOP_GRACE_SECONDS} aaa111`, ps]);
+  });
+
+  it('still fails, naming the survivors and the stop error, when a container outlives the bound', async () => {
+    const root = temp();
+    const label = `nanoclaw-install=${slug(root)}`;
+    const { env } = makeEnv('linux', {
+      [`docker ps -q --filter label=${label}`]: { ok: true, stdout: 'aaa111' },
+      [`docker stop -t ${CUTOVER_STOP_GRACE_SECONDS} aaa111`]: { ok: false, stdout: 'permission denied' },
+    });
+
+    await expect(drainContainers(root, env, 0)).rejects.toThrow(
+      'Timed out waiting for NanoClaw containers to stop: aaa111 (docker stop failed: permission denied)',
+    );
+  });
+
+  it('fails closed when the runtime cannot be queried', async () => {
+    const root = temp();
+    const label = `nanoclaw-install=${slug(root)}`;
+    const { env, calls } = makeEnv('linux', {
+      [`docker ps -q --filter label=${label}`]: { ok: false, stdout: 'Cannot connect to the Docker daemon' },
+    });
+
+    await expect(drainContainers(root, env)).rejects.toThrow('Cannot inspect active NanoClaw containers with docker');
     expect(calls).toEqual([`docker ps -q --filter label=${label}`]);
   });
 

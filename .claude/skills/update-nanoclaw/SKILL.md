@@ -140,8 +140,9 @@ pnpm exec tsx "$stageRoot/scripts/update-nanoclaw.ts" cutover \
   --project-root "$PWD" --id "$id"
 ```
 
-Cutover stops the detected service, waits for this install's labeled agent
-containers to exit, snapshots mutable state, resets the live branch to the
+Cutover stops the detected service, then stops this install's labeled agent
+containers (an agent mid-turn loses that turn; wait for a quiet moment if that
+matters), snapshots mutable state, resets the live branch to the
 validated target, installs frozen dependencies, builds the host, and updates
 the agent image when `container/` changed. Hardened-image installs use `pull`;
 local-image installs build locally. The service remains stopped while required
