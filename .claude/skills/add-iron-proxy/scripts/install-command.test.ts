@@ -125,6 +125,18 @@ describe('Iron installer progress and process bounds', () => {
       ),
     ).toBe(false);
     expect(lines.join('\n')).toContain('STATUS: failed');
+    expect(lines.join('\n')).toContain('ERROR: Source access unavailable');
     expect(lines.join('\n')).not.toContain('STATUS: success');
+  });
+
+  it('flattens a multi-line failure into the one-line ERROR field', async () => {
+    const lines: string[] = [];
+    await installStep(
+      async () => {
+        throw new Error('first line\n  second line');
+      },
+      (line) => lines.push(line),
+    );
+    expect(lines.join('\n')).toContain('ERROR: first line second line');
   });
 });

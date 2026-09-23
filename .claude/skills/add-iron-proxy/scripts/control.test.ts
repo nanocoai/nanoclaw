@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { parse as yaml } from 'yaml';
 
-import { controlCompose, controlPaths, controlPort } from './control.js';
+import { controlCompose, controlPaths, controlPort, resolveOrphanedDatabase, type DockerRunner } from './control.js';
 import { hasFrontProxy, frontProxyHash } from './build-managed-proxy.js';
 
 const roots: string[] = [];
@@ -44,6 +44,77 @@ describe('official Iron Control installation', () => {
     delete process.env.NANOCLAW_IRON_CONTROL_PORT;
     fs.writeFileSync(path.join(root, '.env'), 'NANOCLAW_IRON_CONTROL_PORT=invalid\n');
     expect(() => controlPort(root)).toThrow('between 1 and 65535');
+  });
+
+  describe('database volume without its keys', () => {
+    // A fake docker: `volume ls` and `ps -a --filter volume=` answer from the
+    // given state; every other invocation (the removal) is only recorded.
+    const fakeDocker = (volumes: string[], containers: string[]) => {
+      const calls: string[][] = [];
+      const docker: DockerRunner = async (args) => {
+        calls.push(args);
+        if (args[0] === 'volume' && args[1] === 'ls') return volumes.join('\n') + '\n';
+        if (args[0] === 'ps') return containers.join('\n') + '\n';
+        return '';
+      };
+      return { docker, calls, removals: () => calls.filter((a) => a[0] === 'volume' && a[1] === 'rm') };
+    };
+
+    it('does nothing when no database volume exists for this install', async () => {
+      const root = temporary();
+      const fake = fakeDocker(['unrelated_database'], []);
+      await resolveOrphanedDatabase(root, { docker: fake.docker, confirmRemoval: async () => true });
+      expect(fake.removals()).toEqual([]);
+      expect(fake.calls.some((a) => a[0] === 'ps')).toBe(false);
+    });
+
+    it('never removes a volume a container still mounts and names the exact commands', async () => {
+      const root = temporary();
+      const volume = `${controlPaths(root).project}_database`;
+      const container = `${controlPaths(root).project}-database-1`;
+      const fake = fakeDocker([volume], [container]);
+      await expect(
+        resolveOrphanedDatabase(root, { docker: fake.docker, confirmRemoval: async () => true }),
+      ).rejects.toThrow(`docker rm -f ${container} && docker volume rm ${volume}`);
+      expect(fake.removals()).toEqual([]);
+    });
+
+    it('stops a headless run with the volume name and its removal command', async () => {
+      const root = temporary();
+      const volume = `${controlPaths(root).project}_database`;
+      const fake = fakeDocker([volume], []);
+      const failure = await resolveOrphanedDatabase(root, { docker: fake.docker }).catch((error: Error) => error);
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toContain(`docker volume rm ${volume}`);
+      expect((failure as Error).message).toContain(controlPaths(root).environment);
+      expect(fake.removals()).toEqual([]);
+    });
+
+    it('removes an orphaned volume only after the operator agrees', async () => {
+      const root = temporary();
+      const volume = `${controlPaths(root).project}_database`;
+      const questions: string[] = [];
+      const fake = fakeDocker([volume], []);
+      await resolveOrphanedDatabase(root, {
+        docker: fake.docker,
+        confirmRemoval: async (message) => {
+          questions.push(message);
+          return true;
+        },
+      });
+      expect(questions).toEqual(['Remove it and start fresh?']);
+      expect(fake.removals()).toEqual([['volume', 'rm', volume]]);
+    });
+
+    it('keeps the volume and stops when the operator aborts', async () => {
+      const root = temporary();
+      const volume = `${controlPaths(root).project}_database`;
+      const fake = fakeDocker([volume], []);
+      await expect(
+        resolveOrphanedDatabase(root, { docker: fake.docker, confirmRemoval: async () => false }),
+      ).rejects.toThrow(`docker volume rm ${volume}`);
+      expect(fake.removals()).toEqual([]);
+    });
   });
 
   it('requires both the pinned source and the exact approval front', () => {

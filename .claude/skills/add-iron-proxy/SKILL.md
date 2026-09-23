@@ -67,7 +67,11 @@ pnpm exec tsx .claude/skills/add-iron-proxy/scripts/setup.ts --with-control
   health before retrying. The installer terminates the timed-out process group.
 - **The database exists but keys are missing:** restore its matching `control.env`.
   Keep the database volume and encryption keys together; do not generate replacement
-  keys for an existing database.
+  keys for an existing database. The volume `nanoclaw-iron-control-<slug>_database`
+  survives deleting the checkout. When no container still mounts it, an interactive
+  setup offers to remove it and start fresh; a headless run stops and prints the exact
+  `docker volume rm` command. When a container still mounts it, setup stops and names
+  the `docker rm -f … && docker volume rm …` command; nothing is removed on its own.
 
 ## Validate
 

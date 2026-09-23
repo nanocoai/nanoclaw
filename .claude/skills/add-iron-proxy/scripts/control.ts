@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { installCommand } from './install-command.js';
 
+import * as p from '@clack/prompts';
 import { stringify as yaml } from 'yaml';
 import { getInstallSlug } from '../../../../src/install-slug.js';
 import { upsertEnvVar } from '../../../../setup/set-env.js';
@@ -129,20 +130,94 @@ export async function controlRequest(root: string, resource: string, method = 'G
   return response.status === 204 ? null : ((await response.json()) as { data: unknown }).data;
 }
 
-export async function installControl(root = process.cwd()): Promise<void> {
+/** Runs one `docker` command and resolves its stdout; the install seam for tests. */
+export type DockerRunner = (args: string[], label: string) => Promise<string>;
+
+const dockerCapture: DockerRunner = (args, label) =>
+  installCommand('docker', args, { label, timeoutMs: 15_000, capture: true });
+
+export interface ControlDatabaseState {
+  volume: string;
+  exists: boolean;
+  /** Containers that mount the database volume, running or stopped. */
+  containers: string[];
+}
+
+export async function inspectControlDatabase(
+  root: string,
+  docker: DockerRunner = dockerCapture,
+): Promise<ControlDatabaseState> {
+  const volume = `${controlPaths(root).project}_database`;
+  const volumes = await docker(['volume', 'ls', '--format', '{{.Name}}'], 'Check existing Iron Control data');
+  if (!volumes.trim().split('\n').includes(volume)) return { volume, exists: false, containers: [] };
+  const attached = await docker(
+    ['ps', '-a', '--filter', `volume=${volume}`, '--format', '{{.Names}}'],
+    'Check services using the Iron Control database',
+  );
+  return { volume, exists: true, containers: attached.trim().split('\n').filter(Boolean) };
+}
+
+export interface InstallControlOptions {
+  docker?: DockerRunner;
+  /**
+   * Asks the operator whether an orphaned database may be removed. Absent in a
+   * headless run, which stops with the exact command instead.
+   */
+  confirmRemoval?: (message: string) => Promise<boolean>;
+}
+
+async function askRemoval(message: string): Promise<boolean> {
+  const answer = await p.select({
+    message,
+    options: [
+      { value: 'remove', label: 'Remove it and start fresh' },
+      { value: 'abort', label: 'Abort' },
+    ],
+  });
+  return !p.isCancel(answer) && answer === 'remove';
+}
+
+/**
+ * A database volume without this install's `control.env` cannot be opened: its
+ * rows are encrypted with keys only that file held. A volume no container
+ * mounts is orphaned and may be removed with explicit consent; a volume a
+ * container still uses is never touched here.
+ */
+export async function resolveOrphanedDatabase(root: string, options: InstallControlOptions = {}): Promise<void> {
+  const paths = controlPaths(root);
+  const state = await inspectControlDatabase(root, options.docker);
+  if (!state.exists) return;
+  const removeVolume = `docker volume rm ${state.volume}`;
+  if (state.containers.length) {
+    throw new Error(
+      `Iron Control database ${state.volume} is still used by ${state.containers.join(', ')} but its encryption keys are missing for this install. ` +
+        `Restore ${paths.environment}, or remove the old services and database with: docker rm -f ${state.containers.join(' ')} && ${removeVolume}`,
+    );
+  }
+  const confirm = options.confirmRemoval ?? (process.stdin.isTTY ? askRemoval : undefined);
+  if (!confirm) {
+    throw new Error(
+      `Iron Control database ${state.volume} exists but its encryption keys are missing for this install. ` +
+        `Restore ${paths.environment}, or remove the orphaned database with: ${removeVolume}`,
+    );
+  }
+  console.log(`The old Iron Control database (${state.volume}) can't be reused without its keys.`);
+  if (!(await confirm('Remove it and start fresh?'))) {
+    throw new Error(
+      `Iron Control database ${state.volume} was kept. Restore ${paths.environment} or run: ${removeVolume}`,
+    );
+  }
+  await (options.docker ?? dockerCapture)(['volume', 'rm', state.volume], 'Remove the orphaned Iron Control database');
+}
+
+export async function installControl(root = process.cwd(), options: InstallControlOptions = {}): Promise<void> {
   const p = controlPaths(root);
   const port = controlPort(root);
   const url = `http://127.0.0.1:${port}`;
   fs.mkdirSync(p.directory, { recursive: true, mode: 0o700 });
   fs.chmodSync(p.directory, 0o700);
   if (!fs.existsSync(p.environment)) {
-    const volumes = await installCommand('docker', ['volume', 'ls', '--format', '{{.Name}}'], {
-      label: 'Check existing Iron Control data',
-      timeoutMs: 15_000,
-      capture: true,
-    });
-    if (volumes.trim().split('\n').includes(`${p.project}_database`))
-      throw new Error(`Iron Control database exists but its encryption keys are missing; restore ${p.environment}`);
+    await resolveOrphanedDatabase(root, options);
     const password = secret();
     const email = 'operator@nanoclaw.local';
     const databasePassword = secret();

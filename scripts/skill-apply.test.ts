@@ -902,7 +902,61 @@ describe('nc:run effect:step (streaming, multi-field capture)', () => {
     const { sdir, rdir } = stepScratch();
     const res = await applySkill(sdir, rdir, { exec: () => {}, execStream: async () => ({ ok: false, fields: {} }) });
     expect(res.agentTasks).toHaveLength(1);
+    expect(res.agentTasks[0].reason).toMatch(/engine could not apply \(the step did not complete\)/);
     expect(res.vars.platform_id).toBeUndefined();
+  });
+
+  it("a failed step's own ERROR field becomes the bounce reason verbatim", async () => {
+    const { sdir, rdir } = stepScratch();
+    const res = await applySkill(sdir, rdir, {
+      exec: () => {},
+      execStream: async () => ({
+        ok: false,
+        fields: { STATUS: 'failed', ERROR: 'Iron Control database x_database exists but its keys are missing' },
+      }),
+    });
+    expect(res.agentTasks).toHaveLength(1);
+    expect(res.agentTasks[0].reason).toBe('Iron Control database x_database exists but its keys are missing');
+  });
+
+  it('skips build and test validation after a failed step instead of running them', async () => {
+    const sdir = mkdtempSync(join(tmpdir(), 'nc-step-skill-'));
+    const rdir = mkdtempSync(join(tmpdir(), 'nc-step-proj-'));
+    writeFileSync(
+      join(sdir, 'SKILL.md'),
+      [
+        '# gateway demo',
+        '',
+        '## Install',
+        '```nc:run effect:step',
+        'pnpm exec tsx install.ts',
+        '```',
+        '',
+        '## Validate',
+        '```nc:run effect:build',
+        'pnpm run build',
+        '```',
+        '',
+        '```nc:run effect:test',
+        'pnpm exec vitest run',
+        '```',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(join(rdir, 'package.json'), '{"name":"scratch"}');
+    const ran: string[] = [];
+    const res = await applySkill(sdir, rdir, {
+      exec: (cmd) => {
+        ran.push(cmd);
+      },
+      execStream: async () => ({ ok: false, fields: { STATUS: 'failed', ERROR: 'precondition failed' } }),
+    });
+    expect(ran).toEqual([]);
+    expect(res.agentTasks.map((t) => t.reason)).toEqual(['precondition failed']);
+    expect(res.skipped).toEqual([
+      'run build: an earlier step did not complete',
+      'run test: an earlier step did not complete',
+    ]);
   });
 });
 
