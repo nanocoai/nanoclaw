@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   acknowledgeRequirement,
@@ -17,7 +17,7 @@ import {
   validateUpdate,
   type UpdateRuntime,
 } from './transaction.js';
-import { drainContainers, stopService } from './service.js';
+import { CUTOVER_STOP_CLI_TIMEOUT_MS, drainContainers, stopService } from './service.js';
 import { getInstallSlug } from '../../src/install-slug.js';
 import type { CommandRunner, ServiceHandle } from './service.js';
 
@@ -598,6 +598,54 @@ describe('update-nanoclaw transaction end to end', () => {
     expect(after.phase).toBe('validated');
     expect(after.snapshot).toBeUndefined();
     expect(exec(stuck.install, 'git', ['rev-parse', 'HEAD'])).toBe(stuckPrepared.originalHead);
+  });
+
+  it('a `docker stop` that stalls past its bound still lands cutover on the rollback path (review on #3873)', async () => {
+    const fixture = createForkFixture();
+    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    const { runtime, events } = fakeRuntime(fixture.install);
+    let clock = 5_000_000;
+    const now = vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    try {
+      // Real drain, default 60 s bound, under a runner whose `stop` "hangs"
+      // until the subprocess timeout and whose `ps` keeps listing the container.
+      runtime.drainContainers = (root) =>
+        drainContainers(root, {
+          platform: 'linux',
+          home: os.homedir(),
+          uid: 1000,
+          runner: {
+            run: () => '',
+            tryRun(command, args, _cwd, options) {
+              events.push(`${command} ${args.join(' ')}`);
+              if (args[0] === 'stop') {
+                clock += options?.timeoutMs ?? CUTOVER_STOP_CLI_TIMEOUT_MS;
+                return { ok: false, stdout: 'ETIMEDOUT' };
+              }
+              return { ok: true, stdout: 'hung444' };
+            },
+          },
+          sleep: async () => {
+            clock += 1_000;
+          },
+        });
+      const prepared = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+      await validateUpdate(fixture.install, prepared.id, runtime);
+      await expect(cutoverUpdate(fixture.install, prepared.id, runtime)).rejects.toThrow(
+        'Timed out waiting for NanoClaw containers to stop: hung444 (docker stop failed: ETIMEDOUT)',
+      );
+      // Service was stopped, the drain gave up inside the bound, the old service came back.
+      expect(events.slice(-1)).toEqual(['service start']);
+      expect(events.filter((e) => e === 'service stop')).toHaveLength(1);
+      const after = loadState(fixture.install, prepared.id);
+      expect(after.phase).toBe('validated');
+      expect(after.snapshot).toBeUndefined();
+      expect(after.lastError).toContain('ETIMEDOUT');
+      expect(exec(fixture.install, 'git', ['rev-parse', 'HEAD'])).toBe(prepared.originalHead);
+    } finally {
+      now.mockRestore();
+    }
   });
 
   it('re-runs cutover after a failed rollback left a populated snapshot (read-only files must not EACCES)', async () => {

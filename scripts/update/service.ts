@@ -5,17 +5,23 @@ import path from 'node:path';
 
 import { getInstallSlug } from '../../src/install-slug.js';
 
+export interface RunOptions {
+  /** Kill the subprocess and fail the call after this long. Unset = no bound. */
+  timeoutMs?: number;
+}
+
 export interface CommandRunner {
-  run(command: string, args: string[], cwd?: string): string;
-  tryRun(command: string, args: string[], cwd?: string): { ok: boolean; stdout: string };
+  run(command: string, args: string[], cwd?: string, options?: RunOptions): string;
+  tryRun(command: string, args: string[], cwd?: string, options?: RunOptions): { ok: boolean; stdout: string };
 }
 
 export function createCommandRunner(): CommandRunner {
-  const run = (command: string, args: string[], cwd?: string): string =>
+  const run = (command: string, args: string[], cwd?: string, options?: RunOptions): string =>
     execFileSync(command, args, {
       cwd,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: options?.timeoutMs,
       // Node's default maxBuffer is 1 MiB; a full vitest run on a large repo
       // exceeds it and the whole validate step dies as `spawnSync pnpm
       // ENOBUFS` with the tests never judged. 64 MiB is far above any real
@@ -24,18 +30,18 @@ export function createCommandRunner(): CommandRunner {
     }).trim();
   return {
     run,
-    tryRun(command, args, cwd) {
+    tryRun(command, args, cwd, options) {
       try {
-        return { ok: true, stdout: run(command, args, cwd) };
+        return { ok: true, stdout: run(command, args, cwd, options) };
       } catch (err) {
-        const failed = err as { stdout?: Buffer | string; stderr?: Buffer | string };
-        return {
-          ok: false,
-          stdout: [failed.stdout, failed.stderr]
-            .map((part) => part?.toString().trim())
-            .filter(Boolean)
-            .join('\n'),
-        };
+        const failed = err as { code?: string; stdout?: Buffer | string; stderr?: Buffer | string };
+        const output = [failed.stdout, failed.stderr]
+          .map((part) => part?.toString().trim())
+          .filter(Boolean)
+          .join('\n');
+        // A timed-out or unspawnable command has no output of its own; the
+        // error code (ETIMEDOUT, ENOENT) is the only thing worth reporting.
+        return { ok: false, stdout: output || (failed.code ? String(failed.code) : '') };
       }
     },
   };
@@ -204,6 +210,18 @@ export function startService(handle: ServiceHandle, projectRoot: string, env: Se
 export const CUTOVER_STOP_GRACE_SECONDS = 10;
 
 /**
+ * Bound on the `docker stop` CLI call itself. `-t` only bounds how long the
+ * container gets before the daemon SIGKILLs it; a daemon that never answers
+ * would otherwise block the (synchronous) call forever, and cutover would sit
+ * with the service down and never reach its rollback path. Comfortably above
+ * the grace so a healthy stop is never cut short.
+ */
+export const CUTOVER_STOP_CLI_TIMEOUT_MS = 30_000;
+
+/** Bound on each `docker ps` poll, for the same reason. */
+export const CUTOVER_LIST_CLI_TIMEOUT_MS = 15_000;
+
+/**
  * Stop this install's containers, then wait until the runtime lists none.
  *
  * The host is the only thing that ever stops an idle agent container: it keeps
@@ -232,16 +250,25 @@ export async function drainContainers(projectRoot: string, env: ServiceEnvironme
   const runtime = process.env.CONTAINER_RUNTIME ?? 'docker';
   const label = `nanoclaw-install=${getInstallSlug(projectRoot)}`;
   const list = (): { ok: boolean; ids: string[] } => {
-    const listed = env.runner.tryRun(runtime, ['ps', '-q', '--filter', `label=${label}`]);
+    const listed = env.runner.tryRun(runtime, ['ps', '-q', '--filter', `label=${label}`], undefined, {
+      timeoutMs: CUTOVER_LIST_CLI_TIMEOUT_MS,
+    });
     return { ok: listed.ok, ids: listed.stdout.split('\n').filter(Boolean) };
   };
   const initial = list();
   if (!initial.ok) throw new Error(`Cannot inspect active NanoClaw containers with ${runtime}`);
   if (initial.ids.length === 0) return;
 
-  env.log?.(`Stopping ${initial.ids.length} NanoClaw container(s) for cutover: ${initial.ids.join(', ')}`);
-  const stopped = env.runner.tryRun(runtime, ['stop', '-t', String(CUTOVER_STOP_GRACE_SECONDS), ...initial.ids]);
+  // One deadline for stop AND poll: the clock starts before the stop call, so
+  // a slow or stalled stop eats into the bound instead of extending it.
   const started = Date.now();
+  env.log?.(`Stopping ${initial.ids.length} NanoClaw container(s) for cutover: ${initial.ids.join(', ')}`);
+  const stopped = env.runner.tryRun(
+    runtime,
+    ['stop', '-t', String(CUTOVER_STOP_GRACE_SECONDS), ...initial.ids],
+    undefined,
+    { timeoutMs: CUTOVER_STOP_CLI_TIMEOUT_MS },
+  );
   while (true) {
     const current = list();
     if (!current.ok) throw new Error(`Cannot inspect active NanoClaw containers with ${runtime}`);
