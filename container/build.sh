@@ -131,6 +131,13 @@ if [ -z "${INSTALL_CJK_FONTS:-}" ] && [ -f "../.env" ]; then
 fi
 
 BUILD_ARGS=()
+# Apple Container re-creates its builder VM at a 2 GiB default on every bare
+# `container build`, which OOMs ("Killed ... cannot allocate memory") on the
+# cli-tools layer — and a builder started separately with more memory does not
+# survive the next bare invocation. Pass the memory explicitly every time.
+if [ "$CONTAINER_RUNTIME" = "container" ]; then
+    BUILD_ARGS+=(-m "${CONTAINER_BUILDER_MEM:-8G}")
+fi
 if [ "${INSTALL_CJK_FONTS:-false}" = "true" ]; then
     if [ "$PULL" = "true" ]; then
         # A pulled image ships whatever font set its publisher baked in; this
@@ -181,6 +188,45 @@ build_image() {
     done
 }
 
+# Apple `container` orphans the previous unpacked snapshot every time an image is
+# rebuilt or re-pulled under a tag that already exists, and its collector runs ONLY
+# during `image delete` and `image prune`. An install that rebuilds this image often
+# and never prunes accumulates them indefinitely: on 2026-09-22 this machine held
+# 134 GB of snapshots against ~8 GB of live image content, and one prune returned
+# 103 GB. Upstream apple/container#2164 describes it exactly and is NOT fixed — both
+# fix PRs were closed UNMERGED, so no version bump retires this and it has to be
+# swept by whoever creates the garbage. That is this script.
+#
+# Dangling only. NEVER `-a`: nothing is running at build time, so `-a` treats EVERY
+# image as unused — including the one just built and every sibling install's on the
+# same host — and rebuilding this one costs a `container builder delete` plus a
+# `--no-cache` pass.
+#
+# The tradeoff, stated because it is real: the previous build of this tag becomes
+# dangling the moment the new one lands, so this removes it and with it the option
+# of rolling back to that exact image by digest. Anything you tagged yourself is
+# untouched. Set NANOCLAW_SKIP_SNAPSHOT_PRUNE=true to keep it.
+#
+# Never fails the build. The image is already built; a failed sweep costs disk, not
+# correctness, and a build that succeeded must not report failure because of it.
+reclaim_snapshots() {
+    [ "$CONTAINER_RUNTIME" = "container" ] || return 0
+    command -v container >/dev/null 2>&1 || return 0
+    if [ "$(printf '%s' "${NANOCLAW_SKIP_SNAPSHOT_PRUNE:-false}" | tr '[:upper:]' '[:lower:]')" = "true" ]; then
+        return 0
+    fi
+    local out="" status=0 count=0
+    out="$(container image prune 2>&1)" || status=$?
+    if [ "$status" -ne 0 ]; then
+        echo "note: could not reclaim orphaned snapshots (apple/container#2164)." >&2
+        echo "      Disk only — the image built fine. Run: container image prune" >&2
+        return 0
+    fi
+    count="$(printf '%s\n' "$out" | grep -c '^deleted ' 2>/dev/null || true)"
+    [ "${count:-0}" -gt 0 ] && echo "Reclaimed ${count} orphaned image snapshot(s)."
+    return 0
+}
+
 if [ "$PULL" = "true" ]; then
     echo "Pulling NanoClaw agent container image..."
     # Not exec'd: pull.sh runs as a child so `set -e` still carries its exit
@@ -218,6 +264,10 @@ else
 
     build_image "${BUILD_ARGS[@]}" -t "${IMAGE_NAME}:${TAG}" .
 fi
+
+# The image just replaced is dangling from this moment on; sweep it here rather
+# than leaving it for a human to remember.
+reclaim_snapshots
 
 echo ""
 if [ "$PULL" = "true" ]; then
