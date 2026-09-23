@@ -969,6 +969,55 @@ describe('router — per-wiring thread policy', () => {
     });
   });
 
+  it('mention-sticky wakes only mentions and transport-subscribed follow-ups, not accumulated sessions', async () => {
+    await getDb().run(
+      "UPDATE messaging_group_agents SET engage_mode = 'mention-sticky', ignored_message_policy = 'accumulate' WHERE id = 'mga-tp'",
+    );
+
+    await withThreadedAdapter(async () => {
+      const { routeInbound } = await import('./router.js');
+      const { wakeContainer } = await import('./container-runner.js');
+      const wake = wakeContainer as unknown as ReturnType<typeof vi.fn>;
+      wake.mockClear();
+
+      const ambient1 = threadedEvent('msg-ambient-1');
+      const ambient2 = threadedEvent('msg-ambient-2');
+      await routeInbound({ ...ambient1, message: { ...ambient1.message, isSubscribed: false } });
+      await routeInbound({ ...ambient2, message: { ...ambient2.message, isSubscribed: false } });
+
+      expect(wake).not.toHaveBeenCalled();
+      const session = await findSession('mg-tp', 'thread-42');
+      expect(session).toBeDefined();
+      const db = new Database(inboundDbPath('ag-tp', session!.id));
+      expect(db.prepare('SELECT trigger FROM messages_in ORDER BY seq').all()).toEqual([
+        { trigger: 0 },
+        { trigger: 0 },
+      ]);
+      db.close();
+
+      const mention = threadedEvent('msg-mention');
+      const followup = threadedEvent('msg-followup');
+      await routeInbound({
+        ...mention,
+        message: { ...mention.message, isMention: true, isSubscribed: false },
+      });
+      await routeInbound({
+        ...followup,
+        message: { ...followup.message, isMention: false, isSubscribed: true },
+      });
+
+      expect(wake).toHaveBeenCalledTimes(2);
+      const after = new Database(inboundDbPath('ag-tp', session!.id));
+      expect(after.prepare('SELECT trigger FROM messages_in ORDER BY seq').all()).toEqual([
+        { trigger: 0 },
+        { trigger: 0 },
+        { trigger: 1 },
+        { trigger: 1 },
+      ]);
+      after.close();
+    });
+  });
+
   it('auto-create takes unknown_sender_policy from the declaration and falls back faithfully', async () => {
     const { registerChannelAdapter } = await import('./channels/channel-registry.js');
     const { routeInbound } = await import('./router.js');
