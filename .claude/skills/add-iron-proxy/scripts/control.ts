@@ -136,32 +136,76 @@ export type DockerRunner = (args: string[], label: string) => Promise<string>;
 const dockerCapture: DockerRunner = (args, label) =>
   installCommand('docker', args, { label, timeoutMs: 15_000, capture: true });
 
-export interface ControlDatabaseState {
-  volume: string;
-  exists: boolean;
-  /** Containers that mount the database volume, running or stopped. */
-  containers: string[];
+/** One container Docker Compose created for this install's Iron Control project. */
+export interface ControlContainer {
+  name: string;
+  /** The compose service: `web` carries the keys in its environment, `database` mounts the volume. */
+  service: string;
+  running: boolean;
 }
 
+export interface ControlDatabaseState {
+  volume: string;
+  /** The database volume exists. */
+  exists: boolean;
+  /** This install's Iron Control containers (compose project label), running or stopped. */
+  containers: ControlContainer[];
+  /** Containers outside this install's compose project that mount the volume; never touched here. */
+  foreign: string[];
+}
+
+/**
+ * Lists what an earlier Iron Control install of THIS checkout left in Docker:
+ * the containers Compose labelled with this install's project name, and the
+ * database volume. Another install has another slug, so neither its project
+ * name nor its volume name can match.
+ */
 export async function inspectControlDatabase(
   root: string,
   docker: DockerRunner = dockerCapture,
 ): Promise<ControlDatabaseState> {
-  const volume = `${controlPaths(root).project}_database`;
+  const project = controlPaths(root).project;
+  const volume = `${project}_database`;
   const volumes = await docker(['volume', 'ls', '--format', '{{.Name}}'], 'Check existing Iron Control data');
-  if (!volumes.trim().split('\n').includes(volume)) return { volume, exists: false, containers: [] };
-  const attached = await docker(
+  const exists = volumes.trim().split('\n').includes(volume);
+  const listed = await docker(
+    [
+      'ps',
+      '-a',
+      '--filter',
+      `label=com.docker.compose.project=${project}`,
+      '--format',
+      '{{.Names}}\t{{.Label "com.docker.compose.service"}}\t{{.State}}',
+    ],
+    'Check existing Iron Control services',
+  );
+  const containers = listed
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => {
+      const [name, service = '', state = ''] = line.split('\t');
+      return { name, service, running: state === 'running' };
+    });
+  if (!exists) return { volume, exists, containers, foreign: [] };
+  const mounting = await docker(
     ['ps', '-a', '--filter', `volume=${volume}`, '--format', '{{.Names}}'],
     'Check services using the Iron Control database',
   );
-  return { volume, exists: true, containers: attached.trim().split('\n').filter(Boolean) };
+  const own = new Set(containers.map((container) => container.name));
+  const foreign = mounting
+    .trim()
+    .split('\n')
+    .filter((name) => name && !own.has(name));
+  return { volume, exists, containers, foreign };
 }
 
 export interface InstallControlOptions {
   docker?: DockerRunner;
   /**
-   * Asks the operator whether an orphaned database may be removed. Absent in a
-   * headless run, which stops with the exact command instead.
+   * Asks the operator whether this install's old Iron Control services and
+   * database may be removed. Absent in a headless run, which stops with the
+   * exact commands instead.
    */
   confirmRemoval?: (message: string) => Promise<boolean>;
 }
@@ -173,41 +217,87 @@ async function askRemoval(message: string): Promise<boolean> {
       { value: 'remove', label: 'Remove it and start fresh' },
       { value: 'abort', label: 'Abort' },
     ],
+    // Enter alone keeps everything; removal takes a deliberate move.
+    initialValue: 'abort',
   });
   return !p.isCancel(answer) && answer === 'remove';
 }
 
+/** "services a, b and database volume v": what the earlier install left behind. */
+function leftovers(state: ControlDatabaseState): string {
+  const names = state.containers.map((container) => container.name);
+  return [
+    ...(names.length ? [`services ${names.join(', ')}`] : []),
+    ...(state.exists ? [`database volume ${state.volume}`] : []),
+  ].join(' and ');
+}
+
+/** The commands that remove what `state` lists, in the order Docker accepts them. */
+function removalCommand(state: ControlDatabaseState, extraContainers: string[] = []): string {
+  const names = [...state.containers.map((container) => container.name), ...extraContainers];
+  return [
+    ...(names.length ? [`docker rm -f ${names.join(' ')}`] : []),
+    ...(state.exists ? [`docker volume rm ${state.volume}`] : []),
+  ].join(' && ');
+}
+
 /**
- * A database volume without this install's `control.env` cannot be opened: its
- * rows are encrypted with keys only that file held. A volume no container
- * mounts is orphaned and may be removed with explicit consent; a volume a
- * container still uses is never touched here.
+ * `control.env` was the only file holding the encryption keys, but the `web`
+ * container still carries them in its environment. Once it is removed, the
+ * database rows are unreadable for good, so every path that may remove it
+ * says so first.
+ */
+function keysWarning(state: ControlDatabaseState): string {
+  const web = state.containers.find((container) => container.service === 'web');
+  if (!web) return '';
+  return (
+    ` The ${web.running ? 'running ' : ''}web container ${web.name} holds the only remaining copy of those keys ` +
+    `(its environment: docker inspect ${web.name}); removing it destroys them and every credential stored in the database.`
+  );
+}
+
+/**
+ * Without this install's `control.env` the database cannot be opened: its rows
+ * are encrypted with keys only that file held. What the earlier install left in
+ * Docker (this install's compose containers, the volume, or both) may be
+ * removed together with explicit consent; a container outside this install's
+ * compose project that mounts the volume is never touched here.
  */
 export async function resolveOrphanedDatabase(root: string, options: InstallControlOptions = {}): Promise<void> {
   const paths = controlPaths(root);
   const state = await inspectControlDatabase(root, options.docker);
-  if (!state.exists) return;
-  const removeVolume = `docker volume rm ${state.volume}`;
-  if (state.containers.length) {
+  if (!state.exists && !state.containers.length) return;
+  if (state.foreign.length) {
     throw new Error(
-      `Iron Control database ${state.volume} is still used by ${state.containers.join(', ')} but its encryption keys are missing for this install. ` +
-        `Restore ${paths.environment}, or remove the old services and database with: docker rm -f ${state.containers.join(' ')} && ${removeVolume}`,
+      `Iron Control database ${state.volume} is still used by ${state.foreign.join(', ')}, which this install did not create, ` +
+        `and its encryption keys are missing for this install. Restore ${paths.environment}, ` +
+        `or remove those services and the database by hand: ${removalCommand(state, state.foreign)}`,
     );
   }
+  const command = removalCommand(state);
   const confirm = options.confirmRemoval ?? (process.stdin.isTTY ? askRemoval : undefined);
   if (!confirm) {
     throw new Error(
-      `Iron Control database ${state.volume} exists but its encryption keys are missing for this install. ` +
-        `Restore ${paths.environment}, or remove the orphaned database with: ${removeVolume}`,
+      `An earlier Iron Control install of this checkout left ${leftovers(state)} in Docker, but its encryption keys are missing for this install.` +
+        `${keysWarning(state)} Restore ${paths.environment}, or remove the old install with: ${command}`,
     );
   }
-  console.log(`The old Iron Control database (${state.volume}) can't be reused without its keys.`);
-  if (!(await confirm('Remove it and start fresh?'))) {
+  console.log(
+    `The old Iron Control install (${leftovers(state)}) can't be reused without its keys.${keysWarning(state)}`,
+  );
+  const web = state.containers.find((container) => container.service === 'web');
+  const question = web
+    ? `Remove it and start fresh? This destroys the keys held by ${web.name} and every credential in the old database.`
+    : 'Remove it and start fresh?';
+  if (!(await confirm(question))) {
     throw new Error(
-      `Iron Control database ${state.volume} was kept. Restore ${paths.environment} or run: ${removeVolume}`,
+      `Kept the old Iron Control install (${leftovers(state)}). Restore ${paths.environment} or run: ${command}`,
     );
   }
-  await (options.docker ?? dockerCapture)(['volume', 'rm', state.volume], 'Remove the orphaned Iron Control database');
+  const docker = options.docker ?? dockerCapture;
+  const names = state.containers.map((container) => container.name);
+  if (names.length) await docker(['rm', '-f', ...names], 'Remove the old Iron Control services');
+  if (state.exists) await docker(['volume', 'rm', state.volume], 'Remove the orphaned Iron Control database');
 }
 
 export async function installControl(root = process.cwd(), options: InstallControlOptions = {}): Promise<void> {
