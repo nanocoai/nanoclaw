@@ -1038,6 +1038,45 @@ describe('run-health gate (a bounce blocks later side effects)', () => {
     expect(gated).toHaveLength(2); // restart + step, both bounced by the gate
   });
 
+  // A step's ERROR text is the step's own; one that happens to read like the
+  // engine's deferred-input marker is still a failure, not a missing answer.
+  it('a failed step whose ERROR mentions an unresolved {{var}} still latches the gate', async () => {
+    writeFileSync(
+      join(gskill, 'SKILL.md'),
+      [
+        '# step then restart demo',
+        '',
+        '## Pair the device',
+        '```nc:run effect:step',
+        'pnpm exec tsx setup/index.ts --step pair',
+        '```',
+        '',
+        '## Restart the service',
+        '```nc:run effect:restart',
+        'bash restart.sh',
+        '```',
+        '',
+      ].join('\n'),
+    );
+    const cmds: string[] = [];
+    const res = await applySkill(gskill, groot, {
+      inputs: {},
+      exec: (c: string) => {
+        cmds.push(c);
+      },
+      execStream: async () => ({
+        ok: false,
+        fields: { STATUS: 'failed', ERROR: 'nested skill left unresolved {{token}}' },
+      }),
+    });
+    expect(cmds).not.toContain('bash restart.sh');
+    expect(res.deferred).toEqual([]);
+    expect(res.agentTasks.map((t) => t.reason)).toEqual([
+      'nested skill left unresolved {{token}}',
+      'skipped: an earlier step did not complete — run this from the prose after fixing it',
+    ]);
+  });
+
   // Once blocked, an operator block must not walk the human through steps the
   // run has already gated ("a pairing code is about to appear" → nothing
   // appears). No event ⇒ a consumer's URL offer / readiness confirm never

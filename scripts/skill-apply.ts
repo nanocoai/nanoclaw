@@ -1058,9 +1058,12 @@ export async function applySkill(skillDir: string, root: string, opts: ApplyOpti
           /* already failing — the close is best-effort */
         }
       }
-      if (/unresolved \{\{/.test(msg))
+      // A step's own ERROR text is checked first: it is the step's to write, so
+      // one that reads like the engine's deferred-input marker is still a
+      // failure (the gate must latch), never a missing answer.
+      if (e instanceof StepFailure && e.reported) bounce(d, msg);
+      else if (/unresolved \{\{/.test(msg))
         res.deferred.push(msg); // blocked on a prompt input
-      else if (e instanceof StepFailure && e.reported) bounce(d, msg);
       else bounce(d, `engine could not apply (${msg}) — an agent applies it from the prose`);
     }
   }
