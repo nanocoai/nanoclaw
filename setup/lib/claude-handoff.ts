@@ -46,7 +46,7 @@ import {
   offerClaudeAssist,
   STEP_FILES,
 } from './claude-assist.js';
-import { getPickedProvider } from './picked-provider.js';
+import { resolveSelectedProvider } from './picked-provider.js';
 import { ensureAnswer } from './runner.js';
 import { brandBody, note } from './theme.js';
 
@@ -226,13 +226,13 @@ function buildHandoffPrompt(ctx: HandoffContext): string {
 /**
  * Dispatcher for every setup-failure assist offer.
  *
- * On a non-claude install (the operator picked codex/opencode/… this run),
- * the picked provider owns failure assist: its registered
- * `offerFailureAssist` hook runs first, and Claude is only a fallback —
- * a guarded one, offered when already installed and signed in, never
- * installed or signed in on the spot.
+ * On a non-claude install (the runtime picked this run, preset through
+ * NANOCLAW_AGENT_PROVIDER, or stamped in `.env` by an earlier run), that
+ * provider owns failure assist: its registered `offerFailureAssist` hook
+ * runs first, and Claude is only a fallback — a guarded one, offered when
+ * already installed and signed in, never installed or signed in on the spot.
  *
- * On a claude install (no pick), behavior is unchanged: checks
+ * On a claude install (nothing else selected), behavior is unchanged: checks
  * NANOCLAW_SETUP_ASSIST_MODE and delegates to either the interactive
  * failure handoff (default) or the non-interactive assist.
  *
@@ -241,8 +241,8 @@ function buildHandoffPrompt(ctx: HandoffContext): string {
 export async function offerClaudeOnFailure(ctx: AssistContext, projectRoot: string = process.cwd()): Promise<boolean> {
   if (process.env.NANOCLAW_SKIP_CLAUDE_ASSIST === '1') return false;
 
-  const provider = getPickedProvider();
-  if (provider) {
+  const provider = resolveSelectedProvider(projectRoot);
+  if (provider && provider !== 'claude') {
     const assist = getSetupProvider(provider)?.offerFailureAssist;
     if (assist) {
       const outcome = await assist(ctx, projectRoot);

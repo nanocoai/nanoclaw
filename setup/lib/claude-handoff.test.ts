@@ -1,3 +1,7 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 import type { AssistContext } from './claude-assist.js';
@@ -85,9 +89,46 @@ afterEach(() => {
   setPickedProvider(undefined);
   delete process.env.NANOCLAW_SKIP_CLAUDE_ASSIST;
   delete process.env.NANOCLAW_SETUP_ASSIST_MODE;
+  delete process.env.NANOCLAW_AGENT_PROVIDER;
+  for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
+const roots: string[] = [];
+/** A project root whose `.env` carries the install-wide default an earlier run stamped. */
+function stampedRoot(provider: string): string {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-handoff-'));
+  roots.push(root);
+  fs.writeFileSync(path.join(root, '.env'), `DEFAULT_AGENT_PROVIDER=${provider}\n`);
+  return root;
+}
+
 describe('offerClaudeOnFailure provider dispatch', () => {
+  it('a preset provider (NANOCLAW_AGENT_PROVIDER) counts before the picker has run', async () => {
+    process.env.NANOCLAW_AGENT_PROVIDER = 'tp-nohook';
+    const ran = await offerClaudeOnFailure(CTX, '/tmp');
+    expect(ran).toBe(false);
+    expect(ce.warnings).toHaveLength(1);
+    expect(ce.warnings[0]).toContain('tp-nohook');
+    expect(ce.ensureClaudeReady).not.toHaveBeenCalled();
+    expect(ce.confirmMessages).toEqual([]);
+  });
+
+  it('a provider stamped in .env by an earlier run counts on re-entry', async () => {
+    const root = stampedRoot('tp-launch');
+    const ran = await offerClaudeOnFailure(CTX, root);
+    expect(ran).toBe(true);
+    expect(hookCalls).toEqual(['tp-launch']);
+    expect(ce.ensureClaudeReady).not.toHaveBeenCalled();
+  });
+
+  it('a stamped claude default keeps the Claude handoff', async () => {
+    const root = stampedRoot('claude');
+    ce.confirms.push(false);
+    await offerClaudeOnFailure(CTX, root);
+    expect(ce.ensureClaudeReady).toHaveBeenCalledOnce();
+    expect(ce.confirmMessages).toEqual(['Want to debug this with Claude?']);
+  });
+
   it('claude install (no pick): unchanged — offers the Claude handoff', async () => {
     ce.confirms.push(false); // decline "Want to debug this with Claude?"
     const ran = await offerClaudeOnFailure(CTX, '/tmp');
