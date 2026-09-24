@@ -129,6 +129,18 @@ describe('offerClaudeOnFailure provider dispatch', () => {
     expect(ce.confirmMessages).toEqual(['Want to debug this with Claude?']);
   });
 
+  it('an explicit claude pick this run wins over a non-claude default an earlier run stamped', async () => {
+    const root = stampedRoot('tp-launch');
+    setPickedProvider('claude');
+    ce.confirms.push(false);
+    const ran = await offerClaudeOnFailure(CTX, root);
+    expect(ran).toBe(false);
+    expect(hookCalls).toEqual([]);
+    expect(ce.warnings).toEqual([]);
+    expect(ce.ensureClaudeReady).toHaveBeenCalledOnce();
+    expect(ce.confirmMessages).toEqual(['Want to debug this with Claude?']);
+  });
+
   it('claude install (no pick): unchanged — offers the Claude handoff', async () => {
     ce.confirms.push(false); // decline "Want to debug this with Claude?"
     const ran = await offerClaudeOnFailure(CTX, '/tmp');

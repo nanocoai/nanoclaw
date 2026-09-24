@@ -95,4 +95,11 @@ describe('ensureClaudeReady on a non-claude install', () => {
     expect(await ensureClaudeReady(projectRoot('DEFAULT_AGENT_PROVIDER=claude\n'))).toBe(false);
     expect(state.confirmMessages).toEqual(['Claude CLI is needed to diagnose this. Install it now?']);
   });
+
+  it('keeps the install offer when claude was picked this run over a stamped non-claude default', async () => {
+    setPickedProvider('claude');
+    expect(await ensureClaudeReady(projectRoot('DEFAULT_AGENT_PROVIDER=opencode\n'))).toBe(false);
+    expect(state.confirmMessages).toEqual(['Claude CLI is needed to diagnose this. Install it now?']);
+    expect(state.warnings).toEqual([]);
+  });
 });
