@@ -96,9 +96,14 @@ afterEach(() => {
 const roots: string[] = [];
 /** A project root whose `.env` carries the install-wide default an earlier run stamped. */
 function stampedRoot(provider: string): string {
+  const root = freshRoot();
+  fs.writeFileSync(path.join(root, '.env'), `DEFAULT_AGENT_PROVIDER=${provider}\n`);
+  return root;
+}
+/** A fresh checkout: no `.env` yet, so nothing has chosen a runtime. */
+function freshRoot(): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-handoff-'));
   roots.push(root);
-  fs.writeFileSync(path.join(root, '.env'), `DEFAULT_AGENT_PROVIDER=${provider}\n`);
   return root;
 }
 
@@ -141,11 +146,33 @@ describe('offerClaudeOnFailure provider dispatch', () => {
     expect(ce.confirmMessages).toEqual(['Want to debug this with Claude?']);
   });
 
-  it('claude install (no pick): unchanged — offers the Claude handoff', async () => {
+  it('a claude pick this run keeps the Claude handoff, before .env is stamped', async () => {
+    setPickedProvider('claude');
     ce.confirms.push(false); // decline "Want to debug this with Claude?"
-    const ran = await offerClaudeOnFailure(CTX, '/tmp');
+    const ran = await offerClaudeOnFailure(CTX, freshRoot());
     expect(ran).toBe(false);
     expect(ce.ensureClaudeReady).toHaveBeenCalledOnce();
+    expect(ce.confirmMessages).toEqual(['Want to debug this with Claude?']);
+    expect(ce.warnings).toEqual([]);
+  });
+
+  it('nothing chosen yet (fresh run failing before the picker) + Claude not set up: guarded skip, never the installer', async () => {
+    const ran = await offerClaudeOnFailure(CTX, freshRoot());
+    expect(ran).toBe(false);
+    expect(ce.warnings).toHaveLength(1);
+    expect(ce.warnings[0]).toContain('no agent runtime has been chosen yet');
+    // ensureClaudeReady owns the install/sign-in prompts — it must not run.
+    expect(ce.ensureClaudeReady).not.toHaveBeenCalled();
+    expect(ce.confirmMessages).toEqual([]);
+    expect(hookCalls).toEqual([]);
+  });
+
+  it('nothing chosen yet + Claude already installed and signed in: offer stands', async () => {
+    ce.isClaudeReady.mockReturnValue(true);
+    ce.confirms.push(false); // decline the offer
+    const ran = await offerClaudeOnFailure(CTX, freshRoot());
+    expect(ran).toBe(false);
+    expect(ce.warnings).toEqual([]);
     expect(ce.confirmMessages).toEqual(['Want to debug this with Claude?']);
   });
 
@@ -215,7 +242,15 @@ describe('offerClaudeOnFailure provider dispatch', () => {
 
   it('NANOCLAW_SETUP_ASSIST_MODE still routes a claude install to the non-interactive assist', async () => {
     process.env.NANOCLAW_SETUP_ASSIST_MODE = 'true';
-    await offerClaudeOnFailure(CTX, '/tmp');
+    await offerClaudeOnFailure(CTX, stampedRoot('claude'));
     expect(ce.offerClaudeAssist).toHaveBeenCalledOnce();
+  });
+
+  it('NANOCLAW_SETUP_ASSIST_MODE does not reach the assist before a runtime is chosen', async () => {
+    process.env.NANOCLAW_SETUP_ASSIST_MODE = 'true';
+    const ran = await offerClaudeOnFailure(CTX, freshRoot());
+    expect(ran).toBe(false);
+    expect(ce.offerClaudeAssist).not.toHaveBeenCalled();
+    expect(ce.warnings).toHaveLength(1);
   });
 });

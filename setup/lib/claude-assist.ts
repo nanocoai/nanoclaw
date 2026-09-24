@@ -28,7 +28,7 @@ import * as p from '@clack/prompts';
 import k from 'kleur';
 
 import { extractClaudeOAuthToken } from './captured-token.js';
-import { isNonClaudeInstall, resolveSelectedProvider } from './picked-provider.js';
+import { isClaudeInstall, resolveSelectedProvider } from './picked-provider.js';
 import { ensureAnswer } from './runner.js';
 import { brandBody, fitToWidth, fmtDuration, note } from './theme.js';
 
@@ -149,16 +149,23 @@ export function isClaudeReady(): boolean {
   return isClaudeInstalled() && isClaudeAuthenticated();
 }
 
+/**
+ * The one line a failure gets instead of a Claude offer, shared by every
+ * assist entry point: `provider` is the runtime this run serves, or undefined
+ * when nothing has been chosen yet (a fresh run that failed before the picker).
+ */
+export function claudeOfferSkippedMessage(provider: string | undefined): string {
+  const why = provider ? `this install uses ${provider}` : 'no agent runtime has been chosen yet';
+  return `Skipping the Claude debug offer — ${why} and Claude isn't set up here. The failure details are in logs/setup.log.`;
+}
+
 export async function ensureClaudeReady(projectRoot: string): Promise<boolean> {
-  // A run that serves another runtime never installs or signs in Claude on
-  // the spot; Claude helps there only when it is already usable.
-  if (isNonClaudeInstall(projectRoot)) {
+  // Only a run known to serve Claude installs or signs it in on the spot. Any
+  // other run — another runtime, or nothing chosen yet — gets Claude only
+  // when it is already usable.
+  if (!isClaudeInstall(projectRoot)) {
     if (isClaudeReady()) return true;
-    p.log.warn(
-      brandBody(
-        `Skipping the Claude debug offer — this install uses ${resolveSelectedProvider(projectRoot)} and Claude isn't set up here. The failure details are in logs/setup.log.`,
-      ),
-    );
+    p.log.warn(brandBody(claudeOfferSkippedMessage(resolveSelectedProvider(projectRoot))));
     return false;
   }
   if (!isClaudeInstalled()) {

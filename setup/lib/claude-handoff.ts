@@ -41,6 +41,7 @@ import { getSetupProvider } from '../providers/registry.js';
 import {
   type AssistContext,
   BIG_PICTURE_FILES,
+  claudeOfferSkippedMessage,
   ensureClaudeReady,
   isClaudeReady,
   offerClaudeAssist,
@@ -232,9 +233,14 @@ function buildHandoffPrompt(ctx: HandoffContext): string {
  * runs first, and Claude is only a fallback — a guarded one, offered when
  * already installed and signed in, never installed or signed in on the spot.
  *
- * On a claude install (nothing else selected), behavior is unchanged: checks
- * NANOCLAW_SETUP_ASSIST_MODE and delegates to either the interactive
- * failure handoff (default) or the non-interactive assist.
+ * Before anything has been chosen (a fresh run that fails ahead of the
+ * picker — environment, container, gateway), the same guard applies: there
+ * is no provider hook to run, and Claude is offered only when already
+ * usable. Nothing is installed for a runtime the operator has not picked.
+ *
+ * On a claude install (picked this run, preset, or stamped), behavior is
+ * unchanged: checks NANOCLAW_SETUP_ASSIST_MODE and delegates to either the
+ * interactive failure handoff (default) or the non-interactive assist.
  *
  * Drop-in replacement for `offerClaudeAssist` at failure call sites.
  */
@@ -242,8 +248,8 @@ export async function offerClaudeOnFailure(ctx: AssistContext, projectRoot: stri
   if (process.env.NANOCLAW_SKIP_CLAUDE_ASSIST === '1') return false;
 
   const provider = resolveSelectedProvider(projectRoot);
-  if (provider && provider !== 'claude') {
-    const assist = getSetupProvider(provider)?.offerFailureAssist;
+  if (provider !== 'claude') {
+    const assist = provider ? getSetupProvider(provider)?.offerFailureAssist : undefined;
     if (assist) {
       const outcome = await assist(ctx, projectRoot);
       if (outcome === 'launched') return true;
@@ -252,11 +258,7 @@ export async function offerClaudeOnFailure(ctx: AssistContext, projectRoot: stri
       // through to the guarded Claude offer.
     }
     if (!isClaudeReady()) {
-      p.log.warn(
-        brandBody(
-          `Skipping the Claude debug offer — this install uses ${provider} and Claude isn't set up here. The failure details are in logs/setup.log.`,
-        ),
-      );
+      p.log.warn(brandBody(claudeOfferSkippedMessage(provider)));
       return false;
     }
   }

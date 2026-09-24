@@ -48,8 +48,12 @@ export function resolveSelectedProvider(projectRoot = process.cwd()): string | u
   );
 }
 
-/** True when this run serves a runtime other than Claude. */
-export function isNonClaudeInstall(projectRoot = process.cwd()): boolean {
-  const provider = resolveSelectedProvider(projectRoot);
-  return Boolean(provider) && provider !== 'claude';
+/**
+ * True only when this run is known to serve Claude — the pick, the preset, or
+ * the stamped default says so. "Nothing chosen yet" is not a Claude install:
+ * a failure before the picker must not install or sign in the Claude CLI on a
+ * machine whose operator may be about to pick another runtime.
+ */
+export function isClaudeInstall(projectRoot = process.cwd()): boolean {
+  return resolveSelectedProvider(projectRoot) === 'claude';
 }

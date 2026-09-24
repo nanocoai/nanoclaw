@@ -103,3 +103,27 @@ describe('ensureClaudeReady on a non-claude install', () => {
     expect(state.warnings).toEqual([]);
   });
 });
+
+describe('ensureClaudeReady before a runtime has been chosen', () => {
+  it('never offers to install the Claude CLI on a fresh run that failed ahead of the picker', async () => {
+    expect(await ensureClaudeReady(projectRoot())).toBe(false);
+    expect(state.confirmMessages).toEqual([]);
+    expect(state.warnings).toHaveLength(1);
+    expect(state.warnings[0]).toContain('no agent runtime has been chosen yet');
+  });
+
+  it('still says yes when Claude is already installed and signed in', async () => {
+    state.claudeInstalled = true;
+    state.claudeSignedIn = true;
+    expect(await ensureClaudeReady(projectRoot())).toBe(true);
+    expect(state.confirmMessages).toEqual([]);
+    expect(state.warnings).toEqual([]);
+  });
+
+  it('a claude pick this run restores the install offer before .env is stamped', async () => {
+    setPickedProvider('claude');
+    expect(await ensureClaudeReady(projectRoot())).toBe(false);
+    expect(state.confirmMessages).toEqual(['Claude CLI is needed to diagnose this. Install it now?']);
+    expect(state.warnings).toEqual([]);
+  });
+});
