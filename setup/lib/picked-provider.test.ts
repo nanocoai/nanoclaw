@@ -33,6 +33,13 @@ describe('resolveSelectedProvider', () => {
     expect(resolveSelectedProvider(projectRoot())).toBe('opencode');
   });
 
+  it('a claude pick this run is carried like any other value', () => {
+    setPickedProvider('Claude');
+    expect(getPickedProvider()).toBe('claude');
+    expect(process.env.NANOCLAW_PICKED_PROVIDER).toBe('claude');
+    expect(resolveSelectedProvider(projectRoot())).toBe('claude');
+  });
+
   it('falls back to the preset, then to the default an earlier run stamped', () => {
     process.env.NANOCLAW_AGENT_PROVIDER = 'codex';
     expect(resolveSelectedProvider(projectRoot('DEFAULT_AGENT_PROVIDER=opencode\n'))).toBe('codex');
@@ -45,6 +52,12 @@ describe('resolveSelectedProvider', () => {
     process.env.NANOCLAW_AGENT_PROVIDER = 'codex';
     setPickedProvider('opencode');
     expect(resolveSelectedProvider(projectRoot('DEFAULT_AGENT_PROVIDER=claude\n'))).toBe('opencode');
+  });
+
+  it('a claude pick this run wins over the preset and the stamped default', () => {
+    process.env.NANOCLAW_AGENT_PROVIDER = 'codex';
+    setPickedProvider('claude');
+    expect(resolveSelectedProvider(projectRoot('DEFAULT_AGENT_PROVIDER=opencode\n'))).toBe('claude');
   });
 
   it('clearing the pick clears the env var', () => {
