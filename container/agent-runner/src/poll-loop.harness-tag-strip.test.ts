@@ -116,28 +116,28 @@ describe('harness tag artifacts stripped from deliveries (wiring)', () => {
     expect(pushes).toHaveLength(0);
   });
 
-  it('replaces bare error-result text and artifacts with a safe notice', async () => {
+  it('sanitizes the dedicated error field while keeping raw diagnostics private', async () => {
     const { query, pushes } = makeResultQuery({
       type: 'result',
       text: 'Raw provider diagnostic: transport terminated.\n<dispatch>',
       isError: true,
+      error: 'Spending limit reached.\n<dispatch>',
     });
 
     await processQuery(query, ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(JSON.parse(out[0].content).text).toBe('The agent run failed. Check the logs for details.');
+    expect(JSON.parse(out[0].content).text).toBe('Spending limit reached.');
     // No re-wrap nudge — an error result must not re-hammer the gateway.
     expect(pushes).toHaveLength(0);
   });
 });
 
-it('sanitizes the dedicated provider error field without delivering private result text', async () => {
+it('replaces bare error-result diagnostics with a safe fallback notice', async () => {
   const { query, pushes } = makeResultQuery({
     type: 'result',
-    text: 'Private raw transport diagnostic',
-    error: 'Please try again later.\n<invoke name="retry"></parameter>',
+    text: 'Private raw transport diagnostic\n<dispatch>',
     isError: true,
   });
 
@@ -145,7 +145,7 @@ it('sanitizes the dedicated provider error field without delivering private resu
 
   const out = getUndeliveredMessages();
   expect(out).toHaveLength(1);
-  expect(JSON.parse(out[0].content).text).toBe('Please try again later.');
+  expect(JSON.parse(out[0].content).text).toBe('The agent run failed. Check the logs for details.');
   expect(out[0].content).not.toContain('Private raw transport diagnostic');
   expect(pushes).toHaveLength(0);
 });

@@ -448,15 +448,20 @@ it('does not push accumulated-only follow-ups into an active query', async () =>
 });
 
 describe('error result with no <message> envelope', () => {
-  it('delivers a safe failure notice to the triggering channel and does not nudge', async () => {
+  it('delivers the dedicated safe error field without forwarding model diagnostics', async () => {
     const budgetText = 'Spending limit reached. Add your own key at https://example.com/keys';
-    const { query, pushes } = makeResultQuery({ type: 'result', text: budgetText, isError: true });
+    const { query, pushes } = makeResultQuery({
+      type: 'result',
+      text: 'raw provider diagnostic',
+      isError: true,
+      error: budgetText,
+    });
 
     await processQuery(query, ERR_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(JSON.parse(out[0].content).text).toBe('The agent run failed. Check the logs for details.');
+    expect(JSON.parse(out[0].content).text).toBe(budgetText);
     expect(out[0].platform_id).toBe('chan-1');
     expect(out[0].channel_type).toBe('discord');
     // No re-wrap nudge — an error result must not re-hammer the gateway.
