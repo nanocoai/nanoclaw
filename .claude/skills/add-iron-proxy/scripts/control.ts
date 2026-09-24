@@ -4,6 +4,12 @@ import { assertCredentialIsolation } from './credential-isolation.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { installCommand } from './install-command.js';
+import {
+  ensureControlImage,
+  pinnedControlImage,
+  type ControlImage,
+  type ControlImageOptions,
+} from './control-image.js';
 
 import { stringify as yaml } from 'yaml';
 import { getInstallSlug } from '../../../../src/install-slug.js';
@@ -26,6 +32,8 @@ export function controlPaths(root = process.cwd()) {
     proxyEnvironment: path.join(directory, 'proxy.env'),
     registration: path.join(directory, 'registration.json'),
     login: path.join(directory, 'login.txt'),
+    /** How the console image runs on this engine (see control-image.ts). */
+    image: path.join(directory, 'image.json'),
   };
 }
 
@@ -44,7 +52,7 @@ export function controlPort(root: string): number {
   return port;
 }
 
-export function controlCompose(root: string, port: number): string {
+export function controlCompose(root: string, port: number, image: ControlImage = pinnedControlImage()): string {
   const p = controlPaths(root);
   return yaml({
     name: p.project,
@@ -57,8 +65,9 @@ export function controlCompose(root: string, port: number): string {
         healthcheck: { test: ['CMD-SHELL', 'pg_isready -U iron_control'], interval: '2s', timeout: '3s', retries: 30 },
       },
       web: {
-        image: pins['iron-control-image'],
-        platform: pins['iron-control-platform'],
+        image: image.image,
+        // A locally built image is native and only exists on this engine.
+        ...(image.platform ? { platform: image.platform } : { pull_policy: 'never' }),
         restart: 'unless-stopped',
         env_file: [p.environment],
         command: ['./bin/rails', 'server'],
@@ -129,12 +138,17 @@ export async function controlRequest(root: string, resource: string, method = 'G
   return response.status === 204 ? null : ((await response.json()) as { data: unknown }).data;
 }
 
-export async function installControl(root = process.cwd()): Promise<void> {
+export type InstallControlOptions = ControlImageOptions;
+
+export async function installControl(root = process.cwd(), options: InstallControlOptions = {}): Promise<void> {
   const p = controlPaths(root);
   const port = controlPort(root);
   const url = `http://127.0.0.1:${port}`;
   fs.mkdirSync(p.directory, { recursive: true, mode: 0o700 });
   fs.chmodSync(p.directory, 0o700);
+  // Settle how the console runs on this engine before any image is pulled or
+  // any key is generated: an architecture without a usable image stops here.
+  const image = await ensureControlImage(p, options);
   if (!fs.existsSync(p.environment)) {
     const volumes = await installCommand('docker', ['volume', 'ls', '--format', '{{.Name}}'], {
       label: 'Check existing Iron Control data',
@@ -173,7 +187,7 @@ export async function installControl(root = process.cwd()): Promise<void> {
     `POSTGRES_USER=iron_control\nPOSTGRES_PASSWORD=${environment.IRON_CONTROL_DATABASE_PASSWORD}\n`,
   );
   // Keep encryption and account keys unchanged on every refresh.
-  writePrivate(p.compose, controlCompose(root, port));
+  writePrivate(p.compose, controlCompose(root, port, image));
   await compose(root, ['up', '-d', '--wait', '--wait-timeout', '240']);
   let registration: { principalId: string; proxyId: string };
   if (fs.existsSync(p.registration)) {

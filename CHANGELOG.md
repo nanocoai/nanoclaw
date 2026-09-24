@@ -4,6 +4,7 @@ All notable changes to NanoClaw will be documented in this file.
 
 ## [Unreleased]
 
+- **Iron Proxy setup works on arm64 hosts.** The Iron Control console image upstream exists for amd64 only, so on an arm64 Linux host (or Apple Silicon) the Iron Control step failed with `exec format error` unless QEMU emulation happened to be installed. Setup now checks the Docker engine's architecture before pulling anything: on amd64 nothing changes (same pinned image and digest); elsewhere it builds the console from the pinned upstream revision on that machine and runs it natively, keeps the pinned image under emulation when it cannot build, and otherwise stops before any pull with the two options (`docker run --privileged --rm tonistiigi/binfmt --install amd64`, or the OneCLI gateway). The choice is recorded in `data/session-materials/iron-control/image.json` so re-runs and `/update-nanoclaw` keep it. (#3888)
 - **`ncl approvals help` and `ncl dropped-messages help` now list every value the host writes.** The `status` values include `awaiting_reason` (the "Reject with reason…" hold) and the `reason` values include `unknown_sender_decline_notify`; the reason list is derived from the unknown-sender policy list, so a new policy shows up in the help automatically. List filters are not checked against these lists (they never were), so existing `--status` and `--reason` queries behave as before.
 
 ## [2.4.0] - 2026-09-23
