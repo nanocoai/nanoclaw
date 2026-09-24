@@ -218,6 +218,11 @@ export async function installControl(root = process.cwd(), options: InstallContr
   fs.chmodSync(p.directory, 0o700);
   if (!fs.existsSync(p.environment)) {
     await resolveOrphanedDatabase(root, options);
+    // New keys go with a new database (none existed, or the orphan was just
+    // removed with consent). A registration or proxy token left from an older
+    // database names a proxy that database took with it; keeping it would make
+    // every retry look up that proxy and stop on its 404.
+    for (const stale of [p.registration, p.proxyEnvironment]) fs.rmSync(stale, { force: true });
     const password = secret();
     const email = 'operator@nanoclaw.local';
     const databasePassword = secret();

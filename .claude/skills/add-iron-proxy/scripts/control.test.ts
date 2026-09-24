@@ -1,11 +1,25 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parse as yaml } from 'yaml';
 
-import { controlCompose, controlPaths, controlPort, resolveOrphanedDatabase, type DockerRunner } from './control.js';
+import {
+  controlCompose,
+  controlPaths,
+  controlPort,
+  installControl,
+  resolveOrphanedDatabase,
+  type DockerRunner,
+} from './control.js';
 import { hasFrontProxy, frontProxyHash } from './build-managed-proxy.js';
+
+// `compose up` and every other docker call outside the injected runner is a
+// no-op here; the tests below never start a container.
+vi.mock('./install-command.js', async (importActual) => ({
+  ...(await importActual<typeof import('./install-command.js')>()),
+  installCommand: vi.fn(async () => ''),
+}));
 
 const roots: string[] = [];
 const temporary = () => {
@@ -14,6 +28,7 @@ const temporary = () => {
   return root;
 };
 afterEach(() => {
+  vi.unstubAllGlobals();
   delete process.env.NANOCLAW_IRON_CONTROL_PORT;
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
@@ -104,6 +119,36 @@ describe('official Iron Control installation', () => {
       });
       expect(questions).toEqual(['Remove it and start fresh?']);
       expect(fake.removals()).toEqual([['volume', 'rm', volume]]);
+    });
+
+    it('a consented fresh start also retires the registration of the removed database', async () => {
+      const root = temporary();
+      const paths = controlPaths(root);
+      const volume = `${paths.project}_database`;
+      fs.mkdirSync(paths.directory, { recursive: true });
+      fs.writeFileSync(paths.registration, JSON.stringify({ principalId: 'principal-1', proxyId: 'proxy-1' }));
+      fs.writeFileSync(paths.proxyEnvironment, 'IRON_PROXY_TOKEN=old\nIRON_CONTROL_PLANE_URL=http://web:3000\n');
+      const fake = fakeDocker([volume], []);
+      const requests: string[] = [];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (url: string, init: RequestInit) => {
+          const resource = new URL(url).pathname.replace('/api/v1/', '');
+          requests.push(`${init.method ?? 'GET'} ${resource}`);
+          if (resource === 'proxies/proxy-1') return new Response('', { status: 404 });
+          if (resource === 'principals/nanoclaw') return Response.json({ data: { id: 'principal-2' } });
+          if (resource === 'proxies') return Response.json({ data: { id: 'proxy-2', token: 'fresh-token' } });
+          return new Response('', { status: 500 });
+        }),
+      );
+      await installControl(root, { docker: fake.docker, confirmRemoval: async () => true });
+      expect(fake.removals()).toEqual([['volume', 'rm', volume]]);
+      expect(requests).not.toContain('GET proxies/proxy-1');
+      expect(JSON.parse(fs.readFileSync(paths.registration, 'utf8'))).toEqual({
+        principalId: 'principal-2',
+        proxyId: 'proxy-2',
+      });
+      expect(fs.readFileSync(paths.proxyEnvironment, 'utf8')).toContain('IRON_PROXY_TOKEN=fresh-token');
     });
 
     it('keeps the volume and stops when the operator aborts', async () => {
