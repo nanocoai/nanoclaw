@@ -185,7 +185,7 @@ Test your contribution on a fresh clone before submitting. For skills, run the s
 
 Area labels (`area/*`) are applied automatically from the files your PR touches; you don't pick one.
 
-**Changelog:** `CHANGELOG.md` is maintainer-owned — don't edit it in your PR. If your change is user-visible, put one user-facing line in the template's `release-note` block; it's optional raw material that maintainers harvest at release time. Skip it and a maintainer writes the line. For a breaking change, the release note must cover detect, why, fix/migration, and rollback.
+**Changelog:** `CHANGELOG.md` is maintainer-owned — don't edit it in your PR. If your change is user-visible, replace the prompt in the template's `release-note` block with one user-facing line; maintainers harvest those lines at release time and edit them into the changelog. If nothing an operator sees changes, check "No user-visible behavior change" instead. The `release-note` check fails until the description has one or the other, and editing the description re-runs it. For a breaking change, the release note must cover detect, why, fix/migration, and rollback.
 
 ### PR body shape
 
@@ -202,9 +202,10 @@ This applies to humans and coding agents alike:
   Summary, Change kind, Validation, Security and trust boundaries, AI
   assistance — because silence is ambiguous: "None." beats deletion, and
   reviewers rely on the fixed five landing in the same place every PR.
-- Three situational sections may be deleted when they don't apply: Related
-  work, User and release impact (only when there is no user-visible change),
-  Skill delivery (only when this is not a skill).
+- Two situational sections may be deleted when they don't apply: Related
+  work, Skill delivery (only when this is not a skill). Keep User and release
+  impact even when nothing user-visible changes: the `release-note` check
+  reads its "No user-visible behavior change" box.
 - Validation lists receipts, one bullet per piece of evidence:
   command -> result. Name the test that covers the changed behavior, or say
   in one line why none does (docs-only, config-only, unreachable in CI).

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-// Harvests the optional fenced `release-note` block that the v2 pull request
+// Harvests the fenced `release-note` block that the v2 pull request
 // template (marker `nanoclaw-pr-template:v2`) asks contributors to fill in, and
 // renders a draft changelog section for a maintainer to edit.
 //
@@ -25,10 +25,15 @@ export const KIND_HEADINGS = {
 
 export const UNLABELLED_HEADING = 'Unlabelled';
 
-// The literal prompt shipped inside the template's fence. A contributor who
-// never touched the block leaves this behind; it is not a release note.
-const TEMPLATE_PLACEHOLDER =
-  'Optional: one user-facing line for the changelog. Skip it and a maintainer will write one.';
+// The literal prompts the template has shipped inside its fence. A contributor
+// who never touched the block leaves one behind; it is not a release note. The
+// first is the current prompt. The second predates the release-note check:
+// pull requests opened before it still carry it, and both the harvest and the
+// check must keep reading it as no note.
+const TEMPLATE_PLACEHOLDERS = new Set([
+  'Replace this with one user-facing line for the changelog. Required unless "No user-visible behavior change" is checked.',
+  'Optional: one user-facing line for the changelog. Skip it and a maintainer will write one.',
+]);
 
 const RELEASE_NOTE_INFO_STRINGS = new Set(['release-note', 'release-notes']);
 
@@ -83,19 +88,18 @@ export function extractReleaseNote(body) {
 }
 
 function finishNote(lines) {
-  let text = lines.join('\n').replace(/<!--[\s\S]*?-->/g, '');
+  const text = lines.join('\n').replace(/<!--[\s\S]*?-->/g, '');
+
+  // An untouched prompt is no note, even when an editor re-wrapped it.
+  if (TEMPLATE_PLACEHOLDERS.has(collapseWhitespace(text))) return null;
 
   // Tolerate a contributor who wrote their line under the untouched prompt.
-  const withoutPlaceholder = text
+  const kept = text
     .split('\n')
-    .filter((line) => collapseWhitespace(line) !== TEMPLATE_PLACEHOLDER)
+    .filter((line) => !TEMPLATE_PLACEHOLDERS.has(collapseWhitespace(line)))
     .join('\n');
-  if (collapseWhitespace(withoutPlaceholder)) text = withoutPlaceholder;
-
-  const trimmed = text.replace(/^\n+/, '').replace(/\s+$/, '');
-  if (!collapseWhitespace(trimmed)) return null;
-  if (collapseWhitespace(trimmed) === TEMPLATE_PLACEHOLDER) return null;
-  return trimmed;
+  const trimmed = kept.replace(/^\n+/, '').replace(/\s+$/, '');
+  return collapseWhitespace(trimmed) ? trimmed : null;
 }
 
 /** The kind this PR is grouped under, or null when it carries no managed kind. */
@@ -106,8 +110,8 @@ export function pullRequestKind(labels) {
   return MANAGED_KINDS.find((kind) => names.has(kind)) ?? null;
 }
 
-/** True when the v2 "Breaking change" box is checked outside any fenced block. */
-export function isBreakingChange(body) {
+/** The body's lines outside every flush-left fenced block; an unterminated fence hides the rest. */
+function linesOutsideFences(body) {
   const text = String(body ?? '').replaceAll('\r\n', '\n');
   const lines = [];
   let fenceChar = null;
@@ -126,7 +130,23 @@ export function isBreakingChange(body) {
     }
     if (fenceChar === null) lines.push(line);
   }
-  return lines.some((line) => /^- \[x\]\s+Breaking change\b/i.test(line));
+  return lines;
+}
+
+/**
+ * True when a flush-left v2 checkbox whose text starts with `label` is checked
+ * outside any fenced block. The label is matched literally and case-insensitively,
+ * so the template's trailing "— release note below" prose need not be repeated.
+ */
+export function isBoxChecked(body, label) {
+  const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = new RegExp(`^- \\[x\\]\\s+${escaped}\\b`, 'i');
+  return linesOutsideFences(body).some((line) => pattern.test(line));
+}
+
+/** True when the v2 "Breaking change" box is checked outside any fenced block. */
+export function isBreakingChange(body) {
+  return isBoxChecked(body, 'Breaking change');
 }
 
 /**

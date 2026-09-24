@@ -8,9 +8,9 @@
      seconds — technical terms fine, decoration not. If a sentence adds no
      reviewable fact, delete it.
 
-     Keep Summary, Change kind, Validation, Security, and AI assistance in
-     every PR ("None." beats deletion); Related work, User and release
-     impact, and Skill delivery may go when they don't apply. -->
+     Keep Summary, Change kind, Validation, User and release impact,
+     Security, and AI assistance in every PR ("None." beats deletion);
+     Related work and Skill delivery may go when they don't apply. -->
 
 ## Summary
 
@@ -57,7 +57,7 @@ Closes #
 - [ ] Breaking change — release note below covers detect, why, fix/migration, rollback
 
 ```release-note
-Optional: one user-facing line for the changelog. Skip it and a maintainer will write one.
+Replace this with one user-facing line for the changelog. Required unless "No user-visible behavior change" is checked.
 ```
 
 ## Security and trust boundaries

@@ -1,0 +1,39 @@
+name: Release note
+
+# Fails a pull request whose description neither checks the "No user-visible
+# behavior change" box nor carries a release note in the template's
+# ```release-note block (.github/PULL_REQUEST_TEMPLATE.md, "User and release
+# impact"). The verdict is scripts/check-release-note.mjs, which decides
+# "non-empty" with the same extractReleaseNote the changelog harvest uses
+# (scripts/release-notes.mjs), so a note that passes here is a line the harvest
+# will find. `edited` is in the trigger list because the description is what
+# gets fixed: every edit re-runs the check. `synchronize` gives each new head
+# commit its own verdict, since a check run belongs to a commit.
+#
+# Plain `pull_request`, unlike label-pr.yml: this job needs no write access. It
+# reads the description from an environment variable — never from a shell
+# interpolation of contributor-controlled text.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions: {}
+
+jobs:
+  release-note:
+    name: release-note
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check the release-note section of the description
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: node scripts/check-release-note.mjs

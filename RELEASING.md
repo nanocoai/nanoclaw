@@ -27,7 +27,7 @@ Keep `## [Unreleased]` and dated `## [X.Y.Z] - YYYY-MM-DD` headings unchanged; c
 
 ## Harvesting release notes from merged pull requests
 
-The v2 pull request template (`<!-- nanoclaw-pr-template:v2 -->`) carries an optional fenced
+The v2 pull request template (`<!-- nanoclaw-pr-template:v2 -->`) carries a fenced
 ```release-note``` block: one user-facing line, written by the contributor who knows what changed.
 `scripts/release-notes.mjs` collects those blocks across a merge range and prints a draft for you
 to edit:
@@ -48,6 +48,21 @@ there too, so an unwritten migration cannot disappear from the draft.
 
 The draft is a starting point, not the entry. Curate it into the shape described above, then paste
 what you keep under `## [Unreleased]`. The tool prints to stdout and never writes `CHANGELOG.md`.
+
+### The release-note check
+
+The `release-note` check in `.github/workflows/release-note.yml` runs `scripts/check-release-note.mjs`
+whenever a pull request is opened, reopened, pushed to, or has its description edited. It passes when
+the description checks **No user-visible behavior change** or its `release-note` block holds a
+line. Otherwise it fails and points the contributor at the template's "User and release impact"
+section. It reads the block with the harvest's own parser, so an untouched template prompt counts as
+empty in both places: every passing pull request either declared no user-visible change or left a
+line for the draft.
+
+Editing the description re-runs the check without a new commit, so a maintainer can also fix a
+contributor's description directly. A pull request that merged after the check and still appears
+under **Needs a line** normally ticked **No user-visible behavior change**; confirm that claim rather
+than writing a line for it.
 
 ## Publishing the release
 

@@ -10,6 +10,11 @@ import {
   renderDraftChangelog,
 } from './release-notes.mjs';
 
+// The prompt the template shipped before the release-note check. Pull requests
+// opened earlier still carry it, so it must keep reading as no note. The current
+// prompt is covered against the live template in check-release-note.test.ts.
+const LEGACY_PROMPT = 'Optional: one user-facing line for the changelog. Skip it and a maintainer will write one.';
+
 const TEMPLATE_BLOCK = [
   '## User and release impact',
   '',
@@ -17,7 +22,7 @@ const TEMPLATE_BLOCK = [
   '- [x] User-visible change — release note below',
   '',
   '```release-note',
-  'Optional: one user-facing line for the changelog. Skip it and a maintainer will write one.',
+  LEGACY_PROMPT,
   '```',
   '',
 ].join('\n');
@@ -48,13 +53,12 @@ describe('release-note extraction', () => {
   });
 
   it('drops the placeholder line when the contributor wrote underneath it', () => {
-    const mixed = body(
-      [
-        'Optional: one user-facing line for the changelog. Skip it and a maintainer will write one.',
-        'The real line.',
-      ].join('\n'),
-    );
+    const mixed = body([LEGACY_PROMPT, 'The real line.'].join('\n'));
     expect(extractReleaseNote(mixed)).toBe('The real line.');
+  });
+
+  it('treats an untouched prompt re-wrapped across lines as no note', () => {
+    expect(extractReleaseNote(body(LEGACY_PROMPT.replace('changelog. ', 'changelog.\n')))).toBeNull();
   });
 
   it('returns null for an empty block and for a body with no release-note fence', () => {
