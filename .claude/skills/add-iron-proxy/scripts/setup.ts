@@ -12,6 +12,7 @@ import { upsertEnvVar } from '../../../../setup/set-env.js';
 import { installStep, installCommand, InstallCommandFailure } from './install-command.js';
 import { buildManagedProxy, hasFrontProxy } from './build-managed-proxy.js';
 import { controlPaths, installControl, removeControl, storeModelCredential } from './control.js';
+import { readAllowedHostsFile, validateAllowedHost } from '../payload/src/gateway-providers/iron-proxy-allowlist.js';
 
 const pins = JSON.parse(
   fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'versions.json'), 'utf8'),
@@ -58,22 +59,8 @@ export function statePaths(projectRoot = process.cwd()) {
   };
 }
 
-export function validateAllowedHost(raw: string): string {
-  const host = raw.trim().toLowerCase();
-  if (!/^(?:\*\.)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(host)) {
-    throw new Error(`Invalid allowed host: ${raw}`);
-  }
-  return host;
-}
-
-function readAllowedHosts(projectRoot: string): string[] {
-  const file = statePaths(projectRoot).allowedHosts;
-  if (!fs.existsSync(file)) return [];
-  const value = JSON.parse(fs.readFileSync(file, 'utf8')) as unknown;
-  if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string')) {
-    throw new Error(`Invalid Iron Proxy allowed-hosts file: ${file}`);
-  }
-  return [...new Set(value.map(validateAllowedHost))].sort();
+export function readAllowedHosts(projectRoot: string): string[] {
+  return readAllowedHostsFile(statePaths(projectRoot).allowedHosts);
 }
 
 function writeAllowedHosts(hosts: readonly string[], projectRoot: string): void {

@@ -16,6 +16,7 @@ Copy the package's provider, approval middleware, tests, and agent guidance into
 ```nc:copy
 payload/src/gateway-providers/iron-proxy.ts -> src/gateway-providers/iron-proxy.ts
 payload/src/gateway-providers/iron-proxy.test.ts -> src/gateway-providers/iron-proxy.test.ts
+payload/src/gateway-providers/iron-proxy-allowlist.ts -> src/gateway-providers/iron-proxy-allowlist.ts
 payload/src/gateway-providers/iron-proxy-approval.ts -> src/gateway-providers/iron-proxy-approval.ts
 payload/src/gateway-providers/iron-proxy-approval.test.ts -> src/gateway-providers/iron-proxy-approval.test.ts
 payload/src/gateway-providers/iron-proxy-transform.proto -> src/gateway-providers/iron-proxy-transform.proto
