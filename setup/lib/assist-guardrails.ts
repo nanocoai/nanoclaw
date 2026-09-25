@@ -25,27 +25,6 @@ export function assistGuardrails(): string {
   return ASSIST_GUARDRAILS.join('\n');
 }
 
-/**
- * Read-only diagnostics OpenCode may run without asking. Wildcard patterns
- * where `*` matches anything. `docker inspect` is deliberately absent: it
- * prints container env, which holds gateway credentials. `ncl` is absent
- * because a wildcard cannot keep a read verb from matching a mutating
- * command's arguments. The launcher re-asks for redirection and file output.
- */
-export const READ_ONLY_COMMANDS: readonly string[] = [
-  'docker ps *',
-  'docker logs *',
-  'docker images *',
-  'ls *',
-  'cat logs/*',
-  'tail logs/*',
-  'tail * logs/*',
-  'grep * logs/*',
-  'git status *',
-  'git log *',
-  'git diff *',
-];
-
 /** `<tool> <verb>` with or without options between them, e.g. `docker compose -f x.yml down`. */
 function verbs(tool: string, names: string[]): string[] {
   return names.flatMap((verb) => [`${tool} ${verb} *`, `${tool} * ${verb} *`]);

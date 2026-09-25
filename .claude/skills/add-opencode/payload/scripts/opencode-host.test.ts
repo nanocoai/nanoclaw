@@ -209,13 +209,14 @@ describe('native host OpenCode lifecycle', () => {
     const bash = Object.entries(permission.bash as Record<string, string>);
     // Last matching rule wins: the catch-all must come first.
     expect(bash[0]).toEqual(['*', 'ask']);
-    expect(permission.bash['docker ps *']).toBe('allow');
-    expect(permission.bash['docker logs *']).toBe('allow');
-    expect(permission.bash['docker inspect *']).toBeUndefined();
+    // No allow rules: OpenCode matches a grouped redirection such as
+    // `(ls) > file` as plain `ls`, so any bash allow can write files.
+    expect(Object.values(permission.bash)).not.toContain('allow');
+    // Subagents carry their own (possibly operator-loosened) permissions.
+    expect(permission.task).toBe('deny');
     for (const denied of ['docker rm *', 'docker * rm *', 'docker * down *', 'launchctl * unload *']) {
       expect(permission.bash[denied]).toBe('deny');
     }
-    expect(permission.bash['*.env*']).toBe('ask');
     // Agent-level permission blocks in the operator's config are merged after
     // the top-level rules, so the session also runs as a dedicated default
     // agent whose name no operator config can target.
@@ -237,6 +238,16 @@ describe('native host OpenCode lifecycle', () => {
     expect(config.default_agent).toBe('nanoclaw-maintenance');
   });
 
+  it('leaves a non-JSON inline config intact and keeps only the top-level override', async () => {
+    touch(path.join(root, 'bin/opencode'));
+    const jsonc = '{ // operator provider\n "model": "user/model", }';
+    vi.stubEnv('OPENCODE_CONFIG_CONTENT', jsonc);
+    await hostOpenCode.launch(root);
+    const env = edge.spawn.mock.calls[0][2].env;
+    expect(env.OPENCODE_CONFIG_CONTENT).toBe(jsonc);
+    expect(JSON.parse(env.OPENCODE_PERMISSION).edit).toBe('ask');
+  });
+
   it('matches bash commands against the permission override as OpenCode 1.18 does', async () => {
     touch(path.join(root, 'bin/opencode'));
     await hostOpenCode.launch(root);
@@ -254,9 +265,8 @@ describe('native host OpenCode lifecycle', () => {
         if (source.endsWith(' .*')) source = source.slice(0, -3) + '( .*)?';
         return new RegExp(`^${source}$`, 's').test(command);
       })?.[1];
-    expect(action('docker ps')).toBe('allow');
-    expect(action('docker ps -a --format {{.Names}}')).toBe('allow');
-    expect(action('tail -n 50 logs/setup.log')).toBe('allow');
+    expect(action('docker ps')).toBe('ask');
+    expect(action('tail -n 50 logs/setup.log')).toBe('ask');
     expect(action('docker inspect nanoclaw-iron-proxy')).toBe('ask');
     expect(action('curl -x http://proxy:8080 https://example.com')).toBe('ask');
     expect(action('docker rm -f nanoclaw-iron-proxy')).toBe('deny');
@@ -267,14 +277,10 @@ describe('native host OpenCode lifecycle', () => {
     expect(action('docker container rm nanoclaw-iron-proxy')).toBe('deny');
     expect(action('systemctl --user --no-block stop nanoclaw.service')).toBe('deny');
     expect(action('launchctl bootout gui/501/com.nanoclaw')).toBe('deny');
-    // Read-only allows never cover redirection, file output or mutating ncl verbs.
-    expect(action('ls > src/index.ts')).toBe('ask');
-    expect(action('cat logs/setup.log >> src/index.ts')).toBe('ask');
-    expect(action('git diff --output=src/index.ts')).toBe('ask');
+    // OpenCode extracts `ls` from `(ls) > src/index.ts`; it must still ask.
+    expect(action('ls')).toBe('ask');
     expect(action('ncl groups restart --id g1 --rebuild --message "get ready"')).toBe('ask');
-    // A read-only allow never covers .env.
-    expect(action('cat logs/../.env')).toBe('ask');
-    expect(action('ls -la .env')).toBe('ask');
+    expect(action('cat .env')).toBe('ask');
   });
 
   it('keeps native configuration free of the maintenance override', async () => {

@@ -8,7 +8,7 @@ import * as p from '@clack/prompts';
 
 import { pathToFileURL } from 'url';
 
-import { assistGuardrails, DESTRUCTIVE_COMMANDS, READ_ONLY_COMMANDS } from '../setup/lib/assist-guardrails.js';
+import { assistGuardrails, DESTRUCTIVE_COMMANDS } from '../setup/lib/assist-guardrails.js';
 
 export const OPENCODE_HOST_INSTALL_VERSION = '1.18.25';
 
@@ -73,26 +73,26 @@ export type MaintenancePurpose = 'debug' | 'update';
 
 /**
  * Permission override for maintenance sessions. OpenCode defaults to allow
- * for bash and edit. Within a rule object the last matching pattern wins:
- * ask by default, allow read-only diagnostics, and ask again for anything
- * that redirects, writes an output file, or names .env (OpenCode matches the
- * whole command including its redirections). Debug sessions then deny what
- * takes down the live install (explicit denies also hold under --auto).
- * Update sessions keep those commands at ask, because the update skill stops
- * the service and drains containers.
+ * for bash, edit and subagents. Every command and edit asks: there is no
+ * read-only allow-list, because OpenCode matches a grouped redirection such
+ * as `(ls) > file` as plain `ls`, so any bash allow rule can write files.
+ * The operator can still answer "always" for a command in the session.
+ * Subagents are denied: they run with their own permissions, which an
+ * operator config may loosen. Debug sessions also deny what takes down the
+ * live install (explicit denies hold under --auto; the last matching rule
+ * wins). Update sessions keep those commands at ask, because the update
+ * skill stops the service and drains containers.
  */
 export function maintenancePermission(purpose: MaintenancePurpose): {
   edit: 'ask';
-  bash: Record<string, 'ask' | 'allow' | 'deny'>;
+  task: 'deny';
+  bash: Record<string, 'ask' | 'deny'>;
 } {
   return {
     edit: 'ask',
+    task: 'deny',
     bash: {
       '*': 'ask',
-      ...Object.fromEntries(READ_ONLY_COMMANDS.map((command) => [command, 'allow' as const])),
-      '*>*': 'ask',
-      '*--output*': 'ask',
-      '*.env*': 'ask',
       ...(purpose === 'debug'
         ? Object.fromEntries(DESTRUCTIVE_COMMANDS.map((command) => [command, 'deny' as const]))
         : {}),
@@ -107,34 +107,37 @@ export const MAINTENANCE_AGENT = 'nanoclaw-maintenance';
  * OPENCODE_PERMISSION merges after the global and project config, so it wins
  * over an operator's top-level allow-all settings. Agent-level permission
  * blocks merge after top-level rules, so the session also starts in a
- * dedicated primary agent whose name no operator config targets. An inline
- * config the operator already exported is kept.
+ * dedicated primary agent whose name no operator config targets, added to
+ * any JSON inline config the operator already exported. A non-JSON (JSONC)
+ * inline config is left intact and the session relies on the top-level
+ * override alone, rather than dropping the operator's providers.
  */
 export function maintenanceEnv(purpose: MaintenancePurpose, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const permission = maintenancePermission(purpose);
+  const env = { ...base, OPENCODE_PERMISSION: JSON.stringify(permission) };
   let inline: { agent?: Record<string, unknown> } & Record<string, unknown> = {};
-  try {
-    const parsed: unknown = base.OPENCODE_CONFIG_CONTENT ? JSON.parse(base.OPENCODE_CONFIG_CONTENT) : {};
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) inline = parsed as typeof inline;
-  } catch {
-    // Not JSON (OpenCode also accepts JSONC here): replaced for this session only.
+  if (base.OPENCODE_CONFIG_CONTENT) {
+    try {
+      const parsed: unknown = JSON.parse(base.OPENCODE_CONFIG_CONTENT);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return env;
+      inline = parsed as typeof inline;
+    } catch {
+      return env;
+    }
   }
-  return {
-    ...base,
-    OPENCODE_PERMISSION: JSON.stringify(permission),
-    OPENCODE_CONFIG_CONTENT: JSON.stringify({
-      ...inline,
-      default_agent: MAINTENANCE_AGENT,
-      agent: {
-        ...inline.agent,
-        [MAINTENANCE_AGENT]: {
-          mode: 'primary',
-          description: `NanoClaw ${purpose} session: asks before edits and commands.`,
-          permission,
-        },
+  env.OPENCODE_CONFIG_CONTENT = JSON.stringify({
+    ...inline,
+    default_agent: MAINTENANCE_AGENT,
+    agent: {
+      ...inline.agent,
+      [MAINTENANCE_AGENT]: {
+        mode: 'primary',
+        description: `NanoClaw ${purpose} session: asks before edits and commands.`,
+        permission,
       },
-    }),
-  };
+    },
+  });
+  return env;
 }
 
 function run(
