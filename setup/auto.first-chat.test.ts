@@ -11,6 +11,14 @@ const fixture = vi.hoisted(() => ({
   brightSelect: vi.fn(),
 }));
 vi.mock('./providers/index.js', () => ({}));
+// Importing the wizard takes the setup lock and resumes a saved Slack job in
+// the checkout's data/; neither may touch the real checkout from a test.
+vi.mock('../src/community-portal/slack-job.js', () => ({
+  withSetupLock: (run: () => Promise<void>) => run(),
+  launchSlackJob: async () => false,
+  readSlackJob: async () => null,
+  slackJobStatus: () => null,
+}));
 vi.mock('./lib/bright-select.js', () => ({ brightSelect: fixture.brightSelect }));
 vi.mock('./lib/setup-config-parse.js', () => ({
   parseFlags: () => ({ help: false, errors: [], values: {} }),
