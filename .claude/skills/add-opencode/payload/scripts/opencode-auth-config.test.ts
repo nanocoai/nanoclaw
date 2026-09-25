@@ -163,9 +163,9 @@ vi.mock('@clack/prompts', () => ({
   log: {
     success: vi.fn(),
     info: vi.fn(),
-    warn: (message: string) => {
+    warn: vi.fn((message: string) => {
       fixture.warnings.push(message);
-    },
+    }),
   },
 }));
 vi.mock('../setup/logs.js', () => ({ userInput: vi.fn(), step: vi.fn() }));
