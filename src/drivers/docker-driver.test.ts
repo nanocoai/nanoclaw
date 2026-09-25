@@ -18,6 +18,7 @@ import {
 } from './docker-driver.js';
 import { FakeCli } from './fake-cli.js';
 import { withSessionEvents } from './session-events.js';
+import { registerSessionLogSink } from './session-log-sink.js';
 import { FIXTURE_POLICY, fixtureSpec, fixtureSpecWithAux } from './spec-fixture.js';
 import { LABELS, type SessionEvent } from './types.js';
 
@@ -379,6 +380,53 @@ describe('lifecycle', () => {
       'Container exited non-zero',
       expect.objectContaining({ stderrTail: ['Unknown provider: mock. Registered: claude'] }),
     );
+  });
+
+  it('feeds every stderr line to a registered session log sink and closes it on exit', async () => {
+    // The container runs --rm; a sink is the only place its full stderr can
+    // outlive it.
+    const lines: string[] = [];
+    const close = vi.fn();
+    const sink = vi.fn(() => ({ write: (line: string) => lines.push(line), close }));
+    const unregister = registerSessionLogSink(sink);
+    try {
+      const handle = await driver().prepare(fixtureSpec());
+      await handle.start();
+
+      const proc = cli.started.at(-1)!.proc;
+      proc.emitStderr('[agent-runner] starting');
+      proc.emitStderr('[poll-loop] idle');
+      proc.emitExit(0);
+
+      expect(sink).toHaveBeenCalledExactlyOnceWith(handle.key, 'ncl-spike-s1');
+      expect(lines).toEqual(['[agent-runner] starting', '[poll-loop] idle']);
+      expect(close).toHaveBeenCalledOnce();
+    } finally {
+      unregister();
+    }
+  });
+
+  it('keeps supervising when a session log sink throws', async () => {
+    const unregister = registerSessionLogSink(() => ({
+      write: () => {
+        throw new Error('disk full');
+      },
+    }));
+    try {
+      const handle = await driver().prepare(fixtureSpec());
+      await handle.start();
+
+      const proc = cli.started.at(-1)!.proc;
+      expect(() => proc.emitStderr('boom')).not.toThrow();
+      proc.emitExit(1);
+
+      expect(log.warn).toHaveBeenCalledWith(
+        'Container exited non-zero',
+        expect.objectContaining({ stderrTail: ['boom'] }),
+      );
+    } finally {
+      unregister();
+    }
   });
 
   it('does not report a terminal event for a stop the host asked for', async () => {
