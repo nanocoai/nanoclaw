@@ -308,3 +308,29 @@ describe('buildOpenCodeConfig reasoning effort', () => {
     expect(modelOptions(config, 'deepseek-v4-flash-lite')).toBeUndefined();
   });
 });
+
+describe('buildOpenCodeConfig env source', () => {
+  it('prefers options.env over process.env', () => {
+    process.env.OPENCODE_PROVIDER = 'openai';
+    process.env.OPENCODE_MODEL = 'openai/process-model';
+    process.env.ANTHROPIC_BASE_URL = 'https://process.example.test/v1';
+    process.env.OPENCODE_MODEL_CONTEXT_LIMIT = '1000';
+    const config = buildOpenCodeConfig({
+      env: {
+        OPENCODE_PROVIDER: 'openrouter',
+        OPENCODE_MODEL: 'openrouter/options-model',
+        ANTHROPIC_BASE_URL: 'https://options.example.test/v1',
+        OPENCODE_MODEL_CONTEXT_LIMIT: '65536',
+      },
+    });
+    expect(config.model).toBe('openrouter/options-model');
+    const providers = config.provider as Record<string, Record<string, unknown>>;
+    expect(providers.openai).toBeUndefined();
+    expect(providers.openrouter.options).toEqual({
+      apiKey: 'placeholder',
+      baseURL: 'https://options.example.test/v1',
+    });
+    const models = providers.openrouter.models as Record<string, Record<string, unknown>>;
+    expect(models['options-model'].limit).toEqual({ context: 65536 });
+  });
+});

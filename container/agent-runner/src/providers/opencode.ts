@@ -267,15 +267,16 @@ function parseLimitEnv(varName: string, raw: string | undefined): number | undef
 }
 
 export function buildOpenCodeConfig(options: ProviderOptions): Record<string, unknown> {
-  const provider = process.env.OPENCODE_PROVIDER || 'anthropic';
-  const model = process.env.OPENCODE_MODEL;
-  const smallModel = process.env.OPENCODE_SMALL_MODEL;
+  const env = options.env ?? process.env;
+  const provider = env.OPENCODE_PROVIDER || 'anthropic';
+  const model = env.OPENCODE_MODEL;
+  const smallModel = env.OPENCODE_SMALL_MODEL;
   // Reasoning effort from the group's container config (ncl groups config
   // update --effort). OpenCode forwards a free-form per-model `options` object
   // to the ai-sdk provider, which maps reasoningEffort onto reasoning_effort in
   // the request body.
   const effort = options.effort;
-  const proxyUrl = process.env.ANTHROPIC_BASE_URL;
+  const proxyUrl = env.ANTHROPIC_BASE_URL;
 
   const providerModelId = model ? model.replace(new RegExp(`^${provider}/`), '') : undefined;
   const providerSmallModelId = smallModel ? smallModel.replace(new RegExp(`^${provider}/`), '') : undefined;
@@ -287,8 +288,8 @@ export function buildOpenCodeConfig(options: ProviderOptions): Record<string, un
   // Undeclared custom models resolve limit.context to 0, which silently disables
   // compaction and kills long sessions against a fixed-window backend (e.g. vLLM).
   // Absent these env vars, behavior is unchanged (no `limit` key emitted).
-  const contextLimitEnv = process.env.OPENCODE_MODEL_CONTEXT_LIMIT;
-  const outputLimitEnv = process.env.OPENCODE_MODEL_OUTPUT_LIMIT;
+  const contextLimitEnv = env.OPENCODE_MODEL_CONTEXT_LIMIT;
+  const outputLimitEnv = env.OPENCODE_MODEL_OUTPUT_LIMIT;
   const contextLimit = parseLimitEnv('OPENCODE_MODEL_CONTEXT_LIMIT', contextLimitEnv);
   const outputLimit = parseLimitEnv('OPENCODE_MODEL_OUTPUT_LIMIT', outputLimitEnv);
   if (outputLimitEnv !== undefined && contextLimit === undefined) {
@@ -311,7 +312,7 @@ export function buildOpenCodeConfig(options: ProviderOptions): Record<string, un
   // `attachment` is a registry/UI flag rather than a pipeline gate, but it is
   // set alongside so the entry stays internally consistent.
   // Absent this env var, behavior is unchanged (no capability keys emitted).
-  const modalityEnv = process.env.OPENCODE_MODEL_INPUT_MODALITIES;
+  const modalityEnv = env.OPENCODE_MODEL_INPUT_MODALITIES;
   const requestedModalities = (modalityEnv ?? '')
     .split(',')
     .map((entry) => entry.trim().toLowerCase())
@@ -430,11 +431,12 @@ let sharedConfigKey: string | null = null;
 let sharedInit: Promise<SharedRuntime> | null = null;
 
 function runtimeConfigKey(options: ProviderOptions): string {
+  const env = options.env ?? process.env;
   return JSON.stringify({
     mcp: mcpServersToOpenCodeConfig(options.mcpServers),
-    model: process.env.OPENCODE_MODEL,
-    small: process.env.OPENCODE_SMALL_MODEL,
-    op: process.env.OPENCODE_PROVIDER,
+    model: env.OPENCODE_MODEL,
+    small: env.OPENCODE_SMALL_MODEL,
+    op: env.OPENCODE_PROVIDER,
   });
 }
 
