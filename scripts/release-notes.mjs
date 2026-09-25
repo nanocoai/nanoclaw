@@ -42,49 +42,81 @@ function collapseWhitespace(text) {
 }
 
 /**
- * Returns the body of the first flush-left fenced block whose info string is
- * `release-note` (or `release-notes`), or null when there is no usable note.
+ * Reads a description the way GitHub renders it, as far as the harvest and the
+ * release-note check care: the visible lines outside every fenced block, and
+ * each fenced block with its info string and body lines.
  *
- * The fence grammar deliberately matches the one the v2 label workflow already
- * applies when it strips fences before parsing checkboxes: flush-left, three or
- * more backticks or tildes, closed by a run of the same character at least as
- * long. An unterminated fence runs to the end of the body, as CommonMark says.
+ * The fence grammar matches the one the v2 label workflow applies when it
+ * strips fences before parsing checkboxes: flush-left, three or more backticks
+ * or tildes. Closing follows CommonMark: up to three spaces, then a run of the
+ * same character at least as long, with nothing after it but spaces, so a
+ * ```release-note line inside a
+ * ```markdown example is content, not a closer. An unterminated fence runs to
+ * the end of the body.
+ *
+ * Outside fences, an HTML block comment (a line starting with `<!--`, up to
+ * three spaces in) is hidden through the first line containing `-->`, or to the
+ * end of the body when it never closes, as CommonMark renders it; a `<!--`
+ * after the `-->` on that line opens another comment. Its lines are
+ * neither visible nor able to open a fence, so a commented-out box or
+ * release-note block counts for nothing.
  */
-export function extractReleaseNote(body) {
+function readDescription(body) {
   const lines = String(body ?? '')
     .replaceAll('\r\n', '\n')
     .split('\n');
-
-  let fenceChar = null;
-  let fenceLength = 0;
-  let collecting = false;
-  const collected = [];
+  const visible = [];
+  const blocks = [];
+  let block = null;
+  let inComment = false;
 
   for (const line of lines) {
-    if (fenceChar === null) {
-      const opener = /^(`{3,}|~{3,})[ \t]*(.*)$/.exec(line);
-      if (!opener) continue;
-      const marker = opener[1];
-      const info = opener[2].trim();
-      // A backtick fence's info string may not contain a backtick (CommonMark).
-      if (marker[0] === '`' && info.includes('`')) continue;
-      fenceChar = marker[0];
-      fenceLength = marker.length;
-      collecting = RELEASE_NOTE_INFO_STRINGS.has(info.toLowerCase());
+    if (block) {
+      if (block.closer.test(line)) block = null;
+      else block.lines.push(line);
       continue;
     }
-
-    const closer = new RegExp(`^\\${fenceChar}{${fenceLength},}[ \\t]*$`).test(line);
-    if (closer) {
-      if (collecting) return finishNote(collected);
-      fenceChar = null;
-      fenceLength = 0;
+    if (inComment || /^ {0,3}<!--/.test(line)) {
+      inComment = commentOpenAtEnd(line, inComment);
       continue;
     }
-    if (collecting) collected.push(line);
+    const opener = /^(`{3,}|~{3,})[ \t]*(.*)$/.exec(line);
+    // A backtick fence's info string may not contain a backtick (CommonMark).
+    if (opener && !(opener[1][0] === '`' && opener[2].includes('`'))) {
+      const [, marker, info] = opener;
+      block = { info: info.trim(), lines: [], closer: new RegExp(`^ {0,3}\\${marker[0]}{${marker.length},}[ \\t]*$`) };
+      blocks.push(block);
+      continue;
+    }
+    visible.push(line);
   }
+  return { visible, blocks };
+}
 
-  return collecting ? finishNote(collected) : null;
+// Whether a comment is still open after `line`: `-->` closes one, and a later
+// `<!--` on the same line opens the next, which then hides the lines below it.
+// The search for `-->` starts inside the opener, so the empty comments `<!-->`
+// and `<!--->` close themselves, as CommonMark reads them.
+function commentOpenAtEnd(line, open) {
+  let from = 0;
+  for (;;) {
+    const at = line.indexOf(open ? '-->' : '<!--', from);
+    if (at === -1) return open;
+    from = at + (open ? 3 : 2);
+    open = !open;
+  }
+}
+
+/**
+ * Returns the body of the first flush-left fenced block whose info string is
+ * `release-note` (or `release-notes`), or null when there is no usable note.
+ * Fences and comments are read by readDescription.
+ */
+export function extractReleaseNote(body) {
+  const block = readDescription(body).blocks.find((candidate) =>
+    RELEASE_NOTE_INFO_STRINGS.has(candidate.info.toLowerCase()),
+  );
+  return block ? finishNote(block.lines) : null;
 }
 
 function finishNote(lines) {
@@ -110,41 +142,18 @@ export function pullRequestKind(labels) {
   return MANAGED_KINDS.find((kind) => names.has(kind)) ?? null;
 }
 
-/** The body's lines outside every flush-left fenced block; an unterminated fence hides the rest. */
-function linesOutsideFences(body) {
-  const text = String(body ?? '').replaceAll('\r\n', '\n');
-  const lines = [];
-  let fenceChar = null;
-  let fenceLength = 0;
-  for (const line of text.split('\n')) {
-    const marker = /^(`{3,}|~{3,})/.exec(line);
-    if (marker) {
-      if (fenceChar === null) {
-        fenceChar = marker[1][0];
-        fenceLength = marker[1].length;
-      } else if (line[0] === fenceChar && marker[1].length >= fenceLength) {
-        fenceChar = null;
-        fenceLength = 0;
-      }
-      continue;
-    }
-    if (fenceChar === null) lines.push(line);
-  }
-  return lines;
-}
-
 /**
  * True when a flush-left v2 checkbox whose text starts with `label` is checked
- * outside any fenced block. The label is matched literally and case-insensitively,
+ * on a visible line: outside every fenced block and HTML comment. The label is matched literally and case-insensitively,
  * so the template's trailing "— release note below" prose need not be repeated.
  */
 export function isBoxChecked(body, label) {
   const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const pattern = new RegExp(`^- \\[x\\]\\s+${escaped}\\b`, 'i');
-  return linesOutsideFences(body).some((line) => pattern.test(line));
+  return readDescription(body).visible.some((line) => pattern.test(line));
 }
 
-/** True when the v2 "Breaking change" box is checked outside any fenced block. */
+/** True when the v2 "Breaking change" box is checked on a visible line. */
 export function isBreakingChange(body) {
   return isBoxChecked(body, 'Breaking change');
 }

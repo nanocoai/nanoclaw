@@ -16,6 +16,7 @@
 // argument or interpolated into a shell line: a description is
 // contributor-controlled text.
 
+import { randomUUID } from 'node:crypto';
 import { appendFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
@@ -93,7 +94,19 @@ export function run(
   const result = decideReleaseNote(env.PR_BODY);
   const report = result.ok ? successMessage(result) : failureMessage(result);
 
-  out(report);
+  if (result.verdict === 'note') {
+    // The note is contributor text. Between these two lines the runner reads
+    // `::` lines as plain log output, so a note cannot issue workflow commands.
+    // The token is fresh per run so the note cannot contain it. See "Stopping
+    // and starting workflow commands":
+    // https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-commands#stopping-and-starting-workflow-commands
+    const token = randomUUID();
+    out(`::stop-commands::${token}`);
+    out(report);
+    out(`::${token}::`);
+  } else {
+    out(report);
+  }
   for (const warning of result.warnings) out(`::warning title=Release note::${escapeAnnotation(warning)}`);
   if (!result.ok) out(`::error title=Release note::${escapeAnnotation(report)}`);
 

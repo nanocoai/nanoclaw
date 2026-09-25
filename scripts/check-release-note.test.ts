@@ -128,6 +128,51 @@ describe('decideReleaseNote', () => {
   });
 });
 
+describe('what the rendered description hides', () => {
+  it('a box inside an HTML comment is not checked', () => {
+    expect(decideReleaseNote(`<!--\n- [x] ${NO_CHANGE_BOX}\n-->\n`)).toMatchObject({ ok: false, verdict: 'missing' });
+    expect(decideReleaseNote(`<!-- - [x] ${NO_CHANGE_BOX} -->\n`).ok).toBe(false);
+    // An unterminated comment runs to the end of the body, as the rendered page shows it.
+    expect(decideReleaseNote(`<!--\n- [x] ${NO_CHANGE_BOX}\n`).ok).toBe(false);
+    // The box after a closed comment still counts.
+    expect(decideReleaseNote(`<!--\nhidden\n-->\n- [x] ${NO_CHANGE_BOX}\n`).verdict).toBe('no-change');
+  });
+
+  it('a box inside the template tone comment is not checked', () => {
+    const tone = TEMPLATE.match(/<!-- Release note:[\s\S]*?-->/)?.[0] ?? '';
+    const hidden = TEMPLATE.replace(tone, tone.replace('-->', `\n- [x] ${NO_CHANGE_BOX}\n-->`));
+    expect(hidden).not.toBe(TEMPLATE);
+    expect(decideReleaseNote(hidden).ok).toBe(false);
+  });
+
+  it('a comment reopened after --> on the same line hides the lines below', () => {
+    expect(decideReleaseNote(`<!-- first --> <!-- second\n- [x] ${NO_CHANGE_BOX}\n-->\n`).ok).toBe(false);
+    expect(decideReleaseNote(`<!--\nfirst --> <!-- second\n- [x] ${NO_CHANGE_BOX}\n-->\n`).ok).toBe(false);
+    expect(decideReleaseNote(`<!-- a --> <!-- b -->\n- [x] ${NO_CHANGE_BOX}\n`).verdict).toBe('no-change');
+    // The empty comments <!--> and <!---> close themselves.
+    expect(decideReleaseNote(`<!-->\n- [x] ${NO_CHANGE_BOX}\n`).verdict).toBe('no-change');
+    expect(decideReleaseNote(`<!--->\n- [x] ${NO_CHANGE_BOX}\n`).verdict).toBe('no-change');
+  });
+
+  it('a closing fence may be indented up to three spaces (CommonMark)', () => {
+    expect(decideReleaseNote(`~~~markdown\nExample\n ~~~\n- [x] ${NO_CHANGE_BOX}\n`).verdict).toBe('no-change');
+    expect(decideReleaseNote(`~~~markdown\nExample\n    ~~~\n- [x] ${NO_CHANGE_BOX}\n`).ok).toBe(false);
+  });
+
+  it('a comment opener inside a fenced block is code, not a comment', () => {
+    expect(decideReleaseNote(`\`\`\`\n<!--\n\`\`\`\n- [x] ${NO_CHANGE_BOX}\n`).verdict).toBe('no-change');
+  });
+
+  it('a release-note block inside an HTML comment is not a note', () => {
+    expect(decideReleaseNote('<!--\n```release-note\nHidden.\n```\n-->\n').ok).toBe(false);
+  });
+
+  it('a fence line with an info string does not close a block (CommonMark)', () => {
+    const example = ['```markdown', '```release-note', `- [x] ${NO_CHANGE_BOX}`, '```', ''].join('\n');
+    expect(decideReleaseNote(example)).toMatchObject({ ok: false, verdict: 'missing' });
+  });
+});
+
 describe('coupling to the template and the workflow', () => {
   it('the checkbox labels are the template lines under "User and release impact"', () => {
     const section = TEMPLATE.split(`## ${TEMPLATE_SECTION}`)[1]?.split('\n## ')[0] ?? '';
@@ -203,6 +248,39 @@ describe('run', () => {
     const contradictory = capture({ PR_BODY: filled({ check: [NO_CHANGE_BOX, USER_VISIBLE_BOX] }) });
     expect(contradictory.code).toBe(0);
     expect(contradictory.text.match(/^::warning title=Release note::/gm)).toHaveLength(1);
+  });
+});
+
+describe('run with a note that looks like a workflow command', () => {
+  const NOTE = ['::set-env name=EXAMPLE::value', '::stop-commands::x', '::error::forged'].join('\n');
+
+  it('prints the note only between stop-commands and its resume token', () => {
+    const lines: string[] = [];
+    expect(run({ PR_BODY: `\`\`\`release-note\n${NOTE}\n\`\`\`\n` }, (line) => lines.push(...line.split('\n')))).toBe(
+      0,
+    );
+
+    const stop = lines.findIndex((line) => /^::stop-commands::[0-9a-f-]{36}$/.test(line));
+    expect(stop).toBeGreaterThanOrEqual(0);
+    const token = lines[stop].slice('::stop-commands::'.length);
+    const resume = lines.indexOf(`::${token}::`);
+    expect(resume).toBeGreaterThan(stop);
+    expect(NOTE).not.toContain(token);
+
+    const inside = lines.slice(stop + 1, resume).join('\n');
+    expect(inside).toContain(NOTE);
+    const outside = [...lines.slice(0, stop), ...lines.slice(resume + 1)];
+    expect(outside.filter((line) => line.startsWith('::'))).toEqual([]);
+  });
+
+  it('uses a fresh token on every run', () => {
+    const tokens = [0, 1].map(() => {
+      const lines: string[] = [];
+      run({ PR_BODY: '```release-note\nA line.\n```\n' }, (line) => lines.push(line));
+      return lines.find((line) => line.startsWith('::stop-commands::'));
+    });
+    expect(tokens[0]).toBeDefined();
+    expect(tokens[0]).not.toBe(tokens[1]);
   });
 });
 

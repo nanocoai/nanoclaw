@@ -89,6 +89,18 @@ describe('release-note extraction', () => {
     expect(extractReleaseNote('  ```release-note\n  Indented.\n  ```\n')).toBeNull();
   });
 
+  it('does not let a fence line with an info string close a block (CommonMark)', () => {
+    expect(extractReleaseNote('```markdown\n```release-note\nExample.\n```\n')).toBeNull();
+  });
+
+  it('ends the note at a closing fence indented up to three spaces', () => {
+    expect(extractReleaseNote('```release-note\nA line.\n   ```\n\n## Security\n')).toBe('A line.');
+  });
+
+  it('skips a release-note block inside an HTML comment', () => {
+    expect(extractReleaseNote('<!--\n```release-note\nHidden.\n```\n-->\n' + body('Shown.'))).toBe('Shown.');
+  });
+
   it('strips HTML comments out of the harvested note', () => {
     expect(extractReleaseNote(body('Visible line. <!-- reviewer note -->'))).toBe('Visible line.');
   });
@@ -114,6 +126,17 @@ describe('breaking-change detection', () => {
 
   it('ignores a checkbox that only appears inside a fenced block', () => {
     expect(isBreakingChange('```release-note\n- [x] Breaking change\n```\n')).toBe(false);
+  });
+
+  it('ignores a breaking box inside an HTML comment', () => {
+    expect(isBreakingChange('<!--\n- [x] Breaking change — release note below\n-->\n')).toBe(false);
+    expect(collectReleaseNotes([{ number: 1, body: '<!--\n- [x] Breaking change\n-->\n' }]).missing[0].breaking).toBe(
+      false,
+    );
+  });
+
+  it('keeps a box hidden when a fence line with an info string sits inside the block', () => {
+    expect(isBreakingChange('```markdown\n```release-note\n- [x] Breaking change\n```\n')).toBe(false);
   });
 });
 
