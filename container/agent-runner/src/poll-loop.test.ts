@@ -480,6 +480,16 @@ describe('error result with no <message> envelope', () => {
     expect(pushes).toHaveLength(0);
   });
 
+  it('sends no notice back to an agent route, so a failure cannot loop through a2a', async () => {
+    const { query, pushes } = makeResultQuery({ type: 'result', text: '', isError: true });
+    const agentRouting = { platformId: 'ag-self', channelType: 'agent', threadId: null, inReplyTo: 'm1' };
+
+    await processQuery(query, agentRouting, ['m1'], 'mock', undefined, 'prompt', undefined);
+
+    expect(getUndeliveredMessages()).toHaveLength(0);
+    expect(pushes).toHaveLength(0);
+  });
+
   it('still nudges (and does not deliver) a normal unwrapped result', async () => {
     const { query, pushes } = makeResultQuery({ type: 'result', text: 'bare text, no envelope' });
 
