@@ -1,13 +1,8 @@
 /**
  * Stop and remove every runtime container of one agent group, matched by the
- * install label plus the group label the driver stamps on the session
- * container and its per-session auxiliaries. `ps -a` also catches containers
- * that exited without being auto-removed. A successful `rm --force` proves
- * removal; otherwise a failed stop or rm counts only if the runtime still
- * lists a container for the group afterwards.
- *
- * Never throws: an unreachable daemon or missing runtime binary is returned as
- * a failure for the caller to report.
+ * install label plus the group label the driver stamps on the session container
+ * and its auxiliaries (`ps -a` also catches exited ones). Never throws: an
+ * unreachable daemon or missing binary comes back as a failure to report.
  */
 import { CUTOVER_STOP_CLI_TIMEOUT_MS, CUTOVER_STOP_GRACE_SECONDS, type CommandRunner } from './service.js';
 

@@ -1,12 +1,7 @@
 /**
- * scripts/delete-cli-agent.ts stops and removes the agent's container before
- * its group folder is deleted.
- *
- * Drives the real entry point in a child process against a temp cwd
- * (PROJECT_ROOT = cwd, so data/v2.db is temp), with a fake runtime binary
- * via CONTAINER_RUNTIME that records every call together with whether the
- * group folder still existed at that moment. The fake can also start a
- * container between listings, standing in for a spawn already in flight.
+ * Proves scripts/delete-cli-agent.ts stops the agent's containers, including one
+ * spawned between listings, before its group folder is deleted. Runs the real
+ * entry point against a temp cwd and a fake CONTAINER_RUNTIME.
  */
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -46,13 +41,10 @@ describe('scripts/delete-cli-agent.ts', { timeout: 20_000 }, () => {
     );
     db.close();
 
-    // A fake runtime backed by a `containers` file: `ps` prints it, `stop`/`rm`
-    // drop the named ids. A `fail` file fails every stop/rm, a
-    // `fail-<verb>-<n>` file fails the n-th call of that verb, and a
-    // `spawn-on-ps-<n>` file is appended before the n-th `ps` answers, which
-    // stands in for a host spawn that lands after an earlier listing. Every
-    // call is logged with the folder's existence at call time so ordering
-    // against the folder removal is provable.
+    // Fake runtime over a `containers` file: `ps` prints it, `stop`/`rm` drop ids.
+    // `fail` fails every stop/rm, `fail-<verb>-<n>` the n-th call of that verb, and
+    // `spawn-on-ps-<n>` is appended before the n-th `ps` (an in-flight spawn).
+    // Each call is logged with whether the folder still existed.
     log = path.join(cwd, 'runtime-calls.log');
     runtime = path.join(cwd, 'fake-docker');
     fs.writeFileSync(path.join(cwd, 'containers'), 'abc123\n');

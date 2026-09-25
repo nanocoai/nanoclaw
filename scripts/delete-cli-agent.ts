@@ -7,15 +7,10 @@
  * groups/<folder>/ directory. Leaves the CLI messaging group intact so it
  * can be reused for a new agent.
  *
- * Containers are stopped before the folder they mount is removed; the host
- * keeps idle agent containers up between turns and is the only thing that
- * stops them. Deleting the rows stops new spawns, but not one already in
- * flight: the host reads the group once and then starts the container
- * without rechecking it. So after the first stop the script waits a short
- * grace and re-lists the group's containers, up to SWEEP_PASSES times,
- * checks once more if the last pass still found something, and removes the
- * folder only after that. A spawn slower than the sweep can still outlive it;
- * it is then reported as still present.
+ * Containers are stopped before the folder they mount is removed: the host is
+ * the only thing that stops idle ones. Deleting the rows blocks new spawns but
+ * not one already in flight, hence the re-list sweep; a spawn slower than the
+ * sweep is reported as still present.
  *
  * Usage:
  *   pnpm exec tsx scripts/delete-cli-agent.ts --folder <folder-name>
@@ -82,9 +77,6 @@ if (!ag) {
   process.exit(0);
 }
 
-// Rows are gone, so no new spawn starts for the group. A spawn already in
-// flight can still start its container after the first listing, which the
-// sweep passes catch if it lands within their grace (see the header).
 const containerOptions = {
   runtime: process.env.CONTAINER_RUNTIME ?? CONTAINER_RUNTIME_BIN,
   installSlug: INSTALL_SLUG,
