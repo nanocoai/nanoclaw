@@ -16,8 +16,12 @@ export async function allowModelHost(host: string, root: string): Promise<void> 
   await run(['--allow-host', host], root);
 }
 
-/** Reserved names (and their subdomains) no public CA certifies; Iron verifies upstream TLS against public roots only. */
-const PRIVATE_NAME = /(?:^|\.)(?:internal|local|localhost|home\.arpa)$/;
+/**
+ * Names no public CA certifies, with their subdomains: IANA special-use names and the
+ * TLDs ICANN will never delegate (home, corp, mail). Iron verifies upstream TLS
+ * against public roots only.
+ */
+const PRIVATE_NAME = /(?:^|\.)(?:internal|local|localhost|home\.arpa|home|corp|mail)$/;
 
 export function ironModelEndpoint(raw: string, root: string) {
   const url = new URL(raw);
