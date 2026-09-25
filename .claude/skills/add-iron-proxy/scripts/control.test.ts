@@ -70,17 +70,18 @@ describe('Iron Control compose per architecture', () => {
     expect(web.pull_policy).toBeUndefined();
   });
 
-  it('runs a locally built image natively and never pulls it', () => {
+  it('runs a locally built image on its native platform and never pulls it', () => {
     const root = temporary();
     const config = yaml(controlCompose(root, 18443, localControlImage('arm64')));
     expect(config.services.web.image).toMatch(/^nanoclaw-iron-control:[0-9a-f]{7}-arm64$/);
-    expect(config.services.web.platform).toBeUndefined();
+    // Explicit so DOCKER_DEFAULT_PLATFORM cannot make Compose ask for amd64.
+    expect(config.services.web.platform).toBe('linux/arm64');
     expect(config.services.web.pull_policy).toBe('never');
     expect(config.services.web.image).not.toContain('@sha256');
     // Everything else stays as on amd64: loopback port, env files, database.
     const pinned = yaml(controlCompose(root, 18443));
     const { image: _i, platform: _p, ...pinnedWeb } = pinned.services.web;
-    const { image: _j, pull_policy: _q, ...localWeb } = config.services.web;
+    const { image: _j, platform: _k, pull_policy: _q, ...localWeb } = config.services.web;
     expect(localWeb).toEqual(pinnedWeb);
     expect(config.services.database).toEqual(pinned.services.database);
   });

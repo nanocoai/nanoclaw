@@ -66,8 +66,9 @@ export function controlCompose(root: string, port: number, image: ControlImage =
       },
       web: {
         image: image.image,
-        // A locally built image is native and only exists on this engine.
-        ...(image.platform ? { platform: image.platform } : { pull_policy: 'never' }),
+        platform: image.platform,
+        // A locally built image only exists on this engine.
+        ...(image.source === 'local-build' ? { pull_policy: 'never' } : {}),
         restart: 'unless-stopped',
         env_file: [p.environment],
         command: ['./bin/rails', 'server'],
@@ -138,17 +139,31 @@ export async function controlRequest(root: string, resource: string, method = 'G
   return response.status === 204 ? null : ((await response.json()) as { data: unknown }).data;
 }
 
-export type InstallControlOptions = ControlImageOptions;
+export interface InstallControlOptions extends ControlImageOptions {
+  /** The console image already settled by {@link prepareControlImage} in this run. */
+  image?: ControlImage;
+}
+
+/**
+ * Settles how the console runs on this engine before any image is pulled or
+ * built and any key is generated: an architecture without a usable image
+ * stops here. Setup calls it before building Iron Proxy.
+ */
+export async function prepareControlImage(
+  root = process.cwd(),
+  options: ControlImageOptions = {},
+): Promise<ControlImage> {
+  const p = controlPaths(root);
+  fs.mkdirSync(p.directory, { recursive: true, mode: 0o700 });
+  fs.chmodSync(p.directory, 0o700);
+  return ensureControlImage(p, options);
+}
 
 export async function installControl(root = process.cwd(), options: InstallControlOptions = {}): Promise<void> {
   const p = controlPaths(root);
   const port = controlPort(root);
   const url = `http://127.0.0.1:${port}`;
-  fs.mkdirSync(p.directory, { recursive: true, mode: 0o700 });
-  fs.chmodSync(p.directory, 0o700);
-  // Settle how the console runs on this engine before any image is pulled or
-  // any key is generated: an architecture without a usable image stops here.
-  const image = await ensureControlImage(p, options);
+  const image = options.image ?? (await prepareControlImage(root, options));
   if (!fs.existsSync(p.environment)) {
     const volumes = await installCommand('docker', ['volume', 'ls', '--format', '{{.Name}}'], {
       label: 'Check existing Iron Control data',

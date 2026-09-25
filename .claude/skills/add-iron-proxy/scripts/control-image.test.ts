@@ -3,9 +3,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { controlCompose } from './control.js';
 import {
   AMD64_EMULATION_COMMAND,
   detectControlHost,
+  hasAmd64Emulation,
+  localControlImage,
   ensureControlImage,
   localControlImageTag,
   pinnedControlImage,
@@ -37,6 +40,8 @@ interface Engine {
   buildx?: boolean;
   /** Revision label of an already built local image, or none. */
   built?: string;
+  /** Architecture of that image; the engine's own by default. */
+  builtArch?: string;
 }
 
 /** A Docker engine and Git that answer like the real install commands, without running anything. */
@@ -49,15 +54,18 @@ function fakeExec(engine: Engine) {
     };
     if (command === 'git') return '';
     if (args[0] === 'version') return `${engine.arch ?? 'arm64'}\n`;
-    if (args[0] === 'buildx') return engine.buildx === false ? absent() : 'github.com/docker/buildx v0.31.1';
-    if (args[0] === 'build') {
+    if (args[0] === 'buildx' && args[1] === 'version')
+      return engine.buildx === false ? absent() : 'github.com/docker/buildx v0.31.1';
+    if (args[0] === 'buildx' && args[1] === 'build') {
       engine.built = commit;
+      engine.builtArch = args[args.indexOf('--platform') + 1]?.replace('linux/', '');
       expect(fs.existsSync(args.at(-1)!)).toBe(true);
       return '';
     }
     if (args[0] === 'image' && args[1] === 'inspect') {
       if (!engine.built) return absent();
-      return args.includes('{{.Id}}') ? `sha256:${'a'.repeat(64)}\n` : `${engine.built}\n`;
+      if (args.includes('{{.Id}}')) return `sha256:${'a'.repeat(64)}\n`;
+      return `${engine.builtArch ?? engine.arch ?? 'arm64'} ${engine.built}\n`;
     }
     if (args[0] === 'run') return '';
     throw new Error(`unexpected command: ${command} ${args.join(' ')}`);
@@ -95,6 +103,7 @@ describe('Iron Control image decision table', () => {
     expect(plan.ok && plan.image).toEqual({
       source: 'local-build',
       image: `nanoclaw-iron-control:${commit.slice(0, 7)}-arm64`,
+      platform: 'linux/arm64',
       arch: 'arm64',
     });
     expect(plan.ok && plan.note).toContain('building it from the pinned source');
@@ -165,7 +174,7 @@ describe('Iron Control engine detection', () => {
       'inspect',
       `nanoclaw-iron-control:${commit.slice(0, 7)}-arm64`,
       '--format',
-      '{{index .Config.Labels "org.opencontainers.image.revision"}}',
+      '{{.Architecture}} {{index .Config.Labels "org.opencontainers.image.revision"}}',
     ]);
     const without = fakeExec({ arch: 'arm64', buildx: false, built: 'stale-revision' });
     expect(await detectControlHost({ exec: without.exec, emulation: () => true })).toEqual({
@@ -174,6 +183,31 @@ describe('Iron Control engine detection', () => {
       hasEmulation: true,
       hasLocalBuild: false,
     });
+  });
+
+  it('does not reuse a local image built for another architecture', async () => {
+    // e.g. built while DOCKER_DEFAULT_PLATFORM=linux/amd64 was set.
+    const engine = fakeExec({ arch: 'arm64', buildx: true, built: commit, builtArch: 'amd64' });
+    expect((await detectControlHost({ exec: engine.exec, emulation: () => false })).hasLocalBuild).toBe(false);
+  });
+
+  it('counts a QEMU amd64 handler only while the kernel has it enabled', () => {
+    const kernel =
+      (status: string, handler?: string, flags = 'POCF') =>
+      (file: string) => {
+        if (file === '/proc/sys/fs/binfmt_misc/status') return `${status}\n`;
+        expect(file).toBe('/proc/sys/fs/binfmt_misc/qemu-x86_64');
+        if (handler === undefined) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+        return `${handler}\ninterpreter /usr/bin/qemu-x86_64\nflags: ${flags}\n`;
+      };
+    expect(hasAmd64Emulation('linux', kernel('enabled', 'enabled'))).toBe(true);
+    expect(hasAmd64Emulation('linux', kernel('enabled', 'disabled'))).toBe(false);
+    // `echo 0 > status` disables every handler while each still reads enabled.
+    expect(hasAmd64Emulation('linux', kernel('disabled', 'enabled'))).toBe(false);
+    expect(hasAmd64Emulation('linux', kernel('enabled'))).toBe(false);
+    // Without F the interpreter must exist inside the container, which it does not.
+    expect(hasAmd64Emulation('linux', kernel('enabled', 'enabled', 'OC'))).toBe(false);
+    expect(hasAmd64Emulation('darwin', kernel('disabled'))).toBe(true);
   });
 
   it('refuses an engine that does not answer', async () => {
@@ -203,19 +237,25 @@ describe('Iron Control image preflight', () => {
     expect(image).toEqual({
       source: 'local-build',
       image: `nanoclaw-iron-control:${commit.slice(0, 7)}-arm64`,
+      platform: 'linux/arm64',
       arch: 'arm64',
     });
     expect(engine.calls).toContainEqual(['git', 'fetch', '--depth', '1', 'origin', commit]);
     expect(engine.calls).toContainEqual(['git', 'diff', '--exit-code']);
-    const build = engine.calls.find((call) => call[1] === 'build')!;
-    expect(build.slice(0, 7)).toEqual([
+    const build = engine.calls.find((call) => call[1] === 'buildx' && call[2] === 'build')!;
+    // Explicit platform and --load: DOCKER_DEFAULT_PLATFORM or a docker-container
+    // builder must not produce a foreign image or leave it in the build cache.
+    expect(build.slice(0, 10)).toEqual([
       'docker',
+      'buildx',
       'build',
+      '--platform',
+      'linux/arm64',
+      '--load',
       '-t',
       `nanoclaw-iron-control:${commit.slice(0, 7)}-arm64`,
       '--label',
       `org.opencontainers.image.revision=${commit}`,
-      '--label',
     ]);
     expect(engine.calls.some((call) => call[1] === 'pull' || call[1] === 'run')).toBe(false);
     expect(lines.join('\n')).toContain('building it from the pinned source');
@@ -231,12 +271,12 @@ describe('Iron Control image preflight', () => {
     const again = fakeExec({ arch: 'arm64', buildx: false, built: commit });
     const image = await ensureControlImage(paths, { exec: again.exec, emulation: () => true, report: () => {} });
     expect(image.source).toBe('local-build');
-    expect(again.calls.some((call) => call[0] === 'git' || call[1] === 'build')).toBe(false);
+    expect(again.calls.some((call) => call[0] === 'git' || call[2] === 'build')).toBe(false);
   });
 
   it('keeps an install from before this record on the emulated pinned image', async () => {
     const paths = temporary();
-    fs.writeFileSync(paths.compose, 'name: existing\n');
+    fs.writeFileSync(paths.compose, controlCompose(path.dirname(paths.compose), 10257, pinnedControlImage()));
     const engine = fakeExec({ arch: 'arm64', buildx: true });
     const image = await ensureControlImage(paths, { exec: engine.exec, emulation: () => true, report: () => {} });
     expect(image).toEqual({
@@ -245,7 +285,7 @@ describe('Iron Control image preflight', () => {
       platform: 'linux/amd64',
       arch: 'arm64',
     });
-    expect(engine.calls.some((call) => call[1] === 'build')).toBe(false);
+    expect(engine.calls.some((call) => call[2] === 'build')).toBe(false);
     expect(readControlImageRecord(paths.image)).toMatchObject({ source: 'pinned-emulated', arch: 'arm64' });
     // Without emulation the old install cannot have worked; build natively instead.
     const rebuilt = fakeExec({ arch: 'arm64', buildx: true });
@@ -255,13 +295,24 @@ describe('Iron Control image preflight', () => {
     ).toBe('local-build');
   });
 
+  it('decides again when image.json is deleted from a local-build install', async () => {
+    // Docker Desktop always emulates; its compose file runs the local image.
+    const paths = temporary();
+    const root = path.dirname(paths.compose);
+    fs.writeFileSync(paths.compose, controlCompose(root, 10257, localControlImage('arm64')));
+    const engine = fakeExec({ arch: 'arm64', buildx: true, built: commit });
+    const image = await ensureControlImage(paths, { exec: engine.exec, emulation: () => true, report: () => {} });
+    expect(image.source).toBe('local-build');
+    expect(engine.calls.some((call) => call[2] === 'build')).toBe(false);
+  });
+
   it('stops a headless run with the exact commands and touches nothing', async () => {
     const paths = temporary();
     const engine = fakeExec({ arch: 'arm64', buildx: false });
     await expect(
       ensureControlImage(paths, { exec: engine.exec, emulation: () => false, report: () => {} }),
     ).rejects.toThrow(AMD64_EMULATION_COMMAND);
-    expect(engine.calls.some((call) => call[1] === 'run' || call[1] === 'build' || call[1] === 'pull')).toBe(false);
+    expect(engine.calls.some((call) => call[1] === 'run' || call[2] === 'build' || call[1] === 'pull')).toBe(false);
     expect(fs.existsSync(paths.image)).toBe(false);
   });
 

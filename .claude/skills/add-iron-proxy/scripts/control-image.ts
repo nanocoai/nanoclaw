@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import * as p from '@clack/prompts';
+import { parse as parseYaml } from 'yaml';
 
 import { installCommand, InstallCommandFailure } from './install-command.js';
 
@@ -25,8 +26,8 @@ export type ControlImageSource = 'pinned' | 'pinned-emulated' | 'local-build';
 export interface ControlImage {
   source: ControlImageSource;
   image: string;
-  /** Compose `platform:`; absent for a locally built image, which is native. */
-  platform?: string;
+  /** Compose `platform:`: linux/amd64 for the pinned image, the engine's own for a local build. */
+  platform: string;
   /** The Docker engine architecture the choice was made for (GOARCH). */
   arch: string;
 }
@@ -90,7 +91,7 @@ export function localControlImageTag(arch: string): string {
 }
 
 export function localControlImage(arch: string): ControlImage {
-  return { source: 'local-build', image: localControlImageTag(arch), arch };
+  return { source: 'local-build', image: localControlImageTag(arch), platform: `linux/${arch}`, arch };
 }
 
 export function blockedControlImageMessage(arch: string): string {
@@ -130,11 +131,25 @@ export function planControlImage(host: ControlHost, previous?: ControlImageSourc
 
 /**
  * Docker Desktop (macOS, Windows) always runs amd64 images. On Linux the
- * kernel must have a QEMU handler registered, which is what the binfmt
- * command above installs.
+ * kernel must have a QEMU handler registered and enabled, which is what the
+ * binfmt command above does. A disabled handler keeps its file, and the
+ * global status switch disables every handler at once. The handler also needs
+ * the F flag: without it the interpreter is looked up inside each container,
+ * and the console image has none.
  */
-export function hasAmd64Emulation(platform = process.platform): boolean {
-  return platform !== 'linux' || fs.existsSync('/proc/sys/fs/binfmt_misc/qemu-x86_64');
+export function hasAmd64Emulation(
+  platform = process.platform,
+  read = (file: string) => fs.readFileSync(file, 'utf8'),
+): boolean {
+  if (platform !== 'linux') return true;
+  const entry = (file: string) => read(`/proc/sys/fs/binfmt_misc/${file}`).split('\n');
+  try {
+    const handler = entry('qemu-x86_64');
+    const flags = handler.find((line) => line.startsWith('flags:')) ?? '';
+    return entry('status')[0].trim() === 'enabled' && handler[0].trim() === 'enabled' && flags.slice(6).includes('F');
+  } catch {
+    return false;
+  }
 }
 
 const probeHint = 'Check that Docker is running and reachable, then retry.';
@@ -162,9 +177,15 @@ export async function detectControlHost(options: ControlImageOptions = {}): Prom
     throw new Error('Docker did not report its engine architecture; check that Docker is running');
   if (arch === 'amd64') return { arch, canBuild: true, hasEmulation: true, hasLocalBuild: false };
   const canBuild = (await probe(exec, ['buildx', 'version'], 'Check Docker Buildx', 'not available')) !== undefined;
-  const revision = await probe(
+  const built = await probe(
     exec,
-    ['image', 'inspect', localControlImageTag(arch), '--format', `{{index .Config.Labels "${REVISION_LABEL}"}}`],
+    [
+      'image',
+      'inspect',
+      localControlImageTag(arch),
+      '--format',
+      `{{.Architecture}} {{index .Config.Labels "${REVISION_LABEL}"}}`,
+    ],
     'Check for an Iron Control image built on this machine',
     'not built yet',
   );
@@ -172,7 +193,7 @@ export async function detectControlHost(options: ControlImageOptions = {}): Prom
     arch,
     canBuild,
     hasEmulation: (options.emulation ?? hasAmd64Emulation)(),
-    hasLocalBuild: revision?.trim() === pins['iron-control-commit'],
+    hasLocalBuild: built?.trim() === `${arch} ${pins['iron-control-commit']}`,
   };
 }
 
@@ -194,7 +215,26 @@ function writeControlImageRecord(file: string, record: ControlImageRecord): void
   fs.chmodSync(file, 0o600);
 }
 
-/** Build unmodified upstream Iron Control from the pinned revision, natively. */
+/**
+ * Installs from before image.json ran the pinned image under emulation; they
+ * stay on it while it still works. Only a compose file that still pins that
+ * image counts, so deleting image.json from a local build decides again.
+ */
+function composeSource(file: string): ControlImageSource | undefined {
+  if (!fs.existsSync(file)) return undefined;
+  try {
+    const web = parseYaml(fs.readFileSync(file, 'utf8'))?.services?.web;
+    return web?.image === pins['iron-control-image'] && web?.platform ? 'pinned-emulated' : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Build unmodified upstream Iron Control from the pinned revision, natively.
+ * Explicit so neither DOCKER_DEFAULT_PLATFORM nor a selected docker-container
+ * builder (which keeps results in its cache) changes what lands in the engine.
+ */
 export async function buildControlImage(arch: string, exec: Exec = installCommand): Promise<void> {
   const source = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-iron-control-'));
   try {
@@ -214,7 +254,11 @@ export async function buildControlImage(arch: string, exec: Exec = installComman
     await exec(
       'docker',
       [
+        'buildx',
         'build',
+        '--platform',
+        `linux/${arch}`,
+        '--load',
         '-t',
         localControlImageTag(arch),
         '--label',
@@ -258,10 +302,7 @@ export async function ensureControlImage(
   const host = await detectControlHost(options);
   if (host.arch === 'amd64') return pinnedControlImage();
   const record = readControlImageRecord(paths.image);
-  // Installs from before this record ran the pinned image under emulation;
-  // they stay on it while it still works.
-  const previous =
-    record?.arch === host.arch ? record.source : fs.existsSync(paths.compose) ? 'pinned-emulated' : undefined;
+  const previous = record?.arch === host.arch ? record.source : composeSource(paths.compose);
   let plan = planControlImage(host, previous);
   if (!plan.ok) {
     const confirm =

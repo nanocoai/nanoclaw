@@ -11,7 +11,7 @@ import { LABELS } from '../../../../src/drivers/types.js';
 import { upsertEnvVar } from '../../../../setup/set-env.js';
 import { installStep, installCommand, InstallCommandFailure } from './install-command.js';
 import { buildManagedProxy, hasFrontProxy } from './build-managed-proxy.js';
-import { controlPaths, installControl, removeControl, storeModelCredential } from './control.js';
+import { controlPaths, installControl, prepareControlImage, removeControl, storeModelCredential } from './control.js';
 
 const pins = JSON.parse(
   fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'versions.json'), 'utf8'),
@@ -237,8 +237,11 @@ export async function run(args: string[], projectRoot = process.cwd()): Promise<
   const managed = args.includes('--with-control') || !!readProjectEnv(projectRoot).NANOCLAW_IRON_CONTROL_URL;
   const localIndex = args.indexOf('--local-image');
   if (managed || localIndex < 0) {
+    // The console's architecture preflight runs first: it can stop setup,
+    // and should do so before the Iron Proxy build spends minutes.
+    const controlImage = managed ? await prepareControlImage(projectRoot) : undefined;
     IMAGE = await buildManagedProxy();
-    if (managed) await installControl(projectRoot);
+    if (managed) await installControl(projectRoot, { image: controlImage });
     upsertEnvVar('NANOCLAW_IRON_PROXY_IMAGE', IMAGE, projectRoot);
   }
   const localImage = localIndex >= 0 ? args[localIndex + 1] : readProjectEnv(projectRoot).NANOCLAW_IRON_PROXY_IMAGE;
