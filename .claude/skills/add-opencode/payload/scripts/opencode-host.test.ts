@@ -212,10 +212,29 @@ describe('native host OpenCode lifecycle', () => {
     expect(permission.bash['docker ps *']).toBe('allow');
     expect(permission.bash['docker logs *']).toBe('allow');
     expect(permission.bash['docker inspect *']).toBeUndefined();
-    for (const denied of ['docker rm *', 'docker stop *', 'docker compose down *', 'launchctl unload *']) {
+    for (const denied of ['docker rm *', 'docker * rm *', 'docker * down *', 'launchctl * unload *']) {
       expect(permission.bash[denied]).toBe('deny');
     }
     expect(permission.bash['*.env*']).toBe('ask');
+    // Agent-level permission blocks in the operator's config are merged after
+    // the top-level rules, so the session also runs as a dedicated default
+    // agent whose name no operator config can target.
+    const config = JSON.parse(options.env.OPENCODE_CONFIG_CONTENT);
+    expect(config.default_agent).toBe('nanoclaw-maintenance');
+    expect(config.agent['nanoclaw-maintenance']).toMatchObject({ mode: 'primary', permission });
+  });
+
+  it('keeps an operator-supplied inline config while adding the maintenance agent', async () => {
+    touch(path.join(root, 'bin/opencode'));
+    vi.stubEnv(
+      'OPENCODE_CONFIG_CONTENT',
+      JSON.stringify({ model: 'user/model', agent: { mine: { mode: 'primary' } } }),
+    );
+    await hostOpenCode.launch(root);
+    const config = JSON.parse(edge.spawn.mock.calls[0][2].env.OPENCODE_CONFIG_CONTENT);
+    expect(config.model).toBe('user/model');
+    expect(config.agent.mine).toEqual({ mode: 'primary' });
+    expect(config.default_agent).toBe('nanoclaw-maintenance');
   });
 
   it('matches bash commands against the permission override as OpenCode 1.18 does', async () => {
@@ -243,6 +262,16 @@ describe('native host OpenCode lifecycle', () => {
     expect(action('docker rm -f nanoclaw-iron-proxy')).toBe('deny');
     expect(action('docker stop nanoclaw-iron-control')).toBe('deny');
     expect(action('launchctl unload ~/Library/LaunchAgents/com.nanoclaw.plist')).toBe('deny');
+    // Variants with options between the tool and the verb.
+    expect(action('docker compose -f compose.yml down')).toBe('deny');
+    expect(action('docker container rm nanoclaw-iron-proxy')).toBe('deny');
+    expect(action('systemctl --user --no-block stop nanoclaw.service')).toBe('deny');
+    expect(action('launchctl bootout gui/501/com.nanoclaw')).toBe('deny');
+    // Read-only allows never cover redirection, file output or mutating ncl verbs.
+    expect(action('ls > src/index.ts')).toBe('ask');
+    expect(action('cat logs/setup.log >> src/index.ts')).toBe('ask');
+    expect(action('git diff --output=src/index.ts')).toBe('ask');
+    expect(action('ncl groups restart --id g1 --rebuild --message "get ready"')).toBe('ask');
     // A read-only allow never covers .env.
     expect(action('cat logs/../.env')).toBe('ask');
     expect(action('ls -la .env')).toBe('ask');

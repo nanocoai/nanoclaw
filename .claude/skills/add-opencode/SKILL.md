@@ -44,10 +44,12 @@ remain in native OpenCode history; deleting its private temporary file does not
 erase those records. The helper requires stable OpenCode 1.18.25 or newer with
 `--prompt` and prefers the newest compatible installation it finds.
 `--debug`, `--update` and failure help launch it with an `OPENCODE_PERMISSION`
-override: OpenCode asks before edits and before any command outside a short
-read-only list. Debug sessions also deny stopping or removing containers and the
-service; update sessions leave those steps to the update skill, behind a prompt.
-`--configure` keeps OpenCode's native permissions.
+override and start in a dedicated `nanoclaw-maintenance` agent carrying the same
+rules, so neither top-level nor agent-level settings in the operator's config
+loosen them. OpenCode asks before edits and before any command outside a short
+read-only list, including redirections. Debug sessions also deny stopping or
+removing containers and the service; update sessions leave those steps to the
+update skill, behind a prompt. `--configure` keeps OpenCode's native permissions.
 Automatic help before payload
 installation is optional and is not part of the runtime contract.
 

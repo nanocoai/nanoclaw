@@ -195,5 +195,9 @@ describe('interactive Claude failure handoff', () => {
     const denied = args.slice(args.indexOf('--disallowedTools') + 1);
     for (const command of DESTRUCTIVE_COMMANDS) expect(denied).toContain(`Bash(${command})`);
     for (const line of ASSIST_GUARDRAILS) expect(args[0]).toContain(line);
+    // auto mode approves file edits on its own; ask rules outrank allow rules
+    // and are honored in auto mode, so every edit reaches the operator.
+    const settings = JSON.parse(args[args.indexOf('--settings') + 1]);
+    expect(settings.permissions.ask).toEqual(['Edit', 'Write', 'NotebookEdit']);
   });
 });

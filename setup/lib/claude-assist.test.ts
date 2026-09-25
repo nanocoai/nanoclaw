@@ -56,6 +56,8 @@ beforeEach(() => {
   });
 });
 
+const denied = (args: string[]) => args.slice(args.indexOf('--disallowedTools') + 1);
+
 describe('non-interactive Claude assist', () => {
   it('diagnoses with read-only tools instead of bypassing permissions', async () => {
     // Accept the diagnosis, decline running the suggested command.
@@ -68,12 +70,14 @@ describe('non-interactive Claude assist', () => {
     // dontAsk turns every unapproved call into a denial: nobody is at the
     // terminal to answer a prompt while the spinner runs.
     expect(args[args.indexOf('--permission-mode') + 1]).toBe('dontAsk');
-    expect(args[args.indexOf('--tools') + 1]).toBe('Read,Grep,Glob,Bash');
-    expect(args).toContain('Bash(docker ps *)');
-    expect(args).not.toContain('Bash(docker inspect *)');
-    const denied = args.slice(args.indexOf('--disallowedTools') + 1);
-    for (const command of DESTRUCTIVE_COMMANDS) expect(denied).toContain(`Bash(${command})`);
-    expect(denied).toContain('Read(./.env)');
+    // No Bash and no MCP servers: an operator's own allow rules (for example
+    // Bash(pnpm *)) would still apply under dontAsk, so the tools themselves
+    // are limited to reading.
+    expect(args[args.indexOf('--tools') + 1]).toBe('Read,Grep,Glob');
+    expect(args).toContain('--strict-mcp-config');
+    expect(args.some((arg) => arg.startsWith('Bash(') && !denied(args).includes(arg))).toBe(false);
+    for (const command of DESTRUCTIVE_COMMANDS) expect(denied(args)).toContain(`Bash(${command})`);
+    expect(denied(args)).toContain('Read(./.env)');
   });
 
   it('tells Claude the guardrails and the supported gateway repair', async () => {

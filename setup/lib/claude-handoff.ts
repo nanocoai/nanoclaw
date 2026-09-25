@@ -11,8 +11,8 @@
  *   1. Build a handoff prompt from the caller's context: channel, current
  *      step, completed steps, collected values (secrets redacted), relevant
  *      files to read.
- *   2. Spawn `claude "<prompt>" --permission-mode auto` (plus deny rules
- *      for destructive commands, see CLAUDE_DENIED_TOOLS) with
+ *   2. Spawn `claude "<prompt>" --permission-mode auto` (plus ask rules
+ *      for file edits and deny rules for destructive commands) with
  *      `stdio: 'inherit'` so Claude owns the terminal. The positional prompt
  *      is auto-submitted as the first user message, so Claude starts
  *      orienting immediately instead of sitting at an empty prompt — and the
@@ -122,7 +122,18 @@ function spawnInteractiveClaude(prompt: string): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
     const child = spawn(
       'claude',
-      [prompt, '--permission-mode', 'auto', '--disallowedTools', ...CLAUDE_DENIED_TOOLS, ...sessionArgs],
+      [
+        prompt,
+        '--permission-mode',
+        'auto',
+        // auto mode approves file edits by itself; ask rules outrank allow
+        // rules and hold in auto mode, so every edit reaches the operator.
+        '--settings',
+        JSON.stringify({ permissions: { ask: ['Edit', 'Write', 'NotebookEdit'] } }),
+        '--disallowedTools',
+        ...CLAUDE_DENIED_TOOLS,
+        ...sessionArgs,
+      ],
       { stdio: 'inherit' },
     );
     child.on('close', () => {

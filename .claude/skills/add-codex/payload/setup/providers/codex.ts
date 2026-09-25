@@ -310,11 +310,13 @@ export async function offerCodexFailureAssist(ctx: AssistContext, projectRoot: s
     // codex accepts a positional initial prompt for the interactive TUI.
     // Explicit flags override the operator's config.toml: commands run in a
     // read-only sandbox, and anything that needs more (a write, the Docker
-    // socket, the service manager) asks the operator first.
-    const child = spawn('codex', ['--sandbox', 'read-only', '--ask-for-approval', 'on-request', prompt], {
-      cwd: projectRoot,
-      stdio: 'inherit',
-    });
+    // socket, the service manager) asks the operator first, never an
+    // automatic reviewer.
+    const child = spawn(
+      'codex',
+      ['--sandbox', 'read-only', '--ask-for-approval', 'on-request', '-c', 'approvals_reviewer="user"', prompt],
+      { cwd: projectRoot, stdio: 'inherit' },
+    );
     child.on('close', () => {
       p.log.success(brandBody("Back from Codex. Let's continue."));
       resolve('launched');

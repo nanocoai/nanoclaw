@@ -135,9 +135,18 @@ describe('offerCodexFailureAssist', () => {
       const [binary, args] = mockSpawn.mock.calls[0] as [string, string[]];
       expect(binary).toBe('codex');
       // Explicit flags override the operator's own config.toml defaults.
-      expect(args.slice(0, 4)).toEqual(['--sandbox', 'read-only', '--ask-for-approval', 'on-request']);
+      // approvals_reviewer=user keeps escalations with the operator even when
+      // their config.toml routes approvals to an automatic reviewer.
+      expect(args.slice(0, 6)).toEqual([
+        '--sandbox',
+        'read-only',
+        '--ask-for-approval',
+        'on-request',
+        '-c',
+        'approvals_reviewer="user"',
+      ]);
       expect(args).not.toContain('--dangerously-bypass-approvals-and-sandbox');
-      for (const line of ASSIST_GUARDRAILS) expect(args[4]).toContain(line);
+      for (const line of ASSIST_GUARDRAILS) expect(args[6]).toContain(line);
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
     }

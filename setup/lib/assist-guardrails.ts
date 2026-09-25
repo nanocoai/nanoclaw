@@ -26,10 +26,11 @@ export function assistGuardrails(): string {
 }
 
 /**
- * Read-only diagnostics an assist may run without asking. Wildcard patterns
- * where `*` matches anything; OpenCode and Claude both accept this form.
- * `docker inspect` is deliberately absent: it prints container env, which
- * holds gateway credentials.
+ * Read-only diagnostics OpenCode may run without asking. Wildcard patterns
+ * where `*` matches anything. `docker inspect` is deliberately absent: it
+ * prints container env, which holds gateway credentials. `ncl` is absent
+ * because a wildcard cannot keep a read verb from matching a mutating
+ * command's arguments. The launcher re-asks for redirection and file output.
  */
 export const READ_ONLY_COMMANDS: readonly string[] = [
   'docker ps *',
@@ -40,33 +41,24 @@ export const READ_ONLY_COMMANDS: readonly string[] = [
   'tail logs/*',
   'tail * logs/*',
   'grep * logs/*',
-  'ncl * list *',
-  'ncl * get *',
   'git status *',
   'git log *',
   'git diff *',
 ];
 
-/** Commands that take down a live install. Denied outright where the CLI supports deny rules. */
+/** `<tool> <verb>` with or without options between them, e.g. `docker compose -f x.yml down`. */
+function verbs(tool: string, names: string[]): string[] {
+  return names.flatMap((verb) => [`${tool} ${verb} *`, `${tool} * ${verb} *`]);
+}
+
+/**
+ * Commands that take down a live install. Denied outright where the CLI
+ * supports deny rules (OpenCode debug sessions, Claude). A deny list is a
+ * backstop, not a boundary: anything it misses still asks, or runs in a
+ * sandbox, depending on the launcher.
+ */
 export const DESTRUCTIVE_COMMANDS: readonly string[] = [
-  'docker stop *',
-  'docker rm *',
-  'docker kill *',
-  'docker container stop *',
-  'docker container rm *',
-  'docker container kill *',
-  'docker container prune *',
-  'docker compose down *',
-  'docker network rm *',
-  'docker network prune *',
-  'docker volume rm *',
-  'docker volume prune *',
-  'docker system prune *',
-  'launchctl unload *',
-  'launchctl bootout *',
-  'launchctl remove *',
-  'systemctl stop *',
-  'systemctl disable *',
-  'systemctl --user stop *',
-  'systemctl --user disable *',
+  ...verbs('docker', ['rm', 'rmi', 'stop', 'kill', 'down', 'prune']),
+  ...verbs('launchctl', ['unload', 'bootout', 'remove', 'kill', 'disable']),
+  ...verbs('systemctl', ['stop', 'disable', 'kill', 'mask']),
 ];

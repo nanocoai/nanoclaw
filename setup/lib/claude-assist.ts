@@ -12,9 +12,9 @@
  *      step's name/message/hint, and a short list of *file references*
  *      (not contents) so Claude can Read what it needs on its own.
  *   4. Spawn `claude -p --output-format stream-json` with a spinner that
- *      shows elapsed time. The session is read-only: `--permission-mode
- *      dontAsk` denies anything outside a short allow-list of read-only
- *      tools and diagnostics, and destructive commands are denied outright.
+ *      shows elapsed time. The session is read-only: only Read, Grep and
+ *      Glob exist, `--permission-mode dontAsk` denies anything else, and
+ *      destructive commands are denied outright.
  *   5. Parse `REASON:` / `COMMAND:` out of the response. Show the reason
  *      in a clack note, then hand off to `setup/run-suggested.sh` for
  *      editable pre-fill + exec.
@@ -29,7 +29,7 @@ import path from 'path';
 import * as p from '@clack/prompts';
 import k from 'kleur';
 
-import { assistGuardrails, DESTRUCTIVE_COMMANDS, READ_ONLY_COMMANDS } from './assist-guardrails.js';
+import { assistGuardrails, DESTRUCTIVE_COMMANDS } from './assist-guardrails.js';
 import { extractClaudeOAuthToken } from './captured-token.js';
 import { ensureAnswer } from './runner.js';
 import { brandBody, fitToWidth, fmtDuration, note } from './theme.js';
@@ -88,20 +88,22 @@ export const CLAUDE_DENIED_TOOLS = DESTRUCTIVE_COMMANDS.map((command) => `Bash($
 
 /**
  * Permission flags for the non-interactive diagnosis. Nobody answers
- * prompts while the spinner runs, so `dontAsk` turns every call outside the
- * allow-list into a denial. The suggested fix still goes through the
- * operator's confirm-and-edit step before it runs.
+ * prompts while the spinner runs, so `dontAsk` turns every unapproved call
+ * into a denial. The operator's own allow rules still apply under dontAsk,
+ * so Bash and MCP servers are left out entirely: the diagnosis reads files
+ * and logs, and the suggested fix goes through the operator's
+ * confirm-and-edit step before it runs.
  */
 export const CLAUDE_READ_ONLY_ARGS = [
   '--permission-mode',
   'dontAsk',
   '--tools',
-  'Read,Grep,Glob,Bash',
+  'Read,Grep,Glob',
+  '--strict-mcp-config',
   '--allowedTools',
   'Read',
   'Grep',
   'Glob',
-  ...READ_ONLY_COMMANDS.map((command) => `Bash(${command})`),
   '--disallowedTools',
   ...CLAUDE_DENIED_TOOLS,
   'Read(./.env)',
