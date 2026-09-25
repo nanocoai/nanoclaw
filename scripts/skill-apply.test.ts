@@ -902,7 +902,61 @@ describe('nc:run effect:step (streaming, multi-field capture)', () => {
     const { sdir, rdir } = stepScratch();
     const res = await applySkill(sdir, rdir, { exec: () => {}, execStream: async () => ({ ok: false, fields: {} }) });
     expect(res.agentTasks).toHaveLength(1);
+    expect(res.agentTasks[0].reason).toMatch(/engine could not apply \(the step did not complete\)/);
     expect(res.vars.platform_id).toBeUndefined();
+  });
+
+  it("a failed step's own ERROR field becomes the bounce reason verbatim", async () => {
+    const { sdir, rdir } = stepScratch();
+    const res = await applySkill(sdir, rdir, {
+      exec: () => {},
+      execStream: async () => ({
+        ok: false,
+        fields: { STATUS: 'failed', ERROR: 'Iron Control database x_database exists but its keys are missing' },
+      }),
+    });
+    expect(res.agentTasks).toHaveLength(1);
+    expect(res.agentTasks[0].reason).toBe('Iron Control database x_database exists but its keys are missing');
+  });
+
+  it('skips build and test validation after a failed step instead of running them', async () => {
+    const sdir = mkdtempSync(join(tmpdir(), 'nc-step-skill-'));
+    const rdir = mkdtempSync(join(tmpdir(), 'nc-step-proj-'));
+    writeFileSync(
+      join(sdir, 'SKILL.md'),
+      [
+        '# gateway demo',
+        '',
+        '## Install',
+        '```nc:run effect:step',
+        'pnpm exec tsx install.ts',
+        '```',
+        '',
+        '## Validate',
+        '```nc:run effect:build',
+        'pnpm run build',
+        '```',
+        '',
+        '```nc:run effect:test',
+        'pnpm exec vitest run',
+        '```',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(join(rdir, 'package.json'), '{"name":"scratch"}');
+    const ran: string[] = [];
+    const res = await applySkill(sdir, rdir, {
+      exec: (cmd) => {
+        ran.push(cmd);
+      },
+      execStream: async () => ({ ok: false, fields: { STATUS: 'failed', ERROR: 'precondition failed' } }),
+    });
+    expect(ran).toEqual([]);
+    expect(res.agentTasks.map((t) => t.reason)).toEqual(['precondition failed']);
+    expect(res.skipped).toEqual([
+      'run build: an earlier step did not complete',
+      'run test: an earlier step did not complete',
+    ]);
   });
 });
 
@@ -982,6 +1036,45 @@ describe('run-health gate (a bounce blocks later side effects)', () => {
     expect(res.agentTasks).toHaveLength(3);
     const gated = res.agentTasks.filter((t) => /an earlier step did not complete/.test(t.reason));
     expect(gated).toHaveLength(2); // restart + step, both bounced by the gate
+  });
+
+  // A step's ERROR text is the step's own; one that happens to read like the
+  // engine's deferred-input marker is still a failure, not a missing answer.
+  it('a failed step whose ERROR mentions an unresolved {{var}} still latches the gate', async () => {
+    writeFileSync(
+      join(gskill, 'SKILL.md'),
+      [
+        '# step then restart demo',
+        '',
+        '## Pair the device',
+        '```nc:run effect:step',
+        'pnpm exec tsx setup/index.ts --step pair',
+        '```',
+        '',
+        '## Restart the service',
+        '```nc:run effect:restart',
+        'bash restart.sh',
+        '```',
+        '',
+      ].join('\n'),
+    );
+    const cmds: string[] = [];
+    const res = await applySkill(gskill, groot, {
+      inputs: {},
+      exec: (c: string) => {
+        cmds.push(c);
+      },
+      execStream: async () => ({
+        ok: false,
+        fields: { STATUS: 'failed', ERROR: 'nested skill left unresolved {{token}}' },
+      }),
+    });
+    expect(cmds).not.toContain('bash restart.sh');
+    expect(res.deferred).toEqual([]);
+    expect(res.agentTasks.map((t) => t.reason)).toEqual([
+      'nested skill left unresolved {{token}}',
+      'skipped: an earlier step did not complete — run this from the prose after fixing it',
+    ]);
   });
 
   // Once blocked, an operator block must not walk the human through steps the

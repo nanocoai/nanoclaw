@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { installCommand } from './install-command.js';
 
+import * as p from '@clack/prompts';
 import { stringify as yaml } from 'yaml';
 import { getInstallSlug } from '../../../../src/install-slug.js';
 import { upsertEnvVar } from '../../../../setup/set-env.js';
@@ -129,20 +130,189 @@ export async function controlRequest(root: string, resource: string, method = 'G
   return response.status === 204 ? null : ((await response.json()) as { data: unknown }).data;
 }
 
-export async function installControl(root = process.cwd()): Promise<void> {
+/** Runs one `docker` command and resolves its stdout; the install seam for tests. */
+export type DockerRunner = (args: string[], label: string) => Promise<string>;
+
+const dockerCapture: DockerRunner = (args, label) =>
+  installCommand('docker', args, { label, timeoutMs: 15_000, capture: true });
+
+/** One container Docker Compose created for this install's Iron Control project. */
+export interface ControlContainer {
+  name: string;
+  /** The compose service: `web` carries the keys in its environment, `database` mounts the volume. */
+  service: string;
+  running: boolean;
+}
+
+export interface ControlDatabaseState {
+  volume: string;
+  /** The database volume exists. */
+  exists: boolean;
+  /** This install's Iron Control containers (compose project label), running or stopped. */
+  containers: ControlContainer[];
+  /** Containers outside this install's compose project that mount the volume; never touched here. */
+  foreign: string[];
+}
+
+/**
+ * Lists what an earlier Iron Control install of THIS checkout left in Docker:
+ * the containers Compose labelled with this install's project name, and the
+ * database volume. Another install has another slug, so neither its project
+ * name nor its volume name can match.
+ */
+export async function inspectControlDatabase(
+  root: string,
+  docker: DockerRunner = dockerCapture,
+): Promise<ControlDatabaseState> {
+  const project = controlPaths(root).project;
+  const volume = `${project}_database`;
+  const volumes = await docker(['volume', 'ls', '--format', '{{.Name}}'], 'Check existing Iron Control data');
+  const exists = volumes.trim().split('\n').includes(volume);
+  const listed = await docker(
+    [
+      'ps',
+      '-a',
+      '--filter',
+      `label=com.docker.compose.project=${project}`,
+      '--format',
+      '{{.Names}}\t{{.Label "com.docker.compose.service"}}\t{{.State}}',
+    ],
+    'Check existing Iron Control services',
+  );
+  const containers = listed
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => {
+      const [name, service = '', state = ''] = line.split('\t');
+      return { name, service, running: state === 'running' };
+    });
+  if (!exists) return { volume, exists, containers, foreign: [] };
+  const mounting = await docker(
+    ['ps', '-a', '--filter', `volume=${volume}`, '--format', '{{.Names}}'],
+    'Check services using the Iron Control database',
+  );
+  const own = new Set(containers.map((container) => container.name));
+  const foreign = mounting
+    .trim()
+    .split('\n')
+    .filter((name) => name && !own.has(name));
+  return { volume, exists, containers, foreign };
+}
+
+export interface InstallControlOptions {
+  docker?: DockerRunner;
+  /**
+   * Asks the operator whether this install's old Iron Control services and
+   * database may be removed. Absent in a headless run, which stops with the
+   * exact commands instead.
+   */
+  confirmRemoval?: (message: string) => Promise<boolean>;
+}
+
+async function askRemoval(message: string): Promise<boolean> {
+  const answer = await p.select({
+    message,
+    options: [
+      { value: 'remove', label: 'Remove it and start fresh' },
+      { value: 'abort', label: 'Abort' },
+    ],
+    // Enter alone keeps everything; removal takes a deliberate move.
+    initialValue: 'abort',
+  });
+  return !p.isCancel(answer) && answer === 'remove';
+}
+
+/** "services a, b and database volume v": what the earlier install left behind. */
+function leftovers(state: ControlDatabaseState): string {
+  const names = state.containers.map((container) => container.name);
+  return [
+    ...(names.length ? [`services ${names.join(', ')}`] : []),
+    ...(state.exists ? [`database volume ${state.volume}`] : []),
+  ].join(' and ');
+}
+
+/** The commands that remove what `state` lists, in the order Docker accepts them. */
+function removalCommand(state: ControlDatabaseState, extraContainers: string[] = []): string {
+  const names = [...state.containers.map((container) => container.name), ...extraContainers];
+  return [
+    ...(names.length ? [`docker rm -f ${names.join(' ')}`] : []),
+    ...(state.exists ? [`docker volume rm ${state.volume}`] : []),
+  ].join(' && ');
+}
+
+/**
+ * `control.env` was the only file holding the encryption keys, but the `web`
+ * container still carries them in its environment. Once it is removed, the
+ * database rows are unreadable for good, so every path that may remove it
+ * says so first.
+ */
+function keysWarning(state: ControlDatabaseState): string {
+  const web = state.containers.find((container) => container.service === 'web');
+  if (!web) return '';
+  return (
+    ` The ${web.running ? 'running ' : ''}web container ${web.name} holds the only remaining copy of those keys ` +
+    `(its environment: docker inspect ${web.name}); removing it destroys them and every credential stored in the database.`
+  );
+}
+
+/**
+ * Without this install's `control.env` the database cannot be opened: its rows
+ * are encrypted with keys only that file held. What the earlier install left in
+ * Docker (this install's compose containers, the volume, or both) may be
+ * removed together with explicit consent; a container outside this install's
+ * compose project that mounts the volume is never touched here.
+ */
+export async function resolveOrphanedDatabase(root: string, options: InstallControlOptions = {}): Promise<void> {
+  const paths = controlPaths(root);
+  const state = await inspectControlDatabase(root, options.docker);
+  if (!state.exists && !state.containers.length) return;
+  if (state.foreign.length) {
+    throw new Error(
+      `Iron Control database ${state.volume} is still used by ${state.foreign.join(', ')}, which this install did not create, ` +
+        `and its encryption keys are missing for this install. Restore ${paths.environment}, ` +
+        `or remove those services and the database by hand: ${removalCommand(state, state.foreign)}`,
+    );
+  }
+  const command = removalCommand(state);
+  const confirm = options.confirmRemoval ?? (process.stdin.isTTY ? askRemoval : undefined);
+  if (!confirm) {
+    throw new Error(
+      `An earlier Iron Control install of this checkout left ${leftovers(state)} in Docker, but its encryption keys are missing for this install.` +
+        `${keysWarning(state)} Restore ${paths.environment}, or remove the old install with: ${command}`,
+    );
+  }
+  console.log(
+    `The old Iron Control install (${leftovers(state)}) can't be reused without its keys.${keysWarning(state)}`,
+  );
+  const web = state.containers.find((container) => container.service === 'web');
+  const question = web
+    ? `Remove it and start fresh? This destroys the keys held by ${web.name} and every credential in the old database.`
+    : 'Remove it and start fresh?';
+  if (!(await confirm(question))) {
+    throw new Error(
+      `Kept the old Iron Control install (${leftovers(state)}). Restore ${paths.environment} or run: ${command}`,
+    );
+  }
+  const docker = options.docker ?? dockerCapture;
+  const names = state.containers.map((container) => container.name);
+  if (names.length) await docker(['rm', '-f', ...names], 'Remove the old Iron Control services');
+  if (state.exists) await docker(['volume', 'rm', state.volume], 'Remove the orphaned Iron Control database');
+}
+
+export async function installControl(root = process.cwd(), options: InstallControlOptions = {}): Promise<void> {
   const p = controlPaths(root);
   const port = controlPort(root);
   const url = `http://127.0.0.1:${port}`;
   fs.mkdirSync(p.directory, { recursive: true, mode: 0o700 });
   fs.chmodSync(p.directory, 0o700);
   if (!fs.existsSync(p.environment)) {
-    const volumes = await installCommand('docker', ['volume', 'ls', '--format', '{{.Name}}'], {
-      label: 'Check existing Iron Control data',
-      timeoutMs: 15_000,
-      capture: true,
-    });
-    if (volumes.trim().split('\n').includes(`${p.project}_database`))
-      throw new Error(`Iron Control database exists but its encryption keys are missing; restore ${p.environment}`);
+    await resolveOrphanedDatabase(root, options);
+    // New keys go with a new database (none existed, or the orphan was just
+    // removed with consent). A registration or proxy token left from an older
+    // database names a proxy that database took with it; keeping it would make
+    // every retry look up that proxy and stop on its 404.
+    for (const stale of [p.registration, p.proxyEnvironment]) fs.rmSync(stale, { force: true });
     const password = secret();
     const email = 'operator@nanoclaw.local';
     const databasePassword = secret();

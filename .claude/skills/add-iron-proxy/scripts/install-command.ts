@@ -123,8 +123,13 @@ export async function installStep(
     return true;
   } catch (error) {
     // Callers must provide curated errors; no child stderr reaches this boundary.
-    report(error instanceof Error ? error.message : 'Iron installation failed');
-    report('=== NANOCLAW SETUP: IRON_GATEWAY ===\nSTATUS: failed\n=== END ===');
+    const message = error instanceof Error ? error.message : 'Iron installation failed';
+    report(message);
+    // ERROR carries the curated message as one line so the consumer can show
+    // it as the step's failure instead of a generic "did not complete".
+    report(
+      `=== NANOCLAW SETUP: IRON_GATEWAY ===\nSTATUS: failed\nERROR: ${message.replace(/\s*\n\s*/g, ' ')}\n=== END ===`,
+    );
     return false;
   }
 }
