@@ -156,9 +156,13 @@ vi.mock('child_process', async (original) => ({
     throw new Error('catalog unavailable');
   },
 }));
+import * as p from '@clack/prompts';
+import * as setupLog from '../setup/logs.js';
 import { runOpenCodeAuthStep, runOpenCodeSetupAuth } from './opencode-auth.js';
 
 beforeEach(() => {
+  vi.mocked(setupLog.step).mockClear();
+  vi.mocked(p.log.warn).mockClear();
   Object.assign(fixture, {
     gateway: 'onecli',
     gatewayEndpoints: [],
@@ -365,6 +369,31 @@ describe('custom endpoint model discovery', () => {
     await runOpenCodeAuthStep();
     expect(fixture.modelRequests).toHaveLength(1);
     expect(fixture.writes).toContainEqual(['OPENCODE_MODEL', 'openai/fixture']);
+  });
+  // setup.log must say whether the endpoint answered with the chosen model:
+  // a success line alone reads as "verified" to whoever debugs the install.
+  it('records an unverified endpoint when the catalog cannot be listed', async () => {
+    fixture.backend = 'local';
+    fixture.failModels = true;
+    await runOpenCodeAuthStep();
+    expect(setupLog.step).toHaveBeenCalledWith(
+      'auth',
+      'success',
+      expect.any(Number),
+      expect.objectContaining({ PROVIDER: 'opencode', BACKEND: 'local', ENDPOINT_CHECK: 'not-verified' }),
+    );
+    expect(p.log.warn).toHaveBeenCalledWith(expect.stringContaining("couldn't confirm"));
+  });
+  it('records a verified endpoint when the catalog lists the chosen model', async () => {
+    fixture.backend = 'local';
+    await runOpenCodeAuthStep();
+    expect(setupLog.step).toHaveBeenCalledWith(
+      'auth',
+      'success',
+      expect.any(Number),
+      expect.objectContaining({ ENDPOINT_CHECK: 'model-listed' }),
+    );
+    expect(p.log.warn).not.toHaveBeenCalledWith(expect.stringContaining("couldn't confirm"));
   });
   it('does not save the key or defaults when model selection is cancelled', async () => {
     fixture.backend = 'local';

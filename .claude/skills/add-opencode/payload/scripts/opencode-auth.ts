@@ -217,6 +217,7 @@ export async function runOpenCodeAuthCli(args: string[]): Promise<void> {
 }
 
 export async function runOpenCodeAuthStep(options: { allowSkip?: boolean } = {}): Promise<void> {
+  const startedAt = Date.now();
   const backend = answer(
     await brightSelect<Backend>({
       message: 'Which model backend should OpenCode use?',
@@ -354,8 +355,8 @@ export async function runOpenCodeAuthStep(options: { allowSkip?: boolean } = {})
   }
   const pendingKey =
     customCatalog && model === undefined ? await promptOpenCodeApiKey(provider, baseUrl, host) : undefined;
+  let discoveredModels: string[] = [];
   if (model === undefined) {
-    let discoveredModels: string[] = [];
     try {
       discoveredModels = customCatalog
         ? pendingKey?.keepExisting
@@ -377,6 +378,21 @@ export async function runOpenCodeAuthStep(options: { allowSkip?: boolean } = {})
   defaults.OPENCODE_MODEL = model;
   defaults.OPENCODE_SMALL_MODEL = model;
   checkExportedDefaults(defaults);
+  // A custom endpoint counts as checked only when its own catalog listed the
+  // chosen model. The probe runs from the host, not through the container and
+  // gateway, so the first agent reply is still the end-to-end check.
+  const endpointCheck = customCatalog
+    ? discoveredModels.includes(model)
+      ? 'model-listed'
+      : 'not-verified'
+    : undefined;
+  if (endpointCheck === 'not-verified') {
+    p.log.warn(
+      brandBody(
+        `Setup couldn't confirm that ${baseUrl} serves ${model}. Your assistant's first reply will show whether it works.`,
+      ),
+    );
+  }
 
   if (backend === 'chatgpt') {
     await runOpenCodeChatGptAuth(chatGptMethod);
@@ -393,7 +409,11 @@ export async function runOpenCodeAuthStep(options: { allowSkip?: boolean } = {})
     else upsertEnvVar(name, value);
   }
 
-  setupLog.step('auth', 'success', 0, { PROVIDER: 'opencode', BACKEND: backend });
+  setupLog.step('auth', 'success', Date.now() - startedAt, {
+    PROVIDER: 'opencode',
+    BACKEND: backend,
+    ENDPOINT_CHECK: endpointCheck,
+  });
   p.log.success(brandBody('OpenCode configured. Credentials, when supplied, live in the selected gateway.'));
 }
 
