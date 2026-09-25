@@ -618,10 +618,12 @@ export async function processQuery(
             // "Did anything user-visible go out this turn?" — door
             // deliveries (midTurnSent) plus any chat row written since the
             // turn boundary (which also sees MCP send_message calls the
-            // frame-local count can't). When false and the result still
-            // carries content, the wrap-nudge fires so the model re-sends
-            // and the retry streams through the mid-turn door.
-            turnDelivered: midTurnCompleteDelivery ? midTurnSent > 0 || chatRowWrittenSince(turnStartSeq) : undefined,
+            // frame-local count can't). Computed for every provider: a
+            // result-door provider that already replied via a tool must not
+            // be nudged into repeating itself over unwrapped closing prose.
+            // When false and the result still carries content, the
+            // wrap-nudge fires so the model re-sends.
+            turnDelivered: midTurnSent > 0 || chatRowWrittenSince(turnStartSeq, routing.channelType === 'agent'),
           });
           // Completed partial output remains deliverable, but an explicit
           // provider failure must keep its status and never trigger a retry.
@@ -824,7 +826,9 @@ export interface ResultDispatchOptions {
    * Did anything user-visible go out this turn? True when the mid-turn door
    * delivered (midTurnSent > 0) OR any chat row landed in outbound.db since
    * the turn boundary (covers MCP send_message calls the frame-local count
-   * cannot see). Only meaningful with `suppressDelivery`. When false and the
+   * cannot see). Without `suppressDelivery` it only prevents the wrap-nudge
+   * after a tool delivery, so unwrapped closing prose does not trigger a
+   * duplicate re-send. With `suppressDelivery`, when false and the
    * result carries content — wrapped blocks or unwrapped prose — the turn
    * counts as undelivered and the wrap-nudge fires, so the model re-sends
    * and the retry streams through the mid-turn door. This is the deliberate
@@ -995,15 +999,36 @@ function maxOutboundSeq(): number {
  * result door's nudge decision: unlike the frame-local midTurnSent count,
  * this also sees MCP send_message / send_file deliveries made this turn, so
  * an agent that already replied via tools is not nudged into repeating
- * itself. Fail-open to false: if the lookup breaks, the nudge may fire
+ * itself. Reactions do not count as a reply, and neither does a message to
+ * another agent unless this turn is itself an agent wake: on a user-facing
+ * turn an a2a send is delegation, and the user's answer is still owed. Fail-open to false: if the lookup breaks, the nudge may fire
  * spuriously (a repeat coax), never silently swallow an undelivered turn.
  */
-function chatRowWrittenSince(afterSeq: number): boolean {
+function chatRowWrittenSince(afterSeq: number, countAgentRows: boolean): boolean {
   try {
     // ponytail: reuse the existing semantic read; add a cursor operation only if history scans show up in profiles.
-    return getUndeliveredMessages().some((message) => (message.seq ?? 0) > afterSeq && message.kind === 'chat');
+    return getUndeliveredMessages().some(
+      (message) =>
+        (message.seq ?? 0) > afterSeq &&
+        message.kind === 'chat' &&
+        (countAgentRows || message.channel_type !== 'agent') &&
+        !isReactionRow(message.content),
+    );
   } catch (err) {
     log(`chatRowWrittenSince failed: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+}
+
+/**
+ * A reaction (add_reaction) is a chat row too, but it is an acknowledgement,
+ * not a reply: an agent that reacts and then leaves its answer unwrapped has
+ * still delivered nothing, so the nudge must fire.
+ */
+function isReactionRow(content: string): boolean {
+  try {
+    return (JSON.parse(content) as { operation?: unknown }).operation === 'reaction';
+  } catch {
     return false;
   }
 }
@@ -1134,8 +1159,10 @@ export async function dispatchResultText(
   // log) — never treat it as an undelivered reply or nudge the agent to wrap it.
   // With suppressDelivery the delivered-this-turn question is answered by
   // turnDelivered (door deliveries + DB-visible sends like MCP send_message);
-  // otherwise by this dispatch's own send count.
-  const anythingDelivered = options?.suppressDelivery ? options.turnDelivered === true : sent > 0;
+  // otherwise by this dispatch's own send count or an earlier tool send.
+  const anythingDelivered = options?.suppressDelivery
+    ? options.turnDelivered === true
+    : sent > 0 || options?.turnDelivered === true;
   const hasUnwrapped = !routing.taskRun && !anythingDelivered && !!scratchpad;
   if (hasUnwrapped) {
     log(`WARNING: agent output had no <message to="..."> blocks — nothing was sent`);
