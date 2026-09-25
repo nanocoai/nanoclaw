@@ -32,6 +32,7 @@
 "area/channels":
   - changed-files:
       - any-glob-to-any-file:
+          # Channel adapter infrastructure and setup
           - "src/channels/**"
           - "src/modules/interactive/**"
           - "src/modules/typing/**"
@@ -46,26 +47,6 @@
           - "docs/isolation-model.md"
           - ".claude/skills/manage-channels/**"
           - ".claude/skills/migrate-slack-agents/**"
-          - ".claude/skills/add-deltachat/**"
-          - ".claude/skills/add-dial/**"
-          - ".claude/skills/add-dial-number/**"
-          - ".claude/skills/add-discord/**"
-          - ".claude/skills/add-emacs/**"
-          - ".claude/skills/add-gchat/**"
-          - ".claude/skills/add-github/**"
-          - ".claude/skills/add-imessage/**"
-          - ".claude/skills/add-linear/**"
-          - ".claude/skills/add-matrix/**"
-          - ".claude/skills/add-mattermost/**"
-          - ".claude/skills/add-resend/**"
-          - ".claude/skills/add-signal/**"
-          - ".claude/skills/add-slack/**"
-          - ".claude/skills/add-teams/**"
-          - ".claude/skills/add-telegram/**"
-          - ".claude/skills/add-webex/**"
-          - ".claude/skills/add-wechat/**"
-          - ".claude/skills/add-whatsapp/**"
-          - ".claude/skills/add-whatsapp-cloud/**"
 
 "area/configuration":
   - changed-files:
@@ -253,7 +234,14 @@
 "area/setup-installation":
   - changed-files:
       - any-glob-to-any-file:
-          - "setup/**"
+          # Setup infrastructure — not setup/channels/ or setup/providers/
+          # (those belong to area/channels and area/providers respectively).
+          - "setup/*.ts"
+          - "setup/*.sh"
+          - "setup/*.mjs"
+          - "setup/lib/**"
+          - "setup/migrate-v2/**"
+          - "setup/uninstall/**"
           - "launchd/**"
           - "nanoclaw.sh"
           - "migrate-v2.sh"
@@ -286,7 +274,10 @@
 "area/skills":
   - changed-files:
       - any-glob-to-any-file:
-          - ".claude/skills/**"
+          # Skill engine and infrastructure — not every individual skill
+          # directory. Channel/provider/tool install skills belong to their
+          # respective area/ labels; only skills that ARE skill infra (the
+          # engine, registry, guidelines) or operational workflows live here.
           - ".agents/skills"
           - "container/skills/**"
           - "src/group-skills*"
@@ -299,6 +290,11 @@
           - "docs/skill-directives.md"
           - "docs/skill-engine-seam.md"
           - ".github/workflows/registry-skills.yml"
+          # Operational skills that don't belong to another area
+          - ".claude/skills/customize/**"
+          - ".claude/skills/setup/**"
+          - ".claude/skills/debug/**"
+          - ".claude/skills/update-nanoclaw/**"
 
 "area/tools":
   - changed-files:
