@@ -104,34 +104,49 @@ afterEach(async () => {
 });
 
 describe('deliverToSessions', () => {
-  it('drains up to DELIVERY_CONCURRENCY sessions at once, all of them exactly once', async () => {
-    const sessions = await seedSessions(20);
-    let inFlight = 0;
-    let peak = 0;
-    const delivered: string[] = [];
-    let release: () => void = () => {};
-    const gate = new Promise<void>((resolve) => (release = resolve));
-    setDeliveryAdapter({
-      deliver: async (_ct, _pid, _tid, _kind, content) => {
-        inFlight++;
-        peak = Math.max(peak, inFlight);
-        await gate;
-        inFlight--;
-        delivered.push(JSON.parse(content).text);
-        return 'pm';
-      },
-    });
+  // The drain test is synchronous SQLite file I/O end to end: seeding creates
+  // 40 mailbox files under /tmp and writes 20 queued messages, then the drain
+  // reads every mailbox and marks each message delivered. Normal CI cost is
+  // ~0.5s for this whole file, but a contended runner disk pushed the test
+  // past vitest's 5s default (run 35985927515, Node 24, attempt 2). Give it a
+  // budget only a stalled runner exceeds; the assertions are unchanged.
+  const IO_BOUND_TIMEOUT_MS = 30_000;
 
-    const done = deliverToSessions(sessions);
-    // Let the first wave read its queues and reach the adapter.
-    await vi.waitFor(() => expect(inFlight).toBe(CONCURRENCY));
-    release();
-    await done;
+  it(
+    'drains up to DELIVERY_CONCURRENCY sessions at once, all of them exactly once',
+    async () => {
+      const sessions = await seedSessions(20);
+      let inFlight = 0;
+      let peak = 0;
+      const delivered: string[] = [];
+      let release: () => void = () => {};
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      setDeliveryAdapter({
+        deliver: async (_ct, _pid, _tid, _kind, content) => {
+          inFlight++;
+          peak = Math.max(peak, inFlight);
+          await gate;
+          inFlight--;
+          delivered.push(JSON.parse(content).text);
+          return 'pm';
+        },
+      });
 
-    expect(peak).toBe(CONCURRENCY);
-    expect(delivered).toHaveLength(20);
-    expect(new Set(delivered).size).toBe(20);
-  });
+      const done = deliverToSessions(sessions);
+      // Let the first wave read its queues and reach the adapter. The default
+      // 1s waitFor budget is tight for the same slow-disk reason; the cap
+      // itself is asserted through `peak` below, so waiting longer costs
+      // nothing in coverage.
+      await vi.waitFor(() => expect(inFlight).toBe(CONCURRENCY), { timeout: 10_000 });
+      release();
+      await done;
+
+      expect(peak).toBe(CONCURRENCY);
+      expect(delivered).toHaveLength(20);
+      expect(new Set(delivered).size).toBe(20);
+    },
+    IO_BOUND_TIMEOUT_MS,
+  );
 
   it('a session whose drain throws is logged and skipped; the rest still deliver this tick', async () => {
     const good = await seedSessions(3);

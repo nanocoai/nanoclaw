@@ -48,14 +48,22 @@ export function queryHost(root, timeoutMs = 1000) {
   });
 }
 
-/** Wait for an identified host; optionally demand a new instance or channel. */
+/**
+ * Wait for an identified host; optionally demand a new instance or channel.
+ *
+ * The deadline decides whether to probe again; it never clips a probe. Each
+ * probe gets queryHost's own socket timeout, so a host that answers just after
+ * the budget is judged by its answer (previous instance, wrong process, missing
+ * channel) instead of being reported as "Host status timed out". On the failure
+ * path this can overrun timeoutMs by one probe.
+ */
 export async function waitForHost(root, { previous = '', pid, startedAfter, channel, alive, timeoutMs = 30000 } = {}) {
   const deadline = Date.now() + timeoutMs;
   let reason = 'Host did not respond';
   while (Date.now() < deadline) {
     if (alive && !alive()) throw new Error('NanoClaw exited before becoming ready. Check logs/nanoclaw.error.log.');
     try {
-      const status = await queryHost(root, Math.min(1000, deadline - Date.now()));
+      const status = await queryHost(root);
       if (status.instance_id === previous) reason = 'The previous host is still serving requests';
       else if (pid && status.pid !== pid) reason = 'A different process is serving requests';
       else if (startedAfter !== undefined && !(Date.parse(status.started_at) > startedAfter)) {

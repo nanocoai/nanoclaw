@@ -22,6 +22,7 @@ if (fs.existsSync(socketPath)) fs.unlinkSync(socketPath);
 const instanceId = crypto.randomUUID();
 const server = net.createServer((socket) => {
   let request = '';
+  socket.on('error', () => {});
   socket.on('data', (chunk) => {
     request += chunk.toString('utf8');
     if (!request.includes('\\n')) return;
@@ -31,7 +32,7 @@ const server = net.createServer((socket) => {
       socket.end(JSON.stringify({ id: frame.id, ok: false }) + '\\n');
       return;
     }
-    socket.end(JSON.stringify({
+    const reply = () => socket.end(JSON.stringify({
       id: frame.id,
       ok: true,
       data: {
@@ -42,6 +43,9 @@ const server = net.createServer((socket) => {
         channels: [{ instance: 'mattermost', type: 'mattermost', connected: true }],
       },
     }) + '\\n');
+    // A loaded runner answering after the caller's budget, made deterministic.
+    if (fs.existsSync('slow-status')) setTimeout(reply, 200);
+    else reply();
   });
 });
 server.listen(socketPath);
@@ -147,6 +151,12 @@ describe('restart host identity and readiness', () => {
     await expect(waitForHost(root, { previous: status.instance_id, timeoutMs: 100 })).rejects.toThrow('previous host');
     await expect(waitForHost(root, { pid: process.pid, timeoutMs: 100 })).rejects.toThrow('different process');
     await expect(waitForHost(root, { channel: 'missing', timeoutMs: 100 })).rejects.toThrow('not connected');
+  });
+
+  it('judges a host that answers after the readiness budget by its answer, not by the clock', async () => {
+    const status = await startHost();
+    writeFileSync(join(root, 'slow-status'), '');
+    await expect(waitForHost(root, { previous: status.instance_id, timeoutMs: 50 })).rejects.toThrow('previous host');
   });
 
   it('propagates a failed systemd restart despite a healthy old host', async () => {
