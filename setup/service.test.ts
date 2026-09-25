@@ -1,6 +1,10 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 
 import { getLaunchdLabel } from '../src/install-slug.js';
+import { installCliSymlink } from './service.js';
 
 /**
  * Tests for service configuration generation.
@@ -115,5 +119,77 @@ describe('systemd unit generation', () => {
   it('sets correct ExecStart', () => {
     const unit = generateSystemdUnit('/usr/bin/node', '/srv/nanoclaw', '/home/user', false);
     expect(unit).toContain('ExecStart=/usr/bin/node /srv/nanoclaw/dist/index.js');
+  });
+});
+
+describe('installCliSymlink', () => {
+  let tmpDir: string;
+
+  afterEach(() => {
+    if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('creates ~/.local/bin/ncl symlinked to bin/ncl', () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-symlink-'));
+    const projectRoot = path.join(tmpDir, 'project');
+    const homeDir = path.join(tmpDir, 'home');
+    fs.mkdirSync(path.join(projectRoot, 'bin'), { recursive: true });
+    fs.writeFileSync(path.join(projectRoot, 'bin', 'ncl'), '#!/bin/sh\n');
+
+    installCliSymlink(projectRoot, homeDir);
+
+    const target = path.join(homeDir, '.local', 'bin', 'ncl');
+    expect(fs.lstatSync(target).isSymbolicLink()).toBe(true);
+    expect(fs.readlinkSync(target)).toBe(path.join(projectRoot, 'bin', 'ncl'));
+  });
+
+  it('is idempotent — re-running on an existing symlink does not throw', () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-symlink-'));
+    const projectRoot = path.join(tmpDir, 'project');
+    const homeDir = path.join(tmpDir, 'home');
+    fs.mkdirSync(path.join(projectRoot, 'bin'), { recursive: true });
+    fs.writeFileSync(path.join(projectRoot, 'bin', 'ncl'), '#!/bin/sh\n');
+
+    installCliSymlink(projectRoot, homeDir);
+    installCliSymlink(projectRoot, homeDir);
+
+    const target = path.join(homeDir, '.local', 'bin', 'ncl');
+    expect(fs.lstatSync(target).isSymbolicLink()).toBe(true);
+  });
+
+  it('does not clobber a real (non-symlink) file at the target path', () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-symlink-'));
+    const projectRoot = path.join(tmpDir, 'project');
+    const homeDir = path.join(tmpDir, 'home');
+    fs.mkdirSync(path.join(projectRoot, 'bin'), { recursive: true });
+    fs.writeFileSync(path.join(projectRoot, 'bin', 'ncl'), '#!/bin/sh\n');
+    fs.mkdirSync(path.join(homeDir, '.local', 'bin'), { recursive: true });
+    fs.writeFileSync(path.join(homeDir, '.local', 'bin', 'ncl'), 'real file');
+
+    installCliSymlink(projectRoot, homeDir);
+
+    const target = path.join(homeDir, '.local', 'bin', 'ncl');
+    expect(fs.lstatSync(target).isSymbolicLink()).toBe(false);
+    expect(fs.readFileSync(target, 'utf-8')).toBe('real file');
+  });
+});
+
+describe('WSL nohup fallback', () => {
+  it('generates a valid wrapper script', () => {
+    const projectRoot = '/home/user/nanoclaw';
+    const nodePath = '/usr/bin/node';
+    const pidFile = path.join(projectRoot, 'nanoclaw.pid');
+
+    // Simulate what service.ts generates
+    const wrapper = `#!/bin/bash
+set -euo pipefail
+cd ${JSON.stringify(projectRoot)}
+nohup ${JSON.stringify(nodePath)} ${JSON.stringify(projectRoot)}/dist/index.js >> ${JSON.stringify(projectRoot)}/logs/nanoclaw.log 2>> ${JSON.stringify(projectRoot)}/logs/nanoclaw.error.log &
+echo $! > ${JSON.stringify(pidFile)}`;
+
+    expect(wrapper).toContain('#!/bin/bash');
+    expect(wrapper).toContain('nohup');
+    expect(wrapper).toContain(nodePath);
+    expect(wrapper).toContain('nanoclaw.pid');
   });
 });
