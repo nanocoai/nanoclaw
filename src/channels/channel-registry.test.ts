@@ -122,6 +122,64 @@ describe('channel registry', () => {
   });
 });
 
+describe('channel registry — <NAME>_ENABLED flag', () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    const { teardownChannelAdapters } = await import('./channel-registry.js');
+    await teardownChannelAdapters();
+    vi.resetModules();
+  });
+
+  const mockSetup = () => ({
+    onInbound: () => {},
+    onInboundEvent: () => {},
+    onMetadata: () => {},
+    onAction: () => {},
+  });
+
+  it('skips a channel whose flag is exactly false without calling its factory', async () => {
+    vi.stubEnv('PARKED_CHAN_ENABLED', 'false');
+    const reg = await import('./channel-registry.js');
+    const factory = vi.fn(() => createMockAdapter('parked-chan'));
+    reg.registerChannelAdapter('parked-chan', { factory });
+
+    await reg.initChannelAdapters(mockSetup);
+
+    expect(factory).not.toHaveBeenCalled();
+    expect(reg.getChannelAdapterExact('parked-chan')).toBeUndefined();
+    expect(reg.getRegisteredChannelNames()).toContain('parked-chan');
+  });
+
+  it('starts channels with the flag unset or true', async () => {
+    vi.stubEnv('ON_CHAN_ENABLED', 'true');
+    const reg = await import('./channel-registry.js');
+    const unset = createMockAdapter('unset-chan');
+    const on = createMockAdapter('on-chan');
+    reg.registerChannelAdapter('unset-chan', { factory: () => unset });
+    reg.registerChannelAdapter('on-chan', { factory: () => on });
+
+    await reg.initChannelAdapters(mockSetup);
+
+    expect(reg.getChannelAdapterExact('unset-chan')).toBe(unset);
+    expect(reg.getChannelAdapterExact('on-chan')).toBe(on);
+  });
+
+  it('does not hot-start a parked channel', async () => {
+    const reg = await import('./channel-registry.js');
+    await reg.initChannelAdapters(mockSetup);
+    vi.stubEnv('LATE_CHAN_ENABLED', 'false');
+    const factory = vi.fn(() => createMockAdapter('late-chan'));
+    reg.registerChannelAdapter('late-chan', { factory });
+
+    expect(await reg.startChannelAdapter('late-chan')).toBe('no-credentials');
+    expect(factory).not.toHaveBeenCalled();
+  });
+});
+
 describe('channel registry — instance keying', () => {
   // Fresh module per test: the registry and activeAdapters maps are
   // module-level, and these arms register conflicting same-channelType
