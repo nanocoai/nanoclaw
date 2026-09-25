@@ -185,7 +185,7 @@ Test your contribution on a fresh clone before submitting. For skills, run the s
 
 Area labels (`area/*`) are applied automatically from the files your PR touches; you don't pick one.
 
-**Changelog:** `CHANGELOG.md` is maintainer-owned — don't edit it in your PR. If your change is user-visible, replace the prompt in the template's `release-note` block with one user-facing line; maintainers harvest those lines at release time and edit them into the changelog. If nothing an operator sees changes, check "No user-visible behavior change" instead. The `release-note` check fails until the description has one or the other, and editing the description re-runs it. For a breaking change, the release note must cover detect, why, fix/migration, and rollback.
+**Changelog:** `CHANGELOG.md` is maintainer-owned — don't edit it in your PR. If your change is user-visible, replace the prompt in the template's `release-note` block with one user-facing line, written for the person running NanoClaw (the comment above the block has the rules and an example); maintainers harvest those lines at release time and edit them into the changelog. If nothing an operator sees changes, check "No user-visible behavior change" instead. The `release-note` check fails until the description has one or the other, and editing the description re-runs it. For a breaking change, the release note must cover detect, why, fix/migration, and rollback.
 
 ### PR body shape
 

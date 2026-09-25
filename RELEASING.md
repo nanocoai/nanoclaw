@@ -29,6 +29,8 @@ Keep `## [Unreleased]` and dated `## [X.Y.Z] - YYYY-MM-DD` headings unchanged; c
 
 The v2 pull request template (`<!-- nanoclaw-pr-template:v2 -->`) carries a fenced
 ```release-note``` block: one user-facing line, written by the contributor who knows what changed.
+The comment above that block gives contributors the tone rules from "What goes in a release":
+a bold operator-facing lead, at most one sentence of detail, no internals or PR numbers.
 `scripts/release-notes.mjs` collects those blocks across a merge range and prints a draft for you
 to edit:
 

@@ -113,6 +113,19 @@ describe('decideReleaseNote', () => {
     expect(decideReleaseNote('~~~release-note\nTilde.\n~~~\n').verdict).toBe('note');
     expect(decideReleaseNote('```release-notes\nPlural.\n```\n').verdict).toBe('note');
   });
+
+  it('ignores the tone-guide comment above the block: unedited it is still the placeholder, with a note it passes', () => {
+    const tone = TEMPLATE.match(/<!-- Release note:[\s\S]*?-->/)?.[0] ?? '';
+    expect(tone).toContain('**Bold lead');
+    expect(TEMPLATE.indexOf(tone)).toBeLessThan(TEMPLATE.indexOf('```release-note'));
+
+    const unedited = decideReleaseNote(filled({ check: [USER_VISIBLE_BOX] }));
+    expect(unedited).toMatchObject({ ok: false, verdict: 'missing', note: null });
+
+    const note = "**Fresh installs no longer leave the setup test agent's container running.** It used to log errors.";
+    const written = decideReleaseNote(filled({ check: [USER_VISIBLE_BOX], note }));
+    expect(written).toMatchObject({ ok: true, verdict: 'note', note });
+  });
 });
 
 describe('coupling to the template and the workflow', () => {
