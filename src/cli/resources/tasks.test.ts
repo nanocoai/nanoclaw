@@ -36,6 +36,7 @@ import { dispatch } from '../dispatch.js';
 import { formatTasksTable } from '../format-tasks.js';
 import type { CallerContext } from '../frame.js';
 import { getAgentMailbox } from '../../mailbox/index.js';
+import { registerTaskField } from '../../modules/scheduling/task-fields.js';
 import './tasks.js';
 import '../commands/index.js'; // registers tasks-help for the help-topic test
 
@@ -446,6 +447,121 @@ describe('tasks CLI resource', () => {
     const d = r.data as { origin_session_id: string | null; created_at: string };
     expect(d.origin_session_id).toBe('chat-1'); // the session that created it
     expect(d.created_at).toBeTruthy();
+  });
+
+  describe('registered task fields', () => {
+    const unregister: Array<() => void> = [];
+    afterEach(() => {
+      while (unregister.length) unregister.pop()!();
+    });
+
+    function registerFields(): void {
+      unregister.push(
+        registerTaskField({
+          flag: 'timeout_ms',
+          contentKey: 'timeoutMs',
+          type: 'number',
+          description: 'Per-task timeout.',
+          parse: (raw) => {
+            if (typeof raw !== 'number' || raw <= 0) throw new Error('--timeout-ms must be a positive number');
+            return raw;
+          },
+        }),
+        registerTaskField({ flag: 'label', contentKey: 'label', description: 'Display label.' }),
+      );
+    }
+
+    async function storedContent(sessionId: string): Promise<Record<string, unknown>> {
+      const db = new Database(inboundDbPath('ag-1', sessionId), { readonly: true });
+      const row = db.prepare("SELECT content FROM messages_in WHERE kind = 'task'").get() as { content: string };
+      db.close();
+      return JSON.parse(row.content);
+    }
+
+    it('an unregistered flag is still rejected, and get carries no extra keys', async () => {
+      const bad = await dispatch(
+        {
+          id: 'c',
+          command: 'tasks-create',
+          args: { prompt: 'x', process_after: '2999-01-01T00:00:00Z', timeout_ms: '5' },
+        },
+        agentCtx(),
+      );
+      expect(bad.ok).toBe(false);
+      if (!bad.ok) expect(bad.error.message).toContain('unknown flag --timeout-ms');
+
+      const created = await dispatch(
+        { id: 'c2', command: 'tasks-create', args: { prompt: 'x', process_after: '2999-01-01T00:00:00Z' } },
+        agentCtx(),
+      );
+      expect(created.ok).toBe(true);
+      if (!created.ok) return;
+      const { series_id, session_id } = created.data as { series_id: string; session_id: string };
+      expect(Object.keys(await storedContent(session_id)).sort()).toEqual(['originSessionId', 'prompt', 'script']);
+      const got = await dispatch({ id: 'g', command: 'tasks-get', args: { id: series_id } }, agentCtx());
+      expect(got.ok).toBe(true);
+      if (got.ok) expect(got.data).not.toHaveProperty('timeout_ms');
+    });
+
+    it('round-trips create → get → partial update → content JSON', async () => {
+      registerFields();
+      const created = await dispatch(
+        {
+          id: 'c',
+          command: 'tasks-create',
+          args: { prompt: 'x', process_after: '2999-01-01T00:00:00Z', timeout_ms: '5000', label: 'nightly' },
+        },
+        agentCtx(),
+      );
+      expect(created.ok).toBe(true);
+      if (!created.ok) return;
+      const { series_id, session_id } = created.data as { series_id: string; session_id: string };
+      expect(await storedContent(session_id)).toMatchObject({ prompt: 'x', timeoutMs: 5000, label: 'nightly' });
+
+      const got = await dispatch({ id: 'g', command: 'tasks-get', args: { id: series_id } }, agentCtx());
+      expect(got.ok).toBe(true);
+      if (got.ok) expect(got.data).toMatchObject({ timeout_ms: 5000, label: 'nightly' });
+
+      const upd = await dispatch(
+        { id: 'u', command: 'tasks-update', args: { id: series_id, timeout_ms: '9000' } },
+        agentCtx(),
+      );
+      expect(upd.ok).toBe(true);
+      if (upd.ok) expect(upd.data).toMatchObject({ fields: ['timeoutMs'] });
+      expect(await storedContent(session_id)).toMatchObject({ prompt: 'x', timeoutMs: 9000, label: 'nightly' });
+    });
+
+    it('a parse error surfaces on create and update', async () => {
+      registerFields();
+      const bad = await dispatch(
+        {
+          id: 'c',
+          command: 'tasks-create',
+          args: { prompt: 'x', process_after: '2999-01-01T00:00:00Z', timeout_ms: '-1' },
+        },
+        agentCtx(),
+      );
+      expect(bad.ok).toBe(false);
+      if (!bad.ok) expect(bad.error.message).toContain('--timeout-ms must be a positive number');
+
+      const created = await dispatch(
+        { id: 'c2', command: 'tasks-create', args: { prompt: 'x', process_after: '2999-01-01T00:00:00Z' } },
+        agentCtx(),
+      );
+      if (!created.ok) throw new Error('create failed');
+      const { series_id } = created.data as { series_id: string };
+      const upd = await dispatch(
+        { id: 'u', command: 'tasks-update', args: { id: series_id, timeout_ms: '0' } },
+        agentCtx(),
+      );
+      expect(upd.ok).toBe(false);
+      if (!upd.ok) expect(upd.error.message).toContain('--timeout-ms must be a positive number');
+    });
+
+    it('refuses a field that shadows a core flag or content key', () => {
+      expect(() => registerTaskField({ flag: 'prompt', contentKey: 'x', description: '' })).toThrow('reserved');
+      expect(() => registerTaskField({ flag: 'x', contentKey: 'script', description: '' })).toThrow('reserved');
+    });
   });
 
   it('each task gets its own isolated session, and list fans out across them', async () => {
