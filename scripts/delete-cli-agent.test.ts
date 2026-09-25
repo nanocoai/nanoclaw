@@ -5,7 +5,8 @@
  * Drives the real entry point in a child process against a temp cwd
  * (PROJECT_ROOT = cwd, so data/v2.db is temp), with a fake runtime binary
  * via CONTAINER_RUNTIME that records every call together with whether the
- * group folder still existed at that moment.
+ * group folder still existed at that moment. The fake can also start a
+ * container between listings, standing in for a spawn already in flight.
  */
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -23,7 +24,8 @@ const AGENT_GROUP_ID = 'ag-ping-test';
 /** Pinned: the cwd-derived slug depends on tmpdir symlink resolution (macOS /var → /private/var). */
 const INSTALL_ID = 'dcatest';
 
-describe('scripts/delete-cli-agent.ts', () => {
+// Each run sleeps through the script's sweep grace (2s per pass, up to two passes).
+describe('scripts/delete-cli-agent.ts', { timeout: 20_000 }, () => {
   let cwd: string;
   let runtime: string;
   let log: string;
@@ -44,17 +46,33 @@ describe('scripts/delete-cli-agent.ts', () => {
     );
     db.close();
 
-    // A fake runtime: `ps` lists one container, every call is logged with the
-    // folder's existence at call time so ordering against the rm is provable.
+    // A fake runtime backed by a `containers` file: `ps` prints it, `stop`/`rm`
+    // drop the named ids. A `fail` file fails every stop/rm, a
+    // `fail-<verb>-<n>` file fails the n-th call of that verb, and a
+    // `spawn-on-ps-<n>` file is appended before the n-th `ps` answers, which
+    // stands in for a host spawn that lands after an earlier listing. Every
+    // call is logged with the folder's existence at call time so ordering
+    // against the folder removal is provable.
     log = path.join(cwd, 'runtime-calls.log');
     runtime = path.join(cwd, 'fake-docker');
+    fs.writeFileSync(path.join(cwd, 'containers'), 'abc123\n');
     fs.writeFileSync(
       runtime,
       [
         '#!/bin/sh',
+        `state="${cwd}"`,
         `if [ -d "${path.join(cwd, 'groups', FOLDER)}" ]; then folder=present; else folder=gone; fi`,
         `printf '%s folder=%s\\n' "$*" "$folder" >> "${log}"`,
-        'case "$1" in ps) echo abc123 ;; esac',
+        'n=$(( $(cat "$state/count-$1" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$state/count-$1"',
+        'if [ -f "$state/fail-$1-$n" ]; then echo "$1 hiccup" >&2; exit 1; fi',
+        'case "$1" in',
+        '  ps)',
+        '    if [ -f "$state/spawn-on-ps-$n" ]; then cat "$state/spawn-on-ps-$n" >> "$state/containers"; fi',
+        '    cat "$state/containers" ;;',
+        '  stop|rm)',
+        '    if [ -f "$state/fail" ]; then echo "permission denied" >&2; exit 1; fi',
+        '    for id in "$@"; do grep -vxF -- "$id" "$state/containers" > "$state/containers.next"; mv "$state/containers.next" "$state/containers"; done ;;',
+        'esac',
         'exit 0',
       ].join('\n'),
     );
@@ -76,7 +94,7 @@ describe('scripts/delete-cli-agent.ts', () => {
   it('stops and removes the group container while its folder still exists, then deletes the folder', () => {
     const result = run();
     expect(result.status, result.stderr).toBe(0);
-    expect(result.stdout).toContain('Stopped container(s) for ping_test: abc123');
+    expect(result.stdout).toContain('Stopped 1 container(s) for ping_test: abc123');
     expect(result.stdout).toContain(`Deleted agent group ${AGENT_GROUP_ID} (${FOLDER}).`);
 
     const filters = `--filter label=nanoclaw-install=${INSTALL_ID} --filter label=nanoclaw-group=${AGENT_GROUP_ID}`;
@@ -84,6 +102,7 @@ describe('scripts/delete-cli-agent.ts', () => {
       `ps -aq ${filters} folder=present`,
       'stop -t 10 abc123 folder=present',
       'rm --force abc123 folder=present',
+      `ps -aq ${filters} folder=present`,
     ]);
     expect(fs.existsSync(path.join(cwd, 'groups', FOLDER))).toBe(false);
 
@@ -93,6 +112,54 @@ describe('scripts/delete-cli-agent.ts', () => {
     };
     db.close();
     expect(row.count).toBe(0);
+  });
+
+  it('stops a container that appears after the first listing, before the folder goes', () => {
+    fs.writeFileSync(path.join(cwd, 'spawn-on-ps-2'), 'late456\n');
+    const result = run();
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain('Stopped 2 container(s) for ping_test: abc123, late456');
+    expect(result.stderr).not.toContain('still present');
+
+    const calls = fs.readFileSync(log, 'utf8').trim().split('\n');
+    expect(calls).toContain('stop -t 10 late456 folder=present');
+    expect(calls).toContain('rm --force late456 folder=present');
+    expect(fs.readFileSync(path.join(cwd, 'containers'), 'utf8')).toBe('');
+    expect(fs.existsSync(path.join(cwd, 'groups', FOLDER))).toBe(false);
+  });
+
+  it('checks once more after the last pass and names a container that started during it', () => {
+    fs.writeFileSync(path.join(cwd, 'spawn-on-ps-2'), 'late1\n');
+    fs.writeFileSync(path.join(cwd, 'spawn-on-ps-3'), 'late2\n');
+    fs.writeFileSync(path.join(cwd, 'spawn-on-ps-4'), 'late3\n');
+    const result = run();
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain('Stopped 3 container(s) for ping_test: abc123, late1, late2');
+    expect(result.stderr).toContain('1 container(s) for ping_test still present: late3');
+  });
+
+  it('keeps sweeping past a failed listing and reports only the end state', () => {
+    // Pass 1 cannot stop abc123 (its re-list is ps #2), the next listing
+    // (ps #3) fails, and the pass after that stops it.
+    fs.writeFileSync(path.join(cwd, 'fail-stop-1'), '');
+    fs.writeFileSync(path.join(cwd, 'fail-rm-1'), '');
+    fs.writeFileSync(path.join(cwd, 'fail-ps-3'), '');
+    const result = run();
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain('Stopped 1 container(s) for ping_test: abc123');
+    expect(result.stderr).not.toContain('still present');
+    expect(result.stderr).not.toContain('Could not clean up');
+    expect(fs.readFileSync(path.join(cwd, 'containers'), 'utf8')).toBe('');
+  });
+
+  it('names the survivors and claims nothing stopped when stop and rm fail', () => {
+    fs.writeFileSync(path.join(cwd, 'fail'), '');
+    const result = run();
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).not.toContain('Stopped');
+    expect(result.stderr).toContain('1 container(s) for ping_test still present: abc123');
+    expect(result.stderr).toContain('permission denied');
+    expect(result.stdout).toContain(`Deleted agent group ${AGENT_GROUP_ID} (${FOLDER}).`);
   });
 
   it('still deletes the group when the runtime cannot be reached', () => {
