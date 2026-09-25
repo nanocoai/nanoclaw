@@ -30,6 +30,10 @@ jobs:
   label:
     runs-on: ubuntu-latest
     permissions:
+      # contents: read lets actions/labeler fetch .github/labeler.yml through
+      # the API (no checkout). Under pull_request_target that resolves at the
+      # base-branch SHA, so a fork cannot substitute its own label config.
+      contents: read
       pull-requests: write
       issues: write # createLabel (core-team, until Decision 4) + list/create the single compliance comment
       statuses: write # report-only template-compliance commit status
@@ -322,3 +326,25 @@ jobs:
                 labels: add,
               });
             }
+
+      # area/* from changed paths. This runs as a step here, not as its own
+      # workflow: actions/labeler (v5 through v7.0.0) writes with setLabels,
+      # a full replace built from the PR labels it read at start. As a
+      # parallel workflow on `opened` it wiped every label the step above had
+      # just added. Running after that step, in the same serialized job, it
+      # reads the labels that step wrote.
+      #
+      # Same events as before: opened, synchronize, reopened. Not edited or
+      # ready_for_review: the labeler re-adds every matching label, so running
+      # on body edits would undo a maintainer's area/* pruning. Known gap: the
+      # concurrency group keeps one pending run, so a push that lands while a
+      # run is active and is followed by an edit loses its area pass until the
+      # next push. !cancelled() keeps area labels coming when the step above
+      # fails (a commit-status 5xx, say).
+      - if: ${{ !cancelled() && contains(fromJSON('["opened", "synchronize", "reopened"]'), github.event.action) }}
+        uses: actions/labeler@8558fd74291d67161a8a78ce36a881fa63b766a9 # v5.0.0
+        with:
+          configuration-path: .github/labeler.yml
+          # Add only. A maintainer pruning area/* down to the primary subsystem
+          # must not have the workflow put the labels back on the next push.
+          sync-labels: false
