@@ -3,16 +3,8 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-// Liveness while the model is generating. The SDK emits one `assistant`
-// message per COMPLETED content block, so a long single block (a 2 500-word
-// answer, a long thinking block) produces no message at all until it ends.
-// The poll-loop touches the heartbeat only on provider events, so the host
-// sweep saw a silent container and killed it at the ceiling mid-generation
-// (reproduced on exe.dev 2026-09-23 with the ceiling lowered to 30 s: three
-// kills in a row on the same message, no result ever delivered). Streaming
-// deltas are the liveness signal the SDK offers for that window: opt in with
-// `includePartialMessages` and surface each `stream_event` as activity,
-// throttled so a burst of deltas is one touch per second, not one per token.
+// Proves streaming deltas keep the heartbeat alive through a long content block,
+// throttled to one `activity` per second (see includePartialMessages in claude.ts).
 
 const sdkMessages: unknown[] = [];
 let lastOptions: Record<string, unknown> | undefined;

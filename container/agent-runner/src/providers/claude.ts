@@ -270,14 +270,10 @@ export class ClaudeProvider implements AgentProvider {
           : undefined,
         allowedTools: [...this.mcp.allowedTools],
         disallowedTools: [...this.executionPolicy.disallowedTools],
-        // Liveness while the model generates. The SDK emits one `assistant`
-        // message per COMPLETED content block, so a long single block (a
-        // 2 500-word answer, a long thinking block) is a silent window: no
-        // event, no heartbeat touch, and the host sweep kills the container
-        // at the idle ceiling mid-generation, then retries the same turn
-        // into the same wall. Streaming deltas are the SDK's liveness signal
-        // for that window; translateEvents surfaces them as throttled
-        // `activity` and nothing else.
+        // The SDK emits `assistant` only per completed content block, so a long
+        // block is silent and the host sweep kills the container mid-generation.
+        // Streaming deltas are the liveness signal for that window; translateEvents
+        // turns them into throttled `activity` and nothing else.
         includePartialMessages: true,
         env: this.env,
         model: this.inference.model,
@@ -311,9 +307,8 @@ export class ClaudeProvider implements AgentProvider {
         messageCount++;
 
         // Yield activity for every SDK event so the poll loop knows the agent
-        // is working. Streaming deltas (`stream_event`, opted in above) arrive
-        // per token; they carry no content for us, so they count as activity
-        // at most once per second — one heartbeat touch, not one per token.
+        // is working. Deltas arrive per token and carry no content for us, so
+        // they count at most once per second.
         if (message.type === 'stream_event') {
           const now = Date.now();
           if (now - lastStreamActivityAt < STREAM_ACTIVITY_INTERVAL_MS) continue;
