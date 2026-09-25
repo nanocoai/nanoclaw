@@ -25,11 +25,8 @@ export const KIND_HEADINGS = {
 
 export const UNLABELLED_HEADING = 'Unlabelled';
 
-// The literal prompts the template has shipped inside its fence. A contributor
-// who never touched the block leaves one behind; it is not a release note. The
-// first is the current prompt. The second predates the release-note check:
-// pull requests opened before it still carry it, and both the harvest and the
-// check must keep reading it as no note.
+// Prompts the template has shipped inside its fence; an untouched one is no
+// note. The second predates the release-note check and older PRs still carry it.
 const TEMPLATE_PLACEHOLDERS = new Set([
   'Replace this with one user-facing line for the changelog. Required unless "No user-visible behavior change" is checked.',
   'Optional: one user-facing line for the changelog. Skip it and a maintainer will write one.',
@@ -42,24 +39,10 @@ function collapseWhitespace(text) {
 }
 
 /**
- * Reads a description the way GitHub renders it, as far as the harvest and the
- * release-note check care: the visible lines outside every fenced block, and
- * each fenced block with its info string and body lines.
- *
- * The fence grammar matches the one the v2 label workflow applies when it
- * strips fences before parsing checkboxes: flush-left, three or more backticks
- * or tildes. Closing follows CommonMark: up to three spaces, then a run of the
- * same character at least as long, with nothing after it but spaces, so a
- * ```release-note line inside a
- * ```markdown example is content, not a closer. An unterminated fence runs to
- * the end of the body.
- *
- * Outside fences, an HTML block comment (a line starting with `<!--`, up to
- * three spaces in) is hidden through the first line containing `-->`, or to the
- * end of the body when it never closes, as CommonMark renders it; a `<!--`
- * after the `-->` on that line opens another comment. Its lines are
- * neither visible nor able to open a fence, so a commented-out box or
- * release-note block counts for nothing.
+ * Reads a description as GitHub renders it: visible lines plus each fenced block.
+ * Fence openers match the v2 label workflow's grammar (flush-left, 3+ backticks
+ * or tildes); closers and HTML block comments follow CommonMark, so a
+ * commented-out box or release-note block counts for nothing.
  */
 function readDescription(body) {
   const lines = String(body ?? '')

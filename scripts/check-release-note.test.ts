@@ -1,9 +1,6 @@
 /**
- * Fixture tests for the release-note check that .github/workflows/release-note.yml
- * runs on every pull request. The decision lives in scripts/check-release-note.mjs
- * and is imported directly; the fixtures below also pin the script to the template
- * it enforces and to the workflow that runs it, so none of the three can drift
- * from the others unnoticed.
+ * Fixture tests for scripts/check-release-note.mjs, also pinned to the template it
+ * enforces and the workflow that runs it, so none of the three drifts unnoticed.
  */
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';

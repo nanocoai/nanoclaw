@@ -1,20 +1,9 @@
 #!/usr/bin/env node
 
-// Decides whether a pull request description satisfies the "User and release
-// impact" section of .github/PULL_REQUEST_TEMPLATE.md and reports the verdict
-// the way GitHub Actions expects. .github/workflows/release-note.yml runs it on
-// every pull request event that can change the description.
-//
-// A description passes when it either checks the "No user-visible behavior
-// change" box or carries a non-empty ```release-note fenced block. "Non-empty"
-// is decided by extractReleaseNote from release-notes.mjs — the function the
-// changelog harvest uses — so a note that passes here is a line the harvest
-// will find, and the template's untouched prompt counts as no note in both
-// places.
-//
-// The body arrives through the PR_BODY environment variable, never as an
-// argument or interpolated into a shell line: a description is
-// contributor-controlled text.
+// "Non-empty" is decided by the same extractReleaseNote the changelog harvest
+// uses, so a note that passes here is a line the harvest will find.
+// The body arrives through PR_BODY, never as an argument or shell line: a
+// description is contributor-controlled text.
 
 import { randomUUID } from 'node:crypto';
 import { appendFileSync } from 'node:fs';
@@ -32,13 +21,8 @@ export const TEMPLATE_PATH = '.github/PULL_REQUEST_TEMPLATE.md';
 export const TEMPLATE_SECTION = 'User and release impact';
 
 /**
- * The verdict for one description.
- *   ok: whether the check passes.
- *   verdict: 'note' (a release note is present), 'no-change' (the no-change
- *     box carries it), or 'missing' (neither).
- *   claimsChange: the user-visible or breaking box is checked.
- *   warnings: advisory lines for a passing description that still looks
- *     inconsistent; they never fail the check.
+ * The verdict for one description. verdict is 'note', 'no-change' or 'missing';
+ * warnings flag a passing description that looks inconsistent and never fail it.
  */
 export function decideReleaseNote(body) {
   const note = extractReleaseNote(body);
@@ -95,10 +79,8 @@ export function run(
   const report = result.ok ? successMessage(result) : failureMessage(result);
 
   if (result.verdict === 'note') {
-    // The note is contributor text. Between these two lines the runner reads
-    // `::` lines as plain log output, so a note cannot issue workflow commands.
-    // The token is fresh per run so the note cannot contain it. See "Stopping
-    // and starting workflow commands":
+    // The note is contributor text: inside the stop-commands pair `::` lines are
+    // plain output, and the per-run token cannot appear in the note.
     // https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-commands#stopping-and-starting-workflow-commands
     const token = randomUUID();
     out(`::stop-commands::${token}`);

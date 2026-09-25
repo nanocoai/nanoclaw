@@ -10,9 +10,7 @@ import {
   renderDraftChangelog,
 } from './release-notes.mjs';
 
-// The prompt the template shipped before the release-note check. Pull requests
-// opened earlier still carry it, so it must keep reading as no note. The current
-// prompt is covered against the live template in check-release-note.test.ts.
+// The current prompt is covered against the live template in check-release-note.test.ts.
 const LEGACY_PROMPT = 'Optional: one user-facing line for the changelog. Skip it and a maintainer will write one.';
 
 const TEMPLATE_BLOCK = [
