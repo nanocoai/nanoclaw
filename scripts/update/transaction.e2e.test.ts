@@ -10,6 +10,7 @@ import {
   cleanupUpdate,
   cutoverUpdate,
   finishUpdate,
+  loadGatewayModules,
   loadState,
   prepareUpdate,
   pruneTransactions,
@@ -194,6 +195,8 @@ function fakeRuntime(
     drainContainers: async () => {
       events.push('containers drained');
     },
+    // The fixtures are minimal repos with no setup/ tree; load this checkout's.
+    loadGateway: () => loadGatewayModules(path.resolve(import.meta.dirname, '../..')),
     startService: () => {
       events.push('service start');
       if (options.migrateOnStart && fs.readFileSync(path.join(install, 'src/value.ts'), 'utf8').includes('new')) {
