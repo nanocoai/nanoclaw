@@ -1,27 +1,46 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 
 import { upsertEnvVar } from '../set-env.js';
 import { envValue } from '../../src/env.js';
 
 /**
- * A gateway skill answers "am I the installed one?" by printing `installed`.
- * The probe runs from the project root, because a detector reads that copy's
+ * A gateway skill answers "am I the installed one?" by printing `installed` as its
+ * last line. The probe runs from the project root, because a detector reads that copy's
  * `.env` to identify the installation, independently of service health — even when it is
  * staged elsewhere during an update.
  */
 export type GatewayDetector = (script: string) => boolean;
 
+/** The project's tsx, else the one running this code. */
+function tsxCli(projectRoot: string): string {
+  try {
+    return createRequire(path.join(projectRoot, 'package.json')).resolve('tsx/cli');
+  } catch {
+    return createRequire(import.meta.url).resolve('tsx/cli');
+  }
+}
+
 function runDetector(projectRoot: string, script: string): boolean {
   try {
-    return (
-      execFileSync('pnpm', ['exec', 'tsx', script], {
-        cwd: projectRoot,
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'ignore'],
-      }).trim() === 'installed'
-    );
+    // No pnpm in between: a nested pnpm prints workspace warnings to stdout.
+    const stdout = execFileSync(process.execPath, [tsxCli(projectRoot), script], {
+      cwd: projectRoot,
+      // Keep what `pnpm exec` gave detectors: the project's local binaries on PATH.
+      env: {
+        ...process.env,
+        PATH: [path.join(projectRoot, 'node_modules', '.bin'), process.env.PATH].filter(Boolean).join(path.delimiter),
+      },
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const lines = stdout
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
+    return lines.at(-1) === 'installed';
   } catch {
     return false;
   }
