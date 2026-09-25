@@ -590,15 +590,27 @@ describe('OpenCode setup with Iron selected', () => {
     expect(fixture.placeholders).toEqual([]);
     expect(fixture.writes).toEqual([]);
   });
-  it('warns at setup when the endpoint certificate is not trusted', async () => {
+  it.each(['DEPTH_ZERO_SELF_SIGNED_CERT', 'INVALID_PURPOSE', 'CERT_HAS_EXPIRED', 'ERR_TLS_CERT_ALTNAME_INVALID'])(
+    'warns at setup when the endpoint certificate fails verification (%s)',
+    async (code) => {
+      fixture.backend = 'local';
+      fixture.keyless = true;
+      fixture.modelFetchError = Object.assign(new TypeError('fetch failed'), {
+        cause: Object.assign(new Error('certificate verification failed'), { code }),
+      });
+      await runOpenCodeSetupAuth();
+      expect(fixture.warnings.join('\n')).toMatch(/publicly trusted certificate/);
+    },
+  );
+  it('does not blame the certificate for a connection failure', async () => {
     fixture.backend = 'local';
     fixture.keyless = true;
     fixture.modelFetchError = Object.assign(new TypeError('fetch failed'), {
-      cause: Object.assign(new Error('self-signed certificate'), { code: 'DEPTH_ZERO_SELF_SIGNED_CERT' }),
+      cause: Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }),
     });
     await runOpenCodeSetupAuth();
-    expect(fixture.warnings.join('\n')).toMatch(/certificate/);
-    expect(fixture.warnings.join('\n')).toMatch(/publicly trusted/);
+    expect(fixture.warnings.join('\n')).toMatch(/Could not list models/);
+    expect(fixture.warnings.join('\n')).not.toMatch(/certificate/);
   });
   it('does not fall back to OneCLI or save defaults after an Iron failure', async () => {
     fixture.failVault = true;

@@ -65,10 +65,47 @@ function gatewayEndpointError(store: ProviderCredentialStore, value: string): st
   }
 }
 
+/**
+ * Node's certificate verification codes: X509Pointer::ErrorCode in
+ * deps/ncrypto/ncrypto.cc (UNSPECIFIED is its fallback; OUT_OF_MEM is left out),
+ * plus the hostname check tls.checkServerIdentity reports.
+ */
+const CERTIFICATE_ERROR_CODES = new Set([
+  'UNABLE_TO_GET_ISSUER_CERT',
+  'UNABLE_TO_GET_CRL',
+  'UNABLE_TO_DECRYPT_CERT_SIGNATURE',
+  'UNABLE_TO_DECRYPT_CRL_SIGNATURE',
+  'UNABLE_TO_DECODE_ISSUER_PUBLIC_KEY',
+  'CERT_SIGNATURE_FAILURE',
+  'CRL_SIGNATURE_FAILURE',
+  'CERT_NOT_YET_VALID',
+  'CERT_HAS_EXPIRED',
+  'CRL_NOT_YET_VALID',
+  'CRL_HAS_EXPIRED',
+  'ERROR_IN_CERT_NOT_BEFORE_FIELD',
+  'ERROR_IN_CERT_NOT_AFTER_FIELD',
+  'ERROR_IN_CRL_LAST_UPDATE_FIELD',
+  'ERROR_IN_CRL_NEXT_UPDATE_FIELD',
+  'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'SELF_SIGNED_CERT_IN_CHAIN',
+  'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  'CERT_CHAIN_TOO_LONG',
+  'CERT_REVOKED',
+  'INVALID_CA',
+  'PATH_LENGTH_EXCEEDED',
+  'INVALID_PURPOSE',
+  'CERT_UNTRUSTED',
+  'CERT_REJECTED',
+  'HOSTNAME_MISMATCH',
+  'UNSPECIFIED',
+  'ERR_TLS_CERT_ALTNAME_INVALID',
+]);
+
 /** TLS verification failures carry their reason on the fetch error's cause. */
 function isCertificateError(error: unknown): boolean {
   const code = (error as { cause?: { code?: unknown } })?.cause?.code;
-  return typeof code === 'string' && /CERT|SELF_SIGNED|UNABLE_TO_VERIFY/.test(code);
+  return typeof code === 'string' && CERTIFICATE_ERROR_CODES.has(code);
 }
 
 function checkExportedDefaults(defaults: Record<string, string | undefined>): void {
@@ -394,12 +431,12 @@ export async function runOpenCodeAuthStep(options: { allowSkip?: boolean } = {})
         : discoverRuntimeModels(provider, true, backend === 'chatgpt');
     } catch (error) {
       p.log.warn(brandBody('Could not list models. Enter a model id manually; no built-in model list is substituted.'));
-      // The catalog request is the only TLS contact setup makes. A gateway that
-      // verifies upstream certificates fails every turn against this endpoint.
+      // The catalog request is the only TLS contact setup makes. The host's DNS and
+      // trust store can differ from the gateway's, so this warns rather than refuses.
       if (isCertificateError(error))
         p.log.warn(
           brandBody(
-            'The endpoint presented a certificate this host does not trust. Gateways that verify upstream TLS, such as Iron Proxy, will reject it at runtime; use a publicly trusted certificate.',
+            "This host did not trust the endpoint's certificate. If your gateway reaches the same server and verifies upstream TLS, as Iron Proxy does, every request will fail; use a publicly trusted certificate.",
           ),
         );
     }

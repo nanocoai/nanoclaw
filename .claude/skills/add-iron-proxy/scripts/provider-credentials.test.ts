@@ -262,6 +262,8 @@ it.each([
   'https://192.168.1.20/v1',
   'https://host.docker.internal/v1',
   'https://llm.local/v1',
+  'https://home.arpa/v1',
+  'https://llm.home.arpa/v1',
 ])('rejects unsupported model endpoint %s before changing configuration', (url) => {
   const f = fixture();
   expect(() => ironModelEndpoint(url, f.root)).toThrow('HTTPS model endpoint on port 443');
