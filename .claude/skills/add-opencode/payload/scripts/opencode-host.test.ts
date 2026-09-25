@@ -32,6 +32,7 @@ import {
   runHostOpenCode,
   OPENCODE_HOST_INSTALL_VERSION,
 } from './opencode-host.js';
+import { ASSIST_GUARDRAILS } from '../setup/lib/assist-guardrails.js';
 
 let root: string;
 function touch(file: string, content = ''): void {
@@ -111,7 +112,11 @@ describe('native host OpenCode lifecycle', () => {
     const binary = path.join(root, 'data/host-harness/opencode/node_modules/.bin/opencode');
     expect(findHostOpenCode(root)).toEqual({ binary, version: OPENCODE_HOST_INSTALL_VERSION });
     expect(await hostOpenCode.launch(root)).toBe('exited');
-    expect(edge.spawn).toHaveBeenLastCalledWith(binary, [], { cwd: root, stdio: 'inherit' });
+    expect(edge.spawn).toHaveBeenLastCalledWith(binary, [], {
+      cwd: root,
+      stdio: 'inherit',
+      env: expect.objectContaining({ OPENCODE_PERMISSION: expect.any(String) }),
+    });
   });
 
   it('rejects failed help commands even when stderr names the maintenance option', () => {
@@ -185,7 +190,7 @@ describe('native host OpenCode lifecycle', () => {
     expect(await hostOpenCode.prepare(root)).toBe('unavailable');
   });
 
-  it('uses the current checkout, native permissions, and only a context file reference in argv', async () => {
+  it('uses the current checkout, a restrictive permission override, and only a context file reference in argv', async () => {
     touch(path.join(root, 'bin/opencode'));
     const context = path.join(root, 'context with spaces.md');
     touch(context, 'PRIVATE FAILURE DETAIL');
@@ -194,7 +199,59 @@ describe('native host OpenCode lifecycle', () => {
     expect(args).toEqual(['--prompt', `Read ${JSON.stringify(context)} and follow the maintenance request inside it.`]);
     expect(JSON.stringify(args)).not.toContain('PRIVATE FAILURE DETAIL');
     expect(args).not.toContain('--auto');
-    expect(options).toEqual({ cwd: root, stdio: 'inherit' });
+    expect(options.cwd).toBe(root);
+    expect(options.stdio).toBe('inherit');
+    expect(options.env.PATH).toBe(process.env.PATH);
+    // OPENCODE_PERMISSION merges after the global and project config, so it
+    // wins over an operator's own allow-all settings.
+    const permission = JSON.parse(options.env.OPENCODE_PERMISSION);
+    expect(permission.edit).toBe('ask');
+    const bash = Object.entries(permission.bash as Record<string, string>);
+    // Last matching rule wins: the catch-all must come first.
+    expect(bash[0]).toEqual(['*', 'ask']);
+    expect(permission.bash['docker ps *']).toBe('allow');
+    expect(permission.bash['docker logs *']).toBe('allow');
+    expect(permission.bash['docker inspect *']).toBeUndefined();
+    for (const denied of ['docker rm *', 'docker stop *', 'docker compose down *', 'launchctl unload *']) {
+      expect(permission.bash[denied]).toBe('deny');
+    }
+    expect(permission.bash['*.env*']).toBe('ask');
+  });
+
+  it('matches bash commands against the permission override as OpenCode 1.18 does', async () => {
+    touch(path.join(root, 'bin/opencode'));
+    await hostOpenCode.launch(root);
+    const rules = Object.entries(
+      JSON.parse(edge.spawn.mock.calls[0][2].env.OPENCODE_PERMISSION).bash as Record<string, string>,
+    );
+    // Mirrors OpenCode's Wildcard.match (a trailing " *" also matches no arguments)
+    // and its findLast evaluation.
+    const action = (command: string) =>
+      rules.findLast(([pattern]) => {
+        let source = pattern
+          .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+          .replace(/\*/g, '.*')
+          .replace(/\?/g, '.');
+        if (source.endsWith(' .*')) source = source.slice(0, -3) + '( .*)?';
+        return new RegExp(`^${source}$`, 's').test(command);
+      })?.[1];
+    expect(action('docker ps')).toBe('allow');
+    expect(action('docker ps -a --format {{.Names}}')).toBe('allow');
+    expect(action('tail -n 50 logs/setup.log')).toBe('allow');
+    expect(action('docker inspect nanoclaw-iron-proxy')).toBe('ask');
+    expect(action('curl -x http://proxy:8080 https://example.com')).toBe('ask');
+    expect(action('docker rm -f nanoclaw-iron-proxy')).toBe('deny');
+    expect(action('docker stop nanoclaw-iron-control')).toBe('deny');
+    expect(action('launchctl unload ~/Library/LaunchAgents/com.nanoclaw.plist')).toBe('deny');
+    // A read-only allow never covers .env.
+    expect(action('cat logs/../.env')).toBe('ask');
+    expect(action('ls -la .env')).toBe('ask');
+  });
+
+  it('keeps native configuration free of the maintenance override', async () => {
+    touch(path.join(root, 'bin/opencode'));
+    await hostOpenCode.configure(root);
+    expect(edge.spawn.mock.calls[0][2]).toEqual({ cwd: root, stdio: 'inherit' });
   });
 
   it('allows native configuration without consulting Docker or OneCLI', async () => {
@@ -217,6 +274,7 @@ describe('existing setup failure-assist hook', () => {
       contextFile = JSON.parse(args[1].slice('Read '.length).split(' and follow')[0]);
       expect(fs.readFileSync(contextFile, 'utf8')).toContain('PRIVATE FAILURE DETAIL');
       expect(fs.readFileSync(contextFile, 'utf8')).toContain('Authentication callback failed');
+      for (const line of ASSIST_GUARDRAILS) expect(fs.readFileSync(contextFile, 'utf8')).toContain(line);
       expect(fs.statSync(contextFile).mode & 0o777).toBe(0o600);
       expect(fs.statSync(path.dirname(contextFile)).mode & 0o777).toBe(0o700);
       expect(JSON.stringify(args)).not.toContain('PRIVATE FAILURE DETAIL');
@@ -265,6 +323,28 @@ describe('existing setup failure-assist hook', () => {
       return child;
     });
     await runHostOpenCode(['--update'], root);
+  });
+  it('asks before every update command but leaves the cutover to the update skill', async () => {
+    touch(path.join(root, 'bin/opencode'));
+    let permission: { edit: string; bash: Record<string, string> } | undefined;
+    let context = '';
+    edge.spawn.mockImplementation((_binary: string, args: string[], options: { env: Record<string, string> }) => {
+      context = fs.readFileSync(JSON.parse(args[1].slice('Read '.length).split(' and follow')[0]), 'utf8');
+      permission = JSON.parse(options.env.OPENCODE_PERMISSION);
+      const child = new EventEmitter();
+      queueMicrotask(() => child.emit('close', 0));
+      return child;
+    });
+    await runHostOpenCode(['--update'], root);
+    expect(permission!.edit).toBe('ask');
+    expect(permission!.bash['*']).toBe('ask');
+    // The update skill stops the service and drains containers itself.
+    expect(Object.values(permission!.bash)).not.toContain('deny');
+    expect(context).not.toContain(ASSIST_GUARDRAILS[1]);
+
+    await runHostOpenCode(['--debug'], root);
+    expect(permission!.bash['docker rm *']).toBe('deny');
+    for (const line of ASSIST_GUARDRAILS) expect(context).toContain(line);
   });
 });
 

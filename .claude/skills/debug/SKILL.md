@@ -91,6 +91,26 @@ Reading the flow:
 - `messages_out` has a reply but the user never received it → a delivery problem (see issue 1 below).
 - `messages_in` is empty → routing never reached this session (check the router log lines and the central wiring with `ncl wirings list`).
 
+## Working on a live install
+
+Setup's failure assist (Claude, Codex or OpenCode on the operator's machine) starts from this skill. The install it debugs is live, so:
+
+- Never stop, remove or recreate containers, volumes or networks. A container that looks stale can belong to the gateway or to other software on the machine.
+- Never stop or unload the NanoClaw service (`launchctl unload`/`bootout`, `systemctl stop`/`disable`). Ask before restarting it.
+- Ask before editing `.env`, gateway files or source code, and before rebuilding the image.
+- Never print or pass credentials. `docker inspect` shows container env, which holds gateway credentials. Don't put proxy URLs or tokens on a command line.
+- Propose a repair and explain it. Setup retries the failed step to verify it.
+
+## Repairing the gateway
+
+If the credential gateway (OneCLI or Iron Proxy) is unreachable, unhealthy, or its containers are missing, re-run its setup step from the checkout:
+
+```bash
+pnpm exec tsx setup/index.ts --step gateway
+```
+
+The step detects the installed gateway, refreshes its payload and reconciles its services. Don't recreate gateway containers by hand with `docker run`/`docker rm`, and keep the gateway's database volumes and keys together: never generate replacement keys for an existing database. After the step succeeds, retry the failed setup step, or restart the service (see issue 1 below) on a finished install.
+
 ## Common Issues
 
 ### 1. "No adapter for channel type" / Messages silently lost (null platform_message_id)
@@ -120,7 +140,7 @@ grep "Channel adapter started" logs/nanoclaw.log | tail -10
 
 **Fix:**
 1. Identify which service has the correct binary and EnvironmentFile (the one whose log shows the expected channels — e.g. `signal`, `telegram`, `cli` — all started).
-2. Stop and disable the stale duplicate service:
+2. Stop and disable the stale duplicate service. A setup assist proposes these commands and the operator runs them:
    ```bash
    systemctl --user stop nanoclaw.service   # or whichever is the old one
    systemctl --user disable nanoclaw.service
@@ -145,7 +165,7 @@ A spawned container that exits without writing to `outbound.db` shows up in `log
 onecli agents list                                        # check secretMode
 onecli agents set-secret-mode --id <agent-id> --mode all  # inject all matching secrets
 ```
-If the gateway itself is unreachable, the container runner refuses to spawn (`OneCLI gateway not applied — refusing to spawn container without credentials` in the host log). Confirm the gateway is up at `http://127.0.0.1:10254`.
+If the gateway itself is unreachable, the container runner refuses to spawn (`OneCLI gateway not applied — refusing to spawn container without credentials` in the host log). Confirm the gateway is up at `http://127.0.0.1:10254`. If it isn't, follow [Repairing the gateway](#repairing-the-gateway).
 
 **MCP server failures:** a misconfigured MCP server can abort the agent run. Look for MCP initialization errors in the streamed container stderr (`LOG_LEVEL=debug`).
 

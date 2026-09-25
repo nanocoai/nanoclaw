@@ -11,8 +11,10 @@
  *   3. Build a minimal prompt: the one-paragraph situation, the failing
  *      step's name/message/hint, and a short list of *file references*
  *      (not contents) so Claude can Read what it needs on its own.
- *   4. Spawn `claude -p --output-format text` with a 2-minute timeout and
- *      a spinner that shows elapsed time.
+ *   4. Spawn `claude -p --output-format stream-json` with a spinner that
+ *      shows elapsed time. The session is read-only: `--permission-mode
+ *      dontAsk` denies anything outside a short allow-list of read-only
+ *      tools and diagnostics, and destructive commands are denied outright.
  *   5. Parse `REASON:` / `COMMAND:` out of the response. Show the reason
  *      in a clack note, then hand off to `setup/run-suggested.sh` for
  *      editable pre-fill + exec.
@@ -27,6 +29,7 @@ import path from 'path';
 import * as p from '@clack/prompts';
 import k from 'kleur';
 
+import { assistGuardrails, DESTRUCTIVE_COMMANDS, READ_ONLY_COMMANDS } from './assist-guardrails.js';
 import { extractClaudeOAuthToken } from './captured-token.js';
 import { ensureAnswer } from './runner.js';
 import { brandBody, fitToWidth, fmtDuration, note } from './theme.js';
@@ -75,6 +78,35 @@ export const STEP_FILES: Record<string, string[]> = {
 };
 
 export const BIG_PICTURE_FILES = ['README.md', 'setup/auto.ts'];
+
+/**
+ * Claude CLI deny rules for every setup assist. Deny rules hold in every
+ * permission mode, `auto` included, so the model cannot take down the live
+ * install even when its classifier would allow it.
+ */
+export const CLAUDE_DENIED_TOOLS = DESTRUCTIVE_COMMANDS.map((command) => `Bash(${command})`);
+
+/**
+ * Permission flags for the non-interactive diagnosis. Nobody answers
+ * prompts while the spinner runs, so `dontAsk` turns every call outside the
+ * allow-list into a denial. The suggested fix still goes through the
+ * operator's confirm-and-edit step before it runs.
+ */
+export const CLAUDE_READ_ONLY_ARGS = [
+  '--permission-mode',
+  'dontAsk',
+  '--tools',
+  'Read,Grep,Glob,Bash',
+  '--allowedTools',
+  'Read',
+  'Grep',
+  'Glob',
+  ...READ_ONLY_COMMANDS.map((command) => `Bash(${command})`),
+  '--disallowedTools',
+  ...CLAUDE_DENIED_TOOLS,
+  'Read(./.env)',
+  'Read(./.env.*)',
+];
 
 /**
  * Returns `true` if the user ran a Claude-suggested fix command; callers
@@ -254,6 +286,9 @@ function buildPrompt(ctx: AssistContext, projectRoot: string): string {
     'If no safe single command can fix it, respond with:',
     'REASON: <why>',
     'COMMAND: none',
+    '',
+    'The suggested command must follow these too.',
+    assistGuardrails(),
   ].join('\n');
 }
 
@@ -357,7 +392,7 @@ async function queryClaudeUnderSpinner(prompt: string, projectRoot: string): Pro
     //
     // Resume the same session on repeat invocations so Claude carries
     // context across failures in one setup run.
-    const claudeArgs = ['-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'bypassPermissions'];
+    const claudeArgs = ['-p', '--output-format', 'stream-json', '--verbose', ...CLAUDE_READ_ONLY_ARGS];
     if (claudeSessionId) {
       claudeArgs.push('--resume', claudeSessionId);
     }

@@ -11,7 +11,8 @@
  *   1. Build a handoff prompt from the caller's context: channel, current
  *      step, completed steps, collected values (secrets redacted), relevant
  *      files to read.
- *   2. Spawn `claude "<prompt>" --permission-mode auto` with
+ *   2. Spawn `claude "<prompt>" --permission-mode auto` (plus deny rules
+ *      for destructive commands, see CLAUDE_DENIED_TOOLS) with
  *      `stdio: 'inherit'` so Claude owns the terminal. The positional prompt
  *      is auto-submitted as the first user message, so Claude starts
  *      orienting immediately instead of sitting at an empty prompt — and the
@@ -38,9 +39,11 @@ import * as p from '@clack/prompts';
 import k from 'kleur';
 
 import { getSetupProvider } from '../providers/registry.js';
+import { assistGuardrails } from './assist-guardrails.js';
 import {
   type AssistContext,
   BIG_PICTURE_FILES,
+  CLAUDE_DENIED_TOOLS,
   ensureClaudeReady,
   isClaudeReady,
   offerClaudeAssist,
@@ -117,7 +120,11 @@ let handoffSessionStarted = false;
 function spawnInteractiveClaude(prompt: string): Promise<boolean> {
   const sessionArgs = handoffSessionStarted ? ['--resume', handoffSessionId] : ['--session-id', handoffSessionId];
   return new Promise<boolean>((resolve) => {
-    const child = spawn('claude', [prompt, '--permission-mode', 'auto', ...sessionArgs], { stdio: 'inherit' });
+    const child = spawn(
+      'claude',
+      [prompt, '--permission-mode', 'auto', '--disallowedTools', ...CLAUDE_DENIED_TOOLS, ...sessionArgs],
+      { stdio: 'inherit' },
+    );
     child.on('close', () => {
       handoffSessionStarted = true;
       p.log.success(brandBody("Back from Claude. Let's continue."));
@@ -219,6 +226,7 @@ function buildHandoffPrompt(ctx: HandoffContext): string {
 
   lines.push('Relevant files (read as needed with the Read tool):');
   for (const f of files) lines.push(`  - ${f}`);
+  lines.push('', assistGuardrails());
 
   return lines.join('\n');
 }
@@ -328,6 +336,7 @@ function buildFailurePrompt(ctx: AssistContext, projectRoot: string): string {
     'Relevant files (read as needed with the Read tool):',
   );
   for (const f of references) lines.push(`  - ${f}`);
+  lines.push('', assistGuardrails());
 
   return lines.join('\n');
 }

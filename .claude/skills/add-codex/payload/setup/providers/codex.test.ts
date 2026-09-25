@@ -23,14 +23,18 @@ vi.mock('../logs.js', () => ({ step: vi.fn(), userInput: vi.fn() }));
 // The API-key path reads the key through clack's masked prompt; everything
 // else in the module keeps the real clack rendering.
 const mockPassword = vi.fn();
+const mockConfirm = vi.fn();
 vi.mock('@clack/prompts', async (original) => ({
   ...(await original<typeof import('@clack/prompts')>()),
   password: (...args: unknown[]) => mockPassword(...args),
+  confirm: (...args: unknown[]) => mockConfirm(...args),
 }));
 
+import { ASSIST_GUARDRAILS } from '../lib/assist-guardrails.js';
 import * as setupLog from '../logs.js';
 import {
   buildCodexFailurePrompt,
+  offerCodexFailureAssist,
   runCodexApiKeyAuth,
   runCodexInstallCheck,
   runCodexLoginAuth,
@@ -101,6 +105,42 @@ describe('buildCodexFailurePrompt', () => {
     const prompt = buildCodexFailurePrompt({ stepName: 'verify', msg: 'boom' }, '/repo');
     expect(prompt).toContain('logs/setup-steps/');
     expect(prompt).not.toContain('Hint:');
+  });
+});
+
+describe('offerCodexFailureAssist', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    mockSpawn.mockReset();
+    mockSpawnSync.mockReset();
+    mockConfirm.mockReset();
+  });
+
+  it('launches Codex read-only with approval on request, and states the guardrails', async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-assist-home-'));
+    try {
+      fs.mkdirSync(path.join(home, '.codex'));
+      fs.writeFileSync(path.join(home, '.codex', 'auth.json'), '{}');
+      vi.stubEnv('HOME', home);
+      mockSpawnSync.mockReturnValue({ status: 0, stdout: 'codex-cli 0.155.1' });
+      mockConfirm.mockResolvedValue(true);
+      mockSpawn.mockImplementation(() => {
+        const child = new EventEmitter();
+        setImmediate(() => child.emit('close', 0));
+        return child;
+      });
+
+      expect(await offerCodexFailureAssist({ stepName: 'gateway', msg: 'boom' }, '/repo')).toBe('launched');
+
+      const [binary, args] = mockSpawn.mock.calls[0] as [string, string[]];
+      expect(binary).toBe('codex');
+      // Explicit flags override the operator's own config.toml defaults.
+      expect(args.slice(0, 4)).toEqual(['--sandbox', 'read-only', '--ask-for-approval', 'on-request']);
+      expect(args).not.toContain('--dangerously-bypass-approvals-and-sandbox');
+      for (const line of ASSIST_GUARDRAILS) expect(args[4]).toContain(line);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
 });
 

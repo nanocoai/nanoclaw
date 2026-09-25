@@ -13,6 +13,7 @@ import path from 'path';
 import * as p from '@clack/prompts';
 import k from 'kleur';
 
+import { assistGuardrails } from '../lib/assist-guardrails.js';
 import { brightSelect } from '../lib/bright-select.js';
 import { type AssistContext, BIG_PICTURE_FILES, STEP_FILES } from '../lib/claude-assist.js';
 import { brandBody, note } from '../lib/theme.js';
@@ -272,6 +273,7 @@ export function buildCodexFailurePrompt(ctx: AssistContext, projectRoot: string)
     'Relevant files (read as needed):',
   );
   for (const f of references) lines.push(`  - ${f}`);
+  lines.push('', assistGuardrails());
 
   return lines.join('\n');
 }
@@ -306,7 +308,13 @@ export async function offerCodexFailureAssist(ctx: AssistContext, projectRoot: s
 
   return new Promise<FailureAssistResult>((resolve) => {
     // codex accepts a positional initial prompt for the interactive TUI.
-    const child = spawn('codex', [prompt], { cwd: projectRoot, stdio: 'inherit' });
+    // Explicit flags override the operator's config.toml: commands run in a
+    // read-only sandbox, and anything that needs more (a write, the Docker
+    // socket, the service manager) asks the operator first.
+    const child = spawn('codex', ['--sandbox', 'read-only', '--ask-for-approval', 'on-request', prompt], {
+      cwd: projectRoot,
+      stdio: 'inherit',
+    });
     child.on('close', () => {
       p.log.success(brandBody("Back from Codex. Let's continue."));
       resolve('launched');
