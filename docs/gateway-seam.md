@@ -319,7 +319,8 @@ separate account-header secret. Parsing a provider's own login file stays in
 the provider; converting to a gateway's storage format stays in the gateway.
 
 `modelEndpoint(url)` is the one network hook. It validates an endpoint before
-setup prompts for anything, and its `configure()` routes the endpoint through
+setup prompts for anything else (OpenCode calls it from its URL prompt, so the
+operator can correct a refused URL), and its `configure()` routes the endpoint through
 the gateway once prompts complete. Iron uses it to permit the model host in its
 front proxy — needed even for a keyless local model, which creates no
 credential — and to refuse plaintext endpoints early. OneCLI declares nothing.

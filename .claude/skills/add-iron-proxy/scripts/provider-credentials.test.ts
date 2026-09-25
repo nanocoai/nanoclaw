@@ -256,12 +256,28 @@ it('does not turn API unavailability into an absent credential', async () => {
   await expect(f.connect(api()).find()).rejects.toThrow('503');
 });
 
-it.each(['http://models.example.test/v1', 'https://models.example.test:8000/v1'])(
-  'rejects unsupported model endpoint %s before changing configuration',
+it.each([
+  'http://models.example.test/v1',
+  'https://models.example.test:8000/v1',
+  'https://192.168.1.20/v1',
+  'https://host.docker.internal/v1',
+  'https://llm.local/v1',
+])('rejects unsupported model endpoint %s before changing configuration', (url) => {
+  const f = fixture();
+  expect(() => ironModelEndpoint(url, f.root)).toThrow('HTTPS model endpoint on port 443');
+  expect(f.allowHost).not.toHaveBeenCalled();
+});
+it('names what Iron needs when it refuses a model endpoint', () => {
+  const f = fixture();
+  expect(() => ironModelEndpoint('http://host.docker.internal:8000/v1', f.root)).toThrow(
+    /port 443 whose host is a DNS name with a publicly trusted certificate/,
+  );
+});
+it.each(['https://models.example.test/v1', 'https://models.example.test:443/v1'])(
+  'accepts the HTTPS endpoint %s',
   (url) => {
     const f = fixture();
-    expect(() => ironModelEndpoint(url, f.root)).toThrow('HTTPS model endpoint on port 443');
-    expect(f.allowHost).not.toHaveBeenCalled();
+    expect(() => ironModelEndpoint(url, f.root)).not.toThrow();
   },
 );
 it('rechecks OAuth account rules before keeping or replacing a credential', async () => {

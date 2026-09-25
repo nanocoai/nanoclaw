@@ -9,7 +9,11 @@ import path from 'path';
 import * as p from '@clack/prompts';
 
 import { getCredentialStore } from '../setup/gateways/credential-store.js';
-import type { ChatGptOAuthCredential, GatewayCredentialConnection } from '../setup/gateways/credential-store.js';
+import type {
+  ChatGptOAuthCredential,
+  GatewayCredentialConnection,
+  ProviderCredentialStore,
+} from '../setup/gateways/credential-store.js';
 import { brightSelect } from '../setup/lib/bright-select.js';
 import { brandBody } from '../setup/lib/theme.js';
 import * as setupLog from '../setup/logs.js';
@@ -47,6 +51,24 @@ function validHttpUrl(value: string): string | undefined {
     // handled below
   }
   return 'Enter an absolute http(s) URL without embedded credentials, query, or fragment.';
+}
+
+const LOCAL_PLACEHOLDER = 'http://host.docker.internal:8000/v1';
+const HTTPS_PLACEHOLDER = 'https://models.example.com/v1';
+
+/** The selected gateway's reason it can never route this endpoint, checked while the operator can still correct it. */
+function gatewayEndpointError(store: ProviderCredentialStore, value: string): string | undefined {
+  try {
+    store.modelEndpoint?.(value);
+  } catch (error) {
+    return `${(error as Error).message} See "Local model behind Iron Proxy" in the add-opencode skill.`;
+  }
+}
+
+/** TLS verification failures carry their reason on the fetch error's cause. */
+function isCertificateError(error: unknown): boolean {
+  const code = (error as { cause?: { code?: unknown } })?.cause?.code;
+  return typeof code === 'string' && /CERT|SELF_SIGNED|UNABLE_TO_VERIFY/.test(code);
 }
 
 function checkExportedDefaults(defaults: Record<string, string | undefined>): void {
@@ -253,6 +275,14 @@ export async function runOpenCodeAuthStep(options: { allowSkip?: boolean } = {})
     return;
   }
 
+  const store = await getCredentialStore();
+  const exportedBaseUrl = process.env.OPENCODE_BASE_URL?.trim();
+  if ((backend === 'local' || backend === 'custom') && exportedBaseUrl && exportedBaseUrl !== 'native') {
+    const invalid = validHttpUrl(exportedBaseUrl) ?? gatewayEndpointError(store, exportedBaseUrl);
+    if (invalid) throw new Error(`The exported OPENCODE_BASE_URL cannot be used. ${invalid}`);
+  }
+  const validBaseUrl = (value: string) => validHttpUrl(value) ?? gatewayEndpointError(store, value);
+
   let provider: string = backend;
   let baseUrl = '';
   let host = '';
@@ -279,8 +309,8 @@ export async function runOpenCodeAuthStep(options: { allowSkip?: boolean } = {})
     baseUrl = answer(
       await p.text({
         message: 'OpenAI-compatible base URL (include /v1)',
-        placeholder: 'http://host.docker.internal:8000/v1',
-        validate: (value) => validHttpUrl(String(value ?? '').trim()),
+        placeholder: gatewayEndpointError(store, LOCAL_PLACEHOLDER) ? HTTPS_PLACEHOLDER : LOCAL_PLACEHOLDER,
+        validate: (value) => validBaseUrl(String(value ?? '').trim()),
       }),
     ).trim();
     host = new URL(baseUrl).hostname;
@@ -315,7 +345,7 @@ export async function runOpenCodeAuthStep(options: { allowSkip?: boolean } = {})
       await p.text({
         message: 'Custom API base URL (leave blank for OpenCode native configuration)',
         placeholder: 'https://api.example.com/v1',
-        validate: (value) => (String(value ?? '').trim() ? validHttpUrl(String(value).trim()) : undefined),
+        validate: (value) => (String(value ?? '').trim() ? validBaseUrl(String(value).trim()) : undefined),
       }),
     ).trim();
     host = baseUrl
@@ -339,7 +369,7 @@ export async function runOpenCodeAuthStep(options: { allowSkip?: boolean } = {})
     OPENCODE_AUTH_MODE: backend === 'chatgpt' ? 'chatgpt' : undefined,
   };
   checkExportedDefaults(defaults);
-  const endpoint = (await getCredentialStore()).modelEndpoint?.(baseUrl || `https://${host}`);
+  const endpoint = store.modelEndpoint?.(baseUrl || `https://${host}`);
 
   // Guarded model catalogs need the newly entered key before discovery.
   // Keeping a vaulted key never reads it back into the host setup process.
@@ -362,8 +392,16 @@ export async function runOpenCodeAuthStep(options: { allowSkip?: boolean } = {})
           ? []
           : (await discoverLocalModelIds(baseUrl, globalThis.fetch, pendingKey?.key)).map((id) => `${provider}/${id}`)
         : discoverRuntimeModels(provider, true, backend === 'chatgpt');
-    } catch {
+    } catch (error) {
       p.log.warn(brandBody('Could not list models. Enter a model id manually; no built-in model list is substituted.'));
+      // The catalog request is the only TLS contact setup makes. A gateway that
+      // verifies upstream certificates fails every turn against this endpoint.
+      if (isCertificateError(error))
+        p.log.warn(
+          brandBody(
+            'The endpoint presented a certificate this host does not trust. Gateways that verify upstream TLS, such as Iron Proxy, will reject it at runtime; use a publicly trusted certificate.',
+          ),
+        );
     }
     if (pendingKey?.keepExisting) {
       p.log.info(
