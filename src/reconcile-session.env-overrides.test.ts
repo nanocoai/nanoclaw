@@ -3,12 +3,24 @@
  * and NANOCLAW_CLAIM_STUCK_MS reach the constants `decideStuckAction` uses, and a
  * bad value falls back to the default with one warning.
  *
- * `readEnvFile` is mocked so a developer's own `.env` cannot leak into the
- * "unset" case.
+ * `readEnvFile` is wrapped so a developer's own `.env` cannot leak into the
+ * "unset" case: it returns {} unless a test points it at a temp project root,
+ * where the real parser reads a real `.env` with config.ts's own key list.
  */
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('./env.js', () => ({ readEnvFile: () => ({}) }));
+const envState = vi.hoisted(() => ({ root: undefined as string | undefined }));
+vi.mock('./env.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./env.js')>();
+  return {
+    ...actual,
+    readEnvFile: (keys: string[]) => (envState.root ? actual.readEnvFile(keys, envState.root) : {}),
+  };
+});
 const warn = vi.fn();
 vi.mock('./log.js', () => ({ log: { debug: vi.fn(), info: vi.fn(), warn, error: vi.fn() } }));
 
@@ -24,7 +36,15 @@ async function loadWith(env: Record<string, string>) {
   return import('./reconcile-session.js');
 }
 
+async function loadWithDotEnv(dotEnv: string, env: Record<string, string> = {}) {
+  envState.root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-sweep-env-'));
+  fs.writeFileSync(path.join(envState.root, '.env'), dotEnv);
+  return loadWith(env);
+}
+
 afterEach(() => {
+  if (envState.root) fs.rmSync(envState.root, { recursive: true, force: true });
+  envState.root = undefined;
   vi.unstubAllEnvs();
   vi.resetModules();
 });
@@ -79,5 +99,45 @@ describe('sweep timer env overrides', () => {
     mod = await loadWith({ NANOCLAW_CLAIM_STUCK_MS: '500' });
     expect(mod.CLAIM_STUCK_MS).toBe(DEFAULT_CLAIM_MS);
     expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('reads both overrides from .env through the real parser', async () => {
+    const twoHrMs = 2 * 60 * 60 * 1000;
+    const tenMinMs = 10 * 60 * 1000;
+    const { ABSOLUTE_CEILING_MS, CLAIM_STUCK_MS, decideStuckAction } = await loadWithDotEnv(
+      `NANOCLAW_ABSOLUTE_CEILING_MS=${twoHrMs}\nNANOCLAW_CLAIM_STUCK_MS="${tenMinMs}"\n`,
+    );
+    expect(ABSOLUTE_CEILING_MS).toBe(twoHrMs);
+    expect(CLAIM_STUCK_MS).toBe(tenMinMs);
+    expect(warn).not.toHaveBeenCalled();
+
+    const base = { now: NOW, containerState: null, claims: [] };
+    expect(decideStuckAction({ ...base, heartbeatMtimeMs: NOW - 45 * 60 * 1000 }).action).toBe('ok');
+    expect(decideStuckAction({ ...base, heartbeatMtimeMs: NOW - (twoHrMs + 1) })).toMatchObject({
+      action: 'kill-ceiling',
+      ceilingMs: twoHrMs,
+    });
+
+    const claimAt = (ageMs: number) => [{ messageId: 'm-1', statusChanged: new Date(NOW - ageMs).toISOString() }];
+    const claimBase = {
+      now: NOW,
+      heartbeatMtimeMs: 0,
+      containerStartedAtMs: NOW - 5 * 60 * 1000,
+      containerState: null,
+    };
+    expect(decideStuckAction({ ...claimBase, claims: claimAt(5 * 60 * 1000) }).action).toBe('ok');
+    expect(decideStuckAction({ ...claimBase, claims: claimAt(tenMinMs + 1) })).toMatchObject({
+      action: 'kill-claim',
+      toleranceMs: tenMinMs,
+    });
+  });
+
+  it('process env wins over .env', async () => {
+    const { ABSOLUTE_CEILING_MS, CLAIM_STUCK_MS } = await loadWithDotEnv(
+      'NANOCLAW_ABSOLUTE_CEILING_MS=7200000\nNANOCLAW_CLAIM_STUCK_MS=600000\n',
+      { NANOCLAW_ABSOLUTE_CEILING_MS: '3600000', NANOCLAW_CLAIM_STUCK_MS: '120000' },
+    );
+    expect(ABSOLUTE_CEILING_MS).toBe(3600000);
+    expect(CLAIM_STUCK_MS).toBe(120000);
   });
 });
