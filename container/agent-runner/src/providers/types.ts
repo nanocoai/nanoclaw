@@ -92,7 +92,15 @@ export interface ProviderOptions {
    * keeps the provider default; a tier it did not declare never reaches it.
    */
   speed?: ProviderSpeed;
+  /**
+   * How a provider built on the Claude Code preset composes its system prompt.
+   * `claude_code` (the default) appends the instructions to the preset;
+   * `plain` sends only the instructions. Providers without a preset ignore it.
+   */
+  systemPromptMode?: SystemPromptMode;
 }
+
+export type SystemPromptMode = 'claude_code' | 'plain';
 
 export interface QueryInput {
   /** Initial prompt (already formatted by agent-runner). */
