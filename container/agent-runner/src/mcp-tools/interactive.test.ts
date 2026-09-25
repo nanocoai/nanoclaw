@@ -174,6 +174,31 @@ describe('send_card', () => {
     expect(url.description).toContain('http or https');
   });
 
+  // llama.cpp compiles tool schemas to a grammar and rejects these escapes,
+  // failing every request that carries send_card.
+  it('keeps the url pattern free of escapes a grammar converter rejects', () => {
+    const { pattern } = LINK_ACTION_SCHEMA.properties.url as { pattern: string };
+
+    expect(pattern).not.toMatch(/\\[sStn]/);
+
+    const re = new RegExp(pattern);
+    for (const url of ['https://example.com', 'http://a', 'https://x.io/p?q=1#f', 'HTTP://h:8080/~u']) {
+      expect(re.test(url)).toBe(true);
+    }
+    for (const url of [
+      'https://',
+      'https:///p',
+      'https://?q',
+      'https://#f',
+      'https://ex ample.com',
+      'https://example.com\t',
+      'https://example.com\n',
+      'ftp://example.com',
+    ]) {
+      expect(re.test(url)).toBe(false);
+    }
+  });
+
   it('constrains children to text instead of promising nested action blocks', () => {
     const cardSchema = sendCard.tool.inputSchema.properties.card as {
       properties: { children: { description: string; items: { anyOf: Array<Record<string, unknown>> } } };

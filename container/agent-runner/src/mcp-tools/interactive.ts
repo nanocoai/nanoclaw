@@ -69,9 +69,13 @@ export const LINK_ACTION_SCHEMA = Object.freeze({
     // gives, and the anchors reject whitespace, which would otherwise break out
     // of '[label](url)' on an adapter that degrades a card to markdown.
     // Rejected: '#', '/docs', 'localhost:3000', 'javascript:', 'mailto:'.
+    // Printable-ASCII ranges stand in for \s and \S: llama.cpp's
+    // schema-to-grammar converter rejects those escapes and fails every request
+    // that carries this tool. The first host character excludes '#', '/' and
+    // '?'. A non-ASCII host has to be percent-encoded.
     url: {
       type: 'string' as const,
-      pattern: '^[hH][tT][tT][pP][sS]?://[^\\s/?#]\\S*$',
+      pattern: '^[hH][tT][tT][pP][sS]?://[!-"$-.0->@-~][!-~]*$',
       description: "Web link (http or https), e.g. 'https://example.com'.",
     },
     style: {
