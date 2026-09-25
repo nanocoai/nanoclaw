@@ -633,11 +633,15 @@ export async function processQuery(
           // second run summary.
           const archivedResult = [resultText, failed ? event.error : undefined].filter(Boolean).join('\n');
           if (routing.taskRun && !taskBlockNudged) await autoAppendTaskLog(archivedResult);
-          if (failed && hasHumanChatEndpoint(routing)) {
+          if (failed) {
             // A failed turn needs a visible notice even after a partial reply.
             // Only the provider's dedicated error field is channel content;
             // unwrapped model output and raw diagnostics remain private.
-            await deliverErrorResult(routing, event.error ?? 'The agent run failed. Check the logs for details.');
+            const notice = event.error ?? 'The agent run failed. Check the logs for details.';
+            if (hasHumanChatEndpoint(routing)) await deliverErrorResult(routing, notice);
+            // No human to tell: keep the reason in the runner log, since the
+            // skipped notice may be the only place it would have been recorded.
+            else log(`Error result — no human chat endpoint, notice not sent: ${notice}`);
           }
           // An unwrapped final text only warrants the wrap-nudge when NOTHING
           // was delivered this turn — hasUnwrapped already folds in the

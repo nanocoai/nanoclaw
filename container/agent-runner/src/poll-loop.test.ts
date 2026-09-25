@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import { describe, it, expect, beforeEach, afterEach, spyOn } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './mailbox/sqlite/connection.js';
 import { getPendingMessages, markCompleted } from './db/messages-in.js';
@@ -488,6 +488,26 @@ describe('error result with no <message> envelope', () => {
 
     expect(getUndeliveredMessages()).toHaveLength(0);
     expect(pushes).toHaveLength(0);
+  });
+
+  it.each([
+    ['provider error', 'billing hard-stop', 'billing hard-stop'],
+    ['fallback text', undefined, 'The agent run failed. Check the logs for details.'],
+  ])('logs a suppressed agent-route failure once: %s', async (_label, error, expected) => {
+    const { query } = makeResultQuery({ type: 'result', text: '', isError: true, error });
+    const agentRouting = { platformId: 'ag-self', channelType: 'agent', threadId: null, inReplyTo: 'm1' };
+    const lines: string[] = [];
+    const spy = spyOn(console, 'error').mockImplementation((line) => {
+      lines.push(String(line));
+    });
+    try {
+      await processQuery(query, agentRouting, ['m1'], 'mock', undefined, 'prompt', undefined);
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(lines.filter((line) => line.includes(expected))).toHaveLength(1);
+    expect(getUndeliveredMessages()).toHaveLength(0);
   });
 
   it('still nudges (and does not deliver) a normal unwrapped result', async () => {
