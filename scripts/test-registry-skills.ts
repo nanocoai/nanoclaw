@@ -3,7 +3,7 @@
 // Applies one branch-backed or self-contained provider add-* skill to a disposable checkout and runs only
 // its build/test directives. `--all` is the local equivalent of the CI matrix.
 
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   existsSync,
@@ -133,15 +133,60 @@ function materializeSkill(commit: string, skill: string, skillsRoot: string): Re
   return meta;
 }
 
-function command(cmd: string, cwd: string, quiet = false): string {
+// No single skill step legitimately runs this long (the image build is the
+// slowest at a few minutes). A step that does is wedged — nanoclaw#3839 was a
+// `bun test` spinning inside Bun's spawnSync until GitHub's 6-hour cancel —
+// and SIGKILL is the only signal a synchronous spin honours.
+const COMMAND_TIMEOUT_MS = 15 * 60 * 1000;
+
+function command(cmd: string, cwd: string, quiet = false): Promise<string> {
   if (!quiet) console.log(`  $ ${cmd}`);
-  const result = spawnSync(cmd, { cwd, shell: true, encoding: 'utf8', maxBuffer: 50 * 1024 * 1024 });
-  if (result.status !== 0) {
-    if (result.stdout) process.stdout.write(result.stdout);
-    if (result.stderr) process.stderr.write(result.stderr);
-    throw new Error(`command exited ${result.status}: ${cmd}`);
-  }
-  return result.stdout ?? '';
+  return new Promise((resolve, reject) => {
+    // Run in its own process group: `sh -c "cd x && bun test"` keeps the shell
+    // as bun's parent, so killing the shell alone would orphan a wedged bun.
+    const child = spawn(cmd, { cwd, shell: true, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
+    child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
+    const killGroup = (signal: NodeJS.Signals) => {
+      try {
+        if (child.pid) process.kill(-child.pid, signal);
+      } catch {
+        // Already gone.
+      }
+    };
+    let timedOut = false;
+    const deadline = setTimeout(() => {
+      timedOut = true;
+      killGroup('SIGKILL');
+    }, COMMAND_TIMEOUT_MS);
+    // A detached group no longer hears the terminal's Ctrl-C; relay it.
+    const onInt = () => killGroup('SIGINT');
+    const onTerm = () => killGroup('SIGTERM');
+    process.on('SIGINT', onInt);
+    process.on('SIGTERM', onTerm);
+    const finish = (status: number | null, signal: NodeJS.Signals | null, error?: Error) => {
+      clearTimeout(deadline);
+      process.off('SIGINT', onInt);
+      process.off('SIGTERM', onTerm);
+      const out = Buffer.concat(stdout).toString('utf8');
+      if (status === 0 && !signal && !error && !timedOut) return resolve(out);
+      if (out) process.stdout.write(out);
+      const err = Buffer.concat(stderr).toString('utf8');
+      if (err) process.stderr.write(err);
+      const why = timedOut
+        ? `timed out after ${COMMAND_TIMEOUT_MS / 1000}s`
+        : error
+          ? `failed: ${error.message}`
+          : signal
+            ? `killed by ${signal}`
+            : `exited ${status}`;
+      reject(new Error(`command ${why}: ${cmd}`));
+    };
+    child.on('error', (error) => finish(null, null, error));
+    child.on('close', (status, signal) => finish(status, signal));
+  });
 }
 
 export function discover(skillsRoot = SKILLS_ROOT): RegistrySkill[] {
@@ -385,8 +430,8 @@ async function testCombinedProviders(skills: RegistrySkill[]): Promise<void> {
   try {
     git(['clone', '--quiet', '--shared', '--no-checkout', SOURCE_ROOT, root]);
     git(['checkout', '--quiet', '--detach', git(['rev-parse', 'HEAD'])], root);
-    command('pnpm install --frozen-lockfile --prefer-offline', root);
-    command('bun install --frozen-lockfile', join(root, 'container/agent-runner'));
+    await command('pnpm install --frozen-lockfile --prefer-offline', root);
+    await command('bun install --frozen-lockfile', join(root, 'container/agent-runner'));
 
     for (const meta of selected) {
       console.log(`\n==> ${meta.skill}`);
@@ -432,8 +477,8 @@ async function testOldProviderRefresh(commit: string): Promise<void> {
     git(['clone', '--quiet', '--shared', '--no-checkout', SOURCE_ROOT, root]);
     git(['fetch', '--quiet', 'origin', commit], root);
     git(['checkout', '--quiet', '--detach', commit], root);
-    command('pnpm install --frozen-lockfile --prefer-offline', root);
-    command('bun install --frozen-lockfile', join(root, 'container/agent-runner'));
+    await command('pnpm install --frozen-lockfile --prefer-offline', root);
+    await command('bun install --frozen-lockfile', join(root, 'container/agent-runner'));
 
     const oldSkills = LEGACY_PROVIDER_SKILLS.map((name) =>
       discover(join(root, '.claude/skills')).find(({ skill }) => skill === name),
@@ -485,8 +530,8 @@ async function testPreContractProviders(): Promise<void> {
   try {
     git(['clone', '--quiet', '--shared', '--no-checkout', SOURCE_ROOT, root]);
     git(['checkout', '--quiet', '--detach', git(['rev-parse', 'HEAD'])], root);
-    command('pnpm install --frozen-lockfile --prefer-offline', root);
-    command('bun install --frozen-lockfile', join(root, 'container/agent-runner'));
+    await command('pnpm install --frozen-lockfile --prefer-offline', root);
+    await command('bun install --frozen-lockfile', join(root, 'container/agent-runner'));
 
     const refs = { providers: PRE_CONTRACT_PROVIDERS_SHA };
     for (const name of LEGACY_PROVIDER_SKILLS) {
@@ -526,8 +571,8 @@ async function testAll(skills: RegistrySkill[]): Promise<void> {
     try {
       git(['clone', '--quiet', '--shared', '--no-checkout', SOURCE_ROOT, root]);
       git(['checkout', '--quiet', '--detach', head], root);
-      command('pnpm install --frozen-lockfile --prefer-offline', root);
-      if (meta.bun) command('bun install --frozen-lockfile', join(root, 'container/agent-runner'));
+      await command('pnpm install --frozen-lockfile --prefer-offline', root);
+      if (meta.bun) await command('bun install --frozen-lockfile', join(root, 'container/agent-runner'));
       const scenarios = fixtureScenarios(meta);
       for (const [index, fixture] of scenarios.entries()) {
         const scenario = fixture.name ?? String(index + 1);

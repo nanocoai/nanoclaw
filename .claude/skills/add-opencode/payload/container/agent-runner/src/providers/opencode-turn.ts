@@ -175,7 +175,7 @@ export async function* executeOpenCodeTurn(options: {
   signal: AbortSignal;
   silenceMs: number;
   idleMs: number;
-  prepare?(): void;
+  prepare?(): void | Promise<void>;
   discard(): void;
 }): AsyncGenerator<{ type: 'activity' } | { type: 'error'; message: string; retryable: false }, OpenCodeTurnResult> {
   const { client, pump, sessionId, signal } = options;
@@ -230,7 +230,8 @@ export async function* executeOpenCodeTurn(options: {
     );
     if (prior.error) throw openCodeError(prior.error);
     if (failure) throw failure;
-    options.prepare?.();
+    await options.prepare?.();
+    if (failure) throw failure;
     const messageId = createOpenCodeMessageId();
     let response: Awaited<ReturnType<OpenCodeSessionClient['prompt']>> | undefined;
     let finished = false;
