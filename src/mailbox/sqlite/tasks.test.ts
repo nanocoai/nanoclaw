@@ -268,6 +268,27 @@ describe('updateTask', () => {
     db.close();
   });
 
+  it('upgrades a pre-JSON-envelope legacy row instead of throwing', () => {
+    const db = freshDb();
+    insertTaskRow(db, {
+      id: 'task-legacy',
+      seriesId: 'task-legacy',
+      processAfter: '2999-01-01T00:00:00.000Z',
+      recurrence: null,
+      content: 'legacy plain-string prompt',
+    });
+
+    const touched = updateTask(db, 'task-legacy', { prompt: 'new prompt' });
+    expect(touched).toBe(1);
+
+    const row = db.prepare('SELECT content FROM messages_in WHERE id = ?').get('task-legacy') as {
+      content: string;
+    };
+    const parsed = JSON.parse(row.content);
+    expect(parsed.prompt).toBe('new prompt');
+    expect(parsed.script).toBeNull();
+  });
+
   it('returns 0 when no live task matches', () => {
     const db = freshDb();
     insertTaskRow(db, {
