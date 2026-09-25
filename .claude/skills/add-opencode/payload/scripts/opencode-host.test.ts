@@ -222,7 +222,51 @@ describe('native host OpenCode lifecycle', () => {
     // agent whose name no operator config can target.
     const config = JSON.parse(options.env.OPENCODE_CONFIG_CONTENT);
     expect(config.default_agent).toBe('nanoclaw-maintenance');
-    expect(config.agent['nanoclaw-maintenance']).toMatchObject({ mode: 'primary', permission });
+    expect(config.agent['nanoclaw-maintenance']).toMatchObject({ mode: 'primary', permission: { ...permission } });
+  });
+
+  it('lets the session read its own context file without an external-directory prompt', async () => {
+    touch(path.join(root, 'bin/opencode'));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'opencode-context-'));
+    try {
+      const context = path.join(outside, 'context.md');
+      touch(context, 'request');
+      await hostOpenCode.launch(root, context);
+      const env = edge.spawn.mock.calls[0][2].env;
+      const agent = JSON.parse(env.OPENCODE_CONFIG_CONTENT).agent['nanoclaw-maintenance'].permission;
+      // OpenCode asks with `<dir>/*` for the path the model passes; macOS
+      // resolves the temp dir through /private, so allow both spellings.
+      expect(agent.external_directory).toEqual({
+        [`${outside}/*`]: 'allow',
+        [`${fs.realpathSync(outside)}/*`]: 'allow',
+      });
+      expect(agent.edit).toBe('ask');
+      expect(agent.bash['*']).toBe('ask');
+      // Agent rules are appended after the operator's, so only the agent
+      // carries the grant: a top-level map would replace an operator's
+      // blanket external_directory deny for every other path.
+      expect(JSON.parse(env.OPENCODE_PERMISSION).external_directory).toBeUndefined();
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('grants no external directory whose path OpenCode would read as a wildcard', async () => {
+    touch(path.join(root, 'bin/opencode'));
+    const parent = path.join(root, 'team?');
+    fs.mkdirSync(parent);
+    const context = path.join(fs.mkdtempSync(path.join(parent, 'ctx-')), 'context.md');
+    touch(context, 'request');
+    await hostOpenCode.launch(root, context);
+    const config = JSON.parse(edge.spawn.mock.calls[0][2].env.OPENCODE_CONFIG_CONTENT);
+    expect(config.agent['nanoclaw-maintenance'].permission.external_directory).toBeUndefined();
+  });
+
+  it('grants no external directory without a context file', async () => {
+    touch(path.join(root, 'bin/opencode'));
+    await hostOpenCode.launch(root);
+    const config = JSON.parse(edge.spawn.mock.calls[0][2].env.OPENCODE_CONFIG_CONTENT);
+    expect(config.agent['nanoclaw-maintenance'].permission.external_directory).toBeUndefined();
   });
 
   it('keeps an operator-supplied inline config while adding the maintenance agent', async () => {

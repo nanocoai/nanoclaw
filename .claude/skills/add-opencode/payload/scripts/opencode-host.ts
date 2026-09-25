@@ -112,7 +112,11 @@ export const MAINTENANCE_AGENT = 'nanoclaw-maintenance';
  * inline config is left intact and the session relies on the top-level
  * override alone, rather than dropping the operator's providers.
  */
-export function maintenanceEnv(purpose: MaintenancePurpose, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+export function maintenanceEnv(
+  purpose: MaintenancePurpose,
+  base: NodeJS.ProcessEnv = process.env,
+  contextDir?: string,
+): NodeJS.ProcessEnv {
   const permission = maintenancePermission(purpose);
   const env = { ...base, OPENCODE_PERMISSION: JSON.stringify(permission) };
   let inline: { agent?: Record<string, unknown> } & Record<string, unknown> = {};
@@ -133,11 +137,26 @@ export function maintenanceEnv(purpose: MaintenancePurpose, base: NodeJS.Process
       [MAINTENANCE_AGENT]: {
         mode: 'primary',
         description: `NanoClaw ${purpose} session: asks before edits and commands.`,
-        permission,
+        permission: { ...permission, ...contextReadable(contextDir) },
       },
     },
   });
   return env;
+}
+
+/**
+ * Let the session read its own instructions, which sit in a private temp dir
+ * outside the checkout. OpenCode asks with `<dir>/*` for the path the model
+ * passes, and macOS resolves the temp dir through /private, so both
+ * spellings. Agent-level only: agent rules are appended after the
+ * operator's, so an operator's blanket external_directory deny still covers
+ * every other path. A path OpenCode would read as a wildcard gets no grant.
+ */
+function contextReadable(contextDir?: string): { external_directory?: Record<string, 'allow'> } {
+  if (!contextDir) return {};
+  const dirs = [...new Set([contextDir, fs.realpathSync(contextDir)])];
+  if (dirs.some((dir) => /[*?]/.test(dir))) return {};
+  return { external_directory: Object.fromEntries(dirs.map((dir) => [`${dir}/*`, 'allow' as const])) };
 }
 
 function run(
@@ -222,7 +241,7 @@ export const hostOpenCode = {
     const args = contextFile
       ? ['--prompt', `Read ${JSON.stringify(contextFile)} and follow the maintenance request inside it.`]
       : [];
-    return run(binary, args, root, maintenanceEnv(purpose));
+    return run(binary, args, root, maintenanceEnv(purpose, process.env, contextFile && path.dirname(contextFile)));
   },
 };
 
