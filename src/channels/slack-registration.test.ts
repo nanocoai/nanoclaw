@@ -26,12 +26,21 @@
  * conversation classifier (direct / group_dm / channel) that consumers like
  * approval cards render from. It is a pure function over an injected
  * SlackAdapter, so it is driven here with mocks; no live API is touched.
+ *
+ * It also covers postSlackCollapsibleCard — the bridge's postCard override
+ * that posts send_card specs with collapsible sections as Block Kit
+ * containers — against a mocked Web API client.
  */
 import type { SlackAdapter } from '@chat-adapter/slack';
 import { describe, it, expect, vi } from 'vitest';
 
 import { getRegisteredChannelNames } from './channel-registry.js';
-import { resolveSlackConversation } from './slack.js';
+import {
+  buildCollapsibleCardBlocks,
+  postSlackCollapsibleCard,
+  resolveSlackConversation,
+  type SlackCardPoster,
+} from './slack.js';
 import './index.js'; // the real barrel — triggers every channel's self-registration
 
 describe('slack channel registration', () => {
@@ -155,5 +164,130 @@ describe('resolveSlackConversation', () => {
       participantNames: ['name-U1', 'name-U3'],
       participantIds: ['U1', 'U3'],
     });
+  });
+});
+
+describe('postSlackCollapsibleCard', () => {
+  function poster(postMessage: (args: Record<string, unknown>) => Promise<{ ts?: string }>) {
+    return {
+      decodeThreadId: (threadId: string) => {
+        const [, channel, threadTs = ''] = threadId.split(':');
+        return { channel, threadTs };
+      },
+      webClient: { chat: { postMessage: vi.fn(postMessage) } },
+    };
+  }
+
+  it('returns undefined without calling Slack when no child is collapsible', async () => {
+    const slack = poster(async () => ({ ts: '1.1' }));
+    const card = { title: 'Report', children: ['plain', { text: 'more' }] };
+
+    await expect(
+      postSlackCollapsibleCard(slack as unknown as SlackCardPoster, 'slack:C1:1.2', card, 'Report'),
+    ).resolves.toBeUndefined();
+    expect(slack.webClient.chat.postMessage).not.toHaveBeenCalled();
+  });
+
+  it('posts header, sections, a collapsed container, and link buttons in spec order', async () => {
+    const slack = poster(async () => ({ ts: '1700000000.000100' }));
+    const card = {
+      title: 'Build failed',
+      description: 'main branch',
+      children: ['Step 3 of 5', { collapsible: true, title: 'Stack trace', text: 'Error: boom' }, { text: 'Retry?' }],
+      actions: [{ label: 'Logs', url: 'https://example.com/logs', style: 'primary' }, { label: 'Broken' }],
+    };
+
+    const id = await postSlackCollapsibleCard(
+      slack as unknown as SlackCardPoster,
+      'slack:C1:1.2',
+      card,
+      'Build failed fallback',
+    );
+
+    expect(id).toBe('1700000000.000100');
+    const args = slack.webClient.chat.postMessage.mock.calls[0][0];
+    expect(args).toMatchObject({ channel: 'C1', thread_ts: '1.2', text: 'Build failed fallback' });
+    const blocks = args.blocks as Array<Record<string, unknown>>;
+    expect(blocks.map((b) => b.type)).toEqual(['header', 'section', 'section', 'container', 'section', 'actions']);
+    expect(blocks[3]).toEqual({
+      type: 'container',
+      title: { type: 'plain_text', text: 'Stack trace' },
+      is_collapsible: true,
+      default_collapsed: true,
+      child_blocks: [{ type: 'section', text: { type: 'mrkdwn', text: 'Error: boom' } }],
+    });
+    const buttons = blocks[5].elements as Array<Record<string, unknown>>;
+    expect(buttons).toHaveLength(1);
+    expect(buttons[0]).toMatchObject({ type: 'button', url: 'https://example.com/logs', style: 'primary' });
+  });
+
+  it('posts top-level when the thread id carries no thread ts', async () => {
+    const slack = poster(async () => ({ ts: '1.1' }));
+    await postSlackCollapsibleCard(
+      slack as unknown as SlackCardPoster,
+      'slack:D1',
+      { children: [{ collapsible: true, title: 'Details', text: 'x' }] },
+      'x',
+    );
+    expect(slack.webClient.chat.postMessage.mock.calls[0][0].thread_ts).toBeUndefined();
+  });
+
+  it('returns undefined when the Slack API call fails', async () => {
+    const slack = poster(async () => {
+      throw new Error('invalid_blocks');
+    });
+    const card = { title: 'T', children: [{ collapsible: true, title: 'Trace', text: 'boom' }] };
+
+    await expect(
+      postSlackCollapsibleCard(slack as unknown as SlackCardPoster, 'slack:C1', card, 'T'),
+    ).resolves.toBeUndefined();
+    expect(slack.webClient.chat.postMessage).toHaveBeenCalledOnce();
+  });
+});
+
+describe('buildCollapsibleCardBlocks', () => {
+  it('clips the container title and splits long text at newlines within the child-block limit', () => {
+    const line = 'x'.repeat(99);
+    const text = Array.from({ length: 400 }, () => line).join('\n');
+    const blocks = buildCollapsibleCardBlocks({
+      children: [{ collapsible: true, title: 't'.repeat(200), text }],
+    });
+
+    const container = blocks?.[0] as { title: { text: string }; child_blocks: Array<{ text: { text: string } }> };
+    expect(container.title.text).toHaveLength(150);
+    expect(container.title.text.endsWith('…')).toBe(true);
+    expect(container.child_blocks.length).toBeGreaterThan(1);
+    expect(container.child_blocks.length).toBeLessThanOrEqual(10);
+    for (const block of container.child_blocks) expect(block.text.text.length).toBeLessThanOrEqual(3000);
+    expect(container.child_blocks[0].text.text.startsWith(line)).toBe(true);
+    expect(container.child_blocks[0].text.text.endsWith(line)).toBe(true);
+  });
+
+  it('marks text beyond the child-block limit as truncated', () => {
+    const blocks = buildCollapsibleCardBlocks({
+      children: [{ collapsible: true, title: 'Log', text: 'y'.repeat(40_000) }],
+    });
+    const container = blocks?.[0] as { child_blocks: Array<{ text: { text: string } }> };
+    expect(container.child_blocks).toHaveLength(10);
+    expect(container.child_blocks[9].text.text.endsWith('…')).toBe(true);
+  });
+
+  it('falls back to a generic title and skips empty collapsible sections', () => {
+    const blocks = buildCollapsibleCardBlocks({
+      children: [
+        { collapsible: true, title: '  ', text: 'body' },
+        { collapsible: true, title: 'Empty', text: '' },
+      ],
+    });
+    expect(blocks).toHaveLength(1);
+    expect((blocks?.[0] as { title: { text: string } }).title.text).toBe('Details');
+  });
+
+  it('returns null when the card exceeds the per-message block limit', () => {
+    const children = Array.from({ length: 26 }, (_, i) => [
+      `line ${i}`,
+      { collapsible: true, title: `s${i}`, text: 'x' },
+    ]).flat();
+    expect(buildCollapsibleCardBlocks({ children })).toBeNull();
   });
 });
