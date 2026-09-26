@@ -525,6 +525,112 @@ describe('DB-visible sends gate the nudge', () => {
     expect(deliveredTexts()).toEqual(['sent via tool']);
     expect(nudges(pushes)).toHaveLength(0);
   });
+
+  it('suppresses the nudge for a result-door provider too, so a tool send is not repeated', async () => {
+    seedDest();
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      const { writeMessageOut } = await import('./db/messages-out.js');
+      writeMessageOut({
+        id: 'mcp-1',
+        kind: 'chat',
+        platform_id: 'chan-1',
+        channel_type: 'discord',
+        thread_id: null,
+        content: JSON.stringify({ text: 'sent via tool' }),
+      });
+      // No mid-turn door here: the reply already went out via the tool, so
+      // the unwrapped closing prose must not trigger a duplicate re-send.
+      yield { type: 'result', text: 'Told them via the tool.' };
+    }
+    const { query, pushes } = makeStubQuery(events());
+
+    await processQuery(query, CHAT_ROUTING, ['m1'], 'opencode', undefined, 'prompt', undefined, false);
+
+    expect(deliveredTexts()).toEqual(['sent via tool']);
+    expect(nudges(pushes)).toHaveLength(0);
+  });
+
+  it('a reaction alone does not count as a reply: the unwrapped answer is still nudged', async () => {
+    seedDest();
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      const { writeMessageOut } = await import('./db/messages-out.js');
+      writeMessageOut({
+        id: 'react-1',
+        kind: 'chat',
+        platform_id: 'chan-1',
+        channel_type: 'discord',
+        thread_id: null,
+        content: JSON.stringify({ operation: 'reaction', messageId: 'p-1', emoji: 'eyes' }),
+      });
+      yield { type: 'result', text: 'The answer is 4.' };
+    }
+    const { query, pushes } = makeStubQuery(events());
+
+    await processQuery(query, CHAT_ROUTING, ['m1'], 'opencode', undefined, 'prompt', undefined, false);
+
+    expect(nudges(pushes)).toHaveLength(1);
+  });
+
+  it('a delegation send to another agent does not count as the user reply', async () => {
+    seedDest();
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      const { writeMessageOut } = await import('./db/messages-out.js');
+      writeMessageOut({
+        id: 'a2a-1',
+        kind: 'chat',
+        platform_id: 'ag-worker',
+        channel_type: 'agent',
+        thread_id: null,
+        content: JSON.stringify({ text: 'Check the arithmetic.' }),
+      });
+      yield { type: 'result', text: 'The answer is 4.' };
+    }
+    const { query, pushes } = makeStubQuery(events());
+
+    await processQuery(query, CHAT_ROUTING, ['m1'], 'opencode', undefined, 'prompt', undefined, false);
+
+    expect(nudges(pushes)).toHaveLength(1);
+  });
+
+  it('on an agent wake, a tool send back to the agent is the reply', async () => {
+    seedDest();
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      const { writeMessageOut } = await import('./db/messages-out.js');
+      writeMessageOut({
+        id: 'a2a-1',
+        kind: 'chat',
+        platform_id: 'ag-caller',
+        channel_type: 'agent',
+        thread_id: null,
+        content: JSON.stringify({ text: 'Done.' }),
+      });
+      yield { type: 'result', text: 'Replied via the tool.' };
+    }
+    const { query, pushes } = makeStubQuery(events());
+    const agentRouting = { ...CHAT_ROUTING, platformId: 'ag-caller', channelType: 'agent' };
+
+    await processQuery(query, agentRouting, ['m1'], 'opencode', undefined, 'prompt', undefined, false);
+
+    expect(nudges(pushes)).toHaveLength(0);
+  });
+
+  it('still nudges a result-door provider whose turn delivered nothing', async () => {
+    seedDest();
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      yield { type: 'result', text: 'The answer is 4.' };
+    }
+    const { query, pushes } = makeStubQuery(events());
+
+    await processQuery(query, CHAT_ROUTING, ['m1'], 'opencode', undefined, 'prompt', undefined, false);
+
+    expect(deliveredTexts()).toEqual([]);
+    expect(nudges(pushes)).toHaveLength(1);
+  });
 });
 
 // ── Failure ordering — mid-turn outbound write fails ──
