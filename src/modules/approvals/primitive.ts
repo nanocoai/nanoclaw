@@ -155,29 +155,62 @@ export async function pickApprover(agentGroupId: string | null): Promise<string[
   return approvers;
 }
 
+export interface ApprovalDeliveryOrderContext {
+  originChannelType: string;
+  originInstance?: string;
+}
+
+/**
+ * Reorders (or narrows) the approver walk in `pickApprovalDelivery`. Receives
+ * the default order and returns the order to try — e.g. to skip approvers on a
+ * channel that is currently unreachable. IDs not in the input are ignored.
+ * At most one is registered.
+ */
+export type ApprovalDeliveryOrder = (
+  approvers: string[],
+  ctx: ApprovalDeliveryOrderContext,
+) => string[] | Promise<string[]>;
+
+let approvalDeliveryOrder: ApprovalDeliveryOrder | null = null;
+
+export function registerApprovalDeliveryOrder(order: ApprovalDeliveryOrder): () => void {
+  if (approvalDeliveryOrder) {
+    log.warn('Approval delivery order already registered — overwriting');
+  }
+  approvalDeliveryOrder = order;
+  return () => {
+    if (approvalDeliveryOrder === order) approvalDeliveryOrder = null;
+  };
+}
+
 /**
  * Walk the approver list and return the first (approverId, messagingGroup)
  * pair we can actually deliver to. Returns null if nobody is reachable.
  *
  * Tie-break: prefer approvers reachable on the same channel kind as the
  * origin; else first in list. A same-channel origin resolves through its
- * exact adapter instance.
+ * exact adapter instance. A registered ApprovalDeliveryOrder may reorder
+ * the walk.
  */
 export async function pickApprovalDelivery(
   approvers: string[],
   originChannelType: string,
   originInstance?: string,
 ): Promise<{ userId: string; messagingGroup: MessagingGroup } | null> {
-  if (originChannelType) {
-    for (const userId of approvers) {
-      if (channelTypeOf(userId) !== originChannelType) continue;
-      const mg = await ensureUserDm(userId, originInstance === undefined ? undefined : { instance: originInstance });
-      if (mg) return { userId, messagingGroup: mg };
-    }
+  const sameOrigin = (userId: string): boolean =>
+    Boolean(originChannelType) && channelTypeOf(userId) === originChannelType;
+  let ordered = [...approvers.filter(sameOrigin), ...approvers.filter((userId) => !sameOrigin(userId))];
+  if (approvalDeliveryOrder) {
+    const eligible = new Set(approvers);
+    ordered = (await approvalDeliveryOrder(ordered, { originChannelType, originInstance })).filter((userId) =>
+      eligible.has(userId),
+    );
   }
-  for (const userId of approvers) {
-    if (originChannelType && channelTypeOf(userId) === originChannelType) continue;
-    const mg = await ensureUserDm(userId);
+  for (const userId of ordered) {
+    const mg = await ensureUserDm(
+      userId,
+      sameOrigin(userId) && originInstance !== undefined ? { instance: originInstance } : undefined,
+    );
     if (mg) return { userId, messagingGroup: mg };
   }
   return null;

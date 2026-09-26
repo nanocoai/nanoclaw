@@ -14,7 +14,7 @@ import {
 import { closeDb, createAgentGroup, initTestDb, runMigrations } from '../../db/index.js';
 import { createUser } from '../permissions/db/users.js';
 import { grantRole } from '../permissions/db/user-roles.js';
-import { pickApprovalDelivery, pickApprover } from './primitive.js';
+import { pickApprovalDelivery, pickApprover, registerApprovalDeliveryOrder } from './primitive.js';
 
 function now(): string {
   return new Date().toISOString();
@@ -159,5 +159,55 @@ describe('pickApprovalDelivery', () => {
     expect(exact?.messagingGroup.instance).toBe('slack-secondary');
     expect(primary.openDMCalls).toEqual(['admin']);
     expect(secondary.openDMCalls).toEqual(['admin']);
+  });
+});
+
+describe('pickApprovalDelivery ordering hook', () => {
+  let dispose: (() => void) | undefined;
+
+  beforeEach(async () => {
+    await seedAgentGroup('ag-1');
+    await mountMockAdapter('telegram');
+    await mountMockAdapter('discord', async (h) => `dm-${h}`);
+    await seedUser('telegram:111', 'telegram');
+    await seedUser('discord:222', 'discord');
+  });
+
+  afterEach(() => {
+    dispose?.();
+    dispose = undefined;
+  });
+
+  it('is consulted with the default order and its order is walked', async () => {
+    const seen: Array<{ approvers: string[]; originChannelType: string; originInstance?: string }> = [];
+    dispose = registerApprovalDeliveryOrder((approvers, ctx) => {
+      seen.push({ approvers, ...ctx });
+      return approvers.filter((id) => !id.startsWith('discord:'));
+    });
+
+    const result = await pickApprovalDelivery(['telegram:111', 'discord:222'], 'discord', 'discord');
+
+    expect(seen).toEqual([
+      { approvers: ['discord:222', 'telegram:111'], originChannelType: 'discord', originInstance: 'discord' },
+    ]);
+    expect(result?.userId).toBe('telegram:111');
+  });
+
+  it('returns null when the hook narrows the walk to nobody', async () => {
+    dispose = registerApprovalDeliveryOrder(() => []);
+    expect(await pickApprovalDelivery(['telegram:111', 'discord:222'], 'discord')).toBeNull();
+  });
+
+  it('ignores IDs the hook adds that were not eligible approvers', async () => {
+    await seedUser('telegram:999', 'telegram');
+    dispose = registerApprovalDeliveryOrder((approvers) => ['telegram:999', ...approvers]);
+    const result = await pickApprovalDelivery(['telegram:111', 'discord:222'], 'discord');
+    expect(result?.userId).toBe('discord:222');
+  });
+
+  it('keeps the default order once the hook is unregistered', async () => {
+    registerApprovalDeliveryOrder(() => ['telegram:111'])();
+    const result = await pickApprovalDelivery(['telegram:111', 'discord:222'], 'discord');
+    expect(result?.userId).toBe('discord:222');
   });
 });
