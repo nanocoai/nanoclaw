@@ -17,6 +17,7 @@ import { CronExpressionParser } from 'cron-parser';
 
 import { resolveGroupTimezone } from '../../container-config.js';
 import { log } from '../../log.js';
+import { reportOperationalError } from '../../operational-errors.js';
 import type { Session } from '../../types.js';
 import type { InboundMailbox } from '../../mailbox/index.js';
 import { appendRunLog } from './run-log.js';
@@ -88,6 +89,12 @@ export async function handleRecurrence(inDb: InboundMailbox, session: Session): 
           scriptFails,
           sessionId: session.id,
         });
+        reportOperationalError({
+          kind: 'task.auto-paused',
+          message: `Task series ${msg.seriesId} auto-paused after ${scriptFails} consecutive script failures; resume with \`ncl tasks resume ${msg.seriesId}\``,
+          key: `task.auto-paused:${msg.seriesId}`,
+          details: { seriesId: msg.seriesId, agentGroupId: session.agent_group_id, scriptFails },
+        });
         continue;
       }
 
@@ -110,6 +117,14 @@ export async function handleRecurrence(inDb: InboundMailbox, session: Session): 
         ...(scriptFails > 0 && { scriptFails, backoffMin: scriptBackoffMinutes(scriptFails) }),
         sessionId: session.id,
       });
+      if (scriptFails > 0) {
+        reportOperationalError({
+          kind: 'task.script-failing',
+          message: `Task series ${msg.seriesId} pre-task script failed ${scriptFails} run(s) in a row; next run ${nextRun}`,
+          key: `task.script-failing:${msg.seriesId}`,
+          details: { seriesId: msg.seriesId, agentGroupId: session.agent_group_id, scriptFails, nextRun },
+        });
+      }
     } catch (err) {
       log.error('Failed to compute next recurrence', {
         messageId: msg.id,

@@ -3,6 +3,7 @@ import path from 'path';
 
 import { DATA_DIR } from './config.js';
 import { log } from './log.js';
+import { reportOperationalError } from './operational-errors.js';
 
 const CB_PATH = path.join(DATA_DIR, 'circuit-breaker.json');
 const RESET_WINDOW_MS = 60 * 60 * 1000; // 1 hour
@@ -79,6 +80,12 @@ export async function enforceStartupBackoff(): Promise<void> {
       attempt,
       delaySec,
       resumeAt,
+    });
+    reportOperationalError({
+      kind: 'host.startup-backoff',
+      message: `Host restarted ${attempt - 1} times within an hour without a clean shutdown; startup delayed ${delaySec}s`,
+      key: 'host.startup-backoff',
+      details: { attempt, delaySec, resumeAt },
     });
     await new Promise((resolve) => setTimeout(resolve, delaySec * 1000));
     log.info('Circuit breaker: backoff complete, resuming startup', { attempt });
