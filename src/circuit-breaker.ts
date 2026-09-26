@@ -1,4 +1,5 @@
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import { DATA_DIR } from './config.js';
@@ -13,12 +14,21 @@ const BACKOFF_SCHEDULE_S = [0, 0, 10, 30, 120, 300, 900];
 interface CircuitBreakerState {
   attempt: number;
   timestamp: string;
+  // Which instance earned these strikes. `data/` can outlive the instance that
+  // wrote it — a mounted volume handed to a fresh container, a restored
+  // backup — and strikes from a previous instance say nothing about this one's
+  // health. os.hostname() is stable for the life of a machine or container and
+  // changes when the instance does, which is exactly the boundary we want.
+  host: string;
 }
 
-function read(): CircuitBreakerState | null {
+// As found on disk: files written before the breaker recorded `host` have none.
+type PersistedState = Omit<CircuitBreakerState, 'host'> & { host?: string };
+
+function read(): PersistedState | null {
   try {
     const raw = fs.readFileSync(CB_PATH, 'utf-8');
-    return JSON.parse(raw) as CircuitBreakerState;
+    return JSON.parse(raw) as PersistedState;
   } catch {
     return null;
   }
@@ -47,11 +57,22 @@ export function resetCircuitBreaker(): void {
 
 export async function enforceStartupBackoff(): Promise<void> {
   const now = new Date();
+  const host = os.hostname();
   const prev = read();
 
   let attempt: number;
   if (!prev) {
     attempt = 1;
+  } else if (prev.host !== host) {
+    // Includes files from before the breaker recorded a host: no identity is
+    // no proof the strikes are ours, so a legacy file resets once and is
+    // rewritten with one.
+    attempt = 1;
+    log.info('Circuit breaker reset — prior state was written by a different instance', {
+      previousHost: prev.host ?? '(none recorded)',
+      currentHost: host,
+      previousAttempt: prev.attempt,
+    });
   } else {
     const elapsedMs = now.getTime() - new Date(prev.timestamp).getTime();
     if (elapsedMs < RESET_WINDOW_MS) {
@@ -70,7 +91,7 @@ export async function enforceStartupBackoff(): Promise<void> {
     }
   }
 
-  write({ attempt, timestamp: now.toISOString() });
+  write({ attempt, timestamp: now.toISOString(), host });
 
   const delaySec = getDelay(attempt);
   if (delaySec > 0) {
