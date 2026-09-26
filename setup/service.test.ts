@@ -1,6 +1,11 @@
-import { describe, it, expect } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+
+import { afterEach, beforeEach, describe, it, expect } from 'vitest';
 
 import { getLaunchdLabel } from '../src/install-slug.js';
+import { hostProxyEnv } from './service.js';
 
 /**
  * Tests for service configuration generation.
@@ -115,5 +120,52 @@ describe('systemd unit generation', () => {
   it('sets correct ExecStart', () => {
     const unit = generateSystemdUnit('/usr/bin/node', '/srv/nanoclaw', '/home/user', false);
     expect(unit).toContain('ExecStart=/usr/bin/node /srv/nanoclaw/dist/index.js');
+  });
+});
+
+describe('hostProxyEnv', () => {
+  let root: string;
+
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-proxy-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('is empty when no proxy is configured', () => {
+    expect(hostProxyEnv(root, {})).toEqual({});
+  });
+
+  it('enables the env proxy and keeps local addresses direct', () => {
+    expect(hostProxyEnv(root, { HTTPS_PROXY: 'http://proxy.example:3128' })).toEqual({
+      NODE_USE_ENV_PROXY: '1',
+      HTTPS_PROXY: 'http://proxy.example:3128',
+      HTTP_PROXY: 'http://proxy.example:3128',
+      NO_PROXY: 'localhost,127.0.0.1,::1',
+    });
+  });
+
+  it('prefers HTTPS_PROXY, then HTTP_PROXY, then ALL_PROXY', () => {
+    const env = { HTTP_PROXY: 'http://http.example:1', ALL_PROXY: 'http://all.example:2' };
+    expect(hostProxyEnv(root, env).HTTPS_PROXY).toBe('http://http.example:1');
+    expect(hostProxyEnv(root, { ALL_PROXY: 'http://all.example:2' }).HTTPS_PROXY).toBe('http://all.example:2');
+    expect(hostProxyEnv(root, { https_proxy: 'http://lower.example:3', ...env }).HTTPS_PROXY).toBe(
+      'http://lower.example:3',
+    );
+  });
+
+  it('reads .env when the environment has no proxy, and the environment wins over .env', () => {
+    fs.writeFileSync(path.join(root, '.env'), 'HTTPS_PROXY=http://file.example:8080\nNO_PROXY=localhost,.internal\n');
+    expect(hostProxyEnv(root, {})).toMatchObject({
+      HTTPS_PROXY: 'http://file.example:8080',
+      NO_PROXY: 'localhost,.internal',
+    });
+    expect(hostProxyEnv(root, { HTTPS_PROXY: 'http://shell.example:1' }).HTTPS_PROXY).toBe('http://shell.example:1');
+  });
+
+  it('skips proxies Node cannot use', () => {
+    expect(hostProxyEnv(root, { ALL_PROXY: 'socks5://127.0.0.1:1080' })).toEqual({});
   });
 });

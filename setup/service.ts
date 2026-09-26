@@ -10,6 +10,7 @@ import net from 'net';
 import os from 'os';
 import path from 'path';
 
+import { readEnvFile } from '../src/env.js';
 import { log } from '../src/log.js';
 import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
 import { writeUpgradeState } from '../src/upgrade-state.js';
@@ -91,6 +92,35 @@ export async function run(_args: string[]): Promise<void> {
   installCliSymlink(projectRoot, homeDir);
 }
 
+const PROXY_KEYS = ['HTTPS_PROXY', 'HTTP_PROXY', 'ALL_PROXY'];
+const DEFAULT_NO_PROXY = 'localhost,127.0.0.1,::1';
+
+/**
+ * Environment the host needs to reach the internet through an outbound proxy.
+ * Node ignores HTTPS_PROXY unless NODE_USE_ENV_PROXY is set when the process
+ * boots, so it has to come from the service definition, not from the host's
+ * own startup code. The setup shell's environment wins over .env. Returns an
+ * empty object when no proxy is configured.
+ */
+export function hostProxyEnv(projectRoot: string, env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const fromFile = readEnvFile([...PROXY_KEYS, 'NO_PROXY'], projectRoot);
+  const pick = (key: string): string | undefined =>
+    (env[key] || env[key.toLowerCase()] || fromFile[key])?.trim() || undefined;
+  // Node's built-in proxy support only speaks to http(s) proxies.
+  const proxyUrl = PROXY_KEYS.map(pick).find((url) => url && /^https?:\/\//i.test(url));
+  if (!proxyUrl) return {};
+  return {
+    NODE_USE_ENV_PROXY: '1',
+    HTTPS_PROXY: proxyUrl,
+    HTTP_PROXY: proxyUrl,
+    NO_PROXY: pick('NO_PROXY') ?? DEFAULT_NO_PROXY,
+  };
+}
+
+function xmlEscape(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
 /**
  * Symlink bin/ncl into ~/.local/bin so `ncl` is available from anywhere.
  * Idempotent — overwrites an existing symlink but won't clobber a real file.
@@ -131,6 +161,10 @@ function setupLaunchd(projectRoot: string, nodePath: string, homeDir: string): v
   const plistPath = path.join(homeDir, 'Library', 'LaunchAgents', `${label}.plist`);
   fs.mkdirSync(path.dirname(plistPath), { recursive: true });
 
+  const proxyEntries = Object.entries(hostProxyEnv(projectRoot))
+    .map(([key, value]) => `\n        <key>${key}</key>\n        <string>${xmlEscape(value)}</string>`)
+    .join('');
+
   const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -153,7 +187,7 @@ function setupLaunchd(projectRoot: string, nodePath: string, homeDir: string): v
         <key>PATH</key>
         <string>/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin</string>
         <key>HOME</key>
-        <string>${homeDir}</string>
+        <string>${homeDir}</string>${proxyEntries}
     </dict>
     <key>StandardOutPath</key>
     <string>${projectRoot}/logs/nanoclaw.log</string>
@@ -303,6 +337,11 @@ async function setupSystemd(projectRoot: string, nodePath: string, homeDir: stri
     systemctlPrefix = 'systemctl --user';
   }
 
+  // systemd expands % specifiers inside Environment= values.
+  const proxyLines = Object.entries(hostProxyEnv(projectRoot))
+    .map(([key, value]) => `\nEnvironment=${key}=${value.replace(/%/g, '%%')}`)
+    .join('');
+
   const unit = `[Unit]
 Description=NanoClaw Personal Assistant
 After=network.target
@@ -315,7 +354,7 @@ Restart=always
 RestartSec=5
 KillMode=process
 Environment=HOME=${homeDir}
-Environment=PATH=/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin${proxyLines}
 StandardOutput=append:${projectRoot}/logs/nanoclaw.log
 StandardError=append:${projectRoot}/logs/nanoclaw.error.log
 
@@ -504,6 +543,7 @@ socket.setTimeout(1000, () => {
 });
 `)} ${shellQuote(path.join(projectRoot, 'data', 'ncl.sock'))}`,
     '',
+    ...Object.entries(hostProxyEnv(projectRoot)).map(([key, value]) => `export ${key}=${shellQuote(value)}`),
     'echo "Starting NanoClaw..."',
     // Node resets the inherited SIGHUP ignore; detach from the wizard terminal.
     `setsid nohup ${shellQuote(nodePath)} ${shellQuote(entrypoint)} \\`,
