@@ -72,16 +72,17 @@ function killProcessTree(proc: ChildProcess): void {
 export function spawnOpencodeServer(
   config: Record<string, unknown>,
   timeoutMs = 10_000,
+  environment: NodeJS.ProcessEnv = process.env,
 ): Promise<{ url: string; proc: ChildProcess }> {
   return new Promise((resolve, reject) => {
-    initializeOpenCodeAuth(process.env.XDG_DATA_HOME ?? '/opencode-xdg', process.env.OPENCODE_AUTH_MODE);
+    initializeOpenCodeAuth(environment.XDG_DATA_HOME ?? '/opencode-xdg', environment.OPENCODE_AUTH_MODE);
     const hostname = '127.0.0.1';
     const port = 4096;
     const proc = spawn('opencode', ['serve', `--hostname=${hostname}`, `--port=${port}`], {
       // `opencode serve` has no directory flag. Its cwd is the project root
       // used by native document discovery and built-in filesystem tools.
       cwd: AGENT_DIR,
-      env: buildOpenCodeServerEnv(config),
+      env: buildOpenCodeServerEnv(config, environment),
       detached: true,
     });
 
@@ -344,13 +345,16 @@ type SharedRuntime = {
  * this seam exercises it.
  */
 export interface OpenCodeSharedRuntimeDeps {
-  spawnServer(config: Record<string, unknown>): Promise<{ url: string; proc: ChildProcess }>;
+  spawnServer(
+    config: Record<string, unknown>,
+    environment: NodeJS.ProcessEnv,
+  ): Promise<{ url: string; proc: ChildProcess }>;
   createClient(url: string, cwd: string): SharedRuntimeClient;
   createQuestionClient(url: string): QuestionClient;
 }
 
 const defaultSharedRuntimeDeps: OpenCodeSharedRuntimeDeps = {
-  spawnServer: (config) => spawnOpencodeServer(config),
+  spawnServer: (config, environment) => spawnOpencodeServer(config, undefined, environment),
   // OpenCode scopes sessions and tool execution by the directory carried by
   // the SDK client. The server process cwd is not sufficient: without this
   // option the SDK defaults requests to the server's launch directory.
@@ -387,7 +391,10 @@ async function ensureSharedRuntime(
   configuration?: ResolvedRuntimeConfiguration,
 ): Promise<SharedRuntime> {
   const config = buildOpenCodeConfig(options, configuration);
-  const key = JSON.stringify({ config, cwd });
+  // The server inherits this environment (credentials, endpoints), so a
+  // provider built with a different one must not reuse the running server.
+  const environment = options.env ?? process.env;
+  const key = JSON.stringify({ config, cwd, environment });
   if (sharedRuntime && sharedConfigKey === key) return sharedRuntime;
 
   if (sharedInit) return sharedInit;
@@ -397,7 +404,7 @@ async function ensureSharedRuntime(
     if (sharedRuntime) {
       destroySharedRuntime();
     }
-    const { url, proc } = await deps.spawnServer(config);
+    const { url, proc } = await deps.spawnServer(config, environment);
 
     let runtime: SharedRuntime;
     // Owns the SSE subscription and its retry loop. Teardown closes the
@@ -739,16 +746,20 @@ export class OpenCodeProvider implements AgentProvider {
       let sessionId = input.continuation;
       let initialized = false;
       try {
+        // A per-query model resolves exactly as a provider constructed with
+        // that model would, so the server config declares it.
+        const options = input.model ? { ...self.options, model: input.model } : self.options;
+        const inference = (
+          input.model || !self.configuration
+            ? resolveOpenCodeInference(options, options.env ?? process.env)
+            : self.configuration.inference
+        ) as Record<string, unknown>;
+        const configuration = self.configuration && { ...self.configuration, inference };
         const runtime = self.runtime
-          ? await self.runtime.getRuntime(self.options, input.cwd)
-          : await ensureSharedRuntime(self.options, input.cwd, self.configuration);
+          ? await self.runtime.getRuntime(options, input.cwd)
+          : await ensureSharedRuntime(options, input.cwd, configuration);
         const pump = eventPump(runtime);
-        const promptModel = resolveOpenCodePromptModel(
-          (self.configuration?.inference ?? resolveOpenCodeInference(self.options, process.env)) as Record<
-            string,
-            unknown
-          >,
-        );
+        const promptModel = resolveOpenCodePromptModel(inference);
         while (!abort.signal.aborted) {
           while (!pending.length && !ended && !abort.signal.aborted) {
             await new Promise<void>((resolve) => {

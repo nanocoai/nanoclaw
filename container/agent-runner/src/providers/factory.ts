@@ -14,9 +14,13 @@ export function createProvider(name: string, options: ProviderOptions = {}): Age
   // over by the render path below.
   const inputs = runtimeInputs(options);
   // Core resolves the declared configuration and hands the result to the
-  // provider; the provider does not call its own capabilities.
+  // provider; the provider does not call its own capabilities. Capabilities
+  // see the environment the provider itself runs with.
   const build = (opts: ProviderOptions, optsInputs = runtimeInputs(opts)): AgentProvider =>
-    getProviderFactory(name)(opts, contract ? resolveRuntimeConfiguration(contract, optsInputs) : undefined);
+    getProviderFactory(name)(
+      opts,
+      contract ? resolveRuntimeConfiguration(contract, optsInputs, opts.env ?? process.env) : undefined,
+    );
   // Wrappers see the bare provider; the contract hooks below attach to what
   // the runner actually holds, so they run once per query and exchange.
   const provider = getProviderWrappers(name).reduce(

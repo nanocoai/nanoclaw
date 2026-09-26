@@ -782,4 +782,68 @@ describe('runtime contract consumption', () => {
     expect(spawnServer).toHaveBeenCalledTimes(2);
     expect(first.proc.kill).toHaveBeenCalled();
   });
+
+  it('resolves config and spawns the server from the provider env, not process.env', async () => {
+    const server = fakeServer((sid) => server.reply(sid, 'configured'));
+    const { spawnServer } = installDeps([server]);
+    const env = {
+      XDG_DATA_HOME: memoryDir,
+      OPENCODE_PROVIDER: 'openai',
+      OPENCODE_MODEL: 'openai/env-model',
+      OPENCODE_BASE_URL: 'http://localhost:8892/v1',
+    };
+    const provider = createProvider('opencode', { env });
+    registerProviderMemorySessionHook('opencode', provider, MEMORY_HOOK);
+    await runOneTurn(provider as OpenCodeProvider);
+    expect(spawnServer.mock.calls[0][0]).toMatchObject({
+      model: 'openai/env-model',
+      enabled_providers: ['openai'],
+      provider: { openai: { options: { baseURL: 'http://localhost:8892/v1' } } },
+    });
+    expect(spawnServer.mock.calls[0][1]).toBe(env);
+  });
+
+  it('does not share one server between providers with different envs', async () => {
+    const first = fakeServer((sid) => first.reply(sid, 'one'));
+    const second = fakeServer((sid) => second.reply(sid, 'two'));
+    const { spawnServer } = installDeps([first, second]);
+    const configuration = {
+      executionPolicy: { question: 'deny' },
+      inference: { model: 'openai/test' },
+      mcpServers: {},
+    };
+    for (const credential of ['a', 'b']) {
+      const provider = new OpenCodeProvider(
+        { env: { OPENCODE_TEST_CREDENTIAL: credential } },
+        undefined,
+        configuration,
+      );
+      provider.registerMemorySessionHook(MEMORY_HOOK);
+      await runOneTurn(provider);
+    }
+    expect(spawnServer).toHaveBeenCalledTimes(2);
+    expect(spawnServer.mock.calls.map((call) => call[1].OPENCODE_TEST_CREDENTIAL)).toEqual(['a', 'b']);
+  });
+
+  it('declares and prompts a per-query model override', async () => {
+    const server = fakeServer((sid) => server.reply(sid, 'override'));
+    const { spawnServer } = installDeps([server]);
+    const models: unknown[] = [];
+    const prompt = server.client.session.prompt;
+    server.client.session.prompt = ((params) => {
+      models.push(params.body.model);
+      return prompt(params);
+    }) as OpenCodeSessionClient['prompt'];
+    const env = { XDG_DATA_HOME: memoryDir, OPENCODE_PROVIDER: 'openai', OPENCODE_MODEL: 'openai/configured' };
+    const provider = createProvider('opencode', { env });
+    registerProviderMemorySessionHook('opencode', provider, MEMORY_HOOK);
+    const query = provider.query({ prompt: 'hi', cwd: CWD, model: 'openai/fallback' });
+    query.end();
+    await collect(query.events);
+    expect(spawnServer.mock.calls[0][0]).toMatchObject({
+      model: 'openai/fallback',
+      provider: { openai: { models: { fallback: { id: 'fallback' } } } },
+    });
+    expect(models).toEqual([{ providerID: 'openai', modelID: 'fallback' }]);
+  });
 });

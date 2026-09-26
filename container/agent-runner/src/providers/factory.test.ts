@@ -126,6 +126,33 @@ describe('createProvider', () => {
     expect(memorySeen).toEqual([{ hookCommand: 'run-hook' }]);
   });
 
+  it('resolves configuration against the provider env when one is supplied', () => {
+    const name = `factory-env-${process.pid}`;
+    const seen: Array<ResolvedRuntimeConfiguration | undefined> = [];
+    registerProvider(name, {
+      create: (_options, configuration) => {
+        seen.push(configuration);
+        return stubProvider();
+      },
+      contract: {
+        seamVersion: PROVIDER_RUNTIME_CONTRACT_SEAM_VERSION,
+        configuration: {
+          executionPolicy: { constant: {} },
+          inference: (_input, environment) => ({ endpoint: environment.FACTORY_ENV_PROBE ?? null }),
+        },
+        textDelivery: 'result',
+        commands: { formatting: 'xml' },
+      },
+    });
+
+    createProvider(name, { env: { FACTORY_ENV_PROBE: 'from-options' } });
+    createProvider(name, {});
+    expect(seen.map((configuration) => configuration?.inference)).toEqual([
+      { endpoint: 'from-options' },
+      { endpoint: null },
+    ]);
+  });
+
   it('hands Claude the core-resolved configuration (no provider-side resolve)', () => {
     const provider = createProvider('claude', {
       mcpServers: { 'custom.server': { command: 'custom-server' } },
