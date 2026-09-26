@@ -118,7 +118,7 @@ export function maintenanceEnv(
   contextDir?: string,
 ): NodeJS.ProcessEnv {
   const permission = maintenancePermission(purpose);
-  const env = { ...base, OPENCODE_PERMISSION: JSON.stringify(permission) };
+  const env: NodeJS.ProcessEnv = { ...base, OPENCODE_PERMISSION: JSON.stringify(permission) };
   let inline: { agent?: Record<string, unknown> } & Record<string, unknown> = {};
   if (base.OPENCODE_CONFIG_CONTENT) {
     try {
