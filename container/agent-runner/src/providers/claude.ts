@@ -268,7 +268,7 @@ export class ClaudeProvider implements AgentProvider {
         allowedTools: [...this.mcp.allowedTools],
         disallowedTools: [...this.executionPolicy.disallowedTools],
         env: this.env,
-        model: this.inference.model,
+        model: input.model ?? this.inference.model,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         effort: this.inference.effort as any,
         permissionMode: this.executionPolicy.permissionMode,
@@ -293,6 +293,9 @@ export class ClaudeProvider implements AgentProvider {
 
     async function* translateEvents(): AsyncGenerator<ProviderEvent> {
       let messageCount = 0;
+      // Anything the attempt did that a retry would repeat: a tool call or
+      // assistant text the poll-loop may already have delivered.
+      let producedOutput = false;
       for await (const message of sdkResult) {
         if (aborted) return;
         messageCount++;
@@ -322,11 +325,15 @@ export class ClaudeProvider implements AgentProvider {
           const content = (message as { message?: { content?: Array<{ type?: string; text?: string }> } }).message
             ?.content;
           if (Array.isArray(content)) {
+            if (content.some((block) => block.type === 'tool_use')) producedOutput = true;
             const text = content
               .filter((block) => block.type === 'text' && block.text)
               .map((block) => block.text)
               .join('');
-            if (text) yield { type: 'text', text };
+            if (text) {
+              producedOutput = true;
+              yield { type: 'text', text };
+            }
           }
         } else if (message.type === 'result') {
           // `result` text exists only on subtype:"success"; error subtypes
@@ -334,11 +341,13 @@ export class ClaudeProvider implements AgentProvider {
           // `errors[]` instead. Keep that actionable notice separate from
           // model output so the poll-loop can deliver it without scratchpad.
           const m = message as { result?: string; is_error?: boolean; errors?: string[] };
+          const isError = m.is_error === true;
           yield {
             type: 'result',
             text: m.result ?? null,
-            isError: m.is_error === true,
+            isError,
             error: m.errors?.length ? m.errors.join('\n') : undefined,
+            ...(isError ? { retryable: !producedOutput } : {}),
           };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
           yield { type: 'error', message: 'API retry', retryable: true };

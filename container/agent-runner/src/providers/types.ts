@@ -114,6 +114,13 @@ export interface QueryInput {
   systemContext?: {
     instructions?: string;
   };
+
+  /**
+   * Model for this query only, overriding the provider's configured model.
+   * Omitted in normal operation; a wrapper sets it to retry an attempt on
+   * another model. Providers without per-query model selection ignore it.
+   */
+  model?: string;
 }
 
 export type McpServerConfig =
@@ -160,8 +167,12 @@ export type ProviderEvent =
    * `text` is model output; `error` is an optional user-facing provider error
    * (e.g. a billing/quota notice), kept separate from model scratchpad and
    * raw diagnostics. Failures without `error` receive a generic notice.
+   * `retryable` (failed turns only) is true when the attempt ran no tool and
+   * emitted no text, so re-running it cannot repeat side effects or visible
+   * output. The poll-loop ignores it; a provider wrapper can use it to retry
+   * the attempt before the failure is delivered.
    */
-  | { type: 'result'; text: string | null; isError?: boolean; error?: string }
+  | { type: 'result'; text: string | null; isError?: boolean; error?: string; retryable?: boolean }
   /**
    * An assistant text segment emitted mid-turn (e.g. between tool calls).
    * The SDK's final `result` carries only the LAST assistant text, so a
