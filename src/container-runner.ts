@@ -28,6 +28,7 @@ import { CONTAINER_PLUGINS_DIR, materializeContainerJson } from './container-con
 import { getContainerConfig } from './db/container-configs.js';
 import { updateContainerConfigScalars } from './db/container-configs.js';
 import { CONTAINER_RUNTIME_BIN } from './container-runtime.js';
+import { collectContributedEnv } from './container-env-contributors.js';
 import { composeGroupProjectDoc, DEFAULT_PROJECT_DOC } from './project-doc-compose.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import {
@@ -1261,11 +1262,12 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
   };
   // The contributed lane (ContainerSpec.contributedEnv): registry-sourced env,
   // exempt from the credential-NAME check and still refused credential VALUES.
-  // The model provider's contribution fills first, the gateway's second — a
-  // gateway wins a key collision, the override the old raw-argv append got
-  // from Docker's last-wins rule.
+  // The model provider's contribution fills first, registered env
+  // contributors next, the gateway's last — a gateway wins a key collision,
+  // the override the old raw-argv append got from Docker's last-wins rule.
   const contributedEnv: Record<string, string> = {
     ...(contribution.env ?? {}),
+    ...collectContributedEnv({ agentGroupId: agentGroup.id, sessionId: session.id, containerConfig }),
     ...(gateway.env ?? {}),
   };
 
