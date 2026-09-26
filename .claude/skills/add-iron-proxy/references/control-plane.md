@@ -55,11 +55,16 @@ two checks. Do not send test messages or writes to a real app.
 
 `control.env` holds the operator bootstrap and encryption keys; `proxy.env`
 holds this proxy's control-plane token; `login.txt` holds operator sign-in
-details. Files are mode 0600 inside a mode 0700 directory. Back up these files
+details; `image.json` records how the console image runs on this engine (the
+pinned amd64 image, that image under emulation, or a local build for another
+architecture). Files are mode 0600 inside a mode 0700 directory. Back up these files
 and the install-scoped PostgreSQL volume together. Recreating containers does
 not recreate keys or the database.
 
-The control-plane image and database image are pinned by digest. The native
+The control-plane image and database image are pinned by digest. On an engine
+that is not amd64 the control-plane image is instead built from the pinned
+upstream revision, labelled with that revision, and recorded in `image.json`;
+the database image is multi-architecture and stays pinned by digest. The native
 proxy build uses unmodified upstream source and is pinned by source commit plus the separate NanoClaw approval-front hash. Do not
 replace it with a generic managed-mode image: managed updates would remove
 NanoClaw's local identity and approval transforms.

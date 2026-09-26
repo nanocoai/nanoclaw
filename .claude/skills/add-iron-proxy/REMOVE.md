@@ -16,4 +16,9 @@ when the operator requested permanent data deletion. Do this before NanoClaw
 removes the encryption keys. Never remove another copy's volume or a shared
 database.
 
+On an engine that is not amd64, removal keeps the console image setup built
+here (`nanoclaw-iron-control:<revision>-<arch>`, listed by `docker images`) so a
+re-install does not rebuild it; remove it with `docker image rm` when the copy
+is gone for good.
+
 Use the journal-derived skill removal to remove installed payload files.

@@ -17,5 +17,7 @@ COPY --from=build /out/iron-proxy /usr/local/bin/iron-proxy
 COPY --from=approval-summary /summary/target/release/gateway-approval-summary /usr/local/bin/gateway-approval-summary
 COPY --from=approval-summary /summary/LICENSE.onecli /usr/share/licenses/onecli-summary/LICENSE
 COPY --from=build /out/nanoclaw-iron-front /usr/local/bin/nanoclaw-iron-front
-COPY --chmod=755 _entrypoint.sh /usr/local/bin/nanoclaw-iron-entrypoint
+# Plain COPY + chmod, not COPY --chmod: the legacy builder (Docker without Buildx) must build this too.
+COPY _entrypoint.sh /usr/local/bin/nanoclaw-iron-entrypoint
+RUN chmod 755 /usr/local/bin/nanoclaw-iron-entrypoint
 ENTRYPOINT ["nanoclaw-iron-entrypoint"]

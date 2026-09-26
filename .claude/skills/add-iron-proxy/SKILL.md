@@ -51,7 +51,16 @@ NanoClaw's approval service uses a private Unix socket on Linux. On macOS it use
 
 `NANOCLAW_IRON_PROXY_PORT` in `.env` sets the internal proxy port (default `8080`). Setup uses the same value for the front listener and the agent proxy URL. This does not publish a host port. Re-run setup and restart this NanoClaw copy after changing it.
 
-`NANOCLAW_IRON_CONTROL_PORT` sets the console port (default `10257`). Only `127.0.0.1` is published. Set it before setup if another install uses that port; use the URL printed by setup. The official image currently targets `linux/amd64`; Docker on Apple Silicon runs it with emulation.
+`NANOCLAW_IRON_CONTROL_PORT` sets the console port (default `10257`). Only `127.0.0.1` is published. Set it before setup if another install uses that port; use the URL printed by setup.
+
+### Architectures
+
+The pinned official Iron Control image exists for `linux/amd64` only. Setup checks the Docker engine's architecture before it pulls anything:
+
+- **amd64**: the pinned image and digest, unchanged.
+- **Any other architecture (arm64 Linux hosts, Apple Silicon)**: setup builds Iron Control from the pinned upstream revision on this machine with Docker Buildx, tags it `nanoclaw-iron-control:<revision>-<arch>`, and runs it natively with `platform:` set to the engine's own (several minutes on first install; later runs reuse the image). Without Buildx it keeps the pinned amd64 image under QEMU emulation when the engine can run amd64 containers. When it can do neither, it stops before any pull and names the options: enable emulation with `docker run --privileged --rm tonistiigi/binfmt --install amd64`, or choose the OneCLI gateway. Setup never registers emulation on its own; the wizard runs the step without a terminal, so that command is yours to run. Running `setup.ts --with-control` from a terminal asks first.
+
+The choice is recorded in `data/session-materials/iron-control/image.json` and reused by later setup runs and `/update-nanoclaw`; an install that already ran the pinned image under emulation keeps doing so while emulation works. To decide again, delete `image.json` and `compose.yaml` from that directory and re-run setup: both are rewritten, and the keys and database are kept. This check runs before setup builds Iron Proxy, so a host that can neither build nor emulate stops within seconds.
 
 ```nc:run effect:step
 pnpm exec tsx .claude/skills/add-iron-proxy/scripts/setup.ts --with-control
@@ -68,6 +77,11 @@ pnpm exec tsx .claude/skills/add-iron-proxy/scripts/setup.ts --with-control
 - **The database exists but keys are missing:** restore its matching `control.env`.
   Keep the database volume and encryption keys together; do not generate replacement
   keys for an existing database.
+- **`exec format error` or "has no arm64 image" at the Iron Control step:** this
+  engine is not amd64 and the pinned console image only exists for amd64. Install
+  Docker Buildx so setup builds the console here, or enable emulation with
+  `docker run --privileged --rm tonistiigi/binfmt --install amd64`, or choose the
+  OneCLI gateway; then re-run setup. See [Architectures](#architectures).
 
 ## Validate
 
@@ -76,7 +90,7 @@ pnpm run build
 ```
 
 ```nc:run effect:test
-pnpm exec vitest run src/gateway-providers/iron-proxy.test.ts src/gateway-providers/iron-proxy-approval.test.ts src/gateway-providers/gateway-provider-registry.test.ts src/gateway-approval-coordinator.test.ts .claude/skills/add-iron-proxy/scripts/control.test.ts .claude/skills/add-iron-proxy/scripts/provider-credentials.test.ts .claude/skills/add-iron-proxy/scripts/credential-isolation.test.ts .claude/skills/add-iron-proxy/scripts/install-command.test.ts
+pnpm exec vitest run src/gateway-providers/iron-proxy.test.ts src/gateway-providers/iron-proxy-approval.test.ts src/gateway-providers/gateway-provider-registry.test.ts src/gateway-approval-coordinator.test.ts .claude/skills/add-iron-proxy/scripts/control.test.ts .claude/skills/add-iron-proxy/scripts/control-image.test.ts .claude/skills/add-iron-proxy/scripts/provider-credentials.test.ts .claude/skills/add-iron-proxy/scripts/credential-isolation.test.ts .claude/skills/add-iron-proxy/scripts/install-command.test.ts
 ```
 
 The setup consumer writes `NANOCLAW_GATEWAY_PROVIDER=iron-proxy` only after every directive succeeds. Restart only this copy's NanoClaw service after an upgrade so its session contribution and approval bridge match the new installation. Check the proxy has synced its assigned principal before reporting the gateway ready.
