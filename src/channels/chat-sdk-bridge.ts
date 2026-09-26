@@ -47,6 +47,8 @@ interface ConnectionAwareAdapter extends Adapter {
 export interface ReplyContext {
   text: string;
   sender: string;
+  /** True only when the quoted message was authored by this adapter's bot. */
+  isReplyToBot?: boolean;
 }
 
 // ---------------------------------------------------------------------------
