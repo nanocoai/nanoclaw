@@ -82,6 +82,12 @@ Its schema:
 }
 ```
 
+> **Note:** setup may write a `nonMainReadOnly` top-level key into freshly
+> created allowlist files — this field is a legacy artefact and is silently
+> ignored by the validator (`src/modules/mount-security/index.ts`).
+> Read-write permission is always decided per `allowedRoots[n].allowReadWrite`,
+> never by the top-level flag.
+
 **Default blocked patterns** (merged with any in the file):
 ```
 .ssh, .gnupg, .gpg, .aws, .azure, .gcloud, .kube, .docker,
