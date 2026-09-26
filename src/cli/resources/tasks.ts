@@ -49,6 +49,16 @@ function bool(value: unknown): boolean {
   return value === true || value === 'true' || value === '1';
 }
 
+/**
+ * Tri-state read of a declared boolean flag: `undefined` when the caller did
+ * not pass it at all, so `update` can tell "leave it alone" apart from
+ * "set it to false". The declared-arg validator has already coerced a passed
+ * value to a real boolean (`--fresh-session false` / `--fresh-session 0`).
+ */
+function optionalBool(value: unknown): boolean | undefined {
+  return value === undefined ? undefined : bool(value);
+}
+
 function normalizeNullableString(value: unknown): string | null | undefined {
   if (value === undefined) return undefined;
   if (value === null) return null;
@@ -118,6 +128,7 @@ function toOutput(session: ScopedSession, row: TaskRow) {
     recurrence: row.recurrence,
     prompt: content.prompt.length > 120 ? content.prompt.slice(0, 117) + '...' : content.prompt,
     has_script: content.script ? 1 : 0,
+    fresh_session: content.freshSession ? 1 : 0,
     origin_session_id: content.originSessionId, // which session created the task (null for CLI-created)
     created_at: row.timestamp,
     tries: row.tries,
@@ -153,6 +164,7 @@ async function createTask(args: Record<string, unknown>, ctx: CallerContext) {
     script,
     dangerouslyOverrideRecurrenceLimit: bool(args.dangerously_override_recurrence_limit),
     timezone: await resolveGroupTimezone(group),
+    freshSession: bool(args.fresh_session),
   });
   const { session, row } = await createScheduledTask(group, prepared, {
     originSessionId: ctx.caller === 'agent' ? ctx.sessionId : null,
@@ -260,6 +272,7 @@ async function getTask(args: Record<string, unknown>, ctx: CallerContext) {
         ...toOutput(session, row),
         prompt: content.prompt,
         script: content.script,
+        fresh_session: content.freshSession ? 1 : 0,
         origin_session_id: content.originSessionId,
         completed_runs: stats.runs,
         failed_runs: stats.failedRuns,
@@ -360,6 +373,10 @@ async function updateTaskCommand(args: Record<string, unknown>, ctx: CallerConte
     update.recurrence = recurrence;
   }
   if (script !== undefined) update.script = script;
+  // Tri-state: an omitted --fresh-session leaves the series as it is; only an
+  // explicit value (including `--fresh-session false`) changes it.
+  const freshSession = optionalBool(args.fresh_session);
+  if (freshSession !== undefined) update.freshSession = freshSession;
   const fields = Object.keys(update);
   if (fields.length === 0) throw new Error('nothing to update');
 
@@ -440,6 +457,12 @@ registerResource({
     { name: 'recurrence', type: 'string', description: 'Optional cron expression.', updatable: true },
     { name: 'prompt', type: 'string', description: 'Task prompt.', required: true, updatable: true },
     { name: 'script', type: 'string', description: 'Optional pre-task bash script.', updatable: true },
+    {
+      name: 'fresh_session',
+      type: 'boolean',
+      description: 'Start each occurrence in a fresh agent conversation instead of resuming. Default off.',
+      updatable: true,
+    },
   ],
   operations: {},
   customOperations: {
@@ -499,6 +522,11 @@ registerResource({
         `carries a --script gate (the script decides whether each fire needs you — a gated fire that\n` +
         `finds nothing costs zero tokens) or you pass --dangerously-override-recurrence-limit after\n` +
         `the user explicitly confirmed they want an ungated frequent task.\n\n` +
+        `Session continuity: by default every occurrence of a series resumes the previous one, so the\n` +
+        `agent remembers what it did last time — and the conversation grows without bound, since a live\n` +
+        `recurring series' session is never reset. Pass --fresh-session for stateless jobs that redo the\n` +
+        `same work each fire; each occurrence then starts a clean conversation. It can be turned on or off\n` +
+        `later on a live series with \`ncl tasks update <id> --fresh-session [true|false]\`.\n\n` +
         `Failure backoff: a script that ERRORS repeatedly backs the series off (2,4,8,…60 min between fires; each errored fire counts as a failed run); after 8 consecutive failures the series is auto-paused with a note in its run log — fix the script, then \`ncl tasks resume <id>\`. A deliberate wakeAgent=false is a normal run and never backs off. \`ncl tasks get <id>\` shows failed_runs and the run log.`,
       args: [
         {
@@ -528,6 +556,15 @@ registerResource({
           name: 'script',
           type: 'string',
           description: 'Pre-task gate script (bash) — see the --script contract above.',
+        },
+        {
+          name: 'fresh_session',
+          type: 'boolean',
+          description:
+            'Run each occurrence in a fresh agent conversation instead of resuming the previous run. ' +
+            'Off by default (occurrences resume, so the agent remembers prior runs). Turn it on for ' +
+            'stateless jobs that do the same work every time — a resuming series never resets, so its ' +
+            'context (and token cost) grows with every fire.',
         },
         {
           name: 'group',
@@ -585,6 +622,13 @@ registerResource({
             'Schedule more than 4 fires/day anyway. Only after the user explicitly confirmed they understand the quota/token cost and you agree it is right.',
         },
         { name: 'script', type: 'string', description: 'New pre-task script; "null"/"none" removes it.' },
+        {
+          name: 'fresh_session',
+          type: 'boolean',
+          description:
+            'Turn stateless occurrences on (--fresh-session) or off (--fresh-session false) for a live ' +
+            'series, keeping its id, run counts, and run log. Omit to leave the current setting alone.',
+        },
         {
           name: 'group',
           type: 'string',
