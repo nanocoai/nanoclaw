@@ -168,6 +168,25 @@ describe('send_card', () => {
     },
   );
 
+  it('keeps a non-ASCII link by normalizing it with URL', async () => {
+    const result = await sendCard.handler({
+      card: {
+        title: 'Test',
+        actions: [
+          { label: 'Wiki', url: 'https://de.wikipedia.org/wiki/München' },
+          { label: 'Host', url: 'https://münchen.de/' },
+        ],
+      },
+    });
+
+    expect(result.content[0].text).toMatch(/^Card sent \(id: msg-[^)]+\)$/);
+    const content = JSON.parse(getUndeliveredMessages()[0].content);
+    expect(content.card.actions).toEqual([
+      { label: 'Wiki', url: 'https://de.wikipedia.org/wiki/M%C3%BCnchen' },
+      { label: 'Host', url: 'https://xn--mnchen-3ya.de/' },
+    ]);
+  });
+
   it('states the url rule in the schema description the agent reads', () => {
     const url = LINK_ACTION_SCHEMA.properties.url as { description: string };
 
@@ -194,6 +213,9 @@ describe('send_card', () => {
       'https://example.com\t',
       'https://example.com\n',
       'ftp://example.com',
+      'https://a.com/"x',
+      'https://a.com/\\x',
+      'https://"a.com',
     ]) {
       expect(re.test(url)).toBe(false);
     }
