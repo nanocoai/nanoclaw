@@ -296,6 +296,47 @@ describe('error and interrupted turns', () => {
     expect(pushes).toHaveLength(0);
   });
 
+  // An agent wake (a2a or on_wake) has no human chat endpoint. A notice to
+  // the agent route would come back as a2a, fail again, and loop.
+  const AGENT_ROUTING = {
+    platformId: 'ag-self',
+    channelType: 'agent',
+    threadId: null,
+    inReplyTo: 'm1',
+    taskRun: false,
+  };
+
+  it('an error result on an agent route keeps partial output and sends no notice back', async () => {
+    seedDest();
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      yield { type: 'text', text: '<message to="discord-main">Progress before failure.</message>' };
+      yield { type: 'result', text: 'Backend failed.', isError: true, error: 'Incorrect API key' };
+    }
+    const { query, pushes } = makeStubQuery(events());
+
+    await processQuery(query, AGENT_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined, true);
+
+    expect(deliveredTexts()).toEqual(['Progress before failure.']);
+    expect(getUndeliveredMessages().filter((m) => m.channel_type === 'agent')).toHaveLength(0);
+    expect(pushes).toHaveLength(0);
+  });
+
+  it('a stream that throws on an agent route sends no notice back', async () => {
+    seedDest();
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      throw new Error('SDK stream died');
+    }
+    const { query } = makeStubQuery(events());
+
+    await expect(
+      processQuery(query, AGENT_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined, true),
+    ).rejects.toThrow('SDK stream died');
+
+    expect(getUndeliveredMessages()).toHaveLength(0);
+  });
+
   it('a stream that throws after a mid-turn delivery: the delivered row survives, processQuery rejects', async () => {
     seedDest();
     async function* events(): AsyncGenerator<ProviderEvent> {

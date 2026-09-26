@@ -633,11 +633,15 @@ export async function processQuery(
           // second run summary.
           const archivedResult = [resultText, failed ? event.error : undefined].filter(Boolean).join('\n');
           if (routing.taskRun && !taskBlockNudged) await autoAppendTaskLog(archivedResult);
-          if (failed && !routing.taskRun) {
+          if (failed) {
             // A failed turn needs a visible notice even after a partial reply.
             // Only the provider's dedicated error field is channel content;
             // unwrapped model output and raw diagnostics remain private.
-            await deliverErrorResult(routing, event.error ?? 'The agent run failed. Check the logs for details.');
+            const notice = event.error ?? 'The agent run failed. Check the logs for details.';
+            if (hasHumanChatEndpoint(routing)) await deliverErrorResult(routing, notice);
+            // No human to tell: keep the reason in the runner log, since the
+            // skipped notice may be the only place it would have been recorded.
+            else log(`Error result — no human chat endpoint, notice not sent: ${notice}`);
           }
           // An unwrapped final text only warrants the wrap-nudge when NOTHING
           // was delivered this turn — hasUnwrapped already folds in the
@@ -705,11 +709,11 @@ export async function processQuery(
       // Completed turns are no longer answering or queued. Preserve partial
       // output from unfinished turns and report that the run did not finish.
       // Retrying the same route or several queued turns in one thread needs
-      // only one notice. Task and agent wakes have no human chat endpoint.
+      // only one notice.
       const failedRoutes = [...(answering ? [routing] : []), ...queuedTurns.map((turn) => turn.routing)];
       const noticed: RoutingContext[] = [];
       for (const target of failedRoutes) {
-        if (target.taskRun || !target.platformId || !target.channelType || target.channelType === 'agent') continue;
+        if (!hasHumanChatEndpoint(target)) continue;
         if (
           noticed.some(
             (prior) =>
@@ -769,6 +773,15 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
       log(`Progress: ${event.message}`);
       break;
   }
+}
+
+/**
+ * Can a failure notice reach a human on this route? Task runs report through
+ * their run log. Agent wakes (a2a, on_wake) have no human chat endpoint: a
+ * notice would route back as a2a, fail again, and loop.
+ */
+function hasHumanChatEndpoint(routing: RoutingContext): boolean {
+  return !routing.taskRun && !!routing.platformId && !!routing.channelType && routing.channelType !== 'agent';
 }
 
 /** Send the dedicated provider error or a generic failure notice. */
