@@ -1,0 +1,42 @@
+skill: add-mem0-graph
+version: 1.0.0
+description: "Add persistent graph-enhanced memory using mem0 with existing Qdrant + Neo4j infrastructure and local BGE-M3 embeddings"
+core_version: 0.1.0
+
+adds:
+  - src/mem0-memory.ts
+  - services/mem0-bridge/app.py
+  - services/mem0-bridge/requirements.txt
+  - services/mem0-bridge/mem0-bridge.service
+  - services/mem0-bridge/embed-proxy.py
+
+modifies:
+  - src/config.ts
+  - src/index.ts
+  - src/ipc.ts
+  - src/container-runner.ts
+  - container/agent-runner/src/ipc-mcp-stdio.ts
+
+structured:
+  npm_dependencies: {}
+  env_additions:
+    - MEM0_BRIDGE_URL
+    - MEM0_USER_ID
+    - MEM0_QDRANT_URL
+    - MEM0_NEO4J_URL
+    - MEM0_NEO4J_USER
+    - MEM0_NEO4J_PASSWORD
+    - MEM0_EMBED_PROVIDER
+    - MEM0_EMBED_MODEL
+    - MEM0_EMBED_URL
+    - MEM0_EMBED_DIMS
+    - MEM0_LLM_PROVIDER
+    - MEM0_LLM_MODEL
+    - MEM0_LLM_URL
+
+conflicts:
+  - add-memory
+
+depends: []
+
+test: "npx vitest run .claude/skills/add-mem0-graph/tests/add-mem0-graph.test.ts"
