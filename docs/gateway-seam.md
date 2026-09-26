@@ -243,7 +243,7 @@ fresh-install preference later without changing provider login.
 `setup/gateways/install.ts` applies the chosen skill through the
 normal skill engine — same `nc:` directives, same journal — and stamps
 `NANOCLAW_GATEWAY_PROVIDER`. The skill's `scripts/detect.ts` prints `installed`
-or `absent`, which is what lets `/update-nanoclaw` recognise an install that
+or `absent` as its last line of output, which is what lets `/update-nanoclaw` recognise an install that
 predates the seam and reapply its gateway before cutover
 (`scripts/update/transaction.ts`).
 

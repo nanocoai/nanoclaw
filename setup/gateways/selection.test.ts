@@ -59,3 +59,39 @@ describe('implicit gateway migration', () => {
     expect(detectInstalledGateway(root)).toBeUndefined();
   });
 });
+
+describe('real detector probe', () => {
+  // A nested pnpm prints workspace warnings to stdout ahead of the detector's answer.
+  const PNPM_WARN =
+    'groups/zz-repro                          |  WARN  The field "pnpm.onlyBuiltDependencies" was found in ' +
+    '/x/groups/zz-repro/package.json. This will not take effect.';
+
+  function detectWith(stdout: string): string | undefined {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-probe-'));
+    roots.push(root);
+    fs.symlinkSync(path.resolve('node_modules'), path.join(root, 'node_modules'));
+    fs.writeFileSync(path.join(root, 'package.json'), '{"type":"module"}');
+    const scripts = path.join(root, '.claude', 'skills', 'add-fixture', 'scripts');
+    fs.mkdirSync(scripts, { recursive: true });
+    fs.writeFileSync(path.join(scripts, 'detect.ts'), `process.stdout.write(${JSON.stringify(stdout)});\n`);
+    return detectInstalledGateway(root);
+  }
+
+  it('reads the answer after unrelated output such as a pnpm warning', () => {
+    expect(detectWith(`${PNPM_WARN}\ninstalled\n`)).toBe('fixture');
+  });
+
+  it.each(['absent\n', `${PNPM_WARN}\nabsent\n`, 'installed\nabsent\n', ''])(
+    'stays not installed when the detector says so: %j',
+    (stdout) => {
+      expect(detectWith(stdout)).toBeUndefined();
+    },
+  );
+
+  it.each(['installedx\n', 'not installed\n', `installed ${PNPM_WARN}\n`, 'INSTALLED\n'])(
+    'does not read garbage as installed: %j',
+    (stdout) => {
+      expect(detectWith(stdout)).toBeUndefined();
+    },
+  );
+});
