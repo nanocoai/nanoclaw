@@ -24,6 +24,7 @@ import { log } from '../log.js';
 
 import { realCli, validateRuntimeName, type Cli, type SupervisedProcess } from './cli.js';
 import { JsonDocumentStream } from './json-stream.js';
+import { openSessionLog } from './session-log-sink.js';
 import {
   LABELS,
   asFailureError,
@@ -488,13 +489,16 @@ class DockerHandle implements SessionHandle {
     // itself only here, so keep a tail and surface it at warn on a non-zero exit.
     const proc = this.cli.start(['start', '--attach', this.name]);
     this.#proc = proc;
+    const sessionLog = openSessionLog(this.key, this.name);
     proc.onStderr((line) => {
       log.debug(line, { container: this.name });
+      sessionLog?.write(line);
       this.#stderrTail.push(line);
       if (this.#stderrTail.length > 10) this.#stderrTail.shift();
     });
     proc.onExit((code) => {
       this.#attachExitCode = code;
+      sessionLog?.close();
       if (!this.#stopping && code !== 0 && code !== null && this.#stderrTail.length > 0) {
         log.warn('Container exited non-zero', { containerName: this.name, code, stderrTail: this.#stderrTail });
       }
