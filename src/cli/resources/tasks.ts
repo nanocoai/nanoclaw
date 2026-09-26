@@ -14,6 +14,7 @@ import {
 } from '../../db/sessions.js';
 import type { TaskUpdate } from '../../mailbox/index.js';
 import { parseTaskContent } from '../../modules/scheduling/task-content.js';
+import { getTaskFields, parseTaskFields, readTaskFields } from '../../modules/scheduling/task-fields.js';
 import {
   createScheduledTask,
   enforceRecurrenceLimit,
@@ -25,7 +26,7 @@ import {
   validateRecurrence,
 } from '../../modules/scheduling/create.js';
 import { destroySessionMailbox, sessionDir, withExistingMailboxSession } from '../../session-manager.js';
-import { registerResource } from '../crud.js';
+import { registerResource, type ColumnDef } from '../crud.js';
 import { appendRunLog, deleteRunLog } from '../../modules/scheduling/run-log.js';
 import { formatTasksTable } from '../format-tasks.js';
 import type { CallerContext } from '../frame.js';
@@ -132,6 +133,11 @@ function selectTask(mailbox: InboundMailbox, id: string): TaskRow | undefined {
   return mailbox.getTask(id);
 }
 
+/** Flags contributed by registered task fields, appended to create/update. */
+function taskFieldArgs(): ColumnDef[] {
+  return getTaskFields().map((f) => ({ name: f.flag, type: f.type ?? 'string', description: f.description }));
+}
+
 function taskId(args: Record<string, unknown>): string {
   const id = str(args.id);
   if (!id) throw new Error('task series id is required');
@@ -153,6 +159,7 @@ async function createTask(args: Record<string, unknown>, ctx: CallerContext) {
     script,
     dangerouslyOverrideRecurrenceLimit: bool(args.dangerously_override_recurrence_limit),
     timezone: await resolveGroupTimezone(group),
+    fields: parseTaskFields(args),
   });
   const { session, row } = await createScheduledTask(group, prepared, {
     originSessionId: ctx.caller === 'agent' ? ctx.sessionId : null,
@@ -261,6 +268,7 @@ async function getTask(args: Record<string, unknown>, ctx: CallerContext) {
         prompt: content.prompt,
         script: content.script,
         origin_session_id: content.originSessionId,
+        ...readTaskFields(row.content),
         completed_runs: stats.runs,
         failed_runs: stats.failedRuns,
         series_key: seriesKey,
@@ -360,8 +368,10 @@ async function updateTaskCommand(args: Record<string, unknown>, ctx: CallerConte
     update.recurrence = recurrence;
   }
   if (script !== undefined) update.script = script;
-  const fields = Object.keys(update);
+  const extra = parseTaskFields(args);
+  const fields = [...Object.keys(update), ...Object.keys(extra)];
   if (fields.length === 0) throw new Error('nothing to update');
+  if (Object.keys(extra).length > 0) update.fields = extra;
 
   let touched = 0;
   for (const session of await selectedSessions(args, ctx)) {
@@ -413,6 +423,61 @@ async function runTaskCommand(args: Record<string, unknown>, ctx: CallerContext)
   }
   throw new Error(`task not found: ${id}`);
 }
+
+const createArgs: ColumnDef[] = [
+  {
+    name: 'name',
+    type: 'string',
+    description: 'Short descriptive name → readable task id (<slug>-<hex>). Without it, ids are t-<hex>.',
+  },
+  { name: 'prompt', type: 'string', description: 'Task prompt the agent wakes to.', required: true },
+  {
+    name: 'recurrence',
+    type: 'string',
+    description: 'Cron expression (instance TZ). First run derives from the cron grid when --process-after is omitted.',
+  },
+  {
+    name: 'dangerously_override_recurrence_limit',
+    type: 'boolean',
+    description:
+      'Schedule more than 4 fires/day anyway. Only after the user explicitly confirmed they understand the quota/token cost and you agree it is right.',
+  },
+  {
+    name: 'process_after',
+    type: 'string',
+    description: 'First/next run time (ISO 8601 or naive local). Required for one-shots.',
+  },
+  {
+    name: 'script',
+    type: 'string',
+    description: 'Pre-task gate script (bash) — see the --script contract above.',
+  },
+  {
+    name: 'group',
+    type: 'string',
+    description: 'Agent group id (host callers; auto-filled to your own group inside a container).',
+  },
+];
+
+const updateArgs: ColumnDef[] = [
+  { name: 'id', type: 'string', description: 'Task series id.', required: true },
+  { name: 'prompt', type: 'string', description: 'Replace the task prompt.' },
+  { name: 'process_after', type: 'string', description: 'New next-run time (ISO 8601 or naive local).' },
+  { name: 'recurrence', type: 'string', description: 'New cron expression; "null"/"none" clears it (one-shot).' },
+  {
+    name: 'dangerously_override_recurrence_limit',
+    type: 'boolean',
+    description:
+      'Schedule more than 4 fires/day anyway. Only after the user explicitly confirmed they understand the quota/token cost and you agree it is right.',
+  },
+  { name: 'script', type: 'string', description: 'New pre-task script; "null"/"none" removes it.' },
+  {
+    name: 'group',
+    type: 'string',
+    description: 'Agent group id (host callers; auto-filled to your own group inside a container).',
+  },
+  { name: 'session', type: 'string', description: 'Limit to one task session id.' },
+];
 
 registerResource({
   name: 'task',
@@ -500,41 +565,9 @@ registerResource({
         `finds nothing costs zero tokens) or you pass --dangerously-override-recurrence-limit after\n` +
         `the user explicitly confirmed they want an ungated frequent task.\n\n` +
         `Failure backoff: a script that ERRORS repeatedly backs the series off (2,4,8,…60 min between fires; each errored fire counts as a failed run); after 8 consecutive failures the series is auto-paused with a note in its run log — fix the script, then \`ncl tasks resume <id>\`. A deliberate wakeAgent=false is a normal run and never backs off. \`ncl tasks get <id>\` shows failed_runs and the run log.`,
-      args: [
-        {
-          name: 'name',
-          type: 'string',
-          description: 'Short descriptive name → readable task id (<slug>-<hex>). Without it, ids are t-<hex>.',
-        },
-        { name: 'prompt', type: 'string', description: 'Task prompt the agent wakes to.', required: true },
-        {
-          name: 'recurrence',
-          type: 'string',
-          description:
-            'Cron expression (instance TZ). First run derives from the cron grid when --process-after is omitted.',
-        },
-        {
-          name: 'dangerously_override_recurrence_limit',
-          type: 'boolean',
-          description:
-            'Schedule more than 4 fires/day anyway. Only after the user explicitly confirmed they understand the quota/token cost and you agree it is right.',
-        },
-        {
-          name: 'process_after',
-          type: 'string',
-          description: 'First/next run time (ISO 8601 or naive local). Required for one-shots.',
-        },
-        {
-          name: 'script',
-          type: 'string',
-          description: 'Pre-task gate script (bash) — see the --script contract above.',
-        },
-        {
-          name: 'group',
-          type: 'string',
-          description: 'Agent group id (host callers; auto-filled to your own group inside a container).',
-        },
-      ],
+      get args() {
+        return [...createArgs, ...taskFieldArgs()];
+      },
       examples: [
         `# Recurring — --recurrence alone is enough; the first run comes off the cron grid:\nncl tasks create --name "sales briefing" --prompt "Send the weekday sales briefing" --recurrence "0 9 * * 1-5"`,
         `# One-shot — --process-after required (UTC, offset, or naive-local in the instance TZ):\nncl tasks create --name "ping" --prompt "Remind me to call Dana" --process-after "tomorrow 18:00"`,
@@ -573,25 +606,9 @@ registerResource({
     update: {
       access: 'open',
       description: 'Update a live task by series id.',
-      args: [
-        { name: 'id', type: 'string', description: 'Task series id.', required: true },
-        { name: 'prompt', type: 'string', description: 'Replace the task prompt.' },
-        { name: 'process_after', type: 'string', description: 'New next-run time (ISO 8601 or naive local).' },
-        { name: 'recurrence', type: 'string', description: 'New cron expression; "null"/"none" clears it (one-shot).' },
-        {
-          name: 'dangerously_override_recurrence_limit',
-          type: 'boolean',
-          description:
-            'Schedule more than 4 fires/day anyway. Only after the user explicitly confirmed they understand the quota/token cost and you agree it is right.',
-        },
-        { name: 'script', type: 'string', description: 'New pre-task script; "null"/"none" removes it.' },
-        {
-          name: 'group',
-          type: 'string',
-          description: 'Agent group id (host callers; auto-filled to your own group inside a container).',
-        },
-        { name: 'session', type: 'string', description: 'Limit to one task session id.' },
-      ],
+      get args() {
+        return [...updateArgs, ...taskFieldArgs()];
+      },
       handler: async (args, ctx) => updateTaskCommand(args, ctx),
     },
     cancel: {
