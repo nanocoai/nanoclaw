@@ -16,10 +16,18 @@ export async function allowModelHost(host: string, root: string): Promise<void> 
   await run(['--allow-host', host], root);
 }
 
+/**
+ * Names no public CA certifies, with their subdomains: IANA special-use names and the
+ * TLDs ICANN will never delegate (home, corp, mail). Iron verifies upstream TLS
+ * against public roots only.
+ */
+const PRIVATE_NAME = /(?:^|\.)(?:internal|local|localhost|home\.arpa|home|corp|mail)$/;
+
 export function ironModelEndpoint(raw: string, root: string) {
   const url = new URL(raw);
   if (
     !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/.test(url.hostname) ||
+    PRIVATE_NAME.test(url.hostname) ||
     url.protocol !== 'https:' ||
     (url.port && url.port !== '443') ||
     url.username ||
@@ -28,7 +36,7 @@ export function ironModelEndpoint(raw: string, root: string) {
     url.hash
   )
     throw new Error(
-      'Iron Proxy requires an HTTPS model endpoint on port 443. Put a TLS endpoint in front of a local model server before configuring it.',
+      'Iron Proxy requires an HTTPS model endpoint on port 443 whose host is a DNS name with a publicly trusted certificate; plain HTTP, other ports, IP addresses, and private names such as host.docker.internal cannot work. Put a TLS reverse proxy with such a certificate in front of a local model server.',
     );
   return { configure: () => allowModelHost(url.hostname, root) };
 }

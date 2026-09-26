@@ -142,8 +142,9 @@ model hostname. Rotation and reauthentication keep IDs and grants. Moving a key
 to another host requires confirmation and re-entering its value.
 
 Native backends and custom/keyless HTTPS endpoints on port 443 are supported.
-Use a DNS name and TLS for local models; plaintext HTTP endpoints fail during
-setup. Follow the OpenCode skill to restart the host and test a real reply.
+Use a DNS name and a publicly trusted certificate for local models; setup rejects
+plain HTTP, other ports, IP addresses, and private names at the prompt. The
+OpenCode skill's "Local model behind Iron Proxy" section has a recipe. Follow the OpenCode skill to restart the host and test a real reply.
 
 ## Remove
 

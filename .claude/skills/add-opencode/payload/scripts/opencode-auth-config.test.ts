@@ -93,6 +93,11 @@ const fixture = vi.hoisted(() => ({
   catalogs: 0,
   customProvider: 'openai',
   baseUrl: 'https://models.example/v1',
+  baseUrlAnswers: [] as string[],
+  placeholders: [] as string[],
+  validationErrors: [] as string[],
+  warnings: [] as string[],
+  modelFetchError: undefined as Error | undefined,
   oldHost: '',
   moveHost: true,
   hostConfirmations: 0,
@@ -121,10 +126,27 @@ vi.mock('@clack/prompts', () => ({
   cancel: () => {
     throw new Error('cancelled');
   },
-  text: async ({ message }: { message: string }) => {
+  text: async ({
+    message,
+    placeholder,
+    validate,
+  }: {
+    message: string;
+    placeholder?: string;
+    validate?: (value: string) => string | undefined;
+  }) => {
     fixture.textPrompts.push(message);
     if (message.includes('provider id')) return fixture.customProvider;
-    if (message.includes('base URL')) return fixture.baseUrl;
+    if (message.includes('base URL')) {
+      fixture.placeholders.push(placeholder ?? '');
+      // Clack re-asks until validate passes; the operator answers in order, then gives up.
+      for (const answer of fixture.baseUrlAnswers.length ? fixture.baseUrlAnswers : [fixture.baseUrl]) {
+        const error = validate?.(answer);
+        if (!error) return answer;
+        fixture.validationErrors.push(error);
+      }
+      return Symbol('cancel');
+    }
     return `${fixture.backend === 'local' ? 'openai' : fixture.backend === 'custom' ? fixture.customProvider : 'openrouter'}/fixture`;
   },
   confirm: async ({ message }: { message: string }) => {
@@ -138,7 +160,13 @@ vi.mock('@clack/prompts', () => ({
     fixture.passwords++;
     return fixture.cancelPassword ? Symbol('cancel') : fixture.key;
   },
-  log: { success: vi.fn(), info: vi.fn(), warn: vi.fn() },
+  log: {
+    success: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn((message: string) => {
+      fixture.warnings.push(message);
+    }),
+  },
 }));
 vi.mock('../setup/logs.js', () => ({ userInput: vi.fn(), step: vi.fn() }));
 vi.mock('../setup/set-env.js', () => ({
@@ -170,6 +198,11 @@ beforeEach(() => {
     catalogs: 0,
     customProvider: 'openai',
     baseUrl: 'https://models.example/v1',
+    baseUrlAnswers: [],
+    placeholders: [],
+    validationErrors: [],
+    warnings: [],
+    modelFetchError: undefined,
     oldHost: '',
     moveHost: true,
     hostConfirmations: 0,
@@ -204,6 +237,7 @@ beforeEach(() => {
           passwords: fixture.passwords,
           saved: fixture.requests.filter((r) => ['POST', 'PATCH'].includes(r.method ?? '')).length,
         });
+        if (fixture.modelFetchError) throw fixture.modelFetchError;
         if (fixture.failModels) return new Response('Unauthorized', { status: 401 });
         return new Response(JSON.stringify({ data: [{ id: 'fixture' }] }));
       }
@@ -326,6 +360,18 @@ describe('OpenCode auth configuration commit', () => {
     await expect(runOpenCodeSetupAuth()).rejects.toThrow('requires a configured backend');
     expect(fixture.writes).toEqual([]);
     expect(fixture.requests).toEqual([]);
+  });
+});
+
+describe('local endpoint with OneCLI selected', () => {
+  it('still accepts a plaintext local endpoint and suggests one', async () => {
+    fixture.backend = 'local';
+    fixture.keyless = true;
+    fixture.baseUrl = 'http://host.docker.internal:8000/v1';
+    await runOpenCodeAuthStep();
+    expect(fixture.validationErrors).toEqual([]);
+    expect(fixture.placeholders).toEqual(['http://host.docker.internal:8000/v1']);
+    expect(fixture.writes).toContainEqual(['OPENCODE_BASE_URL', 'http://host.docker.internal:8000/v1']);
   });
 });
 
@@ -493,14 +539,78 @@ describe('OpenCode setup with Iron selected', () => {
     expect(fixture.gatewayEndpoints).toEqual(['https://models.example/v1']);
     expect(fixture.vaultUrls).toEqual([]);
   });
-  it('rejects a plaintext local endpoint before requesting keys or discovering models', async () => {
+  it('rejects a plaintext local endpoint at the prompt and asks again', async () => {
     fixture.backend = 'local';
-    fixture.baseUrl = 'http://models.example:8000/v1';
-    await expect(runOpenCodeSetupAuth()).rejects.toThrow('HTTPS model endpoint');
+    fixture.keyless = true;
+    fixture.baseUrlAnswers = ['http://host.docker.internal:8000/v1', 'https://models.example/v1'];
+    await runOpenCodeSetupAuth();
+    expect(fixture.validationErrors).toHaveLength(1);
+    expect(fixture.validationErrors[0]).toMatch(/HTTPS model endpoint on port 443/);
+    expect(fixture.validationErrors[0]).toMatch(/publicly trusted certificate/);
+    expect(fixture.validationErrors[0]).toMatch(/Local model behind Iron Proxy/);
+    expect(fixture.gatewayEndpoints).toEqual(['https://models.example/v1']);
+    expect(fixture.writes).toContainEqual(['OPENCODE_BASE_URL', 'https://models.example/v1']);
+  });
+  it.each([
+    ['plain HTTP', 'http://host.docker.internal:8000/v1'],
+    ['HTTPS on another port', 'https://models.example:8443/v1'],
+    ['an IP address', 'https://192.168.1.20/v1'],
+    ['a private name', 'https://host.docker.internal/v1'],
+  ])('never saves %s, before requesting keys or discovering models', async (_label, url) => {
+    fixture.backend = 'local';
+    fixture.baseUrl = url;
+    await expect(runOpenCodeSetupAuth()).rejects.toThrow('cancelled');
+    expect(fixture.validationErrors).toHaveLength(1);
     expect(fixture.passwords).toBe(0);
     expect(fixture.catalogs).toBe(0);
     expect(fixture.modelRequests).toEqual([]);
     expect(fixture.writes).toEqual([]);
+    expect(fixture.gatewayEndpoints).toEqual([]);
+  });
+  it('accepts HTTPS on port 443 with a DNS name', async () => {
+    fixture.backend = 'local';
+    fixture.keyless = true;
+    fixture.baseUrl = 'https://models.example:443/v1';
+    await runOpenCodeSetupAuth();
+    expect(fixture.validationErrors).toEqual([]);
+    expect(fixture.gatewayEndpoints).toEqual(['https://models.example:443/v1']);
+  });
+  it('suggests an HTTPS URL in the local endpoint prompt', async () => {
+    fixture.backend = 'local';
+    fixture.keyless = true;
+    await runOpenCodeSetupAuth();
+    expect(fixture.placeholders).toEqual(['https://models.example.com/v1']);
+  });
+  it('refuses an exported base URL Iron cannot use before asking for one', async () => {
+    fixture.backend = 'local';
+    vi.stubEnv('OPENCODE_BASE_URL', 'http://host.docker.internal:8000/v1');
+    await expect(runOpenCodeSetupAuth()).rejects.toThrow(
+      /exported OPENCODE_BASE_URL.*HTTPS model endpoint on port 443/s,
+    );
+    expect(fixture.placeholders).toEqual([]);
+    expect(fixture.writes).toEqual([]);
+  });
+  it.each(['DEPTH_ZERO_SELF_SIGNED_CERT', 'INVALID_PURPOSE', 'CERT_HAS_EXPIRED', 'ERR_TLS_CERT_ALTNAME_INVALID'])(
+    'warns at setup when the endpoint certificate fails verification (%s)',
+    async (code) => {
+      fixture.backend = 'local';
+      fixture.keyless = true;
+      fixture.modelFetchError = Object.assign(new TypeError('fetch failed'), {
+        cause: Object.assign(new Error('certificate verification failed'), { code }),
+      });
+      await runOpenCodeSetupAuth();
+      expect(fixture.warnings.join('\n')).toMatch(/publicly trusted certificate/);
+    },
+  );
+  it('does not blame the certificate for a connection failure', async () => {
+    fixture.backend = 'local';
+    fixture.keyless = true;
+    fixture.modelFetchError = Object.assign(new TypeError('fetch failed'), {
+      cause: Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }),
+    });
+    await runOpenCodeSetupAuth();
+    expect(fixture.warnings.join('\n')).toMatch(/Could not list models/);
+    expect(fixture.warnings.join('\n')).not.toMatch(/certificate/);
   });
   it('does not fall back to OneCLI or save defaults after an Iron failure', async () => {
     fixture.failVault = true;
