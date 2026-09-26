@@ -33,7 +33,8 @@ import {
   type RestampResult,
 } from '../../templates/restamp.js';
 import { isValidTimezone } from '../../timezone.js';
-import type { AgentGroup, ContainerConfigRow } from '../../types.js';
+import { SYSTEM_PROMPT_MODES } from '../../types.js';
+import type { AgentGroup, ContainerConfigRow, SystemPromptMode } from '../../types.js';
 import { registerResource } from '../crud.js';
 import { localizeIsoTimestamps } from '../format.js';
 
@@ -78,6 +79,7 @@ function presentConfig(row: ContainerConfigRow): Record<string, unknown> {
     model: row.model,
     effort: row.effort,
     speed: row.speed,
+    system_prompt_mode: row.system_prompt_mode,
     image_tag: row.image_tag,
     assistant_name: row.assistant_name,
     max_messages_per_prompt: row.max_messages_per_prompt,
@@ -400,8 +402,9 @@ registerResource({
       access: 'approval',
       description:
         'Update container config scalar fields. Changes are saved but do NOT take effect until you run `ncl groups restart`. ' +
-        'Use --id <group-id> and any of: --provider, --model, --effort, --speed, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, ' +
+        'Use --id <group-id> and any of: --provider, --model, --effort, --speed, --system-prompt-mode, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, ' +
         '--speed must be one of the speed tiers the group\'s provider declares (Claude: "standard", "fast"), or "" to follow the install default; a provider that declares none accepts only "". ' +
+        '--system-prompt-mode is "claude_code" (the Claude Code preset plus the group\'s instructions; the default) or "plain" (only the group\'s instructions, for non-Claude models behind an Anthropic-compatible endpoint); "" clears back to the default. ' +
         '--timezone (IANA id like "Europe/Lisbon"; "" clears back to the install default; scheduled-task times follow it immediately, message display after restart).',
       handler: async (args) => {
         const id = args.id as string;
@@ -416,6 +419,7 @@ registerResource({
             | 'model'
             | 'effort'
             | 'speed'
+            | 'system_prompt_mode'
             | 'image_tag'
             | 'assistant_name'
             | 'max_messages_per_prompt'
@@ -436,6 +440,13 @@ registerResource({
           if (speed !== '') assertDeclaredSpeedTier(speed, resolveProviderName(updates.provider, row.provider));
           updates.speed = speed || null;
         }
+        if (args.system_prompt_mode !== undefined) {
+          const mode = args.system_prompt_mode as string;
+          if (mode !== '' && !(SYSTEM_PROMPT_MODES as readonly string[]).includes(mode)) {
+            throw new Error(`--system-prompt-mode must be one of: ${SYSTEM_PROMPT_MODES.join(', ')} (or "" to clear)`);
+          }
+          updates.system_prompt_mode = (mode || null) as SystemPromptMode | null;
+        }
         if (args.image_tag !== undefined) updates.image_tag = args.image_tag as string;
         if (args.assistant_name !== undefined) updates.assistant_name = args.assistant_name as string;
         if (args.max_messages_per_prompt !== undefined)
@@ -450,7 +461,7 @@ registerResource({
 
         if (Object.keys(updates).length === 0) {
           throw new Error(
-            'Nothing to update — provide at least one of: --provider, --model, --effort, --speed, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --timezone',
+            'Nothing to update — provide at least one of: --provider, --model, --effort, --speed, --system-prompt-mode, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --timezone',
           );
         }
 

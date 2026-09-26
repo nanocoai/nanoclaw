@@ -17,6 +17,15 @@ export interface AgentGroup {
  */
 export type ContainerSpeed = string;
 
+/**
+ * How the Claude provider builds its system prompt. `claude_code` (the default)
+ * appends the composed instructions to the Claude Code preset; `plain` sends
+ * only the composed instructions, for non-Claude models behind an
+ * Anthropic-compatible endpoint.
+ */
+export const SYSTEM_PROMPT_MODES = ['claude_code', 'plain'] as const;
+export type SystemPromptMode = (typeof SYSTEM_PROMPT_MODES)[number];
+
 /** Per-agent-group container runtime config. Source of truth in the DB;
  *  materialized to `groups/<folder>/container.json` at spawn time. */
 export interface ContainerConfigRow {
@@ -35,6 +44,7 @@ export interface ContainerConfigRow {
   cli_scope: string; // 'disabled' | 'group' | 'global'
   timezone: string | null; // IANA id; NULL = follow the install-global timezone
   speed: ContainerSpeed | null; // NULL = install/provider default
+  system_prompt_mode: SystemPromptMode | null; // NULL = 'claude_code'
   /**
    * Session isolation tier ('container' | 'vm') — see SessionSpec.runtimeTier.
    * Optional on the TS type because the trunk schema does not carry the
