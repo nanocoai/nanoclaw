@@ -139,6 +139,23 @@ cp .claude/skills/add-vercel/vercel-manifest.test.ts src/vercel-manifest.test.ts
 pnpm exec vitest run src/vercel-manifest.test.ts
 ```
 
+```nc:copy
+container-skills/vercel-cli/SKILL.md -> container/skills/vercel-cli/SKILL.md
+vercel-manifest.test.ts -> src/vercel-manifest.test.ts
+```
+
+```nc:json-merge into:container/cli-tools.json key:name
+{ "name": "vercel", "version": "52.2.1" }
+```
+
+```nc:run effect:build
+./container/build.sh
+```
+
+```nc:run effect:test
+pnpm exec vitest run src/vercel-manifest.test.ts
+```
+
 The test asserts both halves of the install: a pinned `vercel` entry in `container/cli-tools.json`, and the container skill at `container/skills/vercel-cli/`. Either alone is a broken install — a manifest entry with no skill leaves the agent a binary nobody told it about, and a skill with no entry tells it to run a command that is not there.
 
 ## Phase 5: Sync Skills to Running Agent Groups

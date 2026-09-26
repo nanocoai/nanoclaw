@@ -79,9 +79,18 @@ cp "$skill_dir/container-skills/convert-documents-to-markdown/SKILL.md" \
 cp "$skill_dir/anydoc-manifest.test.ts" src/anydoc-manifest.test.ts
 ```
 
+```nc:copy
+container-skills/convert-documents-to-markdown/SKILL.md -> container/skills/convert-documents-to-markdown/SKILL.md
+anydoc-manifest.test.ts -> src/anydoc-manifest.test.ts
+```
+
 If the manifest has no AnyDoc entry, append this exact object to its JSON array. Do not add `onlyBuilt`; the package and its prebuilt Linux bindings have no install lifecycle script.
 
 ```json
+{ "name": "@firecrawl/anydoc", "version": "0.1.6" }
+```
+
+```nc:json-merge into:container/cli-tools.json key:name
 { "name": "@firecrawl/anydoc", "version": "0.1.6" }
 ```
 
@@ -93,6 +102,15 @@ Run validation before building the image:
 pnpm exec vitest run src/anydoc-manifest.test.ts container/cli-tools.test.ts
 pnpm run build
 ./container/build.sh
+```
+
+```nc:run effect:build
+pnpm run build
+./container/build.sh
+```
+
+```nc:run effect:test
+pnpm exec vitest run src/anydoc-manifest.test.ts container/cli-tools.test.ts
 ```
 
 If pnpm rejects the package as too new, stop. Do not bypass the release-age policy.

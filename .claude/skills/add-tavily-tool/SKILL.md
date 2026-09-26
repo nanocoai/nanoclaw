@@ -46,6 +46,10 @@ entry named `mcp-remote` is not already present:
 }
 ```
 
+```nc:json-merge into:container/cli-tools.json key:name
+{ "name": "mcp-remote", "version": "0.1.38" }
+```
+
 Keep the JSON valid and limit the entry to the two fields shown; this package
 does not require a native build-script opt-in.
 
@@ -55,10 +59,22 @@ Copy the dependency guard into the host test tree:
 cp .claude/skills/add-tavily-tool/tavily-manifest.test.ts src/tavily-manifest.test.ts
 ```
 
+```nc:copy
+tavily-manifest.test.ts -> src/tavily-manifest.test.ts
+```
+
 Build the image and run the guard:
 
 ```bash
 ./container/build.sh
+pnpm exec vitest run src/tavily-manifest.test.ts
+```
+
+```nc:run effect:build
+./container/build.sh
+```
+
+```nc:run effect:test
 pnpm exec vitest run src/tavily-manifest.test.ts
 ```
 

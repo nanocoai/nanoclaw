@@ -79,6 +79,10 @@ cat > /tmp/input.json
 exec bun run /app/src/index.ts < /tmp/input.json
 ```
 
+```nc:run
+bash .claude/skills/add-mnemon/apply.sh
+```
+
 `>/dev/stderr 2>&1` routes all mnemon output to stderr (docker logs) so it doesn't interfere with the JSON stdin handshake between host and agent-runner.
 
 ### 3. Copy the integration tests
@@ -91,6 +95,11 @@ cp .claude/skills/add-mnemon/mnemon-entrypoint.test.ts src/mnemon-entrypoint.tes
 pnpm exec vitest run src/mnemon-dockerfile.test.ts src/mnemon-entrypoint.test.ts
 ```
 
+```nc:copy
+mnemon-dockerfile.test.ts -> src/mnemon-dockerfile.test.ts
+mnemon-entrypoint.test.ts -> src/mnemon-entrypoint.test.ts
+```
+
 `mnemon-dockerfile.test.ts` asserts the `MNEMON_VERSION` ARG and `MNEMON_DATA_DIR` ENV are present (red if the install layer is dropped on an upgrade). `mnemon-entrypoint.test.ts` asserts the entrypoint invokes `mnemon setup --target claude-code` (red if the wiring is removed).
 
 ### 4. Rebuild and smoke-test the image
@@ -98,6 +107,14 @@ pnpm exec vitest run src/mnemon-dockerfile.test.ts src/mnemon-entrypoint.test.ts
 ```bash
 ./container/build.sh
 docker run --rm --entrypoint mnemon nanoclaw-agent:latest --version
+```
+
+```nc:run effect:build
+./container/build.sh
+```
+
+```nc:run effect:test
+pnpm exec vitest run src/mnemon-dockerfile.test.ts src/mnemon-entrypoint.test.ts
 ```
 
 ## Phase 3: Restart and Verify
