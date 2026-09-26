@@ -25,6 +25,8 @@ So a fork is defined by its recipe. Most upgrades don't need to run it (see "Upg
 
 The recipe is the one fork-specific thing. It lives in your fork, never upstream. (A recipe is itself a skill: a SKILL.md listing the fork's skills in apply order.)
 
+The exception is a **published recipe**: a composition worth sharing whole can be contributed upstream as one reviewable bundle under `.claude/skills/recipes/<name>/` — the recipe SKILL.md on top, its component skills inside it under `skills/<component>/`, each a complete skill in its own right (SKILL.md, REMOVE.md, a `files.txt` manifest, and a generated `files/` mirror) held to the same guidelines as any standalone skill. The recipe's own stack tests ride along the same way. Fork-private recipes remain the default; publishing is for the rare composition that is itself the product, like the PR Factory.
+
 ## What's in a skill
 
 A skill carries everything it needs:

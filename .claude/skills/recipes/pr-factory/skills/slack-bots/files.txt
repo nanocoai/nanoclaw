@@ -1,0 +1,13 @@
+# slack-bots — files this component owns outright: the four channel modules,
+# the legacy-upgrade migration, and the four guard tests. The barrel lines, the
+# slack.ts 3-line patch, the router hunk, and the migrations-barrel insert are
+# applied as edits per SKILL.md, not as file copies.
+src/channels/slack-bot-ids.ts
+src/channels/slack-supervisor.ts
+src/channels/slack-tester.ts
+src/channels/sibling-mention.ts
+src/db/migrations/module-slack-bots-bot-id-to-instance.ts
+src/channels/multibot-registration.test.ts
+src/channels/slack-ignore-senders.test.ts
+src/router-sibling-mention.test.ts
+src/db/slack-bots-migration.test.ts
