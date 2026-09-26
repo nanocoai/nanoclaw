@@ -454,6 +454,17 @@ export async function processQuery(
   let pollInFlight = false;
   let endedForCommand = false;
   let mailboxFailureStreak = 0;
+
+  // Independent heartbeat timer — ensures the host sees signs of life even
+  // when the Claude API is slow, rate-limited, or hung. Without this, the
+  // heartbeat only updates when API events arrive, causing false
+  // stale-container kills when the API is rate-limited or waiting for a
+  // response.
+  let heartbeatTimerDone = false;
+  const heartbeatHandle = setInterval(() => {
+    if (!heartbeatTimerDone) touchHeartbeat();
+  }, 10_000);
+
   const pollHandle = setInterval(() => {
     if (done || pollInFlight || endedForCommand) return;
     pollInFlight = true;
@@ -554,9 +565,14 @@ export async function processQuery(
                 `mailbox driver requested a fresh runner. Exiting so the host respawns it.`,
             );
             // Stop touching the heartbeat so host-sweep stale detection fires
-            // promptly even if exit() races with in-flight async work.
+            // promptly even if exit() races with in-flight async work. The
+            // independent timer must stop here too, or it would keep this
+            // container looking alive right through the respawn we just asked
+            // the host for.
             done = true;
+            heartbeatTimerDone = true;
             clearInterval(pollHandle);
+            clearInterval(heartbeatHandle);
             // Defer exit one tick so this log line flushes through Docker's
             // log driver before the process dies.
             setTimeout(() => process.exit(75), 100);
@@ -734,7 +750,9 @@ export async function processQuery(
     throw err;
   } finally {
     done = true;
+    heartbeatTimerDone = true;
     clearInterval(pollHandle);
+    clearInterval(heartbeatHandle);
   }
 
   return { continuation: queryContinuation };
