@@ -8,9 +8,9 @@
      seconds — technical terms fine, decoration not. If a sentence adds no
      reviewable fact, delete it.
 
-     Keep Summary, Change kind, Validation, Security, and AI assistance in
-     every PR ("None." beats deletion); Related work, User and release
-     impact, and Skill delivery may go when they don't apply. -->
+     Keep Summary, Change kind, Validation, User and release impact,
+     Security, and AI assistance in every PR ("None." beats deletion);
+     Related work and Skill delivery may go when they don't apply. -->
 
 ## Summary
 
@@ -56,8 +56,16 @@ Closes #
 - [ ] User-visible change — release note below
 - [ ] Breaking change — release note below covers detect, why, fix/migration, rollback
 
+<!-- Release note: written for the person running NanoClaw, not for reviewers.
+     **Bold lead: what the operator now sees or can do.** Then at most one
+     sentence: the symptom it ends, or the exact command they must run.
+     No file names, functions, labels or PR numbers; those go in Summary.
+     Example: **Fresh installs no longer leave the setup test agent's
+     container running.** It used to log `unable to open database file`
+     every few seconds until the next restart. -->
+
 ```release-note
-Optional: one user-facing line for the changelog. Skip it and a maintainer will write one.
+Replace this with one user-facing line for the changelog. Required unless "No user-visible behavior change" is checked.
 ```
 
 ## Security and trust boundaries
