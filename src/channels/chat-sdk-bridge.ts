@@ -371,6 +371,13 @@ export interface ChatSdkBridgeConfig {
    * and reactions still target the head of the reply.
    */
   maxTextLength?: number;
+  /**
+   * Optional override for display cards (send_card). Receives the card spec
+   * exactly as the agent sent it, so a channel can render structure the
+   * shared Card model can't express. Return the posted message id, or
+   * undefined to fall through to the default card rendering.
+   */
+  postCard?: (threadId: string, cardSpec: Record<string, unknown>, fallbackText: string) => Promise<string | undefined>;
 }
 
 /**
@@ -948,6 +955,11 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         if (cardChildren.length === 0 && !title) {
           log.warn('send_card payload empty, skipping delivery');
           return;
+        }
+
+        if (config.postCard) {
+          const id = await config.postCard(tid, cardSpec, fallbackText);
+          if (id !== undefined) return id;
         }
 
         const card = Card({ title, children: cardChildren });
