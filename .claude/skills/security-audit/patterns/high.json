@@ -1,0 +1,88 @@
+{
+  "patterns": [
+    {
+      "id": "undocumented-fetch",
+      "category": "network",
+      "severity": "HIGH",
+      "regex": "fetch\\(['\"]https?://(?!localhost|127\\.0\\.0\\.1)",
+      "message": "External network access detected",
+      "remediation": "Document all external API calls in SKILL.md. List domains accessed and purpose.",
+      "requiresContext": true,
+      "contextCheck": "skillMdMentionsDomain"
+    },
+    {
+      "id": "undocumented-axios",
+      "category": "network",
+      "severity": "HIGH",
+      "regex": "axios\\.(get|post|put|delete|patch)\\(['\"]https?://(?!localhost|127\\.0\\.0\\.1)",
+      "message": "External API call detected",
+      "remediation": "Document all external API endpoints in SKILL.md.",
+      "requiresContext": true,
+      "contextCheck": "skillMdMentionsDomain"
+    },
+    {
+      "id": "dynamic-url",
+      "category": "network",
+      "severity": "HIGH",
+      "regex": "fetch\\((?!['\"\\`])[a-zA-Z_$]",
+      "message": "Dynamic URL construction: fetch() called with variable URL",
+      "remediation": "Use explicit URLs or clearly document dynamic URL patterns."
+    },
+    {
+      "id": "eval-usage",
+      "category": "obfuscation",
+      "severity": "HIGH",
+      "regex": "\\beval\\s*\\(",
+      "message": "eval() detected: Dynamic code execution",
+      "remediation": "Avoid eval(). Use explicit code or safer alternatives like JSON.parse()."
+    },
+    {
+      "id": "function-constructor",
+      "category": "obfuscation",
+      "severity": "HIGH",
+      "regex": "new\\s+Function\\s*\\(",
+      "message": "Function constructor detected: Dynamic code generation",
+      "remediation": "Use explicit function definitions instead of dynamic construction."
+    },
+    {
+      "id": "env-enumeration",
+      "category": "credential-access",
+      "severity": "HIGH",
+      "regex": "Object\\.(keys|values|entries)\\(process\\.env\\)",
+      "message": "Environment variable enumeration: Iterating over all env vars",
+      "remediation": "Access specific environment variables by name instead of enumerating all."
+    },
+    {
+      "id": "secrets-spread",
+      "category": "credential-access",
+      "severity": "HIGH",
+      "regex": "\\.\\.\\.\\s*process\\.env|\\.\\.\\.\\s*secrets",
+      "message": "Secrets spread operator: Copying all environment variables or secrets",
+      "remediation": "Access specific secrets by name instead of bulk copying."
+    },
+    {
+      "id": "shell-exec",
+      "category": "process-injection",
+      "severity": "HIGH",
+      "regex": "exec(Sync)?\\(['\"]?/bin/(sh|bash|zsh)",
+      "message": "Shell execution detected: Spawning shell process",
+      "remediation": "Avoid shell execution. Use direct process spawning with spawn() instead."
+    },
+    {
+      "id": "dynamic-require",
+      "category": "obfuscation",
+      "severity": "HIGH",
+      "regex": "require\\((?!['\"\\`])[a-zA-Z_$]",
+      "message": "Dynamic require: Loading module with computed name",
+      "remediation": "Use static require() with literal module names for auditability."
+    },
+    {
+      "id": "dynamic-import",
+      "category": "obfuscation",
+      "severity": "HIGH",
+      "regex": "import\\((?!['\"\\`])[a-zA-Z_$]",
+      "message": "Dynamic import: Loading module with computed name",
+      "remediation": "Use static imports for auditability."
+    }
+  ]
+}
