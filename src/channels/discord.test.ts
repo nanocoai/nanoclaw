@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { unwrapForwardedSnapshot } from './discord.js';
+import { isEnvProxyActive, resolveGatewayModules, unwrapForwardedSnapshot, withNativeWebSocket } from './discord.js';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function forwardPayload(snapshotMessage: Record<string, any> | null, overrides: Record<string, any> = {}) {
@@ -72,5 +72,66 @@ describe('unwrapForwardedSnapshot', () => {
     });
     unwrapForwardedSnapshot(data);
     expect(data.content).toBe('[Forwarded message]\none\ntwo');
+  });
+});
+
+describe('isEnvProxyActive', () => {
+  it('is off when no proxy is configured', () => {
+    expect(isEnvProxyActive({ NODE_USE_ENV_PROXY: '1' }, [])).toBe(false);
+  });
+
+  it('is off when a proxy is set but Node is not routing through it', () => {
+    expect(isEnvProxyActive({ HTTPS_PROXY: 'http://proxy.example:8080' }, [])).toBe(false);
+  });
+
+  it('is on with a proxy and NODE_USE_ENV_PROXY=1', () => {
+    expect(isEnvProxyActive({ HTTPS_PROXY: 'http://proxy.example:8080', NODE_USE_ENV_PROXY: '1' }, [])).toBe(true);
+  });
+
+  it('is on with a lowercase proxy var and --use-env-proxy', () => {
+    expect(isEnvProxyActive({ http_proxy: 'http://proxy.example:8080' }, ['--use-env-proxy'])).toBe(true);
+  });
+
+  it('is on with --use-env-proxy in NODE_OPTIONS', () => {
+    expect(
+      isEnvProxyActive(
+        { HTTP_PROXY: 'http://proxy.example:8080', NODE_OPTIONS: '--max-old-space-size=512 --use-env-proxy' },
+        [],
+      ),
+    ).toBe(true);
+  });
+});
+
+describe('withNativeWebSocket', () => {
+  class FakeWs {}
+  class FakeNative {}
+
+  it('exposes the native constructor only while the gateway loads', () => {
+    const ws = { WebSocket: FakeWs as unknown };
+    let seen: unknown;
+    withNativeWebSocket(ws, FakeNative, () => {
+      seen = ws.WebSocket;
+    });
+    expect(seen).toBe(FakeNative);
+    expect(ws.WebSocket).toBe(FakeWs);
+  });
+
+  it('restores the original constructor when loading throws', () => {
+    const ws = { WebSocket: FakeWs as unknown };
+    expect(() =>
+      withNativeWebSocket(ws, FakeNative, () => {
+        throw new Error('boom');
+      }),
+    ).toThrow('boom');
+    expect(ws.WebSocket).toBe(FakeWs);
+  });
+});
+
+describe('resolveGatewayModules', () => {
+  it('finds the ws package that @discordjs/ws loads', () => {
+    const { ws, loadGateway } = resolveGatewayModules();
+    expect(typeof ws.WebSocket).toBe('function');
+    expect((ws.WebSocket as { OPEN?: number }).OPEN).toBe(1);
+    expect(typeof loadGateway).toBe('function');
   });
 });
