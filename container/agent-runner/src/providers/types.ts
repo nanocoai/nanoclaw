@@ -92,7 +92,23 @@ export interface ProviderOptions {
    * keeps the provider default; a tier it did not declare never reaches it.
    */
   speed?: ProviderSpeed;
+  /**
+   * How a provider built on the Claude Code preset composes its system prompt.
+   * `claude_code` (the default) appends the instructions to the preset;
+   * `plain` sends only the instructions. Providers without a preset ignore it.
+   */
+  systemPromptMode?: SystemPromptMode;
+  /**
+   * Run every query without ambient context: no filesystem settings (skills,
+   * instruction files, settings hooks) and no built-in tools, so the model
+   * sees only the system context, the prompt, and the configured MCP servers.
+   * Omitted (the default) keeps the full context. Providers without such
+   * context ignore it.
+   */
+  minimalContext?: boolean;
 }
+
+export type SystemPromptMode = 'claude_code' | 'plain';
 
 export interface QueryInput {
   /** Initial prompt (already formatted by agent-runner). */

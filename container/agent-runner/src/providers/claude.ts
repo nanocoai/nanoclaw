@@ -10,6 +10,7 @@ import type { ResolvedRuntimeConfiguration } from '../provider-contracts/registr
 // contract — registration is two-step so it compiles on a core without one.
 import {
   SDK_DISALLOWED_TOOLS,
+  TOOL_ALLOWLIST,
   type resolveClaudeExecutionPolicy,
   type resolveClaudeInference,
   type resolveClaudeMcpServers,
@@ -19,7 +20,14 @@ import {
 // read the SDK's on-disk .jsonl, which no other provider has.
 import { archiveClaudeTranscript, rotateClaudeContinuation } from './claude-history.js';
 import { registerProvider } from './provider-registry.js';
-import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
+import type {
+  AgentProvider,
+  AgentQuery,
+  ProviderEvent,
+  ProviderOptions,
+  QueryInput,
+  SystemPromptMode,
+} from './types.js';
 
 function log(msg: string): void {
   console.error(`[claude-provider] ${msg}`);
@@ -198,6 +206,8 @@ export class ClaudeProvider implements AgentProvider {
   private executionPolicy: ReturnType<typeof resolveClaudeExecutionPolicy>;
   private env: Record<string, string | undefined>;
   private additionalDirectories?: string[];
+  private systemPromptMode: SystemPromptMode;
+  private minimalContext: boolean;
   private memorySessionHook?: MemorySessionHookRegistration;
 
   /**
@@ -209,6 +219,8 @@ export class ClaudeProvider implements AgentProvider {
     this.assistantName = options.assistantName;
     this.mcp = configuration.mcpServers as ReturnType<typeof resolveClaudeMcpServers>;
     this.additionalDirectories = options.additionalDirectories;
+    this.systemPromptMode = options.systemPromptMode ?? 'claude_code';
+    this.minimalContext = options.minimalContext === true;
     this.inference = configuration.inference as ReturnType<typeof resolveClaudeInference>;
     this.executionPolicy = configuration.executionPolicy as ReturnType<typeof resolveClaudeExecutionPolicy>;
     this.env = {
@@ -243,6 +255,20 @@ export class ClaudeProvider implements AgentProvider {
     return rotateClaudeContinuation({ continuation, assistantName: this.assistantName, log }, REAL_CLOCK);
   }
 
+  /**
+   * `claude_code` appends the instructions (agent name + destinations) to the
+   * preset. The append is rebuilt at every container start. Left to the SDK
+   * default, Claude Code records the prompt on a session's first request and
+   * resends that record on every resume, so a resumed agent would keep its old
+   * name and destination list until compaction. snapshot: false renders it
+   * fresh each time. `plain` sends the instructions alone, without the preset.
+   */
+  private buildSystemPrompt(instructions: string | undefined) {
+    if (!instructions) return undefined;
+    if (this.systemPromptMode === 'plain') return instructions;
+    return { type: 'preset' as const, preset: 'claude_code' as const, append: instructions, snapshot: false };
+  }
+
   query(input: QueryInput): AgentQuery {
     if (!this.memorySessionHook) throw new Error('Claude memory session hook was not registered');
     const stream = new MessageStream();
@@ -257,23 +283,20 @@ export class ClaudeProvider implements AgentProvider {
         additionalDirectories: this.additionalDirectories,
         resume: input.continuation,
         pathToClaudeCodeExecutable: '/pnpm/claude',
-        // The append (agent name + destinations) is rebuilt at every container
-        // start. Left to the SDK default, Claude Code records the prompt on a
-        // session's first request and resends that record on every resume, so
-        // a resumed agent would keep its old name and destination list until
-        // compaction. snapshot: false renders it fresh each time.
-        systemPrompt: instructions
-          ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions, snapshot: false }
-          : undefined,
-        allowedTools: [...this.mcp.allowedTools],
-        disallowedTools: [...this.executionPolicy.disallowedTools],
+        systemPrompt: this.buildSystemPrompt(instructions),
+        allowedTools: this.minimalContext
+          ? this.mcp.allowedTools.filter((tool) => !TOOL_ALLOWLIST.includes(tool))
+          : [...this.mcp.allowedTools],
+        disallowedTools: this.minimalContext
+          ? [...this.executionPolicy.disallowedTools, ...TOOL_ALLOWLIST]
+          : [...this.executionPolicy.disallowedTools],
         env: this.env,
         model: this.inference.model,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         effort: this.inference.effort as any,
         permissionMode: this.executionPolicy.permissionMode,
         allowDangerouslySkipPermissions: this.executionPolicy.allowDangerouslySkipPermissions,
-        settingSources: ['project', 'user', 'local'],
+        settingSources: this.minimalContext ? [] : ['project', 'user', 'local'],
         // Flag-level settings: `fastMode` only when the install turns it on,
         // then the execution policy's fixed keys, spread last so per-group
         // input can never override them. Both are Settings members rather

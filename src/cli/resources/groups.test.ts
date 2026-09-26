@@ -437,4 +437,52 @@ describe('groups config (host-only)', () => {
       expect(await speedOf()).toBe('turbo');
     });
   });
+
+  describe('--system-prompt-mode', () => {
+    const GID = 'ag-spm';
+    const group = { id: GID, name: 'p', folder: 'p', agent_provider: null, created_at: now() };
+    const setMode = (mode: string) =>
+      dispatch(
+        { id: `spm-${mode}`, command: 'groups-config-update', args: { id: GID, 'system-prompt-mode': mode } },
+        { caller: 'host' },
+      );
+    const materialize = async (): Promise<ContainerConfig> =>
+      JSON.parse(JSON.stringify(configFromDb((await getContainerConfig(GID))!, group))) as ContainerConfig;
+
+    beforeEach(async () => {
+      await createAgentGroup(group);
+      await ensureContainerConfig(GID);
+    });
+
+    it('leaves container.json without the key until a group sets it', async () => {
+      expect((await getContainerConfig(GID))!.system_prompt_mode).toBeNull();
+      expect(Object.keys(await materialize())).not.toContain('systemPromptMode');
+    });
+
+    it('stores plain and materializes it into container.json', async () => {
+      expect((await setMode('plain')).ok).toBe(true);
+      expect((await getContainerConfig(GID))!.system_prompt_mode).toBe('plain');
+      expect((await materialize()).systemPromptMode).toBe('plain');
+    });
+
+    it('accepts claude_code, which materializes as the default', async () => {
+      expect((await setMode('claude_code')).ok).toBe(true);
+      expect((await getContainerConfig(GID))!.system_prompt_mode).toBe('claude_code');
+      expect(Object.keys(await materialize())).not.toContain('systemPromptMode');
+    });
+
+    it('clears to NULL on ""', async () => {
+      await setMode('plain');
+      expect((await setMode('')).ok).toBe(true);
+      expect((await getContainerConfig(GID))!.system_prompt_mode).toBeNull();
+    });
+
+    it('rejects an unknown mode and writes nothing', async () => {
+      await setMode('plain');
+      const rejected = await setMode('minimal');
+      expect(rejected.ok).toBe(false);
+      expect(errorMessage(rejected)).toBe('--system-prompt-mode must be one of: claude_code, plain (or "" to clear)');
+      expect((await getContainerConfig(GID))!.system_prompt_mode).toBe('plain');
+    });
+  });
 });
