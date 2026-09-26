@@ -168,10 +168,57 @@ describe('send_card', () => {
     },
   );
 
+  it('keeps a non-ASCII link by normalizing it with URL', async () => {
+    const result = await sendCard.handler({
+      card: {
+        title: 'Test',
+        actions: [
+          { label: 'Wiki', url: 'https://de.wikipedia.org/wiki/München' },
+          { label: 'Host', url: 'https://münchen.de/' },
+        ],
+      },
+    });
+
+    expect(result.content[0].text).toMatch(/^Card sent \(id: msg-[^)]+\)$/);
+    const content = JSON.parse(getUndeliveredMessages()[0].content);
+    expect(content.card.actions).toEqual([
+      { label: 'Wiki', url: 'https://de.wikipedia.org/wiki/M%C3%BCnchen' },
+      { label: 'Host', url: 'https://xn--mnchen-3ya.de/' },
+    ]);
+  });
+
   it('states the url rule in the schema description the agent reads', () => {
     const url = LINK_ACTION_SCHEMA.properties.url as { description: string };
 
     expect(url.description).toContain('http or https');
+  });
+
+  // llama.cpp compiles tool schemas to a grammar and rejects these escapes,
+  // failing every request that carries send_card.
+  it('keeps the url pattern free of escapes a grammar converter rejects', () => {
+    const { pattern } = LINK_ACTION_SCHEMA.properties.url as { pattern: string };
+
+    expect(pattern).not.toMatch(/\\[sStn]/);
+
+    const re = new RegExp(pattern);
+    for (const url of ['https://example.com', 'http://a', 'https://x.io/p?q=1#f', 'HTTP://h:8080/~u']) {
+      expect(re.test(url)).toBe(true);
+    }
+    for (const url of [
+      'https://',
+      'https:///p',
+      'https://?q',
+      'https://#f',
+      'https://ex ample.com',
+      'https://example.com\t',
+      'https://example.com\n',
+      'ftp://example.com',
+      'https://a.com/"x',
+      'https://a.com/\\x',
+      'https://"a.com',
+    ]) {
+      expect(re.test(url)).toBe(false);
+    }
   });
 
   it('constrains children to text instead of promising nested action blocks', () => {
