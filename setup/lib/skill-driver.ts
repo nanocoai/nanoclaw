@@ -12,8 +12,8 @@
  * policy module (scripts/skill-policy.ts): the natural-barrier gate confirm,
  * the URL offer, the prose-derived validation message.
  */
-import { execSync, spawn } from 'node:child_process';
-import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 
 import * as p from '@clack/prompts';
@@ -37,6 +37,10 @@ import { emitStatus } from '../status.js';
 import { openUrl } from './browser.js';
 import { isHelpEscape, offerClaudeHandoff, validateWithHelpEscape } from './claude-handoff.js';
 import { startSpinner } from './runner.js';
+import { channelsRemote, hostExec } from './skill-host.js';
+
+// Re-exported: existing callers and tests import these from the driver.
+export { channelsRemote, hostExec };
 
 /**
  * Build the clack `validate` callback an `nc:prompt` carries — the interactive
@@ -250,65 +254,6 @@ async function reuseFromEnv(
 }
 
 /**
- * Host exec for the engine's run directives. Returns stdout so a
- * `run capture:<var>` can bind it. Puts the project's `bin/` on PATH so a bare
- * `ncl …` in a wire directive resolves to `bin/ncl` even when it isn't
- * symlinked onto the operator's PATH.
- *
- * Async (spawn, not execSync) so the step spinner keeps animating: a sync exec
- * blocks the event loop for the whole command and freezes every ticker in the
- * process. A failure rejects with the FIRST line as the actionable summary —
- * `exit <code>: <first stderr line>` — and the full stderr kept below, so
- * one-line consumers (run-channel-skill's bounce warn) stay readable while the
- * agentTask reason an agent fixes from still carries everything.
- *
- * Non-step effects are captured-output steps — the spinner is the only UI, and
- * stderr is piped, never echoed (a chatty tool's warnings don't belong on the
- * wizard screen). When `rawLog` is given, every command's stdout+stderr is
- * appended there (level 3, like runner.ts's per-step raw logs) so the silenced
- * noise stays inspectable.
- */
-export function hostExec(
-  projectRoot: string,
-  rawLog?: string,
-): (cmd: string, context?: ExecContext) => Promise<string> {
-  const tee = (cmd: string, stdout: string, stderr: string): void => {
-    if (!rawLog) return;
-    const body = [stdout, stderr].filter(Boolean).join('');
-    appendFileSync(rawLog, `$ ${cmd}\n${body}${body && !body.endsWith('\n') ? '\n' : ''}\n`);
-  };
-  return (cmd, context) =>
-    new Promise((resolve, reject) => {
-      const child = spawn('bash', ['-c', cmd], {
-        cwd: projectRoot,
-        env: { ...process.env, PATH: `${join(projectRoot, 'bin')}:${process.env.PATH ?? ''}` },
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      let out = '';
-      let err = '';
-      child.stdout.on('data', (c: Buffer) => {
-        out += c.toString('utf8');
-      });
-      child.stderr.on('data', (c: Buffer) => {
-        err += c.toString('utf8');
-      });
-      child.on('error', reject);
-      child.on('close', (code) => {
-        const redact = context?.redact ?? ((text: string) => text);
-        tee(redact(cmd), redact(out), redact(err));
-        if (code === 0) return resolve(out);
-        const stderr = redact(err).trim();
-        const head =
-          stderr
-            .split('\n')
-            .map((l) => l.trim())
-            .find(Boolean) ?? 'command failed';
-        reject(new Error(`exit ${code ?? '?'}: ${head}${stderr ? `\n${stderr}` : ''}`));
-      });
-    });
-}
-
-/**
  * Streaming host exec for `nc:run effect:step`. Spawns the step through a shell,
  * tees its human-facing output to the operator's terminal live (so a pairing code
  * card or a QR rendered by the step shows), parses the `=== NANOCLAW SETUP: TYPE
@@ -473,16 +418,6 @@ function defaultOnEvent(
 export function plainDuration(ms: number): string {
   const s = Math.max(0, Math.round(ms / 1000));
   return s >= 60 ? `(${Math.floor(s / 60)}m ${s % 60}s)` : `(${s}s)`;
-}
-
-/** Fork-aware registry-branch remote (same resolver setup/channels/slack.ts uses). */
-export function channelsRemote(projectRoot: string): () => string {
-  return () =>
-    execSync('source setup/lib/channels-remote.sh; resolve_channels_remote', {
-      cwd: projectRoot,
-      shell: '/bin/bash',
-      encoding: 'utf8',
-    }).trim();
 }
 
 export interface RunSkillOptions {

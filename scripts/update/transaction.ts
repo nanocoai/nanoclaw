@@ -1,11 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import { getInstallSlug } from '../../src/install-slug.js';
-import { installGateway } from '../../setup/gateways/install.js';
-import { resolveGatewaySelection } from '../../setup/gateways/selection.js';
-import { upsertEnvVar } from '../../setup/set-env.js';
 import { refreshInstalledSkills, type SkillsRefreshReport } from '../update-skills.js';
 import {
   createCommandRunner,
@@ -72,6 +70,41 @@ export interface PruneReport {
   retained: string[];
 }
 
+/**
+ * The gateway helpers live under setup/, which the controller cannot import
+ * statically: every installed /update-nanoclaw skill extracts the controller
+ * with `git archive <ref> scripts src/install-slug.ts`, so its static import
+ * graph has to stay inside those paths. They load instead from a full checkout
+ * of the target: the stage while validating, the reset live checkout at
+ * cutover. They import no packages, so they load before the stage has
+ * node_modules. scripts/update/controller-archive.test.ts enforces both halves.
+ */
+export interface GatewayModules {
+  refreshGateway: typeof import('../../setup/gateways/refresh.js').refreshGateway;
+  resolveGatewaySelection: typeof import('../../setup/gateways/selection.js').resolveGatewaySelection;
+  upsertEnvVar: typeof import('../../setup/set-env.js').upsertEnvVar;
+}
+
+export async function loadGatewayModules(root: string): Promise<GatewayModules> {
+  if (!fs.existsSync(path.join(root, 'setup/gateways/refresh.ts'))) {
+    // A cherry-pick stage can predate these modules.
+    throw new Error(
+      `${root} has no setup/gateways/refresh.ts; include the commit that adds it, or update with merge or rebase`,
+    );
+  }
+  const load = (rel: string) => import(pathToFileURL(path.join(root, rel)).href);
+  const [refresh, selection, env] = await Promise.all([
+    load('setup/gateways/refresh.ts'),
+    load('setup/gateways/selection.ts'),
+    load('setup/set-env.ts'),
+  ]);
+  return {
+    refreshGateway: refresh.refreshGateway,
+    resolveGatewaySelection: selection.resolveGatewaySelection,
+    upsertEnvVar: env.upsertEnvVar,
+  };
+}
+
 export interface UpdateRuntime {
   runner: CommandRunner;
   serviceEnv: ServiceEnvironment;
@@ -80,6 +113,7 @@ export interface UpdateRuntime {
   drainContainers(projectRoot: string): Promise<void>;
   startService(handle: ServiceHandle, projectRoot: string): void;
   verifyHealth(handle: ServiceHandle, projectRoot: string): Promise<boolean>;
+  loadGateway(root: string): Promise<GatewayModules>;
 }
 
 export function createUpdateRuntime(runner = createCommandRunner()): UpdateRuntime {
@@ -92,6 +126,7 @@ export function createUpdateRuntime(runner = createCommandRunner()): UpdateRunti
     drainContainers: (root) => drainContainers(root, serviceEnv),
     startService: (handle, root) => startService(handle, root, serviceEnv),
     verifyHealth: (handle, root) => verifyServiceHealth(handle, root, serviceEnv),
+    loadGateway: loadGatewayModules,
   };
 }
 
@@ -313,12 +348,17 @@ export async function validateUpdate(
     refreshPreparedState(state, runtime);
 
     if (hasChanged(state, 'src/gateway-providers') || hasChanged(state, 'setup/gateways')) {
+      const { refreshGateway, resolveGatewaySelection } = await runtime.loadGateway(state.stageRoot);
       state.gatewaySelection = resolveGatewaySelection(
         state.projectRoot,
         undefined,
         path.join(state.stageRoot, '.claude', 'skills'),
       );
-      await installGateway(state.gatewaySelection, state.stageRoot, { mode: 'refresh', stamp: false });
+      await refreshGateway(
+        state.gatewaySelection,
+        state.stageRoot,
+        path.join(state.transactionRoot, 'gateway-refresh.log'),
+      );
       commitStageChanges(state, runtime, 'chore: materialize selected gateway');
       refreshPreparedState(state, runtime);
     }
@@ -572,7 +612,11 @@ export async function cutoverUpdate(
     saveState(state);
     git(runtime, state.projectRoot, ['reset', '--hard', state.targetHead]);
     installAndBuild(state.projectRoot, state, runtime);
-    if (state.gatewaySelection) upsertEnvVar('NANOCLAW_GATEWAY_PROVIDER', state.gatewaySelection, state.projectRoot);
+    if (state.gatewaySelection) {
+      // From the live checkout, now exactly the validated commit.
+      const { upsertEnvVar } = await runtime.loadGateway(state.projectRoot);
+      upsertEnvVar('NANOCLAW_GATEWAY_PROVIDER', state.gatewaySelection, state.projectRoot);
+    }
     state.phase = 'cutover';
     state.lastError = undefined;
     saveState(state);
