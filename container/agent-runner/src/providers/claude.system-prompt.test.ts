@@ -82,3 +82,23 @@ describe('system prompt mode', () => {
     });
   });
 });
+
+describe('minimal context', () => {
+  it('is off by default: settings load and built-in tools stay allowed', async () => {
+    await drive('# You are Ada');
+    expect(lastOptions?.settingSources).toEqual(['project', 'user', 'local']);
+    expect(lastOptions?.allowedTools).toContain('Bash');
+    expect(lastOptions?.disallowedTools).not.toContain('Bash');
+  });
+
+  it('drops settings and built-in tools but keeps MCP servers', async () => {
+    await drive('# You are Ada', undefined, {
+      minimalContext: true,
+      mcpServers: { extra: { command: 'extra-server' } },
+    });
+    expect(lastOptions?.settingSources).toEqual([]);
+    expect(lastOptions?.allowedTools).toEqual(['mcp__extra__*']);
+    expect(lastOptions?.disallowedTools).toEqual(expect.arrayContaining(['Bash', 'Read', 'Skill', 'CronCreate']));
+    expect(Object.keys(lastOptions?.mcpServers as object)).toEqual(['extra']);
+  });
+});

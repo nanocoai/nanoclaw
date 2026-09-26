@@ -10,6 +10,7 @@ import type { ResolvedRuntimeConfiguration } from '../provider-contracts/registr
 // contract — registration is two-step so it compiles on a core without one.
 import {
   SDK_DISALLOWED_TOOLS,
+  TOOL_ALLOWLIST,
   type resolveClaudeExecutionPolicy,
   type resolveClaudeInference,
   type resolveClaudeMcpServers,
@@ -206,6 +207,7 @@ export class ClaudeProvider implements AgentProvider {
   private env: Record<string, string | undefined>;
   private additionalDirectories?: string[];
   private systemPromptMode: SystemPromptMode;
+  private minimalContext: boolean;
   private memorySessionHook?: MemorySessionHookRegistration;
 
   /**
@@ -218,6 +220,7 @@ export class ClaudeProvider implements AgentProvider {
     this.mcp = configuration.mcpServers as ReturnType<typeof resolveClaudeMcpServers>;
     this.additionalDirectories = options.additionalDirectories;
     this.systemPromptMode = options.systemPromptMode ?? 'claude_code';
+    this.minimalContext = options.minimalContext === true;
     this.inference = configuration.inference as ReturnType<typeof resolveClaudeInference>;
     this.executionPolicy = configuration.executionPolicy as ReturnType<typeof resolveClaudeExecutionPolicy>;
     this.env = {
@@ -281,15 +284,19 @@ export class ClaudeProvider implements AgentProvider {
         resume: input.continuation,
         pathToClaudeCodeExecutable: '/pnpm/claude',
         systemPrompt: this.buildSystemPrompt(instructions),
-        allowedTools: [...this.mcp.allowedTools],
-        disallowedTools: [...this.executionPolicy.disallowedTools],
+        allowedTools: this.minimalContext
+          ? this.mcp.allowedTools.filter((tool) => !TOOL_ALLOWLIST.includes(tool))
+          : [...this.mcp.allowedTools],
+        disallowedTools: this.minimalContext
+          ? [...this.executionPolicy.disallowedTools, ...TOOL_ALLOWLIST]
+          : [...this.executionPolicy.disallowedTools],
         env: this.env,
         model: input.model ?? this.inference.model,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         effort: this.inference.effort as any,
         permissionMode: this.executionPolicy.permissionMode,
         allowDangerouslySkipPermissions: this.executionPolicy.allowDangerouslySkipPermissions,
-        settingSources: ['project', 'user', 'local'],
+        settingSources: this.minimalContext ? [] : ['project', 'user', 'local'],
         // Flag-level settings: `fastMode` only when the install turns it on,
         // then the execution policy's fixed keys, spread last so per-group
         // input can never override them. Both are Settings members rather
