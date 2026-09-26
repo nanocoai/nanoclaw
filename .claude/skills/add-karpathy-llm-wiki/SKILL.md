@@ -43,6 +43,8 @@ Create `container/skills/wiki/SKILL.md` tailored to this user's wiki. This is th
 
 If `container/skills/wiki/SKILL.md` already exists, ask the user whether to update it before overwriting, so an existing tailored schema is preserved on re-run.
 
+The skill must include a contradiction detection step as part of the ingest workflow: before updating any wiki page with a new claim, the agent checks whether it conflicts with existing content on that page. If it does, both claims are recorded in `wiki/contradictions.md` (with source, date, and a description of the conflict) and the page is left unchanged until the user resolves the conflict. Make this explicit in the skill so the agent treats it as a required step, not an optional one.
+
 ### 3c. Group CLAUDE.md
 
 Edit the group's CLAUDE.md to add a wiki section, wrapped in marker comments so it can be located and replaced on re-run:
@@ -60,6 +62,7 @@ If a `<!-- BEGIN karpathy-llm-wiki -->` block already exists, replace it in plac
 - Index the key files and folders (`wiki/`, `sources/`, `wiki/index.md`, `wiki/log.md`)
 - Point to the container skill for detailed workflow
 - **Ingest discipline:** Be very explicit that when the user provides multiple files or points at a folder with many files, the agent MUST process them one at a time. For each file: read it, discuss takeaways, create/update all wiki pages (summary, entities, concepts, cross-references, index, log), and completely finish with that file before moving to the next. Never batch-read all files and then process them together — this produces shallow, generic pages instead of the deep integration the pattern requires.
+- **Contradiction discipline:** Before writing any claim to a wiki page, the agent checks whether it conflicts with existing content on that page. If it does, both versions are logged in `wiki/contradictions.md` with source, date, and a plain description of the conflict. The wiki page stays unchanged until the user resolves it. Make clear that silently overwriting a prior claim is never acceptable — an unresolved conflict in `contradictions.md` is always the right outcome over a quietly wrong wiki page.
 
 ## Step 4: Source handling capabilities
 
