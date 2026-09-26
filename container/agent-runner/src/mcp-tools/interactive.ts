@@ -219,14 +219,14 @@ export const sendCard: McpToolDefinition = {
         card: {
           type: 'object',
           description:
-            'Display card with optional title, description, text children, and URL link actions. Each action requires a non-empty label and a url that is a web link (http or https); invalid actions are dropped. Callback buttons are unsupported; use ask_user_question for choices.',
+            'Display card with optional title, description, text children, and URL link actions. A child may be a collapsible section; channels that cannot collapse it show it expanded. Each action requires a non-empty label and a url that is a web link (http or https); invalid actions are dropped. Callback buttons are unsupported; use ask_user_question for choices.',
           properties: {
             title: { type: 'string' },
             description: { type: 'string' },
             children: {
               type: 'array',
               description:
-                'Text content only: strings or objects with a text field. Nested action blocks are unsupported.',
+                'Text content only: strings, objects with a text field, or collapsible sections { collapsible: true, title, text } for long detail such as logs or stack traces. Nested action blocks are unsupported.',
               items: {
                 anyOf: [
                   { type: 'string' },
@@ -234,6 +234,15 @@ export const sendCard: McpToolDefinition = {
                     type: 'object',
                     properties: { text: { type: 'string' } },
                     required: ['text'],
+                  },
+                  {
+                    type: 'object',
+                    properties: {
+                      collapsible: { type: 'boolean', const: true },
+                      title: { type: 'string', description: 'Short label shown while the section is collapsed.' },
+                      text: { type: 'string' },
+                    },
+                    required: ['collapsible', 'title', 'text'],
                   },
                 ],
               },

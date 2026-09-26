@@ -543,6 +543,61 @@ describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
     expect(calls).toHaveLength(0);
   });
 
+  it('renders a collapsible child expanded, as its bold title then its text', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+    });
+    await bridge.deliver('telegram:42', null, {
+      kind: 'chat-sdk',
+      content: {
+        type: 'card',
+        card: {
+          title: 'Build failed',
+          children: ['Step 3 of 5', { collapsible: true, title: 'Stack trace', text: 'Error: boom\n  at main' }],
+        },
+      },
+    });
+    const msg = calls[0].message as {
+      card?: { children?: Array<{ type?: string; content?: string; style?: string }> };
+    };
+    expect(msg.card?.children).toEqual([
+      { type: 'text', content: 'Step 3 of 5' },
+      { type: 'text', content: 'Stack trace', style: 'bold' },
+      { type: 'text', content: 'Error: boom\n  at main' },
+    ]);
+  });
+
+  it('renders a collapsible child without a title as plain text', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+    });
+    await bridge.deliver('telegram:42', null, {
+      kind: 'chat-sdk',
+      content: { type: 'card', card: { children: [{ collapsible: true, title: '', text: 'details' }] } },
+    });
+    const msg = calls[0].message as { card?: { children?: Array<{ type?: string; content?: string }> } };
+    expect(msg.card?.children).toEqual([{ type: 'text', content: 'details' }]);
+  });
+
+  it('hands a collapsible child to postCard untouched', async () => {
+    const postCard = vi.fn(async () => 'custom-id');
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage: makePostCapture().postMessage }),
+      supportsThreads: false,
+      postCard,
+    });
+    const card = {
+      title: 'Build failed',
+      children: [{ collapsible: true, title: 'Stack trace', text: 'Error: boom' }],
+    };
+    await bridge.deliver('slack:C1', null, { kind: 'chat-sdk', content: { type: 'card', card } });
+    expect(postCard).toHaveBeenCalledWith('slack:C1', card, 'Build failed');
+  });
+
   it('hands the raw card spec to a postCard override and returns its id', async () => {
     const { calls, postMessage } = makePostCapture();
     const postCard = vi.fn(async () => 'custom-id');

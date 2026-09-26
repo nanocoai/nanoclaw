@@ -922,7 +922,14 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
               typeof child === 'object' &&
               typeof (child as Record<string, unknown>).text === 'string'
             ) {
-              cardChildren.push(CardText((child as Record<string, string>).text));
+              // The shared Card model has no collapsible element, so a collapsible
+              // section renders expanded: its title as a bold line, then its text.
+              // Channels that can collapse it do so through postCard.
+              const { collapsible, title: sectionTitle, text } = child as Record<string, unknown>;
+              if (collapsible === true && typeof sectionTitle === 'string' && sectionTitle) {
+                cardChildren.push(CardText(sectionTitle, { style: 'bold' }));
+              }
+              cardChildren.push(CardText(text as string));
             }
           }
         }

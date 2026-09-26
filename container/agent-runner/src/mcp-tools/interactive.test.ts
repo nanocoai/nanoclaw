@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 
+import { AjvJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/ajv';
+
 import { closeSessionDb, getInboundDb, getOutboundDb, initTestSessionDb } from '../mailbox/sqlite/connection.js';
 import { getUndeliveredMessages } from '../db/messages-out.js';
 import { findQuestionResponse } from '../db/messages-in.js';
@@ -180,7 +182,30 @@ describe('send_card', () => {
     };
 
     expect(cardSchema.properties.children.description).toContain('Nested action blocks are unsupported');
-    expect(cardSchema.properties.children.items.anyOf).toHaveLength(2);
+    expect(cardSchema.properties.children.items.anyOf).toHaveLength(3);
+  });
+
+  it('advertises collapsible sections as a child shape', () => {
+    const cardSchema = sendCard.tool.inputSchema.properties.card as {
+      properties: { children: { description: string; items: Record<string, unknown> } };
+    };
+    const validateChild = new AjvJsonSchemaValidator().getValidator(cardSchema.properties.children.items);
+
+    expect(cardSchema.properties.children.description).toContain('collapsible');
+    expect(validateChild({ collapsible: true, title: 'Stack trace', text: 'Error: boom' }).valid).toBe(true);
+    expect(validateChild('plain').valid).toBe(true);
+    expect(validateChild({ text: 'plain' }).valid).toBe(true);
+    expect(validateChild({ collapsible: true, title: 'No text' }).valid).toBe(false);
+    expect(validateChild({ title: 'No text' }).valid).toBe(false);
+  });
+
+  it('passes a collapsible child through to the bridge unchanged', async () => {
+    const children = ['Step 3 of 5', { collapsible: true, title: 'Stack trace', text: 'Error: boom\n  at main' }];
+    const result = await sendCard.handler({ card: { title: 'Build failed', children } });
+
+    expect(result.content[0].text).toMatch(/^Card sent \(id: msg-[^)]+\)$/);
+    const content = JSON.parse(getUndeliveredMessages()[0].content);
+    expect(content.card.children).toEqual(children);
   });
 
   it('stays quiet when every action has a url', async () => {
