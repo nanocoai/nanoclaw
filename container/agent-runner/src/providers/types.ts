@@ -98,6 +98,14 @@ export interface ProviderOptions {
    * `plain` sends only the instructions. Providers without a preset ignore it.
    */
   systemPromptMode?: SystemPromptMode;
+  /**
+   * Run every query without ambient context: no filesystem settings (skills,
+   * instruction files, settings hooks) and no built-in tools, so the model
+   * sees only the system context, the prompt, and the configured MCP servers.
+   * Omitted (the default) keeps the full context. Providers without such
+   * context ignore it.
+   */
+  minimalContext?: boolean;
 }
 
 export type SystemPromptMode = 'claude_code' | 'plain';
