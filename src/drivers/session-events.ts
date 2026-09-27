@@ -73,6 +73,8 @@ function idOf(key: SessionKey): string {
 interface KeyState {
   /** Latest inner (unwrapped) handle for this key — the truth-read channel. */
   handle: SessionHandle;
+  /** The handle came from `prepare` here and owns the attach process a listed one lacks. */
+  prepared: boolean;
   cb: ((failure?: SessionFailure) => void) | null;
   stopIntent: boolean;
   fired: boolean;
@@ -90,9 +92,10 @@ class SessionEventsHub {
   constructor(private readonly driver: SessionDriver) {}
 
   /** A fresh incarnation resets the key: fired/stop-intent belong to the old one. */
-  trackPrepared(handle: SessionHandle): void {
+  trackPrepared(handle: SessionHandle, prepared = true): void {
     this.#states.set(idOf(handle.key), {
       handle,
+      prepared,
       cb: null,
       stopIntent: false,
       fired: false,
@@ -101,11 +104,15 @@ class SessionEventsHub {
     });
   }
 
-  /** A listed handle refreshes the truth-read channel without resetting state. */
+  /**
+   * A listed handle refreshes the truth-read channel without resetting state,
+   * except over a prepared one: that handle's attach exit is the only record of
+   * how its session ended, and a periodic listing must not discard it.
+   */
   trackListed(handle: SessionHandle): void {
     const state = this.#states.get(idOf(handle.key));
-    if (state) state.handle = handle;
-    else this.trackPrepared(handle);
+    if (!state) this.trackPrepared(handle, false);
+    else if (!state.prepared) state.handle = handle;
   }
 
   arm(key: SessionKey, cb: (failure?: SessionFailure) => void): void {
