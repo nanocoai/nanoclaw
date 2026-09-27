@@ -304,11 +304,10 @@ export class ClaudeProvider implements AgentProvider {
       let lastStreamActivityAt = 0;
       for await (const message of sdkResult) {
         if (aborted) return;
-        messageCount++;
 
         // Yield activity for every SDK event so the poll loop knows the agent
         // is working. Deltas arrive per token and carry no content for us, so
-        // they count at most once per second.
+        // they count at most once per second, and not as messages.
         if (message.type === 'stream_event') {
           const now = Date.now();
           if (now - lastStreamActivityAt < STREAM_ACTIVITY_INTERVAL_MS) continue;
@@ -316,6 +315,7 @@ export class ClaudeProvider implements AgentProvider {
           yield { type: 'activity' };
           continue;
         }
+        messageCount++;
         yield { type: 'activity' };
 
         if (message.type === 'system' && message.subtype === 'init') {

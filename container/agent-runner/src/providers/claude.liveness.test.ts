@@ -124,6 +124,26 @@ describe('liveness during generation', () => {
     expect(events.filter((e) => e.type === 'activity')).toHaveLength(1 + 5 + 1);
   });
 
+  it('leaves stream deltas out of the completed-query message count', async () => {
+    sdkMessages.push({ type: 'system', subtype: 'init', session_id: 'sess-1' });
+    for (let i = 0; i < 200; i++) sdkMessages.push(delta(i));
+    sdkMessages.push(
+      { type: 'assistant', message: { content: [{ type: 'text', text: 'done' }] } },
+      { type: 'result', subtype: 'success', result: 'done' },
+    );
+    const lines: string[] = [];
+    const errorSpy = spyOn(console, 'error').mockImplementation((line: unknown) => {
+      lines.push(String(line));
+    });
+    try {
+      await drive();
+    } finally {
+      errorSpy.mockRestore();
+    }
+    // init, assistant and result: the per-token deltas are not SDK messages.
+    expect(lines).toContain('[claude-provider] Query completed after 3 SDK messages');
+  });
+
   it('holds the throttle until a full second has passed', async () => {
     sdkMessages.push(
       { type: 'system', subtype: 'init', session_id: 'sess-1' },
