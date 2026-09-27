@@ -188,12 +188,13 @@ describe('drain and health gates', () => {
       const key = `${command} ${args.join(' ')}`;
       calls.push(key);
       if (args[0] === 'stop') stopped = true;
-      if (key === ps) return { ok: true, stdout: `${stopped ? '' : 'agent111|s1|agent\n'}iron222||gateway\n` };
+      if (key === ps)
+        return { ok: true, stdout: `${stopped ? '' : 'agent111|s1|agent\nbare444||agent\n'}iron222||gateway\n` };
       return { ok: true, stdout: '' };
     };
 
     await drainContainers(root, env);
-    expect(calls).toEqual([ps, `docker stop -t ${CUTOVER_STOP_GRACE_SECONDS} agent111`, ps]);
+    expect(calls).toEqual([ps, `docker stop -t ${CUTOVER_STOP_GRACE_SECONDS} agent111 bare444`, ps]);
   });
 
   it('still stops pre-seam containers (no session, no role)', async () => {
@@ -209,10 +210,10 @@ describe('drain and health gates', () => {
   it('restarts only gateway-owned containers after a snapshot restore, and never throws', () => {
     const root = temp();
     const label = `nanoclaw-install=${slug(root)}`;
-    const ps = `docker ps --filter label=${label} --format ${DRAIN_LIST_FORMAT}`;
+    const ps = `docker ps -a --filter label=${label} --format ${DRAIN_LIST_FORMAT}`;
     const restart = `docker restart -t ${CUTOVER_STOP_GRACE_SECONDS} iron222`;
     const { env, calls } = makeEnv('linux', {
-      [ps]: { ok: true, stdout: 'agent111|s1|agent\niron222||gateway\nold333||\n' },
+      [ps]: { ok: true, stdout: 'agent111|s1|agent\niron222||gateway\nold333||\nbare444||agent\n' },
       [restart]: { ok: false, stdout: 'daemon error' },
     });
     const progress: string[] = [];

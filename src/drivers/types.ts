@@ -346,13 +346,13 @@ export const LABELS = {
 } as const;
 
 /**
- * A named role without a session belongs to an installed gateway's own
+ * A session-less `gateway` role belongs to an installed gateway's own
  * lifecycle (e.g. the Iron central proxy). Install-wide sweeps — residue
  * reaping and the update cutover drain — must leave it alone: nothing
  * recreates it except the gateway's own setup.
  */
 export function isGatewayOwned(sessionId: string | undefined, role: string | undefined): boolean {
-  return !sessionId && !!role;
+  return !sessionId && role === 'gateway';
 }
 
 /**
