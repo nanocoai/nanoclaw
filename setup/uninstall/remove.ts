@@ -11,7 +11,7 @@ import fs from 'fs';
 import path from 'path';
 
 import type { RemovalAction } from './plan.js';
-import type { RunCommand } from './scan.js';
+import { ironControlCleanup, listIronControl, type RunCommand } from './scan.js';
 
 export interface ExecDeps {
   runCommand: RunCommand;
@@ -135,29 +135,32 @@ function runAction(action: RemovalAction, deps: ExecDeps, notes: string[]): void
       break;
     }
     case 'rm-iron-control': {
-      const { runtime, project, volume, network } = action;
-      const ps = runCommand(runtime, ['ps', '-aq', '--filter', `label=com.docker.compose.project=${project}`]);
-      const ids = ps.stdout
-        .split('\n')
-        .map((s) => s.trim())
-        .filter(Boolean);
-      if (ps.status !== 0 || (ids.length > 0 && runCommand(runtime, ['rm', '-f', ...ids]).status !== 0)) {
+      const { runtime, project } = action;
+      // data/ (its keys) is deleted next either way; say so, so a leftover is
+      // never mistaken for recoverable data.
+      const leftover = (what: string) =>
         notes.push(
-          `Iron Control: containers not removed — retry with: ` +
-            `${runtime} ps -aq --filter label=com.docker.compose.project=${project} | xargs -r ${runtime} rm -f` +
-            (volume ? `; ${runtime} volume rm ${volume}` : ''),
+          `Iron Control ${what} — its keys are removed with data/, so it can't be read again. ` +
+            `Remove it with: ${ironControlCleanup(runtime, project)}`,
         );
+      const found = listIronControl(runCommand, runtime, project);
+      if (!found) {
+        leftover(`not removed ('${runtime}' unavailable)`);
         break;
       }
-      if (volume && runCommand(runtime, ['volume', 'rm', volume]).status !== 0) {
-        notes.push(
-          `Iron Control database ${volume}: not removed (in use?) — retry with: ${runtime} volume rm ${volume}`,
-        );
+      if (found.containerIds.length > 0 && runCommand(runtime, ['rm', '-f', ...found.containerIds]).status !== 0) {
+        leftover('containers not removed');
         break;
       }
-      // Best-effort: a kept host's proxy container can still be attached.
-      if (network && runCommand(runtime, ['network', 'rm', network]).status !== 0) {
-        notes.push(`Iron Control network ${network}: not removed — retry with: ${runtime} network rm ${network}`);
+      if (found.volume && runCommand(runtime, ['volume', 'rm', found.volume]).status !== 0) {
+        leftover(`database ${found.volume} not removed (in use?)`);
+        break;
+      }
+      // A kept host's proxy container can still be attached; only the network is left then.
+      if (found.network && runCommand(runtime, ['network', 'rm', found.network]).status !== 0) {
+        notes.push(
+          `Iron Control network ${found.network}: not removed — retry with: ${runtime} network rm ${found.network}`,
+        );
       }
       log('✓ removed Iron Control and its database');
       break;

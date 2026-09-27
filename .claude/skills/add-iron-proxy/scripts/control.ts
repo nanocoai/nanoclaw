@@ -147,7 +147,7 @@ export async function installControl(root = process.cwd()): Promise<void> {
       throw new Error(
         `Iron Control database exists but its encryption keys are missing; restore ${p.environment}, ` +
           `or delete the old database and every credential stored in it with: ` +
-          `docker rm -f ${p.project}-database-1 ${p.project}-web-1 then docker volume rm ${p.project}_database`,
+          `docker rm -f ${p.project}-database-1 ${p.project}-web-1; docker volume rm ${p.project}_database`,
       );
     const password = secret();
     const email = 'operator@nanoclaw.local';

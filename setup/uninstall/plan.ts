@@ -43,8 +43,8 @@ export type RemovalAction =
    * of their API keys). .env is deliberately excluded from `delete-path`.
    */
   | { kind: 'backup-env'; envPath: string }
-  /** Containers re-listed by project label at removal time, then volume, then network. */
-  | { kind: 'rm-iron-control'; runtime: string; project: string; volume?: string; network?: string }
+  /** Re-listed at removal time like rm-containers: containers, then volume, then network. */
+  | { kind: 'rm-iron-control'; runtime: string; project: string }
   | { kind: 'delete-path'; item: PathItem }
   | { kind: 'delete-runtime-path'; item: PathItem };
 
@@ -100,8 +100,7 @@ export function buildRemovalPlan(inv: Inventory, d: Decisions): RemovalAction[] 
   if (d.data) {
     // Before .env and data/: its keys live there, so the database goes with them.
     if (inv.ironControl) {
-      const { project, volume, network } = inv.ironControl;
-      actions.push({ kind: 'rm-iron-control', runtime: inv.containerRuntime, project, volume, network });
+      actions.push({ kind: 'rm-iron-control', runtime: inv.containerRuntime, project: inv.ironControl.project });
     }
     const env = inv.data.find((i) => path.basename(i.path) === '.env');
     if (env) actions.push({ kind: 'backup-env', envPath: env.path });

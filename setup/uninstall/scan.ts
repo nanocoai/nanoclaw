@@ -227,7 +227,41 @@ function scanService(deps: ScanDeps, slug: string, containerRuntime: string, not
   return service;
 }
 
-/** Only this install's project label and names; another copy's slug never matches. */
+/**
+ * This install's Iron Control objects, by its project label and exact names;
+ * another copy's slug never matches. Null when the runtime did not answer, so
+ * a failed lookup is never read as "nothing there".
+ */
+export function listIronControl(runCommand: RunCommand, runtime: string, project: string): IronControlInventory | null {
+  const lines = (args: string[]): string[] | null => {
+    const res = runCommand(runtime, args);
+    if (res.status !== 0) return null;
+    return res.stdout
+      .split('\n')
+      .map((s) => s.trim())
+      .filter(Boolean);
+  };
+  const containerIds = lines(['ps', '-aq', '--filter', `label=com.docker.compose.project=${project}`]);
+  const volumes = lines(['volume', 'ls', '--format', '{{.Name}}']);
+  const networks = lines(['network', 'ls', '--format', '{{.Name}}']);
+  if (!containerIds || !volumes || !networks) return null;
+  const volume = `${project}_database`;
+  return {
+    project,
+    containerIds,
+    ...(volumes.includes(volume) ? { volume } : {}),
+    ...(networks.includes(project) ? { network: project } : {}),
+  };
+}
+
+/** One pasteable line; `;` so a container that is already gone doesn't skip the volume. */
+export function ironControlCleanup(runtime: string, project: string): string {
+  return (
+    `${runtime} ps -aq --filter label=com.docker.compose.project=${project} | xargs -r ${runtime} rm -f; ` +
+    `${runtime} volume rm ${project}_database; ${runtime} network rm ${project}`
+  );
+}
+
 function scanIronControl(
   runCommand: RunCommand,
   slug: string,
@@ -235,28 +269,19 @@ function scanIronControl(
   notes: string[],
 ): IronControlInventory | undefined {
   const project = ironControlProject(slug);
-  const volume = `${project}_database`;
+  let found: IronControlInventory | null = null;
   try {
-    const ps = runCommand(runtime, ['ps', '-aq', '--filter', `label=com.docker.compose.project=${project}`]);
-    if (ps.status !== 0) throw new Error('unavailable');
-    const inventory: IronControlInventory = {
-      project,
-      containerIds: ps.stdout
-        .split('\n')
-        .map((s) => s.trim())
-        .filter(Boolean),
-    };
-    if (runCommand(runtime, ['volume', 'inspect', volume]).status === 0) inventory.volume = volume;
-    if (runCommand(runtime, ['network', 'inspect', project]).status === 0) inventory.network = project;
-    return inventory.containerIds.length || inventory.volume || inventory.network ? inventory : undefined;
+    found = listIronControl(runCommand, runtime, project);
   } catch {
+    found = null;
+  }
+  if (!found) {
     notes.push(
-      `Iron Control (if installed): '${runtime}' unavailable; remove later with: ` +
-        `${runtime} ps -aq --filter label=com.docker.compose.project=${project} | xargs -r ${runtime} rm -f; ` +
-        `${runtime} volume rm ${volume}; ${runtime} network rm ${project}`,
+      `Iron Control (if installed): '${runtime}' unavailable; remove later with: ${ironControlCleanup(runtime, project)}`,
     );
     return undefined;
   }
+  return found.containerIds.length || found.volume || found.network ? found : undefined;
 }
 
 function existingItems(

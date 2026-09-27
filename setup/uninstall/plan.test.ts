@@ -115,13 +115,7 @@ describe('buildRemovalPlan Iron Control', () => {
   it('removes the database with the data group, before the keys in data/', () => {
     const actions = buildRemovalPlan(inventory({ ironControl }), allYes());
     const ironIdx = actions.findIndex((a) => a.kind === 'rm-iron-control');
-    expect(actions[ironIdx]).toEqual({
-      kind: 'rm-iron-control',
-      runtime: 'docker',
-      project: ironControl.project,
-      volume: ironControl.volume,
-      network: ironControl.network,
-    });
+    expect(actions[ironIdx]).toEqual({ kind: 'rm-iron-control', runtime: 'docker', project: ironControl.project });
     expect(ironIdx).toBeGreaterThan(actions.findIndex((a) => a.kind === 'rm-containers'));
     expect(ironIdx).toBeLessThan(actions.findIndex((a) => a.kind === 'backup-env'));
   });

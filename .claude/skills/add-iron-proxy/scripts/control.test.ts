@@ -68,7 +68,7 @@ describe('official Iron Control installation', () => {
     const failure = installControl(root);
     await expect(failure).rejects.toThrow(`restore ${controlPaths(root).environment}`);
     await expect(failure).rejects.toThrow(
-      `docker rm -f ${project}-database-1 ${project}-web-1 then docker volume rm ${project}_database`,
+      `docker rm -f ${project}-database-1 ${project}-web-1; docker volume rm ${project}_database`,
     );
     // Only the volume listing ran: nothing was removed or started.
     expect(installCommandMock).toHaveBeenCalledTimes(1);

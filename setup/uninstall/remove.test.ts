@@ -175,49 +175,50 @@ describe('executePlan', () => {
   });
 
   describe('rm-iron-control', () => {
-    const action: RemovalAction = {
-      kind: 'rm-iron-control',
-      runtime: 'docker',
-      project: 'nanoclaw-iron-control-abcd1234',
-      volume: 'nanoclaw-iron-control-abcd1234_database',
-      network: 'nanoclaw-iron-control-abcd1234',
-    };
-
-    it('re-lists by project label, then removes containers, volume and network', () => {
-      const calls: string[][] = [];
-      const docker: RunCommand = (cmd, args) => {
-        calls.push([cmd, ...args]);
-        return { status: 0, stdout: args[0] === 'ps' ? 'web1\ndb1\n' : '' };
+    const project = 'nanoclaw-iron-control-abcd1234';
+    const action: RemovalAction = { kind: 'rm-iron-control', runtime: 'docker', project };
+    /** Docker answering listings with this install's objects plus another copy's. */
+    const docker =
+      (calls: string[][], fail: (args: string[]) => boolean = () => false): RunCommand =>
+      (_cmd, args) => {
+        calls.push(args);
+        if (fail(args)) return { status: 1, stdout: '' };
+        if (args[0] === 'ps') return { status: 0, stdout: 'web1\ndb1\n' };
+        if (args[1] === 'ls' && args[0] === 'volume')
+          return { status: 0, stdout: `nanoclaw-iron-control-ffffffff_database\n${project}_database\n` };
+        if (args[1] === 'ls') return { status: 0, stdout: `bridge\n${project}\n` };
+        return { status: 0, stdout: '' };
       };
-      const { notes } = executePlan([action], deps({ runCommand: docker }));
-      expect(calls).toEqual([
-        ['docker', 'ps', '-aq', '--filter', 'label=com.docker.compose.project=nanoclaw-iron-control-abcd1234'],
-        ['docker', 'rm', '-f', 'web1', 'db1'],
-        ['docker', 'volume', 'rm', 'nanoclaw-iron-control-abcd1234_database'],
-        ['docker', 'network', 'rm', 'nanoclaw-iron-control-abcd1234'],
+
+    it('re-lists at removal time, then removes containers, volume and network', () => {
+      const calls: string[][] = [];
+      const { notes } = executePlan([action], deps({ runCommand: docker(calls) }));
+      expect(calls.filter((args) => args[0] === 'rm' || args[1] === 'rm')).toEqual([
+        ['rm', '-f', 'web1', 'db1'],
+        ['volume', 'rm', `${project}_database`],
+        ['network', 'rm', project],
       ]);
+      expect(calls[0]).toEqual(['ps', '-aq', '--filter', `label=com.docker.compose.project=${project}`]);
       expect(notes).toEqual([]);
     });
 
-    it('keeps the volume and notes the commands when the containers cannot be listed', () => {
+    it('removes nothing and gives the commands when a listing fails', () => {
       const calls: string[][] = [];
-      const docker: RunCommand = (cmd, args) => {
-        calls.push(args);
-        return { status: args[0] === 'ps' ? 1 : 0, stdout: '' };
-      };
-      const { notes } = executePlan([action], deps({ runCommand: docker }));
-      expect(calls).toEqual([
-        ['ps', '-aq', '--filter', 'label=com.docker.compose.project=nanoclaw-iron-control-abcd1234'],
+      const { notes } = executePlan([action], deps({ runCommand: docker(calls, (args) => args[1] === 'ls') }));
+      expect(calls.some((args) => args[0] === 'rm' || args[1] === 'rm')).toBe(false);
+      expect(notes).toEqual([
+        expect.stringContaining(`docker volume rm ${project}_database; docker network rm ${project}`),
       ]);
-      expect(notes.some((n) => n.includes('docker volume rm nanoclaw-iron-control-abcd1234_database'))).toBe(true);
     });
 
-    it('notes the retry command when the volume is still in use', () => {
-      const docker: RunCommand = (_cmd, args) => ({ status: args[0] === 'volume' ? 1 : 0, stdout: '' });
-      const { notes } = executePlan([action], deps({ runCommand: docker }));
-      expect(notes).toEqual([
-        expect.stringContaining('retry with: docker volume rm nanoclaw-iron-control-abcd1234_database'),
-      ]);
+    it('says the leftover database is unreadable when its removal fails', () => {
+      const calls: string[][] = [];
+      const { notes } = executePlan(
+        [action],
+        deps({ runCommand: docker(calls, (args) => args[0] === 'volume' && args[1] === 'rm') }),
+      );
+      expect(notes).toEqual([expect.stringContaining("can't be read again")]);
+      expect(notes[0]).toContain(`docker volume rm ${project}_database`);
     });
   });
 });
