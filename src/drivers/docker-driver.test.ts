@@ -553,6 +553,23 @@ describe('idempotency and adoption', () => {
     expect(cli.joined().some((c) => c === 'rm --force ncl-spike-s1')).toBe(false);
   });
 
+  it('removes exited session residue but keeps a stopped gateway (Iron proxy after cutover)', async () => {
+    // Removing the gateway leaves nothing to recreate it; every later spawn
+    // would fail until the gateway's setup is re-run.
+    cli.responses = [
+      {
+        match: /^ps -a/,
+        output: 'ncl-spike-s1-aux|s1|mcp\nnanoclaw-iron-proxy-spike||gateway\nold-residue||\n',
+      },
+    ];
+
+    await driver().reapResidue('spike');
+
+    expect(cli.joined()).toContain('rm --force ncl-spike-s1-aux');
+    expect(cli.joined()).toContain('rm --force old-residue');
+    expect(cli.joined().some((c) => c === 'rm --force nanoclaw-iron-proxy-spike')).toBe(false);
+  });
+
   it('reaps install-owned networks whose containers are gone', async () => {
     cli.responses = [{ match: /^network ls/, output: 'nc-spike-a-session\nnc-spike-a-uplink\n' }];
 

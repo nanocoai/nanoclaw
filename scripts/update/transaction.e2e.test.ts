@@ -18,7 +18,7 @@ import {
   validateUpdate,
   type UpdateRuntime,
 } from './transaction.js';
-import { CUTOVER_STOP_CLI_TIMEOUT_MS, drainContainers, stopService } from './service.js';
+import { CUTOVER_STOP_CLI_TIMEOUT_MS, DRAIN_LIST_FORMAT, drainContainers, stopService } from './service.js';
 import { getInstallSlug } from '../../src/install-slug.js';
 import type { CommandRunner, ServiceHandle } from './service.js';
 
@@ -610,7 +610,7 @@ describe('update-nanoclaw transaction end to end', () => {
     expect(cut.phase).toBe('cutover');
     // state.projectRoot is realpathed (macOS tmp lives under /var → /private/var), so derive the slug from it.
     const slugValue = getInstallSlug(cut.projectRoot);
-    const ps = `docker ps -q --filter label=nanoclaw-install=${slugValue}`;
+    const ps = `docker ps --filter label=nanoclaw-install=${slugValue} --format ${DRAIN_LIST_FORMAT}`;
     expect(events.indexOf('service stop')).toBeLessThan(events.indexOf(ps));
     expect(events.filter((e) => e.startsWith('docker '))).toEqual([ps, 'docker stop -t 10 idle111', ps]);
 
