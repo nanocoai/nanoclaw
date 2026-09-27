@@ -1,24 +1,16 @@
 /**
- * The host sweep's orphan stop: a container whose session row or agent group
- * was deleted is stopped, one whose rows exist (or whose spawn is still in
- * flight here) is not, and only this install's sessions are listed.
+ * The host sweep's orphan stop: a supervised session whose session row or
+ * agent group was deleted is stopped, one whose rows exist (or whose spawn is
+ * still in flight) is not, and the runtime is never listed for it.
  */
 import fs from 'fs';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 import type { SupervisedHandle, SupervisedSnapshot } from './drivers/session-events.js';
 
-const { runtime, listSessions, prepare, spawnGate } = vi.hoisted(() => {
-  const runtime: { installed: boolean; snapshots: SupervisedSnapshot[] } = { installed: true, snapshots: [] };
-  return {
-    runtime,
-    listSessions: vi.fn(async (installSlug: string) =>
-      runtime.snapshots.filter(({ handle }) => handle.key.installSlug === installSlug),
-    ),
-    prepare: vi.fn(),
-    // Holds spawnContainer at its first read so a test can observe a spawn in flight.
-    spawnGate: { hold: null as Promise<void> | null },
-  };
+const { snapshots, listSessions, prepare } = vi.hoisted(() => {
+  const snapshots: SupervisedSnapshot[] = [];
+  return { snapshots, listSessions: vi.fn(async () => snapshots), prepare: vi.fn() };
 });
 vi.mock('./config.js', async () => {
   const actual = await vi.importActual<typeof import('./config.js')>('./config.js');
@@ -27,28 +19,19 @@ vi.mock('./config.js', async () => {
 });
 vi.mock('./drivers/index.js', () => {
   const driver = { kind: 'fake', listSessions, prepare, capabilities: () => ({}) };
-  return {
-    getSessionDriver: () => driver,
-    peekSessionDriver: () => (runtime.installed ? driver : null),
-    isSessionEventsDriver: () => false,
-  };
+  return { getSessionDriver: () => driver, isSessionEventsDriver: () => false };
 });
 
-vi.mock('./db/agent-groups.js', async () => {
-  const actual = await vi.importActual<typeof import('./db/agent-groups.js')>('./db/agent-groups.js');
-  return {
-    ...actual,
-    getAgentGroup: async (id: string) => {
-      if (spawnGate.hold) await spawnGate.hold;
-      return actual.getAgentGroup(id);
-    },
-  };
-});
-
-import { INSTALL_SLUG } from './config.js';
-import { stopOrphanedSessions, wakeContainer } from './container-runner.js';
+import {
+  adoptRunningSessions,
+  isContainerRunning,
+  killContainer,
+  stopOrphanedSessions,
+  wakeContainer,
+} from './container-runner.js';
 import { dispatch } from './cli/dispatch.js';
 import './cli/resources/groups.js';
+import * as coordination from './db/coordination.js';
 import { ensureContainerConfig } from './db/container-configs.js';
 import { initTestDb, closeDb, runMigrations, createAgentGroup, createSession, getDb } from './db/index.js';
 import type { Session } from './types.js';
@@ -57,15 +40,32 @@ function now(): string {
   return new Date().toISOString();
 }
 
-function snapshot(sessionId: string, agentGroupId = 'ag-1', installSlug = INSTALL_SLUG) {
-  const stop = vi.fn(async () => {});
+function fakeHandle(sessionId: string, start: () => Promise<void> = async () => {}) {
+  const terminalCallbacks: Array<(failure?: unknown) => void> = [];
+  const stop = vi.fn(async (_reason: string) => {
+    for (const callback of terminalCallbacks) callback(undefined);
+  });
   const handle = {
-    key: { installSlug, agentGroupId, sessionId },
+    key: { installSlug: 'test-install', agentGroupId: 'ag-1', sessionId },
     name: `nanoclaw-v2-${sessionId}`,
+    start,
     stop,
-    onTerminal() {},
+    async status() {
+      return { phase: 'running' };
+    },
+    onTerminal(callback: (failure?: unknown) => void) {
+      terminalCallbacks.push(callback);
+    },
   } as unknown as SupervisedHandle;
-  runtime.snapshots.push({ handle, phase: 'running' } as SupervisedSnapshot);
+  return { handle, stop };
+}
+
+/** Register sess-1 as a supervised runtime through startup adoption. */
+async function adopt() {
+  const { handle, stop } = fakeHandle('sess-1');
+  snapshots.push({ handle, phase: 'running' } as SupervisedSnapshot);
+  expect((await adoptRunningSessions()).adopted).toBe(1);
+  listSessions.mockClear();
   return stop;
 }
 
@@ -77,18 +77,16 @@ function session(id: string): Session {
     thread_id: null,
     agent_provider: null,
     status: 'active',
-    container_status: 'stopped',
+    container_status: 'running',
     last_active: now(),
     created_at: now(),
   };
 }
 
 beforeEach(async () => {
-  runtime.installed = true;
-  runtime.snapshots.length = 0;
+  snapshots.length = 0;
   listSessions.mockClear();
-  prepare.mockClear();
-  spawnGate.hold = null;
+  prepare.mockReset();
   const db = await initTestDb();
   await runMigrations(db);
   await createAgentGroup({
@@ -102,75 +100,57 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  if (isContainerRunning('sess-1')) {
+    killContainer('sess-1', 'test-teardown');
+    await vi.waitFor(() => expect(isContainerRunning('sess-1')).toBe(false));
+  }
   await closeDb();
   fs.rmSync('/tmp/nanoclaw-test-orphan-sweep', { recursive: true, force: true });
 });
 
 describe('stopOrphanedSessions', () => {
   it('leaves a session whose rows exist alone', async () => {
-    const stop = snapshot('sess-1');
+    const stop = await adopt();
     expect(await stopOrphanedSessions()).toBe(0);
     expect(stop).not.toHaveBeenCalled();
+    expect(isContainerRunning('sess-1')).toBe(true);
   });
 
-  it('stops a container whose session row was deleted', async () => {
-    const stop = snapshot('sess-1');
+  it('stops and unregisters a session whose row was deleted, without listing the runtime', async () => {
+    const stop = await adopt();
     await getDb().run('DELETE FROM sessions WHERE id = ?', 'sess-1');
     expect(await stopOrphanedSessions()).toBe(1);
     expect(stop).toHaveBeenCalledWith('orphaned');
+    await vi.waitFor(() => expect(isContainerRunning('sess-1')).toBe(false));
+    expect(listSessions).not.toHaveBeenCalled();
   });
 
-  it('stops the containers `ncl groups delete` leaves behind', async () => {
-    const stop = snapshot('sess-1');
+  it('stops the session `ncl groups delete` leaves behind', async () => {
+    const stop = await adopt();
     const resp = await dispatch({ id: 'req-del', command: 'groups-delete', args: { id: 'ag-1' } }, { caller: 'host' });
     expect(resp.ok).toBe(true);
     expect(await stopOrphanedSessions()).toBe(1);
     expect(stop).toHaveBeenCalledWith('orphaned');
   });
 
-  it('stops a container whose agent group is gone while its session row remains', async () => {
-    const stop = snapshot('sess-1');
+  it('stops a session whose agent group is gone while its session row remains', async () => {
+    const stop = await adopt();
     await getDb().run('PRAGMA foreign_keys = OFF');
     await getDb().run('DELETE FROM agent_groups WHERE id = ?', 'ag-1');
     expect(await stopOrphanedSessions()).toBe(1);
     expect(stop).toHaveBeenCalledWith('orphaned');
   });
 
-  it('lists only this install, so another install’s containers are never touched', async () => {
-    const foreign = snapshot('sess-other', 'ag-other', 'other-install');
-    expect(await stopOrphanedSessions()).toBe(0);
-    expect(listSessions).toHaveBeenCalledWith(INSTALL_SLUG);
-    expect(foreign).not.toHaveBeenCalled();
-  });
-
-  it('leaves a spawn still in flight in this process for the next tick', async () => {
-    let release!: () => void;
-    spawnGate.hold = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const spawning = wakeContainer(session('sess-1'));
-    const stop = snapshot('sess-1');
-    await getDb().run('DELETE FROM sessions WHERE id = ?', 'sess-1');
-    expect(await stopOrphanedSessions()).toBe(0);
-    expect(stop).not.toHaveBeenCalled();
-    spawnGate.hold = null;
-    release();
-    await spawning;
-  });
-
-  it('does nothing when no driver was ever selected', async () => {
-    runtime.installed = false;
-    snapshot('sess-orphan');
+  it('asks nothing of the runtime when this process supervises nothing', async () => {
     expect(await stopOrphanedSessions()).toBe(0);
     expect(listSessions).not.toHaveBeenCalled();
   });
 });
 
-describe('spawnContainer', () => {
+describe('a delete that races a spawn', () => {
   it('starts no container when the rows are deleted while the spawn composes', async () => {
-    const coordination = await import('./db/coordination.js');
-    const actualClaim = coordination.tryClaimSession;
     await ensureContainerConfig('ag-1');
+    const actualClaim = coordination.tryClaimSession;
     const claimSpy = vi.spyOn(coordination, 'tryClaimSession').mockImplementation(async (args) => {
       await getDb().run('DELETE FROM sessions WHERE id = ?', 'sess-1');
       return actualClaim(args);
@@ -180,5 +160,26 @@ describe('spawnContainer', () => {
     expect(prepare).not.toHaveBeenCalled();
     expect((await coordination.getSessionClaim('sess-1'))?.claimed_by ?? null).toBeNull();
     claimSpy.mockRestore();
+  });
+
+  it('leaves a spawn mid-start alone, then stops it on the next tick', async () => {
+    await ensureContainerConfig('ag-1');
+    let started!: () => void;
+    const startGate = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const { handle, stop } = fakeHandle('sess-1', () => startGate);
+    prepare.mockResolvedValue(handle);
+
+    const spawning = wakeContainer(session('sess-1'));
+    await vi.waitFor(() => expect(isContainerRunning('sess-1')).toBe(true));
+    await getDb().run('DELETE FROM sessions WHERE id = ?', 'sess-1');
+    expect(await stopOrphanedSessions()).toBe(0);
+    expect(stop).not.toHaveBeenCalled();
+
+    started();
+    expect(await spawning).toBe(true);
+    expect(await stopOrphanedSessions()).toBe(1);
+    expect(stop).toHaveBeenCalledWith('orphaned');
   });
 });

@@ -43,7 +43,7 @@ import {
 import { getHostInstanceId } from './host-instance.js';
 import { getDb, hasTable } from './db/connection.js';
 import { getSession } from './db/sessions.js';
-import { getSessionDriver, isSessionEventsDriver, peekSessionDriver } from './drivers/index.js';
+import { getSessionDriver, isSessionEventsDriver } from './drivers/index.js';
 import type { SupervisedHandle, SupervisedSnapshot } from './drivers/session-events.js';
 import { GROUP_FOLDER_LABEL, labelValueLegal, specInvalid } from './drivers/types.js';
 import type { ContainerSpec, MountSpec, SessionFailure, SessionSpec } from './drivers/types.js';
@@ -893,38 +893,28 @@ export async function adoptRunningSessions(): Promise<{ adopted: number; stopped
 }
 
 /**
- * Stop this install's sessions whose session row or agent group no longer
- * exists. The per-session reconcile only visits live rows, so a delete (setup
- * cleanup, `ncl groups delete`) would otherwise leave the container up until
- * the next host restart, where adoption stops it the same way.
+ * Stop the sessions this process supervises whose session row or agent group
+ * no longer exists. The per-session reconcile only visits live rows, so a
+ * delete (setup cleanup, `ncl groups delete`) would otherwise leave the
+ * container up until the next host restart, where adoption stops it the same
+ * way. Containers no process supervises are adoption's job, not this sweep's.
  *
- * Not racy against a legitimate spawn: a spawn reads its session row before it
- * creates a container (`spawnContainer`), and the runtime is listed before the
- * rows are read, so a listed container whose row is missing had it deleted.
- * A spawn this process still has in flight is left for the next tick, when it
- * is registered and can be stopped through its runtime entry.
+ * Not racy against a legitimate spawn: a runtime is registered only after its
+ * session row was read (`spawnContainer`) or checked (adoption), and the rows
+ * are read after that, so a missing row was deleted. A spawn still in flight
+ * is left for the next tick, once `start()` has returned.
  */
 export async function stopOrphanedSessions(): Promise<number> {
-  // Never instantiate a driver here: a host that never selected one has nothing to stop.
-  const driver = peekSessionDriver();
-  if (!driver) return 0;
-  const snapshots = await driver.listSessions(INSTALL_SLUG);
   let stopped = 0;
-  for (const { handle } of snapshots) {
-    const { sessionId } = handle.key;
-    if (sessionId && wakePromises.has(sessionId)) continue;
-    const session = sessionId ? await getSession(sessionId) : undefined;
+  for (const [sessionId, runtime] of [...activeContainers]) {
+    if (wakePromises.has(sessionId) || runtime.stopReason) continue;
+    const session = await getSession(sessionId);
     if (session && (await getAgentGroup(session.agent_group_id))) continue;
     log.warn('Stopping container whose session or agent group was deleted', {
       sessionId,
-      agentGroupId: handle.key.agentGroupId,
-      container: handle.name,
+      containerName: runtime.containerName,
     });
-    if (sessionId && activeContainers.has(sessionId)) {
-      killContainer(sessionId, 'orphaned');
-    } else {
-      await handle.stop('orphaned').catch((err) => log.error('Failed to stop orphaned container', { sessionId, err }));
-    }
+    killContainer(sessionId, 'orphaned');
     stopped += 1;
   }
   return stopped;
