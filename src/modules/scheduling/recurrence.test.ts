@@ -14,6 +14,7 @@ import { ensureSchema, openInboundDb } from '../../mailbox/sqlite/session-db.js'
 import { insertTaskRow } from '../../mailbox/sqlite/tasks.js';
 import { wrapSqliteInbound } from '../../mailbox/sqlite/index.js';
 import { handleRecurrence, scriptBackoffMinutes } from './recurrence.js';
+import { parseTaskContent } from './task-content.js';
 import type { Session } from '../../types.js';
 
 // Pin a non-UTC zone so the tz-interpretation test is exact even on UTC CI.
@@ -139,6 +140,25 @@ describe('handleRecurrence', () => {
       process_after: string;
     };
     expect(follow.process_after).toMatch(/T03:30:00/);
+  });
+
+  it('carries freshSession forward to the next occurrence (no schema change)', async () => {
+    const db = freshDb();
+    insertTaskRow(db, {
+      id: 'task-fresh',
+      seriesId: 'task-fresh',
+      processAfter: '2020-01-01T00:00:00.000Z',
+      recurrence: '0 9 * * *',
+      content: JSON.stringify({ prompt: 'nightly sweep', script: null, originSessionId: null, freshSession: true }),
+    });
+    db.prepare(`UPDATE messages_in SET status='completed' WHERE id='task-fresh'`).run();
+
+    await handleRecurrence(wrapSqliteInbound(db), fakeSession());
+
+    const follow = db.prepare(`SELECT content FROM messages_in WHERE id != 'task-fresh'`).get() as {
+      content: string;
+    };
+    expect(parseTaskContent(follow.content).freshSession).toBe(true);
   });
 
   it('does not clone rows whose recurrence is already cleared', async () => {
