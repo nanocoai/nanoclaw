@@ -95,6 +95,7 @@ uncertain ones to a person or to your own reasoning.
 
 | Status | Meaning | CLI behavior |
 |---|---|---|
-| 401 / 403 | Credential missing or rejected at the gateway | exit 2, no retry |
+| 401 | Credential missing or rejected at the gateway | exit 2, no retry |
+| 403 | Gateway policy, or the key's quota or permissions | exit 2, no retry |
 | 422 | Malformed request; body names the field | exit 3 with the body excerpt |
-| 429 / 529 | Rate limited / overloaded | retried with backoff, then exit 3 |
+| 429 / 529 | Rate limited / overloaded | retried with backoff (honoring `Retry-After`); a 429 that will not clear soon is exit 5, a lasting 529 exit 3 |

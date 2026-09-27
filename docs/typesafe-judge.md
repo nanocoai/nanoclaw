@@ -3,7 +3,7 @@
 `/add-typesafe-tool` lets a NanoClaw agent hand its snap decisions to a
 decision model while it keeps the reasoning and the writing. It mounts the
 `typesafe-judge` container skill into every agent and registers the
-`api.typesafe.ai` credential with the install's OneCLI gateway. The agent gets a
+endpoint's credential with the install's OneCLI gateway. The agent gets a
 CLI that asks TypeSafe's Jev model typed questions and returns probabilities,
 never text.
 
@@ -24,6 +24,17 @@ each other, so a workflow asks what its decision tree can use in one call
 (speculative fan-out) and lets code pick the answers that matter.
 `confidence` summarizes how peaked an answer's distribution is; the docs at
 https://docs.typesafe.ai (primitives, confidence, patterns) are the reference.
+
+## Two endpoints
+
+Jev is reachable at TypeSafe (`https://api.typesafe.ai/v1/systemone`, a
+TypeSafe key) and through OpenRouter (`https://openrouter.ai/api/v1/systemone`,
+an OpenRouter key, billed to OpenRouter credits). OpenRouter's endpoint takes
+the same request, including `model: "jev-latest"`, and returns the same answer
+shape, so everything below applies to both. The skill asks which one, writes
+`container/skills/typesafe-judge/endpoint.json` (`{"endpoint":"openrouter"}`),
+and keys the gateway secret and rate-limit rule on that endpoint's host and
+path. The CLI reads the file on every call; `--endpoint` overrides it.
 
 ## The container tool
 
@@ -81,9 +92,10 @@ brake only: an agent may downgrade a gate and say why, never upgrade one.
 ## How the key gets in
 
 The CLI sends `Authorization: Bearer placeholder`. The gateway replaces it
-at the network edge for host `api.typesafe.ai`, exactly as `/add-vercel`
-does for `api.vercel.com`. The key never sits in an env var, a file inside
-the repo, a command line, or a chat.
+at the network edge for the endpoint's host, exactly as `/add-vercel`
+does for `api.vercel.com`. On OpenRouter the secret is scoped to the path
+`/api/v1/systemone`, so the key is injected into Jev calls only. The key never
+sits in an env var, a file inside the repo, a command line, or a chat.
 
 **OneCLI only, for now.** `/add-typesafe-tool` reads the gateway stamp
 (`NANOCLAW_GATEWAY_PROVIDER`, environment first, then `.env`; it never probes)
@@ -94,21 +106,23 @@ approval card; Iron support waits on a per-host auto-approval rule in core.
 
 On OneCLI the operator stores the key themselves, either through the
 prefilled dashboard form
-(`/connections/secrets?create=generic&host=api.typesafe.ai&…`) or with
-`onecli secrets create --type generic --host-pattern api.typesafe.ai
+(`/connections/secrets?create=generic&host=api.typesafe.ai&…`, or
+`host=openrouter.ai&path=%2Fapi%2Fv1%2Fsystemone&…`) or with
+`onecli secrets create --type generic --host-pattern <host> [--path-pattern <path>]
 --header-name Authorization --value-format "Bearer {value}" --file <path>`
 from a private file. The skill then verifies that a secret exists for that
 exact host (names are not consulted), merges it into every
 `selective`-mode agent of this install (leaving an agent untouched if its
 list cannot be read; `all`-mode agents need nothing), and creates one
-rate-limit rule, "TypeSafe: spend ceiling" (600 requests an hour; OneCLI
+rate-limit rule, "TypeSafe: spend ceiling", on the endpoint's host and
+judgment path (600 requests an hour; OneCLI
 counts it per agent, so it caps each agent rather than the host; edit the
 number in the dashboard). A same-named rule that is disabled, scoped, on
 another host, or narrowed to a method or path judgments never use fails the
 step instead of passing as protection.
 
 The skill's guard test (`src/typesafe-manifest.test.ts` after apply) fails
-if the CLI stops targeting `api.typesafe.ai`, drops the placeholder, or
+if the CLI stops targeting either endpoint, drops the placeholder, or
 starts reading a key from anywhere.
 
 ## Removal

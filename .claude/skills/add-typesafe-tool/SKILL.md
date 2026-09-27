@@ -1,13 +1,14 @@
 ---
 name: add-typesafe-tool
-description: Give NanoClaw agents TypeSafe's Jev decision model as a container tool — the `typesafe-judge` CLI (classify, route, rank, verify, yes/no with calibrated confidence) plus credential injection for api.typesafe.ai through the OneCLI gateway (OneCLI-only for now). Use when agents should make judgments with a System One model instead of reasoning them out.
+description: Give NanoClaw agents TypeSafe's Jev decision model as a container tool — the `typesafe-judge` CLI (classify, route, rank, verify, yes/no with calibrated confidence) plus credential injection through the OneCLI gateway, calling Jev either at api.typesafe.ai or through OpenRouter (OneCLI-only for now). Use when agents should make judgments with a System One model instead of reasoning them out.
 ---
 
 # Add TypeSafe Tool
 
 Installs TypeSafe as a **container tool**: the `typesafe-judge` skill and CLI
-mounted into every agent container, and a credential for `api.typesafe.ai`
-held by the install's OneCLI gateway so in-container calls are injected
+mounted into every agent container, and a credential for the chosen endpoint
+(`api.typesafe.ai`, or `openrouter.ai` for Jev through OpenRouter) held by the
+install's OneCLI gateway so in-container calls are injected
 at the network edge. The key never enters a container, an env var, or a chat.
 Idempotent: safe to re-run.
 
@@ -59,23 +60,43 @@ container-skills/typesafe-judge/references/question-design.md -> container/skill
 ```
 
 Copy the guard test into the host test tree. It asserts the installed skill is
-complete and that its CLI still targets `api.typesafe.ai` with the placeholder
+complete and that its CLI still targets the System One endpoints with the placeholder
 credential, which is what ties the container tool to the gateway rule below:
 
 ```nc:copy
 typesafe-manifest.test.ts -> src/typesafe-manifest.test.ts
 ```
 
+## Choose the endpoint
+
+Jev is served by TypeSafe directly and by OpenRouter, which exposes the same
+request and answers at a TypeSafe-compatible endpoint and bills your OpenRouter
+credits. Ask the user which one to use: `typesafe` (a key from the TypeSafe
+console) or `openrouter` (an OpenRouter key):
+
+```nc:prompt endpoint validate:^(typesafe|openrouter)$ normalize:lower
+Call Jev through which endpoint: typesafe (api.typesafe.ai, a TypeSafe key) or openrouter (openrouter.ai, an OpenRouter key)?
+```
+
+Record the choice beside the CLI, which reads `endpoint.json` on every call
+(`--endpoint` overrides it per call), and resolve the host and path the
+gateway steps below are keyed on:
+
+```nc:run capture:api_host=.host,api_path=.path
+case "{{endpoint}}" in typesafe) H=api.typesafe.ai; P=/v1/systemone ;; openrouter) H=openrouter.ai; P=/api/v1/systemone ;; *) echo "unknown endpoint {{endpoint}}" >&2; exit 1 ;; esac; printf '{"endpoint":"%s"}\n' "{{endpoint}}" > container/skills/typesafe-judge/endpoint.json && printf '{"host":"%s","path":"%s"}\n' "$H" "$P"
+```
+
 ## Store the key in the OneCLI vault
 
-The TypeSafe key is created in the TypeSafe console
-(https://console.typesafe.ai, API keys). The operator stores it in the gateway
+The key is created in the TypeSafe console (https://console.typesafe.ai, API
+keys) or, for OpenRouter, at https://openrouter.ai/settings/keys (a key with a
+credit limit caps spend at the provider too). The operator stores it in the gateway
 themselves; do not accept the key in chat, do not write it to a file inside the
 repository, and do not pass it on a command line you run.
 
 Tell the user:
 
-```nc:operator
+```nc:operator when:endpoint=typesafe
 Store your TypeSafe API key in the OneCLI vault for host api.typesafe.ai. Either open this prefilled form in the OneCLI dashboard and paste the key there:
 
   http://127.0.0.1:10254/connections/secrets?create=generic&host=api.typesafe.ai&name=TypeSafe%20API%20Key&header=Authorization&format=Bearer%20%7Bvalue%7D
@@ -87,12 +108,24 @@ or, in a terminal on this host, run this one line (it prompts for the key withou
 Tell me when the secret exists.
 ```
 
+```nc:operator when:endpoint=openrouter
+Store your OpenRouter API key in the OneCLI vault for host openrouter.ai, path /api/v1/systemone, so the key is injected only into Jev calls and no other OpenRouter traffic from your agents. Either open this prefilled form in the OneCLI dashboard, check that the path pattern reads /api/v1/systemone, and paste the key there:
+
+  http://127.0.0.1:10254/connections/secrets?create=generic&host=openrouter.ai&path=%2Fapi%2Fv1%2Fsystemone&name=OpenRouter%20Jev&header=Authorization&format=Bearer%20%7Bvalue%7D
+
+or, in a terminal on this host, run this one line (it prompts for the key without echo and never puts it on a command line or in shell history):
+
+  umask 077 && printf 'OpenRouter API key: ' && read -rs k && echo && printf '%s' "$k" > "$HOME/.openrouter-key" && unset k && onecli secrets create --name "OpenRouter Jev" --type generic --host-pattern openrouter.ai --path-pattern /api/v1/systemone --header-name Authorization --value-format "Bearer {value}" --file "$HOME/.openrouter-key"; rm -f "$HOME/.openrouter-key"
+
+Tell me when the secret exists.
+```
+
 Then confirm the vault has a secret for that exact host (the name is not
-consulted, so an unrelated "TypeSafe" secret for another host cannot pass).
+consulted, so an unrelated secret named like it for another host cannot pass).
 A missing secret stops here; nothing later can work without it:
 
 ```nc:run effect:check
-onecli secrets list | jq -e '.data[] | select(.hostPattern=="api.typesafe.ai")' >/dev/null
+onecli secrets list | jq -e '.data[] | select(.hostPattern=="{{api_host}}")' >/dev/null
 ```
 
 Agents in `all` secret mode (the NanoClaw default) get the secret automatically.
@@ -105,7 +138,7 @@ identifier is its group id, so the list is intersected with `ncl groups list`
 that agent to selective and cut it off from its other secrets:
 
 ```nc:run effect:wire
-S=$(onecli secrets list | jq -r 'first(.data[] | select(.hostPattern=="api.typesafe.ai")) | .id // empty'); [ -n "$S" ] || { echo "no api.typesafe.ai secret in the OneCLI vault — the credential step above did not complete" >&2; exit 1; }; G=$(ncl groups list --json) || { echo "could not list this install's agent groups — is the NanoClaw host running?" >&2; exit 1; }; AG=$(onecli agents list) || { echo "could not list OneCLI agents" >&2; exit 1; }; printf '%s' "$AG" | jq -r --argjson mine "$(printf '%s' "$G" | jq -c '[.data[].id]')" '.data[] | select(.secretMode=="selective" and (.identifier as $i | $mine | index($i) != null)) | "\(.id)\t\(.identifier)"' | while IFS="$(printf '\t')" read -r aid gid; do CUR=$(onecli agents secrets --id "$aid") || { echo "could not read the secret list of $gid; leaving it untouched" >&2; exit 1; }; MERGED=$(printf '%s' "$CUR" | jq -er --arg s "$S" '[.data[], $s] | unique | join(",")') || { echo "unexpected secret list for $gid; leaving it untouched" >&2; exit 1; }; onecli agents set-secrets --id "$aid" --secret-ids "$MERGED" >/dev/null || { echo "could not add the TypeSafe secret to $gid" >&2; exit 1; }; echo "TypeSafe secret added to the list of $gid"; done
+S=$(onecli secrets list | jq -r 'first(.data[] | select(.hostPattern=="{{api_host}}")) | .id // empty'); [ -n "$S" ] || { echo "no {{api_host}} secret in the OneCLI vault — the credential step above did not complete" >&2; exit 1; }; G=$(ncl groups list --json) || { echo "could not list this install's agent groups — is the NanoClaw host running?" >&2; exit 1; }; AG=$(onecli agents list) || { echo "could not list OneCLI agents" >&2; exit 1; }; printf '%s' "$AG" | jq -r --argjson mine "$(printf '%s' "$G" | jq -c '[.data[].id]')" '.data[] | select(.secretMode=="selective" and (.identifier as $i | $mine | index($i) != null)) | "\(.id)\t\(.identifier)"' | while IFS="$(printf '\t')" read -r aid gid; do CUR=$(onecli agents secrets --id "$aid") || { echo "could not read the secret list of $gid; leaving it untouched" >&2; exit 1; }; MERGED=$(printf '%s' "$CUR" | jq -er --arg s "$S" '[.data[], $s] | unique | join(",")') || { echo "unexpected secret list for $gid; leaving it untouched" >&2; exit 1; }; onecli agents set-secrets --id "$aid" --secret-ids "$MERGED" >/dev/null || { echo "could not add the TypeSafe secret to $gid" >&2; exit 1; }; echo "TypeSafe secret added to the list of $gid"; done
 ```
 
 Put a spend ceiling in the gateway. The CLI caps a single call at 64
@@ -117,13 +150,15 @@ interactive use and low enough to stop a runaway; change the number in the
 OneCLI dashboard to suit the plan.
 
 The rule is matched by its exact name so only this skill's rule is ever read
-or written. An existing rule with that name must actually be the ceiling
+or written. It is scoped to the judgment path, so on OpenRouter it throttles
+Jev calls only. An existing rule with that name must actually be the ceiling
 (right host, `rate_limit`, enabled, no agent scope, and not narrowed to a
-method or path that judgments never use: they are `POST /v1/systemone`);
-anything else stops here rather than passing as protection:
+method or path that judgments never use: they are `POST /v1/systemone` on
+TypeSafe, `POST /api/v1/systemone` on OpenRouter); anything else stops here
+rather than passing as protection:
 
 ```nc:run effect:wire
-RL=$(onecli rules list) || { echo "could not list OneCLI rules" >&2; exit 1; }; printf '%s' "$RL" | jq -e '.data | type == "array"' >/dev/null || { echo "unexpected output from onecli rules list; not creating anything" >&2; exit 1; }; N=$(printf '%s' "$RL" | jq '[.data[] | select(.name=="TypeSafe: spend ceiling")] | length'); if [ "$N" -eq 0 ]; then onecli rules create --name "TypeSafe: spend ceiling" --host-pattern api.typesafe.ai --action rate_limit --rate-limit 600 --rate-limit-window hour --enabled >/dev/null || { echo "could not create the TypeSafe rate-limit rule" >&2; exit 1; }; else printf '%s' "$RL" | jq -e '[.data[] | select(.name=="TypeSafe: spend ceiling")] | length == 1 and (.[0].hostPattern=="api.typesafe.ai") and (.[0].action=="rate_limit") and (.[0].enabled==true) and ((.[0].agentId // "")=="") and ((.[0].rateLimit // 0) > 0) and ((.[0].method // "") | . == "" or . == "POST") and ((.[0].pathPattern // "") | . == "" or . == "/v1/systemone" or . == "/v1/*" or . == "/*")' >/dev/null || { echo "a rule named \"TypeSafe: spend ceiling\" exists but is not an enabled, unscoped rate limit covering POST /v1/systemone on api.typesafe.ai — fix or delete it in the OneCLI dashboard, then re-run" >&2; exit 1; }; fi
+RL=$(onecli rules list) || { echo "could not list OneCLI rules" >&2; exit 1; }; printf '%s' "$RL" | jq -e '.data | type == "array"' >/dev/null || { echo "unexpected output from onecli rules list; not creating anything" >&2; exit 1; }; N=$(printf '%s' "$RL" | jq '[.data[] | select(.name=="TypeSafe: spend ceiling")] | length'); if [ "$N" -eq 0 ]; then onecli rules create --name "TypeSafe: spend ceiling" --host-pattern {{api_host}} --path-pattern {{api_path}} --action rate_limit --rate-limit 600 --rate-limit-window hour --enabled >/dev/null || { echo "could not create the TypeSafe rate-limit rule" >&2; exit 1; }; else printf '%s' "$RL" | jq -e '[.data[] | select(.name=="TypeSafe: spend ceiling")] | length == 1 and (.[0].hostPattern=="{{api_host}}") and (.[0].action=="rate_limit") and (.[0].enabled==true) and ((.[0].agentId // "")=="") and ((.[0].rateLimit // 0) > 0) and ((.[0].method // "") | . == "" or . == "POST") and ((.[0].pathPattern // "") | . == "" or . == "/*" or . == "{{api_path}}")' >/dev/null || { echo "a rule named \"TypeSafe: spend ceiling\" exists but is not an enabled, unscoped rate limit covering POST {{api_path}} on {{api_host}} — fix or delete it in the OneCLI dashboard, then re-run" >&2; exit 1; }; fi
 ```
 
 An agent that hits the ceiling gets a 429 from the gateway; the CLI turns a
@@ -157,7 +192,7 @@ G=$(ncl groups list --json) || { echo "could not list agent groups — is the Na
 
 Every agent can now run `bun /app/skills/typesafe-judge/scripts/typesafe-judge.ts`
 (the container skill tells it when and how). Auth is injected by the gateway;
-exit code 2 from the CLI means the gateway or TypeSafe refused the call (a 401
+exit code 2 from the CLI means the gateway or the endpoint refused the call (a 401
 is a missing credential, a 403 is a policy, quota or permission) and exit code
 5 means rate limited; neither is a bug. Verify from a chat with any agent:
 
@@ -172,27 +207,33 @@ To uninstall: see [REMOVE.md](REMOVE.md).
 `/add-onecli`, then re-run this skill.
 
 **The vault check fails after the operator stored the key.** The secret's host
-pattern must be exactly `api.typesafe.ai` (no scheme, no path); the check
+pattern must be exactly `api.typesafe.ai` or `openrouter.ai` (no scheme); the check
 matches on the host, not the name. `onecli secrets list` shows what is stored.
 
 **An agent gets exit code 2 with a 401.** The gateway has no credential for
-`api.typesafe.ai`, or the agent is in `selective` mode without the secret on
-its list. Re-run this skill; the wire step merges the secret into every
-selective agent.
+the endpoint's host, or the agent is in `selective` mode without the secret on
+its list. On OpenRouter, a secret whose path pattern does not cover
+`/api/v1/systemone` is never injected. Re-run this skill; the wire step merges
+the secret into every selective agent.
 
 **An agent gets exit code 2 with a 403.** The credential is probably fine. A
 gateway block rule scoped to that agent refused the call, or the key is out of
-quota or lacks permission. Check `onecli rules list`, then the TypeSafe
-console.
+quota or credit, or lacks permission. Check `onecli rules list`, then the
+TypeSafe or OpenRouter console.
 
 **An agent gets exit code 5.** Rate limited: the per-agent "TypeSafe: spend
-ceiling" rule, or the TypeSafe plan's own limit. The agent should have stopped
+ceiling" rule, or the provider's own limit. The agent should have stopped
 its loop. Raise the rule's number in the OneCLI dashboard if the workload is
 legitimate.
 
-**An agent gets exit code 3 (`could not reach TypeSafe`).** The container's
+**An agent gets exit code 3 (`could not reach TypeSafe` or `OpenRouter`).** The container's
 `HTTPS_PROXY` is not reaching the gateway, or the gateway is blocking the host.
-Check OneCLI's logs and its rules for `api.typesafe.ai`.
+Check OneCLI's logs and its rules for the endpoint's host.
+
+**Switch endpoints later.** Re-run this skill and answer the other endpoint;
+it rewrites `container/skills/typesafe-judge/endpoint.json`. Delete the old
+secret and the "TypeSafe: spend ceiling" rule first (REMOVE.md step 3), since
+the rule is keyed by name and would otherwise fail the check for the new host.
 
 **`bun: command not found` inside a container.** The image predates the Bun
 runtime; rebuild with `./container/build.sh` and restart the group.

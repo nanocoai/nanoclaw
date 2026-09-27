@@ -9,7 +9,7 @@
 import { describe, expect, it } from 'bun:test';
 
 import {
-  API_URL,
+  ENDPOINTS,
   DEFAULT_MODEL,
   DEFAULT_THRESHOLDS,
   PLACEHOLDER_CREDENTIAL,
@@ -207,7 +207,7 @@ describe('evaluate (mocked fetch)', () => {
     const req = buildRequest(parseArgs([]), JSON.stringify({ state: 's', questions: threeQuestions }));
     const res = await evaluate(req, transport);
     expect(calls).toHaveLength(1);
-    expect(calls[0].url).toBe(API_URL);
+    expect(calls[0].url).toBe(ENDPOINTS.typesafe.url);
     expect(calls[0].init.method).toBe('POST');
     const headers = calls[0].init.headers as Record<string, string>;
     expect(headers.Authorization).toBe(`Bearer ${PLACEHOLDER_CREDENTIAL}`);
@@ -425,5 +425,37 @@ describe('run (end to end with stdin)', () => {
     const ctx = io({ transport: fakeTransport([]).transport });
     expect(await run(['--help'], ctx)).toBe(0);
     expect(ctx.out.join('')).toContain('typesafe-judge');
+  });
+
+  it('picks the endpoint from --endpoint, then the install endpoint.json, then typesafe', async () => {
+    const stdin = async () => JSON.stringify({ state: 's', questions: threeQuestions });
+    const urlFor = async (argv: string[], endpointConfig?: string) => {
+      const t = fakeTransport([{ status: 200, body: okAnswers }]);
+      expect(await run(argv, io({ transport: t.transport, stdin, endpointConfig }))).toBe(0);
+      return t.calls[0].url;
+    };
+    expect(await urlFor([])).toBe(ENDPOINTS.typesafe.url);
+    expect(await urlFor([], '{"endpoint":"openrouter"}')).toBe(ENDPOINTS.openrouter.url);
+    expect(await urlFor(['--endpoint', 'typesafe'], '{"endpoint":"openrouter"}')).toBe(ENDPOINTS.typesafe.url);
+
+    // A missing credential names the host the gateway must hold it for.
+    const missing = io({ transport: fakeTransport([{ status: 401, body: {} }]).transport, stdin, endpointConfig: '{"endpoint":"openrouter"}' });
+    expect(await run([], missing)).toBe(2);
+    expect(missing.err.join('')).toMatch(/OpenRouter returned 401: the openrouter.ai credential/);
+    expect(missing.err.join('')).toMatch(/OpenRouter API key in the credential gateway for host openrouter.ai/);
+  });
+
+  it('refuses an unknown endpoint before sending anything', async () => {
+    for (const [argv, endpointConfig, why] of [
+      [['--endpoint', 'anthropic'], undefined, /--endpoint must name an endpoint: typesafe or openrouter/],
+      [[], '{"endpoint":"toString"}', /endpoint.json must name an endpoint/],
+      [[], 'openrouter', /endpoint.json is not valid JSON/],
+    ] as const) {
+      const t = fakeTransport([{ status: 200, body: okAnswers }]);
+      const ctx = io({ transport: t.transport, stdin: async () => JSON.stringify({ state: 's', questions: threeQuestions }), endpointConfig });
+      expect(await run([...argv], ctx)).toBe(1);
+      expect(ctx.err.join('')).toMatch(why);
+      expect(t.calls).toHaveLength(0);
+    }
   });
 });

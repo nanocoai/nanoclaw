@@ -3,7 +3,10 @@
  * typesafe-judge — ask TypeSafe's System One model (Jev) for typed judgments.
  *
  * Reads `{ state, questions, model? }` as JSON on stdin (or from flags), POSTs
- * it to https://api.typesafe.ai/v1/systemone and prints the answers as JSON.
+ * it to a System One endpoint — TypeSafe's own (https://api.typesafe.ai/v1/systemone)
+ * or OpenRouter's TypeSafe-compatible one (https://openrouter.ai/api/v1/systemone) —
+ * and prints the answers as JSON. The installer records the choice in
+ * `endpoint.json` beside `scripts/`; `--endpoint` overrides it per call.
  * The three primitives (noul, choice, score) are passed through unchanged;
  * several questions in one call are one request (speculative fan-out).
  * `--gate` adds a per-answer decision (act / propose / withhold) derived from
@@ -11,16 +14,24 @@
  *
  * Credentials: the request carries `Authorization: Bearer placeholder`. The
  * install's credential gateway (OneCLI) replaces it with the
- * real key at the network edge, matched on the api.typesafe.ai host. This
+ * real key at the network edge, matched on the endpoint's host. This
  * script never reads an API key from the environment, a file, or an argument.
  *
  * Runs under Bun inside the agent container with no runtime dependencies. It
  * only uses portable Node/Web APIs so it typechecks under either runtime.
  */
-import { readFileSync } from 'node:fs';
-import { pathToFileURL } from 'node:url';
+import { existsSync, readFileSync } from 'node:fs';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
-export const API_URL = 'https://api.typesafe.ai/v1/systemone';
+/** System One endpoints that accept the same request and return the same answers. */
+export const ENDPOINTS = {
+  typesafe: { url: 'https://api.typesafe.ai/v1/systemone', host: 'api.typesafe.ai', label: 'TypeSafe' },
+  openrouter: { url: 'https://openrouter.ai/api/v1/systemone', host: 'openrouter.ai', label: 'OpenRouter' },
+} as const;
+export type EndpointName = keyof typeof ENDPOINTS;
+export const DEFAULT_ENDPOINT: EndpointName = 'typesafe';
+/** Written by /add-typesafe-tool beside scripts/: `{"endpoint":"openrouter"}`. */
+const ENDPOINT_FILE = fileURLToPath(new URL('../endpoint.json', import.meta.url));
 export const DEFAULT_MODEL = 'jev-latest';
 export const PLACEHOLDER_CREDENTIAL = 'placeholder';
 const USER_AGENT = 'nanoclaw typesafe-judge';
@@ -105,6 +116,7 @@ export interface CliOptions {
   state?: unknown;
   questions?: Record<string, Question>;
   model?: string;
+  endpoint?: EndpointName;
   gate: boolean;
   thresholds: GateThresholds;
   pretty: boolean;
@@ -156,6 +168,7 @@ Flags:
   --choice "<question>" --options "a:rubric|b:rubric"   Shorthand choice (id "choice")
   --score "<question>" --levels "low desc|mid desc|high desc"   Shorthand score (id "score")
   --model <name>            Default jev-latest
+  --endpoint <name>         typesafe or openrouter (default: endpoint.json from the install, else typesafe)
   --gate                    Add gate.<id> = { decision: act|propose|withhold, certainty, value, level? }
   --act <0-1>               Confidence to act on a choice/score (default ${DEFAULT_THRESHOLDS.act})
   --propose <0-1>           Confidence to propose (default ${DEFAULT_THRESHOLDS.propose})
@@ -266,6 +279,9 @@ export function parseArgs(argv: string[], readFile: (p: string) => string = (p) 
       case '--model':
         opts.model = readArgValue(argv, i++, a);
         break;
+      case '--endpoint':
+        opts.endpoint = parseEndpoint(readArgValue(argv, i++, a), '--endpoint');
+        break;
       case '--gate':
         opts.gate = true;
         break;
@@ -320,6 +336,24 @@ export function parseArgs(argv: string[], readFile: (p: string) => string = (p) 
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/** A preset name, or a UsageError naming where the bad value came from. */
+export function parseEndpoint(raw: unknown, source: string): EndpointName {
+  if (typeof raw === 'string' && Object.hasOwn(ENDPOINTS, raw)) return raw as EndpointName;
+  throw new UsageError(`${source} must name an endpoint: ${Object.keys(ENDPOINTS).join(' or ')}`);
+}
+
+/** The installer's choice from endpoint.json (`{"endpoint":"openrouter"}`); the default when the file is absent. */
+export function configuredEndpoint(config: string | undefined): EndpointName {
+  if (config === undefined) return DEFAULT_ENDPOINT;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(config);
+  } catch {
+    throw new UsageError('endpoint.json is not valid JSON');
+  }
+  return parseEndpoint(isRecord(parsed) ? parsed.endpoint : undefined, 'endpoint.json');
 }
 
 export function validateQuestions(raw: unknown): Record<string, Question> {
@@ -475,14 +509,19 @@ export function answerMatches(question: Question, v: unknown): v is Answer {
 export async function evaluate(
   request: JudgeRequest,
   transport: Transport,
-  { timeoutMs = DEFAULT_TIMEOUT_MS, attempts = 4 }: { timeoutMs?: number; attempts?: number } = {},
+  {
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    attempts = 4,
+    endpoint = DEFAULT_ENDPOINT,
+  }: { timeoutMs?: number; attempts?: number; endpoint?: EndpointName } = {},
 ): Promise<JudgeResponse> {
+  const { url, host, label } = ENDPOINTS[endpoint];
   const body = JSON.stringify(request);
   let delay = 1000;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     let res: Response;
     try {
-      res = await transport.fetch(API_URL, {
+      res = await transport.fetch(url, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${PLACEHOLDER_CREDENTIAL}`,
@@ -495,7 +534,7 @@ export async function evaluate(
       });
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
-      if (attempt === attempts) throw new UpstreamError(`could not reach TypeSafe through the gateway: ${reason}`);
+      if (attempt === attempts) throw new UpstreamError(`could not reach ${label} through the gateway: ${reason}`);
       await transport.sleep(delay);
       delay *= 2;
       continue;
@@ -503,11 +542,11 @@ export async function evaluate(
     // Auth-class bodies are deliberately not surfaced: they are the one place a
     // gateway or upstream might echo the header it rejected.
     if (res.status === 401) {
-      throw new AuthError('TypeSafe returned 401: the api.typesafe.ai credential is missing or rejected at the gateway', 401);
+      throw new AuthError(`${label} returned 401: the ${host} credential is missing or rejected at the gateway`, 401);
     }
     if (res.status === 403) {
       throw new AuthError(
-        'TypeSafe returned 403: the request was refused. Either a gateway policy blocks this agent for api.typesafe.ai ' +
+        `${label} returned 403: the request was refused. Either a gateway policy blocks this agent for ${host} ` +
           '(a block or rate-limit rule), or the key lacks permission or quota. The credential may well be connected.',
         403,
       );
@@ -517,29 +556,29 @@ export async function evaluate(
       if (res.status === 429 && (wait > MAX_RETRY_AFTER_MS || attempt === attempts)) {
         throw new RateLimitError(
           `rate limited (429)${wait > 0 ? `, retry after about ${Math.ceil(wait / 1000)}s` : ''}: ` +
-            'either the gateway spend ceiling for this agent or the TypeSafe plan limit',
+            `either the gateway spend ceiling for this agent or the ${label} plan limit`,
         );
       }
-      if (attempt === attempts) throw new UpstreamError(`TypeSafe returned ${res.status} after ${attempts} attempts`, res.status);
+      if (attempt === attempts) throw new UpstreamError(`${label} returned ${res.status} after ${attempts} attempts`, res.status);
       await transport.sleep(Math.max(delay, Math.min(wait, MAX_RETRY_AFTER_MS)));
       delay *= 2;
       continue;
     }
     if (!res.ok) {
-      throw new UpstreamError(`TypeSafe returned ${res.status}: ${await safeText(res)}`, res.status);
+      throw new UpstreamError(`${label} returned ${res.status}: ${await safeText(res)}`, res.status);
     }
     let parsed: unknown;
     try {
       parsed = await res.json();
     } catch {
-      throw new UpstreamError('TypeSafe returned a non-JSON body', res.status);
+      throw new UpstreamError(`${label} returned a non-JSON body`, res.status);
     }
-    if (!isRecord(parsed) || !isRecord(parsed.answers)) throw new UpstreamError('TypeSafe response has no answers map', res.status);
+    if (!isRecord(parsed) || !isRecord(parsed.answers)) throw new UpstreamError(`${label} response has no answers map`, res.status);
     const answers: Record<string, Answer> = {};
     for (const id of Object.keys(request.questions)) {
       const a = parsed.answers[id];
       if (!answerMatches(request.questions[id], a)) {
-        throw new UpstreamError(`TypeSafe response is missing a well-formed ${request.questions[id].type} answer for "${id}"`, res.status);
+        throw new UpstreamError(`${label} response is missing a well-formed ${request.questions[id].type} answer for "${id}"`, res.status);
       }
       answers[id] = a;
     }
@@ -549,7 +588,7 @@ export async function evaluate(
       ...(isRecord(parsed.usage) ? { usage: parsed.usage as JudgeResponse['usage'] } : {}),
     };
   }
-  throw new UpstreamError('TypeSafe request failed');
+  throw new UpstreamError(`${label} request failed`);
 }
 
 /** `Retry-After` as milliseconds (delta-seconds or an HTTP date), capped so a bad header cannot park the agent. */
@@ -583,6 +622,8 @@ export interface RunIo {
   stderr: (s: string) => void;
   readFile: (p: string) => string;
   transport: Transport;
+  /** Contents of the install's endpoint.json, or undefined when there is none. */
+  endpointConfig?: string;
 }
 
 /** Full CLI run; returns the exit code. */
@@ -598,12 +639,14 @@ export async function run(argv: string[], io: RunIo): Promise<number> {
     io.stdout(HELP + '\n');
     return 0;
   }
+  let endpoint: EndpointName = DEFAULT_ENDPOINT;
   try {
+    endpoint = opts.endpoint ?? configuredEndpoint(io.endpointConfig);
     let body: string | undefined;
     if (opts.input) body = io.readFile(opts.input);
     else if (opts.state === undefined) body = await io.stdin();
     const request = buildRequest(opts, body);
-    const response = await evaluate(request, io.transport, { timeoutMs: opts.timeoutMs, attempts: opts.attempts });
+    const response = await evaluate(request, io.transport, { timeoutMs: opts.timeoutMs, attempts: opts.attempts, endpoint });
     const out: Record<string, unknown> = { model: response.model, answers: response.answers };
     if (response.usage) out.usage = response.usage;
     if (opts.gate) out.gate = gateAll(response.answers, opts.thresholds);
@@ -616,12 +659,13 @@ export async function run(argv: string[], io: RunIo): Promise<number> {
       return 1;
     }
     if (err instanceof AuthError) {
+      const { host, label } = ENDPOINTS[endpoint];
       const hint =
         err.status === 401
-          ? 'Ask the operator to store the TypeSafe API key in the credential gateway for host api.typesafe.ai ' +
+          ? `Ask the operator to store the ${label} API key in the credential gateway for host ${host} ` +
             '(on the host: /add-typesafe-tool), then retry. Never ask for the key in chat.'
-          : 'Do not retry in a loop. Tell the operator: check the gateway rules for api.typesafe.ai and this agent, ' +
-            'then the key\'s quota and permissions in the TypeSafe console. Never ask for the key in chat.';
+          : `Do not retry in a loop. Tell the operator: check the gateway rules for ${host} and this agent, ` +
+            `then the key's quota and permissions in the ${label} console. Never ask for the key in chat.`;
       io.stderr(`error: ${message}\n${hint}\n`);
       return 2;
     }
@@ -648,6 +692,7 @@ if (invokedDirectly) {
     stdout: (s) => process.stdout.write(s),
     stderr: (s) => process.stderr.write(s),
     readFile: (p) => readFileSync(p, 'utf8'),
+    endpointConfig: existsSync(ENDPOINT_FILE) ? readFileSync(ENDPOINT_FILE, 'utf8') : undefined,
     transport: { fetch: (...args) => fetch(...args), sleep: (ms) => new Promise((r) => setTimeout(r, ms)) },
   }).then(
     (code) => process.exit(code),
