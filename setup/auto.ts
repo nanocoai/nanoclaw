@@ -46,7 +46,7 @@ import {
 } from './channels/initial-setup.js';
 import { runInheritScript } from './lib/inherit-script.js';
 import { offerPortalReminder, portalEnabled, runImagePortal } from './portal.js';
-import { pingCliAgent, PING_AGENT_FOLDER, type PingResult } from './lib/agent-ping.js';
+import { logFirstChat, pingCliAgent, PING_AGENT_FOLDER, type PingResult } from './lib/agent-ping.js';
 import { getSetupProvider, listSetupProviders } from './providers/registry.js';
 import { applyProviderSkill, loadHostContractModules } from './providers/install.js';
 import {
@@ -573,9 +573,7 @@ async function main(): Promise<void> {
       );
       const pingStart = Date.now();
       const ping = await confirmAssistantResponds();
-      // The only setup check that goes through the container, gateway and
-      // model. Log it so a failed reply isn't hidden behind earlier successes.
-      setupLog.step('first-chat', ping === 'ok' ? 'success' : 'failed', Date.now() - pingStart, { RESULT: ping });
+      logFirstChat(ping, Date.now() - pingStart);
       if (ping === 'ok') {
         phEmit('first_chat_ready');
         const cleanupRawLog = setupLog.stepRawLog('cleanup-cli-agent');
