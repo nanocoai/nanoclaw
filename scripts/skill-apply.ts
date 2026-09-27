@@ -887,7 +887,8 @@ export async function applySkill(skillDir: string, root: string, opts: ApplyOpti
   let blocked = false;
   const SIDE_EFFECTS = new Set(['restart', 'step', 'wire']);
   // Validation of an install that already failed only delays the failure the
-  // operator needs to read; it is skipped (not bounced) once `blocked` latches.
+  // operator needs to read. It is not run once `blocked` latches, but it is
+  // bounced, so the agent's recovery tasks still include it.
   const VALIDATION = new Set(['build', 'test']);
   const bounce = (d: Directive, reason: string) => {
     blocked = true;
@@ -995,12 +996,9 @@ export async function applySkill(skillDir: string, root: string, opts: ApplyOpti
       // own — bounce it too so the agent runs it from the prose once the upstream
       // failure is fixed. (A deferred prompt did NOT set `blocked`, so this only
       // trips on a real failure, never a headless rebuild's missing input.)
-      if (d.kind === 'run' && typeof d.attrs.effect === 'string' && SIDE_EFFECTS.has(d.attrs.effect) && blocked) {
+      const effect = d.kind === 'run' && typeof d.attrs.effect === 'string' ? d.attrs.effect : '';
+      if (blocked && (SIDE_EFFECTS.has(effect) || VALIDATION.has(effect))) {
         bounce(d, 'skipped: an earlier step did not complete — run this from the prose after fixing it');
-        continue;
-      }
-      if (d.kind === 'run' && typeof d.attrs.effect === 'string' && VALIDATION.has(d.attrs.effect) && blocked) {
-        res.skipped.push(`run ${d.attrs.effect}: an earlier step did not complete`);
         continue;
       }
       const st = selfStatus(d, root, opts.mode);

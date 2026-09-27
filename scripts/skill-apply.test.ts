@@ -919,7 +919,7 @@ describe('nc:run effect:step (streaming, multi-field capture)', () => {
     expect(res.agentTasks[0].reason).toBe('Iron Control database x_database exists but its keys are missing');
   });
 
-  it('skips build and test validation after a failed step instead of running them', async () => {
+  it('does not run build and test after a failed step, but keeps them in the recovery tasks', async () => {
     const sdir = mkdtempSync(join(tmpdir(), 'nc-step-skill-'));
     const rdir = mkdtempSync(join(tmpdir(), 'nc-step-proj-'));
     writeFileSync(
@@ -952,10 +952,12 @@ describe('nc:run effect:step (streaming, multi-field capture)', () => {
       execStream: async () => ({ ok: false, fields: { STATUS: 'failed', ERROR: 'precondition failed' } }),
     });
     expect(ran).toEqual([]);
-    expect(res.agentTasks.map((t) => t.reason)).toEqual(['precondition failed']);
-    expect(res.skipped).toEqual([
-      'run build: an earlier step did not complete',
-      'run test: an earlier step did not complete',
+    // The step's own reason comes first; build and test are not run, but stay
+    // in the recovery tasks so an agent validates after fixing the step.
+    expect(res.agentTasks.map((t) => [t.kind, t.reason])).toEqual([
+      ['run', 'precondition failed'],
+      ['run', 'skipped: an earlier step did not complete — run this from the prose after fixing it'],
+      ['run', 'skipped: an earlier step did not complete — run this from the prose after fixing it'],
     ]);
   });
 });
