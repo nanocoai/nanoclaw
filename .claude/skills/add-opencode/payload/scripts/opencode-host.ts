@@ -103,14 +103,9 @@ export function maintenancePermission(purpose: MaintenancePurpose): {
 export const MAINTENANCE_AGENT = 'nanoclaw-maintenance';
 
 /**
- * Environment for a maintenance session (OpenCode 1.18).
- * OPENCODE_PERMISSION merges after the global and project config, so it wins
- * over an operator's top-level allow-all settings. Agent-level permission
- * blocks merge after top-level rules, so the session also starts in a
- * dedicated primary agent whose name no operator config targets, added to
- * any JSON inline config the operator already exported. A non-JSON (JSONC)
- * inline config is left intact and the session relies on the top-level
- * override alone, rather than dropping the operator's providers.
+ * Environment for a maintenance session. OPENCODE_PERMISSION merges last, so it
+ * beats an operator's allow-all; agent-level rules still override it, so the
+ * session also runs as a dedicated agent no operator config names.
  */
 export function maintenanceEnv(
   purpose: MaintenancePurpose,
@@ -120,6 +115,7 @@ export function maintenanceEnv(
   const permission = maintenancePermission(purpose);
   const env: NodeJS.ProcessEnv = { ...base, OPENCODE_PERMISSION: JSON.stringify(permission) };
   let inline: { agent?: Record<string, unknown> } & Record<string, unknown> = {};
+  // Leave a JSONC inline config intact rather than drop the operator's providers.
   if (base.OPENCODE_CONFIG_CONTENT) {
     try {
       const parsed: unknown = JSON.parse(base.OPENCODE_CONFIG_CONTENT);

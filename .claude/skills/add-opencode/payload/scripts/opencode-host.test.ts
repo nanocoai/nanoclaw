@@ -292,7 +292,7 @@ describe('native host OpenCode lifecycle', () => {
     expect(JSON.parse(env.OPENCODE_PERMISSION).edit).toBe('ask');
   });
 
-  it('matches bash commands against the permission override as OpenCode 1.18 does', async () => {
+  it('matches bash commands against the permission override as OpenCode does', async () => {
     touch(path.join(root, 'bin/opencode'));
     await hostOpenCode.launch(root);
     const rules = Object.entries(
