@@ -98,8 +98,8 @@ describe('runMemorySessionHook', () => {
   });
 
   it('gives up at the deadline even when a background child keeps stdout open', async () => {
-    // spawnSync closed the pipes on timeout; the async path must not wait for
-    // `close` behind a lingering grandchild (or a hook that ignores SIGTERM).
+    // The async path must not wait for `close` behind a lingering grandchild
+    // or a hook that ignores SIGTERM.
     const started = Date.now();
     const res = await runHookCommand('sleep 5 & echo partial; wait', '{}', 150);
     expect(Date.now() - started).toBeLessThan(2000);

@@ -40,12 +40,8 @@ const MEMORY_HOOK_TIMEOUT_MS = 10_000;
 
 /**
  * Run one hook command with the payload on stdin; resolve with its exit status
- * and stdout. This is an async `spawn`, not `spawnSync`, on purpose: Bun's
- * synchronous wait loop can lose the child's exit and spin forever
- * (oven-sh/bun#34069, reproduced on 1.4.0; nanoclaw#3839). Every turn runs this
- * command next to sqlite, SSE sockets and timers, exactly the churn that
- * triggers it, and a synchronous spin is immune to every timeout we own.
- * The event-loop path reaps normally and lets our own deadline fire.
+ * and stdout. Async on purpose: under Bun, spawnSync can miss the child's exit
+ * and spin forever, past every timeout we own (oven-sh/bun#34069).
  */
 export function runHookCommand(
   command: string,
@@ -65,7 +61,6 @@ export function runHookCommand(
     const deadline = setTimeout(() => {
       // Settle now rather than on `close`: a hook that ignores SIGTERM, or
       // leaves a background child holding stdout, must not hold the turn lock.
-      // spawnSync's timeout closed the pipes the same way.
       child.kill('SIGTERM');
       child.stdin.destroy();
       child.stdout.destroy();

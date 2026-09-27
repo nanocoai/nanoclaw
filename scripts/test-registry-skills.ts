@@ -133,10 +133,9 @@ function materializeSkill(commit: string, skill: string, skillsRoot: string): Re
   return meta;
 }
 
-// No single skill step legitimately runs this long (the image build is the
-// slowest at a few minutes). A step that does is wedged — nanoclaw#3839 was a
-// `bun test` spinning inside Bun's spawnSync until GitHub's 6-hour cancel —
-// and SIGKILL is the only signal a synchronous spin honours.
+// No skill step legitimately runs this long (the image build takes a few
+// minutes). A longer one is wedged, and SIGKILL is the only signal a
+// synchronous spin honours.
 const COMMAND_TIMEOUT_MS = 15 * 60 * 1000;
 
 function command(cmd: string, cwd: string, quiet = false): Promise<string> {
