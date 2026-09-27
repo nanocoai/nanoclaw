@@ -912,11 +912,11 @@ describe('nc:run effect:step (streaming, multi-field capture)', () => {
       exec: () => {},
       execStream: async () => ({
         ok: false,
-        fields: { STATUS: 'failed', ERROR: 'Iron Control database x_database exists but its keys are missing' },
+        fields: { STATUS: 'failed', ERROR: 'setup step failed: database x exists but its keys are missing' },
       }),
     });
     expect(res.agentTasks).toHaveLength(1);
-    expect(res.agentTasks[0].reason).toBe('Iron Control database x_database exists but its keys are missing');
+    expect(res.agentTasks[0].reason).toBe('setup step failed: database x exists but its keys are missing');
   });
 
   it('does not run build and test after a failed step, but keeps them in the recovery tasks', async () => {
