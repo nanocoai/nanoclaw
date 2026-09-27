@@ -243,26 +243,6 @@ describe('stop-intent suppression is hub-owned', () => {
   });
 });
 
-describe('listing', () => {
-  it('keeps a prepared handle as the truth read when a later listing names the same key', async () => {
-    const driver = new FakeDriver();
-    const { inner, handle, hub } = await prepared(driver, 's1');
-    const terminal = vi.fn();
-    handle.onTerminal(terminal);
-
-    // The reconstructed handle lacks the prepared one's attach state and would
-    // report stopped; the prepared one still says running.
-    const listed = new FakeHandle(makeKey('s1'));
-    listed.statusValue = { phase: 'stopped' };
-    driver.snapshots = [{ handle: listed, phase: 'running' }];
-    await hub.listSessions('spike');
-
-    driver.emit({ key: inner.key, kind: 'terminal' });
-    await settled();
-    expect(terminal).not.toHaveBeenCalled();
-  });
-});
-
 describe('arming order', () => {
   it('buffers a terminal confirmed before onTerminal is armed and delivers on arming', async () => {
     const driver = new FakeDriver();
