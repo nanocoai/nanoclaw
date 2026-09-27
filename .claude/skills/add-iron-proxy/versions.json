@@ -1,0 +1,9 @@
+{
+  "iron-control-source": "https://github.com/ironsh/iron-control",
+  "iron-control-commit": "6fe857654376d67d100400bbd26c31540effb127",
+  "iron-control-image": "docker.io/ironsh/iron-control:sha-6fe8576@sha256:dc287ea43c6b5305a4ae03d9496fb352678ccf6b206bb8c509691521687d3f22",
+  "iron-control-platform": "linux/amd64",
+  "iron-control-postgres-image": "docker.io/library/postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73",
+  "iron-proxy-source": "https://github.com/ironsh/iron-proxy.git",
+  "iron-proxy-commit": "2393dd175a8c419153fb49917fdeceb94cd9ed59"
+}

@@ -37,7 +37,7 @@ After installing this payload, run `pnpm exec tsx scripts/opencode-host.ts --con
 for host OpenCode setup, or use `--update` / `--debug` for the corresponding
 operational skill. An existing OpenCode CLI can also run directly in the checkout;
 it discovers `.claude/skills` natively. Host sign-in uses OpenCode's own settings
-and is independent of the container's OneCLI credentials. Installed setup failures
+and is independent of the container's gateway credentials. Installed setup failures
 use the existing provider failure-assist hook, including wizard authentication
 and installation-check failures. Host diagnostic context is model input and may
 remain in native OpenCode history; deleting its private temporary file does not
@@ -46,12 +46,13 @@ erase those records. The helper requires stable OpenCode 1.18.25 or newer with
 Automatic help before payload
 installation is optional and is not part of the runtime contract.
 
-Install and refresh require host contract version 1. The compatibility predicate
+Install and refresh require host contract version 1 and credential-connection
+seam version 1. The compatibility predicate
 below guards every subsequent step, so an unsupported core receives no partial
 payload or dependency changes. Update core first if it reports a missing prerequisite.
 
 ```nc:run effect:refresh capture:opencode_core_ready validate:^yes$
-node -e "const fs=require('fs'); const p='src/provider-contracts/registry.ts'; if(fs.existsSync(p) && /PROVIDER_HOST_CONTRACT_SEAM_VERSION = 1/.test(fs.readFileSync(p,'utf8'))) console.log('yes'); else console.log('no')"
+node -e "const fs=require('fs'); const p='src/provider-contracts/registry.ts', g='setup/gateways/credential-store.ts'; if(fs.existsSync(p) && /PROVIDER_HOST_CONTRACT_SEAM_VERSION = 1/.test(fs.readFileSync(p,'utf8')) && fs.existsSync(g) && /PROVIDER_CREDENTIAL_CONNECTION_SEAM_VERSION = 1/.test(fs.readFileSync(g,'utf8'))) console.log('yes'); else console.log('no')"
 ```
 
 Copy only the files listed below from this skill's `payload/` to the matching
@@ -97,6 +98,7 @@ payload/container/agent-runner/src/providers/opencode-auth.test.ts -> container/
 payload/scripts/opencode-auth-config.test.ts -> scripts/opencode-auth-config.test.ts
 payload/scripts/opencode-auth.test.ts -> scripts/opencode-auth.test.ts
 payload/scripts/opencode-auth.ts -> scripts/opencode-auth.ts
+payload/scripts/opencode-gateway.test.ts -> scripts/opencode-gateway.test.ts
 payload/scripts/opencode-host.ts -> scripts/opencode-host.ts
 payload/scripts/opencode-host.test.ts -> scripts/opencode-host.test.ts
 payload/scripts/opencode-model-config.ts -> scripts/opencode-model-config.ts
@@ -166,7 +168,7 @@ cd container/agent-runner && bun run typecheck
 ```
 
 ```nc:run effect:test when:opencode_core_ready=yes
-pnpm exec vitest run src/providers/opencode-registration.test.ts scripts/opencode-auth*.test.ts scripts/opencode-host.test.ts scripts/opencode-models.test.ts scripts/opencode-vault.test.ts setup/providers
+pnpm exec vitest run src/providers/opencode-registration.test.ts scripts/opencode-auth*.test.ts scripts/opencode-gateway.test.ts scripts/opencode-host.test.ts scripts/opencode-models.test.ts scripts/opencode-vault.test.ts setup/providers
 ```
 
 ```nc:run effect:test when:opencode_core_ready=yes
@@ -191,21 +193,31 @@ ChatGPT sign-in, a local OpenAI-compatible endpoint, OpenRouter, DeepSeek, or a
 supported native backend. Automatic API-key configuration supports OpenAI,
 OpenRouter, DeepSeek, Google, and Anthropic; other native authentication schemes
 require separate integration. The command stores credentials in the configured
-credential gateway (the current adapter uses OneCLI) and backend defaults in
+credential gateway selected by `NANOCLAW_GATEWAY_PROVIDER` and backend defaults in
 `.env`. The full setup wizard also offers this flow and selects OpenCode for
 new groups only after configuration succeeds. The standalone command leaves the
 instance default unchanged.
 
 For ChatGPT, native OpenCode sign-in runs in a temporary container directory.
-The OAuth credential is translated into OneCLI's supported vault format, and the
-temporary native file is removed. The container initializes fixed
-`onecli-managed` placeholders before every OpenCode server start at
-`$XDG_DATA_HOME/opencode/auth.json`; tokens and account metadata stay in OneCLI.
+OpenCode parses its own login file into the seam's `chatgpt` OAuth profile, hands
+it to the selected gateway, and removes the temporary native file. Iron Control stores its refresh token in a native OAuth broker
+using OpenCode's own public OAuth client; a separate granted secret supplies the
+account header. Setup waits for Iron's native broker to mint a fresh access token
+before continuing; this can take up to two minutes. OneCLI translates the same result to its native credential format. The container initializes fixed
+`nc-opencode-token-v1` placeholders before every OpenCode server start at
+`$XDG_DATA_HOME/opencode/auth.json`; tokens and account metadata stay in the gateway.
 API-key mode clears stale OAuth state. Refresh the payload and restart the host
 service and affected containers when updating from the earlier read-only-bind
 candidate; old containers retain their mounts until recreated.
 
-Before using a group, grant its OneCLI agent access to the chosen secret.
+With Iron Proxy, setup grants both the model credential and any account header
+to this installation’s principal. It reconciles the destination allowlist without
+installing OneCLI or reading `ONECLI_URL` / `ONECLI_API_KEY`. Native model domains
+and the configured HTTPS model host belong to OpenCode’s provider contract.
+Iron endpoints must use HTTPS on port 443 with a DNS hostname, including keyless
+self-hosted models; put TLS in front of a plaintext local server first.
+
+With the OneCLI gateway selected, grant the group’s OneCLI agent access to the chosen secret.
 Read its existing secret assignments first and merge the new secret ID into that
 list: `onecli agents set-secrets` replaces assignments. Verify the result with
 `onecli agents secrets`. Do not put a key in `.env`, command arguments, or the
@@ -246,16 +258,23 @@ pnpm exec tsx scripts/opencode-auth.ts --reauth
 pnpm exec tsx scripts/opencode-auth.ts --reauth --method browser
 ```
 
-This pairs again and updates the existing OneCLI secret ID, preserving its agent
-permissions and all backend/model defaults. It uses NanoClaw's `ONECLI_URL` and
-`ONECLI_API_KEY` management connection. If no credential exists, it creates one;
-grant that new secret to the group as described above. Retry the failed request.
+This pairs again and updates the existing gateway credential ID, preserving
+its grants and all backend/model defaults. Iron also retains the existing broker
+and account-header IDs and resets a dead broker with the new refresh token.
+Only a selected OneCLI adapter uses `ONECLI_URL` and `ONECLI_API_KEY`. If no
+credential exists, setup creates one and applies the gateway’s grant behavior
+described above. Retry the failed request.
 
 An unavailable vault, duplicate name, or incompatible credential entry stops the
 operation before sign-in. Resolve the gateway/permissions or entry metadata in
-OneCLI and retry; do not delete a credential to force setup to run. Failed
+the selected gateway and retry; do not delete a credential to force setup to run. Failed
 pairing leaves the old entry intact; failed saves leave defaults unchanged.
 Temporary native credentials are removed after either success or failure.
+
+API-key rotation keeps the same credential ID. Changing its exact host requires
+confirmation. Iron’s update API replaces the secret source when changing rules,
+so a host change also requires re-entering the key; a blank answer can only keep
+a key on its existing host. Setup never retrieves the stored key.
 
 ## Change or refresh the default model
 

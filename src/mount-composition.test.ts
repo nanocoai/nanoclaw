@@ -81,6 +81,7 @@ function specFrom(mounts: Awaited<ReturnType<typeof composedMounts>>): SessionSp
     labels: { [GROUP_FOLDER_LABEL]: FOLDER },
     containers: [{ role: 'agent', image: 'nanoclaw-agent:test', env: {}, mounts: toMountSpecs(mounts, GROUP_ID) }],
     network: 'shared-private',
+    networkAccess: { endpoint: 'localhost', target: { kind: 'host' } },
     hardening: 'standard',
     resources: {},
     runtimeTier: 'container',

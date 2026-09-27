@@ -17,7 +17,10 @@ import {
 } from './registry.js';
 
 const provider = 'claude';
-const tone = { default: 'Concise', toSettings: (tone: string) => ({ outputStyle: tone }) };
+// Claude Code's own default output style. With a named style (such as Concise) Claude Code adds a style message to every
+// request, and the conversation is then not read back from the prompt cache: each request writes it to the cache again.
+// The concise instruction is in the agent's CLAUDE.md (container/CLAUDE.md, Communication), in the cached prefix.
+const tone = { default: 'default', toSettings: (tone: string) => ({ outputStyle: tone }) };
 
 export const claudeRuntimeContract: ProviderRuntimeContract = {
   seamVersion: PROVIDER_RUNTIME_CONTRACT_SEAM_VERSION,

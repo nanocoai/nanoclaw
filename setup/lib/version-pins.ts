@@ -12,8 +12,7 @@ import { fileURLToPath } from 'url';
 const VERSIONS_FILE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'versions.json');
 
 /**
- * Returns the pinned version for a component, e.g.
- * `readVersionPin('onecli-gateway')`. Throws when the file or the pin is
+ * Returns a pinned version or immutable source revision. Throws when the file or the pin is
  * missing — a missing pin is an install-tree defect, not a runtime condition.
  */
 export function readVersionPin(component: string): string {

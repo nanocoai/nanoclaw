@@ -134,3 +134,29 @@ describe('OpenCode host payload', () => {
     expect(api.env).toMatchObject({ OPENCODE_AUTH_MODE: 'api-key' });
   });
 });
+
+describe('OpenCode model gateway destinations', () => {
+  it('declares native backends and only the configured custom HTTPS hostname', async () => {
+    const { openCodeModelDomains } = await import('../provider-contracts/opencode.js');
+    expect(openCodeModelDomains('https://models.example.test/v1')).toEqual(
+      expect.arrayContaining([
+        'chatgpt.com',
+        'api.openai.com',
+        'openrouter.ai',
+        'api.deepseek.com',
+        'generativelanguage.googleapis.com',
+        'api.anthropic.com',
+        'models.example.test',
+      ]),
+    );
+    expect(openCodeModelDomains('native')).not.toContain('models.example.test');
+  });
+  it.each([
+    'http://models.example.test/v1',
+    'https://models.example.test:8443/v1',
+    'https://user:pass@models.example.test/v1',
+  ])('does not declare an unsupported endpoint %s for model approval', async (endpoint) => {
+    const { openCodeModelDomains } = await import('../provider-contracts/opencode.js');
+    expect(openCodeModelDomains(endpoint)).not.toContain('models.example.test');
+  });
+});

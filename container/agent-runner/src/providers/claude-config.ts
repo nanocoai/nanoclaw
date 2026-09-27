@@ -61,7 +61,6 @@ export const TOOL_ALLOWLIST = [
   'WebSearch',
   'WebFetch',
   'Task',
-  'TaskOutput',
   'TaskStop',
   'TeamCreate',
   'TeamDelete',
@@ -84,11 +83,18 @@ export function mcpAllowPattern(serverName: string): string {
  * SDK's own permission prompts. The disallowed builtins are policy too —
  * they are the SDK surfaces that would bypass nanoclaw's scheduling or hang
  * a headless session.
+ *
+ * `settings` rides the SDK's flag-level settings, which outrank the group's
+ * own settings files, so it holds for every group, existing ones included.
+ * Since 2.1.275 Claude Code syncs the skills and plugins enabled on the
+ * signed-in claude.ai account into terminal sessions; the sync keys opt out,
+ * so an agent gets the skills nanoclaw mounts, not the operator's own.
  */
 export function resolveClaudeExecutionPolicy(): {
   permissionMode: 'bypassPermissions';
   allowDangerouslySkipPermissions: true;
   disallowedTools: string[];
+  settings: { syncClaudeAiSkills: false; syncClaudeAiPlugins: false };
 } {
   return {
     permissionMode: 'bypassPermissions',
@@ -96,6 +102,7 @@ export function resolveClaudeExecutionPolicy(): {
     // A copy: the contract value is deep-frozen on registration, and the
     // exported constant must stay a plain mutable array.
     disallowedTools: [...SDK_DISALLOWED_TOOLS],
+    settings: { syncClaudeAiSkills: false, syncClaudeAiPlugins: false },
   };
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "nanoclaw",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "description": "Personal AI assistant. Lightweight, secure, customizable.",
   "type": "module",
   "packageManager": "pnpm@10.34.5",
@@ -35,7 +35,6 @@
   "dependencies": {
     "@clack/core": "^1.2.0",
     "@clack/prompts": "^1.2.0",
-    "@onecli-sh/sdk": "2.2.1",
     "better-sqlite3": "13.0.3",
     "chat": "4.29.0",
     "cron-parser": "5.5.0",

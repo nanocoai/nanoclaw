@@ -24,18 +24,25 @@ import { emitStatus } from './status.js';
  * steps still write directly) so flows don't invent grep/sed pipelines (which
  * can't be allowlisted tightly).
  */
-export function upsertEnvVar(key: string, value: string): { existed: boolean } {
-  return { existed: upsertEnvVars({ [key]: value }).has(key) };
+export function upsertEnvVar(
+  key: string,
+  value: string,
+  projectRoot = process.cwd(),
+): { existed: boolean } {
+  return { existed: upsertEnvVars({ [key]: value }, projectRoot).has(key) };
 }
 
 /** Commit related settings together, removing every assignment the reader accepts.
  * A failed write or rename leaves the previous configuration intact. */
-export function upsertEnvVars(values: Record<string, string>): Set<string> {
+export function upsertEnvVars(
+  values: Record<string, string>,
+  projectRoot = process.cwd(),
+): Set<string> {
   for (const [key, value] of Object.entries(values)) {
     if (!/^[A-Z][A-Z0-9_]*$/.test(key)) throw new Error(`Invalid env key: ${key} (must be UPPER_SNAKE_CASE)`);
     if (/[\r\n\0]/.test(value)) throw new Error(`Invalid multiline env value for ${key}`);
   }
-  const namedFile = path.join(process.cwd(), '.env');
+  const namedFile = path.join(projectRoot, '.env');
   const exists = fs.existsSync(namedFile);
   // Keep an operator's .env symlink; replace its target, in the same directory.
   const envFile = exists ? fs.realpathSync(namedFile) : namedFile;

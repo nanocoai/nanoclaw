@@ -109,3 +109,25 @@ describe('buildSystemPromptAddendum — multi-destination routing guidance', () 
     expect(prompt).not.toContain('your own channel destination(s):');
   });
 });
+
+describe('buildSystemPromptAddendum — reading messages', () => {
+  it('explains the inbound block kinds in chat mode, after the sending section', () => {
+    seedDestination('casa', 'Casa', 'whatsapp', 'group-1@g.us');
+
+    const prompt = buildSystemPromptAddendum('Casa');
+
+    expect(prompt).toContain('## Reading messages');
+    expect(prompt).toContain('<cross-session-context>');
+    expect(prompt).toContain('<dm-history>');
+    expect(prompt).toContain('Its `from` says which');
+    expect(prompt).toContain('ask.');
+    expect(prompt.indexOf('## Sending messages')).toBeLessThan(prompt.indexOf('## Reading messages'));
+  });
+
+  it('omits the reading section in task mode, which never receives echoes', () => {
+    const prompt = buildSystemPromptAddendum('Casa', { kind: 'task', taskId: 'weekly-report' });
+
+    expect(prompt).not.toContain('Reading messages');
+    expect(prompt).not.toContain('cross-session-context');
+  });
+});

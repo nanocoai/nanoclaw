@@ -10,8 +10,8 @@
 import fs from 'fs';
 import path from 'path';
 
-import type { RunCommand } from './onecli-agents.js';
 import type { RemovalAction } from './plan.js';
+import type { RunCommand } from './scan.js';
 
 export interface ExecDeps {
   runCommand: RunCommand;
@@ -138,22 +138,6 @@ function runAction(action: RemovalAction, deps: ExecDeps, notes: string[]): void
       fs.rmSync(action.linkPath, { force: true });
       log('✓ removed ncl command');
       break;
-    case 'delete-onecli-agent': {
-      const res = runCommand('onecli', ['agents', 'delete', '--id', action.agent.uuid]);
-      if (res.status === 0) {
-        log(`✓ deleted OneCLI agent ${action.agent.name} (${action.agent.identifier})`);
-      } else if (res.status === null) {
-        // spawn failure (binary gone since the scan), not a missing agent
-        log(`! couldn't run onecli for ${action.agent.identifier}`);
-        notes.push(
-          `OneCLI agent ${action.agent.name} (${action.agent.identifier}): couldn't run onecli — ` +
-            `delete manually with: onecli agents delete --id ${action.agent.uuid}`,
-        );
-      } else {
-        log(`! OneCLI agent ${action.agent.identifier} already gone`);
-      }
-      break;
-    }
     case 'backup-env': {
       // Backup and removal are one action so a failed backup (which throws
       // into executePlan's catch) can never be followed by the deletion.

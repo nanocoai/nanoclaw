@@ -3,11 +3,8 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import Database from 'better-sqlite3';
-
 import { getInstallSlug, getLaunchdLabel, getSystemdUnit } from '../../src/install-slug.js';
-import type { RunCommand } from './onecli-agents.js';
-import { detectExistingInstall, scanInstall, type ScanDeps } from './scan.js';
+import { detectExistingInstall, scanInstall, type RunCommand, type ScanDeps } from './scan.js';
 
 let root: string;
 let home: string;
@@ -140,37 +137,6 @@ describe('scanInstall ncl symlink', () => {
   });
 });
 
-describe('scanInstall OneCLI agents', () => {
-  const vault = JSON.stringify({
-    data: [
-      { id: 'u-1', identifier: 'ag-mine', name: 'Mine', isDefault: false },
-      { id: 'u-2', identifier: 'ag-other', name: 'Other', isDefault: false },
-    ],
-  });
-  const onecliUp = fakeRun({ onecli: () => ({ status: 0, stdout: vault }) });
-
-  it('splits mine vs orphans against the central DB', () => {
-    fs.mkdirSync(path.join(root, 'data'));
-    const db = new Database(path.join(root, 'data', 'v2.db'));
-    db.exec('CREATE TABLE agent_groups (id TEXT PRIMARY KEY)');
-    db.prepare('INSERT INTO agent_groups (id) VALUES (?)').run('ag-mine');
-    db.close();
-
-    const inv = scanInstall(deps({ runCommand: onecliUp }));
-    expect(inv.onecli.idsKnown).toBe(true);
-    expect(inv.onecli.mine.map((a) => a.identifier)).toEqual(['ag-mine']);
-    expect(inv.onecli.orphans.map((a) => a.identifier)).toEqual(['ag-other']);
-  });
-
-  it('flags orphan labels as unreliable when the DB is unreadable', () => {
-    const inv = scanInstall(deps({ runCommand: onecliUp }));
-    expect(inv.onecli.idsKnown).toBe(false);
-    expect(inv.onecli.mine).toEqual([]);
-    expect(inv.onecli.orphans.map((a) => a.identifier)).toEqual(['ag-mine', 'ag-other']);
-    expect(inv.notes.some((n) => n.includes("Couldn't read agent_groups"))).toBe(true);
-  });
-});
-
 describe('detectExistingInstall', () => {
   it('is false for an empty checkout', () => {
     expect(detectExistingInstall(root)).toBe(false);
@@ -178,8 +144,7 @@ describe('detectExistingInstall', () => {
 
   it('is true when the central DB exists', () => {
     fs.mkdirSync(path.join(root, 'data'));
-    const db = new Database(path.join(root, 'data', 'v2.db'));
-    db.close();
+    fs.writeFileSync(path.join(root, 'data', 'v2.db'), '');
     expect(detectExistingInstall(root)).toBe(true);
   });
 });

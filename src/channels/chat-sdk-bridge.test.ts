@@ -558,3 +558,102 @@ describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
     expect(msg.markdown).toBe('plain hello');
   });
 });
+
+it('uses a registered approval presentation losslessly for initial and terminal cards', async () => {
+  const { registerQuestionRenderResolver } = await import('./question-render-registry.js');
+  const evidence = 'full evidence\n'.repeat(500);
+  registerQuestionRenderResolver((id) =>
+    id === 'presentation-fixture'
+      ? {
+          title: 'Review',
+          options: [],
+          deferResolution: true,
+          renderMessage: () => ({ markdown: evidence }),
+          renderTerminal: (resolution) => ({ markdown: `${evidence}\n${resolution}` }),
+        }
+      : undefined,
+  );
+  const { calls, postMessage } = makePostCapture();
+  const edits: PostCall[] = [];
+  const bridge = createChatSdkBridge({
+    adapter: stubAdapter({
+      postMessage,
+      editMessage: async (threadId, _id, message) => {
+        edits.push({ threadId, message });
+        return { id: 'card', threadId, raw: {} };
+      },
+    }),
+    supportsThreads: false,
+  });
+  await bridge.deliver('stub:C1', null, {
+    kind: 'chat-sdk',
+    content: {
+      type: 'ask_question',
+      questionId: 'presentation-fixture',
+      title: 'Review',
+      options: [],
+      requirePresentation: true,
+    },
+  });
+  expect(calls[0].message).toEqual({ markdown: evidence });
+  await bridge.deliver('stub:C1', null, {
+    kind: 'chat-sdk',
+    content: {
+      operation: 'edit',
+      questionId: 'presentation-fixture',
+      messageId: 'card',
+      terminalCard: { resolution: 'Rejected' },
+    },
+  });
+  expect(edits[0].message).toEqual({ markdown: `${evidence}\nRejected` });
+});
+
+it('forwards the authenticated instance and message address without editing a deferred approval', async () => {
+  const { initTestDb, closeDb } = await import('../db/connection.js');
+  const { runMigrations } = await import('../db/migrations/index.js');
+  const { registerQuestionRenderResolver } = await import('./question-render-registry.js');
+  await runMigrations(await initTestDb());
+  registerQuestionRenderResolver((id) =>
+    id === 'address-fixture'
+      ? {
+          title: 'Review',
+          options: [{ label: 'Approve', selectedLabel: 'Approved', value: 'approve' }],
+          deferResolution: true,
+        }
+      : undefined,
+  );
+  const editMessage = vi.fn();
+  const adapter = stubAdapter({
+    name: 'fixture',
+    initialize: async () => {},
+    channelIdFromThreadId: (threadId: string) => threadId,
+    editMessage,
+  });
+  const bridge = createChatSdkBridge({ adapter, instance: 'fixture-one', supportsThreads: false });
+  const onAction = vi.fn();
+  try {
+    await bridge.setup({ onInbound: () => {}, onInboundEvent: () => {}, onMetadata: () => {}, onAction });
+    const chat = (bridge as unknown as { _chat: import('chat').Chat })._chat;
+    await chat.processAction(
+      {
+        actionId: 'ncq:address-fixture:0',
+        adapter,
+        messageId: 'original-card',
+        raw: {},
+        threadId: 'fixture:room',
+        user: { userId: 'selected' } as never,
+        value: '0',
+      },
+      undefined,
+    );
+    expect(onAction).toHaveBeenCalledWith('address-fixture', 'approve', 'selected', {
+      instance: 'fixture-one',
+      messageId: 'original-card',
+      platformId: 'fixture:room',
+    });
+    expect(editMessage).not.toHaveBeenCalled();
+  } finally {
+    await bridge.teardown();
+    await closeDb();
+  }
+});

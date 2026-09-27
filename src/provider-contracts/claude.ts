@@ -56,6 +56,8 @@ export const CLAUDE_COMPATIBLE_HOST_SURFACES = {
 registerProviderFileTransformer('claude-settings', claudeSettingsTransformer);
 
 registerProviderHostContract('claude', {
+  modelEndpoints: { api: 'https://api.anthropic.com' },
+  modelDomains: ['anthropic.com'],
   seamVersion: PROVIDER_HOST_CONTRACT_SEAM_VERSION,
   ...CLAUDE_COMPATIBLE_HOST_SURFACES,
   commands: {

@@ -3,7 +3,7 @@ import * as p from '@clack/prompts';
 import { brightSelect } from '../setup/lib/bright-select.js';
 import { CONTAINER_IMAGE } from '../src/config.js';
 import { CONTAINER_RUNTIME_BIN } from '../src/container-runtime.js';
-import { buildOneCliManagedStub } from '../src/providers/opencode-auth-stub.js';
+import { buildGatewayManagedStub } from '../src/providers/opencode-auth-stub.js';
 
 const MAX_MODEL_DISCOVERY_BYTES = 1024 * 1024;
 
@@ -98,13 +98,13 @@ export function runtimeModelArgs(provider: string, refresh = false, chatgpt = fa
   if (!chatgpt) return [...args, '--entrypoint', 'opencode', CONTAINER_IMAGE, ...command];
   if (provider !== 'openai') throw new Error('ChatGPT mode requires the openai backend.');
   // Activate the same OAuth model filter as the agent runtime, with fixed
-  // non-secret sentinels only. No login, OneCLI access, or host mounts occur.
+  // non-secret sentinels only. No login, gateway access, or host mounts occur.
   return [
     ...args,
     '-e',
     'XDG_DATA_HOME=/tmp/opencode-model-catalog',
     '-e',
-    `OPENCODE_CATALOG_AUTH=${JSON.stringify(buildOneCliManagedStub())}`,
+    `OPENCODE_CATALOG_AUTH=${JSON.stringify(buildGatewayManagedStub())}`,
     '--entrypoint',
     'sh',
     CONTAINER_IMAGE,

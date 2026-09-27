@@ -27,16 +27,15 @@ import {
   resetGatewayProvider,
   type GatewayApprovalDecision,
   type GatewayApprovalRequest,
-  type GatewayApprovalSource,
-  type GatewayProvider,
+  type GatewayProviderDefinition,
 } from '../../gateway-providers/index.js';
 import type { PendingApproval } from '../../types.js';
 import {
-  ONECLI_ACTION,
-  resolveOneCLIApproval,
-  startOneCLIApprovalHandler,
-  stopOneCLIApprovalHandler,
-} from './onecli-approvals.js';
+  GATEWAY_APPROVAL_ACTION,
+  handleGatewayApprovalResponse,
+  startGatewayApprovalCoordinator,
+  stopGatewayApprovalCoordinator,
+} from '../../gateway-approval-coordinator.js';
 
 const TEST_DIR = '/tmp/nanoclaw-test-restart-honesty';
 
@@ -57,28 +56,47 @@ const captureAdapter: ChannelDeliveryAdapter = {
 };
 
 let capturedHandler: ((request: GatewayApprovalRequest) => Promise<GatewayApprovalDecision>) | null = null;
-const source: GatewayApprovalSource & { decide?: ReturnType<typeof vi.fn>; listPending?: ReturnType<typeof vi.fn> } = {
-  subscribe(handler) {
+const source: GatewayProviderDefinition['approvals'] & {
+  decide?: ReturnType<typeof vi.fn>;
+  listPending?: ReturnType<typeof vi.fn>;
+} = {
+  async subscribe(handler, signal) {
     capturedHandler = handler;
-    return { stop() {} };
+    await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }));
   },
 };
 
-const fakeProvider: GatewayProvider = {
+const fakeProvider: GatewayProviderDefinition = {
   kind: 'fake-for-tests',
-  async contribute() {
-    throw new Error('not under test');
+  agentSkills: [],
+  sessions: {
+    async ensure() {
+      throw new Error('not under test');
+    },
   },
-  approvals: () => source,
+  approvals: source,
 };
+
+async function resolveApproval(questionId: string, value: string): Promise<boolean> {
+  return handleGatewayApprovalResponse({
+    questionId,
+    value,
+    userId: 'telegram:admin',
+    channelType: 'telegram',
+    platformId: 'D-1',
+    threadId: null,
+  });
+}
+
+vi.mock('./response-handler.js', () => ({ isAuthorizedApprovalClick: async () => true }));
 
 async function seedRow(overrides: Partial<PendingApproval> = {}): Promise<PendingApproval> {
   const row: PendingApproval = {
     approval_id: 'oa-test0001',
     session_id: null,
     request_id: 'req-1',
-    action: ONECLI_ACTION,
-    payload: JSON.stringify({ approver: 'telegram:admin' }),
+    action: GATEWAY_APPROVAL_ACTION,
+    payload: JSON.stringify({ gatewayProvider: 'fake-for-tests' }),
     created_at: iso(-60_000),
     agent_group_id: 'ag-1',
     channel_type: 'telegram',
@@ -112,7 +130,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  stopOneCLIApprovalHandler();
+  await stopGatewayApprovalCoordinator();
   resetGatewayProvider(null);
   await closeDb();
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true, force: true });
@@ -121,41 +139,43 @@ afterEach(async () => {
 describe('row-keyed resolution after a restart', () => {
   it('a surviving still-open card is decidable; approve carries the retry caveat', async () => {
     await seedRow();
-    startOneCLIApprovalHandler(captureAdapter);
+    await startGatewayApprovalCoordinator(fakeProvider, captureAdapter, vi.fn());
 
     // No in-memory state exists for this row — exactly the post-restart shape.
-    expect(await resolveOneCLIApproval('oa-test0001', 'approve')).toBe(true);
+    expect(await resolveApproval('oa-test0001', 'approve')).toBe(true);
     expect(await getPendingApproval('oa-test0001')).toBeUndefined();
 
     const edit = delivered.find((call) => call.content.includes('retry'));
     expect(edit, 'approve without a gateway decide path must tell the human to have the agent retry').toBeDefined();
   });
 
-  it('a late reject needs no caveat edit — the auto-edited card is already honest', async () => {
+  it('a late reject updates the card after the coordinator accepts it', async () => {
     await seedRow();
-    startOneCLIApprovalHandler(captureAdapter);
+    await startGatewayApprovalCoordinator(fakeProvider, captureAdapter, vi.fn());
 
-    expect(await resolveOneCLIApproval('oa-test0001', 'reject')).toBe(true);
+    expect(await resolveApproval('oa-test0001', 'reject')).toBe(true);
     expect(await getPendingApproval('oa-test0001')).toBeUndefined();
-    expect(delivered).toHaveLength(0);
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0].content).not.toContain('retry');
   });
 
   it('a late decision rides the gateway decide capability when present', async () => {
     source.decide = vi.fn().mockResolvedValue(true);
     await seedRow();
-    startOneCLIApprovalHandler(captureAdapter);
+    await startGatewayApprovalCoordinator(fakeProvider, captureAdapter, vi.fn());
 
-    expect(await resolveOneCLIApproval('oa-test0001', 'approve')).toBe(true);
+    expect(await resolveApproval('oa-test0001', 'approve')).toBe(true);
     expect(source.decide).toHaveBeenCalledWith('req-1', 'approve');
     // Delivered to the gateway — no caveat follow-up needed.
-    expect(delivered).toHaveLength(0);
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0].content).not.toContain('retry');
   });
 
   it('a second click loses the row transition and reports unresolved', async () => {
     await seedRow();
-    startOneCLIApprovalHandler(captureAdapter);
-    expect(await resolveOneCLIApproval('oa-test0001', 'approve')).toBe(true);
-    expect(await resolveOneCLIApproval('oa-test0001', 'reject')).toBe(false);
+    await startGatewayApprovalCoordinator(fakeProvider, captureAdapter, vi.fn());
+    expect(await resolveApproval('oa-test0001', 'approve')).toBe(true);
+    expect(await resolveApproval('oa-test0001', 'reject')).toBe(false);
   });
 });
 
@@ -169,7 +189,7 @@ describe('re-attach at startup', () => {
     });
     await seedRow({ approval_id: 'oa-alive001', request_id: 'req-new', expires_at: iso(120_000) });
 
-    startOneCLIApprovalHandler(captureAdapter);
+    await startGatewayApprovalCoordinator(fakeProvider, captureAdapter, vi.fn());
 
     await vi.waitFor(async () => {
       expect(await getPendingApproval('oa-overdue1')).toBeUndefined();
@@ -182,7 +202,7 @@ describe('re-attach at startup', () => {
   it('consults listPending when the gateway can enumerate held requests', async () => {
     source.listPending = vi.fn().mockResolvedValue([{ id: 'req-1' }]);
     await seedRow();
-    startOneCLIApprovalHandler(captureAdapter);
+    await startGatewayApprovalCoordinator(fakeProvider, captureAdapter, vi.fn());
     await vi.waitFor(() => expect(source.listPending).toHaveBeenCalled());
     expect(await getPendingApproval('oa-test0001')).toBeDefined();
   });
@@ -191,20 +211,21 @@ describe('re-attach at startup', () => {
 describe('reconnect dedupe', () => {
   it('a redelivered request re-arms the existing card — never a duplicate', async () => {
     await seedRow({ request_id: 'req-9' });
-    startOneCLIApprovalHandler(captureAdapter);
+    await startGatewayApprovalCoordinator(fakeProvider, captureAdapter, vi.fn());
     expect(capturedHandler).not.toBeNull();
 
     const decisionPromise = capturedHandler!({
       id: 'req-9',
       expiresAt: iso(120_000),
-      method: 'POST',
-      host: 'api.example.com',
-      path: '/send',
-      agent: { name: 'Agent' },
+      agentGroupId: 'ag-1',
+      createdAt: iso(0),
+      title: 'Credentials Request',
+      question: 'Allow POST api.example.com/send?',
     });
-    // Let handleRequest reach the dedupe check before clicking.
+    // Let the asynchronous DB reads re-arm the callback before clicking the card.
+    await new Promise<void>((resolve) => setImmediate(resolve));
     await vi.waitFor(async () => {
-      expect(await resolveOneCLIApproval('oa-test0001', 'approve')).toBe(true);
+      expect(await resolveApproval('oa-test0001', 'approve')).toBe(true);
     });
     await expect(decisionPromise).resolves.toBe('approve');
     // No ask_question card was delivered for the redelivery.
@@ -212,14 +233,14 @@ describe('reconnect dedupe', () => {
   });
 
   it('a genuinely new request cards once and stamps the routed approver', async () => {
-    startOneCLIApprovalHandler(captureAdapter);
+    await startGatewayApprovalCoordinator(fakeProvider, captureAdapter, vi.fn());
     const decisionPromise = capturedHandler!({
       id: 'req-fresh',
       expiresAt: iso(120_000),
-      method: 'POST',
-      host: 'api.example.com',
-      path: '/send',
-      agent: { name: 'Agent', externalId: 'ag-1' },
+      agentGroupId: 'ag-1',
+      createdAt: iso(0),
+      title: 'Credentials Request',
+      question: 'Allow POST api.example.com/send?',
     });
 
     let approvalId = '';
@@ -232,7 +253,7 @@ describe('reconnect dedupe', () => {
     expect(row?.approver_user_id).toBe('telegram:admin');
     expect(row?.request_id).toBe('req-fresh');
 
-    expect(await resolveOneCLIApproval(approvalId, 'reject')).toBe(true);
+    expect(await resolveApproval(approvalId, 'reject')).toBe(true);
     await expect(decisionPromise).resolves.toBe('deny');
   });
 });

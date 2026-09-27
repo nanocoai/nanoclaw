@@ -4,23 +4,19 @@
  * The order is load-bearing:
  *   1. Service / processes / containers / image / symlink — stop the host
  *      first so it can't respawn containers mid-removal.
- *   2. OneCLI agent deletions — before the data group, which removes the
- *      data/v2.db the mine/orphan split was computed from.
- *   3. Data group, with the .env backup strictly before its deletion.
- *   4. User group (groups/, store/).
- *   5. Runtime tail: dist/ then node_modules/ — ALWAYS last. The uninstaller
+ *   2. Data group, with the .env backup strictly before its deletion.
+ *   3. User group (groups/, store/).
+ *   4. Runtime tail: dist/ then node_modules/ — ALWAYS last. The uninstaller
  *      runs on tsx out of node_modules; nothing may load after this.
  */
 import path from 'path';
 
-import type { VaultAgent } from './onecli-agents.js';
 import type { Inventory, PathItem } from './scan.js';
 
 export interface Decisions {
   service: boolean;
   data: boolean;
   user: boolean;
-  onecliDelete: VaultAgent[];
 }
 
 export type RemovalAction =
@@ -41,7 +37,6 @@ export type RemovalAction =
   | { kind: 'rm-containers'; runtime: string; labelFilter: string }
   | { kind: 'rmi'; runtime: string; image: string }
   | { kind: 'rm-ncl-symlink'; linkPath: string }
-  | { kind: 'delete-onecli-agent'; agent: VaultAgent }
   /**
    * Backs up AND removes .env as one atomic action: a failed backup must
    * never be followed by the deletion (the backup is the user's only copy
@@ -98,10 +93,6 @@ export function buildRemovalPlan(inv: Inventory, d: Decisions): RemovalAction[] 
     if (s.nclSymlink) {
       actions.push({ kind: 'rm-ncl-symlink', linkPath: s.nclSymlink });
     }
-  }
-
-  for (const agent of d.onecliDelete) {
-    actions.push({ kind: 'delete-onecli-agent', agent });
   }
 
   if (d.data) {

@@ -86,8 +86,15 @@ describe('installed runtime catalog', () => {
     expect(args).not.toContain('--mount');
     expect(args).not.toContain('--env-file');
     const stubArg = args.find((value: string) => value.startsWith('OPENCODE_CATALOG_AUTH='));
+    // The catalog run presents the same non-secret placeholder the agent runtime does.
     expect(JSON.parse(stubArg.split('=').slice(1).join('='))).toEqual({
-      openai: { type: 'oauth', access: 'onecli-managed', refresh: 'onecli-managed', expires: Date.UTC(2100, 0, 1) },
+      openai: {
+        type: 'oauth',
+        access: 'nc-opencode-token-v1',
+        refresh: 'nc-opencode-token-v1',
+        accountId: 'nc-opencode-token-v1',
+        expires: Date.UTC(2100, 0, 1),
+      },
     });
     expect(options.timeout).toBe(60000);
     expect(options.maxBuffer).toBeGreaterThan(0);

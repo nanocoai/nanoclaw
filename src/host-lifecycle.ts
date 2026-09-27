@@ -6,10 +6,12 @@
  * ready, and shutdown work begins only from the host's graceful-shutdown path.
  */
 import type { DbDriver } from './db/driver.js';
+import type { ChannelDeliveryAdapter } from './delivery.js';
 import { log } from './log.js';
 
 export interface HostStartContext {
   db: DbDriver;
+  deliveryAdapter: ChannelDeliveryAdapter;
   signal: AbortSignal;
 }
 

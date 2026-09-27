@@ -2,8 +2,10 @@ import { randomUUID } from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
+export const OPENCODE_CREDENTIAL_PLACEHOLDER = 'nc-opencode-token-v1';
+
 /** Initialize this container's private auth state before every server start.
- * These placeholders select OpenCode's OAuth transport; OneCLI owns real tokens.
+ * These placeholders select OpenCode's OAuth transport; the selected gateway owns real tokens.
  * API-key mode clears stale OAuth state when a session changes backend.
  */
 export function initializeOpenCodeAuth(dataHome: string, mode: string | undefined): void {
@@ -18,7 +20,13 @@ export function initializeOpenCodeAuth(dataHome: string, mode: string | undefine
   const auth =
     mode === 'chatgpt'
       ? {
-          openai: { type: 'oauth', access: 'onecli-managed', refresh: 'onecli-managed', expires: Date.UTC(2100, 0, 1) },
+          openai: {
+            type: 'oauth',
+            access: OPENCODE_CREDENTIAL_PLACEHOLDER,
+            refresh: OPENCODE_CREDENTIAL_PLACEHOLDER,
+            accountId: OPENCODE_CREDENTIAL_PLACEHOLDER,
+            expires: Date.UTC(2100, 0, 1),
+          },
         }
       : {};
   const temporary = path.join(directory, `.auth-${randomUUID()}.tmp`);

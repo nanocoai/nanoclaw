@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   acknowledgeRequirement,
@@ -17,7 +17,8 @@ import {
   validateUpdate,
   type UpdateRuntime,
 } from './transaction.js';
-import { stopService } from './service.js';
+import { CUTOVER_STOP_CLI_TIMEOUT_MS, drainContainers, stopService } from './service.js';
+import { getInstallSlug } from '../../src/install-slug.js';
 import type { CommandRunner, ServiceHandle } from './service.js';
 
 const roots: string[] = [];
@@ -55,7 +56,7 @@ interface Fixture {
   upstreamHead: string;
 }
 
-function createForkFixture(options: { breaking?: boolean; externalPinMove?: boolean } = {}): Fixture {
+function createForkFixture(options: { breaking?: boolean; gatewayExtraction?: boolean } = {}): Fixture {
   const seed = temp('nanoclaw-update-seed-');
   exec(seed, 'git', ['init', '-b', 'main']);
   write(seed, 'package.json', '{"name":"nanoclaw-test","version":"2.1.54"}\n');
@@ -67,7 +68,7 @@ function createForkFixture(options: { breaking?: boolean; externalPinMove?: bool
   write(seed, 'src/channels/index.ts', "import './cli.js';\n");
   write(seed, 'src/providers/index.ts', '');
   write(seed, 'container/agent-runner/src/providers/index.ts', "import './claude.js';\n");
-  write(seed, 'versions.json', '{"onecli-gateway":"1.0.0","onecli-cli":"1.0.0"}\n');
+  write(seed, 'versions.json', '{"agent-image":"example@sha256:old"}\n');
   write(seed, 'CHANGELOG.md', '# Changelog\n');
   write(seed, 'src/value.ts', 'export const value = "old";\n');
   commit(seed, 'base');
@@ -87,8 +88,42 @@ function createForkFixture(options: { breaking?: boolean; externalPinMove?: bool
     );
     write(seed, 'docs/test-migration.md', '# Test migration\n');
   }
-  if (options.externalPinMove) {
-    write(seed, 'versions.json', '{"onecli-gateway":"2.0.0","onecli-cli":"1.0.0"}\n');
+  if (options.gatewayExtraction) {
+    write(seed, 'src/gateway-providers/installed.ts', '// Installed gateway providers.\n');
+    write(
+      seed,
+      '.claude/skills/add-onecli/gateway.json',
+      '{"kind":"onecli","label":"OneCLI","description":"Gateway","default":true}\n',
+    );
+    write(
+      seed,
+      '.claude/skills/add-onecli/SKILL.md',
+      [
+        '---',
+        'name: add-onecli',
+        'description: Test gateway extraction.',
+        '---',
+        '',
+        '```nc:copy',
+        'payload/src/gateway-providers/onecli.ts -> src/gateway-providers/onecli.ts',
+        '```',
+        '',
+        '```nc:append to:src/gateway-providers/installed.ts',
+        "import './onecli.js';",
+        '```',
+        '',
+      ].join('\n'),
+    );
+    write(
+      seed,
+      '.claude/skills/add-onecli/scripts/detect.ts',
+      "import fs from 'node:fs'; console.log(fs.readFileSync('.env', 'utf8').includes('ONECLI_URL=') ? 'installed' : 'absent');\n",
+    );
+    write(
+      seed,
+      '.claude/skills/add-onecli/payload/src/gateway-providers/onecli.ts',
+      "export const gateway = 'onecli';\n",
+    );
   }
   const upstreamHead = commit(seed, 'upstream update at same package version');
   exec(seed, 'git', ['remote', 'add', 'publish', official]);
@@ -105,6 +140,7 @@ function createForkFixture(options: { breaking?: boolean; externalPinMove?: bool
   const originalHead = commit(install, 'local customization');
   write(install, 'data/v2.db', 'old-schema');
   write(install, '.env', 'EXAMPLE=old\n');
+  if (options.gatewayExtraction) fs.appendFileSync(path.join(install, '.env'), 'ONECLI_URL=http://127.0.0.1:10254\n');
   write(install, 'start-nanoclaw.sh', '#!/bin/bash\nnode dist/index.js\n');
   write(install, 'nanoclaw.pid', '1234\n');
   return { install, originalHead, upstreamHead };
@@ -176,6 +212,38 @@ afterEach(() => {
 });
 
 describe('update-nanoclaw transaction end to end', () => {
+  it('applies an implicit OneCLI skill before stamping the extracted gateway selection', async () => {
+    const fixture = createForkFixture({ gatewayExtraction: true });
+    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    const bin = temp('nanoclaw-update-bin-');
+    const pnpm = path.join(bin, 'pnpm');
+    write(bin, 'pnpm', `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} "$3"\n`);
+    fs.chmodSync(pnpm, 0o755);
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${previousPath ?? ''}`;
+    const { runtime } = fakeRuntime(fixture.install);
+
+    try {
+      let state = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+      state = await validateUpdate(fixture.install, state.id, runtime);
+      state = await cutoverUpdate(fixture.install, state.id, runtime);
+
+      expect(state.phase).toBe('cutover');
+      expect(fs.readFileSync(path.join(fixture.install, 'src/gateway-providers/installed.ts'), 'utf8')).toContain(
+        "import './onecli.js';",
+      );
+      expect(fs.readFileSync(path.join(fixture.install, 'src/gateway-providers/onecli.ts'), 'utf8')).toContain(
+        "gateway = 'onecli'",
+      );
+      expect(fs.readFileSync(path.join(fixture.install, '.env'), 'utf8')).toContain('NANOCLAW_GATEWAY_PROVIDER=onecli');
+      state = await finishUpdate(fixture.install, state.id, runtime);
+      expect(state.phase).toBe('complete');
+    } finally {
+      process.env.PATH = previousPath;
+    }
+  });
+
   it('stages through official upstream, gates a migration, completes, and can restore code plus mutable state', async () => {
     const fixture = createForkFixture({ breaking: true });
     previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
@@ -441,33 +509,6 @@ describe('update-nanoclaw transaction end to end', () => {
     expect(fs.readFileSync(path.join(fixture.install, 'data/v2.db'), 'utf8')).toBe('old-schema');
     expect(fs.existsSync(path.join(fixture.install, 'data/upgrade-state.json'))).toBe(false);
   });
-
-  it('gates external version-pin moves and retains an exact rollback target', async () => {
-    const fixture = createForkFixture({ externalPinMove: true });
-    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
-    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
-    const { runtime } = fakeRuntime(fixture.install);
-
-    let state = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
-    state = await validateUpdate(fixture.install, state.id, runtime);
-    state = await cutoverUpdate(fixture.install, state.id, runtime);
-
-    expect(state.requirements).toMatchObject([
-      {
-        type: 'external-component',
-        description: 'onecli-gateway: 1.0.0 → 2.0.0',
-        status: 'pending',
-        rollback: 'Restore onecli-gateway to 1.0.0',
-      },
-    ]);
-    await expect(finishUpdate(fixture.install, state.id, runtime)).rejects.toThrow('Unresolved migrations');
-
-    state = acknowledgeRequirement(fixture.install, state.id, state.requirements[0].id, 'succeeded', undefined);
-    state = await finishUpdate(fixture.install, state.id, runtime);
-    expect(state.phase).toBe('complete');
-    expect(state.requirements[0].rollback).toBe('Restore onecli-gateway to 1.0.0');
-  });
-
   it('rolls back even though cutover already stopped the service (stale handle must not be re-stopped)', async () => {
     const fixture = createForkFixture();
     previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
@@ -530,6 +571,121 @@ describe('update-nanoclaw transaction end to end', () => {
     expect(events.filter((event) => event === 'service stop')).toHaveLength(1);
     expect(events).toContain('service start');
     expect(running).toBe(true);
+  });
+
+  it("cutover stops the install's containers only after the service is down, and a container that will not stop restores the old service (#3828)", async () => {
+    const fixture = createForkFixture();
+    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    const { runtime, events } = fakeRuntime(fixture.install);
+    // The REAL drain under a docker-faithful runner: one idle agent container
+    // that only disappears once `docker stop` has been issued for it.
+    let stopIssued = false;
+    const docker: CommandRunner = {
+      run: () => '',
+      tryRun(command, args) {
+        events.push(`${command} ${args.join(' ')}`);
+        if (args[0] === 'stop') {
+          stopIssued = true;
+          return { ok: true, stdout: '' };
+        }
+        return { ok: true, stdout: stopIssued ? '' : 'idle111' };
+      },
+    };
+    runtime.drainContainers = (root) =>
+      drainContainers(root, {
+        platform: 'linux',
+        home: os.homedir(),
+        uid: 1000,
+        runner: docker,
+        sleep: async () => {},
+      });
+
+    const prepared = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+    await validateUpdate(fixture.install, prepared.id, runtime);
+    const cut = await cutoverUpdate(fixture.install, prepared.id, runtime);
+    expect(cut.phase).toBe('cutover');
+    // state.projectRoot is realpathed (macOS tmp lives under /var → /private/var), so derive the slug from it.
+    const slugValue = getInstallSlug(cut.projectRoot);
+    const ps = `docker ps -q --filter label=nanoclaw-install=${slugValue}`;
+    expect(events.indexOf('service stop')).toBeLessThan(events.indexOf(ps));
+    expect(events.filter((e) => e.startsWith('docker '))).toEqual([ps, 'docker stop -t 10 idle111', ps]);
+
+    // Failure path: a container that survives the stop. Same ordering, and the
+    // transaction must restart the old service with the state still validated.
+    const stuck = createForkFixture();
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    const stuckRun = fakeRuntime(stuck.install);
+    stuckRun.runtime.drainContainers = (root) =>
+      drainContainers(
+        root,
+        {
+          platform: 'linux',
+          home: os.homedir(),
+          uid: 1000,
+          runner: { run: () => '', tryRun: () => ({ ok: true, stdout: 'stuck222' }) },
+          sleep: async () => {},
+        },
+        0,
+      );
+    const stuckPrepared = prepareUpdate({ projectRoot: stuck.install, upstreamRef: 'upstream/main' }, stuckRun.runtime);
+    await validateUpdate(stuck.install, stuckPrepared.id, stuckRun.runtime);
+    await expect(cutoverUpdate(stuck.install, stuckPrepared.id, stuckRun.runtime)).rejects.toThrow(
+      'Timed out waiting for NanoClaw containers to stop: stuck222',
+    );
+    expect(stuckRun.events.slice(-2)).toEqual(['service stop', 'service start']);
+    const after = loadState(stuck.install, stuckPrepared.id);
+    expect(after.phase).toBe('validated');
+    expect(after.snapshot).toBeUndefined();
+    expect(exec(stuck.install, 'git', ['rev-parse', 'HEAD'])).toBe(stuckPrepared.originalHead);
+  });
+
+  it('a `docker stop` that stalls past its bound still lands cutover on the rollback path (review on #3873)', async () => {
+    const fixture = createForkFixture();
+    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    const { runtime, events } = fakeRuntime(fixture.install);
+    let clock = 5_000_000;
+    const now = vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    try {
+      // Real drain, default 60 s bound, under a runner whose `stop` "hangs"
+      // until the subprocess timeout and whose `ps` keeps listing the container.
+      runtime.drainContainers = (root) =>
+        drainContainers(root, {
+          platform: 'linux',
+          home: os.homedir(),
+          uid: 1000,
+          runner: {
+            run: () => '',
+            tryRun(command, args, _cwd, options) {
+              events.push(`${command} ${args.join(' ')}`);
+              if (args[0] === 'stop') {
+                clock += options?.timeoutMs ?? CUTOVER_STOP_CLI_TIMEOUT_MS;
+                return { ok: false, stdout: 'ETIMEDOUT' };
+              }
+              return { ok: true, stdout: 'hung444' };
+            },
+          },
+          sleep: async () => {
+            clock += 1_000;
+          },
+        });
+      const prepared = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+      await validateUpdate(fixture.install, prepared.id, runtime);
+      await expect(cutoverUpdate(fixture.install, prepared.id, runtime)).rejects.toThrow(
+        'Timed out waiting for NanoClaw containers to stop: hung444 (docker stop failed: ETIMEDOUT)',
+      );
+      // Service was stopped, the drain gave up inside the bound, the old service came back.
+      expect(events.slice(-1)).toEqual(['service start']);
+      expect(events.filter((e) => e === 'service stop')).toHaveLength(1);
+      const after = loadState(fixture.install, prepared.id);
+      expect(after.phase).toBe('validated');
+      expect(after.snapshot).toBeUndefined();
+      expect(after.lastError).toContain('ETIMEDOUT');
+      expect(exec(fixture.install, 'git', ['rev-parse', 'HEAD'])).toBe(prepared.originalHead);
+    } finally {
+      now.mockRestore();
+    }
   });
 
   it('re-runs cutover after a failed rollback left a populated snapshot (read-only files must not EACCES)', async () => {

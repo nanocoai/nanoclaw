@@ -29,10 +29,11 @@ It does not provide automatic restart or boot persistence.
 - Container image rebuilt with tsconfig (`container/agent-runner/tsconfig.json`)
 - E2E verified: host → Docker container → agent responds → "E2E works!" ✓
 
-### OneCLI Integration
-- `ensureAgent()` call added before `applyContainerConfig()` in `src/container-runner.ts`
-- Without `ensureAgent`, OneCLI rejects unknown agent identifiers and returns false, leaving container with no credentials
-- E2E verified with OneCLI credential injection ✓
+### Gateway Integration
+- `src/container-runner.ts` leases the session's gateway contribution through `sessions.ensure` before composing the spec; the lease is revoked when the session ends
+- A provider that cannot lease the session fails the spawn — the inbound row stays pending and host-sweep retries, rather than a container starting with no credentials
+- The selected gateway is installed from its `/add-<gateway>` skill; see [gateway-seam.md](gateway-seam.md)
+- E2E verified with gateway credential injection ✓
 
 ### Channel Barrel
 - `src/index.ts` imports `./channels/index.js` (the barrel)
@@ -121,7 +122,7 @@ Channel adapter → routeInbound() → resolve messaging_group → resolve agent
 | `src/session-manager.ts` | Creates inbound.db + outbound.db per session |
 | `src/delivery.ts` | Polls outbound.db, delivers, handles system actions |
 | `src/host-sweep.ts` | Syncs processing_ack, stale detection, recurrence |
-| `src/container-runner.ts` | Spawns containers, OneCLI ensureAgent + applyContainerConfig |
+| `src/container-runner.ts` | Spawns containers; leases + revokes the session's gateway contribution |
 | `setup/register.ts` | Creates entities (agent_group, messaging_group, wiring) |
 | `setup/templates.ts` | Template discovery + first-agent stamping through `ncl groups create --template` |
 | `setup/verify.ts` | Checks central DB for registered groups |

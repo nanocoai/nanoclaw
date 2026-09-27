@@ -45,14 +45,45 @@ jobs:
         working-directory: container/agent-runner
         run: bun run test
 
+  iron-front:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.1'
+          cache-dependency-path: .claude/skills/add-iron-proxy/front-proxy/go.sum
+      - name: Verify stock Iron and front proxy
+        shell: bash
+        run: |
+          set -euo pipefail
+          skill="$GITHUB_WORKSPACE/.claude/skills/add-iron-proxy"
+          source_dir="$RUNNER_TEMP/stock-iron-source"
+          source_url=$(jq -r '."iron-proxy-source"' "$skill/versions.json")
+          revision=$(jq -r '."iron-proxy-commit"' "$skill/versions.json")
+          git init "$source_dir"
+          git -C "$source_dir" remote add origin "$source_url"
+          git -C "$source_dir" fetch --depth=1 origin "$revision"
+          git -C "$source_dir" checkout --detach FETCH_HEAD
+          test "$(git -C "$source_dir" rev-parse HEAD)" = "$revision"
+          cp -R "$skill/front-proxy" "$source_dir/_front-proxy"
+          cd "$source_dir/_front-proxy"
+          go test -mod=readonly -race -count=1 ./...
+          test -z "$(gofmt -l .)"
+          git -C "$source_dir" diff --exit-code
+
   # Repository rules require exact `ci`; always run it so matrix failures remain blocking.
   ci:
     if: always()
-    needs: test
+    needs: [test, iron-front]
     permissions: {}
     runs-on: ubuntu-latest
     steps:
-      - run: test "${{ needs.test.result }}" = success
+      - run: |
+          test "${{ needs.test.result }}" = success
+          test "${{ needs.iron-front.result }}" = success
 
   # The single check the main ruleset will require, in every repo under the same
   # name. It needs `ci` as well as `test` so the older required context and the
@@ -61,7 +92,7 @@ jobs:
   gate:
     name: gate
     if: always()
-    needs: [test, ci]
+    needs: [test, iron-front, ci]
     permissions: {}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -70,3 +101,4 @@ jobs:
         run: |
           test "${{ needs.test.result }}" = success
           test "${{ needs.ci.result }}" = success
+          test "${{ needs.iron-front.result }}" = success

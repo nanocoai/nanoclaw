@@ -42,8 +42,8 @@ export const REJECT_WITH_REASON_VALUE = 'reject_with_reason';
 /**
  * Three-button approval UI. Plain Reject is the instant fast path; "Reject with
  * reason…" opts into the reason-capture flow. Shared by every module approval
- * (create_agent, install_packages, add_mcp_server); OneCLI credential cards
- * keep their own two-button set in onecli-approvals.ts.
+ * (create_agent, install_packages, add_mcp_server). Gateway approvals use the
+ * core gateway coordinator's two-button decision flow.
  */
 const APPROVAL_OPTIONS: RawOption[] = [
   { label: 'Approve', selectedLabel: '✅ Approved', value: 'approve', style: 'primary' },

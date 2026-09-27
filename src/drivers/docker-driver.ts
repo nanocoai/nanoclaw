@@ -11,14 +11,14 @@
  * `container-runner.ts` keeps composition and lifecycle policy only.
  *
  * Network topology note: on Docker the containers of a session do NOT share a
- * network namespace — an auxiliary container's uplink here is a routable bridge, so
- * a netns-join would hand the agent the whole internet and delete the lockdown
- * the private network provides. `capabilities.sharedNetworkNamespace = false`
- * is how an egress overlay learns to address such a container by name here rather
- * than by localhost.
+ * network namespace. Auxiliary containers keep the ordinary bridge as their
+ * uplink and join one per-session internal network; the agent joins only that
+ * internal network. This preserves the gateway-only topology without exposing
+ * any runtime flags through the public spec.
  */
 import { createHash } from 'crypto';
 import fs from 'fs';
+import os from 'os';
 
 import { log } from '../log.js';
 
@@ -33,6 +33,7 @@ import {
   type ContainerSpec,
   type DriverCapabilities,
   type MountPolicy,
+  type NetworkAccessIntent,
   type MountSpec,
   type SessionDriver,
   type SessionEvent,
@@ -51,6 +52,7 @@ export interface DockerDriverOptions extends MountPolicy {
   cli?: Cli;
   /** Docker network the session's containers attach to, resolved by the overlay. */
   networkArgsFor?: (spec: SessionSpec) => string[];
+  reconcileNetworkAccess?: (access: NetworkAccessIntent) => void;
 }
 
 /** Watch reconnection: bounded backoff, never give up (see `watchSessions`). */
@@ -89,10 +91,7 @@ export class DockerSessionDriver implements SessionDriver {
       encryptedVolumes: false,
       unrealized: [],
       sharedNetworkNamespace: false,
-      // Realizes the agent container only, and REFUSES specs carrying more —
-      // see the role check in `prepare`. Flips only when this driver actually
-      // manages auxiliary containers, never before.
-      auxiliaryContainers: false,
+      auxiliaryContainers: true,
       // The daemon this driver shells for sessions is the same one
       // buildAgentGroupImage builds against; rebuild-in-place is real here.
       imageBuild: true,
@@ -103,30 +102,32 @@ export class DockerSessionDriver implements SessionDriver {
     ensureDockerRunning(this.#cli);
   }
 
+  async reconcileNetworkAccess(access: NetworkAccessIntent): Promise<void> {
+    this.opts.reconcileNetworkAccess?.(access);
+  }
+
   async prepare(spec: SessionSpec): Promise<SessionHandle> {
     validateSpec(spec, this.#policy, this.capabilities());
 
     const extra = spec.containers.filter((c) => c.role !== 'agent');
-    if (extra.length > 0) {
-      // Refusal, not omission. This driver realizes the agent container only,
-      // and a spec is a statement of what the session IS — realizing a subset
-      // would validate containers that never exist, leaving (say) a dead proxy
-      // address in the agent's env to be discovered at first egress instead of
-      // here. Composition gates on capabilities().auxiliaryContainers, so this
-      // is the backstop for a composer that did not.
-      throw specInvalid(
-        `docker driver does not manage container role '${extra[0].role}'; ` +
-          `auxiliary containers require a driver with capabilities().auxiliaryContainers`,
-      );
-    }
     const agent = spec.containers.find((c) => c.role === 'agent')!;
     const name = validateRuntimeName(agentContainerName(spec), 'container');
+    const networkArgs = this.opts.networkArgsFor?.(spec) ?? [];
+    if (extra.length > 0 && spec.networkAccess.target.kind !== 'session-container') {
+      throw specInvalid('a session cannot use both a central gateway network and an auxiliary gateway container');
+    }
+    const target = spec.networkAccess.target;
+    if (target.kind === 'session-container' && !extra.some((c) => c.role === target.role)) {
+      throw specInvalid('session-container network target must name an auxiliary container');
+    }
+    const privateNetwork = extra.length > 0 ? sessionNetworkName(spec) : undefined;
+    const auxiliaryNames = extra.map((container) => auxiliaryContainerName(spec, container.role));
 
     this.#remember(spec.key);
 
     // Idempotency on key: an existing live container for this key is the session.
     if (this.#existingSession(name, spec.key)) {
-      return new DockerHandle(spec.key, name, this.#cli, null, this.#emit);
+      return new DockerHandle(spec.key, name, this.#cli, null, auxiliaryNames, privateNetwork, this.#emit);
     }
 
     // Composition existsSync-gates mount sources; re-check here so a
@@ -134,44 +135,52 @@ export class DockerSessionDriver implements SessionDriver {
     // as a fresh empty directory — see `assertMountSourcesExist`). After the
     // idempotency return: an existing container's mounts are already bound,
     // and a source deleted since must not refuse adoption of a live session.
-    assertMountSourcesExist(agent.mounts);
+    for (const container of spec.containers) assertMountSourcesExist(container.mounts);
 
-    const args = ['create', '--rm', '--name', name];
-    args.push(...labelArgs(labelsForKey(spec.key, 'agent', { ...spec.labels, ...(agent.labels ?? {}) })));
-    args.push(...resourceArgs(spec));
-    args.push(...hardeningArgs(spec));
-    args.push(...userArgs(spec));
-    // Composed env first, contributed env second: on a duplicate `-e` key
-    // Docker's last flag wins, which realizes the contract rule that the
-    // contributed lane overrides composed literals (see ContainerSpec).
-    args.push(...envArgs(agent.env));
-    args.push(...envArgs(agent.contributedEnv ?? {}));
-    args.push(...mountArgs(agent.mounts));
-    // Network topology is driver-private: injected at registration (see
-    // `drivers/index.ts`), never carried on the spec. Argv-shaped input has no
-    // remaining channel through composition.
-    args.push(...(this.opts.networkArgsFor?.(spec) ?? []));
-    if (agent.command && agent.command.length > 0) {
-      // Docker splits PID 1 across --entrypoint (argv[0] + fixed flags) and the
-      // post-image argv. Keeping the split in the spec is what lets another
-      // realization preserve tini as PID 1 rather than inventing an entrypoint.
-      args.push('--entrypoint', agent.command[0]);
-      args.push(agent.image, ...agent.command.slice(1), ...(agent.args ?? []));
-    } else {
-      args.push(agent.image, ...(agent.args ?? []));
-    }
-
+    const created: string[] = [];
     try {
-      this.#cli.run(args);
+      if (privateNetwork) {
+        this.#cli.run([
+          'network',
+          'create',
+          '--internal',
+          ...labelArgs(labelsForKey(spec.key, 'session-network', spec.labels)),
+          privateNetwork,
+        ]);
+        for (let i = 0; i < extra.length; i++) {
+          const container = extra[i];
+          const auxiliaryName = auxiliaryNames[i];
+          created.push(auxiliaryName);
+          this.#cli.run(containerCreateArgs(spec, container, auxiliaryName, auxiliaryNetworkArgs()));
+          const alias =
+            spec.networkAccess.target.kind === 'session-container' && spec.networkAccess.target.role === container.role
+              ? spec.networkAccess.endpoint
+              : container.role;
+          this.#cli.run(['network', 'connect', '--alias', alias, privateNetwork, auxiliaryName]);
+        }
+      }
+      created.push(name);
+      this.#cli.run(
+        containerCreateArgs(spec, agent, name, privateNetwork ? ['--network', privateNetwork] : networkArgs),
+      );
     } catch (error) {
-      try {
-        this.#cli.run(['rm', '--force', name]);
-      } catch {
-        /* prepare is atomic: allocate all or leave nothing */
+      for (const createdName of created.reverse()) {
+        try {
+          this.#cli.run(['rm', '--force', createdName]);
+        } catch {
+          /* prepare is atomic: allocate all or leave nothing */
+        }
+      }
+      if (privateNetwork) {
+        try {
+          this.#cli.run(['network', 'rm', privateNetwork]);
+        } catch {
+          /* prepare is atomic: allocate all or leave nothing */
+        }
       }
       throw normalizeDockerError(error);
     }
-    return new DockerHandle(spec.key, name, this.#cli, spec, this.#emit);
+    return new DockerHandle(spec.key, name, this.#cli, spec, auxiliaryNames, privateNetwork, this.#emit);
   }
 
   async listSessions(installSlug: string): Promise<SessionSnapshot[]> {
@@ -201,9 +210,18 @@ export class DockerSessionDriver implements SessionDriver {
       .map((line) => {
         const [name, state, agentGroupId, sessionId] = line.split('|');
         const key: SessionKey = { installSlug, agentGroupId, sessionId };
+        const auxiliaries = auxiliaryContainerNames(this.#cli, key);
         this.#remember(key);
         return {
-          handle: new DockerHandle(key, name, this.#cli, null, this.#emit),
+          handle: new DockerHandle(
+            key,
+            name,
+            this.#cli,
+            null,
+            auxiliaries,
+            auxiliaries.length > 0 ? sessionNetworkName({ key }) : undefined,
+            this.#emit,
+          ),
           phase: dockerStatePhase(state),
         };
       });
@@ -227,7 +245,8 @@ export class DockerSessionDriver implements SessionDriver {
 
   /**
    * The one driver-level watch: a `docker events` subscription filtered by the
-   * install and agent-role labels. Emits best-effort hints for every observed
+   * install label. Auxiliary ends are session ends too, so every role emits
+   * best-effort hints for every observed
    * transition — including ends the host itself requested; intent filtering is
    * the session-events hub's job, not this driver's.
    */
@@ -240,8 +259,6 @@ export class DockerSessionDriver implements SessionDriver {
         'type=container',
         '--filter',
         `label=${LABELS.install}=${installSlug}`,
-        '--filter',
-        `label=${LABELS.role}=agent`,
         '--format',
         '{{json .}}',
       ],
@@ -349,26 +366,23 @@ export class DockerSessionDriver implements SessionDriver {
       log.warn('Failed to clean up orphaned containers', { err });
     }
 
-    // Pre-seam residue: containers spawned before the driver seam carry the
-    // install label but not the session label, so `listSessions` cannot see
-    // them — they can be neither adopted nor matched to a session. Left alone
-    // they would run forever AND race a freshly-named replacement for the same
-    // session directory. Stopping them is exactly what the old
-    // `cleanupOrphans()` did to every container on every start.
+    // Pre-seam residue carries only the install label. A named role without a
+    // session belongs to an installed gateway's own lifecycle and must survive
+    // driver reconciliation.
     try {
       const out = this.#cli.run([
         'ps',
         '--filter',
         `label=${LABELS.install}=${installSlug}`,
         '--format',
-        `{{.Names}}|{{.Label "${LABELS.session}"}}`,
+        `{{.Names}}|{{.Label "${LABELS.session}"}}|{{.Label "${LABELS.role}"}}`,
       ]);
       const preSeam = out
         .trim()
         .split('\n')
         .filter(Boolean)
         .map((line) => line.split('|'))
-        .filter(([, sessionId]) => !sessionId)
+        .filter(([, sessionId, role]) => !sessionId && !role)
         .map(([name]) => name);
       for (const name of preSeam) {
         try {
@@ -454,11 +468,20 @@ class DockerHandle implements SessionHandle {
     private readonly cli: Cli,
     /** Present only between prepare and start; null for an adopted handle. */
     private readonly pendingSpec: SessionSpec | null,
+    private readonly auxiliaryNames: readonly string[],
+    private readonly privateNetwork: string | undefined,
     private readonly emit: (event: SessionEvent) => void,
   ) {}
 
   async start(): Promise<void> {
     if (this.#proc) return; // idempotent
+    for (const auxiliary of this.auxiliaryNames) {
+      try {
+        this.cli.run(['start', auxiliary]);
+      } catch (error) {
+        throw normalizeDockerError(error);
+      }
+    }
     // `start --attach` is the supervision channel: it exits with the container's
     // exit code and streams the stderr that explains a boot failure. A container
     // that dies at boot (unknown provider, missing binary, bad config) explains
@@ -508,7 +531,29 @@ class DockerHandle implements SessionHandle {
       return this.pendingSpec && !this.#proc ? { phase: 'ready' } : { phase: 'stopped' };
     }
     const [status, exit] = state.split('|');
-    if (status === 'running') return { phase: 'running' };
+    if (status === 'running') {
+      for (const auxiliary of this.auxiliaryNames) {
+        try {
+          const [auxStatus, auxExit] = this.cli
+            .run(['inspect', '--format', '{{.State.Status}}|{{.State.ExitCode}}', auxiliary])
+            .trim()
+            .split('|');
+          if (auxStatus !== 'running') {
+            return {
+              phase: 'failed',
+              failure: {
+                kind: 'started-then-died',
+                retryable: false,
+                ...(auxExit ? { exitCode: Number(auxExit) } : {}),
+              },
+            };
+          }
+        } catch {
+          return { phase: 'failed', failure: { kind: 'started-then-died', retryable: false } };
+        }
+      }
+      return { phase: 'running' };
+    }
     if (status === 'created') return { phase: 'ready' };
     if (status === 'exited' && exit !== '0') {
       return { phase: 'failed', failure: { kind: 'started-then-died', retryable: false, exitCode: Number(exit) } };
@@ -534,9 +579,39 @@ class DockerHandle implements SessionHandle {
     }
     try {
       this.cli.run(['rm', '--force', this.name]);
-    } catch {
-      /* `--rm` usually got there first */
+    } catch (error) {
+      this.#confirmRemoved(this.name, error);
     }
+    for (const auxiliary of [...this.auxiliaryNames].reverse()) {
+      try {
+        this.cli.run(['stop', '-t', '1', auxiliary]);
+      } catch {
+        /* already gone */
+      }
+      try {
+        this.cli.run(['rm', '--force', auxiliary]);
+      } catch (error) {
+        this.#confirmRemoved(auxiliary, error);
+      }
+    }
+    if (this.privateNetwork) {
+      try {
+        this.cli.run(['network', 'rm', this.privateNetwork]);
+      } catch {
+        /* already gone or still in use */
+      }
+    }
+  }
+
+  /** A successful daemon query distinguishes auto-removal from a daemon outage. */
+  #confirmRemoved(name: string, error: unknown): void {
+    try {
+      const remaining = this.cli.run(['ps', '-a', '--filter', `name=^/${name}$`, '--format', '{{.Names}}']);
+      if (!remaining.trim()) return;
+    } catch (probeError) {
+      throw normalizeDockerError(probeError);
+    }
+    throw normalizeDockerError(error);
   }
 
   /** `docker exec` against this session's container — see `SessionExecSpec`. */
@@ -609,11 +684,78 @@ export function dockerEventToSessionEvent(doc: unknown, installSlug: string): Se
  * names, deterministically. The human-readable, timestamped name the host used
  * to generate survives as the `nanoclaw-container-name` lineage label.
  */
-export function agentContainerName(spec: SessionSpec): string {
+export function agentContainerName(spec: Pick<SessionSpec, 'key'>): string {
   const raw = `${spec.key.installSlug}-${spec.key.sessionId}`.replaceAll(/[^a-zA-Z0-9_.-]/g, '-');
   if (raw.length <= 48) return `ncl-${raw}`;
   const hash = createHash('sha256').update(`${spec.key.installSlug} ${spec.key.sessionId}`).digest('hex').slice(0, 8);
   return `ncl-${raw.slice(0, 39)}-${hash}`;
+}
+
+export function sessionNetworkName(spec: Pick<SessionSpec, 'key'>): string {
+  return `${agentContainerName(spec)}-private`;
+}
+
+export function auxiliaryContainerName(spec: SessionSpec, role: string): string {
+  const raw = `${agentContainerName(spec)}-${role}`;
+  if (raw.length <= 63) return validateRuntimeName(raw, 'container');
+  const hash = createHash('sha256').update(raw).digest('hex').slice(0, 8);
+  return validateRuntimeName(`${raw.slice(0, 54)}-${hash}`, 'container');
+}
+
+/** Linux Docker does not provide this standard host alias unless it is explicit. */
+export function auxiliaryNetworkArgs(platform: NodeJS.Platform = os.platform()): string[] {
+  return ['--network', 'bridge', ...(platform === 'linux' ? ['--add-host=host.docker.internal:host-gateway'] : [])];
+}
+
+function auxiliaryContainerNames(cli: Cli, key: SessionKey): string[] {
+  try {
+    return cli
+      .run([
+        'ps',
+        '-a',
+        '--filter',
+        `label=${LABELS.install}=${key.installSlug}`,
+        '--filter',
+        `label=${LABELS.group}=${key.agentGroupId}`,
+        '--filter',
+        `label=${LABELS.session}=${key.sessionId}`,
+        '--format',
+        `{{.Names}}|{{.Label "${LABELS.role}"}}`,
+      ])
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => line.split('|'))
+      .filter(([, role]) => role !== 'agent')
+      .map(([name]) => validateRuntimeName(name, 'container'));
+  } catch {
+    return [];
+  }
+}
+
+function containerCreateArgs(
+  spec: SessionSpec,
+  container: ContainerSpec,
+  name: string,
+  networkArgs: readonly string[],
+): string[] {
+  const args = ['create', '--rm', '--name', name];
+  args.push(...labelArgs(labelsForKey(spec.key, container.role, { ...spec.labels, ...(container.labels ?? {}) })));
+  args.push(...resourceArgs(spec));
+  args.push(...hardeningArgs(spec));
+  if (container.role !== 'agent') args.push('--read-only');
+  args.push(...userArgs(spec));
+  args.push(...envArgs(container.env));
+  args.push(...envArgs(container.contributedEnv ?? {}));
+  args.push(...mountArgs(container.mounts));
+  args.push(...networkArgs);
+  if (container.command && container.command.length > 0) {
+    args.push('--entrypoint', container.command[0]);
+    args.push(container.image, ...container.command.slice(1), ...(container.args ?? []));
+  } else {
+    args.push(container.image, ...(container.args ?? []));
+  }
+  return args;
 }
 
 /**
