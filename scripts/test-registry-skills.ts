@@ -133,58 +133,22 @@ function materializeSkill(commit: string, skill: string, skillsRoot: string): Re
   return meta;
 }
 
-// No skill step legitimately runs this long (the image build takes a few
-// minutes). A longer one is wedged, and SIGKILL is the only signal a
-// synchronous spin honours.
-const COMMAND_TIMEOUT_MS = 15 * 60 * 1000;
-
+// Streams as it runs so a hung step shows where it stopped; the job-level
+// timeout bounds it. stdout is also captured for the caller.
 function command(cmd: string, cwd: string, quiet = false): Promise<string> {
   if (!quiet) console.log(`  $ ${cmd}`);
   return new Promise((resolve, reject) => {
-    // Run in its own process group: `sh -c "cd x && bun test"` keeps the shell
-    // as bun's parent, so killing the shell alone would orphan a wedged bun.
-    const child = spawn(cmd, { cwd, shell: true, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(cmd, { cwd, shell: true, stdio: ['ignore', 'pipe', 'inherit'] });
     const stdout: Buffer[] = [];
-    const stderr: Buffer[] = [];
-    child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
-    child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
-    const killGroup = (signal: NodeJS.Signals) => {
-      try {
-        if (child.pid) process.kill(-child.pid, signal);
-      } catch {
-        // Already gone.
-      }
-    };
-    let timedOut = false;
-    const deadline = setTimeout(() => {
-      timedOut = true;
-      killGroup('SIGKILL');
-    }, COMMAND_TIMEOUT_MS);
-    // A detached group no longer hears the terminal's Ctrl-C; relay it.
-    const onInt = () => killGroup('SIGINT');
-    const onTerm = () => killGroup('SIGTERM');
-    process.on('SIGINT', onInt);
-    process.on('SIGTERM', onTerm);
-    const finish = (status: number | null, signal: NodeJS.Signals | null, error?: Error) => {
-      clearTimeout(deadline);
-      process.off('SIGINT', onInt);
-      process.off('SIGTERM', onTerm);
-      const out = Buffer.concat(stdout).toString('utf8');
-      if (status === 0 && !signal && !error && !timedOut) return resolve(out);
-      if (out) process.stdout.write(out);
-      const err = Buffer.concat(stderr).toString('utf8');
-      if (err) process.stderr.write(err);
-      const why = timedOut
-        ? `timed out after ${COMMAND_TIMEOUT_MS / 1000}s`
-        : error
-          ? `failed: ${error.message}`
-          : signal
-            ? `killed by ${signal}`
-            : `exited ${status}`;
-      reject(new Error(`command ${why}: ${cmd}`));
-    };
-    child.on('error', (error) => finish(null, null, error));
-    child.on('close', (status, signal) => finish(status, signal));
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdout.push(chunk);
+      process.stdout.write(chunk);
+    });
+    child.on('error', (error) => reject(new Error(`command failed: ${error.message}: ${cmd}`)));
+    child.on('close', (status, signal) => {
+      if (status === 0) return resolve(Buffer.concat(stdout).toString('utf8'));
+      reject(new Error(`command ${signal ? `killed by ${signal}` : `exited ${status}`}: ${cmd}`));
+    });
   });
 }
 
