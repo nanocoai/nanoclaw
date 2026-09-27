@@ -218,7 +218,8 @@ describe('update-nanoclaw transaction end to end', () => {
     process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
     const bin = temp('nanoclaw-update-bin-');
     const pnpm = path.join(bin, 'pnpm');
-    write(bin, 'pnpm', `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} "$3"\n`);
+    // Runs the detector script, the last argument of `pnpm --silent exec tsx <script>`.
+    write(bin, 'pnpm', `#!/bin/sh\nfor script; do :; done\nexec ${JSON.stringify(process.execPath)} "$script"\n`);
     fs.chmodSync(pnpm, 0o755);
     const previousPath = process.env.PATH;
     process.env.PATH = `${bin}${path.delimiter}${previousPath ?? ''}`;
