@@ -43,7 +43,7 @@ import {
 import { getHostInstanceId } from './host-instance.js';
 import { getDb, hasTable } from './db/connection.js';
 import { getSession } from './db/sessions.js';
-import { getSessionDriver, isSessionEventsDriver } from './drivers/index.js';
+import { getSessionDriver, isSessionEventsDriver, peekSessionDriver } from './drivers/index.js';
 import type { SupervisedHandle, SupervisedSnapshot } from './drivers/session-events.js';
 import { GROUP_FOLDER_LABEL, labelValueLegal, specInvalid } from './drivers/types.js';
 import type { ContainerSpec, MountSpec, SessionFailure, SessionSpec } from './drivers/types.js';
@@ -437,6 +437,11 @@ async function spawnContainer(session: Session): Promise<void> {
     claimIncarnation = await claimSessionRun(session.id, containerName);
     if (claimIncarnation === null) {
       throw new Error(`session ${session.id} is claimed by another live host process — not spawning a duplicate`);
+    }
+    // The rows can be deleted while this spawn composes; recheck before the
+    // runtime exists so a deleted group gets no container.
+    if (!(await getSession(session.id)) || !(await getAgentGroup(agentGroup.id))) {
+      throw new Error(`session ${session.id} or its agent group was deleted mid-spawn — not starting a container`);
     }
 
     // Clear any orphan heartbeat from a previous container instance — the sweep's
@@ -885,6 +890,44 @@ export async function adoptRunningSessions(): Promise<{ adopted: number; stopped
   await honorPendingStopIntents();
 
   return { adopted, stopped };
+}
+
+/**
+ * Stop this install's sessions whose session row or agent group no longer
+ * exists. The per-session reconcile only visits live rows, so a delete (setup
+ * cleanup, `ncl groups delete`) would otherwise leave the container up until
+ * the next host restart, where adoption stops it the same way.
+ *
+ * Not racy against a legitimate spawn: a spawn reads its session row before it
+ * creates a container (`spawnContainer`), and the runtime is listed before the
+ * rows are read, so a listed container whose row is missing had it deleted.
+ * A spawn this process still has in flight is left for the next tick, when it
+ * is registered and can be stopped through its runtime entry.
+ */
+export async function stopOrphanedSessions(): Promise<number> {
+  // Never instantiate a driver here: a host that never selected one has nothing to stop.
+  const driver = peekSessionDriver();
+  if (!driver) return 0;
+  const snapshots = await driver.listSessions(INSTALL_SLUG);
+  let stopped = 0;
+  for (const { handle } of snapshots) {
+    const { sessionId } = handle.key;
+    if (sessionId && wakePromises.has(sessionId)) continue;
+    const session = sessionId ? await getSession(sessionId) : undefined;
+    if (session && (await getAgentGroup(session.agent_group_id))) continue;
+    log.warn('Stopping container whose session or agent group was deleted', {
+      sessionId,
+      agentGroupId: handle.key.agentGroupId,
+      container: handle.name,
+    });
+    if (sessionId && activeContainers.has(sessionId)) {
+      killContainer(sessionId, 'orphaned');
+    } else {
+      await handle.stop('orphaned').catch((err) => log.error('Failed to stop orphaned container', { sessionId, err }));
+    }
+    stopped += 1;
+  }
+  return stopped;
 }
 
 /**
