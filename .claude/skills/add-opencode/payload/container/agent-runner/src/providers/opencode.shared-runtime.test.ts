@@ -582,7 +582,11 @@ describe('abort and watchdog', () => {
   });
 
   it('abort() stops the in-flight session and keeps the shared server', async () => {
-    const server = fakeServer(() => {});
+    let promptSent!: () => void;
+    const prompted = new Promise<void>((resolve) => {
+      promptSent = resolve;
+    });
+    const server = fakeServer(() => promptSent());
     const { spawnServer } = installDeps([server]);
     const provider = newProvider();
 
@@ -590,9 +594,10 @@ describe('abort and watchdog', () => {
     const iterator = query.events[Symbol.asyncIterator]();
     expect((await iterator.next()).value).toEqual({ type: 'init', continuation: 'ses_1' });
 
-    // The generator is now parked on stream.next() with a prompt in flight.
+    // Abort only once the prompt is in flight: `prepare` spawns the memory
+    // hook first, so a fixed sleep can abort before the prompt is sent.
     const pendingNext = iterator.next();
-    await Bun.sleep(10);
+    await prompted;
     query.abort();
 
     // What the server sends back for the aborted session (the fake abort
