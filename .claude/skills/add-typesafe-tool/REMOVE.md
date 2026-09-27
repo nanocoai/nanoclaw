@@ -22,13 +22,15 @@ rm -f src/typesafe-manifest.test.ts
 
 ## 3. Remove the gateway credential
 
-Deleting the `api.typesafe.ai` secret from the OneCLI vault revokes access for every
-agent (only secrets for that exact host are touched). Per-agent secret lists
+Deleting the secret from the OneCLI vault revokes access for every agent. Only
+this skill's secrets are touched: any secret for host `api.typesafe.ai`, and an
+`openrouter.ai` secret only when its path pattern is the Jev path
+`/api/v1/systemone`, so other OpenRouter credentials stay. Per-agent secret lists
 are left alone (`set-secrets` would switch an `all`-mode agent to
 `selective` and cut it off from its other secrets):
 
 ```bash
-for id in $(onecli secrets list | jq -r '.data[] | select(.hostPattern=="api.typesafe.ai") | .id'); do onecli secrets delete --id "$id"; done
+for id in $(onecli secrets list | jq -r '.data[] | select(.hostPattern=="api.typesafe.ai" or (.hostPattern=="openrouter.ai" and .pathPattern=="/api/v1/systemone")) | .id'); do onecli secrets delete --id "$id"; done
 ```
 
 Remove the spend-ceiling rule this skill created (matched by its exact name,
@@ -47,5 +49,5 @@ on its next message):
 ncl groups list --json | jq -r '.data[].id' | while read -r gid; do ncl groups restart --id "$gid"; done
 ```
 
-The TypeSafe account and key are managed in the TypeSafe console, not by
-NanoClaw; revoke the key there if it is no longer needed.
+The TypeSafe or OpenRouter account and key are managed in that provider's
+console, not by NanoClaw; revoke the key there if it is no longer needed.

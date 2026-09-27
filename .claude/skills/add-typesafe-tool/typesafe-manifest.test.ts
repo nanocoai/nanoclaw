@@ -9,8 +9,9 @@
  *
  * It checks the halves that have to agree for the install to work: the skill
  * files the agent reads, the CLI they point at, and the CLI's credential
- * contract — it must target api.typesafe.ai (the host the gateway rule is
- * registered for) with the placeholder bearer and never read a key itself.
+ * contract — it must target the System One endpoints the gateway rule can be
+ * registered for (api.typesafe.ai, openrouter.ai) with the placeholder bearer
+ * and never read a key itself.
  */
 import fs from 'fs';
 import path from 'path';
@@ -44,9 +45,10 @@ describe('the TypeSafe judge tool is installed in the agent containers', () => {
     expect(fs.existsSync(path.join(skillDir, 'scripts', 'typesafe-judge.test.ts'))).toBe(true);
   });
 
-  it('targets api.typesafe.ai with the gateway placeholder and never reads a key', () => {
+  it('targets the System One endpoints with the gateway placeholder and never reads a key', () => {
     const cli = fs.readFileSync(cliPath, 'utf8');
     expect(cli).toContain("'https://api.typesafe.ai/v1/systemone'");
+    expect(cli).toContain("'https://openrouter.ai/api/v1/systemone'");
     expect(cli).toContain("PLACEHOLDER_CREDENTIAL = 'placeholder'");
     expect(cli).toMatch(/Authorization: `Bearer \$\{PLACEHOLDER_CREDENTIAL\}`/);
     // No env var, file, or flag ever supplies the credential.

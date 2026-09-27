@@ -201,7 +201,7 @@ Five types of skills. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full taxono
 | `/update-nanoclaw` | Bring upstream updates into a customized install |
 | `/add-onecli`, `/add-iron-proxy` | Install or refresh this copy's credential gateway |
 | `/migrate-memory` | Carry a group's agent memory across a provider switch (operator-run, both directions) |
-| `/add-typesafe-tool` | Give agents TypeSafe's Jev decision model as the `typesafe-judge` container tool (classify, route, rank, verify with calibrated confidence), with the `api.typesafe.ai` key in the OneCLI vault (OneCLI-only for now) |
+| `/add-typesafe-tool` | Give agents TypeSafe's Jev decision model as the `typesafe-judge` container tool (classify, route, rank, verify with calibrated confidence), called at `api.typesafe.ai` or through OpenRouter, with the key in the OneCLI vault (OneCLI-only for now) |
 
 ## Contributing
 

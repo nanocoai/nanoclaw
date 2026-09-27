@@ -155,13 +155,17 @@ far you got, and do not retry until the window has passed.
 
 ## Credentials and refusals
 
-Never look for, ask for, or handle a TypeSafe API key. The request carries the
+Never look for, ask for, or handle an API key. The request carries the
 placeholder `Authorization: Bearer placeholder`; the credential gateway swaps
-in the real key at the network edge. Exit code 2 means the call was refused,
-and the message says which kind:
+in the real key at the network edge. The operator chose the endpoint at
+install (TypeSafe directly, or Jev through OpenRouter, recorded in
+`/app/skills/typesafe-judge/endpoint.json`); do not pass `--endpoint`
+unless told to, because the gateway only holds a key for that one. Exit code 2
+means the call was refused, and the message says which kind:
 
 - **401**: the credential is missing or rejected. An operator must run
-  `/add-typesafe-tool` on the host to store the api.typesafe.ai credential.
+  `/add-typesafe-tool` on the host to store the credential for the host the
+  message names.
 - **403**: a gateway policy (a block or rate-limit rule for this agent), or
   the key's quota or permissions. The credential may be fine. Do not retry
   in a loop; tell the user what the message says.
