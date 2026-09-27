@@ -71,35 +71,26 @@ export interface PruneReport {
 }
 
 /**
- * The gateway helpers live under setup/, which the controller cannot import
- * statically: every installed /update-nanoclaw skill extracts the controller
- * with `git archive <ref> scripts src/install-slug.ts`, so its static import
- * graph has to stay inside those paths. They load instead from a full checkout
- * of the target: the stage while validating, the reset live checkout at
- * cutover. They import no packages, so they load before the stage has
- * node_modules. scripts/update/controller-archive.test.ts enforces both halves.
+ * setup/ is outside the `git archive <ref> scripts src/install-slug.ts` extract
+ * every installed /update-nanoclaw skill runs, so these load from a full
+ * checkout of the target instead. They import no packages, so they load before
+ * the stage has node_modules; scripts/update/controller-archive.test.ts checks.
  */
 export interface GatewayModules {
-  refreshGateway: typeof import('../../setup/gateways/refresh.js').refreshGateway;
+  loadGatewayCatalog: typeof import('../../setup/gateways/catalog.js').loadGatewayCatalog;
   resolveGatewaySelection: typeof import('../../setup/gateways/selection.js').resolveGatewaySelection;
   upsertEnvVar: typeof import('../../setup/set-env.js').upsertEnvVar;
 }
 
 export async function loadGatewayModules(root: string): Promise<GatewayModules> {
-  if (!fs.existsSync(path.join(root, 'setup/gateways/refresh.ts'))) {
-    // A cherry-pick stage can predate these modules.
-    throw new Error(
-      `${root} has no setup/gateways/refresh.ts; include the commit that adds it, or update with merge or rebase`,
-    );
-  }
   const load = (rel: string) => import(pathToFileURL(path.join(root, rel)).href);
-  const [refresh, selection, env] = await Promise.all([
-    load('setup/gateways/refresh.ts'),
+  const [catalog, selection, env] = await Promise.all([
+    load('setup/gateways/catalog.ts'),
     load('setup/gateways/selection.ts'),
     load('setup/set-env.ts'),
   ]);
   return {
-    refreshGateway: refresh.refreshGateway,
+    loadGatewayCatalog: catalog.loadGatewayCatalog,
     resolveGatewaySelection: selection.resolveGatewaySelection,
     upsertEnvVar: env.upsertEnvVar,
   };
@@ -348,17 +339,25 @@ export async function validateUpdate(
     refreshPreparedState(state, runtime);
 
     if (hasChanged(state, 'src/gateway-providers') || hasChanged(state, 'setup/gateways')) {
-      const { refreshGateway, resolveGatewaySelection } = await runtime.loadGateway(state.stageRoot);
-      state.gatewaySelection = resolveGatewaySelection(
+      const { loadGatewayCatalog, resolveGatewaySelection } = await runtime.loadGateway(state.stageRoot);
+      const kind = resolveGatewaySelection(
         state.projectRoot,
         undefined,
         path.join(state.stageRoot, '.claude', 'skills'),
       );
-      await refreshGateway(
-        state.gatewaySelection,
-        state.stageRoot,
-        path.join(state.transactionRoot, 'gateway-refresh.log'),
-      );
+      const entry = loadGatewayCatalog(state.stageRoot).gateways.find((candidate) => candidate.kind === kind);
+      if (!entry) throw new Error(`Unknown gateway provider: ${kind}`);
+      state.gatewaySelection = kind;
+      const gateway = { name: kind, skillName: path.basename(entry.skillPath), kind: 'gateway' as const };
+      const report = await refreshInstalledSkills(state.stageRoot, [gateway.skillName], { include: [gateway] });
+      state.skillRefresh.skills.push(...report.skills);
+      state.skillRefresh.selected.push(...report.selected);
+      state.skillRefresh.success &&= report.success;
+      if (!report.success) {
+        throw new Error(
+          `Gateway skill did not fully apply: ${report.skills.flatMap((skill) => skill.errors).join('; ')}`,
+        );
+      }
       commitStageChanges(state, runtime, 'chore: materialize selected gateway');
       refreshPreparedState(state, runtime);
     }

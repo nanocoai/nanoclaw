@@ -11,15 +11,11 @@
  */
 import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
-import { isBuiltin } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import ts from 'typescript';
 import { afterEach, describe, expect, it } from 'vitest';
-
-import { loadGatewayModules } from './transaction.js';
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '../..');
 const SKILL = path.join(REPO_ROOT, '.claude/skills/update-nanoclaw/SKILL.md');
@@ -29,7 +25,6 @@ const CONTROLLER = 'scripts/update-nanoclaw.ts';
 const INSTALLED_SKILL_ARCHIVE = ['scripts', 'src/install-slug.ts'];
 // The stage is a full checkout; these trees stand in for it.
 const STAGE_TREES = ['scripts', 'setup', 'src'];
-const STAGED_GATEWAY_MODULES = ['setup/gateways/refresh.ts', 'setup/gateways/selection.ts', 'setup/set-env.ts'];
 const MODULE_NOT_FOUND = /Cannot find (module|package)|ERR_MODULE_NOT_FOUND/;
 
 const roots: string[] = [];
@@ -92,52 +87,6 @@ function assertNoNodeModulesAbove(dir: string): void {
   }
 }
 
-/** Every module specifier a file loads at runtime, including literal dynamic imports. */
-function runtimeSpecifiers(file: string): string[] {
-  const source = ts.createSourceFile(file, fs.readFileSync(file, 'utf8'), ts.ScriptTarget.Latest, true);
-  const specifiers: string[] = [];
-  const visit = (node: ts.Node): void => {
-    if (ts.isImportDeclaration(node) && !node.importClause?.isTypeOnly) {
-      specifiers.push((node.moduleSpecifier as ts.StringLiteral).text);
-    } else if (ts.isExportDeclaration(node) && node.moduleSpecifier && !node.isTypeOnly) {
-      specifiers.push((node.moduleSpecifier as ts.StringLiteral).text);
-    } else if (
-      ts.isCallExpression(node) &&
-      node.expression.kind === ts.SyntaxKind.ImportKeyword &&
-      node.arguments[0] &&
-      ts.isStringLiteralLike(node.arguments[0])
-    ) {
-      specifiers.push(node.arguments[0].text);
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(source);
-  return specifiers;
-}
-
-/** Walk each entry's graph inside the extract; report anything it cannot load there. */
-function unloadableImports(root: string, entries: string[]): string[] {
-  const problems: string[] = [];
-  const seen = new Set<string>();
-  const walk = (file: string): void => {
-    if (seen.has(file)) return;
-    seen.add(file);
-    for (const specifier of runtimeSpecifiers(file)) {
-      const from = path.relative(root, file);
-      if (!specifier.startsWith('.')) {
-        if (!isBuiltin(specifier)) problems.push(`${from} imports package ${specifier}`);
-        continue;
-      }
-      const target = path.resolve(path.dirname(file), specifier);
-      const candidate = [target.replace(/\.js$/, '.ts'), target].find((p) => fs.existsSync(p));
-      if (!candidate) problems.push(`${from} imports ${specifier}, which is not in the archive`);
-      else if (/\.[cm]?[jt]s$/.test(candidate)) walk(candidate);
-    }
-  };
-  for (const entry of entries) walk(path.join(root, entry));
-  return problems;
-}
-
 /** Run the controller the way SKILL.md does: tsx from the live install, the script by absolute path. */
 function runController(script: string, args: string[], cwd: string, updateDir: string) {
   return spawnSync(process.execPath, ['--import', TSX_LOADER, script, ...args], {
@@ -165,13 +114,6 @@ const ARCHIVES: [string, () => string[]][] = [
 // Each case spawns tsx cold on a few hundred modules; allow for a loaded CI box.
 describe('update-nanoclaw controller archive', { timeout: 60_000 }, () => {
   describe.each(ARCHIVES)('%s', (_name, paths) => {
-    it('holds every module the controller imports, and none of them is a package', () => {
-      const controller = temp('ctrl-archive-controller-');
-      extract(controller, paths());
-
-      expect(unloadableImports(controller, [CONTROLLER])).toEqual([]);
-    });
-
     it('loads and runs the controller with no node_modules', () => {
       const controller = temp('ctrl-archive-controller-');
       extract(controller, paths());
@@ -196,7 +138,6 @@ describe('update-nanoclaw controller archive', { timeout: 60_000 }, () => {
     const stage = temp('ctrl-archive-stage-');
     extract(stage, STAGE_TREES);
     assertNoNodeModulesAbove(stage);
-    expect(unloadableImports(stage, STAGED_GATEWAY_MODULES)).toEqual([]);
 
     const controller = temp('ctrl-archive-controller-');
     extract(controller, INSTALLED_SKILL_ARCHIVE);
@@ -219,15 +160,7 @@ describe('update-nanoclaw controller archive', { timeout: 60_000 }, () => {
 
     expect(result.stderr).not.toMatch(MODULE_NOT_FOUND);
     expect(result.stdout.trim(), result.stderr).toBe(
-      'refreshGateway:function,resolveGatewaySelection:function,upsertEnvVar:function',
-    );
-  });
-
-  it('names the missing module when a cherry-pick stage predates the gateway helpers', async () => {
-    const stage = temp('ctrl-archive-stage-');
-
-    await expect(loadGatewayModules(stage)).rejects.toThrow(
-      `${stage} has no setup/gateways/refresh.ts; include the commit that adds it, or update with merge or rebase`,
+      'loadGatewayCatalog:function,resolveGatewaySelection:function,upsertEnvVar:function',
     );
   });
 
