@@ -211,13 +211,13 @@ describe('executePlan', () => {
       ]);
     });
 
-    it('says the leftover database is unreadable when its removal fails', () => {
+    it('gives the cleanup commands when the database removal fails', () => {
       const calls: string[][] = [];
       const { notes } = executePlan(
         [action],
         deps({ runCommand: docker(calls, (args) => args[0] === 'volume' && args[1] === 'rm') }),
       );
-      expect(notes).toEqual([expect.stringContaining("can't be read again")]);
+      expect(notes).toEqual([expect.stringContaining('Its keys in data/ are being deleted, so remove it too')]);
       expect(notes[0]).toContain(`docker volume rm ${project}_database`);
     });
   });

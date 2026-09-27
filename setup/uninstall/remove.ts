@@ -136,12 +136,12 @@ function runAction(action: RemovalAction, deps: ExecDeps, notes: string[]): void
     }
     case 'rm-iron-control': {
       const { runtime, project } = action;
-      // data/ (its keys) is deleted next either way; say so, so a leftover is
-      // never mistaken for recoverable data.
+      // data/ (its keys) is deleted next either way, which leaves a database
+      // the next install at this path stops on; the note says how to finish.
       const leftover = (what: string) =>
         notes.push(
-          `Iron Control ${what} — its keys are removed with data/, so it can't be read again. ` +
-            `Remove it with: ${ironControlCleanup(runtime, project)}`,
+          `Iron Control ${what}. Its keys in data/ are being deleted, so remove it too: ` +
+            ironControlCleanup(runtime, project),
         );
       const found = listIronControl(runCommand, runtime, project);
       if (!found) {
