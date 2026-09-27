@@ -103,7 +103,7 @@ Setup's failure assist (Claude, Codex or OpenCode on the operator's machine) sta
 
 ## Repairing the gateway
 
-If the credential gateway (OneCLI or Iron Proxy) is unreachable, unhealthy, or its containers are missing, re-run its setup step from the checkout:
+If the installed credential gateway is unreachable, unhealthy, or its containers are missing, re-run its setup step from the checkout:
 
 ```bash
 pnpm exec tsx setup/index.ts --step gateway
