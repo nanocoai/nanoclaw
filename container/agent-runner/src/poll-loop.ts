@@ -22,6 +22,7 @@ import {
   formatMessages,
   extractRouting,
   categorizeMessage,
+  FAILURE_NOTICE_FIELD,
   isClearCommand,
   isRunnerCommand,
   isSessionEcho,
@@ -638,10 +639,10 @@ export async function processQuery(
             // Only the provider's dedicated error field is channel content;
             // unwrapped model output and raw diagnostics remain private.
             const notice = event.error ?? 'The agent run failed. Check the logs for details.';
-            if (hasHumanChatEndpoint(routing)) await deliverErrorResult(routing, notice);
-            // No human to tell: keep the reason in the runner log, since the
-            // skipped notice may be the only place it would have been recorded.
-            else log(`Error result — no human chat endpoint, notice not sent: ${notice}`);
+            if (sendsFailureNotice(routing)) await deliverErrorResult(routing, notice);
+            // Keep the reason in the runner log, since the skipped notice may
+            // be the only place it would have been recorded.
+            else log(`Error result — notice not sent on this route: ${notice}`);
           }
           // An unwrapped final text only warrants the wrap-nudge when NOTHING
           // was delivered this turn — hasUnwrapped already folds in the
@@ -709,17 +710,19 @@ export async function processQuery(
       // Completed turns are no longer answering or queued. Preserve partial
       // output from unfinished turns and report that the run did not finish.
       // Retrying the same route or several queued turns in one thread needs
-      // only one notice.
+      // only one notice. The host picks an a2a reply's session by in_reply_to,
+      // so agent routes also compare it.
       const failedRoutes = [...(answering ? [routing] : []), ...queuedTurns.map((turn) => turn.routing)];
       const noticed: RoutingContext[] = [];
       for (const target of failedRoutes) {
-        if (!hasHumanChatEndpoint(target)) continue;
+        if (!sendsFailureNotice(target)) continue;
         if (
           noticed.some(
             (prior) =>
               prior.platformId === target.platformId &&
               prior.channelType === target.channelType &&
-              prior.threadId === target.threadId,
+              prior.threadId === target.threadId &&
+              (target.channelType !== 'agent' || prior.inReplyTo === target.inReplyTo),
           )
         )
           continue;
@@ -776,12 +779,12 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
 }
 
 /**
- * Can a failure notice reach a human on this route? Task runs report through
- * their run log. Agent wakes (a2a, on_wake) have no human chat endpoint: a
- * notice would route back as a2a, fail again, and loop.
+ * Does a failure on this route get a notice? Task runs report through their
+ * run log. A turn woken only by failure notices sends none, so an a2a or
+ * self-addressed failure chain stops after one notice.
  */
-function hasHumanChatEndpoint(routing: RoutingContext): boolean {
-  return !routing.taskRun && !!routing.platformId && !!routing.channelType && routing.channelType !== 'agent';
+function sendsFailureNotice(routing: RoutingContext): boolean {
+  return !routing.taskRun && !!routing.platformId && !!routing.channelType && !routing.failureNoticeWake;
 }
 
 /** Send the dedicated provider error or a generic failure notice. */
@@ -794,7 +797,7 @@ async function deliverErrorResult(routing: RoutingContext, text: string): Promis
     platform_id: routing.platformId,
     channel_type: routing.channelType,
     thread_id: routing.threadId,
-    content: JSON.stringify({ text: stripHarnessTagArtifacts(text) }),
+    content: JSON.stringify({ text: stripHarnessTagArtifacts(text), [FAILURE_NOTICE_FIELD]: true }),
   });
 }
 

@@ -296,17 +296,23 @@ describe('error and interrupted turns', () => {
     expect(pushes).toHaveLength(0);
   });
 
-  // An agent wake (a2a or on_wake) has no human chat endpoint. A notice to
-  // the agent route would come back as a2a, fail again, and loop.
+  // A turn woken only by failure notices never answers with another notice,
+  // so an a2a failure chain stops after one hop. Other agent routes still
+  // hear that their request failed.
   const AGENT_ROUTING = {
-    platformId: 'ag-self',
+    platformId: 'ag-a',
     channelType: 'agent',
     threadId: null,
     inReplyTo: 'm1',
     taskRun: false,
   };
+  const NOTICE_WAKE_ROUTING = { ...AGENT_ROUTING, failureNoticeWake: true };
+  const agentNotices = () => getUndeliveredMessages().filter((m) => m.channel_type === 'agent');
 
-  it('an error result on an agent route keeps partial output and sends no notice back', async () => {
+  it.each([
+    ['a plain agent route gets one notice', AGENT_ROUTING, 1],
+    ['a failure-notice wake gets none', NOTICE_WAKE_ROUTING, 0],
+  ])('error result keeps partial output: %s', async (_label, routing, expected) => {
     seedDest();
     async function* events(): AsyncGenerator<ProviderEvent> {
       yield { type: 'init', continuation: 's1' };
@@ -315,14 +321,20 @@ describe('error and interrupted turns', () => {
     }
     const { query, pushes } = makeStubQuery(events());
 
-    await processQuery(query, AGENT_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined, true);
+    await processQuery(query, routing, ['m1'], 'claude', undefined, 'prompt', undefined, true);
 
-    expect(deliveredTexts()).toEqual(['Progress before failure.']);
-    expect(getUndeliveredMessages().filter((m) => m.channel_type === 'agent')).toHaveLength(0);
+    const chatTexts = getUndeliveredMessages()
+      .filter((m) => m.channel_type === 'discord')
+      .map((m) => JSON.parse(m.content).text);
+    expect(chatTexts).toEqual(['Progress before failure.']);
+    expect(agentNotices()).toHaveLength(expected);
     expect(pushes).toHaveLength(0);
   });
 
-  it('a stream that throws on an agent route sends no notice back', async () => {
+  it.each([
+    ['a plain agent route gets one notice', AGENT_ROUTING, 1],
+    ['a failure-notice wake gets none', NOTICE_WAKE_ROUTING, 0],
+  ])('a stream that throws: %s', async (_label, routing, expected) => {
     seedDest();
     async function* events(): AsyncGenerator<ProviderEvent> {
       yield { type: 'init', continuation: 's1' };
@@ -330,11 +342,13 @@ describe('error and interrupted turns', () => {
     }
     const { query } = makeStubQuery(events());
 
-    await expect(
-      processQuery(query, AGENT_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined, true),
-    ).rejects.toThrow('SDK stream died');
+    await expect(processQuery(query, routing, ['m1'], 'claude', undefined, 'prompt', undefined, true)).rejects.toThrow(
+      'SDK stream died',
+    );
 
-    expect(getUndeliveredMessages()).toHaveLength(0);
+    const out = agentNotices();
+    expect(out).toHaveLength(expected);
+    for (const row of out) expect(JSON.parse(row.content).failureNotice).toBe(true);
   });
 
   it('a stream that throws after a mid-turn delivery: the delivered row survives, processQuery rejects', async () => {
