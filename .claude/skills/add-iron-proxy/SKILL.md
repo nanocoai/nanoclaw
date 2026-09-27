@@ -67,7 +67,9 @@ pnpm exec tsx .claude/skills/add-iron-proxy/scripts/setup.ts --with-control
   health before retrying. The installer terminates the timed-out process group.
 - **The database exists but keys are missing:** restore its matching `control.env`.
   Keep the database volume and encryption keys together; do not generate replacement
-  keys for an existing database.
+  keys for an existing database. `nanoclaw uninstall` removes both together. If the
+  folder was deleted by hand, the error prints the `docker rm -f` and `docker volume rm`
+  commands that delete the old database; run them only if its credentials can go.
 
 ## Validate
 

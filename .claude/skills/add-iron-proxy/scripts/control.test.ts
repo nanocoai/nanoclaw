@@ -1,11 +1,18 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parse as yaml } from 'yaml';
 
-import { controlCompose, controlPaths, controlPort } from './control.js';
+import { controlCompose, controlPaths, controlPort, installControl } from './control.js';
 import { hasFrontProxy, frontProxyHash } from './build-managed-proxy.js';
+import { installCommand } from './install-command.js';
+
+vi.mock('./install-command.js', async (importActual) => ({
+  ...(await importActual<typeof import('./install-command.js')>()),
+  installCommand: vi.fn(async () => ''),
+}));
+const installCommandMock = vi.mocked(installCommand);
 
 const roots: string[] = [];
 const temporary = () => {
@@ -14,6 +21,7 @@ const temporary = () => {
   return root;
 };
 afterEach(() => {
+  installCommandMock.mockClear();
   delete process.env.NANOCLAW_IRON_CONTROL_PORT;
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
@@ -44,6 +52,20 @@ describe('official Iron Control installation', () => {
     delete process.env.NANOCLAW_IRON_CONTROL_PORT;
     fs.writeFileSync(path.join(root, '.env'), 'NANOCLAW_IRON_CONTROL_PORT=invalid\n');
     expect(() => controlPort(root)).toThrow('between 1 and 65535');
+  });
+
+  it('prints the exact cleanup commands when the database outlived its keys', async () => {
+    const root = temporary();
+    const project = controlPaths(root).project;
+    installCommandMock.mockResolvedValueOnce(`other_database\n${project}_database\n`);
+    const failure = installControl(root);
+    await expect(failure).rejects.toThrow(`restore ${controlPaths(root).environment}`);
+    await expect(failure).rejects.toThrow(
+      `docker rm -f ${project}-database-1 ${project}-web-1 then docker volume rm ${project}_database`,
+    );
+    // Only the volume listing ran: nothing was removed or started.
+    expect(installCommandMock).toHaveBeenCalledTimes(1);
+    expect(fs.existsSync(controlPaths(root).environment)).toBe(false);
   });
 
   it('requires both the pinned source and the exact approval front', () => {

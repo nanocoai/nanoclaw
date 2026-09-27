@@ -141,8 +141,14 @@ export async function installControl(root = process.cwd()): Promise<void> {
       timeoutMs: 15_000,
       capture: true,
     });
+    // A folder deleted by hand leaves the containers and volume behind, and
+    // the same path derives the same names; setup never removes them itself.
     if (volumes.trim().split('\n').includes(`${p.project}_database`))
-      throw new Error(`Iron Control database exists but its encryption keys are missing; restore ${p.environment}`);
+      throw new Error(
+        `Iron Control database exists but its encryption keys are missing; restore ${p.environment}, ` +
+          `or delete the old database and every credential stored in it with: ` +
+          `docker rm -f ${p.project}-database-1 ${p.project}-web-1 then docker volume rm ${p.project}_database`,
+      );
     const password = secret();
     const email = 'operator@nanoclaw.local';
     const databasePassword = secret();
