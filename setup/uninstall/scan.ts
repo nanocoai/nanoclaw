@@ -53,7 +53,27 @@ export interface Inventory {
   runtime: PathItem[];
   /** Group 3: groups/ and store/ — user content, unrecoverable. */
   user: PathItem[];
+  /** add-iron-proxy's Iron Control database; removed with the data group. */
+  ironControl?: IronControlInventory;
   notes: string[];
+}
+
+export interface IronControlInventory {
+  project: string;
+  containerIds: string[];
+  /** Present only when the volume exists. */
+  volume?: string;
+  /** Present only when the network exists. */
+  network?: string;
+}
+
+/**
+ * The Compose project add-iron-proxy names after this install's slug (its
+ * controlPaths(); a skill test pins the two together). Its database volume
+ * is encrypted with keys kept in data/, so it cannot outlive that folder.
+ */
+export function ironControlProject(slug: string): string {
+  return `nanoclaw-iron-control-${slug}`;
 }
 
 export interface ScanDeps {
@@ -74,6 +94,7 @@ export function scanInstall(deps: ScanDeps): Inventory {
   const notes: string[] = [];
 
   const service = scanService(deps, slug, containerRuntime, notes);
+  const ironControl = scanIronControl(runCommand, slug, containerRuntime, notes);
 
   const data = existingItems(projectRoot, home, [
     { rel: 'data', what: 'Database & conversations' },
@@ -109,6 +130,7 @@ export function scanInstall(deps: ScanDeps): Inventory {
     data,
     runtime,
     user,
+    ...(ironControl ? { ironControl } : {}),
     notes,
   };
 }
@@ -203,6 +225,38 @@ function scanService(deps: ScanDeps, slug: string, containerRuntime: string, not
   }
 
   return service;
+}
+
+/** Only this install's project label and names; another copy's slug never matches. */
+function scanIronControl(
+  runCommand: RunCommand,
+  slug: string,
+  runtime: string,
+  notes: string[],
+): IronControlInventory | undefined {
+  const project = ironControlProject(slug);
+  const volume = `${project}_database`;
+  try {
+    const ps = runCommand(runtime, ['ps', '-aq', '--filter', `label=com.docker.compose.project=${project}`]);
+    if (ps.status !== 0) throw new Error('unavailable');
+    const inventory: IronControlInventory = {
+      project,
+      containerIds: ps.stdout
+        .split('\n')
+        .map((s) => s.trim())
+        .filter(Boolean),
+    };
+    if (runCommand(runtime, ['volume', 'inspect', volume]).status === 0) inventory.volume = volume;
+    if (runCommand(runtime, ['network', 'inspect', project]).status === 0) inventory.network = project;
+    return inventory.containerIds.length || inventory.volume || inventory.network ? inventory : undefined;
+  } catch {
+    notes.push(
+      `Iron Control (if installed): '${runtime}' unavailable; remove later with: ` +
+        `${runtime} ps -aq --filter label=com.docker.compose.project=${project} | xargs -r ${runtime} rm -f; ` +
+        `${runtime} volume rm ${volume}; ${runtime} network rm ${project}`,
+    );
+    return undefined;
+  }
 }
 
 function existingItems(

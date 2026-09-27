@@ -25,7 +25,7 @@ import { note } from '../lib/theme.js';
 import * as setupLog from '../logs.js';
 import { buildRemovalPlan, type Decisions } from './plan.js';
 import { executePlan, type ExecDeps } from './remove.js';
-import { scanInstall, tilde, type Inventory, type RunCommand } from './scan.js';
+import { scanInstall, tilde, type Inventory, type IronControlInventory, type RunCommand } from './scan.js';
 
 const GROUPS = {
   service: {
@@ -44,6 +44,14 @@ const GROUPS = {
     prompt: "Delete your agents' memory & files shown above? (cannot be undone)",
   },
 } as const;
+
+const IRON_CONTROL_NOTE =
+  'This includes the Iron Control database: its encryption keys are in data/, which this deletes, so it could never be read again.';
+
+function ironControlRow(iron: IronControlInventory): { what: string; where: string } {
+  const parts = [`${iron.containerIds.length} container(s)`, ...(iron.volume ? [`volume ${iron.volume}`] : [])];
+  return { what: 'Iron Control database', where: `${iron.project} (${parts.join(', ')})` };
+}
 
 const runCommand: RunCommand = (cmd, args) => {
   const res = spawnSync(cmd, args, { encoding: 'utf-8' });
@@ -85,6 +93,8 @@ export async function runUninstallFlow(opts: {
 
   const svcRows = serviceRows(inv, home);
   const dataRows = [...inv.data, ...inv.runtime].map(({ what, where }) => ({ what, where }));
+  if (inv.ironControl) dataRows.unshift(ironControlRow(inv.ironControl));
+  const dataDesc = inv.ironControl ? `${GROUPS.data.desc} ${IRON_CONTROL_NOTE}` : GROUPS.data.desc;
   const userRows = inv.user.map(({ what, where }) => ({ what, where }));
   const totalFound = svcRows.length + dataRows.length + userRows.length;
 
@@ -99,7 +109,7 @@ export async function runUninstallFlow(opts: {
   if (dryRun) {
     p.log.message(k.cyan('PREVIEW ONLY — this shows what would be deleted and changes nothing.'));
     if (svcRows.length > 0) note(groupBody(GROUPS.service.desc, svcRows), GROUPS.service.title);
-    if (dataRows.length > 0) note(groupBody(GROUPS.data.desc, dataRows), GROUPS.data.title);
+    if (dataRows.length > 0) note(groupBody(dataDesc, dataRows), GROUPS.data.title);
     if (userRows.length > 0) note(groupBody(GROUPS.user.desc, userRows), GROUPS.user.title);
     const empty = emptyGroupTitles(svcRows.length, dataRows.length, userRows.length);
     if (empty.length > 0) p.log.message(k.dim(`Nothing found for: ${empty.join(', ')}`));
@@ -128,7 +138,7 @@ export async function runUninstallFlow(opts: {
 
   let dataYes = false;
   if (dataRows.length > 0) {
-    note(groupBody(GROUPS.data.desc, dataRows), GROUPS.data.title);
+    note(groupBody(dataDesc, dataRows), GROUPS.data.title);
     dataYes = await confirmGroup(GROUPS.data.prompt, yes);
   }
 

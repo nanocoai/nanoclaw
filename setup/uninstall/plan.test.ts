@@ -104,6 +104,34 @@ describe('buildRemovalPlan declined groups', () => {
   });
 });
 
+describe('buildRemovalPlan Iron Control', () => {
+  const ironControl = {
+    project: 'nanoclaw-iron-control-abcd1234',
+    containerIds: ['web1', 'db1'],
+    volume: 'nanoclaw-iron-control-abcd1234_database',
+    network: 'nanoclaw-iron-control-abcd1234',
+  };
+
+  it('removes the database with the data group, before the keys in data/', () => {
+    const actions = buildRemovalPlan(inventory({ ironControl }), allYes());
+    const ironIdx = actions.findIndex((a) => a.kind === 'rm-iron-control');
+    expect(actions[ironIdx]).toEqual({
+      kind: 'rm-iron-control',
+      runtime: 'docker',
+      project: ironControl.project,
+      volume: ironControl.volume,
+      network: ironControl.network,
+    });
+    expect(ironIdx).toBeGreaterThan(actions.findIndex((a) => a.kind === 'rm-containers'));
+    expect(ironIdx).toBeLessThan(actions.findIndex((a) => a.kind === 'backup-env'));
+  });
+
+  it('keeps the database when the data group is declined', () => {
+    const actions = buildRemovalPlan(inventory({ ironControl }), { service: true, data: false, user: true });
+    expect(kinds(actions)).not.toContain('rm-iron-control');
+  });
+});
+
 describe('buildRemovalPlan conditional actions', () => {
   it('skips backup-env when there is no .env', () => {
     const inv = inventory({ data: [item('/proj/data', 'Database & conversations')] });

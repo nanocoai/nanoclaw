@@ -173,4 +173,51 @@ describe('executePlan', () => {
     );
     expect(notes.some((n) => n.includes('xargs -r docker rm -f'))).toBe(true);
   });
+
+  describe('rm-iron-control', () => {
+    const action: RemovalAction = {
+      kind: 'rm-iron-control',
+      runtime: 'docker',
+      project: 'nanoclaw-iron-control-abcd1234',
+      volume: 'nanoclaw-iron-control-abcd1234_database',
+      network: 'nanoclaw-iron-control-abcd1234',
+    };
+
+    it('re-lists by project label, then removes containers, volume and network', () => {
+      const calls: string[][] = [];
+      const docker: RunCommand = (cmd, args) => {
+        calls.push([cmd, ...args]);
+        return { status: 0, stdout: args[0] === 'ps' ? 'web1\ndb1\n' : '' };
+      };
+      const { notes } = executePlan([action], deps({ runCommand: docker }));
+      expect(calls).toEqual([
+        ['docker', 'ps', '-aq', '--filter', 'label=com.docker.compose.project=nanoclaw-iron-control-abcd1234'],
+        ['docker', 'rm', '-f', 'web1', 'db1'],
+        ['docker', 'volume', 'rm', 'nanoclaw-iron-control-abcd1234_database'],
+        ['docker', 'network', 'rm', 'nanoclaw-iron-control-abcd1234'],
+      ]);
+      expect(notes).toEqual([]);
+    });
+
+    it('keeps the volume and notes the commands when the containers cannot be listed', () => {
+      const calls: string[][] = [];
+      const docker: RunCommand = (cmd, args) => {
+        calls.push(args);
+        return { status: args[0] === 'ps' ? 1 : 0, stdout: '' };
+      };
+      const { notes } = executePlan([action], deps({ runCommand: docker }));
+      expect(calls).toEqual([
+        ['ps', '-aq', '--filter', 'label=com.docker.compose.project=nanoclaw-iron-control-abcd1234'],
+      ]);
+      expect(notes.some((n) => n.includes('docker volume rm nanoclaw-iron-control-abcd1234_database'))).toBe(true);
+    });
+
+    it('notes the retry command when the volume is still in use', () => {
+      const docker: RunCommand = (_cmd, args) => ({ status: args[0] === 'volume' ? 1 : 0, stdout: '' });
+      const { notes } = executePlan([action], deps({ runCommand: docker }));
+      expect(notes).toEqual([
+        expect.stringContaining('retry with: docker volume rm nanoclaw-iron-control-abcd1234_database'),
+      ]);
+    });
+  });
 });

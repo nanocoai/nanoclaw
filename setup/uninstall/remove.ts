@@ -134,6 +134,34 @@ function runAction(action: RemovalAction, deps: ExecDeps, notes: string[]): void
       }
       break;
     }
+    case 'rm-iron-control': {
+      const { runtime, project, volume, network } = action;
+      const ps = runCommand(runtime, ['ps', '-aq', '--filter', `label=com.docker.compose.project=${project}`]);
+      const ids = ps.stdout
+        .split('\n')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (ps.status !== 0 || (ids.length > 0 && runCommand(runtime, ['rm', '-f', ...ids]).status !== 0)) {
+        notes.push(
+          `Iron Control: containers not removed — retry with: ` +
+            `${runtime} ps -aq --filter label=com.docker.compose.project=${project} | xargs -r ${runtime} rm -f` +
+            (volume ? `; ${runtime} volume rm ${volume}` : ''),
+        );
+        break;
+      }
+      if (volume && runCommand(runtime, ['volume', 'rm', volume]).status !== 0) {
+        notes.push(
+          `Iron Control database ${volume}: not removed (in use?) — retry with: ${runtime} volume rm ${volume}`,
+        );
+        break;
+      }
+      // Best-effort: a kept host's proxy container can still be attached.
+      if (network && runCommand(runtime, ['network', 'rm', network]).status !== 0) {
+        notes.push(`Iron Control network ${network}: not removed — retry with: ${runtime} network rm ${network}`);
+      }
+      log('✓ removed Iron Control and its database');
+      break;
+    }
     case 'rm-ncl-symlink':
       fs.rmSync(action.linkPath, { force: true });
       log('✓ removed ncl command');

@@ -4,7 +4,7 @@ import os from 'os';
 import path from 'path';
 
 import { getInstallSlug, getLaunchdLabel, getSystemdUnit } from '../../src/install-slug.js';
-import { detectExistingInstall, scanInstall, type RunCommand, type ScanDeps } from './scan.js';
+import { detectExistingInstall, ironControlProject, scanInstall, type RunCommand, type ScanDeps } from './scan.js';
 
 let root: string;
 let home: string;
@@ -113,6 +113,61 @@ describe('scanInstall service artifacts', () => {
     expect(inv.service.containerIds).toEqual([]);
     expect(inv.service.image).toBeUndefined();
     expect(inv.notes.some((n) => n.includes("'docker' unavailable"))).toBe(true);
+  });
+});
+
+describe('scanInstall Iron Control', () => {
+  /** Docker holding this install's Iron Control project plus another copy's. */
+  const ironDocker = (calls: string[][], ours: { ids: string[]; volume: boolean; network: boolean }) => {
+    const project = ironControlProject(getInstallSlug(root));
+    return fakeRun({
+      docker: (args) => {
+        calls.push(args);
+        if (args[0] === 'ps' && args.includes(`label=com.docker.compose.project=${project}`))
+          return { status: 0, stdout: ours.ids.join('\n') + '\n' };
+        if (args[0] === 'ps') return { status: 0, stdout: '' };
+        if (args[0] === 'volume')
+          return { status: ours.volume && args[2] === `${project}_database` ? 0 : 1, stdout: '' };
+        if (args[0] === 'network') return { status: ours.network && args[2] === project ? 0 : 1, stdout: '' };
+        return { status: 1, stdout: '' };
+      },
+    });
+  };
+
+  it("lists only this install's project, volume and network", () => {
+    const calls: string[][] = [];
+    const project = ironControlProject(getInstallSlug(root));
+    const inv = scanInstall(
+      deps({ runCommand: ironDocker(calls, { ids: ['web1', 'db1'], volume: true, network: true }) }),
+    );
+    expect(inv.ironControl).toEqual({
+      project,
+      containerIds: ['web1', 'db1'],
+      volume: `${project}_database`,
+      network: project,
+    });
+    // Every Iron lookup names this slug exactly; nothing lists all volumes or projects.
+    const iron = calls.filter((args) => args.join(' ').includes('iron-control'));
+    expect(iron.length).toBe(3);
+    for (const args of iron) expect(args.join(' ')).toContain(project);
+  });
+
+  it('finds an orphaned volume with no containers left', () => {
+    const inv = scanInstall(deps({ runCommand: ironDocker([], { ids: [], volume: true, network: false }) }));
+    expect(inv.ironControl).toMatchObject({ containerIds: [], volume: expect.stringMatching(/_database$/) });
+    expect(inv.ironControl?.network).toBeUndefined();
+  });
+
+  it('reports nothing when Iron Control was never installed', () => {
+    const inv = scanInstall(deps({ runCommand: ironDocker([], { ids: [], volume: false, network: false }) }));
+    expect(inv.ironControl).toBeUndefined();
+  });
+
+  it('notes the manual commands when docker is unavailable', () => {
+    const inv = scanInstall(deps());
+    expect(inv.ironControl).toBeUndefined();
+    const project = ironControlProject(getInstallSlug(root));
+    expect(inv.notes.some((n) => n.includes(`docker volume rm ${project}_database`))).toBe(true);
   });
 });
 

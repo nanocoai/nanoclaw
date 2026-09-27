@@ -7,6 +7,8 @@ import { parse as yaml } from 'yaml';
 import { controlCompose, controlPaths, controlPort, installControl } from './control.js';
 import { hasFrontProxy, frontProxyHash } from './build-managed-proxy.js';
 import { installCommand } from './install-command.js';
+import { getInstallSlug } from '../../../../src/install-slug.js';
+import { ironControlProject } from '../../../../setup/uninstall/scan.js';
 
 vi.mock('./install-command.js', async (importActual) => ({
   ...(await importActual<typeof import('./install-command.js')>()),
@@ -52,6 +54,11 @@ describe('official Iron Control installation', () => {
     delete process.env.NANOCLAW_IRON_CONTROL_PORT;
     fs.writeFileSync(path.join(root, '.env'), 'NANOCLAW_IRON_CONTROL_PORT=invalid\n');
     expect(() => controlPort(root)).toThrow('between 1 and 65535');
+  });
+
+  it('names its project the way uninstall finds it', () => {
+    const root = temporary();
+    expect(controlPaths(root).project).toBe(ironControlProject(getInstallSlug(root)));
   });
 
   it('prints the exact cleanup commands when the database outlived its keys', async () => {
