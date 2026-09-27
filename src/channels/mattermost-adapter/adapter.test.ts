@@ -1,14 +1,15 @@
 import { createServer } from 'node:http';
 import { createHmac } from 'node:crypto';
 import { WebSocketServer } from 'ws';
-import { Actions, Button, Card, Select } from 'chat';
+import { Actions, Button, Card } from 'chat';
 import type { ChatInstance } from 'chat';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { MattermostAdapter } from './adapter.js';
 import type { MattermostAdapterOptions } from './adapter.js';
-import { CALLBACK_SECRET_KEY, cardToAttachment } from './format.js';
+import { CALLBACK_SECRET_KEY } from './format.js';
 import { createMattermostAdapter } from './index.js';
+import { buildMattermostAdapter } from '../mattermost.js';
 
 const BOT_ID = '7g4f95dymtrjmqnoozdyi57xbw';
 const USER_ID = '7mx5jdcrnby18yrpnzont8ggwo';
@@ -233,6 +234,8 @@ describe('Mattermost runtime verification contract', () => {
 const CALLBACK_URL = 'https://callback.example/webhook/mattermost';
 const SECRET = 'test-callback-secret';
 const TOKEN = 'test-bot-token';
+const DERIVED_LABEL = 'nanoclaw-mattermost-callback-secret:v1';
+const DERIVED_SECRET = createHmac('sha256', TOKEN).update(DERIVED_LABEL).digest('hex');
 const BASE_OPTIONS = { token: TOKEN, url: 'https://mattermost.example' };
 
 function request(context: Record<string, unknown>): Request {
@@ -274,20 +277,57 @@ afterEach(() => vi.unstubAllEnvs());
 
 describe('Mattermost callback authentication', () => {
   it.each([undefined, '', '   ', '\t\n'])(
-    'rejects a callback URL with an absent or blank secret (%j)',
-    (callbackSecret) => {
-      expect(() => new MattermostAdapter({ ...BASE_OPTIONS, callbackUrl: CALLBACK_URL, callbackSecret })).toThrow(
-        /callbackSecret is missing or blank/,
-      );
+    'starts without a secret (%j) and verifies clicks with the token-derived one',
+    async (callbackSecret) => {
+      const { adapter, processAction } = await fixture({ callbackSecret });
+      expect((await adapter.handleWebhook(request({ action_id: 'approve' }))).status).toBe(401);
+      expect((await adapter.handleWebhook(request({ action_id: 'approve', callback_token: SECRET }))).status).toBe(401);
+      expect(
+        (await adapter.handleWebhook(request({ action_id: 'approve', callback_token: DERIVED_SECRET }))).status,
+      ).toBe(200);
+      expect(processAction).toHaveBeenCalledTimes(1);
     },
   );
 
-  it.each([undefined, '', '   '])('refuses actions when callbacks are unconfigured (%j)', async (callbackSecret) => {
-    const { adapter, fetchImpl, processAction } = await fixture({ callbackUrl: undefined, callbackSecret });
+  it('writes the same derived secret into posted cards that it verifies', async () => {
+    const { adapter, fetchImpl } = await fixture({ callbackSecret: undefined });
+    const card = Card({ children: [Actions([Button({ id: 'approve', label: 'Approve' })])] });
+    await adapter.postMessage(`mattermost:${CHANNEL_ID}`, { card });
+    const body = vi
+      .mocked(fetchImpl)
+      .mock.calls.map((call) => (call as unknown as [unknown, RequestInit])[1]?.body)
+      .filter(Boolean)
+      .map((raw) => JSON.parse(String(raw)))
+      .find((parsed) => parsed?.props?.attachments);
+    const context = body.props.attachments[0].actions[0].integration.context;
+    expect(context).toEqual({ action_id: 'approve', [CALLBACK_SECRET_KEY]: DERIVED_SECRET });
+    expect(JSON.stringify(body)).not.toContain(TOKEN);
+    expect((await adapter.handleWebhook(request(context))).status).toBe(200);
+  });
+
+  it('uses an explicit secret instead of the derived one', async () => {
+    const { adapter, processAction } = await fixture();
     expect(
-      (await adapter.handleWebhook(request({ action_id: 'approve', callback_token: callbackSecret }))).status,
+      (await adapter.handleWebhook(request({ action_id: 'approve', callback_token: DERIVED_SECRET }))).status,
     ).toBe(401);
-    expect(fetchImpl).not.toHaveBeenCalled();
+    expect((await adapter.handleWebhook(request({ action_id: 'approve', callback_token: SECRET }))).status).toBe(200);
+    expect(processAction).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses cards posted before a bot token rotation', async () => {
+    const { adapter, processAction } = await fixture({ callbackSecret: undefined, token: 'rotated-bot-token' });
+    expect(
+      (await adapter.handleWebhook(request({ action_id: 'approve', callback_token: DERIVED_SECRET }))).status,
+    ).toBe(401);
+    expect(processAction).not.toHaveBeenCalled();
+  });
+
+  it('refuses every action when neither a secret nor a token is available', async () => {
+    const { adapter, processAction } = await fixture({ callbackSecret: undefined, token: '' });
+    const blankDerived = createHmac('sha256', '').update(DERIVED_LABEL).digest('hex');
+    for (const callback_token of [undefined, '', blankDerived]) {
+      expect((await adapter.handleWebhook(request({ action_id: 'approve', callback_token }))).status).toBe(401);
+    }
     expect(processAction).not.toHaveBeenCalled();
   });
 
@@ -329,23 +369,6 @@ describe('Mattermost callback authentication', () => {
     },
   );
 
-  it('requires an explicit opt-out and warns when accepting local unauthenticated callbacks', async () => {
-    const { adapter, logger, processAction } = await fixture({
-      callbackSecret: '  ',
-      allowUnauthenticatedCallbacks: true,
-    });
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('callbacks are unauthenticated'));
-    expect((await adapter.handleWebhook(request({ action_id: 'local-test' }))).status).toBe(200);
-    expect(processAction).toHaveBeenCalledTimes(1);
-  });
-
-  it('still checks a configured secret when the opt-out is enabled', async () => {
-    const { adapter, logger, processAction } = await fixture({ allowUnauthenticatedCallbacks: true });
-    expect(logger.warn).not.toHaveBeenCalled();
-    expect((await adapter.handleWebhook(request({ action_id: 'approve' }))).status).toBe(401);
-    expect(processAction).not.toHaveBeenCalled();
-  });
-
   it('keeps setup proofs separate from user actions and runtime disclosure', async () => {
     const { adapter, fetchImpl, processAction } = await fixture({ callbackUrl: undefined, callbackSecret: undefined });
     const nonce = '12345678-1234-1234-1234-123456789abc';
@@ -370,7 +393,6 @@ describe('Mattermost callback configuration', () => {
     vi.stubEnv('MATTERMOST_BOT_TOKEN', TOKEN);
     vi.stubEnv('MATTERMOST_CALLBACK_URL', CALLBACK_URL);
     vi.stubEnv('MATTERMOST_CALLBACK_SECRET', '');
-    vi.stubEnv('MATTERMOST_ALLOW_UNAUTHENTICATED_CALLBACKS', '');
   }
 
   it('keeps an unconfigured channel inert', () => {
@@ -379,108 +401,25 @@ describe('Mattermost callback configuration', () => {
     expect(createMattermostAdapter()).toBeNull();
   });
 
-  it('falls back to the environment when the explicit secret is whitespace', () => {
+  it('builds an adapter with a callback URL and no secret', () => {
     environment();
-    expect(() => createMattermostAdapter({ callbackSecret: '  ' })).toThrow(/MATTERMOST_CALLBACK_SECRET/);
-    vi.stubEnv('MATTERMOST_CALLBACK_SECRET', SECRET);
-    expect(createMattermostAdapter({ callbackSecret: '  ' })).toBeInstanceOf(MattermostAdapter);
-  });
-
-  it('honors explicit false over the environment opt-out', () => {
-    environment();
-    vi.stubEnv('MATTERMOST_ALLOW_UNAUTHENTICATED_CALLBACKS', 'true');
     expect(createMattermostAdapter()).toBeInstanceOf(MattermostAdapter);
-    expect(() => createMattermostAdapter({ allowUnauthenticatedCallbacks: false })).toThrow(
-      /callbackSecret is missing or blank/,
-    );
+    expect(
+      buildMattermostAdapter({ baseUrl: BASE_OPTIONS.url, botToken: TOKEN, callbackUrl: CALLBACK_URL }),
+    ).toBeInstanceOf(MattermostAdapter);
   });
 
-  it.each(['false', 'true', 1, [], {}])('rejects a non-boolean config opt-out (%j)', (value) => {
+  it('falls back to the environment secret when the explicit one is whitespace', async () => {
     environment();
-    for (const envValue of ['', 'true']) {
-      vi.stubEnv('MATTERMOST_ALLOW_UNAUTHENTICATED_CALLBACKS', envValue);
-      expect(() => createMattermostAdapter({ allowUnauthenticatedCallbacks: value as unknown as boolean })).toThrow(
-        /callbackSecret is missing or blank/,
-      );
-    }
-  });
-
-  it.each(['TRUE', '1', 'false'])('does not interpret %s as permission to skip authentication', (value) => {
-    environment();
-    vi.stubEnv('MATTERMOST_ALLOW_UNAUTHENTICATED_CALLBACKS', value);
-    expect(() => createMattermostAdapter()).toThrow(/callbackSecret is missing or blank/);
-    expect(createMattermostAdapter({ allowUnauthenticatedCallbacks: true })).toBeInstanceOf(MattermostAdapter);
-  });
-});
-
-describe('Mattermost callback secret destinations', () => {
-  it.each([
-    'https://external.example/hook',
-    'https://callback.example/other',
-    `${CALLBACK_URL}.evil`,
-    `${CALLBACK_URL}/actions/extra`,
-    `${CALLBACK_URL}?forward=external`,
-    'https://callback.example@external.example/webhook/mattermost',
-    'http://callback.example/webhook/mattermost',
-    'https://callback.example:8443/webhook/mattermost',
-  ])('keeps the adapter secret off %s and rejects a forged replay', async (callbackUrl) => {
-    const card = Card({
-      children: [Actions([Button({ id: 'approve', label: 'Approve', value: 'yes', callbackUrl })])],
-    });
-    const action = cardToAttachment(card, CALLBACK_URL, SECRET)!.actions![0];
-    expect(action.integration).toEqual({ url: callbackUrl, context: { action_id: 'approve', value: 'yes' } });
-    const { adapter, fetchImpl, processAction } = await fixture();
-    expect((await adapter.handleWebhook(request(action.integration.context!))).status).toBe(401);
-    expect(fetchImpl).not.toHaveBeenCalled();
-    expect(processAction).not.toHaveBeenCalled();
-  });
-
-  it.each([undefined, CALLBACK_URL, `${CALLBACK_URL}/`, `${CALLBACK_URL}/actions`, `${CALLBACK_URL}/actions/`])(
-    'authenticates buttons using the adapter route (%s)',
-    (callbackUrl) => {
-      const card = Card({ children: [Actions([Button({ id: 'approve', label: 'Approve', callbackUrl })])] });
-      expect(cardToAttachment(card, CALLBACK_URL, SECRET)!.actions![0].integration.context).toEqual({
-        action_id: 'approve',
-        [CALLBACK_SECRET_KEY]: SECRET,
-      });
-    },
-  );
-
-  it('authenticates selects using the adapter route', () => {
-    const card = Card({
-      children: [Actions([Select({ id: 'pick', label: 'Pick', options: [{ label: 'Blue', value: 'blue' }] })])],
-    });
-    expect(cardToAttachment(card, CALLBACK_URL, SECRET)!.actions![0].integration).toEqual({
-      url: CALLBACK_URL,
-      context: { action_id: 'pick', [CALLBACK_SECRET_KEY]: SECRET },
-    });
-  });
-
-  it('uses the same destination protection when posting and editing cards', async () => {
-    const { adapter, fetchImpl } = await fixture({ callbackUrl: 'https://callback.example/' });
-    const card = Card({
-      children: [
-        Actions([
-          Button({ id: 'ours', label: 'Ours', callbackUrl: CALLBACK_URL }),
-          Button({ id: 'external', label: 'External', callbackUrl: 'https://external.example/hook' }),
-        ]),
-      ],
-    });
-    await adapter.postMessage(`mattermost:${CHANNEL_ID}`, { card });
-    await adapter.editMessage(`mattermost:${CHANNEL_ID}`, POST_ID, { card });
-    const bodies = vi
-      .mocked(fetchImpl)
-      .mock.calls.map((call) => {
-        const init = (call as unknown as [unknown, RequestInit])[1];
-        return init?.body ? JSON.parse(String(init.body)) : undefined;
-      })
-      .filter((body) => body?.props?.attachments);
-    expect(bodies).toHaveLength(2);
-    for (const body of bodies) {
-      expect(body.props.attachments[0].actions.map((action: { integration: unknown }) => action.integration)).toEqual([
-        { url: CALLBACK_URL, context: { action_id: 'ours', callback_token: SECRET } },
-        { url: 'https://external.example/hook', context: { action_id: 'external' } },
-      ]);
-    }
+    vi.stubEnv('MATTERMOST_CALLBACK_SECRET', SECRET);
+    const { fetchImpl } = await fixture();
+    const processAction = vi.fn();
+    const adapter = createMattermostAdapter({ callbackSecret: '  ', fetchImpl, skipSocket: true })!;
+    await adapter.initialize({ getLogger: () => console, processAction } as unknown as ChatInstance);
+    expect(
+      (await adapter.handleWebhook(request({ action_id: 'approve', callback_token: DERIVED_SECRET }))).status,
+    ).toBe(401);
+    expect((await adapter.handleWebhook(request({ action_id: 'approve', callback_token: SECRET }))).status).toBe(200);
+    expect(processAction).toHaveBeenCalledTimes(1);
   });
 });

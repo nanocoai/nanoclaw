@@ -98,30 +98,26 @@ function secretMatches(presented: unknown, expected: string): boolean {
   return actual.length === configured.length && timingSafeEqual(actual, configured);
 }
 
-function requireCallbackSecret(options: MattermostAdapterOptions): string | undefined {
-  const secret = options.callbackSecret;
-  if (secret !== undefined && secret.trim() !== '') return secret;
-  if (options.callbackUrl && options.allowUnauthenticatedCallbacks !== true) {
-    throw new Error(
-      'MattermostAdapter: callbackUrl is set but callbackSecret is missing or blank. ' +
-        'Set callbackSecret (MATTERMOST_CALLBACK_SECRET) to authenticate interactive clicks. ' +
-        'Only isolated local tests may set allowUnauthenticatedCallbacks: true.',
-    );
-  }
-  return undefined;
+/** Domain label for the derived callback secret; distinct from the setup proofs' messages. */
+const DERIVED_CALLBACK_SECRET_LABEL = 'nanoclaw-mattermost-callback-secret:v1';
+
+/**
+ * An explicit secret wins. Otherwise derive one from the bot token, so every
+ * install authenticates clicks with no extra config. HMAC is one-way: the value
+ * Mattermost stores in card context never reveals the token. Rotating the token
+ * changes it, so cards posted before the rotation stop verifying.
+ */
+function resolveCallbackSecret(options: MattermostAdapterOptions): string | undefined {
+  if (options.callbackSecret?.trim()) return options.callbackSecret;
+  if (!options.token?.trim()) return undefined;
+  return createHmac('sha256', options.token).update(DERIVED_CALLBACK_SECRET_LABEL).digest('hex');
 }
 
 export interface MattermostAdapterOptions {
   /**
-   * Permit unauthenticated actions only in isolated local tests. Off by
-   * default; never enable where untrusted clients can reach the callback.
-   * A configured secret is still enforced when this option is true.
-   */
-  allowUnauthenticatedCallbacks?: boolean;
-  /**
-   * Shared secret for actions addressed to this adapter. Required and
-   * nonblank whenever callbackUrl is configured, unless explicitly opted
-   * out for local tests. Old cards need reissuing when the secret changes.
+   * Shared secret every action carries back in its context. Optional: when
+   * absent or blank, one is derived from the bot token. Cards posted before
+   * the secret (or the token it derives from) changes stop being clickable.
    */
   callbackSecret?: string;
   /** Externally reachable base URL Mattermost POSTs button clicks to. */
@@ -249,7 +245,6 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
   readonly rest: MattermostRestClient;
 
   private readonly setupCallbacks = new Set<string>();
-  private readonly allowUnauthenticatedCallbacks: boolean;
   private readonly callbackSecret: string | undefined;
   private readonly callbackUrl: string | undefined;
   /**
@@ -294,8 +289,7 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
   constructor(options: MattermostAdapterOptions) {
     this.options = { ...options, url: normalizeBaseUrl(options.url) };
     this.callbackUrl = options.callbackUrl;
-    this.callbackSecret = requireCallbackSecret(options);
-    this.allowUnauthenticatedCallbacks = options.allowUnauthenticatedCallbacks === true;
+    this.callbackSecret = resolveCallbackSecret(options);
     this.logger = new ConsoleLogger('info', 'mattermost');
     this.rest = new MattermostRestClient({
       baseUrl: this.options.url,
@@ -312,11 +306,6 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
   async initialize(chat: ChatInstance): Promise<void> {
     this.chat = chat;
     this.logger = chat.getLogger('mattermost');
-    if (this.allowUnauthenticatedCallbacks && this.callbackSecret === undefined) {
-      this.logger.warn(
-        'Mattermost action callbacks are unauthenticated: allowUnauthenticatedCallbacks is enabled without a callbackSecret. Anyone who can reach the route can trigger actions.',
-      );
-    }
 
     try {
       const me = await this.rest.getMe();
@@ -946,9 +935,9 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
    * webhook server at `/webhook/mattermost`.
    *
    * Mattermost signs nothing on this request. Actions must present the
-   * configured callbackSecret in context, or receive 401 before dispatch.
-   * Without a secret, only an explicit local-test opt-out permits actions.
-   * Setup proofs below use a separate credential and never dispatch actions.
+   * callback secret (configured or derived from the bot token) in context,
+   * or receive 401 before dispatch. Setup proofs below use a separate
+   * credential and never dispatch actions.
    *
    * The dispatch is fire-and-forget, mirroring Slack's `handleBlockActions`:
    * `chat.processAction` is started and the 200 goes back immediately, because
@@ -997,17 +986,13 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
       return Response.json({});
     }
 
-    if (this.callbackSecret !== undefined) {
-      const presented = payload.context?.[CALLBACK_SECRET_KEY];
-      if (!secretMatches(presented, this.callbackSecret)) {
-        this.logger.warn('Mattermost action callback rejected: missing or wrong callback secret', {
-          postId: payload.post_id,
-          userId: payload.user_id,
-        });
-        return new Response('Unauthorized', { status: 401 });
-      }
-    } else if (!this.allowUnauthenticatedCallbacks) {
-      this.logger.warn('Mattermost action callback rejected: no callbackSecret is configured');
+    // Undefined only when the bot token is blank; every action is then refused.
+    const presented = payload.context?.[CALLBACK_SECRET_KEY];
+    if (this.callbackSecret === undefined || !secretMatches(presented, this.callbackSecret)) {
+      this.logger.warn('Mattermost action callback rejected: missing or wrong callback secret', {
+        postId: payload.post_id,
+        userId: payload.user_id,
+      });
       return new Response('Unauthorized', { status: 401 });
     }
 
@@ -1015,7 +1000,6 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
     // action or posting a message. Authenticate before exposing runtime values.
     const challenge = payload.context?.nanoclaw_setup_probe;
     if (typeof challenge === 'string' && /^[a-f0-9-]{36}$/.test(challenge)) {
-      if (!this.callbackSecret) return new Response('Unauthorized', { status: 401 });
       const runtime = {
         challenge,
         bot_id: this.botUserId,
