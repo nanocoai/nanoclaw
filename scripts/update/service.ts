@@ -317,7 +317,11 @@ export function restartGatewayContainers(projectRoot: string, env: ServiceEnviro
     .map((line) => line.split('|'))
     .filter(([, sessionId, role]) => !sessionId && role === 'gateway')
     .map(([id]) => id);
-  if (!listed.ok || ids.length === 0) return;
+  if (!listed.ok) {
+    env.log?.(`Cannot list gateway containers with ${runtime}; restart them or re-run the gateway's setup script.`);
+    return;
+  }
+  if (ids.length === 0) return;
   env.log?.(`Restarting ${ids.length} gateway container(s) onto the restored data/: ${ids.join(', ')}`);
   const restarted = env.runner.tryRun(
     runtime,
