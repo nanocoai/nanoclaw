@@ -184,6 +184,8 @@ describe('interactive Claude failure handoff', () => {
       queueMicrotask(() => child.emit('close', 0));
       return child;
     });
+    // Claude is usable, so the handoff is offered whether or not a runtime was picked.
+    ce.isClaudeReady.mockReturnValue(true);
     ce.confirms.push(true);
     expect(await offerClaudeOnFailure(CTX, '/tmp')).toBe(true);
 
