@@ -20,6 +20,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const TEST_ROOT = '/tmp/nanoclaw-codex-host-contribution-test';
 const DATA_DIR = path.join(TEST_ROOT, 'data');
 const GROUPS_DIR = path.join(TEST_ROOT, 'groups');
+const AUTO_HOST_ENV = { ...process.env, NANOCLAW_CODEX_TRANSPORT: 'auto' };
 // An old install skill may run on a new core without installing Codex's contract.
 const newCoreIt = fs.existsSync(path.join(process.cwd(), 'src/provider-contracts/codex.ts')) ? it : it.skip;
 
@@ -99,7 +100,7 @@ describe('codex host contribution against real core', () => {
       agentGroupId: ag.id,
       groupDir,
       selectedSkills: [],
-      hostEnv: process.env,
+      hostEnv: AUTO_HOST_ENV,
     });
 
     // Per-group codex state dir exists and is mounted RW at ~/.codex.
@@ -132,6 +133,27 @@ describe('codex host contribution against real core', () => {
     // is asserted here and the order in the contract-core test below.
     expect(byContainerPath(codexMounts(mounts))).toEqual(byContainerPath(expectedCodexMounts(groupDir, codexShared)));
     expect(containerPaths).not.toContain('/home/node/.claude');
+    expect(contribution.env).toEqual({ NANOCLAW_CODEX_TRANSPORT: 'auto' });
+  });
+
+  it('passes the validated Codex transport setting into the container', async () => {
+    const ag = group('ag-codex-transport', 'codex-transport-group');
+    await createAgentGroup(ag);
+    await ensureContainerConfig(ag.id);
+    const contributionFn = getProviderContainerConfig('codex')!;
+    const base = {
+      sessionDir: path.join(DATA_DIR, 'v2-sessions', ag.id, 'session-1'),
+      agentGroupId: ag.id,
+      groupDir: path.join(GROUPS_DIR, ag.folder),
+      selectedSkills: [],
+    };
+
+    const http = await contributionFn({ ...base, hostEnv: { NANOCLAW_CODEX_TRANSPORT: 'HTTP' } });
+    expect(http.env).toEqual({ NANOCLAW_CODEX_TRANSPORT: 'http' });
+
+    await expect(contributionFn({ ...base, hostEnv: { NANOCLAW_CODEX_TRANSPORT: 'invalid' } })).rejects.toThrow(
+      /must be "auto" or "http"/,
+    );
   });
 
   newCoreIt('orders the declared codex surfaces ahead of the composed AGENTS.md', async () => {
@@ -144,7 +166,7 @@ describe('codex host contribution against real core', () => {
       agentGroupId: ag.id,
       groupDir,
       selectedSkills: [],
-      hostEnv: process.env,
+      hostEnv: AUTO_HOST_ENV,
     });
     const session = { id: 'session-1', agent_group_id: ag.id } as Session;
     const config: ContainerConfig = {
@@ -174,7 +196,7 @@ describe('codex host contribution against real core', () => {
       agentGroupId: ag.id,
       groupDir: path.join(GROUPS_DIR, ag.folder),
       selectedSkills: [],
-      hostEnv: process.env,
+      hostEnv: AUTO_HOST_ENV,
     });
 
     const mirrored = path.join(GROUPS_DIR, ag.folder, '.agents', 'skills', 'widget');
@@ -200,12 +222,12 @@ describe('codex host contribution against real core', () => {
       agentGroupId: ag.id,
       groupDir,
       selectedSkills: [],
-      hostEnv: process.env,
+      hostEnv: AUTO_HOST_ENV,
       coreOwnsProviderSurfaces: true as const,
     };
 
     const contribution = await getProviderContainerConfig('codex')!(context);
-    expect(contribution).toEqual({});
+    expect(contribution).toEqual({ env: { NANOCLAW_CODEX_TRANSPORT: 'auto' } });
 
     const mounts = await buildMounts(ag, session, config, 'codex', contribution);
     expect(mounts.filter((mount) => mount.containerPath === '/home/node/.codex')).toHaveLength(1);
