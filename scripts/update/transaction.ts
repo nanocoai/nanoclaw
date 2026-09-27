@@ -10,6 +10,7 @@ import {
   defaultServiceEnvironment,
   detectService,
   drainContainers,
+  restartGatewayContainers,
   startService,
   stopService,
   verifyServiceHealth,
@@ -102,6 +103,7 @@ export interface UpdateRuntime {
   detectService(projectRoot: string): ServiceHandle;
   stopService(handle: ServiceHandle): Promise<void>;
   drainContainers(projectRoot: string): Promise<void>;
+  restartGateways(projectRoot: string): void;
   startService(handle: ServiceHandle, projectRoot: string): void;
   verifyHealth(handle: ServiceHandle, projectRoot: string): Promise<boolean>;
   loadGateway(root: string): Promise<GatewayModules>;
@@ -115,6 +117,7 @@ export function createUpdateRuntime(runner = createCommandRunner()): UpdateRunti
     detectService: (root) => detectService(root, serviceEnv),
     stopService: (handle) => stopService(handle, serviceEnv),
     drainContainers: (root) => drainContainers(root, serviceEnv),
+    restartGateways: (root) => restartGatewayContainers(root, serviceEnv),
     startService: (handle, root) => startService(handle, root, serviceEnv),
     verifyHealth: (handle, root) => verifyServiceHealth(handle, root, serviceEnv),
     loadGateway: loadGatewayModules,
@@ -572,6 +575,8 @@ async function rollbackLocal(state: UpdateState, runtime: UpdateRuntime): Promis
   await runtime.stopService(state.service);
   git(runtime, state.projectRoot, ['reset', '--hard', state.originalHead]);
   restoreSnapshot(state);
+  // Gateways survive cutover; their bind mounts still hold the replaced data/.
+  runtime.restartGateways(state.projectRoot);
   installAndBuild(state.projectRoot, state, runtime);
   if (state.service?.active) {
     runtime.startService(state.service, state.projectRoot);

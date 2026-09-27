@@ -293,6 +293,41 @@ export async function drainContainers(projectRoot: string, env: ServiceEnvironme
   }
 }
 
+/**
+ * Restart this install's running gateway-owned containers (see drainContainers).
+ * A snapshot restore replaces `data/`, and a running container's bind mounts
+ * still point at the deleted directories until it restarts: the Iron proxy
+ * would keep serving with a dead approval socket and stale config.
+ * Best effort: a failure is logged, never fatal to the rollback.
+ */
+export function restartGatewayContainers(projectRoot: string, env: ServiceEnvironment): void {
+  const runtime = process.env.CONTAINER_RUNTIME ?? 'docker';
+  const label = `nanoclaw-install=${getInstallSlug(projectRoot)}`;
+  const listed = env.runner.tryRun(
+    runtime,
+    ['ps', '--filter', `label=${label}`, '--format', DRAIN_LIST_FORMAT],
+    undefined,
+    { timeoutMs: CUTOVER_LIST_CLI_TIMEOUT_MS },
+  );
+  const ids = listed.stdout
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => line.split('|'))
+    .filter(([, sessionId, role]) => !sessionId && !!role)
+    .map(([id]) => id);
+  if (!listed.ok || ids.length === 0) return;
+  env.log?.(`Restarting ${ids.length} gateway container(s) onto the restored data/: ${ids.join(', ')}`);
+  const restarted = env.runner.tryRun(
+    runtime,
+    ['restart', '-t', String(CUTOVER_STOP_GRACE_SECONDS), ...ids],
+    undefined,
+    { timeoutMs: CUTOVER_STOP_CLI_TIMEOUT_MS },
+  );
+  if (!restarted.ok) {
+    env.log?.(`Gateway restart failed (${restarted.stdout || 'no output'}); re-run the gateway's setup script.`);
+  }
+}
+
 export async function verifyServiceHealth(
   handle: ServiceHandle,
   projectRoot: string,

@@ -14,6 +14,7 @@ import {
   createCommandRunner,
   detectService,
   drainContainers,
+  restartGatewayContainers,
   startService,
   stopService,
   verifyServiceHealth,
@@ -203,6 +204,23 @@ describe('drain and health gates', () => {
 
     await expect(drainContainers(root, env, 0)).rejects.toThrow('old333');
     expect(calls).toContain(`docker stop -t ${CUTOVER_STOP_GRACE_SECONDS} old333`);
+  });
+
+  it('restarts only gateway-owned containers after a snapshot restore, and never throws', () => {
+    const root = temp();
+    const label = `nanoclaw-install=${slug(root)}`;
+    const ps = `docker ps --filter label=${label} --format ${DRAIN_LIST_FORMAT}`;
+    const restart = `docker restart -t ${CUTOVER_STOP_GRACE_SECONDS} iron222`;
+    const { env, calls } = makeEnv('linux', {
+      [ps]: { ok: true, stdout: 'agent111|s1|agent\niron222||gateway\nold333||\n' },
+      [restart]: { ok: false, stdout: 'daemon error' },
+    });
+    const progress: string[] = [];
+    env.log = (message) => progress.push(message);
+
+    expect(() => restartGatewayContainers(root, env)).not.toThrow();
+    expect(calls).toEqual([ps, restart]);
+    expect(progress[1]).toContain('re-run the gateway');
   });
 
   it('tolerates a failed stop when the containers are gone anyway (exited between list and stop)', async () => {
