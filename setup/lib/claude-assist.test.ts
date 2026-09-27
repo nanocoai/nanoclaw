@@ -31,7 +31,7 @@ vi.mock('./theme.js', async (importActual) => ({
   note: vi.fn(),
 }));
 
-import { ASSIST_GUARDRAILS, DESTRUCTIVE_COMMANDS, GATEWAY_REPAIR_COMMAND } from './assist-guardrails.js';
+import { ASSIST_GUARDRAILS, GATEWAY_REPAIR_COMMAND } from './assist-guardrails.js';
 import { offerClaudeAssist } from './claude-assist.js';
 
 beforeEach(() => {
@@ -56,8 +56,6 @@ beforeEach(() => {
   });
 });
 
-const denied = (args: string[]) => args.slice(args.indexOf('--disallowedTools') + 1);
-
 describe('non-interactive Claude assist', () => {
   it('diagnoses with read-only tools instead of bypassing permissions', async () => {
     // Accept the diagnosis, decline running the suggested command.
@@ -66,18 +64,25 @@ describe('non-interactive Claude assist', () => {
 
     const [binary, args] = ca.spawn.mock.calls[0] as [string, string[]];
     expect(binary).toBe('claude');
-    expect(args).not.toContain('bypassPermissions');
     // dontAsk turns every unapproved call into a denial: nobody is at the
-    // terminal to answer a prompt while the spinner runs.
-    expect(args[args.indexOf('--permission-mode') + 1]).toBe('dontAsk');
-    // No Bash and no MCP servers: an operator's own allow rules (for example
-    // Bash(pnpm *)) would still apply under dontAsk, so the tools themselves
-    // are limited to reading.
-    expect(args[args.indexOf('--tools') + 1]).toBe('Read,Grep,Glob');
-    expect(args).toContain('--strict-mcp-config');
-    expect(args.some((arg) => arg.startsWith('Bash(') && !denied(args).includes(arg))).toBe(false);
-    for (const command of DESTRUCTIVE_COMMANDS) expect(denied(args)).toContain(`Bash(${command})`);
-    expect(denied(args)).toContain('Read(./.env)');
+    // terminal to answer a prompt while the spinner runs. Bash and MCP
+    // servers are left out, so an operator's own allow rules (for example
+    // Bash(pnpm *)) have nothing to apply to.
+    expect(args).toEqual([
+      '-p',
+      '--output-format',
+      'stream-json',
+      '--verbose',
+      '--permission-mode',
+      'dontAsk',
+      '--tools',
+      'Read,Grep,Glob',
+      '--strict-mcp-config',
+      '--allowedTools',
+      'Read',
+      'Grep',
+      'Glob',
+    ]);
   });
 
   it('tells Claude the guardrails and the supported gateway repair', async () => {

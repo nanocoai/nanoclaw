@@ -13,8 +13,7 @@
  *      (not contents) so Claude can Read what it needs on its own.
  *   4. Spawn `claude -p --output-format stream-json` with a spinner that
  *      shows elapsed time. The session is read-only: only Read, Grep and
- *      Glob exist, `--permission-mode dontAsk` denies anything else, and
- *      destructive commands are denied outright.
+ *      Glob exist and `--permission-mode dontAsk` denies anything else.
  *   5. Parse `REASON:` / `COMMAND:` out of the response. Show the reason
  *      in a clack note, then hand off to `setup/run-suggested.sh` for
  *      editable pre-fill + exec.
@@ -29,7 +28,7 @@ import path from 'path';
 import * as p from '@clack/prompts';
 import k from 'kleur';
 
-import { assistGuardrails, DESTRUCTIVE_COMMANDS } from './assist-guardrails.js';
+import { assistGuardrails } from './assist-guardrails.js';
 import { extractClaudeOAuthToken } from './captured-token.js';
 import { ensureAnswer } from './runner.js';
 import { brandBody, fitToWidth, fmtDuration, note } from './theme.js';
@@ -80,13 +79,6 @@ export const STEP_FILES: Record<string, string[]> = {
 export const BIG_PICTURE_FILES = ['README.md', 'setup/auto.ts'];
 
 /**
- * Claude CLI deny rules for every setup assist. Deny rules hold in every
- * permission mode, `auto` included, so the model cannot take down the live
- * install even when its classifier would allow it.
- */
-export const CLAUDE_DENIED_TOOLS = DESTRUCTIVE_COMMANDS.map((command) => `Bash(${command})`);
-
-/**
  * Permission flags for the non-interactive diagnosis. Nobody answers
  * prompts while the spinner runs, so `dontAsk` turns every unapproved call
  * into a denial. The operator's own allow rules still apply under dontAsk,
@@ -104,10 +96,6 @@ export const CLAUDE_READ_ONLY_ARGS = [
   'Read',
   'Grep',
   'Glob',
-  '--disallowedTools',
-  ...CLAUDE_DENIED_TOOLS,
-  'Read(./.env)',
-  'Read(./.env.*)',
 ];
 
 /**

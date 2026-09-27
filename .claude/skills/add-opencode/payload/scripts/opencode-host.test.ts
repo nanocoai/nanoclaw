@@ -32,7 +32,6 @@ import {
   runHostOpenCode,
   OPENCODE_HOST_INSTALL_VERSION,
 } from './opencode-host.js';
-import { ASSIST_GUARDRAILS } from '../setup/lib/assist-guardrails.js';
 
 let root: string;
 function touch(file: string, content = ''): void {
@@ -115,7 +114,7 @@ describe('native host OpenCode lifecycle', () => {
     expect(edge.spawn).toHaveBeenLastCalledWith(binary, [], {
       cwd: root,
       stdio: 'inherit',
-      env: expect.objectContaining({ OPENCODE_PERMISSION: expect.any(String) }),
+      env: expect.objectContaining({ OPENCODE_PERMISSION: JSON.stringify({ edit: 'ask', bash: 'ask' }) }),
     });
   });
 
@@ -203,49 +202,26 @@ describe('native host OpenCode lifecycle', () => {
     expect(options.stdio).toBe('inherit');
     expect(options.env.PATH).toBe(process.env.PATH);
     // OPENCODE_PERMISSION merges after the global and project config, so it
-    // wins over an operator's own allow-all settings.
+    // wins over an operator's top-level allow-all.
     const permission = JSON.parse(options.env.OPENCODE_PERMISSION);
-    expect(permission.edit).toBe('ask');
-    const bash = Object.entries(permission.bash as Record<string, string>);
-    // Last matching rule wins: the catch-all must come first.
-    expect(bash[0]).toEqual(['*', 'ask']);
-    // No allow rules: OpenCode matches a grouped redirection such as
-    // `(ls) > file` as plain `ls`, so any bash allow can write files.
-    expect(Object.values(permission.bash)).not.toContain('allow');
-    // Subagents carry their own (possibly operator-loosened) permissions.
-    expect(permission.task).toBe('deny');
-    for (const denied of ['docker rm *', 'docker * rm *', 'docker * down *', 'launchctl * unload *']) {
-      expect(permission.bash[denied]).toBe('deny');
-    }
-    // Agent-level permission blocks in the operator's config are merged after
-    // the top-level rules, so the session also runs as a dedicated default
-    // agent whose name no operator config can target.
-    const config = JSON.parse(options.env.OPENCODE_CONFIG_CONTENT);
-    expect(config.default_agent).toBe('nanoclaw-maintenance');
-    expect(config.agent['nanoclaw-maintenance']).toMatchObject({ mode: 'primary', permission: { ...permission } });
+    expect(permission).toMatchObject({ edit: 'ask', bash: 'ask' });
+    expect(Object.keys(permission).sort()).toEqual(['bash', 'edit', 'external_directory']);
   });
 
-  it('lets the session read its own context file without an external-directory prompt', async () => {
+  it('lets the session read its own context file and nothing else outside the checkout', async () => {
     touch(path.join(root, 'bin/opencode'));
     const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'opencode-context-'));
     try {
       const context = path.join(outside, 'context.md');
       touch(context, 'request');
       await hostOpenCode.launch(root, context);
-      const env = edge.spawn.mock.calls[0][2].env;
-      const agent = JSON.parse(env.OPENCODE_CONFIG_CONTENT).agent['nanoclaw-maintenance'].permission;
+      const permission = JSON.parse(edge.spawn.mock.calls[0][2].env.OPENCODE_PERMISSION);
       // OpenCode asks with `<dir>/*` for the path the model passes; macOS
       // resolves the temp dir through /private, so allow both spellings.
-      expect(agent.external_directory).toEqual({
+      expect(permission.external_directory).toEqual({
         [`${outside}/*`]: 'allow',
         [`${fs.realpathSync(outside)}/*`]: 'allow',
       });
-      expect(agent.edit).toBe('ask');
-      expect(agent.bash['*']).toBe('ask');
-      // Agent rules are appended after the operator's, so only the agent
-      // carries the grant: a top-level map would replace an operator's
-      // blanket external_directory deny for every other path.
-      expect(JSON.parse(env.OPENCODE_PERMISSION).external_directory).toBeUndefined();
     } finally {
       fs.rmSync(outside, { recursive: true, force: true });
     }
@@ -258,73 +234,7 @@ describe('native host OpenCode lifecycle', () => {
     const context = path.join(fs.mkdtempSync(path.join(parent, 'ctx-')), 'context.md');
     touch(context, 'request');
     await hostOpenCode.launch(root, context);
-    const config = JSON.parse(edge.spawn.mock.calls[0][2].env.OPENCODE_CONFIG_CONTENT);
-    expect(config.agent['nanoclaw-maintenance'].permission.external_directory).toBeUndefined();
-  });
-
-  it('grants no external directory without a context file', async () => {
-    touch(path.join(root, 'bin/opencode'));
-    await hostOpenCode.launch(root);
-    const config = JSON.parse(edge.spawn.mock.calls[0][2].env.OPENCODE_CONFIG_CONTENT);
-    expect(config.agent['nanoclaw-maintenance'].permission.external_directory).toBeUndefined();
-  });
-
-  it('keeps an operator-supplied inline config while adding the maintenance agent', async () => {
-    touch(path.join(root, 'bin/opencode'));
-    vi.stubEnv(
-      'OPENCODE_CONFIG_CONTENT',
-      JSON.stringify({ model: 'user/model', agent: { mine: { mode: 'primary' } } }),
-    );
-    await hostOpenCode.launch(root);
-    const config = JSON.parse(edge.spawn.mock.calls[0][2].env.OPENCODE_CONFIG_CONTENT);
-    expect(config.model).toBe('user/model');
-    expect(config.agent.mine).toEqual({ mode: 'primary' });
-    expect(config.default_agent).toBe('nanoclaw-maintenance');
-  });
-
-  it('leaves a non-JSON inline config intact and keeps only the top-level override', async () => {
-    touch(path.join(root, 'bin/opencode'));
-    const jsonc = '{ // operator provider\n "model": "user/model", }';
-    vi.stubEnv('OPENCODE_CONFIG_CONTENT', jsonc);
-    await hostOpenCode.launch(root);
-    const env = edge.spawn.mock.calls[0][2].env;
-    expect(env.OPENCODE_CONFIG_CONTENT).toBe(jsonc);
-    expect(JSON.parse(env.OPENCODE_PERMISSION).edit).toBe('ask');
-  });
-
-  it('matches bash commands against the permission override as OpenCode does', async () => {
-    touch(path.join(root, 'bin/opencode'));
-    await hostOpenCode.launch(root);
-    const rules = Object.entries(
-      JSON.parse(edge.spawn.mock.calls[0][2].env.OPENCODE_PERMISSION).bash as Record<string, string>,
-    );
-    // Mirrors OpenCode's Wildcard.match (a trailing " *" also matches no arguments)
-    // and its findLast evaluation.
-    const action = (command: string) =>
-      rules.findLast(([pattern]) => {
-        let source = pattern
-          .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-          .replace(/\*/g, '.*')
-          .replace(/\?/g, '.');
-        if (source.endsWith(' .*')) source = source.slice(0, -3) + '( .*)?';
-        return new RegExp(`^${source}$`, 's').test(command);
-      })?.[1];
-    expect(action('docker ps')).toBe('ask');
-    expect(action('tail -n 50 logs/setup.log')).toBe('ask');
-    expect(action('docker inspect nanoclaw-iron-proxy')).toBe('ask');
-    expect(action('curl -x http://proxy:8080 https://example.com')).toBe('ask');
-    expect(action('docker rm -f nanoclaw-iron-proxy')).toBe('deny');
-    expect(action('docker stop nanoclaw-iron-control')).toBe('deny');
-    expect(action('launchctl unload ~/Library/LaunchAgents/com.nanoclaw.plist')).toBe('deny');
-    // Variants with options between the tool and the verb.
-    expect(action('docker compose -f compose.yml down')).toBe('deny');
-    expect(action('docker container rm nanoclaw-iron-proxy')).toBe('deny');
-    expect(action('systemctl --user --no-block stop nanoclaw.service')).toBe('deny');
-    expect(action('launchctl bootout gui/501/com.nanoclaw')).toBe('deny');
-    // OpenCode extracts `ls` from `(ls) > src/index.ts`; it must still ask.
-    expect(action('ls')).toBe('ask');
-    expect(action('ncl groups restart --id g1 --rebuild --message "get ready"')).toBe('ask');
-    expect(action('cat .env')).toBe('ask');
+    expect(JSON.parse(edge.spawn.mock.calls[0][2].env.OPENCODE_PERMISSION)).toEqual({ edit: 'ask', bash: 'ask' });
   });
 
   it('keeps native configuration free of the maintenance override', async () => {
@@ -353,7 +263,6 @@ describe('existing setup failure-assist hook', () => {
       contextFile = JSON.parse(args[1].slice('Read '.length).split(' and follow')[0]);
       expect(fs.readFileSync(contextFile, 'utf8')).toContain('PRIVATE FAILURE DETAIL');
       expect(fs.readFileSync(contextFile, 'utf8')).toContain('Authentication callback failed');
-      for (const line of ASSIST_GUARDRAILS) expect(fs.readFileSync(contextFile, 'utf8')).toContain(line);
       expect(fs.statSync(contextFile).mode & 0o777).toBe(0o600);
       expect(fs.statSync(path.dirname(contextFile)).mode & 0o777).toBe(0o700);
       expect(JSON.stringify(args)).not.toContain('PRIVATE FAILURE DETAIL');
@@ -403,27 +312,19 @@ describe('existing setup failure-assist hook', () => {
     });
     await runHostOpenCode(['--update'], root);
   });
-  it('asks before every update command but leaves the cutover to the update skill', async () => {
+  it('asks before every edit and command in debug and update sessions', async () => {
     touch(path.join(root, 'bin/opencode'));
-    let permission: { edit: string; bash: Record<string, string> } | undefined;
-    let context = '';
-    edge.spawn.mockImplementation((_binary: string, args: string[], options: { env: Record<string, string> }) => {
-      context = fs.readFileSync(JSON.parse(args[1].slice('Read '.length).split(' and follow')[0]), 'utf8');
-      permission = JSON.parse(options.env.OPENCODE_PERMISSION);
+    const permissions: Record<string, string>[] = [];
+    edge.spawn.mockImplementation((_binary: string, _args: string[], options: { env: Record<string, string> }) => {
+      permissions.push(JSON.parse(options.env.OPENCODE_PERMISSION));
       const child = new EventEmitter();
       queueMicrotask(() => child.emit('close', 0));
       return child;
     });
     await runHostOpenCode(['--update'], root);
-    expect(permission!.edit).toBe('ask');
-    expect(permission!.bash['*']).toBe('ask');
-    // The update skill stops the service and drains containers itself.
-    expect(Object.values(permission!.bash)).not.toContain('deny');
-    expect(context).not.toContain(ASSIST_GUARDRAILS[1]);
-
     await runHostOpenCode(['--debug'], root);
-    expect(permission!.bash['docker rm *']).toBe('deny');
-    for (const line of ASSIST_GUARDRAILS) expect(context).toContain(line);
+    expect(permissions).toHaveLength(2);
+    for (const permission of permissions) expect(permission).toMatchObject({ edit: 'ask', bash: 'ask' });
   });
 });
 

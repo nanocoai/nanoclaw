@@ -54,7 +54,7 @@ vi.mock('./runner.js', () => ({ ensureAnswer: (v: unknown) => v }));
 
 import { EventEmitter } from 'events';
 
-import { ASSIST_GUARDRAILS, DESTRUCTIVE_COMMANDS } from './assist-guardrails.js';
+import { ASSIST_GUARDRAILS } from './assist-guardrails.js';
 import { offerClaudeOnFailure } from './claude-handoff.js';
 import { setPickedProvider } from './picked-provider.js';
 import { registerSetupProvider, type FailureAssistResult } from '../providers/registry.js';
@@ -178,7 +178,7 @@ describe('offerClaudeOnFailure provider dispatch', () => {
 });
 
 describe('interactive Claude failure handoff', () => {
-  it('hard-denies destructive commands and carries the guardrails', async () => {
+  it('carries the live-install context', async () => {
     ce.spawn.mockImplementation(() => {
       const child = new EventEmitter();
       queueMicrotask(() => child.emit('close', 0));
@@ -189,15 +189,6 @@ describe('interactive Claude failure handoff', () => {
 
     const [binary, args] = ce.spawn.mock.calls[0] as [string, string[]];
     expect(binary).toBe('claude');
-    // auto mode stays (the operator is at the terminal); deny rules hold in
-    // every permission mode, auto included.
-    expect(args[args.indexOf('--permission-mode') + 1]).toBe('auto');
-    const denied = args.slice(args.indexOf('--disallowedTools') + 1);
-    for (const command of DESTRUCTIVE_COMMANDS) expect(denied).toContain(`Bash(${command})`);
     for (const line of ASSIST_GUARDRAILS) expect(args[0]).toContain(line);
-    // auto mode approves file edits on its own; ask rules outrank allow rules
-    // and are honored in auto mode, so every edit reaches the operator.
-    const settings = JSON.parse(args[args.indexOf('--settings') + 1]);
-    expect(settings.permissions.ask).toEqual(['Edit', 'Write', 'NotebookEdit']);
   });
 });

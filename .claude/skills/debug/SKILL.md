@@ -91,16 +91,6 @@ Reading the flow:
 - `messages_out` has a reply but the user never received it → a delivery problem (see issue 1 below).
 - `messages_in` is empty → routing never reached this session (check the router log lines and the central wiring with `ncl wirings list`).
 
-## Working on a live install
-
-Setup's failure assist (Claude, Codex or OpenCode on the operator's machine) starts from this skill. The install it debugs is live, so:
-
-- Never stop, remove or recreate containers, volumes or networks. A container that looks stale can belong to the gateway or to other software on the machine.
-- Never stop or unload the NanoClaw service (`launchctl unload`/`bootout`, `systemctl stop`/`disable`). Ask before restarting it.
-- Ask before editing `.env`, gateway files or source code, and before rebuilding the image.
-- Never print or pass credentials. `docker inspect` shows container env, which holds gateway credentials. Don't put proxy URLs or tokens on a command line.
-- Propose a repair and explain it. Setup retries the failed step to verify it.
-
 ## Repairing the gateway
 
 If the installed credential gateway is unreachable, unhealthy, or its containers are missing, re-run its setup step from the checkout:
@@ -109,7 +99,7 @@ If the installed credential gateway is unreachable, unhealthy, or its containers
 pnpm exec tsx setup/index.ts --step gateway
 ```
 
-The step detects the installed gateway, refreshes its payload and reconciles its services. Don't recreate gateway containers by hand with `docker run`/`docker rm`, and keep the gateway's database volumes and keys together: never generate replacement keys for an existing database. After the step succeeds, retry the failed setup step, or restart the service (see issue 1 below) on a finished install.
+The step detects the installed gateway and checks it. For a gateway whose setup manages its own services, it also refreshes the payload and reconciles those services; otherwise it only reports whether the gateway is up, so follow that gateway's own start instructions. Don't recreate gateway containers by hand with `docker run`/`docker rm`, and keep the gateway's database volumes and keys together: never generate replacement keys for an existing database. After the step succeeds, retry the failed setup step, or restart the service (see issue 1 below) on a finished install.
 
 ## Common Issues
 
@@ -140,7 +130,7 @@ grep "Channel adapter started" logs/nanoclaw.log | tail -10
 
 **Fix:**
 1. Identify which service has the correct binary and EnvironmentFile (the one whose log shows the expected channels — e.g. `signal`, `telegram`, `cli` — all started).
-2. Stop and disable the stale duplicate service. A setup assist proposes these commands and the operator runs them:
+2. Stop and disable the stale duplicate service:
    ```bash
    systemctl --user stop nanoclaw.service   # or whichever is the old one
    systemctl --user disable nanoclaw.service
