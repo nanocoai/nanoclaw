@@ -10,9 +10,8 @@ NanoClaw's uninstall flow removes this copy's gateway material with its other da
 Iron Control's `web` and `database` containers carry the same `nanoclaw-install`
 and `nanoclaw-role=gateway` labels as the central proxy. A container with the
 install label, the gateway role (`nanoclaw-role=gateway`) and no session label
-is gateway-owned:
-the update drain and the host's residue reaping leave it alone
-(https://github.com/nanocoai/nanoclaw/pull/3948, which lands first). The
+is gateway-owned (`GATEWAY_ROLE`, see `docs/gateway-seam.md`): the update drain
+and the host's residue reaping leave it alone. The
 uninstaller does not read the role; a Compose project is this copy's when every
 container in it carries this copy's install label. With the data group it then
 removes the project's containers, database volume and network, because the

@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { installCommand } from './install-command.js';
 
 import { stringify as yaml } from 'yaml';
-import { LABELS } from '../../../../src/drivers/types.js';
+import { GATEWAY_ROLE, LABELS } from '../../../../src/drivers/types.js';
 import { getInstallSlug } from '../../../../src/install-slug.js';
 import { upsertEnvVar } from '../../../../setup/set-env.js';
 
@@ -51,7 +51,7 @@ export function controlCompose(root: string, port: number): string {
   // this project's volume and network; the role keeps the host's residue
   // reaping off a running gateway. Never on the volume: Compose would offer
   // to recreate an existing one (data loss) when its labels change.
-  const labels = { [LABELS.install]: getInstallSlug(root), [LABELS.role]: 'gateway' };
+  const labels = { [LABELS.install]: getInstallSlug(root), [LABELS.role]: GATEWAY_ROLE };
   return yaml({
     name: p.project,
     services: {

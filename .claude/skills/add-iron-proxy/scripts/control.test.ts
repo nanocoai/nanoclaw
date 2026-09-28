@@ -8,7 +8,7 @@ import { controlCompose, controlPaths, controlPort, installControl } from './con
 import { hasFrontProxy, frontProxyHash } from './build-managed-proxy.js';
 import { installCommand } from './install-command.js';
 import { getInstallSlug } from '../../../../src/install-slug.js';
-import { LABELS } from '../../../../src/drivers/types.js';
+import { GATEWAY_ROLE, LABELS } from '../../../../src/drivers/types.js';
 
 vi.mock('./install-command.js', async (importActual) => ({
   ...(await importActual<typeof import('./install-command.js')>()),
@@ -59,7 +59,7 @@ describe('official Iron Control installation', () => {
   it('labels both services like the central proxy, and neither the volume nor the network', () => {
     const root = temporary();
     const config = yaml(controlCompose(root, 18443));
-    const labels = { [LABELS.install]: getInstallSlug(root), [LABELS.role]: 'gateway' };
+    const labels = { [LABELS.install]: getInstallSlug(root), [LABELS.role]: GATEWAY_ROLE };
     expect(config.services.web.labels).toEqual(labels);
     expect(config.services.database.labels).toEqual(labels);
     expect(Object.keys(config.services.web).slice(0, 4)).toEqual(['image', 'platform', 'restart', 'labels']);
