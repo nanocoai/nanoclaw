@@ -14,9 +14,11 @@
  * channelType stays 'slack' either way, so user ids, formatting, container
  * config, and the wiring-defaults declaration are shared across instances.
  */
-import { createSlackAdapter, type SlackAdapter } from '@chat-adapter/slack';
+import { cardToBlockKit, createSlackAdapter, type SlackAdapter } from '@chat-adapter/slack';
+import { Actions, Card, CardText, LinkButton } from 'chat';
 
 import { readEnvFile } from '../env.js';
+import { log } from '../log.js';
 import type { ChannelAdapter, ChannelContextDefaults, ChannelDefaults } from './adapter.js';
 import { createChatSdkBridge } from './chat-sdk-bridge.js';
 import { registerChannelAdapter } from './channel-registry.js';
@@ -127,6 +129,174 @@ export async function resolveSlackConversation(
   }
 }
 
+/** Slack Block Kit limits that apply to a collapsible card. */
+const CONTAINER_TITLE_MAX = 150;
+const CONTAINER_CHILD_BLOCKS_MAX = 10;
+const MESSAGE_BLOCKS_MAX = 50;
+// Section text caps at 3000 characters; the margin leaves room for the
+// emoji and bold conversion cardToBlockKit applies.
+const SECTION_TEXT_MAX = 2900;
+
+type SlackBlock = Record<string, unknown>;
+
+/**
+ * The display-card override the Chat SDK bridge accepts as `postCard`. Typed
+ * here so this adapter compiles against a bridge that predates the option;
+ * such a bridge simply never calls it.
+ */
+type PostCard = (
+  threadId: string,
+  cardSpec: Record<string, unknown>,
+  fallbackText: string,
+) => Promise<string | undefined>;
+
+/** The slice of SlackAdapter the collapsible-card post needs. */
+export type SlackCardPoster = Pick<SlackAdapter, 'decodeThreadId' | 'webClient'>;
+
+interface CollapsibleChild {
+  collapsible: true;
+  title?: unknown;
+  text: string;
+}
+
+function isCollapsibleChild(child: unknown): child is CollapsibleChild {
+  if (!child || typeof child !== 'object') return false;
+  const { collapsible, text } = child as Record<string, unknown>;
+  return collapsible === true && typeof text === 'string' && text.trim() !== '';
+}
+
+function truncate(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+}
+
+/**
+ * Split text into chunks of at most `max` characters, breaking at the last
+ * newline inside each window when there is one. Past `maxChunks` the rest is
+ * dropped and the final chunk ends in an ellipsis.
+ */
+function splitText(text: string, max: number, maxChunks: number): string[] {
+  const chunks: string[] = [];
+  let rest = text;
+  while (rest.length > max && chunks.length < maxChunks - 1) {
+    const newline = rest.lastIndexOf('\n', max);
+    const cut = newline > 0 ? newline : max;
+    chunks.push(rest.slice(0, cut));
+    rest = rest.slice(newline > 0 ? cut + 1 : cut);
+  }
+  chunks.push(truncate(rest, max));
+  return chunks.filter((chunk) => chunk.trim() !== '');
+}
+
+function textBlocks(texts: string[]): SlackBlock[] {
+  if (texts.length === 0) return [];
+  return cardToBlockKit(Card({ children: texts.map((t) => CardText(t)) })) as SlackBlock[];
+}
+
+function collapsibleContainer(child: CollapsibleChild): SlackBlock {
+  const title = typeof child.title === 'string' && child.title.trim() ? child.title.trim() : 'Details';
+  return {
+    type: 'container',
+    title: { type: 'plain_text', text: truncate(title, CONTAINER_TITLE_MAX) },
+    is_collapsible: true,
+    default_collapsed: true,
+    child_blocks: textBlocks(splitText(child.text, SECTION_TEXT_MAX, CONTAINER_CHILD_BLOCKS_MAX)),
+  };
+}
+
+function linkButtonBlocks(actions: unknown): SlackBlock[] {
+  if (!Array.isArray(actions)) return [];
+  const buttons = actions
+    .filter(
+      (a): a is Record<string, unknown> =>
+        !!a &&
+        typeof a === 'object' &&
+        typeof a.url === 'string' &&
+        !!a.url &&
+        typeof a.label === 'string' &&
+        !!a.label,
+    )
+    .map((a) =>
+      LinkButton({
+        label: a.label as string,
+        url: a.url as string,
+        style: a.style === 'primary' || a.style === 'danger' || a.style === 'default' ? a.style : undefined,
+      }),
+    );
+  if (buttons.length === 0) return [];
+  return cardToBlockKit(Card({ children: [Actions(buttons)] })) as SlackBlock[];
+}
+
+/** True when a send_card spec carries at least one collapsible section. */
+export function hasCollapsibleChild(cardSpec: Record<string, unknown>): boolean {
+  return Array.isArray(cardSpec.children) && cardSpec.children.some(isCollapsibleChild);
+}
+
+/**
+ * Block Kit for a send_card spec, in spec order: the title as a header, the
+ * description and plain children as sections, each collapsible section as a
+ * `container` block that starts collapsed, then link actions as buttons.
+ * Non-collapsible parts go through cardToBlockKit, so they render exactly as
+ * the default card does. Returns null when the result exceeds Slack's
+ * per-message block limit.
+ */
+export function buildCollapsibleCardBlocks(cardSpec: Record<string, unknown>): SlackBlock[] | null {
+  const title = typeof cardSpec.title === 'string' ? cardSpec.title : '';
+  const blocks: SlackBlock[] = title ? (cardToBlockKit(Card({ title })) as SlackBlock[]) : [];
+  let pending: string[] =
+    typeof cardSpec.description === 'string' && cardSpec.description ? [cardSpec.description] : [];
+
+  for (const child of Array.isArray(cardSpec.children) ? cardSpec.children : []) {
+    if (isCollapsibleChild(child)) {
+      blocks.push(...textBlocks(pending), collapsibleContainer(child));
+      pending = [];
+    } else if (typeof child === 'string' && child) {
+      pending.push(child);
+    } else if (child && typeof child === 'object' && typeof (child as Record<string, unknown>).text === 'string') {
+      const text = (child as Record<string, string>).text;
+      if (text) pending.push(text);
+    }
+  }
+  blocks.push(...textBlocks(pending), ...linkButtonBlocks(cardSpec.actions));
+  return blocks.length > MESSAGE_BLOCKS_MAX ? null : blocks;
+}
+
+/**
+ * Post a send_card spec that carries collapsible sections as native Block
+ * Kit. Returns the message ts, or undefined — for a card without collapsible
+ * sections, one over Slack's limits, or any Slack API failure — so the
+ * bridge posts its default card instead.
+ */
+export async function postSlackCollapsibleCard(
+  slackAdapter: SlackCardPoster,
+  threadId: string,
+  cardSpec: Record<string, unknown>,
+  fallbackText: string,
+): Promise<string | undefined> {
+  if (!hasCollapsibleChild(cardSpec)) return undefined;
+  const blocks = buildCollapsibleCardBlocks(cardSpec);
+  if (!blocks) return undefined;
+  try {
+    const { channel, threadTs } = slackAdapter.decodeThreadId(threadId);
+    // Slack's typed block union predates the container block; the body is
+    // plain Block Kit JSON, so it is handed over as the call's own argument type.
+    const args = {
+      channel,
+      thread_ts: threadTs || undefined,
+      text: fallbackText,
+      blocks,
+      unfurl_links: false,
+      unfurl_media: false,
+    } as unknown as Parameters<SlackCardPoster['webClient']['chat']['postMessage']>[0];
+    const result = await slackAdapter.webClient.chat.postMessage(args);
+    return result.ts;
+  } catch (err) {
+    log.warn('Slack collapsible card failed, posting the default card', {
+      err: err instanceof Error ? err.message : String(err),
+    });
+    return undefined;
+  }
+}
+
 /** Construction knobs for one Slack bot identity. */
 export interface SlackBridgeOptions {
   /**
@@ -174,14 +344,17 @@ export function createSlackBridge(options: SlackBridgeOptions = {}): ChannelAdap
     appToken,
     mode: appToken ? 'socket' : 'webhook',
   });
-  const bridge = createChatSdkBridge({
+  const bridgeConfig: Parameters<typeof createChatSdkBridge>[0] & { postCard?: PostCard } = {
     adapter: slackAdapter,
     extractRawText: extractSlackRawText,
     instance: options.instanceKey, // undefined ⇒ default instance (keyed by channelType)
     concurrency: 'concurrent',
     supportsThreads: true,
     defaults: SLACK_DEFAULTS,
-  });
+    postCard: (threadId, cardSpec, fallbackText) =>
+      postSlackCollapsibleCard(slackAdapter, threadId, cardSpec, fallbackText),
+  };
+  const bridge = createChatSdkBridge(bridgeConfig);
   bridge.resolveChannelName = async (platformId: string) => {
     try {
       const info = await slackAdapter.fetchThread(platformId);
