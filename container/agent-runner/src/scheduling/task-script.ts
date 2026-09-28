@@ -21,13 +21,22 @@ export async function runScript(
   taskId: string,
   timeoutMs: number = SCRIPT_TIMEOUT_MS,
 ): Promise<ScriptResult | null> {
-  const scriptPath = path.join('/tmp', `task-script-${taskId}.sh`);
+  // Honor the script's own shebang (fork): a task script starting with `#!`
+  // is executed directly so the kernel resolves its interpreter — a
+  // `#!/usr/bin/env node` task runs under node, not bash. Everything else
+  // keeps the historical `bash <file>` invocation. Forcing bash on a
+  // shebang'd script makes bash parse the interpreter line as a comment and
+  // the script body as shell, which fails every run. Extensionless temp name
+  // for shebang'd scripts: runtimes that sniff extensions (bun) would
+  // otherwise re-route a `.sh` file to their own shell.
+  const hasShebang = script.startsWith('#!');
+  const scriptPath = path.join('/tmp', `task-script-${taskId}${hasShebang ? '' : '.sh'}`);
   fs.writeFileSync(scriptPath, script, { mode: 0o755 });
 
   return new Promise((resolve) => {
     execFile(
-      'bash',
-      [scriptPath],
+      hasShebang ? scriptPath : 'bash',
+      hasShebang ? [] : [scriptPath],
       { timeout: timeoutMs, maxBuffer: SCRIPT_MAX_BUFFER, env: process.env },
       (error, stdout, stderr) => {
         try {

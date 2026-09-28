@@ -53,6 +53,17 @@ describe('script-skip ack chain (container leg)', () => {
     expect(ackStatus('t-err')).toBe('script-skip:error');
   });
 
+
+  it('a shebang\'d script runs under its declared interpreter, not bash', async () => {
+    // Bash would parse the node code as shell and fail with syntax errors;
+    // honoring the shebang lets the kernel pick the interpreter.
+    insertTask('t-node', '#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({ wakeAgent: true }))');
+    const { keep, skipped } = await applyPreTaskScripts(getPendingMessages());
+
+    expect(skipped).toHaveLength(0);
+    expect(keep).toHaveLength(1);
+  });
+
   it('a deliberate wakeAgent=false gate acks plain completed — never backs off', async () => {
     insertTask('t-gated', 'echo \'{"wakeAgent": false}\'');
     const { keep, skipped } = await applyPreTaskScripts(getPendingMessages());
