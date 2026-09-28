@@ -407,7 +407,7 @@ describe('update-nanoclaw transaction end to end', () => {
     state = await validateUpdate(fixture.install, state.id, runtime);
     state = await cutoverUpdate(fixture.install, state.id, runtime);
     fs.writeFileSync(path.join(fixture.install, '.env'), 'EXAMPLE=post-update\n');
-    fs.rmSync(dataLink);
+    fs.unlinkSync(dataLink);
     fs.symlinkSync(path.relative(fixture.install, replacementData), dataLink);
 
     await expect(rollbackUpdate(fixture.install, state.id, runtime)).rejects.toThrow(
