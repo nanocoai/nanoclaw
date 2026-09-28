@@ -9,7 +9,8 @@ pnpm exec tsx .claude/skills/add-iron-proxy/scripts/setup.ts --remove
 NanoClaw's uninstall flow removes this copy's gateway material with its other data.
 Iron Control's `web` and `database` containers carry the same `nanoclaw-install`
 and `nanoclaw-role=gateway` labels as the central proxy. A container with the
-install label, a role other than `agent` and no session label is gateway-owned:
+install label, the gateway role (`nanoclaw-role=gateway`) and no session label
+is gateway-owned:
 the update drain and the host's residue reaping leave it alone
 (https://github.com/nanocoai/nanoclaw/pull/3948, which lands first). The
 uninstaller does not read the role; a Compose project is this copy's when every

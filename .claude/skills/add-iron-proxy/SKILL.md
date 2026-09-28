@@ -69,7 +69,7 @@ pnpm exec tsx .claude/skills/add-iron-proxy/scripts/setup.ts --with-control
   Keep the database volume and encryption keys together; do not generate replacement
   keys for an existing database. `nanoclaw uninstall` removes both together: the
   containers carry this copy's `nanoclaw-install` and `nanoclaw-role=gateway` labels
-  (gateway-owned: a non-agent role and no session, so the update drain and residue
+  (gateway-owned: the gateway role and no session, so the update drain and residue
   reaping keep them), and the uninstaller removes their Compose project's volume and
   network with `data/`.
   If the folder was deleted by hand, the error prints the `docker rm -f` and
