@@ -31,7 +31,6 @@ vi.mock('./theme.js', async (importActual) => ({
   note: vi.fn(),
 }));
 
-import { ASSIST_GUARDRAILS, GATEWAY_REPAIR_COMMAND } from './assist-guardrails.js';
 import { offerClaudeAssist } from './claude-assist.js';
 
 beforeEach(() => {
@@ -84,17 +83,11 @@ describe('non-interactive Claude assist', () => {
       'Glob',
     ]);
   });
-
-  it('tells Claude the guardrails and the supported gateway repair', async () => {
-    ca.confirms.push(true, false);
-    await offerClaudeAssist({ stepName: 'gateway', msg: 'boom' }, '/tmp/nanoclaw');
-    for (const line of ASSIST_GUARDRAILS) expect(ca.stdin).toContain(line);
-  });
 });
 
-it('the debug skill documents the gateway repair the guardrails name', () => {
+it('the debug skill documents the supported gateway repair', () => {
   // actual fs: only child_process is mocked in this file.
   const skill = fs.readFileSync('.claude/skills/debug/SKILL.md', 'utf8');
   expect(skill).toContain('## Repairing the gateway');
-  expect(skill).toContain(GATEWAY_REPAIR_COMMAND);
+  expect(skill).toContain('pnpm exec tsx setup/index.ts --step gateway');
 });

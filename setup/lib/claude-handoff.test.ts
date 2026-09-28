@@ -12,7 +12,6 @@ const ce = vi.hoisted(() => ({
   ensureClaudeReady: vi.fn(async () => true),
   isClaudeReady: vi.fn(() => false),
   offerClaudeAssist: vi.fn(async () => false),
-  spawn: vi.fn(),
 }));
 
 vi.mock('./claude-assist.js', async (importActual) => {
@@ -42,19 +41,10 @@ vi.mock('@clack/prompts', async (importActual) => {
   };
 });
 
-// A stand-in `claude` that exits at once, so the handoff's argv can be checked.
-vi.mock('child_process', async (importActual) => ({
-  ...(await importActual<typeof import('child_process')>()),
-  spawn: ce.spawn,
-}));
-
 // ensureAnswer only unwraps clack's cancel symbol; pass values through so the
 // test doesn't drag the full runner module (and its transitive imports) in.
 vi.mock('./runner.js', () => ({ ensureAnswer: (v: unknown) => v }));
 
-import { EventEmitter } from 'events';
-
-import { ASSIST_GUARDRAILS } from './assist-guardrails.js';
 import { offerClaudeOnFailure } from './claude-handoff.js';
 import { setPickedProvider } from './picked-provider.js';
 import { registerSetupProvider, type FailureAssistResult } from '../providers/registry.js';
@@ -174,23 +164,5 @@ describe('offerClaudeOnFailure provider dispatch', () => {
     process.env.NANOCLAW_SETUP_ASSIST_MODE = 'true';
     await offerClaudeOnFailure(CTX, '/tmp');
     expect(ce.offerClaudeAssist).toHaveBeenCalledOnce();
-  });
-});
-
-describe('interactive Claude failure handoff', () => {
-  it('carries the live-install context', async () => {
-    ce.spawn.mockImplementation(() => {
-      const child = new EventEmitter();
-      queueMicrotask(() => child.emit('close', 0));
-      return child;
-    });
-    // Claude is usable, so the handoff is offered whether or not a runtime was picked.
-    ce.isClaudeReady.mockReturnValue(true);
-    ce.confirms.push(true);
-    expect(await offerClaudeOnFailure(CTX, '/tmp')).toBe(true);
-
-    const [binary, args] = ce.spawn.mock.calls[0] as [string, string[]];
-    expect(binary).toBe('claude');
-    for (const line of ASSIST_GUARDRAILS) expect(args[0]).toContain(line);
   });
 });

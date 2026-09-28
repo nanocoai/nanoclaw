@@ -38,7 +38,6 @@ import * as p from '@clack/prompts';
 import k from 'kleur';
 
 import { getSetupProvider } from '../providers/registry.js';
-import { assistGuardrails } from './assist-guardrails.js';
 import {
   type AssistContext,
   BIG_PICTURE_FILES,
@@ -329,7 +328,6 @@ function buildFailurePrompt(ctx: AssistContext, projectRoot: string): string {
     'Relevant files (read as needed with the Read tool):',
   );
   for (const f of references) lines.push(`  - ${f}`);
-  lines.push('', assistGuardrails());
 
   return lines.join('\n');
 }

@@ -69,20 +69,8 @@ export function findHostOpenCode(root: string): { binary: string; version: strin
 /**
  * OpenCode allows edits and commands by default. OPENCODE_PERMISSION merges
  * after the global and project config, so maintenance sessions ask first.
- * The context file sits in a private temp dir outside the checkout, which
- * OpenCode would also ask to read: that dir alone is allowed, under both
- * spellings (macOS resolves the temp dir through /private). A path OpenCode
- * would read as a wildcard gets no grant.
  */
-export function maintenancePermission(contextDir?: string): string {
-  const dirs = contextDir ? [...new Set([contextDir, fs.realpathSync(contextDir)])] : [];
-  const grant = dirs.length && !dirs.some((dir) => /[*?]/.test(dir));
-  return JSON.stringify({
-    edit: 'ask',
-    bash: 'ask',
-    ...(grant && { external_directory: Object.fromEntries(dirs.map((dir) => [`${dir}/*`, 'allow'])) }),
-  });
-}
+export const MAINTENANCE_PERMISSION = JSON.stringify({ edit: 'ask', bash: 'ask' });
 
 function run(
   binary: string,
@@ -166,8 +154,7 @@ export const hostOpenCode = {
     const args = contextFile
       ? ['--prompt', `Read ${JSON.stringify(contextFile)} and follow the maintenance request inside it.`]
       : [];
-    const permission = maintenancePermission(contextFile && path.dirname(contextFile));
-    return run(binary, args, root, { ...process.env, OPENCODE_PERMISSION: permission });
+    return run(binary, args, root, { ...process.env, OPENCODE_PERMISSION: MAINTENANCE_PERMISSION });
   },
 };
 

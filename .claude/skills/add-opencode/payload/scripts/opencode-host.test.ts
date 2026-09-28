@@ -203,38 +203,7 @@ describe('native host OpenCode lifecycle', () => {
     expect(options.env.PATH).toBe(process.env.PATH);
     // OPENCODE_PERMISSION merges after the global and project config, so it
     // wins over an operator's top-level allow-all.
-    const permission = JSON.parse(options.env.OPENCODE_PERMISSION);
-    expect(permission).toMatchObject({ edit: 'ask', bash: 'ask' });
-    expect(Object.keys(permission).sort()).toEqual(['bash', 'edit', 'external_directory']);
-  });
-
-  it('lets the session read its own context file and nothing else outside the checkout', async () => {
-    touch(path.join(root, 'bin/opencode'));
-    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'opencode-context-'));
-    try {
-      const context = path.join(outside, 'context.md');
-      touch(context, 'request');
-      await hostOpenCode.launch(root, context);
-      const permission = JSON.parse(edge.spawn.mock.calls[0][2].env.OPENCODE_PERMISSION);
-      // OpenCode asks with `<dir>/*` for the path the model passes; macOS
-      // resolves the temp dir through /private, so allow both spellings.
-      expect(permission.external_directory).toEqual({
-        [`${outside}/*`]: 'allow',
-        [`${fs.realpathSync(outside)}/*`]: 'allow',
-      });
-    } finally {
-      fs.rmSync(outside, { recursive: true, force: true });
-    }
-  });
-
-  it('grants no external directory whose path OpenCode would read as a wildcard', async () => {
-    touch(path.join(root, 'bin/opencode'));
-    const parent = path.join(root, 'team?');
-    fs.mkdirSync(parent);
-    const context = path.join(fs.mkdtempSync(path.join(parent, 'ctx-')), 'context.md');
-    touch(context, 'request');
-    await hostOpenCode.launch(root, context);
-    expect(JSON.parse(edge.spawn.mock.calls[0][2].env.OPENCODE_PERMISSION)).toEqual({ edit: 'ask', bash: 'ask' });
+    expect(JSON.parse(options.env.OPENCODE_PERMISSION)).toEqual({ edit: 'ask', bash: 'ask' });
   });
 
   it('keeps native configuration free of the maintenance override', async () => {
@@ -324,7 +293,7 @@ describe('existing setup failure-assist hook', () => {
     await runHostOpenCode(['--update'], root);
     await runHostOpenCode(['--debug'], root);
     expect(permissions).toHaveLength(2);
-    for (const permission of permissions) expect(permission).toMatchObject({ edit: 'ask', bash: 'ask' });
+    for (const permission of permissions) expect(permission).toEqual({ edit: 'ask', bash: 'ask' });
   });
 });
 

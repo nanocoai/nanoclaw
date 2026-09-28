@@ -28,7 +28,6 @@ import path from 'path';
 import * as p from '@clack/prompts';
 import k from 'kleur';
 
-import { assistGuardrails } from './assist-guardrails.js';
 import { extractClaudeOAuthToken } from './captured-token.js';
 import { ensureAnswer } from './runner.js';
 import { brandBody, fitToWidth, fmtDuration, note } from './theme.js';
@@ -276,9 +275,6 @@ function buildPrompt(ctx: AssistContext, projectRoot: string): string {
     'If no safe single command can fix it, respond with:',
     'REASON: <why>',
     'COMMAND: none',
-    '',
-    'The suggested command must follow these too.',
-    assistGuardrails(),
   ].join('\n');
 }
 

@@ -46,9 +46,8 @@ erase those records. The helper requires stable OpenCode 1.18.25 or newer with
 `--debug`, `--update` and failure help launch it with an `OPENCODE_PERMISSION`
 override, so OpenCode asks before every edit and command even when the
 operator's top-level config allows them (OpenCode itself skips the prompt for
-a bare redirection with no command, such as `> file`). The session's context
-file sits in a private temp dir outside the checkout; that dir is readable
-without a prompt. `--configure` keeps OpenCode's native permissions.
+a bare redirection with no command, such as `> file`). `--configure` keeps
+OpenCode's native permissions.
 Automatic help before payload
 installation is optional and is not part of the runtime contract.
 
