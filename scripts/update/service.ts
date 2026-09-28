@@ -221,7 +221,9 @@ export const CUTOVER_STOP_CLI_TIMEOUT_MS = 30_000;
 /** Bound on each `docker ps` poll, for the same reason. */
 export const CUTOVER_LIST_CLI_TIMEOUT_MS = 15_000;
 
+/** Copies of `LABELS` and `GATEWAY_ROLE` (src/drivers/types.ts); a test pins them equal. */
 export const DRAIN_LIST_FORMAT = '{{.ID}}|{{.Label "nanoclaw-session"}}|{{.Label "nanoclaw-role"}}';
+export const CONTROLLER_GATEWAY_ROLE = 'gateway';
 
 /**
  * Stop this install's containers, then wait until the runtime lists none.
@@ -234,11 +236,10 @@ export const DRAIN_LIST_FORMAT = '{{.ID}}|{{.Label "nanoclaw-session"}}|{{.Label
  *
  * Stopping here, after the service is down, is race-free: nothing is left that
  * could spawn a replacement (the manual `docker stop` before cutover was not).
- * The filter is the install label — agent containers plus any per-session
- * auxiliary — minus gateway-owned containers (role=gateway with no session,
- * e.g. the Iron central proxy): nothing recreates those at host start. Same
- * rule as `isGatewayOwned` in src/drivers/types.ts, inlined to keep the
- * controller's imports small. The OneCLI gateway carries no install label.
+ * The filter is the install label (agent containers plus per-session
+ * auxiliaries) minus gateway-owned ones (role=gateway, no session): nothing
+ * recreates those at host start. Same rule as `isGatewayOwned` in
+ * src/drivers/types.ts, inlined to keep the controller's imports small.
  *
  * A container mid-turn is stopped as well. The agent-runner has no SIGTERM
  * handler and the controller cannot read turn state from outside the host
@@ -263,7 +264,7 @@ export async function drainContainers(projectRoot: string, env: ServiceEnvironme
       .split('\n')
       .filter(Boolean)
       .map((line) => line.split('|'))
-      .filter(([, sessionId, role]) => !!sessionId || role !== 'gateway')
+      .filter(([, sessionId, role]) => !!sessionId || role !== CONTROLLER_GATEWAY_ROLE)
       .map(([id]) => id);
     return { ok: listed.ok, ids };
   };
@@ -295,9 +296,8 @@ export async function drainContainers(projectRoot: string, env: ServiceEnvironme
 
 /**
  * Restart this install's gateway-owned containers (see drainContainers).
- * A snapshot restore replaces `data/`, and a container's bind mounts still
- * point at the deleted directories until it restarts: the Iron proxy would
- * keep serving with a dead approval socket and stale config. Stopped ones are
+ * A snapshot restore replaces `data/`, and a container's bind mounts keep
+ * pointing at the deleted directories until it restarts. Stopped ones are
  * included so a retried rollback recovers a restart that failed halfway.
  * Best effort: throwing here would leave the service down, so a failure is
  * logged with the recovery step instead.
@@ -315,7 +315,7 @@ export function restartGatewayContainers(projectRoot: string, env: ServiceEnviro
     .split('\n')
     .filter(Boolean)
     .map((line) => line.split('|'))
-    .filter(([, sessionId, role]) => !sessionId && role === 'gateway')
+    .filter(([, sessionId, role]) => !sessionId && role === CONTROLLER_GATEWAY_ROLE)
     .map(([id]) => id);
   if (!listed.ok) {
     env.log?.(`Cannot list gateway containers with ${runtime}; restart them or re-run the gateway's setup script.`);

@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   CUTOVER_LIST_CLI_TIMEOUT_MS,
   CUTOVER_STOP_CLI_TIMEOUT_MS,
+  CONTROLLER_GATEWAY_ROLE,
   CUTOVER_STOP_GRACE_SECONDS,
   DRAIN_LIST_FORMAT,
   createCommandRunner,
@@ -21,6 +22,7 @@ import {
   type CommandRunner,
   type ServiceEnvironment,
 } from './service.js';
+import { GATEWAY_ROLE, LABELS } from '../../src/drivers/types.js';
 
 const roots: string[] = [];
 
@@ -175,10 +177,14 @@ describe('drain and health gates', () => {
     expect(progress).toEqual(['Stopping 2 NanoClaw container(s) for cutover: aaa111, bbb222']);
   });
 
-  it('leaves gateway-owned containers running: nothing recreates the Iron proxy after cutover', async () => {
-    // The Iron central proxy carries the install label and role=gateway but no
-    // session. Stopping it at cutover let the next host start reap it, and
-    // every spawn then failed with "central container is unavailable".
+  it('keeps its inlined label contract equal to src/drivers/types.ts', () => {
+    expect(DRAIN_LIST_FORMAT).toBe(`{{.ID}}|{{.Label "${LABELS.session}"}}|{{.Label "${LABELS.role}"}}`);
+    expect(CONTROLLER_GATEWAY_ROLE).toBe(GATEWAY_ROLE);
+  });
+
+  it('leaves gateway-owned containers running through cutover', async () => {
+    // A gateway's own container carries the install label and role=gateway but
+    // no session; stopping it let the next host start reap it.
     const root = temp();
     const label = `nanoclaw-install=${slug(root)}`;
     const ps = `docker ps --filter label=${label} --format ${DRAIN_LIST_FORMAT}`;
@@ -189,7 +195,7 @@ describe('drain and health gates', () => {
       calls.push(key);
       if (args[0] === 'stop') stopped = true;
       if (key === ps)
-        return { ok: true, stdout: `${stopped ? '' : 'agent111|s1|agent\nbare444||agent\n'}iron222||gateway\n` };
+        return { ok: true, stdout: `${stopped ? '' : 'agent111|s1|agent\nbare444||agent\n'}gw222||gateway\n` };
       return { ok: true, stdout: '' };
     };
 
@@ -211,9 +217,9 @@ describe('drain and health gates', () => {
     const root = temp();
     const label = `nanoclaw-install=${slug(root)}`;
     const ps = `docker ps -a --filter label=${label} --format ${DRAIN_LIST_FORMAT}`;
-    const restart = `docker restart -t ${CUTOVER_STOP_GRACE_SECONDS} iron222`;
+    const restart = `docker restart -t ${CUTOVER_STOP_GRACE_SECONDS} gw222`;
     const { env, calls } = makeEnv('linux', {
-      [ps]: { ok: true, stdout: 'agent111|s1|agent\niron222||gateway\nold333||\nbare444||agent\n' },
+      [ps]: { ok: true, stdout: 'agent111|s1|agent\ngw222||gateway\nold333||\nbare444||agent\n' },
       [restart]: { ok: false, stdout: 'daemon error' },
     });
     const progress: string[] = [];

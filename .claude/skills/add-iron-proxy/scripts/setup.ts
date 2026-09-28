@@ -7,7 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { getInstallSlug } from '../../../../src/install-slug.js';
-import { LABELS } from '../../../../src/drivers/types.js';
+import { GATEWAY_ROLE, LABELS } from '../../../../src/drivers/types.js';
 import { upsertEnvVar } from '../../../../setup/set-env.js';
 import { installStep, installCommand, InstallCommandFailure } from './install-command.js';
 import { buildManagedProxy, hasFrontProxy } from './build-managed-proxy.js';
@@ -149,7 +149,7 @@ async function startCentralProxy(projectRoot: string): Promise<void> {
     '--label',
     centralInstallLabel(projectRoot),
     '--label',
-    `${LABELS.role}=gateway`,
+    `${LABELS.role}=${GATEWAY_ROLE}`,
     ...(uid == null ? [] : ['--user', `${uid}:${gid ?? uid}`]),
     ...centralHostGatewayArgs(),
     '--restart',

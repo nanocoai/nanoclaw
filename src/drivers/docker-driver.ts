@@ -374,8 +374,8 @@ export class DockerSessionDriver implements SessionDriver {
       log.warn('Failed to clean up orphaned containers', { err });
     }
 
-    // Pre-seam residue carries only the install label. A named role without a
-    // session belongs to an installed gateway's own lifecycle and must survive
+    // Session-less residue: pre-seam containers carry only the install label.
+    // Gateway-owned containers are the one session-less kind that must survive
     // driver reconciliation.
     try {
       const out = this.#cli.run([
@@ -390,7 +390,7 @@ export class DockerSessionDriver implements SessionDriver {
         .split('\n')
         .filter(Boolean)
         .map((line) => line.split('|'))
-        .filter(([, sessionId, role]) => !sessionId && !role)
+        .filter(([, sessionId, role]) => !sessionId && !isGatewayOwned(sessionId, role))
         .map(([name]) => name);
       for (const name of preSeam) {
         try {
