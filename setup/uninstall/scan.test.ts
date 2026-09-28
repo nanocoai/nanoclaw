@@ -145,7 +145,7 @@ describe('scanInstall compose projects', () => {
           );
           const format = args.includes('--format') ? args[args.indexOf('--format') + 1] : '{{.ID}}';
           const render = ([name, [proj]]: [string, [string, string]]) =>
-            format.includes(COMPOSE_PROJECT_LABEL) ? proj : name;
+            format.includes(COMPOSE_PROJECT_LABEL) ? proj : `id-${name}|${name}`;
           // Like docker: one line per row (empty for a missing label), nothing at all for no rows.
           return { status: 0, stdout: rows.length ? rows.map(render).join('\n') + '\n' : '' };
         }

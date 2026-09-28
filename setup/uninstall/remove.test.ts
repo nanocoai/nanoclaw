@@ -180,7 +180,11 @@ describe('executePlan', () => {
     const action: RemovalAction = { kind: 'rm-project-residue', runtime: 'docker', projects: [project] };
     /** Docker answering only label-filtered listings; removals are recorded. */
     const docker =
-      (calls: string[][], fail: (args: string[]) => boolean = () => false, containers = 'web1\ndb1\n'): RunCommand =>
+      (
+        calls: string[][],
+        fail: (args: string[]) => boolean = () => false,
+        containers = 'id1|web1\nid2|db1\n',
+      ): RunCommand =>
       (_cmd, args) => {
         calls.push(args);
         if (fail(args)) return { status: 1, stdout: '' };
@@ -200,12 +204,12 @@ describe('executePlan', () => {
       const calls: string[][] = [];
       const { notes } = executePlan([action], deps({ runCommand: docker(calls) }));
       expect(calls.slice(0, 3)).toEqual([
-        ['ps', '-a', '--filter', filter, '--format', '{{.Names}}'],
+        ['ps', '-a', '--filter', filter, '--format', '{{.ID}}|{{.Names}}'],
         ['volume', 'ls', '-q', '--filter', filter],
         ['network', 'ls', '--filter', filter, '--format', '{{.Name}}'],
       ]);
       expect(removals(calls)).toEqual([
-        ['rm', '-f', 'web1', 'db1'],
+        ['rm', '-f', 'id1', 'id2'],
         ['volume', 'rm', `${project}_database`],
         ['network', 'rm', project],
       ]);
@@ -232,7 +236,7 @@ describe('executePlan', () => {
     it('stops at the containers when they cannot be removed and gives the commands', () => {
       const calls: string[][] = [];
       const { notes } = executePlan([action], deps({ runCommand: docker(calls, (args) => args[0] === 'rm') }));
-      expect(removals(calls)).toEqual([['rm', '-f', 'web1', 'db1']]);
+      expect(removals(calls)).toEqual([['rm', '-f', 'id1', 'id2']]);
       expect(notes).toEqual([expect.stringContaining(`containers not removed. Its keys in data/ are being deleted`)]);
       expect(notes[0]).toContain(cleanup);
     });

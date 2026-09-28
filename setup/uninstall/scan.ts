@@ -244,13 +244,20 @@ export function listProject(
   runCommand: RunCommand,
   runtime: string,
   project: string,
-): { containers: string[]; volumes: string[]; networks: string[] } | null {
+): { containerIds: string[]; containers: string[]; volumes: string[]; networks: string[] } | null {
   const filter = `label=${COMPOSE_PROJECT_LABEL}=${project}`;
-  const containers = listLines(runCommand, runtime, ['ps', '-a', '--filter', filter, '--format', '{{.Names}}']);
+  // IDs to remove (a name can be reused between listing and removal), names to show.
+  const rows = listLines(runCommand, runtime, ['ps', '-a', '--filter', filter, '--format', '{{.ID}}|{{.Names}}']);
   const volumes = listLines(runCommand, runtime, ['volume', 'ls', '-q', '--filter', filter]);
   const networks = listLines(runCommand, runtime, ['network', 'ls', '--filter', filter, '--format', '{{.Name}}']);
-  if (!containers || !volumes || !networks) return null;
-  return { containers, volumes, networks };
+  if (!rows || !volumes || !networks) return null;
+  const split = rows.map((row) => row.split('|'));
+  return {
+    containerIds: split.map(([id]) => id),
+    containers: split.map(([id, name = id]) => name),
+    volumes,
+    networks,
+  };
 }
 
 /** One pasteable line per project; `;` so an empty listing doesn't skip the rest. */

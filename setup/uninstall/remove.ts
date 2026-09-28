@@ -151,7 +151,7 @@ function runAction(action: RemovalAction, deps: ExecDeps, notes: string[]): void
           continue;
         }
         // Containers first: a declined service group leaves them holding the volumes.
-        if (found.containers.length > 0 && runCommand(runtime, ['rm', '-f', ...found.containers]).status !== 0) {
+        if (found.containerIds.length > 0 && runCommand(runtime, ['rm', '-f', ...found.containerIds]).status !== 0) {
           leftover('containers not removed');
           continue;
         }
