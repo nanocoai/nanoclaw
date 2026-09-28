@@ -59,7 +59,10 @@ details. Files are mode 0600 inside a mode 0700 directory. Back up these files
 and the install-scoped PostgreSQL volume together. Recreating containers does
 not recreate keys or the database.
 
-The control-plane image and database image are pinned by digest. The native
+The control-plane image and database image are pinned by digest. On an engine
+that can neither run amd64 containers natively nor emulate them, the
+control-plane image is instead built from the pinned upstream revision and
+labelled with it; the database image is multi-architecture. The native
 proxy build uses unmodified upstream source and is pinned by source commit plus the separate NanoClaw approval-front hash. Do not
 replace it with a generic managed-mode image: managed updates would remove
 NanoClaw's local identity and approval transforms.
