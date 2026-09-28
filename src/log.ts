@@ -15,17 +15,44 @@ const FULL_RESET = '\x1b[0m';
 
 const threshold = LEVELS[(process.env.LOG_LEVEL as Level) || 'info'] ?? LEVELS.info;
 
+function safeStringify(v: unknown): string {
+  /* eslint-disable no-catch-all/no-catch-all -- logging must never throw: a throw here reaches uncaughtException, which exits the host */
+  try {
+    return JSON.stringify(v);
+  } catch {
+    // Circular refs and BigInt are the common throws; mark them instead.
+    const ancestors: object[] = [];
+    try {
+      return JSON.stringify(v, function (this: unknown, _key, value: unknown) {
+        if (typeof value === 'bigint') return `${value}n`;
+        if (typeof value !== 'object' || value === null) return value;
+        while (ancestors.length && ancestors[ancestors.length - 1] !== this) ancestors.pop();
+        if (ancestors.includes(value)) return '[Circular]';
+        ancestors.push(value);
+        return value;
+      });
+    } catch {
+      try {
+        return String(v);
+      } catch {
+        return '[Unserializable]';
+      }
+    }
+  }
+  /* eslint-enable no-catch-all/no-catch-all */
+}
+
 function formatErr(err: unknown): string {
   if (err instanceof Error) {
     return `{ type: "${err.constructor.name}", message: "${err.message}", stack: ${err.stack} }`;
   }
-  return JSON.stringify(err);
+  return safeStringify(err);
 }
 
 function formatData(data: Record<string, unknown>): string {
   const parts: string[] = [];
   for (const [k, v] of Object.entries(data)) {
-    parts.push(`${KEY_COLOR}${k}${RESET}=${k === 'err' ? formatErr(v) : JSON.stringify(v)}`);
+    parts.push(`${KEY_COLOR}${k}${RESET}=${k === 'err' ? formatErr(v) : safeStringify(v)}`);
   }
   return parts.length ? ' ' + parts.join(' ') : '';
 }
