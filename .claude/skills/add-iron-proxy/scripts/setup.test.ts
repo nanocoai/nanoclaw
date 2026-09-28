@@ -113,8 +113,8 @@ describe('Iron Proxy setup on an arm64 Linux engine', () => {
     );
     expect(message).toContain('Install Docker Buildx');
     expect(message).toContain('OneCLI gateway');
-    // Only probes ran: the engine architecture, the cached console image, Buildx.
-    expect(dockerVerbs()).toEqual(['version --format', 'image inspect', 'buildx version']);
+    // Only probes ran: the engine architecture, the cached console image, Buildx, then the daemon again.
+    expect(dockerVerbs()).toEqual(['version --format', 'image inspect', 'buildx version', 'version --format']);
     expect(engine.calls.some((call) => call[0] === 'git' || call[0] === 'python3')).toBe(false);
     expect(fs.existsSync(controlPaths(root).compose)).toBe(false);
   });

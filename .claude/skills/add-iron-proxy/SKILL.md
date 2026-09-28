@@ -78,6 +78,14 @@ pnpm exec tsx .claude/skills/add-iron-proxy/scripts/setup.ts --with-control
 - **`exec format error` at the Iron Control step, or "Iron Control has no arm64 image":**
   the engine is not amd64 and cannot run the pinned console image. Follow the
   printed options (see [Architectures](#architectures)), then re-run setup.
+- **Still `exec format error` on an arm64 machine that has QEMU binfmt:** the
+  Docker engine is a VM or a remote daemon (Colima, Lima, Podman machine, a
+  `DOCKER_HOST` elsewhere). The emulation check reads this machine's kernel, not
+  the engine's (and off Linux it assumes Docker Desktop, which always emulates), so
+  it cannot see that the engine lacks a handler; an engine-side check would cost a
+  pull, which setup avoids on purpose. Enable emulation inside the engine (the
+  `tonistiigi/binfmt` command from [Architectures](#architectures), run against that
+  engine), or choose the OneCLI gateway; then re-run setup.
 - **The database exists but keys are missing:** restore its matching `control.env`.
   Keep the database volume and encryption keys together; do not generate replacement
   keys for an existing database.

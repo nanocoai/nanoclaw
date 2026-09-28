@@ -113,11 +113,10 @@ async function probe(exec: Exec, args: string[], label: string, absentHint: stri
   }
 }
 
-export async function detectControlHost(options: ControlImageOptions = {}): Promise<ControlHost> {
-  const exec = options.exec ?? installCommand;
+async function engineArch(exec: Exec, label: string): Promise<string> {
   const arch = (
     await exec('docker', ['version', '--format', '{{.Server.Arch}}'], {
-      label: 'Check the Docker engine architecture',
+      label,
       timeoutMs: 15_000,
       capture: true,
       failureHint: 'Check that Docker is running and reachable, then retry.',
@@ -125,6 +124,12 @@ export async function detectControlHost(options: ControlImageOptions = {}): Prom
   ).trim();
   if (!/^[a-z0-9]+$/.test(arch))
     throw new Error('Docker did not report its engine architecture; check that Docker is running');
+  return arch;
+}
+
+export async function detectControlHost(options: ControlImageOptions = {}): Promise<ControlHost> {
+  const exec = options.exec ?? installCommand;
+  const arch = await engineArch(exec, 'Check the Docker engine architecture');
   return { arch, hasEmulation: arch === 'amd64' || (options.emulation ?? hasAmd64Emulation)() };
 }
 
@@ -204,8 +209,12 @@ export async function ensureControlImage(options: ControlImageOptions = {}): Pro
     report(`Using the Iron Control image built on this machine for ${host.arch}.`);
     return plan.image;
   }
-  if ((await probe(exec, ['buildx', 'version'], 'Check Docker Buildx', 'not available')) === undefined)
+  if ((await probe(exec, ['buildx', 'version'], 'Check Docker Buildx', 'not available')) === undefined) {
+    // A failed probe also looks like this when docker itself stopped working;
+    // that is an outage to report, not a missing plugin.
+    await engineArch(exec, 'Check that Docker is still reachable');
     throw new Error(blockedControlImageMessage(host.arch));
+  }
   await buildControlImage(host.arch, exec);
   return plan.image;
 }

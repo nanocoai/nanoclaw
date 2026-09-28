@@ -17,3 +17,10 @@ removes the encryption keys. Never remove another copy's volume or a shared
 database.
 
 Use the journal-derived skill removal to remove installed payload files.
+
+A console image that setup built on this machine (`nanoclaw-iron-control:<revision>-<arch>`,
+only on engines that cannot run the amd64 image) carries no install label: it is
+shared by every copy on the machine, so neither this command nor `nanoclaw uninstall`
+removes it, and a new pinned revision leaves the old one behind. Prune it yourself
+once no copy needs it: `docker rmi nanoclaw-iron-control:<revision>-<arch>` (list them
+with `docker images nanoclaw-iron-control`).

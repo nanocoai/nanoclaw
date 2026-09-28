@@ -24,7 +24,7 @@ const pins = JSON.parse(
 ) as Record<string, string>;
 
 /** A Docker engine described by architecture, Buildx, and which images it already holds. */
-function engine(spec: { arch: string; buildx: boolean; images?: Record<string, string> }) {
+function engine(spec: { arch: string; buildx: boolean; images?: Record<string, string>; diesAfter?: number }) {
   const calls: string[][] = [];
   const images = { ...(spec.images ?? {}) };
   const exec: Exec = async (command, args, options) => {
@@ -32,6 +32,12 @@ function engine(spec: { arch: string; buildx: boolean; images?: Record<string, s
     const absent = () => {
       throw new InstallCommandFailure(`${options.label}: ${options.absentHint ?? 'failed (exit 1)'}`);
     };
+    if (
+      spec.diesAfter !== undefined &&
+      command === 'docker' &&
+      calls.filter((c) => c[0] === 'docker').length > spec.diesAfter
+    )
+      throw new InstallCommandFailure(`${options.label} failed (exit 1). ${options.failureHint ?? ''}`.trim());
     if (command === 'git') return '';
     if (command !== 'docker') throw new Error(`unexpected command: ${command}`);
     if (args[0] === 'version') return `${spec.arch}\n`;
@@ -185,6 +191,19 @@ describe('ensureControlImage', () => {
       blockedControlImageMessage('arm64'),
     );
     expect(docker.calls.some((call) => call[0] === 'git' || call[2] === 'build')).toBe(false);
+  });
+
+  it('reports Docker itself failing instead of a missing Buildx plugin', async () => {
+    // The architecture check passes, then every docker call fails (a broken CLI
+    // or socket): the failed Buildx probe alone would read as a missing plugin.
+    const docker = engine({ arch: 'arm64', buildx: true, diesAfter: 1 });
+    const failure = await ensureControlImage({ exec: docker.exec, emulation: noBinfmt, report: () => {} }).catch(
+      (error: unknown) => error as Error,
+    );
+    expect(failure.message).toContain('Check that Docker is still reachable');
+    expect(failure.message).toContain('Docker is running and reachable');
+    expect(failure.message).not.toContain('buildx is unavailable');
+    expect(docker.calls.at(-1)?.slice(0, 2)).toEqual(['docker', 'version']);
   });
 
   it('propagates an interrupted probe instead of treating it as absent', async () => {
