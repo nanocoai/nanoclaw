@@ -108,25 +108,45 @@ function readNohupPid(projectRoot: string): number | undefined {
   }
 }
 
+function realpathOr(value: string): string {
+  try {
+    return fs.realpathSync(value);
+  } catch {
+    return value;
+  }
+}
+
 // start-nanoclaw.sh's is_previous_host test, allowing node options before the
-// script: node with this checkout's absolute entrypoint among its arguments.
-// 'unknown' when a live process's command line cannot be read.
+// script: node with this checkout's entrypoint among its absolute arguments,
+// compared by real path on both sides so a symlinked checkout still matches.
+// The cwd must be this checkout too: the host takes its root from cwd, and a
+// cwd cannot drift the way a later-repointed argv symlink can.
+// /^node/ also admits nodemon, which still runs this checkout's host.
+// 'unknown' when a live candidate's cmdline or cwd cannot be read. argv is
+// checked first: another user's process has a readable cmdline but no cwd.
 function nohupHostIdentity(pid: number, projectRoot: string, env: ServiceEnvironment): 'host' | 'other' | 'unknown' {
+  const procDir = path.join(env.procRoot ?? '/proc', String(pid));
+  const unreadable = () => (processExists(pid) ? 'unknown' : 'other');
   let args: string[];
   try {
-    args = fs.readFileSync(path.join(env.procRoot ?? '/proc', String(pid), 'cmdline'), 'utf8').split('\0');
+    args = fs.readFileSync(path.join(procDir, 'cmdline'), 'utf8').split('\0');
   } catch {
-    return processExists(pid) ? 'unknown' : 'other';
+    return unreadable();
   }
   const entrypoint = path.join(projectRoot, 'dist', 'index.js');
-  const accepted = new Set([entrypoint]);
-  try {
-    accepted.add(fs.realpathSync(entrypoint));
-  } catch {
-    // Not built: only the literal path can match.
-  }
+  const real = realpathOr(entrypoint);
   const isNode = /^node/.test(path.basename(args[0] ?? ''));
-  return isNode && args.slice(1).some((arg) => accepted.has(arg)) ? 'host' : 'other';
+  const runsEntrypoint = args
+    .slice(1)
+    .some((arg) => path.isAbsolute(arg) && (arg === entrypoint || realpathOr(arg) === real));
+  if (!isNode || !runsEntrypoint) return 'other';
+  let cwd: string;
+  try {
+    cwd = fs.readlinkSync(path.join(procDir, 'cwd'));
+  } catch {
+    return unreadable();
+  }
+  return realpathOr(cwd) === realpathOr(projectRoot) ? 'host' : 'other';
 }
 
 /**
@@ -158,7 +178,11 @@ export function resolveNohupHost(handle: ServiceHandle, projectRoot: string, env
     .filter((pid) => nohupHostIdentity(pid, projectRoot, env) === 'host')
     .sort((x, y) => x - y);
   if (hosts.length > 1) return { mode: 'unmanaged', active: true, name: hosts.join(',') };
-  if (hosts.length === 1) return { ...handle, pid: hosts[0], active: true };
+  if (hosts.length === 1) {
+    env.log?.(`Found running NanoClaw host (PID ${hosts[0]}); stopping it`);
+    return { ...handle, pid: hosts[0], active: true };
+  }
+  env.log?.('No running NanoClaw host found for this checkout; nothing to stop');
   return { ...handle, pid: undefined, active: false };
 }
 

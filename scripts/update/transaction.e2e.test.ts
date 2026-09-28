@@ -617,6 +617,7 @@ describe('update-nanoclaw transaction end to end', () => {
       fs.writeFileSync(path.join(fixture.install, 'nanoclaw.pid'), `${live.pid}\n`);
       const entrypoint = path.join(fs.realpathSync(fixture.install), 'dist', 'index.js');
       write(proc, `${live.pid}/cmdline`, `node\0${entrypoint}\0`);
+      fs.symlinkSync(fs.realpathSync(fixture.install), path.join(proc, String(live.pid), 'cwd'));
       fs.writeFileSync(path.join(fixture.install, 'data/v2.db'), 'post-update-data');
       events.length = 0;
 

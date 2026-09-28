@@ -442,14 +442,17 @@ describe('resolveNohupHost (nohup rollback stop target)', () => {
       runner: { run: () => '', tryRun: () => ({ ok: true, stdout: '' }) },
       sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     };
-    const writeCmdline = (pid: number, entry: string) => {
+    // A fake /proc/<pid>: cmdline plus the cwd link the kernel exposes.
+    const writeProc = (pid: number, argv: string[], cwd = root) => {
       fs.mkdirSync(path.join(proc, String(pid)), { recursive: true });
-      fs.writeFileSync(path.join(proc, String(pid), 'cmdline'), `node\0${entry}\0`);
+      fs.writeFileSync(path.join(proc, String(pid), 'cmdline'), `${argv.join('\0')}\0`);
+      fs.symlinkSync(cwd, path.join(proc, String(pid), 'cwd'));
     };
+    const writeCmdline = (pid: number, entry: string) => writeProc(pid, ['node', entry]);
     const host = (pid: number) => writeCmdline(pid, path.join(root, 'dist', 'index.js'));
     const recordPid = (text: string) => fs.writeFileSync(path.join(root, 'nanoclaw.pid'), `${text}\n`);
     const captured = { mode: 'nohup' as const, active: true, definition: path.join(root, 'start-nanoclaw.sh') };
-    return { root, env, host, writeCmdline, recordPid, captured };
+    return { root, env, host, writeProc, writeCmdline, recordPid, captured };
   }
 
   it('stops the host recorded in nanoclaw.pid, not the dead pid captured before cutover', async () => {
@@ -477,14 +480,10 @@ describe('resolveNohupHost (nohup rollback stop target)', () => {
   });
 
   it('counts a host started with node options (with values) before the entrypoint', () => {
-    const { root, env, writeCmdline, captured } = fixture();
+    const { root, env, writeProc, writeCmdline, captured } = fixture();
     fs.mkdirSync(path.join(root, 'dist'));
     fs.writeFileSync(path.join(root, 'dist', 'index.js'), '');
-    fs.mkdirSync(path.join(env.procRoot!, '5151'));
-    fs.writeFileSync(
-      path.join(env.procRoot!, '5151', 'cmdline'),
-      `node\0--require\0./register.cjs\0${path.join(root, 'dist', 'index.js')}\0`,
-    );
+    writeProc(5151, ['node', '--require', './register.cjs', path.join(root, 'dist', 'index.js')]);
     writeCmdline(4242, '/usr/bin/sleep');
     expect(resolveNohupHost({ ...captured, pid: 4242 }, root, env)).toMatchObject({ pid: 5151, active: true });
   });
@@ -503,13 +502,9 @@ describe('resolveNohupHost (nohup rollback stop target)', () => {
   });
 
   it('ignores non-node readers of the entrypoint and relative spellings from another cwd', () => {
-    const { root, env, recordPid, captured } = fixture();
-    const write = (pid: number, argv: string[]) => {
-      fs.mkdirSync(path.join(env.procRoot!, String(pid)));
-      fs.writeFileSync(path.join(env.procRoot!, String(pid), 'cmdline'), `${argv.join('\0')}\0`);
-    };
-    write(5151, ['tail', '-f', path.join(root, 'dist', 'index.js')]);
-    write(6161, ['node', 'dist/index.js']);
+    const { root, env, writeProc, recordPid, captured } = fixture();
+    writeProc(5151, ['tail', '-f', path.join(root, 'dist', 'index.js')]);
+    writeProc(6161, ['node', 'dist/index.js']);
     recordPid('5151');
     expect(resolveNohupHost({ ...captured, pid: 6161 }, root, env)).toMatchObject({ active: false });
   });
@@ -550,6 +545,47 @@ describe('resolveNohupHost (nohup rollback stop target)', () => {
     recordPid(String(process.pid));
     const noProc = { ...env, procRoot: path.join(root, 'no-proc') };
     expect(resolveNohupHost({ ...captured, pid: 4242 }, root, noProc)).toMatchObject({ mode: 'unmanaged' });
+  });
+
+  it.each(['real path', 'symlink alias'])('matches a symlinked checkout when the launcher recorded the %s', (form) => {
+    const { env, writeProc, captured } = fixture();
+    const real = temp();
+    const alias = path.join(temp(), 'nanoclaw');
+    fs.symlinkSync(real, alias);
+    fs.mkdirSync(path.join(real, 'dist'));
+    fs.writeFileSync(path.join(real, 'dist', 'index.js'), '');
+    const [recorded, projectRoot] = form === 'real path' ? [real, alias] : [alias, real];
+    // The kernel reports cwd resolved, whichever spelling the launcher cd'd into.
+    writeProc(5151, ['node', path.join(recorded, 'dist', 'index.js')], fs.realpathSync(real));
+    expect(resolveNohupHost({ ...captured, pid: 4242 }, projectRoot, env)).toMatchObject({ pid: 5151, active: true });
+  });
+
+  it("ignores another checkout's host whose argv symlink now points here", () => {
+    const { env, writeProc, captured } = fixture();
+    const [mine, other] = [temp(), temp()];
+    for (const dir of [mine, other]) {
+      fs.mkdirSync(path.join(dir, 'dist'));
+      fs.writeFileSync(path.join(dir, 'dist', 'index.js'), '');
+    }
+    // Started as /current/dist/index.js while current -> other, then current was repointed here.
+    const current = path.join(temp(), 'current');
+    fs.symlinkSync(mine, current);
+    writeProc(5151, ['node', path.join(current, 'dist', 'index.js')], other);
+    expect(resolveNohupHost({ ...captured, pid: 4242 }, mine, env)).toMatchObject({ active: false });
+  });
+
+  it('logs whether it found a host to stop or none', () => {
+    const { root, env, host, writeCmdline, captured } = fixture();
+    const progress: string[] = [];
+    env.log = (message) => progress.push(message);
+    writeCmdline(4242, '/usr/bin/sleep');
+    resolveNohupHost({ ...captured, pid: 4242 }, root, env);
+    host(5151);
+    resolveNohupHost({ ...captured, pid: 4242 }, root, env);
+    expect(progress).toEqual([
+      'No running NanoClaw host found for this checkout; nothing to stop',
+      'Found running NanoClaw host (PID 5151); stopping it',
+    ]);
   });
 
   it('leaves service-manager handles untouched', () => {
