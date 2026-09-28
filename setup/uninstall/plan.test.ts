@@ -105,7 +105,12 @@ describe('buildRemovalPlan declined groups', () => {
 });
 
 describe('buildRemovalPlan compose projects', () => {
-  const projects = { names: ['gw-abcd1234'], volumes: ['gw-abcd1234_database'], networks: ['gw-abcd1234'] };
+  const projects = {
+    names: ['gw-abcd1234'],
+    containers: ['gw-abcd1234-web-1'],
+    volumes: ['gw-abcd1234_database'],
+    networks: ['gw-abcd1234'],
+  };
 
   it('removes project volumes and networks with the data group, after containers and before the keys in data/', () => {
     const actions = buildRemovalPlan(inventory({ projects }), allYes());
@@ -113,7 +118,6 @@ describe('buildRemovalPlan compose projects', () => {
     expect(actions[idx]).toEqual({
       kind: 'rm-project-residue',
       runtime: 'docker',
-      slug: 'abcd1234',
       projects: ['gw-abcd1234'],
     });
     expect(idx).toBeGreaterThan(actions.findIndex((a) => a.kind === 'rm-containers'));

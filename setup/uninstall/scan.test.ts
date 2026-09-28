@@ -37,8 +37,11 @@ function deps(overrides: Partial<ScanDeps> = {}): ScanDeps {
 const dockerUp = (containerIds: string[], hasImage: boolean) =>
   fakeRun({
     docker: (args) => {
-      if (args[0] === 'ps' && args.some((a) => a.startsWith('label=nanoclaw-install=')))
-        return { status: 0, stdout: containerIds.join('\n') + '\n' };
+      if (args[0] === 'ps' && args.some((a) => a.startsWith('label=nanoclaw-install='))) {
+        // Agent containers carry no Compose project label: docker prints an empty line for each.
+        const byProject = args.some((a) => a.includes('com.docker.compose.project'));
+        return { status: 0, stdout: containerIds.map((id) => (byProject ? '' : id)).join('\n') + '\n' };
+      }
       if (args[0] === 'ps' || args[1] === 'ls') return { status: 0, stdout: '' };
       if (args[0] === 'image') return { status: hasImage ? 0 : 1, stdout: '' };
       return { status: 1, stdout: '' };
@@ -121,7 +124,7 @@ describe('scanInstall service artifacts', () => {
 
 describe('scanInstall compose projects', () => {
   interface Fake {
-    /** container id → [compose project, install slug] */
+    /** container name → [compose project, install slug] */
     containers: Record<string, [string, string]>;
     volumes: Record<string, string>;
     networks: Record<string, string>;
@@ -141,8 +144,8 @@ describe('scanInstall compose projects', () => {
             ([, [proj, owner]]) => (project ? proj === project : true) && (slug ? owner === slug : true),
           );
           const format = args.includes('--format') ? args[args.indexOf('--format') + 1] : '{{.ID}}';
-          const render = ([id, [proj, owner]]: [string, [string, string]]) =>
-            format.includes(COMPOSE_PROJECT_LABEL) ? proj : format.includes('|') ? `${id}|${owner}` : id;
+          const render = ([name, [proj]]: [string, [string, string]]) =>
+            format.includes(COMPOSE_PROJECT_LABEL) ? proj : name;
           // Like docker: one line per row (empty for a missing label), nothing at all for no rows.
           return { status: 0, stdout: rows.length ? rows.map(render).join('\n') + '\n' : '' };
         }
@@ -153,7 +156,6 @@ describe('scanInstall compose projects', () => {
             .map(([name]) => name);
           return { status: 0, stdout: names.join('\n') + '\n' };
         }
-        if (args[0] === 'image') return { status: 1, stdout: '' };
         return { status: 1, stdout: '' };
       },
     });
@@ -161,48 +163,32 @@ describe('scanInstall compose projects', () => {
     const slug = getInstallSlug(root);
     return {
       containers: {
-        web1: [`gw-${slug}`, slug],
-        db1: [`gw-${slug}`, slug],
+        [`gw-${slug}-web-1`]: [`gw-${slug}`, slug],
+        [`gw-${slug}-database-1`]: [`gw-${slug}`, slug],
         agent1: ['', slug],
-        decoyweb: ['gw-ffffffff', 'ffffffff'],
-        decoydb: ['gw-ffffffff', 'ffffffff'],
+        'gw-ffffffff-web-1': ['gw-ffffffff', 'ffffffff'],
       },
       volumes: { [`gw-${slug}_database`]: `gw-${slug}`, 'gw-ffffffff_database': 'gw-ffffffff', stray: 'other' },
       networks: { [`gw-${slug}`]: `gw-${slug}`, 'gw-ffffffff': 'gw-ffffffff', bridge: '' },
     };
   };
 
-  it("lists only this copy's project volumes and networks next to a decoy copy's", () => {
+  it("lists this copy's project containers, volumes and networks, not a decoy copy's", () => {
     const slug = getInstallSlug(root);
     const inv = scanInstall(deps({ runCommand: fakeDocker(state()) }));
-    expect(inv.projects).toEqual({ names: [`gw-${slug}`], volumes: [`gw-${slug}_database`], networks: [`gw-${slug}`] });
-    expect(inv.service.containerIds).toEqual(['web1', 'db1', 'agent1']);
+    expect(inv.projects).toEqual({
+      names: [`gw-${slug}`],
+      containers: [`gw-${slug}-web-1`, `gw-${slug}-database-1`],
+      volumes: [`gw-${slug}_database`],
+      networks: [`gw-${slug}`],
+    });
     expect(inv.notes).toEqual([]);
-  });
-
-  it('skips a project that also holds a container of another copy', () => {
-    const fake = state();
-    const slug = getInstallSlug(root);
-    fake.containers.shared = [`gw-${slug}`, 'ffffffff'];
-    expect(scanInstall(deps({ runCommand: fakeDocker(fake) })).projects).toBeUndefined();
-  });
-
-  it('skips a project that holds an unlabeled container', () => {
-    const fake = state();
-    fake.containers.legacy = [`gw-${getInstallSlug(root)}`, ''];
-    expect(scanInstall(deps({ runCommand: fakeDocker(fake) })).projects).toBeUndefined();
   });
 
   it("reports nothing when only the decoy copy's project exists", () => {
     const fake = state();
-    for (const id of ['web1', 'db1']) delete fake.containers[id];
-    expect(scanInstall(deps({ runCommand: fakeDocker(fake) })).projects).toBeUndefined();
-  });
-
-  it('reports nothing for a project with no volumes or networks left', () => {
-    const fake = state();
-    fake.volumes = {};
-    fake.networks = {};
+    const slug = getInstallSlug(root);
+    for (const name of [`gw-${slug}-web-1`, `gw-${slug}-database-1`]) delete fake.containers[name];
     expect(scanInstall(deps({ runCommand: fakeDocker(fake) })).projects).toBeUndefined();
   });
 

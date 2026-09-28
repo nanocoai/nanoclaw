@@ -11,7 +11,7 @@ import fs from 'fs';
 import path from 'path';
 
 import type { RemovalAction } from './plan.js';
-import { listProjectResidue, projectCleanup, type RunCommand } from './scan.js';
+import { listProject, projectCleanup, type RunCommand } from './scan.js';
 
 export interface ExecDeps {
   runCommand: RunCommand;
@@ -135,7 +135,7 @@ function runAction(action: RemovalAction, deps: ExecDeps, notes: string[]): void
       break;
     }
     case 'rm-project-residue': {
-      const { runtime, slug } = action;
+      const { runtime } = action;
       let volumes = 0;
       let networks = 0;
       for (const project of action.projects) {
@@ -145,18 +145,13 @@ function runAction(action: RemovalAction, deps: ExecDeps, notes: string[]): void
             `Project ${project}: ${what}. Its keys in data/ are being deleted, so remove it too: ` +
               projectCleanup(runtime, project),
           );
-        // Re-listed at removal time; a failed listing must not read as "nothing there".
-        const found = listProjectResidue(runCommand, runtime, slug, project);
+        const found = listProject(runCommand, runtime, project);
         if (!found) {
           leftover(`not removed ('${runtime}' unavailable)`);
           continue;
         }
-        if (!found.owned) {
-          notes.push(`Project ${project}: now shared with another copy; left untouched.`);
-          continue;
-        }
         // Containers first: a declined service group leaves them holding the volumes.
-        if (found.containerIds.length > 0 && runCommand(runtime, ['rm', '-f', ...found.containerIds]).status !== 0) {
+        if (found.containers.length > 0 && runCommand(runtime, ['rm', '-f', ...found.containers]).status !== 0) {
           leftover('containers not removed');
           continue;
         }

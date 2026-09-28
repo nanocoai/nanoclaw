@@ -12,8 +12,9 @@ and `nanoclaw-role=gateway` labels as the central proxy. A container with the
 install label, the gateway role (`nanoclaw-role=gateway`) and no session label
 is gateway-owned (`GATEWAY_ROLE`, see `docs/gateway-seam.md`): the update drain
 and the host's residue reaping leave it alone. The
-uninstaller does not read the role; a Compose project is this copy's when every
-container in it carries this copy's install label. With the data group it then
+uninstaller does not read the role: it takes the Compose project of each
+container with this copy's install label, which is this copy's alone because the
+project name comes from the install slug. With the data group it then
 removes the project's containers, database volume and network, because the
 encryption keys it deletes from `data/` are the only way to read that database. The project is found through
 its containers: an install whose containers predate the labels gets them on its

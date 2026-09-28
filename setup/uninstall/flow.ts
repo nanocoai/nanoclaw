@@ -45,11 +45,12 @@ const GROUPS = {
   },
 } as const;
 
-const PROJECT_NOTE =
-  "This includes the data volumes of this copy's services (such as a gateway's database). They can't be read without the keys in data/, which this deletes.";
+export const PROJECT_NOTE =
+  "This includes this copy's service containers and their data volumes (such as a gateway's database), even if you keep group 1. The volumes can't be read without the keys in data/, which this deletes.";
 
-function projectRows(projects: ProjectInventory): { what: string; where: string }[] {
+export function projectRows(projects: ProjectInventory): { what: string; where: string }[] {
   const rows: { what: string; where: string }[] = [];
+  if (projects.containers.length > 0) rows.push({ what: 'Service containers', where: projects.containers.join(', ') });
   if (projects.volumes.length > 0) rows.push({ what: 'Service data volumes', where: projects.volumes.join(', ') });
   if (projects.networks.length > 0) rows.push({ what: 'Service networks', where: projects.networks.join(', ') });
   return rows;

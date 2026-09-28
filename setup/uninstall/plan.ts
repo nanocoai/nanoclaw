@@ -44,11 +44,11 @@ export type RemovalAction =
    */
   | { kind: 'backup-env'; envPath: string }
   /**
-   * This copy's Compose projects, re-listed by project label at removal time:
-   * containers (they hold the volumes, and the keys), then volumes, then
-   * networks. Ownership is re-checked against the slug before anything goes.
+   * This copy's Compose projects, listed by project label at removal time
+   * (the host was alive through the confirm phase): containers (they hold the
+   * volumes), then volumes, then networks.
    */
-  | { kind: 'rm-project-residue'; runtime: string; slug: string; projects: string[] }
+  | { kind: 'rm-project-residue'; runtime: string; projects: string[] }
   | { kind: 'delete-path'; item: PathItem }
   | { kind: 'delete-runtime-path'; item: PathItem };
 
@@ -107,7 +107,6 @@ export function buildRemovalPlan(inv: Inventory, d: Decisions): RemovalAction[] 
       actions.push({
         kind: 'rm-project-residue',
         runtime: inv.containerRuntime,
-        slug: inv.slug,
         projects: inv.projects.names,
       });
     }

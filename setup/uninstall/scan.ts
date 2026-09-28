@@ -64,6 +64,8 @@ export interface Inventory {
 export interface ProjectInventory {
   /** Compose project names, from the containers carrying this copy's install label. */
   names: string[];
+  /** Container names; removed with the volumes even when the service group was declined. */
+  containers: string[];
   volumes: string[];
   networks: string[];
 }
@@ -237,82 +239,18 @@ function listLines(runCommand: RunCommand, runtime: string, args: string[]): str
     .filter(Boolean);
 }
 
-/**
- * A project's containers with their install label, from one listing so the
- * ownership verdict and the ids it covers cannot drift apart. An unlabeled
- * container shows as an empty slug, never as a missing line.
- */
-function projectMembers(
-  runCommand: RunCommand,
-  runtime: string,
-  project: string,
-): { id: string; slug: string }[] | null {
-  const lines = listLines(runCommand, runtime, [
-    'ps',
-    '-a',
-    '--filter',
-    `label=${COMPOSE_PROJECT_LABEL}=${project}`,
-    '--format',
-    '{{.ID}}|{{.Label "nanoclaw-install"}}',
-  ]);
-  if (!lines) return null;
-  return lines.map((line) => {
-    const [id, slug = ''] = line.split('|');
-    return { id, slug };
-  });
-}
-
-/**
- * Compose projects owned outright by this copy: every container of the
- * project carries its install label. A project with a container labeled for
- * another copy, or for none, is shared and never selected. Null when the
- * runtime did not answer, so a failed lookup is never read as "nothing there".
- */
-export function listOwnedProjects(runCommand: RunCommand, runtime: string, slug: string): string[] | null {
-  const labels = listLines(runCommand, runtime, [
-    'ps',
-    '-a',
-    '--filter',
-    `label=nanoclaw-install=${slug}`,
-    '--format',
-    `{{.Label "${COMPOSE_PROJECT_LABEL}"}}`,
-  ]);
-  if (!labels) return null;
-  const owned: string[] = [];
-  for (const project of [...new Set(labels)].sort()) {
-    const members = projectMembers(runCommand, runtime, project);
-    if (!members) return null;
-    if (members.every((m) => m.slug === slug)) owned.push(project);
-  }
-  return owned;
-}
-
-export interface ProjectResidue {
-  /** False once any container of the project carries another copy's label, or none. */
-  owned: boolean;
-  containerIds: string[];
-  volumes: string[];
-  networks: string[];
-}
-
 /** A project's containers, volumes and networks by its Compose label; null when a listing failed. */
-export function listProjectResidue(
+export function listProject(
   runCommand: RunCommand,
   runtime: string,
-  slug: string,
   project: string,
-): ProjectResidue | null {
+): { containers: string[]; volumes: string[]; networks: string[] } | null {
   const filter = `label=${COMPOSE_PROJECT_LABEL}=${project}`;
-  const members = projectMembers(runCommand, runtime, project);
+  const containers = listLines(runCommand, runtime, ['ps', '-a', '--filter', filter, '--format', '{{.Names}}']);
   const volumes = listLines(runCommand, runtime, ['volume', 'ls', '-q', '--filter', filter]);
   const networks = listLines(runCommand, runtime, ['network', 'ls', '--filter', filter, '--format', '{{.Name}}']);
-  if (!members || !volumes || !networks) return null;
-  return {
-    owned: members.every((m) => m.slug === slug),
-    containerIds: members.map((m) => m.id),
-    volumes,
-    networks,
-  };
+  if (!containers || !volumes || !networks) return null;
+  return { containers, volumes, networks };
 }
 
 /** One pasteable line per project; `;` so an empty listing doesn't skip the rest. */
@@ -325,13 +263,25 @@ export function projectCleanup(runtime: string, project: string): string {
   );
 }
 
+/**
+ * The Compose projects of this copy's labeled containers. A gateway names its
+ * project after the install slug, so the project is this copy's alone; a
+ * project shared by two copies would be removed with this one.
+ */
 function scanProjects(
   runCommand: RunCommand,
   slug: string,
   runtime: string,
   notes: string[],
 ): ProjectInventory | undefined {
-  const names = listOwnedProjects(runCommand, runtime, slug);
+  const names = listLines(runCommand, runtime, [
+    'ps',
+    '-a',
+    '--filter',
+    `label=nanoclaw-install=${slug}`,
+    '--format',
+    `{{.Label "${COMPOSE_PROJECT_LABEL}"}}`,
+  ]);
   if (!names) {
     notes.push(
       `Service volumes/networks: '${runtime}' unavailable; for each project of this copy's containers ` +
@@ -340,19 +290,19 @@ function scanProjects(
     );
     return undefined;
   }
-  const found: ProjectInventory = { names: [], volumes: [], networks: [] };
-  for (const project of names) {
-    const residue = listProjectResidue(runCommand, runtime, slug, project);
-    if (!residue) {
+  const found: ProjectInventory = { names: [], containers: [], volumes: [], networks: [] };
+  for (const project of [...new Set(names)].sort()) {
+    const listed = listProject(runCommand, runtime, project);
+    if (!listed) {
       notes.push(
         `Project ${project}: '${runtime}' listing failed; remove later with: ${projectCleanup(runtime, project)}`,
       );
       continue;
     }
-    if (residue.volumes.length === 0 && residue.networks.length === 0) continue;
     found.names.push(project);
-    found.volumes.push(...residue.volumes);
-    found.networks.push(...residue.networks);
+    found.containers.push(...listed.containers);
+    found.volumes.push(...listed.volumes);
+    found.networks.push(...listed.networks);
   }
   return found.names.length > 0 ? found : undefined;
 }
