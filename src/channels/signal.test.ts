@@ -203,6 +203,8 @@ describe('SignalAdapter', () => {
         expect.objectContaining({
           id: '1700000000000',
           kind: 'chat',
+          isMention: true,
+          isGroup: false,
           content: expect.objectContaining({
             text: 'Hello from Signal',
             sender: '+15555550123',
@@ -238,6 +240,8 @@ describe('SignalAdapter', () => {
         'group:abc123',
         null,
         expect.objectContaining({
+          isMention: false,
+          isGroup: true,
           content: expect.objectContaining({
             text: 'Group hello',
             sender: '+15555550999',
