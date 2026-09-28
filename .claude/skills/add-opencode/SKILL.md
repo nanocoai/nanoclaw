@@ -210,16 +210,9 @@ service and affected containers when updating from the earlier read-only-bind
 candidate; old containers retain their mounts until recreated.
 
 Native model domains and the configured HTTPS model host belong to OpenCode’s
-provider contract. Some gateways grant the credential to this installation during
-setup; others need the manual grant below. The gateway's skill says which.
-Iron endpoints must use HTTPS on port 443 with a DNS hostname, including keyless
-self-hosted models; put TLS in front of a plaintext local server first.
-
-With the OneCLI gateway selected, grant the group’s OneCLI agent access to the chosen secret.
-Read its existing secret assignments first and merge the new secret ID into that
-list: `onecli agents set-secrets` replaces assignments. Verify the result with
-`onecli agents secrets`. Do not put a key in `.env`, command arguments, or the
-container environment.
+provider contract. Your gateway's skill says whether a manual grant, a manual
+re-auth after expiry, or an https-only endpoint applies. Do not put a key in
+`.env`, command arguments, or the container environment.
 
 After installing on a running NanoClaw host, restart its actual host service
 before waking any OpenCode group. This reloads the host provider registration and
@@ -240,9 +233,8 @@ needs to move from another provider, follow `/migrate-memory` before switching.
 
 ## Recover a ChatGPT login
 
-OAuth refresh belongs to the credential gateway. Installs using OneCLI 1.41.0
-require manual reauthentication after expiry; see [OneCLI compatibility](ONECLI-LEGACY.md)
-for the version-specific limitation and upgrade constraints.
+OAuth refresh belongs to the credential gateway; your gateway's skill says
+whether re-auth after expiry is manual.
 
 The container uses only a fixed sentinel. Do not implement token refresh in the
 provider or copy live credentials into a group. A saved credential is not proof
@@ -257,7 +249,7 @@ pnpm exec tsx scripts/opencode-auth.ts --reauth --method browser
 ```
 
 This pairs again and updates the existing gateway credential ID, preserving
-its grants and all backend/model defaults. Only a selected OneCLI adapter uses `ONECLI_URL` and `ONECLI_API_KEY`. If no
+its grants and all backend/model defaults. If no
 credential exists, setup creates one and applies the gateway’s grant behavior
 described above. Retry the failed request.
 

@@ -1,11 +1,13 @@
-# OneCLI compatibility
+# ChatGPT OAuth refresh with OneCLI
 
-These notes apply to the current OneCLI credential adapter, not OpenCode's
-runtime contract.
+These notes apply to the current OneCLI credential adapter, not to any
+provider's runtime contract.
 
-NanoClaw's OneCLI 1.41.0 pin cannot refresh the ChatGPT OAuth credentials imported
-by this skill: its refresh request omits the required client ID. After expiry,
-use the [manual reauthentication procedure](SKILL.md#recover-a-chatgpt-login).
+NanoClaw's OneCLI 1.41.0 pin cannot refresh the ChatGPT OAuth credentials a
+provider imports (for example OpenCode's ChatGPT sign-in): its refresh request
+omits the required client ID. After expiry, use the provider's manual
+reauthentication, for OpenCode the
+[Recover a ChatGPT login](../../add-opencode/SKILL.md#recover-a-chatgpt-login) procedure.
 The same procedure also handles revoked credentials.
 
 Do not assume a gateway upgrade resolves unattended ChatGPT operation.

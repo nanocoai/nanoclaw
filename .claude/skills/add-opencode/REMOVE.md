@@ -49,7 +49,7 @@ If `DEFAULT_AGENT_PROVIDER=opencode` is saved in `.env`, change only that key to
 `claude` (or another installed provider) before restarting the host. Then remove
 OpenCode-specific `.env` settings that are no longer used. Keep
 `ANTHROPIC_BASE_URL` if another integration still needs it. Session state,
-memory, and OneCLI secrets are user data: retain them unless the operator
+memory, and credentials stored in the gateway are user data: retain them unless the operator
 explicitly requests deletion. The fixed credential stub may remain unused.
 
 Run the host build and runner typecheck, then `./container/build.sh build` to

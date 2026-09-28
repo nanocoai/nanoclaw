@@ -86,16 +86,17 @@ kept; OpenCode never sees a native id. A blank key keeps a reusable entry;
 a non-reusable one (for example an expired login, or a key the gateway cannot
 move to a new host) demands a value.
 Moving a key to another exact host requires explicit confirmation inside the
-gateway's lookup. OneCLI can keep its stored value across a move, so a blank
-answer completes it; another gateway may require re-entry (see its skill). Ambiguous or incompatible entries fail without exposing their values.
+gateway's lookup; whether a blank answer keeps the stored value across the move
+is the gateway's decision (see its skill). Ambiguous or incompatible entries fail without exposing their values.
 
 How a gateway stores the ChatGPT profile, its IDs and grants, and how it retries
 a partial save is the gateway's own business; OpenCode relies only on the seam. The native login
 file is removed before network waits and on failure; agents receive only fixed
-placeholders. Existing OneCLI credential names and formats remain compatible.
+placeholders.
 
 Gateway endpoint validation happens before key prompts or catalog requests.
-Iron requires HTTPS on port 443 and DNS names; this includes keyless endpoints.
+The selected gateway may constrain endpoints (for example, https only, keyless
+endpoints included); its skill says how.
 The gateway permits the model destination only after prompts complete. Native
 model domains and an operator-configured HTTPS model host are declared by the
 OpenCode host contract on startup; explicit gateway policy holds remain in force.
