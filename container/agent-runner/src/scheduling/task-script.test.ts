@@ -12,6 +12,9 @@
  * own test goes red.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '../mailbox/sqlite/connection.js';
 import { getPendingMessages, markScriptSkipped } from '../db/messages-in.js';
@@ -113,5 +116,58 @@ describe('a timed-out script is reported as a timeout', () => {
     const joined = lines.join('\n');
     expect(joined).toContain('error: Command failed');
     expect(joined).not.toContain('timed out');
+  });
+});
+
+describe('a timed-out script takes its children down with it', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'task-script-'));
+  afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }));
+
+  it('kills the forked last command, so its side effect never lands', async () => {
+    const marker = path.join(tmp, 'side-effect');
+    const pidFile = path.join(tmp, 'grandchild.pid');
+    // bash forks (not execs) this last command, so the grandchild outlives a bash-only kill.
+    const script = `bash -c 'echo $$ > ${pidFile}; sleep 1; echo 1 > ${marker}'`;
+
+    const original = console.error;
+    console.error = () => {};
+    try {
+      expect(await runScript(script, 't-orphan', 300)).toBeNull();
+    } finally {
+      console.error = original;
+    }
+
+    // Wait past the grandchild's own sleep, which also gives init time to reap it.
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(fs.existsSync(marker)).toBe(false);
+    const pid = Number(fs.readFileSync(pidFile, 'utf8'));
+    expect(() => process.kill(pid, 0)).toThrow();
+  });
+
+  it('resolves at the timeout even if a child escaped the group and holds the pipes', async () => {
+    const started = Date.now();
+    const original = console.error;
+    console.error = () => {};
+    try {
+      // set -m puts the background job in its own process group.
+      expect(await runScript('set -m; (sleep 2; echo escaped >&2) & wait', 't-escape', 200)).toBeNull();
+    } finally {
+      console.error = original;
+    }
+    expect(Date.now() - started).toBeLessThan(1500);
+  });
+
+  it('enforces the output limit in bytes, not characters', async () => {
+    const original = console.error;
+    const lines: string[] = [];
+    console.error = (...args: unknown[]) => void lines.push(args.map(String).join(' '));
+    try {
+      // 400k three-byte chars: under 1 MiB of characters, over 1 MiB of bytes.
+      const script = `printf '{"wakeAgent":true,"data":"'; head -c 400000 /dev/zero | tr '\\0' 'x' | sed 's/x/界/g'; printf '"}\\n'`;
+      expect(await runScript(script, 't-bytes', 10_000)).toBeNull();
+    } finally {
+      console.error = original;
+    }
+    expect(lines.join('\n')).toContain('stdout maxBuffer length exceeded');
   });
 });
