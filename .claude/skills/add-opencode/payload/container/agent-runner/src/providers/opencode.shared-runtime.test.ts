@@ -247,9 +247,9 @@ function installDeps(servers: Array<ReturnType<typeof fakeServer>>, spawnFailure
   return { spawnServer };
 }
 
-function newProvider(): OpenCodeProvider {
+function newProvider(hook = MEMORY_HOOK): OpenCodeProvider {
   const provider = new OpenCodeProvider({});
-  provider.registerMemorySessionHook(MEMORY_HOOK);
+  provider.registerMemorySessionHook(hook);
   return provider;
 }
 
@@ -307,7 +307,9 @@ describe('shared runtime recovery', () => {
       return { data: true };
     };
     installDeps([server]);
-    const query = newProvider().query({ prompt: 'work', cwd: CWD });
+    // No hook sources, so no subprocess: a hook spawn stalled by host load
+    // would hold prepare() past the watchdog and Bun's test timeout.
+    const query = newProvider({ ...MEMORY_HOOK, sources: [] }).query({ prompt: 'work', cwd: CWD });
     query.end();
     // A missing routing branch must fail promptly rather than waiting for
     // the production idle watchdog.
