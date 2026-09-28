@@ -133,14 +133,21 @@ pnpm exec tsx setup/index.ts --step provider-auth opencode
 
 The OpenCode setup flow supports ChatGPT sign-in and API keys through Iron
 Control. It installs no OneCLI service and needs no OneCLI management settings.
-ChatGPT arrives as the seam's `chatgpt` OAuth profile: Iron creates a native
-broker from OpenCode's public OAuth client and refresh token, and a separate
-granted secret carries the `ChatGPT-Account-Id` header; any other OAuth profile
-is rejected. The agent sees only placeholders. Initial sign-in and reauthentication wait for the
+ChatGPT arrives as the seam's `chatgpt` OAuth profile: Iron creates three
+records, a native broker from OpenCode's public OAuth client and refresh token,
+a broker-backed bearer secret, and a separate granted secret that carries the
+`ChatGPT-Account-Id` header; any other OAuth profile is rejected. The agent sees only placeholders. Initial sign-in and reauthentication wait for the
 native broker to refresh successfully (up to two minutes) before setup continues. API keys use each backend's declared header
 scheme. Setup grants the secrets to this install's principal and permits the
-model hostname. Rotation and reauthentication keep IDs and grants. Moving a key
-to another host requires confirmation and re-entering its value.
+model hostname. Rotation and reauthentication keep IDs and grants; reauthentication
+also resets a dead broker with the new refresh token. Moving a key to another
+host requires confirmation and re-entering its value: Iron's update API replaces
+a secret's source whenever its rules change, so a blank answer keeps a key only
+on its existing host. Records use install-scoped foreign IDs, so an interrupted
+save is retried on the same IDs, and missing grants are reconciled without
+reading values. Before keeping or overwriting a record, setup rechecks its
+ownership and rules and stops if they no longer match. Broker refresh may continue during login; a change to the broker's
+client binding or the secrets' rules stops setup.
 
 Native backends and custom/keyless HTTPS endpoints on port 443 are supported.
 Use a DNS name and TLS for local models; plaintext HTTP endpoints fail during

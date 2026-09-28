@@ -200,20 +200,18 @@ instance default unchanged.
 
 For ChatGPT, native OpenCode sign-in runs in a temporary container directory.
 OpenCode parses its own login file into the seam's `chatgpt` OAuth profile, hands
-it to the selected gateway, and removes the temporary native file. Iron Control stores its refresh token in a native OAuth broker
-using OpenCode's own public OAuth client; a separate granted secret supplies the
-account header. Setup waits for Iron's native broker to mint a fresh access token
-before continuing; this can take up to two minutes. OneCLI translates the same result to its native credential format. The container initializes fixed
+it to the selected gateway, and removes the temporary native file. The gateway
+stores it in its own native format, and setup may wait for the gateway to confirm
+the login works; the gateway's skill describes both. The container initializes fixed
 `nc-opencode-token-v1` placeholders before every OpenCode server start at
 `$XDG_DATA_HOME/opencode/auth.json`; tokens and account metadata stay in the gateway.
 API-key mode clears stale OAuth state. Refresh the payload and restart the host
 service and affected containers when updating from the earlier read-only-bind
 candidate; old containers retain their mounts until recreated.
 
-With Iron Proxy, setup grants both the model credential and any account header
-to this installation’s principal. It reconciles the destination allowlist without
-installing OneCLI or reading `ONECLI_URL` / `ONECLI_API_KEY`. Native model domains
-and the configured HTTPS model host belong to OpenCode’s provider contract.
+Native model domains and the configured HTTPS model host belong to OpenCode’s
+provider contract. Some gateways grant the credential to this installation during
+setup; others need the manual grant below. The gateway's skill says which.
 Iron endpoints must use HTTPS on port 443 with a DNS hostname, including keyless
 self-hosted models; put TLS in front of a plaintext local server first.
 
@@ -259,9 +257,7 @@ pnpm exec tsx scripts/opencode-auth.ts --reauth --method browser
 ```
 
 This pairs again and updates the existing gateway credential ID, preserving
-its grants and all backend/model defaults. Iron also retains the existing broker
-and account-header IDs and resets a dead broker with the new refresh token.
-Only a selected OneCLI adapter uses `ONECLI_URL` and `ONECLI_API_KEY`. If no
+its grants and all backend/model defaults. Only a selected OneCLI adapter uses `ONECLI_URL` and `ONECLI_API_KEY`. If no
 credential exists, setup creates one and applies the gateway’s grant behavior
 described above. Retry the failed request.
 
@@ -272,9 +268,9 @@ pairing leaves the old entry intact; failed saves leave defaults unchanged.
 Temporary native credentials are removed after either success or failure.
 
 API-key rotation keeps the same credential ID. Changing its exact host requires
-confirmation. Iron’s update API replaces the secret source when changing rules,
-so a host change also requires re-entering the key; a blank answer can only keep
-a key on its existing host. Setup never retrieves the stored key.
+confirmation; whether the stored key can move with it is the gateway's decision,
+and a blank answer keeps a key only where the gateway allows. Setup never
+retrieves the stored key.
 
 ## Change or refresh the default model
 

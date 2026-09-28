@@ -83,19 +83,14 @@ drives the real setup flow through a fixture gateway that exists nowhere else.
 
 The gateway reports whether a stored credential exists and whether it can be
 kept; OpenCode never sees a native id. A blank key keeps a reusable entry;
-a non-reusable one (an expired Iron broker, a moved Iron key) demands a value.
+a non-reusable one (for example an expired login, or a key the gateway cannot
+move to a new host) demands a value.
 Moving a key to another exact host requires explicit confirmation inside the
-gateway's lookup. OneCLI can keep its stored value across a move; Iron requires
-re-entry because its update API replaces the source alongside the rules.
-Ambiguous or incompatible entries fail without exposing their values, and both
-gateways refuse a write when the entry changed since the lookup.
+gateway's lookup. OneCLI can keep its stored value across a move, so a blank
+answer completes it; another gateway may require re-entry (see its skill). Ambiguous or incompatible entries fail without exposing their values.
 
-Iron uses install-scoped native foreign IDs. ChatGPT creates a broker with
-OpenCode's pinned public OAuth client, a broker-backed bearer secret, and a
-separate account-header secret. Reauthentication preserves all three IDs.
-Missing grants are reconciled without extracting values. Broker refresh activity
-may continue during login; changes to its client binding or secret rules stop
-setup. Partial saves can be retried using those same owned IDs. The native login
+How a gateway stores the ChatGPT profile, its IDs and grants, and how it retries
+a partial save is the gateway's own business; OpenCode relies only on the seam. The native login
 file is removed before network waits and on failure; agents receive only fixed
 placeholders. Existing OneCLI credential names and formats remain compatible.
 
