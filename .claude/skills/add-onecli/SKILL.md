@@ -56,4 +56,8 @@ pnpm exec vitest run src/gateway-providers/onecli-files.test.ts src/gateway-prov
 
 The setup consumer writes `NANOCLAW_GATEWAY_PROVIDER=onecli` only after every directive above succeeds. Claude authentication is then completed through `scripts/auth.ts`; credentials never enter an agent container.
 
+## Provider credential limits
+
+`scripts/provider-credentials.ts` stores caller-described credentials (for example OpenCode keys) through the gateway seam's `connection()`. Before `keep()` or `save()` writes, it rereads the entry and refuses a changed ID, a duplicate, or unexpected metadata (host, scope, source, injection). It cannot detect a value rotated by someone else between the lookup and the write: OneCLI's secret list has no revision or update time, and its `PATCH` has no compare-and-set. A concurrent value change is overwritten by the setup value. Avoid editing the same OneCLI secret while setup is running.
+
 During an atomic NanoClaw upgrade, `scripts/detect.ts` identifies an older implicit OneCLI installation so the generic updater can preserve that choice before the service restarts.

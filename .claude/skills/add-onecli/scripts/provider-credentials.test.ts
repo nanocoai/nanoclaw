@@ -234,6 +234,25 @@ describe('OpenCode vault management', () => {
     expect(transport).toHaveBeenCalledTimes(1);
   });
 
+  // Known limit: OneCLI's list carries no revision and PATCH has no
+  // compare-and-set, so a value rotated between find() and save() is invisible.
+  it('cannot detect a value rotated between lookup and save', async () => {
+    const stored = { ...metadata(), value: 'original-fixture' };
+    const transport = vi.fn(async (_url: string, init: RequestInit) => {
+      if (init.method === 'GET') {
+        const { value: _value, ...listed } = stored;
+        return new Response(JSON.stringify([listed]));
+      }
+      Object.assign(stored, JSON.parse(init.body as string));
+      return new Response(JSON.stringify({ success: true }));
+    });
+    const vault = createOneCliCredentialConnection(google, 'http://vault.example', '', transport);
+    const id = await vault.find();
+    stored.value = 'concurrent-rotation-fixture';
+    await expect(vault.save('setup-fixture', id)).resolves.toBe('existing-key');
+    expect(stored.value).toBe('setup-fixture');
+  });
+
   it('does not recreate an entry after a failed update or reveal upstream error contents', async () => {
     const transport = vi.fn(async (_url: string, init: RequestInit) =>
       init.method === 'GET'
