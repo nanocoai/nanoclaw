@@ -43,8 +43,12 @@ export type RemovalAction =
    * of their API keys). .env is deliberately excluded from `delete-path`.
    */
   | { kind: 'backup-env'; envPath: string }
-  /** Re-listed at removal time like rm-containers: containers, then volume, then network. */
-  | { kind: 'rm-iron-control'; runtime: string; project: string }
+  /**
+   * This copy's Compose projects, re-listed by project label at removal time:
+   * containers (they hold the volumes, and the keys), then volumes, then
+   * networks. Ownership is re-checked against the slug before anything goes.
+   */
+  | { kind: 'rm-project-residue'; runtime: string; slug: string; projects: string[] }
   | { kind: 'delete-path'; item: PathItem }
   | { kind: 'delete-runtime-path'; item: PathItem };
 
@@ -98,9 +102,14 @@ export function buildRemovalPlan(inv: Inventory, d: Decisions): RemovalAction[] 
   }
 
   if (d.data) {
-    // Before .env and data/: its keys live there, so the database goes with them.
-    if (inv.ironControl) {
-      actions.push({ kind: 'rm-iron-control', runtime: inv.containerRuntime, project: inv.ironControl.project });
+    // Before .env and data/: service data is encrypted with keys kept there.
+    if (inv.projects) {
+      actions.push({
+        kind: 'rm-project-residue',
+        runtime: inv.containerRuntime,
+        slug: inv.slug,
+        projects: inv.projects.names,
+      });
     }
     const env = inv.data.find((i) => path.basename(i.path) === '.env');
     if (env) actions.push({ kind: 'backup-env', envPath: env.path });

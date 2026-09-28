@@ -11,7 +11,7 @@ import fs from 'fs';
 import path from 'path';
 
 import type { RemovalAction } from './plan.js';
-import { ironControlCleanup, listIronControl, type RunCommand } from './scan.js';
+import { listProjectResidue, projectCleanup, type RunCommand } from './scan.js';
 
 export interface ExecDeps {
   runCommand: RunCommand;
@@ -134,35 +134,42 @@ function runAction(action: RemovalAction, deps: ExecDeps, notes: string[]): void
       }
       break;
     }
-    case 'rm-iron-control': {
-      const { runtime, project } = action;
-      // data/ (its keys) is deleted next either way, which leaves a database
-      // the next install at this path stops on; the note says how to finish.
-      const leftover = (what: string) =>
-        notes.push(
-          `Iron Control ${what}. Its keys in data/ are being deleted, so remove it too: ` +
-            ironControlCleanup(runtime, project),
-        );
-      const found = listIronControl(runCommand, runtime, project);
-      if (!found) {
-        leftover(`not removed ('${runtime}' unavailable)`);
-        break;
+    case 'rm-project-residue': {
+      const { runtime, slug } = action;
+      let volumes = 0;
+      let networks = 0;
+      for (const project of action.projects) {
+        // data/ (the keys) goes next either way; the note says how to finish.
+        const leftover = (what: string) =>
+          notes.push(
+            `Project ${project}: ${what}. Its keys in data/ are being deleted, so remove it too: ` +
+              projectCleanup(runtime, project),
+          );
+        // Re-listed at removal time; a failed listing must not read as "nothing there".
+        const found = listProjectResidue(runCommand, runtime, slug, project);
+        if (!found) {
+          leftover(`not removed ('${runtime}' unavailable)`);
+          continue;
+        }
+        if (!found.owned) {
+          notes.push(`Project ${project}: now shared with another copy; left untouched.`);
+          continue;
+        }
+        // Containers first: a declined service group leaves them holding the volumes.
+        if (found.containerIds.length > 0 && runCommand(runtime, ['rm', '-f', ...found.containerIds]).status !== 0) {
+          leftover('containers not removed');
+          continue;
+        }
+        for (const volume of found.volumes) {
+          if (runCommand(runtime, ['volume', 'rm', volume]).status === 0) volumes++;
+          else notes.push(`Volume ${volume}: not removed (in use?) — retry with: ${runtime} volume rm ${volume}`);
+        }
+        for (const network of found.networks) {
+          if (runCommand(runtime, ['network', 'rm', network]).status === 0) networks++;
+          else notes.push(`Network ${network}: not removed (in use?) — retry with: ${runtime} network rm ${network}`);
+        }
       }
-      if (found.containerIds.length > 0 && runCommand(runtime, ['rm', '-f', ...found.containerIds]).status !== 0) {
-        leftover('containers not removed');
-        break;
-      }
-      if (found.volume && runCommand(runtime, ['volume', 'rm', found.volume]).status !== 0) {
-        leftover(`database ${found.volume} not removed (in use?)`);
-        break;
-      }
-      // A kept host's proxy container can still be attached; only the network is left then.
-      if (found.network && runCommand(runtime, ['network', 'rm', found.network]).status !== 0) {
-        notes.push(
-          `Iron Control network ${found.network}: not removed — retry with: ${runtime} network rm ${found.network}`,
-        );
-      }
-      log('✓ removed Iron Control and its database');
+      if (volumes + networks > 0) log(`✓ removed ${volumes} data volume(s) and ${networks} network(s)`);
       break;
     }
     case 'rm-ncl-symlink':

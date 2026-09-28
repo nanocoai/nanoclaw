@@ -4,7 +4,7 @@ import os from 'os';
 import path from 'path';
 
 import { getInstallSlug, getLaunchdLabel, getSystemdUnit } from '../../src/install-slug.js';
-import { detectExistingInstall, ironControlProject, scanInstall, type RunCommand, type ScanDeps } from './scan.js';
+import { COMPOSE_PROJECT_LABEL, detectExistingInstall, scanInstall, type RunCommand, type ScanDeps } from './scan.js';
 
 let root: string;
 let home: string;
@@ -108,7 +108,7 @@ describe('scanInstall service artifacts', () => {
     expect(inv.service.containerIds).toEqual(['abc123', 'def456']);
     expect(inv.service.image).toMatch(/^nanoclaw-agent-v2-[0-9a-f]{8}:latest$/);
     expect(inv.notes).toEqual([]);
-    expect(inv.ironControl).toBeUndefined();
+    expect(inv.projects).toBeUndefined();
   });
 
   it('degrades with a manual-cleanup note when docker is unavailable', () => {
@@ -119,62 +119,112 @@ describe('scanInstall service artifacts', () => {
   });
 });
 
-describe('scanInstall Iron Control', () => {
-  /** Docker holding this install's Iron Control objects next to another copy's. */
-  const ironDocker = (ours: { ids: string[]; volume: boolean; network: boolean }, failVolumes = false) => {
-    const project = ironControlProject(getInstallSlug(root));
-    const other = ironControlProject('ffffffff');
-    return fakeRun({
+describe('scanInstall compose projects', () => {
+  interface Fake {
+    /** container id → [compose project, install slug] */
+    containers: Record<string, [string, string]>;
+    volumes: Record<string, string>;
+    networks: Record<string, string>;
+    fail?: (args: string[]) => boolean;
+  }
+  const projectOf = (args: string[]) =>
+    args.find((a) => a.startsWith(`label=${COMPOSE_PROJECT_LABEL}=`))?.split('=')[2];
+  /** Docker holding this copy's project next to a decoy copy's, answered by label filters only. */
+  const fakeDocker = (fake: Fake) =>
+    fakeRun({
       docker: (args) => {
-        if (args[0] === 'ps' && args.includes(`label=com.docker.compose.project=${project}`))
-          return { status: 0, stdout: ours.ids.join('\n') + '\n' };
-        if (args[0] === 'ps') return { status: 0, stdout: '' };
-        if (args[0] === 'volume')
-          return failVolumes
-            ? { status: 1, stdout: '' }
-            : { status: 0, stdout: [`${other}_database`, ...(ours.volume ? [`${project}_database`] : [])].join('\n') };
-        if (args[0] === 'network')
-          return { status: 0, stdout: ['bridge', other, ...(ours.network ? [project] : [])].join('\n') };
+        if (fake.fail?.(args)) return { status: 1, stdout: '' };
+        const project = projectOf(args);
+        const slug = args.find((a) => a.startsWith('label=nanoclaw-install='))?.split('=')[2];
+        if (args[0] === 'ps') {
+          const rows = Object.entries(fake.containers).filter(
+            ([, [proj, owner]]) => (project ? proj === project : true) && (slug ? owner === slug : true),
+          );
+          const format = args.includes('--format') ? args[args.indexOf('--format') + 1] : '{{.ID}}';
+          const render = ([id, [proj, owner]]: [string, [string, string]]) =>
+            format.includes(COMPOSE_PROJECT_LABEL) ? proj : format.includes('|') ? `${id}|${owner}` : id;
+          // Like docker: one line per row (empty for a missing label), nothing at all for no rows.
+          return { status: 0, stdout: rows.length ? rows.map(render).join('\n') + '\n' : '' };
+        }
+        if (args[0] === 'volume' || args[0] === 'network') {
+          const table = args[0] === 'volume' ? fake.volumes : fake.networks;
+          const names = Object.entries(table)
+            .filter(([, proj]) => proj === project)
+            .map(([name]) => name);
+          return { status: 0, stdout: names.join('\n') + '\n' };
+        }
+        if (args[0] === 'image') return { status: 1, stdout: '' };
         return { status: 1, stdout: '' };
       },
     });
+  const state = (): Fake => {
+    const slug = getInstallSlug(root);
+    return {
+      containers: {
+        web1: [`gw-${slug}`, slug],
+        db1: [`gw-${slug}`, slug],
+        agent1: ['', slug],
+        decoyweb: ['gw-ffffffff', 'ffffffff'],
+        decoydb: ['gw-ffffffff', 'ffffffff'],
+      },
+      volumes: { [`gw-${slug}_database`]: `gw-${slug}`, 'gw-ffffffff_database': 'gw-ffffffff', stray: 'other' },
+      networks: { [`gw-${slug}`]: `gw-${slug}`, 'gw-ffffffff': 'gw-ffffffff', bridge: '' },
+    };
   };
 
-  it("lists only this install's project, volume and network", () => {
-    const project = ironControlProject(getInstallSlug(root));
-    const inv = scanInstall(deps({ runCommand: ironDocker({ ids: ['web1', 'db1'], volume: true, network: true }) }));
-    expect(inv.ironControl).toEqual({
-      project,
-      containerIds: ['web1', 'db1'],
-      volume: `${project}_database`,
-      network: project,
-    });
+  it("lists only this copy's project volumes and networks next to a decoy copy's", () => {
+    const slug = getInstallSlug(root);
+    const inv = scanInstall(deps({ runCommand: fakeDocker(state()) }));
+    expect(inv.projects).toEqual({ names: [`gw-${slug}`], volumes: [`gw-${slug}_database`], networks: [`gw-${slug}`] });
+    expect(inv.service.containerIds).toEqual(['web1', 'db1', 'agent1']);
+    expect(inv.notes).toEqual([]);
   });
 
-  it('finds an orphaned volume with no containers left', () => {
-    const inv = scanInstall(deps({ runCommand: ironDocker({ ids: [], volume: true, network: false }) }));
-    expect(inv.ironControl).toMatchObject({ containerIds: [], volume: expect.stringMatching(/_database$/) });
-    expect(inv.ironControl?.network).toBeUndefined();
+  it('skips a project that also holds a container of another copy', () => {
+    const fake = state();
+    const slug = getInstallSlug(root);
+    fake.containers.shared = [`gw-${slug}`, 'ffffffff'];
+    expect(scanInstall(deps({ runCommand: fakeDocker(fake) })).projects).toBeUndefined();
   });
 
-  it("reports nothing when only another copy's objects exist", () => {
-    const inv = scanInstall(deps({ runCommand: ironDocker({ ids: [], volume: false, network: false }) }));
-    expect(inv.ironControl).toBeUndefined();
+  it('skips a project that holds an unlabeled container', () => {
+    const fake = state();
+    fake.containers.legacy = [`gw-${getInstallSlug(root)}`, ''];
+    expect(scanInstall(deps({ runCommand: fakeDocker(fake) })).projects).toBeUndefined();
   });
 
-  it('never reads a failed volume listing as "no volume"', () => {
-    const inv = scanInstall(deps({ runCommand: ironDocker({ ids: ['web1'], volume: true, network: true }, true) }));
-    expect(inv.ironControl).toBeUndefined();
-    expect(inv.notes.some((n) => n.startsWith('Iron Control (if installed)'))).toBe(true);
+  it("reports nothing when only the decoy copy's project exists", () => {
+    const fake = state();
+    for (const id of ['web1', 'db1']) delete fake.containers[id];
+    expect(scanInstall(deps({ runCommand: fakeDocker(fake) })).projects).toBeUndefined();
   });
 
-  it('notes the manual commands when docker is unavailable', () => {
+  it('reports nothing for a project with no volumes or networks left', () => {
+    const fake = state();
+    fake.volumes = {};
+    fake.networks = {};
+    expect(scanInstall(deps({ runCommand: fakeDocker(fake) })).projects).toBeUndefined();
+  });
+
+  it('never reads a failed volume listing as "no volumes" and gives the exact commands', () => {
+    const slug = getInstallSlug(root);
+    const fake = state();
+    fake.fail = (args) => args[0] === 'volume';
+    const inv = scanInstall(deps({ runCommand: fakeDocker(fake) }));
+    expect(inv.projects).toBeUndefined();
+    expect(inv.notes).toEqual([
+      expect.stringContaining(
+        `docker ps -aq --filter label=${COMPOSE_PROJECT_LABEL}=gw-${slug} | xargs -r docker rm -f; ` +
+          `docker volume ls -q --filter label=${COMPOSE_PROJECT_LABEL}=gw-${slug} | xargs -r docker volume rm; ` +
+          `docker network ls -q --filter label=${COMPOSE_PROJECT_LABEL}=gw-${slug} | xargs -r docker network rm`,
+      ),
+    ]);
+  });
+
+  it('notes how to find and remove the projects when docker is unavailable', () => {
     const inv = scanInstall(deps());
-    expect(inv.ironControl).toBeUndefined();
-    const project = ironControlProject(getInstallSlug(root));
-    expect(
-      inv.notes.some((n) => n.includes(`docker volume rm ${project}_database; docker network rm ${project}`)),
-    ).toBe(true);
+    expect(inv.projects).toBeUndefined();
+    expect(inv.notes.some((n) => n.startsWith('Service volumes/networks:') && n.includes('<project>'))).toBe(true);
   });
 });
 

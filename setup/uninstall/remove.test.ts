@@ -174,51 +174,135 @@ describe('executePlan', () => {
     expect(notes.some((n) => n.includes('xargs -r docker rm -f'))).toBe(true);
   });
 
-  describe('rm-iron-control', () => {
-    const project = 'nanoclaw-iron-control-abcd1234';
-    const action: RemovalAction = { kind: 'rm-iron-control', runtime: 'docker', project };
-    /** Docker answering listings with this install's objects plus another copy's. */
+  describe('rm-project-residue', () => {
+    const project = 'gw-abcd1234';
+    const filter = `label=com.docker.compose.project=${project}`;
+    const action: RemovalAction = {
+      kind: 'rm-project-residue',
+      runtime: 'docker',
+      slug: 'abcd1234',
+      projects: [project],
+    };
+    /** Docker answering only label-filtered listings; removals are recorded. */
     const docker =
-      (calls: string[][], fail: (args: string[]) => boolean = () => false): RunCommand =>
+      (
+        calls: string[][],
+        fail: (args: string[]) => boolean = () => false,
+        members = 'web1|abcd1234\ndb1|abcd1234\n',
+      ): RunCommand =>
       (_cmd, args) => {
         calls.push(args);
         if (fail(args)) return { status: 1, stdout: '' };
-        if (args[0] === 'ps') return { status: 0, stdout: 'web1\ndb1\n' };
-        if (args[1] === 'ls' && args[0] === 'volume')
-          return { status: 0, stdout: `nanoclaw-iron-control-ffffffff_database\n${project}_database\n` };
-        if (args[1] === 'ls') return { status: 0, stdout: `bridge\n${project}\n` };
+        if (args[0] === 'ps' && !args.includes(filter)) return { status: 0, stdout: 'decoy\n' };
+        if (args[0] === 'ps') return { status: 0, stdout: members };
+        if (args[1] === 'ls' && !args.includes(filter)) return { status: 0, stdout: 'decoy\n' };
+        if (args[0] === 'volume' && args[1] === 'ls') return { status: 0, stdout: `${project}_database\n` };
+        if (args[0] === 'network' && args[1] === 'ls') return { status: 0, stdout: `${project}\n` };
         return { status: 0, stdout: '' };
       };
+    const removals = (calls: string[][]) => calls.filter((args) => args[0] === 'rm' || args[1] === 'rm');
+    const cleanup =
+      `docker ps -aq --filter ${filter} | xargs -r docker rm -f; ` +
+      `docker volume ls -q --filter ${filter} | xargs -r docker volume rm; ` +
+      `docker network ls -q --filter ${filter} | xargs -r docker network rm`;
 
-    it('re-lists at removal time, then removes containers, volume and network', () => {
+    it('re-checks ownership and re-lists by project label, then removes containers, volumes, networks', () => {
       const calls: string[][] = [];
       const { notes } = executePlan([action], deps({ runCommand: docker(calls) }));
-      expect(calls.filter((args) => args[0] === 'rm' || args[1] === 'rm')).toEqual([
+      expect(calls[0]).toEqual(['ps', '-a', '--filter', filter, '--format', '{{.ID}}|{{.Label "nanoclaw-install"}}']);
+      expect(calls.filter((args) => args[1] === 'ls')).toEqual([
+        ['volume', 'ls', '-q', '--filter', filter],
+        ['network', 'ls', '--filter', filter, '--format', '{{.Name}}'],
+      ]);
+      expect(removals(calls)).toEqual([
         ['rm', '-f', 'web1', 'db1'],
         ['volume', 'rm', `${project}_database`],
         ['network', 'rm', project],
       ]);
-      expect(calls[0]).toEqual(['ps', '-aq', '--filter', `label=com.docker.compose.project=${project}`]);
       expect(notes).toEqual([]);
     });
 
     it('removes nothing and gives the commands when a listing fails', () => {
       const calls: string[][] = [];
       const { notes } = executePlan([action], deps({ runCommand: docker(calls, (args) => args[1] === 'ls') }));
-      expect(calls.some((args) => args[0] === 'rm' || args[1] === 'rm')).toBe(false);
-      expect(notes).toEqual([
-        expect.stringContaining(`docker volume rm ${project}_database; docker network rm ${project}`),
-      ]);
+      expect(removals(calls)).toEqual([]);
+      expect(notes).toEqual([expect.stringContaining(cleanup)]);
     });
 
-    it('gives the cleanup commands when the database removal fails', () => {
+    it('removes nothing when the ownership check fails', () => {
+      const calls: string[][] = [];
+      const { notes } = executePlan(
+        [action],
+        deps({ runCommand: docker(calls, (args) => args.includes('--format') && args[0] === 'ps') }),
+      );
+      expect(removals(calls)).toEqual([]);
+      expect(notes).toEqual([expect.stringContaining(cleanup)]);
+    });
+
+    it('leaves a project untouched once a container of another copy joined it', () => {
+      const calls: string[][] = [];
+      const { notes } = executePlan(
+        [action],
+        deps({ runCommand: docker(calls, () => false, 'db1|abcd1234\nweb1|ffffffff\n') }),
+      );
+      expect(removals(calls)).toEqual([]);
+      expect(notes).toEqual([`Project ${project}: now shared with another copy; left untouched.`]);
+    });
+
+    it('still removes the volume after the service group already removed the containers', () => {
+      const calls: string[][] = [];
+      const gone: RunCommand = (_cmd, args) => {
+        calls.push(args);
+        if (args[0] === 'ps') return { status: 0, stdout: '' };
+        return docker([])(_cmd, args);
+      };
+      const { notes } = executePlan([action], deps({ runCommand: gone }));
+      expect(removals(calls)).toEqual([
+        ['volume', 'rm', `${project}_database`],
+        ['network', 'rm', project],
+      ]);
+      expect(notes).toEqual([]);
+    });
+
+    it('stops at the containers when they cannot be removed and gives the commands', () => {
+      const calls: string[][] = [];
+      const { notes } = executePlan([action], deps({ runCommand: docker(calls, (args) => args[0] === 'rm') }));
+      expect(removals(calls)).toEqual([['rm', '-f', 'web1', 'db1']]);
+      expect(notes).toEqual([expect.stringContaining(`containers not removed. Its keys in data/ are being deleted`)]);
+      expect(notes[0]).toContain(cleanup);
+    });
+
+    it('notes the retry command when a volume removal fails and still removes the network', () => {
       const calls: string[][] = [];
       const { notes } = executePlan(
         [action],
         deps({ runCommand: docker(calls, (args) => args[0] === 'volume' && args[1] === 'rm') }),
       );
-      expect(notes).toEqual([expect.stringContaining('Its keys in data/ are being deleted, so remove it too')]);
-      expect(notes[0]).toContain(`docker volume rm ${project}_database`);
+      expect(removals(calls).slice(1)).toEqual([
+        ['volume', 'rm', `${project}_database`],
+        ['network', 'rm', project],
+      ]);
+      expect(notes).toEqual([expect.stringContaining(`retry with: docker volume rm ${project}_database`)]);
+    });
+
+    it('handles several projects and reports the removal counts', () => {
+      const lines: string[] = [];
+      const calls: string[][] = [];
+      const two: RemovalAction = { kind: 'rm-project-residue', runtime: 'docker', slug: 's', projects: ['a', 'b'] };
+      executePlan(
+        [two],
+        deps({
+          runCommand: (_cmd, args) => {
+            calls.push(args);
+            if (args[0] === 'ps') return { status: 0, stdout: '' };
+            if (args[1] === 'ls') return { status: 0, stdout: `${args[4] ?? args[3]}-x\n` };
+            return { status: 0, stdout: '' };
+          },
+          log: (l) => lines.push(l),
+        }),
+      );
+      expect(removals(calls)).toHaveLength(4);
+      expect(lines).toEqual(['✓ removed 2 data volume(s) and 2 network(s)']);
     });
   });
 });

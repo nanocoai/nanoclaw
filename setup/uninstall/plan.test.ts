@@ -104,25 +104,36 @@ describe('buildRemovalPlan declined groups', () => {
   });
 });
 
-describe('buildRemovalPlan Iron Control', () => {
-  const ironControl = {
-    project: 'nanoclaw-iron-control-abcd1234',
-    containerIds: ['web1', 'db1'],
-    volume: 'nanoclaw-iron-control-abcd1234_database',
-    network: 'nanoclaw-iron-control-abcd1234',
-  };
+describe('buildRemovalPlan compose projects', () => {
+  const projects = { names: ['gw-abcd1234'], volumes: ['gw-abcd1234_database'], networks: ['gw-abcd1234'] };
 
-  it('removes the database with the data group, before the keys in data/', () => {
-    const actions = buildRemovalPlan(inventory({ ironControl }), allYes());
-    const ironIdx = actions.findIndex((a) => a.kind === 'rm-iron-control');
-    expect(actions[ironIdx]).toEqual({ kind: 'rm-iron-control', runtime: 'docker', project: ironControl.project });
-    expect(ironIdx).toBeGreaterThan(actions.findIndex((a) => a.kind === 'rm-containers'));
-    expect(ironIdx).toBeLessThan(actions.findIndex((a) => a.kind === 'backup-env'));
+  it('removes project volumes and networks with the data group, after containers and before the keys in data/', () => {
+    const actions = buildRemovalPlan(inventory({ projects }), allYes());
+    const idx = actions.findIndex((a) => a.kind === 'rm-project-residue');
+    expect(actions[idx]).toEqual({
+      kind: 'rm-project-residue',
+      runtime: 'docker',
+      slug: 'abcd1234',
+      projects: ['gw-abcd1234'],
+    });
+    expect(idx).toBeGreaterThan(actions.findIndex((a) => a.kind === 'rm-containers'));
+    expect(idx).toBeLessThan(actions.findIndex((a) => a.kind === 'backup-env'));
+    expect(idx).toBeLessThan(actions.findIndex((a) => a.kind === 'delete-path'));
   });
 
-  it('keeps the database when the data group is declined', () => {
-    const actions = buildRemovalPlan(inventory({ ironControl }), { service: true, data: false, user: true });
-    expect(kinds(actions)).not.toContain('rm-iron-control');
+  it('removes the project with the data group even when the service group is declined', () => {
+    const actions = buildRemovalPlan(inventory({ projects }), { service: false, data: true, user: false });
+    expect(kinds(actions)).not.toContain('rm-containers');
+    expect(kinds(actions).indexOf('rm-project-residue')).toBeLessThan(kinds(actions).indexOf('backup-env'));
+  });
+
+  it('keeps the volumes when the data group is declined', () => {
+    const actions = buildRemovalPlan(inventory({ projects }), { service: true, data: false, user: true });
+    expect(kinds(actions)).not.toContain('rm-project-residue');
+  });
+
+  it('plans nothing extra when the copy has no projects', () => {
+    expect(kinds(buildRemovalPlan(inventory(), allYes()))).not.toContain('rm-project-residue');
   });
 });
 

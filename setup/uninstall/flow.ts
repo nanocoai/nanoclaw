@@ -25,7 +25,7 @@ import { note } from '../lib/theme.js';
 import * as setupLog from '../logs.js';
 import { buildRemovalPlan, type Decisions } from './plan.js';
 import { executePlan, type ExecDeps } from './remove.js';
-import { scanInstall, tilde, type Inventory, type IronControlInventory, type RunCommand } from './scan.js';
+import { scanInstall, tilde, type Inventory, type ProjectInventory, type RunCommand } from './scan.js';
 
 const GROUPS = {
   service: {
@@ -45,12 +45,14 @@ const GROUPS = {
   },
 } as const;
 
-const IRON_CONTROL_NOTE =
-  'This includes the Iron Control database: its encryption keys are in data/, which this deletes, so it could never be read again.';
+const PROJECT_NOTE =
+  "This includes the data volumes of this copy's services (such as a gateway's database). They can't be read without the keys in data/, which this deletes.";
 
-function ironControlRow(iron: IronControlInventory): { what: string; where: string } {
-  const parts = [`${iron.containerIds.length} container(s)`, ...(iron.volume ? [`volume ${iron.volume}`] : [])];
-  return { what: 'Iron Control database', where: `${iron.project} (${parts.join(', ')})` };
+function projectRows(projects: ProjectInventory): { what: string; where: string }[] {
+  const rows: { what: string; where: string }[] = [];
+  if (projects.volumes.length > 0) rows.push({ what: 'Service data volumes', where: projects.volumes.join(', ') });
+  if (projects.networks.length > 0) rows.push({ what: 'Service networks', where: projects.networks.join(', ') });
+  return rows;
 }
 
 const runCommand: RunCommand = (cmd, args) => {
@@ -93,8 +95,8 @@ export async function runUninstallFlow(opts: {
 
   const svcRows = serviceRows(inv, home);
   const dataRows = [...inv.data, ...inv.runtime].map(({ what, where }) => ({ what, where }));
-  if (inv.ironControl) dataRows.unshift(ironControlRow(inv.ironControl));
-  const dataDesc = inv.ironControl ? `${GROUPS.data.desc} ${IRON_CONTROL_NOTE}` : GROUPS.data.desc;
+  if (inv.projects) dataRows.unshift(...projectRows(inv.projects));
+  const dataDesc = inv.projects ? `${GROUPS.data.desc} ${PROJECT_NOTE}` : GROUPS.data.desc;
   const userRows = inv.user.map(({ what, where }) => ({ what, where }));
   const totalFound = svcRows.length + dataRows.length + userRows.length;
 

@@ -7,9 +7,19 @@ pnpm exec tsx .claude/skills/add-iron-proxy/scripts/setup.ts --remove
 ```
 
 NanoClaw's uninstall flow removes this copy's gateway material with its other data.
-With the data group it also removes this copy's Iron Control containers, database
-volume and network (Compose project `nanoclaw-iron-control-<slug>`), because the
-encryption keys it deletes from `data/` are the only way to read that database.
+Iron Control's `web` and `database` containers carry the same `nanoclaw-install`
+and `nanoclaw-role=gateway` labels as the central proxy. A container with the
+install label, a role other than `agent` and no session label is gateway-owned:
+the update drain and the host's residue reaping leave it alone
+(https://github.com/nanocoai/nanoclaw/pull/3948, which lands first). The
+uninstaller does not read the role; a Compose project is this copy's when every
+container in it carries this copy's install label. With the data group it then
+removes the project's containers, database volume and network, because the
+encryption keys it deletes from `data/` are the only way to read that database. The project is found through
+its containers: an install whose containers predate the labels gets them on its
+next setup run, and a volume whose containers were already removed (the command
+above, or an earlier service-only uninstall) is not found. In both cases the
+uninstaller leaves the volume and the next setup prints the exact removal commands.
 
 The ordinary removal command above preserves Iron Control's database volume. To
 keep the data, back up that volume together with
