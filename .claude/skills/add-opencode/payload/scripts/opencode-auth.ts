@@ -190,7 +190,8 @@ async function performChatGptSignIn(method: ChatGptLoginMethod, root: string, va
     const secret = readOpenCodeOAuth(authJson);
     // Delete native token files before any network wait. A Ctrl-C during the
     // gateway save must not strand them when the process exits immediately.
-    // The gateway refuses the save if its entry changed since the lookup.
+    // The gateway rereads the entry and refuses a changed identity or checked
+    // metadata; it cannot detect a value-only rotation, which this overwrites.
     fs.rmSync(loginDir, { recursive: true, force: true });
     await vault.save(secret);
   } finally {
