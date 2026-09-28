@@ -6,6 +6,13 @@ import { touchHeartbeat } from '../heartbeat.js';
 
 const SCRIPT_TIMEOUT_MS = 30_000;
 const SCRIPT_MAX_BUFFER = 1024 * 1024;
+// On timeout the group gets SIGTERM, so a script can trap it and clean up as it could
+// under execFile, then SIGKILL after the grace. 2 s is enough to drop a lock or temp dir
+// and adds little to the 30 s budget. Worst case a timed-out script holds the queue for
+// timeout + grace + reap cap (33 s at the defaults).
+const SCRIPT_KILL_GRACE_MS = 2_000;
+// SIGKILL is not synchronous; wait this long for the group to vanish before moving on.
+const SCRIPT_KILL_REAP_MS = 1_000;
 
 export interface ScriptResult {
   wakeAgent: boolean;
@@ -37,22 +44,54 @@ export async function runScript(
     let exitCode: number | null = null;
     let exitSignal: NodeJS.Signals | null = null;
 
-    const killGroup = (): void => {
-      killed = true;
+    const signalGroup = (signal: NodeJS.Signals | 0): boolean => {
       try {
-        process.kill(-child.pid!, 'SIGKILL');
+        process.kill(-child.pid!, signal);
+        return true;
       } catch {
-        /* group already gone */
+        return false; // group already gone
       }
+    };
+
+    // After a kill, resolve only once the group is gone, so the next task's script
+    // never overlaps this one and no signal is sent after the PGID could be reused.
+    let closed = false;
+    let groupGone = false;
+    let poll: ReturnType<typeof setInterval> | undefined;
+    let graceTimer: ReturnType<typeof setTimeout> | undefined;
+    const tryFinish = (): void => {
+      if (closed && (!killed || groupGone)) finish(null);
+    };
+    const endGroup = (): void => {
+      clearInterval(poll);
+      clearTimeout(graceTimer);
+      groupGone = true;
       // A process that left the group can still hold the pipes open; drop them
-      // so 'close' fires once bash is dead, as execFile does.
+      // so 'close' fires, as execFile does.
       child.stdout.destroy();
       child.stderr.destroy();
+      tryFinish();
+    };
+    const killGroup = (): void => {
+      if (killed) return;
+      killed = true;
+      if (!signalGroup('SIGTERM')) return endGroup();
+      poll = setInterval(() => {
+        if (!signalGroup(0)) endGroup();
+      }, 100);
+      graceTimer = setTimeout(() => {
+        signalGroup('SIGKILL');
+        graceTimer = setTimeout(() => {
+          log(`[${taskId}] process group still alive ${SCRIPT_KILL_REAP_MS}ms after SIGKILL; moving on`);
+          endGroup();
+        }, SCRIPT_KILL_REAP_MS);
+      }, SCRIPT_KILL_GRACE_MS);
     };
 
     const timer = setTimeout(killGroup, timeoutMs);
 
     const collect = (stream: 'stdout' | 'stderr') => (chunk: Buffer) => {
+      if (killed) return; // output is discarded anyway; keep draining without buffering
       out[stream].push(chunk);
       bytes[stream] += chunk.length;
       if (!overflow && bytes[stream] > SCRIPT_MAX_BUFFER) {
@@ -68,6 +107,8 @@ export async function runScript(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearInterval(poll);
+      clearTimeout(graceTimer);
       try {
         fs.unlinkSync(scriptPath);
       } catch {
@@ -125,7 +166,8 @@ export async function runScript(
     child.on('close', (code, signal) => {
       exitCode = code;
       exitSignal = signal;
-      finish(null);
+      closed = true;
+      tryFinish();
     });
   });
 }

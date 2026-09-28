@@ -120,7 +120,10 @@ describe('a timed-out script is reported as a timeout', () => {
 });
 
 describe('a timed-out script takes its children down with it', () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'task-script-'));
+  let tmp: string;
+  beforeEach(() => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'task-script-'));
+  });
   afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }));
 
   it('kills the forked last command, so its side effect never lands', async () => {
@@ -144,18 +147,59 @@ describe('a timed-out script takes its children down with it', () => {
     expect(() => process.kill(pid, 0)).toThrow();
   });
 
-  it('resolves at the timeout even if a child escaped the group and holds the pipes', async () => {
+  it('resolves after the kill grace even if a child escaped the group and holds the pipes', async () => {
     const started = Date.now();
     const original = console.error;
     console.error = () => {};
     try {
       // set -m puts the background job in its own process group.
-      expect(await runScript('set -m; (sleep 2; echo escaped >&2) & wait', 't-escape', 200)).toBeNull();
+      expect(await runScript('set -m; (sleep 6; echo escaped >&2) & wait', 't-escape', 200)).toBeNull();
     } finally {
       console.error = original;
     }
-    expect(Date.now() - started).toBeLessThan(1500);
+    expect(Date.now() - started).toBeLessThan(4000);
+  }, 10_000);
+
+  it('sends SIGTERM first, so a script can trap its timeout and clean up', async () => {
+    const cleaned = path.join(tmp, 'cleaned');
+    const original = console.error;
+    console.error = () => {};
+    try {
+      const script = `trap 'echo 1 > ${cleaned}; exit 1' TERM; sleep 5 & wait`;
+      const started = Date.now();
+      expect(await runScript(script, 't-trap', 200)).toBeNull();
+      // Exited on SIGTERM, so it resolves inside the grace instead of waiting for SIGKILL.
+      expect(Date.now() - started).toBeLessThan(1500);
+    } finally {
+      console.error = original;
+    }
+    expect(fs.existsSync(cleaned)).toBe(true);
   });
+
+  it('SIGKILLs a child that ignores SIGTERM, and resolves only once it is dead', async () => {
+    const marker = path.join(tmp, 'stubborn');
+    const pidFile = path.join(tmp, 'stubborn.pid');
+    const pgidFile = path.join(tmp, 'stubborn.pgid');
+    const original = console.error;
+    console.error = () => {};
+    try {
+      // An ignored signal stays ignored across exec, so sleep ignores SIGTERM too.
+      // The script's own bash is the group leader, so its pid is the group id.
+      const script = `echo $$ > ${pgidFile}; bash -c 'trap "" TERM; echo $$ > ${pidFile}; sleep 3; echo 1 > ${marker}'`;
+      const started = Date.now();
+      expect(await runScript(script, 't-stubborn', 200)).toBeNull();
+      expect(Date.now() - started).toBeGreaterThanOrEqual(2000);
+    } finally {
+      console.error = original;
+    }
+    // Checked at resolution, not later: resolving early would let the next task's script overlap this one.
+    const pgid = Number(fs.readFileSync(pgidFile, 'utf8'));
+    expect(() => process.kill(-pgid, 0)).toThrow();
+    const pid = Number(fs.readFileSync(pidFile, 'utf8'));
+    expect(() => process.kill(pid, 0)).toThrow();
+    await new Promise((r) => setTimeout(r, 1200));
+    expect(fs.existsSync(marker)).toBe(false);
+  }, 10_000);
 
   it('enforces the output limit in bytes, not characters', async () => {
     const original = console.error;
