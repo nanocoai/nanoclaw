@@ -52,6 +52,8 @@ export type ServiceMode = 'launchd' | 'systemd-user' | 'systemd-system' | 'nohup
 export interface ServiceHandle {
   mode: ServiceMode;
   active: boolean;
+  /** Unit still starting or stopping: must be stopped like a running one, never counts as healthy. */
+  transitional?: boolean;
   name?: string;
   definition?: string;
   pid?: number;
@@ -88,6 +90,56 @@ function processExists(pid: number): boolean {
   }
 }
 
+/**
+ * `systemctl --user` needs XDG_RUNTIME_DIR; `su -`, cron and non-interactive
+ * SSH leave it unset while the user manager still runs (linger or another
+ * session). Adopt /run/user/<uid> process-wide: stop and start need it too.
+ */
+export function adoptUserRuntimeDir(uid: number, runRoot = '/run/user'): void {
+  if (process.env.XDG_RUNTIME_DIR) return;
+  const runtimeDir = path.join(runRoot, String(uid));
+  if (fs.existsSync(runtimeDir)) process.env.XDG_RUNTIME_DIR = runtimeDir;
+}
+
+/**
+ * Liveness by exit code: 0 = running (stdout), `stoppedExit` = stopped
+ * (undefined), anything else = the probe itself failed, so throw. Reading every
+ * failure as "stopped" let a run without the user bus skip stop and restart,
+ * pass health against the stale host, and report complete.
+ */
+export function probe(
+  env: ServiceEnvironment,
+  command: string,
+  args: string[],
+  stoppedExit: number[],
+  hint: string,
+): { stdout: string; transitional: boolean } | undefined {
+  try {
+    return { stdout: env.runner.run(command, args), transitional: false };
+  } catch (err) {
+    const failed = err as { status?: number | null; stdout?: Buffer | string; stderr?: Buffer | string };
+    if (typeof failed.status === 'number' && stoppedExit.includes(failed.status)) {
+      // systemctl is-active exits 3 for activating/deactivating too (a unit
+      // mid auto-restart still holds the service): only its terminal states
+      // are stopped. Other tools print nothing on their stopped exit.
+      const state = failed.stdout?.toString().trim() ?? '';
+      return /^(activating|deactivating)$/.test(state) ? { stdout: state, transitional: true } : undefined;
+    }
+    const detail = failed.stderr?.toString().trim() || (err instanceof Error ? err.message : String(err));
+    throw new Error(
+      `Cannot tell whether NanoClaw is running: \`${command} ${args.join(' ')}\` failed (${detail}). ${hint}`,
+    );
+  }
+}
+
+function flag(unit: { transitional: boolean } | undefined): { transitional?: true } {
+  return unit?.transitional ? { transitional: true } : {};
+}
+
+function userBusHint(uid: number): string {
+  return `Run the update from a login session of this user, or with XDG_RUNTIME_DIR=/run/user/${uid} while the user manager runs (loginctl enable-linger).`;
+}
+
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -102,7 +154,15 @@ export function detectService(projectRoot: string, env: ServiceEnvironment): Ser
         mode: 'launchd',
         name,
         definition,
-        active: env.runner.tryRun('launchctl', ['print', `gui/${env.uid}/${name}`]).ok,
+        // 113: not loaded in this domain; 112 (no such domain) and the rest are probe failures.
+        active:
+          probe(
+            env,
+            'launchctl',
+            ['print', `gui/${env.uid}/${name}`],
+            [113],
+            'Run the update from a login session of this user.',
+          ) !== undefined,
       };
     }
   }
@@ -112,20 +172,20 @@ export function detectService(projectRoot: string, env: ServiceEnvironment): Ser
     const userDefinition = path.join(env.home, '.config', 'systemd', 'user', `${name}.service`);
     const systemDefinition = `/etc/systemd/system/${name}.service`;
     if (fs.existsSync(userDefinition)) {
-      return {
-        mode: 'systemd-user',
-        name,
-        definition: userDefinition,
-        active: env.runner.tryRun('systemctl', ['--user', 'is-active', '--quiet', name]).ok,
-      };
+      adoptUserRuntimeDir(env.uid);
+      // 3: not active; a bus error exits 1 and is not "stopped".
+      const unit = probe(env, 'systemctl', ['--user', 'is-active', name], [3], userBusHint(env.uid));
+      return { mode: 'systemd-user', name, definition: userDefinition, active: unit !== undefined, ...flag(unit) };
     }
     if (fs.existsSync(systemDefinition)) {
-      return {
-        mode: 'systemd-system',
-        name,
-        definition: systemDefinition,
-        active: env.runner.tryRun('systemctl', ['is-active', '--quiet', name]).ok,
-      };
+      const unit = probe(
+        env,
+        'systemctl',
+        ['is-active', name],
+        [3],
+        'Run the update where systemctl can reach the system manager.',
+      );
+      return { mode: 'systemd-system', name, definition: systemDefinition, active: unit !== undefined, ...flag(unit) };
     }
 
     const definition = path.join(projectRoot, 'start-nanoclaw.sh');
@@ -141,8 +201,15 @@ export function detectService(projectRoot: string, env: ServiceEnvironment): Ser
     }
   }
 
-  const unmanaged = env.runner.tryRun('pgrep', ['-f', `${escapeRegex(projectRoot)}/(dist/index\\.js|src/index\\.ts)`]);
-  if (unmanaged.ok && unmanaged.stdout) {
+  // pgrep exits 1 for no match; a missing or broken pgrep must not read as "nothing running".
+  const unmanaged = probe(
+    env,
+    'pgrep',
+    ['-f', `${escapeRegex(projectRoot)}/(dist/index\\.js|src/index\\.ts)`],
+    [1],
+    'Install procps (pgrep) and retry.',
+  );
+  if (unmanaged?.stdout) {
     return { mode: 'unmanaged', active: true, name: unmanaged.stdout.split('\n').join(',') };
   }
   return { mode: 'none', active: false };
@@ -168,6 +235,7 @@ export async function stopService(handle: ServiceHandle, env: ServiceEnvironment
       if (!/No such process/i.test(err instanceof Error ? err.message : String(err))) throw err;
     }
   } else if (handle.mode === 'systemd-user') {
+    adoptUserRuntimeDir(env.uid);
     env.runner.run('systemctl', ['--user', 'stop', handle.name!]);
   } else if (handle.mode === 'systemd-system') {
     env.runner.run('systemctl', ['stop', handle.name!]);
@@ -193,6 +261,7 @@ export function startService(handle: ServiceHandle, projectRoot: string, env: Se
     env.runner.run('launchctl', ['bootstrap', `gui/${env.uid}`, handle.definition!]);
     env.runner.run('launchctl', ['kickstart', `gui/${env.uid}/${handle.name}`]);
   } else if (handle.mode === 'systemd-user') {
+    adoptUserRuntimeDir(env.uid);
     env.runner.run('systemctl', ['--user', 'start', handle.name!]);
   } else if (handle.mode === 'systemd-system') {
     env.runner.run('systemctl', ['start', handle.name!]);
@@ -343,12 +412,22 @@ export async function verifyServiceHealth(
   if (!handle.active) return true;
   const socket = path.join(projectRoot, 'data', 'ncl.sock');
   const started = Date.now();
+  // A probe failure here is "not healthy yet", not a verdict: the start just
+  // succeeded, so the manager is reachable and the window is for settling.
+  let probeError: unknown;
   while (Date.now() - started < timeoutMs) {
-    const current = detectService(projectRoot, env);
-    if (current.active && fs.existsSync(socket)) {
+    let current: ServiceHandle | undefined;
+    try {
+      current = detectService(projectRoot, env);
+      probeError = undefined;
+    } catch (err) {
+      probeError = err;
+    }
+    if (current?.active && !current.transitional && fs.existsSync(socket)) {
       if (env.runner.tryRun(path.join(projectRoot, 'bin', 'ncl'), ['groups', 'list'], projectRoot).ok) return true;
     }
     await env.sleep(500);
   }
+  if (probeError) throw probeError;
   return false;
 }
