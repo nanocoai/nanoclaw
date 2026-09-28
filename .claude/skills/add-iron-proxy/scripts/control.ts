@@ -4,12 +4,6 @@ import { assertCredentialIsolation } from './credential-isolation.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { installCommand } from './install-command.js';
-import {
-  ensureControlImage,
-  pinnedControlImage,
-  type ControlImage,
-  type ControlImageOptions,
-} from './control-image.js';
 
 import { stringify as yaml } from 'yaml';
 import { getInstallSlug } from '../../../../src/install-slug.js';
@@ -50,7 +44,7 @@ export function controlPort(root: string): number {
   return port;
 }
 
-export function controlCompose(root: string, port: number, image: ControlImage = pinnedControlImage()): string {
+export function controlCompose(root: string, port: number): string {
   const p = controlPaths(root);
   return yaml({
     name: p.project,
@@ -63,10 +57,8 @@ export function controlCompose(root: string, port: number, image: ControlImage =
         healthcheck: { test: ['CMD-SHELL', 'pg_isready -U iron_control'], interval: '2s', timeout: '3s', retries: 30 },
       },
       web: {
-        image: image.image,
-        platform: image.platform,
-        // A locally built image only exists on this engine.
-        ...(image.source === 'local-build' ? { pull_policy: 'never' } : {}),
+        image: pins['iron-control-image'],
+        platform: pins['iron-control-platform'],
         restart: 'unless-stopped',
         env_file: [p.environment],
         command: ['./bin/rails', 'server'],
@@ -137,19 +129,7 @@ export async function controlRequest(root: string, resource: string, method = 'G
   return response.status === 204 ? null : ((await response.json()) as { data: unknown }).data;
 }
 
-export interface InstallControlOptions extends ControlImageOptions {
-  /** The console image already settled by {@link prepareControlImage} in this run. */
-  image?: ControlImage;
-}
-
-/**
- * Settles how the console runs on this engine before any image is pulled and
- * builds it where the engine can neither run the pinned image nor emulate it.
- * Setup calls it before building Iron Proxy so a blocked engine stops first.
- */
-export const prepareControlImage = ensureControlImage;
-
-export async function installControl(root = process.cwd(), options: InstallControlOptions = {}): Promise<void> {
+export async function installControl(root = process.cwd()): Promise<void> {
   const p = controlPaths(root);
   const port = controlPort(root);
   const url = `http://127.0.0.1:${port}`;
@@ -193,8 +173,7 @@ export async function installControl(root = process.cwd(), options: InstallContr
     `POSTGRES_USER=iron_control\nPOSTGRES_PASSWORD=${environment.IRON_CONTROL_DATABASE_PASSWORD}\n`,
   );
   // Keep encryption and account keys unchanged on every refresh.
-  const image = options.image ?? (await prepareControlImage(options));
-  writePrivate(p.compose, controlCompose(root, port, image));
+  writePrivate(p.compose, controlCompose(root, port));
   await compose(root, ['up', '-d', '--wait', '--wait-timeout', '240']);
   let registration: { principalId: string; proxyId: string };
   if (fs.existsSync(p.registration)) {

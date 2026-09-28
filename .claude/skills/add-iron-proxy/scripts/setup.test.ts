@@ -6,18 +6,27 @@ import { parse as yaml } from 'yaml';
 
 import { InstallCommandFailure } from './install-command.js';
 
-/** A fresh arm64 Linux engine with no cached images; Buildx and binfmt vary per test. */
-const engine = { emulation: false, buildx: true, calls: [] as string[][] };
+/** A fresh arm64 Linux engine with no cached images; the kernel's QEMU registration varies per test. */
+const engine = { emulation: false, calls: [] as string[][] };
 
 // The kernel's QEMU registration, never the test machine's own.
+const X86_64_HANDLER =
+  'enabled\ninterpreter /usr/bin/qemu-x86_64\nflags: POCF\noffset 0\nmagic 7f454c4602010100000000000000000002003e00\nmask fffffffffffefe00fffffffffffffffffeffffff\n';
 const readFileSync = fs.readFileSync;
 vi.spyOn(fs, 'readFileSync').mockImplementation(((file: fs.PathOrFileDescriptor, ...rest: unknown[]) => {
   if (typeof file === 'string' && file.startsWith('/proc/sys/fs/binfmt_misc/')) {
+    if (file.endsWith('/status')) return 'enabled\n';
     if (!engine.emulation) throw Object.assign(new Error(`ENOENT: ${file}`), { code: 'ENOENT' });
-    return 'enabled\ninterpreter /usr/bin/qemu-x86_64\nflags: POCF\n';
+    return X86_64_HANDLER;
   }
   return (readFileSync as (...args: unknown[]) => unknown)(file, ...rest);
 }) as typeof fs.readFileSync);
+const readdirSync = fs.readdirSync;
+vi.spyOn(fs, 'readdirSync').mockImplementation(((dir: fs.PathLike, ...rest: unknown[]) => {
+  if (dir === '/proc/sys/fs/binfmt_misc')
+    return engine.emulation ? ['qemu-x86_64', 'register', 'status'] : ['register', 'status'];
+  return (readdirSync as (...args: unknown[]) => unknown)(dir, ...rest);
+}) as typeof fs.readdirSync);
 const composeStarted = new Error('compose up reached');
 
 vi.mock('./install-command.js', async (original) => {
@@ -26,18 +35,15 @@ vi.mock('./install-command.js', async (original) => {
     ...actual,
     installCommand: vi.fn(async (command: string, args: string[], options: { label: string; absentHint?: string }) => {
       engine.calls.push([command, ...args]);
-      const absent = () => {
-        throw new actual.InstallCommandFailure(`${options.label}: ${options.absentHint ?? 'failed (exit 1)'}`);
-      };
       if (command === 'git' || command === 'python3') return '';
       if (command !== 'docker') throw new Error(`unexpected command: ${command}`);
-      if (args[0] === 'version') return 'arm64\n';
-      if (args[0] === 'buildx') return engine.buildx ? '' : absent();
+      if (args[0] === 'info') return `aarch64 ${os.release()} ${os.hostname()}\n`;
       if (args[0] === 'build') return '';
       if (args[0] === 'image' && args[1] === 'inspect') {
-        const built = engine.calls.some((call) => call.includes('build') && call.includes(args[2]));
-        if (!built) return absent();
-        return args.includes('--format') ? `arm64 ${'0'.repeat(40)}` : `sha256:${'b'.repeat(64)}`;
+        if (!engine.calls.some((call) => call[1] === 'build')) {
+          throw new actual.InstallCommandFailure(`${options.label}: ${options.absentHint ?? 'failed (exit 1)'}`);
+        }
+        return `sha256:${'b'.repeat(64)}`;
       }
       if (args[0] === 'volume') return '';
       if (args[0] === 'compose') throw composeStarted;
@@ -47,7 +53,10 @@ vi.mock('./install-command.js', async (original) => {
 });
 
 const { run } = await import('./setup.js');
+const { installCommand } = await import('./install-command.js');
+const installCommandMock = vi.mocked(installCommand);
 const { controlPaths } = await import('./control.js');
+const { hasAmd64Emulation } = await import('./control-preflight.js');
 
 const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
 const roots: string[] = [];
@@ -55,7 +64,6 @@ const roots: string[] = [];
 beforeEach(() => {
   engine.calls.length = 0;
   engine.emulation = false;
-  engine.buildx = true;
   Object.defineProperty(process, 'platform', { ...platform, value: 'linux' });
 });
 afterEach(() => {
@@ -69,53 +77,92 @@ function project(): string {
   return root;
 }
 
-const dockerVerbs = () => engine.calls.filter((call) => call[0] === 'docker').map((call) => call.slice(1, 3).join(' '));
-const webService = (root: string) => yaml(fs.readFileSync(controlPaths(root).compose, 'utf8')).services.web;
+const dockerVerbs = () => engine.calls.filter((call) => call[0] === 'docker').map((call) => call[1]);
 
 describe('Iron Proxy setup on an arm64 Linux engine', () => {
-  it('keeps the pinned amd64 console image where QEMU emulation is registered', async () => {
-    engine.emulation = true;
-    const root = project();
-    await expect(run(['--with-control'], root)).rejects.toBe(composeStarted);
-    const verbs = dockerVerbs();
-    expect(verbs.filter((verb) => verb.startsWith('buildx'))).toEqual([]);
-    expect(verbs.filter((verb) => verb.startsWith('build'))).toHaveLength(1);
-    const web = webService(root);
-    expect(web.image).toMatch(/^docker.io\/ironsh\/iron-control:.*@sha256:[a-f0-9]{64}$/);
-    expect(web.platform).toBe('linux/amd64');
-    expect(web.pull_policy).toBeUndefined();
-  });
-
-  it('builds the console natively before the proxy where nothing emulates amd64', async () => {
-    const root = project();
-    await expect(run(['--with-control'], root)).rejects.toBe(composeStarted);
-    const verbs = dockerVerbs();
-    expect(verbs.indexOf('buildx build')).toBeGreaterThanOrEqual(0);
-    expect(verbs.indexOf('buildx build')).toBeLessThan(verbs.indexOf('build -f'));
-    const build = engine.calls.find((call) => call[1] === 'buildx' && call[2] === 'build')!;
-    expect(build.slice(3, 6)).toEqual(['--platform', 'linux/arm64', '--load']);
-    const web = webService(root);
-    expect(web.image).toMatch(/^nanoclaw-iron-control:[0-9a-f]{7}-arm64$/);
-    expect(web.platform).toBe('linux/arm64');
-    expect(web.pull_policy).toBe('never');
-  });
-
-  it('stops with the documented options before building or fetching anything without Buildx', async () => {
-    engine.buildx = false;
+  it('stops before building or fetching anything when the engine cannot run amd64 images', async () => {
     const root = project();
     const failure = await run(['--with-control'], root).catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(Error);
     expect(failure).not.toBeInstanceOf(InstallCommandFailure);
     const message = (failure as Error).message;
-    expect(message).toContain('Iron Control has no arm64 image');
+    expect(message).toContain('Iron Control cannot run on this aarch64 Docker engine');
     expect(message).toMatch(
       /docker run --privileged --rm docker\.io\/tonistiigi\/binfmt:\S+@sha256:[0-9a-f]{64} --install amd64/,
     );
-    expect(message).toContain('Install Docker Buildx');
     expect(message).toContain('OneCLI gateway');
-    // Only probes ran: the engine architecture, the cached console image, Buildx, then the daemon again.
-    expect(dockerVerbs()).toEqual(['version --format', 'image inspect', 'buildx version', 'version --format']);
+    expect(dockerVerbs()).toEqual(['info']);
     expect(engine.calls.some((call) => call[0] === 'git' || call[0] === 'python3')).toBe(false);
     expect(fs.existsSync(controlPaths(root).compose)).toBe(false);
+  });
+
+  it('leaves an engine on another kernel alone, since it cannot inspect it', async () => {
+    // Docker Desktop, a VM or a remote daemon: same kernel release here, but another host.
+    installCommandMock.mockImplementationOnce(async (command: string, args: string[]) => {
+      engine.calls.push([command, ...args]);
+      return `aarch64 ${os.release()} other-host\n`;
+    });
+    const root = project();
+    await expect(run(['--with-control'], root)).rejects.toBe(composeStarted);
+    expect(dockerVerbs()[0]).toBe('info');
+    expect(yaml(fs.readFileSync(controlPaths(root).compose, 'utf8')).services.web.platform).toBe('linux/amd64');
+  });
+
+  it('keeps the pinned amd64 console image where the kernel has a QEMU handler', async () => {
+    engine.emulation = true;
+    const root = project();
+    await expect(run(['--with-control'], root)).rejects.toBe(composeStarted);
+    expect(dockerVerbs().filter((verb) => verb === 'build')).toHaveLength(1);
+    const web = yaml(fs.readFileSync(controlPaths(root).compose, 'utf8')).services.web;
+    expect(web.image).toMatch(/^docker.io\/ironsh\/iron-control:.*@sha256:[a-f0-9]{64}$/);
+    expect(web.platform).toBe('linux/amd64');
+  });
+});
+
+describe('amd64 emulation probe', () => {
+  const x86 =
+    'enabled\ninterpreter /run/qemu-x86_64\nflags: POCF\noffset 0\nmagic 7f454c4602010100000000000000000002003e00\nmask ffffffffff\n';
+  const arm = x86.replace('3e00', 'b700');
+  const kernel = (status: string, handlers: Record<string, string>) => ({
+    list: () => ['register', 'status', ...Object.keys(handlers)],
+    read: (file: string) => {
+      if (file === 'status') return status;
+      if (file in handlers) return handlers[file];
+      throw Object.assign(new Error(`ENOENT: ${file}`), { code: 'ENOENT' });
+    },
+  });
+  const probe = (status: string, handlers: Record<string, string>) => {
+    const k = kernel(status, handlers);
+    return hasAmd64Emulation(k.list, k.read);
+  };
+
+  it('accepts an enabled x86-64 handler with the F flag under any name', () => {
+    expect(probe('enabled', { 'qemu-x86_64': x86 })).toBe(true);
+    expect(probe('enabled', { 'x86_64-linux': x86, 'qemu-aarch64': arm })).toBe(true);
+  });
+
+  it('rejects a missing, disabled, non-fixed or other-architecture handler and no binfmt at all', () => {
+    expect(probe('enabled', {})).toBe(false);
+    expect(probe('enabled', { 'qemu-aarch64': arm })).toBe(false);
+    expect(probe('disabled', { 'qemu-x86_64': x86 })).toBe(false);
+    expect(probe('enabled', { 'qemu-x86_64': x86.replace('enabled', 'disabled') })).toBe(false);
+    expect(probe('enabled', { 'qemu-x86_64': x86.replace('POCF', 'POC') })).toBe(false);
+    expect(probe('enabled', { 'qemu-x86_64': x86.replace('offset 0', 'offset 18') })).toBe(false);
+    expect(probe('enabled', { 'qemu-i386-like': x86.replace('7f454c4602', '7f454c4601') })).toBe(false);
+  });
+
+  it('answers unknown, never absent, when binfmt_misc is not readable here', () => {
+    const missing = () => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    };
+    expect(hasAmd64Emulation(missing, missing)).toBeUndefined();
+    // Listing or a handler read failing after a readable status is unknown too.
+    expect(hasAmd64Emulation(missing, (file) => (file === 'status' ? 'enabled' : missing()))).toBeUndefined();
+    expect(
+      hasAmd64Emulation(
+        () => ['gone', 'status'],
+        (file) => (file === 'status' ? 'enabled' : missing()),
+      ),
+    ).toBeUndefined();
   });
 });
