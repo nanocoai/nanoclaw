@@ -585,6 +585,47 @@ describe('update-nanoclaw transaction end to end', () => {
     expect(running).toBe(true);
   });
 
+  it('a rollback whose drain fails restarts the stopped service and changes nothing', async () => {
+    const fixture = createForkFixture();
+    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    const { runtime, events } = fakeRuntime(fixture.install);
+    let state = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+    state = await validateUpdate(fixture.install, state.id, runtime);
+    state = await cutoverUpdate(fixture.install, state.id, runtime);
+    state = await finishUpdate(fixture.install, state.id, runtime);
+    const updatedHead = exec(fixture.install, 'git', ['rev-parse', 'HEAD']);
+
+    runtime.drainContainers = async () => {
+      throw new Error('Cannot inspect active NanoClaw containers with docker');
+    };
+    events.length = 0;
+    await expect(rollbackUpdate(fixture.install, state.id, runtime)).rejects.toThrow('Cannot inspect');
+    expect(events).toEqual(['service stop', 'service start']);
+    expect(loadState(fixture.install, state.id).phase).toBe('complete');
+    expect(exec(fixture.install, 'git', ['rev-parse', 'HEAD'])).toBe(updatedHead);
+  });
+
+  it('a failed rollback drain never starts a service that was already down (after cutover, before finish)', async () => {
+    const fixture = createForkFixture();
+    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    const { runtime, events } = fakeRuntime(fixture.install);
+    let state = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+    state = await validateUpdate(fixture.install, state.id, runtime);
+    state = await cutoverUpdate(fixture.install, state.id, runtime);
+
+    // Cutover left the service stopped; migrations may still be pending.
+    runtime.detectService = () => ({ mode: 'systemd-user', active: false, name: 'nanoclaw-test' });
+    runtime.drainContainers = async () => {
+      throw new Error('Cannot inspect active NanoClaw containers with docker');
+    };
+    events.length = 0;
+    await expect(rollbackUpdate(fixture.install, state.id, runtime)).rejects.toThrow('Cannot inspect');
+    expect(events).not.toContain('service start');
+    expect(loadState(fixture.install, state.id).phase).toBe('cutover');
+  });
+
   it('nohup rollback stops the host started after cutover and drains containers before restoring data/', async () => {
     const fixture = createForkFixture();
     previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
@@ -617,7 +658,6 @@ describe('update-nanoclaw transaction end to end', () => {
       fs.writeFileSync(path.join(fixture.install, 'nanoclaw.pid'), `${live.pid}\n`);
       const entrypoint = path.join(fs.realpathSync(fixture.install), 'dist', 'index.js');
       write(proc, `${live.pid}/cmdline`, `node\0${entrypoint}\0`);
-      fs.symlinkSync(fs.realpathSync(fixture.install), path.join(proc, String(live.pid), 'cwd'));
       fs.writeFileSync(path.join(fixture.install, 'data/v2.db'), 'post-update-data');
       events.length = 0;
 
