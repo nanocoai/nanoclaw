@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { installCommand } from './install-command.js';
 
 import { stringify as yaml } from 'yaml';
+import { LABELS } from '../../../../src/drivers/types.js';
 import { getInstallSlug } from '../../../../src/install-slug.js';
 import { upsertEnvVar } from '../../../../setup/set-env.js';
 
@@ -46,12 +47,18 @@ export function controlPort(root: string): number {
 
 export function controlCompose(root: string, port: number): string {
   const p = controlPaths(root);
+  // Same labels as the central proxy: the install label lets uninstall remove
+  // this project's volume and network; the role keeps the host's residue
+  // reaping off a running gateway. Never on the volume: Compose would offer
+  // to recreate an existing one (data loss) when its labels change.
+  const labels = { [LABELS.install]: getInstallSlug(root), [LABELS.role]: 'gateway' };
   return yaml({
     name: p.project,
     services: {
       database: {
         image: pins['iron-control-postgres-image'],
         restart: 'unless-stopped',
+        labels,
         env_file: [p.databaseEnvironment],
         volumes: ['database:/var/lib/postgresql/data'],
         healthcheck: { test: ['CMD-SHELL', 'pg_isready -U iron_control'], interval: '2s', timeout: '3s', retries: 30 },
@@ -60,6 +67,7 @@ export function controlCompose(root: string, port: number): string {
         image: pins['iron-control-image'],
         platform: pins['iron-control-platform'],
         restart: 'unless-stopped',
+        labels,
         env_file: [p.environment],
         command: ['./bin/rails', 'server'],
         ports: [`127.0.0.1:${port}:3000`],

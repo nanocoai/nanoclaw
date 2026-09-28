@@ -8,7 +8,7 @@ import { controlCompose, controlPaths, controlPort, installControl } from './con
 import { hasFrontProxy, frontProxyHash } from './build-managed-proxy.js';
 import { installCommand } from './install-command.js';
 import { getInstallSlug } from '../../../../src/install-slug.js';
-import { ironControlProject } from '../../../../setup/uninstall/scan.js';
+import { LABELS } from '../../../../src/drivers/types.js';
 
 vi.mock('./install-command.js', async (importActual) => ({
   ...(await importActual<typeof import('./install-command.js')>()),
@@ -56,9 +56,15 @@ describe('official Iron Control installation', () => {
     expect(() => controlPort(root)).toThrow('between 1 and 65535');
   });
 
-  it('names its project the way uninstall finds it', () => {
+  it('labels both services like the central proxy, and neither the volume nor the network', () => {
     const root = temporary();
-    expect(controlPaths(root).project).toBe(ironControlProject(getInstallSlug(root)));
+    const config = yaml(controlCompose(root, 18443));
+    const labels = { [LABELS.install]: getInstallSlug(root), [LABELS.role]: 'gateway' };
+    expect(config.services.web.labels).toEqual(labels);
+    expect(config.services.database.labels).toEqual(labels);
+    expect(Object.keys(config.services.web).slice(0, 4)).toEqual(['image', 'platform', 'restart', 'labels']);
+    expect(config.volumes.database).toEqual({});
+    expect(config.networks.default).toEqual({ name: controlPaths(root).network });
   });
 
   it('prints the exact cleanup commands when the database outlived its keys', async () => {
