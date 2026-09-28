@@ -438,11 +438,6 @@ async function spawnContainer(session: Session): Promise<void> {
     if (claimIncarnation === null) {
       throw new Error(`session ${session.id} is claimed by another live host process — not spawning a duplicate`);
     }
-    // The rows can be deleted while this spawn composes; recheck before the
-    // runtime exists so a deleted group gets no container.
-    if (!(await getSession(session.id)) || !(await getAgentGroup(agentGroup.id))) {
-      throw new Error(`session ${session.id} or its agent group was deleted mid-spawn — not starting a container`);
-    }
 
     // Clear any orphan heartbeat from a previous container instance — the sweep's
     // ceiling check treats a missing file as "fresh spawn, give grace". Without

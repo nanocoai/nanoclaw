@@ -31,7 +31,6 @@ import {
 } from './container-runner.js';
 import { dispatch } from './cli/dispatch.js';
 import './cli/resources/groups.js';
-import * as coordination from './db/coordination.js';
 import { ensureContainerConfig } from './db/container-configs.js';
 import { initTestDb, closeDb, runMigrations, createAgentGroup, createSession, getDb } from './db/index.js';
 import type { Session } from './types.js';
@@ -147,21 +146,7 @@ describe('stopOrphanedSessions', () => {
   });
 });
 
-describe('a delete that races a spawn', () => {
-  it('starts no container when the rows are deleted while the spawn composes', async () => {
-    await ensureContainerConfig('ag-1');
-    const actualClaim = coordination.tryClaimSession;
-    const claimSpy = vi.spyOn(coordination, 'tryClaimSession').mockImplementation(async (args) => {
-      await getDb().run('DELETE FROM sessions WHERE id = ?', 'sess-1');
-      return actualClaim(args);
-    });
-    expect(await wakeContainer(session('sess-1'))).toBe(false);
-    expect(claimSpy).toHaveBeenCalledOnce();
-    expect(prepare).not.toHaveBeenCalled();
-    expect((await coordination.getSessionClaim('sess-1'))?.claimed_by ?? null).toBeNull();
-    claimSpy.mockRestore();
-  });
-
+describe('a delete that lands mid-spawn', () => {
   it('leaves a spawn mid-start alone, then stops it on the next tick', async () => {
     await ensureContainerConfig('ag-1');
     let started!: () => void;
