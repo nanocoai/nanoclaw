@@ -65,6 +65,8 @@ export interface ServiceEnvironment {
   sleep(ms: number): Promise<void>;
   /** Progress line for a wait the operator would otherwise read as a hang. */
   log?(message: string): void;
+  /** procfs mount for nohup host identity checks; tests point it at a fixture. */
+  procRoot?: string;
 }
 
 export function defaultServiceEnvironment(runner = createCommandRunner()): ServiceEnvironment {
@@ -90,6 +92,74 @@ function processExists(pid: number): boolean {
 
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function nohupPidFile(projectRoot: string): string {
+  return path.join(projectRoot, 'nanoclaw.pid');
+}
+
+function readNohupPid(projectRoot: string): number | undefined {
+  try {
+    const text = fs.readFileSync(nohupPidFile(projectRoot), 'utf8').trim();
+    // Positive only: `kill` with 0 or a negative pid signals a process group.
+    return /^[1-9][0-9]*$/.test(text) ? Number(text) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// start-nanoclaw.sh's is_previous_host test, allowing node options before the
+// script: node with this checkout's absolute entrypoint among its arguments.
+// 'unknown' when a live process's command line cannot be read.
+function nohupHostIdentity(pid: number, projectRoot: string, env: ServiceEnvironment): 'host' | 'other' | 'unknown' {
+  let args: string[];
+  try {
+    args = fs.readFileSync(path.join(env.procRoot ?? '/proc', String(pid), 'cmdline'), 'utf8').split('\0');
+  } catch {
+    return processExists(pid) ? 'unknown' : 'other';
+  }
+  const entrypoint = path.join(projectRoot, 'dist', 'index.js');
+  const accepted = new Set([entrypoint]);
+  try {
+    accepted.add(fs.realpathSync(entrypoint));
+  } catch {
+    // Not built: only the literal path can match.
+  }
+  const isNode = /^node/.test(path.basename(args[0] ?? ''));
+  return isNode && args.slice(1).some((arg) => accepted.has(arg)) ? 'host' : 'other';
+}
+
+/**
+ * The host a nohup stop must reach now. A captured handle holds whichever pid
+ * ran at capture; start-nanoclaw.sh records later starts only in nanoclaw.pid,
+ * and a failed pid write records none. So scan procfs and signal only a pid
+ * proven to be this checkout's host (a stale pid may be reused). Anything
+ * unprovable or several hosts become an unmanaged handle, which stopService
+ * refuses before any reset.
+ */
+export function resolveNohupHost(handle: ServiceHandle, projectRoot: string, env: ServiceEnvironment): ServiceHandle {
+  if (handle.mode !== 'nohup') return handle;
+  const known = [readNohupPid(projectRoot), handle.pid].filter((pid): pid is number => pid !== undefined);
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(env.procRoot ?? '/proc');
+  } catch {
+    entries = [];
+  }
+  const scanned = entries.filter((entry) => /^[1-9][0-9]*$/.test(entry)).map(Number);
+  if (scanned.length === 0) {
+    // No procfs, so no way to prove identity: refuse rather than guess.
+    const live = known.filter(processExists);
+    return live.length ? { mode: 'unmanaged', active: true, name: live.join(',') } : { ...handle, active: false };
+  }
+  const unknown = known.filter((pid) => nohupHostIdentity(pid, projectRoot, env) === 'unknown');
+  if (unknown.length) return { mode: 'unmanaged', active: true, name: unknown.join(',') };
+  const hosts = [...new Set([...known, ...scanned])]
+    .filter((pid) => nohupHostIdentity(pid, projectRoot, env) === 'host')
+    .sort((x, y) => x - y);
+  if (hosts.length > 1) return { mode: 'unmanaged', active: true, name: hosts.join(',') };
+  if (hosts.length === 1) return { ...handle, pid: hosts[0], active: true };
+  return { ...handle, pid: undefined, active: false };
 }
 
 export function detectService(projectRoot: string, env: ServiceEnvironment): ServiceHandle {
@@ -129,15 +199,9 @@ export function detectService(projectRoot: string, env: ServiceEnvironment): Ser
     }
 
     const definition = path.join(projectRoot, 'start-nanoclaw.sh');
-    const pidFile = path.join(projectRoot, 'nanoclaw.pid');
-    if (fs.existsSync(definition) && fs.existsSync(pidFile)) {
-      const pid = Number.parseInt(fs.readFileSync(pidFile, 'utf8').trim(), 10);
-      return {
-        mode: 'nohup',
-        definition,
-        pid: Number.isFinite(pid) ? pid : undefined,
-        active: Number.isFinite(pid) && processExists(pid),
-      };
+    if (fs.existsSync(definition) && fs.existsSync(nohupPidFile(projectRoot))) {
+      const pid = readNohupPid(projectRoot);
+      return { mode: 'nohup', definition, pid, active: pid !== undefined && processExists(pid) };
     }
   }
 
@@ -275,7 +339,7 @@ export async function drainContainers(projectRoot: string, env: ServiceEnvironme
   // One deadline for stop AND poll: the clock starts before the stop call, so
   // a slow or stalled stop eats into the bound instead of extending it.
   const started = Date.now();
-  env.log?.(`Stopping ${initial.ids.length} NanoClaw container(s) for cutover: ${initial.ids.join(', ')}`);
+  env.log?.(`Stopping ${initial.ids.length} NanoClaw container(s): ${initial.ids.join(', ')}`);
   const stopped = env.runner.tryRun(
     runtime,
     ['stop', '-t', String(CUTOVER_STOP_GRACE_SECONDS), ...initial.ids],

@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -583,6 +583,51 @@ describe('update-nanoclaw transaction end to end', () => {
     expect(events.filter((event) => event === 'service stop')).toHaveLength(1);
     expect(events).toContain('service start');
     expect(running).toBe(true);
+  });
+
+  it('nohup rollback stops the host started after cutover and drains containers before restoring data/', async () => {
+    const fixture = createForkFixture();
+    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    const { runtime, events } = fakeRuntime(fixture.install);
+    // Captured at cutover: the pre-update host, which cutover itself stops.
+    const oldPid = spawnSync('node', ['-e', '']).pid;
+    const definition = path.join(fixture.install, 'start-nanoclaw.sh');
+    runtime.detectService = () => ({ mode: 'nohup', active: true, definition, pid: oldPid });
+    runtime.stopService = async (handle) => {
+      events.push(`service stop ${handle.pid}`);
+      await stopService(handle, { ...runtime.serviceEnv, sleep: (ms) => new Promise((r) => setTimeout(r, ms)) });
+    };
+    const proc = temp('nanoclaw-update-proc-');
+    runtime.serviceEnv.procRoot = proc;
+    runtime.drainContainers = async (root) => {
+      events.push(`containers drained (db=${fs.readFileSync(path.join(root, 'data/v2.db'), 'utf8')})`);
+    };
+
+    let state = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+    state = await validateUpdate(fixture.install, state.id, runtime);
+    state = await cutoverUpdate(fixture.install, state.id, runtime);
+    state = await finishUpdate(fixture.install, state.id, runtime);
+    expect(state.phase).toBe('complete');
+
+    // finish's start-nanoclaw.sh launched a new host and recorded only its pid.
+    const live = spawn('sleep', ['30'], { stdio: 'ignore' });
+    const exited = new Promise((resolve) => live.once('exit', resolve));
+    try {
+      fs.writeFileSync(path.join(fixture.install, 'nanoclaw.pid'), `${live.pid}\n`);
+      const entrypoint = path.join(fs.realpathSync(fixture.install), 'dist', 'index.js');
+      write(proc, `${live.pid}/cmdline`, `node\0${entrypoint}\0`);
+      fs.writeFileSync(path.join(fixture.install, 'data/v2.db'), 'post-update-data');
+      events.length = 0;
+
+      state = await rollbackUpdate(fixture.install, state.id, runtime);
+      expect(state.phase).toBe('rolled-back');
+      expect(events.slice(0, 2)).toEqual([`service stop ${live.pid}`, 'containers drained (db=post-update-data)']);
+      await expect(exited).resolves.toBeDefined();
+      expect(fs.readFileSync(path.join(fixture.install, 'data/v2.db'), 'utf8')).toBe('old-schema');
+    } finally {
+      live.kill('SIGKILL');
+    }
   });
 
   it("cutover stops the install's containers only after the service is down, and a container that will not stop restores the old service (#3828)", async () => {

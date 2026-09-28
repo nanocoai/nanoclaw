@@ -11,6 +11,7 @@ import {
   detectService,
   drainContainers,
   restartGatewayContainers,
+  resolveNohupHost,
   startService,
   stopService,
   verifyServiceHealth,
@@ -571,8 +572,13 @@ async function rollbackLocal(state: UpdateState, runtime: UpdateRuntime): Promis
   // the restore for a service that is simply gone, while a service that is
   // genuinely still running still aborts loudly BEFORE anything is destroyed.
   // Deliberately not a fresh detection: an under-reporting detection would
-  // skip the stop and reset the checkout under a live service.
-  await runtime.stopService(state.service);
+  // skip the stop and reset the checkout under a live service. A nohup handle
+  // is re-pointed at the host running now (finish or a restart started a new pid).
+  await runtime.stopService(resolveNohupHost(state.service, state.projectRoot, runtime.serviceEnv));
+  // The host leaves agent containers running on SIGTERM for adoption; left up,
+  // they keep bind mounts into the data/ the restore replaces. A drain failure
+  // aborts here, before anything is reset, and the rollback can be re-run.
+  await runtime.drainContainers(state.projectRoot);
   git(runtime, state.projectRoot, ['reset', '--hard', state.originalHead]);
   restoreSnapshot(state);
   // Gateways survive cutover; their bind mounts still hold the replaced data/.
