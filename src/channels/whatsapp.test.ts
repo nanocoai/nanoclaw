@@ -11,12 +11,13 @@
  * Both helpers and the mode-resolution truth table are covered below so a
  * future refactor that breaks any part fails this suite.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 import {
   appendMediaFailureNote,
   computeIsMention,
   computeWhatsappDefaults,
+  createSetupGate,
   hasMentionPills,
   isBotMentionedInGroup,
   isBotTypedMention,
@@ -306,6 +307,77 @@ describe('parseWhatsAppMentions', () => {
     const { text, mentions } = parseWhatsAppMentions('(@15551234567) wrote this');
     expect(text).toBe('(@15551234567) wrote this');
     expect(mentions).toEqual(['15551234567@s.whatsapp.net']);
+  });
+});
+
+describe('createSetupGate (WhatsApp setup() timeout guard, incident: 57min host hang)', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it('resolves via external resolve() before the timeout, without ever calling onTimeout', async () => {
+    const onTimeout = vi.fn();
+    const gate = createSetupGate(45_000, onTimeout);
+    const settled = vi.fn();
+    gate.promise.then(settled);
+
+    gate.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toHaveBeenCalledOnce();
+
+    // The timeout is still scheduled but must be a no-op once already settled.
+    await vi.advanceTimersByTimeAsync(45_000);
+    expect(onTimeout).not.toHaveBeenCalled();
+    expect(settled).toHaveBeenCalledOnce();
+  });
+
+  it('rejects via external reject() before the timeout, without ever calling onTimeout', async () => {
+    const onTimeout = vi.fn();
+    const gate = createSetupGate(45_000, onTimeout);
+    const failure = new Error('WhatsApp logged out');
+    const caught = vi.fn();
+    gate.promise.catch(caught);
+
+    gate.reject(failure);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(caught).toHaveBeenCalledWith(failure);
+
+    await vi.advanceTimersByTimeAsync(45_000);
+    expect(onTimeout).not.toHaveBeenCalled();
+  });
+
+  it('this is the actual bug: resolves via the timeout, calling onTimeout, when nothing external ever settles it', async () => {
+    // Reproduces the Aug 5 incident: Baileys' connection:open never fires for
+    // a logged-out session with nobody present to re-scan a QR — no `open`,
+    // no `close`/loggedOut either — so external resolve()/reject() are never
+    // called at all. Before the fix this left setup()'s await unbounded,
+    // hanging initChannelAdapters() (and the whole host) indefinitely.
+    const onTimeout = vi.fn();
+    const gate = createSetupGate(45_000, onTimeout);
+    const settled = vi.fn();
+    gate.promise.then(settled);
+
+    await vi.advanceTimersByTimeAsync(44_999);
+    expect(settled).not.toHaveBeenCalled();
+    expect(onTimeout).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(onTimeout).toHaveBeenCalledOnce();
+    expect(settled).toHaveBeenCalledOnce();
+  });
+
+  it('a late external resolve()/reject() after the timeout has already fired is a silent no-op', async () => {
+    const gate = createSetupGate(45_000, () => {});
+    const settled = vi.fn();
+    gate.promise.then(settled);
+
+    await vi.advanceTimersByTimeAsync(45_000);
+    expect(settled).toHaveBeenCalledOnce();
+
+    // Must not throw, double-resolve, or unhandled-reject.
+    expect(() => gate.resolve()).not.toThrow();
+    expect(() => gate.reject(new Error('late'))).not.toThrow();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toHaveBeenCalledOnce();
   });
 });
 
