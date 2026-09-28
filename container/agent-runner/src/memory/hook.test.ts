@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import fs from 'fs';
 import path from 'path';
 
-import { runBun, type RunBunResult } from '../testing/run-bun.js';
+import { runBun, type RunBunResult } from '../test-utils/run-bun.js';
 
 const BASE = '/tmp/nanoclaw-memory-hook-test';
 

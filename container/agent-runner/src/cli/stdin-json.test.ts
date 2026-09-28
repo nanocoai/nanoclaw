@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 
-import { runBun } from '../testing/run-bun.js';
+import { runBun } from '../test-utils/run-bun.js';
 import { MAX_STDIN_JSON_BYTES, readStdinJsonArgs, type StdinJsonStream } from './stdin-json.js';
 
 async function* stream(...chunks: Array<string | Uint8Array>): StdinJsonStream {

@@ -1,5 +1,7 @@
 export interface RunBunResult {
-  exitCode: number;
+  /** null when a signal ended the child; see signalCode. */
+  exitCode: number | null;
+  signalCode: NodeJS.Signals | null;
   stdout: string;
   stderr: string;
 }
@@ -16,10 +18,11 @@ export async function runBun(args: string[], stdin: string, cwd: string = proces
     stdout: 'pipe',
     stderr: 'pipe',
   });
-  const [stdout, stderr, exitCode] = await Promise.all([
+  // Drain both pipes while waiting: a child that fills a pipe buffer blocks until it is read.
+  const [stdout, stderr] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
     proc.exited,
   ]);
-  return { exitCode, stdout, stderr };
+  return { exitCode: proc.exitCode, signalCode: proc.signalCode, stdout, stderr };
 }
