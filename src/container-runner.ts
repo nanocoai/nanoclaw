@@ -1202,7 +1202,59 @@ export async function buildMounts(
     mounts.push(...providerContribution.mounts.map((m) => ({ ...m, mountClass: 'allowlisted-extra' as const, scope })));
   }
 
+  ensureSessionMountPoints(mounts, sessDir);
   return mounts;
+}
+
+/**
+ * Pre-create, as the host user, every mount point that lands directly inside
+ * the session workspace (`/workspace` ← sessDir): `/workspace/agent`,
+ * `/workspace/global`, `/workspace/extra/<name>`, provider state volumes, etc.
+ *
+ * Left to Docker, a missing bind-mount target is created on the host by the
+ * daemon — as root. The host process cannot remove root-owned directories, so
+ * `ncl tasks delete` (which rmSyncs the task session's directory) died after
+ * destroying the mailbox but before deleting the central session row, leaving
+ * an `active` session with no inbound.db that the dashboard sweep warned about
+ * every minute. Creating the targets up front keeps the whole session tree
+ * owned by the host user.
+ *
+ * Only targets whose nearest enclosing mount is `/workspace` itself are
+ * created; a target nested under another mount (e.g. `/workspace/agent/CLAUDE.md`
+ * inside the group folder) lives in that mount's source, not in sessDir.
+ */
+export function ensureSessionMountPoints(mounts: readonly VolumeMount[], sessDir: string): void {
+  const root = '/workspace';
+  for (const mount of mounts) {
+    const target = mount.containerPath;
+    if (!target.startsWith(`${root}/`)) continue;
+    let parent = root;
+    for (const other of mounts) {
+      const p = other.containerPath;
+      if (p !== target && target.startsWith(`${p}/`) && p.length > parent.length) parent = p;
+    }
+    if (parent !== root) continue;
+
+    const hostTarget = path.join(sessDir, path.relative(root, target));
+    if (!hostTarget.startsWith(`${sessDir}${path.sep}`) || fs.existsSync(hostTarget)) continue;
+    let isFile = false;
+    try {
+      isFile = fs.statSync(mount.hostPath).isFile();
+    } catch {
+      // Missing source: Docker would create a directory, so mirror that.
+    }
+    try {
+      if (isFile) {
+        fs.mkdirSync(path.dirname(hostTarget), { recursive: true });
+        fs.closeSync(fs.openSync(hostTarget, 'a'));
+      } else {
+        fs.mkdirSync(hostTarget, { recursive: true });
+      }
+    } catch (err) {
+      // Best-effort: Docker still creates the target (as root) if this fails.
+      log.warn('Could not pre-create session mount point', { hostTarget, err });
+    }
+  }
 }
 
 /** VolumeMount (host vocabulary) → MountSpec (seam vocabulary). */
