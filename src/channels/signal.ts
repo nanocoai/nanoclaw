@@ -670,16 +670,24 @@ export function createSignalAdapter(config: {
       }
     }
 
-    // Image attachments — emit `[Image: <path>]` lines so the agent's Read
-    // tool can pick them up, and surface the structured `attachments` array
-    // for consumers that prefer that shape. Without this, vision-capable
-    // models never see images sent over Signal.
-    const attachmentRefs: Array<{ path: string; contentType: string }> = [];
+    // Image attachments — read the bytes from signal-cli's store and pass them
+    // as base64 `data`. The host stages these into the session's mounted
+    // `inbox/` (session-manager.extractAttachmentFiles) and rewrites them to a
+    // container-readable `localPath`, which the agent-runner formatter surfaces
+    // as `[image: <name> — saved to /workspace/inbox/...]`. Emitting a host path
+    // here instead is unreadable from inside the agent container.
+    const attachmentRefs: Array<{ data: string; contentType: string; type: string }> = [];
     for (const img of imageAttachments) {
       const imagePath = join(config.signalDataDir, 'attachments', img.id!);
-      const imageLine = `[Image: ${imagePath}]`;
-      content = content ? `${content}\n${imageLine}` : imageLine;
-      attachmentRefs.push({ path: imagePath, contentType: img.contentType || 'image/jpeg' });
+      if (!existsSync(imagePath)) {
+        log.warn('Signal: image attachment file not found', { id: img.id, path: imagePath });
+        continue;
+      }
+      attachmentRefs.push({
+        data: readFileSync(imagePath).toString('base64'),
+        contentType: img.contentType || 'image/jpeg',
+        type: 'image',
+      });
     }
 
     const msg: InboundMessage = {
