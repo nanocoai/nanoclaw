@@ -130,6 +130,49 @@ describe('registry refresh end to end', () => {
     expect(fs.readFileSync(path.join(install, 'src/channels/demo.ts'), 'utf8')).toContain('upstream-current');
   });
 
+  it('refreshes an included gateway skill that detection cannot see, code only', async () => {
+    const root = temp('nanoclaw-skills-gateway-');
+    write(root, 'src/gateway-providers/installed.ts', '// barrel\n');
+    write(root, '.claude/skills/add-demo-gw/payload/demo-gw.ts', 'export const v = 2;\n');
+    write(root, 'src/gateway-providers/demo-gw.ts', 'export const v = 1;\n');
+    write(
+      root,
+      '.claude/skills/add-demo-gw/SKILL.md',
+      [
+        '# Apply',
+        '```nc:copy',
+        'payload/demo-gw.ts -> src/gateway-providers/demo-gw.ts',
+        '```',
+        '```nc:append to:src/gateway-providers/installed.ts',
+        "import './demo-gw.js';",
+        '```',
+        '```nc:dep manager:pnpm',
+        'demo-sdk@1.0.0',
+        '```',
+        '```nc:run effect:external',
+        'echo setup',
+        '```',
+      ].join('\n'),
+    );
+    const commands: string[] = [];
+    const gateway = { name: 'demo-gw', skillName: 'add-demo-gw', kind: 'gateway' as const };
+
+    const report = await refreshInstalledSkills(root, ['add-demo-gw'], {
+      include: [gateway],
+      exec: (command) => {
+        commands.push(command);
+      },
+    });
+
+    expect(report.success, JSON.stringify(report, null, 2)).toBe(true);
+    expect(report.skills).toMatchObject([{ ...gateway, status: 'refreshed' }]);
+    expect(fs.readFileSync(path.join(root, 'src/gateway-providers/demo-gw.ts'), 'utf8')).toContain('v = 2');
+    expect(fs.readFileSync(path.join(root, 'src/gateway-providers/installed.ts'), 'utf8')).toContain(
+      "import './demo-gw.js';",
+    );
+    expect(commands).toEqual(['pnpm add demo-sdk@1.0.0']);
+  });
+
   it('returns a blocking structured failure for prose-only installed skills', async () => {
     const root = temp('nanoclaw-skills-prose-');
     write(root, 'src/channels/index.ts', "import './cli.js';\nimport './demo.js';\n");

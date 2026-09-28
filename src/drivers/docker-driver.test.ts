@@ -542,15 +542,36 @@ describe('idempotency and adoption', () => {
     cli.responses = [
       {
         match: /^ps --filter/,
-        output: 'nanoclaw-v2-agent-one-1700000000000||\nnanoclaw-gateway||gateway\nncl-spike-s1|s1|agent\n',
+        output:
+          'nanoclaw-v2-agent-one-1700000000000||\nnanoclaw-gateway||gateway\nncl-spike-s1|s1|agent\nbare-proxy||proxy\n',
       },
     ];
 
     await driver().reapResidue('spike');
 
     expect(cli.joined()).toContain('rm --force nanoclaw-v2-agent-one-1700000000000');
+    // Only GATEWAY_ROLE is spared: the running pass matches the exited pass.
+    expect(cli.joined()).toContain('rm --force bare-proxy');
     expect(cli.joined().some((c) => c === 'rm --force nanoclaw-gateway')).toBe(false);
     expect(cli.joined().some((c) => c === 'rm --force ncl-spike-s1')).toBe(false);
+  });
+
+  it('removes exited session residue but keeps a stopped gateway-owned container', async () => {
+    // Removing the gateway leaves nothing to recreate it; every later spawn
+    // would fail until the gateway's setup is re-run.
+    cli.responses = [
+      {
+        match: /^ps -a/,
+        output: 'ncl-spike-s1-aux|s1|mcp\ngateway-spike||gateway\nold-residue||\nbare-proxy||proxy\n',
+      },
+    ];
+
+    await driver().reapResidue('spike');
+
+    expect(cli.joined()).toContain('rm --force ncl-spike-s1-aux');
+    expect(cli.joined()).toContain('rm --force old-residue');
+    expect(cli.joined()).toContain('rm --force bare-proxy');
+    expect(cli.joined().some((c) => c === 'rm --force gateway-spike')).toBe(false);
   });
 
   it('reaps install-owned networks whose containers are gone', async () => {

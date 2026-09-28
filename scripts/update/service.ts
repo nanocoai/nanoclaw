@@ -221,6 +221,10 @@ export const CUTOVER_STOP_CLI_TIMEOUT_MS = 30_000;
 /** Bound on each `docker ps` poll, for the same reason. */
 export const CUTOVER_LIST_CLI_TIMEOUT_MS = 15_000;
 
+/** Copies of `LABELS` and `GATEWAY_ROLE` (src/drivers/types.ts); a test pins them equal. */
+export const DRAIN_LIST_FORMAT = '{{.ID}}|{{.Label "nanoclaw-session"}}|{{.Label "nanoclaw-role"}}';
+export const CONTROLLER_GATEWAY_ROLE = 'gateway';
+
 /**
  * Stop this install's containers, then wait until the runtime lists none.
  *
@@ -232,10 +236,10 @@ export const CUTOVER_LIST_CLI_TIMEOUT_MS = 15_000;
  *
  * Stopping here, after the service is down, is race-free: nothing is left that
  * could spawn a replacement (the manual `docker stop` before cutover was not).
- * The filter is the install label alone — the set the host's own residue
- * reaping and `setup/uninstall` act on: agent containers plus any per-session
- * auxiliary. The OneCLI gateway is a separate compose project without this
- * label and is never touched.
+ * The filter is the install label (agent containers plus per-session
+ * auxiliaries) minus gateway-owned ones (role=gateway, no session): nothing
+ * recreates those at host start. Same rule as `isGatewayOwned` in
+ * src/drivers/types.ts, inlined to keep the controller's imports small.
  *
  * A container mid-turn is stopped as well. The agent-runner has no SIGTERM
  * handler and the controller cannot read turn state from outside the host
@@ -250,10 +254,19 @@ export async function drainContainers(projectRoot: string, env: ServiceEnvironme
   const runtime = process.env.CONTAINER_RUNTIME ?? 'docker';
   const label = `nanoclaw-install=${getInstallSlug(projectRoot)}`;
   const list = (): { ok: boolean; ids: string[] } => {
-    const listed = env.runner.tryRun(runtime, ['ps', '-q', '--filter', `label=${label}`], undefined, {
-      timeoutMs: CUTOVER_LIST_CLI_TIMEOUT_MS,
-    });
-    return { ok: listed.ok, ids: listed.stdout.split('\n').filter(Boolean) };
+    const listed = env.runner.tryRun(
+      runtime,
+      ['ps', '--filter', `label=${label}`, '--format', DRAIN_LIST_FORMAT],
+      undefined,
+      { timeoutMs: CUTOVER_LIST_CLI_TIMEOUT_MS },
+    );
+    const ids = listed.stdout
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => line.split('|'))
+      .filter(([, sessionId, role]) => !!sessionId || role !== CONTROLLER_GATEWAY_ROLE)
+      .map(([id]) => id);
+    return { ok: listed.ok, ids };
   };
   const initial = list();
   if (!initial.ok) throw new Error(`Cannot inspect active NanoClaw containers with ${runtime}`);
@@ -278,6 +291,46 @@ export async function drainContainers(projectRoot: string, env: ServiceEnvironme
       throw new Error(`Timed out waiting for NanoClaw containers to stop: ${current.ids.join(', ')}${detail}`);
     }
     await env.sleep(1_000);
+  }
+}
+
+/**
+ * Restart this install's gateway-owned containers (see drainContainers).
+ * A snapshot restore replaces `data/`, and a container's bind mounts keep
+ * pointing at the deleted directories until it restarts. Stopped ones are
+ * included so a retried rollback recovers a restart that failed halfway.
+ * Best effort: throwing here would leave the service down, so a failure is
+ * logged with the recovery step instead.
+ */
+export function restartGatewayContainers(projectRoot: string, env: ServiceEnvironment): void {
+  const runtime = process.env.CONTAINER_RUNTIME ?? 'docker';
+  const label = `nanoclaw-install=${getInstallSlug(projectRoot)}`;
+  const listed = env.runner.tryRun(
+    runtime,
+    ['ps', '-a', '--filter', `label=${label}`, '--format', DRAIN_LIST_FORMAT],
+    undefined,
+    { timeoutMs: CUTOVER_LIST_CLI_TIMEOUT_MS },
+  );
+  const ids = listed.stdout
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => line.split('|'))
+    .filter(([, sessionId, role]) => !sessionId && role === CONTROLLER_GATEWAY_ROLE)
+    .map(([id]) => id);
+  if (!listed.ok) {
+    env.log?.(`Cannot list gateway containers with ${runtime}; restart them or re-run the gateway's setup script.`);
+    return;
+  }
+  if (ids.length === 0) return;
+  env.log?.(`Restarting ${ids.length} gateway container(s) onto the restored data/: ${ids.join(', ')}`);
+  const restarted = env.runner.tryRun(
+    runtime,
+    ['restart', '-t', String(CUTOVER_STOP_GRACE_SECONDS), ...ids],
+    undefined,
+    { timeoutMs: CUTOVER_STOP_CLI_TIMEOUT_MS },
+  );
+  if (!restarted.ok) {
+    env.log?.(`Gateway restart failed (${restarted.stdout || 'no output'}); re-run the gateway's setup script.`);
   }
 }
 

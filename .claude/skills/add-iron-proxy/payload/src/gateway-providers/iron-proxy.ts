@@ -12,6 +12,7 @@ import { readEnvFile } from '../env.js';
 import { getInstallSlug } from '../install-slug.js';
 import { log } from '../log.js';
 
+import { readAllowedHostsFile } from './iron-proxy-allowlist.js';
 import { IronProxyApprovalBridge, type IronApprovalIdentity } from './iron-proxy-approval.js';
 import {
   registerGatewayProvider,
@@ -158,9 +159,7 @@ function ensureApprovalSocketAlias(settings: IronProxySettings): void {
 }
 
 function readAllowedHosts(settings: IronProxySettings): string[] {
-  if (!fs.existsSync(settings.allowedHostsFile)) return [];
-  const hosts = JSON.parse(fs.readFileSync(settings.allowedHostsFile, 'utf8')) as string[];
-  return [...new Set(hosts.map(normalizeHost))].sort();
+  return readAllowedHostsFile(settings.allowedHostsFile, (message) => log.warn(message));
 }
 
 /** The front owns approvals. Stock Iron only injects credentials on loopback. */

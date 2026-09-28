@@ -18,6 +18,21 @@ export function isSessionEcho(msg: MessageInRow): boolean {
 }
 
 /**
+ * Content flag the runner sets on its own failure notices. The host passes
+ * a2a content through unchanged, so the flag reaches the receiving agent and
+ * a failure there sends no notice back (never answer an error with an error).
+ */
+export const FAILURE_NOTICE_FIELD = 'failureNotice';
+
+export function isFailureNotice(msg: MessageInRow): boolean {
+  try {
+    return JSON.parse(msg.content)?.[FAILURE_NOTICE_FIELD] === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Command categories for messages starting with '/'.
  * - admin: sender must be in NANOCLAW_ADMIN_USER_IDS
  * - filtered: silently drop (mark completed without processing)
@@ -87,8 +102,9 @@ export function categorizeMessage(msg: MessageInRow, providerName: string): Comm
   const senderId = extractSenderId(msg, content);
 
   // Cross-session echo rows are ambient copies of another conversation —
-  // a copied "/clear" etc. must never execute here.
-  if (isSessionEcho(msg) || !text.startsWith('/')) {
+  // a copied "/clear" etc. must never execute here. Nor may a failure
+  // notice whose error text happens to start with a slash.
+  if (isSessionEcho(msg) || isFailureNotice(msg) || !text.startsWith('/')) {
     return { category: 'none', command: '', text, senderId };
   }
 
@@ -113,7 +129,7 @@ export function categorizeMessage(msg: MessageInRow, providerName: string): Comm
  * before messages reach the container.
  */
 export function isClearCommand(msg: MessageInRow): boolean {
-  if (isSessionEcho(msg)) return false;
+  if (isSessionEcho(msg) || isFailureNotice(msg)) return false;
   const content = parseContent(msg.content);
   const text = (content.text || '').trim();
   return text.toLowerCase().startsWith('/clear');
@@ -155,6 +171,8 @@ export interface RoutingContext {
    *  delivers from a task session; final-text `<message to>` blocks are inert
    *  and the final text auto-appends to the series run log. */
   taskRun: boolean;
+  /** Every non-echo row that woke this turn is a failure notice. */
+  failureNoticeWake?: boolean;
 }
 
 /**
@@ -163,10 +181,15 @@ export interface RoutingContext {
  * row must never decide where the reply goes (its routing is NULL by
  * contract, but even a malformed row with routing set is skipped). Falls
  * back to the plain first row if the batch is somehow all echo (shouldn't
- * happen — echo rows never trigger).
+ * happen — echo rows never trigger). A batch that opens with a failure
+ * notice routes by its first real waking message instead, so a failure
+ * answers the requester, not the agent that failed.
  */
 export function extractRouting(messages: MessageInRow[]): RoutingContext {
-  const first = messages.find((m) => !isSessionEcho(m)) ?? messages[0];
+  const nonEcho = messages.filter((m) => !isSessionEcho(m));
+  const waking = nonEcho.filter((m) => m.trigger !== 0);
+  const preferred = nonEcho[0] && isFailureNotice(nonEcho[0]) ? waking.find((m) => !isFailureNotice(m)) : undefined;
+  const first = preferred ?? nonEcho[0] ?? messages[0];
   return {
     platformId: first?.platform_id ?? null,
     channelType: first?.channel_type ?? null,
@@ -175,6 +198,8 @@ export function extractRouting(messages: MessageInRow[]): RoutingContext {
     // Echo rows riding along with a task must not disable one-door delivery:
     // taskRun as long as at least one task row and no non-task/non-echo row.
     taskRun: messages.some((m) => m.kind === 'task') && messages.every((m) => m.kind === 'task' || isSessionEcho(m)),
+    // Accumulated trigger=0 context rides along but did not wake the turn.
+    failureNoticeWake: waking.length > 0 && waking.every(isFailureNotice),
   };
 }
 

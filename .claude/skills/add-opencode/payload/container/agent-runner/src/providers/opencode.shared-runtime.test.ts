@@ -247,9 +247,9 @@ function installDeps(servers: Array<ReturnType<typeof fakeServer>>, spawnFailure
   return { spawnServer };
 }
 
-function newProvider(): OpenCodeProvider {
+function newProvider(hook = MEMORY_HOOK): OpenCodeProvider {
   const provider = new OpenCodeProvider({});
-  provider.registerMemorySessionHook(MEMORY_HOOK);
+  provider.registerMemorySessionHook(hook);
   return provider;
 }
 
@@ -307,7 +307,9 @@ describe('shared runtime recovery', () => {
       return { data: true };
     };
     installDeps([server]);
-    const query = newProvider().query({ prompt: 'work', cwd: CWD });
+    // No hook sources, so no subprocess: a hook spawn stalled by host load
+    // would hold prepare() past the watchdog and Bun's test timeout.
+    const query = newProvider({ ...MEMORY_HOOK, sources: [] }).query({ prompt: 'work', cwd: CWD });
     query.end();
     // A missing routing branch must fail promptly rather than waiting for
     // the production idle watchdog.
@@ -582,7 +584,11 @@ describe('abort and watchdog', () => {
   });
 
   it('abort() stops the in-flight session and keeps the shared server', async () => {
-    const server = fakeServer(() => {});
+    let promptSent!: () => void;
+    const prompted = new Promise<void>((resolve) => {
+      promptSent = resolve;
+    });
+    const server = fakeServer(() => promptSent());
     const { spawnServer } = installDeps([server]);
     const provider = newProvider();
 
@@ -590,9 +596,10 @@ describe('abort and watchdog', () => {
     const iterator = query.events[Symbol.asyncIterator]();
     expect((await iterator.next()).value).toEqual({ type: 'init', continuation: 'ses_1' });
 
-    // The generator is now parked on stream.next() with a prompt in flight.
+    // Abort only once the prompt is in flight: `prepare` spawns the memory
+    // hook first, so a fixed sleep can abort before the prompt is sent.
     const pendingNext = iterator.next();
-    await Bun.sleep(10);
+    await prompted;
     query.abort();
 
     // What the server sends back for the aborted session (the fake abort

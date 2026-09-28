@@ -217,6 +217,7 @@ export async function runOpenCodeAuthCli(args: string[]): Promise<void> {
 }
 
 export async function runOpenCodeAuthStep(options: { allowSkip?: boolean } = {}): Promise<void> {
+  const startedAt = Date.now();
   const backend = answer(
     await brightSelect<Backend>({
       message: 'Which model backend should OpenCode use?',
@@ -393,7 +394,7 @@ export async function runOpenCodeAuthStep(options: { allowSkip?: boolean } = {})
     else upsertEnvVar(name, value);
   }
 
-  setupLog.step('auth', 'success', 0, { PROVIDER: 'opencode', BACKEND: backend });
+  setupLog.step('auth', 'success', Date.now() - startedAt, { PROVIDER: 'opencode', BACKEND: backend });
   p.log.success(brandBody('OpenCode configured. Credentials, when supplied, live in the selected gateway.'));
 }
 

@@ -252,6 +252,18 @@ The payload lands in ordinary paths — `src/gateway-providers/<kind>.ts`,
 `src/gateway-providers/installed.ts`. Nothing outside that directory is
 rewritten to install a gateway.
 
+## Gateway-owned containers
+
+A gateway skill that runs its own long-lived containers labels them
+`nanoclaw-install=<slug>` and `nanoclaw-role=gateway` (`GATEWAY_ROLE` in
+`src/drivers/types.ts`), with no `nanoclaw-session`. Core never stops or reaps
+those in install-wide sweeps (host residue reaping, the update cutover drain);
+only the gateway's setup recreates them. After an update rollback restores
+`data/`, core restarts them so their bind mounts point at the restored
+directories. Uninstall still removes them with the rest of the install. Do not
+add these labels to a gateway's existing Compose volumes or networks: Compose
+then asks to recreate them, which loses their data.
+
 ## Mount class `gateway-trust`
 
 Public CA material a MITM gateway needs the agent to trust. Pinned by path to

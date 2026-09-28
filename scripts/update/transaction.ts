@@ -1,17 +1,16 @@
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import { getInstallSlug } from '../../src/install-slug.js';
-import { installGateway } from '../../setup/gateways/install.js';
-import { resolveGatewaySelection } from '../../setup/gateways/selection.js';
-import { upsertEnvVar } from '../../setup/set-env.js';
 import { refreshInstalledSkills, type SkillsRefreshReport } from '../update-skills.js';
 import {
   createCommandRunner,
   defaultServiceEnvironment,
   detectService,
   drainContainers,
+  restartGatewayContainers,
   startService,
   stopService,
   verifyServiceHealth,
@@ -72,14 +71,42 @@ export interface PruneReport {
   retained: string[];
 }
 
+/**
+ * setup/ is outside the `git archive <ref> scripts src/install-slug.ts` extract
+ * every installed /update-nanoclaw skill runs, so these load from a full
+ * checkout of the target instead. They import no packages, so they load before
+ * the stage has node_modules; scripts/update/controller-archive.test.ts checks.
+ */
+export interface GatewayModules {
+  loadGatewayCatalog: typeof import('../../setup/gateways/catalog.js').loadGatewayCatalog;
+  resolveGatewaySelection: typeof import('../../setup/gateways/selection.js').resolveGatewaySelection;
+  upsertEnvVar: typeof import('../../setup/set-env.js').upsertEnvVar;
+}
+
+export async function loadGatewayModules(root: string): Promise<GatewayModules> {
+  const load = (rel: string) => import(pathToFileURL(path.join(root, rel)).href);
+  const [catalog, selection, env] = await Promise.all([
+    load('setup/gateways/catalog.ts'),
+    load('setup/gateways/selection.ts'),
+    load('setup/set-env.ts'),
+  ]);
+  return {
+    loadGatewayCatalog: catalog.loadGatewayCatalog,
+    resolveGatewaySelection: selection.resolveGatewaySelection,
+    upsertEnvVar: env.upsertEnvVar,
+  };
+}
+
 export interface UpdateRuntime {
   runner: CommandRunner;
   serviceEnv: ServiceEnvironment;
   detectService(projectRoot: string): ServiceHandle;
   stopService(handle: ServiceHandle): Promise<void>;
   drainContainers(projectRoot: string): Promise<void>;
+  restartGateways(projectRoot: string): void;
   startService(handle: ServiceHandle, projectRoot: string): void;
   verifyHealth(handle: ServiceHandle, projectRoot: string): Promise<boolean>;
+  loadGateway(root: string): Promise<GatewayModules>;
 }
 
 export function createUpdateRuntime(runner = createCommandRunner()): UpdateRuntime {
@@ -90,8 +117,10 @@ export function createUpdateRuntime(runner = createCommandRunner()): UpdateRunti
     detectService: (root) => detectService(root, serviceEnv),
     stopService: (handle) => stopService(handle, serviceEnv),
     drainContainers: (root) => drainContainers(root, serviceEnv),
+    restartGateways: (root) => restartGatewayContainers(root, serviceEnv),
     startService: (handle, root) => startService(handle, root, serviceEnv),
     verifyHealth: (handle, root) => verifyServiceHealth(handle, root, serviceEnv),
+    loadGateway: loadGatewayModules,
   };
 }
 
@@ -313,12 +342,25 @@ export async function validateUpdate(
     refreshPreparedState(state, runtime);
 
     if (hasChanged(state, 'src/gateway-providers') || hasChanged(state, 'setup/gateways')) {
-      state.gatewaySelection = resolveGatewaySelection(
+      const { loadGatewayCatalog, resolveGatewaySelection } = await runtime.loadGateway(state.stageRoot);
+      const kind = resolveGatewaySelection(
         state.projectRoot,
         undefined,
         path.join(state.stageRoot, '.claude', 'skills'),
       );
-      await installGateway(state.gatewaySelection, state.stageRoot, { mode: 'refresh', stamp: false });
+      const entry = loadGatewayCatalog(state.stageRoot).gateways.find((candidate) => candidate.kind === kind);
+      if (!entry) throw new Error(`Unknown gateway provider: ${kind}`);
+      state.gatewaySelection = kind;
+      const gateway = { name: kind, skillName: path.basename(entry.skillPath), kind: 'gateway' as const };
+      const report = await refreshInstalledSkills(state.stageRoot, [gateway.skillName], { include: [gateway] });
+      state.skillRefresh.skills.push(...report.skills);
+      state.skillRefresh.selected.push(...report.selected);
+      state.skillRefresh.success &&= report.success;
+      if (!report.success) {
+        throw new Error(
+          `Gateway skill did not fully apply: ${report.skills.flatMap((skill) => skill.errors).join('; ')}`,
+        );
+      }
       commitStageChanges(state, runtime, 'chore: materialize selected gateway');
       refreshPreparedState(state, runtime);
     }
@@ -533,6 +575,8 @@ async function rollbackLocal(state: UpdateState, runtime: UpdateRuntime): Promis
   await runtime.stopService(state.service);
   git(runtime, state.projectRoot, ['reset', '--hard', state.originalHead]);
   restoreSnapshot(state);
+  // Gateways survive cutover; their bind mounts still hold the replaced data/.
+  runtime.restartGateways(state.projectRoot);
   installAndBuild(state.projectRoot, state, runtime);
   if (state.service?.active) {
     runtime.startService(state.service, state.projectRoot);
@@ -572,7 +616,11 @@ export async function cutoverUpdate(
     saveState(state);
     git(runtime, state.projectRoot, ['reset', '--hard', state.targetHead]);
     installAndBuild(state.projectRoot, state, runtime);
-    if (state.gatewaySelection) upsertEnvVar('NANOCLAW_GATEWAY_PROVIDER', state.gatewaySelection, state.projectRoot);
+    if (state.gatewaySelection) {
+      // From the live checkout, now exactly the validated commit.
+      const { upsertEnvVar } = await runtime.loadGateway(state.projectRoot);
+      upsertEnvVar('NANOCLAW_GATEWAY_PROVIDER', state.gatewaySelection, state.projectRoot);
+    }
     state.phase = 'cutover';
     state.lastError = undefined;
     saveState(state);

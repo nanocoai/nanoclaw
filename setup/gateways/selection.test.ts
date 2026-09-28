@@ -2,13 +2,16 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { execFileSync } from 'node:child_process';
+
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { detectInstalledGateway, ensureExplicitGatewaySelection, resolveGatewaySelection } from './selection.js';
 
 const roots: string[] = [];
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
@@ -57,5 +60,35 @@ describe('implicit gateway migration', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-selection-'));
     roots.push(root);
     expect(detectInstalledGateway(root)).toBeUndefined();
+  });
+});
+
+describe('real detector probe', () => {
+  it('detects an installed gateway from inside a nested pnpm', () => {
+    // An outer `pnpm exec` sets this. The inner pnpm then prints a WARN to stdout
+    // for a nested package.json with a `pnpm` field, ahead of the detector's answer.
+    vi.stubEnv('pnpm_config_verify_deps_before_run', 'false');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-probe-'));
+    roots.push(root);
+    const { packageManager } = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ type: 'module', packageManager }));
+    fs.writeFileSync(path.join(root, 'pnpm-workspace.yaml'), 'onlyBuiltDependencies: [esbuild]\n');
+    fs.symlinkSync(path.resolve('node_modules'), path.join(root, 'node_modules'));
+    fs.mkdirSync(path.join(root, 'groups', 'repro'), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, 'groups', 'repro', 'package.json'),
+      JSON.stringify({ name: 'repro', pnpm: { onlyBuiltDependencies: ['esbuild'] } }),
+    );
+    const scripts = path.join(root, '.claude', 'skills', 'add-fixture', 'scripts');
+    fs.mkdirSync(scripts, { recursive: true });
+    fs.writeFileSync(path.join(scripts, 'detect.ts'), "console.log('installed');\n");
+
+    const loud = execFileSync('pnpm', ['exec', 'tsx', path.join(scripts, 'detect.ts')], {
+      cwd: root,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    expect(loud).toContain('WARN');
+    expect(detectInstalledGateway(root)).toBe('fixture');
   });
 });

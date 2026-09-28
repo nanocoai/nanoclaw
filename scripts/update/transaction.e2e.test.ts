@@ -10,6 +10,7 @@ import {
   cleanupUpdate,
   cutoverUpdate,
   finishUpdate,
+  loadGatewayModules,
   loadState,
   prepareUpdate,
   pruneTransactions,
@@ -17,7 +18,7 @@ import {
   validateUpdate,
   type UpdateRuntime,
 } from './transaction.js';
-import { CUTOVER_STOP_CLI_TIMEOUT_MS, drainContainers, stopService } from './service.js';
+import { CUTOVER_STOP_CLI_TIMEOUT_MS, DRAIN_LIST_FORMAT, drainContainers, stopService } from './service.js';
 import { getInstallSlug } from '../../src/install-slug.js';
 import type { CommandRunner, ServiceHandle } from './service.js';
 
@@ -194,6 +195,11 @@ function fakeRuntime(
     drainContainers: async () => {
       events.push('containers drained');
     },
+    restartGateways: () => {
+      events.push('gateways restarted');
+    },
+    // The fixtures are minimal repos with no setup/ tree; load this checkout's.
+    loadGateway: () => loadGatewayModules(path.resolve(import.meta.dirname, '../..')),
     startService: () => {
       events.push('service start');
       if (options.migrateOnStart && fs.readFileSync(path.join(install, 'src/value.ts'), 'utf8').includes('new')) {
@@ -218,7 +224,8 @@ describe('update-nanoclaw transaction end to end', () => {
     process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
     const bin = temp('nanoclaw-update-bin-');
     const pnpm = path.join(bin, 'pnpm');
-    write(bin, 'pnpm', `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} "$3"\n`);
+    // Runs the detector script, the last argument of `pnpm --silent exec tsx <script>`.
+    write(bin, 'pnpm', `#!/bin/sh\nfor script; do :; done\nexec ${JSON.stringify(process.execPath)} "$script"\n`);
     fs.chmodSync(pnpm, 0o755);
     const previousPath = process.env.PATH;
     process.env.PATH = `${bin}${path.delimiter}${previousPath ?? ''}`;
@@ -282,8 +289,13 @@ describe('update-nanoclaw transaction end to end', () => {
     fs.writeFileSync(path.join(fixture.install, 'start-nanoclaw.sh'), '#!/bin/bash\nexit 1\n');
     fs.writeFileSync(path.join(fixture.install, 'nanoclaw.pid'), '9999\n');
     runtime.detectService = () => ({ mode: 'unmanaged', active: true });
+    const beforeRollback = events.length;
     state = await rollbackUpdate(fixture.install, state.id, runtime);
     expect(state.phase).toBe('rolled-back');
+    // Gateways kept through cutover must be remounted onto the restored data/.
+    const rollbackEvents = events.slice(beforeRollback);
+    expect(rollbackEvents).toContain('gateways restarted');
+    expect(rollbackEvents.indexOf('gateways restarted')).toBeLessThan(rollbackEvents.indexOf('service start'));
     expect(exec(fixture.install, 'git', ['rev-parse', 'HEAD'])).toBe(fixture.originalHead);
     expect(fs.readFileSync(path.join(fixture.install, 'data/v2.db'), 'utf8')).toBe('old-schema');
     expect(fs.readFileSync(path.join(fixture.install, '.env'), 'utf8')).toBe('EXAMPLE=old\n');
@@ -607,7 +619,7 @@ describe('update-nanoclaw transaction end to end', () => {
     expect(cut.phase).toBe('cutover');
     // state.projectRoot is realpathed (macOS tmp lives under /var → /private/var), so derive the slug from it.
     const slugValue = getInstallSlug(cut.projectRoot);
-    const ps = `docker ps -q --filter label=nanoclaw-install=${slugValue}`;
+    const ps = `docker ps --filter label=nanoclaw-install=${slugValue} --format ${DRAIN_LIST_FORMAT}`;
     expect(events.indexOf('service stop')).toBeLessThan(events.indexOf(ps));
     expect(events.filter((e) => e.startsWith('docker '))).toEqual([ps, 'docker stop -t 10 idle111', ps]);
 

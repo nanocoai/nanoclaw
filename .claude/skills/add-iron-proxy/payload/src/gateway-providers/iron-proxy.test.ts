@@ -151,6 +151,21 @@ describe('Iron Proxy provider', () => {
     expect(front.allowed_hosts).toContain(settings.modelHost);
   });
 
+  it('leaves an invalid allowed-hosts entry out of the front config and warns', async () => {
+    const { log } = await import('../log.js');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'iron-front-allowlist-'));
+    const allowedHostsFile = path.join(dir, 'allowed-hosts.json');
+    fs.writeFileSync(allowedHostsFile, JSON.stringify(['extra.example.com', 'host.docker.internal:11434']));
+    try {
+      const front = JSON.parse(ironFrontConfig({ ...settings, allowedHostsFile }));
+      expect(front.allowed_hosts).toContain('extra.example.com');
+      expect(front.allowed_hosts).not.toContain('host.docker.internal:11434');
+      expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('Iron only reaches HTTPS on 443'));
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('routes through the central proxy with a signed session identity', () => {
     fs.mkdirSync(path.dirname(settings.identityKey), { recursive: true });
     fs.writeFileSync(settings.identityKey, Buffer.alloc(32, 7));

@@ -3,7 +3,7 @@
 // Applies one branch-backed or self-contained provider add-* skill to a disposable checkout and runs only
 // its build/test directives. `--all` is the local equivalent of the CI matrix.
 
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   existsSync,
@@ -133,15 +133,23 @@ function materializeSkill(commit: string, skill: string, skillsRoot: string): Re
   return meta;
 }
 
-function command(cmd: string, cwd: string, quiet = false): string {
+// Streams as it runs so a hung step shows where it stopped; the job-level
+// timeout bounds it. stdout is also captured for the caller.
+function command(cmd: string, cwd: string, quiet = false): Promise<string> {
   if (!quiet) console.log(`  $ ${cmd}`);
-  const result = spawnSync(cmd, { cwd, shell: true, encoding: 'utf8', maxBuffer: 50 * 1024 * 1024 });
-  if (result.status !== 0) {
-    if (result.stdout) process.stdout.write(result.stdout);
-    if (result.stderr) process.stderr.write(result.stderr);
-    throw new Error(`command exited ${result.status}: ${cmd}`);
-  }
-  return result.stdout ?? '';
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, { cwd, shell: true, stdio: ['ignore', 'pipe', 'inherit'] });
+    const stdout: Buffer[] = [];
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdout.push(chunk);
+      process.stdout.write(chunk);
+    });
+    child.on('error', (error) => reject(new Error(`command failed: ${error.message}: ${cmd}`)));
+    child.on('close', (status, signal) => {
+      if (status === 0) return resolve(Buffer.concat(stdout).toString('utf8'));
+      reject(new Error(`command ${signal ? `killed by ${signal}` : `exited ${status}`}: ${cmd}`));
+    });
+  });
 }
 
 export function discover(skillsRoot = SKILLS_ROOT): RegistrySkill[] {
@@ -385,8 +393,8 @@ async function testCombinedProviders(skills: RegistrySkill[]): Promise<void> {
   try {
     git(['clone', '--quiet', '--shared', '--no-checkout', SOURCE_ROOT, root]);
     git(['checkout', '--quiet', '--detach', git(['rev-parse', 'HEAD'])], root);
-    command('pnpm install --frozen-lockfile --prefer-offline', root);
-    command('bun install --frozen-lockfile', join(root, 'container/agent-runner'));
+    await command('pnpm install --frozen-lockfile --prefer-offline', root);
+    await command('bun install --frozen-lockfile', join(root, 'container/agent-runner'));
 
     for (const meta of selected) {
       console.log(`\n==> ${meta.skill}`);
@@ -432,8 +440,8 @@ async function testOldProviderRefresh(commit: string): Promise<void> {
     git(['clone', '--quiet', '--shared', '--no-checkout', SOURCE_ROOT, root]);
     git(['fetch', '--quiet', 'origin', commit], root);
     git(['checkout', '--quiet', '--detach', commit], root);
-    command('pnpm install --frozen-lockfile --prefer-offline', root);
-    command('bun install --frozen-lockfile', join(root, 'container/agent-runner'));
+    await command('pnpm install --frozen-lockfile --prefer-offline', root);
+    await command('bun install --frozen-lockfile', join(root, 'container/agent-runner'));
 
     const oldSkills = LEGACY_PROVIDER_SKILLS.map((name) =>
       discover(join(root, '.claude/skills')).find(({ skill }) => skill === name),
@@ -485,8 +493,8 @@ async function testPreContractProviders(): Promise<void> {
   try {
     git(['clone', '--quiet', '--shared', '--no-checkout', SOURCE_ROOT, root]);
     git(['checkout', '--quiet', '--detach', git(['rev-parse', 'HEAD'])], root);
-    command('pnpm install --frozen-lockfile --prefer-offline', root);
-    command('bun install --frozen-lockfile', join(root, 'container/agent-runner'));
+    await command('pnpm install --frozen-lockfile --prefer-offline', root);
+    await command('bun install --frozen-lockfile', join(root, 'container/agent-runner'));
 
     const refs = { providers: PRE_CONTRACT_PROVIDERS_SHA };
     for (const name of LEGACY_PROVIDER_SKILLS) {
@@ -526,8 +534,8 @@ async function testAll(skills: RegistrySkill[]): Promise<void> {
     try {
       git(['clone', '--quiet', '--shared', '--no-checkout', SOURCE_ROOT, root]);
       git(['checkout', '--quiet', '--detach', head], root);
-      command('pnpm install --frozen-lockfile --prefer-offline', root);
-      if (meta.bun) command('bun install --frozen-lockfile', join(root, 'container/agent-runner'));
+      await command('pnpm install --frozen-lockfile --prefer-offline', root);
+      if (meta.bun) await command('bun install --frozen-lockfile', join(root, 'container/agent-runner'));
       const scenarios = fixtureScenarios(meta);
       for (const [index, fixture] of scenarios.entries()) {
         const scenario = fixture.name ?? String(index + 1);

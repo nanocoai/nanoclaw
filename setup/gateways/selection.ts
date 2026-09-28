@@ -16,7 +16,8 @@ export type GatewayDetector = (script: string) => boolean;
 function runDetector(projectRoot: string, script: string): boolean {
   try {
     return (
-      execFileSync('pnpm', ['exec', 'tsx', script], {
+      // --silent: a nested pnpm prints workspace warnings to stdout.
+      execFileSync('pnpm', ['--silent', 'exec', 'tsx', script], {
         cwd: projectRoot,
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'ignore'],
