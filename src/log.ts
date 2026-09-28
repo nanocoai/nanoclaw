@@ -70,7 +70,18 @@ function emit(level: Level, msg: string, data?: Record<string, unknown>): void {
   if (LEVELS[level] < threshold) return;
   const tag = `${COLORS[level]}${level.toUpperCase()}${level === 'fatal' ? FULL_RESET : RESET}`;
   const stream = LEVELS[level] >= LEVELS.warn ? process.stderr : process.stdout;
-  stream.write(`[${ts()}] ${tag} ${MSG_COLOR}${msg}${RESET}${data ? formatData(data) : ''}\n`);
+  /* eslint-disable no-catch-all/no-catch-all -- same reason as safeStringify: logging must never throw */
+  try {
+    stream.write(`[${ts()}] ${tag} ${MSG_COLOR}${msg}${RESET}${data ? formatData(data) : ''}\n`);
+  } catch {
+    // e.g. a throwing getter on the data bag itself, read before safeStringify sees it.
+    try {
+      process.stderr.write(`[${ts()}] ${tag} ${MSG_COLOR}${msg}${RESET} [log data unserializable]\n`);
+    } catch {
+      /* nowhere left to report it */
+    }
+  }
+  /* eslint-enable no-catch-all/no-catch-all */
 }
 
 export const log = {

@@ -54,4 +54,15 @@ describe('log never throws on unserializable data', () => {
     expect(() => log.warn('hostile', { err: hostile, bare: Object.create(null) })).not.toThrow();
     expect(written.join('')).toContain('[object Object]');
   });
+
+  it('survives a throwing getter on the data bag itself', () => {
+    const data = {
+      ok: 1,
+      get boom(): never {
+        throw new Error('getter');
+      },
+    };
+    expect(() => log.error('bag', data)).not.toThrow();
+    expect(written.join('')).toContain('[log data unserializable]');
+  });
 });
