@@ -1,6 +1,6 @@
 /**
- * Tests for the agent-facing room actions: create_room and
- * add_to_room, driven through the REAL guard-wrapped delivery entries
+ * Tests for the agent-facing room actions: create_room, add_to_room, and
+ * handoff, driven through the real registered delivery entries
  * (getDeliveryAction) over a real in-memory central DB. Slack traffic is a
  * recorded fetch stub (auth.test + conversations.open only — room actions
  * never provision apps); the canvas leg is mocked like orchestrate.test.ts.
@@ -18,14 +18,21 @@ const ANDY_BOT_TOKEN = 'xoxb-andy-secret-token';
 const PIXEL_BOT_TOKEN = 'xoxb-pixel-secret-token';
 const DEVIN_BOT_TOKEN = 'xoxb-devin-secret-token';
 
-const { mockNotifyWrite, mockRequestApproval, mockWriteDestinations, mockCreateRoomCanvas, mockWireCanvasComments } =
-  vi.hoisted(() => ({
-    mockNotifyWrite: vi.fn(),
-    mockRequestApproval: vi.fn().mockResolvedValue(undefined),
-    mockWriteDestinations: vi.fn(),
-    mockCreateRoomCanvas: vi.fn(),
-    mockWireCanvasComments: vi.fn(),
-  }));
+const {
+  mockNotifyWrite,
+  mockRequestApproval,
+  mockWriteDestinations,
+  mockCreateRoomCanvas,
+  mockWireCanvasComments,
+  mockDeliver,
+} = vi.hoisted(() => ({
+  mockNotifyWrite: vi.fn(),
+  mockRequestApproval: vi.fn().mockResolvedValue(undefined),
+  mockWriteDestinations: vi.fn(),
+  mockCreateRoomCanvas: vi.fn(),
+  mockWireCanvasComments: vi.fn(),
+  mockDeliver: vi.fn().mockResolvedValue('slack-message-1'),
+}));
 
 // Room canvas (contract C2) — non-throwing, returns the canvas id or undefined.
 vi.mock('./room-canvas.js', () => ({
@@ -65,11 +72,11 @@ vi.mock('../approvals/index.js', async () => {
   };
 });
 
-// Registers the create_room / add_to_room delivery actions — the path under
+// Registers the create_room / add_to_room / handoff delivery actions — the path under
 // test. Deliberately NOT src/modules/index.ts: the upstream a2a barrel stays
 // unloaded.
 import './index.js';
-import { getDeliveryAction } from '../../delivery.js';
+import { getDeliveryAction, setDeliveryAdapter } from '../../delivery.js';
 import { listGuardedActions } from '../../guard/index.js';
 import { log } from '../../log.js';
 import { registerChannelAdapter } from '../../channels/channel-registry.js';
@@ -230,6 +237,8 @@ async function seedSubAgent(name: string, groupId: string, instanceKey: string):
 beforeEach(async () => {
   vi.clearAllMocks();
   mockCreateRoomCanvas.mockResolvedValue(undefined);
+  mockDeliver.mockResolvedValue('slack-message-1');
+  setDeliveryAdapter({ deliver: (...args) => mockDeliver(...args) });
   fetchCalls = [];
   // Faithful default: the source room holds exactly the operator + its bots.
   sourceRoomMembers = ['U0OPERATOR', 'U0ANDYBOT', 'U0PIXELBOT'];
@@ -289,12 +298,13 @@ afterEach(async () => {
 });
 
 describe('guard wiring', () => {
-  it('both room actions are in the guard catalog and their entries are guard-wrapped', () => {
+  it('privileged room actions are guarded and the host-validated handoff entry is registered', () => {
     const actions = new Set(listGuardedActions().map((s) => s.action));
     expect(actions.has('rooms.create')).toBe(true);
     expect(actions.has('rooms.add_agent')).toBe(true);
     expect(getDeliveryAction('create_room')).toBeDefined();
     expect(getDeliveryAction('add_to_room')).toBeDefined();
+    expect(getDeliveryAction('handoff')).toBeDefined();
   });
 
   it('confined (group-scope) caller: create_room holds for approval, nothing runs', async () => {
@@ -367,16 +377,14 @@ describe('create_room', () => {
       agentNames: ['Andy', 'Pixel', 'Devin'],
     });
 
-    // Allowlisted for a2a; success notify tells the CALLER to author the
-    // intro via its projected room destination, tagging both bots.
+    // Allowlisted for a2a; success notify keeps recipient choice explicit
+    // and never manufactures a mention-all kickoff.
     expect(fs.readFileSync(path.join(tmpDir, '.env'), 'utf-8')).toMatch(/^SLACK_A2A_ROOMS=.*G0TEAM/m);
     const success = notifyTexts().at(-1)!;
     expect(success).toContain('Room "Website Team" is live (G0TEAM)');
-    expect(success).toContain('send_message({ to: "website-team"');
-    expect(success).toContain('<@U0PIXELBOT>');
-    expect(success).toContain('<@U0DEVINBOT>');
-    expect(success).not.toContain('<@U0ANDYBOT>');
-    expect(success).toContain('no mechanics, no member lists');
+    expect(success).toContain('No agent was engaged automatically');
+    expect(success).toContain('handoff({ room: "website-team"');
+    expect(success).not.toContain('<@');
 
     assertNoTokenLeak();
   });
@@ -423,6 +431,101 @@ describe('create_room', () => {
 
     expect(mockRequestApproval).not.toHaveBeenCalled();
     expect(notifyTexts().at(-1)).toContain('agents must be a non-empty list');
+  });
+});
+
+describe('handoff', () => {
+  async function openRoom(agentNames: string[]): Promise<Session> {
+    await runAction('create_room', { name: 'Website Team', agents: agentNames });
+    const room = await getMessagingGroupByPlatform('slack', 'slack:G0TEAM', 'slack');
+    expect(room).toBeDefined();
+    mockNotifyWrite.mockClear();
+    mockDeliver.mockClear();
+    fetchCalls = [];
+    return {
+      ...SLACK_SESSION,
+      id: 'sess-room',
+      messaging_group_id: room!.id,
+      thread_id: 'slack:G0TEAM:1700000000.000001',
+    };
+  }
+
+  it('from the room session, posts one mention through the caller instance/thread and wakes only that agent', async () => {
+    const session = await openRoom(['Pixel', 'Devin']);
+
+    await runAction('handoff', { to: 'Pixel', text: 'Please review the API contract.' }, session);
+
+    expect(mockDeliver).toHaveBeenCalledTimes(1);
+    const [channelType, platformId, threadId, kind, rawContent, files, instance] = mockDeliver.mock.calls[0]!;
+    expect({ channelType, platformId, threadId, kind, files, instance }).toEqual({
+      channelType: 'slack',
+      platformId: 'slack:G0TEAM',
+      threadId: 'slack:G0TEAM:1700000000.000001',
+      kind: 'chat',
+      files: undefined,
+      instance: 'slack',
+    });
+    const delivered = JSON.parse(rawContent as string) as { text: string };
+    expect(delivered.text).toBe('Please review the API contract.\n<@U0PIXELBOT>');
+    expect(delivered.text.match(/<@[^>]+>/g)).toEqual(['<@U0PIXELBOT>']);
+    expect(delivered.text).not.toContain('U0DEVINBOT');
+  });
+
+  it('from the creation session, an explicit room and recipient list engages exactly those agents', async () => {
+    await openRoom(['Pixel', 'Devin']);
+
+    await runAction('handoff', {
+      room: 'website-team',
+      to: ['Pixel', 'Devin'],
+      text: 'Please both review the API contract.',
+    });
+
+    expect(mockDeliver).toHaveBeenCalledTimes(1);
+    const [, platformId, threadId, , rawContent, , instance] = mockDeliver.mock.calls[0]!;
+    expect({ platformId, threadId, instance }).toEqual({
+      platformId: 'slack:G0TEAM',
+      threadId: null,
+      instance: 'slack',
+    });
+    expect(JSON.parse(rawContent as string)).toEqual({
+      text: 'Please both review the API contract.\n<@U0PIXELBOT> <@U0DEVINBOT>',
+    });
+  });
+
+  it('from a DM, rejects implicit handoff with private-A2A or explicit-room guidance', async () => {
+    await runAction('handoff', { to: 'Pixel', text: 'Please review.' });
+
+    expect(mockDeliver).not.toHaveBeenCalled();
+    const failure = notifyTexts().at(-1)!;
+    expect(failure).toContain('handoff needs a shared Slack surface');
+    expect(failure).toContain('use send_message for private A2A');
+    expect(failure).toContain('pass an explicit room destination');
+  });
+
+  it('rejects self, outsider, unknown, duplicate, and raw-mention requests host-side', async () => {
+    const session = await openRoom(['Pixel']);
+    const cases: Array<{ content: Record<string, unknown>; failure: string }> = [
+      { content: { to: 'Andy', text: 'Review.' }, failure: 'cannot hand off to yourself' },
+      { content: { to: 'Devin', text: 'Review.' }, failure: 'agent "Devin" is not wired to room' },
+      { content: { to: 'Ghost', text: 'Review.' }, failure: 'unknown agent "Ghost"' },
+      { content: { to: ['Pixel', 'pixel'], text: 'Review.' }, failure: 'duplicate handoff target' },
+      {
+        content: { to: 'Pixel', text: 'Review <@U0OTHER>.' },
+        failure: 'text must not contain raw Slack mention markup',
+      },
+    ];
+
+    for (const testCase of cases) {
+      mockNotifyWrite.mockClear();
+      await runAction('handoff', testCase.content, session);
+      expect(mockDeliver).not.toHaveBeenCalled();
+      expect(notifyTexts().at(-1)).toContain(`handoff failed: ${testCase.failure}`);
+      if (testCase.failure.includes('not wired to room')) {
+        expect(notifyTexts().at(-1)).toContain('use send_message to relay privately');
+        expect(notifyTexts().at(-1)).toContain('add/invite the agent before handing off');
+      }
+    }
+    assertNoTokenLeak();
   });
 });
 
