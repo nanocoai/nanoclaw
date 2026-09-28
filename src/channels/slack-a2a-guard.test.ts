@@ -25,6 +25,7 @@ import type { ChannelSetup, InboundMessage } from './adapter.js';
 import {
   botAuthorOf,
   registerSlackBotGuard,
+  setSlackAuthorIsBotResolver,
   setBotInboundPolicy,
   wrapSlackBotGuard,
   type SlackBotInboundContext,
@@ -88,6 +89,7 @@ function makeSetup(onInbound?: ChannelSetup['onInbound']): { setup: ChannelSetup
 
 afterEach(() => {
   setBotInboundPolicy(null);
+  setSlackAuthorIsBotResolver('slack', null);
   vi.clearAllMocks();
 });
 
@@ -138,6 +140,33 @@ describe('wrapSlackBotGuard — default (no admission policy)', () => {
     expect(log.debug).toHaveBeenCalledWith(
       expect.stringContaining('bot-authored inbound dropped'),
       expect.objectContaining({ botId: 'B0FOREIGN', platformId: 'slack:C1', instanceKey: 'slack' }),
+    );
+  });
+
+  it('passes a delegated upload when Slack confirms its author is human', async () => {
+    const { setup, calls } = makeSetup();
+    const wrapped = wrapSlackBotGuard(setup, 'slack');
+    setSlackAuthorIsBotResolver('slack', async () => false);
+    const message = botMessage('U123', 'file');
+
+    await wrapped.onInbound('slack:D1', null, message);
+
+    expect(calls).toEqual([{ platformId: 'slack:D1', threadId: null, message }]);
+  });
+
+  it('fails closed when an ambiguous author lookup fails', async () => {
+    const { setup, calls } = makeSetup();
+    const wrapped = wrapSlackBotGuard(setup, 'slack');
+    setSlackAuthorIsBotResolver('slack', async () => {
+      throw new Error('lookup failed');
+    });
+
+    await wrapped.onInbound('slack:D1', null, botMessage('U123', 'file'));
+
+    expect(calls).toHaveLength(0);
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.stringContaining('keeping bot classification'),
+      expect.objectContaining({ instanceKey: 'slack', platformId: 'slack:D1' }),
     );
   });
 
