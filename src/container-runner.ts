@@ -57,6 +57,7 @@ import {
 } from './gateway-providers/index.js';
 import { releaseGatewaySession, type GatewaySessionControl } from './gateway-session-lifecycle.js';
 import { initGroupFilesystem } from './group-init.js';
+import { withLocalProxyBypass } from './local-proxy-bypass.js';
 import { getAgentMailbox } from './mailbox/index.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
@@ -1263,11 +1264,11 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
   // exempt from the credential-NAME check and still refused credential VALUES.
   // The model provider's contribution fills first, the gateway's second — a
   // gateway wins a key collision, the override the old raw-argv append got
-  // from Docker's last-wins rule.
-  const contributedEnv: Record<string, string> = {
+  // from Docker's last-wins rule. Local hops bypass any contributed proxy.
+  const contributedEnv: Record<string, string> = withLocalProxyBypass({
     ...(contribution.env ?? {}),
     ...(gateway.env ?? {}),
-  };
+  });
 
   const hostUid = process.getuid?.();
   const hostGid = process.getgid?.();
