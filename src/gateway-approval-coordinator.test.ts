@@ -280,6 +280,53 @@ describe('gateway approval coordinator', () => {
     expect(delivered).toHaveLength(0);
   });
 
+  it.each([
+    ['models.example.test:8000', 'approve'],
+    ['MODELS.EXAMPLE.TEST:8000', 'approve'],
+    ['models.example.test:8001', 'card'],
+    ['models.example.test', 'card'],
+    ['sub.models.example.test:8000', 'card'],
+  ])('auto-approves only the exact declared model authority: %s', async (host, expected) => {
+    const { registerProviderHostContract, getProviderHostContract } = await import('./provider-contracts/index.js');
+    if (!getProviderHostContract('fixture-authority'))
+      registerProviderHostContract('fixture-authority', {
+        ...getProviderHostContract('claude')!,
+        modelAuthorities: ['models.example.test:8000'],
+      });
+    const coordinator = await import('./gateway-approval-coordinator.js');
+    const now = new Date().toISOString();
+    await createSession({
+      id: 'authority-session',
+      agent_group_id: 'ag-1',
+      messaging_group_id: null,
+      thread_id: null,
+      agent_provider: 'fixture-authority',
+      status: 'active',
+      container_status: 'running',
+      last_active: now,
+      created_at: now,
+    });
+    await coordinator.startGatewayApprovalCoordinator(provider(), delivery, vi.fn(), { timeoutMs: 5_000 });
+    const decision = decide(
+      request({
+        trigger: 'default',
+        destination: { host },
+        sessionId: 'authority-session',
+        runtimeIdentity: gatewayRuntimeIdentity({
+          installSlug: INSTALL_SLUG,
+          agentGroupId: 'ag-1',
+          sessionId: 'authority-session',
+        }),
+      }),
+    );
+    if (expected === 'approve') {
+      expect(await decision).toBe('approve');
+      expect(delivered).toHaveLength(0);
+    } else {
+      await vi.waitFor(() => expect(delivered).toHaveLength(1));
+    }
+  });
+
   it('persists and delivers a normalized request, then accepts only the authorized response', async () => {
     const coordinator = await import('./gateway-approval-coordinator.js');
     await coordinator.startGatewayApprovalCoordinator(provider(), delivery, vi.fn(), { timeoutMs: 5_000 });

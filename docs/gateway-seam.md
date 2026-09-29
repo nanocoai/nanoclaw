@@ -146,6 +146,12 @@ approval. Missing declarations never imply open access. Provider packages declar
 their own domains; gateway adapters must not keep model-host lists or interpret
 presentation text to make approval decisions.
 
+A provider may also declare `modelAuthorities`: exact `host:port` pairs for an
+operator-configured model endpoint that is not a public HTTPS domain, such as a
+model server on the host. A request to exactly that authority is approved like a
+model domain; another port or a subdomain is not. Core does not decide which
+schemes reach it; the selected gateway does.
+
 Core validates identity, session ownership, freshness, expiry, and bridge health
 before approving. Network restrictions and credential grants still apply. Native
 gateway denials must not be converted into default holds. Native explicit approval
