@@ -159,4 +159,18 @@ describe('OpenCode model gateway destinations', () => {
     const { openCodeModelDomains } = await import('../provider-contracts/opencode.js');
     expect(openCodeModelDomains(endpoint)).not.toContain('models.example.test');
   });
+  it.each([
+    ['http://host.docker.internal:8000/v1', ['host.docker.internal:8000']],
+    ['http://HOST.docker.internal:11434/v1', ['host.docker.internal:11434']],
+    ['https://models.example.test:8443/v1', ['models.example.test:8443']],
+    ['https://models.example.test/v1', []],
+    ['http://host.docker.internal/v1', []],
+    ['http://192.168.1.20:8000/v1', []],
+    ['http://user:pw@host.docker.internal:8000/v1', []],
+    ['native', []],
+    ['not a url', []],
+  ])('declares %s as the exact model authorities %j', async (endpoint, expected) => {
+    const { openCodeModelAuthorities } = await import('../provider-contracts/opencode.js');
+    expect(openCodeModelAuthorities(endpoint)).toEqual(expected);
+  });
 });
