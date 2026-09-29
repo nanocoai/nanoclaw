@@ -158,8 +158,14 @@ model hostname. Rotation and reauthentication keep IDs and grants. Moving a key
 to another host requires confirmation and re-entering its value.
 
 Native backends and custom/keyless HTTPS endpoints on port 443 are supported.
-Use a DNS name and TLS for local models; plaintext HTTP endpoints fail during
-setup. Follow the OpenCode skill to restart the host and test a real reply.
+Setup adds the model host to the front proxy's allowlist once prompts complete,
+even for a keyless endpoint, which creates no credential.
+This is NanoClaw's rule for the Iron gateway, not a limit of Iron itself. Iron
+trusts only public CAs, so setup refuses plain HTTP, other ports, IP addresses
+and private names such as `*.home.arpa` at the prompt: an https endpoint on a
+private name would pass setup and then fail every turn with `502 Bad Gateway`.
+Setup reports why it could not list models (for example a self-signed
+certificate) when it can reach the endpoint. Follow the OpenCode skill to restart the host and test a real reply.
 
 ## Remove
 

@@ -330,11 +330,11 @@ Codex file shape that record expects. Iron stores it as a token broker plus a
 separate account-header secret. Parsing a provider's own login file stays in
 the provider; converting to a gateway's storage format stays in the gateway.
 
-`modelEndpoint(url)` is the one network hook. It validates an endpoint before
-setup prompts for anything, and its `configure()` routes the endpoint through
-the gateway once prompts complete. Iron uses it to permit the model host in its
-front proxy — needed even for a keyless local model, which creates no
-credential — and to refuse plaintext endpoints early. OneCLI declares nothing.
+`modelEndpoint(url)` is the one network hook. A provider calls it when the
+operator enters an endpoint, so a refused URL can be corrected at the prompt;
+`configure()` routes the endpoint through the gateway once prompts complete.
+A gateway refuses an endpoint it can never serve by throwing, with the reason
+in the message. A gateway that keeps no network allowlist declares nothing.
 
 `PROVIDER_CREDENTIAL_CONNECTION_SEAM_VERSION` gates a provider skill whose
 install needs `connection()`; an older core's store lacks it and the skill must

@@ -256,14 +256,42 @@ it('does not turn API unavailability into an absent credential', async () => {
   await expect(f.connect(api()).find()).rejects.toThrow('503');
 });
 
-it.each(['http://models.example.test/v1', 'https://models.example.test:8000/v1'])(
-  'rejects unsupported model endpoint %s before changing configuration',
+it.each([
+  'http://models.example.test/v1',
+  'https://models.example.test:8000/v1',
+  'https://192.168.1.20/v1',
+  'https://[fd00::1]/v1',
+  'https://localhost/v1',
+])('rejects unsupported model endpoint %s before changing configuration', (url) => {
+  const f = fixture();
+  expect(() => ironModelEndpoint(url, f.root)).toThrow('https://<dns-name> on port 443');
+  expect(f.allowHost).not.toHaveBeenCalled();
+});
+it("says the endpoint rule is NanoClaw's and why plain HTTP is refused", () => {
+  const f = fixture();
+  expect(() => ironModelEndpoint('http://host.docker.internal:8000/v1', f.root)).toThrow(
+    /^NanoClaw's Iron gateway .*certificate Iron trusts.*never cross the network unencrypted/,
+  );
+});
+it.each(['https://models.example.test/v1', 'https://models.example.test:443/v1'])(
+  'accepts the HTTPS endpoint %s',
   (url) => {
     const f = fixture();
-    expect(() => ironModelEndpoint(url, f.root)).toThrow('HTTPS model endpoint on port 443');
-    expect(f.allowHost).not.toHaveBeenCalled();
+    expect(() => ironModelEndpoint(url, f.root)).not.toThrow();
   },
 );
+it.each([
+  ['host.docker.internal', 'https://host.docker.internal/v1'],
+  ['llm.local', 'https://llm.local/v1'],
+  ['home.arpa', 'https://home.arpa/v1'],
+  ['llm.home.arpa', 'https://llm.home.arpa:443/v1'],
+  ['ollama.home', 'https://ollama.home/v1'],
+  ['models.corp', 'https://models.corp/v1'],
+])('refuses the private name %s, which no public CA certifies', (host, url) => {
+  const f = fixture();
+  expect(() => ironModelEndpoint(url, f.root)).toThrow(`${host} is a private name.`);
+  expect(f.allowHost).not.toHaveBeenCalled();
+});
 it('rechecks OAuth account rules before keeping or replacing a credential', async () => {
   const f = fixture();
   const c = f.connect(oauth);

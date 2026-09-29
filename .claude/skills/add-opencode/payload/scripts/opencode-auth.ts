@@ -9,7 +9,11 @@ import path from 'path';
 import * as p from '@clack/prompts';
 
 import { getCredentialStore } from '../setup/gateways/credential-store.js';
-import type { ChatGptOAuthCredential, GatewayCredentialConnection } from '../setup/gateways/credential-store.js';
+import type {
+  ChatGptOAuthCredential,
+  GatewayCredentialConnection,
+  ProviderCredentialStore,
+} from '../setup/gateways/credential-store.js';
 import { brightSelect } from '../setup/lib/bright-select.js';
 import { brandBody } from '../setup/lib/theme.js';
 import * as setupLog from '../setup/logs.js';
@@ -47,6 +51,18 @@ function validHttpUrl(value: string): string | undefined {
     // handled below
   }
   return 'Enter an absolute http(s) URL without embedded credentials, query, or fragment.';
+}
+
+const LOCAL_PLACEHOLDER = 'http://host.docker.internal:8000/v1';
+const HTTPS_PLACEHOLDER = 'https://models.example.com/v1';
+
+/** The selected gateway's reason it can never route this endpoint, checked while the operator can still correct it. */
+function gatewayEndpointError(store: ProviderCredentialStore, value: string): string | undefined {
+  try {
+    store.modelEndpoint?.(value);
+  } catch (error) {
+    return (error as Error).message;
+  }
 }
 
 function checkExportedDefaults(defaults: Record<string, string | undefined>): void {
@@ -254,6 +270,14 @@ export async function runOpenCodeAuthStep(options: { allowSkip?: boolean } = {})
     return;
   }
 
+  const store = await getCredentialStore();
+  const exportedBaseUrl = process.env.OPENCODE_BASE_URL?.trim();
+  if ((backend === 'local' || backend === 'custom') && exportedBaseUrl && exportedBaseUrl !== 'native') {
+    const invalid = validHttpUrl(exportedBaseUrl) ?? gatewayEndpointError(store, exportedBaseUrl);
+    if (invalid) throw new Error(`The exported OPENCODE_BASE_URL cannot be used. ${invalid}`);
+  }
+  const validBaseUrl = (value: string) => validHttpUrl(value) ?? gatewayEndpointError(store, value);
+
   let provider: string = backend;
   let baseUrl = '';
   let host = '';
@@ -280,8 +304,8 @@ export async function runOpenCodeAuthStep(options: { allowSkip?: boolean } = {})
     baseUrl = answer(
       await p.text({
         message: 'OpenAI-compatible base URL (include /v1)',
-        placeholder: 'http://host.docker.internal:8000/v1',
-        validate: (value) => validHttpUrl(String(value ?? '').trim()),
+        placeholder: gatewayEndpointError(store, LOCAL_PLACEHOLDER) ? HTTPS_PLACEHOLDER : LOCAL_PLACEHOLDER,
+        validate: (value) => validBaseUrl(String(value ?? '').trim()),
       }),
     ).trim();
     host = new URL(baseUrl).hostname;
@@ -316,7 +340,7 @@ export async function runOpenCodeAuthStep(options: { allowSkip?: boolean } = {})
       await p.text({
         message: 'Custom API base URL (leave blank for OpenCode native configuration)',
         placeholder: 'https://api.example.com/v1',
-        validate: (value) => (String(value ?? '').trim() ? validHttpUrl(String(value).trim()) : undefined),
+        validate: (value) => (String(value ?? '').trim() ? validBaseUrl(String(value).trim()) : undefined),
       }),
     ).trim();
     host = baseUrl
@@ -340,7 +364,7 @@ export async function runOpenCodeAuthStep(options: { allowSkip?: boolean } = {})
     OPENCODE_AUTH_MODE: backend === 'chatgpt' ? 'chatgpt' : undefined,
   };
   checkExportedDefaults(defaults);
-  const endpoint = (await getCredentialStore()).modelEndpoint?.(baseUrl || `https://${host}`);
+  const endpoint = store.modelEndpoint?.(baseUrl || `https://${host}`);
 
   // Guarded model catalogs need the newly entered key before discovery.
   // Keeping a vaulted key never reads it back into the host setup process.
@@ -363,8 +387,18 @@ export async function runOpenCodeAuthStep(options: { allowSkip?: boolean } = {})
           ? []
           : (await discoverLocalModelIds(baseUrl, globalThis.fetch, pendingKey?.key)).map((id) => `${provider}/${id}`)
         : discoverRuntimeModels(provider, true, backend === 'chatgpt');
-    } catch {
-      p.log.warn(brandBody('Could not list models. Enter a model id manually; no built-in model list is substituted.'));
+    } catch (error) {
+      // fetch() hides the reason (e.g. "self-signed certificate") in its cause; a
+      // dual-stack failure nests it one level deeper, in an AggregateError.
+      const cause = (error as { cause?: { message?: unknown; errors?: { message?: unknown }[] } })?.cause;
+      const reason = String(cause?.message || cause?.errors?.[0]?.message || (error as Error)?.message || '')
+        .replace(/\s+/g, ' ')
+        .slice(0, 200);
+      p.log.warn(
+        brandBody(
+          `Could not list models${reason ? ` (${reason})` : ''}. Enter a model id manually; no built-in model list is substituted.`,
+        ),
+      );
     }
     if (pendingKey?.keepExisting) {
       p.log.info(

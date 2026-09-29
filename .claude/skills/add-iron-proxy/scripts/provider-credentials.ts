@@ -16,6 +16,13 @@ export async function allowModelHost(host: string, root: string): Promise<void> 
   await run(['--allow-host', host], root);
 }
 
+/**
+ * Names no public CA certifies, with their subdomains: IANA special-use names and the
+ * TLDs ICANN will never delegate (home, corp, mail). Iron trusts only public roots,
+ * so an https endpoint on one would pass setup and then fail every turn.
+ */
+const PRIVATE_NAME = /(?:^|\.)(?:internal|local|localhost|home\.arpa|home|corp|mail)$/;
+
 export function ironModelEndpoint(raw: string, root: string) {
   const url = new URL(raw);
   if (
@@ -28,7 +35,11 @@ export function ironModelEndpoint(raw: string, root: string) {
     url.hash
   )
     throw new Error(
-      'Iron Proxy requires an HTTPS model endpoint on port 443. Put a TLS endpoint in front of a local model server before configuring it.',
+      "NanoClaw's Iron gateway needs the model endpoint as https://<dns-name> on port 443, with a certificate Iron trusts (public CAs by default). Plain HTTP is refused so keys and model replies never cross the network unencrypted. IP addresses are not supported. The add-iron-proxy skill describes which model endpoints Iron can serve.",
+    );
+  if (PRIVATE_NAME.test(url.hostname))
+    throw new Error(
+      `${url.hostname} is a private name. No public CA issues certificates for it and Iron trusts only public CAs, so every request would fail. The add-iron-proxy skill describes which model endpoints Iron can serve.`,
     );
   return { configure: () => allowModelHost(url.hostname, root) };
 }
