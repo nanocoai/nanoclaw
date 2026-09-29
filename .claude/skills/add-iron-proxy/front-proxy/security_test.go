@@ -622,10 +622,15 @@ func mustURL(raw string) *url.URL {
 	}
 	return u
 }
-func TestPlaintextOriginPinsHostAndPort(t *testing.T) {
+func TestLocalModelHostIsPlainHTTPOnlyWithAWrittenPort(t *testing.T) {
 	var hits atomic.Int32
-	g, _ := fixture(t, &fixtureBridge{}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1); w.WriteHeader(200) }))
-	g.cfg.PlaintextOrigins = []string{"host.docker.internal:8000"}
+	var decided []string
+	b := &fixtureBridge{request: func(ctx context.Context, r *pb.TransformRequestRequest) (*pb.TransformRequestResponse, error) {
+		decided = append(decided, r.Request.Host)
+		return &pb.TransformRequestResponse{Action: pb.TransformAction_TRANSFORM_ACTION_CONTINUE}, nil
+	}}
+	g, _ := fixture(t, b, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1); w.WriteHeader(200) }))
+	g.cfg.AllowedHosts = append(g.cfg.AllowedHosts, "host.docker.internal")
 	send := func(method, target string) int {
 		r := httptest.NewRequest(method, target, nil)
 		r.Header.Set("Proxy-Authorization", auth(g, "session-A"))
@@ -633,61 +638,49 @@ func TestPlaintextOriginPinsHostAndPort(t *testing.T) {
 		g.ServeHTTP(w, r)
 		return w.Code
 	}
-	if code := send("GET", "http://host.docker.internal:8000/v1/models"); code != 200 || hits.Load() != 1 {
-		t.Fatalf("pinned origin: status=%d upstream=%d", code, hits.Load())
+	// The port decision is the bridge's: the front forwards any written-out port to it.
+	if code := send("GET", "http://host.docker.internal:11434/v1/models"); code != 200 || hits.Load() != 1 {
+		t.Fatalf("local model: status=%d upstream=%d", code, hits.Load())
 	}
-	for _, target := range []string{"http://host.docker.internal:8001/v1/models", "http://host.docker.internal/v1/models", "http://sub.host.docker.internal:8000/v1/models"} {
+	if len(decided) != 1 || decided[0] != "host.docker.internal:11434" {
+		t.Fatalf("bridge saw %v", decided)
+	}
+	for _, target := range []string{"http://host.docker.internal/v1/models", "http://host.docker.internal:80/v1/models"} {
 		if code := send("GET", target); code != 403 {
 			t.Fatalf("%s: status=%d", target, code)
 		}
 	}
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("CONNECT", "host.docker.internal:8000", nil)
-	r.Host = "host.docker.internal:8000"
+	r := httptest.NewRequest("CONNECT", "host.docker.internal:443", nil)
+	r.Host = "host.docker.internal:443"
 	r.Header.Set("Proxy-Authorization", auth(g, "session-A"))
 	g.ServeHTTP(w, r)
-	if w.Code != 403 || hits.Load() != 1 {
-		t.Fatalf("https to a plaintext origin: status=%d upstream=%d", w.Code, hits.Load())
+	if w.Code != 403 || hits.Load() != 1 || len(decided) != 1 {
+		t.Fatalf("CONNECT despite an allow entry: status=%d upstream=%d decided=%v", w.Code, hits.Load(), decided)
 	}
 }
 
-func TestPlaintextOriginsNeedAnExplicitPort(t *testing.T) {
-	for _, origin := range []string{"host.docker.internal", "Host.Docker.Internal:8000", "host.docker.internal:", "host.docker.internal:8000/v1"} {
-		g, _ := fixture(t, &fixtureBridge{}, http.NotFoundHandler())
-		cfg := g.cfg
-		cfg.PlaintextOrigins = []string{origin}
-		if _, err := newGateway(cfg, &fixtureBridge{}); err == nil {
-			t.Fatalf("accepted %q", origin)
-		}
-	}
-}
-
-func TestPlaintextOriginOverridesAnOlderHostAllowEntry(t *testing.T) {
+func TestLocalModelPortRefusedByTheBridgeNeverReachesUpstream(t *testing.T) {
 	var hits atomic.Int32
-	g, _ := fixture(t, &fixtureBridge{}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1); w.WriteHeader(200) }))
-	g.cfg.AllowedHosts = append(g.cfg.AllowedHosts, "host.docker.internal")
-	g.cfg.PlaintextOrigins = []string{"host.docker.internal:8000"}
+	b := &fixtureBridge{request: func(ctx context.Context, r *pb.TransformRequestRequest) (*pb.TransformRequestResponse, error) {
+		if r.Request.Host != "host.docker.internal:11434" {
+			return &pb.TransformRequestResponse{Action: pb.TransformAction_TRANSFORM_ACTION_REJECT}, nil
+		}
+		return &pb.TransformRequestResponse{Action: pb.TransformAction_TRANSFORM_ACTION_CONTINUE}, nil
+	}}
+	g, _ := fixture(t, b, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1); w.WriteHeader(200) }))
+	r := httptest.NewRequest("GET", "http://host.docker.internal:8001/v1/models", nil)
+	r.Header.Set("Proxy-Authorization", auth(g, "session-A"))
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("CONNECT", "host.docker.internal:8443", nil)
-	r.Host = "host.docker.internal:8443"
-	r.Header.Set("Proxy-Authorization", auth(g, "session-A"))
-	g.ServeHTTP(w, r)
-	if w.Code != 403 {
-		t.Fatalf("CONNECT to another port: status=%d", w.Code)
-	}
-	r = httptest.NewRequest("GET", "http://host.docker.internal:9000/", nil)
-	r.Header.Set("Proxy-Authorization", auth(g, "session-A"))
-	w = httptest.NewRecorder()
 	g.ServeHTTP(w, r)
 	if w.Code != 403 || hits.Load() != 0 {
-		t.Fatalf("http to another port: status=%d upstream=%d", w.Code, hits.Load())
+		t.Fatalf("undeclared port: status=%d upstream=%d", w.Code, hits.Load())
 	}
 }
 
-func TestPlaintextOriginServesOnlyTheOpenAIPaths(t *testing.T) {
+func TestLocalModelServesOnlyTheOpenAIPaths(t *testing.T) {
 	var hits atomic.Int32
 	g, _ := fixture(t, &fixtureBridge{}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1); w.WriteHeader(200) }))
-	g.cfg.PlaintextOrigins = []string{"host.docker.internal:11434"}
 	send := func(method, target string) int {
 		r := httptest.NewRequest(method, target, nil)
 		r.Header.Set("Proxy-Authorization", auth(g, "session-A"))

@@ -1,0 +1,41 @@
+import { readEnvFile } from '../env.js';
+import { listProviderHostContracts, type ProviderHostContract } from '../provider-contracts/index.js';
+
+/** Docker's name for the machine running the containers. */
+export const LOCAL_MODEL_HOST = 'host.docker.internal';
+
+/** Ports on this machine that belong to NanoClaw's gateways; a local model may never be one. */
+export function gatewayPorts(approvalPort: number | undefined, env: NodeJS.ProcessEnv = process.env): number[] {
+  const file = readEnvFile(['NANOCLAW_IRON_CONTROL_PORT', 'ONECLI_URL']);
+  const ports = [Number(env.NANOCLAW_IRON_CONTROL_PORT || file.NANOCLAW_IRON_CONTROL_PORT || 10257), 10254, 10255];
+  if (approvalPort) ports.push(approvalPort);
+  const onecli = env.ONECLI_URL || file.ONECLI_URL;
+  if (onecli) {
+    try {
+      const url = new URL(onecli);
+      ports.push(Number(url.port || (url.protocol === 'https:' ? 443 : 80)));
+    } catch {
+      /* A malformed ONECLI_URL is OneCLI's own setup error. */
+    }
+  }
+  return [...new Set(ports)];
+}
+
+/**
+ * The origins the approval bridge admits over plain HTTP: providers' declared model
+ * authorities on this machine, read when the host starts, so the configured endpoint
+ * is always the pinned one and no pin can outlive it.
+ */
+export function localModelOrigins(
+  approvalPort: number | undefined,
+  contracts: readonly Pick<ProviderHostContract, 'modelAuthorities'>[] = listProviderHostContracts(),
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
+  const refused = new Set(gatewayPorts(approvalPort, env));
+  return [...new Set(contracts.flatMap((contract) => contract.modelAuthorities ?? []))]
+    .filter((authority) => {
+      const [host, port] = authority.split(':');
+      return host === LOCAL_MODEL_HOST && port !== '80' && !refused.has(Number(port));
+    })
+    .sort();
+}

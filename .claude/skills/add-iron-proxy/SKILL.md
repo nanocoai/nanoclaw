@@ -183,20 +183,20 @@ Traffic still goes through Iron, and egress lockdown stays on.
    prompt, and answer that it works without an API key.
 3. Restart the host as the provider skill describes.
 
-Before pinning, setup fetches `GET /v1/models` on that port from a container,
-the way Iron will reach it, and refuses unless it gets an OpenAI-style model
-list. It also refuses the ports of NanoClaw's own gateways (the approval port,
-Iron Control and OneCLI) and port 80.
+Before accepting it, setup refuses port 80 and the ports of NanoClaw's own
+gateways (the approval port, Iron Control and OneCLI), and fetches
+`GET /v1/models` on that port from a container, the way Iron will reach it. It
+needs a direct OpenAI-style model list; a redirect or anything else is refused.
 
-Setup pins exactly that host and port, for the OpenAI inference routes only
+The port is the one the provider declares for its configured endpoint, read when
+the host starts: changing the endpoint and restarting moves it, and there is no
+separate pin to clear. Only that port and the OpenAI inference routes
 (`GET /v1/models[/<id>]`, `POST /v1/chat/completions`, `/v1/completions`,
-`/v1/embeddings`, `/v1/responses`): other ports on this machine, a model server's
-own admin routes (for example `/api/pull` or vLLM's `load_lora_adapter`) and
-HTTPS to the host all stay refused. Only one such endpoint is kept; entering
-another replaces it, moving the provider to an https endpoint clears it, and
-`setup.ts --clear-plaintext-model` removes it. Iron refuses a key for
-`host.docker.internal`, because it injects keys by host whatever the scheme. A
-model that needs a key must use an https endpoint on a public DNS name. Plain
+`/v1/embeddings`, `/v1/responses`) are reachable: other ports on this machine, a
+model server's own admin routes (for example `/api/pull` or vLLM's
+`load_lora_adapter`) and HTTPS to the host all stay refused. Iron refuses a key
+for `host.docker.internal`, because it injects keys by host whatever the scheme.
+A model that needs a key must use an https endpoint on a public DNS name. Plain
 HTTP can be read or changed by anything already on this machine or on the Docker
 bridge; that is the trade for not running TLS locally.
 

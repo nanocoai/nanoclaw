@@ -40,19 +40,17 @@ import (
 )
 
 type config struct {
-	Listen       string   `json:"listen"`
-	Backend      string   `json:"backend"`
-	CACert       string   `json:"ca_cert"`
-	CAKey        string   `json:"ca_key"`
-	IdentityKey  string   `json:"identity_key"`
-	AllowedHosts []string `json:"allowed_hosts"`
-	// Exact host:port pairs reachable over plain HTTP, and only over plain HTTP.
-	PlaintextOrigins []string `json:"plaintext_origins"`
-	ApprovalTarget   string   `json:"approval_target"`
-	ApprovalCert     string   `json:"approval_cert"`
-	ApprovalKey      string   `json:"approval_key"`
-	SummaryCommand   string   `json:"summary_command"`
-	TimeoutMS        int      `json:"timeout_ms"`
+	Listen         string   `json:"listen"`
+	Backend        string   `json:"backend"`
+	CACert         string   `json:"ca_cert"`
+	CAKey          string   `json:"ca_key"`
+	IdentityKey    string   `json:"identity_key"`
+	AllowedHosts   []string `json:"allowed_hosts"`
+	ApprovalTarget string   `json:"approval_target"`
+	ApprovalCert   string   `json:"approval_cert"`
+	ApprovalKey    string   `json:"approval_key"`
+	SummaryCommand string   `json:"summary_command"`
+	TimeoutMS      int      `json:"timeout_ms"`
 }
 
 type gateway struct {
@@ -111,15 +109,6 @@ func newGateway(cfg config, bridge pb.TransformServiceClient) (*gateway, error) 
 	}
 	if cfg.TimeoutMS <= 0 || cfg.TimeoutMS > 300000 {
 		return nil, errors.New("invalid approval timeout")
-	}
-	for _, origin := range cfg.PlaintextOrigins {
-		// An origin without an explicit port would silently mean :80.
-		if _, port, err := net.SplitHostPort(origin); err != nil || port == "" {
-			return nil, errors.New("plaintext origins must be host:port")
-		}
-		if normalized, err := authority(origin, "http"); err != nil || normalized != origin {
-			return nil, errors.New("plaintext origins must be host:port")
-		}
 	}
 	// DisableCompression: the front never negotiates gzip on the client's behalf.
 	// Go's transparent decompression would strip Content-Length, and the tunnel
@@ -188,12 +177,10 @@ func authority(raw, scheme string) (string, error) {
 
 func (g *gateway) allowed(host string) bool {
 	host = strings.ToLower(host)
-	// A plaintext origin's host is reachable on its pinned port only, whatever an
-	// older allow entry says.
-	for _, origin := range g.cfg.PlaintextOrigins {
-		if pinned, _, err := net.SplitHostPort(origin); err == nil && pinned == host {
-			return false
-		}
+	// The local model host is reachable only by the plain-HTTP rule in forward,
+	// whatever an allow entry says, so HTTPS and CONNECT to it stay closed.
+	if host == localModelHost {
+		return false
 	}
 	for _, pattern := range g.cfg.AllowedHosts {
 		pattern = strings.ToLower(pattern)
@@ -227,14 +214,9 @@ func openAIRequest(r *http.Request) bool {
 	return ok && r.Method == method
 }
 
-func (g *gateway) plaintext(target string) bool {
-	for _, origin := range g.cfg.PlaintextOrigins {
-		if origin == target {
-			return true
-		}
-	}
-	return false
-}
+// localModelHost is Docker's name for the machine running the containers. Plain
+// HTTP to it carries no key; the approval bridge decides which port is the model.
+const localModelHost = "host.docker.internal"
 
 func safeRequest(r *http.Request) *pb.HttpRequest {
 	u := *r.URL
@@ -341,15 +323,18 @@ func (g *gateway) forward(r *http.Request, identity, tunnel string) *http.Respon
 	if err != nil || requested != target || (tunnel != "" && (target != tunnel || r.URL.Scheme != "https")) {
 		return deny(r, 403)
 	}
-	// A plaintext origin opens one port over HTTP only; allowed hosts cover every
-	// port, so a local model host must never be added to them.
-	plaintext := r.URL.Scheme == "http" && tunnel == "" && g.plaintext(target)
-	if !plaintext && !g.allowed(r.URL.Hostname()) {
+	// Plain HTTP to the local model host needs a written-out port (port 80 vanishes
+	// from normalized URLs); the bridge then admits only the configured model's port.
+	local := r.URL.Scheme == "http" && tunnel == "" && strings.EqualFold(r.URL.Hostname(), localModelHost)
+	if local && (r.URL.Port() == "" || r.URL.Port() == "80") {
 		return deny(r, 403)
 	}
-	// Approval matches host:port only, so the pinned origin exposes the OpenAI API
+	if !local && !g.allowed(r.URL.Hostname()) {
+		return deny(r, 403)
+	}
+	// Approval matches host:port only, so the local model exposes the OpenAI API
 	// alone; a model server's admin routes (pull, delete, load) would pass unasked.
-	if plaintext && !openAIRequest(r) {
+	if local && !openAIRequest(r) {
 		return deny(r, 403)
 	}
 	if ok, err := g.approve(r.Context(), r, identity); err != nil || !ok {

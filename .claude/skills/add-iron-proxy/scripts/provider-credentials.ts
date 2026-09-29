@@ -7,21 +7,8 @@ import type {
 } from '../../../../setup/gateways/credential-store.js';
 import { getInstallSlug } from '../../../../src/install-slug.js';
 import { controlPaths, controlRequest, grantSecret, IronControlRequestError } from './control.js';
-import { run, statePaths } from './setup.js';
+import { prepareLocalModel, run, statePaths } from './setup.js';
 import { assertCredentialIsolation, ironHeaderName } from './credential-isolation.js';
-
-/**
- * One pinned keyless model on this machine; replaces any earlier one. Setup always
- * reruns, so a failed earlier attempt cannot leave the proxy unconfigured.
- */
-export async function allowPlaintextModel(origin: string, root: string): Promise<void> {
-  await run(['--allow-plaintext-model', origin], root);
-}
-
-function hasPlaintextPin(root: string): boolean {
-  const file = statePaths(root).plaintextModels;
-  return fs.existsSync(file) && (JSON.parse(fs.readFileSync(file, 'utf8')) as unknown[]).length > 0;
-}
 
 export async function allowModelHost(host: string, root: string): Promise<void> {
   const file = statePaths(root).frontConfigFile;
@@ -53,7 +40,7 @@ export function ironModelEndpoint(raw: string, root: string) {
         `A model on this machine must be http://${HOST_MACHINE}:<port>/... with its port written out, the path /v1, and no credentials, query or fragment.`,
       );
     const origin = `${HOST_MACHINE}:${url.port}`;
-    return { configure: () => allowPlaintextModel(origin, root) };
+    return { configure: () => prepareLocalModel(origin, root) };
   }
   if (
     !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/.test(url.hostname) ||
@@ -71,13 +58,7 @@ export function ironModelEndpoint(raw: string, root: string) {
     throw new Error(
       `${url.hostname} is a private name. No public CA issues certificates for it and Iron trusts only public CAs, so every request would fail. The add-iron-proxy skill explains how to serve a local model.`,
     );
-  return {
-    // Moving to an https endpoint must not leave an older plain-HTTP pin open.
-    configure: () =>
-      hasPlaintextPin(root)
-        ? run(['--allow-host', url.hostname, '--clear-plaintext-model'], root)
-        : allowModelHost(url.hostname, root),
-  };
+  return { configure: () => allowModelHost(url.hostname, root) };
 }
 
 /** The header the ChatGPT profile routes on; a property of the profile, not of the caller. */

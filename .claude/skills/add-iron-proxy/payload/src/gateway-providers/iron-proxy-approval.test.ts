@@ -161,19 +161,25 @@ describe('Iron Proxy approval transport', () => {
     expect(await pending.result).toMatchObject({ action: 2 });
   });
 
-  it('accepts plain HTTP only for the exact pinned origin', async () => {
+  it('hands core the exact declared local model authority for its model rule', async () => {
+    // Core auto-approves an exact declared host:port (gateway-approval-coordinator tests).
     const pending = transformCall({
-      request: { method: 'POST', host: 'host.docker.internal:8000', url: 'http://host.docker.internal:8000/v1/chat' },
+      request: {
+        method: 'POST',
+        host: 'host.docker.internal:8000',
+        url: 'http://host.docker.internal:8000/v1/chat/completions',
+      },
     });
     await vi.waitFor(() => expect(held.size).toBe(1));
     const decision = [...held.values()][0];
+    expect(decision.request.trigger).toBe('default');
     expect(decision.request.destination).toEqual({ host: 'host.docker.internal:8000', method: 'POST' });
     decision.resolve('approve');
     expect(await pending.result).toMatchObject({ action: 1 });
   });
 
   it.each([
-    ['host.docker.internal:8001', 'http://host.docker.internal:8001/v1/chat'],
+    ['host.docker.internal:8001', 'http://host.docker.internal:8001/v1/chat/completions'],
     ['api.github.com', 'http://api.github.com/repos'],
     ['host.docker.internal:8000', 'https://host.docker.internal:8000/v1/chat'],
     ['host.docker.internal:8000', 'http://evil.test:8000/v1/chat'],

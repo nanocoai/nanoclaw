@@ -173,4 +173,12 @@ describe('OpenCode model gateway destinations', () => {
     const { openCodeModelAuthorities } = await import('../provider-contracts/opencode.js');
     expect(openCodeModelAuthorities(endpoint)).toEqual(expected);
   });
+  it('reads the saved endpoint each time, so a changed port is what the next host start declares', async () => {
+    const { openCodeModelAuthorities } = await import('../provider-contracts/opencode.js');
+    vi.stubEnv('OPENCODE_BASE_URL', 'http://host.docker.internal:11434/v1');
+    expect(openCodeModelAuthorities()).toEqual(['host.docker.internal:11434']);
+    vi.stubEnv('OPENCODE_BASE_URL', 'http://host.docker.internal:8080/v1');
+    expect(openCodeModelAuthorities()).toEqual(['host.docker.internal:8080']);
+    vi.unstubAllEnvs();
+  });
 });
