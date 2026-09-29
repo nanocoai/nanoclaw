@@ -35,14 +35,103 @@ describe('OpenCode setup payload', () => {
       async () => new Response(JSON.stringify({ data: [{ id: 'qwen-b' }, { id: ' qwen-a ' }, { id: 'qwen-b' }, {}] })),
     );
 
-    await expect(discoverLocalModelIds('http://host.docker.internal:8891/v1/', fetchImpl)).resolves.toEqual([
-      'qwen-a',
-      'qwen-b',
-    ]);
+    await expect(
+      discoverLocalModelIds('http://host.docker.internal:8891/v1/', fetchImpl, undefined, 'darwin'),
+    ).resolves.toEqual(['qwen-a', 'qwen-b']);
     expect(fetchImpl).toHaveBeenCalledWith(
       new URL('http://127.0.0.1:8891/v1/models'),
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
+  });
+
+  it('lists a Linux model from the Docker bridge gateway, where containers reach host.docker.internal', async () => {
+    proc.execFileSync.mockReturnValueOnce('172.18.0.1 \n');
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ data: [{ id: 'qwen' }] })));
+    await expect(
+      discoverLocalModelIds('http://host.docker.internal:8000/v1', fetchImpl, undefined, 'linux'),
+    ).resolves.toEqual(['qwen']);
+    expect(proc.execFileSync).toHaveBeenCalledWith(
+      expect.any(String),
+      ['network', 'inspect', 'bridge', '--format', '{{range .IPAM.Config}}{{.Gateway}} {{end}}'],
+      expect.anything(),
+    );
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).toHaveBeenCalledWith(new URL('http://172.18.0.1:8000/v1/models'), expect.anything());
+  });
+
+  it('falls back to loopback on Linux when the bridge address is unreachable (Docker Desktop, WSL)', async () => {
+    proc.execFileSync.mockReturnValueOnce('172.17.0.1');
+    const fetchImpl = vi
+      .fn()
+      .mockRejectedValueOnce(Object.assign(new TypeError('fetch failed'), { cause: { code: 'EHOSTUNREACH' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: [{ id: 'qwen' }] })));
+    await expect(
+      discoverLocalModelIds('http://host.docker.internal:8000/v1', fetchImpl, undefined, 'linux'),
+    ).resolves.toEqual(['qwen']);
+    expect(fetchImpl.mock.calls.map(([url]) => String(url))).toEqual([
+      'http://172.17.0.1:8000/v1/models',
+      'http://127.0.0.1:8000/v1/models',
+    ]);
+  });
+
+  it('also falls back when the bridge address is silent until the timeout', async () => {
+    proc.execFileSync.mockReturnValueOnce('172.17.0.1');
+    const abort = Object.assign(new Error('This operation was aborted'), { name: 'AbortError' });
+    const fetchImpl = vi
+      .fn()
+      .mockRejectedValueOnce(abort)
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: [{ id: 'qwen' }] })));
+    await expect(
+      discoverLocalModelIds('http://host.docker.internal:8000/v1', fetchImpl, undefined, 'linux'),
+    ).resolves.toEqual(['qwen']);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ['a redirect', Object.assign(new TypeError('fetch failed'), { cause: new Error('unexpected redirect') })],
+    [
+      'a TLS or protocol error',
+      Object.assign(new TypeError('fetch failed'), { cause: { code: 'ERR_TLS_CERT_ALTNAME_INVALID' } }),
+    ],
+  ])('treats %s from the bridge address as its answer', async (_label, failure) => {
+    proc.execFileSync.mockReturnValueOnce('172.17.0.1');
+    const fetchImpl = vi.fn().mockRejectedValueOnce(failure);
+    await expect(
+      discoverLocalModelIds('http://host.docker.internal:8000/v1', fetchImpl, undefined, 'linux'),
+    ).rejects.toThrow('fetch failed');
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not retry after a broken body from a server that answered', async () => {
+    proc.execFileSync.mockReturnValueOnce('172.17.0.1');
+    const broken = new Response(null);
+    vi.spyOn(broken, 'text').mockRejectedValue(new TypeError('terminated'));
+    const fetchImpl = vi.fn().mockResolvedValueOnce(broken);
+    await expect(
+      discoverLocalModelIds('http://host.docker.internal:8000/v1', fetchImpl, undefined, 'linux'),
+    ).rejects.toThrow('terminated');
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not retry another address after the server answered', async () => {
+    proc.execFileSync.mockReturnValueOnce('172.17.0.1');
+    const fetchImpl = vi.fn(async () => new Response('nope', { status: 401 }));
+    await expect(discoverLocalModelIds('http://host.docker.internal:8000/v1', fetchImpl, 'k', 'linux')).rejects.toThrow(
+      'HTTP 401',
+    );
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses loopback alone when Docker has no bridge information, and never asks Docker on macOS', async () => {
+    proc.execFileSync.mockImplementationOnce(() => {
+      throw new Error('docker: not found');
+    });
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ data: [] })));
+    await discoverLocalModelIds('http://host.docker.internal:8000/v1', fetchImpl, undefined, 'linux');
+    expect(fetchImpl).toHaveBeenCalledWith(new URL('http://127.0.0.1:8000/v1/models'), expect.anything());
+    proc.execFileSync.mockClear();
+    await discoverLocalModelIds('http://host.docker.internal:8000/v1', fetchImpl, undefined, 'darwin');
+    expect(proc.execFileSync).not.toHaveBeenCalled();
   });
 
   it('rejects malformed model discovery responses so the wizard can fall back to manual input', async () => {

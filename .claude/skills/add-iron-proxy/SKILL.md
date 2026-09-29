@@ -179,8 +179,8 @@ Traffic still goes through Iron, and egress lockdown stays on.
 1. Start the server on a fixed port. On Docker Desktop (macOS, Windows) it can
    listen on `127.0.0.1`. On Linux, `host.docker.internal` is the Docker bridge
    gateway, so bind the server to that address (often `172.17.0.1`). Avoid
-   `0.0.0.0`: it also exposes a keyless model to your network. The provider's
-   model picker may then find no models from the host; enter the model id.
+   `0.0.0.0`: it also exposes a keyless model to your network. Setup lists the
+   model's ids from that same bridge address.
 2. Enter `http://host.docker.internal:<port>/v1` at the provider's endpoint
    prompt, and answer that it works without an API key.
 3. Restart the host as the provider skill describes.
