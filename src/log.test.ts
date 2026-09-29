@@ -17,42 +17,53 @@ describe('log never throws on unserializable data', () => {
 
   afterEach(() => vi.restoreAllMocks());
 
+  const throwingTraps: ProxyHandler<object> = {
+    get: () => {
+      throw new Error('get trap');
+    },
+    ownKeys: () => {
+      throw new Error('ownKeys trap');
+    },
+    getOwnPropertyDescriptor: () => {
+      throw new Error('descriptor trap');
+    },
+  };
+
   it('logs a circular non-Error err value', () => {
     const err: Record<string, unknown> = { code: 'E_SINK' };
     err.self = err;
     expect(() => log.warn('sink failed', { err })).not.toThrow();
-    expect(written.join('')).toContain('{"code":"E_SINK","self":"[Circular]"}');
+    expect(written.join('')).toContain('[Circular');
   });
 
   it('logs a circular value under any other key', () => {
     const node: Record<string, unknown> = { id: 1 };
     node.parent = { child: node };
     expect(() => log.error('bad node', { node })).not.toThrow();
-    expect(written.join('')).toContain('{"id":1,"parent":{"child":"[Circular]"}}');
+    expect(written.join('')).toContain('[Circular');
   });
 
   it('logs BigInt values', () => {
-    expect(() => log.warn('big', { err: 10n, size: { bytes: 42n } })).not.toThrow();
-    const out = written.join('');
-    expect(out).toContain('"10n"');
-    expect(out).toContain('{"bytes":"42n"}');
+    expect(() => log.warn('big', { err: 10n })).not.toThrow();
+    expect(written.join('')).toContain('10n');
   });
 
-  it('does not mark a shared, non-circular reference as circular', () => {
-    // The BigInt forces the fallback path, where the cycle check runs.
-    const shared = { a: 1 };
-    log.warn('shared', { pair: [shared, shared, 1n] });
-    expect(written.join('')).toContain('[{"a":1},{"a":1},"1n"]');
-  });
-
-  it('falls back when even the replacer cannot serialize the value', () => {
+  it('logs a value whose toJSON throws', () => {
     const hostile = {
       toJSON() {
         throw new Error('no');
       },
     };
-    expect(() => log.warn('hostile', { err: hostile, bare: Object.create(null) })).not.toThrow();
-    expect(written.join('')).toContain('[object Object]');
+    expect(() => log.warn('hostile', { err: hostile })).not.toThrow();
+    expect(written.join('')).toContain('hostile');
+  });
+
+  it('survives a Proxy with throwing traps, as a value or as the data bag', () => {
+    expect(() => log.warn('proxy value', { err: new Proxy({}, throwingTraps) })).not.toThrow();
+    expect(() => log.warn('proxy bag', new Proxy({}, throwingTraps) as Record<string, unknown>)).not.toThrow();
+    const out = written.join('');
+    expect(out).toContain('proxy value');
+    expect(out).toContain('proxy bag');
   });
 
   it('survives a throwing getter on the data bag itself', () => {

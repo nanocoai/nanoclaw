@@ -1,3 +1,5 @@
+import { inspect } from 'node:util';
+
 const LEVELS = { debug: 20, info: 30, warn: 40, error: 50, fatal: 60 } as const;
 type Level = keyof typeof LEVELS;
 
@@ -16,28 +18,13 @@ const FULL_RESET = '\x1b[0m';
 const threshold = LEVELS[(process.env.LOG_LEVEL as Level) || 'info'] ?? LEVELS.info;
 
 function safeStringify(v: unknown): string {
-  /* eslint-disable no-catch-all/no-catch-all -- logging must never throw: a throw here reaches uncaughtException, which exits the host */
+  // JSON.stringify throws on cycles and BigInt; inspect handles both. Anything
+  // inspect cannot handle falls through to the catch in emit.
+  /* eslint-disable no-catch-all/no-catch-all -- logging must never throw */
   try {
     return JSON.stringify(v);
   } catch {
-    // Circular refs and BigInt are the common throws; mark them instead.
-    const ancestors: object[] = [];
-    try {
-      return JSON.stringify(v, function (this: unknown, _key, value: unknown) {
-        if (typeof value === 'bigint') return `${value}n`;
-        if (typeof value !== 'object' || value === null) return value;
-        while (ancestors.length && ancestors[ancestors.length - 1] !== this) ancestors.pop();
-        if (ancestors.includes(value)) return '[Circular]';
-        ancestors.push(value);
-        return value;
-      });
-    } catch {
-      try {
-        return String(v);
-      } catch {
-        return '[Unserializable]';
-      }
-    }
+    return inspect(v, { breakLength: Infinity });
   }
   /* eslint-enable no-catch-all/no-catch-all */
 }
@@ -70,7 +57,7 @@ function emit(level: Level, msg: string, data?: Record<string, unknown>): void {
   if (LEVELS[level] < threshold) return;
   const tag = `${COLORS[level]}${level.toUpperCase()}${level === 'fatal' ? FULL_RESET : RESET}`;
   const stream = LEVELS[level] >= LEVELS.warn ? process.stderr : process.stdout;
-  /* eslint-disable no-catch-all/no-catch-all -- same reason as safeStringify: logging must never throw */
+  /* eslint-disable no-catch-all/no-catch-all -- logging must never throw: a throw here reaches uncaughtException, which exits the host */
   try {
     stream.write(`[${ts()}] ${tag} ${MSG_COLOR}${msg}${RESET}${data ? formatData(data) : ''}\n`);
   } catch {
