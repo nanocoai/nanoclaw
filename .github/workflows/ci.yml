@@ -15,13 +15,13 @@ jobs:
       matrix:
         node-version: [22, 24]
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ matrix.node-version }}
           cache: pnpm
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.4.0
       - run: pnpm install --frozen-lockfile
@@ -50,8 +50,8 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: '1.26.1'
           cache-dependency-path: .claude/skills/add-iron-proxy/front-proxy/go.sum
