@@ -13,6 +13,8 @@ export function gatewayPorts(approvalPort: number | undefined, env: NodeJS.Proce
   if (onecli) {
     try {
       const url = new URL(onecli);
+      // Reserved whatever the host: a local OneCLI may be addressed by a LAN IP or alias,
+      // and over-reserving only blocks a model that shares a remote OneCLI's port.
       ports.push(Number(url.port || (url.protocol === 'https:' ? 443 : 80)));
     } catch {
       /* A malformed ONECLI_URL is OneCLI's own setup error. */

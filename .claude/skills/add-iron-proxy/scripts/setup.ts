@@ -105,7 +105,9 @@ export async function prepareLocalModel(origin: string, projectRoot: string): Pr
         'sh',
         image,
         '-c',
-        'printf "GET /v1/models HTTP/1.0\\r\\nHost: %s\\r\\nAccept: application/json\\r\\n\\r\\n" "$1" | nc -w 5 "$2" "$3"',
+        // Hold the request side open: BusyBox nc half-closes when stdin ends, and async
+        // servers (Uvicorn) then drop the reply. nc exits when the hold ends.
+        '{ printf "GET /v1/models HTTP/1.0\\r\\nHost: %s\\r\\nAccept: application/json\\r\\n\\r\\n" "$1"; sleep 5; } | nc -w 5 "$2" "$3"',
         'probe',
         origin,
         local.LOCAL_MODEL_HOST,

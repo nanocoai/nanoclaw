@@ -37,6 +37,10 @@ it('never admits port 80 or a gateway port, whatever a provider declares', () =>
     'host.docker.internal:20001',
   ]);
 });
+it('reserves the OneCLI port whatever host its URL names', () => {
+  expect(gatewayPorts(undefined, env({ ONECLI_URL: 'http://192.168.1.10:10999' }))).toContain(10999);
+  expect(gatewayPorts(undefined, env({ ONECLI_URL: 'https://remote-gateway.example:11434' }))).toContain(11434);
+});
 it('uses the running gateway approval port and a process-env Iron Control port', () => {
   expect(gatewayPorts(19123, env({ NANOCLAW_IRON_CONTROL_PORT: '20001' })).sort()).toEqual([
     10254, 10255, 19123, 20001,
