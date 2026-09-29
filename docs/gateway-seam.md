@@ -407,7 +407,9 @@ responses, timeouts and session revocation fail closed. Iron listens only on
 loopback in the same container, with dial-time loopback restrictions preventing
 backend access through DNS aliases. Control-plane sync cannot replace the front.
 Credentialed application traffic uses HTTPS; the Iron adapter preserves the
-request scheme and rejects plaintext HTTP rather than treating it as HTTPS. Its helper receives a 16 KiB body prefix and no authorization headers;
+request scheme and rejects plaintext HTTP rather than treating it as HTTPS. The
+one exception is a keyless model endpoint on the host, pinned by host and port
+and refused any credential. Its helper receives a 16 KiB body prefix and no authorization headers;
 only the resulting summary crosses the approval channel. The original request
 stream is preserved. The source is checksum-verified, its upstream tests run in
 the image build, and a version mismatch against OneCLI's gateway pin fails the

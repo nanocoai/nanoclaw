@@ -542,17 +542,18 @@ describe('OpenCode setup with Iron selected', () => {
   it('rejects a plaintext local endpoint at the prompt and asks again', async () => {
     fixture.backend = 'local';
     fixture.keyless = true;
-    fixture.baseUrlAnswers = ['http://host.docker.internal:8000/v1', 'https://models.example/v1'];
+    fixture.baseUrlAnswers = ['http://models.example:8000/v1', 'https://models.example/v1'];
     await runOpenCodeSetupAuth();
     expect(fixture.validationErrors).toHaveLength(1);
     expect(fixture.validationErrors[0]).toMatch(/https:\/\/<dns-name> on port 443/);
     expect(fixture.validationErrors[0]).toMatch(/certificate Iron trusts/);
-    expect(fixture.validationErrors[0]).toMatch(/add-iron-proxy skill describes which model endpoints Iron can serve/);
+    expect(fixture.validationErrors[0]).toMatch(/add-iron-proxy skill explains how to serve a local model/);
     expect(fixture.gatewayEndpoints).toEqual(['https://models.example/v1']);
     expect(fixture.writes).toContainEqual(['OPENCODE_BASE_URL', 'https://models.example/v1']);
   });
   it.each([
-    ['plain HTTP', 'http://host.docker.internal:8000/v1'],
+    ['plain HTTP', 'http://models.example:8000/v1'],
+    ['plain HTTP to the host without a port', 'http://host.docker.internal/v1'],
     ['HTTPS on another port', 'https://models.example:8443/v1'],
     ['an IP address', 'https://192.168.1.20/v1'],
     ['a private name', 'https://models.home.arpa/v1'],
@@ -575,15 +576,34 @@ describe('OpenCode setup with Iron selected', () => {
     expect(fixture.validationErrors).toEqual([]);
     expect(fixture.gatewayEndpoints).toEqual(['https://models.example:443/v1']);
   });
-  it('suggests an HTTPS URL in the local endpoint prompt', async () => {
+  it('suggests the keyless model on this machine, which Iron accepts over plain HTTP', async () => {
     fixture.backend = 'local';
     fixture.keyless = true;
     await runOpenCodeSetupAuth();
-    expect(fixture.placeholders).toEqual(['https://models.example.com/v1']);
+    expect(fixture.placeholders).toEqual(['http://host.docker.internal:8000/v1']);
+  });
+  it('saves a keyless model on this machine over plain HTTP', async () => {
+    fixture.backend = 'local';
+    fixture.keyless = true;
+    fixture.baseUrl = 'http://host.docker.internal:11434/v1';
+    await runOpenCodeSetupAuth();
+    expect(fixture.validationErrors).toEqual([]);
+    expect(fixture.passwords).toBe(0);
+    expect(fixture.gatewayEndpoints).toEqual(['http://host.docker.internal:11434/v1']);
+    expect(fixture.writes).toContainEqual(['OPENCODE_BASE_URL', 'http://host.docker.internal:11434/v1']);
+  });
+  it('refuses a key for a model on this machine before asking for it', async () => {
+    fixture.backend = 'local';
+    fixture.keyless = false;
+    fixture.baseUrl = 'http://host.docker.internal:11434/v1';
+    await expect(runOpenCodeSetupAuth()).rejects.toThrow('Iron sends keys only over HTTPS');
+    expect(fixture.passwords).toBe(0);
+    expect(fixture.writes).toEqual([]);
+    expect(fixture.gatewayEndpoints).toEqual([]);
   });
   it('refuses an exported base URL Iron cannot use before asking for one', async () => {
     fixture.backend = 'local';
-    vi.stubEnv('OPENCODE_BASE_URL', 'http://host.docker.internal:8000/v1');
+    vi.stubEnv('OPENCODE_BASE_URL', 'http://models.example:8000/v1');
     await expect(runOpenCodeSetupAuth()).rejects.toThrow(
       /exported OPENCODE_BASE_URL.*https:\/\/<dns-name> on port 443/s,
     );

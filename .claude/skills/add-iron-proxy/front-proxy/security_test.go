@@ -622,3 +622,106 @@ func mustURL(raw string) *url.URL {
 	}
 	return u
 }
+func TestPlaintextOriginPinsHostAndPort(t *testing.T) {
+	var hits atomic.Int32
+	g, _ := fixture(t, &fixtureBridge{}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1); w.WriteHeader(200) }))
+	g.cfg.PlaintextOrigins = []string{"host.docker.internal:8000"}
+	send := func(method, target string) int {
+		r := httptest.NewRequest(method, target, nil)
+		r.Header.Set("Proxy-Authorization", auth(g, "session-A"))
+		w := httptest.NewRecorder()
+		g.ServeHTTP(w, r)
+		return w.Code
+	}
+	if code := send("GET", "http://host.docker.internal:8000/v1/models"); code != 200 || hits.Load() != 1 {
+		t.Fatalf("pinned origin: status=%d upstream=%d", code, hits.Load())
+	}
+	for _, target := range []string{"http://host.docker.internal:8001/v1/models", "http://host.docker.internal/v1/models", "http://sub.host.docker.internal:8000/v1/models"} {
+		if code := send("GET", target); code != 403 {
+			t.Fatalf("%s: status=%d", target, code)
+		}
+	}
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("CONNECT", "host.docker.internal:8000", nil)
+	r.Host = "host.docker.internal:8000"
+	r.Header.Set("Proxy-Authorization", auth(g, "session-A"))
+	g.ServeHTTP(w, r)
+	if w.Code != 403 || hits.Load() != 1 {
+		t.Fatalf("https to a plaintext origin: status=%d upstream=%d", w.Code, hits.Load())
+	}
+}
+
+func TestPlaintextOriginsNeedAnExplicitPort(t *testing.T) {
+	for _, origin := range []string{"host.docker.internal", "Host.Docker.Internal:8000", "host.docker.internal:", "host.docker.internal:8000/v1"} {
+		g, _ := fixture(t, &fixtureBridge{}, http.NotFoundHandler())
+		cfg := g.cfg
+		cfg.PlaintextOrigins = []string{origin}
+		if _, err := newGateway(cfg, &fixtureBridge{}); err == nil {
+			t.Fatalf("accepted %q", origin)
+		}
+	}
+}
+
+func TestPlaintextOriginOverridesAnOlderHostAllowEntry(t *testing.T) {
+	var hits atomic.Int32
+	g, _ := fixture(t, &fixtureBridge{}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1); w.WriteHeader(200) }))
+	g.cfg.AllowedHosts = append(g.cfg.AllowedHosts, "host.docker.internal")
+	g.cfg.PlaintextOrigins = []string{"host.docker.internal:8000"}
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("CONNECT", "host.docker.internal:8443", nil)
+	r.Host = "host.docker.internal:8443"
+	r.Header.Set("Proxy-Authorization", auth(g, "session-A"))
+	g.ServeHTTP(w, r)
+	if w.Code != 403 {
+		t.Fatalf("CONNECT to another port: status=%d", w.Code)
+	}
+	r = httptest.NewRequest("GET", "http://host.docker.internal:9000/", nil)
+	r.Header.Set("Proxy-Authorization", auth(g, "session-A"))
+	w = httptest.NewRecorder()
+	g.ServeHTTP(w, r)
+	if w.Code != 403 || hits.Load() != 0 {
+		t.Fatalf("http to another port: status=%d upstream=%d", w.Code, hits.Load())
+	}
+}
+
+func TestPlaintextOriginServesOnlyTheOpenAIPaths(t *testing.T) {
+	var hits atomic.Int32
+	g, _ := fixture(t, &fixtureBridge{}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1); w.WriteHeader(200) }))
+	g.cfg.PlaintextOrigins = []string{"host.docker.internal:11434"}
+	send := func(method, target string) int {
+		r := httptest.NewRequest(method, target, nil)
+		r.Header.Set("Proxy-Authorization", auth(g, "session-A"))
+		w := httptest.NewRecorder()
+		g.ServeHTTP(w, r)
+		return w.Code
+	}
+	const base = "http://host.docker.internal:11434"
+	allowed := [][2]string{{"POST", "/v1/chat/completions"}, {"GET", "/v1/models"}, {"GET", "/v1/models/"}, {"GET", "/v1/models/llama3"}, {"POST", "/v1/embeddings"}}
+	for _, c := range allowed {
+		if code := send(c[0], base+c[1]); code != 200 {
+			t.Fatalf("%s %s: status=%d", c[0], c[1], code)
+		}
+	}
+	refused := [][2]string{
+		{"POST", "/api/pull"},
+		{"DELETE", "/api/delete"},
+		{"POST", "/v1"},
+		{"POST", "/v1/../api/pull"},
+		{"POST", "/v1/%2e%2e/api/pull"},
+		{"POST", "/v1%2F..%2Fapi/pull"},
+		{"GET", "/v1//models"},
+		{"POST", "/v1/load_lora_adapter"},
+		{"GET", "/v1/models/a/b"},
+		{"DELETE", "/v1/models/qwen"},
+		{"POST", "/v1/models"},
+		{"GET", "/v1/chat/completions"},
+	}
+	for _, c := range refused {
+		if code := send(c[0], base+c[1]); code != 403 {
+			t.Fatalf("%s %s: status=%d", c[0], c[1], code)
+		}
+	}
+	if int(hits.Load()) != len(allowed) {
+		t.Fatalf("upstream hits=%d", hits.Load())
+	}
+}

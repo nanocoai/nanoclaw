@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path"
 	"strings"
 	"syscall"
 	"time"
@@ -39,17 +40,19 @@ import (
 )
 
 type config struct {
-	Listen         string   `json:"listen"`
-	Backend        string   `json:"backend"`
-	CACert         string   `json:"ca_cert"`
-	CAKey          string   `json:"ca_key"`
-	IdentityKey    string   `json:"identity_key"`
-	AllowedHosts   []string `json:"allowed_hosts"`
-	ApprovalTarget string   `json:"approval_target"`
-	ApprovalCert   string   `json:"approval_cert"`
-	ApprovalKey    string   `json:"approval_key"`
-	SummaryCommand string   `json:"summary_command"`
-	TimeoutMS      int      `json:"timeout_ms"`
+	Listen       string   `json:"listen"`
+	Backend      string   `json:"backend"`
+	CACert       string   `json:"ca_cert"`
+	CAKey        string   `json:"ca_key"`
+	IdentityKey  string   `json:"identity_key"`
+	AllowedHosts []string `json:"allowed_hosts"`
+	// Exact host:port pairs reachable over plain HTTP, and only over plain HTTP.
+	PlaintextOrigins []string `json:"plaintext_origins"`
+	ApprovalTarget   string   `json:"approval_target"`
+	ApprovalCert     string   `json:"approval_cert"`
+	ApprovalKey      string   `json:"approval_key"`
+	SummaryCommand   string   `json:"summary_command"`
+	TimeoutMS        int      `json:"timeout_ms"`
 }
 
 type gateway struct {
@@ -108,6 +111,15 @@ func newGateway(cfg config, bridge pb.TransformServiceClient) (*gateway, error) 
 	}
 	if cfg.TimeoutMS <= 0 || cfg.TimeoutMS > 300000 {
 		return nil, errors.New("invalid approval timeout")
+	}
+	for _, origin := range cfg.PlaintextOrigins {
+		// An origin without an explicit port would silently mean :80.
+		if _, port, err := net.SplitHostPort(origin); err != nil || port == "" {
+			return nil, errors.New("plaintext origins must be host:port")
+		}
+		if normalized, err := authority(origin, "http"); err != nil || normalized != origin {
+			return nil, errors.New("plaintext origins must be host:port")
+		}
 	}
 	// DisableCompression: the front never negotiates gzip on the client's behalf.
 	// Go's transparent decompression would strip Content-Length, and the tunnel
@@ -176,12 +188,48 @@ func authority(raw, scheme string) (string, error) {
 
 func (g *gateway) allowed(host string) bool {
 	host = strings.ToLower(host)
+	// A plaintext origin's host is reachable on its pinned port only, whatever an
+	// older allow entry says.
+	for _, origin := range g.cfg.PlaintextOrigins {
+		if pinned, _, err := net.SplitHostPort(origin); err == nil && pinned == host {
+			return false
+		}
+	}
 	for _, pattern := range g.cfg.AllowedHosts {
 		pattern = strings.ToLower(pattern)
 		if host == pattern {
 			return true
 		}
 		if strings.HasPrefix(pattern, "*.") && strings.HasSuffix(host, pattern[1:]) && host != pattern[2:] {
+			return true
+		}
+	}
+	return false
+}
+
+// OpenAI inference routes and their methods only: servers also put admin routes
+// under /v1 (vLLM's load_lora_adapter, Xinference's DELETE /v1/models/<id>), and
+// approval cannot tell them apart.
+var openAIRoutes = map[string]string{"/v1/models": "GET", "/v1/chat/completions": "POST", "/v1/completions": "POST", "/v1/embeddings": "POST", "/v1/responses": "POST"}
+
+// openAIRequest accepts a clean path with no encoded separators, so no dot-segment
+// or %2F form can reach another route after the server normalizes it.
+func openAIRequest(r *http.Request) bool {
+	p := r.URL.Path
+	clean := path.Clean(p)
+	if r.URL.RawPath != "" || strings.ContainsAny(p, "\\%") || (clean != p && clean+"/" != p) {
+		return false
+	}
+	if strings.HasPrefix(clean, "/v1/models/") && !strings.Contains(clean[len("/v1/models/"):], "/") {
+		return r.Method == "GET"
+	}
+	method, ok := openAIRoutes[clean]
+	return ok && r.Method == method
+}
+
+func (g *gateway) plaintext(target string) bool {
+	for _, origin := range g.cfg.PlaintextOrigins {
+		if origin == target {
 			return true
 		}
 	}
@@ -293,7 +341,15 @@ func (g *gateway) forward(r *http.Request, identity, tunnel string) *http.Respon
 	if err != nil || requested != target || (tunnel != "" && (target != tunnel || r.URL.Scheme != "https")) {
 		return deny(r, 403)
 	}
-	if !g.allowed(r.URL.Hostname()) {
+	// A plaintext origin opens one port over HTTP only; allowed hosts cover every
+	// port, so a local model host must never be added to them.
+	plaintext := r.URL.Scheme == "http" && tunnel == "" && g.plaintext(target)
+	if !plaintext && !g.allowed(r.URL.Hostname()) {
+		return deny(r, 403)
+	}
+	// Approval matches host:port only, so the pinned origin exposes the OpenAI API
+	// alone; a model server's admin routes (pull, delete, load) would pass unasked.
+	if plaintext && !openAIRequest(r) {
 		return deny(r, 403)
 	}
 	if ok, err := g.approve(r.Context(), r, identity); err != nil || !ok {

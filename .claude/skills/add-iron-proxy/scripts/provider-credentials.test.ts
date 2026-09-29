@@ -269,9 +269,30 @@ it.each([
 });
 it("says the endpoint rule is NanoClaw's and why plain HTTP is refused", () => {
   const f = fixture();
-  expect(() => ironModelEndpoint('http://host.docker.internal:8000/v1', f.root)).toThrow(
-    /^NanoClaw's Iron gateway .*certificate Iron trusts.*never cross the network unencrypted/,
+  expect(() => ironModelEndpoint('http://models.example.test:8000/v1', f.root)).toThrow(
+    /^NanoClaw's Iron gateway .*certificate Iron trusts.*never cross the network unencrypted.*http:\/\/host\.docker\.internal:<port>/,
   );
+});
+it('accepts plain HTTP to a model on this machine, pinned to its port', () => {
+  const f = fixture();
+  expect(() => ironModelEndpoint('http://host.docker.internal:8000/v1', f.root)).not.toThrow();
+  expect(() => ironModelEndpoint('http://HOST.DOCKER.INTERNAL:11434/v1', f.root)).not.toThrow();
+});
+it.each([
+  'http://host.docker.internal/v1',
+  'http://host.docker.internal:80/v1',
+  'http://user:pw@host.docker.internal:8000/v1',
+  'http://host.docker.internal:8000/v1?x=1',
+  'http://sub.host.docker.internal:8000/v1',
+  'http://localhost:8000/v1',
+  'http://192.168.1.20:8000/v1',
+])('refuses plain HTTP that is not a pinned model on this machine: %s', (url) => {
+  const f = fixture();
+  expect(() => ironModelEndpoint(url, f.root)).toThrow();
+});
+it('refuses a keyed credential for the host machine, which is reachable over plain HTTP', () => {
+  const f = fixture();
+  expect(() => f.connect(api('host.docker.internal'))).toThrow('Iron sends keys only over HTTPS');
 });
 it.each(['https://models.example.test/v1', 'https://models.example.test:443/v1'])(
   'accepts the HTTPS endpoint %s',

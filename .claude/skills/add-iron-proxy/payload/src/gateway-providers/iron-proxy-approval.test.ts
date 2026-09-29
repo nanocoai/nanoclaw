@@ -99,7 +99,13 @@ beforeEach(async () => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'iron-approval-'));
   const protoPath = path.join(process.cwd(), 'src', 'gateway-providers', 'iron-proxy-transform.proto');
   bridge = new IronProxyApprovalBridge(
-    { socketPath: path.join(root, 'approval.sock'), timeoutMs: 100, maxPending: 1, protoPath },
+    {
+      socketPath: path.join(root, 'approval.sock'),
+      plaintextOrigins: ['host.docker.internal:8000'],
+      timeoutMs: 100,
+      maxPending: 1,
+      protoPath,
+    },
     (runtimeIdentity) => (identityActive && runtimeIdentity === identity.runtimeIdentity ? identity : undefined),
   );
   controller = new AbortController();
@@ -153,6 +159,27 @@ describe('Iron Proxy approval transport', () => {
     const decision = [...held.values()][0];
     decision.resolve('deny');
     expect(await pending.result).toMatchObject({ action: 2 });
+  });
+
+  it('accepts plain HTTP only for the exact pinned origin', async () => {
+    const pending = transformCall({
+      request: { method: 'POST', host: 'host.docker.internal:8000', url: 'http://host.docker.internal:8000/v1/chat' },
+    });
+    await vi.waitFor(() => expect(held.size).toBe(1));
+    const decision = [...held.values()][0];
+    expect(decision.request.destination).toEqual({ host: 'host.docker.internal:8000', method: 'POST' });
+    decision.resolve('approve');
+    expect(await pending.result).toMatchObject({ action: 1 });
+  });
+
+  it.each([
+    ['host.docker.internal:8001', 'http://host.docker.internal:8001/v1/chat'],
+    ['api.github.com', 'http://api.github.com/repos'],
+    ['host.docker.internal:8000', 'https://host.docker.internal:8000/v1/chat'],
+    ['host.docker.internal:8000', 'http://evil.test:8000/v1/chat'],
+  ])('rejects plain HTTP or a mismatched scheme outside the pinned origin: %s %s', async (host, url) => {
+    expect(await transform({ request: { method: 'POST', host, url } })).toMatchObject({ action: 2 });
+    expect(held.size).toBe(0);
   });
 
   it('rejects inconsistent URL authority instead of applying the model exemption', async () => {
@@ -283,7 +310,8 @@ it('rejects malformed proxy summary metadata', async () => {
 });
 
 const compatibilityFixtures = JSON.parse(fs.readFileSync('gateway-compat/onecli-summary/fixtures.json', 'utf8')) as {
-  name: string; request: { host: string; method: string; path: string };
+  name: string;
+  request: { host: string; method: string; path: string };
   summary: { action: string; details: { label: string; value: string }[] };
 }[];
 
@@ -294,7 +322,9 @@ it.each(compatibilityFixtures)('preserves OneCLI approval content: $name', async
   await vi.waitFor(() => expect(held.size).toBe(1));
   const decision = [...held.values()][0];
   expect(decision.request.summary).toEqual({
-    agent: identity.groupName, action: fixture.summary.action, details: fixture.summary.details,
+    agent: identity.groupName,
+    action: fixture.summary.action,
+    details: fixture.summary.details,
     resource: `${fixture.request.method} ${fixture.request.host}${fixture.request.path}`,
     reason: 'The gateway policy requires human approval for this request.',
   });

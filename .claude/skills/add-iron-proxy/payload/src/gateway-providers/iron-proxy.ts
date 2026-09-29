@@ -158,6 +158,25 @@ function ensureApprovalSocketAlias(settings: IronProxySettings): void {
   }
 }
 
+/** Setup writes at most one `host.docker.internal:<port>`; anything else fails closed. */
+export function readPlaintextModels(settings: IronProxySettings): string[] {
+  const file = path.join(path.dirname(settings.allowedHostsFile), 'plaintext-models.json');
+  if (!fs.existsSync(file)) return [];
+  const origins = JSON.parse(fs.readFileSync(file, 'utf8')) as unknown;
+  if (
+    !Array.isArray(origins) ||
+    origins.length > 1 ||
+    origins.some((origin) => typeof origin !== 'string' || !isPlaintextModel(origin))
+  )
+    throw new Error(`Invalid Iron Proxy plaintext model file: ${file}`);
+  return origins as string[];
+}
+
+export function isPlaintextModel(origin: string): boolean {
+  const match = /^host\.docker\.internal:([1-9][0-9]{0,4})$/.exec(origin);
+  return !!match && Number(match[1]) <= 65535;
+}
+
 function readAllowedHosts(settings: IronProxySettings): string[] {
   return readAllowedHostsFile(settings.allowedHostsFile, (message) => log.warn(message));
 }
@@ -214,6 +233,7 @@ export function ironFrontConfig(settings: IronProxySettings): string {
         allowed_hosts: [
           ...new Set([settings.modelHost, ...providerModelAllowedHosts(), ...readAllowedHosts(settings)]),
         ].sort(),
+        plaintext_origins: readPlaintextModels(settings),
         approval_target: settings.approvalPort
           ? `host.docker.internal:${settings.approvalPort}`
           : `unix://${APPROVAL_SOCKET}`,
@@ -369,6 +389,7 @@ export function defineIronProxyProvider(initialSettings?: IronProxySettings): Ga
     bridge = new IronProxyApprovalBridge(
       {
         socketPath: configured.approvalSocket,
+        plaintextOrigins: readPlaintextModels(configured),
         timeoutMs: configured.approvalTimeoutMs,
         maxPending: configured.maxPending,
         ...(configured.approvalPort

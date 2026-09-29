@@ -10,6 +10,19 @@ import { controlPaths, controlRequest, grantSecret, IronControlRequestError } fr
 import { run, statePaths } from './setup.js';
 import { assertCredentialIsolation, ironHeaderName } from './credential-isolation.js';
 
+/**
+ * One pinned keyless model on this machine; replaces any earlier one. Setup always
+ * reruns, so a failed earlier attempt cannot leave the proxy unconfigured.
+ */
+export async function allowPlaintextModel(origin: string, root: string): Promise<void> {
+  await run(['--allow-plaintext-model', origin], root);
+}
+
+function hasPlaintextPin(root: string): boolean {
+  const file = statePaths(root).plaintextModels;
+  return fs.existsSync(file) && (JSON.parse(fs.readFileSync(file, 'utf8')) as unknown[]).length > 0;
+}
+
 export async function allowModelHost(host: string, root: string): Promise<void> {
   const file = statePaths(root).frontConfigFile;
   if (fs.existsSync(file) && JSON.parse(fs.readFileSync(file, 'utf8')).allowed_hosts?.includes(host)) return;
@@ -23,8 +36,25 @@ export async function allowModelHost(host: string, root: string): Promise<void> 
  */
 const PRIVATE_NAME = /(?:^|\.)(?:internal|local|localhost|home\.arpa|home|corp|mail)$/;
 
+/** Docker's name for the machine running the containers. */
+const HOST_MACHINE = 'host.docker.internal';
+
 export function ironModelEndpoint(raw: string, root: string) {
+  if (/^http:\/\/host\.docker\.internal:80(?:[/?#]|$)/i.test(raw.trim()))
+    throw new Error(
+      `Port 80 is not supported for a model on this machine; use the model server's own port, for example http://${HOST_MACHINE}:11434/v1.`,
+    );
   const url = new URL(raw);
+  // Keys and replies of a keyless model on this machine never cross the network,
+  // so plain HTTP is allowed there, pinned to its port.
+  if (url.protocol === 'http:' && url.hostname === HOST_MACHINE) {
+    if (!url.port || url.username || url.password || url.search || url.hash || !/^\/v1\/?$/.test(url.pathname))
+      throw new Error(
+        `A model on this machine must be http://${HOST_MACHINE}:<port>/... with its port written out, the path /v1, and no credentials, query or fragment.`,
+      );
+    const origin = `${HOST_MACHINE}:${url.port}`;
+    return { configure: () => allowPlaintextModel(origin, root) };
+  }
   if (
     !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/.test(url.hostname) ||
     url.protocol !== 'https:' ||
@@ -35,13 +65,19 @@ export function ironModelEndpoint(raw: string, root: string) {
     url.hash
   )
     throw new Error(
-      "NanoClaw's Iron gateway needs the model endpoint as https://<dns-name> on port 443, with a certificate Iron trusts (public CAs by default). Plain HTTP is refused so keys and model replies never cross the network unencrypted. IP addresses are not supported. The add-iron-proxy skill describes which model endpoints Iron can serve.",
+      "NanoClaw's Iron gateway needs the model endpoint as https://<dns-name> on port 443, with a certificate Iron trusts (public CAs by default). Plain HTTP is refused so keys and model replies never cross the network unencrypted; the one exception is a keyless model on this machine at http://host.docker.internal:<port>. IP addresses are not supported. The add-iron-proxy skill explains how to serve a local model.",
     );
   if (PRIVATE_NAME.test(url.hostname))
     throw new Error(
-      `${url.hostname} is a private name. No public CA issues certificates for it and Iron trusts only public CAs, so every request would fail. The add-iron-proxy skill describes which model endpoints Iron can serve.`,
+      `${url.hostname} is a private name. No public CA issues certificates for it and Iron trusts only public CAs, so every request would fail. The add-iron-proxy skill explains how to serve a local model.`,
     );
-  return { configure: () => allowModelHost(url.hostname, root) };
+  return {
+    // Moving to an https endpoint must not leave an older plain-HTTP pin open.
+    configure: () =>
+      hasPlaintextPin(root)
+        ? run(['--allow-host', url.hostname, '--clear-plaintext-model'], root)
+        : allowModelHost(url.hostname, root),
+  };
 }
 
 /** The header the ChatGPT profile routes on; a property of the profile, not of the caller. */
@@ -77,6 +113,11 @@ export function createIronCredentialConnection(
     !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/.test(target.host)
   )
     throw new Error('Iron credentials require a name, a runtime placeholder, and an exact DNS hostname');
+  // Iron injects by host whatever the scheme, and this host is reachable over plain HTTP.
+  if (target.host.toLowerCase() === HOST_MACHINE)
+    throw new Error(
+      `Iron sends keys only over HTTPS. A model at http://${HOST_MACHINE} must be keyless; use an https endpoint for a model that needs a key.`,
+    );
   const injection = target.kind === 'oauth' ? BEARER : target.injection;
   if (!/^[a-zA-Z0-9-]+$/.test(injection.headerName) || !['{value}', 'Bearer {value}'].includes(injection.valueFormat))
     throw new Error('Unsupported Iron credential injection scheme');

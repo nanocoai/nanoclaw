@@ -11,7 +11,7 @@ import { GATEWAY_ROLE, LABELS } from '../../../../src/drivers/types.js';
 import { upsertEnvVar } from '../../../../setup/set-env.js';
 import { installStep, installCommand, InstallCommandFailure } from './install-command.js';
 import { buildManagedProxy, hasFrontProxy } from './build-managed-proxy.js';
-import { controlPaths, installControl, removeControl, storeModelCredential } from './control.js';
+import { controlPaths, controlPort, installControl, removeControl, storeModelCredential } from './control.js';
 import { checkControlEngine } from './control-preflight.js';
 import { readAllowedHostsFile, validateAllowedHost } from '../payload/src/gateway-providers/iron-proxy-allowlist.js';
 
@@ -55,9 +55,85 @@ export function statePaths(projectRoot = process.cwd()) {
     frontConfigFile: path.join(shared, 'front.json'),
     identityKey: path.join(shared, 'workload-identity.key'),
     allowedHosts: path.join(shared, 'allowed-hosts.json'),
+    plaintextModels: path.join(shared, 'plaintext-models.json'),
     agentCaCert: path.join(projectRoot, 'data', 'gateway-trust', 'iron-proxy', 'ca.crt'),
     containerName: `nanoclaw-iron-proxy-${getInstallSlug(projectRoot)}`,
   };
+}
+
+/** Plain HTTP is allowed only to a keyless model on this machine, pinned to one port. */
+export function validatePlaintextModel(raw: string): string {
+  const origin = raw.trim().toLowerCase();
+  const match = /^host\.docker\.internal:([1-9][0-9]{0,4})$/.exec(origin);
+  // Port 80 vanishes from normalized URLs, so the pinned host:port would never match.
+  if (!match || Number(match[1]) > 65535 || match[1] === '80')
+    throw new Error(`A plaintext model endpoint must be host.docker.internal:<port> (not 80); got ${raw}`);
+  return origin;
+}
+
+/** Ports on this machine that belong to NanoClaw's gateways; a pin must never open one. */
+export function gatewayPorts(projectRoot: string): number[] {
+  const env = readProjectEnv(projectRoot);
+  const ports = [
+    Number(env.NANOCLAW_IRON_PROXY_APPROVAL_PORT || 19000 + (parseInt(getInstallSlug(projectRoot), 16) % 10000)),
+    controlPort(projectRoot),
+    10254,
+    10255,
+  ];
+  const onecli = process.env.ONECLI_URL || env.ONECLI_URL;
+  if (onecli) {
+    try {
+      const url = new URL(onecli);
+      ports.push(Number(url.port || (url.protocol === 'https:' ? 443 : 80)));
+    } catch {
+      /* A malformed ONECLI_URL is OneCLI's own setup error. */
+    }
+  }
+  return [...new Set(ports)];
+}
+
+/**
+ * The pin opens a port on this machine, so require an OpenAI-style model list there,
+ * fetched the way Iron will reach it: from a container, as host.docker.internal.
+ */
+export function checkModelList(output: string, port: number): void {
+  let body: any;
+  try {
+    body = JSON.parse(output);
+  } catch {
+    body = undefined;
+  }
+  if (!body || !Array.isArray(body.data) || body.data.some((model: any) => typeof model?.id !== 'string'))
+    throw new Error(
+      `Port ${port} on this machine did not answer GET /v1/models with an OpenAI-style model list; it will not be opened over plain HTTP.`,
+    );
+}
+
+async function probeModelServer(origin: string): Promise<void> {
+  const port = Number(origin.slice(origin.lastIndexOf(':') + 1));
+  let output = '';
+  try {
+    output = await docker(
+      [
+        'run',
+        '--rm',
+        ...centralHostGatewayArgs(),
+        '--entrypoint',
+        'wget',
+        IMAGE,
+        '-q',
+        '-T',
+        '5',
+        '-O',
+        '-',
+        `http://${origin}/v1/models`,
+      ],
+      true,
+    );
+  } catch (error) {
+    if (error instanceof InstallCommandFailure && error.interrupted) throw error;
+  }
+  checkModelList(output, port);
 }
 
 export function readAllowedHosts(projectRoot: string): string[] {
@@ -223,6 +299,12 @@ export async function run(args: string[], projectRoot = process.cwd()): Promise<
     return;
   }
   const managed = args.includes('--with-control') || !!readProjectEnv(projectRoot).NANOCLAW_IRON_CONTROL_URL;
+  const plaintextArg = args.indexOf('--allow-plaintext-model');
+  if (plaintextArg >= 0 && args.includes('--clear-plaintext-model'))
+    throw new Error('--allow-plaintext-model and --clear-plaintext-model cannot be combined');
+  const plaintextModel = plaintextArg >= 0 ? validatePlaintextModel(args[plaintextArg + 1] ?? '') : undefined;
+  if (plaintextModel && gatewayPorts(projectRoot).includes(Number(plaintextModel.split(':')[1])))
+    throw new Error(`Port ${plaintextModel.split(':')[1]} belongs to a NanoClaw gateway, not a model server.`);
   const localIndex = args.indexOf('--local-image');
   if (managed || localIndex < 0) {
     // An engine that cannot run the console stops here, before the Iron
@@ -247,6 +329,7 @@ export async function run(args: string[], projectRoot = process.cwd()): Promise<
   ) {
     throw new Error('Iron Proxy skill does not contain an exact image digest');
   }
+  if (plaintextModel) await probeModelServer(plaintextModel);
   const paths = statePaths(projectRoot);
   fs.mkdirSync(paths.shared, { recursive: true, mode: 0o700 });
   fs.mkdirSync(paths.approvalDir, { recursive: true, mode: 0o700 });
@@ -259,6 +342,12 @@ export async function run(args: string[], projectRoot = process.cwd()): Promise<
     allowed.push(validateAllowedHost(args[allowIndex + 1]));
   }
   writeAllowedHosts(allowed, projectRoot);
+  if (plaintextModel || args.includes('--clear-plaintext-model')) {
+    fs.writeFileSync(paths.plaintextModels, `${JSON.stringify(plaintextModel ? [plaintextModel] : [])}\n`, {
+      mode: 0o600,
+    });
+    fs.chmodSync(paths.plaintextModels, 0o600);
+  }
   if (!IMAGE.startsWith('sha256:')) await docker(['pull', IMAGE]);
   await ensureCA(projectRoot);
   ensureIdentityKey(projectRoot);
