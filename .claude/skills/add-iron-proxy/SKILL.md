@@ -69,7 +69,9 @@ pnpm exec tsx .claude/skills/add-iron-proxy/scripts/setup.ts --with-control
 - **"Iron Control cannot run on this aarch64 Docker engine", or `exec format error`
   at the Iron Control step:** the pinned console image is amd64 only. Run the printed
   `tonistiigi/binfmt` command against the Docker engine, or choose the OneCLI gateway;
-  then re-run setup. Setup only checks an engine running on this machine's own kernel;
+  then re-run setup. The registration lives in the kernel and is gone after a reboot:
+  re-run the command, or register it at boot (a systemd unit or your Docker host's
+  boot script), or Iron Control restart-loops with `exec format error`. Setup only checks an engine running on this machine's own kernel;
   a VM or remote engine (Docker Desktop, Colima, a `DOCKER_HOST` elsewhere) is not
   inspected and needs emulation enabled inside the engine.
 - **The database exists but keys are missing:** restore its matching `control.env`.

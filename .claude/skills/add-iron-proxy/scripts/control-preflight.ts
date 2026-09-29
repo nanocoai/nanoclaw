@@ -82,7 +82,7 @@ export async function checkControlEngine(emulation = hasAmd64Emulation, platform
       `Iron Control cannot run on this ${arch} Docker engine: its pinned image is linux/amd64 only and the engine has no amd64 emulation.`,
       'Pick one, then re-run setup:',
       `  - Enable amd64 emulation for this Docker engine: ${AMD64_EMULATION_COMMAND}`,
-      '    Iron Control then runs its pinned image emulated; Iron Proxy stays native.',
+      '    Iron Control then runs its pinned image emulated; Iron Proxy stays native. The registration lives in the kernel and is gone after a reboot: re-run it, or register it at boot, or Iron Control restart-loops with exec format error.',
       '  - Choose the OneCLI gateway instead of Iron Proxy.',
     ].join('\n'),
   );
