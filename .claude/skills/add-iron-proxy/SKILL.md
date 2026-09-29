@@ -167,7 +167,7 @@ trusts only public CAs, so setup refuses plain HTTP (except below), other ports,
 IP addresses and private names such as `*.home.arpa` at the prompt: an https
 endpoint on a private name would pass setup and then fail every turn with
 `502 Bad Gateway`. Setup reports why it could not list models (for example a
-self-signed certificate) when it can reach the endpoint. Follow the OpenCode skill to restart the host and test a real reply.
+self-signed certificate) when it can reach the endpoint. Follow your provider's skill to restart the host and test a real reply.
 
 ### Serve a local model
 
