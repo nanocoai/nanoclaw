@@ -95,8 +95,8 @@ file is removed before network waits and on failure; agents receive only fixed
 placeholders.
 
 Gateway endpoint validation happens before key prompts or catalog requests.
-The selected gateway may constrain endpoints (for example, https only, keyless
-endpoints included); its skill says how.
+The selected gateway may constrain endpoints; its skill says which endpoints it
+accepts.
 The gateway permits the model destination only after prompts complete. Native
 model domains and an operator-configured HTTPS model host are declared by the
 OpenCode host contract on startup; explicit gateway policy holds remain in force.

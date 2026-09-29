@@ -210,8 +210,8 @@ service and affected containers when updating from the earlier read-only-bind
 candidate; old containers retain their mounts until recreated.
 
 Native model domains and the configured HTTPS model host belong to OpenCode’s
-provider contract. Your gateway's skill says whether a manual grant, a manual
-re-auth after expiry, or an https-only endpoint applies. Do not put a key in
+provider contract. Your gateway's skill says which endpoints it accepts and
+whether a manual grant or a manual re-auth after expiry applies. Do not put a key in
 `.env`, command arguments, or the container environment.
 
 After installing on a running NanoClaw host, restart its actual host service
