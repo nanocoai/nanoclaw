@@ -48,14 +48,75 @@ describe('log never throws on unserializable data', () => {
     expect(written.join('')).toContain('10n');
   });
 
-  it('logs a value whose toJSON throws', () => {
-    const hostile = {
+  it('honors a top-level toJSON when stringify throws on its result', () => {
+    // The BigInt in toJSON's result makes stringify throw, so the inspect fallback runs.
+    const value = {
+      token: 'SECRET',
+      toJSON() {
+        return { id: 1n };
+      },
+    };
+    expect(() => log.warn('redacted', { err: value })).not.toThrow();
+    const out = written.join('');
+    expect(out).toContain('1n');
+    expect(out).not.toContain('SECRET');
+  });
+
+  it('passes the root key to toJSON, as JSON.stringify does', () => {
+    const value = {
+      token: 'SECRET',
+      toJSON(key: string) {
+        return key === '' ? { id: 1n } : this;
+      },
+    };
+    log.warn('keyed', { err: value });
+    expect(written.join('')).not.toContain('SECRET');
+  });
+
+  it('never prints the raw value when toJSON throws', () => {
+    const value = {
+      token: 'SECRET',
       toJSON() {
         throw new Error('no');
       },
     };
-    expect(() => log.warn('hostile', { err: hostile })).not.toThrow();
-    expect(written.join('')).toContain('hostile');
+    expect(() => log.warn('throwing toJSON', { err: value })).not.toThrow();
+    const out = written.join('');
+    expect(out).not.toContain('SECRET');
+    expect(out).toContain('[unserializable]');
+  });
+
+  it('keeps other fields, but not the value, when a toJSON getter throws', () => {
+    const err = {
+      token: 'SECRET',
+      get toJSON(): never {
+        throw new Error('getter');
+      },
+    };
+    log.warn('getter toJSON', { requestId: 'req-123', err });
+    const out = written.join('');
+    expect(out).toContain('req-123');
+    expect(out).not.toContain('SECRET');
+  });
+
+  it('does not call toJSON twice', () => {
+    const value = {
+      token: 'SECRET',
+      toJSON() {
+        delete (this as { toJSON?: unknown }).toJSON;
+        return { id: 1n };
+      },
+    };
+    log.warn('once', { err: value });
+    const out = written.join('');
+    expect(out).toContain('1n');
+    expect(out).not.toContain('SECRET');
+  });
+
+  it('keeps fields four levels deep in the inspect fallback', () => {
+    const err = { n: 1n, a: { b: { c: { d: { code: 'E_DEEP' } } } } };
+    log.warn('deep', { err });
+    expect(written.join('')).toContain('E_DEEP');
   });
 
   it('survives a Proxy with throwing traps, as a value or as the data bag', () => {

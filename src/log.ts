@@ -17,14 +17,23 @@ const FULL_RESET = '\x1b[0m';
 
 const threshold = LEVELS[(process.env.LOG_LEVEL as Level) || 'info'] ?? LEVELS.info;
 
+const INSPECT_OPTS = { breakLength: Infinity, depth: 6 };
+
 function safeStringify(v: unknown): string {
   // JSON.stringify throws on cycles and BigInt; inspect handles both. Anything
   // inspect cannot handle falls through to the catch in emit.
+  let root: { value: unknown } | undefined;
   /* eslint-disable no-catch-all/no-catch-all -- logging must never throw */
   try {
-    return JSON.stringify(v);
+    // The first replacer call sees the root after toJSON ran, so the fallback
+    // honors a redacting toJSON without calling it twice.
+    return JSON.stringify(v, (_key, value: unknown) => {
+      root ??= { value };
+      return value;
+    });
   } catch {
-    return inspect(v, { breakLength: Infinity });
+    // No root means reading or running toJSON threw; never print the raw value.
+    return root ? inspect(root.value, INSPECT_OPTS) : '[unserializable]';
   }
   /* eslint-enable no-catch-all/no-catch-all */
 }
