@@ -202,6 +202,10 @@ A model that needs a key must use an https endpoint on a public DNS name. Plain
 HTTP can be read or changed by anything already on this machine or on the Docker
 bridge; that is the trade for not running TLS locally.
 
+A keyless model on another machine on your LAN is not supported with Iron yet;
+use https with a real domain and a public certificate for remote or keyed model
+servers.
+
 ## Remove
 
 Follow [REMOVE.md](REMOVE.md). Stop only this copy's proxy and console services. Keep the database volume and encryption keys together when preserving data.
