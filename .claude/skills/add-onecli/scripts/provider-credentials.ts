@@ -135,8 +135,6 @@ export function createOneCliCredentialConnection(
   };
   // A host move is explicit and keeps the granted ID. Revalidate the old
   // descriptor on the final read so an edit during prompts cannot be adopted.
-  // Only metadata and the ID are rechecked: OneCLI exposes no revision or
-  // compare-and-set, so save() overwrites a concurrent value rotation.
   let expected = descriptor;
   const find: OneCliCredentialConnection['find'] = async (options) => {
     const metadata = await request('', 'GET');
