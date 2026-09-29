@@ -117,7 +117,8 @@ describe('default model command', () => {
     fixture.choose.mockResolvedValue('openai/qwen-local');
     await runModelSelection(['--refresh']);
     expect(request).toHaveBeenCalledWith(new URL('http://127.0.0.1:8000/v1/models'), expect.any(Object));
-    expect(fixture.exec).not.toHaveBeenCalled();
+    // On Linux the host-side list may look up the Docker bridge; the native catalog never runs.
+    expect(fixture.exec.mock.calls.filter(([, args]) => (args as string[])[0] === 'run')).toEqual([]);
     expect(fixture.choose.mock.calls[0][0].options).toContainEqual({
       value: 'openai/qwen-local',
       label: 'openai/qwen-local',
