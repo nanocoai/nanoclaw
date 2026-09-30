@@ -296,6 +296,19 @@ async function drainSession(session: Session): Promise<void> {
 
   for (const msg of pending) {
     try {
+      const refusal = await refuseBeforeDelivery(msg, session);
+      if (refusal) {
+        await withExistingMailboxSession(agentGroup.id, session.id, (mailbox) =>
+          mailbox.markDeliveryRefused(msg.id, refusal.reasonCode),
+        );
+        await clearAttemptRow(msg.id);
+        log.warn('Pre-delivery authorizer refused message', {
+          messageId: msg.id,
+          sessionId: session.id,
+          reasonCode: refusal.reasonCode,
+        });
+        continue;
+      }
       const platformMsgId = await deliverMessage(msg, session);
       await withExistingMailboxSession(agentGroup.id, session.id, (mailbox) =>
         mailbox.markDelivered(msg.id, platformMsgId ?? null),
@@ -631,6 +644,53 @@ type DeliveryBatchPreviewHook = (
 const batchPreviewHooks: DeliveryBatchPreviewHook[] = [];
 export function registerDeliveryBatchPreview(hook: DeliveryBatchPreviewHook): void {
   batchPreviewHooks.push(hook);
+}
+
+/**
+ * Present when `registerPreDeliveryAuthorizer` runs before transport.
+ * Authorizers are generic: core does not know why a provider refuses.
+ */
+export const PRE_DELIVERY_AUTHORIZER_SEAM = 1;
+
+export interface PreDeliveryRefusal {
+  reasonCode: string;
+}
+
+export type PreDeliveryAuthorizer = (
+  msg: {
+    id: string;
+    kind: string;
+    platformId: string | null;
+    channelType: string | null;
+    threadId: string | null;
+    content: string;
+  },
+  session: Session,
+) => Promise<PreDeliveryRefusal | null> | PreDeliveryRefusal | null;
+
+const preDeliveryAuthorizers: PreDeliveryAuthorizer[] = [];
+
+/** Register a check that runs after the due snapshot and before transport. */
+export function registerPreDeliveryAuthorizer(authorizer: PreDeliveryAuthorizer): void {
+  preDeliveryAuthorizers.push(authorizer);
+}
+
+async function refuseBeforeDelivery(
+  msg: {
+    id: string;
+    kind: string;
+    platformId: string | null;
+    channelType: string | null;
+    threadId: string | null;
+    content: string;
+  },
+  session: Session,
+): Promise<PreDeliveryRefusal | null> {
+  for (const authorizer of preDeliveryAuthorizers) {
+    const refusal = await authorizer(msg, session);
+    if (refusal) return refusal;
+  }
+  return null;
 }
 
 export function registerDeliveryAction(action: string, handler: DeliveryActionHandler, unguardedDecl: Unguarded): void;

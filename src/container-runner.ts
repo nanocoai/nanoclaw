@@ -1274,6 +1274,22 @@ export function mergeMounts(composed: MountSpec[], contributed: MountSpec[]): Mo
   return [...composed.filter((m) => !contributedTargets.has(m.containerPath)), ...contributed];
 }
 
+/** Present when composition honors `ProviderContainerContribution.agentRunnerPreload`. */
+export const AGENT_RUNNER_PRELOAD_SEAM = 1;
+
+/**
+ * Launch args for the real runner entry. An empty preload keeps the historical
+ * command byte-for-byte. A preload must be one absolute container path so the
+ * shell command cannot gain extra words.
+ */
+export function agentRunnerLaunchArgs(preload: string | undefined): string[] {
+  if (preload == null || preload === '') return ['exec bun run /app/src/index.ts'];
+  if (!/^\/(?:[A-Za-z0-9._+-]+\/)*[A-Za-z0-9._+-]+$/.test(preload) || preload.split('/').includes('..')) {
+    throw new Error(`agent runner preload must be one absolute container path: ${preload}`);
+  }
+  return [`exec bun run --preload ${preload} /app/src/index.ts`];
+}
+
 /**
  * Compose the session spec. This is the tail of the old `buildContainerArgs`,
  * with argv assembly removed: the host says what a session *is*, the driver
@@ -1321,7 +1337,7 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
     // Run the v2 entry point directly (no tsc, no stdin). The driver maps the
     // 'standard' posture's PID-1 requirement onto this: Docker adds `--init`.
     command: ['bash', '-c'],
-    args: ['exec bun run /app/src/index.ts'],
+    args: agentRunnerLaunchArgs(contribution.agentRunnerPreload),
     mounts: mergeMounts(toMountSpecs(mounts, agentGroup.id), gateway.mounts ?? []),
     contributedEnv,
   };
