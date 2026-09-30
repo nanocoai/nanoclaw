@@ -251,6 +251,38 @@ func tunnel(t *testing.T, g *gateway, sni string) (net.Conn, *bufio.Reader, erro
 	e = tlsConn.Handshake()
 	return tlsConn, bufio.NewReader(tlsConn), e
 }
+
+// git and other libcurl clients send proxy credentials only after a challenge.
+func TestMissingProxyAuthChallengesAndAcceptsRetryOnSameConnection(t *testing.T) {
+	g, _ := fixture(t, &fixtureBridge{}, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("unexpected backend request") }))
+	front := httptest.NewServer(g)
+	t.Cleanup(front.Close)
+	u, _ := url.Parse(front.URL)
+	raw, e := net.Dial("tcp", u.Host)
+	if e != nil {
+		t.Fatal(e)
+	}
+	t.Cleanup(func() { raw.Close() })
+	raw.SetDeadline(time.Now().Add(3 * time.Second))
+	reader := bufio.NewReader(raw)
+	io.WriteString(raw, "CONNECT api.example.test:443 HTTP/1.1\r\nHost: api.example.test:443\r\n\r\n")
+	challenge, e := http.ReadResponse(reader, &http.Request{Method: "CONNECT"})
+	if e != nil {
+		t.Fatal(e)
+	}
+	io.Copy(io.Discard, challenge.Body)
+	if challenge.StatusCode != 407 || !strings.HasPrefix(challenge.Header.Get("Proxy-Authenticate"), "Basic ") {
+		t.Fatalf("status=%d challenge=%q", challenge.StatusCode, challenge.Header.Get("Proxy-Authenticate"))
+	}
+	io.WriteString(raw, "CONNECT api.example.test:443 HTTP/1.1\r\nHost: api.example.test:443\r\nProxy-Authorization: "+auth(g, "session-A")+"\r\n\r\n")
+	retry, e := http.ReadResponse(reader, &http.Request{Method: "CONNECT"})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if retry.StatusCode != 200 {
+		t.Fatalf("retry=%d", retry.StatusCode)
+	}
+}
 func TestTunnelRejectsMismatchedSNI(t *testing.T) {
 	g, _ := fixture(t, &fixtureBridge{}, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("unexpected backend request") }))
 	_, _, e := tunnel(t, g, "different.example.test")
