@@ -336,6 +336,7 @@ func (g *gateway) forward(r *http.Request, identity, tunnel string) *http.Respon
 func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	identity, err := g.identity(r)
 	if err != nil {
+		w.Header().Set("Proxy-Authenticate", `Basic realm="nanoclaw"`)
 		http.Error(w, "Proxy authentication required", 407)
 		return
 	}
