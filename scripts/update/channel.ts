@@ -156,15 +156,15 @@ export async function resolveUpdateTarget(options: ResolveOptions): Promise<Upda
   const remoteUrl = runner.run('git', ['remote', 'get-url', options.remote], root);
   let source: UpdateTarget['source'] = 'github-release';
   let note: string | undefined;
-  let list: ReleaseInfo[];
+  let tag: string | undefined;
   try {
-    list = await (options.fetchReleases ?? fetchGithubReleases)(remoteUrl);
+    tag = pickTag(await (options.fetchReleases ?? fetchGithubReleases)(remoteUrl), options.channel);
+    if (!tag) throw new Error(`no ${options.channel} release listed`);
   } catch (err) {
     source = 'annotated-tag';
     note = `GitHub releases unavailable (${err instanceof Error ? err.message : String(err)}); used the newest annotated release tag on ${options.remote}`;
-    list = annotatedRemoteTags(runner, root, options.remote);
+    tag = pickTag(annotatedRemoteTags(runner, root, options.remote), options.channel);
   }
-  const tag = pickTag(list, options.channel);
   if (!tag) throw new Error(`No ${options.channel} release found on ${options.remote}`);
 
   // No --force: a local tag that differs from upstream's must stop the update.

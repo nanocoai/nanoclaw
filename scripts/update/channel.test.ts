@@ -157,6 +157,17 @@ describe('resolveUpdateTarget', () => {
     expect(target.note).toMatch(/ENOTFOUND/);
   });
 
+  it('stable falls back to remote tags when the API lists no stable release', async () => {
+    const { install } = fixture('v2.3.0');
+    const target = await resolveUpdateTarget({
+      projectRoot: install,
+      remote: 'upstream',
+      channel: 'stable',
+      fetchReleases: releases({ tag: 'v2.5.0-rc.1', prerelease: true }),
+    });
+    expect(target).toMatchObject({ ref: 'refs/tags/v2.4.0', source: 'annotated-tag' });
+  });
+
   it('beta resolves to the newest release candidate newer than stable', async () => {
     const { install } = fixture('v2.3.0');
     const target = await resolveUpdateTarget({
