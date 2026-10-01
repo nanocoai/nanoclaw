@@ -1,11 +1,13 @@
 /**
  * Update channels: which upstream ref /update-nanoclaw merges.
  *
- *   stable (default)  newest published, non-prerelease GitHub Release vX.Y.Z
- *   beta              newest vX.Y.Z-rc.N pre-release newer than stable, else stable
+ *   stable (default)  newest annotated vX.Y.Z tag on the remote
+ *   beta              newest vX.Y.Z-rc.N tag newer than stable, else stable
  *   edge              tip of the remote's main branch
  *
- * Set NANOCLAW_UPDATE_CHANNEL in .env; `prepare --channel` overrides it once.
+ * release.yml creates the annotated tag only when it publishes the release, so
+ * the tag list is the release list. Set NANOCLAW_UPDATE_CHANNEL in .env;
+ * `prepare --channel` overrides it once.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -15,25 +17,16 @@ import { createCommandRunner, type CommandRunner } from './service.js';
 export const CHANNELS = ['stable', 'beta', 'edge'] as const;
 export type UpdateChannel = (typeof CHANNELS)[number];
 
-export interface ReleaseInfo {
-  tag: string;
-  draft: boolean;
-  prerelease: boolean;
-}
-
 export interface UpdateTarget {
   channel: UpdateChannel;
   ref: string;
   tag?: string;
-  source: 'github-release' | 'annotated-tag' | 'branch';
-  note?: string;
 }
 
 export interface ResolveOptions {
   projectRoot: string;
   remote: string;
   channel: UpdateChannel;
-  fetchReleases?: (remoteUrl: string) => Promise<ReleaseInfo[]>;
   runner?: CommandRunner;
 }
 
@@ -92,51 +85,21 @@ export function readChannelSetting(projectRoot: string, override?: string): Upda
   return value as UpdateChannel;
 }
 
-function githubRepo(remoteUrl: string): string | null {
-  const match = /github\.com[:/]([^/]+)\/([^/]+?)(?:\.git)?\/?$/.exec(remoteUrl);
-  return match ? `${match[1]}/${match[2]}` : null;
-}
-
-export async function fetchGithubReleases(remoteUrl: string): Promise<ReleaseInfo[]> {
-  const repo = githubRepo(remoteUrl);
-  if (!repo) throw new Error(`${remoteUrl} is not a GitHub remote`);
-  const releases: ReleaseInfo[] = [];
-  // Every page: many release candidates can push the newest stable release off page one.
-  for (let page = 1; page <= 10; page += 1) {
-    const response = await fetch(`https://api.github.com/repos/${repo}/releases?per_page=100&page=${page}`, {
-      headers: { accept: 'application/vnd.github+json' },
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!response.ok) throw new Error(`GitHub releases API returned ${response.status}`);
-    const body = (await response.json()) as Array<{ tag_name: string; draft: boolean; prerelease: boolean }>;
-    releases.push(...body.map((item) => ({ tag: item.tag_name, draft: item.draft, prerelease: item.prerelease })));
-    if (body.length < 100) break;
-  }
-  return releases;
-}
-
-/** Fallback when the API is unreachable: annotated release tags straight from the remote. */
-function annotatedRemoteTags(runner: CommandRunner, root: string, remote: string): ReleaseInfo[] {
-  const peeled = runner
+/** Annotated release tags on the remote; lightweight and non-release tags never count. */
+function remoteReleaseTags(runner: CommandRunner, root: string, remote: string): string[] {
+  return runner
     .run('git', ['ls-remote', '--tags', remote], root)
     .split('\n')
     .map((line) => /refs\/tags\/(.+)\^\{\}$/.exec(line.trim())?.[1])
-    .filter((tag): tag is string => tag !== undefined);
-  return peeled.map((tag) => ({ tag, draft: false, prerelease: parseReleaseTag(tag)?.rc !== undefined }));
+    .filter((tag): tag is string => tag !== undefined && parseReleaseTag(tag) !== null);
 }
 
-function pickTag(list: ReleaseInfo[], channel: 'stable' | 'beta'): string | undefined {
-  const published = list.filter((item) => !item.draft && parseReleaseTag(item.tag));
-  const newest = (tags: string[]) => tags.sort(compareReleaseTags).at(-1);
-  const stable = newest(
-    published.filter((i) => !i.prerelease && parseReleaseTag(i.tag)!.rc === undefined).map((i) => i.tag),
-  );
+function pickTag(tags: string[], channel: 'stable' | 'beta'): string | undefined {
+  const newest = (list: string[]) => list.sort(compareReleaseTags).at(-1);
+  const stable = newest(tags.filter((tag) => parseReleaseTag(tag)!.rc === undefined));
   if (channel === 'stable') return stable;
-  const rc = newest(
-    published.filter((i) => i.prerelease && parseReleaseTag(i.tag)!.rc !== undefined).map((i) => i.tag),
-  );
-  if (rc && (!stable || compareReleaseTags(rc, stable) > 0)) return rc;
-  return stable;
+  const rc = newest(tags.filter((tag) => parseReleaseTag(tag)!.rc !== undefined));
+  return rc && (!stable || compareReleaseTags(rc, stable) > 0) ? rc : stable;
 }
 
 function remoteMainRef(runner: CommandRunner, root: string, remote: string): string {
@@ -147,24 +110,13 @@ function remoteMainRef(runner: CommandRunner, root: string, remote: string): str
   throw new Error(`Remote ${remote} has neither main nor master`);
 }
 
-export async function resolveUpdateTarget(options: ResolveOptions): Promise<UpdateTarget> {
+export function resolveUpdateTarget(options: ResolveOptions): UpdateTarget {
   const runner = options.runner ?? createCommandRunner();
   const root = options.projectRoot;
   const mainRef = remoteMainRef(runner, root, options.remote);
-  if (options.channel === 'edge') return { channel: 'edge', ref: mainRef, source: 'branch' };
+  if (options.channel === 'edge') return { channel: 'edge', ref: mainRef };
 
-  const remoteUrl = runner.run('git', ['remote', 'get-url', options.remote], root);
-  let source: UpdateTarget['source'] = 'github-release';
-  let note: string | undefined;
-  let tag: string | undefined;
-  try {
-    tag = pickTag(await (options.fetchReleases ?? fetchGithubReleases)(remoteUrl), options.channel);
-    if (!tag) throw new Error(`no ${options.channel} release listed`);
-  } catch (err) {
-    source = 'annotated-tag';
-    note = `GitHub releases unavailable (${err instanceof Error ? err.message : String(err)}); used the newest annotated release tag on ${options.remote}`;
-    tag = pickTag(annotatedRemoteTags(runner, root, options.remote), options.channel);
-  }
+  const tag = pickTag(remoteReleaseTags(runner, root, options.remote), options.channel);
   if (!tag) throw new Error(`No ${options.channel} release found on ${options.remote}`);
 
   // No --force: a local tag that differs from upstream's must stop the update.
@@ -181,7 +133,7 @@ export async function resolveUpdateTarget(options: ResolveOptions): Promise<Upda
         `Otherwise wait for a release that includes this install's commit (${base.slice(0, 8)}).`,
     );
   }
-  return { channel: options.channel, ref, tag, source, ...(note ? { note } : {}) };
+  return { channel: options.channel, ref, tag };
 }
 
 /** Record the channel in the marker after the target code's own `upgrade-state.ts set`. */

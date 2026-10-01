@@ -11,7 +11,6 @@ import {
   readChannelSetting,
   resolveUpdateTarget,
   stampChannel,
-  type ReleaseInfo,
 } from './channel.js';
 
 const roots: string[] = [];
@@ -76,14 +75,6 @@ function fixture(installAt: string) {
   return { seed, official, install, shas };
 }
 
-const releases = (...items: Array<Partial<ReleaseInfo> & { tag: string }>): (() => Promise<ReleaseInfo[]>) => {
-  return async () => items.map((item) => ({ draft: false, prerelease: false, ...item }));
-};
-
-const unreachable = async (): Promise<ReleaseInfo[]> => {
-  throw new Error('getaddrinfo ENOTFOUND api.github.com');
-};
-
 describe('release tag parsing', () => {
   it('accepts only vX.Y.Z and vX.Y.Z-rc.N', () => {
     expect(parseReleaseTag('v2.4.0')).toMatchObject({ major: 2, minor: 4, patch: 0 });
@@ -122,110 +113,42 @@ describe('channel setting', () => {
 });
 
 describe('resolveUpdateTarget', () => {
-  it('stable resolves to the newest published, non-prerelease release and ignores junk tags', async () => {
+  const resolve = (install: string, channel: 'stable' | 'beta' | 'edge') =>
+    resolveUpdateTarget({ projectRoot: install, remote: 'upstream', channel });
+
+  it('stable resolves to the newest annotated vX.Y.Z tag and ignores junk, lightweight and rc tags', () => {
     const { install, shas } = fixture('v2.3.0');
-    const target = await resolveUpdateTarget({
-      projectRoot: install,
-      remote: 'upstream',
-      channel: 'stable',
-      fetchReleases: releases(
-        { tag: 'v2.3.0' },
-        { tag: 'v2.4.0' },
-        { tag: 'v2.5.0-rc.1', prerelease: true },
-        { tag: 'v3.0.0', draft: true },
-        { tag: 'pre-update-852435f4-20260827104121-ad21ae1c' },
-      ),
-    });
-    expect(target).toMatchObject({
-      channel: 'stable',
-      ref: 'refs/tags/v2.4.0',
-      tag: 'v2.4.0',
-      source: 'github-release',
-    });
+    expect(resolve(install, 'stable')).toEqual({ channel: 'stable', ref: 'refs/tags/v2.4.0', tag: 'v2.4.0' });
     expect(git(install, ['rev-parse', 'refs/tags/v2.4.0^{commit}'])).toBe(shas['v2.4.0']);
   });
 
-  it('stable falls back to the newest annotated vX.Y.Z tag on the remote when the API is unreachable', async () => {
+  it('beta resolves to the newest release candidate newer than stable', () => {
     const { install } = fixture('v2.3.0');
-    const target = await resolveUpdateTarget({
-      projectRoot: install,
-      remote: 'upstream',
-      channel: 'stable',
-      fetchReleases: unreachable,
-    });
-    expect(target).toMatchObject({ ref: 'refs/tags/v2.4.0', source: 'annotated-tag' });
-    expect(target.note).toMatch(/ENOTFOUND/);
+    expect(resolve(install, 'beta')).toMatchObject({ channel: 'beta', ref: 'refs/tags/v2.5.0-rc.1' });
   });
 
-  it('stable falls back to remote tags when the API lists no stable release', async () => {
-    const { install } = fixture('v2.3.0');
-    const target = await resolveUpdateTarget({
-      projectRoot: install,
-      remote: 'upstream',
-      channel: 'stable',
-      fetchReleases: releases({ tag: 'v2.5.0-rc.1', prerelease: true }),
-    });
-    expect(target).toMatchObject({ ref: 'refs/tags/v2.4.0', source: 'annotated-tag' });
-  });
-
-  it('beta resolves to the newest release candidate newer than stable', async () => {
-    const { install } = fixture('v2.3.0');
-    const target = await resolveUpdateTarget({
-      projectRoot: install,
-      remote: 'upstream',
-      channel: 'beta',
-      fetchReleases: releases({ tag: 'v2.4.0' }, { tag: 'v2.5.0-rc.1', prerelease: true }),
-    });
-    expect(target).toMatchObject({ channel: 'beta', ref: 'refs/tags/v2.5.0-rc.1' });
-  });
-
-  it('edge resolves to the remote main branch', async () => {
+  it('edge resolves to the remote main branch', () => {
     const { install } = fixture('main');
-    const target = await resolveUpdateTarget({
-      projectRoot: install,
-      remote: 'upstream',
-      channel: 'edge',
-      fetchReleases: unreachable,
-    });
-    expect(target).toMatchObject({ channel: 'edge', ref: 'upstream/main', source: 'branch' });
+    expect(resolve(install, 'edge')).toEqual({ channel: 'edge', ref: 'upstream/main' });
   });
 
-  it('allows stable for a customized install whose upstream base is behind the tag', async () => {
+  it('allows stable for a customized install whose upstream base is behind the tag', () => {
     const { install } = fixture('v2.3.0');
     commit(install, 'local customization');
-    const target = await resolveUpdateTarget({
-      projectRoot: install,
-      remote: 'upstream',
-      channel: 'stable',
-      fetchReleases: releases({ tag: 'v2.4.0' }),
-    });
-    expect(target.tag).toBe('v2.4.0');
+    expect(resolve(install, 'stable').tag).toBe('v2.4.0');
   });
 
-  it('refuses to move an install past the latest release backward to it', async () => {
+  it('refuses to move an install past the latest release backward to it', () => {
     const { install } = fixture('main');
     commit(install, 'local customization');
-    await expect(
-      resolveUpdateTarget({
-        projectRoot: install,
-        remote: 'upstream',
-        channel: 'stable',
-        fetchReleases: releases({ tag: 'v2.4.0' }),
-      }),
-    ).rejects.toThrow(/newer than v2\.4\.0[\s\S]*NANOCLAW_UPDATE_CHANNEL=edge/);
+    expect(() => resolve(install, 'stable')).toThrow(/newer than v2\.4\.0[\s\S]*NANOCLAW_UPDATE_CHANNEL=edge/);
   });
 
-  it('picks CalVer over 2.x', async () => {
+  it('picks CalVer over 2.x', () => {
     const { seed, official, install } = fixture('v2.3.0');
     tag(seed, 'v2026.10.0');
     git(seed, ['push', '-q', official, 'refs/tags/v2026.10.0']);
-    const target = await resolveUpdateTarget({
-      projectRoot: install,
-      remote: 'upstream',
-      channel: 'stable',
-      fetchReleases: unreachable,
-    });
-    expect(target.tag).toBe('v2026.10.0');
+    expect(resolve(install, 'stable').tag).toBe('v2026.10.0');
   });
 });
 

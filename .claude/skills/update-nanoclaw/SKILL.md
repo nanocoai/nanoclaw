@@ -88,9 +88,9 @@ git archive "$upstream_ref" scripts src/install-slug.ts | tar -x -C "$controller
 
 The update channel picks what to merge:
 
-- `stable` (default): the newest published GitHub Release `vX.Y.Z`. If the
-  GitHub API is unreachable, the newest annotated `vX.Y.Z` tag on the remote.
-- `beta`: the newest `vX.Y.Z-rc.N` pre-release newer than stable, else stable.
+- `stable` (default): the newest release, i.e. the newest annotated `vX.Y.Z`
+  tag on the official remote.
+- `beta`: the newest `vX.Y.Z-rc.N` tag newer than stable, else stable.
 - `edge`: the tip of upstream `main`.
 
 The controller reads `NANOCLAW_UPDATE_CHANNEL` from `.env`. When the user asks
@@ -107,8 +107,8 @@ pnpm exec tsx "$controller_dir/scripts/update-nanoclaw.ts" prepare \
 
 The JSON result is `nanoclaw-update/v1`. Record its `id`, `stageRoot`, backup
 branch/tag, changed files, and requirements. The live `HEAD` is still unchanged.
-Tell the user the channel and release it resolved (`target.tag`, or `main` on
-edge); if `target.note` is present, show it.
+Tell the user the `channel` and the `upstreamRef` it resolved (a release tag,
+or `main` on edge).
 
 Stable and beta never move an install backward. If this install already has
 upstream commits newer than the latest release, `prepare` fails before staging

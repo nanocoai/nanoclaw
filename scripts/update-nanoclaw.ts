@@ -66,8 +66,6 @@ function parseArgs(argv: string[]): ParsedArgs {
   return parsed;
 }
 
-let target: UpdateTarget | undefined;
-
 function requireValue<T>(value: T | undefined, name: string): T {
   if (value === undefined) throw new Error(`Missing ${name}`);
   return value;
@@ -80,8 +78,9 @@ async function execute(args: ParsedArgs): Promise<UpdateState | PruneReport> {
       throw new Error('Pass --remote [--channel], or --upstream-ref, not both');
     }
     let upstreamRef = args.upstreamRef;
+    let target: UpdateTarget | undefined;
     if (upstreamRef === undefined) {
-      target = await resolveUpdateTarget({
+      target = resolveUpdateTarget({
         projectRoot: args.projectRoot,
         remote: requireValue(args.remote, '--remote or --upstream-ref'),
         channel: readChannelSetting(args.projectRoot, args.channel),
@@ -121,7 +120,7 @@ async function execute(args: ParsedArgs): Promise<UpdateState | PruneReport> {
 async function main(): Promise<void> {
   try {
     const result = await execute(parseArgs(process.argv.slice(2)));
-    const output = result.schema === 'nanoclaw-update-prune/v1' ? result : { ...summarizeState(result), target };
+    const output = result.schema === 'nanoclaw-update-prune/v1' ? result : summarizeState(result);
     process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
     if (result.schema === 'nanoclaw-update/v1' && result.phase === 'conflict') process.exitCode = 2;
   } catch (err) {
