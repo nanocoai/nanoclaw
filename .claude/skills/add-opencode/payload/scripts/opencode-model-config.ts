@@ -7,11 +7,8 @@ import { buildGatewayManagedStub } from '../src/providers/opencode-auth-stub.js'
 
 const MAX_MODEL_DISCOVERY_BYTES = 1024 * 1024;
 
-/**
- * Host addresses that reach what containers reach as host.docker.internal. On Linux
- * that is the Docker bridge gateway (where host-gateway points), so a model bound
- * there is found; loopback follows for Docker Desktop, whose bridge sits in a VM.
- */
+// On Linux host.docker.internal is the bridge gateway, where a local model may be bound;
+// Docker Desktop's bridge sits in a VM, so loopback follows.
 export function hostAddressesForContainers(platform: NodeJS.Platform = process.platform): string[] {
   if (platform !== 'linux') return ['127.0.0.1'];
   let gateway: string | undefined;

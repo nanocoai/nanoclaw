@@ -11,7 +11,7 @@ import { GATEWAY_ROLE, LABELS } from '../../../../src/drivers/types.js';
 import { upsertEnvVar } from '../../../../setup/set-env.js';
 import { installStep, installCommand, InstallCommandFailure } from './install-command.js';
 import { buildManagedProxy, hasFrontProxy } from './build-managed-proxy.js';
-import { controlPaths, controlPort, installControl, removeControl, storeModelCredential } from './control.js';
+import { controlPaths, installControl, removeControl, storeModelCredential } from './control.js';
 import { checkControlEngine } from './control-preflight.js';
 import { readAllowedHostsFile, validateAllowedHost } from '../payload/src/gateway-providers/iron-proxy-allowlist.js';
 
@@ -60,10 +60,7 @@ export function statePaths(projectRoot = process.cwd()) {
   };
 }
 
-/**
- * A raw HTTP/1.0 answer to GET /v1/models: a direct 200 with an OpenAI-style model
- * list. A redirect or anything else fails, since the port it points to stays closed.
- */
+/** A redirect fails: the port it points to stays closed to the agent. */
 export function checkModelList(response: string, port: number): void {
   const split = response.indexOf('\r\n\r\n');
   const status = /^HTTP\/1\.[01] (\d{3})/.exec(response)?.[1];
@@ -79,11 +76,8 @@ export function checkModelList(response: string, port: number): void {
     );
 }
 
-/**
- * Plain HTTP to a local model opens a port on this machine, so refuse the gateways'
- * own ports and require a model list there, fetched the way Iron reaches it: from a
- * container on the proxy's network, as host.docker.internal, following no redirect.
- */
+// Plain HTTP opens a port on this machine, so gateway ports are refused and the model
+// list is fetched the way Iron reaches it.
 export async function prepareLocalModel(origin: string, projectRoot: string): Promise<void> {
   const port = Number(origin.slice(origin.lastIndexOf(':') + 1));
   const provider = await import('../../../../src/gateway-providers/iron-proxy.js');

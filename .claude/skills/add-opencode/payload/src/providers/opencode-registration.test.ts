@@ -181,4 +181,11 @@ describe('OpenCode model gateway destinations', () => {
     expect(openCodeModelAuthorities()).toEqual(['host.docker.internal:8080']);
     vi.unstubAllEnvs();
   });
+  it('never declares an authority from the shared ANTHROPIC_BASE_URL', async () => {
+    const { openCodeModelAuthorities } = await import('../provider-contracts/opencode.js');
+    vi.stubEnv('OPENCODE_BASE_URL', undefined);
+    vi.stubEnv('ANTHROPIC_BASE_URL', 'http://host.docker.internal:8000/v1');
+    expect(openCodeModelAuthorities()).toEqual([]);
+    vi.unstubAllEnvs();
+  });
 });

@@ -18,6 +18,11 @@ function configuredEndpoint(): string | undefined {
   );
 }
 
+// The shared ANTHROPIC_BASE_URL may be another provider's keyed endpoint, so it never pins a port.
+function openCodeEndpoint(): string | undefined {
+  return process.env.OPENCODE_BASE_URL ?? readEnvFile(['OPENCODE_BASE_URL']).OPENCODE_BASE_URL;
+}
+
 /** Operator-owned endpoint settings are realized when the host starts. */
 export function openCodeModelDomains(endpoint = configuredEndpoint()): string[] {
   const domains = [...NATIVE_MODEL_DOMAINS];
@@ -46,7 +51,7 @@ export function openCodeModelDomains(endpoint = configuredEndpoint()): string[] 
  * declared as its exact host:port; the selected gateway decides the scheme. A
  * default port leaves no port in the URL or the request, so domains cover it.
  */
-export function openCodeModelAuthorities(endpoint = configuredEndpoint()): string[] {
+export function openCodeModelAuthorities(endpoint = openCodeEndpoint()): string[] {
   if (!endpoint || endpoint === 'native') return [];
   try {
     const url = new URL(endpoint);

@@ -94,7 +94,7 @@ pnpm run build
 ```
 
 ```nc:run effect:test
-pnpm exec vitest run src/gateway-providers/iron-proxy.test.ts src/gateway-providers/iron-proxy-approval.test.ts src/gateway-providers/gateway-provider-registry.test.ts src/gateway-approval-coordinator.test.ts .claude/skills/add-iron-proxy/scripts/control.test.ts .claude/skills/add-iron-proxy/scripts/setup.test.ts .claude/skills/add-iron-proxy/scripts/provider-credentials.test.ts .claude/skills/add-iron-proxy/scripts/credential-isolation.test.ts .claude/skills/add-iron-proxy/scripts/install-command.test.ts
+pnpm exec vitest run src/gateway-providers/iron-proxy.test.ts src/gateway-providers/iron-proxy-approval.test.ts src/gateway-providers/gateway-provider-registry.test.ts src/gateway-approval-coordinator.test.ts .claude/skills/add-iron-proxy/scripts/control.test.ts .claude/skills/add-iron-proxy/scripts/setup.test.ts .claude/skills/add-iron-proxy/scripts/provider-credentials.test.ts .claude/skills/add-iron-proxy/scripts/credential-isolation.test.ts .claude/skills/add-iron-proxy/scripts/install-command.test.ts src/gateway-providers/iron-proxy-local-model.test.ts .claude/skills/add-iron-proxy/scripts/local-model.test.ts
 ```
 
 The setup consumer writes `NANOCLAW_GATEWAY_PROVIDER=iron-proxy` only after every directive succeeds. Restart only this copy's NanoClaw service after an upgrade so its session contribution and approval bridge match the new installation. Check the proxy has synced its assigned principal before reporting the gateway ready.
@@ -171,40 +171,13 @@ self-signed certificate) when it can reach the endpoint. Follow your provider's 
 
 ### Serve a local model
 
-A keyless model server on this machine (vLLM, llama.cpp, Ollama, and so on) can
-be reached over plain HTTP at `http://host.docker.internal:<port>/v1`. Its
-prompts and replies never leave the machine, and it has no key to protect.
-Traffic still goes through Iron, and egress lockdown stays on.
+A keyless model on this machine can use `http://host.docker.internal:<port>/v1`. Traffic still goes through Iron.
 
-1. Start the server on a fixed port. On Docker Desktop (macOS, Windows) it can
-   listen on `127.0.0.1`. On Linux, `host.docker.internal` is the Docker bridge
-   gateway, so bind the server to that address (often `172.17.0.1`). Avoid
-   `0.0.0.0`: it also exposes a keyless model to your network. Setup lists the
-   model's ids from that same bridge address.
-2. Enter `http://host.docker.internal:<port>/v1` at the provider's endpoint
-   prompt, and answer that it works without an API key.
-3. Restart the host as the provider skill describes.
+1. Run the server on a fixed port, bound to `127.0.0.1` (Docker Desktop) or the Docker bridge address, often `172.17.0.1` (Linux). Not `0.0.0.0`: that exposes it to your network.
+2. Enter the URL at the provider's endpoint prompt, and answer that it needs no key.
+3. Restart the host.
 
-Before accepting it, setup refuses port 80 and the ports of NanoClaw's own
-gateways (the approval port, Iron Control and OneCLI), and fetches
-`GET /v1/models` on that port from a container, the way Iron will reach it. It
-needs a direct OpenAI-style model list; a redirect or anything else is refused.
-
-The port is the one the provider declares for its configured endpoint, read when
-the host starts: changing the endpoint and restarting moves it, and there is no
-separate pin to clear. Only that port and the OpenAI inference routes
-(`GET /v1/models[/<id>]`, `POST /v1/chat/completions`, `/v1/completions`,
-`/v1/embeddings`, `/v1/responses`) are reachable: other ports on this machine, a
-model server's own admin routes (for example `/api/pull` or vLLM's
-`load_lora_adapter`) and HTTPS to the host all stay refused. Iron refuses a key
-for `host.docker.internal`, because it injects keys by host whatever the scheme.
-A model that needs a key must use an https endpoint on a public DNS name. Plain
-HTTP can be read or changed by anything already on this machine or on the Docker
-bridge; that is the trade for not running TLS locally.
-
-A keyless model on another machine on your LAN is not supported with Iron yet;
-use https with a real domain and a public certificate for remote or keyed model
-servers.
+Only that port and the OpenAI inference routes are reachable. Don't grant an Iron credential for `host.docker.internal`: Iron would send it over plain HTTP. A model that needs a key, or runs on another machine, needs https on a public DNS name.
 
 ## Remove
 

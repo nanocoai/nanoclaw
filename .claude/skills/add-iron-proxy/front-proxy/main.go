@@ -194,8 +194,7 @@ func (g *gateway) allowed(host string) bool {
 	return false
 }
 
-// OpenAI inference routes and their methods only: servers also put admin routes
-// under /v1 (vLLM's load_lora_adapter, Xinference's DELETE /v1/models/<id>), and
+// Inference routes only: model servers also put admin routes under /v1, and
 // approval cannot tell them apart.
 var openAIRoutes = map[string]string{"/v1/models": "GET", "/v1/chat/completions": "POST", "/v1/completions": "POST", "/v1/embeddings": "POST", "/v1/responses": "POST"}
 

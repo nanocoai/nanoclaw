@@ -23,11 +23,7 @@ export function gatewayPorts(approvalPort: number | undefined, env: NodeJS.Proce
   return [...new Set(ports)];
 }
 
-/**
- * The origins the approval bridge admits over plain HTTP: providers' declared model
- * authorities on this machine, read when the host starts, so the configured endpoint
- * is always the pinned one and no pin can outlive it.
- */
+/** Derived from providers' declared authorities at host start, so no pin outlives its endpoint. */
 export function localModelOrigins(
   approvalPort: number | undefined,
   contracts: readonly Pick<ProviderHostContract, 'modelAuthorities'>[] = listProviderHostContracts(),
