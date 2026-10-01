@@ -104,8 +104,13 @@ function pickTag(tags: string[], channel: 'stable' | 'beta'): string | undefined
 
 function remoteMainRef(runner: CommandRunner, root: string, remote: string): string {
   for (const branch of ['main', 'master']) {
-    const ref = `${remote}/${branch}`;
-    if (runner.tryRun('git', ['rev-parse', '--verify', '--quiet', `refs/remotes/${ref}`], root).ok) return ref;
+    // Fetch it here: a stale tracking ref would hide upstream commits from the backward check.
+    const fetched = runner.tryRun(
+      'git',
+      ['fetch', '--quiet', '--no-tags', remote, `+refs/heads/${branch}:refs/remotes/${remote}/${branch}`],
+      root,
+    );
+    if (fetched.ok) return `${remote}/${branch}`;
   }
   throw new Error(`Remote ${remote} has neither main nor master`);
 }

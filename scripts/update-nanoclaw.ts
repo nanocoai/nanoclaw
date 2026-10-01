@@ -90,7 +90,8 @@ async function execute(args: ParsedArgs): Promise<UpdateState | PruneReport> {
     return prepareUpdate({
       projectRoot: args.projectRoot,
       upstreamRef,
-      channel: target?.channel,
+      // A cherry-pick takes only the listed commits, so it never lands on the channel's ref.
+      channel: args.strategy === 'cherry-pick' ? undefined : target?.channel,
       strategy: args.strategy,
       commits: args.commits,
     });

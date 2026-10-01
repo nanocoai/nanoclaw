@@ -144,6 +144,13 @@ describe('resolveUpdateTarget', () => {
     expect(() => resolve(install, 'stable')).toThrow(/newer than v2\.4\.0[\s\S]*NANOCLAW_UPDATE_CHANNEL=edge/);
   });
 
+  it('fetches the remote main itself, so a stale tracking ref cannot hide newer upstream commits', () => {
+    const { install, shas } = fixture('main');
+    git(install, ['update-ref', 'refs/remotes/upstream/main', shas['v2.3.0']]);
+    expect(() => resolve(install, 'stable')).toThrow(/newer than v2\.4\.0/);
+    expect(git(install, ['rev-parse', 'upstream/main'])).toBe(shas.main);
+  });
+
   it('picks CalVer over 2.x', () => {
     const { seed, official, install } = fixture('v2.3.0');
     tag(seed, 'v2026.10.0');
