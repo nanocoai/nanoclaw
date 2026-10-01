@@ -8,7 +8,6 @@ import {
   cleanupUpdate,
   cutoverUpdate,
   finishUpdate,
-  loadGatewayModules,
   loadState,
   prepareUpdate,
   pruneTransactions,
@@ -85,7 +84,10 @@ interface ChannelReport {
 
 async function execute(args: ParsedArgs): Promise<UpdateState | PruneReport | ChannelReport> {
   if (args.command === 'set-channel') {
-    const { upsertEnvVar } = await loadGatewayModules(args.projectRoot);
+    // Load only set-env.ts: it exists on every 2.x install, unlike the gateway modules.
+    const setEnv = pathToFileURL(path.join(args.projectRoot, 'setup/set-env.ts')).href;
+    const { upsertEnvVar } = (await import(setEnv)) as typeof import('../setup/set-env.js');
+    process.chdir(args.projectRoot);
     const channel = writeChannelSetting(args.projectRoot, requireValue(args.channel, '--channel'), upsertEnvVar);
     return { schema: 'nanoclaw-update-channel/v1', channel };
   }
@@ -100,7 +102,8 @@ async function execute(args: ParsedArgs): Promise<UpdateState | PruneReport | Ch
       target = resolveUpdateTarget({
         projectRoot: args.projectRoot,
         remote: requireValue(args.remote, '--remote or --upstream-ref'),
-        channel: readChannelSetting(args.projectRoot, args.channel),
+        // A cherry-pick takes only the listed commits, so the release backward check does not apply.
+        channel: args.strategy === 'cherry-pick' ? 'edge' : readChannelSetting(args.projectRoot, args.channel),
       });
       upstreamRef = target.ref;
     }

@@ -97,6 +97,10 @@ export function writeChannelSetting(
 ): UpdateChannel {
   const channel = parseChannel(raw);
   upsert('NANOCLAW_UPDATE_CHANNEL', channel, projectRoot);
+  // Writers before 2.4 ignore projectRoot and use the cwd; never report a write that did not land.
+  if (envValue(projectRoot, 'NANOCLAW_UPDATE_CHANNEL') !== channel) {
+    throw new Error(`Could not save NANOCLAW_UPDATE_CHANNEL=${channel} to ${path.join(projectRoot, '.env')}`);
+  }
   return channel;
 }
 

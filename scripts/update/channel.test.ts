@@ -138,6 +138,11 @@ describe('writeChannelSetting', () => {
     expect(readChannelSetting(root)).toBe('edge');
   });
 
+  it('fails when the writer did not save to this install (pre-2.4 writers use the cwd)', () => {
+    const root = temp('channel-write-');
+    expect(() => writeChannelSetting(root, 'edge', () => undefined)).toThrow(/Could not save/);
+  });
+
   it('rejects an unknown channel without touching .env', () => {
     const root = temp('channel-write-');
     fs.writeFileSync(path.join(root, '.env'), 'A=1\n');
