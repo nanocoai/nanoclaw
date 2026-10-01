@@ -157,7 +157,9 @@ describe('release workflow safeguards', () => {
     expect(releaseWorkflow).not.toContain(
       "- name: Verify protected release environment\n        if: inputs.mode == 'publish'",
     );
-    expect(releaseWorkflow).toContain('EXPECTED_REVIEWERS=\'["gavrielc","omri-maya"]\'');
+    expect(releaseWorkflow).toContain(
+      'EXPECTED_REVIEWERS=\'["amit-shafnir","gavrielc","glifocat","omri-maya","zvi-fried"]\'',
+    );
     expect(releaseWorkflow).toContain('Release reviewer roster drift');
   });
 
@@ -169,7 +171,7 @@ describe('release workflow safeguards', () => {
     expect(releaseWorkflow).not.toContain('release.mjs environment');
     expect(releaseWorkflow).toContain('EXPECTED_REVIEWERS=\'["glifocat"]\'\n              PREVENT_SELF_REVIEW=false');
     expect(releaseWorkflow).toContain(
-      'EXPECTED_REVIEWERS=\'["gavrielc","omri-maya"]\'\n              PREVENT_SELF_REVIEW=true',
+      'EXPECTED_REVIEWERS=\'["amit-shafnir","gavrielc","glifocat","omri-maya","zvi-fried"]\'\n              PREVENT_SELF_REVIEW=true',
     );
     expect(releaseWorkflow).toContain('environments/${ENVIRONMENT}/deployment-branch-policies');
     expect(releaseWorkflow).toContain('CHANNEL_FLAGS=(--prerelease --latest=false)');

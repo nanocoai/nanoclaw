@@ -78,7 +78,7 @@ jobs:
           case "$RELEASE_VERSION" in *-*) ENVIRONMENT=prerelease ;; *) ENVIRONMENT=release ;; esac
           case "$ENVIRONMENT" in
             release)
-              EXPECTED_REVIEWERS='["gavrielc","omri-maya"]'
+              EXPECTED_REVIEWERS='["amit-shafnir","gavrielc","glifocat","omri-maya","zvi-fried"]'
               PREVENT_SELF_REVIEW=true
               ;;
             prerelease)
