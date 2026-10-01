@@ -14,6 +14,7 @@ import {
   startService,
   stopService,
   verifyServiceHealth,
+  withRecordedNohupHost,
   type CommandRunner,
   type ServiceEnvironment,
   type ServiceHandle,
@@ -565,14 +566,19 @@ async function rollbackLocal(state: UpdateState, runtime: UpdateRuntime): Promis
   // below, and discovering it after the stop/reset leaves the operator with a
   // stopped service on old code and a forward-migrated database.
   assertSnapshotRestorable(state);
-  // On the cutover failure path the service was already stopped by cutover
-  // itself; `stopService` is idempotent per mode (already-stopped is success
-  // in the manager's own vocabulary — see its header), so this cannot abort
-  // the restore for a service that is simply gone, while a service that is
-  // genuinely still running still aborts loudly BEFORE anything is destroyed.
-  // Deliberately not a fresh detection: an under-reporting detection would
-  // skip the stop and reset the checkout under a live service.
-  await runtime.stopService(state.service);
+  // Stop via the captured handle so an under-reporting detection cannot skip it;
+  // stopService is idempotent, so a host cutover already stopped is fine.
+  const live = withRecordedNohupHost(state.service, state.projectRoot, runtime.serviceEnv);
+  const wasRunning = runtime.detectService(state.projectRoot).active;
+  await runtime.stopService(live);
+  try {
+    // Agent containers outlive the host's SIGTERM and still mount the data/ the restore replaces.
+    await runtime.drainContainers(state.projectRoot);
+  } catch (err) {
+    // Nothing is reset yet: restart the host only if this rollback is what stopped it.
+    if (wasRunning) runtime.startService(live, state.projectRoot);
+    throw err;
+  }
   git(runtime, state.projectRoot, ['reset', '--hard', state.originalHead]);
   restoreSnapshot(state);
   // Gateways survive cutover; their bind mounts still hold the replaced data/.

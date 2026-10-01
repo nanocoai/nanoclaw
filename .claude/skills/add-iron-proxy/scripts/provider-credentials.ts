@@ -141,7 +141,7 @@ export function createIronCredentialConnection(
     }
   };
   // The record find() observed. Its id never leaves this adapter: keep() and
-  // save() act on it, and both refuse an entry that changed since the lookup.
+  // save() act on it, and both reread the entry and refuse a changed ID or metadata.
   let observed: any | null | undefined;
   let oauthObserved: { broker: any; account: any } | undefined;
   let expectedHost = target.host;

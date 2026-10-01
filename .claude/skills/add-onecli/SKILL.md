@@ -44,6 +44,23 @@ The setup script safely reuses a healthy existing installation, installs the pin
 pnpm exec tsx .claude/skills/add-onecli/scripts/setup.ts
 ```
 
+## Provider credentials
+
+Provider skills such as `/add-opencode` store model credentials here through the
+gateway seam. OneCLI does not grant them automatically: grant the group's OneCLI
+agent access to the chosen secret. Read its existing secret assignments first and
+merge the new secret ID into that list, because `onecli agents set-secrets`
+replaces assignments. Verify the result with `onecli agents secrets`. Do not put
+a key in `.env`, command arguments, or the container environment.
+
+- Only a selected OneCLI adapter uses `ONECLI_URL` and `ONECLI_API_KEY`.
+- Moving an API key to another exact host keeps its stored value, so a blank
+  answer at the key prompt completes the move after confirmation.
+- Existing OneCLI credential names and formats remain compatible.
+- ChatGPT logins need manual reauthentication after expiry on the pinned
+  OneCLI 1.41.0; see [ChatGPT OAuth refresh](references/chatgpt-oauth-refresh.md)
+  for the limitation and upgrade constraints.
+
 ## Validate
 
 ```nc:run effect:build
