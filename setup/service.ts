@@ -16,6 +16,7 @@ import { writeUpgradeState } from '../src/upgrade-state.js';
 import { cleanupUnhealthyPeers } from './peer-cleanup.js';
 import { commandExists, getPlatform, getNodePath, getServiceManager, isRoot } from './platform.js';
 import { emitStatus } from './status.js';
+import { ensureUserLinger } from './lib/systemd-linger.js';
 
 export async function run(_args: string[]): Promise<void> {
   const projectRoot = process.cwd();
@@ -356,14 +357,7 @@ WantedBy=${runningAsRoot ? 'multi-user.target' : 'default.target'}`;
 
   // Enable lingering so the user service survives SSH logout.
   // Without linger, systemd terminates all user processes when the last session closes.
-  if (!runningAsRoot) {
-    try {
-      execSync('loginctl enable-linger', { stdio: 'ignore' });
-      log.info('Enabled loginctl linger for current user');
-    } catch (err) {
-      log.warn('loginctl enable-linger failed — service may stop on SSH logout', { err });
-    }
-  }
+  const lingerEnabled = !runningAsRoot && ensureUserLinger(process.getuid!());
 
   // Enable and start
   try {
@@ -406,7 +400,7 @@ WantedBy=${runningAsRoot ? 'multi-user.target' : 'default.target'}`;
     UNIT_PATH: unitPath,
     SERVICE_LOADED: serviceLoaded,
     ...(dockerGroupStale ? { DOCKER_GROUP_STALE: true } : {}),
-    LINGER_ENABLED: !runningAsRoot,
+    LINGER_ENABLED: lingerEnabled,
     STATUS: 'success',
     LOG: 'logs/setup.log',
   });
