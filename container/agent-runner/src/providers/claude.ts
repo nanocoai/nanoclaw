@@ -154,6 +154,9 @@ const postToolUseHook: HookCallback = async () => {
 /** Minimum spacing between `activity` frames derived from streaming deltas. */
 const STREAM_ACTIVITY_INTERVAL_MS = 1000;
 
+/** Cap on an SDK `result` string reused as a channel error notice. */
+const MAX_RESULT_ERROR_CHARS = 500;
+
 /** The real clock for archive names and rotation stamps; tests hand the history functions a fixed one. */
 const REAL_CLOCK = { now: () => Date.now() };
 
@@ -352,11 +355,15 @@ export class ClaudeProvider implements AgentProvider {
           // `errors[]` instead. Keep that actionable notice separate from
           // model output so the poll-loop can deliver it without scratchpad.
           const m = message as { result?: string; is_error?: boolean; errors?: string[] };
+          const isError = m.is_error === true;
+          // Some failures (e.g. an invalid API key) leave errors[] empty and put
+          // the SDK's user-facing message in `result`; use it as the notice.
+          const resultAsError = isError && !m.errors?.length ? m.result?.trim().slice(0, MAX_RESULT_ERROR_CHARS) : '';
           yield {
             type: 'result',
-            text: m.result ?? null,
-            isError: m.is_error === true,
-            error: m.errors?.length ? m.errors.join('\n') : undefined,
+            text: resultAsError ? null : (m.result ?? null),
+            isError,
+            error: m.errors?.length ? m.errors.join('\n') : resultAsError || undefined,
           };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
           yield { type: 'error', message: 'API retry', retryable: true };

@@ -110,3 +110,62 @@ it('keeps a Claude task billing failure in its task log and out of chat', async 
   ]);
   expect(pushes).toHaveLength(0);
 });
+
+const AUTH_ERROR = 'Invalid API key · Fix external API key';
+
+async function resultEvents(): Promise<Array<{ text: string | null; isError?: boolean; error?: string }>> {
+  const provider = createProvider('claude');
+  provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
+  const events: Array<{ type: string; text: string | null; isError?: boolean; error?: string }> = [];
+  for await (const e of provider.query({ prompt: 'ping', cwd: tmp }).events) events.push(e as (typeof events)[0]);
+  return events.filter((e) => e.type === 'result');
+}
+
+it('uses the SDK result text as the error when errors[] is empty', async () => {
+  sdkMessages.push({ type: 'result', subtype: 'success', is_error: true, result: `  ${AUTH_ERROR}\n`, errors: [] });
+  expect(await resultEvents()).toEqual([{ type: 'result', text: null, isError: true, error: AUTH_ERROR }]);
+});
+
+it('caps a long SDK result used as the error', async () => {
+  sdkMessages.push({ type: 'result', subtype: 'success', is_error: true, result: 'x'.repeat(2000) });
+  const [result] = await resultEvents();
+  expect(result!.error!.length).toBeLessThanOrEqual(500);
+});
+
+it('keeps errors[] as the error when the SDK provides it', async () => {
+  sdkMessages.push({ type: 'result', subtype: 'success', is_error: true, result: AUTH_ERROR, errors: [BILLING_ERROR] });
+  expect(await resultEvents()).toEqual([{ type: 'result', text: AUTH_ERROR, isError: true, error: BILLING_ERROR }]);
+});
+
+it('leaves a successful result untouched', async () => {
+  sdkMessages.push({
+    type: 'result',
+    subtype: 'success',
+    is_error: false,
+    result: '<message to="main">pong</message>',
+  });
+  expect(await resultEvents()).toEqual([
+    { type: 'result', text: '<message to="main">pong</message>', isError: false, error: undefined },
+  ]);
+});
+
+it('delivers the SDK auth error to the channel instead of the generic notice', async () => {
+  sdkMessages.push({ type: 'result', subtype: 'success', is_error: true, result: AUTH_ERROR, errors: [] });
+  const provider = createProvider('claude');
+  provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
+  const exchanges: ProviderExchange[] = [];
+
+  await processQuery(
+    provider.query({ prompt: 'ping', cwd: tmp }),
+    { platformId: 'chan-1', channelType: 'discord', threadId: null, inReplyTo: 'm1' },
+    ['m1'],
+    'claude',
+    (exchange) => exchanges.push(exchange),
+    'ping',
+    undefined,
+    claudeRuntimeContract.textDelivery === 'mid-turn-complete',
+  );
+
+  expect(getUndeliveredMessages().map((row) => JSON.parse(row.content).text)).toEqual([AUTH_ERROR]);
+  expect(exchanges.map((e) => [e.result, e.status])).toEqual([[AUTH_ERROR, 'error']]);
+});
