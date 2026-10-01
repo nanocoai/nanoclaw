@@ -7,12 +7,13 @@
  * untouched. A commit failure never fails setup; it is reported instead.
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, realpathSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { lstatSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 
 import * as p from '@clack/prompts';
 
-/** Dirty path → blob hash of its working-tree content, or '-' when deleted. */
+/** Dirty path → fingerprint of its working-tree entry (type, mode, content), or '-' when absent. */
 export type TreeSnapshot = Map<string, string>;
 
 export interface SetupCommitResult {
@@ -26,7 +27,20 @@ function git(root: string, args: string[], input?: string): string {
     encoding: 'utf8',
     input,
     stdio: ['pipe', 'pipe', 'pipe'],
+    timeout: 60_000,
   });
+}
+
+function fingerprint(file: string): string {
+  try {
+    const stat = lstatSync(file);
+    if (stat.isSymbolicLink()) return `link:${readlinkSync(file)}`;
+    if (!stat.isFile()) return 'other';
+    const exec = stat.mode & 0o111 ? 'x' : '-';
+    return `${exec}:${createHash('sha256').update(readFileSync(file)).digest('hex')}`;
+  } catch {
+    return '-';
+  }
 }
 
 /** Null when `root` is not the top of its own Git checkout: nothing to commit into. */
@@ -40,24 +54,23 @@ export function snapshotTree(root: string): TreeSnapshot | null {
     .split('\0')
     .filter(Boolean)
     .map((entry) => entry.slice(3));
-  const snapshot: TreeSnapshot = new Map(paths.map((file) => [file, '-']));
-  const present = paths.filter((file) => existsSync(join(root, file)));
-  if (present.length) {
-    const hashes = git(root, ['hash-object', '--stdin-paths'], `${present.join('\n')}\n`)
-      .trim()
-      .split('\n');
-    present.forEach((file, i) => snapshot.set(file, hashes[i]));
-  }
-  return snapshot;
+  return new Map(paths.map((file) => [file, fingerprint(join(root, file))]));
 }
 
-function identityArgs(root: string): string[] {
-  try {
-    if (git(root, ['config', 'user.name']).trim() && git(root, ['config', 'user.email']).trim()) return [];
-  } catch {
-    /* unset on a fresh machine */
+// A fresh machine may have no Git identity. Set one on this checkout only:
+// the updater later merges upstream into these commits and needs it too.
+function ensureIdentity(root: string): void {
+  for (const [key, value] of [
+    ['user.name', 'NanoClaw setup'],
+    ['user.email', 'setup@nanoclaw.invalid'],
+  ]) {
+    try {
+      if (git(root, ['config', key]).trim()) continue;
+    } catch {
+      /* unset */
+    }
+    git(root, ['config', '--local', key, value]);
   }
-  return ['-c', 'user.name=NanoClaw setup', '-c', 'user.email=setup@nanoclaw.invalid'];
 }
 
 export function commitSetupChanges(root: string, before: TreeSnapshot | null, message: string): SetupCommitResult {
@@ -68,11 +81,16 @@ export function commitSetupChanges(root: string, before: TreeSnapshot | null, me
     const changed = [...after].filter(([file, hash]) => before.get(file) !== hash).map(([file]) => file);
     if (!changed.length) return { committed: [] };
     const spec = `${changed.join('\0')}\0`;
+    ensureIdentity(root);
     git(root, ['add', '--all', '--pathspec-from-file=-', '--pathspec-file-nul'], spec);
+    // Machine-made local commits: no hooks, no signing prompt mid-setup.
     git(
       root,
       [
-        ...identityArgs(root),
+        '-c',
+        'core.hooksPath=/dev/null',
+        '-c',
+        'commit.gpgSign=false',
         'commit',
         '--no-verify',
         '--quiet',
@@ -97,7 +115,12 @@ export async function withSetupCommit<T>(
   apply: () => Promise<T>,
   onError: (error: string) => void,
 ): Promise<T> {
-  const before = snapshotTree(root);
+  let before: TreeSnapshot | null = null;
+  try {
+    before = snapshotTree(root);
+  } catch (err) {
+    onError(err instanceof Error ? err.message : String(err));
+  }
   try {
     return await apply();
   } finally {

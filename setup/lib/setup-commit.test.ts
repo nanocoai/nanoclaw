@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -88,7 +88,32 @@ describe('setup skill applies leave an updatable checkout', () => {
       'src/providers/index.ts',
     ]);
     expect(readFileSync(join(root, '.env'), 'utf8')).toBe('SECRET=1\n');
-    expect(() => prepareUpdate({ projectRoot: root, upstreamRef: 'main' })).not.toThrow();
+
+    // Upstream moves on; merging it into the setup commit needs a committer.
+    git(root, 'branch', 'upstream', 'HEAD~1');
+    git(root, 'worktree', 'add', '-q', join(temp('setup-commit-upstream-'), 'wt'), 'upstream');
+    const upstreamTree = git(root, 'worktree', 'list', '--porcelain').match(
+      /worktree (.*setup-commit-upstream-.*)/,
+    )![1];
+    writeFileSync(join(upstreamTree, 'CHANGELOG.md'), 'new release\n');
+    git(upstreamTree, 'add', '-A');
+    git(upstreamTree, '-c', 'user.name=u', '-c', 'user.email=u@u', 'commit', '-qm', 'upstream release');
+    expect(prepareUpdate({ projectRoot: root, upstreamRef: 'upstream' }).phase).toBe('prepared');
+  });
+
+  it('survives entries a content hash cannot read and notices mode-only changes', async () => {
+    const root = install();
+    mkdirSync(join(root, 'linked-dir'));
+    writeFileSync(join(root, 'linked-dir', 'f'), 'f\n');
+    symlinkSync(join(root, 'linked-dir'), join(root, 'dir-link'));
+    writeFileSync(join(root, 'tool.sh'), 'echo\n');
+    const onError = vi.fn();
+
+    await withSetupCommit(root, 'example', async () => chmodSync(join(root, 'tool.sh'), 0o755), onError);
+
+    expect(onError).not.toHaveBeenCalled();
+    expect(git(root, 'show', '--name-only', '--format=', 'HEAD')).toBe('tool.sh');
+    expect(git(root, 'ls-files', '-s', 'tool.sh')).toMatch(/^100755/);
   });
 
   it("leaves the operator's own uncommitted edits alone", async () => {
