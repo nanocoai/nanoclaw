@@ -94,8 +94,8 @@ The update channel picks what to merge:
 - `edge`: the tip of upstream `main`.
 
 The controller reads `NANOCLAW_UPDATE_CHANNEL` from `.env`. When the user asks
-for a different channel just this once, add `--channel <name>`. Do not edit
-`.env` unless the user asks to change their default.
+for a different channel just this once, add `--channel <name>`. To change the
+default, run `set-channel` (below); never edit `.env` by hand.
 
 Default to `merge`. Use `rebase` only when the user explicitly wants linear
 history. Use `cherry-pick` only with an explicit comma-separated commit list.
@@ -108,12 +108,27 @@ pnpm exec tsx "$controller_dir/scripts/update-nanoclaw.ts" prepare \
 The JSON result is `nanoclaw-update/v1`. Record its `id`, `stageRoot`, backup
 branch/tag, changed files, and requirements. The live `HEAD` is still unchanged.
 Tell the user the `channel` and the `upstreamRef` it resolved (a release tag,
-or `main` on edge).
+or `main` on edge). If `changedFiles` is empty on stable or beta, say "Already
+on the newest release (vX.Y.Z)", run `abandon`, and stop.
 
 Stable and beta never move an install backward. If this install already has
-upstream commits newer than the latest release, `prepare` fails before staging
-anything and says so. Relay that message; the user can set
-`NANOCLAW_UPDATE_CHANNEL=edge` in `.env` to keep following `main`.
+upstream commits newer than the newest release, `prepare` stages nothing and
+exits with an error whose `code` is `ahead-of-release` (with `tag`). Ask the
+user one question:
+
+> This install is newer than the latest release, `<tag>`. Keep getting the
+> newest code from `main` (edge), or switch to releases and wait for the next
+> one (stable)?
+
+Save the answer as their default:
+
+```bash
+pnpm exec tsx "$controller_dir/scripts/update-nanoclaw.ts" set-channel \
+  --project-root "$PWD" --channel edge   # or stable
+```
+
+On edge, run `prepare` again in the same run and continue. On stable, stop
+and say there is nothing to update until the next release.
 
 If `phase` is `conflict`, resolve conflicts only inside `stageRoot`, preserving
 intentional local customizations. Complete the merge/rebase/cherry-pick there,

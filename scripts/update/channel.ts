@@ -77,12 +77,44 @@ function envValue(projectRoot: string, key: string): string | undefined {
   return found;
 }
 
-export function readChannelSetting(projectRoot: string, override?: string): UpdateChannel {
-  const value = (override ?? envValue(projectRoot, 'NANOCLAW_UPDATE_CHANNEL') ?? 'stable').trim().toLowerCase();
+function parseChannel(raw: string): UpdateChannel {
+  const value = raw.trim().toLowerCase();
   if (!(CHANNELS as readonly string[]).includes(value)) {
     throw new Error(`Unknown update channel "${value}". Use one of: ${CHANNELS.join(', ')}`);
   }
   return value as UpdateChannel;
+}
+
+export function readChannelSetting(projectRoot: string, override?: string): UpdateChannel {
+  return parseChannel(override ?? envValue(projectRoot, 'NANOCLAW_UPDATE_CHANNEL') ?? 'stable');
+}
+
+/** `upsert` is setup/set-env.ts's writer, loaded from the install because the archived controller cannot import setup/. */
+export function writeChannelSetting(
+  projectRoot: string,
+  raw: string,
+  upsert: (key: string, value: string, projectRoot: string) => unknown,
+): UpdateChannel {
+  const channel = parseChannel(raw);
+  upsert('NANOCLAW_UPDATE_CHANNEL', channel, projectRoot);
+  return channel;
+}
+
+/** Thrown when stable/beta would move the install backward; the skill turns it into a question. */
+export class AheadOfReleaseError extends Error {
+  readonly code = 'ahead-of-release';
+  constructor(
+    readonly channel: UpdateChannel,
+    readonly tag: string,
+    readonly base: string,
+  ) {
+    super(
+      `This install already has upstream changes newer than ${tag}, the newest release on the ${channel} channel. ` +
+        `Updating to it would move backward, so nothing was changed. ` +
+        `To keep following main, set NANOCLAW_UPDATE_CHANNEL=edge in .env (or pass --channel edge once). ` +
+        `Otherwise wait for a release that includes this install's commit (${base.slice(0, 8)}).`,
+    );
+  }
 }
 
 /** Annotated release tags on the remote; lightweight and non-release tags never count. */
@@ -131,12 +163,7 @@ export function resolveUpdateTarget(options: ResolveOptions): UpdateTarget {
   // Compare upstream history only, so local customizations never count as "ahead".
   const base = runner.run('git', ['merge-base', 'HEAD', mainRef], root);
   if (!runner.tryRun('git', ['merge-base', '--is-ancestor', base, `${ref}^{commit}`], root).ok) {
-    throw new Error(
-      `This install already has upstream changes newer than ${tag}, the newest release on the ${options.channel} channel. ` +
-        `Updating to it would move backward, so nothing was changed. ` +
-        `To keep following main, set NANOCLAW_UPDATE_CHANNEL=edge in .env (or pass --channel edge once). ` +
-        `Otherwise wait for a release that includes this install's commit (${base.slice(0, 8)}).`,
-    );
+    throw new AheadOfReleaseError(options.channel, tag, base);
   }
   return { channel: options.channel, ref, tag };
 }

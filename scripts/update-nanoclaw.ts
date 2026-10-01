@@ -8,6 +8,7 @@ import {
   cleanupUpdate,
   cutoverUpdate,
   finishUpdate,
+  loadGatewayModules,
   loadState,
   prepareUpdate,
   pruneTransactions,
@@ -18,7 +19,13 @@ import {
   type UpdateState,
   type PruneReport,
 } from './update/transaction.js';
-import { readChannelSetting, resolveUpdateTarget, type UpdateTarget } from './update/channel.js';
+import {
+  AheadOfReleaseError,
+  readChannelSetting,
+  resolveUpdateTarget,
+  writeChannelSetting,
+  type UpdateTarget,
+} from './update/channel.js';
 
 interface ParsedArgs {
   command: string;
@@ -71,7 +78,17 @@ function requireValue<T>(value: T | undefined, name: string): T {
   return value;
 }
 
-async function execute(args: ParsedArgs): Promise<UpdateState | PruneReport> {
+interface ChannelReport {
+  schema: 'nanoclaw-update-channel/v1';
+  channel: string;
+}
+
+async function execute(args: ParsedArgs): Promise<UpdateState | PruneReport | ChannelReport> {
+  if (args.command === 'set-channel') {
+    const { upsertEnvVar } = await loadGatewayModules(args.projectRoot);
+    const channel = writeChannelSetting(args.projectRoot, requireValue(args.channel, '--channel'), upsertEnvVar);
+    return { schema: 'nanoclaw-update-channel/v1', channel };
+  }
   if (args.command === 'prepare') {
     // --upstream-ref is the pre-channel interface older installed skills still use: merge exactly that ref.
     if (args.upstreamRef !== undefined && (args.remote !== undefined || args.channel !== undefined)) {
@@ -121,7 +138,7 @@ async function execute(args: ParsedArgs): Promise<UpdateState | PruneReport> {
 async function main(): Promise<void> {
   try {
     const result = await execute(parseArgs(process.argv.slice(2)));
-    const output = result.schema === 'nanoclaw-update-prune/v1' ? result : summarizeState(result);
+    const output = result.schema === 'nanoclaw-update/v1' ? summarizeState(result) : result;
     process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
     if (result.schema === 'nanoclaw-update/v1' && result.phase === 'conflict') process.exitCode = 2;
   } catch (err) {
@@ -130,6 +147,7 @@ async function main(): Promise<void> {
         {
           schema: 'nanoclaw-update-error/v1',
           error: err instanceof Error ? err.message : String(err),
+          ...(err instanceof AheadOfReleaseError ? { code: err.code, channel: err.channel, tag: err.tag } : {}),
         },
         null,
         2,

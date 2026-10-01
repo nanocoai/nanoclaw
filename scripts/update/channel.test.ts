@@ -5,12 +5,15 @@ import path from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { upsertEnvVar } from '../../setup/set-env.js';
 import {
+  AheadOfReleaseError,
   compareReleaseTags,
   parseReleaseTag,
   readChannelSetting,
   resolveUpdateTarget,
   stampChannel,
+  writeChannelSetting,
 } from './channel.js';
 
 const roots: string[] = [];
@@ -112,6 +115,37 @@ describe('channel setting', () => {
   });
 });
 
+describe('writeChannelSetting', () => {
+  const env = (root: string) => fs.readFileSync(path.join(root, '.env'), 'utf8');
+
+  it('adds the key to a missing or existing .env and keeps other lines and comments', () => {
+    const root = temp('channel-write-');
+    writeChannelSetting(root, 'edge', upsertEnvVar);
+    expect(env(root)).toBe('NANOCLAW_UPDATE_CHANNEL=edge\n');
+    fs.writeFileSync(path.join(root, '.env'), '# keep me\nOTHER=1\n');
+    writeChannelSetting(root, 'stable', upsertEnvVar);
+    expect(env(root)).toBe('# keep me\nOTHER=1\nNANOCLAW_UPDATE_CHANNEL=stable\n');
+  });
+
+  it('replaces an existing value in place, is idempotent, and is read back', () => {
+    const root = temp('channel-write-');
+    fs.writeFileSync(path.join(root, '.env'), 'A=1\nNANOCLAW_UPDATE_CHANNEL="stable"\n# note\nB=2\n');
+    writeChannelSetting(root, 'edge', upsertEnvVar);
+    const once = env(root);
+    expect(once).toBe('A=1\nNANOCLAW_UPDATE_CHANNEL=edge\n# note\nB=2\n');
+    writeChannelSetting(root, 'edge', upsertEnvVar);
+    expect(env(root)).toBe(once);
+    expect(readChannelSetting(root)).toBe('edge');
+  });
+
+  it('rejects an unknown channel without touching .env', () => {
+    const root = temp('channel-write-');
+    fs.writeFileSync(path.join(root, '.env'), 'A=1\n');
+    expect(() => writeChannelSetting(root, 'nightly', upsertEnvVar)).toThrow(/stable, beta, edge/);
+    expect(env(root)).toBe('A=1\n');
+  });
+});
+
 describe('resolveUpdateTarget', () => {
   const resolve = (install: string, channel: 'stable' | 'beta' | 'edge') =>
     resolveUpdateTarget({ projectRoot: install, remote: 'upstream', channel });
@@ -142,6 +176,12 @@ describe('resolveUpdateTarget', () => {
     const { install } = fixture('main');
     commit(install, 'local customization');
     expect(() => resolve(install, 'stable')).toThrow(/newer than v2\.4\.0[\s\S]*NANOCLAW_UPDATE_CHANNEL=edge/);
+    try {
+      resolve(install, 'stable');
+    } catch (err) {
+      expect(err).toBeInstanceOf(AheadOfReleaseError);
+      expect(err).toMatchObject({ code: 'ahead-of-release', tag: 'v2.4.0', channel: 'stable' });
+    }
   });
 
   it('fetches the remote main itself, so a stale tracking ref cannot hide newer upstream commits', () => {
