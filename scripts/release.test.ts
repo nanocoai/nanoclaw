@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import {
   assembleReleaseBody,
   changelogSection,
+  isPrerelease,
   publicationPlan,
   publicationReadbackStatus,
   verifyRelease,
@@ -90,6 +91,56 @@ NanoClaw 2.4.0 adds things.
   });
 });
 
+describe('pre-release metadata', () => {
+  const withUnreleased = changelog.replace(
+    '## [Unreleased]\n',
+    '## [Unreleased]\n\nNext release in progress.\n\n- Pending change.\n',
+  );
+
+  it('treats only x.y.z-rc.N as a pre-release', () => {
+    expect(isPrerelease('2.5.0-rc.1')).toBe(true);
+    expect(isPrerelease('2.5.0-rc.12')).toBe(true);
+    expect(isPrerelease('2.5.0')).toBe(false);
+  });
+
+  it.each(['2.5.0-beta.1', '2.5.0-rc.0', '2.5.0-rc.01', '2.5.0-rc', 'v2.5.0-rc.1', '2.5.0-rc.1+build', '2.5'])(
+    'rejects the unsupported version %s',
+    (version) => {
+      expect(() => isPrerelease(version)).toThrow('x.y.z or x.y.z-rc.N');
+    },
+  );
+
+  it('publishes the Unreleased notes without needing a dated section', () => {
+    expect(verifyRelease({ changelog: withUnreleased, packageVersion: '2.2.0-rc.1', version: '2.2.0-rc.1' })).toBe(
+      'Next release in progress.\n\n- Pending change.',
+    );
+    expect(changelogSection(withUnreleased, '2.2.0-rc.1')).not.toContain('2.1.54');
+  });
+
+  it('requires the package version, Unreleased bullets, and an unreleased base version', () => {
+    expect(() => verifyRelease({ changelog: withUnreleased, packageVersion: '2.2.0', version: '2.2.0-rc.1' })).toThrow(
+      'does not match',
+    );
+    expect(() => verifyRelease({ changelog, packageVersion: '2.2.0-rc.1', version: '2.2.0-rc.1' })).toThrow(
+      '[Unreleased] must contain at least one release-note bullet',
+    );
+    expect(() =>
+      verifyRelease({ changelog: withUnreleased, packageVersion: '2.1.54-rc.1', version: '2.1.54-rc.1' }),
+    ).toThrow('already records as released');
+  });
+
+  it('assembles a pre-release body from the Unreleased notes', () => {
+    const generatedNotes = `## What's Changed
+* Fix one by @alice in https://github.com/nanocoai/nanoclaw/pull/1
+
+**Full Changelog**: https://github.com/nanocoai/nanoclaw/compare/v2.1.54...v2.2.0-rc.1`;
+
+    const body = assembleReleaseBody({ changelog: withUnreleased, generatedNotes, version: '2.2.0-rc.1' });
+    expect(body.startsWith('Next release in progress.')).toBe(true);
+    expect(body).not.toContain('First curated change.');
+  });
+});
+
 describe('release workflow safeguards', () => {
   it('fails wrong-repository and wrong-ref dispatches instead of skipping verification', () => {
     expect(releaseWorkflow).toContain('name: Verify dispatch source');
@@ -108,6 +159,29 @@ describe('release workflow safeguards', () => {
     );
     expect(releaseWorkflow).toContain('EXPECTED_REVIEWERS=\'["gavrielc","omri-maya"]\'');
     expect(releaseWorkflow).toContain('Release reviewer roster drift');
+  });
+
+  it('publishes pre-releases through their own environment, never as latest', () => {
+    expect(releaseWorkflow).toContain("environment: ${{ contains(inputs.version, '-') && 'prerelease' || 'release' }}");
+    expect(releaseWorkflow).toContain(
+      'case "$RELEASE_VERSION" in *-*) ENVIRONMENT=prerelease ;; *) ENVIRONMENT=release ;; esac',
+    );
+    expect(releaseWorkflow).not.toContain('release.mjs environment');
+    expect(releaseWorkflow).toContain('EXPECTED_REVIEWERS=\'["glifocat"]\'\n              PREVENT_SELF_REVIEW=false');
+    expect(releaseWorkflow).toContain(
+      'EXPECTED_REVIEWERS=\'["gavrielc","omri-maya"]\'\n              PREVENT_SELF_REVIEW=true',
+    );
+    expect(releaseWorkflow).toContain('environments/${ENVIRONMENT}/deployment-branch-policies');
+    expect(releaseWorkflow).toContain('CHANNEL_FLAGS=(--prerelease --latest=false)');
+    expect(releaseWorkflow).toContain('CHANNEL_FLAGS=(--latest)');
+    expect(releaseWorkflow).not.toMatch(/^\s+--latest$/m);
+  });
+
+  it('measures release notes from the previous stable tag, skipping pre-releases', () => {
+    expect(releaseWorkflow).toContain(
+      `PREVIOUS_TAG=$(git describe --tags --abbrev=0 --match 'v*' --exclude 'v*-*' "$TARGET_SHA^")`,
+    );
+    expect(releaseWorkflow).not.toContain('git describe --tags --abbrev=0 "$TARGET_SHA^"');
   });
 
   it('bounds post-publication API propagation retries and fails closed after the deadline', () => {
@@ -201,6 +275,16 @@ describe('publication recovery', () => {
 
   it('treats an exact published release as an idempotent success', () => {
     expect(plan({ release: matchingRelease, tagState: annotatedTag })).toBe('already-published');
+  });
+
+  it('expects a pre-release to be published as a prerelease, and only a pre-release', () => {
+    const rcRelease = { ...matchingRelease, name: 'v2.2.0-rc.1', tag_name: 'v2.2.0-rc.1', prerelease: true };
+    const rc = { release: rcRelease, tagState: annotatedTag, version: '2.2.0-rc.1' };
+    expect(plan(rc)).toBe('already-published');
+    expect(() => plan({ ...rc, release: { ...rcRelease, prerelease: false } })).toThrow(
+      'is not marked as a prerelease',
+    );
+    expect(plan({ version: '2.2.0-rc.1' })).toBe('create-tag-and-release');
   });
 
   it('retries only exact release states that are still propagating', () => {
