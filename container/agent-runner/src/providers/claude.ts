@@ -154,11 +154,14 @@ const postToolUseHook: HookCallback = async () => {
 /** Minimum spacing between `activity` frames derived from streaming deltas. */
 const STREAM_ACTIVITY_INTERVAL_MS = 1000;
 
-/** Longest SDK `result` string reused as a channel error notice. */
-const MAX_RESULT_ERROR_CHARS = 300;
-
-/** The Claude CLI's own fixed failure notices, safe to show in a channel. */
-const SDK_NOTICE = /^(Invalid API key|Credit balance is too low|Prompt is too long)\b/;
+/** The Claude CLI's own fixed failure notices (exact strings), safe to show in a channel. */
+const SDK_NOTICES = new Set([
+  'Not logged in · Please run /login',
+  'Invalid API key · Fix external API key',
+  'Invalid auth token · Fix external auth token',
+  'Credit balance is too low',
+  'Prompt is too long',
+]);
 
 /** The real clock for archive names and rotation stamps; tests hand the history functions a fixed one. */
 const REAL_CLOCK = { now: () => Date.now() };
@@ -361,12 +364,9 @@ export class ClaudeProvider implements AgentProvider {
           const isError = m.is_error === true;
           // Some failures (e.g. an invalid API key) leave errors[] empty and put
           // the SDK's own notice in `result`. Other result text can echo upstream
-          // bodies, so only the SDK's fixed notices are reused; the rest stay generic.
+          // bodies, so only exact fixed notices are reused; the rest stay generic.
           const candidate = isError && !m.errors?.length ? (m.result?.trim() ?? '') : '';
-          const resultAsError =
-            candidate.length <= MAX_RESULT_ERROR_CHARS && !/[\r\n]/.test(candidate) && SDK_NOTICE.test(candidate)
-              ? candidate
-              : '';
+          const resultAsError = SDK_NOTICES.has(candidate) ? candidate : '';
           yield {
             type: 'result',
             text: resultAsError ? null : (m.result ?? null),
