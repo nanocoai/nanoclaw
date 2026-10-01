@@ -69,6 +69,8 @@ fi
 
 Materialize the newest controller from that ref. This is the self-update seam:
 an older local skill still executes the newest safety code before any mutation.
+The controller always comes from `main`; the ref it merges follows the channel
+(step 2).
 
 ```bash
 # pwd -P: on macOS mktemp returns a path through the /var symlink, and a
@@ -82,18 +84,36 @@ controller_dir="$(cd "$(mktemp -d)" && pwd -P)"
 git archive "$upstream_ref" scripts src/install-slug.ts | tar -x -C "$controller_dir"
 ```
 
-## 2. Choose the Git strategy and prepare
+## 2. Choose the channel, the Git strategy, and prepare
+
+The update channel picks what to merge:
+
+- `stable` (default): the newest published GitHub Release `vX.Y.Z`. If the
+  GitHub API is unreachable, the newest annotated `vX.Y.Z` tag on the remote.
+- `beta`: the newest `vX.Y.Z-rc.N` pre-release newer than stable, else stable.
+- `edge`: the tip of upstream `main`.
+
+The controller reads `NANOCLAW_UPDATE_CHANNEL` from `.env`. When the user asks
+for a different channel just this once, add `--channel <name>`. Do not edit
+`.env` unless the user asks to change their default.
 
 Default to `merge`. Use `rebase` only when the user explicitly wants linear
 history. Use `cherry-pick` only with an explicit comma-separated commit list.
 
 ```bash
 pnpm exec tsx "$controller_dir/scripts/update-nanoclaw.ts" prepare \
-  --project-root "$PWD" --upstream-ref "$upstream_ref" --strategy merge
+  --project-root "$PWD" --remote "$upstream_remote" --strategy merge
 ```
 
 The JSON result is `nanoclaw-update/v1`. Record its `id`, `stageRoot`, backup
 branch/tag, changed files, and requirements. The live `HEAD` is still unchanged.
+Tell the user the channel and release it resolved (`target.tag`, or `main` on
+edge); if `target.note` is present, show it.
+
+Stable and beta never move an install backward. If this install already has
+upstream commits newer than the latest release, `prepare` fails before staging
+anything and says so. Relay that message; the user can set
+`NANOCLAW_UPDATE_CHANNEL=edge` in `.env` to keep following `main`.
 
 If `phase` is `conflict`, resolve conflicts only inside `stageRoot`, preserving
 intentional local customizations. Complete the merge/rebase/cherry-pick there,
