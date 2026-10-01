@@ -108,8 +108,10 @@ pnpm exec tsx "$controller_dir/scripts/update-nanoclaw.ts" prepare \
 The JSON result is `nanoclaw-update/v1`. Record its `id`, `stageRoot`, backup
 branch/tag, changed files, and requirements. The live `HEAD` is still unchanged.
 Tell the user the `channel` and the `upstreamRef` it resolved (a release tag,
-or `main` on edge). If `changedFiles` is empty on stable or beta, say "Already
-on the newest release (vX.Y.Z)", run `abandon`, and stop.
+or `main` on edge). If `phase` is `prepared` with empty `changedFiles` on
+stable or beta, say "Already on the newest release (vX.Y.Z)" and still run
+step 3: validation can refresh installed channel and provider skills. If
+`changedFiles` is still empty after validation, run `abandon` and stop.
 
 Stable and beta never move an install backward. If this install already has
 upstream commits newer than the newest release, `prepare` stages nothing and
@@ -127,8 +129,8 @@ pnpm exec tsx "$controller_dir/scripts/update-nanoclaw.ts" set-channel \
   --project-root "$PWD" --channel edge   # or stable
 ```
 
-On edge, run `prepare` again in the same run and continue. On stable, stop
-and say there is nothing to update until the next release.
+On edge, run `prepare` again with `--channel edge` and continue. On stable,
+stop and say there is nothing to update until the next release.
 
 If `phase` is `conflict`, resolve conflicts only inside `stageRoot`, preserving
 intentional local customizations. Complete the merge/rebase/cherry-pick there,
