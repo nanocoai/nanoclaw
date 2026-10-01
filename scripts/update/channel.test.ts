@@ -115,6 +115,8 @@ describe('channel setting', () => {
     fs.writeFileSync(path.join(root, '.env'), 'OTHER=1\nNANOCLAW_UPDATE_CHANNEL="edge"\n');
     expect(readChannelSetting(root)).toBe('edge');
     expect(readChannelSetting(root, 'stable')).toBe('stable');
+    fs.writeFileSync(path.join(root, '.env'), 'NANOCLAW_UPDATE_CHANNEL = edge\nNANOCLAW_UPDATE_CHANNEL=\n');
+    expect(readChannelSetting(root)).toBe('edge');
     expect(() => readChannelSetting(root, 'nightly')).toThrow(/stable, beta, edge/);
   });
 });

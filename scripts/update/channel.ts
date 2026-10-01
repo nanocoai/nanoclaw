@@ -74,10 +74,12 @@ function envValue(projectRoot: string, key: string): string | undefined {
   let found: string | undefined;
   for (const line of content.split('\n')) {
     const trimmed = line.trim();
-    if (!trimmed.startsWith(`${key}=`)) continue;
-    let value = trimmed.slice(key.length + 1).trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eqIdx = trimmed.indexOf('=');
+    if (eqIdx === -1 || trimmed.slice(0, eqIdx).trim() !== key) continue;
+    let value = trimmed.slice(eqIdx + 1).trim();
     if (value.length >= 2 && /^(["']).*\1$/.test(value)) value = value.slice(1, -1);
-    found = value || undefined;
+    if (value) found = value;
   }
   return found;
 }
@@ -98,13 +100,19 @@ function githubRepo(remoteUrl: string): string | null {
 export async function fetchGithubReleases(remoteUrl: string): Promise<ReleaseInfo[]> {
   const repo = githubRepo(remoteUrl);
   if (!repo) throw new Error(`${remoteUrl} is not a GitHub remote`);
-  const response = await fetch(`https://api.github.com/repos/${repo}/releases?per_page=100`, {
-    headers: { accept: 'application/vnd.github+json' },
-    signal: AbortSignal.timeout(10_000),
-  });
-  if (!response.ok) throw new Error(`GitHub releases API returned ${response.status}`);
-  const body = (await response.json()) as Array<{ tag_name: string; draft: boolean; prerelease: boolean }>;
-  return body.map((item) => ({ tag: item.tag_name, draft: item.draft, prerelease: item.prerelease }));
+  const releases: ReleaseInfo[] = [];
+  // Every page: many release candidates can push the newest stable release off page one.
+  for (let page = 1; page <= 10; page += 1) {
+    const response = await fetch(`https://api.github.com/repos/${repo}/releases?per_page=100&page=${page}`, {
+      headers: { accept: 'application/vnd.github+json' },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) throw new Error(`GitHub releases API returned ${response.status}`);
+    const body = (await response.json()) as Array<{ tag_name: string; draft: boolean; prerelease: boolean }>;
+    releases.push(...body.map((item) => ({ tag: item.tag_name, draft: item.draft, prerelease: item.prerelease })));
+    if (body.length < 100) break;
+  }
+  return releases;
 }
 
 /** Fallback when the API is unreachable: annotated release tags straight from the remote. */
