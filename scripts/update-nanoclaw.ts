@@ -84,9 +84,10 @@ interface ChannelReport {
 
 async function execute(args: ParsedArgs): Promise<UpdateState | PruneReport | ChannelReport> {
   if (args.command === 'set-channel') {
-    // Load only set-env.ts: it exists on every 2.x install, unlike the gateway modules.
+    // Load only set-env.ts: upsertEnvVar exists from 2.2 on, unlike the gateway modules.
     const setEnv = pathToFileURL(path.join(args.projectRoot, 'setup/set-env.ts')).href;
-    const { upsertEnvVar } = (await import(setEnv)) as typeof import('../setup/set-env.js');
+    const { upsertEnvVar } = (await import(setEnv)) as Partial<typeof import('../setup/set-env.js')>;
+    if (typeof upsertEnvVar !== 'function') throw new Error('This install predates set-channel; update it first');
     process.chdir(args.projectRoot);
     const channel = writeChannelSetting(args.projectRoot, requireValue(args.channel, '--channel'), upsertEnvVar);
     return { schema: 'nanoclaw-update-channel/v1', channel };
