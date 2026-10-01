@@ -38,7 +38,9 @@ Confirm the live tree is clean:
 git status --porcelain
 ```
 
-Stop if it prints anything.
+Stop if it prints anything. Setup commits the files it applies as
+`setup: apply <skill>` commits, so leftovers are the operator's own edits: ask
+whether to commit them as a local customization or stash them, then re-check.
 
 Use the official remote if one already exists. Otherwise add it as `upstream`:
 

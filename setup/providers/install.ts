@@ -33,6 +33,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { applySkill, type ApplyResult } from '../../scripts/skill-apply.js';
+import { warnSetupCommit, withSetupCommit } from '../lib/setup-commit.js';
 import {
   verifyProviderContracts,
   isPinnedBunVersion,
@@ -78,21 +79,27 @@ export async function applyProviderSkill(
   // A provider SKILL.md has no prompt directives (vault-only auth runs
   // separately). No resolveInput is passed: absent ⇒ any prompt defers, which
   // is exactly the old defer-all stub's semantics with no stub to maintain.
-  const result = await applySkill(skillDir, projectRoot, {
-    mode: options.mode ?? 'install',
-    skipEffects: ['build', 'test', 'external'],
-    resolveDependencyCommand: (request) => portableDependencyCommand(projectRoot, bunOnHost, request),
-    exec: (cmd) => execSync(cmd, { cwd: projectRoot, stdio: 'pipe', encoding: 'utf8' }),
-    // Fork-aware: reuse the existing resolver (handles upstream/fork remotes and
-    // the auto-add-upstream fallback) instead of assuming `origin` — same call
-    // setup/channels/slack.ts makes for the `channels` branch.
-    resolveRemote: () =>
-      execSync('source setup/lib/channels-remote.sh; resolve_channels_remote', {
-        cwd: projectRoot,
-        shell: '/bin/bash',
-        encoding: 'utf8',
-      }).trim(),
-  });
+  const result = await withSetupCommit(
+    projectRoot,
+    path.basename(skillDir),
+    () =>
+      applySkill(skillDir, projectRoot, {
+        mode: options.mode ?? 'install',
+        skipEffects: ['build', 'test', 'external'],
+        resolveDependencyCommand: (request) => portableDependencyCommand(projectRoot, bunOnHost, request),
+        exec: (cmd) => execSync(cmd, { cwd: projectRoot, stdio: 'pipe', encoding: 'utf8' }),
+        // Fork-aware: reuse the existing resolver (handles upstream/fork remotes and
+        // the auto-add-upstream fallback) instead of assuming `origin` — same call
+        // setup/channels/slack.ts makes for the `channels` branch.
+        resolveRemote: () =>
+          execSync('source setup/lib/channels-remote.sh; resolve_channels_remote', {
+            cwd: projectRoot,
+            shell: '/bin/bash',
+            encoding: 'utf8',
+          }).trim(),
+      }),
+    warnSetupCommit,
+  );
 
   const blockers = [...result.agentTasks.map((t) => t.reason), ...result.deferred];
   // Verify in "required-declared" mode: the provider this skill installs must
