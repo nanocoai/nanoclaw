@@ -157,6 +157,9 @@ const STREAM_ACTIVITY_INTERVAL_MS = 1000;
 /** Longest SDK `result` string reused as a channel error notice. */
 const MAX_RESULT_ERROR_CHARS = 300;
 
+/** The Claude CLI's own fixed failure notices, safe to show in a channel. */
+const SDK_NOTICE = /^(Invalid API key|Credit balance is too low|Prompt is too long)\b/;
+
 /** The real clock for archive names and rotation stamps; tests hand the history functions a fixed one. */
 const REAL_CLOCK = { now: () => Date.now() };
 
@@ -357,11 +360,11 @@ export class ClaudeProvider implements AgentProvider {
           const m = message as { result?: string; is_error?: boolean; errors?: string[] };
           const isError = m.is_error === true;
           // Some failures (e.g. an invalid API key) leave errors[] empty and put
-          // the SDK's own short notice in `result`. Text naming "API Error" can echo
-          // upstream bodies, so it and long or multi-line text stay generic.
+          // the SDK's own notice in `result`. Other result text can echo upstream
+          // bodies, so only the SDK's fixed notices are reused; the rest stay generic.
           const candidate = isError && !m.errors?.length ? (m.result?.trim() ?? '') : '';
           const resultAsError =
-            candidate.length <= MAX_RESULT_ERROR_CHARS && !/[\r\n]/.test(candidate) && !/API Error\b/i.test(candidate)
+            candidate.length <= MAX_RESULT_ERROR_CHARS && !/[\r\n]/.test(candidate) && SDK_NOTICE.test(candidate)
               ? candidate
               : '';
           yield {

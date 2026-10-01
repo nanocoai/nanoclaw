@@ -129,8 +129,9 @@ it('uses the SDK result text as the error when errors[] is empty', async () => {
 it.each([
   ['an API Error dump', 'API Error: 400 rejected input: <internal>private</internal>'],
   ['a wrapped API Error', 'Failed to authenticate. API Error: 403 denied for tenant private-customer'],
-  ['multi-line text', 'first line\nsecond line'],
-  ['long text', 'x'.repeat(301)],
+  ['an unprefixed upstream message', 'Rate limit reached for tenant private-customer'],
+  ['a multi-line SDK notice', `${AUTH_ERROR}\nsecond line`],
+  ['a long SDK notice', `${AUTH_ERROR} ${'x'.repeat(300)}`],
 ])('keeps the generic notice for %s', async (_label, result) => {
   sdkMessages.push({ type: 'result', subtype: 'success', is_error: true, result, errors: [] });
   expect(await resultEvents()).toEqual([{ type: 'result', text: result, isError: true, error: undefined }]);
