@@ -174,9 +174,17 @@ describe('release workflow safeguards', () => {
       'EXPECTED_REVIEWERS=\'["amit-shafnir","gavrielc","glifocat","omri-maya","zvi-fried"]\'\n              PREVENT_SELF_REVIEW=true',
     );
     expect(releaseWorkflow).toContain('environments/${ENVIRONMENT}/deployment-branch-policies');
-    expect(releaseWorkflow).toContain('CHANNEL_FLAGS=(--prerelease --latest=false)');
-    expect(releaseWorkflow).toContain('CHANNEL_FLAGS=(--latest)');
-    expect(releaseWorkflow).not.toMatch(/^\s+--latest$/m);
+    expect(releaseWorkflow).toContain(
+      [
+        '          if [[ "$RELEASE_VERSION" == *-* ]]; then',
+        '            CHANNEL_FLAGS=(--prerelease --latest=false)',
+        '          else',
+        '            CHANNEL_FLAGS=(--latest)',
+        '          fi',
+      ].join('\n'),
+    );
+    expect(releaseWorkflow).toContain('--verify-tag \\\n              "${CHANNEL_FLAGS[@]}"');
+    expect(releaseWorkflow.match(/--latest|--prerelease/g)).toEqual(['--prerelease', '--latest', '--latest']);
   });
 
   it('measures release notes from the previous stable tag, skipping pre-releases', () => {
