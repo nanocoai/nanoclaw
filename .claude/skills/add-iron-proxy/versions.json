@@ -6,5 +6,5 @@
   "amd64-emulation-image": "docker.io/tonistiigi/binfmt:qemu-v10.2.3-68@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0",
   "iron-control-postgres-image": "docker.io/library/postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73",
   "iron-proxy-source": "https://github.com/ironsh/iron-proxy.git",
-  "iron-proxy-commit": "2393dd175a8c419153fb49917fdeceb94cd9ed59"
+  "iron-proxy-commit": "8a0eb0beb6524f4a7739b799842a13159d8b739e"
 }

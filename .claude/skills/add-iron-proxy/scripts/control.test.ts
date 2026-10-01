@@ -83,7 +83,7 @@ describe('official Iron Control installation', () => {
 
   it('requires both the pinned source and the exact approval front', () => {
     const labels = {
-      'org.opencontainers.image.revision': '2393dd175a8c419153fb49917fdeceb94cd9ed59',
+      'org.opencontainers.image.revision': '8a0eb0beb6524f4a7739b799842a13159d8b739e',
       'ai.nanoclaw.approval-front': frontProxyHash,
     };
     expect(hasFrontProxy({ Config: { Labels: labels } })).toBe(true);
