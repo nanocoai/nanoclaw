@@ -36,7 +36,7 @@ function fingerprint(file: string): string {
     const stat = lstatSync(file);
     if (stat.isSymbolicLink()) return `link:${readlinkSync(file)}`;
     if (!stat.isFile()) return 'other';
-    const exec = stat.mode & 0o111 ? 'x' : '-';
+    const exec = stat.mode & 0o100 ? 'x' : '-';
     return `${exec}:${createHash('sha256').update(readFileSync(file)).digest('hex')}`;
   } catch {
     return '-';
@@ -82,23 +82,12 @@ export function commitSetupChanges(root: string, before: TreeSnapshot | null, me
     if (!changed.length) return { committed: [] };
     const spec = `${changed.join('\0')}\0`;
     ensureIdentity(root);
-    git(root, ['add', '--all', '--pathspec-from-file=-', '--pathspec-file-nul'], spec);
     // Machine-made local commits: no hooks, no signing prompt mid-setup.
+    const quiet = ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgSign=false'];
+    git(root, [...quiet, 'add', '--all', '--pathspec-from-file=-', '--pathspec-file-nul'], spec);
     git(
       root,
-      [
-        '-c',
-        'core.hooksPath=/dev/null',
-        '-c',
-        'commit.gpgSign=false',
-        'commit',
-        '--no-verify',
-        '--quiet',
-        '-m',
-        message,
-        '--pathspec-from-file=-',
-        '--pathspec-file-nul',
-      ],
+      [...quiet, 'commit', '--no-verify', '--quiet', '-m', message, '--pathspec-from-file=-', '--pathspec-file-nul'],
       spec,
     );
     return { committed: changed };

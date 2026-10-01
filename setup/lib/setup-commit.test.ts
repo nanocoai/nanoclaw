@@ -11,6 +11,7 @@ import { runSkill } from './skill-driver.js';
 
 const temps: string[] = [];
 let previousUpdateDir: string | undefined;
+let previousGitEnv: Record<string, string | undefined> = {};
 
 function temp(prefix: string): string {
   const dir = mkdtempSync(join(tmpdir(), prefix));
@@ -62,11 +63,22 @@ function payloadSkill(): string {
 }
 
 beforeEach(() => {
+  // No global or system Git identity, as on a fresh machine.
+  previousGitEnv = {
+    GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL,
+    GIT_CONFIG_NOSYSTEM: process.env.GIT_CONFIG_NOSYSTEM,
+  };
+  process.env.GIT_CONFIG_GLOBAL = '/dev/null';
+  process.env.GIT_CONFIG_NOSYSTEM = '1';
   previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
   process.env.NANOCLAW_UPDATE_DIR = temp('setup-commit-updates-');
 });
 
 afterEach(() => {
+  for (const [key, value] of Object.entries(previousGitEnv)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
   if (previousUpdateDir === undefined) delete process.env.NANOCLAW_UPDATE_DIR;
   else process.env.NANOCLAW_UPDATE_DIR = previousUpdateDir;
   for (const dir of temps.splice(0)) rmSync(dir, { recursive: true, force: true });
@@ -98,6 +110,7 @@ describe('setup skill applies leave an updatable checkout', () => {
     writeFileSync(join(upstreamTree, 'CHANGELOG.md'), 'new release\n');
     git(upstreamTree, 'add', '-A');
     git(upstreamTree, '-c', 'user.name=u', '-c', 'user.email=u@u', 'commit', '-qm', 'upstream release');
+    expect(git(root, 'config', '--local', 'user.email')).toBe('setup@nanoclaw.invalid');
     expect(prepareUpdate({ projectRoot: root, upstreamRef: 'upstream' }).phase).toBe('prepared');
   });
 
