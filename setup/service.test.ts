@@ -1,3 +1,4 @@
+import { execFileSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -5,7 +6,14 @@ import path from 'path';
 import { afterEach, beforeEach, describe, it, expect } from 'vitest';
 
 import { getLaunchdLabel } from '../src/install-slug.js';
-import { hostProxyEnv, nodeHonorsEnvProxy, renderSystemdUnit } from './service.js';
+import {
+  hostProxyEnv,
+  nodeHonorsEnvProxy,
+  renderSystemdUnit,
+  serviceProxyEnvPath,
+  writeOwnerOnly,
+  writeServiceProxyEnv,
+} from './service.js';
 
 /**
  * Tests for service configuration generation.
@@ -208,13 +216,16 @@ describe('nodeHonorsEnvProxy', () => {
   });
 });
 
-describe('renderSystemdUnit', () => {
+describe('service proxy environment', () => {
   let root: string;
   let saved: NodeJS.ProcessEnv;
+  let savedUmask: number;
+  const authed = 'http://user:SYNTHETIC_PROXY_PASSWORD@proxy.example:3128';
 
   beforeEach(() => {
     root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-unit-'));
     saved = { ...process.env };
+    savedUmask = process.umask(0o022);
     for (const key of ['HTTPS_PROXY', 'HTTP_PROXY', 'ALL_PROXY', 'NO_PROXY']) {
       delete process.env[key];
       delete process.env[key.toLowerCase()];
@@ -223,23 +234,104 @@ describe('renderSystemdUnit', () => {
 
   afterEach(() => {
     process.env = saved;
+    process.umask(savedUmask);
     fs.rmSync(root, { recursive: true, force: true });
   });
 
-  it('writes quoted proxy Environment= lines when a proxy is configured', () => {
-    fs.writeFileSync(path.join(root, '.env'), 'HTTPS_PROXY=http://proxy.example:3128\nNO_PROXY=a, b\n');
-    const unit = renderSystemdUnit(root, '/usr/bin/node', '/home/user', false);
-    expect(unit).toContain('Environment="NODE_USE_ENV_PROXY=1"');
-    expect(unit).toContain('Environment="HTTPS_PROXY=http://proxy.example:3128"');
-    expect(unit).toContain('Environment="HTTP_PROXY=http://proxy.example:3128"');
-    expect(unit).toContain('Environment="NO_PROXY=localhost,127.0.0.1,::1,[::1],a,b"');
-    expect(unit).toContain('Environment="https_proxy=http://proxy.example:3128"');
-    expect(unit).toContain('Environment="http_proxy=http://proxy.example:3128"');
-    expect(unit).toContain('Environment="no_proxy=localhost,127.0.0.1,::1,[::1],a,b"');
-    expect(unit).not.toContain('node_use_env_proxy');
+  const mode = (file: string) => fs.statSync(file).mode & 0o777;
+
+  it.each([false, true])('keeps proxy credentials out of the unit (system unit: %s)', (asRoot) => {
+    fs.writeFileSync(path.join(root, '.env'), `HTTPS_PROXY=${authed}\n`);
+    const envFile = writeServiceProxyEnv(root);
+    expect(envFile).toBe(serviceProxyEnvPath(root));
+    const unit = renderSystemdUnit(root, '/usr/bin/node', '/home/user', asRoot, envFile);
+    expect(unit).not.toContain('SYNTHETIC_PROXY_PASSWORD');
+    expect(unit).not.toContain('PROXY');
+    expect(unit).toContain(`EnvironmentFile=${envFile}`);
+    expect(mode(envFile!)).toBe(0o600);
   });
 
-  it('writes no proxy lines without a proxy', () => {
-    expect(renderSystemdUnit(root, '/usr/bin/node', '/home/user', false)).not.toContain('PROXY');
+  it('writes every proxy key and its lowercase twin, readable by a shell', () => {
+    fs.writeFileSync(path.join(root, '.env'), `HTTPS_PROXY=${authed}\nNO_PROXY=a, b\n`);
+    const envFile = writeServiceProxyEnv(root)!;
+    const content = fs.readFileSync(envFile, 'utf8');
+    expect(content).toContain('NODE_USE_ENV_PROXY="1"');
+    expect(content).toContain('no_proxy="localhost,127.0.0.1,::1,[::1],a,b"');
+    expect(content).not.toContain('node_use_env_proxy');
+    const sourced = execFileSync(
+      '/bin/bash',
+      ['-c', 'set -a; . "$1"; printf "%s\\n" "$HTTPS_PROXY" "$http_proxy" "$NO_PROXY" "$no_proxy"', '_', envFile],
+      { encoding: 'utf8', env: { PATH: process.env.PATH } },
+    );
+    const noProxy = 'localhost,127.0.0.1,::1,[::1],a,b';
+    expect(sourced.trim().split('\n')).toEqual([authed, authed, noProxy, noProxy]);
+  });
+
+  it('escapes characters that are special inside double quotes', () => {
+    const odd = 'http://u:p$a"s`s\\w%d@proxy.example:1';
+    process.env.HTTPS_PROXY = odd;
+    const envFile = writeServiceProxyEnv(root)!;
+    const sourced = execFileSync('/bin/bash', ['-c', '. "$1"; printf "%s" "$HTTPS_PROXY"', '_', envFile], {
+      encoding: 'utf8',
+    });
+    expect(sourced).toBe(odd);
+  });
+
+  it('tightens an existing broader-mode file on rerun', () => {
+    const envFile = serviceProxyEnvPath(root);
+    fs.mkdirSync(path.dirname(envFile), { recursive: true });
+    fs.writeFileSync(envFile, 'stale\n', { mode: 0o644 });
+    process.env.HTTPS_PROXY = authed;
+    writeServiceProxyEnv(root);
+    expect(mode(envFile)).toBe(0o600);
+    expect(fs.readFileSync(envFile, 'utf8')).toContain('SYNTHETIC_PROXY_PASSWORD');
+  });
+
+  it('removes a stale file and writes no unit line when no proxy is configured', () => {
+    const envFile = serviceProxyEnvPath(root);
+    fs.mkdirSync(path.dirname(envFile), { recursive: true });
+    fs.writeFileSync(envFile, 'HTTPS_PROXY="http://old.example:1"\n');
+    expect(writeServiceProxyEnv(root)).toBeUndefined();
+    expect(fs.existsSync(envFile)).toBe(false);
+    expect(renderSystemdUnit(root, '/usr/bin/node', '/home/user', false)).not.toContain('Environment' + 'File');
+  });
+
+  it('escapes glob characters in the EnvironmentFile= path', () => {
+    const unit = renderSystemdUnit(root, '/usr/bin/node', '/root', true, '/opt/nc[dev]/data/service-proxy.env');
+    expect(unit).toContain('EnvironmentFile=/opt/nc\\[dev\\]/data/service-proxy.env');
+  });
+
+  it('accepts space-separated NO_PROXY entries', () => {
+    const env = { HTTPS_PROXY: 'http://proxy.example:1', no_proxy: 'api.internal gateway.internal\n.x' };
+    expect(hostProxyEnv(root, env).NO_PROXY).toBe('localhost,127.0.0.1,::1,[::1],api.internal,gateway.internal,.x');
+  });
+
+  it('ignores proxy URLs containing whitespace', () => {
+    expect(hostProxyEnv(root, { HTTPS_PROXY: 'http://proxy.example:1\nX=1' })).toEqual({});
+  });
+});
+
+describe('writeOwnerOnly', () => {
+  let dir: string;
+  let savedUmask: number;
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-owner-'));
+    savedUmask = process.umask(0o022);
+  });
+  afterEach(() => {
+    process.umask(savedUmask);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('creates new files and replaces existing ones as 0600', () => {
+    const fresh = path.join(dir, 'fresh.plist');
+    writeOwnerOnly(fresh, 'a');
+    expect(fs.statSync(fresh).mode & 0o777).toBe(0o600);
+    const existing = path.join(dir, 'existing.plist');
+    fs.writeFileSync(existing, 'old', { mode: 0o644 });
+    writeOwnerOnly(existing, 'new');
+    expect(fs.statSync(existing).mode & 0o777).toBe(0o600);
+    expect(fs.readFileSync(existing, 'utf8')).toBe('new');
+    expect(fs.readdirSync(dir).sort()).toEqual(['existing.plist', 'fresh.plist']);
   });
 });
