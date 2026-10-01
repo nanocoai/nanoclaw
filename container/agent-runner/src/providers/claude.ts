@@ -357,11 +357,11 @@ export class ClaudeProvider implements AgentProvider {
           const m = message as { result?: string; is_error?: boolean; errors?: string[] };
           const isError = m.is_error === true;
           // Some failures (e.g. an invalid API key) leave errors[] empty and put
-          // the SDK's own short notice in `result`. "API Error:" text can echo
+          // the SDK's own short notice in `result`. Text naming "API Error" can echo
           // upstream bodies, so it and long or multi-line text stay generic.
           const candidate = isError && !m.errors?.length ? (m.result?.trim() ?? '') : '';
           const resultAsError =
-            candidate.length <= MAX_RESULT_ERROR_CHARS && !/[\r\n]/.test(candidate) && !/^API Error\b/i.test(candidate)
+            candidate.length <= MAX_RESULT_ERROR_CHARS && !/[\r\n]/.test(candidate) && !/API Error\b/i.test(candidate)
               ? candidate
               : '';
           yield {
