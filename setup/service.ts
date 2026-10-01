@@ -13,6 +13,7 @@ import path from 'path';
 import { log } from '../src/log.js';
 import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
 import { writeUpgradeState } from '../src/upgrade-state.js';
+import type { LingerResult } from './linger.js';
 import { cleanupUnhealthyPeers } from './peer-cleanup.js';
 import { commandExists, getPlatform, getNodePath, getServiceManager, isRoot } from './platform.js';
 import { emitStatus } from './status.js';
@@ -356,13 +357,12 @@ WantedBy=${runningAsRoot ? 'multi-user.target' : 'default.target'}`;
 
   // Enable lingering so the user service survives SSH logout.
   // Without linger, systemd terminates all user processes when the last session closes.
+  // linger.ts is dynamic-imported so its body (and the encrypted-home detection
+  // helpers it pulls in) never evaluates on macOS or on the nohup fallback path.
+  let lingerResult: LingerResult = { lingerEnabled: false };
   if (!runningAsRoot) {
-    try {
-      execSync('loginctl enable-linger', { stdio: 'ignore' });
-      log.info('Enabled loginctl linger for current user');
-    } catch (err) {
-      log.warn('loginctl enable-linger failed — service may stop on SSH logout', { err });
-    }
+    const { manageUserLinger } = await import('./linger.js');
+    lingerResult = manageUserLinger(unitName);
   }
 
   // Enable and start
@@ -406,7 +406,10 @@ WantedBy=${runningAsRoot ? 'multi-user.target' : 'default.target'}`;
     UNIT_PATH: unitPath,
     SERVICE_LOADED: serviceLoaded,
     ...(dockerGroupStale ? { DOCKER_GROUP_STALE: true } : {}),
-    LINGER_ENABLED: !runningAsRoot,
+    LINGER_ENABLED: lingerResult.lingerEnabled,
+    ...(lingerResult.encryptedHome
+      ? { ENCRYPTED_HOME: lingerResult.encryptedHome.type }
+      : {}),
     STATUS: 'success',
     LOG: 'logs/setup.log',
   });
