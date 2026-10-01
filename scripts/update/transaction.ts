@@ -566,13 +566,8 @@ async function rollbackLocal(state: UpdateState, runtime: UpdateRuntime): Promis
   // below, and discovering it after the stop/reset leaves the operator with a
   // stopped service on old code and a forward-migrated database.
   assertSnapshotRestorable(state);
-  // On the cutover failure path the service was already stopped by cutover
-  // itself; `stopService` is idempotent per mode (already-stopped is success
-  // in the manager's own vocabulary — see its header), so this cannot abort
-  // the restore for a service that is simply gone, while a service that is
-  // genuinely still running still aborts loudly BEFORE anything is destroyed.
-  // Deliberately not a fresh detection: an under-reporting detection would
-  // skip the stop and reset the checkout under a live service.
+  // Stop via the captured handle so an under-reporting detection cannot skip it;
+  // stopService is idempotent, so a host cutover already stopped is fine.
   const live = withRecordedNohupHost(state.service, state.projectRoot, runtime.serviceEnv);
   const wasRunning = runtime.detectService(state.projectRoot).active;
   await runtime.stopService(live);
