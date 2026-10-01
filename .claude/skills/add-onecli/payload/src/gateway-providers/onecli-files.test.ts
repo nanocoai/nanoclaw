@@ -78,7 +78,11 @@ describe('persistent OneCLI files', () => {
   it.each(['symlink', 'permissions'] as const)('refuses an unsafe staging directory: %s', (kind) => {
     const directory = path.join(dir, 'onecli');
     if (kind === 'symlink') fs.symlinkSync(dir, directory);
-    else fs.mkdirSync(directory, { mode: 0o755 });
+    else {
+      // mkdir's mode is masked by umask (077 yields 0700, which is safe).
+      fs.mkdirSync(directory);
+      fs.chmodSync(directory, 0o755);
+    }
     expect(() => stageOnecliFile(dir, 'ca', 'CA')).toThrow(/OneCLI file directory/);
     expect(fs.readdirSync(dir)).toEqual(['onecli']);
   });
