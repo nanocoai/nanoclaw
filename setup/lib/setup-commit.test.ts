@@ -67,9 +67,11 @@ beforeEach(() => {
   previousGitEnv = {
     GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL,
     GIT_CONFIG_NOSYSTEM: process.env.GIT_CONFIG_NOSYSTEM,
+    NANOCLAW_SETUP_COMMIT: process.env.NANOCLAW_SETUP_COMMIT,
   };
   process.env.GIT_CONFIG_GLOBAL = '/dev/null';
   process.env.GIT_CONFIG_NOSYSTEM = '1';
+  delete process.env.NANOCLAW_SETUP_COMMIT;
   previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
   process.env.NANOCLAW_UPDATE_DIR = temp('setup-commit-updates-');
 });
@@ -187,6 +189,22 @@ describe('setup skill applies leave an updatable checkout', () => {
     );
     expect(git(root, 'status', '--porcelain')).toBe('');
     expect(git(root, 'ls-files', 'README.md')).toBe('');
+  });
+
+  it('skips the commit when NANOCLAW_SETUP_COMMIT=0, and only then', async () => {
+    const write = (root: string) => async () => writeFileSync(join(root, 'src', 'providers', 'example.ts'), 'x\n');
+
+    process.env.NANOCLAW_SETUP_COMMIT = '0';
+    const optedOut = install();
+    const head = git(optedOut, 'rev-parse', 'HEAD');
+    await withSetupCommit(optedOut, 'example', write(optedOut), () => {});
+    expect(git(optedOut, 'rev-parse', 'HEAD')).toBe(head);
+    expect(git(optedOut, 'status', '--porcelain')).toBe('?? src/providers/example.ts');
+
+    process.env.NANOCLAW_SETUP_COMMIT = '1';
+    const kept = install();
+    await withSetupCommit(kept, 'example', write(kept), () => {});
+    expect(git(kept, 'status', '--porcelain')).toBe('');
   });
 
   it('does nothing outside the top of a Git checkout', async () => {

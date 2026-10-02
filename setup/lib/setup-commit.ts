@@ -104,6 +104,9 @@ export async function withSetupCommit<T>(
   apply: () => Promise<T>,
   onError: (error: string) => void,
 ): Promise<T> {
+  // Contributors running setup in a dev clone can keep these commits off
+  // their feature branch; they then commit (or discard) the files themselves.
+  if (process.env.NANOCLAW_SETUP_COMMIT === '0') return apply();
   let before: TreeSnapshot | null = null;
   try {
     before = snapshotTree(root);
