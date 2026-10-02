@@ -65,7 +65,7 @@ beforeEach(() => {
   vi.stubEnv('NANOCLAW_DISPLAY_NAME', 'Operator');
   // Every step but the terminating cli-agent step; the container step, where
   // the question is asked, is skipped as on any re-entry.
-  vi.stubEnv('NANOCLAW_SKIP', 'environment,container,onecli,auth,mounts,service,first-chat,timezone,channel,verify');
+  vi.stubEnv('NANOCLAW_SKIP', 'environment,container,gateway,auth,mounts,service,first-chat,timezone,channel,verify');
   fixture.fail.mockRejectedValue(new Error('failure assistance finished'));
   fixture.offerPortalReminder.mockResolvedValue(false);
 });

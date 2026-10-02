@@ -1,0 +1,13 @@
+{
+  "version": "1.41.0",
+  "commit": "fe0981f09122358d4b3c721ef3e141026a2fdc46",
+  "files": {
+    "apps.rs": "12bf43528f3510cd2ab9330dd05d2ddb6ee267f033b2384474dca4931b438c52",
+    "cloud_summary.rs": "1a7d0d1b1ad0fd30d7082be464a2bb6908dbb4dff53a113e69c2b0cef600fa85",
+    "summary/generic.rs": "f0a3f72db64106a74da23195ccdf3aacea44b92e3ec97c58029520feacb9686b",
+    "summary/gmail.rs": "f93a104ecbac03f30113be32252d5c5df10b49ed771d53e51e5df35e22110e29",
+    "summary/google_calendar.rs": "ec704141fcd69cf9851abe9de9e235aee3ffacc87eb63e7b5e1ceafd2b767b3f",
+    "summary/mime.rs": "25b3202d9c971d11147c65c705d1b34f017374c5790b6ef09da9a806cb378c60",
+    "summary.rs": "52e5da3af6b10add03d16bffba47201e59f87344b80deee27a9badd2e948f14c"
+  }
+}

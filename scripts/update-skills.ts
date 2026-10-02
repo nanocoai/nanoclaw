@@ -7,7 +7,7 @@ import { applySkill, fullyApplied, type DependencyCommandRequest } from './skill
 import { parseDirectives } from './skill-directives.js';
 import { pinnedBunVersion } from './provider-contract-verifier.js';
 
-export type InstalledSkillKind = 'channel' | 'provider';
+export type InstalledSkillKind = 'channel' | 'provider' | 'gateway';
 
 export interface InstalledSkill {
   name: string;
@@ -37,6 +37,8 @@ export interface SkillsRefreshReport {
 interface RefreshOptions {
   commandAvailable?: (command: string, cwd: string) => boolean;
   exec?: (command: string, cwd: string) => string | void | Promise<string | void>;
+  /** Skills detection cannot see, such as a gateway whose barrel import is not there yet. */
+  include?: InstalledSkill[];
 }
 
 function commandAvailable(command: string, cwd: string): boolean {
@@ -131,7 +133,7 @@ export async function refreshInstalledSkills(
   requested: 'all' | string[] = 'all',
   options: RefreshOptions = {},
 ): Promise<SkillsRefreshReport> {
-  const installed = detectInstalledSkills(root);
+  const installed = [...detectInstalledSkills(root), ...(options.include ?? [])];
   const selected =
     requested === 'all'
       ? installed

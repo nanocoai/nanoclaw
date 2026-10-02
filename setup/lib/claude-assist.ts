@@ -11,8 +11,9 @@
  *   3. Build a minimal prompt: the one-paragraph situation, the failing
  *      step's name/message/hint, and a short list of *file references*
  *      (not contents) so Claude can Read what it needs on its own.
- *   4. Spawn `claude -p --output-format text` with a 2-minute timeout and
- *      a spinner that shows elapsed time.
+ *   4. Spawn `claude -p --output-format stream-json` with a spinner that
+ *      shows elapsed time. The session is read-only: only Read, Grep and
+ *      Glob exist and `--permission-mode dontAsk` denies anything else.
  *   5. Parse `REASON:` / `COMMAND:` out of the response. Show the reason
  *      in a clack note, then hand off to `setup/run-suggested.sh` for
  *      editable pre-fill + exec.
@@ -48,8 +49,8 @@ export const STEP_FILES: Record<string, string[]> = {
   bootstrap: ['setup.sh', 'setup/install-node.sh', 'nanoclaw.sh'],
   environment: ['setup/environment.ts'],
   container: ['setup/container.ts', 'setup/install-docker.sh', 'container/Dockerfile'],
-  onecli: ['setup/onecli.ts'],
-  auth: ['setup/auth.ts', 'setup/register-claude-token.sh', 'setup/install-claude.sh'],
+  gateway: ['setup/gateways/install.ts', 'setup/gateways/catalog.ts'],
+  auth: ['setup/gateways/auth-step.ts', 'setup/gateways/install.ts'],
   mounts: ['setup/mounts.ts'],
   service: ['setup/service.ts'],
   'cli-agent': ['setup/cli-agent.ts', 'scripts/init-cli-agent.ts'],
@@ -75,6 +76,26 @@ export const STEP_FILES: Record<string, string[]> = {
 };
 
 export const BIG_PICTURE_FILES = ['README.md', 'setup/auto.ts'];
+
+/**
+ * Permission flags for the non-interactive diagnosis. Nobody answers
+ * prompts while the spinner runs, so `dontAsk` turns every unapproved call
+ * into a denial. The operator's own allow rules still apply under dontAsk,
+ * so Bash and MCP servers are left out entirely: the diagnosis reads files
+ * and logs, and the suggested fix goes through the operator's
+ * confirm-and-edit step before it runs.
+ */
+export const CLAUDE_READ_ONLY_ARGS = [
+  '--permission-mode',
+  'dontAsk',
+  '--tools',
+  'Read,Grep,Glob',
+  '--strict-mcp-config',
+  '--allowedTools',
+  'Read',
+  'Grep',
+  'Glob',
+];
 
 /**
  * Returns `true` if the user ran a Claude-suggested fix command; callers
@@ -183,7 +204,7 @@ export async function ensureClaudeReady(projectRoot: string): Promise<boolean> {
     // Run under script(1) to capture the OAuth token from PTY output
     // while preserving interactive TTY for the browser OAuth flow.
     // Same approach as register-claude-token.sh, but we set the env var
-    // instead of writing to OneCLI.
+    // instead of writing through the selected gateway.
     const tmpfile = path.join(os.tmpdir(), `claude-setup-token-${process.pid}`);
     try {
       const isUtilLinux = (() => {
@@ -357,7 +378,7 @@ async function queryClaudeUnderSpinner(prompt: string, projectRoot: string): Pro
     //
     // Resume the same session on repeat invocations so Claude carries
     // context across failures in one setup run.
-    const claudeArgs = ['-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'bypassPermissions'];
+    const claudeArgs = ['-p', '--output-format', 'stream-json', '--verbose', ...CLAUDE_READ_ONLY_ARGS];
     if (claudeSessionId) {
       claudeArgs.push('--resume', claudeSessionId);
     }

@@ -45,7 +45,9 @@ export interface ContainerConfigRow {
   updated_at: string;
 }
 
-export type UnknownSenderPolicy = 'strict' | 'request_approval' | 'decline_notify' | 'public';
+/** Every unknown_sender_policy value a messaging group can hold. */
+export const UNKNOWN_SENDER_POLICIES = ['strict', 'request_approval', 'decline_notify', 'public'] as const;
+export type UnknownSenderPolicy = (typeof UNKNOWN_SENDER_POLICIES)[number];
 
 export interface MessagingGroup {
   id: string;
@@ -222,6 +224,10 @@ export interface PendingQuestion {
 
 // ── Pending approvals (central DB) ──
 
+/** Every status a pending_approvals row can hold. */
+export const PENDING_APPROVAL_STATUSES = ['pending', 'approved', 'rejected', 'expired', 'awaiting_reason'] as const;
+export type PendingApprovalStatus = (typeof PENDING_APPROVAL_STATUSES)[number];
+
 export interface PendingApproval {
   approval_id: string;
   session_id: string | null;
@@ -241,12 +247,12 @@ export interface PendingApproval {
   instance: string | null;
   platform_message_id: string | null;
   /**
-   * For OneCLI credential rows, the gateway's request TTL. For a module
+   * For gateway approval rows, the provider request TTL. For a module
    * approval held by "Reject with reason…", the deadline after which the
    * host sweep finalizes a plain reject (set by markApprovalAwaitingReason).
    */
   expires_at: string | null;
-  status: 'pending' | 'approved' | 'rejected' | 'expired' | 'awaiting_reason';
+  status: PendingApprovalStatus;
   title: string;
   /** Original approval-card body, retained when the card reaches a terminal state. */
   question: string;

@@ -3,30 +3,86 @@ import * as p from '@clack/prompts';
 import { brightSelect } from '../setup/lib/bright-select.js';
 import { CONTAINER_IMAGE } from '../src/config.js';
 import { CONTAINER_RUNTIME_BIN } from '../src/container-runtime.js';
-import { buildOneCliManagedStub } from '../src/providers/opencode-auth-stub.js';
+import { buildGatewayManagedStub } from '../src/providers/opencode-auth-stub.js';
 
 const MAX_MODEL_DISCOVERY_BYTES = 1024 * 1024;
+
+// On Linux host.docker.internal is the bridge gateway, where a local model may be bound;
+// Docker Desktop's bridge sits in a VM, so loopback follows.
+export function hostAddressesForContainers(platform: NodeJS.Platform = process.platform): string[] {
+  if (platform !== 'linux') return ['127.0.0.1'];
+  let gateway: string | undefined;
+  try {
+    const output = execFileSync(
+      CONTAINER_RUNTIME_BIN,
+      ['network', 'inspect', 'bridge', '--format', '{{range .IPAM.Config}}{{.Gateway}} {{end}}'],
+      { encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'ignore'] },
+    );
+    gateway = output.split(/\s+/).find((address) => /^\d{1,3}(?:\.\d{1,3}){3}$/.test(address));
+  } catch {
+    // No bridge information: loopback is the only candidate.
+  }
+  return [...new Set([...(gateway ? [gateway] : []), '127.0.0.1'])];
+}
 
 /** Probe a container-facing OpenAI-compatible URL from the host setup process. */
 export async function discoverLocalModelIds(
   baseUrl: string,
   fetchImpl: typeof fetch = globalThis.fetch,
   apiKey?: string,
+  platform: NodeJS.Platform = process.platform,
 ): Promise<string[]> {
   const url = new URL(baseUrl);
-  if (url.hostname === 'host.docker.internal') url.hostname = '127.0.0.1';
   url.pathname = `${url.pathname.replace(/\/$/, '')}/models`;
   url.search = '';
   url.hash = '';
+  const hosts = url.hostname === 'host.docker.internal' ? hostAddressesForContainers(platform) : [url.hostname];
+  let lastError: unknown;
+  for (const host of hosts) {
+    url.hostname = host;
+    try {
+      return await listModels(new URL(url), fetchImpl, apiKey);
+    } catch (error) {
+      // Only an address that never answered moves on; any HTTP answer is final.
+      // Callers read the original failure (and its cause) for the reason they show.
+      const original = error instanceof NoAnswer ? error.cause : error;
+      if (!(error instanceof NoAnswer) || host === hosts[hosts.length - 1]) throw original;
+      lastError = original;
+    }
+  }
+  throw lastError;
+}
 
+/** No response at all: refused, unreachable, or silent until the timeout. */
+class NoAnswer extends Error {}
+const CONNECT_ERRORS = new Set([
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'EADDRNOTAVAIL',
+  'ETIMEDOUT',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_SOCKET',
+]);
+
+async function listModels(url: URL, fetchImpl: typeof fetch, apiKey?: string): Promise<string[]> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 5_000);
   try {
-    const response = await fetchImpl(url, {
-      signal: controller.signal,
-      redirect: 'error',
-      ...(apiKey ? { headers: { Authorization: `Bearer ${apiKey}` } } : {}),
-    });
+    let response: Response;
+    try {
+      response = await fetchImpl(url, {
+        signal: controller.signal,
+        redirect: 'error',
+        ...(apiKey ? { headers: { Authorization: `Bearer ${apiKey}` } } : {}),
+      });
+    } catch (error) {
+      const code = (error as { cause?: { code?: unknown } })?.cause?.code;
+      if ((error as Error)?.name === 'AbortError' || (typeof code === 'string' && CONNECT_ERRORS.has(code)))
+        throw new NoAnswer((error as Error).message, { cause: error });
+      throw error;
+    }
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const declaredLength = Number(response.headers.get('content-length'));
     if (Number.isFinite(declaredLength) && declaredLength > MAX_MODEL_DISCOVERY_BYTES) {
@@ -98,13 +154,13 @@ export function runtimeModelArgs(provider: string, refresh = false, chatgpt = fa
   if (!chatgpt) return [...args, '--entrypoint', 'opencode', CONTAINER_IMAGE, ...command];
   if (provider !== 'openai') throw new Error('ChatGPT mode requires the openai backend.');
   // Activate the same OAuth model filter as the agent runtime, with fixed
-  // non-secret sentinels only. No login, OneCLI access, or host mounts occur.
+  // non-secret sentinels only. No login, gateway access, or host mounts occur.
   return [
     ...args,
     '-e',
     'XDG_DATA_HOME=/tmp/opencode-model-catalog',
     '-e',
-    `OPENCODE_CATALOG_AUTH=${JSON.stringify(buildOneCliManagedStub())}`,
+    `OPENCODE_CATALOG_AUTH=${JSON.stringify(buildGatewayManagedStub())}`,
     '--entrypoint',
     'sh',
     CONTAINER_IMAGE,

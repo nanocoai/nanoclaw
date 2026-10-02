@@ -1,6 +1,91 @@
+// Both installed gateways run their real seam adapters here. Only the
+// gateway selection and the transports beneath the adapters are stubbed, so
+// OpenCode is exercised against OneCLI's and Iron's actual translation and
+// failure paths rather than a hand-written stand-in.
+vi.mock('../setup/gateways/credential-store.js', async () => {
+  const { createProviderCredentialConnection } =
+    await import('../.claude/skills/add-onecli/scripts/provider-credentials.js');
+  const { createIronCredentialConnection, ironModelEndpoint } =
+    await import('../.claude/skills/add-iron-proxy/scripts/provider-credentials.js');
+  const { IronControlRequestError } = await import('../.claude/skills/add-iron-proxy/scripts/control.js');
+  const ironRequest = async (resource: string, method = 'GET', data?: any) => {
+    if (fixture.failVault) throw new IronControlRequestError('Iron unavailable', 503);
+    const [kind, action, namespace, id] = resource.split('/');
+    const key = kind + '/' + (method === 'GET' ? id : action);
+    if (method === 'GET') {
+      const record = fixture.iron.records.get(key);
+      if (!record || record.namespace !== namespace) throw new IronControlRequestError('fixture', 404);
+      const response = structuredClone(record);
+      if (kind === 'broker_credentials') Object.assign(response, { status: 'live', last_refresh: 'refreshed' });
+      return response;
+    }
+    // A PUT names either a foreign id (create or upsert) or an existing
+    // record's opaque id (update in place), as Iron Control does.
+    const existing =
+      fixture.iron.records.get(key) ??
+      [...fixture.iron.records.entries()].find(([k, r]) => k.startsWith(kind + '/') && r.id === action)?.[1];
+    const record = {
+      ...data,
+      id: existing?.id ?? 'id-' + fixture.iron.records.size,
+      foreign_id: existing?.foreign_id ?? action,
+    };
+    if (kind === 'static_secrets') {
+      if (data.source.secret !== undefined) fixture.iron.values.set(record.id, data.source.secret);
+      record.source = { source_type: data.source.source_type, config: data.source.config };
+      record.inject_config ??= {};
+    } else {
+      fixture.iron.values.set(record.id, record.refresh_token);
+      delete record.refresh_token;
+      record.dead = false;
+    }
+    fixture.iron.records.set(kind + '/' + record.foreign_id, record);
+    return structuredClone(record);
+  };
+  return {
+    getCredentialStore: async () => ({
+      has: async () => false,
+      save: async () => {},
+      ...(fixture.gateway === 'iron-proxy'
+        ? {
+            modelEndpoint: (url: string) => {
+              ironModelEndpoint(url, fixture.iron.root);
+              return {
+                configure: async () => {
+                  fixture.gatewayEndpoints.push(url);
+                },
+              };
+            },
+            connection: (target: any) =>
+              createIronCredentialConnection(target, fixture.iron.root, {
+                request: ironRequest,
+                grant: async (id: string) => {
+                  fixture.iron.grants.add(id);
+                },
+                allowHost: async (host: string) => {
+                  fixture.iron.allowed.push(host);
+                },
+                checkIsolation: async () => {},
+              }),
+          }
+        : { connection: (target: any) => createProviderCredentialConnection(target) }),
+    }),
+  };
+});
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 const fixture = vi.hoisted(() => ({
+  gateway: 'onecli',
+  gatewayEndpoints: [] as string[],
+  iron: {
+    root: '',
+    records: new Map<string, any>(),
+    values: new Map<string, string>(),
+    grants: new Set<string>(),
+    allowed: [] as string[],
+  },
   writes: [] as Array<[string, string | null]>,
   requests: [] as RequestInit[],
   vaultUrls: [] as string[],
@@ -8,6 +93,11 @@ const fixture = vi.hoisted(() => ({
   catalogs: 0,
   customProvider: 'openai',
   baseUrl: 'https://models.example/v1',
+  baseUrlAnswers: [] as string[],
+  placeholders: [] as string[],
+  validationErrors: [] as string[],
+  warnings: [] as string[],
+  modelFetchError: undefined as Error | undefined,
   oldHost: '',
   moveHost: true,
   hostConfirmations: 0,
@@ -36,10 +126,27 @@ vi.mock('@clack/prompts', () => ({
   cancel: () => {
     throw new Error('cancelled');
   },
-  text: async ({ message }: { message: string }) => {
+  text: async ({
+    message,
+    placeholder,
+    validate,
+  }: {
+    message: string;
+    placeholder?: string;
+    validate?: (value: string) => string | undefined;
+  }) => {
     fixture.textPrompts.push(message);
     if (message.includes('provider id')) return fixture.customProvider;
-    if (message.includes('base URL')) return fixture.baseUrl;
+    if (message.includes('base URL')) {
+      fixture.placeholders.push(placeholder ?? '');
+      // Clack re-asks until validate passes; the operator answers in order, then gives up.
+      for (const answer of fixture.baseUrlAnswers.length ? fixture.baseUrlAnswers : [fixture.baseUrl]) {
+        const error = validate?.(answer);
+        if (!error) return answer;
+        fixture.validationErrors.push(error);
+      }
+      return Symbol('cancel');
+    }
     return `${fixture.backend === 'local' ? 'openai' : fixture.backend === 'custom' ? fixture.customProvider : 'openrouter'}/fixture`;
   },
   confirm: async ({ message }: { message: string }) => {
@@ -53,7 +160,13 @@ vi.mock('@clack/prompts', () => ({
     fixture.passwords++;
     return fixture.cancelPassword ? Symbol('cancel') : fixture.key;
   },
-  log: { success: vi.fn(), info: vi.fn(), warn: vi.fn() },
+  log: {
+    success: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn((message: string) => {
+      fixture.warnings.push(message);
+    }),
+  },
 }));
 vi.mock('../setup/logs.js', () => ({ userInput: vi.fn(), step: vi.fn() }));
 vi.mock('../setup/set-env.js', () => ({
@@ -75,6 +188,9 @@ import { runOpenCodeAuthStep, runOpenCodeSetupAuth } from './opencode-auth.js';
 
 beforeEach(() => {
   Object.assign(fixture, {
+    gateway: 'onecli',
+    gatewayEndpoints: [],
+    iron: { root: fixture.iron.root, records: new Map(), values: new Map(), grants: new Set(), allowed: [] },
     writes: [],
     requests: [],
     vaultUrls: [],
@@ -82,6 +198,11 @@ beforeEach(() => {
     catalogs: 0,
     customProvider: 'openai',
     baseUrl: 'https://models.example/v1',
+    baseUrlAnswers: [],
+    placeholders: [],
+    validationErrors: [],
+    warnings: [],
+    modelFetchError: undefined,
     oldHost: '',
     moveHost: true,
     hostConfirmations: 0,
@@ -116,6 +237,7 @@ beforeEach(() => {
           passwords: fixture.passwords,
           saved: fixture.requests.filter((r) => ['POST', 'PATCH'].includes(r.method ?? '')).length,
         });
+        if (fixture.modelFetchError) throw fixture.modelFetchError;
         if (fixture.failModels) return new Response('Unauthorized', { status: 401 });
         return new Response(JSON.stringify({ data: [{ id: 'fixture' }] }));
       }
@@ -241,6 +363,18 @@ describe('OpenCode auth configuration commit', () => {
   });
 });
 
+describe('local endpoint with OneCLI selected', () => {
+  it('still accepts a plaintext local endpoint and suggests one', async () => {
+    fixture.backend = 'local';
+    fixture.keyless = true;
+    fixture.baseUrl = 'http://host.docker.internal:8000/v1';
+    await runOpenCodeAuthStep();
+    expect(fixture.validationErrors).toEqual([]);
+    expect(fixture.placeholders).toEqual(['http://host.docker.internal:8000/v1']);
+    expect(fixture.writes).toContainEqual(['OPENCODE_BASE_URL', 'http://host.docker.internal:8000/v1']);
+  });
+});
+
 describe('custom endpoint model discovery', () => {
   it('prompts first and sends the new bearer only to the configured catalog before vaulting', async () => {
     fixture.backend = 'local';
@@ -334,5 +468,181 @@ describe('backend authentication changes', () => {
     await expect(runOpenCodeAuthStep()).rejects.toThrow(outcome === 'decline' ? 'host change cancelled' : 'cancelled');
     expect(fixture.requests.map((request) => request.method)).toEqual(['GET']);
     expect(fixture.writes).toEqual([]);
+  });
+});
+
+describe('OpenCode setup with Iron selected', () => {
+  const roots: string[] = [];
+  beforeEach(async () => {
+    fixture.gateway = 'iron-proxy';
+    vi.stubEnv('ONECLI_URL', undefined);
+    vi.stubEnv('ONECLI_API_KEY', undefined);
+    // The real Iron adapter refuses to touch credentials before Iron Control is registered.
+    const { controlPaths } = await import('../.claude/skills/add-iron-proxy/scripts/control.js');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'opencode-iron-setup-'));
+    roots.push(root);
+    fs.mkdirSync(path.dirname(controlPaths(root).registration), { recursive: true });
+    fs.writeFileSync(controlPaths(root).registration, '{}');
+    fixture.iron.root = root;
+  });
+  afterEach(() => {
+    for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+  });
+  const storedValues = () => [...fixture.iron.values.values()];
+  it('connects a native backend without reading OneCLI or changing gateway selection', async () => {
+    await runOpenCodeSetupAuth();
+    expect(storedValues()).toEqual(['fixture-key']);
+    expect(fixture.iron.grants.size).toBe(1);
+    expect(fixture.iron.allowed).toContain('openrouter.ai');
+    expect(fixture.vaultUrls).toEqual([]);
+    expect(fixture.gatewayEndpoints).toEqual(['https://openrouter.ai']);
+    expect(fixture.writes).toContainEqual(['OPENCODE_PROVIDER', 'openrouter']);
+    expect(fixture.writes.every(([key]) => key.startsWith('OPENCODE_'))).toBe(true);
+    const [record] = fixture.iron.records.values();
+    expect(record.replace_config).toEqual({
+      proxy_value: 'nc-opencode-token-v1',
+      match_headers: ['Authorization'],
+      require: false,
+    });
+    expect(JSON.stringify([...fixture.iron.records.values()])).not.toContain('fixture-key');
+  });
+  it('keeps an Iron key on a blank answer and rotates it under the same native id', async () => {
+    await runOpenCodeSetupAuth();
+    const [id] = fixture.iron.values.keys();
+    fixture.key = '';
+    fixture.writes = [];
+    await runOpenCodeSetupAuth();
+    expect(storedValues()).toEqual(['fixture-key']);
+    expect(fixture.writes).toContainEqual(['OPENCODE_PROVIDER', 'openrouter']);
+    fixture.key = 'rotated-fixture';
+    await runOpenCodeSetupAuth();
+    expect([...fixture.iron.values.entries()]).toEqual([[id, 'rotated-fixture']]);
+    expect(fixture.iron.grants.size).toBe(1);
+  });
+  it('requires a value after an Iron host move because Iron cannot keep a moved key', async () => {
+    fixture.backend = 'local';
+    await runOpenCodeSetupAuth();
+    fixture.baseUrl = 'https://moved.example/v1';
+    fixture.key = '';
+    fixture.writes = [];
+    await expect(runOpenCodeSetupAuth()).rejects.toThrow('API key is required');
+    expect(fixture.hostConfirmations).toBe(1);
+    expect(storedValues()).toEqual(['fixture-key']);
+    expect(fixture.writes).toEqual([]);
+  });
+  it('configures a keyless HTTPS model route without creating a credential', async () => {
+    fixture.backend = 'local';
+    fixture.keyless = true;
+    await runOpenCodeSetupAuth();
+    expect(storedValues()).toEqual([]);
+    expect(fixture.passwords).toBe(0);
+    expect(fixture.gatewayEndpoints).toEqual(['https://models.example/v1']);
+    expect(fixture.vaultUrls).toEqual([]);
+  });
+  it('rejects a plaintext local endpoint at the prompt and asks again', async () => {
+    fixture.backend = 'local';
+    fixture.keyless = true;
+    fixture.baseUrlAnswers = ['http://models.example:8000/v1', 'https://models.example/v1'];
+    await runOpenCodeSetupAuth();
+    expect(fixture.validationErrors).toHaveLength(1);
+    expect(fixture.validationErrors[0]).toMatch(/https:\/\/<dns-name> on port 443/);
+    expect(fixture.validationErrors[0]).toMatch(/certificate Iron trusts/);
+    expect(fixture.validationErrors[0]).toMatch(/add-iron-proxy skill explains how to serve a local model/);
+    expect(fixture.gatewayEndpoints).toEqual(['https://models.example/v1']);
+    expect(fixture.writes).toContainEqual(['OPENCODE_BASE_URL', 'https://models.example/v1']);
+  });
+  it.each([
+    ['plain HTTP', 'http://models.example:8000/v1'],
+    ['plain HTTP to the host without a port', 'http://host.docker.internal/v1'],
+    ['HTTPS on another port', 'https://models.example:8443/v1'],
+    ['an IP address', 'https://192.168.1.20/v1'],
+    ['a private name', 'https://models.home.arpa/v1'],
+  ])('never saves %s, before requesting keys or discovering models', async (_label, url) => {
+    fixture.backend = 'local';
+    fixture.baseUrl = url;
+    await expect(runOpenCodeSetupAuth()).rejects.toThrow('cancelled');
+    expect(fixture.validationErrors).toHaveLength(1);
+    expect(fixture.passwords).toBe(0);
+    expect(fixture.catalogs).toBe(0);
+    expect(fixture.modelRequests).toEqual([]);
+    expect(fixture.writes).toEqual([]);
+    expect(fixture.gatewayEndpoints).toEqual([]);
+  });
+  it('accepts HTTPS on port 443 with a DNS name', async () => {
+    fixture.backend = 'local';
+    fixture.keyless = true;
+    fixture.baseUrl = 'https://models.example:443/v1';
+    await runOpenCodeSetupAuth();
+    expect(fixture.validationErrors).toEqual([]);
+    expect(fixture.gatewayEndpoints).toEqual(['https://models.example:443/v1']);
+  });
+  it('suggests the keyless model on this machine, which Iron accepts over plain HTTP', async () => {
+    fixture.backend = 'local';
+    fixture.keyless = true;
+    await runOpenCodeSetupAuth();
+    expect(fixture.placeholders).toEqual(['http://host.docker.internal:8000/v1']);
+  });
+  it('saves a keyless model on this machine over plain HTTP', async () => {
+    fixture.backend = 'local';
+    fixture.keyless = true;
+    fixture.baseUrl = 'http://host.docker.internal:11434/v1';
+    await runOpenCodeSetupAuth();
+    expect(fixture.validationErrors).toEqual([]);
+    expect(fixture.passwords).toBe(0);
+    expect(fixture.gatewayEndpoints).toEqual(['http://host.docker.internal:11434/v1']);
+    expect(fixture.writes).toContainEqual(['OPENCODE_BASE_URL', 'http://host.docker.internal:11434/v1']);
+  });
+  it('refuses a key for a model on this machine before asking for it', async () => {
+    fixture.backend = 'local';
+    fixture.keyless = false;
+    fixture.baseUrl = 'http://host.docker.internal:11434/v1';
+    await expect(runOpenCodeSetupAuth()).rejects.toThrow('Iron sends keys only over HTTPS');
+    expect(fixture.passwords).toBe(0);
+    expect(fixture.writes).toEqual([]);
+    expect(fixture.gatewayEndpoints).toEqual([]);
+  });
+  it('refuses an exported base URL Iron cannot use before asking for one', async () => {
+    fixture.backend = 'local';
+    vi.stubEnv('OPENCODE_BASE_URL', 'http://models.example:8000/v1');
+    await expect(runOpenCodeSetupAuth()).rejects.toThrow(
+      /exported OPENCODE_BASE_URL.*https:\/\/<dns-name> on port 443/s,
+    );
+    expect(fixture.placeholders).toEqual([]);
+    expect(fixture.writes).toEqual([]);
+  });
+  it('shows why the model list failed', async () => {
+    fixture.backend = 'local';
+    fixture.keyless = true;
+    fixture.modelFetchError = Object.assign(new TypeError('fetch failed'), {
+      cause: Object.assign(new Error('self-signed certificate'), { code: 'DEPTH_ZERO_SELF_SIGNED_CERT' }),
+    });
+    await runOpenCodeSetupAuth();
+    expect(fixture.warnings.join('\n')).toMatch(/Could not list models \(self-signed certificate\)\. Enter a model id/);
+  });
+  it('reads the first nested error of an empty AggregateError cause', async () => {
+    fixture.backend = 'local';
+    fixture.keyless = true;
+    fixture.modelFetchError = Object.assign(new TypeError('fetch failed'), {
+      cause: Object.assign(new AggregateError([new Error('connect ECONNREFUSED 127.0.0.1:8000')], ''), {
+        code: 'ECONNREFUSED',
+      }),
+    });
+    await runOpenCodeSetupAuth();
+    expect(fixture.warnings.join('\n')).toMatch(/Could not list models \(connect ECONNREFUSED 127\.0\.0\.1:8000\)/);
+  });
+  it('falls back to the error message when there is no cause', async () => {
+    fixture.backend = 'local';
+    fixture.keyless = true;
+    fixture.modelFetchError = new Error('HTTP 401\nfrom endpoint');
+    await runOpenCodeSetupAuth();
+    expect(fixture.warnings.join('\n')).toMatch(/Could not list models \(HTTP 401 from endpoint\)/);
+  });
+  it('does not fall back to OneCLI or save defaults after an Iron failure', async () => {
+    fixture.failVault = true;
+    await expect(runOpenCodeSetupAuth()).rejects.toThrow('Iron unavailable');
+    expect(fixture.vaultUrls).toEqual([]);
+    expect(fixture.passwords).toBe(0);
+    expect(fixture.writes).toEqual([]);
+    expect(fixture.gatewayEndpoints).toEqual([]);
   });
 });

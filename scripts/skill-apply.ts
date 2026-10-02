@@ -74,7 +74,22 @@ export type ApplyEvent =
 // the terminal status block's fields, which `capture:<var>=<FIELD>` binds.
 export interface StepOutcome {
   ok: boolean;
+  /** `ERROR` holds the step's own one-line failure message when it reports one. */
   fields: Record<string, string>;
+}
+
+/**
+ * A streaming step that ended without success. `reported` is true when the
+ * step's terminal block named its own cause, which then stands as the bounce
+ * reason verbatim instead of the engine's generic wrapper.
+ */
+export class StepFailure extends Error {
+  readonly reported: boolean;
+  constructor(reportedError?: string) {
+    const message = reportedError?.trim();
+    super(message || 'the step did not complete');
+    this.reported = Boolean(message);
+  }
 }
 
 // Consumers must use this filter for command logs, diagnostics and live output.
@@ -755,7 +770,7 @@ async function applyOne(
         if (!ctx.execStream)
           throw new Error('effect:step needs a streaming exec — an agent runs the step from the prose');
         const { ok, fields } = await ctx.execStream(substitute(d.body.join('\n'), vars));
-        if (!ok) throw new Error('the step did not complete');
+        if (!ok) throw new StepFailure(fields.ERROR);
         if (capture) {
           for (const pair of capture.split(',')) {
             const eq = pair.indexOf('=');
@@ -871,6 +886,10 @@ export async function applySkill(skillDir: string, root: string, opts: ApplyOpti
   // `blocked` stays false and a later restart remains runnable.
   let blocked = false;
   const SIDE_EFFECTS = new Set(['restart', 'step', 'wire']);
+  // Validation of an install that already failed only delays the failure the
+  // operator needs to read. It is not run once `blocked` latches, but it is
+  // bounced, so the agent's recovery tasks still include it.
+  const VALIDATION = new Set(['build', 'test']);
   const bounce = (d: Directive, reason: string) => {
     blocked = true;
     res.agentTasks.push({ kind: d.kind, line: d.line, reason, prose: proseFor(md, d.line) });
@@ -977,7 +996,8 @@ export async function applySkill(skillDir: string, root: string, opts: ApplyOpti
       // own — bounce it too so the agent runs it from the prose once the upstream
       // failure is fixed. (A deferred prompt did NOT set `blocked`, so this only
       // trips on a real failure, never a headless rebuild's missing input.)
-      if (d.kind === 'run' && typeof d.attrs.effect === 'string' && SIDE_EFFECTS.has(d.attrs.effect) && blocked) {
+      const effect = d.kind === 'run' && typeof d.attrs.effect === 'string' ? d.attrs.effect : '';
+      if (blocked && (SIDE_EFFECTS.has(effect) || VALIDATION.has(effect))) {
         bounce(d, 'skipped: an earlier step did not complete — run this from the prose after fixing it');
         continue;
       }
@@ -1036,7 +1056,11 @@ export async function applySkill(skillDir: string, root: string, opts: ApplyOpti
           /* already failing — the close is best-effort */
         }
       }
-      if (/unresolved \{\{/.test(msg))
+      // A step's own ERROR text is checked first: it is the step's to write, so
+      // one that reads like the engine's deferred-input marker is still a
+      // failure (the gate must latch), never a missing answer.
+      if (e instanceof StepFailure && e.reported) bounce(d, msg);
+      else if (/unresolved \{\{/.test(msg))
         res.deferred.push(msg); // blocked on a prompt input
       else bounce(d, `engine could not apply (${msg}) — an agent applies it from the prose`);
     }

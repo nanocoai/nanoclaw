@@ -5,6 +5,7 @@ import { hasDeclaredChannelDefaults } from '../../channels/channel-registry.js';
 import { getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
 import { log } from '../../log.js';
 import { routeInbound } from '../../router.js';
+import { UNKNOWN_SENDER_POLICIES } from '../../types.js';
 import { registerResource } from '../crud.js';
 
 registerResource({
@@ -56,7 +57,7 @@ registerResource({
       type: 'string',
       description:
         'What happens when an unrecognized sender posts. "strict" drops silently. "request_approval" sends an approval card to an admin. "decline_notify" declines the sender politely and sends the owner a one-line FYI. "public" allows anyone. Default: declared by the channel adapter for this context (DM vs group); "strict" when the channel has no declaration.',
-      enum: ['strict', 'request_approval', 'decline_notify', 'public'],
+      enum: [...UNKNOWN_SENDER_POLICIES],
       default: 'strict',
       updatable: true,
     },

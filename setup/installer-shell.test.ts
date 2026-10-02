@@ -11,7 +11,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const files = readdirSync(here)
   .filter((f) => (f.endsWith('.sh') || f.endsWith('.ts')) && !f.endsWith('.test.ts'))
   .map((f) => path.join(here, f))
-  .concat(path.resolve(here, '../.claude/skills/init-onecli/SKILL.md'));
+  .concat(path.resolve(here, '../.claude/skills/add-onecli/scripts/setup.ts'));
 
 const CURL_PIPE = /curl\b[^|\n]*\|\s*(.+)$/;
 const SYSTEM_SHELL = /^(?:sudo(?:\s+-\S+)*\s+)?\/bin\/(?:sh|bash)(?=\s|$|["'`])/;
@@ -33,7 +33,7 @@ describe('setup installers', () => {
   });
 
   it('keeps the OneCLI installer on /bin/sh', () => {
-    const src = readFileSync(path.join(here, 'onecli.ts'), 'utf-8');
+    const src = readFileSync(path.resolve(here, '../.claude/skills/add-onecli/scripts/setup.ts'), 'utf-8');
     expect(src).toMatch(/curl -fsSL onecli\.sh\/install \| \/bin\/sh/);
   });
 });

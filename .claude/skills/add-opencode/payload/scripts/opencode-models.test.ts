@@ -86,8 +86,15 @@ describe('installed runtime catalog', () => {
     expect(args).not.toContain('--mount');
     expect(args).not.toContain('--env-file');
     const stubArg = args.find((value: string) => value.startsWith('OPENCODE_CATALOG_AUTH='));
+    // The catalog run presents the same non-secret placeholder the agent runtime does.
     expect(JSON.parse(stubArg.split('=').slice(1).join('='))).toEqual({
-      openai: { type: 'oauth', access: 'onecli-managed', refresh: 'onecli-managed', expires: Date.UTC(2100, 0, 1) },
+      openai: {
+        type: 'oauth',
+        access: 'nc-opencode-token-v1',
+        refresh: 'nc-opencode-token-v1',
+        accountId: 'nc-opencode-token-v1',
+        expires: Date.UTC(2100, 0, 1),
+      },
     });
     expect(options.timeout).toBe(60000);
     expect(options.maxBuffer).toBeGreaterThan(0);
@@ -110,7 +117,8 @@ describe('default model command', () => {
     fixture.choose.mockResolvedValue('openai/qwen-local');
     await runModelSelection(['--refresh']);
     expect(request).toHaveBeenCalledWith(new URL('http://127.0.0.1:8000/v1/models'), expect.any(Object));
-    expect(fixture.exec).not.toHaveBeenCalled();
+    // On Linux the host-side list may look up the Docker bridge; the native catalog never runs.
+    expect(fixture.exec.mock.calls.filter(([, args]) => (args as string[])[0] === 'run')).toEqual([]);
     expect(fixture.choose.mock.calls[0][0].options).toContainEqual({
       value: 'openai/qwen-local',
       label: 'openai/qwen-local',

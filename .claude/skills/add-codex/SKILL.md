@@ -1,6 +1,6 @@
 ---
 name: add-codex
-description: Use Codex (OpenAI's codex app-server) as a full agent provider — planning, tool orchestration, MCP tools, server-side history, session resume — alongside or instead of Claude. ChatGPT subscription or OpenAI API key, vault-only via OneCLI. Per-group via `ncl groups config update --provider codex`. Distinct from using OpenAI as an MCP tool (where Claude remains the planner).
+description: Use Codex (OpenAI's codex app-server) as a full agent provider — planning, tool orchestration, MCP tools, server-side history, session resume — alongside or instead of Claude. ChatGPT subscription or OpenAI API key, vault-only via the selected gateway. Per-group via `ncl groups config update --provider codex`. Distinct from using OpenAI as an MCP tool (where Claude remains the planner).
 metadata:
   nanoclaw-provider: codex
   nanoclaw-provider-label: Codex
@@ -15,7 +15,7 @@ metadata:
 
 NanoClaw selects each group's agent backend from `container_configs.provider` (default `claude`). This skill installs the Codex provider: copy the payload from the `providers` branch, append one import to each of the three provider barrels, add the pinned Codex CLI to the container manifest (`container/cli-tools.json`), rebuild, then run the vault auth walk-through.
 
-The provider runs `codex app-server` as a child process speaking JSON-RPC over stdio: native streaming, MCP tools, server-side conversation history (the continuation is a thread id, no on-disk transcript). Credentials are **vault-only**: OneCLI serves a sentinel `auth.json` stub into the container and swaps the real ChatGPT token or API key on the wire — no key in `.env`, nothing readable in the container.
+The provider runs `codex app-server` as a child process speaking JSON-RPC over stdio: native streaming, MCP tools, server-side conversation history (the continuation is a thread id, no on-disk transcript). Credentials are **vault-only**: The selected gateway serves a sentinel `auth.json` stub into the container and swaps the real ChatGPT token or API key on the wire — no key in `.env`, nothing readable in the container.
 
 The mechanical steps under **Install** carry `nc:` directive fences: an agent reads the prose and applies them, and a parser can apply them deterministically from the same document. Every directive is idempotent, so the whole skill is safe to re-run; anything a parser can't apply falls back to the prose beside it.
 
@@ -44,7 +44,6 @@ src/providers/codex-agents-md.ts
 src/providers/codex-registration.test.ts
 src/providers/codex-host-contribution.test.ts
 src/providers/codex-agents-md.test.ts
-src/provider-contracts/codex.ts
 container/agent-runner/src/providers/codex.ts
 container/agent-runner/src/providers/codex-app-server.ts
 container/agent-runner/src/providers/exchange-archive.ts
@@ -57,10 +56,22 @@ container/agent-runner/src/providers/codex-contract-parity.test.ts
 container/agent-runner/src/providers/codex.conformance.test.ts
 container/agent-runner/src/providers/codex-cli-tools.test.ts
 container/agent-runner/src/provider-contracts/codex.ts
-setup/providers/codex.ts
-setup/providers/codex.test.ts
 setup/providers/codex-registration.test.ts
 container/AGENTS.md
+```
+
+### Use the selected gateway for authentication
+
+Install the bundled Codex authentication hook alongside the registry payload. This
+keeps the same login choices while delegating custody to the selected gateway,
+and preserves the hook when a provider refresh copies registry files again.
+These two files are omitted from the registry copy so refresh stays idempotent.
+The setup screens and step sequence do not change.
+
+```nc:copy
+payload/src/provider-contracts/codex.ts -> src/provider-contracts/codex.ts
+payload/setup/providers/codex.ts -> setup/providers/codex.ts
+payload/setup/providers/codex.test.ts -> setup/providers/codex.test.ts
 ```
 
 ### 2. Wire the barrels
@@ -92,10 +103,10 @@ import './codex.js';
 The agent's global Node CLIs install from `container/cli-tools.json` (a json-merge seam), not hand-edited Dockerfile layers. Add Codex by appending one entry — idempotent on `name`, so a re-run is a no-op. `@openai/codex` has no native postinstall, so no `onlyBuilt`. The Dockerfile already installs every manifest entry via pinned `pnpm install -g`; no Dockerfile edit is needed.
 
 ```nc:json-merge into:container/cli-tools.json key:name
-{ "name": "@openai/codex", "version": "0.146.0" }
+{ "name": "@openai/codex", "version": "0.155.1" }
 ```
 
-The version (`0.146.0`) is the canonical pin — this SKILL.md is the source of truth.
+The version (`0.155.1`) is the canonical pin — this SKILL.md is the source of truth.
 
 ### 4. Build
 
@@ -119,7 +130,7 @@ The registration tests import only the real barrels — they go red if a barrel 
 pnpm exec tsx setup/index.ts --step provider-auth codex
 ```
 
-The same walk-through fresh installs get from the setup picker: ChatGPT subscription (browser login or device pairing) or an OpenAI API key, landed in the OneCLI vault. Idempotent — it short-circuits when a matching secret already exists. It finishes with the install check.
+The same walk-through fresh installs get from the setup picker: ChatGPT subscription (browser login or device pairing) or an OpenAI API key, landed in the selected gateway’s vault. Idempotent — it short-circuits when a matching secret already exists. It finishes with the install check.
 
 ## Use it
 

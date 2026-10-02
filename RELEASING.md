@@ -16,12 +16,14 @@ A release is cut by a maintainer publishing it. The trigger is a release PR that
 
 `CHANGELOG.md` is the canonical record of user-visible change. The release body on GitHub mirrors it. Aim for:
 
-- **Bold lead-ins** per major feature or fix, then a sentence-case prose explanation.
-- **`[BREAKING]` prefix** for any change that requires user action. Always include the workaround inline — never link to a separate doc for the fix.
-- **Doc links** for major features (relative paths into the repo, e.g. `[setup/lib/install-slug.sh](setup/lib/install-slug.sh)`).
-- **Inline commands** for actionable steps, in backticks.
-- **Minor items** as single plain bullets at the bottom of the entry, no bold lead-in.
+- **A short opening.** One paragraph starting `NanoClaw X.Y.Z adds …` that names what matters for the person running NanoClaw, then the categories below.
+- **`### ⚠️ Before you update` first** whenever an entry needs action or changes cost. Every `[BREAKING]` item lives here with its migration inline on the same bullet line: keep the tag at the start of the line (the update controller and `scripts/release.mjs` look for it), say who is affected, the exact command or edit, and how to check success. A link to a longer detect/fix/verify/rollback guide may follow the inline action, never replace it.
+- **Then `### ✨ New`, `### 🛠️ Fixes`, `### 🔒 Security`, and `### 🔧 For custom installations`**, in that order, skipping empty ones. One emoji per heading, always with the text label.
+- **One outcome per bullet.** A bold lead that states the operator-facing result, then one or two sentences of detail. Fold small related fixes into one bullet rather than adding a plain-bullet tail.
+- **Inline commands and repo-relative doc links**, e.g. `[gateway migration](docs/gateway-seam.md#migrating-an-existing-installation)`. Distinguish new installations, existing installations, and customized forks when the action differs.
 - **No PR numbers** in the user-facing prose. PR references can live in the GitHub Release's `## Contributors` section.
+
+Keep `## [Unreleased]` and dated `## [X.Y.Z] - YYYY-MM-DD` headings unchanged; categories are level-three headings inside the version section and `scripts/release.mjs extract` carries them into the release body. Published release bodies are immutable; improve the next entry rather than rewriting history. [CHANGELOG.md](CHANGELOG.md) `[2.4.0]` is the reference entry.
 
 ## Harvesting release notes from merged pull requests
 
@@ -41,7 +43,8 @@ required. Harvested notes are grouped by the PR's `kind/*` label — the same ma
 `.github/workflows/label-pr.yml` applies — and each bullet carries its PR link and author so you can
 go back to the source. Pull requests whose block is absent or still holds the template prompt are
 listed under **Needs a line** instead of being dropped silently; write a line for the user-visible
-ones and ignore the rest.
+ones and ignore the rest. A PR that ticked the breaking-change box keeps its `[BREAKING]` warning
+there too, so an unwritten migration cannot disappear from the draft.
 
 The draft is a starting point, not the entry. Curate it into the shape described above, then paste
 what you keep under `## [Unreleased]`. The tool prints to stdout and never writes `CHANGELOG.md`.

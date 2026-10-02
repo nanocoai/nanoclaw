@@ -151,6 +151,9 @@ const postToolUseHook: HookCallback = async () => {
   return { continue: true };
 };
 
+/** Minimum spacing between `activity` frames derived from streaming deltas. */
+const STREAM_ACTIVITY_INTERVAL_MS = 1000;
+
 /** The real clock for archive names and rotation stamps; tests hand the history functions a fixed one. */
 const REAL_CLOCK = { now: () => Date.now() };
 
@@ -257,11 +260,21 @@ export class ClaudeProvider implements AgentProvider {
         additionalDirectories: this.additionalDirectories,
         resume: input.continuation,
         pathToClaudeCodeExecutable: '/pnpm/claude',
+        // The append (agent name + destinations) is rebuilt at every container
+        // start. Left to the SDK default, Claude Code records the prompt on a
+        // session's first request and resends that record on every resume, so
+        // a resumed agent would keep its old name and destination list until
+        // compaction. snapshot: false renders it fresh each time.
         systemPrompt: instructions
-          ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions }
+          ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions, snapshot: false }
           : undefined,
         allowedTools: [...this.mcp.allowedTools],
         disallowedTools: [...this.executionPolicy.disallowedTools],
+        // The SDK emits `assistant` only per completed content block, so a long
+        // block is silent and the host sweep kills the container mid-generation.
+        // Streaming deltas are the liveness signal for that window; translateEvents
+        // turns them into throttled `activity` and nothing else.
+        includePartialMessages: true,
         env: this.env,
         model: this.inference.model,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -269,10 +282,11 @@ export class ClaudeProvider implements AgentProvider {
         permissionMode: this.executionPolicy.permissionMode,
         allowDangerouslySkipPermissions: this.executionPolicy.allowDangerouslySkipPermissions,
         settingSources: ['project', 'user', 'local'],
-        // Only sent when enabled, so an install that never turns it on passes
-        // exactly the options it always did. `fastMode` is a Settings member
-        // rather than a query option, which is why it rides `settings`.
-        ...(this.inference.settings ? { settings: this.inference.settings } : {}),
+        // Flag-level settings: `fastMode` only when the install turns it on,
+        // then the execution policy's fixed keys, spread last so per-group
+        // input can never override them. Both are Settings members rather
+        // than query options, which is why they ride `settings`.
+        settings: { ...this.inference.settings, ...this.executionPolicy.settings },
         mcpServers: this.mcp.mcpServers,
         hooks: {
           PreToolUse: [{ hooks: [preToolUseHook] }],
@@ -287,11 +301,21 @@ export class ClaudeProvider implements AgentProvider {
 
     async function* translateEvents(): AsyncGenerator<ProviderEvent> {
       let messageCount = 0;
+      let lastStreamActivityAt = 0;
       for await (const message of sdkResult) {
         if (aborted) return;
-        messageCount++;
 
-        // Yield activity for every SDK event so the poll loop knows the agent is working
+        // Yield activity for every SDK event so the poll loop knows the agent
+        // is working. Deltas arrive per token and carry no content for us, so
+        // they count at most once per second, and not as messages.
+        if (message.type === 'stream_event') {
+          const now = Date.now();
+          if (now - lastStreamActivityAt < STREAM_ACTIVITY_INTERVAL_MS) continue;
+          lastStreamActivityAt = now;
+          yield { type: 'activity' };
+          continue;
+        }
+        messageCount++;
         yield { type: 'activity' };
 
         if (message.type === 'system' && message.subtype === 'init') {

@@ -1,46 +1,36 @@
 /**
- * Gateway provider registry.
+ * Declarative gateway-provider contract and its single registry.
  *
- * The fourth member of the registry family (session drivers, provider
- * container configs, session egress): an install's gateway contributes to
- * every session it spawns — proxy env, trust anchors, credential stubs — and
- * that contribution is TYPED spec content merged before validation, never raw
- * argv appended after it. A gateway that cannot say what it contributes in
- * spec vocabulary does not get to contribute.
- *
- * Its own module, not part of `index.ts`, for the same reason
- * `driver-registry.ts` is separate from the driver barrel: the file an overlay
- * appends an import to must not be the file that owns the map (temporal dead
- * zone on the one path nobody exercises until an overlay is installed).
- *
- * "Gateway provider" is spelled out everywhere on this surface: "provider"
- * alone already means model provider in this tree (`src/providers/`).
+ * A provider translates its native protocol and manages only resources it
+ * owns. NanoClaw owns application lifecycle, approvals, reconciliation, and
+ * realization of the typed runtime contribution.
  */
-import type { ContainerSpec, DriverCapabilities, MountSpec, SessionKey } from '../drivers/types.js';
+import type {
+  ContainerSpec,
+  DriverCapabilities,
+  MountSpec,
+  NetworkAccessIntent,
+  SessionKey,
+} from '../drivers/types.js';
 
-/**
- * What a gateway contributes to one session, in spec vocabulary.
- *
- * - `env` lands on the agent's contributed lane (`ContainerSpec.contributedEnv`),
- *   filled after the model provider's contribution, so the gateway wins a key
- *   collision — the override the old raw-argv append got from Docker's
- *   last-wins rule, now stated as contract.
- * - `mounts` are ordinary MountSpecs: same classes, same admission as every
- *   other mount. Composition dedupes by containerPath with the gateway
- *   winning, so the spec a driver sees is collision-free.
- * - `containers` are auxiliary containers (a per-session proxy). Never role
- *   'agent'. Gated on the driver's `capabilities().auxiliaryContainers` before
- *   a spec is ever built.
- */
+/** Typed spec content contributed to one session. Raw runtime flags never cross this seam. */
 export interface GatewayContribution {
   env?: Record<string, string>;
   mounts?: MountSpec[];
   containers?: ContainerSpec[];
+  /** Provider-owned runtime lineage; reserved host labels cannot be overridden. */
+  labels?: Record<string, string>;
+  /** The only network destination this session may use. */
+  networkAccess: NetworkAccessIntent;
 }
 
-export interface GatewayProviderInput {
+export interface GatewaySessionInput {
   key: SessionKey;
-  /** The agent group's display name — gateway-side agent registration wants it. */
+  /** Adoption must never provision replacement identity for a surviving runtime. */
+  disposition?: 'create' | 'adopt';
+  /** Stable across host restarts and runtime adoption. */
+  runtimeIdentity: string;
+  /** The agent group's display name, for gateways that register an agent identity. */
   groupName: string;
   /** The runtime container this session runs in, as the driver named it; providers key per-session resources on it. */
   containerName: string;
@@ -52,95 +42,135 @@ export interface GatewayProviderInput {
   capabilities: DriverCapabilities;
 }
 
+export function gatewayRuntimeIdentity(key: SessionKey): string {
+  return `${key.installSlug}/${key.agentGroupId}/${key.sessionId}`;
+}
+
 /**
- * A credentialed request held by the gateway awaiting a human decision, in
- * provider-neutral vocabulary (the shape every credential-proxy gateway
- * shares: what is being called, by which agent, until when).
+ * Result of idempotently ensuring one session. The signal stops observation
+ * by this host. Per-session resources use awaited `release` to distinguish
+ * runtime termination from host replacement.
  */
+export interface GatewaySessionRelease {
+  kind: 'session-ended' | 'host-detached';
+  reason: string;
+}
+
+export interface GatewaySessionLease {
+  contribution: GatewayContribution;
+  /** Await cleanup. Host detachment preserves resources for the successor. */
+  release?(event: GatewaySessionRelease): Promise<void>;
+  onUnavailable?(report: (reason: string) => void): void;
+}
+
+export type GatewayApprovalDecision = 'approve' | 'deny' | 'unavailable';
+
+/** Privacy-safe request presentation translated from a provider's native protocol. */
 export interface GatewayApprovalRequest {
-  /** The gateway's own request id — the dedupe key across reconnects. */
+  /** Missing means explicit policy approval for compatibility with older adapters. */
+  trigger?: 'default' | 'policy';
+  /** Exact verified channel identity selected by the gateway policy. */
+  approverUserId?: string;
+  approverInstance?: string;
+  /** Verified destination selected by the gateway policy adapter. */
+  delivery?: { messagingGroupId: string; threadId?: string };
+  /** Metadata only: never credentials, query strings, or request bodies. */
+  destination?: { host: string; method?: string };
+  /** Selected, bounded display fields may come from the request. Never pass raw bodies, headers, tokens or query strings. */
+  summary?: {
+    agent: string;
+    action: string;
+    resource: string;
+    reason: string;
+    details?: { label: string; value: string }[];
+  };
+  /** Policy-selected, privacy-reviewed fields. Rejected if oversized; never silently truncated. */
+  displayFields?: Array<
+    | { label: string; type: 'text' | 'long_text'; value: string }
+    | { label: string; type: 'list'; value: string[]; overflow?: number }
+  >;
   id: string;
-  /** ISO-8601: when the gateway gives up waiting for a decision. */
-  expiresAt: string;
-  method: string;
-  host: string;
-  path: string;
-  bodyPreview?: string;
-  /** The requesting agent; `externalId` is the agent group id when set. */
-  agent: { externalId?: string; name: string };
-  /** Optional structured summary (action + labeled fields) for the card. */
-  summary?: { action?: string; details?: { label: string; value: string }[] };
+  agentGroupId: string;
+  sessionId?: string;
+  runtimeIdentity?: string;
+  createdAt: string;
+  expiresAt?: string;
+  title: string;
+  question: string;
+  audit?: Record<string, string | number | boolean | null>;
 }
 
-export type GatewayApprovalDecision = 'approve' | 'deny';
-
-export interface GatewayApprovalSubscription {
-  stop(): void;
+/** Core-owned installation scope for gateways whose native event stream is shared. */
+export interface GatewayApprovalScope {
+  /** Read live group membership. A rejected lookup is not permission to decide. */
+  ownsAgentGroup(agentGroupId: string): Promise<boolean>;
 }
 
-/**
- * The manual-approvals capability of a gateway. `subscribe` is the one
- * required member: the handler is invoked per held request and its resolved
- * value is the decision. The optional members are capability flags —
- * implement them only when the gateway genuinely supports the operation:
- *
- * - `listPending` — enumerate requests still held gateway-side, for
- *   reconnect reconciliation. A gateway that does not redeliver un-decided
- *   requests on reconnect and offers no enumeration omits it.
- * - `decide` — deliver a decision outside the subscribe callback (a late
- *   decision for a request whose original callback did not survive a
- *   restart). Returns false when the gateway no longer holds the request.
- */
-export interface GatewayApprovalSource {
-  subscribe(
-    handler: (request: GatewayApprovalRequest) => Promise<GatewayApprovalDecision>,
-  ): GatewayApprovalSubscription;
-  listPending?(): Promise<GatewayApprovalRequest[]>;
-  decide?(requestId: string, decision: GatewayApprovalDecision): Promise<boolean>;
+/** A gateway-owned connection handoff. No credentials cross this boundary. */
+export type GatewayConnectionResult =
+  | { status: 'action_required'; action: 'operator_console' | 'oauth'; connect_url: string; message: string }
+  | { status: 'unsupported'; message: string };
+
+export interface GatewayProviderDefinition {
+  kind: string;
+  /** Shared approval health for separated host processes. Missing/expired leases must read false. */
+  availability?: {
+    /** Only the process owning the approval subscription publishes; refreshes a bounded lease. */
+    publish(available: boolean): Promise<void>;
+    read(): Promise<boolean>;
+  };
+  /** Read-only handoff: must not grant credentials or change network policy. */
+  connections?: {
+    connect(input: { agentGroupId: string; host: string }): Promise<GatewayConnectionResult>;
+  };
+  /** Only the selected gateway's skills and instructions reach an agent. */
+  agentSkills: readonly string[];
+  sessions: {
+    /** Idempotently creates or reconnects whatever this session needs; same call for new and adopted sessions. */
+    ensure(input: GatewaySessionInput, signal: AbortSignal): Promise<GatewaySessionLease>;
+    /** Called after surviving sessions have been considered for adoption. */
+    reapOrphans?(): void | Promise<void>;
+  };
+  /** Required for every gateway. Ending while signal is active fails closed. */
+  approvals: {
+    /** Approval action names owned by an older adapter version and swept during migration. */
+    legacyActions?: readonly string[];
+    /** Persist decisions until acknowledged. Requires decide and listPending. */
+    durable?: boolean;
+    subscribe(
+      decide: (request: GatewayApprovalRequest) => Promise<GatewayApprovalDecision>,
+      signal: AbortSignal,
+      resolved?: (requestId: string) => Promise<void>,
+      /** Shared-stream adapters must filter ownership before translating or settling requests. */
+      scope?: GatewayApprovalScope,
+    ): Promise<void>;
+    /** Optional restart recovery, when the gateway supports held-request enumeration or late decisions. */
+    listPending?(): Promise<GatewayApprovalRequest[]>;
+    decide?(requestId: string, decision: GatewayApprovalDecision): Promise<boolean>;
+  };
 }
 
-export interface GatewayProvider {
-  /** Identity, for logs and selection — never a branch above the seam. */
-  readonly kind: string;
-  /**
-   * Called per spawn, before composition validates the spec. Fail-closed: a
-   * throw aborts the spawn, the inbound message stays pending, and the next
-   * sweep tick retries — a session without its gateway is a session without
-   * credentials, and it must not launch.
-   */
-  contribute(input: GatewayProviderInput): Promise<GatewayContribution>;
-  /**
-   * Manual-approvals capability. Absent when the gateway has no held-request
-   * approval flow; the approvals module consumes this seam and never imports
-   * a gateway SDK directly.
-   */
-  approvals?(): GatewayApprovalSource;
-}
-
-/** Not a union: overlays bring their own kinds (see `DriverKind`). */
+/** Not a union: installable gateway packages bring their own kinds. */
 export type GatewayProviderKind = string;
 
-export type GatewayProviderFactory = () => GatewayProvider;
+const registry = new Map<GatewayProviderKind, GatewayProviderDefinition>();
 
-const registry = new Map<GatewayProviderKind, GatewayProviderFactory>();
-
-/**
- * Install a gateway provider under a kind. Overlays call this at module scope
- * from a file reached via `installed.ts`; a duplicate registration is a wiring
- * bug and throws rather than letting the last import silently win.
- */
-export function registerGatewayProvider(kind: GatewayProviderKind, factory: GatewayProviderFactory): void {
-  if (registry.has(kind)) {
-    throw new Error(`Gateway provider already registered: ${kind}`);
+export function registerGatewayProvider(definition: GatewayProviderDefinition): void {
+  if (registry.has(definition.kind)) {
+    throw new Error('Gateway provider already registered: ' + definition.kind);
   }
-  registry.set(kind, factory);
+  registry.set(definition.kind, definition);
 }
 
-export function getGatewayProviderFactory(kind: GatewayProviderKind): GatewayProviderFactory | undefined {
+export function getGatewayProviderRegistration(kind: GatewayProviderKind): GatewayProviderDefinition | undefined {
   return registry.get(kind);
 }
 
-/** The kinds this build can actually run — what the failure message reports. */
+export function listGatewayProviderRegistrations(): GatewayProviderDefinition[] {
+  return [...registry.values()];
+}
+
+/** The kinds this build can actually run. */
 export function listGatewayProviderKinds(): GatewayProviderKind[] {
   return [...registry.keys()];
 }

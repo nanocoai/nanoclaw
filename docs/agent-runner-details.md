@@ -130,7 +130,8 @@ What a provider declares:
   than restating the shape, so a field core adds reaches every provider through the type.
 - `configuration.tone` (optional) — `{ default, toSettings(tone) }`. Core maps the
   declared default into provider-native settings and passes them to the factory as
-  `configuration.tone`. Claude declares `Concise` → `outputStyle` and seeds it only
+  `configuration.tone`. Claude declares `default` (Claude Code's own style; a named style such as `Concise`
+  defeats prompt caching, so the concise instruction lives in `container/CLAUDE.md`) → `outputStyle` and seeds it only
   when absent in the group's native user `settings.json` during session-hook setup.
   Existing values are preserved; project/local settings retain native precedence.
   Claude sends no tone override through SDK query settings. Codex declares `friendly`

@@ -10,6 +10,8 @@ const fixture = vi.hoisted(() => ({
   installModes: [] as unknown[],
   build: { ok: true } as { ok: boolean; message?: string },
   blockers: [] as string[],
+  contractModules: [] as string[],
+  loadedContractModules: [] as string[],
   auth: vi.fn(async () => {}),
   check: vi.fn(async () => {}),
 }));
@@ -44,7 +46,11 @@ vi.mock('./providers/install.js', () => ({
     fixture.order.push('install');
     fixture.installModes.push(options);
     if (fixture.offline) throw new Error('Registry and build dependencies are unavailable');
-    return { changed: fixture.changed, blockers: fixture.blockers };
+    return { changed: fixture.changed, blockers: fixture.blockers, hostContractModules: fixture.contractModules };
+  },
+  loadHostContractModules: async (modules: string[]) => {
+    fixture.order.push('load-contracts');
+    fixture.loadedContractModules.push(...modules);
   },
 }));
 vi.mock('./lib/container-build.js', () => ({
@@ -78,6 +84,8 @@ beforeEach(() => {
     installModes: [],
     build: { ok: true },
     blockers: [],
+    contractModules: [],
+    loadedContractModules: [],
   });
   fixture.auth.mockClear();
   fixture.check.mockClear();
@@ -103,17 +111,22 @@ describe('standalone provider setup flow', () => {
     },
   );
 
-  it('loads the setup adapter after a fresh installation and successful image build', async () => {
+  // The contract barrel is in this process's ESM cache from startup, so
+  // the module the install appended is imported directly, after the rebuild
+  // and before the payload's auth step asks the gateway store for endpoints.
+  it('loads the host contract and the setup adapter after a fresh installation and image build', async () => {
     fixture.installed = false;
+    fixture.contractModules = ['/install/src/provider-contracts/claude.ts'];
     await run(['claude']);
-    expect(fixture.order).toEqual(['install', 'build', 'load-adapter', 'auth']);
+    expect(fixture.order).toEqual(['install', 'build', 'load-contracts', 'load-adapter', 'auth']);
+    expect(fixture.loadedContractModules).toEqual(['/install/src/provider-contracts/claude.ts']);
     expect(fixture.installModes).toEqual([{ mode: 'install' }]);
     expect(fixture.check).toHaveBeenCalledTimes(1);
   });
   it('persists the local image choice after successful apply, then builds before auth', async () => {
     fixture.image = 'hardened';
     await run(['opencode', '--refresh']);
-    expect(fixture.order).toEqual(['install', 'local-image', 'build', 'auth']);
+    expect(fixture.order).toEqual(['install', 'local-image', 'build', 'load-contracts', 'auth']);
     expect(fixture.installModes).toEqual([{ mode: 'refresh' }]);
     expect(fixture.check).toHaveBeenCalledTimes(1);
   });
@@ -157,7 +170,7 @@ describe('standalone provider setup flow', () => {
   it('does not rebuild when applying a skill made no image changes', async () => {
     fixture.changed = false;
     await run(['opencode', '--refresh']);
-    expect(fixture.order).toEqual(['install', 'auth']);
+    expect(fixture.order).toEqual(['install', 'load-contracts', 'auth']);
     expect(fixture.check).toHaveBeenCalledTimes(1);
   });
 });

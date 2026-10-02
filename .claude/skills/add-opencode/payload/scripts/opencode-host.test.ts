@@ -111,7 +111,11 @@ describe('native host OpenCode lifecycle', () => {
     const binary = path.join(root, 'data/host-harness/opencode/node_modules/.bin/opencode');
     expect(findHostOpenCode(root)).toEqual({ binary, version: OPENCODE_HOST_INSTALL_VERSION });
     expect(await hostOpenCode.launch(root)).toBe('exited');
-    expect(edge.spawn).toHaveBeenLastCalledWith(binary, [], { cwd: root, stdio: 'inherit' });
+    expect(edge.spawn).toHaveBeenLastCalledWith(binary, [], {
+      cwd: root,
+      stdio: 'inherit',
+      env: expect.objectContaining({ OPENCODE_PERMISSION: JSON.stringify({ edit: 'ask', bash: 'ask' }) }),
+    });
   });
 
   it('rejects failed help commands even when stderr names the maintenance option', () => {
@@ -185,7 +189,7 @@ describe('native host OpenCode lifecycle', () => {
     expect(await hostOpenCode.prepare(root)).toBe('unavailable');
   });
 
-  it('uses the current checkout, native permissions, and only a context file reference in argv', async () => {
+  it('uses the current checkout, a restrictive permission override, and only a context file reference in argv', async () => {
     touch(path.join(root, 'bin/opencode'));
     const context = path.join(root, 'context with spaces.md');
     touch(context, 'PRIVATE FAILURE DETAIL');
@@ -194,7 +198,18 @@ describe('native host OpenCode lifecycle', () => {
     expect(args).toEqual(['--prompt', `Read ${JSON.stringify(context)} and follow the maintenance request inside it.`]);
     expect(JSON.stringify(args)).not.toContain('PRIVATE FAILURE DETAIL');
     expect(args).not.toContain('--auto');
-    expect(options).toEqual({ cwd: root, stdio: 'inherit' });
+    expect(options.cwd).toBe(root);
+    expect(options.stdio).toBe('inherit');
+    expect(options.env.PATH).toBe(process.env.PATH);
+    // OPENCODE_PERMISSION merges after the global and project config, so it
+    // wins over an operator's top-level allow-all.
+    expect(JSON.parse(options.env.OPENCODE_PERMISSION)).toEqual({ edit: 'ask', bash: 'ask' });
+  });
+
+  it('keeps native configuration free of the maintenance override', async () => {
+    touch(path.join(root, 'bin/opencode'));
+    await hostOpenCode.configure(root);
+    expect(edge.spawn.mock.calls[0][2]).toEqual({ cwd: root, stdio: 'inherit' });
   });
 
   it('allows native configuration without consulting Docker or OneCLI', async () => {
@@ -265,6 +280,20 @@ describe('existing setup failure-assist hook', () => {
       return child;
     });
     await runHostOpenCode(['--update'], root);
+  });
+  it('asks before every edit and command in debug and update sessions', async () => {
+    touch(path.join(root, 'bin/opencode'));
+    const permissions: Record<string, string>[] = [];
+    edge.spawn.mockImplementation((_binary: string, _args: string[], options: { env: Record<string, string> }) => {
+      permissions.push(JSON.parse(options.env.OPENCODE_PERMISSION));
+      const child = new EventEmitter();
+      queueMicrotask(() => child.emit('close', 0));
+      return child;
+    });
+    await runHostOpenCode(['--update'], root);
+    await runHostOpenCode(['--debug'], root);
+    expect(permissions).toHaveLength(2);
+    for (const permission of permissions) expect(permission).toEqual({ edit: 'ask', bash: 'ask' });
   });
 });
 

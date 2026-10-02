@@ -9,8 +9,6 @@ import { isValidTimezone } from './timezone.js';
 const envConfig = readEnvFile([
   'ASSISTANT_NAME',
   'ASSISTANT_HAS_OWN_NUMBER',
-  'ONECLI_URL',
-  'ONECLI_API_KEY',
   'TZ',
   'DEFAULT_AGENT_PROVIDER',
   'NANOCLAW_DEFAULT_MODEL',
@@ -20,7 +18,6 @@ const envConfig = readEnvFile([
   'CONTAINER_PIDS_LIMIT',
   'NANOCLAW_EGRESS_LOCKDOWN',
   'NANOCLAW_EGRESS_NETWORK',
-  'ONECLI_GATEWAY_CONTAINER',
   'WEBHOOK_PORT',
 ]);
 
@@ -91,8 +88,6 @@ export const CONTAINER_IMAGE = process.env.CONTAINER_IMAGE || getDefaultContaine
 // reaping only ever see this install's sessions, not a peer's.
 export const INSTALL_SLUG = getInstallSlug(PROJECT_ROOT);
 export const CONTAINER_INSTALL_LABEL = `nanoclaw-install=${INSTALL_SLUG}`;
-export const ONECLI_URL = process.env.ONECLI_URL || envConfig.ONECLI_URL;
-export const ONECLI_API_KEY = process.env.ONECLI_API_KEY || envConfig.ONECLI_API_KEY;
 // Per-container resource caps, passed through to `docker run`. Default empty =
 // no flag added = today's unbounded behavior (don't OOM existing OSS workloads).
 // Operators opt in: CONTAINER_CPU_LIMIT=2, CONTAINER_MEMORY_LIMIT=8g.
@@ -106,13 +101,11 @@ export const CONTAINER_MEMORY_LIMIT = process.env.CONTAINER_MEMORY_LIMIT || envC
 // Empty = no cap.
 export const CONTAINER_PIDS_LIMIT = process.env.CONTAINER_PIDS_LIMIT ?? envConfig.CONTAINER_PIDS_LIMIT ?? '2048';
 
-// Egress lockdown — force all agent traffic through the OneCLI gateway on a
+// Egress lockdown — force all agent traffic through the selected gateway on a
 // no-internet Docker network. Off by default; consumed by src/egress-lockdown.ts.
 export const EGRESS_LOCKDOWN = (process.env.NANOCLAW_EGRESS_LOCKDOWN || envConfig.NANOCLAW_EGRESS_LOCKDOWN) === 'true';
 export const EGRESS_NETWORK =
   process.env.NANOCLAW_EGRESS_NETWORK || envConfig.NANOCLAW_EGRESS_NETWORK || 'nanoclaw-egress';
-export const ONECLI_GATEWAY_CONTAINER =
-  process.env.ONECLI_GATEWAY_CONTAINER || envConfig.ONECLI_GATEWAY_CONTAINER || 'onecli';
 
 // Resolve when the listener starts so a late process override still wins.
 export function getWebhookPort(): number {

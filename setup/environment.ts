@@ -24,7 +24,7 @@ export function readEnvKey(key: string, projectRoot?: string): string | null {
 
 /**
  * Set (or replace) a single `KEY=value` line in `.env`, creating the file if
- * needed. Non-secret config only — secrets belong in the OneCLI vault.
+ * needed. Non-secret config only — secrets belong in the selected gateway.
  */
 export function upsertEnvKey(key: string, value: string, projectRoot?: string): void {
   const envPath = path.join(projectRoot ?? process.cwd(), '.env');

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import { getInstallSlug } from '../../src/install-slug.js';
 import { refreshInstalledSkills, type SkillsRefreshReport } from '../update-skills.js';
@@ -9,9 +10,11 @@ import {
   defaultServiceEnvironment,
   detectService,
   drainContainers,
+  restartGatewayContainers,
   startService,
   stopService,
   verifyServiceHealth,
+  withRecordedNohupHost,
   type CommandRunner,
   type ServiceEnvironment,
   type ServiceHandle,
@@ -21,7 +24,7 @@ export type UpdatePhase = 'conflict' | 'prepared' | 'validated' | 'cutover' | 'c
 
 export interface UpdateRequirement {
   id: string;
-  type: 'breaking-change' | 'external-component';
+  type: 'breaking-change';
   description: string;
   source: string;
   status: 'pending' | 'succeeded' | 'failed';
@@ -54,6 +57,7 @@ export interface UpdateState {
   service?: ServiceHandle;
   snapshot?: SnapshotEntry[];
   validation?: string[];
+  gatewaySelection?: string;
   lastError?: string;
   createdAt: string;
   completedAt?: string;
@@ -68,14 +72,42 @@ export interface PruneReport {
   retained: string[];
 }
 
+/**
+ * setup/ is outside the `git archive <ref> scripts src/install-slug.ts` extract
+ * every installed /update-nanoclaw skill runs, so these load from a full
+ * checkout of the target instead. They import no packages, so they load before
+ * the stage has node_modules; scripts/update/controller-archive.test.ts checks.
+ */
+export interface GatewayModules {
+  loadGatewayCatalog: typeof import('../../setup/gateways/catalog.js').loadGatewayCatalog;
+  resolveGatewaySelection: typeof import('../../setup/gateways/selection.js').resolveGatewaySelection;
+  upsertEnvVar: typeof import('../../setup/set-env.js').upsertEnvVar;
+}
+
+export async function loadGatewayModules(root: string): Promise<GatewayModules> {
+  const load = (rel: string) => import(pathToFileURL(path.join(root, rel)).href);
+  const [catalog, selection, env] = await Promise.all([
+    load('setup/gateways/catalog.ts'),
+    load('setup/gateways/selection.ts'),
+    load('setup/set-env.ts'),
+  ]);
+  return {
+    loadGatewayCatalog: catalog.loadGatewayCatalog,
+    resolveGatewaySelection: selection.resolveGatewaySelection,
+    upsertEnvVar: env.upsertEnvVar,
+  };
+}
+
 export interface UpdateRuntime {
   runner: CommandRunner;
   serviceEnv: ServiceEnvironment;
   detectService(projectRoot: string): ServiceHandle;
   stopService(handle: ServiceHandle): Promise<void>;
   drainContainers(projectRoot: string): Promise<void>;
+  restartGateways(projectRoot: string): void;
   startService(handle: ServiceHandle, projectRoot: string): void;
   verifyHealth(handle: ServiceHandle, projectRoot: string): Promise<boolean>;
+  loadGateway(root: string): Promise<GatewayModules>;
 }
 
 export function createUpdateRuntime(runner = createCommandRunner()): UpdateRuntime {
@@ -86,8 +118,10 @@ export function createUpdateRuntime(runner = createCommandRunner()): UpdateRunti
     detectService: (root) => detectService(root, serviceEnv),
     stopService: (handle) => stopService(handle, serviceEnv),
     drainContainers: (root) => drainContainers(root, serviceEnv),
+    restartGateways: (root) => restartGatewayContainers(root, serviceEnv),
     startService: (handle, root) => startService(handle, root, serviceEnv),
     verifyHealth: (handle, root) => verifyServiceHealth(handle, root, serviceEnv),
+    loadGateway: loadGatewayModules,
   };
 }
 
@@ -152,11 +186,12 @@ export function loadState(projectRoot: string, id: string): UpdateState {
   // Same canonicalization as the safety comparisons: the slug is derived from
   // the path's spelling, so a symlink-spelled --project-root must land on the
   // root the (realpathed) prepare wrote under, not an ENOENT sibling.
-  const expectedTransactionRoot = path.join(defaultTransactionsRoot(realResolve(projectRoot)), id);
+  const resolvedProjectRoot = realResolve(projectRoot);
+  const expectedTransactionRoot = path.join(defaultTransactionsRoot(resolvedProjectRoot), id);
   const target = statePath(expectedTransactionRoot);
   const state = JSON.parse(fs.readFileSync(target, 'utf8')) as UpdateState;
   if (state.schema !== 'nanoclaw-update/v1') throw new Error(`Unsupported update state in ${target}`);
-  if (!hasSafeStatePaths(state, projectRoot, expectedTransactionRoot, id)) {
+  if (!hasSafeStatePaths(state, resolvedProjectRoot, expectedTransactionRoot, id)) {
     throw new Error('Update state contains mismatched or unsafe paths');
   }
   return state;
@@ -191,40 +226,13 @@ function breakingRequirements(runtime: UpdateRuntime, root: string, from: string
     }));
 }
 
-function jsonAt(runtime: UpdateRuntime, root: string, rev: string, file: string): Record<string, unknown> {
-  const result = tryGit(runtime, root, ['show', `${rev}:${file}`]);
-  if (!result.ok || !result.stdout) return {};
-  return JSON.parse(result.stdout) as Record<string, unknown>;
-}
-
-function externalRequirements(runtime: UpdateRuntime, root: string, from: string, to: string): UpdateRequirement[] {
-  const before = jsonAt(runtime, root, from, 'versions.json');
-  const after = jsonAt(runtime, root, to, 'versions.json');
-  return ['onecli-gateway', 'onecli-cli']
-    .filter((name) => before[name] !== after[name])
-    .map((name) => {
-      const description = `${name}: ${String(before[name] ?? 'absent')} → ${String(after[name] ?? 'absent')}`;
-      return {
-        id: requirementId('external-component', description),
-        type: 'external-component' as const,
-        description,
-        source: 'docs/onecli-upgrades.md',
-        status: 'pending' as const,
-        rollback: `Restore ${name} to ${String(before[name] ?? 'the previously installed version')}`,
-      };
-    });
-}
-
 function refreshPreparedState(state: UpdateState, runtime: UpdateRuntime): void {
   assertClean(runtime, state.stageRoot, 'Staging worktree');
   state.targetHead = git(runtime, state.stageRoot, ['rev-parse', 'HEAD']);
   state.changedFiles = git(runtime, state.stageRoot, ['diff', '--name-only', state.originalHead, state.targetHead])
     .split('\n')
     .filter(Boolean);
-  state.requirements = [
-    ...breakingRequirements(runtime, state.stageRoot, state.originalHead, state.targetHead),
-    ...externalRequirements(runtime, state.stageRoot, state.originalHead, state.targetHead),
-  ];
+  state.requirements = [...breakingRequirements(runtime, state.stageRoot, state.originalHead, state.targetHead)];
   state.phase = 'prepared';
   state.lastError = undefined;
   saveState(state);
@@ -333,6 +341,30 @@ export async function validateUpdate(
     if (!state.skillRefresh.success) throw new Error('One or more installed skills failed to refresh');
     commitStageChanges(state, runtime, 'chore: refresh installed skill payloads');
     refreshPreparedState(state, runtime);
+
+    if (hasChanged(state, 'src/gateway-providers') || hasChanged(state, 'setup/gateways')) {
+      const { loadGatewayCatalog, resolveGatewaySelection } = await runtime.loadGateway(state.stageRoot);
+      const kind = resolveGatewaySelection(
+        state.projectRoot,
+        undefined,
+        path.join(state.stageRoot, '.claude', 'skills'),
+      );
+      const entry = loadGatewayCatalog(state.stageRoot).gateways.find((candidate) => candidate.kind === kind);
+      if (!entry) throw new Error(`Unknown gateway provider: ${kind}`);
+      state.gatewaySelection = kind;
+      const gateway = { name: kind, skillName: path.basename(entry.skillPath), kind: 'gateway' as const };
+      const report = await refreshInstalledSkills(state.stageRoot, [gateway.skillName], { include: [gateway] });
+      state.skillRefresh.skills.push(...report.skills);
+      state.skillRefresh.selected.push(...report.selected);
+      state.skillRefresh.success &&= report.success;
+      if (!report.success) {
+        throw new Error(
+          `Gateway skill did not fully apply: ${report.skills.flatMap((skill) => skill.errors).join('; ')}`,
+        );
+      }
+      commitStageChanges(state, runtime, 'chore: materialize selected gateway');
+      refreshPreparedState(state, runtime);
+    }
 
     const checks: string[] = [];
     // Cheap, and it names the offending path while nothing is stopped yet.
@@ -534,16 +566,23 @@ async function rollbackLocal(state: UpdateState, runtime: UpdateRuntime): Promis
   // below, and discovering it after the stop/reset leaves the operator with a
   // stopped service on old code and a forward-migrated database.
   assertSnapshotRestorable(state);
-  // On the cutover failure path the service was already stopped by cutover
-  // itself; `stopService` is idempotent per mode (already-stopped is success
-  // in the manager's own vocabulary — see its header), so this cannot abort
-  // the restore for a service that is simply gone, while a service that is
-  // genuinely still running still aborts loudly BEFORE anything is destroyed.
-  // Deliberately not a fresh detection: an under-reporting detection would
-  // skip the stop and reset the checkout under a live service.
-  await runtime.stopService(state.service);
+  // Stop via the captured handle so an under-reporting detection cannot skip it;
+  // stopService is idempotent, so a host cutover already stopped is fine.
+  const live = withRecordedNohupHost(state.service, state.projectRoot, runtime.serviceEnv);
+  const wasRunning = runtime.detectService(state.projectRoot).active;
+  await runtime.stopService(live);
+  try {
+    // Agent containers outlive the host's SIGTERM and still mount the data/ the restore replaces.
+    await runtime.drainContainers(state.projectRoot);
+  } catch (err) {
+    // Nothing is reset yet: restart the host only if this rollback is what stopped it.
+    if (wasRunning) runtime.startService(live, state.projectRoot);
+    throw err;
+  }
   git(runtime, state.projectRoot, ['reset', '--hard', state.originalHead]);
   restoreSnapshot(state);
+  // Gateways survive cutover; their bind mounts still hold the replaced data/.
+  runtime.restartGateways(state.projectRoot);
   installAndBuild(state.projectRoot, state, runtime);
   if (state.service?.active) {
     runtime.startService(state.service, state.projectRoot);
@@ -573,6 +612,9 @@ export async function cutoverUpdate(
   assertMutableRootsResolvable(state.projectRoot);
 
   state.service = runtime.detectService(state.projectRoot);
+  // Service first, containers second: with the host down nothing can spawn a
+  // replacement, so the drain (which stops the labeled set itself) is
+  // race-free. If it fails the catch below restarts the old service.
   await runtime.stopService(state.service);
   try {
     await runtime.drainContainers(state.projectRoot);
@@ -580,6 +622,11 @@ export async function cutoverUpdate(
     saveState(state);
     git(runtime, state.projectRoot, ['reset', '--hard', state.targetHead]);
     installAndBuild(state.projectRoot, state, runtime);
+    if (state.gatewaySelection) {
+      // From the live checkout, now exactly the validated commit.
+      const { upsertEnvVar } = await runtime.loadGateway(state.projectRoot);
+      upsertEnvVar('NANOCLAW_GATEWAY_PROVIDER', state.gatewaySelection, state.projectRoot);
+    }
     state.phase = 'cutover';
     state.lastError = undefined;
     saveState(state);
@@ -604,9 +651,6 @@ export function acknowledgeRequirement(
   if (state.phase !== 'cutover') throw new Error(`Cannot acknowledge requirements from ${state.phase}`);
   const requirement = state.requirements.find((item) => item.id === requirementIdValue);
   if (!requirement) throw new Error(`Unknown requirement: ${requirementIdValue}`);
-  if (requirement.type === 'external-component' && status === 'succeeded' && !rollback && !requirement.rollback) {
-    throw new Error(`External requirement ${requirementIdValue} needs an exact rollback instruction`);
-  }
   requirement.status = status;
   if (rollback) requirement.rollback = rollback;
   saveState(state);

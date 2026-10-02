@@ -75,10 +75,11 @@ an older local skill still executes the newest safety code before any mutation.
 # symlinked argv defeats Node's import.meta main-module guard — the controller
 # then exits 0 having done NOTHING. Canonicalize before use.
 controller_dir="$(cd "$(mktemp -d)" && pwd -P)"
-git archive "$upstream_ref" \
-  scripts/update-nanoclaw.ts scripts/update scripts/update-skills.ts \
-  scripts/skill-apply.ts scripts/skill-directives.ts src/install-slug.ts \
-  | tar -x -C "$controller_dir"
+# Extract all of scripts/, not a hand-listed subset. These paths are a
+# contract: older copies of this skill extract exactly them from the newest
+# ref, so the controller must load from them alone, with no node_modules.
+# scripts/update/controller-archive.test.ts enforces it.
+git archive "$upstream_ref" scripts src/install-slug.ts | tar -x -C "$controller_dir"
 ```
 
 ## 2. Choose the Git strategy and prepare
@@ -99,22 +100,27 @@ intentional local customizations. Complete the merge/rebase/cherry-pick there,
 commit it, then run:
 
 ```bash
-pnpm exec tsx "$stageRoot/scripts/update-nanoclaw.ts" resume \
+pnpm exec tsx "$controller_dir/scripts/update-nanoclaw.ts" resume \
   --project-root "$PWD" --id "$id"
 ```
+
+Run every transaction command from `$controller_dir`, not from `stageRoot`: a
+cherry-pick stage can still hold the old controller. If `$controller_dir` is
+gone (a reboot clears temp directories), recreate it with the step 1 commands
+without fetching again.
 
 Show the user the upstream commits, changed-file buckets, requirements, and any
 resolved conflicts. To stop with no live mutation:
 
 ```bash
-pnpm exec tsx "$stageRoot/scripts/update-nanoclaw.ts" abandon \
+pnpm exec tsx "$controller_dir/scripts/update-nanoclaw.ts" abandon \
   --project-root "$PWD" --id "$id"
 ```
 
 ## 3. Validate the staged result
 
 ```bash
-pnpm exec tsx "$stageRoot/scripts/update-nanoclaw.ts" validate \
+pnpm exec tsx "$controller_dir/scripts/update-nanoclaw.ts" validate \
   --project-root "$PWD" --id "$id"
 ```
 
@@ -135,12 +141,13 @@ Before downtime, show the exact changed files, required migrations, detected
 backup tag, and rollback command. Ask for one confirmation to begin cutover.
 
 ```bash
-pnpm exec tsx "$stageRoot/scripts/update-nanoclaw.ts" cutover \
+pnpm exec tsx "$controller_dir/scripts/update-nanoclaw.ts" cutover \
   --project-root "$PWD" --id "$id"
 ```
 
-Cutover stops the detected service, waits for this install's labeled agent
-containers to exit, snapshots mutable state, resets the live branch to the
+Cutover stops the detected service, then stops this install's labeled agent
+containers (an agent mid-turn loses that turn; wait for a quiet moment if that
+matters), snapshots mutable state, resets the live branch to the
 validated target, installs frozen dependencies, builds the host, and updates
 the agent image when `container/` changed. Hardened-image installs use `pull`;
 local-image installs build locally. The service remains stopped while required
@@ -178,7 +185,7 @@ changes before acknowledging it. Finish refuses a dirty cut-over checkout.
 After verification, acknowledge the requirement:
 
 ```bash
-pnpm exec tsx "$stageRoot/scripts/update-nanoclaw.ts" ack \
+pnpm exec tsx "$controller_dir/scripts/update-nanoclaw.ts" ack \
   --project-root "$PWD" --id "$id" \
   --requirement "$requirement_id" --status succeeded
 ```
@@ -196,7 +203,7 @@ path for forward local migrations.
 ## 6. Finish and health-check
 
 ```bash
-pnpm exec tsx "$stageRoot/scripts/update-nanoclaw.ts" finish \
+pnpm exec tsx "$controller_dir/scripts/update-nanoclaw.ts" finish \
   --project-root "$PWD" --id "$id"
 ```
 

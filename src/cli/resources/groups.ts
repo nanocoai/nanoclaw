@@ -1,3 +1,4 @@
+import { connectGatewayAccount } from '../../gateway-connections.js';
 import { randomUUID } from 'crypto';
 
 import {
@@ -123,6 +124,16 @@ registerResource({
   // DELETE violates FK constraints (#2525).
   operations: { list: 'open', get: 'open', update: 'approval' },
   customOperations: {
+    connect: {
+      access: 'open',
+      description:
+        'Get the selected gateway’s account-connection step for any --host. Does not grant credentials or change policy.',
+      handler: async (args, ctx) => {
+        const id = ctx.caller === 'agent' ? ctx.agentGroupId : String(args.id ?? '');
+        if (!id) throw new Error('--id is required on the host');
+        return connectGatewayAccount(id, String(args.host ?? ''));
+      },
+    },
     create: {
       access: 'approval',
       description:
@@ -226,7 +237,8 @@ registerResource({
       description:
         'Delete an agent group and its dependent rows (sessions, destinations, approvals, role grants, ' +
         'memberships, channel wirings). FK-ordered cascade in a single transaction. ' +
-        'Use --id <group-id>. Out of scope: killing running containers, on-disk cleanup of groups/<folder>/ and data/v2-sessions/<group-id>/. ' +
+        "Use --id <group-id>. The host sweep stops the group's running containers within about a minute. " +
+        'Out of scope: on-disk cleanup of groups/<folder>/ and data/v2-sessions/<group-id>/. ' +
         'The leftover groups/<folder>/ blocks re-creating a group under the same folder name until it is moved or removed.',
       handler: async (args) => {
         const id = args.id as string;

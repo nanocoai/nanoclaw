@@ -66,9 +66,20 @@ export function findHostOpenCode(root: string): { binary: string; version: strin
   return selected;
 }
 
-function run(binary: string, args: string[], root: string): Promise<'exited' | 'failed' | 'unavailable'> {
+/**
+ * OpenCode allows edits and commands by default. OPENCODE_PERMISSION merges
+ * after the global and project config, so maintenance sessions ask first.
+ */
+export const MAINTENANCE_PERMISSION = JSON.stringify({ edit: 'ask', bash: 'ask' });
+
+function run(
+  binary: string,
+  args: string[],
+  root: string,
+  env?: NodeJS.ProcessEnv,
+): Promise<'exited' | 'failed' | 'unavailable'> {
   return new Promise((resolve) => {
-    const child = spawn(binary, args, { cwd: root, stdio: 'inherit' });
+    const child = spawn(binary, args, env ? { cwd: root, stdio: 'inherit', env } : { cwd: root, stdio: 'inherit' });
     child.once('error', () => resolve('unavailable'));
     child.once('close', (code) => resolve(code === 0 ? 'exited' : 'failed'));
   });
@@ -128,7 +139,7 @@ export const hostOpenCode = {
         'OpenCode on the host uses its own native credentials and model configuration.',
         'In OpenCode, use /connect to sign in, then /models to choose a model.',
         'For a custom endpoint, follow https://opencode.ai/docs/providers/#custom-provider.',
-        'NanoClaw container credentials remain in OneCLI. Host maintenance works independently of that gateway.',
+        'NanoClaw container credentials remain in the selected gateway. Host maintenance works independently of it.',
         'Exit OpenCode to return here.',
       ].join('\n'),
       'Configure host OpenCode',
@@ -143,7 +154,7 @@ export const hostOpenCode = {
     const args = contextFile
       ? ['--prompt', `Read ${JSON.stringify(contextFile)} and follow the maintenance request inside it.`]
       : [];
-    return run(binary, args, root);
+    return run(binary, args, root, { ...process.env, OPENCODE_PERMISSION: MAINTENANCE_PERMISSION });
   },
 };
 

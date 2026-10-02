@@ -6,13 +6,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   checkOpenCodeInstall,
-  buildOneCliManagedStub,
-  buildOneCliOAuthSecret,
+  readOpenCodeOAuth,
   buildOpenCodeLoginArgs,
   discoverLocalModelIds,
   normalizeOptionalInput,
-  findChatGptSecret,
-  createChatGptVault,
   runOpenCodeAuthCli,
   runOpenCodeChatGptAuth,
 } from './opencode-auth.js';
@@ -38,14 +35,103 @@ describe('OpenCode setup payload', () => {
       async () => new Response(JSON.stringify({ data: [{ id: 'qwen-b' }, { id: ' qwen-a ' }, { id: 'qwen-b' }, {}] })),
     );
 
-    await expect(discoverLocalModelIds('http://host.docker.internal:8891/v1/', fetchImpl)).resolves.toEqual([
-      'qwen-a',
-      'qwen-b',
-    ]);
+    await expect(
+      discoverLocalModelIds('http://host.docker.internal:8891/v1/', fetchImpl, undefined, 'darwin'),
+    ).resolves.toEqual(['qwen-a', 'qwen-b']);
     expect(fetchImpl).toHaveBeenCalledWith(
       new URL('http://127.0.0.1:8891/v1/models'),
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
+  });
+
+  it('lists a Linux model from the Docker bridge gateway, where containers reach host.docker.internal', async () => {
+    proc.execFileSync.mockReturnValueOnce('172.18.0.1 \n');
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ data: [{ id: 'qwen' }] })));
+    await expect(
+      discoverLocalModelIds('http://host.docker.internal:8000/v1', fetchImpl, undefined, 'linux'),
+    ).resolves.toEqual(['qwen']);
+    expect(proc.execFileSync).toHaveBeenCalledWith(
+      expect.any(String),
+      ['network', 'inspect', 'bridge', '--format', '{{range .IPAM.Config}}{{.Gateway}} {{end}}'],
+      expect.anything(),
+    );
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).toHaveBeenCalledWith(new URL('http://172.18.0.1:8000/v1/models'), expect.anything());
+  });
+
+  it('falls back to loopback on Linux when the bridge address is unreachable (Docker Desktop, WSL)', async () => {
+    proc.execFileSync.mockReturnValueOnce('172.17.0.1');
+    const fetchImpl = vi
+      .fn()
+      .mockRejectedValueOnce(Object.assign(new TypeError('fetch failed'), { cause: { code: 'EHOSTUNREACH' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: [{ id: 'qwen' }] })));
+    await expect(
+      discoverLocalModelIds('http://host.docker.internal:8000/v1', fetchImpl, undefined, 'linux'),
+    ).resolves.toEqual(['qwen']);
+    expect(fetchImpl.mock.calls.map(([url]) => String(url))).toEqual([
+      'http://172.17.0.1:8000/v1/models',
+      'http://127.0.0.1:8000/v1/models',
+    ]);
+  });
+
+  it('also falls back when the bridge address is silent until the timeout', async () => {
+    proc.execFileSync.mockReturnValueOnce('172.17.0.1');
+    const abort = Object.assign(new Error('This operation was aborted'), { name: 'AbortError' });
+    const fetchImpl = vi
+      .fn()
+      .mockRejectedValueOnce(abort)
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: [{ id: 'qwen' }] })));
+    await expect(
+      discoverLocalModelIds('http://host.docker.internal:8000/v1', fetchImpl, undefined, 'linux'),
+    ).resolves.toEqual(['qwen']);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ['a redirect', Object.assign(new TypeError('fetch failed'), { cause: new Error('unexpected redirect') })],
+    [
+      'a TLS or protocol error',
+      Object.assign(new TypeError('fetch failed'), { cause: { code: 'ERR_TLS_CERT_ALTNAME_INVALID' } }),
+    ],
+  ])('treats %s from the bridge address as its answer', async (_label, failure) => {
+    proc.execFileSync.mockReturnValueOnce('172.17.0.1');
+    const fetchImpl = vi.fn().mockRejectedValueOnce(failure);
+    await expect(
+      discoverLocalModelIds('http://host.docker.internal:8000/v1', fetchImpl, undefined, 'linux'),
+    ).rejects.toThrow('fetch failed');
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not retry after a broken body from a server that answered', async () => {
+    proc.execFileSync.mockReturnValueOnce('172.17.0.1');
+    const broken = new Response(null);
+    vi.spyOn(broken, 'text').mockRejectedValue(new TypeError('terminated'));
+    const fetchImpl = vi.fn().mockResolvedValueOnce(broken);
+    await expect(
+      discoverLocalModelIds('http://host.docker.internal:8000/v1', fetchImpl, undefined, 'linux'),
+    ).rejects.toThrow('terminated');
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not retry another address after the server answered', async () => {
+    proc.execFileSync.mockReturnValueOnce('172.17.0.1');
+    const fetchImpl = vi.fn(async () => new Response('nope', { status: 401 }));
+    await expect(discoverLocalModelIds('http://host.docker.internal:8000/v1', fetchImpl, 'k', 'linux')).rejects.toThrow(
+      'HTTP 401',
+    );
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses loopback alone when Docker has no bridge information, and never asks Docker on macOS', async () => {
+    proc.execFileSync.mockImplementationOnce(() => {
+      throw new Error('docker: not found');
+    });
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ data: [] })));
+    await discoverLocalModelIds('http://host.docker.internal:8000/v1', fetchImpl, undefined, 'linux');
+    expect(fetchImpl).toHaveBeenCalledWith(new URL('http://127.0.0.1:8000/v1/models'), expect.anything());
+    proc.execFileSync.mockClear();
+    await discoverLocalModelIds('http://host.docker.internal:8000/v1', fetchImpl, undefined, 'darwin');
+    expect(proc.execFileSync).not.toHaveBeenCalled();
   });
 
   it('rejects malformed model discovery responses so the wizard can fall back to manual input', async () => {
@@ -53,45 +139,39 @@ describe('OpenCode setup payload', () => {
     await expect(discoverLocalModelIds('http://127.0.0.1:8891/v1', fetchImpl)).rejects.toThrow('no data array');
   });
 
-  it('vaults ChatGPT tokens in the Codex shape OneCLI classifies as oauth', () => {
+  it('validates ChatGPT tokens independently of the selected gateway', () => {
     expect(
-      buildOneCliOAuthSecret(
-        {
-          openai: {
-            type: 'oauth',
-            access: 'live-access-token',
-            refresh: 'live-refresh-token',
-            expires: 1,
-            accountId: 'account-123',
-          },
+      readOpenCodeOAuth({
+        openai: {
+          type: 'oauth',
+          access: 'live-access-token',
+          refresh: 'live-refresh-token',
+          expires: 1,
+          accountId: 'account-123',
         },
-        new Date('2026-08-29T12:00:00.000Z'),
-      ),
+      }),
     ).toEqual({
-      tokens: {
-        access_token: 'live-access-token',
-        refresh_token: 'live-refresh-token',
-        account_id: 'account-123',
-      },
-      OPENAI_API_KEY: null,
-      last_refresh: '2026-08-29T12:00:00.000Z',
+      profile: 'chatgpt',
+      accessToken: 'live-access-token',
+      refreshToken: 'live-refresh-token',
+      accountId: 'account-123',
     });
   });
 
   it('refuses to vault a credential with no account id, which the gateway cannot route', () => {
     const base = { type: 'oauth', access: 'a', refresh: 'r' };
-    expect(() => buildOneCliOAuthSecret({ openai: base })).toThrow('no account id');
-    expect(() => buildOneCliOAuthSecret({ openai: { ...base, accountId: '  ' } })).toThrow('no account id');
+    expect(() => readOpenCodeOAuth({ openai: base })).toThrow('no account id');
+    expect(() => readOpenCodeOAuth({ openai: { ...base, accountId: '  ' } })).toThrow('no account id');
   });
 
   it('refuses to vault a credential with no refresh token, which the gateway cannot renew', () => {
-    expect(() => buildOneCliOAuthSecret({ openai: { type: 'oauth', access: 'a', accountId: 'account-123' } })).toThrow(
+    expect(() => readOpenCodeOAuth({ openai: { type: 'oauth', access: 'a', accountId: 'account-123' } })).toThrow(
       'did not create an OpenAI OAuth credential',
     );
   });
 
   it('rejects API-key auth records instead of misrepresenting them as subscription OAuth', () => {
-    expect(() => buildOneCliOAuthSecret({ openai: { type: 'api', key: 'sk-live' } })).toThrow(
+    expect(() => readOpenCodeOAuth({ openai: { type: 'api', key: 'sk-live' } })).toThrow(
       'did not create an OpenAI OAuth credential',
     );
   });
@@ -140,99 +220,13 @@ describe('OpenCode setup payload', () => {
   });
 });
 
-const secretMetadata = {
-  id: 'secret-existing',
-  name: 'OpenCode ChatGPT',
-  type: 'openai',
-  hostPattern: 'chatgpt.com',
-  valueSource: 'inline',
-  scope: 'project',
-  metadata: { authMode: 'oauth' },
-  pathPattern: null,
-};
-const fakeVault = (id: string | null = 'secret-existing') => ({
-  find: vi.fn(async () => id),
+const fakeVault = (existing: { reusable: boolean } | null = { reusable: true }) => ({
+  find: vi.fn(async () => existing),
   save: vi.fn(async () => {}),
+  keep: vi.fn(async () => {}),
 });
 
 describe('ChatGPT vault recovery', () => {
-  it('finds a unique credential and rejects ambiguous or malformed metadata', () => {
-    expect(findChatGptSecret([secretMetadata])).toBe('secret-existing');
-    expect(findChatGptSecret([{ name: 'Anthropic' }])).toBeNull();
-    for (const value of [
-      null,
-      {},
-      [null],
-      [secretMetadata, secretMetadata],
-      [{ ...secretMetadata, id: '' }],
-      [{ ...secretMetadata, type: 'generic' }],
-      [{ ...secretMetadata, valueSource: 'onepassword' }],
-      [{ ...secretMetadata, metadata: { authMode: 'api-key' } }],
-      [{ ...secretMetadata, pathPattern: '/restricted' }],
-    ]) {
-      expect(() => findChatGptSecret(value)).toThrow();
-    }
-  });
-
-  it('updates only the existing secret value through the configured gateway', async () => {
-    const fetchImpl = vi.fn(
-      async (_url: string, init?: RequestInit) =>
-        new Response(JSON.stringify(init?.method === 'GET' ? [secretMetadata] : { success: true })),
-    );
-    const vault = createChatGptVault('https://gateway.example', 'management-fixture', fetchImpl as typeof fetch);
-    expect(await vault.find()).toBe('secret-existing');
-    await vault.save({ tokens: { refresh_token: 'refresh-fixture' } }, 'secret-existing');
-    const [url, options] = fetchImpl.mock.calls.find(([, init]) => init?.method === 'PATCH')!;
-    expect(url).toBe('https://gateway.example/v1/secrets/secret-existing');
-    expect(options).toMatchObject({
-      method: 'PATCH',
-      redirect: 'error',
-      headers: { Authorization: 'Bearer management-fixture' },
-    });
-    expect(JSON.parse(options?.body as string)).toEqual({
-      value: JSON.stringify({ tokens: { refresh_token: 'refresh-fixture' } }),
-    });
-    expect(proc.execFileSync).not.toHaveBeenCalled();
-  });
-
-  it('creates a credential only when no existing ID was found', async () => {
-    const fetchImpl = vi.fn(
-      async (_url: string, init?: RequestInit) =>
-        new Response(JSON.stringify(init?.method === 'GET' ? [] : { id: 'created-fixture' })),
-    );
-    await createChatGptVault('http://localhost:10255', '', fetchImpl as typeof fetch).save({ tokens: {} }, null);
-    expect(fetchImpl).toHaveBeenCalledWith(
-      'http://localhost:10255/v1/secrets',
-      expect.objectContaining({
-        method: 'POST',
-        body: JSON.stringify({
-          name: 'OpenCode ChatGPT',
-          type: 'openai',
-          valueSource: 'inline',
-          hostPattern: 'chatgpt.com',
-          value: '{"tokens":{}}',
-        }),
-      }),
-    );
-  });
-
-  it('sanitizes response, transport, and JSON errors', async () => {
-    for (const fetchImpl of [
-      vi.fn(async () => new Response('sensitive-response', { status: 403 })),
-      vi.fn(async () => {
-        throw new Error('sensitive-transport');
-      }),
-      vi.fn(async () => new Response('sensitive-json')),
-    ]) {
-      await expect(createChatGptVault('https://gateway.example', '', fetchImpl).find()).rejects.toThrow(
-        'Check gateway connectivity',
-      );
-      await expect(createChatGptVault('https://gateway.example', '', fetchImpl).find()).rejects.not.toThrow(
-        'sensitive',
-      );
-    }
-  });
-
   it('rejects unknown command options before changing state', async () => {
     await expect(runOpenCodeAuthCli(['--reauth', '--method', 'invalid'])).rejects.toThrow('Usage:');
   });
@@ -259,9 +253,18 @@ describe('ChatGPT credential lifecycle', () => {
     await runOpenCodeChatGptAuth('device', { root, vault });
     expect(proc.spawn).not.toHaveBeenCalled();
     expect(vault.find).toHaveBeenCalledTimes(1);
+    expect(vault.keep).toHaveBeenCalledWith();
     expect(vault.save).not.toHaveBeenCalled();
     expect(fs.readdirSync(root)).toEqual(['.env']);
     expect(fs.readFileSync(path.join(root, '.env'), 'utf8')).toBe(env);
+  });
+
+  it('reauthenticates a dead gateway connection even without --reauth', async () => {
+    const vault = fakeVault({ reusable: false });
+    const signIn = vi.fn(async () => {});
+    await runOpenCodeChatGptAuth('device', { vault, signIn });
+    expect(signIn).toHaveBeenCalledWith('device', process.cwd(), vault);
+    expect(vault.keep).not.toHaveBeenCalled();
   });
 
   it('reauthenticates into the existing ID and does not rewrite defaults', async () => {
@@ -271,7 +274,7 @@ describe('ChatGPT credential lifecycle', () => {
     const vault = fakeVault();
     const signIn = vi.fn(async () => {});
     await runOpenCodeChatGptAuth('device', { root, vault, signIn, reauth: true });
-    expect(signIn).toHaveBeenCalledWith('device', root, 'secret-existing', vault);
+    expect(signIn).toHaveBeenCalledWith('device', root, vault);
     expect(fs.readFileSync(path.join(root, '.env'), 'utf8')).toBe(env);
   });
 
@@ -292,7 +295,7 @@ describe('ChatGPT credential lifecycle', () => {
     expect(fs.readFileSync(path.join(root, '.env'), 'utf8')).toBe(env);
   });
 
-  it.each(['success', 'save-failure', 'changed-id', 'empty-access', 'blank-refresh', 'pending-save'])(
+  it.each(['success', 'save-failure', 'changed-entry', 'empty-access', 'blank-refresh', 'pending-save'])(
     'removes temporary native credentials and preserves state (%s)',
     async (outcome) => {
       const root = makeRoot();
@@ -313,8 +316,8 @@ describe('ChatGPT credential lifecycle', () => {
         );
       }
       if (outcome === 'save-failure') vault.save.mockRejectedValue(new Error('save failed'));
-      if (outcome === 'changed-id')
-        vault.find.mockResolvedValueOnce('secret-existing').mockResolvedValue('secret-other');
+      // The gateway, not OpenCode, detects an entry that changed since the lookup.
+      if (outcome === 'changed-entry') vault.save.mockRejectedValue(new Error('changed during setup'));
       proc.spawn.mockImplementation((_command: string, args: string[]) => {
         loginDir = args[args.indexOf('-v') + 1].split(':')[0];
         const authDir = path.join(loginDir, 'data', 'opencode');
@@ -348,20 +351,20 @@ describe('ChatGPT credential lifecycle', () => {
           await result;
         }
       } else if (outcome === 'save-failure') await expect(result).rejects.toThrow('save failed');
-      else if (outcome === 'changed-id') await expect(result).rejects.toThrow('changed during sign-in');
+      else if (outcome === 'changed-entry') await expect(result).rejects.toThrow('changed during setup');
       else if (outcome === 'empty-access' || outcome === 'blank-refresh')
         await expect(result).rejects.toThrow('did not create an OpenAI OAuth credential');
       else await result;
       expect(loginDir).not.toBe('');
       expect(fs.existsSync(loginDir)).toBe(false);
-      if (['changed-id', 'empty-access', 'blank-refresh'].includes(outcome)) expect(vault.save).not.toHaveBeenCalled();
+      if (['empty-access', 'blank-refresh'].includes(outcome)) expect(vault.save).not.toHaveBeenCalled();
       else
-        expect(vault.save).toHaveBeenCalledWith(
-          expect.objectContaining({
-            tokens: { access_token: 'access-fixture', refresh_token: 'refresh-fixture', account_id: 'account-fixture' },
-          }),
-          'secret-existing',
-        );
+        expect(vault.save).toHaveBeenCalledWith({
+          profile: 'chatgpt',
+          accessToken: 'access-fixture',
+          refreshToken: 'refresh-fixture',
+          accountId: 'account-fixture',
+        });
       expect(proc.execFileSync).not.toHaveBeenCalled();
     },
   );
@@ -372,15 +375,7 @@ describe('ChatGPT credential lifecycle', () => {
 
     await runOpenCodeChatGptAuth('browser', { root, vault: fakeVault(null), signIn });
 
-    expect(signIn).toHaveBeenCalledWith('browser', root, null, expect.any(Object));
-  });
-
-  it('omits accountId, leaving OneCLI the sole source of chatgpt-account-id', () => {
-    // The pinned OpenCode CLI sets `ChatGPT-Account-Id` only when
-    // `openai.accountId` is present; OneCLI injects it from the vaulted
-    // `tokens.account_id`, so a sign-in-free stub needs no account id and
-    // never has to read a secret value to invent one.
-    expect(buildOneCliManagedStub().openai).not.toHaveProperty('accountId');
+    expect(signIn).toHaveBeenCalledWith('browser', root, expect.any(Object));
   });
 });
 

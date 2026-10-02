@@ -49,4 +49,8 @@ describe('public setup flags', () => {
       errors: [],
     });
   });
+
+  it('parses an explicit gateway selection', () => {
+    expect(parseFlags(['--gateway-provider', 'onecli']).values).toEqual({ gatewayProvider: 'onecli' });
+  });
 });
