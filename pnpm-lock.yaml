@@ -4,13 +4,18 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  '@beeper/chat-adapter-matrix@0.2.0':
+    hash: d8f9cda088701285b3be191ea30edfd2e96ccb7b97f2934fa8c26c1fa424c020
+    path: patches/@beeper__chat-adapter-matrix@0.2.0.patch
+
 importers:
 
   .:
     dependencies:
       '@beeper/chat-adapter-matrix':
         specifier: ^0.2.0
-        version: 0.2.0(@opentelemetry/api@1.9.1)(zod@4.6.5)
+        version: 0.2.0(patch_hash=d8f9cda088701285b3be191ea30edfd2e96ccb7b97f2934fa8c26c1fa424c020)(@opentelemetry/api@1.9.1)(zod@4.6.5)
       '@bitbasti/chat-adapter-webex':
         specifier: ^0.1.0
         version: 0.1.0(chat@4.29.0(zod@4.6.5))(zod@4.6.5)
@@ -47,6 +52,9 @@ importers:
       '@clack/prompts':
         specifier: ^1.2.0
         version: 1.2.0
+      '@deltachat/stdio-rpc-server':
+        specifier: 2.49.0
+        version: 2.49.0(@deltachat/jsonrpc-client@2.62.0(ws@8.21.3))
       '@resend/chat-sdk-adapter':
         specifier: ^0.1.1
         version: 0.1.1(@chat-adapter/shared@4.41.1(zod@4.6.5))(chat@4.29.0(zod@4.6.5))(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
@@ -218,6 +226,67 @@ packages:
 
   '@clack/prompts@1.2.0':
     resolution: {integrity: sha512-4jmztR9fMqPMjz6H/UZXj0zEmE43ha1euENwkckKKel4XpSfokExPo5AiVStdHSAlHekz4d0CA/r45Ok1E4D3w==}
+
+  '@deltachat/jsonrpc-client@2.62.0':
+    resolution: {integrity: sha512-5viD3RxKjK4ZU4JVK1iGJCGGo4LFqVwOz7a+qPYdl17Lv2favkZJR5/9EWDhIu0z/KKoUpy1/ZqYm1IxfSP0QQ==}
+
+  '@deltachat/stdio-rpc-server-android-arm64@2.49.0':
+    resolution: {integrity: sha512-rAFqEctejIUG+seT87W1jisxOU8heVOd/A2J/+cCQr0UdBCIoFuNehiQRIezLmWnYvyuVyj2UPHxvMShHrDQ6Q==}
+    cpu: [arm64]
+    os: [android]
+
+  '@deltachat/stdio-rpc-server-android-arm@2.49.0':
+    resolution: {integrity: sha512-O6AMt0fcbVsyLr9o+exQUnehqBqviLBX+YK4M/wO0605mhbMgnFbCl+HDRpCK1QsC2wFKXRet0lYjoxMhZO4rA==}
+    cpu: [arm]
+    os: [android]
+
+  '@deltachat/stdio-rpc-server-darwin-arm64@2.49.0':
+    resolution: {integrity: sha512-MxCJcIl8X/4KuuSwc6byLXbukNUB+WnLh+AeeCs2Fr1ph0XnUSUkXIDcHuCyVZfd6YrrLabB2Tmwl7K7I9yzBg==}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@deltachat/stdio-rpc-server-darwin-x64@2.49.0':
+    resolution: {integrity: sha512-NE3T6EWiTa5ogZW/EmKV16Q7ooUE8CrvjIYu2aaYbFYNojnmd8ugGSuCZJxfFsdgpyBaJJXnKpPT0OBZrHOH1w==}
+    cpu: [x64]
+    os: [darwin]
+
+  '@deltachat/stdio-rpc-server-linux-arm64@2.49.0':
+    resolution: {integrity: sha512-M/A51UM4HvWbDTSecVcOPq9a2PWjR2K377fiMasFRQetCrrPs9QD3b4dY9xtZpGv+PYP8MPUXG9ZpekniiRSMw==}
+    cpu: [arm64]
+    os: [linux]
+
+  '@deltachat/stdio-rpc-server-linux-arm@2.49.0':
+    resolution: {integrity: sha512-5WGaMJjhwfn4/0xBPllii70adEVstKtMqI/VWs031H8312/Le2NZowL3K96TZjJfHzQkJ8AinhiRkRDUqMfT6g==}
+    cpu: [arm]
+    os: [linux]
+
+  '@deltachat/stdio-rpc-server-linux-ia32@2.49.0':
+    resolution: {integrity: sha512-9IHgb90kPJEXBOrbZARf8f1F82QaQCd0BxqLDRtb2BAxjY8ow0LOn4JPt4HG+f/Fl88KzNUbnnJcp/e8m/Ld6g==}
+    cpu: [ia32]
+    os: [linux]
+
+  '@deltachat/stdio-rpc-server-linux-x64@2.49.0':
+    resolution: {integrity: sha512-hXDNIABuaQ128cjeYk2a2p9tKZ+ypQe62fXprS94DmKNtYD2D2kFCvlhve8OZBZyx6X1RUNySBfCWiThYSJWlQ==}
+    cpu: [x64]
+    os: [linux]
+
+  '@deltachat/stdio-rpc-server-win32-ia32@2.49.0':
+    resolution: {integrity: sha512-V6/+AGilKND+3/SHMcJeMJ5Dsgegva0vRqawSETWd7nx1lHnit0d4Nffy8G2QaihQljCvmMSrldTxS5GNeo5Uw==}
+    cpu: [ia32]
+    os: [win32]
+
+  '@deltachat/stdio-rpc-server-win32-x64@2.49.0':
+    resolution: {integrity: sha512-+zvbmpKuEbZWAXFmGsa4Brr14m/O5GEYR2H7LqnCiH8/buwhHFbDPpZLUAM0zKQpVURQUuk9tir5AEuwfLMBng==}
+    cpu: [x64]
+    os: [win32]
+
+  '@deltachat/stdio-rpc-server@2.49.0':
+    resolution: {integrity: sha512-Qic8mfxyvS9XPsBnGAdaLfvI83M/v6j/sd37R5iEleHI2Q0/3LjXOEwn8OImOwlaAE/WADbaVguOSz3NLvF9Rw==}
+    peerDependencies:
+      '@deltachat/jsonrpc-client': '*'
+
+  '@deltachat/tiny-emitter@3.0.0':
+    resolution: {integrity: sha512-iapvwGCEWFjXtObQ/vNzXS0+M9hrZrY2tMdV7SaX8kHXKVm3oIuJUVmUj5jhABTL7GstO6uKzV+36FUZVGOqCA==}
 
   '@discordjs/builders@1.14.1':
     resolution: {integrity: sha512-gSKkhXLqs96TCzk66VZuHHl8z2bQMJFGwrXC0f33ngK+FLNau4hU1PYny3DNJfNdSH+gVMzE85/d5FQ2BpcNwQ==}
@@ -2193,6 +2262,16 @@ packages:
   isexe@2.0.0:
     resolution: {integrity: sha512-RHxMLp9lnKHGHRng9QFhRCMbYAcVpn69smSGcq3f36xjgVVWThj4qqLbTLlq7Ssj8B+fIQ1EuCEGI2lKsyQeIw==}
 
+  isomorphic-ws@4.0.1:
+    resolution: {integrity: sha512-BhBvN2MBpWTaSHdWRb/bwdZJ1WaehQ2L1KngkCkfLUGF0mAWAT1sQUQacEmQ0jXkFw/czDXPNQSL5u2/Krsz1w==}
+    peerDependencies:
+      ws: '*'
+
+  isomorphic-ws@5.0.0:
+    resolution: {integrity: sha512-muId7Zzn9ywDsyXgTIafTry2sV3nySZeUDe6YedVd1Hvuuep5AsIlqK+XefWpYTyJG5e503F2xIuT2lcU6rCSw==}
+    peerDependencies:
+      ws: '*'
+
   jackspeak@3.4.3:
     resolution: {integrity: sha512-OGlZQpz2yfahA/Rd1Y8Cd9SIEsqvXkLVoSw/cgwhnhFMDbsQFeZYoJJ7bIZBS9BcamUW96asq/npPWugM+RQBw==}
 
@@ -3192,6 +3271,11 @@ packages:
       eslint: ^8.57.0 || ^9.0.0 || ^10.0.0
       typescript: '>=4.8.4 <6.1.0'
 
+  typescript@4.9.5:
+    resolution: {integrity: sha512-1FXk9E2Hm+QzZQ7z+McJiHL4NW1F2EzMu9Nq9i3zAaGqibafqYwCVU6WyWAuyQRRzOlxou8xZSyXLEN8oKj24g==}
+    engines: {node: '>=4.2.0'}
+    hasBin: true
+
   typescript@5.9.3:
     resolution: {integrity: sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==}
     engines: {node: '>=14.17'}
@@ -3425,6 +3509,9 @@ packages:
     resolution: {integrity: sha512-aePbxDmcYW++PaqBsJ+HYUFwCdv4LVvdnhBy78E57PIor8/OVvhMrADFFEDh8DHDFRv/O9i3lPhsENjO7QX0+A==}
     engines: {node: '>=8'}
 
+  yerpc@0.6.4:
+    resolution: {integrity: sha512-f/yBGREg5sR9aa6QG0thon6uL8jKJhQuRO/SwGsnOIIe45wFQrMYBV+A5cCNEgqzSHsz+Jl2F7sEO6h7CJfr5w==}
+
   yocto-queue@0.1.0:
     resolution: {integrity: sha512-rVksvsnNCdJ/ohGc6xgPwyN8eheCxsiLM8mxuE/t/mOVqJewPuO1miLpTHQiRgTKCLexL4MeAFVagts7HmNZ2Q==}
     engines: {node: '>=10'}
@@ -3446,7 +3533,7 @@ snapshots:
 
   '@babel/runtime@8.0.5': {}
 
-  '@beeper/chat-adapter-matrix@0.2.0(@opentelemetry/api@1.9.1)(zod@4.6.5)':
+  '@beeper/chat-adapter-matrix@0.2.0(patch_hash=d8f9cda088701285b3be191ea30edfd2e96ccb7b97f2934fa8c26c1fa424c020)(@opentelemetry/api@1.9.1)(zod@4.6.5)':
     dependencies:
       '@chat-adapter/state-memory': 4.29.0(zod@4.6.5)
       '@chat-adapter/state-redis': 4.41.1(@opentelemetry/api@1.9.1)(zod@4.6.5)
@@ -3633,6 +3720,63 @@ snapshots:
       fast-string-width: 1.1.0
       fast-wrap-ansi: 0.1.6
       sisteransi: 1.0.5
+
+  '@deltachat/jsonrpc-client@2.62.0(ws@8.21.3)':
+    dependencies:
+      '@deltachat/tiny-emitter': 3.0.0
+      isomorphic-ws: 5.0.0(ws@8.21.3)
+      yerpc: 0.6.4
+    transitivePeerDependencies:
+      - bufferutil
+      - utf-8-validate
+      - ws
+
+  '@deltachat/stdio-rpc-server-android-arm64@2.49.0':
+    optional: true
+
+  '@deltachat/stdio-rpc-server-android-arm@2.49.0':
+    optional: true
+
+  '@deltachat/stdio-rpc-server-darwin-arm64@2.49.0':
+    optional: true
+
+  '@deltachat/stdio-rpc-server-darwin-x64@2.49.0':
+    optional: true
+
+  '@deltachat/stdio-rpc-server-linux-arm64@2.49.0':
+    optional: true
+
+  '@deltachat/stdio-rpc-server-linux-arm@2.49.0':
+    optional: true
+
+  '@deltachat/stdio-rpc-server-linux-ia32@2.49.0':
+    optional: true
+
+  '@deltachat/stdio-rpc-server-linux-x64@2.49.0':
+    optional: true
+
+  '@deltachat/stdio-rpc-server-win32-ia32@2.49.0':
+    optional: true
+
+  '@deltachat/stdio-rpc-server-win32-x64@2.49.0':
+    optional: true
+
+  '@deltachat/stdio-rpc-server@2.49.0(@deltachat/jsonrpc-client@2.62.0(ws@8.21.3))':
+    dependencies:
+      '@deltachat/jsonrpc-client': 2.62.0(ws@8.21.3)
+    optionalDependencies:
+      '@deltachat/stdio-rpc-server-android-arm': 2.49.0
+      '@deltachat/stdio-rpc-server-android-arm64': 2.49.0
+      '@deltachat/stdio-rpc-server-darwin-arm64': 2.49.0
+      '@deltachat/stdio-rpc-server-darwin-x64': 2.49.0
+      '@deltachat/stdio-rpc-server-linux-arm': 2.49.0
+      '@deltachat/stdio-rpc-server-linux-arm64': 2.49.0
+      '@deltachat/stdio-rpc-server-linux-ia32': 2.49.0
+      '@deltachat/stdio-rpc-server-linux-x64': 2.49.0
+      '@deltachat/stdio-rpc-server-win32-ia32': 2.49.0
+      '@deltachat/stdio-rpc-server-win32-x64': 2.49.0
+
+  '@deltachat/tiny-emitter@3.0.0': {}
 
   '@discordjs/builders@1.14.1':
     dependencies:
@@ -5602,6 +5746,14 @@ snapshots:
 
   isexe@2.0.0: {}
 
+  isomorphic-ws@4.0.1(ws@8.21.3):
+    dependencies:
+      ws: 8.21.3
+
+  isomorphic-ws@5.0.0(ws@8.21.3):
+    dependencies:
+      ws: 8.21.3
+
   jackspeak@3.4.3:
     dependencies:
       '@isaacs/cliui': 8.0.2
@@ -6873,6 +7025,8 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
+  typescript@4.9.5: {}
+
   typescript@5.9.3: {}
 
   uc.micro@3.0.0: {}
@@ -7056,6 +7210,17 @@ snapshots:
       which-module: 2.0.1
       y18n: 4.0.3
       yargs-parser: 18.1.3
+
+  yerpc@0.6.4:
+    dependencies:
+      '@types/ws': 8.18.1
+      isomorphic-ws: 4.0.1(ws@8.21.3)
+      typescript: 4.9.5
+    optionalDependencies:
+      ws: 8.21.3
+    transitivePeerDependencies:
+      - bufferutil
+      - utf-8-validate
 
   yocto-queue@0.1.0: {}
 

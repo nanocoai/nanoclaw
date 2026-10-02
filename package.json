@@ -48,6 +48,7 @@
     "@chat-adapter/whatsapp": "4.29.0",
     "@clack/core": "^1.2.0",
     "@clack/prompts": "^1.2.0",
+    "@deltachat/stdio-rpc-server": "2.49.0",
     "@resend/chat-sdk-adapter": "^0.1.1",
     "@types/qrcode": "^1.5.6",
     "@whiskeysockets/baileys": "7.0.0-rc.9",
@@ -80,5 +81,10 @@
   },
   "engines": {
     "node": ">=22"
+  },
+  "pnpm": {
+    "patchedDependencies": {
+      "@beeper/chat-adapter-matrix@0.2.0": "patches/@beeper__chat-adapter-matrix@0.2.0.patch"
+    }
   }
 }
