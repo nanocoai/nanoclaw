@@ -13,6 +13,11 @@ receive each other's messages over their own Socket Mode connections as plain
 `message` events with `channel_type: "mpim"`, `bot_id` set, and `subtype`
 null.
 
+**Canonical home.** This directory on `main` is the skill's canonical source —
+the setup wizard and any direct apply read it from the checkout. The copy on
+the `channels` branch is a compatibility mirror for older checkouts whose
+setup fetches companions from there; edits land here, never there.
+
 **Where sibling-bot messages die today.** The adapter/Chat-SDK stack's only
 bot filter is self-protection (`isMe`); a sibling bot's message arrives with
 `isMe: false`, `isBot: true` and flows into the Slack channel's bot-inbound

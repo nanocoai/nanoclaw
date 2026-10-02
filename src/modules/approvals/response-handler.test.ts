@@ -29,14 +29,14 @@ function now() {
   return new Date().toISOString();
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true, force: true });
   fs.mkdirSync(TEST_DIR, { recursive: true });
-  const db = initTestDb();
-  runMigrations(db);
+  const db = await initTestDb();
+  await runMigrations(db);
 
-  createAgentGroup({ id: 'ag-1', name: 'Agent', folder: 'agent', agent_provider: null, created_at: now() });
-  createSession({
+  await createAgentGroup({ id: 'ag-1', name: 'Agent', folder: 'agent', agent_provider: null, created_at: now() });
+  await createSession({
     id: 'sess-1',
     agent_group_id: 'ag-1',
     messaging_group_id: null,
@@ -49,8 +49,8 @@ beforeEach(() => {
   });
 });
 
-afterEach(() => {
-  closeDb();
+afterEach(async () => {
+  await closeDb();
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true, force: true });
 });
 
@@ -61,7 +61,7 @@ describe('approval response authorization', () => {
     const handler = vi.fn().mockResolvedValue(undefined);
     registerApprovalHandler('install_packages', handler);
 
-    createPendingApproval({
+    await createPendingApproval({
       approval_id: 'appr-1',
       session_id: 'sess-1',
       request_id: 'appr-1',
@@ -83,19 +83,25 @@ describe('approval response authorization', () => {
 
     expect(claimed).toBe(true);
     expect(handler).not.toHaveBeenCalled();
-    expect(getPendingApproval('appr-1')).toBeDefined();
+    expect(await getPendingApproval('appr-1')).toBeDefined();
   });
 
   it('allows an owner/admin click to dispatch the registered approval handler', async () => {
-    upsertUser({ id: 'telegram:owner', kind: 'telegram', display_name: 'Owner', created_at: now() });
-    grantRole({ user_id: 'telegram:owner', role: 'owner', agent_group_id: null, granted_by: null, granted_at: now() });
+    await upsertUser({ id: 'telegram:owner', kind: 'telegram', display_name: 'Owner', created_at: now() });
+    await grantRole({
+      user_id: 'telegram:owner',
+      role: 'owner',
+      agent_group_id: null,
+      granted_by: null,
+      granted_at: now(),
+    });
 
     const { registerApprovalHandler } = await import('./primitive.js');
     const { handleApprovalsResponse } = await import('./response-handler.js');
     const handler = vi.fn().mockResolvedValue(undefined);
     registerApprovalHandler('install_packages_allowed', handler);
 
-    createPendingApproval({
+    await createPendingApproval({
       approval_id: 'appr-2',
       session_id: 'sess-1',
       request_id: 'appr-2',
@@ -118,12 +124,64 @@ describe('approval response authorization', () => {
     expect(claimed).toBe(true);
     expect(handler).toHaveBeenCalledTimes(1);
     expect(handler).toHaveBeenCalledWith(expect.objectContaining({ userId: 'telegram:owner' }));
-    expect(getPendingApproval('appr-2')).toBeUndefined();
+    expect(await getPendingApproval('appr-2')).toBeUndefined();
+  });
+
+  it('lets only one concurrent approval response run the action handler', async () => {
+    await upsertUser({ id: 'telegram:owner-race', kind: 'telegram', display_name: 'Owner', created_at: now() });
+    await grantRole({
+      user_id: 'telegram:owner-race',
+      role: 'owner',
+      agent_group_id: null,
+      granted_by: null,
+      granted_at: now(),
+    });
+
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { registerApprovalHandler } = await import('./primitive.js');
+    const { handleApprovalsResponse } = await import('./response-handler.js');
+    const handler = vi.fn(async () => held);
+    registerApprovalHandler('approval_race_action', handler);
+    await createPendingApproval({
+      approval_id: 'appr-race',
+      session_id: 'sess-1',
+      request_id: 'appr-race',
+      action: 'approval_race_action',
+      payload: JSON.stringify({}),
+      created_at: now(),
+      title: 'Race approval',
+      options_json: JSON.stringify([]),
+    });
+    const response = {
+      questionId: 'appr-race',
+      value: 'approve',
+      userId: 'owner-race',
+      channelType: 'telegram',
+      platformId: 'dm-owner-race',
+      threadId: null,
+    };
+
+    const first = handleApprovalsResponse(response);
+    const second = handleApprovalsResponse(response);
+    await vi.waitFor(() => expect(handler).toHaveBeenCalledTimes(1));
+    release();
+    await Promise.all([first, second]);
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(await getPendingApproval('appr-race')).toBeUndefined();
   });
 
   it('allows global admins to resolve approvals without a session-scoped agent group', async () => {
-    upsertUser({ id: 'telegram:global-admin', kind: 'telegram', display_name: 'Global Admin', created_at: now() });
-    grantRole({
+    await upsertUser({
+      id: 'telegram:global-admin',
+      kind: 'telegram',
+      display_name: 'Global Admin',
+      created_at: now(),
+    });
+    await grantRole({
       user_id: 'telegram:global-admin',
       role: 'admin',
       agent_group_id: null,
@@ -136,7 +194,7 @@ describe('approval response authorization', () => {
     const handler = vi.fn().mockResolvedValue(undefined);
     registerApprovalHandler('global_admin_allowed', handler);
 
-    createPendingApproval({
+    await createPendingApproval({
       approval_id: 'appr-3',
       session_id: 'sess-1',
       agent_group_id: null,
@@ -159,7 +217,7 @@ describe('approval response authorization', () => {
 
     expect(claimed).toBe(true);
     expect(handler).toHaveBeenCalledTimes(1);
-    expect(getPendingApproval('appr-3')).toBeUndefined();
+    expect(await getPendingApproval('appr-3')).toBeUndefined();
   });
 
   it('an approval with approver_user_id is resolvable by that user, not a non-assignee', async () => {
@@ -168,7 +226,7 @@ describe('approval response authorization', () => {
     const handler = vi.fn().mockResolvedValue(undefined);
     registerApprovalHandler('assigned_approver_action', handler);
 
-    createPendingApproval({
+    await createPendingApproval({
       approval_id: 'appr-4',
       session_id: 'sess-1',
       request_id: 'appr-4',
@@ -190,7 +248,7 @@ describe('approval response authorization', () => {
       threadId: null,
     });
     expect(handler).not.toHaveBeenCalled();
-    expect(getPendingApproval('appr-4')).toBeDefined();
+    expect(await getPendingApproval('appr-4')).toBeDefined();
 
     // The named approver resolves it.
     await handleApprovalsResponse({
@@ -202,6 +260,6 @@ describe('approval response authorization', () => {
       threadId: null,
     });
     expect(handler).toHaveBeenCalledTimes(1);
-    expect(getPendingApproval('appr-4')).toBeUndefined();
+    expect(await getPendingApproval('appr-4')).toBeUndefined();
   });
 });

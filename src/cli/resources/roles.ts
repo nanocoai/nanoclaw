@@ -38,12 +38,16 @@ registerResource({
         if (!userId) throw new Error('--user is required');
         if (!role || !['owner', 'admin'].includes(role)) throw new Error('--role must be owner or admin');
         if (role === 'owner' && groupId) throw new Error('owner role is always global (do not pass --group)');
-        getDb()
-          .prepare(
-            `INSERT OR IGNORE INTO user_roles (user_id, role, agent_group_id, granted_by, granted_at)
-             VALUES (?, ?, ?, ?, ?)`,
-          )
-          .run(userId, role, groupId, grantedBy, new Date().toISOString());
+        await getDb().run(
+          `INSERT INTO user_roles (user_id, role, agent_group_id, granted_by, granted_at)
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT DO NOTHING`,
+          userId,
+          role,
+          groupId,
+          grantedBy,
+          new Date().toISOString(),
+        );
         return { user_id: userId, role, agent_group_id: groupId };
       },
     },
@@ -56,9 +60,12 @@ registerResource({
         const groupId = (args.group as string) ?? null;
         if (!userId) throw new Error('--user is required');
         if (!role) throw new Error('--role is required');
-        const result = getDb()
-          .prepare('DELETE FROM user_roles WHERE user_id = ? AND role = ? AND agent_group_id IS ?')
-          .run(userId, role, groupId);
+        const result = await getDb().run(
+          'DELETE FROM user_roles WHERE user_id = ? AND role = ? AND agent_group_id IS NOT DISTINCT FROM ?',
+          userId,
+          role,
+          groupId,
+        );
         if (result.changes === 0) throw new Error('role not found');
         return { revoked: { user_id: userId, role, agent_group_id: groupId } };
       },

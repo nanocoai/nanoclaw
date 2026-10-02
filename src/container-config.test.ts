@@ -34,34 +34,61 @@ const GROUP: AgentGroup = {
 };
 
 describe('resolveGroupTimezone', () => {
-  beforeEach(() => {
-    runMigrations(initTestDb());
-    createAgentGroup(GROUP);
-    ensureContainerConfig(GROUP.id);
+  beforeEach(async () => {
+    await runMigrations(await initTestDb());
+    await createAgentGroup(GROUP);
+    await ensureContainerConfig(GROUP.id);
   });
-  afterEach(() => {
-    closeDb();
-  });
-
-  it('returns the install-global timezone when no override is set', () => {
-    expect(resolveGroupTimezone(GROUP.id)).toBe(TIMEZONE);
-    expect(resolveGroupTimezone('ag-no-such-group')).toBe(TIMEZONE);
+  afterEach(async () => {
+    await closeDb();
   });
 
-  it('returns a valid override, and falls back to global on an invalid stored value', () => {
-    updateContainerConfigScalars(GROUP.id, { timezone: 'Asia/Tokyo' });
-    expect(resolveGroupTimezone(GROUP.id)).toBe('Asia/Tokyo');
-
-    updateContainerConfigScalars(GROUP.id, { timezone: 'Not/AZone' });
-    expect(resolveGroupTimezone(GROUP.id)).toBe(TIMEZONE);
+  it('returns the install-global timezone when no override is set', async () => {
+    expect(await resolveGroupTimezone(GROUP.id)).toBe(TIMEZONE);
+    expect(await resolveGroupTimezone('ag-no-such-group')).toBe(TIMEZONE);
   });
 
-  it('configFromDb ships a valid timezone to the container and drops an invalid one', () => {
-    updateContainerConfigScalars(GROUP.id, { timezone: 'Asia/Tokyo' });
-    expect(configFromDb(getContainerConfig(GROUP.id)!, GROUP).timezone).toBe('Asia/Tokyo');
+  it('returns a valid override, and falls back to global on an invalid stored value', async () => {
+    await updateContainerConfigScalars(GROUP.id, { timezone: 'Asia/Tokyo' });
+    expect(await resolveGroupTimezone(GROUP.id)).toBe('Asia/Tokyo');
 
-    updateContainerConfigScalars(GROUP.id, { timezone: 'Not/AZone' });
-    expect(configFromDb(getContainerConfig(GROUP.id)!, GROUP).timezone).toBeUndefined();
+    await updateContainerConfigScalars(GROUP.id, { timezone: 'Not/AZone' });
+    expect(await resolveGroupTimezone(GROUP.id)).toBe(TIMEZONE);
+  });
+
+  it('configFromDb ships a valid timezone to the container and drops an invalid one', async () => {
+    await updateContainerConfigScalars(GROUP.id, { timezone: 'Asia/Tokyo' });
+    expect(configFromDb((await getContainerConfig(GROUP.id))!, GROUP).timezone).toBe('Asia/Tokyo');
+
+    await updateContainerConfigScalars(GROUP.id, { timezone: 'Not/AZone' });
+    expect(configFromDb((await getContainerConfig(GROUP.id))!, GROUP).timezone).toBeUndefined();
+  });
+
+  // The composer widens a corrupt selection to 'all' rather than dropping
+  // skills. This reading used to be a bare cast, so a row that is not JSON
+  // threw here first and the tolerance never applied: every spawn failed, and
+  // `wakeContainer`'s transient-retry contract left the group dark.
+  it('configFromDb widens a corrupt skill selection instead of throwing', async () => {
+    const row = (await getContainerConfig(GROUP.id))!;
+    expect(configFromDb(row, GROUP).skills).toBe('all');
+    expect(configFromDb({ ...row, skills: '["welcome"]' }, GROUP).skills).toEqual(['welcome']);
+    expect(configFromDb({ ...row, skills: '{not json' }, GROUP).skills).toBe('all');
+    expect(configFromDb({ ...row, skills: 'null' }, GROUP).skills).toBe('all');
+  });
+
+  it('configFromDb ships a declared runtime tier and refuses an unknown one', async () => {
+    // The trunk schema carries no runtime_tier column, so the row surfaces it
+    // only where a deployment's migration added it — modeled here by spreading
+    // onto the fetched row. Absent stays absent (the composer's default); an
+    // invalid value fails closed rather than composing at the default tier.
+    const row = (await getContainerConfig(GROUP.id))!;
+    expect(configFromDb(row, GROUP).runtimeTier).toBeUndefined();
+    expect(configFromDb({ ...row, runtime_tier: 'container' }, GROUP).runtimeTier).toBe('container');
+    expect(configFromDb({ ...row, runtime_tier: 'vm' }, GROUP).runtimeTier).toBe('vm');
+    expect(() => configFromDb({ ...row, runtime_tier: 'hypervisor' }, GROUP)).toThrow(
+      /invalid runtime_tier "hypervisor"/,
+    );
+    expect(configFromDb({ ...row, runtime_tier: null }, GROUP).runtimeTier).toBeUndefined();
   });
 });
 

@@ -1,12 +1,12 @@
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import { describe, it, expect, beforeEach, afterEach, spyOn } from 'bun:test';
 
-import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './db/connection.js';
-import { getPendingMessages, markCompleted } from './db/messages-in.js';
+import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './mailbox/sqlite/connection.js';
+import { getPendingMessages, markCompleted, type MessageInRow } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
-import { formatMessages, extractRouting } from './formatter.js';
-import { isCorruptionError, processQuery } from './poll-loop.js';
+import { formatMessages, extractRouting, isClearCommand, isRunnerCommand } from './formatter.js';
+import { processQuery } from './poll-loop.js';
 import { MockProvider } from './providers/mock.js';
-import type { AgentQuery, ProviderEvent } from './providers/types.js';
+import type { AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
 
 beforeEach(() => {
   initTestSessionDb();
@@ -220,7 +220,13 @@ describe('origin metadata (from= attribute)', () => {
       .run(name, name, channelType, platformId);
   }
 
-  function insertWithRouting(id: string, kind: string, content: object, channelType: string | null, platformId: string | null): void {
+  function insertWithRouting(
+    id: string,
+    kind: string,
+    content: object,
+    channelType: string | null,
+    platformId: string | null,
+  ): void {
     getInboundDb()
       .prepare(
         `INSERT INTO messages_in (id, kind, timestamp, status, platform_id, channel_type, content)
@@ -298,8 +304,7 @@ describe('mock provider', () => {
     const typed = events.filter((e) => e.type !== 'activity');
     expect(typed.length).toBeGreaterThanOrEqual(3);
     expect(typed[0].type).toBe('init');
-    // The mock declares emitsMidTurnText, so the turn's text streams as a
-    // text event before the result repeats it.
+    // The mock streams text before the result repeats it.
     expect(typed[1].type).toBe('text');
     expect(typed[2].type).toBe('result');
     expect((typed[2] as { text: string }).text).toBe('Echo: Hello');
@@ -357,7 +362,7 @@ describe('end-to-end with mock provider', () => {
 
     for await (const event of query.events) {
       if (event.type === 'result' && event.text) {
-        writeMessageOut({
+        await writeMessageOut({
           id: `out-${Date.now()}`,
           in_reply_to: routing.inReplyTo,
           kind: 'chat',
@@ -414,6 +419,8 @@ const ERR_ROUTING = {
   inReplyTo: 'm1',
 };
 
+const AGENT_ROUTING = { platformId: 'ag-a', channelType: 'agent', threadId: null, inReplyTo: 'm1' };
+
 it('does not push accumulated-only follow-ups into an active query', async () => {
   const pushes: string[] = [];
 
@@ -443,7 +450,7 @@ it('does not push accumulated-only follow-ups into an active query', async () =>
 });
 
 describe('error result with no <message> envelope', () => {
-  it('delivers a budget/billing error to the triggering channel and does not nudge', async () => {
+  it('delivers a safe failure notice to the triggering channel and does not nudge', async () => {
     const budgetText = 'Spending limit reached. Add your own key at https://example.com/keys';
     const { query, pushes } = makeResultQuery({ type: 'result', text: budgetText, isError: true });
 
@@ -451,11 +458,51 @@ describe('error result with no <message> envelope', () => {
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(JSON.parse(out[0].content).text).toBe(budgetText);
+    expect(JSON.parse(out[0].content)).toEqual({
+      text: 'The agent run failed. Check the logs for details.',
+      failureNotice: true,
+    });
     expect(out[0].platform_id).toBe('chan-1');
     expect(out[0].channel_type).toBe('discord');
     // No re-wrap nudge — an error result must not re-hammer the gateway.
     expect(pushes).toHaveLength(0);
+  });
+
+  it.each([
+    '<internal>PRIVATE THOUGHTS</internal>\n\nOpenCode prompt failed: {"responseHeaders":{"authorization":"fixture-secret"}}',
+    'Unwrapped private reasoning\n\n{"responseBody":"fixture-secret"}',
+    '',
+  ])('keeps failed-turn scratchpad and diagnostics out of chat: %s', async (text) => {
+    const { query, pushes } = makeResultQuery({ type: 'result', text, isError: true });
+    const exchanges: ProviderExchange[] = [];
+    await processQuery(query, ERR_ROUTING, ['m1'], 'mock', (exchange) => exchanges.push(exchange), 'prompt', undefined);
+    expect(getUndeliveredMessages().map((row) => JSON.parse(row.content).text)).toEqual([
+      'The agent run failed. Check the logs for details.',
+    ]);
+    expect(exchanges).toHaveLength(1);
+    expect(exchanges[0].status).toBe('error');
+    expect(exchanges[0].result).toBe(text);
+    expect(pushes).toHaveLength(0);
+  });
+
+  it.each([
+    ['provider error', 'billing hard-stop', 'billing hard-stop'],
+    ['fallback text', undefined, 'The agent run failed. Check the logs for details.'],
+  ])('logs a skipped notice once when answering a failure notice: %s', async (_label, error, expected) => {
+    const { query } = makeResultQuery({ type: 'result', text: '', isError: true, error });
+    const noticeRouting = { ...AGENT_ROUTING, failureNoticeWake: true };
+    const lines: string[] = [];
+    const spy = spyOn(console, 'error').mockImplementation((line) => {
+      lines.push(String(line));
+    });
+    try {
+      await processQuery(query, noticeRouting, ['m1'], 'mock', undefined, 'prompt', undefined);
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(lines.filter((line) => line.includes(expected))).toHaveLength(1);
+    expect(getUndeliveredMessages()).toHaveLength(0);
   });
 
   it('still nudges (and does not deliver) a normal unwrapped result', async () => {
@@ -469,21 +516,177 @@ describe('error result with no <message> envelope', () => {
   });
 });
 
-describe('isCorruptionError', () => {
-  it('matches the Docker Desktop macOS torn-read symptom', () => {
-    expect(isCorruptionError('database disk image is malformed')).toBe(true);
+describe('a2a failure notices (never answer a notice with a notice)', () => {
+  function insertRow(
+    id: string,
+    content: object | string,
+    channelType: string | null,
+    platformId: string | null,
+    opts: { trigger?: 0 | 1; onWake?: 0 | 1 } = {},
+  ): void {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, kind, timestamp, status, platform_id, channel_type, trigger, on_wake, content)
+         VALUES (?, 'chat', datetime('now'), 'pending', ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        platformId,
+        channelType,
+        opts.trigger ?? 1,
+        opts.onWake ?? 0,
+        typeof content === 'string' ? content : JSON.stringify(content),
+      );
+  }
+
+  /** One failing turn over every pending row, as the poll loop would run it. */
+  async function failTurn(): Promise<void> {
+    const rows = getPendingMessages(true);
+    const { query } = makeResultQuery({ type: 'result', text: '', isError: true, error: 'Incorrect API key' });
+    await processQuery(query, extractRouting(rows), [], 'mock', undefined, 'prompt', undefined);
+    markCompleted(rows.map((m) => m.id));
+  }
+
+  /** Outbound agent-route rows; routeToSession then starts a fresh inbox. */
+  function agentOutbound(): Array<{ platform_id: string | null; content: string }> {
+    return getUndeliveredMessages().filter((m) => m.channel_type === 'agent');
+  }
+
+  /** The host's a2a route: a fresh session inbox, content passed unchanged. */
+  function routeToSession(content: string, fromAgent: string, id: string): void {
+    closeSessionDb();
+    initTestSessionDb();
+    insertRow(id, content, 'agent', fromAgent);
+  }
+
+  it('A asks B, B fails: A gets exactly one notice, and a failure there sends nothing back', async () => {
+    // B's session: A's request arrives and B's turn fails.
+    insertRow('a2a-1', { text: 'please summarize the report', sender: 'A' }, 'agent', 'ag-a');
+    await failTurn();
+    const toA = agentOutbound();
+    expect(toA).toHaveLength(1);
+    expect(toA[0].platform_id).toBe('ag-a');
+    expect(JSON.parse(toA[0].content)).toEqual({ text: 'Incorrect API key', failureNotice: true });
+
+    // A's session: the notice arrives from B and A's turn fails too.
+    routeToSession(toA[0].content, 'ag-b', 'a2a-2');
+    const lines: string[] = [];
+    const spy = spyOn(console, 'error').mockImplementation((line) => {
+      lines.push(String(line));
+    });
+    try {
+      await failTurn();
+    } finally {
+      spy.mockRestore();
+    }
+    expect(getUndeliveredMessages()).toHaveLength(0);
+    expect(lines.filter((line) => line.includes('notice not sent'))).toHaveLength(1);
   });
 
-  it('matches wrapped SQLite corruption codes', () => {
-    expect(isCorruptionError('SqliteError: SQLITE_CORRUPT_VTAB: ...')).toBe(true);
-    expect(isCorruptionError('file is not a database')).toBe(true);
+  it('a self-addressed restart message that fails stops after one notice', async () => {
+    const restart = { text: 'verify the new tool', sender: 'system', senderId: 'system' };
+    insertRow('restart-1', restart, 'agent', 'ag-self', { onWake: 1 });
+    let notices = 0;
+    for (let hop = 0; hop < 5; hop++) {
+      await failTurn();
+      const out = agentOutbound();
+      if (out.length === 0) break;
+      notices += out.length;
+      // Self-send: the host routes the notice straight back to this session.
+      routeToSession(out[0].content, 'ag-self', `a2a-hop-${hop}`);
+    }
+    expect(notices).toBe(1);
   });
 
-  it('returns false for unrelated errors', () => {
-    expect(isCorruptionError('database is locked')).toBe(false);
-    expect(isCorruptionError('no such table: messages_in')).toBe(false);
-    expect(isCorruptionError('')).toBe(false);
+  it('a batch mixing a failure notice with a real message still gets a notice', async () => {
+    insertRow('n1', { text: 'Incorrect API key', failureNotice: true }, 'agent', 'ag-b');
+    insertRow('m2', { text: 'any update?', sender: 'Alice' }, 'discord', 'chan-1');
+    await failTurn();
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0].content).failureNotice).toBe(true);
+    // The requester hears about it, not the agent whose notice came first.
+    expect([out[0].channel_type, out[0].platform_id, out[0].in_reply_to]).toEqual(['discord', 'chan-1', 'm2']);
   });
+
+  it.each([
+    ['accumulated context', { channelType: 'discord', platformId: 'chan-1', trigger: 0 as 0 | 1 }],
+    ['a cross-session echo', { channelType: 'session-echo', platformId: null, trigger: 1 as 0 | 1 }],
+  ])('%s riding along with a failure notice does not earn a notice', async (_label, extra) => {
+    insertRow('c1', { text: 'context', sender: 'Bob' }, extra.channelType, extra.platformId, {
+      trigger: extra.trigger,
+    });
+    insertRow('n1', { text: 'Incorrect API key', failureNotice: true }, 'agent', 'ag-b');
+    await failTurn();
+    expect(getUndeliveredMessages()).toHaveLength(0);
+  });
+
+  it('a plain agent route still gets its notice', async () => {
+    const { query } = makeResultQuery({ type: 'result', text: '', isError: true });
+    await processQuery(query, AGENT_ROUTING, ['m1'], 'mock', undefined, 'prompt', undefined);
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].channel_type).toBe('agent');
+    expect(out[0].platform_id).toBe('ag-a');
+  });
+
+  it('context between a leading notice and the request does not take the route', () => {
+    const row = (id: string, channel: string, platform: string, trigger: number, content: object) =>
+      ({
+        id,
+        kind: 'chat',
+        trigger,
+        channel_type: channel,
+        platform_id: platform,
+        thread_id: null,
+        content: JSON.stringify(content),
+      }) as unknown as MessageInRow;
+    const routing = extractRouting([
+      row('n1', 'agent', 'ag-b', 1, { text: 'Incorrect API key', failureNotice: true }),
+      row('c1', 'discord', 'chan-x', 0, { text: 'context' }),
+      row('m2', 'discord', 'chan-1', 1, { text: 'any update?' }),
+    ]);
+    expect([routing.platformId, routing.inReplyTo, routing.failureNoticeWake]).toEqual(['chan-1', 'm2', false]);
+  });
+
+  it('a failure notice is never a runner command', () => {
+    insertRow('n1', { text: '/clear is required before retrying', failureNotice: true }, 'agent', 'ag-b');
+    insertRow('n2', { text: '/compact failed', failureNotice: true }, 'agent', 'ag-b');
+    const [clearLike, compactLike] = getPendingMessages();
+    expect(isClearCommand(clearLike)).toBe(false);
+    expect(isRunnerCommand(compactLike, 'claude')).toBe(false);
+  });
+
+  it.each([
+    ['{"text":"hi","failureNotice":"true"}', false],
+    ['{"text":"hi","failureNotice":true}', true],
+    ['not json', false],
+    ['null', false],
+  ])('extractRouting reads the marker strictly: %s', (content, expected) => {
+    insertRow('x1', content, 'agent', 'ag-b');
+    expect(extractRouting(getPendingMessages()).failureNoticeWake).toBe(expected);
+  });
+});
+
+it('delivers completed wrapped text while recording the failed turn exactly once', async () => {
+  getInboundDb()
+    .prepare(
+      `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+     VALUES ('main', 'main', 'channel', 'discord', 'chan-1', NULL)`,
+    )
+    .run();
+  const text = '<message to="main">Completed before failure.</message>\n\nBackend failed.';
+  const { query, pushes } = makeResultQuery({ type: 'result', text, isError: true });
+  const exchanges: ProviderExchange[] = [];
+
+  await processQuery(query, ERR_ROUTING, ['m1'], 'mock', (exchange) => exchanges.push(exchange), 'prompt', undefined);
+
+  expect(getUndeliveredMessages().map((row) => JSON.parse(row.content).text)).toEqual([
+    'Completed before failure.',
+    'The agent run failed. Check the logs for details.',
+  ]);
+  expect(exchanges).toEqual([{ prompt: 'prompt', result: text, continuation: 'sess-1', status: 'error' }]);
+  expect(pushes).toHaveLength(0);
 });
 
 // --- Task-run turn wiring: the REAL processQuery path (one-door) ---
@@ -501,13 +704,34 @@ const TASK_ROUTING = {
 
 function taskLogRows(): Array<{ text: string }> {
   return (
-    getOutboundDb()
-      .prepare("SELECT content FROM messages_out WHERE kind = 'task_log' ORDER BY seq")
-      .all() as Array<{ content: string }>
+    getOutboundDb().prepare("SELECT content FROM messages_out WHERE kind = 'task_log' ORDER BY seq").all() as Array<{
+      content: string;
+    }>
   ).map((r) => JSON.parse(r.content) as { text: string });
 }
 
 describe('task-run turn wiring (real processQuery)', () => {
+  it('logs a failed task with inert message blocks once and does not retry delivery', async () => {
+    const text = '<message to="main">Completed before failure.</message>\n\nBackend failed.';
+    const { query, pushes } = makeResultQuery({ type: 'result', text, isError: true });
+    const exchanges: ProviderExchange[] = [];
+
+    await processQuery(
+      query,
+      TASK_ROUTING,
+      ['t1'],
+      'mock',
+      (exchange) => exchanges.push(exchange),
+      'prompt',
+      undefined,
+    );
+
+    expect(taskLogRows()).toEqual([{ text: '[undelivered → main] Completed before failure. Backend failed.' }]);
+    expect(getUndeliveredMessages().filter((row) => row.kind === 'chat')).toHaveLength(0);
+    expect(exchanges).toEqual([{ prompt: 'prompt', result: text, continuation: 'sess-1', status: 'error' }]);
+    expect(pushes).toHaveLength(0);
+  });
+
   it('auto-appends the final text as a task_log row', async () => {
     async function* events(): AsyncGenerator<ProviderEvent> {
       yield { type: 'init', continuation: 's1' };

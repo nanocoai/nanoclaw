@@ -78,7 +78,41 @@ For a fence-carrying skill, conformance means:
 - **The lint passes**: `pnpm exec tsx scripts/skill-directives.ts .claude/skills/<name>/SKILL.md`. Retired presentation attrs (`min:`/`error:`/`open:`/`gate`/`label:`/`on-fail:`) are errors; the reference floor — a `## Troubleshooting` section on any skill with a secret prompt or interactive step — is a warning worth honoring regardless of fences.
 - **Directives are idempotent** by construction (`copy` overwrites, `append` skips-if-present, `env-set` sets-if-absent, …) — which is the same re-runnable-apply rule every skill already has.
 
+### Provider skill frontmatter (`nanoclaw-provider-*`)
+
+A provider install skill (`/add-codex`, `/add-opencode`) also declares how the setup wizard should treat the provider. The declaration lives in the SKILL.md frontmatter under `metadata:` and is parsed by `setup/providers/skill-descriptor.ts`; nothing about the offer is hard-coded in setup. Every key is required once `nanoclaw-provider` is present, and every key is read by setup code:
+
+| Key | Allowed values | Read by |
+|-----|----------------|---------|
+| `nanoclaw-provider` | lowercase kebab-case provider name (`codex`) | descriptor identity; `setup/providers/install.ts` passes it to the contract verifier as the provider that must be declared |
+| `nanoclaw-provider-label` | display text | the provider picker in `setup/auto.ts` (`askAgentProviderChoice`) |
+| `nanoclaw-provider-hint` | display text | the picker's hint column (suffixed "— installs now") |
+| `nanoclaw-provider-offered` | `'true'` \| `'false'` (quoted strings) | `listInstallableProviderDescriptors` — only `'true'` reaches the picker's "installs now" list and `--step provider-auth <name>`. `'false'` marks a skill-only provider that never appears in setup |
+| `nanoclaw-provider-image` | `local-required` \| `hardened-compatible` | `providerImagePolicy` — whether picking the provider forces a locally built sandbox image instead of the pre-built one |
+
+The skill directory itself is the install skill setup applies in-process (`applyProviderSkill`); there is no key for it, and a leftover `nanoclaw-provider-install-skill` is rejected. `nanoclaw-provider-label` and `nanoclaw-provider-hint` must match the `label`/`hint` of the provider's `setup/providers/<name>.ts` entry once it is installed — the descriptor labels the offer before install, the entry labels it after, and `setup/providers/skill-descriptor.test.ts` fails on drift.
+
+A skill-only provider (`offered: 'false'`) must not copy a `setup/providers/<name>.ts` or append to the `setup/providers/index.ts` barrel — that barrel is the second way a provider reaches the picker.
+
+**Conformance test.** Every provider that declares a runtime contract proves it from its own `container/agent-runner/src/providers/<name>.conformance.test.ts`, calling `defineProviderConformance(name, contract, { probes? })` with the probe fixtures its resolves need — that knowledge is the provider's, so core runs no generic sweep over registered contracts, and Claude proves its own the same way. The file is part of the payload a provider skill copies; the install verifier (`scripts/provider-contract-verifier.ts`) runs it and fails when a declared provider ships none.
+
+**Merge order.** The provider payload branch must carry the files a provider skill copies (including the `provider-contracts/<name>.ts` declarations and the `<name>.conformance.test.ts`) before the trunk change that lists them lands, otherwise `/add-<name>` fails at its copy step; `scripts/test-registry-skills.ts --combined-providers` fails CI when trunk carries provider skills whose payload is not on the registry branch.
+
 ---
+
+### Provider setup help
+
+Provider-owned setup help belongs in the installed setup entry's existing
+`offerFailureAssist` hook. Post-install verification uses `runInstallCheck`.
+A helper that runs before payload installation is an optional setup extension,
+not a requirement of the runtime contract. See [OpenCode host help](provider-host-maintenance.md).
+
+The setup installer skips the skill's build, test, and external command fences
+and runs the provider contract verifier. For optional host-helper coverage in
+that path, name the installed test `scripts/<provider>-host.test.ts`, using a
+lowercase kebab-case provider name. The verifier discovers these files and runs
+them with its host checks. Also include the test in the skill's prose and
+`nc:run effect:test` command so ordinary skill application runs it.
 
 ## Integration points
 
@@ -171,7 +205,7 @@ Each with its fix. These are patterns to remove, not to test around: a drift-pro
 2. **REMOVE.md soft-disable** (comments out an import; leaves copied files behind). DELETE the import line and `rm` every file the skill copied.
 3. **REMOVE.md incomplete** (misses env vars, the package uninstall, copied tests). Reverse *every* change; read the env vars from the skill's own credentials section, don't guess.
 4. **Raw SQL against a core DB** (read or write). Use a core helper or an `ncl` verb; the in-tree query wrapper is the sanctioned last resort. Never the `sqlite3` binary.
-5. **Credential threading** (`-e KEY=…` or a stdin secrets payload into the container). OneCLI gateway only; it injects credentials per request.
+5. **Credential threading** (`-e KEY=…` or a stdin secrets payload into the container). The credential gateway only; it injects credentials per request.
 6. **Branch-merge install** (`git merge` of a registry branch or any code branch). Install by additive fetch: `git fetch origin <branch>`, then `git show origin/<branch>:path > path` per file. For an update/reapply workflow, re-run each installed skill's additive apply, never merge.
 7. **Diff-against-past framing** ("earlier versions…", "this is now redundant") and **documenting non-steps** ("no X needed"). Write present-tense DO steps only. A skill reads as a standalone artifact with no memory of its own edits.
 8. **Stale reach-in targets** (an edit aimed at code that no longer exists; a reach-in already shipped in trunk). Verify the target exists *before* instructing the edit; reconcile already-in-trunk ones to a no-op. Before appending to an allowlist or list, check how it's consumed; the entry may already be derived from a registry, making the edit dead.

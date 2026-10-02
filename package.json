@@ -1,6 +1,6 @@
 {
   "name": "nanoclaw",
-  "version": "2.2.0",
+  "version": "2.4.0",
   "description": "Personal AI assistant. Lightweight, secure, customizable.",
   "type": "module",
   "packageManager": "pnpm@10.34.5",
@@ -13,13 +13,19 @@
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
+    "mailbox-model:generate": "cp src/mailbox/model.ts container/agent-runner/src/mailbox/model.generated.ts",
+    "mailbox-model:check": "cmp src/mailbox/model.ts container/agent-runner/src/mailbox/model.generated.ts",
     "format": "prettier --write \"src/**/*.ts\"",
     "format:fix": "prettier --write \"src/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\"",
+    "stdin-json:generate": "sh scripts/sync-stdin-json.sh",
+    "stdin-json:check": "sh scripts/sync-stdin-json.sh --check",
     "prepare": "husky",
     "setup": "tsx setup/index.ts",
     "setup:auto": "tsx setup/auto.ts",
     "ncl": "tsx src/cli/client.ts",
+    "migrate": "tsx scripts/migrate.ts",
+    "release-notes": "node scripts/release-notes.mjs",
     "chat": "tsx scripts/chat.ts",
     "local-web": "tsx scripts/local-web-url.ts",
     "lint": "eslint src/",
@@ -42,11 +48,10 @@
     "@chat-adapter/whatsapp": "4.29.0",
     "@clack/core": "^1.2.0",
     "@clack/prompts": "^1.2.0",
-    "@onecli-sh/sdk": "2.2.1",
     "@resend/chat-sdk-adapter": "^0.1.1",
     "@types/qrcode": "^1.5.6",
     "@whiskeysockets/baileys": "7.0.0-rc.9",
-    "better-sqlite3": "11.10.0",
+    "better-sqlite3": "13.0.3",
     "chat": "4.29.0",
     "chat-adapter-imessage": "^0.1.1",
     "cron-parser": "5.5.0",
@@ -68,12 +73,12 @@
     "globals": "^15.12.0",
     "husky": "^9.1.7",
     "prettier": "^3.8.1",
-    "tsx": "^4.19.0",
+    "tsx": "^4.23.15",
     "typescript": "^5.7.0",
     "typescript-eslint": "^8.35.0",
     "vitest": "^4.0.18"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   }
 }

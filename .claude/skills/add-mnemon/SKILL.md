@@ -117,13 +117,13 @@ systemctl --user restart $(systemd_unit)              # Linux
 After the next container starts, check that setup ran:
 
 ```bash
-docker logs $(docker ps --filter name=nanoclaw-v2 --format '{{.Names}}' | head -1) 2>&1 | grep -i mnemon
+docker logs $(docker ps --filter label=nanoclaw-session --format "{{.Names}}" | head -1) 2>&1 | grep -i mnemon
 ```
 
 Then inspect the hooks inside the running container:
 
 ```bash
-docker exec $(docker ps --filter name=nanoclaw-v2 --format '{{.Names}}' | head -1) \
+docker exec $(docker ps --filter label=nanoclaw-session --format "{{.Names}}" | head -1) \
   cat /home/node/.claude/settings.json | grep -A5 mnemon
 ```
 
@@ -136,7 +136,7 @@ Have a conversation with the agent, then start a new session and reference somet
 Mnemon writes to `/home/node/.claude/mnemon/` inside the container, which maps to the per-agent-group `.claude/` directory on the host. To find the exact host path:
 
 ```bash
-docker inspect $(docker ps --filter name=nanoclaw-v2 --format '{{.Names}}' | head -1) \
+docker inspect $(docker ps --filter label=nanoclaw-session --format "{{.Names}}" | head -1) \
   --format '{{range .Mounts}}{{if eq .Destination "/home/node/.claude"}}{{.Source}}{{end}}{{end}}'
 ```
 

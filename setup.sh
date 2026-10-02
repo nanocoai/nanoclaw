@@ -58,7 +58,7 @@ check_node() {
     NODE_PATH_FOUND=$(command -v node)
     local major
     major=$(echo "$NODE_VERSION" | cut -d. -f1)
-    if [ "$major" -ge 20 ] 2>/dev/null; then
+    if [ "$major" -ge 22 ] 2>/dev/null; then
       NODE_OK="true"
     fi
     log "Node $NODE_VERSION at $NODE_PATH_FOUND (major=$major, ok=$NODE_OK)"
@@ -85,20 +85,48 @@ install_deps() {
   # is invisible but corepack still blocks on stdin. Auto-accept.
   export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 
+  # A previous run (or the manual recovery printed below) may have left pnpm
+  # in ~/.local/bin, which a fresh login shell doesn't always have on PATH.
+  if ! command -v pnpm >/dev/null 2>&1 && [ -x "$HOME/.local/bin/pnpm" ]; then
+    export PATH="$HOME/.local/bin:$PATH"
+    log "Found pnpm in $HOME/.local/bin — prepended to PATH"
+  fi
+
   # Preferred path: enable corepack so `pnpm` shim lands on PATH.
   if command -v corepack >/dev/null 2>&1; then
     log "Enabling corepack"
     corepack enable >> "$LOG_FILE" 2>&1 || true
 
-    # On Linux/WSL with system-wide Node (e.g. apt-installed to /usr/bin),
-    # corepack needs root to symlink /usr/bin/pnpm. macOS Homebrew installs
+    # With system-wide Node (e.g. apt-installed to /usr/bin), corepack puts
+    # its shims next to the node binary, so a non-root user gets EACCES on
+    # /usr/bin/pnpm. Retry into ~/.local/bin, which needs no root — nanoclaw.sh
+    # and the service unit already carry it on PATH.
+    if ! command -v pnpm >/dev/null 2>&1; then
+      local user_bin="$HOME/.local/bin"
+      log "pnpm not on PATH after corepack enable — retrying into $user_bin"
+      if mkdir -p "$user_bin" >> "$LOG_FILE" 2>&1 \
+          && corepack enable --install-directory "$user_bin" pnpm >> "$LOG_FILE" 2>&1 \
+          && [ -x "$user_bin/pnpm" ]; then
+        export PATH="$user_bin:$PATH"
+        hash -r 2>/dev/null || true
+        log "corepack pnpm shim installed in $user_bin"
+      else
+        log "corepack enable into $user_bin failed"
+      fi
+    fi
+
+    # Last resort before the npm fallback: passwordless sudo. `-n` never
+    # prompts — output is redirected to the log, so a password prompt would
+    # be invisible and block until sudo times out. macOS Homebrew installs
     # land in a user-writable prefix, and a sudo retry there would create
     # root-owned shims inside /opt/homebrew that later break brew — so the
     # retry is Linux-only.
     if ! command -v pnpm >/dev/null 2>&1 && [ "$PLATFORM" = "linux" ] \
         && command -v sudo >/dev/null 2>&1; then
-      log "pnpm not on PATH after corepack enable — retrying with sudo"
-      sudo corepack enable >> "$LOG_FILE" 2>&1 || true
+      log "pnpm still not on PATH — retrying corepack enable with sudo -n"
+      if ! sudo -n corepack enable >> "$LOG_FILE" 2>&1; then
+        log "sudo -n corepack enable failed (sudo needs a password, or corepack errored)"
+      fi
     fi
   else
     log "corepack not available — will fall back to npm-install pnpm"
@@ -114,10 +142,20 @@ install_deps() {
       | sed -E 's/.*"pnpm@([^"]+)".*/\1/')
     [ -z "$pinned" ] && pinned="latest"
     log "Installing pnpm@${pinned} via npm"
-    npm install -g "pnpm@${pinned}" >> "$LOG_FILE" 2>&1 \
-      || ([ "$PLATFORM" = "linux" ] && command -v sudo >/dev/null 2>&1 \
-            && sudo npm install -g "pnpm@${pinned}" >> "$LOG_FILE" 2>&1) \
-      || true
+    if ! npm install -g "pnpm@${pinned}" >> "$LOG_FILE" 2>&1; then
+      # sudo can't prompt here (output goes to the log) — use a user-owned
+      # prefix instead. ~/.local puts pnpm in ~/.local/bin, which nanoclaw.sh
+      # and the service unit already have on PATH.
+      log "npm install -g failed — retrying with a user-owned prefix"
+      NPM_LOCAL_PREFIX="$HOME/.local"
+      if mkdir -p "$NPM_LOCAL_PREFIX" \
+          && npm install -g "pnpm@${pinned}" --prefix "$NPM_LOCAL_PREFIX" >> "$LOG_FILE" 2>&1; then
+        export PATH="$NPM_LOCAL_PREFIX/bin:$PATH"
+        log "Installed pnpm@${pinned} to user-owned prefix: $NPM_LOCAL_PREFIX"
+      else
+        log "pnpm install via user-owned prefix also failed"
+      fi
+    fi
   fi
 
   # `npm install -g` writes to npm's global prefix, which isn't always on the
@@ -136,6 +174,12 @@ install_deps() {
 
   if ! command -v pnpm >/dev/null 2>&1; then
     log "pnpm not on PATH after corepack + npm fallback"
+    echo "Could not install pnpm without root. Run this, then re-run setup:"
+    if command -v corepack >/dev/null 2>&1; then
+      echo "  mkdir -p ~/.local/bin && corepack enable --install-directory ~/.local/bin pnpm"
+    else
+      echo "  npm install -g pnpm@${pinned:-<version from package.json packageManager>} --prefix ~/.local"
+    fi
     return
   fi
 
@@ -185,8 +229,15 @@ detect_platform
 check_node
 if [ "$NODE_OK" = "false" ]; then
   log "Node missing or too old — running setup/install-node.sh"
-  echo "Node not found — installing via setup/install-node.sh"
+  echo "Node 22+ not found — installing via setup/install-node.sh"
   if bash "$PROJECT_ROOT/setup/install-node.sh" 2>&1 | tee -a "$LOG_FILE"; then
+    if [ -x "$HOME/.local/bin/node" ]; then
+      export PATH="$HOME/.local/bin:$PATH"
+    elif [ "$PLATFORM" = "macos" ] && command -v brew >/dev/null 2>&1; then
+      if NODE22_PREFIX="$(brew --prefix node@22 2>/dev/null)"; then
+        export PATH="$NODE22_PREFIX/bin:$PATH"
+      fi
+    fi
     hash -r 2>/dev/null || true
     check_node
   else

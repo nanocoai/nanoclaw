@@ -103,10 +103,7 @@ export function inferIsGroup(channelType: string, platformId: string): number {
  * Key rule: requires_trigger=0 means "respond to everything" regardless
  * of the pattern value. The pattern was for mention highlighting, not gating.
  */
-export function triggerToEngage(input: {
-  trigger_pattern: string | null;
-  requires_trigger: number | null;
-}): {
+export function triggerToEngage(input: { trigger_pattern: string | null; requires_trigger: number | null }): {
   engage_mode: 'pattern' | 'mention' | 'mention-sticky';
   engage_pattern: string | null;
 } {
@@ -153,9 +150,7 @@ export const CHANNEL_AUTH_REGISTRY: Record<string, ChannelAuthSpec> = {
   },
   telegram: {
     v1EnvKeys: ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_API_ID', 'TELEGRAM_API_HASH'],
-    requiredV2Keys: [
-      { key: 'TELEGRAM_BOT_TOKEN', where: 'BotFather on Telegram → /mybots → Bot → API Token' },
-    ],
+    requiredV2Keys: [{ key: 'TELEGRAM_BOT_TOKEN', where: 'BotFather on Telegram → /mybots → Bot → API Token' }],
     candidatePaths: ['data/sessions/telegram', 'store/telegram-session'],
   },
   whatsapp: {

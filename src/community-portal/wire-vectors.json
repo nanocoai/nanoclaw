@@ -1,0 +1,33 @@
+{
+  "note": "Generated with the remote-access module signProof() as the reference signer. Throwaway key; grants nothing.",
+  "proof": {
+    "pkcs8_b64": "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg/NiCsxXCtTZ5mdi20CJ7RoiOO1Sz4X/hFO8pnFNc+AuhRANCAARsUzkNcfNlgb1cGR5m5aanOfBd8Cge0VwZxaEoMOWJ2BNk15b5zvEjiy9zXpvS0oFxim5Nqlum1VohtSu1mD9Y",
+    "publicKey": {
+      "kty": "EC",
+      "crv": "P-256",
+      "x": "bFM5DXHzZYG9XBkeZuWmpznwXfAoHtFcGcWhKDDlidg",
+      "y": "E2TXlvnO8SOLL3Nem9LSgXGKbk2qW6bVWiG1K7WYP1g"
+    },
+    "fingerprint": "8fBYMR5CR4CwkjdN",
+    "cases": [
+      {
+        "ts": 1788825600,
+        "nonce": "q6urq6urq6urq6urq6urqw",
+        "signingInput": "nanoclaw-host-grant-v1\n1788825600\nq6urq6urq6urq6urq6urqw",
+        "header": "v1;kid=8fBYMR5CR4CwkjdN;ts=1788825600;nonce=q6urq6urq6urq6urq6urqw;sig=L8sP_sx7B_Y_JdwwnFvXQMEoEXqqIZkajVikSezQi39UqHO2f8mtPgLv8dT2-YqKCCGEiq8cu44zcER3ZsEERg"
+      },
+      {
+        "ts": 1788825601.9,
+        "nonce": "JeZux7AVMDLtlhWZFDi1Pg",
+        "signingInput": "nanoclaw-host-grant-v1\n1788825601\nJeZux7AVMDLtlhWZFDi1Pg",
+        "header": "v1;kid=8fBYMR5CR4CwkjdN;ts=1788825601;nonce=JeZux7AVMDLtlhWZFDi1Pg;sig=tIIXaK7TAZPDw_59jXac7V7ggSLCRrE0UmSg98lnSJnMI37v9xKBFD4Ep7wHG_TJd95P-fYpjHxAev8eaTRXag"
+      },
+      {
+        "ts": 1788912000,
+        "nonce": "de7MMcXiA468sdrIoA-Vbg",
+        "signingInput": "nanoclaw-host-grant-v1\n1788912000\nde7MMcXiA468sdrIoA-Vbg",
+        "header": "v1;kid=8fBYMR5CR4CwkjdN;ts=1788912000;nonce=de7MMcXiA468sdrIoA-Vbg;sig=lCq0z0wVDkjUCGxIwWjGlAQS19jU4z6po5bH6fitrLbUIg4hndWdL3nGEud_qg_JFWG7g7xNXPOAI-gIUOgeAA"
+      }
+    ]
+  }
+}

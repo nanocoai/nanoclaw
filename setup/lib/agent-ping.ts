@@ -13,7 +13,17 @@
  */
 import { spawn } from 'child_process';
 
+import * as setupLog from '../logs.js';
+
+export const PING_AGENT_FOLDER = 'ping_test';
+
 export type PingResult = 'ok' | 'no_reply' | 'socket_error' | 'auth_error';
+
+// The only setup check that goes through the container, gateway and model.
+// Log it so a failed reply isn't hidden behind earlier successes.
+export function logFirstChat(result: PingResult, durationMs: number): void {
+  setupLog.step('first-chat', result === 'ok' ? 'success' : 'failed', durationMs, { RESULT: result });
+}
 
 export function classifyPingResult(exitCode: number | null, stdout: string, stderr = ''): PingResult {
   const output = `${stdout}\n${stderr}`;

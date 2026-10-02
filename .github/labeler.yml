@@ -1,0 +1,321 @@
+# Path -> area/* mapping for actions/labeler.
+#
+# Every key below must byte-match a label that already exists in the repo
+# (`gh label list`). GitHub's addLabels API auto-creates unknown labels with a
+# random color and no description, so a typo here silently invents a label.
+#
+# A PR may carry several area/* labels; the labeler only adds, never removes
+# (`sync-labels: false`), so a maintainer can prune to the primary subsystem by
+# hand and the workflow will not put it back.
+#
+# Paths with no confident owner are deliberately left unmapped rather than
+# guessed. See .github/workflows/label-area.yml for the runner side.
+
+"area/agent-memory":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "container/agent-runner/src/memory/**"
+          - "src/migrate-claude-memory-settings*"
+          - "src/memory-migration-contract.test.ts"
+          - "docs/memory.md"
+          - ".claude/skills/migrate-memory/**"
+          - ".claude/skills/add-mnemon/**"
+          - ".claude/skills/add-karpathy-llm-wiki/**"
+
+"area/agent-runner":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "container/agent-runner/**"
+          - "docs/agent-runner-details.md"
+          - "docs/SDK_DEEP_DIVE.md"
+
+"area/channels":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/channels/**"
+          - "src/modules/interactive/**"
+          - "src/modules/typing/**"
+          - "setup/channels/**"
+          - "setup/pair-dial*"
+          - "setup/pair-telegram*"
+          - "setup/signal-auth*"
+          - "setup/whatsapp-auth*"
+          - "setup/install-signal-cli.sh"
+          - "scripts/photon-setup*"
+          - "scripts/seed-discord.ts"
+          - "docs/isolation-model.md"
+          - ".claude/skills/manage-channels/**"
+          - ".claude/skills/migrate-slack-agents/**"
+          - ".claude/skills/add-deltachat/**"
+          - ".claude/skills/add-dial/**"
+          - ".claude/skills/add-dial-number/**"
+          - ".claude/skills/add-discord/**"
+          - ".claude/skills/add-emacs/**"
+          - ".claude/skills/add-gchat/**"
+          - ".claude/skills/add-github/**"
+          - ".claude/skills/add-imessage/**"
+          - ".claude/skills/add-linear/**"
+          - ".claude/skills/add-matrix/**"
+          - ".claude/skills/add-mattermost/**"
+          - ".claude/skills/add-resend/**"
+          - ".claude/skills/add-signal/**"
+          - ".claude/skills/add-slack/**"
+          - ".claude/skills/add-teams/**"
+          - ".claude/skills/add-telegram/**"
+          - ".claude/skills/add-webex/**"
+          - ".claude/skills/add-wechat/**"
+          - ".claude/skills/add-whatsapp/**"
+          - ".claude/skills/add-whatsapp-cloud/**"
+
+"area/configuration":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/config*"
+          - "src/env*"
+          - "src/container-config*"
+          - "src/backfill-container-configs*"
+          - "src/db/container-configs*"
+          - "src/group-folder*"
+          - "src/group-init*"
+          - "src/group-persona*"
+          - "src/project-doc-compose*"
+          - "src/timezone*"
+          - "container/agent-runner/src/config*"
+          - "config-examples/**"
+          - ".env.example"
+          - ".claude/skills/customize/**"
+          - "docs/customizing.md"
+
+"area/containers":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "container/Dockerfile"
+          - "container/.dockerignore"
+          - "container/entrypoint.sh"
+          - "container/build.sh"
+          - "container/pull.sh"
+          - "container/install-cli-tools.sh"
+          - "container/cli-tools*"
+          - "container/CLAUDE.md"
+          - "src/container-runner*"
+          - "src/container-runtime*"
+          - "src/container-restart*"
+          - "src/drivers/**"
+          - "src/mount-composition.test.ts"
+          - "src/modules/self-mod/**"
+          - "src/egress-lockdown*"
+          - "setup/container*"
+          - "setup/lib/container-build*"
+          - "scripts/detect-driver-migration*"
+          - "docs/build-and-runtime.md"
+          - "docs/hardened-image.md"
+          - "docs/host-lifecycle-migration.md"
+          - ".github/workflows/approve-agent-image.yml"
+          - ".github/workflows/refresh-agent-image.yml"
+          - ".github/workflows/verify-agent-image.yml"
+          - ".claude/skills/manage-mounts/**"
+
+"area/core":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/index*"
+          - "src/router*"
+          - "src/delivery*"
+          - "src/delivery-guard*"
+          - "src/host-sweep*"
+          - "src/host-lifecycle*"
+          - "src/host-core.test.ts"
+          - "src/circuit-breaker*"
+          - "src/response-registry*"
+          - "src/webhook-server*"
+          - "src/state-sqlite*"
+          - "src/attachment-naming*"
+          - "src/platform-id*"
+          - "src/log.ts"
+          - "src/types.ts"
+          - "src/mailbox/**"
+          - "src/db/**"
+          - "src/modules/agent-to-agent/**"
+          - "src/modules/cross-session-context/**"
+          - "container/agent-runner/src/mailbox/**"
+          - "container/agent-runner/src/poll-loop*"
+          - "docs/architecture.md"
+          - "docs/architecture-diagram.md"
+          - "docs/architecture-diagram.html"
+          - "docs/api-details.md"
+          - "docs/db.md"
+          - "docs/db-central.md"
+          - "docs/agent-mailbox-seam-migration.md"
+          - "docs/central-db-async-migration.md"
+
+"area/credentials":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/gateway-providers/**"
+          - "src/modules/approvals/onecli-approvals.ts"
+          - "container/skills/onecli-gateway/**"
+          - "setup/onecli*"
+          - "setup/install-cred-helper*"
+          - "setup/registry-login*"
+          - "setup/registry/credential-helper.mjs"
+          - "docs/onecli-upgrades.md"
+          - ".claude/skills/init-onecli/**"
+
+"area/ncl-cli":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/cli/**"
+          - "src/command-gate*"
+          - "container/agent-runner/src/cli/**"
+          - "bin/ncl"
+          - "scripts/q*"
+
+"area/providers":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/providers/**"
+          - "src/provider-surfaces.test.ts"
+          - "container/agent-runner/src/providers/**"
+          - "setup/providers/**"
+          - "setup/provider-auth*"
+          - "setup/lib/picked-provider*"
+          - "docs/provider-migration.md"
+          - "docs/ollama.md"
+          - ".claude/skills/add-codex/**"
+          - ".claude/skills/add-opencode/**"
+          - ".claude/skills/add-ollama-provider/**"
+
+"area/repository-maintenance":
+  - changed-files:
+      - any-glob-to-any-file:
+          - ".github/**"
+          - ".husky/**"
+          - ".gitignore"
+          - ".npmrc"
+          - ".nvmrc"
+          - ".prettierrc"
+          - "eslint.config.js"
+          - "tsconfig.json"
+          - "vitest.config.ts"
+          - "vitest.skills.config.ts"
+          - "src/test-setup.ts"
+          - "versions.json"
+          - "AGENTS.md"
+          - "CLAUDE.md"
+          - ".claude/settings.json"
+          - "assets/**"
+          - "package.json"
+          - "pnpm-lock.yaml"
+          - "pnpm-workspace.yaml"
+          - "README.md"
+          - "README_ja.md"
+          - "README_ko.md"
+          - "README_zh.md"
+          - "CHANGELOG.md"
+          - "CODE_OF_CONDUCT.md"
+          - "CONTRIBUTING.md"
+          - "CONTRIBUTORS.md"
+          - "LICENSE"
+          - "RELEASING.md"
+          - "docs/README.md"
+          - "docs/BRANCH-FORK-MAINTENANCE.md"
+          - "repo-tokens/**"
+          - "scripts/release*"
+
+"area/scheduled-tasks":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/modules/scheduling/**"
+          - "container/agent-runner/src/scheduling/**"
+          - "docs/scheduled-tasks.md"
+          - "docs/ncl-tasks-migration.md"
+
+"area/security":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/guard/**"
+          - "src/modules/approvals/**"
+          - "src/modules/permissions/**"
+          - "src/modules/mount-security/**"
+          - "src/attachment-safety*"
+          - "src/inbox-safety*"
+          - "container/agent-runner/src/harness-tag-strip*"
+          - "docs/SECURITY.md"
+
+"area/sessions":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/session-manager*"
+          - "src/db/sessions*"
+          - "docs/db-session.md"
+          - "scripts/cleanup-sessions.sh"
+
+"area/setup-installation":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "setup/**"
+          - "launchd/**"
+          - "nanoclaw.sh"
+          - "migrate-v2.sh"
+          - "migrate-v2-reset.sh"
+          - "src/install-slug*"
+          - "src/upgrade-state*"
+          - "scripts/upgrade-state.ts"
+          - "scripts/update-nanoclaw*"
+          - "scripts/update/**"
+          - "setup.sh"
+          - "uninstall.sh"
+          - "scripts/init-first-agent*"
+          - "scripts/init-cli-agent*"
+          - "scripts/delete-cli-agent*"
+          - "scripts/migrate*"
+          - "scripts/run-migrations*"
+          - "docs/setup-flow.md"
+          - "docs/setup-wiring.md"
+          - "docs/migration-dev.md"
+          - "docs/v1-to-v2-changes.md"
+          - "docs/upgrade-recovery.md"
+          - ".claude/skills/setup/**"
+          - ".claude/skills/init-first-agent/**"
+          - ".claude/skills/debug/**"
+          - ".claude/skills/migrate-from-v1/**"
+          - ".claude/skills/migrate-from-openclaw/**"
+          - ".claude/skills/migrate-nanoclaw/**"
+          - ".claude/skills/update-nanoclaw/**"
+
+"area/skills":
+  - changed-files:
+      - any-glob-to-any-file:
+          - ".claude/skills/**"
+          - ".agents/skills"
+          - "container/skills/**"
+          - "src/group-skills*"
+          - "scripts/skill-*"
+          - "scripts/test-registry-skills.ts"
+          - "scripts/update-skills*"
+          - "setup/lib/skill-driver*"
+          - "docs/skills-model.md"
+          - "docs/skill-guidelines.md"
+          - "docs/skill-directives.md"
+          - "docs/skill-engine-seam.md"
+          - ".github/workflows/registry-skills.yml"
+
+"area/tools":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "container/agent-runner/src/mcp-tools/**"
+          - "container/agent-runner/src/plugin-mcp*"
+          - "container/skills/agent-browser/**"
+          - "container/skills/frontend-engineer/**"
+          - ".mcp.json"
+          - ".claude/skills/add-anydoc/**"
+          - ".claude/skills/add-atomic-chat-tool/**"
+          - ".claude/skills/add-clidash/**"
+          - ".claude/skills/add-dashboard/**"
+          - ".claude/skills/add-dial-tool/**"
+          - ".claude/skills/add-macos-statusbar/**"
+          - ".claude/skills/add-ollama-tool/**"
+          - ".claude/skills/add-rtk/**"
+          - ".claude/skills/add-tavily-tool/**"
+          - ".claude/skills/add-vercel/**"
+          - "scripts/add-dial-tool-scope.test.ts"

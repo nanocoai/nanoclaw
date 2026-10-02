@@ -23,14 +23,14 @@ function now(): string {
   return new Date().toISOString();
 }
 
-beforeEach(() => {
-  const db = initTestDb();
-  runMigrations(db);
+beforeEach(async () => {
+  const db = await initTestDb();
+  await runMigrations(db);
 });
 
 afterEach(async () => {
   await teardownChannelAdapters();
-  closeDb();
+  await closeDb();
 });
 
 async function mountMockAdapter(
@@ -71,8 +71,8 @@ async function mountMockAdapter(
   return { delivered, openDMCalls };
 }
 
-function seedAgentGroup(id: string): void {
-  createAgentGroup({
+async function seedAgentGroup(id: string): Promise<void> {
+  await createAgentGroup({
     id,
     name: id.toUpperCase(),
     folder: id,
@@ -81,70 +81,70 @@ function seedAgentGroup(id: string): void {
   });
 }
 
-function seedUser(id: string, kind: string): void {
-  createUser({ id, kind, display_name: null, created_at: now() });
+async function seedUser(id: string, kind: string): Promise<void> {
+  await createUser({ id, kind, display_name: null, created_at: now() });
 }
 
 describe('canAccessAgentGroup', () => {
-  beforeEach(() => {
-    seedAgentGroup('ag-1');
-    seedAgentGroup('ag-2');
+  beforeEach(async () => {
+    await seedAgentGroup('ag-1');
+    await seedAgentGroup('ag-2');
   });
 
-  it('denies unknown users', () => {
-    const d = canAccessAgentGroup('ghost', 'ag-1');
+  it('denies unknown users', async () => {
+    const d = await canAccessAgentGroup('ghost', 'ag-1');
     expect(d.allowed).toBe(false);
     expect(d.allowed === false && d.reason).toBe('unknown_user');
   });
 
-  it('allows owners globally', () => {
-    seedUser('u-owner', 'telegram');
-    grantRole({ user_id: 'u-owner', role: 'owner', agent_group_id: null, granted_by: null, granted_at: now() });
-    expect(canAccessAgentGroup('u-owner', 'ag-1').allowed).toBe(true);
-    expect(canAccessAgentGroup('u-owner', 'ag-2').allowed).toBe(true);
+  it('allows owners globally', async () => {
+    await seedUser('u-owner', 'telegram');
+    await grantRole({ user_id: 'u-owner', role: 'owner', agent_group_id: null, granted_by: null, granted_at: now() });
+    expect((await canAccessAgentGroup('u-owner', 'ag-1')).allowed).toBe(true);
+    expect((await canAccessAgentGroup('u-owner', 'ag-2')).allowed).toBe(true);
   });
 
-  it('allows global admins', () => {
-    seedUser('u-ga', 'telegram');
-    grantRole({ user_id: 'u-ga', role: 'admin', agent_group_id: null, granted_by: null, granted_at: now() });
-    expect(canAccessAgentGroup('u-ga', 'ag-1').allowed).toBe(true);
-    expect(canAccessAgentGroup('u-ga', 'ag-2').allowed).toBe(true);
+  it('allows global admins', async () => {
+    await seedUser('u-ga', 'telegram');
+    await grantRole({ user_id: 'u-ga', role: 'admin', agent_group_id: null, granted_by: null, granted_at: now() });
+    expect((await canAccessAgentGroup('u-ga', 'ag-1')).allowed).toBe(true);
+    expect((await canAccessAgentGroup('u-ga', 'ag-2')).allowed).toBe(true);
   });
 
-  it('scopes admins to their agent group', () => {
-    seedUser('u-sa', 'telegram');
-    grantRole({ user_id: 'u-sa', role: 'admin', agent_group_id: 'ag-1', granted_by: null, granted_at: now() });
-    expect(canAccessAgentGroup('u-sa', 'ag-1').allowed).toBe(true);
-    const denied = canAccessAgentGroup('u-sa', 'ag-2');
+  it('scopes admins to their agent group', async () => {
+    await seedUser('u-sa', 'telegram');
+    await grantRole({ user_id: 'u-sa', role: 'admin', agent_group_id: 'ag-1', granted_by: null, granted_at: now() });
+    expect((await canAccessAgentGroup('u-sa', 'ag-1')).allowed).toBe(true);
+    const denied = await canAccessAgentGroup('u-sa', 'ag-2');
     expect(denied.allowed).toBe(false);
     expect(denied.allowed === false && denied.reason).toBe('not_member');
   });
 
-  it('admin @ group is implicitly a member', () => {
-    seedUser('u-sa', 'telegram');
-    grantRole({ user_id: 'u-sa', role: 'admin', agent_group_id: 'ag-1', granted_by: null, granted_at: now() });
-    expect(isMember('u-sa', 'ag-1')).toBe(true);
+  it('admin @ group is implicitly a member', async () => {
+    await seedUser('u-sa', 'telegram');
+    await grantRole({ user_id: 'u-sa', role: 'admin', agent_group_id: 'ag-1', granted_by: null, granted_at: now() });
+    expect(await isMember('u-sa', 'ag-1')).toBe(true);
   });
 
-  it('allows members of the group', () => {
-    seedUser('u-m', 'telegram');
-    addMember({ user_id: 'u-m', agent_group_id: 'ag-1', added_by: null, added_at: now() });
-    expect(canAccessAgentGroup('u-m', 'ag-1').allowed).toBe(true);
-    expect(canAccessAgentGroup('u-m', 'ag-2').allowed).toBe(false);
+  it('allows members of the group', async () => {
+    await seedUser('u-m', 'telegram');
+    await addMember({ user_id: 'u-m', agent_group_id: 'ag-1', added_by: null, added_at: now() });
+    expect((await canAccessAgentGroup('u-m', 'ag-1')).allowed).toBe(true);
+    expect((await canAccessAgentGroup('u-m', 'ag-2')).allowed).toBe(false);
   });
 
-  it('denies known-but-not-member users', () => {
-    seedUser('u-known', 'telegram');
-    const d = canAccessAgentGroup('u-known', 'ag-1');
+  it('denies known-but-not-member users', async () => {
+    await seedUser('u-known', 'telegram');
+    const d = await canAccessAgentGroup('u-known', 'ag-1');
     expect(d.allowed).toBe(false);
     expect(d.allowed === false && d.reason).toBe('not_member');
   });
 });
 
 describe('role helpers', () => {
-  it('rejects owner rows with a scope', () => {
-    seedUser('u-1', 'telegram');
-    expect(() =>
+  it('rejects owner rows with a scope', async () => {
+    await seedUser('u-1', 'telegram');
+    await expect(
       grantRole({
         user_id: 'u-1',
         role: 'owner',
@@ -152,22 +152,22 @@ describe('role helpers', () => {
         granted_by: null,
         granted_at: now(),
       }),
-    ).toThrow();
+    ).rejects.toThrow();
   });
 
-  it('hasAnyOwner reflects owner grants', () => {
-    seedUser('u-1', 'telegram');
-    expect(hasAnyOwner()).toBe(false);
-    grantRole({ user_id: 'u-1', role: 'owner', agent_group_id: null, granted_by: null, granted_at: now() });
-    expect(hasAnyOwner()).toBe(true);
-    expect(isOwner('u-1')).toBe(true);
+  it('hasAnyOwner reflects owner grants', async () => {
+    await seedUser('u-1', 'telegram');
+    expect(await hasAnyOwner()).toBe(false);
+    await grantRole({ user_id: 'u-1', role: 'owner', agent_group_id: null, granted_by: null, granted_at: now() });
+    expect(await hasAnyOwner()).toBe(true);
+    expect(await isOwner('u-1')).toBe(true);
   });
 });
 
 describe('ensureUserDm', () => {
   it('adapter without openDM: falls through to using the bare handle as platform_id', async () => {
     await mountMockAdapter('nodm');
-    seedUser('nodm:123', 'nodm');
+    await seedUser('nodm:123', 'nodm');
 
     const mg = await ensureUserDm('nodm:123');
     expect(mg).toBeDefined();
@@ -175,13 +175,13 @@ describe('ensureUserDm', () => {
     expect(mg!.platform_id).toBe('123');
     expect(mg!.is_group).toBe(0);
 
-    const cached = getUserDm('nodm:123', 'nodm');
+    const cached = await getUserDm('nodm:123', 'nodm');
     expect(cached?.messaging_group_id).toBe(mg!.id);
   });
 
   it('Telegram via chat-sdk-bridge: adapter.openDM returns prefixed platform_id', async () => {
     const mock = await mountMockAdapter('telegram', async (handle) => `telegram:${handle}`);
-    seedUser('telegram:6037840640', 'telegram');
+    await seedUser('telegram:6037840640', 'telegram');
 
     const mg = await ensureUserDm('telegram:6037840640');
     expect(mg).toBeDefined();
@@ -195,7 +195,7 @@ describe('ensureUserDm', () => {
 
   it('resolution-required channels: calls adapter.openDM, uses its result, caches', async () => {
     const mock = await mountMockAdapter('discord', async (handle) => `dm-channel-${handle}`);
-    seedUser('discord:user-1', 'discord');
+    await seedUser('discord:user-1', 'discord');
 
     const mg = await ensureUserDm('discord:user-1');
     expect(mg).toBeDefined();
@@ -208,7 +208,7 @@ describe('ensureUserDm', () => {
   });
 
   it('returns null when the adapter is not registered', async () => {
-    seedUser('missing:42', 'missing');
+    await seedUser('missing:42', 'missing');
     expect(await ensureUserDm('missing:42')).toBeNull();
   });
 
@@ -216,14 +216,14 @@ describe('ensureUserDm', () => {
     await mountMockAdapter('slack', async () => {
       throw new Error('openDM boom');
     });
-    seedUser('slack:u1', 'slack');
+    await seedUser('slack:u1', 'slack');
     expect(await ensureUserDm('slack:u1')).toBeNull();
-    expect(getUserDm('slack:u1', 'slack')).toBeUndefined();
+    expect(await getUserDm('slack:u1', 'slack')).toBeUndefined();
   });
 
   it('reuses an existing messaging_group row if one already matches', async () => {
     await mountMockAdapter('telegram');
-    seedUser('telegram:555', 'telegram');
+    await seedUser('telegram:555', 'telegram');
     const existing = {
       id: 'mg-preexisting',
       channel_type: 'telegram',
@@ -233,10 +233,10 @@ describe('ensureUserDm', () => {
       unknown_sender_policy: 'strict' as const,
       created_at: now(),
     };
-    createMessagingGroup(existing);
+    await createMessagingGroup(existing);
 
     const mg = await ensureUserDm('telegram:555');
     expect(mg?.id).toBe('mg-preexisting');
-    expect(getUserDm('telegram:555', 'telegram')?.messaging_group_id).toBe('mg-preexisting');
+    expect((await getUserDm('telegram:555', 'telegram'))?.messaging_group_id).toBe('mg-preexisting');
   });
 });

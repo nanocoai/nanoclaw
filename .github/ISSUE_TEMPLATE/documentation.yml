@@ -1,0 +1,64 @@
+name: "📖 Documentation correction"
+description: Report docs that are wrong, missing, broken, or unclear.
+title: "[docs] "
+labels:
+  - kind/documentation
+  - triage/unresolved
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Browse the [NanoClaw docs](https://docs.nanoclaw.dev/) or search the repository before opening a new report.
+
+        ### Required information
+
+  - type: input
+    id: page-path
+    attributes:
+      label: Page or path
+      description: Link the docs page or give the repository path.
+      placeholder: https://docs.nanoclaw.dev/... or docs/...
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem-summary
+    attributes:
+      label: What is wrong or missing?
+      description: Tell us what needs to change.
+      placeholder: This step uses an old command and fails on the current release.
+    validations:
+      required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        ### Optional evidence
+
+  - type: input
+    id: version
+    attributes:
+      label: NanoClaw version or commit
+      description: Add this when the documented behavior depends on the version.
+      placeholder: v2.3.0 or 294ef2ae
+
+  - type: textarea
+    id: current-claim
+    attributes:
+      label: Current text or example
+      description: Copy the exact text or example involved.
+      placeholder: "The page currently says: ‘Run ...’"
+
+  - type: textarea
+    id: source-evidence
+    attributes:
+      label: Evidence from the code or docs
+      description: Link the current code, command output, or another primary source. Include a commit SHA when it matters.
+      placeholder: src/example.ts at 294ef2ae, or the output from `ncl ...`
+
+  - type: textarea
+    id: proposed-correction
+    attributes:
+      label: Suggested correction
+      description: If you know the fix, suggest replacement wording or the missing content.
+      placeholder: "Replace the old command with: `ncl ...`"

@@ -19,6 +19,13 @@ the room. The flow also adds two agent-facing room actions — `create_room`
 flow's `purpose` / `allow_guests` / `room` parameters. Non-Slack sessions are
 untouched: `create_agent` from any other channel behaves exactly as upstream.
 
+**Canonical home.** This directory on `main` is the skill's canonical source —
+the setup wizard and any direct apply read it from the checkout. The copy on
+the `channels` branch is a compatibility mirror for older checkouts whose
+setup fetches companions from there; edits land here, never there. The
+payload the Apply steps fetch with `from-branch:channels` stays on the
+channels branch, exactly like `/add-slack`'s own.
+
 ## Prerequisites
 
 All prose below assumes these are already in place, in this order:
@@ -288,15 +295,14 @@ bash setup/lib/restart.sh
   `--restart` runs `bash setup/lib/restart.sh` for you, otherwise it prints
   the restart instruction.
 
-- **Setup-wizard leg.** On a trunk new enough for step 2's check, running
-  `bash nanoclaw.sh --slack-agents` does the whole install: the flag registers
-  the managed-provisioning pre-step and the companion list
-  (`slack-a2a-rooms`, then this skill) at wizard boot
+- **Setup-wizard leg.** `bash nanoclaw.sh` does the whole install by default:
+  the managed-provisioning pre-step and the companion list (`slack-a2a-rooms`,
+  then this skill) register unconditionally at wizard boot
   (`setup/channels/slack-auto-register.ts` → `setup/channels/companions.ts`),
   so the wizard provisions the first app, applies `/add-slack`, then applies
-  both feature skills with one deferred restart. Without the flag, setup
-  installs the base Slack experience only. That leg ships with trunk, and
-  this skill does not touch it.
+  both feature skills with one deferred restart. A plain-bot install is the
+  manual choice inside the flow. That leg ships with trunk, and this skill
+  does not touch it.
 
 Everything the flow creates at runtime is user data, not skill payload: agent
 groups, messaging groups, and wirings stay in the central DB; token lines,

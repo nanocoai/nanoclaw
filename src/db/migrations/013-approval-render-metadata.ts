@@ -18,6 +18,7 @@ import type { Migration } from './index.js';
 export const migration013: Migration = {
   version: 13,
   name: 'approval-render-metadata',
+  sqliteOnly: true,
   up(db: Database.Database) {
     db.exec(`ALTER TABLE pending_channel_approvals ADD COLUMN title TEXT NOT NULL DEFAULT ''`);
     db.exec(`ALTER TABLE pending_channel_approvals ADD COLUMN options_json TEXT NOT NULL DEFAULT '[]'`);

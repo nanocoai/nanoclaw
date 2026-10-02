@@ -1,0 +1,32 @@
+name: Label PR Area
+
+# SECURITY: this workflow runs with write access to the base repo on fork PRs,
+# because `pull_request_target` executes in the context of the base branch.
+# Keep it metadata-only — do NOT add actions/checkout or any step that
+# executes PR-supplied content (install scripts, build commands, etc.).
+# actions/labeler never checks out the PR; when the config file is absent from
+# the runner it fetches `.github/labeler.yml` through the GitHub API at
+# `github.context.sha`, which under `pull_request_target` is the base branch.
+# A fork therefore cannot substitute its own label config.
+# See https://securitylab.github.com/resources/github-actions-preventing-pwn-requests/
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  area:
+    runs-on: ubuntu-latest
+    permissions:
+      # contents: read is required: with no checkout, labeler fetches
+      # .github/labeler.yml via repos.getContent, which this scope gates.
+      # It resolves at the base-branch SHA under pull_request_target, so it
+      # does not weaken the no-checkout posture.
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/labeler@8558fd74291d67161a8a78ce36a881fa63b766a9 # v5.0.0
+        with:
+          configuration-path: .github/labeler.yml
+          # Add only. A maintainer pruning area/* down to the primary subsystem
+          # must not have the workflow put the labels back on the next push.
+          sync-labels: false

@@ -1,5 +1,5 @@
 /**
- * Step: whatsapp-auth — standalone WhatsApp (Baileys v7) authentication.
+ * Step: whatsapp-auth — standalone WhatsApp (Baileys) authentication.
  *
  * Forked from the channels-branch version so setup:auto's driver can render
  * the terminal UX itself (inside clack) instead of the step dumping a raw QR
@@ -27,6 +27,7 @@
  */
 import fs from 'fs';
 import path from 'path';
+import { createRequire } from 'module';
 // Named import (not default) — pino's d.ts under NodeNext resolves the
 // default export to `typeof pino` (namespace), which isn't callable. The
 // named `pino` export resolves to the callable function.
@@ -46,23 +47,22 @@ const AUTH_DIR = path.join(process.cwd(), 'store', 'auth');
 const PAIRING_CODE_FILE = path.join(process.cwd(), 'store', 'pairing-code.txt');
 const baileysLogger = pino({ level: 'silent' });
 
-/** Fetch current WA Web version — wppconnect tracker, then Baileys sw.js scrape. */
-async function resolveWaWebVersion(): Promise<[number, number, number]> {
-  try {
-    const res = await fetch('https://wppconnect.io/whatsapp-versions/', {
-      signal: AbortSignal.timeout(5000),
-    });
-    if (res.ok) {
-      const html = await res.text();
-      const match = html.match(/2\.3000\.(\d+)/);
-      if (match) return [2, 3000, Number(match[1])];
-    }
-  } catch { /* fall through */ }
-  try {
-    const { version } = await fetchLatestWaWebVersion({});
-    if (version) return version as [number, number, number];
-  } catch { /* fall through */ }
-  throw new Error('Could not fetch current WhatsApp Web version — cannot connect with stale version');
+// Baileys v6 bug: getPlatformId sends charCode (49) instead of enum value (1).
+// Fixed in Baileys 7.x but not backported. Without this patch pairing codes
+// fail with "couldn't link device" because WhatsApp receives an invalid
+// platform id. createRequire because proto is not a named ESM export.
+const _require = createRequire(import.meta.url);
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const { proto } = _require('@whiskeysockets/baileys') as { proto: any };
+try {
+  const _generics = _require('@whiskeysockets/baileys/lib/Utils/generics') as Record<string, unknown>;
+  _generics.getPlatformId = (browser: string): string => {
+    const platformType =
+      proto.DeviceProps.PlatformType[browser.toUpperCase() as keyof typeof proto.DeviceProps.PlatformType];
+    return platformType ? platformType.toString() : '1';
+  };
+} catch {
+  // If CJS require fails, QR auth still works; only pairing code may be affected.
 }
 
 type AuthMethod = 'qr' | 'pairing-code';
@@ -195,7 +195,9 @@ export async function run(args: string[]): Promise<void> {
 
     async function connectSocket(isReconnect = false): Promise<void> {
       const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
-      const version = await resolveWaWebVersion();
+      const { version } = await fetchLatestWaWebVersion({}).catch(() => ({
+        version: undefined,
+      }));
 
       const sock = makeWASocket({
         version,
@@ -209,12 +211,7 @@ export async function run(args: string[]): Promise<void> {
       });
 
       // Request pairing code only on first connect (not reconnect after 515).
-      if (
-        !isReconnect &&
-        method === 'pairing-code' &&
-        phone &&
-        !state.creds.registered
-      ) {
+      if (!isReconnect && method === 'pairing-code' && phone && !state.creds.registered) {
         setTimeout(async () => {
           try {
             const code = await sock.requestPairingCode(phone);
@@ -250,9 +247,7 @@ export async function run(args: string[]): Promise<void> {
         }
 
         if (connection === 'close') {
-          const reason = (
-            lastDisconnect?.error as { output?: { statusCode?: number } }
-          )?.output?.statusCode;
+          const reason = (lastDisconnect?.error as { output?: { statusCode?: number } })?.output?.statusCode;
           if (reason === DisconnectReason.loggedOut) {
             clearTimeout(timeout);
             emitStatus('WHATSAPP_AUTH', {

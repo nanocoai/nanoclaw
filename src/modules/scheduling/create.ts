@@ -1,12 +1,10 @@
 import { randomUUID } from 'crypto';
-import fs from 'fs';
-
 import { CronExpressionParser } from 'cron-parser';
 
 import { TIMEZONE } from '../../config.js';
-import { inboundDbPath, resolveTaskSession, withInboundDb } from '../../session-manager.js';
+import type { TaskRecord } from '../../mailbox/index.js';
+import { resolveTaskSession, withMailboxSession } from '../../session-manager.js';
 import { parseZonedToUtc } from '../../timezone.js';
-import { insertTaskRow } from './db.js';
 
 export const MAX_DAILY_FIRES = 4;
 
@@ -32,17 +30,7 @@ export interface PreparedScheduledTask {
   processAfter: string;
 }
 
-export interface ScheduledTaskRow {
-  row_id: string;
-  series_id: string | null;
-  status: string;
-  process_after: string | null;
-  recurrence: string | null;
-  content: string;
-  timestamp: string;
-  tries: number;
-  seq: number;
-}
+export type ScheduledTaskRow = TaskRecord;
 
 /**
  * The deterministic slug half of a task id. Exposed so template restamping can
@@ -141,19 +129,16 @@ export function prepareScheduledTask(input: {
 }
 
 /** Persist a prepared task through NanoClaw's single task/session representation. */
-export function createScheduledTask(
+export async function createScheduledTask(
   agentGroupId: string,
   task: PreparedScheduledTask,
   options?: { status?: 'pending' | 'paused'; originSessionId?: string | null },
-): { session: { id: string; agent_group_id: string }; row: ScheduledTaskRow } {
+): Promise<{ session: { id: string; agent_group_id: string }; row: ScheduledTaskRow }> {
   const id = makeTaskId(task.name);
-  const { session } = resolveTaskSession(agentGroupId, id);
+  const { session } = await resolveTaskSession(agentGroupId, id);
 
-  if (!fs.existsSync(inboundDbPath(agentGroupId, session.id))) {
-    throw new Error('task system session inbound.db not found');
-  }
-  const row = withInboundDb(agentGroupId, session.id, (db) => {
-    insertTaskRow(db, {
+  const row = await withMailboxSession(agentGroupId, session.id, async (db) => {
+    await db.insertTask({
       id,
       seriesId: id,
       processAfter: task.processAfter,
@@ -165,12 +150,9 @@ export function createScheduledTask(
       }),
       status: options?.status ?? 'pending',
     });
-    return db
-      .prepare(
-        `SELECT id AS row_id, series_id, status, process_after, recurrence, content, timestamp, tries, seq
-           FROM messages_in WHERE id = ?`,
-      )
-      .get(id) as ScheduledTaskRow;
+    const stored = db.getTask(id);
+    if (!stored) throw new Error(`task row not found after insert: ${id}`);
+    return stored;
   });
 
   return { session: { id: session.id, agent_group_id: session.agent_group_id }, row };

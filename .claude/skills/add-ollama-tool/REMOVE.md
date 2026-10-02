@@ -15,11 +15,11 @@ rm -f container/agent-runner/src/ollama-mcp-stdio.ts \
 
 In `container/agent-runner/src/index.ts`, remove the `ollama: { … }` entry from the `mcpServers` object (leave `nanoclaw` and any other entries).
 
-## 3. Revert the host-side edits in `src/container-runner.ts`
+## 3. Revert the host-side edits
 
-- Remove the `import { ollamaEnvArgs } from './ollama-env.js';` import.
-- Remove the `args.push(...ollamaEnvArgs());` line that follows the `TZ` env line.
-- Remove the `[OLLAMA]` branch from the `container.stderr` logger. If `[OLLAMA]` was the only prefix branch, restore the logger to its single-line `log.debug(line, …)` form; if other local-model tools still have branches there, just drop the `[OLLAMA]` one and leave the rest intact.
+- Remove the `import { ollamaEnv } from './ollama-env.js';` import.
+- Remove the `...ollamaEnv(),` spread from the `env` literal in `composeSessionSpec`.
+- Remove the `[OLLAMA]` branch from the driver's stderr handler in `src/drivers/docker-driver.ts`. If `[OLLAMA]` was the only prefix branch, restore the handler to its single `log.debug(line, …)` form (keep the stderr-tail lines); if other local-model tools still have branches there, just drop the `[OLLAMA]` one and leave the rest intact.
 
 ## 4. Remove env vars
 

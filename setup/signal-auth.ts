@@ -82,8 +82,7 @@ function listAccounts(): string[] {
  * but be defensive) fall back to the URL alone for an external renderer.
  */
 async function renderQr(url: string): Promise<string[]> {
-  const scanHint =
-    'Signal → Settings → Linked Devices → Link New Device → scan this code.';
+  const scanHint = 'Signal → Settings → Linked Devices → Link New Device → scan this code.';
   const urlHint = 'Or open this link on the phone running Signal:';
   try {
     const QRCode = await import('qrcode');
@@ -196,10 +195,7 @@ export async function run(_args: string[]): Promise<void> {
       if (code === 0) {
         const post = listAccounts();
         if (post.length === 0) {
-          finish(
-            { STATUS: 'failed', ERROR: 'link exited 0 but no account registered' },
-            1,
-          );
+          finish({ STATUS: 'failed', ERROR: 'link exited 0 but no account registered' }, 1);
           return;
         }
         finish({ STATUS: 'success', ACCOUNT: post[0] }, 0);

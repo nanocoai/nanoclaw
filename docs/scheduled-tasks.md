@@ -129,7 +129,7 @@ Store state that must survive between runs under `/workspace/agent`, the agent
 group workspace.
 
 Avoid putting secrets directly in task scripts. Prefer runtime credential
-injection through OneCLI so credentials are not stored in the task definition.
+injection through the installed credential gateway so credentials are not stored in the task definition.
 
 ## Frequency limit
 

@@ -1,5 +1,10 @@
 # NanoClaw — Central DB Schema
 
+The central store is accessed through the asynchronous `DbDriver` contract in
+`src/db/driver.ts`. `src/db/compose.ts` performs the one backend choice and
+registers it through `src/db/driver-registry.ts`; callers never import a backend
+directly. SQLite at `data/v2.db` remains the default composition.
+
 Complete reference for `data/v2.db`, the host-owned admin-plane database. Start with [db.md](db.md) for the three-DB overview, the map, and the cross-mount rules.
 
 Access layer: `src/db/`. `src/db/schema.ts`'s `SCHEMA` constant is a *reference copy* of the core tables for orientation — it is not exhaustive: several tables (`agent_destinations`, `pending_approvals`, `container_configs`, `agent_message_policies`, `pending_channel_approvals`, and others) exist only in their migration files under `src/db/migrations/`, which remain the actual source of truth for what's created at runtime.
@@ -209,7 +214,7 @@ Access layer: `src/db/agent-destinations.ts`.
 Two workflows share this table:
 
 - **Session-bound MCP approvals** — `install_packages`, `add_mcp_server`. `session_id` is set.
-- **OneCLI credential approvals** — `session_id` may be NULL; `agent_group_id` + `channel_type` + `platform_id` route the admin card.
+- **Gateway credential approvals** — `session_id` may be NULL; `agent_group_id` + `channel_type` + `platform_id` route the admin card.
 
 ```sql
 CREATE TABLE pending_approvals (
@@ -234,7 +239,7 @@ CREATE INDEX idx_pending_approvals_action_status ON pending_approvals(action, st
 
 - `status`: `pending` | `approved` | `rejected` | `expired`.
 - `platform_message_id` lets the host edit the admin card in place after a decision.
-- Access layer: `src/db/sessions.ts`; sweep + delivery: `src/onecli-approvals.ts`.
+- Access layer: `src/db/sessions.ts`; sweep + delivery: `src/gateway-approval-coordinator.ts`.
 
 ### 1.12 `unregistered_senders`
 
@@ -328,7 +333,7 @@ CREATE TABLE container_configs (
 
 `timezone` overrides the install-global timezone for one agent group: host-side scheduling (cron interpretation, `--process-after`, run-log stamps) resolves it live via `resolveGroupTimezone` (`src/container-config.ts`); the container gets it as its `TZ` env on next respawn. Set via `ncl groups config update --timezone <IANA>` (`""` clears back to NULL) or `ncl groups create --timezone`.
 
-- **Readers:** `src/container-config.ts`, `src/container-runner.ts`, `src/cli/dispatch.ts` (scope enforcement), `src/claude-md-compose.ts`
+- **Readers:** `src/container-config.ts`, `src/container-runner.ts`, `src/cli/dispatch.ts` (scope enforcement), `src/project-doc-compose.ts`
 - **Writers:** `src/db/container-configs.ts`, `src/modules/self-mod/apply.ts`, `src/backfill-container-configs.ts`
 
 ### 1.16 `pending_sender_approvals`
@@ -417,7 +422,7 @@ Several early migrations were later renamed/retired and replaced by "module" fil
 |---|---|------|------------|
 | 1 | `initial-v2-schema` | `001-initial.ts` | Core tables: `agent_groups`, `messaging_groups`, `messaging_group_agents` (with the original `trigger_rules`/`response_scope` columns — see v10), `users`, `user_roles`, `agent_group_members`, `user_dms`, `sessions`, `pending_questions` |
 | 2 | `chat-sdk-state` | `002-chat-sdk-state.ts` | `chat_sdk_kv`, `chat_sdk_subscriptions`, `chat_sdk_locks`, `chat_sdk_lists` |
-| 3 | `pending-approvals` | `module-approvals-pending-approvals.ts` | `pending_approvals` (session-bound + OneCLI fields) |
+| 3 | `pending-approvals` | `module-approvals-pending-approvals.ts` | `pending_approvals` (session-bound + gateway fields) |
 | 4 | `agent-destinations` | `module-agent-to-agent-destinations.ts` | `agent_destinations` + backfill from existing `messaging_group_agents` wirings |
 | 7 | `pending-approvals-title-options` | `module-approvals-title-options.ts` | Retroactive `ALTER TABLE pending_approvals` add `title`, `options_json` for DBs that ran migration 3 before its `CREATE TABLE` was edited to include those columns |
 | 8 | `dropped-messages` | `008-dropped-messages.ts` | `unregistered_senders` |
@@ -434,7 +439,40 @@ Several early migrations were later renamed/retired and replaced by "module" fil
 | 19 | `wiring-threads-override` | `019-wiring-threads.ts` | `messaging_group_agents.threads` — per-wiring thread-policy override (NULL = adapter default) |
 | 20 | `container-config-timezone` | `020-container-config-timezone.ts` | `container_configs.timezone` — per-agent-group timezone override (NULL = install-global) |
 | 21 | `approval-question-render-metadata` | `021-approval-question.ts` | `question` card-body column on all three approval tables so terminal edits retain the original request |
+| 22 | `messaging-group-detached-at` | `022-messaging-group-detached.ts` | `messaging_groups.detached_at` — records when the bot left a channel without deleting its wiring |
 
 Numbers 5 and 6 are intentionally absent — migrations were renumbered during early development.
 
 Session DB schemas (`INBOUND_SCHEMA`, `OUTBOUND_SCHEMA`) are **not** versioned here. They're `CREATE TABLE IF NOT EXISTS` so new columns land via the session-DB lazy migration helpers (`migrateDeliveredTable()` etc.) when a session file from an older build is reopened. See [db-session.md](db-session.md).
+
+## 3. Portable SQL rules
+
+Central-DB runtime SQL must work on SQLite and installed remote backends. Session mailbox SQL is outside this rule because `inbound.db` and `outbound.db` remain direct SQLite.
+
+- Use `INSERT ... ON CONFLICT (...) DO NOTHING` instead of `INSERT OR IGNORE`.
+- Use `INSERT ... ON CONFLICT (...) DO UPDATE SET ... = excluded....` instead of `INSERT OR REPLACE`; replacement deletes and recreates a row and is not portable.
+- Never use `rowid` for runtime ordering. Declare a stable domain-column order, with a deterministic key as the final tie-breaker.
+- Use snake_case aliases because remote SQL engines may fold unquoted identifiers to lowercase.
+- Use `IS NOT DISTINCT FROM ?` when nullable equality is required. `IS ?` is SQLite-only, while `=` does not match two NULL values.
+- Keep named parameters in the existing `@name` form. The backend driver owns placeholder rewriting.
+- Store timestamps as ISO-8601 UTC text produced by `new Date().toISOString()`. Portable central-DB SQL compares the consistently shaped text directly; SQLite-only operational snippets may use `datetime()` around both sides.
+- Central migrations added after the async DB boundary must use the backend-neutral driver API and portable SQL. Backend-specific schema work belongs in a named migration override.
+
+## 4. Migration execution
+
+`runMigrations()` has three modes:
+
+- `auto` migrates SQLite and validates non-SQLite backends.
+- `validate` performs no DDL and refuses startup when the ledger is missing or pending.
+- `migrate` applies migrations and is used by `pnpm run migrate` under the migration-owner role.
+
+Backends may provide three narrow hooks: baseline bootstrap, name-keyed
+migration overrides, and a lock around the complete migration run. Legacy
+SQLite-only migrations are frozen by name; a non-SQLite backend must cover
+them in its baseline or provide an override. Foreign-key PRAGMA handling is
+never attempted outside SQLite.
+
+Host startup uses `auto`; production schema changes are a separate operator
+step. `scripts/q.ts` sends only the canonical `data/v2.db` path through the
+installed composition. Explicit `inbound.db` and `outbound.db` paths always
+remain local SQLite files and retain their journal mode.

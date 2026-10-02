@@ -5,6 +5,7 @@ import type { Migration } from './index.js';
 export const migration001: Migration = {
   version: 1,
   name: 'initial-v2-schema',
+  sqliteOnly: true,
   up(db: Database.Database) {
     db.exec(`
       CREATE TABLE agent_groups (

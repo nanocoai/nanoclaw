@@ -11,7 +11,8 @@ import { initTestDb, closeDb, runMigrations, createAgentGroup } from '../../db/i
 import { getDb } from '../../db/connection.js';
 import { createPendingApproval, createSession, deletePendingApproval, getPendingApproval } from '../../db/sessions.js';
 import { requestApproval } from '../approvals/index.js';
-import { initSessionFolder, inboundDbPath } from '../../session-manager.js';
+import { inboundDbPath } from '../../mailbox/sqlite/paths.js';
+import { initSessionFolder } from '../../session-manager.js';
 import type { PendingApproval, Session } from '../../types.js';
 
 vi.mock('../../container-runner.js', () => ({
@@ -39,8 +40,8 @@ function now(): string {
   return new Date().toISOString();
 }
 
-function policyCount(): number {
-  return (getDb().prepare('SELECT COUNT(*) AS n FROM agent_message_policies').get() as { n: number }).n;
+async function policyCount(): Promise<number> {
+  return (await getDb().get<{ n: number }>('SELECT COUNT(*) AS n FROM agent_message_policies'))!.n;
 }
 
 function readInbound(agentGroupId: string, sessionId: string) {
@@ -69,8 +70,8 @@ function makeSession(id: string, agentGroupId: string): Session {
 }
 
 /** Seed a live a2a hold row (what requestApproval writes) and return it as the grant. */
-function seedA2aHold(approvalId: string, payload: Record<string, unknown>): PendingApproval {
-  createPendingApproval({
+async function seedA2aHold(approvalId: string, payload: Record<string, unknown>): Promise<PendingApproval> {
+  await createPendingApproval({
     approval_id: approvalId,
     session_id: 'sess-A',
     request_id: approvalId,
@@ -82,58 +83,64 @@ function seedA2aHold(approvalId: string, payload: Record<string, unknown>): Pend
     options_json: '[]',
     approver_user_id: 'telegram:dana',
   });
-  return getPendingApproval(approvalId)!;
+  return (await getPendingApproval(approvalId))!;
 }
 
 describe('agent message policies', () => {
   let SA: Session;
   let SB: Session;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
     fs.mkdirSync(TEST_DIR, { recursive: true });
-    const db = initTestDb();
-    runMigrations(db);
+    const db = await initTestDb();
+    await runMigrations(db);
     vi.mocked(requestApproval).mockClear();
 
-    createAgentGroup({ id: A, name: 'A', folder: 'a', agent_provider: null, created_at: now() });
-    createAgentGroup({ id: B, name: 'B', folder: 'b', agent_provider: null, created_at: now() });
+    await createAgentGroup({ id: A, name: 'A', folder: 'a', agent_provider: null, created_at: now() });
+    await createAgentGroup({ id: B, name: 'B', folder: 'b', agent_provider: null, created_at: now() });
     SA = makeSession('sess-A', A);
     SB = makeSession('sess-B', B);
-    createSession(SA);
-    createSession(SB);
+    await createSession(SA);
+    await createSession(SB);
     initSessionFolder(A, SA.id);
     initSessionFolder(B, SB.id);
     // A→B connection wired.
-    createDestination({ agent_group_id: A, local_name: 'b', target_type: 'agent', target_id: B, created_at: now() });
+    await createDestination({
+      agent_group_id: A,
+      local_name: 'b',
+      target_type: 'agent',
+      target_id: B,
+      created_at: now(),
+    });
   });
 
-  afterEach(() => {
-    closeDb();
+  afterEach(async () => {
+    await closeDb();
     if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   });
 
   // ── policy table round-trip ──
 
-  it('set / get / remove round-trip, incl. approver', () => {
-    expect(getMessagePolicy(A, B)).toBeUndefined();
+  it('set / get / remove round-trip, incl. approver', async () => {
+    expect(await getMessagePolicy(A, B)).toBeUndefined();
 
-    setMessagePolicy(A, B, 'telegram:sam', now());
-    expect(getMessagePolicy(A, B)).toMatchObject({
+    await setMessagePolicy(A, B, 'telegram:sam', now());
+    expect(await getMessagePolicy(A, B)).toMatchObject({
       from_agent_group_id: A,
       to_agent_group_id: B,
       approver: 'telegram:sam',
     });
-    expect(policyCount()).toBe(1);
+    expect(await policyCount()).toBe(1);
 
     // Upsert updates the approver without inserting a duplicate row.
-    setMessagePolicy(A, B, 'telegram:dana', now());
-    expect(getMessagePolicy(A, B)!.approver).toBe('telegram:dana');
-    expect(policyCount()).toBe(1);
+    await setMessagePolicy(A, B, 'telegram:dana', now());
+    expect((await getMessagePolicy(A, B))!.approver).toBe('telegram:dana');
+    expect(await policyCount()).toBe(1);
 
-    expect(removeMessagePolicy(A, B)).toBe(true);
-    expect(getMessagePolicy(A, B)).toBeUndefined();
-    expect(removeMessagePolicy(A, B)).toBe(false);
+    expect(await removeMessagePolicy(A, B)).toBe(true);
+    expect(await getMessagePolicy(A, B)).toBeUndefined();
+    expect(await removeMessagePolicy(A, B)).toBe(false);
   });
 
   // ── gate behavior in routeAgentMessage ──
@@ -148,7 +155,7 @@ describe('agent message policies', () => {
   });
 
   it('policy present → holds the message and requests approval from the policy approver', async () => {
-    setMessagePolicy(A, B, 'telegram:dana', now());
+    await setMessagePolicy(A, B, 'telegram:dana', now());
 
     await routeAgentMessage(
       { id: 'm2', platform_id: B, content: JSON.stringify({ text: 'sensitive' }), in_reply_to: null },
@@ -167,7 +174,7 @@ describe('agent message policies', () => {
   });
 
   it('self-message is never gated even if a policy row somehow exists', async () => {
-    setMessagePolicy(A, A, 'telegram:dana', now()); // pathological, but must be ignored
+    await setMessagePolicy(A, A, 'telegram:dana', now()); // pathological, but must be ignored
     await routeAgentMessage(
       { id: 'self', platform_id: A, content: JSON.stringify({ text: 'note' }), in_reply_to: null },
       SA,
@@ -177,8 +184,8 @@ describe('agent message policies', () => {
   });
 
   it('ghost policy (policy row, no destination row) still denies — deny beats the policy hold', async () => {
-    deleteDestination(A, 'b'); // removes A→B — the destination ACL now denies
-    setMessagePolicy(A, B, 'telegram:dana', now()); // ...but a stale policy row remains
+    await deleteDestination(A, 'b'); // removes A→B — the destination ACL now denies
+    await setMessagePolicy(A, B, 'telegram:dana', now()); // ...but a stale policy row remains
 
     await expect(
       routeAgentMessage({ id: 'ghost', platform_id: B, content: JSON.stringify({ text: 'x' }), in_reply_to: null }, SA),
@@ -190,9 +197,9 @@ describe('agent message policies', () => {
   // ── approve handler re-enters the guarded route with the grant ──
 
   it('applyA2aMessageGate delivers the held message to the target (valid grant)', async () => {
-    setMessagePolicy(A, B, 'telegram:dana', now());
+    await setMessagePolicy(A, B, 'telegram:dana', now());
     const payload = { id: 'held-1', platform_id: B, content: JSON.stringify({ text: 'approved!' }), in_reply_to: null };
-    const approval = seedA2aHold('appr-a2a-1', payload);
+    const approval = await seedA2aHold('appr-a2a-1', payload);
 
     const notify = vi.fn();
     await applyA2aMessageGate({ session: SA, userId: 'telegram:dana', notify, payload, approval });
@@ -206,11 +213,11 @@ describe('agent message policies', () => {
   });
 
   it('destination revoked between hold and approve → refused cleanly, requester told, nothing delivered', async () => {
-    setMessagePolicy(A, B, 'telegram:dana', now());
+    await setMessagePolicy(A, B, 'telegram:dana', now());
     const payload = { id: 'held-2', platform_id: B, content: JSON.stringify({ text: 'stale' }), in_reply_to: null };
-    const approval = seedA2aHold('appr-a2a-2', payload);
+    const approval = await seedA2aHold('appr-a2a-2', payload);
 
-    deleteDestination(A, 'b'); // revoke A→B while the card is pending
+    await deleteDestination(A, 'b'); // revoke A→B while the card is pending
 
     const notify = vi.fn();
     // An expected policy refusal — resolves (no throw), so the response
@@ -222,9 +229,9 @@ describe('agent message policies', () => {
   });
 
   it('mismatched grant (held for another target) refuses the replay cleanly', async () => {
-    setMessagePolicy(A, B, 'telegram:dana', now());
+    await setMessagePolicy(A, B, 'telegram:dana', now());
     // Grant was approved for a message to A (different target than the replay).
-    const approval = seedA2aHold('appr-a2a-3', { id: 'other', platform_id: A, content: '{}', in_reply_to: null });
+    const approval = await seedA2aHold('appr-a2a-3', { id: 'other', platform_id: A, content: '{}', in_reply_to: null });
     const payload = { id: 'held-3', platform_id: B, content: JSON.stringify({ text: 'swap' }), in_reply_to: null };
 
     const notify = vi.fn();
@@ -235,11 +242,11 @@ describe('agent message policies', () => {
   });
 
   it('a grant only works while its row is live (executes once)', async () => {
-    setMessagePolicy(A, B, 'telegram:dana', now());
+    await setMessagePolicy(A, B, 'telegram:dana', now());
     const payload = { id: 'held-4', platform_id: B, content: JSON.stringify({ text: 'once' }), in_reply_to: null };
-    const approval = seedA2aHold('appr-a2a-4', payload);
+    const approval = await seedA2aHold('appr-a2a-4', payload);
 
-    deletePendingApproval(approval.approval_id); // resolution already consumed the row
+    await deletePendingApproval(approval.approval_id); // resolution already consumed the row
 
     const notify = vi.fn();
     await applyA2aMessageGate({ session: SA, userId: 'telegram:dana', notify, payload, approval });
@@ -250,17 +257,17 @@ describe('agent message policies', () => {
 
   // ── ghost-gate cleanup ──
 
-  it('deleting the connection drops its policy', () => {
-    setMessagePolicy(A, B, 'telegram:dana', now());
-    deleteDestination(A, 'b'); // removes the A→B agent destination
-    expect(getMessagePolicy(A, B)).toBeUndefined();
+  it('deleting the connection drops its policy', async () => {
+    await setMessagePolicy(A, B, 'telegram:dana', now());
+    await deleteDestination(A, 'b'); // removes the A→B agent destination
+    expect(await getMessagePolicy(A, B)).toBeUndefined();
   });
 
-  it('deleteAllDestinationsTouching drops policies on both sides', () => {
-    setMessagePolicy(A, B, 'telegram:dana', now());
-    setMessagePolicy(B, A, 'telegram:dana', now());
-    deleteAllDestinationsTouching(A);
-    expect(getMessagePolicy(A, B)).toBeUndefined();
-    expect(getMessagePolicy(B, A)).toBeUndefined();
+  it('deleteAllDestinationsTouching drops policies on both sides', async () => {
+    await setMessagePolicy(A, B, 'telegram:dana', now());
+    await setMessagePolicy(B, A, 'telegram:dana', now());
+    await deleteAllDestinationsTouching(A);
+    expect(await getMessagePolicy(A, B)).toBeUndefined();
+    expect(await getMessagePolicy(B, A)).toBeUndefined();
   });
 });

@@ -1,0 +1,145 @@
+{
+  "notes": "Conformance fixtures for scripts/skill-conformance.test.ts — shaped fake values only, never real credentials. Three scenarios cover the sign-in branches: (1) not signed in → email+OTP signup (reuse_choice defaults to 'switch' via the echo capture), (2) signed in → reuse the account, (3) signed in → switch to a different account (email+OTP). The `command -v dial` stub answers dial_cli_path (pinned into .env so the service never depends on PATH); the `package.json` stub answers dial_ua (the DIAL_USER_AGENT token); the `dial doctor` stub answers signed_in/connected_email; `echo switch` answers the default reuse_choice; `number list` answers platform_id; the optional tool install is an effect:step (the nested /add-dial-tool apply) and needs no exec stub; stepFields feed the pairing step (capture:owner_handle=PAIRED_NUMBER).",
+  "scenarios": [
+    {
+      "name": "fresh-signup",
+      "inputs": {
+        "owner_email": "operator@example.com",
+        "otp": "123456",
+        "inbound_access": "owner",
+        "install_tool": "no"
+      },
+      "exec": [
+        {
+          "match": "package.json",
+          "stdout": "nanoclaw/2.2.0"
+        },
+        {
+          "match": "command -v dial",
+          "stdout": "/usr/local/bin/dial"
+        },
+        {
+          "match": "dial doctor",
+          "stdout": "{\"auth\":{\"signedIn\":false}}"
+        },
+        {
+          "match": "echo switch",
+          "stdout": "switch"
+        },
+        {
+          "match": "number list",
+          "stdout": "+14155550123"
+        }
+      ],
+      "stepFields": {
+        "PLATFORM_ID": "+14155550123",
+        "PAIRED_NUMBER": "+14155550199"
+      }
+    },
+    {
+      "name": "reuse-signed-in",
+      "inputs": {
+        "reuse_choice": "reuse",
+        "inbound_access": "public",
+        "install_tool": "yes",
+        "dial_agents": "all"
+      },
+      "exec": [
+        {
+          "match": "(.data|length)==0",
+          "stdout": "yes"
+        },
+        {
+          "match": "join(\", \")",
+          "stdout": "ag-1787000000000-aaaaaa (Nano)"
+        },
+        {
+          "match": "package.json",
+          "stdout": "nanoclaw/2.2.0"
+        },
+        {
+          "match": "command -v dial",
+          "stdout": "/usr/local/bin/dial"
+        },
+        {
+          "match": "dial doctor",
+          "stdout": "{\"auth\":{\"signedIn\":true,\"email\":\"operator@example.com\"}}"
+        },
+        {
+          "match": "number list",
+          "stdout": "+14155550123"
+        }
+      ],
+      "stepFields": {
+        "PLATFORM_ID": "+14155550123",
+        "PAIRED_NUMBER": "+14155550199"
+      }
+    },
+    {
+      "name": "switch-account",
+      "inputs": {
+        "reuse_choice": "switch",
+        "owner_email": "other@example.com",
+        "otp": "654321",
+        "inbound_access": "owner",
+        "install_tool": "no"
+      },
+      "exec": [
+        {
+          "match": "package.json",
+          "stdout": "nanoclaw/2.2.0"
+        },
+        {
+          "match": "command -v dial",
+          "stdout": "/usr/local/bin/dial"
+        },
+        {
+          "match": "dial doctor",
+          "stdout": "{\"auth\":{\"signedIn\":true,\"email\":\"operator@example.com\"}}"
+        },
+        {
+          "match": "number list",
+          "stdout": "+14155550123"
+        }
+      ],
+      "stepFields": {
+        "PLATFORM_ID": "+14155550123",
+        "PAIRED_NUMBER": "+14155550199"
+      }
+    },
+    {
+      "name": "signed-in-no-agent-groups",
+      "inputs": {
+        "reuse_choice": "reuse",
+        "inbound_access": "public",
+        "install_tool": "yes"
+      },
+      "exec": [
+        {
+          "match": "(.data|length)==0",
+          "stdout": "no"
+        },
+        {
+          "match": "package.json",
+          "stdout": "nanoclaw/2.2.0"
+        },
+        {
+          "match": "command -v dial",
+          "stdout": "/usr/local/bin/dial"
+        },
+        {
+          "match": "dial doctor",
+          "stdout": "{\"auth\":{\"signedIn\":true,\"email\":\"operator@example.com\"}}"
+        },
+        {
+          "match": "number list",
+          "stdout": "+14155550123"
+        }
+      ],
+      "stepFields": {
+        "PLATFORM_ID": "+14155550123",
+        "PAIRED_NUMBER": "+14155550199"
+      }
+    }
+  ]
+}

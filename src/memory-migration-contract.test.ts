@@ -55,9 +55,9 @@ describe('shared-memory migration contract', () => {
   });
 
   it('keeps skipped breaking migrations visible before update restart', () => {
-    expect(updateSkill).toContain('unresolved-migrations list');
-    expect(updateSkill).toContain('skipped, failed, or incomplete');
-    expect(updateSkill).toContain('Run unresolved migrations (Recommended)');
-    expect(updateSkill).toContain('Restart anyway');
+    expect(updateSkill).toContain('Process requirements one at a time');
+    expect(updateSkill).toContain('--status failed');
+    expect(updateSkill).toContain('blocks finish');
+    expect(updateSkill).toContain('never offer “restart anyway.”');
   });
 });

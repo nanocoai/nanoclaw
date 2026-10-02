@@ -24,7 +24,10 @@ The only rule worth remembering: **a change isn't really part of your fork until
 
 ## Upgrading
 
-Always upgrade by running `/update-nanoclaw`. **Don't just `git pull`.** The command sets a rollback point, pulls the upstream changes, runs your tests, and walks you through anything that needs fixing, usually a small, local fix in one skill.
+Always upgrade by running `/update-nanoclaw`. **Don't just `git pull`.** The
+command stages upstream in an isolated worktree, refreshes installed skills,
+runs the test gates, snapshots mutable state, and health-checks the cutover. Its
+rollback restores SQLite and local configuration as well as Git.
 
 ## The deal
 

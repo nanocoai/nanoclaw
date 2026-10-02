@@ -73,21 +73,21 @@ async function activate(): Promise<void> {
   }));
 }
 
-function seedWiring(options: {
+async function seedWiring(options: {
   isGroup?: 0 | 1;
   engageMode?: MessagingGroupAgent['engage_mode'];
   engagePattern?: string | null;
   sessionMode?: 'shared' | 'per-thread';
   ignoredMessagePolicy?: 'drop' | 'accumulate';
-}): void {
-  createAgentGroup({
+}): Promise<void> {
+  await createAgentGroup({
     id: 'ag-1',
     name: 'Test Agent',
     folder: 'test-agent',
     agent_provider: null,
     created_at: now(),
   });
-  createMessagingGroup({
+  await createMessagingGroup({
     id: 'mg-1',
     channel_type: 'testchat',
     platform_id: 'testchat:C1',
@@ -97,7 +97,7 @@ function seedWiring(options: {
     unknown_sender_policy: 'public',
     created_at: now(),
   });
-  createMessagingGroupAgent({
+  await createMessagingGroupAgent({
     id: 'mga-1',
     messaging_group_id: 'mg-1',
     agent_group_id: 'ag-1',
@@ -120,7 +120,7 @@ async function inbound(id: string, threadId: string | null, text: string, isMent
     message: {
       id,
       kind: 'chat-sdk',
-      content: JSON.stringify({ sender: 'Gavriel', senderId: 'U1', text }),
+      content: JSON.stringify({ sender: 'Alex', senderId: 'U1', text }),
       timestamp: now(),
       isMention,
       isGroup: false,
@@ -130,22 +130,22 @@ async function inbound(id: string, threadId: string | null, text: string, isMent
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   fs.mkdirSync(TEST_DIR, { recursive: true });
-  runMigrations(initTestDb());
+  await runMigrations(await initTestDb());
 });
 
 afterEach(async () => {
   await teardownChannelAdapters();
-  closeDb();
+  await closeDb();
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
 });
 
 describe('registerSessionCreatedHook', () => {
   it('fires once per created session with the resolved wiring context, not again on reuse', async () => {
     await activate();
-    seedWiring({ sessionMode: 'per-thread' });
+    await seedWiring({ sessionMode: 'per-thread' });
 
     const events: SessionCreatedEvent[] = [];
     registerSessionCreatedHook((event) => {
@@ -179,7 +179,7 @@ describe('registerSessionCreatedHook', () => {
     await activate();
     // A mention-mode wiring with accumulate policy: a non-mention message
     // takes the accumulate path (wake=false) and still creates the session.
-    seedWiring({ isGroup: 1, engageMode: 'mention', ignoredMessagePolicy: 'accumulate', sessionMode: 'shared' });
+    await seedWiring({ isGroup: 1, engageMode: 'mention', ignoredMessagePolicy: 'accumulate', sessionMode: 'shared' });
 
     const events: SessionCreatedEvent[] = [];
     registerSessionCreatedHook((event) => {
@@ -198,7 +198,7 @@ describe('registerSessionCreatedHook', () => {
     await activate();
     // Group chat + thread-enabled wiring: shared session_mode resolves to
     // per-thread at fanout — the hook must see the RESOLVED mode.
-    seedWiring({ isGroup: 1, engageMode: 'pattern', engagePattern: '.', sessionMode: 'shared' });
+    await seedWiring({ isGroup: 1, engageMode: 'pattern', engagePattern: '.', sessionMode: 'shared' });
 
     const events: SessionCreatedEvent[] = [];
     registerSessionCreatedHook((event) => {
@@ -213,7 +213,7 @@ describe('registerSessionCreatedHook', () => {
 
   it('a throwing hook (sync or async) never breaks routing', async () => {
     await activate();
-    seedWiring({ sessionMode: 'per-thread' });
+    await seedWiring({ sessionMode: 'per-thread' });
 
     registerSessionCreatedHook(() => {
       throw new Error('sync boom');
