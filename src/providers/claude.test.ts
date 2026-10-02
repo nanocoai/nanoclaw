@@ -16,9 +16,15 @@ vi.mock('../env.js', async (importOriginal) => ({
     Object.fromEntries(keys.flatMap((k) => (k in dotenv.values ? [[k, dotenv.values[k]]] : []))),
 }));
 
-import { realizeProviderSpawnSurfaces } from '../provider-contracts/realize.js';
-import { getProviderHostContract } from '../provider-contracts/registry.js';
-import { getProviderContainerConfig } from './provider-container-registry.js';
+// The DB-backed project-doc compose is not under test here.
+vi.mock('../project-doc-compose.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../project-doc-compose.js')>()),
+  composeGroupProjectDoc: async () => {},
+}));
+
+import { resolveProviderContribution } from '../container-runner.js';
+import type { ContainerConfig } from '../container-config.js';
+import type { AgentGroup, Session } from '../types.js';
 import '../provider-contracts/index.js';
 import './index.js';
 
@@ -32,27 +38,20 @@ afterEach(() => {
   fs.rmSync(TEST_ROOT, { recursive: true, force: true });
 });
 
-// Mirrors resolveProviderContribution for a declared contract, minus the
-// DB-backed project-doc compose.
+// The spawn path's own resolution; composeSessionSpec puts contribution.env on
+// the contributed lane (container-runner.test.ts).
 async function claudeEnv(): Promise<Record<string, string> | undefined> {
-  const fn = getProviderContainerConfig('claude');
-  const groupDir = `${TEST_ROOT}/groups/claude-env`;
-  const sessionDir = `${TEST_ROOT}/data/v2-sessions/group-1/session-1`;
-  fs.mkdirSync(groupDir, { recursive: true });
-  const ctx = { sessionDir, agentGroupId: 'group-1', groupDir, selectedSkills: [], hostEnv: process.env };
-  const surfaces = await realizeProviderSpawnSurfaces(
-    'claude',
-    getProviderHostContract('claude')!,
-    'group-1',
-    groupDir,
-    sessionDir,
-    [],
-    {
-      legacyOverlay: async () => (await fn?.({ ...ctx, coreOwnsProviderSurfaces: true })) ?? {},
-      composeProjectDocument: async () => {},
-    },
-  );
-  return surfaces.contribution.env;
+  const session = { id: 'session-1', agent_group_id: 'group-1', agent_provider: null } as Session;
+  const group = { id: 'group-1', folder: 'claude-env' } as AgentGroup;
+  const config: ContainerConfig = {
+    provider: 'claude',
+    mcpServers: {},
+    packages: { apt: [], npm: [] },
+    additionalMounts: [],
+    skills: [],
+  };
+  fs.mkdirSync(`${TEST_ROOT}/groups/claude-env`, { recursive: true });
+  return (await resolveProviderContribution(session, group, config)).contribution.env;
 }
 
 describe('claude provider container env', () => {
@@ -63,6 +62,12 @@ describe('claude provider container env', () => {
 
   it('falls back to .env when the service env does not carry it', async () => {
     delete process.env[KEY];
+    dotenv.values = { [KEY]: '500000' };
+    expect((await claudeEnv())?.[KEY]).toBe('500000');
+  });
+
+  it('treats an empty service value as unset and still reads .env', async () => {
+    process.env[KEY] = ' ';
     dotenv.values = { [KEY]: '500000' };
     expect((await claudeEnv())?.[KEY]).toBe('500000');
   });

@@ -12,7 +12,7 @@ import { registerProviderContainerConfig } from './provider-container-registry.j
 const KEY = 'CLAUDE_CODE_AUTO_COMPACT_WINDOW';
 
 registerProviderContainerConfig('claude', (ctx) => {
-  const value = (ctx.hostEnv[KEY] ?? readEnvFile([KEY])[KEY])?.trim();
+  const value = ctx.hostEnv[KEY]?.trim() || readEnvFile([KEY])[KEY]?.trim();
   if (!value) return {};
   if (!/^[1-9]\d*$/.test(value)) {
     log.warn(`Ignoring ${KEY}: expected a positive integer token count`, { value });
