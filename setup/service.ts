@@ -218,7 +218,7 @@ export function writeServiceProxyEnv(projectRoot: string): string | undefined {
  * Earlier setups wrote proxy URLs inline. The active service file is rewritten
  * below, but one left by another service type would keep its credentials.
  */
-function tightenCredentialFiles(projectRoot: string, homeDir: string): void {
+export function tightenCredentialFiles(projectRoot: string, homeDir: string): void {
   const unit = `${getSystemdUnit(projectRoot)}.service`;
   const candidates = [
     path.join(homeDir, 'Library', 'LaunchAgents', `${getLaunchdLabel(projectRoot)}.plist`),
@@ -227,17 +227,19 @@ function tightenCredentialFiles(projectRoot: string, homeDir: string): void {
     path.join(projectRoot, 'start-nanoclaw.sh'),
   ];
   for (const file of candidates) {
+    let target = 0o600;
     try {
       const mode = fs.statSync(file).mode & 0o777;
+      target = mode & 0o700;
       const text = mode & 0o077 ? fs.readFileSync(file, 'utf8') : '';
-      if (/_proxy/i.test(text) && text.includes('@')) {
-        fs.chmodSync(file, mode & 0o700);
-        log.info('Restricted a service file that holds proxy credentials', { file });
-      }
+      if (!/_proxy/i.test(text) || !text.includes('@')) continue;
+      fs.chmodSync(file, target);
+      log.info('Restricted a service file that holds proxy credentials', { file });
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-        log.warn('Could not restrict a service file that may hold proxy credentials', { file, err });
-      }
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      // Usually a root-owned file left by an earlier root install; only the user can fix it.
+      const fix = `sudo chmod ${target.toString(8)} ${shellQuote(file)}`;
+      log.warn(`Could not restrict ${file}, which may hold a proxy password. To fix, run: ${fix}`, { file, fix, err });
     }
   }
 }

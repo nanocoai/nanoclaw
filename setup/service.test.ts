@@ -3,14 +3,16 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { afterEach, beforeEach, describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 
-import { getLaunchdLabel } from '../src/install-slug.js';
+import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
+import { log } from '../src/log.js';
 import {
   hostProxyEnv,
   nodeHonorsEnvProxy,
   renderSystemdUnit,
   serviceProxyEnvPath,
+  tightenCredentialFiles,
   writeOwnerOnly,
   writeServiceProxyEnv,
 } from './service.js';
@@ -333,5 +335,39 @@ describe('writeOwnerOnly', () => {
     expect(fs.statSync(existing).mode & 0o777).toBe(0o600);
     expect(fs.readFileSync(existing, 'utf8')).toBe('new');
     expect(fs.readdirSync(dir).sort()).toEqual(['existing.plist', 'fresh.plist']);
+  });
+});
+
+describe('tightenCredentialFiles', () => {
+  let root: string;
+  let unitFile: string;
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-tighten-'));
+    const unitDir = path.join(root, 'home/.config/systemd/user');
+    fs.mkdirSync(unitDir, { recursive: true });
+    unitFile = path.join(unitDir, `${getSystemdUnit(root)}.service`);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('leaves a service file without proxy credentials untouched', () => {
+    fs.writeFileSync(unitFile, 'Environment="HTTPS_PROXY=http://proxy.example:1"\n', { mode: 0o644 });
+    fs.chmodSync(unitFile, 0o644);
+    tightenCredentialFiles(root, path.join(root, 'home'));
+    expect(fs.statSync(unitFile).mode & 0o777).toBe(0o644);
+  });
+
+  it('names the file and the fix when it cannot change the mode', () => {
+    fs.writeFileSync(unitFile, 'Environment="HTTPS_PROXY=http://u:p@proxy.example:1"\n', { mode: 0o644 });
+    fs.chmodSync(unitFile, 0o644);
+    vi.spyOn(fs, 'chmodSync').mockImplementation(() => {
+      throw Object.assign(new Error('operation not permitted'), { code: 'EPERM' });
+    });
+    const warn = vi.spyOn(log, 'warn').mockImplementation(() => {});
+    tightenCredentialFiles(root, path.join(root, 'home'));
+    const fix = `sudo chmod 600 '${unitFile}'`;
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining(fix), expect.objectContaining({ file: unitFile, fix }));
   });
 });
