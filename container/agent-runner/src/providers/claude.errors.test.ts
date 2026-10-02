@@ -112,6 +112,9 @@ it('keeps a Claude task billing failure in its task log and out of chat', async 
 });
 
 const AUTH_ERROR = 'Invalid API key · Fix external API key';
+const OWNER_HINT =
+  "Whoever runs this NanoClaw needs to fix this outside the chat. Please don't send keys or passwords here.";
+const AUTH_NOTICE = `${AUTH_ERROR}\n${OWNER_HINT}`;
 
 async function resultEvents(): Promise<Array<{ text: string | null; isError?: boolean; error?: string }>> {
   const provider = createProvider('claude');
@@ -121,9 +124,17 @@ async function resultEvents(): Promise<Array<{ text: string | null; isError?: bo
   return events.filter((e) => e.type === 'result');
 }
 
-it('uses the SDK result text as the error when errors[] is empty', async () => {
-  sdkMessages.push({ type: 'result', subtype: 'success', is_error: true, result: `  ${AUTH_ERROR}\n`, errors: [] });
-  expect(await resultEvents()).toEqual([{ type: 'result', text: null, isError: true, error: AUTH_ERROR }]);
+it.each([
+  ['Not logged in · Please run /login', OWNER_HINT],
+  [`  ${AUTH_ERROR}\n`, OWNER_HINT],
+  ['Invalid auth token · Fix external auth token', OWNER_HINT],
+  ['Credit balance is too low', OWNER_HINT],
+  ['Prompt is too long', 'This conversation got too long. An admin can send /clear to start a new one.'],
+])('uses SDK notice %p plus its chat hint as the error when errors[] is empty', async (result, hint) => {
+  sdkMessages.push({ type: 'result', subtype: 'success', is_error: true, result, errors: [] });
+  expect(await resultEvents()).toEqual([
+    { type: 'result', text: null, isError: true, error: `${result.trim()}\n${hint}` },
+  ]);
 });
 
 it.each([
@@ -171,6 +182,6 @@ it('delivers the SDK auth error to the channel instead of the generic notice', a
     claudeRuntimeContract.textDelivery === 'mid-turn-complete',
   );
 
-  expect(getUndeliveredMessages().map((row) => JSON.parse(row.content).text)).toEqual([AUTH_ERROR]);
-  expect(exchanges.map((e) => [e.result, e.status])).toEqual([[AUTH_ERROR, 'error']]);
+  expect(getUndeliveredMessages().map((row) => JSON.parse(row.content).text)).toEqual([AUTH_NOTICE]);
+  expect(exchanges.map((e) => [e.result, e.status])).toEqual([[AUTH_NOTICE, 'error']]);
 });

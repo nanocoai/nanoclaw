@@ -154,13 +154,18 @@ const postToolUseHook: HookCallback = async () => {
 /** Minimum spacing between `activity` frames derived from streaming deltas. */
 const STREAM_ACTIVITY_INTERVAL_MS = 1000;
 
-/** The Claude CLI's own fixed failure notices (exact strings), safe to show in a channel. */
-const SDK_NOTICES = new Set([
-  'Not logged in · Please run /login',
-  'Invalid API key · Fix external API key',
-  'Invalid auth token · Fix external auth token',
-  'Credit balance is too low',
-  'Prompt is too long',
+// The notices are written for a terminal user; a chat user can't act on them
+// and must never be invited to paste a key.
+const OWNER_FIX_HINT =
+  "Whoever runs this NanoClaw needs to fix this outside the chat. Please don't send keys or passwords here.";
+
+/** The Claude CLI's own fixed failure notices (exact strings), safe to show in a channel, and the hint added to each. */
+const SDK_NOTICES = new Map([
+  ['Not logged in · Please run /login', OWNER_FIX_HINT],
+  ['Invalid API key · Fix external API key', OWNER_FIX_HINT],
+  ['Invalid auth token · Fix external auth token', OWNER_FIX_HINT],
+  ['Credit balance is too low', OWNER_FIX_HINT],
+  ['Prompt is too long', 'This conversation got too long. An admin can send /clear to start a new one.'],
 ]);
 
 /** The real clock for archive names and rotation stamps; tests hand the history functions a fixed one. */
@@ -366,7 +371,9 @@ export class ClaudeProvider implements AgentProvider {
           // the SDK's own notice in `result`. Other result text can echo upstream
           // bodies, so only exact fixed notices are reused; the rest stay generic.
           const candidate = isError && !m.errors?.length ? (m.result?.trim() ?? '') : '';
-          const resultAsError = SDK_NOTICES.has(candidate) ? candidate : '';
+          // Notice first, hint on its own line: setup's ping shows only the first line.
+          const hint = SDK_NOTICES.get(candidate);
+          const resultAsError = hint ? `${candidate}\n${hint}` : '';
           yield {
             type: 'result',
             text: resultAsError ? null : (m.result ?? null),
