@@ -156,6 +156,7 @@ function track(root: string): string {
 }
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
@@ -176,6 +177,7 @@ describe('provisioning-core bootstrap', () => {
   });
 
   it('module absent in a Git checkout: commits the fetched file so the install stays updatable', async () => {
+    vi.stubEnv('NANOCLAW_SETUP_COMMIT', '');
     const root = track(fs.mkdtempSync(path.join(os.tmpdir(), 'slack-auto-git-')));
     const git = (...args: string[]) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
     git('init', '-q');

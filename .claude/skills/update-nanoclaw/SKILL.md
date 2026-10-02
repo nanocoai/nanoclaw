@@ -39,8 +39,10 @@ git status --porcelain
 ```
 
 Stop if it prints anything. Setup commits the files it applies as
-`setup: apply <skill>` commits, so leftovers are the operator's own edits: ask
-whether to commit them as a local customization or stash them, then re-check.
+`setup: apply <skill>` commits unless `NANOCLAW_SETUP_COMMIT=0` was set.
+Treat anything left as part of the install: show it, ask the user to commit it
+as a local customization, then re-check. Never stash it, since the updater
+discovers installed skills from these files.
 
 Use the official remote if one already exists. Otherwise add it as `upstream`:
 
