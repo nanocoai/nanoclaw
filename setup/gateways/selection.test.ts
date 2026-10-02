@@ -70,8 +70,15 @@ describe('real detector probe', () => {
     vi.stubEnv('pnpm_config_verify_deps_before_run', 'false');
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-probe-'));
     roots.push(root);
-    const { packageManager } = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ type: 'module', packageManager }));
+    const { packageManager, pnpm } = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+    // The symlinked install records the host's patches; a probe root that disagrees
+    // makes pnpm skip the nested-project scan that prints the WARN.
+    const patches = Object.entries<string>(pnpm?.patchedDependencies ?? {}).map(([dep, file]) => [
+      dep,
+      path.resolve(file),
+    ]);
+    const probePnpm = patches.length ? { pnpm: { patchedDependencies: Object.fromEntries(patches) } } : {};
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ type: 'module', packageManager, ...probePnpm }));
     fs.writeFileSync(path.join(root, 'pnpm-workspace.yaml'), 'onlyBuiltDependencies: [esbuild]\n');
     fs.symlinkSync(path.resolve('node_modules'), path.join(root, 'node_modules'));
     fs.mkdirSync(path.join(root, 'groups', 'repro'), { recursive: true });
