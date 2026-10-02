@@ -195,6 +195,15 @@ esac
     expect((await queryHost(root)).instance_id).not.toBe(old.instance_id);
   });
 
+  it('restarts when the caller forces color, so the timestamp stays a number', async () => {
+    const old = await startHost();
+    writeFileSync(join(binDir, 'systemctl'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    // pnpm exports FORCE_COLOR=1 to the scripts it runs. console.log colorizes a
+    // bare number, so a wrapped timestamp reaches host-status.mjs as NaN.
+    await execFileAsync('bash', [join(root, 'setup/lib/restart.sh')], { env: { ...env(), FORCE_COLOR: '1' } });
+    expect((await queryHost(root)).instance_id).not.toBe(old.instance_id);
+  });
+
   it.each(['bootstrap', 'kickstart'])(
     'propagates launchd %s failure through the complete shell without falling back',
     async (action) => {
