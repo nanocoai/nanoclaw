@@ -86,16 +86,10 @@ git archive "$upstream_ref" scripts src/install-slug.ts | tar -x -C "$controller
 
 ## 2. Choose the channel, the Git strategy, and prepare
 
-The update channel picks what to merge:
-
-- `stable` (default): the newest release, i.e. the newest annotated `vX.Y.Z`
-  tag on the official remote.
-- `beta`: the newest `vX.Y.Z-rc.N` tag newer than stable, else stable.
-- `edge`: the tip of upstream `main`.
-
-The controller reads `NANOCLAW_UPDATE_CHANNEL` from `.env`. When the user asks
-for a different channel just this once, add `--channel <name>`. To change the
-default, run `set-channel` (below); never edit `.env` by hand.
+Channels (`NANOCLAW_UPDATE_CHANNEL` in `.env`; `--channel <name>` overrides it
+once): `stable` (default) = newest annotated `vX.Y.Z` tag; `beta` = newest
+`-rc.N` if newer than stable; `edge` = upstream `main`. Change the default only
+with `set-channel` (below), never by editing `.env`.
 
 Default to `merge`. Use `rebase` only when the user explicitly wants linear
 history. Use `cherry-pick` only with an explicit comma-separated commit list.
@@ -107,31 +101,22 @@ pnpm exec tsx "$controller_dir/scripts/update-nanoclaw.ts" prepare \
 
 The JSON result is `nanoclaw-update/v1`. Record its `id`, `stageRoot`, backup
 branch/tag, changed files, and requirements. The live `HEAD` is still unchanged.
-Tell the user the `channel` and the `upstreamRef` it resolved (a release tag,
-or `main` on edge). If `phase` is `prepared` and `targetHead` equals
-`originalHead` on stable or beta, say "Already on the newest release
-(vX.Y.Z)" and still run step 3: validation can refresh installed channel and
-provider skills. If `targetHead` still equals `originalHead` after validation,
-run `abandon` and stop.
+Tell the user the `channel` and `upstreamRef`. Then:
 
-Stable and beta never move an install backward. If this install already has
-upstream commits newer than the newest release, `prepare` stages nothing and
-exits with an error whose `code` is `ahead-of-release` (with `tag`). Ask the
-user one question:
+- **Nothing new** (stable/beta, `phase: prepared`, `targetHead` equals
+  `originalHead`): say "Already on the newest release (vX.Y.Z)", still run
+  step 3 (it refreshes installed skills), and `abandon` if `targetHead` is
+  still unchanged.
+- **Error `code: ahead-of-release`** (nothing staged): ask once, "This install
+  is newer than the latest release, `<tag>`. Keep getting the newest code from
+  `main` (edge), or switch to releases and wait for the next one (stable)?"
+  Save the answer, then on edge re-run `prepare` with `--channel edge`; on
+  stable stop, as there is nothing to update until the next release:
 
-> This install is newer than the latest release, `<tag>`. Keep getting the
-> newest code from `main` (edge), or switch to releases and wait for the next
-> one (stable)?
-
-Save the answer as their default:
-
-```bash
-pnpm exec tsx "$controller_dir/scripts/update-nanoclaw.ts" set-channel \
-  --project-root "$PWD" --channel edge   # or stable
-```
-
-On edge, run `prepare` again with `--channel edge` and continue. On stable,
-stop and say there is nothing to update until the next release.
+  ```bash
+  pnpm exec tsx "$controller_dir/scripts/update-nanoclaw.ts" set-channel \
+    --project-root "$PWD" --channel edge   # or stable
+  ```
 
 If `phase` is `conflict`, resolve conflicts only inside `stageRoot`, preserving
 intentional local customizations. Complete the merge/rebase/cherry-pick there,

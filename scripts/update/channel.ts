@@ -131,11 +131,9 @@ function remoteReleaseTags(runner: CommandRunner, root: string, remote: string):
 }
 
 function pickTag(tags: string[], channel: 'stable' | 'beta'): string | undefined {
-  const newest = (list: string[]) => list.sort(compareReleaseTags).at(-1);
-  const stable = newest(tags.filter((tag) => parseReleaseTag(tag)!.rc === undefined));
-  if (channel === 'stable') return stable;
-  const rc = newest(tags.filter((tag) => parseReleaseTag(tag)!.rc !== undefined));
-  return rc && (!stable || compareReleaseTags(rc, stable) > 0) ? rc : stable;
+  // A release sorts after its own rcs, so beta's newest is an rc only when it is newer than stable.
+  const eligible = channel === 'stable' ? tags.filter((tag) => parseReleaseTag(tag)!.rc === undefined) : tags;
+  return eligible.sort(compareReleaseTags).at(-1);
 }
 
 function remoteMainRef(runner: CommandRunner, root: string, remote: string): string {
