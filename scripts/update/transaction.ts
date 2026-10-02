@@ -729,6 +729,9 @@ function containerBuildArgs(envFile: string, state: UpdateState): string[] | und
 }
 
 function installAndBuild(root: string, state: UpdateState, runtime: UpdateRuntime): void {
+  // On the live checkout this swaps node_modules under the running controller.
+  // tsx compiles each later import with the esbuild it started with, which
+  // refuses a binary of another version: callers load their modules first.
   runtime.runner.run('pnpm', ['install', '--frozen-lockfile'], root);
   runtime.runner.run('pnpm', ['run', 'build'], root);
   const container = containerBuildArgs(path.join(root, '.env'), state);
@@ -844,12 +847,12 @@ export async function cutoverUpdate(
     state.snapshot = createSnapshot(state);
     saveState(state);
     git(runtime, state.projectRoot, ['reset', '--hard', state.targetHead]);
+    // From the live checkout, now exactly the validated commit, and before
+    // installAndBuild: see there.
+    const selection = state.gatewaySelection;
+    const gateway = selection ? await runtime.loadGateway(state.projectRoot) : undefined;
     installAndBuild(state.projectRoot, state, runtime);
-    if (state.gatewaySelection) {
-      // From the live checkout, now exactly the validated commit.
-      const { upsertEnvVar } = await runtime.loadGateway(state.projectRoot);
-      upsertEnvVar('NANOCLAW_GATEWAY_PROVIDER', state.gatewaySelection, state.projectRoot);
-    }
+    if (selection && gateway) gateway.upsertEnvVar('NANOCLAW_GATEWAY_PROVIDER', selection, state.projectRoot);
     state.phase = 'cutover';
     state.lastError = undefined;
     saveState(state);
