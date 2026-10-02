@@ -1,14 +1,8 @@
 /**
- * Chromium trust for the credential gateway's CA.
- *
- * A gateway that terminates TLS hands the container its CA through
- * NODE_EXTRA_CA_CERTS (Node/Bun) and SSL_CERT_FILE (curl, git, OpenSSL).
- * Chromium reads neither: on Linux it trusts only the system roots plus the
- * user's NSS database at ~/.pki/nssdb. Without this import, every page the
- * agent browser opens through the gateway fails with ERR_CERT_AUTHORITY_INVALID.
- *
- * The database lives in the container's ephemeral HOME and is rebuilt on every
- * spawn, so it always matches the CA the current gateway mounted.
+ * Chromium on Linux ignores NODE_EXTRA_CA_CERTS and SSL_CERT_FILE and trusts only
+ * the system roots plus ~/.pki/nssdb, so a TLS-inspecting gateway's CA must be
+ * imported there or every agent-browser page fails. HOME is per-container (--rm),
+ * so the database is fresh on every spawn and always matches the mounted CA.
  */
 import { execFileSync } from 'child_process';
 import fs from 'fs';
@@ -37,12 +31,11 @@ export function trustGatewayCaForChromium(
   const log = opts.log ?? (() => {});
   if (!caPath || !fs.existsSync(caPath)) return 0;
 
-  const certs = fs.readFileSync(caPath, 'utf8').match(PEM_BLOCK) ?? [];
-  if (certs.length === 0) return 0;
-
   const nssDir = path.join(home, '.pki', 'nssdb');
   const db = `sql:${nssDir}`;
   try {
+    const certs = fs.readFileSync(caPath, 'utf8').match(PEM_BLOCK) ?? [];
+    if (certs.length === 0) return 0;
     fs.mkdirSync(nssDir, { recursive: true, mode: 0o700 });
     if (!fs.existsSync(path.join(nssDir, 'cert9.db'))) {
       run('certutil', ['-N', '-d', db, '--empty-password']);
@@ -52,7 +45,6 @@ export function trustGatewayCaForChromium(
       certs.forEach((pem, i) => {
         const file = path.join(tmp, `${i}.pem`);
         fs.writeFileSync(file, pem + '\n');
-        // Same nickname on every spawn: re-adding replaces rather than duplicates.
         run('certutil', ['-A', '-d', db, '-n', `nanoclaw-gateway-ca-${i}`, '-t', 'C,,', '-i', file]);
       });
     } finally {

@@ -54,6 +54,13 @@ describe('trustGatewayCaForChromium', () => {
     expect(calls.map((c) => c[1])).toEqual(['-A']);
   });
 
+  test('an unreadable CA path is logged, not thrown', () => {
+    const logs: string[] = [];
+    expect(trustGatewayCaForChromium({ caPath: dir, home: dir, run, log: (m) => logs.push(m) })).toBe(0);
+    expect(calls).toEqual([]);
+    expect(logs[0]).toContain('EISDIR');
+  });
+
   test('a certutil failure is logged, not thrown', () => {
     const ca = path.join(dir, 'ca.pem');
     fs.writeFileSync(ca, PEM('AAAA'));
