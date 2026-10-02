@@ -13,34 +13,34 @@ importers:
         version: 0.2.0(zod@4.4.3)
       '@bitbasti/chat-adapter-webex':
         specifier: ^0.1.0
-        version: 0.1.0(chat@4.29.0(zod@4.4.3))(zod@4.4.3)
+        version: 0.1.0(chat@4.41.1(zod@4.4.3))(zod@4.4.3)
       '@chat-adapter/discord':
-        specifier: 4.29.0
-        version: 4.29.0(zod@4.4.3)
+        specifier: 4.41.1
+        version: 4.41.1(zod@4.4.3)
       '@chat-adapter/gchat':
-        specifier: 4.29.0
-        version: 4.29.0(zod@4.4.3)
+        specifier: 4.41.1
+        version: 4.41.1(zod@4.4.3)
       '@chat-adapter/github':
-        specifier: 4.29.0
-        version: 4.29.0(zod@4.4.3)
+        specifier: 4.41.1
+        version: 4.41.1(zod@4.4.3)
       '@chat-adapter/linear':
-        specifier: 4.29.0
-        version: 4.29.0(graphql@17.0.2)(zod@4.4.3)
+        specifier: 4.41.1
+        version: 4.41.1(graphql@17.0.2)(zod@4.4.3)
       '@chat-adapter/slack':
-        specifier: 4.29.0
-        version: 4.29.0(zod@4.4.3)
+        specifier: 4.41.1
+        version: 4.41.1(zod@4.4.3)
       '@chat-adapter/state-memory':
-        specifier: 4.29.0
-        version: 4.29.0(zod@4.4.3)
+        specifier: 4.41.1
+        version: 4.41.1(zod@4.4.3)
       '@chat-adapter/teams':
-        specifier: 4.29.0
-        version: 4.29.0(zod@4.4.3)
+        specifier: 4.41.1
+        version: 4.41.1(zod@4.4.3)
       '@chat-adapter/telegram':
-        specifier: 4.29.0
-        version: 4.29.0(zod@4.4.3)
+        specifier: 4.41.1
+        version: 4.41.1(zod@4.4.3)
       '@chat-adapter/whatsapp':
-        specifier: 4.29.0
-        version: 4.29.0(zod@4.4.3)
+        specifier: 4.41.1
+        version: 4.41.1(zod@4.4.3)
       '@clack/core':
         specifier: ^1.2.0
         version: 1.2.0
@@ -52,7 +52,7 @@ importers:
         version: 2.2.1
       '@resend/chat-sdk-adapter':
         specifier: ^0.1.1
-        version: 0.1.1(@chat-adapter/shared@4.38.1(zod@4.4.3))(chat@4.29.0(zod@4.4.3))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+        version: 0.1.1(@chat-adapter/shared@4.41.1(zod@4.4.3))(chat@4.41.1(zod@4.4.3))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       '@types/qrcode':
         specifier: ^1.5.6
         version: 1.5.6
@@ -63,11 +63,11 @@ importers:
         specifier: 11.10.0
         version: 11.10.0
       chat:
-        specifier: 4.29.0
-        version: 4.29.0(zod@4.4.3)
+        specifier: 4.41.1
+        version: 4.41.1(zod@4.4.3)
       chat-adapter-imessage:
         specifier: ^0.1.1
-        version: 0.1.1(chat@4.29.0(zod@4.4.3))(typescript@5.9.3)(zod@4.4.3)
+        version: 0.1.1(chat@4.41.1(zod@4.4.3))(typescript@5.9.3)(zod@4.4.3)
       cron-parser:
         specifier: 5.5.0
         version: 5.5.0
@@ -168,52 +168,48 @@ packages:
   '@cacheable/utils@2.5.0':
     resolution: {integrity: sha512-buipgOVDkkPXNR5+xBpDw7Zk2n1EvU7qBJCNUcL7rhQ//kfpOXPAvQ511Os0vpLYJ1pZnvudNytkQt2hst3wqA==}
 
-  '@chat-adapter/discord@4.29.0':
-    resolution: {integrity: sha512-C6pDVKn7s0PhvgeqldYxoShWXJzthwtlo+sCesqenh56M03eHsioinqxeJttmtK8y1ZD8/qiP2lAZufDwuEQhA==}
+  '@chat-adapter/discord@4.41.1':
+    resolution: {integrity: sha512-i5WH8cxsGN0KK9GXaZFijJ4X8oOlZNYMxepyIg1Boxe8HiM/7HBGpaXTy+6Ei7c5ZyoDfuPk8aWft5dx+Si/ag==}
     engines: {node: '>=20'}
 
-  '@chat-adapter/gchat@4.29.0':
-    resolution: {integrity: sha512-SZ5ZgzFmZ4oRj0AAISbjPztPiICTpw+RdPiPywNwqGWt2LItUOL+8+dl8zZMk+F86E/r0sqRjdbc8+9GqUe2pA==}
+  '@chat-adapter/gchat@4.41.1':
+    resolution: {integrity: sha512-n1wgRXX/IBFHavkwYHfWaEIYcnbAai49HheM4Z9c5yV6Yv4g3FktB/cXd7NhVuCkO/oYd3cg/v1MQgi/RF+geQ==}
     engines: {node: '>=20'}
 
-  '@chat-adapter/github@4.29.0':
-    resolution: {integrity: sha512-B6OXzMbIibSylhWSx+zgJj71jv9ojBuLsR/UJTi2Ft8pVnNyjckuW9zjkjH3MJBNbErHqlv4511lADHUzzt6yQ==}
+  '@chat-adapter/github@4.41.1':
+    resolution: {integrity: sha512-yNQj3FSmJqW8gdV9LB1HrGUMQfuL8cPQPQ7wx7fbZnU3EWCdLgmFWYZN2Mu8bA0BWKdin9F2sUnbl4Cmx/U4uQ==}
     engines: {node: '>=20'}
 
-  '@chat-adapter/linear@4.29.0':
-    resolution: {integrity: sha512-4cq7pBv0CICka8V0uuae7bNfb1rTdmYjsNjOs7Gkr4vChlhDxRUEGUoiBqvOEYKqxFtFOkRk9Wod0tIQmbPySw==}
+  '@chat-adapter/linear@4.41.1':
+    resolution: {integrity: sha512-68ejJXBHSe/pgXNTa1yvSps4AJt+4JcSlIRsDxZr0odYoEdKA0tk3vG05XhqYYG4rAR8SHML0y0LkX7uoouYRQ==}
     engines: {node: '>=20'}
 
-  '@chat-adapter/shared@4.29.0':
-    resolution: {integrity: sha512-ARqTDoHJHKN9rpytbFPJbNmqqx3fOg5xwsTZdlingQPAssOSeHDBdqrFJkgDhyCRGbmDtG09cuS0FkVzeoh2qg==}
+  '@chat-adapter/shared@4.41.1':
+    resolution: {integrity: sha512-ia1Ctd4mclpiNd+sYUc/fo9RXIFoBr/Z0JFFk3hue1XiFXPTJClG/BHpS+243UmSkeE5JORjY4MmW+szdhhFWw==}
     engines: {node: '>=20'}
 
-  '@chat-adapter/shared@4.38.1':
-    resolution: {integrity: sha512-zJiMl43fiS3a2RjLFdCyTUTqcDY2xss1Acbzc9yfsw8YAkS0LZRdrNmp9/RjLhZB0+FzLarNAayvdKqF2GwnQg==}
+  '@chat-adapter/slack@4.41.1':
+    resolution: {integrity: sha512-aq8sETBNrlrD13tB0pwMNf4jILRbrnc9TiDRP/Z9rVDejqDEImOrHVZgpX8ZHIJlT9cPXmJidgUPIE5iz45HLA==}
     engines: {node: '>=20'}
 
-  '@chat-adapter/slack@4.29.0':
-    resolution: {integrity: sha512-s2DXAwkTpmiIKSATXgrO879s1pqFwS70Y0JPd+TRGRzDeh6nfqt5dnKt5Bug0P1zwkB6DoPurhnYS9nqhSmD/w==}
+  '@chat-adapter/state-memory@4.41.1':
+    resolution: {integrity: sha512-1hrbjz2OfXmEECX6N6NDPaQvf60VhJWY5Q0xJ+hBbcE9mCgYrH1/I7zrgo+39TOUORiT5KlHqozH7yTl+Ga35A==}
     engines: {node: '>=20'}
 
-  '@chat-adapter/state-memory@4.29.0':
-    resolution: {integrity: sha512-+L5LPj9VkyXFXAcfFlTvf2JihuFfQV5U9TfXDlQeG7k6NMEA8irt4a0c6MTxFP7OI5YENknVwRGzmcUubvEWSw==}
+  '@chat-adapter/state-redis@4.41.1':
+    resolution: {integrity: sha512-oOpLtAclCt2aBOAw3TVE0CM1cjChWnMvoDmzpr4kEj21trGQhCukkVYCF1FSE9jfW4D+hbvYB/uI1beGCFAakw==}
     engines: {node: '>=20'}
 
-  '@chat-adapter/state-redis@4.38.1':
-    resolution: {integrity: sha512-SNxn0igBRISmZI53HVdWHjlNFkn87gzSjlj+KkctnLVUd5q8ijitmip4EBg4hq7/UXiwYcxovd7En+3Jttxavg==}
+  '@chat-adapter/teams@4.41.1':
+    resolution: {integrity: sha512-aoxuXBJPqHSHH6t5d2IXYl8RcdViM2OOG48YTnDNqIfSwQMVToFr0Pc+hxBGaO8Fcwvtyollc2rUdQsGI6WkGA==}
     engines: {node: '>=20'}
 
-  '@chat-adapter/teams@4.29.0':
-    resolution: {integrity: sha512-KQq1JOeE8kgp13CAviT8+7A4KHO4uZOceV4VbIZdJiyDsChR08KTOeCNAKd6wr48zyF5SulJUjMbnOy745NTFw==}
+  '@chat-adapter/telegram@4.41.1':
+    resolution: {integrity: sha512-BgONRwr5RWHTXFGg5w/uWRHwW0Z7LclCQDnUa5psI+JYw19hsZ1HJSPnYq9PAZN/UpWflV2O6XWxFpT4Ff4CbQ==}
     engines: {node: '>=20'}
 
-  '@chat-adapter/telegram@4.29.0':
-    resolution: {integrity: sha512-015tU3HEjFQWw7DgebXWkDeQA6lTdTVEO4btAV3f6U1kEnOfjLVJq98latcsM1WkEvv+3LIFKpsz9pG53aamBw==}
-    engines: {node: '>=20'}
-
-  '@chat-adapter/whatsapp@4.29.0':
-    resolution: {integrity: sha512-CDKmlDHmiiJ2xtca0wZ2DIYnySUFuiKn6f3ZQvschFVa6pSaDmaldmJc3iul+ELi10+RE7x5+immfc//+TTzFg==}
+  '@chat-adapter/whatsapp@4.41.1':
+    resolution: {integrity: sha512-zODMD9Bk4v+5ZBdwebJLG9uRqwnPVJVOlyTf4YcGGrfLF1V06EP2dNUXEHgoiaBH2+EwAl3xVjxJOa65KMg/+g==}
     engines: {node: '>=20'}
 
   '@clack/core@1.2.0':
@@ -658,6 +654,9 @@ packages:
   '@jridgewell/sourcemap-codec@1.5.5':
     resolution: {integrity: sha512-cYQ9310grqxueWbl+WuIUIaiUaDcj7WOq5fVhEljNVgRfOUhY9fy2zTvfoqWsnebh8Sl70VScFbICvJnLKB0Og==}
 
+  '@jridgewell/sourcemap-codec@1.6.0':
+    resolution: {integrity: sha512-T7jf+5zgsZHwNJ4lvQ7/aezbyk0nNX+zJVWpmHA7VYsEx7a7qr5Rg5IbtJFqkgze5Y2sruq1RUY8Q837Od7iFw==}
+
   '@jridgewell/trace-mapping@0.3.31':
     resolution: {integrity: sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==}
 
@@ -702,11 +701,12 @@ packages:
     resolution: {integrity: sha512-f0OUHEGVOZS/zRlKQQa2YqQ6BWun0yYMhjzum2fiIgz+drE/OhwZ/Z3QCgqVppvaXxThdbH9lvXA4DBczBeVng==}
     engines: {node: '>=20'}
 
-  '@napi-rs/wasm-runtime@1.1.4':
-    resolution: {integrity: sha512-3NQNNgA1YSlJb/kMH1ildASP9HW7/7kYnRI2szWJaofaS1hWmbGI4H+d3+22aGzXXN9IJ+n+GiFVcGipJP18ow==}
+  '@napi-rs/wasm-runtime@1.2.4':
+    resolution: {integrity: sha512-AJxoUD2/15ESHbvpcyjU274nsAPLuOtPHCk0vKJM5pj//Fg/B1FXNWjPnXTT9PymCYYiHo4zPj0ZomXBKhoy7g==}
+    engines: {node: ^20.19.0 || ^22.13.0 || >=23.5.0}
     peerDependencies:
-      '@emnapi/core': ^1.7.1
-      '@emnapi/runtime': ^1.7.1
+      '@emnapi/core': ^1.7.1 || ^2.0.0-alpha.4
+      '@emnapi/runtime': ^1.7.1 || ^2.0.0-alpha.4
 
   '@octokit/auth-app@8.3.0':
     resolution: {integrity: sha512-/UaKmJCsOc5XBZwhnFiGNdLH/FkDF8lYtBn1QlKxtX7IpgaRB/XOXjixFtERAknyUZHxp3oDuoiG0En4VptJSg==}
@@ -1208,8 +1208,8 @@ packages:
   '@tokenizer/token@0.3.0':
     resolution: {integrity: sha512-OvjF+z51L3ov0OyAU0duzsYuvO01PH7x4t6DJx+guahgTnBHkhJdG7soQeTSFLWN3efnHyibZ4Z8l2EuWwJN3A==}
 
-  '@tybys/wasm-util@0.10.1':
-    resolution: {integrity: sha512-9tTaPJLSiejZKx+Bmog4uSubteqTvFrVrURwkmHixBo0G4seD0zUxp98E1DzUBJxLQ3NPwXrGKDiVjwx/DpPsg==}
+  '@tybys/wasm-util@0.10.4':
+    resolution: {integrity: sha512-W3c4gRigFS0T/Ma4qIYF3GDAc5AQdHb1yL5znJT1Zv1YaD9Kitx656wBjvr19qbiosmZT8lWDM5BEMynUqX65A==}
 
   '@types/better-sqlite3@7.6.13':
     resolution: {integrity: sha512-NMv9ASNARoKksWtsq/SHakpYAYnhBrQgGD8zkLYk/jaK8jUGn08CfEdTRgYhMypUQAfzSP8W6gNLe0q19/t4VA==}
@@ -1391,6 +1391,11 @@ packages:
     engines: {node: '>=0.4.0'}
     hasBin: true
 
+  acorn@8.18.0:
+    resolution: {integrity: sha512-lGq+9yr1/GuAWaVYIHRjvvySG5/4VfKIvC8EWxStPdcDh/Ka7FG3twP6v4d5BkravUilhIAsG4Qj83t02LWUPQ==}
+    engines: {node: '>=0.4.0'}
+    hasBin: true
+
   agent-base@6.0.2:
     resolution: {integrity: sha512-RZNwNclF7+MS/8bDg70amg32dyeZGZxiDuQmZxKLAlQjr3jGyLx+4Kkk58UO7D2QdgFIQCovuSuZESne6RG6XQ==}
     engines: {node: '>= 6.0.0'}
@@ -1564,20 +1569,8 @@ packages:
     peerDependencies:
       chat: ^4.14.0
 
-  chat@4.29.0:
-    resolution: {integrity: sha512-KdPfzaie5ivYytyRICTERg5xT+LeCbYefokvNAqTHe92eqkFaoTMXXkSitikxJVWhZIb2YoXF1b9UZHyzSzKzw==}
-    engines: {node: '>=20'}
-    peerDependencies:
-      ai: ^6.0.182
-      zod: ^3.0.0 || ^4.0.0
-    peerDependenciesMeta:
-      ai:
-        optional: true
-      zod:
-        optional: true
-
-  chat@4.38.1:
-    resolution: {integrity: sha512-FD6vNLT8clXHKhN3I1m+3Bn2nz0rsB6/bmNPsJeh6Cr7kwWLg0MYl2uor9YaKBp38F77sBRVKdYKVA6ihUby3w==}
+  chat@4.41.1:
+    resolution: {integrity: sha512-+/LDcLoYLihf/9Kp5ymj2ylvm6q5vySQTMn0ZoeU0UWDfNVmCNc6OiADW8hwnejOLfevUs8lEpgotG9rmIxZvg==}
     engines: {node: '>=20'}
     peerDependencies:
       ai: ^6.0.182 || ^7.0.0
@@ -1727,11 +1720,8 @@ packages:
   dijkstrajs@1.0.3:
     resolution: {integrity: sha512-qiSlmBq9+BCdCA/L46dw8Uy93mloxsPSbwnm5yrKn2vMPiy8KyAskTF6zuV/j5BMsmOGZDPs7KjU+mjb670kfA==}
 
-  discord-api-types@0.37.120:
-    resolution: {integrity: sha512-7xpNK0EiWjjDFp2nAhHXezE4OUWm7s1zhc/UXXN6hnFFU8dfoPHgV0Hx0RPiCa3ILRpdeh152icc68DGCyXYIw==}
-
-  discord-api-types@0.38.53:
-    resolution: {integrity: sha512-HL1zz/UuZ+bbJjA/X8Kbxx9gk8v9rJAbTeWRNYKmIdjwJ7EovjlHgoJTxcLpATfNJ+AonOtMdy3Y5MVIJAAd/A==}
+  discord-api-types@0.38.56:
+    resolution: {integrity: sha512-Hti4RZsGvF5C7SM8rF2MDHtIm0Hyfrlk84GpEA29nj91tvVVMvX+oQSCodu10t2ZcjFGofq8TX0YyC04B2E69Q==}
 
   discord-interactions@4.4.0:
     resolution: {integrity: sha512-jjJx8iwAeJcj8oEauV43fue9lNqkf38fy60aSs2+G8D1nJmDxUIrk08o3h0F3wgwuBWWJUZO+X/VgfXsxpCiJA==}
@@ -1854,6 +1844,7 @@ packages:
   eslint@9.39.4:
     resolution: {integrity: sha512-XoMjdBOwe/esVgEvLmNsD3IRHkm7fbKIUGvrleloJXUZgDHig2IPWNniv+GwjyJXzuNqVjlr5+4yVUZjycJwfQ==}
     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
+    deprecated: This version is no longer supported. Please see https://eslint.org/version-support for other options.
     hasBin: true
     peerDependencies:
       jiti: '*'
@@ -2277,78 +2268,78 @@ packages:
     resolution: {gitHosted: true, tarball: https://codeload.github.com/whiskeysockets/libsignal-node/tar.gz/bcea72df9ec34d9d9140ab30619cf479c7c144c7}
     version: 6.0.0
 
-  lightningcss-android-arm64@1.32.0:
-    resolution: {integrity: sha512-YK7/ClTt4kAK0vo6w3X+Pnm0D2cf2vPHbhOXdoNti1Ga0al1P4TBZhwjATvjNwLEBCnKvjJc2jQgHXH0NEwlAg==}
+  lightningcss-android-arm64@1.33.0:
+    resolution: {integrity: sha512-gEpRTalKdosp4Bb8qWtc2iOgE5SeIHlpS1up9bFq2wAyYhl1UdTObYiHe98zEM9SQvSoqQZ1IQD0JNpg3Ml5pg==}
     engines: {node: '>= 12.0.0'}
     cpu: [arm64]
     os: [android]
 
-  lightningcss-darwin-arm64@1.32.0:
-    resolution: {integrity: sha512-RzeG9Ju5bag2Bv1/lwlVJvBE3q6TtXskdZLLCyfg5pt+HLz9BqlICO7LZM7VHNTTn/5PRhHFBSjk5lc4cmscPQ==}
+  lightningcss-darwin-arm64@1.33.0:
+    resolution: {integrity: sha512-Sciaz8eenNTKn9b3t7+xr0ipTp9YxKQY4npwQ3mrRuL0BAVHBLyZxofhaKBAVtzmtRZ/zTyo0/to4B1uWG/Djg==}
     engines: {node: '>= 12.0.0'}
     cpu: [arm64]
     os: [darwin]
 
-  lightningcss-darwin-x64@1.32.0:
-    resolution: {integrity: sha512-U+QsBp2m/s2wqpUYT/6wnlagdZbtZdndSmut/NJqlCcMLTWp5muCrID+K5UJ6jqD2BFshejCYXniPDbNh73V8w==}
+  lightningcss-darwin-x64@1.33.0:
+    resolution: {integrity: sha512-Z5UPAxzrjlWNNyGy6i65cJzzvgJ5D3T6wMvs+gWpY9d7qRhANrxqAp6LhxIgZhWEw18RfJTGcRxjuLIBr+m8XQ==}
     engines: {node: '>= 12.0.0'}
     cpu: [x64]
     os: [darwin]
 
-  lightningcss-freebsd-x64@1.32.0:
-    resolution: {integrity: sha512-JCTigedEksZk3tHTTthnMdVfGf61Fky8Ji2E4YjUTEQX14xiy/lTzXnu1vwiZe3bYe0q+SpsSH/CTeDXK6WHig==}
+  lightningcss-freebsd-x64@1.33.0:
+    resolution: {integrity: sha512-QQM/Ti/hQajJwCY+RiWuCZ9sdtI/XQk7nDK5vC8kkdwixezOlDgvDx7+RT+QjK6FcFT4MpsuoBnHIo/O3StRRg==}
     engines: {node: '>= 12.0.0'}
     cpu: [x64]
     os: [freebsd]
 
-  lightningcss-linux-arm-gnueabihf@1.32.0:
-    resolution: {integrity: sha512-x6rnnpRa2GL0zQOkt6rts3YDPzduLpWvwAF6EMhXFVZXD4tPrBkEFqzGowzCsIWsPjqSK+tyNEODUBXeeVHSkw==}
+  lightningcss-linux-arm-gnueabihf@1.33.0:
+    resolution: {integrity: sha512-N7FVBe6iS24MlM6R/4RBTxGhQheZGs7tiQ9U32UtF75NzP5Q7xWPRqLBCKxlRQRk3rY1jCIPLzx7WzOhuUIRLQ==}
     engines: {node: '>= 12.0.0'}
     cpu: [arm]
     os: [linux]
 
-  lightningcss-linux-arm64-gnu@1.32.0:
-    resolution: {integrity: sha512-0nnMyoyOLRJXfbMOilaSRcLH3Jw5z9HDNGfT/gwCPgaDjnx0i8w7vBzFLFR1f6CMLKF8gVbebmkUN3fa/kQJpQ==}
+  lightningcss-linux-arm64-gnu@1.33.0:
+    resolution: {integrity: sha512-j2v/itmy4HlNxlc6voKXYgBqNi0Ng2LShg4z7GufpEgs05P+2suBVyi9I6YHq5uoVFx9ETin3eCEhLVyXGQnKg==}
     engines: {node: '>= 12.0.0'}
     cpu: [arm64]
     os: [linux]
     libc: [glibc]
 
-  lightningcss-linux-arm64-musl@1.32.0:
-    resolution: {integrity: sha512-UpQkoenr4UJEzgVIYpI80lDFvRmPVg6oqboNHfoH4CQIfNA+HOrZ7Mo7KZP02dC6LjghPQJeBsvXhJod/wnIBg==}
+  lightningcss-linux-arm64-musl@1.33.0:
+    resolution: {integrity: sha512-yiO5ROMuYQgXbC60yjZU5CYSFZGKXL0HFATXt9mHJn1+zW55oCtMI9NfcVhYLMFDL7gV7oBPon/EmMMGg2OvtQ==}
     engines: {node: '>= 12.0.0'}
     cpu: [arm64]
     os: [linux]
     libc: [musl]
 
-  lightningcss-linux-x64-gnu@1.32.0:
-    resolution: {integrity: sha512-V7Qr52IhZmdKPVr+Vtw8o+WLsQJYCTd8loIfpDaMRWGUZfBOYEJeyJIkqGIDMZPwPx24pUMfwSxxI8phr/MbOA==}
+  lightningcss-linux-x64-gnu@1.33.0:
+    resolution: {integrity: sha512-ar+Ju7LmcN0Jo4FpL4hpFybwNG9/3A/Br5KW2n2jyODg3MEZXaDYADdemoNS+BDNfMgKvylJLj4S5tyRActuAg==}
     engines: {node: '>= 12.0.0'}
     cpu: [x64]
     os: [linux]
     libc: [glibc]
 
-  lightningcss-linux-x64-musl@1.32.0:
-    resolution: {integrity: sha512-bYcLp+Vb0awsiXg/80uCRezCYHNg1/l3mt0gzHnWV9XP1W5sKa5/TCdGWaR/zBM2PeF/HbsQv/j2URNOiVuxWg==}
+  lightningcss-linux-x64-musl@1.33.0:
+    resolution: {integrity: sha512-RYiYbkokw0trfKqqzfF55lginwEPrD3OJDfTuJzFs1MK6iFnDenaz1fqLLtX4ITG3OktJQXOeTaw1awrBAlZPw==}
     engines: {node: '>= 12.0.0'}
     cpu: [x64]
     os: [linux]
     libc: [musl]
 
-  lightningcss-win32-arm64-msvc@1.32.0:
-    resolution: {integrity: sha512-8SbC8BR40pS6baCM8sbtYDSwEVQd4JlFTOlaD3gWGHfThTcABnNDBda6eTZeqbofalIJhFx0qKzgHJmcPTnGdw==}
+  lightningcss-win32-arm64-msvc@1.33.0:
+    resolution: {integrity: sha512-1K+MPfLSFVpphzpdbfkhlWk6wBrTObBzS2T6db10PNOZgR9GoVsAWzwNyuhUYYbTp23j+4RrncfujZ4uAzXvwA==}
     engines: {node: '>= 12.0.0'}
     cpu: [arm64]
     os: [win32]
 
-  lightningcss-win32-x64-msvc@1.32.0:
-    resolution: {integrity: sha512-Amq9B/SoZYdDi1kFrojnoqPLxYhQ4Wo5XiL8EVJrVsB8ARoC1PWW6VGtT0WKCemjy8aC+louJnjS7U18x3b06Q==}
+  lightningcss-win32-x64-msvc@1.33.0:
+    resolution: {integrity: sha512-OlEICDx/Xl0FqSp4bry8zFnCvGpig3Gl4gCquvYwHuqJKEC1+n9NgDniFvqHGmMv1ZkqDJrDqKKSykTDX+ehuA==}
     engines: {node: '>= 12.0.0'}
     cpu: [x64]
     os: [win32]
 
-  lightningcss@1.32.0:
-    resolution: {integrity: sha512-NXYBzinNrblfraPGyrbPoD19C1h9lfI/1mzgWYvXUTe414Gz/X1FD2XBZSZM7rRTrMA8JL3OtAaGifrIKhQ5yQ==}
+  lightningcss@1.33.0:
+    resolution: {integrity: sha512-WkUDrojuJs0xkgGf2udWxa3yGBRxPtxUkB79i6aCZLRgc7PM8fZe9TosfPDcvEpQZbuFASnHYmRLBLUbmLOIIA==}
     engines: {node: '>= 12.0.0'}
 
   limiter@1.1.5:
@@ -2641,8 +2632,8 @@ packages:
     resolution: {integrity: sha512-RyOSq98kuVfXB1emJ+NjBF0av8Ph3oBuqNy+Z5sFFfLhjYrkBQEB53V8u+U0RNTVwNo20WoPUwNkfKwZfrOqmQ==}
     engines: {node: '>=18'}
 
-  nanoid@3.3.11:
-    resolution: {integrity: sha512-N8SpfPUnUp1bK+PMYW8qSWdl9U+wwNWI4QKxOYDy9JAro3WMX7p2OeVRF9v+347pnakNevPmiHhNmZ2HbFA76w==}
+  nanoid@3.3.19:
+    resolution: {integrity: sha512-Y2tUNy4ouw6tq5oDSKeQYGOyhkUBhNOcGV/02KC+6kd9eDGqdZd++mjMiIDilrBYvjEnCYvVtsuHCuP+okSfug==}
     engines: {node: ^10 || ^12 || ^13.7 || ^14 || >=15.0.1}
     hasBin: true
 
@@ -2798,6 +2789,10 @@ packages:
     resolution: {integrity: sha512-QP88BAKvMam/3NxH6vj2o21R6MjxZUAd6nlwAS/pnGvN9IVLocLHxGYIzFhg6fUQ+5th6P4dv4eW9jX3DSIj7A==}
     engines: {node: '>=12'}
 
+  picomatch@4.0.7:
+    resolution: {integrity: sha512-qcJu88Q2IWqJsDD529JKMdwGm/dvInW4HvQnRwiH9JtihJvzGOscDtHE3x1pBKeUOTysQ8kVmLnJ2kJu7yhcGA==}
+    engines: {node: '>=12'}
+
   pino-abstract-transport@2.0.0:
     resolution: {integrity: sha512-F63x5tizV6WCh4R6RHyi2Ml+M70DNRXt/+HANowMflpgGFMAym/VKm6G7ZOQRjqN7XbGxK1Lg9t6ZrtzOaivMw==}
 
@@ -2815,8 +2810,8 @@ packages:
   postal-mime@2.7.3:
     resolution: {integrity: sha512-MjhXadAJaWgYzevi46+3kLak8y6gbg0ku14O1gO/LNOuay8dO+1PtcSGvAdgDR0DoIsSaiIA8y/Ddw6MnrO0Tw==}
 
-  postcss@8.5.10:
-    resolution: {integrity: sha512-pMMHxBOZKFU6HgAZ4eyGnwXF/EvPGGqUr0MnZ5+99485wwW41kW91A4LOGxSHhgugZmSChL5AlElNdwlNgcnLQ==}
+  postcss@8.5.28:
+    resolution: {integrity: sha512-RRuzqDtt5Y9h3quz5hWhK+TPnsmVs6WwSU6LkJMeY4HstUEDuYTG8UJSdawMRzmzAtV+KEoG8N3Qg2qLy5vM/A==}
     engines: {node: ^10 || ^12 || >=14}
 
   prebuild-install@7.1.3:
@@ -3069,8 +3064,8 @@ packages:
   sonic-boom@4.2.1:
     resolution: {integrity: sha512-w6AxtubXa2wTXAUsZMMWERrsIRAdrK0Sc+FUytWvYAhBJLyuI4llrMIC1DtlNSdI99EI86KZum2MMq3EAZlF9Q==}
 
-  source-map-js@1.2.1:
-    resolution: {integrity: sha512-UXWMKhLOwVKb728IUtQPXxfYU+usdybtUrK/8uGE8CQMvrhOpwvzDBwj0QhSL7MQc7vIsISBG8VQ8+IDQxpfQA==}
+  source-map-js@1.2.2:
+    resolution: {integrity: sha512-KGj/8Y43x35aZVDtt+J4mK1hoLGHULMYfSkODJNQjNDC3oW1PqPoxMwo0pLUsWM/UEGzON/NxeHywEfNXNP3Vw==}
     engines: {node: '>=0.10.0'}
 
   source-map-support@0.5.21:
@@ -3168,6 +3163,10 @@ packages:
 
   tinyglobby@0.2.16:
     resolution: {integrity: sha512-pn99VhoACYR8nFHhxqix+uvsbXineAasWm5ojXoN8xEwK5Kd3/TrhNn1wByuD52UxWRLy8pu+kRMniEi6Eq9Zg==}
+    engines: {node: '>=12.0.0'}
+
+  tinyglobby@0.2.17:
+    resolution: {integrity: sha512-wXR/dYpcqKmfWpEdZjiKJOwCNFndD0DMnrW/cYjVGttEkBfVgcLFHoNrlj47mjOVic9yyNu65alsgF4NQyTa2g==}
     engines: {node: '>=12.0.0'}
 
   tinyrainbow@3.1.0:
@@ -3486,9 +3485,9 @@ snapshots:
 
   '@beeper/chat-adapter-matrix@0.2.0(zod@4.4.3)':
     dependencies:
-      '@chat-adapter/state-memory': 4.29.0(zod@4.4.3)
-      '@chat-adapter/state-redis': 4.38.1(zod@4.4.3)
-      chat: 4.29.0(zod@4.4.3)
+      '@chat-adapter/state-memory': 4.41.1(zod@4.4.3)
+      '@chat-adapter/state-redis': 4.41.1(zod@4.4.3)
+      chat: 4.41.1(zod@4.4.3)
       marked: 15.0.12
       matrix-js-sdk: 41.9.0
       node-html-parser: 7.1.0
@@ -3500,10 +3499,10 @@ snapshots:
       - workflow
       - zod
 
-  '@bitbasti/chat-adapter-webex@0.1.0(chat@4.29.0(zod@4.4.3))(zod@4.4.3)':
+  '@bitbasti/chat-adapter-webex@0.1.0(chat@4.41.1(zod@4.4.3))(zod@4.4.3)':
     dependencies:
-      '@chat-adapter/shared': 4.38.1(zod@4.4.3)
-      chat: 4.29.0(zod@4.4.3)
+      '@chat-adapter/shared': 4.41.1(zod@4.4.3)
+      chat: 4.41.1(zod@4.4.3)
     transitivePeerDependencies:
       - ai
       - supports-color
@@ -3530,11 +3529,11 @@ snapshots:
       hashery: 1.5.1
       keyv: 5.6.0
 
-  '@chat-adapter/discord@4.29.0(zod@4.4.3)':
+  '@chat-adapter/discord@4.41.1(zod@4.4.3)':
     dependencies:
-      '@chat-adapter/shared': 4.29.0(zod@4.4.3)
-      chat: 4.29.0(zod@4.4.3)
-      discord-api-types: 0.37.120
+      '@chat-adapter/shared': 4.41.1(zod@4.4.3)
+      chat: 4.41.1(zod@4.4.3)
+      discord-api-types: 0.38.56
       discord-interactions: 4.4.0
       discord.js: 14.27.0
     transitivePeerDependencies:
@@ -3542,83 +3541,81 @@ snapshots:
       - bufferutil
       - supports-color
       - utf-8-validate
+      - workflow
       - zod
 
-  '@chat-adapter/gchat@4.29.0(zod@4.4.3)':
+  '@chat-adapter/gchat@4.41.1(zod@4.4.3)':
     dependencies:
-      '@chat-adapter/shared': 4.29.0(zod@4.4.3)
+      '@chat-adapter/shared': 4.41.1(zod@4.4.3)
       '@googleapis/chat': 44.7.0
       '@googleapis/workspaceevents': 9.2.0
-      chat: 4.29.0(zod@4.4.3)
-    transitivePeerDependencies:
-      - ai
-      - supports-color
-      - zod
-
-  '@chat-adapter/github@4.29.0(zod@4.4.3)':
-    dependencies:
-      '@chat-adapter/shared': 4.29.0(zod@4.4.3)
-      '@octokit/auth-app': 8.3.0
-      '@octokit/rest': 22.0.1
-      chat: 4.29.0(zod@4.4.3)
-    transitivePeerDependencies:
-      - ai
-      - supports-color
-      - zod
-
-  '@chat-adapter/linear@4.29.0(graphql@17.0.2)(zod@4.4.3)':
-    dependencies:
-      '@chat-adapter/shared': 4.29.0(zod@4.4.3)
-      '@linear/sdk': 76.0.0(graphql@17.0.2)
-      chat: 4.29.0(zod@4.4.3)
-    transitivePeerDependencies:
-      - ai
-      - graphql
-      - supports-color
-      - zod
-
-  '@chat-adapter/shared@4.29.0(zod@4.4.3)':
-    dependencies:
-      chat: 4.29.0(zod@4.4.3)
-    transitivePeerDependencies:
-      - ai
-      - supports-color
-      - zod
-
-  '@chat-adapter/shared@4.38.1(zod@4.4.3)':
-    dependencies:
-      chat: 4.38.1(zod@4.4.3)
+      chat: 4.41.1(zod@4.4.3)
     transitivePeerDependencies:
       - ai
       - supports-color
       - workflow
       - zod
 
-  '@chat-adapter/slack@4.29.0(zod@4.4.3)':
+  '@chat-adapter/github@4.41.1(zod@4.4.3)':
     dependencies:
-      '@chat-adapter/shared': 4.29.0(zod@4.4.3)
+      '@chat-adapter/shared': 4.41.1(zod@4.4.3)
+      '@octokit/auth-app': 8.3.0
+      '@octokit/rest': 22.0.1
+      chat: 4.41.1(zod@4.4.3)
+    transitivePeerDependencies:
+      - ai
+      - supports-color
+      - workflow
+      - zod
+
+  '@chat-adapter/linear@4.41.1(graphql@17.0.2)(zod@4.4.3)':
+    dependencies:
+      '@chat-adapter/shared': 4.41.1(zod@4.4.3)
+      '@linear/sdk': 76.0.0(graphql@17.0.2)
+      chat: 4.41.1(zod@4.4.3)
+    transitivePeerDependencies:
+      - ai
+      - graphql
+      - supports-color
+      - workflow
+      - zod
+
+  '@chat-adapter/shared@4.41.1(zod@4.4.3)':
+    dependencies:
+      chat: 4.41.1(zod@4.4.3)
+    transitivePeerDependencies:
+      - ai
+      - supports-color
+      - workflow
+      - zod
+
+  '@chat-adapter/slack@4.41.1(zod@4.4.3)':
+    dependencies:
+      '@chat-adapter/shared': 4.41.1(zod@4.4.3)
       '@slack/socket-mode': 2.0.7
       '@slack/web-api': 7.19.0
-      chat: 4.29.0(zod@4.4.3)
+      chat: 4.41.1(zod@4.4.3)
     transitivePeerDependencies:
       - ai
       - bufferutil
       - debug
       - supports-color
       - utf-8-validate
+      - workflow
       - zod
 
-  '@chat-adapter/state-memory@4.29.0(zod@4.4.3)':
+  '@chat-adapter/state-memory@4.41.1(zod@4.4.3)':
     dependencies:
-      chat: 4.29.0(zod@4.4.3)
+      chat: 4.41.1(zod@4.4.3)
     transitivePeerDependencies:
       - ai
       - supports-color
+      - workflow
       - zod
 
-  '@chat-adapter/state-redis@4.38.1(zod@4.4.3)':
+  '@chat-adapter/state-redis@4.41.1(zod@4.4.3)':
     dependencies:
-      chat: 4.38.1(zod@4.4.3)
+      chat: 4.41.1(zod@4.4.3)
       redis: 5.12.1
     transitivePeerDependencies:
       - '@node-rs/xxhash'
@@ -3628,36 +3625,39 @@ snapshots:
       - workflow
       - zod
 
-  '@chat-adapter/teams@4.29.0(zod@4.4.3)':
+  '@chat-adapter/teams@4.41.1(zod@4.4.3)':
     dependencies:
-      '@chat-adapter/shared': 4.29.0(zod@4.4.3)
+      '@chat-adapter/shared': 4.41.1(zod@4.4.3)
       '@microsoft/teams.api': 2.0.15
       '@microsoft/teams.apps': 2.0.15
       '@microsoft/teams.cards': 2.0.15
       '@microsoft/teams.graph-endpoints': 2.0.15
-      chat: 4.29.0(zod@4.4.3)
+      chat: 4.41.1(zod@4.4.3)
     transitivePeerDependencies:
       - ai
       - debug
       - supports-color
+      - workflow
       - zod
 
-  '@chat-adapter/telegram@4.29.0(zod@4.4.3)':
+  '@chat-adapter/telegram@4.41.1(zod@4.4.3)':
     dependencies:
-      '@chat-adapter/shared': 4.29.0(zod@4.4.3)
-      chat: 4.29.0(zod@4.4.3)
+      '@chat-adapter/shared': 4.41.1(zod@4.4.3)
+      chat: 4.41.1(zod@4.4.3)
     transitivePeerDependencies:
       - ai
       - supports-color
+      - workflow
       - zod
 
-  '@chat-adapter/whatsapp@4.29.0(zod@4.4.3)':
+  '@chat-adapter/whatsapp@4.41.1(zod@4.4.3)':
     dependencies:
-      '@chat-adapter/shared': 4.29.0(zod@4.4.3)
-      chat: 4.29.0(zod@4.4.3)
+      '@chat-adapter/shared': 4.41.1(zod@4.4.3)
+      chat: 4.41.1(zod@4.4.3)
     transitivePeerDependencies:
       - ai
       - supports-color
+      - workflow
       - zod
 
   '@clack/core@1.2.0':
@@ -3677,7 +3677,7 @@ snapshots:
       '@discordjs/formatters': 0.6.2
       '@discordjs/util': 1.2.0
       '@sapphire/shapeshift': 4.0.0
-      discord-api-types: 0.38.53
+      discord-api-types: 0.38.56
       fast-deep-equal: 3.1.3
       ts-mixer: 6.0.4
       tslib: 2.8.1
@@ -3688,7 +3688,7 @@ snapshots:
 
   '@discordjs/formatters@0.6.2':
     dependencies:
-      discord-api-types: 0.38.53
+      discord-api-types: 0.38.56
 
   '@discordjs/rest@2.6.3':
     dependencies:
@@ -3697,14 +3697,14 @@ snapshots:
       '@sapphire/async-queue': 1.5.5
       '@sapphire/snowflake': 3.5.5
       '@vladfrangu/async_event_emitter': 2.4.7
-      discord-api-types: 0.38.53
+      discord-api-types: 0.38.56
       magic-bytes.js: 1.13.1
       tslib: 2.8.1
       undici: 6.28.0
 
   '@discordjs/util@1.2.0':
     dependencies:
-      discord-api-types: 0.38.53
+      discord-api-types: 0.38.56
 
   '@discordjs/ws@1.2.3':
     dependencies:
@@ -3714,7 +3714,7 @@ snapshots:
       '@sapphire/async-queue': 1.5.5
       '@types/ws': 8.18.1
       '@vladfrangu/async_event_emitter': 2.4.7
-      discord-api-types: 0.38.53
+      discord-api-types: 0.38.56
       tslib: 2.8.1
       ws: 8.21.3
     transitivePeerDependencies:
@@ -4001,7 +4001,7 @@ snapshots:
 
   '@jridgewell/gen-mapping@0.3.13':
     dependencies:
-      '@jridgewell/sourcemap-codec': 1.5.5
+      '@jridgewell/sourcemap-codec': 1.6.0
       '@jridgewell/trace-mapping': 0.3.31
     optional: true
 
@@ -4016,10 +4016,13 @@ snapshots:
 
   '@jridgewell/sourcemap-codec@1.5.5': {}
 
+  '@jridgewell/sourcemap-codec@1.6.0':
+    optional: true
+
   '@jridgewell/trace-mapping@0.3.31':
     dependencies:
       '@jridgewell/resolve-uri': 3.1.2
-      '@jridgewell/sourcemap-codec': 1.5.5
+      '@jridgewell/sourcemap-codec': 1.6.0
     optional: true
 
   '@keyv/bigmap@1.3.1(keyv@5.6.0)':
@@ -4083,11 +4086,11 @@ snapshots:
       - debug
       - supports-color
 
-  '@napi-rs/wasm-runtime@1.1.4(@emnapi/core@1.9.2)(@emnapi/runtime@1.9.2)':
+  '@napi-rs/wasm-runtime@1.2.4(@emnapi/core@1.9.2)(@emnapi/runtime@1.9.2)':
     dependencies:
       '@emnapi/core': 1.9.2
       '@emnapi/runtime': 1.9.2
-      '@tybys/wasm-util': 0.10.1
+      '@tybys/wasm-util': 0.10.4
     optional: true
 
   '@octokit/auth-app@8.3.0':
@@ -4397,12 +4400,12 @@ snapshots:
     dependencies:
       '@redis/client': 5.12.1
 
-  '@resend/chat-sdk-adapter@0.1.1(@chat-adapter/shared@4.38.1(zod@4.4.3))(chat@4.29.0(zod@4.4.3))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)':
+  '@resend/chat-sdk-adapter@0.1.1(@chat-adapter/shared@4.41.1(zod@4.4.3))(chat@4.41.1(zod@4.4.3))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)':
     dependencies:
-      '@chat-adapter/shared': 4.38.1(zod@4.4.3)
+      '@chat-adapter/shared': 4.41.1(zod@4.4.3)
       '@react-email/components': 1.0.8(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       '@react-email/render': 2.0.4(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
-      chat: 4.29.0(zod@4.4.3)
+      chat: 4.41.1(zod@4.4.3)
       hast-util-to-html: 9.0.5
       mdast-util-to-hast: 13.2.1
       resend: 6.9.2(@react-email/render@2.0.4(react-dom@19.2.8(react@19.2.8))(react@19.2.8))
@@ -4450,7 +4453,7 @@ snapshots:
     dependencies:
       '@emnapi/core': 1.9.2
       '@emnapi/runtime': 1.9.2
-      '@napi-rs/wasm-runtime': 1.1.4(@emnapi/core@1.9.2)(@emnapi/runtime@1.9.2)
+      '@napi-rs/wasm-runtime': 1.2.4(@emnapi/core@1.9.2)(@emnapi/runtime@1.9.2)
     optional: true
 
   '@rolldown/binding-win32-arm64-msvc@1.0.0-rc.15':
@@ -4528,7 +4531,7 @@ snapshots:
 
   '@tokenizer/token@0.3.0': {}
 
-  '@tybys/wasm-util@0.10.1':
+  '@tybys/wasm-util@0.10.4':
     dependencies:
       tslib: 2.8.1
     optional: true
@@ -4752,6 +4755,9 @@ snapshots:
 
   acorn@8.16.0: {}
 
+  acorn@8.18.0:
+    optional: true
+
   agent-base@6.0.2:
     dependencies:
       debug: 4.4.3
@@ -4926,12 +4932,12 @@ snapshots:
 
   character-entities@2.0.2: {}
 
-  chat-adapter-imessage@0.1.1(chat@4.29.0(zod@4.4.3))(typescript@5.9.3)(zod@4.4.3):
+  chat-adapter-imessage@0.1.1(chat@4.41.1(zod@4.4.3))(typescript@5.9.3)(zod@4.4.3):
     dependencies:
-      '@chat-adapter/shared': 4.38.1(zod@4.4.3)
+      '@chat-adapter/shared': 4.41.1(zod@4.4.3)
       '@photon-ai/advanced-imessage-kit': 1.16.0(typescript@5.9.3)
       '@photon-ai/imessage-kit': 2.1.2
-      chat: 4.29.0(zod@4.4.3)
+      chat: 4.41.1(zod@4.4.3)
     transitivePeerDependencies:
       - ai
       - bufferutil
@@ -4942,21 +4948,7 @@ snapshots:
       - workflow
       - zod
 
-  chat@4.29.0(zod@4.4.3):
-    dependencies:
-      '@workflow/serde': 4.1.0-beta.2
-      mdast-util-to-string: 4.0.0
-      remark-gfm: 4.0.1
-      remark-parse: 11.0.0
-      remark-stringify: 11.0.0
-      remend: 1.3.0
-      unified: 11.0.5
-    optionalDependencies:
-      zod: 4.4.3
-    transitivePeerDependencies:
-      - supports-color
-
-  chat@4.38.1(zod@4.4.3):
+  chat@4.41.1(zod@4.4.3):
     dependencies:
       '@workflow/serde': 4.1.0-beta.2
       mdast-util-to-string: 4.0.0
@@ -5074,9 +5066,7 @@ snapshots:
 
   dijkstrajs@1.0.3: {}
 
-  discord-api-types@0.37.120: {}
-
-  discord-api-types@0.38.53: {}
+  discord-api-types@0.38.56: {}
 
   discord-interactions@4.4.0: {}
 
@@ -5089,7 +5079,7 @@ snapshots:
       '@discordjs/util': 1.2.0
       '@discordjs/ws': 1.2.3
       '@sapphire/snowflake': 3.5.5
-      discord-api-types: 0.38.53
+      discord-api-types: 0.38.56
       fast-deep-equal: 3.1.3
       lodash.snakecase: 4.1.1
       magic-bytes.js: 1.13.1
@@ -5355,6 +5345,10 @@ snapshots:
   fdir@6.5.0(picomatch@4.0.4):
     optionalDependencies:
       picomatch: 4.0.4
+
+  fdir@6.5.0(picomatch@4.0.7):
+    optionalDependencies:
+      picomatch: 4.0.7
 
   fetch-blob@3.2.0:
     dependencies:
@@ -5736,54 +5730,54 @@ snapshots:
       curve25519-js: 0.0.4
       protobufjs: 7.6.5
 
-  lightningcss-android-arm64@1.32.0:
+  lightningcss-android-arm64@1.33.0:
     optional: true
 
-  lightningcss-darwin-arm64@1.32.0:
+  lightningcss-darwin-arm64@1.33.0:
     optional: true
 
-  lightningcss-darwin-x64@1.32.0:
+  lightningcss-darwin-x64@1.33.0:
     optional: true
 
-  lightningcss-freebsd-x64@1.32.0:
+  lightningcss-freebsd-x64@1.33.0:
     optional: true
 
-  lightningcss-linux-arm-gnueabihf@1.32.0:
+  lightningcss-linux-arm-gnueabihf@1.33.0:
     optional: true
 
-  lightningcss-linux-arm64-gnu@1.32.0:
+  lightningcss-linux-arm64-gnu@1.33.0:
     optional: true
 
-  lightningcss-linux-arm64-musl@1.32.0:
+  lightningcss-linux-arm64-musl@1.33.0:
     optional: true
 
-  lightningcss-linux-x64-gnu@1.32.0:
+  lightningcss-linux-x64-gnu@1.33.0:
     optional: true
 
-  lightningcss-linux-x64-musl@1.32.0:
+  lightningcss-linux-x64-musl@1.33.0:
     optional: true
 
-  lightningcss-win32-arm64-msvc@1.32.0:
+  lightningcss-win32-arm64-msvc@1.33.0:
     optional: true
 
-  lightningcss-win32-x64-msvc@1.32.0:
+  lightningcss-win32-x64-msvc@1.33.0:
     optional: true
 
-  lightningcss@1.32.0:
+  lightningcss@1.33.0:
     dependencies:
       detect-libc: 2.1.2
     optionalDependencies:
-      lightningcss-android-arm64: 1.32.0
-      lightningcss-darwin-arm64: 1.32.0
-      lightningcss-darwin-x64: 1.32.0
-      lightningcss-freebsd-x64: 1.32.0
-      lightningcss-linux-arm-gnueabihf: 1.32.0
-      lightningcss-linux-arm64-gnu: 1.32.0
-      lightningcss-linux-arm64-musl: 1.32.0
-      lightningcss-linux-x64-gnu: 1.32.0
-      lightningcss-linux-x64-musl: 1.32.0
-      lightningcss-win32-arm64-msvc: 1.32.0
-      lightningcss-win32-x64-msvc: 1.32.0
+      lightningcss-android-arm64: 1.33.0
+      lightningcss-darwin-arm64: 1.33.0
+      lightningcss-darwin-x64: 1.33.0
+      lightningcss-freebsd-x64: 1.33.0
+      lightningcss-linux-arm-gnueabihf: 1.33.0
+      lightningcss-linux-arm64-gnu: 1.33.0
+      lightningcss-linux-arm64-musl: 1.33.0
+      lightningcss-linux-x64-gnu: 1.33.0
+      lightningcss-linux-x64-musl: 1.33.0
+      lightningcss-win32-arm64-msvc: 1.33.0
+      lightningcss-win32-x64-msvc: 1.33.0
 
   limiter@1.1.5: {}
 
@@ -6248,7 +6242,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  nanoid@3.3.11: {}
+  nanoid@3.3.19: {}
 
   napi-build-utils@2.0.0: {}
 
@@ -6387,6 +6381,8 @@ snapshots:
 
   picomatch@4.0.4: {}
 
+  picomatch@4.0.7: {}
+
   pino-abstract-transport@2.0.0:
     dependencies:
       split2: 4.2.0
@@ -6411,11 +6407,11 @@ snapshots:
 
   postal-mime@2.7.3: {}
 
-  postcss@8.5.10:
+  postcss@8.5.28:
     dependencies:
-      nanoid: 3.3.11
+      nanoid: 3.3.19
       picocolors: 1.1.1
-      source-map-js: 1.2.1
+      source-map-js: 1.2.2
 
   prebuild-install@7.1.3:
     dependencies:
@@ -6762,7 +6758,7 @@ snapshots:
     dependencies:
       atomic-sleep: 1.0.0
 
-  source-map-js@1.2.1: {}
+  source-map-js@1.2.2: {}
 
   source-map-support@0.5.21:
     dependencies:
@@ -6854,7 +6850,7 @@ snapshots:
   terser@5.50.0:
     dependencies:
       '@jridgewell/source-map': 0.3.11
-      acorn: 8.16.0
+      acorn: 8.18.0
       commander: 2.20.3
       source-map-support: 0.5.21
     optional: true
@@ -6871,6 +6867,11 @@ snapshots:
     dependencies:
       fdir: 6.5.0(picomatch@4.0.4)
       picomatch: 4.0.4
+
+  tinyglobby@0.2.17:
+    dependencies:
+      fdir: 6.5.0(picomatch@4.0.7)
+      picomatch: 4.0.7
 
   tinyrainbow@3.1.0: {}
 
@@ -7003,11 +7004,11 @@ snapshots:
 
   vite@8.0.8(@types/node@22.19.17)(esbuild@0.27.7)(terser@5.50.0)(tsx@4.21.0)(yaml@2.9.0):
     dependencies:
-      lightningcss: 1.32.0
-      picomatch: 4.0.4
-      postcss: 8.5.10
+      lightningcss: 1.33.0
+      picomatch: 4.0.7
+      postcss: 8.5.28
       rolldown: 1.0.0-rc.15
-      tinyglobby: 0.2.16
+      tinyglobby: 0.2.17
     optionalDependencies:
       '@types/node': 22.19.17
       esbuild: 0.27.7

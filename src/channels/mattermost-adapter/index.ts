@@ -1,7 +1,7 @@
 /**
  * In-tree Chat SDK `Adapter` for Mattermost.
  *
- * Built against `chat@4.29.0` (pinned exactly). WebSocket inbound with
+ * Built against `chat@4.41.1` (pinned exactly). WebSocket inbound with
  * liveness pings and reliable-websocket resume, REST outbound with timeouts
  * and 429 handling, plain-text/markdown round trip with emoji placeholders
  * resolved, interactive cards (buttons, selects, fields, images, plus an

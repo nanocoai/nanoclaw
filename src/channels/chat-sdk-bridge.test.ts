@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Adapter, AdapterPostableMessage, RawMessage } from 'chat';
 
-import { createChatSdkBridge, splitForLimit } from './chat-sdk-bridge.js';
+import { attachmentBytesToBase64, createChatSdkBridge, splitForLimit } from './chat-sdk-bridge.js';
 
 vi.mock('../webhook-server.js', () => ({
   registerWebhookAdapter: vi.fn(),
@@ -51,6 +51,27 @@ describe('splitForLimit', () => {
     expect(chunks.length).toBe(Math.ceil(100 / 30));
     for (const c of chunks) expect(c.length).toBeLessThanOrEqual(30);
     expect(chunks.join('')).toBe(text);
+  });
+});
+
+describe('attachmentBytesToBase64', () => {
+  const bytes = Buffer.from('telegram attachment');
+  const expected = bytes.toString('base64');
+
+  it('encodes a Buffer', () => {
+    expect(attachmentBytesToBase64(Buffer.from(bytes))).toBe(expected);
+  });
+
+  it('encodes an ArrayBuffer (Telegram fetchData since 4.39)', () => {
+    const ab = new ArrayBuffer(bytes.length);
+    new Uint8Array(ab).set(bytes);
+    expect(attachmentBytesToBase64(ab)).toBe(expected);
+  });
+
+  it('encodes only the viewed range of a Uint8Array', () => {
+    const backing = new Uint8Array(bytes.length + 4);
+    backing.set(bytes, 2);
+    expect(attachmentBytesToBase64(backing.subarray(2, 2 + bytes.length))).toBe(expected);
   });
 });
 
