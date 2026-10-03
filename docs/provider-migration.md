@@ -13,6 +13,26 @@ to Codex and back. The switch runs from the host.
    legacy `memory/memories/imported-agent-memory.md`, run `/migrate-memory`
    first. This is a one-time upgrade migration, not part of a provider switch.
 
+GitHub Copilot authenticates through the credential gateway with an operator's
+device login. The token never enters the agent container: the provider sends a
+non-secret placeholder and the gateway swaps the `Authorization` header on the
+Copilot hosts. After installing `/add-copilot`, connect it once on the host
+(OneCLI gateway, macOS keychain):
+
+```bash
+pnpm exec tsx scripts/copilot-login.ts [--login <github-login>] [--relogin]
+```
+
+The script runs `copilot login` when no token is stored, asks GitHub which
+Copilot API endpoint the account is licensed for (individual, business, or
+enterprise), and stores two scoped gateway secrets: `api.github.com` limited to
+`/copilot_internal/*`, because the token can carry repository scopes, and the
+account's Copilot API host. It pins `COPILOT_API_URL` in `.env`. For business
+and enterprise accounts it also adds a gateway rule that blocks
+`api.individual.githubcopilot.com`. Re-run it after a new device login.
+`COPILOT_MODEL` optionally overrides the model; otherwise the provider requests
+`auto`, which picks a model the subscription allows.
+
 ## Switching
 
 ```bash
@@ -26,13 +46,13 @@ pinned.
 
 ## What carries over
 
-| State | How |
-|-------|-----|
-| Group identity, wiring, members, roles, destinations | Provider-neutral central DB |
-| Container config, skills, MCP servers, packages, mounts, CLI scope | Provider-neutral config |
-| Standing role and persona | `instructions.prepend.md`, composed into each provider's native project document |
-| Durable memory | Shared `memory/` tree; the provider hook loads its index and definition |
-| Workspace files and conversation archives | Same group workspace for every provider |
+| State                                                              | How                                                                              |
+| ------------------------------------------------------------------ | -------------------------------------------------------------------------------- |
+| Group identity, wiring, members, roles, destinations               | Provider-neutral central DB                                                      |
+| Container config, skills, MCP servers, packages, mounts, CLI scope | Provider-neutral config                                                          |
+| Standing role and persona                                          | `instructions.prepend.md`, composed into each provider's native project document |
+| Durable memory                                                     | Shared `memory/` tree; the provider hook loads its index and definition          |
+| Workspace files and conversation archives                          | Same group workspace for every provider                                          |
 
 The memory hook runs when a context window is created: `startup`, `clear`, and
 `compact`. It does not run on `resume`, because the resumed conversation already
@@ -50,7 +70,9 @@ filesystem search (`rg`, `find`, and relative Markdown links).
   Claude SDK session, a Codex thread). The target provider starts a fresh
   context; the old continuation remains available if you switch back.
 - **Provider state directories.** `.claude-shared/` and `.codex-shared/` remain
-  separate and idle while their provider is not selected.
+  separate and idle while their provider is not selected. Copilot uses its own
+  `.copilot-shared/` compatibility skill directory, not Claude's session or
+  credential state.
 - **Provider-specific model settings.** Confirm the selected model and effort
   are valid for the target provider.
 

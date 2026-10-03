@@ -31,7 +31,7 @@ describe('provider skill descriptors', () => {
       offered: true,
       skillDir: path.join('.claude', 'skills', 'add-codex'),
     });
-    expect(listInstallableProviderDescriptors().map((entry) => entry.value)).toEqual(['codex', 'opencode']);
+    expect(listInstallableProviderDescriptors().map((entry) => entry.value)).toEqual(['codex', 'copilot', 'opencode']);
     expect(providerImagePolicy('CODEX')).toBe('local-required');
     expect(providerImagePolicy('claude')).toBe('hardened-compatible');
     expect(providerImagePolicy('unknown-provider')).toBe('local-required');
@@ -46,6 +46,18 @@ describe('provider skill descriptors', () => {
     const addOpencode = fs.readFileSync(path.join('.claude', 'skills', 'add-opencode', 'SKILL.md'), 'utf-8');
     expect(addOpencode).toMatch(/^```nc:append to:setup\/providers\/index\.ts/m);
     expect(addOpencode).toContain('payload/setup/providers/opencode.ts -> setup/providers/opencode.ts');
+  });
+
+  it('offers GitHub Copilot through its skill and installs its setup adapter through the barrel', () => {
+    expect(getInstallableProviderDescriptor('copilot')).toMatchObject({
+      value: 'copilot',
+      label: 'GitHub Copilot',
+      offered: true,
+      image: 'local-required',
+    });
+    const addCopilot = fs.readFileSync(path.join('.claude', 'skills', 'add-copilot', 'SKILL.md'), 'utf-8');
+    expect(addCopilot).toMatch(/^```nc:append to:setup\/providers\/index\.ts/m);
+    expect(addCopilot).toContain('payload/setup/providers/copilot.ts -> setup/providers/copilot.ts');
   });
 
   it('never surfaces a descriptor with offered false in the installable list', () => {
