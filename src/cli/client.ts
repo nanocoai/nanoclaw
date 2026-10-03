@@ -24,6 +24,7 @@ import { SocketTransport } from './socket-client.js';
 import { readStdinJsonArgs, StdinJsonInputError } from './stdin-json.js';
 import type { Transport } from './transport.js';
 import { formatTransportError } from './transport-errors.js';
+import { collectHealthReport, formatHealthReportHuman } from '../health-check.js';
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
@@ -38,6 +39,17 @@ async function main(): Promise<void> {
     process.stderr.write('ncl: missing command\n');
     printUsage();
     process.exit(2);
+  }
+
+  // `health` (#2504) reads local state directly and never goes through the
+  // socket transport below — unlike every other command, it's meant to
+  // still say something useful when the host process that would otherwise
+  // serve the socket is down. See src/health-check.ts.
+  if (command === 'health') {
+    const report = await collectHealthReport();
+    const output = json ? JSON.stringify(report, null, 2) : formatHealthReportHuman(report);
+    process.stdout.write(output + '\n', () => process.exit(0));
+    return;
   }
 
   let requestArgs = args;
@@ -90,6 +102,12 @@ function printUsage(): void {
       '  --stdin-json  Read one bounded JSON object from stdin and merge it with argv flags.',
       '',
       'Run `ncl help` to list available resources and commands.',
+      '',
+      'ncl health',
+      '  Local, read-only operational health check — host liveness, sessions,',
+      '  recent errors, approvals nearing expiry. Reads on-disk state directly',
+      '  and works even when the host process is down. Add --json for',
+      '  machine-readable output.',
       '',
     ].join('\n'),
   );
