@@ -379,7 +379,17 @@ async function deliverMessage(
     return;
   }
 
-  const content = JSON.parse(msg.content);
+  let content: any;
+  try {
+    content = JSON.parse(msg.content);
+  } catch (err) {
+    log.error('Malformed outbound message content, not valid JSON — delivering best-effort as plain text', {
+      id: msg.id,
+      sessionId: session.id,
+      err,
+    });
+    content = { text: msg.content };
+  }
 
   // System actions — handle internally (cli_request, etc.)
   if (msg.kind === 'system') {
