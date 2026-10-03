@@ -12,16 +12,12 @@ name: Label PR
 # shipped code cannot drift. Edit the function only between the markers.
 on:
   pull_request_target:
-    # `synchronize` is for the template-compliance status only (a commit
-    # status is per-SHA, so every push needs a fresh one). Label mutations
-    # stay gated off synchronize in the driver below, preserving the
-    # labels-only-on-body-events behavior.
+    # Pushes refresh both the primary area and the per-commit status.
     types: [opened, edited, reopened, ready_for_review, synchronize]
 
-# Serialize runs per PR. Two events landing together (a push and a body edit)
-# would otherwise race on the check-then-act that posts the single fix comment,
-# and both runs could see no comment and post one. Queue rather than cancel:
-# a cancelled run leaves the commit status for its SHA unwritten.
+# One label writer per PR. Serialize edits and pushes, then read fresh API
+# state rather than the triggering event's label snapshot. Targeted mutations
+# preserve unrelated labels even if a maintainer adds one during this run.
 concurrency:
   group: label-pr-${{ github.event.pull_request.number }}
   cancel-in-progress: false
@@ -31,44 +27,17 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
-      issues: write # createLabel (core-team, until Decision 4) + list/create the single compliance comment
+      contents: read # area rules from the trusted base commit, without checkout
+      issues: write # targeted label changes and the single compliance comment
       statuses: write # report-only template-compliance commit status
     steps:
       - uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
         with:
           script: |
             // NANOCLAW-LABEL-LOGIC-START
-            // Pure decision function. No API calls, no environment reads — the
-            // driver below feeds it payload fields and applies the result.
-            //
-            // Every label string emitted here must byte-match a label that
-            // already exists in the repo (`gh label list`): addLabels
-            // auto-creates unknown names with a random color and no
-            // description, so a typo silently invents a label. Never push a
-            // name that is not in the fixed vocabularies below.
-            //
-            // Two body contracts, selected by marker:
-            //   v2 (the exact HTML comment `<!-- nanoclaw-pr-template:v2 -->`):
-            //     stable-token parsing on flush-left checkbox lines, with
-            //     fenced blocks stripped first. Exactly one checked kind box
-            //     is an explicit verdict: it is added and the managed set is
-            //     reconciled — stale kinds AND their legacy `PR: *` twins are
-            //     removed, keeping the two vocabularies in lockstep. With
-            //     zero or several boxes, the conventional-commit title prefix
-            //     is an ADVISORY fallback: it only adds a kind when the PR
-            //     carries no managed kind at all, and it never removes
-            //     anything — so a maintainer's triage classification always
-            //     survives later edited/reopened/ready_for_review events.
-            //     Still ambiguous → apply nothing; the PR lands in triage.
-            //   v1 (`contributing-guide: v1`, or no marker): the pre-v2
-            //     behavior, byte-frozen — visible-substring checkbox matching,
-            //     add-only, emitting both the legacy `PR: *` vocabulary and
-            //     its `kind/*` equivalent.
-            // Both paths keep emitting `PR: *`; v2 earns `follows-guidelines`
-            // only from an explicit checkbox verdict (an unfilled template
-            // earns nothing). All of `PR: *`, `follows-guidelines`, and
-            // `core-team` stay until Decision 4 retires them.
-
+            // Pure decisions, exercised directly by the workflow tests.
+            // Emit only modern classifications. Legacy automation labels are
+            // retired on the next normal PR event, not in a repository sweep.
             // Drop fenced code blocks (``` and ~~~, any info string). A line
             // scanner rather than a regex so an UNTERMINATED fence hides
             // everything after it instead of nothing, and so ``` cannot close
@@ -101,99 +70,92 @@ jobs:
             // One declaration, so the two can never drift apart.
             const MANAGED_KINDS = ['kind/bug', 'kind/feature', 'kind/documentation', 'kind/cleanup', 'kind/hardening'];
 
-            function computeLabels({ body, title, author, currentLabels }) {
+            function selectPrimaryArea(files, areaRules) {
+              const rules = Object.entries(areaRules);
+              for (const [area, patterns] of rules) {
+                if (!/^area\/[a-z][a-z-]*$/.test(area) || !Array.isArray(patterns) || !patterns.length) {
+                  throw new Error('Invalid primary-area configuration');
+                }
+                for (const pattern of patterns) {
+                  if (typeof pattern !== 'string' || !pattern || pattern.startsWith('/') ||
+                      pattern.split('/').includes('..') || /[\*?\[\]{}\\]/.test(pattern.replace(/\/\*\*$|\*$/, ''))) {
+                    throw new Error(`Unsupported primary-area path pattern: ${pattern}`);
+                  }
+                }
+              }
+              const votes = new Map();
+              for (const file of files) {
+                // Renames count once, under their destination path.
+                const filename = typeof file === 'string' ? file : file.filename;
+                let best;
+                for (const [area, patterns] of rules) {
+                  for (const pattern of patterns) {
+                    const directory = pattern.endsWith('/**');
+                    const prefix = pattern.endsWith('*');
+                    const literal = directory ? pattern.slice(0, -2) : prefix ? pattern.slice(0, -1) : pattern;
+                    const matches = directory ? filename.startsWith(literal)
+                      : prefix ? filename.startsWith(literal) && !filename.slice(literal.length).includes('/')
+                      : filename === literal;
+                    if (matches && (!best || literal.length > best.specificity ||
+                        (literal.length === best.specificity && area < best.area))) {
+                      best = { area, specificity: literal.length };
+                    }
+                  }
+                }
+                if (best) {
+                  const vote = votes.get(best.area) || { area: best.area, count: 0, specificity: 0 };
+                  vote.count++;
+                  vote.specificity = Math.max(vote.specificity, best.specificity);
+                  votes.set(best.area, vote);
+                }
+              }
+              // One vote per file after choosing its most-specific owner. On a count
+              // tie, prefer the more-specific match, then the lexical area name.
+              return [...votes.values()].sort((a, b) => b.count - a.count || b.specificity - a.specificity ||
+                (a.area < b.area ? -1 : a.area > b.area ? 1 : 0))[0]?.area;
+            }
+
+            function computeLabels({ body, title, currentLabels = [], files = [], areaRules = {} }) {
               body = body || '';
               title = title || '';
-              const current = new Set(currentLabels || []);
-              const add = [];
-              const remove = [];
-
-              // Legacy vocabulary kept in lockstep until Decision 4. Hardening
-              // has no PR:* equivalent, so none is emitted rather than
-              // guessing one.
-              const KIND_TO_LEGACY = {
-                'kind/bug': 'PR: Fix',
-                'kind/feature': 'PR: Feature',
-                'kind/documentation': 'PR: Docs',
-                'kind/cleanup': 'PR: Refactor',
-                'kind/hardening': null,
-              };
-              const TITLE_PREFIX_TO_KIND = {
-                fix: 'kind/bug',
-                feat: 'kind/feature',
-                docs: 'kind/documentation',
-                refactor: 'kind/cleanup',
-                chore: 'kind/cleanup',
-                ci: 'kind/cleanup',
-                test: 'kind/cleanup',
-                build: 'kind/cleanup',
-                style: 'kind/cleanup',
-                perf: 'kind/cleanup',
-              };
-
-              // Lowercase GitHub logins; keep in sync with the core team roster.
-              const CORE_TEAM = ['gavrielc', 'koshkoshinsk', 'glifocat', 'gabi-simons', 'omri-maya', 'amit-shafnir', 'moshe-nanoco', 'zvi-fried'];
-              const coreTeam = CORE_TEAM.includes((author || '').toLowerCase());
-              if (coreTeam) add.push('core-team');
-
+              const current = new Set(currentLabels);
+              const scanned = stripFences(body);
+              const retired = ['PR: Fix', 'PR: Feature', 'PR: Docs', 'PR: Refactor', 'PR: Skill',
+                'core-team', 'follows-guidelines'];
+              const titleKinds = { fix: 'kind/bug', feat: 'kind/feature', docs: 'kind/documentation',
+                refactor: 'kind/cleanup', chore: 'kind/cleanup', ci: 'kind/cleanup', test: 'kind/cleanup',
+                build: 'kind/cleanup', style: 'kind/cleanup', perf: 'kind/cleanup' };
+              let kind;
+              let skill = current.has('delivery/skill');
               if (body.includes('<!-- nanoclaw-pr-template:v2 -->')) {
-                // ── v2: stable-token parsing ──
-                const scanned = stripFences(body);
-                const checked = MANAGED_KINDS.filter((kind) =>
-                  new RegExp('^-\\s*\\[[xX]\\]\\s*`' + kind.replace('/', '\\/') + '`', 'm').test(scanned),
-                );
-
-                if (checked.length === 1) {
-                  // Explicit checkbox verdict: add, and reconcile BOTH
-                  // vocabularies so an edited selection swaps cleanly instead
-                  // of accumulating (kind/bug leaving and PR: Fix staying
-                  // would desync the legacy set the triage queue still reads).
-                  const kind = checked[0];
-                  add.push(kind);
-                  if (KIND_TO_LEGACY[kind]) add.push(KIND_TO_LEGACY[kind]);
-                  for (const stale of MANAGED_KINDS) {
-                    if (stale === kind) continue;
-                    remove.push(stale);
-                    if (KIND_TO_LEGACY[stale]) remove.push(KIND_TO_LEGACY[stale]);
-                  }
-                  add.push('follows-guidelines');
-                } else {
-                  // Zero or several boxes: the conventional-commit title
-                  // prefix is advisory — it fills a blank, never overrules.
-                  // No removals, and no addition when the PR already carries
-                  // a managed kind (maintainer triage wins).
-                  const m = /^([a-z]+)(\([^)]*\))?!?:/.exec(title.trim());
-                  const kind = m ? TITLE_PREFIX_TO_KIND[m[1]] : undefined;
-                  const hasManagedKind = MANAGED_KINDS.some((k) => current.has(k));
-                  if (kind !== undefined && !hasManagedKind) {
-                    add.push(kind);
-                    if (KIND_TO_LEGACY[kind]) add.push(KIND_TO_LEGACY[kind]);
-                  }
-                }
-
-                // Skill delivery: explicit checkbox verdicts only, kept in
-                // lockstep with its legacy twin. No box checked → no verdict,
-                // nothing changes.
-                if (/^-\s*\[[xX]\]\s*Skill:/m.test(scanned)) {
-                  add.push('delivery/skill');
-                  add.push('PR: Skill');
-                } else if (/^-\s*\[[xX]\]\s*Not a skill/m.test(scanned)) {
-                  remove.push('delivery/skill');
-                  remove.push('PR: Skill');
-                }
+                const checked = MANAGED_KINDS.filter((value) =>
+                  new RegExp('^-\\s*\\[[xX]\\]\\s*`' + value + '`', 'm').test(scanned));
+                if (checked.length === 1) kind = checked[0];
+                const isSkill = /^-\s*\[[xX]\]\s*Skill:/m.test(scanned);
+                const notSkill = /^-\s*\[[xX]\]\s*Not a skill/m.test(scanned);
+                if (isSkill !== notSkill) skill = isSkill;
               } else {
-                // ── v1: pre-v2 behavior, byte-frozen (add-only) ──
-                if (body.includes('[x] **Feature skill**'))       { add.push('PR: Skill'); add.push('PR: Feature'); add.push('kind/feature'); add.push('delivery/skill'); }
-                else if (body.includes('[x] **Utility skill**'))   { add.push('PR: Skill'); add.push('kind/feature'); add.push('delivery/skill'); }
-                else if (body.includes('[x] **Operational/container skill**')) { add.push('PR: Skill'); add.push('kind/feature'); add.push('delivery/skill'); }
-                else if (body.includes('[x] **Fix**'))             { add.push('PR: Fix'); add.push('kind/bug'); }
-                else if (body.includes('[x] **Simplification**'))  { add.push('PR: Refactor'); add.push('kind/cleanup'); }
-                else if (body.includes('[x] **Documentation**'))   { add.push('PR: Docs'); add.push('kind/documentation'); }
-
-                if (body.includes('contributing-guide: v1')) add.push('follows-guidelines');
+                // Continue understanding old templates without their duplicate labels.
+                if (scanned.includes('[x] **Feature skill**') || scanned.includes('[x] **Utility skill**') ||
+                    scanned.includes('[x] **Operational/container skill**')) {
+                  kind = 'kind/feature';
+                  skill = true;
+                } else if (scanned.includes('[x] **Fix**')) kind = 'kind/bug';
+                else if (scanned.includes('[x] **Simplification**')) kind = 'kind/cleanup';
+                else if (scanned.includes('[x] **Documentation**')) kind = 'kind/documentation';
               }
-
-              return { add, remove, coreTeam };
+              if (!kind) {
+                // A single maintainer classification wins over an advisory title.
+                const existing = MANAGED_KINDS.filter((value) => current.has(value));
+                const prefix = /^([a-z]+)(\([^)]*\))?!?:/.exec(title.trim());
+                kind = existing.length === 1 ? existing[0]
+                  : prefix && Object.hasOwn(titleKinds, prefix[1]) ? titleKinds[prefix[1]] : undefined;
+              }
+              const area = selectPrimaryArea(files, areaRules);
+              const add = [...(kind ? [kind] : []), ...(skill ? ['delivery/skill'] : []), ...(area ? [area] : [])];
+              const desired = new Set(add);
+              const managed = new Set([...MANAGED_KINDS, 'delivery/skill', ...Object.keys(areaRules), ...retired]);
+              return { add, remove: currentLabels.filter((value) => managed.has(value) && !desired.has(value)) };
             }
 
             // Report-only template compliance (CI-04: the classification
@@ -224,17 +186,28 @@ jobs:
             }
             // NANOCLAW-LABEL-LOGIC-END
 
-            const pr = context.payload.pull_request;
-            const currentLabels = (pr.labels || []).map((l) => l.name);
-            const { add, remove, coreTeam } = computeLabels({
-              body: pr.body,
-              title: pr.title,
-              author: pr.user.login,
-              currentLabels,
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner, repo: context.repo.repo,
+              pull_number: context.payload.pull_request.number,
             });
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner: context.repo.owner, repo: context.repo.repo, pull_number: pr.number, per_page: 100,
+            });
+            // GitHub caps this endpoint at 3,000 files. Do not classify partial evidence.
+            if (files.length < pr.changed_files) throw new Error('Incomplete PR file list; leaving labels unchanged');
+            const config = await github.rest.repos.getContent({
+              owner: context.repo.owner, repo: context.repo.repo,
+              path: '.github/pr-label-areas.json', ref: context.sha,
+            });
+            if (typeof config.data.content !== 'string' || config.data.encoding !== 'base64') {
+              throw new Error('Primary-area rules must be a file at the trusted base commit');
+            }
+            const areaRules = JSON.parse(Buffer.from(config.data.content, 'base64').toString('utf8'));
+            const currentLabels = (pr.labels || []).map((label) => label.name);
+            const { add, remove } = computeLabels({ body: pr.body, title: pr.title, currentLabels, files, areaRules });
 
             // ── Report-only template-compliance status (every event) ──
-            const compliance = decideCompliance({ body: pr.body, add, currentLabels });
+            const compliance = decideCompliance({ body: pr.body, add, currentLabels: currentLabels.filter((label) => !remove.includes(label)) });
             if (compliance.state !== null) {
               await github.rest.repos.createCommitStatus({
                 owner: context.repo.owner,
@@ -280,23 +253,6 @@ jobs:
               }
             }
 
-            // ── Label mutations: body events only, never on synchronize ──
-            if (context.payload.action === 'synchronize') return;
-
-            if (coreTeam) {
-              try {
-                await github.rest.issues.createLabel({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  name: 'core-team',
-                  color: '1D76DB',
-                  description: 'PR opened by a core team member',
-                });
-              } catch (e) {
-                if (e.status !== 422) throw e; // 422: label already exists
-              }
-            }
-
             // Removals first, and only of labels actually on the PR, so an
             // edited kind selection swaps cleanly instead of accumulating.
             const current = new Set((pr.labels || []).map((l) => l.name));
@@ -314,11 +270,12 @@ jobs:
               }
             }
 
-            if (add.length > 0) {
+            const missing = add.filter((name) => !current.has(name));
+            if (missing.length > 0) {
               await github.rest.issues.addLabels({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: pr.number,
-                labels: add,
+                labels: missing,
               });
             }
