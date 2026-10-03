@@ -42,20 +42,20 @@ The labels are their own reference. Run `gh label list` to print the full set wi
 
 ### Core or your fork?
 
-NanoClaw expects you to install and update it with a coding agent, like Claude Code, Codex or OpenCode. That agent can fix small problems in your own copy when they come up. So core takes fixes for the normal setup, plus security fixes.
+NanoClaw expects you to have a coding agent, like Claude Code, Codex or OpenCode, to help when you install or update it. That agent can fix small problems in your own copy when they come up. So most fixes for rare setups belong on your own fork, not in core.
 
 **Send a PR for:**
-- a bug in the normal setup most people run
+- a bug on a normal, correctly configured install
+- something that used to work until a release broke it by mistake
 - a security fix, even for a rare setup. If it could be exploited, don't open a public PR. [Report it privately](https://github.com/nanocoai/nanoclaw/security/advisories/new) instead.
-- a bug on any supported setup that your coding agent can't fix by itself while it installs or updates NanoClaw
 
 **Keep it on your fork:**
-- a fix for a rare setup, like one OS version, one old upgrade path, or one machine's settings
+- a fix for a rare setup, like one OS version, one machine's settings, or an upgrade from an old commit that was never a release
 - a change that only your setup needs
 
 If a change fits both lists, send the PR.
 
-For a fork fix, ask your coding agent to make the change in your copy. To keep it safe through updates, turn it into a [private skill](https://docs.nanoclaw.dev/extend/writing-skills#private-skill-or-upstream-contribution).
+For a fork fix, ask your coding agent to make the change in your copy. A skill makes it easier to carry through updates. If other people would want it too, send the skill as a PR. See [Private skill or upstream contribution?](https://docs.nanoclaw.dev/extend/writing-skills#private-skill-or-upstream-contribution)
 
 **Closing PRs in batches.** Maintainers may close PRs that fit this rule, several at a time. Each one gets a comment that says why, points to the code or issue that shows it is a rare case, and links here. If we got it wrong, reply with who else hits the problem and we will take another look.
 
