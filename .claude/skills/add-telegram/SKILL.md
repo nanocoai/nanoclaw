@@ -61,7 +61,7 @@ clean-upstream rebuild). The pairing handshake below spawns this step:
 Pinned to an exact version — the supply-chain policy rejects ranges and `latest`:
 
 ```nc:dep
-@chat-adapter/telegram@4.29.0
+@chat-adapter/telegram@4.38.1
 ```
 
 ### 5. Build and validate
