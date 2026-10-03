@@ -74,6 +74,7 @@ export async function run(_args: string[]): Promise<void> {
   }
 
   proxyStatusFields = proxyStatus(projectRoot, nodePath);
+  tightenCredentialFiles(projectRoot, homeDir);
 
   if (platform === 'macos') {
     setupLaunchd(projectRoot, nodePath, homeDir);
@@ -114,15 +115,14 @@ export function hostProxyEnv(projectRoot: string, env: NodeJS.ProcessEnv = proce
   // Node's built-in proxy support only speaks to http(s) proxies.
   const proxy = (key: string): string | undefined => {
     const url = pick(key);
-    return url && /^https?:\/\//i.test(url) ? url : undefined;
+    return url && /^https?:\/\/\S+$/i.test(url) ? url : undefined;
   };
   const httpsProxy = proxy('HTTPS_PROXY') ?? proxy('ALL_PROXY') ?? proxy('HTTP_PROXY');
   const httpProxy = proxy('HTTP_PROXY') ?? proxy('ALL_PROXY') ?? proxy('HTTPS_PROXY');
   if (!httpsProxy || !httpProxy) return {};
 
   const bypass = [DEFAULT_NO_PROXY, env.NO_PROXY, env.no_proxy, fromFile.NO_PROXY]
-    .flatMap((list) => (list ?? '').split(','))
-    .map((entry) => entry.trim())
+    .flatMap((list) => (list ?? '').split(/[\s,]+/))
     .filter(Boolean);
 
   return {
@@ -181,6 +181,67 @@ function hostProxyEnvEntries(projectRoot: string): [string, string][] {
           [key.toLowerCase(), value],
         ],
   );
+}
+
+export function serviceProxyEnvPath(projectRoot: string): string {
+  return path.join(projectRoot, 'data', 'service-proxy.env');
+}
+
+/** Writes via a fresh 0600 file and a rename, so an existing wider-mode file never holds the new content. */
+export function writeOwnerOnly(file: string, content: string): void {
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.rmSync(tmp, { force: true });
+  fs.writeFileSync(tmp, content, { mode: 0o600, flag: 'wx' });
+  fs.renameSync(tmp, file);
+}
+
+/**
+ * Writes the proxy environment to an owner-only file, since proxy URLs can
+ * carry credentials. The double-quoted format reads the same through
+ * systemd's EnvironmentFile= and bash's `source`. Removes the file and
+ * returns undefined when no proxy is configured.
+ */
+export function writeServiceProxyEnv(projectRoot: string): string | undefined {
+  const file = serviceProxyEnvPath(projectRoot);
+  const entries = hostProxyEnvEntries(projectRoot);
+  if (entries.length === 0) {
+    fs.rmSync(file, { force: true });
+    return undefined;
+  }
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const lines = entries.map(([key, value]) => `${key}="${value.replace(/[\\"`$]/g, '\\$&')}"\n`);
+  writeOwnerOnly(file, lines.join(''));
+  return file;
+}
+
+/**
+ * Earlier setups wrote proxy URLs inline. The active service file is rewritten
+ * below, but one left by another service type would keep its credentials.
+ */
+export function tightenCredentialFiles(projectRoot: string, homeDir: string): void {
+  const unit = `${getSystemdUnit(projectRoot)}.service`;
+  const candidates = [
+    path.join(homeDir, 'Library', 'LaunchAgents', `${getLaunchdLabel(projectRoot)}.plist`),
+    path.join(homeDir, '.config', 'systemd', 'user', unit),
+    `/etc/systemd/system/${unit}`,
+    path.join(projectRoot, 'start-nanoclaw.sh'),
+  ];
+  for (const file of candidates) {
+    let target = 0o600;
+    try {
+      const mode = fs.statSync(file).mode & 0o777;
+      target = mode & 0o700;
+      const text = mode & 0o077 ? fs.readFileSync(file, 'utf8') : '';
+      if (!/_proxy/i.test(text) || !text.includes('@')) continue;
+      fs.chmodSync(file, target);
+      log.info('Restricted a service file that holds proxy credentials', { file });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      // Usually a root-owned file left by an earlier root install; only the user can fix it.
+      const fix = `sudo chmod ${target.toString(8)} ${shellQuote(file)}`;
+      log.warn(`Could not restrict ${file}, which may hold a proxy password. To fix, run: ${fix}`, { file, fix, err });
+    }
+  }
 }
 
 function xmlEscape(value: string): string {
@@ -262,7 +323,8 @@ function setupLaunchd(projectRoot: string, nodePath: string, homeDir: string): v
 </dict>
 </plist>`;
 
-  fs.writeFileSync(plistPath, plist);
+  // launchd has no env-file option, so the plist that holds the proxy values is owner-only.
+  writeOwnerOnly(plistPath, plist);
   log.info('Wrote launchd plist', { plistPath });
 
   // Unload first to force launchd to drop any cached plist and re-read from
@@ -381,11 +443,13 @@ export function renderSystemdUnit(
   nodePath: string,
   homeDir: string,
   runningAsRoot: boolean,
+  proxyEnvFile?: string,
 ): string {
-  // systemd expands % specifiers and splits unquoted values on spaces.
-  const proxyLines = hostProxyEnvEntries(projectRoot)
-    .map(([key, value]) => `\nEnvironment="${key}=${value.replace(/%/g, '%%').replace(/["\\]/g, '\\$&')}"`)
-    .join('');
+  // Unit files are world-readable; proxy values stay in the owner-only file.
+  // systemd expands % specifiers and globs this path.
+  const proxyLine = proxyEnvFile
+    ? `\nEnvironmentFile=${proxyEnvFile.replace(/%/g, '%%').replace(/[[\]*?\\]/g, '\\$&')}`
+    : '';
 
   return `[Unit]
 Description=NanoClaw Personal Assistant
@@ -399,7 +463,7 @@ Restart=always
 RestartSec=5
 KillMode=process
 Environment=HOME=${homeDir}
-Environment=PATH=/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin${proxyLines}
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin${proxyLine}
 StandardOutput=append:${projectRoot}/logs/nanoclaw.log
 StandardError=append:${projectRoot}/logs/nanoclaw.error.log
 
@@ -435,7 +499,7 @@ async function setupSystemd(projectRoot: string, nodePath: string, homeDir: stri
     systemctlPrefix = 'systemctl --user';
   }
 
-  const unit = renderSystemdUnit(projectRoot, nodePath, homeDir, runningAsRoot);
+  const unit = renderSystemdUnit(projectRoot, nodePath, homeDir, runningAsRoot, writeServiceProxyEnv(projectRoot));
 
   fs.writeFileSync(unitPath, unit);
   log.info('Wrote systemd unit', { unitPath });
@@ -571,6 +635,7 @@ async function setupNohupFallback(projectRoot: string, nodePath: string): Promis
   const wrapperPath = path.join(projectRoot, 'start-nanoclaw.sh');
   const pidFile = path.join(projectRoot, 'nanoclaw.pid');
   const entrypoint = path.join(projectRoot, 'dist', 'index.js');
+  const proxyEnvFile = writeServiceProxyEnv(projectRoot);
 
   const lines = [
     '#!/bin/bash',
@@ -620,7 +685,7 @@ socket.setTimeout(1000, () => {
 });
 `)} ${shellQuote(path.join(projectRoot, 'data', 'ncl.sock'))}`,
     '',
-    ...hostProxyEnvEntries(projectRoot).map(([name, value]) => `export ${name}=${shellQuote(value)}`),
+    ...(proxyEnvFile ? ['set -a', `. ${shellQuote(proxyEnvFile)}`, 'set +a'] : []),
     'echo "Starting NanoClaw..."',
     // Node resets the inherited SIGHUP ignore; detach from the wizard terminal.
     `setsid nohup ${shellQuote(nodePath)} ${shellQuote(entrypoint)} \\`,
