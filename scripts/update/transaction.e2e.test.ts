@@ -57,7 +57,47 @@ interface Fixture {
   upstreamHead: string;
 }
 
-function createForkFixture(options: { breaking?: boolean; gatewayExtraction?: boolean } = {}): Fixture {
+function writeOnecliSkill(root: string, payload: string): void {
+  write(
+    root,
+    '.claude/skills/add-onecli/gateway.json',
+    '{"kind":"onecli","label":"OneCLI","description":"Gateway","default":true}\n',
+  );
+  write(
+    root,
+    '.claude/skills/add-onecli/SKILL.md',
+    [
+      '---',
+      'name: add-onecli',
+      'description: Test gateway extraction.',
+      '---',
+      '',
+      '```nc:copy',
+      'payload/src/gateway-providers/onecli.ts -> src/gateway-providers/onecli.ts',
+      '```',
+      '',
+      '```nc:append to:src/gateway-providers/installed.ts',
+      "import './onecli.js';",
+      '```',
+      '',
+    ].join('\n'),
+  );
+  write(
+    root,
+    '.claude/skills/add-onecli/scripts/detect.ts',
+    "import fs from 'node:fs'; console.log(fs.readFileSync('.env', 'utf8').includes('ONECLI_URL=') ? 'installed' : 'absent');\n",
+  );
+  write(root, '.claude/skills/add-onecli/payload/src/gateway-providers/onecli.ts', payload);
+}
+
+function createForkFixture(
+  options: {
+    breaking?: boolean;
+    gatewayExtraction?: boolean;
+    gatewayPayloadOnly?: boolean | 'other';
+    otherSkillOnly?: boolean;
+  } = {},
+): Fixture {
   const seed = temp('nanoclaw-update-seed-');
   exec(seed, 'git', ['init', '-b', 'main']);
   write(seed, 'package.json', '{"name":"nanoclaw-test","version":"2.1.54"}\n');
@@ -72,6 +112,22 @@ function createForkFixture(options: { breaking?: boolean; gatewayExtraction?: bo
   write(seed, 'versions.json', '{"agent-image":"example@sha256:old"}\n');
   write(seed, 'CHANGELOG.md', '# Changelog\n');
   write(seed, 'src/value.ts', 'export const value = "old";\n');
+  if (options.gatewayPayloadOnly) {
+    writeOnecliSkill(seed, "export const gateway = 'onecli-v1';\n");
+    write(seed, 'src/gateway-providers/installed.ts', "// Installed gateway providers.\nimport './onecli.js';\n");
+    write(seed, 'src/gateway-providers/onecli.ts', "export const gateway = 'onecli-v1';\n");
+    write(
+      seed,
+      '.claude/skills/add-other/gateway.json',
+      '{"kind":"other","label":"Other","description":"Gateway","default":false}\n',
+    );
+    write(
+      seed,
+      '.claude/skills/add-other/SKILL.md',
+      '---\nname: add-other\n---\n\n```nc:copy\npayload/other.ts -> src/gateway-providers/other.ts\n```\n',
+    );
+    write(seed, '.claude/skills/add-other/payload/other.ts', "export const gateway = 'other-v1';\n");
+  }
   commit(seed, 'base');
 
   const official = temp('nanoclaw-update-official-');
@@ -81,7 +137,20 @@ function createForkFixture(options: { breaking?: boolean; gatewayExtraction?: bo
   fs.rmSync(fork, { recursive: true });
   exec(path.dirname(fork), 'git', ['clone', '--bare', official, fork]);
 
-  write(seed, 'src/value.ts', 'export const value = "new";\n');
+  // A payload-only upstream change touches nothing outside the skill directory.
+  if (options.gatewayPayloadOnly === 'other') {
+    write(seed, '.claude/skills/add-other/payload/other.ts', "export const gateway = 'other-v2';\n");
+  } else if (options.gatewayPayloadOnly) {
+    write(
+      seed,
+      '.claude/skills/add-onecli/payload/src/gateway-providers/onecli.ts',
+      "export const gateway = 'onecli-v2';\n",
+    );
+  } else if (options.otherSkillOnly) {
+    write(seed, '.claude/skills/customize/SKILL.md', '---\nname: customize\n---\n');
+  } else {
+    write(seed, 'src/value.ts', 'export const value = "new";\n');
+  }
   if (options.breaking) {
     fs.appendFileSync(
       path.join(seed, 'CHANGELOG.md'),
@@ -91,40 +160,7 @@ function createForkFixture(options: { breaking?: boolean; gatewayExtraction?: bo
   }
   if (options.gatewayExtraction) {
     write(seed, 'src/gateway-providers/installed.ts', '// Installed gateway providers.\n');
-    write(
-      seed,
-      '.claude/skills/add-onecli/gateway.json',
-      '{"kind":"onecli","label":"OneCLI","description":"Gateway","default":true}\n',
-    );
-    write(
-      seed,
-      '.claude/skills/add-onecli/SKILL.md',
-      [
-        '---',
-        'name: add-onecli',
-        'description: Test gateway extraction.',
-        '---',
-        '',
-        '```nc:copy',
-        'payload/src/gateway-providers/onecli.ts -> src/gateway-providers/onecli.ts',
-        '```',
-        '',
-        '```nc:append to:src/gateway-providers/installed.ts',
-        "import './onecli.js';",
-        '```',
-        '',
-      ].join('\n'),
-    );
-    write(
-      seed,
-      '.claude/skills/add-onecli/scripts/detect.ts',
-      "import fs from 'node:fs'; console.log(fs.readFileSync('.env', 'utf8').includes('ONECLI_URL=') ? 'installed' : 'absent');\n",
-    );
-    write(
-      seed,
-      '.claude/skills/add-onecli/payload/src/gateway-providers/onecli.ts',
-      "export const gateway = 'onecli';\n",
-    );
+    writeOnecliSkill(seed, "export const gateway = 'onecli';\n");
   }
   const upstreamHead = commit(seed, 'upstream update at same package version');
   exec(seed, 'git', ['remote', 'add', 'publish', official]);
@@ -142,6 +178,7 @@ function createForkFixture(options: { breaking?: boolean; gatewayExtraction?: bo
   write(install, 'data/v2.db', 'old-schema');
   write(install, '.env', 'EXAMPLE=old\n');
   if (options.gatewayExtraction) fs.appendFileSync(path.join(install, '.env'), 'ONECLI_URL=http://127.0.0.1:10254\n');
+  if (options.gatewayPayloadOnly) fs.appendFileSync(path.join(install, '.env'), 'NANOCLAW_GATEWAY_PROVIDER=onecli\n');
   write(install, 'start-nanoclaw.sh', '#!/bin/bash\nnode dist/index.js\n');
   write(install, 'nanoclaw.pid', '1234\n');
   return { install, originalHead, upstreamHead };
@@ -283,6 +320,82 @@ describe('update-nanoclaw transaction end to end', () => {
     } finally {
       process.env.PATH = previousPath;
     }
+  });
+
+  it('refreshes the installed gateway when only its skill payload changed', async () => {
+    const fixture = createForkFixture({ gatewayPayloadOnly: true });
+    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    const { runtime } = fakeRuntime(fixture.install);
+
+    let state = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+    expect(state.changedFiles).toEqual(['.claude/skills/add-onecli/payload/src/gateway-providers/onecli.ts']);
+    state = await validateUpdate(fixture.install, state.id, runtime);
+    expect(state.skillRefresh?.selected).toEqual(['onecli']);
+    state = await cutoverUpdate(fixture.install, state.id, runtime);
+
+    expect(fs.readFileSync(path.join(fixture.install, 'src/gateway-providers/onecli.ts'), 'utf8')).toContain(
+      "gateway = 'onecli-v2'",
+    );
+    const installed = fs.readFileSync(path.join(fixture.install, 'src/gateway-providers/installed.ts'), 'utf8');
+    expect(installed.match(/onecli\.js/g)).toHaveLength(1);
+    state = await finishUpdate(fixture.install, state.id, runtime);
+    expect(state.phase).toBe('complete');
+  });
+
+  it('skips a payload-only gateway refresh when the install has no gateway selected', async () => {
+    const fixture = createForkFixture({ gatewayPayloadOnly: true });
+    write(fixture.install, '.env', 'EXAMPLE=old\n');
+    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    const { runtime } = fakeRuntime(fixture.install);
+
+    let state = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+    state = await validateUpdate(fixture.install, state.id, runtime);
+    expect(state.phase).toBe('validated');
+    expect(state.gatewaySelection).toBeUndefined();
+    expect(state.skillRefresh?.selected).toEqual([]);
+    expect(state.validation?.[0]).toMatch(/^gateway payload refresh skipped: /);
+  });
+
+  it("leaves the selected gateway alone when only another gateway's payload changed", async () => {
+    const fixture = createForkFixture({ gatewayPayloadOnly: 'other' });
+    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    const { runtime } = fakeRuntime(fixture.install);
+
+    let state = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+    state = await validateUpdate(fixture.install, state.id, runtime);
+    expect(state.phase).toBe('validated');
+    expect(state.gatewaySelection).toBeUndefined();
+    expect(state.skillRefresh?.selected).toEqual([]);
+  });
+
+  it('reports a payload-only skip when the selected gateway is not in the catalog', async () => {
+    const fixture = createForkFixture({ gatewayPayloadOnly: true });
+    write(fixture.install, '.env', 'NANOCLAW_GATEWAY_PROVIDER=custom-gateway\n');
+    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    const { runtime } = fakeRuntime(fixture.install);
+
+    let state = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+    state = await validateUpdate(fixture.install, state.id, runtime);
+    expect(state.phase).toBe('validated');
+    expect(state.gatewaySelection).toBeUndefined();
+    expect(state.validation?.[0]).toBe('gateway payload refresh skipped: custom-gateway is not in the gateway catalog');
+  });
+
+  it('leaves gateway handling alone when only a non-gateway skill changed', async () => {
+    const fixture = createForkFixture({ otherSkillOnly: true });
+    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    const { runtime } = fakeRuntime(fixture.install);
+    runtime.loadGateway = () => Promise.reject(new Error('gateway modules must not load'));
+
+    let state = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+    state = await validateUpdate(fixture.install, state.id, runtime);
+    expect(state.phase).toBe('validated');
+    expect(state.gatewaySelection).toBeUndefined();
   });
 
   it('stages through official upstream, gates a migration, completes, and can restore code plus mutable state', async () => {
