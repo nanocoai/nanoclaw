@@ -224,6 +224,15 @@ function genericGet(def: ResourceDef) {
   };
 }
 
+/**
+ * Slug validator for user-supplied resource IDs.
+ *
+ * Mirrors the lowercase-slug shape callers already use as workarounds for
+ * #2386 (OneCLI rejects raw UUIDs). 1-50 chars, must start with a letter,
+ * then letters / digits / hyphens. Anchored — no partial matches.
+ */
+const ID_SLUG_RE = /^[a-z][a-z0-9-]{0,49}$/;
+
 function genericCreate(def: ResourceDef) {
   return async (args: Record<string, unknown>) => {
     const values: Record<string, unknown> = {};
@@ -235,7 +244,21 @@ function genericCreate(def: ResourceDef) {
     for (const col of def.columns) {
       if (col.generated) {
         if (col.name === def.idColumn) {
-          values[col.name] = randomUUID();
+          // #2390: honor user-supplied --id. The help text advertises --id
+          // as `(auto)`, but a value passed explicitly is the user's intent
+          // and must not be silently overwritten by randomUUID().
+          const supplied = args[col.name];
+          if (supplied !== undefined && supplied !== '') {
+            const id = String(supplied);
+            if (!ID_SLUG_RE.test(id)) {
+              throw new Error(
+                `--id must match ${ID_SLUG_RE.source} (1-50 chars, lowercase letter then letters/digits/hyphens). Got: ${id}`,
+              );
+            }
+            values[col.name] = id;
+          } else {
+            values[col.name] = randomUUID();
+          }
         } else if (col.name.endsWith('_at')) {
           values[col.name] = new Date().toISOString();
         }
