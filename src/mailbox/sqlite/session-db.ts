@@ -267,6 +267,15 @@ export function markDeliveryFailed(db: Database.Database, messageOutId: string):
   ).run(messageOutId, new Date().toISOString());
 }
 
+export function markDeliveryRefused(db: Database.Database, messageOutId: string, reasonCode: string): void {
+  migrateDeliveredTable(db);
+  db.prepare(
+    `INSERT OR IGNORE INTO delivered
+       (message_out_id, platform_message_id, status, delivered_at, reason_code)
+     VALUES (?, NULL, 'refused', ?, ?)`,
+  ).run(messageOutId, new Date().toISOString(), reasonCode);
+}
+
 /** Ensure the delivered table has columns added after initial schema. */
 export function migrateDeliveredTable(db: Database.Database): void {
   const cols = new Set(
@@ -277,6 +286,9 @@ export function migrateDeliveredTable(db: Database.Database): void {
   }
   if (!cols.has('status')) {
     db.prepare("ALTER TABLE delivered ADD COLUMN status TEXT NOT NULL DEFAULT 'delivered'").run();
+  }
+  if (!cols.has('reason_code')) {
+    db.prepare('ALTER TABLE delivered ADD COLUMN reason_code TEXT').run();
   }
 }
 
