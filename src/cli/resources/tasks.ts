@@ -92,10 +92,22 @@ async function selectedSessions(
   const group = groupArg(args, ctx);
   if (group) {
     // One session per live task series — the loops below already fan out across them.
-    return (await findTaskSessions(group, includeClosed)).map((s) => ({
+    const sessions = (await findTaskSessions(group, includeClosed)).map((s) => ({
       id: s.id,
       agent_group_id: s.agent_group_id,
     }));
+
+    // Legacy pre-2.1.54 recurring tasks live in the caller's own main chat
+    // session (messaging_group_id set, no per-series system:tasks thread), so
+    // findTaskSessions() never surfaces them. Fold in the caller's own session
+    // — ownSession() re-checks group ownership, so this can't leak a sibling
+    // session's tasks to another agent caller.
+    if (ctx.caller === 'agent' && ctx.sessionId && !sessions.some((s) => s.id === ctx.sessionId)) {
+      const own = await ownSession(ctx.sessionId, ctx);
+      if (own.agent_group_id === group) sessions.push(own);
+    }
+
+    return sessions;
   }
 
   if (ctx.caller === 'agent') return [];
