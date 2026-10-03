@@ -586,6 +586,38 @@ export async function handleGatewayApprovalResponse(payload: ResponsePayload): P
   }
 }
 
+/**
+ * Reject one gateway approval by id, outside a card click — backs the local
+ * `ncl approvals reject`. Same claim, card edit, decision delivery and settle
+ * as a Reject press, so a racing click or expiry cannot also win. Returns false
+ * when the row is not a pending gateway approval.
+ */
+export async function rejectGatewayApproval(approvalId: string): Promise<boolean> {
+  const approval = await getPendingApproval(approvalId);
+  if (!approval || approval.action !== GATEWAY_APPROVAL_ACTION) return false;
+  const state = pending.get(approvalId);
+  if (!(await transitionPendingApprovalStatus(approvalId, 'pending', 'rejected'))) return false;
+  if (state) clearTimeout(state.timer);
+  try {
+    await editGatewayApprovalCard(approval, '❌ Rejected');
+    if (approvalSource?.durable) {
+      await deliverDurableDecision({ ...approval, status: 'rejected' });
+    } else {
+      await deletePendingApproval(approvalId);
+      if (!state && approvalSource?.decide && approval.request_id) {
+        try {
+          await approvalSource.decide(approval.request_id, 'deny');
+        } catch (err) {
+          log.warn('Late rejection not accepted by gateway', { approvalId, err });
+        }
+      }
+    }
+  } finally {
+    if (state) settle(approvalId, state, 'deny');
+  }
+  return true;
+}
+
 async function expireApproval(
   approvalId: string,
   reason: 'no response' | 'host restarted' | 'bridge failed' | 'request changed',
