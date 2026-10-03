@@ -1,0 +1,25 @@
+# hindsight-mcp — wrapper-only stack.
+#
+# This compose brings up ONLY the MCP wrapper. It assumes a Hindsight
+# engine is already running and reachable at $HINDSIGHT_URL. If you also
+# need to start the engine, point HINDSIGHT_URL at it (or run the engine
+# in a sibling compose).
+#
+# See ../.claude/skills/add-hindsight/SKILL.md for the full setup walk-through.
+
+services:
+  hindsight-mcp:
+    build: .
+    image: hindsight-mcp:local
+    restart: unless-stopped
+    environment:
+      # HTTP URL of the running Hindsight engine. Required.
+      HINDSIGHT_URL: ${HINDSIGHT_URL}
+      # Map of token:prefix pairs — see README. Required (at least one pair).
+      MCP_AUTH_TOKENS: ${MCP_AUTH_TOKENS}
+      MCP_PORT: 3852
+      MCP_BIND: 0.0.0.0
+    ports:
+      # By default bind to loopback only — memory content is sensitive. Override
+      # MCP_HOST_BIND to expose to a VPN IP or 0.0.0.0 if you need to.
+      - "${MCP_HOST_BIND:-127.0.0.1}:${MCP_HOST_PORT:-3852}:3852"
