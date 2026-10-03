@@ -1,0 +1,5 @@
+# slack-canvas — files this component owns outright. The modules-barrel line
+# (src/modules/index.ts) and the delivery.ts file-transform hook are applied
+# as edits per SKILL.md, not as file copies.
+src/modules/pr-factory/slack-canvas.ts
+src/modules/pr-factory/file-transform.test.ts

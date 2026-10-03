@@ -1,0 +1,7 @@
+# gh-action-approval — files this component owns outright. The modules-barrel
+# line (src/modules/index.ts) is applied as an edit per SKILL.md, not as a
+# file copy. data/gh-users.json is operator-created from the sample and never
+# ships.
+src/modules/pr-factory/gh-action-approval.ts
+src/modules/pr-factory/gh-users.sample.json
+src/modules/pr-factory/gh-action.test.ts
