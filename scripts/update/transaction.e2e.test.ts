@@ -63,8 +63,8 @@ function createForkFixture(options: { breaking?: boolean; gatewayExtraction?: bo
   write(seed, 'package.json', '{"name":"nanoclaw-test","version":"2.1.54"}\n');
   // Mirrors the shipped .gitignore: the bare `data` entry is what lets an
   // operator point the root at external storage with a symlink without
-  // `assertClean` refusing the cutover.
-  write(seed, '.gitignore', 'data/\ndata\n.env\nstart-nanoclaw.sh\nnanoclaw.pid\n');
+  // `assertClean` refusing the cutover. `.tmp-*` covers restore leftovers.
+  write(seed, '.gitignore', 'data/\ndata\n.env\nstart-nanoclaw.sh\nnanoclaw.pid\n.tmp-*\n');
   write(seed, 'pnpm-lock.yaml', 'lockfileVersion: 9\n');
   write(seed, 'src/channels/index.ts', "import './cli.js';\n");
   write(seed, 'src/providers/index.ts', '');
@@ -209,6 +209,40 @@ function fakeRuntime(
     verifyHealth: async () => health.shift() ?? true,
   };
   return { runtime, events };
+}
+
+// PATH stubs that record the pnpm, systemctl and docker calls a printed
+// recovery chain makes; `docker ps` lists one gateway container.
+function stubCommands(): { env: NodeJS.ProcessEnv; calls: () => string[] } {
+  const bin = temp('nanoclaw-update-stubs-');
+  const log = path.join(bin, 'calls.log');
+  write(
+    bin,
+    'stub',
+    '#!/bin/sh\nprintf \'%s\\n\' "$(basename "$0") $*" >> "$STUB_CALLS"\n' +
+      'if [ "$(basename "$0")" = docker ] && [ "$1" = ps ]; then echo gw1; fi\n',
+  );
+  fs.chmodSync(path.join(bin, 'stub'), 0o755);
+  for (const name of ['pnpm', 'systemctl', 'docker']) fs.symlinkSync('stub', path.join(bin, name));
+  return {
+    env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH ?? ''}`, STUB_CALLS: log },
+    calls: () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n') : []),
+  };
+}
+
+function recoveryChain(message: string): string {
+  const chain = message.split('(safe to run again if a step fails):\n')[1] ?? '';
+  return chain.split('\nWhen it succeeds, start NanoClaw: ')[0];
+}
+
+function failSnapshotCopy(file: string): void {
+  const copyFile = fs.copyFileSync;
+  vi.spyOn(fs, 'copyFileSync').mockImplementation((source, destination, mode) => {
+    if (String(source).endsWith(path.join('snapshot', file))) {
+      throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+    }
+    copyFile(source, destination, mode);
+  });
 }
 
 afterEach(() => {
@@ -367,6 +401,308 @@ describe('update-nanoclaw transaction end to end', () => {
     // Restored in place: same directory, so ownership and ACLs survive too.
     expect(fs.statSync(externalData).ino).toBe(externalDataInode);
     expect(fs.readlinkSync(dataLink)).toBe(relativeTarget);
+  });
+
+  it('a failed cutover restores all of data/ even when it holds folders this user cannot delete (#4003)', async () => {
+    const fixture = createForkFixture();
+    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    // Rootful Docker creates nested mount points (extra/<name>) as root. A
+    // read-only `extra` stands in for that: the host user cannot delete `mount`.
+    const sessions = path.join(fixture.install, 'data/v2-sessions');
+    const extra = path.join(sessions, 'ag-1/sess-1/extra');
+    fs.mkdirSync(path.join(extra, 'mount'), { recursive: true });
+    for (const group of ['ag-1', 'ag-2', 'ag-3']) write(sessions, `${group}/sess-1/inbound.db`, `${group} messages`);
+    const { runtime, events } = fakeRuntime(fixture.install);
+    const logs: string[] = [];
+    runtime.serviceEnv.log = (message) => logs.push(message);
+    // The target build fails after the snapshot, as #4004's did; by then the
+    // live tree holds the undeletable folder and data the rollback must undo.
+    const baseRun = runtime.runner.run.bind(runtime.runner);
+    runtime.runner.run = (command, args, cwd = fixture.install) => {
+      if (command === 'pnpm' && args[1] === 'build') {
+        if (fs.readFileSync(path.join(fixture.install, 'src/value.ts'), 'utf8').includes('new')) {
+          fs.writeFileSync(path.join(fixture.install, 'data/v2.db'), 'forward-migrated-schema');
+          fs.chmodSync(extra, 0o555);
+          throw new Error('target build failed');
+        }
+      }
+      return baseRun(command, args, cwd);
+    };
+    const leftovers = () => fs.readdirSync(fixture.install).filter((name) => name.startsWith('.tmp-'));
+
+    let state = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+    state = await validateUpdate(fixture.install, state.id, runtime);
+    try {
+      await expect(cutoverUpdate(fixture.install, state.id, runtime)).rejects.toThrow('target build failed');
+
+      expect(loadState(fixture.install, state.id).phase).toBe('rolled-back');
+      expect(events.at(-1)).toBe('service start');
+      expect(fs.readFileSync(path.join(fixture.install, 'data/v2.db'), 'utf8')).toBe('old-schema');
+      for (const group of ['ag-1', 'ag-2', 'ag-3']) {
+        expect(fs.readFileSync(path.join(sessions, `${group}/sess-1/inbound.db`), 'utf8')).toBe(`${group} messages`);
+      }
+      expect(fs.statSync(path.join(extra, 'mount')).isDirectory()).toBe(true);
+      // Only the folder that could not be deleted is left, in a git-ignored
+      // sibling the log names, so the next update still sees a clean tree.
+      expect(leftovers()).toHaveLength(1);
+      const leftover = path.join(fixture.install, leftovers()[0]);
+      expect(fs.readdirSync(leftover)).toEqual(['v2-sessions']);
+      expect(fs.readdirSync(path.join(leftover, 'v2-sessions'))).toEqual(['ag-1']);
+      expect(fs.readdirSync(path.join(leftover, 'v2-sessions/ag-1/sess-1'))).toEqual(['extra']);
+      expect(logs.join('\n')).toContain(`sudo rm -rf ${fs.realpathSync(leftover)}`);
+      expect(exec(fixture.install, 'git', ['status', '--porcelain'])).toBe('');
+    } finally {
+      for (const name of leftovers()) {
+        const locked = path.join(fixture.install, name, 'v2-sessions/ag-1/sess-1/extra');
+        if (fs.existsSync(locked)) fs.chmodSync(locked, 0o755);
+      }
+      if (fs.existsSync(extra)) fs.chmodSync(extra, 0o755);
+    }
+  });
+
+  it('a rollback that cannot copy the snapshot back touches no live file and says how to finish by hand', async () => {
+    const fixture = createForkFixture();
+    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    const { runtime, events } = fakeRuntime(fixture.install);
+    const baseRun = runtime.runner.run.bind(runtime.runner);
+    runtime.runner.run = (command, args, cwd = fixture.install) => {
+      if (command === 'pnpm' && args[1] === 'build') {
+        if (fs.readFileSync(path.join(fixture.install, 'src/value.ts'), 'utf8').includes('new')) {
+          fs.writeFileSync(path.join(fixture.install, 'data/v2.db'), 'forward-migrated-schema');
+          // The disk fills up while the rollback copies the snapshot back.
+          failSnapshotCopy(path.join('data', 'v2.db'));
+          throw new Error('target build failed');
+        }
+      }
+      return baseRun(command, args, cwd);
+    };
+
+    let state = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+    state = await validateUpdate(fixture.install, state.id, runtime);
+    let failure: Error | undefined;
+    try {
+      await cutoverUpdate(fixture.install, state.id, runtime);
+    } catch (err) {
+      failure = err as Error;
+    } finally {
+      vi.restoreAllMocks();
+    }
+
+    const snapshot = path.join(state.transactionRoot, 'snapshot');
+    const message = failure?.message ?? '';
+    expect(message).toContain('target build failed\nThe automatic rollback failed too: ');
+    expect(message).toContain('Could not restore the mutable-state snapshot: ENOSPC');
+    expect(message).toContain('Nothing was deleted');
+    expect(message).toContain('NanoClaw is stopped');
+    expect(message).toContain(`  cd ${state.projectRoot} &&\n  snapshot=${snapshot} &&\n`);
+    expect(message).toMatch(
+      /\n {2}move_aside data \.tmp-before-rollback-\w+-data && mkdir -p data && cp -af "\$snapshot"\/data\/\. data\/ &&\n/,
+    );
+    expect(loadState(fixture.install, state.id).lastError).toBe(message);
+    // No live file was deleted or replaced, no copy was left behind, and the
+    // service stays stopped rather than starting on a half-restored tree.
+    expect(fs.readFileSync(path.join(fixture.install, 'data/v2.db'), 'utf8')).toBe('forward-migrated-schema');
+    expect(fs.readdirSync(fixture.install).filter((name) => name.startsWith('.tmp-'))).toEqual([]);
+    expect(events.at(-1)).not.toBe('service start');
+    expect(fs.readFileSync(path.join(snapshot, 'data/v2.db'), 'utf8')).toBe('old-schema');
+
+    // The printed chain is fail-fast: a copy that fails starts nothing.
+    const stubs = stubCommands();
+    fs.chmodSync(path.join(snapshot, 'data/v2.db'), 0o000);
+    try {
+      expect(spawnSync('sh', ['-c', recoveryChain(message)], { env: stubs.env }).status).not.toBe(0);
+    } finally {
+      fs.chmodSync(path.join(snapshot, 'data/v2.db'), 0o644);
+    }
+    expect(stubs.calls()).toEqual([]);
+    // Run again once the cause is gone, it finishes exactly what the rollback would have.
+    expect(spawnSync('sh', ['-c', recoveryChain(message)], { env: stubs.env }).status).toBe(0);
+    expect(fs.readFileSync(path.join(fixture.install, 'data/v2.db'), 'utf8')).toBe('old-schema');
+    expect(fs.readFileSync(path.join(fixture.install, '.env'), 'utf8')).toBe('EXAMPLE=old\n');
+    expect(stubs.calls()).toEqual([
+      `docker ps -aq --filter label=nanoclaw-install=${getInstallSlug(state.projectRoot)} --filter label=nanoclaw-role=gateway`,
+      'docker restart -t 10 gw1',
+      'pnpm install --frozen-lockfile',
+      'pnpm run build',
+    ]);
+    // The start is its own last step, never part of the re-runnable chain.
+    expect(message).toMatch(/\nWhen it succeeds, start NanoClaw: .*systemctl --user start nanoclaw-test$/);
+  });
+
+  it('the printed recovery for a symlinked data/ restores into the same directory', async () => {
+    const fixture = createForkFixture();
+    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    const externalData = path.join(temp('nanoclaw-external-data-'), 'data');
+    const dataLink = path.join(fixture.install, 'data');
+    fs.renameSync(dataLink, externalData);
+    fs.symlinkSync(externalData, dataLink);
+    const { runtime } = fakeRuntime(fixture.install);
+    let state = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+    state = await validateUpdate(fixture.install, state.id, runtime);
+    state = await cutoverUpdate(fixture.install, state.id, runtime);
+    state = await finishUpdate(fixture.install, state.id, runtime);
+    fs.writeFileSync(path.join(externalData, 'v2.db'), 'post-update-data');
+
+    failSnapshotCopy(path.join('data', 'v2.db'));
+    let message = '';
+    try {
+      await rollbackUpdate(fixture.install, state.id, runtime).catch((err: Error) => {
+        message = err.message;
+      });
+    } finally {
+      vi.restoreAllMocks();
+    }
+    expect(message).toContain('Nothing was deleted');
+    expect(fs.readFileSync(path.join(externalData, 'v2.db'), 'utf8')).toBe('post-update-data');
+
+    // A copy that fails part way stops the chain; the same chain then re-runs.
+    const inode = fs.statSync(externalData).ino;
+    const snapshotDb = path.join(state.transactionRoot, 'snapshot', 'data', 'v2.db');
+    fs.chmodSync(snapshotDb, 0o000);
+    try {
+      expect(spawnSync('sh', ['-c', recoveryChain(message)], { env: stubCommands().env }).status).not.toBe(0);
+    } finally {
+      fs.chmodSync(snapshotDb, 0o644);
+    }
+    expect(spawnSync('sh', ['-c', recoveryChain(message)], { env: stubCommands().env }).status).toBe(0);
+    expect(fs.readFileSync(path.join(externalData, 'v2.db'), 'utf8')).toBe('old-schema');
+    // The live children went into one held-aside folder; the directory itself stayed.
+    // One fresh folder per run: the first holds what was live, the second the failed run's copy.
+    const held = fs.readdirSync(externalData).filter((name) => name !== 'v2.db');
+    expect(held).toHaveLength(2);
+    expect(held.every((name) => /^\.tmp-before-rollback-\w+-\w{6}$/.test(name))).toBe(true);
+    const before = held.map((name) => path.join(externalData, name, 'v2.db')).filter((file) => fs.existsSync(file));
+    expect(before.map((file) => fs.readFileSync(file, 'utf8'))).toEqual(['post-update-data']);
+    expect(fs.statSync(externalData).ino).toBe(inode);
+    expect(fs.readlinkSync(dataLink)).toBe(externalData);
+  });
+
+  it('a target the rollback cannot read still gets restore steps ahead of the start command', async () => {
+    const fixture = createForkFixture();
+    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    const externalData = path.join(temp('nanoclaw-external-data-'), 'data');
+    fs.renameSync(path.join(fixture.install, 'data'), externalData);
+    fs.symlinkSync(externalData, path.join(fixture.install, 'data'));
+    const { runtime } = fakeRuntime(fixture.install);
+    let state = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+    state = await validateUpdate(fixture.install, state.id, runtime);
+    state = await cutoverUpdate(fixture.install, state.id, runtime);
+    state = await finishUpdate(fixture.install, state.id, runtime);
+
+    fs.chmodSync(externalData, 0o000);
+    let message = '';
+    try {
+      await rollbackUpdate(fixture.install, state.id, runtime).catch((err: Error) => {
+        message = err.message;
+      });
+    } finally {
+      fs.chmodSync(externalData, 0o755);
+    }
+    expect(message).toMatch(/Could not restore the mutable-state snapshot: EACCES/);
+    const chain = recoveryChain(message);
+    expect(chain.indexOf('cp -af "$snapshot"/data/.')).toBeGreaterThan(0);
+    expect(message.indexOf('cp -af "$snapshot"/data/.')).toBeLessThan(message.indexOf('When it succeeds, start'));
+  });
+
+  it('the printed image step follows the .env being restored, not the unreadable live one', async () => {
+    const fixture = createForkFixture();
+    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    const env = path.join(fixture.install, '.env');
+    fs.writeFileSync(env, 'EXAMPLE=old\nNANOCLAW_HARDENED_IMAGE=true\n');
+    const { runtime } = fakeRuntime(fixture.install);
+    const baseRun = runtime.runner.run.bind(runtime.runner);
+    runtime.runner.run = (command, args, cwd = fixture.install) => {
+      if (command === 'pnpm' && args[1] === 'build') {
+        if (fs.readFileSync(path.join(fixture.install, 'src/value.ts'), 'utf8').includes('new')) {
+          fs.writeFileSync(env, 'EXAMPLE=new\n');
+          fs.chmodSync(env, 0o000);
+          failSnapshotCopy(path.join('data', 'v2.db'));
+          throw new Error('target build failed');
+        }
+      }
+      return baseRun(command, args, cwd);
+    };
+    let state = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+    // A change under container/ makes cutover and rollback rebuild the image.
+    write(state.stageRoot, 'container/Dockerfile', 'FROM scratch\n');
+    commit(state.stageRoot, 'container change');
+    state = await validateUpdate(fixture.install, state.id, runtime);
+    let message = '';
+    try {
+      await cutoverUpdate(fixture.install, state.id, runtime).catch((err: Error) => {
+        message = err.message;
+      });
+    } finally {
+      vi.restoreAllMocks();
+      fs.chmodSync(env, 0o644);
+    }
+    expect(message).toContain('Nothing was deleted');
+    expect(recoveryChain(message)).toMatch(/ &&\n {2}bash container\/build\.sh pull$/);
+    expect(fs.readFileSync(env, 'utf8')).toBe('EXAMPLE=new\n');
+  });
+
+  it('restores overlapping roots once: .env symlinked into the data/ target', async () => {
+    const fixture = createForkFixture();
+    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    const externalData = path.join(temp('nanoclaw-external-data-'), 'data');
+    fs.renameSync(path.join(fixture.install, 'data'), externalData);
+    fs.symlinkSync(externalData, path.join(fixture.install, 'data'));
+    fs.renameSync(path.join(fixture.install, '.env'), path.join(externalData, 'config.env'));
+    fs.symlinkSync(path.join(externalData, 'config.env'), path.join(fixture.install, '.env'));
+    const { runtime } = fakeRuntime(fixture.install);
+    let state = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+    state = await validateUpdate(fixture.install, state.id, runtime);
+    state = await cutoverUpdate(fixture.install, state.id, runtime);
+    state = await finishUpdate(fixture.install, state.id, runtime);
+    fs.writeFileSync(path.join(externalData, 'config.env'), 'EXAMPLE=post-update\n');
+    fs.writeFileSync(path.join(externalData, 'v2.db'), 'post-update-data');
+
+    state = await rollbackUpdate(fixture.install, state.id, runtime);
+
+    expect(state.phase).toBe('rolled-back');
+    expect(fs.readFileSync(path.join(externalData, 'config.env'), 'utf8')).toBe('EXAMPLE=old\n');
+    expect(fs.readFileSync(path.join(externalData, 'v2.db'), 'utf8')).toBe('old-schema');
+    expect(fs.readdirSync(externalData).filter((name) => name.startsWith('.tmp-'))).toEqual([]);
+  });
+
+  it('a restore that fails part way through the swap puts every live path back', async () => {
+    const fixture = createForkFixture();
+    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    const { runtime } = fakeRuntime(fixture.install);
+    let state = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+    state = await validateUpdate(fixture.install, state.id, runtime);
+    state = await cutoverUpdate(fixture.install, state.id, runtime);
+    state = await finishUpdate(fixture.install, state.id, runtime);
+    fs.writeFileSync(path.join(fixture.install, 'data/v2.db'), 'post-update-data');
+    fs.writeFileSync(path.join(fixture.install, '.env'), 'EXAMPLE=post-update\n');
+
+    // .env swaps first; then data/ is moved aside but its copy cannot move in.
+    const rename = fs.renameSync;
+    vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+      if (String(from).includes('.tmp-restore-') && String(to) === path.join(state.projectRoot, 'data')) {
+        throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' });
+      }
+      rename(from, to);
+    });
+    try {
+      await expect(rollbackUpdate(fixture.install, state.id, runtime)).rejects.toThrow(
+        /EBUSY[\s\S]*Nothing was deleted[\s\S]*NanoClaw is stopped/,
+      );
+    } finally {
+      vi.restoreAllMocks();
+    }
+
+    expect(fs.readFileSync(path.join(fixture.install, '.env'), 'utf8')).toBe('EXAMPLE=post-update\n');
+    expect(fs.readFileSync(path.join(fixture.install, 'data/v2.db'), 'utf8')).toBe('post-update-data');
+    expect(fs.readdirSync(fixture.install).filter((name) => name.startsWith('.tmp-'))).toEqual([]);
+    expect(loadState(fixture.install, state.id).phase).toBe('complete');
   });
 
   it('fails closed before stopping the service when the snapshot is gone', async () => {

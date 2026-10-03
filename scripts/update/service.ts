@@ -302,6 +302,26 @@ export async function stopService(handle: ServiceHandle, env: ServiceEnvironment
   }
 }
 
+// For commands printed to an operator: quotes only what a shell would misread.
+export function shellQuote(value: string): string {
+  return /^[\w@%+=:,./-]+$/.test(value) ? value : "'" + value.replace(/'/g, "'\\''") + "'";
+}
+
+/** What `startService` runs, for an operator finishing a failed rollback by hand. */
+export function startCommand(handle: ServiceHandle, uid: number): string | undefined {
+  if (handle.mode === 'launchd') {
+    // `;`: on a second try the job is already bootstrapped and only needs the kickstart.
+    return `launchctl bootstrap gui/${uid} ${shellQuote(handle.definition!)}; launchctl kickstart gui/${uid}/${handle.name}`;
+  }
+  if (handle.mode === 'systemd-user') {
+    // startService adopts this runtime dir; a `su -` or cron shell lacks it.
+    return `XDG_RUNTIME_DIR="\${XDG_RUNTIME_DIR:-/run/user/${uid}}" systemctl --user start ${handle.name}`;
+  }
+  if (handle.mode === 'systemd-system') return `systemctl start ${handle.name}`;
+  if (handle.mode === 'nohup') return `bash ${shellQuote(handle.definition!)}`;
+  return undefined;
+}
+
 export function startService(handle: ServiceHandle, projectRoot: string, env: ServiceEnvironment): void {
   if (!handle.active) return;
   if (handle.mode === 'launchd') {
@@ -448,6 +468,17 @@ export function restartGatewayContainers(projectRoot: string, env: ServiceEnviro
   if (!restarted.ok) {
     env.log?.(`Gateway restart failed (${restarted.stdout || 'no output'}); re-run the gateway's setup script.`);
   }
+}
+
+/**
+ * The same restart as a shell command, for an operator finishing a rollback by
+ * hand. Only a gateway's own setup sets the gateway role, always without a
+ * session, so the two label filters select what the list above selects.
+ */
+export function gatewayRestartCommand(projectRoot: string): string {
+  const runtime = shellQuote(process.env.CONTAINER_RUNTIME ?? 'docker');
+  const labels = `--filter label=nanoclaw-install=${getInstallSlug(projectRoot)} --filter label=nanoclaw-role=${CONTROLLER_GATEWAY_ROLE}`;
+  return `ids=$(${runtime} ps -aq ${labels}) && { [ -z "$ids" ] || ${runtime} restart -t ${CUTOVER_STOP_GRACE_SECONDS} $ids; }`;
 }
 
 export async function verifyServiceHealth(
