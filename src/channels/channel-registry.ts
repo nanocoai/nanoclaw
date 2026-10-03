@@ -6,6 +6,7 @@
  */
 import type { ChannelAdapter, ChannelDefaults, ChannelRegistration, ChannelSetup, OutboundFile } from './adapter.js';
 import type { ChannelDeliveryAdapter } from '../delivery.js';
+import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 
 /** Adapter instance registry key shape: a webhook route segment and state-namespace key, so URL-safe only. */
@@ -21,6 +22,24 @@ function isNetworkError(err: unknown): err is Error {
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/** `<NAME>_ENABLED` for a registry name: uppercased, non-alphanumerics → `_`. */
+function channelEnabledKey(name: string): string {
+  return `${name.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_ENABLED`;
+}
+
+/**
+ * A channel is parked when `<NAME>_ENABLED` is exactly `false` (process env
+ * wins, then `.env`). Unset or any other value means enabled. Parking only
+ * skips the factory — the channel's DB rows stay untouched.
+ */
+function isChannelParked(name: string): boolean {
+  const key = channelEnabledKey(name);
+  const raw = process.env[key]?.trim() || readEnvFile([key])[key]?.trim();
+  if (raw !== 'false') return false;
+  log.info('Channel disabled via env flag, skipping', { channel: name, flag: key });
+  return true;
+}
 
 const registry = new Map<string, ChannelRegistration>();
 const activeAdapters = new Map<string, ChannelAdapter>();
@@ -262,12 +281,14 @@ export function getChannelContainerConfig(name: string): ChannelRegistration['co
 
 /**
  * Instantiate and set up all registered channel adapters.
- * Skips adapters that return null (missing credentials).
+ * Skips parked channels (`<NAME>_ENABLED=false`) and adapters that return
+ * null (missing credentials).
  */
 export async function initChannelAdapters(setupFn: (adapter: ChannelAdapter) => ChannelSetup): Promise<void> {
   hotStartSetupFn = setupFn;
   for (const [name, registration] of registry) {
     try {
+      if (isChannelParked(name)) continue;
       const adapter = await registration.factory();
       if (!adapter) {
         log.warn('Channel credentials missing, skipping', { channel: name });
@@ -344,6 +365,7 @@ export async function startChannelAdapter(key: string): Promise<'started' | 'alr
   const registration = registry.get(key);
   if (!registration) throw new Error(`startChannelAdapter: no registration for '${key}'`);
   if (!hotStartSetupFn) throw new Error('startChannelAdapter: initChannelAdapters has not run');
+  if (isChannelParked(key)) return 'no-credentials';
   const adapter = await registration.factory();
   if (!adapter) return 'no-credentials';
   const setup = hotStartSetupFn(adapter);
