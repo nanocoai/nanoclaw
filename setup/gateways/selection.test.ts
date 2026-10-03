@@ -70,8 +70,30 @@ describe('real detector probe', () => {
     vi.stubEnv('pnpm_config_verify_deps_before_run', 'false');
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-probe-'));
     roots.push(root);
-    const { packageManager } = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ type: 'module', packageManager }));
+    const host = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+    const { packageManager, pnpm } = host;
+    // The symlinked install records the host's patches and overrides; a probe root
+    // that disagrees makes pnpm skip the nested-project scan that prints the WARN.
+    // A `$dep` override names a host dependency the probe root does not have.
+    const deps: Record<string, string> = {
+      ...host.optionalDependencies,
+      ...host.devDependencies,
+      ...host.dependencies,
+    };
+    const patches = Object.entries<string>(pnpm?.patchedDependencies ?? {}).map(([dep, file]) => [
+      dep,
+      path.resolve(file),
+    ]);
+    const overrides = Object.entries<string>(pnpm?.overrides ?? {}).map(([selector, spec]) => [
+      selector,
+      spec.startsWith('$') ? deps[spec.slice(1)] : spec,
+    ]);
+    const mirrored = {
+      ...(patches.length ? { patchedDependencies: Object.fromEntries(patches) } : {}),
+      ...(overrides.length ? { overrides: Object.fromEntries(overrides) } : {}),
+    };
+    const probePnpm = Object.keys(mirrored).length ? { pnpm: mirrored } : {};
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ type: 'module', packageManager, ...probePnpm }));
     fs.writeFileSync(path.join(root, 'pnpm-workspace.yaml'), 'onlyBuiltDependencies: [esbuild]\n');
     fs.symlinkSync(path.resolve('node_modules'), path.join(root, 'node_modules'));
     fs.mkdirSync(path.join(root, 'groups', 'repro'), { recursive: true });
