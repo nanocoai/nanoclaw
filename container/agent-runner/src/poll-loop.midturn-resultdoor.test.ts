@@ -231,7 +231,9 @@ describe('error and interrupted turns', () => {
       true,
     );
 
-    expect(deliveredTexts()).toEqual(['The agent run failed. Check the logs for details.']);
+    expect(deliveredTexts()).toEqual([
+      "Sorry, something went wrong and I couldn't answer. Whoever runs this NanoClaw can look into it using the logs: https://docs.nanoclaw.dev/operate/troubleshooting#start-here",
+    ]);
     expect(pushes).toHaveLength(0);
     expect(exchanges).toHaveLength(1);
     expect(exchanges[0].status).toBe('error');
@@ -270,7 +272,10 @@ describe('error and interrupted turns', () => {
       true,
     );
 
-    expect(deliveredTexts()).toEqual(['Sent before failure.', 'The agent run failed. Check the logs for details.']);
+    expect(deliveredTexts()).toEqual([
+      'Sent before failure.',
+      "Sorry, something went wrong and I couldn't answer. Whoever runs this NanoClaw can look into it using the logs: https://docs.nanoclaw.dev/operate/troubleshooting#start-here",
+    ]);
     expect(pushes).toHaveLength(0);
     expect(exchanges).toHaveLength(1);
     expect(exchanges[0].status).toBe('error');
@@ -290,8 +295,13 @@ describe('error and interrupted turns', () => {
 
     expect(deliveredTexts()).toEqual(
       progress
-        ? ['Progress before failure.', 'The agent run failed. Check the logs for details.']
-        : ['The agent run failed. Check the logs for details.'],
+        ? [
+            'Progress before failure.',
+            "Sorry, something went wrong and I couldn't answer. Whoever runs this NanoClaw can look into it using the logs: https://docs.nanoclaw.dev/operate/troubleshooting#start-here",
+          ]
+        : [
+            "Sorry, something went wrong and I couldn't answer. Whoever runs this NanoClaw can look into it using the logs: https://docs.nanoclaw.dev/operate/troubleshooting#start-here",
+          ],
     );
     expect(pushes).toHaveLength(0);
   });
@@ -365,7 +375,10 @@ describe('error and interrupted turns', () => {
     ).rejects.toThrow('SDK stream died');
 
     // The mid-turn write is durable — an interrupted turn cannot claw it back.
-    expect(deliveredTexts()).toEqual(['Sent before the crash.', 'The agent run failed. Check the logs for details.']);
+    expect(deliveredTexts()).toEqual([
+      'Sent before the crash.',
+      "Sorry, something went wrong and I couldn't answer. Whoever runs this NanoClaw can look into it using the logs: https://docs.nanoclaw.dev/operate/troubleshooting#start-here",
+    ]);
   });
 });
 
