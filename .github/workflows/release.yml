@@ -164,7 +164,7 @@ jobs:
             echo "- Version: \`$TAG\`"
             echo "- Target: \`$TARGET_SHA\`"
             echo "- Pre-release: \`$([[ "$RELEASE_VERSION" == *-* ]] && echo yes || echo no)\`"
-            echo "- Previous stable tag: \`$(git describe --tags --abbrev=0 --match 'v*' --exclude 'v*-*' "$TARGET_SHA^")\`"
+            echo "- Previous stable tag: \`$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude 'v*-*' "$TARGET_SHA^")\`"
             echo "- Mode: \`${{ inputs.mode }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -241,7 +241,7 @@ jobs:
           set -euo pipefail
           TAG="v${RELEASE_VERSION}"
           # Contributors and the compare link cover everything since the last stable release.
-          PREVIOUS_TAG=$(git describe --tags --abbrev=0 --match 'v*' --exclude 'v*-*' "$TARGET_SHA^")
+          PREVIOUS_TAG=$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude 'v*-*' "$TARGET_SHA^")
 
           gh api -X POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
             -f tag_name="$TAG" \

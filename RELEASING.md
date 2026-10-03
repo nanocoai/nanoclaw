@@ -98,7 +98,7 @@ A pre-release lets people test the next version early. It uses the same workflow
 - **Version** is `X.Y.Z-rc.N` (N starts at 1), where `X.Y.Z` is the next stable version. Other suffixes are rejected.
 - **The release PR** bumps `package.json` to `X.Y.Z-rc.N` and leaves `CHANGELOG.md` alone. The notes are the `## [Unreleased]` section as it stands, which must hold at least one bullet. Verification fails if `## [X.Y.Z]` is already in the changelog.
 - **Approval** comes from the `prerelease` environment: `glifocat` is its only reviewer and may approve his own run, so a pre-release needs no second person. The `release` environment and its reviewers still gate every stable version.
-- **Publication** creates an annotated, immutable `vX.Y.Z-rc.N` tag and a GitHub Release marked Pre-release and never latest.
+- **Publication** creates an annotated, immutable `vX.Y.Z-rc.N` tag and a GitHub Release marked Pre-release and never latest. On the first pre-release, confirm GitHub reports it as immutable; the read-back step fails closed until it does.
 
 Contributor lists and the compare link always start from the previous stable tag, so the stable `X.Y.Z` release covers everything its release candidates covered. To promote, open the normal stable release PR: bump `package.json` to `X.Y.Z` and move `Unreleased` to the dated `X.Y.Z` section.
 

@@ -8,6 +8,7 @@ import {
   isPrerelease,
   publicationPlan,
   publicationReadbackStatus,
+  unreleasedSection,
   verifyRelease,
 } from './release.mjs';
 
@@ -129,6 +130,12 @@ describe('pre-release metadata', () => {
     ).toThrow('already records as released');
   });
 
+  it('requires exactly one Unreleased heading and reads it when it is the last section', () => {
+    expect(() => unreleasedSection('# Changelog\n\n## [2.1.54] - 2026-07-31\n\n- Old.\n')).toThrow('found 0');
+    expect(() => unreleasedSection(`${withUnreleased}\n## [Unreleased]\n\n- Again.\n`)).toThrow('found 2');
+    expect(unreleasedSection('# Changelog\n\n## [Unreleased]\n\n- Only change.\n')).toBe('- Only change.');
+  });
+
   it('assembles a pre-release body from the Unreleased notes', () => {
     const generatedNotes = `## What's Changed
 * Fix one by @alice in https://github.com/nanocoai/nanoclaw/pull/1
@@ -189,7 +196,7 @@ describe('release workflow safeguards', () => {
 
   it('measures release notes from the previous stable tag, skipping pre-releases', () => {
     expect(releaseWorkflow).toContain(
-      `PREVIOUS_TAG=$(git describe --tags --abbrev=0 --match 'v*' --exclude 'v*-*' "$TARGET_SHA^")`,
+      `PREVIOUS_TAG=$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude 'v*-*' "$TARGET_SHA^")`,
     );
     expect(releaseWorkflow).not.toContain('git describe --tags --abbrev=0 "$TARGET_SHA^"');
   });
