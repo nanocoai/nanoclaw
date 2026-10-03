@@ -15,25 +15,44 @@
 # workflow makes is re-derived from the registry, because a dispatch payload is
 # attacker-supplied the moment that token leaks. Payload values are passed
 # through env: rather than inlined into run: blocks, for the same reason.
+#
+# The PR is opened by the nanoclaw-image-refresh App, not GITHUB_TOKEN: GitHub
+# refuses PRs from GITHUB_TOKEN here, and one it did open would start no
+# workflows, so `verify` would never report. The App key lives in the
+# agent-image-pr environment, which only main can use. A person merges.
 name: refresh-agent-image
 
 on:
   repository_dispatch:
     types: [agent-image-promoted]
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Find the candidate and mint the App token; push nothing and open no PR
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
-  open-bump-pr:
+  # The AWS role and the App key never share a job: this one reads the
+  # registry and holds no repository write.
+  find:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # create the bump branch
-      pull-requests: write # open the bump PR
+      contents: read
       id-token: write # OIDC for the read-only ECR role
+    outputs:
+      found: ${{ steps.candidate.outputs.found }}
+      tag: ${{ steps.candidate.outputs.tag }}
+      ref: ${{ steps.candidate.outputs.ref }}
+      branch: ${{ steps.candidate.outputs.branch }}
+      pin: ${{ steps.candidate.outputs.pin }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Assume the read-only role
         id: aws
@@ -110,24 +129,79 @@ jobs:
           print(f'digest={newest["imageDigest"]}')
           print(f'ref={registry}/{os.environ["REPO_NAME"]}@{newest["imageDigest"]}')
           print(f'branch=chore/repin-{tag}')
+          print(f'pin={pin}')
           PY
 
-      - name: Skip when there is nothing to propose
-        if: steps.candidate.outputs.found != 'true'
+      - name: Report the candidate
+        env:
+          FOUND: ${{ steps.candidate.outputs.found }}
+          REASON: ${{ steps.candidate.outputs.reason }}
+          REF: ${{ steps.candidate.outputs.ref }}
         run: |
-          echo "::notice::No bump to open — ${{ steps.candidate.outputs.reason || 'no hardened-* image found' }}."
+          if [ "$FOUND" = "true" ]; then
+            MSG="Candidate: ${REF}"
+          else
+            MSG="No bump to open — ${REASON:-no hardened-* image found}."
+          fi
+          echo "::notice::$MSG"
+          echo "$MSG" >> "$GITHUB_STEP_SUMMARY"
+
+  open-pr:
+    needs: find
+    if: needs.find.outputs.found == 'true'
+    runs-on: ubuntu-latest
+    environment: agent-image-pr
+    # One at a time, so two dispatches can't both find no PR and race the push.
+    concurrency:
+      group: agent-image-repin-pr
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      # Minted per run, scoped to this repository and to the two permissions a
+      # bump needs (v2.0.4+ honours the permission inputs; v1 ignored them).
+      # Nothing is pushed before this succeeds.
+      - name: Mint the App token
+        id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: Iv23li2a07KCTmbZpgDE # nanoclaw-image-refresh
+          private-key: ${{ secrets.AGENT_IMAGE_PR_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          token: ${{ steps.app.outputs.token }}
+
+      # Re-running only this job reuses find's outputs. If main's pin moved in
+      # between, the candidate could now be a rollback, so stop.
+      - name: Main still has the pin find compared against
+        env:
+          PIN: ${{ needs.find.outputs.pin }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          now = json.load(open('versions.json')).get('agent-image', '')
+          if now != os.environ['PIN']:
+              print("::error::The pin on main changed since the candidate was chosen. Re-run the whole workflow.")
+              sys.exit(1)
+          PY
 
       # Deterministic branch name per image, so a duplicate dispatch finds the
       # existing PR instead of opening a second one.
       - name: Check whether this bump is already open
         id: existing
-        if: steps.candidate.outputs.found == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          BRANCH: ${{ steps.candidate.outputs.branch }}
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          BRANCH: ${{ needs.find.outputs.branch }}
         run: |
           set -euo pipefail
-          if gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number' | grep -q '[0-9]'; then
+          # Captured first: inside `if … | grep` a failed lookup would read as
+          # "no PR" and let the push below overwrite an open PR's branch.
+          OPEN="$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$OPEN" ]; then
             echo "open=true" >> "$GITHUB_OUTPUT"
             echo "::notice::A PR for $BRANCH is already open."
           else
@@ -135,12 +209,15 @@ jobs:
           fi
 
       - name: Open the bump PR
-        if: steps.candidate.outputs.found == 'true' && steps.existing.outputs.open == 'false'
+        # A dry run stops here, after the key, the environment and the
+        # token's access have all been exercised with no writes.
+        if: steps.existing.outputs.open == 'false' && !inputs.dry_run
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.candidate.outputs.tag }}
-          REF: ${{ steps.candidate.outputs.ref }}
-          BRANCH: ${{ steps.candidate.outputs.branch }}
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          APP_SLUG: ${{ steps.app.outputs.app-slug }}
+          TAG: ${{ needs.find.outputs.tag }}
+          REF: ${{ needs.find.outputs.ref }}
+          BRANCH: ${{ needs.find.outputs.branch }}
           # Prose only — never a decision input. See the header.
           PAYLOAD_CREATED: ${{ github.event.client_payload.created }}
           PAYLOAD_UPSTREAM: ${{ github.event.client_payload.upstream_digest }}
@@ -157,12 +234,18 @@ jobs:
           PY
           git diff --stat
 
-          git config user.name  'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          # Commit as the App's bot user, so the commit and the PR share an author.
+          BOT_ID="$(gh api "/users/${APP_SLUG}%5Bbot%5D" --jq .id)"
+          git config user.name  "${APP_SLUG}[bot]"
+          git config user.email "${BOT_ID}+${APP_SLUG}[bot]@users.noreply.github.com"
           git switch -c "$BRANCH"
           git add versions.json
           git commit -m "versions: repin the agent image to ${TAG}"
-          git push -u origin "$BRANCH"
+          # The branch name belongs to this workflow and no PR is open on it, so
+          # a re-run after a failed `gh pr create` replaces it. The lease only
+          # overwrites the head seen here.
+          SEEN="$(git ls-remote origin "refs/heads/${BRANCH}" | cut -f1)"
+          git push --force-with-lease="refs/heads/${BRANCH}:${SEEN}" origin "HEAD:refs/heads/${BRANCH}"
 
           {
             echo "Repins the agent image to \`${TAG}\`."
@@ -188,7 +271,7 @@ jobs:
             echo "to trust — \`verify-agent-image\` re-derives all of them on this PR from the"
             echo "registry, under a different role, and is a required check."
             echo
-            echo "Opened automatically. A human still merges."
+            echo "Opened automatically by the \`${APP_SLUG}\` App. A person merges."
           } > /tmp/pr-body.md
 
           gh pr create \
