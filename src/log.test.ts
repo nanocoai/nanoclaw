@@ -48,8 +48,7 @@ describe('log never throws on unserializable data', () => {
     expect(written.join('')).toContain('10n');
   });
 
-  it('honors a top-level toJSON when stringify throws on its result', () => {
-    // The BigInt in toJSON's result makes stringify throw, so the inspect fallback runs.
+  it('honors a top-level toJSON whose result holds a BigInt', () => {
     const value = {
       token: 'SECRET',
       toJSON() {
@@ -113,10 +112,63 @@ describe('log never throws on unserializable data', () => {
     expect(out).not.toContain('SECRET');
   });
 
-  it('keeps fields four levels deep in the inspect fallback', () => {
+  it('keeps fields four levels deep next to a BigInt', () => {
     const err = { n: 1n, a: { b: { c: { d: { code: 'E_DEEP' } } } } };
     log.warn('deep', { err });
     expect(written.join('')).toContain('E_DEEP');
+  });
+
+  const redactor = () => ({
+    token: 'SECRET',
+    toJSON() {
+      return { token: '[redacted]' };
+    },
+  });
+
+  it('honors a nested toJSON when a sibling is a BigInt', () => {
+    log.warn('nested bigint', { err: { creds: redactor(), n: 1n } });
+    const out = written.join('');
+    expect(out).toContain('[redacted]');
+    expect(out).toContain('1n');
+    expect(out).not.toContain('SECRET');
+  });
+
+  it('honors a nested toJSON when the value has a cycle', () => {
+    const err: Record<string, unknown> = { creds: redactor() };
+    err.self = err;
+    log.warn('nested cycle', { err });
+    const out = written.join('');
+    expect(out).toContain('[redacted]');
+    expect(out).toContain('[Circular');
+    expect(out).not.toContain('SECRET');
+  });
+
+  it('does not mark a shared, non-circular reference as circular', () => {
+    const x = { a: 1 };
+    log.warn('shared', { v: { p: x, q: x, r: [x] }, n: 1n });
+    expect(written.join('')).not.toContain('[Circular');
+  });
+
+  it('marks a cycle inside a toJSON result', () => {
+    const value = {
+      token: 'SECRET',
+      toJSON() {
+        const o: Record<string, unknown> = { token: '[redacted]' };
+        o.self = o;
+        return o;
+      },
+    };
+    log.warn('toJSON cycle', { err: { creds: value } });
+    const out = written.join('');
+    expect(out).toContain('[Circular');
+    expect(out).not.toContain('SECRET');
+  });
+
+  it('honors a top-level toJSON', () => {
+    log.warn('top-level', { err: redactor() });
+    const out = written.join('');
+    expect(out).toContain('[redacted]');
+    expect(out).not.toContain('SECRET');
   });
 
   it('survives a Proxy with throwing traps, as a value or as the data bag', () => {
