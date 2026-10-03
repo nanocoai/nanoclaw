@@ -178,6 +178,8 @@ describe('provisioning-core bootstrap', () => {
 
   it('module absent in a Git checkout: commits the fetched file so the install stays updatable', async () => {
     vi.stubEnv('NANOCLAW_SETUP_COMMIT', '');
+    vi.stubEnv('GIT_CONFIG_GLOBAL', '/dev/null');
+    vi.stubEnv('GIT_CONFIG_NOSYSTEM', '1');
     const root = track(fs.mkdtempSync(path.join(os.tmpdir(), 'slack-auto-git-')));
     const git = (...args: string[]) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
     git('init', '-q');

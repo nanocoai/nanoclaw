@@ -57,44 +57,75 @@ export function snapshotTree(root: string): TreeSnapshot | null {
   return new Map(paths.map((file) => [file, fingerprint(join(root, file))]));
 }
 
-// A fresh machine may have no Git identity. Set one on this checkout only:
-// the updater later merges upstream into these commits and needs it too.
-function ensureIdentity(root: string): void {
-  for (const [key, value] of [
-    ['user.name', 'NanoClaw setup'],
-    ['user.email', 'setup@nanoclaw.invalid'],
-  ]) {
+const FALLBACK_IDENTITY = [
+  ['user.name', 'NanoClaw setup'],
+  ['user.email', 'setup@nanoclaw.invalid'],
+] as const;
+
+function missingIdentity(root: string): (typeof FALLBACK_IDENTITY)[number][] {
+  return FALLBACK_IDENTITY.filter(([key]) => {
     try {
-      if (git(root, ['config', key]).trim()) continue;
+      return !git(root, ['config', key]).trim();
     } catch {
-      /* unset */
+      return true;
     }
-    git(root, ['config', '--local', key, value]);
-  }
+  });
 }
 
 export function commitSetupChanges(root: string, before: TreeSnapshot | null, message: string): SetupCommitResult {
   if (!before) return { committed: [] };
+  let changed: string[] = [];
+  let missing: ReturnType<typeof missingIdentity> = [];
   try {
     const after = snapshotTree(root);
     if (!after) return { committed: [] };
-    const changed = [...after].filter(([file, hash]) => before.get(file) !== hash).map(([file]) => file);
+    changed = [...after].filter(([file, hash]) => before.get(file) !== hash).map(([file]) => file);
     if (!changed.length) return { committed: [] };
     const spec = `${changed.join('\0')}\0`;
-    ensureIdentity(root);
+    missing = missingIdentity(root);
     // Machine-made local commits: no hooks, no signing prompt mid-setup.
     const quiet = ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgSign=false'];
+    const identity = missing.flatMap(([key, value]) => ['-c', `${key}=${value}`]);
     git(root, [...quiet, 'add', '--all', '--pathspec-from-file=-', '--pathspec-file-nul'], spec);
     git(
       root,
-      [...quiet, 'commit', '--no-verify', '--quiet', '-m', message, '--pathspec-from-file=-', '--pathspec-file-nul'],
+      [
+        ...quiet,
+        ...identity,
+        'commit',
+        '--no-verify',
+        '--quiet',
+        '-m',
+        message,
+        '--pathspec-from-file=-',
+        '--pathspec-file-nul',
+      ],
       spec,
     );
-    return { committed: changed };
   } catch (err) {
-    const stderr = (err as { stderr?: string }).stderr?.trim();
-    return { committed: [], error: stderr || (err instanceof Error ? err.message : String(err)) };
+    return {
+      committed: [],
+      error:
+        `Couldn't commit the files setup just added (${reason(err)}). Before updating, review \`git status\` ` +
+        'and commit those files (git add <files> && git commit). If Git asks who you are, set user.name and user.email.',
+    };
   }
+  // Only once a commit exists: the updater later merges upstream into it
+  // and needs an identity too. Scoped to this checkout.
+  try {
+    for (const [key, value] of missing) git(root, ['config', '--local', key, value]);
+  } catch (err) {
+    return {
+      committed: changed,
+      error: `Committed setup's files, but couldn't save a Git identity (${reason(err)}). Set user.name and user.email in this checkout before updating.`,
+    };
+  }
+  return { committed: changed };
+}
+
+function reason(err: unknown): string {
+  const stderr = (err as { stderr?: string }).stderr?.trim();
+  return stderr || (err instanceof Error ? err.message : String(err));
 }
 
 /** Run one skill apply and commit its changes, even when the apply throws. */
@@ -111,7 +142,7 @@ export async function withSetupCommit<T>(
   try {
     before = snapshotTree(root);
   } catch (err) {
-    onError(err instanceof Error ? err.message : String(err));
+    onError(`Couldn't check which files setup changes (${reason(err)}); commit them yourself before updating.`);
   }
   try {
     return await apply();
@@ -122,7 +153,5 @@ export async function withSetupCommit<T>(
 }
 
 export function warnSetupCommit(error: string): void {
-  p.log.warn(
-    `Couldn't commit the files setup just added (${error}). Commit them before updating: git add -A && git commit`,
-  );
+  p.log.warn(error);
 }

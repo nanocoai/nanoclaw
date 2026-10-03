@@ -224,6 +224,19 @@ describe('setup skill applies leave an updatable checkout', () => {
     expect(git(root, 'rev-parse', 'HEAD')).toBe(head);
   });
 
+  it('reports a commit that landed when only saving the identity fails', async () => {
+    const root = install();
+    const before = snapshotTree(root);
+    writeFileSync(join(root, 'src', 'providers', 'example.ts'), 'x\n');
+    writeFileSync(join(root, '.git', 'config.lock'), '');
+
+    const result = commitSetupChanges(root, before, 'setup: apply example');
+
+    expect(result.committed).toEqual(['src/providers/example.ts']);
+    expect(result.error).toMatch(/^Committed setup's files, but couldn't save a Git identity/);
+    expect(git(root, 'status', '--porcelain')).toBe('');
+  });
+
   it('reports a commit failure instead of failing the apply', async () => {
     const root = install();
     writeFileSync(join(root, '.git', 'index.lock'), '');
@@ -239,5 +252,7 @@ describe('setup skill applies leave an updatable checkout', () => {
     );
     expect(result).toBe('applied');
     expect(onError).toHaveBeenCalledWith(expect.stringContaining('index.lock'));
+    // No commit was made, so no fallback identity is left on the checkout.
+    expect(() => git(root, 'config', '--local', 'user.email')).toThrow();
   });
 });
