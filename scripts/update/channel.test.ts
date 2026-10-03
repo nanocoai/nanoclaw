@@ -6,6 +6,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { upsertEnvVar } from '../../setup/set-env.js';
+import { abandonUpdate, prepareUpdate } from './transaction.js';
 import {
   AheadOfReleaseError,
   compareReleaseTags,
@@ -201,6 +202,32 @@ describe('resolveUpdateTarget', () => {
     tag(seed, 'v2026.10.0');
     git(seed, ['push', '-q', official, 'refs/tags/v2026.10.0']);
     expect(resolve(install, 'stable').tag).toBe('v2026.10.0');
+  });
+});
+
+describe('prepare on a release tag', () => {
+  it('stages the newer stable tag and records the channel', () => {
+    const { install, shas } = fixture('v2.3.0');
+    // prepareUpdate's runner inherits process.env; keep the operator's git config (e.g. merge.ff) out.
+    const saved = { ...process.env };
+    Object.assign(process.env, {
+      NANOCLAW_UPDATE_DIR: temp('channel-updates-'),
+      GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_CONFIG_NOSYSTEM: '1',
+    });
+    try {
+      const target = resolveUpdateTarget({ projectRoot: install, remote: 'upstream', channel: 'stable' });
+      const state = prepareUpdate({ projectRoot: install, upstreamRef: target.ref, channel: target.channel });
+      expect(state).toMatchObject({ phase: 'prepared', channel: 'stable', upstreamRef: 'refs/tags/v2.4.0' });
+      expect(state.targetHead).toBe(shas['v2.4.0']);
+      expect(git(install, ['rev-parse', 'HEAD'])).toBe(shas['v2.3.0']);
+      abandonUpdate(install, state.id);
+    } finally {
+      for (const key of ['NANOCLAW_UPDATE_DIR', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM']) {
+        if (saved[key] === undefined) delete process.env[key];
+        else process.env[key] = saved[key];
+      }
+    }
   });
 });
 
