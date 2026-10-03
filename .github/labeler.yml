@@ -110,7 +110,6 @@
           - "docs/build-and-runtime.md"
           - "docs/hardened-image.md"
           - "docs/host-lifecycle-migration.md"
-          - ".github/workflows/approve-agent-image.yml"
           - ".github/workflows/refresh-agent-image.yml"
           - ".github/workflows/verify-agent-image.yml"
           - ".claude/skills/manage-mounts/**"

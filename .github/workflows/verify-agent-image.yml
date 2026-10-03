@@ -8,15 +8,11 @@
 #              These catch a wrong or mismatched image. They are things the
 #              image asserts about itself, so they detect drift, not forgery.
 #
-#   AUTO-MERGE signature verification. The only check here that a registry
-#              write cannot satisfy on its own, so it is the only one allowed
-#              to remove the human. No signature, no auto-merge — never the
-#              other way round.
+#   REPORTED   signature verification. The only check here that a registry
+#              write cannot satisfy on its own. Its result goes to the job
+#              summary for the person who merges; it never merges anything.
 #
-# Absent signer configuration, an unverifiable signature, a fork PR with no
-# OIDC, a missing role: every one of those ends with auto-merge off and the PR
-# waiting for a person. There is no path through this file where uncertainty
-# results in a merge.
+# Nothing here approves or merges. A person merges every pin change.
 #
 # Runs on every pull request, deliberately, and NOT filtered on the versions.json
 # path. A required status check that is path-filtered never reports on a PR that
@@ -39,7 +35,6 @@ jobs:
     permissions:
       contents: read
       id-token: write # OIDC for the pull-only ECR role
-      pull-requests: write # only ever used to enable auto-merge
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -190,7 +185,7 @@ jobs:
               print("::warning::Manifest size moved by more than 3x — worth a look before merging.")
           PY
 
-      # AUTO-MERGE GATE. Nothing above can switch this on.
+      # REPORTED, not blocking: the last step tells the person merging.
       #
       # Keyless Sigstore, so what is being trusted is the publisher's build
       # workflow identity rather than a key anybody could copy. The defaults
@@ -237,36 +232,27 @@ jobs:
           # them: `.att` and `.sbom` are both absent upstream, and that is a
           # considered choice on their side — BuildKit provenance embeds build
           # environment detail they do not want redistributed. Verifying an SBOM
-          # that is never published would fail every run and hold this gate
-          # permanently off, which reads as "signature broken" rather than
-          # "attestations not offered".
+          # that is never published would fail every run, which reads as
+          # "signature broken" rather than "attestations not offered".
           #
           # If that changes, the check belongs here and must name each CHILD
           # digest from /tmp/manifest.json rather than the index: attestations
           # attach per architecture, so verifying the index alone would pass
           # without ever having looked at an SBOM.
 
-      # Arming auto-merge is a convenience, NOT a verification result, so it
-      # cannot be allowed to decide this job's conclusion. It is the last step,
-      # and without continue-on-error its failure turns the whole job red — on a
-      # draft pull request, whenever allow_auto_merge is off, or on a transient
-      # API error. Now that `verify` is a required check that is a self-inflicted
-      # block, and worse: approve-agent-image only triggers on this workflow
-      # concluding success, so one flaky call here silently breaks the approval
-      # chain behind it. A red job must mean the IMAGE failed a check.
-      - name: Enable auto-merge
-        continue-on-error: true
-        if: steps.pin.outputs.changed == 'true' && steps.sig.outcome == 'success'
+      # A missing signature stays a warning: the shape checks still hold, and an
+      # image promoted without its `.sig` tag is otherwise usable. The person
+      # merging decides, so the result goes where they look.
+      - name: Report the signature to the person merging
+        if: steps.pin.outputs.changed == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SIG: ${{ steps.sig.outcome }}
         run: |
-          echo "Signature verified against the configured publisher identity."
-          gh pr merge --squash --auto '${{ github.event.pull_request.number }}' \
-            || echo "::notice::Could not arm auto-merge (draft, disabled, or transient). Verification stands; a human merges."
-
-      - name: Explain why a human is still needed
-        if: steps.pin.outputs.changed == 'true' && steps.sig.outcome != 'success'
-        run: |
-          echo "::notice::Shape checks passed, but no verified publisher signature."
-          echo "Auto-merge stays off. Every check above is a claim the image makes about"
-          echo "itself; only a signature is something whoever pushed it could not forge."
+          if [ "$SIG" = "success" ]; then
+            MSG="Publisher signature verified for the new pin."
+            echo "::notice::$MSG"
+          else
+            MSG="No verified publisher signature for the new pin. The shape checks are claims the image makes about itself; only a signature is something whoever pushed it could not forge."
+            echo "::warning::$MSG"
+          fi
+          echo "$MSG" >> "$GITHUB_STEP_SUMMARY"
