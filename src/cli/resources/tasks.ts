@@ -81,6 +81,40 @@ async function ownSession(sessionId: string, ctx: CallerContext): Promise<Scoped
   return { id: session.id, agent_group_id: session.agent_group_id };
 }
 
+/**
+ * Sessions that actually hold task rows but are not shaped like task sessions.
+ *
+ * LOOKUP ONLY — never lifecycle. Installs predating per-series task sessions
+ * keep their tasks in the session that created them; for a chat-created task
+ * that is a chat session, which `findTaskSessions` excludes because it requires
+ * `messaging_group_id IS NULL` and a `system:tasks` thread id. Such tasks still
+ * FIRE (the host sweep walks every active session, shape-agnostic) but were
+ * unreachable from `ncl tasks`, so an agent could not list, pause, resume,
+ * update or cancel its own schedule.
+ *
+ * Deliberately NOT expressed by widening `isTaskThread()`. That predicate gates
+ * task-session LIFECYCLE: `shouldCloseTaskSession` (reconcile-session.ts) is
+ * `isTaskThread(threadId) && !containerRunning && liveTaskCount === 0`. If a live
+ * chat session ever satisfied `isTaskThread`, the reconciler would close it as
+ * soon as its container stopped with no live tasks, and channel delivery for
+ * that session would die. Keeping the widening here confines it to resolution.
+ *
+ * Unioned with `findTaskSessions` rather than used only as an empty-result
+ * fallback: a group can hold legacy rows *and* per-series sessions at once (it
+ * does the moment such an install creates one new task), and a plain fallback
+ * would hide the legacy rows again at that point.
+ */
+async function legacyTaskSessions(agentGroupId: string): Promise<ScopedSession[]> {
+  const found: ScopedSession[] = [];
+  for (const session of await getActiveSessions()) {
+    if (session.agent_group_id !== agentGroupId) continue;
+    const scoped: ScopedSession = { id: session.id, agent_group_id: session.agent_group_id };
+    const live = await withInbound(scoped, (mailbox) => mailbox.countLiveTasks());
+    if ((live ?? 0) > 0) found.push(scoped);
+  }
+  return found;
+}
+
 async function selectedSessions(
   args: Record<string, unknown>,
   ctx: CallerContext,
@@ -92,10 +126,19 @@ async function selectedSessions(
   const group = groupArg(args, ctx);
   if (group) {
     // One session per live task series — the loops below already fan out across them.
-    return (await findTaskSessions(group, includeClosed)).map((s) => ({
-      id: s.id,
-      agent_group_id: s.agent_group_id,
-    }));
+    const scoped: ScopedSession[] = [];
+    const seen = new Set<string>();
+    for (const s of await findTaskSessions(group, includeClosed)) {
+      if (seen.has(s.id)) continue;
+      seen.add(s.id);
+      scoped.push({ id: s.id, agent_group_id: s.agent_group_id });
+    }
+    for (const s of await legacyTaskSessions(group)) {
+      if (seen.has(s.id)) continue;
+      seen.add(s.id);
+      scoped.push(s);
+    }
+    return scoped;
   }
 
   if (ctx.caller === 'agent') return [];
