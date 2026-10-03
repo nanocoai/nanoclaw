@@ -8,6 +8,7 @@ import { expect, it } from 'vitest';
 import type { ResponseFrame } from './frame.js';
 import { register } from './registry.js';
 import { startCliServer, stopCliServer } from './socket-server.js';
+import { stripNodeWarnings } from './stdin-json.test-utils.js';
 
 type PrintArgs = {
   'argv-value': string;
@@ -138,7 +139,11 @@ function runCli(
     });
     child.once('close', (code, signal) => {
       clearTimeout(timeout);
-      resolve({ code, signal, stdout, stderr });
+      // Node versions newer than the CI matrix print loader deprecation
+      // warnings on the child's stderr (tsx trips DEP0205 on Node 25+).
+      // Those are environmental noise, not CLI output — drop exactly them
+      // so the `stderr: ''` assertions stay meaningful everywhere.
+      resolve({ code, signal, stdout, stderr: stripNodeWarnings(stderr) });
     });
   });
 }
