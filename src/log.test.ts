@@ -143,6 +143,27 @@ describe('log never throws on unserializable data', () => {
     expect(out).not.toContain('SECRET');
   });
 
+  it('does not mark a shared, non-circular reference as circular', () => {
+    const x = { a: 1 };
+    log.warn('shared', { v: { p: x, q: x, r: [x] }, n: 1n });
+    expect(written.join('')).not.toContain('[Circular');
+  });
+
+  it('marks a cycle inside a toJSON result', () => {
+    const value = {
+      token: 'SECRET',
+      toJSON() {
+        const o: Record<string, unknown> = { token: '[redacted]' };
+        o.self = o;
+        return o;
+      },
+    };
+    log.warn('toJSON cycle', { err: { creds: value } });
+    const out = written.join('');
+    expect(out).toContain('[Circular');
+    expect(out).not.toContain('SECRET');
+  });
+
   it('honors a top-level toJSON', () => {
     log.warn('top-level', { err: redactor() });
     const out = written.join('');
