@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 
-import { deriveAttachmentName, extForMime } from './attachment-naming.js';
+import { deriveAttachmentName, extForMime, mimeForFilename } from './attachment-naming.js';
 
 describe('extForMime', () => {
   it('returns empty for undefined / non-string / empty', () => {
@@ -67,5 +67,42 @@ describe('deriveAttachmentName', () => {
   it('does not crash on non-string mimeType (defensive against buggy bridges)', () => {
     expect(() => deriveAttachmentName({ mimeType: { foo: 'bar' } })).not.toThrow();
     expect(deriveAttachmentName({ mimeType: { foo: 'bar' } })).toMatch(/^attachment-\d+$/);
+  });
+});
+
+describe('mimeForFilename', () => {
+  it('maps the extensions agents actually produce', () => {
+    expect(mimeForFilename('chart.png')).toBe('image/png');
+    expect(mimeForFilename('photo.jpg')).toBe('image/jpeg');
+    expect(mimeForFilename('photo.jpeg')).toBe('image/jpeg');
+    expect(mimeForFilename('report.pdf')).toBe('application/pdf');
+    expect(mimeForFilename('data.csv')).toBe('text/csv');
+    expect(mimeForFilename('notes.md')).toBe('text/markdown');
+  });
+
+  it('is case-insensitive on the extension', () => {
+    expect(mimeForFilename('CHART.PNG')).toBe('image/png');
+  });
+
+  it('uses the last dot, so dotted names still resolve', () => {
+    expect(mimeForFilename('qa-ingestion.v2.png')).toBe('image/png');
+  });
+
+  it('returns undefined rather than guessing octet-stream', () => {
+    // Adapters own their own fallback; handing them a guess as though it were
+    // a fact is what produced the Teams 400 in the first place.
+    expect(mimeForFilename('archive.unknownext')).toBeUndefined();
+    expect(mimeForFilename('no-extension')).toBeUndefined();
+    expect(mimeForFilename('')).toBeUndefined();
+    expect(mimeForFilename(undefined)).toBeUndefined();
+    expect(mimeForFilename(42)).toBeUndefined();
+  });
+
+  it('round-trips every mime the inbound direction knows', () => {
+    // EXT_TO_MIME is derived from MIME_TO_EXT; this pins the invariant so a
+    // future edit to one table cannot silently desync the other.
+    for (const mime of ['image/png', 'image/jpeg', 'application/pdf', 'video/mp4', 'audio/ogg']) {
+      expect(mimeForFilename(`f.${extForMime(mime)}`)).toBe(mime);
+    }
   });
 });
