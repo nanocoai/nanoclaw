@@ -1,0 +1,65 @@
+# Graphiti knowledge-graph memory for NanoClaw agents.
+#
+# Installed by /add-graphiti into data/graphiti/ and run as the compose project
+# "nanoclaw-graphiti". All images are pinned; bump them deliberately.
+#
+# Nothing here listens on a LAN interface by default:
+#   - Neo4j publishes only to the host loopback (browser + bolt for the operator).
+#   - The Graphiti MCP server publishes nothing. graphiti-proxy fronts it on
+#     GRAPHITI_BIND_ADDR, which the skill sets to the address agent containers
+#     reach as host.docker.internal (the docker0 bridge IP on Linux, 127.0.0.1
+#     on Docker Desktop). See proxy.conf for why the proxy exists.
+services:
+  neo4j:
+    image: neo4j:5.26.0
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${NEO4J_HTTP_PORT:-7474}:7474"
+      - "127.0.0.1:${NEO4J_BOLT_PORT:-7687}:7687"
+    environment:
+      - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD:?set NEO4J_PASSWORD in data/graphiti/.env}
+      - NEO4J_server_memory_heap_initial__size=512m
+      - NEO4J_server_memory_heap_max__size=1G
+      - NEO4J_server_memory_pagecache_size=512m
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD", "wget", "-O", "/dev/null", "http://localhost:7474"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  graphiti-mcp:
+    image: zepai/knowledge-graph-mcp:1.1.0-graphiti-0.30.1-standalone
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: true
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    environment:
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_DATABASE=neo4j
+      - CONFIG_PATH=/app/mcp/config/config.yaml
+    volumes:
+      - ./config.yaml:/app/mcp/config/config.yaml:ro
+    command: ["uv", "run", "main.py"]
+
+  graphiti-proxy:
+    image: nginx:1.30.4-alpine
+    restart: unless-stopped
+    depends_on:
+      graphiti-mcp:
+        condition: service_healthy
+    volumes:
+      - ./proxy.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "${GRAPHITI_BIND_ADDR:-127.0.0.1}:${GRAPHITI_PORT:-8000}:8000"
+
+volumes:
+  neo4j_data:
+  neo4j_logs:
