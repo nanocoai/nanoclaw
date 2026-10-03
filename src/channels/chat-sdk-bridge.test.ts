@@ -543,6 +543,61 @@ describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
     expect(calls).toHaveLength(0);
   });
 
+  it('hands the raw card spec to a postCard override and returns its id', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const postCard = vi.fn(async () => 'custom-id');
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+      postCard,
+    });
+    const card = { title: 'Report', children: ['body', { text: 'more' }] };
+    const id = await bridge.deliver('slack:C1', 'slack:C1:1.2', {
+      kind: 'chat-sdk',
+      content: { type: 'card', card, fallbackText: 'Report fallback' },
+    });
+    expect(id).toBe('custom-id');
+    expect(postCard).toHaveBeenCalledWith('slack:C1:1.2', card, 'Report fallback');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('posts the default card when the postCard override returns undefined', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const postCard = vi.fn(async () => undefined);
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+      postCard,
+    });
+    const id = await bridge.deliver('telegram:42', null, {
+      kind: 'chat-sdk',
+      content: { type: 'card', card: { title: 'Daily', children: ['item'] }, fallbackText: 'Daily' },
+    });
+    expect(postCard).toHaveBeenCalledOnce();
+    expect(id).toBe('msg-stub');
+    expect(calls).toHaveLength(1);
+    const msg = calls[0].message as { card?: { title?: string }; fallbackText?: string };
+    expect(msg.card?.title).toBe('Daily');
+    expect(msg.fallbackText).toBe('Daily');
+  });
+
+  it('does not consult postCard for an empty card', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const postCard = vi.fn(async () => 'custom-id');
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+      postCard,
+    });
+    const id = await bridge.deliver('telegram:42', null, {
+      kind: 'chat-sdk',
+      content: { type: 'card', card: {} },
+    });
+    expect(id).toBeUndefined();
+    expect(postCard).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(0);
+  });
+
   it('falls through to the text branch for non-card chat-sdk payloads (no regression)', async () => {
     const { calls, postMessage } = makePostCapture();
     const bridge = createChatSdkBridge({
