@@ -32,6 +32,7 @@ import type { InboundEvent } from '../../channels/adapter.js';
 import { registerResponseHandler, type ResponsePayload } from '../../response-registry.js';
 import { getDeliveryAdapter } from '../../delivery.js';
 import { log } from '../../log.js';
+import { namespacedUserId } from '../../platform-id.js';
 import type { MessagingGroup, MessagingGroupAgent } from '../../types.js';
 import { guard } from '../../guard/index.js';
 import { channelsRegister, sendersAdmit } from './guard.js';
@@ -272,15 +273,9 @@ async function handleSenderApprovalResponse(payload: ResponsePayload): Promise<b
   const row = await getPendingSenderApproval(payload.questionId);
   if (!row) return false;
 
-  // payload.userId is the raw platform userId (e.g. "6037840640"); namespace it
-  // with the channel type so it matches users(id) format. Some platforms
-  // (e.g. Teams "29:xxx") already include a colon — mirror resolveOrCreateUser
-  // logic and only prefix when the raw id has no colon.
-  const clickerId = payload.userId
-    ? payload.userId.includes(':')
-      ? payload.userId
-      : `${payload.channelType}:${payload.userId}`
-    : null;
+  // payload.userId is the raw platform userId (e.g. "6037840640" or Teams
+  // "29:xxx"); namespace it with the channel type so it matches users(id).
+  const clickerId = payload.userId ? namespacedUserId(payload.channelType, payload.userId) : null;
   const isAuthorized =
     clickerId !== null &&
     (clickerId === row.approver_user_id || (await hasAdminPrivilege(clickerId, row.agent_group_id)));
@@ -458,11 +453,7 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
 
   // Click authorization is the guard's channels.register decision (./guard.ts):
   // the delivered approver, or an admin of the pending row's anchor agent group.
-  const clickerId = payload.userId
-    ? payload.userId.includes(':')
-      ? payload.userId
-      : `${payload.channelType}:${payload.userId}`
-    : null;
+  const clickerId = payload.userId ? namespacedUserId(payload.channelType, payload.userId) : null;
   const decision = await guard(channelsRegister, {
     actor: { kind: 'human', userId: clickerId ?? '' },
     payload: { questionId: payload.questionId },
