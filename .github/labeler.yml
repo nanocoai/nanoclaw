@@ -186,9 +186,13 @@
           - ".claude/skills/add-ollama-provider/**"
 
 "area/repository-maintenance":
+  # Skill PRs regenerate .github/skill-pins; that alone is not repo maintenance.
+  - changed-files:
+      - all-globs-to-any-file:
+          - ".github/**"
+          - "!.github/skill-pins/**"
   - changed-files:
       - any-glob-to-any-file:
-          - ".github/**"
           - ".husky/**"
           - ".gitignore"
           - ".npmrc"
