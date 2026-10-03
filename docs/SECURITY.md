@@ -146,6 +146,8 @@ none approves on error. If the provider's approval bridge goes away, holds are
 denied, running sessions stop, and session admission closes until a supervised
 reconnect proves the bridge is back.
 
+This per-agent scoping applies to generic secrets (`secretMode`, `agents set-secrets`). On a self-hosted OneCLI gateway, OAuth app connections are account-level and shared by every agent — per-agent connection assignment (`PUT /v1/agents/{id}/connections`) is project-scoped and only available on OneCLI Cloud. An agent with no explicit OAuth connection assignment can still reach any OAuth-connected app on a self-hosted gateway.
+
 **Never on the container filesystem:**
 - The project root and `.env` — never mounted; the container only receives the paths in the mount table above.
 - The mount allowlist — external (`~/.config/nanoclaw/…`), never mounted.
