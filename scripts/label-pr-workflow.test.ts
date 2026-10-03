@@ -28,14 +28,25 @@ type DecideCompliance = (args: {
   body?: string | null;
   add: string[];
   currentLabels?: string[];
-}) => { state: 'success' | 'failure' | null };
+  author?: string | null;
+}) => { state: 'success' | 'failure'; missing: string[]; exempt: boolean; description: string };
 
-type ShouldPostComplianceComment = (state: string | null, existingCommentBodies: Array<string | null>) => boolean;
+interface ComplianceCommentPlan {
+  action: 'create' | 'update' | 'none';
+  commentId?: number;
+  body?: string;
+}
+
+type PlanComplianceComment = (
+  compliance: { state: 'success' | 'failure'; missing: string[]; exempt: boolean },
+  existingComments: Array<{ id: number; body?: string | null; user?: { login?: string } | null }>,
+) => ComplianceCommentPlan;
 
 interface ExtractedLogic {
   computeLabels: ComputeLabels;
   decideCompliance: DecideCompliance;
-  shouldPostComplianceComment: ShouldPostComplianceComment;
+  planComplianceComment: PlanComplianceComment;
+  REQUIRED_SECTIONS: string[];
 }
 
 function extractLogic(): ExtractedLogic {
@@ -56,16 +67,16 @@ function extractLogic(): ExtractedLogic {
     .map((line) => line.replace(/^ {12}/, ''))
     .join('\n');
   return new Function(
-    `${code}\nreturn { computeLabels, decideCompliance, shouldPostComplianceComment };`,
+    `${code}\nreturn { computeLabels, decideCompliance, planComplianceComment, REQUIRED_SECTIONS };`,
   )() as ExtractedLogic;
 }
 
-const { computeLabels, decideCompliance, shouldPostComplianceComment } = extractLogic();
+const { computeLabels, decideCompliance, planComplianceComment, REQUIRED_SECTIONS } = extractLogic();
 
 /** Full pipeline as the driver runs it: parse, then judge compliance. */
-function complianceFor(body: string, title: string, currentLabels: string[] = []) {
-  const { add } = computeLabels({ body, title, author: 'drive-by-contributor', currentLabels });
-  return decideCompliance({ body, add, currentLabels });
+function complianceFor(body: string, title: string, currentLabels: string[] = [], author = 'drive-by-contributor') {
+  const { add } = computeLabels({ body, title, author, currentLabels });
+  return decideCompliance({ body, add, currentLabels, author });
 }
 
 /** Raw workflow text, for fixtures that couple prose promises to parser behavior. */
@@ -322,34 +333,133 @@ describe('v1 bodies (frozen pre-v2 behavior)', () => {
   });
 });
 
-describe('template-compliance (report-only)', () => {
-  it('v2 body with zero kind verdict: failing status', () => {
-    expect(complianceFor(v2Body([]), 'Update stuff').state).toBe('failure');
+/** The sections the template header requires in every PR. */
+const REQUIRED = ['Summary', 'Change kind', 'Validation', 'Security and trust boundaries', 'AI assistance'];
+/** A complete v2 body: every required section, plus v2Body's kind and skill blocks. */
+const fullBody = (kinds: string[], opts: { omit?: string[]; extra?: string } = {}) =>
+  v2Body(kinds) +
+  REQUIRED.filter((h) => h !== 'Change kind' && !(opts.omit || []).includes(h))
+    .map((h) => `\n## ${h}\n\nSomething real.\n`)
+    .join('') +
+  (opts.extra || '');
+/** fullBody with the Change kind heading itself removed. */
+const withoutKindHeading = (kinds: string[]) => fullBody(kinds).replace('## Change kind\n', '');
+
+describe('template-compliance', () => {
+  it('requires exactly the sections the template header names', () => {
+    expect(REQUIRED_SECTIONS).toEqual(REQUIRED);
+    const template = fs.readFileSync(path.join(__dirname, '..', '.github', 'PULL_REQUEST_TEMPLATE.md'), 'utf8');
+    for (const h of REQUIRED_SECTIONS) expect(template).toMatch(new RegExp(`^## ${h}$`, 'm'));
   });
 
-  it('good bodies are green: checkbox verdict, title fallback, or an already-applied kind', () => {
-    expect(complianceFor(v2Body(['kind/bug']), 'x').state).toBe('success');
-    expect(complianceFor(v2Body([]), 'fix: something').state).toBe('success');
-    // Maintainer classified at triage; blank body must NOT go red.
-    expect(complianceFor(v2Body([]), 'Update stuff', ['kind/cleanup']).state).toBe('success');
+  it('complete v2 body with one kind box: success', () => {
+    const res = complianceFor(fullBody(['kind/bug']), 'Update stuff');
+    expect(res.state).toBe('success');
+    expect(res.missing).toEqual([]);
+    expect(res.exempt).toBe(false);
   });
 
-  it('v1 and no-marker bodies are untouched: no status at all', () => {
-    expect(complianceFor('<!-- contributing-guide: v1 -->\n- [x] **Fix** - bug fix', 'x').state).toBeNull();
-    expect(complianceFor('just a hand-written body', 'fix: x').state).toBeNull();
+  it('optional sections may be deleted', () => {
+    const body = fullBody(['kind/bug']).replace(/\n## Skill delivery\n[\s\S]*?(?=\n## )/, '\n');
+    expect(body).not.toContain('Skill delivery');
+    expect(complianceFor(body, 'x').state).toBe('success');
   });
 
-  it('the fix comment posts once, ever — idempotent across pushes', () => {
-    // First failing push: no comments yet -> post.
-    expect(shouldPostComplianceComment('failure', [])).toBe(true);
-    // Later pushes: our marker comment exists -> never repeat.
-    const marked = ['<!-- nanoclaw-template-compliance -->\nThis PR uses the v2 template…'];
-    expect(shouldPostComplianceComment('failure', marked)).toBe(false);
-    // Unrelated comments do not suppress it.
-    expect(shouldPostComplianceComment('failure', ['LGTM', null])).toBe(true);
-    // Green states never comment.
-    expect(shouldPostComplianceComment('success', [])).toBe(false);
-    expect(shouldPostComplianceComment(null, [])).toBe(false);
+  it('no v2 marker: failure, even with every section present', () => {
+    const res = complianceFor(fullBody(['kind/bug']).replace(V2, ''), 'fix: x');
+    expect(res.state).toBe('failure');
+    expect(res.missing).toContain('v2 template marker');
+    expect(res.description).toMatch(/v2 template/);
+  });
+
+  it('a filled-in template that lost its marker is blamed for the marker only', () => {
+    // Real case: the marker line dropped, every section and a kind box kept.
+    // The v1 parser ignores the box, so "kind classification" would be false.
+    const res = complianceFor(fullBody(['kind/bug']).replace(V2, ''), 'Update stuff');
+    expect(res.missing).toEqual(['v2 template marker']);
+  });
+
+  it('v1 and hand-written bodies now fail instead of getting no status', () => {
+    expect(complianceFor('<!-- contributing-guide: v1 -->\n- [x] **Fix** - bug fix', 'x').state).toBe('failure');
+    expect(complianceFor('just a hand-written body', 'fix: x').state).toBe('failure');
+    expect(complianceFor('', 'fix: x').state).toBe('failure');
+  });
+
+  it('each missing required section fails and is named', () => {
+    for (const h of REQUIRED.filter((x) => x !== 'Change kind')) {
+      const res = complianceFor(fullBody(['kind/bug'], { omit: [h] }), 'x');
+      expect(res.state, h).toBe('failure');
+      expect(res.missing, h).toEqual([`${h} section`]);
+      expect(res.description, h).toContain(h);
+    }
+    const noKindHeading = complianceFor(withoutKindHeading(['kind/bug']), 'x');
+    expect(noKindHeading.state).toBe('failure');
+    expect(noKindHeading.missing).toEqual(['Change kind section']);
+  });
+
+  it('a heading only inside a code fence or an HTML comment does not count', () => {
+    const fenced = fullBody(['kind/bug'], { omit: ['Validation'], extra: '\n```md\n## Validation\n```\n' });
+    expect(complianceFor(fenced, 'x').missing).toEqual(['Validation section']);
+    const tilde = fullBody(['kind/bug'], { omit: ['Validation'], extra: '\n~~~\n## Validation\n~~~\n' });
+    expect(complianceFor(tilde, 'x').missing).toEqual(['Validation section']);
+    const commented = fullBody(['kind/bug'], { omit: ['AI assistance'], extra: '\n<!--\n## AI assistance\n-->\n' });
+    expect(complianceFor(commented, 'x').missing).toEqual(['AI assistance section']);
+    // An unterminated comment hides the rest of the body when GitHub renders it.
+    const open = fullBody(['kind/bug'], { omit: ['AI assistance'], extra: '\n<!-- oops\n## AI assistance\n' });
+    expect(complianceFor(open, 'x').missing).toEqual(['AI assistance section']);
+  });
+
+  it('CommonMark block rules: indented fences, inline `<!--`, fence text inside a comment', () => {
+    // Inline code mentioning `<!--` opens no comment.
+    const inline = fullBody(['kind/bug']).replace('Something real.', 'Handles the literal `<!--` token.');
+    expect(complianceFor(inline, 'x').state).toBe('success');
+    // A fence opened with one space of indent still closes on a flush-left fence.
+    // (Placed after the kind boxes: the kind parser's stripFences, unchanged
+    // here, is flush-left only.)
+    const indentedOpen = fullBody(['kind/bug']).replace('## Validation', ' ```\ncode\n```\n## Validation');
+    expect(complianceFor(indentedOpen, 'x').state).toBe('success');
+    // Headings inside an indented fence are code, not sections.
+    const hiddenInFence = fullBody(['kind/bug'], { omit: ['Validation'], extra: '\n   ```\n## Validation\n   ```\n' });
+    expect(complianceFor(hiddenInFence, 'x').missing).toEqual(['Validation section']);
+    // A fence marker inside an HTML comment is comment text; the comment still closes.
+    const fenceInComment = fullBody(['kind/bug']).replace('## Validation', '<!--\n   ```\n-->\n## Validation');
+    expect(complianceFor(fenceInComment, 'x').state).toBe('success');
+    // A fence opened on a list item closes on its indented closing line.
+    const listFence = fullBody(['kind/bug']).replace('## Validation', '- ~~~sh\n  echo ok\n  ~~~\n\n## Validation');
+    expect(complianceFor(listFence, 'x').state).toBe('success');
+    // A shorter or different-character line does not close a fence.
+    const unclosed = fullBody(['kind/bug'], { omit: ['Validation'], extra: '\n````\n```\n~~~~\n## Validation\n````\n' });
+    expect(complianceFor(unclosed, 'x').missing).toEqual(['Validation section']);
+  });
+
+  it('heading matching tolerates case, level, CRLF, up to three leading spaces, and a trailing note', () => {
+    const body = fullBody(['kind/bug'])
+      .replace('## Validation', '### validation (manual)')
+      .replace('## Summary', '   ## Summary')
+      .replace(/\n/g, '\r\n');
+    expect(complianceFor(body, 'x').state).toBe('success');
+    // But a heading that merely starts with the word does not count.
+    const prefixed = fullBody(['kind/bug']).replace('## Summary', '## Summaryish');
+    expect(complianceFor(prefixed, 'x').missing).toEqual(['Summary section']);
+    // Four spaces make it indented code, not a heading.
+    const indented = fullBody(['kind/bug']).replace('## Summary', '    ## Summary');
+    expect(complianceFor(indented, 'x').missing).toEqual(['Summary section']);
+  });
+
+  it('a section must be a heading, not prose that mentions it', () => {
+    const body = fullBody(['kind/bug'], { omit: ['Summary'], extra: '\nSee ## Summary above.\n' });
+    expect(complianceFor(body, 'x').missing).toEqual(['Summary section']);
+  });
+
+  it('kind rule unchanged: no verdict fails, and every classification path passes', () => {
+    const none = complianceFor(fullBody([]), 'Update stuff');
+    expect(none.state).toBe('failure');
+    expect(none.missing).toEqual(['kind classification']);
+    expect(complianceFor(fullBody([]), 'fix: something').state).toBe('success');
+    // Maintainer classified at triage; blank kind box must NOT go red.
+    expect(complianceFor(fullBody([]), 'Update stuff', ['kind/cleanup']).state).toBe('success');
+    // Several boxes with no fallback: still unclassified.
+    expect(complianceFor(fullBody(['kind/bug', 'kind/feature']), 'Update stuff').state).toBe('failure');
   });
 
   it('decideCompliance recognizes every kind computeLabels can emit', () => {
@@ -358,12 +468,97 @@ describe('template-compliance (report-only)', () => {
     // parser can emit must also count as a classification, so an honestly
     // filled-in template can never leave the status red.
     for (const kind of TEMPLATE_KINDS) {
-      const res = computeLabels({ body: v2Body([kind]), title: 'Update stuff', author: FORK_AUTHOR });
+      const res = computeLabels({ body: fullBody([kind]), title: 'Update stuff', author: FORK_AUTHOR });
       expect(res.add).toContain(kind);
-      expect(complianceFor(v2Body([kind]), 'Update stuff').state).toBe('success');
+      expect(complianceFor(fullBody([kind]), 'Update stuff').state).toBe('success');
       // Same kind arriving as maintainer triage rather than a checkbox.
-      expect(complianceFor(v2Body([]), 'Update stuff', [kind]).state).toBe('success');
+      expect(complianceFor(fullBody([]), 'Update stuff', [kind]).state).toBe('success');
     }
+  });
+
+  it('bot authors are exempt: success, never failure', () => {
+    for (const bot of ['dependabot[bot]', 'renovate[bot]', 'github-actions[bot]', 'some-app[bot]', 'Dependabot[BOT]']) {
+      const res = complianceFor('Bumps foo from 1.0 to 1.1.', 'chore(deps): bump foo', [], bot);
+      expect(res.state, bot).toBe('success');
+      expect(res.exempt, bot).toBe(true);
+      expect(res.missing, bot).toEqual([]);
+    }
+    // A human login that merely contains "bot" is not exempt.
+    expect(complianceFor('hand-written', 'x', [], 'robotics-fan').state).toBe('failure');
+  });
+
+  it('status description names what is missing and fits GitHub\'s 140-char cap', () => {
+    const worst = complianceFor('nothing here', 'Update stuff');
+    expect(worst.state).toBe('failure');
+    expect(worst.missing).toEqual(['v2 template marker', ...REQUIRED.map((h) => `${h} section`)]);
+    const v2Worst = complianceFor(V2 + 'nothing here', 'Update stuff');
+    expect(v2Worst.missing).toEqual([...REQUIRED.map((h) => `${h} section`), 'kind classification']);
+    expect(v2Worst.description.length).toBeLessThanOrEqual(140);
+    expect(worst.description.length).toBeLessThanOrEqual(140);
+    expect(worst.description).not.toMatch(/report-only|does not block/i);
+    const one = complianceFor(fullBody(['kind/bug'], { omit: ['Validation'] }), 'x');
+    expect(one.description).toBe('Missing: Validation section');
+    expect(complianceFor(fullBody(['kind/bug']), 'x').description.length).toBeLessThanOrEqual(140);
+  });
+});
+
+describe('template-compliance comment', () => {
+  const ACTIONS = { login: 'github-actions[bot]' };
+  const failing = () => complianceFor(fullBody(['kind/bug'], { omit: ['Validation'] }), 'x');
+
+  it('first failure creates one comment naming what is missing, with template and CONTRIBUTING links', () => {
+    const plan = planComplianceComment(failing(), []);
+    expect(plan.action).toBe('create');
+    expect(plan.body).toContain('<!-- nanoclaw-template-compliance -->');
+    expect(plan.body).toContain('Validation section');
+    expect(plan.body).toContain('https://github.com/nanocoai/nanoclaw/blob/main/.github/PULL_REQUEST_TEMPLATE.md');
+    expect(plan.body).toContain('https://github.com/nanocoai/nanoclaw/blob/main/CONTRIBUTING.md');
+    expect(plan.body).not.toMatch(/report-only|does not block/i);
+  });
+
+  it('later failures update our existing comment instead of posting another', () => {
+    const first = planComplianceComment(failing(), []);
+    const existing = [
+      { id: 1, body: 'LGTM', user: { login: 'someone' } },
+      { id: 7, body: first.body, user: ACTIONS },
+    ];
+    // Same content: nothing to do (no edit churn on every push).
+    expect(planComplianceComment(failing(), existing).action).toBe('none');
+    // Different gaps: edit comment 7 in place.
+    const other = complianceFor(fullBody(['kind/bug'], { omit: ['Summary'] }), 'x');
+    const plan = planComplianceComment(other, existing);
+    expect(plan).toMatchObject({ action: 'update', commentId: 7 });
+    expect(plan.body).toContain('Summary section');
+    expect(plan.body).not.toContain('Validation section');
+  });
+
+  it('only our own marker comment counts: a pasted marker neither suppresses nor gets edited', () => {
+    const spoof = [{ id: 3, body: '<!-- nanoclaw-template-compliance -->\nfake', user: { login: 'drive-by-contributor' } }];
+    expect(planComplianceComment(failing(), spoof).action).toBe('create');
+  });
+
+  it('once fixed, our comment is edited to say so; with no comment, nothing is posted', () => {
+    const green = complianceFor(fullBody(['kind/bug']), 'x');
+    expect(planComplianceComment(green, []).action).toBe('none');
+    const first = planComplianceComment(failing(), []);
+    const plan = planComplianceComment(green, [{ id: 7, body: first.body, user: ACTIONS }]);
+    expect(plan).toMatchObject({ action: 'update', commentId: 7 });
+    expect(plan.body).toContain('<!-- nanoclaw-template-compliance -->');
+    expect(plan.body).not.toContain('Validation section');
+    // And it is not re-edited on every later green push.
+    expect(planComplianceComment(green, [{ id: 7, body: plan.body, user: ACTIONS }]).action).toBe('none');
+  });
+
+  it('bot-authored PRs never get a comment', () => {
+    const bot = complianceFor('Bumps foo.', 'chore: bump', [], 'dependabot[bot]');
+    expect(planComplianceComment(bot, []).action).toBe('none');
+  });
+
+  it('comment text is built only from fixed vocabulary, never PR content', () => {
+    const hostile = '<!-- nanoclaw-pr-template:v2 -->\n## Summary\n@everyone <script>x</script>\n';
+    const plan = planComplianceComment(complianceFor(hostile, '@everyone'), []);
+    expect(plan.body).not.toContain('@everyone');
+    expect(plan.body).not.toContain('<script>');
   });
 
   it('every conventional-commit prefix the fix comment promises actually maps to a kind', () => {

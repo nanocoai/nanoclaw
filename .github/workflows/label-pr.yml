@@ -31,8 +31,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
-      issues: write # createLabel (core-team, until Decision 4) + list/create the single compliance comment
-      statuses: write # report-only template-compliance commit status
+      issues: write # createLabel (core-team, until Decision 4) + list/create/update the single compliance comment
+      statuses: write # template-compliance commit status
     steps:
       - uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
         with:
@@ -196,31 +196,161 @@ jobs:
               return { add, remove, coreTeam };
             }
 
-            // Report-only template compliance (CI-04: the classification
-            // check runs and reports long before it is ever required).
-            //   - v2-marker body with a kind classification (parser verdict,
-            //     title fallback, or an already-applied managed kind) →
-            //     'success'.
-            //   - v2-marker body with no classification at all → 'failure':
-            //     a red X on the commit status, deliberately NOT in the
-            //     required-checks list, so the PR stays mergeable and nothing
-            //     is ever auto-closed.
-            //   - v1 / no-marker bodies → null: untouched, no status at all.
-            function decideCompliance({ body, add, currentLabels }) {
-              if (!(body || '').includes('<!-- nanoclaw-pr-template:v2 -->')) return { state: null };
-              const classified =
-                add.some((l) => MANAGED_KINDS.includes(l)) ||
-                (currentLabels || []).some((l) => MANAGED_KINDS.includes(l));
-              return { state: classified ? 'success' : 'failure' };
+            // Template compliance: a PR body must follow the v2 template.
+            // 'failure' when any of these is missing, in this order:
+            //   - the v2 marker (v1 and hand-written bodies fail too),
+            //   - a required section heading (REQUIRED_SECTIONS: the sections
+            //     the template header says to keep in every PR; Related work,
+            //     User and release impact, and Skill delivery may be deleted),
+            //   - on v2 bodies, a kind classification (parser checkbox
+            //     verdict, title fallback, or an already-applied managed
+            //     kind — unchanged).
+            // Headings count only outside fenced code and HTML comments, the
+            // parts of the body GitHub does not render as headings.
+            // Bot authors (any `[bot]` login; GitHub forbids brackets in user
+            // logins, so a human cannot claim the suffix) are exempt with a
+            // 'success' rather than no status: a missing status never resolves,
+            // so it would block the PR forever if the context is made required.
+            // The release note is checked by its own workflow, not here.
+            const REQUIRED_SECTIONS = ['Summary', 'Change kind', 'Validation', 'Security and trust boundaries', 'AI assistance'];
+
+            // Lines GitHub renders as Markdown, minus fenced code and HTML
+            // comment blocks, close to CommonMark's block rules. A fence
+            // closes only on the same character at least as long, and may be
+            // indented or opened on a list item (`- ~~~sh`), since list items
+            // hold fences too. Leading whitespace is not measured, so a lone
+            // fence line inside 4-space indented code is misread; the trade
+            // favors list fences, which PR bodies use far more. A comment
+            // block starts on a line opening with `<!--` and runs to the line
+            // holding `-->` (unterminated: to the end). A `<!--` mid-line
+            // (inline code, prose) opens nothing. Its own scanner, not
+            // stripFences, so the kind parser stays unchanged.
+            function visibleText(body) {
+              const out = [];
+              let fence = null;
+              let comment = false;
+              for (const line of (body || '').replace(/\r\n?/g, '\n').split('\n')) {
+                if (comment) {
+                  if (line.includes('-->')) comment = false;
+                  continue;
+                }
+                if (fence) {
+                  const close = /^[ \t]*(`{3,}|~{3,})[ \t]*$/.exec(line);
+                  if (close && close[1][0] === fence[0] && close[1].length >= fence.length) fence = null;
+                  continue;
+                }
+                const open = /^[ \t]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)?(`{3,}|~{3,})(.*)$/.exec(line);
+                if (open && !(open[1][0] === '`' && open[2].includes('`'))) {
+                  fence = open[1];
+                  continue;
+                }
+                const html = /^ {0,3}<!--/.exec(line);
+                if (html) {
+                  comment = !line.slice(html[0].length).includes('-->');
+                  continue;
+                }
+                out.push(line);
+              }
+              return out.join('\n');
             }
 
-            // One fix-instructions comment per PR, ever — not one per push.
-            // The hidden marker identifies our comment; a marker hit from any
-            // earlier run suppresses a new one.
+            function hasSection(visible, name) {
+              const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              return new RegExp('^ {0,3}#{1,6}[ \\t]+' + escaped + '(?![\\w-])[^\\n]*$', 'im').test(visible);
+            }
+
+            // GitHub caps commit-status descriptions at 140 characters.
+            function complianceDescription(missing) {
+              if (missing.length === 0) return 'PR follows the v2 template';
+              if (missing[0] === 'v2 template marker') {
+                return 'Not on the v2 template (marker missing): copy .github/PULL_REQUEST_TEMPLATE.md into the description';
+              }
+              let text = 'Missing: ' + missing.join(', ');
+              if (text.length > 140) text = 'Missing ' + missing.length + ': ' + missing.join(', ');
+              return text.length > 140 ? text.slice(0, 139) + '…' : text;
+            }
+
+            function decideCompliance({ body, add, currentLabels, author }) {
+              if (/\[bot\]$/i.test(author || '')) {
+                return { state: 'success', missing: [], exempt: true, description: 'Bot-authored PR: template not required' };
+              }
+              const missing = [];
+              const v2 = (body || '').includes('<!-- nanoclaw-pr-template:v2 -->');
+              if (!v2) missing.push('v2 template marker');
+              const visible = visibleText(body);
+              for (const name of REQUIRED_SECTIONS) {
+                if (!hasSection(visible, name)) missing.push(name + ' section');
+              }
+              const classified =
+                (add || []).some((l) => MANAGED_KINDS.includes(l)) ||
+                (currentLabels || []).some((l) => MANAGED_KINDS.includes(l));
+              // Only judged on v2 bodies: without the marker, computeLabels
+              // takes the v1 path and ignores a checked kind box, so this
+              // would blame a filled-in box. Restoring the marker re-judges it.
+              if (v2 && !classified) missing.push('kind classification');
+              return {
+                state: missing.length === 0 ? 'success' : 'failure',
+                missing,
+                exempt: false,
+                description: complianceDescription(missing),
+              };
+            }
+
+            // One compliance comment per PR, edited in place: created on the
+            // first failure, rewritten when the gaps change, and switched to a
+            // short resolved note once the body passes. Only a comment that
+            // github-actions[bot] wrote AND that carries the marker counts, so a
+            // pasted marker can neither suppress it nor be edited. The text is
+            // built only from fixed strings and the fixed `missing` vocabulary;
+            // never interpolate PR-controlled content into a comment posted
+            // with write permissions.
             const COMPLIANCE_COMMENT_MARKER = '<!-- nanoclaw-template-compliance -->';
-            function shouldPostComplianceComment(state, existingCommentBodies) {
-              if (state !== 'failure') return false;
-              return !(existingCommentBodies || []).some((b) => (b || '').includes(COMPLIANCE_COMMENT_MARKER));
+            const COMPLIANCE_BOT = 'github-actions[bot]';
+            const TEMPLATE_URL = 'https://github.com/nanocoai/nanoclaw/blob/main/.github/PULL_REQUEST_TEMPLATE.md';
+            const CONTRIBUTING_URL = 'https://github.com/nanocoai/nanoclaw/blob/main/CONTRIBUTING.md';
+
+            function complianceCommentBody(missing) {
+              if (missing.length === 0) {
+                return [
+                  COMPLIANCE_COMMENT_MARKER,
+                  'The PR description now follows the [PR template](' + TEMPLATE_URL + '), and the `template-compliance` status is green.',
+                ].join('\n');
+              }
+              const lines = [
+                COMPLIANCE_COMMENT_MARKER,
+                'The `template-compliance` status is red: the PR description does not follow the [PR template](' + TEMPLATE_URL + '). See [CONTRIBUTING](' + CONTRIBUTING_URL + ') for what each section needs.',
+                '',
+                'Missing:',
+                ...missing.map((m) => '- ' + m),
+                '',
+              ];
+              if (missing.includes('v2 template marker')) {
+                lines.push('Copy the template into the description, keep its first line (`<!-- nanoclaw-pr-template:v2 -->`), and fill it in.');
+              }
+              if (missing.some((m) => m.endsWith(' section'))) {
+                lines.push('Headings count only as written outside code blocks and HTML comments. Write "None." rather than deleting a required section.');
+              }
+              if (missing.includes('kind classification')) {
+                lines.push(
+                  'For the kind, either:',
+                  '- check exactly one box in the **Change kind** section (`kind/bug`, `kind/feature`, `kind/documentation`, `kind/cleanup`, or `kind/hardening`), or',
+                  '- give the PR a conventional-commit title (`fix:`, `feat:`, `docs:`, `refactor:`, `chore:`, `ci:`, `test:`, `build:`, `style:`, `perf:`) and edit the description to re-trigger labeling.',
+                );
+              }
+              lines.push('', 'The status is recalculated on every push and description edit.');
+              return lines.join('\n');
+            }
+
+            function planComplianceComment(compliance, existingComments) {
+              if (compliance.exempt) return { action: 'none' };
+              const ours = (existingComments || []).find(
+                (c) => c && c.user && c.user.login === COMPLIANCE_BOT && (c.body || '').includes(COMPLIANCE_COMMENT_MARKER),
+              );
+              if (compliance.state === 'success' && !ours) return { action: 'none' };
+              const body = complianceCommentBody(compliance.missing);
+              if (!ours) return { action: 'create', body };
+              if (ours.body === body) return { action: 'none' };
+              return { action: 'update', commentId: ours.id, body };
             }
             // NANOCLAW-LABEL-LOGIC-END
 
@@ -233,50 +363,56 @@ jobs:
               currentLabels,
             });
 
-            // ── Report-only template-compliance status (every event) ──
-            const compliance = decideCompliance({ body: pr.body, add, currentLabels });
-            if (compliance.state !== null) {
-              await github.rest.repos.createCommitStatus({
+            // ── Template-compliance status and comment (every event) ──
+            // Judge the PR as it is now, not the event payload: a re-run of
+            // an old event (or a queued one) would otherwise post a stale
+            // verdict and rewrite the comment with gaps already fixed.
+            const { data: live } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number,
+            });
+            const liveLabels = (live.labels || []).map((l) => l.name);
+            const compliance = decideCompliance({
+              body: live.body,
+              add: computeLabels({ body: live.body, title: live.title, author: live.user.login, currentLabels: liveLabels }).add,
+              currentLabels: liveLabels,
+              author: live.user.login,
+            });
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: live.head.sha,
+              state: compliance.state,
+              context: 'template-compliance',
+              description: compliance.description,
+            });
+            if (!compliance.exempt) {
+              // Paginate: finding our one comment is a check-then-act over the
+              // whole comment list, so reading only the first page would re-post
+              // on any PR whose discussion has outgrown it. github.paginate
+              // returns the flat array, not a { data } envelope.
+              const existing = await github.paginate(github.rest.issues.listComments, {
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                sha: pr.head.sha,
-                state: compliance.state,
-                context: 'template-compliance',
-                description:
-                  compliance.state === 'success'
-                    ? 'PR carries a kind classification'
-                    : 'No kind classification — check one kind/* box (report-only, does not block merge)',
+                issue_number: pr.number,
+                per_page: 100,
               });
-              if (compliance.state === 'failure') {
-                // Paginate: the 'one comment ever' guarantee is a check-then-act
-                // over the whole comment list, so reading only the first page
-                // would re-post on any PR whose discussion has outgrown it.
-                // github.paginate returns the flat array, not a { data } envelope.
-                const existing = await github.paginate(github.rest.issues.listComments, {
+              const plan = planComplianceComment(compliance, existing);
+              if (plan.action === 'create') {
+                await github.rest.issues.createComment({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
                   issue_number: pr.number,
-                  per_page: 100,
+                  body: plan.body,
                 });
-                if (shouldPostComplianceComment(compliance.state, existing.map((c) => c.body))) {
-                  // Static text only — never interpolate PR-controlled content
-                  // into a comment posted with write permissions.
-                  await github.rest.issues.createComment({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    issue_number: pr.number,
-                    body: [
-                      COMPLIANCE_COMMENT_MARKER,
-                      'This PR uses the v2 template but has no kind classification, so the report-only `template-compliance` status is red. It does not block merging.',
-                      '',
-                      'To fix, either:',
-                      '- check exactly one box in the **Change kind** section (`kind/bug`, `kind/feature`, `kind/documentation`, `kind/cleanup`, or `kind/hardening`), or',
-                      '- give the PR a conventional-commit title (`fix:`, `feat:`, `docs:`, `refactor:`, `chore:`, `ci:`, `test:`, `build:`, `style:`, `perf:`) and edit the description to re-trigger labeling.',
-                      '',
-                      'A maintainer can also apply a `kind/*` label directly. Applying the label does not clear this status on its own: the status is recalculated on the next push or description edit.',
-                    ].join('\n'),
-                  });
-                }
+              } else if (plan.action === 'update') {
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: plan.commentId,
+                  body: plan.body,
+                });
               }
             }
 
