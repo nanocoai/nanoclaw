@@ -351,9 +351,10 @@ describe.each(SKILLS)('%s', (name) => {
     directives.forEach((d, i) => {
       if (d.kind !== 'run') return;
       for (const cmd of d.body) {
-        const key = cmd.match(/^pnpm pkg set '(pnpm\.[^=']+)=/)?.[1];
+        const key = cmd.match(/\bpnpm pkg set ["']?(pnpm\.[^="']+)=/)?.[1];
         if (!key) continue;
-        expect(removeMd, `REMOVE.md never deletes ${key}`).toContain(`pnpm pkg delete '${key}'`);
+        const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        expect(removeMd, `REMOVE.md never deletes ${key}`).toMatch(new RegExp(`pnpm pkg delete ["']?${escaped}["']?`));
         directives.forEach((dep, j) => {
           if (dep.kind === 'dep' && !exclusive(d, dep)) {
             expect(j, `nc:dep at line ${dep.line} installs before line ${d.line} sets ${key}`).toBeGreaterThan(i);
