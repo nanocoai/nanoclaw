@@ -549,6 +549,70 @@ describe('CLI scope enforcement', () => {
     }
   });
 
+  it('group: warns on stderr when explicit --agent_group_id differs from the locked value', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    await dispatch({ id: '1', command: 'sessions-list', args: { agent_group_id: 'other-group' } }, agentCtx());
+
+    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('--agent_group_id (other-group)'));
+    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('overridden by group scope (g1)'));
+    stderrSpy.mockRestore();
+  });
+
+  it('group: warns on stderr when explicit --group differs from the locked value', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    await dispatch({ id: '1', command: 'members-add', args: { user: 'u1', group: 'other-group' } }, agentCtx());
+
+    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('--group (other-group)'));
+    stderrSpy.mockRestore();
+  });
+
+  it('group: warns on stderr when explicit --id differs from the locked group id (groups/destinations)', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    await dispatch({ id: '1', command: 'groups-test', args: { id: 'other-group' } }, agentCtx());
+
+    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('--id (other-group)'));
+    stderrSpy.mockRestore();
+  });
+
+  it('group: warns on stderr when explicit --id differs from the resolved wiring id', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    await dispatch({ id: '1', command: 'wirings-get', args: { id: 'w-foreign' } }, agentCtx());
+
+    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('--id (w-foreign)'));
+    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('overridden by group scope (w-current)'));
+    stderrSpy.mockRestore();
+  });
+
+  it('group: does not warn when the explicit auto-fill value matches the locked value', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    const resp = await dispatch({ id: '1', command: 'sessions-list', args: { agent_group_id: 'g1' } }, agentCtx());
+
+    expect(resp.ok).toBe(true);
+    expect(stderrSpy).not.toHaveBeenCalled();
+    stderrSpy.mockRestore();
+  });
+
+  it('group: does not warn when the auto-fill arg is not explicitly passed', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    const resp = await dispatch({ id: '1', command: 'sessions-list', args: {} }, agentCtx());
+
+    expect(resp.ok).toBe(true);
+    expect(stderrSpy).not.toHaveBeenCalled();
+    stderrSpy.mockRestore();
+  });
+
   it('global: allows cross-group access', async () => {
     mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
 
