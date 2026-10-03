@@ -6,7 +6,7 @@ import { getPendingMessages } from './db/messages-in.js';
 import { getContinuation, setContinuation } from './db/session-state.js';
 import { getSessionRouting } from './db/session-routing.js';
 import { MockProvider } from './providers/mock.js';
-import type { ProviderExchange } from './providers/types.js';
+import type { AgentQuery, ProviderExchange, QueryInput } from './providers/types.js';
 import { runPollLoop } from './poll-loop.js';
 
 const MOCK_PROVIDER_CONTRACT = {
@@ -32,14 +32,21 @@ afterEach(() => {
 function insertMessage(
   id: string,
   content: object,
-  opts?: { platformId?: string; channelType?: string; threadId?: string },
+  opts?: { platformId?: string; channelType?: string; threadId?: string; kind?: 'chat' | 'task' },
 ) {
   getInboundDb()
     .prepare(
       `INSERT INTO messages_in (id, kind, timestamp, status, platform_id, channel_type, thread_id, content)
-       VALUES (?, 'chat', datetime('now'), 'pending', ?, ?, ?, ?)`,
+       VALUES (?, ?, datetime('now'), 'pending', ?, ?, ?, ?)`,
     )
-    .run(id, opts?.platformId ?? null, opts?.channelType ?? null, opts?.threadId ?? null, JSON.stringify(content));
+    .run(
+      id,
+      opts?.kind ?? 'chat',
+      opts?.platformId ?? null,
+      opts?.channelType ?? null,
+      opts?.threadId ?? null,
+      JSON.stringify(content),
+    );
 }
 
 describe('poll loop integration', () => {
@@ -77,6 +84,44 @@ describe('poll loop integration', () => {
     expect(pending).toHaveLength(0);
 
     await loopPromise.catch(() => {});
+  });
+
+  it('rotates a warm continuation between turns and starts the next turn fresh', async () => {
+    class RotatingProvider extends MockProvider {
+      queryCount = 0;
+      rotationChecks = 0;
+      continuations: Array<string | undefined> = [];
+
+      override query(input: QueryInput): AgentQuery {
+        this.queryCount++;
+        this.continuations.push(input.continuation);
+        return super.query(input);
+      }
+
+      override maybeRotateContinuation(_continuation: string, _cwd: string): string | null {
+        this.rotationChecks++;
+        return this.rotationChecks === 1 ? 'transcript exceeded test cap' : null;
+      }
+    }
+
+    const provider = new RotatingProvider(
+      {},
+      () => `<message to="discord-test">reply-${provider.queryCount}</message>`,
+      () => [`<message to="discord-test">reply-${provider.queryCount}</message>`],
+    );
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 5000);
+
+    insertMessage('m1', { prompt: 'first scheduled task' }, { kind: 'task', threadId: 'system:tasks:rotate' });
+    await waitFor(() => getUndeliveredMessages().length === 1, 2000);
+    insertMessage('m2', { prompt: 'second scheduled task' }, { kind: 'task', threadId: 'system:tasks:rotate' });
+    await waitFor(() => getUndeliveredMessages().length === 2, 3000);
+    controller.abort();
+    await loopPromise.catch(() => {});
+
+    expect(provider.queryCount).toBe(2);
+    expect(provider.rotationChecks).toBeGreaterThanOrEqual(2);
+    expect(provider.continuations).toEqual([undefined, undefined]);
   });
 
   it('should process multiple messages in a batch', async () => {
