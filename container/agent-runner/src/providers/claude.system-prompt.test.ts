@@ -38,8 +38,12 @@ afterEach(() => {
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
-async function drive(instructions: string, continuation?: string): Promise<void> {
-  const provider = createProvider('claude', {});
+async function drive(
+  instructions: string,
+  continuation?: string,
+  options: Parameters<typeof createProvider>[1] = {},
+): Promise<void> {
+  const provider = createProvider('claude', options);
   provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
   const q = provider.query({ prompt: 'hi', cwd: tmp, continuation, systemContext: { instructions } });
   for await (const _ of q.events) {
@@ -55,6 +59,25 @@ describe('system prompt append', () => {
       type: 'preset',
       preset: 'claude_code',
       append,
+      snapshot: false,
+    });
+  });
+});
+
+describe('system prompt mode', () => {
+  it('plain sends only the instructions, without the preset', async () => {
+    const instructions = '# You are Ada';
+    await drive(instructions, undefined, { systemPromptMode: 'plain' });
+    expect(lastOptions?.systemPrompt).toBe(instructions);
+  });
+
+  it('claude_code keeps the preset append', async () => {
+    const instructions = '# You are Ada';
+    await drive(instructions, undefined, { systemPromptMode: 'claude_code' });
+    expect(lastOptions?.systemPrompt).toEqual({
+      type: 'preset',
+      preset: 'claude_code',
+      append: instructions,
       snapshot: false,
     });
   });
