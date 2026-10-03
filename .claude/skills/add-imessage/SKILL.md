@@ -71,7 +71,18 @@ import './imessage.js';
 Pinned to an exact version — the supply-chain policy rejects ranges and
 `latest`. Install only the chosen backend's package.
 
-**Local** — the Chat SDK iMessage adapter:
+**Local** — the Chat SDK iMessage adapter. Its `chat.db` reader
+(`@photon-ai/imessage-kit`) brings its own `better-sqlite3` 12.x, which ships no
+prebuilt binary, and NanoClaw doesn't run dependency build scripts, so that
+copy can't open the database. First point the reader at NanoClaw's own
+prebuilt `better-sqlite3` (`$better-sqlite3` is pnpm's reference to the version
+NanoClaw pins). The reinstall applies it to an install that already has the
+adapter, since the step below skips a package that is already present:
+
+```nc:run effect:refresh when:backend=local
+pnpm pkg set 'pnpm.overrides[@photon-ai/imessage-kit>better-sqlite3]=$better-sqlite3'
+pnpm install --no-frozen-lockfile
+```
 
 ```nc:dep when:backend=local
 chat-adapter-imessage@0.1.1
@@ -113,6 +124,15 @@ exports, builders) and auto-skips when the package is absent:
 
 ```nc:run effect:test when:backend=hosted
 pnpm exec vitest run src/channels/imessage.test.ts
+```
+
+For the local backend, check that the `chat.db` reader's `better-sqlite3`
+loads under Node. It fails with `Could not locate the bindings file` when that
+copy has no binary, meaning step 4's override didn't land: re-run that
+override step, then this check:
+
+```nc:run effect:test when:backend=local
+node --input-type=module -e 'import { createRequire } from "node:module"; const kit = createRequire(import.meta.resolve("chat-adapter-imessage")).resolve("@photon-ai/imessage-kit"); const Database = createRequire(kit)("better-sqlite3"); new Database(":memory:").close();'
 ```
 
 ## Local backend: Full Disk Access (macOS)
@@ -280,6 +300,12 @@ changes per Node version (`~/.nvm/versions/node/v22.x.x/bin/node`), so an old
 grant silently stops covering a new binary. Re-open System Settings → Privacy &
 Security → Full Disk Access, add the binary at `$(which node)`, then restart
 the service.
+
+**Local: `Failed to open database … Could not locate the bindings file`.** The
+`chat.db` reader is on a `better-sqlite3` copy with no native binary, from an
+install made before step 4 set its override. Re-run `/add-imessage` with the
+`local` backend: step 4 sets the override and reinstalls, and the skill
+restarts the service.
 
 **`spectrum-ts` not installed** (hosted) — re-run step 4
 (`pnpm install spectrum-ts@11.0.0`) and restart.
