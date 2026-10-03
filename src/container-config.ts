@@ -235,6 +235,9 @@ export interface AdditionalMountConfig {
   readonly?: boolean;
 }
 
+/** How the agent in a group reaches a destination. */
+export type DeliveryMode = 'envelope' | 'tools-only';
+
 /** Shape of the materialized `container.json` file read by the container runner. */
 export interface ContainerConfig {
   mcpServers: Record<string, McpServerConfig>;
@@ -257,6 +260,7 @@ export interface ContainerConfig {
   /** Provider-declared speed tier (`standard` or `fast` for Claude); the group value overrides the install default. */
   speed?: ContainerSpeed;
   timezone?: string;
+  deliveryMode?: DeliveryMode;
   /** Session isolation tier for the group's containers; absent = the composer's default ('container'). */
   runtimeTier?: 'container' | 'vm';
 }
@@ -383,7 +387,14 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
     ...speedFields(parseContainerSpeed(row.speed) ?? (FAST_MODE ? 'fast' : undefined)),
     timezone: row.timezone && isValidTimezone(row.timezone) ? row.timezone : undefined,
     runtimeTier: parseRuntimeTier(row.runtime_tier, group.name),
+    // Never pass an unknown value to the runner. Omission resolves to the
+    // historical envelope contract there.
+    deliveryMode: isDeliveryMode(row.delivery_mode) ? row.delivery_mode : undefined,
   };
+}
+
+export function isDeliveryMode(value: unknown): value is DeliveryMode {
+  return value === 'envelope' || value === 'tools-only';
 }
 
 /** The stored tier was validated against the provider's declaration when written; empty means unset. */
