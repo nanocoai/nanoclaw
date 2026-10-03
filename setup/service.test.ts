@@ -352,6 +352,32 @@ describe('tightenCredentialFiles', () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
+  it.each([
+    [
+      'launchd plist',
+      () => path.join(root, 'home/Library/LaunchAgents', `${getLaunchdLabel(root)}.plist`),
+      0o644,
+      0o600,
+    ],
+    ['user unit', () => unitFile, 0o644, 0o600],
+    ['nohup wrapper', () => path.join(root, 'start-nanoclaw.sh'), 0o755, 0o700],
+  ])('restricts a %s holding a proxy credential, keeping owner bits', (_name, file, before, after) => {
+    fs.mkdirSync(path.dirname(file()), { recursive: true });
+    fs.writeFileSync(file(), 'export HTTPS_PROXY=http://u:p@proxy.example:1\n');
+    fs.chmodSync(file(), before);
+    tightenCredentialFiles(root, path.join(root, 'home'));
+    expect(fs.statSync(file()).mode & 0o777).toBe(after);
+  });
+
+  it('does not read or change a file that is already owner-only', () => {
+    fs.writeFileSync(unitFile, 'Environment="HTTPS_PROXY=http://u:p@proxy.example:1"\n');
+    fs.chmodSync(unitFile, 0o600);
+    const read = vi.spyOn(fs, 'readFileSync');
+    tightenCredentialFiles(root, path.join(root, 'home'));
+    expect(read).not.toHaveBeenCalledWith(unitFile, 'utf8');
+    expect(fs.statSync(unitFile).mode & 0o777).toBe(0o600);
+  });
+
   it('leaves a service file without proxy credentials untouched', () => {
     fs.writeFileSync(unitFile, 'Environment="HTTPS_PROXY=http://proxy.example:1"\n', { mode: 0o644 });
     fs.chmodSync(unitFile, 0o644);
