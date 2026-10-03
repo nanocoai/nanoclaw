@@ -23,6 +23,9 @@ export interface UpgradeState {
   tree: string;
   updatedAt: string;
   via: string;
+  /** Update channel and ref the updater merged; absent for setup and older stamps. */
+  channel?: string;
+  ref?: string;
 }
 
 export interface CodeIdentity {
