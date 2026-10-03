@@ -1,0 +1,15 @@
+skill: things
+version: 1.0.0
+description: "Things 3 task management via things3-cli (list, search, add, update, complete)"
+core_version: 0.1.0
+adds:
+  - container/skills/things/SKILL.md
+modifies:
+  - src/ipc.ts
+  - container/agent-runner/src/ipc-mcp-stdio.ts
+structured:
+  env_additions:
+    - THINGS_AUTH_TOKEN
+conflicts: []
+depends: []
+test: "npx vitest run --config vitest.skills.config.ts .claude/skills/add-things/tests/things.test.ts"
