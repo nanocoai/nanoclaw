@@ -37,6 +37,7 @@ NanoClaw 2026.10.0-rc.1 is the release candidate for 2026.10.0, the first releas
 
 - **Version numbers are now calendar-based (`YYYY.M.PATCH`).** 2026.10.0 follows 2.4.0 and sorts after it, so tools that compare versions keep working; a dependency range such as `^2` will not match it. Release tags stay `vX.Y.Z` and annotated.
 - **Forks that merge `main` by hand** can keep doing so; to keep `/update-nanoclaw` on `main` instead of releases, run `pnpm exec tsx scripts/update-nanoclaw.ts set-channel --channel edge` once.
+- **Provider contracts can list exact model endpoints.** A provider skill sets `modelAuthorities` to `host:port` pairs that skip the gateway's default approval, as `modelDomains` does for whole domains.
 - **The published agent image is unchanged in this release.** Installs that pull the image keep the 2026-08-25 build; the agent-runner dependency refresh in this release reaches them with the next image, built from this release's tag. Installs that build the image locally get it now.
 
 ## [2.4.0] - 2026-09-23
