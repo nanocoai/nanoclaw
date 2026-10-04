@@ -453,10 +453,15 @@ export function renderSystemdUnit(
 
   return `[Unit]
 Description=NanoClaw Personal Assistant
-After=network.target
+After=network-online.target docker.service
+Wants=network-online.target
 
 [Service]
 Type=simple
+# A user unit cannot order on the system docker.service, and a Pi without an
+# RTC boots fast enough to beat dockerd. Wait until the daemon answers.
+ExecStartPre=/bin/sh -c "until docker info >/dev/null 2>&1; do sleep 2; done"
+TimeoutStartSec=300
 ExecStart=${nodePath} ${projectRoot}/dist/index.js
 WorkingDirectory=${projectRoot}
 Restart=always

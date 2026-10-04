@@ -62,10 +62,15 @@ function generatePlist(nodePath: string, projectRoot: string, homeDir: string): 
 function generateSystemdUnit(nodePath: string, projectRoot: string, homeDir: string, isSystem: boolean): string {
   return `[Unit]
 Description=NanoClaw Personal Assistant
-After=network.target
+After=network-online.target docker.service
+Wants=network-online.target
 
 [Service]
 Type=simple
+# A user unit cannot order on the system docker.service, and a Pi without an
+# RTC boots fast enough to beat dockerd. Wait until the daemon answers.
+ExecStartPre=/bin/sh -c "until docker info >/dev/null 2>&1; do sleep 2; done"
+TimeoutStartSec=300
 ExecStart=${nodePath} ${projectRoot}/dist/index.js
 WorkingDirectory=${projectRoot}
 Restart=always
@@ -395,5 +400,16 @@ describe('tightenCredentialFiles', () => {
     tightenCredentialFiles(root, path.join(root, 'home'));
     const fix = `sudo chmod 600 '${unitFile}'`;
     expect(warn).toHaveBeenCalledWith(expect.stringContaining(fix), expect.objectContaining({ file: unitFile, fix }));
+  });
+});
+
+describe('renderSystemdUnit', () => {
+  it.each([false, true])('waits for the docker daemon before starting (system unit: %s)', (asRoot) => {
+    const unit = renderSystemdUnit('/srv/nanoclaw', '/usr/bin/node', '/home/user', asRoot);
+    expect(unit).toContain('After=network-online.target docker.service');
+    expect(unit).toContain('Wants=network-online.target');
+    expect(unit).toContain('ExecStartPre=/bin/sh -c "until docker info >/dev/null 2>&1; do sleep 2; done"');
+    expect(unit).toContain('TimeoutStartSec=300');
+    expect(unit.indexOf('ExecStartPre=')).toBeLessThan(unit.indexOf('ExecStart='));
   });
 });
