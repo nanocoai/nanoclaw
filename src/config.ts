@@ -21,6 +21,7 @@ const envConfig = readEnvFile([
   'NANOCLAW_EGRESS_LOCKDOWN',
   'NANOCLAW_EGRESS_NETWORK',
   'ONECLI_GATEWAY_CONTAINER',
+  'NANOCLAW_BROWSER_EGRESS_NETWORK',
 ]);
 
 /**
@@ -112,6 +113,13 @@ export const EGRESS_NETWORK =
   process.env.NANOCLAW_EGRESS_NETWORK || envConfig.NANOCLAW_EGRESS_NETWORK || 'nanoclaw-egress';
 export const ONECLI_GATEWAY_CONTAINER =
   process.env.ONECLI_GATEWAY_CONTAINER || envConfig.ONECLI_GATEWAY_CONTAINER || 'onecli';
+
+// The second, NON-internal network attached only to agent groups that opted
+// into direct browser egress (`container_configs.direct_browser_egress`). It
+// is never attached to a group that has not opted in, and it never replaces
+// `EGRESS_NETWORK` — see src/browser-direct-egress.ts and docs/SECURITY.md §7.
+export const BROWSER_EGRESS_NETWORK =
+  process.env.NANOCLAW_BROWSER_EGRESS_NETWORK || envConfig.NANOCLAW_BROWSER_EGRESS_NETWORK || 'nanoclaw-browser-egress';
 
 // Timezone for scheduled tasks, message formatting, etc.
 // Validates each candidate is a real IANA identifier before accepting.

@@ -190,14 +190,77 @@ The host therefore derives a Chromium managed-policy document
 (`src/gateway-providers/chromium-ca-policy.ts`). Browser traffic keeps going
 through the gateway — credential injection, rules and audit unchanged — and
 Chromium trusts exactly the one CA curl and Node already trust. Exempting the
-browser from the proxy instead is *not* an option under lockdown: the internal
-network has no route off-box, and Docker networking is per-container, so
-"direct egress for one process" would mean direct egress for the whole agent.
+browser from the proxy instead is *not* an option under lockdown as such: the
+internal network has no route off-box, and Docker networking is per-container,
+so "direct egress for one process" means direct egress for the whole agent —
+which is precisely the trade §7 makes explicit, opt-in, and per-group.
 
 The generated policy files live in `data/gateway-trust/` — deliberately not the
 OS temp dir, because on a VM-backed Docker (Colima) the host's `$TMPDIR` is not
 shared into the VM and such a bind mount silently materializes as an empty
 directory inside the container.
+
+### 7. Direct Browser Egress (opt-in, per agent group)
+
+**This is a deliberate, narrow hole in the perimeter described above. It is not
+a general capability, it is off for every group unless an operator turns it on,
+and it cannot be turned on from inside a container.**
+
+The OneCLI gateway is a *credential-injection* proxy, not a general internet
+proxy, and it is deny-by-default: a request to a host for which no connection or
+secret is configured comes back as `resolution_failed`. That is the gateway
+working as designed — but it also means `agent-browser` can only reach hosts
+someone explicitly wired up, which for a household assistant is close to nothing.
+§6 fixed the certificate half of browsing; this section is the other half, and it
+is paid for with perimeter rather than with configuration.
+
+When `container_configs.direct_browser_egress = 1` for an agent group
+(`ncl groups config set-browser-egress --id <group-id> --enabled true`), its
+containers get, *in addition to* the usual `nanoclaw-egress` attachment:
+
+1. a second attachment to `nanoclaw-browser-egress`, a **normal (non-internal)**
+   Docker bridge with a real route off-box;
+2. a read-only shim named `agent-browser`, mounted at
+   `/opt/nanoclaw/browser-direct-egress/agent-browser`, which `unset`s the proxy
+   variables and `exec`s the real launcher;
+3. that directory prepended to `PATH` by PID 1's own shell, so the shim precedes
+   the image’s `/pnpm` entry for every descendant process.
+
+**What this gives up, stated plainly.** An opted-in group’s browser traffic
+**bypasses the OneCLI gateway entirely** — no credential injection, no rule
+evaluation, no audit trail — and reaches the real internet directly. And because
+Docker networking is per-container rather than per-process, the *container* is
+what gains the route: everything else inside it keeps using the gateway because
+its environment still points there, which is configuration, not confinement. For
+that one container the proxy is advisory — a deliberate `curl --noproxy '*'`
+would reach the internet unmediated too. Treat an opted-in group as a container
+with general internet access, and grant it only where that is acceptable.
+
+**What it does not touch.** `nanoclaw-egress` stays `--internal` for every group,
+opted-in or not. No group without the flag sees this network, this mount or this
+`PATH` entry. `HTTPS_PROXY` is never changed for the container as a whole, so
+the agent's own model calls and any OneCLI-connected service keep getting their
+credentials injected exactly as before.
+
+**Operational notes.**
+
+- The flag is operator-only (`hostOnly`) for the same reason mount management is:
+  an agent must never be able to widen the boundary it runs inside.
+- It takes effect on the next container start (`ncl groups restart`).
+- Every start of an opted-in container logs `Direct browser egress active` with
+  the group id and network name, next to the existing `Egress lockdown active`
+  line, so an operator can tell at a glance which containers are loosened.
+- `docker exec` into the container does **not** inherit the shim (exec builds its
+  env from the container config, not from PID 1), so a hand-run `agent-browser`
+  still goes through the gateway. Only the processes the agent actually runs —
+  descendants of PID 1 — get the direct path.
+- Network setup fails fast: if `nanoclaw-browser-egress` cannot be created or
+  attached, the spawn is torn down rather than started with a posture that
+  disagrees with its config.
+
+Implementation: `src/browser-direct-egress.ts`, composition in
+`src/container-runner.ts`, realization in `src/drivers/docker-driver.ts`
+(`extraNetworksFor`) and `src/drivers/index.ts`.
 
 ## Resource Limits
 

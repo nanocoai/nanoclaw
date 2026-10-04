@@ -39,6 +39,7 @@
 import os from 'os';
 import path from 'path';
 
+import { BROWSER_EGRESS_NETWORK, ensureBrowserEgressNetwork } from '../browser-direct-egress.js';
 import { DATA_DIR, GROUPS_DIR } from '../config.js';
 import { EGRESS_NETWORK, egressNetworkArgs, ensureEgressNetwork } from '../egress-lockdown.js';
 import { readEnvFile } from '../env.js';
@@ -83,9 +84,34 @@ function dockerNetworkArgs(spec: SessionSpec): string[] {
   return os.platform() === 'linux' ? ['--add-host=host.docker.internal:host-gateway'] : [];
 }
 
+/**
+ * The additional attachment an opted-in group gets: a NON-internal bridge with
+ * a real route off-box, alongside — never instead of — the locked-down egress
+ * network. Only a spec whose composed intent says so gets it, so a group that
+ * did not opt in is untouched, and the lockdown for every other group is
+ * exactly what it was.
+ *
+ * Fail-fast, like the lockdown itself: a container that comes up without the
+ * attachment its spec declares is a group whose browsing silently goes nowhere
+ * while its config says otherwise. `ensureBrowserEgressNetwork` throws, and
+ * `prepare` tears the half-allocated container down.
+ */
+function dockerExtraNetworks(spec: SessionSpec): string[] {
+  if (spec.network !== 'shared-private+direct') return [];
+  ensureBrowserEgressNetwork();
+  log.info('Direct browser egress active', {
+    containerName: agentContainerName(spec),
+    agentGroupId: spec.key.agentGroupId,
+    network: BROWSER_EGRESS_NETWORK,
+    note: 'browser traffic bypasses the OneCLI gateway (credential injection and audit) — docs/SECURITY.md §7',
+  });
+  return [BROWSER_EGRESS_NETWORK];
+}
+
 registerSessionDriver(
   DEFAULT_DRIVER_KIND,
-  (policy) => new DockerSessionDriver({ ...policy, networkArgsFor: dockerNetworkArgs }),
+  (policy) =>
+    new DockerSessionDriver({ ...policy, networkArgsFor: dockerNetworkArgs, extraNetworksFor: dockerExtraNetworks }),
 );
 
 export function configuredDriverKind(env: NodeJS.ProcessEnv = process.env): DriverKind {

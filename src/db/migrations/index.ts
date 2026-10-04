@@ -28,6 +28,7 @@ import { migration024 } from './024-host-coordination.js';
 import { migration025 } from './025-checklist-items.js';
 import { migration026 } from './026-checklist-section-heading.js';
 import { migration027 } from './027-checklist-item-description.js';
+import { migration028 } from './028-container-config-browser-egress.js';
 
 interface MigrationBase {
   version: number;
@@ -97,6 +98,7 @@ export const migrations: Migration[] = [
   migration025,
   migration026,
   migration027,
+  migration028,
 ];
 
 /**

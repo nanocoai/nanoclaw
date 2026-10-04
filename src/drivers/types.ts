@@ -125,8 +125,17 @@ export interface SessionSpec {
    * else. On Docker that is the egress-lockdown network machinery; other
    * realizations enforce it declaratively. `capabilities.networkPolicy` tells
    * the overlay which enforcement it got.
+   *
+   * 'shared-private+direct': the same gateway attachment, PLUS a second
+   * attachment with a real route to the internet. Composed only for an agent
+   * group that opted into direct browser egress
+   * (`container_configs.direct_browser_egress`). Say it at the topology level
+   * and say it honestly: the direct route belongs to the CONTAINER, not to one
+   * process in it — what keeps everything but the browser on the gateway is
+   * the proxy env those clients still read, which is configuration rather than
+   * confinement. See src/browser-direct-egress.ts and docs/SECURITY.md §7.
    */
-  network: 'shared-private' | 'none';
+  network: 'shared-private' | 'shared-private+direct' | 'none';
   /** Named, versioned posture. Drivers map it; raw flags never cross the seam. */
   hardening: 'standard';
   resources: SessionResources;

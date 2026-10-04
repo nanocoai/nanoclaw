@@ -27,6 +27,14 @@ export interface ContainerConfigRow {
   cli_scope: string; // 'disabled' | 'group' | 'global'
   timezone: string | null; // IANA id; NULL = follow the install-global timezone
   /**
+   * 1 = this group's containers also attach to a non-internal network and run
+   * `agent-browser` without the gateway proxy, so browser traffic reaches the
+   * internet directly (migration 028; docs/SECURITY.md §7). 0/absent = today's
+   * behavior: gateway-only egress. Optional on the TS type so fixtures and
+   * pre-migration rows need no updating — the reader treats absent as off.
+   */
+  direct_browser_egress?: number | null;
+  /**
    * Session isolation tier ('container' | 'vm') — see SessionSpec.runtimeTier.
    * Optional on the TS type because the trunk schema does not carry the
    * column: a deployment whose driver realizes more than one tier adds it,

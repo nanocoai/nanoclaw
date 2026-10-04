@@ -21,6 +21,7 @@ import {
   formatMessages,
   extractRouting,
   categorizeMessage,
+  extractMessageText,
   isClearCommand,
   isRunnerCommand,
   isSessionEcho,
@@ -29,6 +30,7 @@ import {
 } from './formatter.js';
 import { stripHarnessTagArtifacts } from './harness-tag-strip.js';
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
+import { handleCredentialCaptureReply } from './mcp-tools/bureaucracy-automation.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
 
 const POLL_INTERVAL_MS = 1000;
@@ -175,6 +177,18 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
           thread_id: routing.threadId,
           content: JSON.stringify({ text: uploadTrace() }),
         });
+        commandIds.push(msg.id);
+        continue;
+      }
+      // Credential-capture interception: while a request_credential_setup
+      // flow is pending, the user's plaintext username/password reply is
+      // consumed HERE — deterministic TypeScript, never an LLM turn — so it
+      // never becomes part of the agent's own conversation context. See
+      // mcp-tools/bureaucracy-automation.ts.
+      if (
+        (msg.kind === 'chat' || msg.kind === 'chat-sdk') &&
+        (await handleCredentialCaptureReply(extractMessageText(msg)))
+      ) {
         commandIds.push(msg.id);
         continue;
       }

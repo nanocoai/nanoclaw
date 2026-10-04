@@ -70,15 +70,24 @@ export function categorizeMessage(msg: MessageInRow): CommandInfo {
 }
 
 /**
+ * Extract the plain text out of a chat/chat-sdk message's `content` JSON.
+ * Shared by isClearCommand, categorizeMessage, and poll-loop's credential-
+ * capture interception — anything that needs to compare a message's text
+ * against a literal string rather than the full formatted XML.
+ */
+export function extractMessageText(msg: MessageInRow): string {
+  const content = parseContent(msg.content);
+  return (content.text || '').trim();
+}
+
+/**
  * Narrow check for /clear — the only command the runner handles directly.
  * All other command gating (filtered, admin) is done by the host router
  * before messages reach the container.
  */
 export function isClearCommand(msg: MessageInRow): boolean {
   if (isSessionEcho(msg)) return false;
-  const content = parseContent(msg.content);
-  const text = (content.text || '').trim();
-  return text.toLowerCase().startsWith('/clear');
+  return extractMessageText(msg).toLowerCase().startsWith('/clear');
 }
 
 /**

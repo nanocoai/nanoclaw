@@ -327,11 +327,19 @@ CREATE TABLE container_configs (
   additional_mounts      TEXT NOT NULL DEFAULT '[]',
   cli_scope              TEXT NOT NULL DEFAULT 'group',   -- disabled | group | global
   timezone               TEXT,                            -- IANA id; NULL = install-global TZ (added by migration 20)
+  direct_browser_egress  INTEGER NOT NULL DEFAULT 0,      -- 1 = browser bypasses the gateway (added by migration 28)
   updated_at             TEXT NOT NULL
 );
 ```
 
 `timezone` overrides the install-global timezone for one agent group: host-side scheduling (cron interpretation, `--process-after`, run-log stamps) resolves it live via `resolveGroupTimezone` (`src/container-config.ts`); the container gets it as its `TZ` env on next respawn. Set via `ncl groups config update --timezone <IANA>` (`""` clears back to NULL) or `ncl groups create --timezone`.
+
+`direct_browser_egress` is a **security** flag, not a convenience one. `1` attaches the group's containers to a second,
+non-internal Docker network and runs `agent-browser` with the proxy env stripped, so that group's browser traffic
+bypasses the OneCLI gateway's credential injection and audit trail entirely. `0` (the default for every existing row)
+is today's gateway-only egress. Operator-only: `ncl groups config set-browser-egress --id <id> --enabled true|false`,
+never settable from inside a container. Anything but a literal `1` reads as off. See [SECURITY.md §7](SECURITY.md) and
+`src/browser-direct-egress.ts`.
 
 - **Readers:** `src/container-config.ts`, `src/container-runner.ts`, `src/cli/dispatch.ts` (scope enforcement), `src/project-doc-compose.ts`
 - **Writers:** `src/db/container-configs.ts`, `src/modules/self-mod/apply.ts`, `src/backfill-container-configs.ts`
@@ -440,6 +448,7 @@ Several early migrations were later renamed/retired and replaced by "module" fil
 | 20 | `container-config-timezone` | `020-container-config-timezone.ts` | `container_configs.timezone` — per-agent-group timezone override (NULL = install-global) |
 | 21 | `approval-question-render-metadata` | `021-approval-question.ts` | `question` card-body column on all three approval tables so terminal edits retain the original request |
 | 22 | `messaging-group-detached-at` | `022-messaging-group-detached.ts` | `messaging_groups.detached_at` — records when the bot left a channel without deleting its wiring |
+| 28 | `container-config-browser-egress` | `028-container-config-browser-egress.ts` | `container_configs.direct_browser_egress` — per-agent-group opt-in to gateway-bypassing browser egress (0 = off for every existing row) |
 
 Numbers 5 and 6 are intentionally absent — migrations were renumbered during early development.
 
