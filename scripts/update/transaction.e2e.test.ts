@@ -277,7 +277,7 @@ describe('update-nanoclaw transaction end to end', () => {
       state = await cutoverUpdate(fixture.install, state.id, runtime);
 
       expect(state.phase).toBe('cutover');
-      // The install can replace the esbuild tsx compiles imports with (toolchain-swap.test.ts).
+      // tsx compiles each import with the esbuild it started with, and the install can replace it.
       const cutover = events.slice(beforeCutover);
       expect(cutover).toContain('gateway loaded');
       expect(cutover.indexOf('gateway loaded')).toBeLessThan(cutover.indexOf('pnpm install --frozen-lockfile'));

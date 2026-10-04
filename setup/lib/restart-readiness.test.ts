@@ -129,9 +129,7 @@ async function startHost(): Promise<{ pid: number; instance_id: string }> {
   }
 }
 
-// Each case starts real host processes; alongside the full parallel suite the
-// first one takes most of the default 5s, so a little extra load timed it out.
-describe('restart host identity and readiness', { timeout: 20_000 }, () => {
+describe('restart host identity and readiness', () => {
   it('restarts the fallback from another directory and requires the requested channel', async () => {
     const first = await startHost();
     writeFileSync(join(binDir, 'systemctl'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
