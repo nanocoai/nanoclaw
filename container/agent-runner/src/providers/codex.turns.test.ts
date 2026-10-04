@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -121,6 +121,167 @@ describe('CodexProvider active turns', () => {
     expect(fake.killed).toBe(true);
   });
 
+  it('keeps a retrying turn alive and steers into it until it completes', async () => {
+    const fake = createFakeCodexRuntime();
+    const query = createCodexProvider({}, fake.runtime).query({ prompt: 'prompt', cwd: '/workspace/agent' });
+    const events: ProviderEvent[] = [];
+    const collect = collectEvents(query.events, events).catch((error: Error) => error);
+
+    await waitFor(() => fake.startCalls.length === 1);
+    fake.notify('error', { error: { message: 'stream disconnected' }, willRetry: true });
+    await sleep(20);
+
+    expect(fake.killed).toBe(false);
+    expect(events.some((event) => event.type === 'error' || event.type === 'result')).toBe(false);
+    query.push('follow-up during retry');
+    await waitFor(() => fake.steerCalls.length === 1);
+    query.end();
+    fake.completeTurn('recovered answer');
+
+    expect(await collect).toBeUndefined();
+    expect(fake.startCalls).toHaveLength(1);
+    expect(fake.steerCalls).toEqual([{ threadId: 'thread-1', turnId: 'turn-1', inputText: 'follow-up during retry' }]);
+    expect(events.filter((event) => event.type === 'result')).toEqual([{ type: 'result', text: 'recovered answer' }]);
+    expect(fake.killed).toBe(true);
+  });
+
+  it('reports a terminal turn failure after a transient error without starting another turn', async () => {
+    const fake = createFakeCodexRuntime();
+    const query = createCodexProvider({}, fake.runtime).query({ prompt: 'prompt', cwd: '/workspace/agent' });
+    query.end();
+    const events: ProviderEvent[] = [];
+    const collect = collectEvents(query.events, events).catch((error: Error) => error);
+
+    await waitFor(() => fake.startCalls.length === 1);
+    fake.notify('error', { error: { message: 'stream disconnected' }, willRetry: true });
+    await sleep(20);
+    fake.notify('turn/completed', {
+      turn: {
+        status: 'failed',
+        error: { message: 'terminal failure', additionalDetails: 'retry exhausted' },
+        items: [],
+      },
+    });
+
+    expect((await collect)?.message).toBe('terminal failure: retry exhausted');
+    expect(events.filter((event) => event.type === 'error')).toEqual([
+      { type: 'error', message: 'terminal failure: retry exhausted', retryable: false, classification: undefined },
+    ]);
+    expect(events.some((event) => event.type === 'result')).toBe(false);
+    expect(fake.startCalls).toHaveLength(1);
+    expect(fake.killed).toBe(true);
+  });
+
+  it.each([false, undefined, 'true'])(
+    'keeps nonretrying error notifications terminal (willRetry=%s)',
+    async (willRetry) => {
+      const fake = createFakeCodexRuntime();
+      const query = createCodexProvider({}, fake.runtime).query({ prompt: 'prompt', cwd: '/workspace/agent' });
+      const events: ProviderEvent[] = [];
+      const collect = collectEvents(query.events, events).catch((error: Error) => error);
+
+      await waitFor(() => fake.startCalls.length === 1);
+      fake.notify('error', {
+        error: { message: 'permission denied' },
+        ...(willRetry === undefined ? {} : { willRetry }),
+      });
+
+      expect((await collect)?.message).toBe('permission denied');
+      expect(events.filter((event) => event.type === 'error')).toEqual([
+        { type: 'error', message: 'permission denied', retryable: false, classification: 'sandbox' },
+      ]);
+      expect(events.some((event) => event.type === 'result')).toBe(false);
+      expect(fake.killed).toBe(true);
+    },
+  );
+
+  it('can abort a turn while the app-server is retrying', async () => {
+    const fake = createFakeCodexRuntime();
+    const query = createCodexProvider({}, fake.runtime).query({ prompt: 'prompt', cwd: '/workspace/agent' });
+    const events: ProviderEvent[] = [];
+    const collect = collectEvents(query.events, events).catch((error: Error) => error);
+
+    await waitFor(() => fake.startCalls.length === 1);
+    fake.notify('error', { error: { message: 'stream disconnected' }, willRetry: true });
+    await sleep(20);
+    query.abort();
+
+    expect(await collect).toBeUndefined();
+    expect(fake.interruptCalls).toEqual([{ threadId: 'thread-1', turnId: 'turn-1' }]);
+    expect(events.some((event) => event.type === 'error' || event.type === 'result')).toBe(false);
+    expect(fake.startCalls).toHaveLength(1);
+    expect(fake.killed).toBe(true);
+  });
+
+  it('keeps the existing turn deadline active during native retries', async () => {
+    const originalSetTimeout = globalThis.setTimeout;
+    let fireDeadline: (() => void) | undefined;
+    const timeout = spyOn(globalThis, 'setTimeout').mockImplementation((callback, ms, ...args) => {
+      if (ms === 10 * 60 * 1000) fireDeadline = () => callback(...args);
+      return originalSetTimeout(callback, ms, ...args);
+    });
+    const fake = createFakeCodexRuntime();
+    const query = createCodexProvider({}, fake.runtime).query({ prompt: 'prompt', cwd: '/workspace/agent' });
+    const events: ProviderEvent[] = [];
+    const collect = collectEvents(query.events, events).catch((error: Error) => error);
+    try {
+      await waitFor(() => fake.startCalls.length === 1);
+      fake.notify('error', { error: { message: 'stream disconnected' }, willRetry: true });
+      await sleep(20);
+      expect(fireDeadline).toBeDefined();
+      fireDeadline!();
+
+      expect((await collect)?.message).toBe('Turn timed out after 600000ms');
+      expect(events.filter((event) => event.type === 'error')).toHaveLength(1);
+      expect(events.some((event) => event.type === 'result')).toBe(false);
+      expect(fake.startCalls).toHaveLength(1);
+      expect(fake.killed).toBe(true);
+    } finally {
+      timeout.mockRestore();
+      query.abort();
+      await collect;
+    }
+  });
+
+  it('does not report earlier partial text as success when an interrupted turn has no final items', async () => {
+    const fake = createFakeCodexRuntime();
+    const query = createCodexProvider({}, fake.runtime).query({ prompt: 'prompt', cwd: '/workspace/agent' });
+    query.end();
+    const events: ProviderEvent[] = [];
+    const collect = collectEvents(query.events, events).catch((error: Error) => error);
+
+    await waitFor(() => fake.startCalls.length === 1);
+    fake.notify('item/agentMessage/delta', { delta: 'partial answer' });
+    fake.notify('turn/completed', { turn: { status: 'interrupted', error: null, items: [] } });
+
+    expect((await collect)?.message).toBe('Codex turn interrupted');
+    expect(events.filter((event) => event.type === 'error')).toHaveLength(1);
+    expect(events.some((event) => event.type === 'result')).toBe(false);
+    expect(fake.killed).toBe(true);
+  });
+
+  it.each(['failed', 'inProgress', undefined, null, 'unexpected', 1])(
+    'does not report success for a noncompleted or malformed completion status (%s)',
+    async (status) => {
+      const fake = createFakeCodexRuntime();
+      const query = createCodexProvider({}, fake.runtime).query({ prompt: 'prompt', cwd: '/workspace/agent' });
+      query.end();
+      const events: ProviderEvent[] = [];
+      const collect = collectEvents(query.events, events).catch((error: Error) => error);
+
+      await waitFor(() => fake.startCalls.length === 1);
+      // failed/null is a nullable-schema control, not a claimed native emission.
+      fake.notify('turn/completed', {
+        turn: { status, error: null, items: [{ type: 'agentMessage', text: 'partial answer' }] },
+      });
+
+      expect((await collect)?.message).toBe('Codex turn failed');
+      expect(events.filter((event) => event.type === 'error')).toHaveLength(1);
+      expect(events.some((event) => event.type === 'result')).toBe(false);
+      expect(fake.killed).toBe(true);
+    },
+  );
+
   it('threads the configured model and effort into the turn', async () => {
     const fake = createFakeCodexRuntime();
     const provider = createCodexProvider({ model: 'gpt-5.5', effort: 'high' }, fake.runtime);
@@ -237,11 +398,12 @@ function createFakeCodexRuntime(opts: { rejectSteer?: boolean } = {}) {
     startCalls,
     steerCalls,
     interruptCalls,
+    notify,
     get killed() {
       return killed;
     },
     completeTurn(text: string) {
-      notify('turn/completed', { turn: { items: [{ type: 'agentMessage', text }] } });
+      notify('turn/completed', { turn: { status: 'completed', error: null, items: [{ type: 'agentMessage', text }] } });
     },
     crashServer(err: Error) {
       for (const h of [...server.exitHandlers]) h(err);

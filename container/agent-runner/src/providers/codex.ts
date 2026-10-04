@@ -337,6 +337,7 @@ async function* runOneTurn(
         break;
       }
       case 'error': {
+        if (params.willRetry === true) break;
         const err = params.error as { message?: string; additionalDetails?: string | null } | undefined;
         const msg = [err?.message, err?.additionalDetails].filter(Boolean).join(': ') || 'Codex turn failed';
         state.error = new Error(msg);
@@ -345,7 +346,11 @@ async function* runOneTurn(
       }
       case 'turn/completed': {
         const turn = params.turn as
-          | { error?: { message?: string; additionalDetails?: string | null } | null; items?: unknown[] }
+          | {
+              status?: unknown;
+              error?: { message?: string; additionalDetails?: string | null } | null;
+              items?: unknown[];
+            }
           | undefined;
         const agentMessage = turn?.items
           ?.filter((item): item is { type: string; text?: string } => typeof item === 'object' && item !== null)
@@ -355,6 +360,8 @@ async function* runOneTurn(
           const msg =
             [turn.error.message, turn.error.additionalDetails].filter(Boolean).join(': ') || 'Codex turn failed';
           state.error = new Error(msg);
+        } else if (turn?.status !== 'completed') {
+          state.error = new Error(turn?.status === 'interrupted' ? 'Codex turn interrupted' : 'Codex turn failed');
         }
         finishTurn();
         break;
