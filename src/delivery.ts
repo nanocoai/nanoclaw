@@ -29,6 +29,7 @@ import { clearDeliveryAttempt, recordDeliveryAttempt } from './db/coordination.j
 import { runGuarded, type DeliveryGuardSpec, type GuardedDeliveryHandler } from './delivery-guard.js';
 import { isUnguarded, type Unguarded } from './guard/index.js';
 import { mapConcurrent } from './concurrency.js';
+import { noticeDeliveryFailure } from './delivery-failure-notice.js';
 import { fanOutboundMessage } from './modules/cross-session-context/index.js';
 import { log } from './log.js';
 import { normalizeOptions } from './channels/ask-question.js';
@@ -341,6 +342,7 @@ async function drainSession(session: Session): Promise<void> {
         try {
           await withExistingMailboxSession(agentGroup.id, session.id, (mailbox) => mailbox.markDeliveryFailed(msg.id));
           await clearAttemptRow(msg.id);
+          await noticeDeliveryFailure(msg, session, err);
         } catch (markErr) {
           log.error('Failed to record permanent delivery failure', {
             messageId: msg.id,
