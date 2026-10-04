@@ -38,7 +38,11 @@ Confirm the live tree is clean:
 git status --porcelain
 ```
 
-Stop if it prints anything.
+Stop if it prints anything. Setup commits the files it applies as
+`setup: apply <skill>` commits unless `NANOCLAW_SETUP_COMMIT=0` was set.
+Treat anything left as part of the install: show it, ask the user to commit it
+as a local customization, then re-check. Never stash it, since the updater
+discovers installed skills from these files.
 
 Use the official remote if one already exists. Otherwise add it as `upstream`:
 
@@ -148,9 +152,12 @@ pnpm exec tsx "$controller_dir/scripts/update-nanoclaw.ts" validate \
 ```
 
 Validation performs a fork-safe structured refresh of every installed channel
-and provider, commits refreshed payloads in the staging branch, installs frozen
-dependencies, runs the host build and full host tests, and runs the container
-dependency/typecheck leg when Bun is available. A provider skill that declares
+and provider, and of the selected gateway when gateway core or that gateway's
+own skill changed. On a skill-only change, a gateway it cannot resolve is
+skipped and named in the validation checks. It commits refreshed payloads in
+the staging branch, installs frozen dependencies, runs the host build and full
+host tests, and runs the container dependency/typecheck leg when Bun is
+available. A provider skill that declares
 Bun dependencies does not require Bun on the host: refresh runs the exact Bun
 version pinned by `container/Dockerfile` through pnpm. Any selected skill
 refresh or validation failure blocks cutover and the completion stamp.

@@ -16,14 +16,18 @@ import {
   createCommandRunner,
   detectService,
   drainContainers,
+  gatewayRestartCommand,
   probe,
   restartGatewayContainers,
+  shellQuote,
+  startCommand,
   startService,
   stopService,
   verifyServiceHealth,
   withRecordedNohupHost,
   type CommandRunner,
   type ServiceEnvironment,
+  type ServiceHandle,
 } from './service.js';
 import { GATEWAY_ROLE, LABELS } from '../../src/drivers/types.js';
 
@@ -135,6 +139,62 @@ describe('service-mode detection and control', () => {
     startService({ mode: 'nohup', active: true, definition, pid: 4242 }, root, env);
 
     expect(calls).toEqual([`bash ${definition}`]);
+  });
+
+  it('prints the start command startService runs, for a rollback finished by hand', () => {
+    const { env, calls } = makeEnv('linux');
+    const cases: [ServiceHandle, string][] = [
+      [
+        { mode: 'launchd', active: true, name: 'com.nanoclaw-v2-x', definition: '/Users/me/x.plist' },
+        'launchctl bootstrap gui/1000 /Users/me/x.plist; launchctl kickstart gui/1000/com.nanoclaw-v2-x',
+      ],
+      [
+        { mode: 'systemd-user', active: true, name: 'nanoclaw-v2-x' },
+        'XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1000}" systemctl --user start nanoclaw-v2-x',
+      ],
+      [{ mode: 'systemd-system', active: true, name: 'nanoclaw-v2-x' }, 'systemctl start nanoclaw-v2-x'],
+      [{ mode: 'nohup', active: true, definition: '/srv/nano/start-nanoclaw.sh' }, 'bash /srv/nano/start-nanoclaw.sh'],
+    ];
+    for (const [handle, printed] of cases) {
+      calls.length = 0;
+      startService(handle, '/srv', env);
+      expect(startCommand(handle, env.uid)).toBe(printed);
+      // Every call startService made appears in the printed command, in order.
+      let at = 0;
+      for (const call of calls) {
+        at = printed.indexOf(call, at);
+        expect(at).toBeGreaterThanOrEqual(0);
+      }
+    }
+    expect(startCommand({ mode: 'none', active: false }, env.uid)).toBeUndefined();
+    const awkward = "/srv/it's $HOME `nano`";
+    expect(spawnSync('sh', ['-c', `printf %s ${shellQuote(awkward)}`], { encoding: 'utf8' }).stdout).toBe(awkward);
+  });
+
+  it('prints a gateway restart that restarts the listed containers, and is a no-op when there are none', () => {
+    const root = temp();
+    const bin = temp();
+    const log = path.join(bin, 'calls.log');
+    const docker = (listed: string) =>
+      fs.writeFileSync(
+        path.join(bin, 'docker'),
+        `#!/bin/sh\necho "docker $*" >> ${JSON.stringify(log)}\n[ "$1" = ps ] && printf '${listed}'\nexit 0\n`,
+        { mode: 0o755 },
+      );
+    const run = () =>
+      spawnSync('sh', ['-c', gatewayRestartCommand(root)], {
+        env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH ?? ''}` },
+      }).status;
+    const ps = `docker ps -aq --filter label=nanoclaw-install=${slug(root)} --filter label=nanoclaw-role=gateway`;
+
+    docker('gw1\\ngw2\\n');
+    expect(run()).toBe(0);
+    expect(fs.readFileSync(log, 'utf8').trim().split('\n')).toEqual([ps, 'docker restart -t 10 gw1 gw2']);
+
+    fs.rmSync(log);
+    docker('');
+    expect(run()).toBe(0);
+    expect(fs.readFileSync(log, 'utf8').trim().split('\n')).toEqual([ps]);
   });
 
   it('refuses to mutate under an unmanaged pnpm-dev process', async () => {

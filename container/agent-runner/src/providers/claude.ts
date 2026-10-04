@@ -154,6 +154,20 @@ const postToolUseHook: HookCallback = async () => {
 /** Minimum spacing between `activity` frames derived from streaming deltas. */
 const STREAM_ACTIVITY_INTERVAL_MS = 1000;
 
+// The notices are written for a terminal user; a chat user can't act on them
+// and must never be invited to paste a key.
+const OWNER_FIX_HINT =
+  "Whoever runs this NanoClaw needs to fix this outside the chat. Please don't send keys or passwords here.";
+
+/** The Claude CLI's own fixed failure notices (exact strings), safe to show in a channel, and the hint added to each. */
+const SDK_NOTICES = new Map([
+  ['Not logged in · Please run /login', OWNER_FIX_HINT],
+  ['Invalid API key · Fix external API key', OWNER_FIX_HINT],
+  ['Invalid auth token · Fix external auth token', OWNER_FIX_HINT],
+  ['Credit balance is too low', OWNER_FIX_HINT],
+  ['Prompt is too long', 'This conversation got too long. An admin can send /clear to start a new one.'],
+]);
+
 /** The real clock for archive names and rotation stamps; tests hand the history functions a fixed one. */
 const REAL_CLOCK = { now: () => Date.now() };
 
@@ -352,11 +366,19 @@ export class ClaudeProvider implements AgentProvider {
           // `errors[]` instead. Keep that actionable notice separate from
           // model output so the poll-loop can deliver it without scratchpad.
           const m = message as { result?: string; is_error?: boolean; errors?: string[] };
+          const isError = m.is_error === true;
+          // Some failures (e.g. an invalid API key) leave errors[] empty and put
+          // the SDK's own notice in `result`. Other result text can echo upstream
+          // bodies, so only exact fixed notices are reused; the rest stay generic.
+          const candidate = isError && !m.errors?.length ? (m.result?.trim() ?? '') : '';
+          // Notice first, hint on its own line: setup's ping shows only the first line.
+          const hint = SDK_NOTICES.get(candidate);
+          const resultAsError = hint ? `${candidate}\n${hint}` : '';
           yield {
             type: 'result',
-            text: m.result ?? null,
-            isError: m.is_error === true,
-            error: m.errors?.length ? m.errors.join('\n') : undefined,
+            text: resultAsError ? null : (m.result ?? null),
+            isError,
+            error: m.errors?.length ? m.errors.join('\n') : resultAsError || undefined,
           };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
           yield { type: 'error', message: 'API retry', retryable: true };

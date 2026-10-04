@@ -9,7 +9,8 @@
 # hand and the workflow will not put it back.
 #
 # Paths with no confident owner are deliberately left unmapped rather than
-# guessed. See .github/workflows/label-area.yml for the runner side.
+# guessed. The runner side is the actions/labeler step at the end of
+# .github/workflows/label-pr.yml.
 
 "area/agent-memory":
   - changed-files:

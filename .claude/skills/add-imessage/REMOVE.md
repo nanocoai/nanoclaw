@@ -18,9 +18,13 @@ rm -f src/channels/imessage.ts src/channels/imessage.test.ts src/channels/imessa
 
 ## 3. Uninstall the backend package(s)
 
-Uninstall whichever is present:
+Uninstall whichever is present. For the local backend, delete its
+`better-sqlite3` override first, so the uninstall also drops it from the
+lockfile (an empty `"pnpm": { "overrides": {} }` left in `package.json` is
+harmless):
 
 ```bash
+pnpm pkg delete 'pnpm.overrides[@photon-ai/imessage-kit>better-sqlite3]'   # local backend
 pnpm uninstall chat-adapter-imessage   # local backend
 pnpm uninstall spectrum-ts             # hosted backend
 ```

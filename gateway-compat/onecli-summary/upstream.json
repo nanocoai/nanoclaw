@@ -1,8 +1,8 @@
 {
-  "version": "1.41.0",
-  "commit": "fe0981f09122358d4b3c721ef3e141026a2fdc46",
+  "version": "1.42.0",
+  "commit": "3912c74d7029505f0f5389745568111d643adc68",
   "files": {
-    "apps.rs": "12bf43528f3510cd2ab9330dd05d2ddb6ee267f033b2384474dca4931b438c52",
+    "apps.rs": "f77227bbea035a43fe0d67277604b4923215d072db2d2a45eba171b3abdc6392",
     "cloud_summary.rs": "1a7d0d1b1ad0fd30d7082be464a2bb6908dbb4dff53a113e69c2b0cef600fa85",
     "summary/generic.rs": "f0a3f72db64106a74da23195ccdf3aacea44b92e3ec97c58029520feacb9686b",
     "summary/gmail.rs": "f93a104ecbac03f30113be32252d5c5df10b49ed771d53e51e5df35e22110e29",
