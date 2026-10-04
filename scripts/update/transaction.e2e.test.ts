@@ -392,7 +392,7 @@ describe('update-nanoclaw transaction end to end', () => {
     state = await validateUpdate(fixture.install, state.id, runtime);
     expect(state.phase).toBe('validated');
     expect(state.gatewaySelection).toBeUndefined();
-    expect(state.validation?.[0]).toBe('gateway payload refresh skipped: custom-gateway is not in the gateway catalog');
+    expect(state.validation?.[0]).toBe('gateway payload refresh skipped: Unknown gateway provider: custom-gateway');
   });
 
   it('leaves gateway handling alone when only a non-gateway skill changed', async () => {

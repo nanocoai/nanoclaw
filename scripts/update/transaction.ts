@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+import type { GatewayCatalogEntry } from '../../setup/gateways/catalog.js';
 import { getInstallSlug } from '../../src/install-slug.js';
 import { refreshInstalledSkills, type SkillsRefreshReport } from '../update-skills.js';
 import {
@@ -358,20 +359,23 @@ export async function validateUpdate(
     state.gatewaySelection = undefined;
     if (gatewayCoreChanged || changedGatewaySkills.size > 0) {
       const { loadGatewayCatalog, resolveGatewaySelection } = await runtime.loadGateway(state.stageRoot);
-      // Payload-only: refresh just the selected gateway's own skill; skip, not fail, when none resolves.
-      let kind: string | undefined;
+      let entry: GatewayCatalogEntry | undefined;
       try {
-        kind = resolveGatewaySelection(state.projectRoot, undefined, path.join(state.stageRoot, '.claude', 'skills'));
+        const kind = resolveGatewaySelection(
+          state.projectRoot,
+          undefined,
+          path.join(state.stageRoot, '.claude', 'skills'),
+        );
+        entry = loadGatewayCatalog(state.stageRoot).gateways.find((candidate) => candidate.kind === kind);
+        if (!entry) throw new Error(`Unknown gateway provider: ${kind}`);
       } catch (err) {
+        // Skill-only change: don't block the update over a gateway it can't resolve; say so instead.
         if (gatewayCoreChanged) throw err;
         checks.push(`gateway payload refresh skipped: ${err instanceof Error ? err.message : String(err)}`);
       }
-      const entry = kind && loadGatewayCatalog(state.stageRoot).gateways.find((candidate) => candidate.kind === kind);
-      if (kind && !entry) {
-        if (gatewayCoreChanged) throw new Error(`Unknown gateway provider: ${kind}`);
-        checks.push(`gateway payload refresh skipped: ${kind} is not in the gateway catalog`);
-      }
-      if (kind && entry && (gatewayCoreChanged || changedGatewaySkills.has(path.basename(entry.skillPath)))) {
+      // Skill-only change: refresh just the selected gateway, and only if its own skill changed.
+      if (entry && (gatewayCoreChanged || changedGatewaySkills.has(path.basename(entry.skillPath)))) {
+        const kind = entry.kind;
         state.gatewaySelection = kind;
         const gateway = { name: kind, skillName: path.basename(entry.skillPath), kind: 'gateway' as const };
         const report = await refreshInstalledSkills(state.stageRoot, [gateway.skillName], { include: [gateway] });
