@@ -4,10 +4,35 @@ import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 const VERSION_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+const PRERELEASE_PATTERN = /^((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))-rc\.[1-9]\d*$/;
+
+export function isPrerelease(version) {
+  if (PRERELEASE_PATTERN.test(version)) return true;
+  if (VERSION_PATTERN.test(version)) return false;
+  throw new Error(`version must be x.y.z or x.y.z-rc.N without a v prefix: ${version}`);
+}
+
+function bulletedSection(remainder, label) {
+  const nextHeading = remainder.search(/^## \[/m);
+  const section = (nextHeading === -1 ? remainder : remainder.slice(0, nextHeading)).trim();
+  if (!section || !/^[-*] /m.test(section)) {
+    throw new Error(`CHANGELOG.md [${label}] must contain at least one release-note bullet`);
+  }
+  return section;
+}
+
+// Pre-releases publish the Unreleased notes as they stand; the stable release PR moves them.
+export function unreleasedSection(markdown) {
+  const matches = [...markdown.matchAll(/^## \[Unreleased\]$/gm)];
+  if (matches.length !== 1) {
+    throw new Error(`CHANGELOG.md must contain exactly one [Unreleased] heading; found ${matches.length}`);
+  }
+  return bulletedSection(markdown.slice(matches[0].index + matches[0][0].length), 'Unreleased');
+}
 
 export function changelogSection(markdown, version) {
-  if (!VERSION_PATTERN.test(version)) {
-    throw new Error(`version must be an exact x.y.z value without a v prefix: ${version}`);
+  if (isPrerelease(version)) {
+    return unreleasedSection(markdown);
   }
 
   const escaped = version.replaceAll('.', '\\.');
@@ -18,21 +43,20 @@ export function changelogSection(markdown, version) {
     throw new Error(`CHANGELOG.md must contain exactly one dated [${version}] heading; found ${matches.length}`);
   }
 
-  const start = matches[0].index + matches[0][0].length;
-  const remainder = markdown.slice(start);
-  const nextHeading = remainder.search(/^## \[/m);
-  const section = (nextHeading === -1 ? remainder : remainder.slice(0, nextHeading)).trim();
-
-  if (!section || !/^[-*] /m.test(section)) {
-    throw new Error(`CHANGELOG.md [${version}] must contain at least one release-note bullet`);
-  }
-
-  return section;
+  return bulletedSection(markdown.slice(matches[0].index + matches[0][0].length), version);
 }
 
 export function verifyRelease({ changelog, packageVersion, version }) {
   if (packageVersion !== version) {
     throw new Error(`package.json version ${packageVersion} does not match requested release ${version}`);
+  }
+
+  if (isPrerelease(version)) {
+    const base = version.match(PRERELEASE_PATTERN)[1];
+    if (changelog.includes(`## [${base}]`)) {
+      throw new Error(`${version} is a pre-release of ${base}, which CHANGELOG.md already records as released`);
+    }
+    return unreleasedSection(changelog);
   }
 
   const unreleasedIndex = changelog.indexOf('## [Unreleased]');
@@ -110,8 +134,8 @@ export function publicationPlan({ expectedBody, release, tagState, targetSha, ve
     if (release.draft !== false) {
       throw new Error(`GitHub Release ${tag} is still a draft`);
     }
-    if (release.prerelease !== false) {
-      throw new Error(`GitHub Release ${tag} is marked as a prerelease`);
+    if (release.prerelease !== isPrerelease(version)) {
+      throw new Error(`GitHub Release ${tag} is ${release.prerelease ? '' : 'not '}marked as a prerelease`);
     }
     if (release.immutable !== true) {
       throw new Error(`GitHub Release ${tag} is not immutable`);
@@ -154,7 +178,7 @@ export function main(argv) {
   const [command, version, ...args] = argv;
   if (!command || !version) {
     throw new Error(
-      'usage: node scripts/release.mjs <verify|extract|assemble|plan|readback> <x.y.z> [command arguments]',
+      'usage: node scripts/release.mjs <verify|extract|assemble|plan|readback> <x.y.z[-rc.N]> [command arguments]',
     );
   }
 

@@ -37,7 +37,7 @@ import './iron-proxy.js';
 ## Install the bridge dependencies
 
 ```nc:dep manager:pnpm
-@grpc/grpc-js@1.14.4
+@grpc/grpc-js@1.14.5
 @grpc/proto-loader@0.8.1
 ```
 

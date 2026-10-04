@@ -338,6 +338,32 @@ describe.each(SKILLS)('%s', (name) => {
     });
   });
 
+  // A `pnpm pkg set 'pnpm.…'` changes how pnpm resolves the skill's deps. Set
+  // after a dep, it misses that install; missing from REMOVE.md, it outlives
+  // the skill. Only guards on the same var with different values never co-run.
+  it('pnpm settings precede the deps they shape and REMOVE.md deletes them', () => {
+    const removeMd = existsSync(join(dir, 'REMOVE.md')) ? readFileSync(join(dir, 'REMOVE.md'), 'utf8') : '';
+    const exclusive = (a: Directive, b: Directive) =>
+      isString(a.attrs.when) &&
+      isString(b.attrs.when) &&
+      a.attrs.when !== b.attrs.when &&
+      a.attrs.when.split('=')[0] === b.attrs.when.split('=')[0];
+    directives.forEach((d, i) => {
+      if (d.kind !== 'run') return;
+      for (const cmd of d.body) {
+        const key = cmd.match(/\bpnpm pkg set ["']?(pnpm\.[^="']+)=/)?.[1];
+        if (!key) continue;
+        const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        expect(removeMd, `REMOVE.md never deletes ${key}`).toMatch(new RegExp(`pnpm pkg delete ["']?${escaped}["']?`));
+        directives.forEach((dep, j) => {
+          if (dep.kind === 'dep' && !exclusive(d, dep)) {
+            expect(j, `nc:dep at line ${dep.line} installs before line ${d.line} sets ${key}`).toBeGreaterThan(i);
+          }
+        });
+      }
+    });
+  });
+
   // A restart-shaped command on a bare `nc:run` (no effect:) would silently
   // escape both skipEffects ownership and the run-health gate.
   it('no restart-shaped command hides on a bare nc:run', () => {

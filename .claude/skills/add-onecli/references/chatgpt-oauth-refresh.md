@@ -3,7 +3,7 @@
 These notes apply to the current OneCLI credential adapter, not to any
 provider's runtime contract.
 
-NanoClaw's OneCLI 1.41.0 pin cannot refresh the ChatGPT OAuth credentials a
+NanoClaw's OneCLI 1.42.0 pin cannot refresh the ChatGPT OAuth credentials a
 provider imports (for example OpenCode's ChatGPT sign-in): its refresh request
 omits the required client ID. After expiry, use the provider's manual
 reauthentication, for OpenCode the

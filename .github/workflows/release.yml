@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Exact package version to release (without a v prefix)
+        description: Exact package version to release (x.y.z, or x.y.z-rc.N for a pre-release; no v prefix)
         required: true
         type: string
       target_sha:
@@ -69,25 +69,41 @@ jobs:
       - name: Verify protected release environment
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          if ! gh api "repos/${GITHUB_REPOSITORY}/environments/release" > "$RUNNER_TEMP/release-environment.json"; then
-            echo "::error::Create and protect the release environment before publishing."
+          # Stable releases need a second person; pre-releases are approved by their sole reviewer.
+          # Same rule as the publish job's environment expression; release.mjs verify rejects
+          # any '-' suffix other than -rc.N. Kept in shell so older target commits still verify.
+          case "$RELEASE_VERSION" in *-*) ENVIRONMENT=prerelease ;; *) ENVIRONMENT=release ;; esac
+          case "$ENVIRONMENT" in
+            release)
+              EXPECTED_REVIEWERS='["amit-shafnir","gavrielc","glifocat","omri-maya","zvi-fried"]'
+              PREVENT_SELF_REVIEW=true
+              ;;
+            prerelease)
+              EXPECTED_REVIEWERS='["glifocat"]'
+              PREVENT_SELF_REVIEW=false
+              ;;
+          esac
+
+          if ! gh api "repos/${GITHUB_REPOSITORY}/environments/${ENVIRONMENT}" > "$RUNNER_TEMP/release-environment.json"; then
+            echo "::error::Create and protect the $ENVIRONMENT environment before publishing."
             exit 1
           fi
 
-          if ! jq -e '
+          if ! jq -e --argjson prevent "$PREVENT_SELF_REVIEW" '
             .can_admins_bypass == false and
             .deployment_branch_policy.protected_branches == false and
             .deployment_branch_policy.custom_branch_policies == true and
             ([.protection_rules[] | select(.type == "required_reviewers")] | length) == 1 and
-            ([.protection_rules[] | select(.type == "required_reviewers")][0].prevent_self_review == true) and
+            ([.protection_rules[] | select(.type == "required_reviewers")][0].prevent_self_review == $prevent) and
             all(
               [.protection_rules[] | select(.type == "required_reviewers")][0].reviewers[];
               .type == "User"
             )
           ' "$RUNNER_TEMP/release-environment.json" >/dev/null; then
-            echo "::error::The release environment must have one user-reviewer rule, prevent self-review and admin bypass, and use custom branch policies."
+            echo "::error::The $ENVIRONMENT environment must have one user-reviewer rule with prevent_self_review=$PREVENT_SELF_REVIEW, prevent admin bypass, and use custom branch policies."
             exit 1
           fi
 
@@ -95,19 +111,18 @@ jobs:
             [.protection_rules[] | select(.type == "required_reviewers") | .reviewers[].reviewer.login]
             | sort
           ' "$RUNNER_TEMP/release-environment.json")
-          EXPECTED_REVIEWERS='["gavrielc","omri-maya"]'
           if [ "$ACTUAL_REVIEWERS" != "$EXPECTED_REVIEWERS" ]; then
-            echo "::error::Release reviewer roster drift: expected $EXPECTED_REVIEWERS, got $ACTUAL_REVIEWERS. Update the workflow and RELEASING.md together in a reviewed pull request."
+            echo "::error::Release reviewer roster drift ($ENVIRONMENT): expected $EXPECTED_REVIEWERS, got $ACTUAL_REVIEWERS. Update the workflow and RELEASING.md together in a reviewed pull request."
             exit 1
           fi
 
-          gh api "repos/${GITHUB_REPOSITORY}/environments/release/deployment-branch-policies" \
+          gh api "repos/${GITHUB_REPOSITORY}/environments/${ENVIRONMENT}/deployment-branch-policies" \
             > "$RUNNER_TEMP/release-branch-policies.json"
           if ! jq -e '
             .total_count == 1 and
             any(.branch_policies[]; .name == "main" and (.type // "branch") == "branch")
           ' "$RUNNER_TEMP/release-branch-policies.json" >/dev/null; then
-            echo "::error::The release environment must allow exactly the main branch."
+            echo "::error::The $ENVIRONMENT environment must allow exactly the main branch."
             exit 1
           fi
 
@@ -148,7 +163,8 @@ jobs:
             echo "### Release verification"
             echo "- Version: \`$TAG\`"
             echo "- Target: \`$TARGET_SHA\`"
-            echo "- Previous tag: \`$(git describe --tags --abbrev=0 "$TARGET_SHA^")\`"
+            echo "- Pre-release: \`$([[ "$RELEASE_VERSION" == *-* ]] && echo yes || echo no)\`"
+            echo "- Previous stable tag: \`$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude 'v*-*' "$TARGET_SHA^")\`"
             echo "- Mode: \`${{ inputs.mode }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -175,9 +191,10 @@ jobs:
     if: inputs.mode == 'publish'
     needs: verify
     runs-on: ubuntu-latest
-    # This environment must be created and protected before the workflow lands.
+    # Both environments must be created and protected before the workflow lands.
     # GitHub otherwise auto-creates an unprotected environment on first use.
-    environment: release
+    # Only x.y.z-rc.N passes verify with a '-'; the verify job checks this same environment.
+    environment: ${{ contains(inputs.version, '-') && 'prerelease' || 'release' }}
     permissions:
       contents: write
     steps:
@@ -223,7 +240,8 @@ jobs:
         run: |
           set -euo pipefail
           TAG="v${RELEASE_VERSION}"
-          PREVIOUS_TAG=$(git describe --tags --abbrev=0 "$TARGET_SHA^")
+          # Contributors and the compare link cover everything since the last stable release.
+          PREVIOUS_TAG=$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude 'v*-*' "$TARGET_SHA^")
 
           gh api -X POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
             -f tag_name="$TAG" \
@@ -280,13 +298,20 @@ jobs:
             git push origin "refs/tags/$TAG"
           fi
 
+          # A pre-release must never become /releases/latest, which the stable channel follows.
+          if [[ "$RELEASE_VERSION" == *-* ]]; then
+            CHANNEL_FLAGS=(--prerelease --latest=false)
+          else
+            CHANNEL_FLAGS=(--latest)
+          fi
+
           if [ "$PLAN" != "already-published" ]; then
             gh release create "$TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --title "$TAG" \
               --notes-file "$RUNNER_TEMP/release-notes.md" \
               --verify-tag \
-              --latest
+              "${CHANNEL_FLAGS[@]}"
           else
             echo "::notice::GitHub Release $TAG already matches the requested publication; nothing to change."
           fi

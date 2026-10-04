@@ -58,7 +58,7 @@ a key in `.env`, command arguments, or the container environment.
   answer at the key prompt completes the move after confirmation.
 - Existing OneCLI credential names and formats remain compatible.
 - ChatGPT logins need manual reauthentication after expiry on the pinned
-  OneCLI 1.41.0; see [ChatGPT OAuth refresh](references/chatgpt-oauth-refresh.md)
+  OneCLI 1.42.0; see [ChatGPT OAuth refresh](references/chatgpt-oauth-refresh.md)
   for the limitation and upgrade constraints.
 
 ## Validate
