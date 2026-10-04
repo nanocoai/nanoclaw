@@ -27,7 +27,6 @@
  */
 import fs from 'fs';
 import path from 'path';
-import { createRequire } from 'module';
 // Named import (not default) — pino's d.ts under NodeNext resolves the
 // default export to `typeof pino` (namespace), which isn't callable. The
 // named `pino` export resolves to the callable function.
@@ -46,24 +45,6 @@ import { emitStatus } from './status.js';
 const AUTH_DIR = path.join(process.cwd(), 'store', 'auth');
 const PAIRING_CODE_FILE = path.join(process.cwd(), 'store', 'pairing-code.txt');
 const baileysLogger = pino({ level: 'silent' });
-
-// Baileys v6 bug: getPlatformId sends charCode (49) instead of enum value (1).
-// Fixed in Baileys 7.x but not backported. Without this patch pairing codes
-// fail with "couldn't link device" because WhatsApp receives an invalid
-// platform id. createRequire because proto is not a named ESM export.
-const _require = createRequire(import.meta.url);
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const { proto } = _require('@whiskeysockets/baileys') as { proto: any };
-try {
-  const _generics = _require('@whiskeysockets/baileys/lib/Utils/generics') as Record<string, unknown>;
-  _generics.getPlatformId = (browser: string): string => {
-    const platformType =
-      proto.DeviceProps.PlatformType[browser.toUpperCase() as keyof typeof proto.DeviceProps.PlatformType];
-    return platformType ? platformType.toString() : '1';
-  };
-} catch {
-  // If CJS require fails, QR auth still works; only pairing code may be affected.
-}
 
 type AuthMethod = 'qr' | 'pairing-code';
 
