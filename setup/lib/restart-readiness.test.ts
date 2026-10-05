@@ -1,11 +1,21 @@
-import { execFile, execFileSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { execFile, execFileSync, spawnSync } from 'node:child_process';
+import {
+  copyFileSync,
+  linkSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { queryHost, waitForHost } from './host-status.mjs';
 
@@ -54,30 +64,10 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 
 const shellQuote = (value: string): string => `'${value.replaceAll("'", `'"'"'`)}'`;
 
-let root: string;
-let binDir: string;
-let ownedPids: Set<number>;
-
-beforeEach(() => {
-  // Keep the fixture's Unix socket path below macOS's 104-byte limit.
-  root = realpathSync(mkdtempSync(join(tmpdir(), 'ncl-rst-')));
-  binDir = join(root, 'test-bin');
-  ownedPids = new Set();
-  mkdirSync(join(root, 'setup/lib'), { recursive: true });
-  mkdirSync(join(root, 'dist'));
-  mkdirSync(join(root, 'logs'));
-  mkdirSync(binDir);
-  for (const name of ['host-status.mjs', 'restart.sh', 'install-slug.sh']) {
-    copyFileSync(join(sourceLib, name), join(root, 'setup/lib', name));
-  }
-  writeFileSync(join(root, 'dist/index.js'), fixtureHost);
-  writeFileSync(join(binDir, 'uname'), '#!/bin/sh\necho Linux\n', { mode: 0o755 });
-  writeFileSync(join(binDir, 'node'), `#!/bin/sh\nexec ${shellQuote(process.execPath)} "$@"\n`, { mode: 0o755 });
-  writeFileSync(
-    join(root, 'start-nanoclaw.sh'),
-    `#!/bin/bash
+// Root-relative, so one file hardlinked into each test root serves every test.
+const launcher = `#!/bin/bash
 set -eu
-cd ${shellQuote(root)}
+cd "$(dirname "$0")"
 [[ -f dist/index.js ]]
 old_pid="$(cat nanoclaw.pid 2>/dev/null || true)"
 if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
@@ -86,9 +76,51 @@ if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
 fi
 ${shellQuote(process.execPath)} dist/index.js >> logs/nanoclaw.log 2>> logs/nanoclaw.error.log < /dev/null &
 echo $! > nanoclaw.pid
-`,
-    { mode: 0o755 },
-  );
+`;
+
+let root: string;
+let shared: string;
+let binDir: string;
+let ownedPids: Set<number>;
+
+function resetStubs(): void {
+  writeFileSync(join(binDir, 'uname'), '#!/bin/sh\necho Linux\n', { mode: 0o755 });
+  writeFileSync(join(binDir, 'systemctl'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+  writeFileSync(join(binDir, 'launchctl'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+}
+
+beforeAll(() => {
+  // macOS checks the first exec of every new script (~200 ms, queued across a
+  // parallel run). Create the stubs and launcher once and exec them here; the
+  // tests rewrite them in place or hardlink them, which reuses that check.
+  shared = realpathSync(mkdtempSync(join(tmpdir(), 'ncl-rst-bin-')));
+  binDir = join(shared, 'bin');
+  mkdirSync(binDir);
+  symlinkSync(process.execPath, join(binDir, 'node'));
+  writeFileSync(join(shared, 'start-nanoclaw.sh'), launcher, { mode: 0o755 });
+  resetStubs();
+  for (const file of ['bin/uname', 'bin/systemctl', 'bin/launchctl', 'start-nanoclaw.sh']) {
+    spawnSync(join(shared, file));
+  }
+});
+
+afterAll(() => {
+  rmSync(shared, { recursive: true, force: true });
+});
+
+beforeEach(() => {
+  // Keep the fixture's Unix socket path below macOS's 104-byte limit.
+  root = realpathSync(mkdtempSync(join(tmpdir(), 'ncl-rst-')));
+  ownedPids = new Set();
+  mkdirSync(join(root, 'setup/lib'), { recursive: true });
+  mkdirSync(join(root, 'dist'));
+  mkdirSync(join(root, 'logs'));
+  for (const name of ['host-status.mjs', 'restart.sh', 'install-slug.sh']) {
+    copyFileSync(join(sourceLib, name), join(root, 'setup/lib', name));
+  }
+  writeFileSync(join(root, 'dist/index.js'), fixtureHost);
+  resetStubs();
+  linkSync(join(shared, 'start-nanoclaw.sh'), join(root, 'start-nanoclaw.sh'));
 });
 
 afterEach(async () => {
