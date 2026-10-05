@@ -1001,6 +1001,9 @@ describe('update-nanoclaw transaction end to end', () => {
           events.push('service stop');
           return '';
         }
+        if (command === 'launchctl' && args[0] === 'print' && !running) {
+          throw Object.assign(new Error('Could not find service'), { status: 113 });
+        }
         return '';
       },
       tryRun: () => ({ ok: true, stdout: '' }),

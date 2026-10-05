@@ -276,10 +276,38 @@ export function detectService(projectRoot: string, env: ServiceEnvironment): Ser
 export async function stopService(handle: ServiceHandle, env: ServiceEnvironment): Promise<void> {
   if (!handle.active) return;
   if (handle.mode === 'launchd') {
+    const target = `gui/${env.uid}/${handle.name}`;
+    // Every PID the job reports: KeepAlive can swap the host between probes.
+    const pids = new Set<number>();
+    const loaded = () => {
+      const job = probe(
+        env,
+        'launchctl',
+        ['print', target],
+        [113],
+        'Run the update from a login session of this user.',
+      );
+      const pid = Number(/^\s*pid = (\d+)/m.exec(job?.stdout ?? '')?.[1]);
+      if (pid) pids.add(pid);
+      return job !== undefined;
+    };
+    loaded();
     try {
-      env.runner.run('launchctl', ['bootout', `gui/${env.uid}/${handle.name}`]);
+      env.runner.run('launchctl', ['bootout', target]);
     } catch (err) {
       if (!/No such process/i.test(err instanceof Error ? err.message : String(err))) throw err;
+    }
+    // bootout returns while the host still runs its shutdown handlers. Wait for
+    // the job to leave the domain and the process to exit, or the snapshot races
+    // the shutdown and the next bootstrap fails with "5: Input/output error".
+    const stopping = () => loaded() || [...pids].some(processExists);
+    for (let i = 0; i < 60 && stopping(); i += 1) await env.sleep(500);
+    if (stopping()) {
+      const start = startCommand(handle, env.uid);
+      throw new Error(
+        `NanoClaw service ${handle.name} did not stop (PID ${[...pids].join(', ') || 'unknown'}). ` +
+          `Once it has exited, start it again with: ${start}`,
+      );
     }
   } else if (handle.mode === 'systemd-user') {
     adoptUserRuntimeDir(env.uid);
