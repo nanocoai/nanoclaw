@@ -49,13 +49,21 @@ This must print `ghcr.io/onecli/onecli:<pin>`. Do not pull or restart until it d
     image: ghcr.io/onecli/onecli:${ONECLI_VERSION:-<onecli-gateway pin from .claude/skills/add-onecli/versions.json>}
 ```
 
+Back up the gateway database before you pull or restart. A newer gateway can migrate it, and going back to the pin does not undo that:
+
+```bash
+cd ~/.onecli && (umask 077 && F=~/onecli-db-backup-$(date +%Y%m%d-%H%M%S).sql && docker compose exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' > "$F" && grep -q 'PostgreSQL database dump complete' "$F" && ls -l "$F")
+```
+
+It prints the new file only when the dump is complete; if it prints nothing, the backup failed. Only you can read the file. `postgres` is the database service in the stock compose file; use your service's name if it differs. Restoring from this dump has not been tested. Stored secrets are encrypted with a key kept outside the database (the `app-data` volume), so the dump alone does not recover them if that volume is lost.
+
 Then pull and restart:
 
 ```bash
 cd ~/.onecli && env -u ONECLI_VERSION docker compose pull onecli && env -u ONECLI_VERSION docker compose up -d
 ```
 
-**If a gateway newer than the pin has started, even briefly:** it can migrate its database, and going back to the pin does not undo that. Roll back (step 4), then check `docker logs onecli 2>&1 | grep -iE 'migrat|error'`. In testing, rolling back from 1.43.3 worked; from 1.45.0 it left a `policy_rule_identities.agent_group_id does not exist` error at startup. Access rules and approvals were not checked either time. If you see a database error, restore a gateway database backup from before the newer version ran, if you have one. There is no other tested repair, so otherwise [open an issue](https://github.com/nanocoai/nanoclaw/issues) with the log lines.
+**If a gateway newer than the pin has started, even briefly:** it can migrate its database, and going back to the pin does not undo that. Roll back (step 4), then check `docker logs onecli 2>&1 | grep -iE 'migrat|error'`. In testing, rolling back from 1.43.3 worked; from 1.45.0 it left a `policy_rule_identities.agent_group_id does not exist` error at startup. Access rules and approvals were not checked either time. If you see a database error, restore a backup taken before the newer version ran (the one from step 2, if you took it in time). There is no other tested repair, so otherwise [open an issue](https://github.com/nanocoai/nanoclaw/issues) with the log lines.
 
 ## 3. Verify
 
@@ -94,7 +102,7 @@ source setup/lib/install-slug.sh && systemctl --user restart $(systemd_unit)
 
 ## 4. Rollback
 
-Save the old version in `~/.onecli/.env` the same way as in step 2, so a later restart does not undo the rollback , then restart and check the running tag. The command accepts only a version or `rollback`; if it refuses, nothing restarts. The last line printed must end in `:<old-version>`:
+Save the old version in `~/.onecli/.env` the same way as in step 2, so a later restart does not undo the rollback, then restart and check the running tag. The command accepts only a version or `rollback`; if it refuses, nothing restarts. The last line printed must end in `:<old-version>`:
 
 ```bash
 cd ~/.onecli && (umask 077 && P=<old-version> && { printf '%s\n' "$P" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+|rollback' || { echo "Not saved: '$P' is not a version or rollback" >&2; exit 1; }; } && touch .env && { grep -v '^[[:space:]]*ONECLI_VERSION[[:space:]]*=' .env; echo "ONECLI_VERSION=$P"; } > .env.new && cat .env.new > .env && rm .env.new) && env -u ONECLI_VERSION docker compose up -d && docker inspect -f '{{.Config.Image}}' onecli

@@ -48,6 +48,15 @@ describe('OneCLI upgrade guide: save commands', () => {
     expect(saveLines).toHaveLength(2);
   });
 
+  it('backs up the gateway database before the pull and restart', () => {
+    const guide = fs.readFileSync(GUIDE, 'utf8');
+    const backup = guide.split('\n').filter((l) => l.includes('pg_dump'));
+    expect(backup).toHaveLength(1);
+    expect(backup[0]).not.toMatch(/!|\s#\s/);
+    expect(guide.indexOf(backup[0])).toBeLessThan(guide.indexOf('docker compose pull onecli'));
+    expect(spawnSync('sh', ['-n', '-c', backup[0]]).status).toBe(0);
+  });
+
   // An unquoted `!` is history expansion when pasted into interactive zsh or bash.
   // So is a trailing `#` comment in zsh, where it is a parse error.
   it('save commands contain no `!` and no trailing comment', () => {
