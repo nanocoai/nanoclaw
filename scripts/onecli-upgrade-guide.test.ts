@@ -57,6 +57,30 @@ describe('OneCLI upgrade guide: save commands', () => {
     expect(spawnSync('sh', ['-n', '-c', backup[0]]).status).toBe(0);
   });
 
+  // `docker` is a stub that prints what a complete, cut-off, or failed dump would.
+  it.each([
+    ['complete', 'echo "-- PostgreSQL database dump complete"', true],
+    ['cut off', 'echo "CREATE TABLE x"', false],
+    ['failed', 'echo "CREATE TABLE x"; exit 1', false],
+  ])('backup keeps the file only for a complete dump: %s', (_name, body, kept) => {
+    const backup = fs
+      .readFileSync(GUIDE, 'utf8')
+      .split('\n')
+      .filter((l) => l.includes('pg_dump'))[0];
+    const bin = path.join(home, 'bin');
+    fs.mkdirSync(bin);
+    fs.writeFileSync(path.join(bin, 'docker'), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+    const r = spawnSync('sh', ['-c', backup], {
+      env: { PATH: `${bin}:${process.env.PATH ?? ''}`, HOME: home },
+      encoding: 'utf8',
+    });
+    const files = fs.readdirSync(home).filter((f) => f.startsWith('onecli-db-backup-'));
+    expect(r.status === 0).toBe(kept);
+    expect(files).toHaveLength(kept ? 1 : 0);
+    if (kept) expect(fs.statSync(path.join(home, files[0])).mode & 0o777).toBe(0o600);
+    else expect(r.stderr).toContain('Backup failed, nothing saved');
+  });
+
   // An unquoted `!` is history expansion when pasted into interactive zsh or bash.
   // So is a trailing `#` comment in zsh, where it is a parse error.
   it('save commands contain no `!` and no trailing comment', () => {
