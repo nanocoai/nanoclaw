@@ -55,7 +55,7 @@ Back up the gateway database before you pull or restart. A newer gateway can mig
 cd ~/.onecli && (umask 077 && F=~/onecli-db-backup-$(date +%Y%m%d-%H%M%S).sql && docker compose exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' > "$F.part" && grep -q 'PostgreSQL database dump complete' "$F.part" && mv "$F.part" "$F" || { rm -f "$F.part"; echo "Backup failed, nothing saved" >&2; exit 1; }; ls -l "$F")
 ```
 
-It prints the new file only when the dump is complete. If the dump fails or stops early, it says so and leaves no file behind; a leftover file ending in `.part` is not a backup. Only you can read the file. `postgres` is the database service in the stock compose file; use your service's name if it differs. Restoring from this dump has not been tested. Stored secrets are encrypted with a key kept outside the database. By default it is the `secret-encryption-key` file in the `app-data` volume; if you set `SECRET_ENCRYPTION_KEY` yourself, it is wherever you set it. Either way, the dump alone does not recover secrets without that key.
+It prints the new file only when the dump is complete. If the dump fails or stops early, it says so and leaves no file behind; a leftover file ending in `.part` is not a backup. Only you can read the file. `postgres` is the database service in the stock compose file; use your service's name if it differs. Restoring it was tested once, from 1.45.0 back to 1.42.0: loaded with `psql` into a new, empty database, it brought the gateway back without the startup error and with its stored secret. There is no restore command in this guide yet. Stored secrets are encrypted with a key kept outside the database. By default it is the `secret-encryption-key` file in the `app-data` volume; if you set `SECRET_ENCRYPTION_KEY` yourself, it is wherever you set it. Either way, the dump alone does not recover secrets without that key.
 
 Then pull and restart:
 
@@ -63,7 +63,7 @@ Then pull and restart:
 cd ~/.onecli && env -u ONECLI_VERSION docker compose pull onecli && env -u ONECLI_VERSION docker compose up -d
 ```
 
-**If a gateway newer than the pin has started, even briefly:** it can migrate its database, and going back to the pin does not undo that. Roll back (step 4), then check `docker logs onecli 2>&1 | grep -iE 'migrat|error'`. In testing, rolling back from 1.43.3 worked; from 1.45.0 it left a `policy_rule_identities.agent_group_id does not exist` error at startup. Access rules and approvals were not checked either time. If you see a database error, restore a backup taken before the newer version ran (the one from step 2, if you took it in time). There is no other tested repair, so otherwise [open an issue](https://github.com/nanocoai/nanoclaw/issues) with the log lines.
+**If a gateway newer than the pin has started, even briefly:** it can migrate its database, and going back to the pin does not undo that. Put the gateway back on the pin (step 2), then check `docker logs onecli 2>&1 | grep -iE 'migrat|error'`. In testing, rolling back from 1.43.3 worked; from 1.45.0 it left a `policy_rule_identities.agent_group_id does not exist` error at startup. Access rules and approvals were not checked either time. If you see a database error, restore a backup taken before the newer version ran (the one from step 2, if you took it in time). There is no other tested repair, so otherwise [open an issue](https://github.com/nanocoai/nanoclaw/issues) with the log lines.
 
 ## 3. Verify
 

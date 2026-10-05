@@ -152,4 +152,13 @@ describe('OneCLI upgrade guide: save commands', () => {
     expect(r.stderr).toContain('Not saved');
     expect(fs.readFileSync(envFile, 'utf8')).toBe('ONECLI_VERSION=1.42.0\n');
   });
+
+  it('the migration warning sends the reader back to the pin, not to the old version', () => {
+    const warning = fs
+      .readFileSync(GUIDE, 'utf8')
+      .split('\n')
+      .find((l) => l.startsWith('**If a gateway newer than the pin'));
+    expect(warning).toContain('back on the pin (step 2)');
+    expect(warning).not.toContain('step 4');
+  });
 });
