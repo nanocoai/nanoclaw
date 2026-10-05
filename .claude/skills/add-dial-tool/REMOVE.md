@@ -32,8 +32,14 @@ created are name-prefixed, so only those go — an operator's own rules on
 
 ```bash
 for id in $(onecli secrets list | jq -r '.data[] | select(.name | test("(?i)dial")) | .id'); do onecli secrets delete --id "$id"; done
-for id in $(onecli rules list | jq -r '.data[] | select(.hostPattern=="api.getdial.ai" and .action=="block" and (.name | startswith("Dial: blocked for "))) | .id'); do onecli rules delete --id "$id"; done
+for id in $(onecli rules list | jq -r '.data[] | select(.hostPattern=="api.getdial.ai" and .action=="block" and (.name | startswith("Dial: blocked for "))) | .id'); do onecli rules delete --id "$id" || echo "could not delete rule $id: remove it in the OneCLI console"; done
 ```
+
+On OneCLI gateway 1.42 and later the rule commands fail: legacy rules can no
+longer be changed (1.42) or even listed (1.43+). That is safe once the secret is
+gone, because a leftover block rule only blocks a host that no agent holds a key
+for. Delete the `Dial: blocked for …` policies in the OneCLI console if you want
+them gone.
 
 ## 4. Rebuild and restart the agents
 

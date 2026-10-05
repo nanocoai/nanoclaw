@@ -8,6 +8,10 @@
       },
       "exec": [
         {
+          "match": "/api/health",
+          "stdout": "1.41.0"
+        },
+        {
           "match": "package.json",
           "stdout": "nanoclaw/2.2.0"
         },
@@ -29,6 +33,10 @@
         "otp": "123456"
       },
       "exec": [
+        {
+          "match": "/api/health",
+          "stdout": "1.41.0"
+        },
         {
           "match": "package.json",
           "stdout": "nanoclaw/2.2.0"

@@ -37,6 +37,22 @@ command -v onecli >/dev/null
 
 If it fails, tell the user to run `/init-onecli` first, then retry. Stop here.
 
+This skill scopes Dial with legacy OneCLI block rules. OneCLI gateway 1.42 and
+later reject legacy rule writes (`410`), and that includes 1.42.0, the version
+NanoClaw pins. Writing the Dial key first and then failing on the rules would
+leave every `all`-mode agent able to use Dial. So read the version of the
+gateway the `onecli` CLI talks to before anything is written, and stop unless it
+is older than 1.42. The Dial sign-up and credential steps below use the captured
+version, so they cannot run when this check fails:
+
+```nc:run capture:onecli_gateway validate:^[0-9]+\.[0-9]+\.[0-9]+$ effect:fetch
+U=$(onecli config get api-host | jq -r '.value // empty') && [ -n "$U" ] || { echo "could not read the onecli CLI's api-host, so the OneCLI gateway version cannot be checked. Nothing was written to OneCLI." >&2; exit 1; }; H=$(curl -fsS --max-time 10 "$U/api/health") || { echo "could not reach the OneCLI gateway at $U. Nothing was written to OneCLI." >&2; exit 1; }; V=$(printf '%s' "$H" | jq -er '.version') || V=; case "$V" in 0.*|1.[0-9].*|1.[1-3][0-9].*|1.4[01].*) printf '%s\n' "$V" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' && { echo "$V"; exit 0; };; esac; echo "OneCLI gateway version '${V:-unreadable}' at $U: /add-dial-tool needs legacy OneCLI rules, which gateway 1.42 and later reject. Nothing was written to OneCLI. This skill is not supported on the pinned gateway (1.42.0) until it moves to the OneCLI policy API." >&2; exit 1
+```
+
+If it fails, show the user the message as it is and stop. Do not work around it
+by turning off OneCLI policy enforcement or granting the Dial key by hand: the
+block rules are what keep agents you did not choose away from Dial.
+
 Calls this setup makes to Dial identify the install. The `dial` CLI prepends
 `DIAL_USER_AGENT` to its own token, so the account's requests stay attributable
 to this NanoClaw install in Dial's server-side logs. Resolve the token once
@@ -121,7 +137,7 @@ What's your email? Dial sends a one-time code to verify it. By continuing you cr
 Send the code (`--force` re-sends even if a prior code is pending):
 
 ```nc:run effect:external when:signed_in=false
-DIAL_USER_AGENT={{dial_ua}} dial auth login {{owner_email}} --force
+: "OneCLI gateway {{onecli_gateway}}"; DIAL_USER_AGENT={{dial_ua}} dial auth login {{owner_email}} --force
 ```
 
 ### Verify the code
@@ -136,7 +152,7 @@ Verify it. Do **not** pass `--agent nanoclaw` here: this skill owns the containe
 `dial-cli` skill, and `--agent` would drop a second, unmanaged copy next to it:
 
 ```nc:run effect:external when:signed_in=false
-DIAL_USER_AGENT={{dial_ua}} dial auth verify-otp --code {{otp}}
+: "OneCLI gateway {{onecli_gateway}}"; DIAL_USER_AGENT={{dial_ua}} dial auth verify-otp --code {{otp}}
 ```
 
 ## Put the CLI and its skill in the agent image
@@ -183,7 +199,7 @@ after (`--file`), so it is never on argv or in a captured variable. Selective-mo
 agents pick the new id up in the merge step below:
 
 ```nc:run effect:external
-T=$(mktemp) && chmod 600 "$T" && jq -r '.apiKey // empty' "${XDG_DATA_HOME:-$HOME/.local/share}/dial/auth.v1.json" > "$T" 2>/dev/null; [ -s "$T" ] || { rm -f "$T"; echo "no Dial API key in the host auth file — sign in with dial auth login / verify-otp, then re-run" >&2; exit 1; }; S=$(onecli secrets list | jq -r 'first(.data[] | select(.name | test("(?i)dial"))) | .id // empty'); if [ -n "$S" ]; then onecli secrets delete --id "$S" >/dev/null || { rm -f "$T"; echo "could not remove the previous Dial secret $S" >&2; exit 1; }; fi; onecli secrets create --name "Dial API" --type generic --file "$T" --host-pattern api.getdial.ai --header-name Authorization --value-format "Bearer {value}" >/dev/null; rc=$?; rm -f "$T"; exit $rc
+: "OneCLI gateway {{onecli_gateway}}"; T=$(mktemp) && chmod 600 "$T" && jq -r '.apiKey // empty' "${XDG_DATA_HOME:-$HOME/.local/share}/dial/auth.v1.json" > "$T" 2>/dev/null; [ -s "$T" ] || { rm -f "$T"; echo "no Dial API key in the host auth file — sign in with dial auth login / verify-otp, then re-run" >&2; exit 1; }; S=$(onecli secrets list | jq -r 'first(.data[] | select(.name | test("(?i)dial"))) | .id // empty'); if [ -n "$S" ]; then onecli secrets delete --id "$S" >/dev/null || { rm -f "$T"; echo "could not remove the previous Dial secret $S" >&2; exit 1; }; fi; onecli secrets create --name "Dial API" --type generic --file "$T" --host-pattern api.getdial.ai --header-name Authorization --value-format "Bearer {value}" >/dev/null; rc=$?; rm -f "$T"; exit $rc
 ```
 
 ## Scope it to the chosen agents

@@ -30,6 +30,7 @@ import path from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { applySkill } from './skill-apply.js';
 import { parseDirectives, type Directive } from './skill-directives.js';
 
 const SKILL_MD = path.resolve(__dirname, '../.claude/skills/add-dial-tool/SKILL.md');
@@ -45,6 +46,7 @@ const isRun = (effect: string, needle: string) => (d: Directive) =>
 
 // The commands under test, as written in the document.
 const CMD = {
+  versionGuard: one((d) => d.kind === 'run' && d.attrs.capture === 'onecli_gateway'),
   typoGuard: one(isRun('check', 'unknown agent group')),
   credential: one(isRun('external', 'onecli secrets')),
   ensureAgents: one(isRun('wire', 'onecli agents create')),
@@ -131,6 +133,7 @@ function setup(
 S="$STATE"
 arg() { local k="$1"; shift; while [ $# -gt 0 ]; do if [ "$1" = "$k" ]; then echo "$2"; return; fi; shift; done; }
 case "$1 $2" in
+  "config get") if [ -f "$S/api-host" ]; then cat "$S/api-host"; else echo '{"key":"api-host","value":"http://gw.test:10254"}'; fi ;;
   "secrets list") cat "$S/secrets.json" ;;
   "secrets delete") i=$(arg --id "$@"); jq --arg i "$i" '.data |= map(select(.id != $i))' "$S/secrets.json" > "$S/t" && mv "$S/t" "$S/secrets.json"; echo '{"status":"deleted"}' ;;
   "secrets create") f=$(arg --file "$@"); [ -n "$f" ] && cat "$f" > "$S/key-seen"; jq '.data += [{"id":"sec-new","name":"Dial API"}]' "$S/secrets.json" > "$S/t" && mv "$S/t" "$S/secrets.json"; echo '{"id":"sec-new"}' ;;
@@ -148,8 +151,8 @@ esac`,
 }
 
 /** Run one document command under POSIX sh with {{dial_agents}} substituted. */
-function sh(cmd: string, agents = ''): { stdout: string; status: number } {
-  const substituted = cmd.replaceAll('{{dial_agents}}', agents);
+function sh(cmd: string, agents = '', extraEnv: Record<string, string> = {}): { stdout: string; status: number } {
+  const substituted = cmd.replaceAll('{{dial_agents}}', agents).replaceAll('{{onecli_gateway}}', '1.41.0');
   try {
     const stdout = execFileSync('sh', ['-c', substituted], {
       cwd: root,
@@ -161,6 +164,7 @@ function sh(cmd: string, agents = ''): { stdout: string; status: number } {
         STATE: state,
         XDG_DATA_HOME: process.env.TEST_XDG,
         HOME: root,
+        ...extraEnv,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -375,5 +379,87 @@ describe('add-dial-tool: registering the host credential with OneCLI', () => {
     const { status } = sh(CMD.credential);
     expect(status).not.toBe(0);
     expect(callLines().some((l) => l.startsWith('onecli secrets'))).toBe(false);
+  });
+});
+
+describe('add-dial-tool: OneCLI gateway version guard', () => {
+  // Legacy rule writes return 410 from gateway 1.42 on; the guard must stop
+  // before the credential step writes the key, or all-mode agents get Dial.
+  function guard(health: string | null, opts: { apiHost?: string; curlExit?: number } = {}) {
+    if (opts.apiHost !== undefined) fs.writeFileSync(path.join(state, 'api-host'), opts.apiHost);
+    const out = health === null ? 'echo "connection refused" >&2' : `echo '${health}'`;
+    writeStub('curl', `${out}\nexit ${opts.curlExit ?? (health === null ? 7 : 0)}`);
+    return sh(CMD.versionGuard);
+  }
+  const health = (version?: string) => JSON.stringify({ status: 'ok', ...(version ? { version } : {}) });
+
+  it.each(['1.41.0', '1.36.0', '1.9.2', '0.8.0'])('passes on gateway %s and captures the version', (v) => {
+    const r = guard(health(v));
+    expect(r.status).toBe(0);
+    expect(r.stdout.trim()).toBe(v);
+    expect(callLines()).toContain('curl -fsS --max-time 10 http://gw.test:10254/api/health');
+  });
+
+  it.each(['1.42.0', '1.43.3', '1.100.0', '2.7.0', 'unknown', 'dev', '1.41', '1.41.0-x'])(
+    'stops on gateway %s',
+    (v) => {
+      const r = guard(health(v));
+      expect(r.status).not.toBe(0);
+      expect(r.stdout).toBe('');
+    },
+  );
+
+  it('stops on a missing version, invalid JSON, a failed transfer, or an unreachable gateway', () => {
+    expect(guard(health()).status).not.toBe(0);
+    expect(guard(`${health('1.41.0')}garbage`).status).not.toBe(0);
+    expect(guard(health('1.41.0'), { curlExit: 18 }).status).not.toBe(0);
+    expect(guard(null).status).not.toBe(0);
+  });
+
+  it('checks the host the onecli CLI writes to, and stops without one', () => {
+    expect(guard(health('1.41.0'), { apiHost: '{"key":"api-host","value":"http://other:1"}' }).status).toBe(0);
+    expect(callLines()).toContain('curl -fsS --max-time 10 http://other:1/api/health');
+    expect(guard(health('1.41.0'), { apiHost: '{"key":"api-host","value":""}' }).status).not.toBe(0);
+    expect(callLines().filter((l) => l.startsWith('curl'))).toHaveLength(1);
+  });
+
+  it('runs before anything is written, and the credential step depends on its capture', () => {
+    const order = directives.filter((d) => d.kind === 'run').map((d) => d.body.join('\n'));
+    const at = order.indexOf(CMD.versionGuard);
+    expect(at).toBeGreaterThanOrEqual(0);
+    expect(at).toBeLessThan(order.indexOf(CMD.credential));
+    expect(at).toBeLessThan(order.indexOf(CMD.ensureAgents));
+    // An unresolved {{var}} defers the directive, so a failed guard blocks the key write.
+    expect(CMD.credential).toContain('{{onecli_gateway}}');
+  });
+
+  it('the skill engine never writes the Dial key when the guard fails', async () => {
+    const r = fs.mkdtempSync(path.join(os.tmpdir(), 'add-dial-tool-apply-'));
+    try {
+      fs.mkdirSync(path.join(r, 'container'));
+      fs.writeFileSync(path.join(r, 'container/cli-tools.json'), '[]\n');
+      fs.writeFileSync(path.join(r, 'package.json'), '{"name":"scratch"}\n');
+      fs.writeFileSync(path.join(r, '.env'), '');
+      const ran: string[] = [];
+      const res = await applySkill(path.dirname(SKILL_MD), r, {
+        inputs: { dial_agents: 'all', owner_email: 'operator@example.com', otp: '123456' },
+        resolveRemote: () => 'origin',
+        exec: (c) => {
+          ran.push(c);
+          if (c.includes('/api/health')) throw new Error('gateway 1.42.0 is not supported');
+          if (c.includes('dial doctor')) return '{"auth":{"signedIn":false}}';
+          if (c.includes('(.data|length)==0')) return 'ag-1 (Sales)';
+          if (c.includes('package.json')) return 'nanoclaw/2.2.0';
+          return undefined;
+        },
+        execStream: async () => ({ ok: true, fields: {} }),
+      });
+      expect(ran.some((c) => c.includes('/api/health'))).toBe(true);
+      expect(ran.some((c) => c.includes('onecli secrets create') || c.includes('onecli rules'))).toBe(false);
+      expect(ran.some((c) => c.includes('dial auth'))).toBe(false);
+      expect(res.agentTasks.length).toBeGreaterThan(0);
+    } finally {
+      fs.rmSync(r, { recursive: true, force: true });
+    }
   });
 });

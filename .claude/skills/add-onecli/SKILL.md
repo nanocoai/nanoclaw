@@ -40,6 +40,8 @@ import './onecli.js';
 
 The setup script safely reuses a healthy existing installation, installs the pinned local gateway when absent, or uses `NANOCLAW_ONECLI_API_HOST` and `NANOCLAW_ONECLI_API_TOKEN` for a remote gateway.
 
+This integration supports exactly the gateway version pinned in `versions.json` (`onecli-gateway`, today 1.42.0). OneCLI 1.43 and later remove the agent secret-assignment API used below, so 1.43+ is not supported for now. Setup reuses an existing gateway without checking its version: follow [Upgrading the OneCLI gateway](payload/docs/onecli-upgrades.md) to check it and to move it to the pin. The CLI (`onecli-cli`) and SDK (`onecli-sdk`) have their own pins.
+
 ```nc:run effect:external
 pnpm exec tsx .claude/skills/add-onecli/scripts/setup.ts
 ```

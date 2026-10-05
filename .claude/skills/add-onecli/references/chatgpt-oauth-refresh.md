@@ -11,8 +11,8 @@ reauthentication, for OpenCode the
 The same procedure also handles revoked credentials.
 
 Do not assume a gateway upgrade resolves unattended ChatGPT operation.
-OneCLI 1.43.1 removes the agent-grant API used by this NanoClaw version, so that
-upgrade also requires an integration migration and validation of token refresh.
+OneCLI 1.43 and later remove the agent-grant API used by this NanoClaw version, so
+that upgrade also requires an integration migration and validation of token refresh.
 A different proxy is not established as compatible by these tests.
 
 The container holds only a fixed non-secret sentinel. Token refresh and account
