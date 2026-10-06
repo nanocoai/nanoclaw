@@ -9,9 +9,7 @@
  * The marker lives in `data/` (gitignored), so a `git pull` can't touch it.
  * Only the sanctioned paths call writeUpgradeState(); clearing the tripwire
  * by hand is the same `set` — see docs/upgrade-recovery.md. Setup's own local
- * commits (setup/lib/setup-commit.ts) move HEAD after the service step
- * stamped it, so they carry a marker that matched forward to the new HEAD;
- * a marker that already mismatched stays as it is.
+ * commits (setup/lib/setup-commit.ts) carry a current marker forward.
  */
 import fs from 'fs';
 import path from 'path';
@@ -114,11 +112,7 @@ export function writeUpgradeState(opts: {
   return state;
 }
 
-/**
- * The marker when it matches the checkout exactly, else null. Setup reads it
- * before creating a local commit and, if it was current, rewrites it for the
- * new HEAD; a marker that did not match is never repaired this way.
- */
+/** The marker when it matches the checkout exactly, else null. */
 export function currentUpgradeState(projectRoot?: string): UpgradeState | null {
   return isUpgradeCurrent(projectRoot) ? readUpgradeState(projectRoot) : null;
 }

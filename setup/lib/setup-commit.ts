@@ -5,12 +5,6 @@
  * an install customization like any other. Only paths whose content changed
  * during the apply are committed, so an operator's own uncommitted edits stay
  * untouched. A commit failure never fails setup; it is reported instead.
- *
- * The startup tripwire binds the upgrade marker to the exact HEAD, and the
- * service step stamps it before channel skills run: each commit here moves
- * HEAD, so a marker that matched before the commit is rewritten for the new
- * one. Otherwise a fresh install that added a channel stops at its next
- * restart.
  */
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -120,10 +114,21 @@ export function commitSetupChanges(root: string, before: TreeSnapshot | null, me
         'and commit those files (git add <files> && git commit). If Git asks who you are, set user.name and user.email.',
     };
   }
-  // Stamp only a commit whose parent is the HEAD the marker certified: a
-  // marker recorded without Git, or a pull that slipped in meanwhile, must
-  // still trip.
-  if (marker && parentCommit(root) === marker.commit) {
+  // Only once a commit exists: the updater later merges upstream into it
+  // and needs an identity too. Scoped to this checkout.
+  try {
+    for (const [key, value] of missing) git(root, ['config', '--local', key, value]);
+  } catch (err) {
+    return {
+      committed: changed,
+      error: `Committed setup's files, but couldn't save a Git identity (${reason(err)}). Set user.name and user.email in this checkout before updating.`,
+    };
+  }
+  // The startup tripwire binds the marker to the exact HEAD, which this commit
+  // just moved. A marker that matched the old HEAD is rewritten for the new
+  // one; one that already mismatched (raw pull, foreign commit) stays stale,
+  // so the host still stops.
+  if (marker) {
     try {
       writeUpgradeState({ via: marker.via, channel: marker.channel, ref: marker.ref, projectRoot: root });
     } catch (err) {
@@ -135,25 +140,7 @@ export function commitSetupChanges(root: string, before: TreeSnapshot | null, me
       };
     }
   }
-  // Only once a commit exists: the updater later merges upstream into it
-  // and needs an identity too. Scoped to this checkout.
-  try {
-    for (const [key, value] of missing) git(root, ['config', '--local', key, value]);
-  } catch (err) {
-    return {
-      committed: changed,
-      error: `Committed setup's files, but couldn't save a Git identity (${reason(err)}). Set user.name and user.email in this checkout before updating.`,
-    };
-  }
   return { committed: changed };
-}
-
-function parentCommit(root: string): string | null {
-  try {
-    return git(root, ['rev-parse', '--verify', 'HEAD^{commit}^']).trim();
-  } catch {
-    return null;
-  }
 }
 
 function reason(err: unknown): string {

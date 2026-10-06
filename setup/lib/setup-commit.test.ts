@@ -137,10 +137,44 @@ describe('setup commits keep the upgrade marker on HEAD', () => {
     expect(isUpgradeCurrent(root)).toBe(false);
   });
 
-  it('does not stamp when the marker certified a commit other than the parent', async () => {
+  // HEAD still is the marked commit, but the code is not: an update left a
+  // new package.json in the tree. The marker is stale and must stay so.
+  it('leaves a marker that no longer matches the code alone even when HEAD did not move', async () => {
+    const root = install();
+    const stamped = writeUpgradeState({ via: 'setup', projectRoot: root });
+    writeFileSync(join(root, 'package.json'), '{ "version": "2.0.0" }\n');
+    expect(isUpgradeCurrent(root)).toBe(false);
+
+    await withSetupCommit(
+      root,
+      'telegram',
+      async () => writeFileSync(join(root, 'src', 'telegram.ts'), '1\n'),
+      vi.fn(),
+    );
+
+    expect(git(root, 'log', '-1', '--format=%s')).toBe('setup: apply telegram');
+    expect(git(root, 'show', '--name-only', '--format=', 'HEAD')).toBe('src/telegram.ts');
+    expect(readUpgradeState(root)).toEqual(stamped);
+  });
+
+  it('saves the fallback Git identity before it stamps', async () => {
     const root = install();
     writeUpgradeState({ via: 'setup', projectRoot: root });
-    // A marker recorded without Git access, or a HEAD that moved under setup.
+
+    await withSetupCommit(
+      root,
+      'telegram',
+      async () => writeFileSync(join(root, 'src', 'telegram.ts'), '1\n'),
+      vi.fn(),
+    );
+
+    expect(git(root, 'config', '--local', 'user.email')).toBe('setup@nanoclaw.invalid');
+    expect(isUpgradeCurrent(root)).toBe(true);
+  });
+
+  it('does not carry forward a marker recorded without Git', async () => {
+    const root = install();
+    writeUpgradeState({ via: 'setup', projectRoot: root });
     const marker = readUpgradeState(root)!;
     writeFileSync(
       join(root, 'data', 'upgrade-state.json'),
