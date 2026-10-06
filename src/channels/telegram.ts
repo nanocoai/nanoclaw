@@ -9,6 +9,10 @@
  * interceptor, pairing, and wiring defaults are shared. channelType stays
  * 'telegram' either way: user ids, formatting, and container config are one
  * namespace across bots. See .claude/skills/telegram-multi-instance.
+ *
+ * Progress message (opt-in): set TELEGRAM_PROGRESS_MESSAGE=true to post a
+ * silent "Working on it…" message on turns that run longer than a few
+ * seconds, edited with the elapsed time and deleted when the reply lands.
  */
 import { createTelegramAdapter } from '@chat-adapter/telegram';
 
@@ -330,6 +334,157 @@ export function createTelegramInboundInterceptor(
   };
 }
 
+/** The Bot API calls the progress message needs, injectable for tests. */
+export interface TelegramProgressApi {
+  send(platformId: string, text: string): Promise<number | null>;
+  edit(platformId: string, messageId: number, text: string): Promise<void>;
+  remove(platformId: string, messageId: number): Promise<void>;
+}
+
+export interface TelegramProgressOptions {
+  /** Turns that reply faster than this never show a progress message. */
+  showAfterMs?: number;
+  /** Minimum gap between edits, well inside Telegram's per-chat edit limits. */
+  editIntervalMs?: number;
+  /** No typing tick for this long means the turn ended without a reply. */
+  idleMs?: number;
+}
+
+export interface TelegramProgress {
+  tick(platformId: string, status?: string): Promise<void>;
+  finish(platformId: string): Promise<void>;
+  dispose(): void;
+}
+
+interface ProgressEntry {
+  startedAt: number;
+  messageId: Promise<number | null> | null;
+  lastText: string;
+  lastEditAt: number;
+  idleTimer?: NodeJS.Timeout;
+}
+
+const MAX_STATUS_LENGTH = 200;
+
+function formatElapsed(ms: number): string {
+  const total = Math.floor(ms / 1000);
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return minutes > 0 ? `${minutes}m ${String(seconds).padStart(2, '0')}s` : `${seconds}s`;
+}
+
+function renderProgress(elapsedMs: number, status?: string): string {
+  const head = `Working on it… (${formatElapsed(elapsedMs)})`;
+  const detail = status?.trim().slice(0, MAX_STATUS_LENGTH);
+  return detail ? `${head}\n${detail}` : head;
+}
+
+/**
+ * Live "working…" message driven by the host's typing refresh: the typing
+ * module re-fires setTyping every few seconds while the agent is actually
+ * working, so each tick doubles as a progress heartbeat. The message is sent
+ * once a turn outlasts showAfterMs, edited in place (rate-limited, only when
+ * the text changes) with the elapsed time and any status the host passes,
+ * and deleted when the reply lands or the ticks stop.
+ */
+export function createTelegramProgress(
+  api: TelegramProgressApi,
+  options: TelegramProgressOptions = {},
+): TelegramProgress {
+  const showAfterMs = options.showAfterMs ?? 10_000;
+  const editIntervalMs = options.editIntervalMs ?? 10_000;
+  const idleMs = options.idleMs ?? 20_000;
+  const entries = new Map<string, ProgressEntry>();
+
+  async function finish(platformId: string): Promise<void> {
+    const entry = entries.get(platformId);
+    if (!entry) return;
+    entries.delete(platformId);
+    clearTimeout(entry.idleTimer);
+    const messageId = entry.messageId ? await entry.messageId : null;
+    if (messageId === null) return;
+    await api.remove(platformId, messageId).catch((err) => log.warn('Telegram progress delete failed', { err }));
+  }
+
+  async function tick(platformId: string, status?: string): Promise<void> {
+    const now = Date.now();
+    let entry = entries.get(platformId);
+    if (!entry) {
+      entry = { startedAt: now, messageId: null, lastText: '', lastEditAt: 0 };
+      entries.set(platformId, entry);
+    }
+    clearTimeout(entry.idleTimer);
+    entry.idleTimer = setTimeout(() => void finish(platformId), idleMs);
+    entry.idleTimer.unref?.();
+
+    const elapsed = now - entry.startedAt;
+    if (elapsed < showAfterMs) return;
+    const text = renderProgress(elapsed, status);
+
+    if (!entry.messageId) {
+      entry.lastText = text;
+      entry.lastEditAt = now;
+      entry.messageId = api.send(platformId, text).catch((err) => {
+        log.warn('Telegram progress send failed', { err });
+        return null;
+      });
+      await entry.messageId;
+      return;
+    }
+
+    if (text === entry.lastText || now - entry.lastEditAt < editIntervalMs) return;
+    entry.lastText = text;
+    entry.lastEditAt = now;
+    const messageId = await entry.messageId;
+    if (messageId === null || entries.get(platformId) !== entry) return;
+    await api.edit(platformId, messageId, text).catch((err) => log.warn('Telegram progress edit failed', { err }));
+  }
+
+  function dispose(): void {
+    for (const entry of entries.values()) clearTimeout(entry.idleTimer);
+    entries.clear();
+  }
+
+  return { tick, finish, dispose };
+}
+
+async function callTelegram(token: string, method: string, body: Record<string, unknown>): Promise<unknown> {
+  const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const json = (await res.json()) as { ok?: boolean; result?: unknown; description?: string };
+  if (!json.ok) throw new Error(`Telegram ${method} failed: ${json.description ?? res.status}`);
+  return json.result;
+}
+
+function telegramProgressApi(token: string): TelegramProgressApi {
+  const chatId = (platformId: string) => platformId.split(':').slice(1).join(':');
+  return {
+    async send(platformId, text) {
+      const result = (await callTelegram(token, 'sendMessage', {
+        chat_id: chatId(platformId),
+        text,
+        disable_notification: true,
+      })) as { message_id?: number };
+      return result.message_id ?? null;
+    },
+    async edit(platformId, messageId, text) {
+      await callTelegram(token, 'editMessageText', { chat_id: chatId(platformId), message_id: messageId, text });
+    },
+    async remove(platformId, messageId) {
+      await callTelegram(token, 'deleteMessage', { chat_id: chatId(platformId), message_id: messageId });
+    },
+  };
+}
+
+/** A delivery that answers the user, as opposed to an edit or reaction on an earlier message. */
+function isReplyDelivery(message: { content: unknown }): boolean {
+  const content = message.content;
+  return !(content && typeof content === 'object' && 'operation' in content && content.operation);
+}
+
 /**
  * Bot id (the part of a token before ':') to the instance key that claimed
  * it. Telegram allows one getUpdates poller per bot (a second one gets 409
@@ -395,6 +550,10 @@ export function createTelegramBridge(options: TelegramBridgeOptions = {}): Chann
   });
 
   const botUsernamePromise = fetchBotUsername(token);
+  const progress =
+    readEnvFile(['TELEGRAM_PROGRESS_MESSAGE']).TELEGRAM_PROGRESS_MESSAGE === 'true'
+      ? createTelegramProgress(telegramProgressApi(token))
+      : null;
 
   const wrapped: ChannelAdapter = {
     ...bridge,
@@ -421,6 +580,21 @@ export function createTelegramBridge(options: TelegramBridgeOptions = {}): Chann
       return withRetry(() => bridge.setup(intercepted), 'bridge.setup');
     },
   };
+  if (progress) {
+    wrapped.setTyping = async (platformId, threadId, status, statusKind) => {
+      await bridge.setTyping?.(platformId, threadId, status, statusKind);
+      await progress.tick(platformId, status);
+    };
+    wrapped.deliver = async (platformId, threadId, message) => {
+      const messageId = await bridge.deliver(platformId, threadId, message);
+      if (isReplyDelivery(message)) await progress.finish(platformId);
+      return messageId;
+    };
+    wrapped.teardown = async () => {
+      progress.dispose();
+      await bridge.teardown();
+    };
+  }
   return wrapped;
 }
 
