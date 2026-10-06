@@ -526,7 +526,6 @@ export function registerResource(def: ResourceDef): void {
   // can fix the invocation without a second help round-trip.
   if (def.customOperations) {
     for (const [verb, op] of Object.entries(def.customOperations)) {
-      const declared = op.args;
       register({
         name: `${def.plural}-${verb.replace(/ /g, '-')}`,
         action: `${def.plural}.${verb.replace(/ /g, '.')}`,
@@ -534,10 +533,11 @@ export function registerResource(def: ResourceDef): void {
         access: op.access,
         hostOnly: op.hostOnly,
         resource: def.plural,
-        parseArgs: declared
+        // `op.args` is read per call so a verb may extend its flags after registration.
+        parseArgs: op.args
           ? (raw) => {
               try {
-                return validateArgs(declared, normalizeArgs(raw));
+                return validateArgs(op.args ?? [], normalizeArgs(raw));
               } catch (e) {
                 const usage = renderVerbHelp(def, verb);
                 const msg = e instanceof Error ? e.message : String(e);
