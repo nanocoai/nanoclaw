@@ -15,7 +15,9 @@
  * Also registers the agent-facing room actions: `create_room` (one
  * MPIM with N bots + the operator over ensureAgentRoom) and `add_to_room`
  * (superset re-open — MPIM fork), each guard-wrapped with the same
- * cli_scope trust split as create_agent (./guard.ts, ./room-actions.ts).
+ * cli_scope trust split as create_agent, plus unguarded `handoff`, whose
+ * recipients and same-room authority are validated in the host handler
+ * before delivery through the caller's own adapter.
  *
  * The handler never touches inbound DBs (guarded handlers replay without
  * one); all requester notifications go through the approvals module's
@@ -25,6 +27,7 @@ import { SlackApiError } from '../../channels/slack-lib.js';
 import { reenterGuardedDeliveryAction, registerDeliveryAction, registerDeliveryBatchPreview } from '../../delivery.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
+import { unguarded } from '../../guard/index.js';
 import { log } from '../../log.js';
 import type { Session } from '../../types.js';
 import { getDestinationByName, normalizeName } from '../agent-to-agent/db/agent-destinations.js';
@@ -36,6 +39,7 @@ import { dedupeSlug, deriveInstanceSlug, runSlackAgentFlow } from './orchestrate
 import {
   handleAddToRoom,
   handleCreateRoom,
+  handleHandoff,
   requestAddToRoomHold,
   requestCreateRoomHold,
   validateAddToRoom,
@@ -254,7 +258,7 @@ registerDeliveryAction('create_agent', slackAwareCreateAgent, {
   onDeny: (_content, session, reason) => notifyAgent(session, `create_agent denied: ${reason}`),
 });
 
-// Agent-facing room actions — guard-wrapped like create_agent:
+// Room creation/membership actions — guard-wrapped like create_agent:
 // global-scope groups act directly, everything else holds for the admin
 // chain, and the approval continuation re-enters the same wrapped entry with
 // the approval row as its grant.
@@ -273,3 +277,11 @@ registerDeliveryAction('add_to_room', handleAddToRoom, {
   onDeny: (_content, session, reason) => notifyAgent(session, `add_to_room denied: ${reason}`),
 });
 registerApprovalHandler('add_to_room', reenterGuardedDeliveryAction('add_to_room'));
+
+registerDeliveryAction(
+  'handoff',
+  handleHandoff,
+  unguarded(
+    "same-room message through the caller's own Slack adapter; recipients are host-validated destinations and room members",
+  ),
+);
