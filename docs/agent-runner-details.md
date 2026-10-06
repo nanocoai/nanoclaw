@@ -623,6 +623,11 @@ Implementation:
 `send_message` / `send_file`: `resolveDestinationThread` with the published reply stamp — the
 thread of the message being answered, else the chat's latest `messages_in` thread. The bound
 `thread_id` is the last resort, when that yields no thread (a per-thread session stays in it).
+`send_card` also takes an optional `to` (a channel destination name, resolved by the same
+`resolveRouting` as `send_message`; no bound-thread fallback). The bound chat is null in a session
+with no attached chat — a scheduled task run — so there `send_card` requires `to` and
+`ask_user_question` refuses; neither writes a row with null routing, which the host could only fail
+(see `UndeliverableError` in `src/delivery.ts`).
 
 #### send_card
 
@@ -634,6 +639,7 @@ callback buttons and choices.
 {
   name: 'send_card',
   params: {
+    to?: string,           // channel destination name (as in send_message); required when the session has no attached chat
     card: {                // title/description, text children, URL link actions
       title?: string,
       description?: string,
