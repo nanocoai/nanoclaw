@@ -368,7 +368,11 @@ describe('SignalAdapter', () => {
       await adapter.teardown();
     });
 
-    it('forwards image attachments as [Image: <path>] plus structured attachments array', async () => {
+    it('forwards image attachments as base64 data (for inbox staging into the container)', async () => {
+      const { mkdirSync, writeFileSync } = await import('node:fs');
+      mkdirSync('/tmp/signal-cli-test-data/attachments', { recursive: true });
+      writeFileSync('/tmp/signal-cli-test-data/attachments/att123abc', Buffer.from('fake-image-bytes'));
+
       const adapter = createAdapter();
       const cfg = createMockSetup();
       await adapter.setup(cfg);
@@ -388,8 +392,13 @@ describe('SignalAdapter', () => {
         null,
         expect.objectContaining({
           content: expect.objectContaining({
-            text: expect.stringMatching(/^\[Image: .+att123abc\]$/),
-            attachments: [expect.objectContaining({ contentType: 'image/jpeg' })],
+            attachments: [
+              expect.objectContaining({
+                contentType: 'image/jpeg',
+                type: 'image',
+                data: Buffer.from('fake-image-bytes').toString('base64'),
+              }),
+            ],
           }),
         }),
       );
