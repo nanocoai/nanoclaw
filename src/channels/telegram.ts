@@ -19,7 +19,7 @@ import { grantRole, hasAnyOwner, isGlobalAdmin, isOwner } from '../modules/permi
 import { upsertUser } from '../modules/permissions/db/users.js';
 import { createChatSdkBridge, type ReplyContext } from './chat-sdk-bridge.js';
 import { registerChannelAdapter } from './channel-registry.js';
-import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage } from './adapter.js';
+import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage, OutboundMessage } from './adapter.js';
 import { tryConsume } from './telegram-pairing.js';
 
 /**
@@ -32,6 +32,44 @@ const TELEGRAM_DEFAULTS: ChannelDefaults = {
   group: { engageMode: 'mention', threads: false, unknownSenderPolicy: 'request_approval' },
   mentions: 'platform',
 };
+
+/**
+ * Telegram rejects the whole message when it can't parse the MarkdownV2
+ * entities (e.g. a link whose target it refuses, like a private IP). The
+ * bridge would retry the same payload and drop it, so plain chat text is
+ * re-sent without formatting instead.
+ */
+export function isEntityParseError(err: unknown): boolean {
+  return /can't parse entities/i.test(String((err as { message?: unknown })?.message ?? err));
+}
+
+export function plainTextFallback(message: OutboundMessage): string | null {
+  if (message.files?.length) return null;
+  const content = message.content as Record<string, unknown> | null;
+  if (!content || content.operation || content.type) return null;
+  return typeof content.text === 'string' && content.text ? content.text : null;
+}
+
+export async function sendPlainText(
+  token: string,
+  platformId: string,
+  threadId: string | null,
+  text: string,
+): Promise<string | undefined> {
+  const [, chatId, topicId] = (threadId ?? platformId).split(':');
+  const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text: text.slice(0, 4096),
+      ...(topicId ? { message_thread_id: Number(topicId) } : {}),
+    }),
+  });
+  const data = (await res.json()) as { ok?: boolean; description?: string; result?: { message_id?: number } };
+  if (!data.ok) throw new Error(`Telegram plain-text fallback failed: ${data.description ?? res.status}`);
+  return `${chatId}:${data.result?.message_id}`;
+}
 
 /**
  * Retry a one-shot operation that can fail on transient network errors at
@@ -411,6 +449,16 @@ export function createTelegramBridge(options: TelegramBridgeOptions = {}): Chann
         return data.ok ? (data.result?.title ?? null) : null;
       } catch {
         return null;
+      }
+    },
+    async deliver(platformId, threadId, message) {
+      try {
+        return await bridge.deliver(platformId, threadId, message);
+      } catch (err) {
+        const text = isEntityParseError(err) ? plainTextFallback(message) : null;
+        if (text === null) throw err;
+        log.warn('Telegram rejected message formatting, resending as plain text', { platformId, threadId, err });
+        return sendPlainText(token, platformId, threadId, text);
       }
     },
     async setup(hostConfig: ChannelSetup) {
