@@ -21,6 +21,7 @@ import {
   isBotMentionedInGroup,
   isBotTypedMention,
   parseWhatsAppMentions,
+  resolveGroupSubject,
   resolveSharedMode,
   rewriteBotLidMention,
 } from './whatsapp.js';
@@ -329,5 +330,21 @@ describe('appendMediaFailureNote', () => {
     expect(appendMediaFailureNote('', ['image', 'document'])).toBe(
       '[image could not be downloaded] [document could not be downloaded]',
     );
+  });
+});
+
+describe('resolveGroupSubject', () => {
+  it('returns the trimmed subject for a group JID', () => {
+    expect(resolveGroupSubject('120363412490186586@g.us', '  Design Team  ')).toBe('Design Team');
+  });
+
+  it('returns null for a DM JID — a phone number is not a channel name', () => {
+    expect(resolveGroupSubject('15550009999@s.whatsapp.net', 'Design Team')).toBeNull();
+  });
+
+  it('returns null for a blank or missing subject so the card keeps its generic wording', () => {
+    expect(resolveGroupSubject('120363412490186586@g.us', '   ')).toBeNull();
+    expect(resolveGroupSubject('120363412490186586@g.us', undefined)).toBeNull();
+    expect(resolveGroupSubject('120363412490186586@g.us', null)).toBeNull();
   });
 });
