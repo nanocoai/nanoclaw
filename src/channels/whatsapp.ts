@@ -330,7 +330,7 @@ export function rewriteBotLidMention(
 
 /**
  * Append a visible note for media that failed to download, so the agent knows
- * something was sent rather than silently losing the attachment — or the whole
+ * something was sent rather than silently losing the attachment - or the whole
  * message, when an uncaptioned image would otherwise be dropped by the
  * empty-message guard. Returns `content` unchanged when nothing failed.
  */
@@ -858,13 +858,9 @@ registerChannelAdapter('whatsapp', {
             // Download media attachments (images, video, audio, documents)
             const { attachments, failures } = await downloadInboundMedia(msg, normalized);
 
-            // Surface failed downloads as text so the agent knows media was
-            // sent even when it couldn't be fetched — instead of silently
-            // dropping the attachment (or the whole message, if uncaptioned).
-            content = appendMediaFailureNote(content, failures);
-
-            // Skip empty protocol messages (no text and no attachments)
-            if (!content && attachments.length === 0) continue;
+            // Skip empty protocol messages: no text, no downloaded
+            // attachments, and no failed downloads to report.
+            if (!content && attachments.length === 0 && failures.length === 0) continue;
 
             // Resolve sender: in groups, participant may be LID — use participantAlt
             const rawSender = msg.key.participant || msg.key.remoteJid || '';
@@ -931,7 +927,10 @@ registerChannelAdapter('whatsapp', {
               isMention: computeIsMention(WHATSAPP_SHARED, isGroup, botMentionedInGroup),
               isGroup,
               content: {
-                text: content,
+                // Apply the media-failure note here, at the boundary, so the
+                // raw `content` stays intact for the slash-command and
+                // bot-message matching above.
+                text: appendMediaFailureNote(content, failures),
                 sender,
                 senderName,
                 ...(attachments.length > 0 && { attachments }),
