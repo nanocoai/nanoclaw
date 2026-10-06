@@ -987,6 +987,154 @@ describe('SignalAdapter', () => {
       expect(adapter.supportsThreads).toBe(false);
     });
   });
+  // --- Reactions ---
+
+  describe('reactions', () => {
+    beforeEach(() => {
+      tcpRef.rpcResponses.set('sendReaction', { timestamp: 999 });
+    });
+
+    it('sends an outbound DM reaction via sendReaction RPC, resolving shortcodes', async () => {
+      const adapter = createAdapter();
+      await adapter.setup(createMockSetup());
+
+      await adapter.deliver('+15555550123', null, {
+        kind: 'chat',
+        content: { operation: 'reaction', messageId: '1700000000001:ag-abc123', emoji: 'thumbs_up' },
+      });
+
+      const calls = getRpcCallsForMethod('sendReaction');
+      expect(calls.length).toBe(1);
+      expect(calls[0].params).toEqual(
+        expect.objectContaining({
+          emoji: '👍',
+          targetAuthor: '+15555550123',
+          targetTimestamp: 1700000000001,
+          recipient: ['+15555550123'],
+          account: '+15551234567',
+        }),
+      );
+
+      await adapter.teardown();
+    });
+
+    it('passes raw unicode emoji through unchanged', async () => {
+      const adapter = createAdapter();
+      await adapter.setup(createMockSetup());
+
+      await adapter.deliver('+15555550123', null, {
+        kind: 'chat',
+        content: { operation: 'reaction', messageId: '1700000000002', emoji: '🪱' },
+      });
+
+      const calls = getRpcCallsForMethod('sendReaction');
+      expect(calls.length).toBe(1);
+      expect(calls[0].params).toEqual(expect.objectContaining({ emoji: '🪱' }));
+
+      await adapter.teardown();
+    });
+
+    it('drops unknown emoji shortcodes without calling the daemon', async () => {
+      const adapter = createAdapter();
+      await adapter.setup(createMockSetup());
+
+      await adapter.deliver('+15555550123', null, {
+        kind: 'chat',
+        content: { operation: 'reaction', messageId: '1700000000003', emoji: 'not_a_real_shortcode' },
+      });
+
+      expect(getRpcCallsForMethod('sendReaction').length).toBe(0);
+
+      await adapter.teardown();
+    });
+
+    it('targets group reactions with the author remembered from inbound', async () => {
+      const adapter = createAdapter();
+      const cfg = createMockSetup();
+      await adapter.setup(cfg);
+
+      // Inbound group message caches its author for later reaction targeting.
+      pushEvent({
+        sourceNumber: '+15550001111',
+        sourceName: 'Bob',
+        dataMessage: {
+          timestamp: 1700000000004,
+          message: 'group hello',
+          groupV2: { id: 'grp1' },
+        },
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      await adapter.deliver('group:grp1', null, {
+        kind: 'chat',
+        content: { operation: 'reaction', messageId: '1700000000004:ag-abc123', emoji: 'heart' },
+      });
+
+      const calls = getRpcCallsForMethod('sendReaction');
+      expect(calls.length).toBe(1);
+      expect(calls[0].params).toEqual(
+        expect.objectContaining({
+          emoji: '❤️',
+          groupId: 'grp1',
+          targetAuthor: '+15550001111',
+          targetTimestamp: 1700000000004,
+        }),
+      );
+
+      await adapter.teardown();
+    });
+
+    it('forwards inbound reactions as formatted chat events', async () => {
+      const adapter = createAdapter();
+      const cfg = createMockSetup();
+      await adapter.setup(cfg);
+
+      pushEvent({
+        sourceNumber: '+15555550123',
+        sourceName: 'Alice',
+        dataMessage: {
+          timestamp: 1700000000005,
+          reaction: { emoji: '👍', targetSentTimestamp: 1700000000001 },
+        },
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      expect(cfg.onInbound).toHaveBeenCalledWith(
+        '+15555550123',
+        null,
+        expect.objectContaining({
+          kind: 'chat',
+          content: expect.objectContaining({
+            text: '[Alice reacted 👍 to your message]',
+            sender: '+15555550123',
+          }),
+        }),
+      );
+
+      await adapter.teardown();
+    });
+
+    it('ignores reaction removals', async () => {
+      const adapter = createAdapter();
+      const cfg = createMockSetup();
+      await adapter.setup(cfg);
+
+      pushEvent({
+        sourceNumber: '+15555550123',
+        sourceName: 'Alice',
+        dataMessage: {
+          timestamp: 1700000000006,
+          reaction: { emoji: '👍', targetSentTimestamp: 1700000000001, isRemove: true },
+        },
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      expect(cfg.onInbound).not.toHaveBeenCalled();
+
+      await adapter.teardown();
+    });
+  });
+
 });
 
 describe('computeSignalIsMention', () => {
