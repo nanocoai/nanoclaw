@@ -5,6 +5,12 @@
  * an install customization like any other. Only paths whose content changed
  * during the apply are committed, so an operator's own uncommitted edits stay
  * untouched. A commit failure never fails setup; it is reported instead.
+ *
+ * The startup tripwire binds the upgrade marker to the exact HEAD, and the
+ * service step stamps it before channel skills run: each commit here moves
+ * HEAD, so a marker that matched before the commit is rewritten for the new
+ * one. Otherwise a fresh install that added a channel stops at its next
+ * restart.
  */
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -12,6 +18,8 @@ import { lstatSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 
 import * as p from '@clack/prompts';
+
+import { currentUpgradeState, writeUpgradeState } from '../../src/upgrade-state.js';
 
 /** Dirty path → fingerprint of its working-tree entry (type, mode, content), or '-' when absent. */
 export type TreeSnapshot = Map<string, string>;
@@ -76,6 +84,7 @@ export function commitSetupChanges(root: string, before: TreeSnapshot | null, me
   if (!before) return { committed: [] };
   let changed: string[] = [];
   let missing: ReturnType<typeof missingIdentity> = [];
+  let marker: ReturnType<typeof currentUpgradeState> = null;
   try {
     const after = snapshotTree(root);
     if (!after) return { committed: [] };
@@ -83,6 +92,7 @@ export function commitSetupChanges(root: string, before: TreeSnapshot | null, me
     if (!changed.length) return { committed: [] };
     const spec = `${changed.join('\0')}\0`;
     missing = missingIdentity(root);
+    marker = currentUpgradeState(root);
     // Machine-made local commits: no hooks, no signing prompt mid-setup.
     const quiet = ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgSign=false'];
     const identity = missing.flatMap(([key, value]) => ['-c', `${key}=${value}`]);
@@ -110,6 +120,21 @@ export function commitSetupChanges(root: string, before: TreeSnapshot | null, me
         'and commit those files (git add <files> && git commit). If Git asks who you are, set user.name and user.email.',
     };
   }
+  // Stamp only a commit whose parent is the HEAD the marker certified: a
+  // marker recorded without Git, or a pull that slipped in meanwhile, must
+  // still trip.
+  if (marker && parentCommit(root) === marker.commit) {
+    try {
+      writeUpgradeState({ via: marker.via, channel: marker.channel, ref: marker.ref, projectRoot: root });
+    } catch (err) {
+      return {
+        committed: changed,
+        error:
+          `Committed setup's files, but couldn't update the upgrade marker (${reason(err)}). ` +
+          'Run `pnpm exec tsx scripts/upgrade-state.ts set` before restarting NanoClaw.',
+      };
+    }
+  }
   // Only once a commit exists: the updater later merges upstream into it
   // and needs an identity too. Scoped to this checkout.
   try {
@@ -121,6 +146,14 @@ export function commitSetupChanges(root: string, before: TreeSnapshot | null, me
     };
   }
   return { committed: changed };
+}
+
+function parentCommit(root: string): string | null {
+  try {
+    return git(root, ['rev-parse', '--verify', 'HEAD^{commit}^']).trim();
+  } catch {
+    return null;
+  }
 }
 
 function reason(err: unknown): string {
