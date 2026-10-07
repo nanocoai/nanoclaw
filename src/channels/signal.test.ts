@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 // --- Mocks ---
 
@@ -166,7 +168,7 @@ describe('SignalAdapter', () => {
 
     it('throws NetworkError if daemon is unreachable', async () => {
       const { createConnection } = await import('node:net');
-      vi.mocked(createConnection).mockImplementationOnce((...args: any[]) => {
+      vi.mocked(createConnection).mockImplementationOnce(() => {
         const sock = createFakeSocket();
         setImmediate(() => sock.emit('error', new Error('Connection refused')));
         return sock as any;
@@ -196,9 +198,9 @@ describe('SignalAdapter', () => {
 
       await new Promise((r) => setTimeout(r, 50));
 
-      expect(cfg.onMetadata).toHaveBeenCalledWith('+15555550123', 'Alice', false);
+      expect(cfg.onMetadata).toHaveBeenCalledWith('signal:+15555550123', 'Alice', false);
       expect(cfg.onInbound).toHaveBeenCalledWith(
-        '+15555550123',
+        'signal:+15555550123',
         null,
         expect.objectContaining({
           id: '1700000000000',
@@ -317,7 +319,7 @@ describe('SignalAdapter', () => {
 
       await new Promise((r) => setTimeout(r, 50));
       expect(cfg.onInbound).toHaveBeenCalledWith(
-        '+15551234567',
+        'signal:+15551234567',
         null,
         expect.objectContaining({
           content: expect.objectContaining({
@@ -325,6 +327,128 @@ describe('SignalAdapter', () => {
             senderName: 'Me',
             isFromMe: true,
           }),
+        }),
+      );
+
+      await adapter.teardown();
+    });
+
+    it('stages a Note to Self attachment sent with no caption', async () => {
+      const dataDir = join('/tmp', `signal-cli-test-data-${Date.now()}-self1`);
+      mkdirSync(join(dataDir, 'attachments'), { recursive: true });
+      writeFileSync(join(dataDir, 'attachments', 'selfpdf'), '%PDF-1.4 noted');
+
+      const adapter = createSignalAdapter({
+        cliPath: 'signal-cli',
+        account: '+15551234567',
+        tcpHost: '127.0.0.1',
+        tcpPort: 7583,
+        manageDaemon: false,
+        signalDataDir: dataDir,
+      });
+      const cfg = createMockSetup();
+      await adapter.setup(cfg);
+
+      pushEvent({
+        sourceNumber: '+15551234567',
+        syncMessage: {
+          sentMessage: {
+            timestamp: 1700000000010,
+            destinationNumber: '+15551234567',
+            attachments: [{ id: 'selfpdf', contentType: 'application/pdf', filename: 'notes.pdf', size: 14 }],
+          },
+        },
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      expect(cfg.onInbound).toHaveBeenCalledWith(
+        'signal:+15551234567',
+        null,
+        expect.objectContaining({
+          content: expect.objectContaining({
+            isFromMe: true,
+            attachments: [
+              expect.objectContaining({
+                type: 'file',
+                name: 'notes.pdf',
+                mimeType: 'application/pdf',
+                data: Buffer.from('%PDF-1.4 noted').toString('base64'),
+              }),
+            ],
+          }),
+        }),
+      );
+
+      await adapter.teardown();
+      rmSync(dataDir, { recursive: true, force: true });
+    });
+
+    it('keeps the caption alongside a Note to Self attachment', async () => {
+      const dataDir = join('/tmp', `signal-cli-test-data-${Date.now()}-self2`);
+      mkdirSync(join(dataDir, 'attachments'), { recursive: true });
+      writeFileSync(join(dataDir, 'attachments', 'selfimg'), 'JPEGBYTES');
+
+      const adapter = createSignalAdapter({
+        cliPath: 'signal-cli',
+        account: '+15551234567',
+        tcpHost: '127.0.0.1',
+        tcpPort: 7583,
+        manageDaemon: false,
+        signalDataDir: dataDir,
+      });
+      const cfg = createMockSetup();
+      await adapter.setup(cfg);
+
+      pushEvent({
+        sourceNumber: '+15551234567',
+        syncMessage: {
+          sentMessage: {
+            timestamp: 1700000000011,
+            message: 'read this later',
+            destinationNumber: '+15551234567',
+            attachments: [{ id: 'selfimg', contentType: 'image/jpeg', size: 9 }],
+          },
+        },
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      expect(cfg.onInbound).toHaveBeenCalledWith(
+        'signal:+15551234567',
+        null,
+        expect.objectContaining({
+          content: expect.objectContaining({
+            text: 'read this later',
+            attachments: [expect.objectContaining({ type: 'image', mimeType: 'image/jpeg' })],
+          }),
+        }),
+      );
+
+      await adapter.teardown();
+      rmSync(dataDir, { recursive: true, force: true });
+    });
+
+    it('notes an unreadable Note to Self attachment instead of dropping the message', async () => {
+      const adapter = createAdapter();
+      const cfg = createMockSetup();
+      await adapter.setup(cfg);
+
+      pushEvent({
+        sourceNumber: '+15551234567',
+        syncMessage: {
+          sentMessage: {
+            timestamp: 1700000000012,
+            destinationNumber: '+15551234567',
+            attachments: [{ id: 'vanished', contentType: 'application/pdf', filename: 'ghost.pdf' }],
+          },
+        },
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      expect(cfg.onInbound).toHaveBeenCalledWith(
+        'signal:+15551234567',
+        null,
+        expect.objectContaining({
+          content: expect.objectContaining({ text: '[ghost.pdf could not be read]' }),
         }),
       );
 
@@ -352,7 +476,11 @@ describe('SignalAdapter', () => {
       const cfg = createMockSetup();
       await adapter.setup(cfg);
 
-      await adapter.deliver('+15555550123', null, {
+      // deliver() is called with the DB-stored (signal:-prefixed) DM
+      // platformId in production; the echo cache is keyed on that same
+      // value, which must match the prefixed platformId the inbound path
+      // computes below for the echo check to actually fire.
+      await adapter.deliver('signal:+15555550123', null, {
         kind: 'text',
         content: { text: 'Echo test' },
       });
@@ -368,7 +496,55 @@ describe('SignalAdapter', () => {
       await adapter.teardown();
     });
 
-    it('forwards image attachments as [Image: <path>] plus structured attachments array', async () => {
+    it('reads non-audio attachments from disk and forwards them as base64', async () => {
+      const dataDir = join('/tmp', `signal-cli-test-data-${Date.now()}`);
+      mkdirSync(join(dataDir, 'attachments'), { recursive: true });
+      const attId = 'att123abc';
+      writeFileSync(join(dataDir, 'attachments', attId), Buffer.from('fake jpeg bytes'));
+
+      const adapter = createSignalAdapter({
+        cliPath: 'signal-cli',
+        account: '+15551234567',
+        tcpHost: '127.0.0.1',
+        tcpPort: 7583,
+        manageDaemon: false,
+        signalDataDir: dataDir,
+      });
+      const cfg = createMockSetup();
+      await adapter.setup(cfg);
+
+      pushEvent({
+        sourceNumber: '+15555550123',
+        sourceName: 'Alice',
+        dataMessage: {
+          timestamp: 1700000000000,
+          attachments: [{ id: attId, contentType: 'image/jpeg', filename: 'photo.jpg', size: 15 }],
+        },
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      expect(cfg.onInbound).toHaveBeenCalledWith(
+        'signal:+15555550123',
+        null,
+        expect.objectContaining({
+          content: expect.objectContaining({
+            attachments: [
+              expect.objectContaining({
+                type: 'image',
+                name: 'photo.jpg',
+                mimeType: 'image/jpeg',
+                data: Buffer.from('fake jpeg bytes').toString('base64'),
+              }),
+            ],
+          }),
+        }),
+      );
+
+      await adapter.teardown();
+      rmSync(dataDir, { recursive: true, force: true });
+    });
+
+    it('falls back to a placeholder when a non-audio attachment file is missing on disk', async () => {
       const adapter = createAdapter();
       const cfg = createMockSetup();
       await adapter.setup(cfg);
@@ -378,23 +554,202 @@ describe('SignalAdapter', () => {
         sourceName: 'Alice',
         dataMessage: {
           timestamp: 1700000000000,
-          attachments: [{ id: 'att123abc', contentType: 'image/jpeg', size: 50000 }],
+          attachments: [{ id: 'missing-att', contentType: 'application/pdf', filename: 'doc.pdf', size: 999 }],
         },
       });
 
       await new Promise((r) => setTimeout(r, 50));
       expect(cfg.onInbound).toHaveBeenCalledWith(
-        '+15555550123',
+        'signal:+15555550123',
+        null,
+        expect.objectContaining({
+          content: expect.objectContaining({ text: '[doc.pdf could not be read]' }),
+        }),
+      );
+      const call = (cfg.onInbound as ReturnType<typeof vi.fn>).mock.calls.find((c) => c[0] === 'signal:+15555550123');
+      expect(call?.[2].content.attachments).toBeUndefined();
+
+      await adapter.teardown();
+    });
+
+    it('skips an attachment over the inline cap and says so', async () => {
+      const dataDir = join('/tmp', `signal-cli-test-data-${Date.now()}-cap`);
+      mkdirSync(join(dataDir, 'attachments'), { recursive: true });
+      writeFileSync(join(dataDir, 'attachments', 'big'), Buffer.alloc(64));
+
+      const adapter = createSignalAdapter({
+        cliPath: 'signal-cli',
+        account: '+15551234567',
+        tcpHost: '127.0.0.1',
+        tcpPort: 7583,
+        manageDaemon: false,
+        signalDataDir: dataDir,
+        maxInlineAttachmentBytes: 8,
+      });
+      const cfg = createMockSetup();
+      await adapter.setup(cfg);
+
+      pushEvent({
+        sourceNumber: '+15555550123',
+        dataMessage: {
+          timestamp: 1700000000004,
+          attachments: [{ id: 'big', contentType: 'video/mp4', filename: 'clip.mp4', size: 64 }],
+        },
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      expect(cfg.onInbound).toHaveBeenCalledWith(
+        'signal:+15555550123',
+        null,
+        expect.objectContaining({
+          content: expect.objectContaining({ text: '[clip.mp4 could not be read]' }),
+        }),
+      );
+      const call = (cfg.onInbound as ReturnType<typeof vi.fn>).mock.calls.find((c) => c[0] === 'signal:+15555550123');
+      expect(call?.[2].content.attachments).toBeUndefined();
+
+      await adapter.teardown();
+      rmSync(dataDir, { recursive: true, force: true });
+    });
+
+    it('stages every attachment when several arrive together, not just images', async () => {
+      const dataDir = join('/tmp', `signal-cli-test-data-${Date.now()}-multi`);
+      mkdirSync(join(dataDir, 'attachments'), { recursive: true });
+      writeFileSync(join(dataDir, 'attachments', 'm1'), 'one');
+      writeFileSync(join(dataDir, 'attachments', 'm2'), 'two');
+
+      const adapter = createSignalAdapter({
+        cliPath: 'signal-cli',
+        account: '+15551234567',
+        tcpHost: '127.0.0.1',
+        tcpPort: 7583,
+        manageDaemon: false,
+        signalDataDir: dataDir,
+      });
+      const cfg = createMockSetup();
+      await adapter.setup(cfg);
+
+      pushEvent({
+        sourceNumber: '+15555550123',
+        dataMessage: {
+          timestamp: 1700000000006,
+          attachments: [
+            { id: 'm1', contentType: 'image/png', size: 3 },
+            { id: 'm2', contentType: 'application/zip', filename: 'bundle.zip', size: 3 },
+          ],
+        },
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      const call = (cfg.onInbound as ReturnType<typeof vi.fn>).mock.calls.find((c) => c[0] === 'signal:+15555550123');
+      expect((call?.[2].content.attachments as Array<{ type: string }>).map((a) => a.type)).toEqual(['image', 'file']);
+
+      await adapter.teardown();
+      rmSync(dataDir, { recursive: true, force: true });
+    });
+
+    it('stages an audio attachment sent alongside caption text instead of dropping it', async () => {
+      // Regression: hasVoice only fires when there's no text, and the old
+      // dataMessage.attachments filter excluded every audio/* content type
+      // from the non-voice set — an audio clip with a caption fell into
+      // neither bucket and was silently dropped.
+      const dataDir = join('/tmp', `signal-cli-test-data-${Date.now()}-audiocap`);
+      mkdirSync(join(dataDir, 'attachments'), { recursive: true });
+      writeFileSync(join(dataDir, 'attachments', 'aud1'), 'AUDIOBYTES');
+
+      const adapter = createSignalAdapter({
+        cliPath: 'signal-cli',
+        account: '+15551234567',
+        tcpHost: '127.0.0.1',
+        tcpPort: 7583,
+        manageDaemon: false,
+        signalDataDir: dataDir,
+      });
+      const cfg = createMockSetup();
+      await adapter.setup(cfg);
+
+      pushEvent({
+        sourceNumber: '+15555550123',
+        dataMessage: {
+          timestamp: 1700000000007,
+          message: 'check this out',
+          attachments: [{ id: 'aud1', contentType: 'audio/aac', filename: 'clip.aac', size: 10 }],
+        },
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      expect(cfg.onInbound).toHaveBeenCalledWith(
+        'signal:+15555550123',
         null,
         expect.objectContaining({
           content: expect.objectContaining({
-            text: expect.stringMatching(/^\[Image: .+att123abc\]$/),
-            attachments: [expect.objectContaining({ contentType: 'image/jpeg' })],
+            text: 'check this out',
+            attachments: [
+              expect.objectContaining({
+                type: 'file',
+                name: 'clip.aac',
+                mimeType: 'audio/aac',
+                data: Buffer.from('AUDIOBYTES').toString('base64'),
+              }),
+            ],
           }),
         }),
       );
 
       await adapter.teardown();
+      rmSync(dataDir, { recursive: true, force: true });
+    });
+
+    it('forwards the raw audio bytes as an attachment even when transcription is unavailable', async () => {
+      const prevWhisperBin = process.env.WHISPER_BIN;
+      const prevOpenaiKey = process.env.OPENAI_API_KEY;
+      delete process.env.WHISPER_BIN;
+      delete process.env.OPENAI_API_KEY;
+      const attachmentsDir = join('/tmp/signal-cli-test-data', 'attachments');
+      mkdirSync(attachmentsDir, { recursive: true });
+      const attachmentPath = join(attachmentsDir, 'voice123');
+      writeFileSync(attachmentPath, Buffer.from('fake-audio-bytes'));
+
+      try {
+        const adapter = createAdapter();
+        const cfg = createMockSetup();
+        await adapter.setup(cfg);
+
+        pushEvent({
+          sourceNumber: '+15555550123',
+          sourceName: 'Alice',
+          dataMessage: {
+            timestamp: 1700000000000,
+            attachments: [{ id: 'voice123', contentType: 'audio/aac', size: 12345 }],
+          },
+        });
+
+        await new Promise((r) => setTimeout(r, 50));
+        expect(cfg.onInbound).toHaveBeenCalledWith(
+          'signal:+15555550123',
+          null,
+          expect.objectContaining({
+            content: expect.objectContaining({
+              text: '[Voice Message]',
+              attachments: [
+                expect.objectContaining({
+                  type: 'voice',
+                  mimeType: 'audio/aac',
+                  data: Buffer.from('fake-audio-bytes').toString('base64'),
+                }),
+              ],
+            }),
+          }),
+        );
+
+        await adapter.teardown();
+      } finally {
+        rmSync(attachmentsDir, { recursive: true, force: true });
+        if (prevWhisperBin === undefined) delete process.env.WHISPER_BIN;
+        else process.env.WHISPER_BIN = prevWhisperBin;
+        if (prevOpenaiKey === undefined) delete process.env.OPENAI_API_KEY;
+        else process.env.OPENAI_API_KEY = prevOpenaiKey;
+      }
     });
   });
 
@@ -443,7 +798,7 @@ describe('SignalAdapter', () => {
 
       await new Promise((r) => setTimeout(r, 50));
       expect(cfg.onInbound).toHaveBeenCalledWith(
-        '+15555550123',
+        'signal:+15555550123',
         null,
         expect.objectContaining({
           content: expect.objectContaining({ text: 'hey @Bob are you here?' }),
@@ -479,7 +834,7 @@ describe('SignalAdapter', () => {
 
       await new Promise((r) => setTimeout(r, 50));
       expect(cfg.onInbound).toHaveBeenCalledWith(
-        '+15555550123',
+        'signal:+15555550123',
         null,
         expect.objectContaining({
           content: expect.objectContaining({
@@ -898,7 +1253,7 @@ describe('SignalAdapter', () => {
 
       await new Promise((r) => setTimeout(r, 50));
       expect(cfg.onInbound).toHaveBeenCalledWith(
-        '+15555550999',
+        'signal:+15555550999',
         null,
         expect.objectContaining({
           content: expect.objectContaining({ text: 'Hello', sender: '+15555550999' }),
@@ -913,7 +1268,10 @@ describe('SignalAdapter', () => {
       const cfg = createMockSetup();
       await adapter.setup(cfg);
 
-      await adapter.deliver('+15555550123', null, {
+      // See the comment in 'skips echoed outbound messages' above: deliver()
+      // must be called with the prefixed platformId to match the inbound
+      // echo check's key.
+      await adapter.deliver('signal:+15555550123', null, {
         kind: 'text',
         content: { text: 'Echo test' },
       });
@@ -943,6 +1301,36 @@ describe('SignalAdapter', () => {
       await new Promise((r) => setTimeout(r, 20));
 
       expect(adapter.isConnected()).toBe(false);
+
+      await adapter.teardown();
+    });
+
+    it('queues sends made while disconnected instead of dropping them, and flushes on the next setup()', async () => {
+      const adapter = createAdapter();
+      await adapter.setup(createMockSetup());
+      expect(adapter.isConnected()).toBe(true);
+
+      // Simulate the daemon dropping the TCP connection.
+      tcpRef.fakeSocket.destroy();
+      await new Promise((r) => setTimeout(r, 20));
+      expect(adapter.isConnected()).toBe(false);
+
+      await adapter.deliver('+15555550123', null, {
+        kind: 'text',
+        content: { text: 'queued while disconnected' },
+      });
+      expect(getRpcCallsForMethod('send')).toHaveLength(0);
+
+      // This adapter has no reconnect loop (see the onClose handler comment
+      // in signal.ts) — recovery today is a service restart, which calls
+      // setup() again and flushes anything still queued.
+      await adapter.setup(createMockSetup());
+      expect(adapter.isConnected()).toBe(true);
+      await new Promise((r) => setTimeout(r, 20));
+
+      const sendCalls = getRpcCallsForMethod('send');
+      expect(sendCalls).toHaveLength(1);
+      expect(sendCalls[0].params.message).toBe('queued while disconnected');
 
       await adapter.teardown();
     });
