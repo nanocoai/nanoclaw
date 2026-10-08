@@ -8,7 +8,7 @@
  * the real realization path against an injected fake CLI and asserts on the
  * commands the driver actually issued.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   DockerSessionDriver,
@@ -403,6 +403,109 @@ describe('lifecycle', () => {
 
     expect(cli.joined()).toContain('stop -t 1 ncl-spike-s1');
     expect(cli.joined()).toContain('rm --force ncl-spike-s1');
+    expect(cli.joined().some((call) => call.startsWith('ps -a'))).toBe(false);
+  });
+
+  describe('removal racing Docker auto-removal', () => {
+    const inProgress = new Error(
+      'Error response from daemon: removal of container ncl-spike-s1 is already in progress',
+    );
+    const probeCount = () => cli.joined().filter((call) => call.startsWith('ps -a')).length;
+    const commandCount = (prefix: string) => cli.joined().filter((call) => call === prefix).length;
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('treats an auto-removal still in flight as removed', async () => {
+      const handle = await driver().prepare(fixtureSpec());
+      await handle.start();
+      cli.responses = [
+        { match: /^rm /, throws: inProgress },
+        { match: /^ps -a/, output: 'ncl-spike-s1\n', once: true },
+        { match: /^ps -a/, output: '' },
+      ];
+
+      const stopped = handle.stop('sweep-kill');
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      await expect(stopped).resolves.toBeUndefined();
+      expect(probeCount()).toBe(2);
+    });
+
+    it('still fails when the container never goes away', async () => {
+      const handle = await driver().prepare(fixtureSpec());
+      await handle.start();
+      cli.responses = [
+        { match: /^rm /, throws: inProgress },
+        { match: /^ps -a/, output: 'ncl-spike-s1\n' },
+      ];
+
+      const stopped = handle.stop('sweep-kill');
+      const assertion = expect(stopped).rejects.toMatchObject({ kind: 'unknown' });
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      await assertion;
+      expect(probeCount()).toBe(10);
+    });
+
+    it('reports a daemon outage without polling', async () => {
+      const handle = await driver().prepare(fixtureSpec());
+      await handle.start();
+      cli.responses = [
+        { match: /^rm /, throws: inProgress },
+        {
+          match: /^ps -a/,
+          throws: 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?',
+        },
+      ];
+
+      const stopped = handle.stop('sweep-kill');
+      const assertion = expect(stopped).rejects.toMatchObject({ kind: 'runtime-unavailable' });
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      await assertion;
+      expect(probeCount()).toBe(1);
+    });
+
+    it('shares one teardown between concurrent stops', async () => {
+      const handle = await driver().prepare(fixtureSpec());
+      await handle.start();
+      cli.responses = [
+        { match: /^rm /, throws: inProgress },
+        { match: /^ps -a/, output: 'ncl-spike-s1\n', once: true },
+        { match: /^ps -a/, output: '' },
+      ];
+
+      const first = handle.stop('sweep-kill');
+      const second = handle.stop('host-shutdown');
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      await expect(Promise.all([first, second])).resolves.toEqual([undefined, undefined]);
+      expect(commandCount('stop -t 1 ncl-spike-s1')).toBe(1);
+      expect(commandCount('rm --force ncl-spike-s1')).toBe(1);
+    });
+
+    it('retries teardown after a failed stop', async () => {
+      const handle = await driver().prepare(fixtureSpec());
+      await handle.start();
+      cli.responses = [
+        { match: /^rm /, throws: inProgress },
+        { match: /^ps -a/, output: 'ncl-spike-s1\n' },
+      ];
+
+      const failed = handle.stop('sweep-kill');
+      const assertion = expect(failed).rejects.toMatchObject({ kind: 'unknown' });
+      await vi.advanceTimersByTimeAsync(10_000);
+      await assertion;
+
+      cli.responses = [{ match: /^rm /, throws: inProgress }];
+      await expect(handle.stop('sweep-kill')).resolves.toBeUndefined();
+      expect(commandCount('rm --force ncl-spike-s1')).toBe(2);
+    });
   });
 
   it('kills the attach process when docker stop fails, so supervision cannot hang', async () => {
