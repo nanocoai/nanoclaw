@@ -502,7 +502,10 @@ describe('lifecycle', () => {
       await vi.advanceTimersByTimeAsync(10_000);
       await assertion;
 
-      cli.responses = [{ match: /^rm /, throws: inProgress }];
+      cli.responses = [
+        { match: /^rm /, throws: inProgress },
+        { match: /^ps -a/, output: '' },
+      ];
       await expect(handle.stop('sweep-kill')).resolves.toBeUndefined();
       expect(commandCount('rm --force ncl-spike-s1')).toBe(2);
     });
