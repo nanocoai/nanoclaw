@@ -223,6 +223,47 @@ describe('deliverSessionMessages — malformed row containment', () => {
   });
 });
 
+describe('deliverSessionMessages — malformed message content', () => {
+  it('a row whose content is not valid JSON still delivers instead of retrying to permanent failure', async () => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+
+    // Unlike insertOutbound/insertOutboundRaw (which always JSON.stringify
+    // the content), write a raw non-JSON string directly — the shape a
+    // corrupted or hand-crafted outbox row would have. deliverMessage's
+    // JSON.parse(msg.content) must not throw out to the retry loop for this.
+    const db = new Database(outboundDbPath('ag-1', session.id));
+    db.prepare(
+      `INSERT INTO messages_out (id, timestamp, kind, platform_id, channel_type, content)
+       VALUES ('out-malformed', datetime('now'), 'chat', 'telegram:123', 'telegram', ?)`,
+    ).run('not valid json {{{');
+    db.close();
+
+    const calls: string[] = [];
+    setDeliveryAdapter({
+      async deliver(_ct, _pid, _tid, _kind, content) {
+        calls.push(content);
+        return 'plat-msg';
+      },
+    });
+
+    const errorSpy = vi.spyOn(log, 'error').mockImplementation(() => {});
+    await deliverSessionMessages(session);
+
+    // Delivered on the first attempt — a deterministic parse error must not
+    // consume retry attempts the way a transient adapter failure would.
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toBe('not valid json {{{');
+    const delivered = await withMailboxSession('ag-1', session.id, (mailbox) => mailbox.getDeliveredIds());
+    expect(delivered.has('out-malformed')).toBe(true);
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Malformed outbound message content'),
+      expect.objectContaining({ id: 'out-malformed' }),
+    );
+    errorSpy.mockRestore();
+  });
+});
+
 describe('deliverSessionMessages — retry and permanent failure', () => {
   it('retries on adapter failure and marks failed after MAX_DELIVERY_ATTEMPTS (3)', async () => {
     await seedAgentAndChannel();
