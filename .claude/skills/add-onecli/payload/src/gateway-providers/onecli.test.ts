@@ -1,9 +1,25 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { GatewayApprovalRequest, GatewaySessionInput } from './gateway-provider-registry.js';
+
+// onecli.ts reads these from process.env before the mocked .env file, at import time,
+// so a caller's shell (an agent host sets ANTHROPIC_BASE_URL) would leak into the fixtures.
+vi.hoisted(() => {
+  for (const key of [
+    'ANTHROPIC_BASE_URL',
+    'ONECLI_API_KEY',
+    'ONECLI_CONSOLE_URL',
+    'ONECLI_GATEWAY_CONTAINER',
+    'ONECLI_GATEWAY_URL',
+    'ONECLI_PROJECT_ID',
+    'ONECLI_URL',
+  ]) {
+    vi.stubEnv(key, undefined);
+  }
+});
 
 const sdk = vi.hoisted(() => ({
   ensureAgent: vi.fn(async () => ({ created: false })),
@@ -72,6 +88,10 @@ const input = (sessionId: string): GatewaySessionInput => ({
 beforeEach(() => {
   vi.clearAllMocks();
   sdk.manualApproval = undefined;
+});
+
+afterAll(() => {
+  vi.unstubAllEnvs();
 });
 
 afterEach(() => {
