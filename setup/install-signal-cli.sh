@@ -12,7 +12,7 @@
 
 set -euo pipefail
 
-VERSION="0.14.3"
+VERSION="0.14.7"
 INSTALL_DIR="${HOME}/.local/bin"
 
 emit_status() {
