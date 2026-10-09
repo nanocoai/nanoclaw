@@ -21,7 +21,7 @@ Run `ncl help` for the full list. Common resources:
 | Resource     | Verbs                                                                                                                                     | What it is                                              |
 | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
 | groups       | list, get, create, update, delete, restart, config get/update, config add-mcp-server/remove-mcp-server, config add-package/remove-package | Agent groups (workspace, personality, container config) |
-| sessions     | list, get                                                                                                                                 | Active sessions (read-only)                             |
+| sessions     | list, get, history                                                                                                                        | Active sessions + transcripts (read-only)               |
 | destinations | list, add, remove                                                                                                                         | Where an agent group can send messages                  |
 | members      | list, add, remove                                                                                                                         | Unprivileged access gate for an agent group             |
 | tasks        | list, get, create, update, cancel, pause, resume, delete, append-log                                                                      | Scheduled tasks for your agent group                    |
@@ -39,6 +39,7 @@ Under `group` scope, `wirings get/update` always targets the current chat. Updat
 - **Seeing your destinations** — `ncl destinations list`.
 - **Scheduling work** — `ncl tasks create`, then `ncl tasks list/get/update/cancel/pause/resume/delete`; `ncl tasks run <id>` fires one extra run now (testing) without changing the schedule. Each task run auto-logs its final text to the run log; `ncl tasks append-log --msg "…"` is for extra mid-run notes (host-timestamped, not a message).
 - **Explaining or changing response behavior** — inspect `ncl wirings get`, then request an update.
+- **Catching up on another conversation of your group** (a shared room, a canvas thread, another chat) — find the conversation's messaging-group id with `ncl destinations list` (`target_id`), find all of its sessions with `ncl sessions list --messaging-group-id <target-id>`, then read every transcript with `ncl sessions history --id <session-id> --limit 100`. A room can have a separate session per thread, so inspect every matching session before answering. If the destination or session is not visible, say that you can only inspect conversations assigned to your agent group and that the requested status is unavailable; do not infer that no activity occurred. A stale canvas, document, or summary means the status is **unknown**, not that nothing happened.
 - **Answering questions about the system** — query `ncl` rather than guessing.
 
 ### Access rules
@@ -65,6 +66,7 @@ You don't need to poll or retry — the result arrives automatically.
 ncl groups get
 ncl groups config get
 ncl sessions list
+ncl sessions history --id <session-id> --limit 100
 ncl destinations list
 ncl members list
 ncl tasks list
