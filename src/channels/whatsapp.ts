@@ -107,10 +107,43 @@ const GROUP_METADATA_CACHE_TTL_MS = 60_000; // 1 min for outbound sends
 const SENT_MESSAGE_CACHE_MAX = 256;
 const RECONNECT_DELAY_MS = 5000;
 const PENDING_QUESTIONS_MAX = 64;
+/** Per chat. A chat can hold several unanswered cards at once, but not without
+ *  bound: nothing clears an entry whose question was resolved elsewhere. */
+const PENDING_QUESTIONS_PER_CHAT_MAX = 16;
 
 /** Normalize an option label to a slash command: "Approve" → "/approve" */
 function optionToCommand(option: string): string {
   return '/' + option.toLowerCase().replace(/\s+/g, '-');
+}
+
+export interface PendingQuestion {
+  questionId: string;
+  options: NormalizedOption[];
+}
+
+/**
+ * Match a slash-command reply against a chat's pending questions.
+ *
+ * Scanned newest first: two cards live in the same chat can offer the same
+ * option label (two approvals both rendering `/reject`), and nothing in the
+ * reply distinguishes them — WhatsApp gives us plain text, not a callback
+ * carrying the card it came from. The newest card is the one the user just
+ * saw, so it wins the ambiguity.
+ *
+ * Returns the array index so the caller can drop exactly the question that
+ * was answered and leave the others answerable.
+ */
+export function matchPendingQuestion(
+  pendings: PendingQuestion[],
+  content: string,
+): { index: number; pending: PendingQuestion; option: NormalizedOption } | undefined {
+  const cmd = content.trim().toLowerCase();
+  for (let index = pendings.length - 1; index >= 0; index--) {
+    const pending = pendings[index];
+    const option = pending.options.find((o) => optionToCommand(o.label) === cmd);
+    if (option) return { index, pending, option };
+  }
+  return undefined;
 }
 
 // --- Markdown → WhatsApp formatting ---
@@ -438,15 +471,11 @@ registerChannelAdapter('whatsapp', {
     // Group metadata cache with TTL
     const groupMetadataCache = new Map<string, { metadata: GroupMetadata; expiresAt: number }>();
 
-    // Pending questions: chatJid → { questionId, options }
-    // User replies with /approve, /reject, etc. to answer
-    const pendingQuestions = new Map<
-      string,
-      {
-        questionId: string;
-        options: NormalizedOption[];
-      }
-    >();
+    // Pending questions: chatJid → questions awaiting an answer, oldest first.
+    // User replies with /approve, /reject, etc. to answer.
+    // A list, not a single entry: nothing stops the agent asking a second
+    // question before the first is answered, and each has to stay answerable.
+    const pendingQuestions = new Map<string, PendingQuestion[]>();
 
     // Group sync tracking
     let lastGroupSync = 0;
@@ -888,18 +917,20 @@ registerChannelAdapter('whatsapp', {
             const isBotMessage = WHATSAPP_SHARED ? content.startsWith(`${ASSISTANT_NAME}:`) : false;
 
             // Check if this reply answers a pending question via slash command
-            const pending = pendingQuestions.get(chatJid);
-            if (pending && content.startsWith('/')) {
-              const cmd = content.trim().toLowerCase();
-              const matched = pending.options.find((o) => optionToCommand(o.label) === cmd);
-              if (matched) {
+            const pendings = pendingQuestions.get(chatJid);
+            if (pendings && content.startsWith('/')) {
+              const hit = matchPendingQuestion(pendings, content);
+              if (hit) {
                 const voterName = msg.pushName || sender.split('@')[0];
-                setupConfig.onAction(pending.questionId, matched.value, sender);
-                pendingQuestions.delete(chatJid);
-                await sendRawMessage(chatJid, `${matched.selectedLabel} by ${voterName}`);
+                setupConfig.onAction(hit.pending.questionId, hit.option.value, sender);
+                // Drop only the question that was answered — any other card
+                // open in this chat stays answerable.
+                pendings.splice(hit.index, 1);
+                if (pendings.length === 0) pendingQuestions.delete(chatJid);
+                await sendRawMessage(chatJid, `${hit.option.selectedLabel} by ${voterName}`);
                 log.info('Question answered', {
-                  questionId: pending.questionId,
-                  value: matched.value,
+                  questionId: hit.pending.questionId,
+                  value: hit.option.value,
                   voterName,
                 });
                 continue; // Don't forward this reply to the agent
@@ -1009,7 +1040,10 @@ registerChannelAdapter('whatsapp', {
           const text = `*${title}*\n\n${question}\n\nReply with:\n${optionLines}`;
           const msgId = await sendRawMessage(platformId, text);
           if (msgId) {
-            pendingQuestions.set(platformId, { questionId, options });
+            const pendings = pendingQuestions.get(platformId) ?? [];
+            pendings.push({ questionId, options });
+            if (pendings.length > PENDING_QUESTIONS_PER_CHAT_MAX) pendings.shift();
+            pendingQuestions.set(platformId, pendings);
             if (pendingQuestions.size > PENDING_QUESTIONS_MAX) {
               const oldest = pendingQuestions.keys().next().value!;
               pendingQuestions.delete(oldest);
