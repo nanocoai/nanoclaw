@@ -436,6 +436,15 @@ describe('CLI scope enforcement', () => {
     }
   });
 
+  it('group: denies when the scope changes to group after dispatch skipped the auto-fill', async () => {
+    // Dispatch reads `global` (no auto-fill), the guard then reads `group`.
+    mockGetContainerConfig.mockReturnValueOnce({ cli_scope: 'global' }).mockReturnValue({ cli_scope: 'group' });
+
+    const resp = await dispatch({ id: '1', command: 'destinations-list', args: {} }, agentCtx());
+
+    expect(resp).toMatchObject({ ok: false, error: { code: 'forbidden' } });
+  });
+
   it('group: allows members, auto-fills --group', async () => {
     mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
 
@@ -745,6 +754,32 @@ describe('CLI scope enforcement', () => {
     );
 
     expect(resp.ok).toBe(true);
+  });
+
+  it('group: filters rows even if the scope changes after the auto-fill', async () => {
+    // Dispatch and the guard read `group`; a later read would say `disabled`.
+    mockGetContainerConfig
+      .mockReturnValueOnce({ cli_scope: 'group' })
+      .mockReturnValueOnce({ cli_scope: 'group' })
+      .mockReturnValue({ cli_scope: 'disabled' });
+
+    const resp = await dispatch({ id: '1', command: 'groups-list-data', args: {} }, agentCtx());
+
+    expect(resp.ok).toBe(true);
+    if (resp.ok) expect((resp.data as Array<{ id: string }>).map((g) => g.id)).toEqual(['g1']);
+  });
+
+  it('group: filters rows when the scope changes from disabled to group mid-request', async () => {
+    // Dispatch reads `disabled` (no auto-fill), the guard then reads `group`.
+    mockGetContainerConfig.mockReturnValueOnce({ cli_scope: 'disabled' }).mockReturnValue({ cli_scope: 'group' });
+
+    const resp = await dispatch(
+      { id: '1', command: 'groups-list-data', args: { id: 'g1', agent_group_id: 'g1', group: 'g1' } },
+      agentCtx(),
+    );
+
+    expect(resp.ok).toBe(true);
+    if (resp.ok) expect((resp.data as Array<{ id: string }>).map((g) => g.id)).toEqual(['g1']);
   });
 
   it('global: no post-handler filtering', async () => {
