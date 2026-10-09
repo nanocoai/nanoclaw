@@ -15,6 +15,8 @@
     "typecheck": "tsc --noEmit",
     "mailbox-model:generate": "cp src/mailbox/model.ts container/agent-runner/src/mailbox/model.generated.ts",
     "mailbox-model:check": "cmp src/mailbox/model.ts container/agent-runner/src/mailbox/model.generated.ts",
+    "slash-command:generate": "cp src/slash-command.ts container/agent-runner/src/slash-command.generated.ts",
+    "slash-command:check": "cmp src/slash-command.ts container/agent-runner/src/slash-command.generated.ts",
     "format": "prettier --write \"src/**/*.ts\"",
     "format:fix": "prettier --write \"src/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\"",

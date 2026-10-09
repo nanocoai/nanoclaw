@@ -4,6 +4,7 @@ import { TIMEZONE, formatLocalTime, formatLocalStamp } from './timezone.js';
 import './providers/index.js';
 import './provider-contracts/index.js';
 import { getProviderRuntimeContract } from './providers/provider-registry.js';
+import { commandText, slashCommandName, withoutBotSuffix } from './slash-command.generated.js';
 
 /**
  * channel_type marking cross-session context copies (accumulate fan-out from
@@ -80,7 +81,7 @@ function commandSets(providerName: string): CommandSets {
 export interface CommandInfo {
   category: CommandCategory;
   command: string; // the command name (e.g., '/clear')
-  text: string; // full original text
+  text: string; // full text; a command's `@botname` suffix is dropped
   senderId: string | null;
 }
 
@@ -97,30 +98,29 @@ export interface CommandInfo {
  * that populate `senderId` directly) and leave it alone.
  */
 export function categorizeMessage(msg: MessageInRow, providerName: string): CommandInfo {
-  const content = parseContent(msg.content);
-  const text = (content.text || '').trim();
-  const senderId = extractSenderId(msg, content);
+  const text = commandText(msg.content);
+  const senderId = extractSenderId(msg, parseContent(msg.content));
 
   // Cross-session echo rows are ambient copies of another conversation —
   // a copied "/clear" etc. must never execute here. Nor may a failure
   // notice whose error text happens to start with a slash.
-  if (isSessionEcho(msg) || isFailureNotice(msg) || !text.startsWith('/')) {
+  // The host gate names commands with the same parse (slash-command.generated.ts).
+  const command = isSessionEcho(msg) || isFailureNotice(msg) ? null : slashCommandName(text);
+  if (command === null) {
     return { category: 'none', command: '', text, senderId };
   }
 
-  // Extract the command name (e.g., '/clear' from '/clear some args')
-  const command = text.split(/\s/)[0].toLowerCase();
-
+  const dispatchText = withoutBotSuffix(text);
   const commands = commandSets(providerName);
   if (commands.admin.has(command)) {
-    return { category: 'admin', command, text, senderId };
+    return { category: 'admin', command, text: dispatchText, senderId };
   }
 
   if (commands.filtered.has(command)) {
-    return { category: 'filtered', command, text, senderId };
+    return { category: 'filtered', command, text: dispatchText, senderId };
   }
 
-  return { category: 'passthrough', command, text, senderId };
+  return { category: 'passthrough', command, text: dispatchText, senderId };
 }
 
 /**
@@ -130,9 +130,8 @@ export function categorizeMessage(msg: MessageInRow, providerName: string): Comm
  */
 export function isClearCommand(msg: MessageInRow): boolean {
   if (isSessionEcho(msg) || isFailureNotice(msg)) return false;
-  const content = parseContent(msg.content);
-  const text = (content.text || '').trim();
-  return text.toLowerCase().startsWith('/clear');
+  // Exact name, never a prefix: the host gate only admin-checks '/clear'.
+  return slashCommandName(commandText(msg.content)) === '/clear';
 }
 
 /**
