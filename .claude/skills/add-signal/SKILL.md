@@ -172,9 +172,11 @@ this channel with `/init-first-agent` (or `/manage-channels`).
 - **type**: `signal`
 - **terminology**: Signal has "chats" (1:1 DMs) and "groups." The owner reaches their own assistant through Note to Self.
 - **platform-id-format**:
-  - Owner DM (Note to Self): the bare phone number `+<number>` (e.g. `+15551234567`) — your own messages route back as inbound with `isFromMe`, addressed by your number.
-  - Third-party DM: `signal:{UUID}` — the sender's Signal ACI, **not** their phone number.
-  - Group: `signal:{base64GroupId}` — base64-encoded GroupV2 ID.
+  - Owner DM (Note to Self): `signal:{ownerNumber}` (e.g. `signal:+15551234567`) — your own messages route back as inbound with `isFromMe`, addressed under the same `signal:`-prefixed convention as any other Signal DM.
+  - Third-party DM: `signal:{senderId}` — the sender's Signal ACI (UUID) when signal-cli reports one, else their phone number.
+  - Group: `group:{base64GroupId}` — `group:`-prefixed (not `signal:`), base64-encoded GroupV2 ID.
+
+  All DM `platform_id`s are `signal:`-prefixed consistently — inbound messages, Note to Self, and cold DMs opened via `openDM` (e.g. an approval sent to a user who's never messaged the bot) all resolve to the same value for the same person, so a card sent before any inbound message still matches the user's real reply.
 - **how-to-find-id**: The owner number comes back from the device-link step above. For third parties or groups, send a message to the bot, then query `messaging_groups`.
 - **supports-threads**: no
 - **typical-use**: Personal assistant via Signal DMs or small group chats
@@ -186,7 +188,10 @@ this channel with `/init-first-agent` (or `/manage-channels`).
 - Quoted replies — `replyTo*` fields populated from Signal quotes.
 - Typing indicators — DMs only (Signal doesn't support group typing).
 - Note to Self — messages you send to your own account from another device route to the agent as inbound with `isFromMe: true`.
-- Voice attachments — detected but not transcribed by default; the agent receives a `[Voice Message]` placeholder. Run `/add-voice-transcription` for local transcription.
+- Voice attachments — detected but not transcribed by default; the agent receives a `[Voice Message]` placeholder. The raw audio is also forwarded as a file attachment (so it isn't lost when transcription is unavailable), including when a voice/audio attachment arrives alongside caption text (previously dropped — see Troubleshooting). Run `/add-voice-transcription` for local transcription.
+- Inbound attachments of every type (images, voice, and general files — PDFs, documents, video, archives) — staged to disk and forwarded to the agent the same way every other chat adapter does, including attachment-only Note to Self messages (previously silently dropped — see Troubleshooting). A per-file `[<name> could not be read]` note replaces a missing/unreadable/oversized attachment instead of dropping the whole message. Size-capped per attachment (default 20MB, tune with `SIGNAL_MAX_INLINE_ATTACHMENT_BYTES`). See Troubleshooting below if your copy predates the fix.
+- Approval questions — `ask_question` (unknown-sender approval cards, `ask_user_question`) renders as text with `/approve`, `/reject`-style slash commands built from the option labels. Also implements `openDM`, so a cold DM to a user who's never messaged the bot (e.g. an approver being notified for the first time) resolves to the same `signal:{UUID}`-prefixed platform_id their real messages use — without it, the reply-matching card and the user's actual DM session would live in two different, unlinked messaging_groups.
+- Outbound sends queue while disconnected — a send attempted while the TCP connection to signal-cli is down is queued rather than dropped, and flushed in order the next time the adapter connects (today that means a service restart; there is no background reconnect loop yet).
 
 Not supported yet: outbound file attachments (logged and dropped), edit/delete messages, reactions.
 
@@ -278,6 +283,11 @@ SIGNAL_MANAGE_DAEMON=true
 
 # signal-cli data directory (default: ~/.local/share/signal-cli)
 SIGNAL_DATA_DIR=~/.local/share/signal-cli
+
+# Max size (bytes) of an inbound attachment staged and forwarded to the agent.
+# Larger attachments are skipped with a "[<name> could not be read]" note
+# instead of the message being dropped. Default: 20971520 (20MB).
+SIGNAL_MAX_INLINE_ATTACHMENT_BYTES=20971520
 ```
 
 **Security note:** keep the TCP host on `127.0.0.1`. The daemon has no auth — binding it to a public interface would expose your full Signal account to the network.
@@ -307,6 +317,30 @@ If you see `Signal daemon not reachable at 127.0.0.1:7583` and `SIGNAL_MANAGE_DA
 
 Signal responses show `platformMsgId=undefined` in the main log. This means the delivery poll ran but found no adapter — likely a duplicate service instance issue (see above). Affected messages cannot be retried; the user must resend.
 
+### Images and file attachments not reaching the agent
+
+**Symptom:** Voice messages transcribe fine, but images sent over Signal are never seen by the agent, and other attachments (PDFs, text files, documents) are silently ignored — no error, no placeholder text, nothing in the response referencing them.
+
+**Root cause:** An earlier version of the adapter spliced an unmounted local path into the message text for image attachments only, which the agent's Read tool could never open; every other attachment type was dropped before that point with no path emitted at all.
+
+**Fix:** Attachments are read from disk and forwarded as base64 through the same inbound-attachment mechanism the other chat adapters already use (see `whatsapp.ts` or `discord.ts` for the pattern). If your copy of `src/channels/signal.ts` predates this, re-copy it and rebuild — see **Copy the adapter and its registration test** above.
+
+### Audio attachment with a caption, or an attachment-only Note to Self, silently dropped
+
+**Symptom:** An audio clip sent together with caption text never reaches the agent (only the caption text shows up, or nothing at all); or a Note to Self message consisting of only an attachment (no text) never shows up as inbound at all.
+
+**Root cause:** The old attachment filter special-cased audio as "voice" only when there was no accompanying text, and excluded all other `audio/*` content from the general attachment path — so audio-with-caption fell into neither bucket and was dropped. The Note to Self (sync message) handler only staged attachments when there was also caption text, so an attachment-only self-note produced an empty message that was discarded upstream.
+
+**Fix:** Both paths now stage every attachment through the same generic mechanism regardless of accompanying text. If your copy predates this, re-copy `src/channels/signal.ts` and rebuild — see **Copy the adapter and its registration test** above.
+
+### Duplicate `messaging_groups` rows / cold-DM approvals not resolving, after upgrading
+
+**Symptom:** After upgrading to a version where DM `platform_id`s are `signal:`-prefixed, some users' DM history appears to reset, or approval/pairing cards sent to a known user silently go nowhere even though their regular chat still works.
+
+**Root cause:** Older adapter copies used the bare handle in one or more code paths (raw `platform_id`, or — before `openDM()` existed — the cold-DM fallback in `ensureUserDm`) while other paths already used the `signal:`-prefixed form. That leaves two `messaging_groups` rows per identity: an older bare-handle row, and the `signal:`-prefixed one that's actually wired and holds history. `user_dms` can end up caching the unprefixed one, rerouting cold-DM lookups to a dead end.
+
+**Fix:** Query `messaging_groups` for `channel_type='signal'` and compare `platform_id` values per person — a wired row with active sessions vs. an unwired duplicate (with/without the `signal:` prefix) for the same handle/UUID. If you find a pair: confirm which is wired, repoint any `user_dms` row at it, then delete the unwired duplicate once nothing else references it (check `messaging_group_agents`, `sessions`, `pending_approvals`, `pending_sender_approvals`/`pending_channel_approvals`, `unregistered_senders`). There's no automatic migration for this yet — it's manual reconciliation until one exists.
+
 ### Lost connection mid-session
 
 If you see `Signal channel lost TCP connection to signal-cli daemon` in the logs, the daemon dropped the connection. Restart the service to re-establish.
@@ -327,6 +361,8 @@ You must request SMS first, wait ~60 seconds, then request voice. Both steps can
 
 signal-cli holds an exclusive lock on its data directory while the daemon is running. Stop NanoClaw before running any `signal-cli` commands directly, then restart afterward.
 
+If this lock is held during the **device-link setup step** itself (the running NanoClaw service's `signal-cli daemon` holding the lock, rather than a manual command), the setup wizard no longer hangs indefinitely: the probe times out (default 15s, tune with `NANOCLAW_SIGNAL_PROBE_TIMEOUT_MS`) and fails with `signal-cli is locked by another instance (the running NanoClaw service holds it). Stop the NanoClaw service, re-run setup, then start the service again.` — follow that remedy.
+
 ### Group replies going to DM instead of group
 
 Modern Signal groups use GroupV2. The adapter must extract the group ID from `envelope?.dataMessage?.groupV2?.id` — not `groupInfo?.groupId`, which is GroupV1/legacy. If group messages are routing as DMs, check `src/channels/signal.ts` and confirm the groupId extraction falls through to `groupV2.id`.
@@ -334,3 +370,7 @@ Modern Signal groups use GroupV2. The adapter must extract the group ID from `en
 ### QR / linking URL expired
 
 The `sgnl://linkdevice…` URL (and the Path A registration captcha) expire after a few minutes. Re-run the device-link step to get a fresh QR.
+
+### Trunk updated but wiring defaults unchanged (stale adapter copy)
+
+`src/channels/signal.ts` declares its own `SIGNAL_DEFAULTS` (engage mode, threading, unknown-sender policy) — that lives in the adapter copy installed from the `channels` branch, not in trunk. Running `/update-nanoclaw` without the follow-up skill-update step leaves the old adapter copy in place, so trunk-level behavior changes documented there silently don't apply to Signal. Fix: re-run `/add-signal` (or `/update-skills`) to pull the current adapter, then restart the service.
