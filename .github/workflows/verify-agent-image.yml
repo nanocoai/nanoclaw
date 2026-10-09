@@ -31,7 +31,7 @@ permissions:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-paradixe
     permissions:
       contents: read
       id-token: write # OIDC for the pull-only ECR role

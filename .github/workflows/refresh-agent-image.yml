@@ -27,7 +27,7 @@ permissions:
 
 jobs:
   open-bump-pr:
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-paradixe
     permissions:
       contents: write # create the bump branch
       pull-requests: write # open the bump PR

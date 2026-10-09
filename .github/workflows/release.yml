@@ -28,7 +28,7 @@ concurrency:
 
 jobs:
   dispatch:
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-paradixe
     permissions: {}
     steps:
       - name: Verify dispatch source
@@ -48,7 +48,7 @@ jobs:
 
   verify:
     needs: dispatch
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-paradixe
     permissions:
       actions: read
       contents: read
@@ -190,7 +190,7 @@ jobs:
   publish:
     if: inputs.mode == 'publish'
     needs: verify
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-paradixe
     # Both environments must be created and protected before the workflow lands.
     # GitHub otherwise auto-creates an unprotected environment on first use.
     # Only x.y.z-rc.N passes verify with a '-'; the verify job checks this same environment.

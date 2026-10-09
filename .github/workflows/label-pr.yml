@@ -28,7 +28,7 @@ concurrency:
 
 jobs:
   label:
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-paradixe
     permissions:
       # contents: read lets actions/labeler fetch .github/labeler.yml through
       # the API (no checkout). Under pull_request_target that resolves at the
