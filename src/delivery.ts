@@ -31,6 +31,7 @@ import { isUnguarded, type Unguarded } from './guard/index.js';
 import { mapConcurrent } from './concurrency.js';
 import { fanOutboundMessage } from './modules/cross-session-context/index.js';
 import { log } from './log.js';
+import { reportOperationalError } from './operational-errors.js';
 import { normalizeOptions } from './channels/ask-question.js';
 import { clearOutbox, readOutboxFiles, withExistingMailboxSession } from './session-manager.js';
 import { pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typing/index.js';
@@ -337,6 +338,18 @@ async function drainSession(session: Session): Promise<void> {
           sessionId: session.id,
           attempts,
           err,
+        });
+        reportOperationalError({
+          kind: 'delivery.failed',
+          message: `Message ${msg.id} could not be delivered to ${msg.channelType ?? 'unknown channel'} after ${attempts} attempts`,
+          key: `delivery.failed:${session.id}`,
+          details: {
+            messageId: msg.id,
+            sessionId: session.id,
+            agentGroupId: session.agent_group_id,
+            channelType: msg.channelType,
+            error: err instanceof Error ? err.message : String(err),
+          },
         });
         try {
           await withExistingMailboxSession(agentGroup.id, session.id, (mailbox) => mailbox.markDeliveryFailed(msg.id));

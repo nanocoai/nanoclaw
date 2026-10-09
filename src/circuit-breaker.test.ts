@@ -31,6 +31,7 @@ vi.mock('./log.js', () => ({
 }));
 
 import { enforceStartupBackoff, resetCircuitBreaker } from './circuit-breaker.js';
+import { registerOperationalErrorSink, type OperationalError } from './operational-errors.js';
 
 function readState(): { attempt: number; timestamp: string } {
   return JSON.parse(fs.readFileSync(CB_PATH, 'utf-8'));
@@ -187,5 +188,44 @@ describe('enforceStartupBackoff — fresh install (DATA_DIR missing)', () => {
     expect(fs.existsSync(TEST_DIR)).toBe(true);
     expect(fs.existsSync(CB_PATH)).toBe(true);
     expect(readState().attempt).toBe(1);
+  });
+});
+
+describe('enforceStartupBackoff — operational error report', () => {
+  let unregister: (() => void) | undefined;
+  afterEach(() => unregister?.());
+
+  function captureReports(): OperationalError[] {
+    const reports: OperationalError[] = [];
+    unregister = registerOperationalErrorSink((e) => {
+      reports.push(e);
+    });
+    return reports;
+  }
+
+  it('reports a delayed startup to registered sinks before sleeping', async () => {
+    const reports = captureReports();
+    seedState(3);
+    vi.useFakeTimers();
+
+    const promise = enforceStartupBackoff();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toMatchObject({
+      kind: 'host.startup-backoff',
+      key: 'host.startup-backoff',
+      details: { attempt: 4, delaySec: 30 },
+    });
+
+    await vi.runAllTimersAsync();
+    await promise;
+  });
+
+  it('reports nothing when startup is not delayed', async () => {
+    const reports = captureReports();
+    seedState(1);
+    await enforceStartupBackoff();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(reports).toHaveLength(0);
   });
 });
