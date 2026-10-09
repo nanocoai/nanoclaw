@@ -42,6 +42,24 @@ export function openOutboundDbRw(dbPath: string): Database.Database {
   return db;
 }
 
+/**
+ * A read-only open of a session DB fails with `SQLITE_READONLY` /
+ * "attempt to write a readonly database" when the WRITER side is mid-commit
+ * and the DELETE-journal file is still hot: journal recovery requires write
+ * access, which a readonly open does not have. The condition is transient —
+ * the next delivery tick (~1s) or sweep tick (~60s) sees a clean DB, so
+ * callers should treat it as "skip this tick" rather than log a stack per
+ * tick for the whole commit window.
+ */
+export function isTransientSqliteReadonlyError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const code = (err as { code?: unknown }).code;
+  if (typeof code === 'string' && code.startsWith('SQLITE_READONLY')) return true;
+  const message = (err as { message?: unknown }).message;
+  if (typeof message === 'string' && /readonly database/i.test(message)) return true;
+  return false;
+}
+
 export function upsertSessionRouting(
   db: Database.Database,
   routing: { channel_type: string | null; platform_id: string | null; thread_id: string | null },
