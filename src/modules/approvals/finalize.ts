@@ -61,3 +61,33 @@ export async function finalizeReject(
   await requestWake(session, 'approval-response');
   return true;
 }
+
+/**
+ * Expire an approval nobody answered. The agent gets a context-only note
+ * (trigger: false) — it reads it on its next wake rather than being woken days
+ * later just to hear the request lapsed.
+ */
+export async function finalizeExpired(approval: PendingApproval, session: Session): Promise<boolean> {
+  if (!(await transitionPendingApprovalStatus(approval.approval_id, 'pending', 'expired'))) return false;
+
+  await writeSessionMessage(session.agent_group_id, session.id, {
+    id: `appr-note-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    kind: 'chat',
+    timestamp: new Date().toISOString(),
+    platformId: session.agent_group_id,
+    channelType: 'agent',
+    threadId: null,
+    content: JSON.stringify({
+      text: `Your ${approval.action} request (${approval.title}) expired without an admin response and was not applied. Ask again if it is still needed.`,
+      sender: 'system',
+      senderId: 'system',
+    }),
+    trigger: false,
+  });
+
+  log.info('Approval expired unanswered', { approvalId: approval.approval_id, action: approval.action });
+
+  await deletePendingApproval(approval.approval_id);
+  await notifyApprovalResolved({ approval, session, outcome: 'reject', userId: '' });
+  return true;
+}
