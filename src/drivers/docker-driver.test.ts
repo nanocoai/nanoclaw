@@ -770,3 +770,24 @@ it('does not report successful teardown when the Docker daemon refuses removal',
   cli.responses.unshift({ match: /^(stop|rm|ps) /, throws: new Error('Cannot connect to the Docker daemon') });
   await expect(handle.stop('shutdown')).rejects.toMatchObject({ kind: 'runtime-unavailable' });
 });
+
+describe('ensureReady — retry on transient runtime failures', () => {
+  it('recovers when the daemon answers after misses', async () => {
+    let misses = 2;
+    const origRun = cli.run.bind(cli);
+    cli.run = ((args: string[], opts?: { input?: string }) => {
+      if (args.join(' ') === 'info' && misses-- > 0) {
+        throw new Error('error during connect: open //./pipe/docker_engine');
+      }
+      return origRun(args, opts);
+    }) as typeof cli.run;
+    cli.responses = [{ match: /^info$/, output: '' }];
+    await expect(driver().ensureReady([0, 0, 0])).resolves.toBeUndefined();
+    expect(log.info).toHaveBeenCalledWith('Container runtime reachable after retries', expect.anything());
+  });
+
+  it('exhausts the schedule and rethrows the probe error', async () => {
+    cli.responses = [{ match: /^info$/, throws: new Error('Cannot connect to the Docker daemon') }];
+    await expect(driver().ensureReady([0, 0])).rejects.toThrow('Container runtime is required but failed to start');
+  });
+});

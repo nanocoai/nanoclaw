@@ -99,8 +99,40 @@ export class DockerSessionDriver implements SessionDriver {
     };
   }
 
-  async ensureReady(): Promise<void> {
-    ensureDockerRunning(this.#cli);
+  async ensureReady(retryDelaysMs: number[] = RUNTIME_READY_RETRY_DELAYS_MS): Promise<void> {
+    // Retry schedule around the single-shot FATAL probe. On Windows the
+    // `\\.\pipe\docker_engine` named pipe briefly disappears during Docker
+    // Desktop restarts, WSL kernel churn, or resource pressure; the one-shot
+    // probe turns every such hiccup into a FATAL exit, which trips the
+    // startup circuit breaker into 5-15min backoff — far longer than the
+    // underlying Docker outage. Budget ~180s total (a Docker Desktop restart
+    // hiccup is typically 30-90s). Exhausting the schedule rethrows the
+    // probe's final error, so the failure shape (banner included) is exactly
+    // the single-shot one. Optional schedule param: tests inject [0, …] to
+    // skip the real sleeps.
+    let lastErr: unknown;
+    for (let i = 0; i < retryDelaysMs.length; i++) {
+      if (retryDelaysMs[i] > 0) {
+        await new Promise<void>((resolve) => setTimeout(resolve, retryDelaysMs[i]));
+      }
+      try {
+        ensureDockerRunning(this.#cli);
+        if (i > 0) log.info('Container runtime reachable after retries', { attempts: i + 1 });
+        return;
+      } catch (err) {
+        lastErr = err;
+        const nextDelay = retryDelaysMs[i + 1];
+        if (nextDelay !== undefined) {
+          log.warn('Container runtime not ready, will retry', {
+            attempt: i + 1,
+            maxAttempts: retryDelaysMs.length,
+            nextRetryInMs: nextDelay,
+            err: (err as { message?: string }).message?.split('\n')[0] ?? 'unknown',
+          });
+        }
+      }
+    }
+    throw lastErr;
   }
 
   async reconcileNetworkAccess(access: NetworkAccessIntent): Promise<void> {
@@ -851,6 +883,9 @@ export function assertMountSourcesExist(mounts: readonly MountSpec[]): void {
     }
   }
 }
+
+/** Retry schedule for the readiness probe in `ensureReady` — index 0 = first attempt (no delay), total budget ~180s. Exported for tests. */
+export const RUNTIME_READY_RETRY_DELAYS_MS: number[] = [0, 5_000, 10_000, 15_000, 30_000, 60_000, 60_000];
 
 /** Ensure the container runtime is reachable. Fatal at startup — agents cannot run without it. */
 export function ensureDockerRunning(cli: Cli = realCli('docker')): void {
