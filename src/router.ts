@@ -200,7 +200,12 @@ function dispatchSessionCreated(event: SessionCreatedEvent): void {
   }
 }
 
-function safeParseContent(raw: string): { text?: string; sender?: string; senderId?: string } {
+function safeParseContent(raw: string): {
+  text?: string;
+  sender?: string;
+  senderId?: string;
+  replyTo?: { isReplyToBot?: boolean };
+} {
   try {
     return JSON.parse(raw);
   } catch {
@@ -358,6 +363,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   //    avoids the extra await).
   const parsed = safeParseContent(event.message.content);
   const messageText = parsed.text ?? '';
+  const isDirectlyAddressed = isMention || parsed.replyTo?.isReplyToBot === true;
 
   // Per-wiring thread policy inputs, resolved once per event. Each wiring's
   // threads override (NULL = inherit) resolves against the channel's declared
@@ -390,7 +396,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     );
     const effectiveThreadId = threadsEnabled ? event.threadId : null;
 
-    const engages = await evaluateEngage(agent, messageText, isMention, mg, effectiveThreadId);
+    const engages = await evaluateEngage(agent, messageText, isDirectlyAddressed, mg, effectiveThreadId);
 
     const accessOk = engages && (!accessGate || (await accessGate(event, userId, mg, agent.agent_group_id)).allowed);
     const scopeOk = engages && (!senderScopeGate || (await senderScopeGate(event, userId, mg, agent)).allowed);
@@ -458,9 +464,10 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
  * Decide whether a given wired agent should engage on this message.
  *
  *   'pattern'        — regex test on text; '.' = always
- *   'mention'        — bot must be mentioned on the platform. Resolved by
- *                      the adapter (SDK-level) and forwarded as
- *                      `event.message.isMention`. Agent display name
+ *   'mention'        — bot must be directly addressed by a platform mention
+ *                      or a reply to its own message. Resolved by the adapter
+ *                      and forwarded as `event.message.isMention` or
+ *                      serialized `replyTo.isReplyToBot`. Agent display name
  *                      (`agent_group.name`) is irrelevant — users address
  *                      the bot via its platform username (@botname on
  *                      Telegram, user-id mention on Slack/Discord), not
@@ -468,8 +475,8 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
  *                      user wants to disambiguate between multiple agents
  *                      wired to one chat, use engage_mode='pattern' with
  *                      the disambiguator as the regex.
- *   'mention-sticky' — platform mention OR an active per-thread session
- *                      already exists for this (agent, mg, thread). The
+ *   'mention-sticky' — direct address OR an active per-thread session already
+ *                      exists for this (agent, mg, thread). The
  *                      session existence IS our subscription state; once
  *                      a thread has engaged us once, follow-ups arrive
  *                      with no mention and should still fire.
@@ -477,7 +484,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
 async function evaluateEngage(
   agent: MessagingGroupAgent,
   text: string,
-  isMention: boolean,
+  isDirectlyAddressed: boolean,
   mg: MessagingGroup,
   threadId: string | null,
 ): Promise<boolean> {
@@ -493,9 +500,9 @@ async function evaluateEngage(
       }
     }
     case 'mention':
-      return isMention;
+      return isDirectlyAddressed;
     case 'mention-sticky': {
-      if (isMention) return true;
+      if (isDirectlyAddressed) return true;
       // Sticky follow-up: session already exists for this (agent, mg, thread)
       // — the thread was activated before, keep firing.
       if (mg.is_group === 0) return false; // DMs never use mention-sticky sensibly
