@@ -242,7 +242,7 @@
           - "src/modules/permissions/**"
           - "src/modules/mount-security/**"
           - "src/attachment-safety*"
-          - "src/inbox-safety*"
+          - "src/anchored-dir*"
           - "container/agent-runner/src/harness-tag-strip*"
           - "docs/SECURITY.md"
 

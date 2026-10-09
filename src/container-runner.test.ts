@@ -564,4 +564,15 @@ describe('syncSkillSymlinks', () => {
       expect.objectContaining({ skill: 'welcome' }),
     );
   });
+
+  it('leaves a host directory alone when the skills dir is a symlink to it', () => {
+    const dir = tmpClaudeDir();
+    const hostDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-host-'));
+    fs.symlinkSync('/somewhere', path.join(hostDir, 'stale-link'));
+    fs.symlinkSync(hostDir, path.join(dir, 'skills'));
+
+    syncSkillSymlinks(dir, { ...containerConfig, skills: ['welcome'] } as ContainerConfig);
+
+    expect(fs.readdirSync(hostDir).sort()).toEqual(['stale-link']);
+  });
 });

@@ -64,8 +64,83 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await closeDb();
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+});
+
+/**
+ * Let the container win the race: run `swap` once, right before the host's
+ * first fs call that creates `leaf`. Every way the host could create the file
+ * goes through one of these calls, so the swap lands after every check.
+ */
+function swapBeforeCreate(leaf: string, swap: () => void): void {
+  let fired = false;
+  for (const method of ['openSync', 'writeFileSync', 'copyFileSync'] as const) {
+    const original = fs[method] as (...args: unknown[]) => unknown;
+    vi.spyOn(fs, method).mockImplementation(((...args: unknown[]) => {
+      const target = method === 'copyFileSync' ? args[1] : args[0];
+      if (!fired && typeof target === 'string' && path.basename(target) === leaf) {
+        fired = true;
+        swap();
+      }
+      return original.apply(fs, args);
+    }) as never);
+  }
+}
+
+/** Replace inbox/<messageId> with a symlink to `target`, as a container could. */
+function swapInboxDir(messageId: string, target: string): () => void {
+  return () => {
+    const dir = path.join(sessionDir(AG, SESS), 'inbox', messageId);
+    fs.renameSync(dir, `${dir}-moved`);
+    fs.symlinkSync(target, dir);
+  };
+}
+
+function attachmentMessage(id: string, names: string[]) {
+  return {
+    id,
+    kind: 'chat' as const,
+    timestamp: now(),
+    platformId: 'whatsapp:123',
+    channelType: 'whatsapp',
+    threadId: null,
+    content: JSON.stringify({
+      text: 'see attached',
+      attachments: names.map((name) => ({ name, data: Buffer.from(`bytes-${name}`).toString('base64') })),
+    }),
+  };
+}
+
+describe('extractAttachmentFiles — inbox dir swapped after the checks', () => {
+  it('writes a single attachment into the directory it checked', async () => {
+    const canaryDir = path.join(TEST_DIR, 'canary-single');
+    fs.mkdirSync(canaryDir, { recursive: true });
+    swapBeforeCreate('one.txt', swapInboxDir('race-single', canaryDir));
+
+    await writeSessionMessage(AG, SESS, attachmentMessage('race-single', ['one.txt']));
+
+    expect(fs.readdirSync(canaryDir)).toHaveLength(0);
+  });
+
+  it('writes every attachment of a batch into the directory it checked', async () => {
+    const canaryDir = path.join(TEST_DIR, 'canary-batch');
+    fs.mkdirSync(canaryDir, { recursive: true });
+    swapBeforeCreate('second.txt', swapInboxDir('race-batch', canaryDir));
+
+    await writeSessionMessage(AG, SESS, attachmentMessage('race-batch', ['first.txt', 'second.txt']));
+
+    expect(fs.readdirSync(canaryDir)).toHaveLength(0);
+  });
+
+  it('still saves attachments when nothing interferes', async () => {
+    await writeSessionMessage(AG, SESS, attachmentMessage('plain', ['a.txt', 'b.txt']));
+
+    const inbox = path.join(sessionDir(AG, SESS), 'inbox', 'plain');
+    expect(fs.readFileSync(path.join(inbox, 'a.txt'), 'utf-8')).toBe('bytes-a.txt');
+    expect(fs.readFileSync(path.join(inbox, 'b.txt'), 'utf-8')).toBe('bytes-b.txt');
+  });
 });
 
 describe('extractAttachmentFiles — inbox-root symlink containment (#2828 sibling)', () => {

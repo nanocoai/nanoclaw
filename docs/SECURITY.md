@@ -59,9 +59,25 @@ Shared memory content is read only by the provider's SessionStart hook inside
 the container. Host-side project-document composers inline the repository's own
 instruction sources, and read nothing the agent can author except
 `instructions.prepend.md` (opened with `O_NOFOLLOW`); they never open
-`memory/index.md` or linked agent-controlled files. A memory symlink can
-therefore reach only paths already visible inside that container, not arbitrary
-host files.
+`memory/index.md` or linked agent-controlled files, so they never follow a
+memory symlink to a host file.
+
+**Host file I/O inside agent-writable mounts.** The session folder, the group
+folder and provider state volumes are mounted read-write, so an agent can turn
+any name inside them into a symlink at any moment, including between a host
+check and the host's next syscall. The host operations that read, write or
+delete there on the agent's behalf (inbound attachments, outbox delivery and
+cleanup, agent-to-agent file forwarding, shared and template skill sync, the
+task run log, and the seed and reconcile of provider settings files such as
+`settings.json`) go through `AnchoredDir` (`src/anchored-dir.ts`): each
+directory below the mount point is opened by descriptor with symlinks refused,
+and the host then works only through that descriptor, never through the path
+again. A symlink planted on one of these paths is refused, not followed. On
+macOS this needs `/.vol` inode paths (APFS or HFS+ volumes); on any other
+volume these operations are refused. Other host writes there create
+exclusively, replace by rename, sit under a read-only nested mount, or (the
+per-spawn provider stub) open only their leaf with `O_NOFOLLOW`; new host code
+that touches these trees should use `AnchoredDir`.
 
 **Additional-mount allowlist** — extra mounts from a group's container config
 are validated against an allowlist at `~/.config/nanoclaw/mount-allowlist.json`,
@@ -82,7 +98,9 @@ Its schema:
 }
 ```
 
-**Default blocked patterns** (merged with any in the file):
+**Default blocked patterns** (merged with any in the file). They filter
+additional mounts only, and play no part in host file I/O inside the fixed
+mounts above:
 ```
 .ssh, .gnupg, .gpg, .aws, .azure, .gcloud, .kube, .docker,
 credentials, .env, .netrc, .npmrc, .pypirc, id_rsa, id_ed25519,
