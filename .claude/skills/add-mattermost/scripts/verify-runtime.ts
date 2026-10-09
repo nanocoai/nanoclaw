@@ -205,6 +205,15 @@ export async function verifyMattermostRuntime(
   }
 }
 
+// Print only this helper's own messages. A parse or network error can quote the
+// server's response, and this output becomes the setup failure reason.
+export function failureMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : '';
+  return message.startsWith('Mattermost runtime verification: ')
+    ? message
+    : 'Mattermost runtime verification: could not complete the check';
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const [expectedBotId, expectedOwnerId, platformId] = process.argv.slice(2);
   try {
@@ -213,7 +222,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       'Mattermost verified: running bot and settings, authenticated adapter, owner DM, and callback delivery from the Mattermost server.',
     );
   } catch (error) {
-    console.error(error instanceof Error ? error.message : String(error));
+    console.error(failureMessage(error));
     process.exitCode = 1;
   }
 }

@@ -103,6 +103,7 @@ describe('Mattermost bot setup guidance', () => {
         directive.body.some((line) => line.includes('/api/v4/users/username/{{owner_username}}')),
     );
     expect(ownerLookup?.attrs.capture).toBe('owner_user_id=.id,owner_handle=.id');
+    expect(ownerLookup?.attrs.validate).toBe('^[a-z0-9]{26}$');
   });
 
   it('replaces a stale canonical URL without changing existing credentials', () => {
