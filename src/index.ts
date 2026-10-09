@@ -25,6 +25,7 @@ import { startGatewayAvailabilityMonitor } from './gateway-availability.js';
 import { getGatewayProvider } from './gateway-providers/index.js';
 import { routeInbound } from './router.js';
 import { log } from './log.js';
+import { runHostStartups } from './host-startup.js';
 import { enforceUpgradeTripwire } from './upgrade-state.js';
 
 // Response registry lives in response-registry.ts to break the
@@ -86,6 +87,7 @@ async function main(): Promise<void> {
   // 1. Init central DB
   const db = await initDb(CENTRAL_DB_PATH, { role: 'host' });
   await runMigrations(db, undefined, { mode: 'auto' });
+  await runHostStartups();
   log.info('Central DB ready', { dialect: db.dialect });
 
   // 1b. Backfill container_configs from legacy container.json files.

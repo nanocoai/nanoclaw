@@ -33,6 +33,7 @@ import { stripHarnessTagArtifacts } from './harness-tag-strip.js';
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
 import type { ProviderRuntimeContract } from './provider-contracts/registry.js';
+import { dueTaskRowHooksFor, type DueTaskRowHooks } from './provider-contracts/due-task-rows.js';
 
 const POLL_INTERVAL_MS = 1000;
 const ACTIVE_POLL_INTERVAL_MS = 500;
@@ -51,7 +52,7 @@ function generateId(): string {
 export interface PollLoopConfig {
   provider: AgentProvider;
   /** Declared provider runtime behavior. Contractless providers keep legacy defaults. */
-  providerContract?: Pick<ProviderRuntimeContract, 'textDelivery' | 'commands'>;
+  providerContract?: Pick<ProviderRuntimeContract, 'textDelivery' | 'commands' | 'turn'>;
   /**
    * Name of the provider (e.g. "claude", "codex", "opencode"). Used to key
    * the stored continuation per-provider so flipping providers doesn't
@@ -90,6 +91,10 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
   const midTurnCompleteDelivery = config.providerContract
     ? config.providerContract.textDelivery === 'mid-turn-complete'
     : (legacy.emitsMidTurnText ?? false);
+  const ordinaryFollowUps = config.providerContract?.turn?.ordinaryFollowUps ?? 'push';
+  const dueTaskPolicy = config.providerContract?.turn?.dueTaskRows ?? 'runner-log';
+  const dueTaskHooks: DueTaskRowHooks | undefined =
+    dueTaskPolicy === 'provider' ? dueTaskRowHooksFor(config.providerName) : undefined;
 
   // Resume the agent's prior session from a previous container run if one
   // was persisted. The continuation is opaque to the poll-loop — the
@@ -232,21 +237,40 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       continue;
     }
 
+    let dueTaskState: unknown | null = null;
+    if (dueTaskHooks) {
+      try {
+        dueTaskState = dueTaskHooks.begin(keep);
+      } catch (err) {
+        log(`due-task begin failed: ${err instanceof Error ? err.message : String(err)}`);
+        dueTaskState = null;
+      }
+    }
+    const dueTask = dueTaskState !== null && dueTaskHooks ? { hooks: dueTaskHooks, state: dueTaskState } : null;
+
     // Format messages: passthrough commands get raw text (only if the
     // provider natively handles slash commands), others get XML.
     const prompt = formatMessagesWithCommands(keep, nativeSlashCommands, config.providerName);
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 
-    const query = config.provider.query({
-      prompt,
-      continuation,
-      cwd: config.cwd,
-      systemContext: config.systemContext,
-    });
-    // Process the query while concurrently polling for new messages
     const skippedSet = new Set(skipped.map((s) => s.id));
     const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
+    let query: AgentQuery;
+    try {
+      query = config.provider.query({
+        prompt,
+        continuation,
+        cwd: config.cwd,
+        systemContext: config.systemContext,
+      });
+    } catch (err) {
+      if (dueTask === null) throw err;
+      log(`due-task query construction failed: ${err instanceof Error ? err.message : String(err)}`);
+      markCompleted(processingIds);
+      continue;
+    }
+    // Process the query while concurrently polling for new messages
     // Publish the batch's route so MCP tools (send_message, send_file) thread
     // replies into the conversation being answered and stamp in_reply_to for
     // a2a return-path routing. Re-published at every turn boundary inside
@@ -273,7 +297,16 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         continuation,
         midTurnCompleteDelivery,
         config.signal,
+        ordinaryFollowUps,
+        dueTask,
       );
+      if (dueTask) {
+        try {
+          await dueTask.hooks.finish(dueTask.state);
+        } catch (err) {
+          log(`due-task finish failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
       if (result.continuation && result.continuation !== continuation) {
         continuation = result.continuation;
         setContinuation(config.providerName, continuation);
@@ -281,6 +314,14 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       log(`Query error: ${errMsg}`);
+      if (dueTask) {
+        const handled = dueTask.hooks.isHandled(dueTask.state);
+        log(
+          handled
+            ? `due-task post-handling failure: ${errMsg}`
+            : `due-task handling failed before decision: ${errMsg}`,
+        );
+      }
 
       // Stale/corrupt continuation recovery: ask the provider whether
       // this error means the stored continuation is unusable, and clear
@@ -371,12 +412,15 @@ export async function processQuery(
    */
   midTurnCompleteDelivery = false,
   signal?: AbortSignal,
+  ordinaryFollowUps: 'push' | 'defer-until-fresh-query' = 'push',
+  dueTask: { hooks: DueTaskRowHooks; state: unknown } | null = null,
 ): Promise<QueryResult> {
   // adoptTurn mutates routing in place; keep the caller's batch route intact.
   routing = { ...routing };
   let queryContinuation: string | undefined;
   let done = false;
   let unwrappedNudged = false;
+  let releaseForFreshQuery = false;
   // Once-per-turn guard for the task-run "<message> block was not delivered"
   // nudge — mirrors unwrappedNudged for chat turns.
   let taskBlockNudged = false;
@@ -500,6 +544,18 @@ export async function processQuery(
         // Accumulated context must not engage a warm query by itself.
         if (!newMessages.some((m) => m.trigger === 1)) return;
 
+        if (
+          ordinaryFollowUps === 'defer-until-fresh-query' &&
+          newMessages.some((m) => m.trigger === 1 && !isRunnerCommand(m, providerName))
+        ) {
+          // Leave ordinary follow-ups pending and unacknowledged. The current
+          // turn finishes; the outer loop then starts a fresh query. Slash
+          // commands already took the abort path above.
+          releaseForFreshQuery = true;
+          if (!answering && queuedTurns.length === 0) query.end();
+          return;
+        }
+
         const newIds = newMessages.map((m) => m.id);
         markProcessing(newIds);
 
@@ -528,6 +584,13 @@ export async function processQuery(
 
         const keptIds = keep.map((m) => m.id);
         const prompt = formatMessages(keep);
+        if (dueTask) {
+          try {
+            await dueTask.hooks.noteFollowUpRows(dueTask.state, keep);
+          } catch (err) {
+            log(`due-task follow-up note failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
         query.push(prompt);
         archivePrompts.push(prompt);
@@ -575,6 +638,14 @@ export async function processQuery(
     for await (const event of query.events) {
       handleEvent(event, routing);
       touchHeartbeat();
+
+      if (event.type === 'error' && dueTask) {
+        try {
+          await dueTask.hooks.onErrorEvent(dueTask.state, event.message ?? null);
+        } catch (err) {
+          log(`due-task error hook failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
 
       if (event.type === 'init') {
         queryContinuation = event.continuation;
@@ -626,13 +697,21 @@ export async function processQuery(
           });
           // Completed partial output remains deliverable, but an explicit
           // provider failure must keep its status and never trigger a retry.
-          const willRetryTaskBlocks = !failed && shouldNudgeTaskBlocks(routing.taskRun, taskBlocks, taskBlockNudged);
+          const willRetryTaskBlocks =
+            !dueTask && !failed && shouldNudgeTaskBlocks(routing.taskRun, taskBlocks, taskBlockNudged);
           // One-door task delivery: the final text becomes the run log entry
           // while explicit append-log calls remain optional additive notes.
           // Errors included: a failed run's text belongs in its log, not chat.
           // A corrective retry handles delivery only; its result is not a
           // second run summary.
           const archivedResult = [resultText, failed ? event.error : undefined].filter(Boolean).join('\n');
+          // A provider-owned due task claims the run-log row. The call below stays
+          // so an ordinary task_log still runs when no provider claimed it.
+          suppressRunnerTaskLog = false;
+          if (dueTask) {
+            await invokeDueTaskResult(dueTask, resultText, failed, event.error);
+            suppressRunnerTaskLog = true;
+          }
           if (routing.taskRun && !taskBlockNudged) await autoAppendTaskLog(archivedResult);
           if (failed) {
             // A failed turn needs a visible notice even after a partial reply.
@@ -692,6 +771,7 @@ export async function processQuery(
         const next = queuedTurns.shift();
         if (next) adoptTurn(next);
         else answering = false;
+        if (releaseForFreshQuery && !next) query.end();
       }
     }
   } catch (err) {
@@ -706,7 +786,7 @@ export async function processQuery(
       continuation: queryContinuation ?? initialContinuation,
       status: 'error',
     });
-    if (!cancelled) {
+    if (!cancelled && !dueTask) {
       // Completed turns are no longer answering or queued. Preserve partial
       // output from unfinished turns and report that the run did not finish.
       // Retrying the same route or several queued turns in one thread needs
@@ -1199,7 +1279,45 @@ function escapePromptXml(value: string): string {
  * `task_log` outbound row; the host appends it to the series' tasks/<id>.md
  * with its usual timestamp stamp. Never delivered to anyone.
  */
+let suppressRunnerTaskLog = false;
+
+async function invokeDueTaskResult(
+  dueTask: { hooks: DueTaskRowHooks; state: unknown },
+  resultText: string,
+  failed: boolean,
+  errorText: string | undefined,
+): Promise<void> {
+  try {
+    await dueTask.hooks.onResultEvent(dueTask.state);
+    if (failed) {
+      await dueTask.hooks.decideError(dueTask.state, errorText ?? resultText ?? '');
+    } else {
+      const visible = unsentVisibleText(resultText);
+      await dueTask.hooks.decideResult(dueTask.state, visible.text, visible.sanitizeFailed);
+    }
+    await dueTask.hooks.markHandled(dueTask.state);
+  } catch (err) {
+    log(`due-task result hook failed: ${err instanceof Error ? err.message : String(err)}`);
+    throw err;
+  }
+}
+
+/** Text outside `<message to>` blocks. Internal-tag policy belongs to the provider. */
+function unsentVisibleText(text: string): { text: string | null; sanitizeFailed: boolean } {
+  try {
+    const visible = text.replace(/<message\s+to="[^"]+"\s*>[\s\S]*?<\/message>/g, '');
+    return { text: visible, sanitizeFailed: false };
+  } catch (err) {
+    log(`due-task visible-text extraction failed: ${err instanceof Error ? err.message : String(err)}`);
+    return { text: null, sanitizeFailed: true };
+  }
+}
+
 export async function autoAppendTaskLog(text: string): Promise<void> {
+  if (suppressRunnerTaskLog) {
+    suppressRunnerTaskLog = false;
+    return;
+  }
   // Run-log hygiene: an inert <message to> block never belongs in the log as
   // raw XML — replace each with its inner text, marked undelivered, so the
   // log stays readable prose.

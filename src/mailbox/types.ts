@@ -102,6 +102,8 @@ export interface InboundMailbox {
   getDeliveredIds(): Set<string>;
   markDelivered(messageOutId: string, platformMessageId: string | null): void;
   markDeliveryFailed(messageOutId: string): void;
+  /** Terminal refusal. The row is not delivered and is not retried. */
+  markDeliveryRefused(messageOutId: string, reasonCode: string): void;
   getInboundSourceSessionId(messageId: string): string | null;
   getMostRecentPeerSourceSessionId(peerAgentGroupId: string): string | null;
   insertTask(task: Task): Promise<void>;

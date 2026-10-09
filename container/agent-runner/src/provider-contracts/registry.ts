@@ -101,6 +101,21 @@ export interface RuntimeHistoryCallbacks {
   readTrace?(): string | null;
 }
 
+/**
+ * Present when this core honors `ProviderRuntimeContract.turn`.
+ * An external provider can refuse to activate when this export is missing.
+ */
+export const PROVIDER_TURN_POLICY_SEAM = 1;
+
+/**
+ * What the poll loop does with ordinary follow-ups while a query is active.
+ * Absent or `push` is the historical behavior: claim, push, and acknowledge
+ * during the active query. `defer-until-fresh-query` leaves them pending and
+ * unacknowledged until that query has finished and a later loop iteration
+ * starts a new one. Slash commands keep the existing abort path.
+ */
+export type OrdinaryFollowUpPolicy = 'push' | 'defer-until-fresh-query';
+
 export interface ProviderRuntimeContract {
   seamVersion: number;
   /** Provider-declared configuration surfaces. */
@@ -114,5 +129,14 @@ export interface ProviderRuntimeContract {
     formatting: 'native' | 'xml';
     nativeAdmin?: readonly string[];
     nativeFiltered?: readonly string[];
+  };
+  /**
+   * Omitted fields keep historical behavior: follow-ups are pushed during
+   * the active query, and a due task batch is appended to the runner log.
+   */
+  turn?: {
+    ordinaryFollowUps?: OrdinaryFollowUpPolicy;
+    /** `provider` lets registered due-task hooks own a batch when begin() is non-null. */
+    dueTaskRows?: 'runner-log' | 'provider';
   };
 }
