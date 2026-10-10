@@ -1,0 +1,204 @@
+---
+name: add-iron-proxy
+description: Install or refresh Iron Proxy and its official Iron Control web console for NanoClaw. Use when selecting the Iron gateway, adding its management UI, configuring credentials and grants, or restoring the proxy, approval bridge, and agent guidance.
+---
+
+# Add Iron Proxy gateway
+
+Install the official `iron-control` console and PostgreSQL alongside one central Iron Proxy. NanoClaw core supplies the generic gateway seam and human approval flow. Read `docs/gateway-seam.md` before changing the integration.
+
+Use the bundled setup scripts and the source revisions in `versions.json`. The console is the upstream Rails application; its UI is not generated or copied into NanoClaw. This is a local Docker installation. Reuse this copy's recorded services and keys when refreshing it.
+
+## Install the provider payload
+
+Copy the package's provider, approval middleware, tests, and agent guidance into their normal NanoClaw paths.
+
+```nc:copy
+payload/src/gateway-providers/iron-proxy.ts -> src/gateway-providers/iron-proxy.ts
+payload/src/gateway-providers/iron-proxy.test.ts -> src/gateway-providers/iron-proxy.test.ts
+payload/src/gateway-providers/iron-proxy-allowlist.ts -> src/gateway-providers/iron-proxy-allowlist.ts
+payload/src/gateway-providers/iron-proxy-local-model.ts -> src/gateway-providers/iron-proxy-local-model.ts
+payload/src/gateway-providers/iron-proxy-local-model.test.ts -> src/gateway-providers/iron-proxy-local-model.test.ts
+payload/src/gateway-providers/iron-proxy-approval.ts -> src/gateway-providers/iron-proxy-approval.ts
+payload/src/gateway-providers/iron-proxy-approval.test.ts -> src/gateway-providers/iron-proxy-approval.test.ts
+payload/src/gateway-providers/iron-proxy-transform.proto -> src/gateway-providers/iron-proxy-transform.proto
+payload/container/skills/iron-proxy-gateway/SKILL.md -> container/skills/iron-proxy-gateway/SKILL.md
+payload/container/skills/iron-proxy-gateway/instructions.md -> container/skills/iron-proxy-gateway/instructions.md
+```
+
+## Register once
+
+The provider file makes the only product registration call. It declares idempotent sessions, typed runtime contributions, owned-resource cleanup, normalized approvals, network access, and agent guidance. NanoClaw core owns approval persistence, cards, clicks, authorization, and timeouts.
+
+```nc:append to:src/gateway-providers/installed.ts
+import './iron-proxy.js';
+```
+
+## Install the bridge dependencies
+
+```nc:dep manager:pnpm
+@grpc/grpc-js@1.14.5
+@grpc/proto-loader@0.8.1
+```
+
+## Install the console and pinned proxy
+
+Setup pulls the pinned official Iron Control image and database image, starts them on a dedicated Docker network, creates a local operator account, and registers this copy's proxy and principal through Iron's API. It stores credentials and encryption keys in owner-only files under `data/session-materials/iron-control/`. The database has its own persistent volume and no published port. Neither the console credentials nor its database are mounted into agents.
+
+The installer streams stage names and elapsed-time updates. Source downloads stop after two minutes, the image build after twenty minutes, and console startup after six minutes. It never opens a Git credential prompt. The proxy is built locally from the pinned public upstream source, so installation does not require a GitHub account or access to a private proxy image. The console and build dependencies use their pinned public images. On failure, fix the reported access or service issue and rerun setup; keep existing database volumes and encryption keys together. Raw subprocess output is not streamed because it can contain credentials.
+
+Setup builds unmodified upstream Iron Proxy and a separate NanoClaw approval front in the same image. No Iron fork or source patch is used. The front is the only network-facing listener. It authenticates session identities, inspects each HTTP request inside HTTPS tunnels, checks the allowlist, and waits for an explicit approval before forwarding to Iron on `127.0.0.1:18080`. Empty, malformed, rejected or timed-out decisions fail closed. Iron's own dial-time loopback and link-local deny rules prevent DNS aliases from reaching the internal backend. Managed control-plane updates only change Iron's credential transforms; they cannot remove the front's checks.
+
+The front builds and runs the pinned OneCLI helper in `gateway-compat/onecli-summary`; do not add app-specific rules. Only method, host, path, response status and the resulting OneCLI summary reach the approval bridge. Raw bodies, authorization headers, query strings and Iron transform traces do not. The helper sees a bounded pre-injection body prefix; the full original stream is preserved. Read the approval-presentation contract in `docs/gateway-seam.md`. The build tests stock Iron, the front, and the summary helper, then records an immutable image ID and source hash.
+NanoClaw's approval service uses a private Unix socket on Linux. On macOS it uses loopback with mutual TLS and a proxy-only client certificate. Credentials pass directly from Iron Control to Iron Proxy.
+
+`NANOCLAW_IRON_PROXY_PORT` in `.env` sets the internal proxy port (default `8080`). Setup uses the same value for the front listener and the agent proxy URL. This does not publish a host port. Re-run setup and restart this NanoClaw copy after changing it.
+
+`NANOCLAW_IRON_CONTROL_PORT` sets the console port (default `10257`). Only `127.0.0.1` is published. Set it before setup if another install uses that port; use the URL printed by setup. The official image currently targets `linux/amd64`; Docker on Apple Silicon runs it with emulation. On another architecture, setup checks the engine before it pulls anything and stops, printing the command that enables amd64 emulation, when the engine cannot run that image.
+
+```nc:run effect:step
+pnpm exec tsx .claude/skills/add-iron-proxy/scripts/setup.ts --with-control
+```
+
+## Troubleshooting
+
+- **Source access fails:** verify the pinned source is readable from this machine.
+  The installer uses the public source in `versions.json` and disables interactive
+  Git prompts. Check connectivity and the pinned revision, then retry.
+- **A command times out:** use the last printed stage to identify whether source
+  download, image build, or console startup failed. Check connectivity and Docker
+  health before retrying. The installer terminates the timed-out process group.
+- **"Iron Control cannot run on this aarch64 Docker engine", or `exec format error`
+  at the Iron Control step:** the pinned console image is amd64 only. Run the printed
+  `tonistiigi/binfmt` command against the Docker engine, or choose the OneCLI gateway;
+  then re-run setup. The registration lives in the kernel and is gone after a reboot:
+  re-run the command, or register it at boot (a systemd unit or your Docker host's
+  boot script), or Iron Control restart-loops with `exec format error`. Setup only checks an engine running on this machine's own kernel;
+  a VM or remote engine (Docker Desktop, Colima, a `DOCKER_HOST` elsewhere) is not
+  inspected and needs emulation enabled inside the engine.
+- **The database exists but keys are missing:** restore its matching `control.env`.
+  Keep the database volume and encryption keys together; do not generate replacement
+  keys for an existing database. `nanoclaw uninstall` removes both together: the
+  containers carry this copy's `nanoclaw-install` and `nanoclaw-role=gateway` labels
+  (gateway-owned: the gateway role and no session, so the update drain and residue
+  reaping keep them), and the uninstaller removes their Compose project's volume and
+  network with `data/`.
+  If the folder was deleted by hand, the error prints the `docker rm -f` and
+  `docker volume rm` commands that delete the old database; run them only if its
+  credentials can go.
+
+## Validate
+
+```nc:run effect:build
+pnpm run build
+```
+
+```nc:run effect:test
+pnpm exec vitest run src/gateway-providers/iron-proxy.test.ts src/gateway-providers/iron-proxy-approval.test.ts src/gateway-providers/gateway-provider-registry.test.ts src/gateway-approval-coordinator.test.ts .claude/skills/add-iron-proxy/scripts/control.test.ts .claude/skills/add-iron-proxy/scripts/setup.test.ts .claude/skills/add-iron-proxy/scripts/provider-credentials.test.ts .claude/skills/add-iron-proxy/scripts/credential-isolation.test.ts .claude/skills/add-iron-proxy/scripts/install-command.test.ts src/gateway-providers/iron-proxy-local-model.test.ts .claude/skills/add-iron-proxy/scripts/local-model.test.ts
+```
+
+The setup consumer writes `NANOCLAW_GATEWAY_PROVIDER=iron-proxy` only after every directive succeeds. Restart only this copy's NanoClaw service after an upgrade so its session contribution and approval bridge match the new installation. Check the proxy has synced its assigned principal before reporting the gateway ready.
+
+The request order is front identity and allowlist → human approval → stock Iron credentials → upstream. The front also requires an explicit response decision before returning upstream data. HTTPS tunnels pin the target authority; each inner HTTP request is checked again. Streaming responses and WebSocket upgrades use this same request/response gate. Credentialed application requests use HTTPS; the approval bridge rejects plaintext HTTP destinations, except one keyless model on this machine pinned by host and port (see [Serve a local model](#serve-a-local-model)). Do not rewrite an HTTP request’s approval metadata as HTTPS to bypass that restriction. The bridge forwards every allowed HTTP request to core as a default approval request. Core uses the active agent provider’s model-domain declaration to permit model traffic without a card; other destinations retain human approval. CONNECT verifies identity; the inner HTTP request is the approval point. Existing standalone model credentials are moved into Iron Control during setup and removed from the old secret file after successful storage and grant.
+
+## Open and use the official console
+
+Open the URL printed by setup. Give the operator the path to `login.txt` in the same private directory; keep passwords and API tokens out of chat and command logs. `control.ts status` prints only the URL and login-file location.
+
+The pinned console provides **Secrets**, **Credentials**, **OAuth Apps**, and **Principals**. Use Secrets to create a credential, choose its source, and set its host, method, and path rules. The current console shows principals and grants but creates grants through its API. Apply a secret to this NanoClaw copy with the bundled helper:
+
+```bash
+pnpm exec tsx .claude/skills/add-iron-proxy/scripts/control.ts grant static <secret-id>
+```
+
+Other supported kinds are `gcp`, `aws`, `oauth`, `postgres`, and `hmac`. The command only grants an existing credential to this install's recorded principal. Read [references/control-plane.md](references/control-plane.md) for the exact supported UI, source links, policy example, and verification steps.
+
+The pinned source has no general egress Policies screen or audit search. Do not promise the screens shown in newer or hosted documentation. A grant's request rules govern credential use; the local egress allowlist remains separate.
+
+To allow another destination explicitly, the operator runs:
+
+```bash
+pnpm exec tsx .claude/skills/add-iron-proxy/scripts/setup.ts --allow-host <hostname-or-*.domain>
+```
+
+For a standalone proxy without the console, omit `--with-control` on a fresh install. A recorded console is preserved on refresh. Both modes build the pinned public source. To reuse an independently built image, build the exact commit from `versions.json`
+and label the image `org.opencontainers.image.revision` with that commit. Then run
+`pnpm exec tsx .claude/skills/add-iron-proxy/scripts/setup.ts --local-image <image>`.
+Setup checks the revision and records the immutable local image ID. All installs require the exact bundled approval-front label; a stock Iron image alone is not the full NanoClaw integration.
+
+## Codex authentication
+
+Use the existing provider-auth entry point after `/add-codex` installs the
+provider. Browser sign-in, device pairing, and API-key entry are the same for
+all gateways; `scripts/credential-store.ts` supplies Iron's custody adapter.
+Iron Control stores API keys and manages subscription refresh-token rotation
+through its native broker. Agents receive only a synthetic `auth.json` file.
+A subscription login uses a new, dedicated Codex session; never copy personal
+Codex credentials. The setup flow and provider picker stay unchanged.
+
+```bash
+pnpm exec tsx setup/index.ts --step provider-auth codex
+```
+
+## OpenCode authentication
+
+After installing `/add-opencode`, use the same provider-auth entry point:
+
+```bash
+pnpm exec tsx setup/index.ts --step provider-auth opencode
+```
+
+The OpenCode setup flow supports ChatGPT sign-in and API keys through Iron
+Control. It installs no OneCLI service and needs no OneCLI management settings.
+ChatGPT arrives as the seam's `chatgpt` OAuth profile: Iron creates three
+records, a native broker from OpenCode's public OAuth client and refresh token,
+a broker-backed bearer secret, and a separate granted secret that carries the
+`ChatGPT-Account-Id` header; any other OAuth profile is rejected. The agent sees only placeholders. Initial sign-in and reauthentication wait for the
+native broker to refresh successfully (up to two minutes) before setup continues. API keys use each backend's declared header
+scheme. Setup grants the secrets to this install's principal and permits the
+model hostname. Rotation and reauthentication keep IDs and grants; reauthentication
+also resets a dead broker with the new refresh token. Moving a key to another
+host requires confirmation and re-entering its value: Iron's update API replaces
+a secret's source whenever its rules change, so a blank answer keeps a key only
+on its existing host. Records use install-scoped foreign IDs, so an interrupted
+save is retried on the same IDs, and missing grants are reconciled without
+reading values. Before keeping or overwriting a record, setup rechecks its
+ownership and rules and stops if they no longer match. Broker refresh may continue during login; a change to the broker's
+client binding or the secrets' rules stops setup.
+
+Native backends and keyless or custom HTTPS endpoints on port 443 are supported.
+Setup refuses plain HTTP (except a local model, below), other ports, IP addresses
+and private names such as `*.home.arpa`, because Iron trusts only public
+certificates. Setup adds the model host to Iron's allowlist.
+Follow your provider's skill to restart the host and test a real reply.
+
+### Serve a local model
+
+A keyless model on this machine can use `http://host.docker.internal:<port>/v1`. Traffic still goes through Iron.
+
+1. Run the server on a fixed port, bound to `127.0.0.1` (Docker Desktop) or the Docker bridge address, often `172.17.0.1` (Linux). Not `0.0.0.0`: that exposes it to your network.
+2. Enter the URL at the provider's endpoint prompt, and answer that it needs no key.
+3. Restart the host.
+
+Only that port and the OpenAI inference routes are reachable. Don't grant an Iron credential for `host.docker.internal`: Iron would send it over plain HTTP. A model that needs a key, or runs on another machine, needs https on a public DNS name.
+
+## Remove
+
+Follow [REMOVE.md](REMOVE.md). Stop only this copy's proxy and console services. Keep the database volume and encryption keys together when preserving data.
+
+### Provider credentials on shared model hosts
+
+OpenCode and Codex use distinct non-secret markers. Iron replaces only the matching
+header marker, so each runtime retains its own account on a shared HTTPS host.
+Claude's managed model marker remains distinct. These replacements use
+`require: false`: a request from another provider must pass without substitution.
+The upstream API still rejects an unavailable or unmatched placeholder.
+
+Refresh the installed provider payloads and rebuild the agent image before using
+this version. Reconnect older Codex credentials to replace their host-wide injection
+rules. If setup identifies a conflicting legacy or manual grant, reconnect that
+provider with this version (including Claude's model credential), or remove the
+conflicting grant in Iron Control. Stored secrets are write-only and are not
+silently rewritten. Setup checks direct and role grants, including inactive OAuth
+brokers. The installation's Iron principal remains the authorization boundary;
+these markers select credentials, not permissions for separate untrusted tenants.

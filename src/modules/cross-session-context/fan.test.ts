@@ -15,9 +15,11 @@ vi.mock('../../config.js', async () => {
 
 import { closeDb, createAgentGroup, initTestDb, runMigrations } from '../../db/index.js';
 import { createMessagingGroup } from '../../db/messaging-groups.js';
-import { createSession } from '../../db/sessions.js';
+import { createSession, getSession, updateSession } from '../../db/sessions.js';
 import { createDestination } from '../agent-to-agent/db/agent-destinations.js';
-import { inboundDbPath } from '../../session-manager.js';
+import { inboundDbPath } from '../../mailbox/sqlite/paths.js';
+import { registerReconcileEnqueue } from '../../reconcile-feeds.js';
+import { initSessionFolder } from '../../session-manager.js';
 import type { MessagingGroup, Session } from '../../types.js';
 import {
   buildDeliveredEchoLabel,
@@ -26,9 +28,18 @@ import {
   fanInboundMessage,
   fanOutboundMessage,
   selectEchoTargets,
+  selectHotSessions,
+  settleEchoFans,
   truncateEchoText,
 } from './fan.js';
-import { ECHO_CHANNEL_TYPE, ECHO_SIBLING_SURFACE, ECHO_TASK_SURFACE, ECHO_TEXT_MAX_CHARS } from './config.js';
+import {
+  ECHO_CHANNEL_TYPE,
+  ECHO_MAX_AGE_MS,
+  ECHO_SIBLING_SURFACE,
+  ECHO_TASK_SURFACE,
+  ECHO_TEXT_MAX_CHARS,
+  HOT_SESSION_LIMIT,
+} from './config.js';
 
 const TEST_DIR = '/tmp/nanoclaw-test-cross-session-fan';
 const AG = 'ag-1';
@@ -48,12 +59,14 @@ function mg(id: string, platformId: string, isGroup: number, name: string | null
   };
 }
 
+/** Sessions are recently active by default — the fan only targets the hot set. */
 function session(
   id: string,
   agentGroupId: string,
   mgId: string | null,
   threadId: string | null,
   status: 'active' | 'closed' = 'active',
+  lastActive: string | null = NOW,
 ): Session {
   return {
     id,
@@ -63,13 +76,23 @@ function session(
     agent_provider: null,
     status,
     container_status: 'stopped',
-    last_active: null,
+    last_active: lastActive,
     created_at: NOW,
   };
 }
 
+/** Create the central row AND provision the mailbox — echo writes only land in existing mailboxes. */
+async function addSession(s: Session): Promise<void> {
+  await createSession(s);
+  initSessionFolder(s.agent_group_id, s.id);
+}
+
+function minutesAgo(minutes: number): string {
+  return new Date(Date.parse(NOW) - minutes * 60_000).toISOString();
+}
+
 const ROOM_MG = mg('mg-room', 'C123', 1, 'pixel-room');
-const DM_MG = mg('mg-dm', 'D456', 0, 'Gavriel');
+const DM_MG = mg('mg-dm', 'D456', 0, 'Alex');
 const ROOM2_MG = mg('mg-room2', 'C789', 1, null);
 const DM2_MG = mg('mg-dm2', 'D999', 0, 'Someone');
 
@@ -93,64 +116,114 @@ function readEchoRows(sessionId: string): Array<Record<string, unknown>> {
 }
 
 function chatContent(text: string): string {
-  return JSON.stringify({ text, sender: 'Gavriel', senderId: 'slack:U1' });
+  return JSON.stringify({ text, sender: 'Alex', senderId: 'slack:U1' });
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   fs.mkdirSync(TEST_DIR, { recursive: true });
-  const db = initTestDb();
-  runMigrations(db);
-  createAgentGroup({ id: AG, name: 'Pixel', folder: 'pixel', agent_provider: null, created_at: NOW });
-  createAgentGroup({ id: 'ag-2', name: 'Other', folder: 'other', agent_provider: null, created_at: NOW });
-  for (const m of [ROOM_MG, DM_MG, ROOM2_MG, DM2_MG]) createMessagingGroup(m);
-  createSession(SRC_ROOM);
-  createSession(SRC_DM);
-  createSession(DM_SIBLING);
-  createSession(TASK_SESS);
-  createSession(session('s-room2', AG, 'mg-room2', null));
-  createSession(session('s-dm2', AG, 'mg-dm2', null));
-  createSession(session('s-dm-closed', AG, 'mg-dm', 'closed-thread', 'closed'));
-  createSession(session('s-a2a', AG, null, null));
-  createSession(session('s-other-group', 'ag-2', 'mg-dm', null));
+  const db = await initTestDb();
+  await runMigrations(db);
+  await createAgentGroup({ id: AG, name: 'Pixel', folder: 'pixel', agent_provider: null, created_at: NOW });
+  await createAgentGroup({ id: 'ag-2', name: 'Other', folder: 'other', agent_provider: null, created_at: NOW });
+  for (const m of [ROOM_MG, DM_MG, ROOM2_MG, DM2_MG]) await createMessagingGroup(m);
+  await addSession(SRC_ROOM);
+  await addSession(SRC_DM);
+  await addSession(DM_SIBLING);
+  await addSession(TASK_SESS);
+  await addSession(session('s-room2', AG, 'mg-room2', null));
+  await addSession(session('s-dm2', AG, 'mg-dm2', null));
+  await addSession(session('s-dm-closed', AG, 'mg-dm', 'closed-thread', 'closed'));
+  await addSession(session('s-a2a', AG, null, null));
+  await createSession(session('s-other-group', 'ag-2', 'mg-dm', null));
 });
 
-afterEach(() => {
-  closeDb();
+afterEach(async () => {
+  await settleEchoFans();
+  registerReconcileEnqueue(null);
+  await closeDb();
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
 });
 
 describe('selectEchoTargets (same-conversation audience rule)', () => {
+  const cand = (id: string, mg: string | null, thread: string | null = id, status = 'active', lastActive = NOW) => ({
+    id,
+    status,
+    messaging_group_id: mg,
+    thread_id: thread,
+    last_active: lastActive,
+  });
   const candidates = [
-    { id: 's-src', status: 'active', messaging_group_id: 'mg-room' },
-    { id: 's-room-t2', status: 'active', messaging_group_id: 'mg-room' },
-    { id: 's-dm', status: 'active', messaging_group_id: 'mg-dm' },
-    { id: 's-dm-t2', status: 'active', messaging_group_id: 'mg-dm' },
-    { id: 's-dm2', status: 'active', messaging_group_id: 'mg-dm2' },
-    { id: 's-room2', status: 'active', messaging_group_id: 'mg-room2' },
-    { id: 's-task', status: 'active', messaging_group_id: null },
-    { id: 's-a2a', status: 'active', messaging_group_id: null },
-    { id: 's-closed', status: 'closed', messaging_group_id: 'mg-dm' },
+    cand('s-src', 'mg-room', null),
+    cand('s-room-t2', 'mg-room'),
+    cand('s-dm', 'mg-dm', null),
+    cand('s-dm-t2', 'mg-dm'),
+    cand('s-dm2', 'mg-dm2', null),
+    cand('s-room2', 'mg-room2', null),
+    cand('s-task', null),
+    cand('s-a2a', null),
+    cand('s-closed', 'mg-dm', 'closed-thread', 'closed'),
   ];
+  const nowMs = Date.parse(NOW);
 
-  it('targets ONLY active same-mg siblings: never other conversations, task/a2a sessions, closed, or the source', () => {
-    const ids = selectEchoTargets(candidates, 's-dm', 'mg-dm').map((s) => s.id);
+  it('targets ONLY active same-mg siblings: never other conversations, task/a2a sessions, closed, or the source', async () => {
+    const ids = selectEchoTargets(candidates, 's-dm', 'mg-dm', nowMs).map((s) => s.id);
     expect(ids.sort()).toEqual(['s-dm-t2']);
   });
 
-  it('room thread siblings are same-mg and therefore targets', () => {
-    const ids = selectEchoTargets(candidates, 's-src', 'mg-room').map((s) => s.id);
+  it('room thread siblings are same-mg and therefore targets', async () => {
+    const ids = selectEchoTargets(candidates, 's-src', 'mg-room', nowMs).map((s) => s.id);
     expect(ids.sort()).toEqual(['s-room-t2']);
   });
 
-  it('an unresolved source conversation fans nowhere', () => {
-    expect(selectEchoTargets(candidates, 's-dm', null)).toEqual([]);
+  it('an unresolved source conversation fans nowhere', async () => {
+    expect(selectEchoTargets(candidates, 's-dm', null, nowMs)).toEqual([]);
+  });
+});
+
+describe('selectHotSessions (bounded audience)', () => {
+  const nowMs = Date.parse(NOW);
+  const thread = (i: number, lastActive: string) => ({
+    id: `t-${i}`,
+    status: 'active',
+    messaging_group_id: 'mg-room',
+    thread_id: `thread-${i}`,
+    last_active: lastActive,
+  });
+
+  it('keeps the HOT_SESSION_LIMIT most recently active sessions, newest first', () => {
+    // 20 threads, thread i last active i minutes ago → the 8 newest are t-0..t-7.
+    const threads = Array.from({ length: 20 }, (_, i) => thread(i, minutesAgo(i)));
+    const hot = selectHotSessions(threads, 'mg-room', nowMs);
+    expect(hot).toHaveLength(HOT_SESSION_LIMIT);
+    expect(hot.map((s) => s.id)).toEqual(Array.from({ length: HOT_SESSION_LIMIT }, (_, i) => `t-${i}`));
+  });
+
+  it('always keeps the top-level session, even when it is not among the newest K', () => {
+    const topLevel = { ...thread(99, minutesAgo(600)), id: 'top', thread_id: null };
+    const threads = Array.from({ length: 20 }, (_, i) => thread(i, minutesAgo(i)));
+    const hot = selectHotSessions([...threads, topLevel], 'mg-room', nowMs);
+    expect(hot).toHaveLength(HOT_SESSION_LIMIT + 1);
+    expect(hot.at(-1)?.id).toBe('top');
+  });
+
+  it('drops sessions idle past the horizon, sessions that never received a message, and duplicates', () => {
+    const stale = thread(1, new Date(nowMs - ECHO_MAX_AGE_MS - 1000).toISOString());
+    const fresh = thread(2, new Date(nowMs - ECHO_MAX_AGE_MS + 60_000).toISOString());
+    const never = { ...thread(3, NOW), last_active: null };
+    const staleTop = { ...thread(4, new Date(nowMs - ECHO_MAX_AGE_MS - 1000).toISOString()), thread_id: null };
+    const hot = selectHotSessions([stale, fresh, never, staleTop, fresh], 'mg-room', nowMs);
+    expect(hot.map((s) => s.id)).toEqual(['t-2']);
+  });
+
+  it('is empty for an unresolved conversation', () => {
+    expect(selectHotSessions([thread(1, NOW)], null, nowMs)).toEqual([]);
   });
 });
 
 describe('fanInboundMessage', () => {
-  it('fans a DM trigger into same-mg sibling threads ONLY — never rooms, other DMs, or task sessions', () => {
-    const written = fanInboundMessage({
+  it('fans a DM trigger into same-mg sibling threads ONLY — never rooms, other DMs, or task sessions', async () => {
+    const written = await fanInboundMessage({
       session: SRC_DM,
       mg: DM_MG,
       messageId: 'msg-2:ag-1',
@@ -173,11 +246,11 @@ describe('fanInboundMessage', () => {
     expect(sibRows[0].source_session_id).toBe('s-dm');
     const sibContent = JSON.parse(sibRows[0].content as string);
     expect(sibContent.text).toBe('private note');
-    expect(sibContent.sender).toBe('Gavriel');
+    expect(sibContent.sender).toBe('Alex');
     expect(sibContent.senderId).toBe('slack:U1');
     expect(sibContent.echo).toEqual({
       surface: ECHO_SIBLING_SURFACE,
-      label: 'another conversation with Gavriel',
+      label: 'another conversation with Alex',
     });
 
     // Nothing else in the group hears it: not task sessions, not rooms, not
@@ -193,9 +266,9 @@ describe('fanInboundMessage', () => {
     expect(readEchoRows('s-dm')).toHaveLength(0);
   });
 
-  it('a room trigger reaches same-mg room thread siblings only — room→DM and room→task are retired', () => {
-    createSession(session('s-room-t2', AG, 'mg-room', 'room-thread-2'));
-    const written = fanInboundMessage({
+  it('a room trigger reaches same-mg room thread siblings only — room→DM and room→task are retired', async () => {
+    await addSession(session('s-room-t2', AG, 'mg-room', 'room-thread-2'));
+    const written = await fanInboundMessage({
       session: SRC_ROOM,
       mg: ROOM_MG,
       messageId: 'msg-1:ag-1',
@@ -218,8 +291,8 @@ describe('fanInboundMessage', () => {
     expect(readEchoRows('s-task')).toHaveLength(0);
   });
 
-  it('a DM sibling-thread source fans back to the original DM session (symmetric)', () => {
-    const written = fanInboundMessage({
+  it('a DM sibling-thread source fans back to the original DM session (symmetric)', async () => {
+    const written = await fanInboundMessage({
       session: DM_SIBLING,
       mg: DM_MG,
       messageId: 'msg-2b:ag-1',
@@ -237,9 +310,102 @@ describe('fanInboundMessage', () => {
     expect(readEchoRows('s-dm-t2')).toHaveLength(0);
   });
 
-  it('truncates text to 500 chars head with … appended', () => {
+  it('writes echoes through the lean path: no last_active bump, no reconcile enqueue', async () => {
+    const enqueued: string[] = [];
+    registerReconcileEnqueue((sessionId) => enqueued.push(sessionId));
+    const before = (await getSession('s-dm-t2'))?.last_active;
+
+    await fanInboundMessage({
+      session: SRC_DM,
+      mg: DM_MG,
+      messageId: 'msg-lean:ag-1',
+      kind: 'chat',
+      channelType: 'slack',
+      content: chatContent('ambient only'),
+      timestamp: NOW,
+    });
+
+    expect(readEchoRows('s-dm-t2')).toHaveLength(1);
+    // An echo is ambient traffic: it must not make the idle sibling look
+    // busy (that ranking decides the hot set) nor schedule a reconcile
+    // (trigger=0 rows never wake anything).
+    expect((await getSession('s-dm-t2'))?.last_active).toBe(before);
+    expect(enqueued).toEqual([]);
+  });
+
+  it('fans only into the hot set: the K most recently active siblings plus the top-level session', async () => {
+    // 12 room threads; thread i was last active i minutes ago. The source is
+    // the room's top-level session; the audience is the 8 most recently
+    // active OTHER sessions: t-0..t-7.
+    for (let i = 0; i < 12; i++) {
+      await addSession(session(`s-room-t${i}`, AG, 'mg-room', `room-thread-${i}`, 'active', minutesAgo(i)));
+    }
+    const written = await fanInboundMessage({
+      session: SRC_ROOM,
+      mg: ROOM_MG,
+      messageId: 'msg-bound:ag-1',
+      kind: 'chat',
+      channelType: 'slack',
+      content: chatContent('bounded'),
+      timestamp: NOW,
+    });
+    expect(written).toBe(HOT_SESSION_LIMIT);
+    for (let i = 0; i < 12; i++) {
+      expect(readEchoRows(`s-room-t${i}`), `s-room-t${i}`).toHaveLength(i < HOT_SESSION_LIMIT ? 1 : 0);
+    }
+
+    // From a thread, the top-level room session is a target even though 8
+    // fresher threads outrank it.
+    await updateSession('s-room', { last_active: minutesAgo(500) });
+    const fresh = await fanInboundMessage({
+      session: session('s-room-t0', AG, 'mg-room', 'room-thread-0'),
+      mg: ROOM_MG,
+      messageId: 'msg-bound-2:ag-1',
+      kind: 'chat',
+      channelType: 'slack',
+      content: chatContent('from a thread'),
+      timestamp: NOW,
+    });
+    // 8 other hot threads + the top-level session, which outranking threads
+    // cannot push out.
+    expect(fresh).toBe(HOT_SESSION_LIMIT + 1);
+    expect(readEchoRows('s-room')).toHaveLength(1);
+  });
+
+  it('skips a target whose mailbox is missing (operator reset) without failing the fan', async () => {
+    // Central row exists, folder does not.
+    await createSession(session('s-dm-t3', AG, 'mg-dm', 'thread-3'));
+    const written = await fanInboundMessage({
+      session: SRC_DM,
+      mg: DM_MG,
+      messageId: 'msg-missing:ag-1',
+      kind: 'chat',
+      channelType: 'slack',
+      content: chatContent('still lands elsewhere'),
+      timestamp: NOW,
+    });
+    expect(written).toBe(1);
+    expect(readEchoRows('s-dm-t2')).toHaveLength(1);
+    expect(fs.existsSync(inboundDbPath(AG, 's-dm-t3'))).toBe(false);
+  });
+
+  it('settleEchoFans waits for fans that were fired unawaited', async () => {
+    void fanInboundMessage({
+      session: SRC_DM,
+      mg: DM_MG,
+      messageId: 'msg-bg:ag-1',
+      kind: 'chat',
+      channelType: 'slack',
+      content: chatContent('in the background'),
+      timestamp: NOW,
+    });
+    await settleEchoFans();
+    expect(readEchoRows('s-dm-t2')).toHaveLength(1);
+  });
+
+  it('truncates text to 500 chars head with … appended', async () => {
     const long = 'x'.repeat(ECHO_TEXT_MAX_CHARS + 100);
-    fanInboundMessage({
+    await fanInboundMessage({
       session: SRC_DM,
       mg: DM_MG,
       messageId: 'msg-3:ag-1',
@@ -253,7 +419,7 @@ describe('fanInboundMessage', () => {
     expect(content.text.length).toBe(ECHO_TEXT_MAX_CHARS + 1);
   });
 
-  it('never fans echo rows, a2a rows, non-chat kinds, or empty text', () => {
+  it('never fans echo rows, a2a rows, non-chat kinds, or empty text', async () => {
     const base = {
       session: SRC_ROOM,
       mg: ROOM_MG,
@@ -261,19 +427,19 @@ describe('fanInboundMessage', () => {
       content: chatContent('hi'),
       timestamp: NOW,
     };
-    expect(fanInboundMessage({ ...base, kind: 'chat', channelType: ECHO_CHANNEL_TYPE })).toBe(0);
-    expect(fanInboundMessage({ ...base, kind: 'chat', channelType: 'agent' })).toBe(0);
-    expect(fanInboundMessage({ ...base, kind: 'task', channelType: 'slack' })).toBe(0);
-    expect(fanInboundMessage({ ...base, kind: 'system', channelType: 'slack' })).toBe(0);
+    expect(await fanInboundMessage({ ...base, kind: 'chat', channelType: ECHO_CHANNEL_TYPE })).toBe(0);
+    expect(await fanInboundMessage({ ...base, kind: 'chat', channelType: 'agent' })).toBe(0);
+    expect(await fanInboundMessage({ ...base, kind: 'task', channelType: 'slack' })).toBe(0);
+    expect(await fanInboundMessage({ ...base, kind: 'system', channelType: 'slack' })).toBe(0);
     expect(
-      fanInboundMessage({ ...base, kind: 'chat', channelType: 'slack', content: JSON.stringify({ text: '' }) }),
+      await fanInboundMessage({ ...base, kind: 'chat', channelType: 'slack', content: JSON.stringify({ text: '' }) }),
     ).toBe(0);
     expect(readEchoRows('s-dm')).toHaveLength(0);
     expect(readEchoRows('s-task')).toHaveLength(0);
   });
 
-  it('never fans from a task session (task sessions are not a source)', () => {
-    const written = fanInboundMessage({
+  it('never fans from a task session (task sessions are not a source)', async () => {
+    const written = await fanInboundMessage({
       session: TASK_SESS,
       mg: ROOM_MG,
       messageId: 'msg-5:ag-1',
@@ -290,8 +456,8 @@ describe('fanInboundMessage', () => {
 describe('fanOutboundMessage', () => {
   const agentGroup = { id: AG, name: 'Pixel', folder: 'pixel', agent_provider: null, created_at: NOW };
 
-  it('fans a delivered DM reply into same-mg sibling threads ONLY, with the agent as sender', () => {
-    const written = fanOutboundMessage(
+  it('fans a delivered DM reply into same-mg sibling threads ONLY, with the agent as sender', async () => {
+    const written = await fanOutboundMessage(
       {
         id: 'out-2',
         kind: 'chat',
@@ -315,13 +481,13 @@ describe('fanOutboundMessage', () => {
     expect(sibContent.senderId).toBe(AG);
     expect(sibContent.echo).toEqual({
       surface: ECHO_SIBLING_SURFACE,
-      label: 'another conversation with Gavriel',
+      label: 'another conversation with Alex',
     });
   });
 
-  it('a delivered room reply reaches same-mg room siblings only — never the group DMs or task sessions', () => {
-    createSession(session('s-room-t2', AG, 'mg-room', 'room-thread-2'));
-    const written = fanOutboundMessage(
+  it('a delivered room reply reaches same-mg room siblings only — never the group DMs or task sessions', async () => {
+    await addSession(session('s-room-t2', AG, 'mg-room', 'room-thread-2'));
+    const written = await fanOutboundMessage(
       {
         id: 'out-1',
         kind: 'chat',
@@ -339,7 +505,7 @@ describe('fanOutboundMessage', () => {
     expect(readEchoRows('s-task')).toHaveLength(0);
   });
 
-  it("resolves the sender's own instance, not a lexically-first sibling, when instances share a platform address", () => {
+  it("resolves the sender's own instance, not a lexically-first sibling, when instances share a platform address", async () => {
     // Two sibling messaging groups share one platform address (e.g. two bot
     // identities in the same multi-bot conversation) but belong to different
     // adapter instances. "alpha" sorts before "zulu", so a plain by-platform
@@ -347,12 +513,12 @@ describe('fanOutboundMessage', () => {
     // for this sender.
     const dmAlpha = { ...mg('mg-dm-alpha', 'D-multi', 0, 'Shared DM'), instance: 'alpha' };
     const dmZulu = { ...mg('mg-dm-zulu', 'D-multi', 0, 'Shared DM'), instance: 'zulu' };
-    createMessagingGroup(dmAlpha);
-    createMessagingGroup(dmZulu);
+    await createMessagingGroup(dmAlpha);
+    await createMessagingGroup(dmZulu);
 
     // The sender is only authorized against (and only reaches Slack through)
     // its "zulu" sibling.
-    createDestination({
+    await createDestination({
       agent_group_id: AG,
       local_name: 'shared-dm',
       target_type: 'channel',
@@ -362,12 +528,12 @@ describe('fanOutboundMessage', () => {
 
     // Two candidate sibling sessions, one per instance's row — only the one
     // on the sender's own ("zulu") row should count as "the same DM".
-    createSession(session('s-sib-zulu', AG, 'mg-dm-zulu', 'thread-zulu'));
-    createSession(session('s-sib-alpha', AG, 'mg-dm-alpha', 'thread-alpha'));
+    await addSession(session('s-sib-zulu', AG, 'mg-dm-zulu', 'thread-zulu'));
+    await addSession(session('s-sib-alpha', AG, 'mg-dm-alpha', 'thread-alpha'));
 
     // Source is a room session (not the origin of "D-multi"), so resolution
     // falls into the non-origin, sibling-collision-prone branch.
-    const written = fanOutboundMessage(
+    const written = await fanOutboundMessage(
       {
         id: 'out-shared-dm',
         kind: 'chat',
@@ -393,27 +559,27 @@ describe('fanOutboundMessage', () => {
     expect(written).toBe(1);
   });
 
-  it('skips system/task_log/agent/echo/unrouted messages', () => {
+  it('skips system/task_log/agent/echo/unrouted messages', async () => {
     const content = JSON.stringify({ text: 'x' });
     const base = { id: 'out-3', platform_id: 'C123', channel_type: 'slack', content };
-    expect(fanOutboundMessage({ ...base, kind: 'system' }, SRC_ROOM, agentGroup)).toBe(0);
-    expect(fanOutboundMessage({ ...base, kind: 'task_log' }, SRC_ROOM, agentGroup)).toBe(0);
-    expect(fanOutboundMessage({ ...base, kind: 'chat', channel_type: 'agent' }, SRC_ROOM, agentGroup)).toBe(0);
-    expect(fanOutboundMessage({ ...base, kind: 'chat', channel_type: ECHO_CHANNEL_TYPE }, SRC_ROOM, agentGroup)).toBe(
-      0,
-    );
-    expect(fanOutboundMessage({ ...base, kind: 'chat', platform_id: null }, SRC_ROOM, agentGroup)).toBe(0);
+    expect(await fanOutboundMessage({ ...base, kind: 'system' }, SRC_ROOM, agentGroup)).toBe(0);
+    expect(await fanOutboundMessage({ ...base, kind: 'task_log' }, SRC_ROOM, agentGroup)).toBe(0);
+    expect(await fanOutboundMessage({ ...base, kind: 'chat', channel_type: 'agent' }, SRC_ROOM, agentGroup)).toBe(0);
+    expect(
+      await fanOutboundMessage({ ...base, kind: 'chat', channel_type: ECHO_CHANNEL_TYPE }, SRC_ROOM, agentGroup),
+    ).toBe(0);
+    expect(await fanOutboundMessage({ ...base, kind: 'chat', platform_id: null }, SRC_ROOM, agentGroup)).toBe(0);
     // task_log from a task session (series bookkeeping) still never fans.
-    expect(fanOutboundMessage({ ...base, kind: 'task_log' }, TASK_SESS, agentGroup)).toBe(0);
+    expect(await fanOutboundMessage({ ...base, kind: 'task_log' }, TASK_SESS, agentGroup)).toBe(0);
     expect(readEchoRows('s-dm')).toHaveLength(0);
     expect(readEchoRows('s-task')).toHaveLength(0);
   });
 
-  it("a task-session DM send fans ONLY into that DM's sessions, with the task-delivery shape", () => {
+  it("a task-session DM send fans ONLY into that DM's sessions, with the task-delivery shape", async () => {
     // A second task session proves task sessions are excluded as targets for
     // task-delivery fans (the source itself is excluded by id).
-    createSession(session('s-task2', AG, null, 'system:tasks:weekly-1'));
-    const written = fanOutboundMessage(
+    await addSession(session('s-task2', AG, null, 'system:tasks:weekly-1'));
+    const written = await fanOutboundMessage(
       {
         id: 'out-task-dm',
         kind: 'chat',
@@ -446,8 +612,8 @@ describe('fanOutboundMessage', () => {
     expect(readEchoRows('s-task2')).toHaveLength(0);
   });
 
-  it("a task-session room send fans only into that room's sessions — never the DM fan the room rule would give", () => {
-    const written = fanOutboundMessage(
+  it("a task-session room send fans only into that room's sessions — never the DM fan the room rule would give", async () => {
+    const written = await fanOutboundMessage(
       {
         id: 'out-task-room',
         kind: 'chat',
@@ -472,16 +638,16 @@ describe('fanOutboundMessage', () => {
 });
 
 describe('label + truncation helpers', () => {
-  it('buildEchoLabel renders room and DM labels', () => {
+  it('buildEchoLabel renders room and DM labels', async () => {
     expect(buildEchoLabel({ name: 'pixel-room', platform_id: 'C1', is_group: 1 })).toBe('#pixel-room room');
     expect(buildEchoLabel({ name: null, platform_id: 'C1', is_group: 1 })).toBe('#C1 room');
-    expect(buildEchoLabel({ name: null, platform_id: 'D1', is_group: 0 }, 'Gavriel')).toBe('DM with Gavriel');
+    expect(buildEchoLabel({ name: null, platform_id: 'D1', is_group: 0 }, 'Alex')).toBe('DM with Alex');
     expect(buildEchoLabel({ name: null, platform_id: 'D1', is_group: 0 }, null)).toBe('DM (D1)');
   });
 
-  it('buildSiblingEchoLabel renders same-DM sibling labels with sensible fallbacks', () => {
-    expect(buildSiblingEchoLabel({ name: 'Gavriel', platform_id: 'D1', is_group: 0 })).toBe(
-      'another conversation with Gavriel',
+  it('buildSiblingEchoLabel renders same-DM sibling labels with sensible fallbacks', async () => {
+    expect(buildSiblingEchoLabel({ name: 'Alex', platform_id: 'D1', is_group: 0 })).toBe(
+      'another conversation with Alex',
     );
     expect(buildSiblingEchoLabel({ name: null, platform_id: 'D1', is_group: 0 }, 'Gav')).toBe(
       'another conversation with Gav',
@@ -495,14 +661,14 @@ describe('label + truncation helpers', () => {
     );
   });
 
-  it("buildDeliveredEchoLabel names the delivered-to surface from the receiver's perspective", () => {
+  it("buildDeliveredEchoLabel names the delivered-to surface from the receiver's perspective", async () => {
     expect(buildDeliveredEchoLabel({ is_group: 0 }, true)).toBe('this DM, posted by your scheduled task');
     expect(buildDeliveredEchoLabel({ is_group: 1 }, true)).toBe('this room, posted by your scheduled task');
     expect(buildDeliveredEchoLabel({ is_group: 0 }, false)).toBe('this DM, posted by you from another conversation');
     expect(buildDeliveredEchoLabel({ is_group: 1 }, false)).toBe('this room, posted by you from another conversation');
   });
 
-  it('truncateEchoText leaves short text untouched', () => {
+  it('truncateEchoText leaves short text untouched', async () => {
     expect(truncateEchoText('short')).toBe('short');
   });
 });

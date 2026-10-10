@@ -77,24 +77,27 @@ v2 auto-creates a `users` row for every sender it sees (via `extractAndUpsertUse
 Use the DB helpers in `src/modules/permissions/db/user-roles.ts` (`getUserRoles`, `grantRole`). Init the DB first, then call the helpers:
 
 ```ts
-import path from 'path';
-import { initDb } from '../src/db/connection.js';
+import { closeDb, initDb } from '../src/db/connection.js';
 import { runMigrations } from '../src/db/migrations/index.js';
-import { DATA_DIR } from '../src/config.js';
+import { CENTRAL_DB_PATH } from '../src/config.js';
 import { getUserRoles, grantRole } from '../src/modules/permissions/db/user-roles.js';
 
-const db = initDb(path.join(DATA_DIR, 'v2.db'));
-runMigrations(db); // idempotent
+const db = await initDb(CENTRAL_DB_PATH);
+try {
+  await runMigrations(db); // idempotent
 
-const userId = '<user_id>';
-if (!getUserRoles(userId).some((r) => r.role === 'owner')) {
-  grantRole({
-    user_id: userId,
-    role: 'owner',
-    agent_group_id: null, // owner role must be global
-    granted_by: null,
-    granted_at: new Date().toISOString(),
-  });
+  const userId = '<user_id>';
+  if (!(await getUserRoles(userId)).some((r) => r.role === 'owner')) {
+    await grantRole({
+      user_id: userId,
+      role: 'owner',
+      agent_group_id: null, // owner role must be global
+      granted_by: null,
+      granted_at: new Date().toISOString(),
+    });
+  }
+} finally {
+  await closeDb();
 }
 ```
 

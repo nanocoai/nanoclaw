@@ -18,35 +18,35 @@ import { closeDb, createAgentGroup, initTestDb, runMigrations } from './db/index
 import { initGroupFilesystem } from './group-init.js';
 import type { AgentGroup } from './types.js';
 
-function makeGroup(id: string): AgentGroup {
+async function makeGroup(id: string): Promise<AgentGroup> {
   const ag = { id, name: id, folder: id, agent_provider: null, created_at: new Date().toISOString() } as AgentGroup;
-  createAgentGroup(ag);
+  await createAgentGroup(ag);
   return ag;
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   fs.rmSync(TEST_ROOT, { recursive: true, force: true });
   fs.mkdirSync(TEST_ROOT, { recursive: true });
-  runMigrations(initTestDb());
+  await runMigrations(await initTestDb());
 });
 
-afterEach(() => {
-  closeDb();
+afterEach(async () => {
+  await closeDb();
   fs.rmSync(TEST_ROOT, { recursive: true, force: true });
 });
 
 describe('group filesystem scaffold', () => {
-  it('creates plugins/ so the read-only plugins mount is unconditional', () => {
-    const ag = makeGroup('ag-plugins');
-    initGroupFilesystem(ag, {});
+  it('creates plugins/ so the read-only plugins mount is unconditional', async () => {
+    const ag = await makeGroup('ag-plugins');
+    await initGroupFilesystem(ag, {});
     expect(fs.statSync(path.join(TEST_ROOT, 'groups', ag.folder, 'plugins')).isDirectory()).toBe(true);
   });
 });
 
 describe('default settings.json for new groups', () => {
-  it('is lean: no agent-teams env key, unmanaged keys intact', () => {
-    const ag = makeGroup('ag-lean');
-    initGroupFilesystem(ag, {});
+  it('is lean: no agent-teams env key, unmanaged keys intact', async () => {
+    const ag = await makeGroup('ag-lean');
+    await initGroupFilesystem(ag, {});
 
     const file = path.join(TEST_ROOT, 'data', 'v2-sessions', ag.id, '.claude-shared', 'settings.json');
     const settings = JSON.parse(fs.readFileSync(file, 'utf-8'));
@@ -56,9 +56,9 @@ describe('default settings.json for new groups', () => {
     expect(JSON.stringify(settings.hooks.PreCompact)).toContain('compact-instructions');
   });
 
-  it('never rewrites an existing settings.json — a hand-edited re-enable sticks', () => {
-    const ag = makeGroup('ag-reenable');
-    initGroupFilesystem(ag, {});
+  it('never rewrites an existing settings.json — a hand-edited re-enable sticks', async () => {
+    const ag = await makeGroup('ag-reenable');
+    await initGroupFilesystem(ag, {});
     const file = path.join(TEST_ROOT, 'data', 'v2-sessions', ag.id, '.claude-shared', 'settings.json');
 
     // Operator re-enables both features by editing the file (the documented path).
@@ -67,7 +67,7 @@ describe('default settings.json for new groups', () => {
     edited.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = '1';
     fs.writeFileSync(file, JSON.stringify(edited, null, 2) + '\n');
 
-    initGroupFilesystem(ag, {}); // next spawn
+    await initGroupFilesystem(ag, {}); // next spawn
 
     const after = JSON.parse(fs.readFileSync(file, 'utf-8'));
     expect(after.disableWorkflows).toBeUndefined();

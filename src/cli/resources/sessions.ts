@@ -72,7 +72,7 @@ registerResource({
       // Self-scoped in the handler: custom ops bypass the dispatcher's generic
       // scope post-filter, so cross-group callers get "session not found"
       // (the dispatcher's sessions pre-handler check covers this verb too).
-      handler: async (args, ctx) => sessionHistory(args, ctx),
+      handler: async (args, ctx) => await sessionHistory(args, ctx),
       formatHuman: (data) => formatHistoryLines(data as HistoryRow[]),
     },
   },

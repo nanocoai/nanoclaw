@@ -12,10 +12,11 @@
 import fs from 'fs';
 import path from 'path';
 
-import { DATA_DIR } from '../src/config.js';
+import { CENTRAL_DB_PATH, DATA_DIR } from '../src/config.js';
 import { getAgentGroupByFolder, deleteAgentGroup } from '../src/db/agent-groups.js';
-import { initDb } from '../src/db/connection.js';
+import { closeDb, initDb } from '../src/db/connection.js';
 import { runMigrations } from '../src/db/migrations/index.js';
+import type { AgentGroup } from '../src/types.js';
 
 interface Args {
   folder: string;
@@ -36,29 +37,31 @@ function parseArgs(): Args {
 
 const args = parseArgs();
 
-const db = initDb(path.join(DATA_DIR, 'v2.db'));
-runMigrations(db);
+const db = await initDb(CENTRAL_DB_PATH);
+let ag: AgentGroup | undefined;
+try {
+  await runMigrations(db);
+  ag = await getAgentGroupByFolder(args.folder);
+  if (ag) {
+    if (!db.columnOwners) throw new Error(`Central DB driver "${db.dialect}" does not support column discovery`);
+    const group = ag;
+    await db.transaction(async () => {
+      const tables = (await db.columnOwners!('agent_group_id')).filter((name) => name !== 'agent_groups');
+      for (const name of tables) {
+        const quotedName = `"${name.replaceAll('"', '""')}"`;
+        await db.run(`DELETE FROM ${quotedName} WHERE agent_group_id = ?`, group.id);
+      }
+      await deleteAgentGroup(group.id);
+    });
+  }
+} finally {
+  await closeDb();
+}
 
-const ag = getAgentGroupByFolder(args.folder);
 if (!ag) {
   console.log(`No agent group with folder "${args.folder}" — nothing to delete.`);
   process.exit(0);
 }
-
-const cleanup = db.transaction(() => {
-  const tables = db
-    .prepare(
-      `SELECT DISTINCT m.name FROM sqlite_master m
-       JOIN pragma_table_info(m.name) p ON p.name = 'agent_group_id'
-       WHERE m.type = 'table' AND m.name != 'agent_groups'`,
-    )
-    .all() as { name: string }[];
-  for (const { name } of tables) {
-    db.prepare(`DELETE FROM ${name} WHERE agent_group_id = ?`).run(ag.id);
-  }
-  deleteAgentGroup(ag.id);
-});
-cleanup();
 
 // Remove the groups/<folder>/ directory.
 const groupDir = path.join(process.cwd(), 'groups', args.folder);

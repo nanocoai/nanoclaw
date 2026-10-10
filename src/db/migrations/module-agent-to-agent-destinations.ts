@@ -21,6 +21,7 @@ import type { Migration } from './index.js';
 export const moduleAgentToAgentDestinations: Migration = {
   version: 4,
   name: 'agent-destinations',
+  sqliteOnly: true,
   up(db: Database.Database) {
     db.exec(`
       CREATE TABLE agent_destinations (

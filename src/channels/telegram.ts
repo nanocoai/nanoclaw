@@ -1,6 +1,14 @@
 /**
  * Telegram channel adapter (v2) — uses Chat SDK bridge, with an inbound
  * interceptor for setup pairing and the owner/global-admin `/connect_group` command.
+ *
+ * Additional bot identities: set TELEGRAM_INSTANCES=<name>[,<name>...] plus a
+ * per-instance token (TELEGRAM_BOT_TOKEN_<NAME>; name uppercased, dashes to
+ * underscores). Each name registers under the `telegram-<name>` instance key
+ * through the same createTelegramBridge factory as the default bot, so the
+ * interceptor, pairing, and wiring defaults are shared. channelType stays
+ * 'telegram' either way: user ids, formatting, and container config are one
+ * namespace across bots. See .claude/skills/telegram-multi-instance.
  */
 import { createTelegramAdapter } from '@chat-adapter/telegram';
 
@@ -197,10 +205,18 @@ async function sendPairingConfirmation(token: string, platformId: string): Promi
   });
 }
 
+/**
+ * `instanceKey` is this bot's registry key ('telegram' for the default bot,
+ * 'telegram-<name>' for a named one). Pairing and the messaging-group row are
+ * instance-exact: a code issued for one bot never pairs on another, and a
+ * chat paired on a named bot gets its own row instead of updating the
+ * default bot's.
+ */
 export function createTelegramInboundInterceptor(
   botUsernamePromise: Promise<string | null>,
   hostOnInbound: ChannelSetup['onInbound'],
   token: string,
+  instanceKey: string,
 ): ChannelSetup['onInbound'] {
   return async (platformId, threadId, message) => {
     const { text, authorUserId } = readInboundFields(message);
@@ -246,6 +262,7 @@ export function createTelegramInboundInterceptor(
         platformId,
         isGroup: isGroupPlatformId(platformId),
         adminUserId: authorUserId,
+        instance: instanceKey,
       });
       if (!consumed) {
         hostOnInbound(platformId, threadId, message);
@@ -255,7 +272,7 @@ export function createTelegramInboundInterceptor(
       // code-bearing message never reaches an agent. Privilege is now a
       // property of the paired user, not the chat: upsert the user, and if
       // this instance has no owner yet, promote them to owner.
-      const existing = await getMessagingGroupByPlatform('telegram', platformId);
+      const existing = await getMessagingGroupByPlatform('telegram', platformId, instanceKey);
       if (existing) {
         await updateMessagingGroup(existing.id, {
           is_group: consumed.consumed!.isGroup ? 1 : 0,
@@ -265,6 +282,7 @@ export function createTelegramInboundInterceptor(
           id: `mg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
           channel_type: 'telegram',
           platform_id: platformId,
+          instance: instanceKey,
           name: consumed.consumed!.name,
           is_group: consumed.consumed!.isGroup ? 1 : 0,
           // Same context-appropriate default as router auto-create, so a
@@ -297,6 +315,7 @@ export function createTelegramInboundInterceptor(
 
       log.info('Telegram pairing accepted — chat registered', {
         platformId,
+        instance: instanceKey,
         pairedUser: pairedUserId,
         promotedToOwner,
         intent: consumed.intent,
@@ -311,57 +330,131 @@ export function createTelegramInboundInterceptor(
   };
 }
 
+/**
+ * Bot id (the part of a token before ':') to the instance key that claimed
+ * it. Telegram allows one getUpdates poller per bot (a second one gets 409
+ * conflicts), so a name whose bot another instance already holds is skipped
+ * at the factory. Keyed by bot id so this module-level map never holds a
+ * secret.
+ */
+const claimedBotIds = new Map<string, string>();
+
+/** Construction knobs for one Telegram bot identity. */
+export interface TelegramBridgeOptions {
+  /**
+   * Uppercased/underscored instance suffix appended to the token env key
+   * after an underscore: 'GH_BOT' reads TELEGRAM_BOT_TOKEN_GH_BOT. Omit for
+   * the default bot's unsuffixed key.
+   */
+  envKeySuffix?: string;
+  /**
+   * Registry/bridge instance key (e.g. 'telegram-gh-bot'). Omit for the
+   * default instance, keyed by channelType.
+   */
+  instanceKey?: string;
+}
+
+/**
+ * Build one Telegram bot identity's bridge from its token. The default bot is
+ * the zero-suffix call (used by the registration below); named instances pass
+ * a suffix + instance key and get the exact same construction: polling
+ * adapter, pairing interceptor, channel-name resolution, TELEGRAM_DEFAULTS
+ * declaration. Returns null when the token is missing (or its bot is already
+ * claimed by another instance) so the registry surfaces its normal
+ * "credentials missing, skipping" warning.
+ */
+export function createTelegramBridge(options: TelegramBridgeOptions = {}): ChannelAdapter | null {
+  const tokenKey = `TELEGRAM_BOT_TOKEN${options.envKeySuffix ? `_${options.envKeySuffix}` : ''}`;
+  const token = readEnvFile([tokenKey])[tokenKey];
+  if (!token) return null;
+  const instanceKey = options.instanceKey ?? 'telegram';
+  const botId = token.split(':')[0];
+  const holder = claimedBotIds.get(botId);
+  if (holder !== undefined && holder !== instanceKey) {
+    log.warn('Telegram bot token already in use by another instance, skipping', { instance: instanceKey, holder });
+    return null;
+  }
+  claimedBotIds.set(botId, instanceKey);
+  const telegramAdapter = createTelegramAdapter({
+    botToken: token,
+    mode: 'polling',
+  });
+  const bridge = createChatSdkBridge({
+    adapter: telegramAdapter,
+    instance: options.instanceKey, // undefined ⇒ default instance (keyed by channelType)
+    concurrency: 'concurrent',
+    extractReplyContext,
+    supportsThreads: false,
+    defaults: TELEGRAM_DEFAULTS,
+    // No transformOutboundText: @chat-adapter/telegram >= 4.29 parses
+    // CommonMark and renders escaped MarkdownV2 itself. The legacy-Markdown
+    // sanitizer this replaced was written for the old converter and, run in
+    // front of the new one, downgraded **bold** to *single-star* — which the
+    // adapter then parsed as emphasis and rendered as _italic_.
+    maxTextLength: 4000,
+  });
+
+  const botUsernamePromise = fetchBotUsername(token);
+
+  const wrapped: ChannelAdapter = {
+    ...bridge,
+    resolveChannelName: async (platformId: string) => {
+      const chatId = platformId.split(':').slice(1).join(':');
+      if (!chatId) return null;
+      try {
+        const res = await fetch(`https://api.telegram.org/bot${token}/getChat`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ chat_id: chatId }),
+        });
+        const data = (await res.json()) as { ok?: boolean; result?: { title?: string } };
+        return data.ok ? (data.result?.title ?? null) : null;
+      } catch {
+        return null;
+      }
+    },
+    async setup(hostConfig: ChannelSetup) {
+      const intercepted: ChannelSetup = {
+        ...hostConfig,
+        onInbound: createTelegramInboundInterceptor(botUsernamePromise, hostConfig.onInbound, token, instanceKey),
+      };
+      return withRetry(() => bridge.setup(intercepted), 'bridge.setup');
+    },
+  };
+  return wrapped;
+}
+
+/** Env-key suffix for a named instance: uppercased, dashes to underscores. */
+function instanceEnvKeySuffix(name: string): string {
+  return name.toUpperCase().replace(/-/g, '_');
+}
+
+/** Named-instance entry into createTelegramBridge; exported for the registration test. */
+export function telegramInstanceBridgeFactory(name: string): ChannelAdapter | null {
+  return createTelegramBridge({ envKeySuffix: instanceEnvKeySuffix(name), instanceKey: `telegram-${name}` });
+}
+
 registerChannelAdapter('telegram', {
-  factory: () => {
-    const env = readEnvFile(['TELEGRAM_BOT_TOKEN']);
-    if (!env.TELEGRAM_BOT_TOKEN) return null;
-    const token = env.TELEGRAM_BOT_TOKEN;
-    const telegramAdapter = createTelegramAdapter({
-      botToken: token,
-      mode: 'polling',
-    });
-    const bridge = createChatSdkBridge({
-      adapter: telegramAdapter,
-      concurrency: 'concurrent',
-      extractReplyContext,
-      supportsThreads: false,
-      defaults: TELEGRAM_DEFAULTS,
-      // No transformOutboundText: @chat-adapter/telegram >= 4.29 parses
-      // CommonMark and renders escaped MarkdownV2 itself. The legacy-Markdown
-      // sanitizer this replaced was written for the old converter and, run in
-      // front of the new one, downgraded **bold** to *single-star* — which the
-      // adapter then parsed as emphasis and rendered as _italic_.
-      maxTextLength: 4000,
-    });
-
-    const botUsernamePromise = fetchBotUsername(token);
-
-    const wrapped: ChannelAdapter = {
-      ...bridge,
-      resolveChannelName: async (platformId: string) => {
-        const chatId = platformId.split(':').slice(1).join(':');
-        if (!chatId) return null;
-        try {
-          const res = await fetch(`https://api.telegram.org/bot${token}/getChat`, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ chat_id: chatId }),
-          });
-          const data = (await res.json()) as { ok?: boolean; result?: { title?: string } };
-          return data.ok ? (data.result?.title ?? null) : null;
-        } catch {
-          return null;
-        }
-      },
-      async setup(hostConfig: ChannelSetup) {
-        const intercepted: ChannelSetup = {
-          ...hostConfig,
-          onInbound: createTelegramInboundInterceptor(botUsernamePromise, hostConfig.onInbound, token),
-        };
-        return withRetry(() => bridge.setup(intercepted), 'bridge.setup');
-      },
-    };
-    return wrapped;
-  },
+  factory: () => createTelegramBridge(),
   defaults: TELEGRAM_DEFAULTS,
 });
+
+// Named instances: registration is unconditional for every listed name (a
+// missing token is then reported at boot instead of leaving a bot silently
+// absent), and every registration carries the same TELEGRAM_DEFAULTS
+// declaration as the default bot, so offline creation paths (setup, ncl)
+// resolve declared wiring defaults for named instances too. Names are
+// lowercase kebab so the env-key mapping is one-to-one and the instance key
+// is URL-safe for the bridge.
+for (const raw of (readEnvFile(['TELEGRAM_INSTANCES']).TELEGRAM_INSTANCES ?? '').split(',')) {
+  const name = raw.trim();
+  if (!name) continue;
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) {
+    log.warn('TELEGRAM_INSTANCES name must match ^[a-z0-9][a-z0-9-]*$, skipping', { name });
+    continue;
+  }
+  registerChannelAdapter(`telegram-${name}`, {
+    factory: () => telegramInstanceBridgeFactory(name),
+    defaults: TELEGRAM_DEFAULTS,
+  });
+}

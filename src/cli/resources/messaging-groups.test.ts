@@ -42,14 +42,14 @@ const declared: ChannelDefaults = {
 registerChannelAdapter('declchan-mg', { factory: () => null, defaults: declared });
 
 describe('messaging-groups CLI create defaults instance to channel_type', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
     fs.mkdirSync(TEST_DIR, { recursive: true });
-    runMigrations(initTestDb());
+    await runMigrations(await initTestDb());
   });
 
-  afterEach(() => {
-    closeDb();
+  afterEach(async () => {
+    await closeDb();
     if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   });
 
@@ -65,7 +65,7 @@ describe('messaging-groups CLI create defaults instance to channel_type', () => 
     );
 
     expect(resp.ok).toBe(true);
-    const row = getMessagingGroupByPlatform('telegram', '12345');
+    const row = await getMessagingGroupByPlatform('telegram', '12345');
     expect(row).toBeDefined();
     expect(row?.instance).toBe('telegram');
   });
@@ -81,19 +81,19 @@ describe('messaging-groups CLI create defaults instance to channel_type', () => 
     );
 
     expect(resp.ok).toBe(true);
-    expect(getMessagingGroupByPlatform('telegram', '67890', 'work')?.instance).toBe('work');
+    expect((await getMessagingGroupByPlatform('telegram', '67890', 'work'))?.instance).toBe('work');
   });
 });
 
 describe('messaging-groups CLI create resolves unknown_sender_policy from the channel declaration', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
     fs.mkdirSync(TEST_DIR, { recursive: true });
-    runMigrations(initTestDb());
+    await runMigrations(await initTestDb());
   });
 
-  afterEach(() => {
-    closeDb();
+  afterEach(async () => {
+    await closeDb();
     if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   });
 
@@ -103,13 +103,13 @@ describe('messaging-groups CLI create resolves unknown_sender_policy from the ch
   it('DM context takes the declared dm policy', async () => {
     const resp = await create({ channel_type: 'declchan-mg', platform_id: 'dm-1' }, 'req-d1');
     expect(resp.ok).toBe(true);
-    expect(getMessagingGroupByPlatform('declchan-mg', 'dm-1')?.unknown_sender_policy).toBe('public');
+    expect((await getMessagingGroupByPlatform('declchan-mg', 'dm-1'))?.unknown_sender_policy).toBe('public');
   });
 
   it('group context takes the declared group policy', async () => {
     const resp = await create({ channel_type: 'declchan-mg', platform_id: 'g-1', is_group: '1' }, 'req-d2');
     expect(resp.ok).toBe(true);
-    expect(getMessagingGroupByPlatform('declchan-mg', 'g-1')?.unknown_sender_policy).toBe('request_approval');
+    expect((await getMessagingGroupByPlatform('declchan-mg', 'g-1'))?.unknown_sender_policy).toBe('request_approval');
   });
 
   it('explicit --unknown-sender-policy wins over the declaration', async () => {
@@ -118,12 +118,12 @@ describe('messaging-groups CLI create resolves unknown_sender_policy from the ch
       'req-d3',
     );
     expect(resp.ok).toBe(true);
-    expect(getMessagingGroupByPlatform('declchan-mg', 'dm-2')?.unknown_sender_policy).toBe('strict');
+    expect((await getMessagingGroupByPlatform('declchan-mg', 'dm-2'))?.unknown_sender_policy).toBe('strict');
   });
 
   it("undeclared channels keep the legacy static 'strict' default (back-compat)", async () => {
     const resp = await create({ channel_type: 'stalechan-mg', platform_id: 's-1' }, 'req-d4');
     expect(resp.ok).toBe(true);
-    expect(getMessagingGroupByPlatform('stalechan-mg', 's-1')?.unknown_sender_policy).toBe('strict');
+    expect((await getMessagingGroupByPlatform('stalechan-mg', 's-1'))?.unknown_sender_policy).toBe('strict');
   });
 });

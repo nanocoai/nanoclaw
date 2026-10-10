@@ -84,9 +84,9 @@ container/skills/whatsapp-formatting/instructions.md
 ```
 
 The `whatsapp-formatting` container skill is part of the channel payload: its
-`instructions.md` becomes the `skill-whatsapp-formatting.md` fragment in every
-group's composed CLAUDE.md (see `src/claude-md-compose.ts`), teaching agents
-WhatsApp's formatting syntax. Trunk does not ship it — without this copy step
+`instructions.md` is inlined as a section of every group's composed project
+document (see `src/project-doc-compose.ts`), teaching agents WhatsApp's
+formatting syntax. Trunk does not ship it — without this copy step
 agents format WhatsApp messages with generic markdown that renders literally.
 
 ### 2. Register the adapter
@@ -105,7 +105,7 @@ Baileys is the WhatsApp Web client; `qrcode` renders the device-link QR in the
 terminal; `pino` is Baileys' logger:
 
 ```nc:dep
-@whiskeysockets/baileys@7.0.0-rc.9
+@whiskeysockets/baileys@7.0.0-rc14
 qrcode@1.5.4
 @types/qrcode@1.5.6
 pino@9.6.0

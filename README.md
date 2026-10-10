@@ -18,6 +18,19 @@
 
 ---
 
+<div align="center">
+
+### <img src="https://img.shields.io/badge/NEW!-2EB67D?style=for-the-badge" alt="NEW!" valign="middle"> Agents in Slack: one app per agent <img src="assets/slack-icon.svg" alt="" width="22" valign="middle">
+
+Setup provisions each agent its own Slack app: manifest, avatar, and workspace install, no tokens to paste.
+Spawn teammates from chat: every one gets its own bot identity, container, and memory, with shared rooms and canvases.
+
+[![Quick Start](https://img.shields.io/badge/Quick%20Start%20%E2%86%92-4A154B?style=for-the-badge)](#quick-start)
+
+</div>
+
+---
+
 ## Why I Built NanoClaw
 
 [OpenClaw](https://github.com/openclaw/openclaw) is an impressive project, but I wouldn't have been able to sleep if I had given complex software I didn't understand full access to my life. OpenClaw has nearly half a million lines of code, 53 config files, and 70+ dependencies. Its security is at the application level (allowlists, pairing codes) rather than true OS-level isolation. Everything runs in one Node process with shared memory.
@@ -32,7 +45,7 @@ cd nanoclaw-v2
 bash nanoclaw.sh
 ```
 
-`nanoclaw.sh` walks you from a fresh machine to a named agent you can message. It installs Node, pnpm, and Docker if missing, registers your Anthropic credential with OneCLI, builds the agent container, and pairs your first channel (iMessage, Telegram, Discord, WhatsApp, or a local CLI). If a step fails, Claude Code is invoked automatically to diagnose and resume from where it broke.
+`nanoclaw.sh` walks you from a fresh machine to a named agent you can message. It installs Node, pnpm, and Docker if missing, installs a credential gateway and registers your Anthropic credential with it, builds the agent container, and pairs your first channel (Slack, Telegram, Discord, WhatsApp, iMessage, or a local CLI). If a step fails, Claude Code is invoked automatically to diagnose and resume from where it broke.
 
 <details>
 <summary><strong>Migrating from NanoClaw v1?</strong></summary>
@@ -47,7 +60,7 @@ bash migrate-v2.sh
 
 `migrate-v2.sh` finds your v1 install (sibling directory, or `NANOCLAW_V1_PATH=/path/to/nanoclaw`), migrates state into the v2 checkout, then `exec`s into Claude Code to finish the parts that need judgment (owner seeding, shared-memory migration, fork-customisation replay).
 
-Run the script directly, not from inside a Claude session — the deterministic side needs interactive prompts and real shell I/O for Node/pnpm bootstrap, Docker, OneCLI, and the container build.
+Run the script directly, not from inside a Claude session — the deterministic side needs interactive prompts and real shell I/O for Node/pnpm bootstrap, Docker, the credential gateway, and the container build.
 
 **What it does:** merges `.env`, seeds the v2 DB from `registered_groups`, copies group folders + session data + scheduled tasks, installs the channel adapters you select, copies channel auth state (including the Baileys keystore for WhatsApp — LID mapping is now resolved per-message by the Baileys v7 adapter, not migrated), builds the agent container.
 
@@ -81,7 +94,7 @@ See [docs/v1-to-v2-changes.md](docs/v1-to-v2-changes.md) for what's different an
 - **Scheduled tasks**: recurring jobs executed by the agent, with optional [script gates](docs/scheduled-tasks.md) that avoid waking it when there is no work
 - **Web access** — search and fetch content from the web
 - **Container isolation** — agents are sandboxed in Docker containers (macOS/Linux/WSL2)
-- **Credential security** — agents never hold raw API keys. Outbound requests route through [OneCLI's Agent Vault](https://github.com/onecli/onecli), which injects credentials at request time and enforces per-agent policies and rate limits.
+- **Credential security** — agents never hold raw API keys. Outbound requests route through a credential gateway that injects credentials at request time and enforces per-agent policies and rate limits. Which gateway is yours to pick: setup installs one (currently [OneCLI's Agent Vault](https://github.com/onecli/onecli)) behind a provider seam.
 - **Agent templates**: stamp a ready-to-run agent (instructions + MCP tools + skills, no secrets) from a reusable bundle via `ncl groups create --template <ref>`. Templates load from the local `templates/` folder; populate it by hand or by copying from the [public library](https://github.com/nanocoai/nanoclaw-templates). See [docs/templates.md](docs/templates.md).
 
 ## Accounts and what leaves your machine
@@ -93,7 +106,33 @@ your machine.
 One opt-in exception: you can [fetch a prebuilt agent image](docs/hardened-image.md) instead of
 building it locally. Fetching ours needs a free account, so we see your email address and when
 you ask for an image — nothing about your agents, and nothing after the image lands. Building
-locally needs no account and contacts nothing, and is the default.
+locally needs no account and contacts nothing, and is the default. The same account unlocks the
+[perks](#perks) below.
+
+## Perks
+
+The free account also opens the **community portal** at [portal.nanoclaw.dev](https://portal.nanoclaw.dev),
+a dashboard where you switch on what the account offers. Today that is Echo's hardened agent
+image and a managed Slack app for your agent, created and installed for you with no tokens to
+paste. Everything else in NanoClaw works without it.
+
+Setup opens the portal once. You sign in in the browser, approve the terminal you are running
+setup from, and enable the perk; the wizard notices and continues on its own. Enabling Echo is
+where you agree to Echo's terms, including whether you want product and security email. Close
+the page without enabling anything and setup carries on without the perk, then offers it once
+more later.
+
+What stays on your machine: the sign-in record and install token in `~/.config/nanoclaw/account.json`,
+one device key per machine in `~/.config/nanoclaw/device-key.json`, and this checkout's journal in
+`data/community-portal.json` (which perks are on, setup progress, the credentials a perk handed
+you), all mode `0600`. The install token never passes through the browser: the browser sees only
+the one-time sign-in code, and the token reaches this machine from the account service directly.
+The host keeps one outbound connection to the portal so a perk you change in the browser reaches
+the running agent; it sends nothing about your agents, messages or files.
+
+Revisit a step with `pnpm exec tsx setup/portal.ts --stage echo` or `--stage slack`. To sign a
+machine out, forget it under **Devices** in the portal: its token stops working and the host
+disconnects. Files, recovery commands and troubleshooting: [docs/community-portal.md](docs/community-portal.md).
 
 ## Usage
 
@@ -140,7 +179,7 @@ No channel or provider skills are currently requested — propose one via an iss
 ## Requirements
 
 - macOS or Linux (Windows via WSL2)
-- Node.js 20+ and pnpm 10+ (the installer will install both if missing)
+- Node.js 22+ and pnpm 10+ (the installer will install both if missing)
 - [Docker Desktop](https://docker.com/products/docker-desktop) (macOS/Windows) or Docker Engine (Linux)
 - [Claude Code](https://claude.ai/download) for `/customize`, `/debug`, error recovery during setup, and all `/add-<channel>` skills
 
@@ -162,7 +201,7 @@ Key files:
 - `src/delivery.ts` — polls `outbound.db`, delivers via adapter, handles system actions
 - `src/host-sweep.ts` — 60s sweep: stale detection, due-message wake, recurrence
 - `src/session-manager.ts` — resolves sessions, opens `inbound.db` / `outbound.db`
-- `src/container-runner.ts` — spawns per-agent-group containers, OneCLI credential injection
+- `src/container-runner.ts` — spawns per-agent-group containers, leases the session's gateway contribution
 - `src/db/` — central DB (users, roles, agent groups, messaging groups, wiring, migrations)
 - `src/channels/` — channel adapter infra (adapters installed via `/add-<channel>` skills)
 - `src/providers/` — host-side provider config (`claude` baked in; others via skills)
@@ -181,7 +220,7 @@ Yes. Docker is the default runtime and works on macOS, Linux, and Windows (via W
 
 **Is this secure?**
 
-Agents run in containers, not behind application-level permission checks. They can only access explicitly mounted directories. Credentials never enter the container — outbound API requests route through [OneCLI's Agent Vault](https://github.com/onecli/onecli), which injects authentication at the proxy level and supports rate limits and access policies. You should still review what you're running, but the codebase is small enough that you actually can. See the [security documentation](https://docs.nanoclaw.dev/concepts/security) for the full security model.
+Agents run in containers, not behind application-level permission checks. They can only access explicitly mounted directories. Credentials never enter the container — outbound API requests route through the installed credential gateway, which injects authentication at the proxy level and supports rate limits and access policies. You should still review what you're running, but the codebase is small enough that you actually can. See the [security documentation](https://docs.nanoclaw.dev/concepts/security) for the full security model.
 
 **Why no configuration files?**
 
@@ -212,7 +251,7 @@ If a step fails, `nanoclaw.sh` hands off to Claude Code to diagnose and resume. 
 bash nanoclaw.sh --uninstall
 ```
 
-Every install is tagged with a per-checkout id, so the uninstaller removes only what belongs to that copy: the background service, containers and image, app data and logs, your agents' files, and this copy's OneCLI vault agents. Shared things — the OneCLI app and your credentials, other NanoClaw copies on the machine — are left alone. It shows exactly what it found and asks for confirmation per group; nothing is deleted until you say yes. Use `--dry-run` to preview without changing anything, or `--yes` to skip the prompts. Your `.env` is backed up before removal. To finish, delete the checkout folder itself.
+Every install is tagged with a per-checkout id, so the uninstaller removes only what belongs to that copy: the background service, containers and image, app data and logs, your agents' files, and this copy's gateway agents. Shared things — the gateway service and your credentials, other NanoClaw copies on the machine — are left alone. It shows exactly what it found and asks for confirmation per group; nothing is deleted until you say yes. Use `--dry-run` to preview without changing anything, or `--yes` to skip the prompts. Your `.env` is backed up before removal. To finish, delete the checkout folder itself.
 
 **What changes will be accepted into the codebase?**
 

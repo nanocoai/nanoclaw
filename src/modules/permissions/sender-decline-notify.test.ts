@@ -14,7 +14,7 @@
 import fs from 'fs';
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 
-import { initTestDb, closeDb, runMigrations } from '../../db/index.js';
+import { initTestDb, closeDb, getDb, runMigrations } from '../../db/index.js';
 import { createAgentGroup } from '../../db/agent-groups.js';
 import { createMessagingGroup, createMessagingGroupAgent, updateMessagingGroup } from '../../db/messaging-groups.js';
 import { upsertUser } from './db/users.js';
@@ -41,13 +41,12 @@ vi.mock('../../delivery.js', () => ({
 vi.mock('./user-dm.js', () => ({
   ensureUserDm: vi.fn(async (userId: string) => {
     const { getDb } = await import('../../db/connection.js');
-    const row = getDb()
-      .prepare(
-        `SELECT mg.* FROM messaging_groups mg
+    const row = await getDb().get(
+      `SELECT mg.* FROM messaging_groups mg
            JOIN user_dms ud ON ud.messaging_group_id = mg.id
           WHERE ud.user_id = ?`,
-      )
-      .get(userId);
+      userId,
+    );
     return row;
   }),
 }));
@@ -66,8 +65,8 @@ function now() {
 beforeEach(async () => {
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   fs.mkdirSync(TEST_DIR, { recursive: true });
-  const db = initTestDb();
-  runMigrations(db);
+  const db = await initTestDb();
+  await runMigrations(db);
 
   // Side-effect imports: register hooks (permissions module) AFTER the
   // mocks are in place.
@@ -75,9 +74,9 @@ beforeEach(async () => {
 
   // Fixtures: agent group, a wired 1:1 DM messaging group with
   // decline_notify (a DM-shaped channel), owner + owner DM.
-  createAgentGroup({ id: 'ag-1', name: 'Agent', folder: 'agent', agent_provider: null, created_at: now() });
+  await createAgentGroup({ id: 'ag-1', name: 'Agent', folder: 'agent', agent_provider: null, created_at: now() });
 
-  createMessagingGroup({
+  await createMessagingGroup({
     id: 'mg-dm-stranger',
     channel_type: 'telegram',
     platform_id: 'dm-stranger',
@@ -86,7 +85,7 @@ beforeEach(async () => {
     unknown_sender_policy: 'decline_notify',
     created_at: now(),
   });
-  createMessagingGroupAgent({
+  await createMessagingGroupAgent({
     id: 'mga-1',
     messaging_group_id: 'mg-dm-stranger',
     agent_group_id: 'ag-1',
@@ -100,15 +99,15 @@ beforeEach(async () => {
   });
 
   // Owner user (with display name — feeds the decline copy) + their DM.
-  upsertUser({ id: 'telegram:owner', kind: 'telegram', display_name: 'Gavriel', created_at: now() });
-  grantRole({
+  await upsertUser({ id: 'telegram:owner', kind: 'telegram', display_name: 'Alex', created_at: now() });
+  await grantRole({
     user_id: 'telegram:owner',
     role: 'owner',
     agent_group_id: null,
     granted_by: null,
     granted_at: now(),
   });
-  createMessagingGroup({
+  await createMessagingGroup({
     id: 'mg-dm-owner',
     channel_type: 'telegram',
     platform_id: 'dm-owner',
@@ -117,19 +116,20 @@ beforeEach(async () => {
     unknown_sender_policy: 'public',
     created_at: now(),
   });
-  const { getDb } = await import('../../db/connection.js');
-  getDb()
-    .prepare(
-      `INSERT INTO user_dms (user_id, channel_type, messaging_group_id, resolved_at)
-       VALUES (?, ?, ?, ?)`,
-    )
-    .run('telegram:owner', 'telegram', 'mg-dm-owner', now());
+  await getDb().run(
+    `INSERT INTO user_dms (user_id, channel_type, messaging_group_id, resolved_at)
+     VALUES (?, ?, ?, ?)`,
+    'telegram:owner',
+    'telegram',
+    'mg-dm-owner',
+    now(),
+  );
 
   deliverMock.mockClear();
 });
 
-afterEach(() => {
-  closeDb();
+afterEach(async () => {
+  await closeDb();
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
 });
 
@@ -155,16 +155,47 @@ function strangerDm(text: string) {
 
 async function settle() {
   // The decline flow is fire-and-forget off the access gate.
-  await new Promise((r) => setTimeout(r, 10));
+  await new Promise((r) => setTimeout(r, 25));
+}
+
+async function waitForDeliveries(count: number): Promise<void> {
+  await vi.waitFor(() => expect(deliverMock).toHaveBeenCalledTimes(count));
 }
 
 describe('unknown-sender decline_notify flow', () => {
-  it('declines in the DM, FYIs the owner, records the drop — no card', async () => {
-    const { routeInbound } = await import('../../router.js');
-    await routeInbound(strangerDm('hi, can you book me a flight?'));
+  it('honors caller-supplied copy and conversation-scoped dedupe', async () => {
+    const { declineAndNotify } = await import('./sender-approval.js');
+    const event = strangerDm('hello');
+    const input = {
+      messagingGroupId: 'mg-dm-stranger',
+      agentGroupId: 'ag-1',
+      senderIdentity: 'telegram:stranger-1',
+      senderName: 'Stranger One',
+      event,
+      dedupeKey: 'conversation',
+      declineText: 'Only the owner can connect me here.',
+      fyiText: 'FYI: I declined an unauthorized channel invitation.',
+    };
+
+    await declineAndNotify(input);
+    await waitForDeliveries(2);
+    expect(JSON.parse(deliverMock.mock.calls[0][4] as string).text).toBe(input.declineText);
+    expect(JSON.parse(deliverMock.mock.calls[1][4] as string).text).toBe(input.fyiText);
+
+    await declineAndNotify({
+      ...input,
+      senderIdentity: 'telegram:stranger-2',
+      senderName: 'Stranger Two',
+    });
     await settle();
 
     expect(deliverMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('declines in the DM, FYIs the owner, records the drop — no card', async () => {
+    const { routeInbound } = await import('../../router.js');
+    await routeInbound(strangerDm('hi, can you book me a flight?'));
+    await waitForDeliveries(2);
 
     // (a) Polite decline into the stranger's DM, as the bot.
     const [dChannel, dPlatform, dThread, dKind, dContent] = deliverMock.mock.calls[0];
@@ -173,7 +204,7 @@ describe('unknown-sender decline_notify flow', () => {
     expect(dThread).toBeNull();
     expect(dKind).toBe('chat-sdk');
     const decline = JSON.parse(dContent as string);
-    expect(decline.text).toBe("I'm Gavriel's personal agent — I can't help you directly.");
+    expect(decline.text).toBe("I'm Alex's personal agent — I can't help you directly.");
     expect(decline.options).toBeUndefined(); // plain text, no buttons
 
     // (b) One-line FYI to the owner's DM — informational, not a card.
@@ -188,28 +219,29 @@ describe('unknown-sender decline_notify flow', () => {
     expect(fyi.text).toContain('Stranger (tg:stranger)');
     expect(fyi.text).toContain('ncl members add');
 
-    const { getDb } = await import('../../db/connection.js');
     // Drop recorded. (The gate writes reason 'unknown_sender_decline_notify';
     // core's structural no_agent_engaged record then upserts the same row —
     // pre-existing behavior shared with every refusal path.)
-    const drop = getDb()
-      .prepare('SELECT user_id FROM unregistered_senders WHERE platform_id = ?')
-      .get('dm-stranger') as { user_id: string };
-    expect(drop.user_id).toBe('tg:stranger');
+    const drop = await getDb().get<{ user_id: string }>(
+      'SELECT user_id FROM unregistered_senders WHERE platform_id = ?',
+      'dm-stranger',
+    );
+    expect(drop).toBeDefined();
+    expect(drop!.user_id).toBe('tg:stranger');
 
     // No card rows anywhere — only the decline stamp.
-    const rows = getDb().prepare('SELECT id FROM pending_sender_approvals').all() as Array<{ id: string }>;
+    const rows = await getDb().all<{ id: string }>('SELECT id FROM pending_sender_approvals');
     expect(rows).toHaveLength(1);
     expect(rows[0].id).toMatch(/^decline:/);
-    const channelRows = getDb().prepare('SELECT COUNT(*) AS c FROM pending_channel_approvals').get() as { c: number };
-    expect(channelRows.c).toBe(0);
+    const channelRows = await getDb().get<{ c: number }>('SELECT COUNT(*) AS c FROM pending_channel_approvals');
+    expect(channelRows).toBeDefined();
+    expect(channelRows!.c).toBe(0);
   });
 
   it('dedupes: a second message within 24h sends no further decline or FYI', async () => {
     const { routeInbound } = await import('../../router.js');
     await routeInbound(strangerDm('hello'));
-    await settle();
-    expect(deliverMock).toHaveBeenCalledTimes(2);
+    await waitForDeliveries(2);
 
     await routeInbound(strangerDm('are you there?'));
     await settle();
@@ -218,60 +250,53 @@ describe('unknown-sender decline_notify flow', () => {
     // message upserts twice: the gate's policy record + core's structural
     // no_agent_engaged record — pre-existing double-count on refusals).
     expect(deliverMock).toHaveBeenCalledTimes(2);
-    const { getDb } = await import('../../db/connection.js');
-    const drop = getDb()
-      .prepare('SELECT message_count FROM unregistered_senders WHERE platform_id = ?')
-      .get('dm-stranger') as { message_count: number };
-    expect(drop.message_count).toBe(4);
+    const drop = await getDb().get<{ message_count: number }>(
+      'SELECT message_count FROM unregistered_senders WHERE platform_id = ?',
+      'dm-stranger',
+    );
+    expect(drop).toBeDefined();
+    expect(drop!.message_count).toBe(4);
   });
 
   it('declines again once the 24h stamp expires', async () => {
     const { routeInbound } = await import('../../router.js');
     await routeInbound(strangerDm('hello'));
-    await settle();
-    expect(deliverMock).toHaveBeenCalledTimes(2);
+    await waitForDeliveries(2);
 
     // Age the stamp past the window.
-    const { getDb } = await import('../../db/connection.js');
     const old = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
-    getDb().prepare(`UPDATE pending_sender_approvals SET created_at = ? WHERE id LIKE 'decline:%'`).run(old);
+    await getDb().run(`UPDATE pending_sender_approvals SET created_at = ? WHERE id LIKE 'decline:%'`, old);
 
     await routeInbound(strangerDm('hello again'));
-    await settle();
-
-    expect(deliverMock).toHaveBeenCalledTimes(4); // second decline + FYI pair
-    const stamp = getDb()
-      .prepare(`SELECT created_at FROM pending_sender_approvals WHERE id LIKE 'decline:%'`)
-      .get() as {
-      created_at: string;
-    };
-    expect(new Date(stamp.created_at).getTime()).toBeGreaterThan(Date.now() - 60_000); // refreshed
+    await waitForDeliveries(4);
+    const stamp = await getDb().get<{ created_at: string }>(
+      `SELECT created_at FROM pending_sender_approvals WHERE id LIKE 'decline:%'`,
+    );
+    expect(stamp).toBeDefined();
+    expect(new Date(stamp!.created_at).getTime()).toBeGreaterThan(Date.now() - 60_000); // refreshed
   });
 
   it('flip request_approval→decline_notify with a card pending: card row converts to a stamp, dedupe holds', async () => {
     // Start on request_approval — the stranger's first message cards.
-    updateMessagingGroup('mg-dm-stranger', { unknown_sender_policy: 'request_approval' });
+    await updateMessagingGroup('mg-dm-stranger', { unknown_sender_policy: 'request_approval' });
     const { routeInbound } = await import('../../router.js');
     await routeInbound(strangerDm('hello'));
-    await settle();
-    expect(deliverMock).toHaveBeenCalledTimes(1); // the approval card
+    await waitForDeliveries(1); // the approval card
 
-    const { getDb } = await import('../../db/connection.js');
-    let rows = getDb().prepare('SELECT id FROM pending_sender_approvals').all() as Array<{ id: string }>;
+    let rows = await getDb().all<{ id: string }>('SELECT id FROM pending_sender_approvals');
     expect(rows).toHaveLength(1);
     expect(rows[0].id).toMatch(/^nsa-/);
 
     // Operator flips the policy while the card is still pending.
-    updateMessagingGroup('mg-dm-stranger', { unknown_sender_policy: 'decline_notify' });
+    await updateMessagingGroup('mg-dm-stranger', { unknown_sender_policy: 'decline_notify' });
     deliverMock.mockClear();
 
     await routeInbound(strangerDm('are you there?'));
-    await settle();
+    await waitForDeliveries(2);
 
     // Decline + FYI went out; the pending card row became the stamp (the
     // UNIQUE(messaging_group_id, sender_identity) collision converts it).
-    expect(deliverMock).toHaveBeenCalledTimes(2);
-    rows = getDb().prepare('SELECT id FROM pending_sender_approvals').all() as Array<{ id: string }>;
+    rows = await getDb().all<{ id: string }>('SELECT id FROM pending_sender_approvals');
     expect(rows).toHaveLength(1);
     expect(rows[0].id).toMatch(/^decline:/);
 
@@ -282,7 +307,7 @@ describe('unknown-sender decline_notify flow', () => {
   });
 
   it('decline_notify on a group messaging group: silent drop — no public decline, no FYI', async () => {
-    createMessagingGroup({
+    await createMessagingGroup({
       id: 'mg-team',
       channel_type: 'telegram',
       platform_id: 'group-team',
@@ -291,7 +316,7 @@ describe('unknown-sender decline_notify flow', () => {
       unknown_sender_policy: 'decline_notify',
       created_at: now(),
     });
-    createMessagingGroupAgent({
+    await createMessagingGroupAgent({
       id: 'mga-team',
       messaging_group_id: 'mg-team',
       agent_group_id: 'ag-1',
@@ -311,36 +336,35 @@ describe('unknown-sender decline_notify flow', () => {
     // Nothing delivered anywhere — the DM-phrased decline must never be
     // posted publicly into the group channel; no stamp either.
     expect(deliverMock).not.toHaveBeenCalled();
-    const { getDb } = await import('../../db/connection.js');
-    const drop = getDb()
-      .prepare('SELECT user_id FROM unregistered_senders WHERE platform_id = ?')
-      .get('group-team') as { user_id: string };
-    expect(drop.user_id).toBe('tg:stranger');
-    const stamps = getDb().prepare('SELECT COUNT(*) AS c FROM pending_sender_approvals').get() as { c: number };
-    expect(stamps.c).toBe(0);
+    const drop = await getDb().get<{ user_id: string }>(
+      'SELECT user_id FROM unregistered_senders WHERE platform_id = ?',
+      'group-team',
+    );
+    expect(drop).toBeDefined();
+    expect(drop!.user_id).toBe('tg:stranger');
+    const stamps = await getDb().get<{ c: number }>('SELECT COUNT(*) AS c FROM pending_sender_approvals');
+    expect(stamps).toBeDefined();
+    expect(stamps!.c).toBe(0);
   });
 
   it('policy flip back to request_approval clears the stale stamp and cards normally', async () => {
     const { routeInbound } = await import('../../router.js');
     await routeInbound(strangerDm('hello'));
-    await settle();
-    expect(deliverMock).toHaveBeenCalledTimes(2);
+    await waitForDeliveries(2);
 
-    updateMessagingGroup('mg-dm-stranger', { unknown_sender_policy: 'request_approval' });
+    await updateMessagingGroup('mg-dm-stranger', { unknown_sender_policy: 'request_approval' });
     deliverMock.mockClear();
 
     await routeInbound(strangerDm('let me in'));
-    await settle();
+    await waitForDeliveries(1);
 
     // One card to the owner — the decline stamp did not block the UNIQUE key.
-    expect(deliverMock).toHaveBeenCalledTimes(1);
     const [, platform, , , content] = deliverMock.mock.calls[0];
     expect(platform).toBe('dm-owner');
     const payload = JSON.parse(content as string);
     expect(payload.type).toBe('ask_question');
 
-    const { getDb } = await import('../../db/connection.js');
-    const rows = getDb().prepare('SELECT id FROM pending_sender_approvals').all() as Array<{ id: string }>;
+    const rows = await getDb().all<{ id: string }>('SELECT id FROM pending_sender_approvals');
     expect(rows).toHaveLength(1);
     expect(rows[0].id).toMatch(/^nsa-/); // real card row; stamp gone
   });

@@ -6,18 +6,18 @@ import { createPendingApproval } from '../db/sessions.js';
 import { log } from '../log.js';
 import { registerQuestionRenderResolver, resolveQuestionRender } from './question-render-registry.js';
 
-beforeEach(() => {
-  const db = initTestDb();
-  runMigrations(db);
+beforeEach(async () => {
+  const db = await initTestDb();
+  await runMigrations(db);
 });
 
-afterEach(() => {
-  closeDb();
+afterEach(async () => {
+  await closeDb();
   vi.restoreAllMocks();
 });
 
 describe('question render resolver registry', () => {
-  it('runs module resolvers in registration order and stops on the first result', () => {
+  it('runs module resolvers in registration order and stops on the first result', async () => {
     const order: string[] = [];
     const later = vi.fn(() => undefined);
     const expected = {
@@ -41,12 +41,12 @@ describe('question render resolver registry', () => {
       return undefined;
     });
 
-    expect(resolveQuestionRender('module-order-question')).toBe(expected);
+    expect(await resolveQuestionRender('module-order-question')).toBe(expected);
     expect(order).toEqual(['first', 'second']);
     expect(later).not.toHaveBeenCalled();
   });
 
-  it('resolves over a snapshot when a resolver registers another resolver', () => {
+  it('resolves over a snapshot when a resolver registers another resolver', async () => {
     const expected = {
       title: 'Registered during resolution',
       options: [{ label: 'Continue', selectedLabel: 'Continued', value: 'continue' }],
@@ -60,21 +60,21 @@ describe('question render resolver registry', () => {
       return undefined;
     });
 
-    expect(resolveQuestionRender('snapshot-question')).toBeUndefined();
+    expect(await resolveQuestionRender('snapshot-question')).toBeUndefined();
     expect(registeredDuringResolution).not.toHaveBeenCalled();
 
-    expect(resolveQuestionRender('snapshot-question')).toBe(expected);
+    expect(await resolveQuestionRender('snapshot-question')).toBe(expected);
     expect(registeredDuringResolution).toHaveBeenCalledOnce();
   });
 
-  it('logs an optional resolver failure and continues to the built-in fallback', () => {
+  it('logs an optional resolver failure and continues to the built-in fallback', async () => {
     const failure = new Error('resolver failure');
     const errorSpy = vi.spyOn(log, 'error').mockImplementation(() => undefined);
     registerQuestionRenderResolver((questionId) => {
       if (questionId === 'resolver-failure-question') throw failure;
       return undefined;
     });
-    createPendingApproval({
+    await createPendingApproval({
       approval_id: 'resolver-failure-question',
       request_id: 'request-resolver-failure',
       action: 'test-action',
@@ -84,7 +84,7 @@ describe('question render resolver registry', () => {
       options_json: JSON.stringify([{ label: 'Allow', selectedLabel: 'Allowed', value: 'allow' }]),
     });
 
-    expect(resolveQuestionRender('resolver-failure-question')).toEqual({
+    expect(await resolveQuestionRender('resolver-failure-question')).toEqual({
       title: 'Built-in fallback after failure',
       question: '',
       options: [{ label: 'Allow', selectedLabel: 'Allowed', value: 'allow' }],
@@ -92,8 +92,8 @@ describe('question render resolver registry', () => {
     expect(errorSpy).toHaveBeenCalledWith('Question render resolver threw', { err: failure });
   });
 
-  it('uses the existing database lookup as the final built-in fallback', () => {
-    createPendingApproval({
+  it('uses the existing database lookup as the final built-in fallback', async () => {
+    await createPendingApproval({
       approval_id: 'built-in-render-question',
       request_id: 'request-1',
       action: 'test-action',
@@ -103,14 +103,14 @@ describe('question render resolver registry', () => {
       options_json: JSON.stringify([{ label: 'Allow', selectedLabel: 'Allowed', value: 'allow' }]),
     });
 
-    expect(resolveQuestionRender('built-in-render-question')).toEqual({
+    expect(await resolveQuestionRender('built-in-render-question')).toEqual({
       title: 'Built-in approval',
       question: '',
       options: [{ label: 'Allow', selectedLabel: 'Allowed', value: 'allow' }],
     });
   });
 
-  it('returns undefined when neither a module nor the built-in fallback owns the id', () => {
-    expect(resolveQuestionRender('unowned-render-question')).toBeUndefined();
+  it('returns undefined when neither a module nor the built-in fallback owns the id', async () => {
+    expect(await resolveQuestionRender('unowned-render-question')).toBeUndefined();
   });
 });

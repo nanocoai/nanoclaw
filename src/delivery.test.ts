@@ -26,16 +26,10 @@ vi.mock('./config.js', async () => {
 
 const TEST_DIR = '/tmp/nanoclaw-test-delivery';
 
-import {
-  initTestDb,
-  closeDb,
-  runMigrations,
-  createAgentGroup,
-  createMessagingGroup,
-  createMessagingGroupAgent,
-} from './db/index.js';
-import { getDeliveredIds } from './db/session-db.js';
-import { resolveSession, resolveTaskSession, outboundDbPath, openInboundDb } from './session-manager.js';
+import { initTestDb, closeDb, runMigrations, createAgentGroup, createMessagingGroup } from './db/index.js';
+import { getDeliveredIds } from './mailbox/sqlite/session-db.js';
+import { inboundDbPath, outboundDbPath } from './mailbox/sqlite/paths.js';
+import { resolveSession, resolveTaskSession, withMailboxSession } from './session-manager.js';
 import {
   deliverSessionMessages,
   registerDeliveryBatchPreview,
@@ -44,20 +38,26 @@ import {
 } from './delivery.js';
 import { createChannelDeliveryAdapter } from './channels/channel-registry.js';
 import { createDestination } from './modules/agent-to-agent/db/agent-destinations.js';
+import { getAgentMailbox } from './mailbox/index.js';
+import { log } from './log.js';
+
+function openInboundDb(agentGroupId: string, sessionId: string): Database.Database {
+  return new Database(inboundDbPath(agentGroupId, sessionId));
+}
 
 function now(): string {
   return new Date().toISOString();
 }
 
-function seedAgentAndChannel(): void {
-  createAgentGroup({
+async function seedAgentAndChannel(): Promise<void> {
+  await createAgentGroup({
     id: 'ag-1',
     name: 'Test Agent',
     folder: 'test-agent',
     agent_provider: null,
     created_at: now(),
   });
-  createMessagingGroup({
+  await createMessagingGroup({
     id: 'mg-1',
     channel_type: 'telegram',
     platform_id: 'telegram:123',
@@ -77,22 +77,45 @@ function insertOutbound(agentGroupId: string, sessionId: string, msgId: string):
   db.close();
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   fs.mkdirSync(TEST_DIR, { recursive: true });
-  const db = initTestDb();
-  runMigrations(db);
+  const db = await initTestDb();
+  await runMigrations(db);
 });
 
-afterEach(() => {
-  closeDb();
+afterEach(async () => {
+  await closeDb();
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
 });
 
 describe('deliverSessionMessages — concurrent invocations', () => {
+  it('logs mailbox failures with session context and retries on the next poll', async () => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    const err = new Error('mailbox unavailable');
+    const sessionSpy = vi.spyOn(getAgentMailbox(), 'session').mockRejectedValueOnce(err);
+    const logSpy = vi.spyOn(log, 'error').mockImplementation(() => {});
+
+    try {
+      await deliverSessionMessages(session);
+      expect(logSpy).toHaveBeenCalledWith('Session mailbox delivery failed', {
+        agentGroupId: 'ag-1',
+        sessionId: session.id,
+        err,
+      });
+
+      await deliverSessionMessages(session);
+      expect(sessionSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      sessionSpy.mockRestore();
+      logSpy.mockRestore();
+    }
+  });
+
   it('delivers a message exactly once when active and sweep polls overlap', async () => {
-    seedAgentAndChannel();
-    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
     insertOutbound('ag-1', session.id, 'out-1');
 
     const calls: string[] = [];
@@ -114,8 +137,8 @@ describe('deliverSessionMessages — concurrent invocations', () => {
   });
 
   it('still delivers on a subsequent call after the first finishes', async () => {
-    seedAgentAndChannel();
-    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
     insertOutbound('ag-1', session.id, 'out-first');
 
     const calls: string[] = [];
@@ -141,8 +164,8 @@ describe('deliverSessionMessages — concurrent invocations', () => {
     // still landed on the user's screen — the catch path must not trigger
     // a re-send. We simulate by having the adapter succeed on the first
     // call and recording how many times it's invoked across two attempts.
-    seedAgentAndChannel();
-    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
     insertOutbound('ag-1', session.id, 'out-once');
 
     let callCount = 0;
@@ -162,10 +185,48 @@ describe('deliverSessionMessages — concurrent invocations', () => {
   });
 });
 
+describe('deliverSessionMessages — malformed row containment', () => {
+  it('a row that fails strict parsing does not block the rest of the queue', async () => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+
+    // A non-integer seq fails parseOutboundRecord's strict integer check —
+    // the adapter must fall back to a best-effort read instead of throwing
+    // out of getDueMessages and starving every later message.
+    const db = new Database(outboundDbPath('ag-1', session.id));
+    db.prepare(
+      `INSERT INTO messages_out (id, seq, timestamp, kind, platform_id, channel_type, content)
+       VALUES ('out-bad', 3.5, datetime('now'), 'chat', 'telegram:123', 'telegram', ?)`,
+    ).run(JSON.stringify({ text: 'weird row' }));
+    db.close();
+    insertOutbound('ag-1', session.id, 'out-good');
+
+    const calls: string[] = [];
+    setDeliveryAdapter({
+      async deliver(_ct, _pid, _tid, _kind, content) {
+        calls.push(content);
+        return 'plat-msg';
+      },
+    });
+
+    const warn = vi.spyOn(log, 'warn').mockImplementation(() => {});
+    await deliverSessionMessages(session);
+    expect(calls).toHaveLength(2);
+    const delivered = await withMailboxSession('ag-1', session.id, (mailbox) => mailbox.getDeliveredIds());
+    expect(delivered.has('out-good')).toBe(true);
+    expect(delivered.has('out-bad')).toBe(true);
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    await deliverSessionMessages(session);
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+});
+
 describe('deliverSessionMessages — retry and permanent failure', () => {
   it('retries on adapter failure and marks failed after MAX_DELIVERY_ATTEMPTS (3)', async () => {
-    seedAgentAndChannel();
-    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
     insertOutbound('ag-1', session.id, 'out-flaky');
 
     let callCount = 0;
@@ -193,9 +254,7 @@ describe('deliverSessionMessages — retry and permanent failure', () => {
     expect(callCount).toBe(3);
 
     // Verify the message is in the delivered table with 'failed' status
-    const inDb = openInboundDb('ag-1', session.id);
-    const delivered = getDeliveredIds(inDb);
-    inDb.close();
+    const delivered = await withMailboxSession('ag-1', session.id, (mailbox) => mailbox.getDeliveredIds());
     expect(delivered.has('out-flaky')).toBe(true);
   });
 
@@ -206,36 +265,36 @@ describe('deliverSessionMessages — retry and permanent failure', () => {
     // throw so the row takes the normal retry → failed path. Uses the REAL
     // createChannelDeliveryAdapter with an empty registry — the state after
     // an adapter factory returns null (missing credentials) at startup.
-    seedAgentAndChannel();
-    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
     insertOutbound('ag-1', session.id, 'out-offline');
 
     setDeliveryAdapter(createChannelDeliveryAdapter());
 
     // Attempt 1 — must NOT be acknowledged as delivered
     await deliverSessionMessages(session);
-    let inDb = openInboundDb('ag-1', session.id);
-    expect(getDeliveredIds(inDb).has('out-offline')).toBe(false);
-    inDb.close();
+    expect(
+      await withMailboxSession('ag-1', session.id, (mailbox) => mailbox.getDeliveredIds().has('out-offline')),
+    ).toBe(false);
 
     // Attempts 2 and 3 — exhausts MAX_DELIVERY_ATTEMPTS
     await deliverSessionMessages(session);
     await deliverSessionMessages(session);
 
     // The row must end as status='failed', never 'delivered'
-    inDb = openInboundDb('ag-1', session.id);
-    const row = inDb
-      .prepare('SELECT status, platform_message_id FROM delivered WHERE message_out_id = ?')
-      .get('out-offline') as { status: string; platform_message_id: string | null } | undefined;
-    inDb.close();
+    const deliveryDb = new Database(inboundDbPath('ag-1', session.id), { readonly: true });
+    const row = deliveryDb.prepare('SELECT * FROM delivered WHERE message_out_id = ?').get('out-offline') as
+      | { status: string; platform_message_id: string | null }
+      | undefined;
+    deliveryDb.close();
     expect(row).toBeDefined();
     expect(row!.status).toBe('failed');
     expect(row!.platform_message_id).toBeNull();
   });
 
   it('clears attempt counter on successful delivery', async () => {
-    seedAgentAndChannel();
-    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
     insertOutbound('ag-1', session.id, 'out-retry-ok');
 
     let callCount = 0;
@@ -263,7 +322,7 @@ describe('deliverSessionMessages — retry and permanent failure', () => {
 
 describe('deliverSessionMessages — instance resolution', () => {
   it('delivers via the origin session instance when sibling rows share (channel_type, platform_id)', async () => {
-    createAgentGroup({
+    await createAgentGroup({
       id: 'ag-1',
       name: 'Test Agent',
       folder: 'test-agent',
@@ -273,7 +332,7 @@ describe('deliverSessionMessages — instance resolution', () => {
     // Two instances own the same chat address. The named row sorts before
     // 'slack', so a plain by-platform lookup (default-instance-first) would
     // pick mg-default — only origin-session preference selects mg-tester.
-    createMessagingGroup({
+    await createMessagingGroup({
       id: 'mg-default',
       channel_type: 'slack',
       platform_id: 'slack:C1',
@@ -282,7 +341,7 @@ describe('deliverSessionMessages — instance resolution', () => {
       unknown_sender_policy: 'public',
       created_at: now(),
     });
-    createMessagingGroup({
+    await createMessagingGroup({
       id: 'mg-tester',
       channel_type: 'slack',
       platform_id: 'slack:C1',
@@ -293,7 +352,7 @@ describe('deliverSessionMessages — instance resolution', () => {
       created_at: now(),
     });
 
-    const { session } = resolveSession('ag-1', 'mg-tester', null, 'shared');
+    const { session } = await resolveSession('ag-1', 'mg-tester', null, 'shared');
     const db = new Database(outboundDbPath('ag-1', session.id));
     db.prepare(
       `INSERT INTO messages_out (id, timestamp, kind, platform_id, channel_type, content)
@@ -314,8 +373,8 @@ describe('deliverSessionMessages — instance resolution', () => {
   });
 
   it('default session passes the backfilled default instance (= channel_type)', async () => {
-    seedAgentAndChannel();
-    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
     insertOutbound('ag-1', session.id, 'out-default-inst');
 
     const instances: Array<string | undefined> = [];
@@ -333,10 +392,10 @@ describe('deliverSessionMessages — instance resolution', () => {
 
 describe('deliverSessionMessages — permission check', () => {
   it('rejects delivery to an unauthorized channel destination', async () => {
-    seedAgentAndChannel();
+    await seedAgentAndChannel();
 
     // Create a second messaging group that the agent is NOT wired to
-    createMessagingGroup({
+    await createMessagingGroup({
       id: 'mg-2',
       channel_type: 'discord',
       platform_id: 'discord:456',
@@ -347,7 +406,7 @@ describe('deliverSessionMessages — permission check', () => {
     });
 
     // Session is on mg-1 (telegram)
-    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
 
     // Insert an outbound message targeting mg-2 (discord) — not the origin chat
     const outDb = new Database(outboundDbPath('ag-1', session.id));
@@ -376,21 +435,19 @@ describe('deliverSessionMessages — permission check', () => {
     expect(calls).toHaveLength(0);
 
     // Message is marked as permanently failed
-    const inDb = openInboundDb('ag-1', session.id);
-    const delivered = getDeliveredIds(inDb);
-    inDb.close();
+    const delivered = await withMailboxSession('ag-1', session.id, (mailbox) => mailbox.getDeliveredIds());
     expect(delivered.has('out-unauth')).toBe(true);
   });
 
   it("authorizes and delivers via the sender's own instance when sibling instances share a platform address", async () => {
-    seedAgentAndChannel();
+    await seedAgentAndChannel();
 
     // Two sibling messaging groups share one physical channel address but
     // belong to different adapter instances (e.g. two bot identities in the
     // same multi-bot room). "alpha" sorts before "zulu" lexically, so a
     // plain by-platform lookup with no instance hint would pick "alpha" —
     // the wrong sibling for this sender.
-    createMessagingGroup({
+    await createMessagingGroup({
       id: 'mg-sib-alpha',
       channel_type: 'discord',
       platform_id: 'discord:999',
@@ -400,7 +457,7 @@ describe('deliverSessionMessages — permission check', () => {
       unknown_sender_policy: 'public',
       created_at: now(),
     });
-    createMessagingGroup({
+    await createMessagingGroup({
       id: 'mg-sib-zulu',
       channel_type: 'discord',
       platform_id: 'discord:999',
@@ -412,7 +469,7 @@ describe('deliverSessionMessages — permission check', () => {
     });
 
     // The sender is only authorized against its own ("zulu") sibling.
-    createDestination({
+    await createDestination({
       agent_group_id: 'ag-1',
       local_name: 'room',
       target_type: 'channel',
@@ -422,7 +479,7 @@ describe('deliverSessionMessages — permission check', () => {
 
     // Session origin is mg-1 (telegram) — not the shared room, so the
     // origin-session shortcut doesn't apply here.
-    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
 
     const outDb = new Database(outboundDbPath('ag-1', session.id));
     outDb
@@ -455,12 +512,12 @@ describe('deliverSessionMessages — permission check', () => {
   });
 
   it('still authorizes and delivers an ordinary single-instance non-origin channel destination', async () => {
-    seedAgentAndChannel();
+    await seedAgentAndChannel();
 
     // A second, single-instance channel the agent is legitimately wired to
     // (the common case: broadcasting from a DM session to a wired channel —
     // no sibling instances, no ambiguity, exactly one row for this address).
-    createMessagingGroup({
+    await createMessagingGroup({
       id: 'mg-broadcast',
       channel_type: 'discord',
       platform_id: 'discord:789',
@@ -469,7 +526,7 @@ describe('deliverSessionMessages — permission check', () => {
       unknown_sender_policy: 'public',
       created_at: now(),
     });
-    createDestination({
+    await createDestination({
       agent_group_id: 'ag-1',
       local_name: 'team-channel',
       target_type: 'channel',
@@ -478,7 +535,7 @@ describe('deliverSessionMessages — permission check', () => {
     });
 
     // Session is on mg-1 (telegram) — not the origin of the broadcast target.
-    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
 
     const outDb = new Database(outboundDbPath('ag-1', session.id));
     outDb
@@ -514,8 +571,8 @@ describe('deliverSessionMessages — permission check', () => {
 
 describe('deliverSessionMessages — task_log rows (one-door task delivery)', () => {
   it('appends to the series run log and never calls the adapter', async () => {
-    seedAgentAndChannel();
-    const { session } = resolveTaskSession('ag-1', 'daily-digest-a1b2');
+    await seedAgentAndChannel();
+    const { session } = await resolveTaskSession('ag-1', 'daily-digest-a1b2');
 
     const db = new Database(outboundDbPath('ag-1', session.id));
     db.prepare(
@@ -539,15 +596,15 @@ describe('deliverSessionMessages — task_log rows (one-door task delivery)', ()
     const line = fs.readFileSync(logFile, 'utf8').trim();
     expect(line).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2} — checked feeds; nothing new$/);
     // Marked delivered — the row is not retried.
-    const delivered = getDeliveredIds(openInboundDb('ag-1', session.id));
+    const delivered = await withMailboxSession('ag-1', session.id, (mailbox) => mailbox.getDeliveredIds());
     expect(delivered.has('log-1')).toBe(true);
   });
 });
 
 describe('deliverSessionMessages — batch preview hooks', () => {
   it('hooks see the whole undelivered batch before row processing; a throwing hook never breaks delivery', async () => {
-    seedAgentAndChannel();
-    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
     insertOutbound('ag-1', session.id, 'bp-1');
     insertOutbound('ag-1', session.id, 'bp-2');
 
@@ -602,8 +659,8 @@ describe('deliverSessionMessages — post-delivery hooks', () => {
   }
 
   it('fires only for user-facing kinds — system and task_log rows are skipped', async () => {
-    seedAgentAndChannel();
-    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
     // Unknown system action: handled internally, marked delivered, no hook.
     insertOutboundRow('ag-1', session.id, 'pd-sys', 'system', '2026-01-01T00:00:01.000Z', { action: 'nope' });
     // task_log outside a task session: ignored + marked delivered, no hook.
@@ -627,8 +684,8 @@ describe('deliverSessionMessages — post-delivery hooks', () => {
   });
 
   it('firstDelivery is true exactly on the first delivered row of a fresh session', async () => {
-    seedAgentAndChannel();
-    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
     insertOutboundRow('ag-1', session.id, 'fd-1', 'chat', '2026-01-01T00:00:01.000Z');
     insertOutboundRow('ag-1', session.id, 'fd-2', 'chat', '2026-01-01T00:00:02.000Z');
 
@@ -651,8 +708,8 @@ describe('deliverSessionMessages — post-delivery hooks', () => {
   });
 
   it('a throwing hook never breaks delivery or markDelivered', async () => {
-    seedAgentAndChannel();
-    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
     insertOutboundRow('ag-1', session.id, 'th-1', 'chat', '2026-01-01T00:00:01.000Z');
     insertOutboundRow('ag-1', session.id, 'th-2', 'chat', '2026-01-01T00:00:02.000Z');
 

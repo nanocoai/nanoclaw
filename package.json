@@ -1,6 +1,6 @@
 {
   "name": "nanoclaw",
-  "version": "2.2.0",
+  "version": "2026.10.0-rc.1",
   "description": "Personal AI assistant. Lightweight, secure, customizable.",
   "type": "module",
   "packageManager": "pnpm@10.34.5",
@@ -13,18 +13,26 @@
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
+    "mailbox-model:generate": "cp src/mailbox/model.ts container/agent-runner/src/mailbox/model.generated.ts",
+    "mailbox-model:check": "cmp src/mailbox/model.ts container/agent-runner/src/mailbox/model.generated.ts",
     "format": "prettier --write \"src/**/*.ts\"",
     "format:fix": "prettier --write \"src/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\"",
+    "stdin-json:generate": "sh scripts/sync-stdin-json.sh",
+    "stdin-json:check": "sh scripts/sync-stdin-json.sh --check",
     "prepare": "husky",
     "setup": "tsx setup/index.ts",
     "setup:auto": "tsx setup/auto.ts",
     "ncl": "tsx src/cli/client.ts",
+    "migrate": "tsx scripts/migrate.ts",
+    "release-notes": "node scripts/release-notes.mjs",
     "chat": "tsx scripts/chat.ts",
+    "local-web": "tsx scripts/local-web-url.ts",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:mattermost-live": "MATTERMOST_LAB_REQUIRED=1 vitest run src/channels/mattermost-live.test.ts"
   },
   "dependencies": {
     "@beeper/chat-adapter-matrix": "^0.2.0",
@@ -40,36 +48,43 @@
     "@chat-adapter/whatsapp": "4.29.0",
     "@clack/core": "^1.2.0",
     "@clack/prompts": "^1.2.0",
-    "@onecli-sh/sdk": "2.2.1",
+    "@deltachat/stdio-rpc-server": "2.49.0",
     "@resend/chat-sdk-adapter": "^0.1.1",
     "@types/qrcode": "^1.5.6",
     "@whiskeysockets/baileys": "7.0.0-rc.9",
-    "better-sqlite3": "11.10.0",
+    "better-sqlite3": "13.0.3",
     "chat": "4.29.0",
     "chat-adapter-imessage": "^0.1.1",
-    "chat-adapter-mattermost": "^1.1.3",
     "cron-parser": "5.5.0",
     "kleur": "^4.1.5",
+    "markdown-it": "15.0.0",
     "pino": "^9.6.0",
     "qrcode": "^1.5.4",
     "wechat-ilink-client": "^0.1.0",
+    "ws": "8.21.3",
     "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.35.0",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.10.0",
+    "@types/ws": "8.18.1",
     "eslint": "^9.35.0",
     "eslint-plugin-no-catch-all": "^1.1.0",
     "globals": "^15.12.0",
     "husky": "^9.1.7",
     "prettier": "^3.8.1",
-    "tsx": "^4.19.0",
+    "tsx": "^4.23.15",
     "typescript": "^5.7.0",
     "typescript-eslint": "^8.35.0",
     "vitest": "^4.0.18"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
+  },
+  "pnpm": {
+    "patchedDependencies": {
+      "@beeper/chat-adapter-matrix@0.2.0": "patches/@beeper__chat-adapter-matrix@0.2.0.patch"
+    }
   }
 }

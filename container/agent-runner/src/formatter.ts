@@ -1,6 +1,9 @@
 import { findByRouting } from './destinations.js';
 import type { MessageInRow } from './db/messages-in.js';
 import { TIMEZONE, formatLocalTime, formatLocalStamp } from './timezone.js';
+import './providers/index.js';
+import './provider-contracts/index.js';
+import { getProviderRuntimeContract } from './providers/provider-registry.js';
 
 /**
  * channel_type marking cross-session context copies (accumulate fan-out from
@@ -15,6 +18,21 @@ export function isSessionEcho(msg: MessageInRow): boolean {
 }
 
 /**
+ * Content flag the runner sets on its own failure notices. The host passes
+ * a2a content through unchanged, so the flag reaches the receiving agent and
+ * a failure there sends no notice back (never answer an error with an error).
+ */
+export const FAILURE_NOTICE_FIELD = 'failureNotice';
+
+export function isFailureNotice(msg: MessageInRow): boolean {
+  try {
+    return JSON.parse(msg.content)?.[FAILURE_NOTICE_FIELD] === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Command categories for messages starting with '/'.
  * - admin: sender must be in NANOCLAW_ADMIN_USER_IDS
  * - filtered: silently drop (mark completed without processing)
@@ -23,8 +41,41 @@ export function isSessionEcho(msg: MessageInRow): boolean {
  */
 export type CommandCategory = 'admin' | 'filtered' | 'passthrough' | 'none';
 
-const ADMIN_COMMANDS = new Set(['/remote-control', '/clear', '/compact', '/context', '/cost', '/files', '/upload-trace']);
-const FILTERED_COMMANDS = new Set(['/help', '/login', '/logout', '/doctor', '/config', '/start']);
+/** Commands the runner itself handles, whatever provider is active. */
+const RUNNER_ADMIN_COMMANDS = ['/clear', '/upload-trace'];
+
+interface CommandSets {
+  admin: ReadonlySet<string>;
+  filtered: ReadonlySet<string>;
+}
+
+const commandSetsByProvider = new Map<string, CommandSets>();
+
+/**
+ * The command lists for the ACTIVE provider: the runner's own commands plus
+ * the native admin/filtered commands its contract declares. Another
+ * registered contract's lists are never consulted — a session runs exactly
+ * one provider. A provider without a contract contributes nothing.
+ */
+// What the formatter applied to every provider before runtime contracts
+// existed. Only the contractless fallback reads these; a declared contract
+// supplies its own lists.
+const LEGACY_NATIVE_ADMIN_COMMANDS = ['/remote-control', '/compact', '/context', '/cost', '/files'];
+const LEGACY_NATIVE_FILTERED_COMMANDS = ['/help', '/login', '/logout', '/doctor', '/config', '/start'];
+
+function commandSets(providerName: string): CommandSets {
+  const cached = commandSetsByProvider.get(providerName);
+  if (cached) return cached;
+  const contract = getProviderRuntimeContract(providerName);
+  const sets: CommandSets = {
+    // A provider with no contract keeps the lists the formatter hard-coded
+    // before contracts existed, so a pre-contract payload sees no change.
+    admin: new Set([...RUNNER_ADMIN_COMMANDS, ...(contract?.commands.nativeAdmin ?? LEGACY_NATIVE_ADMIN_COMMANDS)]),
+    filtered: new Set(contract?.commands.nativeFiltered ?? LEGACY_NATIVE_FILTERED_COMMANDS),
+  };
+  commandSetsByProvider.set(providerName, sets);
+  return sets;
+}
 
 export interface CommandInfo {
   category: CommandCategory;
@@ -35,7 +86,8 @@ export interface CommandInfo {
 
 /**
  * Categorize a message as a command or not.
- * Only applies to chat/chat-sdk messages.
+ * Only applies to chat/chat-sdk messages. `providerName` is the active
+ * provider whose contract supplies the native command lists.
  *
  * The extracted `senderId` is compared against `NANOCLAW_ADMIN_USER_IDS`
  * which stores ids in the namespaced form `<channel_type>:<raw>` (see
@@ -44,25 +96,27 @@ export interface CommandInfo {
  * contains a `:` we assume it's pre-namespaced (non-chat-sdk adapters
  * that populate `senderId` directly) and leave it alone.
  */
-export function categorizeMessage(msg: MessageInRow): CommandInfo {
+export function categorizeMessage(msg: MessageInRow, providerName: string): CommandInfo {
   const content = parseContent(msg.content);
   const text = (content.text || '').trim();
   const senderId = extractSenderId(msg, content);
 
   // Cross-session echo rows are ambient copies of another conversation —
-  // a copied "/clear" etc. must never execute here.
-  if (isSessionEcho(msg) || !text.startsWith('/')) {
+  // a copied "/clear" etc. must never execute here. Nor may a failure
+  // notice whose error text happens to start with a slash.
+  if (isSessionEcho(msg) || isFailureNotice(msg) || !text.startsWith('/')) {
     return { category: 'none', command: '', text, senderId };
   }
 
   // Extract the command name (e.g., '/clear' from '/clear some args')
   const command = text.split(/\s/)[0].toLowerCase();
 
-  if (ADMIN_COMMANDS.has(command)) {
+  const commands = commandSets(providerName);
+  if (commands.admin.has(command)) {
     return { category: 'admin', command, text, senderId };
   }
 
-  if (FILTERED_COMMANDS.has(command)) {
+  if (commands.filtered.has(command)) {
     return { category: 'filtered', command, text, senderId };
   }
 
@@ -75,7 +129,7 @@ export function categorizeMessage(msg: MessageInRow): CommandInfo {
  * before messages reach the container.
  */
 export function isClearCommand(msg: MessageInRow): boolean {
-  if (isSessionEcho(msg)) return false;
+  if (isSessionEcho(msg) || isFailureNotice(msg)) return false;
   const content = parseContent(msg.content);
   const text = (content.text || '').trim();
   return text.toLowerCase().startsWith('/clear');
@@ -87,9 +141,9 @@ export function isClearCommand(msg: MessageInRow): boolean {
  * a query's first input. Used by the follow-up poller to bail out and let
  * the outer loop reopen the query.
  */
-export function isRunnerCommand(msg: MessageInRow): boolean {
+export function isRunnerCommand(msg: MessageInRow, providerName: string): boolean {
   if (msg.kind !== 'chat' && msg.kind !== 'chat-sdk') return false;
-  const cat = categorizeMessage(msg).category;
+  const cat = categorizeMessage(msg, providerName).category;
   return cat === 'admin' || cat === 'passthrough';
 }
 
@@ -117,6 +171,8 @@ export interface RoutingContext {
    *  delivers from a task session; final-text `<message to>` blocks are inert
    *  and the final text auto-appends to the series run log. */
   taskRun: boolean;
+  /** Every non-echo row that woke this turn is a failure notice. */
+  failureNoticeWake?: boolean;
 }
 
 /**
@@ -125,10 +181,15 @@ export interface RoutingContext {
  * row must never decide where the reply goes (its routing is NULL by
  * contract, but even a malformed row with routing set is skipped). Falls
  * back to the plain first row if the batch is somehow all echo (shouldn't
- * happen — echo rows never trigger).
+ * happen — echo rows never trigger). A batch that opens with a failure
+ * notice routes by its first real waking message instead, so a failure
+ * answers the requester, not the agent that failed.
  */
 export function extractRouting(messages: MessageInRow[]): RoutingContext {
-  const first = messages.find((m) => !isSessionEcho(m)) ?? messages[0];
+  const nonEcho = messages.filter((m) => !isSessionEcho(m));
+  const waking = nonEcho.filter((m) => m.trigger !== 0);
+  const preferred = nonEcho[0] && isFailureNotice(nonEcho[0]) ? waking.find((m) => !isFailureNotice(m)) : undefined;
+  const first = preferred ?? nonEcho[0] ?? messages[0];
   return {
     platformId: first?.platform_id ?? null,
     channelType: first?.channel_type ?? null,
@@ -136,9 +197,9 @@ export function extractRouting(messages: MessageInRow[]): RoutingContext {
     inReplyTo: first?.id ?? null,
     // Echo rows riding along with a task must not disable one-door delivery:
     // taskRun as long as at least one task row and no non-task/non-echo row.
-    taskRun:
-      messages.some((m) => m.kind === 'task') &&
-      messages.every((m) => m.kind === 'task' || isSessionEcho(m)),
+    taskRun: messages.some((m) => m.kind === 'task') && messages.every((m) => m.kind === 'task' || isSessionEcho(m)),
+    // Accumulated trigger=0 context rides along but did not wake the turn.
+    failureNoticeWake: waking.length > 0 && waking.every(isFailureNotice),
   };
 }
 
@@ -223,13 +284,15 @@ function formatEchoMessage(msg: MessageInRow): string {
   const label = content.echo?.label || 'another conversation';
   const sender = content.sender || 'Unknown';
   const time = formatLocalStamp(new Date(msg.timestamp), TIMEZONE);
-  // dm-timeline rows are the DM's own preceding timeline — FIRST-CLASS
-  // conversation history this thread continues from (the agent's own posts
-  // render as sender="you"), unlike cross-session-context ambient echoes
-  // from other live surfaces which must never be acted on in-place.
-  if (content.echo?.surface === 'dm-timeline') {
+  // Timeline rows are the conversation's own preceding history — FIRST-CLASS
+  // context this thread continues from (the agent's own posts render as
+  // sender="you"), unlike cross-session-context ambient echoes from other
+  // live surfaces which must never be acted on in-place. dm-timeline = a DM's
+  // timeline; channel-timeline = a group conversation's (per-thread groups).
+  if (content.echo?.surface === 'dm-timeline' || content.echo?.surface === 'channel-timeline') {
     const who = (content as { self?: boolean }).self ? 'you' : sender;
-    return `<dm-history sender="${escapeXml(who)}" time="${escapeXml(time)}">${escapeXml(content.text || '')}</dm-history>`;
+    const tag = content.echo.surface === 'channel-timeline' ? 'channel-history' : 'dm-history';
+    return `<${tag} sender="${escapeXml(who)}" time="${escapeXml(time)}">${escapeXml(content.text || '')}</${tag}>`;
   }
   return `<cross-session-context from="${escapeXml(label)}" sender="${escapeXml(sender)}" time="${escapeXml(time)}">${escapeXml(content.text || '')}</cross-session-context>`;
 }

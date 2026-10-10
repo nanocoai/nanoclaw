@@ -35,7 +35,7 @@ export const HELPER_BINARY_NAME = `docker-credential-${CRED_HELPER_NAME}`;
  */
 const HELPER_MARKER = 'nanoclaw-docker-credential-helper';
 
-/** Preferred first; `~/.local/bin` is the unprivileged fallback, as in setup/onecli.ts. */
+/** Preferred first; `~/.local/bin` is the unprivileged fallback used by installable gateways. */
 const BIN_DIRS = ['/usr/local/bin', path.join(os.homedir(), '.local', 'bin')];
 
 /**

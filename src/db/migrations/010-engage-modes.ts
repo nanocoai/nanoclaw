@@ -64,6 +64,7 @@ function backfill(row: LegacyRow): {
 export const migration010: Migration = {
   version: 10,
   name: 'engage-modes',
+  sqliteOnly: true,
   up: (db: Database.Database) => {
     // Add the four new columns alongside the existing two. SQLite ALTER ADD
     // is cheap and non-rewriting.

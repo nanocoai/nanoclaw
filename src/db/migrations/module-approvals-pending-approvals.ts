@@ -5,10 +5,9 @@ import type { Migration } from './index.js';
  * request. Used by:
  *   - install_packages / add_mcp_server  (session-bound, `session_id` set,
  *     status stays at default 'pending' until handled)
- *   - OneCLI credential approvals from the SDK `configureManualApproval`
- *     callback (session_id may be null, action='onecli_credential').
+ *   - Gateway credential approvals (session_id may be null).
  *
- * The OneCLI-specific columns (`agent_group_id`, `channel_type`, `platform_id`,
+ * Provider-tracking columns (`agent_group_id`, `channel_type`, `platform_id`,
  * `platform_message_id`, `expires_at`, `status`) let the host edit the admin
  * card when a request expires and sweep stale rows on startup.
  */
@@ -18,6 +17,7 @@ import type { Migration } from './index.js';
 export const moduleApprovalsPendingApprovals: Migration = {
   version: 3,
   name: 'pending-approvals',
+  sqliteOnly: true,
   up(db) {
     db.exec(`
       CREATE TABLE pending_approvals (

@@ -12,7 +12,7 @@ with (`create_room` / `add_to_room`) — team-room shape, who posts the
 introduction, and the bot-to-bot self-limit.
 
 The host composes every container skill's `instructions.md` into each group's
-CLAUDE.md at spawn (`src/claude-md-compose.ts`), so if you are reading this
+CLAUDE.md at spawn (`src/project-doc-compose.ts`), so if you are reading this
 from inside a session, those rules are already part of your standing
 instructions. There is nothing further to load or run here.
 

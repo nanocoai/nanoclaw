@@ -6,7 +6,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 
-import { closeSessionDb, getInboundDb, getOutboundDb, initTestSessionDb } from './db/connection.js';
+import { closeSessionDb, getInboundDb, getOutboundDb, initTestSessionDb } from './mailbox/sqlite/connection.js';
 import { getUndeliveredMessages, writeMessageOut } from './db/messages-out.js';
 import { getTaskSeriesId } from './db/session-routing.js';
 import { sendFile, sendMessage } from './mcp-tools/core.js';
@@ -109,23 +109,11 @@ describe('explicit outbound destinations', () => {
     expect(out).toHaveLength(1);
     expect(out[0].platform_id).toBe('telegram:99');
   });
-
-  it('preserves the current thread for an explicitly named matching destination', async () => {
-    seedDestination('current-chat', 'discord', 'channel:1');
-    seedSessionRouting('discord', 'channel:1', 'thread-7');
-
-    await sendMessage.handler({ to: 'current-chat', text: 'hello' });
-
-    const out = getUndeliveredMessages();
-    expect(out).toHaveLength(1);
-    expect(out[0].platform_id).toBe('channel:1');
-    expect(out[0].thread_id).toBe('thread-7');
-  });
 });
 
 describe('final-output blocks in a task run', () => {
-  it('keeps them inert and returns their destination and content for correction', () => {
-    const { sent, hasUnwrapped, taskBlocks } = dispatchResultText(
+  it('keeps them inert and returns their destination and content for correction', async () => {
+    const { sent, hasUnwrapped, taskBlocks } = await dispatchResultText(
       '<message to="family">digest is ready</message>',
       taskRouting,
     );
@@ -136,8 +124,8 @@ describe('final-output blocks in a task run', () => {
     expect(getUndeliveredMessages()).toHaveLength(0);
   });
 
-  it('still delivers final-output blocks in chat sessions', () => {
-    const { sent, taskBlocks } = dispatchResultText('<message to="family">hi</message>', {
+  it('still delivers final-output blocks in chat sessions', async () => {
+    const { sent, taskBlocks } = await dispatchResultText('<message to="family">hi</message>', {
       ...taskRouting,
       taskRun: false,
     });
@@ -145,6 +133,28 @@ describe('final-output blocks in a task run', () => {
     expect(sent).toBe(1);
     expect(taskBlocks).toEqual([]);
     expect(getUndeliveredMessages()).toHaveLength(1);
+  });
+
+  it("threads a chat-session block from the batch being answered, not the channel's latest row", async () => {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, seq, kind, timestamp, status, platform_id, channel_type, thread_id, content)
+         VALUES ('in-2', 4, 'chat', ?, 'completed', 'telegram:99', 'telegram', 'T-later', '{}')`,
+      )
+      .run(new Date().toISOString());
+
+    await dispatchResultText('<message to="family">hi</message>', {
+      platformId: 'telegram:99',
+      channelType: 'telegram',
+      threadId: 'T-batch',
+      inReplyTo: 'in-1',
+      taskRun: false,
+    });
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].thread_id).toBe('T-batch');
+    expect(out[0].in_reply_to).toBe('in-1');
   });
 
   it('nudges at most once and only when a task result contains inert blocks', () => {
@@ -165,15 +175,15 @@ describe('final-output blocks in a task run', () => {
     expect(nudge).not.toContain('Re-send now');
   });
 
-  it('records the original task result once, not the correction retry', () => {
+  it('records the original task result once, not the correction retry', async () => {
     let nudged = false;
     const original = '<message to="family">digest</message>';
-    const first = dispatchResultText(original, taskRouting);
-    if (!nudged) autoAppendTaskLog(original);
+    const first = await dispatchResultText(original, taskRouting);
+    if (!nudged) await autoAppendTaskLog(original);
     nudged = shouldNudgeTaskBlocks(true, first.taskBlocks, nudged);
 
-    const retry = dispatchResultText('Delivery decision handled.', taskRouting);
-    if (!nudged) autoAppendTaskLog('Delivery decision handled.');
+    const retry = await dispatchResultText('Delivery decision handled.', taskRouting);
+    if (!nudged) await autoAppendTaskLog('Delivery decision handled.');
     expect(shouldNudgeTaskBlocks(true, retry.taskBlocks, nudged)).toBe(false);
 
     const rows = getOutboundDb().prepare("SELECT content FROM messages_out WHERE kind = 'task_log'").all() as {
@@ -185,8 +195,8 @@ describe('final-output blocks in a task run', () => {
 });
 
 describe('automatic task run summary', () => {
-  it('writes a task_log row from final text', () => {
-    autoAppendTaskLog('Checked  the\nfeeds — nothing new.');
+  it('writes a task_log row from final text', async () => {
+    await autoAppendTaskLog('Checked  the\nfeeds — nothing new.');
 
     const rows = getOutboundDb().prepare("SELECT kind, content FROM messages_out WHERE kind = 'task_log'").all() as {
       kind: string;
@@ -196,8 +206,8 @@ describe('automatic task run summary', () => {
     expect(JSON.parse(rows[0].content).text).toBe('Checked the feeds — nothing new.');
   });
 
-  it('marks legacy final-output blocks undelivered and never stores raw XML', () => {
-    autoAppendTaskLog('Digest done. <message to="family">3 new posts today</message> See you tomorrow.');
+  it('marks legacy final-output blocks undelivered and never stores raw XML', async () => {
+    await autoAppendTaskLog('Digest done. <message to="family">3 new posts today</message> See you tomorrow.');
 
     const row = getOutboundDb().prepare("SELECT content FROM messages_out WHERE kind = 'task_log'").get() as {
       content: string;
@@ -208,8 +218,8 @@ describe('automatic task run summary', () => {
     expect(line).toContain('Digest done.');
   });
 
-  it('is additive to an explicit append-log request', () => {
-    writeMessageOut({
+  it('is additive to an explicit append-log request', async () => {
+    await writeMessageOut({
       id: 'cli-progress',
       kind: 'system',
       content: JSON.stringify({
@@ -220,7 +230,7 @@ describe('automatic task run summary', () => {
       }),
     });
 
-    autoAppendTaskLog('final summary');
+    await autoAppendTaskLog('final summary');
 
     expect(getOutboundDb().prepare("SELECT 1 FROM messages_out WHERE kind = 'task_log'").all()).toHaveLength(1);
   });

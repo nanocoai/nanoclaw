@@ -182,9 +182,7 @@ async function handleStall(
   render: { pauseRender: () => void; resumeRender: () => void },
 ): Promise<void> {
   render.pauseRender();
-  p.log.warn(
-    brandBody(`This looks stuck — no output from the ${stepName} step for the last 60 seconds.`),
-  );
+  p.log.warn(brandBody(`This looks stuck — no output from the ${stepName} step for the last 60 seconds.`));
   phEmit('step_stalled', { step: stepName });
 
   const { ensureAnswer } = await import('./runner.js');
@@ -192,12 +190,12 @@ async function handleStall(
 
   const choice = ensureAnswer(
     await brightSelect<'wait' | 'help'>({
-      message: "What now?",
+      message: 'What now?',
       options: [
         {
           value: 'wait',
-          label: "Keep waiting",
-          hint: "large images can take 5–10 minutes",
+          label: 'Keep waiting',
+          hint: 'large images can take 5–10 minutes',
         },
         {
           value: 'help',

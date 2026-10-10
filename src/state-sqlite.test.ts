@@ -17,13 +17,13 @@ import { initTestDb, closeDb, getDb } from './db/connection.js';
 import { runMigrations } from './db/migrations/index.js';
 import { SqliteStateAdapter } from './state-sqlite.js';
 
-beforeEach(() => {
-  const db = initTestDb();
-  runMigrations(db);
+beforeEach(async () => {
+  const db = await initTestDb();
+  await runMigrations(db);
 });
 
-afterEach(() => {
-  closeDb();
+afterEach(async () => {
+  await closeDb();
 });
 
 async function makeAdapter(namespace?: string): Promise<SqliteStateAdapter> {
@@ -35,7 +35,7 @@ async function makeAdapter(namespace?: string): Promise<SqliteStateAdapter> {
 describe('default instance — legacy unprefixed keys (live-install regression arm)', () => {
   it('reads rows written before the namespace dimension existed', async () => {
     // A pre-existing install's subscription row: bare thread id.
-    getDb().prepare("INSERT INTO chat_sdk_subscriptions (thread_id) VALUES ('T-raw')").run();
+    await getDb().run("INSERT INTO chat_sdk_subscriptions (thread_id) VALUES ('T-raw')");
     const state = await makeAdapter();
     expect(await state.isSubscribed('T-raw')).toBe(true);
   });
@@ -46,13 +46,11 @@ describe('default instance — legacy unprefixed keys (live-install regression a
     await state.subscribe('slack:T1');
     await state.appendToList('l1', 'item');
 
-    const kv = getDb().prepare('SELECT key FROM chat_sdk_kv').all() as Array<{ key: string }>;
+    const kv = await getDb().all<{ key: string }>('SELECT key FROM chat_sdk_kv');
     expect(kv.map((r) => r.key)).toEqual(['k1']);
-    const subs = getDb().prepare('SELECT thread_id FROM chat_sdk_subscriptions').all() as Array<{
-      thread_id: string;
-    }>;
+    const subs = await getDb().all<{ thread_id: string }>('SELECT thread_id FROM chat_sdk_subscriptions');
     expect(subs.map((r) => r.thread_id)).toEqual(['slack:T1']);
-    const lists = getDb().prepare('SELECT key FROM chat_sdk_lists').all() as Array<{ key: string }>;
+    const lists = await getDb().all<{ key: string }>('SELECT key FROM chat_sdk_lists');
     expect(lists.map((r) => r.key)).toEqual(['l1']);
   });
 });
@@ -63,7 +61,7 @@ describe('namespaced instance — round-trips and raw-key shape', () => {
     await state.set('k1', { v: 42 });
     expect(await state.get('k1')).toEqual({ v: 42 });
 
-    const raw = getDb().prepare('SELECT key FROM chat_sdk_kv').all() as Array<{ key: string }>;
+    const raw = await getDb().all<{ key: string }>('SELECT key FROM chat_sdk_kv');
     expect(raw.map((r) => r.key)).toEqual(['slack-tester:k1']);
 
     expect(await state.setIfNotExists('k1', 'other')).toBe(false);
@@ -78,9 +76,7 @@ describe('namespaced instance — round-trips and raw-key shape', () => {
     await state.subscribe('slack:T1');
     expect(await state.isSubscribed('slack:T1')).toBe(true);
 
-    const raw = getDb().prepare('SELECT thread_id FROM chat_sdk_subscriptions').all() as Array<{
-      thread_id: string;
-    }>;
+    const raw = await getDb().all<{ thread_id: string }>('SELECT thread_id FROM chat_sdk_subscriptions');
     expect(raw.map((r) => r.thread_id)).toEqual(['slack-tester:slack:T1']);
 
     await state.unsubscribe('slack:T1');
@@ -92,7 +88,7 @@ describe('namespaced instance — round-trips and raw-key shape', () => {
     await state.appendToList('history', 'a');
     await state.appendToList('history', 'b');
     expect(await state.getList('history')).toEqual(['a', 'b']);
-    const raw = getDb().prepare('SELECT DISTINCT key FROM chat_sdk_lists').all() as Array<{ key: string }>;
+    const raw = await getDb().all<{ key: string }>('SELECT DISTINCT key FROM chat_sdk_lists');
     expect(raw.map((r) => r.key)).toEqual(['slack-tester:history']);
   });
 });
@@ -128,12 +124,12 @@ describe('locks under a namespace', () => {
     // own SQL sites. A prefixed id here would double-prefix on release.
     expect(lock!.threadId).toBe('slack:T1');
 
-    const raw = getDb().prepare('SELECT thread_id FROM chat_sdk_locks').all() as Array<{ thread_id: string }>;
+    const raw = await getDb().all<{ thread_id: string }>('SELECT thread_id FROM chat_sdk_locks');
     expect(raw.map((r) => r.thread_id)).toEqual(['slack-tester:slack:T1']);
 
     expect(await state.extendLock(lock!, 10_000)).toBe(true);
     await state.releaseLock(lock!);
-    expect(getDb().prepare('SELECT COUNT(*) AS c FROM chat_sdk_locks').get()).toEqual({ c: 0 });
+    expect(await getDb().get('SELECT COUNT(*) AS c FROM chat_sdk_locks')).toEqual({ c: 0 });
   });
 
   it('same-thread locks in different namespaces do not contend', async () => {
@@ -152,7 +148,7 @@ describe('queue under a namespace', () => {
     const entry = { message: { id: 'm1' } } as never;
     expect(await state.enqueue('slack:T1', entry, 10)).toBe(1);
 
-    const raw = getDb().prepare('SELECT DISTINCT key FROM chat_sdk_lists').all() as Array<{ key: string }>;
+    const raw = await getDb().all<{ key: string }>('SELECT DISTINCT key FROM chat_sdk_lists');
     // Single prefix: enqueue must NOT apply k() itself (appendToList does);
     // a double prefix ('slack-tester:slack-tester:queue:…') never drains.
     expect(raw.map((r) => r.key)).toEqual(['slack-tester:queue:slack:T1']);
@@ -162,5 +158,24 @@ describe('queue under a namespace', () => {
     expect(out).toEqual(entry);
     expect(await state.queueDepth('slack:T1')).toBe(0);
     expect(await state.dequeue('slack:T1')).toBeNull();
+  });
+
+  it('keeps concurrent appends contiguous and never dequeues one row twice', async () => {
+    const state = await makeAdapter('slack-race');
+    await Promise.all(Array.from({ length: 20 }, (_, i) => state.appendToList('history', i)));
+
+    const rows = await getDb().all<{ idx: number }>(
+      'SELECT idx FROM chat_sdk_lists WHERE key = ? ORDER BY idx',
+      'slack-race:history',
+    );
+    expect(rows.map((row) => row.idx)).toEqual(Array.from({ length: 20 }, (_, i) => i));
+
+    const first = { message: { id: 'q1' } } as never;
+    const second = { message: { id: 'q2' } } as never;
+    await state.enqueue('slack:T2', first, 10);
+    await state.enqueue('slack:T2', second, 10);
+    const dequeued = await Promise.all([state.dequeue('slack:T2'), state.dequeue('slack:T2')]);
+    expect(dequeued).toEqual(expect.arrayContaining([first, second]));
+    expect(await state.dequeue('slack:T2')).toBeNull();
   });
 });

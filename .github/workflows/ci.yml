@@ -3,20 +3,27 @@ name: CI
 on:
   pull_request:
     branches: [main]
+  # A post-merge run on main, so main itself carries a verdict and not only the
+  # pull requests that fed it. Nothing below reads the pull_request payload.
+  push:
+    branches: [main]
 
 jobs:
-  ci:
+  test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [22, 24]
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 20
+          node-version: ${{ matrix.node-version }}
           cache: pnpm
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.3.12
+          bun-version: 1.4.0
       - run: pnpm install --frozen-lockfile
       - name: Install agent-runner deps (Bun)
         working-directory: container/agent-runner
@@ -36,4 +43,62 @@ jobs:
 
       - name: Container tests
         working-directory: container/agent-runner
-        run: bun test
+        run: bun run test
+
+  iron-front:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: '1.26.1'
+          cache-dependency-path: .claude/skills/add-iron-proxy/front-proxy/go.sum
+      - name: Verify stock Iron and front proxy
+        shell: bash
+        run: |
+          set -euo pipefail
+          skill="$GITHUB_WORKSPACE/.claude/skills/add-iron-proxy"
+          source_dir="$RUNNER_TEMP/stock-iron-source"
+          source_url=$(jq -r '."iron-proxy-source"' "$skill/versions.json")
+          revision=$(jq -r '."iron-proxy-commit"' "$skill/versions.json")
+          git init "$source_dir"
+          git -C "$source_dir" remote add origin "$source_url"
+          git -C "$source_dir" fetch --depth=1 origin "$revision"
+          git -C "$source_dir" checkout --detach FETCH_HEAD
+          test "$(git -C "$source_dir" rev-parse HEAD)" = "$revision"
+          cp -R "$skill/front-proxy" "$source_dir/_front-proxy"
+          cd "$source_dir/_front-proxy"
+          go test -mod=readonly -race -count=1 ./...
+          test -z "$(gofmt -l .)"
+          git -C "$source_dir" diff --exit-code
+
+  # Repository rules require exact `ci`; always run it so matrix failures remain blocking.
+  ci:
+    if: always()
+    needs: [test, iron-front]
+    permissions: {}
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          test "${{ needs.test.result }}" = success
+          test "${{ needs.iron-front.result }}" = success
+
+  # The single check the main ruleset will require, in every repo under the same
+  # name. It needs `ci` as well as `test` so the older required context and the
+  # new one cannot disagree. if: always() because a skipped required check is
+  # not a failed one.
+  gate:
+    name: gate
+    if: always()
+    needs: [test, iron-front, ci]
+    permissions: {}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: every needed job succeeded
+        run: |
+          test "${{ needs.test.result }}" = success
+          test "${{ needs.ci.result }}" = success
+          test "${{ needs.iron-front.result }}" = success

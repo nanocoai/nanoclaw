@@ -43,14 +43,14 @@ function now() {
 beforeEach(async () => {
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   fs.mkdirSync(TEST_DIR, { recursive: true });
-  const db = initTestDb();
-  runMigrations(db);
+  const db = await initTestDb();
+  await runMigrations(db);
 
   await import('./index.js');
 
-  createAgentGroup({ id: 'ag-1', name: 'Agent', folder: 'agent', agent_provider: null, created_at: now() });
+  await createAgentGroup({ id: 'ag-1', name: 'Agent', folder: 'agent', agent_provider: null, created_at: now() });
 
-  createMessagingGroup({
+  await createMessagingGroup({
     id: 'mg-channel',
     channel_type: 'telegram',
     platform_id: 'telegram:-1009999',
@@ -59,7 +59,7 @@ beforeEach(async () => {
     unknown_sender_policy: 'public',
     created_at: now(),
   });
-  createMessagingGroupAgent({
+  await createMessagingGroupAgent({
     id: 'mga-known',
     messaging_group_id: 'mg-channel',
     agent_group_id: 'ag-1',
@@ -75,8 +75,8 @@ beforeEach(async () => {
   vi.mocked(wakeContainer).mockClear();
 });
 
-afterEach(() => {
-  closeDb();
+afterEach(async () => {
+  await closeDb();
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
 });
 

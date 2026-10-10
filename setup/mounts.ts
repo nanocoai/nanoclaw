@@ -32,18 +32,13 @@ export async function run(args: string[]): Promise<void> {
   const configFile = path.join(configDir, 'mount-allowlist.json');
 
   if (isRoot()) {
-    log.warn(
-      'Running as root — mount allowlist will be written to root home directory',
-    );
+    log.warn('Running as root — mount allowlist will be written to root home directory');
   }
 
   fs.mkdirSync(configDir, { recursive: true });
 
   if (fs.existsSync(configFile) && !force) {
-    log.info(
-      'Mount allowlist already exists — skipping (use --force to overwrite)',
-      { configFile },
-    );
+    log.info('Mount allowlist already exists — skipping (use --force to overwrite)', { configFile });
     emitStatus('CONFIGURE_MOUNTS', {
       PATH: configFile,
       ALLOWED_ROOTS: 0,
@@ -85,9 +80,7 @@ export async function run(args: string[]): Promise<void> {
     }
 
     fs.writeFileSync(configFile, JSON.stringify(parsed, null, 2) + '\n');
-    allowedRoots = Array.isArray(parsed.allowedRoots)
-      ? parsed.allowedRoots.length
-      : 0;
+    allowedRoots = Array.isArray(parsed.allowedRoots) ? parsed.allowedRoots.length : 0;
     nonMainReadOnly = parsed.nonMainReadOnly === false ? 'false' : 'true';
   } else {
     // Read from stdin
@@ -111,16 +104,11 @@ export async function run(args: string[]): Promise<void> {
     }
 
     fs.writeFileSync(configFile, JSON.stringify(parsed, null, 2) + '\n');
-    allowedRoots = Array.isArray(parsed.allowedRoots)
-      ? parsed.allowedRoots.length
-      : 0;
+    allowedRoots = Array.isArray(parsed.allowedRoots) ? parsed.allowedRoots.length : 0;
     nonMainReadOnly = parsed.nonMainReadOnly === false ? 'false' : 'true';
   }
 
-  log.info(
-    'Allowlist configured',
-    { configFile, allowedRoots, nonMainReadOnly },
-  );
+  log.info('Allowlist configured', { configFile, allowedRoots, nonMainReadOnly });
 
   emitStatus('CONFIGURE_MOUNTS', {
     PATH: configFile,

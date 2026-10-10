@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>NanoClaw · Local web chat</title>
+    <link rel="stylesheet" href="/local-web-page.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside id="agent-sidebar" class="agent-sidebar" aria-label="Agents">
+        <div class="sidebar-brand">
+          <!-- Inline, not <img>: the page's CSP allows data: images only, and the
+               adapter serves no route for an SVG file. -->
+          <h1>
+            <svg
+              class="logotype"
+              viewBox="0 0 793 116"
+              role="img"
+              aria-label="NanoClaw"
+              xmlns="http://www.w3.org/2000/svg"
+            >
+              <path
+                d="M461.184 2C482.307 2 497.92 10.0173 506.645 25.3649C508.864 29.1827 510.012 33.2296 510.012 37.1237C510.012 45.3702 504.425 50.7153 495.93 50.7153C488.889 50.7153 484.603 47.9666 481.083 41.1709C476.185 31.7791 470.062 27.4266 461.567 27.4266C448.25 27.4266 439.832 39.1856 439.832 58.8855C439.832 78.8144 448.174 90.5734 461.644 90.5734C470.521 90.5733 476.72 86.0682 481.389 76.2946C484.68 69.3462 488.583 66.6737 495.394 66.6737C504.655 66.6738 510.701 72.3242 510.701 80.9525C510.701 83.7013 510.089 86.6028 508.941 89.4279C502.512 105.386 483.915 116 462.409 116C427.357 116 406.77 95.3073 406.77 58.9617C406.77 22.6162 427.816 2 461.184 2Z"
+                class="mark-claw"
+              />
+              <path
+                d="M541.429 2C572.606 2.00013 557.118 81.4572 557.118 99.8123C557.118 110.884 550.613 116 541.429 116C513.535 116 513.535 2 541.429 2Z"
+                class="mark-claw"
+              />
+              <path
+                fill-rule="evenodd"
+                clip-rule="evenodd"
+                d="M615.124 27.6556C638.543 27.6556 654.232 39.3383 654.232 56.4421V100.271C654.232 111.113 647.727 116 638.696 116C630.43 116 624.614 111.953 623.619 102.79H623.006C618.568 111.037 608.312 115.313 598.516 115.313C583.133 115.313 570.046 104.776 570.046 89.5807C570.046 73.3932 582.521 64.6123 605.098 63.2379L623.619 62.0924V57.969C623.619 52.3188 619.333 49.2646 613.44 49.2646C608.542 49.2646 606.093 50.5627 600.659 55.5259C596.985 58.8855 593.006 60.5652 588.337 60.5652C580.914 60.5652 575.633 55.9839 575.633 49.4936C575.633 47.5847 575.786 46.3631 576.245 44.836C579.459 34.0698 594.077 27.6556 615.124 27.6556ZM610.302 79.7308C604.332 80.1889 600.965 83.014 600.965 87.1373C600.965 91.7186 604.715 94.391 610.225 94.391C617.19 94.391 623.619 90.4969 623.619 84.3121V78.8143L610.302 79.7308Z"
+                class="mark-claw"
+              />
+              <path
+                d="M777.679 27.8848C786.174 27.8848 792.297 33.4589 792.297 41.0181C792.297 44.1487 791.685 46.7449 790.46 51.1735L776.837 98.8961C773.47 110.731 767.653 116 756.25 116C744.311 116 738.188 110.808 735.586 98.7433L727.168 59.8017H726.555L718.213 99.0488C715.688 110.96 709.642 116 697.932 116C686.758 116 681.095 110.731 677.727 99.0488L664.105 51.5553C662.803 47.0502 662.191 44.4541 662.191 41.2471C662.191 33.5352 668.62 27.8849 677.268 27.8848C698.754 27.8848 698.109 72.3775 700.84 86.679H701.453L710.101 42.3926C711.937 33.0008 718.06 27.8848 727.55 27.8848C736.964 27.8849 743.163 33.0007 745 42.4688L753.724 86.679H754.337L763.061 41.0944C764.592 33.0006 769.949 27.8848 777.679 27.8848Z"
+                class="mark-claw"
+              />
+              <path
+                d="M144.664 112.991C129.285 112.991 116.202 102.456 116.202 87.2638C116.202 71.0795 128.673 62.3004 151.244 60.9262L169.76 59.7811V55.6587C169.76 50.0095 165.475 46.9559 159.584 46.9559C154.687 46.9559 152.239 48.2537 146.806 53.2158C143.134 56.5748 139.155 58.2543 134.488 58.2543C127.067 58.2543 121.787 53.6739 121.787 47.1849C121.787 45.2764 121.94 44.0549 122.399 42.5281C125.613 31.7641 140.227 25.3515 161.267 25.3515C184.68 25.3515 200.365 37.0316 200.365 54.1319V97.9515C200.365 108.792 193.861 113.678 184.833 113.678C176.569 113.678 170.755 109.632 169.76 100.471H169.148C164.71 108.715 154.458 112.991 144.664 112.991ZM156.37 92.0732C163.333 92.0732 169.76 88.1798 169.76 81.9963V76.4997L156.447 77.4158C150.479 77.8739 147.113 80.6985 147.113 84.8209C147.113 89.4013 150.862 92.0732 156.37 92.0732ZM227.909 113.678C218.727 113.678 212.224 108.563 212.224 97.4934V41.3067C212.224 31.306 217.656 25.5805 227.45 25.5805C237.243 25.5805 243.594 31.306 243.594 41.383V43.2915H244.206C248.49 31.4587 256.524 25.8095 269.378 25.8095C288.353 25.8095 298.758 37.566 298.758 57.7963V97.4934C298.758 108.563 292.255 113.678 283.073 113.678C273.892 113.678 267.389 108.563 267.389 97.4934V64.7433C267.389 56.2694 263.41 51.0783 255.529 51.0783C248.108 51.0783 243.594 56.8038 243.594 64.6669V97.4934C243.594 108.563 237.09 113.678 227.909 113.678ZM352.393 113.907C324.849 113.907 308.016 98.0278 308.016 69.5527C308.016 41.841 325.308 25.3515 352.393 25.3515C379.631 25.3515 396.846 41.6884 396.846 69.5527C396.846 98.1041 380.013 113.907 352.393 113.907ZM352.393 91.5388C360.197 91.5388 365.017 83.7521 365.017 69.6291C365.017 55.8877 360.12 47.7193 352.393 47.7193C344.742 47.7193 339.845 55.8877 339.845 69.6291C339.845 83.7521 344.512 91.5388 352.393 91.5388Z"
+                class="mark-word"
+              />
+              <path
+                d="M35.6947 8.85552C31.0275 2.67192 26.5133 0 20.6219 0C-7.14729 0 -6.59928 113.977 20.6219 113.977C30.2624 113.977 35.9242 108.327 35.9242 97.9451V54.0492L74.2565 105.121C78.8471 111.381 83.2083 113.977 89.4057 113.977C116.426 113.977 116.358 0 89.0232 0C79.3827 0 73.7209 5.64921 73.7209 16.0315V59.0114L35.6947 8.85552Z"
+                class="mark-word"
+              />
+            </svg>
+          </h1>
+        </div>
+        <button id="create-agent" class="create-agent-button" type="button">Create agent</button>
+        <nav id="agent-list" class="agent-list" aria-label="Agent conversations"></nav>
+        <p class="sidebar-local">Local only · 127.0.0.1</p>
+      </aside>
+      <button id="sidebar-scrim" class="sidebar-scrim" type="button" aria-label="Close agent selector" hidden></button>
+
+      <section class="shell">
+        <header>
+          <div class="header-identity">
+            <button
+              id="agents-toggle"
+              class="icon-button agents-toggle"
+              type="button"
+              aria-label="Choose agent"
+              aria-controls="agent-sidebar"
+              aria-expanded="false"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" aria-hidden="true">
+                <path d="M4 6h16M4 12h16M4 18h16" />
+              </svg>
+            </button>
+            <div class="identity">
+              <p class="eyebrow">Current agent</p>
+              <h1 id="agent-title">Loading…</h1>
+              <p id="agent-runtime" class="agent-runtime"></p>
+            </div>
+          </div>
+          <div class="header-tools">
+            <p id="status" class="status" role="status" data-state="down"><span>Connecting…</span></p>
+            <button id="theme" class="icon-button" type="button" aria-label="Switch theme" title="Switch theme">
+              <svg
+                class="icon-moon"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.9"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a6.8 6.8 0 0 0 10.5 10.5Z" />
+              </svg>
+              <svg
+                class="icon-sun"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.9"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <circle cx="12" cy="12" r="4" />
+                <path
+                  d="M12 2.5v2M12 19.5v2M4.6 4.6l1.4 1.4M18 18l1.4 1.4M2.5 12h2M19.5 12h2M4.6 19.4 6 18M18 6l1.4-1.4"
+                />
+              </svg>
+            </button>
+          </div>
+        </header>
+
+        <div class="log-wrap">
+          <section id="messages" role="log" aria-live="polite" aria-label="Conversation"></section>
+          <div id="activity" class="activity" role="status" hidden>
+            <span class="activity-dot" aria-hidden="true"></span>
+            <span id="activity-label">Thinking…</span>
+          </div>
+          <button id="jump" class="jump" type="button" hidden>
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.4"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M12 4v15M5.5 12.5 12 19l6.5-6.5" />
+            </svg>
+            Latest
+          </button>
+        </div>
+
+        <div class="dock">
+          <form id="composer">
+            <label class="sr-only" for="message">Message your agent</label>
+            <textarea
+              id="message"
+              maxlength="8000"
+              rows="1"
+              placeholder="Message your agent…"
+              autocomplete="off"
+            ></textarea>
+            <button id="send" type="submit" disabled>Send</button>
+          </form>
+          <p class="hint">
+            <span class="hint-keys"><kbd>Enter</kbd> to send · <kbd>Shift</kbd>+<kbd>Enter</kbd> for a new line</span>
+            <span id="counter" class="counter" hidden></span>
+          </p>
+        </div>
+      </section>
+    </main>
+
+    <dialog id="create-agent-dialog" class="create-agent-dialog" aria-labelledby="create-agent-title">
+      <form id="create-agent-form">
+        <div class="dialog-heading">
+          <div>
+            <p class="dialog-kicker">New conversation</p>
+            <h2 id="create-agent-title">Create agent</h2>
+          </div>
+          <button id="close-create-agent" class="icon-button" type="button" aria-label="Close create agent dialog">
+            ×
+          </button>
+        </div>
+        <p id="create-agent-error" class="form-error" role="alert" hidden></p>
+        <label class="form-field">
+          <span>Name</span>
+          <input id="agent-name" name="name" maxlength="64" autocomplete="off" required />
+        </label>
+        <div class="inheritance-summary">
+          <span>Inherit from <strong id="inherit-agent"></strong></span>
+          <span id="inherit-runtime"></span>
+        </div>
+        <label id="provider-field" class="form-field">
+          <span>Provider</span>
+          <select id="agent-provider" name="provider"></select>
+        </label>
+        <p id="single-provider" class="single-provider" hidden></p>
+        <details id="advanced-options" class="advanced-options">
+          <summary>Advanced</summary>
+          <div class="advanced-fields">
+            <label class="form-field">
+              <span>Model</span>
+              <input id="agent-model" name="model" maxlength="128" placeholder="Default" autocomplete="off" />
+            </label>
+            <label class="form-field">
+              <span>Effort</span>
+              <select id="agent-effort" name="effort">
+                <option value="">Default</option>
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+                <option value="xhigh">XHigh</option>
+              </select>
+            </label>
+          </div>
+        </details>
+        <div class="dialog-actions">
+          <button id="cancel-create-agent" class="secondary-button" type="button">Cancel</button>
+          <button id="submit-create-agent" class="primary-button" type="submit">Create agent</button>
+        </div>
+      </form>
+    </dialog>
+    <script src="/local-web-page.js" type="module"></script>
+  </body>
+</html>

@@ -19,6 +19,13 @@ the room. The flow also adds two agent-facing room actions — `create_room`
 flow's `purpose` / `allow_guests` / `room` parameters. Non-Slack sessions are
 untouched: `create_agent` from any other channel behaves exactly as upstream.
 
+**Canonical home.** This directory on `main` is the skill's canonical source —
+the setup wizard and any direct apply read it from the checkout. The copy on
+the `channels` branch is a compatibility mirror for older checkouts whose
+setup fetches companions from there; edits land here, never there. The
+payload the Apply steps fetch with `from-branch:channels` stays on the
+channels branch, exactly like `/add-slack`'s own.
+
 ## Prerequisites
 
 All prose below assumes these are already in place, in this order:
@@ -65,7 +72,7 @@ NanoClaw trunk is too old for this skill — bring the install up to date
 (`/update-nanoclaw`) instead of patching any of these files by hand:
 
 ```nc:run effect:check
-grep -q "export async function startChannelAdapter" src/channels/channel-registry.ts && grep -q "export function registerDeliveryBatchPreview" src/delivery.ts && grep -q "session: Session) => Promise<void>" src/delivery.ts && grep -q "trigger?: boolean" src/session-manager.ts && grep -q "findCliResponse" container/agent-runner/src/db/messages-in.ts && grep -q "Promise<number>" container/agent-runner/src/db/messages-out.ts && grep -q "suppressCreatedNotify" src/modules/agent-to-agent/create-agent.ts && grep -q "dedupeKey?: string" src/modules/permissions/sender-approval.ts && grep -q "declineText?: string" src/modules/permissions/sender-approval.ts && grep -q "fyiText?: string" src/modules/permissions/sender-approval.ts && grep -q "export function extendTool" container/agent-runner/src/mcp-tools/server.ts && grep -q "export function registerChannelPreStep" setup/channels/companions.ts && grep -q "instructions.md" src/claude-md-compose.ts && grep -q "await action.decide" src/guard/guard.ts
+grep -q "export async function startChannelAdapter" src/channels/channel-registry.ts && grep -q "export function registerDeliveryBatchPreview" src/delivery.ts && grep -q "session: Session) => Promise<void>" src/delivery.ts && grep -q "trigger?: boolean" src/session-manager.ts && grep -q "findCliResponse" container/agent-runner/src/db/messages-in.ts && grep -q "Promise<number>" container/agent-runner/src/db/messages-out.ts && grep -q "suppressCreatedNotify" src/modules/agent-to-agent/create-agent.ts && grep -q "dedupeKey?: string" src/modules/permissions/sender-approval.ts && grep -q "declineText?: string" src/modules/permissions/sender-approval.ts && grep -q "fyiText?: string" src/modules/permissions/sender-approval.ts && grep -q "export function extendTool" container/agent-runner/src/mcp-tools/server.ts && grep -q "export function registerChannelPreStep" setup/channels/companions.ts && grep -q "instructions.md" src/project-doc-compose.ts && grep -q "await action.decide" src/guard/guard.ts
 ```
 
 The last term requires an async-capable guard seam: the flow's `create_agent`
@@ -288,15 +295,14 @@ bash setup/lib/restart.sh
   `--restart` runs `bash setup/lib/restart.sh` for you, otherwise it prints
   the restart instruction.
 
-- **Setup-wizard leg.** On a trunk new enough for step 2's check, running
-  `bash nanoclaw.sh --slack-agents` does the whole install: the flag registers
-  the managed-provisioning pre-step and the companion list
-  (`slack-a2a-rooms`, then this skill) at wizard boot
+- **Setup-wizard leg.** `bash nanoclaw.sh` does the whole install by default:
+  the managed-provisioning pre-step and the companion list (`slack-a2a-rooms`,
+  then this skill) register unconditionally at wizard boot
   (`setup/channels/slack-auto-register.ts` → `setup/channels/companions.ts`),
   so the wizard provisions the first app, applies `/add-slack`, then applies
-  both feature skills with one deferred restart. Without the flag, setup
-  installs the base Slack experience only. That leg ships with trunk, and
-  this skill does not touch it.
+  both feature skills with one deferred restart. A plain-bot install is the
+  manual choice inside the flow. That leg ships with trunk, and this skill
+  does not touch it.
 
 Everything the flow creates at runtime is user data, not skill payload: agent
 groups, messaging groups, and wirings stay in the central DB; token lines,

@@ -4,24 +4,18 @@
  *
  * Fixes: Root→system systemd, WSL nohup fallback, no `|| true` swallowing errors.
  */
-import { execSync } from 'child_process';
+import { execFileSync, execSync } from 'child_process';
 import fs from 'fs';
+import net from 'net';
 import os from 'os';
 import path from 'path';
 
+import { readEnvFile } from '../src/env.js';
 import { log } from '../src/log.js';
 import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
 import { writeUpgradeState } from '../src/upgrade-state.js';
 import { cleanupUnhealthyPeers } from './peer-cleanup.js';
-import {
-  commandExists,
-  getPlatform,
-  getNodePath,
-  getServiceManager,
-  hasSystemd,
-  isRoot,
-  isWSL,
-} from './platform.js';
+import { commandExists, getPlatform, getNodePath, getServiceManager, isRoot } from './platform.js';
 import { emitStatus } from './status.js';
 
 export async function run(_args: string[]): Promise<void> {
@@ -79,10 +73,13 @@ export async function run(_args: string[]): Promise<void> {
     });
   }
 
+  proxyStatusFields = proxyStatus(projectRoot, nodePath);
+  tightenCredentialFiles(projectRoot, homeDir);
+
   if (platform === 'macos') {
     setupLaunchd(projectRoot, nodePath, homeDir);
   } else if (platform === 'linux') {
-    setupLinux(projectRoot, nodePath, homeDir);
+    await setupLinux(projectRoot, nodePath, homeDir);
   } else {
     emitStatus('SETUP_SERVICE', {
       SERVICE_TYPE: 'unknown',
@@ -96,6 +93,159 @@ export async function run(_args: string[]): Promise<void> {
   }
 
   installCliSymlink(projectRoot, homeDir);
+}
+
+const PROXY_KEYS = ['HTTPS_PROXY', 'HTTP_PROXY', 'ALL_PROXY'];
+// Node's fetch only matches IPv6 NO_PROXY entries written in brackets; http.get matches the bare form.
+const DEFAULT_NO_PROXY = 'localhost,127.0.0.1,::1,[::1]';
+
+/**
+ * Environment the host needs to reach the internet through an outbound proxy.
+ * Node ignores HTTPS_PROXY unless NODE_USE_ENV_PROXY is set when the process
+ * boots, so it has to come from the service definition, not from the host's
+ * own startup code. Each key resolves on its own, setup shell over .env, and
+ * falls back to ALL_PROXY and then to the other key. NO_PROXY entries (from
+ * the user or written to .env by a gateway skill) are added to the loopback
+ * defaults. Returns an empty object when no proxy is configured.
+ */
+export function hostProxyEnv(projectRoot: string, env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const fromFile = readEnvFile([...PROXY_KEYS, 'NO_PROXY'], projectRoot);
+  const pick = (key: string): string | undefined =>
+    (env[key] || env[key.toLowerCase()] || fromFile[key])?.trim() || undefined;
+  // Node's built-in proxy support only speaks to http(s) proxies.
+  const proxy = (key: string): string | undefined => {
+    const url = pick(key);
+    return url && /^https?:\/\/\S+$/i.test(url) ? url : undefined;
+  };
+  const httpsProxy = proxy('HTTPS_PROXY') ?? proxy('ALL_PROXY') ?? proxy('HTTP_PROXY');
+  const httpProxy = proxy('HTTP_PROXY') ?? proxy('ALL_PROXY') ?? proxy('HTTPS_PROXY');
+  if (!httpsProxy || !httpProxy) return {};
+
+  const bypass = [DEFAULT_NO_PROXY, env.NO_PROXY, env.no_proxy, fromFile.NO_PROXY]
+    .flatMap((list) => (list ?? '').split(/[\s,]+/))
+    .filter(Boolean);
+
+  return {
+    NODE_USE_ENV_PROXY: '1',
+    HTTPS_PROXY: httpsProxy,
+    HTTP_PROXY: httpProxy,
+    NO_PROXY: [...new Set(bypass)].join(','),
+  };
+}
+
+/**
+ * Whether a Node version (e.g. "22.20.0") honors NODE_USE_ENV_PROXY for both
+ * fetch and http(s). 22.21+ does; 23.x ignores it; 24.0-24.4 only proxies fetch.
+ */
+export function nodeHonorsEnvProxy(version: string): boolean {
+  const [major, minor] = version.split('.').map(Number);
+  if (major === 22) return minor >= 21;
+  if (major === 24) return minor >= 5;
+  return major >= 25;
+}
+
+/**
+ * Status fields for SETUP_SERVICE: PROXY=ignored_by_node when a proxy is
+ * configured but the service's Node won't use it, so the wizard can say so.
+ */
+function proxyStatus(projectRoot: string, nodePath: string): Record<string, string> {
+  if (Object.keys(hostProxyEnv(projectRoot)).length === 0) return {};
+  let version: string;
+  try {
+    version = execFileSync(nodePath, ['-p', 'process.versions.node'], { encoding: 'utf8' }).trim();
+  } catch {
+    return {};
+  }
+  if (nodeHonorsEnvProxy(version)) return {};
+  log.warn('An outbound proxy is configured but this Node ignores NODE_USE_ENV_PROXY; the host will go direct', {
+    nodePath,
+    version,
+  });
+  return { PROXY: 'ignored_by_node', PROXY_NODE_VERSION: version };
+}
+
+// Set once per run so every service type reports it in SETUP_SERVICE.
+let proxyStatusFields: Record<string, string> = {};
+
+/**
+ * hostProxyEnv() as [name, value] pairs, with each proxy key also under its
+ * lowercase name: Node reads the lowercase name first, so an inherited
+ * no_proxy would otherwise override the merged NO_PROXY.
+ */
+function hostProxyEnvEntries(projectRoot: string): [string, string][] {
+  return Object.entries(hostProxyEnv(projectRoot)).flatMap(([key, value]): [string, string][] =>
+    key === 'NODE_USE_ENV_PROXY'
+      ? [[key, value]]
+      : [
+          [key, value],
+          [key.toLowerCase(), value],
+        ],
+  );
+}
+
+export function serviceProxyEnvPath(projectRoot: string): string {
+  return path.join(projectRoot, 'data', 'service-proxy.env');
+}
+
+/** Writes via a fresh 0600 file and a rename, so an existing wider-mode file never holds the new content. */
+export function writeOwnerOnly(file: string, content: string): void {
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.rmSync(tmp, { force: true });
+  fs.writeFileSync(tmp, content, { mode: 0o600, flag: 'wx' });
+  fs.renameSync(tmp, file);
+}
+
+/**
+ * Writes the proxy environment to an owner-only file, since proxy URLs can
+ * carry credentials. The double-quoted format reads the same through
+ * systemd's EnvironmentFile= and bash's `source`. Removes the file and
+ * returns undefined when no proxy is configured.
+ */
+export function writeServiceProxyEnv(projectRoot: string): string | undefined {
+  const file = serviceProxyEnvPath(projectRoot);
+  const entries = hostProxyEnvEntries(projectRoot);
+  if (entries.length === 0) {
+    fs.rmSync(file, { force: true });
+    return undefined;
+  }
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const lines = entries.map(([key, value]) => `${key}="${value.replace(/[\\"`$]/g, '\\$&')}"\n`);
+  writeOwnerOnly(file, lines.join(''));
+  return file;
+}
+
+/**
+ * Earlier setups wrote proxy URLs inline. The active service file is rewritten
+ * below, but one left by another service type would keep its credentials.
+ */
+export function tightenCredentialFiles(projectRoot: string, homeDir: string): void {
+  const unit = `${getSystemdUnit(projectRoot)}.service`;
+  const candidates = [
+    path.join(homeDir, 'Library', 'LaunchAgents', `${getLaunchdLabel(projectRoot)}.plist`),
+    path.join(homeDir, '.config', 'systemd', 'user', unit),
+    `/etc/systemd/system/${unit}`,
+    path.join(projectRoot, 'start-nanoclaw.sh'),
+  ];
+  for (const file of candidates) {
+    let target = 0o600;
+    try {
+      const mode = fs.statSync(file).mode & 0o777;
+      target = mode & 0o700;
+      const text = mode & 0o077 ? fs.readFileSync(file, 'utf8') : '';
+      if (!/_proxy/i.test(text) || !text.includes('@')) continue;
+      fs.chmodSync(file, target);
+      log.info('Restricted a service file that holds proxy credentials', { file });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      // Usually a root-owned file left by an earlier root install; only the user can fix it.
+      const fix = `sudo chmod ${target.toString(8)} ${shellQuote(file)}`;
+      log.warn(`Could not restrict ${file}, which may hold a proxy password. To fix, run: ${fix}`, { file, fix, err });
+    }
+  }
+}
+
+function xmlEscape(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 /**
@@ -131,21 +281,16 @@ function installCliSymlink(projectRoot: string, homeDir: string): void {
   }
 }
 
-function setupLaunchd(
-  projectRoot: string,
-  nodePath: string,
-  homeDir: string,
-): void {
+function setupLaunchd(projectRoot: string, nodePath: string, homeDir: string): void {
   // Per-checkout service label so multiple NanoClaw installs can coexist
   // without clobbering each other's plist.
   const label = getLaunchdLabel(projectRoot);
-  const plistPath = path.join(
-    homeDir,
-    'Library',
-    'LaunchAgents',
-    `${label}.plist`,
-  );
+  const plistPath = path.join(homeDir, 'Library', 'LaunchAgents', `${label}.plist`);
   fs.mkdirSync(path.dirname(plistPath), { recursive: true });
+
+  const proxyEntries = hostProxyEnvEntries(projectRoot)
+    .map(([key, value]) => `\n        <key>${key}</key>\n        <string>${xmlEscape(value)}</string>`)
+    .join('');
 
   const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -169,7 +314,7 @@ function setupLaunchd(
         <key>PATH</key>
         <string>/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin</string>
         <key>HOME</key>
-        <string>${homeDir}</string>
+        <string>${homeDir}</string>${proxyEntries}
     </dict>
     <key>StandardOutPath</key>
     <string>${projectRoot}/logs/nanoclaw.log</string>
@@ -178,7 +323,8 @@ function setupLaunchd(
 </dict>
 </plist>`;
 
-  fs.writeFileSync(plistPath, plist);
+  // launchd has no env-file option, so the plist that holds the proxy values is owner-only.
+  writeOwnerOnly(plistPath, plist);
   log.info('Wrote launchd plist', { plistPath });
 
   // Unload first to force launchd to drop any cached plist and re-read from
@@ -234,22 +380,19 @@ function setupLaunchd(
     PLIST_PATH: plistPath,
     SERVICE_LOADED: serviceLoaded,
     STATUS: 'success',
+    ...proxyStatusFields,
     LOG: 'logs/setup.log',
   });
 }
 
-function setupLinux(
-  projectRoot: string,
-  nodePath: string,
-  homeDir: string,
-): void {
+async function setupLinux(projectRoot: string, nodePath: string, homeDir: string): Promise<void> {
   const serviceManager = getServiceManager();
 
   if (serviceManager === 'systemd') {
-    setupSystemd(projectRoot, nodePath, homeDir);
+    await setupSystemd(projectRoot, nodePath, homeDir);
   } else {
     // WSL without systemd or other Linux without systemd
-    setupNohupFallback(projectRoot, nodePath, homeDir);
+    await setupNohupFallback(projectRoot, nodePath);
   }
 }
 
@@ -295,11 +438,40 @@ function checkDockerGroupStale(): boolean {
   }
 }
 
-function setupSystemd(
+export function renderSystemdUnit(
   projectRoot: string,
   nodePath: string,
   homeDir: string,
-): void {
+  runningAsRoot: boolean,
+  proxyEnvFile?: string,
+): string {
+  // Unit files are world-readable; proxy values stay in the owner-only file.
+  // systemd expands % specifiers and globs this path.
+  const proxyLine = proxyEnvFile
+    ? `\nEnvironmentFile=${proxyEnvFile.replace(/%/g, '%%').replace(/[[\]*?\\]/g, '\\$&')}`
+    : '';
+
+  return `[Unit]
+Description=NanoClaw Personal Assistant
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=${nodePath} ${projectRoot}/dist/index.js
+WorkingDirectory=${projectRoot}
+Restart=always
+RestartSec=5
+KillMode=process
+Environment=HOME=${homeDir}
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin${proxyLine}
+StandardOutput=append:${projectRoot}/logs/nanoclaw.log
+StandardError=append:${projectRoot}/logs/nanoclaw.error.log
+
+[Install]
+WantedBy=${runningAsRoot ? 'multi-user.target' : 'default.target'}`;
+}
+
+async function setupSystemd(projectRoot: string, nodePath: string, homeDir: string): Promise<void> {
   const runningAsRoot = isRoot();
   const unitName = getSystemdUnit(projectRoot);
   const unitFileName = `${unitName}.service`;
@@ -317,10 +489,8 @@ function setupSystemd(
     try {
       execSync('systemctl --user daemon-reload', { stdio: 'pipe' });
     } catch {
-      log.warn(
-        'systemd user session not available — falling back to nohup wrapper',
-      );
-      setupNohupFallback(projectRoot, nodePath, homeDir);
+      log.warn('systemd user session not available — falling back to nohup wrapper');
+      await setupNohupFallback(projectRoot, nodePath);
       return;
     }
     const unitDir = path.join(homeDir, '.config', 'systemd', 'user');
@@ -329,24 +499,7 @@ function setupSystemd(
     systemctlPrefix = 'systemctl --user';
   }
 
-  const unit = `[Unit]
-Description=NanoClaw Personal Assistant
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=${nodePath} ${projectRoot}/dist/index.js
-WorkingDirectory=${projectRoot}
-Restart=always
-RestartSec=5
-KillMode=process
-Environment=HOME=${homeDir}
-Environment=PATH=/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin
-StandardOutput=append:${projectRoot}/logs/nanoclaw.log
-StandardError=append:${projectRoot}/logs/nanoclaw.error.log
-
-[Install]
-WantedBy=${runningAsRoot ? 'multi-user.target' : 'default.target'}`;
+  const unit = renderSystemdUnit(projectRoot, nodePath, homeDir, runningAsRoot, writeServiceProxyEnv(projectRoot));
 
   fs.writeFileSync(unitPath, unit);
   log.info('Wrote systemd unit', { unitPath });
@@ -360,18 +513,14 @@ WantedBy=${runningAsRoot ? 'multi-user.target' : 'default.target'}`;
   // normal group perms apply again).
   let dockerGroupStale = !runningAsRoot && checkDockerGroupStale();
   if (dockerGroupStale) {
-    log.warn(
-      'Docker group not active in systemd session — user was likely added to docker group mid-session',
-    );
+    log.warn('Docker group not active in systemd session — user was likely added to docker group mid-session');
     if (commandExists('setfacl')) {
       const user = execSync('whoami', { encoding: 'utf-8' }).trim();
       try {
         execSync(`sudo setfacl -m u:${user}:rw /var/run/docker.sock`, {
           stdio: 'inherit',
         });
-        log.info(
-          'Applied temporary ACL to /var/run/docker.sock (resets on docker restart or reboot)',
-        );
+        log.info('Applied temporary ACL to /var/run/docker.sock (resets on docker restart or reboot)');
         dockerGroupStale = false;
       } catch (err) {
         log.warn('Failed to apply setfacl workaround', { err });
@@ -391,10 +540,7 @@ WantedBy=${runningAsRoot ? 'multi-user.target' : 'default.target'}`;
       execSync('loginctl enable-linger', { stdio: 'ignore' });
       log.info('Enabled loginctl linger for current user');
     } catch (err) {
-      log.warn(
-        'loginctl enable-linger failed — service may stop on SSH logout',
-        { err },
-      );
+      log.warn('loginctl enable-linger failed — service may stop on SSH logout', { err });
     }
   }
 
@@ -439,63 +585,140 @@ WantedBy=${runningAsRoot ? 'multi-user.target' : 'default.target'}`;
     UNIT_PATH: unitPath,
     SERVICE_LOADED: serviceLoaded,
     ...(dockerGroupStale ? { DOCKER_GROUP_STALE: true } : {}),
+    ...proxyStatusFields,
     LINGER_ENABLED: !runningAsRoot,
     STATUS: 'success',
     LOG: 'logs/setup.log',
   });
 }
 
-function setupNohupFallback(
-  projectRoot: string,
-  nodePath: string,
-  homeDir: string,
-): void {
-  log.warn('No systemd detected — generating nohup wrapper script');
+// Single quotes keep checkout paths literal in the generated shell script.
+function shellQuote(value: string): string {
+  return "'" + value.replace(/'/g, "'\\''") + "'";
+}
+
+function processRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    // kill -0 also succeeds for an exited child waiting to be reaped on Linux.
+    return !/\) Z /.test(fs.readFileSync(`/proc/${pid}/stat`, 'utf8'));
+  } catch {
+    return false;
+  }
+}
+
+/** The admin socket opens at the end of host startup, after channels and polls. */
+export async function waitForNohupStartup(projectRoot: string, pid: number, timeoutMs = 30_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!processRunning(pid)) throw new Error('NanoClaw exited during startup');
+    const ready = await new Promise<boolean>((resolve) => {
+      // Do not probe cli.sock: connecting there replaces the interactive chat client.
+      const socket = net.createConnection(path.join(projectRoot, 'data', 'ncl.sock'));
+      const done = (connected: boolean): void => {
+        socket.destroy();
+        resolve(connected);
+      };
+      socket.once('connect', () => done(true));
+      socket.once('error', () => done(false));
+      socket.setTimeout(Math.min(500, Math.max(1, deadline - Date.now())), () => done(false));
+    });
+    if (ready && processRunning(pid)) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error('Timed out waiting for NanoClaw admin socket');
+}
+
+async function setupNohupFallback(projectRoot: string, nodePath: string): Promise<void> {
+  log.warn('No usable systemd service — starting with nohup');
 
   const wrapperPath = path.join(projectRoot, 'start-nanoclaw.sh');
   const pidFile = path.join(projectRoot, 'nanoclaw.pid');
+  const entrypoint = path.join(projectRoot, 'dist', 'index.js');
+  const proxyEnvFile = writeServiceProxyEnv(projectRoot);
 
   const lines = [
     '#!/bin/bash',
     '# start-nanoclaw.sh — Start NanoClaw without systemd',
-    `# To stop: kill \\$(cat ${pidFile})`,
+    `# To stop: kill "$(cat ${shellQuote(pidFile)})"`,
     '',
     'set -euo pipefail',
+    `cd ${shellQuote(projectRoot)}`,
     '',
-    `cd ${JSON.stringify(projectRoot)}`,
-    '',
-    '# Stop existing instance if running',
-    `if [ -f ${JSON.stringify(pidFile)} ]; then`,
-    `  OLD_PID=$(cat ${JSON.stringify(pidFile)} 2>/dev/null || echo "")`,
-    '  if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then',
-    '    echo "Stopping existing NanoClaw (PID $OLD_PID)..."',
-    '    kill "$OLD_PID" 2>/dev/null || true',
-    '    sleep 2',
+    '# Only stop the recorded host from this checkout; a PID can be reused.',
+    'is_previous_host() {',
+    '  [[ "$OLD_PID" =~ ^[1-9][0-9]*$ ]] || return 1',
+    '  [ -r "/proc/$OLD_PID/cmdline" ] || return 1',
+    '  local -a args=()',
+    '  mapfile -d "" -t args < "/proc/$OLD_PID/cmdline" 2>/dev/null || return 1',
+    `  [ "\${args[1]:-}" = ${shellQuote(entrypoint)} ]`,
+    '}',
+    `OLD_PID=$(cat ${shellQuote(pidFile)} 2>/dev/null || true)`,
+    'if is_previous_host; then',
+    '  echo "Stopping existing NanoClaw (PID $OLD_PID)..."',
+    '  kill "$OLD_PID"',
+    '  for ((i=0; i<100; i++)); do',
+    '    is_previous_host || break',
+    '    sleep 0.1',
+    '  done',
+    '  if is_previous_host; then',
+    '    echo "Previous NanoClaw did not stop; refusing to start another host" >&2',
+    '    exit 1',
     '  fi',
     'fi',
     '',
-    'echo "Starting NanoClaw..."',
-    `nohup ${JSON.stringify(nodePath)} ${JSON.stringify(projectRoot + '/dist/index.js')} \\`,
-    `  >> ${JSON.stringify(projectRoot + '/logs/nanoclaw.log')} \\`,
-    `  2>> ${JSON.stringify(projectRoot + '/logs/nanoclaw.error.log')} &`,
+    '# A missing/stale PID file must not let an existing listener fake readiness.',
+    `${shellQuote(nodePath)} -e ${shellQuote(`
+const socket = require('net').createConnection(process.argv[1]);
+socket.once('connect', () => {
+  console.error('NanoClaw admin socket is already in use; stop the existing host first');
+  process.exit(1);
+});
+socket.once('error', (err) => {
+  if (err.code === 'ENOENT' || err.code === 'ECONNREFUSED') process.exit(0);
+  console.error('Cannot check NanoClaw admin socket:', err.message);
+  process.exit(1);
+});
+socket.setTimeout(1000, () => {
+  console.error('Timed out checking existing NanoClaw admin socket');
+  process.exit(1);
+});
+`)} ${shellQuote(path.join(projectRoot, 'data', 'ncl.sock'))}`,
     '',
-    `echo $! > ${JSON.stringify(pidFile)}`,
-    'echo "NanoClaw started (PID $!)"',
-    `echo "Logs: tail -f ${projectRoot}/logs/nanoclaw.log"`,
+    ...(proxyEnvFile ? ['set -a', `. ${shellQuote(proxyEnvFile)}`, 'set +a'] : []),
+    'echo "Starting NanoClaw..."',
+    // Node resets the inherited SIGHUP ignore; detach from the wizard terminal.
+    `setsid nohup ${shellQuote(nodePath)} ${shellQuote(entrypoint)} \\`,
+    `  >> ${shellQuote(projectRoot + '/logs/nanoclaw.log')} \\`,
+    `  2>> ${shellQuote(projectRoot + '/logs/nanoclaw.error.log')} < /dev/null &`,
+    `echo $! > ${shellQuote(pidFile)}`,
+    'echo "NanoClaw launched (PID $!)"',
   ];
-  const wrapper = lines.join('\n') + '\n';
-
-  fs.writeFileSync(wrapperPath, wrapper, { mode: 0o755 });
+  fs.writeFileSync(wrapperPath, lines.join('\n') + '\n', { mode: 0o755 });
   log.info('Wrote nohup wrapper script', { wrapperPath });
+
+  let failure: unknown;
+  try {
+    execFileSync('/bin/bash', [wrapperPath], { cwd: projectRoot, stdio: 'pipe', timeout: 15_000 });
+    const pid = Number(fs.readFileSync(pidFile, 'utf8').trim());
+    if (!Number.isInteger(pid) || pid <= 0) throw new Error('Invalid NanoClaw PID file');
+    await waitForNohupStartup(projectRoot, pid);
+  } catch (err) {
+    failure = err;
+    log.error('Nohup service failed to start; see logs/nanoclaw.error.log', { err });
+  }
 
   emitStatus('SETUP_SERVICE', {
     SERVICE_TYPE: 'nohup',
     NODE_PATH: nodePath,
     PROJECT_PATH: projectRoot,
     WRAPPER_PATH: wrapperPath,
-    SERVICE_LOADED: false,
-    FALLBACK: 'wsl_no_systemd',
-    STATUS: 'success',
+    SERVICE_LOADED: !failure,
+    FALLBACK: 'no_usable_systemd',
+    ...proxyStatusFields,
+    STATUS: failure ? 'failed' : 'success',
+    ...(failure ? { ERROR: 'service_start_failed' } : {}),
     LOG: 'logs/setup.log',
   });
+  if (failure) throw new Error('NanoClaw failed to start; see logs/nanoclaw.error.log', { cause: failure });
 }

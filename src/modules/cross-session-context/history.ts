@@ -11,12 +11,10 @@
  * an agent caller asking about another group's session gets the same
  * "session not found" as a nonexistent id (no cross-group existence oracle).
  */
-import fs from 'fs';
-
 import { TIMEZONE } from '../../config.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { getSession } from '../../db/sessions.js';
-import { inboundDbPath, openOutboundDb, withInboundDb } from '../../session-manager.js';
+import { withExistingMailboxSession } from '../../session-manager.js';
 import { formatLocalStamp } from '../../timezone.js';
 import type { CallerContext } from '../../cli/frame.js';
 
@@ -61,46 +59,35 @@ function parseText(raw: string): { text: string; sender: string | null } {
  * Human rendering (pipe lines, localized stamps, capped cells) lives in
  * `formatHistoryLines`, wired as the operation's `formatHuman`.
  */
-export function sessionHistory(args: Record<string, unknown>, ctx: CallerContext): HistoryRow[] {
+export async function sessionHistory(args: Record<string, unknown>, ctx: CallerContext): Promise<HistoryRow[]> {
   const sessionId = typeof args.id === 'string' && args.id.length > 0 ? args.id : undefined;
   if (!sessionId) throw new Error('session id is required');
   const limitRaw = Number(args.limit ?? HISTORY_DEFAULT_LIMIT);
   const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.floor(limitRaw) : HISTORY_DEFAULT_LIMIT;
 
-  const session = getSession(sessionId);
+  const session = await getSession(sessionId);
   // Self-scope (see header): cross-group agents get "not found", never "forbidden".
   if (!session || (ctx.caller === 'agent' && session.agent_group_id !== ctx.agentGroupId)) {
     throw new Error(`session not found: ${sessionId}`);
   }
 
-  const agentName = getAgentGroup(session.agent_group_id)?.name ?? 'agent';
+  const agentName = (await getAgentGroup(session.agent_group_id))?.name ?? 'agent';
   const rows: HistoryRow[] = [];
 
-  if (fs.existsSync(inboundDbPath(session.agent_group_id, session.id))) {
-    const inbound = withInboundDb(session.agent_group_id, session.id, (db) =>
-      db.prepare('SELECT timestamp, kind, content FROM messages_in ORDER BY seq DESC LIMIT ?').all(limit),
-    ) as Array<{ timestamp: string; kind: string; content: string }>;
-    for (const r of inbound) {
+  const history = await withExistingMailboxSession(session.agent_group_id, session.id, (mailbox) => ({
+    inbound: mailbox.getInboundHistory(limit),
+    outbound: mailbox.getOutboundHistory(limit),
+  }));
+
+  if (history) {
+    for (const r of history.inbound) {
       const { text, sender } = parseText(r.content);
       rows.push({ timestamp: r.timestamp, direction: 'in', kind: r.kind, sender: sender ?? '', text });
     }
-  }
-
-  try {
-    const outDb = openOutboundDb(session.agent_group_id, session.id);
-    try {
-      const outbound = outDb
-        .prepare('SELECT timestamp, kind, content FROM messages_out ORDER BY seq DESC LIMIT ?')
-        .all(limit) as Array<{ timestamp: string; kind: string; content: string }>;
-      for (const r of outbound) {
-        const { text } = parseText(r.content);
-        rows.push({ timestamp: r.timestamp, direction: 'out', kind: r.kind, sender: agentName, text });
-      }
-    } finally {
-      outDb.close();
+    for (const r of history.outbound) {
+      const { text } = parseText(r.content);
+      rows.push({ timestamp: r.timestamp, direction: 'out', kind: r.kind, sender: agentName, text });
     }
-  } catch {
-    // outbound.db may not exist yet (container never started) — inbound-only view.
   }
 
   rows.sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0));

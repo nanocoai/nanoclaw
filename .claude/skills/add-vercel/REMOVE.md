@@ -44,5 +44,5 @@ not part of the base image. Then `./container/build.sh` so the image matches the
 So sessions stop loading the removed `vercel-cli` skill on next wake:
 
 ```bash
-docker ps --format "{{.ID}} {{.Names}}" | grep nanoclaw-v2 | awk '{print $1}' | xargs -r docker stop
+docker ps --filter label=nanoclaw-session -q | xargs -r docker stop
 ```

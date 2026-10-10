@@ -23,7 +23,9 @@ set -euo pipefail
 # Exit codes:
 #   0  signed in, or already signed in
 #   2  deliberately skipped — the caller may continue on the unauthenticated
-#      path (no credentials supplied under --non-interactive, or user declined)
+#      path (no credentials supplied under --non-interactive, or user declined).
+#      Also --require-verified's answer for a stored credential the service
+#      could not be asked about.
 #   1  failed
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

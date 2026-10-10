@@ -30,8 +30,8 @@ const FOREIGN_AGENT: CallerContext = {
   messagingGroupId: 'mg-y',
 };
 
-function writeInbound(id: string, timestamp: string, text: string, sender = 'Gavriel'): void {
-  writeSessionMessage(AG, SESS, {
+async function writeInbound(id: string, timestamp: string, text: string, sender = 'Alex'): Promise<void> {
+  await writeSessionMessage(AG, SESS, {
     id,
     kind: 'chat',
     timestamp,
@@ -42,19 +42,19 @@ function writeInbound(id: string, timestamp: string, text: string, sender = 'Gav
   });
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   fs.mkdirSync(TEST_DIR, { recursive: true });
-  const db = initTestDb();
-  runMigrations(db);
-  createAgentGroup({
+  const db = await initTestDb();
+  await runMigrations(db);
+  await createAgentGroup({
     id: AG,
     name: 'Pixel',
     folder: 'pixel',
     agent_provider: null,
     created_at: '2026-08-01T00:00:00.000Z',
   });
-  createSession({
+  await createSession({
     id: SESS,
     agent_group_id: AG,
     messaging_group_id: null,
@@ -68,17 +68,17 @@ beforeEach(() => {
   initSessionFolder(AG, SESS);
 });
 
-afterEach(() => {
-  closeDb();
+afterEach(async () => {
+  await closeDb();
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
 });
 
 describe('sessionHistory', () => {
-  it('merges inbound + outbound chronologically as structured rows (ISO timestamps)', () => {
-    writeInbound('in-1', '2026-08-01T10:00:00.000Z', 'hello there');
-    writeInbound('in-2', '2026-08-01T10:02:00.000Z', 'second message');
+  it('merges inbound + outbound chronologically as structured rows (ISO timestamps)', async () => {
+    await writeInbound('in-1', '2026-08-01T10:00:00.000Z', 'hello there');
+    await writeInbound('in-2', '2026-08-01T10:02:00.000Z', 'second message');
     // writeOutboundDirect stamps now() — always sorts after the fixed 2026 stamps.
-    writeOutboundDirect(AG, SESS, {
+    await writeOutboundDirect(AG, SESS, {
       id: 'out-1',
       kind: 'chat',
       platformId: 'D1',
@@ -87,13 +87,13 @@ describe('sessionHistory', () => {
       content: JSON.stringify({ text: 'agent reply' }),
     });
 
-    const rows = sessionHistory({ id: SESS }, HOST);
+    const rows = await sessionHistory({ id: SESS }, HOST);
     expect(rows).toHaveLength(3);
     expect(rows[0]).toEqual({
       timestamp: '2026-08-01T10:00:00.000Z',
       direction: 'in',
       kind: 'chat',
-      sender: 'Gavriel',
+      sender: 'Alex',
       text: 'hello there',
     });
     expect(rows[1].text).toBe('second message');
@@ -103,44 +103,44 @@ describe('sessionHistory', () => {
     expect(rows[2].text).toBe('agent reply');
   });
 
-  it('formatHistoryLines renders pipe lines with localized stamps and capped cells', () => {
-    writeInbound('in-1', '2026-08-01T10:00:00.000Z', 'hello there');
-    const lines = formatHistoryLines(sessionHistory({ id: SESS }, HOST), 'UTC').split('\n');
-    expect(lines).toEqual(['2026-08-01 10:00|in|chat|Gavriel|hello there']);
+  it('formatHistoryLines renders pipe lines with localized stamps and capped cells', async () => {
+    await writeInbound('in-1', '2026-08-01T10:00:00.000Z', 'hello there');
+    const lines = formatHistoryLines(await sessionHistory({ id: SESS }, HOST), 'UTC').split('\n');
+    expect(lines).toEqual(['2026-08-01 10:00|in|chat|Alex|hello there']);
     // A non-UTC install timezone shifts the human stamp; data stays ISO.
-    const berlin = formatHistoryLines(sessionHistory({ id: SESS }, HOST), 'Europe/Berlin');
+    const berlin = formatHistoryLines(await sessionHistory({ id: SESS }, HOST), 'Europe/Berlin');
     expect(berlin.startsWith('2026-08-01 12:00|')).toBe(true);
   });
 
-  it('applies --limit keeping the NEWEST rows', () => {
+  it('applies --limit keeping the NEWEST rows', async () => {
     for (let i = 0; i < 5; i++) {
-      writeInbound(`in-${i}`, `2026-08-01T10:0${i}:00.000Z`, `msg ${i}`);
+      await writeInbound(`in-${i}`, `2026-08-01T10:0${i}:00.000Z`, `msg ${i}`);
     }
-    const rows = sessionHistory({ id: SESS, limit: 2 }, HOST);
+    const rows = await sessionHistory({ id: SESS, limit: 2 }, HOST);
     expect(rows).toHaveLength(2);
     expect(rows[0].text).toBe('msg 3');
     expect(rows[1].text).toBe('msg 4');
   });
 
-  it('sanitizes newlines and pipes in the human rendering only — rows keep the raw text', () => {
-    writeInbound('in-1', '2026-08-01T10:00:00.000Z', 'line one\nline two | with pipe');
-    const rows = sessionHistory({ id: SESS }, HOST);
+  it('sanitizes newlines and pipes in the human rendering only — rows keep the raw text', async () => {
+    await writeInbound('in-1', '2026-08-01T10:00:00.000Z', 'line one\nline two | with pipe');
+    const rows = await sessionHistory({ id: SESS }, HOST);
     expect(rows[0].text).toBe('line one\nline two | with pipe');
     const line = formatHistoryLines(rows, 'UTC');
     expect(line.split('\n')).toHaveLength(1);
     expect(line.endsWith('line one line two / with pipe')).toBe(true);
   });
 
-  it('self-scopes: a cross-group agent gets "session not found", same as a bogus id', () => {
-    writeInbound('in-1', '2026-08-01T10:00:00.000Z', 'private');
-    expect(() => sessionHistory({ id: SESS }, FOREIGN_AGENT)).toThrow(`session not found: ${SESS}`);
-    expect(() => sessionHistory({ id: 'sess-nope' }, FOREIGN_AGENT)).toThrow('session not found: sess-nope');
-    expect(() => sessionHistory({ id: 'sess-nope' }, HOST)).toThrow('session not found: sess-nope');
+  it('self-scopes: a cross-group agent gets "session not found", same as a bogus id', async () => {
+    await writeInbound('in-1', '2026-08-01T10:00:00.000Z', 'private');
+    await expect(sessionHistory({ id: SESS }, FOREIGN_AGENT)).rejects.toThrow(`session not found: ${SESS}`);
+    await expect(sessionHistory({ id: 'sess-nope' }, FOREIGN_AGENT)).rejects.toThrow('session not found: sess-nope');
+    await expect(sessionHistory({ id: 'sess-nope' }, HOST)).rejects.toThrow('session not found: sess-nope');
   });
 
-  it('allows the owning agent group and the host', () => {
-    writeInbound('in-1', '2026-08-01T10:00:00.000Z', 'visible');
-    expect(sessionHistory({ id: SESS }, OWN_AGENT)[0].text).toBe('visible');
-    expect(sessionHistory({ id: SESS }, HOST)[0].text).toBe('visible');
+  it('allows the owning agent group and the host', async () => {
+    await writeInbound('in-1', '2026-08-01T10:00:00.000Z', 'visible');
+    expect((await sessionHistory({ id: SESS }, OWN_AGENT))[0].text).toBe('visible');
+    expect((await sessionHistory({ id: SESS }, HOST))[0].text).toBe('visible');
   });
 });

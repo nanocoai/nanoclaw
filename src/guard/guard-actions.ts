@@ -24,7 +24,7 @@ export interface GuardedActionSpec {
    * allow. Runs on every consult, including approved replays (a grant
    * satisfies a hold, never a deny).
    */
-  decide: (input: GuardInput) => GuardDecision;
+  decide: (input: GuardInput) => GuardDecision | Promise<GuardDecision>;
   /**
    * The pending_approvals.action its holds resolve through — a grant is only
    * accepted when its row carries this action. Omit for actions that can

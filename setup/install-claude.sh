@@ -29,7 +29,7 @@ if ! command -v curl >/dev/null 2>&1; then
 fi
 
 echo "STEP: claude-native-install"
-curl -fsSL https://claude.ai/install.sh | bash
+curl -fsSL https://claude.ai/install.sh | /bin/bash
 
 # Native installer writes to ~/.local/bin and appends a PATH line to the
 # user's rc file; that doesn't help this session, so put it on PATH now.

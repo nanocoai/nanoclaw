@@ -8,6 +8,9 @@ import type { ChannelAdapter, ChannelDefaults, ChannelRegistration, ChannelSetup
 import type { ChannelDeliveryAdapter } from '../delivery.js';
 import { log } from '../log.js';
 
+/** Adapter instance registry key shape: a webhook route segment and state-namespace key, so URL-safe only. */
+export const INSTANCE_KEY_RE = /^[A-Za-z0-9._-]+$/;
+
 const SETUP_RETRY_DELAYS_MS = [2000, 5000, 10000];
 
 /** Duck-type check — adapters that throw an Error with `name === 'NetworkError'`
