@@ -40,6 +40,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         fonts-noto-color-emoji \
         libgbm1 \
         libnss3 \
+        libnss3-tools \
         libatk-bridge2.0-0 \
         libgtk-3-0 \
         libx11-xcb1 \

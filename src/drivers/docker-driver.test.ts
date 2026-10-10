@@ -27,7 +27,11 @@ vi.mock('../log.js', () => ({
 
 // The driver re-checks mount sources exist; fixture paths are not real files
 // on the test host. A vi.fn so single tests can flip it to "missing".
-vi.mock('fs', () => ({ default: { existsSync: vi.fn(() => true) } }));
+// `constants` stays real: anchored-dir reads open flags at load time.
+vi.mock('fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('fs')>();
+  return { default: { constants: actual.constants, existsSync: vi.fn(() => true) } };
+});
 
 import fs from 'fs';
 

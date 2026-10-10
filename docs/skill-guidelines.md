@@ -58,7 +58,7 @@ In rough order of safety:
 - **Add a file**: safest. New code in the skill's own files, or fetched from a registry branch (`git show origin/<branch>:path > path`).
 - **Append to a file**: an import in a barrel, a line in `.env`, an entry at the end of a list.
 - **Edit a value in JSON**: e.g. a `package.json` field.
-- **Add a dependency**, pinned to an exact version.
+- **Add a dependency**, pinned to an exact version. Then run `pnpm run skill-pins:generate` and commit `.github/skill-pins/`: it mirrors every skill pin so Dependabot can see it, and CI fails while it is stale.
 - **Insert into existing code (an "integration point")**: the one risky move. Keep it to a line or two that *calls* code living in the skill's own files, never an inlined block of logic. A skill full of these is a smell.
 
 Fetching from a registry branch is **additive, never a merge**. `git fetch origin <branch>` then `git show origin/<branch>:path > path` per file. Never `git merge` a registry branch into an install.

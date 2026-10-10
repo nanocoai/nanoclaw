@@ -18,11 +18,8 @@
  * `channel_type === 'agent'` check. When the module is absent the check in
  * core throws with a "module not installed" message so retry → mark failed.
  */
-import fs from 'fs';
-import path from 'path';
-
+import { AnchoredDir, copyRegularFile } from '../../anchored-dir.js';
 import { isSafeAttachmentName } from '../../attachment-safety.js';
-import { ensureContainedInboxDir, isPathInside } from '../../inbox-safety.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { getSession } from '../../db/sessions.js';
 import { requestWake } from '../../request-wake.js';
@@ -65,106 +62,69 @@ export function forwardAttachedFiles(
     return [];
   }
 
-  const sourceDir = path.join(sessionDir(source.agentGroupId, source.sessionId), 'outbox', source.messageId);
-  if (!fs.existsSync(sourceDir)) {
-    log.warn('agent-route: source outbox dir missing, no files forwarded', {
-      sourceMsgId: source.messageId,
-      sourceDir,
-    });
+  // Both agents can write their own session folders, so either could turn
+  // `outbox`, `inbox` or a message dir into a symlink at any time. Each side is
+  // opened as an AnchoredDir (symlinks refused) and used only through it, the
+  // same way as the channel-inbound path (#2828, CWE-59).
+  let sourceDir: AnchoredDir | null;
+  try {
+    sourceDir = AnchoredDir.open(sessionDir(source.agentGroupId, source.sessionId), ['outbox', source.messageId]);
+  } catch (err) {
+    log.warn('agent-route: rejecting unsafe source outbox dir', { sourceMsgId: source.messageId, err });
+    return [];
+  }
+  if (!sourceDir) {
+    log.warn('agent-route: source outbox dir missing, no files forwarded', { sourceMsgId: source.messageId });
     return [];
   }
 
-  let realSourceDir: string;
+  let targetDir: AnchoredDir | null = null;
   try {
-    const sourceDirStat = fs.lstatSync(sourceDir);
-    if (!sourceDirStat.isDirectory() || sourceDirStat.isSymbolicLink()) {
-      log.warn('agent-route: rejecting unsafe source outbox dir', {
-        sourceMsgId: source.messageId,
-        sourceDir,
-      });
-      return [];
-    }
-    realSourceDir = fs.realpathSync(sourceDir);
+    targetDir = AnchoredDir.open(sessionDir(target.agentGroupId, target.sessionId), ['inbox', target.messageId], true);
   } catch (err) {
-    log.warn('agent-route: failed to inspect source outbox dir', {
-      sourceMsgId: source.messageId,
-      sourceDir,
+    log.warn('agent-route: rejecting unsafe target inbox dir', {
+      targetGroup: target.agentGroupId,
+      targetSession: target.sessionId,
+      targetMsgId: target.messageId,
       err,
     });
-    return [];
-  }
-
-  // Target-side containment — shared with the channel-inbound path. A
-  // compromised target agent can write inside its own session dir, so it could
-  // pre-place `inbox` (or `inbox/<future-msgId>`) as a symlink pointing
-  // anywhere host-writable; ensureContainedInboxDir refuses the symlink before
-  // any copy lands outside the sandbox (#2828, CWE-59).
-  const inboxRoot = path.join(sessionDir(target.agentGroupId, target.sessionId), 'inbox');
-  const targetInboxDir = ensureContainedInboxDir(inboxRoot, target.messageId, {
-    targetGroup: target.agentGroupId,
-    targetSession: target.sessionId,
-    targetMsgId: target.messageId,
-  });
-  if (!targetInboxDir) {
-    return [];
   }
 
   const attachments: ForwardedAttachment[] = [];
-  for (const filename of source.filenames) {
-    if (!isSafeAttachmentName(filename)) {
-      log.warn('agent-route: rejecting unsafe attachment filename (path traversal attempt?)', {
-        sourceMsgId: source.messageId,
-        filename,
-      });
-      continue;
-    }
-    const src = path.join(sourceDir, filename);
-    let realSrc: string;
-    try {
-      const srcStat = fs.lstatSync(src);
-      if (!srcStat.isFile() || srcStat.isSymbolicLink()) {
-        log.warn('agent-route: rejecting unsafe source outbox file', {
+  try {
+    if (!targetDir) return [];
+    for (const filename of source.filenames) {
+      if (!isSafeAttachmentName(filename)) {
+        log.warn('agent-route: rejecting unsafe attachment filename (path traversal attempt?)', {
           sourceMsgId: source.messageId,
           filename,
         });
         continue;
       }
-      realSrc = fs.realpathSync(src);
-    } catch {
-      log.warn('agent-route: referenced file missing in source outbox, skipped', {
-        sourceMsgId: source.messageId,
+      try {
+        // Stream source → target through both descriptors. Exclusive create on
+        // the target never follows or overwrites a pre-placed entry; neither
+        // side is addressed by path after its dir was opened.
+        copyRegularFile(sourceDir, filename, targetDir, filename);
+      } catch (err) {
+        log.warn('agent-route: skipped forwarding file (missing, unsafe, or already present)', {
+          sourceMsgId: source.messageId,
+          targetMsgId: target.messageId,
+          filename,
+          err,
+        });
+        continue;
+      }
+      attachments.push({
+        name: filename,
         filename,
+        type: 'file',
+        localPath: `inbox/${target.messageId}/${filename}`,
       });
-      continue;
     }
-    if (!isPathInside(realSourceDir, realSrc)) {
-      log.warn('agent-route: rejecting source file outside source outbox dir', {
-        sourceMsgId: source.messageId,
-        filename,
-      });
-      continue;
-    }
-    const dst = path.join(targetInboxDir, filename);
-    try {
-      // COPYFILE_EXCL: fail with EEXIST rather than follow or overwrite a
-      // pre-placed symlink / existing file at dst — the host is the sole
-      // writer of these attachments.
-      fs.copyFileSync(realSrc, dst, fs.constants.COPYFILE_EXCL);
-    } catch (err) {
-      log.warn('agent-route: refusing to write target inbox file', {
-        sourceMsgId: source.messageId,
-        targetMsgId: target.messageId,
-        filename,
-        err,
-      });
-      continue;
-    }
-    attachments.push({
-      name: filename,
-      filename,
-      type: 'file',
-      localPath: `inbox/${target.messageId}/${filename}`,
-    });
+  } finally {
+    sourceDir.close();
+    targetDir?.close();
   }
   return attachments;
 }

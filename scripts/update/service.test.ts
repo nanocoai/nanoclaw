@@ -16,14 +16,18 @@ import {
   createCommandRunner,
   detectService,
   drainContainers,
+  gatewayRestartCommand,
   probe,
   restartGatewayContainers,
+  shellQuote,
+  startCommand,
   startService,
   stopService,
   verifyServiceHealth,
   withRecordedNohupHost,
   type CommandRunner,
   type ServiceEnvironment,
+  type ServiceHandle,
 } from './service.js';
 import { GATEWAY_ROLE, LABELS } from '../../src/drivers/types.js';
 
@@ -135,6 +139,62 @@ describe('service-mode detection and control', () => {
     startService({ mode: 'nohup', active: true, definition, pid: 4242 }, root, env);
 
     expect(calls).toEqual([`bash ${definition}`]);
+  });
+
+  it('prints the start command startService runs, for a rollback finished by hand', () => {
+    const { env, calls } = makeEnv('linux');
+    const cases: [ServiceHandle, string][] = [
+      [
+        { mode: 'launchd', active: true, name: 'com.nanoclaw-v2-x', definition: '/Users/me/x.plist' },
+        'launchctl bootstrap gui/1000 /Users/me/x.plist; launchctl kickstart gui/1000/com.nanoclaw-v2-x',
+      ],
+      [
+        { mode: 'systemd-user', active: true, name: 'nanoclaw-v2-x' },
+        'XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1000}" systemctl --user start nanoclaw-v2-x',
+      ],
+      [{ mode: 'systemd-system', active: true, name: 'nanoclaw-v2-x' }, 'systemctl start nanoclaw-v2-x'],
+      [{ mode: 'nohup', active: true, definition: '/srv/nano/start-nanoclaw.sh' }, 'bash /srv/nano/start-nanoclaw.sh'],
+    ];
+    for (const [handle, printed] of cases) {
+      calls.length = 0;
+      startService(handle, '/srv', env);
+      expect(startCommand(handle, env.uid)).toBe(printed);
+      // Every call startService made appears in the printed command, in order.
+      let at = 0;
+      for (const call of calls) {
+        at = printed.indexOf(call, at);
+        expect(at).toBeGreaterThanOrEqual(0);
+      }
+    }
+    expect(startCommand({ mode: 'none', active: false }, env.uid)).toBeUndefined();
+    const awkward = "/srv/it's $HOME `nano`";
+    expect(spawnSync('sh', ['-c', `printf %s ${shellQuote(awkward)}`], { encoding: 'utf8' }).stdout).toBe(awkward);
+  });
+
+  it('prints a gateway restart that restarts the listed containers, and is a no-op when there are none', () => {
+    const root = temp();
+    const bin = temp();
+    const log = path.join(bin, 'calls.log');
+    const docker = (listed: string) =>
+      fs.writeFileSync(
+        path.join(bin, 'docker'),
+        `#!/bin/sh\necho "docker $*" >> ${JSON.stringify(log)}\n[ "$1" = ps ] && printf '${listed}'\nexit 0\n`,
+        { mode: 0o755 },
+      );
+    const run = () =>
+      spawnSync('sh', ['-c', gatewayRestartCommand(root)], {
+        env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH ?? ''}` },
+      }).status;
+    const ps = `docker ps -aq --filter label=nanoclaw-install=${slug(root)} --filter label=nanoclaw-role=gateway`;
+
+    docker('gw1\\ngw2\\n');
+    expect(run()).toBe(0);
+    expect(fs.readFileSync(log, 'utf8').trim().split('\n')).toEqual([ps, 'docker restart -t 10 gw1 gw2']);
+
+    fs.rmSync(log);
+    docker('');
+    expect(run()).toBe(0);
+    expect(fs.readFileSync(log, 'utf8').trim().split('\n')).toEqual([ps]);
   });
 
   it('refuses to mutate under an unmanaged pnpm-dev process', async () => {
@@ -579,26 +639,86 @@ describe('stopService idempotency (already-stopped is success, per mode)', () =>
     sleep: async () => {},
   });
 
-  it('tolerates launchd bootout of a not-loaded job, in launchctl own words', async () => {
+  // launchctl as stopService sees it: `print` succeeds while the job is in the
+  // domain (`loadedPolls` more times after bootout), then exits 113.
+  function launchd(options: { loadedPolls: number; pid?: number; bootout?: string }) {
+    let remaining: number | undefined;
+    const calls: string[] = [];
+    let sleeps = 0;
     const runner: CommandRunner = {
-      run() {
-        throw new Error('Command failed: launchctl bootout gui/501/x\nBoot-out failed: 3: No such process');
+      run(command, args) {
+        calls.push(`${command} ${args.join(' ')}`);
+        if (args[0] === 'bootout') {
+          remaining = options.loadedPolls;
+          if (options.bootout) throw new Error(`Command failed: launchctl bootout ${args[1]}\n${options.bootout}`);
+          return '';
+        }
+        if (remaining === undefined || remaining-- > 0) return `state = running\n\tpid = ${options.pid ?? 99999999}\n`;
+        throw Object.assign(new Error('Could not find service'), { status: 113, stderr: 'Could not find service' });
       },
       tryRun: () => ({ ok: true, stdout: '' }),
     };
-    await expect(stopService({ mode: 'launchd', active: true, name: 'x' }, env(runner))).resolves.toBeUndefined();
+    const environment: ServiceEnvironment = {
+      ...env(runner),
+      sleep: async () => {
+        sleeps += 1;
+      },
+    };
+    return { environment, calls, sleeps: () => sleeps };
+  }
+  const handle: ServiceHandle = { mode: 'launchd', active: true, name: 'x', definition: '/Users/me/x.plist' };
+
+  it('waits after launchd bootout until the job has left the domain', async () => {
+    const fake = launchd({ loadedPolls: 3 });
+    await expect(stopService(handle, fake.environment)).resolves.toBeUndefined();
+    expect(fake.sleeps()).toBe(3);
+    expect(fake.calls.slice(0, 2)).toEqual(['launchctl print gui/501/x', 'launchctl bootout gui/501/x']);
+  });
+
+  it('waits for the host process itself when the job is gone first', async () => {
+    const host = spawn('node', ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    try {
+      const fake = launchd({ loadedPolls: 0, pid: host.pid });
+      let sleeps = 0;
+      fake.environment.sleep = async () => {
+        sleeps += 1;
+        host.kill('SIGKILL');
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      };
+      await expect(stopService(handle, fake.environment)).resolves.toBeUndefined();
+      expect(sleeps).toBeGreaterThan(0);
+    } finally {
+      host.kill('SIGKILL');
+    }
+  });
+
+  it('throws when the launchd job is still loaded after the bounded wait', async () => {
+    const fake = launchd({ loadedPolls: Infinity, pid: 4242 });
+    await expect(stopService(handle, fake.environment)).rejects.toThrow(
+      /NanoClaw service x did not stop \(PID 4242\)\..*start it again with: launchctl bootstrap gui\/501 /,
+    );
+    expect(fake.sleeps()).toBe(60);
+  });
+
+  it('tolerates launchd bootout of a not-loaded job, in launchctl own words', async () => {
+    const fake = launchd({ loadedPolls: 0, bootout: 'Boot-out failed: 3: No such process' });
+    await expect(stopService(handle, fake.environment)).resolves.toBeUndefined();
+    expect(fake.sleeps()).toBe(0);
   });
 
   it('still throws for any other launchd stop failure — the caller must abort before destroying anything', async () => {
+    const fake = launchd({ loadedPolls: 0, bootout: 'Boot-out failed: 5: Input/output error' });
+    await expect(stopService(handle, fake.environment)).rejects.toThrow(/Input\/output error/);
+  });
+
+  it('refuses when launchctl cannot say whether the job is still loaded', async () => {
     const runner: CommandRunner = {
       run() {
-        throw new Error('Boot-out failed: 5: Input/output error');
+        throw Object.assign(new Error('Could not find domain'), { status: 112, stderr: 'Could not find domain' });
       },
       tryRun: () => ({ ok: true, stdout: '' }),
     };
-    await expect(stopService({ mode: 'launchd', active: true, name: 'x' }, env(runner))).rejects.toThrow(
-      /Input\/output error/,
-    );
+    await expect(stopService(handle, env(runner))).rejects.toThrow(/Cannot tell whether NanoClaw is running/);
   });
 
   it('tolerates ESRCH for a nohup pid that already exited', async () => {

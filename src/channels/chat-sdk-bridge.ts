@@ -4,6 +4,7 @@
  *
  * Used by Discord, Slack, and other Chat SDK-supported platforms.
  */
+import { createHash, timingSafeEqual } from 'crypto';
 import http from 'http';
 
 import {
@@ -1043,6 +1044,9 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
  * This is needed because the Gateway listener in webhook-forwarding mode
  * sends ALL raw events (including INTERACTION_CREATE for button clicks)
  * to the webhookUrl, which we handle here.
+ *
+ * Loopback is not a trust boundary, so only our own Gateway listener may post
+ * here: it sends the bot token in x-discord-gateway-token on every forward.
  */
 function startLocalWebhookServer(
   adapter: GatewayAdapter,
@@ -1051,6 +1055,11 @@ function startLocalWebhookServer(
 ): Promise<string> {
   return new Promise((resolve) => {
     const server = http.createServer((req, res) => {
+      if (!gatewayTokenMatches(req.headers['x-discord-gateway-token'], botToken)) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end('{"error":"unauthorized"}');
+        return;
+      }
       const chunks: Buffer[] = [];
       req.on('data', (chunk: Buffer) => chunks.push(chunk));
       req.on('end', () => {
@@ -1075,6 +1084,13 @@ function startLocalWebhookServer(
       resolve(url);
     });
   });
+}
+
+/** Constant-time check; hashing first keeps the lengths equal. No token configured means no match. */
+function gatewayTokenMatches(header: string | string[] | undefined, botToken: string | undefined): boolean {
+  if (!botToken || typeof header !== 'string') return false;
+  const digest = (s: string) => createHash('sha256').update(s).digest();
+  return timingSafeEqual(digest(header), digest(botToken));
 }
 
 async function handleForwardedEvent(

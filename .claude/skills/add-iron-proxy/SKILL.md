@@ -21,6 +21,8 @@ payload/src/gateway-providers/iron-proxy-local-model.ts -> src/gateway-providers
 payload/src/gateway-providers/iron-proxy-local-model.test.ts -> src/gateway-providers/iron-proxy-local-model.test.ts
 payload/src/gateway-providers/iron-proxy-approval.ts -> src/gateway-providers/iron-proxy-approval.ts
 payload/src/gateway-providers/iron-proxy-approval.test.ts -> src/gateway-providers/iron-proxy-approval.test.ts
+payload/src/gateway-providers/iron-proxy-credential-scope.ts -> src/gateway-providers/iron-proxy-credential-scope.ts
+payload/src/gateway-providers/iron-proxy-credential-scope.test.ts -> src/gateway-providers/iron-proxy-credential-scope.test.ts
 payload/src/gateway-providers/iron-proxy-transform.proto -> src/gateway-providers/iron-proxy-transform.proto
 payload/container/skills/iron-proxy-gateway/SKILL.md -> container/skills/iron-proxy-gateway/SKILL.md
 payload/container/skills/iron-proxy-gateway/instructions.md -> container/skills/iron-proxy-gateway/instructions.md
@@ -37,7 +39,7 @@ import './iron-proxy.js';
 ## Install the bridge dependencies
 
 ```nc:dep manager:pnpm
-@grpc/grpc-js@1.14.4
+@grpc/grpc-js@1.14.5
 @grpc/proto-loader@0.8.1
 ```
 
@@ -49,8 +51,10 @@ The installer streams stage names and elapsed-time updates. Source downloads sto
 
 Setup builds unmodified upstream Iron Proxy and a separate NanoClaw approval front in the same image. No Iron fork or source patch is used. The front is the only network-facing listener. It authenticates session identities, inspects each HTTP request inside HTTPS tunnels, checks the allowlist, and waits for an explicit approval before forwarding to Iron on `127.0.0.1:18080`. Empty, malformed, rejected or timed-out decisions fail closed. Iron's own dial-time loopback and link-local deny rules prevent DNS aliases from reaching the internal backend. Managed control-plane updates only change Iron's credential transforms; they cannot remove the front's checks.
 
-The front builds and runs the pinned OneCLI helper in `gateway-compat/onecli-summary`; do not add app-specific rules. Only method, host, path, response status and the resulting OneCLI summary reach the approval bridge. Raw bodies, authorization headers, query strings and Iron transform traces do not. The helper sees a bounded pre-injection body prefix; the full original stream is preserved. Read the approval-presentation contract in `docs/gateway-seam.md`. The build tests stock Iron, the front, and the summary helper, then records an immutable image ID and source hash.
+The front builds and runs the pinned OneCLI helper in `gateway-compat/onecli-summary`; do not add app-specific rules. Only method, host, path, response status, the resulting OneCLI summary and whether the request sends a body or upgrade reach the approval bridge. Raw bodies, authorization headers, query strings and Iron transform traces do not. The helper sees a bounded pre-injection body prefix; the full original stream is preserved. Read the approval-presentation contract in `docs/gateway-seam.md`. The build tests stock Iron, the front, and the summary helper, then records an immutable image ID and source hash.
 NanoClaw's approval service uses a private Unix socket on Linux. On macOS it uses loopback with mutual TLS and a proxy-only client certificate. Credentials pass directly from Iron Control to Iron Proxy.
+
+With `NANOCLAW_GATEWAY_UNCREDENTIALED_READS=true` in `.env`, a GET or HEAD that sends no body or upgrade skips the card when no Iron credential rule could apply to its host and method. The bridge reads the rules from the proxy's `config.yaml` and, when managed, from Iron Control's effective config for the principal the proxy is assigned now. It reads them fresh for each such request and keeps every card for 30 seconds after its first read, because Iron applies grant changes on its own 10-second sync. Every rule it has seen stays in scope, recorded in `seen-credential-rules.json` beside `config.yaml`, because Iron can keep applying a grant that Iron Control has dropped. Delete that file and restart the host to forget revoked grants. The card also stays when Iron Control cannot be read, when the assignment changes mid-read, when a rule has an unknown shape, when `config.yaml` or `proxy.env` is newer than the running proxy (restart it), or when `proxy.env` sets a custom sync interval. Two gaps remain. A grant created in the moment between that read and the forward can be used without a card. So can a grant created and revoked between two reads, if Iron synced it in between, until Iron drops it. A front built before this change never attests a payload-free request, so re-run setup to rebuild it. See `docs/gateway-seam.md` for the data-leak trade-off.
 
 `NANOCLAW_IRON_PROXY_PORT` in `.env` sets the internal proxy port (default `8080`). Setup uses the same value for the front listener and the agent proxy URL. This does not publish a host port. Re-run setup and restart this NanoClaw copy after changing it.
 
@@ -94,7 +98,7 @@ pnpm run build
 ```
 
 ```nc:run effect:test
-pnpm exec vitest run src/gateway-providers/iron-proxy.test.ts src/gateway-providers/iron-proxy-approval.test.ts src/gateway-providers/gateway-provider-registry.test.ts src/gateway-approval-coordinator.test.ts .claude/skills/add-iron-proxy/scripts/control.test.ts .claude/skills/add-iron-proxy/scripts/setup.test.ts .claude/skills/add-iron-proxy/scripts/provider-credentials.test.ts .claude/skills/add-iron-proxy/scripts/credential-isolation.test.ts .claude/skills/add-iron-proxy/scripts/install-command.test.ts src/gateway-providers/iron-proxy-local-model.test.ts .claude/skills/add-iron-proxy/scripts/local-model.test.ts
+pnpm exec vitest run src/gateway-providers/iron-proxy.test.ts src/gateway-providers/iron-proxy-approval.test.ts src/gateway-providers/iron-proxy-credential-scope.test.ts src/gateway-providers/gateway-provider-registry.test.ts src/gateway-approval-coordinator.test.ts .claude/skills/add-iron-proxy/scripts/control.test.ts .claude/skills/add-iron-proxy/scripts/setup.test.ts .claude/skills/add-iron-proxy/scripts/provider-credentials.test.ts .claude/skills/add-iron-proxy/scripts/credential-isolation.test.ts .claude/skills/add-iron-proxy/scripts/install-command.test.ts src/gateway-providers/iron-proxy-local-model.test.ts .claude/skills/add-iron-proxy/scripts/local-model.test.ts
 ```
 
 The setup consumer writes `NANOCLAW_GATEWAY_PROVIDER=iron-proxy` only after every directive succeeds. Restart only this copy's NanoClaw service after an upgrade so its session contribution and approval bridge match the new installation. Check the proxy has synced its assigned principal before reporting the gateway ready.

@@ -22,17 +22,29 @@ symlink to it is pruned automatically on the next spawn:
 rm -rf container/skills/dial-cli
 ```
 
-## 3. Remove the OneCLI credential and the per-agent block rules
+## 3. Remove the OneCLI credential, then the Dial policy
 
-Deleting the secret is what revokes access for every agent. Per-agent secret
-lists are not edited (`set-secrets` would switch an `all`-mode agent to
-`selective` and cut it off from its other secrets). The block rules this skill
-created are name-prefixed, so only those go — an operator's own rules on
-`api.getdial.ai` stay:
+Deleting the secret is what revokes access for every agent, so it goes first
+and the policy only goes once every Dial secret is gone (the script refuses
+otherwise: the block is what keeps unchosen agents away from a key that is
+injected for every `all`-mode agent). Per-agent secret lists are not edited
+(`set-secrets` would switch an `all`-mode agent to `selective` and cut it off
+from its other secrets). The policy rules this skill keeps (`Dial: blocked
+agents`, and any `Dial: blocked for <group>` rule a legacy block was migrated
+to) are deleted through the policy API and the policy is published; an
+operator's own rules on `api.getdial.ai` stay. Publishing applies the whole
+policy draft, so finish or discard any edit left open in the OneCLI console
+first:
 
 ```bash
-for id in $(onecli secrets list | jq -r '.data[] | select(.name | test("(?i)dial")) | .id'); do onecli secrets delete --id "$id"; done
-for id in $(onecli rules list | jq -r '.data[] | select(.hostPattern=="api.getdial.ai" and .action=="block" and (.name | startswith("Dial: blocked for "))) | .id'); do onecli rules delete --id "$id"; done
+for id in $(onecli secrets list | jq -r '.data[] | select(.name | test("(?i)dial")) | .id'); do onecli secrets delete --id "$id" || exit 1; done && pnpm exec tsx .claude/skills/add-dial-tool/scripts/dial-policy.ts remove
+```
+
+On an OneCLI gateway older than 1.42 the policy API is not enforced and the
+script fails; the skill then scoped Dial with legacy rules, which go like this:
+
+```bash
+for id in $(onecli rules list | jq -r '.data[] | select(.hostPattern=="api.getdial.ai" and .action=="block" and (.name | startswith("Dial: blocked for "))) | .id'); do onecli rules delete --id "$id" || echo "could not delete rule $id: remove it in the OneCLI console"; done
 ```
 
 ## 4. Rebuild and restart the agents

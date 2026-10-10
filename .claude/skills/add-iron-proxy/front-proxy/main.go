@@ -235,11 +235,20 @@ func (g *gateway) approve(ctx context.Context, r *http.Request, identity string)
 		if err != nil {
 			return false, err
 		}
-		ctx = metadata.AppendToOutgoingContext(ctx, "x-iron-approval-summary", base64.StdEncoding.EncodeToString(summary))
+		ctx = metadata.AppendToOutgoingContext(ctx, "x-iron-approval-summary", base64.StdEncoding.EncodeToString(summary), "x-iron-request-payload", requestPayload(r))
 	}
 	reply, err := g.bridge.TransformRequest(ctx, &pb.TransformRequestRequest{Request: safeRequest(r)})
 	// No custom responses or request mutations are accepted from the decision service.
 	return err == nil && reply != nil && reply.Action == pb.TransformAction_TRANSFORM_ACTION_CONTINUE && reply.Response == nil && reply.ModifiedRequest == nil, err
+}
+
+// requestPayload is "none" only when nothing beyond the URL and headers leaves:
+// no body, and no upgrade into a two-way stream. Approval may skip a card for those.
+func requestPayload(r *http.Request) string {
+	if r.ContentLength == 0 && len(r.TransferEncoding) == 0 && r.Header.Get("Upgrade") == "" {
+		return "none"
+	}
+	return "present"
 }
 
 func (g *gateway) summarize(ctx context.Context, r *http.Request) ([]byte, error) {
@@ -376,6 +385,7 @@ func (g *gateway) forward(r *http.Request, identity, tunnel string) *http.Respon
 func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	identity, err := g.identity(r)
 	if err != nil {
+		w.Header().Set("Proxy-Authenticate", `Basic realm="nanoclaw"`)
 		http.Error(w, "Proxy authentication required", 407)
 		return
 	}

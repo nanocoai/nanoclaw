@@ -10,6 +10,7 @@ import { randomUUID } from 'crypto';
 
 import { getDb } from '../db/connection.js';
 import { isUniqueViolation } from '../db/errors.js';
+import { normalizeArgs } from './args.js';
 import { renderVerbHelp } from './help-render.js';
 import { register } from './registry.js';
 import type { Access } from './registry.js';
@@ -359,18 +360,6 @@ function genericDelete(def: ResourceDef) {
     if (result.changes === 0) throw new Error(`${def.name} not found: ${id}`);
     return { deleted: id };
   };
-}
-
-// ---------------------------------------------------------------------------
-// parseArgs helper: normalizes --hyphen-keys to underscore_keys
-// ---------------------------------------------------------------------------
-
-function normalizeArgs(raw: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(raw)) {
-    out[k.replace(/-/g, '_')] = v;
-  }
-  return out;
 }
 
 // ---------------------------------------------------------------------------

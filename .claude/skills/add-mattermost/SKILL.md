@@ -226,7 +226,7 @@ Your Mattermost username, without `@`.
 
 Resolve that user and open the DM shared with the bot.
 
-```nc:run capture:owner_user_id=.id,owner_handle=.id effect:fetch
+```nc:run capture:owner_user_id=.id,owner_handle=.id effect:fetch validate:^[a-z0-9]{26}$
 curl -sf "{{base_url}}/api/v4/users/username/{{owner_username}}" -H "Authorization: Bearer {{bot_token}}"
 ```
 

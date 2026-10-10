@@ -905,3 +905,157 @@ it('waits for the first subscription result and shared health publication when s
   await starting;
   expect(publish).toHaveBeenLastCalledWith(true);
 });
+
+describe('uncredentialed reads', () => {
+  const read = (overrides: Partial<NonNullable<GatewayApprovalRequest['destination']>> = {}) =>
+    request({
+      trigger: 'default',
+      destination: { host: 'docs.example.test', method: 'GET', sendsPayload: false, ...overrides },
+    });
+
+  function scoped(
+    credentialScope?: NonNullable<GatewayProviderDefinition['approvals']['credentialScope']>,
+  ): GatewayProviderDefinition {
+    const gateway = provider({ rejectable: true });
+    return { ...gateway, approvals: { ...gateway.approvals, credentialScope } };
+  }
+
+  async function expectCard(result: Promise<string>): Promise<void> {
+    const coordinator = await import('./gateway-approval-coordinator.js');
+    await vi.waitFor(() => expect(delivered).toHaveLength(1));
+    await coordinator.stopGatewayApprovalCoordinator();
+    expect(await result).toBe('deny');
+  }
+
+  it.each(['GET', 'HEAD'])('approves an opted-in %s without a card when no credential applies', async (method) => {
+    vi.stubEnv('NANOCLAW_GATEWAY_UNCREDENTIALED_READS', 'true');
+    const scope = vi.fn(async () => 'none' as const);
+    const coordinator = await import('./gateway-approval-coordinator.js');
+    await coordinator.startGatewayApprovalCoordinator(scoped(scope), delivery, vi.fn());
+    expect(await decide(read({ method }))).toBe('approve');
+    expect(scope).toHaveBeenCalledWith({ host: 'docs.example.test', method });
+    expect(delivered).toHaveLength(0);
+  });
+
+  it.each([
+    ['the gateway reports a credential', async () => 'credential' as const],
+    ['the scope lookup rejects', async () => Promise.reject(new Error('control plane down'))],
+    [
+      'the scope lookup throws',
+      () => {
+        throw new Error('unreadable rules');
+      },
+    ],
+    ['the gateway answers anything else', async () => 'maybe' as unknown as 'none'],
+  ])('keeps the card when %s', async (_name, scope) => {
+    vi.stubEnv('NANOCLAW_GATEWAY_UNCREDENTIALED_READS', 'true');
+    const coordinator = await import('./gateway-approval-coordinator.js');
+    await coordinator.startGatewayApprovalCoordinator(scoped(scope), delivery, vi.fn());
+    await expectCard(decide(read()));
+  });
+
+  it('keeps the card when the scope lookup does not answer in time', async () => {
+    vi.stubEnv('NANOCLAW_GATEWAY_UNCREDENTIALED_READS', 'true');
+    const coordinator = await import('./gateway-approval-coordinator.js');
+    await coordinator.startGatewayApprovalCoordinator(
+      scoped(() => new Promise(() => {})),
+      delivery,
+      vi.fn(),
+    );
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const result = decide(read());
+    await vi.advanceTimersByTimeAsync(5_000);
+    vi.useRealTimers();
+    await expectCard(result);
+  });
+
+  it.each([
+    ['the flag is off', undefined, () => read()],
+    ['the flag is not exactly true', '1', () => read()],
+    ['the method writes', 'true', () => read({ method: 'POST' })],
+    ['the request sends a payload', 'true', () => read({ sendsPayload: true })],
+    ['the payload is not attested', 'true', () => read({ sendsPayload: undefined })],
+    ['the hold is an explicit policy', 'true', () => ({ ...read(), trigger: 'policy' as const })],
+    ['the hold has no trigger', 'true', () => ({ ...read(), trigger: undefined })],
+  ])('never asks the gateway when %s', async (_name, flag, held) => {
+    if (flag !== undefined) vi.stubEnv('NANOCLAW_GATEWAY_UNCREDENTIALED_READS', flag);
+    const scope = vi.fn(async () => 'none' as const);
+    const coordinator = await import('./gateway-approval-coordinator.js');
+    await coordinator.startGatewayApprovalCoordinator(scoped(scope), delivery, vi.fn());
+    await expectCard(decide(held()));
+    expect(scope).not.toHaveBeenCalled();
+  });
+
+  it('keeps the card for a gateway without a credential scope', async () => {
+    vi.stubEnv('NANOCLAW_GATEWAY_UNCREDENTIALED_READS', 'true');
+    const coordinator = await import('./gateway-approval-coordinator.js');
+    await coordinator.startGatewayApprovalCoordinator(scoped(), delivery, vi.fn());
+    await expectCard(decide(read()));
+  });
+
+  it.each([{ sessionId: 'unknown' }, { runtimeIdentity: 'wrong' }, { createdAt: '2000-01-01T00:00:00.000Z' }])(
+    'validates the request before asking the gateway: %j',
+    async (overrides) => {
+      vi.stubEnv('NANOCLAW_GATEWAY_UNCREDENTIALED_READS', 'true');
+      const scope = vi.fn(async () => 'none' as const);
+      const coordinator = await import('./gateway-approval-coordinator.js');
+      await coordinator.startGatewayApprovalCoordinator(scoped(scope), delivery, vi.fn());
+      expect(await decide({ ...read(), ...overrides })).toBe('deny');
+      expect(scope).not.toHaveBeenCalled();
+      expect(delivered).toHaveLength(0);
+    },
+  );
+
+  it('rejects a payload flag that is not a boolean', async () => {
+    vi.stubEnv('NANOCLAW_GATEWAY_UNCREDENTIALED_READS', 'true');
+    const coordinator = await import('./gateway-approval-coordinator.js');
+    await coordinator.startGatewayApprovalCoordinator(
+      scoped(async () => 'none'),
+      delivery,
+      vi.fn(),
+    );
+    expect(await decide(read({ sendsPayload: 'false' as unknown as boolean }))).toBe('deny');
+    expect(delivered).toHaveLength(0);
+  });
+
+  it('denies when the subscription fails during the scope lookup', async () => {
+    vi.stubEnv('NANOCLAW_GATEWAY_UNCREDENTIALED_READS', 'true');
+    let answer!: (scope: 'none') => void;
+    const scope = vi.fn(() => new Promise<'none'>((resolve) => (answer = resolve)));
+    const coordinator = await import('./gateway-approval-coordinator.js');
+    const unavailable = vi.fn();
+    await coordinator.startGatewayApprovalCoordinator(scoped(scope), delivery, unavailable);
+    const result = decide(read());
+    await vi.waitFor(() => expect(scope).toHaveBeenCalled());
+    failSubscription!(new Error('bridge lost'));
+    await vi.waitFor(() => expect(unavailable).toHaveBeenCalled());
+    answer('none');
+    expect(await result).toBe('deny');
+    expect(delivered).toHaveLength(0);
+  });
+
+  it('denies a read whose own deadline passes during the scope lookup', async () => {
+    vi.stubEnv('NANOCLAW_GATEWAY_UNCREDENTIALED_READS', 'true');
+    let answer!: (scope: 'none') => void;
+    const scope = vi.fn(() => new Promise<'none'>((resolve) => (answer = resolve)));
+    const coordinator = await import('./gateway-approval-coordinator.js');
+    await coordinator.startGatewayApprovalCoordinator(scoped(scope), delivery, vi.fn());
+    const result = decide({ ...read(), expiresAt: new Date(Date.now() + 3_000).toISOString() });
+    await vi.waitFor(() => expect(scope).toHaveBeenCalled());
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + 5_000 });
+    answer('none');
+    expect(await result).toBe('deny');
+    expect(delivered).toHaveLength(0);
+  });
+
+  it('leaves model and configured-read approvals to their own rules', async () => {
+    vi.stubEnv('NANOCLAW_GATEWAY_UNCREDENTIALED_READS', 'true');
+    vi.stubEnv('NANOCLAW_GATEWAY_READ_ONLY_HOSTS', 'api.example.test');
+    const scope = vi.fn(async () => 'credential' as const);
+    const coordinator = await import('./gateway-approval-coordinator.js');
+    await coordinator.startGatewayApprovalCoordinator(scoped(scope), delivery, vi.fn());
+    expect(await decide(read({ host: 'api.anthropic.com' }))).toBe('approve');
+    expect(await decide(read({ host: 'api.example.test' }))).toBe('approve');
+    expect(scope).not.toHaveBeenCalled();
+  });
+});

@@ -11,8 +11,8 @@ import type { GatewaySessionInput } from './gateway-provider-registry.js';
 vi.mock('../env.js', () => ({ readEnvFile: () => ({}) }));
 vi.mock('node:child_process', () => ({
   execFile: vi.fn(
-    (_bin: string, _args: string[], _opts: unknown, done: (e: unknown, stdout: string, stderr: string) => void) =>
-      done(null, 'true\n', ''),
+    (_bin: string, args: string[], _opts: unknown, done: (e: unknown, stdout: string, stderr: string) => void) =>
+      done(null, args.includes('{{.State.StartedAt}}') ? '2999-01-01T00:00:00.000000000Z\n' : 'true\n', ''),
   ),
 }));
 vi.mock('../container-runtime.js', () => ({ CONTAINER_RUNTIME_BIN: 'docker' }));
@@ -29,6 +29,7 @@ import {
   readIronProxySettings,
   type IronProxySettings,
 } from './iron-proxy.js';
+import { localConfigRules, ruleCovers } from './iron-proxy-credential-scope.js';
 
 const digest = `ghcr.io/example/iron-proxy@sha256:${'a'.repeat(64)}`;
 const root = '/tmp/nanoclaw-iron-test';
@@ -119,6 +120,38 @@ describe('Iron Proxy provider', () => {
     expect(front.summary_command).toBe('/usr/local/bin/gateway-approval-summary');
     expect(JSON.stringify(config)).not.toContain('/run/secrets/upstream');
     expect(front).toEqual(JSON.parse(ironFrontConfig(settings)));
+  });
+
+  it('reads back exactly the credential rule its own unmanaged config writes', () => {
+    const rules = localConfigRules(ironProxyConfig(settings));
+    const covered = (host: string, method: string) => rules.some((rule) => ruleCovers(rule, { host, method }));
+    for (const method of ['GET', 'HEAD', 'POST']) expect(covered(settings.modelHost, method)).toBe(true);
+    expect(covered('docs.example.test', 'GET')).toBe(false);
+    expect(localConfigRules(ironProxyConfig({ ...settings, managed: true }))).toEqual([]);
+  });
+
+  it('answers credential scope from the live configuration file', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'iron-scope-provider-'));
+    const configFile = path.join(dir, 'config.yaml');
+    fs.writeFileSync(configFile, ironProxyConfig(settings));
+    vi.useFakeTimers({ toFake: ['Date'], now: 0 });
+    try {
+      const provider = defineIronProxyProvider({ ...settings, configFile, projectRoot: dir, managed: false });
+      const scope = provider.approvals.credentialScope!;
+      expect(await scope({ host: 'api.anthropic.com', method: 'GET' })).toBe('credential');
+      expect(await scope({ host: 'docs.example.test', method: 'GET' })).toBe('credential');
+      vi.setSystemTime(60_000);
+      expect(await scope({ host: 'docs.example.test', method: 'GET' })).toBe('none');
+      expect(JSON.parse(fs.readFileSync(path.join(dir, 'seen-credential-rules.json'), 'utf8'))).toContainEqual({
+        host: 'api.anthropic.com',
+        methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'],
+      });
+      fs.rmSync(configFile);
+      await expect(scope({ host: 'other.example.test', method: 'GET' })).rejects.toThrow();
+    } finally {
+      vi.useRealTimers();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('keeps the local model host out of the front config; the bridge decides its port', () => {

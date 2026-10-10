@@ -235,7 +235,11 @@ function installOnecli(): { stdout: string; ok: boolean } {
   // be a foreign shell (exe.dev images ship /exe.dev/bin/sh first on PATH; its
   // builtin lsof always exits 0, so the installer's port probe reports every
   // port as busy and the install fails with "Port 5432 is already in use").
-  const gw = runInstall(`export ONECLI_VERSION=${ONECLI_GATEWAY_VERSION} && curl -fsSL onecli.sh/install | /bin/sh`);
+  // The script runs in a shell, so fetch it over HTTPS only: a scheme-less URL
+  // makes curl use plain HTTP, and --proto-redir blocks a redirect downgrade.
+  const gw = runInstall(
+    `export ONECLI_VERSION=${ONECLI_GATEWAY_VERSION} && curl --proto '=https' --proto-redir '=https' -fsSL https://onecli.sh/install | /bin/sh`,
+  );
   stdout += gw.stdout;
   if (!gw.ok) {
     log.error('OneCLI gateway install failed', { stderr: gw.stderr });

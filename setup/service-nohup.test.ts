@@ -24,6 +24,7 @@ vi.mock('../src/upgrade-state.js', () => ({ writeUpgradeState: () => ({ version:
 vi.mock('./peer-cleanup.js', () => ({ cleanupUnhealthyPeers: () => ({ unloaded: [], removed: [] }) }));
 vi.mock('./status.js', () => ({ emitStatus: vi.fn() }));
 
+import { getSystemdUnit } from '../src/install-slug.js';
 import { emitStatus } from './status.js';
 import { run, waitForNohupStartup } from './service.js';
 
@@ -81,6 +82,41 @@ describe.runIf(process.platform === 'linux')('nohup service startup', () => {
     expect(fs.statSync(path.join(host.root, 'data/ncl.sock')).isSocket()).toBe(true);
     process.kill(readPid(), 0);
     execFileSync('/bin/bash', ['-n', path.join(host.root, 'start-nanoclaw.sh')]);
+  });
+
+  it('passes an authenticated proxy to the host without writing it into the wrapper', async () => {
+    const authed = 'http://user:SYNTHETIC_PROXY_PASSWORD@proxy.example:3128';
+    for (const key of ['HTTPS_PROXY', 'HTTP_PROXY', 'ALL_PROXY', 'NO_PROXY']) {
+      vi.stubEnv(key, undefined);
+      vi.stubEnv(key.toLowerCase(), undefined);
+    }
+    const umask = process.umask(0o022);
+    try {
+      fs.writeFileSync(path.join(host.root, '.env'), `HTTPS_PROXY=${authed}\n`);
+      fixture(`
+  require('fs').writeFileSync('seen-env', JSON.stringify(process.env));
+  require('net').createServer(c => c.end()).listen('data/ncl.sock');
+`);
+      await run([]);
+    } finally {
+      process.umask(umask);
+      vi.unstubAllEnvs();
+    }
+    expect(fields()).toMatchObject({ SERVICE_LOADED: true, STATUS: 'success' });
+    expect(fs.readFileSync(path.join(host.root, 'start-nanoclaw.sh'), 'utf8')).not.toContain('SYNTHETIC');
+    expect(fs.statSync(path.join(host.root, 'data/service-proxy.env')).mode & 0o777).toBe(0o600);
+    const seen = JSON.parse(fs.readFileSync(path.join(host.root, 'seen-env'), 'utf8'));
+    expect(seen).toMatchObject({ NODE_USE_ENV_PROXY: '1', HTTPS_PROXY: authed, https_proxy: authed });
+  });
+
+  it('restricts a leftover service file that still holds proxy credentials', async () => {
+    const unitDir = path.join(host.root, 'home/.config/systemd/user');
+    fs.mkdirSync(unitDir, { recursive: true });
+    const leftover = path.join(unitDir, `${getSystemdUnit(host.root)}.service`);
+    fs.writeFileSync(leftover, `export https_proxy='http://u:pa'\\''ss@proxy.example:1'\n`, { mode: 0o644 });
+    acceptingHost();
+    await run([]);
+    expect(fs.statSync(leftover).mode & 0o777).toBe(0o600);
   });
 
   it('restarts the recorded host and waits for the replacement to be ready', async () => {

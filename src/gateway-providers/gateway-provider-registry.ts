@@ -75,7 +75,12 @@ export interface GatewayApprovalRequest {
   /** Verified destination selected by the gateway policy adapter. */
   delivery?: { messagingGroupId: string; threadId?: string };
   /** Metadata only: never credentials, query strings, or request bodies. */
-  destination?: { host: string; method?: string };
+  destination?: {
+    host: string;
+    method?: string;
+    /** Adapter-attested; false only when the request has no body and asks for no protocol upgrade. */
+    sendsPayload?: boolean;
+  };
   /** Selected, bounded display fields may come from the request. Never pass raw bodies, headers, tokens or query strings. */
   summary?: {
     agent: string;
@@ -147,6 +152,11 @@ export interface GatewayProviderDefinition {
     /** Optional restart recovery, when the gateway supports held-request enumeration or late decisions. */
     listPending?(): Promise<GatewayApprovalRequest[]>;
     decide?(requestId: string, decision: GatewayApprovalDecision): Promise<boolean>;
+    /**
+     * Whether the gateway could attach a stored credential to a request for
+     * this destination. May over-report, never under-report; reject when unsure.
+     */
+    credentialScope?(destination: { host: string; method?: string }): Promise<'credential' | 'none'>;
   };
 }
 

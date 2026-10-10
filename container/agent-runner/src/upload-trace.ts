@@ -6,6 +6,7 @@ import type { MessageInRow } from './db/messages-in.js';
 import './providers/index.js';
 import './provider-contracts/index.js';
 import { readProviderTrace } from './provider-contracts/realize.js';
+import { commandText, slashCommandName } from './slash-command.generated.js';
 
 /**
  * `/upload-trace` command: upload this session's transcript to the user's
@@ -25,13 +26,8 @@ import { readProviderTrace } from './provider-contracts/realize.js';
  * (no LLM turn). Admin-gated by the host router before it reaches the container.
  */
 export function isUploadTraceCommand(msg: MessageInRow): boolean {
-  let text = '';
-  try {
-    text = (JSON.parse(msg.content)?.text ?? '').trim();
-  } catch {
-    return false; // non-JSON content is never a command
-  }
-  return text.toLowerCase().startsWith('/upload-trace');
+  // Exact name, never a prefix: the host gate only admin-checks '/upload-trace'.
+  return slashCommandName(commandText(msg.content)) === '/upload-trace';
 }
 
 function curl(args: string[], input?: string): { ok: boolean; out: string } {

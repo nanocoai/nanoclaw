@@ -381,6 +381,32 @@ match. Changing `.env` applies to subsequent requests; restart the host when
 changing a process-environment override. OneCLI's explicit native policy holds
 remain authoritative.
 
+### Uncredentialed reads
+
+`NANOCLAW_GATEWAY_UNCREDENTIALED_READS=true` lets a `default` hold skip the card
+when the gateway attaches no stored credential to it. It is off by default and
+applies only when all of these hold:
+
+- the method is GET or HEAD;
+- the adapter sets `destination.sendsPayload: false`, attesting that the request
+  has no body and asks for no protocol upgrade;
+- the gateway's `approvals.credentialScope(destination)` answers `'none'` within
+  five seconds.
+
+A gateway derives `credentialScope` from its own credential rules. It may
+over-report and must never under-report, so it answers `'none'` only from rules
+at least as fresh as the ones its proxy enforces. A missing hook, an error, a
+timeout or any other answer keeps the card; a request whose deadline passes
+during the lookup is denied. Each card-free approval is logged with the
+request's audit metadata.
+
+This trades a human check for the egress allowlist. A request with no credential
+can still carry data out in its URL and headers to any allowed host, and GET is
+not proof of a read: some services act on a GET, such as publishing a
+notification or submitting a form. Other methods, bodies, upgrades, explicit
+policy holds and credentialed requests keep their cards. Configured read-only
+hosts and model domains are decided first and are unaffected.
+
 ### Approval presentation
 
 Gateways may supply `summary` with `agent`, `action`, `resource`, `reason`,

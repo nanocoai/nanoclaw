@@ -1,5 +1,3 @@
-import { inspect } from 'node:util';
-
 const LEVELS = { debug: 20, info: 30, warn: 40, error: 50, fatal: 60 } as const;
 type Level = keyof typeof LEVELS;
 
@@ -17,23 +15,23 @@ const FULL_RESET = '\x1b[0m';
 
 const threshold = LEVELS[(process.env.LOG_LEVEL as Level) || 'info'] ?? LEVELS.info;
 
-const INSPECT_OPTS = { breakLength: Infinity, depth: 6 };
-
 function safeStringify(v: unknown): string {
-  // JSON.stringify throws on cycles and BigInt; inspect handles both. Anything
-  // inspect cannot handle falls through to the catch in emit.
-  let root: { value: unknown } | undefined;
+  // The replacer runs after each toJSON, so nested redaction holds; mapping BigInt
+  // and cycles here keeps stringify from throwing on them.
+  const ancestors: unknown[] = [];
   /* eslint-disable no-catch-all/no-catch-all -- logging must never throw */
   try {
-    // The first replacer call sees the root after toJSON ran, so the fallback
-    // honors a redacting toJSON without calling it twice.
-    return JSON.stringify(v, (_key, value: unknown) => {
-      root ??= { value };
+    return JSON.stringify(v, function (this: unknown, _key, value: unknown) {
+      if (typeof value === 'bigint') return `${value}n`;
+      if (typeof value !== 'object' || value === null) return value;
+      while (ancestors.length && ancestors[ancestors.length - 1] !== this) ancestors.pop();
+      if (ancestors.includes(value)) return '[Circular]';
+      ancestors.push(value);
       return value;
     });
   } catch {
-    // No root means reading or running toJSON threw; never print the raw value.
-    return root ? inspect(root.value, INSPECT_OPTS) : '[unserializable]';
+    // A throwing toJSON, getter or Proxy trap: fail closed, never print the raw value.
+    return '[unserializable]';
   }
   /* eslint-enable no-catch-all/no-catch-all */
 }

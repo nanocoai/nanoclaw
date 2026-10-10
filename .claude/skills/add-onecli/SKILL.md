@@ -40,6 +40,8 @@ import './onecli.js';
 
 The setup script safely reuses a healthy existing installation, installs the pinned local gateway when absent, or uses `NANOCLAW_ONECLI_API_HOST` and `NANOCLAW_ONECLI_API_TOKEN` for a remote gateway.
 
+This integration supports exactly the gateway version pinned in `.claude/skills/add-onecli/versions.json` (`onecli-gateway`, today 1.42.0; not the `versions.json` at the project root). OneCLI 1.43 and later remove the agent secret-assignment API used below, so 1.43+ is not supported for now. Setup reuses an existing gateway without checking its version: follow [Upgrading the OneCLI gateway](payload/docs/onecli-upgrades.md) to check it and to move it to the pin. The CLI (`onecli-cli`) and SDK (`onecli-sdk`) have their own pins.
+
 ```nc:run effect:external
 pnpm exec tsx .claude/skills/add-onecli/scripts/setup.ts
 ```
@@ -58,7 +60,7 @@ a key in `.env`, command arguments, or the container environment.
   answer at the key prompt completes the move after confirmation.
 - Existing OneCLI credential names and formats remain compatible.
 - ChatGPT logins need manual reauthentication after expiry on the pinned
-  OneCLI 1.41.0; see [ChatGPT OAuth refresh](references/chatgpt-oauth-refresh.md)
+  OneCLI 1.42.0; see [ChatGPT OAuth refresh](references/chatgpt-oauth-refresh.md)
   for the limitation and upgrade constraints.
 
 ## Validate
