@@ -40,7 +40,7 @@ import './resend.js';
 Pinned to an exact version — the supply-chain policy rejects ranges and `latest`:
 
 ```nc:dep
-@resend/chat-sdk-adapter@0.1.1
+@resend/chat-sdk-adapter@0.3.0
 ```
 
 ### 4. Build and validate

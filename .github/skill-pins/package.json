@@ -25,7 +25,7 @@
     "@onecli-sh/sdk": "2.2.1",
     "@openai/codex": "0.162.1",
     "@opencode-ai/sdk": "1.18.25",
-    "@resend/chat-sdk-adapter": "0.1.1",
+    "@resend/chat-sdk-adapter": "0.3.0",
     "@types/qrcode": "1.5.6",
     "@types/ws": "8.18.1",
     "@whiskeysockets/baileys": "7.0.0-rc14",
@@ -163,7 +163,7 @@
       ]
     },
     "@resend/chat-sdk-adapter": {
-      "version": "0.1.1",
+      "version": "0.3.0",
       "sources": [
         ".claude/skills/add-resend/SKILL.md nc:dep"
       ]
