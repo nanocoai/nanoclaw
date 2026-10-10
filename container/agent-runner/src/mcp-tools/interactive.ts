@@ -10,6 +10,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { findQuestionResponse, markCompleted } from '../db/messages-in.js';
 import { writeMessageOut } from '../db/messages-out.js';
 import { getSessionRouting, resolveDestinationThread } from '../db/session-routing.js';
+import { destinationList, resolveRouting } from './routing.js';
 import { getCurrentReplyRoute } from '../db/session-state.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
@@ -34,6 +35,15 @@ function routing() {
       ? resolveDestinationThread(session.channel_type, session.platform_id, getCurrentReplyRoute())
       : null;
   return { ...session, thread_id: thread?.threadId ?? session.thread_id };
+}
+
+/**
+ * The bound chat is null in a session with no attached chat — a scheduled
+ * task run. A row written with null routing can never be delivered (the host
+ * fails it), so the tool refuses up front and points at the fix.
+ */
+function unroutable(tool: string, hint: string): string {
+  return `${tool} has nowhere to go: this session has no attached chat (a task run). ${hint}`;
 }
 
 /**
@@ -189,6 +199,14 @@ export const askUserQuestion: McpToolDefinition = {
 
     const questionId = generateId();
     const r = routing();
+    if (!r.channel_type || !r.platform_id) {
+      return err(
+        unroutable(
+          'ask_user_question',
+          'Nobody can answer here; use send_message with an explicit "to" destination to tell someone what you need.',
+        ),
+      );
+    }
 
     // Write question card to outbound.db
     await writeMessageOut({
@@ -239,10 +257,16 @@ export const askUserQuestion: McpToolDefinition = {
 export const sendCard: McpToolDefinition = {
   tool: {
     name: 'send_card',
-    description: 'Send a display card with optional URL link buttons to the current conversation.',
+    description:
+      'Send a display card with optional URL link buttons to the current conversation, or to a named channel destination with `to`.',
     inputSchema: {
       type: 'object' as const,
       properties: {
+        to: {
+          type: 'string',
+          description:
+            'Destination name, as in send_message (channel destinations only). Optional in a chat: the card goes to the current conversation. Required in a session with no attached chat, such as a scheduled task run.',
+        },
         card: {
           type: 'object',
           description:
@@ -285,7 +309,25 @@ export const sendCard: McpToolDefinition = {
     if (!card) return err('card is required');
 
     const id = generateId();
-    const r = routing();
+    let r: { channel_type: string | null; platform_id: string | null; thread_id: string | null };
+    let sentTo = ''; // ' to <name>' when an explicit destination was given
+    const to = typeof args.to === 'string' ? args.to.trim() : '';
+    if (to) {
+      const resolved = resolveRouting(to);
+      if ('error' in resolved) return err(resolved.error);
+      if (resolved.channel_type === 'agent') {
+        return err(
+          `send_card can only target a channel destination; "${to}" is an agent. Use send_message for agents.`,
+        );
+      }
+      r = resolved;
+      sentTo = ` to ${to}`;
+    } else {
+      r = routing();
+      if (!r.channel_type || !r.platform_id) {
+        return err(unroutable('send_card', `Pass "to": one of ${destinationList()}.`));
+      }
+    }
     const { card: renderable, dropped } = partitionActions(card);
 
     await writeMessageOut({
@@ -297,13 +339,13 @@ export const sendCard: McpToolDefinition = {
       content: JSON.stringify({ type: 'card', card: renderable, fallbackText: (args.fallbackText as string) || '' }),
     });
 
-    log(`send_card: ${id}`);
+    log(`send_card: ${id}${sentTo}`);
     if (dropped > 0) {
       return ok(
-        `Card sent (id: ${id}). ${dropped} invalid action(s) were dropped: send_card link actions need a non-empty label and a url that is a web link (http or https), such as https://example.com. Use ask_user_question for callback buttons.`,
+        `Card sent${sentTo} (id: ${id}). ${dropped} invalid action(s) were dropped: send_card link actions need a non-empty label and a url that is a web link (http or https), such as https://example.com. Use ask_user_question for callback buttons.`,
       );
     }
-    return ok(`Card sent (id: ${id})`);
+    return ok(`Card sent${sentTo} (id: ${id})`);
   },
 };
 
