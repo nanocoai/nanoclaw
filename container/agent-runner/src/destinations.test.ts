@@ -28,6 +28,7 @@ describe('buildSystemPromptAddendum — multi-destination routing guidance', () 
     const prompt = buildSystemPromptAddendum('Casa');
 
     expect(prompt).toContain('default to addressing the destination it came `from`');
+    expect(prompt).toContain('your answer still has to be sent after it');
     expect(prompt).toContain('from="name"');
     expect(prompt).toContain('`casa`');
     expect(prompt).toContain('`whatsapp-mg-17780`');
