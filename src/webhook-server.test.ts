@@ -12,7 +12,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 
 import type { Chat } from 'chat';
 
-import { registerWebhookAdapter, stopWebhookServer } from './webhook-server.js';
+import { getWebhookStatus, registerWebhookAdapter, stopWebhookServer } from './webhook-server.js';
 
 const PORT = 3917;
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -63,6 +63,11 @@ describe('registerWebhookAdapter — route/handler split', () => {
 
     const res = await post('/webhook/slack', 'payload-default');
     expect(res.status).toBe(200);
+    expect(getWebhookStatus()).toEqual({
+      id: res.headers.get('x-nanoclaw-webhook-id'),
+      port: PORT,
+      paths: ['/webhook/slack'],
+    });
     expect(await res.json()).toEqual({ via: 'default' });
     expect(calls).toEqual(['payload-default']);
   });

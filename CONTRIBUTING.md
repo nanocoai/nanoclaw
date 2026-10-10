@@ -40,12 +40,31 @@ The labels are their own reference. Run `gh label list` to print the full set wi
 
 **Not accepted:** Features, capabilities, compatibility, enhancements. These should be skills.
 
+### Core or your fork?
+
+NanoClaw expects you to have a coding agent, like Claude Code, Codex or OpenCode, to help when you install or update it. That agent can fix small problems in your own copy when they come up. So most fixes for rare setups belong on your own fork, not in core.
+
+**Send a PR for:**
+- a bug on a normal, correctly configured install
+- something that used to work until a release broke it by mistake
+- a security fix, even for a rare setup. If it could be exploited, don't open a public PR. [Report it privately](https://github.com/nanocoai/nanoclaw/security/advisories/new) instead.
+
+**Keep it on your fork:**
+- a fix for a rare setup, like one OS version, one machine's settings, or an upgrade from an old commit that was never a release
+- a change that only your setup needs
+
+If a change fits both lists, send the PR.
+
+For a fork fix, ask your coding agent to make the change in your copy. A skill makes it easier to carry through updates. If other people would want it too, send the skill as a PR. See [Private skill or upstream contribution?](https://docs.nanoclaw.dev/extend/writing-skills#private-skill-or-upstream-contribution)
+
+**Closing PRs in batches.** Maintainers may close PRs that fit this rule, several at a time. Each one gets a comment that says why, points to the code or issue that shows it is a rare case, and links here. If we got it wrong, reply with who else hits the problem and we will take another look.
+
 ## Breaking Changes
 
 Breaking changes are allowed; **silent** ones are not. NanoClaw does not migrate user installs at runtime — the user's coding agent is the migrator, so every breaking change must ship a migration path that agent can execute without a human reverse-engineering the diff:
 
-1. **Every `[BREAKING]` CHANGELOG entry must reference its migration path** — either a skill to run (`Run /<skill-name> to <action>`) or a `docs/` page covering **detect / why / fix / verify / rollback** (see [docs/onecli-upgrades.md](docs/onecli-upgrades.md) for the shape). `/update-nanoclaw` surfaces these entries after every update and walks the user through them.
-2. **If the change moves an external component's sanctioned version** (gateway, pinned CLI binary, …), update its pin in [`versions.json`](versions.json). The changelog stays human-narrative; `versions.json` is the machine-checkable signal — `/update-nanoclaw` diffs it across the update and routes the user to the linked doc for any pin that moved.
+1. **Every `[BREAKING]` CHANGELOG entry must reference its migration path** — either a skill to run (`Run /<skill-name> to <action>`) or a `docs/` page covering **detect / why / fix / verify / rollback**. `/update-nanoclaw` surfaces these entries after every update and walks the user through them.
+2. **If the change moves an external component's sanctioned version**, update its pin where that component's owner keeps it: `versions.json` for things trunk installs (the agent image), or the skill's own `versions.json` for anything a `/add-*` skill owns (gateways, their CLIs). The changelog stays human-narrative; the pin file is the machine-checkable signal the installing skill enforces.
 
 ## Skills
 
@@ -80,6 +99,8 @@ Add a messaging channel or an agent provider. The SKILL.md contains the install 
 4. Open a PR. We'll land the code on the registry branch from your work
 
 See `/add-slack` for a good example. See [docs/skills-model.md](docs/skills-model.md) for why install is a fetch, never a merge.
+
+Gateway providers use the same one-registration shape, but keep their implementation and tests in the skill's `payload/` directory on `main`. Setup discovers each package through its `gateway.json` and applies it without another repository or registry branch.
 
 #### 2. Utility skills (with code files)
 

@@ -5,6 +5,7 @@
  * with a question card, then polls messages_in for the response.
  */
 import { AjvJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/ajv';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 import { findQuestionResponse, markCompleted } from '../db/messages-in.js';
 import { writeMessageOut } from '../db/messages-out.js';
@@ -68,9 +69,15 @@ export const LINK_ACTION_SCHEMA = Object.freeze({
     // gives, and the anchors reject whitespace, which would otherwise break out
     // of '[label](url)' on an adapter that degrades a card to markdown.
     // Rejected: '#', '/docs', 'localhost:3000', 'javascript:', 'mailto:'.
+    // Printable-ASCII ranges stand in for \s and \S: llama.cpp's
+    // schema-to-grammar converter rejects those escapes and fails every request
+    // that carries this tool. The classes also leave out '"' and '\\', which
+    // the converter would otherwise copy into the JSON string rule. The first
+    // host character excludes '#', '/' and '?'. Non-ASCII URLs are normalized
+    // with `new URL()` before validation (see normalizeLinkUrl).
     url: {
       type: 'string' as const,
-      pattern: '^[hH][tT][tT][pP][sS]?://[^\\s/?#]\\S*$',
+      pattern: '^[hH][tT][tT][pP][sS]?://[!$-.0->@-[\\]-~][!#-[\\]-~]*$',
       description: "Web link (http or https), e.g. 'https://example.com'.",
     },
     style: {
@@ -88,12 +95,33 @@ const validateLinkAction = new AjvJsonSchemaValidator().getValidator<Record<stri
  * the ones it would drop. Invalid entries — including `null`, which would
  * crash the bridge's property reads — never reach the payload.
  */
+const NON_ASCII = /[^\x00-\x7F]/;
+
+/**
+ * The pattern is ASCII-only, so a link like `https://de.wikipedia.org/wiki/München`
+ * would be dropped. `new URL()` percent-encodes the path and punycodes the host,
+ * which keeps such links. Only non-ASCII URLs are rewritten; everything else is
+ * validated exactly as the agent sent it.
+ */
+function normalizeLinkUrl(action: unknown): unknown {
+  if (typeof action !== 'object' || action === null) return action;
+  const url = (action as { url?: unknown }).url;
+  if (typeof url !== 'string' || !NON_ASCII.test(url)) return action;
+  try {
+    return { ...action, url: new URL(url).href };
+  } catch {
+    return action;
+  }
+}
+
 function partitionActions(card: Record<string, unknown>): { card: Record<string, unknown>; dropped: number } {
   const actions = card.actions;
   if (!Array.isArray(actions)) return { card, dropped: 0 };
 
-  const valid = actions.filter((action) => validateLinkAction(action).valid);
-  if (valid.length === actions.length) return { card, dropped: 0 };
+  const normalized = actions.map(normalizeLinkUrl);
+  const valid = normalized.filter((action) => validateLinkAction(action).valid);
+  const changed = normalized.some((action, index) => action !== actions[index]);
+  if (valid.length === actions.length && !changed) return { card, dropped: 0 };
 
   return { card: { ...card, actions: valid }, dropped: actions.length - valid.length };
 }
@@ -104,10 +132,6 @@ function ok(text: string) {
 
 function err(text: string) {
   return { content: [{ type: 'text' as const, text: `Error: ${text}` }], isError: true };
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export const askUserQuestion: McpToolDefinition = {
@@ -143,7 +167,8 @@ export const askUserQuestion: McpToolDefinition = {
       required: ['title', 'question', 'options'],
     },
   },
-  async handler(args) {
+  async handler(args, context) {
+    if (context?.signal.aborted) return err('Question cancelled');
     const title = args.title as string;
     const question = args.question as string;
     const rawOptions = args.options as unknown[];
@@ -186,6 +211,7 @@ export const askUserQuestion: McpToolDefinition = {
     // Poll for response in inbound.db (host writes the response there)
     const deadline = Date.now() + timeout;
     while (Date.now() < deadline) {
+      if (context?.signal.aborted) return err('Question cancelled');
       const response = findQuestionResponse(questionId);
 
       if (response) {
@@ -197,7 +223,12 @@ export const askUserQuestion: McpToolDefinition = {
         return ok(parsed.selectedOption);
       }
 
-      await sleep(1000);
+      try {
+        await sleep(1000, undefined, { signal: context?.signal });
+      } catch (error) {
+        if (context?.signal.aborted) return err('Question cancelled');
+        throw error;
+      }
     }
 
     log(`ask_user_question timeout: ${questionId}`);

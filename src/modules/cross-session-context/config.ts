@@ -2,8 +2,8 @@
  * Cross-session context caps.
  *
  * Module-level constants for now — no DB config. Exported so the
- * router/delivery fan hooks, the host-sweep pruner, and tests share one
- * source of truth.
+ * router/delivery fan hooks, the backfill, the host-sweep pruner, and tests
+ * share one source of truth.
  */
 
 /** channel_type stamped on fanned rows (cross-stream contract — the
@@ -30,8 +30,27 @@ export const ECHO_TEXT_MAX_CHARS = 500;
  *  task sessions receive no echoes. */
 export const ECHO_BACKLOG_CAP = 50;
 
-/** Pending echo rows older than this are dropped regardless of the count caps. */
-export const ECHO_MAX_AGE_DAYS = 7;
+/**
+ * The ambient-context horizon, in days. One number bounds three things:
+ *   - which sessions of a conversation count as recently active (the fan
+ *     audience and the backfill sources — see HOT_SESSION_LIMIT),
+ *   - how far back a backfill reaches,
+ *   - how long a pending echo row lives before the sweep pruner drops it.
+ */
+export const ECHO_MAX_AGE_DAYS = 3;
+export const ECHO_MAX_AGE_MS = ECHO_MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
+
+/**
+ * The hot set: a conversation's HOT_SESSION_LIMIT most recently active
+ * sessions (by `sessions.last_active`, within ECHO_MAX_AGE_DAYS), plus its
+ * top-level session. Live echoes fan ONLY into the hot set, and a session
+ * outside it catches up from the hot set when it next wakes. Everything the
+ * module does per message is therefore O(HOT_SESSION_LIMIT), never O(sessions).
+ */
+export const HOT_SESSION_LIMIT = 8;
+
+/** Mailbox sessions in flight at once during a fan or a backfill read. */
+export const ECHO_CONCURRENCY = 8;
 
 /** Backfill prelude surface: THIS DM's preceding timeline (first-class
  *  conversation history), distinct from live cross-thread fan echoes. */

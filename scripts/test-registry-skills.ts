@@ -1,9 +1,9 @@
 #!/usr/bin/env tsx
 
-// Applies one branch-backed add-* skill to a disposable checkout and runs only
+// Applies one branch-backed or self-contained provider add-* skill to a disposable checkout and runs only
 // its build/test directives. `--all` is the local equivalent of the CI matrix.
 
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   existsSync,
@@ -28,6 +28,7 @@ import {
   resolveChatCoreVersion,
   validate,
 } from './skill-directives.js';
+import { gitFetchBranchCommand } from './git-fetch-branch.js';
 import { refreshInstalledSkills, resolveRegistryRemote } from './update-skills.js';
 import { verifyProviderContracts } from './provider-contract-verifier.js';
 import { parseProviderDescriptor } from '../setup/providers/skill-descriptor.js';
@@ -132,18 +133,26 @@ function materializeSkill(commit: string, skill: string, skillsRoot: string): Re
   return meta;
 }
 
-function command(cmd: string, cwd: string, quiet = false): string {
+// Streams as it runs so a hung step shows where it stopped; the job-level
+// timeout bounds it. stdout is also captured for the caller.
+function command(cmd: string, cwd: string, quiet = false): Promise<string> {
   if (!quiet) console.log(`  $ ${cmd}`);
-  const result = spawnSync(cmd, { cwd, shell: true, encoding: 'utf8', maxBuffer: 50 * 1024 * 1024 });
-  if (result.status !== 0) {
-    if (result.stdout) process.stdout.write(result.stdout);
-    if (result.stderr) process.stderr.write(result.stderr);
-    throw new Error(`command exited ${result.status}: ${cmd}`);
-  }
-  return result.stdout ?? '';
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, { cwd, shell: true, stdio: ['ignore', 'pipe', 'inherit'] });
+    const stdout: Buffer[] = [];
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdout.push(chunk);
+      process.stdout.write(chunk);
+    });
+    child.on('error', (error) => reject(new Error(`command failed: ${error.message}: ${cmd}`)));
+    child.on('close', (status, signal) => {
+      if (status === 0) return resolve(Buffer.concat(stdout).toString('utf8'));
+      reject(new Error(`command ${signal ? `killed by ${signal}` : `exited ${status}`}: ${cmd}`));
+    });
+  });
 }
 
-function discover(skillsRoot = SKILLS_ROOT): RegistrySkill[] {
+export function discover(skillsRoot = SKILLS_ROOT): RegistrySkill[] {
   return readdirSync(skillsRoot)
     .filter((name) => name.startsWith('add-'))
     .flatMap((skill) => {
@@ -151,8 +160,10 @@ function discover(skillsRoot = SKILLS_ROOT): RegistrySkill[] {
       const path = join(dir, 'SKILL.md');
       if (!existsSync(path)) return [];
       const markdown = readFileSync(path, 'utf8');
-      if (![...markdown.matchAll(REGISTRY_MENTION)].length) return [];
       const directives = parseDirectives(markdown);
+      const provider = parseProviderDescriptor(markdown, skill)?.value;
+      const localPayload = Boolean(provider) && directives.some((d) => d.kind === 'copy' && !d.attrs['from-branch']);
+      if (![...markdown.matchAll(REGISTRY_MENTION)].length && !localPayload) return [];
       const branches = [
         ...new Set(
           directives
@@ -165,9 +176,9 @@ function discover(skillsRoot = SKILLS_ROOT): RegistrySkill[] {
         {
           skill,
           branches,
-          provider: parseProviderDescriptor(markdown, skill)?.value,
+          provider,
           bun: markdown.includes('container/agent-runner'),
-          executable: branches.length > 0,
+          executable: branches.length > 0 || localPayload,
           dir,
           markdown,
         },
@@ -305,7 +316,7 @@ async function testSkill(
   skipEffects = SKIPPED_EFFECTS,
 ): Promise<void> {
   if (!meta.executable) {
-    throw new Error(`${meta.skill} pulls registry code but has no nc:copy from-branch directive`);
+    throw new Error(`${meta.skill} has no executable nc:copy source`);
   }
 
   const directives = parseDirectives(meta.markdown);
@@ -329,7 +340,8 @@ async function testSkill(
         if (event.type === 'step-start') current = byLine.get(event.line);
       },
       exec: (cmd) => {
-        if (/^git fetch skill-ci (channels|providers)$/.test(cmd)) return '';
+        // These refs are pinned above; skill-ci is not a network remote here.
+        if ([...REGISTRY_BRANCHES].some((branch) => cmd === gitFetchBranchCommand('skill-ci', branch))) return '';
         const stub = fixture.exec?.find((candidate) => cmd.includes(candidate.match));
         if (stub) return stub.stdout;
         if (current?.kind === 'run' && STUBBED_EFFECTS.has(String(current.attrs.effect))) {
@@ -340,7 +352,7 @@ async function testSkill(
       execStream: async () => ({ ok: true, fields: fixture.stepFields ?? {} }),
     });
 
-  const before = roundTrip && meta.branches.includes('providers') ? snapshot(root) : undefined;
+  const before = roundTrip && (meta.provider || meta.branches.includes('providers')) ? snapshot(root) : undefined;
   const result = await apply();
 
   if (!fullyApplied(result)) {
@@ -381,8 +393,8 @@ async function testCombinedProviders(skills: RegistrySkill[]): Promise<void> {
   try {
     git(['clone', '--quiet', '--shared', '--no-checkout', SOURCE_ROOT, root]);
     git(['checkout', '--quiet', '--detach', git(['rev-parse', 'HEAD'])], root);
-    command('pnpm install --frozen-lockfile --prefer-offline', root);
-    command('bun install --frozen-lockfile', join(root, 'container/agent-runner'));
+    await command('pnpm install --frozen-lockfile --prefer-offline', root);
+    await command('bun install --frozen-lockfile', join(root, 'container/agent-runner'));
 
     for (const meta of selected) {
       console.log(`\n==> ${meta.skill}`);
@@ -403,9 +415,8 @@ async function testCombinedProviders(skills: RegistrySkill[]): Promise<void> {
       throw new Error(`update-skills refresh failed: ${JSON.stringify(report)}`);
     }
     const verification = await verifyProviderContracts(root, {
-      // OpenCode retains its existing payload until its contract skill lands.
-      // Every other installed provider must already declare its contract.
-      expectedLegacyProviders: ['opencode'],
+      expectedLegacyProviders: [],
+      requiredDeclaredProviders: expected,
       exec: (cmd, cwd) => command(cmd, cwd),
     });
     if (verification.status !== 'passed') {
@@ -429,8 +440,8 @@ async function testOldProviderRefresh(commit: string): Promise<void> {
     git(['clone', '--quiet', '--shared', '--no-checkout', SOURCE_ROOT, root]);
     git(['fetch', '--quiet', 'origin', commit], root);
     git(['checkout', '--quiet', '--detach', commit], root);
-    command('pnpm install --frozen-lockfile --prefer-offline', root);
-    command('bun install --frozen-lockfile', join(root, 'container/agent-runner'));
+    await command('pnpm install --frozen-lockfile --prefer-offline', root);
+    await command('bun install --frozen-lockfile', join(root, 'container/agent-runner'));
 
     const oldSkills = LEGACY_PROVIDER_SKILLS.map((name) =>
       discover(join(root, '.claude/skills')).find(({ skill }) => skill === name),
@@ -482,8 +493,8 @@ async function testPreContractProviders(): Promise<void> {
   try {
     git(['clone', '--quiet', '--shared', '--no-checkout', SOURCE_ROOT, root]);
     git(['checkout', '--quiet', '--detach', git(['rev-parse', 'HEAD'])], root);
-    command('pnpm install --frozen-lockfile --prefer-offline', root);
-    command('bun install --frozen-lockfile', join(root, 'container/agent-runner'));
+    await command('pnpm install --frozen-lockfile --prefer-offline', root);
+    await command('bun install --frozen-lockfile', join(root, 'container/agent-runner'));
 
     const refs = { providers: PRE_CONTRACT_PROVIDERS_SHA };
     for (const name of LEGACY_PROVIDER_SKILLS) {
@@ -513,7 +524,7 @@ async function testAll(skills: RegistrySkill[]): Promise<void> {
   for (const meta of skills) {
     console.log(`\n==> ${meta.skill}`);
     if (!meta.executable) {
-      failures.push(`${meta.skill}: no nc:copy from-branch directive`);
+      failures.push(`${meta.skill}: no executable nc:copy source`);
       console.error(`  FAIL: ${failures.at(-1)}`);
       continue;
     }
@@ -523,14 +534,20 @@ async function testAll(skills: RegistrySkill[]): Promise<void> {
     try {
       git(['clone', '--quiet', '--shared', '--no-checkout', SOURCE_ROOT, root]);
       git(['checkout', '--quiet', '--detach', head], root);
-      command('pnpm install --frozen-lockfile --prefer-offline', root);
-      if (meta.bun) command('bun install --frozen-lockfile', join(root, 'container/agent-runner'));
+      await command('pnpm install --frozen-lockfile --prefer-offline', root);
+      if (meta.bun) await command('bun install --frozen-lockfile', join(root, 'container/agent-runner'));
       const scenarios = fixtureScenarios(meta);
       for (const [index, fixture] of scenarios.entries()) {
         const scenario = fixture.name ?? String(index + 1);
         if (scenarios.length > 1) console.log(`  scenario: ${scenario}`);
         try {
-          await testSkill(meta, fixture, root, refs, index === 0 && meta.branches.includes('providers'));
+          await testSkill(
+            meta,
+            fixture,
+            root,
+            refs,
+            index === 0 && Boolean(meta.provider || meta.branches.includes('providers')),
+          );
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           throw new Error(`${scenario}: ${message}`);

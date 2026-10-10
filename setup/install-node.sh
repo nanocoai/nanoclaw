@@ -45,7 +45,7 @@ else
       ;;
     Linux)
       echo "STEP: nodesource-setup"
-      curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+      curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E /bin/bash -
       echo "STEP: apt-install-nodejs"
       sudo apt-get install -y nodejs
       ;;

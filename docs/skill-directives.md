@@ -28,7 +28,7 @@ Two invariants follow, and both are non-negotiable:
 - `key:value` tokens are attributes.
 - The body's meaning is per-kind.
 
-`prompt` only *acquires* a value and binds it to a name; a separate directive *applies* it, referenced as `{{name}}`. That keeps "ask the human" decoupled from "what you do with the answer" (env, `ncl`, the OneCLI vault, a file).
+`prompt` only *acquires* a value and binds it to a name; a separate directive *applies* it, referenced as `{{name}}`. That keeps "ask the human" decoupled from "what you do with the answer" (env, `ncl`, the credential gateway, a file).
 
 ## The eight kinds
 
@@ -36,7 +36,9 @@ Every directive is idempotent — apply is safe to re-run, per the skills model.
 
 ### `copy [from-branch:<b>]`
 
-Body: one path per line — `PATH` (source == destination) or `SRC -> DST`. Copies the file in; with `from-branch:` the source is fetched from a registry branch (`git show origin/<b>:<path>`). **Idempotency: skip when every destination is present; when any is missing, all listed files are (re)copied — copying overwrites.**
+Body: one path per line — `PATH` (source == destination) or `SRC -> DST`. Copies the file in; with `from-branch:` the source is fetched from a registry branch (`git show refs/remotes/<remote>/<b>:<path>`). **Idempotency: skip when every destination is present; when any is missing, all listed files are (re)copied — copying overwrites.**
+
+Registry copies explicitly fetch `+refs/heads/<b>:refs/remotes/<remote>/<b>` from the selected remote before reading it. This also works in single-branch clones and updates stale registry refs without changing the checkout or its configured fetch mapping. A failed fetch stops the copy; cached registry content is not used as a fallback.
 
 ### `append to:<file> [at:<marker>]`
 

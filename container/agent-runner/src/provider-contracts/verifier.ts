@@ -69,6 +69,14 @@ function validateContract(provider: string, contract: ProviderRuntimeContract): 
     assertCapability(implementation, `${provider}.configuration.${capability}`);
   }
 
+  const tone = contract.configuration.tone;
+  if (tone !== undefined) {
+    if (!tone || typeof tone.default !== 'string' || !tone.default.trim()) {
+      throw new Error(`${provider}.configuration.tone.default must be a non-empty string`);
+    }
+    requireFunction(tone.toSettings, `${provider}.configuration.tone.toSettings`);
+  }
+
   if (contract.lifecycle !== undefined) {
     if (contract.lifecycle === null || typeof contract.lifecycle !== 'object') {
       throw new Error(`${provider}.lifecycle must be an object`);

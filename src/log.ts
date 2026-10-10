@@ -15,17 +15,38 @@ const FULL_RESET = '\x1b[0m';
 
 const threshold = LEVELS[(process.env.LOG_LEVEL as Level) || 'info'] ?? LEVELS.info;
 
+function safeStringify(v: unknown): string {
+  // The replacer runs after each toJSON, so nested redaction holds; mapping BigInt
+  // and cycles here keeps stringify from throwing on them.
+  const ancestors: unknown[] = [];
+  /* eslint-disable no-catch-all/no-catch-all -- logging must never throw */
+  try {
+    return JSON.stringify(v, function (this: unknown, _key, value: unknown) {
+      if (typeof value === 'bigint') return `${value}n`;
+      if (typeof value !== 'object' || value === null) return value;
+      while (ancestors.length && ancestors[ancestors.length - 1] !== this) ancestors.pop();
+      if (ancestors.includes(value)) return '[Circular]';
+      ancestors.push(value);
+      return value;
+    });
+  } catch {
+    // A throwing toJSON, getter or Proxy trap: fail closed, never print the raw value.
+    return '[unserializable]';
+  }
+  /* eslint-enable no-catch-all/no-catch-all */
+}
+
 function formatErr(err: unknown): string {
   if (err instanceof Error) {
     return `{ type: "${err.constructor.name}", message: "${err.message}", stack: ${err.stack} }`;
   }
-  return JSON.stringify(err);
+  return safeStringify(err);
 }
 
 function formatData(data: Record<string, unknown>): string {
   const parts: string[] = [];
   for (const [k, v] of Object.entries(data)) {
-    parts.push(`${KEY_COLOR}${k}${RESET}=${k === 'err' ? formatErr(v) : JSON.stringify(v)}`);
+    parts.push(`${KEY_COLOR}${k}${RESET}=${k === 'err' ? formatErr(v) : safeStringify(v)}`);
   }
   return parts.length ? ' ' + parts.join(' ') : '';
 }
@@ -43,7 +64,18 @@ function emit(level: Level, msg: string, data?: Record<string, unknown>): void {
   if (LEVELS[level] < threshold) return;
   const tag = `${COLORS[level]}${level.toUpperCase()}${level === 'fatal' ? FULL_RESET : RESET}`;
   const stream = LEVELS[level] >= LEVELS.warn ? process.stderr : process.stdout;
-  stream.write(`[${ts()}] ${tag} ${MSG_COLOR}${msg}${RESET}${data ? formatData(data) : ''}\n`);
+  /* eslint-disable no-catch-all/no-catch-all -- logging must never throw: a throw here reaches uncaughtException, which exits the host */
+  try {
+    stream.write(`[${ts()}] ${tag} ${MSG_COLOR}${msg}${RESET}${data ? formatData(data) : ''}\n`);
+  } catch {
+    // e.g. a throwing getter on the data bag itself, read before safeStringify sees it.
+    try {
+      process.stderr.write(`[${ts()}] ${tag} ${MSG_COLOR}${msg}${RESET} [log data unserializable]\n`);
+    } catch {
+      /* nowhere left to report it */
+    }
+  }
+  /* eslint-enable no-catch-all/no-catch-all */
 }
 
 export const log = {

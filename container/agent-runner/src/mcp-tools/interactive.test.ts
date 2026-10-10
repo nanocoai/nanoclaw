@@ -2,10 +2,44 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 
 import { closeSessionDb, getInboundDb, getOutboundDb, initTestSessionDb } from '../mailbox/sqlite/connection.js';
 import { getUndeliveredMessages } from '../db/messages-out.js';
+import { findQuestionResponse } from '../db/messages-in.js';
 import { askUserQuestion, LINK_ACTION_SCHEMA, sendCard } from './interactive.js';
 
 beforeEach(() => initTestSessionDb());
 afterEach(() => closeSessionDb());
+
+describe('ask_user_question cancellation', () => {
+  const args = { title: 'Fixture', question: 'Choose', options: ['yes', 'no'] };
+  it('does not publish a question for an already cancelled request', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const result = await askUserQuestion.handler(args, { signal: controller.signal });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('cancelled');
+    expect(getUndeliveredMessages()).toHaveLength(0);
+  });
+
+  it('stops waiting promptly and never consumes a later response after cancellation', async () => {
+    const controller = new AbortController();
+    const waiting = askUserQuestion.handler(args, { signal: controller.signal });
+    while (!getUndeliveredMessages().length) await Bun.sleep(1);
+    const { questionId } = JSON.parse(getUndeliveredMessages()[0].content);
+    const started = Date.now();
+    controller.abort();
+    const result = await waiting;
+    expect(Date.now() - started).toBeLessThan(250);
+    expect(result.content[0].text).toContain('cancelled');
+    getInboundDb()
+      .prepare('INSERT INTO messages_in (id, kind, timestamp, content) VALUES (?, ?, ?, ?)')
+      .run(
+        'late-question-answer',
+        'chat',
+        new Date().toISOString(),
+        JSON.stringify({ questionId, selectedOption: 'yes' }),
+      );
+    expect(findQuestionResponse(questionId)?.id).toBe('late-question-answer');
+  });
+});
 
 describe('send_card', () => {
   it('tells the agent when callback actions will be dropped', async () => {
@@ -134,10 +168,57 @@ describe('send_card', () => {
     },
   );
 
+  it('keeps a non-ASCII link by normalizing it with URL', async () => {
+    const result = await sendCard.handler({
+      card: {
+        title: 'Test',
+        actions: [
+          { label: 'Wiki', url: 'https://de.wikipedia.org/wiki/München' },
+          { label: 'Host', url: 'https://münchen.de/' },
+        ],
+      },
+    });
+
+    expect(result.content[0].text).toMatch(/^Card sent \(id: msg-[^)]+\)$/);
+    const content = JSON.parse(getUndeliveredMessages()[0].content);
+    expect(content.card.actions).toEqual([
+      { label: 'Wiki', url: 'https://de.wikipedia.org/wiki/M%C3%BCnchen' },
+      { label: 'Host', url: 'https://xn--mnchen-3ya.de/' },
+    ]);
+  });
+
   it('states the url rule in the schema description the agent reads', () => {
     const url = LINK_ACTION_SCHEMA.properties.url as { description: string };
 
     expect(url.description).toContain('http or https');
+  });
+
+  // llama.cpp compiles tool schemas to a grammar and rejects these escapes,
+  // failing every request that carries send_card.
+  it('keeps the url pattern free of escapes a grammar converter rejects', () => {
+    const { pattern } = LINK_ACTION_SCHEMA.properties.url as { pattern: string };
+
+    expect(pattern).not.toMatch(/\\[sStn]/);
+
+    const re = new RegExp(pattern);
+    for (const url of ['https://example.com', 'http://a', 'https://x.io/p?q=1#f', 'HTTP://h:8080/~u']) {
+      expect(re.test(url)).toBe(true);
+    }
+    for (const url of [
+      'https://',
+      'https:///p',
+      'https://?q',
+      'https://#f',
+      'https://ex ample.com',
+      'https://example.com\t',
+      'https://example.com\n',
+      'ftp://example.com',
+      'https://a.com/"x',
+      'https://a.com/\\x',
+      'https://"a.com',
+    ]) {
+      expect(re.test(url)).toBe(false);
+    }
   });
 
   it('constrains children to text instead of promising nested action blocks', () => {

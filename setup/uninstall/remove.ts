@@ -10,8 +10,8 @@
 import fs from 'fs';
 import path from 'path';
 
-import type { RunCommand } from './onecli-agents.js';
 import type { RemovalAction } from './plan.js';
+import { listProject, projectCleanup, type RunCommand } from './scan.js';
 
 export interface ExecDeps {
   runCommand: RunCommand;
@@ -134,26 +134,43 @@ function runAction(action: RemovalAction, deps: ExecDeps, notes: string[]): void
       }
       break;
     }
+    case 'rm-project-residue': {
+      const { runtime } = action;
+      let volumes = 0;
+      let networks = 0;
+      for (const project of action.projects) {
+        // data/ (the keys) goes next either way; the note says how to finish.
+        const leftover = (what: string) =>
+          notes.push(
+            `Project ${project}: ${what}. Its keys in data/ are being deleted, so remove it too: ` +
+              projectCleanup(runtime, project),
+          );
+        const found = listProject(runCommand, runtime, project);
+        if (!found) {
+          leftover(`not removed ('${runtime}' unavailable)`);
+          continue;
+        }
+        // Containers first: a declined service group leaves them holding the volumes.
+        if (found.containerIds.length > 0 && runCommand(runtime, ['rm', '-f', ...found.containerIds]).status !== 0) {
+          leftover('containers not removed');
+          continue;
+        }
+        for (const volume of found.volumes) {
+          if (runCommand(runtime, ['volume', 'rm', volume]).status === 0) volumes++;
+          else notes.push(`Volume ${volume}: not removed (in use?) — retry with: ${runtime} volume rm ${volume}`);
+        }
+        for (const network of found.networks) {
+          if (runCommand(runtime, ['network', 'rm', network]).status === 0) networks++;
+          else notes.push(`Network ${network}: not removed (in use?) — retry with: ${runtime} network rm ${network}`);
+        }
+      }
+      if (volumes + networks > 0) log(`✓ removed ${volumes} data volume(s) and ${networks} network(s)`);
+      break;
+    }
     case 'rm-ncl-symlink':
       fs.rmSync(action.linkPath, { force: true });
       log('✓ removed ncl command');
       break;
-    case 'delete-onecli-agent': {
-      const res = runCommand('onecli', ['agents', 'delete', '--id', action.agent.uuid]);
-      if (res.status === 0) {
-        log(`✓ deleted OneCLI agent ${action.agent.name} (${action.agent.identifier})`);
-      } else if (res.status === null) {
-        // spawn failure (binary gone since the scan), not a missing agent
-        log(`! couldn't run onecli for ${action.agent.identifier}`);
-        notes.push(
-          `OneCLI agent ${action.agent.name} (${action.agent.identifier}): couldn't run onecli — ` +
-            `delete manually with: onecli agents delete --id ${action.agent.uuid}`,
-        );
-      } else {
-        log(`! OneCLI agent ${action.agent.identifier} already gone`);
-      }
-      break;
-    }
     case 'backup-env': {
       // Backup and removal are one action so a failed backup (which throws
       // into executePlan's catch) can never be followed by the deletion.

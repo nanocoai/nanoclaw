@@ -1,3 +1,5 @@
+import http from 'http';
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Adapter, AdapterPostableMessage, RawMessage } from 'chat';
@@ -94,6 +96,22 @@ describe('createChatSdkBridge', () => {
       supportsThreads: true,
     });
     expect(typeof bridge.subscribe).toBe('function');
+  });
+
+  it('reports an adapter transport probe when one is available', () => {
+    let connected = false;
+    const adapter = stubAdapter({}) as Adapter & { isConnected(): boolean };
+    adapter.isConnected = () => connected;
+    const bridge = createChatSdkBridge({ adapter, supportsThreads: true });
+
+    expect(bridge.isConnected()).toBe(false);
+    connected = true;
+    expect(bridge.isConnected()).toBe(true);
+  });
+
+  it('keeps adapters without a transport probe available after setup', () => {
+    const bridge = createChatSdkBridge({ adapter: stubAdapter({}), supportsThreads: true });
+    expect(bridge.isConnected()).toBe(true);
   });
 });
 
@@ -540,5 +558,226 @@ describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
     expect(calls).toHaveLength(1);
     const msg = calls[0].message as { markdown?: string };
     expect(msg.markdown).toBe('plain hello');
+  });
+});
+
+it('uses a registered approval presentation losslessly for initial and terminal cards', async () => {
+  const { registerQuestionRenderResolver } = await import('./question-render-registry.js');
+  const evidence = 'full evidence\n'.repeat(500);
+  registerQuestionRenderResolver((id) =>
+    id === 'presentation-fixture'
+      ? {
+          title: 'Review',
+          options: [],
+          deferResolution: true,
+          renderMessage: () => ({ markdown: evidence }),
+          renderTerminal: (resolution) => ({ markdown: `${evidence}\n${resolution}` }),
+        }
+      : undefined,
+  );
+  const { calls, postMessage } = makePostCapture();
+  const edits: PostCall[] = [];
+  const bridge = createChatSdkBridge({
+    adapter: stubAdapter({
+      postMessage,
+      editMessage: async (threadId, _id, message) => {
+        edits.push({ threadId, message });
+        return { id: 'card', threadId, raw: {} };
+      },
+    }),
+    supportsThreads: false,
+  });
+  await bridge.deliver('stub:C1', null, {
+    kind: 'chat-sdk',
+    content: {
+      type: 'ask_question',
+      questionId: 'presentation-fixture',
+      title: 'Review',
+      options: [],
+      requirePresentation: true,
+    },
+  });
+  expect(calls[0].message).toEqual({ markdown: evidence });
+  await bridge.deliver('stub:C1', null, {
+    kind: 'chat-sdk',
+    content: {
+      operation: 'edit',
+      questionId: 'presentation-fixture',
+      messageId: 'card',
+      terminalCard: { resolution: 'Rejected' },
+    },
+  });
+  expect(edits[0].message).toEqual({ markdown: `${evidence}\nRejected` });
+});
+
+it('forwards the authenticated instance and message address without editing a deferred approval', async () => {
+  const { initTestDb, closeDb } = await import('../db/connection.js');
+  const { runMigrations } = await import('../db/migrations/index.js');
+  const { registerQuestionRenderResolver } = await import('./question-render-registry.js');
+  await runMigrations(await initTestDb());
+  registerQuestionRenderResolver((id) =>
+    id === 'address-fixture'
+      ? {
+          title: 'Review',
+          options: [{ label: 'Approve', selectedLabel: 'Approved', value: 'approve' }],
+          deferResolution: true,
+        }
+      : undefined,
+  );
+  const editMessage = vi.fn();
+  const adapter = stubAdapter({
+    name: 'fixture',
+    initialize: async () => {},
+    channelIdFromThreadId: (threadId: string) => threadId,
+    editMessage,
+  });
+  const bridge = createChatSdkBridge({ adapter, instance: 'fixture-one', supportsThreads: false });
+  const onAction = vi.fn();
+  try {
+    await bridge.setup({ onInbound: () => {}, onInboundEvent: () => {}, onMetadata: () => {}, onAction });
+    const chat = (bridge as unknown as { _chat: import('chat').Chat })._chat;
+    await chat.processAction(
+      {
+        actionId: 'ncq:address-fixture:0',
+        adapter,
+        messageId: 'original-card',
+        raw: {},
+        threadId: 'fixture:room',
+        user: { userId: 'selected' } as never,
+        value: '0',
+      },
+      undefined,
+    );
+    expect(onAction).toHaveBeenCalledWith('address-fixture', 'approve', 'selected', {
+      instance: 'fixture-one',
+      messageId: 'original-card',
+      platformId: 'fixture:room',
+    });
+    expect(editMessage).not.toHaveBeenCalled();
+  } finally {
+    await bridge.teardown();
+    await closeDb();
+  }
+});
+
+describe('createChatSdkBridge — local Gateway webhook', () => {
+  // The Gateway listener forwards raw events to a loopback server; only it may
+  // post there. It sends the bot token in x-discord-gateway-token.
+  const BOT_TOKEN = 'test-bot-token';
+  const realFetch = globalThis.fetch;
+
+  const click = JSON.stringify({
+    type: 'GATEWAY_INTERACTION_CREATE',
+    data: {
+      type: 3,
+      id: 'interaction-1',
+      token: 'interaction-token',
+      channel_id: 'chan-1',
+      data: { custom_id: 'ncq:q-1:approve' },
+      member: { user: { id: 'clicker-1', username: 'clicker' } },
+      message: { id: 'card-1', embeds: [] },
+    },
+  });
+  const message = JSON.stringify({ type: 'GATEWAY_MESSAGE_CREATE', data: { id: 'm-1', content: 'hi' } });
+
+  async function startGateway(botToken?: string) {
+    let webhookUrl = '';
+    const handleWebhook = vi.fn(async () => new Response('ok'));
+    const adapter = stubAdapter({
+      name: 'discord',
+      initialize: async () => {},
+      handleWebhook,
+      channelIdFromThreadId: (threadId: string) => threadId,
+    }) as Adapter & { startGatewayListener: unknown };
+    adapter.startGatewayListener = async (_opts: unknown, _ms: number, _signal: AbortSignal, url: string) => {
+      webhookUrl = url;
+      return new Response('{}');
+    };
+    const onAction = vi.fn();
+    const bridge = createChatSdkBridge({ adapter, supportsThreads: true, botToken });
+    await bridge.setup({ onInbound: () => {}, onInboundEvent: () => {}, onMetadata: () => {}, onAction });
+    const post = (body: string, headers: Record<string, string> = {}) =>
+      realFetch(webhookUrl, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body });
+    return { bridge, post, onAction, handleWebhook, webhookUrl };
+  }
+
+  beforeEach(async () => {
+    const { initTestDb } = await import('../db/connection.js');
+    const { runMigrations } = await import('../db/migrations/index.js');
+    await runMigrations(await initTestDb());
+    // Interaction acks go to the Discord API; keep them off the network.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(null, { status: 204 })),
+    );
+  });
+
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    const { closeDb } = await import('../db/connection.js');
+    await closeDb();
+  });
+
+  it.each([
+    ['no gateway token', {}],
+    ['a wrong gateway token', { 'x-discord-gateway-token': 'not-the-token' }],
+  ])('rejects a request with %s before it reaches the adapter or the host', async (_label, headers) => {
+    const { bridge, post, onAction, handleWebhook } = await startGateway(BOT_TOKEN);
+    try {
+      for (const body of [click, message]) {
+        const res = await post(body, headers);
+        expect(res.status).toBe(401);
+      }
+      expect(onAction).not.toHaveBeenCalled();
+      expect(handleWebhook).not.toHaveBeenCalled();
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('answers 401 without waiting for the request body', async () => {
+    const { bridge, webhookUrl } = await startGateway(BOT_TOKEN);
+    try {
+      const status = await new Promise<number | undefined>((resolve, reject) => {
+        const req = http.request(webhookUrl, { method: 'POST', headers: { 'Content-Length': '1000' } }, (res) => {
+          resolve(res.statusCode);
+          req.destroy();
+        });
+        req.on('error', reject);
+        req.flushHeaders(); // the body never follows
+      });
+      expect(status).toBe(401);
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('rejects every request when no bot token is configured', async () => {
+    const { bridge, post, onAction, handleWebhook } = await startGateway(undefined);
+    try {
+      const res = await post(click, { 'x-discord-gateway-token': '' });
+      expect(res.status).toBe(401);
+      expect((await post(message)).status).toBe(401);
+      expect(onAction).not.toHaveBeenCalled();
+      expect(handleWebhook).not.toHaveBeenCalled();
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('dispatches clicks and forwards other events when the gateway token matches', async () => {
+    const { bridge, post, onAction, handleWebhook } = await startGateway(BOT_TOKEN);
+    try {
+      const auth = { 'x-discord-gateway-token': BOT_TOKEN };
+      expect((await post(click, auth)).status).toBe(200);
+      expect(onAction).toHaveBeenCalledWith('q-1', 'approve', 'clicker-1', {
+        messageId: 'card-1',
+        platformId: 'chan-1',
+      });
+      expect((await post(message, auth)).status).toBe(200);
+      expect(handleWebhook).toHaveBeenCalledTimes(1);
+    } finally {
+      await bridge.teardown();
+    }
   });
 });

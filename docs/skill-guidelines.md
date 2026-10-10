@@ -58,7 +58,7 @@ In rough order of safety:
 - **Add a file**: safest. New code in the skill's own files, or fetched from a registry branch (`git show origin/<branch>:path > path`).
 - **Append to a file**: an import in a barrel, a line in `.env`, an entry at the end of a list.
 - **Edit a value in JSON**: e.g. a `package.json` field.
-- **Add a dependency**, pinned to an exact version.
+- **Add a dependency**, pinned to an exact version. Then run `pnpm run skill-pins:generate` and commit `.github/skill-pins/`: it mirrors every skill pin so Dependabot can see it, and CI fails while it is stale.
 - **Insert into existing code (an "integration point")**: the one risky move. Keep it to a line or two that *calls* code living in the skill's own files, never an inlined block of logic. A skill full of these is a smell.
 
 Fetching from a registry branch is **additive, never a merge**. `git fetch origin <branch>` then `git show origin/<branch>:path > path` per file. Never `git merge` a registry branch into an install.
@@ -87,7 +87,7 @@ A provider install skill (`/add-codex`, `/add-opencode`) also declares how the s
 | `nanoclaw-provider` | lowercase kebab-case provider name (`codex`) | descriptor identity; `setup/providers/install.ts` passes it to the contract verifier as the provider that must be declared |
 | `nanoclaw-provider-label` | display text | the provider picker in `setup/auto.ts` (`askAgentProviderChoice`) |
 | `nanoclaw-provider-hint` | display text | the picker's hint column (suffixed "— installs now") |
-| `nanoclaw-provider-offered` | `'true'` \| `'false'` (quoted strings) | `listInstallableProviderDescriptors` — only `'true'` reaches the picker's "installs now" list and `--step provider-auth <name>`. `'false'` marks a skill-only provider that never appears in setup (OpenCode today) |
+| `nanoclaw-provider-offered` | `'true'` \| `'false'` (quoted strings) | `listInstallableProviderDescriptors` — only `'true'` reaches the picker's "installs now" list and `--step provider-auth <name>`. `'false'` marks a skill-only provider that never appears in setup |
 | `nanoclaw-provider-image` | `local-required` \| `hardened-compatible` | `providerImagePolicy` — whether picking the provider forces a locally built sandbox image instead of the pre-built one |
 
 The skill directory itself is the install skill setup applies in-process (`applyProviderSkill`); there is no key for it, and a leftover `nanoclaw-provider-install-skill` is rejected. `nanoclaw-provider-label` and `nanoclaw-provider-hint` must match the `label`/`hint` of the provider's `setup/providers/<name>.ts` entry once it is installed — the descriptor labels the offer before install, the entry labels it after, and `setup/providers/skill-descriptor.test.ts` fails on drift.
@@ -99,6 +99,20 @@ A skill-only provider (`offered: 'false'`) must not copy a `setup/providers/<nam
 **Merge order.** The provider payload branch must carry the files a provider skill copies (including the `provider-contracts/<name>.ts` declarations and the `<name>.conformance.test.ts`) before the trunk change that lists them lands, otherwise `/add-<name>` fails at its copy step; `scripts/test-registry-skills.ts --combined-providers` fails CI when trunk carries provider skills whose payload is not on the registry branch.
 
 ---
+
+### Provider setup help
+
+Provider-owned setup help belongs in the installed setup entry's existing
+`offerFailureAssist` hook. Post-install verification uses `runInstallCheck`.
+A helper that runs before payload installation is an optional setup extension,
+not a requirement of the runtime contract. See [OpenCode host help](provider-host-maintenance.md).
+
+The setup installer skips the skill's build, test, and external command fences
+and runs the provider contract verifier. For optional host-helper coverage in
+that path, name the installed test `scripts/<provider>-host.test.ts`, using a
+lowercase kebab-case provider name. The verifier discovers these files and runs
+them with its host checks. Also include the test in the skill's prose and
+`nc:run effect:test` command so ordinary skill application runs it.
 
 ## Integration points
 
@@ -191,7 +205,7 @@ Each with its fix. These are patterns to remove, not to test around: a drift-pro
 2. **REMOVE.md soft-disable** (comments out an import; leaves copied files behind). DELETE the import line and `rm` every file the skill copied.
 3. **REMOVE.md incomplete** (misses env vars, the package uninstall, copied tests). Reverse *every* change; read the env vars from the skill's own credentials section, don't guess.
 4. **Raw SQL against a core DB** (read or write). Use a core helper or an `ncl` verb; the in-tree query wrapper is the sanctioned last resort. Never the `sqlite3` binary.
-5. **Credential threading** (`-e KEY=…` or a stdin secrets payload into the container). OneCLI gateway only; it injects credentials per request.
+5. **Credential threading** (`-e KEY=…` or a stdin secrets payload into the container). The credential gateway only; it injects credentials per request.
 6. **Branch-merge install** (`git merge` of a registry branch or any code branch). Install by additive fetch: `git fetch origin <branch>`, then `git show origin/<branch>:path > path` per file. For an update/reapply workflow, re-run each installed skill's additive apply, never merge.
 7. **Diff-against-past framing** ("earlier versions…", "this is now redundant") and **documenting non-steps** ("no X needed"). Write present-tense DO steps only. A skill reads as a standalone artifact with no memory of its own edits.
 8. **Stale reach-in targets** (an edit aimed at code that no longer exists; a reach-in already shipped in trunk). Verify the target exists *before* instructing the edit; reconcile already-in-trunk ones to a no-op. Before appending to an allowlist or list, check how it's consumed; the entry may already be derived from a registry, making the edit dead.

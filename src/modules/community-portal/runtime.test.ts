@@ -103,14 +103,16 @@ async function serve(req: IncomingMessage, res: ServerResponse): Promise<void> {
   res.writeHead(404);
   res.end(JSON.stringify({ error: 'not_found' }));
 }
-async function until(check: () => boolean, timeout = 5_000): Promise<void> {
+async function until(check: () => boolean | Promise<boolean>, timeout = 5_000): Promise<void> {
   const deadline = Date.now() + timeout;
-  while (!check()) {
+  while (!(await check())) {
     if (Date.now() > deadline) throw new Error('timed out');
     await sleep(10);
   }
 }
 const journalFile = (): string => path.join(root, 'data/community-portal.json');
+const readJournal = async (): Promise<{ credentials: object; operations: object }> =>
+  JSON.parse(await readFile(journalFile(), 'utf8')) as { credentials: object; operations: object };
 
 beforeEach(async () => {
   root = await mkdtemp(path.join(os.tmpdir(), 'nc-portal-runtime-'));
@@ -200,8 +202,10 @@ it('reports sign_in_required and clears local credentials when the portal refuse
   ticketStatus = 401;
   const runtime = startPortalRuntime({ root, homeDir: home, log, intervalMs: 50, Socket: FakeSocket });
   await until(() => log.mock.calls.some(([event]) => event.event === 'sign_in_required'));
-  await sleep(200);
-  const journal = JSON.parse(await readFile(journalFile(), 'utf8')) as { credentials: object; operations: object };
+  // sign_in_required is logged when the ticket is refused; the journal write
+  // that clears the credentials follows under the journal lock, so wait for it.
+  await until(async () => Object.keys((await readJournal()).credentials).length === 0);
+  const journal = await readJournal();
   expect(journal.credentials).toEqual({});
   expect(journal.operations).toEqual({});
   expect(FakeSocket.instances).toEqual([]);

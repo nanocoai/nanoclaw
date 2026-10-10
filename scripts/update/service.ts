@@ -5,17 +5,23 @@ import path from 'node:path';
 
 import { getInstallSlug } from '../../src/install-slug.js';
 
+export interface RunOptions {
+  /** Kill the subprocess and fail the call after this long. Unset = no bound. */
+  timeoutMs?: number;
+}
+
 export interface CommandRunner {
-  run(command: string, args: string[], cwd?: string): string;
-  tryRun(command: string, args: string[], cwd?: string): { ok: boolean; stdout: string };
+  run(command: string, args: string[], cwd?: string, options?: RunOptions): string;
+  tryRun(command: string, args: string[], cwd?: string, options?: RunOptions): { ok: boolean; stdout: string };
 }
 
 export function createCommandRunner(): CommandRunner {
-  const run = (command: string, args: string[], cwd?: string): string =>
+  const run = (command: string, args: string[], cwd?: string, options?: RunOptions): string =>
     execFileSync(command, args, {
       cwd,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: options?.timeoutMs,
       // Node's default maxBuffer is 1 MiB; a full vitest run on a large repo
       // exceeds it and the whole validate step dies as `spawnSync pnpm
       // ENOBUFS` with the tests never judged. 64 MiB is far above any real
@@ -24,18 +30,18 @@ export function createCommandRunner(): CommandRunner {
     }).trim();
   return {
     run,
-    tryRun(command, args, cwd) {
+    tryRun(command, args, cwd, options) {
       try {
-        return { ok: true, stdout: run(command, args, cwd) };
+        return { ok: true, stdout: run(command, args, cwd, options) };
       } catch (err) {
-        const failed = err as { stdout?: Buffer | string; stderr?: Buffer | string };
-        return {
-          ok: false,
-          stdout: [failed.stdout, failed.stderr]
-            .map((part) => part?.toString().trim())
-            .filter(Boolean)
-            .join('\n'),
-        };
+        const failed = err as { code?: string; stdout?: Buffer | string; stderr?: Buffer | string };
+        const output = [failed.stdout, failed.stderr]
+          .map((part) => part?.toString().trim())
+          .filter(Boolean)
+          .join('\n');
+        // A timed-out or unspawnable command has no output of its own; the
+        // error code (ETIMEDOUT, ENOENT) is the only thing worth reporting.
+        return { ok: false, stdout: output || (failed.code ? String(failed.code) : '') };
       }
     },
   };
@@ -46,6 +52,8 @@ export type ServiceMode = 'launchd' | 'systemd-user' | 'systemd-system' | 'nohup
 export interface ServiceHandle {
   mode: ServiceMode;
   active: boolean;
+  /** Unit still starting or stopping: must be stopped like a running one, never counts as healthy. */
+  transitional?: boolean;
   name?: string;
   definition?: string;
   pid?: number;
@@ -57,6 +65,10 @@ export interface ServiceEnvironment {
   uid: number;
   runner: CommandRunner;
   sleep(ms: number): Promise<void>;
+  /** Progress line for a wait the operator would otherwise read as a hang. */
+  log?(message: string): void;
+  /** procfs mount for nohup host identity checks; tests point it at a fixture. */
+  procRoot?: string;
 }
 
 export function defaultServiceEnvironment(runner = createCommandRunner()): ServiceEnvironment {
@@ -66,6 +78,8 @@ export function defaultServiceEnvironment(runner = createCommandRunner()): Servi
     uid: process.getuid?.() ?? 0,
     runner,
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    // stderr: stdout carries the controller's JSON result.
+    log: (message) => process.stderr.write(`[update] ${message}\n`),
   };
 }
 
@@ -78,8 +92,109 @@ function processExists(pid: number): boolean {
   }
 }
 
+/**
+ * `systemctl --user` needs XDG_RUNTIME_DIR; `su -`, cron and non-interactive
+ * SSH leave it unset while the user manager still runs (linger or another
+ * session). Adopt /run/user/<uid> process-wide: stop and start need it too.
+ */
+export function adoptUserRuntimeDir(uid: number, runRoot = '/run/user'): void {
+  if (process.env.XDG_RUNTIME_DIR) return;
+  const runtimeDir = path.join(runRoot, String(uid));
+  if (fs.existsSync(runtimeDir)) process.env.XDG_RUNTIME_DIR = runtimeDir;
+}
+
+/**
+ * Liveness by exit code: 0 = running (stdout), `stoppedExit` = stopped
+ * (undefined), anything else = the probe itself failed, so throw. Reading every
+ * failure as "stopped" let a run without the user bus skip stop and restart,
+ * pass health against the stale host, and report complete.
+ */
+export function probe(
+  env: ServiceEnvironment,
+  command: string,
+  args: string[],
+  stoppedExit: number[],
+  hint: string,
+): { stdout: string; transitional: boolean } | undefined {
+  try {
+    return { stdout: env.runner.run(command, args), transitional: false };
+  } catch (err) {
+    const failed = err as { status?: number | null; stdout?: Buffer | string; stderr?: Buffer | string };
+    if (typeof failed.status === 'number' && stoppedExit.includes(failed.status)) {
+      // systemctl is-active exits 3 for activating/deactivating too (a unit
+      // mid auto-restart still holds the service): only its terminal states
+      // are stopped. Other tools print nothing on their stopped exit.
+      const state = failed.stdout?.toString().trim() ?? '';
+      return /^(activating|deactivating)$/.test(state) ? { stdout: state, transitional: true } : undefined;
+    }
+    const detail = failed.stderr?.toString().trim() || (err instanceof Error ? err.message : String(err));
+    throw new Error(
+      `Cannot tell whether NanoClaw is running: \`${command} ${args.join(' ')}\` failed (${detail}). ${hint}`,
+    );
+  }
+}
+
+function flag(unit: { transitional: boolean } | undefined): { transitional?: true } {
+  return unit?.transitional ? { transitional: true } : {};
+}
+
+function userBusHint(uid: number): string {
+  return `Run the update from a login session of this user, or with XDG_RUNTIME_DIR=/run/user/${uid} while the user manager runs (loginctl enable-linger).`;
+}
+
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function nohupPidFile(projectRoot: string): string {
+  return path.join(projectRoot, 'nanoclaw.pid');
+}
+
+function readNohupPid(projectRoot: string): number | undefined {
+  try {
+    const text = fs.readFileSync(nohupPidFile(projectRoot), 'utf8').trim();
+    // Positive only: `kill` with 0 or a negative pid signals a process group.
+    return /^[1-9][0-9]*$/.test(text) ? Number(text) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function realpathOr(value: string): string {
+  try {
+    return fs.realpathSync(value);
+  } catch {
+    return value;
+  }
+}
+
+// start-nanoclaw.sh's is_previous_host (argv[1] is this checkout's entrypoint),
+// by realpath so a symlinked checkout matches. A recorded pid may be reused.
+function isNohupHost(pid: number, projectRoot: string, env: ServiceEnvironment): boolean {
+  try {
+    const script = fs.readFileSync(path.join(env.procRoot ?? '/proc', String(pid), 'cmdline'), 'utf8').split('\0')[1];
+    const entrypoint = realpathOr(path.join(projectRoot, 'dist', 'index.js'));
+    return !!script && path.isAbsolute(script) && realpathOr(script) === entrypoint;
+  } catch {
+    return false;
+  }
+}
+
+// The launcher records every start in nanoclaw.pid, so a handle captured
+// before a later start must be re-pointed at the host recorded now.
+export function withRecordedNohupHost(
+  handle: ServiceHandle,
+  projectRoot: string,
+  env: ServiceEnvironment,
+): ServiceHandle {
+  if (handle.mode !== 'nohup') return handle;
+  const pid = readNohupPid(projectRoot);
+  if (pid !== undefined && isNohupHost(pid, projectRoot, env)) {
+    env.log?.(`Found running NanoClaw host (PID ${pid}); stopping it`);
+    return { ...handle, pid, active: true };
+  }
+  env.log?.('No running NanoClaw host found for this checkout; nothing to stop');
+  return { ...handle, pid: undefined, active: false };
 }
 
 export function detectService(projectRoot: string, env: ServiceEnvironment): ServiceHandle {
@@ -92,7 +207,15 @@ export function detectService(projectRoot: string, env: ServiceEnvironment): Ser
         mode: 'launchd',
         name,
         definition,
-        active: env.runner.tryRun('launchctl', ['print', `gui/${env.uid}/${name}`]).ok,
+        // 113: not loaded in this domain; 112 (no such domain) and the rest are probe failures.
+        active:
+          probe(
+            env,
+            'launchctl',
+            ['print', `gui/${env.uid}/${name}`],
+            [113],
+            'Run the update from a login session of this user.',
+          ) !== undefined,
       };
     }
   }
@@ -102,37 +225,38 @@ export function detectService(projectRoot: string, env: ServiceEnvironment): Ser
     const userDefinition = path.join(env.home, '.config', 'systemd', 'user', `${name}.service`);
     const systemDefinition = `/etc/systemd/system/${name}.service`;
     if (fs.existsSync(userDefinition)) {
-      return {
-        mode: 'systemd-user',
-        name,
-        definition: userDefinition,
-        active: env.runner.tryRun('systemctl', ['--user', 'is-active', '--quiet', name]).ok,
-      };
+      adoptUserRuntimeDir(env.uid);
+      // 3: not active; a bus error exits 1 and is not "stopped".
+      const unit = probe(env, 'systemctl', ['--user', 'is-active', name], [3], userBusHint(env.uid));
+      return { mode: 'systemd-user', name, definition: userDefinition, active: unit !== undefined, ...flag(unit) };
     }
     if (fs.existsSync(systemDefinition)) {
-      return {
-        mode: 'systemd-system',
-        name,
-        definition: systemDefinition,
-        active: env.runner.tryRun('systemctl', ['is-active', '--quiet', name]).ok,
-      };
+      const unit = probe(
+        env,
+        'systemctl',
+        ['is-active', name],
+        [3],
+        'Run the update where systemctl can reach the system manager.',
+      );
+      return { mode: 'systemd-system', name, definition: systemDefinition, active: unit !== undefined, ...flag(unit) };
     }
 
     const definition = path.join(projectRoot, 'start-nanoclaw.sh');
-    const pidFile = path.join(projectRoot, 'nanoclaw.pid');
-    if (fs.existsSync(definition) && fs.existsSync(pidFile)) {
-      const pid = Number.parseInt(fs.readFileSync(pidFile, 'utf8').trim(), 10);
-      return {
-        mode: 'nohup',
-        definition,
-        pid: Number.isFinite(pid) ? pid : undefined,
-        active: Number.isFinite(pid) && processExists(pid),
-      };
+    if (fs.existsSync(definition) && fs.existsSync(nohupPidFile(projectRoot))) {
+      const pid = readNohupPid(projectRoot);
+      return { mode: 'nohup', definition, pid, active: pid !== undefined && isNohupHost(pid, projectRoot, env) };
     }
   }
 
-  const unmanaged = env.runner.tryRun('pgrep', ['-f', `${escapeRegex(projectRoot)}/(dist/index\\.js|src/index\\.ts)`]);
-  if (unmanaged.ok && unmanaged.stdout) {
+  // pgrep exits 1 for no match; a missing or broken pgrep must not read as "nothing running".
+  const unmanaged = probe(
+    env,
+    'pgrep',
+    ['-f', `${escapeRegex(projectRoot)}/(dist/index\\.js|src/index\\.ts)`],
+    [1],
+    'Install procps (pgrep) and retry.',
+  );
+  if (unmanaged?.stdout) {
     return { mode: 'unmanaged', active: true, name: unmanaged.stdout.split('\n').join(',') };
   }
   return { mode: 'none', active: false };
@@ -152,12 +276,41 @@ export function detectService(projectRoot: string, env: ServiceEnvironment): Ser
 export async function stopService(handle: ServiceHandle, env: ServiceEnvironment): Promise<void> {
   if (!handle.active) return;
   if (handle.mode === 'launchd') {
+    const target = `gui/${env.uid}/${handle.name}`;
+    // Every PID the job reports: KeepAlive can swap the host between probes.
+    const pids = new Set<number>();
+    const loaded = () => {
+      const job = probe(
+        env,
+        'launchctl',
+        ['print', target],
+        [113],
+        'Run the update from a login session of this user.',
+      );
+      const pid = Number(/^\s*pid = (\d+)/m.exec(job?.stdout ?? '')?.[1]);
+      if (pid) pids.add(pid);
+      return job !== undefined;
+    };
+    loaded();
     try {
-      env.runner.run('launchctl', ['bootout', `gui/${env.uid}/${handle.name}`]);
+      env.runner.run('launchctl', ['bootout', target]);
     } catch (err) {
       if (!/No such process/i.test(err instanceof Error ? err.message : String(err))) throw err;
     }
+    // bootout returns while the host still runs its shutdown handlers. Wait for
+    // the job to leave the domain and the process to exit, or the snapshot races
+    // the shutdown and the next bootstrap fails with "5: Input/output error".
+    const stopping = () => loaded() || [...pids].some(processExists);
+    for (let i = 0; i < 60 && stopping(); i += 1) await env.sleep(500);
+    if (stopping()) {
+      const start = startCommand(handle, env.uid);
+      throw new Error(
+        `NanoClaw service ${handle.name} did not stop (PID ${[...pids].join(', ') || 'unknown'}). ` +
+          `Once it has exited, start it again with: ${start}`,
+      );
+    }
   } else if (handle.mode === 'systemd-user') {
+    adoptUserRuntimeDir(env.uid);
     env.runner.run('systemctl', ['--user', 'stop', handle.name!]);
   } else if (handle.mode === 'systemd-system') {
     env.runner.run('systemctl', ['stop', handle.name!]);
@@ -177,12 +330,33 @@ export async function stopService(handle: ServiceHandle, env: ServiceEnvironment
   }
 }
 
+// For commands printed to an operator: quotes only what a shell would misread.
+export function shellQuote(value: string): string {
+  return /^[\w@%+=:,./-]+$/.test(value) ? value : "'" + value.replace(/'/g, "'\\''") + "'";
+}
+
+/** What `startService` runs, for an operator finishing a failed rollback by hand. */
+export function startCommand(handle: ServiceHandle, uid: number): string | undefined {
+  if (handle.mode === 'launchd') {
+    // `;`: on a second try the job is already bootstrapped and only needs the kickstart.
+    return `launchctl bootstrap gui/${uid} ${shellQuote(handle.definition!)}; launchctl kickstart gui/${uid}/${handle.name}`;
+  }
+  if (handle.mode === 'systemd-user') {
+    // startService adopts this runtime dir; a `su -` or cron shell lacks it.
+    return `XDG_RUNTIME_DIR="\${XDG_RUNTIME_DIR:-/run/user/${uid}}" systemctl --user start ${handle.name}`;
+  }
+  if (handle.mode === 'systemd-system') return `systemctl start ${handle.name}`;
+  if (handle.mode === 'nohup') return `bash ${shellQuote(handle.definition!)}`;
+  return undefined;
+}
+
 export function startService(handle: ServiceHandle, projectRoot: string, env: ServiceEnvironment): void {
   if (!handle.active) return;
   if (handle.mode === 'launchd') {
     env.runner.run('launchctl', ['bootstrap', `gui/${env.uid}`, handle.definition!]);
     env.runner.run('launchctl', ['kickstart', `gui/${env.uid}/${handle.name}`]);
   } else if (handle.mode === 'systemd-user') {
+    adoptUserRuntimeDir(env.uid);
     env.runner.run('systemctl', ['--user', 'start', handle.name!]);
   } else if (handle.mode === 'systemd-system') {
     env.runner.run('systemctl', ['start', handle.name!]);
@@ -191,23 +365,148 @@ export function startService(handle: ServiceHandle, projectRoot: string, env: Se
   }
 }
 
-export async function drainContainers(
-  projectRoot: string,
-  env: ServiceEnvironment,
-  timeoutMs = 300_000,
-): Promise<void> {
+/**
+ * Grace between cutover's `stop` and the runtime's SIGKILL. Longer than the
+ * host's own 1 s (`STOP_GRACE_SECONDS` in container-runner.ts): a customized
+ * image that does handle SIGTERM gets a real window to flush, and a stock one
+ * that ignores it costs nothing extra beyond these seconds.
+ */
+export const CUTOVER_STOP_GRACE_SECONDS = 10;
+
+/**
+ * Bound on the `docker stop` CLI call itself. `-t` only bounds how long the
+ * container gets before the daemon SIGKILLs it; a daemon that never answers
+ * would otherwise block the (synchronous) call forever, and cutover would sit
+ * with the service down and never reach its rollback path. Comfortably above
+ * the grace so a healthy stop is never cut short.
+ */
+export const CUTOVER_STOP_CLI_TIMEOUT_MS = 30_000;
+
+/** Bound on each `docker ps` poll, for the same reason. */
+export const CUTOVER_LIST_CLI_TIMEOUT_MS = 15_000;
+
+/** Copies of `LABELS` and `GATEWAY_ROLE` (src/drivers/types.ts); a test pins them equal. */
+export const DRAIN_LIST_FORMAT = '{{.ID}}|{{.Label "nanoclaw-session"}}|{{.Label "nanoclaw-role"}}';
+export const CONTROLLER_GATEWAY_ROLE = 'gateway';
+
+/**
+ * Stop this install's containers, then wait until the runtime lists none.
+ *
+ * The host is the only thing that ever stops an idle agent container: it keeps
+ * them alive between turns by design, and its SIGTERM path leaves them running
+ * so the next start can adopt them. `cutoverUpdate` stops the host before
+ * calling this, so a poll-only drain waited on an exit nothing could produce
+ * and timed out five minutes later with the service already down (#3828).
+ *
+ * Stopping here, after the service is down, is race-free: nothing is left that
+ * could spawn a replacement (the manual `docker stop` before cutover was not).
+ * The filter is the install label (agent containers plus per-session
+ * auxiliaries) minus gateway-owned ones (role=gateway, no session): nothing
+ * recreates those at host start. Same rule as `isGatewayOwned` in
+ * src/drivers/types.ts, inlined to keep the controller's imports small.
+ *
+ * A container mid-turn is stopped as well. The agent-runner has no SIGTERM
+ * handler and the controller cannot read turn state from outside the host
+ * DB, so waiting would not preserve the turn, and the update rebuilds the
+ * image that container came from anyway. A non-zero `stop` is not fatal on
+ * its own (a container that exited between the list and the stop makes
+ * `docker stop` fail for that id while the rest still stop); only a
+ * container still listed at the timeout is, and the caller restores the old
+ * service.
+ */
+export async function drainContainers(projectRoot: string, env: ServiceEnvironment, timeoutMs = 60_000): Promise<void> {
   const runtime = process.env.CONTAINER_RUNTIME ?? 'docker';
   const label = `nanoclaw-install=${getInstallSlug(projectRoot)}`;
+  const list = (): { ok: boolean; ids: string[] } => {
+    const listed = env.runner.tryRun(
+      runtime,
+      ['ps', '--filter', `label=${label}`, '--format', DRAIN_LIST_FORMAT],
+      undefined,
+      { timeoutMs: CUTOVER_LIST_CLI_TIMEOUT_MS },
+    );
+    const ids = listed.stdout
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => line.split('|'))
+      .filter(([, sessionId, role]) => !!sessionId || role !== CONTROLLER_GATEWAY_ROLE)
+      .map(([id]) => id);
+    return { ok: listed.ok, ids };
+  };
+  const initial = list();
+  if (!initial.ok) throw new Error(`Cannot inspect active NanoClaw containers with ${runtime}`);
+  if (initial.ids.length === 0) return;
+
+  // One deadline for stop AND poll: the clock starts before the stop call, so
+  // a slow or stalled stop eats into the bound instead of extending it.
   const started = Date.now();
+  env.log?.(`Stopping ${initial.ids.length} NanoClaw container(s): ${initial.ids.join(', ')}`);
+  const stopped = env.runner.tryRun(
+    runtime,
+    ['stop', '-t', String(CUTOVER_STOP_GRACE_SECONDS), ...initial.ids],
+    undefined,
+    { timeoutMs: CUTOVER_STOP_CLI_TIMEOUT_MS },
+  );
   while (true) {
-    const listed = env.runner.tryRun(runtime, ['ps', '-q', '--filter', `label=${label}`]);
-    if (!listed.ok) throw new Error(`Cannot inspect active NanoClaw containers with ${runtime}`);
-    if (!listed.stdout) return;
+    const current = list();
+    if (!current.ok) throw new Error(`Cannot inspect active NanoClaw containers with ${runtime}`);
+    if (current.ids.length === 0) return;
     if (Date.now() - started >= timeoutMs) {
-      throw new Error(`Timed out waiting for active NanoClaw containers: ${listed.stdout.split('\n').join(', ')}`);
+      const detail = stopped.ok ? '' : ` (${runtime} stop failed: ${stopped.stdout || 'no output'})`;
+      throw new Error(`Timed out waiting for NanoClaw containers to stop: ${current.ids.join(', ')}${detail}`);
     }
     await env.sleep(1_000);
   }
+}
+
+/**
+ * Restart this install's gateway-owned containers (see drainContainers).
+ * A snapshot restore replaces `data/`, and a container's bind mounts keep
+ * pointing at the deleted directories until it restarts. Stopped ones are
+ * included so a retried rollback recovers a restart that failed halfway.
+ * Best effort: throwing here would leave the service down, so a failure is
+ * logged with the recovery step instead.
+ */
+export function restartGatewayContainers(projectRoot: string, env: ServiceEnvironment): void {
+  const runtime = process.env.CONTAINER_RUNTIME ?? 'docker';
+  const label = `nanoclaw-install=${getInstallSlug(projectRoot)}`;
+  const listed = env.runner.tryRun(
+    runtime,
+    ['ps', '-a', '--filter', `label=${label}`, '--format', DRAIN_LIST_FORMAT],
+    undefined,
+    { timeoutMs: CUTOVER_LIST_CLI_TIMEOUT_MS },
+  );
+  const ids = listed.stdout
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => line.split('|'))
+    .filter(([, sessionId, role]) => !sessionId && role === CONTROLLER_GATEWAY_ROLE)
+    .map(([id]) => id);
+  if (!listed.ok) {
+    env.log?.(`Cannot list gateway containers with ${runtime}; restart them or re-run the gateway's setup script.`);
+    return;
+  }
+  if (ids.length === 0) return;
+  env.log?.(`Restarting ${ids.length} gateway container(s) onto the restored data/: ${ids.join(', ')}`);
+  const restarted = env.runner.tryRun(
+    runtime,
+    ['restart', '-t', String(CUTOVER_STOP_GRACE_SECONDS), ...ids],
+    undefined,
+    { timeoutMs: CUTOVER_STOP_CLI_TIMEOUT_MS },
+  );
+  if (!restarted.ok) {
+    env.log?.(`Gateway restart failed (${restarted.stdout || 'no output'}); re-run the gateway's setup script.`);
+  }
+}
+
+/**
+ * The same restart as a shell command, for an operator finishing a rollback by
+ * hand. Only a gateway's own setup sets the gateway role, always without a
+ * session, so the two label filters select what the list above selects.
+ */
+export function gatewayRestartCommand(projectRoot: string): string {
+  const runtime = shellQuote(process.env.CONTAINER_RUNTIME ?? 'docker');
+  const labels = `--filter label=nanoclaw-install=${getInstallSlug(projectRoot)} --filter label=nanoclaw-role=${CONTROLLER_GATEWAY_ROLE}`;
+  return `ids=$(${runtime} ps -aq ${labels}) && { [ -z "$ids" ] || ${runtime} restart -t ${CUTOVER_STOP_GRACE_SECONDS} $ids; }`;
 }
 
 export async function verifyServiceHealth(
@@ -219,12 +518,22 @@ export async function verifyServiceHealth(
   if (!handle.active) return true;
   const socket = path.join(projectRoot, 'data', 'ncl.sock');
   const started = Date.now();
+  // A probe failure here is "not healthy yet", not a verdict: the start just
+  // succeeded, so the manager is reachable and the window is for settling.
+  let probeError: unknown;
   while (Date.now() - started < timeoutMs) {
-    const current = detectService(projectRoot, env);
-    if (current.active && fs.existsSync(socket)) {
+    let current: ServiceHandle | undefined;
+    try {
+      current = detectService(projectRoot, env);
+      probeError = undefined;
+    } catch (err) {
+      probeError = err;
+    }
+    if (current?.active && !current.transitional && fs.existsSync(socket)) {
       if (env.runner.tryRun(path.join(projectRoot, 'bin', 'ncl'), ['groups', 'list'], projectRoot).ok) return true;
     }
     await env.sleep(500);
   }
+  if (probeError) throw probeError;
   return false;
 }

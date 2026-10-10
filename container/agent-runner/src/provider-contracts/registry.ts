@@ -51,6 +51,11 @@ export interface ProviderRuntimeConfiguration {
   inference?: Capability<RuntimeConfigurationInputs['inference']>;
   memory?: Capability<RuntimeConfigurationInputs['memory']>;
   mcpServers?: Capability<RuntimeConfigurationInputs['mcpServers']>;
+  /** Provider-native fallback tone and its mapping to native settings. */
+  tone?: {
+    default: string;
+    toSettings(tone: string): Record<string, unknown>;
+  };
 }
 
 /**
@@ -67,6 +72,7 @@ export interface ResolvedRuntimeConfiguration {
   executionPolicy: unknown;
   inference?: unknown;
   mcpServers?: unknown;
+  tone?: Record<string, unknown>;
 }
 
 export interface RuntimeLifecycleCallbacks {

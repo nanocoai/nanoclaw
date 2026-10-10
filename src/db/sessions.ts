@@ -76,6 +76,33 @@ export async function getSessionsByAgentGroup(agentGroupId: string): Promise<Ses
   return getDb().all<Session>('SELECT * FROM sessions WHERE agent_group_id = ?', agentGroupId);
 }
 
+/**
+ * A conversation's most recently active sessions: active rows of one agent
+ * group × messaging group whose `last_active` is at or after `activeSinceIso`
+ * (ISO-8601 UTC), newest first, at most `limit`. Bounded on purpose: callers
+ * on the message path must never need the whole session list of a busy
+ * channel. Sessions that never received a message (`last_active` NULL) are
+ * excluded.
+ */
+export async function getRecentConversationSessions(
+  agentGroupId: string,
+  messagingGroupId: string,
+  activeSinceIso: string,
+  limit: number,
+): Promise<Session[]> {
+  return getDb().all<Session>(
+    `SELECT * FROM sessions
+       WHERE agent_group_id = ? AND messaging_group_id = ? AND status = 'active'
+         AND last_active IS NOT NULL AND last_active >= ?
+       ORDER BY last_active DESC
+       LIMIT ?`,
+    agentGroupId,
+    messagingGroupId,
+    activeSinceIso,
+    limit,
+  );
+}
+
 export async function findSystemSession(agentGroupId: string, threadId: string): Promise<Session | undefined> {
   return getDb().get<Session>(
     `SELECT * FROM sessions
@@ -290,16 +317,23 @@ export async function getAskQuestionRender(id: string): Promise<
       title: string;
       question?: string;
       options: import('../channels/ask-question.js').NormalizedOption[];
+      deferResolution?: boolean;
     }
   | undefined
 > {
   const q = await getPendingQuestion(id);
   if (q) return { title: q.title, options: q.options };
-  const a = await getDb().get<{ title: string; question: string; options_json: string }>(
-    'SELECT title, question, options_json FROM pending_approvals WHERE approval_id = ?',
+  const a = await getDb().get<{ title: string; question: string; options_json: string; action: string }>(
+    'SELECT title, question, options_json, action FROM pending_approvals WHERE approval_id = ?',
     id,
   );
-  if (a?.title) return { title: a.title, question: a.question, options: JSON.parse(a.options_json) };
+  if (a?.title)
+    return {
+      title: a.title,
+      question: a.question,
+      options: JSON.parse(a.options_json),
+      ...(a.action === 'gateway_request' ? { deferResolution: true } : {}),
+    };
 
   // Channel-registration + unknown-sender approvals persist the same render
   // metadata as pending_approvals — just SELECT and return.
@@ -320,4 +354,13 @@ export async function getAskQuestionRender(id: string): Promise<
   }
 
   return undefined;
+}
+
+/** Bind the delivered platform card after its approval row is durable. */
+export async function bindPendingApprovalMessage(approvalId: string, messageId: string): Promise<void> {
+  await getDb().run(
+    'UPDATE pending_approvals SET platform_message_id = ? WHERE approval_id = ?',
+    messageId,
+    approvalId,
+  );
 }

@@ -6,6 +6,7 @@ import type { MessageInRow } from './db/messages-in.js';
 import './providers/index.js';
 import './provider-contracts/index.js';
 import { readProviderTrace } from './provider-contracts/realize.js';
+import { commandText, slashCommandName } from './slash-command.generated.js';
 
 /**
  * `/upload-trace` command: upload this session's transcript to the user's
@@ -15,9 +16,9 @@ import { readProviderTrace } from './provider-contracts/realize.js';
  * `~/.claude/projects/<dir>/<sessionId>.jsonl`, already in the format the
  * viewer auto-detects, so this just pushes it.
  *
- * Auth is the OneCLI gateway's job: curl goes out through the injected
- * HTTPS_PROXY, which adds the user's HF token. We never see the raw token, and
- * a 401 from `whoami` is our "not signed in" signal.
+ * Auth is the credential gateway's job: curl goes out through the injected
+ * proxy, which adds the user's HF token. We never see the raw token, and a 401
+ * from `whoami` is our "not signed in" signal.
  */
 
 /**
@@ -25,13 +26,8 @@ import { readProviderTrace } from './provider-contracts/realize.js';
  * (no LLM turn). Admin-gated by the host router before it reaches the container.
  */
 export function isUploadTraceCommand(msg: MessageInRow): boolean {
-  let text = '';
-  try {
-    text = (JSON.parse(msg.content)?.text ?? '').trim();
-  } catch {
-    return false; // non-JSON content is never a command
-  }
-  return text.toLowerCase().startsWith('/upload-trace');
+  // Exact name, never a prefix: the host gate only admin-checks '/upload-trace'.
+  return slashCommandName(commandText(msg.content)) === '/upload-trace';
 }
 
 function curl(args: string[], input?: string): { ok: boolean; out: string } {
@@ -41,7 +37,7 @@ function curl(args: string[], input?: string): { ok: boolean; out: string } {
 
 /**
  * Setup instructions for when whoami fails. `body` is the gateway's error
- * JSON (when the request was proxied through OneCLI). We surface the URL it
+ * JSON (when the configured gateway provides one). We surface the URL it
  * hands back — `secret_url` for an unknown host (HF's case), `connect_url`
  * for an OAuth app, `manage_url` when the secret exists but this agent lacks
  * access — so the link always points at the right gateway (local or hosted).
@@ -69,8 +65,8 @@ function notSignedInMessage(body: string): string {
     '   (New token → type "Write" → copy it).',
     '',
     setupUrl
-      ? `2. Add it to OneCLI here: ${setupUrl}`
-      : '2. Add it to the OneCLI vault as a secret with host pattern  huggingface.co',
+      ? `2. Add it to your credential gateway here: ${setupUrl}`
+      : '2. Add it to your credential gateway for host huggingface.co',
     '',
     'Then run /upload-trace again.',
   ];
@@ -83,7 +79,7 @@ export function uploadTrace(providerName: string): string {
   if (!file) return 'No transcript to upload for this session yet.';
 
   // whoami, capturing the body + HTTP status (no -f, so the gateway's error
-  // JSON survives a 401). When no token is available the OneCLI gateway
+  // JSON survives a 401). When no token is available, a capable gateway
   // returns a setup URL pre-filled for *this* gateway — so we never hardcode
   // local-vs-hosted dashboard links, and never have to know which it is.
   const who = curl(['-s', '-w', '\n%{http_code}', 'https://huggingface.co/api/whoami-v2']);

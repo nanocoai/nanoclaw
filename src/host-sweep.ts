@@ -3,14 +3,16 @@
  *
  * The per-session body lives in src/reconcile-session.ts (`reconcileSession`,
  * the ReconcileFn shape from src/reconcile.ts); execution runs through the
- * keyed workqueue (src/reconcile-queue.ts). This module owns the resync
- * floor: every 60s it enqueues the singleton duties and every active
- * session, then re-arms once the tick's work has drained — so queue loss
- * costs latency, never correctness, and an explicit enqueue between ticks
- * can never be lost to a concurrent sweep. The re-exports below keep the
- * long-standing import surface of this module stable.
+ * keyed workqueue (src/reconcile-queue.ts), RECONCILE_CONCURRENCY sessions
+ * at a time. This module owns the resync floor: every 60s it enqueues the
+ * singleton duties and every active session, then re-arms once the tick's
+ * work has drained — so queue loss costs latency, never correctness, and an
+ * explicit enqueue between ticks can never be lost to a concurrent sweep.
+ * The re-exports below keep the long-standing import surface of this module
+ * stable.
  */
 import { INSTALL_SLUG } from './config.js';
+import { stopOrphanedSessions } from './container-runner.js';
 import { ensureEgressNetwork } from './egress-lockdown.js';
 import { getActiveSessions } from './db/sessions.js';
 import { peekSessionDriver } from './drivers/index.js';
@@ -31,6 +33,19 @@ export {
 } from './reconcile-session.js';
 
 const SWEEP_INTERVAL_MS = 60_000;
+
+/**
+ * Sessions reconciled in parallel. Each reconcile is one session's mailbox
+ * round trip plus a few central reads; on a remote mailbox that is network
+ * latency, and serially it made a tick scale as sessions × latency (300
+ * sessions × 40 ms/hop ≈ 25 s per tick). Keys never overlap with themselves
+ * (the queue serializes per key), sessions are independent by the mailbox
+ * contract, and the two singleton duties tolerate running alongside sessions
+ * (spawn re-heals the egress network itself; the approvals scan is a central
+ * query). 8 is a modest fan-out for a remote store; local SQLite is
+ * synchronous IO and neither gains nor loses.
+ */
+export const RECONCILE_CONCURRENCY = 8;
 
 let running = false;
 let queue: InProcessReconcileQueue | null = null;
@@ -71,6 +86,7 @@ export function startHostSweep(): void {
   running = true;
   queue = createReconcileQueue({
     reconcile: reconcileSession,
+    concurrency: RECONCILE_CONCURRENCY,
     singletons: {
       // Re-heal the egress network so already-running agents keep their
       // gateway hop if it was detached out-of-band. Best-effort: a heal
@@ -82,6 +98,15 @@ export function startHostSweep(): void {
           ensureEgressNetwork();
         } catch (err) {
           log.error('Egress lockdown re-heal failed', { err });
+        }
+      },
+      // Stop containers whose session or agent group was deleted: the
+      // per-session reconcile only visits sessions that still have a row.
+      'singleton:orphan-containers': async () => {
+        try {
+          await stopOrphanedSessions();
+        } catch (err) {
+          log.error('Orphaned container sweep failed', { err });
         }
       },
       // Finalize any "Reject with reason…" holds whose reply window elapsed
@@ -132,8 +157,9 @@ async function sweep(): Promise<void> {
   const tickQueue = queue;
   if (!running || !tickQueue) return;
 
-  // Tick order matches the loop this replaces: egress re-heal, then every
-  // active session, then the approvals scan — serial through the queue.
+  // Enqueue order matches the loop this replaces: egress re-heal, then every
+  // active session, then the approvals scan; the orphan-container stop last. Keys START in that order; up to
+  // RECONCILE_CONCURRENCY of them run at once.
   tickQueue.add('singleton:egress-reheal');
   try {
     const sessions = await getActiveSessions();
@@ -144,6 +170,7 @@ async function sweep(): Promise<void> {
     log.error('Host sweep error', { err });
   }
   tickQueue.add('singleton:approvals-scan');
+  tickQueue.add('singleton:orphan-containers');
 
   // The tick ends — and the next one is armed — only after everything this
   // tick enqueued has run. Delayed backoff retries don't hold the tick open.

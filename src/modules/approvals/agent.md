@@ -27,7 +27,7 @@ add_mcp_server({
   name: "github",
   command: "npx",
   args: ["@modelcontextprotocol/server-github"],
-  env: { GITHUB_TOKEN: "onecli-managed" }
+  env: { GITHUB_TOKEN: "gateway-managed" }
 })
 ```
 
@@ -47,6 +47,6 @@ You won't see the admin's response in your current turn. After approval, the con
 
 If denied, you'll get a chat message telling you the request was rejected. Do not retry automatically; explain to the user what was denied.
 
-## Credential approvals (OneCLI)
+## Credential approvals
 
-When you call an external API that requires credentials, OneCLI may prompt an admin for approval before releasing the token. This happens transparently: the HTTP call blocks until admin approves or denies. No action needed from you — just make the call. If it errors out with a credential failure, tell the user and stop.
+When you call an external API that requires credentials, the configured gateway may prompt an admin before releasing the token. This happens transparently: the HTTP call blocks until admin approves or denies. If it returns a credential error, tell the user and stop.

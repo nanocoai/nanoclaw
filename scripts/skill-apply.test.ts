@@ -95,6 +95,56 @@ describe('apply engine lifecycle', () => {
     expect(second.skipped.length).toBeGreaterThanOrEqual(3);
   });
 
+  it('fills missing local payload files without overwriting installed files in the same copy block', async () => {
+    writeFileSync(
+      join(skillDir, 'SKILL.md'),
+      '```nc:copy\nresources/sample.ts -> src/sample.ts\nresources/sample.ts -> src/missing.ts\n```\n',
+    );
+    writeFileSync(join(root, 'src/sample.ts'), '// local customization\n');
+    const result = await applySkill(skillDir, root, {});
+    expect(fullyApplied(result)).toBe(true);
+    expect(readFileSync(join(root, 'src/sample.ts'), 'utf8')).toBe('// local customization\n');
+    expect(readFileSync(join(root, 'src/missing.ts'), 'utf8')).toBe('export const sample = true;\n');
+    expect(result.journal).toEqual([{ op: 'wrote', path: 'src/missing.ts' }]);
+    await removeSkill(root, result.journal, () => {});
+    expect(readFileSync(join(root, 'src/sample.ts'), 'utf8')).toBe('// local customization\n');
+    expect(existsSync(join(root, 'src/missing.ts'))).toBe(false);
+  });
+
+  it('fetches only missing registry payload files during install', async () => {
+    writeFileSync(join(skillDir, 'SKILL.md'), '```nc:copy from-branch:providers\nsrc/sample.ts\nsrc/missing.ts\n```\n');
+    writeFileSync(join(root, 'src/sample.ts'), '// local customization\n');
+    const { cmds, exec } = recordingExec();
+    const result = await applySkill(skillDir, root, { exec, resolveRemote: () => 'fixture' });
+    expect(fullyApplied(result)).toBe(true);
+    expect(cmds).toHaveLength(2);
+    expect(cmds[0]).toBe("git fetch 'fixture' '+refs/heads/providers:refs/remotes/fixture/providers'");
+    expect(cmds[1]).toContain("git show 'refs/remotes/fixture/providers:src/missing.ts'");
+    expect(cmds[1]).not.toContain('src/sample.ts');
+    expect(result.journal).toEqual([{ op: 'wrote', path: 'src/missing.ts' }]);
+    expect(readFileSync(join(root, 'src/sample.ts'), 'utf8')).toBe('// local customization\n');
+  });
+
+  it('skips a registry fetch if the missing files arrive before the copy step', async () => {
+    writeFileSync(join(skillDir, 'SKILL.md'), '```nc:copy from-branch:providers\nsrc/sample.ts\nsrc/missing.ts\n```\n');
+    writeFileSync(join(root, 'src/sample.ts'), '// local customization\n');
+    const { cmds, exec } = recordingExec();
+    const result = await applySkill(skillDir, root, {
+      exec,
+      resolveRemote: () => 'fixture',
+      onEvent: async (event) => {
+        if (event.type === 'step-start' && event.kind === 'copy') {
+          writeFileSync(join(root, 'src/missing.ts'), '// installed before copy\n');
+        }
+      },
+    });
+    expect(fullyApplied(result)).toBe(true);
+    expect(cmds).toEqual([]);
+    expect(result.journal).toEqual([]);
+    expect(readFileSync(join(root, 'src/sample.ts'), 'utf8')).toBe('// local customization\n');
+    expect(readFileSync(join(root, 'src/missing.ts'), 'utf8')).toBe('// installed before copy\n');
+  });
+
   it('refresh mode overwrites an installed payload instead of treating presence as current', async () => {
     await applySkill(skillDir, root, { resolveInput: headless({ token: 'sekret-123' }), exec: () => {} });
     writeFileSync(join(skillDir, 'resources/sample.ts'), 'export const sample = "refreshed";\n');
@@ -214,13 +264,9 @@ describe('from-branch copy apply path', () => {
     // the redirect target's parent now exists, so the exec'd `git show … > dest`
     // (mocked here) would not fail with ENOENT on a real run
     expect(existsSync(join(froot, 'container/skills/demo-formatting'))).toBe(true);
-    expect(cmds).toContain('git fetch origin channels');
+    expect(cmds).toContain("git fetch 'origin' '+refs/heads/channels:refs/remotes/origin/channels'");
     expect(
-      cmds.some((c) =>
-        /^git show origin\/channels:container\/skills\/demo-formatting\/SKILL\.md > container\/skills\/demo-formatting\/SKILL\.md$/.test(
-          c,
-        ),
-      ),
+      cmds.some((c) => c.includes("git show 'refs/remotes/origin/channels:container/skills/demo-formatting/SKILL.md'")),
     ).toBe(true);
     expect(res.journal).toContainEqual({ op: 'wrote', path: 'container/skills/demo-formatting/SKILL.md' });
 
@@ -567,6 +613,8 @@ describe('nc:run multi-field JSON capture + validate', () => {
     const res = await applySkill(mskill, mroot, { inputs: {}, exec: () => JSON.stringify({ id: 'not-a-number' }) });
     expect(res.agentTasks).toHaveLength(1); // bounce, not re-ask
     expect(res.agentTasks[0].kind).toBe('run');
+    expect(res.agentTasks[0].reason).toContain('captured app_id does not match');
+    expect(res.agentTasks[0].reason).not.toContain('not-a-number'); // remote text stays out of the bounce
     expect(res.vars.app_id).toBeUndefined(); // validate failed before binding
     // the downstream env-set then defers on the unresolved {{app_id}}
     expect(res.deferred.some((d) => /unresolved \{\{app_id\}\}/.test(d))).toBe(true);
@@ -584,6 +632,7 @@ describe('nc:run multi-field JSON capture + validate', () => {
     writeFileSync(join(mskill, 'SKILL.md'), MULTI_CAPTURE_SKILL);
     const res = await applySkill(mskill, mroot, { inputs: {}, exec: () => 'not json at all' });
     expect(res.agentTasks).toHaveLength(1);
+    expect(res.agentTasks[0].reason).not.toContain('not json'); // remote text stays out of the bounce
     expect(res.vars.application_id).toBeUndefined();
   });
 });
@@ -856,7 +905,63 @@ describe('nc:run effect:step (streaming, multi-field capture)', () => {
     const { sdir, rdir } = stepScratch();
     const res = await applySkill(sdir, rdir, { exec: () => {}, execStream: async () => ({ ok: false, fields: {} }) });
     expect(res.agentTasks).toHaveLength(1);
+    expect(res.agentTasks[0].reason).toMatch(/engine could not apply \(the step did not complete\)/);
     expect(res.vars.platform_id).toBeUndefined();
+  });
+
+  it("a failed step's own ERROR field becomes the bounce reason verbatim", async () => {
+    const { sdir, rdir } = stepScratch();
+    const res = await applySkill(sdir, rdir, {
+      exec: () => {},
+      execStream: async () => ({
+        ok: false,
+        fields: { STATUS: 'failed', ERROR: 'setup step failed: database x exists but its keys are missing' },
+      }),
+    });
+    expect(res.agentTasks).toHaveLength(1);
+    expect(res.agentTasks[0].reason).toBe('setup step failed: database x exists but its keys are missing');
+  });
+
+  it('does not run build and test after a failed step, but keeps them in the recovery tasks', async () => {
+    const sdir = mkdtempSync(join(tmpdir(), 'nc-step-skill-'));
+    const rdir = mkdtempSync(join(tmpdir(), 'nc-step-proj-'));
+    writeFileSync(
+      join(sdir, 'SKILL.md'),
+      [
+        '# gateway demo',
+        '',
+        '## Install',
+        '```nc:run effect:step',
+        'pnpm exec tsx install.ts',
+        '```',
+        '',
+        '## Validate',
+        '```nc:run effect:build',
+        'pnpm run build',
+        '```',
+        '',
+        '```nc:run effect:test',
+        'pnpm exec vitest run',
+        '```',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(join(rdir, 'package.json'), '{"name":"scratch"}');
+    const ran: string[] = [];
+    const res = await applySkill(sdir, rdir, {
+      exec: (cmd) => {
+        ran.push(cmd);
+      },
+      execStream: async () => ({ ok: false, fields: { STATUS: 'failed', ERROR: 'precondition failed' } }),
+    });
+    expect(ran).toEqual([]);
+    // The step's own reason comes first; build and test are not run, but stay
+    // in the recovery tasks so an agent validates after fixing the step.
+    expect(res.agentTasks.map((t) => [t.kind, t.reason])).toEqual([
+      ['run', 'precondition failed'],
+      ['run', 'skipped: an earlier step did not complete — run this from the prose after fixing it'],
+      ['run', 'skipped: an earlier step did not complete — run this from the prose after fixing it'],
+    ]);
   });
 });
 
@@ -936,6 +1041,45 @@ describe('run-health gate (a bounce blocks later side effects)', () => {
     expect(res.agentTasks).toHaveLength(3);
     const gated = res.agentTasks.filter((t) => /an earlier step did not complete/.test(t.reason));
     expect(gated).toHaveLength(2); // restart + step, both bounced by the gate
+  });
+
+  // A step's ERROR text is the step's own; one that happens to read like the
+  // engine's deferred-input marker is still a failure, not a missing answer.
+  it('a failed step whose ERROR mentions an unresolved {{var}} still latches the gate', async () => {
+    writeFileSync(
+      join(gskill, 'SKILL.md'),
+      [
+        '# step then restart demo',
+        '',
+        '## Pair the device',
+        '```nc:run effect:step',
+        'pnpm exec tsx setup/index.ts --step pair',
+        '```',
+        '',
+        '## Restart the service',
+        '```nc:run effect:restart',
+        'bash restart.sh',
+        '```',
+        '',
+      ].join('\n'),
+    );
+    const cmds: string[] = [];
+    const res = await applySkill(gskill, groot, {
+      inputs: {},
+      exec: (c: string) => {
+        cmds.push(c);
+      },
+      execStream: async () => ({
+        ok: false,
+        fields: { STATUS: 'failed', ERROR: 'nested skill left unresolved {{token}}' },
+      }),
+    });
+    expect(cmds).not.toContain('bash restart.sh');
+    expect(res.deferred).toEqual([]);
+    expect(res.agentTasks.map((t) => t.reason)).toEqual([
+      'nested skill left unresolved {{token}}',
+      'skipped: an earlier step did not complete — run this from the prose after fixing it',
+    ]);
   });
 
   // Once blocked, an operator block must not walk the human through steps the

@@ -28,7 +28,7 @@ import {
   getMessagingGroupWithAgentCount,
 } from './db/messaging-groups.js';
 import { findSessionForAgent } from './db/sessions.js';
-import { backfillNewSession, fanInboundMessage } from './modules/cross-session-context/index.js';
+import { backfillSession, fanInboundMessage } from './modules/cross-session-context/index.js';
 import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
 import { resolveSession, writeSessionMessage, writeOutboundDirect } from './session-manager.js';
@@ -577,12 +577,14 @@ async function deliverToAgent(
     }
   }
 
-  if (wake && created) {
-    // New-session backfill (cross-session context): a just-born session is
-    // seeded with its conversation's top-level timeline from sibling
-    // sessions BEFORE the triggering message is written, so replying to
-    // something said in another thread lands with that context in view.
-    await backfillNewSession(agentGroup, session, mg);
+  if (wake) {
+    // Cross-session context backfill: a just-born or long-idle session is
+    // seeded with its conversation's recent top-level timeline from the
+    // conversation's hot set BEFORE the triggering message is written, so
+    // replying to something said in another thread lands with that context
+    // in view. Bounded (K sources, read concurrently); a hot session is a
+    // one-query no-op. Never throws.
+    await backfillSession(agentGroup, session, mg, { created });
   }
 
   const messageId = messageIdForAgent(event.message.id, agent.agent_group_id);
@@ -596,22 +598,6 @@ async function deliverToAgent(
     content: event.message.content,
     trigger: wake,
   });
-
-  if (wake) {
-    // Cross-session context: fan the triggering message into sibling
-    // sessions of the SAME conversation as trigger=0 'session-echo' rows.
-    // Only the engaged branch fans — the accumulate branch above (trigger=0)
-    // never does, so ambient backlog is never copied twice. Never throws.
-    await fanInboundMessage({
-      session,
-      mg,
-      messageId,
-      kind: event.message.kind,
-      channelType: deliveryAddr.channelType,
-      content: event.message.content,
-      timestamp: event.message.timestamp,
-    });
-  }
 
   if (wake && created) {
     // A brand-new engaged session: notify registered modules with the
@@ -662,6 +648,23 @@ async function deliverToAgent(
       // started so it doesn't leak; the inbound row stays pending.
       if (!woke) stopTypingRefresh(freshSession.id);
     }
+
+    // Cross-session context: fan the triggering message into the
+    // conversation's recently active sibling sessions as trigger=0
+    // 'session-echo' rows. Only the engaged branch fans — the accumulate
+    // branch (trigger=0) never does, so ambient backlog is never copied
+    // twice. Fired AFTER the wake and left unawaited: echoes are ambient
+    // context for OTHER sessions and must never sit between a user's message
+    // and its container. Bounded audience + concurrent writes; never throws.
+    void fanInboundMessage({
+      session,
+      mg,
+      messageId,
+      kind: event.message.kind,
+      channelType: deliveryAddr.channelType,
+      content: event.message.content,
+      timestamp: event.message.timestamp,
+    });
   }
 }
 

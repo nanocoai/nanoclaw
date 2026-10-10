@@ -43,8 +43,7 @@ export function isSafeAttachmentName(name: string): boolean {
  *
  * The result always satisfies `isSafeAttachmentName`. Containment against
  * traversal/symlink escape is NOT this function's job — that still comes from
- * `ensureContainedInboxDir` and the `wx`/`COPYFILE_EXCL` flags at the actual
- * writes, unchanged.
+ * the AnchoredDir-based staging and exclusive-create writes, unchanged.
  */
 export function safeAttachmentDirName(id: string): string {
   if (isSafeAttachmentName(id)) return id;

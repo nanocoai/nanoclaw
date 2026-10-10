@@ -3,6 +3,8 @@ import os from 'os';
 import path from 'path';
 import { describe, expect, it, spyOn } from 'bun:test';
 
+import '../providers/index.js';
+import './index.js';
 import { registerProvider } from '../providers/provider-registry.js';
 import { readProviderTrace, runProviderAfterExchange, runProviderBeforeQuery } from './realize.js';
 import {
@@ -134,6 +136,12 @@ describe('provider runtime contracts', () => {
     delete contract.configuration.memory;
     contract.configuration.mcpServers = { constant: {} };
     registerCheckedProvider(contractName('configuration-optional', 'valid'), contract);
+  });
+
+  it.each([null, {}, { default: '' }, { default: 'friendly' }])('rejects invalid tone declarations %j', (tone) => {
+    const contract = emptyContract();
+    contract.configuration.tone = tone as NonNullable<ProviderRuntimeContract['configuration']['tone']>;
+    expect(() => assertProviderRuntimeContractShape('invalid-tone', contract)).toThrow(/configuration\.tone\./);
   });
 
   it('rejects declared capabilities that are neither a function nor a constant', () => {

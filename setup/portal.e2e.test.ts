@@ -244,11 +244,12 @@ describe('single-visit enrollment', () => {
     for (const route of ['/api/v1/setup/code-1/claim', '/api/v1/setup/code-1', '/api/v1/device/state'])
       expect(seen.find((r) => r.route === route)?.bearer).toBe('install-token-test');
 
-    // One link, opened once, before the token polling; the code and the sign-in page on their own lines.
+    // One link, opened once, before the token polling. No bare sign-in link: it would sign in and leave the perk undecided.
     expect(mock.open).toHaveBeenCalledExactlyOnceWith(`${origin}/?setup=code-1`);
     const out = stdout.join('');
     expect(out).toContain(`\n${origin}/?setup=code-1\n`);
-    expect(out).toContain(`Code: ${USER_CODE}\n${ACTIVATE}?user_code=${USER_CODE}\n`);
+    expect(out).not.toContain(USER_CODE);
+    expect(out).not.toContain(ACTIVATE);
     expect(out).not.toContain('device-code-secret');
 
     // Persisted exactly as the standalone sign-in does.

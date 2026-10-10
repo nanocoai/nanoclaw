@@ -15,7 +15,7 @@
 //
 // `prompt` only *acquires* a value and binds it to a name; a separate directive
 // *applies* it, referenced as `{{name}}`. That keeps "ask the human" decoupled
-// from "what you do with the answer" (env, ncl, the OneCLI vault, a file).
+// from "what you do with the answer" (env, ncl, a credential gateway, a file).
 //
 //   copy [from-branch:<b>]  body: `PATH` (src==dst) or `SRC -> DST`   overwrite
 //   append to:<file> [at:<marker>]  body: line(s) to add             skip if present
@@ -110,8 +110,8 @@ export interface Problem {
   message: string;
 }
 
-const FENCE = /^```(\S.*)?$/;
-const EXACT_SEMVER = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
+export const FENCE = /^```(\S.*)?$/;
+export const EXACT_SEMVER = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
 const VAR_REF = /\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g;
 const KNOWN = new Set(['copy', 'append', 'dep', 'run', 'prompt', 'operator', 'env-set', 'json-merge']);
 // Retired directives get a targeted lint error (not just "unknown") so an

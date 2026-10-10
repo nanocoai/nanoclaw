@@ -152,8 +152,8 @@ describe('assistant text block surfacing', () => {
 });
 
 // The provider does NOT derive the result event's text from the streamed
-// assistant messages — it takes the SDK's own `result` / `errors[]` fields
-// verbatim (see the result branch in claude.ts). Containment of result text
+// assistant messages — it takes the SDK's own `result` field and keeps
+// `errors[]` separate (see claude.ts). Containment of result text
 // in streamed text is therefore an SDK premise the provider cannot enforce.
 // These pin the two divergence shapes the poll-loop's midTurnSent===0
 // fallback exists for.
@@ -178,7 +178,7 @@ describe('result text is an independent SDK field (divergence surface)', () => {
     expect(result?.text).toBe('<message to="user">only in the result field</message>');
   });
 
-  it('error-subtype results carry errors[] text that never streamed', async () => {
+  it('keeps error-subtype errors[] separate from model text', async () => {
     sdkMessages.length = 0;
     sdkMessages.push(
       { type: 'system', subtype: 'init', session_id: 'sess-6' },
@@ -190,11 +190,12 @@ describe('result text is an independent SDK field (divergence surface)', () => {
     provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
     const q = provider.query({ prompt: 'hi', cwd: tmp });
 
-    const events: { type: string; text?: string | null; isError?: boolean }[] = [];
-    for await (const e of q.events) events.push(e as { type: string; text?: string | null; isError?: boolean });
+    const events: { type: string; text?: string | null; isError?: boolean; error?: string }[] = [];
+    for await (const e of q.events) events.push(e);
 
     const result = events.find((e) => e.type === 'result');
-    expect(result?.text).toBe('billing hard-stop');
+    expect(result?.text).toBeNull();
+    expect(result?.error).toBe('billing hard-stop');
     expect(result?.isError).toBe(true);
     // 'billing hard-stop' never appeared in a text event — only 'partial progress' did.
     expect(events.filter((e) => e.type === 'text').map((e) => e.text)).toEqual(['partial progress']);

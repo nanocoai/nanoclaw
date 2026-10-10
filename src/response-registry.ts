@@ -14,6 +14,8 @@
 
 export interface ResponsePayload {
   questionId: string;
+  instance?: string;
+  messageId?: string;
   value: string;
   userId: string | null;
   channelType: string;
@@ -25,8 +27,9 @@ export type ResponseHandler = (payload: ResponsePayload) => Promise<boolean>;
 
 const responseHandlers: ResponseHandler[] = [];
 
-export function registerResponseHandler(handler: ResponseHandler): void {
-  responseHandlers.push(handler);
+export function registerResponseHandler(handler: ResponseHandler, options: { prepend?: boolean } = {}): void {
+  if (options.prepend) responseHandlers.unshift(handler);
+  else responseHandlers.push(handler);
 }
 
 export function getResponseHandlers(): readonly ResponseHandler[] {

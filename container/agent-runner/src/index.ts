@@ -4,7 +4,7 @@
  * Runs inside a container. All message IO goes through the registered mailbox.
  *
  * Config is read from /workspace/agent/container.json (mounted RO).
- * Only TZ and OneCLI networking vars come from env.
+ * Only TZ and gateway networking vars come from env.
  *
  * Mount structure:
  *   /workspace/
@@ -23,6 +23,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
+import { trustGatewayCaForChromium } from './browser-trust.js';
 import { loadConfig } from './config.js';
 import { buildSystemPromptAddendum } from './destinations.js';
 import { getTaskSeriesId } from './db/session-routing.js';
@@ -62,6 +63,9 @@ async function main(): Promise<void> {
   // Every provider shares one persistent memory tree. Legacy imports are an
   // operator-run migration and never happen in this normal startup path.
   ensureMemoryScaffold();
+
+  // The agent browser trusts only NSS, not the gateway CA env vars.
+  trustGatewayCaForChromium({ log });
 
   // Runtime-generated system-prompt addendum: agent identity (name) plus
   // the live destinations map. Everything else (capabilities, per-module
