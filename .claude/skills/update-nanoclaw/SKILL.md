@@ -38,7 +38,11 @@ Confirm the live tree is clean:
 git status --porcelain
 ```
 
-Stop if it prints anything.
+Stop if it prints anything. Setup commits the files it applies as
+`setup: apply <skill>` commits unless `NANOCLAW_SETUP_COMMIT=0` was set.
+Treat anything left as part of the install: show it, ask the user to commit it
+as a local customization, then re-check. Never stash it, since the updater
+discovers installed skills from these files.
 
 Use the official remote if one already exists. Otherwise add it as `upstream`:
 
@@ -69,60 +73,91 @@ fi
 
 Materialize the newest controller from that ref. This is the self-update seam:
 an older local skill still executes the newest safety code before any mutation.
+The controller always comes from `main`; the ref it merges follows the channel
+(step 2).
 
 ```bash
 # pwd -P: on macOS mktemp returns a path through the /var symlink, and a
 # symlinked argv defeats Node's import.meta main-module guard — the controller
 # then exits 0 having done NOTHING. Canonicalize before use.
 controller_dir="$(cd "$(mktemp -d)" && pwd -P)"
-# Extract all of scripts/, not a hand-listed subset: the controller's import
-# graph reaches across that tree, and a list has to be edited every time a
-# module it loads gains a sibling import. src/install-slug.ts is the one file
-# outside scripts/ that the controller imports.
+# Extract all of scripts/, not a hand-listed subset. These paths are a
+# contract: older copies of this skill extract exactly them from the newest
+# ref, so the controller must load from them alone, with no node_modules.
+# scripts/update/controller-archive.test.ts enforces it.
 git archive "$upstream_ref" scripts src/install-slug.ts | tar -x -C "$controller_dir"
 ```
 
-## 2. Choose the Git strategy and prepare
+## 2. Choose the channel, the Git strategy, and prepare
+
+Channels (`NANOCLAW_UPDATE_CHANNEL` in `.env`; `--channel <name>` overrides it
+once): `stable` (default) = newest annotated `vX.Y.Z` tag; `beta` = newest
+`-rc.N` if newer than stable; `edge` = upstream `main`. Change the default only
+with `set-channel` (below), never by editing `.env`.
 
 Default to `merge`. Use `rebase` only when the user explicitly wants linear
 history. Use `cherry-pick` only with an explicit comma-separated commit list.
 
 ```bash
 pnpm exec tsx "$controller_dir/scripts/update-nanoclaw.ts" prepare \
-  --project-root "$PWD" --upstream-ref "$upstream_ref" --strategy merge
+  --project-root "$PWD" --remote "$upstream_remote" --strategy merge
 ```
 
 The JSON result is `nanoclaw-update/v1`. Record its `id`, `stageRoot`, backup
 branch/tag, changed files, and requirements. The live `HEAD` is still unchanged.
+Tell the user the `channel` and `upstreamRef`. Then:
+
+- **Nothing new** (stable/beta, `phase: prepared`, `targetHead` equals
+  `originalHead`): say "Already on the newest release (vX.Y.Z)", still run
+  step 3 (it refreshes installed skills), and `abandon` if `targetHead` is
+  still unchanged.
+- **Error `code: ahead-of-release`** (nothing staged): ask once, "This install
+  is newer than the latest release, `<tag>`. Keep getting the newest code from
+  `main` (edge), or switch to releases and wait for the next one (stable)?"
+  Save the answer, then on edge re-run `prepare` with `--channel edge`; on
+  stable stop, as there is nothing to update until the next release:
+
+  ```bash
+  pnpm exec tsx "$controller_dir/scripts/update-nanoclaw.ts" set-channel \
+    --project-root "$PWD" --channel edge   # or stable
+  ```
 
 If `phase` is `conflict`, resolve conflicts only inside `stageRoot`, preserving
 intentional local customizations. Complete the merge/rebase/cherry-pick there,
 commit it, then run:
 
 ```bash
-pnpm exec tsx "$stageRoot/scripts/update-nanoclaw.ts" resume \
+pnpm exec tsx "$controller_dir/scripts/update-nanoclaw.ts" resume \
   --project-root "$PWD" --id "$id"
 ```
+
+Run every transaction command from `$controller_dir`, not from `stageRoot`: a
+cherry-pick stage can still hold the old controller. If `$controller_dir` is
+gone (a reboot clears temp directories), recreate it with the step 1 commands
+without fetching again.
 
 Show the user the upstream commits, changed-file buckets, requirements, and any
 resolved conflicts. To stop with no live mutation:
 
 ```bash
-pnpm exec tsx "$stageRoot/scripts/update-nanoclaw.ts" abandon \
+pnpm exec tsx "$controller_dir/scripts/update-nanoclaw.ts" abandon \
   --project-root "$PWD" --id "$id"
 ```
 
 ## 3. Validate the staged result
 
 ```bash
-pnpm exec tsx "$stageRoot/scripts/update-nanoclaw.ts" validate \
+pnpm exec tsx "$controller_dir/scripts/update-nanoclaw.ts" validate \
   --project-root "$PWD" --id "$id"
 ```
 
 Validation performs a fork-safe structured refresh of every installed channel
-and provider, commits refreshed payloads in the staging branch, installs frozen
-dependencies, runs the host build and full host tests, and runs the container
-dependency/typecheck leg when Bun is available. A provider skill that declares
+and provider, and of the selected gateway when gateway core or that gateway's
+own skill changed. On a skill-only change, a gateway it cannot resolve is
+skipped and named in the validation checks. It commits refreshed payloads in
+the staging branch, installs frozen dependencies, runs the host build and full
+host tests, and runs the container dependency/typecheck leg when Bun is
+available. A provider skill that declares
 Bun dependencies does not require Bun on the host: refresh runs the exact Bun
 version pinned by `container/Dockerfile` through pnpm. Any selected skill
 refresh or validation failure blocks cutover and the completion stamp.
@@ -136,7 +171,7 @@ Before downtime, show the exact changed files, required migrations, detected
 backup tag, and rollback command. Ask for one confirmation to begin cutover.
 
 ```bash
-pnpm exec tsx "$stageRoot/scripts/update-nanoclaw.ts" cutover \
+pnpm exec tsx "$controller_dir/scripts/update-nanoclaw.ts" cutover \
   --project-root "$PWD" --id "$id"
 ```
 
@@ -165,7 +200,7 @@ changes before acknowledging it. Finish refuses a dirty cut-over checkout.
 After verification, acknowledge the requirement:
 
 ```bash
-pnpm exec tsx "$stageRoot/scripts/update-nanoclaw.ts" ack \
+pnpm exec tsx "$controller_dir/scripts/update-nanoclaw.ts" ack \
   --project-root "$PWD" --id "$id" \
   --requirement "$requirement_id" --status succeeded
 ```
@@ -183,7 +218,7 @@ path for forward local migrations.
 ## 6. Finish and health-check
 
 ```bash
-pnpm exec tsx "$stageRoot/scripts/update-nanoclaw.ts" finish \
+pnpm exec tsx "$controller_dir/scripts/update-nanoclaw.ts" finish \
   --project-root "$PWD" --id "$id"
 ```
 

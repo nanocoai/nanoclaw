@@ -251,6 +251,38 @@ func tunnel(t *testing.T, g *gateway, sni string) (net.Conn, *bufio.Reader, erro
 	e = tlsConn.Handshake()
 	return tlsConn, bufio.NewReader(tlsConn), e
 }
+
+// git and other libcurl clients send proxy credentials only after a challenge.
+func TestMissingProxyAuthChallengesAndAcceptsRetryOnSameConnection(t *testing.T) {
+	g, _ := fixture(t, &fixtureBridge{}, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("unexpected backend request") }))
+	front := httptest.NewServer(g)
+	t.Cleanup(front.Close)
+	u, _ := url.Parse(front.URL)
+	raw, e := net.Dial("tcp", u.Host)
+	if e != nil {
+		t.Fatal(e)
+	}
+	t.Cleanup(func() { raw.Close() })
+	raw.SetDeadline(time.Now().Add(3 * time.Second))
+	reader := bufio.NewReader(raw)
+	io.WriteString(raw, "CONNECT api.example.test:443 HTTP/1.1\r\nHost: api.example.test:443\r\n\r\n")
+	challenge, e := http.ReadResponse(reader, &http.Request{Method: "CONNECT"})
+	if e != nil {
+		t.Fatal(e)
+	}
+	io.Copy(io.Discard, challenge.Body)
+	if challenge.StatusCode != 407 || !strings.HasPrefix(challenge.Header.Get("Proxy-Authenticate"), "Basic ") {
+		t.Fatalf("status=%d challenge=%q", challenge.StatusCode, challenge.Header.Get("Proxy-Authenticate"))
+	}
+	io.WriteString(raw, "CONNECT api.example.test:443 HTTP/1.1\r\nHost: api.example.test:443\r\nProxy-Authorization: "+auth(g, "session-A")+"\r\n\r\n")
+	retry, e := http.ReadResponse(reader, &http.Request{Method: "CONNECT"})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if retry.StatusCode != 200 {
+		t.Fatalf("retry=%d", retry.StatusCode)
+	}
+}
 func TestTunnelRejectsMismatchedSNI(t *testing.T) {
 	g, _ := fixture(t, &fixtureBridge{}, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("unexpected backend request") }))
 	_, _, e := tunnel(t, g, "different.example.test")
@@ -621,4 +653,163 @@ func mustURL(raw string) *url.URL {
 		panic(e)
 	}
 	return u
+}
+func TestLocalModelHostIsPlainHTTPOnlyWithAWrittenPort(t *testing.T) {
+	var hits atomic.Int32
+	var decided []string
+	b := &fixtureBridge{request: func(ctx context.Context, r *pb.TransformRequestRequest) (*pb.TransformRequestResponse, error) {
+		decided = append(decided, r.Request.Host)
+		return &pb.TransformRequestResponse{Action: pb.TransformAction_TRANSFORM_ACTION_CONTINUE}, nil
+	}}
+	g, _ := fixture(t, b, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1); w.WriteHeader(200) }))
+	g.cfg.AllowedHosts = append(g.cfg.AllowedHosts, "host.docker.internal")
+	send := func(method, target string) int {
+		r := httptest.NewRequest(method, target, nil)
+		r.Header.Set("Proxy-Authorization", auth(g, "session-A"))
+		w := httptest.NewRecorder()
+		g.ServeHTTP(w, r)
+		return w.Code
+	}
+	// The port decision is the bridge's: the front forwards any written-out port to it.
+	if code := send("GET", "http://host.docker.internal:11434/v1/models"); code != 200 || hits.Load() != 1 {
+		t.Fatalf("local model: status=%d upstream=%d", code, hits.Load())
+	}
+	if len(decided) != 1 || decided[0] != "host.docker.internal:11434" {
+		t.Fatalf("bridge saw %v", decided)
+	}
+	for _, target := range []string{"http://host.docker.internal/v1/models", "http://host.docker.internal:80/v1/models"} {
+		if code := send("GET", target); code != 403 {
+			t.Fatalf("%s: status=%d", target, code)
+		}
+	}
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("CONNECT", "host.docker.internal:443", nil)
+	r.Host = "host.docker.internal:443"
+	r.Header.Set("Proxy-Authorization", auth(g, "session-A"))
+	g.ServeHTTP(w, r)
+	if w.Code != 403 || hits.Load() != 1 || len(decided) != 1 {
+		t.Fatalf("CONNECT despite an allow entry: status=%d upstream=%d decided=%v", w.Code, hits.Load(), decided)
+	}
+}
+
+func TestLocalModelPortRefusedByTheBridgeNeverReachesUpstream(t *testing.T) {
+	var hits atomic.Int32
+	b := &fixtureBridge{request: func(ctx context.Context, r *pb.TransformRequestRequest) (*pb.TransformRequestResponse, error) {
+		if r.Request.Host != "host.docker.internal:11434" {
+			return &pb.TransformRequestResponse{Action: pb.TransformAction_TRANSFORM_ACTION_REJECT}, nil
+		}
+		return &pb.TransformRequestResponse{Action: pb.TransformAction_TRANSFORM_ACTION_CONTINUE}, nil
+	}}
+	g, _ := fixture(t, b, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1); w.WriteHeader(200) }))
+	r := httptest.NewRequest("GET", "http://host.docker.internal:8001/v1/models", nil)
+	r.Header.Set("Proxy-Authorization", auth(g, "session-A"))
+	w := httptest.NewRecorder()
+	g.ServeHTTP(w, r)
+	if w.Code != 403 || hits.Load() != 0 {
+		t.Fatalf("undeclared port: status=%d upstream=%d", w.Code, hits.Load())
+	}
+}
+
+func TestLocalModelServesOnlyTheOpenAIPaths(t *testing.T) {
+	var hits atomic.Int32
+	g, _ := fixture(t, &fixtureBridge{}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1); w.WriteHeader(200) }))
+	send := func(method, target string) int {
+		r := httptest.NewRequest(method, target, nil)
+		r.Header.Set("Proxy-Authorization", auth(g, "session-A"))
+		w := httptest.NewRecorder()
+		g.ServeHTTP(w, r)
+		return w.Code
+	}
+	const base = "http://host.docker.internal:11434"
+	allowed := [][2]string{{"POST", "/v1/chat/completions"}, {"GET", "/v1/models"}, {"GET", "/v1/models/"}, {"GET", "/v1/models/llama3"}, {"POST", "/v1/embeddings"}}
+	for _, c := range allowed {
+		if code := send(c[0], base+c[1]); code != 200 {
+			t.Fatalf("%s %s: status=%d", c[0], c[1], code)
+		}
+	}
+	refused := [][2]string{
+		{"POST", "/api/pull"},
+		{"DELETE", "/api/delete"},
+		{"POST", "/v1"},
+		{"POST", "/v1/../api/pull"},
+		{"POST", "/v1/%2e%2e/api/pull"},
+		{"POST", "/v1%2F..%2Fapi/pull"},
+		{"GET", "/v1//models"},
+		{"POST", "/v1/load_lora_adapter"},
+		{"GET", "/v1/models/a/b"},
+		{"DELETE", "/v1/models/qwen"},
+		{"POST", "/v1/models"},
+		{"GET", "/v1/chat/completions"},
+	}
+	for _, c := range refused {
+		if code := send(c[0], base+c[1]); code != 403 {
+			t.Fatalf("%s %s: status=%d", c[0], c[1], code)
+		}
+	}
+	if int(hits.Load()) != len(allowed) {
+		t.Fatalf("upstream hits=%d", hits.Load())
+	}
+}
+
+// A card may be skipped only for requests that send nothing beyond their URL
+// and headers, so anything that can carry more must be attested "present".
+func TestRequestPayloadAttestation(t *testing.T) {
+	for _, c := range []struct{ name, raw, want string }{
+		{"get", "GET /a HTTP/1.1\r\nHost: api.example.test\r\n\r\n", "none"},
+		{"head", "HEAD /a HTTP/1.1\r\nHost: api.example.test\r\n\r\n", "none"},
+		{"empty-length", "POST /a HTTP/1.1\r\nHost: api.example.test\r\nContent-Length: 0\r\n\r\n", "none"},
+		{"get-body", "GET /a HTTP/1.1\r\nHost: api.example.test\r\nContent-Length: 3\r\n\r\nabc", "present"},
+		{"get-chunked", "GET /a HTTP/1.1\r\nHost: api.example.test\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n", "present"},
+		{"websocket", "GET /a HTTP/1.1\r\nHost: api.example.test\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n", "present"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			seen := make(chan []string, 1)
+			b := &fixtureBridge{request: func(ctx context.Context, r *pb.TransformRequestRequest) (*pb.TransformRequestResponse, error) {
+				if r.Request.Method == "CONNECT" {
+					return &pb.TransformRequestResponse{Action: pb.TransformAction_TRANSFORM_ACTION_CONTINUE}, nil
+				}
+				m, _ := metadata.FromOutgoingContext(ctx)
+				seen <- m.Get("x-iron-request-payload")
+				return &pb.TransformRequestResponse{Action: pb.TransformAction_TRANSFORM_ACTION_REJECT}, nil
+			}}
+			g, _ := fixture(t, b, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("unexpected backend request") }))
+			conn, reader, e := tunnel(t, g, "api.example.test")
+			if e != nil {
+				t.Fatal(e)
+			}
+			io.WriteString(conn, c.raw)
+			if response, e := http.ReadResponse(reader, &http.Request{Method: "GET"}); e != nil || response.StatusCode != 403 {
+				t.Fatalf("response %v %v", response, e)
+			}
+			select {
+			case got := <-seen:
+				if len(got) != 1 || got[0] != c.want {
+					t.Fatalf("attested %q, want %q", got, c.want)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("bridge never asked")
+			}
+		})
+	}
+	for _, c := range []struct {
+		name string
+		body io.Reader
+		want string
+	}{{"plain-get", nil, "none"}, {"plain-body", strings.NewReader("abc"), "present"}} {
+		t.Run(c.name, func(t *testing.T) {
+			var got []string
+			b := &fixtureBridge{request: func(ctx context.Context, _ *pb.TransformRequestRequest) (*pb.TransformRequestResponse, error) {
+				m, _ := metadata.FromOutgoingContext(ctx)
+				got = m.Get("x-iron-request-payload")
+				return &pb.TransformRequestResponse{Action: pb.TransformAction_TRANSFORM_ACTION_REJECT}, nil
+			}}
+			g, _ := fixture(t, b, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("unexpected backend request") }))
+			r := request(g, c.body)
+			r.Method = "GET"
+			g.ServeHTTP(httptest.NewRecorder(), r)
+			if len(got) != 1 || got[0] != c.want {
+				t.Fatalf("attested %q, want %q", got, c.want)
+			}
+		})
+	}
 }

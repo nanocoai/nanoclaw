@@ -53,8 +53,25 @@ export interface Inventory {
   runtime: PathItem[];
   /** Group 3: groups/ and store/ — user content, unrecoverable. */
   user: PathItem[];
+  /**
+   * Volumes and networks of the Compose projects this copy's labeled
+   * containers belong to; removed with the data group.
+   */
+  projects?: ProjectInventory;
   notes: string[];
 }
+
+export interface ProjectInventory {
+  /** Compose project names, from the containers carrying this copy's install label. */
+  names: string[];
+  /** Container names; removed with the volumes even when the service group was declined. */
+  containers: string[];
+  volumes: string[];
+  networks: string[];
+}
+
+/** The label Compose stamps on every container, volume and network of a project. */
+export const COMPOSE_PROJECT_LABEL = 'com.docker.compose.project';
 
 export interface ScanDeps {
   projectRoot: string;
@@ -74,6 +91,7 @@ export function scanInstall(deps: ScanDeps): Inventory {
   const notes: string[] = [];
 
   const service = scanService(deps, slug, containerRuntime, notes);
+  const projects = scanProjects(runCommand, slug, containerRuntime, notes);
 
   const data = existingItems(projectRoot, home, [
     { rel: 'data', what: 'Database & conversations' },
@@ -109,6 +127,7 @@ export function scanInstall(deps: ScanDeps): Inventory {
     data,
     runtime,
     user,
+    ...(projects ? { projects } : {}),
     notes,
   };
 }
@@ -203,6 +222,96 @@ function scanService(deps: ScanDeps, slug: string, containerRuntime: string, not
   }
 
   return service;
+}
+
+/** Non-empty trimmed stdout lines, or null when the runtime did not answer. */
+function listLines(runCommand: RunCommand, runtime: string, args: string[]): string[] | null {
+  let res: { status: number | null; stdout: string };
+  try {
+    res = runCommand(runtime, args);
+  } catch {
+    return null;
+  }
+  if (res.status !== 0) return null;
+  return res.stdout
+    .split('\n')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/** A project's containers, volumes and networks by its Compose label; null when a listing failed. */
+export function listProject(
+  runCommand: RunCommand,
+  runtime: string,
+  project: string,
+): { containerIds: string[]; containers: string[]; volumes: string[]; networks: string[] } | null {
+  const filter = `label=${COMPOSE_PROJECT_LABEL}=${project}`;
+  // IDs to remove (a name can be reused between listing and removal), names to show.
+  const rows = listLines(runCommand, runtime, ['ps', '-a', '--filter', filter, '--format', '{{.ID}}|{{.Names}}']);
+  const volumes = listLines(runCommand, runtime, ['volume', 'ls', '-q', '--filter', filter]);
+  const networks = listLines(runCommand, runtime, ['network', 'ls', '--filter', filter, '--format', '{{.Name}}']);
+  if (!rows || !volumes || !networks) return null;
+  const split = rows.map((row) => row.split('|'));
+  return {
+    containerIds: split.map(([id]) => id),
+    containers: split.map(([id, name = id]) => name),
+    volumes,
+    networks,
+  };
+}
+
+/** One pasteable line per project; `;` so an empty listing doesn't skip the rest. */
+export function projectCleanup(runtime: string, project: string): string {
+  const filter = `--filter label=${COMPOSE_PROJECT_LABEL}=${project}`;
+  return (
+    `${runtime} ps -aq ${filter} | xargs -r ${runtime} rm -f; ` +
+    `${runtime} volume ls -q ${filter} | xargs -r ${runtime} volume rm; ` +
+    `${runtime} network ls -q ${filter} | xargs -r ${runtime} network rm`
+  );
+}
+
+/**
+ * The Compose projects of this copy's labeled containers. A gateway names its
+ * project after the install slug, so the project is this copy's alone; a
+ * project shared by two copies would be removed with this one.
+ */
+function scanProjects(
+  runCommand: RunCommand,
+  slug: string,
+  runtime: string,
+  notes: string[],
+): ProjectInventory | undefined {
+  const names = listLines(runCommand, runtime, [
+    'ps',
+    '-a',
+    '--filter',
+    `label=nanoclaw-install=${slug}`,
+    '--format',
+    `{{.Label "${COMPOSE_PROJECT_LABEL}"}}`,
+  ]);
+  if (!names) {
+    notes.push(
+      `Service volumes/networks: '${runtime}' unavailable; for each project of this copy's containers ` +
+        `(${runtime} ps -a --filter label=nanoclaw-install=${slug} --format '{{.Label "${COMPOSE_PROJECT_LABEL}"}}') ` +
+        `remove later with: ${projectCleanup(runtime, '<project>')}`,
+    );
+    return undefined;
+  }
+  const found: ProjectInventory = { names: [], containers: [], volumes: [], networks: [] };
+  for (const project of [...new Set(names)].sort()) {
+    const listed = listProject(runCommand, runtime, project);
+    if (!listed) {
+      notes.push(
+        `Project ${project}: '${runtime}' listing failed; remove later with: ${projectCleanup(runtime, project)}`,
+      );
+      continue;
+    }
+    found.names.push(project);
+    found.containers.push(...listed.containers);
+    found.volumes.push(...listed.volumes);
+    found.networks.push(...listed.networks);
+  }
+  return found.names.length > 0 ? found : undefined;
 }
 
 function existingItems(

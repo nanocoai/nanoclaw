@@ -40,10 +40,22 @@ export const claudeRuntimeContract: ProviderRuntimeContract = {
   // (providers/claude-history.ts); core only needs the trace lookup.
   history: { readTrace: newestClaudeTranscript },
   textDelivery: 'mid-turn-complete',
+  // Aliases are listed with their command, as in the host contract.
   commands: {
     formatting: 'native',
-    nativeAdmin: ['/remote-control', '/compact', '/context', '/cost', '/files'],
-    nativeFiltered: ['/help', '/login', '/logout', '/doctor', '/config', '/start'],
+    nativeAdmin: [
+      '/remote-control',
+      '/rc',
+      '/compact',
+      '/context',
+      '/cost',
+      '/usage',
+      '/stats',
+      '/files',
+      '/reset',
+      '/new',
+    ],
+    nativeFiltered: ['/help', '/login', '/logout', '/doctor', '/checkup', '/config', '/settings', '/start'],
   },
 };
 

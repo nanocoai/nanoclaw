@@ -10,13 +10,13 @@ import {
 } from './provider-credentials.js';
 
 const CHATGPT_SECRET: OneCliCredential = {
-  name: 'OpenCode ChatGPT',
+  name: 'Provider ChatGPT',
   type: 'openai',
   hostPattern: 'chatgpt.com',
   authMode: 'oauth',
 };
 const google: OneCliCredential = {
-  name: 'OpenCode google',
+  name: 'Provider google',
   type: 'generic',
   hostPattern: 'generativelanguage.googleapis.com',
   injectionConfig: { headerName: 'x-goog-api-key', valueFormat: '{value}' },
@@ -35,7 +35,7 @@ const metadata = (spec: OneCliCredential = google) => ({
 
 afterEach(() => vi.unstubAllEnvs());
 
-describe('OpenCode vault management', () => {
+describe('OneCLI vault management', () => {
   it('reuses an inline credential when a legacy response omits its source', async () => {
     const transport = vi.fn(
       async (_url: string, init: RequestInit) =>
@@ -253,9 +253,9 @@ describe('OpenCode vault management', () => {
   });
 });
 
-describe('OpenCode credential host migration', () => {
+describe('OneCLI credential host migration', () => {
   const target: OneCliCredential = {
-    name: 'OpenCode openai',
+    name: 'Provider openai',
     type: 'generic',
     hostPattern: 'new.example',
     injectionConfig: { headerName: 'Authorization', valueFormat: 'Bearer {value}' },
@@ -388,7 +388,7 @@ describe('gateway seam adapter', () => {
     );
     const connection = createProviderCredentialConnection(key());
     expect(await connection.find()).toBeNull();
-    await expect(connection.keep()).rejects.toThrow('No stored OpenCode credential');
+    await expect(connection.keep()).rejects.toThrow(`No stored ${google.name} credential`);
     await connection.save('google-fixture');
     expect(writes).toEqual([expect.objectContaining({ name: google.name, type: 'generic', value: 'google-fixture' })]);
   });

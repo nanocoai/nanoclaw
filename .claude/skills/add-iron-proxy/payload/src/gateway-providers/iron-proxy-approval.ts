@@ -12,6 +12,8 @@ import { normalizeGatewayApprovalSummary } from '../gateway-approval-summary.js'
 import type { GatewayApprovalDecision, GatewayApprovalRequest } from './gateway-provider-registry.js';
 
 export const IRON_PROXY_IDENTITY_METADATA = 'x-iron-workload-identity';
+/** Set by the trusted front: "none" means no body and no protocol upgrade. */
+export const IRON_PROXY_PAYLOAD_METADATA = 'x-iron-request-payload';
 
 const CONTINUE = 1;
 const REJECT = 2;
@@ -40,6 +42,8 @@ export interface IronApprovalIdentity {
 
 export interface IronApprovalBridgeSettings {
   socketPath: string;
+  /** Exact host:port pairs the front forwards over plain HTTP (a keyless local model). */
+  plaintextOrigins?: readonly string[];
   timeoutMs: number;
   maxPending: number;
   protoPath?: string;
@@ -65,20 +69,30 @@ function metadataIdentity(metadata: grpc.Metadata): string | undefined {
 
 function safeRequest(
   request: TransformRequest | undefined,
-): { method: string; host: string; path: string } | undefined {
-  const method = request?.method?.toUpperCase() ?? '';
+  plaintextOrigins: readonly string[],
+): { method: string; rawMethod: string; host: string; path: string } | undefined {
+  const rawMethod = request?.method ?? '';
+  const method = rawMethod.toUpperCase();
   if (!/^[A-Z]{1,16}$/.test(method)) return undefined;
   const host = (request?.host ?? '').slice(0, 253);
   if (!host || /[\0\r\n]/.test(host)) return undefined;
   try {
-    const base = new URL(`https://${host}`);
+    // HTTP only for an exact pinned origin; anything else must stay HTTPS.
+    const scheme = plaintextOrigins.includes(host.toLowerCase()) ? 'http' : 'https';
+    const base = new URL(`${scheme}://${host}`);
     const url = new URL(request?.url || '/', base);
     if (url.origin !== base.origin || url.username || url.password || base.username || base.password) return undefined;
     const requestPath = url.pathname.slice(0, 240) || '/';
-    return { method, host, path: requestPath };
+    return { method, rawMethod, host, path: requestPath };
   } catch {
     return undefined;
   }
+}
+
+/** Anything but one exact "none" counts as a payload, so an older front keeps every card. */
+function sendsPayload(metadata: grpc.Metadata): boolean {
+  const values = metadata.get(IRON_PROXY_PAYLOAD_METADATA);
+  return !(values.length === 1 && values[0] === 'none');
 }
 
 function safeDisplay(value: string): string {
@@ -226,7 +240,7 @@ export class IronProxyApprovalBridge {
     const identity = runtimeIdentity ? this.resolveIdentity(runtimeIdentity) : undefined;
     if (!runtimeIdentity || !identity) return rejection('Unknown workload identity');
 
-    const request = safeRequest(call.request.request);
+    const request = safeRequest(call.request.request, this.settings.plaintextOrigins ?? []);
     if (!request) return rejection('Invalid request metadata');
     // Iron uses a synthetic CONNECT before MITM. The inner HTTP request is the
     // only approval point; Iron itself closes non-HTTP/TLS tunnel payloads.
@@ -239,7 +253,8 @@ export class IronProxyApprovalBridge {
     const approval: GatewayApprovalRequest = {
       id,
       trigger: 'default',
-      destination: { host: request.host, method: request.method },
+      // Methods are case-sensitive upstream, so policy sees the one the front will forward.
+      destination: { host: request.host, method: request.rawMethod, sendsPayload: sendsPayload(call.metadata) },
       agentGroupId: identity.agentGroupId,
       sessionId: identity.sessionId,
       runtimeIdentity: identity.runtimeIdentity,
@@ -255,7 +270,7 @@ export class IronProxyApprovalBridge {
       },
       title: 'Network credentials request',
       question: `*Agent:* ${safeDisplay(identity.groupName.slice(0, 120))}\n*Request:* ${safeDisplay(`${request.method} ${request.host}${request.path}`)}`,
-      audit: request,
+      audit: { method: request.method, host: request.host, path: request.path },
     };
 
     // This metadata is produced by the trusted proxy, never accepted from HTTP

@@ -25,7 +25,7 @@ import { note } from '../lib/theme.js';
 import * as setupLog from '../logs.js';
 import { buildRemovalPlan, type Decisions } from './plan.js';
 import { executePlan, type ExecDeps } from './remove.js';
-import { scanInstall, tilde, type Inventory, type RunCommand } from './scan.js';
+import { scanInstall, tilde, type Inventory, type ProjectInventory, type RunCommand } from './scan.js';
 
 const GROUPS = {
   service: {
@@ -44,6 +44,17 @@ const GROUPS = {
     prompt: "Delete your agents' memory & files shown above? (cannot be undone)",
   },
 } as const;
+
+export const PROJECT_NOTE =
+  "This includes this copy's service containers and their data volumes (such as a gateway's database), even if you keep group 1. The volumes can't be read without the keys in data/, which this deletes.";
+
+export function projectRows(projects: ProjectInventory): { what: string; where: string }[] {
+  const rows: { what: string; where: string }[] = [];
+  if (projects.containers.length > 0) rows.push({ what: 'Service containers', where: projects.containers.join(', ') });
+  if (projects.volumes.length > 0) rows.push({ what: 'Service data volumes', where: projects.volumes.join(', ') });
+  if (projects.networks.length > 0) rows.push({ what: 'Service networks', where: projects.networks.join(', ') });
+  return rows;
+}
 
 const runCommand: RunCommand = (cmd, args) => {
   const res = spawnSync(cmd, args, { encoding: 'utf-8' });
@@ -85,6 +96,8 @@ export async function runUninstallFlow(opts: {
 
   const svcRows = serviceRows(inv, home);
   const dataRows = [...inv.data, ...inv.runtime].map(({ what, where }) => ({ what, where }));
+  if (inv.projects) dataRows.unshift(...projectRows(inv.projects));
+  const dataDesc = inv.projects ? `${GROUPS.data.desc} ${PROJECT_NOTE}` : GROUPS.data.desc;
   const userRows = inv.user.map(({ what, where }) => ({ what, where }));
   const totalFound = svcRows.length + dataRows.length + userRows.length;
 
@@ -99,7 +112,7 @@ export async function runUninstallFlow(opts: {
   if (dryRun) {
     p.log.message(k.cyan('PREVIEW ONLY — this shows what would be deleted and changes nothing.'));
     if (svcRows.length > 0) note(groupBody(GROUPS.service.desc, svcRows), GROUPS.service.title);
-    if (dataRows.length > 0) note(groupBody(GROUPS.data.desc, dataRows), GROUPS.data.title);
+    if (dataRows.length > 0) note(groupBody(dataDesc, dataRows), GROUPS.data.title);
     if (userRows.length > 0) note(groupBody(GROUPS.user.desc, userRows), GROUPS.user.title);
     const empty = emptyGroupTitles(svcRows.length, dataRows.length, userRows.length);
     if (empty.length > 0) p.log.message(k.dim(`Nothing found for: ${empty.join(', ')}`));
@@ -128,7 +141,7 @@ export async function runUninstallFlow(opts: {
 
   let dataYes = false;
   if (dataRows.length > 0) {
-    note(groupBody(GROUPS.data.desc, dataRows), GROUPS.data.title);
+    note(groupBody(dataDesc, dataRows), GROUPS.data.title);
     dataYes = await confirmGroup(GROUPS.data.prompt, yes);
   }
 

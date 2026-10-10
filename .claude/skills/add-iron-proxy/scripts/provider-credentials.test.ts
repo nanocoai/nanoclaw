@@ -256,14 +256,63 @@ it('does not turn API unavailability into an absent credential', async () => {
   await expect(f.connect(api()).find()).rejects.toThrow('503');
 });
 
-it.each(['http://models.example.test/v1', 'https://models.example.test:8000/v1'])(
-  'rejects unsupported model endpoint %s before changing configuration',
+it.each([
+  'http://models.example.test/v1',
+  'https://models.example.test:8000/v1',
+  'https://192.168.1.20/v1',
+  'https://[fd00::1]/v1',
+  'https://localhost/v1',
+])('rejects unsupported model endpoint %s before changing configuration', (url) => {
+  const f = fixture();
+  expect(() => ironModelEndpoint(url, f.root)).toThrow('https://<dns-name> on port 443');
+  expect(f.allowHost).not.toHaveBeenCalled();
+});
+it("says the endpoint rule is NanoClaw's and why plain HTTP is refused", () => {
+  const f = fixture();
+  expect(() => ironModelEndpoint('http://models.example.test:8000/v1', f.root)).toThrow(
+    /^NanoClaw's Iron gateway .*certificate Iron trusts.*never cross the network unencrypted.*http:\/\/host\.docker\.internal:<port>/,
+  );
+});
+it('accepts plain HTTP to a model on this machine, pinned to its port', () => {
+  const f = fixture();
+  expect(() => ironModelEndpoint('http://host.docker.internal:8000/v1', f.root)).not.toThrow();
+  expect(() => ironModelEndpoint('http://HOST.DOCKER.INTERNAL:11434/v1', f.root)).not.toThrow();
+});
+it.each([
+  'http://host.docker.internal/v1',
+  'http://host.docker.internal:80/v1',
+  'http://user:pw@host.docker.internal:8000/v1',
+  'http://host.docker.internal:8000/v1?x=1',
+  'http://sub.host.docker.internal:8000/v1',
+  'http://localhost:8000/v1',
+  'http://192.168.1.20:8000/v1',
+])('refuses plain HTTP that is not a pinned model on this machine: %s', (url) => {
+  const f = fixture();
+  expect(() => ironModelEndpoint(url, f.root)).toThrow();
+});
+it('refuses a keyed credential for the host machine, which is reachable over plain HTTP', () => {
+  const f = fixture();
+  expect(() => f.connect(api('host.docker.internal'))).toThrow('Iron sends keys only over HTTPS');
+});
+it.each(['https://models.example.test/v1', 'https://models.example.test:443/v1'])(
+  'accepts the HTTPS endpoint %s',
   (url) => {
     const f = fixture();
-    expect(() => ironModelEndpoint(url, f.root)).toThrow('HTTPS model endpoint on port 443');
-    expect(f.allowHost).not.toHaveBeenCalled();
+    expect(() => ironModelEndpoint(url, f.root)).not.toThrow();
   },
 );
+it.each([
+  ['host.docker.internal', 'https://host.docker.internal/v1'],
+  ['llm.local', 'https://llm.local/v1'],
+  ['home.arpa', 'https://home.arpa/v1'],
+  ['llm.home.arpa', 'https://llm.home.arpa:443/v1'],
+  ['ollama.home', 'https://ollama.home/v1'],
+  ['models.corp', 'https://models.corp/v1'],
+])('refuses the private name %s, which no public CA certifies', (host, url) => {
+  const f = fixture();
+  expect(() => ironModelEndpoint(url, f.root)).toThrow(`${host} is a private name.`);
+  expect(f.allowHost).not.toHaveBeenCalled();
+});
 it('rechecks OAuth account rules before keeping or replacing a credential', async () => {
   const f = fixture();
   const c = f.connect(oauth);

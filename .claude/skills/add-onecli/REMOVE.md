@@ -7,4 +7,6 @@ onecli agents list
 onecli agents delete --id <matching-agent-uuid>
 ```
 
+If setup added a local gateway address to `NO_PROXY`, review that entry in `.env` and remove it only if no remaining service needs the bypass.
+
 Do not remove the shared OneCLI application, vault, or credentials unless the operator asks for that separately. Select another installed gateway before restarting NanoClaw.

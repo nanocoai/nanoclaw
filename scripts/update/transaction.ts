@@ -1,20 +1,25 @@
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
+import type { GatewayCatalogEntry } from '../../setup/gateways/catalog.js';
 import { getInstallSlug } from '../../src/install-slug.js';
-import { installGateway } from '../../setup/gateways/install.js';
-import { resolveGatewaySelection } from '../../setup/gateways/selection.js';
-import { upsertEnvVar } from '../../setup/set-env.js';
 import { refreshInstalledSkills, type SkillsRefreshReport } from '../update-skills.js';
+import { stampChannel, type UpdateChannel } from './channel.js';
 import {
   createCommandRunner,
   defaultServiceEnvironment,
   detectService,
   drainContainers,
+  gatewayRestartCommand,
+  restartGatewayContainers,
+  shellQuote,
+  startCommand,
   startService,
   stopService,
   verifyServiceHealth,
+  withRecordedNohupHost,
   type CommandRunner,
   type ServiceEnvironment,
   type ServiceHandle,
@@ -46,6 +51,7 @@ export interface UpdateState {
   stageRoot: string;
   stageBranch: string;
   upstreamRef: string;
+  channel?: UpdateChannel;
   strategy: 'merge' | 'rebase' | 'cherry-pick';
   originalHead: string;
   targetHead?: string;
@@ -72,14 +78,42 @@ export interface PruneReport {
   retained: string[];
 }
 
+/**
+ * setup/ is outside the `git archive <ref> scripts src/install-slug.ts` extract
+ * every installed /update-nanoclaw skill runs, so these load from a full
+ * checkout of the target instead. They import no packages, so they load before
+ * the stage has node_modules; scripts/update/controller-archive.test.ts checks.
+ */
+export interface GatewayModules {
+  loadGatewayCatalog: typeof import('../../setup/gateways/catalog.js').loadGatewayCatalog;
+  resolveGatewaySelection: typeof import('../../setup/gateways/selection.js').resolveGatewaySelection;
+  upsertEnvVar: typeof import('../../setup/set-env.js').upsertEnvVar;
+}
+
+export async function loadGatewayModules(root: string): Promise<GatewayModules> {
+  const load = (rel: string) => import(pathToFileURL(path.join(root, rel)).href);
+  const [catalog, selection, env] = await Promise.all([
+    load('setup/gateways/catalog.ts'),
+    load('setup/gateways/selection.ts'),
+    load('setup/set-env.ts'),
+  ]);
+  return {
+    loadGatewayCatalog: catalog.loadGatewayCatalog,
+    resolveGatewaySelection: selection.resolveGatewaySelection,
+    upsertEnvVar: env.upsertEnvVar,
+  };
+}
+
 export interface UpdateRuntime {
   runner: CommandRunner;
   serviceEnv: ServiceEnvironment;
   detectService(projectRoot: string): ServiceHandle;
   stopService(handle: ServiceHandle): Promise<void>;
   drainContainers(projectRoot: string): Promise<void>;
+  restartGateways(projectRoot: string): void;
   startService(handle: ServiceHandle, projectRoot: string): void;
   verifyHealth(handle: ServiceHandle, projectRoot: string): Promise<boolean>;
+  loadGateway(root: string): Promise<GatewayModules>;
 }
 
 export function createUpdateRuntime(runner = createCommandRunner()): UpdateRuntime {
@@ -90,8 +124,10 @@ export function createUpdateRuntime(runner = createCommandRunner()): UpdateRunti
     detectService: (root) => detectService(root, serviceEnv),
     stopService: (handle) => stopService(handle, serviceEnv),
     drainContainers: (root) => drainContainers(root, serviceEnv),
+    restartGateways: (root) => restartGatewayContainers(root, serviceEnv),
     startService: (handle, root) => startService(handle, root, serviceEnv),
     verifyHealth: (handle, root) => verifyServiceHealth(handle, root, serviceEnv),
+    loadGateway: loadGatewayModules,
   };
 }
 
@@ -211,6 +247,7 @@ function refreshPreparedState(state: UpdateState, runtime: UpdateRuntime): void 
 export interface PrepareOptions {
   projectRoot: string;
   upstreamRef: string;
+  channel?: UpdateChannel;
   strategy?: UpdateState['strategy'];
   commits?: string[];
 }
@@ -250,6 +287,7 @@ export function prepareUpdate(options: PrepareOptions, runtime = createUpdateRun
     stageRoot,
     stageBranch,
     upstreamRef: options.upstreamRef,
+    channel: options.channel,
     strategy,
     originalHead,
     backupBranch,
@@ -312,18 +350,52 @@ export async function validateUpdate(
     commitStageChanges(state, runtime, 'chore: refresh installed skill payloads');
     refreshPreparedState(state, runtime);
 
-    if (hasChanged(state, 'src/gateway-providers') || hasChanged(state, 'setup/gateways')) {
-      state.gatewaySelection = resolveGatewaySelection(
-        state.projectRoot,
-        undefined,
-        path.join(state.stageRoot, '.claude', 'skills'),
-      );
-      await installGateway(state.gatewaySelection, state.stageRoot, { mode: 'refresh', stamp: false });
-      commitStageChanges(state, runtime, 'chore: materialize selected gateway');
-      refreshPreparedState(state, runtime);
+    // Gateway host code is materialized from its skill, so a payload-only change must refresh it too.
+    // The manifest is what puts a skill in the gateway catalog.
+    const changedGatewaySkills = new Set(
+      state.changedFiles
+        .map((file) => /^\.claude\/skills\/([^/]+)\//.exec(file)?.[1])
+        .filter((skill): skill is string => !!skill)
+        .filter((skill) => fs.existsSync(path.join(state.stageRoot, '.claude/skills', skill, 'gateway.json'))),
+    );
+    const checks: string[] = [];
+    const gatewayCoreChanged = hasChanged(state, 'src/gateway-providers') || hasChanged(state, 'setup/gateways');
+    state.gatewaySelection = undefined;
+    if (gatewayCoreChanged || changedGatewaySkills.size > 0) {
+      const { loadGatewayCatalog, resolveGatewaySelection } = await runtime.loadGateway(state.stageRoot);
+      let entry: GatewayCatalogEntry | undefined;
+      try {
+        const kind = resolveGatewaySelection(
+          state.projectRoot,
+          undefined,
+          path.join(state.stageRoot, '.claude', 'skills'),
+        );
+        entry = loadGatewayCatalog(state.stageRoot).gateways.find((candidate) => candidate.kind === kind);
+        if (!entry) throw new Error(`Unknown gateway provider: ${kind}`);
+      } catch (err) {
+        // Skill-only change: don't block the update over a gateway it can't resolve; say so instead.
+        if (gatewayCoreChanged) throw err;
+        checks.push(`gateway payload refresh skipped: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      // Skill-only change: refresh just the selected gateway, and only if its own skill changed.
+      if (entry && (gatewayCoreChanged || changedGatewaySkills.has(path.basename(entry.skillPath)))) {
+        const kind = entry.kind;
+        state.gatewaySelection = kind;
+        const gateway = { name: kind, skillName: path.basename(entry.skillPath), kind: 'gateway' as const };
+        const report = await refreshInstalledSkills(state.stageRoot, [gateway.skillName], { include: [gateway] });
+        state.skillRefresh.skills.push(...report.skills);
+        state.skillRefresh.selected.push(...report.selected);
+        state.skillRefresh.success &&= report.success;
+        if (!report.success) {
+          throw new Error(
+            `Gateway skill did not fully apply: ${report.skills.flatMap((skill) => skill.errors).join('; ')}`,
+          );
+        }
+        commitStageChanges(state, runtime, 'chore: materialize selected gateway');
+        refreshPreparedState(state, runtime);
+      }
     }
 
-    const checks: string[] = [];
     // Cheap, and it names the offending path while nothing is stopped yet.
     assertMutableRootsResolvable(state.projectRoot);
     checks.push('mutable-state roots resolvable');
@@ -482,38 +554,244 @@ function assertSnapshotRestorable(state: UpdateState): void {
   }
 }
 
-function restoreSnapshot(state: UpdateState): void {
-  assertSnapshotRestorable(state);
-  const snapshotRoot = path.join(state.transactionRoot, 'snapshot');
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/** A live path, its snapshot copy (none: remove only), and two same-directory siblings. */
+interface RestoreSwap {
+  live: string;
+  source?: string;
+  staged: string;
+  aside: string;
+}
+
+function liveRestoreTarget(state: UpdateState, entry: SnapshotEntry): string {
+  const target = path.join(state.projectRoot, entry.relativePath);
+  if (entry.symlinkTarget === undefined) return target;
+  return realResolve(path.resolve(path.dirname(target), entry.symlinkTarget));
+}
+
+// A symlinked root's target is the operator's directory, not ours: it may be
+// a mount point or sit under a parent we cannot write. Its children are
+// restored instead, so the directory keeps its inode, mode, and ownership.
+function keepsDirectory(entry: SnapshotEntry, live: string, source: string | undefined): source is string {
+  return (
+    entry.symlinkTarget !== undefined &&
+    source !== undefined &&
+    lstatIfExists(live)?.isDirectory() === true &&
+    lstatIfExists(source)?.isDirectory() === true
+  );
+}
+
+function planRestore(state: UpdateState, snapshotRoot: string): RestoreSwap[] {
+  const token = randomUUID().slice(0, 8);
+  // Siblings, so every rename stays on one filesystem; `.tmp-*` is git-ignored,
+  // so a leftover never makes the next update refuse a dirty checkout.
+  const swap = (live: string, source: string | undefined): RestoreSwap => {
+    const sibling = (kind: string) => path.join(path.dirname(live), `.tmp-${kind}-${token}-${path.basename(live)}`);
+    return { live, source, staged: sibling('restore'), aside: sibling('replaced') };
+  };
+  const swaps: RestoreSwap[] = [];
   for (const entry of state.snapshot ?? []) {
-    const target = path.join(state.projectRoot, entry.relativePath);
-    const restoreTarget =
-      entry.symlinkTarget === undefined ? target : realResolve(path.resolve(path.dirname(target), entry.symlinkTarget));
-    // A symlinked root's target is the operator's directory, not ours: it may be
-    // a mount point or sit under a parent we cannot write, so removing the
-    // directory inode itself can fail AFTER its contents are gone. Empty it in
-    // place and restore into it, preserving the inode, mode, and ownership.
-    const keepDirectory = entry.symlinkTarget !== undefined && lstatIfExists(restoreTarget)?.isDirectory() === true;
-    if (keepDirectory) {
-      for (const child of fs.readdirSync(restoreTarget)) {
-        fs.rmSync(path.join(restoreTarget, child), { recursive: true, force: true });
+    const live = liveRestoreTarget(state, entry);
+    const source = entry.existed ? path.join(snapshotRoot, entry.relativePath) : undefined;
+    if (keepsDirectory(entry, live, source)) {
+      const names = new Set([...fs.readdirSync(live), ...fs.readdirSync(source)]);
+      for (const name of [...names].sort()) {
+        const child = path.join(source, name);
+        swaps.push(swap(path.join(live, name), lstatIfExists(child) ? child : undefined));
       }
     } else {
-      fs.rmSync(restoreTarget, { recursive: true, force: true });
+      swaps.push(swap(live, source));
     }
-    if (entry.existed) copyEntry(path.join(snapshotRoot, entry.relativePath), restoreTarget);
+  }
+  // Roots can overlap (`.env` symlinked into data/'s target). Drop a path that
+  // another swap already restores, or the two would share staged/aside names.
+  const covered = (swap: RestoreSwap, index: number) =>
+    swaps.some(
+      (other, otherIndex) =>
+        swap.live.startsWith(`${other.live}${path.sep}`) || (swap.live === other.live && otherIndex < index),
+    );
+  const unique = swaps.filter((swap, index) => !covered(swap, index));
+  for (const { staged, aside } of unique) {
+    if (lstatIfExists(staged) || lstatIfExists(aside)) throw new Error(`Restore path already exists: ${staged}`);
+  }
+  return unique;
+}
+
+// Deletes what this user can and keeps going past what it cannot (root-owned
+// mount points Docker created), so only those are left. True if fully gone.
+function removeAll(target: string): boolean {
+  try {
+    const stat = lstatIfExists(target);
+    if (!stat) return true;
+    if (stat.isDirectory()) {
+      const kept = fs.readdirSync(target).filter((name) => !removeAll(path.join(target, name)));
+      if (kept.length > 0) return false;
+      fs.rmdirSync(target);
+    } else {
+      fs.unlinkSync(target);
+    }
+    return true;
+  } catch {
+    return false;
   }
 }
 
+/**
+ * Shell steps that do what restoreSnapshot does. They read no live path, so an
+ * unreadable target cannot stop them being printed, and a re-run after fixing
+ * whatever stopped them ends in the same tree: a move made once is skipped,
+ * and a kept directory is emptied into a fresh folder each time.
+ */
+function manualRestoreSteps(state: UpdateState): string[] {
+  const snapshotRoot = path.join(state.transactionRoot, 'snapshot');
+  const prefix = `.tmp-before-rollback-${randomUUID().slice(0, 8)}-`;
+  // Paths inside the checkout are shown relative to it, others in full.
+  const shown = (target: string): string => {
+    const relative = path.relative(state.projectRoot, target);
+    return shellQuote(relative.startsWith('..') || path.isAbsolute(relative) ? target : relative);
+  };
+  const isDirectory = (target: string): boolean => {
+    try {
+      return lstatIfExists(target)?.isDirectory() === true;
+    } catch {
+      return false;
+    }
+  };
+  const steps = [
+    `snapshot=${shellQuote(snapshotRoot)}`,
+    // -L too: a dangling symlink still has to move.
+    'move_aside() { [ -e "$2" ] || [ -L "$2" ] || { [ ! -e "$1" ] && [ ! -L "$1" ] ; } || mv "$1" "$2" ; }',
+  ];
+  for (const entry of state.snapshot ?? []) {
+    const target = liveRestoreTarget(state, entry);
+    const live = shown(target);
+    const source = `"$snapshot"/${shellQuote(entry.relativePath)}`;
+    const directory = entry.existed && isDirectory(path.join(snapshotRoot, entry.relativePath));
+    if (entry.symlinkTarget !== undefined && directory) {
+      // Keep the operator's directory, as restoreSnapshot does: move its children.
+      steps.push(
+        `mkdir -p ${live} && hold=$(mktemp -d ${live}/${prefix}XXXXXX) && ` +
+          `find ${live} -mindepth 1 -maxdepth 1 ! -name ${shellQuote(`${prefix}*`)} ` +
+          `-exec sh -c 'mv "$@" "$0"' "$hold" {} + && cp -af ${source}/. ${live}/`,
+      );
+      continue;
+    }
+    const move = `move_aside ${live} ${shown(path.join(path.dirname(target), prefix + path.basename(target)))}`;
+    if (!entry.existed) steps.push(move);
+    else if (directory) steps.push(`${move} && mkdir -p ${live} && cp -af ${source}/. ${live}/`);
+    else steps.push(`${move} && cp -af ${source} ${live}`);
+  }
+  return steps;
+}
+
+/**
+ * Copy the snapshot next to each live path, swap it in by rename, then delete
+ * what it replaced. Live state is never deleted before its replacement is in
+ * place: an in-place delete stops part way on folders this user cannot delete
+ * (root-owned Docker mount points). A failure renames everything back.
+ */
+function restoreSnapshot(state: UpdateState, log: (message: string) => void): void {
+  assertSnapshotRestorable(state);
+  const snapshotRoot = path.join(state.transactionRoot, 'snapshot');
+  const staged: string[] = [];
+  const moved: { swap: RestoreSwap; aside: boolean; staged: boolean }[] = [];
+  let swaps: RestoreSwap[] = [];
+  try {
+    swaps = planRestore(state, snapshotRoot);
+    for (const swap of swaps) {
+      if (!swap.source) continue;
+      staged.push(swap.staged);
+      copyEntry(swap.source, swap.staged);
+    }
+    for (const swap of swaps) {
+      const step = { swap, aside: false, staged: false };
+      moved.push(step);
+      if (lstatIfExists(swap.live)) {
+        fs.renameSync(swap.live, swap.aside);
+        step.aside = true;
+      }
+      if (swap.source) {
+        fs.renameSync(swap.staged, swap.live);
+        step.staged = true;
+      }
+    }
+  } catch (err) {
+    const stranded: string[] = [];
+    for (const step of moved.reverse()) {
+      try {
+        if (step.staged) fs.renameSync(step.swap.live, step.swap.staged);
+        if (step.aside) fs.renameSync(step.swap.aside, step.swap.live);
+      } catch {
+        const before = step.aside ? `; what was there before is at ${step.swap.aside}` : '';
+        stranded.push(`${step.swap.live} is not as it was${before}`);
+      }
+    }
+    for (const copy of staged) removeAll(copy);
+    throw new Error(
+      [
+        `Could not restore the mutable-state snapshot: ${errorText(err)}`,
+        stranded.length === 0
+          ? 'Nothing was deleted: the live files are back where they were. The snapshot is complete.'
+          : `Some live files could not be put back: ${stranded.join('; ')}. The snapshot is complete.`,
+      ].join('\n'),
+    );
+  }
+  for (const { aside } of swaps) {
+    if (!removeAll(aside)) {
+      log(
+        `Could not delete all of ${aside} (usually folders Docker created as root). Remove it with: sudo rm -rf ${shellQuote(aside)}`,
+      );
+    }
+  }
+}
+
+function containerBuildArgs(envFile: string, state: UpdateState): string[] | undefined {
+  if (!hasChanged(state, 'container')) return undefined;
+  const hardened = fs.existsSync(envFile) && /^NANOCLAW_HARDENED_IMAGE=true$/m.test(fs.readFileSync(envFile, 'utf8'));
+  return ['container/build.sh', ...(hardened ? ['pull'] : [])];
+}
+
 function installAndBuild(root: string, state: UpdateState, runtime: UpdateRuntime): void {
+  // On the live checkout this swaps node_modules under the running controller.
+  // tsx compiles each later import with the esbuild it started with, which
+  // refuses a binary of another version: callers load their modules first.
   runtime.runner.run('pnpm', ['install', '--frozen-lockfile'], root);
   runtime.runner.run('pnpm', ['run', 'build'], root);
-  if (hasChanged(state, 'container')) {
-    const hardened =
-      fs.existsSync(path.join(root, '.env')) &&
-      /^NANOCLAW_HARDENED_IMAGE=true$/m.test(fs.readFileSync(path.join(root, '.env'), 'utf8'));
-    runtime.runner.run('bash', ['container/build.sh', ...(hardened ? ['pull'] : [])], root);
+  const container = containerBuildArgs(path.join(root, '.env'), state);
+  if (container) runtime.runner.run('bash', container, root);
+}
+
+/**
+ * The failure, the state it left, and the steps the rollback did not get to as
+ * one fail-fast chain that is safe to re-run. The service start comes after it,
+ * on its own, so neither a failed step nor a re-run happens under a live host.
+ */
+function manualRecovery(err: unknown, restored: boolean, state: UpdateState, runtime: UpdateRuntime): string {
+  let container: string[] | undefined;
+  try {
+    // The build runs after the restore, so it follows the .env being restored.
+    const envRoot = restored ? state.projectRoot : path.join(state.transactionRoot, 'snapshot');
+    container = containerBuildArgs(path.join(envRoot, '.env'), state);
+  } catch {
+    container = ['container/build.sh'];
   }
+  const steps = [
+    `cd ${shellQuote(state.projectRoot)}`,
+    ...(restored ? [] : [...manualRestoreSteps(state), gatewayRestartCommand(state.projectRoot)]),
+    'pnpm install --frozen-lockfile && pnpm run build',
+    ...(container ? [`bash ${container.join(' ')}`] : []),
+  ];
+  const start = state.service?.active ? startCommand(state.service, runtime.serviceEnv.uid) : undefined;
+  return [
+    errorText(err),
+    `NanoClaw is stopped, with the code reset to ${state.originalHead.slice(0, 8)}. ` +
+      'To finish the rollback by hand, run this (safe to run again if a step fails):',
+    steps.map((step) => `  ${step}`).join(' &&\n'),
+    ...(start ? [`When it succeeds, start NanoClaw: ${start}`] : []),
+  ].join('\n');
 }
 
 async function rollbackLocal(state: UpdateState, runtime: UpdateRuntime): Promise<void> {
@@ -523,17 +801,30 @@ async function rollbackLocal(state: UpdateState, runtime: UpdateRuntime): Promis
   // below, and discovering it after the stop/reset leaves the operator with a
   // stopped service on old code and a forward-migrated database.
   assertSnapshotRestorable(state);
-  // On the cutover failure path the service was already stopped by cutover
-  // itself; `stopService` is idempotent per mode (already-stopped is success
-  // in the manager's own vocabulary — see its header), so this cannot abort
-  // the restore for a service that is simply gone, while a service that is
-  // genuinely still running still aborts loudly BEFORE anything is destroyed.
-  // Deliberately not a fresh detection: an under-reporting detection would
-  // skip the stop and reset the checkout under a live service.
-  await runtime.stopService(state.service);
+  // Stop via the captured handle so an under-reporting detection cannot skip it;
+  // stopService is idempotent, so a host cutover already stopped is fine.
+  const live = withRecordedNohupHost(state.service, state.projectRoot, runtime.serviceEnv);
+  const wasRunning = runtime.detectService(state.projectRoot).active;
+  await runtime.stopService(live);
+  try {
+    // Agent containers outlive the host's SIGTERM and still mount the data/ the restore replaces.
+    await runtime.drainContainers(state.projectRoot);
+  } catch (err) {
+    // Nothing is reset yet: restart the host only if this rollback is what stopped it.
+    if (wasRunning) runtime.startService(live, state.projectRoot);
+    throw err;
+  }
   git(runtime, state.projectRoot, ['reset', '--hard', state.originalHead]);
-  restoreSnapshot(state);
-  installAndBuild(state.projectRoot, state, runtime);
+  let restored = false;
+  try {
+    restoreSnapshot(state, runtime.serviceEnv.log ?? (() => {}));
+    restored = true;
+    // Gateways survive cutover; their bind mounts still hold the replaced data/.
+    runtime.restartGateways(state.projectRoot);
+    installAndBuild(state.projectRoot, state, runtime);
+  } catch (err) {
+    throw new Error(manualRecovery(err, restored, state, runtime));
+  }
   if (state.service?.active) {
     runtime.startService(state.service, state.projectRoot);
     if (!(await runtime.verifyHealth(state.service, state.projectRoot))) {
@@ -543,6 +834,17 @@ async function rollbackLocal(state: UpdateState, runtime: UpdateRuntime): Promis
   state.phase = 'rolled-back';
   state.completedAt = new Date().toISOString();
   saveState(state);
+}
+
+// A rollback's own failure must not hide the failure that started it.
+async function rollbackAfter(cause: unknown, state: UpdateState, runtime: UpdateRuntime): Promise<void> {
+  try {
+    await rollbackLocal(state, runtime);
+  } catch (err) {
+    state.lastError = `${errorText(cause)}\nThe automatic rollback failed too: ${errorText(err)}`;
+    saveState(state);
+    throw new Error(state.lastError);
+  }
 }
 
 export async function cutoverUpdate(
@@ -571,8 +873,12 @@ export async function cutoverUpdate(
     state.snapshot = createSnapshot(state);
     saveState(state);
     git(runtime, state.projectRoot, ['reset', '--hard', state.targetHead]);
+    // From the live checkout, now exactly the validated commit, and before
+    // installAndBuild: see there.
+    const selection = state.gatewaySelection;
+    const gateway = selection ? await runtime.loadGateway(state.projectRoot) : undefined;
     installAndBuild(state.projectRoot, state, runtime);
-    if (state.gatewaySelection) upsertEnvVar('NANOCLAW_GATEWAY_PROVIDER', state.gatewaySelection, state.projectRoot);
+    if (selection && gateway) gateway.upsertEnvVar('NANOCLAW_GATEWAY_PROVIDER', selection, state.projectRoot);
     state.phase = 'cutover';
     state.lastError = undefined;
     saveState(state);
@@ -580,7 +886,7 @@ export async function cutoverUpdate(
   } catch (err) {
     state.lastError = err instanceof Error ? err.message : String(err);
     saveState(state);
-    if (state.snapshot) await rollbackLocal(state, runtime);
+    if (state.snapshot) await rollbackAfter(err, state, runtime);
     else if (state.service.active) runtime.startService(state.service, state.projectRoot);
     throw err;
   }
@@ -625,6 +931,7 @@ export async function finishUpdate(
       ['exec', 'tsx', 'scripts/upgrade-state.ts', 'set', '', 'update-nanoclaw'],
       state.projectRoot,
     );
+    if (state.channel) stampChannel(state.projectRoot, { channel: state.channel, ref: state.upstreamRef });
     if (state.service?.active) {
       runtime.startService(state.service, state.projectRoot);
       if (!(await runtime.verifyHealth(state.service, state.projectRoot))) {
@@ -639,7 +946,7 @@ export async function finishUpdate(
   } catch (err) {
     state.lastError = err instanceof Error ? err.message : String(err);
     saveState(state);
-    await rollbackLocal(state, runtime);
+    await rollbackAfter(err, state, runtime);
     throw err;
   }
 }
@@ -760,6 +1067,7 @@ export function summarizeState(state: UpdateState): Record<string, unknown> {
     originalHead: state.originalHead,
     targetHead: state.targetHead,
     upstreamRef: state.upstreamRef,
+    channel: state.channel,
     backupBranch: state.backupBranch,
     backupTag: state.backupTag,
     stageRoot: state.stageRoot,

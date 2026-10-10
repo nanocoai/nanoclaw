@@ -20,6 +20,7 @@ import { guard, type GuardActor } from '../guard/index.js';
 import { registerApprovalHandler, requestApproval } from '../modules/approvals/index.js';
 import type { PendingApproval } from '../types.js';
 import type { CallerContext, ErrorCode, RequestFrame, ResponseFrame } from './frame.js';
+import { normalizeArgs } from './args.js';
 import { localizeIsoTimestamps } from './format.js';
 import { getResource } from './crud.js';
 import { listVerbs, renderVerbHelp } from './help-render.js';
@@ -41,6 +42,15 @@ export async function dispatch(
   ctx: CallerContext,
   opts: DispatchOptions = {},
 ): Promise<ResponseFrame> {
+  // Canonical keys from here on: auto-fill, the guard and the handler all
+  // read the same object, so no spelling of a flag can reach one but not
+  // another.
+  try {
+    req = { ...req, args: normalizeArgs(req.args) };
+  } catch (e) {
+    return err(req.id, 'invalid-args', errMsg(e));
+  }
+
   let cmd = lookup(req.command);
 
   // Fallback: if the full command isn't registered, find the LONGEST registered
@@ -72,11 +82,11 @@ export async function dispatch(
 
   // Group-scope mechanics for agent callers (visibility, not policy — the
   // allow/hold/deny decisions live in the guard decision, cli/guard.ts).
+  // Read once: the auto-fill and the post-handler filter must agree.
+  const agentCliScope =
+    ctx.caller === 'agent' ? ((await getContainerConfig(ctx.agentGroupId))?.cli_scope ?? 'group') : undefined;
   if (ctx.caller === 'agent') {
-    const configRow = await getContainerConfig(ctx.agentGroupId);
-    const cliScope = configRow?.cli_scope ?? 'group';
-
-    if (cliScope === 'group') {
+    if (agentCliScope === 'group') {
       // Auto-fill agent-group-related args so the agent doesn't need
       // to pass its own group ID explicitly.
       const fill: Record<string, unknown> = {
@@ -187,9 +197,10 @@ export async function dispatch(
     // rejected, and they're already pinned to the caller's group by the
     // pre-handler `--id` auto-fill (groups/destinations) or gated behind approval,
     // so they can't reach another group's data anyway.
+    // Filter unless this request began at `global`: a scope that changed
+    // mid-request (e.g. `disabled` to `group`) must not skip the filter.
     if (ctx.caller === 'agent' && cmd.resource && cmd.generic) {
-      const configRow = await getContainerConfig(ctx.agentGroupId);
-      if ((configRow?.cli_scope ?? 'group') === 'group') {
+      if (agentCliScope !== 'global') {
         const def = getResource(cmd.resource);
         const groupField = def?.scopeField;
         if (!groupField) {

@@ -119,6 +119,12 @@ export interface ProviderInferenceDeclaration {
 export interface ProviderHostContract {
   /** HTTPS domains used by this runtime, exempt from default gateway approval. */
   modelDomains?: readonly string[];
+  /**
+   * Exact `host:port` authorities of operator-configured model endpoints, exempt
+   * from default gateway approval like `modelDomains`. Which schemes may reach
+   * them is the selected gateway's decision.
+   */
+  modelAuthorities?: readonly string[];
   /** Provider-owned HTTPS URLs used by gateway credential adapters. */
   modelEndpoints?: Partial<Record<'api' | 'subscription' | 'token', string>>;
   seamVersion: number;
@@ -226,6 +232,17 @@ export function assertProviderHostContractShape(provider: string, contract: Prov
     for (const domain of contract.modelDomains) {
       if (typeof domain !== 'string' || !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/.test(domain)) {
         throw new Error(`${provider}.modelDomains must contain lowercase DNS domains`);
+      }
+    }
+  }
+  if (contract.modelAuthorities !== undefined) {
+    assertArray(contract.modelAuthorities, `${provider}.modelAuthorities`);
+    for (const authority of contract.modelAuthorities) {
+      const match =
+        typeof authority === 'string' &&
+        /^((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}):([1-9][0-9]{0,4})$/.exec(authority);
+      if (!match || Number(match[2]) > 65535) {
+        throw new Error(`${provider}.modelAuthorities must contain lowercase DNS host:port pairs`);
       }
     }
   }

@@ -105,7 +105,9 @@ afterEach(async () => {
 
 describe('deliverToSessions', () => {
   it('drains up to DELIVERY_CONCURRENCY sessions at once, all of them exactly once', async () => {
-    const sessions = await seedSessions(20);
+    // One past the cap: enough to show the ninth waits, without the file I/O
+    // of a large batch that timed out on a contended CI disk.
+    const sessions = await seedSessions(CONCURRENCY + 1);
     let inFlight = 0;
     let peak = 0;
     const delivered: string[] = [];
@@ -129,8 +131,8 @@ describe('deliverToSessions', () => {
     await done;
 
     expect(peak).toBe(CONCURRENCY);
-    expect(delivered).toHaveLength(20);
-    expect(new Set(delivered).size).toBe(20);
+    expect(delivered).toHaveLength(CONCURRENCY + 1);
+    expect(new Set(delivered).size).toBe(CONCURRENCY + 1);
   });
 
   it('a session whose drain throws is logged and skipped; the rest still deliver this tick', async () => {

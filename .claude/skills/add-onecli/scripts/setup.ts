@@ -13,6 +13,7 @@
  */
 import { execFileSync, execSync } from 'child_process';
 import fs from 'fs';
+import net from 'net';
 import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -100,8 +101,55 @@ function writeEnvVar(name: string, value: string, envFile = path.join(process.cw
   fs.writeFileSync(envFile, withEnvVar(content, name, value));
 }
 
+/**
+ * True for hosts reachable without an outbound proxy: loopback, docker bridge
+ * and RFC 1918 ranges, link-local, CGNAT (tailnets), single-label names and
+ * .local names. IP ranges only match IPv4 literals, not hostnames.
+ */
+export function isLocalHost(host: string): boolean {
+  if (net.isIPv4(host)) {
+    return /^(127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)/.test(
+      host,
+    );
+  }
+  return (
+    host === 'localhost' ||
+    host === 'host.docker.internal' ||
+    host === '::1' ||
+    host.endsWith('.local') ||
+    (!host.includes('.') && !host.includes(':'))
+  );
+}
+
+/**
+ * Adds the gateway host to NO_PROXY in .env content when it is local or
+ * private, so a host behind an outbound proxy still reaches a gateway bound
+ * to the docker bridge. A remote gateway keeps going through the proxy.
+ */
+export function withGatewayNoProxy(content: string, gatewayUrl: string): string {
+  let host: string;
+  try {
+    host = new URL(gatewayUrl).hostname.replace(/^\[|\]$/g, '');
+  } catch {
+    return content;
+  }
+  if (!host || !isLocalHost(host)) return content;
+  const rawCurrent = content.match(/^NO_PROXY=(.*)$/m)?.[1]?.trim() ?? '';
+  const current = /^(['"])(.*)\1$/.exec(rawCurrent)?.[2] ?? rawCurrent;
+  const entries = current
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  if (entries.includes(host)) return content;
+  return withEnvVar(content, 'NO_PROXY', [...entries, host].join(','));
+}
+
 function writeEnvOnecliUrl(url: string): void {
   writeEnvVar('ONECLI_URL', url);
+  const envFile = path.join(process.cwd(), '.env');
+  const content = fs.readFileSync(envFile, 'utf-8');
+  const next = withGatewayNoProxy(content, url);
+  if (next !== content) fs.writeFileSync(envFile, next);
 }
 
 // The SANCTIONED gateway version: fresh installs pin to it. Upgrading an
@@ -187,7 +235,11 @@ function installOnecli(): { stdout: string; ok: boolean } {
   // be a foreign shell (exe.dev images ship /exe.dev/bin/sh first on PATH; its
   // builtin lsof always exits 0, so the installer's port probe reports every
   // port as busy and the install fails with "Port 5432 is already in use").
-  const gw = runInstall(`export ONECLI_VERSION=${ONECLI_GATEWAY_VERSION} && curl -fsSL onecli.sh/install | /bin/sh`);
+  // The script runs in a shell, so fetch it over HTTPS only: a scheme-less URL
+  // makes curl use plain HTTP, and --proto-redir blocks a redirect downgrade.
+  const gw = runInstall(
+    `export ONECLI_VERSION=${ONECLI_GATEWAY_VERSION} && curl --proto '=https' --proto-redir '=https' -fsSL https://onecli.sh/install | /bin/sh`,
+  );
   stdout += gw.stdout;
   if (!gw.ok) {
     log.error('OneCLI gateway install failed', { stderr: gw.stderr });

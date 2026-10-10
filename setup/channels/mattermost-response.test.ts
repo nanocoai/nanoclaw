@@ -1,15 +1,18 @@
 import { exec, execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { applySkill, fullyApplied } from '../../scripts/skill-apply.js';
 import { parseDirectives } from '../../scripts/skill-directives.js';
+import { hostExec } from '../lib/skill-driver.js';
 
 const execAsync = promisify(exec);
-const directives = parseDirectives(readFileSync('.claude/skills/add-mattermost/SKILL.md', 'utf8'));
+const skillText = readFileSync('.claude/skills/add-mattermost/SKILL.md', 'utf8');
+const directives = parseDirectives(skillText);
 const token = 'fixture_bot_token_0123456789';
 const owner = 'o'.repeat(26);
 const bot = 'b'.repeat(26);
@@ -99,5 +102,78 @@ describe('Mattermost skill API checks without jq', () => {
     status = 401;
     response = { message: 'private server error' };
     await expect(run('/api/v4/channels/direct')).rejects.toMatchObject({ code: 1, stdout: '' });
+  });
+});
+
+describe('Mattermost owner lookup through the setup shell', () => {
+  let root: string;
+  let marker: string;
+
+  function fence(needle: string): string {
+    const found = [...skillText.matchAll(/```nc:[^\n]*\n[\s\S]*?\n```/g)]
+      .map((m) => m[0])
+      .filter((block) => block.includes(needle));
+    if (found.length !== 1) throw new Error(`Expected one directive containing ${needle}`);
+    return found[0];
+  }
+
+  // The owner ID comes from the selected server and feeds later shell
+  // commands, so run the real lookup and DM directives through the real host
+  // shell, as setup does.
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'nc-mm-owner-'));
+    marker = join(root, 'injected');
+    symlinkSync(join(process.cwd(), '.claude'), join(root, '.claude'));
+    mkdirSync(join(root, 'skill'));
+    writeFileSync(
+      join(root, 'skill', 'SKILL.md'),
+      [
+        '```nc:prompt base_url\nServer URL.\n```',
+        '```nc:prompt bot_token secret\nBot token.\n```',
+        '```nc:prompt bot_user_id\nBot ID.\n```',
+        fence('nc:prompt owner_username'),
+        fence('/api/v4/users/username/'),
+        fence('/api/v4/channels/direct'),
+      ].join('\n\n'),
+    );
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const apply = () =>
+    applySkill(join(root, 'skill'), root, {
+      inputs: { base_url: baseUrl, bot_token: token, bot_user_id: bot, owner_username: 'owner' },
+      exec: hostExec(root),
+    });
+
+  it('opens the owner DM for a well-formed owner ID', async () => {
+    response = { id: owner, type: 'D' };
+    const res = await apply();
+    expect(fullyApplied(res)).toBe(true);
+    expect(res.vars.owner_handle).toBe(owner);
+    expect(res.vars.platform_id).toBe(`mattermost:${owner}`);
+    expect(requests.map((r) => r.path)).toEqual(['/api/v4/users/username/owner', '/api/v4/channels/direct']);
+    expect(requests[1].body).toBe(JSON.stringify([owner, bot]));
+  });
+
+  it.each([
+    { kind: 'quote break', id: (m: string) => `'; touch ${m}; #` },
+    { kind: 'double-quote break', id: (m: string) => `o"; touch ${m}; echo "` },
+    { kind: 'command substitution', id: (m: string) => `$(touch ${m})` },
+    { kind: 'backtick substitution', id: (m: string) => `\`touch ${m}\`` },
+    { kind: 'trailing newline', id: (m: string) => `${owner}\ntouch ${m}` },
+  ])('rejects a $kind owner ID before any later command uses it', async ({ id }) => {
+    response = { id: id(marker), type: 'D' };
+    const res = await apply();
+    expect(existsSync(marker)).toBe(false);
+    expect(fullyApplied(res)).toBe(false);
+    expect(res.agentTasks[0].reason).toContain('captured owner_user_id');
+    expect(res.vars.owner_user_id).toBeUndefined();
+    expect(res.vars.owner_handle).toBeUndefined();
+    expect(requests.map((r) => r.path)).toEqual(['/api/v4/users/username/owner']);
+    // The bounce reason reaches the operator's terminal and the setup assistant.
+    expect(JSON.stringify(res.agentTasks)).not.toContain(marker);
   });
 });

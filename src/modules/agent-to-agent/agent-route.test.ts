@@ -576,6 +576,26 @@ describe('routeAgentMessage return-path', () => {
     warnSpy.mockRestore();
   });
 
+  it('file forwarding: refuses a symlinked source outbox root, copies nothing', async () => {
+    // A host directory shaped like an outbox message dir.
+    const hostDir = path.join(TEST_DIR, 'host-outside');
+    fs.mkdirSync(path.join(hostDir, 'msg-root'), { recursive: true });
+    fs.writeFileSync(path.join(hostDir, 'msg-root', 'secret.txt'), 'host-secret-bytes');
+
+    // Source replaces its whole `outbox` with a symlink to it.
+    const sourceOutbox = path.join(sessionDir(A, S1.id), 'outbox');
+    fs.rmSync(sourceOutbox, { recursive: true, force: true });
+    fs.symlinkSync(hostDir, sourceOutbox);
+
+    const attachments = forwardAttachedFiles(
+      { agentGroupId: A, sessionId: S1.id, messageId: 'msg-root', filenames: ['secret.txt'] },
+      { agentGroupId: B, sessionId: SB.id, messageId: 'fwd-root' },
+    );
+
+    expect(attachments).toHaveLength(0);
+    expect(fs.existsSync(path.join(sessionDir(B, SB.id), 'inbox', 'fwd-root', 'secret.txt'))).toBe(false);
+  });
+
   it('file forwarding (#2828 regression): a normal forward still works end-to-end', async () => {
     const outboxDir = path.join(sessionDir(A, S1.id), 'outbox', 'msg-ok-file');
     fs.mkdirSync(outboxDir, { recursive: true });

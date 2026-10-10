@@ -7,11 +7,13 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { getInstallSlug } from '../../../../src/install-slug.js';
-import { LABELS } from '../../../../src/drivers/types.js';
+import { GATEWAY_ROLE, LABELS } from '../../../../src/drivers/types.js';
 import { upsertEnvVar } from '../../../../setup/set-env.js';
 import { installStep, installCommand, InstallCommandFailure } from './install-command.js';
 import { buildManagedProxy, hasFrontProxy } from './build-managed-proxy.js';
 import { controlPaths, installControl, removeControl, storeModelCredential } from './control.js';
+import { checkControlEngine } from './control-preflight.js';
+import { readAllowedHostsFile, validateAllowedHost } from '../payload/src/gateway-providers/iron-proxy-allowlist.js';
 
 const pins = JSON.parse(
   fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'versions.json'), 'utf8'),
@@ -58,22 +60,63 @@ export function statePaths(projectRoot = process.cwd()) {
   };
 }
 
-export function validateAllowedHost(raw: string): string {
-  const host = raw.trim().toLowerCase();
-  if (!/^(?:\*\.)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(host)) {
-    throw new Error(`Invalid allowed host: ${raw}`);
+/** A redirect fails: the port it points to stays closed to the agent. */
+export function checkModelList(response: string, port: number): void {
+  const split = response.indexOf('\r\n\r\n');
+  const status = /^HTTP\/1\.[01] (\d{3})/.exec(response)?.[1];
+  let body: any;
+  try {
+    body = split >= 0 ? JSON.parse(response.slice(split + 4)) : undefined;
+  } catch {
+    body = undefined;
   }
-  return host;
+  if (status !== '200' || !body || !Array.isArray(body.data) || body.data.some((m: any) => typeof m?.id !== 'string'))
+    throw new Error(
+      `Port ${port} on this machine did not answer GET /v1/models with an OpenAI-style model list; it will not be reachable over plain HTTP.`,
+    );
 }
 
-function readAllowedHosts(projectRoot: string): string[] {
-  const file = statePaths(projectRoot).allowedHosts;
-  if (!fs.existsSync(file)) return [];
-  const value = JSON.parse(fs.readFileSync(file, 'utf8')) as unknown;
-  if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string')) {
-    throw new Error(`Invalid Iron Proxy allowed-hosts file: ${file}`);
+// Plain HTTP opens a port on this machine, so gateway ports are refused and the model
+// list is fetched the way Iron reaches it.
+export async function prepareLocalModel(origin: string, projectRoot: string): Promise<void> {
+  const port = Number(origin.slice(origin.lastIndexOf(':') + 1));
+  const provider = await import('../../../../src/gateway-providers/iron-proxy.js');
+  const local = await import('../../../../src/gateway-providers/iron-proxy-local-model.js');
+  const settings = provider.readIronProxySettings(process.env, projectRoot);
+  if (local.gatewayPorts(settings.approvalPort).includes(port))
+    throw new Error(`Port ${port} belongs to a NanoClaw gateway, not a model server.`);
+  const image = readProjectEnv(projectRoot).NANOCLAW_IRON_PROXY_IMAGE;
+  if (!image) throw new Error('Install Iron Proxy before configuring a local model.');
+  let response = '';
+  try {
+    response = await docker(
+      [
+        'run',
+        '--rm',
+        ...(settings.managed ? ['--network', controlPaths(projectRoot).network] : []),
+        ...centralHostGatewayArgs(),
+        '--entrypoint',
+        'sh',
+        image,
+        '-c',
+        // Hold the request side open: BusyBox nc half-closes when stdin ends, and async
+        // servers (Uvicorn) then drop the reply. nc exits when the hold ends.
+        '{ printf "GET /v1/models HTTP/1.0\\r\\nHost: %s\\r\\nAccept: application/json\\r\\n\\r\\n" "$1"; sleep 5; } | nc -w 5 "$2" "$3"',
+        'probe',
+        origin,
+        local.LOCAL_MODEL_HOST,
+        String(port),
+      ],
+      true,
+    );
+  } catch (error) {
+    if (error instanceof InstallCommandFailure && error.interrupted) throw error;
   }
-  return [...new Set(value.map(validateAllowedHost))].sort();
+  checkModelList(response, port);
+}
+
+export function readAllowedHosts(projectRoot: string): string[] {
+  return readAllowedHostsFile(statePaths(projectRoot).allowedHosts);
 }
 
 function writeAllowedHosts(hosts: readonly string[], projectRoot: string): void {
@@ -162,7 +205,7 @@ async function startCentralProxy(projectRoot: string): Promise<void> {
     '--label',
     centralInstallLabel(projectRoot),
     '--label',
-    `${LABELS.role}=gateway`,
+    `${LABELS.role}=${GATEWAY_ROLE}`,
     ...(uid == null ? [] : ['--user', `${uid}:${gid ?? uid}`]),
     ...centralHostGatewayArgs(),
     '--restart',
@@ -237,6 +280,9 @@ export async function run(args: string[], projectRoot = process.cwd()): Promise<
   const managed = args.includes('--with-control') || !!readProjectEnv(projectRoot).NANOCLAW_IRON_CONTROL_URL;
   const localIndex = args.indexOf('--local-image');
   if (managed || localIndex < 0) {
+    // An engine that cannot run the console stops here, before the Iron
+    // Proxy build spends minutes.
+    if (managed) await checkControlEngine();
     IMAGE = await buildManagedProxy();
     if (managed) await installControl(projectRoot);
     upsertEnvVar('NANOCLAW_IRON_PROXY_IMAGE', IMAGE, projectRoot);

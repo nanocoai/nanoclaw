@@ -306,7 +306,12 @@ export async function offerCodexFailureAssist(ctx: AssistContext, projectRoot: s
 
   return new Promise<FailureAssistResult>((resolve) => {
     // codex accepts a positional initial prompt for the interactive TUI.
-    const child = spawn('codex', [prompt], { cwd: projectRoot, stdio: 'inherit' });
+    // Commands run in a read-only sandbox; anything that needs more (a
+    // write, the Docker socket, the service manager) asks first.
+    const child = spawn('codex', ['--sandbox', 'read-only', '--ask-for-approval', 'on-request', prompt], {
+      cwd: projectRoot,
+      stdio: 'inherit',
+    });
     child.on('close', () => {
       p.log.success(brandBody("Back from Codex. Let's continue."));
       resolve('launched');

@@ -484,6 +484,30 @@ describe('provider model destinations', () => {
   });
 
   it.each([
+    'Models.example.test:8000',
+    'models.example.test',
+    'models.example.test:0',
+    'models.example.test:65536',
+    'models.example.test:08000',
+    '192.168.1.20:8000',
+    'user@models.example.test:8000',
+    '*.example.test:8000',
+  ])('rejects a model authority that is not an exact lowercase host:port: %s', (authority) => {
+    expect(() =>
+      registerProviderHostContract('invalid-model-authority', { ...emptyContract(), modelAuthorities: [authority] }),
+    ).toThrow('modelAuthorities must contain lowercase DNS host:port pairs');
+  });
+
+  it('accepts exact host:port model authorities', () => {
+    expect(() =>
+      registerProviderHostContract('model-authority-fixture', {
+        ...emptyContract(),
+        modelAuthorities: ['models.example.test:8000', 'api.models.example.test:65535'],
+      }),
+    ).not.toThrow();
+  });
+
+  it.each([
     'https://evil.test',
     'http://models.example.test',
     'https://user:secret@models.example.test',

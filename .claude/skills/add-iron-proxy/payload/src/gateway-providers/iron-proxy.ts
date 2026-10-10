@@ -12,6 +12,9 @@ import { readEnvFile } from '../env.js';
 import { getInstallSlug } from '../install-slug.js';
 import { log } from '../log.js';
 
+import { readAllowedHostsFile } from './iron-proxy-allowlist.js';
+import { IronCredentialScope, ironCredentialRules, seenRuleFile } from './iron-proxy-credential-scope.js';
+import { localModelOrigins } from './iron-proxy-local-model.js';
 import { IronProxyApprovalBridge, type IronApprovalIdentity } from './iron-proxy-approval.js';
 import {
   registerGatewayProvider,
@@ -31,6 +34,7 @@ const SETTINGS = [
   'NANOCLAW_IRON_PROXY_IDENTITY_KEY',
   'NANOCLAW_IRON_PROXY_CONTAINER',
   'NANOCLAW_IRON_CONTROL_URL',
+  'NANOCLAW_IRON_CONTROL_PORT',
   'NANOCLAW_IRON_PROXY_PORT',
   'NANOCLAW_IRON_PROXY_APPROVAL_SOCKET',
   'NANOCLAW_IRON_PROXY_AUTH_ENV',
@@ -65,6 +69,7 @@ export interface IronProxySettings {
   containerName: string;
   port: number;
   managed?: boolean;
+  controlPort?: number;
   projectRoot?: string;
   approvalDir: string;
   approvalSocket: string;
@@ -122,6 +127,7 @@ export function readIronProxySettings(
     containerName: value('NANOCLAW_IRON_PROXY_CONTAINER') || `nanoclaw-iron-proxy-${getInstallSlug(projectRoot)}`,
     port,
     managed: !!value('NANOCLAW_IRON_CONTROL_URL'),
+    controlPort: Number(value('NANOCLAW_IRON_CONTROL_PORT') || 10257),
     projectRoot,
     approvalDir: isInside(approvalSocket, materialRoot)
       ? path.dirname(approvalSocket)
@@ -158,9 +164,7 @@ function ensureApprovalSocketAlias(settings: IronProxySettings): void {
 }
 
 function readAllowedHosts(settings: IronProxySettings): string[] {
-  if (!fs.existsSync(settings.allowedHostsFile)) return [];
-  const hosts = JSON.parse(fs.readFileSync(settings.allowedHostsFile, 'utf8')) as string[];
-  return [...new Set(hosts.map(normalizeHost))].sort();
+  return readAllowedHostsFile(settings.allowedHostsFile, (message) => log.warn(message));
 }
 
 /** The front owns approvals. Stock Iron only injects credentials on loopback. */
@@ -247,6 +251,22 @@ function centralContainerRunning(containerName: string): Promise<boolean> {
       ['inspect', '-f', '{{.State.Running}}', containerName],
       { encoding: 'utf8', timeout: 5_000 },
       (err, stdout) => resolve(!err && stdout.trim() === 'true'),
+    );
+  });
+}
+
+/** When the central proxy last started; it reads its YAML configuration only then. */
+function centralContainerStartedAt(containerName: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      CONTAINER_RUNTIME_BIN,
+      ['inspect', '-f', '{{.State.StartedAt}}', containerName],
+      { encoding: 'utf8', timeout: 5_000 },
+      (err, stdout) => {
+        const startedAt = Date.parse(stdout?.trim() ?? '');
+        if (err || !Number.isFinite(startedAt)) reject(err ?? new Error('Iron Proxy start time is unavailable'));
+        else resolve(startedAt);
+      },
     );
   });
 }
@@ -361,6 +381,7 @@ export function defineIronProxyProvider(initialSettings?: IronProxySettings): Ga
   const leases = new Map<string, LiveLease>();
   let monitor: NodeJS.Timeout | null = null;
   let bridge: IronProxyApprovalBridge | null = null;
+  let scope: IronCredentialScope | null = null;
 
   const currentSettings = (): IronProxySettings => (settings ??= readIronProxySettings());
   const currentBridge = (): IronProxyApprovalBridge => {
@@ -370,6 +391,7 @@ export function defineIronProxyProvider(initialSettings?: IronProxySettings): Ga
     bridge = new IronProxyApprovalBridge(
       {
         socketPath: configured.approvalSocket,
+        plaintextOrigins: localModelOrigins(configured.approvalPort),
         timeoutMs: configured.approvalTimeoutMs,
         maxPending: configured.maxPending,
         ...(configured.approvalPort
@@ -487,7 +509,20 @@ export function defineIronProxyProvider(initialSettings?: IronProxySettings): Ga
     // The proxy is install-owned, not a per-session resource. Session abort
     // drops only its signed capability and approval state.
     sessions: { ensure },
-    approvals: { subscribe: (decide, signal) => currentBridge().subscribe(decide, signal) },
+    approvals: {
+      subscribe: (decide, signal) => currentBridge().subscribe(decide, signal),
+      credentialScope: async (destination) => {
+        const configured = currentSettings();
+        scope ??= new IronCredentialScope(
+          ironCredentialRules(configured, {
+            proxyStartedAt: () => centralContainerStartedAt(configured.containerName),
+          }),
+          undefined,
+          seenRuleFile(path.join(path.dirname(configured.configFile), 'seen-credential-rules.json')),
+        );
+        return scope.lookup(destination);
+      },
+    },
   };
 }
 

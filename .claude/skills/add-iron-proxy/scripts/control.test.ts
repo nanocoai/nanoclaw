@@ -1,11 +1,20 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parse as yaml } from 'yaml';
 
-import { controlCompose, controlPaths, controlPort } from './control.js';
+import { controlCompose, controlPaths, controlPort, installControl } from './control.js';
 import { hasFrontProxy, frontProxyHash } from './build-managed-proxy.js';
+import { installCommand } from './install-command.js';
+import { getInstallSlug } from '../../../../src/install-slug.js';
+import { GATEWAY_ROLE, LABELS } from '../../../../src/drivers/types.js';
+
+vi.mock('./install-command.js', async (importActual) => ({
+  ...(await importActual<typeof import('./install-command.js')>()),
+  installCommand: vi.fn(async () => ''),
+}));
+const installCommandMock = vi.mocked(installCommand);
 
 const roots: string[] = [];
 const temporary = () => {
@@ -14,6 +23,7 @@ const temporary = () => {
   return root;
 };
 afterEach(() => {
+  installCommandMock.mockClear();
   delete process.env.NANOCLAW_IRON_CONTROL_PORT;
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
@@ -46,9 +56,34 @@ describe('official Iron Control installation', () => {
     expect(() => controlPort(root)).toThrow('between 1 and 65535');
   });
 
+  it('labels both services like the central proxy, and neither the volume nor the network', () => {
+    const root = temporary();
+    const config = yaml(controlCompose(root, 18443));
+    const labels = { [LABELS.install]: getInstallSlug(root), [LABELS.role]: GATEWAY_ROLE };
+    expect(config.services.web.labels).toEqual(labels);
+    expect(config.services.database.labels).toEqual(labels);
+    expect(Object.keys(config.services.web).slice(0, 4)).toEqual(['image', 'platform', 'restart', 'labels']);
+    expect(config.volumes.database).toEqual({});
+    expect(config.networks.default).toEqual({ name: controlPaths(root).network });
+  });
+
+  it('prints the exact cleanup commands when the database outlived its keys', async () => {
+    const root = temporary();
+    const project = controlPaths(root).project;
+    installCommandMock.mockResolvedValueOnce(`other_database\n${project}_database\n`);
+    const failure = installControl(root);
+    await expect(failure).rejects.toThrow(`restore ${controlPaths(root).environment}`);
+    await expect(failure).rejects.toThrow(
+      `docker rm -f ${project}-database-1 ${project}-web-1; docker volume rm ${project}_database`,
+    );
+    // Only the volume listing ran: nothing was removed or started.
+    expect(installCommandMock).toHaveBeenCalledTimes(1);
+    expect(fs.existsSync(controlPaths(root).environment)).toBe(false);
+  });
+
   it('requires both the pinned source and the exact approval front', () => {
     const labels = {
-      'org.opencontainers.image.revision': '2393dd175a8c419153fb49917fdeceb94cd9ed59',
+      'org.opencontainers.image.revision': '8a0eb0beb6524f4a7739b799842a13159d8b739e',
       'ai.nanoclaw.approval-front': frontProxyHash,
     };
     expect(hasFrontProxy({ Config: { Labels: labels } })).toBe(true);

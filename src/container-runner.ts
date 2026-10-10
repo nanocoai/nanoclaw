@@ -888,6 +888,34 @@ export async function adoptRunningSessions(): Promise<{ adopted: number; stopped
 }
 
 /**
+ * Stop the sessions this process supervises whose session row or agent group
+ * no longer exists. The per-session reconcile only visits live rows, so a
+ * delete (setup cleanup, `ncl groups delete`) would otherwise leave the
+ * container up until the next host restart, where adoption stops it the same
+ * way. Containers no process supervises are adoption's job, not this sweep's.
+ *
+ * Not racy against a legitimate spawn: a runtime is registered only after its
+ * session row was read (`spawnContainer`) or checked (adoption), and the rows
+ * are read after that, so a missing row was deleted. A spawn still in flight
+ * is left for the next tick, once `start()` has returned.
+ */
+export async function stopOrphanedSessions(): Promise<number> {
+  let stopped = 0;
+  for (const [sessionId, runtime] of [...activeContainers]) {
+    if (wakePromises.has(sessionId) || runtime.stopReason) continue;
+    const session = await getSession(sessionId);
+    if (session && (await getAgentGroup(session.agent_group_id))) continue;
+    log.warn('Stopping container whose session or agent group was deleted', {
+      sessionId,
+      containerName: runtime.containerName,
+    });
+    killContainer(sessionId, 'orphaned');
+    stopped += 1;
+  }
+  return stopped;
+}
+
+/**
  * Honor stop intents that outlived their process. A kill-with-respawn used to
  * live only in a volatile onExit callback: a host dying between the kill and
  * the respawn forgot the restart entirely ("rebuild applied" and nothing came
@@ -1398,17 +1426,12 @@ export function syncSkillSymlinks(
   claudeDir: string,
   containerConfig: import('./container-config.js').ContainerConfig,
 ): string[] {
-  const skillsDir = path.join(claudeDir, 'skills');
-  if (!fs.existsSync(skillsDir)) {
-    fs.mkdirSync(skillsDir, { recursive: true });
-  }
-
   // Same body as the declared-contract path; real (non-symlink) entries are
   // either a template overlay (intentional; see src/group-skills.ts) or a stale
   // pre-refactor skill copy that shadows the shared skill (#3001), so the
   // skip is surfaced as a warning.
   const selected = selectedSkillNames(containerConfig);
-  syncSharedSkillLinks(skillsDir, selected, true);
+  syncSharedSkillLinks(claudeDir, ['skills'], selected, true);
   return selected;
 }
 

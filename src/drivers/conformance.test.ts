@@ -28,8 +28,12 @@ vi.mock('../log.js', () => ({
 
 // The Docker realization re-checks that mount sources exist (a missing source
 // would silently become a fresh empty directory); fixture paths are not real
-// files on the test host.
-vi.mock('fs', () => ({ default: { existsSync: (): boolean => true } }));
+// files on the test host. `constants` stays real: modules on the import path
+// (anchored-dir) read open flags at load time.
+vi.mock('fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('fs')>();
+  return { default: { constants: actual.constants, existsSync: (): boolean => true } };
+});
 
 /**
  * What a driver realized, in vocabulary no runtime owns. This is the

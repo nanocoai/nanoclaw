@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { verifyMattermostRuntime } from '../../.claude/skills/add-mattermost/scripts/verify-runtime.js';
+import { failureMessage, verifyMattermostRuntime } from '../../.claude/skills/add-mattermost/scripts/verify-runtime.js';
 
 const BOT_ID = 'b'.repeat(26);
 const OWNER_ID = 'o'.repeat(26);
@@ -21,6 +21,7 @@ afterEach(async () => {
 async function fixture(
   overrides: {
     bot?: Record<string, unknown>;
+    rawBot?: string;
     callbackStatus?: number;
     owner?: Record<string, unknown>;
     runtimeToken?: string;
@@ -36,7 +37,7 @@ async function fixture(
     requests.push(`${request.method} ${request.url}`);
     response.setHeader('content-type', 'application/json');
     if (request.url === '/api/v4/users/me') {
-      response.end(JSON.stringify(overrides.bot ?? { id: BOT_ID, is_bot: true }));
+      response.end(overrides.rawBot ?? JSON.stringify(overrides.bot ?? { id: BOT_ID, is_bot: true }));
     } else if (request.url === `/api/v4/users/${OWNER_ID}`) {
       response.end(JSON.stringify(overrides.owner ?? { id: OWNER_ID }));
     } else if (request.url === `/api/v4/channels/${CHANNEL_ID}`) {
@@ -210,5 +211,17 @@ describe('Mattermost runtime verification', () => {
     } finally {
       warning.mockRestore();
     }
+  });
+
+  it('prints its own failure messages but never the server response', async () => {
+    const { connected, root } = await fixture({ rawBot: 'REMOTE_TEXT_MARKER' });
+    const error = await verifyMattermostRuntime(root, BOT_ID, OWNER_ID, `mattermost:${CHANNEL_ID}`, {
+      queryHostImpl: connected,
+    }).catch((caught: unknown) => caught);
+    expect(String(error)).toContain('REMOTE_TEXT_MARKER'); // the raw parse error quotes the body
+    expect(failureMessage(error)).toBe('Mattermost runtime verification: could not complete the check');
+
+    const own = new Error('Mattermost runtime verification: invalid owner DM platform ID');
+    expect(failureMessage(own)).toBe(own.message);
   });
 });

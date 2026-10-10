@@ -74,7 +74,22 @@ export type ApplyEvent =
 // the terminal status block's fields, which `capture:<var>=<FIELD>` binds.
 export interface StepOutcome {
   ok: boolean;
+  /** `ERROR` holds the step's own one-line failure message when it reports one. */
   fields: Record<string, string>;
+}
+
+/**
+ * A streaming step that ended without success. `reported` is true when the
+ * step's terminal block named its own cause, which then stands as the bounce
+ * reason verbatim instead of the engine's generic wrapper.
+ */
+export class StepFailure extends Error {
+  readonly reported: boolean;
+  constructor(reportedError?: string) {
+    const message = reportedError?.trim();
+    super(message || 'the step did not complete');
+    this.reported = Boolean(message);
+  }
 }
 
 // Consumers must use this filter for command logs, diagnostics and live output.
@@ -613,6 +628,8 @@ function dotPath(obj: unknown, path: string): unknown {
 // An optional `validate:<re>` is enforced against every bound value; a mismatch
 // THROWS so the run bounces to an agent — a command's output has no human to
 // re-prompt, so an invalid capture is a real failure, not a re-ask.
+// Neither error quotes the output: it can come from a remote server, and the
+// bounce reason reaches the terminal and the setup assistant.
 function bindCapture(
   spec: string,
   stdout: string,
@@ -621,14 +638,19 @@ function bindCapture(
 ): void {
   const re = validate ? new RegExp(validate) : undefined;
   const set = (name: string, value: string): void => {
-    if (re && !re.test(value)) throw new Error(`captured ${name}="${value}" does not match validate:${validate}`);
+    if (re && !re.test(value)) throw new Error(`captured ${name} does not match validate:${validate}`);
     vars.set(name, { value, secret: [...vars.values()].some((v) => v.secret && v.value && value.includes(v.value)) });
   };
   if (!spec.includes('=')) {
     set(spec, stdout);
     return;
   }
-  const json = JSON.parse(stdout) as unknown; // not JSON → throws → outer catch bounces
+  let json: unknown;
+  try {
+    json = JSON.parse(stdout);
+  } catch {
+    throw new Error('capture output is not valid JSON'); // → outer catch bounces
+  }
   for (const pair of spec.split(',')) {
     const eq = pair.indexOf('=');
     if (eq < 1) continue;
@@ -755,7 +777,7 @@ async function applyOne(
         if (!ctx.execStream)
           throw new Error('effect:step needs a streaming exec — an agent runs the step from the prose');
         const { ok, fields } = await ctx.execStream(substitute(d.body.join('\n'), vars));
-        if (!ok) throw new Error('the step did not complete');
+        if (!ok) throw new StepFailure(fields.ERROR);
         if (capture) {
           for (const pair of capture.split(',')) {
             const eq = pair.indexOf('=');
@@ -871,6 +893,10 @@ export async function applySkill(skillDir: string, root: string, opts: ApplyOpti
   // `blocked` stays false and a later restart remains runnable.
   let blocked = false;
   const SIDE_EFFECTS = new Set(['restart', 'step', 'wire']);
+  // Validation of an install that already failed only delays the failure the
+  // operator needs to read. It is not run once `blocked` latches, but it is
+  // bounced, so the agent's recovery tasks still include it.
+  const VALIDATION = new Set(['build', 'test']);
   const bounce = (d: Directive, reason: string) => {
     blocked = true;
     res.agentTasks.push({ kind: d.kind, line: d.line, reason, prose: proseFor(md, d.line) });
@@ -977,7 +1003,8 @@ export async function applySkill(skillDir: string, root: string, opts: ApplyOpti
       // own — bounce it too so the agent runs it from the prose once the upstream
       // failure is fixed. (A deferred prompt did NOT set `blocked`, so this only
       // trips on a real failure, never a headless rebuild's missing input.)
-      if (d.kind === 'run' && typeof d.attrs.effect === 'string' && SIDE_EFFECTS.has(d.attrs.effect) && blocked) {
+      const effect = d.kind === 'run' && typeof d.attrs.effect === 'string' ? d.attrs.effect : '';
+      if (blocked && (SIDE_EFFECTS.has(effect) || VALIDATION.has(effect))) {
         bounce(d, 'skipped: an earlier step did not complete — run this from the prose after fixing it');
         continue;
       }
@@ -1036,7 +1063,11 @@ export async function applySkill(skillDir: string, root: string, opts: ApplyOpti
           /* already failing — the close is best-effort */
         }
       }
-      if (/unresolved \{\{/.test(msg))
+      // A step's own ERROR text is checked first: it is the step's to write, so
+      // one that reads like the engine's deferred-input marker is still a
+      // failure (the gate must latch), never a missing answer.
+      if (e instanceof StepFailure && e.reported) bounce(d, msg);
+      else if (/unresolved \{\{/.test(msg))
         res.deferred.push(msg); // blocked on a prompt input
       else bounce(d, `engine could not apply (${msg}) — an agent applies it from the prose`);
     }

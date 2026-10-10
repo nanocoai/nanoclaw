@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path"
 	"strings"
 	"syscall"
 	"time"
@@ -176,6 +177,11 @@ func authority(raw, scheme string) (string, error) {
 
 func (g *gateway) allowed(host string) bool {
 	host = strings.ToLower(host)
+	// The local model host is reachable only by the plain-HTTP rule in forward,
+	// whatever an allow entry says, so HTTPS and CONNECT to it stay closed.
+	if host == localModelHost {
+		return false
+	}
 	for _, pattern := range g.cfg.AllowedHosts {
 		pattern = strings.ToLower(pattern)
 		if host == pattern {
@@ -187,6 +193,29 @@ func (g *gateway) allowed(host string) bool {
 	}
 	return false
 }
+
+// Inference routes only: model servers also put admin routes under /v1, and
+// approval cannot tell them apart.
+var openAIRoutes = map[string]string{"/v1/models": "GET", "/v1/chat/completions": "POST", "/v1/completions": "POST", "/v1/embeddings": "POST", "/v1/responses": "POST"}
+
+// openAIRequest accepts a clean path with no encoded separators, so no dot-segment
+// or %2F form can reach another route after the server normalizes it.
+func openAIRequest(r *http.Request) bool {
+	p := r.URL.Path
+	clean := path.Clean(p)
+	if r.URL.RawPath != "" || strings.ContainsAny(p, "\\%") || (clean != p && clean+"/" != p) {
+		return false
+	}
+	if strings.HasPrefix(clean, "/v1/models/") && !strings.Contains(clean[len("/v1/models/"):], "/") {
+		return r.Method == "GET"
+	}
+	method, ok := openAIRoutes[clean]
+	return ok && r.Method == method
+}
+
+// localModelHost is Docker's name for the machine running the containers. Plain
+// HTTP to it carries no key; the approval bridge decides which port is the model.
+const localModelHost = "host.docker.internal"
 
 func safeRequest(r *http.Request) *pb.HttpRequest {
 	u := *r.URL
@@ -206,11 +235,20 @@ func (g *gateway) approve(ctx context.Context, r *http.Request, identity string)
 		if err != nil {
 			return false, err
 		}
-		ctx = metadata.AppendToOutgoingContext(ctx, "x-iron-approval-summary", base64.StdEncoding.EncodeToString(summary))
+		ctx = metadata.AppendToOutgoingContext(ctx, "x-iron-approval-summary", base64.StdEncoding.EncodeToString(summary), "x-iron-request-payload", requestPayload(r))
 	}
 	reply, err := g.bridge.TransformRequest(ctx, &pb.TransformRequestRequest{Request: safeRequest(r)})
 	// No custom responses or request mutations are accepted from the decision service.
 	return err == nil && reply != nil && reply.Action == pb.TransformAction_TRANSFORM_ACTION_CONTINUE && reply.Response == nil && reply.ModifiedRequest == nil, err
+}
+
+// requestPayload is "none" only when nothing beyond the URL and headers leaves:
+// no body, and no upgrade into a two-way stream. Approval may skip a card for those.
+func requestPayload(r *http.Request) string {
+	if r.ContentLength == 0 && len(r.TransferEncoding) == 0 && r.Header.Get("Upgrade") == "" {
+		return "none"
+	}
+	return "present"
 }
 
 func (g *gateway) summarize(ctx context.Context, r *http.Request) ([]byte, error) {
@@ -293,7 +331,18 @@ func (g *gateway) forward(r *http.Request, identity, tunnel string) *http.Respon
 	if err != nil || requested != target || (tunnel != "" && (target != tunnel || r.URL.Scheme != "https")) {
 		return deny(r, 403)
 	}
-	if !g.allowed(r.URL.Hostname()) {
+	// Plain HTTP to the local model host needs a written-out port (port 80 vanishes
+	// from normalized URLs); the bridge then admits only the configured model's port.
+	local := r.URL.Scheme == "http" && tunnel == "" && strings.EqualFold(r.URL.Hostname(), localModelHost)
+	if local && (r.URL.Port() == "" || r.URL.Port() == "80") {
+		return deny(r, 403)
+	}
+	if !local && !g.allowed(r.URL.Hostname()) {
+		return deny(r, 403)
+	}
+	// Approval matches host:port only, so the local model exposes the OpenAI API
+	// alone; a model server's admin routes (pull, delete, load) would pass unasked.
+	if local && !openAIRequest(r) {
 		return deny(r, 403)
 	}
 	if ok, err := g.approve(r.Context(), r, identity); err != nil || !ok {
@@ -336,6 +385,7 @@ func (g *gateway) forward(r *http.Request, identity, tunnel string) *http.Respon
 func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	identity, err := g.identity(r)
 	if err != nil {
+		w.Header().Set("Proxy-Authenticate", `Basic realm="nanoclaw"`)
 		http.Error(w, "Proxy authentication required", 407)
 		return
 	}

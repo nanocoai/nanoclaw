@@ -159,4 +159,33 @@ describe('OpenCode model gateway destinations', () => {
     const { openCodeModelDomains } = await import('../provider-contracts/opencode.js');
     expect(openCodeModelDomains(endpoint)).not.toContain('models.example.test');
   });
+  it.each([
+    ['http://host.docker.internal:8000/v1', ['host.docker.internal:8000']],
+    ['http://HOST.docker.internal:11434/v1', ['host.docker.internal:11434']],
+    ['https://models.example.test:8443/v1', ['models.example.test:8443']],
+    ['https://models.example.test/v1', []],
+    ['http://host.docker.internal/v1', []],
+    ['http://192.168.1.20:8000/v1', []],
+    ['http://user:pw@host.docker.internal:8000/v1', []],
+    ['native', []],
+    ['not a url', []],
+  ])('declares %s as the exact model authorities %j', async (endpoint, expected) => {
+    const { openCodeModelAuthorities } = await import('../provider-contracts/opencode.js');
+    expect(openCodeModelAuthorities(endpoint)).toEqual(expected);
+  });
+  it('reads the saved endpoint each time, so a changed port is what the next host start declares', async () => {
+    const { openCodeModelAuthorities } = await import('../provider-contracts/opencode.js');
+    vi.stubEnv('OPENCODE_BASE_URL', 'http://host.docker.internal:11434/v1');
+    expect(openCodeModelAuthorities()).toEqual(['host.docker.internal:11434']);
+    vi.stubEnv('OPENCODE_BASE_URL', 'http://host.docker.internal:8080/v1');
+    expect(openCodeModelAuthorities()).toEqual(['host.docker.internal:8080']);
+    vi.unstubAllEnvs();
+  });
+  it('never declares an authority from the shared ANTHROPIC_BASE_URL', async () => {
+    const { openCodeModelAuthorities } = await import('../provider-contracts/opencode.js');
+    vi.stubEnv('OPENCODE_BASE_URL', undefined);
+    vi.stubEnv('ANTHROPIC_BASE_URL', 'http://host.docker.internal:8000/v1');
+    expect(openCodeModelAuthorities()).toEqual([]);
+    vi.unstubAllEnvs();
+  });
 });

@@ -22,6 +22,16 @@ function insertMessage(id: string, threadId: string, kind = 'chat', text = id): 
     .run(id, kind, new Date().toISOString(), threadId, JSON.stringify({ text, prompt: text }));
 }
 
+function insertAgentMessage(id: string, content: object): void {
+  getInboundDb()
+    .prepare(
+      `INSERT INTO messages_in
+       (id, kind, timestamp, status, trigger, platform_id, channel_type, thread_id, content)
+       VALUES (?, 'chat', ?, 'pending', 1, 'ag-a', 'agent', NULL, ?)`,
+    )
+    .run(id, new Date().toISOString(), JSON.stringify(content));
+}
+
 function visibleRows() {
   return getUndeliveredMessages().filter((row) => row.kind === 'chat');
 }
@@ -127,6 +137,33 @@ describe('provider throws with active or queued turns', () => {
       [NOTICE, 'thread-b'],
       [NOTICE, 'thread-d'],
     ]);
+  });
+
+  it('notifies each abandoned a2a request, since the host routes by in_reply_to', async () => {
+    await runFailure(async function* (pushes) {
+      insertAgentMessage('a2a-1', { text: 'from session one' });
+      await waitFor(() => pushes.length === 1);
+      insertAgentMessage('a2a-2', { text: 'from session two' });
+      await waitFor(() => pushes.length === 2);
+      throw new Error(DIAGNOSTIC);
+    });
+    expect(
+      visibleRows()
+        .filter((row) => row.channel_type === 'agent')
+        .map((row) => [JSON.parse(row.content).failureNotice, row.in_reply_to]),
+    ).toEqual([
+      [true, 'a2a-1'],
+      [true, 'a2a-2'],
+    ]);
+  });
+
+  it('sends no notice for a queued turn woken only by a failure notice', async () => {
+    await runFailure(async function* (pushes) {
+      insertAgentMessage('a2a-notice', { text: 'Incorrect API key', failureNotice: true });
+      await waitFor(() => pushes.length === 1);
+      throw new Error(DIAGNOSTIC);
+    });
+    expect(visibleRows().map((row) => [row.channel_type, row.in_reply_to])).toEqual([['slack', 'request-a']]);
   });
 
   it('adds no failure notice after both turns completed', async () => {

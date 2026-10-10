@@ -1,7 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { isValidGroupFolder } from '../../src/group-folder.js';
-import { classifyPingResult, PING_AGENT_FOLDER } from './agent-ping.js';
+import * as setupLog from '../logs.js';
+import { classifyPingResult, logFirstChat, PING_AGENT_FOLDER } from './agent-ping.js';
+
+vi.mock('../logs.js', () => ({ step: vi.fn() }));
 
 it('uses a runtime-safe folder for the setup ping agent', () => {
   expect(isValidGroupFolder(PING_AGENT_FOLDER)).toBe(true);
@@ -37,4 +40,9 @@ describe('classifyPingResult', () => {
   it('treats empty output as no reply', () => {
     expect(classifyPingResult(0, '')).toBe('no_reply');
   });
+});
+
+it('logs the first-chat ping result to setup.log', () => {
+  logFirstChat('no_reply', 1200);
+  expect(setupLog.step).toHaveBeenCalledWith('first-chat', 'failed', 1200, { RESULT: 'no_reply' });
 });

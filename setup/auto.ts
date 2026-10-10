@@ -46,7 +46,7 @@ import {
 } from './channels/initial-setup.js';
 import { runInheritScript } from './lib/inherit-script.js';
 import { offerPortalReminder, portalEnabled, runImagePortal } from './portal.js';
-import { pingCliAgent, PING_AGENT_FOLDER, type PingResult } from './lib/agent-ping.js';
+import { logFirstChat, pingCliAgent, PING_AGENT_FOLDER, type PingResult } from './lib/agent-ping.js';
 import { getSetupProvider, listSetupProviders } from './providers/registry.js';
 import { applyProviderSkill, loadHostContractModules } from './providers/install.js';
 import {
@@ -520,6 +520,14 @@ async function main(): Promise<void> {
     if (!res.ok) {
       await fail('service', "Couldn't start NanoClaw.", 'See logs/nanoclaw.error.log for details.');
     }
+    if (res.terminal?.fields.PROXY === 'ignored_by_node') {
+      p.log.warn(
+        brandBody(
+          `Node ${res.terminal.fields.PROXY_NODE_VERSION} ignores the outbound proxy, so NanoClaw will connect directly. ` +
+            'Upgrade to Node 22.21+ or 24.5+ to use it.',
+        ),
+      );
+    }
     if (res.terminal?.fields.DOCKER_GROUP_STALE === 'true') {
       p.log.warn(brandBody("NanoClaw's permissions need a tweak before it can reach Docker."));
       p.log.message(
@@ -571,7 +579,9 @@ async function main(): Promise<void> {
           ),
         ),
       );
+      const pingStart = Date.now();
       const ping = await confirmAssistantResponds();
+      logFirstChat(ping, Date.now() - pingStart);
       if (ping === 'ok') {
         phEmit('first_chat_ready');
         const cleanupRawLog = setupLog.stepRawLog('cleanup-cli-agent');

@@ -43,6 +43,12 @@ export type RemovalAction =
    * of their API keys). .env is deliberately excluded from `delete-path`.
    */
   | { kind: 'backup-env'; envPath: string }
+  /**
+   * This copy's Compose projects, listed by project label at removal time
+   * (the host was alive through the confirm phase): containers (they hold the
+   * volumes), then volumes, then networks.
+   */
+  | { kind: 'rm-project-residue'; runtime: string; projects: string[] }
   | { kind: 'delete-path'; item: PathItem }
   | { kind: 'delete-runtime-path'; item: PathItem };
 
@@ -96,6 +102,14 @@ export function buildRemovalPlan(inv: Inventory, d: Decisions): RemovalAction[] 
   }
 
   if (d.data) {
+    // Before .env and data/: service data is encrypted with keys kept there.
+    if (inv.projects) {
+      actions.push({
+        kind: 'rm-project-residue',
+        runtime: inv.containerRuntime,
+        projects: inv.projects.names,
+      });
+    }
     const env = inv.data.find((i) => path.basename(i.path) === '.env');
     if (env) actions.push({ kind: 'backup-env', envPath: env.path });
     for (const item of inv.data) {
