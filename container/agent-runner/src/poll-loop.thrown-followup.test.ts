@@ -10,7 +10,8 @@ import type { AgentProvider, ProviderEvent, ProviderExchange } from './providers
 
 const CONTRACT = { textDelivery: 'mid-turn-complete', commands: { formatting: 'xml' } } as const;
 const DIAGNOSTIC = 'Private native provider diagnostic';
-const NOTICE = 'The agent run failed. Check the logs for details.';
+const NOTICE =
+  "Sorry, something went wrong and I couldn't answer. Whoever runs this NanoClaw can look into it using the logs: https://docs.nanoclaw.dev/operate/troubleshooting#start-here";
 
 function insertMessage(id: string, threadId: string, kind = 'chat', text = id): void {
   getInboundDb()

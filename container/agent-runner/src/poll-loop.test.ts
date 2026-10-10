@@ -459,7 +459,7 @@ describe('error result with no <message> envelope', () => {
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
     expect(JSON.parse(out[0].content)).toEqual({
-      text: 'The agent run failed. Check the logs for details.',
+      text: "Sorry, something went wrong and I couldn't answer. Whoever runs this NanoClaw can look into it using the logs: https://docs.nanoclaw.dev/operate/troubleshooting#start-here",
       failureNotice: true,
     });
     expect(out[0].platform_id).toBe('chan-1');
@@ -477,7 +477,7 @@ describe('error result with no <message> envelope', () => {
     const exchanges: ProviderExchange[] = [];
     await processQuery(query, ERR_ROUTING, ['m1'], 'mock', (exchange) => exchanges.push(exchange), 'prompt', undefined);
     expect(getUndeliveredMessages().map((row) => JSON.parse(row.content).text)).toEqual([
-      'The agent run failed. Check the logs for details.',
+      "Sorry, something went wrong and I couldn't answer. Whoever runs this NanoClaw can look into it using the logs: https://docs.nanoclaw.dev/operate/troubleshooting#start-here",
     ]);
     expect(exchanges).toHaveLength(1);
     expect(exchanges[0].status).toBe('error');
@@ -487,7 +487,11 @@ describe('error result with no <message> envelope', () => {
 
   it.each([
     ['provider error', 'billing hard-stop', 'billing hard-stop'],
-    ['fallback text', undefined, 'The agent run failed. Check the logs for details.'],
+    [
+      'fallback text',
+      undefined,
+      "Sorry, something went wrong and I couldn't answer. Whoever runs this NanoClaw can look into it using the logs: https://docs.nanoclaw.dev/operate/troubleshooting#start-here",
+    ],
   ])('logs a skipped notice once when answering a failure notice: %s', async (_label, error, expected) => {
     const { query } = makeResultQuery({ type: 'result', text: '', isError: true, error });
     const noticeRouting = { ...AGENT_ROUTING, failureNoticeWake: true };
@@ -683,7 +687,7 @@ it('delivers completed wrapped text while recording the failed turn exactly once
 
   expect(getUndeliveredMessages().map((row) => JSON.parse(row.content).text)).toEqual([
     'Completed before failure.',
-    'The agent run failed. Check the logs for details.',
+    "Sorry, something went wrong and I couldn't answer. Whoever runs this NanoClaw can look into it using the logs: https://docs.nanoclaw.dev/operate/troubleshooting#start-here",
   ]);
   expect(exchanges).toEqual([{ prompt: 'prompt', result: text, continuation: 'sess-1', status: 'error' }]);
   expect(pushes).toHaveLength(0);
