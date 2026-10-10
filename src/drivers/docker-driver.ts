@@ -60,6 +60,13 @@ export interface DockerDriverOptions extends MountPolicy {
 const WATCH_RECOVERY_BASE_MS = 1_000;
 const WATCH_RECOVERY_MAX_MS = 30_000;
 
+/**
+ * `docker rm --force` is rejected while Docker's own `--rm` auto-removal is
+ * still running; poll briefly for the container to disappear (see `#confirmRemoved`).
+ */
+const REMOVAL_CONFIRM_ATTEMPTS = 10;
+const REMOVAL_CONFIRM_INTERVAL_MS = 200;
+
 interface InstallWatch {
   subscribers: Set<(event: SessionEvent) => void>;
   attempt: number;
@@ -466,6 +473,8 @@ class DockerHandle implements SessionHandle {
   #proc: SupervisedProcess | null = null;
   /** Log hygiene only — events are never intent-filtered here (that is the hub's job). */
   #stopping = false;
+  /** In-flight or completed teardown; cleared on failure so a later stop() retries. */
+  #stopPromise: Promise<void> | undefined;
   /** Exit code the attach process observed; undefined until it exits. */
   #attachExitCode: number | null | undefined;
   readonly #stderrTail: string[] = [];
@@ -574,7 +583,19 @@ class DockerHandle implements SessionHandle {
    * implementation behavior (it happens to serialize workspace single-writer
    * during termination), not a contract guarantee — see `SessionHandle.stop`.
    */
-  async stop(reason: string): Promise<void> {
+  stop(reason: string): Promise<void> {
+    // Concurrent stops share one teardown: the removal poll yields, and a second
+    // teardown could finish first and see a successor reuse this container name.
+    // A failed teardown is not cached — container-runner's finishAndResolve
+    // relies on a second stop() to retry.
+    this.#stopPromise ??= this.#teardown(reason).catch((error: unknown) => {
+      this.#stopPromise = undefined;
+      throw error;
+    });
+    return this.#stopPromise;
+  }
+
+  async #teardown(reason: string): Promise<void> {
     this.#stopping = true;
     log.info('Stopping session container', { containerName: this.name, reason });
     const grace = String(this.pendingSpec?.stopGraceSeconds ?? 1);
@@ -588,7 +609,7 @@ class DockerHandle implements SessionHandle {
     try {
       this.cli.run(['rm', '--force', this.name]);
     } catch (error) {
-      this.#confirmRemoved(this.name, error);
+      await this.#confirmRemoved(this.name, error);
     }
     for (const auxiliary of [...this.auxiliaryNames].reverse()) {
       try {
@@ -599,7 +620,7 @@ class DockerHandle implements SessionHandle {
       try {
         this.cli.run(['rm', '--force', auxiliary]);
       } catch (error) {
-        this.#confirmRemoved(auxiliary, error);
+        await this.#confirmRemoved(auxiliary, error);
       }
     }
     if (this.privateNetwork) {
@@ -611,13 +632,18 @@ class DockerHandle implements SessionHandle {
     }
   }
 
-  /** A successful daemon query distinguishes auto-removal from a daemon outage. */
-  #confirmRemoved(name: string, error: unknown): void {
-    try {
-      const remaining = this.cli.run(['ps', '-a', '--filter', `name=^/${name}$`, '--format', '{{.Names}}']);
-      if (!remaining.trim()) return;
-    } catch (probeError) {
-      throw normalizeDockerError(probeError);
+  /** Polls until an in-flight auto-removal finishes; a failing probe (daemon outage) throws at once. */
+  async #confirmRemoved(name: string, error: unknown): Promise<void> {
+    for (let attempt = 1; attempt <= REMOVAL_CONFIRM_ATTEMPTS; attempt++) {
+      try {
+        const remaining = this.cli.run(['ps', '-a', '--filter', `name=^/${name}$`, '--format', '{{.Names}}']);
+        if (!remaining.trim()) return;
+      } catch (probeError) {
+        throw normalizeDockerError(probeError);
+      }
+      if (attempt < REMOVAL_CONFIRM_ATTEMPTS) {
+        await new Promise((resolve) => setTimeout(resolve, REMOVAL_CONFIRM_INTERVAL_MS));
+      }
     }
     throw normalizeDockerError(error);
   }
