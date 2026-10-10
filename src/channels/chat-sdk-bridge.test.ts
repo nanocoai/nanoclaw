@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Adapter, AdapterPostableMessage, RawMessage } from 'chat';
 
-import { createChatSdkBridge, splitForLimit } from './chat-sdk-bridge.js';
+import { buttonRows, createChatSdkBridge, splitForLimit } from './chat-sdk-bridge.js';
 
 vi.mock('../webhook-server.js', () => ({
   registerWebhookAdapter: vi.fn(),
@@ -285,6 +285,17 @@ describe('createChatSdkBridge.setup — webhook route and state namespace', () =
   });
 });
 
+describe('buttonRows', () => {
+  it('keeps up to 4 buttons in one row and wraps longer lists by 3', () => {
+    expect(buttonRows([1, 2, 3, 4])).toEqual([[1, 2, 3, 4]]);
+    expect(buttonRows([1, 2, 3, 4, 5])).toEqual([
+      [1, 2, 3],
+      [4, 5],
+    ]);
+    expect(buttonRows([])).toEqual([[]]);
+  });
+});
+
 describe('createChatSdkBridge.deliver — ask_question cards (button styles)', () => {
   // Approval cards color their buttons (Slack: primary→green, danger→red).
   // The bridge must forward the normalized option style into Button() and
@@ -332,6 +343,32 @@ describe('createChatSdkBridge.deliver — ask_question cards (button styles)', (
     const buttons = buttonsFrom(calls);
     expect(buttons.map((b) => b.label)).toEqual(['Approve', 'Deny', 'Skip']);
     expect(buttons.map((b) => b.style)).toEqual(['primary', 'danger', undefined]);
+  });
+
+  it('splits a long option list into rows of 3 so no option is cut off', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+    });
+    const labels = Array.from({ length: 10 }, (_, i) => `Agent ${i + 1}`);
+    await bridge.deliver('telegram:1', null, {
+      kind: 'chat-sdk',
+      content: {
+        type: 'ask_question',
+        questionId: 'q-many',
+        title: 'Choose an agent',
+        question: 'Which?',
+        options: labels,
+      },
+    });
+    const msg = calls[0].message as {
+      card?: { children?: Array<{ type?: string; children?: CapturedButton[] }> };
+    };
+    const rows = (msg.card?.children ?? []).filter((c) => c.type === 'actions').map((r) => r.children ?? []);
+    expect(rows.map((r) => r.length)).toEqual([3, 3, 3, 1]);
+    expect(rows.flat().map((b) => b.label)).toEqual(labels);
+    expect(rows.flat().map((b) => b.id)).toEqual(labels.map((_, i) => `ncq:q-many:${i}`));
   });
 
   it('drops invalid styles before they reach the Button (delivery goes through normalizeOptions)', async () => {
