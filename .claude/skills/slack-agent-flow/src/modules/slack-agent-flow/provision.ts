@@ -25,6 +25,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
+import { rotateManagerToken } from '../../provisioning/slack-app.js';
 import { appendToEnvList, readEnvValue, upsertEnvKey } from './env-file.js';
 import { SlackFlowError, type ProvisionInput, type ProvisionResult } from './types.js';
 
@@ -724,7 +725,11 @@ export async function provisionSlackApp(input: ProvisionInput): Promise<Provisio
             clientVersion: readClientVersion(rootDir),
           },
         )
-      : await provisionDirect(credential.managerToken, displayName, allowGuests);
+      : // Rotate here rather than at credential resolution: resolution runs on
+        // every capability check, provisioning is the only caller that needs a
+        // live token, and a configuration token is only good for 12 hours. A
+        // no-op when SLACK_MANAGER_REFRESH_TOKEN is unset.
+        await provisionDirect((await rotateManagerToken(rootDir)) ?? credential.managerToken, displayName, allowGuests);
 
   // Persist what we have before anything else can fail. App token, app id and
   // instance slug land even when auto-install was refused, so a later run can

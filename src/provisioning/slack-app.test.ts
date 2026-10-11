@@ -18,6 +18,7 @@ import {
   readInstallToken,
   readManagerToken,
   readServiceBase,
+  rotateManagerToken,
   slackServiceForRegistry,
   waitForInstall,
 } from './slack-app.js';
@@ -526,5 +527,89 @@ describe('deferred install completion', () => {
       });
       expect(fetchMock).toHaveBeenCalledOnce();
     });
+  });
+});
+
+describe('rotateManagerToken', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rotate-'));
+    delete process.env.SLACK_MANAGER_TOKEN;
+    delete process.env.SLACK_MANAGER_REFRESH_TOKEN;
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+    vi.unstubAllGlobals();
+  });
+
+  it('is a no-op without a refresh token, so installs that never seeded one are unaffected', async () => {
+    fs.writeFileSync(path.join(dir, '.env'), 'SLACK_MANAGER_TOKEN=xoxe.xoxp-old\n');
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+
+    await expect(rotateManagerToken(dir)).resolves.toBeUndefined();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('persists the successor refresh token before returning the new access token', async () => {
+    // Rotation invalidates the refresh token it consumed. If the new pair is
+    // not on disk before the caller proceeds, a later failure strands the
+    // install with no way back except generating both by hand.
+    fs.writeFileSync(
+      path.join(dir, '.env'),
+      'SLACK_MANAGER_TOKEN=xoxe.xoxp-old\nSLACK_MANAGER_REFRESH_TOKEN=xoxe-1-refresh-old\n',
+    );
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        json: async () => ({
+          ok: true,
+          token: 'xoxe.xoxp-new',
+          refresh_token: 'xoxe-1-refresh-new',
+          exp: 1789999999,
+        }),
+      })),
+    );
+
+    await expect(rotateManagerToken(dir)).resolves.toBe('xoxe.xoxp-new');
+
+    const env = fs.readFileSync(path.join(dir, '.env'), 'utf-8');
+    expect(env).toContain('SLACK_MANAGER_TOKEN=xoxe.xoxp-new');
+    expect(env).toContain('SLACK_MANAGER_REFRESH_TOKEN=xoxe-1-refresh-new');
+  });
+
+  it('sends the refresh token as an argument, with no authorization header', async () => {
+    // tooling.tokens.rotate takes the refresh token as a parameter and requires
+    // no scopes; sending it as a bearer is rejected.
+    fs.writeFileSync(path.join(dir, '.env'), 'SLACK_MANAGER_REFRESH_TOKEN=xoxe-1-refresh-old\n');
+    const fetchSpy = vi.fn(async () => ({
+      json: async () => ({ ok: true, token: 't', refresh_token: 'r' }),
+    }));
+    vi.stubGlobal('fetch', fetchSpy);
+
+    await rotateManagerToken(dir);
+
+    const [url, init] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toContain('tooling.tokens.rotate');
+    expect(String(init.body)).toContain('refresh_token=xoxe-1-refresh-old');
+    expect((init.headers as Record<string, string>).Authorization).toBeUndefined();
+  });
+
+  it('throws rather than falling back, so a dead chain names itself', async () => {
+    // Falling back to the stored token would turn "your refresh token is dead"
+    // into a token_expired from a later call — the error this exists to remove.
+    fs.writeFileSync(
+      path.join(dir, '.env'),
+      'SLACK_MANAGER_TOKEN=xoxe.xoxp-old\nSLACK_MANAGER_REFRESH_TOKEN=xoxe-1-refresh-dead\n',
+    );
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ json: async () => ({ ok: false, error: 'invalid_refresh_token' }) })),
+    );
+
+    await expect(rotateManagerToken(dir)).rejects.toThrow(/invalid_refresh_token/);
+    expect(fs.readFileSync(path.join(dir, '.env'), 'utf-8')).toContain('SLACK_MANAGER_TOKEN=xoxe.xoxp-old');
   });
 });
