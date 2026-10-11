@@ -397,6 +397,43 @@ export function computeWhatsappDefaults(shared: boolean): ChannelDefaults {
       };
 }
 
+/**
+ * A promise that settles exactly once, from whichever comes first: an
+ * external `resolve`/`reject` call, or `timeoutMs` elapsing. Used to bound
+ * `setup()`'s wait for the socket's first `connection.update` — Baileys
+ * doesn't guarantee that event ever fires (a logged-out session with nobody
+ * present to re-scan a QR produces neither `open` nor a `close`/loggedOut
+ * event), so an unbounded wait here hangs `initChannelAdapters()`, which
+ * awaits every channel's `setup()` sequentially, for the rest of host
+ * startup. `onTimeout` fires only when the timeout actually wins the race.
+ */
+export function createSetupGate(
+  timeoutMs: number,
+  onTimeout: () => void,
+): { promise: Promise<void>; resolve: () => void; reject: (err: Error) => void } {
+  let resolveFn: (() => void) | undefined;
+  let rejectFn: ((err: Error) => void) | undefined;
+  const settle = (fn: (() => void) | undefined): void => {
+    fn?.();
+    resolveFn = undefined;
+    rejectFn = undefined;
+  };
+  const promise = new Promise<void>((resolve, reject) => {
+    resolveFn = resolve;
+    rejectFn = reject;
+    setTimeout(() => {
+      if (!resolveFn) return; // already settled by resolve()/reject()
+      onTimeout();
+      settle(resolveFn);
+    }, timeoutMs);
+  });
+  return {
+    promise,
+    resolve: () => settle(resolveFn),
+    reject: (err) => settle(rejectFn ? () => rejectFn!(err) : undefined),
+  };
+}
+
 // Adapter-internal env: same .env keys as always (setup/channels/whatsapp.ts
 // still writes them), but read here instead of imported from core config —
 // shared-number handling is channel-local.
@@ -404,6 +441,11 @@ const waEnv = readEnvFile(['ASSISTANT_NAME', 'ASSISTANT_HAS_OWN_NUMBER']);
 const ASSISTANT_NAME = waEnv.ASSISTANT_NAME || 'Andy';
 const WHATSAPP_SHARED = resolveSharedMode(waEnv.ASSISTANT_HAS_OWN_NUMBER);
 const WHATSAPP_DEFAULTS: ChannelDefaults = computeWhatsappDefaults(WHATSAPP_SHARED);
+
+// initChannelAdapters() awaits every channel's setup() sequentially, so an
+// unattended QR/pairing wait past this point would otherwise hang the whole
+// host — no other channel connects, no scheduled task fires. See createSetupGate.
+const SETUP_TIMEOUT_MS = 45_000;
 
 registerChannelAdapter('whatsapp', {
   factory: () => {
@@ -977,12 +1019,21 @@ registerChannelAdapter('whatsapp', {
       async setup(hostConfig: ChannelSetup) {
         setupConfig = hostConfig;
 
-        // Connect and wait for first open
-        await new Promise<void>((resolve, reject) => {
-          resolveFirstOpen = resolve;
-          rejectFirstOpen = reject;
-          connectSocket().catch(reject);
+        // Connect and wait for first open, but never longer than
+        // SETUP_TIMEOUT_MS — see createSetupGate for why an unbounded wait
+        // here is unsafe. Connection continues in the background past the
+        // timeout; whichever of connectSocket's eventual event or the gate's
+        // own timeout settles first wins, the other is a no-op.
+        const gate = createSetupGate(SETUP_TIMEOUT_MS, () => {
+          log.warn(
+            'WhatsApp did not reach connection:open within timeout — continuing host startup, connecting in background',
+            { timeoutMs: SETUP_TIMEOUT_MS },
+          );
         });
+        resolveFirstOpen = gate.resolve;
+        rejectFirstOpen = gate.reject;
+        connectSocket().catch(gate.reject);
+        await gate.promise;
 
         log.info('WhatsApp adapter initialized');
       },
