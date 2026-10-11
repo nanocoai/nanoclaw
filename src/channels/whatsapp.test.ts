@@ -20,6 +20,7 @@ import {
   hasMentionPills,
   isBotMentionedInGroup,
   isBotTypedMention,
+  matchPendingQuestion,
   parseWhatsAppMentions,
   resolveSharedMode,
   rewriteBotLidMention,
@@ -329,5 +330,56 @@ describe('appendMediaFailureNote', () => {
     expect(appendMediaFailureNote('', ['image', 'document'])).toBe(
       '[image could not be downloaded] [document could not be downloaded]',
     );
+  });
+});
+
+describe('matchPendingQuestion', () => {
+  const opt = (label: string, value = label) => ({ label, selectedLabel: label, value });
+  const approval = (questionId: string, extra: string) => ({
+    questionId,
+    options: [opt('Approve', `approve:${questionId}`), opt('Reject', `reject:${questionId}`), opt(extra)],
+  });
+
+  it('keeps an earlier question answerable after a second one arrives', () => {
+    // The real failure: pendingQuestions was keyed by chat and held one entry,
+    // so a second card silently overwrote the first and no reply could ever
+    // reach it — the card stayed on screen and its row stayed pending forever.
+    const pendings = [approval('q1', 'Snooze'), approval('q2', 'Escalate')];
+    expect(matchPendingQuestion(pendings, '/snooze')?.pending.questionId).toBe('q1');
+  });
+
+  it('resolves the newest question when two cards share an option label', () => {
+    // Unavoidable ambiguity: WhatsApp replies are plain text, so nothing ties
+    // "/reject" to the card it came from. Newest wins — that is the card the
+    // user was just shown.
+    const pendings = [approval('q1', 'Snooze'), approval('q2', 'Escalate')];
+    const hit = matchPendingQuestion(pendings, '/reject');
+    expect(hit?.pending.questionId).toBe('q2');
+    expect(hit?.option.value).toBe('reject:q2');
+  });
+
+  it('reports the index so only the answered question is dropped', () => {
+    const pendings = [approval('q1', 'Snooze'), approval('q2', 'Escalate')];
+    const hit = matchPendingQuestion(pendings, '/snooze')!;
+    expect(hit.index).toBe(0);
+    pendings.splice(hit.index, 1);
+    // The other card survives and is still answerable.
+    expect(matchPendingQuestion(pendings, '/escalate')?.pending.questionId).toBe('q2');
+  });
+
+  it('returns undefined when no pending question offers the command', () => {
+    expect(matchPendingQuestion([approval('q1', 'Snooze')], '/nope')).toBeUndefined();
+  });
+
+  it('returns undefined when nothing is pending', () => {
+    expect(matchPendingQuestion([], '/approve')).toBeUndefined();
+  });
+
+  it('matches regardless of case and surrounding whitespace', () => {
+    expect(matchPendingQuestion([approval('q1', 'Snooze')], '  /APPROVE  ')?.option.value).toBe('approve:q1');
+  });
+
+  it('matches a multi-word label through its slash command form', () => {
+    expect(matchPendingQuestion([approval('q1', 'Ask Again')], '/ask-again')?.option.label).toBe('Ask Again');
   });
 });
