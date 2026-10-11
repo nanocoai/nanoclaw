@@ -65,6 +65,21 @@ function extractReplyContext(raw: Record<string, any>): ReplyContext | null {
   };
 }
 
+/**
+ * Telegram service messages (topic hidden/unhidden/created, pins, members
+ * joining, …) arrive as messages with no text and no attachments. So do
+ * stickers, which the Chat SDK does not map to an attachment. They are
+ * not addressed to the agent; forwarding them makes it answer "you sent an
+ * empty message".
+ */
+function isEmptyInbound(message: InboundMessage): boolean {
+  if (message.kind !== 'chat-sdk' || !message.content || typeof message.content !== 'object') return false;
+  const content = message.content as { text?: unknown; attachments?: unknown };
+  const text = typeof content.text === 'string' ? content.text.trim() : '';
+  const hasAttachments = Array.isArray(content.attachments) && content.attachments.length > 0;
+  return !text && !hasAttachments;
+}
+
 /** Look up the bot username via Telegram getMe. Cached after first call. */
 async function fetchBotUsername(token: string): Promise<string | null> {
   try {
@@ -219,6 +234,10 @@ export function createTelegramInboundInterceptor(
   instanceKey: string,
 ): ChannelSetup['onInbound'] {
   return async (platformId, threadId, message) => {
+    if (isEmptyInbound(message)) {
+      log.debug('Telegram: dropping empty inbound (service message)', { platformId, id: message.id });
+      return;
+    }
     const { text, authorUserId } = readInboundFields(message);
     const botUsername = await botUsernamePromise;
 
