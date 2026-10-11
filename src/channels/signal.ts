@@ -817,9 +817,10 @@ export function createSignalAdapter(config: {
   async function waitForDaemon(): Promise<boolean> {
     const maxWait = 30_000;
     const pollInterval = 1000;
-    const start = Date.now();
+    // Monotonic: an NTP step at boot (no RTC on a Pi) must not expire the wait.
+    const start = performance.now();
 
-    while (Date.now() - start < maxWait) {
+    while (performance.now() - start < maxWait) {
       if (daemon?.isExited()) return false;
       const ok = await signalTcpCheck(config.tcpHost, config.tcpPort);
       if (ok) return true;
