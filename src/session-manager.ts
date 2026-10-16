@@ -8,7 +8,7 @@ import path from 'path';
 
 import { AnchoredDir } from './anchored-dir.js';
 import { deriveAttachmentName } from './attachment-naming.js';
-import { isSafeAttachmentName } from './attachment-safety.js';
+import { isSafeAttachmentName, safeAttachmentDirName } from './attachment-safety.js';
 import type { OutboundFile } from './channels/adapter.js';
 import { DATA_DIR } from './config.js';
 import { getMessagingGroup } from './db/messaging-groups.js';
@@ -329,9 +329,16 @@ export async function writeSessionMessage(
  * mounted writable into the container, so the agent owns the `inbox` and
  * `inbox/<msgId>` names and can turn either into a symlink at any time.
  *
+ * `messageId` is an opaque identifier, not necessarily a filename — some
+ * channels (Google Chat) pass resource paths like `spaces/<s>/messages/<id>`
+ * containing `/`. `safeAttachmentDirName` derives a single safe path
+ * component from it (passing already-safe ids through unchanged) so those
+ * channels stage attachments instead of silently dropping them (#3206); it
+ * does not weaken containment, which still comes from the defenses below.
+ *
  * Defenses:
- *   1. basename check on `messageId` and `filename`.
- *   2. `inbox/<messageId>` is opened as an AnchoredDir, refusing symlinks, and
+ *   1. basename check on `filename` (and on `messageId` before sanitizing).
+ *   2. `inbox/<dir>` is opened as an AnchoredDir, refusing symlinks, and
  *      every attachment is written through that descriptor, so a later swap
  *      of either name cannot redirect a write.
  *   3. exclusive create: never follows or overwrites an existing entry.
@@ -352,9 +359,15 @@ function extractAttachmentFiles(
   const attachments = parsed.attachments as Array<Record<string, unknown>> | undefined;
   if (!Array.isArray(attachments)) return contentStr;
 
-  if (!isSafeAttachmentName(messageId)) {
-    log.warn('Rejecting unsafe inbound message id', { messageId });
-    return contentStr;
+  // messageId is an opaque identifier, not necessarily a filename — some
+  // channels (Google Chat) hand us resource paths like
+  // `spaces/<space>/messages/<id>` that contain `/`. Sanitize into a single
+  // safe path component rather than dropping the attachment outright (#3206).
+  // Containment still comes from AnchoredDir + exclusive create below, not
+  // from this value being "safe" on its own.
+  const inboxMessageId = safeAttachmentDirName(messageId);
+  if (inboxMessageId !== messageId) {
+    log.debug('Sanitized inbound message id for inbox path', { messageId, inboxMessageId });
   }
 
   // Opened lazily on the first attachment that actually carries bytes, so a
@@ -378,9 +391,9 @@ function extractAttachmentFiles(
 
       if (inbox === undefined) {
         try {
-          inbox = AnchoredDir.open(sessionDir(agentGroupId, sessionId), ['inbox', messageId], true);
+          inbox = AnchoredDir.open(sessionDir(agentGroupId, sessionId), ['inbox', inboxMessageId], true);
         } catch (err) {
-          log.warn('Rejecting unsafe inbox directory', { messageId, err });
+          log.warn('Rejecting unsafe inbox directory', { messageId, inboxMessageId, err });
           inbox = null;
         }
       }
@@ -402,10 +415,10 @@ function extractAttachmentFiles(
       }
 
       att.name = filename;
-      att.localPath = `inbox/${messageId}/${filename}`;
+      att.localPath = `inbox/${inboxMessageId}/${filename}`;
       delete att.data;
       changed = true;
-      log.debug('Saved attachment to inbox', { messageId, filename, size: att.size });
+      log.debug('Saved attachment to inbox', { messageId, inboxMessageId, filename, size: att.size });
     }
   } finally {
     inbox?.close();
