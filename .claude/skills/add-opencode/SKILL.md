@@ -52,12 +52,12 @@ Automatic help before payload
 installation is optional and is not part of the runtime contract.
 
 Install and refresh require host contract version 1 and credential-connection
-seam version 1. The compatibility predicate
+seam version 1 or later. The compatibility predicate
 below guards every subsequent step, so an unsupported core receives no partial
 payload or dependency changes. Update core first if it reports a missing prerequisite.
 
 ```nc:run effect:refresh capture:opencode_core_ready validate:^yes$
-node -e "const fs=require('fs'); const p='src/provider-contracts/registry.ts', g='setup/gateways/credential-store.ts'; if(fs.existsSync(p) && /PROVIDER_HOST_CONTRACT_SEAM_VERSION = 1/.test(fs.readFileSync(p,'utf8')) && fs.existsSync(g) && /PROVIDER_CREDENTIAL_CONNECTION_SEAM_VERSION = 1/.test(fs.readFileSync(g,'utf8'))) console.log('yes'); else console.log('no')"
+node -e "const fs=require('fs'); const p='src/provider-contracts/registry.ts', g='setup/gateways/credential-store.ts'; if(fs.existsSync(p) && /PROVIDER_HOST_CONTRACT_SEAM_VERSION = 1/.test(fs.readFileSync(p,'utf8')) && fs.existsSync(g) && /PROVIDER_CREDENTIAL_CONNECTION_SEAM_VERSION = [1-9]/.test(fs.readFileSync(g,'utf8'))) console.log('yes'); else console.log('no')"
 ```
 
 Copy only the files listed below from this skill's `payload/` to the matching
