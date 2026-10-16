@@ -111,7 +111,17 @@ export function updateTask(db: Database.Database, taskId: string, update: TaskUp
     for (const row of rows) {
       let content = row.content;
       if (mergeContent) {
-        const parsed = JSON.parse(row.content) as Record<string, unknown>;
+        // Same LEGACY-COMPAT fallback as parseTaskContent() (task-content.ts):
+        // a pre-JSON-envelope row is plain-string prompt text, not JSON. Every
+        // other reader already tolerates this; this merge path didn't, and
+        // would throw instead of upgrading the row on its first edit.
+        let parsed: Record<string, unknown>;
+        try {
+          parsed = JSON.parse(row.content) as Record<string, unknown>;
+          // eslint-disable-next-line no-catch-all/no-catch-all -- LEGACY-COMPAT(v1-tasks): plain-string content predating the JSON envelope
+        } catch {
+          parsed = { prompt: row.content, script: null };
+        }
         if (update.prompt !== undefined) parsed.prompt = update.prompt;
         if (update.script !== undefined) parsed.script = update.script;
         content = JSON.stringify(parsed);
