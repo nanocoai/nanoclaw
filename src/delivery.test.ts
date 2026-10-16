@@ -601,6 +601,96 @@ describe('deliverSessionMessages — task_log rows (one-door task delivery)', ()
   });
 });
 
+describe('deliverSessionMessages — undeliverable rows (no routing fields)', () => {
+  // send_card / ask_user_question write the session's bound routing, which is
+  // null in a session with no attached chat (a task run). Such a row can never
+  // be delivered: it must end as status='failed' on the FIRST pass (no retry
+  // budget), never 'delivered', and the agent must be told — before this fix the
+  // row was acknowledged as delivered with platform_message_id=NULL and the
+  // agent's "Card sent" stood uncorrected.
+  function insertUnroutable(agentGroupId: string, sessionId: string, msgId: string, content: unknown): void {
+    const db = new Database(outboundDbPath(agentGroupId, sessionId));
+    db.prepare(
+      `INSERT INTO messages_out (id, timestamp, kind, content)
+       VALUES (?, datetime('now'), 'chat-sdk', ?)`,
+    ).run(msgId, JSON.stringify(content));
+    db.close();
+  }
+
+  function readOutcome(agentGroupId: string, sessionId: string, msgId: string) {
+    const db = new Database(inboundDbPath(agentGroupId, sessionId), { readonly: true });
+    const delivered = db
+      .prepare('SELECT status, platform_message_id FROM delivered WHERE message_out_id = ?')
+      .get(msgId) as { status: string; platform_message_id: string | null } | undefined;
+    const notices = db
+      .prepare("SELECT content, trigger FROM messages_in WHERE channel_type = 'agent' ORDER BY seq ASC")
+      .all() as Array<{ content: string; trigger: number }>;
+    db.close();
+    return { delivered, notices };
+  }
+
+  it('fails a destination-less card on the first pass and wakes the chat session with a notice', async () => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertUnroutable('ag-1', session.id, 'card-1', { type: 'card', card: { title: 'T' } });
+
+    const calls: string[] = [];
+    setDeliveryAdapter({
+      async deliver(_c, _p, _t, _k, content) {
+        calls.push(content);
+        return 'pm';
+      },
+    });
+    await deliverSessionMessages(session);
+
+    expect(calls).toHaveLength(0); // nothing to send to
+    const { delivered, notices } = readOutcome('ag-1', session.id, 'card-1');
+    expect(delivered?.status).toBe('failed');
+    expect(delivered?.platform_message_id).toBeNull();
+    expect(notices).toHaveLength(1);
+    const content = JSON.parse(notices[0].content);
+    expect(content.failureNotice).toBe(true);
+    expect(content.sender).toBe('system');
+    expect(content.text).toContain('card (id card-1)');
+    expect(content.text).toContain('send_message');
+    expect(notices[0].trigger).toBe(1); // a chat session is woken to resend correctly
+
+    // Second pass: already failed — no retry, no second notice.
+    await deliverSessionMessages(session);
+    expect(calls).toHaveLength(0);
+    expect(readOutcome('ag-1', session.id, 'card-1').notices).toHaveLength(1);
+  });
+
+  it('in a task run: fails the row, writes the series run log, and leaves a non-waking notice', async () => {
+    await seedAgentAndChannel();
+    const { session } = await resolveTaskSession('ag-1', 'daily-digest-a1b2');
+    insertUnroutable('ag-1', session.id, 'q-1', {
+      type: 'ask_question',
+      questionId: 'q-1',
+      title: 'Pick',
+      question: 'Which?',
+      options: ['a', 'b'],
+    });
+
+    setDeliveryAdapter({
+      async deliver() {
+        throw new Error('adapter must not be called for an unroutable row');
+      },
+    });
+    await deliverSessionMessages(session);
+
+    const { delivered, notices } = readOutcome('ag-1', session.id, 'q-1');
+    expect(delivered?.status).toBe('failed');
+    expect(notices).toHaveLength(1);
+    expect(JSON.parse(notices[0].content).text).toContain('question (id q-1)');
+    expect(notices[0].trigger).toBe(0); // a finished task run is not restarted for a notice
+
+    const logFile = `${TEST_DIR}/groups/test-agent/tasks/daily-digest-a1b2.md`;
+    expect(fs.existsSync(logFile)).toBe(true);
+    expect(fs.readFileSync(logFile, 'utf8')).toContain('Not delivered: your question (id q-1)');
+  });
+});
+
 describe('deliverSessionMessages — batch preview hooks', () => {
   it('hooks see the whole undelivered batch before row processing; a throwing hook never breaks delivery', async () => {
     await seedAgentAndChannel();
