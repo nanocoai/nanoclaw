@@ -24,6 +24,10 @@ If not on macOS, stop and tell the user:
 which swiftc
 ```
 
+```nc:run effect:check
+test "$(uname -s)" = Darwin && command -v swiftc >/dev/null
+```
+
 If not found, tell the user:
 
 > Xcode Command Line Tools are required. Install them by running:
@@ -53,12 +57,20 @@ mkdir -p dist
 swiftc -O -o dist/statusbar "${CLAUDE_SKILL_DIR}/add/src/statusbar.swift"
 ```
 
+```nc:run effect:external
+mkdir -p dist && swiftc -O -o dist/statusbar .claude/skills/add-macos-statusbar/add/src/statusbar.swift
+```
+
 This produces a small native binary at `dist/statusbar`.
 
 On macOS Sequoia or later, clear the quarantine attribute so the binary can run:
 
 ```bash
 xattr -cr dist/statusbar
+```
+
+```nc:run effect:external
+xattr -cr dist/statusbar 2>/dev/null || true
 ```
 
 ### Create the launchd plist

@@ -66,6 +66,13 @@ cp $S/ollama-env.ts             src/ollama-env.ts
 cp $S/ollama-wiring.test.ts     src/ollama-wiring.test.ts
 ```
 
+```nc:copy
+ollama-mcp-stdio.ts -> container/agent-runner/src/ollama-mcp-stdio.ts
+ollama-registration.test.ts -> container/agent-runner/src/ollama-registration.test.ts
+ollama-env.ts -> src/ollama-env.ts
+ollama-wiring.test.ts -> src/ollama-wiring.test.ts
+```
+
 ### Register the MCP server in the agent-runner
 
 Edit `container/agent-runner/src/index.ts`. Find the `mcpServers` object that currently looks like this:
@@ -161,6 +168,10 @@ If `add-atomic-chat-tool` (or another local-model tool) has already turned this 
 multi-branch block, just add an `else if (line.includes('[OLLAMA]'))` branch instead of
 replacing it.
 
+```nc:run
+bash .claude/skills/add-ollama-tool/apply.sh
+```
+
 ### Add env-var stubs to `.env.example`
 
 Append to `.env.example`:
@@ -176,6 +187,15 @@ Append to `.env.example`:
 # OLLAMA_ADMIN_TOOLS=true
 ```
 
+```nc:append to:.env.example
+# Ollama MCP tool (.claude/skills/add-ollama-tool)
+# Override the host where the Ollama daemon listens.
+# Default: http://host.docker.internal:11434 (with fallback to localhost)
+# OLLAMA_HOST=http://host.docker.internal:11434
+# Opt in to library-management tools (pull, delete, show, list-running).
+# OLLAMA_ADMIN_TOOLS=true
+```
+
 ### Validate code changes
 
 ```bash
@@ -186,6 +206,17 @@ pnpm exec vitest run src/ollama-wiring.test.ts
 # Container tree: index.ts registration
 (cd container/agent-runner && bun test src/ollama-registration.test.ts)
 ./container/build.sh
+```
+
+```nc:run effect:build
+pnpm run build
+pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit
+./container/build.sh
+```
+
+```nc:run effect:test
+pnpm exec vitest run src/ollama-wiring.test.ts
+cd container/agent-runner && bun test src/ollama-registration.test.ts
 ```
 
 All must be clean before proceeding. The wiring and registration tests confirm the two
