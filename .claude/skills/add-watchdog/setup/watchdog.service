@@ -1,0 +1,10 @@
+[Unit]
+Description=NanoClaw watchdog — detect and fix stuck digest sessions
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=__NANOCLAW_REPO__
+ExecStart=/bin/bash -c 'cd __NANOCLAW_REPO__ && pnpm exec tsx scripts/watchdog.ts'
+StandardOutput=append:__NANOCLAW_REPO__/logs/watchdog.log
+StandardError=append:__NANOCLAW_REPO__/logs/watchdog.log
