@@ -9,6 +9,10 @@ beforeEach(() => initTestSessionDb());
 afterEach(() => closeSessionDb());
 
 describe('ask_user_question cancellation', () => {
+  // A bound chat, as the host writes it for every chat session; without one
+  // the tool refuses (see the no-attached-chat tests below).
+  beforeEach(() => seedBoundThread('slack', 'C123', null));
+
   const args = { title: 'Fixture', question: 'Choose', options: ['yes', 'no'] };
   it('does not publish a question for an already cancelled request', async () => {
     const controller = new AbortController();
@@ -42,6 +46,8 @@ describe('ask_user_question cancellation', () => {
 });
 
 describe('send_card', () => {
+  beforeEach(() => seedBoundThread('slack', 'C123', null));
+
   it('tells the agent when callback actions will be dropped', async () => {
     const result = await sendCard.handler({
       card: {
@@ -242,6 +248,92 @@ describe('send_card', () => {
     const result = await sendCard.handler({ card: { title: 'Test', description: 'No actions' } });
 
     expect(result.content[0].text).toMatch(/^Card sent \(id: msg-[^)]+\)$/);
+  });
+});
+
+// ── Sessions with no attached chat (task runs) and explicit destinations ──
+// The bound routing is null in a task run. A row written with null routing can
+// never be delivered (the host fails it), so the tools refuse up front;
+// send_card accepts `to` so a task can still render a card somewhere real.
+
+function seedUnboundSession(): void {
+  seedBoundThread(null as unknown as string, null as unknown as string, 'system:tasks:daily-digest-a1b2');
+}
+
+function seedChannelDestination(name: string, channelType: string, platformId: string): void {
+  getInboundDb()
+    .prepare(
+      `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+       VALUES (?, ?, 'channel', ?, ?, NULL)`,
+    )
+    .run(name, name, channelType, platformId);
+}
+
+function seedAgentDestination(name: string, agentGroupId: string): void {
+  getInboundDb()
+    .prepare(
+      `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+       VALUES (?, ?, 'agent', NULL, NULL, ?)`,
+    )
+    .run(name, name, agentGroupId);
+}
+
+describe('send_card / ask_user_question — no attached chat', () => {
+  it('send_card without `to` refuses and writes nothing', async () => {
+    seedUnboundSession();
+    seedChannelDestination('ops', 'slack', 'C-OPS');
+    const res = await sendCard.handler({ card: { title: 'T' } });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toContain('no attached chat');
+    expect(res.content[0].text).toContain('ops');
+    expect(await getUndeliveredMessages()).toHaveLength(0);
+  });
+
+  it('send_card with `to` routes to the named channel destination', async () => {
+    seedUnboundSession();
+    seedChannelDestination('ops', 'slack', 'C-OPS');
+    seedInbound('in-1', 'slack', 'C-OPS', 'thr-9');
+    const res = await sendCard.handler({ to: 'ops', card: { title: 'T' } });
+    expect(res.isError).toBeUndefined();
+    expect(res.content[0].text).toContain('Card sent to ops');
+    const rows = await getUndeliveredMessages();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].channel_type).toBe('slack');
+    expect(rows[0].platform_id).toBe('C-OPS');
+    expect(rows[0].thread_id).toBe('thr-9'); // that channel's latest inbound thread, like send_message
+    expect(JSON.parse(rows[0].content).type).toBe('card');
+  });
+
+  it('send_card rejects an unknown or agent destination', async () => {
+    seedUnboundSession();
+    seedAgentDestination('worker', 'ag-worker');
+    const unknown = await sendCard.handler({ to: 'nope', card: { title: 'T' } });
+    expect(unknown.isError).toBe(true);
+    expect(unknown.content[0].text).toContain('Unknown destination "nope"');
+    const agent = await sendCard.handler({ to: 'worker', card: { title: 'T' } });
+    expect(agent.isError).toBe(true);
+    expect(agent.content[0].text).toContain('channel destination');
+    expect(await getUndeliveredMessages()).toHaveLength(0);
+  });
+
+  it('ask_user_question refuses immediately instead of blocking until timeout', async () => {
+    seedUnboundSession();
+    const started = Date.now();
+    const res = await askUserQuestion.handler({ title: 'T', question: 'Q?', options: ['a', 'b'], timeout: 30 });
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toContain('no attached chat');
+    expect(await getUndeliveredMessages()).toHaveLength(0);
+  });
+
+  it('in a bound chat, send_card without `to` still goes to the current conversation', async () => {
+    seedBoundThread('slack', 'C123', null);
+    const res = await sendCard.handler({ card: { title: 'T' } });
+    expect(res.isError).toBeUndefined();
+    expect(res.content[0].text).toMatch(/^Card sent \(id: msg-/); // unchanged wording for the bound chat
+    const rows = await getUndeliveredMessages();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].platform_id).toBe('C123');
   });
 });
 
