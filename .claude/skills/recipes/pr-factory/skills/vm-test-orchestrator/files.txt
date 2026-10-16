@@ -1,0 +1,5 @@
+# vm-test-orchestrator — files this component owns outright. The
+# modules-barrel line (src/modules/index.ts) is applied as an edit per
+# SKILL.md, not as a file copy.
+src/modules/pr-factory/test-orchestrator.ts
+src/modules/pr-factory/test-orchestrator.test.ts
