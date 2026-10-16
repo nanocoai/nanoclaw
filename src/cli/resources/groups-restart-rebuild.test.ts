@@ -28,6 +28,16 @@ vi.mock('../../container-restart.js', () => ({
 vi.mock('../../log.js', () => ({
   log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn() },
 }));
+// This file is a deliberately DB-free unit test (driver capabilities only) —
+// the restart handler's rebuild branch now also reads the group's container
+// config to decide whether there's anything to rebuild, so getContainerConfig
+// needs a mock here too, or it throws "Database not initialized" since no
+// test in this file ever calls initDb(). Defaults to a row WITH a package
+// configured, since the "rebuilds" test below needs buildAgentGroupImage to
+// actually run — the no-packages case has its own coverage in groups.test.ts.
+vi.mock('../../db/container-configs.js', () => ({
+  getContainerConfig: vi.fn().mockResolvedValue({ packages_apt: '["curl"]', packages_npm: '[]' }),
+}));
 
 import { buildAgentGroupImage } from '../../container-runner.js';
 import { restartAgentGroupContainers } from '../../container-restart.js';

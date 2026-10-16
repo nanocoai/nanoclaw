@@ -36,7 +36,8 @@ const TEST_DIR = '/tmp/nanoclaw-test-cli-groups';
 import { initTestDb, closeDb, runMigrations, createAgentGroup, getDb } from '../../db/index.js';
 import { createSession } from '../../db/sessions.js';
 import { dispatch } from '../dispatch.js';
-import { ensureContainerConfig, getContainerConfig } from '../../db/container-configs.js';
+import { ensureContainerConfig, getContainerConfig, updateContainerConfigJson } from '../../db/container-configs.js';
+import { buildAgentGroupImage } from '../../container-runner.js';
 import { restartAgentGroupContainers } from '../../container-restart.js';
 import { configFromDb } from '../../container-config.js';
 import type { ContainerConfig } from '../../container-config.js';
@@ -436,5 +437,49 @@ describe('groups config (host-only)', () => {
       expect((await getContainerConfig(GID))!.provider).toBe(TURBO_PROVIDER);
       expect(await speedOf()).toBe('turbo');
     });
+  });
+});
+
+describe('groups CLI restart --rebuild (#2701)', () => {
+  beforeEach(async () => {
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+    fs.mkdirSync(TEST_DIR, { recursive: true });
+    await runMigrations(await initTestDb());
+    vi.mocked(buildAgentGroupImage).mockClear();
+  });
+
+  afterEach(() => {
+    closeDb();
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+  });
+
+  it('succeeds without rebuilding when no packages are configured', async () => {
+    const GID = 'ag-no-packages';
+    createAgentGroup({ id: GID, name: 'n', folder: 'n', agent_provider: null, created_at: now() });
+    ensureContainerConfig(GID);
+
+    const resp = await dispatch(
+      { id: 'req-restart-empty', command: 'groups-restart', args: { id: GID, rebuild: true } },
+      { caller: 'host' },
+    );
+
+    expect(resp.ok).toBe(true);
+    expect(resp.ok ? resp.data : null).toMatchObject({ rebuilt: true });
+    expect(buildAgentGroupImage).not.toHaveBeenCalled();
+  });
+
+  it('still rebuilds when packages are configured', async () => {
+    const GID = 'ag-with-packages';
+    createAgentGroup({ id: GID, name: 'p', folder: 'p', agent_provider: null, created_at: now() });
+    ensureContainerConfig(GID);
+    updateContainerConfigJson(GID, 'packages_apt', ['curl']);
+
+    const resp = await dispatch(
+      { id: 'req-restart-pkg', command: 'groups-restart', args: { id: GID, rebuild: true } },
+      { caller: 'host' },
+    );
+
+    expect(resp.ok).toBe(true);
+    expect(buildAgentGroupImage).toHaveBeenCalledWith(GID);
   });
 });
