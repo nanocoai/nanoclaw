@@ -38,6 +38,7 @@ import { log } from './log.js';
 import { heartbeatPath, withExistingMailboxSession } from './session-manager.js';
 import { getContainerStartedAtMs, isContainerRunning, killContainer } from './container-runner.js';
 import { requestWake } from './request-wake.js';
+import { hasCustomSchedulerAdmission, schedulerAdmission } from './modules/scheduling/admission.js';
 import type { Session } from './types.js';
 import type { ContainerState, InboundMailbox, OutboundMailbox } from './mailbox/index.js';
 
@@ -135,7 +136,7 @@ async function reconcileActiveSession(session: Session): Promise<void> {
     const exists = await withExistingMailboxSession(agentGroup.id, session.id, async (mailbox) => {
       mailbox.applyProcessingAcks(mailbox.getTerminalProcessingAcks());
       dueCount = mailbox.countDueMessages();
-      shouldWake = dueCount > 0 && !isContainerRunning(session.id);
+      shouldWake = dueCount > 0 && !isContainerRunning(session.id) && (await admitWake(mailbox, session, dueCount));
       if (!shouldWake) {
         await maintainSessionMailbox(mailbox, session, agentGroup.id);
       }
@@ -163,6 +164,20 @@ async function reconcileActiveSession(session: Session): Promise<void> {
   }
 }
 
+async function admitWake(mailbox: InboundMailbox, session: Session, dueCount: number): Promise<boolean> {
+  if (!hasCustomSchedulerAdmission()) return true;
+  const now = Date.now();
+  const dueTasks = mailbox
+    .listLiveTasks('pending')
+    .filter((task) => task.processAfter === null || Date.parse(task.processAfter) <= now);
+  return schedulerAdmission().shouldWake({
+    session,
+    dueCount,
+    isTaskSession: isTaskThread(session.thread_id),
+    dueTasks,
+  });
+}
+
 async function maintainSessionMailbox(
   mailbox: InboundMailbox & OutboundMailbox,
   session: Session,
@@ -174,6 +189,16 @@ async function maintainSessionMailbox(
   }
   if (!alive) {
     resetStuckProcessingRows(mailbox, mailbox, session, 'container not running');
+  }
+
+  const admission = schedulerAdmission();
+  if (
+    admission.onSessionIdle &&
+    isContainerRunning(session.id) &&
+    mailbox.countDueMessages() === 0 &&
+    mailbox.getProcessingClaims().length === 0
+  ) {
+    await admission.onSessionIdle(session);
   }
 
   // MODULE-HOOK:scheduling-recurrence:start
