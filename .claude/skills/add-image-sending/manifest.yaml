@@ -1,0 +1,16 @@
+skill: add-image-sending
+version: 1.0.0
+description: "Allow the agent to send images (e.g. browser screenshots) to users via send_message image_path parameter"
+core_version: 0.1.0
+adds: []
+modifies:
+  - src/types.ts
+  - src/channels/whatsapp.ts
+  - src/channels/whatsapp.test.ts
+  - src/ipc.ts
+  - src/index.ts
+  - container/agent-runner/src/ipc-mcp-stdio.ts
+structured: {}
+conflicts: []
+depends: []
+test: "npx vitest run src/channels/whatsapp.test.ts"
