@@ -1,3 +1,4 @@
+import { loadConfig } from '../../config.js';
 import { getInboundDb, getOutboundDb, openInboundDb } from './connection.js';
 import type { MessageInRow } from '../../db/messages-in.js';
 import type { MessageOutRow } from '../../db/messages-out.js';
@@ -171,15 +172,32 @@ export function sqliteWriteMessageOut(message: OutboundWrite): number {
   }
 }
 
+/**
+ * The router namespaces messages_in.id per agent group by appending
+ * ":<agentGroupId>" (see src/router.ts messageIdForAgent) so the raw
+ * platform id stays unique across per-agent session DBs. Strip exactly
+ * that known suffix — never split on the first/last colon — since
+ * platform ids can legitimately contain colons themselves (e.g.
+ * Telegram's "6037840640:42").
+ */
+export function stripAgentGroupSuffix(id: string, agentGroupId: string): string {
+  if (!agentGroupId) return id;
+  const suffix = `:${agentGroupId}`;
+  return id.endsWith(suffix) ? id.slice(0, -suffix.length) : id;
+}
+
+/**
+ * For inbound messages, the Chat SDK message ID is the platform message ID
+ * with the router's ":<agentGroupId>" namespacing suffix appended — strip
+ * it before returning (e.g. "6037840640:42:ag-xxx" -> "6037840640:42").
+ */
 export function sqliteGetMessageIdBySeq(sequence: number): string | null {
   const inbound = getInboundDb();
   const inboundRow = inbound.prepare('SELECT id FROM messages_in WHERE seq = ?').get(sequence) as
-    | { id: string }
-    | undefined;
-  if (inboundRow) return inboundRow.id;
+    { id: string } | undefined;
+  if (inboundRow) return stripAgentGroupSuffix(inboundRow.id, loadConfig().agentGroupId);
   const outboundRow = getOutboundDb().prepare('SELECT id FROM messages_out WHERE seq = ?').get(sequence) as
-    | { id: string }
-    | undefined;
+    { id: string } | undefined;
   if (!outboundRow) return null;
   const delivered = inbound
     .prepare('SELECT platform_message_id FROM delivered WHERE message_out_id = ?')
@@ -198,8 +216,7 @@ export function sqliteGetRoutingBySeq(
     (getOutboundDb()
       .prepare('SELECT channel_type, platform_id, thread_id FROM messages_out WHERE seq = ?')
       .get(sequence) as
-      | { channel_type: string | null; platform_id: string | null; thread_id: string | null }
-      | undefined) ?? null
+      { channel_type: string | null; platform_id: string | null; thread_id: string | null } | undefined) ?? null
   );
 }
 
@@ -218,8 +235,7 @@ export function sqliteGetSessionRouting(): SessionRouting {
   const exists = db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'session_routing'").get();
   if (!exists) return { channelType: null, platformId: null, threadId: null };
   const row = db.prepare('SELECT channel_type, platform_id, thread_id FROM session_routing WHERE id = 1').get() as
-    | { channel_type: string | null; platform_id: string | null; thread_id: string | null }
-    | undefined;
+    { channel_type: string | null; platform_id: string | null; thread_id: string | null } | undefined;
   return parseSessionRoutingRecord({
     channelType: row?.channel_type ?? null,
     platformId: row?.platform_id ?? null,
@@ -229,8 +245,7 @@ export function sqliteGetSessionRouting(): SessionRouting {
 
 export function sqliteGetState(key: string): StateValue | undefined {
   const row = getOutboundDb().prepare('SELECT value, updated_at FROM session_state WHERE key = ?').get(key) as
-    | { value: string; updated_at: string }
-    | undefined;
+    { value: string; updated_at: string } | undefined;
   if (!row) return undefined;
   const record = parseStateRecord({ key, value: row.value, updatedAt: sqliteTimestamp(row.updated_at) });
   return { value: record.value, updatedAt: record.updatedAt };
@@ -274,8 +289,7 @@ export function sqliteGetAllDestinations(): Destination[] {
 
 export function sqliteFindByName(name: string): Destination | undefined {
   const row = getInboundDb().prepare('SELECT * FROM destinations WHERE name = ?').get(name) as
-    | DestinationRow
-    | undefined;
+    DestinationRow | undefined;
   return row && destination(row);
 }
 
@@ -284,8 +298,7 @@ export function sqliteFindByRouting(channelType: string, platformId: string): De
   const row =
     channelType === 'agent'
       ? (db.prepare("SELECT * FROM destinations WHERE type = 'agent' AND agent_group_id = ?").get(platformId) as
-          | DestinationRow
-          | undefined)
+          DestinationRow | undefined)
       : (db
           .prepare("SELECT * FROM destinations WHERE type = 'channel' AND channel_type = ? AND platform_id = ?")
           .get(channelType, platformId) as DestinationRow | undefined);
