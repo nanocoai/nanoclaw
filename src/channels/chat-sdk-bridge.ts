@@ -426,6 +426,23 @@ function terminalApprovalMessage(spec: TerminalApprovalCard) {
   };
 }
 
+/**
+ * One Actions row per card renders every option side by side. Platforms cap
+ * a row (Telegram shows at most 8 buttons, Discord allows 5) and narrow
+ * clients truncate the labels, so a long option list — e.g. the channel
+ * registration "Choose an agent" card on an install with 9+ agents — loses
+ * its tail. Short lists (approve / reject) keep a single row.
+ */
+const MAX_SINGLE_ROW_BUTTONS = 4;
+const BUTTONS_PER_ROW = 3;
+
+export function buttonRows<T>(buttons: T[]): T[][] {
+  if (buttons.length <= MAX_SINGLE_ROW_BUTTONS) return [buttons];
+  const rows: T[][] = [];
+  for (let i = 0; i < buttons.length; i += BUTTONS_PER_ROW) rows.push(buttons.slice(i, i + BUTTONS_PER_ROW));
+  return rows;
+}
+
 export function splitForLimit(text: string, limit: number): string[] {
   if (text.length <= limit) return [text];
   const chunks: string[] = [];
@@ -870,21 +887,17 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         }
         if (content.requirePresentation) throw new Error('Approval presentation adapter is unavailable');
         const options: NormalizedOption[] = normalizeOptions(content.options as never);
+        // Encode button id/value with the option index rather than the
+        // full value. Telegram caps callback_data at 64 bytes, and
+        // long values (e.g. ISO datetimes, URLs) push the JSON payload
+        // well past that. The onAction handlers resolve the index back
+        // to the real value via resolveQuestionRender(questionId).
+        const buttons = options.map((opt, idx) =>
+          Button({ id: `ncq:${questionId}:${idx}`, label: opt.label, value: String(idx), style: opt.style }),
+        );
         const card = Card({
           title,
-          children: [
-            CardText(question),
-            Actions(
-              // Encode button id/value with the option index rather than the
-              // full value. Telegram caps callback_data at 64 bytes, and
-              // long values (e.g. ISO datetimes, URLs) push the JSON payload
-              // well past that. The onAction handlers resolve the index back
-              // to the real value via resolveQuestionRender(questionId).
-              options.map((opt, idx) =>
-                Button({ id: `ncq:${questionId}:${idx}`, label: opt.label, value: String(idx), style: opt.style }),
-              ),
-            ),
-          ],
+          children: [CardText(question), ...buttonRows(buttons).map((row) => Actions(row))],
         });
         const result = await adapter.postMessage(tid, {
           card,
