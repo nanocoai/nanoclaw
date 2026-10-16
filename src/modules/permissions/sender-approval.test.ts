@@ -136,7 +136,7 @@ afterEach(async () => {
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
 });
 
-function stranger(text: string) {
+function stranger(text: string, opts?: { isAutomated?: boolean }) {
   return {
     channelType: 'telegram',
     platformId: 'chat-123',
@@ -150,6 +150,7 @@ function stranger(text: string) {
         text,
       }),
       timestamp: now(),
+      isAutomated: opts?.isAutomated,
     },
   };
 }
@@ -350,5 +351,47 @@ describe('unknown-sender request_approval flow', () => {
       'ag-1',
     );
     expect(member).toBeDefined();
+  });
+
+  it('drops an automated sender silently instead of issuing an approval card (#3235)', async () => {
+    const { routeInbound } = await import('../../router.js');
+    await routeInbound(stranger('scheduled digest post', { isAutomated: true }));
+    await new Promise((r) => setTimeout(r, 10));
+
+    // No card delivered, no pending-approval row created.
+    expect(deliverMock).not.toHaveBeenCalled();
+    const { getDb } = await import('../../db/connection.js');
+    const pendingCount = (await getDb().get<{ c: number }>('SELECT COUNT(*) AS c FROM pending_sender_approvals'))!.c;
+    expect(pendingCount).toBe(0);
+
+    // A single drop is recorded (the gate's own automated_sender_* reason is
+    // superseded on the same (channel_type, platform_id) row by core's
+    // no_agent_engaged structural drop — the same upsert-overwrite behavior
+    // that already applies to every other access-gate denial).
+    const { getUnregisteredSenders } = await import('../../db/dropped-messages.js');
+    const dropped = await getUnregisteredSenders();
+    expect(dropped).toHaveLength(1);
+
+    // Not added as a member — repeated automated posts stay droppable, they
+    // never silently gain the ability to trigger the agent.
+    const member = await getDb().get(
+      'SELECT 1 AS x FROM agent_group_members WHERE user_id = ? AND agent_group_id = ?',
+      'tg:stranger',
+      'ag-1',
+    );
+    expect(member).toBeUndefined();
+  });
+
+  it('an automated sender never accumulates duplicate cards across repeated posts (#3235)', async () => {
+    const { routeInbound } = await import('../../router.js');
+    await routeInbound(stranger('digest #1', { isAutomated: true }));
+    await routeInbound(stranger('digest #2', { isAutomated: true }));
+    await routeInbound(stranger('digest #3', { isAutomated: true }));
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(deliverMock).not.toHaveBeenCalled();
+    const { getDb } = await import('../../db/connection.js');
+    const pendingCount = (await getDb().get<{ c: number }>('SELECT COUNT(*) AS c FROM pending_sender_approvals'))!.c;
+    expect(pendingCount).toBe(0);
   });
 });
