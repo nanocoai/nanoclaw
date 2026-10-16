@@ -14,6 +14,7 @@ import { ensureSchema, openInboundDb } from '../../mailbox/sqlite/session-db.js'
 import { insertTaskRow } from '../../mailbox/sqlite/tasks.js';
 import { wrapSqliteInbound } from '../../mailbox/sqlite/index.js';
 import { handleRecurrence, scriptBackoffMinutes } from './recurrence.js';
+import { registerOperationalErrorSink, type OperationalError } from '../../operational-errors.js';
 import type { Session } from '../../types.js';
 
 // Pin a non-UTC zone so the tz-interpretation test is exact even on UTC CI.
@@ -227,6 +228,44 @@ describe('handleRecurrence — script-failure backoff (streak derived from faile
       recurrence: string | null;
     };
     expect(original.recurrence).toBeNull(); // not re-cloned next sweep
+  });
+
+  function captureReports(): { reports: OperationalError[]; off: () => void } {
+    const reports: OperationalError[] = [];
+    const off = registerOperationalErrorSink((e) => {
+      reports.push(e);
+    });
+    return { reports, off };
+  }
+
+  it('reports a failing script series to registered sinks', async () => {
+    const { reports, off } = captureReports();
+    const db = freshDb();
+    seedFailedStreak(db, 3);
+    await handleRecurrence(wrapSqliteInbound(db), fakeSession());
+
+    await vi.waitFor(() => expect(reports).toHaveLength(1));
+    off();
+    expect(reports[0]).toMatchObject({
+      kind: 'task.script-failing',
+      key: 'task.script-failing:task-s-0',
+      details: { seriesId: 'task-s-0', agentGroupId: 'ag-test', scriptFails: 3 },
+    });
+  });
+
+  it('reports an auto-paused series and nothing for a healthy one', async () => {
+    const { reports, off } = captureReports();
+    const healthy = freshDb();
+    seedFailedStreak(healthy, 0);
+    await handleRecurrence(wrapSqliteInbound(healthy), fakeSession());
+
+    const broken = freshDb();
+    seedFailedStreak(broken, 8);
+    await handleRecurrence(wrapSqliteInbound(broken), fakeSession());
+
+    await vi.waitFor(() => expect(reports).toHaveLength(1));
+    off();
+    expect(reports[0]).toMatchObject({ kind: 'task.auto-paused', key: 'task.auto-paused:task-s-0' });
   });
 
   it('writes the auto-pause note into the series run log via the shared appendRunLog', async () => {
