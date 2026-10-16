@@ -19,7 +19,7 @@ export interface SlackChannelDeps {
     name: string,
     registration: { factory: () => ChannelAdapter | null; defaults?: ChannelDefaults },
   ) => void;
-  startChannelAdapter: (key: string) => Promise<'started' | 'already-active' | 'no-credentials'>;
+  startChannelAdapter: (key: string) => Promise<'started' | 'already-active' | 'no-credentials' | 'disabled'>;
 }
 
 const NOT_INSTALLED =
