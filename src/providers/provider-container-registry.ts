@@ -64,6 +64,15 @@ export interface ProviderContainerContribution {
   mounts?: VolumeMount[];
   /** Extra env vars to pass to the container (`-e KEY=VALUE`). */
   env?: Record<string, string>;
+  /**
+   * Absolute container path of a module to import before the real runner
+   * entry (`bun run --preload`). Absent or empty keeps the historical
+   * command. The path is one absolute container path with no shell
+   * metacharacters; composition rejects anything else. Providers use this
+   * to register on the same module instance as the runner entry without
+   * editing the provider barrel.
+   */
+  agentRunnerPreload?: string;
 }
 
 /**
