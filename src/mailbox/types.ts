@@ -61,6 +61,8 @@ export interface TaskUpdate {
   script?: string | null;
   recurrence?: string | null;
   processAfter?: string;
+  /** Extra content-envelope keys to set; keys not listed are left untouched. */
+  fields?: Record<string, unknown>;
 }
 
 export type TaskRecord = CanonicalTaskRecord;
