@@ -1,0 +1,68 @@
+{
+  "patterns": [
+    {
+      "id": "secrets-file-read",
+      "category": "filesystem",
+      "severity": "MEDIUM",
+      "regex": "fs\\.(read|readFile)(Sync)?\\([^)]*\\b(secret|env|token|key|password|credential)",
+      "message": "Reading sensitive files: Accessing files with sensitive names",
+      "remediation": "Document why this skill needs to read sensitive files. Ensure it's necessary and authorized."
+    },
+    {
+      "id": "workspace-escape-write",
+      "category": "filesystem",
+      "severity": "MEDIUM",
+      "regex": "fs\\.(write|writeFile)(Sync)?\\([^)]*\\.\\./",
+      "message": "Writing outside workspace: File write with directory traversal",
+      "remediation": "Skills should only write to /workspace/group or subdirectories. Remove directory traversal."
+    },
+    {
+      "id": "home-directory-access",
+      "category": "filesystem",
+      "severity": "MEDIUM",
+      "regex": "fs\\.(read|write|readFile|writeFile)(Sync)?\\(['\"]?~/(\\.|[a-z])",
+      "message": "Home directory access: Reading or writing to user home directory",
+      "remediation": "Skills should use workspace paths, not home directory paths."
+    },
+    {
+      "id": "tmp-file-write",
+      "category": "filesystem",
+      "severity": "MEDIUM",
+      "regex": "fs\\.(write|writeFile)(Sync)?\\(['\"]?/tmp/",
+      "message": "Temporary file creation: Writing to /tmp",
+      "remediation": "Document why temporary files are needed and ensure cleanup."
+    },
+    {
+      "id": "process-spawn-user-input",
+      "category": "process-injection",
+      "severity": "MEDIUM",
+      "regex": "spawn(Sync)?\\([^)]*\\b(userInput|req\\.|args\\[|argv\\[)",
+      "message": "Process spawn with user input: Potential command injection",
+      "remediation": "Validate and sanitize user input before passing to spawn(). Use argument arrays, not string concatenation."
+    },
+    {
+      "id": "url-user-input",
+      "category": "network",
+      "severity": "MEDIUM",
+      "regex": "fetch\\([^)]*\\b(userInput|req\\.|args\\[|argv\\[)",
+      "message": "fetch() with user input: Potential SSRF vulnerability",
+      "remediation": "Validate and restrict URLs from user input. Use allowlist of permitted domains."
+    },
+    {
+      "id": "file-deletion",
+      "category": "filesystem",
+      "severity": "MEDIUM",
+      "regex": "fs\\.(unlink|rm|rmdir|rm(Sync)?)(Sync)?\\(",
+      "message": "File deletion detected",
+      "remediation": "Document why file deletion is needed and what files may be deleted."
+    },
+    {
+      "id": "chmod-usage",
+      "category": "filesystem",
+      "severity": "MEDIUM",
+      "regex": "fs\\.(chmod|chown)(Sync)?\\(",
+      "message": "File permission modification detected",
+      "remediation": "Document why permission changes are needed and ensure they're safe."
+    }
+  ]
+}
