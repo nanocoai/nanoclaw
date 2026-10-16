@@ -1,0 +1,22 @@
+skill: webhook
+version: 1.0.0
+description: "Bidirectional HTTP webhook channel for external integrations"
+core_version: 0.1.0
+adds:
+  - src/channels/webhook.ts
+  - src/channels/webhook.test.ts
+modifies:
+  - src/index.ts
+  - src/config.ts
+  - src/routing.test.ts
+structured:
+  npm_dependencies: {}
+  env_additions:
+    - WEBHOOK_PORT
+    - WEBHOOK_HOST
+    - WEBHOOK_TOKEN
+    - WEBHOOK_CONNECTOR_URL
+    - WEBHOOK_ONLY
+conflicts: []
+depends: []
+test: "npx vitest run src/channels/webhook.test.ts"
