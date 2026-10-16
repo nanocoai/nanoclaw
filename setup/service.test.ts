@@ -9,6 +9,7 @@ import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
 import { log } from '../src/log.js';
 import {
   hostProxyEnv,
+  installCliSymlink,
   nodeHonorsEnvProxy,
   renderSystemdUnit,
   serviceProxyEnvPath,
@@ -395,5 +396,57 @@ describe('tightenCredentialFiles', () => {
     tightenCredentialFiles(root, path.join(root, 'home'));
     const fix = `sudo chmod 600 '${unitFile}'`;
     expect(warn).toHaveBeenCalledWith(expect.stringContaining(fix), expect.objectContaining({ file: unitFile, fix }));
+  });
+});
+
+describe('installCliSymlink', () => {
+  let tmpDir: string;
+
+  afterEach(() => {
+    if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('creates ~/.local/bin/ncl symlinked to bin/ncl', () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-symlink-'));
+    const projectRoot = path.join(tmpDir, 'project');
+    const homeDir = path.join(tmpDir, 'home');
+    fs.mkdirSync(path.join(projectRoot, 'bin'), { recursive: true });
+    fs.writeFileSync(path.join(projectRoot, 'bin', 'ncl'), '#!/bin/sh\n');
+
+    installCliSymlink(projectRoot, homeDir);
+
+    const target = path.join(homeDir, '.local', 'bin', 'ncl');
+    expect(fs.lstatSync(target).isSymbolicLink()).toBe(true);
+    expect(fs.readlinkSync(target)).toBe(path.join(projectRoot, 'bin', 'ncl'));
+  });
+
+  it('is idempotent — re-running on an existing symlink does not throw', () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-symlink-'));
+    const projectRoot = path.join(tmpDir, 'project');
+    const homeDir = path.join(tmpDir, 'home');
+    fs.mkdirSync(path.join(projectRoot, 'bin'), { recursive: true });
+    fs.writeFileSync(path.join(projectRoot, 'bin', 'ncl'), '#!/bin/sh\n');
+
+    installCliSymlink(projectRoot, homeDir);
+    installCliSymlink(projectRoot, homeDir);
+
+    const target = path.join(homeDir, '.local', 'bin', 'ncl');
+    expect(fs.lstatSync(target).isSymbolicLink()).toBe(true);
+  });
+
+  it('does not clobber a real (non-symlink) file at the target path', () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-symlink-'));
+    const projectRoot = path.join(tmpDir, 'project');
+    const homeDir = path.join(tmpDir, 'home');
+    fs.mkdirSync(path.join(projectRoot, 'bin'), { recursive: true });
+    fs.writeFileSync(path.join(projectRoot, 'bin', 'ncl'), '#!/bin/sh\n');
+    fs.mkdirSync(path.join(homeDir, '.local', 'bin'), { recursive: true });
+    fs.writeFileSync(path.join(homeDir, '.local', 'bin', 'ncl'), 'real file');
+
+    installCliSymlink(projectRoot, homeDir);
+
+    const target = path.join(homeDir, '.local', 'bin', 'ncl');
+    expect(fs.lstatSync(target).isSymbolicLink()).toBe(false);
+    expect(fs.readFileSync(target, 'utf-8')).toBe('real file');
   });
 });
