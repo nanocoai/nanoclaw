@@ -673,8 +673,16 @@ async function deliverToAgent(
  * session DBs. messages_in.id is PRIMARY KEY, so reuse of the raw id would
  * collide across sessions (or, more subtly, within one session if re-routed
  * after a retry). Namespace by agent_group_id to keep ids unique per session.
+ *
+ * The separator is `_`, not `:`: Telegram's message.id is already
+ * `${chatId}:${msgId}`, and this id is later used as a filesystem directory
+ * name (attachment extraction under the session inbox). On Windows NTFS `:`
+ * is reserved (drive prefix / alternate data streams), so a `:`-separated id
+ * makes mkdirSync fail with ENOENT and crashes inbound routing for every
+ * voice/attachment message. POSIX accepts `:` in filenames, which is why the
+ * bug only shows on Windows hosts.
  */
 function messageIdForAgent(baseId: string | undefined, agentGroupId: string): string {
   const id = baseId && baseId.length > 0 ? baseId : generateId();
-  return `${id}:${agentGroupId}`;
+  return `${id}_${agentGroupId}`.replace(/:/g, '_');
 }
