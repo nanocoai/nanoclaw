@@ -33,10 +33,17 @@ it.each([undefined, '', 'ONECLI_URL=\n', '# ONECLI_URL=http://old\n', 'ONECLI_UR
     expect(await detectInstalledOneCLI(fixture(env))).toBe(false);
   },
 );
-it('resolves an unstamped offline legacy install through the actual detector', () => {
-  const root = fixture('ONECLI_URL=http://127.0.0.1:1\n');
-  fs.symlinkSync(path.resolve('node_modules'), path.join(root, 'node_modules'));
-  fs.writeFileSync(path.join(root, 'package.json'), '{"type":"module"}');
-  expect(resolveGatewaySelection(root, undefined, path.resolve('.claude/skills'))).toBe('onecli');
-  expect(fs.readFileSync(path.join(root, '.env'), 'utf8')).not.toContain('NANOCLAW_GATEWAY_PROVIDER');
-});
+// Spawns a real `pnpm exec tsx` per gateway detector; under full-suite load on a
+// shared CI runner that cold start alone has exceeded vitest's 5s default.
+const DETECTOR_SUBPROCESS_TIMEOUT_MS = 30_000;
+it(
+  'resolves an unstamped offline legacy install through the actual detector',
+  () => {
+    const root = fixture('ONECLI_URL=http://127.0.0.1:1\n');
+    fs.symlinkSync(path.resolve('node_modules'), path.join(root, 'node_modules'));
+    fs.writeFileSync(path.join(root, 'package.json'), '{"type":"module"}');
+    expect(resolveGatewaySelection(root, undefined, path.resolve('.claude/skills'))).toBe('onecli');
+    expect(fs.readFileSync(path.join(root, '.env'), 'utf8')).not.toContain('NANOCLAW_GATEWAY_PROVIDER');
+  },
+  DETECTOR_SUBPROCESS_TIMEOUT_MS,
+);
