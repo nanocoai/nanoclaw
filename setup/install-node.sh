@@ -28,6 +28,9 @@ if command -v uvx >/dev/null 2>&1; then
   ln -sf ~/node/bin/node ~/.local/bin/node
   ln -sf ~/node/bin/npm ~/.local/bin/npm
   ln -sf ~/node/bin/npx ~/.local/bin/npx
+  if [ -e ~/node/bin/corepack ]; then
+    ln -sf ~/node/bin/corepack ~/.local/bin/corepack
+  fi
   ln -sf ~/node/bin/pnpm ~/.local/bin/pnpm
   export PATH="$HOME/.local/bin:$PATH"
 else

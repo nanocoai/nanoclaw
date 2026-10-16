@@ -69,6 +69,11 @@ check_node() {
 
 # --- pnpm install ---
 
+pnpm_works() {
+  hash -r 2>/dev/null || true
+  command -v pnpm >/dev/null 2>&1 && pnpm --version >> "$LOG_FILE" 2>&1
+}
+
 install_deps() {
   DEPS_OK="false"
   NATIVE_OK="false"
@@ -135,7 +140,10 @@ install_deps() {
   # Fallback: some Node installs (older nvm, node@22 keg-only, minimal
   # distro packages) don't include corepack. Install pnpm directly at the
   # version pinned via package.json's `packageManager` field.
-  if ! command -v pnpm >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+  if ! pnpm_works && command -v npm >/dev/null 2>&1; then
+    if command -v pnpm >/dev/null 2>&1; then
+      log "pnpm at $(command -v pnpm) fails to run — falling back to npm"
+    fi
     local pinned
     pinned=$(grep -E '"packageManager"' "$PROJECT_ROOT/package.json" 2>/dev/null \
       | head -1 \
@@ -163,19 +171,19 @@ install_deps() {
   # ~/.npm-global` to avoid sudo, or on Linux where /usr/local/bin isn't in
   # PATH. Discover the prefix and prepend its bin dir so `command -v pnpm`
   # sees the new install.
-  if ! command -v pnpm >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+  if ! pnpm_works && command -v npm >/dev/null 2>&1; then
     local npm_prefix
-    npm_prefix=$(npm config get prefix 2>/dev/null)
+    npm_prefix=$(npm config get prefix 2>/dev/null) || true
     if [ -n "$npm_prefix" ] && [ -x "$npm_prefix/bin/pnpm" ]; then
       export PATH="$npm_prefix/bin:$PATH"
       log "Prepended npm prefix bin to PATH: $npm_prefix/bin"
     fi
   fi
 
-  if ! command -v pnpm >/dev/null 2>&1; then
-    log "pnpm not on PATH after corepack + npm fallback"
+  if ! pnpm_works; then
+    log "pnpm not runnable after corepack + npm fallback"
     echo "Could not install pnpm without root. Run this, then re-run setup:"
-    if command -v corepack >/dev/null 2>&1; then
+    if command -v corepack >/dev/null 2>&1 && ! command -v pnpm >/dev/null 2>&1; then
       echo "  mkdir -p ~/.local/bin && corepack enable --install-directory ~/.local/bin pnpm"
     else
       echo "  npm install -g pnpm@${pinned:-<version from package.json packageManager>} --prefix ~/.local"
