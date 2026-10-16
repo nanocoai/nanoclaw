@@ -37,6 +37,21 @@ function actorFor(ctx: CallerContext): GuardActor {
     : { kind: 'agent', agentGroupId: ctx.agentGroupId, sessionId: ctx.sessionId };
 }
 
+/**
+ * Warn on stderr when an explicitly-passed auto-fill arg differs from the
+ * value group scope will lock it to. Gated strictly on differing values —
+ * matching-value passes are harmless redundancy and would train operators
+ * to ignore the warning.
+ */
+function warnIfOverridden(key: string, provided: unknown, locked: unknown): void {
+  if (provided !== undefined && provided !== locked) {
+    process.stderr.write(
+      `warning: --${key} (${provided}) overridden by group scope (${locked}). ` +
+        `Cross-group changes must be submitted from the target group's CLI.\n`,
+    );
+  }
+}
+
 export async function dispatch(
   req: RequestFrame,
   ctx: CallerContext,
@@ -88,7 +103,14 @@ export async function dispatch(
   if (ctx.caller === 'agent') {
     if (agentCliScope === 'group') {
       // Auto-fill agent-group-related args so the agent doesn't need
-      // to pass its own group ID explicitly.
+      // to pass its own group ID explicitly. Warn (stderr) whenever an
+      // explicitly-passed value differs from the locked value: the caller
+      // believes they're targeting one group/resource but the write (or,
+      // for agent_group_id/group, the guard's subsequent deny) lands
+      // somewhere else. Gated strictly on differing values so matching
+      // redundant flags stay silent.
+      warnIfOverridden('agent_group_id', req.args.agent_group_id, ctx.agentGroupId);
+      warnIfOverridden('group', req.args.group, ctx.agentGroupId);
       const fill: Record<string, unknown> = {
         agent_group_id: req.args.agent_group_id ?? ctx.agentGroupId,
         group: req.args.group ?? ctx.agentGroupId,
@@ -96,6 +118,7 @@ export async function dispatch(
       // Only auto-fill --id for resources where it IS the agent group ID
       // (groups, destinations). For sessions/members --id is a different key.
       if (cmd.resource === 'groups' || cmd.resource === 'destinations') {
+        warnIfOverridden('id', req.args.id, ctx.agentGroupId);
         fill.id = req.args.id ?? ctx.agentGroupId;
       }
 
@@ -104,6 +127,7 @@ export async function dispatch(
       if (req.args.help !== true && (req.command === 'wirings-get' || req.command === 'wirings-update')) {
         const wiring = await getMessagingGroupAgentByPair(ctx.messagingGroupId, ctx.agentGroupId);
         if (!wiring) return err(req.id, 'forbidden', 'Wiring not found for this conversation.');
+        warnIfOverridden('id', req.args.id, wiring.id);
         fill.id = wiring.id;
       }
       req = { ...req, args: { ...req.args, ...fill } };
