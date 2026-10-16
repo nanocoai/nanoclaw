@@ -1,0 +1,11 @@
+{
+  "name": "nostr-signer",
+  "version": "1.0.0",
+  "description": "Lightweight Nostr signing daemon — reads nsec from kernel keyring, signs events via Unix socket",
+  "type": "module",
+  "main": "index.js",
+  "dependencies": {
+    "nostr-tools": "^2.10.0",
+    "ws": "^8.18.0"
+  }
+}
