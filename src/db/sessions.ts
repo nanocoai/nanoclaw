@@ -298,6 +298,19 @@ export async function getExpiredAwaitingReasonApprovals(nowIso: string): Promise
   );
 }
 
+/**
+ * Module-initiated approvals still pending that were raised at or before
+ * `cutoffIso` — the stale set. OneCLI rows carry their own gateway TTL and are
+ * excluded by action.
+ */
+export async function getStalePendingApprovals(cutoffIso: string, excludeAction: string): Promise<PendingApproval[]> {
+  return getDb().all<PendingApproval>(
+    "SELECT * FROM pending_approvals WHERE status = 'pending' AND action != ? AND created_at <= ?",
+    excludeAction,
+    cutoffIso,
+  );
+}
+
 export async function deletePendingApproval(approvalId: string): Promise<void> {
   await getDb().run('DELETE FROM pending_approvals WHERE approval_id = ?', approvalId);
 }
