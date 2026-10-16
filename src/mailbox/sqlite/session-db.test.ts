@@ -9,7 +9,13 @@ import fs from 'fs';
 import path from 'path';
 import { describe, it, expect, afterEach } from 'vitest';
 
-import { ensureSchema, getInboundSourceSessionId, migrateMessagesInTable, syncProcessingAcks } from './session-db.js';
+import {
+  ensureSchema,
+  getInboundSourceSessionId,
+  isTransientSqliteReadonlyError,
+  migrateMessagesInTable,
+  syncProcessingAcks,
+} from './session-db.js';
 
 const TEST_DIR = '/tmp/nanoclaw-session-db-test';
 const DB_PATH = path.join(TEST_DIR, 'inbound.db');
@@ -152,5 +158,23 @@ describe('syncProcessingAcks — script-skip counter', () => {
     syncProcessingAcks(inDb, outDb);
 
     expect(status(inDb, 't1')).toBe('completed');
+  });
+});
+
+describe('isTransientSqliteReadonlyError', () => {
+  it('matches the SQLITE_READONLY* error code', () => {
+    expect(isTransientSqliteReadonlyError({ code: 'SQLITE_READONLY_DBMOVED' })).toBe(true);
+    expect(isTransientSqliteReadonlyError({ code: 'SQLITE_READONLY' })).toBe(true);
+  });
+
+  it('matches the better-sqlite3 message form', () => {
+    expect(isTransientSqliteReadonlyError(new Error('attempt to write a readonly database'))).toBe(true);
+  });
+
+  it('refuses unrelated errors and non-errors', () => {
+    expect(isTransientSqliteReadonlyError(new Error('disk full'))).toBe(false);
+    expect(isTransientSqliteReadonlyError(null)).toBe(false);
+    expect(isTransientSqliteReadonlyError('readonly database')).toBe(false);
+    expect(isTransientSqliteReadonlyError(undefined)).toBe(false);
   });
 });
