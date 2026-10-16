@@ -86,6 +86,18 @@ export class MissingChannelAdapterError extends Error {
   }
 }
 
+/** Thrown by the delivery bridge when the adapter is registered but reports
+ *  itself disconnected (a client mid-reconnect, a desktop peer that is away).
+ *  Delivery leaves the row where it is and counts no attempt: nothing was
+ *  sent, so nothing failed, and spending the attempts on a short reconnect
+ *  would mark the message failed for good. */
+export class ChannelAdapterOfflineError extends Error {
+  constructor(readonly key: string) {
+    super(`Channel adapter '${key}' is not connected — the message waits for it to come back.`);
+    this.name = 'ChannelAdapterOfflineError';
+  }
+}
+
 /**
  * Build the host's outbound delivery bridge: dispatches delivery-poll and
  * typing traffic into the adapter registry. Resolution is EXACT-key only —
@@ -110,6 +122,9 @@ export function createChannelDeliveryAdapter(): ChannelDeliveryAdapter {
       const adapter = getChannelAdapterExact(instance ?? channelType);
       if (!adapter) {
         throw new MissingChannelAdapterError(channelType, instance);
+      }
+      if (!adapter.isConnected()) {
+        throw new ChannelAdapterOfflineError(instance ?? channelType);
       }
       return adapter.deliver(platformId, threadId, { kind, content: JSON.parse(content), files });
     },
