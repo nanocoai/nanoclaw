@@ -256,6 +256,14 @@ describe('deliverSessionMessages — retry and permanent failure', () => {
     // Verify the message is in the delivered table with 'failed' status
     const delivered = await withMailboxSession('ag-1', session.id, (mailbox) => mailbox.getDeliveredIds());
     expect(delivered.has('out-flaky')).toBe(true);
+
+    // The agent is told its message never arrived
+    const inDb = openInboundDb('ag-1', session.id);
+    const notice = inDb.prepare('SELECT content FROM messages_in WHERE id = ?').get('delivery-failed-out-flaky') as
+      | { content: string }
+      | undefined;
+    inDb.close();
+    expect(JSON.parse(notice!.content).text).toContain('network timeout');
   });
 
   it('does not acknowledge a message when no channel adapter is registered (#2995)', async () => {
