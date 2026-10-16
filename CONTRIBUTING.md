@@ -78,29 +78,29 @@ A skill is a self-contained add-on: a `SKILL.md` with the apply steps written as
 
 ### Skill types
 
-#### 1. Channel and provider skills (registry branches)
+#### 1. Channel and provider skills
 
-Add a messaging channel or an agent provider. The SKILL.md contains the install steps; the actual code lives on a long-lived registry branch (`channels` or `providers`) that we keep in sync with `main`.
+Add a messaging channel or an agent provider. The SKILL.md contains the install steps. Channel code lives on the long-lived `channels` registry branch, which we keep in sync with `main`; provider code lives in the skill's own `payload/` folder on `main`.
 
-**Location:** `.claude/skills/` on `main` (instructions only), code on the `channels` or `providers` branch
+**Location:** `.claude/skills/` on `main`; channel code on the `channels` branch, provider code in `.claude/skills/<name>/payload/`
 
 **Examples:** `/add-telegram`, `/add-slack`, `/add-discord`, `/add-opencode`
 
 **How they work:**
 1. User runs `/add-telegram`
-2. Claude follows the SKILL.md: `git fetch origin channels`, then copies each file in with `git show origin/channels:<path> > <path>`. Install is an additive fetch, never a `git merge`.
-3. The adapter's registration test is fetched the same way and run as verification
+2. Claude follows the SKILL.md: `git fetch origin channels`, then copies each file in with `git show origin/channels:<path> > <path>`. A provider skill copies from its `payload/` instead. Install is an additive copy, never a `git merge`.
+3. The adapter's registration test is copied in the same way and run as verification
 4. Claude walks through interactive setup (tokens, bot creation, etc.)
 
 **Contributing a channel or provider skill:**
 1. Fork `nanocoai/nanoclaw` and branch from `main`
 2. Build the adapter following [docs/skill-guidelines.md](docs/skill-guidelines.md): a self-registering module, one appended barrel import, and a registration test that imports the real barrel
-3. Add a SKILL.md in `.claude/skills/<name>/` with the fetch-and-copy steps, and a REMOVE.md that reverses every change. Plain prose steps are all that's required. A skill with a credential prompt or an interactive step should include a `## Troubleshooting` section.
-4. Open a PR. We'll land the code on the registry branch from your work
+3. Add a SKILL.md in `.claude/skills/<name>/` with the copy steps, and a REMOVE.md that reverses every change. Plain prose steps are all that's required. A skill with a credential prompt or an interactive step should include a `## Troubleshooting` section.
+4. Open a PR. A provider's code and tests go in the skill's `payload/` in the same PR; for a channel, we'll land the code on the `channels` branch from your work
 
-See `/add-slack` for a good example. See [docs/skills-model.md](docs/skills-model.md) for why install is a fetch, never a merge.
+See `/add-slack` (channel) or `/add-opencode` (provider) for a good example. See [docs/skills-model.md](docs/skills-model.md) for why install is a copy, never a merge.
 
-Gateway providers use the same one-registration shape, but keep their implementation and tests in the skill's `payload/` directory on `main`. Setup discovers each package through its `gateway.json` and applies it without another repository or registry branch.
+Gateway providers use the same one-registration shape and, like agent providers, keep their implementation and tests in the skill's `payload/` directory on `main`. Setup discovers each package through its `gateway.json` and applies it without another repository or registry branch.
 
 #### 2. Utility skills (with code files)
 
@@ -110,7 +110,7 @@ Standalone tools that ship code files alongside the SKILL.md. The SKILL.md tells
 
 **Examples:** a self-contained CLI or helper shipped in a `scripts/` subfolder of the skill.
 
-**Key difference from channel/provider skills:** the code is self-contained in the skill directory and gets copied into place during installation; nothing is fetched from a registry branch.
+**Key difference from channel skills:** the code is self-contained in the skill directory and gets copied into place during installation; nothing is fetched from a registry branch.
 
 **Guidelines:**
 - Put code in separate files, not inline in the SKILL.md

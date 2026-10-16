@@ -108,7 +108,7 @@ describe('OpenCode setup installation and refresh', () => {
     expect(fixture.commands[1]).toBe('rm -f src/opencode-dockerfile.test.ts');
   });
 
-  it('keeps an installed Codex payload and pins without contacting its registry branch', async () => {
+  it('reapplies an installed Codex payload and pins without changing a file', async () => {
     const directory = root();
     const codexSkill = '.claude/skills/add-codex';
     fs.cpSync(codexSkill, path.join(directory, codexSkill), { recursive: true });

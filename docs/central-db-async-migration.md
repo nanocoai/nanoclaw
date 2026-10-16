@@ -78,7 +78,7 @@ that intentionally inspect SQLite behavior.
 
 ## Known external updates
 
-The matching public channel/provider branches must be updated in lockstep:
+The matching `channels` branch adapters and provider skill payloads must be updated in lockstep:
 
 - `telegram.ts`: await messaging-group reads/writes and user upserts.
 - `deltachat.ts`: make `isDcAdmin` async and await `hasTable` and its database

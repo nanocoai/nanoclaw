@@ -17,8 +17,8 @@
  * The copied dirs are real (not symlinks), so they survive providers'
  * symlink-only prunes and persist across respawns.
  *
- * This module is a main-owned seam that provider payloads (on the `providers`
- * donor branch) import — mirrors src/group-persona.ts.
+ * This module is a main-owned seam that provider skill payloads import —
+ * mirrors src/group-persona.ts.
  */
 import fs from 'fs';
 import path from 'path';

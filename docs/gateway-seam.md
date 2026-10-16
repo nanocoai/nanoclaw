@@ -227,9 +227,9 @@ is not behind.
 
 ## How a gateway gets installed
 
-Gateway skills are the one skill type that keeps its implementation on `main`,
-in the skill's own `payload/` directory, rather than on a registry branch. The
-reason is bootstrapping: a channel can be added later, but an install with no
+Gateway skills keep their implementation on `main`, in the skill's own
+`payload/` directory, rather than on a registry branch. For a gateway this is
+required, not a choice: a channel can be added later, but an install with no
 gateway cannot start at all, so the payload has to be present in the checkout
 that setup is running from.
 
