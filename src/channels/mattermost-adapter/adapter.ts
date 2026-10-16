@@ -919,7 +919,7 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
       threadId,
       user: this.projectAuthor(reaction.user_id),
     };
-    chat.processReaction({ ...reactionEvent, adapter: this });
+    void chat.processReaction({ ...reactionEvent, adapter: this });
   }
 
   // =========================================================================

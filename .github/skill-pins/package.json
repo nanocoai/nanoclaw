@@ -8,14 +8,14 @@
     "@anthropic-ai/claude-code": "2.1.296",
     "@beeper/chat-adapter-matrix": "0.2.0",
     "@bitbasti/chat-adapter-webex": "0.1.0",
-    "@chat-adapter/discord": "4.29.0",
-    "@chat-adapter/gchat": "4.29.0",
-    "@chat-adapter/github": "4.29.0",
-    "@chat-adapter/linear": "4.29.0",
-    "@chat-adapter/slack": "4.29.0",
-    "@chat-adapter/teams": "4.29.0",
-    "@chat-adapter/telegram": "4.29.0",
-    "@chat-adapter/whatsapp": "4.29.0",
+    "@chat-adapter/discord": "4.41.1",
+    "@chat-adapter/gchat": "4.41.1",
+    "@chat-adapter/github": "4.41.1",
+    "@chat-adapter/linear": "4.41.1",
+    "@chat-adapter/slack": "4.41.1",
+    "@chat-adapter/teams": "4.41.1",
+    "@chat-adapter/telegram": "4.41.1",
+    "@chat-adapter/whatsapp": "4.41.1",
     "@deltachat/stdio-rpc-server": "2.49.0",
     "@firecrawl/anydoc": "0.1.6",
     "@getdial/cli": "0.37.0",
@@ -60,49 +60,49 @@
       ]
     },
     "@chat-adapter/discord": {
-      "version": "4.29.0",
+      "version": "4.41.1",
       "sources": [
         ".claude/skills/add-discord/SKILL.md nc:dep"
       ]
     },
     "@chat-adapter/gchat": {
-      "version": "4.29.0",
+      "version": "4.41.1",
       "sources": [
         ".claude/skills/add-gchat/SKILL.md nc:dep"
       ]
     },
     "@chat-adapter/github": {
-      "version": "4.29.0",
+      "version": "4.41.1",
       "sources": [
         ".claude/skills/add-github/SKILL.md nc:dep"
       ]
     },
     "@chat-adapter/linear": {
-      "version": "4.29.0",
+      "version": "4.41.1",
       "sources": [
         ".claude/skills/add-linear/SKILL.md nc:dep"
       ]
     },
     "@chat-adapter/slack": {
-      "version": "4.29.0",
+      "version": "4.41.1",
       "sources": [
         ".claude/skills/add-slack/SKILL.md nc:dep"
       ]
     },
     "@chat-adapter/teams": {
-      "version": "4.29.0",
+      "version": "4.41.1",
       "sources": [
         ".claude/skills/add-teams/SKILL.md nc:dep"
       ]
     },
     "@chat-adapter/telegram": {
-      "version": "4.29.0",
+      "version": "4.41.1",
       "sources": [
         ".claude/skills/add-telegram/SKILL.md nc:dep"
       ]
     },
     "@chat-adapter/whatsapp": {
-      "version": "4.29.0",
+      "version": "4.41.1",
       "sources": [
         ".claude/skills/add-whatsapp-cloud/SKILL.md nc:dep"
       ]

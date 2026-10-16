@@ -34,9 +34,8 @@ function extractReplyContext(raw: Record<string, any>): ReplyContext | null {
 /**
  * Discord message forwards carry their content in `message_snapshots`, not
  * `content` (`message_reference.type === 1` means FORWARD; 0 is a normal
- * reply). The adapter only reads `content`/`attachments`, so without this the
- * agent sees an empty message. Unwrap the snapshot back into the payload so
- * text, attachment download, and formatting all ride the existing path.
+ * reply). Unwrap the snapshot into the payload, then drop `message_snapshots`
+ * so adapters >= 4.38 (which flatten snapshots themselves) don't add it twice.
  * Note: snapshots contain no author, so the original sender is unavailable.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -59,9 +58,10 @@ export function unwrapForwardedSnapshot(data: Record<string, any>): void {
   if (fwdAttachments.length > 0) {
     data.attachments = [...(data.attachments ?? []), ...fwdAttachments];
   }
+  delete data.message_snapshots;
 }
 
-function unwrapForwards(adapter: ReturnType<typeof createDiscordAdapter>): void {
+export function unwrapForwards(adapter: ReturnType<typeof createDiscordAdapter>): void {
   const a = adapter as unknown as {
     handleForwardedMessage: (data: Record<string, unknown>, options?: unknown) => Promise<void>;
   };

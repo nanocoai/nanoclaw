@@ -21,7 +21,7 @@ import type { ChannelAdapter, ChannelContextDefaults, ChannelDefaults } from './
 import { createChatSdkBridge } from './chat-sdk-bridge.js';
 import { registerChannelAdapter } from './channel-registry.js';
 import { setSlackAuthorIsBotResolver } from './slack-a2a-guard.js';
-import { extractSlackRawText } from './slack-raw-text.js';
+import { slackRawTextExtractor } from './slack-raw-text.js';
 
 /**
  * Dedicated bot app on a threaded platform. group threads:true keeps
@@ -188,7 +188,7 @@ export function createSlackBridge(options: SlackBridgeOptions = {}): ChannelAdap
   setSlackAuthorIsBotResolver(options.instanceKey ?? 'slack', (userId) => slackAuthorIsBot(slackAdapter, userId));
   const bridge = createChatSdkBridge({
     adapter: slackAdapter,
-    extractRawText: extractSlackRawText,
+    extractRawText: slackRawTextExtractor(slackAdapter),
     instance: options.instanceKey, // undefined ⇒ default instance (keyed by channelType)
     concurrency: 'concurrent',
     supportsThreads: true,
