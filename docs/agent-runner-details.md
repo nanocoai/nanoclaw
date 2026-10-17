@@ -139,7 +139,10 @@ What a provider declares:
 - `lifecycle` — `memorySessionHookRegistration` (runs when core registers the memory hook)
   and `beforeQuery` (runs before each query).
 - `history` — `afterExchange` (the factory wraps `onExchangeComplete` with it) and
-  `readTrace` (what `/upload-trace` uploads). Anything else a provider does with its own
+  `readTrace` (what `/upload-trace` uploads). A provider with no on-disk transcript can
+  implement `afterExchange` with `archiveProviderExchange` from
+  `provider-contracts/exchange-archive.ts`, which appends each exchange to one markdown
+  file per thread in `conversations/`. Anything else a provider does with its own
   transcript — Claude's pre-compact archive and continuation rotation, for example — is
   provider-internal code (`providers/claude-history.ts`), not a contract field.
 - `textDelivery`, `commands` — read by the poll-loop and formatter. The formatter's
