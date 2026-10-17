@@ -17,6 +17,7 @@ import {
   detectService,
   drainContainers,
   gatewayRestartCommand,
+  listInstallContainers,
   probe,
   restartGatewayContainers,
   shellQuote,
@@ -385,6 +386,97 @@ describe('liveness probes: running / stopped / probe failed', () => {
 });
 
 describe('drain and health gates', () => {
+  describe('Apple Container (no `ps`, no `--filter`)', () => {
+    const prev = process.env.CONTAINER_RUNTIME;
+    afterEach(() => {
+      if (prev === undefined) delete process.env.CONTAINER_RUNTIME;
+      else process.env.CONTAINER_RUNTIME = prev;
+    });
+
+    function appleList(root: string, running: boolean) {
+      const install = slug(root);
+      const entry = (id: string, labels: Record<string, string>, state = 'running') => ({
+        status: state,
+        configuration: { id, labels },
+      });
+      return JSON.stringify([
+        ...(running
+          ? [
+              entry('agent-1', { 'nanoclaw-install': install, 'nanoclaw-session': 's1' }),
+              entry('gw-1', { 'nanoclaw-install': install, 'nanoclaw-role': 'gateway' }),
+              entry('aux-1', { 'nanoclaw-install': install, 'nanoclaw-session': 's2', 'nanoclaw-role': 'gateway' }),
+              entry('other-install', { 'nanoclaw-install': 'deadbeef', 'nanoclaw-session': 's9' }),
+            ]
+          : []),
+        entry('stopped-agent', { 'nanoclaw-install': install, 'nanoclaw-session': 's3' }, 'stopped'),
+        {
+          status: { state: 'running' },
+          configuration: { id: 'builder', labels: { 'com.apple.container.plugin': 'builder' } },
+        },
+      ]);
+    }
+
+    it("lists as JSON, stops only this install's running non-gateway containers, and waits for none", async () => {
+      process.env.CONTAINER_RUNTIME = 'container';
+      const root = temp();
+      const { env, calls } = makeEnv('darwin', {});
+      let stopped = false;
+      env.runner.tryRun = (command, args) => {
+        const key = `${command} ${args.join(' ')}`;
+        calls.push(key);
+        if (key === 'container list --all --format json') return { ok: true, stdout: appleList(root, !stopped) };
+        if (args[0] === 'stop') {
+          stopped = true;
+          return { ok: true, stdout: '' };
+        }
+        return { ok: false, stdout: `unexpected: ${key}` };
+      };
+
+      await drainContainers(root, env);
+
+      expect(calls.some((c) => c.startsWith('container ps'))).toBe(false);
+      expect(calls).toContain('container stop -t 10 agent-1 aux-1');
+      expect(calls.filter((c) => c === 'container list --all --format json').length).toBeGreaterThanOrEqual(2);
+    });
+
+    it('keeps waiting on a container that is still stopping, and times out instead of reporting drained', async () => {
+      process.env.CONTAINER_RUNTIME = 'container';
+      const root = temp();
+      const install = slug(root);
+      const stopping = JSON.stringify([
+        {
+          status: 'stopping',
+          configuration: { id: 'agent-1', labels: { 'nanoclaw-install': install, 'nanoclaw-session': 's1' } },
+        },
+      ]);
+      const { env } = makeEnv('darwin', {
+        'container list --all --format json': { ok: true, stdout: stopping },
+        'container stop -t 10 agent-1': { ok: false, stdout: 'timed out' },
+      });
+      await expect(drainContainers(root, env, 0)).rejects.toThrow('agent-1');
+    });
+
+    it('refuses (does not report drained) when the list cannot be parsed', async () => {
+      process.env.CONTAINER_RUNTIME = 'container';
+      const root = temp();
+      const { env } = makeEnv('darwin', { 'container list --all --format json': { ok: true, stdout: 'not json' } });
+      await expect(drainContainers(root, env)).rejects.toThrow(
+        'Cannot inspect active NanoClaw containers with container',
+      );
+    });
+
+    it('lists gateway-owned containers, stopped ones included, for the post-restore restart', () => {
+      process.env.CONTAINER_RUNTIME = 'container';
+      const root = temp();
+      const { env } = makeEnv('darwin', {
+        'container list --all --format json': { ok: true, stdout: appleList(root, true) },
+      });
+      const listed = listInstallContainers('container', `nanoclaw-install=${slug(root)}`, true, env);
+      expect(listed.ok).toBe(true);
+      expect(listed.rows.map((r) => r.id).sort()).toEqual(['agent-1', 'aux-1', 'gw-1', 'stopped-agent']);
+    });
+  });
+
   it('filters active containers by this install slug', async () => {
     const root = temp();
     const label = `nanoclaw-install=${slug(root)}`;
