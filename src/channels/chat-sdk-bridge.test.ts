@@ -780,4 +780,42 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
       await bridge.teardown();
     }
   });
+
+  it('decodes the option index when @chat-adapter/discord appends "\\n<value>" to custom_id', async () => {
+    const { registerQuestionRenderResolver } = await import('./question-render-registry.js');
+    registerQuestionRenderResolver((id) =>
+      id === 'q-index'
+        ? {
+            title: 'Install Packages Request',
+            options: [
+              { label: 'Approve', selectedLabel: '✅ Approved', value: 'approve' },
+              { label: 'Reject', selectedLabel: '❌ Rejected', value: 'reject' },
+            ],
+          }
+        : undefined,
+    );
+    const encodedClick = JSON.stringify({
+      type: 'GATEWAY_INTERACTION_CREATE',
+      data: {
+        type: 3,
+        id: 'interaction-2',
+        token: 'interaction-token',
+        channel_id: 'chan-1',
+        // Button({ id: 'ncq:q-index:0', value: '0' }) as encoded by the Discord adapter.
+        data: { custom_id: 'ncq:q-index:0\n0' },
+        member: { user: { id: 'clicker-1', username: 'clicker' } },
+        message: { id: 'card-2', embeds: [] },
+      },
+    });
+    const { bridge, post, onAction } = await startGateway(BOT_TOKEN);
+    try {
+      expect((await post(encodedClick, { 'x-discord-gateway-token': BOT_TOKEN })).status).toBe(200);
+      expect(onAction).toHaveBeenCalledWith('q-index', 'approve', 'clicker-1', {
+        messageId: 'card-2',
+        platformId: 'chan-1',
+      });
+    } finally {
+      await bridge.teardown();
+    }
+  });
 });
