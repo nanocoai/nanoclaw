@@ -75,7 +75,8 @@ jobs:
           git -C "$source_dir" diff --exit-code
 
   # Skill pins sit outside the lockfile; .github/skill-pins mirrors them so
-  # Dependabot and audit tools can see them. Red when the mirror is stale.
+  # Dependabot and audit tools can see them. Red when the mirror is stale, or
+  # when the signal-cli download hash is not GitHub's digest for its release.
   skill-pins:
     runs-on: ubuntu-26.04
     permissions:
@@ -91,6 +92,19 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm run skill-pins:check
+      - name: signal-cli pin matches its release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          f=setup/install-signal-cli.sh
+          v=$(sed -n 's/^VERSION="\([0-9.]*\)"$/\1/p' "$f")
+          sha=$(sed -n 's/^SHA256="\([0-9a-f]*\)"$/\1/p' "$f")
+          digest=$(gh api "repos/AsamK/signal-cli/releases/tags/v$v" \
+            --jq ".assets[] | select(.name == \"signal-cli-$v-Linux-native.tar.gz\") | .digest")
+          if [ "$digest" != "sha256:$sha" ] || [ "$(grep -cE '\b(VERSION|SHA256)=' "$f")" != 2 ]; then
+            echo "::error file=$f::SHA256 is not GitHub's digest for v$v. Use: SHA256=\"${digest#sha256:}\""
+            exit 1
+          fi
 
   # Repository rules require exact `ci`; always run it so matrix failures remain blocking.
   ci:
