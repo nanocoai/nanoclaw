@@ -202,6 +202,16 @@ Five types of skills. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full taxono
 | `/add-onecli`, `/add-iron-proxy` | Install or refresh this copy's credential gateway |
 | `/migrate-memory` | Carry a group's agent memory across a provider switch (operator-run, both directions) |
 
+## Fork-Local Code
+
+In a fork, keep code that has no upstream counterpart out of upstream files — new files can't merge-conflict, edits inside upstream files can (one measured upgrade: 124 fork-only files → 0 conflicts; 208 upstream-file edits → 91 conflicted files). Full rationale: [docs/customizing.md](docs/customizing.md#keep-fork-only-code-in-one-folder).
+
+- Fork-only files live in one folder mirroring the upstream layout: `src/local/`, `container/agent-runner/src/local/`.
+- Wire them in through an existing registry/barrel with one line per upstream file, each guarded by a registration test.
+- Extend upstream behavior by wrapping it (decorator), not editing it; import upstream helpers, never copy them.
+- If a fork feature must change an upstream decision, propose a behavior-neutral seam upstream instead of editing the file.
+- Skill-fetched files (channels, providers) and migrations stay at their canonical paths.
+
 ## Contributing
 
 Before creating a PR, adding a skill, or preparing any contribution, you MUST read [CONTRIBUTING.md](CONTRIBUTING.md). It covers accepted change types, the skill types and their guidelines, `SKILL.md` format rules, and the pre-submission checklist.
@@ -294,7 +304,7 @@ This project uses pnpm with `minimumReleaseAge: 4320` (3 days) in `pnpm-workspac
 | [docs/v1-to-v2-changes.md](docs/v1-to-v2-changes.md) | v1→v2 architecture diff — vocabulary for where v1 things moved |
 | [docs/migration-dev.md](docs/migration-dev.md) | Migration development guide — testing, debugging, dev loop |
 | [docs/provider-migration.md](docs/provider-migration.md) | Switching a live agent group between providers (e.g. Claude → Codex) — what carries over, rollback |
-| [docs/customizing.md](docs/customizing.md) | Short intro to customizing via skills |
+| [docs/customizing.md](docs/customizing.md) | Short intro to customizing via skills + keeping fork-only code in one folder |
 | [docs/skills-model.md](docs/skills-model.md) | The skills model in full: recipes, tests, upgrades, migrations |
 | [docs/skill-guidelines.md](docs/skill-guidelines.md) | Authoritative checklist for writing a skill |
 | [docs/skill-directives.md](docs/skill-directives.md) | `nc:` directive reference: fence grammar, the eight kinds, effects, guards, lint |
