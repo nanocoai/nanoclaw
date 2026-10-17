@@ -416,6 +416,85 @@ describe('gateway approval coordinator', () => {
     await expect(held).resolves.toBe('deny');
   });
 
+  it('releases a hold whose approval row was deleted under it', async () => {
+    vi.useFakeTimers();
+    const coordinator = await import('./gateway-approval-coordinator.js');
+    await coordinator.startGatewayApprovalCoordinator(provider(), delivery, vi.fn(), {
+      timeoutMs: 1_000,
+      maxPending: 1,
+    });
+
+    const held = decide(request({ id: 'deleted-row' }));
+    await vi.waitFor(() => expect(delivered).toHaveLength(1));
+    let settled = false;
+    void held.then(() => {
+      settled = true;
+    });
+    // What a group or messaging-group delete does to a live session's approval.
+    await approvalDb.deletePendingApproval(JSON.parse(delivered[0].content).questionId);
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(settled).toBe(true);
+    await expect(held).resolves.toBe('deny');
+
+    // The pending slot is free again: the next request gets a card, not the overload denial.
+    void decide(request({ id: 'after-delete' }));
+    await vi.waitFor(() => expect(delivered).toHaveLength(2));
+  });
+
+  it('releases a hold whose row is deleted between the expiry read and its claim', async () => {
+    vi.useFakeTimers();
+    const coordinator = await import('./gateway-approval-coordinator.js');
+    await coordinator.startGatewayApprovalCoordinator(provider(), delivery, vi.fn(), { timeoutMs: 1_000 });
+    const held = decide(request({ id: 'deleted-mid-expiry' }));
+    await vi.waitFor(() => expect(delivered).toHaveLength(1));
+    const { questionId } = JSON.parse(delivered[0].content);
+    let settled = false;
+    void held.then(() => {
+      settled = true;
+    });
+    const original = approvalDb.transitionPendingApprovalStatus;
+    vi.spyOn(approvalDb, 'transitionPendingApprovalStatus').mockImplementation(async (id, expected, status) => {
+      if (id === questionId && status === 'expired') await approvalDb.deletePendingApproval(id);
+      return original(id, expected, status);
+    });
+
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(settled).toBe(true);
+    await expect(held).resolves.toBe('deny');
+  });
+
+  it('keeps a claimed approval when shutdown expiry finds its row already deleted', async () => {
+    const coordinator = await import('./gateway-approval-coordinator.js');
+    await coordinator.startGatewayApprovalCoordinator(provider(), delivery, vi.fn(), { timeoutMs: 5_000 });
+    const decision = decide(request());
+    await vi.waitFor(() => expect(delivered).toHaveLength(1));
+    const { questionId } = JSON.parse(delivered[0].content);
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const original = approvalDb.deletePendingApproval;
+    const deletion = vi.spyOn(approvalDb, 'deletePendingApproval').mockImplementation(async (id) => {
+      await original(id);
+      await blocked;
+    });
+    const response = coordinator.handleGatewayApprovalResponse({
+      questionId,
+      value: 'approve',
+      userId: 'fixture:owner',
+      channelType: 'fixture',
+      platformId: 'owner',
+      threadId: null,
+    });
+    await vi.waitFor(() => expect(deletion).toHaveBeenCalled());
+
+    // The row is gone but the response has not settled yet; shutdown expiry must not override it.
+    await coordinator.stopGatewayApprovalCoordinator();
+    release();
+    await response;
+    await expect(decision).resolves.toBe('approve');
+  });
+
   it('uses the provider expiry instead of shortening its approval window', async () => {
     vi.useFakeTimers();
     const coordinator = await import('./gateway-approval-coordinator.js');

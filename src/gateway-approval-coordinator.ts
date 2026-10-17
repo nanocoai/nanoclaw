@@ -58,6 +58,8 @@ interface PendingState {
   requestKey: string;
   promise: Promise<GatewayApprovalDecision>;
   binding: string;
+  /** Set once a response or gateway event claims the outcome; expiry then leaves it alone, row or not. */
+  decided?: boolean;
 }
 
 export interface GatewayApprovalCoordinatorOptions {
@@ -565,7 +567,10 @@ export async function handleGatewayApprovalResponse(payload: ResponsePayload): P
     if (!claimed) return true;
     // The database claim owns the outcome; expiry must not override it while
     // card updates or gateway delivery are still in flight.
-    if (state) clearTimeout(state.timer);
+    if (state) {
+      clearTimeout(state.timer);
+      state.decided = true;
+    }
     if (approvalSource?.durable) {
       await editGatewayApprovalCard(approval, decision === 'approve' ? '✅ Approved' : '❌ Rejected');
       await deliverDurableDecision({ ...approval, status: decision === 'approve' ? 'approved' : 'rejected' });
@@ -612,6 +617,10 @@ async function expireApproval(
       await editExpiredGatewayApprovalCard(row, reason);
       if (approvalSource?.durable) await deliverDurableDecision({ ...row, status: 'expired' });
       else await deletePendingApproval(approvalId);
+    } else if (state && !(await getPendingApproval(approvalId)) && !state.decided) {
+      // Row deleted under a live hold (group or messaging-group delete): nothing
+      // can decide it now, so release the hold instead of leaking it.
+      expired = true;
     }
   } catch (err) {
     if (state) settle(approvalId, state, unavailableDecision());
@@ -826,6 +835,8 @@ async function resolveGatewayRequest(requestId: string): Promise<void> {
     await transitionPendingApprovalStatus(row.approval_id, 'pending', 'expired');
     const current = await getPendingApproval(row.approval_id);
     if (!current) continue;
+    const state = pending.get(row.approval_id);
+    if (state) state.decided = true;
     const decision =
       current.status === 'approved' ? 'approve' : current.status === 'rejected' ? 'deny' : unavailableDecision();
     await editGatewayApprovalCard(
@@ -837,7 +848,6 @@ async function resolveGatewayRequest(requestId: string): Promise<void> {
           : 'Request ended at the gateway.',
     );
     await deletePendingApproval(row.approval_id);
-    const state = pending.get(row.approval_id);
     if (state) settle(row.approval_id, state, decision);
   }
 }

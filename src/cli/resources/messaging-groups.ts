@@ -2,11 +2,13 @@ import { randomUUID } from 'crypto';
 
 import { resolveUnknownSenderPolicy } from '../../channels/channel-defaults.js';
 import { hasDeclaredChannelDefaults } from '../../channels/channel-registry.js';
+import { getDb, hasTable } from '../../db/connection.js';
 import { getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
 import { log } from '../../log.js';
 import { routeInbound } from '../../router.js';
 import { UNKNOWN_SENDER_POLICIES } from '../../types.js';
 import { registerResource } from '../crud.js';
+import { projectDestinationsToSessions } from './destinations.js';
 
 registerResource({
   name: 'messaging-group',
@@ -72,7 +74,7 @@ registerResource({
   ],
   // Idempotent create: a skill re-running `ncl messaging-groups create` gets the existing row back.
   naturalKey: ['channel_type', 'platform_id', 'instance'],
-  operations: { list: 'open', get: 'open', create: 'approval', update: 'approval', delete: 'approval' },
+  operations: { list: 'open', get: 'open', create: 'approval', update: 'approval' },
   resolveDefaults: (values) => {
     if (values.unknown_sender_policy !== undefined) return;
     const channelType = String(values.channel_type);
@@ -91,6 +93,96 @@ registerResource({
     values.unknown_sender_policy = resolveUnknownSenderPolicy(channelKey, isGroup, channelType);
   },
   customOperations: {
+    delete: {
+      access: 'approval',
+      description:
+        'Delete a messaging group and the rows that point at it (its sessions with their questions, approvals and ' +
+        'host bookkeeping; channel destinations; DM cache entries; pending sender and channel approvals; wirings). ' +
+        'FK-ordered cascade in a single transaction. Use --id <messaging-group-id>. ' +
+        'An agent-shared session that started in this chat goes too; the agent starts a fresh one on its next message. ' +
+        "The host sweep stops the deleted sessions' containers within about a minute. " +
+        'Out of scope: on-disk cleanup of data/v2-sessions/.',
+      handler: async (args) => {
+        const id = args.id as string;
+        if (!id) throw new Error('--id is required');
+        const db = getDb();
+
+        const exists = await db.get('SELECT 1 FROM messaging_groups WHERE id = ? LIMIT 1', id);
+        if (!exists) throw new Error(`messaging-group not found: ${id}`);
+
+        const hasAgentDestinations = await hasTable(db, 'agent_destinations');
+        const hasPendingApprovals = await hasTable(db, 'pending_approvals');
+        const sessionIds = 'SELECT id FROM sessions WHERE messaging_group_id = ?';
+        let destinationOwners: string[] = [];
+
+        // Same shape as `groups delete`: one transaction, counts from each
+        // DELETE's `changes`, rolled back whole if any statement throws.
+        const removed = await db.transaction(async () => {
+          const counts = {
+            pending_questions: 0,
+            pending_approvals: 0,
+            session_claims: 0,
+            delivery_attempts: 0,
+            wake_signals: 0,
+            sessions: 0,
+            agent_destinations: 0,
+            user_dms: 0,
+            pending_sender_approvals: 0,
+            pending_channel_approvals: 0,
+            messaging_group_agents: 0,
+          };
+
+          counts.pending_questions = (
+            await db.run(`DELETE FROM pending_questions WHERE session_id IN (${sessionIds})`, id)
+          ).changes;
+          if (hasPendingApprovals) {
+            counts.pending_approvals = (
+              await db.run(`DELETE FROM pending_approvals WHERE session_id IN (${sessionIds})`, id)
+            ).changes;
+          }
+          // No FK on the host-coordination tables; cleared here so they don't outlive the session.
+          counts.session_claims = (
+            await db.run(`DELETE FROM session_claims WHERE session_id IN (${sessionIds})`, id)
+          ).changes;
+          counts.delivery_attempts = (
+            await db.run(`DELETE FROM delivery_attempts WHERE session_id IN (${sessionIds})`, id)
+          ).changes;
+          counts.wake_signals = (
+            await db.run(`DELETE FROM wake_signals WHERE session_id IN (${sessionIds})`, id)
+          ).changes;
+          counts.sessions = (await db.run('DELETE FROM sessions WHERE messaging_group_id = ?', id)).changes;
+          if (hasAgentDestinations) {
+            destinationOwners = (
+              await db.all<{ agent_group_id: string }>(
+                'SELECT DISTINCT agent_group_id FROM agent_destinations WHERE target_type = ? AND target_id = ?',
+                'channel',
+                id,
+              )
+            ).map((row) => row.agent_group_id);
+            counts.agent_destinations = (
+              await db.run('DELETE FROM agent_destinations WHERE target_type = ? AND target_id = ?', 'channel', id)
+            ).changes;
+          }
+          counts.user_dms = (await db.run('DELETE FROM user_dms WHERE messaging_group_id = ?', id)).changes;
+          counts.pending_sender_approvals = (
+            await db.run('DELETE FROM pending_sender_approvals WHERE messaging_group_id = ?', id)
+          ).changes;
+          counts.pending_channel_approvals = (
+            await db.run('DELETE FROM pending_channel_approvals WHERE messaging_group_id = ?', id)
+          ).changes;
+          counts.messaging_group_agents = (
+            await db.run('DELETE FROM messaging_group_agents WHERE messaging_group_id = ?', id)
+          ).changes;
+          await db.run('DELETE FROM messaging_groups WHERE id = ?', id);
+          return counts;
+        });
+
+        // Like `destinations remove`: drop the chat from live session mailboxes now, not at next spawn.
+        for (const agentGroupId of destinationOwners) await projectDestinationsToSessions(agentGroupId);
+
+        return { deleted: id, removed };
+      },
+    },
     send: {
       access: 'approval',
       description:
