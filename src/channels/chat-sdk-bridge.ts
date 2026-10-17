@@ -48,6 +48,21 @@ interface ConnectionAwareAdapter extends Adapter {
 export interface ReplyContext {
   text: string;
   sender: string;
+  /**
+   * Platform user id of the replied-to author, when the raw payload exposes
+   * it. Telegram sets it from raw.reply_to_message.from.id so the bot
+   * admission policy (telegram-bot-admission.ts) can recognize "reply to my
+   * own message" — display names are not stable identifiers.
+   */
+  senderUserId?: string;
+  /**
+   * Telegram forum topics: reply_to_message is overloaded — plain topic posts
+   * carry the topic's anchor service message, not a conversational reply.
+   * True when the reply target is that anchor (forum_topic_created, or any
+   * textless message). Extractors set it; the admission policy excludes
+   * anchor "replies" from its reply-to-me leg.
+   */
+  replyToForumTopicAnchor?: boolean;
 }
 
 // ---------------------------------------------------------------------------
