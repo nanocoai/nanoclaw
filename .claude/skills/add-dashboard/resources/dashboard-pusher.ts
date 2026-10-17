@@ -99,18 +99,65 @@ function postJson(config: PusherConfig, urlPath: string, data: unknown): void {
 
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
 
+// Transcripts and logs only grow, and a busy agent's transcript can pass the
+// largest string Node can hold (~512 MB): readFileSync(…, 'utf-8') then throws.
+// So files are never read whole — only their tail, or the bytes appended since
+// the last snapshot, a chunk at a time.
+const READ_CHUNK_BYTES = 1024 * 1024;
+const TAIL_WINDOW_BYTES = 256 * 1024;
+const LOG_BACKFILL_BYTES = 512 * 1024;
+
+/**
+ * Calls `onLine` for each newline-terminated line in the byte range [start, end)
+ * of `file`. Returns the offset just past the last newline, and the bytes after
+ * it (a line still being written, or the file's unterminated last line).
+ */
+function readLines(
+  file: string,
+  start: number,
+  end: number,
+  onLine: (line: string) => void,
+): { next: number; rest: string } {
+  const fd = fs.openSync(file, 'r');
+  try {
+    const buf = Buffer.alloc(READ_CHUNK_BYTES);
+    let carry = Buffer.alloc(0);
+    let pos = start;
+    while (pos < end) {
+      const n = fs.readSync(fd, buf, 0, Math.min(buf.length, end - pos), pos);
+      if (n === 0) break;
+      pos += n;
+      const data = carry.length > 0 ? Buffer.concat([carry, buf.subarray(0, n)]) : buf.subarray(0, n);
+      let from = 0;
+      for (let nl = data.indexOf(10); nl !== -1; nl = data.indexOf(10, from)) {
+        onLine(data.toString('utf-8', from, nl));
+        from = nl + 1;
+      }
+      carry = Buffer.from(data.subarray(from));
+    }
+    return { next: pos - carry.length, rest: carry.toString('utf-8') };
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 function startLogTail(config: PusherConfig): void {
   const logFile = path.resolve(process.cwd(), 'logs', 'nanoclaw.log');
   if (!fs.existsSync(logFile)) return;
 
   // Send last 200 lines as backfill
   try {
-    const allLines = fs
-      .readFileSync(logFile, 'utf-8')
-      .split('\n')
-      .filter((l) => l.trim());
-    logOffset = fs.statSync(logFile).size;
-    const tail = allLines.slice(-200).map((l) => l.replace(ANSI_RE, ''));
+    const size = fs.statSync(logFile).size;
+    const start = Math.max(0, size - LOG_BACKFILL_BYTES);
+    const allLines: string[] = [];
+    const { rest } = readLines(logFile, start, size, (l) => allLines.push(l));
+    allLines.push(rest);
+    if (start > 0) allLines.shift(); // the window starts mid-line
+    logOffset = size;
+    const tail = allLines
+      .filter((l) => l.trim())
+      .slice(-200)
+      .map((l) => l.replace(ANSI_RE, ''));
     if (tail.length > 0) postJson(config, '/api/logs/push', { lines: tail });
   } catch {
     return;
@@ -328,12 +375,14 @@ async function collectTokens() {
   const agentGroups = await getAllAgentGroups();
   const nameMap = new Map(agentGroups.map((g) => [g.id, g.name]));
 
+  const seen = new Set<string>();
   if (fs.existsSync(sessionsDir)) {
     for (const agDir of fs.readdirSync(sessionsDir).filter((d) => d.startsWith('ag-'))) {
-      const entries = scanJsonlTokens(path.join(sessionsDir, agDir));
+      const entries = scanJsonlTokens(path.join(sessionsDir, agDir), seen);
       allEntries.push(...entries.map((e) => ({ ...e, agentGroupId: agDir })));
     }
   }
+  for (const file of tokenScanCache.keys()) if (!seen.has(file)) tokenScanCache.delete(file);
 
   const byModel: Record<
     string,
@@ -392,17 +441,48 @@ async function collectTokens() {
   return { totals, byModel, byGroup };
 }
 
-function scanJsonlTokens(agentDir: string) {
+interface TokenEntry {
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+}
+
+// Per transcript: the entries read so far and the byte offset they cover. Each
+// snapshot reads only what was appended since; a file that shrank or was
+// replaced (new inode) is read again from the start.
+const tokenScanCache = new Map<string, { ino: number; offset: number; entries: TokenEntry[] }>();
+
+interface UsageLine {
+  timestamp?: string;
+  model?: string;
+  usage: {
+    input_tokens?: number;
+    output_tokens?: number;
+    cache_read_input_tokens?: number;
+    cache_creation_input_tokens?: number;
+  };
+}
+
+/** An assistant line's usage, or null. Cheap substring check before parsing: most lines are tool results. */
+function parseUsageLine(line: string): UsageLine | null {
+  if (!line.includes('"usage"')) return null;
+  try {
+    const r = JSON.parse(line);
+    return r.type === 'assistant' && r.message?.usage
+      ? { timestamp: r.timestamp, model: r.message.model, usage: r.message.usage }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function scanJsonlTokens(agentDir: string, seen: Set<string>): TokenEntry[] {
   const claudeDir = path.join(agentDir, '.claude-shared', 'projects');
   if (!fs.existsSync(claudeDir)) return [];
 
-  const entries: Array<{
-    model: string;
-    inputTokens: number;
-    outputTokens: number;
-    cacheReadTokens: number;
-    cacheCreationTokens: number;
-  }> = [];
+  const entries: TokenEntry[] = [];
 
   const walk = (dir: string): void => {
     try {
@@ -411,24 +491,26 @@ function scanJsonlTokens(agentDir: string) {
         if (entry.isDirectory()) walk(full);
         else if (entry.name.endsWith('.jsonl')) {
           try {
-            for (const line of fs.readFileSync(full, 'utf-8').split('\n')) {
-              if (!line.trim()) continue;
-              try {
-                const r = JSON.parse(line);
-                if (r.type === 'assistant' && r.message?.usage) {
-                  const u = r.message.usage;
-                  entries.push({
-                    model: r.message.model || 'unknown',
-                    inputTokens: u.input_tokens || 0,
-                    outputTokens: u.output_tokens || 0,
-                    cacheReadTokens: u.cache_read_input_tokens || 0,
-                    cacheCreationTokens: u.cache_creation_input_tokens || 0,
-                  });
-                }
-              } catch {
-                /* skip line */
-              }
+            const st = fs.statSync(full);
+            let cached = tokenScanCache.get(full);
+            if (!cached || cached.ino !== st.ino || st.size < cached.offset) {
+              cached = { ino: st.ino, offset: 0, entries: [] };
+              tokenScanCache.set(full, cached);
             }
+            const fileEntries = cached.entries;
+            cached.offset = readLines(full, cached.offset, st.size, (line) => {
+              const hit = parseUsageLine(line);
+              if (!hit) return;
+              fileEntries.push({
+                model: hit.model || 'unknown',
+                inputTokens: hit.usage.input_tokens || 0,
+                outputTokens: hit.usage.output_tokens || 0,
+                cacheReadTokens: hit.usage.cache_read_input_tokens || 0,
+                cacheCreationTokens: hit.usage.cache_creation_input_tokens || 0,
+              });
+            }).next;
+            seen.add(full);
+            for (const e of fileEntries) entries.push(e);
           } catch {
             /* skip file */
           }
@@ -440,6 +522,24 @@ function scanJsonlTokens(agentDir: string) {
   };
   walk(claudeDir);
   return entries;
+}
+
+/**
+ * The last assistant line with usage in a transcript, read from the end: a
+ * 256 KB window, doubled until a match is found or the window covers the file.
+ */
+function lastUsageLine(file: string): UsageLine | null {
+  const size = fs.statSync(file).size;
+  for (let window = TAIL_WINDOW_BYTES; ; window *= 2) {
+    const start = Math.max(0, size - window);
+    const found: { last: UsageLine | null; skip: boolean } = { last: null, skip: start > 0 }; // skip: window starts mid-line
+    const { rest } = readLines(file, start, size, (line) => {
+      if (found.skip) found.skip = false;
+      else found.last = parseUsageLine(line) ?? found.last;
+    });
+    if (!found.skip) found.last = parseUsageLine(rest) ?? found.last;
+    if (found.last || start === 0) return found.last;
+  }
 }
 
 async function collectContextWindows() {
@@ -479,36 +579,30 @@ async function collectContextWindows() {
     });
 
     // Read last assistant turn from newest file
-    const content = fs.readFileSync(jsonlFiles[0], 'utf-8');
-    const lines = content.split('\n');
-    for (let i = lines.length - 1; i >= 0; i--) {
-      if (!lines[i].trim()) continue;
-      try {
-        const r = JSON.parse(lines[i]);
-        if (r.type === 'assistant' && r.message?.usage) {
-          const u = r.message.usage;
-          const model = r.message.model || 'unknown';
-          const ctx = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
-          const max = 200000;
-          results.push({
-            agentGroupId: agDir,
-            agentGroupName: nameMap.get(agDir),
-            sessionId: path.basename(jsonlFiles[0], '.jsonl'),
-            model,
-            contextTokens: ctx,
-            outputTokens: u.output_tokens || 0,
-            cacheReadTokens: u.cache_read_input_tokens || 0,
-            cacheCreationTokens: u.cache_creation_input_tokens || 0,
-            maxContext: max,
-            usagePercent: max > 0 ? Math.round((ctx / max) * 100) : 0,
-            timestamp: r.timestamp || '',
-          });
-          break;
-        }
-      } catch {
-        /* skip */
-      }
+    let hit: UsageLine | null = null;
+    try {
+      hit = lastUsageLine(jsonlFiles[0]);
+    } catch {
+      continue; // e.g. rotated away since the walk: skip it, not the whole snapshot
     }
+    if (!hit) continue;
+    const u = hit.usage;
+    const model = hit.model || 'unknown';
+    const ctx = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+    const max = 200000;
+    results.push({
+      agentGroupId: agDir,
+      agentGroupName: nameMap.get(agDir),
+      sessionId: path.basename(jsonlFiles[0], '.jsonl'),
+      model,
+      contextTokens: ctx,
+      outputTokens: u.output_tokens || 0,
+      cacheReadTokens: u.cache_read_input_tokens || 0,
+      cacheCreationTokens: u.cache_creation_input_tokens || 0,
+      maxContext: max,
+      usagePercent: max > 0 ? Math.round((ctx / max) * 100) : 0,
+      timestamp: hit.timestamp || '',
+    });
   }
 
   return results;
