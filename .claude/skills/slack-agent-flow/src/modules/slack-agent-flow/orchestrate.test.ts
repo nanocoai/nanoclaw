@@ -15,6 +15,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ChannelDefaults } from '../../channels/adapter.js';
 import type { Session } from '../../types.js';
 
+// Template creates stamp real files: keep them out of the checkout.
+const FILES_ROOT = '/tmp/nanoclaw-test-slack-agent-flow';
+vi.mock('../../config.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../config.js')>()),
+  GROUPS_DIR: '/tmp/nanoclaw-test-slack-agent-flow/groups',
+  DATA_DIR: '/tmp/nanoclaw-test-slack-agent-flow/data',
+  TEMPLATES_DIR: '/tmp/nanoclaw-test-slack-agent-flow/templates',
+}));
+
 const ORIGIN_BOT_TOKEN = 'xoxb-origin-secret-token';
 const NEW_BOT_TOKEN = 'xoxb-new-bot-secret-token';
 const NEW_APP_TOKEN = 'xapp-new-app-secret-token';
@@ -317,6 +326,7 @@ afterEach(async () => {
   vi.restoreAllMocks();
   await closeDb();
   fs.rmSync(tmpDir, { recursive: true, force: true });
+  fs.rmSync(FILES_ROOT, { recursive: true, force: true });
 });
 
 describe('slack-aware create_agent — happy path (Slack-origin session)', () => {
@@ -926,5 +936,44 @@ describe('slack-aware create_agent — workspace install approval', () => {
 
     expect(appStateReads).toBe(1);
     expect(notifyTexts().at(-1)).toContain("failed at step 'install-wait'");
+  });
+});
+
+describe('slack-aware create_agent — from a template', () => {
+  beforeEach(() => {
+    const dir = path.join(FILES_ROOT, 'templates', 'sales', 'sdr');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'plugin.json'),
+      JSON.stringify({
+        $schema: 'https://agent-plugins.org/schemas/1.0.0/plugin.schema.json',
+        name: 'sdr',
+        description: 'Books meetings with new leads',
+      }),
+    );
+  });
+
+  it("builds from the template; the broker gets the ref and the template's description for the avatar", async () => {
+    await runCreateAgent({ name: 'SDR', instructions: 'ignored', template: 'sales/sdr' });
+
+    expect(await getAgentGroupByFolder('sdr')).toBeDefined();
+    expect(mockInitGroupFilesystem).not.toHaveBeenCalled(); // the template path stamps instead
+    const app = fetchCalls.find((c) => c.url.endsWith('/v1/apps'));
+    expect(JSON.parse(app!.body)).toMatchObject({ template: 'sales/sdr' });
+    const avatar = fetchCalls.find((c) => c.url.endsWith('/v1/avatars'));
+    expect(JSON.parse(avatar!.body)).toEqual({ name: 'SDR', description: 'Books meetings with new leads' });
+    expect(notifyTexts().at(-1)).toContain('Agent "SDR" (built from the template "sales/sdr") is live on Slack');
+    assertNoTokenLeak();
+  });
+
+  it('the hold keeps the template and the Slack fields, and the card names the template', async () => {
+    await updateContainerConfigScalars(SRC_GROUP, { cli_scope: 'group' });
+
+    await runCreateAgent({ name: 'SDR', instructions: 'ignored', template: 'sales/sdr', room: 'none' });
+
+    expect(await getAgentGroupByFolder('sdr')).toBeUndefined();
+    const opts = mockRequestApproval.mock.calls[0]![0] as { payload: Record<string, unknown>; question: string };
+    expect(opts.payload).toEqual({ name: 'SDR', instructions: null, template: 'sales/sdr', room: 'none' });
+    expect(opts.question).toContain('template "sales/sdr" (already on this machine)');
   });
 });

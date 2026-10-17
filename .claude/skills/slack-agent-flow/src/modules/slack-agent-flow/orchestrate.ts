@@ -44,6 +44,7 @@ import {
   getMessagingGroupByPlatform,
 } from '../../db/messaging-groups.js';
 import { log } from '../../log.js';
+import { templateDescription } from '../../templates/library.js';
 import type { MessagingGroup, MessagingGroupAgent, Session } from '../../types.js';
 import {
   createDestination,
@@ -441,6 +442,8 @@ interface FlowArgs {
   hotStart: boolean;
   /** Agent instructions excerpt — drives the broker-generated avatar. */
   description?: string;
+  /** Template the agent was built from; recorded with the broker as attribution. */
+  template?: string;
   /** Short PUBLIC line for the room contract + canvas ("what this agent is
    *  for"). Falls back to a first-sentence excerpt of the instructions —
    *  never the full creation prompt (it may carry private detail). */
@@ -503,6 +506,7 @@ async function runFlow(args: FlowArgs): Promise<OrchestrateSuccess> {
     description: args.description,
     allowGuests: args.allowGuests,
     requestedBy: operatorUserId,
+    template: args.template,
     installWait: args.installWait ?? resolveInstallWait(rootDir),
     onInstallPending: async (info) => {
       const text = installPendingText(displayName, info);
@@ -660,6 +664,22 @@ async function runFlow(args: FlowArgs): Promise<OrchestrateSuccess> {
   };
 }
 
+/**
+ * What the broker generates the avatar from: the template's own description
+ * when the agent is built from one (its instructions are ignored then), else
+ * the instructions. The multi-create avatar prefetch keys on this, so both
+ * sides must call it.
+ */
+export function avatarDescription(content: Record<string, unknown>): string | undefined {
+  const text =
+    typeof content.template === 'string' && content.template
+      ? templateDescription(content.template)
+      : typeof content.instructions === 'string'
+        ? content.instructions
+        : undefined;
+  return text?.slice(0, 300);
+}
+
 /** In-host entry — the wrapped create_agent handler's Slack leg (hot-add active). */
 export async function runSlackAgentFlow(args: {
   content: Record<string, unknown>;
@@ -686,7 +706,8 @@ export async function runSlackAgentFlow(args: {
     installWait: args.installWait,
     rootDir: process.cwd(),
     hotStart: true,
-    description: typeof content.instructions === 'string' ? content.instructions.slice(0, 300) : undefined,
+    description: avatarDescription(content),
+    template: typeof content.template === 'string' && content.template ? content.template : undefined,
     purpose: typeof content.purpose === 'string' ? content.purpose : undefined,
     allowGuests: content.allow_guests === true,
     originSession: session,

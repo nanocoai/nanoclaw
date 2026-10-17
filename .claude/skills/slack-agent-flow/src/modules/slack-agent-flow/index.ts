@@ -28,11 +28,17 @@ import { getMessagingGroup } from '../../db/messaging-groups.js';
 import { log } from '../../log.js';
 import type { Session } from '../../types.js';
 import { getDestinationByName, normalizeName } from '../agent-to-agent/db/agent-destinations.js';
-import { createAgent, requestCreateAgentHold, validateCreateAgent } from '../agent-to-agent/create-agent.js';
+import {
+  createAgent,
+  createAgentHoldPayload,
+  requestCreateAgentHold,
+  templateApprovalNote,
+  validateCreateAgent,
+} from '../agent-to-agent/create-agent.js';
 import { agentsCreate } from '../agent-to-agent/guard.js';
 import { notifyAgent, registerApprovalHandler, requestApproval } from '../approvals/index.js';
 import { roomsAddAgent, roomsCreate } from './guard.js';
-import { dedupeSlug, deriveInstanceSlug, runSlackAgentFlow } from './orchestrate.js';
+import { avatarDescription, dedupeSlug, deriveInstanceSlug, runSlackAgentFlow } from './orchestrate.js';
 import {
   handleAddToRoom,
   handleCreateRoom,
@@ -58,8 +64,8 @@ async function isSlackOriginSession(session: Session): Promise<boolean> {
 // flow immediately anyway, and skipping the single case means a guard-HELD
 // lone request never generates an avatar it might not get approval for.
 // The (displayName, description) derivation MUST mirror runSlackAgentFlow /
-// orchestrate exactly — a mismatch is harmless (fresh request) but wastes the
-// prefetch.
+// orchestrate exactly (avatarDescription) — a mismatch is harmless (fresh
+// request) but wastes the prefetch.
 registerDeliveryBatchPreview(async (batch, session) => {
   if (!(await isSlackOriginSession(session))) return;
   const creates = batch
@@ -79,32 +85,33 @@ registerDeliveryBatchPreview(async (batch, session) => {
   const credential = resolveProvisioningCredential(process.cwd());
   if (credential?.mode !== 'broker') return;
   for (const c of creates) {
-    prefetchAvatar(
-      credential.baseUrl,
-      credential.installToken,
-      c.name as string,
-      typeof c.instructions === 'string' ? c.instructions.slice(0, 300) : undefined,
-    );
+    prefetchAvatar(credential.baseUrl, credential.installToken, c.name as string, avatarDescription(c));
   }
   log.info('Avatar prefetch started for multi-create batch', { count: creates.length });
 });
 
-function successText(name: string, roomChannelId: string | undefined, deferredInstall = false): string {
+function successText(
+  name: string,
+  roomChannelId: string | undefined,
+  deferredInstall = false,
+  template?: string,
+): string {
   // The user already knows they were waiting on their workspace — name what
   // unblocked it so the relay reads as an ending, not a fresh announcement.
   const installed = deferredInstall ? ' The workspace approved the install, which is what the wait was for.' : '';
+  const agent = template ? `Agent "${name}" (built from the template "${template}")` : `Agent "${name}"`;
   // room:'none': no shared room was opened — the multi-create
   // pattern finishes with one create_room naming every agent.
   if (roomChannelId === undefined) {
     return (
-      `Agent "${name}" is live on Slack with its own bot and a DM with the operator. No shared room was ` +
+      `${agent} is live on Slack with its own bot and a DM with the operator. No shared room was ` +
       `opened (room:'none') — when the set is complete, open ONE room for all of them with create_room. ` +
       `It came online just now; if it doesn't respond within a minute, an operator can run: bash setup/lib/restart.sh` +
       installed
     );
   }
   return (
-    `Agent "${name}" is live on Slack with its own bot. I opened a DM between it and the operator, ` +
+    `${agent} is live on Slack with its own bot. I opened a DM between it and the operator, ` +
     `and a shared room (${roomChannelId}) where you, I, and it can talk — @-mention it there to engage it. ` +
     `It came online just now; if it doesn't respond within a minute, an operator can run: bash setup/lib/restart.sh` +
     installed
@@ -145,7 +152,8 @@ async function runSlackLeg(
   const { name, localName, newAgentGroupId, slug } = args;
   try {
     const r = await runSlackAgentFlow({ content, session, newAgentGroupId, slug });
-    await notifyAgent(session, successText(name, r.roomChannelId, r.deferredInstall));
+    const template = typeof content.template === 'string' && content.template ? content.template : undefined;
+    await notifyAgent(session, successText(name, r.roomChannelId, r.deferredInstall, template));
   } catch (err) {
     // SlackApiError carries the flow step id its call site passed to the
     // shared Slack lib — surface it like a typed flow step.
@@ -210,9 +218,9 @@ async function slackAwareCreateAgent(content: Record<string, unknown>, session: 
 }
 
 /**
- * Slack-aware hold: same payload shape as upstream ({ name, instructions })
- * so the approved replay re-enters this wrapper unchanged; only the card text
- * differs, telling the admin a Slack bot comes with the sub-agent.
+ * Slack-aware hold: upstream's payload (createAgentHoldPayload, which carries
+ * the template) plus the Slack fields, so the approved replay re-enters this
+ * wrapper unchanged; the card also tells the admin a Slack bot comes with it.
  */
 async function requestSlackCreateAgentHold(content: Record<string, unknown>, session: Session): Promise<void> {
   if (!(await isSlackOriginSession(session))) {
@@ -220,7 +228,6 @@ async function requestSlackCreateAgentHold(content: Record<string, unknown>, ses
     return;
   }
   const name = typeof content.name === 'string' ? content.name : '';
-  const instructions = typeof content.instructions === 'string' ? content.instructions : null;
   const sourceGroup = await getAgentGroup(session.agent_group_id);
   if (!sourceGroup) return;
 
@@ -232,8 +239,7 @@ async function requestSlackCreateAgentHold(content: Record<string, unknown>, ses
     // wrapper with this payload, and dropping it would silently upgrade a
     // guest-accessible request to the agent-view variant.
     payload: {
-      name,
-      instructions,
+      ...createAgentHoldPayload(content),
       ...(typeof content.purpose === 'string' ? { purpose: content.purpose } : {}),
       ...(content.allow_guests === true ? { allow_guests: true } : {}),
       // room:'none' must survive the hold too — dropping it would grow a
@@ -243,7 +249,7 @@ async function requestSlackCreateAgentHold(content: Record<string, unknown>, ses
     title: `Create agent: ${name}`,
     question:
       `Agent "${sourceGroup.name}" wants to create a new sub-agent "${name}" AND provision a dedicated ` +
-      `Slack bot for it (new Slack app, DM with you, and a shared three-way room). Approve?`,
+      `Slack bot for it (new Slack app, DM with you, and a shared three-way room).${templateApprovalNote(content)} Approve?`,
   });
 }
 

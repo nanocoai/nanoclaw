@@ -74,9 +74,9 @@ export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
 export const CENTRAL_DB_PATH = path.join(DATA_DIR, 'v2.db');
-// Local agent-template library. Committed but ships empty (+ README). Resolved
-// once at load. Override to another LOCAL path via NANOCLAW_TEMPLATES_DIR; never
-// a remote URL, never an ncl flag, never runtime-mutable.
+// Local agent-template library: ships with only a README; setup and create_agent
+// copy library templates in (gitignored). Resolved once at load. Override to
+// another LOCAL path via NANOCLAW_TEMPLATES_DIR; never a remote URL or an ncl flag.
 export const TEMPLATES_DIR = process.env.NANOCLAW_TEMPLATES_DIR
   ? path.resolve(process.env.NANOCLAW_TEMPLATES_DIR)
   : path.resolve(PROJECT_ROOT, 'templates');

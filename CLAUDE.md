@@ -118,6 +118,7 @@ ncl help
 | user-dms | list | Cold-DM cache (read-only) |
 | dropped-messages | list | Messages from unregistered senders (read-only) |
 | approvals | list, get | Pending approval requests (read-only) |
+| templates | list | Agent templates on this machine; `--registry` lists the public library |
 
 Key files: `src/cli/dispatch.ts` (dispatcher + approval handler), `src/cli/crud.ts` (generic CRUD registration), `src/cli/resources/` (per-resource definitions).
 
@@ -149,7 +150,7 @@ Per-agent-group container runtime config (provider, model, packages, MCP servers
 | Value | Behavior |
 |-------|----------|
 | `disabled` | Agent never learns about ncl (instructions excluded from CLAUDE.md). Host dispatch rejects any `cli_request`. |
-| `group` (default) | Agent can access `groups`, `sessions`, `destinations`, `members`, `tasks` only, scoped to its own agent group. `--id` and group args are auto-filled. Cross-group access rejected. `cli_scope` changes blocked. |
+| `group` (default) | Agent can access `groups`, `sessions`, `destinations`, `members`, `tasks`, `templates` only, scoped to its own agent group. `--id` and group args are auto-filled. Cross-group access rejected. `cli_scope` changes blocked. |
 | `global` | Unrestricted. Set automatically for owner agent groups via `init-first-agent`. |
 
 Key files: `src/db/container-configs.ts`, `src/container-config.ts`, `src/cli/dispatch.ts` (scope enforcement), `src/project-doc-compose.ts` (instructions exclusion).
@@ -299,7 +300,7 @@ This project uses pnpm with `minimumReleaseAge: 4320` (3 days) in `pnpm-workspac
 | [docs/skill-guidelines.md](docs/skill-guidelines.md) | Authoritative checklist for writing a skill |
 | [docs/skill-directives.md](docs/skill-directives.md) | `nc:` directive reference: fence grammar, the eight kinds, effects, guards, lint |
 | [docs/skill-engine-seam.md](docs/skill-engine-seam.md) | Skill-engine consumer contract (wizard / pipeline / agent-relay) + boundary-rule rationale |
-| [docs/templates.md](docs/templates.md) | Agent templates: what they are, stamping via `ncl groups create --template` + the setup wizard, the gateway/MCP-credential model, supported providers, and how to contribute one |
+| [docs/templates.md](docs/templates.md) | Agent templates: what they are, stamping via `ncl groups create --template`, the setup wizard and an agent's `create_agent`, the gateway/MCP-credential model, supported providers, and how to contribute one |
 | [docs/hardened-image.md](docs/hardened-image.md) | Opt-in: pull the agent image from a registry instead of building it |
 
 ## Container Build Cache

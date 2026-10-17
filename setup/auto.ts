@@ -102,17 +102,19 @@ import { isValidTimezone } from '../src/timezone.js';
 import { DEFAULT_AGENT_PROVIDER, TEMPLATES_DIR } from '../src/config.js';
 import { SocketTransport } from '../src/cli/socket-client.js';
 import {
-  applyTemplatePick,
-  clearTemplatePick,
   cloneRegistry,
   copyTemplate,
+  listTemplatesFromDir,
+  type ClonedRegistry,
+  type TemplateEntry,
+} from '../src/templates/library.js';
+import {
+  applyTemplatePick,
+  clearTemplatePick,
   installTemplateAgent,
   listTemplateAgents,
-  listTemplatesFromDir,
   validateNewTemplateAgentName,
-  type ClonedRegistry,
   type SetupTemplateAgent,
-  type TemplateEntry,
   type TemplateOperation,
 } from './templates.js';
 
@@ -1052,7 +1054,7 @@ async function pickLibraryTemplate(): Promise<string | undefined> {
   spinner.start('Fetching the template library…');
   let registry: ClonedRegistry;
   try {
-    registry = cloneRegistry();
+    registry = await cloneRegistry();
   } catch (err) {
     spinner.stop('Could not reach the template library.');
     const message = err instanceof Error ? err.message : String(err);

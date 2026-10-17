@@ -28,6 +28,8 @@ export interface CreateAgentOptions {
   name?: string;
   /** IANA timezone for the new group; template task schedules fire in it. Omit to follow the install default. */
   timezone?: string;
+  /** Provider for the new group (a sub-agent takes its creator's). Omit for the install default. */
+  provider?: string;
 }
 
 export interface CreateAgentResult {
@@ -106,7 +108,7 @@ export async function createAgentFromTemplate(ref: string, opts?: CreateAgentOpt
 
   const group: AgentGroup = { id, name, folder, agent_provider: null, created_at: new Date().toISOString() };
   await createAgentGroup(group);
-  await ensureContainerConfig(id);
+  await ensureContainerConfig(id, opts?.provider);
   if (timezone) await updateContainerConfigScalars(id, { timezone });
 
   // group-init.ts owns the mkdir at first spawn, but it isn't called here — so we

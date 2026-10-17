@@ -34,6 +34,8 @@ const {
   mockInitGroupFilesystem,
   mockWriteDestinations,
   mockNotifyWrite,
+  mockEnsureTemplateLocal,
+  mockCreateAgentFromTemplate,
   liveApprovals,
   approvalHandlers,
 } = vi.hoisted(() => ({
@@ -43,6 +45,8 @@ const {
   mockInitGroupFilesystem: vi.fn(),
   mockWriteDestinations: vi.fn(),
   mockNotifyWrite: vi.fn(),
+  mockEnsureTemplateLocal: vi.fn(),
+  mockCreateAgentFromTemplate: vi.fn(),
   liveApprovals: new Map<string, import('../../types.js').PendingApproval>(),
   approvalHandlers: new Map<string, (ctx: Record<string, unknown>) => Promise<void>>(),
 }));
@@ -85,6 +89,15 @@ vi.mock('../../session-manager.js', () => ({
   readOutboxFiles: vi.fn().mockReturnValue([]),
   resolveSession: vi.fn(),
   sessionDir: vi.fn().mockReturnValue('/tmp/nowhere'),
+}));
+// The template library and stamper have their own tests; here they are the
+// seams the template branch must call in the right order.
+vi.mock('../../templates/library.js', () => ({
+  ensureTemplateLocal: (...a: unknown[]) => mockEnsureTemplateLocal(...a),
+  hasLocalTemplate: (ref: string) => ref === 'local/one',
+}));
+vi.mock('../../templates/create-agent.js', () => ({
+  createAgentFromTemplate: (...a: unknown[]) => mockCreateAgentFromTemplate(...a),
 }));
 vi.mock('../../container-runner.js', () => ({
   wakeContainer: vi.fn().mockResolvedValue(undefined),
@@ -135,7 +148,13 @@ function liveGrant(approvalId: string, payload: Record<string, unknown>): Pendin
 beforeEach(() => {
   vi.clearAllMocks();
   liveApprovals.clear();
+  mockEnsureTemplateLocal.mockResolvedValue({ dir: '/tmp/templates/sales/sdr', fetched: true, commit: 'c0ffee' });
+  mockCreateAgentFromTemplate.mockResolvedValue({ group: { id: 'ag-sdr', name: 'SDR', folder: 'sdr' }, report: [] });
 });
+
+function notifyTexts(): string[] {
+  return mockNotifyWrite.mock.calls.map((c) => JSON.parse((c[2] as { content: string }).content).text as string);
+}
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -283,5 +302,90 @@ describe('create_agent — approved replay (grant-carrying re-entry)', () => {
 
     expect(mockCreateAgentGroup).not.toHaveBeenCalled();
     expect(mockRequestApproval).not.toHaveBeenCalled();
+  });
+});
+
+describe('create_agent — from a template', () => {
+  it('global scope: fetches, stamps with the agent name and parent provider, wires, and says which template', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global', provider: 'codex' });
+
+    await runCreateAgent({ name: 'SDR', instructions: 'ignored', template: 'sales/sdr' });
+
+    expect(mockRequestApproval).not.toHaveBeenCalled();
+    expect(mockEnsureTemplateLocal).toHaveBeenCalledWith('sales/sdr');
+    expect(mockCreateAgentFromTemplate).toHaveBeenCalledWith('sales/sdr', { name: 'SDR', provider: 'codex' });
+    expect(mockEnsureTemplateLocal.mock.invocationCallOrder[0]).toBeLessThan(
+      mockCreateAgentFromTemplate.mock.invocationCallOrder[0],
+    );
+    expect(mockInitGroupFilesystem).not.toHaveBeenCalled();
+    expect(mockWriteDestinations).toHaveBeenCalledWith('ag-1', 'sess-1');
+    expect(notifyTexts().at(-1)).toContain('Agent "sdr" created from template "sales/sdr"');
+  });
+
+  it('a failed download creates nothing and says so', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+    mockEnsureTemplateLocal.mockRejectedValue(new Error('Could not clone the template library'));
+
+    await runCreateAgent({ name: 'SDR', template: 'sales/sdr' });
+
+    expect(mockCreateAgentFromTemplate).not.toHaveBeenCalled();
+    expect(mockCreateAgentGroup).not.toHaveBeenCalled();
+    expect(notifyTexts().at(-1)).toContain('Could not clone the template library. Nothing was created.');
+  });
+
+  it('a malformed ref is answered before any approval is asked for', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+
+    await runCreateAgent({ name: 'SDR', template: '../../etc' });
+
+    expect(mockRequestApproval).not.toHaveBeenCalled();
+    expect(mockEnsureTemplateLocal).not.toHaveBeenCalled();
+    expect(notifyTexts().at(-1)).toContain('is not a template ref');
+  });
+
+  it('group scope: the hold stores the template, no instructions, and the card says where it comes from', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+
+    await runCreateAgent({ name: 'SDR', instructions: 'ignored', template: 'sales/sdr' });
+    await runCreateAgent({ name: 'Ops', template: 'local/one' });
+
+    expect(mockEnsureTemplateLocal).not.toHaveBeenCalled(); // nothing is downloaded before approval
+    const [library, local] = mockRequestApproval.mock.calls.map((c) => c[0] as Record<string, unknown>);
+    expect(library.payload).toEqual({ name: 'SDR', instructions: null, template: 'sales/sdr' });
+    expect(library.question).toContain('template "sales/sdr" (downloaded from the public template library)');
+    expect(local.question).toContain('template "local/one" (already on this machine)');
+  });
+
+  it('approving the stored hold builds the agent from that template', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+    await runCreateAgent({ name: 'SDR', instructions: 'ignored', template: 'sales/sdr' });
+    // The replay runs with the stored payload, as the approvals response handler does.
+    const stored = (mockRequestApproval.mock.calls[0][0] as { payload: Record<string, unknown> }).payload;
+    const approval = liveGrant('appr-tpl-1', stored);
+
+    await approvalHandlers.get('create_agent')!({
+      session: SESSION,
+      payload: JSON.parse(approval.payload),
+      approval,
+      userId: 'telegram:admin',
+      notify: vi.fn(),
+    });
+
+    expect(mockCreateAgentFromTemplate).toHaveBeenCalledWith('sales/sdr', { name: 'SDR', provider: 'claude' });
+  });
+
+  it('an approval for a plain create never covers a templated request', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+    const plain = liveGrant('appr-tpl-2', { name: 'SDR', instructions: null });
+
+    await approvalHandlers.get('create_agent')!({
+      session: SESSION,
+      payload: { name: 'SDR', instructions: null, template: 'sales/sdr' },
+      approval: plain,
+      userId: 'telegram:admin',
+      notify: vi.fn(),
+    });
+
+    expect(mockCreateAgentFromTemplate).not.toHaveBeenCalled();
   });
 });

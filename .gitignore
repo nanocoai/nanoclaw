@@ -56,3 +56,7 @@ docs/maintainer-guide.md
 docs/drafts/
 forks.md
 .worktrees/
+
+# Library templates copied in by setup or create_agent are install state.
+/templates/*
+!/templates/README.md

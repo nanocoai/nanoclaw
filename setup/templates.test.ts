@@ -48,54 +48,13 @@ import type { AgentGroup } from '../src/types.js';
 import {
   applyTemplatePick,
   clearTemplatePick,
-  copyTemplate,
   installTemplateAgent,
   listTemplateAgents,
-  listTemplatesFromDir,
   validateNewTemplateAgentName,
   type TemplateReplacePlan,
 } from './templates.js';
 
-describe('setup template library', () => {
-  let root: string;
-
-  beforeEach(async () => {
-    root = fs.mkdtempSync(path.join(os.tmpdir(), 'setup-templates-'));
-  });
-
-  afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
-
-  it('finds nested templates by plugin.json and copies one without git metadata', () => {
-    const source = path.join(root, 'source');
-    const destination = path.join(root, 'destination');
-    fs.mkdirSync(path.join(source, 'sales', 'sdr'), { recursive: true });
-    fs.writeFileSync(path.join(source, 'sales', 'sdr', 'plugin.json'), '{"name":"sdr"}');
-    // A context/instructions.md INSIDE a plugin (the NanoClaw extension dir)
-    // must not trip the legacy detection.
-    fs.mkdirSync(path.join(source, 'sales', 'sdr', 'ai.nanoco.nanoclaw', 'context'), { recursive: true });
-    fs.writeFileSync(
-      path.join(source, 'sales', 'sdr', 'ai.nanoco.nanoclaw', 'context', 'instructions.md'),
-      'Sell well.',
-    );
-    fs.mkdirSync(path.join(source, 'sales', 'sdr', '.git'), { recursive: true });
-    fs.writeFileSync(path.join(source, 'sales', 'sdr', '.git', 'config'), 'ignored');
-
-    expect(listTemplatesFromDir(source)).toEqual([{ ref: 'sales/sdr', name: 'sdr' }]);
-
-    copyTemplate(source, 'sales/sdr', destination);
-    expect(fs.readFileSync(path.join(destination, 'sales', 'sdr', 'plugin.json'), 'utf8')).toBe('{"name":"sdr"}');
-    expect(fs.existsSync(path.join(destination, 'sales', 'sdr', '.git'))).toBe(false);
-    expect(() => copyTemplate(source, '../escape', destination)).toThrow('escapes the templates directory');
-  });
-
-  it('emits the migration error for a pre-plugin template layout', () => {
-    const source = path.join(root, 'source');
-    fs.mkdirSync(path.join(source, 'sales', 'sdr', 'context'), { recursive: true });
-    fs.writeFileSync(path.join(source, 'sales', 'sdr', 'context', 'instructions.md'), 'Sell well.');
-
-    expect(() => listTemplatesFromDir(source)).toThrow(/predate the plugin format.*sales\/sdr.*Re-fetch/s);
-  });
-
+describe('setup template steps', () => {
   it('requires a distinct name only when setup creates another template agent', () => {
     const agents: AgentGroup[] = [
       {

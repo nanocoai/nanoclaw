@@ -240,6 +240,12 @@ describe('createAgentFromTemplate', () => {
     expect(row.process_after).toMatch(/T00:00:00/);
   });
 
+  it("stamps the given provider onto the config row (a sub-agent takes its creator's)", async () => {
+    writeTemplate();
+    const { group } = await createAgentFromTemplate('sales/sdr', { provider: 'codex' });
+    expect((await getContainerConfig(group.id))?.provider).toBe('codex');
+  });
+
   it('ignores an invalid timezone — the group follows the install default', async () => {
     const { group: g } = await createAgentFromTemplate('sales/sdr', { name: 'SDR Bad TZ', timezone: 'Not/AZone' });
     expect((await getContainerConfig(g.id))?.timezone).toBeNull();
