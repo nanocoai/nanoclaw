@@ -4,7 +4,8 @@
     {
       "name": "service-account",
       "inputs": {
-        "gchat_credentials": "fake-service-account-json-blob"
+        "gchat_credentials": "fake-service-account-json-blob",
+        "gchat_project_number": "123456789012"
       }
     }
   ]

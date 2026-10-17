@@ -18,7 +18,7 @@ rm -f src/channels/gchat.ts src/channels/gchat-registration.test.ts
 
 ## 2. Remove credentials
 
-Remove `GCHAT_CREDENTIALS` from `.env`.
+Remove `GCHAT_CREDENTIALS` and `GOOGLE_CHAT_PROJECT_NUMBER` from `.env`.
 
 ## 3. Remove the package
 

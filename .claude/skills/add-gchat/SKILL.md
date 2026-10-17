@@ -75,6 +75,7 @@ until they're done.
 > 4. Go to **Google Chat API** > **Configuration**:
 >    - App name and description
 >    - Connection settings: select **HTTP endpoint URL** and set to `https://your-domain/webhook/gchat`
+>    - Authentication Audience: select **Project Number**
 > 5. Create a **Service Account**:
 >    - Go to **IAM & Admin** > **Service Accounts** > **Create Service Account**
 >    - Grant the Chat Bot role
@@ -102,6 +103,27 @@ publicly reachable for Google Chat to deliver events — it's the HTTP endpoint
 URL you set in the Connection settings above. Running locally, expose it with
 ngrok (`ngrok http 3000`), a Cloudflare Tunnel, or a reverse proxy on a VPS.
 
+### Webhook verification
+
+Google signs every webhook, and the adapter refuses to start until it can check
+the signature. It checks against your Google Cloud project number, which only
+works when the Chat app's **Authentication Audience** is **Project Number**.
+Tell the user:
+
+```nc:operator
+In Google Cloud Console, open Google Chat API → Configuration, set Authentication Audience to Project Number, and save.
+Then copy the project number from the project's Dashboard. It is all digits; the project ID is a different value.
+```
+
+Store it in `.env` (set-if-absent):
+
+```nc:prompt gchat_project_number normalize:trim validate:^\d+$
+Paste your Google Cloud project number, digits only, e.g. `123456789012`.
+```
+```nc:env-set
+GOOGLE_CHAT_PROJECT_NUMBER={{gchat_project_number}}
+```
+
 ## Next Steps
 
 If you're in the middle of `/setup`, return to the setup flow now. Otherwise run
@@ -119,6 +141,8 @@ If you're in the middle of `/setup`, return to the setup flow now. Otherwise run
 ## Troubleshooting
 
 **The adapter starts, then errors about credentials.** `GCHAT_CREDENTIALS` must be the *entire* service account JSON collapsed to one line — inspect `.env` and confirm it still contains `"type":"service_account"`, `"private_key"`, and `"client_email"`. A truncated paste (shells often mangle the multi-line private key) is the usual cause; download a fresh JSON key under **IAM & Admin → Service Accounts → Keys** and re-paste it as a single line.
+
+**The adapter won't start: "Webhook signature verification is required".** `GOOGLE_CHAT_PROJECT_NUMBER` is missing from `.env`. Add it as described under **Webhook verification** and restart. If it is set but every webhook is rejected, check that **Authentication Audience** under **Google Chat API → Configuration** is **Project Number**, and that the number matches the project the Chat app belongs to.
 
 **Messages sent in the space never reach the agent.** Google Chat delivers only to the HTTP endpoint URL set under **Google Chat API → Configuration**, and that URL must be publicly reachable at `/webhook/gchat` (shared webhook server, port 3000). Tunnel hostnames (ngrok free tier) change on restart — make sure the Configuration URL matches the tunnel that's actually up.
 
