@@ -6,6 +6,7 @@
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
+  appendFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -94,16 +95,16 @@ function snapshot(root: string): Map<string, string> {
     .split('\0')
     .filter(Boolean)
     .sort();
-  return new Map(
-    files.map((file) => {
-      const full = join(root, file);
-      if (!existsSync(full)) return [file, 'missing'];
-      const stat = lstatSync(full);
-      const content = stat.isSymbolicLink() ? readlinkSync(full) : readFileSync(full);
-      const hash = createHash('sha256').update(content).digest('hex');
-      return [file, `${stat.mode & 0o777}:${hash}`];
-    }),
-  );
+  return new Map(files.map((file) => [file, fileState(root, file)]));
+}
+
+function fileState(root: string, file: string): string {
+  const full = join(root, file);
+  if (!existsSync(full)) return 'missing';
+  const stat = lstatSync(full);
+  const content = stat.isSymbolicLink() ? readlinkSync(full) : readFileSync(full);
+  const hash = createHash('sha256').update(content).digest('hex');
+  return `${stat.mode & 0o777}:${hash}`;
 }
 
 function assertSnapshot(label: string, expected: Map<string, string>, actual: Map<string, string>): void {
@@ -292,7 +293,7 @@ export function selectCombinedProviders(
       `FAIL: trunk carries provider skills (${providerSkills.map(({ skill }) => skill).join(', ')}) ` +
         `but none is available in the providers registry:\n` +
         unavailable.map((entry) => `  ${formatUnavailable(entry)}`).join('\n') +
-        `\nPromote the provider payloads to the providers branch (or pin REGISTRY_PROVIDERS_SHA to a commit that carries them) before this core lands.`,
+        `\nShip the provider payloads in each skill's payload/ (or pin REGISTRY_PROVIDERS_SHA to a commit that carries them) before this core lands.`,
     );
   }
   return available as Array<RegistrySkill & { provider: string }>;
@@ -401,6 +402,9 @@ async function testCombinedProviders(skills: RegistrySkill[]): Promise<void> {
       await testSkill(meta, fixtureScenarios(meta)[0] ?? {}, root, refs, false, [...SKIPPED_EFFECTS, 'build', 'test']);
     }
 
+    // Only a skill that copies from the branch pins its commit in testSkill, so a
+    // payload-only selection would leave the object missing from this clone.
+    pinRegistryRef(root, 'providers', refs.providers);
     git(['update-ref', 'refs/heads/providers', refs.providers], root);
     git(['remote', 'remove', 'origin'], root);
     git(['remote', 'add', 'skill-ci', '.'], root);
@@ -479,6 +483,85 @@ async function testOldProviderRefresh(commit: string): Promise<void> {
     }
     console.log(
       `\nPASS: providers installed from ${PRE_CONTRACT_PROVIDERS_SHA} and refreshed to ${currentRefs.providers} on ${commit}`,
+    );
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Provider skills that copied from the providers branch at `commit` and ship
+ * their own payload now. Installed with the old SKILL.md onto this core, then
+ * refreshed with no registry remote left, they must match a fresh install.
+ */
+async function testProviderPayloadSwitch(commit: string): Promise<void> {
+  if (!/^[0-9a-f]{40}$/i.test(commit)) throw new Error('branch-install trunk must be a full commit SHA');
+
+  ensureCommit(commit);
+  const refs = resolveRegistryRefs();
+  const temp = mkdtempSync(join(tmpdir(), 'nanoclaw-provider-switch-ci-'));
+  const root = join(temp, 'repo');
+  try {
+    git(['clone', '--quiet', '--shared', '--no-checkout', SOURCE_ROOT, root]);
+    git(['checkout', '--quiet', '--detach', git(['rev-parse', 'HEAD'])], root);
+    await command('pnpm install --frozen-lockfile --prefer-offline', root);
+    await command('bun install --frozen-lockfile', join(root, 'container/agent-runner'));
+
+    const moved = discover(join(root, '.claude/skills'))
+      .filter((meta) => meta.provider && !meta.branches.length)
+      .flatMap((current) => {
+        if (!git(['ls-tree', '--name-only', commit, '--', `.claude/skills/${current.skill}/SKILL.md`])) return [];
+        const legacy = materializeSkill(commit, current.skill, join(temp, 'skills'));
+        return legacy.branches.includes('providers') ? [{ current, legacy }] : [];
+      });
+    if (!moved.length) throw new Error(`no provider skill moved off the providers branch since ${commit}`);
+    const skipEffects = [...SKIPPED_EFFECTS, 'build', 'test'];
+    // Every copy destination, ignored ones included: snapshot() skips files like an ignored AGENTS.md.
+    const copied = [
+      ...new Set(
+        moved.flatMap(({ current, legacy }) =>
+          [current, legacy].flatMap((meta) =>
+            parseDirectives(meta.markdown)
+              .filter((directive) => directive.kind === 'copy')
+              .flatMap((directive) => directive.body.map((line) => (line.split('->')[1] ?? line).trim())),
+          ),
+        ),
+      ),
+    ].sort();
+    const state = () => {
+      const files = snapshot(root);
+      for (const file of copied) files.set(file, fileState(root, file));
+      return files;
+    };
+
+    for (const { current } of moved) {
+      console.log(`\n==> fresh payload install of ${current.skill}`);
+      await testSkill(current, fixtureScenarios(current)[0] ?? {}, root, refs, false, skipEffects);
+    }
+    const fresh = state();
+    git(['reset', '--quiet', '--hard'], root);
+    git(['clean', '--quiet', '-fd'], root);
+    git(['clean', '--quiet', '-fX', '--', ...copied], root);
+
+    for (const { legacy } of moved) {
+      console.log(`\n==> ${legacy.skill} from providers ${refs.providers} with the SKILL.md of ${commit}`);
+      await testSkill(legacy, fixtureScenarios(legacy)[0] ?? {}, root, refs, false, skipEffects);
+    }
+    // The locked branch still matches the payload, so make each copy stale: the refresh must rewrite all of them.
+    for (const file of copied) if (existsSync(join(root, file))) appendFileSync(join(root, file), '\n// stale\n');
+    // No registry ref or remote is left, so a refresh that still reads the branch fails.
+    git(['update-ref', '-d', 'refs/remotes/skill-ci/providers'], root);
+    git(['remote', 'remove', 'origin'], root);
+    const report = await refreshInstalledSkills(root, 'all', {
+      exec: (cmd, cwd) => command(cmd, cwd),
+    });
+    const expected = moved.map(({ current }) => current.provider).sort();
+    if (JSON.stringify(report.selected) !== JSON.stringify(expected) || !report.success) {
+      throw new Error(`payload refresh of a branch install failed: ${JSON.stringify(report)}`);
+    }
+    assertSnapshot('payload refresh of a branch install differs from a fresh install', fresh, state());
+    console.log(
+      `\nPASS: ${expected.join(', ')} installed from providers ${refs.providers} and refreshed to the payload`,
     );
   } finally {
     rmSync(temp, { recursive: true, force: true });
@@ -590,13 +673,15 @@ async function main(): Promise<void> {
     await testOldProviderRefresh(process.argv[3] ?? '');
   } else if (arg === '--pre-contract-providers') {
     await testPreContractProviders();
+  } else if (arg === '--provider-payload-switch') {
+    await testProviderPayloadSwitch(process.argv[3] ?? '');
   } else if (arg) {
     const meta = skills.find((candidate) => candidate.skill === basename(arg));
     if (!meta) throw new Error(`unknown registry skill: ${arg}`);
     await testAll([meta]);
   } else {
     console.error(
-      'usage: pnpm exec tsx scripts/test-registry-skills.ts --list|--list-available|--all [skill...]|--combined-providers|--old-provider-refresh <sha>|--pre-contract-providers|<skill>',
+      'usage: pnpm exec tsx scripts/test-registry-skills.ts --list|--list-available|--all [skill...]|--combined-providers|--old-provider-refresh <sha>|--pre-contract-providers|--provider-payload-switch <sha>|<skill>',
     );
     process.exitCode = 2;
   }

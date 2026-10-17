@@ -50,6 +50,8 @@ nanoclaw.pid
 agents-sdk-docs
 .agents
 AGENTS.md
+# Skill payloads ship AGENTS.md as data.
+!/.claude/skills/*/payload/**/AGENTS.md
 
 # Internal working docs, never committed
 docs/maintainer-guide.md

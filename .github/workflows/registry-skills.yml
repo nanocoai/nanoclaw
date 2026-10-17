@@ -165,6 +165,12 @@ jobs:
           REGISTRY_CHANNELS_SHA: ${{ needs.discover.outputs.channels }}
           REGISTRY_PROVIDERS_SHA: ${{ needs.discover.outputs.providers }}
         run: pnpm exec tsx scripts/test-registry-skills.ts --old-provider-refresh 99283f3e274b2b1dae47b141ac4f11f56ad8eb2d
+      # d61af17b is the last trunk whose provider skills copied from the providers branch.
+      - name: Refresh branch-installed providers to their skill payloads
+        env:
+          REGISTRY_CHANNELS_SHA: ${{ needs.discover.outputs.channels }}
+          REGISTRY_PROVIDERS_SHA: ${{ needs.discover.outputs.providers }}
+        run: pnpm exec tsx scripts/test-registry-skills.ts --provider-payload-switch d61af17b541f52632c6194692a166184839a926f
 
   provider-promotion:
     if: always()
