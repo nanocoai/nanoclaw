@@ -13,6 +13,12 @@ export const INSTANCE_KEY_RE = /^[A-Za-z0-9._-]+$/;
 
 const SETUP_RETRY_DELAYS_MS = [2000, 5000, 10000];
 
+/** Delay between background re-attempts for a channel whose setup failed with a
+ *  transient network error. The inline SETUP_RETRY_DELAYS_MS budget spans ~17s
+ *  total; a network outage that outlasts it used to disable the channel for the
+ *  entire process lifetime. */
+const BACKGROUND_RETRY_DELAY_MS = 60_000;
+
 /** Duck-type check — adapters that throw an Error with `name === 'NetworkError'`
  * (Chat SDK's `@chat-adapter/shared.NetworkError` and similar) get a retry on
  * setup. Avoids depending on `@chat-adapter/shared` at trunk level. */
@@ -24,6 +30,11 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 
 const registry = new Map<string, ChannelRegistration>();
 const activeAdapters = new Map<string, ChannelAdapter>();
+
+/** Set by teardownChannelAdapters so an in-flight background retry can't
+ *  resurrect an adapter after shutdown has begun. Cleared at the top of
+ *  initChannelAdapters. */
+let shuttingDown = false;
 
 /** Register a channel adapter factory. Called by channel modules on import. */
 export function registerChannelAdapter(name: string, registration: ChannelRegistration): void {
@@ -261,10 +272,94 @@ export function getChannelContainerConfig(name: string): ChannelRegistration['co
 }
 
 /**
+ * Keep re-attempting a channel whose setup failed with a transient network
+ * error, until it comes up (or fails for a non-network reason, or the host
+ * shuts down).
+ *
+ * Without this, a network blip lasting longer than the ~17s inline retry
+ * budget killed the channel permanently: the host stayed "up", the agent kept
+ * working, and every message it produced was silently discarded by the
+ * no-adapter path in createChannelDeliveryAdapter — while inbound had no
+ * poller at all. That is exactly what happened on 2026-07-21 (`Failed to
+ * start channel adapter channel="telegram" err={type:"NetworkError",
+ * message:"Network error calling Telegram deleteWebhook"}`), and it took a
+ * manual service restart five days later to notice and recover.
+ *
+ * Only NetworkError retries forever — a bad token or misconfig still fails
+ * fast, so we never spin on an error that a retry cannot fix.
+ */
+async function retryAdapterInBackground(
+  name: string,
+  registration: ChannelRegistration,
+  setupFn: (adapter: ChannelAdapter) => ChannelSetup,
+): Promise<void> {
+  let attempt = 0;
+  while (!shuttingDown) {
+    await sleep(BACKGROUND_RETRY_DELAY_MS);
+    if (shuttingDown) return;
+    attempt += 1;
+
+    let adapter: ChannelAdapter | undefined;
+    try {
+      adapter = (await registration.factory()) ?? undefined;
+      if (!adapter) {
+        log.warn('Channel adapter background retry: credentials missing, giving up', { channel: name });
+        return;
+      }
+      await adapter.setup(setupFn(adapter));
+
+      const key = adapter.instance ?? adapter.channelType;
+      // Lost the race (shutdown, or a concurrent init claimed the key):
+      // tear our instance down rather than leaking a live poller.
+      if (shuttingDown || activeAdapters.has(key)) {
+        try {
+          await adapter.teardown();
+        } catch {
+          /* best effort */
+        }
+        return;
+      }
+
+      activeAdapters.set(key, adapter);
+      log.info('Channel adapter recovered by background retry', {
+        channel: name,
+        type: adapter.channelType,
+        instance: key,
+        attempt,
+      });
+      return;
+    } catch (err) {
+      if (adapter) {
+        try {
+          await adapter.teardown();
+        } catch {
+          /* best effort */
+        }
+      }
+      if (!isNetworkError(err)) {
+        log.error('Channel adapter background retry failed with a non-network error, giving up', {
+          channel: name,
+          attempt,
+          err,
+        });
+        return;
+      }
+      log.warn('Channel adapter background retry failed, will retry', {
+        channel: name,
+        attempt,
+        delayMs: BACKGROUND_RETRY_DELAY_MS,
+        err: (err as Error).message,
+      });
+    }
+  }
+}
+
+/**
  * Instantiate and set up all registered channel adapters.
  * Skips adapters that return null (missing credentials).
  */
 export async function initChannelAdapters(setupFn: (adapter: ChannelAdapter) => ChannelSetup): Promise<void> {
+  shuttingDown = false;
   hotStartSetupFn = setupFn;
   for (const [name, registration] of registry) {
     try {
@@ -312,12 +407,20 @@ export async function initChannelAdapters(setupFn: (adapter: ChannelAdapter) => 
       log.info('Channel adapter started', { channel: name, type: adapter.channelType, instance: key });
     } catch (err) {
       log.error('Failed to start channel adapter', { channel: name, err });
+      // A transient network failure used to end here, leaving the channel dead
+      // for the process lifetime. Keep trying in the background so the host
+      // self-heals once the network returns.
+      if (isNetworkError(err)) {
+        void retryAdapterInBackground(name, registration, setupFn);
+      }
     }
   }
 }
 
 /** Tear down all active adapters. */
 export async function teardownChannelAdapters(): Promise<void> {
+  // Stop any in-flight background retry from re-registering an adapter behind us.
+  shuttingDown = true;
   for (const [name, adapter] of activeAdapters) {
     try {
       await adapter.teardown();

@@ -205,8 +205,8 @@ describe('channel registry — instance keying', () => {
 
     // The delivery bridge dispatches by exact key: a default-instance
     // message (instance === channelType after backfill) throws the typed
-    // missing-adapter error (→ retry path, #2995), and is never delivered
-    // through the sibling's identity.
+    // missing-adapter error (→ retry path), and is never delivered through the
+    // sibling's identity.
     const bridge = reg.createChannelDeliveryAdapter();
     let caught: unknown;
     try {
@@ -237,6 +237,93 @@ describe('channel registry — instance keying', () => {
       'slack-tester',
     );
     expect(tester.delivered).toHaveLength(1);
+  });
+});
+
+/** One BACKGROUND_RETRY_DELAY_MS tick (60s) plus slack, for fake timers. */
+const BACKGROUND_RETRY_TICK = 61_000;
+
+describe('channel registry — background retry after a transient setup failure', () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  afterEach(async () => {
+    const { teardownChannelAdapters } = await import('./channel-registry.js');
+    await teardownChannelAdapters();
+    vi.useRealTimers();
+    vi.resetModules();
+  });
+
+  const mockSetup = () => ({
+    onInbound: () => {},
+    onInboundEvent: () => {},
+    onMetadata: () => {},
+    onAction: () => {},
+  });
+
+  function networkError(): Error {
+    // Mirrors @chat-adapter/shared.NetworkError, which the registry duck-types
+    // on `.name` — the real 2026-07-21 failure was
+    // "Network error calling Telegram deleteWebhook".
+    const err = new Error('Network error calling Telegram deleteWebhook');
+    err.name = 'NetworkError';
+    return err;
+  }
+
+  /** Adapter whose setup() throws `failures` times before succeeding. */
+  function flakyAdapter(channelType: string, failures: number, err: () => Error) {
+    const adapter = createMockAdapter(channelType);
+    let calls = 0;
+    const realSetup = adapter.setup.bind(adapter);
+    adapter.setup = async (config) => {
+      calls += 1;
+      if (calls <= failures) throw err();
+      return realSetup(config);
+    };
+    return adapter;
+  }
+
+  it('recovers a channel whose setup outlasted the inline retry budget', async () => {
+    const reg = await import('./channel-registry.js');
+    // 4 failures = the initial attempt + all 3 inline retries (2s/5s/10s),
+    // so init gives up exactly as it did on 2026-07-21. The 5th call succeeds.
+    const adapter = flakyAdapter('telegram', 4, networkError);
+    reg.registerChannelAdapter('telegram', { factory: () => adapter });
+
+    vi.useFakeTimers();
+    const init = reg.initChannelAdapters(mockSetup);
+    await vi.advanceTimersByTimeAsync(20_000); // burn the ~17s inline budget
+    await init;
+
+    // Pre-patch end state: channel dead, host still "up", outbound silently
+    // discarded by the no-adapter path.
+    expect(reg.getChannelAdapterExact('telegram')).toBeUndefined();
+
+    // The background retry brings it back without operator intervention.
+    await vi.advanceTimersByTimeAsync(BACKGROUND_RETRY_TICK);
+    expect(reg.getChannelAdapterExact('telegram')).toBe(adapter);
+
+    // And delivery works again through the recovered adapter.
+    const bridge = reg.createChannelDeliveryAdapter();
+    await bridge.deliver('telegram', 'telegram:-100', null, 'chat', JSON.stringify({ text: 'back online' }));
+    expect(adapter.delivered).toHaveLength(1);
+  });
+
+  it('gives up fast on a non-network error (bad token) instead of spinning', async () => {
+    const reg = await import('./channel-registry.js');
+    const adapter = flakyAdapter('telegram', 99, () => new Error('401 Unauthorized: bad token'));
+    reg.registerChannelAdapter('telegram', { factory: () => adapter });
+
+    vi.useFakeTimers();
+    const init = reg.initChannelAdapters(mockSetup);
+    await vi.advanceTimersByTimeAsync(20_000);
+    await init;
+
+    expect(reg.getChannelAdapterExact('telegram')).toBeUndefined();
+    // No background retry was scheduled — a retry cannot fix a bad token.
+    await vi.advanceTimersByTimeAsync(BACKGROUND_RETRY_TICK * 3);
+    expect(reg.getChannelAdapterExact('telegram')).toBeUndefined();
   });
 });
 
