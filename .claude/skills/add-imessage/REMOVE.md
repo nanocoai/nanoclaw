@@ -68,12 +68,50 @@ launchctl kickstart -k gui/$(id -u)/$(launchd_label)  # macOS
 
 ## 7. Unwire and delete the messaging group (optional)
 
+Other tables point at `messaging_groups`, so clear them first, in one
+transaction. This also deletes the iMessage sessions, the same way
+`ncl groups delete` does. An `agent-shared` session that started on iMessage
+goes too, so the agent's other channels start a fresh session on their next
+message. Session folders under `data/v2-sessions/` stay on disk.
+
 ```bash
 pnpm exec tsx scripts/q.ts data/v2.db "
+BEGIN;
+DELETE FROM pending_questions WHERE session_id IN (SELECT id FROM sessions
+  WHERE messaging_group_id IN (SELECT id FROM messaging_groups WHERE channel_type='imessage'));
+DELETE FROM pending_approvals WHERE session_id IN (SELECT id FROM sessions
+  WHERE messaging_group_id IN (SELECT id FROM messaging_groups WHERE channel_type='imessage'));
+DELETE FROM session_claims WHERE session_id IN (SELECT id FROM sessions
+  WHERE messaging_group_id IN (SELECT id FROM messaging_groups WHERE channel_type='imessage'));
+DELETE FROM delivery_attempts WHERE session_id IN (SELECT id FROM sessions
+  WHERE messaging_group_id IN (SELECT id FROM messaging_groups WHERE channel_type='imessage'));
+DELETE FROM wake_signals WHERE session_id IN (SELECT id FROM sessions
+  WHERE messaging_group_id IN (SELECT id FROM messaging_groups WHERE channel_type='imessage'));
+DELETE FROM sessions WHERE messaging_group_id IN
+  (SELECT id FROM messaging_groups WHERE channel_type='imessage');
+DELETE FROM agent_destinations WHERE target_type='channel' AND target_id IN
+  (SELECT id FROM messaging_groups WHERE channel_type='imessage');
+DELETE FROM user_dms WHERE messaging_group_id IN
+  (SELECT id FROM messaging_groups WHERE channel_type='imessage');
+DELETE FROM pending_sender_approvals WHERE messaging_group_id IN
+  (SELECT id FROM messaging_groups WHERE channel_type='imessage');
+DELETE FROM pending_channel_approvals WHERE messaging_group_id IN
+  (SELECT id FROM messaging_groups WHERE channel_type='imessage');
 DELETE FROM messaging_group_agents WHERE messaging_group_id IN
   (SELECT id FROM messaging_groups WHERE channel_type='imessage');
 DELETE FROM messaging_groups WHERE channel_type='imessage';
+COMMIT;
 "
+```
+
+Then restart the service again. The running host still holds state for the
+deleted sessions in memory, such as pending approval requests, and on startup
+it stops their containers.
+
+```bash
+source setup/lib/install-slug.sh
+launchctl kickstart -k gui/$(id -u)/$(launchd_label)  # macOS
+# systemctl --user restart $(systemd_unit)            # Linux
 ```
 
 ## 8. Delete the Photon project (optional, hosted)
