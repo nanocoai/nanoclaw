@@ -379,9 +379,9 @@ Install the Dial tool now?
 ```
 
 If yes, apply the `/add-dial-tool` skill now, as its own document describes. It
-asks which agents may use Dial (and blocks the rest at the gateway), puts the
-CLI and its skill in the agent image, and registers the account's key with
-OneCLI. It needs OneCLI; if that isn't set up it says so, and the channel
+asks which agents may use Dial (and attaches the account's key in OneCLI to
+those agents only), puts the CLI and its skill in the agent image, and
+registers the key with OneCLI. It needs OneCLI; if that isn't set up it says so, and the channel
 still works without the tool:
 
 The tool's own document asks which agents may use Dial. Ask it here instead: a
@@ -393,22 +393,22 @@ and hand it down:
 ncl groups list --json | jq -r 'if (.data|length)==0 then "no" else "yes" end'
 ```
 ```nc:operator when:has_agents=no
-No agents exist yet — this install creates its first one in a moment, so there is nobody to choose between. Installing the tool for every agent; re-run `/add-dial-tool` any time to narrow that down.
+No agents exist yet, so there is nobody to give Dial to. Installing the tool with no agent holding the key; once your first agent exists, run `/add-dial-tool` to give it Dial.
 ```
 ```nc:run capture:agent_groups when:has_agents=yes effect:fetch
 ncl groups list --json | jq -r '[.data[] | "\(.id) (\(.name))"] | join(", ")'
 ```
 ```nc:operator when:has_agents=yes
-Agents on this install: {{agent_groups}}. Giving an agent Dial lets it text and call any number and buy numbers, billed to your Dial account. Agents you leave out are blocked at the gateway (reversible by running /add-dial-tool again). Agents created after this run have Dial until the next run.
+Agents on this install: {{agent_groups}}. Giving an agent Dial lets it text and call any number and buy numbers, billed to your Dial account. Agents you leave out do not get the Dial key (reversible by running /add-dial-tool again). Agents created after this run do not get Dial until you run /add-dial-tool again.
 ```
 ```nc:prompt dial_agents validate:^(all|none|ag-[A-Za-z0-9-]+(,ag-[A-Za-z0-9-]+)*)$ normalize:trim when:has_agents=yes
-Which agents may use Dial? Enter agent ids separated by commas with no spaces (the `ag-…` column), `all` for every agent, or `none` to install the tool with every agent blocked for now.
+Which agents may use Dial? Enter agent ids separated by commas with no spaces (the `ag-…` column), `all` for every agent that exists now, or `none` to install the tool with no agent holding the key for now.
 ```
 ```nc:run effect:step when:has_agents=yes
 pnpm exec tsx setup/lib/skill-driver.ts .claude/skills/add-dial-tool --input 'dial_agents={{dial_agents}}'
 ```
 ```nc:run effect:step when:has_agents=no
-pnpm exec tsx setup/lib/skill-driver.ts .claude/skills/add-dial-tool --input 'dial_agents=all'
+pnpm exec tsx setup/lib/skill-driver.ts .claude/skills/add-dial-tool --input 'dial_agents=none'
 ```
 
 Then tell the sandboxed agent which line is its own. The container authenticates
