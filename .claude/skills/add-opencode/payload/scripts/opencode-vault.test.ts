@@ -33,7 +33,11 @@ it('routes lookup, save and retention through the selected gateway without OneCL
   await vault.save('fixture-key');
   await vault.keep();
   expect(mock.store).toHaveBeenCalledExactlyOnceWith('/fixture');
-  expect(store.connection).toHaveBeenCalledExactlyOnceWith({ ...target, proxyValue: HOST_PLACEHOLDER });
+  expect(store.connection).toHaveBeenCalledExactlyOnceWith({
+    ...target,
+    proxyValue: HOST_PLACEHOLDER,
+    provider: 'opencode',
+  });
   expect(connection.save).toHaveBeenCalledWith('fixture-key');
   expect(connection.keep).toHaveBeenCalledWith();
 });

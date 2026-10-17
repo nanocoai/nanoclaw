@@ -1,6 +1,6 @@
 {
-  "version": "1.42.0",
-  "commit": "3912c74d7029505f0f5389745568111d643adc68",
+  "version": "1.45.0",
+  "commit": "84ccaf74ce6350f8925675457b48272c29f32c1a",
   "files": {
     "apps.rs": "f77227bbea035a43fe0d67277604b4923215d072db2d2a45eba171b3abdc6392",
     "cloud_summary.rs": "1a7d0d1b1ad0fd30d7082be464a2bb6908dbb4dff53a113e69c2b0cef600fa85",

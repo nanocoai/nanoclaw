@@ -32,6 +32,11 @@ export interface GatewaySessionInput {
   runtimeIdentity: string;
   /** The agent group's display name, for gateways that register an agent identity. */
   groupName: string;
+  /**
+   * The agent provider a new runtime runs, by provider name; absent when adopting.
+   * Gateways that grant model credentials per agent key on it.
+   */
+  provider?: string;
   /** The runtime container this session runs in, as the driver named it; providers key per-session resources on it. */
   containerName: string;
   /**

@@ -90,7 +90,10 @@ interface GatewayProviderDefinition {
 **`ensure` is idempotent.** Core calls it for new and adopted sessions. The
 `disposition` distinguishes creation from adoption: an adapter must not create
 replacement identity for a runtime that survived a host restart. Core invokes
-optional `reapOrphans` only after it has considered surviving runtimes.
+optional `reapOrphans` only after it has considered surviving runtimes. A new
+runtime's input also names the agent `provider` it runs (the session's pinned
+provider, else the group's); a gateway that grants model credentials per agent
+keys on it.
 
 The signal stops the current host's observation. Existing install-scoped
 adapters can retain their signal cleanup. Adapters owning per-session resources

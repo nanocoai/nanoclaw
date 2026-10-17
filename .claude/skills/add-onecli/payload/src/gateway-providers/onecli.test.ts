@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GatewayApprovalRequest, GatewaySessionInput } from './gateway-provider-registry.js';
 
 const sdk = vi.hoisted(() => ({
-  ensureAgent: vi.fn(async () => ({ created: false })),
+  ensureAgent: vi.fn(async (_input: { name: string; identifier: string }) => ({ created: false })),
   getContainerConfig: vi.fn(async () => ({
     env: { HTTPS_PROXY: 'http://host.docker.internal:15001' },
     caCertificate: 'fixture-ca',
@@ -54,13 +54,22 @@ vi.mock('../env.js', () => ({
   }),
 }));
 
-import { contributionFromConfig, withProviderEnv } from './onecli.js';
+import { contributionFromConfig, grantProviderCredentials, withProviderEnv } from './onecli.js';
+import { log } from '../log.js';
 import { getGatewayProviderRegistration } from './gateway-provider-registry.js';
 
 const provider = getGatewayProviderRegistration('onecli')!;
 const scope = { ownsAgentGroup: vi.fn(async (id: string) => id === 'g1') };
 const subscribe = (decide: Parameters<typeof provider.approvals.subscribe>[0], signal: AbortSignal) =>
   provider.approvals.subscribe(decide, signal, undefined, scope);
+const groupInput = (group: string, provider = 'claude'): GatewaySessionInput => ({
+  key: { installSlug: 'install', agentGroupId: group, sessionId: `s-${group}` },
+  runtimeIdentity: `install/${group}/s-${group}`,
+  groupName: group,
+  provider,
+  containerName: 'fixture-agent',
+  capabilities: {} as never,
+});
 const input = (sessionId: string): GatewaySessionInput => ({
   key: { installSlug: 'install', agentGroupId: 'g1', sessionId },
   runtimeIdentity: `install/g1/${sessionId}`,
@@ -242,6 +251,278 @@ describe('OneCLI gateway package', () => {
     controller.abort();
   });
 
+  it('an adopted session (no provider given) reads and writes no grants', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch');
+    const controller = new AbortController();
+    try {
+      await provider.sessions.ensure(input('s1'), controller.signal);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      controller.abort();
+      fetchMock.mockRestore();
+    }
+  });
+
+  it('a new group gets only the model credential for its provider, before its container config', async () => {
+    writeRecord(ADAPTER_DATA, { claude: ['sec-model'], codex: ['sec-codex'] });
+    const gateway = fakeGateway();
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(gateway.fetch);
+    sdk.getContainerConfig.mockImplementationOnce(async () => {
+      gateway.calls.push('container-config');
+      return {
+        env: { HTTPS_PROXY: 'http://host.docker.internal:15001' },
+        caCertificate: 'fixture-ca',
+        caCertificateContainerPath: '/tmp/onecli-ca.pem',
+      };
+    });
+    const controller = new AbortController();
+    try {
+      await provider.sessions.ensure(groupInput('g1'), controller.signal);
+      expect(gateway.calls).toEqual([
+        'GET /v1/agents',
+        'GET /v1/agents/oc-g1/grants',
+        'GET /v1/secrets',
+        'PUT /v1/agents/oc-g1/grants/secrets/sec-model',
+        'done /v1/agents/oc-g1/grants/secrets/sec-model',
+        'container-config',
+      ]);
+      expect(gateway.auth).toBe('Bearer unused');
+    } finally {
+      controller.abort();
+      fetchMock.mockRestore();
+    }
+  });
+
+  let data: string;
+  beforeEach(() => {
+    data = fs.mkdtempSync(path.join(os.tmpdir(), 'onecli-grants-'));
+  });
+  afterEach(() => fs.rmSync(data, { recursive: true, force: true }));
+  const grant = (gateway: ReturnType<typeof fakeGateway>, provider = 'claude') =>
+    grantProviderCredentials('g1', provider, { baseUrl: 'http://gw.test', fetchImpl: gateway.fetch, dataDir: data });
+  const attached = (gateway: ReturnType<typeof fakeGateway>) =>
+    gateway.calls.filter((c) => c.startsWith('PUT ')).map((c) => c.split('/').at(-1));
+
+  it('never attaches tool secrets or app connections: a Vercel or Dial secret stays opt-in', async () => {
+    writeRecord(data, { claude: ['sec-model'] });
+    const gateway = fakeGateway();
+    await expect(grant(gateway)).resolves.toEqual(['sec-model']);
+    expect(attached(gateway)).toEqual(['sec-model']);
+    expect(gateway.calls.some((c) => c.includes('/connections'))).toBe(false);
+  });
+
+  it('a group that switched provider gets the new provider credential and keeps the old grant', async () => {
+    writeRecord(data, { claude: ['sec-model'], codex: ['sec-codex'] });
+    const gateway = fakeGateway({ held: ['sec-model'] });
+    await expect(grant(gateway, 'codex')).resolves.toEqual(['sec-codex']);
+    expect(gateway.calls).not.toContain('DELETE /v1/agents/oc-g1/grants/secrets/sec-model');
+  });
+
+  it('attaches nothing when the agent already holds its model credential', async () => {
+    writeRecord(data, { claude: ['sec-model'] });
+    const gateway = fakeGateway({ held: ['sec-model', 'sec-vercel'] });
+    await expect(grant(gateway)).resolves.toEqual([]);
+    expect(attached(gateway)).toEqual([]);
+  });
+
+  it('a login saved after the group existed is attached on the next spawn', async () => {
+    const vault = [{ id: 'sec-model', name: 'Anthropic' }];
+    const gateway = fakeGateway({ held: ['sec-model'], vault });
+    await expect(grant(gateway, 'codex')).resolves.toEqual([]);
+    // `/add-codex` saves and records its credential while the group exists.
+    vault.push({ id: 'sec-codex', name: 'Codex' });
+    writeRecord(data, { claude: ['sec-model'], codex: ['sec-codex'] });
+    await expect(grant(gateway, 'codex')).resolves.toEqual(['sec-codex']);
+  });
+
+  it('two installs on one gateway: only this install’s recorded credential, never the other’s same-named one', async () => {
+    writeRecord(data, { claude: ['sec-model'] });
+    const gateway = fakeGateway({
+      vault: [
+        { id: 'sec-model', name: 'Anthropic' },
+        { id: 'sec-other-install', name: 'Anthropic' },
+      ],
+    });
+    await expect(grant(gateway)).resolves.toEqual(['sec-model']);
+  });
+
+  it('an install with no record matches the secrets NanoClaw saved once per provider, then records them', async () => {
+    const gateway = fakeGateway({
+      vault: [
+        { id: 'sec-model', name: 'Anthropic' },
+        { id: 'sec-codex', name: 'Codex' },
+        { id: 'sec-oc', name: 'OpenCode openrouter' },
+        { id: 'sec-vercel', name: 'Vercel API Token' },
+      ],
+    });
+    await expect(grant(gateway)).resolves.toEqual(['sec-model']);
+    await expect(grant(gateway, 'opencode')).resolves.toEqual(['sec-oc']);
+    expect(readRecord(data)).toEqual({
+      providers: { claude: ['sec-model'], opencode: ['sec-oc'] },
+      matched: ['claude', 'opencode'],
+    });
+  });
+
+  it('matches names only: a typed key under another name may be one user’s, so it is not adopted', async () => {
+    const gateway = fakeGateway({
+      vault: [
+        { id: 'sec-model', name: 'Anthropic', type: 'anthropic' },
+        { id: 'sec-bob', name: 'Anthropic (Bob)', type: 'anthropic' },
+        { id: 'sec-chatgpt', name: 'OpenCode ChatGPT', type: 'openai' },
+      ],
+    });
+    await expect(grant(gateway)).resolves.toEqual(['sec-model']);
+    await expect(grant(gateway, 'codex')).resolves.toEqual([]);
+  });
+
+  it('matches by name only once: after this install’s credential is deleted, another same-named one is not adopted', async () => {
+    writeRecord(data, { claude: ['sec-gone'] });
+    const gateway = fakeGateway({ vault: [{ id: 'sec-other', name: 'Anthropic' }] });
+    await expect(grant(gateway)).resolves.toEqual([]);
+    expect(readRecord(data)).toEqual({ providers: { claude: ['sec-gone'] }, matched: ['claude'] });
+  });
+
+  it('unions the one-time match with ids a login recorded before the first spawn', async () => {
+    writeRecord(data, { opencode: ['sec-oc'] }, []);
+    const gateway = fakeGateway({
+      vault: [
+        { id: 'sec-oc', name: 'OpenCode openrouter' },
+        { id: 'sec-chatgpt', name: 'OpenCode ChatGPT', type: 'openai' },
+      ],
+    });
+    await expect(grant(gateway, 'opencode')).resolves.toEqual(['sec-oc', 'sec-chatgpt']);
+  });
+
+  it('a match another host finished meanwhile is not repeated (checked again under the lock)', async () => {
+    const gateway = fakeGateway({
+      vault: [
+        { id: 'sec-mine', name: 'Anthropic' },
+        { id: 'sec-other', name: 'Anthropic' },
+      ],
+    });
+    const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+      const res = await gateway.fetch(url, init);
+      // Another host process completes the one-time match while this one reads the vault.
+      if (new URL(String(url)).pathname === '/v1/secrets') writeRecord(data, { claude: ['sec-mine'] });
+      return res;
+    }) as typeof fetch;
+    await expect(
+      grantProviderCredentials('g1', 'claude', { baseUrl: 'http://gw.test', fetchImpl, dataDir: data }),
+    ).resolves.toEqual(['sec-mine']);
+    expect(readRecord(data)).toEqual({ providers: { claude: ['sec-mine'] }, matched: ['claude'] });
+  });
+
+  it('after the one-time match, only recorded ids count (a renamed or new same-named secret adds nothing)', async () => {
+    writeRecord(data, { codex: ['sec-codex'] });
+    const gateway = fakeGateway({
+      vault: [
+        { id: 'sec-codex', name: 'renamed by the operator' },
+        { id: 'sec-openai', name: 'OpenAI' },
+      ],
+    });
+    await expect(grant(gateway, 'codex')).resolves.toEqual(['sec-codex']);
+  });
+
+  it('with no model credential for the provider, warns and lets the spawn go on (keyless endpoints)', async () => {
+    const gateway = fakeGateway({ vault: [{ id: 'sec-vercel', name: 'Vercel API Token' }] });
+    await expect(grant(gateway, 'opencode')).resolves.toEqual([]);
+    expect(attached(gateway)).toEqual([]);
+    expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('No model credential'), {
+      agentGroupId: 'g1',
+      provider: 'opencode',
+    });
+  });
+
+  it('refuses to guess when the record file is unreadable', async () => {
+    fs.mkdirSync(path.join(data, 'onecli'), { recursive: true });
+    fs.writeFileSync(path.join(data, 'onecli', 'provider-credentials.json'), '{"claude": "sec-model"}');
+    await expect(grant(fakeGateway())).rejects.toThrow(/must hold provider names/);
+  });
+
+  it('attaches nothing and records nothing on a gateway without the grants API, where agents are in all mode', async () => {
+    const gateway = fakeGateway({ grantsStatus: 404, grantsBody: UNKNOWN_ROUTE_404 });
+    await expect(
+      grantProviderCredentials('g1', 'claude', { baseUrl: 'http://gw.test/', fetchImpl: gateway.fetch, dataDir: data }),
+    ).resolves.toBeNull();
+    expect(gateway.calls).toEqual(['GET /v1/agents', 'GET /v1/agents/oc-g1/grants']);
+    expect(fs.existsSync(path.join(data, 'onecli'))).toBe(false);
+  });
+
+  it('treats any other grants 404 (agent not found) as a failure, not as a gateway without grants', async () => {
+    const gateway = fakeGateway({ grantsStatus: 404, grantsBody: AGENT_NOT_FOUND_404 });
+    await expect(grant(gateway)).rejects.toThrow(/returned 404/);
+    expect(gateway.calls).not.toContain('GET /v1/secrets');
+  });
+
+  it('an interrupted first setup is repaired by the next spawn; nothing is deleted', async () => {
+    writeRecord(ADAPTER_DATA, { claude: ['sec-model'] });
+    const world = statefulGateway({ vault: ['sec-model', 'sec-vercel'], failPuts: 1 });
+    sdk.ensureAgent.mockImplementation(world.ensureAgent);
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(world.fetch);
+    const first = new AbortController();
+    const second = new AbortController();
+    try {
+      await expect(provider.sessions.ensure(groupInput('g1'), first.signal)).rejects.toThrow(
+        /could not grant the claude model credential to agent group g1.*the next spawn retries/,
+      );
+      expect(world.held('g1')).toEqual([]);
+      expect(sdk.getContainerConfig).not.toHaveBeenCalled();
+      await provider.sessions.ensure(groupInput('g1'), second.signal);
+      expect(world.held('g1')).toEqual(['sec-model']);
+      expect(world.deletes).toBe(0);
+    } finally {
+      first.abort();
+      second.abort();
+      fetchMock.mockRestore();
+      sdk.ensureAgent.mockImplementation(async (_input: { name: string; identifier: string }) => ({ created: false }));
+    }
+  });
+
+  it('concurrent spawns for one group share one ensureAgent and one grants check, and all wait for it', async () => {
+    writeRecord(ADAPTER_DATA, { claude: ['sec-model'] });
+    const gateway = fakeGateway({ putDelayMs: 20 });
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(gateway.fetch);
+    const first = new AbortController();
+    const second = new AbortController();
+    try {
+      await Promise.all([
+        provider.sessions.ensure(groupInput('g1'), first.signal).then(() => gateway.calls.push('ready 1')),
+        provider.sessions.ensure(groupInput('g1'), second.signal).then(() => gateway.calls.push('ready 2')),
+      ]);
+      const granted = gateway.calls.indexOf('done /v1/agents/oc-g1/grants/secrets/sec-model');
+      expect(granted).toBeGreaterThan(-1);
+      expect(gateway.calls.indexOf('ready 1')).toBeGreaterThan(granted);
+      expect(gateway.calls.indexOf('ready 2')).toBeGreaterThan(granted);
+      expect(sdk.ensureAgent).toHaveBeenCalledTimes(1);
+      expect(gateway.calls.filter((c) => c === 'GET /v1/agents/oc-g1/grants')).toHaveLength(1);
+    } finally {
+      first.abort();
+      second.abort();
+      fetchMock.mockRestore();
+    }
+  });
+
+  it('a failed grant fails every concurrent spawn for the group', async () => {
+    writeRecord(ADAPTER_DATA, { claude: ['sec-model'] });
+    const gateway = fakeGateway({ putStatus: 500, putDelayMs: 20 });
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(gateway.fetch);
+    const first = new AbortController();
+    const second = new AbortController();
+    try {
+      const results = await Promise.allSettled([
+        provider.sessions.ensure(groupInput('g1'), first.signal),
+        provider.sessions.ensure(groupInput('g1'), second.signal),
+      ]);
+      expect(results.map((r) => r.status)).toEqual(['rejected', 'rejected']);
+      expect(gateway.calls.some((c) => c.startsWith('DELETE'))).toBe(false);
+      expect(sdk.getContainerConfig).not.toHaveBeenCalled();
+    } finally {
+      first.abort();
+      second.abort();
+      fetchMock.mockRestore();
+    }
+  });
+
   it('shares one health monitor across live leases and reports failure to each session', async () => {
     vi.useFakeTimers();
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('offline'));
@@ -343,3 +624,124 @@ it.each(compatibilityFixtures)('preserves native OneCLI approval content: $name'
   controller.abort();
   await subscription;
 });
+
+const UNKNOWN_ROUTE_404 = {
+  error: {
+    message:
+      'Unrecognized request URL (GET: /v1/agents/oc-g1/grants). Please see https://onecli.sh/docs/api-reference for available endpoints.',
+    type: 'invalid_request_error',
+  },
+};
+const AGENT_NOT_FOUND_404 = { error: { message: 'Agent not found.', type: 'not_found_error' } };
+const ADAPTER_DATA = '/tmp/nanoclaw-onecli-adapter-review';
+const DEFAULT_VAULT = [
+  { id: 'sec-model', name: 'Anthropic' },
+  { id: 'sec-codex', name: 'Codex' },
+  { id: 'sec-vercel', name: 'Vercel API Token' },
+  { id: 'sec-dial', name: 'Dial' },
+];
+
+/** Writes a record; providers listed in `matched` (default: all of them) are past their one-time name match. */
+function writeRecord(dataDir: string, providers: Record<string, string[]>, matched = Object.keys(providers)): void {
+  fs.mkdirSync(path.join(dataDir, 'onecli'), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(dataDir, 'onecli', 'provider-credentials.json'), JSON.stringify({ providers, matched }));
+}
+
+function readRecord(dataDir: string): unknown {
+  return JSON.parse(fs.readFileSync(path.join(dataDir, 'onecli', 'provider-credentials.json'), 'utf8'));
+}
+
+function fakeGateway(
+  opts: {
+    grantsStatus?: number;
+    grantsBody?: unknown;
+    putStatus?: number;
+    putDelayMs?: number;
+    /** Secret ids the group's agent (oc-g1) already holds. */
+    held?: string[];
+    vault?: Array<{ id: string; name: string; type?: string }>;
+  } = {},
+) {
+  const calls: string[] = [];
+  let auth: string | undefined;
+  const json = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+  const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+    const { pathname } = new URL(String(url));
+    const method = init?.method ?? 'GET';
+    auth = (init?.headers as Record<string, string> | undefined)?.Authorization;
+    calls.push(`${method} ${pathname}`);
+    if (pathname === '/v1/agents')
+      return json([
+        { id: 'oc-default', identifier: 'default', isDefault: true },
+        { id: 'oc-g1', identifier: 'g1' },
+      ]);
+    if (pathname === '/v1/agents/oc-g1/grants')
+      return json(
+        opts.grantsBody ?? {
+          mode: 'grants',
+          connections: [],
+          secrets: (opts.held ?? []).map((secretId) => ({ secretId })),
+        },
+        opts.grantsStatus,
+      );
+    if (pathname === '/v1/secrets') return json(opts.vault ?? DEFAULT_VAULT);
+    if (method === 'PUT') {
+      if (opts.putDelayMs) await new Promise((r) => setTimeout(r, opts.putDelayMs));
+      calls.push(`done ${pathname}`);
+      return json({}, opts.putStatus);
+    }
+    return json({ error: 'unexpected' }, 500);
+  }) as typeof fetch;
+  return {
+    calls,
+    fetch: fetchImpl,
+    get auth() {
+      return auth;
+    },
+  };
+}
+
+/** A gateway whose agents and grants change as the adapter creates and attaches. */
+function statefulGateway(opts: { vault: string[]; failPuts?: number }) {
+  const agents = new Map<string, { id: string; identifier: string; secrets: Set<string> }>();
+  let failPuts = opts.failPuts ?? 0;
+  let deletes = 0;
+  const json = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+  const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+    const { pathname } = new URL(String(url));
+    const method = init?.method ?? 'GET';
+    if (method === 'DELETE') deletes += 1;
+    if (pathname === '/v1/agents' && method === 'GET')
+      return json([...agents.values()].map((a) => ({ id: a.id, identifier: a.identifier })));
+    if (pathname === '/v1/secrets') return json(opts.vault.map((id) => ({ id, name: id })));
+    const m = /^\/v1\/agents\/([^/]+)\/grants(?:\/secrets\/([^/]+))?$/.exec(pathname);
+    const agent = m ? agents.get(decodeURIComponent(m[1])) : undefined;
+    if (!agent) return json({ error: { message: 'Agent not found.', type: 'not_found_error' } }, 404);
+    if (!m![2] && method === 'GET')
+      return json({ mode: 'grants', connections: [], secrets: [...agent.secrets].map((secretId) => ({ secretId })) });
+    if (m![2] && method === 'PUT') {
+      if (failPuts > 0) {
+        failPuts -= 1;
+        return json({ error: 'unavailable' }, 503);
+      }
+      agent.secrets.add(decodeURIComponent(m![2]));
+      return json({});
+    }
+    return json({ error: 'unexpected' }, 500);
+  }) as typeof fetch;
+  return {
+    fetch: fetchImpl,
+    ensureAgent: async ({ identifier }: { identifier: string }) => {
+      const id = `oc-${identifier}`;
+      if (agents.has(id)) return { created: false };
+      agents.set(id, { identifier, id, secrets: new Set<string>() });
+      return { created: true };
+    },
+    held: (identifier: string) => [...(agents.get(`oc-${identifier}`)?.secrets ?? [])].sort(),
+    get deletes() {
+      return deletes;
+    },
+  };
+}

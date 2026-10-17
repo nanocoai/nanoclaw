@@ -150,10 +150,11 @@ Messages marked delivered with a null `platform_message_id` are not automaticall
 
 A spawned container that exits without writing to `outbound.db` shows up in `logs/nanoclaw.log` as a `Container exited` line with a non-zero `code`, often preceded by streamed `container=<folder>` stderr (at debug level).
 
-**Authentication errors:** secrets are injected per request by the OneCLI gateway — none are passed in env vars or chat context. A `401` from an API whose credential is in the vault usually means the agent is in `selective` secret mode and that secret was never assigned:
+**Authentication errors:** secrets are injected per request by the OneCLI gateway — none are passed in env vars or chat context. A `403 access_restricted` from the gateway ("credentials exist in OneCLI but this agent does not have access") means that secret is not attached to the agent group's OneCLI agent; a `401` from the API itself means the stored value is wrong or expired. NanoClaw attaches only the group's model credential, on each spawn; a tool secret is attached to the groups chosen when the skill that added it ran:
 ```bash
-onecli agents list                                        # check secretMode
-onecli agents set-secret-mode --id <agent-id> --mode all  # inject all matching secrets
+onecli agents list --max 0                                           # find the agent: identifier = agent group id
+onecli agents grants list --id <agent-id>                            # the secrets it holds
+onecli agents grants attach-secret --id <agent-id> --secret-id <id>  # attach the missing one
 ```
 If the gateway itself is unreachable, the container runner refuses to spawn (`OneCLI gateway not applied — refusing to spawn container without credentials` in the host log). Confirm the gateway is up at `http://127.0.0.1:10254`. If it isn't, follow [Repairing the gateway](#repairing-the-gateway).
 

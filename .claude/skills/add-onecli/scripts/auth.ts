@@ -6,6 +6,13 @@ import path from 'node:path';
 
 import * as p from '@clack/prompts';
 
+import {
+  createdSecretId,
+  isSavedProviderCredential,
+  readProviderCredentials,
+  recordProviderCredentials,
+} from '../payload/src/gateway-providers/onecli-provider-credentials.js';
+
 type Method = 'subscription' | 'oauth' | 'api' | 'skip';
 
 function childEnv(): NodeJS.ProcessEnv {
@@ -16,18 +23,41 @@ function childEnv(): NodeJS.ProcessEnv {
   };
 }
 
+type SecretRow = { id?: string; type?: string; name?: string };
+
+function listSecrets(): SecretRow[] {
+  const raw = execFileSync('onecli', ['secrets', 'list', '--max', '0'], {
+    encoding: 'utf8',
+    env: childEnv(),
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  const parsed = JSON.parse(raw) as SecretRow[] | { data?: SecretRow[] };
+  return (Array.isArray(parsed) ? parsed : parsed.data) ?? [];
+}
+
+const dataDir = () => path.join(process.cwd(), 'data');
+
+// Connected means Claude groups will be granted a credential: a live recorded
+// one, or one saved under NanoClaw's name or type, which is then recorded.
 function hasAnthropicSecret(): boolean {
+  let secrets: SecretRow[];
   try {
-    const raw = execFileSync('onecli', ['secrets', 'list'], {
-      encoding: 'utf8',
-      env: childEnv(),
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
-    const data = (JSON.parse(raw) as { data?: Array<{ type?: string; name?: string }> }).data ?? [];
-    return data.some((secret) => secret.type === 'anthropic' || /anthropic/i.test(secret.name ?? ''));
+    secrets = listSecrets();
   } catch {
     return false;
   }
+  const recorded = new Set(readProviderCredentials(dataDir()).providers.claude ?? []);
+  const ids = secrets.flatMap((s) =>
+    s.id && (recorded.has(s.id) || isSavedProviderCredential('claude', s)) ? [s.id] : [],
+  );
+  if (ids.length) recordProviderCredentials(dataDir(), 'claude', ids);
+  return ids.length > 0;
+}
+
+// New groups get only the recorded model credential, so record what was saved.
+function recordClaudeSecret(id: string | null): void {
+  const ids = id ? [id] : listSecrets().flatMap((s) => (s.id && isSavedProviderCredential('claude', s) ? [s.id] : []));
+  if (ids.length) recordProviderCredentials(dataDir(), 'claude', ids);
 }
 
 function saveSecret(value: string, baseUrl?: string): void {
@@ -48,10 +78,12 @@ function saveSecret(value: string, baseUrl?: string): void {
   } else {
     args.push('--type', 'anthropic', '--value', value, '--host-pattern', 'api.anthropic.com');
   }
-  execFileSync('onecli', args, {
+  const output = execFileSync('onecli', args, {
+    encoding: 'utf8',
     env: childEnv(),
-    stdio: ['ignore', 'ignore', 'pipe'],
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
+  recordClaudeSecret(createdSecretId(output));
 }
 
 function saveEnv(key: string, value: string): void {
@@ -151,6 +183,8 @@ export async function run(): Promise<void> {
       stdio: 'inherit',
     });
     if (result.status !== 0) throw new Error('Claude subscription sign-in failed');
+    // The script saves under the name 'Anthropic'; none existed before it ran.
+    recordClaudeSecret(null);
     return;
   }
 

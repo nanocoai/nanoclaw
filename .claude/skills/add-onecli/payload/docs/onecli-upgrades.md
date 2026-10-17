@@ -4,7 +4,7 @@ NanoClaw talks to the OneCLI gateway (credential vault + egress proxy) through `
 
 There is deliberately **no runtime version check, and setup does not migrate the gateway for you**: the gateway is a separate out-of-band component, and the migrator is your coding agent running `/update-nanoclaw`. The update does not detect a pin move on its own. From 2026.10.0 on, release notes that move the `onecli-gateway` pin carry a `[BREAKING]` line, which stops the update until this doc has been followed; earlier pin moves were not marked, so an older gateway can lag behind its pin. The Detect step below shows whether yours does. (Setup detects a pre-`/v1` gateway and points at this doc, but never upgrades it.) Run the steps below verbatim.
 
-**Supported version: exactly the pin (today 1.42.0).** OneCLI 1.43 and later remove the agent secret-assignment API this integration uses (`onecli agents set-secrets`), so 1.43+ is not supported for now. Never upgrade past the pin, and never rerun the upstream installer (`curl … onecli.sh/install | sh`) without `ONECLI_VERSION` set to the pin: without it, the installer installs the newest release. Rerunning `/add-onecli` does not fix a wrong version either, because setup reuses any healthy gateway without checking which version it runs.
+**Supported version: exactly the pin (today 1.45.0).** This integration attaches secrets to agents through the agent grants API, which OneCLI added in 1.44; on an older gateway those commands fail with `404`. OneCLI 2.x is a rewrite and is not supported. Never upgrade past the pin, and never rerun the upstream installer (`curl … onecli.sh/install | sh`) without `ONECLI_VERSION` set to the pin: without it, the installer installs the newest release. Rerunning `/add-onecli` does not fix a wrong version either, because setup reuses any healthy gateway without checking which version it runs.
 
 ## 1. Detect
 
@@ -31,6 +31,28 @@ The gateway runs as a Docker service in `~/.onecli`. Upgrade just that container
 
 **Local gateway (the common case).** Run these on the gateway's host; for a **remote gateway**, run them on that host (NanoClaw can't reach it over SSH).
 
+**First, if the gateway runs 1.43 or older and the pin is 1.44 or later, check what the move deletes.** Do this before anything below writes the pin. On its first start a 1.44+ gateway converts the project once:
+
+- Each `all`-mode agent gets an explicit grant for **every** secret in the vault at that moment. Agents already in `selective` mode keep their list.
+- Every custom project **network rule and behavioral rule** (one with a non-empty `conditions` list) is **deleted**, including `block` rules: an agent a rule kept away from a host now receives that host's secret. So are **block and approval rules on a secret**: an `all`-mode agent gets a plain grant for it. **Rate limits on allow rules** are dropped, and a **`block` project default is reset to `allow`**.
+- `onecli agents set-secrets`, `onecli agents secrets` and `onecli agents set-secret-mode` answer `410 Gone` afterwards. Use `onecli agents grants list|attach-secret|detach-secret`.
+
+The check needs CLI 2.6 or later for `policy rules`: install the `onecli-cli` pin first ([below](#the-cli-binary-onecli-cli-pin)); it works against the old gateway. Run it from the NanoClaw checkout, with `GW` set as in the Detect step (it only reads the gateway's API; if NanoClaw's `.env` sets `ONECLI_PROJECT_ID`, also `export ONECLI_PROJECT=<that id>`). It reads the draft (what the conversion folds) and the published rules, and exits non-zero when it finds something the conversion deletes or changes, when the draft has unpublished changes (the conversion publishes the draft), or when it cannot read the policy:
+
+```bash
+GW="$GW" sh .claude/skills/add-onecli/scripts/pre-upgrade-check.sh
+```
+
+The conversion runs for every project on the gateway. A local gateway has one; if yours has more, run the check once per project with `ONECLI_PROJECT=<project id>` in front.
+
+If it stops with findings, do not upgrade yet: after the upgrade, access can only be narrowed by detaching secrets from agents, so anything a rule, a rate limit or a `block` default enforced is gone. Note what each finding protects, and upgrade only once you accept that or have a replacement. Also check for `/add-dial-tool`, which keeps unchosen agents away from Dial with a `block` rule named `Dial: blocked agents`:
+
+```bash
+onecli secrets list --max 0 | jq -r '(if type == "array" then . else .data end)[] | select(.name | test("(?i)dial")) | "\(.name)  \(.hostPattern)"'
+```
+
+If it prints a Dial secret, `/add-dial-tool` is installed. It still needs gateway 1.42, so either stay on 1.42 until `/add-dial-tool` supports grants, or remove the Dial secret before upgrading (`onecli secrets delete --id <id>`) and accept that no agent can use Dial until then. If you have already upgraded, detach the Dial secret from every agent that should not have it: `onecli agents grants detach-secret --id <agent-id> --secret-id <dial-secret-id>`.
+
 Write the pin to `~/.onecli/.env`, which Docker Compose reads on every later `docker compose` command. A version given only on the command line is gone after that command, so the next plain `docker compose up` falls back to an older saved value or to `latest`. This keeps the file's other settings and its permissions, and the temporary copy is private to you. The command stops without touching the file when the value is empty or not a version:
 
 ```bash
@@ -55,7 +77,7 @@ Back up the gateway database before you pull or restart. A newer gateway can mig
 cd ~/.onecli && (umask 077 && F=~/onecli-db-backup-$(date +%Y%m%d-%H%M%S).sql && docker compose exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' > "$F.part" && grep -q 'PostgreSQL database dump complete' "$F.part" && mv "$F.part" "$F" || { rm -f "$F.part"; echo "Backup failed, nothing saved" >&2; exit 1; }; ls -l "$F")
 ```
 
-It prints the new file only when the dump is complete. If the dump fails or stops early, it says so and leaves no file behind; a leftover file ending in `.part` is not a backup. Only you can read the file. `postgres` is the database service in the stock compose file; use your service's name if it differs. Restoring it was tested once, from 1.45.0 back to 1.42.0: loaded with `psql` into a new, empty database, it brought the gateway back without the startup error and with its stored secret. There is no restore command in this guide yet. Stored secrets are encrypted with a key kept outside the database. By default it is the `secret-encryption-key` file in the `app-data` volume; if you set `SECRET_ENCRYPTION_KEY` yourself, it is wherever you set it. Either way, the dump alone does not recover secrets without that key.
+It prints the new file only when the dump is complete. If the dump fails or stops early, it says so and leaves no file behind; a leftover file ending in `.part` is not a backup. Only you can read the file. `postgres` is the database service in the stock compose file; use your service's name if it differs. Restoring it was tested once, from 1.45.0 back to 1.42.0: loaded with `psql` into a new, empty database, it brought the gateway back without the startup error and with its stored secret. The restore command is under [Rollback](#4-rollback). Stored secrets are encrypted with a key kept outside the database. By default it is the `secret-encryption-key` file in the `app-data` volume; if you set `SECRET_ENCRYPTION_KEY` yourself, it is wherever you set it. Either way, the dump alone does not recover secrets without that key.
 
 Then pull and restart:
 
@@ -63,7 +85,9 @@ Then pull and restart:
 cd ~/.onecli && env -u ONECLI_VERSION docker compose pull onecli && env -u ONECLI_VERSION docker compose up -d
 ```
 
-**If a gateway newer than the pin has started, even briefly:** it can migrate its database, and going back to the pin does not undo that. Put the gateway back on the pin (step 2), then check `docker logs onecli 2>&1 | grep -iE 'migrat|error'`. In testing, rolling back from 1.43.3 worked; from 1.45.0 it left a `policy_rule_identities.agent_group_id does not exist` error at startup. Access rules and approvals were not checked either time. If you see a database error, restore a backup taken before the newer version ran (the one from step 2, if you took it in time). There is no other tested repair, so otherwise [open an issue](https://github.com/nanocoai/nanoclaw/issues) with the log lines.
+Then check the conversion. Its log line appears a few seconds after `/v1/health` answers, so wait, then run `docker logs onecli 2>&1 | grep grant-conversion`; it must report `0 failed`. Existing agents keep what the conversion gave them. From now on an agent receives only the secrets attached to it: NanoClaw attaches a group's model credential (the one its provider setup saved) on every spawn, and nothing else. A tool secret or app connection reaches a new group only when you attach it, through the skill that added it or with `onecli agents grants attach-secret`.
+
+**If a gateway newer than the pin has started, even briefly:** it can migrate its database, and going back to the pin does not undo that. Put the gateway back on the pin (step 2), then check `docker logs onecli 2>&1 | grep -iE 'migrat|error'`. Access rules and approvals were not checked in testing. If you see a database error, restore a backup taken before the newer version ran (the one from step 2, if you took it in time). There is no other tested repair, so otherwise [open an issue](https://github.com/nanocoai/nanoclaw/issues) with the log lines.
 
 ## 3. Verify
 
@@ -80,7 +104,7 @@ docker inspect -f '{{.Config.Image}}' onecli    # gateway host: must print ghcr.
 curl -s "$GW/api/health"                        # its "version" must be the pin, or "unknown"
 ```
 
-If the tag is not the pin, go back to step 2: the pin is not saved, or the compose file does not use it. If `version` reports 1.43 or later, this gateway is not supported; roll back to the pin (step 4). From a NanoClaw host that only reaches a remote gateway, the `version` field is the only check; it says `unknown` on some builds, so then check the tag on the gateway host.
+If the tag is not the pin, go back to step 2: the pin is not saved, or the compose file does not use it. If `version` reports anything other than the pin, put the gateway on the pin (step 2). From a NanoClaw host that only reaches a remote gateway, the `version` field is the only check; it says `unknown` on some builds, so then check the tag on the gateway host.
 
 **Verify the bind interface (container reachability).** Agent containers reach the gateway over the docker bridge (`host.docker.internal` → e.g. `172.17.0.1`), so a server bound only to `127.0.0.1` boots clean host-side while every credentialed call from containers dies at the proxy:
 
@@ -112,12 +136,22 @@ If the old gateway ran `:latest`, `latest` now means a different image. Give the
 
 If the NanoClaw update itself is being rolled back, also pin `@onecli-sh/sdk` back to its previous version in `package.json` and run `pnpm install`. Stored secrets survive in both directions. Access settings may not: grants and policies changed on the newer gateway are not carried back, so check that agents still get their credentials after a rollback.
 
+**Rolling back from 1.44 or later to 1.43 or older needs the backup from step 2; restoring it is the only supported rollback.** The upgrade migrates the database in ways the old gateway cannot read: without the backup, it starts with a `policy_rule_identities.agent_group_id does not exist` error, and every agent the upgrade converted is left in `selective` mode with an empty secret list, so it gets no credentials. Switching agents back to `all` mode without it (`onecli agents set-secret-mode`) brings back credential injection only: the deleted rules stay deleted, policy stays broken, and an agent that was `selective` before the upgrade would receive every matching secret, so it is not supported.
+
+After saving the old version above, restore the backup into a new, empty database. This replaces the gateway's database: anything changed since the backup is lost. Put the backup's path in `F`; the command stops before touching anything if the file is missing or empty:
+
+```bash
+cd ~/.onecli && (F=<backup file from step 2> && [ -s "$F" ] || { echo "Not restored: '$F' is not a backup file" >&2; exit 1; }; docker compose stop onecli && docker compose exec -T postgres sh -c 'dropdb -U "$POSTGRES_USER" "$POSTGRES_DB" && createdb -U "$POSTGRES_USER" "$POSTGRES_DB"' && docker compose exec -T postgres sh -c 'psql -q -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" "$POSTGRES_DB"' < "$F" && env -u ONECLI_VERSION docker compose up -d)
+```
+
+Tested from 1.45.0 back to 1.42.0: the gateway came back without the startup error, with its agents in `all` mode, its secrets, and its rules. An agent group created after the backup gets a fresh `all`-mode agent on its next spawn.
+
 ## The CLI binary (`onecli-cli` pin)
 
 The `onecli` host CLI is pinned the same way, under `onecli-cli` in `.claude/skills/add-onecli/versions.json`. Setup installs exactly that version by direct release download — it never resolves "latest". When an update moves this pin, replace the binary with the pinned release:
 
 ```bash
-onecli --version                                            # detect: what is installed
+onecli version                                              # detect: what is installed
 V=<onecli-cli pin from .claude/skills/add-onecli/versions.json>
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')                 # darwin | linux
 ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')   # amd64 | arm64
@@ -125,7 +159,7 @@ curl -fsSL -o /tmp/onecli.tgz \
   "https://github.com/onecli/onecli-cli/releases/download/v${V}/onecli_${V}_${OS}_${ARCH}.tar.gz"
 tar -xzf /tmp/onecli.tgz -C /tmp
 install -m 0755 /tmp/onecli "$(command -v onecli || echo ~/.local/bin/onecli)"
-onecli --version                                            # verify: must match the onecli-cli pin
+onecli version                                              # verify: must match the onecli-cli pin
 ```
 
 To roll back, run the same block after reverting `.claude/skills/add-onecli/versions.json` (or checking out the previous NanoClaw version). The CLI is stateless — vault data lives in the gateway, so swapping the binary in either direction loses nothing.

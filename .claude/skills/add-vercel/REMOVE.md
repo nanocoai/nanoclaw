@@ -21,14 +21,13 @@ rm -f src/vercel-manifest.test.ts
 
 ## 3. Remove the OneCLI credential
 
-Delete the Vercel secret and strip its id from every agent's assigned list. `set-secrets` replaces the whole list, so read, filter, and write back per agent:
+Detach the Vercel secret from every agent, then delete it:
 
 ```bash
-VERCEL_SECRET_ID=$(onecli secrets list | jq -r '.data[] | select(.name | test("(?i)vercel")) | .id' | head -1)
+VERCEL_SECRET_ID=$(onecli secrets list --max 0 | jq -r '.data[] | select(.name | test("(?i)vercel")) | .id' | head -1)
 if [ -n "$VERCEL_SECRET_ID" ]; then
-  for agent in $(onecli agents list | jq -r '.data[].id'); do
-    REMAINING=$(onecli agents secrets --id "$agent" | jq -r --arg id "$VERCEL_SECRET_ID" '[.data[] | select(. != $id)] | join(",")')
-    onecli agents set-secrets --id "$agent" --secret-ids "$REMAINING"
+  for agent in $(onecli agents list --max 0 | jq -r '.data[].id'); do
+    onecli agents grants detach-secret --id "$agent" --secret-id "$VERCEL_SECRET_ID" >/dev/null
   done
   onecli secrets delete --id "$VERCEL_SECRET_ID"
 fi

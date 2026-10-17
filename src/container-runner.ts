@@ -403,6 +403,7 @@ async function spawnContainer(session: Session): Promise<void> {
       sessionId: session.id,
     }),
     groupName: agentGroup.name,
+    provider,
     containerName,
     capabilities: driver.capabilities(),
   });
