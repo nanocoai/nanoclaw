@@ -85,7 +85,7 @@ function buildReadingSection(): string {
     'Chat turns can include:',
     '',
     '- `<message>` — the message you are answering. `<dm-history>` and `<channel-history>` are this thread\'s own earlier timeline.',
-    '- `<cross-session-context>` — a copy of something from elsewhere in this conversation: another thread, or a message you or a scheduled task posted here. Its `from` says which. If you can\'t tell whether the current message refers to it or to this thread, ask.',
+    '- `<cross-session-context>` — a copy of something from elsewhere in this conversation: another thread, or a message you or a scheduled task posted here. Its `from` says where; `sender="you"` marks your own. If you can\'t tell whether the current message refers to it or to this thread, ask.',
   ].join('\n');
 }
 
