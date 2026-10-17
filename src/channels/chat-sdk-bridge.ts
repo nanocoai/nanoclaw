@@ -25,7 +25,7 @@ import { log } from '../log.js';
 import { SqliteStateAdapter } from '../state-sqlite.js';
 import { registerWebhookAdapter } from '../webhook-server.js';
 import { normalizeOptions, type NormalizedOption } from './ask-question.js';
-import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage } from './adapter.js';
+import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage, InboundWorkspace } from './adapter.js';
 import { INSTANCE_KEY_RE } from './channel-registry.js';
 import { resolveQuestionRender, dispatchQuestionAction } from './question-render-registry.js';
 
@@ -345,6 +345,11 @@ export interface ChatSdkBridgeConfig {
    */
   extractRawText?: RawTextExtractor;
   /**
+   * Read the sender's and the bot's workspace off `message.raw` before it is
+   * dropped. Return null when the platform event names neither.
+   */
+  extractWorkspace?: (raw: Record<string, unknown>) => InboundWorkspace | null;
+  /**
    * Whether this platform uses threads as the primary conversation unit.
    * See `ChannelAdapter.supportsThreads`. Declared by the calling channel
    * skill, not inferred, because some platforms (Discord) can be used either
@@ -539,6 +544,12 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       serialized.senderName = name;
     }
 
+    // Kept beside the content, not in it: modules read it, the agent never sees it.
+    const workspace =
+      config.extractWorkspace && message.raw
+        ? (config.extractWorkspace(message.raw as Record<string, unknown>) ?? undefined)
+        : undefined;
+
     // Drop raw to save DB space (can be very large)
     serialized.raw = undefined;
 
@@ -549,6 +560,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       timestamp: message.metadata.dateSent.toISOString(),
       isMention,
       isGroup,
+      workspace,
     };
   }
 

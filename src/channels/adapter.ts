@@ -72,6 +72,8 @@ export interface InboundEvent {
     isMention?: boolean;
     /** True when the source is a group/channel thread, false for DMs. */
     isGroup?: boolean;
+    /** See InboundMessage.workspace. */
+    workspace?: InboundWorkspace;
   };
   replyTo?: DeliveryAddress;
 }
@@ -100,6 +102,21 @@ export interface InboundMessage {
   isMention?: boolean;
   /** True when the source is a group/channel thread, false for DMs. */
   isGroup?: boolean;
+  /**
+   * Workspace ids the platform signed into the event, so modules can tell an
+   * outsider from a colleague without a platform API call.
+   */
+  workspace?: InboundWorkspace;
+}
+
+/**
+ * The sender's workspace and the one the receiving bot is installed in (a
+ * Slack team, a Teams tenant). Each is unset when the platform event does not
+ * carry it; a caller comparing the two treats a missing side as "not ours".
+ */
+export interface InboundWorkspace {
+  sender?: string;
+  bot?: string;
 }
 
 /** A file attachment to deliver alongside a message. */
