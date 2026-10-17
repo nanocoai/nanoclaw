@@ -41,14 +41,16 @@ export interface AgentProvider {
   isSessionInvalid(err: unknown): boolean;
 
   /**
-   * Optional pre-resume maintenance. Given the stored continuation token,
-   * decide whether its backing transcript has grown too large or too old to
-   * resume cheaply. Return a non-null reason string to tell the caller to drop
-   * the continuation and start a fresh session (the provider archives any
-   * recoverable summary first); return null to keep resuming.
+   * Optional transcript maintenance. Given a continuation token, decide
+   * whether its backing transcript has grown too large or too old to keep
+   * using. The poll loop calls this before a cold resume and again at an idle
+   * turn boundary while a warm query is kept alive. Return a non-null reason
+   * to archive the transcript, drop the continuation, and start a fresh
+   * session; return null to keep using it.
    *
    * Provider-internal: only the provider knows its transcript format. This
-   * guards the cold-resume failure mode: a long-lived hub session accumulates
+   * guards the cold-resume failure mode and long-lived sessions that never
+   * restart between scheduled turns. A long-lived hub session accumulates
    * days of history — including base64 image blocks the agent Read — and the
    * SDK reloads the whole .jsonl on every resume. Past a threshold the first
    * turn alone can exceed the host's idle ceiling, so the container is killed

@@ -209,9 +209,9 @@ function formatTranscriptMarkdown(
 }
 
 /**
- * Before resuming, drop a transcript that has grown too large or too old to
- * cold-resume within the host's idle ceiling. Archives what it can, moves the
- * `.jsonl` aside, and returns the reason; null keeps resuming.
+ * Drop a transcript that has grown too large or too old to keep using.
+ * Archives what it can, moves the `.jsonl` aside, and returns the reason;
+ * null keeps the continuation.
  */
 export function rotateClaudeContinuation(
   input: ClaudeContinuationRotationInput,
