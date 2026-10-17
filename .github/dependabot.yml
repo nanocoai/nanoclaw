@@ -1,0 +1,50 @@
+# Keeps the SHA-pinned GitHub Actions current. Weekly; minor and patch
+# updates come as one grouped PR, each major alone. Nothing merges itself:
+# bump PRs run the same CI and need the same review as any other PR. A new
+# release waits 7 days before it is proposed, as a guard against a bad one.
+# Dependabot moves the pinned SHA and its version comment together.
+#
+# Skill-pinned npm versions are covered through /.github/skill-pins. The
+# root pnpm and bun lockfiles are not covered yet; that is a separate decision.
+version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00" # UTC, Dependabot's default timezone
+    cooldown:
+      default-days: 7
+    groups:
+      actions-minor-patch:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: chore
+      include: scope
+    open-pull-requests-limit: 5
+
+  # Skill-pinned npm versions, mirrored by `pnpm run skill-pins:generate`.
+  # A bump only edits the shadow file; CI's skill-pins check then fails until
+  # someone runs `pnpm run skill-pins:sync` on the branch and pushes.
+  - package-ecosystem: npm
+    directory: /.github/skill-pins
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00" # UTC, Dependabot's default timezone
+    cooldown:
+      default-days: 7
+    groups:
+      skill-pins-minor-patch:
+        update-types: [minor, patch]
+    ignore:
+      # Must match the root `chat` package (skill-directives lint), so Chat SDK
+      # upgrades move them. This also stops security-update PRs for them;
+      # their advisories still show as Dependabot alerts.
+      - dependency-name: "@chat-adapter/*"
+    commit-message:
+      prefix: chore
+      include: scope
+    open-pull-requests-limit: 5
