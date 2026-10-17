@@ -19,6 +19,7 @@
  *     { "text": "...", "to": {...}, "reply_to": {...} }   # + redirect replies
  *   Server → client:
  *     { "text": "agent reply" }
+ *     { "text": "...", "failureNotice": true }            # the agent run failed
  *
  * The `to` and `reply_to` addressing is how admin transports (the bootstrap
  * script) inject messages targeting any wired channel. `reply_to` is a
@@ -52,6 +53,10 @@ import type {
 import { INSTANCE_KEY_RE, registerChannelAdapter } from './channel-registry.js';
 
 const PLATFORM_ID = 'local';
+
+// Copy of the runner's FAILURE_NOTICE_FIELD (container/agent-runner/src/formatter.ts);
+// cli.test.ts pins it to that and to scripts/chat.ts so a rename fails a test.
+export const FAILURE_NOTICE_FIELD = 'failureNotice';
 
 /**
  * Terminal transport: every line the operator types is for the agent
@@ -148,8 +153,11 @@ function createAdapter(): ChannelAdapter {
       }
       const text = extractText(message);
       if (text === null) return undefined;
+      // Forward the runner's failure flag so clients (the setup ping) can tell
+      // a failed run from a real reply without matching notice text.
+      const failureNotice = isFailureNotice(message) || undefined;
       try {
-        client.write(JSON.stringify({ text }) + '\n');
+        client.write(JSON.stringify({ text, [FAILURE_NOTICE_FIELD]: failureNotice }) + '\n');
       } catch (err) {
         log.warn('Failed to write to CLI client', { err });
       }
@@ -305,6 +313,11 @@ function extractText(message: OutboundMessage): string | null {
     return content.text;
   }
   return null;
+}
+
+function isFailureNotice(message: OutboundMessage): boolean {
+  const content = message.content as Record<string, unknown> | undefined;
+  return typeof content === 'object' && content !== null && content[FAILURE_NOTICE_FIELD] === true;
 }
 
 registerChannelAdapter('cli', { factory: createAdapter, defaults: CLI_DEFAULTS });

@@ -6,7 +6,7 @@ import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { closeDb } from '../src/db/connection.js';
-import { inspectCentralDb } from './central-db-inspection.js';
+import { inspectAgentSession, inspectCentralDb } from './central-db-inspection.js';
 
 const tempDirs: string[] = [];
 
@@ -59,5 +59,29 @@ describe('setup central-DB inspection', () => {
     const inspected = new Database(dbPath, { readonly: true });
     expect(inspected.pragma('journal_mode', { simple: true })).toBe('delete');
     inspected.close();
+  });
+
+  it('finds the newest active session of an agent group by folder', async () => {
+    const projectRoot = tempRoot();
+    fs.mkdirSync(path.join(projectRoot, 'data'));
+    expect(await inspectAgentSession(projectRoot, 'ping_test')).toBeNull();
+    const raw = new Database(path.join(projectRoot, 'data', 'v2.db'));
+    raw.exec(`
+      CREATE TABLE agent_groups (id TEXT PRIMARY KEY, folder TEXT);
+      CREATE TABLE sessions (id TEXT PRIMARY KEY, agent_group_id TEXT, status TEXT, container_status TEXT, created_at TEXT);
+      INSERT INTO agent_groups (id, folder) VALUES ('ag-ping', 'ping_test'), ('ag-other', 'other');
+      INSERT INTO sessions VALUES ('s-old', 'ag-ping', 'active', 'stopped', '2026-10-16T10:00:00Z');
+      INSERT INTO sessions VALUES ('s-new', 'ag-ping', 'active', 'running', '2026-10-16T11:00:00Z');
+      INSERT INTO sessions VALUES ('s-closed', 'ag-ping', 'closed', 'running', '2026-10-16T12:00:00Z');
+      INSERT INTO sessions VALUES ('s-other', 'ag-other', 'active', 'running', '2026-10-16T13:00:00Z');
+    `);
+    raw.close();
+
+    await expect(inspectAgentSession(projectRoot, 'ping_test')).resolves.toEqual({
+      agentGroupId: 'ag-ping',
+      sessionId: 's-new',
+      containerStatus: 'running',
+    });
+    await expect(inspectAgentSession(projectRoot, 'missing')).resolves.toBeNull();
   });
 });
