@@ -66,6 +66,7 @@ export function createCredentialStore(root = process.cwd()): ProviderCredentialS
   return {
     modelEndpoint: (url) => ironModelEndpoint(url, root),
     connection: (target) => createIronCredentialConnection(target, root),
+    connectionPaths: true,
     async has(provider) {
       check(provider);
       if (!fs.existsSync(metadata)) return false;

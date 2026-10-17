@@ -90,6 +90,10 @@ describe('OpenCode setup installation and refresh', () => {
     expect(tree(directory)).toEqual(before);
     expect(fixture.commands).toHaveLength(1);
   });
+  it('accepts a later credential-connection seam, which only adds optional fields', async () => {
+    const result = await applyProviderSkill(skill, root(1, 2));
+    expect(result.blockers).toEqual([]);
+  });
   it('does not count its compatibility predicate as a payload change on an installed provider', async () => {
     const directory = root();
     await applyProviderSkill(skill, directory);

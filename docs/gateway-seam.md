@@ -310,6 +310,9 @@ owns:
 
 - `name` — one connection per name;
 - `host` — the exact DNS hostname the credential is scoped to;
+- `path` (optional) — an exact URL path on that host the credential is limited
+  to, for a runtime that sends other tokens to the same host. Core accepts it
+  only from a gateway whose store declares `connectionPaths`;
 - `proxyValue` — the non-secret marker the runtime presents in place of the
   credential, which gateways doing selective replacement match on;
 - for `kind: 'api-key'`, the `injection` header scheme;
@@ -344,7 +347,8 @@ in the message. A gateway that keeps no network allowlist declares nothing.
 
 `PROVIDER_CREDENTIAL_CONNECTION_SEAM_VERSION` gates a provider skill whose
 install needs `connection()`; an older core's store lacks it and the skill must
-refuse before copying any payload.
+refuse before copying any payload. Version 2 adds the optional `path`; a skill
+that sets it requires version 2 or later.
 
 ## Account connection is separate from request approval
 

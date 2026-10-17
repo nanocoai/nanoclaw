@@ -13,6 +13,7 @@ export function createCredentialStore(root = process.cwd()): ProviderCredentialS
   };
   return {
     connection: (target) => createProviderCredentialConnection(target, root),
+    connectionPaths: true,
     async has(provider) {
       check(provider);
       try {
