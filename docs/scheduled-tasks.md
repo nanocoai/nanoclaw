@@ -99,6 +99,10 @@ Scripts run with Bash, a 30-second timeout, and a 1 MB output limit. The JSON
 decision must be the final line written to standard output. Keep `data` small
 and include only what the agent needs.
 
+A leading `#!` line is ignored: Bash reads the script as a file, so the
+shebang never selects an interpreter. To use another interpreter, call it
+from the script, for example `--script "node /workspace/agent/scrape.js"`.
+
 For example, save this as `check-marker.sh`:
 
 ```bash
