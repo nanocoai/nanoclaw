@@ -11,6 +11,7 @@ import os from 'os';
 import path from 'path';
 
 import { readEnvFile } from '../src/env.js';
+import { nodeHonorsEnvProxy } from '../src/env-proxy.js';
 import { log } from '../src/log.js';
 import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
 import { writeUpgradeState } from '../src/upgrade-state.js';
@@ -133,16 +134,7 @@ export function hostProxyEnv(projectRoot: string, env: NodeJS.ProcessEnv = proce
   };
 }
 
-/**
- * Whether a Node version (e.g. "22.20.0") honors NODE_USE_ENV_PROXY for both
- * fetch and http(s). 22.21+ does; 23.x ignores it; 24.0-24.4 only proxies fetch.
- */
-export function nodeHonorsEnvProxy(version: string): boolean {
-  const [major, minor] = version.split('.').map(Number);
-  if (major === 22) return minor >= 21;
-  if (major === 24) return minor >= 5;
-  return major >= 25;
-}
+export { nodeHonorsEnvProxy };
 
 /**
  * Status fields for SETUP_SERVICE: PROXY=ignored_by_node when a proxy is
