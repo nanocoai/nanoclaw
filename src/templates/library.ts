@@ -141,16 +141,6 @@ function libraryTemplateDir(libraryDir: string, ref: string): string {
   return dir;
 }
 
-/**
- * Copy a list-derived registry template into the local template library,
- * through the hardened plugin copier (no symlinks, special files or oversize trees).
- */
-export function copyTemplate(srcDir: string, ref: string, destDir: string): string {
-  const to = path.resolve(destDir, ref);
-  copyPluginDir(libraryTemplateDir(srcDir, ref), to);
-  return to;
-}
-
 /** A local template's manifest description; undefined when it has none or the manifest is unreadable. */
 export function templateDescription(ref: string, base: string = TEMPLATES_DIR): string | undefined {
   try {
@@ -172,7 +162,8 @@ export function hasLocalTemplate(ref: string, base: string = TEMPLATES_DIR): boo
 /**
  * Make `ref` available under the templates dir, fetching it from the library
  * when there is no local copy. An existing local copy always wins and is never
- * overwritten. `clone` exists so tests never touch the network.
+ * overwritten. `clone` lets a caller reuse a clone it already has (setup) and
+ * keeps tests off the network.
  */
 export async function ensureTemplateLocal(
   ref: string,
@@ -220,6 +211,19 @@ export async function fetchTemplateIndex(fetchImpl: typeof fetch = fetch): Promi
   }
   if (!res.ok) throw new Error(`Could not fetch the template library index (HTTP ${res.status})`);
   return parseTemplateIndex(await res.json());
+}
+
+/** The index.json inside a cloned library. */
+export function readTemplateIndex(dir: string): LibraryTemplate[] {
+  const file = path.join(dir, 'index.json');
+  if (!fs.existsSync(file)) throw new Error('The template library has no index.json');
+  let raw: unknown;
+  try {
+    raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (err) {
+    throw new Error("The template library's index.json is not valid JSON", { cause: err });
+  }
+  return parseTemplateIndex(raw);
 }
 
 /** index.json groups entries by category: `{ schema: 1, categories: { sales: [entry, …] } }`. */

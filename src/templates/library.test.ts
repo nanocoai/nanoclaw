@@ -9,11 +9,11 @@ import { execFileSync } from 'child_process';
 import {
   cloneArgs,
   cloneRegistry,
-  copyTemplate,
   ensureTemplateLocal,
   fetchTemplateIndex,
   listTemplatesFromDir,
   parseTemplateIndex,
+  readTemplateIndex,
   templateDescription,
   type ClonedRegistry,
 } from './library.js';
@@ -51,10 +51,9 @@ function fakeClone(source: string): { clone: () => Promise<ClonedRegistry>; call
   };
 }
 
-describe('listTemplatesFromDir / copyTemplate', () => {
-  it('finds nested templates by plugin.json, skipping dot folders, and copies one', () => {
+describe('listTemplatesFromDir and cloning', () => {
+  it('finds nested templates by plugin.json, skipping dot folders', () => {
     const source = path.join(root, 'source');
-    const destination = path.join(root, 'destination');
     fs.mkdirSync(path.join(source, 'sales', 'sdr'), { recursive: true });
     fs.writeFileSync(path.join(source, 'sales', 'sdr', 'plugin.json'), '{"name":"sdr"}');
     // A context/instructions.md INSIDE a plugin (the NanoClaw extension dir)
@@ -74,22 +73,18 @@ describe('listTemplatesFromDir / copyTemplate', () => {
     );
 
     expect(listTemplatesFromDir(source)).toEqual([{ ref: 'sales/sdr', name: 'sdr' }]);
-
-    copyTemplate(source, 'sales/sdr', destination);
-    expect(fs.readFileSync(path.join(destination, 'sales', 'sdr', 'plugin.json'), 'utf8')).toBe('{"name":"sdr"}');
-    expect(() => copyTemplate(source, '../escape', destination)).toThrow('escapes the templates directory');
   });
 
-  it('refuses to copy through a symlinked parent folder', () => {
-    const source = path.join(root, 'source');
-    fs.mkdirSync(path.join(root, 'host', 'sdr'), { recursive: true });
-    fs.writeFileSync(path.join(root, 'host', 'sdr', 'plugin.json'), '{"name":"sdr"}');
-    fs.mkdirSync(source, { recursive: true });
-    fs.symlinkSync(path.join(root, 'host'), path.join(source, 'sales'));
+  it('refuses to fetch through a symlinked parent folder in the library', async () => {
+    const library = path.join(root, 'library');
+    const base = path.join(root, 'templates');
+    writeTemplate(path.join(root, 'host'), 'x/sdr');
+    fs.mkdirSync(library, { recursive: true });
+    fs.symlinkSync(path.join(root, 'host', 'x'), path.join(library, 'sales'));
+    const { clone } = fakeClone(library);
 
-    expect(() => copyTemplate(source, 'sales/sdr', path.join(root, 'destination'))).toThrow(
-      'leaves the template library',
-    );
+    await expect(ensureTemplateLocal('sales/sdr', { base, clone })).rejects.toThrow('leaves the template library');
+    expect(fs.existsSync(path.join(base, 'sales', 'sdr'))).toBe(false);
   });
 
   it('clones as data: symlinks as plain files, a fixed branch', () => {
@@ -269,6 +264,14 @@ describe('the library index', () => {
       { ref: 'data/no-description', name: 'nodesc', description: '' },
       { ref: 'sales/sdr', name: 'sdr', description: 'Books meetings' },
     ]);
+  });
+
+  it('reads the index.json inside a cloned library, and says so when there is none', () => {
+    expect(() => readTemplateIndex(root)).toThrow('has no index.json');
+    fs.writeFileSync(path.join(root, 'index.json'), '{ not json');
+    expect(() => readTemplateIndex(root)).toThrow('index.json is not valid JSON');
+    fs.writeFileSync(path.join(root, 'index.json'), JSON.stringify(index));
+    expect(readTemplateIndex(root).map((t) => t.ref)).toEqual(['data/analyst', 'data/no-description', 'sales/sdr']);
   });
 
   it('refuses an index schema it does not know', () => {

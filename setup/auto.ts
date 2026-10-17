@@ -103,9 +103,11 @@ import { DEFAULT_AGENT_PROVIDER, TEMPLATES_DIR } from '../src/config.js';
 import { SocketTransport } from '../src/cli/socket-client.js';
 import {
   cloneRegistry,
-  copyTemplate,
+  ensureTemplateLocal,
   listTemplatesFromDir,
+  readTemplateIndex,
   type ClonedRegistry,
+  type LibraryTemplate,
   type TemplateEntry,
 } from '../src/templates/library.js';
 import {
@@ -1049,22 +1051,27 @@ function listLocalTemplates(): TemplateEntry[] {
   }
 }
 
+// One git clone (git honors HTTPS_PROXY; setup's own fetch does not): the list
+// comes from the clone's index.json, and the pick is copied out of the same clone.
 async function pickLibraryTemplate(): Promise<string | undefined> {
   const spinner = p.spinner();
   spinner.start('Fetching the template library…');
-  let registry: ClonedRegistry;
+  let registry: ClonedRegistry | undefined;
+  let templates: LibraryTemplate[];
   try {
     registry = await cloneRegistry();
+    templates = readTemplateIndex(registry.dir);
   } catch (err) {
-    spinner.stop('Could not reach the template library.');
+    registry?.cleanup();
+    spinner.stop('Could not load the template library.');
     const message = err instanceof Error ? err.message : String(err);
     setupLog.step('template-source', 'interactive', 0, { source: 'library', error: message });
     p.log.warn(message);
     return undefined;
   }
 
+  const clone = registry;
   try {
-    const templates = listTemplatesFromDir(registry.dir).filter((template) => template.ref !== '.');
     if (templates.length === 0) {
       spinner.stop('The template library is empty.');
       return undefined;
@@ -1073,26 +1080,25 @@ async function pickLibraryTemplate(): Promise<string | undefined> {
     const ref = await chooseTemplate(templates);
     if (!ref) return undefined;
 
-    const destination = path.join(TEMPLATES_DIR, ref);
-    if (fs.existsSync(destination)) {
+    if (fs.existsSync(path.join(TEMPLATES_DIR, ref))) {
       if (!listLocalTemplates().some((template) => template.ref === ref)) {
         p.log.warn(`Can't install "${ref}": that path already exists but isn't a valid template.`);
         return undefined;
       }
       p.log.info(`Keeping your existing local copy of "${ref}".`);
-    } else {
-      try {
-        copyTemplate(registry.dir, ref, TEMPLATES_DIR);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        setupLog.step('template-copy', 'interactive', 0, { ref, error: message });
-        p.log.warn(`Couldn't copy "${ref}" into templates/: ${message}`);
-        return undefined;
-      }
+      return ref;
+    }
+    try {
+      await ensureTemplateLocal(ref, { clone: async () => ({ ...clone, cleanup: () => {} }) });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setupLog.step('template-copy', 'interactive', 0, { ref, error: message });
+      p.log.warn(`Couldn't copy "${ref}" into templates/: ${message}`);
+      return undefined;
     }
     return ref;
   } finally {
-    registry.cleanup();
+    clone.cleanup();
   }
 }
 
@@ -1107,7 +1113,7 @@ async function pickLocalTemplate(): Promise<string | undefined> {
 
 const BACK_TO_TEMPLATE_SOURCE = '\0back';
 
-async function chooseTemplate(templates: TemplateEntry[]): Promise<string | undefined> {
+async function chooseTemplate(templates: Array<TemplateEntry & { description?: string }>): Promise<string | undefined> {
   const ref = ensureAnswer(
     await p.autocomplete<string>({
       message: 'Choose a template',
@@ -1115,7 +1121,7 @@ async function chooseTemplate(templates: TemplateEntry[]): Promise<string | unde
         ...templates.map((template) => ({
           value: template.ref,
           label: template.name,
-          hint: template.ref.includes('/') ? template.ref : undefined,
+          hint: template.description || (template.ref.includes('/') ? template.ref : undefined),
         })),
         { value: BACK_TO_TEMPLATE_SOURCE, label: '← Back' },
       ],
