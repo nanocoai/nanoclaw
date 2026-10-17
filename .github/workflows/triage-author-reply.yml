@@ -1,0 +1,72 @@
+name: Triage author reply
+
+# When an item's author answers, the ball is back in our court: remove
+# triage/needs-repro and triage/needs-author (and `stale`, if the bot already
+# marked it), so stale.yml never counts the item as waiting on its author.
+#
+#   issue comment by the item's author     -> issue_comment (issues and PRs)
+#   push by the PR author                  -> pull_request_target synchronize
+#
+# A review reply by the PR author is handled by the `answered` job in
+# stale.yml instead, right before each stale run: on a fork PR the review
+# events only get a read-only token, so they cannot remove a label.
+#
+# SECURITY: pull_request_target runs with a write token on fork PRs. This
+# workflow reads event metadata and calls the labels API, nothing else. Do NOT
+# add actions/checkout or any step that runs PR content.
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [synchronize]
+
+jobs:
+  clear:
+    # Filter at the job level so the comments and pushes that need nothing
+    # never start a runner.
+    if: >-
+      (github.event_name == 'issue_comment'
+        && github.event.comment.user.login == github.event.issue.user.login
+        && (contains(github.event.issue.labels.*.name, 'triage/needs-repro')
+          || contains(github.event.issue.labels.*.name, 'triage/needs-author')))
+      || (github.event_name == 'pull_request_target'
+        && github.event.sender.login == github.event.pull_request.user.login
+        && (contains(github.event.pull_request.labels.*.name, 'triage/needs-repro')
+          || contains(github.event.pull_request.labels.*.name, 'triage/needs-author')))
+    runs-on: ubuntu-26.04
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          retries: 3
+          script: |
+            const TRIAGE = ['triage/needs-repro', 'triage/needs-author'];
+            const item = context.payload.issue || context.payload.pull_request;
+            const issue_number = item.number;
+
+            // Only an answer newer than the ask counts. A run that sat in the
+            // queue while a maintainer re-applied a label with a new request
+            // must leave that request alone.
+            const answeredAt = Date.parse(context.payload.comment?.created_at ?? item.updated_at);
+            const events = await github.paginate(github.rest.issues.listEvents, {
+              ...context.repo, issue_number, per_page: 100,
+            });
+            const newerAsk = events.some((e) =>
+              e.event === 'labeled' && TRIAGE.includes(e.label?.name) && Date.parse(e.created_at) > answeredAt);
+            if (newerAsk) {
+              core.info(`#${issue_number}: a triage label went on after this ${context.eventName}; left as is`);
+              return;
+            }
+
+            const remove = item.labels.map((l) => l.name).filter((name) => TRIAGE.includes(name) || name === 'stale');
+            for (const name of remove) {
+              try {
+                await github.rest.issues.removeLabel({ ...context.repo, issue_number, name });
+              } catch (err) {
+                if (err.status !== 404) throw err; // already gone
+              }
+            }
+            core.info(`#${issue_number}: ${context.eventName} by the author; removed ${remove.join(', ')}`);
