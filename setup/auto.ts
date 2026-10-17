@@ -46,7 +46,7 @@ import {
 } from './channels/initial-setup.js';
 import { runInheritScript } from './lib/inherit-script.js';
 import { offerPortalReminder, portalEnabled, runImagePortal } from './portal.js';
-import { logFirstChat, pingCliAgent, PING_AGENT_FOLDER, type PingResult } from './lib/agent-ping.js';
+import { logFirstChat, pingCliAgent, pingFailureCopy, PING_AGENT_FOLDER, type PingOutcome } from './lib/agent-ping.js';
 import { getSetupProvider, listSetupProviders } from './providers/registry.js';
 import { applyProviderSkill, loadHostContractModules } from './providers/install.js';
 import {
@@ -580,8 +580,9 @@ async function main(): Promise<void> {
         ),
       );
       const pingStart = Date.now();
-      const ping = await confirmAssistantResponds();
-      logFirstChat(ping, Date.now() - pingStart);
+      const outcome = await confirmAssistantResponds();
+      logFirstChat(outcome, Date.now() - pingStart);
+      const ping = outcome.result;
       if (ping === 'ok') {
         phEmit('first_chat_ready');
         const cleanupRawLog = setupLog.stepRawLog('cleanup-cli-agent');
@@ -649,18 +650,9 @@ async function main(): Promise<void> {
         }
       } else {
         phEmit('first_chat_failed', { reason: ping });
-        renderPingFailureNote(ping);
-        await offerClaudeOnFailure({
-          stepName: 'cli-agent',
-          msg:
-            ping === 'socket_error'
-              ? "NanoClaw service isn't listening on its CLI socket."
-              : 'No reply from the assistant within 30 seconds.',
-          hint:
-            ping === 'socket_error'
-              ? 'Socket at data/cli.sock did not accept a connection.'
-              : 'Agent container may be failing to start or authenticate.',
-        });
+        const copy = pingFailureCopy(outcome);
+        note(copy.note, 'Skipping the first chat');
+        await offerClaudeOnFailure({ stepName: 'cli-agent', msg: copy.assistMsg, hint: copy.assistHint });
       }
     }
   }
@@ -868,7 +860,7 @@ async function main(): Promise<void> {
  * "patient" and "is this hung?". Returns the raw result so the caller can
  * branch between the chat loop (ok) and a diagnostic note (anything else).
  */
-async function confirmAssistantResponds(): Promise<PingResult> {
+async function confirmAssistantResponds(): Promise<PingOutcome> {
   const s = p.spinner();
   const start = Date.now();
   const label = 'Waking your assistant…';
@@ -878,37 +870,16 @@ async function confirmAssistantResponds(): Promise<PingResult> {
     s.message(`${fitToWidth(label, suffix)}${k.dim(suffix)}`);
   }, 1000);
 
-  const result = await pingCliAgent();
+  const outcome = await pingCliAgent();
 
   clearInterval(tick);
   const suffix = ` (${fmtDuration(Date.now() - start)})`;
-  if (result === 'ok') {
+  if (outcome.result === 'ok') {
     s.stop(`${k.bold(fitToWidth('Your assistant is ready.', suffix))}${k.dim(suffix)}`);
   } else {
-    const msg =
-      result === 'socket_error' ? "Couldn't reach the NanoClaw service." : "Your assistant didn't reply in time.";
-    s.stop(`${k.bold(fitToWidth(msg, suffix))}${k.dim(suffix)}`, 1);
+    s.stop(`${k.bold(fitToWidth(pingFailureCopy(outcome).spinner, suffix))}${k.dim(suffix)}`, 1);
   }
-  return result;
-}
-
-function renderPingFailureNote(result: PingResult): void {
-  const body =
-    result === 'socket_error'
-      ? [
-          wrapForGutter(
-            "The NanoClaw service isn't listening on its local socket. Try restarting it, then chat with `pnpm run chat hi`:",
-            6,
-          ),
-          '',
-          `  macOS:  launchctl kickstart -k gui/$(id -u)/${getLaunchdLabel()}`,
-          `  Linux:  systemctl --user restart ${getSystemdUnit()}`,
-        ].join('\n')
-      : wrapForGutter(
-          'No reply from your assistant within 30 seconds. Check `logs/nanoclaw.log` for clues, then try `pnpm run chat hi`.',
-          6,
-        );
-  note(body, 'Skipping the first chat');
+  return outcome;
 }
 
 /**
