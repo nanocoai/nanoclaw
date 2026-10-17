@@ -40,7 +40,7 @@ import './gchat.js';
 Pinned to an exact version — the supply-chain policy rejects ranges and `latest`:
 
 ```nc:dep
-@chat-adapter/gchat@4.29.0
+@chat-adapter/gchat@4.41.1
 ```
 
 ### 4. Build and validate
@@ -94,6 +94,21 @@ Paste the service account JSON as a single line — the key file you downloaded,
 ```nc:env-set
 GCHAT_CREDENTIALS={{gchat_credentials}}
 ```
+
+### Bot user id (for @mentions in spaces)
+
+The adapter no longer learns the app's own id from mentions. Without it, DMs
+still work, but an @mention in a space doesn't count as a mention, so a
+mention-only wiring never replies. Once the app has replied to you in a DM,
+list that DM's messages with the Chat API (`spaces.messages.list`; the API
+Explorer on its reference page works) and copy the `sender.name` of a message
+whose sender `type` is `BOT`. It looks like `users/123456789`. Add it to `.env`
+and restart the service:
+
+```
+GOOGLE_CHAT_BOT_USER_ID=users/123456789
+```
+
 ### Webhook server
 
 The Chat SDK bridge automatically starts a shared webhook server on port 3000
@@ -121,6 +136,8 @@ If you're in the middle of `/setup`, return to the setup flow now. Otherwise run
 **The adapter starts, then errors about credentials.** `GCHAT_CREDENTIALS` must be the *entire* service account JSON collapsed to one line — inspect `.env` and confirm it still contains `"type":"service_account"`, `"private_key"`, and `"client_email"`. A truncated paste (shells often mangle the multi-line private key) is the usual cause; download a fresh JSON key under **IAM & Admin → Service Accounts → Keys** and re-paste it as a single line.
 
 **Messages sent in the space never reach the agent.** Google Chat delivers only to the HTTP endpoint URL set under **Google Chat API → Configuration**, and that URL must be publicly reachable at `/webhook/gchat` (shared webhook server, port 3000). Tunnel hostnames (ngrok free tier) change on restart — make sure the Configuration URL matches the tunnel that's actually up.
+
+**DMs work, but @mentions in a space are ignored.** `GOOGLE_CHAT_BOT_USER_ID` is missing or wrong; the log shows "Google Chat botUserId is not configured" at startup. Set it as described under **Bot user id** and restart.
 
 **The app doesn't appear when adding it to a space.** Check the Chat API Configuration page: the app status must be live and its visibility must include your domain or user, and you must be adding it from the same Google Workspace the Cloud project belongs to.
 
