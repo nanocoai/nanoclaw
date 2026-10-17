@@ -201,19 +201,29 @@ export async function listSessionsWithStopIntent(): Promise<SessionClaimRow[]> {
   return getDb().all<SessionClaimRow>('SELECT * FROM session_claims WHERE stop_intent IS NOT NULL');
 }
 
-/** Durable stop intent — survives a host restart, unlike the on-wake promise. */
+/**
+ * Durable stop intent — survives a host restart, unlike the on-wake promise.
+ * Never creates a row for a deleted session: an incarnation-0 row recreated
+ * after a delete would make the live runtime's finish() look stale.
+ */
 export async function setStopIntent(
   sessionId: string,
   intent: 'stop' | 'respawn_after_stop' | null,
   now: string,
 ): Promise<void> {
-  await getDb().run(
+  const db = getDb();
+  if (intent === null) {
+    await db.run('UPDATE session_claims SET stop_intent = NULL, updated_at = ? WHERE session_id = ?', now, sessionId);
+    return;
+  }
+  await db.run(
     `INSERT INTO session_claims (session_id, incarnation, stop_intent, updated_at)
-     VALUES (?, 0, ?, ?)
+     SELECT ?, 0, ?, ? WHERE EXISTS (SELECT 1 FROM sessions WHERE id = ?)
      ON CONFLICT (session_id) DO UPDATE SET stop_intent = excluded.stop_intent, updated_at = excluded.updated_at`,
     sessionId,
     intent,
     now,
+    sessionId,
   );
 }
 

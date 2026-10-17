@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 
-import { initSqliteTestDb, closeDb, runMigrations } from './index.js';
+import { initSqliteTestDb, closeDb, runMigrations, createAgentGroup, createSession } from './index.js';
 import {
   registerHostInstance,
   renewHostInstanceLease,
@@ -83,10 +83,29 @@ describe('session_claims', () => {
   });
 
   it('stop intent persists on a row that has never been claimed', async () => {
+    await createAgentGroup({ id: 'ag-9', name: 'ag-9', folder: 'ag-9', agent_provider: null, created_at: iso() });
+    await createSession({
+      id: 's-9',
+      agent_group_id: 'ag-9',
+      messaging_group_id: null,
+      thread_id: null,
+      agent_provider: null,
+      status: 'active',
+      container_status: 'stopped',
+      last_active: null,
+      created_at: iso(),
+    });
     await setStopIntent('s-9', 'respawn_after_stop', iso());
     expect((await getSessionClaim('s-9'))?.stop_intent).toBe('respawn_after_stop');
     await setStopIntent('s-9', null, iso());
     expect((await getSessionClaim('s-9'))?.stop_intent).toBeNull();
+  });
+
+  it('stop intent never recreates the claim row of a deleted session', async () => {
+    // A recreated incarnation-0 row would make the live runtime's finish() look stale.
+    await setStopIntent('s-deleted', 'respawn_after_stop', iso());
+    await setStopIntent('s-deleted', null, iso());
+    expect(await getSessionClaim('s-deleted')).toBeUndefined();
   });
 });
 

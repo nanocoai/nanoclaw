@@ -11,6 +11,7 @@
  * `caller: 'host'` after admin approval, so the test invokes dispatch
  * with the host caller — same code path a real approval would take.
  */
+import Database from 'better-sqlite3';
 import fs from 'fs';
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 
@@ -35,7 +36,10 @@ const TEST_DIR = '/tmp/nanoclaw-test-cli-groups';
 
 import { initTestDb, closeDb, runMigrations, createAgentGroup, getDb } from '../../db/index.js';
 import { createSession } from '../../db/sessions.js';
+import { inboundDbPath } from '../../mailbox/sqlite/paths.js';
+import { initSessionFolder } from '../../session-manager.js';
 import { dispatch } from '../dispatch.js';
+import { projectDestinationsToSessions } from './destinations.js';
 import { ensureContainerConfig, getContainerConfig } from '../../db/container-configs.js';
 import { restartAgentGroupContainers } from '../../container-restart.js';
 import { configFromDb } from '../../container-config.js';
@@ -81,6 +85,21 @@ function errorMessage(res: Awaited<ReturnType<typeof dispatch>>): string | undef
 
 async function count(sql: string, ...params: unknown[]): Promise<number> {
   return (await getDb().get<{ c: number }>(sql, ...params))!.c;
+}
+
+async function createGroupWithSession(groupId: string, sessionId: string): Promise<void> {
+  await createAgentGroup({ id: groupId, name: groupId, folder: groupId, agent_provider: null, created_at: now() });
+  await createSession({
+    id: sessionId,
+    agent_group_id: groupId,
+    messaging_group_id: null,
+    thread_id: null,
+    agent_provider: null,
+    status: 'active',
+    container_status: 'stopped',
+    last_active: null,
+    created_at: now(),
+  });
 }
 
 describe('groups CLI delete cascades dependent rows (#2525)', () => {
@@ -287,6 +306,88 @@ describe('groups CLI delete cascades dependent rows (#2525)', () => {
     expect(await count('SELECT COUNT(*) AS c FROM agent_groups WHERE id = ?', A)).toBe(0);
     expect(await count('SELECT COUNT(*) AS c FROM agent_groups WHERE id = ?', B)).toBe(1);
     expect(await count('SELECT COUNT(*) AS c FROM agent_destinations WHERE agent_group_id = ?', B)).toBe(0);
+  });
+
+  it("clears the host-coordination rows of the group's sessions and leaves another group's alone", async () => {
+    const coordinationRows = async (sessionId: string) => ({
+      session_claims: await count('SELECT COUNT(*) AS c FROM session_claims WHERE session_id = ?', sessionId),
+      delivery_attempts: await count('SELECT COUNT(*) AS c FROM delivery_attempts WHERE session_id = ?', sessionId),
+      wake_signals: await count('SELECT COUNT(*) AS c FROM wake_signals WHERE session_id = ?', sessionId),
+    });
+    const db = getDb();
+    // No FK on these tables (migration 024), so nothing stops them outliving their session.
+    for (const [groupId, sessionId] of [
+      ['ag-victim', 'sess-victim'],
+      ['ag-other', 'sess-other'],
+    ]) {
+      await createGroupWithSession(groupId, sessionId);
+      await db.run(
+        `INSERT INTO session_claims (session_id, incarnation, updated_at) VALUES (?, 1, ?)`,
+        sessionId,
+        now(),
+      );
+      await db.run(
+        `INSERT INTO delivery_attempts (message_id, session_id, attempts) VALUES (?, ?, 1)`,
+        `out-${sessionId}`,
+        sessionId,
+      );
+      await db.run(
+        `INSERT INTO wake_signals (id, session_id, reason, created_at) VALUES (?, ?, 'mail', ?)`,
+        `wake-${sessionId}`,
+        sessionId,
+        now(),
+      );
+    }
+
+    const resp = await dispatch(
+      { id: 'req-del-coord', command: 'groups-delete', args: { id: 'ag-victim' } },
+      { caller: 'host' },
+    );
+
+    expect(resp.ok).toBe(true);
+    const data = (resp as { ok: true; data: { removed: Record<string, number> } }).data;
+    expect(data.removed).toMatchObject({ sessions: 1, session_claims: 1, delivery_attempts: 1, wake_signals: 1 });
+    expect(await coordinationRows('sess-victim')).toEqual({ session_claims: 0, delivery_attempts: 0, wake_signals: 0 });
+    expect(await coordinationRows('sess-other')).toEqual({ session_claims: 1, delivery_attempts: 1, wake_signals: 1 });
+    expect(await count('SELECT COUNT(*) AS c FROM sessions WHERE agent_group_id = ?', 'ag-other')).toBe(1);
+  });
+
+  it("drops the deleted group from a surviving agent's inbound.db destinations", async () => {
+    const A = 'ag-a';
+    const B = 'ag-b';
+    const C = 'ag-c';
+    await createAgentGroup({ id: A, name: 'a', folder: 'a', agent_provider: null, created_at: now() });
+    await createAgentGroup({ id: C, name: 'c', folder: 'c', agent_provider: null, created_at: now() });
+    await createGroupWithSession(B, 'sess-b');
+    for (const [localName, target] of [
+      ['to-a', A],
+      ['to-c', C],
+    ]) {
+      await getDb().run(
+        `INSERT INTO agent_destinations (agent_group_id, local_name, target_type, target_id, created_at)
+         VALUES (?, ?, 'agent', ?, ?)`,
+        B,
+        localName,
+        target,
+        now(),
+      );
+    }
+    const projected = () => {
+      const inbound = new Database(inboundDbPath(B, 'sess-b'), { readonly: true });
+      const names = (
+        inbound.prepare('SELECT name FROM destinations ORDER BY name').all() as Array<{ name: string }>
+      ).map((row) => row.name);
+      inbound.close();
+      return names;
+    };
+    initSessionFolder(B, 'sess-b');
+    await projectDestinationsToSessions(B);
+    expect(projected()).toEqual(['to-a', 'to-c']);
+
+    const resp = await dispatch({ id: 'req-del-proj', command: 'groups-delete', args: { id: A } }, { caller: 'host' });
+
+    expect(resp.ok).toBe(true);
+    expect(projected()).toEqual(['to-c']);
   });
 
   it('returns a handler error for an unknown group id', async () => {
