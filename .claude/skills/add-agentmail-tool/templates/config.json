@@ -1,0 +1,19 @@
+{
+  "inbox": "<inbox address, e.g. assistant@agentmail.to>",
+  "api": "https://api.agentmail.to/v0",
+  "owner_name": "<owner's first name>",
+  "owner": {
+    "<label, e.g. work>": "<owner address>"
+  },
+  "known": {},
+  "lookalike": [],
+  "channel_routed": [],
+  "ignore": [
+    "(^|[<\\s])(no-?reply|do-?not-?reply|donotreply|newsletters?|marketing|promo(tions)?|news)@"
+  ],
+  "digest_hours": [8, 12, 18],
+  "followup_hour": 9,
+  "followup_days": 3,
+  "signature": "<agent name>\nAI assistant to <owner's full name>",
+  "max_request_bytes": 6000000
+}
