@@ -47,6 +47,7 @@ for arg in "$@"; do
     echo ""
     echo "  --template-path <ref>  Create or update an agent from templates/<ref>"
     echo "  --gateway-provider <kind>  Select the credential gateway"
+    echo "  --update-channel <name>  Updates follow stable, beta, or edge"
     echo "  --uninstall            Uninstall this NanoClaw copy"
     echo "  --help, -h             Show this help without installing dependencies"
     exit 0
@@ -91,6 +92,85 @@ for arg in "$@"; do
     exit 1
   fi
 done
+
+# ─── new install: latest release or newest code from main ──────────────
+# Runs before the splash and bootstrap so a switch can restart this script
+# from the release's own files, with dependencies installed for that version.
+# shellcheck source=setup/lib/release-checkout.sh
+source "$PROJECT_ROOT/setup/lib/release-checkout.sh"
+
+REQUESTED_CHANNEL="${NANOCLAW_UPDATE_CHANNEL:-}"
+_release_args=()
+_take_channel=false
+_past_options=false
+for arg in "$@"; do
+  # After `--` setup treats everything as positional, so this must too.
+  if [ "$_past_options" = true ]; then
+    _release_args+=("$arg")
+  elif [ "$_take_channel" = true ]; then
+    REQUESTED_CHANNEL="$arg"
+    _take_channel=false
+  elif [ "$arg" = "--" ]; then
+    _past_options=true
+    _release_args+=("$arg")
+  elif [ "$arg" = "--update-channel" ]; then
+    _take_channel=true
+  elif [ "${arg#--update-channel=}" != "$arg" ]; then
+    REQUESTED_CHANNEL="${arg#--update-channel=}"
+  else
+    _release_args+=("$arg")
+  fi
+done
+if [ "$_take_channel" = true ]; then
+  echo "error: Missing value for --update-channel"
+  exit 1
+fi
+unset _take_channel _past_options
+
+RELEASE_TTY=0
+if [ -t 0 ] && [ -t 1 ]; then RELEASE_TTY=1; fi
+read -r RELEASE_ACTION RELEASE_TAG <<<"$(release_checkout_decide "$PROJECT_ROOT" "$REQUESTED_CHANNEL" "$RELEASE_TTY")"
+
+if [ "$RELEASE_ACTION" = invalid ]; then
+  echo "error: unknown update channel \"$RELEASE_TAG\". Use one of: stable, beta, edge"
+  exit 1
+fi
+
+if [ "$RELEASE_ACTION" = offer ]; then
+  echo ""
+  echo "  This copy is on main, which is newer than the latest release ($RELEASE_TAG)."
+  echo ""
+  echo "  1) Install the latest release $RELEASE_TAG (recommended)"
+  echo "  2) Install the newest code from main"
+  echo ""
+  read -r -p "  Choose [1/2]: " RELEASE_ANS </dev/tty
+  case "${RELEASE_ANS:-1}" in
+    2)
+      # Setup saves this, so the updater follows main instead of stopping
+      # later because the install is ahead of the release.
+      export NANOCLAW_UPDATE_CHANNEL=edge
+      ;;
+    *) RELEASE_ACTION=switch ;;
+  esac
+  echo ""
+fi
+
+if [ "$RELEASE_ACTION" = switch ]; then
+  if release_checkout_switch "$PROJECT_ROOT" "$RELEASE_TAG"; then
+    echo "  Installing release $RELEASE_TAG (branch: stable)."
+    # The release may predate --update-channel; the env var carries the choice.
+    if [ -n "$REQUESTED_CHANNEL" ]; then export NANOCLAW_UPDATE_CHANNEL="$REQUESTED_CHANNEL"; fi
+    exec bash "$PROJECT_ROOT/nanoclaw.sh" ${_release_args[@]+"${_release_args[@]}"}
+  fi
+  echo "  Couldn't switch to release $RELEASE_TAG; continuing with main."
+  RELEASE_ACTION=notice
+fi
+
+if [ "$RELEASE_ACTION" = notice ]; then
+  echo "  This copy is on main, which is newer than the latest release ($RELEASE_TAG). Updates follow releases."
+  echo "  To follow main instead: pnpm exec tsx scripts/update-nanoclaw.ts set-channel --channel edge"
+fi
+unset _release_args
 
 LOGS_DIR="$PROJECT_ROOT/logs"
 STEPS_DIR="$LOGS_DIR/setup-steps"

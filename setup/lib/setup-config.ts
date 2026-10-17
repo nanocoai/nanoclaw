@@ -106,6 +106,20 @@ export const CONFIG: Entry[] = [
     type: 'string',
     placeholder: 'sales/sdr',
   },
+  {
+    key: 'updateChannel',
+    label: 'Update channel',
+    help: 'What updates follow: stable (releases, the default), beta (release candidates), or edge (main).',
+    surface: 'flag+ui',
+    group: 'Updates',
+    type: 'enum',
+    // Values mirror CHANNELS in scripts/update/channel.ts.
+    options: [
+      { value: 'stable', label: 'Stable', hint: 'published releases (default)' },
+      { value: 'beta', label: 'Beta', hint: 'release candidates, then releases' },
+      { value: 'edge', label: 'Edge', hint: 'newest code from main' },
+    ],
+  },
 
   // Existing env-var knobs — flag-only so they don't clutter the UI screen.
   {
