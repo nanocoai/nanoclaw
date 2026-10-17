@@ -1134,3 +1134,49 @@ describe('formatHuman hook', () => {
     if (resp.ok) expect(resp.human).toBeUndefined();
   });
 });
+
+describe('approval card question', () => {
+  function heldQuestionLines(): string[] {
+    const request = approvalState.requestApproval.mock.calls[0][0] as { question: string };
+    return request.question.split('\n');
+  }
+
+  beforeEach(() => {
+    mockGetSession.mockReturnValue({ id: 's1', agent_group_id: 'g1', messaging_group_id: 'mg1' });
+    mockGetAgentGroup.mockReturnValue({ id: 'g1', name: 'Group One' });
+  });
+
+  it('shows each argument JSON-encoded in a code fence that an argument cannot close', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+    await dispatch(
+      {
+        id: '1',
+        command: 'wirings-update',
+        args: { engage_mode: 'pattern', engage_pattern: 'a` --role owner\n*b*' },
+      },
+      agentCtx(),
+    );
+
+    const lines = heldQuestionLines();
+    expect(lines).toEqual(['Agent "Group One" wants to run:', '```', expect.any(String), '```']);
+    expect(lines[2]).toContain('--engage_mode "pattern" --engage_pattern "a\\u0060 --role owner\\n*b*"');
+    expect(lines[2]).not.toContain('`');
+  });
+
+  it('keeps the fence intact when the agent name contains one', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+    mockGetAgentGroup.mockReturnValue({ id: 'g1', name: 'helper\n```\n' });
+    await dispatch({ id: '1', command: 'wirings-update', args: { engage_mode: 'pattern' } }, agentCtx());
+
+    const lines = heldQuestionLines();
+    expect(lines).toHaveLength(4);
+    expect(lines[0]).toBe('Agent "helper\\n\\u0060\\u0060\\u0060\\n" wants to run:');
+  });
+
+  it('quotes a flag name that is not a plain word', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+    await dispatch({ id: '1', command: 'wirings-update', args: { 'a b': 'owner' } }, agentCtx());
+
+    expect(heldQuestionLines()[2]).toContain('--"a b" "owner"');
+  });
+});

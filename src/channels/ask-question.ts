@@ -51,3 +51,22 @@ export interface AskQuestionPayload {
   question: string;
   options: NormalizedOption[];
 }
+
+/**
+ * Render every control/format/invisible/bidi character — and backtick, so a
+ * payload can never close a card's code fence — as a visible \uXXXX
+ * escape. Applied to JSON-encoded payload fields: JSON.stringify already
+ * escapes chars below 0x20, this covers the rest (Cf bidi/zero-width chars,
+ * U+2028/U+2029 line separators, private-use, lone surrogates).
+ */
+export function escapeInvisibles(s: string): string {
+  return s.replace(/[\p{Cc}\p{Cf}\p{Co}\p{Cs}\u2028\u2029`]/gu, (c) => {
+    const cp = c.codePointAt(0) ?? 0;
+    return cp > 0xffff ? `\\u{${cp.toString(16)}}` : `\\u${cp.toString(16).padStart(4, '0')}`;
+  });
+}
+
+/** Quote an untrusted name or value for card text: one line, no fence or hidden characters. */
+export function quoteForCard(value: string): string {
+  return escapeInvisibles(JSON.stringify(value));
+}

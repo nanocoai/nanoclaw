@@ -392,6 +392,57 @@ describe('createChatSdkBridge.deliver — ask_question cards (button styles)', (
     ]);
     expect(edited.card.children.some((child) => child.type === 'actions')).toBe(false);
   });
+
+  it('runs open and resolved card text through escapeCardText, leaving the title alone', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const edits: PostCall[] = [];
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({
+        postMessage,
+        editMessage: async (threadId, _messageId, message) => {
+          edits.push({ threadId, message });
+          return { id: 'msg-1', threadId, raw: {} };
+        },
+      }),
+      supportsThreads: false,
+      escapeCardText: (t) => `[${t}]`,
+    });
+
+    await bridge.deliver('slack:D1', null, {
+      kind: 'chat-sdk',
+      content: {
+        type: 'ask_question',
+        questionId: 'q-3',
+        title: 'Approval needed',
+        question: 'Allow?',
+        options: ['Approve'],
+      },
+    });
+    const posted = calls[0].message as {
+      card: { title: string; children: Array<{ type: string; content?: string }> };
+      fallbackText: string;
+    };
+    expect(posted.card.title).toBe('Approval needed');
+    expect(posted.card.children[0]).toEqual({ type: 'text', content: '[Allow?]' });
+    expect(posted.fallbackText).toBe('Approval needed\n\n[Allow?]\nOptions: Approve');
+
+    await bridge.deliver('slack:D1', null, {
+      kind: 'chat-sdk',
+      content: {
+        operation: 'edit',
+        messageId: 'msg-1',
+        terminalCard: { title: 'Approval needed', question: 'Allow?', resolution: 'Approve by Ann' },
+      },
+    });
+    const edited = edits[0].message as {
+      card: { title: string; children: Array<{ type: string; content?: string; style?: string }> };
+    };
+    expect(edited.card.title).toBe('Approval needed');
+    expect(edited.card.children).toEqual([
+      { type: 'text', content: '[Allow?]' },
+      { type: 'text', content: '[Approve by Ann]', style: 'muted' },
+    ]);
+  });
 });
 
 describe('createChatSdkBridge.deliver — display cards (send_card)', () => {

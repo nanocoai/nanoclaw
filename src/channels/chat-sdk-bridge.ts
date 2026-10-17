@@ -364,6 +364,12 @@ export interface ChatSdkBridgeConfig {
    */
   transformOutboundText?: (text: string) => string;
   /**
+   * Optional escape for ask_question card text (open and resolved cards).
+   * Approval cards mix host wording with untrusted values (agent arguments,
+   * sender names); channels whose card text is raw platform markup set this.
+   */
+  escapeCardText?: (text: string) => string;
+  /**
    * Maximum text length the underlying adapter accepts in a single message.
    * When set, the bridge splits outbound text longer than this on paragraph
    * → line → hard-char boundaries and posts multiple messages. Without this,
@@ -474,6 +480,9 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     );
   }
   const transformText = (t: string): string => (config.transformOutboundText ? config.transformOutboundText(t) : t);
+  const cardText = (t: string): string => (config.escapeCardText ? config.escapeCardText(t) : t);
+  const terminalMessage = (spec: TerminalApprovalCard) =>
+    terminalApprovalMessage({ ...spec, question: cardText(spec.question), resolution: cardText(spec.resolution) });
   /** Registry/routing key for this bridge — also the app-context cache
    *  namespace. Default instances key by the platform name. */
   const instanceKey = config.instance ?? adapter.name;
@@ -718,7 +727,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
             tid,
             event.messageId,
             render?.question
-              ? terminalApprovalMessage({ title, question: render.question, resolution })
+              ? terminalMessage({ title, question: render.question, resolution })
               : { markdown: `${title}\n\n${resolution}` },
           );
         } catch (err) {
@@ -839,7 +848,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           await adapter.editMessage(
             tid,
             content.messageId as string,
-            terminalApprovalMessage(terminalCard as TerminalApprovalCard),
+            terminalMessage(terminalCard as TerminalApprovalCard),
           );
         } else {
           await adapter.editMessage(tid, content.messageId as string, {
@@ -873,7 +882,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         const card = Card({
           title,
           children: [
-            CardText(question),
+            CardText(cardText(question)),
             Actions(
               // Encode button id/value with the option index rather than the
               // full value. Telegram caps callback_data at 64 bytes, and
@@ -888,7 +897,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         });
         const result = await adapter.postMessage(tid, {
           card,
-          fallbackText: `${title}\n\n${question}\nOptions: ${options.map((o) => o.label).join(', ')}`,
+          fallbackText: `${title}\n\n${cardText(question)}\nOptions: ${options.map((o) => o.label).join(', ')}`,
         });
         return result?.id;
       }

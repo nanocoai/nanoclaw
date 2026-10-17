@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { normalizeOption, normalizeOptions } from './ask-question.js';
+import { escapeInvisibles, normalizeOption, normalizeOptions, quoteForCard } from './ask-question.js';
 
 describe('normalizeOption — style whitelist', () => {
   // The style value flows straight into the Chat SDK Button() and from there
@@ -72,5 +72,30 @@ describe('normalizeOptions', () => {
     ]);
     expect(out.map((o) => o.label)).toEqual(['Skip', 'Approve', 'Deny', 'Later']);
     expect(out.map((o) => o.style)).toEqual([undefined, 'primary', 'danger', undefined]);
+  });
+});
+
+describe('escapeInvisibles', () => {
+  it('escapes every bidi, zero-width, and separator character as \\uXXXX', () => {
+    const invisibles = '\u202a\u202e\u2066\u2069\u200e\u200f\u061c\u200b\u200c\u200d\u2060\ufeff\u2028\u2029`';
+    const out = escapeInvisibles(invisibles);
+    for (const c of invisibles) expect(out).not.toContain(c);
+    expect(out).toBe(
+      '\\u202a\\u202e\\u2066\\u2069\\u200e\\u200f\\u061c\\u200b\\u200c\\u200d\\u2060\\ufeff\\u2028\\u2029\\u0060',
+    );
+  });
+
+  it('leaves ordinary text untouched', () => {
+    expect(escapeInvisibles('hello world -y evil [link](https://x)')).toBe('hello world -y evil [link](https://x)');
+  });
+});
+
+describe('quoteForCard', () => {
+  it('keeps a plain name readable inside quotes', () => {
+    expect(quoteForCard('Group One')).toBe('"Group One"');
+  });
+
+  it('keeps line breaks, fences and hidden characters visible on one line', () => {
+    expect(quoteForCard('a\n```\n\u202eb')).toBe('"a\\n\\u0060\\u0060\\u0060\\n\\u202eb"');
   });
 });

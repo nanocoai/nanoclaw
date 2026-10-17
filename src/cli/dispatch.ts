@@ -12,6 +12,7 @@
  * the structural checks live, and the `approved: true` boolean no longer
  * exists.
  */
+import { escapeInvisibles, quoteForCard } from '../channels/ask-question.js';
 import { getContainerConfig } from '../db/container-configs.js';
 import { getAgentGroup } from '../db/agent-groups.js';
 import { getMessagingGroupAgentByPair } from '../db/messaging-groups.js';
@@ -159,9 +160,13 @@ export async function dispatch(
     const agentGroup = await getAgentGroup(ctx.agentGroupId);
     const agentName = agentGroup?.name ?? ctx.agentGroupId;
 
+    // Arguments are agent-controlled: JSON-encode each flag and value inside a
+    // code fence so no value can add lines, pass as another flag, or close the
+    // fence and reach the card's markup.
     const argSummary = Object.entries(req.args)
-      .map(([k, v]) => `--${k} ${v}`)
+      .map(([k, v]) => `--${/^[\w-]+$/.test(k) ? k : JSON.stringify(k)} ${JSON.stringify(v)}`)
       .join(' ');
+    const commandLine = escapeInvisibles(`ncl ${req.command}${argSummary ? ' ' + argSummary : ''}`);
 
     await requestApproval({
       session,
@@ -169,7 +174,7 @@ export async function dispatch(
       action: 'cli_command',
       payload: { frame: { id: req.id, command: req.command, args: req.args }, callerContext: ctx },
       title: `CLI: ${req.command}`,
-      question: `Agent "${agentName}" wants to run:\n\`ncl ${req.command}${argSummary ? ' ' + argSummary : ''}\``,
+      question: `Agent ${quoteForCard(agentName)} wants to run:\n` + '```\n' + commandLine + '\n```',
     });
 
     return err(req.id, 'approval-pending', 'Approval request sent to admin. You will be notified of the result.');
