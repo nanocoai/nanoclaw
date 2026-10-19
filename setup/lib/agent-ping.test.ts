@@ -46,26 +46,28 @@ describe('classifyPingResult', () => {
     expect(classifyPingResult(0, 'pong\n')).toBe('ok');
   });
 
-  it('detects Anthropic auth errors printed as a chat reply', () => {
-    expect(
-      classifyPingResult(
-        0,
-        'Failed to authenticate. API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"Invalid bearer token"}}',
-      ),
-    ).toBe('auth_error');
+  it('detects Anthropic auth errors in a flagged notice', () => {
+    const notice =
+      'Failed to authenticate. API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"Invalid bearer token"}}';
+    expect(classifyPingResult(4, notice, '', notice)).toBe('auth_error');
   });
 
   it('detects auth errors on stderr too', () => {
     expect(classifyPingResult(1, '', 'Authentication error')).toBe('auth_error');
   });
 
-  it('detects Claude Code login banners printed as a chat reply', () => {
-    expect(classifyPingResult(0, 'Invalid API key · Please run /login')).toBe('auth_error');
-    expect(classifyPingResult(0, 'Not logged in · Please run /login')).toBe('auth_error');
+  it('detects Claude Code login notices in a flagged notice', () => {
+    for (const notice of [
+      'Invalid API key · Please run /login',
+      'Not logged in · Please run /login',
+      'Invalid auth token · Fix external auth token',
+    ]) {
+      expect(classifyPingResult(4, notice, '', notice)).toBe('auth_error');
+    }
   });
 
-  it('detects the notice for a bad external auth token', () => {
-    expect(classifyPingResult(4, 'Invalid auth token · Fix external auth token')).toBe('auth_error');
+  it('scores a plain reply that mentions a login problem as ok', () => {
+    expect(classifyPingResult(0, "I'm not logged in to GitHub, so I can't see your repos yet.")).toBe('ok');
   });
 
   it('preserves socket errors', () => {
@@ -79,10 +81,6 @@ describe('classifyPingResult', () => {
 
   it('treats a failure notice (chat exit 4) as an agent failure, not ok', () => {
     expect(classifyPingResult(4, `${GENERIC_FAILURE_NOTICE}\n`)).toBe('agent_failure');
-  });
-
-  it('keeps auth_error for a failure notice that names an auth problem', () => {
-    expect(classifyPingResult(4, 'Invalid API key · Please run /login')).toBe('auth_error');
   });
 });
 
@@ -232,6 +230,14 @@ describe('ping outcome from raw chat-client lines', () => {
     expect(pingOutcome(4, raw('Invalid auth token · Fix external auth token', true).toString(), '')).toEqual({
       result: 'auth_error',
       detail: 'Invalid auth token · Fix external auth token',
+    });
+  });
+
+  it('checks only flagged notices for auth errors, not plain replies', () => {
+    const reply = raw("I'm not logged in to GitHub yet.").toString();
+    expect(pingOutcome(0, reply, '')).toEqual({ result: 'ok' });
+    expect(pingOutcome(4, reply + raw(GENERIC_FAILURE_NOTICE, true).toString(), '')).toEqual({
+      result: 'agent_failure',
     });
   });
 
