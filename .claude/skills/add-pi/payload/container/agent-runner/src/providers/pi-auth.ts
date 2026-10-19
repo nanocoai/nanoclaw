@@ -16,9 +16,10 @@
  *
  * A configured credential is not enough on its own: pi otherwise starts on its
  * built-in default provider (Anthropic first in its preference list), which the
- * gateway usually has no key for. So `settings.json` gets a `defaultProvider`
- * for the single declared provider (or an explicit `PI_DEFAULT_PROVIDER`), and
- * pi supplies that provider's own default model.
+ * gateway usually has no key for. So `settings.json` gets both a
+ * `defaultProvider` for the single declared provider (or an explicit
+ * `PI_DEFAULT_PROVIDER`) and that provider's `defaultModel` (its pi default, or
+ * an explicit `PI_DEFAULT_MODEL`).
  *
  * The provider list arrives host-side as `PI_GATEWAY_PROVIDERS`, so a provider
  * the gateway does not hold gets no entry and pi never selects it. Real logins
@@ -39,6 +40,23 @@ const JWT_CLAIM_PATH = 'https://api.openai.com/auth';
 
 /** Far-future expiry: the placeholder is never refreshed, and pi must not try. */
 const PLACEHOLDER_EXPIRES = Date.UTC(2100, 0, 1);
+
+/**
+ * pi's per-provider default model, mirrored from the pinned SDK's
+ * `defaultModelPerProvider`. pi's initial-model resolver takes the stored
+ * default only when BOTH `defaultProvider` and `defaultModel` are present — a
+ * provider alone falls through to "first available model", which the gateway's
+ * injected `ANTHROPIC_*` env makes pick Anthropic. Override at runtime with
+ * `PI_DEFAULT_MODEL`; an unknown provider simply gets no default model.
+ */
+const DEFAULT_MODEL_BY_PROVIDER: Record<string, string> = {
+  anthropic: 'claude-opus-4-8',
+  openai: 'gpt-5.5',
+  'openai-codex': 'gpt-5.5',
+  deepseek: 'deepseek-v4-flash',
+  google: 'gemini-3.1-pro-preview',
+  openrouter: 'moonshotai/kimi-k2.6',
+};
 
 export interface PiGatewayAuthOptions {
   /**
@@ -141,7 +159,8 @@ export function initializePiGatewayAuth(agentDir: string, options: PiGatewayAuth
   if (authChanged) writeJsonAtomic(agentDir, 'auth.json', auth);
 
   const defaultProvider = resolveDefaultProvider(providers, options.defaultProvider);
-  const defaultModel = options.defaultModel?.trim();
+  const defaultModel =
+    options.defaultModel?.trim() ?? (defaultProvider ? DEFAULT_MODEL_BY_PROVIDER[defaultProvider] : undefined);
   if (!defaultProvider && !defaultModel) return;
   const settingsPath = path.join(agentDir, 'settings.json');
   const settings = readObject(settingsPath);

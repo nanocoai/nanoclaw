@@ -114,6 +114,7 @@ describe('default provider settings', () => {
     initializePiGatewayAuth(agentDir, { providers: ['deepseek'] });
     expect(JSON.parse(fs.readFileSync(path.join(agentDir, 'settings.json'), 'utf-8'))).toEqual({
       defaultProvider: 'deepseek',
+      defaultModel: 'deepseek-v4-flash',
     });
   });
 

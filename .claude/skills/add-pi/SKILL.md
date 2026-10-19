@@ -171,8 +171,8 @@ environment.
 
 pi would otherwise start on its built-in default provider (Anthropic), which
 the gateway usually holds no key for, so the container writes `settings.json`
-with `defaultProvider` set to the single provider recorded in
-`PI_GATEWAY_PROVIDERS`; pi then uses that provider's own default model.
+with `defaultProvider` and `defaultModel` for the single provider recorded in
+`PI_GATEWAY_PROVIDERS`; the model is pi's own default for that provider.
 
 Override it without touching the container by editing
 `data/v2-sessions/<group-id>/.pi-shared/settings.json` (`defaultProvider` /
