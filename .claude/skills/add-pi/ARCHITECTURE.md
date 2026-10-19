@@ -1,7 +1,7 @@
 # pi provider execution and setup
 
 The provider targets NanoClaw's host contract seam version 1 and pins the pi
-SDK at a fixed 0.85.x version. The skill owns its runtime, host, setup, and
+SDK at a fixed 1.3.x version. The skill owns its runtime, host, setup, and
 gateway-credential adapters. Core supplies the provider contracts, delivery
 wording, the memory renderer, resolved MCP configuration, and container policy.
 

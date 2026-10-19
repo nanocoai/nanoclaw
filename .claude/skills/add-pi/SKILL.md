@@ -95,13 +95,13 @@ import './pi.js';
 ```
 
 Install the pinned SDK in the runner's Bun package. Do not use `latest`: the
-provider code is written and tested against the 0.85.x SDK surface. The MCP
+provider code is written and tested against the 1.3.x SDK surface. The MCP
 bridge uses `@modelcontextprotocol/sdk`, which is already an agent-runner
 dependency. There is no host SDK dependency and no CLI manifest entry — pi is a
 pure in-process dependency of the agent-runner.
 
 ```nc:dep manager:bun cwd:container/agent-runner when:pi_core_ready=yes
-@earendil-works/pi-coding-agent@0.85.1
+@earendil-works/pi-coding-agent@1.3.0
 ```
 
 Build the host, typecheck the runner, and run the pi tests. The tests exercise

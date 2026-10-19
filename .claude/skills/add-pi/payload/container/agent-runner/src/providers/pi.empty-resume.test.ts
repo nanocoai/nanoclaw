@@ -433,11 +433,12 @@ describe('PiProvider empty-resume fallback', () => {
     await done;
 
     // Turn 1 resumed the stale context (old history visible); turn 2 opened on
-    // a fresh session whose context only carries the replayed opening prompt.
+    // a fresh session whose context carries only the replayed opening prompt.
+    // Filter to user messages: newer pi versions also inject their own harness
+    // system message, which must not make this assertion version-specific.
     expect(fake.calls[0].context.messages.length).toBeGreaterThan(1);
-    const replayMessages = fake.calls[1].context.messages;
+    const replayMessages = fake.calls[1].context.messages.filter((message) => message.role === 'user');
     expect(replayMessages).toHaveLength(1);
-    expect(replayMessages[0].role).toBe('user');
     expect(replayMessages[0].content[0].text).toContain('hey');
   });
 });
