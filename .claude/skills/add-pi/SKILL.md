@@ -25,7 +25,7 @@ pi `customTools` in process by `mcp-to-pi.ts`.
 pi resolves models and credentials **exclusively from its agentDir files**; the
 SDK reads no auth from environment variables. The host therefore declares the
 group's pi state directory as a state volume
-(`/home/node/.pi`, from `data/v2-sessions/<group>/.pi-shared`) and passes
+(`/home/node/.pi/agent`, from `data/v2-sessions/<group>/.pi-shared`) and passes
 `PI_AGENT_DIR`. Credentials are **gateway-owned**: the container writes fixed
 `gateway-managed` placeholders into the agentDir before every session open, and
 the selected gateway replaces them on the wire. No personal `auth.json` is
@@ -136,7 +136,7 @@ switches a published-image installation to locally built images.
 ## Configure models and credentials
 
 pi reads everything from its agentDir. The host mounts the group's shared
-directory at `/home/node/.pi` and sets `PI_AGENT_DIR=/home/node/.pi/agent`.
+directory at pi's agentDir, `/home/node/.pi/agent` (the group's `.pi-shared`).
 Files there are operator-owned and survive container restarts.
 
 ### ChatGPT subscription (pi's `openai-codex` provider)
@@ -171,7 +171,7 @@ environment.
 
 Model choice lives in the agentDir, not in environment variables: put
 `settings.json` (default model and other settings) and optional `models.json`
-custom providers in `data/v2-sessions/<group-id>/.pi-shared/agent/`. NanoClaw
+custom providers in `data/v2-sessions/<group-id>/.pi-shared/`. NanoClaw
 introduces no `PI_*` model knobs — `ANTHROPIC_BASE_URL` and friends are not read
 by the pi provider.
 
@@ -238,7 +238,7 @@ the session's `outbound.db` `session_state` table.
 |---|---|---|
 | First reply is `"The agent run failed."`; `session_state` shows `continuation:claude` | Provider switch never reached `container_configs` — the runner defaulted to claude | `ncl groups config update --provider pi --id <group>` + `ncl groups restart --id <group>` |
 | Every turn fails with a model-auth error | No gateway credential for the selected provider | `pnpm exec tsx setup/index.ts --step provider-auth pi` (or `provider-auth codex` for ChatGPT) |
-| pi logs "found no auth.json" | The group's `.pi-shared/agent/` was removed or the group was created before this skill | Restart the group (re-prepares the file); the container rewrites placeholders on the next turn |
+| pi logs "found no auth.json" | The group's `.pi-shared/` was removed or the group was created before this skill | Restart the group (re-prepares the file); the container rewrites placeholders on the next turn |
 | `Unknown provider: pi. Registered: claude` | Barrels not wired in the running build | Re-run the install, then `./container/build.sh build` |
 | Model requests blocked by the gateway | The model host is not declared | Use a supported provider, or add its host to the host contract's `modelDomains` and refresh |
 

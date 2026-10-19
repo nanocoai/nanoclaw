@@ -7,8 +7,11 @@ import { PROVIDER_HOST_CONTRACT_SEAM_VERSION, registerProviderHostContract } fro
  *
  * pi reads the project document from `AGENTS.md` and discovers skills from
  * `.agents/skills` (global `~/.agents/skills`, `~/.pi/agent/skills`). The
- * group's pi state lives in a shared `.pi-shared` volume so model config and
- * gateway placeholders persist across sessions.
+ * group's pi state lives in a shared `.pi-shared` volume mounted at the
+ * agentDir itself, so model config and gateway placeholders persist across
+ * sessions. The volume is mounted at the agentDir (not `~/.pi`) because core's
+ * spawn realization creates only the state volume root, and a prepared file
+ * below it must not need an intermediate directory.
  *
  * Credentials are gateway-owned: `auth.json` is prepared empty at every spawn
  * and the container fills it with non-secret `gateway-managed` placeholders.
@@ -43,7 +46,7 @@ registerProviderHostContract('pi', {
         discoveryPath: '/workspace/agent/.agents/skills',
         sharedSource: '/app/skills',
         selfAuthoredHome: '~/.pi/agent/skills',
-        persistentRoots: ['~/.pi', '~/.agents'],
+        persistentRoots: ['~/.pi/agent', '~/.agents'],
         ruleBearingInlined: true,
       },
     },
@@ -52,7 +55,7 @@ registerProviderHostContract('pi', {
     {
       id: 'pi-home',
       directory: '.pi-shared',
-      containerPath: '/home/node/.pi',
+      containerPath: '/home/node/.pi/agent',
       scope: 'group',
       mode: 'rw',
       mountClass: 'allowlisted-extra',
@@ -85,7 +88,7 @@ registerProviderHostContract('pi', {
     {
       id: 'pi-auth-stub',
       volumeId: 'pi-home',
-      relativePath: 'agent/auth.json',
+      relativePath: 'auth.json',
       prepare: { operation: 'append-open-close', when: 'every-spawn' },
     },
   ],
