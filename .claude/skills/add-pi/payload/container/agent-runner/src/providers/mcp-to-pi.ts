@@ -198,6 +198,25 @@ function errorText(result: CallToolResult, toolName: string): string {
   return text || `MCP tool ${toolName} failed`;
 }
 
+/**
+ * Strip JSON-Schema `pattern` constraints before the schema reaches the model.
+ * MCP servers may use regex dialects a model API rejects outright — DeepSeek
+ * returns `400 ... is not a "regex"` for core's own `send_card` URL pattern and
+ * then refuses the whole request. The regex is a client-side hint only: the
+ * tool still validates server-side, so dropping it costs nothing and keeps one
+ * server's schema from breaking every call. Recurses through the schema tree.
+ */
+export function sanitizeToolSchema(schema: unknown): unknown {
+  if (Array.isArray(schema)) return schema.map(sanitizeToolSchema);
+  if (!schema || typeof schema !== 'object') return schema;
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(schema)) {
+    if (key === 'pattern') continue;
+    out[key] = sanitizeToolSchema(value);
+  }
+  return out;
+}
+
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -336,9 +355,10 @@ class McpServerConnection implements McpConnection {
 /**
  * Wrap one MCP tool as a pi `ToolDefinition`.
  *
- * - `parameters` is the MCP tool's raw draft-07 JSON Schema, passed through
- *   as-is: pi's validator takes the generic JSON-Schema path for schemas
- *   without a TypeBox Kind symbol (verified against pi 0.85.1, design §2.3-1).
+ * - `parameters` is the MCP tool's raw draft-07 JSON Schema, with any
+ *   `pattern` constraints stripped (`sanitizeToolSchema`): pi's validator takes
+ *   the generic JSON-Schema path for schemas without a TypeBox Kind symbol, and
+ *   some model APIs reject the regex dialects MCP servers ship.
  * - `isError` results MUST throw: pi hardcodes `isError: false` for normally
  *   resolved executes and only marks errors from exceptions (§2.3-2).
  * - The execute `signal` is forwarded into `callTool` RequestOptions so
@@ -355,7 +375,7 @@ export function wrapMcpTool(
     name,
     label: tool.title ?? tool.name,
     description: tool.description ?? `(MCP tool ${conn.name}/${tool.name})`,
-    parameters: tool.inputSchema as unknown as ToolDefinition['parameters'],
+    parameters: sanitizeToolSchema(tool.inputSchema) as ToolDefinition['parameters'],
     executionMode: opts.executionMode ?? 'sequential',
     execute: async (_toolCallId, params, signal) => {
       let client: Client;

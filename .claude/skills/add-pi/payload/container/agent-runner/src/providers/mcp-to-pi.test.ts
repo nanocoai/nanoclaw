@@ -13,6 +13,7 @@ import {
   createToolNamer,
   mapContentBlocks,
   sanitizeToolName,
+  sanitizeToolSchema,
   toStdioServerParameters,
   wrapMcpTool,
   type McpBridgeOptions,
@@ -21,8 +22,34 @@ import {
 import type { McpServerConfig } from './types.js';
 
 // ---------------------------------------------------------------------------
-// sanitizeToolName / createToolNamer
+// sanitizeToolSchema
 // ---------------------------------------------------------------------------
+
+describe('sanitizeToolSchema', () => {
+  it('drops pattern constraints at any depth while keeping the rest of the schema', () => {
+    const schema = {
+      type: 'object',
+      properties: {
+        url: { type: 'string', pattern: '^https?://', description: 'target' },
+        nested: { type: 'array', items: { type: 'string', pattern: 'x' } },
+      },
+      required: ['url'],
+    };
+    expect(sanitizeToolSchema(schema)).toEqual({
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'target' },
+        nested: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['url'],
+    });
+  });
+
+  it('leaves non-object schemas untouched', () => {
+    expect(sanitizeToolSchema(undefined)).toBeUndefined();
+    expect(sanitizeToolSchema('x')).toBe('x');
+  });
+});
 
 describe('sanitizeToolName', () => {
   it('builds the mcp__<server>__<tool> prefix', () => {
