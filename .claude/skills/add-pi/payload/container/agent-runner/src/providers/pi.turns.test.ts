@@ -19,7 +19,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import type { ModelRuntime } from '@earendil-works/pi-coding-agent';
+import { SessionManager, type ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { AssistantMessageEventStream } from '@earendil-works/pi-ai';
 
 import { PiProvider, type PiMemorySessionHook } from './pi.js';
@@ -299,3 +299,46 @@ describe('PiProvider active turns', () => {
 function inits(events: ProviderEvent[]): Array<{ type: string; continuation: string }> {
   return events.filter((event): event is Extract<ProviderEvent, { type: 'init' }> => event.type === 'init');
 }
+
+describe('PiProvider instructions injection', () => {
+  it('carries the runner instructions on a resumed query too, not only a fresh one', async () => {
+    // The poll loop builds a NEW query per message batch, so instructions are
+    // re-read on every batch. A resumed query must still carry them: pi caches
+    // a session's history, and an instructions block that only appeared on the
+    // first-ever prompt would go stale as soon as destinations change.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-instr-'));
+    try {
+      const sessionsDir = path.join(dir, '.pi', 'sessions');
+      fs.mkdirSync(sessionsDir, { recursive: true });
+      const manager = SessionManager.create(dir, sessionsDir);
+      manager.appendMessage({
+        role: 'user',
+        content: [{ type: 'text', text: 'old question' }],
+        timestamp: Date.now(),
+      } as never);
+      manager.appendMessage(assistantMessage('old answer') as never);
+      const resumable = manager.getSessionFile();
+      expect(resumable).toBeTruthy();
+
+      const fake = createFakeModelRuntime([say('ok')]);
+      const provider = new PiProvider({}, fake.runtime);
+      provider.registerMemorySessionHook(MEMORY_HOOK);
+      const query = provider.query({
+        prompt: 'hello',
+        cwd: dir,
+        continuation: resumable!,
+        systemContext: { instructions: 'DESTINATIONS: telegram, wechat' },
+      });
+      const done = collectEvents(query.events, []);
+      query.end();
+      await done.catch(() => {});
+
+      // The resumed history carries its own user messages; the instructions
+      // belong to THIS turn's prompt, which is the last user message.
+      const users = fake.calls[0]!.context.messages.filter((message) => message.role === 'user');
+      expect(users.at(-1)!.content[0]!.text).toContain('DESTINATIONS: telegram, wechat');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
