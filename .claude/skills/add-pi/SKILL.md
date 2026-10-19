@@ -167,6 +167,14 @@ in the group's `auth.json`, or the equivalent `apiKey` field in a `models.json`
 entry. Never put a real key in either file, in `.env`, or in the container
 environment.
 
+**Grant the secret to the agent group.** OneCLI only injects secrets assigned to
+an agent (`secretMode: selective`), so a saved-but-ungranted key reaches the
+provider as `401 access restricted` even though the request is routed. Grant it
+with the selected gateway's own flow — for OneCLI,
+`PUT /v1/agents/<agentId>/grants/secrets/<secretId>` (its CLI's
+`agents set-secrets` endpoint is retired). New groups get a new agent, so grant
+after each group is created, or the group's first turns fail until you do.
+
 ### Model selection
 
 pi would otherwise start on its built-in default provider (Anthropic), which
@@ -243,6 +251,7 @@ the session's `outbound.db` `session_state` table.
 |---|---|---|
 | First reply is `"The agent run failed."`; `session_state` shows `continuation:claude` | Provider switch never reached `container_configs` — the runner defaulted to claude | `ncl groups config update --provider pi --id <group>` + `ncl groups restart --id <group>` |
 | Every turn fails with a model-auth error | No gateway credential for the selected provider | `pnpm exec tsx setup/index.ts --step provider-auth pi` (or `provider-auth codex` for ChatGPT) |
+| Model calls fail with `401 access restricted`; the gateway log shows `forward: access restricted host=api.<provider>` | The saved secret is not granted to this agent group (OneCLI `secretMode: selective`) | Grant it (`PUT /v1/agents/<agentId>/grants/secrets/<secretId>` on OneCLI), then retry |
 | pi logs "found no auth.json" | The group's `.pi-shared/` was removed or the group was created before this skill | Restart the group (re-prepares the file); the container rewrites placeholders on the next turn |
 | `Unknown provider: pi. Registered: claude` | Barrels not wired in the running build | Re-run the install, then `./container/build.sh build` |
 | Model requests blocked by the gateway | The model host is not declared | Use a supported provider, or add its host to the host contract's `modelDomains` and refresh |

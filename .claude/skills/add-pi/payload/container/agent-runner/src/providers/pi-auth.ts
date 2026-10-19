@@ -1,5 +1,5 @@
 /**
- * Container-owned gateway auth and default model for the pi provider.
+ * Container-owned gateway auth and model default for the pi provider.
  *
  * pi resolves models and credentials exclusively from its agentDir files and
  * reads no auth from the environment. Following the gateway model, the
@@ -11,19 +11,14 @@
  * The ChatGPT subscription path is special: pi derives the account id from the
  * access token's JWT payload and refuses the request when it cannot, so a bare
  * placeholder string is not enough — `buildPlaceholderAccessToken` emits a
- * syntactically valid JWT carrying the placeholder claim. The real token and
- * account header are injected by the gateway.
+ * syntactically valid JWT carrying the placeholder claim.
  *
- * A configured credential is not enough on its own: pi otherwise starts on its
- * built-in default provider (Anthropic first in its preference list), which the
- * gateway usually has no key for. So `settings.json` gets both a
- * `defaultProvider` for the single declared provider (or an explicit
- * `PI_DEFAULT_PROVIDER`) and that provider's `defaultModel` (its pi default, or
- * an explicit `PI_DEFAULT_MODEL`).
- *
- * The provider list arrives host-side as `PI_GATEWAY_PROVIDERS`, so a provider
- * the gateway does not hold gets no entry and pi never selects it. Real logins
- * and operator-authored settings already present are never overwritten.
+ * A credential is not enough on its own: pi otherwise starts on its built-in
+ * default provider (Anthropic first), which the gateway usually has no key for.
+ * The provider therefore also fills `settings.json` with a `defaultProvider`
+ * and `defaultModel` — the model id is looked up from pi's own runtime catalog
+ * (`selectGatewayModel`), never hardcoded, so it follows whatever pi version is
+ * installed. Operator-authored values are never overwritten.
  */
 import { randomUUID } from 'crypto';
 import fs from 'fs';
@@ -41,32 +36,28 @@ const JWT_CLAIM_PATH = 'https://api.openai.com/auth';
 /** Far-future expiry: the placeholder is never refreshed, and pi must not try. */
 const PLACEHOLDER_EXPIRES = Date.UTC(2100, 0, 1);
 
-/**
- * pi's per-provider default model, mirrored from the pinned SDK's
- * `defaultModelPerProvider`. pi's initial-model resolver takes the stored
- * default only when BOTH `defaultProvider` and `defaultModel` are present — a
- * provider alone falls through to "first available model", which the gateway's
- * injected `ANTHROPIC_*` env makes pick Anthropic. Override at runtime with
- * `PI_DEFAULT_MODEL`; an unknown provider simply gets no default model.
- */
-const DEFAULT_MODEL_BY_PROVIDER: Record<string, string> = {
-  anthropic: 'claude-opus-4-8',
-  openai: 'gpt-5.5',
-  'openai-codex': 'gpt-5.5',
-  deepseek: 'deepseek-v4-flash',
-  google: 'gemini-3.1-pro-preview',
-  openrouter: 'moonshotai/kimi-k2.6',
-};
-
 export interface PiGatewayAuthOptions {
   /**
    * pi provider ids whose credentials live in the gateway. `openai-codex` gets
    * an OAuth placeholder; every other id gets an API-key placeholder.
    */
   providers?: readonly string[];
-  /** Explicit default provider id; otherwise a single declared provider is used. */
+}
+
+/** The slice of pi's `ModelRuntime` this module needs; structural so tests need no SDK. */
+export interface ModelCatalogEntry {
+  readonly provider: string;
+  readonly id: string;
+}
+
+export interface GatewayModelCatalog {
+  getModel(providerId: string, modelId: string): ModelCatalogEntry | undefined;
+  getModels(providerId?: string): readonly ModelCatalogEntry[];
+  getAvailableSnapshot(): readonly ModelCatalogEntry[];
+}
+
+export interface PiSettingsInput {
   defaultProvider?: string;
-  /** Explicit default model id, paired with `defaultProvider`. */
   defaultModel?: string;
 }
 
@@ -114,6 +105,27 @@ export function resolveDefaultProvider(
   return explicit?.trim() || (providers.length === 1 ? providers[0] : undefined);
 }
 
+/**
+ * Pick the model pi should start on, from pi's own catalog — nothing here names
+ * a model id, so a pi upgrade changes the answer with no code change. An
+ * explicit provider/model (settings or `PI_DEFAULT_*`) wins; otherwise the
+ * first model the runtime reports as available for the chosen provider, falling
+ * back to the provider's catalog order.
+ */
+export function selectGatewayModel(
+  catalog: GatewayModelCatalog,
+  providers: readonly string[],
+  explicitProvider?: string,
+  explicitModel?: string,
+): ModelCatalogEntry | undefined {
+  const provider = resolveDefaultProvider(providers, explicitProvider);
+  if (!provider) return undefined;
+  const model = explicitModel?.trim();
+  const inCatalog = () => catalog.getModels(provider).find((entry) => entry.provider === provider);
+  if (model) return catalog.getModel(provider, model) ?? inCatalog();
+  return catalog.getAvailableSnapshot().find((entry) => entry.provider === provider) ?? inCatalog();
+}
+
 function readObject(file: string): Record<string, unknown> {
   try {
     const parsed: unknown = JSON.parse(fs.readFileSync(file, 'utf-8'));
@@ -123,6 +135,14 @@ function readObject(file: string): Record<string, unknown> {
     // rather than preserved. A real config file is valid JSON.
   }
   return {};
+}
+
+/** Read pi's operator-facing settings, if any. */
+export function readPiSettings(agentDir: string): PiSettingsInput {
+  const settings = readObject(path.join(agentDir, 'settings.json'));
+  const provider = typeof settings.defaultProvider === 'string' ? settings.defaultProvider : undefined;
+  const model = typeof settings.defaultModel === 'string' ? settings.defaultModel : undefined;
+  return { ...(provider ? { defaultProvider: provider } : {}), ...(model ? { defaultModel: model } : {}) };
 }
 
 /** Atomically replace `agentDir/<name>`, never following a planted symlink. */
@@ -138,40 +158,38 @@ function writeJsonAtomic(agentDir: string, name: string, value: Record<string, u
 }
 
 /**
- * Ensure the agentDir carries gateway placeholders and a usable default
- * provider. Idempotent; only fills what is absent, so a real login or an
- * operator-authored `settings.json` is never overwritten.
+ * Ensure `agentDir/auth.json` carries gateway placeholders. Idempotent; only
+ * fills what is absent, so a real login is never overwritten.
  */
 export function initializePiGatewayAuth(agentDir: string, options: PiGatewayAuthOptions = {}): void {
-  const providers = options.providers ?? [];
-
   const authPath = path.join(agentDir, 'auth.json');
   const auth = readObject(authPath);
-  let authChanged = false;
-  for (const provider of providers) {
+  let changed = false;
+  for (const provider of options.providers ?? []) {
     if (auth[provider] !== undefined) continue;
     auth[provider] =
       provider === PI_CHATGPT_PROVIDER_ID
         ? buildChatGptPlaceholderCredential()
         : { type: 'api_key', key: PI_CREDENTIAL_PLACEHOLDER };
-    authChanged = true;
+    changed = true;
   }
-  if (authChanged) writeJsonAtomic(agentDir, 'auth.json', auth);
+  if (changed) writeJsonAtomic(agentDir, 'auth.json', auth);
+}
 
-  const defaultProvider = resolveDefaultProvider(providers, options.defaultProvider);
-  const defaultModel =
-    options.defaultModel?.trim() ?? (defaultProvider ? DEFAULT_MODEL_BY_PROVIDER[defaultProvider] : undefined);
+/** Fill pi's `settings.json` default provider/model, leaving operator values alone. */
+export function ensurePiSettings(agentDir: string, input: PiSettingsInput): void {
+  const defaultProvider = input.defaultProvider?.trim();
+  const defaultModel = input.defaultModel?.trim();
   if (!defaultProvider && !defaultModel) return;
-  const settingsPath = path.join(agentDir, 'settings.json');
-  const settings = readObject(settingsPath);
-  let settingsChanged = false;
+  const settings = readObject(path.join(agentDir, 'settings.json'));
+  let changed = false;
   if (defaultProvider && settings.defaultProvider === undefined) {
     settings.defaultProvider = defaultProvider;
-    settingsChanged = true;
+    changed = true;
   }
   if (defaultModel && settings.defaultModel === undefined) {
     settings.defaultModel = defaultModel;
-    settingsChanged = true;
+    changed = true;
   }
-  if (settingsChanged) writeJsonAtomic(agentDir, 'settings.json', settings);
+  if (changed) writeJsonAtomic(agentDir, 'settings.json', settings);
 }

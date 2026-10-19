@@ -4,15 +4,15 @@ import path from 'path';
 
 import {
   createAgentSession,
+  ModelRuntime,
   SessionManager,
   type AgentSession,
   type AgentSessionEvent,
-  type ModelRuntime,
   type ToolDefinition,
 } from '@earendil-works/pi-coding-agent';
 
 import { getPiMcpTools } from './mcp-to-pi.js';
-import { initializePiGatewayAuth, parseGatewayProviders } from './pi-auth.js';
+import { ensurePiSettings, initializePiGatewayAuth, parseGatewayProviders, readPiSettings, selectGatewayModel } from './pi-auth.js';
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
@@ -313,19 +313,33 @@ export class PiProvider implements AgentProvider {
       // Credentials come through the selected gateway, never from a copied
       // auth.json: write non-secret placeholders into the agentDir before pi
       // reads it. An existing real login is never overwritten.
-      initializePiGatewayAuth(agentDir, {
-        providers: parseGatewayProviders(process.env.PI_GATEWAY_PROVIDERS),
-        defaultProvider: process.env.PI_DEFAULT_PROVIDER,
-        defaultModel: process.env.PI_DEFAULT_MODEL,
-      });
+      const providers = parseGatewayProviders(process.env.PI_GATEWAY_PROVIDERS);
+      initializePiGatewayAuth(agentDir, { providers });
       const tools = await loadCustomTools();
-      // Injected runtime (tests) wins; production lets pi resolve auth/models
-      // from agentDir. Spread keeps the payload identical when unset.
+      // Injected runtime (tests) wins; production builds pi's own from agentDir.
+      const modelRuntime =
+        self.modelRuntime ??
+        (await ModelRuntime.create({
+          authPath: path.join(agentDir, 'auth.json'),
+          modelsPath: path.join(agentDir, 'models.json'),
+        }));
+      // Resolve the start provider/model from pi's own catalog — no model id is
+      // hardcoded here, so a pi upgrade changes the answer with no code change.
+      // Without it pi falls back to the first provider the gateway's injected
+      // ANTHROPIC_* env makes look available. Operator settings win.
+      const current = readPiSettings(agentDir);
+      const model = selectGatewayModel(
+        modelRuntime,
+        providers,
+        current.defaultProvider ?? process.env.PI_DEFAULT_PROVIDER,
+        current.defaultModel ?? process.env.PI_DEFAULT_MODEL,
+      );
+      if (model) ensurePiSettings(agentDir, { defaultProvider: model.provider, defaultModel: model.id });
       const sessionOptions = {
         cwd,
         agentDir,
         customTools: tools,
-        ...(self.modelRuntime ? { modelRuntime: self.modelRuntime } : {}),
+        modelRuntime,
       };
       let created: AgentSession;
       if (resumePath) {
