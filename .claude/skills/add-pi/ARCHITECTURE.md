@@ -37,7 +37,13 @@ group between providers keeps its memory.
 
 ## MCP
 
-pi has no native MCP subsystem; tools extend through `customTools`. The bridge
+pi does ship a native MCP path (an extension built from an agentDir `mcp.json`)
+and this bridge is kept instead, for semantics that extension does not provide:
+deterministic collision-checked tool names matching the Claude convention,
+JSON-Schema `pattern` stripping (some model APIs reject the regex dialects MCP
+servers ship), `isError` results thrown rather than silently resolved,
+per-turn `abort()` that cancels in-flight calls without closing servers, and
+lazy reconnect of a single dead server.
 maps the core's `McpServerConfig` to pi `ToolDefinition[]`: stdio (native `cwd`
 support — no shim) and Streamable HTTP only (no legacy SSE fallback). A server
 that fails to connect or list is skipped with a log line; an unhealthy server

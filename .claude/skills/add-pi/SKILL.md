@@ -20,11 +20,18 @@ pi is an **in-process SDK** provider: the container runner embeds
 `@earendil-works/pi-coding-agent` directly. There is no `pi serve` process, no
 SSE subscription, and no global CLI — the whole server-lifecycle complexity
 class of the OpenCode provider does not exist here. MCP servers are bridged to
-pi `customTools` in process by `mcp-to-pi.ts`.
+pi `customTools` in process by `mcp-to-pi.ts`. (pi 1.3.0 does ship a native MCP
+extension loaded from an agentDir `mcp.json`; the bridge is kept for semantics
+that extension does not give us — deterministic collision-checked tool names
+matching the Claude convention, JSON-Schema `pattern` stripping that some model
+APIs require, `isError` results thrown rather than resolved, and per-turn
+abort/lazy-reconnect of individual servers.)
 
-pi resolves models and credentials **exclusively from its agentDir files**; the
-SDK reads no auth from environment variables. The host therefore declares the
-group's pi state directory as a state volume
+Models and credentials come from pi's agentDir. pi *also* reads provider keys
+from the environment (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, …), so the
+provider clears those variables before opening a session and the agentDir
+placeholder is the only entry point. The host declares the group's pi state
+directory as a state volume
 (`/home/node/.pi/agent`, from `data/v2-sessions/<group>/.pi-shared`) and passes
 `PI_AGENT_DIR`. Credentials are **gateway-owned**: the container writes fixed
 `gateway-managed` placeholders into the agentDir before every session open, and
@@ -202,6 +209,20 @@ Switching is an operator action — run it from the host. Every provider uses th
 same `memory/` tree, so memory carries across automatically. Run
 `/migrate-memory` only when upgrading a group that still has legacy `.seed.md`,
 `CLAUDE.local.md`, or unindexed imported memory.
+
+**Remove the old provider's project document when switching from Claude.**
+pi's context-file discovery reads `AGENTS.md` *and* `CLAUDE.md`, and core's
+compose step only writes the current provider's file name — it never deletes the
+previous one. A group switched from Claude therefore loads the new `AGENTS.md`
+and the stale `CLAUDE.md` together, duplicating instructions and spending tokens
+on text that no longer applies:
+
+```bash
+# only after confirming the group no longer needs the old rendered document
+mv groups/<folder>/CLAUDE.md groups/<folder>/CLAUDE.md.pre-pi
+```
+
+(Keep it as a rename, not a delete, until you've confirmed the group behaves.)
 
 ### Default new groups to pi (optional)
 

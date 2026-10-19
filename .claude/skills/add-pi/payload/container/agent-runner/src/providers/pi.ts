@@ -44,6 +44,43 @@ export const PI_PERMISSION_POLICY = {
 } as const;
 
 /**
+ * Provider credential variables pi reads directly (`pi-ai`'s env lookup).
+ * Cleared before a session opens so the gateway-managed agentDir placeholder is
+ * the only credential path: a variable left in the container env would bypass
+ * the gateway and put a real key in the process. Matched by prefix below so a
+ * provider added to pi later is covered without editing this list.
+ */
+const PROVIDER_AUTH_ENV_KEYS = [
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'OPENAI_API_KEY',
+  'DEEPSEEK_API_KEY',
+  'GOOGLE_API_KEY',
+  'GEMINI_API_KEY',
+  'OPENROUTER_API_KEY',
+  'XAI_API_KEY',
+  'GROQ_API_KEY',
+  'MISTRAL_API_KEY',
+  'TOGETHER_API_KEY',
+  'FIREWORKS_API_KEY',
+  'HF_TOKEN',
+];
+
+/**
+ * pi's thinking levels. NanoClaw's `--effort` vocabulary overlaps but is not
+ * identical, so map explicitly and log rather than pass an unknown token on.
+ */
+const PI_THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+
+export function toPiThinkingLevel(effort: string | undefined): (typeof PI_THINKING_LEVELS)[number] | undefined {
+  const value = effort?.trim().toLowerCase();
+  if (!value) return undefined;
+  return (PI_THINKING_LEVELS as readonly string[]).includes(value)
+    ? (value as (typeof PI_THINKING_LEVELS)[number])
+    : undefined;
+}
+
+/**
  * Stale / dead pi session heuristics. The provider's own failures throw with
  * messages matching the first two alternatives; the rest cover ENOENT-style
  * errors bubbling out of pi's session reader when a continuation file was
@@ -219,11 +256,21 @@ export class PiProvider implements AgentProvider {
    */
   private readonly modelRuntime?: ModelRuntime;
   private readonly configuration?: unknown;
+  /**
+   * Per-group model/effort from the container config (`ncl groups config update
+   * --model` / `--effort`). Applied as a real override below — pi cannot take
+   * them from its settings file alone, and silently ignoring them would make the
+   * CLI claim a change that never happened.
+   */
+  private readonly modelName?: string;
+  private readonly effort?: string;
   private memorySessionHook?: PiMemorySessionHook;
 
   constructor(options: ProviderOptions = {}, modelRuntime?: ModelRuntime, configuration?: unknown) {
     this.mcpServers = options.mcpServers ?? {};
     this.env = options.env ?? {};
+    this.modelName = options.model?.trim() || undefined;
+    this.effort = options.effort?.trim() || undefined;
     this.modelRuntime = modelRuntime;
     this.configuration = configuration;
   }
@@ -254,16 +301,21 @@ export class PiProvider implements AgentProvider {
     for (const [key, value] of Object.entries(this.env)) {
       if (value !== undefined) process.env[key] = value;
     }
+    // ...then remove provider auth variables, because pi reads those too and a
+    // stray one would shadow the gateway path: the agentDir placeholder must be
+    // the only credential source. The gateway injects the real value on the
+    // wire, so nothing here needs a key.
+    for (const key of PROVIDER_AUTH_ENV_KEYS) delete process.env[key];
 
     const cwd = input.cwd;
     // Session files must land inside the RW group workspace: the continuation
     // is the session file's absolute path, and it has to survive container
     // restarts (poll-loop persists it in the DB; the file must still exist).
     const sessionsDir = path.join(cwd, '.pi', 'sessions');
-    // pi's global config dir. The host-side provider config (src/providers/pi.ts)
-    // mounts a per-session seeded agentDir at /pi-agent and points PI_AGENT_DIR
-    // at it — prefer that when present. Fallback (bare/test environments):
-    // inside the RW workspace so pi never needs a writable HOME.
+    // pi's global config dir. The host contract mounts the group's state volume
+    // at /home/node/.pi/agent and the container config passes PI_AGENT_DIR —
+    // prefer that when present. Fallback (bare/test environments): inside the RW
+    // workspace so pi never needs a writable HOME.
     const agentDir = process.env.PI_AGENT_DIR || path.join(cwd, '.pi', 'agent');
 
     const systemInstructions = input.systemContext?.instructions;
@@ -332,14 +384,26 @@ export class PiProvider implements AgentProvider {
         modelRuntime,
         providers,
         current.defaultProvider ?? process.env.PI_DEFAULT_PROVIDER,
-        current.defaultModel ?? process.env.PI_DEFAULT_MODEL,
+        // A group-level --model wins over the group's settings default, and it
+        // may name either `provider/model` or a bare model id.
+        this.modelName ?? current.defaultModel ?? process.env.PI_DEFAULT_MODEL,
       );
       if (model) ensurePiSettings(agentDir, { defaultProvider: model.provider, defaultModel: model.id });
+      if (this.modelName && model && this.modelName !== model.id) {
+        // A group model the installed pi does not know (renamed between
+        // versions, or a typo) must not be swallowed silently.
+        log(`Model '${this.modelName}' is not in pi's catalog; using ${model.provider}/${model.id}`);
+      }
+      const thinkingLevel = toPiThinkingLevel(this.effort);
+      if (this.effort && !thinkingLevel) {
+        log(`Ignoring unsupported effort '${this.effort}' (expected one of ${PI_THINKING_LEVELS.join(', ')})`);
+      }
       const sessionOptions = {
         cwd,
         agentDir,
         customTools: tools,
         modelRuntime,
+        ...(thinkingLevel ? { thinkingLevel } : {}),
       };
       let created: AgentSession;
       if (resumePath) {

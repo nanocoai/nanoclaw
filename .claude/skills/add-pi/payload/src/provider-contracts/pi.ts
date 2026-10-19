@@ -5,6 +5,11 @@ import { PROVIDER_HOST_CONTRACT_SEAM_VERSION, registerProviderHostContract } fro
 /**
  * Host contract for the `pi` provider.
  *
+ * Every declared surface lives inside the group's own subtree (the group
+ * folder, or the group's session state), so each is classed `group-state`
+ * rather than `allowlisted-extra`: the stricter class makes the driver check
+ * the mount against this group's scope instead of admitting it unconditionally.
+ *
  * pi reads the project document from `AGENTS.md` and discovers skills from
  * `.agents/skills` (global `~/.agents/skills`, `~/.pi/agent/skills`). The
  * group's pi state lives in a shared `.pi-shared` volume mounted at the
@@ -37,7 +42,7 @@ registerProviderHostContract('pi', {
     fileName: 'AGENTS.md',
     maxBytes: DEFAULT_PROJECT_DOC.maxBytes,
     containerPath: '/workspace/agent/AGENTS.md',
-    mountClass: 'allowlisted-extra',
+    mountClass: 'group-state',
     // Instruction prose is core-owned canon; pi declares only the facts
     // rendered into it.
     instructions: {
@@ -58,7 +63,7 @@ registerProviderHostContract('pi', {
       containerPath: '/home/node/.pi/agent',
       scope: 'group',
       mode: 'rw',
-      mountClass: 'allowlisted-extra',
+      mountClass: 'group-state',
     },
   ],
   skillBackings: [
@@ -75,13 +80,13 @@ registerProviderHostContract('pi', {
       backingId: 'pi-skills',
       containerPath: '/workspace/agent/.agents',
       mode: 'ro',
-      mountClass: 'allowlisted-extra',
+      mountClass: 'group-state',
     },
     {
       backingId: 'pi-skills',
       containerPath: '/home/node/.agents',
       mode: 'ro',
-      mountClass: 'allowlisted-extra',
+      mountClass: 'group-state',
     },
   ],
   files: [

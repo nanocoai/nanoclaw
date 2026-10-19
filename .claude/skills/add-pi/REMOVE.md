@@ -22,6 +22,10 @@ place. The install journal records which files the automatic apply actually wrot
 Remove the runner dependency with `cd container/agent-runner && bun remove
 @earendil-works/pi-coding-agent`. Package and lockfile must be updated together.
 
+The pin is mirrored outside the lockfile: run `pnpm run skill-pins:generate` so
+`.github/skill-pins/package.json` drops the `@earendil-works/pi-coding-agent`
+entry. Leaving it behind fails `skill-pins:check` in CI.
+
 If `DEFAULT_AGENT_PROVIDER=pi` is saved in `.env`, change only that key to
 `claude` (or another installed provider) before restarting the host, and remove
 the pi-specific `PI_GATEWAY_PROVIDERS` setting if no other integration

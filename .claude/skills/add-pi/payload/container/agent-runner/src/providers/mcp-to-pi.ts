@@ -1,11 +1,23 @@
 /**
  * MCP → pi tool bridge.
  *
- * pi has no native MCP subsystem (by design — tools are extended via
- * `customTools`). This bridge takes the MCP server configs from the v2
- * provider contract (`McpServerConfig`) and turns them into
- * `ToolDefinition[]` that can be fed straight into
- * `createAgentSession({ customTools })`.
+ * pi 1.3.0 does ship a native MCP path (an extension built from an agentDir
+ * `mcp.json`). This bridge is kept deliberately instead, because the semantics
+ * NanoClaw needs are not the ones that extension provides:
+ *
+ * - Deterministic, collision-checked tool names (`mcp__<server>__<tool>`) that
+ *   match the Claude provider's convention across a session.
+ * - JSON-Schema `pattern` stripping: some model APIs reject the regex dialects
+ *   MCP servers ship and fail the whole request (DeepSeek does this for core's
+ *   own `send_card`).
+ * - `isError` results surfaced as thrown errors, because pi marks error tool
+ *   results only from exceptions.
+ * - Per-turn `abort()` that cancels in-flight `callTool` requests without
+ *   tearing down the servers, and lazy reconnect of a single dead server.
+ *
+ * The bridge takes the MCP server configs from the v2 provider contract
+ * (`McpServerConfig`) and turns them into `ToolDefinition[]` that can be fed
+ * straight into `createAgentSession({ customTools })`.
  *
  * Lifecycle (see docs/mcp-to-pi-design.md §3.3):
  * - Per-process, long-lived. Built lazily on first query, reused across
