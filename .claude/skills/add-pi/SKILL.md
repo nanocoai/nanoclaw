@@ -169,11 +169,16 @@ environment.
 
 ### Model selection
 
-Model choice lives in the agentDir, not in environment variables: put
-`settings.json` (default model and other settings) and optional `models.json`
-custom providers in `data/v2-sessions/<group-id>/.pi-shared/`. NanoClaw
-introduces no `PI_*` model knobs — `ANTHROPIC_BASE_URL` and friends are not read
-by the pi provider.
+pi would otherwise start on its built-in default provider (Anthropic), which
+the gateway usually holds no key for, so the container writes `settings.json`
+with `defaultProvider` set to the single provider recorded in
+`PI_GATEWAY_PROVIDERS`; pi then uses that provider's own default model.
+
+Override it without touching the container by editing
+`data/v2-sessions/<group-id>/.pi-shared/settings.json` (`defaultProvider` /
+`defaultModel` / `models.json` custom providers), or set `PI_DEFAULT_PROVIDER`
+and optional `PI_DEFAULT_MODEL` in `.env`. Operator-authored settings are never
+overwritten. `ANTHROPIC_BASE_URL` and friends are not read by the pi provider.
 
 ## Select a group
 

@@ -315,6 +315,8 @@ export class PiProvider implements AgentProvider {
       // reads it. An existing real login is never overwritten.
       initializePiGatewayAuth(agentDir, {
         providers: parseGatewayProviders(process.env.PI_GATEWAY_PROVIDERS),
+        defaultProvider: process.env.PI_DEFAULT_PROVIDER,
+        defaultModel: process.env.PI_DEFAULT_MODEL,
       });
       const tools = await loadCustomTools();
       // Injected runtime (tests) wins; production lets pi resolve auth/models

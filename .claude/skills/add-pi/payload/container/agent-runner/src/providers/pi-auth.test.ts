@@ -9,6 +9,7 @@ import {
   buildPlaceholderAccessToken,
   initializePiGatewayAuth,
   parseGatewayProviders,
+  resolveDefaultProvider,
 } from './pi-auth.js';
 
 const roots: string[] = [];
@@ -83,11 +84,13 @@ describe('container-owned pi gateway auth', () => {
     const agentDir = path.join(root(), 'agent');
     initializePiGatewayAuth(agentDir, { providers: ['openai'] });
     const first = fs.readFileSync(path.join(agentDir, 'auth.json'), 'utf-8');
+    const second = fs.readFileSync(path.join(agentDir, 'settings.json'), 'utf-8');
     initializePiGatewayAuth(agentDir, { providers: ['openai'] });
 
     expect(fs.readFileSync(path.join(agentDir, 'auth.json'), 'utf-8')).toBe(first);
     expect(fs.statSync(path.join(agentDir, 'auth.json')).mode & 0o777).toBe(0o600);
-    expect(fs.readdirSync(agentDir)).toEqual(['auth.json']);
+    expect(fs.readFileSync(path.join(agentDir, 'settings.json'), 'utf-8')).toBe(second);
+    expect(fs.readdirSync(agentDir).sort()).toEqual(['auth.json', 'settings.json']);
   });
 
   it('replaces a planted file link without touching its target', () => {
@@ -102,6 +105,46 @@ describe('container-owned pi gateway auth', () => {
 
     expect(fs.lstatSync(path.join(agentDir, 'auth.json')).isFile()).toBe(true);
     expect(fs.readFileSync(unrelated, 'utf-8')).toBe('preserve');
+  });
+});
+
+describe('default provider settings', () => {
+  it('points pi at the single declared provider so it does not fall back to Anthropic', () => {
+    const agentDir = path.join(root(), 'agent');
+    initializePiGatewayAuth(agentDir, { providers: ['deepseek'] });
+    expect(JSON.parse(fs.readFileSync(path.join(agentDir, 'settings.json'), 'utf-8'))).toEqual({
+      defaultProvider: 'deepseek',
+    });
+  });
+
+  it('honours an explicit provider/model override and never overwrites operator settings', () => {
+    const agentDir = path.join(root(), 'agent');
+    fs.mkdirSync(agentDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(agentDir, 'settings.json'),
+      JSON.stringify({ defaultProvider: 'openrouter', theme: 'dark' }),
+    );
+    initializePiGatewayAuth(agentDir, { providers: ['deepseek'], defaultModel: 'deepseek-v4-pro' });
+    expect(JSON.parse(fs.readFileSync(path.join(agentDir, 'settings.json'), 'utf-8'))).toEqual({
+      defaultProvider: 'openrouter',
+      theme: 'dark',
+      defaultModel: 'deepseek-v4-pro',
+    });
+  });
+
+  it('leaves the default provider unset when several providers are ambiguous', () => {
+    const agentDir = path.join(root(), 'agent');
+    initializePiGatewayAuth(agentDir, { providers: ['deepseek', 'openrouter'] });
+    expect(fs.existsSync(path.join(agentDir, 'settings.json'))).toBe(false);
+  });
+});
+
+describe('resolveDefaultProvider', () => {
+  it('prefers an explicit choice, falls back to a lone provider', () => {
+    expect(resolveDefaultProvider(['deepseek'], undefined)).toBe('deepseek');
+    expect(resolveDefaultProvider(['deepseek'], 'openrouter')).toBe('openrouter');
+    expect(resolveDefaultProvider(['deepseek', 'openrouter'], undefined)).toBeUndefined();
+    expect(resolveDefaultProvider([], undefined)).toBeUndefined();
   });
 });
 

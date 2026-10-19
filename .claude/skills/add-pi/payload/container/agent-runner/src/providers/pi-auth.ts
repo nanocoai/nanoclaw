@@ -1,5 +1,5 @@
 /**
- * Container-owned gateway auth for the pi provider.
+ * Container-owned gateway auth and default model for the pi provider.
  *
  * pi resolves models and credentials exclusively from its agentDir files and
  * reads no auth from the environment. Following the gateway model, the
@@ -14,10 +14,15 @@
  * syntactically valid JWT carrying the placeholder claim. The real token and
  * account header are injected by the gateway.
  *
+ * A configured credential is not enough on its own: pi otherwise starts on its
+ * built-in default provider (Anthropic first in its preference list), which the
+ * gateway usually has no key for. So `settings.json` gets a `defaultProvider`
+ * for the single declared provider (or an explicit `PI_DEFAULT_PROVIDER`), and
+ * pi supplies that provider's own default model.
+ *
  * The provider list arrives host-side as `PI_GATEWAY_PROVIDERS`, so a provider
  * the gateway does not hold gets no entry and pi never selects it. Real logins
- * already written into the group's shared agentDir are never overwritten: the
- * initializer only fills entries that are absent.
+ * and operator-authored settings already present are never overwritten.
  */
 import { randomUUID } from 'crypto';
 import fs from 'fs';
@@ -41,6 +46,10 @@ export interface PiGatewayAuthOptions {
    * an OAuth placeholder; every other id gets an API-key placeholder.
    */
   providers?: readonly string[];
+  /** Explicit default provider id; otherwise a single declared provider is used. */
+  defaultProvider?: string;
+  /** Explicit default model id, paired with `defaultProvider`. */
+  defaultModel?: string;
 }
 
 function base64(json: unknown): string {
@@ -75,44 +84,75 @@ export function parseGatewayProviders(raw: string | undefined): string[] {
   return [...new Set(raw.split(',').map((entry) => entry.trim()).filter(Boolean))];
 }
 
-function readAuthObject(authPath: string): Record<string, unknown> {
+/**
+ * The provider pi should start on: an explicit setting wins, otherwise a single
+ * declared provider is unambiguous. Two providers with no explicit choice stay
+ * unset so pi keeps its own default rather than us guessing.
+ */
+export function resolveDefaultProvider(
+  providers: readonly string[],
+  explicit: string | undefined,
+): string | undefined {
+  return explicit?.trim() || (providers.length === 1 ? providers[0] : undefined);
+}
+
+function readObject(file: string): Record<string, unknown> {
   try {
-    const parsed: unknown = JSON.parse(fs.readFileSync(authPath, 'utf-8'));
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+    const parsed: unknown = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return { ...(parsed as Record<string, unknown>) };
   } catch {
-    // Missing or unparseable state: pi cannot authenticate with it either, so
-    // it is replaced rather than preserved. A real login is valid JSON.
+    // Missing or unparseable state: pi cannot use it either, so it is replaced
+    // rather than preserved. A real config file is valid JSON.
   }
   return {};
 }
 
+/** Atomically replace `agentDir/<name>`, never following a planted symlink. */
+function writeJsonAtomic(agentDir: string, name: string, value: Record<string, unknown>): void {
+  fs.mkdirSync(agentDir, { recursive: true, mode: 0o700 });
+  const temporary = path.join(agentDir, `.${name}-${randomUUID()}.tmp`);
+  try {
+    fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
+    fs.renameSync(temporary, path.join(agentDir, name));
+  } finally {
+    fs.rmSync(temporary, { force: true });
+  }
+}
+
 /**
- * Ensure `agentDir/auth.json` carries gateway placeholders for the declared
- * providers. Idempotent, and atomic: a stale file (or a planted symlink) is
- * replaced, never followed.
+ * Ensure the agentDir carries gateway placeholders and a usable default
+ * provider. Idempotent; only fills what is absent, so a real login or an
+ * operator-authored `settings.json` is never overwritten.
  */
 export function initializePiGatewayAuth(agentDir: string, options: PiGatewayAuthOptions = {}): void {
-  const authPath = path.join(agentDir, 'auth.json');
-  const auth = readAuthObject(authPath);
+  const providers = options.providers ?? [];
 
-  let changed = false;
-  for (const provider of options.providers ?? []) {
+  const authPath = path.join(agentDir, 'auth.json');
+  const auth = readObject(authPath);
+  let authChanged = false;
+  for (const provider of providers) {
     if (auth[provider] !== undefined) continue;
     auth[provider] =
       provider === PI_CHATGPT_PROVIDER_ID
         ? buildChatGptPlaceholderCredential()
         : { type: 'api_key', key: PI_CREDENTIAL_PLACEHOLDER };
-    changed = true;
+    authChanged = true;
   }
-  if (!changed) return;
+  if (authChanged) writeJsonAtomic(agentDir, 'auth.json', auth);
 
-  fs.mkdirSync(agentDir, { recursive: true, mode: 0o700 });
-  const temporary = path.join(agentDir, `.auth-${randomUUID()}.tmp`);
-  try {
-    fs.writeFileSync(temporary, `${JSON.stringify(auth, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
-    // Replace stale files or symlinks without following or changing their targets.
-    fs.renameSync(temporary, authPath);
-  } finally {
-    fs.rmSync(temporary, { force: true });
+  const defaultProvider = resolveDefaultProvider(providers, options.defaultProvider);
+  const defaultModel = options.defaultModel?.trim();
+  if (!defaultProvider && !defaultModel) return;
+  const settingsPath = path.join(agentDir, 'settings.json');
+  const settings = readObject(settingsPath);
+  let settingsChanged = false;
+  if (defaultProvider && settings.defaultProvider === undefined) {
+    settings.defaultProvider = defaultProvider;
+    settingsChanged = true;
   }
+  if (defaultModel && settings.defaultModel === undefined) {
+    settings.defaultModel = defaultModel;
+    settingsChanged = true;
+  }
+  if (settingsChanged) writeJsonAtomic(agentDir, 'settings.json', settings);
 }
