@@ -176,7 +176,12 @@ async function runPiAuthStep(): Promise<void> {
   ) as string;
 
   try {
-    await store.connection(apiKeyTarget(provider)).save(key.trim());
+    const connection = store.connection(apiKeyTarget(provider));
+    // The gateway seam requires observing the entry before writing it: find()
+    // records the existing id (or its absence) that save() then replaces or
+    // creates. save() without a prior find() is rejected by the seam.
+    await connection.find();
+    await connection.save(key.trim());
   } catch (err) {
     const message = err instanceof Error ? err.message.split('\n')[0] : String(err);
     p.log.error(brandBody(`Couldn't save the ${provider.label} key to the gateway.`));
