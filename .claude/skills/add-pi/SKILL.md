@@ -269,13 +269,13 @@ A first end-to-end turn needs a gateway credential, a granted secret, and a
 group switched to pi. The definitive check that pi actually ran the turn is a
 `continuation:pi` row in the session's `outbound.db` `session_state` table.
 
-**Setup's ping is not proof.** It reports "Your assistant is ready" whenever the
-chat command exits 0 with any output, and a failed pi turn answers with the
-generic "The agent run failed" notice — so a fresh install can look green while
-the gateway is refusing the model call (`401 access restricted` in the gateway
-log, because the new group's agent has not been granted the secret yet). Confirm
-with a real reply, `continuation:pi`, and the gateway log before treating an
-install as working.
+**Check the first chat, not just the install.** Core's setup ping used to score
+any exit-0 reply as success, so a failed pi turn — which answers with the
+runner's generic failure notice — could look green while the gateway was
+refusing the model call (`401 access restricted`, because the new group's agent
+had not been granted the secret yet). Since #3980 the ping reports that notice
+as a failed first chat, so a green result means the model actually answered.
+The definitive check is still a `continuation:pi` row plus a real reply.
 
 A zero-group install is also reported as failed at the end of setup
 (`registeredGroups > 0` is part of its verdict). That is the channel step, not
