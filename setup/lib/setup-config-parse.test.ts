@@ -32,7 +32,7 @@ describe('public setup flags', () => {
 
   it('adds the uvx install directory before probing npm and executing pnpm', () => {
     const entrypoint = fs.readFileSync(path.join(process.cwd(), 'nanoclaw.sh'), 'utf8');
-    const localBinRecovery = entrypoint.indexOf('export PATH="$HOME/.local/bin:$PATH"');
+    const localBinRecovery = entrypoint.indexOf('export PATH="$PATH:$HOME/.local/bin"');
     const npmProbe = entrypoint.indexOf('command -v npm', localBinRecovery);
     const handoff = entrypoint.indexOf('exec pnpm --silent run setup:auto', npmProbe);
 
