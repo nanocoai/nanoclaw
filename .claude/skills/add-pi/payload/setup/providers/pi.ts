@@ -91,6 +91,12 @@ function apiKeyTarget(provider: ApiKeyProvider): GatewayCredentialTarget {
     proxyValue: PLACEHOLDER,
     kind: 'api-key',
     injection: provider.injection,
+    // Names the agent provider this credential belongs to. Gateways that grant
+    // per agent record the saved id under it and attach it to the groups that
+    // run this provider on every spawn; without it the credential is stored but
+    // never granted, and the group's first turns fail with `401 access
+    // restricted`. OneCLI's adapter keys its `provider-credentials.json` on it.
+    provider: 'pi',
   };
 }
 

@@ -174,16 +174,20 @@ in the group's `auth.json`, or the equivalent `apiKey` field in a `models.json`
 entry. Never put a real key in either file, in `.env`, or in the container
 environment.
 
-**Grant the secret to the agent group.** The credential seam stores secrets but
-does not assign them: the selected gateway owns granting, and it does not grant
-automatically. OneCLI only injects secrets assigned to an agent
-(`secretMode: selective`), so a saved-but-ungranted key reaches the provider as
-`401 access restricted` even though the request is routed. Follow the installed
-gateway's skill for its grant step — OneCLI's is described in `/add-onecli`
-(`onecli agents set-secrets`, merged with the agent's existing assignments and
-verified with `onecli agents secrets`; gateways that removed that API use
-`PUT /v1/agents/<agentId>/grants/secrets/<secretId>`). A new group gets a new
-agent, so grant after each group is created.
+**Granting is automatic for the model credential.** The credential seam stores
+secrets and hands the provider name to the gateway; a gateway that grants per
+agent records the saved id under that provider and attaches it to every group
+running this provider, on each spawn — which covers a new group, a group that
+switched to pi, and a login saved after the group existed. Nothing to do by
+hand, and no manual `grants` call is needed for the key this step saves.
+
+That relies on `provider: 'pi'` on the credential target in
+`setup/providers/pi.ts`. If a fork drops it, the key is stored but never
+granted, and every turn fails with `401 access restricted` while the gateway
+log shows `access restricted host=api.<provider>`. Non-model secrets are
+opt-in everywhere: grant those with the gateway's own skill (`/add-onecli`:
+`onecli agents grants attach-secret --id <agent-id> --secret-id <secret-id>`,
+verified with `onecli agents grants list --id <agent-id>`).
 
 ### Model selection
 
@@ -265,17 +269,18 @@ grep -q gateway-managed container/agent-runner/src/providers/pi-auth.ts && echo 
 cd container/agent-runner && bun test --isolate src/providers/pi*.test.ts src/providers/mcp-to-pi.test.ts && cd -
 ```
 
-A first end-to-end turn needs a gateway credential, a granted secret, and a
-group switched to pi. The definitive check that pi actually ran the turn is a
-`continuation:pi` row in the session's `outbound.db` `session_state` table.
+A first end-to-end turn needs a gateway credential and a group switched to pi;
+the credential is attached to the group's agent automatically (see above). The
+definitive check that pi actually ran the turn is a `continuation:pi` row in
+the session's `outbound.db` `session_state` table.
 
 **Check the first chat, not just the install.** Core's setup ping used to score
 any exit-0 reply as success, so a failed pi turn — which answers with the
 runner's generic failure notice — could look green while the gateway was
-refusing the model call (`401 access restricted`, because the new group's agent
-had not been granted the secret yet). Since #3980 the ping reports that notice
-as a failed first chat, so a green result means the model actually answered.
-The definitive check is still a `continuation:pi` row plus a real reply.
+refusing the model call (`401 access restricted`, before grants were attached
+automatically). Since #3980 the ping reports that notice as a failed first
+chat, so a green result means the model actually answered. The definitive check
+is still a `continuation:pi` row plus a real reply.
 
 A zero-group install is also reported as failed at the end of setup
 (`registeredGroups > 0` is part of its verdict). That is the channel step, not
@@ -287,7 +292,7 @@ pi: choosing a channel with no installer, such as `wechat`, leaves no group.
 |---|---|---|
 | First reply is `"The agent run failed."`; `session_state` shows `continuation:claude` | Provider switch never reached `container_configs` — the runner defaulted to claude | `ncl groups config update --provider pi --id <group>` + `ncl groups restart --id <group>` |
 | Every turn fails with a model-auth error | No gateway credential for the selected provider | `pnpm exec tsx setup/index.ts --step provider-auth pi` (or `provider-auth codex` for ChatGPT) |
-| Model calls fail with `401 access restricted`; the gateway log shows `forward: access restricted host=api.<provider>` | The saved secret is not granted to this agent group (the gateway does not grant automatically) | Follow the gateway skill's grant step (`/add-onecli`: `onecli agents set-secrets`, verified with `onecli agents secrets`), then retry |
+| Model calls fail with `401 access restricted`; the gateway log shows `forward: access restricted host=api.<provider>` | The saved secret was never attached to this group's agent — typically a credential target missing `provider: 'pi'`, or a gateway older than 1.44 where per-agent grants do not exist | Check `data/onecli/provider-credentials.json` records `pi`, then grant by hand (`onecli agents grants attach-secret --id <agent-id> --secret-id <secret-id>`) and retry |
 | pi logs "found no auth.json" | The group's `.pi-shared/` was removed or the group was created before this skill | Restart the group (re-prepares the file); the container rewrites placeholders on the next turn |
 | `Unknown provider: pi. Registered: claude` | Barrels not wired in the running build | Re-run the install, then `./container/build.sh build` |
 | Model requests blocked by the gateway | The model host is not declared | Use a supported provider, or add its host to the host contract's `modelDomains` and refresh |
