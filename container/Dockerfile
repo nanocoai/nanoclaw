@@ -17,7 +17,7 @@
 # never require an image rebuild.
 
 # Pinned by digest so a rebuild cannot reuse a cached older base; bump tag and digest together.
-FROM node:22.23.4-slim@sha256:5ec23b7c622b00547753bc6ffd78085dd868a68aeb41c8e0a1418f033e13d96d
+FROM node:24.22.3-trixie-slim@sha256:af02d57b57719b9657a45199a79264a9437940cd55b3c7b3fc99615654f124a0
 
 # ---- Build-time arguments ----------------------------------------------------
 # CJK fonts add ~200MB. Opt in only if you render Chinese/Japanese/Korean text.
@@ -111,9 +111,9 @@ ENV PATH="$PNPM_HOME:$PATH"
 ARG PNPM_VERSION=10.34.9
 RUN corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
 
-# The npm in node:22-slim (10.x) bundles libraries that lag their security
-# releases; npm 11.21.2 bundles the patched ones. Drop this pin once the
-# base image's npm has caught up.
+# The npm bundled with the base image lags security releases of the
+# libraries it bundles; npm 11.21.2 bundles the patched ones. Drop this pin
+# once the base image's npm has caught up.
 ARG NPM_VERSION=11.21.2
 RUN npm install -g npm@${NPM_VERSION}
 
