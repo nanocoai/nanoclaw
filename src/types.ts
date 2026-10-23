@@ -174,40 +174,6 @@ export interface Session {
   created_at: string;
 }
 
-// ── Session DB entities ──
-
-export type MessageInKind = 'chat' | 'chat-sdk' | 'task' | 'webhook' | 'system';
-export type MessageInStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled';
-
-export interface MessageIn {
-  id: string;
-  kind: MessageInKind;
-  timestamp: string;
-  status: MessageInStatus;
-  status_changed: string | null;
-  process_after: string | null;
-  recurrence: string | null;
-  tries: number;
-  platform_id: string | null;
-  channel_type: string | null;
-  thread_id: string | null;
-  content: string; // JSON blob
-}
-
-export interface MessageOut {
-  id: string;
-  in_reply_to: string | null;
-  timestamp: string;
-  delivered: number; // 0 | 1
-  deliver_after: string | null;
-  recurrence: string | null;
-  kind: string;
-  platform_id: string | null;
-  channel_type: string | null;
-  thread_id: string | null;
-  content: string; // JSON blob
-}
-
 // ── Pending questions (central DB) ──
 
 export interface PendingQuestion {

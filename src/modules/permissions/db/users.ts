@@ -30,7 +30,3 @@ export async function getAllUsers(): Promise<User[]> {
 export async function updateDisplayName(id: string, displayName: string): Promise<void> {
   await getDb().run('UPDATE users SET display_name = ? WHERE id = ?', displayName, id);
 }
-
-export async function deleteUser(id: string): Promise<void> {
-  await getDb().run('DELETE FROM users WHERE id = ?', id);
-}
