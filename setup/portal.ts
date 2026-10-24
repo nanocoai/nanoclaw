@@ -95,8 +95,9 @@ function skippedSignIn(error: unknown): void {
 
 /**
  * The not-enrolled path: start the device flow without opening its page,
- * start the stage anonymously with the user code, print and open the single
- * portal link, wait for the sign-in, persist it, then register and claim.
+ * start the stage anonymously with the user code, print the single portal link
+ * and the code, open the link, wait for the sign-in, persist it, then register
+ * and claim.
  * Declined, expired or failed → null; the stage is skipped and nothing else
  * happens.
  */
@@ -114,9 +115,11 @@ async function signInThroughPortal(client: SetupClient, stage: PortalStage, name
     'Open the link below to sign in, approve this terminal, and choose your perk. Setup continues automatically once you decide.',
   );
   // Keep the URL unwrapped so it stays clickable and copyable. It is the only
-  // link: the portal page carries the user code and opens the sign-in itself,
-  // from any device. A bare sign-in link would leave the perk undecided.
+  // link: the portal page opens the sign-in itself, from any device, and a bare
+  // sign-in link would leave the perk undecided.
   process.stdout.write(`\n${setup.url}\n\n`);
+  // The code lets the user check that the sign-in page belongs to this terminal.
+  process.stdout.write(`Code: ${flow.device.userCode} — approve only if the sign-in page shows this code.\n\n`);
   openUrl(setup.url);
   try {
     await finishDeviceFlow(flow);
