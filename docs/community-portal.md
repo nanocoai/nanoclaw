@@ -20,7 +20,9 @@ the terminal continues on its own. Headless machine: the link, the code and the 
 printed on their own lines so you can open them from a phone or laptop.
 
 **Already signed in** (from an earlier step, or from `bash setup/registry-login.sh`): the wizard
-skips sign-in, makes sure this machine is registered at the portal, and opens the dashboard link.
+names the account and asks "Continue as <email>" or "Use a different account". Continuing skips
+sign-in, makes sure this machine is registered at the portal, and opens the dashboard link. A
+different account signs in as above, and the terminal says who signed in.
 
 **Enabling Echo** is where you agree to Echo's terms, including whether you want product and
 security email from NanoClaw and from Echo. Only Echo carries terms; Slack activation is a
