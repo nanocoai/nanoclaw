@@ -39,10 +39,15 @@ vi.mock('./lib/registry-state.js', () => ({
 vi.mock('./status.js', () => ({ emitStatus: vi.fn() }));
 
 import { emitStatus } from './status.js';
-import { run } from './verify.js';
+import { CHANNEL_ENV_KEYS, run } from './verify.js';
 import { readSlackJob, withSetupLock } from '../src/community-portal/slack-job.js';
 
 beforeEach(() => {
+  // These assertions compare CONFIGURED_CHANNELS exactly, and verify() detects a
+  // channel from process.env before the install's .env — so an ambient
+  // GITHUB_TOKEN (every Actions runner sets one; so do most shells with `gh`)
+  // adds a channel the fixture never configured and fails five of these.
+  for (const key of CHANNEL_ENV_KEYS) vi.stubEnv(key, '');
   host.root = fs.mkdtempSync(path.join(os.tmpdir(), 'nc-verify-slack-'));
   host.service = 'running';
   host.groups = 0;
@@ -56,6 +61,7 @@ beforeEach(() => {
   vi.mocked(emitStatus).mockClear();
 });
 afterEach(() => {
+  vi.unstubAllEnvs();
   vi.restoreAllMocks();
   fs.rmSync(host.root, { recursive: true, force: true });
 });
