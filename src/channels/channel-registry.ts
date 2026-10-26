@@ -6,6 +6,7 @@
  */
 import type { ChannelAdapter, ChannelDefaults, ChannelRegistration, ChannelSetup, OutboundFile } from './adapter.js';
 import type { ChannelDeliveryAdapter } from '../delivery.js';
+import { envValue } from '../env.js';
 import { log } from '../log.js';
 
 /** Adapter instance registry key shape: a webhook route segment and state-namespace key, so URL-safe only. */
@@ -21,6 +22,31 @@ function isNetworkError(err: unknown): err is Error {
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Channels an operator has parked via `NANOCLAW_DISABLED_CHANNELS`
+ * (comma-separated registry names; trimmed, case-insensitive, empties
+ * ignored). Process env wins, then `.env`. Unset means none parked.
+ */
+function disabledChannels(): Set<string> {
+  const raw = process.env.NANOCLAW_DISABLED_CHANNELS || envValue('NANOCLAW_DISABLED_CHANNELS') || '';
+  return new Set(
+    raw
+      .split(',')
+      .map((n) => n.trim().toLowerCase())
+      .filter(Boolean),
+  );
+}
+
+/**
+ * A parked channel is not started; its DB rows (messaging groups, wirings,
+ * roles) stay untouched so removing it from the list re-enables it as-is.
+ */
+function isChannelDisabled(name: string): boolean {
+  if (!disabledChannels().has(name.toLowerCase())) return false;
+  log.info('Channel disabled via NANOCLAW_DISABLED_CHANNELS, skipping', { channel: name });
+  return true;
+}
 
 const registry = new Map<string, ChannelRegistration>();
 const activeAdapters = new Map<string, ChannelAdapter>();
@@ -262,12 +288,14 @@ export function getChannelContainerConfig(name: string): ChannelRegistration['co
 
 /**
  * Instantiate and set up all registered channel adapters.
- * Skips adapters that return null (missing credentials).
+ * Skips channels listed in `NANOCLAW_DISABLED_CHANNELS` and adapters that return
+ * null (missing credentials).
  */
 export async function initChannelAdapters(setupFn: (adapter: ChannelAdapter) => ChannelSetup): Promise<void> {
   hotStartSetupFn = setupFn;
   for (const [name, registration] of registry) {
     try {
+      if (isChannelDisabled(name)) continue;
       const adapter = await registration.factory();
       if (!adapter) {
         log.warn('Channel credentials missing, skipping', { channel: name });
@@ -339,11 +367,14 @@ export async function teardownChannelAdapters(): Promise<void> {
  */
 let hotStartSetupFn: ((adapter: ChannelAdapter) => ChannelSetup) | null = null;
 
-export async function startChannelAdapter(key: string): Promise<'started' | 'already-active' | 'no-credentials'> {
+export async function startChannelAdapter(
+  key: string,
+): Promise<'started' | 'already-active' | 'no-credentials' | 'disabled'> {
   if (activeAdapters.has(key)) return 'already-active';
   const registration = registry.get(key);
   if (!registration) throw new Error(`startChannelAdapter: no registration for '${key}'`);
   if (!hotStartSetupFn) throw new Error('startChannelAdapter: initChannelAdapters has not run');
+  if (isChannelDisabled(key)) return 'disabled';
   const adapter = await registration.factory();
   if (!adapter) return 'no-credentials';
   const setup = hotStartSetupFn(adapter);
