@@ -1,0 +1,15 @@
+{
+  "notes": "Conformance fixtures for scripts/skill-conformance.test.ts — shaped fake values only, never real credentials. The skill has no prompts and no branches: the gateway guard is an effect:check that prints the stamped kind (onecli) or fails, so one scenario covers the whole document. The credential checks and the OneCLI wire run against the stubbed exec and capture nothing.",
+  "scenarios": [
+    {
+      "name": "onecli",
+      "inputs": {},
+      "exec": [
+        {
+          "match": "gateway-guard.ts",
+          "stdout": "onecli"
+        }
+      ]
+    }
+  ]
+}
