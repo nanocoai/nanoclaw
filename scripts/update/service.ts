@@ -389,6 +389,67 @@ export const CUTOVER_LIST_CLI_TIMEOUT_MS = 15_000;
 export const DRAIN_LIST_FORMAT = '{{.ID}}|{{.Label "nanoclaw-session"}}|{{.Label "nanoclaw-role"}}';
 export const CONTROLLER_GATEWAY_ROLE = 'gateway';
 
+interface LabeledContainer {
+  id: string;
+  sessionId: string;
+  role: string;
+}
+
+/**
+ * This install's containers with their session and role labels. Docker-compatible
+ * runtimes answer `ps --filter --format`; Apple Container has no `ps` (it is a
+ * plugin lookup that fails) and no `--filter`, so it is listed as JSON and filtered
+ * here. `all` includes stopped containers; otherwise anything not yet `stopped`
+ * (running, stopping, unknown) counts as alive.
+ */
+export function listInstallContainers(
+  runtime: string,
+  label: string,
+  all: boolean,
+  env: ServiceEnvironment,
+): { ok: boolean; rows: LabeledContainer[] } {
+  if (runtime === 'container') {
+    // Always --all: a container that is `stopping` is not listed without it, and a
+    // drain that cannot see it would report success while its VM still writes.
+    const res = env.runner.tryRun(runtime, ['list', '--all', '--format', 'json'], undefined, {
+      timeoutMs: CUTOVER_LIST_CLI_TIMEOUT_MS,
+    });
+    if (!res.ok) return { ok: false, rows: [] };
+    try {
+      const [key, value] = label.split('=');
+      const entries = JSON.parse(res.stdout || '[]') as Array<{
+        status: string | { state?: string };
+        configuration: { id: string; labels?: Record<string, string> };
+      }>;
+      const state = (e: (typeof entries)[number]) => (typeof e.status === 'string' ? e.status : e.status?.state);
+      return {
+        ok: true,
+        rows: entries
+          .filter((e) => e.configuration.labels?.[key] === value && (all || state(e) !== 'stopped'))
+          .map((e) => ({
+            id: e.configuration.id,
+            sessionId: e.configuration.labels?.['nanoclaw-session'] ?? '',
+            role: e.configuration.labels?.['nanoclaw-role'] ?? '',
+          })),
+      };
+    } catch {
+      return { ok: false, rows: [] };
+    }
+  }
+  const listed = env.runner.tryRun(
+    runtime,
+    ['ps', ...(all ? ['-a'] : []), '--filter', `label=${label}`, '--format', DRAIN_LIST_FORMAT],
+    undefined,
+    { timeoutMs: CUTOVER_LIST_CLI_TIMEOUT_MS },
+  );
+  const rows = listed.stdout
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => line.split('|'))
+    .map(([id, sessionId = '', role = '']) => ({ id, sessionId, role }));
+  return { ok: listed.ok, rows };
+}
+
 /**
  * Stop this install's containers, then wait until the runtime lists none.
  *
@@ -418,18 +479,10 @@ export async function drainContainers(projectRoot: string, env: ServiceEnvironme
   const runtime = process.env.CONTAINER_RUNTIME ?? 'docker';
   const label = `nanoclaw-install=${getInstallSlug(projectRoot)}`;
   const list = (): { ok: boolean; ids: string[] } => {
-    const listed = env.runner.tryRun(
-      runtime,
-      ['ps', '--filter', `label=${label}`, '--format', DRAIN_LIST_FORMAT],
-      undefined,
-      { timeoutMs: CUTOVER_LIST_CLI_TIMEOUT_MS },
-    );
-    const ids = listed.stdout
-      .split('\n')
-      .filter(Boolean)
-      .map((line) => line.split('|'))
-      .filter(([, sessionId, role]) => !!sessionId || role !== CONTROLLER_GATEWAY_ROLE)
-      .map(([id]) => id);
+    const listed = listInstallContainers(runtime, label, false, env);
+    const ids = listed.rows
+      .filter(({ sessionId, role }) => !!sessionId || role !== CONTROLLER_GATEWAY_ROLE)
+      .map(({ id }) => id);
     return { ok: listed.ok, ids };
   };
   const initial = list();
@@ -469,18 +522,10 @@ export async function drainContainers(projectRoot: string, env: ServiceEnvironme
 export function restartGatewayContainers(projectRoot: string, env: ServiceEnvironment): void {
   const runtime = process.env.CONTAINER_RUNTIME ?? 'docker';
   const label = `nanoclaw-install=${getInstallSlug(projectRoot)}`;
-  const listed = env.runner.tryRun(
-    runtime,
-    ['ps', '-a', '--filter', `label=${label}`, '--format', DRAIN_LIST_FORMAT],
-    undefined,
-    { timeoutMs: CUTOVER_LIST_CLI_TIMEOUT_MS },
-  );
-  const ids = listed.stdout
-    .split('\n')
-    .filter(Boolean)
-    .map((line) => line.split('|'))
-    .filter(([, sessionId, role]) => !sessionId && role === CONTROLLER_GATEWAY_ROLE)
-    .map(([id]) => id);
+  const listed = listInstallContainers(runtime, label, true, env);
+  const ids = listed.rows
+    .filter(({ sessionId, role }) => !sessionId && role === CONTROLLER_GATEWAY_ROLE)
+    .map(({ id }) => id);
   if (!listed.ok) {
     env.log?.(`Cannot list gateway containers with ${runtime}; restart them or re-run the gateway's setup script.`);
     return;
