@@ -1,11 +1,13 @@
 /**
  * Unit tests for the startup circuit breaker.
  *
- * Covers state transitions, the documented backoff schedule, and the
- * fresh-install case where DATA_DIR doesn't exist yet (the breaker runs
- * before initDb, so it has to create the dir itself).
+ * Covers state transitions, the documented backoff schedule, instance
+ * scoping (state left behind in a durable DATA_DIR by a previous instance),
+ * and the fresh-install case where DATA_DIR doesn't exist yet (the breaker
+ * runs before initDb, so it has to create the dir itself).
  */
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
@@ -32,12 +34,18 @@ vi.mock('./log.js', () => ({
 
 import { enforceStartupBackoff, resetCircuitBreaker } from './circuit-breaker.js';
 
-function readState(): { attempt: number; timestamp: string } {
+function readState(): { attempt: number; timestamp: string; host?: string } {
   return JSON.parse(fs.readFileSync(CB_PATH, 'utf-8'));
 }
 
-function seedState(attempt: number, timestamp = new Date().toISOString()): void {
-  fs.writeFileSync(CB_PATH, JSON.stringify({ attempt, timestamp }));
+/**
+ * Seed prior state. Defaults to this machine's hostname, i.e. state this same
+ * instance would have written — the case the transition and schedule tests are
+ * about. Pass `host` to stand in for another instance over the same `data/`.
+ */
+function seedState(attempt: number, timestamp = new Date().toISOString(), host: string | null = os.hostname()): void {
+  const state = host === null ? { attempt, timestamp } : { attempt, timestamp, host };
+  fs.writeFileSync(CB_PATH, JSON.stringify(state));
 }
 
 beforeEach(() => {
@@ -122,6 +130,69 @@ describe('enforceStartupBackoff — state transitions', () => {
 
     await enforceStartupBackoff();
     expect(readState().attempt).toBe(1);
+  });
+});
+
+describe('enforceStartupBackoff — instance scoping', () => {
+  /**
+   * `data/` can outlive the instance that wrote it: a working tree on a
+   * durable volume mounted into successive fresh containers, a restored
+   * backup. A new instance is not the crashy one that earned the strikes, so
+   * it starts clean rather than serving backoff on inherited history.
+   */
+  const OTHER_HOST = 'some-other-instance';
+
+  it('state from another instance starts clean', async () => {
+    seedState(4, new Date().toISOString(), OTHER_HOST);
+    await enforceStartupBackoff();
+    expect(readState().attempt).toBe(1);
+  });
+
+  it('state from another instance serves no backoff delay', async () => {
+    // attempt=6 would be a 15min delay if the strikes were counted as ours.
+    seedState(6, new Date().toISOString(), OTHER_HOST);
+
+    vi.useFakeTimers();
+    const setTimeoutSpy = vi.spyOn(global, 'setTimeout');
+
+    const promise = enforceStartupBackoff();
+    await vi.runAllTimersAsync();
+    await promise;
+
+    const requestedDelays = setTimeoutSpy.mock.calls.map((c) => c[1] ?? 0);
+    expect(requestedDelays.length ? Math.max(...requestedDelays) : 0).toBe(0);
+  });
+
+  it('takes ownership of the file, so this instance accrues its own strikes', async () => {
+    seedState(4, new Date().toISOString(), OTHER_HOST);
+    await enforceStartupBackoff();
+    expect(readState().host).toBe(os.hostname());
+
+    // Second start now counts: the state on disk is ours.
+    await enforceStartupBackoff();
+    expect(readState().attempt).toBe(2);
+  });
+
+  it('state from this instance still applies', async () => {
+    seedState(3);
+    vi.useFakeTimers();
+    const promise = enforceStartupBackoff();
+    await vi.runAllTimersAsync();
+    await promise;
+    expect(readState().attempt).toBe(4);
+    expect(readState().host).toBe(os.hostname());
+  });
+
+  it('a file with no host (pre-scoping format) is treated as stale', async () => {
+    // No recorded identity is no proof the strikes are ours. Legacy files
+    // reset once, then carry a host like any other.
+    seedState(5, new Date().toISOString(), null);
+    expect(readState().host).toBeUndefined();
+
+    await enforceStartupBackoff();
+
+    expect(readState().attempt).toBe(1);
+    expect(readState().host).toBe(os.hostname());
   });
 });
 
