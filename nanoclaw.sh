@@ -362,6 +362,18 @@ if [ "$(uname -s)" = "Darwin" ] && ! command -v brew >/dev/null 2>&1; then
   esac
 fi
 
+# ─── pre-flight: sudo password on Linux ────────────────────────────────
+# The Node and Docker installers call sudo behind the bootstrap spinner and
+# the sandbox step's window, where its password prompt can't be seen. Ask
+# once here instead; root, passwordless sudo and non-terminal runs skip it.
+# shellcheck source=setup/lib/sudo-preflight.sh
+source "$PROJECT_ROOT/setup/lib/sudo-preflight.sh"
+if ! sudo_preflight "$@"; then
+  ph_event setup_sudo_aborted
+  write_abort_entry sudo-preflight sudo-refused
+  exit 1
+fi
+
 # ─── first step: install the basics (Node + pnpm + native modules) ─────
 
 BOOTSTRAP_RAW="${STEPS_DIR}/01-bootstrap.log"
