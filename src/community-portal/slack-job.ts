@@ -48,6 +48,8 @@ export interface SlackJob {
     templateAgentId?: string;
   };
   error?: string;
+  /** Why an install failed, for verify and the wizard; written through slackJobReason. */
+  reason?: string;
   reportedStatus?: string;
 }
 
@@ -67,6 +69,65 @@ export function slackJobStatus(job: SlackJob | null, now = Date.now()): SlackJob
   if (!JOB_STATUSES.includes(job.status)) return 'failed';
   if (['awaiting_approval', 'installing'].includes(job.status) && !(Date.parse(job.expiresAt) > now)) return 'expired';
   return job.status;
+}
+
+/**
+ * A failure reason is printed by verify and the wizard, so keep it to one
+ * short line with the job's own secrets and anything token-shaped removed.
+ */
+export function slackJobReason(text: string, secrets: (string | undefined)[] = []): string {
+  let out = text;
+  for (const secret of secrets.filter((s): s is string => !!s).sort((a, b) => b.length - a.length))
+    out = out.split(secret).join('[REDACTED]');
+  out = out
+    .replace(/\b(Bearer|Basic)\s+[^\s"']+/gi, '$1 [REDACTED]')
+    .replace(/\b(\w*(?:TOKEN|SECRET|PASSWORD|KEY))=[^\s"']+/gi, '$1=[REDACTED]')
+    .replace(/\b(?:xox[a-z]|xapp)-[\w-]+/g, '[REDACTED]')
+    .replace(/[\w-]{32,}/g, '[REDACTED]')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return out.length > 240 ? `${out.slice(0, 239)}…` : out;
+}
+
+/** What to show for a failed or expired job: its saved reason, else its error code. */
+export function slackJobFailure(job: SlackJob | null): string | undefined {
+  const status = slackJobStatus(job);
+  const text = job && (status === 'failed' || status === 'expired') ? job.reason || job.error : undefined;
+  return text ? slackJobReason(text, [job?.identity?.token, job?.app?.appToken, job?.app?.botToken]) : undefined;
+}
+
+/**
+ * A Slack wire that succeeded with the saved job's own app finishes that job,
+ * so a good re-run clears a failed or expired install. `appToken` is the app
+ * token that run connected with. A job for another app, or one a live worker
+ * still owns, is left as it is.
+ */
+export async function settleSlackJob(
+  appToken: string | undefined,
+  root = process.cwd(),
+  { homeDir }: { homeDir?: string } = {},
+): Promise<boolean> {
+  const settles = (job: SlackJob | null): job is SlackJob =>
+    !!job && ['failed', 'expired'].includes(slackJobStatus(job) ?? '') && !!appToken && appToken === job.app?.appToken;
+  if (!settles(await readSlackJob(root))) return false;
+  const release = await processLock(`${slackJobFile(root)}.lock`);
+  if (!release) return false;
+  try {
+    const job = await readSlackJob(root);
+    if (!settles(job)) return false;
+    job.status = 'complete';
+    delete job.error;
+    delete job.reason;
+    // The worker reports completion with the saved identity; a sign-in since
+    // then replaced that token, and the old one would be refused.
+    const current = await readInstallIdentity(homeDir ? { homeDir } : {});
+    if (current?.accountId === job.identity.account_id && current.installId === job.identity.install_id)
+      job.identity.token = current.token;
+    await writePrivate(slackJobFile(root), job);
+    return true;
+  } finally {
+    release();
+  }
 }
 
 /**
@@ -95,7 +156,9 @@ export async function launchSlackJob(root = process.cwd()): Promise<boolean> {
     !job ||
     !(
       ['awaiting_approval', 'installing'].includes(job.status) ||
-      (job.status === 'complete' && job.reportedStatus !== 'complete')
+      // Past its window the worker exits without reporting, so a launch
+      // here would only repeat on every supervisor check.
+      (job.status === 'complete' && job.reportedStatus !== 'complete' && Date.parse(job.expiresAt) > Date.now())
     )
   )
     return false;

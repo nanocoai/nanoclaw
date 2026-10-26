@@ -44,7 +44,10 @@ It does not provide automatic restart or boot persistence.
 - `setup/register.ts` creates entities (`agent_groups`, `messaging_groups`, `messaging_group_agents`) in `data/v2.db`
 - Accepts `--platform-id` flag
 - `getMessagingGroupAgentByPair()` prevents duplicate wiring
-- `setup/verify.ts` checks the central DB (counts agent groups with wiring)
+- `setup/verify.ts` checks the central DB (counts agent groups with wiring) and prints `OWNER: present|missing`.
+  A terminal-only install has no owner and passes. With a chat channel and no owner or admin it adds an
+  `OWNER_HINT` (`/init-first-agent`), and it fails only when a channel with no wired chat is already dropping
+  messages that nobody can approve (`DROPPED_CHANNELS`).
 
 ### Router Logging
 - `src/router.ts` logs `MESSAGE DROPPED` at WARN level when no agents wired, with actionable guidance
@@ -125,5 +128,5 @@ Channel adapter → routeInbound() → resolve messaging_group → resolve agent
 | `src/container-runner.ts` | Spawns containers; leases + revokes the session's gateway contribution |
 | `setup/register.ts` | Creates entities (agent_group, messaging_group, wiring) |
 | `setup/templates.ts` | First-agent stamping through `ncl groups create --template` (library discovery: `src/templates/library.ts`) |
-| `setup/verify.ts` | Checks central DB for registered groups |
+| `setup/verify.ts` | Checks central DB for registered groups and an owner |
 | `container/agent-runner/src/mailbox/sqlite/connection.ts` | SQLite driver's two-DB connection layer |

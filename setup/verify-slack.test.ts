@@ -30,7 +30,14 @@ vi.mock('./platform.js', () => ({
   hasSystemd: () => true,
 }));
 vi.mock('./central-db-inspection.js', () => ({
-  inspectCentralDb: async () => ({ registeredGroups: host.groups, derivedGroups: 0 }),
+  inspectCentralDb: async () => ({
+    registeredGroups: host.groups,
+    derivedGroups: 0,
+    owners: 0,
+    approvers: 0,
+    wiredChannels: [],
+    droppedChannels: [],
+  }),
 }));
 vi.mock('./lib/registry-state.js', () => ({
   readImageSource: () => 'hardened',
@@ -60,10 +67,15 @@ afterEach(() => {
   fs.rmSync(host.root, { recursive: true, force: true });
 });
 
-function saveJob(status: string, expiresAt = new Date(Date.now() + 60_000).toISOString()): void {
+function saveJob(
+  status: string,
+  expiresAt = new Date(Date.now() + 60_000).toISOString(),
+  extra: Record<string, string> = {},
+): void {
   fs.writeFileSync(
     path.join(host.root, 'data/slack-install.json'),
     JSON.stringify({
+      ...extra,
       status,
       expiresAt,
       app: { appId: 'A_TEST', appToken: 'xapp-private-fixture' },
@@ -97,6 +109,23 @@ describe('verification during background Slack installation', () => {
     host.groups = 1;
     await expect(run([])).rejects.toThrow('verify_exit');
     expect(fields()).toMatchObject({ STATUS: 'failed', SLACK_INSTALL: status });
+  });
+
+  it('names why a job failed, without its secrets', async () => {
+    saveJob('failed', undefined, {
+      error: 'install_needs_attention',
+      reason: 'Resolve your DM channel: exit 127: jq: command not found\nBearer xapp-private-fixture',
+    });
+    host.groups = 1;
+    await expect(run([])).rejects.toThrow('verify_exit');
+    expect(fields()).toMatchObject({
+      STATUS: 'failed',
+      SLACK_INSTALL: 'failed',
+      SLACK_INSTALL_REASON: 'Resolve your DM channel: exit 127: jq: command not found Bearer [REDACTED]',
+    });
+    saveJob('failed', undefined, { error: 'sign_in_required' });
+    await expect(run([])).rejects.toThrow('verify_exit');
+    expect(fields()).toMatchObject({ SLACK_INSTALL_REASON: 'sign_in_required' });
   });
 
   it('does not mistake an expired pending job for progress', async () => {

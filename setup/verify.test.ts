@@ -62,6 +62,11 @@ describe('determineVerifyStatus', () => {
     ).toBe('failed');
   });
 
+  it('fails while a channel drops messages that nobody can approve', () => {
+    expect(determineVerifyStatus({ ...healthyBase, droppingChannels: ['slack'] })).toBe('failed');
+    expect(determineVerifyStatus({ ...healthyBase, droppingChannels: [] })).toBe('success');
+  });
+
   it('fails when credentials are missing', () => {
     expect(
       determineVerifyStatus({

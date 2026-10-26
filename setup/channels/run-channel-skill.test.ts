@@ -9,6 +9,7 @@ import { runSkill } from '../lib/skill-driver.js';
 import { fullyApplied } from '../../scripts/skill-apply.js';
 import { parseDirectives } from '../../scripts/skill-directives.js';
 import { BACK_TO_CHANNEL_SELECTION, backGate } from '../lib/back-nav.js';
+import { SLACK_AGENTS_COMPANION_SKILLS } from './slack-auto-register.js';
 
 // Drive the first-prompt back gate (back-nav's brightSelect) from a queue
 // instead of opening a real TTY select. Hoisted so the vi.mock factory — which
@@ -527,9 +528,9 @@ describe('runChannelSkill adapter (Option A)', () => {
     );
     process.chdir(root);
 
-    const failCalls: Array<{ step: string; msg: string; hint?: string }> = [];
-    const fakeFail = (step: string, msg: string, hint?: string): Promise<never> => {
-      failCalls.push({ step, msg, hint });
+    const failCalls: Array<{ step: string; msg: string; hint?: string; detail?: string }> = [];
+    const fakeFail = (step: string, msg: string, hint?: string, _raw?: string, detail?: string): Promise<never> => {
+      failCalls.push({ step, msg, hint, detail });
       // The real fail() process.exits and never returns; emulate that by aborting
       // the flow so control doesn't fall through to the resolve/wire steps.
       return Promise.reject(new Error('__failed__'));
@@ -554,6 +555,9 @@ describe('runChannelSkill adapter (Option A)', () => {
     expect(failCalls[0].msg).toBe('Register the webhook by hand'); // heading → headline
     expect(failCalls[0].hint).toContain('Open the Faily dashboard'); // prose → hint
     expect(failCalls[0].hint).not.toBe('See logs/setup-steps/ for details, then retry setup.'); // not the generic
+    // The first line of the bounce reason rides along for callers with no terminal.
+    expect(failCalls[0].detail).toMatch(/\S/);
+    expect(failCalls[0].detail).not.toContain('\n');
   });
 });
 
@@ -649,4 +653,138 @@ it('background Slack setup refuses to report ready when a required companion is 
     expect(cmds.some((c) => c.includes('auth.test'))).toBe(true);
     expect(wire).not.toHaveBeenCalled();
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+describe('a good Slack wire settles a saved failed job', () => {
+  const tokens = { bot_token: 'xoxb-saved-test-only', app_token: 'xapp-saved-test-only' };
+  const checkout = process.cwd();
+  // Skills are read relative to cwd: run from the scratch root, with the real
+  // add-slack and directive-free companions, so every companion fully applies.
+  function scratch(status: string, companions = SLACK_AGENTS_COMPANION_SKILLS as readonly string[]): string {
+    const root = mkdtempSync(join(tmpdir(), 'rcs-settle-'));
+    mkdirSync(join(root, '.claude/skills/add-slack'), { recursive: true });
+    writeFileSync(
+      join(root, '.claude/skills/add-slack/SKILL.md'),
+      readFileSync(join(checkout, '.claude/skills/add-slack/SKILL.md')),
+    );
+    for (const skill of companions) {
+      mkdirSync(join(root, `.claude/skills/${skill}`), { recursive: true });
+      writeFileSync(join(root, `.claude/skills/${skill}/SKILL.md`), `# ${skill}\n`);
+    }
+    process.chdir(root);
+    // Never read the real sign-in record: the scratch root is HOME.
+    process.env.HOME = root;
+    mkdirSync(join(root, 'src/channels'), { recursive: true });
+    mkdirSync(join(root, 'data'));
+    writeFileSync(join(root, 'src/channels/index.ts'), '// barrel\n');
+    writeFileSync(join(root, '.env'), '');
+    writeFileSync(join(root, 'package.json'), '{"name":"scratch"}');
+    writeFileSync(
+      join(root, 'data/slack-install.json'),
+      JSON.stringify({
+        id: 'job1',
+        status,
+        expiresAt: new Date(Date.now() + (status === 'expired' ? -60_000 : 60_000)).toISOString(),
+        app: { appId: 'A1', appToken: tokens.app_token, botToken: tokens.bot_token },
+        identity: { token: 'install-test-only', account_id: 'acct', install_id: 'inst' },
+        error: 'install_needs_attention',
+        reason: 'Resolve your DM channel: exit 127: jq: command not found',
+      }),
+      { mode: 0o600 },
+    );
+    return root;
+  }
+  const home = process.env.HOME;
+  afterEach(() => {
+    process.chdir(checkout);
+    process.env.HOME = home;
+  });
+  const job = (root: string) => JSON.parse(readFileSync(join(root, 'data/slack-install.json'), 'utf8'));
+  const rerun = (root: string, inputs: Record<string, string>, wire = () => true) =>
+    runChannelSkill('slack', 'User', {
+      projectRoot: root,
+      agentName: 'Nova',
+      role: 'owner',
+      reuse: false,
+      inputs: { connection: 'provisioned', owner_handle: 'U123456789', ...inputs },
+      exec: async (c: string) =>
+        c.includes('auth.test') ? '@bot in Test' : c.includes('conversations.open') ? 'slack:D123456789' : '',
+      resolveRemote: () => 'origin',
+      wire,
+      fail: () => Promise.reject(new Error('__failed__')),
+    });
+
+  it.each(['failed', 'expired'])('a re-run with the same app marks a %s job complete', async (status) => {
+    const root = scratch(status);
+    try {
+      await rerun(root, tokens);
+      expect(job(root)).toMatchObject({ status: 'complete', app: { appId: 'A1' } });
+      expect(job(root)).not.toHaveProperty('error');
+      expect(job(root)).not.toHaveProperty('reason');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('reports the finished job with the current sign-in, not the one saved with it', async () => {
+    const root = scratch('failed');
+    try {
+      mkdirSync(join(root, '.config/nanoclaw'), { recursive: true });
+      writeFileSync(
+        join(root, '.config/nanoclaw/account.json'),
+        JSON.stringify({ token: 'install-fresh-test-only', account_id: 'acct', install_id: 'inst' }),
+      );
+      await rerun(root, tokens);
+      expect(job(root)).toMatchObject({ status: 'complete', identity: { token: 'install-fresh-test-only' } });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('a reinstall of the same app with a new bot token still finishes the job', async () => {
+    const root = scratch('failed');
+    try {
+      await rerun(root, { bot_token: 'xoxb-reinstalled-test-only', app_token: tokens.app_token });
+      expect(job(root).status).toBe('complete');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('a webhook run with another bot does not trust the app token left in .env', async () => {
+    const root = scratch('failed');
+    try {
+      writeFileSync(join(root, '.env'), `SLACK_APP_TOKEN=${tokens.app_token}\n`);
+      await rerun(root, {
+        connection: 'webhook',
+        bot_token: 'xoxb-other-test-only',
+        signing_secret: '0123456789abcdef',
+      });
+      expect(job(root)).toMatchObject({ status: 'failed', identity: { token: 'install-test-only' } });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the job when a companion the background install needs is missing', async () => {
+    const root = scratch('failed', ['slack-a2a-rooms']);
+    try {
+      await rerun(root, tokens);
+      expect(job(root)).toMatchObject({ status: 'failed', error: 'install_needs_attention' });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a failed job for a different app, and one whose wire failed', async () => {
+    const root = scratch('failed');
+    try {
+      await rerun(root, { bot_token: 'xoxb-other-test-only', app_token: 'xapp-other-test-only' });
+      expect(job(root).status).toBe('failed');
+      await expect(rerun(root, tokens, () => false)).rejects.toThrow('__failed__');
+      expect(job(root)).toMatchObject({ status: 'failed', error: 'install_needs_attention' });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

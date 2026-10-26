@@ -33,7 +33,13 @@ import * as p from '@clack/prompts';
 import k from 'kleur';
 
 import { BACK_TO_CHANNEL_SELECTION } from './lib/back-nav.js';
-import { withSetupLock, launchSlackJob, readSlackJob, slackJobStatus } from '../src/community-portal/slack-job.js';
+import {
+  withSetupLock,
+  launchSlackJob,
+  readSlackJob,
+  slackJobFailure,
+  slackJobStatus,
+} from '../src/community-portal/slack-job.js';
 // The pre-step-aware entry point consults each channel's registered wizard
 // extensions (setup/channels/companions.ts) before running its install skill
 // — the wizard itself stays free of channel-specific imports.
@@ -761,9 +767,10 @@ async function main(): Promise<void> {
         );
       }
       const slackInstall = res.terminal?.fields.SLACK_INSTALL;
+      const slackReason = res.terminal?.fields.SLACK_INSTALL_REASON;
       if (slackInstall === 'failed') {
         notes.push(
-          '• Slack installation needs attention. Check its progress in the portal, then resume with `pnpm exec tsx setup/portal.ts --stage slack`.',
+          `• Slack installation needs attention${slackReason ? ` (${slackReason})` : ''}. Check its progress in the portal, then resume with \`pnpm exec tsx setup/portal.ts --stage slack\`.`,
         );
       } else if (slackInstall === 'expired') {
         notes.push('• Slack approval expired. Review the existing app in the portal before restarting Slack setup.');
@@ -775,6 +782,8 @@ async function main(): Promise<void> {
           '• Want to chat from your phone? Add a messaging app with `/add-telegram`, `/add-slack`, or `/add-discord`.',
         );
       }
+      const ownerHint = res.terminal?.fields.OWNER_HINT;
+      if (ownerHint) notes.push(wrapForGutter(`• ${ownerHint}`, 6));
       if (notes.length > 0) {
         note(notes.join('\n'), "What's left");
       }
@@ -799,6 +808,9 @@ async function main(): Promise<void> {
       return;
     }
     wiringPending = res.terminal?.fields.WIRING === 'pending_first_dm';
+    // The pending-first-DM ending already names /init-first-agent.
+    const ownerHint = res.terminal?.fields.OWNER_HINT;
+    if (ownerHint && !wiringPending) note(wrapForGutter(ownerHint, 6), 'Owner');
   }
 
   const rows: [string, string][] = [
@@ -820,12 +832,14 @@ async function main(): Promise<void> {
     'Heads up',
   );
 
-  const slackStatus = slackJobStatus(await readSlackJob());
+  const slackJob = await readSlackJob();
+  const slackStatus = slackJobStatus(slackJob);
   if (slackStatus === 'failed' || slackStatus === 'expired') {
+    const reason = slackJobFailure(slackJob);
     note(
       slackStatus === 'expired'
         ? 'Slack approval expired. Review the existing app in the portal before restarting Slack setup.'
-        : 'Slack installation needs attention. Check its progress in the portal, then resume with `pnpm exec tsx setup/portal.ts --stage slack`.',
+        : `Slack installation needs attention${reason ? ` (${reason})` : ''}. Check its progress in the portal, then resume with \`pnpm exec tsx setup/portal.ts --stage slack\`.`,
       'Slack setup',
     );
     p.outro(k.yellow('NanoClaw is running. Slack needs attention.'));

@@ -10,8 +10,14 @@ import { pathToFileURL } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import Database from 'better-sqlite3';
 import { processLock, processLockOwner, writePrivate } from '../src/community-portal/index.js';
-import { launchSlackJob, readSlackJob, slackJobFile, type SlackJob } from '../src/community-portal/slack-job.js';
-import { runSlackJob } from './slack-worker.js';
+import {
+  launchSlackJob,
+  readSlackJob,
+  slackJobFile,
+  slackJobReason,
+  type SlackJob,
+} from '../src/community-portal/slack-job.js';
+import { failInstall, runSlackJob } from './slack-worker.js';
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
@@ -331,4 +337,47 @@ it('recovers an owner from a previous process birth even when its PID has been r
   const recovered = await processLock(file);
   expect(recovered).not.toBeNull();
   recovered!();
+});
+
+it('keeps the real reason for an apply failure, one line and with secrets redacted', async () => {
+  const { root } = await fixture();
+  await runSlackJob(root, {
+    report: async () => {},
+    receive: async (_j, body) => {
+      if ('statusOnly' in body) return { status: 'installed' };
+      if ('deliveryId' in body) return {};
+      return { status: 'installed', bot_token: 'xoxb-delivered-test-only', delivery_id: 'receipt1' };
+    },
+    sleep: async () => {},
+    install: async () => {
+      await failInstall(
+        'slack-install',
+        'Resolve your DM channel',
+        'prose',
+        undefined,
+        'exit 127: curl -H "Authorization: Bearer xoxb-delivered-test-only" | jq: command not found',
+      );
+    },
+  });
+  const saved = await readSlackJob(root);
+  expect(saved?.status).toBe('failed');
+  expect(saved?.error).toBe('install_needs_attention');
+  expect(saved?.reason).toMatch(/^Resolve your DM channel: exit 127: .*jq: command not found$/);
+  expect(saved?.reason).not.toContain('xoxb-delivered');
+  expect(saved?.reason).not.toContain('\n');
+});
+
+it('the sanitizer drops token shapes, the job secrets and newlines', () => {
+  const reason = slackJobReason(
+    'line one\n  SLACK_APP_TOKEN=xapp-1-A1-secret token install-test-only Bearer abc.def\tdone',
+    ['install-test-only'],
+  );
+  expect(reason).toBe('line one SLACK_APP_TOKEN=[REDACTED] token [REDACTED] Bearer [REDACTED] done');
+  expect(slackJobReason('x'.repeat(500)).length).toBeLessThanOrEqual(240);
+});
+
+it('never relaunches a finished job after its window: the worker would exit without reporting', async () => {
+  const { root, job } = await fixture();
+  await writePrivate(slackJobFile(root), { ...job, status: 'complete', expiresAt: new Date(0).toISOString() });
+  expect(await launchSlackJob(root)).toBe(false);
 });
