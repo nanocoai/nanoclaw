@@ -7,6 +7,7 @@ import type { Adapter, AdapterPostableMessage, RawMessage } from 'chat';
 import { fenceForCard } from '../card-text.js';
 import { gatewayApprovalPresentation } from '../gateway-approval-presentation.js';
 import type { GatewayApprovalRequest } from '../gateway-providers/gateway-provider-registry.js';
+import { log } from '../log.js';
 import { CardTooLongError } from './ask-question.js';
 import {
   attachmentBytesToBase64,
@@ -1092,6 +1093,70 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
       expect((await post(message, auth)).status).toBe(200);
       expect(handleWebhook).toHaveBeenCalledTimes(1);
     } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('bounds both interaction callbacks with a timeout and still dispatches a click whose ack timed out', async () => {
+    const { registerQuestionRenderResolver } = await import('./question-render-registry.js');
+    registerQuestionRenderResolver((id) =>
+      id === 'q-defer'
+        ? {
+            title: 'Review',
+            options: [{ label: 'Approve', selectedLabel: 'Approved', value: 'approve' }],
+            deferResolution: true,
+          }
+        : undefined,
+    );
+    // The ack hangs until its signal aborts. The timeout signal below is
+    // pre-fired so the test runs at once; one that never fires would hang it.
+    const ackFetch = vi.fn(
+      (_url: string, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal;
+          if (!signal) return;
+          if (signal.aborted) reject(signal.reason);
+          signal.addEventListener('abort', () => reject(signal.reason));
+        }),
+    );
+    vi.stubGlobal('fetch', ackFetch);
+    const deferredClick = JSON.stringify({
+      type: 'GATEWAY_INTERACTION_CREATE',
+      data: {
+        type: 3,
+        id: 'interaction-3',
+        token: 'interaction-token',
+        channel_id: 'chan-1',
+        data: { custom_id: 'ncq:q-defer:0' },
+        member: { user: { id: 'clicker-1', username: 'clicker' } },
+        message: { id: 'card-3', embeds: [] },
+      },
+    });
+    const { bridge, post, onAction } = await startGateway(BOT_TOKEN);
+    const errors = vi.spyOn(log, 'error').mockImplementation(() => {});
+    const timeouts: number[] = [];
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms) => {
+      timeouts.push(ms);
+      return AbortSignal.abort(new DOMException('The operation was aborted due to timeout', 'TimeoutError'));
+    });
+    try {
+      const auth = { 'x-discord-gateway-token': BOT_TOKEN };
+      expect((await post(deferredClick, auth)).status).toBe(200);
+      expect((await post(click, auth)).status).toBe(200);
+
+      expect(ackFetch).toHaveBeenCalledTimes(2);
+      expect(timeouts).toEqual([10_000, 10_000]);
+      expect(onAction).toHaveBeenCalledWith('q-defer', 'approve', 'clicker-1', {
+        messageId: 'card-3',
+        platformId: 'chan-1',
+      });
+      expect(onAction).toHaveBeenCalledWith('q-1', 'approve', 'clicker-1', {
+        messageId: 'card-1',
+        platformId: 'chan-1',
+      });
+    } finally {
+      timeoutSpy.mockRestore();
+      errors.mockRestore();
       await bridge.teardown();
     }
   });

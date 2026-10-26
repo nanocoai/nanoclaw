@@ -35,7 +35,7 @@ import { normalizeOptions } from './channels/ask-question.js';
 import { clearOutbox, readOutboxFiles, withExistingMailboxSession } from './session-manager.js';
 import { pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typing/index.js';
 import type { OutboundFile } from './channels/adapter.js';
-import type { PendingApproval, Session } from './types.js';
+import type { AgentGroup, PendingApproval, Session } from './types.js';
 import type { OutboundMessage } from './mailbox/index.js';
 
 const ACTIVE_POLL_MS = 1000;
@@ -51,6 +51,34 @@ const MAX_DELIVERY_ATTEMPTS = 3;
  * unchanged — drainSession still delivers its rows one by one.
  */
 const DELIVERY_CONCURRENCY = 8;
+
+/**
+ * How long a drain waits on one message's send. Past it the message is
+ * parked (overdueDeliveries) and the drain returns, so one stuck send can't
+ * hold its session until a restart. A slow but healthy send (a large upload)
+ * is parked, not repeated.
+ */
+const DELIVERY_DEADLINE_MS = 60_000;
+/**
+ * How long a poll tick waits on one session's drain. A slower drain (a whole
+ * channel hanging) finishes in the background, still holding
+ * inflightDeliveries (so one per session at most): later ticks skip that
+ * session and every other session keeps the poll's cadence.
+ */
+const TICK_DRAIN_WAIT_MS = 5_000;
+/**
+ * How long a parked send may stay unsettled before it counts as a failed
+ * attempt and the row is retried. Past the longest retry loop a channel SDK
+ * runs inside one send (Slack's web-api: about 30 minutes) and undici's
+ * 5-minute timeouts, so only a send with no bound at all gets this far.
+ */
+const OVERDUE_GIVE_UP_MS = 60 * 60_000;
+/**
+ * Parked sends one session may have at once. Past it the session sends
+ * nothing until one settles or is given up on, so a dead channel holds a
+ * few sends per session instead of one more every deadline.
+ */
+const MAX_PARKED_PER_SESSION = 3;
 
 /**
  * Attempt counts live in the `delivery_attempts` table, so they survive a
@@ -106,6 +134,42 @@ async function clearAttemptRow(messageId: string): Promise<void> {
  * second caller skips will be picked up on the next poll tick (~1s).
  */
 const inflightDeliveries = new Set<string>();
+
+/**
+ * Rows (overdueKey) whose send passed its deadline and has not
+ * settled. Drains skip them, so a send that may still land is never
+ * repeated: a late success marks the row delivered, a late failure counts an
+ * attempt and the next tick retries. A row leaves only after that bookkeeping.
+ * Later rows keep going meanwhile, so a parked row can land after them, the
+ * same reordering a failed-then-retried row already has.
+ */
+const overdueDeliveries = new Set<string>();
+
+/**
+ * Per session, overdue sends that have not settled, including ones past the
+ * give-up. While one is out it can land mid-drain, so drains read
+ * firstDelivery from the mailbox as they mark each row.
+ */
+const unsettledLateSends = new Map<string, number>();
+
+function overdueKey(sessionId: string, messageId: string): string {
+  return `${sessionId}\0${messageId}`;
+}
+
+/**
+ * Drains a tick stopped waiting on (see TICK_DRAIN_WAIT_MS), shared by both
+ * polls. Capped at DELIVERY_CONCURRENCY, so drains in flight stay bounded:
+ * each poll's DELIVERY_CONCURRENCY plus this many. Past the cap a tick waits
+ * on its drains again, so with more hung sessions than the cap a tick slows
+ * by about one deadline per DELIVERY_CONCURRENCY of them.
+ */
+const backgroundDrains = new Set<Promise<void>>();
+
+export function _resetDeliveryStateForTesting(): void {
+  overdueDeliveries.clear();
+  unsettledLateSends.clear();
+  backgroundDrains.clear();
+}
 
 export interface ChannelDeliveryAdapter {
   deliver(
@@ -231,12 +295,22 @@ function nextTickDelay(startedAt: number, intervalMs: number): number {
  * their turn this tick.
  */
 export async function deliverToSessions(sessions: readonly Session[]): Promise<void> {
-  const results = await mapConcurrent(sessions, DELIVERY_CONCURRENCY, (session) => deliverSessionMessages(session));
+  const results = await mapConcurrent(sessions, DELIVERY_CONCURRENCY, (session) => drainWithinTick(session));
   results.forEach((result, i) => {
     if (result.status === 'rejected') {
       log.error('Session delivery failed', { sessionId: sessions[i].id, err: result.reason });
     }
   });
+}
+
+/** Drain a session, but hand it to the background past TICK_DRAIN_WAIT_MS. */
+async function drainWithinTick(session: Session): Promise<void> {
+  const drain = deliverSessionMessages(session);
+  if ((await settlesWithin(drain, TICK_DRAIN_WAIT_MS)) || backgroundDrains.size >= DELIVERY_CONCURRENCY) return drain;
+  backgroundDrains.add(drain);
+  void drain
+    .catch((err) => log.error('Session delivery failed', { sessionId: session.id, err }))
+    .finally(() => backgroundDrains.delete(drain));
 }
 
 export async function deliverSessionMessages(session: Session): Promise<void> {
@@ -256,6 +330,14 @@ async function drainSession(session: Session): Promise<void> {
   const agentGroup = await getAgentGroup(session.agent_group_id);
   if (!agentGroup) return;
 
+  // Snapshot parked rows BEFORE reading the queue: a late send marks its row
+  // delivered before it leaves overdueDeliveries, so every row reads as
+  // delivered or parked, never as neither.
+  const parked = new Set(overdueDeliveries);
+  const lateSendOut = (unsettledLateSends.get(session.id) ?? 0) > 0;
+  const sessionPrefix = overdueKey(session.id, '');
+  if ([...parked].filter((key) => key.startsWith(sessionPrefix)).length >= MAX_PARKED_PER_SESSION) return;
+
   // Read the queue in one short mailbox session, then deliver with NO
   // session held open: delivery handlers (agent-to-agent routing, approval
   // notifications, cli_request → dispatch) open their own sessions on this
@@ -269,7 +351,9 @@ async function drainSession(session: Session): Promise<void> {
       const delivered = mailbox.getDeliveredIds();
       return {
         delivered,
-        pending: mailbox.getDueMessages(delivered).filter((candidate) => !delivered.has(candidate.id)),
+        pending: mailbox
+          .getDueMessages(delivered)
+          .filter((candidate) => !delivered.has(candidate.id) && !parked.has(overdueKey(session.id, candidate.id))),
       };
     });
     if (!existing) return;
@@ -294,72 +378,245 @@ async function drainSession(session: Session): Promise<void> {
     }
   }
 
-  for (const msg of pending) {
-    try {
-      const platformMsgId = await deliverMessage(msg, session);
-      await withExistingMailboxSession(agentGroup.id, session.id, (mailbox) =>
-        mailbox.markDelivered(msg.id, platformMsgId ?? null),
-      );
-      const firstDelivery = delivered.size === 0;
-      delivered.add(msg.id);
-      await clearAttemptRow(msg.id);
-      if (msg.kind !== 'system' && msg.channelType !== 'agent') {
-        pauseTypingRefreshAfterDelivery(session.id);
-        if (msg.kind !== 'task_log') {
-          // Cross-session context: echo the delivered reply into the
-          // conversation's recently active sibling sessions. Unawaited — the
-          // next part of a multi-part reply must not wait on ambient writes.
-          void fanOutboundMessage(
-            {
-              id: msg.id,
-              kind: msg.kind,
-              platform_id: msg.platformId,
-              channel_type: msg.channelType,
-              content: msg.content,
-            },
-            session,
-            agentGroup,
-          );
-          for (const hook of postDeliveryHooks) {
-            try {
-              await hook(msg, session, { firstDelivery });
-            } catch (err) {
-              log.warn('Post-delivery hook failed', { messageId: msg.id, sessionId: session.id, err });
-            }
-          }
-        }
+  // No new row starts after one deadline, so a drain (and a tick waiting on
+  // it) lasts about two deadlines at most; the rest go next tick.
+  let budgetSpent = false;
+  const budget = setTimeout(() => {
+    budgetSpent = true;
+  }, DELIVERY_DEADLINE_MS);
+  try {
+    for (const msg of pending) {
+      if (budgetSpent) return;
+      const send = deliverMessage(msg, session);
+      if (!(await settlesWithin(send, DELIVERY_DEADLINE_MS))) {
+        parkOverdueDelivery(msg, session, agentGroup, send);
+        // Later rows wait for the next tick, so a stuck channel costs this
+        // session one deadline per tick at most.
+        return;
       }
-    } catch (err) {
-      const attempts = await recordAttemptRow(msg.id, session.id, err);
-      if (attempts !== null && attempts >= MAX_DELIVERY_ATTEMPTS) {
-        log.error('Message delivery failed permanently, giving up', {
-          messageId: msg.id,
-          sessionId: session.id,
-          attempts,
-          err,
-        });
+      try {
+        await completeDelivery(msg, session, agentGroup, await send, lateSendOut ? null : delivered.size === 0);
+        delivered.add(msg.id);
+      } catch (err) {
+        await failDelivery(msg, session, agentGroup, err, lateSendOut);
+      }
+    }
+  } finally {
+    clearTimeout(budget);
+  }
+}
+
+/** True when the row is already marked delivered or failed. False if the mailbox can't say. */
+async function alreadyRecorded(agentGroup: AgentGroup, session: Session, messageId: string): Promise<boolean> {
+  const recorded = await withExistingMailboxSession(agentGroup.id, session.id, (mailbox) =>
+    mailbox.getDeliveredIds().has(messageId),
+  ).catch(() => false);
+  return recorded ?? false;
+}
+
+/** True when `promise` settles, either way, within `ms`. Never rejects. */
+async function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), ms);
+  });
+  try {
+    return await Promise.race([
+      promise.then(
+        () => true,
+        () => true,
+      ),
+      deadline,
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * A send landed: mark the row delivered, clear its attempt count, run the
+ * user-facing follow-through; `onRecorded` runs as soon as the mailbox
+ * record is written, before anything else is awaited. `firstDelivery` null (a late send may be out)
+ * reads the flag from the mailbox, and skips a row already recorded, so a
+ * given-up row whose original and retry both land follows through once.
+ * Throws only if marking fails.
+ */
+async function completeDelivery(
+  msg: OutboundMessage,
+  session: Session,
+  agentGroup: AgentGroup,
+  platformMsgId: string | undefined,
+  firstDelivery: boolean | null,
+  onRecorded?: () => void,
+): Promise<void> {
+  let first = firstDelivery ?? false;
+  let recorded = false;
+  await withExistingMailboxSession(agentGroup.id, session.id, (mailbox) => {
+    if (firstDelivery === null) {
+      const ids = mailbox.getDeliveredIds();
+      recorded = ids.has(msg.id);
+      first = ids.size === 0;
+    }
+    if (!recorded) mailbox.markDelivered(msg.id, platformMsgId ?? null);
+  });
+  if (recorded) {
+    // Delivered by the other send, or already marked failed: keep that record.
+    onRecorded?.();
+    await clearAttemptRow(msg.id);
+    log.warn('Send landed for a row already recorded, keeping the first record', {
+      messageId: msg.id,
+      sessionId: session.id,
+      platformMsgId,
+    });
+    return;
+  }
+  onRecorded?.();
+  await clearAttemptRow(msg.id);
+  if (msg.kind !== 'system' && msg.channelType !== 'agent') {
+    pauseTypingRefreshAfterDelivery(session.id);
+    if (msg.kind !== 'task_log') {
+      // Cross-session context: echo the delivered reply into the
+      // conversation's recently active sibling sessions. Unawaited — the
+      // next part of a multi-part reply must not wait on ambient writes.
+      void fanOutboundMessage(
+        {
+          id: msg.id,
+          kind: msg.kind,
+          platform_id: msg.platformId,
+          channel_type: msg.channelType,
+          content: msg.content,
+        },
+        session,
+        agentGroup,
+      );
+      for (const hook of postDeliveryHooks) {
         try {
-          await withExistingMailboxSession(agentGroup.id, session.id, (mailbox) => mailbox.markDeliveryFailed(msg.id));
-          await clearAttemptRow(msg.id);
-        } catch (markErr) {
-          log.error('Failed to record permanent delivery failure', {
-            messageId: msg.id,
-            sessionId: session.id,
-            err: markErr,
-          });
+          await hook(msg, session, { firstDelivery: first });
+        } catch (err) {
+          log.warn('Post-delivery hook failed', { messageId: msg.id, sessionId: session.id, err });
         }
-      } else {
-        log.warn('Message delivery failed, will retry', {
-          messageId: msg.id,
-          sessionId: session.id,
-          // null: the bookkeeping write itself failed; count unknown this tick.
-          attempt: attempts,
-          maxAttempts: MAX_DELIVERY_ATTEMPTS,
-          err,
-        });
       }
     }
   }
+}
+
+/**
+ * A send failed: count the attempt; give up on the row at MAX_DELIVERY_ATTEMPTS.
+ * `checkRecorded` (another send of the row may land): check after counting,
+ * and undo the count if the row is recorded. Success marks then clears, so
+ * this order leaves no stale count either way. Never throws.
+ */
+async function failDelivery(
+  msg: OutboundMessage,
+  session: Session,
+  agentGroup: AgentGroup,
+  err: unknown,
+  checkRecorded = false,
+): Promise<void> {
+  const attempts = await recordAttemptRow(msg.id, session.id, err);
+  if (checkRecorded && (await alreadyRecorded(agentGroup, session, msg.id))) {
+    await clearAttemptRow(msg.id);
+    log.info('Send failed for a row already recorded, keeping that record', {
+      messageId: msg.id,
+      sessionId: session.id,
+    });
+    return;
+  }
+  if (attempts !== null && attempts >= MAX_DELIVERY_ATTEMPTS) {
+    log.error('Message delivery failed permanently, giving up', {
+      messageId: msg.id,
+      sessionId: session.id,
+      attempts,
+      err,
+    });
+    try {
+      await withExistingMailboxSession(agentGroup.id, session.id, (mailbox) => mailbox.markDeliveryFailed(msg.id));
+      await clearAttemptRow(msg.id);
+    } catch (markErr) {
+      log.error('Failed to record permanent delivery failure', {
+        messageId: msg.id,
+        sessionId: session.id,
+        err: markErr,
+      });
+    }
+  } else {
+    log.warn('Message delivery failed, will retry', {
+      messageId: msg.id,
+      sessionId: session.id,
+      // null: the bookkeeping write itself failed; count unknown this tick.
+      attempt: attempts,
+      maxAttempts: MAX_DELIVERY_ATTEMPTS,
+      err,
+    });
+  }
+}
+
+/**
+ * The send passed the deadline: park the row and finish it when the send
+ * settles. A send still pending at OVERDUE_GIVE_UP_MS counts as a failed
+ * attempt and the row is retried; if it lands after all, it still marks the
+ * row delivered, which stops any further retry. Only that path can post
+ * twice: a send stuck past the give-up that still reaches the platform.
+ */
+function parkOverdueDelivery(
+  msg: OutboundMessage,
+  session: Session,
+  agentGroup: AgentGroup,
+  send: Promise<string | undefined>,
+): void {
+  const key = overdueKey(session.id, msg.id);
+  overdueDeliveries.add(key);
+  unsettledLateSends.set(session.id, (unsettledLateSends.get(session.id) ?? 0) + 1);
+  const context = {
+    messageId: msg.id,
+    sessionId: session.id,
+    channelType: msg.channelType,
+    deadlineMs: DELIVERY_DEADLINE_MS,
+  };
+  // A system row is a host action (an agent's image rebuild runs for
+  // minutes), so a long one is expected, not a stuck channel.
+  if (msg.kind === 'system')
+    log.info('System action still running past the delivery deadline, parked until it settles', context);
+  else log.warn('Message delivery passed its deadline, parked until the send settles', context);
+
+  let gaveUp = false;
+  const giveUp = setTimeout(() => {
+    gaveUp = true;
+    log.error('Parked delivery never settled, counting a failed attempt and retrying', {
+      messageId: msg.id,
+      sessionId: session.id,
+      giveUpMs: OVERDUE_GIVE_UP_MS,
+    });
+    void failDelivery(msg, session, agentGroup, new Error(`send did not settle within ${OVERDUE_GIVE_UP_MS} ms`), true)
+      .catch((err) => log.error('Overdue delivery bookkeeping failed', { messageId: msg.id, err }))
+      .finally(() => overdueDeliveries.delete(key));
+  }, OVERDUE_GIVE_UP_MS);
+  giveUp.unref();
+
+  // Free the park slot once the row's record is written: the follow-through
+  // (a post-delivery hook) may run long and must not hold it.
+  let released = false;
+  const release = (): void => {
+    if (released) return;
+    released = true;
+    if (!gaveUp) overdueDeliveries.delete(key);
+    const left = (unsettledLateSends.get(session.id) ?? 1) - 1;
+    if (left > 0) unsettledLateSends.set(session.id, left);
+    else unsettledLateSends.delete(session.id);
+  };
+
+  void send
+    .finally(() => clearTimeout(giveUp))
+    .then((platformMsgId) => completeDelivery(msg, session, agentGroup, platformMsgId, null, release))
+    .then(
+      () => log.info('Overdue message delivery landed', { messageId: msg.id, sessionId: session.id }),
+      async (err) => {
+        // After a give-up this attempt is already counted.
+        if (!gaveUp) await failDelivery(msg, session, agentGroup, err, true);
+      },
+    )
+    .catch((err) => log.error('Overdue delivery bookkeeping failed', { messageId: msg.id, err }))
+    .finally(release);
 }
 
 async function deliverMessage(
