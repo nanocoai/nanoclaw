@@ -103,6 +103,7 @@ import { configuredGatewayKind, detectInstalledGateway } from './gateways/select
 import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
 import type { AgentGroup } from '../src/types.js';
 import { claudeCliAvailable, resolveTimezoneViaClaude } from './lib/tz-from-claude.js';
+import { dockerAccessHint } from './lib/docker-access-hint.js';
 import * as setupLog from './logs.js';
 import { ensureAnswer, fail, runQuietChild, runQuietStep, spawnQuiet } from './lib/runner.js';
 import { emit as phEmit } from './lib/diagnostics.js';
@@ -542,13 +543,11 @@ async function main(): Promise<void> {
         ),
       );
     }
-    if (res.terminal?.fields.DOCKER_GROUP_STALE === 'true') {
-      p.log.warn(brandBody("NanoClaw's permissions need a tweak before it can reach Docker."));
-      p.log.message(
-        brandBody(
-          '  sudo setfacl -m u:$(whoami):rw /var/run/docker.sock\n' + `  systemctl --user restart ${getSystemdUnit()}`,
-        ),
-      );
+    const dockerFix = dockerAccessHint(res.terminal?.fields ?? {}, getSystemdUnit());
+    if (dockerFix) {
+      p.log.warn(brandBody(dockerFix.title));
+      p.log.message(brandBody(dockerFix.commands.map((c) => `  ${c}`).join('\n')));
+      p.log.message(brandBody(dockerFix.note));
     }
   }
 
