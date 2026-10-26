@@ -26,7 +26,7 @@ vi.mock('../../scripts/provider-contract-verifier.js', async (original) => ({
   ...(await original<object>()),
   verifyProviderContracts: fixture.verify,
 }));
-import { applyProviderSkill } from './install.js';
+import { applyProviderSkill, hostFilesChanged } from './install.js';
 import { applySkill, fullyApplied } from '../../scripts/skill-apply.js';
 import { parseDirectives } from '../../scripts/skill-directives.js';
 import { execSync } from 'node:child_process';
@@ -106,12 +106,23 @@ describe('OpenCode setup installation and refresh', () => {
     const result = await applyProviderSkill(skill, directory);
     expect(result.blockers).toEqual([]);
     expect(result.changed).toBe(false);
+    expect(result.hostChanged).toBe(false);
     expect(tree(directory)).toEqual(before);
     expect(fixture.commands).toHaveLength(2);
     expect(fixture.commands[0]).toMatch(/^node -e /);
     expect(fixture.commands[1]).toBe(
       'rm -f src/opencode-dockerfile.test.ts container/agent-runner/src/providers/opencode.attachments.test.ts',
     );
+  });
+
+  it('reports no host change when an install only restores a container file', async () => {
+    const directory = root();
+    await applyProviderSkill(skill, directory);
+    fs.rmSync(path.join(directory, 'container/agent-runner/src/providers/opencode.ts'));
+    const result = await applyProviderSkill(skill, directory);
+    expect(result.blockers).toEqual([]);
+    expect(result.changed).toBe(true);
+    expect(result.hostChanged).toBe(false);
   });
 
   it('keeps an installed Codex payload and pins as they are', async () => {
@@ -170,6 +181,7 @@ describe('OpenCode setup installation and refresh', () => {
     const result = await applyProviderSkill(skill, directory);
     expect(result.blockers).toEqual([]);
     expect(result.changed).toBe(true);
+    expect(result.hostChanged).toBe(true);
     expect(fs.readFileSync(path.join(directory, 'setup/providers/index.ts'), 'utf8')).toContain(
       "import './opencode.js';",
     );
@@ -196,6 +208,7 @@ describe('OpenCode setup installation and refresh', () => {
     const result = await applyProviderSkill(skill, directory, { mode: 'refresh' });
     expect(result.blockers).toEqual([]);
     expect(result.changed).toBe(true);
+    expect(result.hostChanged).toBe(true);
     expect(fs.readFileSync(path.join(directory, 'scripts/opencode-auth.ts'), 'utf8')).toContain('runOpenCodeSetupAuth');
     expect(JSON.parse(fs.readFileSync(path.join(directory, 'container/cli-tools.json'), 'utf8'))).toEqual([
       { name: 'opencode-ai', version: '1.18.25', onlyBuilt: true },
@@ -221,4 +234,32 @@ describe('OpenCode setup installation and refresh', () => {
       expect(fixture.commands).toHaveLength(1);
     },
   );
+});
+
+// The running service loads dist/ (built from src/) and .env only at start;
+// container and setup files reach new containers and setup runs without it.
+describe('host file changes', () => {
+  const changed = (...journal: unknown[]) => hostFilesChanged({ journal } as never);
+  it('counts host source and .env changes', () => {
+    expect(changed({ op: 'wrote', path: 'src/providers/codex.ts' })).toBe(true);
+    expect(changed({ op: 'appended', path: 'src/provider-contracts/index.ts', line: "import './codex.js';" })).toBe(
+      true,
+    );
+    expect(changed({ op: 'set-env', key: 'CODEX_MODEL' })).toBe(true);
+  });
+  it('ignores container, setup and dependency changes', () => {
+    expect(
+      changed(
+        { op: 'wrote', path: 'container/agent-runner/src/providers/codex.ts' },
+        { op: 'appended', path: 'setup/providers/index.ts', line: "import './codex.js';" },
+        { op: 'json-merge', path: 'container/cli-tools.json', key: 'name', value: '@openai/codex' },
+        { op: 'wrote', path: 'scripts/opencode-auth.ts' },
+        {
+          op: 'ran',
+          cmd: 'cd container/agent-runner && bun add x@1',
+          undo: 'cd container/agent-runner && bun remove x',
+        },
+      ),
+    ).toBe(false);
+  });
 });

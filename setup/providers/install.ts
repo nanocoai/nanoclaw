@@ -58,6 +58,13 @@ export interface ProviderInstallResult {
    * an already-installed payload was in the barrel when the process started.
    */
   hostContractModules: string[];
+  /**
+   * True when the apply changed what the running host service loads: its
+   * `src/` (built to `dist/`) or `.env`. The service picks either up only at
+   * start, so a caller that leaves the service running must rebuild the host
+   * and restart it.
+   */
+  hostChanged: boolean;
 }
 
 /** The one barrel whose appended entries the setup process must also load in place. */
@@ -121,7 +128,21 @@ export async function applyProviderSkill(
     blockers,
     verification,
     hostContractModules: blockers.length === 0 ? appendedHostContractModules(result, projectRoot) : [],
+    hostChanged: hostFilesChanged(result),
   };
+}
+
+/**
+ * Whether the apply wrote host source or `.env`. Container and setup files
+ * reach new containers and setup runs on their own. Dependency runs are not
+ * counted: provider skills pin runner packages, and a host package would
+ * arrive with the `src/` code that imports it.
+ */
+export function hostFilesChanged(result: ApplyResult): boolean {
+  return result.journal.some(
+    (entry) =>
+      entry.op === 'set-env' || (entry.op !== 'ran' && path.normalize(entry.path).startsWith(`src${path.sep}`)),
+  );
 }
 
 /**

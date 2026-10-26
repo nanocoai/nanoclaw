@@ -17,7 +17,8 @@ instructions, host, and setup metadata contracts. The host contract remains at
 version 1; the container owns its non-secret ChatGPT placeholder file.
 
 OpenCode is offered by the standard setup provider picker. Existing installs can
-add or authenticate it with `pnpm exec tsx setup/index.ts --step provider-auth opencode`.
+add or authenticate it with `pnpm exec tsx setup/index.ts --step provider-auth opencode`;
+an install that way also rebuilds and restarts the host.
 To replace an installed payload and update its pins, append `--refresh`; back up
 local payload edits first. Ordinary re-authentication leaves installed files and
 the container image alone. Backend defaults are installation-wide; model and
@@ -201,7 +202,8 @@ supported native backend. Automatic API-key configuration supports OpenAI,
 OpenRouter, DeepSeek, Google, and Anthropic; other native authentication schemes
 require separate integration. The command stores credentials in the configured
 credential gateway selected by `NANOCLAW_GATEWAY_PROVIDER` and backend defaults in
-`.env`. The full setup wizard also offers this flow and selects OpenCode for
+`.env`; when that changes `.env`, the command restarts the host service so the
+running host reads the new endpoint. The full setup wizard also offers this flow and selects OpenCode for
 new groups only after configuration succeeds. The standalone command leaves the
 instance default unchanged.
 
@@ -222,11 +224,11 @@ whether a manual grant or a manual re-auth after expiry applies. Do not put a ke
 `.env`, command arguments, or the container environment.
 
 After installing on a running NanoClaw host, restart its actual host service
-before waking any OpenCode group. This reloads the host provider registration and
-backend settings. On Linux use `systemctl --user restart nanoclaw-v2-<install-slug>.service`
-(or the installation's system service command); on macOS use its normal launchd
-restart workflow. Confirm the service is running, then select and restart the
-test group:
+before waking any OpenCode group (the provider-auth install already did). This
+reloads the host provider registration and backend settings:
+`bash setup/lib/restart.sh` restarts the launchd, systemd or nohup service and
+waits for the new host. Confirm the service is running, then select and restart
+the test group:
 
 ```bash
 ncl groups config update --id <group-id> --provider opencode

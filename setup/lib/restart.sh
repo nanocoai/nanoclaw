@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Restart this checkout and require a response from a new host instance.
+# Exits 2 when no service or nohup launcher is installed for it.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
@@ -77,7 +78,7 @@ fi
 
 if [ "$restarted" = false ]; then
   echo "nanoclaw: no installed service or nohup launcher to restart" >&2
-  exit 1
+  exit 2
 fi
 
 args=(wait "$root" --previous "$previous" --pid "$pid" --started-after "$started_after")

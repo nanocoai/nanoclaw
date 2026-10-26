@@ -9,12 +9,17 @@
  * Same walk-through, same vault-only invariant, idempotent (each provider's
  * runAuth short-circuits when its secret already exists) — and unlike
  * re-running full setup, it touches nothing else: no install-wide default
- * provider rewrite, no service changes. Provider install skills call this as
- * their auth step so there is exactly one auth implementation per provider.
+ * provider rewrite. An install that changes host code also rebuilds the host
+ * and restarts the service, so the running host knows the provider. Any run,
+ * re-authentication included, restarts after auth when auth saved settings
+ * the host reads at start (OpenCode's endpoint). Provider install
+ * skills call this as their auth step so there is exactly one auth
+ * implementation per provider.
  * Pass --refresh to intentionally replace the installed payload and update its
  * dependency pins before authentication.
  */
 import { buildContainerImage } from './lib/container-build.js';
+import { HOST_RESTART_COMMAND, readHostSettings, restartHost } from './lib/host-restart.js';
 import * as p from '@clack/prompts';
 import { HARDENED_IMAGE_ENV_KEY, readImageSource, writeImageSource } from './lib/registry-state.js';
 import { getSetupProvider, listSetupProviders } from './providers/registry.js';
@@ -37,6 +42,9 @@ export async function run(args: string[]): Promise<void> {
   }
 
   let entry = getSetupProvider(name);
+  // An install-time restart that found no service, or failed, has already
+  // told the operator; a second attempt after auth would only repeat it.
+  let restartFailed = false;
   const skillDir = getInstallableProviderDescriptor(name)?.skillDir;
   if (refresh && !skillDir) throw new Error(`Provider '${name}' has no install skill to refresh.`);
   if (skillDir && (!entry || refresh)) {
@@ -58,7 +66,7 @@ export async function run(args: string[]): Promise<void> {
     // requested. That keeps reauthentication usable without registry/build
     // access and preserves the operator's installed payload and pins.
     console.log(`${refresh ? 'Refreshing' : 'Installing'} ${name}…`);
-    const { changed, blockers, hostContractModules } = await applyProviderSkill(skillDir, process.cwd(), {
+    const { changed, hostChanged, blockers, hostContractModules } = await applyProviderSkill(skillDir, process.cwd(), {
       mode: refresh ? 'refresh' : 'install',
     });
     if (blockers.length) {
@@ -77,6 +85,9 @@ export async function run(args: string[]): Promise<void> {
         process.exit(1);
       }
     }
+    // Before auth: a failed sign-in exits the process, and a re-run finds the
+    // provider registered and only re-authenticates, so it never restarts.
+    if (hostChanged) restartFailed = restartHostFor(name) !== 'restarted';
     // This process imported src/provider-contracts/index.ts at startup, and
     // ESM caches the barrel, so a line appended to it now never evaluates
     // here; load the contract module directly before the auth step asks the
@@ -106,6 +117,45 @@ export async function run(args: string[]): Promise<void> {
     process.exit(1);
   }
 
+  const settings = readHostSettings();
   await entry.runAuth();
   await entry.runInstallCheck?.();
+  // Auth may save settings the host reads only at start (OpenCode's endpoint).
+  // A failed build can still emit dist/ (tsc has no noEmitOnError), so this
+  // builds and refuses to restart onto a failed build, as the install path does.
+  if (!restartFailed && readHostSettings() !== settings) {
+    // A host restart adopts running agent containers, which keep the settings
+    // they started with until they restart.
+    if (restartHostFor(name, { settingsOnly: true }) !== 'no-service') console.log(AGENTS_KEEP_SETTINGS(name));
+  }
+}
+
+const AGENTS_KEEP_SETTINGS = (name: string) =>
+  `Agents already running keep their old ${name} settings until they restart: bin/ncl groups restart --id <group-id>`;
+
+const SERVICE_STEP_COMMAND = 'pnpm exec tsx setup/index.ts --step service';
+
+function restartHostFor(name: string, opts: { settingsOnly?: boolean } = {}): 'restarted' | 'no-service' | 'failed' {
+  console.log(`Restarting NanoClaw so the running host loads ${name}…`);
+  const restart = restartHost();
+  if (restart.status === 'restarted') return 'restarted';
+  if (restart.status === 'no-service') {
+    // Nothing failed: the service step starts the build made above. A host
+    // started by hand is not a service, so name it in the same line, with its
+    // running agents when only settings changed.
+    const byHand = opts.settingsOnly
+      ? 'or restart a host you started by hand, then its running agents: bin/ncl groups restart --id <group-id>'
+      : 'or restart a host you started by hand';
+    console.log(
+      `No NanoClaw service is installed, so nothing was restarted. To use ${name}, start one with ${SERVICE_STEP_COMMAND} (${byHand}).`,
+    );
+    return 'no-service';
+  }
+  // Auth only talks to the gateway, so it still runs; the exit code reports
+  // the restart the operator has to finish by hand.
+  console.error(
+    `Couldn't restart NanoClaw (${restart.message}); it runs without ${name} until you run: ${HOST_RESTART_COMMAND}`,
+  );
+  process.exitCode = 1;
+  return 'failed';
 }

@@ -59,8 +59,8 @@ native transport selection; making it read-only would prevent local edits but
 would not isolate the gateway's credentials further.
 
 When updating from the earlier candidate, run
-`pnpm exec tsx setup/index.ts --step provider-auth opencode --refresh` and restart the
-host service and affected agent containers together. A running container retains
+`pnpm exec tsx setup/index.ts --step provider-auth opencode --refresh` (it rebuilds and
+restarts the host service), then restart the affected agent containers. A running container retains
 its old bind mounts until recreated. The obsolete `data/opencode/openai-auth-stub.json`
 file is no longer read; it may be removed separately after verifying that no old
 container uses it. Host-native OpenCode auth files must be preserved.

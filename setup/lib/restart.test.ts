@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -91,4 +91,31 @@ echo $! > ${JSON.stringify(path.join(root, 'nanoclaw.pid'))}
     expect(fs.existsSync(path.join(root, 'launcher-ran'))).toBe(true);
     expect(Number(fs.readFileSync(path.join(root, 'nanoclaw.pid'), 'utf8'))).toBeGreaterThan(0);
   }, 20000);
+
+  // provider-auth tells "nothing to restart" apart from a failed restart by
+  // this code, which the macOS branch already returns.
+  it('exits 2 when neither systemd nor the nohup launcher runs the install', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-restart-'));
+    roots.push(root);
+    const lib = path.join(root, 'setup', 'lib');
+    const bin = path.join(root, 'fixture-bin');
+    fs.mkdirSync(lib, { recursive: true });
+    fs.mkdirSync(bin);
+    fs.mkdirSync(path.join(root, 'data'));
+    for (const name of ['host-status.mjs', 'restart.sh', 'install-slug.sh']) {
+      fs.copyFileSync(new URL(`./${name}`, import.meta.url), path.join(lib, name));
+    }
+    fs.writeFileSync(path.join(bin, 'uname'), '#!/bin/sh\necho Linux\n', { mode: 0o755 });
+    fs.writeFileSync(path.join(bin, 'systemctl'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+
+    const result = spawnSync('/bin/bash', [path.join(lib, 'restart.sh')], {
+      cwd: root,
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}` },
+      encoding: 'utf8',
+      timeout: 15000,
+    });
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('no installed service or nohup launcher');
+  });
 });
