@@ -23,3 +23,19 @@ export function namespacedPlatformId(channel: string, raw: string): string {
   if (channel === 'deltachat') return raw;
   return `${channel}:${raw}`;
 }
+
+/**
+ * Namespace a raw platform user ID with its channel type to match users(id).
+ *
+ * Distinct from namespacedPlatformId: user IDs get no '@'/'+' escapes, so
+ * WhatsApp JIDs and Signal numbers keep the prefix they are stored with.
+ *
+ * The prefix test is startsWith(`${channel}:`), not includes(':'): Teams user
+ * IDs are natively colon-bearing ("29:1Eiqnrl..."), so an includes(':') test
+ * reads them as already-namespaced and leaves them bare — they then never
+ * match the stored "teams:29:1Eiqnrl..." and every card click is rejected as
+ * an unauthorized clicker.
+ */
+export function namespacedUserId(channel: string, raw: string): string {
+  return raw.startsWith(`${channel}:`) ? raw : `${channel}:${raw}`;
+}
