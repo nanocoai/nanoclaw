@@ -15,6 +15,58 @@ const FULL_RESET = '\x1b[0m';
 
 const threshold = LEVELS[(process.env.LOG_LEVEL as Level) || 'info'] ?? LEVELS.info;
 
+// Own fields printed with an Error. An allowlist: SDK errors can carry request
+// config and headers, and a log must never receive a credential.
+const ERROR_FIELDS = [
+  'code',
+  'errno',
+  'syscall',
+  'address',
+  'port',
+  'hostname',
+  'path',
+  'signal',
+  'status',
+  'statusCode',
+];
+const SECRET_KEY = /token|secret|password|authorization|cookie|api[-_]?key|credential/i;
+const MAX_CAUSE_DEPTH = 5;
+
+function redact(value: unknown, depth = 0): unknown {
+  if (typeof value !== 'object' || value === null || depth > MAX_CAUSE_DEPTH) return value;
+  if (Array.isArray(value)) return value.map((v) => redact(v, depth + 1));
+  return Object.fromEntries(
+    Object.entries(value).map(([k, v]) => [k, SECRET_KEY.test(k) ? '[redacted]' : redact(v, depth + 1)]),
+  );
+}
+
+function errorFields(err: Error): Record<string, unknown> | undefined {
+  const fields = Object.fromEntries(
+    ERROR_FIELDS.filter((key) => Object.prototype.hasOwnProperty.call(err, key)).map((key) => [
+      key,
+      redact((err as unknown as Record<string, unknown>)[key]),
+    ]),
+  );
+  return Object.keys(fields).length > 0 ? fields : undefined;
+}
+
+// JSON.stringify(new Error('x')) is `{}`: give every Error, at any key or depth,
+// its message, stack, allowlisted fields and causes.
+function serializeError(err: Error, depth = 0): Record<string, unknown> {
+  const out: Record<string, unknown> = { type: err.constructor.name, message: err.message };
+  const fields = errorFields(err);
+  if (fields) out.fields = fields;
+  if (err.stack) out.stack = err.stack;
+  if (depth < MAX_CAUSE_DEPTH) {
+    if (err.cause !== undefined)
+      out.cause = err.cause instanceof Error ? serializeError(err.cause, depth + 1) : err.cause;
+    if (err instanceof AggregateError) {
+      out.errors = err.errors.map((e: unknown) => (e instanceof Error ? serializeError(e, depth + 1) : e));
+    }
+  }
+  return out;
+}
+
 function safeStringify(v: unknown): string {
   // The replacer runs after each toJSON, so nested redaction holds; mapping BigInt
   // and cycles here keeps stringify from throwing on them.
@@ -23,6 +75,7 @@ function safeStringify(v: unknown): string {
   try {
     return JSON.stringify(v, function (this: unknown, _key, value: unknown) {
       if (typeof value === 'bigint') return `${value}n`;
+      if (value instanceof Error) return serializeError(value);
       if (typeof value !== 'object' || value === null) return value;
       while (ancestors.length && ancestors[ancestors.length - 1] !== this) ancestors.pop();
       if (ancestors.includes(value)) return '[Circular]';
@@ -36,11 +89,21 @@ function safeStringify(v: unknown): string {
   /* eslint-enable no-catch-all/no-catch-all */
 }
 
-function formatErr(err: unknown): string {
-  if (err instanceof Error) {
-    return `{ type: "${err.constructor.name}", message: "${err.message}", stack: ${err.stack} }`;
+// `err` keeps its one-line shape; each cause and AggregateError member follows
+// on its own line.
+function formatErr(err: unknown, depth = 0): string {
+  if (!(err instanceof Error)) return safeStringify(err);
+  const fields = errorFields(err);
+  const lines = [
+    `{ type: "${err.constructor.name}", message: "${err.message}",${fields ? ` fields: ${safeStringify(fields)},` : ''} stack: ${err.stack} }`,
+  ];
+  if (depth < MAX_CAUSE_DEPTH) {
+    if (err instanceof AggregateError) {
+      err.errors.forEach((inner: unknown, i: number) => lines.push(`error[${i}]: ${formatErr(inner, depth + 1)}`));
+    }
+    if (err.cause !== undefined) lines.push(`caused by: ${formatErr(err.cause, depth + 1)}`);
   }
-  return safeStringify(err);
+  return lines.join('\n');
 }
 
 function formatData(data: Record<string, unknown>): string {
