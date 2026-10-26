@@ -11,6 +11,9 @@ import type { McpServerConfig, ProviderSpeed } from './providers/types.js';
 
 const CONFIG_PATH = '/workspace/agent/container.json';
 
+/** How this group's agent reaches a destination. */
+export type DeliveryMode = 'envelope' | 'tools-only';
+
 export interface RunnerConfig {
   provider: string;
   assistantName: string;
@@ -21,6 +24,7 @@ export interface RunnerConfig {
   model?: string;
   effort?: string;
   speed?: ProviderSpeed;
+  deliveryMode: DeliveryMode;
 }
 
 const DEFAULT_MAX_MESSAGES = 10;
@@ -58,6 +62,9 @@ export function runnerConfigFromRaw(raw: Record<string, unknown>): RunnerConfig 
     model: (raw.model as string) || undefined,
     effort: (raw.effort as string) || undefined,
     speed: readSpeed(raw),
+    // Only the explicit opt-in changes the contract. Missing and malformed
+    // values preserve the historical envelope behavior.
+    deliveryMode: raw.deliveryMode === 'tools-only' ? 'tools-only' : 'envelope',
   };
 }
 
