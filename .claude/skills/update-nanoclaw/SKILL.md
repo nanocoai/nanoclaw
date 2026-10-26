@@ -234,6 +234,14 @@ rollback:
 pnpm exec tsx scripts/update-nanoclaw.ts cleanup --id "$id"
 ```
 
+Then reinstall the `ncl` CLI symlink so it stays on PATH across this upgrade
+(the fresh-install `service` step isn't part of this flow, so it wouldn't
+otherwise run again):
+
+```bash
+pnpm exec tsx scripts/install-cli-symlink.ts
+```
+
 If health fails, the controller restores the previous Git commit and mutable
 state, rebuilds the previous image, restarts the old service, and verifies it.
 If an external component was changed, also execute the recorded external
