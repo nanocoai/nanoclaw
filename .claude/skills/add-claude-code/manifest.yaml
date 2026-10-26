@@ -1,0 +1,14 @@
+skill: claude-code
+version: 1.0.0
+description: "Connect container agents to Claude Code on the host for coding tasks"
+core_version: 0.1.0
+adds:
+  - src/claude-code-service.ts
+  - container/agent-runner/src/claude-code-proxy.ts
+modifies:
+  - src/index.ts
+  - container/agent-runner/src/index.ts
+structured:
+  env_additions: []
+conflicts: []
+depends: []
