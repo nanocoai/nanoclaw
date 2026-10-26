@@ -29,7 +29,7 @@ vi.mock('../../container-restart.js', () => ({
 
 vi.mock('../../config.js', async () => {
   const actual = await vi.importActual('../../config.js');
-  return { ...actual, DATA_DIR: '/tmp/nanoclaw-test-cli-groups' };
+  return { ...actual, DATA_DIR: '/tmp/nanoclaw-test-cli-groups', DEFAULT_AGENT_PROVIDER: 'claude' };
 });
 
 const TEST_DIR = '/tmp/nanoclaw-test-cli-groups';
