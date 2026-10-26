@@ -13,7 +13,7 @@ describe('container/Dockerfile base image', () => {
   const from = dockerfile.match(/^FROM node:(\S+)$/m);
 
   it('pins an exact Node release by digest', () => {
-    expect(from?.[1]).toMatch(/^\d+\.\d+\.\d+-slim@sha256:[0-9a-f]{64}$/);
+    expect(from?.[1]).toMatch(/^\d+\.\d+\.\d+-(?:[a-z]+-)?slim@sha256:[0-9a-f]{64}$/);
   });
 
   it('meets the Node minimum', () => {

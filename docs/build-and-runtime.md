@@ -37,7 +37,7 @@ Both are committed. CI and the Dockerfile run `--frozen-lockfile` variants — a
 
 ## Image build surface
 
-`container/Dockerfile` is a single-stage build on `node:22.23.4-slim`:
+`container/Dockerfile` is a single-stage build on `node:24.22.1-trixie-slim`:
 
 - **Pinned base** — tag and multi-arch digest, bumped together, at or above the minimum in `setup/lib/node-version.sh`.
 - **Pinned ARGs** — `BUN_VERSION`, `PNPM_VERSION`, `INSTALL_CJK_FONTS`. Bump deliberately in PRs. Global CLI versions (`@anthropic-ai/claude-code`, `agent-browser`, `vercel`) are pinned separately in `container/cli-tools.json`, not as ARGs.
