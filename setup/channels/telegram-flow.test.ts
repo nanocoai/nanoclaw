@@ -44,7 +44,7 @@ interface Recorded {
 async function run(
   envBefore: string,
   inputs: Record<string, string>,
-  // What the stubbed getMe answers per curl: by default each token resolves to its own bot.
+  // Which bot the stubbed getMe returns per curl: by default each token resolves to its own bot.
   getMe: (cmd: string) => string = (cmd) => (cmd.includes(NEW_TOKEN) ? 'mega_bot' : 'nanoclaw_bot'),
 ): Promise<Recorded> {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-tg-flow-'));
@@ -65,7 +65,7 @@ async function run(
     exec: (cmd) => {
       execs.push(cmd);
       if (/^(git|pnpm|bash)\b/.test(cmd) || cmd.includes('git show ')) return '';
-      if (cmd.startsWith('curl')) return getMe(cmd);
+      if (cmd.startsWith('curl')) return JSON.stringify({ ok: true, result: { username: getMe(cmd) } });
       return execFileSync('bash', ['-c', cmd], { cwd: root, encoding: 'utf-8' });
     },
     execStream: async (cmd) => {

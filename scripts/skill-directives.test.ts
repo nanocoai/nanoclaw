@@ -136,7 +136,7 @@ describe('skill-directives parser, on the converted add-slack', () => {
     const resolve = runs.find((d) => d.attrs.capture === 'platform_id')!;
     expect(resolve).toBeTruthy();
     expect(resolve.body.join(' ')).toMatch(/conversations\.open/);
-    expect(resolve.body.join(' ')).toMatch(/"slack:" \+ \.channel\.id/); // emits the slack:<id> platform_id
+    expect(resolve.body.join(' ')).toMatch(/"slack:"\+id/); // emits the slack:<id> platform_id
   });
 
   it('wires the captured variables into env-set via {{var}} references, one per mode', () => {

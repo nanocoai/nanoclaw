@@ -224,7 +224,7 @@ Confirm the account's number — this becomes the agent's public line (its
 `platform_id`):
 
 ```nc:run capture:platform_id validate:^\+[1-9]\d{6,14}$ effect:fetch
-DIAL_USER_AGENT={{dial_ua}} dial number list --json | jq -er '.numbers[0].number'
+DIAL_USER_AGENT={{dial_ua}} dial number list --json | node -e 'try{const n=JSON.parse(require("fs").readFileSync(0,"utf8")).numbers[0].number;if(n==null)process.exit(1);console.log(n)}catch{process.exit(1)}'
 ```
 ```nc:operator
 Your agent's Dial line is {{platform_id}}.
@@ -253,7 +253,7 @@ Rewriting `phoneNumber`/`phoneNumberId` in the auth file makes the no-flag path
 land on the wired line, so an agent that forgets the selector is still correct:
 
 ```nc:run effect:external
-f="${XDG_DATA_HOME:-$HOME/.local/share}/dial/auth.v1.json"; i=$(DIAL_USER_AGENT={{dial_ua}} dial number list --json | jq -er --arg n '{{platform_id}}' '.numbers[]|select(.number==$n)|.id') && jq --arg n '{{platform_id}}' --arg i "$i" '.phoneNumber=$n|.phoneNumberId=$i' "$f" > "$f.new" && mv -f "$f.new" "$f" && chmod 600 "$f" && echo "default sender pinned to {{platform_id}}"
+f="${XDG_DATA_HOME:-$HOME/.local/share}/dial/auth.v1.json"; DIAL_USER_AGENT={{dial_ua}} dial number list --json | node -e 'try{const fs=require("fs");const[n,f]=process.argv.slice(1);const i=JSON.parse(fs.readFileSync(0,"utf8")).numbers.find((x)=>x.number===n)?.id;if(typeof i!=="string"&&typeof i!=="number")process.exit(1);const a=JSON.parse(fs.readFileSync(f,"utf8"));if(!a||typeof a!=="object"||Array.isArray(a))process.exit(1);a.phoneNumber=n;a.phoneNumberId=String(i);fs.writeFileSync(f+".new",JSON.stringify(a,null,2)+"\n",{mode:0o600})}catch{process.exit(1)}' '{{platform_id}}' "$f" && mv -f "$f.new" "$f" && chmod 600 "$f" && echo "default sender pinned to {{platform_id}}"
 ```
 
 ## Choose who may text the line
@@ -390,13 +390,13 @@ this skill owns the operator's terminal. List the groups, then collect the answe
 and hand it down:
 
 ```nc:run capture:has_agents validate:^(yes|no)$ when:install_tool=yes effect:fetch
-ncl groups list --json | jq -r 'if (.data|length)==0 then "no" else "yes" end'
+ncl groups list --json | node -e 'try{const d=JSON.parse(require("fs").readFileSync(0,"utf8")).data;console.log(d==null||d.length===0?"no":"yes")}catch{process.exit(1)}'
 ```
 ```nc:operator when:has_agents=no
 No agents exist yet, so there is nobody to give Dial to. Installing the tool with no agent holding the key; once your first agent exists, run `/add-dial-tool` to give it Dial.
 ```
 ```nc:run capture:agent_groups when:has_agents=yes effect:fetch
-ncl groups list --json | jq -r '[.data[] | "\(.id) (\(.name))"] | join(", ")'
+ncl groups list --json | node -e 'try{console.log(JSON.parse(require("fs").readFileSync(0,"utf8")).data.map((g)=>g.id+" ("+g.name+")").join(", "))}catch{process.exit(1)}'
 ```
 ```nc:operator when:has_agents=yes
 Agents on this install: {{agent_groups}}. Giving an agent Dial lets it text and call any number and buy numbers, billed to your Dial account. Agents you leave out do not get the Dial key (reversible by running /add-dial-tool again). Agents created after this run do not get Dial until you run /add-dial-tool again.

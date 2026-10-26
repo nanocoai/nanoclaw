@@ -24,9 +24,9 @@
         { "match": "TEAMS_APP_ID=.", "stdout": "no" },
         { "match": "app create", "stdout": "{\"credentials\":{\"CLIENT_ID\":\"11111111-2222-3333-4444-555555555555\",\"CLIENT_SECRET\":\"fake-client-secret\",\"TENANT_ID\":\"99999999-8888-7777-6666-555555555555\"},\"teamsAppId\":\"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\",\"installLink\":\"https://teams.microsoft.com/l/app/fake\"}" },
         { "match": "status --json", "stdout": "{\"username\":\"owner@contoso.com\",\"userObjectId\":\"12345678-1234-1234-1234-123456789abc\"}" },
-        { "match": "oauth2/v2.0/token", "stdout": "eyJhbGciOiJIUzI1NiJ9.fake.sig" },
+        { "match": "oauth2/v2.0/token", "stdout": "{\"access_token\":\"eyJhbGciOiJIUzI1NiJ9.fake.sig\"}" },
         { "match": "/members", "stdout": "{\"id\":\"29:1fakeownerid\",\"name\":\"Owner\"}" },
-        { "match": "v3/conversations\"", "stdout": "a:1fakeconversationid" },
+        { "match": "v3/conversations\"", "stdout": "{\"id\":\"a:1fakeconversationid\"}" },
         { "match": "base64url", "stdout": "teams:YTpmYWtl:aHR0cHM6Ly9zbWJh" }
       ]
     },
@@ -45,9 +45,9 @@
         { "match": "app create", "stdout": "{\"credentials\":{\"CLIENT_ID\":\"11111111-2222-3333-4444-555555555555\",\"CLIENT_SECRET\":\"fake-client-secret\",\"TENANT_ID\":\"99999999-8888-7777-6666-555555555555\"},\"teamsAppId\":\"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\",\"installLink\":\"https://teams.microsoft.com/l/app/fake\"}" },
         { "match": "status --json", "stdout": "{\"username\":\"owner@contoso.com\",\"userObjectId\":\"12345678-1234-1234-1234-123456789abc\"}" },
         { "match": "printf '{\"aad\"", "stdout": "{\"aad\":\"12345678-1234-1234-1234-123456789abc\",\"wire\":\"yes\"}" },
-        { "match": "oauth2/v2.0/token", "stdout": "eyJhbGciOiJIUzI1NiJ9.fake.sig" },
+        { "match": "oauth2/v2.0/token", "stdout": "{\"access_token\":\"eyJhbGciOiJIUzI1NiJ9.fake.sig\"}" },
         { "match": "/members", "stdout": "{\"id\":\"29:1faketargetid\",\"name\":\"Target user\"}" },
-        { "match": "v3/conversations\"", "stdout": "a:1fakeconversationid" },
+        { "match": "v3/conversations\"", "stdout": "{\"id\":\"a:1fakeconversationid\"}" },
         { "match": "base64url", "stdout": "teams:YTpmYWtl:aHR0cHM6Ly9zbWJh" }
       ]
     },
@@ -65,9 +65,9 @@
         { "match": "app create", "stdout": "{\"credentials\":{\"CLIENT_ID\":\"11111111-2222-3333-4444-555555555555\",\"CLIENT_SECRET\":\"fake-client-secret\",\"TENANT_ID\":\"99999999-8888-7777-6666-555555555555\"},\"teamsAppId\":\"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\",\"installLink\":\"https://teams.microsoft.com/l/app/fake\"}" },
         { "match": "status --json", "stdout": "{\"username\":\"owner@contoso.com\",\"userObjectId\":\"12345678-1234-1234-1234-123456789abc\"}" },
         { "match": "echo yes", "stdout": "yes" },
-        { "match": "oauth2/v2.0/token", "stdout": "eyJhbGciOiJIUzI1NiJ9.fake.sig" },
+        { "match": "oauth2/v2.0/token", "stdout": "{\"access_token\":\"eyJhbGciOiJIUzI1NiJ9.fake.sig\"}" },
         { "match": "/members", "stdout": "{\"id\":\"29:1fakeownerid\",\"name\":\"Owner\"}" },
-        { "match": "v3/conversations\"", "stdout": "a:1fakeconversationid" },
+        { "match": "v3/conversations\"", "stdout": "{\"id\":\"a:1fakeconversationid\"}" },
         { "match": "base64url", "stdout": "teams:YTpmYWtl:aHR0cHM6Ly9zbWJh" }
       ]
     }

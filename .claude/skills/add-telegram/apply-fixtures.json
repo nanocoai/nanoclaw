@@ -13,7 +13,7 @@
       "exec": [
         { "match": "^TELEGRAM_BOT_TOKEN=.+' .env", "stdout": "no" },
         { "match": "echo ask || echo no", "stdout": "no" },
-        { "match": "getMe", "stdout": "nanoclaw_bot" }
+        { "match": "getMe", "stdout": "{\"ok\":true,\"result\":{\"username\":\"nanoclaw_bot\"}}" }
       ],
       "stepFields": { "PLATFORM_ID": "telegram:123456789", "ADMIN_USER_ID": "987654321" }
     },
@@ -28,8 +28,8 @@
       "exec": [
         { "match": "^TELEGRAM_BOT_TOKEN=.+' .env", "stdout": "yes" },
         { "match": "echo ask || echo no", "stdout": "ask" },
-        { "match": "bot123456789:AAAA", "stdout": "nanoclaw_bot" },
-        { "match": "bot987654321:BBBB", "stdout": "mega_bot" },
+        { "match": "bot123456789:AAAA", "stdout": "{\"ok\":true,\"result\":{\"username\":\"nanoclaw_bot\"}}" },
+        { "match": "bot987654321:BBBB", "stdout": "{\"ok\":true,\"result\":{\"username\":\"mega_bot\"}}" },
         { "match": "tr 'a-z-' 'A-Z_'", "stdout": "MEGA" },
         { "match": "echo telegram-", "stdout": "telegram-mega" }
       ],

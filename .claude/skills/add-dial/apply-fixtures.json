@@ -46,7 +46,7 @@
       },
       "exec": [
         {
-          "match": "(.data|length)==0",
+          "match": "d.length===0",
           "stdout": "yes"
         },
         {
@@ -116,7 +116,7 @@
       },
       "exec": [
         {
-          "match": "(.data|length)==0",
+          "match": "d.length===0",
           "stdout": "no"
         },
         {

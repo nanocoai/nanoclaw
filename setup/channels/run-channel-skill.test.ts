@@ -40,7 +40,7 @@ describe('runChannelSkill adapter (Option A)', () => {
     const exec = (c: string): string | void => {
       cmds.push(c);
       if (c.includes('auth.test')) return '@bot in Acme\n'; // identity capture
-      // the resolve run: conversations.open piped through jq → "slack:<channel>"
+      // the resolve run: conversations.open piped through node → "slack:<channel>"
       if (c.includes('conversations.open')) return 'slack:D0SLACK\n';
     };
     const wired: Array<Record<string, unknown>> = [];
@@ -200,8 +200,8 @@ describe('runChannelSkill adapter (Option A)', () => {
     const opened: string[] = [];
     const steps: string[] = [];
 
-    // The DM-open chain's expected results. The exec mock returns each
-    // command's FINAL stdout (post-jq), matching what the engine captures.
+    // The DM-open chain's expected results. The exec mock returns what each
+    // command prints: the API's JSON for a dot-path capture, else the final stdout.
     const EXPECTED_PLATFORM_ID = `teams:${Buffer.from('a:1conv').toString('base64url')}:${Buffer.from('https://smba.trafficmanager.net/teams/').toString('base64url')}`;
 
     const res = await runSkill('.claude/skills/add-teams', {
@@ -233,10 +233,10 @@ describe('runChannelSkill adapter (Option A)', () => {
             userObjectId: 'aad-owner-1',
           });
         }
-        if (c.includes('login.microsoftonline.com')) return 'eyJfake.bot.token';
+        if (c.includes('login.microsoftonline.com')) return JSON.stringify({ access_token: 'eyJfake.bot.token' });
         // /members is a sub-path of /v3/conversations — match it FIRST
         if (c.includes('/members')) return JSON.stringify({ id: '29:owner-xyz', name: 'Dan Mill' });
-        if (c.includes('/v3/conversations')) return 'a:1conv';
+        if (c.includes('/v3/conversations')) return JSON.stringify({ id: 'a:1conv' });
         if (c.includes('node -e')) return EXPECTED_PLATFORM_ID;
       },
       execStream: async (cmd) => {
@@ -334,9 +334,9 @@ describe('runChannelSkill adapter (Option A)', () => {
         }
         // the rebind fence: printf its own substituted JSON back
         if (c.includes('"wire":"yes"')) return `{"aad":"${TARGET_AAD}","wire":"yes"}`;
-        if (c.includes('login.microsoftonline.com')) return 'eyJfake.bot.token';
+        if (c.includes('login.microsoftonline.com')) return JSON.stringify({ access_token: 'eyJfake.bot.token' });
         if (c.includes('/members')) return JSON.stringify({ id: '29:target-xyz', name: 'Desired Person' });
-        if (c.includes('/v3/conversations')) return 'a:2conv';
+        if (c.includes('/v3/conversations')) return JSON.stringify({ id: 'a:2conv' });
         if (c.includes('node -e')) return EXPECTED_PLATFORM_ID;
       },
       execStream: async () => ({ ok: true, fields: { STATUS: 'success' } }),
@@ -392,9 +392,9 @@ describe('runChannelSkill adapter (Option A)', () => {
         if (c.includes('status --json')) {
           return JSON.stringify({ loggedIn: true, username: 'dan@acme.example', userObjectId: 'aad-owner-1' });
         }
-        if (c.includes('login.microsoftonline.com')) return 'eyJfake.bot.token';
+        if (c.includes('login.microsoftonline.com')) return JSON.stringify({ access_token: 'eyJfake.bot.token' });
         if (c.includes('/members')) return JSON.stringify({ id: '29:owner-xyz', name: 'Dan Mill' });
-        if (c.includes('/v3/conversations')) return 'a:3conv';
+        if (c.includes('/v3/conversations')) return JSON.stringify({ id: 'a:3conv' });
         if (c.includes('node -e')) return 'teams:b64:b64';
       },
       execStream: async () => ({ ok: true, fields: { STATUS: 'success' } }),

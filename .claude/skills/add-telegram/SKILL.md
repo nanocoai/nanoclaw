@@ -134,8 +134,8 @@ Confirm the token works and capture the bot's handle — `getMe` returns the bot
 account and fails here if the token is bad. You'll use the handle to open the
 right chat just before pairing:
 
-```nc:run capture:bot_username effect:fetch
-curl -sf https://api.telegram.org/bot{{bot_token}}/getMe | jq -er '.result.username'
+```nc:run capture:bot_username=.result.username validate:^.+$ effect:fetch
+curl -sf https://api.telegram.org/bot{{bot_token}}/getMe
 ```
 
 ### Add another bot
@@ -172,8 +172,8 @@ Then confirm its token with `getMe` as above:
 ```nc:prompt bot_token_2 secret validate:^[0-9]+:[A-Za-z0-9_-]{35,}$ when:add_another=yes
 Paste the second bot's token from BotFather (looks like `123456:ABC-DEF...`). It must belong to a different bot than the one already configured.
 ```
-```nc:run capture:bot_username_2 effect:fetch when:add_another=yes
-curl -sf https://api.telegram.org/bot{{bot_token_2}}/getMe | jq -er '.result.username'
+```nc:run capture:bot_username_2=.result.username validate:^.+$ effect:fetch when:add_another=yes
+curl -sf https://api.telegram.org/bot{{bot_token_2}}/getMe
 ```
 
 A second token that resolves to the same bot as the first (its handle matches) is

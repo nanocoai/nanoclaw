@@ -290,16 +290,16 @@ below can fail once — re-running the skill is safe.
 
 First a Bot Framework token from the app credentials:
 
-```nc:run effect:fetch when:wire_owner=yes capture:bot_token validate:^eyJ
-curl -sf -X POST "https://login.microsoftonline.com/{{app_tenant_id}}/oauth2/v2.0/token" --data-urlencode "grant_type=client_credentials" --data-urlencode "client_id={{app_id}}" --data-urlencode "client_secret={{app_password}}" --data-urlencode "scope=https://api.botframework.com/.default" | jq -er '.access_token'
+```nc:run effect:fetch when:wire_owner=yes capture:bot_token=.access_token validate:^eyJ
+curl -sf -X POST "https://login.microsoftonline.com/{{app_tenant_id}}/oauth2/v2.0/token" --data-urlencode "grant_type=client_credentials" --data-urlencode "client_id={{app_id}}" --data-urlencode "client_secret={{app_password}}" --data-urlencode "scope=https://api.botframework.com/.default"
 ```
 
 Create the 1:1 conversation (the AAD object id from the CLI session is a
 valid member id; `smba.trafficmanager.net/teams` is the global service URL —
 the same default the adapter itself uses):
 
-```nc:run effect:fetch when:wire_owner=yes capture:conversation_id validate:^.+$
-curl -sf -X POST "https://smba.trafficmanager.net/teams/v3/conversations" -H "Authorization: Bearer {{bot_token}}" -H "Content-Type: application/json" -d '{"bot":{"id":"28:{{app_id}}"},"members":[{"id":"{{owner_aad_id}}","name":"","role":"user"}],"tenantId":"{{app_tenant_id}}","channelData":{"tenant":{"id":"{{app_tenant_id}}"}},"isGroup":false}' | jq -er '.id'
+```nc:run effect:fetch when:wire_owner=yes capture:conversation_id=.id validate:^.+$
+curl -sf -X POST "https://smba.trafficmanager.net/teams/v3/conversations" -H "Authorization: Bearer {{bot_token}}" -H "Content-Type: application/json" -d '{"bot":{"id":"28:{{app_id}}"},"members":[{"id":"{{owner_aad_id}}","name":"","role":"user"}],"tenantId":"{{app_tenant_id}}","channelData":{"tenant":{"id":"{{app_tenant_id}}"}},"isGroup":false}'
 ```
 
 The adapter identifies inbound senders by their Bot Framework `29:` id, not
@@ -311,7 +311,7 @@ filter only guards against channels that list the bot itself (`28:` ids).
 this response and its GUID casing varies.)
 
 ```nc:run effect:fetch when:wire_owner=yes capture:owner_handle=.id,owner_name=.name validate:^.+$
-curl -sf "https://smba.trafficmanager.net/teams/v3/conversations/{{conversation_id}}/members" -H "Authorization: Bearer {{bot_token}}" | jq -er '[.[] | select((.id // "") | startswith("28:") | not)][0] | {id, name: (.name // .givenName // "Teams user")}'
+curl -sf "https://smba.trafficmanager.net/teams/v3/conversations/{{conversation_id}}/members" -H "Authorization: Bearer {{bot_token}}" | node -e 'try{const m=JSON.parse(require("fs").readFileSync(0,"utf8")).filter((x)=>{const id=x?.id??"";if(typeof id!=="string")throw 0;return!id.startsWith("28:")})[0];console.log(JSON.stringify({id:m?.id??null,name:m?.name??m?.givenName??"Teams user"}))}catch{process.exit(1)}'
 ```
 
 Compose the platform id exactly as the adapter encodes thread ids

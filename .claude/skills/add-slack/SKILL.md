@@ -168,12 +168,12 @@ Your Slack member ID (Profile → ⋮ → "Copy member ID"; starts with U).
 
 `auth.test` confirms the bot token works and captures the bot identity:
 ```nc:run capture:connected_as effect:fetch
-curl -sf -X POST https://slack.com/api/auth.test -H "Authorization: Bearer {{bot_token}}" | jq -er '"@" + .user + " in " + .team'
+curl -sf -X POST https://slack.com/api/auth.test -H "Authorization: Bearer {{bot_token}}" | node -e 'try{const r=JSON.parse(require("fs").readFileSync(0,"utf8"));if(![r.user,r.team].every((v)=>typeof v==="string"&&v))process.exit(1);console.log("@"+r.user+" in "+r.team)}catch{process.exit(1)}'
 ```
 
 `conversations.open` yields the DM address `slack:<channelId>` (no channel back = the `im:write` scope is missing — add it and reinstall):
 ```nc:run capture:platform_id effect:fetch
-curl -s -X POST https://slack.com/api/conversations.open -H "Authorization: Bearer {{bot_token}}" -H "Content-Type: application/json" -d '{"users":"{{owner_handle}}"}' | jq -er '"slack:" + .channel.id'
+curl -s -X POST https://slack.com/api/conversations.open -H "Authorization: Bearer {{bot_token}}" -H "Content-Type: application/json" -d '{"users":"{{owner_handle}}"}' | node -e 'try{const id=JSON.parse(require("fs").readFileSync(0,"utf8")).channel?.id;if(typeof id!=="string"||!id)process.exit(1);console.log("slack:"+id)}catch{process.exit(1)}'
 ```
 
 `owner_handle` and `platform_id` feed the owner-wiring step. Sending works immediately;
