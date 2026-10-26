@@ -16,7 +16,13 @@ import {
 import { closeDb, initDb } from './db/connection.js';
 import { runMigrations } from './db/migrations/index.js';
 import { getSessionDriver } from './drivers/index.js';
-import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, stopDeliveryPolls } from './delivery.js';
+import {
+  startActiveDeliveryPoll,
+  startSweepDeliveryPoll,
+  setDeliveryAdapter,
+  stopDeliveryPolls,
+  wrapDeliveryAdapter,
+} from './delivery.js';
 import { startHostInstanceLease, stopHostInstanceLease } from './host-instance.js';
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
 import { startHostModules, stopHostModules } from './host-lifecycle.js';
@@ -167,8 +173,9 @@ async function main(): Promise<void> {
   // 3. Delivery adapter bridge — dispatches to channel adapters by EXACT
   // registry key (instance ?? channelType): a named instance with an
   // offline adapter is never rerouted through a sibling bot. See
-  // createChannelDeliveryAdapter in channels/channel-registry.ts.
-  const deliveryAdapter = createChannelDeliveryAdapter();
+  // createChannelDeliveryAdapter in channels/channel-registry.ts. Modules
+  // may decorate it via registerDeliveryAdapterWrapper.
+  const deliveryAdapter = wrapDeliveryAdapter(createChannelDeliveryAdapter());
   setDeliveryAdapter(deliveryAdapter);
 
   // 4. Core starts the selected gateway's normalized approval subscription

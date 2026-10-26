@@ -129,6 +129,30 @@ export interface ChannelDeliveryAdapter {
   ): Promise<void>;
 }
 
+/**
+ * Decorates the host's channel delivery adapter before anything receives it
+ * (delivery polls, gateway approvals, host modules). Lets a module reroute or
+ * augment outbound sends — e.g. falling back to another channel while the
+ * target one is unreachable — without editing the entry point. Wrappers apply
+ * in registration order, so the last one registered is outermost.
+ */
+export type DeliveryAdapterWrapper = (inner: ChannelDeliveryAdapter) => ChannelDeliveryAdapter;
+
+const deliveryAdapterWrappers: DeliveryAdapterWrapper[] = [];
+
+export function registerDeliveryAdapterWrapper(wrapper: DeliveryAdapterWrapper): () => void {
+  deliveryAdapterWrappers.push(wrapper);
+  return () => {
+    const idx = deliveryAdapterWrappers.indexOf(wrapper);
+    if (idx >= 0) deliveryAdapterWrappers.splice(idx, 1);
+  };
+}
+
+/** Apply registered wrappers; returns `adapter` unchanged when none are registered. */
+export function wrapDeliveryAdapter(adapter: ChannelDeliveryAdapter): ChannelDeliveryAdapter {
+  return deliveryAdapterWrappers.reduce((inner, wrap) => wrap(inner), adapter);
+}
+
 let deliveryAdapter: ChannelDeliveryAdapter | null = null;
 let activePolling = false;
 let sweepPolling = false;
