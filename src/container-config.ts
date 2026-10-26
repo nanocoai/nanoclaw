@@ -418,7 +418,49 @@ export async function materializeContainerJson(agentGroupId: string): Promise<Co
   const p = path.join(GROUPS_DIR, group.folder, 'container.json');
   const dir = path.dirname(p);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(p, JSON.stringify(config, null, 2) + '\n');
+  rewriteInPlace(p, JSON.stringify(config, null, 2) + '\n');
 
   return config;
+}
+
+const { O_CREAT, O_EXCL, O_NOFOLLOW, O_NONBLOCK, O_WRONLY } = fs.constants;
+
+/**
+ * The group dir is agent-writable, so the entry may be a planted symlink or
+ * FIFO: those are replaced, never written through. A regular file keeps its
+ * inode (a rename would detach a running session's read-only mount of it). A
+ * hard link can't cross a mount, so it only names a file the agent can write.
+ */
+function rewriteInPlace(filePath: string, content: string): void {
+  let fd = openRegularFile(filePath);
+  if (fd === undefined) {
+    fs.unlinkSync(filePath);
+    fd = fs.openSync(filePath, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o666);
+  }
+  try {
+    fs.ftruncateSync(fd, 0);
+    fs.writeFileSync(fd, content);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/** A writable descriptor on `filePath` if it is a regular file, else undefined. */
+function openRegularFile(filePath: string): number | undefined {
+  let fd: number;
+  try {
+    // O_NONBLOCK: opening a FIFO with no reader fails with ENXIO instead of hanging.
+    fd = fs.openSync(filePath, O_WRONLY | O_CREAT | O_NOFOLLOW | O_NONBLOCK, 0o666);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ELOOP' || code === 'ENXIO') return undefined;
+    throw err;
+  }
+  let regular = false;
+  try {
+    regular = fs.fstatSync(fd).isFile();
+  } finally {
+    if (!regular) fs.closeSync(fd);
+  }
+  return regular ? fd : undefined;
 }

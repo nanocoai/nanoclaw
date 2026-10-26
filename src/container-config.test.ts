@@ -6,14 +6,22 @@
  * fall back to the global timezone, not silently become UTC, and must never
  * be materialized into container.json.
  */
+import { execFileSync, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+
+const { TEST_ROOT } = vi.hoisted(() => ({ TEST_ROOT: '/tmp/nanoclaw-container-config-test' }));
+vi.mock('./config.js', async () => {
+  const actual = await vi.importActual<typeof import('./config.js')>('./config.js');
+  return { ...actual, GROUPS_DIR: `${TEST_ROOT}/groups` };
+});
 
 import { TIMEZONE } from './config.js';
 import {
   CONTAINER_PLUGINS_DIR,
   configFromDb,
+  materializeContainerJson,
   parseMcpServerConfig,
   resolveGroupTimezone,
   sanitizeStoredMcpServers,
@@ -89,6 +97,82 @@ describe('resolveGroupTimezone', () => {
       /invalid runtime_tier "hypervisor"/,
     );
     expect(configFromDb({ ...row, runtime_tier: null }, GROUP).runtimeTier).toBeUndefined();
+  });
+});
+
+describe('materializeContainerJson', () => {
+  const groupDir = path.join(TEST_ROOT, 'groups', GROUP.folder);
+  const target = path.join(groupDir, 'container.json');
+
+  beforeEach(async () => {
+    fs.rmSync(TEST_ROOT, { recursive: true, force: true });
+    fs.mkdirSync(groupDir, { recursive: true });
+    await runMigrations(await initTestDb());
+    await createAgentGroup(GROUP);
+    await ensureContainerConfig(GROUP.id);
+  });
+  afterEach(async () => {
+    await closeDb();
+    fs.rmSync(TEST_ROOT, { recursive: true, force: true });
+  });
+
+  // The group dir is agent-writable, so container.json can be swapped between
+  // spawns for a symlink to a file outside it. Red if the write follows it.
+  it('replaces a symlink at container.json instead of writing through it', async () => {
+    const victim = path.join(TEST_ROOT, 'victim.txt');
+    fs.writeFileSync(victim, 'ORIGINAL');
+    fs.symlinkSync(victim, target);
+
+    const config = await materializeContainerJson(GROUP.id);
+
+    expect(fs.readFileSync(victim, 'utf-8')).toBe('ORIGINAL');
+    expect(fs.lstatSync(target).isFile()).toBe(true);
+    expect(JSON.parse(fs.readFileSync(target, 'utf-8'))).toEqual(config);
+    expect(fs.readdirSync(groupDir)).toEqual(['container.json']);
+  });
+
+  // The reader is held open so a regression writes into the FIFO and fails
+  // here, instead of blocking the test on a reader-less open.
+  it('replaces a FIFO at container.json instead of writing into it', async () => {
+    execFileSync('mkfifo', [target]);
+    const reader = fs.openSync(target, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+    try {
+      const config = await materializeContainerJson(GROUP.id);
+
+      expect(fs.lstatSync(target).isFile()).toBe(true);
+      expect(JSON.parse(fs.readFileSync(target, 'utf-8'))).toEqual(config);
+    } finally {
+      fs.closeSync(reader);
+    }
+  });
+
+  // A blocking open of a reader-less FIFO would stall the host's spawn path.
+  // The late reader turns that regression into a slow failure, not a hang.
+  it('replaces a reader-less FIFO at container.json without blocking', async () => {
+    execFileSync('mkfifo', [target]);
+    const lateReader = spawn('sh', ['-c', 'sleep 3; cat "$0" > /dev/null', target], { stdio: 'ignore' });
+    try {
+      const started = Date.now();
+      const config = await materializeContainerJson(GROUP.id);
+
+      expect(Date.now() - started).toBeLessThan(1500);
+      expect(fs.lstatSync(target).isFile()).toBe(true);
+      expect(JSON.parse(fs.readFileSync(target, 'utf-8'))).toEqual(config);
+    } finally {
+      lateReader.kill();
+    }
+  });
+
+  // A read-only mount of container.json held by a running session is bound to
+  // the inode; replacing the file by rename would detach it.
+  it('rewrites a regular container.json in place and truncates it', async () => {
+    fs.writeFileSync(target, `{}${' '.repeat(10_000)}trailing`);
+    const inode = fs.statSync(target).ino;
+
+    const config = await materializeContainerJson(GROUP.id);
+
+    expect(fs.statSync(target).ino).toBe(inode);
+    expect(JSON.parse(fs.readFileSync(target, 'utf-8'))).toEqual(config);
   });
 });
 
