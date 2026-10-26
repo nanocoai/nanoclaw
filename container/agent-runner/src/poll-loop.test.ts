@@ -3,6 +3,7 @@ import { describe, it, expect, beforeEach, afterEach, spyOn } from 'bun:test';
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './mailbox/sqlite/connection.js';
 import { getPendingMessages, markCompleted, type MessageInRow } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
+import { getContinuation } from './db/session-state.js';
 import {
   formatMessages,
   extractRouting,
@@ -705,6 +706,140 @@ const TASK_ROUTING = {
   inReplyTo: 't1',
   taskRun: true,
 };
+
+it('waits for provider idle and stream close before rotating a warm continuation', async () => {
+  let releaseBackground: (() => void) | undefined;
+  let releaseClosedInput: (() => void) | undefined;
+  let idle = false;
+  let closed = false;
+  let ended = false;
+  let moves = 0;
+  const exchanges: ProviderExchange[] = [];
+
+  async function* events(): AsyncGenerator<ProviderEvent> {
+    try {
+      yield { type: 'init', continuation: 'warm-session' };
+      yield { type: 'result', text: null };
+      await new Promise<void>((resolve) => {
+        releaseBackground = resolve;
+      });
+      idle = true;
+      const closedInput = new Promise<void>((resolve) => {
+        releaseClosedInput = resolve;
+      });
+      yield { type: 'activity' };
+      await closedInput;
+      // A provider may emit a final error while shutting down. It must not
+      // create a failure notice or another exchange after rotation starts.
+      yield { type: 'result', text: null, isError: true, error: 'late shutdown result' };
+    } finally {
+      closed = true;
+    }
+  }
+
+  const query: AgentQuery = {
+    push: () => {},
+    end: () => {
+      ended = true;
+      releaseClosedInput?.();
+    },
+    abort: () => {},
+    events: events(),
+    canCloseAtIdleBoundary: () => idle,
+  };
+  const running = processQuery(
+    query,
+    TASK_ROUTING,
+    [],
+    'claude',
+    (exchange) => exchanges.push(exchange),
+    'scheduled task',
+    undefined,
+    false,
+    undefined,
+    () => 'transcript exceeded cap',
+    () => {
+      expect(closed).toBe(true);
+      expect(getContinuation('claude')).toBe('warm-session');
+      moves++;
+      return 'transcript exceeded cap';
+    },
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(ended).toBe(false);
+  expect(moves).toBe(0);
+  releaseBackground?.();
+  const result = await running;
+  expect(ended).toBe(true);
+  expect(result.rotationReason).toBe('transcript exceeded cap');
+  expect(moves).toBe(1);
+  expect(getContinuation('claude')).toBeUndefined();
+  expect(exchanges).toHaveLength(0);
+});
+
+it('answers a follow-up queued mid-turn before rotating', async () => {
+  let releaseFirst: (() => void) | undefined;
+  let releaseClosedInput: (() => void) | undefined;
+  let pushed = 0;
+  let results = 0;
+  let checks = 0;
+  const exchanges: ProviderExchange[] = [];
+
+  async function* events(): AsyncGenerator<ProviderEvent> {
+    yield { type: 'init', continuation: 'warm-session' };
+    await new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    yield { type: 'result', text: 'first task done' };
+    results++;
+    const closedInput = new Promise<void>((resolve) => {
+      releaseClosedInput = resolve;
+    });
+    yield { type: 'result', text: 'follow-up done' };
+    results++;
+    await closedInput;
+  }
+
+  const query: AgentQuery = {
+    push: () => {
+      pushed++;
+    },
+    end: () => {
+      releaseClosedInput?.();
+    },
+    abort: () => {},
+    events: events(),
+    canCloseAtIdleBoundary: () => true,
+  };
+  const running = processQuery(
+    query,
+    TASK_ROUTING,
+    [],
+    'claude',
+    (exchange) => exchanges.push(exchange),
+    'first task',
+    undefined,
+    false,
+    undefined,
+    () => {
+      checks++;
+      return 'transcript exceeded cap';
+    },
+    () => 'transcript exceeded cap',
+  );
+  insertMessage('follow-up', 'task', { prompt: 'second task' });
+  for (let i = 0; i < 30 && pushed === 0; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  expect(pushed).toBe(1);
+  releaseFirst?.();
+  const result = await running;
+  expect(result.rotationReason).toBe('transcript exceeded cap');
+  expect(results).toBe(2);
+  expect(exchanges).toHaveLength(2);
+  expect(checks).toBe(1);
+});
 
 function taskLogRows(): Array<{ text: string }> {
   return (

@@ -17,7 +17,7 @@ import {
 } from './claude-config.js';
 // Transcript archiving and rotation are this provider's own concern: both
 // read the SDK's on-disk .jsonl, which no other provider has.
-import { archiveClaudeTranscript, rotateClaudeContinuation } from './claude-history.js';
+import { archiveClaudeTranscript, rotateClaudeContinuation, shouldRotateClaudeContinuation } from './claude-history.js';
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
@@ -253,11 +253,15 @@ export class ClaudeProvider implements AgentProvider {
   }
 
   /**
-   * Pre-resume maintenance: drop a transcript too large or too old to
-   * cold-resume within the host's idle ceiling (see claude-history.ts).
+   * Transcript maintenance: drop a transcript too large or too old to
+   * cold-resume or keep using across warm turns (see claude-history.ts).
    */
   maybeRotateContinuation(continuation: string, _cwd: string): string | null {
     return rotateClaudeContinuation({ continuation, assistantName: this.assistantName, log }, REAL_CLOCK);
+  }
+
+  shouldRotateContinuation(continuation: string, _cwd: string): string | null {
+    return shouldRotateClaudeContinuation(continuation, REAL_CLOCK);
   }
 
   query(input: QueryInput): AgentQuery {
@@ -312,6 +316,7 @@ export class ClaudeProvider implements AgentProvider {
     });
 
     let aborted = false;
+    let sessionIdle = false;
 
     async function* translateEvents(): AsyncGenerator<ProviderEvent> {
       let messageCount = 0;
@@ -319,10 +324,15 @@ export class ClaudeProvider implements AgentProvider {
       for await (const message of sdkResult) {
         if (aborted) return;
 
+        if (message.type === 'system' && message.subtype === 'session_state_changed') {
+          sessionIdle = message.state === 'idle';
+        }
+
         // Yield activity for every SDK event so the poll loop knows the agent
         // is working. Deltas arrive per token and carry no content for us, so
         // they count at most once per second, and not as messages.
         if (message.type === 'stream_event') {
+          sessionIdle = false;
           const now = Date.now();
           if (now - lastStreamActivityAt < STREAM_ACTIVITY_INTERVAL_MS) continue;
           lastStreamActivityAt = now;
@@ -428,13 +438,17 @@ export class ClaudeProvider implements AgentProvider {
     }
 
     return {
-      push: (msg) => stream.push(msg),
+      push: (msg) => {
+        sessionIdle = false;
+        stream.push(msg);
+      },
       end: () => stream.end(),
       events: translateEvents(),
       abort: () => {
         aborted = true;
         stream.end();
       },
+      canCloseAtIdleBoundary: () => sessionIdle,
     };
   }
 }

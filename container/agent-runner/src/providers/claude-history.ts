@@ -209,18 +209,43 @@ function formatTranscriptMarkdown(
 }
 
 /**
- * Before resuming, drop a transcript that has grown too large or too old to
- * cold-resume within the host's idle ceiling. Archives what it can, moves the
- * `.jsonl` aside, and returns the reason; null keeps resuming.
+ * Drop a transcript that has grown too large or too old to keep using.
+ * Archives what it can, moves the `.jsonl` aside, and returns the reason;
+ * null keeps the continuation.
  */
 export function rotateClaudeContinuation(
   input: ClaudeContinuationRotationInput,
   fx: ClaudeHistoryClock,
 ): string | null {
+  const reason = shouldRotateClaudeContinuation(input.continuation, fx);
+  if (!reason) return null;
   const transcriptPath = findContinuationFile(
     path.join(claudeConfigDirectory(), 'projects'),
     `${input.continuation}.jsonl`,
   );
+  if (!transcriptPath) return null;
+
+  try {
+    archiveClaudeTranscript(
+      {
+        transcriptPath,
+        sessionId: input.continuation,
+        assistantName: input.assistantName,
+        log: input.log,
+      },
+      fx,
+    );
+    fs.renameSync(transcriptPath, `${transcriptPath}.rotated-${fx.now()}`);
+    return reason;
+  } catch (error) {
+    input.log(`Failed to move rotated transcript aside: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
+}
+
+/** Inspect the transcript without moving it while the SDK still has it open. */
+export function shouldRotateClaudeContinuation(continuation: string, fx: ClaudeHistoryClock): string | null {
+  const transcriptPath = findContinuationFile(path.join(claudeConfigDirectory(), 'projects'), `${continuation}.jsonl`);
   if (!transcriptPath) return null;
 
   try {
@@ -232,23 +257,7 @@ export function rotateClaudeContinuation(
       // Size-only rotation must survive an unreadable first entry.
     }
     const decision = decideContinuationRotation({ size, firstLine }, fx);
-    if (!decision?.reason) return null;
-
-    archiveClaudeTranscript(
-      {
-        transcriptPath,
-        sessionId: input.continuation,
-        assistantName: input.assistantName,
-        log: input.log,
-      },
-      fx,
-    );
-    try {
-      fs.renameSync(transcriptPath, `${transcriptPath}.rotated-${fx.now()}`);
-    } catch (error) {
-      input.log(`Failed to move rotated transcript aside: ${error instanceof Error ? error.message : String(error)}`);
-    }
-    return decision.reason;
+    return decision?.reason ?? null;
   } catch {
     return null;
   }
