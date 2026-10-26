@@ -15,6 +15,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   fs.rmSync(root, { recursive: true, force: true });
   fs.rmSync(outside, { recursive: true, force: true });
 });
@@ -206,5 +207,122 @@ describe('operations stay on the opened directory', () => {
     }
     expect(fs.readFileSync(target, 'utf-8')).toBe('keep');
     expect(fs.readlinkSync(path.join(root, 'x'))).toBe('/app/skills/x');
+  });
+
+  it('recursive removal stays in the pinned directory and removes links without touching their targets', () => {
+    fs.mkdirSync(path.join(root, 'parent', 'tree', 'nested'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'parent', 'tree', 'nested', 'file'), 'remove');
+    fs.writeFileSync(path.join(outside, 'keep'), 'keep');
+    fs.symlinkSync(outside, path.join(root, 'parent', 'tree', 'link'));
+    fs.symlinkSync(outside, path.join(root, 'parent', 'link'));
+    const dir = openOrThrow(['parent']);
+    try {
+      fs.renameSync(path.join(root, 'parent'), path.join(root, 'moved'));
+      fs.symlinkSync(outside, path.join(root, 'parent'));
+      dir.remove('tree', true);
+      dir.remove('link', true);
+      dir.remove('missing', true);
+      expect(dir.entries()).toEqual([]);
+    } finally {
+      dir.close();
+    }
+    expect(fs.readdirSync(path.join(root, 'moved'))).toEqual([]);
+    expect(fs.readdirSync(outside)).toEqual(['keep']);
+    expect(fs.readFileSync(path.join(outside, 'keep'), 'utf-8')).toBe('keep');
+  });
+
+  it('removes children whose on-disk names carry odd or non-UTF8 bytes', () => {
+    // Filenames are raw bytes on Unix; the recursive walk must delete each one
+    // by its real name, not abort partway and strand the rest.
+    fs.mkdirSync(path.join(root, 'skill'));
+    fs.writeFileSync(path.join(root, 'skill', 'SKILL.md'), 'skill');
+    fs.writeFileSync(path.join(root, 'skill', 'report\\2026.md'), 'odd');
+    // A raw 0xff byte is a valid Linux filename but rejected on UTF-8-only
+    // filesystems (APFS) — exercise it where the platform allows, skip where not.
+    try {
+      fs.writeFileSync(Buffer.concat([Buffer.from(path.join(root, 'skill') + '/'), Buffer.from([0xff])]), 'raw');
+    } catch {
+      /* filesystem rejects non-UTF8 names */
+    }
+    const dir = openOrThrow([]);
+    try {
+      dir.remove('skill', true);
+      expect(dir.entries()).toEqual([]);
+    } finally {
+      dir.close();
+    }
+  });
+
+  it('copies only the supplied file tree into the pinned directory and preserves executable permissions', () => {
+    fs.mkdirSync(path.join(root, 'src', 'scripts', 'nested'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'src', 'SKILL.md'), 'skill');
+    fs.writeFileSync(path.join(root, 'src', 'scripts', 'run.sh'), '#!/bin/sh\n', { mode: 0o755 });
+    fs.writeFileSync(path.join(root, 'src', 'scripts', 'nested', 'data'), 'data');
+    fs.writeFileSync(path.join(root, 'src', 'unlisted'), 'not selected');
+    const src = openOrThrow(['src']);
+    const dst = openOrThrow(['dst'], true);
+    try {
+      fs.renameSync(path.join(root, 'dst'), path.join(root, 'moved'));
+      fs.symlinkSync(outside, path.join(root, 'dst'));
+      dst.copyFiles(src, 'skill', ['SKILL.md', 'scripts/run.sh', 'scripts/nested/data']);
+    } finally {
+      src.close();
+      dst.close();
+    }
+    const copied = path.join(root, 'moved', 'skill');
+    expect(fs.readdirSync(copied)).toEqual(['SKILL.md', 'scripts']);
+    expect(fs.readFileSync(path.join(copied, 'SKILL.md'), 'utf-8')).toBe('skill');
+    expect(fs.readFileSync(path.join(copied, 'scripts', 'run.sh'), 'utf-8')).toBe('#!/bin/sh\n');
+    expect(fs.statSync(path.join(copied, 'scripts', 'run.sh')).mode & 0o777).toBe(0o755);
+    expect(fs.readFileSync(path.join(copied, 'scripts', 'nested', 'data'), 'utf-8')).toBe('data');
+    expect(fs.readdirSync(outside)).toEqual([]);
+  });
+
+  it.each(['file', 'directory', 'symlink'])('refuses a copy destination occupied by a %s', (kind) => {
+    const src = openOrThrow(['src'], true);
+    const dst = openOrThrow(['dst'], true);
+    const taken = path.join(root, 'dst', 'taken');
+    fs.writeFileSync(path.join(outside, 'keep'), 'keep');
+    if (kind === 'file') fs.writeFileSync(taken, 'keep');
+    if (kind === 'directory') fs.mkdirSync(taken);
+    if (kind === 'symlink') fs.symlinkSync(outside, taken);
+    try {
+      src.writeNewFile('file', Buffer.from('new'));
+      expect(() => dst.copyFiles(src, 'taken', ['file'])).toThrow(/EEXIST/);
+      if (kind === 'file') expect(fs.readFileSync(taken, 'utf-8')).toBe('keep');
+      if (kind === 'directory') expect(fs.readdirSync(taken)).toEqual([]);
+      if (kind === 'symlink') expect(fs.readlinkSync(taken)).toBe(outside);
+    } finally {
+      src.close();
+      dst.close();
+    }
+    expect(fs.readdirSync(outside)).toEqual(['keep']);
+    expect(fs.readFileSync(path.join(outside, 'keep'), 'utf-8')).toBe('keep');
+  });
+
+  it.each(['file', 'directory'])('refuses a %s name occupied while copying a tree', (kind) => {
+    fs.mkdirSync(path.join(root, 'src', 'scripts'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'src', 'scripts', 'run.sh'), 'new');
+    fs.writeFileSync(path.join(root, 'src', 'SKILL.md'), 'new');
+    const src = openOrThrow(['src']);
+    const dst = openOrThrow(['dst'], true);
+    const openDir = AnchoredDir.prototype.openDir;
+    vi.spyOn(AnchoredDir.prototype, 'openDir').mockImplementation(function (this: AnchoredDir, name, create) {
+      const dir = openDir.call(this, name, create);
+      if (name === 'copy' && dir) {
+        if (kind === 'file') dir.writeNewFile('SKILL.md', Buffer.from('keep'));
+        else dir.openDir('scripts', true)!.close();
+      }
+      return dir;
+    });
+    try {
+      expect(() => dst.copyFiles(src, 'copy', ['SKILL.md', 'scripts/run.sh'])).toThrow(/EEXIST/);
+    } finally {
+      src.close();
+      dst.close();
+    }
+    const copied = path.join(root, 'dst', 'copy');
+    if (kind === 'file') expect(fs.readFileSync(path.join(copied, 'SKILL.md'), 'utf-8')).toBe('keep');
+    else expect(fs.readdirSync(path.join(copied, 'scripts'))).toEqual([]);
   });
 });

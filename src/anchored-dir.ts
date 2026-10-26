@@ -72,14 +72,14 @@ export class AnchoredDir {
     }
   }
 
-  /** Open the subdirectory `name`, creating it first when asked. Null if missing. */
-  openDir(name: string, create = false): AnchoredDir | null {
+  /** Open `name`, optionally creating it. Exclusive creation refuses any existing entry. Null if missing. */
+  openDir(name: string, create: boolean | 'exclusive' = false): AnchoredDir | null {
     const entry = this.entryPath(name);
     if (create) {
       try {
         fs.mkdirSync(entry);
       } catch (err) {
-        if (errno(err) !== 'EEXIST') throw err;
+        if (create === 'exclusive' || errno(err) !== 'EEXIST') throw err;
       }
     }
     let fd: number;
@@ -199,6 +199,72 @@ export class AnchoredDir {
 
   rmdir(name: string): void {
     fs.rmdirSync(this.entryPath(name));
+  }
+
+  /** Pin each directory before descending so removal never follows a symlink. Missing entries are ignored. */
+  remove(name: string, recursive = false): void {
+    this.removeEntry(Buffer.from(this.entryPath(name)), recursive);
+  }
+
+  // `path` is `<alias>/<component>` as raw bytes; lstat/unlink/rmdir never
+  // follow the final component and the O_DIRECTORY|O_NOFOLLOW open refuses a
+  // swapped-in link, so the walk stays inside the pinned tree. Children come
+  // from a byte-mode readdir so a non-UTF8 or backslash filename is deleted by
+  // its real name, not re-encoded into a miss that would strand it.
+  private removeEntry(path: Buffer, recursive: boolean): void {
+    try {
+      if (recursive && fs.lstatSync(path).isDirectory()) {
+        const fd = fs.openSync(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+        const dir = AnchoredDir.fromFd(fd);
+        const prefix = Buffer.from(`${dir.alias}/`);
+        try {
+          for (const entry of fs.readdirSync(dir.alias, { encoding: 'buffer' })) {
+            dir.removeEntry(Buffer.concat([prefix, entry]), true);
+          }
+        } finally {
+          dir.close();
+        }
+        fs.rmdirSync(path);
+      } else {
+        fs.unlinkSync(path);
+      }
+    } catch (err) {
+      if (errno(err) !== 'ENOENT') throw err;
+    }
+  }
+
+  /**
+   * Copy only the validated relative file names supplied by the caller.
+   * Pinned parents contain writes; exclusive creation prevents reuse of existing entries.
+   */
+  copyFiles(src: AnchoredDir, name: string, files: readonly string[]): void {
+    const dest = this.openDir(name, 'exclusive');
+    if (!dest) throw new Error(`copy destination '${name}' disappeared`);
+    try {
+      const subdirs = new Map<string, string[]>();
+      for (const file of files) {
+        const slash = file.indexOf('/');
+        if (slash === -1) {
+          copyRegularFile(src, file, dest, file);
+        } else {
+          const sub = file.slice(0, slash);
+          const children = subdirs.get(sub) ?? [];
+          children.push(file.slice(slash + 1));
+          subdirs.set(sub, children);
+        }
+      }
+      for (const [sub, children] of subdirs) {
+        const source = src.openDir(sub);
+        if (!source) throw new Error(`copy source '${sub}' disappeared`);
+        try {
+          dest.copyFiles(source, sub, children);
+        } finally {
+          source.close();
+        }
+      }
+    } finally {
+      dest.close();
+    }
   }
 
   symlink(target: string, name: string): void {

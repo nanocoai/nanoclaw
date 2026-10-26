@@ -20,6 +20,7 @@ vi.mock('../log.js', () => ({
 }));
 
 import { closeDb, initTestDb, runMigrations } from '../db/index.js';
+import { AnchoredDir } from '../anchored-dir.js';
 import { createAgentGroup } from '../db/agent-groups.js';
 import { ensureContainerConfig, getContainerConfig, updateContainerConfigJson } from '../db/container-configs.js';
 import { configFromDb, type McpServerConfig } from '../container-config.js';
@@ -155,6 +156,23 @@ async function stamp(): Promise<AgentGroup> {
 const overlaySkill = (groupId: string, skill: string): string =>
   path.join(DATA_DIR, 'v2-sessions', groupId, '.claude-shared', 'skills', skill, 'SKILL.md');
 
+/** Replace the directory's path after apply has pinned it, before it uses the returned handle. */
+function replaceDirectoryAfterOpen(directory: string, outside: string): string {
+  const moved = `${directory}-moved`;
+  const openDir = AnchoredDir.prototype.openDir;
+  let replaced = false;
+  vi.spyOn(AnchoredDir.prototype, 'openDir').mockImplementation(function (this: AnchoredDir, name, create) {
+    const dir = openDir.call(this, name, create);
+    if (!replaced && dir && name === path.basename(directory)) {
+      replaced = true;
+      fs.renameSync(directory, moved);
+      fs.symlinkSync(outside, directory);
+    }
+    return dir;
+  });
+  return moved;
+}
+
 beforeEach(async () => {
   fs.rmSync(TEST_ROOT, { recursive: true, force: true });
   fs.mkdirSync(TEST_ROOT, { recursive: true });
@@ -163,6 +181,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await closeDb();
   fs.rmSync(TEST_ROOT, { recursive: true, force: true });
 });
@@ -216,26 +235,29 @@ describe('restampAgentFromTemplate', () => {
     expect(result.changes.find((c) => c.surface === 'plugin')?.action).toBe('update');
   });
 
-  it('recreates a missing ${PLUGIN_DATA} cwd dir even when plugin files are unchanged', async () => {
-    // The adoption path: same template ref, but the dir is absent (an older
-    // engine skipped cwd servers at stamp time, or the agent deleted it).
-    // plugin-data scaffold must heal without a plugin-file diff.
-    fs.writeFileSync(
-      path.join(TPL, 'mcp.json'),
-      JSON.stringify({
-        $schema: MCP_SCHEMA_URL,
-        mcpServers: { hubspot: { type: 'stdio', command: 'npx', cwd: '${PLUGIN_DATA}/state' } },
-      }),
-    );
-    const g = await stamp();
-    const stateDir = path.join(GROUPS_DIR, g.folder, 'plugin-data', 'sdr', 'state');
-    fs.rmSync(stateDir, { recursive: true });
+  it.each(['state', 'state/./work', '.', ''])(
+    'recreates a missing ${PLUGIN_DATA}/%s cwd dir even when plugin files are unchanged',
+    async (sub) => {
+      // The adoption path: same template ref, but the dir is absent (an older
+      // engine skipped cwd servers at stamp time, or the agent deleted it).
+      // plugin-data scaffold must heal without a plugin-file diff.
+      fs.writeFileSync(
+        path.join(TPL, 'mcp.json'),
+        JSON.stringify({
+          $schema: MCP_SCHEMA_URL,
+          mcpServers: { hubspot: { type: 'stdio', command: 'npx', cwd: '${PLUGIN_DATA}/' + sub } },
+        }),
+      );
+      const g = await stamp();
+      const stateDir = path.join(GROUPS_DIR, g.folder, 'plugin-data', 'sdr', sub);
+      fs.rmSync(stateDir, { recursive: true });
 
-    const result = await restampAgentFromTemplate('sales/sdr', g.id, { apply: true });
+      const result = await restampAgentFromTemplate('sales/sdr', g.id, { apply: true });
 
-    expect(result.changes.find((c) => c.surface === 'plugin')?.action).toBe('unchanged');
-    expect(fs.existsSync(stateDir)).toBe(true);
-  });
+      expect(result.changes.find((c) => c.surface === 'plugin')?.action).toBe('unchanged');
+      expect(fs.existsSync(stateDir)).toBe(true);
+    },
+  );
 
   it('dry run reports every change but mutates nothing', async () => {
     const g = await stamp();
@@ -387,7 +409,7 @@ describe('restampAgentFromTemplate', () => {
     fs.mkdirSync(extraDir, { recursive: true });
     fs.writeFileSync(path.join(extraDir, 'faq.md'), '# FAQ v2\n');
 
-    await expect(restampAgentFromTemplate('sales/sdr', g.id, { apply: true })).rejects.toThrow(/resolves outside/);
+    await expect(restampAgentFromTemplate('sales/sdr', g.id, { apply: true })).rejects.toThrow(/not a real directory/);
     expect(fs.existsSync(path.join(outside, 'faq.md'))).toBe(false);
   });
 
@@ -400,8 +422,113 @@ describe('restampAgentFromTemplate', () => {
     fs.symlinkSync(outside, overlayRoot);
     writeTemplateV2();
 
-    await expect(restampAgentFromTemplate('sales/sdr', g.id, { apply: true })).rejects.toThrow(/resolves outside/);
+    await expect(restampAgentFromTemplate('sales/sdr', g.id, { apply: true })).rejects.toThrow(/not a real directory/);
     expect(fs.existsSync(path.join(outside, 'widget'))).toBe(false);
+  });
+
+  it.each(['create', 'update', 'remove'] as const)(
+    'keeps a context %s inside the opened group directory when its path changes',
+    async (action) => {
+      const g = await stamp();
+      const directory = path.join(GROUPS_DIR, g.folder, 'additional_context');
+      const source = path.join(TPL, NANOCLAW_EXTENSION_NS, 'context', 'additional_context');
+      const name = action === 'create' ? 'guide.md' : 'faq.md';
+      if (action === 'remove') fs.rmSync(path.join(source, name));
+      else fs.writeFileSync(path.join(source, name), '# Updated context\n');
+      const outside = path.join(TEST_ROOT, 'outside-context');
+      fs.mkdirSync(outside);
+      fs.writeFileSync(path.join(outside, 'faq.md'), 'outside FAQ');
+      fs.writeFileSync(path.join(outside, 'keep'), 'keep');
+      const moved = replaceDirectoryAfterOpen(directory, outside);
+
+      const result = await restampAgentFromTemplate('sales/sdr', g.id, { apply: true });
+
+      expect(change(result.changes, 'context', `additional_context/${name}`).action).toBe(action);
+      expect(fs.lstatSync(directory).isSymbolicLink()).toBe(true);
+      expect(fs.readdirSync(outside)).toEqual(['faq.md', 'keep']);
+      expect(fs.readFileSync(path.join(outside, 'faq.md'), 'utf-8')).toBe('outside FAQ');
+      expect(fs.readFileSync(path.join(outside, 'keep'), 'utf-8')).toBe('keep');
+      if (action === 'remove') expect(fs.existsSync(path.join(moved, name))).toBe(false);
+      else expect(fs.readFileSync(path.join(moved, name), 'utf-8')).toBe('# Updated context\n');
+    },
+  );
+
+  it.each(['create', 'update', 'remove'] as const)(
+    'keeps a skill %s inside the opened overlay when its path changes',
+    async (action) => {
+      const g = await stamp();
+      const directory = path.join(DATA_DIR, 'v2-sessions', g.id, '.claude-shared', 'skills');
+      const name = action === 'create' ? 'lookup' : 'widget';
+      if (action === 'remove') fs.rmSync(path.join(TPL, 'skills', name), { recursive: true });
+      else {
+        writeSkill(TPL, name, 'updated skill');
+        fs.mkdirSync(path.join(TPL, 'skills', name, 'scripts'));
+        fs.writeFileSync(path.join(TPL, 'skills', name, 'scripts', 'run.sh'), '#!/bin/sh\n', { mode: 0o755 });
+      }
+      const outside = path.join(TEST_ROOT, 'outside-overlay');
+      fs.mkdirSync(path.join(outside, 'widget'), { recursive: true });
+      fs.writeFileSync(path.join(outside, 'widget', 'SKILL.md'), 'outside skill');
+      fs.writeFileSync(path.join(outside, 'keep'), 'keep');
+      const moved = replaceDirectoryAfterOpen(directory, outside);
+
+      const result = await restampAgentFromTemplate('sales/sdr', g.id, { apply: true });
+
+      expect(change(result.changes, 'skill', name).action).toBe(action);
+      expect(fs.lstatSync(directory).isSymbolicLink()).toBe(true);
+      expect(fs.readdirSync(outside)).toEqual(['keep', 'widget']);
+      expect(fs.readdirSync(path.join(outside, 'widget'))).toEqual(['SKILL.md']);
+      expect(fs.readFileSync(path.join(outside, 'widget', 'SKILL.md'), 'utf-8')).toBe('outside skill');
+      expect(fs.readFileSync(path.join(outside, 'keep'), 'utf-8')).toBe('keep');
+      if (action === 'remove') expect(fs.existsSync(path.join(moved, name))).toBe(false);
+      else {
+        expect(fs.readFileSync(path.join(moved, name, 'SKILL.md'), 'utf-8')).toContain('updated skill');
+        expect(fs.readFileSync(path.join(moved, name, 'scripts', 'run.sh'), 'utf-8')).toBe('#!/bin/sh\n');
+        expect(fs.statSync(path.join(moved, name, 'scripts', 'run.sh')).mode & 0o111).toBe(0o111);
+      }
+    },
+  );
+
+  it.each(['plugin-data', 'plugin-data/sdr'])(
+    'creates plugin-data scaffold inside the opened %s directory when its path changes',
+    async (relative) => {
+      fs.writeFileSync(
+        path.join(TPL, 'mcp.json'),
+        JSON.stringify({
+          $schema: MCP_SCHEMA_URL,
+          mcpServers: { hubspot: { type: 'stdio', command: 'npx', cwd: '${PLUGIN_DATA}/state/work' } },
+        }),
+      );
+      const g = await stamp();
+      const groupDir = path.join(GROUPS_DIR, g.folder);
+      fs.rmSync(path.join(groupDir, 'plugin-data', 'sdr', 'state'), { recursive: true });
+      const outside = path.join(TEST_ROOT, 'outside-data');
+      fs.mkdirSync(outside);
+      fs.writeFileSync(path.join(outside, 'keep'), 'keep');
+      const directory = path.join(groupDir, relative);
+      const moved = replaceDirectoryAfterOpen(directory, outside);
+
+      await restampAgentFromTemplate('sales/sdr', g.id, { apply: true });
+
+      expect(fs.lstatSync(directory).isSymbolicLink()).toBe(true);
+      expect(fs.readdirSync(outside)).toEqual(['keep']);
+      expect(fs.readFileSync(path.join(outside, 'keep'), 'utf-8')).toBe('keep');
+      const scaffold =
+        relative === 'plugin-data' ? path.join(moved, 'sdr', 'state', 'work') : path.join(moved, 'state', 'work');
+      expect(fs.statSync(scaffold).isDirectory()).toBe(true);
+    },
+  );
+
+  it('refuses to create plugin-data scaffold through a symlinked directory', async () => {
+    const g = await stamp();
+    const directory = path.join(GROUPS_DIR, g.folder, 'plugin-data');
+    const outside = path.join(TEST_ROOT, 'outside-data');
+    fs.mkdirSync(outside);
+    fs.rmSync(directory, { recursive: true });
+    fs.symlinkSync(outside, directory);
+    writeTemplateV2();
+
+    await expect(restampAgentFromTemplate('sales/sdr', g.id, { apply: true })).rejects.toThrow(/not a real directory/);
+    expect(fs.readdirSync(outside)).toEqual([]);
   });
 
   it('plans over a dangling symlink in the overlay without crashing', async () => {

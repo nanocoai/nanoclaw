@@ -18,6 +18,7 @@
 import fs from 'fs';
 import path from 'path';
 
+import { AnchoredDir } from '../anchored-dir.js';
 import { mcpServerPluginOwner, resolveGroupTimezone, type McpServerConfig } from '../container-config.js';
 import { getAgentGroup, getAllAgentGroups } from '../db/agent-groups.js';
 import { getContainerConfig, updateContainerConfigJson } from '../db/container-configs.js';
@@ -34,7 +35,7 @@ import { resolveLocalTemplate } from './local-dir.js';
 import { parsePluginManifest, PLUGIN_MANIFEST_FILE } from './manifest.js';
 import { pluginDataCwdSubpaths } from './mcp.js';
 import { parseTemplate, type Template } from './parse.js';
-import { copyPluginDir } from './plugin-dir.js';
+import { copyPluginDir, walkPluginDir } from './plugin-dir.js';
 import { prepareTemplateTasks } from './tasks.js';
 
 export interface RestampChange {
@@ -134,9 +135,7 @@ export async function restampAgentFromTemplate(
     });
     ops.push(() => {
       copyPluginDir(tpl.dir, oldPluginDir);
-      // plugin-data sits in the container-RW group mount (unlike plugins/,
-      // which is its own RO mountpoint) — same symlink rules as every write.
-      mkdirRealWithin(groupDir, path.join(groupDir, 'plugin-data', tpl.name));
+      withWritableDir(groupDir, ['plugin-data', tpl.name], () => {});
     });
   }
 
@@ -144,10 +143,12 @@ export async function restampAgentFromTemplate(
   // when plugins/<name> is byte-identical. An engine upgrade changes what the
   // same template ref stamps (a cwd server the old engine skipped appears on
   // restamp with no plugin-file diff), and the dir may also have been deleted
-  // since the last stamp. Idempotent; mkdirRealWithin creates parents.
+  // since the last stamp. Missing parents are created through pinned directories.
   ops.push(() => {
     for (const sub of pluginDataCwdSubpaths(tpl.mcpServers)) {
-      mkdirRealWithin(groupDir, path.join(groupDir, 'plugin-data', tpl.name, sub));
+      // The cwd validator accepts a trailing root slash and current-directory segments.
+      const segments = sub.split('/').filter((segment) => segment !== '' && segment !== '.');
+      withWritableDir(groupDir, ['plugin-data', tpl.name, ...segments], () => {});
     }
   });
 
@@ -155,7 +156,6 @@ export async function restampAgentFromTemplate(
   const livePersona = readGroupPersona(groupDir);
   const oldPersona = old.instructions?.trim() || undefined;
   const newPersona = tpl.instructions?.trim() || undefined;
-  const personaFile = path.join(groupDir, PERSONA_PREPEND_FILE);
   if (newPersona !== undefined) {
     if (livePersona === newPersona) {
       changes.push({ surface: 'persona', name: PERSONA_PREPEND_FILE, action: 'unchanged' });
@@ -167,11 +167,10 @@ export async function restampAgentFromTemplate(
         ...(livePersona !== null && livePersona !== oldPersona ? { customized: true } : {}),
       });
       ops.push(() => {
-        // rm-then-exclusive-write: the rm removes a planted symlink itself
-        // (never its target), and `wx` makes a link re-planted in the race
-        // window a loud failure instead of a write-through.
-        fs.rmSync(personaFile, { force: true });
-        fs.writeFileSync(personaFile, `${tpl.instructions!.trimEnd()}\n`, { flag: 'wx' });
+        withWritableDir(groupDir, [], (dir) => {
+          dir.remove(PERSONA_PREPEND_FILE);
+          dir.writeNewFile(PERSONA_PREPEND_FILE, Buffer.from(`${tpl.instructions!.trimEnd()}\n`));
+        });
       });
     }
   } else if (oldPersona !== undefined && livePersona !== null) {
@@ -181,7 +180,7 @@ export async function restampAgentFromTemplate(
       action: 'remove',
       ...(livePersona !== oldPersona ? { customized: true } : {}),
     });
-    ops.push(() => fs.rmSync(personaFile, { force: true }));
+    ops.push(() => withWritableDir(groupDir, [], (dir) => dir.remove(PERSONA_PREPEND_FILE)));
   }
 
   // --- context extras ------------------------------------------------------
@@ -189,6 +188,8 @@ export async function restampAgentFromTemplate(
   const newContext = new Map(tpl.contextExtras.map((e) => [e.name, e.content]));
   for (const name of new Set([...oldContext.keys(), ...newContext.keys()])) {
     const target = contextTarget(groupDir, name);
+    const segments = name.split('/');
+    const leaf = segments.pop()!;
     const live = fs.existsSync(target) && fs.statSync(target).isFile() ? fs.readFileSync(target, 'utf-8') : undefined;
     const wanted = newContext.get(name);
     if (wanted !== undefined) {
@@ -203,9 +204,10 @@ export async function restampAgentFromTemplate(
         ...(live !== undefined && live !== oldContext.get(name) ? { customized: true } : {}),
       });
       ops.push(() => {
-        mkdirRealWithin(groupDir, path.dirname(target));
-        fs.rmSync(target, { force: true });
-        fs.writeFileSync(target, wanted, { flag: 'wx' });
+        withWritableDir(groupDir, segments, (dir) => {
+          dir.remove(leaf);
+          dir.writeNewFile(leaf, Buffer.from(wanted));
+        });
       });
     } else if (live !== undefined) {
       changes.push({
@@ -214,21 +216,29 @@ export async function restampAgentFromTemplate(
         action: 'remove',
         ...(live !== oldContext.get(name) ? { customized: true } : {}),
       });
-      ops.push(() => {
-        mkdirRealWithin(groupDir, path.dirname(target));
-        fs.rmSync(target, { force: true });
-      });
+      ops.push(() => withWritableDir(groupDir, segments, (dir) => dir.remove(leaf)));
     }
   }
 
   // --- skills overlay ------------------------------------------------------
   const overlayRoot = groupSkillsOverlayDir(group.id);
-  // The overlay's parent (.claude-shared) is host-provisioned, but the
-  // container can replace `skills` itself with a symlink — verify before
-  // every apply-phase write under it.
-  const ensureOverlayRoot = (): void => {
-    fs.mkdirSync(path.dirname(overlayRoot), { recursive: true });
-    mkdirRealWithin(path.dirname(overlayRoot), overlayRoot);
+  // .claude-shared is host-owned; open the writable skills child through it.
+  const copySkill = (srcDir: string, name: string): void => {
+    const files = walkPluginDir(srcDir);
+    const source = AnchoredDir.open(srcDir, []);
+    if (!source) throw new Error(`Skill source disappeared: ${srcDir}`);
+    try {
+      withWritableDir(path.dirname(overlayRoot), ['skills'], (dir) => {
+        dir.remove(name, true);
+        dir.copyFiles(
+          source,
+          name,
+          files.map((file) => file.rel),
+        );
+      });
+    } finally {
+      source.close();
+    }
   };
   const oldSkills = new Map(old.skills.map((s) => [s.name, s.srcDir]));
   const newSkills = new Map(tpl.skills.map((s) => [s.name, s.srcDir]));
@@ -242,10 +252,7 @@ export async function restampAgentFromTemplate(
         action: 'create',
         ...(oldSrc !== undefined ? { customized: true, note: 'was removed locally; recreated' } : {}),
       });
-      ops.push(() => {
-        ensureOverlayRoot();
-        copyPluginDir(srcDir, overlay);
-      });
+      ops.push(() => copySkill(srcDir, name));
     } else if (dirsEqual(overlay, srcDir)) {
       changes.push({ surface: 'skill', name, action: 'unchanged' });
     } else {
@@ -255,10 +262,7 @@ export async function restampAgentFromTemplate(
         action: 'update',
         ...(oldSrc === undefined || !dirsEqual(overlay, oldSrc) ? { customized: true } : {}),
       });
-      ops.push(() => {
-        ensureOverlayRoot();
-        copyPluginDir(srcDir, overlay);
-      });
+      ops.push(() => copySkill(srcDir, name));
     }
   }
   for (const [name, oldSrc] of oldSkills) {
@@ -271,10 +275,7 @@ export async function restampAgentFromTemplate(
       action: 'remove',
       ...(!dirsEqual(overlay, oldSrc) ? { customized: true } : {}),
     });
-    ops.push(() => {
-      ensureOverlayRoot();
-      fs.rmSync(overlay, { recursive: true, force: true });
-    });
+    ops.push(() => withWritableDir(path.dirname(overlayRoot), ['skills'], (dir) => dir.remove(name, true)));
   }
 
   // --- MCP servers (by ownership marker) -----------------------------------
@@ -470,21 +471,15 @@ function listFilesRecursive(root: string): Map<string, string> {
   return out;
 }
 
-/**
- * Create `dir` (under trusted, existing `base`) for an apply-phase write. The
- * group dir and skills overlay are container-writable, so an agent-planted
- * symlink could redirect a host-side write anywhere: the deepest EXISTING
- * ancestor must resolve inside `base` before the rest is created (freshly
- * created components cannot be symlinks).
- */
-function mkdirRealWithin(base: string, dir: string): void {
-  let existing = dir;
-  while (!fs.existsSync(existing)) existing = path.dirname(existing);
-  const rel = path.relative(fs.realpathSync(base), fs.realpathSync(existing));
-  if (rel.startsWith('..') || path.isAbsolute(rel)) {
-    throw new Error(`refusing to write through "${dir}": it resolves outside the agent's own directories`);
+/** Pin writable descendants of a stable root for the entire operation. */
+function withWritableDir(root: string, segments: string[], action: (dir: AnchoredDir) => void): void {
+  const dir = AnchoredDir.open(root, segments, true);
+  if (!dir) throw new Error(`Restamp directory disappeared: ${path.join(root, ...segments)}`);
+  try {
+    action(dir);
+  } finally {
+    dir.close();
   }
-  fs.mkdirSync(dir, { recursive: true });
 }
 
 /**
