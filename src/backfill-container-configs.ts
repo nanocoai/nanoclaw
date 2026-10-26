@@ -34,19 +34,7 @@ export async function backfillContainerConfigs(): Promise<void> {
     // Skip if already has a config row
     if (await getContainerConfig(group.id)) continue;
 
-    // Read legacy container.json from disk
-    const filePath = path.join(GROUPS_DIR, group.folder, 'container.json');
-    let legacy: LegacyContainerJson = {};
-    if (fs.existsSync(filePath)) {
-      try {
-        legacy = JSON.parse(fs.readFileSync(filePath, 'utf8')) as LegacyContainerJson;
-      } catch (err) {
-        log.warn('Backfill: failed to parse container.json, using defaults', {
-          folder: group.folder,
-          err: String(err),
-        });
-      }
-    }
+    const legacy = readLegacyContainerJson(group.folder);
 
     // DB agent_provider wins over file provider (matches old cascade)
     const provider = group.agent_provider || legacy.provider || null;
@@ -77,4 +65,59 @@ export async function backfillContainerConfigs(): Promise<void> {
   if (backfilled > 0) {
     log.info('Backfilled container_configs from disk', { count: backfilled });
   }
+}
+
+/**
+ * Read a legacy `container.json`. The group folder is a host-owned mount
+ * source the container cannot swap; only the leaf name is container-controlled,
+ * so a no-follow open of the leaf (O_NONBLOCK so a planted FIFO can't block)
+ * refuses a symlink or special file on any volume. The leaf must be a regular
+ * file; anything else is skipped with a warning.
+ */
+function readLegacyContainerJson(folder: string): LegacyContainerJson {
+  const file = path.join(GROUPS_DIR, folder, 'container.json');
+  const skipped = (code?: string): LegacyContainerJson => {
+    log.warn(
+      'Backfill: legacy container.json is not a regular file or is unreadable; its settings were NOT imported. ' +
+        'Re-add them with the `ncl groups config` commands (update, add-mcp-server, add-package).',
+      { folder, code },
+    );
+    return {};
+  };
+  let fd: number;
+  try {
+    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return {};
+    return skipped((err as NodeJS.ErrnoException).code);
+  }
+  let raw: string;
+  try {
+    if (!fs.fstatSync(fd).isFile()) return skipped('ENOTREG');
+    raw = fs.readFileSync(fd, 'utf8');
+  } catch (err) {
+    // A stat/read failure (e.g. EIO) degrades to defaults, never aborts startup.
+    return skipped((err as NodeJS.ErrnoException).code);
+  } finally {
+    // A close-time error must not abort startup either — the result is already decided.
+    try {
+      fs.closeSync(fd);
+    } catch {
+      /* ignore */
+    }
+  }
+  // The parse error quotes the input, so only a generic reason is logged.
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    parsed = undefined;
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    log.warn('Backfill: legacy container.json is not a JSON object; its settings were NOT imported, using defaults', {
+      folder,
+    });
+    return {};
+  }
+  return parsed as LegacyContainerJson;
 }
