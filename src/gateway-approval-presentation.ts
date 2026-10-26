@@ -7,6 +7,14 @@ const safeMultiline = (text: string) =>
 
 const safe = (text: string) => safeMultiline(text.replace(/[\r\n]/g, ' '));
 
+/**
+ * A rough cap, counted before escaping: channels cap or clip titles (the
+ * tightest at 60), some after expanding emoji names. A longer title or action
+ * goes in full into the body under a fixed title; a channel with cardFits
+ * measures the real title and falls back to a fixed one too.
+ */
+export const MAX_CARD_TITLE_CHARS = 60;
+
 /** One renderer for every gateway; no inference of business intent from HTTP methods. */
 export function gatewayApprovalPresentation(request: GatewayApprovalRequest): { title: string; question: string } {
   if (request.displayFields !== undefined) {
@@ -42,7 +50,10 @@ export function gatewayApprovalPresentation(request: GatewayApprovalRequest): { 
     return { title: request.title, question };
   }
   const summary = request.summary;
-  if (!summary) return { title: request.title, question: request.question };
+  if (!summary) {
+    if (request.title.length <= MAX_CARD_TITLE_CHARS) return { title: request.title, question: request.question };
+    return { title: 'Approve external request', question: `*Request:* ${safe(request.title)}\n${request.question}` };
+  }
   for (const field of ['agent', 'action', 'resource', 'reason'] as const) {
     if (typeof summary[field] !== 'string' || !summary[field].trim() || summary[field].length > 600) {
       throw new Error('Invalid gateway approval summary');
@@ -51,16 +62,23 @@ export function gatewayApprovalPresentation(request: GatewayApprovalRequest): { 
   if (summary.details !== undefined && (!Array.isArray(summary.details) || summary.details.length > 6)) {
     throw new Error('Invalid gateway approval details');
   }
+  const omitted = summary.omittedDetails;
+  if (omitted !== undefined && (!Number.isSafeInteger(omitted) || omitted < 0)) {
+    throw new Error('Invalid gateway approval details');
+  }
   const detailed = Boolean(summary.details?.length);
+  const action = safe(summary.action);
   const resource = /^(?:[A-Z]+ |https?:)/.test(summary.resource)
     ? summary.resource.split(/[?#]/, 1)[0]
     : summary.resource;
-  const lines = [
-    `*Agent:* ${safe(summary.agent)}`,
-    ...(detailed ? [] : [`*Action:* ${safe(summary.action)}`]),
-    `*${detailed ? 'Where' : 'Resource'}:* ${safe(resource)}`,
-    ...(detailed ? [] : [`*Why approval:* ${safe(summary.reason)}`]),
-  ];
+  const lines = detailed
+    ? [`*Action:* ${action}`, `*Agent:* ${safe(summary.agent)}`, `*Where:* ${safe(resource)}`]
+    : [
+        `*Agent:* ${safe(summary.agent)}`,
+        `*Action:* ${action}`,
+        `*Resource:* ${safe(resource)}`,
+        `*Why approval:* ${safe(summary.reason)}`,
+      ];
   for (const detail of summary.details ?? []) {
     if (
       !detail ||
@@ -73,11 +91,12 @@ export function gatewayApprovalPresentation(request: GatewayApprovalRequest): { 
     }
     lines.push(`*${safe(detail.label)}:* ${safe(detail.value)}`);
   }
+  if (omitted) lines.push(`… ${omitted} more field${omitted === 1 ? '' : 's'} not shown`);
   const scope = detailed
     ? 'Approve once to allow this action.'
     : 'Approve allows this request once. It does not connect an account or change its permissions.';
-  return {
-    title: detailed ? safe(summary.action) : 'Approve external request',
-    question: lines.join('\n').slice(0, 2600 - scope.length - 1) + '\n' + scope,
-  };
+  let title = 'Approve external request';
+  if (detailed) title = action.length <= MAX_CARD_TITLE_CHARS ? action : 'Approve this action';
+  // Never cut: the bridge posts long text in several blocks.
+  return { title, question: [...lines, scope].join('\n') };
 }
