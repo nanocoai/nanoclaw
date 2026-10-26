@@ -28,8 +28,14 @@ import {
   type RawOption,
 } from '../../channels/ask-question.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
-import { createPendingApproval, deletePendingApproval, getSession } from '../../db/sessions.js';
-import { getDeliveryAdapter } from '../../delivery.js';
+import {
+  bindPendingApprovalMessage,
+  createPendingApproval,
+  deletePendingApproval,
+  getSession,
+  getUnboundPendingApprovals,
+} from '../../db/sessions.js';
+import { getDeliveryAdapter, type ChannelDeliveryAdapter } from '../../delivery.js';
 import { requestWake } from '../../request-wake.js';
 import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
@@ -287,20 +293,13 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
   const adapter = getDeliveryAdapter();
   if (adapter) {
     try {
-      await adapter.deliver(
-        target.messagingGroup.channel_type,
-        target.messagingGroup.platform_id,
+      await sendApprovalCard(
+        adapter,
+        approvalId,
+        target.messagingGroup,
         approvalCardThread(session, target.messagingGroup),
-        'chat-sdk',
-        JSON.stringify({
-          type: 'ask_question',
-          questionId: approvalId,
-          title,
-          question,
-          options: APPROVAL_OPTIONS,
-        }),
-        undefined,
-        target.messagingGroup.instance,
+        title,
+        question,
       );
     } catch (err) {
       log.error('Failed to deliver approval card', { action, approvalId, err });
@@ -318,4 +317,51 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
   }
 
   log.info('Approval requested', { action, approvalId, agentName, approver: target.userId });
+}
+
+async function sendApprovalCard(
+  adapter: ChannelDeliveryAdapter,
+  approvalId: string,
+  to: Pick<MessagingGroup, 'channel_type' | 'platform_id' | 'instance'>,
+  threadId: string | null,
+  title: string,
+  question: string,
+): Promise<void> {
+  // Channels without buttons show fallbackText; handleApprovalTextReply parses the answer.
+  const shortId = approvalId.slice(-6);
+  const messageId = await adapter.deliver(
+    to.channel_type,
+    to.platform_id,
+    threadId,
+    'chat-sdk',
+    JSON.stringify({
+      type: 'ask_question',
+      questionId: approvalId,
+      title,
+      question,
+      options: APPROVAL_OPTIONS,
+      fallbackText: `${title}\n\n${question}\n\nReply "approve ${shortId}", "reject ${shortId}" or "reject ${shortId} <reason>".`,
+    }),
+    undefined,
+    to.instance,
+  );
+  if (messageId) await bindPendingApprovalMessage(approvalId, messageId);
+}
+
+/**
+ * Re-send cards a host restart cut off before the platform confirmed them. A
+ * card that landed but lost its bind is sent twice; both resolve the same row.
+ */
+export async function redeliverUnboundApprovals(adapter: ChannelDeliveryAdapter): Promise<void> {
+  for (const row of await getUnboundPendingApprovals()) {
+    // ga- rows belong to the gateway coordinator, which expires its own unbound cards.
+    if (!row.approval_id.startsWith('appr-') || !row.channel_type || !row.platform_id) continue;
+    const to = { channel_type: row.channel_type, platform_id: row.platform_id, instance: row.instance ?? undefined };
+    try {
+      await sendApprovalCard(adapter, row.approval_id, to, null, row.title, row.question);
+      log.info('Approval card redelivered', { approvalId: row.approval_id });
+    } catch (err) {
+      log.error('Failed to redeliver approval card', { approvalId: row.approval_id, err });
+    }
+  }
 }

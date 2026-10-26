@@ -990,7 +990,9 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         });
         const result = await adapter.postMessage(tid, {
           card,
-          fallbackText: `${title}\n\n${text}\nOptions: ${options.map((o) => o.label).join(', ')}`,
+          fallbackText:
+            (content.fallbackText as string) ||
+            `${title}\n\n${text}\nOptions: ${options.map((o) => o.label).join(', ')}`,
         });
         return result?.id;
       }

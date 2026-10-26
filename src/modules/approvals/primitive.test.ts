@@ -20,14 +20,19 @@ import { CardTooLongError, MAX_CARD_QUESTION_LENGTH } from '../../channels/ask-q
 import { initTestDb, closeDb, runMigrations } from '../../db/index.js';
 import { createAgentGroup } from '../../db/agent-groups.js';
 import { createMessagingGroup } from '../../db/messaging-groups.js';
-import { createSession, getPendingApprovalsByAction } from '../../db/sessions.js';
+import {
+  createPendingApproval,
+  createSession,
+  getPendingApproval,
+  getPendingApprovalsByAction,
+} from '../../db/sessions.js';
 import { setDeliveryAdapter, type ChannelDeliveryAdapter } from '../../delivery.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import type { Session } from '../../types.js';
 import { upsertUser } from '../permissions/db/users.js';
 import { upsertUserDm } from '../permissions/db/user-dms.js';
 import { grantRole } from '../permissions/db/user-roles.js';
-import { requestApproval } from './primitive.js';
+import { redeliverUnboundApprovals, requestApproval } from './primitive.js';
 
 vi.mock('../../container-runner.js', () => ({
   wakeContainer: vi.fn().mockResolvedValue(undefined),
@@ -155,6 +160,45 @@ describe('requestApproval delivery failure', () => {
 
     expect(await getPendingApprovalsByAction('test_action')).toHaveLength(1);
     expect(vi.mocked(writeSessionMessage)).not.toHaveBeenCalled();
+  });
+});
+
+describe('redeliverUnboundApprovals', () => {
+  it('re-sends only the card a restart cut off, once', async () => {
+    const sent: string[] = [];
+    const adapter: ChannelDeliveryAdapter = {
+      async deliver(_c, _p, _t, _k, content) {
+        sent.push(JSON.parse(content).questionId);
+        return `pm-${sent.length}`;
+      },
+    };
+    setDeliveryAdapter(adapter);
+    await requestApproval({
+      session,
+      agentName: 'Agent',
+      action: 'test_action',
+      payload: {},
+      title: 'T',
+      question: 'Q',
+    });
+    await createPendingApproval({
+      approval_id: 'appr-lost',
+      session_id: session.id,
+      request_id: 'appr-lost',
+      action: 'test_action',
+      payload: '{}',
+      created_at: now(),
+      channel_type: DM_CHANNEL,
+      platform_id: DM_PLATFORM,
+      title: 'T',
+      options_json: '[]',
+    });
+
+    await redeliverUnboundApprovals(adapter);
+    await redeliverUnboundApprovals(adapter);
+
+    expect(sent.slice(1)).toEqual(['appr-lost']);
+    expect((await getPendingApproval('appr-lost'))?.platform_message_id).toBe('pm-2');
   });
 });
 
