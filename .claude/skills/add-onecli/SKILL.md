@@ -50,6 +50,8 @@ This integration supports exactly the gateway version pinned in `.claude/skills/
 pnpm exec tsx .claude/skills/add-onecli/scripts/setup.ts
 ```
 
+A new local gateway publishes its admin API and Postgres on `127.0.0.1` only. The gateway proxy port stays on the Docker bridge. Setup leaves a reused gateway's binds alone. `ADMIN_NOT_LOOPBACK` reports non-loopback admin or Postgres bindings; `ADMIN_BINDINGS_UNKNOWN` means Docker could not determine them. Follow the manual steps under "Verify the bind interface" in [docs/onecli-upgrades.md](payload/docs/onecli-upgrades.md) to check and update an existing gateway.
+
 ## Provider credentials
 
 Provider skills such as `/add-opencode` store model credentials here through the
