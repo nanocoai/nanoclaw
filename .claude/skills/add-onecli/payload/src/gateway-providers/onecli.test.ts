@@ -467,6 +467,7 @@ describe('OneCLI gateway package', () => {
   it('a provider with no saved names is never marked matched, so names added in a later release still adopt once', async () => {
     const gateway = fakeGateway({ vault: [{ id: 'sec-model', name: 'Anthropic' }] });
     await expect(grant(gateway, 'ollama')).resolves.toEqual([]);
+    await expect(grant(gateway, 'llmman')).resolves.toEqual([]);
     expect(fs.existsSync(path.join(data, 'onecli', 'provider-credentials.json'))).toBe(false);
   });
 

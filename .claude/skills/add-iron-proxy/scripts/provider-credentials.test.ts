@@ -290,6 +290,7 @@ it('accepts plain HTTP to a model on this machine, pinned to its port', () => {
   const f = fixture();
   expect(() => ironModelEndpoint('http://host.docker.internal:8000/v1', f.root)).not.toThrow();
   expect(() => ironModelEndpoint('http://HOST.DOCKER.INTERNAL:11434/v1', f.root)).not.toThrow();
+  expect(() => ironModelEndpoint('http://host.docker.internal:17434/v1', f.root)).not.toThrow();
 });
 it.each([
   'http://host.docker.internal/v1',
@@ -320,6 +321,7 @@ it.each([
   ['home.arpa', 'https://home.arpa/v1'],
   ['llm.home.arpa', 'https://llm.home.arpa:443/v1'],
   ['ollama.home', 'https://ollama.home/v1'],
+  ['llmman.home', 'https://llmman.home/v1'],
   ['models.corp', 'https://models.corp/v1'],
 ])('refuses the private name %s, which no public CA certifies', (host, url) => {
   const f = fixture();

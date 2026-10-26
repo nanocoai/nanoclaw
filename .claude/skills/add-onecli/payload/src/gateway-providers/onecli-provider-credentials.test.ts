@@ -135,6 +135,7 @@ describe('OneCLI provider credential record', () => {
     expect(is('cursor', { name: 'Cursor notes' })).toBe(false);
     expect(is('claude', { name: 'Cursor' })).toBe(false);
     expect(is('ollama', { name: 'Anthropic' })).toBe(false);
+    expect(is('llmman', { name: 'Anthropic' })).toBe(false);
     expect(is('claude', {})).toBe(false);
   });
 
