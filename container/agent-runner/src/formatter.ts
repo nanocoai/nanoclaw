@@ -191,8 +191,9 @@ export interface RoutingContext {
 export function extractRouting(messages: MessageInRow[]): RoutingContext {
   const nonEcho = messages.filter((m) => !isSessionEcho(m));
   const waking = nonEcho.filter((m) => m.trigger !== 0);
-  const preferred = nonEcho[0] && isFailureNotice(nonEcho[0]) ? waking.find((m) => !isFailureNotice(m)) : undefined;
-  const first = preferred ?? nonEcho[0] ?? messages[0];
+  // Reply where the turn was woken: accumulated context rides along but
+  // never routes, and a failure notice yields to a real message.
+  const first = waking.find((m) => !isFailureNotice(m)) ?? waking[0] ?? nonEcho[0] ?? messages[0];
   return {
     platformId: first?.platform_id ?? null,
     channelType: first?.channel_type ?? null,

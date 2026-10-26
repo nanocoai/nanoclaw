@@ -154,43 +154,53 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       continue;
     }
 
-    const ids = messages.map((m) => m.id);
+    // Command handling: the host router gates filtered and unauthorized
+    // admin commands before they reach the container. The runner handles
+    // /clear (session reset) and /upload-trace directly.
+    const isClear = (m: MessageInRow) => (m.kind === 'chat' || m.kind === 'chat-sdk') && isClearCommand(m);
+    // isSessionEcho guard: a copied "/upload-trace" from another session is
+    // ambient context, never a runner command (isClearCommand self-guards).
+    const isUploadTrace = (m: MessageInRow) =>
+      (m.kind === 'chat' || m.kind === 'chat-sdk') && !isSessionEcho(m) && isUploadTraceCommand(m);
+    const isCommand = (m: MessageInRow) => isClear(m) || isUploadTrace(m);
+    // Context rows beside a command never wake a turn on their own (the
+    // accumulate gate above): they stay pending for the next message.
+    const runsTurn = messages.some((m) => m.trigger === 1 && !isCommand(m));
+    const batch = runsTurn ? messages : messages.filter(isCommand);
+    const ids = batch.map((m) => m.id);
     markProcessing(ids);
 
-    const routing = extractRouting(messages);
-
-    // Command handling: the host router gates filtered and unauthorized
-    // admin commands before they reach the container. The only command
-    // the runner handles directly is /clear (session reset).
+    // Each command replies in its own thread: a batch route would put the
+    // reply, or the turn answering the rest of the batch, in another one.
     const normalMessages: MessageInRow[] = [];
     const commandIds: string[] = [];
 
-    for (const msg of messages) {
-      if ((msg.kind === 'chat' || msg.kind === 'chat-sdk') && isClearCommand(msg)) {
+    for (const msg of batch) {
+      if (isClear(msg)) {
         log('Clearing session (resetting continuation)');
         continuation = undefined;
         clearContinuation(config.providerName);
+        const route = extractRouting([msg]);
         await writeMessageOut({
           id: generateId(),
           kind: 'chat',
-          platform_id: routing.platformId,
-          channel_type: routing.channelType,
-          thread_id: routing.threadId,
+          platform_id: route.platformId,
+          channel_type: route.channelType,
+          thread_id: route.threadId,
           content: JSON.stringify({ text: 'Session cleared.' }),
         });
         commandIds.push(msg.id);
         continue;
       }
-      // isSessionEcho guard: a copied "/upload-trace" from another session is
-      // ambient context, never a runner command (isClearCommand self-guards).
-      if ((msg.kind === 'chat' || msg.kind === 'chat-sdk') && !isSessionEcho(msg) && isUploadTraceCommand(msg)) {
+      if (isUploadTrace(msg)) {
         log('Uploading session trace to Hugging Face');
+        const route = extractRouting([msg]);
         await writeMessageOut({
           id: generateId(),
           kind: 'chat',
-          platform_id: routing.platformId,
-          channel_type: routing.channelType,
-          thread_id: routing.threadId,
+          platform_id: route.platformId,
+          channel_type: route.channelType,
+          thread_id: route.threadId,
           content: JSON.stringify({ text: uploadTrace(config.providerName) }),
         });
         commandIds.push(msg.id);
@@ -203,12 +213,11 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       markCompleted(commandIds);
     }
 
-    if (normalMessages.length === 0) {
-      const remainingIds = ids.filter((id) => !commandIds.includes(id));
-      if (remainingIds.length > 0) markCompleted(remainingIds);
-      log(`All ${messages.length} message(s) were commands, skipping query`);
+    if (!runsTurn) {
+      log(`All ${commandIds.length} triggering message(s) were commands, skipping query`);
       continue;
     }
+    const routing = extractRouting(normalMessages);
 
     // Pre-task scripts: for any task rows with a `script`, run it before the
     // provider call. Scripts returning wakeAgent=false (or erroring) gate
@@ -423,7 +432,8 @@ export async function processQuery(
   // pushed while an answer is still streaming waits its turn — the in-flight
   // answer keeps the destination it started with. Pushed routes queue in
   // push order (including retries) and advance at every result, mirroring
-  // archivePrompts. An empty initial prompt (a pre-warmed query) starts idle.
+  // archivePrompts; a result that answers folded pushes advances past them
+  // too. An empty initial prompt (a pre-warmed query) starts idle.
   let answering = initialPrompt !== '';
   type QueuedTurn = {
     routing: RoutingContext;
@@ -616,6 +626,17 @@ export async function processQuery(
         // (send_message) mid-turn, or the message may not need a response
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
+        // A provider may fold pushes into the running turn and answer them
+        // all with this one result.
+        // Retire their queued turns too (at the turn boundary below, so a
+        // throw before it still notices them), or every later answer lands
+        // one turn behind, in the previous message's thread.
+        const folded = Math.min(Math.max((event.answeredInputs ?? 1) - 1, 0), queuedTurns.length);
+        const foldedTurns = queuedTurns.slice(0, folded);
+        if (folded > 0) {
+          log(`Result answered ${folded} queued turn(s) folded into this one`);
+          archivePrompts.splice(0, folded + 1, archivePrompts.slice(0, folded + 1).join('\n\n'));
+        }
         const resultText = event.text ?? '';
         const failed = event.isError === true;
         if (resultText || failed) {
@@ -648,6 +669,13 @@ export async function processQuery(
             // Keep the reason in the runner log, since the skipped notice may
             // be the only place it would have been recorded.
             else log(`Error result — notice not sent on this route: ${notice}`);
+            // Requests folded into the failed turn failed with it.
+            const noticed = [routing];
+            for (const { routing: target } of foldedTurns) {
+              if (!sendsFailureNotice(target) || noticed.some((prior) => sameNoticeRoute(prior, target))) continue;
+              noticed.push(target);
+              await deliverErrorResult(target, notice);
+            }
           }
           // An unwrapped final text only warrants the wrap-nudge when no
           // <message> block was delivered this turn. If a reply already went
@@ -708,6 +736,7 @@ export async function processQuery(
         turnStartSeq = maxOutboundSeq();
         midTurnTail = '';
         nudgedWindow = undefined;
+        queuedTurns.splice(0, folded);
         const next = queuedTurns.shift();
         if (next) adoptTurn(next);
         else answering = false;
@@ -735,16 +764,7 @@ export async function processQuery(
       const noticed: RoutingContext[] = [];
       for (const target of failedRoutes) {
         if (!sendsFailureNotice(target)) continue;
-        if (
-          noticed.some(
-            (prior) =>
-              prior.platformId === target.platformId &&
-              prior.channelType === target.channelType &&
-              prior.threadId === target.threadId &&
-              (target.channelType !== 'agent' || prior.inReplyTo === target.inReplyTo),
-          )
-        )
-          continue;
+        if (noticed.some((prior) => sameNoticeRoute(prior, target))) continue;
         noticed.push(target);
         try {
           await deliverErrorResult(target, GENERIC_FAILURE_NOTICE);
@@ -804,6 +824,20 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
  */
 function sendsFailureNotice(routing: RoutingContext): boolean {
   return !routing.taskRun && !!routing.platformId && !!routing.channelType && !routing.failureNoticeWake;
+}
+
+/**
+ * Would a failure notice on `b` repeat one already sent on `a`? One notice
+ * per thread is enough; the host picks an a2a reply's session by
+ * in_reply_to, so agent routes also compare it.
+ */
+function sameNoticeRoute(a: RoutingContext, b: RoutingContext): boolean {
+  return (
+    a.platformId === b.platformId &&
+    a.channelType === b.channelType &&
+    a.threadId === b.threadId &&
+    (b.channelType !== 'agent' || a.inReplyTo === b.inReplyTo)
+  );
 }
 
 /** Send the dedicated provider error or a generic failure notice. */
