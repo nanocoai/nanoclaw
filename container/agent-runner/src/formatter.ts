@@ -325,9 +325,11 @@ function formatTaskMessage(msg: MessageInRow): string {
   });
   const parts: string[] = [];
   if (content.scriptOutput) {
-    parts.push('Script output:', JSON.stringify(content.scriptOutput, null, 2), '');
+    parts.push('Script output:', jsonForBlock(content.scriptOutput, 2), '');
   }
-  parts.push('Instructions:', stripLegacyTaskContract(content.prompt || ''));
+  // Only '<' can close the block. Prompts often hold shell commands and URLs,
+  // so '&', '>' and '"' must reach the agent unchanged.
+  parts.push('Instructions:', stripLegacyTaskContract(content.prompt || '').replace(/</g, '&lt;'));
   return `<task${from} time="${escapeXml(time)}" current_time="${escapeXml(currentTime)}">${parts.join('\n')}</task>`;
 }
 
@@ -357,13 +359,13 @@ function formatWebhookMessage(msg: MessageInRow): string {
   const source = content.source || 'unknown';
   const event = content.event || 'unknown';
   const from = originAttr(msg);
-  return `<webhook${from} source="${escapeXml(source)}" event="${escapeXml(event)}">${JSON.stringify(content.payload || content, null, 2)}</webhook>`;
+  return `<webhook${from} source="${escapeXml(source)}" event="${escapeXml(event)}">${jsonForBlock(content.payload || content, 2)}</webhook>`;
 }
 
 function formatSystemMessage(msg: MessageInRow): string {
   const content = parseContent(msg.content);
   const from = originAttr(msg);
-  return `<system_response${from} action="${escapeXml(content.action || 'unknown')}" status="${escapeXml(content.status || 'unknown')}">${JSON.stringify(content.result || null)}</system_response>`;
+  return `<system_response${from} action="${escapeXml(content.action || 'unknown')}" status="${escapeXml(content.status || 'unknown')}">${jsonForBlock(content.result || null)}</system_response>`;
 }
 
 /**
@@ -420,13 +422,13 @@ function formatAttachments(attachments: any[] | undefined): string {
   if (!Array.isArray(attachments) || attachments.length === 0) return '';
   const parts = attachments.map((a) => {
     const name = a.name || a.filename || 'attachment';
-    const type = a.type || 'file';
+    const type = String(a.type || 'file');
     const localPath = a.localPath ? `/workspace/${a.localPath}` : '';
     const url = a.url || '';
     if (localPath) {
-      return `[${type}: ${escapeXml(name)} — saved to ${escapeXml(localPath)}]`;
+      return `[${escapeXml(type)}: ${escapeXml(name)} — saved to ${escapeXml(localPath)}]`;
     }
-    return url ? `[${type}: ${escapeXml(name)} (${escapeXml(url)})]` : `[${type}: ${escapeXml(name)}]`;
+    return url ? `[${escapeXml(type)}: ${escapeXml(name)} (${escapeXml(url)})]` : `[${escapeXml(type)}: ${escapeXml(name)}]`;
   });
   return '\n' + parts.join('\n');
 }
@@ -442,6 +444,15 @@ function parseContent(json: string): any {
 
 function escapeXml(str: string): string {
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+/**
+ * JSON embedded in a prompt block. '<' only ever occurs inside JSON strings,
+ * where `<` is an equivalent escape — so the payload cannot close its
+ * block and stays valid, readable JSON.
+ */
+function jsonForBlock(value: unknown, space?: number): string {
+  return JSON.stringify(value, null, space).replace(/</g, '\\u003c');
 }
 
 /**
