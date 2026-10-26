@@ -415,10 +415,73 @@ export async function materializeContainerJson(agentGroupId: string): Promise<Co
 
   const config = configFromDb(row, group);
 
-  const p = path.join(GROUPS_DIR, group.folder, 'container.json');
-  const dir = path.dirname(p);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(p, JSON.stringify(config, null, 2) + '\n');
+  const groupDir = path.join(GROUPS_DIR, group.folder);
+  fs.mkdirSync(groupDir, { recursive: true });
+  writeContainerJsonNoFollow(groupDir, 'container.json', JSON.stringify(config, null, 2) + '\n');
 
   return config;
+}
+
+/**
+ * Write `name` inside the host-owned group folder `dir` without following a
+ * symlink planted at the leaf. The group folder is a mount source the
+ * container cannot swap, so only the leaf is container-controlled.
+ *
+ * A real existing file is truncated in place (same inode), so a running
+ * container's read-only bind mount sees the new config live — matching the
+ * old in-place write. A symlink or FIFO is the container's, not ours: the
+ * single entry is unlinked (the link itself, never its target) and a fresh
+ * regular file is created. A planted directory is NOT removed — unlink leaves
+ * it and throws, failing the spawn exactly as the old writer's EISDIR did,
+ * rather than recursively deleting container-controlled contents (whose
+ * symlinked children a recursive remove could follow outside the group). The
+ * unlink/create window is the tracked concurrent-swap residual; it is not
+ * reached for the normal regular-file case.
+ */
+function writeContainerJsonNoFollow(dir: string, name: string, data: string): void {
+  const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW, O_NONBLOCK } = fs.constants;
+  const p = path.join(dir, name);
+  const replacePlanted = (): void => {
+    // unlink removes a symlink/FIFO leaf itself; on a directory it throws
+    // (EISDIR/EPERM) and we let that propagate — never a recursive delete.
+    try {
+      fs.unlinkSync(p);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+    const fd = fs.openSync(p, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o666);
+    try {
+      fs.writeFileSync(fd, data);
+    } finally {
+      fs.closeSync(fd);
+    }
+  };
+  // O_NOFOLLOW refuses a symlink (ELOOP); O_NONBLOCK keeps a reader-less FIFO
+  // from blocking the open. No O_TRUNC yet — truncate only once fstat confirms
+  // a regular file, so a non-regular entry is replaced rather than written to.
+  let fd: number;
+  try {
+    fd = fs.openSync(p, O_WRONLY | O_NOFOLLOW | O_NONBLOCK);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    // No entry (ENOENT) and a non-regular leaf (symlink/FIFO/dir) share the
+    // create-fresh path; replacePlanted's unlink ignores ENOENT.
+    if (code === 'ENOENT' || code === 'ELOOP' || code === 'ENXIO' || code === 'EISDIR') return replacePlanted();
+    throw err;
+  }
+  // `closed` guards the fd against a double close: once closed here, the
+  // finally must not close it again (a reused descriptor could be an
+  // unrelated host file), including when replacePlanted throws afterwards.
+  let closed = false;
+  try {
+    if (!fs.fstatSync(fd).isFile()) {
+      fs.closeSync(fd);
+      closed = true;
+      return replacePlanted();
+    }
+    fs.ftruncateSync(fd, 0);
+    fs.writeFileSync(fd, data);
+  } finally {
+    if (!closed) fs.closeSync(fd);
+  }
 }
