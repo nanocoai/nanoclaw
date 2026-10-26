@@ -15,8 +15,12 @@
  * for DMs and 'group:<id>' for group chats. DeltaChat emits numeric chat IDs
  * ('12'). Prefixing any of these would cause a mismatch with what the adapter
  * later emits.
+ *
+ * The CLI adapter emits a bare 'local' platform_id. It has no recognizable
+ * shape, so it gets a channel-name carve-out.
  */
 export function namespacedPlatformId(channel: string, raw: string): string {
+  if (channel === 'cli') return raw;
   if (raw.startsWith(`${channel}:`)) return raw;
   if (raw.includes('@')) return raw;
   if (raw.startsWith('+') || raw.startsWith('group:')) return raw;
