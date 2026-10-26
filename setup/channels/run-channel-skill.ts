@@ -28,6 +28,7 @@ import { ensureAnswer, fail, runQuietChild } from '../lib/runner.js';
 import { hostExec, runSkill, type RunSkillOptions } from '../lib/skill-driver.js';
 import { clearTemplatePick } from '../templates.js';
 import { launchSlackJob, readSlackJob, queueSlackJob } from '../../src/community-portal/slack-job.js';
+import { redactSecrets } from '../../src/secret-redaction.js';
 import { getChannelPreStep, getCompanionSkills } from './companions.js';
 
 const DEFAULT_AGENT_NAME = 'Nano';
@@ -293,7 +294,10 @@ export async function runChannelSkill(
     let rawLog: string | undefined;
     if (res.agentTasks.some((t) => t.reason.includes('\n'))) {
       rawLog = setupLog.stepRawLog(`${channel}-install-bounce`);
-      writeFileSync(rawLog, res.agentTasks.map((t) => `## ${t.kind} (line ${t.line})\n${t.reason}\n`).join('\n'));
+      writeFileSync(
+        rawLog,
+        redactSecrets(res.agentTasks.map((t) => `## ${t.kind} (line ${t.line})\n${t.reason}\n`).join('\n')),
+      );
     }
     for (const t of res.agentTasks) {
       const lines = t.reason

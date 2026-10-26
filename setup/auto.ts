@@ -1769,7 +1769,10 @@ function printIntro(): void {
  * append to a stale one from a previous run.
  */
 function initProgressionLog(): void {
-  if (process.env.NANOCLAW_BOOTSTRAPPED === '1') return;
+  if (process.env.NANOCLAW_BOOTSTRAPPED === '1') {
+    setupLog.redactBootstrapLog();
+    return;
+  }
   let commit = '';
   try {
     commit = spawnSync('git', ['rev-parse', '--short', 'HEAD'], {
