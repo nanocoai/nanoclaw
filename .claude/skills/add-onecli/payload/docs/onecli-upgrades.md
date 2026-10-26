@@ -230,3 +230,8 @@ the account is already connected, another OpenAI secret (such as an API key) is
 still stored; delete it too. The new login has a new secret ID: grant it to
 each agent that had the old one, as described under Provider credentials in the
 add-onecli skill.
+
+The same stub claims a free ChatGPT plan for every login, and Codex hides its
+built-in image generation tool from free plans. The provider removes that
+made-up plan claim, so Codex treats the plan as unknown. The backend still
+decides what the account may use, from the real token the gateway injects.

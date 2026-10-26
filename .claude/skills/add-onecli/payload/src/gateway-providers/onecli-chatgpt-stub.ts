@@ -1,5 +1,5 @@
-/** OneCLI 1.42 writes this fixed id into its ChatGPT login stand-in. */
-const STUB_ACCOUNT_ID = 'onecli-managed';
+/** OneCLI 1.42 writes this fixed id into its ChatGPT login stand-in (account and user id). */
+const STUB_ID = 'onecli-managed';
 const AUTH_CLAIMS = 'https://api.openai.com/auth';
 const ACCOUNT_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -20,7 +20,24 @@ function parse(content: string): StubAuth | undefined {
 /** True for a ChatGPT login stand-in that still carries OneCLI's fixed account id. */
 export function stubNeedsAccountId(content: string): boolean {
   const auth = parse(content);
-  return auth?.auth_mode === 'chatgpt' && auth.tokens?.account_id === STUB_ACCOUNT_ID;
+  return auth?.auth_mode === 'chatgpt' && auth.tokens?.account_id === STUB_ID;
+}
+
+/** Re-encodes the id token's auth claims when `edit` changed them; returns whether it did. */
+function editAuthClaims(tokens: { id_token?: unknown }, edit: (claims: Record<string, unknown>) => boolean): boolean {
+  const parts = typeof tokens.id_token === 'string' ? tokens.id_token.split('.') : [];
+  if (parts.length !== 3) return false;
+  try {
+    const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    const authClaims = claims?.[AUTH_CLAIMS];
+    if (!authClaims || typeof authClaims !== 'object' || !edit(authClaims)) return false;
+    parts[1] = Buffer.from(JSON.stringify(claims)).toString('base64url');
+    tokens.id_token = parts.join('.');
+    return true;
+  } catch {
+    // Leave an unreadable id token as OneCLI wrote it.
+    return false;
+  }
 }
 
 /**
@@ -33,20 +50,29 @@ export function withAccountId(content: string, accountId: string): string {
   const auth = parse(content)!;
   const tokens = auth.tokens!;
   tokens.account_id = accountId;
-  const parts = typeof tokens.id_token === 'string' ? tokens.id_token.split('.') : [];
-  if (parts.length === 3) {
-    try {
-      const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
-      if (claims?.[AUTH_CLAIMS]?.chatgpt_account_id === STUB_ACCOUNT_ID) {
-        claims[AUTH_CLAIMS].chatgpt_account_id = accountId;
-        parts[1] = Buffer.from(JSON.stringify(claims)).toString('base64url');
-        tokens.id_token = parts.join('.');
-      }
-    } catch {
-      // Leave an unreadable id token as OneCLI wrote it.
-    }
-  }
+  editAuthClaims(tokens, (claims) => {
+    if (claims.chatgpt_account_id !== STUB_ID) return false;
+    claims.chatgpt_account_id = accountId;
+    return true;
+  });
   return JSON.stringify(auth, null, 2);
+}
+
+/**
+ * The stand-in claims a free plan for every login, and clients hide
+ * plan-gated tools such as image generation from a free plan. The real plan
+ * is not known here, so drop the made-up claim; the backend still checks the
+ * plan against the real token the gateway injects.
+ */
+export function withoutPlanClaim(content: string): string {
+  const auth = parse(content);
+  if (auth?.auth_mode !== 'chatgpt' || !auth.tokens) return content;
+  const dropped = editAuthClaims(auth.tokens, (claims) => {
+    if (claims.chatgpt_user_id !== STUB_ID || !('chatgpt_plan_type' in claims)) return false;
+    delete claims.chatgpt_plan_type;
+    return true;
+  });
+  return dropped ? JSON.stringify(auth, null, 2) : content;
 }
 
 interface SecretSummary {

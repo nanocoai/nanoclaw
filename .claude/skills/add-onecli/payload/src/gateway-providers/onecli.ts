@@ -4,7 +4,7 @@ import { OneCLI, ApprovalClient, type ContainerConfig, type ApprovalRequest } fr
 
 import { DATA_DIR } from '../config.js';
 import { combinedCaBundle, stageOnecliFile } from './onecli-files.js';
-import { storedAccountId, stubNeedsAccountId, withAccountId } from './onecli-chatgpt-stub.js';
+import { storedAccountId, stubNeedsAccountId, withAccountId, withoutPlanClaim } from './onecli-chatgpt-stub.js';
 import {
   adoptSavedProviderCredentials,
   hasSavedProviderNames,
@@ -74,7 +74,8 @@ export function contributionFromConfig(
     env.DENO_CERT = target;
   }
   for (const stub of config.credentialStubs ?? []) {
-    mount('stub', accountId ? withAccountId(stub.content, accountId) : stub.content, stub.containerPath);
+    const content = withoutPlanClaim(stub.content);
+    mount('stub', accountId ? withAccountId(content, accountId) : content, stub.containerPath);
   }
   return { env, mounts };
 }
