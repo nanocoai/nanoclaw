@@ -33,6 +33,7 @@ import { fanOutboundMessage } from './modules/cross-session-context/index.js';
 import { log } from './log.js';
 import { normalizeOptions } from './channels/ask-question.js';
 import { clearOutbox, readOutboxFiles, withExistingMailboxSession } from './session-manager.js';
+import { isTransientSqliteReadonlyError } from './mailbox/sqlite/session-db.js';
 import { pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typing/index.js';
 import type { OutboundFile } from './channels/adapter.js';
 import type { PendingApproval, Session } from './types.js';
@@ -275,6 +276,11 @@ async function drainSession(session: Session): Promise<void> {
     if (!existing) return;
     ({ delivered, pending } = existing);
   } catch (err) {
+    // If the container is mid-commit, the DELETE-journal write path leaves a
+    // `-journal` file SQLite cannot recover from a readonly open. Skip the
+    // tick quietly — the next active poll (~1s) sees a clean DB; an error
+    // line per tick for the whole commit window is pure spam.
+    if (isTransientSqliteReadonlyError(err)) return;
     log.error('Session mailbox delivery failed', {
       agentGroupId: agentGroup.id,
       sessionId: session.id,
