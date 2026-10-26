@@ -25,7 +25,12 @@ import {
   getMessagingGroupByPlatform,
   getMessagingGroupForOwnDestination,
 } from './db/messaging-groups.js';
-import { clearDeliveryAttempt, recordDeliveryAttempt } from './db/coordination.js';
+import {
+  clearDeliveryAttempt,
+  getDeliveryAttempt,
+  listDeliveryAttempts,
+  recordDeliveryAttempt,
+} from './db/coordination.js';
 import { runGuarded, type DeliveryGuardSpec, type GuardedDeliveryHandler } from './delivery-guard.js';
 import { isUnguarded, type Unguarded } from './guard/index.js';
 import { mapConcurrent } from './concurrency.js';
@@ -41,6 +46,103 @@ import type { OutboundMessage } from './mailbox/index.js';
 const ACTIVE_POLL_MS = 1000;
 const SWEEP_POLL_MS = 60_000;
 const MAX_DELIVERY_ATTEMPTS = 3;
+/** Transient failures back off 2 s, 4 s, 8 s, 16 s, 32 s, then every 60 s;
+ *  the 35th failure lands about 30 minutes after the first and gives up. */
+const TRANSIENT_BASE_DELAY_MS = 2_000;
+const TRANSIENT_MAX_DELAY_MS = 60_000;
+const MAX_TRANSIENT_ATTEMPTS = 35;
+const MAX_RETRY_AFTER_MS = 5 * 60_000;
+const TRANSIENT_NETWORK_CODES = new Set([
+  'ETIMEDOUT',
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'ENETUNREACH',
+  'EHOSTUNREACH',
+  'EAI_AGAIN',
+  'EPIPE',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_SOCKET',
+]);
+
+function httpStatus(err: Record<string, unknown>): number | undefined {
+  const response = err.response as { status?: unknown } | undefined;
+  const inner = err.innerHttpError as { statusCode?: unknown } | undefined;
+  for (const value of [err.status, err.statusCode, response?.status, inner?.statusCode]) {
+    if (typeof value === 'number' && value >= 100 && value < 600) return value;
+  }
+  return undefined;
+}
+
+/** Deep enough for any real wrapper chain; a longer one is not trusted. */
+const MAX_CAUSE_DEPTH = 32;
+
+interface TransientFailure {
+  retryAfterMs?: number;
+  /** Part of the reply is already posted and a retry posts it again. */
+  partial?: boolean;
+}
+
+/**
+ * Null for a permanent failure. Transient: a rate limit (Chat SDK code
+ * RATE_LIMITED, with its Retry-After), HTTP 408/429/5xx, or a network error.
+ * An HTTP status anywhere in the cause chain decides before the error's name,
+ * because adapters wrap a 400 in a NetworkError. Unknown errors, and chains
+ * too deep to read whole, stay permanent: a deterministic failure must never
+ * wedge a conversation.
+ */
+function transientFailure(err: unknown): TransientFailure | null {
+  const chain: Record<string, unknown>[] = [];
+  const seen = new Set<unknown>();
+  let e: unknown = err;
+  while (e && typeof e === 'object' && !seen.has(e)) {
+    if (chain.length === MAX_CAUSE_DEPTH) return null;
+    seen.add(e);
+    const link = e as Record<string, unknown>;
+    chain.push(link);
+    e = link.originalError ?? link.cause;
+  }
+  const failure = transientCause(chain);
+  return failure && chain.some((link) => link.code === 'PARTIAL_SEND') ? { ...failure, partial: true } : failure;
+}
+
+function transientCause(chain: Record<string, unknown>[]): TransientFailure | null {
+  const limited = chain.find((link) => link.code === 'RATE_LIMITED');
+  if (limited) {
+    const retryAfterMs =
+      typeof limited.retryAfterMs === 'number'
+        ? limited.retryAfterMs
+        : typeof limited.retryAfter === 'number'
+          ? limited.retryAfter * 1000
+          : 0;
+    return retryAfterMs > 0 ? { retryAfterMs: Math.min(retryAfterMs, MAX_RETRY_AFTER_MS) } : {};
+  }
+  const status = chain.map(httpStatus).find((s) => s !== undefined);
+  if (status !== undefined) return status === 408 || status === 429 || status >= 500 ? {} : null;
+  const network = chain.some((link) => link.name === 'NetworkError' || TRANSIENT_NETWORK_CODES.has(String(link.code)));
+  return network ? {} : null;
+}
+
+/** A reply split into chunks reposts its sent chunks on every retry, so a
+ *  partly sent one keeps the short cap: still backed off, posted ≤3 times. */
+function attemptCap(transient: TransientFailure | null): number {
+  return transient && !transient.partial ? MAX_TRANSIENT_ATTEMPTS : MAX_DELIVERY_ATTEMPTS;
+}
+
+function retryDelayMs(failure: TransientFailure, attempts: number): number {
+  return (
+    failure.retryAfterMs ?? Math.min(TRANSIENT_BASE_DELAY_MS * 2 ** Math.max(0, attempts - 1), TRANSIENT_MAX_DELAY_MS)
+  );
+}
+
+/** Conversation a channel send goes to; its rate limit and message order
+ *  belong to it. The hold covers this session's messages only: another
+ *  session sending to the same conversation is not held, and order across
+ *  sessions is not guaranteed (as before). */
+function channelDestination(msg: OutboundMessage): string | null {
+  if (msg.kind === 'system' || !msg.channelType || msg.channelType === 'agent' || !msg.platformId) return null;
+  return `${msg.channelType}\u0000${msg.platformId}`;
+}
+
 /**
  * Sessions drained in parallel per poll tick. A visit is one mailbox round
  * trip (read the queue) plus the channel sends; serially, a tick scaled as
@@ -61,16 +163,29 @@ const DELIVERY_CONCURRENCY = 8;
  * give-up decision for this tick (the message just retries next poll), and a
  * failed clear leaves a stale row the next lifecycle of the same id clears.
  */
-async function recordAttemptRow(messageId: string, sessionId: string, err: unknown): Promise<number | null> {
+async function recordAttemptRow(
+  messageId: string,
+  sessionId: string,
+  err: unknown,
+  transient: TransientFailure | null,
+  maxAttempts: number,
+): Promise<{ attempts: number; retryInMs: number | null } | null> {
   /* eslint-disable no-catch-all/no-catch-all -- attempt bookkeeping must never break delivery */
   try {
-    return await recordDeliveryAttempt({
+    // One write carries the count and its deadline, so a crash cannot keep
+    // one without the other. The read is safe: one drain per session at a time.
+    // The failure that reaches the cap gets no deadline: a count at the short
+    // cap with none due marks a give-up a restart cut short.
+    const prior = (await getDeliveryAttempt(messageId))?.attempts ?? 0;
+    const retryInMs = transient && prior + 1 < maxAttempts ? retryDelayMs(transient, prior + 1) : null;
+    const attempts = await recordDeliveryAttempt({
       messageId,
       sessionId,
       now: new Date().toISOString(),
-      nextAttemptAt: null,
+      nextAttemptAt: retryInMs === null ? null : new Date(Date.now() + retryInMs).toISOString(),
       error: err instanceof Error ? err.message : String(err),
     });
+    return { attempts, retryInMs };
   } catch (recordErr) {
     log.error('Failed to record delivery attempt — retrying next poll without a count', {
       messageId,
@@ -294,7 +409,45 @@ async function drainSession(session: Session): Promise<void> {
     }
   }
 
+  // A message backing off after a transient failure is skipped until it is
+  // due, never slept on, and holds its destination so this session's later
+  // messages to it keep their order. Other destinations and sessions go on.
+  const attemptRows = pending.length > 0 ? await listDeliveryAttempts(session.id) : new Map<string, never>();
+  const now = new Date().toISOString();
+  const heldDestinations = new Set<string>();
+
+  const giveUp = async (msgId: string, attempts: number, err: unknown): Promise<void> => {
+    log.error('Message delivery failed permanently, giving up', {
+      messageId: msgId,
+      sessionId: session.id,
+      attempts,
+      err,
+    });
+    try {
+      await withExistingMailboxSession(agentGroup.id, session.id, (mailbox) => mailbox.markDeliveryFailed(msgId));
+      await clearAttemptRow(msgId);
+    } catch (markErr) {
+      log.error('Failed to record permanent delivery failure', {
+        messageId: msgId,
+        sessionId: session.id,
+        err: markErr,
+      });
+    }
+  };
+
   for (const msg of pending) {
+    const destination = channelDestination(msg);
+    if (destination && heldDestinations.has(destination)) continue;
+    const row = attemptRows.get(msg.id);
+    // The host stopped between storing the last failure and marking it failed.
+    if (row && row.next_attempt_at === null && row.attempts >= MAX_DELIVERY_ATTEMPTS) {
+      await giveUp(msg.id, row.attempts, row.last_error);
+      continue;
+    }
+    if (row?.next_attempt_at && row.next_attempt_at > now) {
+      if (destination) heldDestinations.add(destination);
+      continue;
+    }
     try {
       const platformMsgId = await deliverMessage(msg, session);
       await withExistingMailboxSession(agentGroup.id, session.id, (mailbox) =>
@@ -330,24 +483,21 @@ async function drainSession(session: Session): Promise<void> {
         }
       }
     } catch (err) {
-      const attempts = await recordAttemptRow(msg.id, session.id, err);
-      if (attempts !== null && attempts >= MAX_DELIVERY_ATTEMPTS) {
-        log.error('Message delivery failed permanently, giving up', {
+      const transient = destination ? transientFailure(err) : null;
+      const maxAttempts = attemptCap(transient);
+      const record = await recordAttemptRow(msg.id, session.id, err, transient, maxAttempts);
+      const attempts = record?.attempts ?? null;
+      if (attempts !== null && attempts >= maxAttempts) {
+        await giveUp(msg.id, attempts, err);
+      } else if (transient && destination) {
+        heldDestinations.add(destination);
+        log.warn('Message delivery failed transiently, holding its destination', {
           messageId: msg.id,
           sessionId: session.id,
-          attempts,
+          attempt: attempts,
+          retryInMs: record?.retryInMs ?? null,
           err,
         });
-        try {
-          await withExistingMailboxSession(agentGroup.id, session.id, (mailbox) => mailbox.markDeliveryFailed(msg.id));
-          await clearAttemptRow(msg.id);
-        } catch (markErr) {
-          log.error('Failed to record permanent delivery failure', {
-            messageId: msg.id,
-            sessionId: session.id,
-            err: markErr,
-          });
-        }
       } else {
         log.warn('Message delivery failed, will retry', {
           messageId: msg.id,
