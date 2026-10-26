@@ -22,3 +22,12 @@ describe('runner config speed', () => {
     expect(runnerConfigFromRaw({ speed: 7 }).speed).toBeUndefined();
   });
 });
+
+describe('runner config systemPromptMode', () => {
+  it('reads plain and leaves everything else to the default', () => {
+    expect(runnerConfigFromRaw({ systemPromptMode: 'plain' }).systemPromptMode).toBe('plain');
+    expect(runnerConfigFromRaw({ systemPromptMode: 'claude_code' }).systemPromptMode).toBeUndefined();
+    expect(runnerConfigFromRaw({ systemPromptMode: 'other' }).systemPromptMode).toBeUndefined();
+    expect(runnerConfigFromRaw({}).systemPromptMode).toBeUndefined();
+  });
+});

@@ -480,6 +480,7 @@ describe('container configs', () => {
       cli_scope: 'global',
       timezone: null,
       speed: null,
+      system_prompt_mode: null,
       updated_at: now(),
     });
     const row = await getContainerConfig('ag-full');
@@ -496,5 +497,15 @@ describe('container configs', () => {
     await updateContainerConfigScalars('ag-speed', { speed: null });
     const cleared = await getContainerConfig('ag-speed');
     expect(cleared!.speed).toBeNull();
+  });
+
+  it('round-trips the system_prompt_mode scalar', async () => {
+    await createAgentGroup({ id: 'ag-spm', name: 'Spm', folder: 'spm', agent_provider: null, created_at: now() });
+    await ensureContainerConfig('ag-spm');
+    expect((await getContainerConfig('ag-spm'))!.system_prompt_mode).toBeNull();
+    await updateContainerConfigScalars('ag-spm', { system_prompt_mode: 'plain' });
+    expect((await getContainerConfig('ag-spm'))!.system_prompt_mode).toBe('plain');
+    await updateContainerConfigScalars('ag-spm', { system_prompt_mode: null });
+    expect((await getContainerConfig('ag-spm'))!.system_prompt_mode).toBeNull();
   });
 });
