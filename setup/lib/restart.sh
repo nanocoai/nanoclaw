@@ -19,7 +19,10 @@ fi
 previous="$(node "$here/host-status.mjs" snapshot "$root" 2>/dev/null || true)"
 # A snapshot can fail on an old host without the status command or an
 # unresponsive socket. Still require a process born after this request.
-started_after="$(node -e 'console.log(Date.now())')"
+# String() keeps this a number even when FORCE_COLOR is set: console.log
+# colorizes a bare number, and the ANSI wrapper makes host-status.mjs read
+# the value as NaN.
+started_after="$(node -e 'console.log(String(Date.now()))')"
 pid=""
 
 restart_darwin() {
