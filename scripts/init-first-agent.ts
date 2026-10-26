@@ -56,11 +56,11 @@ import {
 import { runMigrations } from '../src/db/migrations/index.js';
 import { assertValidGroupFolder } from '../src/group-folder.js';
 import { stageGroupPersona } from '../src/group-persona.js';
-import { normalizeName } from '../src/modules/agent-to-agent/db/agent-destinations.js';
 import { addMember } from '../src/modules/permissions/db/agent-group-members.js';
 import { getUserRoles, grantRole } from '../src/modules/permissions/db/user-roles.js';
 import { upsertUser } from '../src/modules/permissions/db/users.js';
 import { ensureContainerConfig, updateContainerConfigScalars } from '../src/db/container-configs.js';
+import { dmAgentFolder } from '../src/operator-agent-folders.js';
 import { namespacedPlatformId } from '../src/platform-id.js';
 import type { AgentGroup, MessagingGroup } from '../src/types.js';
 
@@ -272,7 +272,7 @@ async function main(): Promise<void> {
     folder = existing.folder;
     console.log(`Using agent group: ${ag.id} (${folder})`);
   } else {
-    folder = `dm-with-${normalizeName(args.displayName)}`;
+    folder = dmAgentFolder(args.displayName);
     const existing = await getAgentGroupByFolder(folder);
     if (existing) {
       ag = existing;
