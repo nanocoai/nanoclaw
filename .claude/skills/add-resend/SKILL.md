@@ -19,10 +19,20 @@ re-run; anything a parser can't apply falls back to the prose beside it.
 ### 1. Copy the adapter
 
 Fetch the `channels` branch and copy the Resend adapter into `src/channels/`
-(overwrite — the branch is canonical):
+(overwrite — the branch is canonical).
+
+An install from before `resend.test.ts` existed has an older `resend.ts` without
+the `resendRegistration` export the test imports, and the copy below only fills
+missing files. So this step deletes an older `resend.ts` first and the copy
+brings the current one:
+
+```nc:run effect:refresh
+grep -qsF 'export const resendRegistration' src/channels/resend.ts || rm -f src/channels/resend.ts
+```
 
 ```nc:copy from-branch:channels
 src/channels/resend.ts
+src/channels/resend.test.ts
 src/channels/resend-registration.test.ts
 ```
 
@@ -54,13 +64,16 @@ domain is verified manually once the service runs.
 pnpm run build
 ```
 ```nc:run effect:test
-pnpm exec vitest run src/channels/resend-registration.test.ts
+pnpm exec vitest run src/channels/resend-registration.test.ts src/channels/resend.test.ts
 ```
 
 `resend-registration.test.ts` imports the real channel barrel and asserts the
 registry contains `resend`. It goes red if the import line is deleted or drifts,
 if the barrel fails to evaluate, or if `@resend/chat-sdk-adapter` isn't installed
 (the import throws) — so it also covers the dependency from step 3.
+`resend.test.ts` sends through the real adapter with only Resend's HTTP API
+stubbed: the hello to `resend:<address>` goes out, and a reply lands in the
+thread the person last wrote in.
 
 ## Credentials
 
@@ -156,6 +169,6 @@ explicitly.)
 
 **Replies never reach the agent.** Inbound only flows via the webhook: Resend → **Webhooks** must point at your public host at `/webhook/resend` (shared webhook server, port 3000) with the **email.received** event selected, and `RESEND_WEBHOOK_SECRET` must match that webhook's signing secret. Resend's webhook page lists delivery attempts — a run of failures means the URL is unreachable or the secret mismatches.
 
-**Adapter installed but nothing flows.** Run `pnpm exec vitest run src/channels/resend-registration.test.ts` — red means the barrel import or the `@resend/chat-sdk-adapter` install drifted, so re-run the Apply steps. If green, restart the service so it loads the adapter and `.env`, then re-send the hello.
+**Adapter installed but nothing flows.** Run `pnpm exec vitest run src/channels/resend-registration.test.ts src/channels/resend.test.ts` — red means the barrel import, the adapter file or the `@resend/chat-sdk-adapter` install drifted, so re-run the Apply steps. If green, restart the service so it loads the adapter and `.env`, then re-send the hello.
 
 **A proxy or tunnel on another machine, or in Docker on Linux, gets connection refused or times out.** The webhook server listens on 127.0.0.1 only. Add `WEBHOOK_HOST=0.0.0.0` to `.env` and restart; `Webhook server started` in `logs/nanoclaw.log` shows the host it bound.
