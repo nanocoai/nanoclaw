@@ -50,6 +50,20 @@ This integration supports exactly the gateway version pinned in `.claude/skills/
 pnpm exec tsx .claude/skills/add-onecli/scripts/setup.ts
 ```
 
+### Check the agent proxy address
+
+A remote gateway must tell agents its own address: `GATEWAY_BASE_URL=<gateway-host>:<published gateway port, 10255 by default>` in the gateway's environment (`~/.onecli/.env` for an installer setup), then the `onecli` service recreated (a restart keeps the old environment). Without it, OneCLI hands agents `host.docker.internal:10255`, their own machine, and every model call hangs with no reply. This check reads the address the gateway hands agents. It reports `warn` only for a gateway on another host that hands out such an address, and it never fails the install.
+
+```nc:run capture:proxy_check=.status,proxy_hint=.hint effect:fetch
+pnpm exec tsx .claude/skills/add-onecli/scripts/check-proxy.ts
+```
+
+If it reports `warn`, tell the user:
+
+```nc:operator when:proxy_check=warn
+{{proxy_hint}}
+```
+
 ## Provider credentials
 
 Provider skills such as `/add-opencode` store model credentials here through the

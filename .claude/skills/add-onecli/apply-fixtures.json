@@ -1,0 +1,23 @@
+{
+  "notes": "The conformance harness stubs shell execution. check-proxy.ts prints one JSON line with a status and a hint; only status warn shows the hint to the operator.",
+  "scenarios": [
+    {
+      "name": "local or reachable gateway",
+      "exec": [
+        {
+          "match": "check-proxy.ts",
+          "stdout": "{\"status\":\"ok\",\"hint\":\"OneCLI hands agents a proxy address they can reach.\"}\n"
+        }
+      ]
+    },
+    {
+      "name": "remote gateway handing agents their own machine",
+      "exec": [
+        {
+          "match": "check-proxy.ts",
+          "stdout": "{\"status\":\"warn\",\"hint\":\"The remote OneCLI gateway tells agents to use the proxy host.docker.internal:10255, their own machine, so model calls will hang with no reply.\"}\n"
+        }
+      ]
+    }
+  ]
+}
