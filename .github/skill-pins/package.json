@@ -27,12 +27,17 @@
     "@openai/codex": "0.162.1",
     "@opencode-ai/sdk": "1.18.25",
     "@resend/chat-sdk-adapter": "0.3.0",
+    "@types/mailparser": "3.4.6",
+    "@types/nodemailer": "8.0.1",
     "@types/qrcode": "1.5.6",
     "@types/ws": "8.18.1",
     "@whiskeysockets/baileys": "7.0.0-rc14",
     "agent-browser": "0.27.1",
     "chat-adapter-imessage": "0.1.1",
+    "imapflow": "1.7.8",
+    "mailparser": "3.9.47",
     "mcp-remote": "0.1.38",
+    "nodemailer": "10.1.7",
     "opencode-ai": "1.18.25",
     "pino": "9.6.0",
     "qrcode": "1.5.4",
@@ -175,6 +180,18 @@
         ".claude/skills/add-resend/SKILL.md nc:dep"
       ]
     },
+    "@types/mailparser": {
+      "version": "3.4.6",
+      "sources": [
+        ".claude/skills/add-proton-mail/SKILL.md nc:dep"
+      ]
+    },
+    "@types/nodemailer": {
+      "version": "8.0.1",
+      "sources": [
+        ".claude/skills/add-proton-mail/SKILL.md nc:dep"
+      ]
+    },
     "@types/qrcode": {
       "version": "1.5.6",
       "sources": [
@@ -206,10 +223,28 @@
         ".claude/skills/add-imessage/SKILL.md nc:dep when:backend=local"
       ]
     },
+    "imapflow": {
+      "version": "1.7.8",
+      "sources": [
+        ".claude/skills/add-proton-mail/SKILL.md nc:dep"
+      ]
+    },
+    "mailparser": {
+      "version": "3.9.47",
+      "sources": [
+        ".claude/skills/add-proton-mail/SKILL.md nc:dep"
+      ]
+    },
     "mcp-remote": {
       "version": "0.1.38",
       "sources": [
         ".claude/skills/add-tavily-tool/SKILL.md json block"
+      ]
+    },
+    "nodemailer": {
+      "version": "10.1.7",
+      "sources": [
+        ".claude/skills/add-proton-mail/SKILL.md nc:dep"
       ]
     },
     "opencode-ai": {

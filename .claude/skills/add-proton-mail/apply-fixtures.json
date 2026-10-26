@@ -1,0 +1,51 @@
+{
+  "notes": "Conformance fixtures for scripts/skill-conformance.test.ts \u2014 shaped fake values only, never real credentials. One scenario: the paid-plan confirmation, a Bridge login already done by the operator, and the owner's own address. store-secrets.sh (which writes the bridge password and certificate straight to .env and store/, printing neither) and the `secrets address` read are stubbed; the echo stub answers the platform_id/owner_handle captures; docker, the volume chown, the .env check and the port wait are stubbed to succeed.",
+  "scenarios": [
+    {
+      "name": "paid-plan",
+      "inputs": {
+        "plan_ok": "yes",
+        "proton_address": "assistant@proton.me",
+        "owner_email": "owner@example.com"
+      },
+      "exec": [
+        {
+          "match": "docker info",
+          "stdout": ""
+        },
+        {
+          "match": "docker build",
+          "stdout": ""
+        },
+        {
+          "match": "chown",
+          "stdout": ""
+        },
+        {
+          "match": "store-secrets.sh",
+          "stdout": "PROTON_MAIL_BRIDGE_PASSWORD written to .env (22 characters)"
+        },
+        {
+          "match": "PROTON_MAIL_BRIDGE_PASSWORD=",
+          "stdout": ""
+        },
+        {
+          "match": "secrets address",
+          "stdout": "assistant@pm.me"
+        },
+        {
+          "match": "docker run",
+          "stdout": "0123456789abcdef"
+        },
+        {
+          "match": "/dev/tcp/127.0.0.1/1143",
+          "stdout": "* OK [CAPABILITY IMAP4rev1] Proton Mail Bridge"
+        },
+        {
+          "match": "owner@example.com",
+          "stdout": "owner@example.com"
+        }
+      ]
+    }
+  ]
+}
