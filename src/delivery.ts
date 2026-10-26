@@ -32,7 +32,8 @@ import { mapConcurrent } from './concurrency.js';
 import { fanOutboundMessage } from './modules/cross-session-context/index.js';
 import { log } from './log.js';
 import { normalizeOptions } from './channels/ask-question.js';
-import { clearOutbox, readOutboxFiles, withExistingMailboxSession } from './session-manager.js';
+import { clearOutbox, readOutboxFiles, withExistingMailboxSession, writeSessionMessage } from './session-manager.js';
+import { requestWake } from './request-wake.js';
 import { pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typing/index.js';
 import type { OutboundFile } from './channels/adapter.js';
 import type { PendingApproval, Session } from './types.js';
@@ -330,6 +331,34 @@ async function drainSession(session: Session): Promise<void> {
         }
       }
     } catch (err) {
+      if (err instanceof UndeliverableError) {
+        // Deterministic: no retry budget. Mark failed now and tell the agent.
+        log.warn('Message undeliverable, marking failed', {
+          messageId: msg.id,
+          sessionId: session.id,
+          reason: err.message,
+        });
+        try {
+          await withExistingMailboxSession(agentGroup.id, session.id, (mailbox) => mailbox.markDeliveryFailed(msg.id));
+          await clearAttemptRow(msg.id);
+        } catch (markErr) {
+          log.error('Failed to record undeliverable message', {
+            messageId: msg.id,
+            sessionId: session.id,
+            err: markErr,
+          });
+        }
+        try {
+          await notifyUndeliverable(session, msg, err.message);
+        } catch (notifyErr) {
+          log.warn('Failed to notify agent of undeliverable message', {
+            messageId: msg.id,
+            sessionId: session.id,
+            err: notifyErr,
+          });
+        }
+        continue;
+      }
       const attempts = await recordAttemptRow(msg.id, session.id, err);
       if (attempts !== null && attempts >= MAX_DELIVERY_ATTEMPTS) {
         log.error('Message delivery failed permanently, giving up', {
@@ -360,6 +389,74 @@ async function drainSession(session: Session): Promise<void> {
       }
     }
   }
+}
+
+/**
+ * A message that can never be delivered as written — retrying cannot help.
+ * drainSession marks it failed on the first attempt (no retry budget) and
+ * tells the agent, so a send the agent believes succeeded never dies silently.
+ */
+export class UndeliverableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'UndeliverableError';
+  }
+}
+
+/**
+ * Content flag the runner puts on its own failure notices
+ * (container/agent-runner/src/formatter.ts FAILURE_NOTICE_FIELD): the agent
+ * reads the notice but never answers an error with another send.
+ */
+const FAILURE_NOTICE_FIELD = 'failureNotice';
+
+function describeOutbound(msg: { kind: string; content: string }): string {
+  try {
+    const type = JSON.parse(msg.content)?.type;
+    if (type === 'card') return 'card';
+    if (type === 'ask_question') return 'question';
+  } catch {
+    /* fall through */
+  }
+  return msg.kind === 'chat-sdk' ? 'card' : 'message';
+}
+
+/**
+ * Tell the agent an outbound message was dropped. Written into the session's
+ * inbound mailbox as a system chat (the notifyAgent shape the approval flow
+ * uses). A chat session is woken so the agent can resend correctly; a task
+ * session gets the note in its run log plus the row as context for its next
+ * run (trigger=false) — a finished task run is not restarted for a notice.
+ */
+async function notifyUndeliverable(
+  session: Session,
+  msg: { id: string; kind: string; content: string },
+  reason: string,
+): Promise<void> {
+  const what = describeOutbound(msg);
+  const text =
+    `Not delivered: your ${what} (id ${msg.id}) was dropped — ${reason}. Nothing was sent. ` +
+    'To reach someone from this session, call send_message with an explicit "to" destination.';
+  const taskRun = isTaskThread(session.thread_id);
+  if (taskRun && session.thread_id && session.thread_id !== TASKS_SYSTEM_THREAD_ID) {
+    const series = session.thread_id.slice(TASKS_SYSTEM_THREAD_ID.length + 1);
+    try {
+      await appendRunLog(session.agent_group_id, series, text);
+    } catch (err) {
+      log.warn('Could not append undeliverable notice to the task run log', { sessionId: session.id, series, err });
+    }
+  }
+  await writeSessionMessage(session.agent_group_id, session.id, {
+    id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    kind: 'chat',
+    timestamp: new Date().toISOString(),
+    platformId: session.agent_group_id,
+    channelType: 'agent',
+    threadId: null,
+    content: JSON.stringify({ text, sender: 'system', senderId: 'system', [FAILURE_NOTICE_FIELD]: true }),
+    trigger: !taskRun,
+  });
+  if (!taskRun) await requestWake(session, 'inbound-message');
 }
 
 async function deliverMessage(
@@ -491,6 +588,17 @@ async function deliverMessage(
     deliverInstance = mg.instance;
   }
 
+  // No destination: the row cannot reach anyone. Fail it before any
+  // bookkeeping (a pending question with nowhere to render would otherwise be
+  // created) and let drainSession tell the agent. send_card /
+  // ask_user_question write null routing in a session with no attached chat
+  // — a scheduled task run — which is the one way this happens today.
+  if (!msg.channelType || !msg.platformId) {
+    throw new UndeliverableError(
+      'it has no destination (this session has no attached chat, so a card or question has nowhere to go)',
+    );
+  }
+
   // Track pending questions for ask_user_question flow.
   // Guarded: without the interactive module, `pending_questions` doesn't
   // exist and we skip persistence — the card still delivers to the user,
@@ -521,11 +629,6 @@ async function deliverMessage(
   }
 
   // Channel delivery
-  if (!msg.channelType || !msg.platformId) {
-    log.warn('Message missing routing fields', { id: msg.id });
-    return;
-  }
-
   // Read file attachments from outbox if the content declares files.
   // File I/O lives in session-manager.ts (symmetric with inbound
   // extractAttachmentFiles) — delivery just hands buffers to the adapter.
