@@ -19,7 +19,10 @@
  * `src/modules/self-mod/` in PR #7 — they now register delivery actions
  * + approval handlers via this module's public API.
  */
+import { onHostStart } from '../../host-lifecycle.js';
+import { log } from '../../log.js';
 import { registerResponseHandler } from '../../response-registry.js';
+import { redeliverUnboundApprovals } from './primitive.js';
 import { handleApprovalsResponse } from './response-handler.js';
 
 // Public API re-exports so consumers import from the module root.
@@ -30,3 +33,7 @@ export type { ApprovalHandler, ApprovalHandlerContext, RequestApprovalOptions } 
 export { sweepAwaitingReasonRejects } from './reason-capture.js';
 
 registerResponseHandler(handleApprovalsResponse);
+// Not awaited: a slow channel must not hold host startup.
+onHostStart(({ deliveryAdapter }) => {
+  void redeliverUnboundApprovals(deliveryAdapter).catch((err) => log.error('Approval redelivery failed', { err }));
+});
