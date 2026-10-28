@@ -3,6 +3,7 @@ import { CronExpressionParser } from 'cron-parser';
 
 import { TIMEZONE } from '../../config.js';
 import type { TaskRecord } from '../../mailbox/index.js';
+import { enqueueSessionReconcile } from '../../reconcile-feeds.js';
 import { resolveTaskSession, withMailboxSession } from '../../session-manager.js';
 import { parseZonedToUtc } from '../../timezone.js';
 
@@ -154,6 +155,8 @@ export async function createScheduledTask(
     if (!stored) throw new Error(`task row not found after insert: ${id}`);
     return stored;
   });
+  // Arm the session's due wake now rather than on the next sweep tick.
+  enqueueSessionReconcile(session.id);
 
   return { session: { id: session.id, agent_group_id: session.agent_group_id }, row };
 }

@@ -118,6 +118,25 @@ export function countDueMessages(db: Database.Database): number {
   ).count;
 }
 
+/**
+ * The earliest future `process_after` among pending wake-triggering rows, or
+ * null. countDueMessages's complement: a row becomes due at this instant.
+ */
+export function nextDueAt(db: Database.Database): string | null {
+  const row = db
+    .prepare(
+      `SELECT process_after FROM messages_in
+       WHERE status = 'pending'
+         AND trigger = 1
+         AND process_after IS NOT NULL
+         AND datetime(process_after) > datetime('now')
+       ORDER BY datetime(process_after) ASC
+       LIMIT 1`,
+    )
+    .get() as { process_after: string } | undefined;
+  return row?.process_after ?? null;
+}
+
 export function markMessageFailed(db: Database.Database, messageId: string): void {
   db.prepare("UPDATE messages_in SET status = 'failed' WHERE id = ?").run(messageId);
 }

@@ -6,6 +6,7 @@ import { sessionMailboxDir, sessionMailboxPath } from './paths.js';
 export { inboundDbPath, outboundDbPath, sessionMailboxDir, sessionMailboxPath } from './paths.js';
 import {
   countDueMessages,
+  nextDueAt,
   deleteOrphanProcessingClaims,
   ensureSchema,
   getContainerState,
@@ -199,6 +200,10 @@ export function wrapSqliteInbound(db: Database.Database, nextSequence = () => ne
       ),
     insertMessage: async (message) => insertMessage(db, message, nextSequence()),
     countDueMessages: () => countDueMessages(db),
+    nextDueAt: () => {
+      const at = nextDueAt(db);
+      return at === null ? null : sqliteTimestamp(at);
+    },
     markMessageFailed: (messageId) => markMessageFailed(db, messageId),
     retryWithBackoff: (messageId, backoffSec) => retryWithBackoff(db, messageId, backoffSec),
     getMessageForRetry: (messageId, status) => {

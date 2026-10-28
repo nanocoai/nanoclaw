@@ -30,6 +30,7 @@ import { formatTasksTable } from '../format-tasks.js';
 import type { CallerContext } from '../frame.js';
 import type { InboundMailbox } from '../../mailbox/index.js';
 import { isContainerRunning } from '../../container-runner.js';
+import { enqueueSessionReconcile } from '../../reconcile-feeds.js';
 
 type TaskStatus = 'pending' | 'paused';
 
@@ -355,7 +356,10 @@ async function updateTaskCommand(args: Record<string, unknown>, ctx: CallerConte
 
   let touched = 0;
   for (const session of await selectedSessions(args, ctx)) {
-    touched += (await withInbound(session, (mailbox) => mailbox.updateTask(id, update))) ?? 0;
+    const changed = (await withInbound(session, (mailbox) => mailbox.updateTask(id, update))) ?? 0;
+    // A moved due time re-arms the session's due wake on this reconcile.
+    if (changed > 0 && update.processAfter !== undefined) enqueueSessionReconcile(session.id);
+    touched += changed;
   }
   if (touched === 0) throw new Error(`no live task matched: ${id}`);
   return { series_id: id, touched, fields };
@@ -399,7 +403,11 @@ async function runTaskCommand(args: Record<string, unknown>, ctx: CallerContext)
       });
       return { series_id: seriesKey, row_id: rowId, status: 'pending' };
     });
-    if (fired) return fired;
+    if (fired) {
+      // Start now, not on the next sweep tick: the row is due immediately.
+      enqueueSessionReconcile(session.id);
+      return fired;
+    }
   }
   throw new Error(`task not found: ${id}`);
 }
