@@ -40,6 +40,7 @@ import { createChannelDeliveryAdapter } from './channels/channel-registry.js';
 import { createDestination } from './modules/agent-to-agent/db/agent-destinations.js';
 import { getAgentMailbox } from './mailbox/index.js';
 import { log } from './log.js';
+import { NOTE_CAP, resetDeliveryFailureNoticeState } from './delivery-failure-notice.js';
 
 function openInboundDb(agentGroupId: string, sessionId: string): Database.Database {
   return new Database(inboundDbPath(agentGroupId, sessionId));
@@ -78,6 +79,7 @@ function insertOutbound(agentGroupId: string, sessionId: string, msgId: string):
 }
 
 beforeEach(async () => {
+  resetDeliveryFailureNoticeState();
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   fs.mkdirSync(TEST_DIR, { recursive: true });
   const db = await initTestDb();
@@ -256,6 +258,68 @@ describe('deliverSessionMessages — retry and permanent failure', () => {
     // Verify the message is in the delivered table with 'failed' status
     const delivered = await withMailboxSession('ag-1', session.id, (mailbox) => mailbox.getDeliveredIds());
     expect(delivered.has('out-flaky')).toBe(true);
+
+    // The agent is told its message never arrived
+    const inDb = openInboundDb('ag-1', session.id);
+    const notice = inDb.prepare('SELECT content FROM messages_in WHERE id = ?').get('delivery-failed-out-flaky') as
+      | { content: string }
+      | undefined;
+    inDb.close();
+    const noticeText = JSON.parse(notice!.content).text as string;
+    expect(noticeText).toContain('Reason: the platform rejected it');
+    // The remote error text stays in the log, out of the system-voice note.
+    expect(noticeText).not.toContain('network timeout');
+  });
+
+  it('bounds failure notes for a destination that fails every send', async () => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    setDeliveryAdapter({
+      async deliver() {
+        throw new Error('Forbidden: bot was blocked by the user');
+      },
+    });
+    const insert = (id: string, inReplyTo: string | null) => {
+      const db = new Database(outboundDbPath('ag-1', session.id));
+      db.prepare(
+        `INSERT INTO messages_out (id, timestamp, kind, platform_id, channel_type, content, in_reply_to)
+         VALUES (?, datetime('now'), 'chat', 'telegram:123', 'telegram', ?, ?)`,
+      ).run(id, JSON.stringify({ text: 'hello' }), inReplyTo);
+      db.close();
+    };
+    const exhaust = async () => {
+      for (let i = 0; i < 3; i++) await deliverSessionMessages(session);
+    };
+    const noteIds = () => {
+      const inDb = openInboundDb('ag-1', session.id);
+      const rows = inDb.prepare("SELECT id FROM messages_in WHERE id LIKE 'delivery-failed-%' ORDER BY id").all() as {
+        id: string;
+      }[];
+      inDb.close();
+      return rows.map((r) => r.id);
+    };
+    const error = vi.spyOn(log, 'error').mockImplementation(() => {});
+    const warn = vi.spyOn(log, 'warn').mockImplementation(() => {});
+
+    // The agent answers the note on the same destination: that failure gets no note.
+    insert('out-a', null);
+    await exhaust();
+    insert('out-a-reply', 'delivery-failed-out-a');
+    await exhaust();
+    expect(noteIds()).toEqual(['delivery-failed-out-a']);
+
+    // Unrelated sends keep failing: notes stop at NOTE_CAP per destination.
+    for (let i = 0; i < NOTE_CAP + 2; i++) {
+      insert(`out-b${i}`, null);
+      await exhaust();
+    }
+    expect(noteIds()).toHaveLength(NOTE_CAP);
+    expect(warn).toHaveBeenCalledWith(
+      'Delivery failure notice suppressed: too many for this destination',
+      expect.objectContaining({ sessionId: session.id }),
+    );
+    error.mockRestore();
+    warn.mockRestore();
   });
 
   it('does not acknowledge a message when no channel adapter is registered (#2995)', async () => {

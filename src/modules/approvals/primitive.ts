@@ -203,10 +203,13 @@ export function approvalCardThread(session: Session, target: MessagingGroup): st
 
 // ── Request API ──
 
-/** Send a system chat to the agent's session. Used by callers and by the response handler. */
-export async function notifyAgent(session: Session, text: string): Promise<void> {
+/**
+ * Send a system chat to the agent's session. Used by callers and by the response handler.
+ * `id` overrides the generated message id, for callers that recognise their own notes later.
+ */
+export async function notifyAgent(session: Session, text: string, opts: { id?: string } = {}): Promise<void> {
   await writeSessionMessage(session.agent_group_id, session.id, {
-    id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    id: opts.id ?? `sys-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     kind: 'chat',
     timestamp: new Date().toISOString(),
     platformId: session.agent_group_id,
