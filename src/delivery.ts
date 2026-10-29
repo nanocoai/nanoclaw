@@ -537,7 +537,9 @@ async function deliverMessage(
   // Agent-asked questions keep their own markup; host-built cards never come
   // through here, so only they get a channel's card-text escape.
   const deliveredContent =
-    content.type === 'ask_question' ? JSON.stringify({ ...content, fromAgent: true }) : msg.content;
+    content.type === 'ask_question'
+      ? JSON.stringify({ ...content, fromAgent: true })
+      : withPlatformMessageId(content, msg.content, session.agent_group_id);
   const platformMsgId = await deliveryAdapter.deliver(
     msg.channelType,
     msg.platformId,
@@ -714,4 +716,19 @@ async function handleSystemAction(content: Record<string, unknown>, session: Ses
 export function stopDeliveryPolls(): void {
   activePolling = false;
   sweepPolling = false;
+}
+
+/**
+ * The router stores inbound rows as `<platform message id>:<agent group id>`
+ * (see messageIdForAgent in router.ts), and the agent's add_reaction tool
+ * hands that row id back as the target. The platform only knows the part
+ * before the suffix — Telegram answers "message to react not found" — so
+ * strip it before the adapter sees the operation.
+ */
+export function withPlatformMessageId(content: unknown, raw: string, agentGroupId: string): string {
+  if (!content || typeof content !== 'object') return raw;
+  const { operation, messageId } = content as { operation?: unknown; messageId?: unknown };
+  const suffix = `:${agentGroupId}`;
+  if (!operation || typeof messageId !== 'string' || !messageId.endsWith(suffix)) return raw;
+  return JSON.stringify({ ...content, messageId: messageId.slice(0, -suffix.length) });
 }
