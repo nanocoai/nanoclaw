@@ -260,6 +260,31 @@ describe('materializeTemplateSkills', () => {
       expect(warn.mock.calls[0][1]).toMatchObject({ agentGroupId: 'g14' });
     });
 
+    it('fails on an operational error mid-copy instead of starting with a half-copied skill', () => {
+      templateSkill('g16', 'widget', 'SKILL.md', 'new-body');
+      const dest = path.join(GROUPS_DIR, 'grp16', '.agents', 'skills');
+      fs.mkdirSync(path.join(dest, 'widget'), { recursive: true });
+      fs.writeFileSync(path.join(dest, 'widget', 'SKILL.md'), 'old-body');
+
+      // The disk fills up while the replacement file is written: the old
+      // skill is already deleted and the new one only partly copied. That
+      // state must fail the spawn, not be logged as an unsafe directory and
+      // swallowed.
+      const writeSync = vi.spyOn(fs, 'writeSync').mockImplementation(() => {
+        throw Object.assign(new Error('no space left on device'), { code: 'ENOSPC' });
+      });
+      try {
+        expect(() => materializeTemplateSkills('g16', path.join(GROUPS_DIR, 'grp16', '.agents', 'skills'))).toThrow(
+          'no space left on device',
+        );
+      } finally {
+        writeSync.mockRestore();
+      }
+      // The old copy is gone and the replacement never landed — the
+      // half-materialized state the thrown error protects the spawn from.
+      expect(fs.readFileSync(path.join(dest, 'widget', 'SKILL.md'), 'utf-8')).toBe('');
+    });
+
     it('still skips a destination equal to the source', () => {
       templateSkill('g15', 'widget', 'SKILL.md', 'body');
       const src = path.join(DATA_DIR, 'v2-sessions', 'g15', '.claude-shared', 'skills');

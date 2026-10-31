@@ -6,7 +6,7 @@ import { AsyncLocalStorage } from 'async_hooks';
 import fs from 'fs';
 import path from 'path';
 
-import { AnchoredDir } from './anchored-dir.js';
+import { AnchoredDir, isAnchoredRefusal } from './anchored-dir.js';
 import { deriveAttachmentName } from './attachment-naming.js';
 import { inboxFolderName, isSafeAttachmentName } from './attachment-safety.js';
 import type { OutboundFile } from './channels/adapter.js';
@@ -398,6 +398,12 @@ function extractAttachmentFiles(
         try {
           inbox = AnchoredDir.open(sessionDir(agentGroupId, sessionId), ['inbox', folder], true);
         } catch (err) {
+          // Only the deliberate refusal (a segment is a symlink or not a
+          // directory) downgrades to "no attachments". An operational
+          // failure (ENOSPC, EACCES, …) propagates, so the message fails
+          // before it is stored and can be retried, instead of being
+          // accepted without its files and never retried.
+          if (!isAnchoredRefusal(err)) throw err;
           log.warn('Rejecting unsafe inbox directory', { messageId, err });
           inbox = null;
         }
@@ -532,6 +538,11 @@ export function readOutboxFiles(
   try {
     outbox = AnchoredDir.open(sessionDir(agentGroupId, sessionId), ['outbox', messageId]);
   } catch (err) {
+    // Same split as the inbox side: a deliberate refusal downgrades to
+    // "no attachments"; an operational failure propagates, so delivery
+    // retries (and eventually fails the message loudly) instead of
+    // silently delivering without the declared files.
+    if (!isAnchoredRefusal(err)) throw err;
     log.warn('Rejecting unsafe outbox directory', { messageId, err });
     return undefined;
   }
