@@ -4,7 +4,7 @@ import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { AnchoredDir, copyRegularFile } from './anchored-dir.js';
+import { AnchoredDir, copyRegularFile, isAnchoredRefusal } from './anchored-dir.js';
 
 let root: string;
 let outside: string;
@@ -55,6 +55,44 @@ describe('AnchoredDir.open', () => {
     } finally {
       dir.close();
     }
+  });
+});
+
+describe('isAnchoredRefusal', () => {
+  it('recognizes the refusal open raises for a symlinked segment', () => {
+    fs.symlinkSync(outside, path.join(root, 'link'));
+    let caught: unknown;
+    try {
+      AnchoredDir.open(root, ['link']);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toMatch(/not a real directory/);
+    expect(isAnchoredRefusal(caught)).toBe(true);
+  });
+
+  it('recognizes the refusal open raises for a non-directory segment', () => {
+    fs.writeFileSync(path.join(root, 'file'), 'x');
+    let caught: unknown;
+    try {
+      AnchoredDir.open(root, ['file']);
+    } catch (err) {
+      caught = err;
+    }
+    expect(isAnchoredRefusal(caught)).toBe(true);
+  });
+
+  it('does not classify operational errors or plain errors as refusals', () => {
+    const enospc = Object.assign(new Error('no space left on device'), { code: 'ENOSPC' });
+    expect(isAnchoredRefusal(enospc)).toBe(false);
+    expect(isAnchoredRefusal(new Error('plain'))).toBe(false);
+    // A wrapped error is only a refusal when its cause carries the refusal codes.
+    expect(isAnchoredRefusal(new Error('wrapped', { cause: enospc }))).toBe(false);
+    expect(isAnchoredRefusal(new Error('wrapped', { cause: new Error('inner') }))).toBe(false);
+    expect(isAnchoredRefusal(undefined)).toBe(false);
+    expect(isAnchoredRefusal(null)).toBe(false);
+    expect(isAnchoredRefusal('ELOOP')).toBe(false);
   });
 });
 

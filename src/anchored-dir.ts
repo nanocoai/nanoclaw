@@ -218,6 +218,23 @@ export class AnchoredDir {
 }
 
 /**
+ * True when `err` is the refusal this module raises on purpose: a segment
+ * opened through its parent turned out to be a symlink or not a directory,
+ * so nothing was touched. That is the `refusing '<name>': not a real
+ * directory` error from {@link AnchoredDir.openDir}, whose `cause` carries
+ * the ELOOP or ENOTDIR of the underlying open.
+ *
+ * Callers that downgrade refusals (log the path as unsafe and skip) use this
+ * to tell them apart from operational failures — ENOSPC, EACCES, EMFILE, … —
+ * which are not refusals: those must propagate to the caller's retry or
+ * failure path instead of being misreported as an unsafe path and swallowed.
+ */
+export function isAnchoredRefusal(err: unknown): boolean {
+  const code = errno((err as Error | null)?.cause);
+  return code === 'ELOOP' || code === 'ENOTDIR';
+}
+
+/**
  * Stream-copy the regular file `srcName` in `src` to a freshly created
  * `dstName` in `dst`, both pinned by descriptor. Streams in chunks, so it
  * neither buffers the whole file in host memory nor hits the ~2 GiB
