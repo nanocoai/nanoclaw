@@ -162,7 +162,8 @@ level 2, raw capture to level 3.
 
 ## The Anthropic exception
 
-Anthropic credential registration (`setup/register-claude-token.sh`) is
+Anthropic credential registration
+(`.claude/skills/add-onecli/scripts/register-claude-token.sh`) is
 the **one** permitted break in the visual flow. Why:
 
 - `claude setup-token` opens a browser, runs its own OAuth prompt, and
@@ -204,7 +205,7 @@ convention — [skill-engine-seam.md](skill-engine-seam.md) §6).
 | `setup/auto.ts` | Phase 2 driver. Orchestrates the clack UI, step execution, user prompts, and writes to all three log levels for every step it spawns. |
 | `setup/logs.ts` | The logging primitives (`step`, `userInput`, `complete`, `stepRawLog`, `reset`). Single source of truth for level 2/3 formatting and file paths. |
 | `setup/<step>.ts` | Individual step implementations. Must emit one terminal status block; must not write directly to the terminal. |
-| `setup/register-claude-token.sh` | The Anthropic exception. Inherits stdio, prints its own UI, returns a status to the driver. |
+| `.claude/skills/add-onecli/scripts/register-claude-token.sh` | The Anthropic exception. Inherits stdio, prints its own UI, and writes the captured token to the file it is given; the skill's `auth.ts` saves it. |
 | `setup/lib/skill-driver.ts` | Generic skill runner: applies a SKILL.md's `nc:` directives via the engine (`scripts/skill-apply.ts`) and renders its events through clack — prompts via `resolveInput`, spinners for step events, operator notes with the gate/URL-offer policy from `scripts/skill-policy.ts`. Owns all prompting/gating presentation; the engine only declares and emits. |
 | `setup/channels/run-channel-skill.ts` | The generic channel-install entry: drives the channel's `/add-<channel>` SKILL.md through the skill driver, then owns the shared wire (agent name + operator role → `scripts/init-first-agent.ts`). One flow for every channel — no bespoke per-channel code. |
 | `setup/pair-telegram.ts` | Emits `PAIR_TELEGRAM_CODE` / `PAIR_TELEGRAM_ATTEMPT` / `PAIR_TELEGRAM` status blocks. Never prints UI. The driver renders it via clack notes. |

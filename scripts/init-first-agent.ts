@@ -54,6 +54,7 @@ import {
   getMessagingGroupByPlatform,
 } from '../src/db/messaging-groups.js';
 import { runMigrations } from '../src/db/migrations/index.js';
+import { assertValidGroupFolder } from '../src/group-folder.js';
 import { stageGroupPersona } from '../src/group-persona.js';
 import { normalizeName } from '../src/modules/agent-to-agent/db/agent-destinations.js';
 import { addMember } from '../src/modules/permissions/db/agent-group-members.js';
@@ -258,20 +259,9 @@ async function main(): Promise<void> {
 
   const now = new Date().toISOString();
 
-  // 1. User + (conditional) owner grant.
-  const userId = namespacedUserId(args.channel, args.userId);
-  await upsertUser({
-    id: userId,
-    kind: args.channel,
-    display_name: args.displayName,
-    created_at: now,
-  });
-
-  // Owner grant is deferred until after the agent group is resolved, since
-  // an admin grant is scoped to that group. See step 2b.
-
-  // 2. Agent group + filesystem. Setup-created template groups arrive by id;
-  // this script owns only role, membership, channel wiring, and welcome.
+  // 1. Agent group + filesystem, first, so a refused folder leaves nothing
+  // behind. Setup-created template groups arrive by id; this script owns
+  // only role, membership, channel wiring, and welcome.
   const pickedProvider = process.env.NANOCLAW_PICKED_PROVIDER?.trim().toLowerCase();
   let ag: AgentGroup;
   let folder: string;
@@ -288,6 +278,7 @@ async function main(): Promise<void> {
       ag = existing;
       console.log(`Reusing agent group: ${ag.id} (${folder})`);
     } else {
+      assertValidGroupFolder(folder);
       const agId = generateId('ag');
       await createAgentGroup({
         id: agId,
@@ -308,6 +299,15 @@ async function main(): Promise<void> {
         'When the user first reaches out (or you receive a system welcome prompt), introduce yourself briefly and invite them to chat. Keep replies concise.',
     );
   }
+
+  // 2. User.
+  const userId = namespacedUserId(args.channel, args.userId);
+  await upsertUser({
+    id: userId,
+    kind: args.channel,
+    display_name: args.displayName,
+    created_at: now,
+  });
 
   // 2b. Assign the user a role for this agent group. The caller picks via
   // --role; the channel drivers default to 'owner' for the self-host case.

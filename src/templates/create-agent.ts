@@ -4,7 +4,7 @@ import path from 'path';
 
 import { CONTAINER_PLUGINS_DIR } from '../container-config.js';
 import { DATA_DIR, GROUPS_DIR, TIMEZONE } from '../config.js';
-import { createAgentGroup } from '../db/agent-groups.js';
+import { createAgentGroup, getAgentGroupByFolder } from '../db/agent-groups.js';
 import {
   ensureContainerConfig,
   updateContainerConfigJson,
@@ -12,7 +12,7 @@ import {
 } from '../db/container-configs.js';
 import type { McpServerConfig } from '../container-config.js';
 import { isValidTimezone } from '../timezone.js';
-import { assertValidGroupFolder, resolveGroupFolderPath } from '../group-folder.js';
+import { assertValidGroupFolder, groupFolderExistsOnDisk } from '../group-folder.js';
 import { stageGroupPersona } from '../group-persona.js';
 import { log } from '../log.js';
 import { normalizeName } from '../modules/agent-to-agent/db/agent-destinations.js';
@@ -28,6 +28,8 @@ export interface CreateAgentOptions {
   name?: string;
   /** IANA timezone for the new group; template task schedules fire in it. Omit to follow the install default. */
   timezone?: string;
+  /** Provider for the new group (a sub-agent takes its creator's). Omit for the install default. */
+  provider?: string;
 }
 
 export interface CreateAgentResult {
@@ -66,6 +68,22 @@ export function markPluginServers(
 }
 
 /**
+ * The folder a stamp named `name` takes: its normalized name, or that plus
+ * -<8 hex> when taken. Throws, saying why, when it can't be a group folder;
+ * create_agent also runs it after approval, before the fetch. Never before
+ * approval: whether another group holds a folder is not a confined agent's to learn.
+ */
+export async function templateFolder(name: string): Promise<string> {
+  const base = normalizeName(name);
+  assertValidGroupFolder(base);
+  // A group made by setup or a migration has its row before its folder (made at first spawn).
+  if (!groupFolderExistsOnDisk(base) && !(await getAgentGroupByFolder(base))) return base;
+  const folder = `${base}-${randomUUID().slice(0, 8)}`;
+  assertValidGroupFolder(folder, base);
+  return folder;
+}
+
+/**
  * Stamp a self-contained agent group from a LOCAL plugin ref under
  * TEMPLATES_DIR. The plugin carries skills and MCP servers (portable Agent
  * Plugins surface) plus the optional NanoClaw extension (persona, context
@@ -100,13 +118,11 @@ export async function createAgentFromTemplate(ref: string, opts?: CreateAgentOpt
   // Display-name fallback chain: explicit option → manifest extension
   // agentName → plugin folder leaf (exactly the pre-plugin derivation).
   const name = opts?.name ?? tpl.agentName ?? path.basename(dir);
-  let folder = normalizeName(name);
-  assertValidGroupFolder(folder);
-  if (fs.existsSync(resolveGroupFolderPath(folder))) folder = `${folder}-${randomUUID().slice(0, 8)}`;
+  const folder = await templateFolder(name);
 
   const group: AgentGroup = { id, name, folder, agent_provider: null, created_at: new Date().toISOString() };
   await createAgentGroup(group);
-  await ensureContainerConfig(id);
+  await ensureContainerConfig(id, opts?.provider);
   if (timezone) await updateContainerConfigScalars(id, { timezone });
 
   // group-init.ts owns the mkdir at first spawn, but it isn't called here — so we

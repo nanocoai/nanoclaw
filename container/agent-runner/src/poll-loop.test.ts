@@ -3,7 +3,13 @@ import { describe, it, expect, beforeEach, afterEach, spyOn } from 'bun:test';
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './mailbox/sqlite/connection.js';
 import { getPendingMessages, markCompleted, type MessageInRow } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
-import { formatMessages, extractRouting, isClearCommand, isRunnerCommand } from './formatter.js';
+import {
+  formatMessages,
+  extractRouting,
+  isClearCommand,
+  isRunnerCommand,
+  GENERIC_FAILURE_NOTICE,
+} from './formatter.js';
 import { processQuery } from './poll-loop.js';
 import { MockProvider } from './providers/mock.js';
 import type { AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
@@ -459,7 +465,7 @@ describe('error result with no <message> envelope', () => {
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
     expect(JSON.parse(out[0].content)).toEqual({
-      text: 'The agent run failed. Check the logs for details.',
+      text: GENERIC_FAILURE_NOTICE,
       failureNotice: true,
     });
     expect(out[0].platform_id).toBe('chan-1');
@@ -476,9 +482,7 @@ describe('error result with no <message> envelope', () => {
     const { query, pushes } = makeResultQuery({ type: 'result', text, isError: true });
     const exchanges: ProviderExchange[] = [];
     await processQuery(query, ERR_ROUTING, ['m1'], 'mock', (exchange) => exchanges.push(exchange), 'prompt', undefined);
-    expect(getUndeliveredMessages().map((row) => JSON.parse(row.content).text)).toEqual([
-      'The agent run failed. Check the logs for details.',
-    ]);
+    expect(getUndeliveredMessages().map((row) => JSON.parse(row.content).text)).toEqual([GENERIC_FAILURE_NOTICE]);
     expect(exchanges).toHaveLength(1);
     expect(exchanges[0].status).toBe('error');
     expect(exchanges[0].result).toBe(text);
@@ -487,7 +491,7 @@ describe('error result with no <message> envelope', () => {
 
   it.each([
     ['provider error', 'billing hard-stop', 'billing hard-stop'],
-    ['fallback text', undefined, 'The agent run failed. Check the logs for details.'],
+    ['fallback text', undefined, GENERIC_FAILURE_NOTICE],
   ])('logs a skipped notice once when answering a failure notice: %s', async (_label, error, expected) => {
     const { query } = makeResultQuery({ type: 'result', text: '', isError: true, error });
     const noticeRouting = { ...AGENT_ROUTING, failureNoticeWake: true };
@@ -683,7 +687,7 @@ it('delivers completed wrapped text while recording the failed turn exactly once
 
   expect(getUndeliveredMessages().map((row) => JSON.parse(row.content).text)).toEqual([
     'Completed before failure.',
-    'The agent run failed. Check the logs for details.',
+    GENERIC_FAILURE_NOTICE,
   ]);
   expect(exchanges).toEqual([{ prompt: 'prompt', result: text, continuation: 'sess-1', status: 'error' }]);
   expect(pushes).toHaveLength(0);

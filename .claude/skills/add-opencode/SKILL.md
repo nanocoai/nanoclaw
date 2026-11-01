@@ -22,8 +22,10 @@ To replace an installed payload and update its pins, append `--refresh`; back up
 local payload edits first. Ordinary re-authentication leaves installed files and
 the container image alone. Backend defaults are installation-wide; model and
 reasoning effort can be overridden per group through the existing container
-configuration. Per-group backend/auth selection and structured channel attachment
-transport are separate work.
+configuration. Per-group backend/auth selection is separate work. Channel
+attachments reach the agent as a prompt line naming the staged file; the agent
+opens it with OpenCode's read tool, which hands images and PDFs to models that
+accept them (a custom model declares that with `OPENCODE_MODEL_INPUT_MODALITIES`).
 
 Authentication checks the installed files, registration lines, and exact pins
 against this skill's declarations without launching a subprocess or container.
@@ -52,12 +54,12 @@ Automatic help before payload
 installation is optional and is not part of the runtime contract.
 
 Install and refresh require host contract version 1 and credential-connection
-seam version 1. The compatibility predicate
+seam version 1 or later. The compatibility predicate
 below guards every subsequent step, so an unsupported core receives no partial
 payload or dependency changes. Update core first if it reports a missing prerequisite.
 
 ```nc:run effect:refresh capture:opencode_core_ready validate:^yes$
-node -e "const fs=require('fs'); const p='src/provider-contracts/registry.ts', g='setup/gateways/credential-store.ts'; if(fs.existsSync(p) && /PROVIDER_HOST_CONTRACT_SEAM_VERSION = 1/.test(fs.readFileSync(p,'utf8')) && fs.existsSync(g) && /PROVIDER_CREDENTIAL_CONNECTION_SEAM_VERSION = 1/.test(fs.readFileSync(g,'utf8'))) console.log('yes'); else console.log('no')"
+node -e "const fs=require('fs'); const p='src/provider-contracts/registry.ts', g='setup/gateways/credential-store.ts'; if(fs.existsSync(p) && /PROVIDER_HOST_CONTRACT_SEAM_VERSION = 1/.test(fs.readFileSync(p,'utf8')) && fs.existsSync(g) && /PROVIDER_CREDENTIAL_CONNECTION_SEAM_VERSION = [1-9]/.test(fs.readFileSync(g,'utf8'))) console.log('yes'); else console.log('no')"
 ```
 
 Copy only the files listed below from this skill's `payload/` to the matching
@@ -72,11 +74,12 @@ When refreshing an older installation, remove its unused
 Recreate affected containers after the refresh to discard their old config
 symlinks. Keep other tools' settings and persisted session data.
 
-The obsolete host Dockerfile guard must also be removed during refresh; current
-OpenCode installation is declared by the SDK and CLI manifests.
+The obsolete host Dockerfile guard and the retired attachment test must also be
+removed during refresh; current OpenCode installation is declared by the SDK and
+CLI manifests, and the test covered file-part code this payload no longer has.
 
 ```nc:run effect:refresh when:opencode_core_ready=yes
-rm -f src/opencode-dockerfile.test.ts
+rm -f src/opencode-dockerfile.test.ts container/agent-runner/src/providers/opencode.attachments.test.ts
 ```
 
 ```nc:copy when:opencode_core_ready=yes
@@ -87,7 +90,6 @@ payload/container/agent-runner/src/providers/opencode-config.ts -> container/age
 payload/container/agent-runner/src/providers/opencode-memory.ts -> container/agent-runner/src/providers/opencode-memory.ts
 payload/container/agent-runner/src/providers/opencode-registration.test.ts -> container/agent-runner/src/providers/opencode-registration.test.ts
 payload/container/agent-runner/src/providers/opencode-turn.ts -> container/agent-runner/src/providers/opencode-turn.ts
-payload/container/agent-runner/src/providers/opencode.attachments.test.ts -> container/agent-runner/src/providers/opencode.attachments.test.ts
 payload/container/agent-runner/src/providers/opencode.config.test.ts -> container/agent-runner/src/providers/opencode.config.test.ts
 payload/container/agent-runner/src/providers/opencode.conformance.test.ts -> container/agent-runner/src/providers/opencode.conformance.test.ts
 payload/container/agent-runner/src/providers/opencode.empty-resume.test.ts -> container/agent-runner/src/providers/opencode.empty-resume.test.ts
@@ -319,9 +321,6 @@ Put comments on separate lines. These settings affect only OpenCode containers.
 - `OPENCODE_MODEL_OUTPUT_LIMIT`: positive output limit, requiring a context limit.
 - `OPENCODE_MODEL_INPUT_MODALITIES`: optional comma-separated main-model input
   types from `text,audio,image,video,pdf`.
-- `OPENCODE_NATIVE_ATTACHMENT_MAX_COUNT` / `OPENCODE_NATIVE_ATTACHMENT_MAX_BYTES`:
-  optional limits for already-staged structured attachments. Upstream channel
-  attachment transport remains text-only until that separate feature lands.
 
 Custom model limits and modalities apply only to the main model. NanoClaw supplies
 MCP configuration and container policy. See [ARCHITECTURE.md](ARCHITECTURE.md) for

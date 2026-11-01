@@ -1,5 +1,5 @@
-import { afterEach, expect, it, vi } from 'vitest';
-import { permitsConfiguredGatewayRead } from './gateway-read-policy.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { permitsConfiguredGatewayRead, permitsUncredentialedGatewayRead } from './gateway-read-policy.js';
 
 afterEach(() => vi.unstubAllEnvs());
 
@@ -30,3 +30,25 @@ it.each(['', '*', '*.example.test', 'https://api.example.test', 'api.example.tes
     expect(permitsConfiguredGatewayRead({ host: 'api.example.test', method: 'GET' })).toBe(false);
   },
 );
+
+describe('uncredentialed reads', () => {
+  it.each(['GET', 'HEAD'])('admits an opted-in %s that sends no payload', (method) => {
+    vi.stubEnv('NANOCLAW_GATEWAY_UNCREDENTIALED_READS', 'true');
+    expect(permitsUncredentialedGatewayRead({ method, sendsPayload: false })).toBe(true);
+  });
+
+  it.each([
+    ['unset', undefined, { method: 'GET', sendsPayload: false }],
+    ['false', 'false', { method: 'GET', sendsPayload: false }],
+    ['1', '1', { method: 'GET', sendsPayload: false }],
+    ['payload', 'true', { method: 'GET', sendsPayload: true }],
+    ['unattested payload', 'true', { method: 'GET' }],
+    ['write', 'true', { method: 'POST', sendsPayload: false }],
+    ['options', 'true', { method: 'OPTIONS', sendsPayload: false }],
+    ['lower-case method', 'true', { method: 'get', sendsPayload: false }],
+    ['missing method', 'true', { sendsPayload: false }],
+  ])('refuses %s', (_name, flag, destination) => {
+    if (flag !== undefined) vi.stubEnv('NANOCLAW_GATEWAY_UNCREDENTIALED_READS', flag);
+    expect(permitsUncredentialedGatewayRead(destination)).toBe(false);
+  });
+});

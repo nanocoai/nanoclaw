@@ -40,6 +40,25 @@ The labels are their own reference. Run `gh label list` to print the full set wi
 
 **Not accepted:** Features, capabilities, compatibility, enhancements. These should be skills.
 
+### Core or your fork?
+
+NanoClaw expects you to have a coding agent, like Claude Code, Codex or OpenCode, to help when you install or update it. That agent can fix small problems in your own copy when they come up. So most fixes for rare setups belong on your own fork, not in core.
+
+**Send a PR for:**
+- a bug on a normal, correctly configured install
+- something that used to work until a release broke it by mistake
+- a security fix, even for a rare setup. If it could be exploited, don't open a public PR. [Report it privately](https://github.com/nanocoai/nanoclaw/security/advisories/new) instead.
+
+**Keep it on your fork:**
+- a fix for a rare setup, like one OS version, one machine's settings, or an upgrade from an old commit that was never a release
+- a change that only your setup needs
+
+If a change fits both lists, send the PR.
+
+For a fork fix, ask your coding agent to make the change in your copy. A skill makes it easier to carry through updates. If other people would want it too, send the skill as a PR. See [Private skill or upstream contribution?](https://docs.nanoclaw.dev/extend/writing-skills#private-skill-or-upstream-contribution)
+
+**Closing PRs in batches.** Maintainers may close PRs that fit this rule, several at a time. Each one gets a comment that says why, points to the code or issue that shows it is a rare case, and links here. If we got it wrong, reply with who else hits the problem and we will take another look.
+
 ## Breaking Changes
 
 Breaking changes are allowed; **silent** ones are not. NanoClaw does not migrate user installs at runtime — the user's coding agent is the migrator, so every breaking change must ship a migration path that agent can execute without a human reverse-engineering the diff:
@@ -59,29 +78,29 @@ A skill is a self-contained add-on: a `SKILL.md` with the apply steps written as
 
 ### Skill types
 
-#### 1. Channel and provider skills (registry branches)
+#### 1. Channel and provider skills
 
-Add a messaging channel or an agent provider. The SKILL.md contains the install steps; the actual code lives on a long-lived registry branch (`channels` or `providers`) that we keep in sync with `main`.
+Add a messaging channel or an agent provider. The SKILL.md contains the install steps. Channel code lives on the long-lived `channels` registry branch, which we keep in sync with `main`; provider code lives in the skill's own `payload/` folder on `main`.
 
-**Location:** `.claude/skills/` on `main` (instructions only), code on the `channels` or `providers` branch
+**Location:** `.claude/skills/` on `main`; channel code on the `channels` branch, provider code in `.claude/skills/<name>/payload/`
 
 **Examples:** `/add-telegram`, `/add-slack`, `/add-discord`, `/add-opencode`
 
 **How they work:**
 1. User runs `/add-telegram`
-2. Claude follows the SKILL.md: `git fetch origin channels`, then copies each file in with `git show origin/channels:<path> > <path>`. Install is an additive fetch, never a `git merge`.
-3. The adapter's registration test is fetched the same way and run as verification
+2. Claude follows the SKILL.md: `git fetch origin channels`, then copies each file in with `git show origin/channels:<path> > <path>`. A provider skill copies from its `payload/` instead. Install is an additive copy, never a `git merge`.
+3. The adapter's registration test is copied in the same way and run as verification
 4. Claude walks through interactive setup (tokens, bot creation, etc.)
 
 **Contributing a channel or provider skill:**
 1. Fork `nanocoai/nanoclaw` and branch from `main`
 2. Build the adapter following [docs/skill-guidelines.md](docs/skill-guidelines.md): a self-registering module, one appended barrel import, and a registration test that imports the real barrel
-3. Add a SKILL.md in `.claude/skills/<name>/` with the fetch-and-copy steps, and a REMOVE.md that reverses every change. Plain prose steps are all that's required. A skill with a credential prompt or an interactive step should include a `## Troubleshooting` section.
-4. Open a PR. We'll land the code on the registry branch from your work
+3. Add a SKILL.md in `.claude/skills/<name>/` with the copy steps, and a REMOVE.md that reverses every change. Plain prose steps are all that's required. A skill with a credential prompt or an interactive step should include a `## Troubleshooting` section.
+4. Open a PR. A provider's code and tests go in the skill's `payload/` in the same PR; for a channel, we'll land the code on the `channels` branch from your work
 
-See `/add-slack` for a good example. See [docs/skills-model.md](docs/skills-model.md) for why install is a fetch, never a merge.
+See `/add-slack` (channel) or `/add-opencode` (provider) for a good example. See [docs/skills-model.md](docs/skills-model.md) for why install is a copy, never a merge.
 
-Gateway providers use the same one-registration shape, but keep their implementation and tests in the skill's `payload/` directory on `main`. Setup discovers each package through its `gateway.json` and applies it without another repository or registry branch.
+Gateway providers use the same one-registration shape and, like agent providers, keep their implementation and tests in the skill's `payload/` directory on `main`. Setup discovers each package through its `gateway.json` and applies it without another repository or registry branch.
 
 #### 2. Utility skills (with code files)
 
@@ -91,7 +110,7 @@ Standalone tools that ship code files alongside the SKILL.md. The SKILL.md tells
 
 **Examples:** a self-contained CLI or helper shipped in a `scripts/` subfolder of the skill.
 
-**Key difference from channel/provider skills:** the code is self-contained in the skill directory and gets copied into place during installation; nothing is fetched from a registry branch.
+**Key difference from channel skills:** the code is self-contained in the skill directory and gets copied into place during installation; nothing is fetched from a registry branch.
 
 **Guidelines:**
 - Put code in separate files, not inline in the SKILL.md

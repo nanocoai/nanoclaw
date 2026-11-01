@@ -5,7 +5,10 @@ import { afterEach, describe, expect, it } from 'bun:test';
 
 import { createProvider } from './factory.js';
 import { listProviderNames } from './provider-registry.js';
+// Both barrels, as the runner loads them: a contract's afterExchange then
+// replaces the provider's own archive, as it does at runtime.
 import './index.js';
+import '../provider-contracts/index.js';
 
 const hasCodex = fs.existsSync(new URL('./codex.ts', import.meta.url));
 const hasOpenCode = fs.existsSync(new URL('./opencode.ts', import.meta.url));

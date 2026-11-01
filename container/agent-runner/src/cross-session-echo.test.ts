@@ -95,6 +95,44 @@ describe('formatter rendering', () => {
     expect(result).not.toContain('<message');
   });
 
+  it("renders the agent's own reply from a sibling thread with sender=\"you\"", () => {
+    insertMessage(
+      'e-self',
+      'chat',
+      {
+        text: 'here is the summary',
+        sender: 'Pixel',
+        senderId: 'ag-1',
+        self: true,
+        echo: { surface: 'dm-thread', label: 'another conversation in #Pixel room' },
+      },
+      { trigger: 0, channelType: 'session-echo' },
+    );
+
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('<cross-session-context from="another conversation in #Pixel room" sender="you"');
+    expect(result).not.toContain('sender="Pixel"');
+  });
+
+  it("renders the agent's own timeline post with sender=\"you\"", () => {
+    insertMessage(
+      'bf-self',
+      'chat',
+      {
+        text: 'earlier answer',
+        sender: 'Pixel',
+        senderId: 'ag-1',
+        self: true,
+        echo: { surface: 'dm-timeline', label: 'this DM, just before this conversation' },
+      },
+      { trigger: 0, channelType: 'session-echo' },
+    );
+
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('<dm-history sender="you"');
+    expect(result).not.toContain('sender="Pixel"');
+  });
+
   it('renders channel-timeline backfill rows as <channel-history> (group-surface prelude)', () => {
     insertMessage(
       'bf-ch-1',

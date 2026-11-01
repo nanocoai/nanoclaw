@@ -11,9 +11,9 @@ metadata:
 
 # Codex agent provider
 
-> Shortcut: `pnpm exec tsx setup/index.ts --step provider-auth codex` performs this whole install (manifest-driven from the providers branch: files, barrels, CLI manifest entry, image rebuild) plus auth in one command. The steps below are the same operations, for agent-driven or manual application.
+> Shortcut: `pnpm exec tsx setup/index.ts --step provider-auth codex` performs this whole install (manifest-driven from this skill's payload: files, barrels, CLI manifest entry, image rebuild) plus auth in one command. The steps below are the same operations, for agent-driven or manual application.
 
-NanoClaw selects each group's agent backend from `container_configs.provider` (default `claude`). This skill installs the Codex provider: copy the payload from the `providers` branch, append one import to each of the three provider barrels, add the pinned Codex CLI to the container manifest (`container/cli-tools.json`), rebuild, then run the vault auth walk-through.
+NanoClaw selects each group's agent backend from `container_configs.provider` (default `claude`). This skill installs the Codex provider: copy this skill's payload, append one import to each of the three provider barrels, add the pinned Codex CLI to the container manifest (`container/cli-tools.json`), rebuild, then run the vault auth walk-through.
 
 The provider runs `codex app-server` as a child process speaking JSON-RPC over stdio: native streaming, MCP tools, server-side conversation history (the continuation is a thread id, no on-disk transcript). Credentials are **vault-only**: The selected gateway serves a sentinel `auth.json` stub into the container and swaps the real ChatGPT token or API key on the wire — no key in `.env`, nothing readable in the container.
 
@@ -23,8 +23,9 @@ The mechanical steps under **Install** carry `nc:` directive fences: an agent re
 
 ### Pre-flight
 
-Requires `src/project-doc-compose.ts` on trunk. If it is missing, stop and tell
-the operator to run `/update-nanoclaw` first.
+Requires `src/project-doc-compose.ts` and core's shared exchange archive
+(`container/agent-runner/src/provider-contracts/exchange-archive.ts`) on trunk.
+If either is missing, stop and tell the operator to run `/update-nanoclaw` first.
 
 Check whether the payload is already wired (a prior apply, or a trunk that still carries it). All of these present means installed — skip to **Authenticate**:
 
@@ -34,44 +35,41 @@ Check whether the payload is already wired (a prior apply, or a trunk that still
 - `import './codex.js';` in the three provider barrels and both contract barrels
 - an `@openai/codex` entry in `container/cli-tools.json`
 
-### 1. Fetch and copy the payload
+### 1. Copy the payload
 
-Fetch the `providers` branch and copy the Codex payload into all three trees (additive — overwrite each file, never merge the branch). The host files are the provider contribution + the AGENTS.md spec (composition itself lives in trunk's `src/project-doc-compose.ts`) + their guards; the container files are the provider runtime (turn loop, JSON-RPC wrapper, native memory SessionStart hook, per-exchange archiver) + their guards; the setup file is the picker entry + vault auth walk-through; `container/AGENTS.md` is the runtime-contract base the composed AGENTS.md embeds.
+Copy the Codex payload from this skill's `payload/` into all three trees (additive — overwrite each file). The host files are the provider contribution + the AGENTS.md spec (composition itself lives in trunk's `src/project-doc-compose.ts`) + their guards; the container files are the provider runtime (turn loop, JSON-RPC wrapper, native memory SessionStart hook) + their guards, and the runtime contract archives each exchange through core's shared archive; the setup files are the picker entry + vault auth walk-through + their guards; `container/AGENTS.md` is the runtime-contract base the composed AGENTS.md embeds.
 
-```nc:copy from-branch:providers
-src/providers/codex.ts
-src/providers/codex-agents-md.ts
-src/providers/codex-registration.test.ts
-src/providers/codex-host-contribution.test.ts
-src/providers/codex-agents-md.test.ts
-container/agent-runner/src/providers/codex.ts
-container/agent-runner/src/providers/codex-app-server.ts
-container/agent-runner/src/providers/exchange-archive.ts
-container/agent-runner/src/providers/exchange-archive.test.ts
-container/agent-runner/src/providers/codex-registration.test.ts
-container/agent-runner/src/providers/codex.factory.test.ts
-container/agent-runner/src/providers/codex.turns.test.ts
-container/agent-runner/src/providers/codex-app-server.test.ts
-container/agent-runner/src/providers/codex-contract-parity.test.ts
-container/agent-runner/src/providers/codex.conformance.test.ts
-container/agent-runner/src/providers/codex-cli-tools.test.ts
-container/agent-runner/src/provider-contracts/codex.ts
-setup/providers/codex-registration.test.ts
-container/AGENTS.md
-```
-
-### Use the selected gateway for authentication
-
-Install the bundled Codex authentication hook alongside the registry payload. This
-keeps the same login choices while delegating custody to the selected gateway,
-and preserves the hook when a provider refresh copies registry files again.
-These two files are omitted from the registry copy so refresh stays idempotent.
-The setup screens and step sequence do not change.
+The host contract (`src/provider-contracts/codex.ts`) and the setup entry carry the authentication hook for the selected gateway: the same login choices, with custody delegated to the gateway. The setup screens and step sequence do not change.
 
 ```nc:copy
+payload/src/providers/codex.ts -> src/providers/codex.ts
+payload/src/providers/codex-agents-md.ts -> src/providers/codex-agents-md.ts
+payload/src/providers/codex-registration.test.ts -> src/providers/codex-registration.test.ts
+payload/src/providers/codex-host-contribution.test.ts -> src/providers/codex-host-contribution.test.ts
+payload/src/providers/codex-agents-md.test.ts -> src/providers/codex-agents-md.test.ts
+payload/container/agent-runner/src/providers/codex.ts -> container/agent-runner/src/providers/codex.ts
+payload/container/agent-runner/src/providers/codex-app-server.ts -> container/agent-runner/src/providers/codex-app-server.ts
+payload/container/agent-runner/src/providers/codex-registration.test.ts -> container/agent-runner/src/providers/codex-registration.test.ts
+payload/container/agent-runner/src/providers/codex.factory.test.ts -> container/agent-runner/src/providers/codex.factory.test.ts
+payload/container/agent-runner/src/providers/codex.turns.test.ts -> container/agent-runner/src/providers/codex.turns.test.ts
+payload/container/agent-runner/src/providers/codex-app-server.test.ts -> container/agent-runner/src/providers/codex-app-server.test.ts
+payload/container/agent-runner/src/providers/codex-contract-parity.test.ts -> container/agent-runner/src/providers/codex-contract-parity.test.ts
+payload/container/agent-runner/src/providers/codex.conformance.test.ts -> container/agent-runner/src/providers/codex.conformance.test.ts
+payload/container/agent-runner/src/providers/codex-cli-tools.test.ts -> container/agent-runner/src/providers/codex-cli-tools.test.ts
+payload/container/agent-runner/src/provider-contracts/codex.ts -> container/agent-runner/src/provider-contracts/codex.ts
+payload/setup/providers/codex-registration.test.ts -> setup/providers/codex-registration.test.ts
+payload/container/AGENTS.md -> container/AGENTS.md
 payload/src/provider-contracts/codex.ts -> src/provider-contracts/codex.ts
 payload/setup/providers/codex.ts -> setup/providers/codex.ts
 payload/setup/providers/codex.test.ts -> setup/providers/codex.test.ts
+```
+
+The payload used to ship its own copy of the exchange archive. Once neither Codex
+file imports it, this step removes it, so a refreshed install ends up with the same
+files as a fresh one. An install that kept older Codex files keeps the copy they need.
+
+```nc:run effect:refresh
+grep -qsF ./exchange-archive.js container/agent-runner/src/providers/codex.ts || grep -qsF providers/exchange-archive.js container/agent-runner/src/provider-contracts/codex.ts || rm -f container/agent-runner/src/providers/exchange-archive.ts container/agent-runner/src/providers/exchange-archive.test.ts
 ```
 
 ### 2. Wire the barrels
@@ -103,10 +101,11 @@ import './codex.js';
 The agent's global Node CLIs install from `container/cli-tools.json` (a json-merge seam), not hand-edited Dockerfile layers. Add Codex by appending one entry — idempotent on `name`, so a re-run is a no-op. `@openai/codex` has no native postinstall, so no `onlyBuilt`. The Dockerfile already installs every manifest entry via pinned `pnpm install -g`; no Dockerfile edit is needed.
 
 ```nc:json-merge into:container/cli-tools.json key:name
-{ "name": "@openai/codex", "version": "0.155.1" }
+{ "name": "@openai/codex", "version": "0.162.1" }
 ```
 
-The version (`0.155.1`) is the canonical pin — this SKILL.md is the source of truth.
+The version (`0.162.1`) is the canonical pin — this SKILL.md is the source of truth.
+Codex 0.156.0 and later look up the login's workspace id before any model request, so a ChatGPT login needs the credential gateway skill from the same NanoClaw release, which puts that id in the agent's stand-in login. `/update-nanoclaw` refreshes both together; do not refresh this skill alone on an older gateway.
 
 ### 4. Build
 

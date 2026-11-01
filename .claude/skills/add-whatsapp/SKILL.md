@@ -105,7 +105,7 @@ Baileys is the WhatsApp Web client; `qrcode` renders the device-link QR in the
 terminal; `pino` is Baileys' logger:
 
 ```nc:dep
-@whiskeysockets/baileys@7.0.0-rc.9
+@whiskeysockets/baileys@7.0.0-rc14
 qrcode@1.5.4
 @types/qrcode@1.5.6
 pino@9.6.0

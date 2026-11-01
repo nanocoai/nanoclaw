@@ -32,6 +32,11 @@ export interface GatewaySessionInput {
   runtimeIdentity: string;
   /** The agent group's display name, for gateways that register an agent identity. */
   groupName: string;
+  /**
+   * The agent provider a new runtime runs, by provider name; absent when adopting.
+   * Gateways that grant model credentials per agent key on it.
+   */
+  provider?: string;
   /** The runtime container this session runs in, as the driver named it; providers key per-session resources on it. */
   containerName: string;
   /**
@@ -75,7 +80,12 @@ export interface GatewayApprovalRequest {
   /** Verified destination selected by the gateway policy adapter. */
   delivery?: { messagingGroupId: string; threadId?: string };
   /** Metadata only: never credentials, query strings, or request bodies. */
-  destination?: { host: string; method?: string };
+  destination?: {
+    host: string;
+    method?: string;
+    /** Adapter-attested; false only when the request has no body and asks for no protocol upgrade. */
+    sendsPayload?: boolean;
+  };
   /** Selected, bounded display fields may come from the request. Never pass raw bodies, headers, tokens or query strings. */
   summary?: {
     agent: string;
@@ -147,6 +157,11 @@ export interface GatewayProviderDefinition {
     /** Optional restart recovery, when the gateway supports held-request enumeration or late decisions. */
     listPending?(): Promise<GatewayApprovalRequest[]>;
     decide?(requestId: string, decision: GatewayApprovalDecision): Promise<boolean>;
+    /**
+     * Whether the gateway could attach a stored credential to a request for
+     * this destination. May over-report, never under-report; reject when unsure.
+     */
+    credentialScope?(destination: { host: string; method?: string }): Promise<'credential' | 'none'>;
   };
 }
 

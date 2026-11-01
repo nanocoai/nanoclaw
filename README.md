@@ -82,9 +82,9 @@ See [docs/v1-to-v2-changes.md](docs/v1-to-v2-changes.md) for what's different an
 
 **AI-native, hybrid by design.** The install and onboarding flow is an optimized scripted path, fast and deterministic. When a step needs judgment, whether a failed install, a guided decision, or a customization, control hands off to Claude Code seamlessly. Beyond setup there's no monitoring dashboard or debugging UI either: describe the problem in chat and Claude Code handles it.
 
-**Skills over features.** Trunk ships the registry and infrastructure, not specific channel adapters or alternative agent providers. Channels (Discord, Slack, Telegram, WhatsApp, …) live on a long-lived `channels` branch; alternative providers (OpenCode, Ollama) live on `providers`. You run `/add-telegram`, `/add-opencode`, etc. and the skill copies exactly the module(s) you need into your fork. No feature you didn't ask for.
+**Skills over features.** Trunk ships the registry and infrastructure, not specific channel adapters or alternative agent providers. Channels (Discord, Slack, Telegram, WhatsApp, …) live on a long-lived `channels` branch; alternative providers (OpenCode, Codex, Cursor) ship inside their own skill's `payload/` folder. You run `/add-telegram`, `/add-opencode`, etc. and the skill copies exactly the module(s) you need into your fork. No feature you didn't ask for.
 
-**Best harness, best model.** NanoClaw natively uses Claude Code via Anthropic's official Claude Agent SDK, so you get the latest Claude models and Claude Code's full toolset, including the ability to modify and expand your own NanoClaw fork. Other providers are drop-in options: `/add-codex` for OpenAI's Codex (ChatGPT subscription or API key), `/add-opencode` for OpenRouter, Google, DeepSeek and more via OpenCode, and `/add-ollama-provider` for local open-weight models. Provider is configurable per agent group.
+**Best harness, best model.** NanoClaw natively uses Claude Code via Anthropic's official Claude Agent SDK, so you get the latest Claude models and Claude Code's full toolset, including the ability to modify and expand your own NanoClaw fork. Other providers are drop-in options: `/add-codex` for OpenAI's Codex (ChatGPT subscription or API key), `/add-opencode` for OpenRouter, Google, DeepSeek and more via OpenCode, `/add-cursor` for Cursor's local Agent SDK (Cursor account or API key), and `/add-ollama-provider` for local open-weight models. Provider is configurable per agent group.
 
 ## What It Supports
 
@@ -168,7 +168,7 @@ The codebase is small enough that Claude can safely modify it.
 
 **Don't add features. Add skills.**
 
-If you want to add a new channel or agent provider, don't add it to trunk. New channel adapters land on the `channels` branch; new agent providers land on `providers`. Users install them in their own fork with `/add-<name>` skills, which copy the relevant module(s) into the standard paths, wire the registration, and pin dependencies.
+If you want to add a new channel or agent provider, don't add it to trunk. New channel adapters land on the `channels` branch; a new agent provider keeps its code in its skill's `payload/` folder on `main`. Users install them in their own fork with `/add-<name>` skills, which copy the relevant module(s) into the standard paths, wire the registration, and pin dependencies.
 
 This keeps trunk as pure registry and infra, and every fork stays lean — users get the channels and providers they asked for and nothing else.
 
@@ -179,7 +179,7 @@ No channel or provider skills are currently requested — propose one via an iss
 ## Requirements
 
 - macOS or Linux (Windows via WSL2)
-- Node.js 22+ and pnpm 10+ (the installer will install both if missing)
+- Node.js 22.23.4+, 24.22.1+ or 26.12.1+ and pnpm 10+ (the installer will install or update both if needed)
 - [Docker Desktop](https://docker.com/products/docker-desktop) (macOS/Windows) or Docker Engine (Linux)
 - [Claude Code](https://claude.ai/download) for `/customize`, `/debug`, error recovery during setup, and all `/add-<channel>` skills
 
@@ -257,7 +257,7 @@ Every install is tagged with a per-checkout id, so the uninstaller removes only 
 
 Only security fixes, bug fixes, and clear improvements will be accepted to the base configuration. That's all.
 
-Everything else (new capabilities, OS compatibility, hardware support, enhancements) should be contributed as skills: channel and provider code on the `channels`/`providers` registry branches, everything else as a self-contained skill. See [docs/customizing.md](docs/customizing.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
+Everything else (new capabilities, OS compatibility, hardware support, enhancements) should be contributed as skills: channel code on the `channels` registry branch, everything else (agent providers included) as a self-contained skill. See [docs/customizing.md](docs/customizing.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
 
 This keeps the base system minimal and lets every user customize their installation without inheriting features they don't want.
 

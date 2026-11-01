@@ -60,9 +60,24 @@ registerProviderHostContract('claude', {
   modelDomains: ['anthropic.com'],
   seamVersion: PROVIDER_HOST_CONTRACT_SEAM_VERSION,
   ...CLAUDE_COMPATIBLE_HOST_SURFACES,
+  // The SDK runs a command under its aliases too, so each alias is listed
+  // with its command: /usage and /stats are /cost, /reset and /new are the
+  // SDK's own /clear, /checkup is /doctor, /settings is /config, /rc is
+  // /remote-control.
   commands: {
-    nativeAdmin: ['/compact', '/context', '/cost', '/files'],
-    nativeFiltered: ['/start', '/help', '/login', '/logout', '/doctor', '/config', '/remote-control'],
+    nativeAdmin: ['/compact', '/context', '/cost', '/usage', '/stats', '/files', '/reset', '/new'],
+    nativeFiltered: [
+      '/start',
+      '/help',
+      '/login',
+      '/logout',
+      '/doctor',
+      '/checkup',
+      '/config',
+      '/settings',
+      '/remote-control',
+      '/rc',
+    ],
   },
   // `fast` maps onto the SDK's fast serving tier; `standard` lets a group
   // explicitly override an install-wide NANOCLAW_FAST_MODE=true.

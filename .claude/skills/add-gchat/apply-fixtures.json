@@ -4,7 +4,20 @@
     {
       "name": "service-account",
       "inputs": {
-        "gchat_credentials": "fake-service-account-json-blob"
+        "gchat_credentials": "fake-service-account-json-blob",
+        "gchat_endpoint_url": "https://chat.example.com/webhook/gchat",
+        "gchat_project_number": "123456789012",
+        "gchat_bot_id_ready": "now",
+        "gchat_bot_user_id": "users/123456789"
+      }
+    },
+    {
+      "name": "bot-id-later",
+      "inputs": {
+        "gchat_credentials": "fake-service-account-json-blob",
+        "gchat_endpoint_url": "https://chat.example.com/webhook/gchat",
+        "gchat_project_number": "123456789012",
+        "gchat_bot_id_ready": "later"
       }
     }
   ]

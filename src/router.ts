@@ -20,6 +20,7 @@
 import { getChannelAdapter, getChannelDefaults } from './channels/channel-registry.js';
 import { resolveThreadPolicy, resolveUnknownSenderPolicy } from './channels/channel-defaults.js';
 import { gateCommand } from './command-gate.js';
+import { getDeliveryAdapter } from './delivery.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { recordDroppedMessage } from './db/dropped-messages.js';
 import {
@@ -31,7 +32,7 @@ import { findSessionForAgent } from './db/sessions.js';
 import { backfillSession, fanInboundMessage } from './modules/cross-session-context/index.js';
 import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
-import { resolveSession, writeSessionMessage, writeOutboundDirect } from './session-manager.js';
+import { resolveSession, writeSessionMessage } from './session-manager.js';
 import { requestWake } from './request-wake.js';
 import { getSession } from './db/sessions.js';
 import type { AgentGroup, MessagingGroup, MessagingGroupAgent, Session } from './types.js';
@@ -556,7 +557,8 @@ async function deliverToAgent(
 
   // Command gate: classify slash commands before they reach the container.
   // Filtered commands are dropped silently. Denied admin commands get a
-  // permission-denied response written directly to messages_out.
+  // permission-denied reply sent straight to the chat: outbound.db belongs to
+  // the container, and a host write there can collide with its writes.
   if (event.message.kind === 'chat' || event.message.kind === 'chat-sdk') {
     const gate = await gateCommand(event.message.content, userId, agent.agent_group_id);
     if (gate.action === 'filter') {
@@ -564,15 +566,26 @@ async function deliverToAgent(
       return;
     }
     if (gate.action === 'deny') {
-      await writeOutboundDirect(session.agent_group_id, session.id, {
-        id: `deny-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        kind: 'chat',
-        platformId: deliveryAddr.platformId,
-        channelType: deliveryAddr.channelType,
-        threadId: deliveryAddr.threadId,
-        content: JSON.stringify({ text: `Permission denied: ${gate.command} requires admin access.` }),
-      });
       log.info('Admin command denied by gate', { command: gate.command, userId, agentGroupId: agent.agent_group_id });
+      const adapter = getDeliveryAdapter();
+      if (!adapter) {
+        log.warn('Permission-denied reply not sent: no delivery adapter', { command: gate.command });
+        return;
+      }
+      try {
+        await adapter.deliver(
+          deliveryAddr.channelType,
+          deliveryAddr.platformId,
+          deliveryAddr.threadId,
+          'chat',
+          JSON.stringify({ text: `Permission denied: ${gate.command} requires admin access.` }),
+          undefined,
+          event.replyTo ? undefined : mg.instance,
+        );
+        // eslint-disable-next-line no-catch-all/no-catch-all -- a failed reply must not fail inbound routing
+      } catch (err) {
+        log.error('Failed to deliver permission-denied reply', { command: gate.command, err });
+      }
       return;
     }
   }

@@ -1,8 +1,20 @@
+import http from 'http';
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Adapter, AdapterPostableMessage, RawMessage } from 'chat';
 
-import { createChatSdkBridge, splitForLimit } from './chat-sdk-bridge.js';
+import { fenceForCard } from '../card-text.js';
+import { gatewayApprovalPresentation } from '../gateway-approval-presentation.js';
+import type { GatewayApprovalRequest } from '../gateway-providers/gateway-provider-registry.js';
+import { CardTooLongError } from './ask-question.js';
+import {
+  attachmentBytesToBase64,
+  CARD_TEXT_BLOCK_LENGTH,
+  createChatSdkBridge,
+  splitCardText,
+  splitForLimit,
+} from './chat-sdk-bridge.js';
 
 vi.mock('../webhook-server.js', () => ({
   registerWebhookAdapter: vi.fn(),
@@ -51,6 +63,27 @@ describe('splitForLimit', () => {
     expect(chunks.length).toBe(Math.ceil(100 / 30));
     for (const c of chunks) expect(c.length).toBeLessThanOrEqual(30);
     expect(chunks.join('')).toBe(text);
+  });
+});
+
+describe('attachmentBytesToBase64', () => {
+  const bytes = Buffer.from('telegram attachment');
+  const expected = bytes.toString('base64');
+
+  it('encodes a Buffer', () => {
+    expect(attachmentBytesToBase64(Buffer.from(bytes))).toBe(expected);
+  });
+
+  it('encodes an ArrayBuffer (Telegram fetchData since 4.39)', () => {
+    const ab = new ArrayBuffer(bytes.length);
+    new Uint8Array(ab).set(bytes);
+    expect(attachmentBytesToBase64(ab)).toBe(expected);
+  });
+
+  it('encodes only the viewed range of a Uint8Array', () => {
+    const backing = new Uint8Array(bytes.length + 4);
+    backing.set(bytes, 2);
+    expect(attachmentBytesToBase64(backing.subarray(2, 2 + bytes.length))).toBe(expected);
   });
 });
 
@@ -390,6 +423,290 @@ describe('createChatSdkBridge.deliver — ask_question cards (button styles)', (
     ]);
     expect(edited.card.children.some((child) => child.type === 'actions')).toBe(false);
   });
+
+  it('splits a long fenced host card into blocks that each keep their own fences', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+      escapeCardText: (t) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'),
+    });
+    const body = Array.from({ length: 150 }, (_, i) => `line ${i}: \`code\` <x|y> & more`).join('\n');
+
+    await bridge.deliver('slack:D1', null, {
+      kind: 'chat-sdk',
+      content: {
+        type: 'ask_question',
+        questionId: 'q-long',
+        title: 'Message approval',
+        question: `Agent "A" wants to send a message to "B":\n\n${fenceForCard(body)}\n\nApprove?`,
+        options: ['Approve'],
+      },
+    });
+    const card = (calls[0].message as { card: { children: Array<{ type: string; content?: string }> } }).card;
+    const blocks = card.children.filter((c) => c.type === 'text').map((c) => c.content!);
+    expect(blocks.length).toBeGreaterThan(1);
+    for (const block of blocks) {
+      expect(block.length).toBeLessThanOrEqual(CARD_TEXT_BLOCK_LENGTH);
+      expect((block.match(/^ {0,3}```/gm) ?? []).length % 2).toBe(0);
+      expect(block).not.toMatch(/[<>]/);
+    }
+  });
+
+  it('leaves a question the agent asked itself (fromAgent) unescaped', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+      escapeCardText: (t) => `[${t}]`,
+    });
+
+    await bridge.deliver('slack:C1', null, {
+      kind: 'chat-sdk',
+      content: {
+        type: 'ask_question',
+        questionId: 'q-4',
+        title: 'Pick one',
+        question: 'See <https://example.com|docs>?',
+        options: ['Yes'],
+        fromAgent: true,
+      },
+    });
+    const posted = calls[0].message as {
+      card: { children: Array<{ type: string; content?: string }> };
+      fallbackText: string;
+    };
+    expect(posted.card.children[0]).toEqual({ type: 'text', content: 'See <https://example.com|docs>?' });
+    expect(posted.fallbackText).toBe('Pick one\n\nSee <https://example.com|docs>?\nOptions: Yes');
+  });
+
+  it('runs open and resolved card text through escapeCardText, leaving the title alone', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const edits: PostCall[] = [];
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({
+        postMessage,
+        editMessage: async (threadId, _messageId, message) => {
+          edits.push({ threadId, message });
+          return { id: 'msg-1', threadId, raw: {} };
+        },
+      }),
+      supportsThreads: false,
+      escapeCardText: (t) => `[${t}]`,
+    });
+
+    await bridge.deliver('slack:D1', null, {
+      kind: 'chat-sdk',
+      content: {
+        type: 'ask_question',
+        questionId: 'q-3',
+        title: 'Approval needed',
+        question: 'Allow?',
+        options: ['Approve'],
+      },
+    });
+    const posted = calls[0].message as {
+      card: { title: string; children: Array<{ type: string; content?: string }> };
+      fallbackText: string;
+    };
+    expect(posted.card.title).toBe('Approval needed');
+    expect(posted.card.children[0]).toEqual({ type: 'text', content: '[Allow?]' });
+    expect(posted.fallbackText).toBe('Approval needed\n\n[Allow?]\nOptions: Approve');
+
+    await bridge.deliver('slack:D1', null, {
+      kind: 'chat-sdk',
+      content: {
+        operation: 'edit',
+        messageId: 'msg-1',
+        terminalCard: { title: 'Approval needed', question: 'Allow?', resolution: 'Approve by Ann' },
+      },
+    });
+    const edited = edits[0].message as {
+      card: { title: string; children: Array<{ type: string; content?: string; style?: string }> };
+    };
+    expect(edited.card.title).toBe('Approval needed');
+    expect(edited.card.children).toEqual([
+      { type: 'text', content: '[Allow?]' },
+      { type: 'text', content: '[Approve by Ann]', style: 'muted' },
+    ]);
+  });
+
+  const CARD_TITLE = 'Approval needed';
+  function questionCard(question: string, title = CARD_TITLE) {
+    return {
+      kind: 'chat-sdk',
+      content: { type: 'ask_question', questionId: 'q-len', title, question, options: ['Approve'] },
+    };
+  }
+
+  function postedBlocks(calls: PostCall[]): { text: string[]; hasButtons: boolean } {
+    const posted = calls[0].message as { card: { children: Array<{ type: string; content?: string }> } };
+    return {
+      text: posted.card.children.filter((child) => child.type === 'text').map((child) => child.content ?? ''),
+      hasButtons: posted.card.children.some((child) => child.type === 'actions'),
+    };
+  }
+
+  it('posts a full-size gateway summary card whole, in text blocks under the block cap', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({ adapter: stubAdapter({ postMessage }), supportsThreads: false });
+    const { title, question } = gatewayApprovalPresentation({
+      title: 'Legacy',
+      question: 'Legacy question',
+      summary: {
+        agent: 'Nano',
+        action: 'Read external data',
+        resource: 'GET api.example.test/repos',
+        reason: 'Policy requires approval',
+        details: Array.from({ length: 6 }, (_, i) => ({ label: `Detail ${i}`, value: `${i}`.repeat(600) })),
+      },
+    } as GatewayApprovalRequest);
+    expect(question.length).toBeGreaterThan(CARD_TEXT_BLOCK_LENGTH);
+
+    await bridge.deliver('slack:D1', null, questionCard(question, title));
+    const { text, hasButtons } = postedBlocks(calls);
+    expect(text.length).toBeGreaterThan(1);
+    for (const block of text) expect(block.length).toBeLessThanOrEqual(CARD_TEXT_BLOCK_LENGTH);
+    expect(text.join('')).toBe(question);
+    expect(hasButtons).toBe(true);
+  });
+
+  it("refuses a card over the channel's declared limit, counting the title, posting nothing", async () => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+      maxCardTextLength: 100,
+    });
+
+    const fits = 'x'.repeat(100 - CARD_TITLE.length);
+    await expect(bridge.deliver('slack:D1', null, questionCard(`${fits}x`))).rejects.toThrow(CardTooLongError);
+    expect(calls).toHaveLength(0);
+    await bridge.deliver('slack:D1', null, questionCard(fits));
+    expect(calls).toHaveLength(1);
+  });
+
+  it('counts the fences a split adds toward the declared limit', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+      escapeCardText: (t) => t.replace(/&/g, '&amp;'),
+      maxCardTextLength: 3000,
+    });
+
+    // Title + escaped text is exactly 3,000; the split's extra fences push it over.
+    const question = '```\n' + '&'.repeat(598) + '\n```';
+    await expect(bridge.deliver('slack:D1', null, questionCard(question, 'OK'))).rejects.toThrow(CardTooLongError);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('splits the resolved card the same way as the open one', async () => {
+    const edits: PostCall[] = [];
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({
+        editMessage: async (threadId, _messageId, message) => {
+          edits.push({ threadId, message });
+          return { id: 'msg-1', threadId, raw: {} };
+        },
+      }),
+      supportsThreads: false,
+      escapeCardText: (t) => t.replace(/&/g, '&amp;'),
+    });
+
+    const question = '&'.repeat(1000);
+    await bridge.deliver('slack:D1', null, {
+      kind: 'chat-sdk',
+      content: {
+        operation: 'edit',
+        messageId: 'msg-1',
+        terminalCard: { title: 'Approval needed', question, resolution: 'Approved' },
+      },
+    });
+    const edited = edits[0].message as { card: { children: Array<{ content?: string; style?: string }> } };
+    const blocks = edited.card.children.filter((child) => !child.style).map((child) => child.content ?? '');
+    expect(blocks.length).toBeGreaterThan(1);
+    for (const block of blocks) expect(block.length).toBeLessThanOrEqual(CARD_TEXT_BLOCK_LENGTH);
+    expect(blocks.join('')).toBe('&amp;'.repeat(1000));
+    expect(edited.card.children.at(-1)).toEqual({ type: 'text', content: 'Approved', style: 'muted' });
+  });
+
+  it('measures the declared limit after escaping', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+      escapeCardText: (t) => t.replace(/&/g, '&amp;'),
+      maxCardTextLength: 100,
+    });
+
+    await expect(bridge.deliver('slack:D1', null, questionCard('&'.repeat(20)))).rejects.toThrow(/limit 100/);
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe('splitCardText', () => {
+  const ampEscape = (t: string) => t.replace(/&/g, '&amp;');
+
+  it('keeps text that fits as one block', () => {
+    expect(splitCardText('Allow?', (t) => t, 100)).toEqual(['Allow?']);
+  });
+
+  it('measures each block after escaping and never cuts an escape in half', () => {
+    const blocks = splitCardText('&'.repeat(100), ampEscape, 42);
+    for (const block of blocks) {
+      expect(block.length).toBeLessThanOrEqual(42);
+      expect(block).toMatch(/^(&amp;)+$/);
+    }
+    expect(blocks.join('')).toBe(ampEscape('&'.repeat(100)));
+  });
+
+  it('splits at a line break when one is near the limit', () => {
+    expect(splitCardText(`${'a'.repeat(30)}\n${'b'.repeat(30)}`, (t) => t, 40)).toEqual([
+      `${'a'.repeat(30)}\n`,
+      'b'.repeat(30),
+    ]);
+  });
+
+  it('closes a code fence at the end of a block and reopens it in the next', () => {
+    const text = 'Run:\n```\n' + 'y'.repeat(100) + '\n```';
+    const blocks = splitCardText(text, (t) => t, 50);
+    expect(blocks.length).toBeGreaterThan(1);
+    for (const block of blocks) {
+      expect(block.length).toBeLessThanOrEqual(50);
+      expect((block.match(/```/g) ?? []).length % 2).toBe(0);
+    }
+    // Each split inside the fence adds a closing and a reopening fence.
+    expect(blocks.join('').split('\n``````\n').join('')).toBe(text);
+  });
+
+  it('never cuts a fence marker in half', () => {
+    expect(splitCardText('x'.repeat(48) + '```\ncode\n```', (t) => t, 50)).toEqual(['x'.repeat(48), '```\ncode\n```']);
+  });
+
+  it('treats backticks inside a code line as text, not a fence', () => {
+    const blocks = splitCardText(
+      '```\nprintf "```"\n' + 'x'.repeat(1980) + '\n**delete everything**\n```',
+      (t) => t,
+      2000,
+    );
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0].endsWith('\n```')).toBe(true);
+    expect(blocks[1].startsWith('```\n')).toBe(true);
+  });
+
+  it('rechecks the length after backing off a long fence marker', () => {
+    const blocks = splitCardText('```\n' + 'x'.repeat(1992) + '\n````\n' + 'y'.repeat(10), (t) => t, 2000);
+    for (const block of blocks) expect(block.length).toBeLessThanOrEqual(2000);
+  });
+
+  it('never splits a surrogate pair', () => {
+    const blocks = splitCardText('😀'.repeat(50), (t) => t, 31);
+    for (const block of blocks) {
+      expect(block).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
+    }
+    expect(blocks.join('')).toBe('😀'.repeat(50));
+  });
 });
 
 describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
@@ -656,4 +973,164 @@ it('forwards the authenticated instance and message address without editing a de
     await bridge.teardown();
     await closeDb();
   }
+});
+
+describe('createChatSdkBridge — local Gateway webhook', () => {
+  // The Gateway listener forwards raw events to a loopback server; only it may
+  // post there. It sends the bot token in x-discord-gateway-token.
+  const BOT_TOKEN = 'test-bot-token';
+  const realFetch = globalThis.fetch;
+
+  const click = JSON.stringify({
+    type: 'GATEWAY_INTERACTION_CREATE',
+    data: {
+      type: 3,
+      id: 'interaction-1',
+      token: 'interaction-token',
+      channel_id: 'chan-1',
+      data: { custom_id: 'ncq:q-1:approve' },
+      member: { user: { id: 'clicker-1', username: 'clicker' } },
+      message: { id: 'card-1', embeds: [] },
+    },
+  });
+  const message = JSON.stringify({ type: 'GATEWAY_MESSAGE_CREATE', data: { id: 'm-1', content: 'hi' } });
+
+  async function startGateway(botToken?: string) {
+    let webhookUrl = '';
+    const handleWebhook = vi.fn(async () => new Response('ok'));
+    const adapter = stubAdapter({
+      name: 'discord',
+      initialize: async () => {},
+      handleWebhook,
+      channelIdFromThreadId: (threadId: string) => threadId,
+    }) as Adapter & { startGatewayListener: unknown };
+    adapter.startGatewayListener = async (_opts: unknown, _ms: number, _signal: AbortSignal, url: string) => {
+      webhookUrl = url;
+      return new Response('{}');
+    };
+    const onAction = vi.fn();
+    const bridge = createChatSdkBridge({ adapter, supportsThreads: true, botToken });
+    await bridge.setup({ onInbound: () => {}, onInboundEvent: () => {}, onMetadata: () => {}, onAction });
+    const post = (body: string, headers: Record<string, string> = {}) =>
+      realFetch(webhookUrl, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body });
+    return { bridge, post, onAction, handleWebhook, webhookUrl };
+  }
+
+  beforeEach(async () => {
+    const { initTestDb } = await import('../db/connection.js');
+    const { runMigrations } = await import('../db/migrations/index.js');
+    await runMigrations(await initTestDb());
+    // Interaction acks go to the Discord API; keep them off the network.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(null, { status: 204 })),
+    );
+  });
+
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    const { closeDb } = await import('../db/connection.js');
+    await closeDb();
+  });
+
+  it.each([
+    ['no gateway token', {}],
+    ['a wrong gateway token', { 'x-discord-gateway-token': 'not-the-token' }],
+  ])('rejects a request with %s before it reaches the adapter or the host', async (_label, headers) => {
+    const { bridge, post, onAction, handleWebhook } = await startGateway(BOT_TOKEN);
+    try {
+      for (const body of [click, message]) {
+        const res = await post(body, headers);
+        expect(res.status).toBe(401);
+      }
+      expect(onAction).not.toHaveBeenCalled();
+      expect(handleWebhook).not.toHaveBeenCalled();
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('answers 401 without waiting for the request body', async () => {
+    const { bridge, webhookUrl } = await startGateway(BOT_TOKEN);
+    try {
+      const status = await new Promise<number | undefined>((resolve, reject) => {
+        const req = http.request(webhookUrl, { method: 'POST', headers: { 'Content-Length': '1000' } }, (res) => {
+          resolve(res.statusCode);
+          req.destroy();
+        });
+        req.on('error', reject);
+        req.flushHeaders(); // the body never follows
+      });
+      expect(status).toBe(401);
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('rejects every request when no bot token is configured', async () => {
+    const { bridge, post, onAction, handleWebhook } = await startGateway(undefined);
+    try {
+      const res = await post(click, { 'x-discord-gateway-token': '' });
+      expect(res.status).toBe(401);
+      expect((await post(message)).status).toBe(401);
+      expect(onAction).not.toHaveBeenCalled();
+      expect(handleWebhook).not.toHaveBeenCalled();
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('dispatches clicks and forwards other events when the gateway token matches', async () => {
+    const { bridge, post, onAction, handleWebhook } = await startGateway(BOT_TOKEN);
+    try {
+      const auth = { 'x-discord-gateway-token': BOT_TOKEN };
+      expect((await post(click, auth)).status).toBe(200);
+      expect(onAction).toHaveBeenCalledWith('q-1', 'approve', 'clicker-1', {
+        messageId: 'card-1',
+        platformId: 'chan-1',
+      });
+      expect((await post(message, auth)).status).toBe(200);
+      expect(handleWebhook).toHaveBeenCalledTimes(1);
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('decodes the option index when @chat-adapter/discord appends "\\n<value>" to custom_id', async () => {
+    const { registerQuestionRenderResolver } = await import('./question-render-registry.js');
+    registerQuestionRenderResolver((id) =>
+      id === 'q-index'
+        ? {
+            title: 'Install Packages Request',
+            options: [
+              { label: 'Approve', selectedLabel: '✅ Approved', value: 'approve' },
+              { label: 'Reject', selectedLabel: '❌ Rejected', value: 'reject' },
+            ],
+          }
+        : undefined,
+    );
+    const encodedClick = JSON.stringify({
+      type: 'GATEWAY_INTERACTION_CREATE',
+      data: {
+        type: 3,
+        id: 'interaction-2',
+        token: 'interaction-token',
+        channel_id: 'chan-1',
+        // Button({ id: 'ncq:q-index:0', value: '0' }) as encoded by the Discord adapter.
+        data: { custom_id: 'ncq:q-index:0\n0' },
+        member: { user: { id: 'clicker-1', username: 'clicker' } },
+        message: { id: 'card-2', embeds: [] },
+      },
+    });
+    const { bridge, post, onAction } = await startGateway(BOT_TOKEN);
+    try {
+      expect((await post(encodedClick, { 'x-discord-gateway-token': BOT_TOKEN })).status).toBe(200);
+      expect(onAction).toHaveBeenCalledWith('q-index', 'approve', 'clicker-1', {
+        messageId: 'card-2',
+        platformId: 'chan-1',
+      });
+    } finally {
+      await bridge.teardown();
+    }
+  });
 });

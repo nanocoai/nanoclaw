@@ -1,6 +1,6 @@
 ---
 name: update-skills
-description: Refresh installed NanoClaw channel and provider payloads from their registry branches with fork-safe remote resolution and a blocking structured result. Use after updating NanoClaw or whenever installed channel/provider code may be stale.
+description: Refresh installed NanoClaw channel and provider payloads (channels from their registry branch, providers from their skill payload) with fork-safe remote resolution and a blocking structured result. Use after updating NanoClaw or whenever installed channel/provider code may be stale.
 ---
 
 # Update installed skills
@@ -29,11 +29,15 @@ pnpm exec tsx scripts/update-skills.ts --skills all
 # Example subset: --skills slack,opencode
 ```
 
-The helper detects installed skills from the real channel/provider barrels. It
-resolves each registry branch by checking configured remotes, so a fork whose
-`origin` is the user's repo and whose official source is `upstream` works
-without special handling. `NANOCLAW_REGISTRY_REMOTE=<name>` is an explicit
-override and is validated before use.
+The helper detects installed skills from the real channel/provider barrels.
+Provider skills refresh from their own `payload/` in this checkout and need
+no remote; a provider first installed from the old `providers` branch is
+rewritten from the payload the same way. For channel skills it resolves the
+registry branch by checking configured remotes, so a fork whose `origin` is
+the user's repo and whose official source is `upstream` works without
+special handling.
+`NANOCLAW_REGISTRY_REMOTE=<name>` is an explicit override and is validated
+before use.
 
 ## 2. Treat the JSON result as a gate
 

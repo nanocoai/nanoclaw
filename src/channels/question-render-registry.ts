@@ -14,7 +14,10 @@ export interface QuestionRender {
   title: string;
   question?: string;
   options: NormalizedOption[];
-  /** Optional channel presentation. Decision authorization always remains in core. */
+  /**
+   * Optional channel presentation. Decision authorization always remains in core.
+   * It must show the whole request: the bridge does not length-check it.
+   */
   renderMessage?: (questionId: string) => Parameters<Adapter['postMessage']>[1];
   renderTerminal?: (resolution: string) => Parameters<Adapter['postMessage']>[1];
   /** The coordinator updates the card only after it authorizes and records the decision. */

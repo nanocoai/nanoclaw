@@ -18,6 +18,7 @@ describe('WEBHOOK_PORT configuration (#2901)', () => {
     directory = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-webhook-port-'));
     process.chdir(directory);
     vi.stubEnv('WEBHOOK_PORT', undefined);
+    vi.stubEnv('WEBHOOK_HOST', undefined);
     vi.resetModules();
     stopWebhookServer = undefined;
   });
@@ -94,7 +95,7 @@ describe('WEBHOOK_PORT configuration (#2901)', () => {
 
   it('recovers after the configured port is already in use', async () => {
     const occupied = http.createServer();
-    await new Promise<void>((resolve) => occupied.listen(0, '0.0.0.0', resolve));
+    await new Promise<void>((resolve) => occupied.listen(0, '127.0.0.1', resolve));
     const address = occupied.address();
     if (!address || typeof address === 'string') throw new Error('Expected an allocated TCP port');
 

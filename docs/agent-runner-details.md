@@ -8,7 +8,7 @@ The agent-runner has two layers:
 
 1. **Agent-runner core** — owns the poll loop, message formatting, DB reads/writes, MCP tool implementations, routing, status management, media handling. This is NanoClaw-specific and shared across all providers.
 
-2. **Agent provider** — owns the SDK interaction. Takes formatted prompts, pushes them to the SDK, yields events back. Trunk ships the `claude` provider; additional providers (OpenCode, Codex, etc.) are installed by `/add-<provider>` skills from the `providers` branch.
+2. **Agent provider** — owns the SDK interaction. Takes formatted prompts, pushes them to the SDK, yields events back. Trunk ships the `claude` provider; additional providers (OpenCode, Codex, etc.) are installed by `/add-<provider>` skills from the skill's own `payload/`.
 
 The boundary: the agent-runner decides **what** to send and **what to do** with results. The provider decides **how** to talk to the SDK.
 
@@ -139,7 +139,10 @@ What a provider declares:
 - `lifecycle` — `memorySessionHookRegistration` (runs when core registers the memory hook)
   and `beforeQuery` (runs before each query).
 - `history` — `afterExchange` (the factory wraps `onExchangeComplete` with it) and
-  `readTrace` (what `/upload-trace` uploads). Anything else a provider does with its own
+  `readTrace` (what `/upload-trace` uploads). A provider with no on-disk transcript can
+  implement `afterExchange` with `archiveProviderExchange` from
+  `provider-contracts/exchange-archive.ts`, which appends each exchange to one markdown
+  file per thread in `conversations/`. Anything else a provider does with its own
   transcript — Claude's pre-compact archive and continuation rotation, for example — is
   provider-internal code (`providers/claude-history.ts`), not a contract field.
 - `textDelivery`, `commands` — read by the poll-loop and formatter. The formatter's

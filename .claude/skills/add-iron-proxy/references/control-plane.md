@@ -76,6 +76,9 @@ approval, including telemetry and provider-hosted MCP calls. The bridge keeps no
 model-host or endpoint exemption list. See [the shared contract](../../../../docs/gateway-seam.md#default-model-traffic-approvals).
 
 Identity verification, the destination allowlist, and Iron credential grants
-remain enforced. Other app destinations retain human approval. Explicit gateway
+remain enforced. Other app destinations retain human approval, unless the
+operator enables uncredentialed reads: then a payload-free GET or HEAD that no
+granted rule's host and methods cover is approved without a card. Rule paths are
+not used to narrow that check. Explicit gateway
 policy holds must be marked as policy holds and are never covered by the default
 model exemption.

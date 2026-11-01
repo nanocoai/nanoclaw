@@ -37,6 +37,7 @@ import { emitStatus } from '../status.js';
 import { openUrl } from './browser.js';
 import { isHelpEscape, offerClaudeHandoff, validateWithHelpEscape } from './claude-handoff.js';
 import { startSpinner } from './runner.js';
+import { warnSetupCommit, withSetupCommit } from './setup-commit.js';
 
 /**
  * Build the clack `validate` callback an `nc:prompt` carries — the interactive
@@ -569,16 +570,22 @@ export async function runSkill(skillDir: string, opts: RunSkillOptions = {}): Pr
     rawLog = setupLog.stepRawLog(`skill-${basename(skillDir)}`);
     writeFileSync(rawLog, `# skill ${basename(skillDir)} — ${new Date().toISOString()}\n\n`);
   }
-  return applySkill(skillDir, projectRoot, {
-    mode: opts.mode,
-    inputs,
-    resolveInput: opts.resolveInput ?? clackResolveInput({ channel: opts.channel, step: opts.step }),
-    onEvent: opts.onEvent ?? defaultOnEvent(md, confirm, open),
-    exec: opts.exec ?? hostExec(projectRoot, rawLog),
-    execStream: opts.execStream ?? hostExecStream(projectRoot),
-    resolveRemote: opts.resolveRemote ?? channelsRemote(projectRoot),
-    skipEffects: opts.skipEffects,
-  });
+  return withSetupCommit(
+    projectRoot,
+    basename(skillDir),
+    () =>
+      applySkill(skillDir, projectRoot, {
+        mode: opts.mode,
+        inputs,
+        resolveInput: opts.resolveInput ?? clackResolveInput({ channel: opts.channel, step: opts.step }),
+        onEvent: opts.onEvent ?? defaultOnEvent(md, confirm, open),
+        exec: opts.exec ?? hostExec(projectRoot, rawLog),
+        execStream: opts.execStream ?? hostExecStream(projectRoot),
+        resolveRemote: opts.resolveRemote ?? channelsRemote(projectRoot),
+        skipEffects: opts.skipEffects,
+      }),
+    warnSetupCommit,
+  );
 }
 
 /**

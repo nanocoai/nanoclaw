@@ -259,6 +259,9 @@ export interface SessionHandle {
   execSpec(command: string[]): SessionExecSpec;
 }
 
+/** Outcome of reconciling an adopted session's network; see `reconcileNetworkAccess`. */
+export type NetworkReconcile = 'kept' | 'restart';
+
 export interface DriverCapabilities {
   isolationTiers: ('container' | 'vm')[];
   admissionEnforced: boolean;
@@ -308,8 +311,12 @@ export interface SessionDriver {
   capabilities(): DriverCapabilities;
   /** Fatal-at-startup reachability check. Agents cannot run without a runtime. */
   ensureReady?(): Promise<void>;
-  /** Restore gateway network realization when adopting an existing session. */
-  reconcileNetworkAccess?(access: NetworkAccessIntent): Promise<void>;
+  /**
+   * Restore gateway network realization when adopting an existing session.
+   * 'restart' means the runtime is not on the network a new session would get
+   * (the policy changed while it ran); core stops it so the next wake respawns.
+   */
+  reconcileNetworkAccess?(access: NetworkAccessIntent, handle: SessionHandle): Promise<NetworkReconcile | void>;
   /** Allocate everything, start nothing. Idempotent on key: an existing live session returns its handle. */
   prepare(spec: SessionSpec): Promise<SessionHandle>;
   /**

@@ -27,7 +27,11 @@ vi.mock('../log.js', () => ({
 
 // The driver re-checks mount sources exist; fixture paths are not real files
 // on the test host. A vi.fn so single tests can flip it to "missing".
-vi.mock('fs', () => ({ default: { existsSync: vi.fn(() => true) } }));
+// `constants` stays real: anchored-dir reads open flags at load time.
+vi.mock('fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('fs')>();
+  return { default: { constants: actual.constants, existsSync: vi.fn(() => true) } };
+});
 
 import fs from 'fs';
 
@@ -461,6 +465,47 @@ describe('idempotency and adoption', () => {
     const handle = await driver().prepare(fixtureSpec());
 
     expect(handle.name).toBe('ncl-spike-s1');
+    expect(cli.callMatching(/^create /)).toBeUndefined();
+  });
+
+  it('replaces an existing session that is not on the network the spec requires', async () => {
+    cli.responses = [
+      { match: /^inspect --format \{\{json \.NetworkSettings\.Networks\}\}/, output: '{"bridge":{}}' },
+      { match: /^inspect /, output: 'spike|g1|s1\n' },
+    ];
+    const reconcile = vi.fn((_access: unknown, networks: () => string[]) =>
+      networks().includes('bridge') ? ('restart' as const) : ('kept' as const),
+    );
+
+    await new DockerSessionDriver({ ...FIXTURE_POLICY, cli, reconcileNetworkAccess: reconcile }).prepare(fixtureSpec());
+
+    const removed = cli.callMatching(/^rm --force ncl-spike-s1$/);
+    expect(removed).toBeDefined();
+    expect(createArgs()).toBeDefined();
+    expect(cli.callMatching(/^create /)!.seq).toBeGreaterThan(removed!.seq);
+  });
+
+  it('replaces an existing session whose networks cannot be read', async () => {
+    cli.responses = [
+      { match: /^inspect --format \{\{json \.NetworkSettings\.Networks\}\}/, throws: 'Error response from daemon' },
+      { match: /^inspect /, output: 'spike|g1|s1\n' },
+    ];
+    const reconcile = (_access: unknown, networks: () => string[]) => (networks().length ? 'kept' : 'restart');
+
+    await new DockerSessionDriver({ ...FIXTURE_POLICY, cli, reconcileNetworkAccess: reconcile }).prepare(fixtureSpec());
+
+    expect(cli.callMatching(/^rm --force ncl-spike-s1$/)).toBeDefined();
+    expect(createArgs()).toBeDefined();
+  });
+
+  it('reuses an existing session the network policy keeps', async () => {
+    cli.responses = [{ match: /^inspect /, output: 'spike|g1|s1\n' }];
+
+    await new DockerSessionDriver({ ...FIXTURE_POLICY, cli, reconcileNetworkAccess: () => 'kept' }).prepare(
+      fixtureSpec(),
+    );
+
+    expect(cli.callMatching(/^rm /)).toBeUndefined();
     expect(cli.callMatching(/^create /)).toBeUndefined();
   });
 

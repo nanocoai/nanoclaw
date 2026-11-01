@@ -20,6 +20,7 @@
  */
 import type { InboundEvent } from '../../channels/adapter.js';
 import { getDeliveryAdapter } from '../../delivery.js';
+import { getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
 import {
   deletePendingApproval,
   getExpiredAwaitingReasonApprovals,
@@ -31,6 +32,7 @@ import { log } from '../../log.js';
 import { registerMessageInterceptor } from '../../router.js';
 import type { PendingApproval, Session } from '../../types.js';
 import { finalizeReject } from './finalize.js';
+import { approvalCardThread } from './primitive.js';
 
 /** How long an awaiting-reason hold waits for the admin's reply before the sweep finalizes a plain reject. */
 const REASON_CAPTURE_WINDOW_MS = 5 * 60 * 1000;
@@ -101,10 +103,12 @@ export async function armReasonCapture(approval: PendingApproval, session: Sessi
   }
 
   try {
+    // The prompt follows the card: same thread when the card sits in the requester's chat.
+    const cardChat = await getMessagingGroupByPlatform(channelType, platformId, instance);
     await adapter.deliver(
       channelType,
       platformId,
-      null,
+      cardChat ? approvalCardThread(session, cardChat) : null,
       'chat-sdk',
       JSON.stringify({ text: PROMPT_TEXT }),
       undefined,

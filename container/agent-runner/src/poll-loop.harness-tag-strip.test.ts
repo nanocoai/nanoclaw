@@ -5,6 +5,7 @@ import { getUndeliveredMessages } from './db/messages-out.js';
 import { stripHarnessTagArtifacts } from './harness-tag-strip.js';
 import { processQuery } from './poll-loop.js';
 import type { AgentQuery, ProviderEvent } from './providers/types.js';
+import { GENERIC_FAILURE_NOTICE } from './formatter.js';
 
 beforeEach(() => {
   initTestSessionDb();
@@ -127,7 +128,7 @@ describe('harness tag artifacts stripped from deliveries (wiring)', () => {
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(JSON.parse(out[0].content).text).toBe('The agent run failed. Check the logs for details.');
+    expect(JSON.parse(out[0].content).text).toBe(GENERIC_FAILURE_NOTICE);
     // No re-wrap nudge — an error result must not re-hammer the gateway.
     expect(pushes).toHaveLength(0);
   });
