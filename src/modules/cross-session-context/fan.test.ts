@@ -5,6 +5,7 @@
  * in-memory central DB, and the pure audience rule directly.
  */
 import fs from 'fs';
+import path from 'path';
 import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -19,7 +20,7 @@ import { createSession, getSession, updateSession } from '../../db/sessions.js';
 import { createDestination } from '../agent-to-agent/db/agent-destinations.js';
 import { inboundDbPath } from '../../mailbox/sqlite/paths.js';
 import { registerReconcileEnqueue } from '../../reconcile-feeds.js';
-import { initSessionFolder } from '../../session-manager.js';
+import { initSessionFolder, sessionDir } from '../../session-manager.js';
 import type { MessagingGroup, Session } from '../../types.js';
 import {
   buildDeliveredEchoLabel,
@@ -33,6 +34,7 @@ import {
   truncateEchoText,
 } from './fan.js';
 import {
+  ECHO_ATTACHMENT_MAX_BYTES,
   ECHO_CHANNEL_TYPE,
   ECHO_MAX_AGE_MS,
   ECHO_SIBLING_SURFACE,
@@ -388,6 +390,83 @@ describe('fanInboundMessage', () => {
     expect(written).toBe(1);
     expect(readEchoRows('s-dm-t2')).toHaveLength(1);
     expect(fs.existsSync(inboundDbPath(AG, 's-dm-t3'))).toBe(false);
+  });
+
+  describe('attachments', () => {
+    /** Stage a file in the source session's inbox, as writeSessionMessage does before the fan. */
+    function stage(sessionId: string, folder: string, name: string, bytes: string | number): string {
+      const dir = path.join(sessionDir(AG, sessionId), 'inbox', folder);
+      fs.mkdirSync(dir, { recursive: true });
+      if (typeof bytes === 'number') {
+        fs.writeFileSync(path.join(dir, name), '');
+        fs.truncateSync(path.join(dir, name), bytes);
+      } else {
+        fs.writeFileSync(path.join(dir, name), bytes);
+      }
+      return `inbox/${folder}/${name}`;
+    }
+    function echoAttachments(sessionId: string): Array<Record<string, unknown>> {
+      const [row] = readEchoRows(sessionId);
+      return (JSON.parse(row!.content as string) as { attachments?: Array<Record<string, unknown>> }).attachments ?? [];
+    }
+    function staged(text: string, attachments: unknown[]): string {
+      return JSON.stringify({ text, sender: 'Alex', senderId: 'slack:U1', attachments });
+    }
+
+    it('copies the staged files into each sibling and lists them on the echo row', async () => {
+      const localPath = stage('s-dm', 'msg-att:ag-1', 'shot.png', 'PNGBYTES');
+      const written = await fanInboundMessage({
+        session: SRC_DM,
+        mg: DM_MG,
+        messageId: 'msg-att:ag-1',
+        kind: 'chat-sdk',
+        channelType: 'slack',
+        content: staged('see this', [{ type: 'image', name: 'shot.png', mimeType: 'image/png', size: 8, localPath }]),
+        timestamp: NOW,
+      });
+      expect(written).toBe(1);
+
+      const [att] = echoAttachments('s-dm-t2');
+      expect(att).toMatchObject({ type: 'image', name: 'shot.png', mimeType: 'image/png' });
+      expect(att!.localPath).toMatch(/^inbox\/[^/]+\/shot\.png$/);
+      expect(fs.readFileSync(path.join(sessionDir(AG, 's-dm-t2'), att!.localPath as string), 'utf8')).toBe('PNGBYTES');
+    });
+
+    it('fans a media-only message (no text)', async () => {
+      const localPath = stage('s-dm', 'msg-media:ag-1', 'only.png', 'PNG');
+      const written = await fanInboundMessage({
+        session: SRC_DM,
+        mg: DM_MG,
+        messageId: 'msg-media:ag-1',
+        kind: 'chat-sdk',
+        channelType: 'slack',
+        content: staged('', [{ type: 'image', name: 'only.png', localPath }]),
+        timestamp: NOW,
+      });
+      expect(written).toBe(1);
+      expect(echoAttachments('s-dm-t2')[0]!.localPath).toMatch(/only\.png$/);
+    });
+
+    it('names but does not copy files past the per-message size cap', async () => {
+      const big = stage('s-dm', 'msg-big:ag-1', 'huge.mov', ECHO_ATTACHMENT_MAX_BYTES + 1);
+      const small = stage('s-dm', 'msg-big:ag-1', 'small.png', 'PNG');
+      await fanInboundMessage({
+        session: SRC_DM,
+        mg: DM_MG,
+        messageId: 'msg-big:ag-1',
+        kind: 'chat-sdk',
+        channelType: 'slack',
+        content: staged('two files', [
+          { type: 'file', name: 'huge.mov', localPath: big },
+          { type: 'image', name: 'small.png', localPath: small },
+        ]),
+        timestamp: NOW,
+      });
+      const [huge, png] = echoAttachments('s-dm-t2');
+      expect(huge).toMatchObject({ type: 'file', name: 'huge.mov' });
+      expect(huge!.localPath).toBeUndefined();
+      expect(png!.localPath).toMatch(/small\.png$/);
+    });
   });
 
   it('settleEchoFans waits for fans that were fired unawaited', async () => {
