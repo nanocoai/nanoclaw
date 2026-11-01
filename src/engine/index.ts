@@ -353,6 +353,11 @@ export {
 export { getOwners, getGlobalAdmins } from '../modules/permissions/db/user-roles.js';
 // Read-only caller-to-DM evidence; unlike ensureUserDm, never opens a DM.
 export { getUserDm } from '../modules/permissions/db/user-dms.js';
+// Host fallback for a channel-registration card no approver could receive.
+export {
+  setChannelApprovalUndeliverableHandler,
+  type ChannelApprovalUndeliverable,
+} from '../modules/permissions/channel-approval.js';
 export type { UserRole } from '../types.js';
 
 export { addSpawnAdmissionGuard, type SpawnAdmissionGuard } from './spawn-admission.js';

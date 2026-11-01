@@ -185,19 +185,35 @@ export async function pickApprovalDelivery(
   originChannelType: string,
   originInstance?: string,
 ): Promise<{ userId: string; messagingGroup: MessagingGroup } | null> {
+  for await (const candidate of approvalDeliveryCandidates(approvers, originChannelType, originInstance)) {
+    return candidate;
+  }
+  return null;
+}
+
+/**
+ * Every resolvable (approver, DM) pair in `pickApprovalDelivery`'s order,
+ * lazily: a caller that must confirm delivery moves on to the next pair when
+ * a send fails (e.g. no bot has a DM with that approver) without resolving
+ * DMs for approvers it never needs.
+ */
+export async function* approvalDeliveryCandidates(
+  approvers: string[],
+  originChannelType: string,
+  originInstance?: string,
+): AsyncGenerator<{ userId: string; messagingGroup: MessagingGroup }> {
   if (originChannelType) {
     for (const userId of approvers) {
       if (channelTypeOf(userId) !== originChannelType) continue;
       const mg = await ensureUserDm(userId, originInstance === undefined ? undefined : { instance: originInstance });
-      if (mg) return { userId, messagingGroup: mg };
+      if (mg) yield { userId, messagingGroup: mg };
     }
   }
   for (const userId of approvers) {
     if (originChannelType && channelTypeOf(userId) === originChannelType) continue;
     const mg = await ensureUserDm(userId);
-    if (mg) return { userId, messagingGroup: mg };
+    if (mg) yield { userId, messagingGroup: mg };
   }
-  return null;
 }
 
 function channelTypeOf(userId: string): string {

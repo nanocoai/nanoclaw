@@ -39,11 +39,17 @@
  * Dedup: `pending_channel_approvals` PK on messaging_group_id. Second
  * mention while pending silently dropped.
  *
+ * Delivery is confirmed, not assumed: the card goes to the first approver
+ * DM (same channel kind first) whose send succeeds. A send that throws (e.g.
+ * no bot has a DM with that approver: Telegram's "chat not found") moves the
+ * card, and the pending row's approver, to the next candidate.
+ *
  * Failure modes (log + no row, so a future attempt can try again):
  *   - No agent groups exist (install never set up a first agent).
  *   - No eligible approver in user_roles (no owner yet).
- *   - Approver has no reachable DM.
- *   - Delivery adapter missing.
+ *   - No approver has a reachable DM, or every send failed (the host's
+ *     undeliverable handler is told, so the owner hears another way).
+ *   - Delivery adapter missing (undeliverable handler too).
  */
 import { normalizeOptions, type NormalizedOption, type RawOption } from '../../channels/ask-question.js';
 import { escapeInvisibles, quoteForCard } from '../../card-text.js';
@@ -58,8 +64,13 @@ import { log } from '../../log.js';
 import { logId } from '../../log-id.js';
 import type { InboundEvent, ResolvedConversation } from '../../channels/adapter.js';
 import type { AgentGroup, MessagingGroup } from '../../types.js';
-import { pickApprovalDelivery, pickApprover } from '../approvals/primitive.js';
-import { createPendingChannelApproval, hasInFlightChannelApproval } from './db/pending-channel-approvals.js';
+import { approvalDeliveryCandidates, pickApprover } from '../approvals/primitive.js';
+import {
+  createPendingChannelApproval,
+  deletePendingChannelApproval,
+  hasInFlightChannelApproval,
+  updatePendingChannelApprovalApprover,
+} from './db/pending-channel-approvals.js';
 import { hasAdminPrivilege } from './db/user-roles.js';
 
 // ── Value constants (response handler in index.ts parses these) ──
@@ -94,6 +105,46 @@ export function registerChannelCardInterceptor(channelType: string, fn: ChannelC
     log.warn('Channel-card interceptor overwritten', { channelType });
   }
   channelCardInterceptors.set(channelType, fn);
+}
+
+// ── Undeliverable fallback seam ──
+// The engine can't reach the owner when no approver DM accepts the card, so
+// the host decides how to tell them another way (e.g. a dashboard notice).
+// Carries no user or platform ids: only what a notice may show.
+
+export interface ChannelApprovalUndeliverable {
+  messagingGroupId: string;
+  channelType: string;
+  channelName: string | null;
+  title: string;
+  reason: 'no_reachable_approver' | 'all_deliveries_failed' | 'no_delivery_adapter';
+  /** Card sends attempted (each failed). */
+  attempts: number;
+}
+export type ChannelApprovalUndeliverableHandler = (info: ChannelApprovalUndeliverable) => Promise<void> | void;
+
+let undeliverableHandler: ChannelApprovalUndeliverableHandler | null = null;
+
+export function setChannelApprovalUndeliverableHandler(fn: ChannelApprovalUndeliverableHandler | null): void {
+  undeliverableHandler = fn;
+}
+
+async function reportUndeliverable(info: ChannelApprovalUndeliverable): Promise<void> {
+  log.warn('Channel registration card undeliverable', {
+    messagingGroupId: info.messagingGroupId,
+    channelType: info.channelType,
+    reason: info.reason,
+    attempts: info.attempts,
+    fallback: undeliverableHandler ? 'host' : 'none',
+  });
+  if (!undeliverableHandler) return;
+  /* eslint-disable no-catch-all/no-catch-all -- a broken host fallback must not fail the inbound route */
+  try {
+    await undeliverableHandler(info);
+  } catch (err) {
+    log.warn('Channel registration undeliverable fallback failed', { messagingGroupId: info.messagingGroupId, err });
+  }
+  /* eslint-enable no-catch-all/no-catch-all */
 }
 
 // ── Utilities ──
@@ -299,15 +350,6 @@ export async function requestChannelApproval(input: RequestChannelApprovalInput)
     }
   }
 
-  const delivery = await pickApprovalDelivery(approvers, originChannelType, originMg?.instance);
-  if (!delivery) {
-    log.warn('Channel registration skipped — no DM channel for any approver', {
-      messagingGroupId,
-      targetAgentGroupId: referenceGroup.id,
-    });
-    return;
-  }
-
   const isGroup = event.message?.isGroup ?? originMg?.is_group === 1;
 
   let senderName: string | undefined;
@@ -346,53 +388,91 @@ export async function requestChannelApproval(input: RequestChannelApprovalInput)
     ruleNote,
     resolvedConversation,
   );
-  const options = normalizeOptions(await buildApprovalOptions(agentGroups, delivery.userId));
-
-  await createPendingChannelApproval({
-    messaging_group_id: messagingGroupId,
-    agent_group_id: referenceGroup.id,
-    original_message: JSON.stringify(event),
-    approver_user_id: delivery.userId,
-    created_at: new Date().toISOString(),
-    title,
-    question,
-    options_json: JSON.stringify(options),
-  });
+  const undeliverable = (reason: ChannelApprovalUndeliverable['reason'], attempts: number) =>
+    reportUndeliverable({
+      messagingGroupId,
+      channelType: originChannelType,
+      channelName,
+      title,
+      reason,
+      attempts,
+    });
 
   const adapter = getDeliveryAdapter();
   if (!adapter) {
-    log.error('Channel registration row created but no delivery adapter is wired', { messagingGroupId });
+    log.error('Channel registration skipped — no delivery adapter is wired', { messagingGroupId });
+    await undeliverable('no_delivery_adapter', 0);
     return;
   }
 
-  try {
-    await adapter.deliver(
-      delivery.messagingGroup.channel_type,
-      delivery.messagingGroup.platform_id,
-      null,
-      'chat-sdk',
-      JSON.stringify({
-        type: 'ask_question',
-        questionId: messagingGroupId,
+  // The row exists before each send so an immediate click finds it, and names
+  // the approver that send targets, so only they can decide it.
+  let rowCreated = false;
+  let attempts = 0;
+  for await (const delivery of approvalDeliveryCandidates(approvers, originChannelType, originMg?.instance)) {
+    const options = normalizeOptions(await buildApprovalOptions(agentGroups, delivery.userId));
+    if (!rowCreated) {
+      await createPendingChannelApproval({
+        messaging_group_id: messagingGroupId,
+        agent_group_id: referenceGroup.id,
+        original_message: JSON.stringify(event),
+        approver_user_id: delivery.userId,
+        created_at: new Date().toISOString(),
         title,
         question,
-        options,
-      }),
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      delivery.messagingGroup.instance,
-    );
-    log.info('Channel registration card delivered', {
-      messagingGroupId,
-      agentGroupCount: agentGroups.length,
-      approver: logId(delivery.userId),
-    });
-  } catch (err) {
-    log.error('Channel registration card delivery failed', { messagingGroupId, err });
+        options_json: JSON.stringify(options),
+      });
+      rowCreated = true;
+    } else {
+      await updatePendingChannelApprovalApprover(messagingGroupId, delivery.userId, JSON.stringify(options));
+    }
+    attempts++;
+    try {
+      await adapter.deliver(
+        delivery.messagingGroup.channel_type,
+        delivery.messagingGroup.platform_id,
+        null,
+        'chat-sdk',
+        JSON.stringify({
+          type: 'ask_question',
+          questionId: messagingGroupId,
+          title,
+          question,
+          options,
+        }),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        delivery.messagingGroup.instance,
+      );
+      log.info('Channel registration card delivered', {
+        messagingGroupId,
+        agentGroupCount: agentGroups.length,
+        approver: logId(delivery.userId),
+        channelType: delivery.messagingGroup.channel_type,
+        attempts,
+      });
+      return;
+    } catch (err) {
+      log.warn('Channel registration card delivery failed — trying the next approver', {
+        messagingGroupId,
+        approver: logId(delivery.userId),
+        channelType: delivery.messagingGroup.channel_type,
+        err,
+      });
+    }
   }
+
+  if (rowCreated) await deletePendingChannelApproval(messagingGroupId);
+  if (attempts === 0) {
+    log.warn('Channel registration skipped — no DM channel for any approver', {
+      messagingGroupId,
+      targetAgentGroupId: referenceGroup.id,
+    });
+  }
+  await undeliverable(attempts === 0 ? 'no_reachable_approver' : 'all_deliveries_failed', attempts);
 }
 
 // ── Helpers for the response handler (index.ts) ──

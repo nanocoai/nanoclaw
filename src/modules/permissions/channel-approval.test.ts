@@ -19,7 +19,13 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 
 import { initTestDb, closeDb, runMigrations, getDb } from '../../db/index.js';
 import { createAgentGroup } from '../../db/agent-groups.js';
-import { AGENT_ACCESS_SCOPE_WARNING, createNewAgentGroup, describeResolvedRule } from './channel-approval.js';
+import {
+  AGENT_ACCESS_SCOPE_WARNING,
+  createNewAgentGroup,
+  describeResolvedRule,
+  setChannelApprovalUndeliverableHandler,
+  type ChannelApprovalUndeliverable,
+} from './channel-approval.js';
 import {
   createMessagingGroup,
   createMessagingGroupAgent,
@@ -1274,6 +1280,92 @@ describe('unknown-channel registration flow', () => {
     await nameReply('name-reply-late-prompt-2', 'Newbie');
 
     await expectCreatedAndWired('Newbie', mgId);
+  });
+});
+
+describe('confirmed delivery: fall through approvers, then the host fallback', () => {
+  const undeliverable: ChannelApprovalUndeliverable[] = [];
+
+  beforeEach(async () => {
+    undeliverable.length = 0;
+    setChannelApprovalUndeliverableHandler((info) => {
+      undeliverable.push(info);
+    });
+    // A second owner, granted later, reachable on Discord.
+    await upsertUser({ id: 'discord:owner2', kind: 'discord', display_name: 'Owner Two', created_at: now() });
+    await grantRole({
+      user_id: 'discord:owner2',
+      role: 'owner',
+      agent_group_id: null,
+      granted_by: null,
+      granted_at: new Date(Date.now() + 1000).toISOString(),
+    });
+    await createMessagingGroup({
+      id: 'mg-dm-owner2',
+      channel_type: 'discord',
+      platform_id: 'dm-owner2',
+      name: 'Owner Two DM',
+      is_group: 0,
+      unknown_sender_policy: 'strict',
+      created_at: now(),
+    });
+    await getDb().run(
+      `INSERT INTO user_dms (user_id, channel_type, messaging_group_id, resolved_at) VALUES (?, ?, ?, ?)`,
+      'discord:owner2',
+      'discord',
+      'mg-dm-owner2',
+      now(),
+    );
+  });
+
+  afterEach(() => {
+    setChannelApprovalUndeliverableHandler(null);
+    deliverMock.mockReset().mockResolvedValue('plat-msg-id');
+  });
+
+  it('a send no bot can make moves the card and the row to the next approver', async () => {
+    deliverMock.mockRejectedValueOnce(new Error('No telegram bot could deliver: Bad Request: chat not found'));
+    const { routeInbound } = await import('../../router.js');
+    await routeInbound(groupMention('chat-fallthrough'));
+    await vi.waitFor(() => expect(deliverMock).toHaveBeenCalledTimes(2));
+
+    expect(deliverMock.mock.calls[0][1]).toBe('dm-owner');
+    expect(deliverMock.mock.calls[1][0]).toBe('discord');
+    expect(deliverMock.mock.calls[1][1]).toBe('dm-owner2');
+    await vi.waitFor(async () => {
+      const row = await getDb().get<{ approver_user_id: string }>(
+        'SELECT approver_user_id FROM pending_channel_approvals',
+      );
+      expect(row?.approver_user_id).toBe('discord:owner2');
+    });
+    expect(undeliverable).toEqual([]);
+  });
+
+  it('when every send fails: no pending row and the host fallback is told', async () => {
+    deliverMock.mockRejectedValue(new Error('No bot could deliver'));
+    const { routeInbound } = await import('../../router.js');
+    await routeInbound(groupMention('chat-nobody'));
+    await vi.waitFor(() => expect(undeliverable).toHaveLength(1));
+
+    expect(deliverMock).toHaveBeenCalledTimes(2);
+    expect(undeliverable[0]).toMatchObject({
+      channelType: 'telegram',
+      reason: 'all_deliveries_failed',
+      attempts: 2,
+      title: '📣 Bot mentioned in new channel',
+    });
+    expect(await countRows('SELECT COUNT(*) AS c FROM pending_channel_approvals')).toBe(0);
+  });
+
+  it('when no approver has a reachable DM the host fallback is told', async () => {
+    await getDb().run('DELETE FROM user_dms');
+    const { routeInbound } = await import('../../router.js');
+    await routeInbound(groupMention('chat-unreachable'));
+    await vi.waitFor(() => expect(undeliverable).toHaveLength(1));
+
+    expect(deliverMock).not.toHaveBeenCalled();
+    expect(undeliverable[0]).toMatchObject({ reason: 'no_reachable_approver', attempts: 0 });
+    expect(await countRows('SELECT COUNT(*) AS c FROM pending_channel_approvals')).toBe(0);
   });
 });
 

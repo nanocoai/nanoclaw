@@ -70,6 +70,20 @@ export async function updatePendingChannelApprovalCard(
   );
 }
 
+/** Re-target an undelivered card at the next approver (their own visible options). */
+export async function updatePendingChannelApprovalApprover(
+  messagingGroupId: string,
+  approverUserId: string,
+  optionsJson: string,
+): Promise<void> {
+  await getDb().run(
+    'UPDATE pending_channel_approvals SET approver_user_id = ?, options_json = ? WHERE messaging_group_id = ?',
+    approverUserId,
+    optionsJson,
+    messagingGroupId,
+  );
+}
+
 export async function deletePendingChannelApproval(messagingGroupId: string): Promise<void> {
   // Any "Create new agent" name prompt belongs to this approval and ends
   // with it (also enforced by ON DELETE CASCADE where foreign keys are on).
