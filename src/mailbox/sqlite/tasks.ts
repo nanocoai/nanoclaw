@@ -200,3 +200,25 @@ export function insertRecurrence(
 export function clearRecurrence(db: Database.Database, messageId: string): void {
   db.prepare('UPDATE messages_in SET recurrence = NULL WHERE id = ?').run(messageId);
 }
+
+/** Content left on an occurrence once a later occurrence of its series exists. */
+export const SUPERSEDED_TASK_CONTENT = '{"superseded":true}';
+
+/**
+ * Replace the content of a series' finished occurrences older than
+ * `beforeSeq`. Each re-arm copies the full content (prompt + script) into the
+ * next occurrence, so without this a recurring series stores one full copy
+ * per run, forever. The rows stay: their status and timestamps feed the run
+ * stats and the script-failure streak. Only the payload goes, and nothing
+ * reads it once a later occurrence exists — live lookups resolve to the
+ * newest row of the series.
+ */
+export function compactSupersededOccurrences(db: Database.Database, seriesId: string, beforeSeq: number): number {
+  return db
+    .prepare(
+      `UPDATE messages_in SET content = ?
+        WHERE series_id = ? AND kind = 'task' AND status IN ('completed', 'failed')
+          AND recurrence IS NULL AND seq < ? AND content != ?`,
+    )
+    .run(SUPERSEDED_TASK_CONTENT, seriesId, beforeSeq, SUPERSEDED_TASK_CONTENT).changes;
+}
