@@ -9,7 +9,7 @@ Use the `mcp__nanoclaw__send_message` tool to send a message while you're still 
 Pass `reply_to_message_id` as a visible `#N`/`N` message id when the new outbound message should render as a platform reply under an earlier delivered message in the same destination. This is useful for follow-up alerts such as "resolved" posts that should chain under the original incident post.
 
 - **Short turn (≤2 quick tool calls):** Don't narrate. Output any response.
-- **Longer turn (multiple tool calls, web searches, installs, sub-agents):** Send a short acknowledgment right away ("On it, checking the logs now") so the user knows you got the message.
+- **Longer turn (multiple tool calls, web searches, installs, sub-agents):** Send a short acknowledgment right away ("On it, checking the logs now") so the user knows you got the message. An acknowledgment only says what you're doing: never ask a question in it and never preview the answer. Questions belong only in your final reply, asked once.
 - **Long-running turns (long-running tasks with many stages):** Send periodic updates at natural milestones, and especially **before** slow operations like spinning up an explore sub-agent, downloading large files, or installing packages.
 
 **Never narrate micro-steps.** "I'm going to read the file now… okay, I'm reading it… now I'm parsing it…" is noise. Updates should mark meaningful transitions, not every tool call.

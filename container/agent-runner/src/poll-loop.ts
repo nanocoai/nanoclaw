@@ -171,6 +171,33 @@ export function supersedeCurrentChatPush(superseded: boolean[], resultIndex: num
   return true;
 }
 
+/**
+ * The same stale-reply guard for a provider that reports `pushWaitsFor`
+ * (Pi): a chat push that will run after `waitsFor` results not yet produced
+ * makes the chat replies among them stale, since each was drafted without it.
+ * Pi steers a chat message into a running chat turn (waitsFor 0, nothing
+ * stale); it queues one behind a task run or an input already queued ahead
+ * (Tico, 2026-10-31). Only the newest `waitsFor` unresolved pushes are
+ * candidates, and only chat ones: task, handoff and other internal results
+ * keep their own delivery semantics.
+ */
+export function supersedeQueuedChatPushes(
+  superseded: boolean[],
+  chatPushes: readonly boolean[],
+  resultIndex: number,
+  waitsFor: number,
+): boolean {
+  const end = Math.min(superseded.length, chatPushes.length);
+  const start = Math.max(resultIndex, end - Math.max(0, Math.floor(waitsFor)));
+  let marked = false;
+  for (let i = start; i < end; i++) {
+    if (!chatPushes[i]) continue;
+    superseded[i] = true;
+    marked = true;
+  }
+  return marked;
+}
+
 // Inject at push time, not result time: Codex starts the queued turn as soon
 // as its previous turn completes, before the runner can feed back a receipt.
 // The old answer remains in the provider transcript even though dispatch will
@@ -1379,6 +1406,9 @@ export async function processQuery(
   // Preserve whether each push was directly addressed so a warm request is not mistaken
   // for ambient continuation (Nook 2026-06-07).
   const pushAddressed: boolean[] = [addressed];
+  // Parallel to pushAddressed: whether the push answers a chat message (its
+  // result is a chat reply the Pi stale-reply guard may withhold).
+  const pushChat: boolean[] = [addressed || activeSender !== null];
   // Message ids by push index (into pushAddressed). Each push's rows are
   // marked when the result that consumes that push arrives: completed, or
   // failed for an error result, so a failed turn is not recorded as answered.
@@ -2152,14 +2182,21 @@ export async function processQuery(
           .map((m) => taskFireContexts.find((c) => c.taskId === m.id))
           .filter((c): c is TaskFireContext => c !== undefined);
         registerPushContexts(pushTaskContexts);
+        const pushIsChat = keep.some((m) => m.kind === 'chat' || m.kind === 'chat-sdk');
+        // Read immediately before push(): the provider's fold-vs-queue choice
+        // is made synchronously from the same state.
+        const waitsFor = pushIsChat && query.pushWaitsFor ? query.pushWaitsFor(prompt) : 0;
         if (
-          keep.some((m) => m.kind === 'chat' || m.kind === 'chat-sdk') &&
-          supersedeCurrentChatPush(pushSuperseded, resultIndex, activeProviderName())
+          pushIsChat &&
+          ((resultIndex !== pressureHandoffPushIndex &&
+            supersedeCurrentChatPush(pushSuperseded, resultIndex, activeProviderName())) ||
+            (waitsFor > 0 && supersedeQueuedChatPushes(pushSuperseded, pushChat, resultIndex, waitsFor)))
         ) {
           prompt += `\n${SUPERSEDED_RESPONSE_NOTICE}`;
         }
         pushIds.set(pushAddressed.length, keptIds);
         pushAddressed.push(isAddressedTurn(keep, assistantName));
+        pushChat.push(pushIsChat);
         pushSuperseded.push(false);
         noteInput();
         query.push(prompt, followupImageBlocks.length > 0 ? followupImageBlocks : undefined);
@@ -2296,9 +2333,13 @@ export async function processQuery(
           // so advancing just one slot leaves stale addressed flags behind and
           // misclassifies a later internal pressure handoff as a user request.
           const resultAddressed = pushAddressed.slice(resultIndex, resultPushEnd).some(Boolean);
+          const resultChat = pushChat.slice(resultIndex, resultPushEnd).some(Boolean);
           // A queued Codex push may have been replayed into Claude during
-          // failover; Claude can merge it into this very result.
-          const resultSuperseded = deliveryProviderName === 'codex' && (pushSuperseded[resultIndex] ?? false);
+          // failover; Claude can merge it into this very result. Pi (any
+          // query reporting pushWaitsFor) serializes queued pushes like Codex.
+          const resultSuperseded =
+            (deliveryProviderName === 'codex' || (typeof query.pushWaitsFor === 'function' && !mergesPushes)) &&
+            (pushSuperseded[resultIndex] ?? false);
           const resultIds = takePushIds(resultIndex, resultPushEnd);
           resultIndex = resultPushEnd;
           if (event.isError) {
@@ -2441,6 +2482,7 @@ export async function processQuery(
                   answeringPrompt,
                 );
                 pushAddressed.push(resultAddressed);
+                pushChat.push(resultChat);
                 pushSuperseded.push(false);
               } else if (hasUnwrapped && resultAddressed) {
                 // The model ignored the one allowed wrapping retry. Convert
@@ -2536,6 +2578,8 @@ export async function processQuery(
             );
             pushRetry(buildPressureHandoffPrompt(event.tokensUsed as number, pressureThresholdTokens as number));
             pushAddressed.push(false);
+            pushChat.push(false);
+            pushSuperseded.push(false);
           }
 
           // Bug 6 (telegram_dm_teddy 23folg, 2026-05-16): end the stream
