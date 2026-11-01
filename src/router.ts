@@ -601,7 +601,7 @@ async function deliverToAgent(
   }
 
   const messageId = messageIdForAgent(event.message.id, agent.agent_group_id);
-  await writeSessionMessage(session.agent_group_id, session.id, {
+  const writtenContent = await writeSessionMessage(session.agent_group_id, session.id, {
     id: messageId,
     kind: event.message.kind,
     timestamp: event.message.timestamp,
@@ -675,7 +675,8 @@ async function deliverToAgent(
       messageId,
       kind: event.message.kind,
       channelType: deliveryAddr.channelType,
-      content: event.message.content,
+      // As written: staged attachment paths the fan copies from, not base64.
+      content: writtenContent,
       timestamp: event.message.timestamp,
     });
   }

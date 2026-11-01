@@ -25,6 +25,7 @@ import { isTaskThread } from '../../db/sessions.js';
 import { log } from '../../log.js';
 import { withExistingMailboxSession } from '../../session-manager.js';
 import type { AgentGroup, MessagingGroup, Session } from '../../types.js';
+import { copyEchoAttachments, hasAttachments } from './attachments.js';
 import {
   ECHO_CHANNEL_TIMELINE_SURFACE,
   ECHO_CHANNEL_TYPE,
@@ -44,11 +45,23 @@ interface BackfillRow {
   text: string;
   /** Row authored by the agent itself — rendered as "you" in the prelude. */
   self: boolean;
+  /** Session the row came from; its inbox holds the row's staged files. */
+  sourceSessionId: string;
+  /** The source row's `attachments`, copied into the target on write. */
+  attachments?: unknown;
 }
 
-function parseContent(raw: string): { text?: string; sender?: string; senderId?: string; echo?: unknown } {
+interface ParsedContent {
+  text?: string;
+  sender?: string;
+  senderId?: string;
+  echo?: unknown;
+  attachments?: unknown;
+}
+
+function parseContent(raw: string): ParsedContent {
   try {
-    return JSON.parse(raw) as { text?: string; sender?: string; senderId?: string; echo?: unknown };
+    return JSON.parse(raw) as ParsedContent;
   } catch {
     return {};
   }
@@ -79,7 +92,10 @@ async function collectSiblingTopLevel(
   if (timeline.root) {
     const r = timeline.root;
     const c = parseContent(r.content);
-    if (c.text && c.senderId !== 'system' && c.sender !== 'system' && !c.text.startsWith('System instruction:')) {
+    const text = typeof c.text === 'string' ? c.text : '';
+    // A media-only opener (no text) is still part of the timeline.
+    const hasContent = text !== '' || hasAttachments(c.attachments);
+    if (hasContent && c.senderId !== 'system' && c.sender !== 'system' && !text.startsWith('System instruction:')) {
       // Host-injected triggers (the welcome hand-off) are attributed to the
       // OWNER for sender-gating, so filter them by shape too — internal
       // prompts must never surface as user timeline entries (live-hit: the
@@ -88,8 +104,10 @@ async function collectSiblingTopLevel(
         timestamp: r.timestamp,
         sender: c.sender ?? 'user',
         senderId: c.senderId ?? '',
-        text: c.text,
+        text,
         self: false,
+        sourceSessionId: sessionId,
+        attachments: c.attachments,
       });
     }
   }
@@ -103,6 +121,7 @@ async function collectSiblingTopLevel(
       senderId: agentGroup.id,
       text: c.text,
       self: true,
+      sourceSessionId: sessionId,
     });
   }
   return rows;
@@ -189,8 +208,16 @@ export async function backfillSession(
         // The most recent entry is what a short opener ("sure") is usually
         // answering — deliver it whole; earlier entries get the normal cap.
         const isLast = i === newest.length - 1;
+        const id = `${session.id}:backfill:${batch}:${i}`;
+        const attachments = copyEchoAttachments({
+          agentGroupId: agentGroup.id,
+          sourceSessionId: row.sourceSessionId,
+          targetSessionId: session.id,
+          targetMessageId: id,
+          attachments: row.attachments,
+        });
         await mailbox.insertMessage({
-          id: `${session.id}:backfill:${batch}:${i}`,
+          id,
           kind: 'chat',
           timestamp: row.timestamp,
           platformId: null,
@@ -201,6 +228,7 @@ export async function backfillSession(
             sender: row.sender,
             senderId: row.senderId,
             ...(row.self ? { self: true } : {}),
+            ...(attachments.length > 0 ? { attachments } : {}),
             echo: { surface, label },
           }),
           processAfter: null,
