@@ -5,6 +5,7 @@ import {
   selectInitialBatch,
   shouldDeferTaskFromChatTurn,
   supersedeCurrentChatPush,
+  supersedeQueuedChatPushes,
 } from './poll-loop.js';
 import type { MessageInRow } from './db/messages-in.js';
 
@@ -176,6 +177,34 @@ describe('supersedeCurrentChatPush', () => {
     const superseded = [false];
     expect(supersedeCurrentChatPush(superseded, 0, 'claude')).toBe(false);
     expect(superseded).toEqual([false]);
+  });
+});
+
+describe('supersedeQueuedChatPushes (Pi, Tico 2026-10-31)', () => {
+  it('marks nothing when the chat message is steered into the running turn', () => {
+    const superseded = [false];
+    expect(supersedeQueuedChatPushes(superseded, [true], 0, 0)).toBe(false);
+    expect(superseded).toEqual([false]);
+  });
+
+  it('marks the running chat reply and a queued chat reply ahead of the new message', () => {
+    const superseded = [false, false];
+    expect(supersedeQueuedChatPushes(superseded, [true, true], 0, 2)).toBe(true);
+    expect(superseded).toEqual([true, true]);
+  });
+
+  it('never withholds a task result; a chat reply queued behind the task still is', () => {
+    const superseded = [false, false];
+    expect(supersedeQueuedChatPushes(superseded, [false, true], 0, 2)).toBe(true);
+    expect(superseded).toEqual([false, true]);
+    expect(supersedeQueuedChatPushes([false], [false], 0, 1)).toBe(false);
+  });
+
+  it('only touches the newest waitsFor unresolved pushes, never consumed ones', () => {
+    const superseded = [false, false, false];
+    // Push 0 consumed; push 1 already produced (dispatching); push 2 running.
+    expect(supersedeQueuedChatPushes(superseded, [true, true, true], 1, 1)).toBe(true);
+    expect(superseded).toEqual([false, false, true]);
   });
 });
 

@@ -482,6 +482,10 @@ export class UsageLimitFallbackProvider implements AgentProvider {
       get mergesPushedInputs() {
         return activeQuery.mergesPushedInputs;
       },
+      get pushWaitsFor() {
+        const q = activeQuery;
+        return q.pushWaitsFor ? (message: string) => q.pushWaitsFor!(message) : undefined;
+      },
       push: (message, imageBlocks) => {
         followups.push({ message, imageBlocks });
         activeQuery.push(message, imageBlocks);

@@ -226,6 +226,16 @@ export interface AgentQuery {
   readonly mergesPushedInputs?: boolean;
 
   /**
+   * For a provider that serializes pushes but can fold some into the running
+   * turn (Pi steer): how many results not yet produced `push(message)`, if
+   * called now, would run after. 0 = folded into the in-flight run or started
+   * at once. Called synchronously just before push(). When defined, the poll
+   * loop withholds those chat replies (drafted without the newer message)
+   * and tells the new turn so, as it does for Codex.
+   */
+  readonly pushWaitsFor?: (message: string) => number;
+
+  /**
    * Push a follow-up message into the active query. The poll loop supplies
    * `ImageContentBlock[]`; providers may narrow this to their native attachment
    * view (OpenCode uses local file descriptors). Initial-query images remain

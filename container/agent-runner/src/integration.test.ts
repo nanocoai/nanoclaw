@@ -246,6 +246,63 @@ describe('poll loop integration', () => {
     await loopPromise.catch(() => {});
   });
 
+  // Tico WhatsApp 2026-10-31: 8:41 request, the mid-turn ack asked which
+  // card, 8:44 "Cobalt" arrived mid-run, and the run's 8:45 reply re-asked.
+  const ticoRequest = { sender: 'Teddy', text: 'Book the 10:30 tee time for Saturday' };
+  const ticoAnswer = { sender: 'Teddy', text: 'Cobalt' };
+  const staleReask = '<message to="discord-test">Which card should I use for the deposit?</message>';
+  const currentReply = '<message to="discord-test">Booked Saturday 10:30 on your Cobalt card.</message>';
+
+  it('withholds a Pi reply drafted before a chat message queued behind it (no 8:45 re-ask)', async () => {
+    insertMessage('m-0841', ticoRequest, { platformId: 'chan-1', channelType: 'whatsapp' });
+    const provider = new SupersededResultProvider(
+      staleReask,
+      (prompt) => (prompt.includes('was not delivered') && prompt.includes('Cobalt') ? currentReply : staleReask),
+      () => 1,
+    );
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 3000, 'pi_rpc');
+    try {
+      await waitFor(() => provider.queries === 1, 1000);
+      insertMessage('m-0844', ticoAnswer, { platformId: 'chan-1', channelType: 'whatsapp' });
+      await waitFor(() => provider.pushes === 1, 1500);
+      expect(provider.pushedPrompts[0]).toContain('was not delivered');
+      provider.releaseResults();
+      await waitFor(() => getUndeliveredMessages().some((row) => row.kind === 'chat'), 1500);
+      await sleep(100);
+      const rows = getUndeliveredMessages().filter((row) => row.kind === 'chat');
+      expect(rows.map((row) => JSON.parse(row.content).text)).toEqual(['Booked Saturday 10:30 on your Cobalt card.']);
+    } finally {
+      controller.abort();
+      await loopPromise.catch(() => {});
+    }
+  });
+
+  it('delivers the Pi reply a steered chat message was folded into, once', async () => {
+    insertMessage('m-0841', ticoRequest, { platformId: 'chan-1', channelType: 'whatsapp' });
+    const provider = new SupersededResultProvider(
+      currentReply,
+      () => '<internal>silent turn</internal>',
+      () => 0,
+    );
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 3000, 'pi_rpc');
+    try {
+      await waitFor(() => provider.queries === 1, 1000);
+      insertMessage('m-0844', ticoAnswer, { platformId: 'chan-1', channelType: 'whatsapp' });
+      await waitFor(() => provider.pushes === 1, 1500);
+      expect(provider.pushedPrompts[0]).not.toContain('was not delivered');
+      provider.releaseResults();
+      await waitFor(() => getUndeliveredMessages().some((row) => row.kind === 'chat'), 1500);
+      await sleep(100);
+      const rows = getUndeliveredMessages().filter((row) => row.kind === 'chat');
+      expect(rows.map((row) => JSON.parse(row.content).text)).toEqual(['Booked Saturday 10:30 on your Cobalt card.']);
+    } finally {
+      controller.abort();
+      await loopPromise.catch(() => {});
+    }
+  });
+
   it('tells a superseding Telegram follow-up to re-emit the withheld multi-block answer, not refer to it as delivered', async () => {
     // Teddy Telegram 2026-09-08: #996 supplied a sheet; #998 requested Google
     // while the analysis was running. Both result blocks were suppressed, but
@@ -2157,6 +2214,7 @@ class SupersededResultProvider {
     private readonly firstResponse = '<message to="discord-test">details missing</message>',
     private readonly followUpResponse = (_prompt: string) =>
       '<message to="discord-test">labels created from the order details</message>',
+    private readonly waitsFor?: (prompt: string) => number,
   ) {}
   private released = false;
   private wake: (() => void) | null = null;
@@ -2176,6 +2234,7 @@ class SupersededResultProvider {
     let ended = false;
     let aborted = false;
     return {
+      ...(owner.waitsFor ? { pushWaitsFor: owner.waitsFor } : {}),
       push(prompt: string) {
         owner.pushedPrompts.push(prompt);
         owner.pushes += 1;
