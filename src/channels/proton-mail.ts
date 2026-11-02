@@ -41,6 +41,7 @@ import { isSafeAttachmentName } from '../attachment-safety.js';
 import { STORE_DIR, TIMEZONE } from '../config.js';
 import { getMessagingGroupAgents, getMessagingGroupByPlatform } from '../db/messaging-groups.js';
 import { readEnvFile } from '../env.js';
+import { onHostStart } from '../host-lifecycle.js';
 import { log } from '../log.js';
 import { formatLocalTime } from '../timezone.js';
 import type {
@@ -65,13 +66,14 @@ const CARDS_MAX = 64;
  * is refused instead (deliver throws), so a flood cannot push one out.
  */
 const CARDS_HARD_MAX = 1000;
-/** How long after setup() the first drain runs: see setup(). */
-const STARTUP_DELAY_MS = 30_000;
 /**
  * Mail taken from one sender per hour; beyond it, mail waits (in `retry`)
  * until the hour has room again. Bridge drops every loop marker on outgoing
  * mail, so two agents answering each other (or a responder that marks
- * nothing) are slowed here.
+ * nothing) are slowed here, to about this many mails an hour. This is a
+ * throttle, not a loop breaker: held mail is handed over as the hour frees
+ * up. Core has no loop handling for any channel yet. Answers to an open
+ * approval card are not counted (see `answersOpenCard`).
  */
 const INBOUND_PER_SENDER_PER_HOUR = 20;
 const HOUR_MS = 60 * 60_000;
@@ -90,6 +92,13 @@ const DEFERRED_MAX = 200;
  */
 const STRANGERS_PER_HOUR = 10;
 const STRANGERS_MAX = 200;
+/**
+ * New addresses of any one domain within the same window: one domain with
+ * many addresses cannot take every slot and keep genuine new senders out.
+ * Keyed by the exact domain (no public-suffix list), so a flood spread over
+ * subdomains is bounded by STRANGERS_MAX instead.
+ */
+const STRANGERS_PER_DOMAIN_MAX = 20;
 const FAILURES_LISTED_MAX = 20;
 const ADDRESSES_LISTED_MAX = 50;
 const CARD_TTL_MS = 7 * 24 * 60 * 60_000;
@@ -111,6 +120,23 @@ const RETRY_BASE_MS = 60_000;
 const RETRY_MAX_MS = 60 * 60_000;
 /** IMAP keyword left on a mail the adapter gave up on, so a human can find it. */
 const FAILED_KEYWORD = '$NanoClawFailed';
+
+/**
+ * Whether core's startup has finished. The host holds routing until then
+ * (it releases inbound, then runs onHostStart callbacks): mail drained
+ * earlier would be marked read while its routing waited in memory, and lost
+ * on a stop or crash. Set once per process; an adapter set up later (a hot
+ * start) reads mail at once. The callback only sets the flag and wakes the
+ * adapters waiting on it: one that threw would abort host startup.
+ */
+let hostStarted = false;
+const awaitingHostStart = new Set<() => void>();
+onHostStart(() => {
+  hostStarted = true;
+  const waiting = [...awaitingHostStart];
+  awaitingHostStart.clear();
+  for (const begin of waiting) begin();
+});
 /**
  * Stamped on every outbound mail; an inbound carrying it is our own echo.
  * Bridge builds each outgoing mail from a fixed draft template and drops
@@ -236,6 +262,8 @@ export async function mailText(
     retryable?: boolean;
     /** The mail's own marker code (newMarkToken); one is made when not given. */
     token?: string;
+    /** Told how many hidden HTML elements were marked, when there were any. */
+    onHidden?: (elements: number) => void;
   } = {},
 ): Promise<string> {
   if (!parsed.html) return parsed.text ?? '';
@@ -247,8 +275,10 @@ export async function mailText(
   }
   switch (result.kind) {
     case 'text':
-      if (result.hidden > 0)
+      if (result.hidden > 0) {
         log.info('Proton Mail: hidden HTML text flagged for the agent', { elements: result.hidden });
+        opts.onHidden?.(result.hidden);
+      }
       return result.truncated
         ? `${result.text}\n\n[… the HTML body was cut at ${HTML_MAX_CHARS} characters]`
         : result.text;
@@ -327,6 +357,41 @@ const TAG_RUN = /[\u{E0000}-\u{E007F}]+/gu;
 const SELECTOR_RUN = /[\u{E0100}-\u{E01EF}]+|[\uFE00-\uFE0F]{2,}/gu;
 /** Bidirectional controls and marks, which reorder what is shown (the RTLO trick). */
 const BIDI_RUN = /[\u202A-\u202E\u2066-\u2069\u200E\u200F\u061C]+/g;
+/** The marks alone (LRM, RLM, ALM): no embedding, override or isolate. */
+const BIDI_MARK_ONLY = /^[\u200E\u200F\u061C]$/;
+/** Letters of the right-to-left scripts whose ordinary text carries direction marks. */
+const RTL_LETTER = /[\p{Script=Hebrew}\p{Script=Arabic}\p{Script=Syriac}\p{Script=Thaana}\p{Script=Nko}]/u;
+/** Letters of the scripts written without spaces, which use U+200B as a word break. */
+const NO_SPACE_LETTER = /[\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]/u;
+
+/** The nearest character to `at` that is not white space, going left (-1) or right (+1). */
+function nearestNonSpace(text: string, at: number, step: -1 | 1): string {
+  for (let i = at; i >= 0 && i < text.length; i += step) {
+    if (!/\s/.test(text[i])) return text[i];
+  }
+  return '';
+}
+
+/**
+ * Whether a run of direction characters is ordinary right-to-left text: one
+ * mark (never a control) whose nearest letter on either side is Hebrew,
+ * Arabic and the like. Mail clients put such marks in names and around
+ * numbers; a single mark carries no hidden text.
+ */
+function ordinaryBidiMark(run: string, offset: number, text: string): boolean {
+  if (!BIDI_MARK_ONLY.test(run)) return false;
+  return (
+    RTL_LETTER.test(nearestNonSpace(text, offset - 1, -1)) ||
+    RTL_LETTER.test(nearestNonSpace(text, offset + run.length, 1))
+  );
+}
+
+/** Whether a run of invisible characters is one zero-width space between two Thai (or Lao, Khmer, Myanmar) letters. */
+function ordinaryWordBreak(run: string, offset: number, text: string): boolean {
+  return (
+    run === '\u200B' && NO_SPACE_LETTER.test(text[offset - 1] ?? '') && NO_SPACE_LETTER.test(text[offset + 1] ?? '')
+  );
+}
 /** Zero-width, filler and other invisible characters. ZWJ/ZWNJ are left alone: emoji and scripts need them. */
 const INVISIBLE_RUN = /[\u200B\u2060-\u2065\u206A-\u206F\uFEFF\u180E\u034F\u115F\u1160\u3164\uFFA0]+/g;
 /** Everything above, ZWJ/ZWNJ and the soft hyphen too: what a name or filename never needs. */
@@ -369,11 +434,13 @@ export function flagInvisibleText(text: string, token: string): { text: string; 
       flagged = true;
       return `[invisible characters ${token}]`;
     })
-    .replace(BIDI_RUN, () => {
+    .replace(BIDI_RUN, (run: string, offset: number, whole: string) => {
+      if (ordinaryBidiMark(run, offset, whole)) return run;
       flagged = true;
       return `[text-direction characters ${token}]`;
     })
-    .replace(INVISIBLE_RUN, () => {
+    .replace(INVISIBLE_RUN, (run: string, offset: number, whole: string) => {
+      if (ordinaryWordBreak(run, offset, whole)) return run;
       flagged = true;
       return `[invisible characters ${token}]`;
     });
@@ -517,6 +584,21 @@ function runWorker(source: string, workerData: unknown, timeoutMs: number, heapM
   });
 }
 
+/**
+ * html-to-text settings. No word wrap and no upper-casing: either would
+ * change the hidden-text marks (`[hidden CODE: `), which must reach the agent
+ * exactly as written, and neither helps an agent read the mail.
+ */
+const HTML_TO_TEXT_OPTIONS = {
+  wordwrap: false,
+  limits: { maxDepth: HTML_MAX_DEPTH },
+  selectors: [
+    { selector: 'img', format: 'skip' },
+    ...['h1', 'h2', 'h3', 'h4', 'h5', 'h6'].map((selector) => ({ selector, options: { uppercase: false } })),
+    { selector: 'table', options: { uppercaseHeaderCells: false } },
+  ],
+};
+
 async function htmlToTextInWorker(html: string, timeoutMs: number, token: string): Promise<HtmlResult> {
   const outcome = await runWorker(
     HTML_WORKER_SOURCE,
@@ -529,7 +611,7 @@ async function htmlToTextInWorker(html: string, timeoutMs: number, token: string
       html,
       maxChars: HTML_MAX_CHARS,
       maxDepth: HTML_MAX_DEPTH,
-      options: { limits: { maxDepth: HTML_MAX_DEPTH }, selectors: [{ selector: 'img', format: 'skip' }] },
+      options: HTML_TO_TEXT_OPTIONS,
     },
     timeoutMs,
     HTML_WORKER_HEAP_MB,
@@ -736,6 +818,17 @@ function attributionAt(lines: string[], i: number): number {
 const SIGNATURE_START =
   /^(--|Sent with Proton\s?Mail\b.{0,80}|Sent from (my\s.{1,40}|Outlook\b.{0,40}|Mail for Windows\b.{0,20}|Proton\s?Mail\b.{0,40})|Get Outlook for (iOS|Android)\b.{0,20})$/i;
 
+/** Subject prefixes mail clients add when forwarding, across common locales. */
+const FORWARD_SUBJECT = /^(fw|fwd|wg|tr|vs|vb|rv|enc|doorst|i)\s*:/i;
+/** Gmail's and Proton's inline-forward line, and Apple Mail's. */
+const FORWARD_MARKER = /^(-{2,}\s*Forwarded message\s*-{2,}|Begin forwarded message:)$/i;
+const ORIGINAL_MESSAGE = /^-{2,}\s*Original Message\s*-{2,}$/i;
+
+/** Whether a subject is a forward's (FW:, Fwd:, WG:, TR:, …); a reply to one (Re: Fwd:) is not. */
+export function isForwardSubject(subject: string | undefined): boolean {
+  return FORWARD_SUBJECT.test((subject ?? '').trim());
+}
+
 /**
  * Drop the quoted history a mail client appends to a reply: everything from
  * the "On … wrote:" / "-----Original Message-----" marker on, plus any trailing
@@ -743,9 +836,23 @@ const SIGNATURE_START =
  * reply's text as the exact answer to its free-text prompts. Returns the
  * original when stripping would leave nothing — a message that is only a
  * quote is still a message.
+ *
+ * A forward is the opposite case: the mail under the sender's note is what
+ * they are sending, not history. Outlook writes a forward exactly like a
+ * reply (a rule and a From:/Sent: block), so a forward's subject prefix
+ * decides, or a "Forwarded message" / "Begin forwarded message:" line that
+ * comes before any reply attribution; then the whole body is kept. Without
+ * `subject` (card answers) only the marker counts.
  */
-export function stripQuotedReply(text: string): string {
-  const lines = text.replace(/\r\n/g, '\n').split('\n');
+export function stripQuotedReply(text: string, subject?: string): string {
+  const normalized = text.replace(/\r\n/g, '\n');
+  if (isForwardSubject(subject)) return normalized.trim();
+  const lines = normalized.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (attributionAt(lines, i) > 0 || ORIGINAL_MESSAGE.test(line)) break;
+    if (FORWARD_MARKER.test(line)) return normalized.trim();
+  }
   const nextNonEmpty = (from: number): string => {
     for (let j = from; j < lines.length; j++) {
       const t = lines[j].trim();
@@ -759,8 +866,7 @@ export function stripQuotedReply(text: string): string {
     if (
       (line.length <= 120 && SIGNATURE_START.test(line)) ||
       attributionAt(lines, i) > 0 ||
-      /^-{2,}\s*Original Message\s*-{2,}$/i.test(line) ||
-      /^-{2,}\s*Forwarded message\s*-{2,}$/i.test(line) ||
+      ORIGINAL_MESSAGE.test(line) ||
       /^_{5,}$/.test(line) ||
       // Outlook (web/mobile): a bare rule, then a From:/Sent: header block.
       (/^-{10,}$/.test(line) && /^From:\s/i.test(nextNonEmpty(i + 1))) ||
@@ -886,6 +992,13 @@ export function mailingListOf(input: { listId?: string; listPost?: string; prece
 
 /** The authserv-id Proton stamps on its own Authentication-Results headers. */
 export const PROTON_AUTHSERV_ID = 'mail.protonmail.ch';
+/** Proton's own mail domains: internal mail from these (or a subdomain) is trusted. */
+export const PROTON_DOMAINS = ['proton.me', 'protonmail.com', 'protonmail.ch', 'pm.me'];
+
+/** A domain's ASCII (punycode) form, or the domain itself when it has none. */
+function asciiDomain(domain: string): string {
+  return domainToASCII(domain) || domain;
+}
 
 /**
  * Reason this mail's sender is unverified, or null when Proton vouches for it.
@@ -913,10 +1026,22 @@ export const PROTON_AUTHSERV_ID = 'mail.protonmail.ch';
  * DMARC verdict, and fails; should Proton stop sending the header, internal
  * mail goes back to failing.
  *
+ * Internal mail is trusted only from Proton's own domains and their
+ * subdomains (Proton's notices come from notify.proton.me), and from
+ * `internalDomains`: the bridge account's own domain and any listed in
+ * PROTON_MAIL_INTERNAL_DOMAINS, for a Proton custom domain. A Proton account
+ * can send as an address outside Proton (a custom domain, or an external
+ * address it has connected), and nothing Proton adds proves which.
+ *
  * `authResults` is the value of every Authentication-Results header line;
  * `pmOrigin` of every X-Pm-Origin line.
  */
-export function checkSenderAuth(fromAddress: string, authResults: string[], pmOrigin: string[] = []): string | null {
+export function checkSenderAuth(
+  fromAddress: string,
+  authResults: string[],
+  pmOrigin: string[] = [],
+  internalDomains: string[] = [],
+): string | null {
   const fromDomain = normalizeAddress(fromAddress).split('@').pop() ?? '';
   const verdicts: Array<{ result: string; domain?: string }> = [];
   for (const raw of authResults) {
@@ -936,7 +1061,13 @@ export function checkSenderAuth(fromAddress: string, authResults: string[], pmOr
   const origins = pmOrigin.map((o) => o.trim().toLowerCase());
   if (origins.length > 1) return `${origins.length} X-Pm-Origin headers`;
   if (origins[0] === 'internal') {
-    return verdicts.length === 0 ? null : 'internal mail carrying a DMARC verdict';
+    if (verdicts.length > 0) return 'internal mail carrying a DMARC verdict';
+    const trusted = [...PROTON_DOMAINS, ...internalDomains].map((d) => asciiDomain(d.trim().toLowerCase()));
+    const from = asciiDomain(fromDomain);
+    if (!trusted.some((d) => d && (from === d || from.endsWith(`.${d}`)))) {
+      return `internal mail from ${fromDomain}, not a Proton domain or one in PROTON_MAIL_INTERNAL_DOMAINS`;
+    }
+    return null;
   }
   if (verdicts.length === 0) return 'no DMARC verdict from Proton';
   if (verdicts.length > 1) return `${verdicts.length} DMARC verdicts claiming to be Proton's`;
@@ -944,7 +1075,7 @@ export function checkSenderAuth(fromAddress: string, authResults: string[], pmOr
   if (v.result !== 'pass') return `dmarc=${v.result}`;
   // An international domain may be written in Unicode on one side and in
   // punycode on the other: compare the ASCII forms.
-  const ascii = (d: string | undefined) => (d ? domainToASCII(d) || d : '');
+  const ascii = (d: string | undefined) => (d ? asciiDomain(d) : '');
   if (ascii(v.domain) !== ascii(fromDomain)) return `dmarc passed for ${v.domain ?? 'no domain'}, not ${fromDomain}`;
   return null;
 }
@@ -1065,7 +1196,14 @@ export function displayName(address: string, name?: string): string | undefined 
 /** How a sender is shown to approvers and agents: the verified address, after the display name if there is one. */
 export function senderLabel(address: string, name?: string): string {
   const n = displayName(address, name);
-  return n ? `${n} <${address}>` : address;
+  const label = n ? `${n} <${address}>` : address;
+  // A domain in Unicode can look like another (a Cyrillic "а" in paypal):
+  // its ASCII form, shown beside it, cannot.
+  const at = address.lastIndexOf('@');
+  const domain = address.slice(at + 1);
+  if (at < 0 || /^[\x20-\x7e]*$/.test(domain)) return label;
+  const ascii = domainToASCII(domain);
+  return ascii && ascii !== domain ? `${label} (${address.slice(0, at)}@${ascii})` : label;
 }
 
 /**
@@ -1530,6 +1668,7 @@ registerChannelAdapter('proton-mail', {
       'PROTON_MAIL_MARK_SEEN',
       'PROTON_MAIL_PROCESS_BACKLOG',
       'PROTON_MAIL_DEFAULT_SUBJECT',
+      'PROTON_MAIL_INTERNAL_DOMAINS',
     ]);
     const address = env.PROTON_MAIL_ADDRESS ? normalizeAddress(env.PROTON_MAIL_ADDRESS) : '';
     const password = env.PROTON_MAIL_BRIDGE_PASSWORD;
@@ -1565,6 +1704,15 @@ registerChannelAdapter('proton-mail', {
       markSeen: env.PROTON_MAIL_MARK_SEEN !== 'false',
       processBacklog: env.PROTON_MAIL_PROCESS_BACKLOG === 'true',
       defaultSubject: env.PROTON_MAIL_DEFAULT_SUBJECT || 'Message from your assistant',
+      /**
+       * Domains, beyond Proton's own, whose Proton-internal mail is trusted
+       * (checkSenderAuth): the bridge account's own, and a comma-separated
+       * PROTON_MAIL_INTERNAL_DOMAINS for other Proton custom domains.
+       */
+      internalDomains: [
+        address.split('@').pop() ?? '',
+        ...(env.PROTON_MAIL_INTERNAL_DOMAINS ?? '').split(',').map((d) => d.trim().toLowerCase()),
+      ].filter(Boolean),
     };
     const imapTls = tlsOptions(cfg.imapHost, { ca, rejectUnauthorized });
     const smtpTls = tlsOptions(cfg.smtpHost, { ca, rejectUnauthorized });
@@ -1592,13 +1740,14 @@ registerChannelAdapter('proton-mail', {
     let transporter: Transporter | undefined;
     let connected = false;
     let shuttingDown = false;
-    /** False until STARTUP_DELAY_MS after setup(): see setup(). */
+    /** False until the host has started (hostStarted): see setup(). */
     let accepting = false;
     let draining = false;
     let drainAgain = false;
     let reconnectDelay = RECONNECT_DELAY_MS;
     let pollTimer: NodeJS.Timeout | undefined;
-    let startTimer: NodeJS.Timeout | undefined;
+    /** This adapter's entry in awaitingHostStart while it waits. */
+    let beginReading: (() => void) | undefined;
     let reconnectTimer: NodeJS.Timeout | undefined;
 
     // --- Outbound ---
@@ -1695,6 +1844,20 @@ registerChannelAdapter('proton-mail', {
     }
 
     /**
+     * Whether a mail from `addr` is In-Reply-To an open card mailed to that
+     * address, judged on the headers alone. Such a mail skips the hourly
+     * sender limit; matchCardReply still decides whether it is an answer.
+     * Each card takes one answer, so this cannot carry a flood.
+     */
+    function answersOpenCard(addr: string, inReplyTo: string | undefined): boolean {
+      const ids = messageIds(inReplyTo);
+      if (ids.length === 0) return false;
+      return Object.values(state.cards).some(
+        (c) => c.address === addr && !c.answeredAt && !c.closedAt && ids.includes(c.messageId),
+      );
+    }
+
+    /**
      * 'done': handled (or deliberately dropped); 'leave-unread': refused, for a
      * human to look at; 'deferred': waiting in `retry` for an hourly limit.
      */
@@ -1702,20 +1865,23 @@ registerChannelAdapter('proton-mail', {
 
     /**
      * Hold a mail in `retry` until `at`, when its limit has room again — unless
-     * too much mail already waits, when it is left unread for good.
+     * too much mail already waits, when it is left unread for good, and
+     * flagged for a human to find.
      */
-    function defer(uid: number, kind: 'sender' | 'strangers', from: string, at: number): Outcome {
+    async function defer(uid: number, kind: 'sender' | 'strangers', from: string, at: number): Promise<Outcome> {
       if (!state.retry[uid]?.deferred) {
         const waiting = Object.values(state.retry).filter((r) => r.deferred);
         if (
           waiting.length >= DEFERRED_MAX ||
           waiting.filter((r) => r.from === from).length >= DEFERRED_PER_SENDER_MAX
         ) {
-          log.warn('Proton Mail: over an hourly limit with too much mail already waiting — left unread', {
+          log.warn('Proton Mail: over an hourly limit with too much mail already waiting — left unread and flagged', {
             uid,
             from,
             limit: kind,
+            keyword: FAILED_KEYWORD,
           });
+          await flag(uid, [FAILED_KEYWORD]);
           return 'leave-unread';
         }
       }
@@ -1745,6 +1911,19 @@ registerChannelAdapter('proton-mail', {
           uid,
           from: addr,
           max: STRANGERS_MAX,
+          keyword: FAILED_KEYWORD,
+        });
+        await flag(uid, [FAILED_KEYWORD]);
+        return 'leave-unread';
+      }
+      const domain = asciiDomain(addr.split('@').pop() ?? '');
+      const ofDomain = Object.keys(state.strangers).filter((a) => asciiDomain(a.split('@').pop() ?? '') === domain);
+      if (ofDomain.length >= STRANGERS_PER_DOMAIN_MAX) {
+        log.warn('Proton Mail: too many new addresses of one domain awaiting approval — left unread and flagged', {
+          uid,
+          from: addr,
+          domain,
+          max: STRANGERS_PER_DOMAIN_MAX,
           keyword: FAILED_KEYWORD,
         });
         await flag(uid, [FAILED_KEYWORD]);
@@ -1820,6 +1999,7 @@ registerChannelAdapter('proton-mail', {
         fromAddr,
         rawHeaderValues(head, 'authentication-results'),
         rawHeaderValues(head, 'x-pm-origin'),
+        cfg.internalDomains,
       );
       if (authFailure) {
         log.warn('Proton Mail: refused mail whose sender is unverified', { uid, from: fromAddr, reason: authFailure });
@@ -1828,9 +2008,10 @@ registerChannelAdapter('proton-mail', {
 
       // A failed mail's retry was counted when it first came in; counting it
       // again would let one failing mail use up the sender's hour. A mail
-      // held for this limit is checked again.
+      // held for this limit is checked again. An answer to an open card is
+      // never held: a held answer would let a gateway approval time out.
       const retry = state.retry[uid];
-      if (!retry || retry.deferred === 'sender') {
+      if ((!retry || retry.deferred === 'sender') && !answersOpenCard(fromAddr, head.inReplyTo)) {
         const freeAt = senderRateFreeAt(fromAddr);
         if (freeAt !== null) return defer(uid, 'sender', fromAddr, freeAt);
       }
@@ -1840,7 +2021,14 @@ registerChannelAdapter('proton-mail', {
 
       // This mail's mark code (see newMarkToken).
       const token = newMarkToken();
-      const fullText = await mailText(parsed, HTML_TIMEOUT_MS, { retryable: !state.retry[uid], token });
+      // The worker's own count decides the note for the body's HTML, not a
+      // search for the mark in the converted text.
+      let hiddenElements = 0;
+      const fullText = await mailText(parsed, HTML_TIMEOUT_MS, {
+        retryable: !state.retry[uid],
+        token,
+        onHidden: (n) => (hiddenElements += n),
+      });
       const rawText = fullText.slice(0, TEXT_MAX_CHARS);
       // Subject, Message-ID and References come from any sender and are kept
       // in the state file and sent back in headers, so each is capped. What
@@ -1848,7 +2036,9 @@ registerChannelAdapter('proton-mail', {
       const subjectPlain = parsed.subject ? oneLine(parsed.subject, SUBJECT_MAX_CHARS) || undefined : undefined;
       const subjectMarks = subjectPlain ? flagInvisibleText(subjectPlain, token) : undefined;
       const subject = subjectMarks?.text || undefined;
-      let body = stripQuotedReply(rawText);
+      // A forward's subject keeps the forwarded mail (see stripQuotedReply);
+      // card matching below strips without it.
+      let body = stripQuotedReply(rawText, subjectPlain);
       // A mail forwarded as an attachment ("Forward as Attachment") carries
       // its whole content in a message/rfc822 part: read its text into the
       // body, as an inline forward's is. The file is delivered too.
@@ -1872,7 +2062,10 @@ registerChannelAdapter('proton-mail', {
       body = shown.text;
       // The subject's marks count only when the agent sees the subject.
       const subjectMarked = !!subjectMarks?.flagged && subjectShown(subject, threadSubject, subjectPlain);
-      if (shown.flagged || subjectMarked || body.includes(`[hidden ${token}: `)) body += `\n\n${hiddenNote(token)}`;
+      // An attached forward's marks are found by their text, which no longer
+      // wraps or changes case (HTML_TO_TEXT_OPTIONS).
+      const marked = hiddenElements > 0 || body.includes(`[hidden ${token}: `);
+      if (shown.flagged || subjectMarked || marked) body += `\n\n${hiddenNote(token)}`;
       const references = [parsed.references ?? []]
         .flat()
         .map((r) => safeMessageId(r))
@@ -2284,19 +2477,21 @@ registerChannelAdapter('proton-mail', {
         setupConfig = config;
         fs.mkdirSync(STATE_DIR, { recursive: true });
         await connect();
-        // No mail is read until STARTUP_DELAY_MS after setup(). The host holds
-        // routing until its own startup finishes, after setup() returns; mail
-        // drained before then would be marked read while its routing waited
-        // in memory, and lost on a stop or crash. The adapter cannot see that
-        // moment, so this is a fixed delay, independent of the poll interval.
-        // IDLE delivers `exists` promptly after that; the poll is the safety
-        // net for a bridge that drops IDLE or a missed notification, and
-        // runs retries.
-        startTimer = setTimeout(() => {
-          startTimer = undefined;
+        // No mail is read until the host has started (see hostStarted). IDLE
+        // delivers `exists` promptly after that; the poll is the safety net
+        // for a bridge that drops IDLE or a missed notification, and runs
+        // retries. drain() does nothing until `accepting`.
+        const begin = () => {
+          beginReading = undefined;
+          if (shuttingDown) return;
           accepting = true;
           void drain();
-        }, STARTUP_DELAY_MS);
+        };
+        if (hostStarted) begin();
+        else {
+          beginReading = begin;
+          awaitingHostStart.add(begin);
+        }
         pollTimer = setInterval(() => void drain(), cfg.pollMs);
       },
 
@@ -2397,7 +2592,7 @@ registerChannelAdapter('proton-mail', {
         shuttingDown = true;
         connected = false;
         if (pollTimer) clearInterval(pollTimer);
-        if (startTimer) clearTimeout(startTimer);
+        if (beginReading) awaitingHostStart.delete(beginReading);
         if (reconnectTimer) clearTimeout(reconnectTimer);
         try {
           await client?.logout();
