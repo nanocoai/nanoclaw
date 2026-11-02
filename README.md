@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/nanocoai-nanoclaw-badge.png)](https://mseep.ai/app/nanocoai-nanoclaw)
+
 <p align="center">
   <img src="assets/nanoclaw-logo.png" alt="NanoClaw" width="400">
 </p>
