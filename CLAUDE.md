@@ -66,7 +66,7 @@ For ad-hoc central queries from skills or scripts, use the in-tree wrapper rathe
 | `src/host-sweep.ts` + `src/reconcile-session.ts` | 60s resync floor; the per-session pass (`reconcileSession`: `processing_ack` sync, stuck detection, due-message wake, recurrence) runs through the keyed queue in `src/reconcile-queue.ts` |
 | `src/session-manager.ts` | Resolves sessions; session folder, heartbeat and outbox paths; reads and writes session mailboxes through `src/mailbox/` |
 | `src/mailbox/` | Session-mailbox seam (`AgentMailbox`); the SQLite realization (`inbound.db` / `outbound.db`) is `src/mailbox/sqlite/`, mirrored in `container/agent-runner/src/mailbox/` |
-| `src/container-runner.ts` | Spawns per-agent-group Docker containers with session DB + outbox mounts; leases the session's gateway contribution and revokes it on exit |
+| `src/container-runner.ts` | Composes each session's `SessionSpec` (mounts, env, command) and hands it to the session driver — one agent container per session, plus any auxiliary containers the gateway adds; leases the session's gateway contribution and revokes it on exit |
 | `src/drivers/` | Session-driver seam: turns a `SessionSpec` into a running container (argv, mounts, kill/stop, orphan listing). `NANOCLAW_RUNTIME_DRIVER` picks the driver (default and only built-in: `docker`); overlays append a registration to `installed.ts`. `src/container-runtime.ts` keeps only the runtime binary name |
 | `src/gateway-providers/` | Credential-gateway seam: `GatewayProviderDefinition` + its single registry. One provider per install, selected by `NANOCLAW_GATEWAY_PROVIDER`; overlays append a registration to `installed.ts`. See [docs/gateway-seam.md](docs/gateway-seam.md) |
 | `src/gateway-approval-coordinator.ts` | Core-owned human approval flow every gateway gets: request validation, approver routing, `pending_approvals`, terminal cards, and supervised reconnect of the provider's approval subscription |
@@ -87,7 +87,7 @@ For ad-hoc central queries from skills or scripts, use the in-tree wrapper rathe
 | `setup/gateways/` | Gateway catalog (`gateway.json` discovery), selection/detection, and the skill-driven install used by setup and `/update-nanoclaw` |
 | `container/agent-runner/src/` | Agent-runner: poll loop, formatter, provider abstraction, MCP tools, destinations |
 | `container/skills/` | Container skills mounted into every agent session (`agent-browser`, `frontend-engineer`, `self-customize`, `welcome`; the selected gateway's agent skill and opt-in skills like `vercel-cli`, `slack-formatting` and `whatsapp-formatting` install with the `/add-*` skill that adds their capability) |
-| `groups/<folder>/` | Per-agent-group filesystem (CLAUDE.md, skills) — agent-runner source is a shared read-only mount, not copied per group |
+| `groups/<folder>/` | Per-agent-group folder: `instructions.prepend.md` (standing instructions) and `memory/`, plus the composed project doc (`CLAUDE.md` or the provider's file) and `container.json`, both rewritten every spawn — never edit those two. Skills live in the provider's skill store (Claude: `data/v2-sessions/<id>/.claude-shared/skills/`) |
 | `scripts/init-first-agent.ts` | Bootstrap the first DM-wired agent (used by `/init-first-agent` skill) |
 | `scripts/skill-apply.ts` | Deterministic SKILL.md applier — executes `nc:` directive fences; declare/emit core, journaled + idempotent |
 | `scripts/skill-directives.ts` + `scripts/skill-policy.ts` | `nc:` grammar parser + lint; UI-free driver policy derived from document structure (gate confirm, URL offer) |
@@ -152,7 +152,7 @@ Per-agent-group container runtime config (provider, model, packages, MCP servers
 |-------|----------|
 | `disabled` | Agent never learns about ncl (instructions excluded from CLAUDE.md). Host dispatch rejects any `cli_request`. |
 | `group` (default) | Agent can access `groups`, `sessions`, `destinations`, `members`, `tasks`, `templates` only, scoped to its own agent group. `--id` and group args are auto-filled. Cross-group access rejected. `cli_scope` changes blocked. |
-| `global` | Unrestricted. Set automatically for owner agent groups via `init-first-agent`. |
+| `global` | Every resource, across groups, except host-only commands (`groups config add-mount`/`remove-mount`), which no container can run. `tasks`, `groups connect` and `sessions history` still act only on the caller's own group. Set automatically for owner agent groups via `init-first-agent`. |
 
 Key files: `src/db/container-configs.ts`, `src/container-config.ts`, `src/cli/guard.ts` (scope decision; group-scope list in `src/cli/registry.ts`), `src/cli/dispatch.ts` (arg auto-fill, row filtering), `src/project-doc-compose.ts` (instructions exclusion).
 
@@ -227,7 +227,7 @@ Run commands directly — don't tell the user to run them.
 # Host (Node + pnpm)
 pnpm run dev          # Host via tsx (no watch)
 pnpm run build        # Compile host TypeScript (src/)
-./container/build.sh  # Rebuild agent container image (nanoclaw-agent:latest)
+./container/build.sh  # Rebuild agent container image (nanoclaw-agent-v2-<slug>:latest)
 pnpm test             # Host tests (vitest)
 
 # Agent-runner (Bun — separate package tree under container/agent-runner/)
@@ -324,8 +324,8 @@ The agent container runs on **Bun**; the host runs on **Node** (pnpm). They comm
 - **Bumping `@anthropic-ai/claude-agent-sdk`, `@modelcontextprotocol/sdk`, or any agent-runner runtime dep** → no `minimumReleaseAge` policy applies to this tree. Check the release date on npm, pin deliberately, never `bun update` blindly.
 - **Writing a new named-param SQL insert/update in the container** → use `$name` in both SQL and JS keys: `.run({ $id: msg.id })`. `bun:sqlite` does not auto-strip the prefix the way `better-sqlite3` does on the host. Positional `?` params work normally.
 - **Adding a test in `container/agent-runner/src/`** → import from `bun:test`, not `vitest`. Vitest runs on Node and can't load `bun:sqlite`. `vitest.config.ts` excludes this tree.
-- **Adding a Node CLI the agent invokes at runtime** (like `agent-browser`, `claude-code`, `vercel`) → put it in the Dockerfile's pnpm global-install block, pinned to an exact version via a new `ARG`. Don't use `bun install -g` — that bypasses the pnpm supply-chain policy.
-- **Changing the Dockerfile entrypoint or the dynamic-spawn command** (`src/container-runner.ts` line ~503) → keep `exec bun ...` so signals forward cleanly. The image has no `/app/dist`; don't reintroduce a tsc build step.
+- **Adding a Node CLI the agent invokes at runtime** (like `agent-browser`, `claude-code`) → add a `{ "name", "version" }` entry, pinned to an exact version, to `container/cli-tools.json` (`"onlyBuilt": true` only for a native postinstall); `container/install-cli-tools.sh` installs it with pnpm. Don't add it in the Dockerfile (bypasses the manifest) or with `bun install -g` (bypasses the pnpm supply-chain policy).
+- **Changing the Dockerfile entrypoint or the dynamic-spawn command** (the agent `ContainerSpec` in `composeSessionSpec`, `src/container-runner.ts`) → keep `exec bun ...` so signals forward cleanly. The image has no `/app/dist`; don't reintroduce a tsc build step.
 - **Changing session-DB pragmas** (`container/agent-runner/src/mailbox/sqlite/connection.ts`) → `journal_mode=DELETE` is load-bearing for cross-mount visibility. Read the comment block at the top of the file first.
 
 ## CJK font support
