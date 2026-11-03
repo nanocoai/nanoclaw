@@ -8,6 +8,9 @@ patchedDependencies:
   '@beeper/chat-adapter-matrix@0.2.0':
     hash: d8f9cda088701285b3be191ea30edfd2e96ccb7b97f2934fa8c26c1fa424c020
     path: patches/@beeper__chat-adapter-matrix@0.2.0.patch
+  '@chat-adapter/discord@4.41.1':
+    hash: 21b9919cd6699e1f1d1b8091561b798b98a37aae40a1c266e3bfa1b075dd1706
+    path: patches/@chat-adapter__discord@4.41.1.patch
 
 importers:
 
@@ -21,7 +24,7 @@ importers:
         version: 0.1.0(chat@4.41.1(zod@4.6.5))(zod@4.6.5)
       '@chat-adapter/discord':
         specifier: 4.41.1
-        version: 4.41.1(zod@4.6.5)
+        version: 4.41.1(patch_hash=21b9919cd6699e1f1d1b8091561b798b98a37aae40a1c266e3bfa1b075dd1706)(zod@4.6.5)
       '@chat-adapter/gchat':
         specifier: 4.41.1
         version: 4.41.1(zod@4.6.5)
@@ -3558,7 +3561,7 @@ snapshots:
       hashery: 1.5.1
       keyv: 5.6.0
 
-  '@chat-adapter/discord@4.41.1(zod@4.6.5)':
+  '@chat-adapter/discord@4.41.1(patch_hash=21b9919cd6699e1f1d1b8091561b798b98a37aae40a1c266e3bfa1b075dd1706)(zod@4.6.5)':
     dependencies:
       '@chat-adapter/shared': 4.41.1(zod@4.6.5)
       chat: 4.41.1(zod@4.6.5)

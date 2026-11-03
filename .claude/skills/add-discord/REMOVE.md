@@ -23,7 +23,9 @@ Remove `DISCORD_BOT_TOKEN`, `DISCORD_APPLICATION_ID`, and `DISCORD_PUBLIC_KEY` f
 ## 3. Remove the package
 
 ```bash
+pnpm pkg delete 'pnpm.patchedDependencies[@chat-adapter/discord@4.41.1]'
 pnpm uninstall @chat-adapter/discord
+rm -f patches/@chat-adapter__discord@4.41.1.patch
 ```
 
 ## 4. Rebuild and restart
