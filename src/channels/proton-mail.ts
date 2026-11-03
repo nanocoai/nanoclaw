@@ -90,6 +90,10 @@ const DEFERRED_MAX = 200;
  * approved senders' over-limit mail would be refused instead of held.
  */
 const DEFERRED_STRANGERS_MAX = DEFERRED_MAX / 2;
+/** How long the adapter waits for the host's onHostStart before it logs an error (it keeps waiting). */
+const HOST_START_WARN_MS = 5 * 60_000;
+/** How often one new address may be looked up with core to see whether it was settled (pruneSettled). */
+const SETTLED_RECHECK_MS = 10 * 60_000;
 /**
  * Addresses not yet approved whose mail was handed to the host, each of which
  * may raise an approval card that core never closes before CARD_TTL_MS. A new
@@ -103,8 +107,8 @@ const STRANGERS_MAX = 200;
  * New addresses of any one domain within the same window: one domain with
  * many addresses cannot take every slot and keep genuine new senders out.
  * A full domain is pruned of addresses core has since settled, and a new
- * address beyond it waits (in `retry`) for the domain's oldest slot to
- * expire: delayed, not refused. Keyed by the exact domain (no public-suffix
+ * address beyond it waits (in `retry`), checked again hourly, until a slot
+ * is free: delayed, not refused. Keyed by the exact domain (no public-suffix
  * list), so a flood spread over subdomains is bounded by STRANGERS_MAX instead.
  */
 const STRANGERS_PER_DOMAIN_MAX = 20;
@@ -1769,6 +1773,8 @@ registerChannelAdapter('proton-mail', {
     let pollTimer: NodeJS.Timeout | undefined;
     /** This adapter's entry in awaitingHostStart while it waits. */
     let beginReading: (() => void) | undefined;
+    /** Logs an error if the host has still not started this adapter after HOST_START_WARN_MS. */
+    let startWarnTimer: NodeJS.Timeout | undefined;
     let reconnectTimer: NodeJS.Timeout | undefined;
 
     // --- Outbound ---
@@ -1842,16 +1848,35 @@ registerChannelAdapter('proton-mail', {
      * and the host keeps the whole event with the pending approval.
      */
     async function senderApproved(addr: string): Promise<boolean> {
-      const mg = await getMessagingGroupByPlatform('proton-mail', addr);
-      if (!mg || mg.denied_at) return false;
-      return (await getMessagingGroupAgents(mg.id)).length > 0;
+      return (await senderStatus(addr)) === 'approved';
     }
 
-    /** Whether core has settled this address: approved (wired to an agent) or denied. */
-    async function senderDecided(addr: string): Promise<boolean> {
+    /** Where core stands on an address: approved (wired to an agent), denied, or not yet settled. */
+    async function senderStatus(addr: string): Promise<'approved' | 'denied' | 'pending'> {
       const mg = await getMessagingGroupByPlatform('proton-mail', addr);
-      if (!mg) return false;
-      return !!mg.denied_at || (await getMessagingGroupAgents(mg.id)).length > 0;
+      if (!mg) return 'pending';
+      if (mg.denied_at) return 'denied';
+      return (await getMessagingGroupAgents(mg.id)).length > 0 ? 'approved' : 'pending';
+    }
+
+    /** When each new address was last checked with core (pruneSettled); in memory only. */
+    const settledCheckedAt = new Map<string, number>();
+
+    /**
+     * Drop from `state.strangers` the addresses core has since approved or
+     * denied: the adapter is not told when that happens. Each address is
+     * looked up at most once per SETTLED_RECHECK_MS, the lookups together.
+     */
+    async function pruneSettled(addrs: string[], now: number): Promise<void> {
+      const due = addrs.filter((a) => now - (settledCheckedAt.get(a) ?? -Infinity) >= SETTLED_RECHECK_MS);
+      const statuses = await Promise.all(due.map((a) => senderStatus(a)));
+      due.forEach((a, i) => {
+        settledCheckedAt.set(a, now);
+        if (statuses[i] !== 'pending') {
+          delete state.strangers[a];
+          settledCheckedAt.delete(a);
+        }
+      });
     }
 
     /** The adapter's own notice answering an inbound mail, on that mail's thread. */
@@ -1895,11 +1920,16 @@ registerChannelAdapter('proton-mail', {
     /**
      * Hold a mail in `retry` until `at`, when its limit has room again — unless
      * too much mail already waits, when it is left unread for good, and
-     * flagged for a human to find.
+     * flagged for a human to find. The caps are checked whenever a mail joins
+     * a kind of hold, also when one held for the sender limit is held again
+     * as a new sender's (the share DEFERRED_STRANGERS_MAX bounds).
      */
     async function defer(uid: number, kind: 'sender' | 'strangers', from: string, at: number): Promise<Outcome> {
-      if (!state.retry[uid]?.deferred) {
-        const waiting = Object.values(state.retry).filter((r) => r.deferred);
+      if (state.retry[uid]?.deferred !== kind) {
+        // Not counting this mail itself, held until now under the other kind.
+        const waiting = Object.entries(state.retry)
+          .filter(([u, r]) => r.deferred && u !== String(uid))
+          .map(([, r]) => r);
         if (
           waiting.length >= DEFERRED_MAX ||
           waiting.filter((r) => r.from === from).length >= DEFERRED_PER_SENDER_MAX ||
@@ -1932,9 +1962,20 @@ registerChannelAdapter('proton-mail', {
     async function admitStranger(uid: number, addr: string): Promise<'ok' | Outcome> {
       const now = Date.now();
       for (const [a, at] of Object.entries(state.strangers)) {
-        if (now - Date.parse(at) > CARD_TTL_MS) delete state.strangers[a];
+        if (now - Date.parse(at) > CARD_TTL_MS) {
+          delete state.strangers[a];
+          settledCheckedAt.delete(a);
+        }
       }
       if (state.strangers[addr]) return 'ok';
+      const domainOf = (a: string) => asciiDomain(a.split('@').pop() ?? '');
+      const domain = domainOf(addr);
+      const ofDomain = () => Object.keys(state.strangers).filter((a) => domainOf(a) === domain);
+      // Before either limit refuses or holds a mail, the addresses core has
+      // since settled give their slots back.
+      const all = Object.keys(state.strangers);
+      if (all.length >= STRANGERS_MAX) await pruneSettled(all, now);
+      else if (ofDomain().length >= STRANGERS_PER_DOMAIN_MAX) await pruneSettled(ofDomain(), now);
       const times = Object.values(state.strangers).map((t) => Date.parse(t));
       if (times.length >= STRANGERS_MAX) {
         log.warn('Proton Mail: too many new addresses awaiting approval — left unread and flagged', {
@@ -1946,28 +1987,20 @@ registerChannelAdapter('proton-mail', {
         await flag(uid, [FAILED_KEYWORD]);
         return 'leave-unread';
       }
-      // One domain's share. A full domain first loses the addresses core has
-      // since approved or denied (the adapter is not told when that happens);
-      // if it is still full, the mail waits until the domain's oldest slot
-      // expires, so a genuine sender is delayed, never refused.
-      const domainOf = (a: string) => asciiDomain(a.split('@').pop() ?? '');
-      const domain = domainOf(addr);
-      let ofDomain = Object.keys(state.strangers).filter((a) => domainOf(a) === domain);
-      if (ofDomain.length >= STRANGERS_PER_DOMAIN_MAX) {
-        for (const a of ofDomain) {
-          if (await senderDecided(a)) delete state.strangers[a];
-        }
-        ofDomain = ofDomain.filter((a) => state.strangers[a]);
-      }
-      if (ofDomain.length >= STRANGERS_PER_DOMAIN_MAX) {
-        const oldest = Math.min(...ofDomain.map((a) => Date.parse(state.strangers[a])));
+      // One domain's share. If it is still full, the mail waits: until the
+      // domain's oldest slot expires, or for an hour, when it is checked
+      // again (by then core may have settled some of the domain's
+      // addresses). A genuine sender is delayed, never refused for this.
+      const mine = ofDomain();
+      if (mine.length >= STRANGERS_PER_DOMAIN_MAX) {
+        const oldest = Math.min(...mine.map((a) => Date.parse(state.strangers[a])));
         log.warn('Proton Mail: too many new addresses of one domain awaiting approval — mail held', {
           uid,
           from: addr,
           domain,
           max: STRANGERS_PER_DOMAIN_MAX,
         });
-        return defer(uid, 'strangers', addr, oldest + CARD_TTL_MS + 1_000);
+        return defer(uid, 'strangers', addr, Math.min(oldest + CARD_TTL_MS + 1_000, now + HOUR_MS));
       }
       const lastHour = times.filter((t) => now - t < HOUR_MS);
       if (lastHour.length >= STRANGERS_PER_HOUR) return defer(uid, 'strangers', addr, Math.min(...lastHour) + HOUR_MS);
@@ -2116,10 +2149,12 @@ registerChannelAdapter('proton-mail', {
       const subjectMarked = !!subjectMarks?.flagged && subjectShown(subject, threadSubject, subjectPlain);
       // The note follows the marks the agent will actually see: html-to-text
       // no longer wraps or changes case (HTML_TO_TEXT_OPTIONS), so a mark is
-      // found exactly as written. A count of hidden elements would also
-      // count those in quoted history that stripQuotedReply has cut, and
-      // tell the agent of marks it cannot find.
-      if (shown.flagged || subjectMarked || body.includes(markOpen(token))) body += `\n\n${hiddenNote(token)}`;
+      // found as written — up to its trailing space, which html-to-text
+      // trims before a block element (`[hidden CODE:\n\n…`). A count of
+      // hidden elements would also count those in quoted history that
+      // stripQuotedReply has cut, and tell the agent of marks it cannot find.
+      const marked = body.includes(markOpen(token).trimEnd());
+      if (shown.flagged || subjectMarked || marked) body += `\n\n${hiddenNote(token)}`;
       const references = [parsed.references ?? []]
         .flat()
         .map((r) => safeMessageId(r))
@@ -2544,6 +2579,8 @@ registerChannelAdapter('proton-mail', {
         // retries. drain() does nothing until `accepting`.
         const begin = () => {
           beginReading = undefined;
+          if (startWarnTimer) clearTimeout(startWarnTimer);
+          startWarnTimer = undefined;
           if (shuttingDown) return;
           accepting = true;
           void drain();
@@ -2552,6 +2589,19 @@ registerChannelAdapter('proton-mail', {
         else {
           beginReading = begin;
           awaitingHostStart.add(begin);
+          // Waiting is safe (mail stays unread on the server) but must not be
+          // silent: a host that never runs onHostStart, or loads this module
+          // after it did, would otherwise leave mail unread with no sign why.
+          startWarnTimer = setTimeout(() => {
+            startWarnTimer = undefined;
+            if (!accepting && !shuttingDown)
+              log.error(
+                'Proton Mail: the host has not started this adapter (onHostStart never ran) — no mail is read',
+                {
+                  waitedMs: HOST_START_WARN_MS,
+                },
+              );
+          }, HOST_START_WARN_MS);
         }
         pollTimer = setInterval(() => void drain(), cfg.pollMs);
       },
@@ -2654,6 +2704,7 @@ registerChannelAdapter('proton-mail', {
         connected = false;
         if (pollTimer) clearInterval(pollTimer);
         if (beginReading) awaitingHostStart.delete(beginReading);
+        if (startWarnTimer) clearTimeout(startWarnTimer);
         if (reconnectTimer) clearTimeout(reconnectTimer);
         try {
           await client?.logout();
