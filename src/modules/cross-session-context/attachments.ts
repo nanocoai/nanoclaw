@@ -15,6 +15,11 @@
  *
  * A file that cannot be copied (missing, unsafe, past the size cap) stays on
  * the row by name, without a path, so the agent still knows it was there.
+ *
+ * When the pruner drops a pending echo row, the agent never saw it, so its
+ * copied files are removed with it (removeEchoAttachments). Files on delivered
+ * rows stay, like the source session's own inbox files: the agent can still
+ * refer back to them.
  */
 import { AnchoredDir, copyRegularFile } from '../../anchored-dir.js';
 import { inboxFolderName, isSafeAttachmentName } from '../../attachment-safety.js';
@@ -160,4 +165,50 @@ export function copyEchoAttachments(args: {
     target?.close();
   }
   return result;
+}
+
+/**
+ * Remove the inbox folders copied for pruned echo rows. Each id names its
+ * folder through inboxFolderName, the same way copyEchoAttachments chose it,
+ * so only folders this module created are touched. A folder that holds
+ * anything but files is left in place. Never throws.
+ */
+export function removeEchoAttachments(args: {
+  agentGroupId: string;
+  sessionId: string;
+  rowIds: readonly string[];
+}): void {
+  if (args.rowIds.length === 0) return;
+  let inbox: AnchoredDir | null;
+  try {
+    inbox = AnchoredDir.open(sessionDir(args.agentGroupId, args.sessionId), ['inbox']);
+    // eslint-disable-next-line no-catch-all/no-catch-all -- cleanup is best effort; the rows are already gone
+  } catch (err) {
+    log.warn('Echo attachment cleanup skipped', { sessionId: args.sessionId, err });
+    return;
+  }
+  if (!inbox) return;
+
+  try {
+    for (const rowId of args.rowIds) {
+      const folderName = inboxFolderName(rowId);
+      if (folderName === null) continue;
+      try {
+        const folder = inbox.openDir(folderName);
+        if (!folder) continue;
+        try {
+          // unlink never follows a symlink and refuses a directory.
+          for (const name of folder.entries()) folder.unlink(name);
+        } finally {
+          folder.close();
+        }
+        inbox.rmdir(folderName);
+        // eslint-disable-next-line no-catch-all/no-catch-all -- one bad folder must not stop the rest
+      } catch (err) {
+        log.warn('Echo attachment folder not removed', { sessionId: args.sessionId, folder: folderName, err });
+      }
+    }
+  } finally {
+    inbox.close();
+  }
 }
