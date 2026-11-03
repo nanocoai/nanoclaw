@@ -559,6 +559,10 @@ export function formatTableRows(
  * CommonJS, so it needs no file of its own in src or dist.
  */
 const HTML_WORKER_SOURCE = `
+// Functions below are carried over as their own source. Run under tsx, esbuild
+// wraps their inner functions in __name(fn, "name") calls, a helper the worker
+// does not have: this stands in for it (the name is not needed).
+var __name = (fn) => fn;
 const { parentPort, workerData } = require('worker_threads');
 const { htmlToText } = require(workerData.module);
 const { Parser, parseDocument } = require(workerData.htmlparser2);
