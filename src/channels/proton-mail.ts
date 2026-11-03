@@ -483,7 +483,10 @@ interface TableBuilder {
  * with nothing between cells. A row with one cell of content, or with a cell
  * of more than three lines, is layout (newsletters are built of tables), not
  * data: each such cell is written as a block of its own, as it was converted.
- * Empty rows are dropped. Self-contained: the worker runs it from its source.
+ * Empty rows are dropped, and so are columns empty in every row (templates
+ * space their columns with empty cells); a blank cell in a column that has
+ * content elsewhere is kept, so data rows stay aligned. Self-contained: the
+ * worker runs it from its source.
  */
 export function tableRowsToText(rows: Array<Array<{ text: string }>>): string {
   const cellLinesMax = 3;
@@ -493,27 +496,33 @@ export function tableRowsToText(rows: Array<Array<{ text: string }>>): string {
     if (lines.length) blocks.push(lines.join('\n'));
     lines = [];
   };
-  for (const cells of rows) {
-    const texts = cells.map((c) =>
+  const lined = rows.map((cells) =>
+    cells.map((c) =>
       c.text
         .split('\n')
         .map((s) => s.trim())
         .filter(Boolean),
-    );
+    ),
+  );
+  const used: boolean[] = [];
+  for (const texts of lined) texts.forEach((t, i) => (used[i] = used[i] || t.length > 0));
+  rows.forEach((cells, r) => {
+    const texts = lined[r];
     const full = cells.filter((_, i) => texts[i].length > 0);
-    if (full.length === 0) continue;
+    if (full.length === 0) return;
     if (full.length === 1 || texts.some((t) => t.length > cellLinesMax)) {
       flush();
       for (const c of full) blocks.push(c.text.trim());
     } else {
       lines.push(
         texts
+          .filter((_, i) => used[i])
           .map((t) => t.join(' / '))
           .join(' | ')
           .trimEnd(),
       );
     }
-  }
+  });
   flush();
   return blocks.join('\n\n');
 }
@@ -595,6 +604,22 @@ if (tooDeep(html, workerData.maxDepth)) {
     const open = '[hidden ' + workerData.token + ': ';
     const close = ' /hidden ' + workerData.token + ']';
     const textOf = (n) => (n.type === 'text' ? n.data : (n.children || []).map(textOf).join(''));
+    const wrap = (el) => {
+      el.children.unshift(new Text(open));
+      el.children.push(new Text(close));
+    };
+    // A hidden table, row group or row is marked in each of its cells: the
+    // table formatter reads cells only, so a mark beside them would be lost
+    // while their text still came through.
+    const STRUCTURE = new Set(['table', 'thead', 'tbody', 'tfoot', 'tr']);
+    const wrapCells = (node) => {
+      for (const c of node.children || []) {
+        if (c.type !== 'tag') continue;
+        if (c.name === 'td' || c.name === 'th') {
+          if (textOf(c).trim()) wrap(c);
+        } else wrapCells(c);
+      }
+    };
     const mark = (node) => {
       for (const child of node.children || []) {
         if (child.type !== 'tag') continue;
@@ -602,8 +627,8 @@ if (tooDeep(html, workerData.maxDepth)) {
         const unseen = child.name === 'template' || child.name === 'noscript' || 'hidden' in a || isHiddenStyle(a.style || '');
         if (unseen && textOf(child).trim()) {
           hidden++;
-          child.children.unshift(new Text(open));
-          child.children.push(new Text(close));
+          if (STRUCTURE.has(child.name)) wrapCells(child);
+          else wrap(child);
         } else {
           mark(child);
         }

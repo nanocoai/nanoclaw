@@ -1019,6 +1019,25 @@ describe('HTML tables', () => {
     expect(await read(html)).toBe(`Total | £300[hidden ${TOK}: pay another account /hidden ${TOK}]`);
   });
 
+  it('a hidden table, row group or row is marked cell by cell, so no hidden text comes through unmarked', async () => {
+    expect(await read('<p>Hi</p><table style="display:none"><tr><td>one</td><td>two</td></tr></table>')).toBe(
+      `Hi\n\n[hidden ${TOK}: one /hidden ${TOK}] | [hidden ${TOK}: two /hidden ${TOK}]`,
+    );
+    expect(
+      await read('<table><tr><td>a</td><td>b</td></tr><tr style="display:none"><td>s</td><td>x</td></tr></table>'),
+    ).toBe(`a | b\n[hidden ${TOK}: s /hidden ${TOK}] | [hidden ${TOK}: x /hidden ${TOK}]`);
+    expect(await read('<table><tbody hidden><tr><td>secret</td></tr></tbody></table>')).toBe(
+      `[hidden ${TOK}: secret /hidden ${TOK}]`,
+    );
+  });
+
+  it('columns empty in every row (a template’s spacers) are dropped', async () => {
+    const html =
+      '<table><tr><td>To</td><td></td><td>Smith</td><td></td><td>Re: trip</td><td></td></tr>' +
+      '<tr><td>Date</td><td></td><td>4 Nov</td><td></td><td>x</td><td></td></tr></table>';
+    expect(await read(html)).toBe('To | Smith | Re: trip\nDate | 4 Nov | x');
+  });
+
   it('the worker runs its embedded functions under tsx too (esbuild’s __name wrappers)', () => {
     // vitest compiles without esbuild's keepNames; tsx (`pnpm run dev`) wraps
     // inner functions in __name(…) calls, which the worker must tolerate.
