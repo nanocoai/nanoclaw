@@ -15,14 +15,15 @@ safe to re-run; anything a parser can't apply falls back to the prose beside it.
 
 ## Apply
 
-### 1. Copy the adapter and its registration test
+### 1. Copy the adapter and its tests
 
-Fetch the `channels` branch and copy the Discord adapter and its registration
-test into `src/channels/` (overwrite — the branch is canonical):
+Fetch the `channels` branch and copy the Discord adapter, its registration test
+and its gateway test into `src/channels/` (overwrite — the branch is canonical):
 
 ```nc:copy from-branch:channels
 src/channels/discord.ts
 src/channels/discord-registration.test.ts
+src/channels/discord-gateway.test.ts
 ```
 
 ### 2. Register the adapter
@@ -73,13 +74,13 @@ Pinned to an exact version — the supply-chain policy rejects ranges and `lates
 ### 5. Build and validate
 
 Build first: it guards the typed `createChatSdkBridge(...)` core call and proves
-the dependency is installed. Then run the one integration test.
+the dependency is installed. Then run the two tests.
 
 ```nc:run effect:build
 pnpm run build
 ```
 ```nc:run effect:test
-pnpm exec vitest run src/channels/discord-registration.test.ts
+pnpm exec vitest run src/channels/discord-registration.test.ts src/channels/discord-gateway.test.ts
 ```
 
 `discord-registration.test.ts` imports the real channel barrel and asserts the
@@ -87,6 +88,11 @@ registry contains `discord`. It goes red if the import line is deleted or drifts
 if the barrel fails to evaluate, or if `@chat-adapter/discord` isn't installed
 (the import throws) — so it also covers the dependency from step 4. End-to-end
 delivery against a real server is verified manually once the service runs.
+
+`discord-gateway.test.ts` feeds the installed adapter a server message that
+@mentions the bot, with the in-place change discord.js makes to it, and asserts
+the message reaches the webhook as sent. It goes red when the adapter lacks the
+step 3 patch.
 
 ## Credentials
 

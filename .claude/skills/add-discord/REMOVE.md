@@ -10,10 +10,10 @@ Delete the self-registration import from `src/channels/index.ts` (skip if alread
 import './discord.js';
 ```
 
-Then delete the copied adapter and its registration test:
+Then delete the copied adapter and its tests:
 
 ```bash
-rm -f src/channels/discord.ts src/channels/discord-registration.test.ts
+rm -f src/channels/discord.ts src/channels/discord-registration.test.ts src/channels/discord-gateway.test.ts
 ```
 
 ## 2. Remove credentials
