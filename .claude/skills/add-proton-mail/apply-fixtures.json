@@ -1,5 +1,5 @@
 {
-  "notes": "Conformance fixtures for scripts/skill-conformance.test.ts \u2014 shaped fake values only, never real credentials. One scenario: the paid-plan confirmation, a Bridge login already done by the operator, and the owner's own address. store-secrets.sh (which writes the bridge password and certificate straight to .env and store/, printing neither) and the `secrets address` read are stubbed; the echo stub answers the platform_id/owner_handle captures; docker, the volume chown, the .env check and the port wait are stubbed to succeed.",
+  "notes": "Conformance fixtures for scripts/skill-conformance.test.ts \u2014 shaped fake values only, never real credentials. One scenario: the paid-plan confirmation, a Bridge login already done by the operator, and the owner's own address. store-secrets.sh (which writes the bridge password and certificate straight to .env and store/, printing neither) and the `secrets address` read are stubbed; the echo stub answers the platform_id/owner_handle captures; docker, the owner check, the volume chown, the .env check and the port wait are stubbed to succeed.",
   "scenarios": [
     {
       "name": "paid-plan",
@@ -38,8 +38,12 @@
           "stdout": "0123456789abcdef"
         },
         {
-          "match": "/dev/tcp/127.0.0.1/1143",
+          "match": "connect(1143",
           "stdout": "* OK [CAPABILITY IMAP4rev1] Proton Mail Bridge"
+        },
+        {
+          "match": "owner-check.sh",
+          "stdout": "nanoclaw-install=0123abcd"
         },
         {
           "match": "owner@example.com",

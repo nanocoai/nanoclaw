@@ -71,7 +71,11 @@ Stop the Bridge container and delete its image and network. The named volume
 holds the Proton login — removing it deletes this device's login (Proton also
 lists it under Settings → Security → Sessions, where it can be revoked):
 
+First check that this checkout owns them: if another NanoClaw checkout on this
+host set up the Bridge, this stops, and nothing of that checkout's is removed.
+
 ```bash
+bash .claude/skills/add-proton-mail/bridge/owner-check.sh >/dev/null || exit 1
 docker rm -f nanoclaw-proton-bridge 2>/dev/null || true
 docker rmi nanoclaw-proton-bridge:latest 2>/dev/null || true
 docker network rm nanoclaw-mail 2>/dev/null || true

@@ -128,10 +128,23 @@ Bridge stores the account login in a `pass` keyring inside the container. It
 lives in a named Docker volume, `nanoclaw-proton-bridge`, so it survives
 container and image replacement. Bridge runs as uid 10001, so the volume must
 belong to that user — a no-op on a fresh install, a one-time fix for a volume an
-older, root-run version of this skill created:
+older, root-run version of this skill created.
+
+The container, volume and network names and the loopback ports are global to
+the host, so one Bridge serves one NanoClaw checkout. Every step that creates,
+replaces or removes them first runs `bridge/owner-check.sh`, which labels them
+`nanoclaw-install=<install slug>` and stops if another checkout on this host
+already owns them, rather than taking over its Bridge and login:
 
 ```nc:run effect:external
-docker volume inspect nanoclaw-proton-bridge >/dev/null 2>&1 || docker volume create nanoclaw-proton-bridge >/dev/null; docker run --rm --user 0 --log-driver none -v nanoclaw-proton-bridge:/root --entrypoint chown nanoclaw-proton-bridge:latest -R 10001:10001 /root
+label=$(bash .claude/skills/add-proton-mail/bridge/owner-check.sh) && { docker volume inspect nanoclaw-proton-bridge >/dev/null 2>&1 || docker volume create --label "$label" nanoclaw-proton-bridge >/dev/null; } && docker run --rm --user 0 --log-driver none -v nanoclaw-proton-bridge:/root --entrypoint chown nanoclaw-proton-bridge:latest -R 10001:10001 /root
+```
+
+Only one Bridge may hold the vault at a time, so stop a running one (a re-run,
+or signing in again) before the login. **Run Bridge** below starts it again:
+
+```nc:run effect:external
+bash .claude/skills/add-proton-mail/bridge/owner-check.sh >/dev/null && { docker stop nanoclaw-proton-bridge >/dev/null 2>&1 || true; }
 ```
 
 The login itself is interactive (Proton asks for the account password, a 2FA
@@ -139,7 +152,7 @@ code if enabled, and the mailbox password on two-password accounts), so it has
 to run in a real terminal. Tell the user:
 
 ```nc:operator
-Sign the Bridge in to your Proton account. In a real terminal (SSH session or local shell — the login needs a TTY):
+Sign the Bridge in to your Proton account. In a real terminal (SSH session or local shell — the login needs a TTY). If you sign in again later, first run `docker stop nanoclaw-proton-bridge`, then this:
 
     docker run --rm -it -v nanoclaw-proton-bridge:/root nanoclaw-proton-bridge:latest init
 
@@ -201,7 +214,7 @@ back across reboots. Re-running replaces the container in place (the login lives
 in the volume, not the container):
 
 ```nc:run effect:external
-docker network inspect nanoclaw-mail >/dev/null 2>&1 || docker network create nanoclaw-mail >/dev/null; docker rm -f nanoclaw-proton-bridge >/dev/null 2>&1; docker run -d --name nanoclaw-proton-bridge --restart unless-stopped --network nanoclaw-mail --cap-drop ALL --security-opt no-new-privileges -p 127.0.0.1:1025:2025 -p 127.0.0.1:1143:2143 -v nanoclaw-proton-bridge:/root nanoclaw-proton-bridge:latest
+label=$(bash .claude/skills/add-proton-mail/bridge/owner-check.sh) && { docker network inspect nanoclaw-mail >/dev/null 2>&1 || docker network create --label "$label" nanoclaw-mail >/dev/null; } && { docker rm -f nanoclaw-proton-bridge >/dev/null 2>&1 || true; } && docker run -d --name nanoclaw-proton-bridge --label "$label" --restart unless-stopped --network nanoclaw-mail --cap-drop ALL --security-opt no-new-privileges -p 127.0.0.1:1025:2025 -p 127.0.0.1:1143:2143 -v nanoclaw-proton-bridge:/root nanoclaw-proton-bridge:latest
 ```
 
 Bridge takes a few seconds to load the vault and open its listeners. Wait for
@@ -211,7 +224,7 @@ itself is listening. An adapter that connects early would only retry, but a
 failed check here points straight at Bridge rather than at the adapter:
 
 ```nc:run effect:check
-for i in $(seq 1 30); do timeout 5 bash -c 'exec 3<>/dev/tcp/127.0.0.1/1143; head -c 64 <&3' 2>/dev/null | grep -q '^\* OK' && exit 0; sleep 2; done; docker logs --tail 20 nanoclaw-proton-bridge; exit 1
+for i in $(seq 1 30); do node -e "const s=require('net').connect(1143,'127.0.0.1');s.setTimeout(5000,()=>process.exit(1));s.on('error',()=>process.exit(1));s.once('data',d=>process.exit(String(d).startsWith('* OK')?0:1))" && exit 0; sleep 2; done; docker logs --tail 20 nanoclaw-proton-bridge; exit 1
 ```
 
 ## Restart

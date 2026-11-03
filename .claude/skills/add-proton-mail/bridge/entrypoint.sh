@@ -15,7 +15,9 @@ set -euo pipefail
 # backstop. Upgrades are manual: bump BRIDGE_VERSION/BRIDGE_COMMIT and rebuild.
 updates="${HOME:?}/.local/share/protonmail/bridge-v3/updates"
 if [[ -d "$updates" ]] && [[ -n "$(ls -A "$updates")" ]]; then
-  echo "entrypoint: discarding downloaded Bridge updates: $(ls "$updates" | tr '\n' ' ')"
+  # stderr: `secrets` below prints one field on stdout for store-secrets.sh to
+  # capture, and nothing else may share it.
+  echo "entrypoint: discarding downloaded Bridge updates: $(ls "$updates" | tr '\n' ' ')" >&2
   rm -rf "${updates:?}"/*
 fi
 
@@ -30,8 +32,9 @@ if [[ "${1:-}" == "init" ]]; then
     gpg --batch --generate-key /protonmail/gpgparams
     pass init nanoclaw-bridge
   fi
-  # Only one bridge may run against the vault at a time.
-  pkill -x bridge 2>/dev/null || true
+  # Only one bridge may run against the vault at a time. The long-lived
+  # container is in another PID namespace, so it can't be stopped from here:
+  # the skill stops it before this runs.
   exec /protonmail/bridge --cli "$@"
 fi
 
