@@ -96,7 +96,32 @@ it('delegates refresh rotation to the native Iron broker and grants only derived
     expect.objectContaining({ source: { source_type: 'token_broker', config: { credential_id: 'bcr_test' } } }),
   );
   const local = fs.readFileSync(path.join(root, 'codex.json'), 'utf8');
-  expect(local).not.toMatch(/fixture-(refresh|access|account)/);
+  expect(local).not.toMatch(/fixture-(refresh|access)/);
+  // The workspace id is an identifier the agent's stand-in login must carry.
+  expect(JSON.parse(local)).toMatchObject({ mode: 'chatgpt', accountId: 'fixture-account' });
+});
+it('asks for a new sign-in when a ChatGPT login predates the recorded workspace id', async () => {
+  const root = fixture();
+  fs.writeFileSync(path.join(root, 'codex.json'), JSON.stringify({ mode: 'chatgpt', secretIds: [] }));
+  expect(await createCredentialStore(root).has('codex')).toBe(false);
+  expect(mocks.request).not.toHaveBeenCalled();
+  fs.writeFileSync(
+    path.join(root, 'codex.json'),
+    JSON.stringify({ mode: 'chatgpt', secretIds: [], accountId: 'fixture-account' }),
+  );
+  expect(await createCredentialStore(root).has('codex')).toBe(true);
+  fs.writeFileSync(path.join(root, 'codex.json'), JSON.stringify({ mode: 'api', secretIds: [] }));
+  expect(await createCredentialStore(root).has('codex')).toBe(true);
+});
+it('rejects a ChatGPT login whose account id is not a plain identifier', async () => {
+  const root = fixture();
+  const file = oauthLogin(root);
+  const auth = JSON.parse(fs.readFileSync(file, 'utf8'));
+  auth.tokens.account_id = 'bad id\n';
+  fs.writeFileSync(file, JSON.stringify(auth));
+  await expect(createCredentialStore(root).save('codex', { kind: 'oauth', file })).rejects.toThrow(
+    'complete ChatGPT session',
+  );
 });
 it('does not claim a dead broker is connected', async () => {
   const root = fixture();

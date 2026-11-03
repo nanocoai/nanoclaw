@@ -5,7 +5,7 @@ import { DATA_DIR, DEFAULT_AGENT_PROVIDER, GROUPS_DIR } from './config.js';
 import { ensureContainerConfig } from './db/container-configs.js';
 import { stageGroupPersona } from './group-persona.js';
 import { log } from './log.js';
-import { CLAUDE_DEFAULT_SETTINGS, migrateClaudeMemorySettings } from './migrate-claude-memory-settings.js';
+import { prepareClaudeMemorySettings } from './migrate-claude-memory-settings.js';
 import { getProviderHostContract } from './provider-contracts/registry.js';
 import { initializeProviderGroupSurfaces } from './provider-contracts/realize.js';
 import { providerProvidesAgentSurfaces } from './providers/provider-container-registry.js';
@@ -81,13 +81,9 @@ export async function initGroupFilesystem(
       initialized.push('.claude-shared');
     }
 
-    const settingsFile = path.join(claudeDir, 'settings.json');
-    if (!fs.existsSync(settingsFile)) {
-      fs.writeFileSync(settingsFile, CLAUDE_DEFAULT_SETTINGS);
-      initialized.push('settings.json');
-    } else if (migrateClaudeMemorySettings(settingsFile)) {
-      initialized.push('settings.json (reconciled Claude settings)');
-    }
+    const settings = prepareClaudeMemorySettings(claudeDir);
+    if (settings === 'created') initialized.push('settings.json');
+    else if (settings === 'reconciled') initialized.push('settings.json (reconciled Claude settings)');
 
     // Skills directory — created empty here; symlinks are synced at spawn
     // time by container-runner.ts based on container.json skills selection.

@@ -121,7 +121,7 @@ describe('offerCodexFailureAssist', () => {
       fs.mkdirSync(path.join(home, '.codex'));
       fs.writeFileSync(path.join(home, '.codex', 'auth.json'), '{}');
       vi.stubEnv('HOME', home);
-      mockSpawnSync.mockReturnValue({ status: 0, stdout: 'codex-cli 0.155.1' });
+      mockSpawnSync.mockReturnValue({ status: 0, stdout: 'codex-cli 0.162.1' });
       mockConfirm.mockResolvedValue(true);
       mockSpawn.mockImplementation(() => {
         const child = new EventEmitter();

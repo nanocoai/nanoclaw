@@ -8,6 +8,7 @@ import { getSessionRouting } from './db/session-routing.js';
 import { MockProvider } from './providers/mock.js';
 import type { ProviderExchange } from './providers/types.js';
 import { runPollLoop } from './poll-loop.js';
+import { GENERIC_FAILURE_NOTICE } from './formatter.js';
 
 const MOCK_PROVIDER_CONTRACT = {
   textDelivery: 'mid-turn-complete',
@@ -165,23 +166,26 @@ describe('poll loop integration', () => {
   it('unknown destination is dropped, valid destination is sent', async () => {
     insertMessage('m1', { sender: 'Alice', text: 'hi' }, { platformId: 'chan-1', channelType: 'discord' });
 
-    const provider = new MockProvider(
-      {},
-      () => '<message to="nonexistent">dropped</message><message to="discord-test">delivered</message>',
-    );
+    let turns = 0;
+    const provider = new MockProvider({}, () => {
+      turns++;
+      return '<message to="nonexistent">dropped</message><message to="discord-test">delivered</message>';
+    });
     const controller = new AbortController();
     const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
 
-    await waitFor(() => getUndeliveredMessages().length > 0, 2000);
+    // Wait for the nudged retry to be answered too.
+    await waitFor(() => turns >= 2, 2000);
+    await new Promise((resolve) => setTimeout(resolve, 50));
     controller.abort();
+    await loopPromise.catch(() => {});
 
+    // Only the valid destination gets output. The dropped block is nudged and
+    // this mock answers the retry identically: the repeat is not sent again.
     const out = getUndeliveredMessages();
-    // Only the valid destination should produce output
     expect(out).toHaveLength(1);
     expect(JSON.parse(out[0].content).text).toBe('delivered');
     expect(out[0].platform_id).toBe('chan-1');
-
-    await loopPromise.catch(() => {});
   });
 
   it('multiple <message> blocks each produce an outbound message', async () => {
@@ -471,7 +475,7 @@ describe('poll loop — provider error recovery', () => {
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(JSON.parse(out[0].content).text).toBe('The agent run failed. Check the logs for details.');
+    expect(JSON.parse(out[0].content).text).toBe(GENERIC_FAILURE_NOTICE);
     expect(out[0].content).not.toContain('API rate limit exceeded');
 
     // Input message should be marked completed despite the error
@@ -500,7 +504,7 @@ describe('poll loop — stale session recovery', () => {
     // A safe notice reaches the user; the provider diagnostic stays private.
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(JSON.parse(out[0].content).text).toBe('The agent run failed. Check the logs for details.');
+    expect(JSON.parse(out[0].content).text).toBe(GENERIC_FAILURE_NOTICE);
     expect(out[0].content).not.toContain('session not found');
 
     // Continuation was cleared (isSessionInvalid returned true)

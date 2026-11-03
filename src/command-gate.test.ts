@@ -87,3 +87,74 @@ describe('normal messages pass through', () => {
     expect(await gateCommand('/whatever', 'telegram:1', 'ag-1')).toEqual({ action: 'pass' });
   });
 });
+
+// Each row: message text and the runner-handled command it executes, if any
+// (mirrored in container/agent-runner/src/slash-command.test.ts). A non-admin
+// must be denied exactly the rows the runner would execute.
+const RUNNER_COMMAND_CORPUS: Array<[string, '/clear' | '/upload-trace' | null]> = [
+  ['/clear', '/clear'],
+  ['/CLEAR', '/clear'],
+  ['  /clear now ', '/clear'],
+  ['/clear@somebot', '/clear'],
+  ['/CLEAR@Bot', '/clear'],
+  ['/clear@somebot please', '/clear'],
+  ['/clear\tnow', '/clear'],
+  ['/clear\nnow', '/clear'],
+  ['/clearx', null],
+  ['/clear.', null],
+  ['/clear-', null],
+  ['/clear_all', null],
+  ['/clear@', null],
+  ['/clear@bot.', null],
+  ['/clear@bot/x', null],
+  ['/upload-trace', '/upload-trace'],
+  ['/upload-trace@somebot', '/upload-trace'],
+  ['/UPLOAD-TRACE now', '/upload-trace'],
+  ['/upload-tracex', null],
+  ['/upload-trace.', null],
+  ['/upload', null],
+  ['clear', null],
+  ['hello /clear', null],
+];
+
+describe('gate and runner agree on command names', () => {
+  it.each(RUNNER_COMMAND_CORPUS)('%j from a non-admin', async (text, executes) => {
+    const expected = executes ? { action: 'deny', command: executes } : { action: 'pass' };
+    expect(await gateCommand(JSON.stringify({ text }), 'telegram:nobody', 'ag-1')).toEqual(expected);
+  });
+
+  it('gates a native admin command sent with a bot suffix', async () => {
+    expect(await gateCommand('/compact@somebot', 'telegram:nobody', 'ag-1')).toEqual({
+      action: 'deny',
+      command: '/compact',
+    });
+  });
+
+  it('still lets an owner run a suffixed admin command', async () => {
+    await seedUser('telegram:owner');
+    await grantRole({
+      user_id: 'telegram:owner',
+      role: 'owner',
+      agent_group_id: null,
+      granted_by: null,
+      granted_at: now(),
+    });
+    expect(await gateCommand('/clear@somebot', 'telegram:owner', 'ag-1')).toEqual({ action: 'pass' });
+  });
+
+  it('drops a filtered command sent with a bot suffix', async () => {
+    expect(await gateCommand('/start@somebot', 'telegram:1', 'ag-1')).toEqual({ action: 'filter' });
+  });
+
+  // The Claude SDK runs these aliases as the gated command itself.
+  it.each(['/reset', '/new', '/usage', '/stats'])('denies the SDK alias %s to a non-admin', async (alias) => {
+    expect(await gateCommand(`${alias}@somebot now`, 'telegram:nobody', 'ag-1')).toEqual({
+      action: 'deny',
+      command: alias,
+    });
+  });
+
+  it.each(['/checkup', '/settings', '/rc'])('drops the SDK alias %s like its command', async (alias) => {
+    expect(await gateCommand(alias, 'telegram:1', 'ag-1')).toEqual({ action: 'filter' });
+  });
+});

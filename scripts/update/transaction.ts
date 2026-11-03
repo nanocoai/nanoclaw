@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url';
 import type { GatewayCatalogEntry } from '../../setup/gateways/catalog.js';
 import { getInstallSlug } from '../../src/install-slug.js';
 import { refreshInstalledSkills, type SkillsRefreshReport } from '../update-skills.js';
+import { stampChannel, type UpdateChannel } from './channel.js';
 import {
   createCommandRunner,
   defaultServiceEnvironment,
@@ -50,6 +51,7 @@ export interface UpdateState {
   stageRoot: string;
   stageBranch: string;
   upstreamRef: string;
+  channel?: UpdateChannel;
   strategy: 'merge' | 'rebase' | 'cherry-pick';
   originalHead: string;
   targetHead?: string;
@@ -245,6 +247,7 @@ function refreshPreparedState(state: UpdateState, runtime: UpdateRuntime): void 
 export interface PrepareOptions {
   projectRoot: string;
   upstreamRef: string;
+  channel?: UpdateChannel;
   strategy?: UpdateState['strategy'];
   commits?: string[];
 }
@@ -284,6 +287,7 @@ export function prepareUpdate(options: PrepareOptions, runtime = createUpdateRun
     stageRoot,
     stageBranch,
     upstreamRef: options.upstreamRef,
+    channel: options.channel,
     strategy,
     originalHead,
     backupBranch,
@@ -927,6 +931,7 @@ export async function finishUpdate(
       ['exec', 'tsx', 'scripts/upgrade-state.ts', 'set', '', 'update-nanoclaw'],
       state.projectRoot,
     );
+    if (state.channel) stampChannel(state.projectRoot, { channel: state.channel, ref: state.upstreamRef });
     if (state.service?.active) {
       runtime.startService(state.service, state.projectRoot);
       if (!(await runtime.verifyHealth(state.service, state.projectRoot))) {
@@ -1062,6 +1067,7 @@ export function summarizeState(state: UpdateState): Record<string, unknown> {
     originalHead: state.originalHead,
     targetHead: state.targetHead,
     upstreamRef: state.upstreamRef,
+    channel: state.channel,
     backupBranch: state.backupBranch,
     backupTag: state.backupTag,
     stageRoot: state.stageRoot,

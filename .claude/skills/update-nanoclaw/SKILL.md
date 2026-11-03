@@ -73,6 +73,8 @@ fi
 
 Materialize the newest controller from that ref. This is the self-update seam:
 an older local skill still executes the newest safety code before any mutation.
+The controller always comes from `main`; the ref it merges follows the channel
+(step 2).
 
 ```bash
 # pwd -P: on macOS mktemp returns a path through the /var symlink, and a
@@ -86,18 +88,39 @@ controller_dir="$(cd "$(mktemp -d)" && pwd -P)"
 git archive "$upstream_ref" scripts src/install-slug.ts | tar -x -C "$controller_dir"
 ```
 
-## 2. Choose the Git strategy and prepare
+## 2. Choose the channel, the Git strategy, and prepare
+
+Channels (`NANOCLAW_UPDATE_CHANNEL` in `.env`; `--channel <name>` overrides it
+once): `stable` (default) = newest annotated `vX.Y.Z` tag; `beta` = newest
+`-rc.N` if newer than stable; `edge` = upstream `main`. Change the default only
+with `set-channel` (below), never by editing `.env`.
 
 Default to `merge`. Use `rebase` only when the user explicitly wants linear
 history. Use `cherry-pick` only with an explicit comma-separated commit list.
 
 ```bash
 pnpm exec tsx "$controller_dir/scripts/update-nanoclaw.ts" prepare \
-  --project-root "$PWD" --upstream-ref "$upstream_ref" --strategy merge
+  --project-root "$PWD" --remote "$upstream_remote" --strategy merge
 ```
 
 The JSON result is `nanoclaw-update/v1`. Record its `id`, `stageRoot`, backup
 branch/tag, changed files, and requirements. The live `HEAD` is still unchanged.
+Tell the user the `channel` and `upstreamRef`. Then:
+
+- **Nothing new** (stable/beta, `phase: prepared`, `targetHead` equals
+  `originalHead`): say "Already on the newest release (vX.Y.Z)", still run
+  step 3 (it refreshes installed skills), and `abandon` if `targetHead` is
+  still unchanged.
+- **Error `code: ahead-of-release`** (nothing staged): ask once, "This install
+  is newer than the latest release, `<tag>`. Keep getting the newest code from
+  `main` (edge), or switch to releases and wait for the next one (stable)?"
+  Save the answer, then on edge re-run `prepare` with `--channel edge`; on
+  stable stop, as there is nothing to update until the next release:
+
+  ```bash
+  pnpm exec tsx "$controller_dir/scripts/update-nanoclaw.ts" set-channel \
+    --project-root "$PWD" --channel edge   # or stable
+  ```
 
 If `phase` is `conflict`, resolve conflicts only inside `stageRoot`, preserving
 intentional local customizations. Complete the merge/rebase/cherry-pick there,

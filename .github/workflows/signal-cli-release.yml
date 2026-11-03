@@ -1,0 +1,33 @@
+# Opens one issue per stable signal-cli release that is newer than the Linux
+# pin in setup/install-signal-cli.sh, with the lines to paste. Upstream warns
+# that releases older than three months may stop working, and Actions cannot
+# open pull requests in this repo, so an issue is the reminder.
+name: signal-cli-release
+
+on:
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: signal-cli-release
+
+jobs:
+  check:
+    if: github.repository == 'nanocoai/nanoclaw'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Open an issue for a newer signal-cli release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/signal-cli-release-issue.sh

@@ -13,6 +13,7 @@ import { getInstallSlug } from '../install-slug.js';
 import { log } from '../log.js';
 
 import { readAllowedHostsFile } from './iron-proxy-allowlist.js';
+import { IronCredentialScope, ironCredentialRules, seenRuleFile } from './iron-proxy-credential-scope.js';
 import { localModelOrigins } from './iron-proxy-local-model.js';
 import { IronProxyApprovalBridge, type IronApprovalIdentity } from './iron-proxy-approval.js';
 import {
@@ -33,6 +34,7 @@ const SETTINGS = [
   'NANOCLAW_IRON_PROXY_IDENTITY_KEY',
   'NANOCLAW_IRON_PROXY_CONTAINER',
   'NANOCLAW_IRON_CONTROL_URL',
+  'NANOCLAW_IRON_CONTROL_PORT',
   'NANOCLAW_IRON_PROXY_PORT',
   'NANOCLAW_IRON_PROXY_APPROVAL_SOCKET',
   'NANOCLAW_IRON_PROXY_AUTH_ENV',
@@ -67,6 +69,7 @@ export interface IronProxySettings {
   containerName: string;
   port: number;
   managed?: boolean;
+  controlPort?: number;
   projectRoot?: string;
   approvalDir: string;
   approvalSocket: string;
@@ -124,6 +127,7 @@ export function readIronProxySettings(
     containerName: value('NANOCLAW_IRON_PROXY_CONTAINER') || `nanoclaw-iron-proxy-${getInstallSlug(projectRoot)}`,
     port,
     managed: !!value('NANOCLAW_IRON_CONTROL_URL'),
+    controlPort: Number(value('NANOCLAW_IRON_CONTROL_PORT') || 10257),
     projectRoot,
     approvalDir: isInside(approvalSocket, materialRoot)
       ? path.dirname(approvalSocket)
@@ -251,6 +255,22 @@ function centralContainerRunning(containerName: string): Promise<boolean> {
   });
 }
 
+/** When the central proxy last started; it reads its YAML configuration only then. */
+function centralContainerStartedAt(containerName: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      CONTAINER_RUNTIME_BIN,
+      ['inspect', '-f', '{{.State.StartedAt}}', containerName],
+      { encoding: 'utf8', timeout: 5_000 },
+      (err, stdout) => {
+        const startedAt = Date.parse(stdout?.trim() ?? '');
+        if (err || !Number.isFinite(startedAt)) reject(err ?? new Error('Iron Proxy start time is unavailable'));
+        else resolve(startedAt);
+      },
+    );
+  });
+}
+
 /** Material the proxy cannot serve a session without. */
 function missingMaterial(files: readonly string[]): string | undefined {
   return files.find((file) => !fs.existsSync(file));
@@ -277,18 +297,26 @@ export function signedWorkloadToken(identity: string, key: Buffer): string {
   return `${unsigned}.${createHmac('sha256', key).update(unsigned).digest('base64url')}`;
 }
 
-/** Synthetic login data only; real tokens and account headers stay inside Iron. */
-export function codexPlaceholder(mode: 'api' | 'chatgpt'): string {
+const CODEX_ACCOUNT_ID = /^[A-Za-z0-9_-]{1,128}$/;
+let warnedCodexAccount = false;
+
+/**
+ * Synthetic login data only; real tokens stay inside Iron. Clients match the
+ * account id against the login's workspace list, so the stored login's
+ * workspace id (an identifier, not a credential) replaces the placeholder.
+ */
+export function codexPlaceholder(mode: 'api' | 'chatgpt', accountId?: string): string {
   if (mode === 'api') return JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: CODEX_PLACEHOLDER });
+  const account = accountId && CODEX_ACCOUNT_ID.test(accountId) ? accountId : CODEX_PLACEHOLDER;
   const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
   const token = `${encode({ alg: 'none' })}.${encode({
     sub: CODEX_PLACEHOLDER,
-    'https://api.openai.com/auth': { chatgpt_account_id: CODEX_PLACEHOLDER, chatgpt_plan_type: 'plus' },
+    'https://api.openai.com/auth': { chatgpt_account_id: account, chatgpt_plan_type: 'plus' },
   })}.cGxhY2Vob2xkZXI`;
   return JSON.stringify({
     auth_mode: 'chatgpt',
     OPENAI_API_KEY: null,
-    tokens: { id_token: token, access_token: CODEX_PLACEHOLDER, refresh_token: '', account_id: CODEX_PLACEHOLDER },
+    tokens: { id_token: token, access_token: CODEX_PLACEHOLDER, refresh_token: '', account_id: account },
     last_refresh: new Date().toISOString(),
   });
 }
@@ -300,14 +328,22 @@ function codexAuthMount(
   if (!settings.managed || !settings.projectRoot) return [];
   const metadata = path.join(settings.projectRoot, 'data/session-materials/iron-control/codex.json');
   if (!fs.existsSync(metadata)) return [];
-  const { mode } = JSON.parse(fs.readFileSync(metadata, 'utf8'));
+  const { mode, accountId } = JSON.parse(fs.readFileSync(metadata, 'utf8'));
   if (mode !== 'api' && mode !== 'chatgpt') throw new Error('Invalid Iron Codex authentication mode');
+  const recorded = typeof accountId === 'string' && CODEX_ACCOUNT_ID.test(accountId) ? accountId : undefined;
+  if (mode === 'chatgpt' && !recorded && !warnedCodexAccount) {
+    // Logins saved before the id was recorded; Iron cannot read stored values back.
+    warnedCodexAccount = true;
+    log.warn('Iron Codex login has no recorded workspace id; sign in again', {
+      command: 'pnpm exec tsx setup/index.ts --step provider-auth codex',
+    });
+  }
   const group = input.key.agentGroupId;
   if (!/^[a-zA-Z0-9_-]+$/.test(group)) throw new Error('Invalid agent group ID');
   const directory = path.join(settings.projectRoot, 'data/v2-sessions', group, '.iron-codex');
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   const file = path.join(directory, 'auth.json');
-  fs.writeFileSync(file, codexPlaceholder(mode), { mode: 0o644 });
+  fs.writeFileSync(file, codexPlaceholder(mode, recorded), { mode: 0o644 });
   return [
     {
       class: 'group-state',
@@ -361,6 +397,7 @@ export function defineIronProxyProvider(initialSettings?: IronProxySettings): Ga
   const leases = new Map<string, LiveLease>();
   let monitor: NodeJS.Timeout | null = null;
   let bridge: IronProxyApprovalBridge | null = null;
+  let scope: IronCredentialScope | null = null;
 
   const currentSettings = (): IronProxySettings => (settings ??= readIronProxySettings());
   const currentBridge = (): IronProxyApprovalBridge => {
@@ -488,7 +525,20 @@ export function defineIronProxyProvider(initialSettings?: IronProxySettings): Ga
     // The proxy is install-owned, not a per-session resource. Session abort
     // drops only its signed capability and approval state.
     sessions: { ensure },
-    approvals: { subscribe: (decide, signal) => currentBridge().subscribe(decide, signal) },
+    approvals: {
+      subscribe: (decide, signal) => currentBridge().subscribe(decide, signal),
+      credentialScope: async (destination) => {
+        const configured = currentSettings();
+        scope ??= new IronCredentialScope(
+          ironCredentialRules(configured, {
+            proxyStartedAt: () => centralContainerStartedAt(configured.containerName),
+          }),
+          undefined,
+          seenRuleFile(path.join(path.dirname(configured.configFile), 'seen-credential-rules.json')),
+        );
+        return scope.lookup(destination);
+      },
+    },
   };
 }
 

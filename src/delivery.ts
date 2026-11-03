@@ -534,12 +534,16 @@ async function deliverMessage(
       ? readOutboxFiles(session.agent_group_id, session.id, msg.id, content.files as string[])
       : undefined;
 
+  // Agent-asked questions keep their own markup; host-built cards never come
+  // through here, so only they get a channel's card-text escape.
+  const deliveredContent =
+    content.type === 'ask_question' ? JSON.stringify({ ...content, fromAgent: true }) : msg.content;
   const platformMsgId = await deliveryAdapter.deliver(
     msg.channelType,
     msg.platformId,
     msg.threadId,
     msg.kind,
-    msg.content,
+    deliveredContent,
     files,
     deliverInstance,
   );

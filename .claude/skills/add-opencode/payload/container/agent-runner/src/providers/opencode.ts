@@ -1,10 +1,7 @@
 import { initializeOpenCodeAuth } from './opencode-auth.js';
 import { spawn, type ChildProcess } from 'child_process';
-import { lstatSync, realpathSync } from 'fs';
-import path from 'path';
-import { pathToFileURL } from 'url';
 
-import { createOpencodeClient, type FilePartInput } from '@opencode-ai/sdk';
+import { createOpencodeClient } from '@opencode-ai/sdk';
 // The root client has no `.question` surface; reply/reject/list for the
 // interactive `question` tool live on the `/v2` subpath client. Import it
 // separately so the session/event client above is untouched.
@@ -45,8 +42,6 @@ const DEFAULT_STREAM_SILENCE_MS = 60_000;
 const DEFAULT_IDLE_TIMEOUT_MS = 900_000;
 
 const AGENT_DIR = '/workspace/agent';
-const DEFAULT_NATIVE_ATTACHMENT_MAX_COUNT = 8;
-const DEFAULT_NATIVE_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
 
 /** Native session lookup errors invalidate a stored continuation; backend/network failures do not. */
 const STALE_SESSION_RE = /"name":"NotFoundError"/;
@@ -119,51 +114,6 @@ export function spawnOpencodeServer(
   });
 }
 
-/**
- * The shared attachment contract carries only host-staged files, bound to the
- * source message whose inbox owns them. Remote URLs remain prompt text and are
- * never fetched implicitly.
- *
- * Attachments are ALSO described inline in the prompt text the formatter
- * produces, and that text rendering stays the contract every provider relies
- * on. Everything below is an additive view for OpenCode's file parts: when no
- * structured attachment arrives, the provider behaves exactly as it did before.
- */
-interface OpenCodePromptAttachment {
-  sourceMessageId: string;
-  filename: string;
-  path: string;
-  mime?: string;
-}
-
-/** Extension → MIME fallback, for adapters that report no `mimeType`. */
-const ATTACHMENT_MIME_BY_EXT: Record<string, string> = {
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.webp': 'image/webp',
-  '.heic': 'image/heic',
-  '.pdf': 'application/pdf',
-};
-
-function attachmentMime(att: OpenCodePromptAttachment): string | undefined {
-  if (att.mime) return att.mime;
-  const name = att.path || att.filename || '';
-  const dot = name.lastIndexOf('.');
-  return dot < 0 ? undefined : ATTACHMENT_MIME_BY_EXT[name.slice(dot).toLowerCase()];
-}
-
-export interface NativeAttachmentLimits {
-  maxCount: number;
-  maxBytes: number;
-}
-
-export interface NativeAttachmentFileInfo {
-  realPath: string;
-  size: number;
-}
-
 function positiveIntegerEnv(name: string, fallback: number): number {
   const raw = process.env[name];
   if (raw === undefined) return fallback;
@@ -174,118 +124,6 @@ function positiveIntegerEnv(name: string, fallback: number): number {
     return fallback;
   }
   return parsed;
-}
-
-export function resolveNativeAttachmentLimits(): NativeAttachmentLimits {
-  return {
-    maxCount: positiveIntegerEnv('OPENCODE_NATIVE_ATTACHMENT_MAX_COUNT', DEFAULT_NATIVE_ATTACHMENT_MAX_COUNT),
-    maxBytes: positiveIntegerEnv('OPENCODE_NATIVE_ATTACHMENT_MAX_BYTES', DEFAULT_NATIVE_ATTACHMENT_MAX_BYTES),
-  };
-}
-
-function inspectNativeAttachment(filePath: string): NativeAttachmentFileInfo | null {
-  try {
-    const stat = lstatSync(filePath);
-    if (!stat.isFile() || stat.isSymbolicLink()) return null;
-    return { realPath: realpathSync(filePath), size: stat.size };
-  } catch {
-    return null;
-  }
-}
-
-function isPathInside(parent: string, child: string): boolean {
-  const relative = path.relative(parent, child);
-  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
-}
-
-function isSafeComponent(value: string): boolean {
-  return (
-    value.length > 0 &&
-    value !== '.' &&
-    value !== '..' &&
-    !value.includes('/') &&
-    !value.includes('\\') &&
-    !value.includes('\0')
-  );
-}
-
-/**
- * Turn a turn's attachments into OpenCode file parts, so the model sees the
- * media itself rather than only the `[image: cat.png — saved to …]` line the
- * formatter already renders into the prompt text.
- *
- * The URL is a `file://` path, NOT a data: URI, deliberately: OpenCode resolves
- * a file: part server-side and converts supported local media for the model.
- * Base64-ing here would duplicate that work and inflate the request body. The
- * server shares this container's filesystem (spawnOpencodeServer), so the path
- * resolves.
- *
- * Only images and PDFs are forwarded; PDFs go through even though a given
- * backend may reject them, since the alternative is silently withholding a
- * document the user did send. Anything skipped is still described in the
- * prompt text, so it is never lost — just not handed over as media.
- *
- * `exists` is injectable so tests can drive resolvability without touching disk.
- */
-export function buildAttachmentFileParts(
-  attachments: OpenCodePromptAttachment[] | undefined,
-  inspect: (path: string) => NativeAttachmentFileInfo | null = inspectNativeAttachment,
-  limits: NativeAttachmentLimits = resolveNativeAttachmentLimits(),
-): FilePartInput[] {
-  const parts: FilePartInput[] = [];
-  let totalBytes = 0;
-  for (const att of attachments ?? []) {
-    if (parts.length >= limits.maxCount) {
-      log(`Native attachment count limit reached (${limits.maxCount}); remaining files stay prompt text only`);
-      break;
-    }
-    if (!isSafeComponent(att.sourceMessageId) || !isSafeComponent(att.filename)) continue;
-    const expectedRoot = `/workspace/inbox/${att.sourceMessageId}`;
-    const expectedPath = `${expectedRoot}/${att.filename}`;
-    if (path.resolve(att.path) !== expectedPath) {
-      log(`Attachment path is not bound to its source message, not sent as media: ${att.filename}`);
-      continue;
-    }
-    const mime = attachmentMime(att);
-    if (!mime) continue;
-    if (!mime.startsWith('image/') && mime !== 'application/pdf') continue;
-    const info = inspect(att.path);
-    if (!info || !isPathInside(expectedRoot, info.realPath) || path.basename(info.realPath) !== att.filename) {
-      log(`Attachment has no safe regular file, not sent as media: ${att.filename}`);
-      continue;
-    }
-    if (info.size < 0 || totalBytes + info.size > limits.maxBytes) {
-      log(`Native attachment byte limit reached (${limits.maxBytes}); ${att.filename} stays prompt text only`);
-      continue;
-    }
-    totalBytes += info.size;
-    // OpenCode appends file parts after the combined batch text. Prefix the
-    // display name with the source id so two messages carrying `image.png`
-    // remain unambiguous to the model; the prompt text keeps the original name.
-    parts.push({
-      type: 'file',
-      mime,
-      filename: `${att.sourceMessageId}--${att.filename}`,
-      url: pathToFileURL(info.realPath).href,
-    });
-  }
-  return parts;
-}
-
-/**
- * The prompt body for one turn: the text the formatter produced, plus any
- * media that came with it. Both the opening prompt and every mid-turn push go
- * through here, so an attachment reaches the model the same way whichever path
- * carried it — OpenCode holds one query open per session, so in practice most
- * real messages arrive as pushes.
- */
-export function buildPromptParts(
-  text: string,
-  attachments?: OpenCodePromptAttachment[],
-  inspect: (path: string) => NativeAttachmentFileInfo | null = inspectNativeAttachment,
-  limits: NativeAttachmentLimits = resolveNativeAttachmentLimits(),
-): Array<{ type: 'text'; text: string } | FilePartInput> {
-  return [{ type: 'text', text }, ...buildAttachmentFileParts(attachments, inspect, limits)];
 }
 
 type OpenCodeEvent = { type: string; properties: Record<string, unknown> };
@@ -356,8 +194,8 @@ const defaultSharedRuntimeDeps: OpenCodeSharedRuntimeDeps = {
   // option the SDK defaults requests to the server's launch directory.
   // The cast bridges one declared gap: the handle types `prompt` parts as
   // `unknown[]` so fakes stay light, while the SDK types them as its part
-  // union. Every call site passes `buildPromptParts` output, which is the
-  // SDK's own union, so the runtime shapes agree.
+  // union. Every call site passes a text part, which is in the SDK's own
+  // union, so the runtime shapes agree.
   createClient: (url, cwd) => createOpencodeClient({ baseUrl: url, directory: cwd }) as unknown as SharedRuntimeClient,
   createQuestionClient: (url) => createOpencodeQuestionClient({ baseUrl: url }),
 };
@@ -724,12 +562,7 @@ export class OpenCodeProvider implements AgentProvider {
 
   query(input: QueryInput): AgentQuery {
     if (!this.memorySessionHook) throw new Error('OpenCode memory session hook was not registered');
-    const pending: Array<{ text: string; attachments?: OpenCodePromptAttachment[] }> = [
-      {
-        text: input.prompt,
-        attachments: (input as QueryInput & { attachments?: OpenCodePromptAttachment[] }).attachments,
-      },
-    ];
+    const pending: string[] = [input.prompt];
     let waiting: (() => void) | undefined;
     let ended = false;
     const abort = new AbortController();
@@ -776,7 +609,7 @@ export class OpenCodeProvider implements AgentProvider {
             client: runtime.client.session,
             pump,
             sessionId,
-            parts: buildPromptParts(turn.text, turn.attachments),
+            parts: [{ type: 'text', text: turn }],
             model: promptModel,
             prepare: async () => {
               await prepareOpenCodeMemory(
@@ -806,9 +639,9 @@ export class OpenCodeProvider implements AgentProvider {
     }
 
     return {
-      push: (text: string, attachments?: OpenCodePromptAttachment[]) => {
+      push: (text: string) => {
         if (ended || abort.signal.aborted) return;
-        pending.push({ text, attachments });
+        pending.push(text);
         waiting?.();
       },
       end: () => {

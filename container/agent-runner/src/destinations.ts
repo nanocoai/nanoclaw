@@ -85,7 +85,7 @@ function buildReadingSection(): string {
     'Chat turns can include:',
     '',
     '- `<message>` — the message you are answering. `<dm-history>` and `<channel-history>` are this thread\'s own earlier timeline.',
-    '- `<cross-session-context>` — a copy of something from elsewhere in this conversation: another thread, or a message you or a scheduled task posted here. Its `from` says which. If you can\'t tell whether the current message refers to it or to this thread, ask.',
+    '- `<cross-session-context>` — a copy of something from elsewhere in this conversation: another thread, or a message you or a scheduled task posted here. Its `from` says where; `sender="you"` marks your own. If you can\'t tell whether the current message refers to it or to this thread, ask.',
   ].join('\n');
 }
 
@@ -136,7 +136,7 @@ function buildDestinationsSection(mode: SessionMode): string {
   );
   lines.push('');
   lines.push(
-    'The `send_message` MCP tool is the same delivery, available mid-turn — handy for a quick acknowledgment ("on it") before a slow tool call. Always pass its explicit `to` destination. Each `send_message` call and each final-response `<message>` block lands as its own message in the conversation, so they read as a sequence rather than as one combined reply.',
+    'The `send_message` MCP tool is the same delivery, available mid-turn. Always pass its explicit `to` destination. It is handy for a quick acknowledgment ("on it") before a slow tool call, but your answer still has to be sent after it. Each `send_message` call and each final-response `<message>` block lands as its own message in the conversation, so they read as a sequence rather than as one combined reply.',
   );
   lines.push('');
   lines.push(

@@ -34,6 +34,7 @@ import fs from 'fs';
 import { getSessionClaim } from './db/coordination.js';
 import { getSession, isTaskThread, updateSession } from './db/sessions.js';
 import { getAgentGroup } from './db/agent-groups.js';
+import { ABSOLUTE_CEILING_MS_RAW, CLAIM_STUCK_MS_RAW } from './config.js';
 import { log } from './log.js';
 import { heartbeatPath, withExistingMailboxSession } from './session-manager.js';
 import { getContainerStartedAtMs, isContainerRunning, killContainer } from './container-runner.js';
@@ -41,13 +42,35 @@ import { requestWake } from './request-wake.js';
 import type { Session } from './types.js';
 import type { ContainerState, InboundMailbox, OutboundMailbox } from './mailbox/index.js';
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// One global env override per timer, read once at host start like every other
+// NANOCLAW_* setting. Anything that is not a whole number of ms inside
+// [min, 24 h] is refused with a warning and the built-in default is used.
+function envOverrideMs(name: string, raw: string, defaultMs: number, minMs: number): number {
+  if (raw === '') return defaultMs;
+  const parsed = /^\d+$/.test(raw) ? Number(raw) : NaN;
+  if (Number.isNaN(parsed) || parsed < minMs || parsed > DAY_MS) {
+    log.warn(`Ignoring ${name}=${raw}: expected an integer between ${minMs} and ${DAY_MS} ms; using ${defaultMs}`);
+    return defaultMs;
+  }
+  return parsed;
+}
+
 // Absolute idle ceiling for a running container. If the heartbeat file hasn't
 // been touched in this long, the container is either stuck or doing genuinely
-// nothing — kill and restart on the next inbound.
-export const ABSOLUTE_CEILING_MS = 30 * 60 * 1000;
+// nothing — kill and restart on the next inbound. Override with
+// NANOCLAW_ABSOLUTE_CEILING_MS (60 s .. 24 h).
+export const ABSOLUTE_CEILING_MS = envOverrideMs(
+  'NANOCLAW_ABSOLUTE_CEILING_MS',
+  ABSOLUTE_CEILING_MS_RAW,
+  30 * 60 * 1000,
+  60 * 1000,
+);
 // Stuck tolerance window applied per 'processing' claim — "did we see any
-// signs of life since this message was claimed?"
-export const CLAIM_STUCK_MS = 60 * 1000;
+// signs of life since this message was claimed?" Override with
+// NANOCLAW_CLAIM_STUCK_MS (10 s .. 24 h).
+export const CLAIM_STUCK_MS = envOverrideMs('NANOCLAW_CLAIM_STUCK_MS', CLAIM_STUCK_MS_RAW, 60 * 1000, 10 * 1000);
 const MAX_TRIES = 5;
 const BACKOFF_BASE_MS = 5000;
 

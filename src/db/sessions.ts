@@ -168,6 +168,25 @@ export async function updateSession(
   await getDb().run(`UPDATE sessions SET ${fields.join(', ')} WHERE id = @id`, values);
 }
 
+/** Give a session with no chat a chat; false when it already has one. */
+export async function bindUnboundSession(id: string, messagingGroupId: string): Promise<boolean> {
+  const result = await getDb().run(
+    'UPDATE sessions SET messaging_group_id = ? WHERE id = ? AND messaging_group_id IS NULL',
+    messagingGroupId,
+    id,
+  );
+  return result.changes > 0;
+}
+
+/** Undo bindUnboundSession, only while the session still has that chat. */
+export async function unbindSession(id: string, messagingGroupId: string): Promise<void> {
+  await getDb().run(
+    'UPDATE sessions SET messaging_group_id = NULL WHERE id = ? AND messaging_group_id = ?',
+    id,
+    messagingGroupId,
+  );
+}
+
 export async function deleteSession(id: string): Promise<void> {
   await getDb().run('DELETE FROM sessions WHERE id = ?', id);
 }

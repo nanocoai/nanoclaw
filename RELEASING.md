@@ -8,6 +8,8 @@ Each release ships:
 - A `CHANGELOG.md` entry under `## [<version>] - <YYYY-MM-DD>`.
 - A GitHub Release whose body mirrors the CHANGELOG entry plus a contributors section.
 
+Versions are calendar-based, `YYYY.M.PATCH`, starting with 2026.10.0 (after 2.4.0): the year, the month of the release without a leading zero (`2026.9.0`, never `2026.09.0`), and a patch number that starts at 0 each month. A version says how old an install is, and it still sorts after every 2.x release.
+
 ## When to cut a release
 
 A release is cut by a maintainer publishing it. The trigger is a release PR that bumps `package.json` and adds its `CHANGELOG.md` entry. There is no fixed schedule, and back-to-back changes may be rolled into one release. Cutting at least weekly is preferable to batching: smaller releases are easier to read, pin, and revert.

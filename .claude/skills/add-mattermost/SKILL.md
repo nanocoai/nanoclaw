@@ -194,10 +194,15 @@ identity before it saves any settings.
 
 Approvals require Mattermost itself—not the browser—to reach NanoClaw. Ask for
 a URL routable from the Mattermost server. It may be NanoClaw's base URL or the
-full `/webhook/mattermost` route; the adapter normalizes either form.
+full `/webhook/mattermost` route; the adapter normalizes either form. The
+webhook server listens on 127.0.0.1 only, so a URL served by a tunnel or proxy
+on this machine works as is. Only when Mattermost calls NanoClaw directly from
+another machine, or from Docker on Linux (`host.docker.internal` mapped with
+`host-gateway` is the bridge address), add `WEBHOOK_HOST=0.0.0.0` to `.env`;
+the restart below picks it up.
 
 ```nc:prompt callback_url reuse:MATTERMOST_CALLBACK_URL normalize:rstrip-slash validate:^https?://(?:[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])(?::[0-9]{1,5})?(?:/[A-Za-z0-9._~%+-]+)*$
-Callback URL reachable from Mattermost, such as `https://nanoclaw.example.com` or `http://host.docker.internal:3000/webhook/mattermost`.
+Callback URL reachable from Mattermost, such as `https://nanoclaw.example.com` or `http://host.docker.internal:3000/webhook/mattermost`. If Mattermost calls it directly from another machine or from Docker on Linux, add `WEBHOOK_HOST=0.0.0.0` to `.env` first.
 ```
 
 Save the selected server, authenticated bot token, and callback URL. On a rerun,
@@ -226,7 +231,7 @@ Your Mattermost username, without `@`.
 
 Resolve that user and open the DM shared with the bot.
 
-```nc:run capture:owner_user_id=.id,owner_handle=.id effect:fetch
+```nc:run capture:owner_user_id=.id,owner_handle=.id effect:fetch validate:^[a-z0-9]{26}$
 curl -sf "{{base_url}}/api/v4/users/username/{{owner_username}}" -H "Authorization: Bearer {{bot_token}}"
 ```
 
@@ -335,3 +340,5 @@ longer than the adapter heartbeat.
 **Messages arrive but no agent runs.** Inspect `ncl dropped-messages list` and
 `ncl wirings list`. `no_agent_wired` means approval is pending or no wiring was
 created; it is not an adapter failure.
+
+**A proxy or tunnel on another machine, or in Docker on Linux, gets connection refused or times out.** The webhook server listens on 127.0.0.1 only. Add `WEBHOOK_HOST=0.0.0.0` to `.env` and restart; `Webhook server started` in `logs/nanoclaw.log` shows the host it bound.

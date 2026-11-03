@@ -90,7 +90,10 @@ interface GatewayProviderDefinition {
 **`ensure` is idempotent.** Core calls it for new and adopted sessions. The
 `disposition` distinguishes creation from adoption: an adapter must not create
 replacement identity for a runtime that survived a host restart. Core invokes
-optional `reapOrphans` only after it has considered surviving runtimes.
+optional `reapOrphans` only after it has considered surviving runtimes. A new
+runtime's input also names the agent `provider` it runs (the session's pinned
+provider, else the group's); a gateway that grants model credentials per agent
+keys on it.
 
 The signal stops the current host's observation. Existing install-scoped
 adapters can retain their signal cleanup. Adapters owning per-session resources
@@ -227,9 +230,9 @@ is not behind.
 
 ## How a gateway gets installed
 
-Gateway skills are the one skill type that keeps its implementation on `main`,
-in the skill's own `payload/` directory, rather than on a registry branch. The
-reason is bootstrapping: a channel can be added later, but an install with no
+Gateway skills keep their implementation on `main`, in the skill's own
+`payload/` directory, rather than on a registry branch. For a gateway this is
+required, not a choice: a channel can be added later, but an install with no
 gateway cannot start at all, so the payload has to be present in the checkout
 that setup is running from.
 
@@ -310,6 +313,11 @@ owns:
 
 - `name` — one connection per name;
 - `host` — the exact DNS hostname the credential is scoped to;
+- `path` (optional) — an exact URL path on that host the credential is limited
+  to, for a runtime that sends other tokens to the same host. It starts with
+  `/` and uses only letters, digits and `._~/-`, since gateways may read other
+  characters as glob syntax. Core accepts it only from a gateway whose store
+  declares `connectionPaths`;
 - `proxyValue` — the non-secret marker the runtime presents in place of the
   credential, which gateways doing selective replacement match on;
 - for `kind: 'api-key'`, the `injection` header scheme;
@@ -344,7 +352,8 @@ in the message. A gateway that keeps no network allowlist declares nothing.
 
 `PROVIDER_CREDENTIAL_CONNECTION_SEAM_VERSION` gates a provider skill whose
 install needs `connection()`; an older core's store lacks it and the skill must
-refuse before copying any payload.
+refuse before copying any payload. Version 2 adds the optional `path`; a skill
+that sets it requires version 2 or later.
 
 ## Account connection is separate from request approval
 
@@ -380,6 +389,32 @@ GraphQL POSTs, subdomains, nonstandard ports and malformed configuration do not
 match. Changing `.env` applies to subsequent requests; restart the host when
 changing a process-environment override. OneCLI's explicit native policy holds
 remain authoritative.
+
+### Uncredentialed reads
+
+`NANOCLAW_GATEWAY_UNCREDENTIALED_READS=true` lets a `default` hold skip the card
+when the gateway attaches no stored credential to it. It is off by default and
+applies only when all of these hold:
+
+- the method is GET or HEAD;
+- the adapter sets `destination.sendsPayload: false`, attesting that the request
+  has no body and asks for no protocol upgrade;
+- the gateway's `approvals.credentialScope(destination)` answers `'none'` within
+  five seconds.
+
+A gateway derives `credentialScope` from its own credential rules. It may
+over-report and must never under-report, so it answers `'none'` only from rules
+at least as fresh as the ones its proxy enforces. A missing hook, an error, a
+timeout or any other answer keeps the card; a request whose deadline passes
+during the lookup is denied. Each card-free approval is logged with the
+request's audit metadata.
+
+This trades a human check for the egress allowlist. A request with no credential
+can still carry data out in its URL and headers to any allowed host, and GET is
+not proof of a read: some services act on a GET, such as publishing a
+notification or submitting a form. Other methods, bodies, upgrades, explicit
+policy holds and credentialed requests keep their cards. Configured read-only
+hosts and model domains are decided first and are unaffected.
 
 ### Approval presentation
 

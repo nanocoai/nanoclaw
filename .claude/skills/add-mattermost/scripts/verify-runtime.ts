@@ -8,7 +8,7 @@ const MATTERMOST_ID = /^[a-z0-9]{26}$/;
 
 type HostStatus = {
   channels: Array<{ connected: boolean; instance: string; type: string }>;
-  webhook?: { id: string; port: number; paths: string[] } | null;
+  webhook?: { id: string; host?: string; port: number; paths: string[] } | null;
 };
 
 type Dependencies = {
@@ -20,6 +20,13 @@ function required(env: Record<string, string>, key: string): string {
   const value = env[key];
   if (!value) throw new Error(`Mattermost runtime verification: ${key} is missing from .env`);
   return value;
+}
+
+// The address the listener bound. A wildcard bind (`::` is dual-stack), or a
+// host too old to report one, answers on 127.0.0.1; IPv6 needs brackets.
+function probeHost(host: string | undefined): string {
+  if (!host || host === '0.0.0.0' || host === '::') return '127.0.0.1';
+  return host.includes(':') ? `[${host}]` : host;
 }
 
 async function getJson(fetchImpl: typeof fetch, url: string, token: string): Promise<Record<string, unknown>> {
@@ -79,9 +86,10 @@ export async function verifyMattermostRuntime(
   if (!listener?.id || !listener.paths.includes('/webhook/mattermost')) {
     throw new Error('Mattermost runtime verification: this host has no listening Mattermost callback route');
   }
-  // Use the actual host's bound port, including service-level overrides. The
-  // response identity binds the HTTP route to the host queried over its socket.
-  const localUrl = `http://127.0.0.1:${listener.port}/webhook/mattermost`;
+  // Use the actual host's bound address and port, including service-level
+  // overrides. The response identity binds the HTTP route to the host queried
+  // over its socket.
+  const localUrl = `http://${probeHost(listener.host)}:${listener.port}/webhook/mattermost`;
   const challenge = randomUUID();
   const probe = async (received: boolean) => {
     const callback = await fetchImpl(localUrl, {
@@ -205,6 +213,15 @@ export async function verifyMattermostRuntime(
   }
 }
 
+// Print only this helper's own messages. A parse or network error can quote the
+// server's response, and this output becomes the setup failure reason.
+export function failureMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : '';
+  return message.startsWith('Mattermost runtime verification: ')
+    ? message
+    : 'Mattermost runtime verification: could not complete the check';
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const [expectedBotId, expectedOwnerId, platformId] = process.argv.slice(2);
   try {
@@ -213,7 +230,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       'Mattermost verified: running bot and settings, authenticated adapter, owner DM, and callback delivery from the Mattermost server.',
     );
   } catch (error) {
-    console.error(error instanceof Error ? error.message : String(error));
+    console.error(failureMessage(error));
     process.exitCode = 1;
   }
 }

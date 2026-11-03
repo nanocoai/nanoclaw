@@ -13,6 +13,8 @@ import { join } from 'node:path';
 
 import * as p from '@clack/prompts';
 
+import { currentUpgradeState, writeUpgradeState } from '../../src/upgrade-state.js';
+
 /** Dirty path → fingerprint of its working-tree entry (type, mode, content), or '-' when absent. */
 export type TreeSnapshot = Map<string, string>;
 
@@ -76,6 +78,7 @@ export function commitSetupChanges(root: string, before: TreeSnapshot | null, me
   if (!before) return { committed: [] };
   let changed: string[] = [];
   let missing: ReturnType<typeof missingIdentity> = [];
+  let marker: ReturnType<typeof currentUpgradeState> = null;
   try {
     const after = snapshotTree(root);
     if (!after) return { committed: [] };
@@ -83,6 +86,7 @@ export function commitSetupChanges(root: string, before: TreeSnapshot | null, me
     if (!changed.length) return { committed: [] };
     const spec = `${changed.join('\0')}\0`;
     missing = missingIdentity(root);
+    marker = currentUpgradeState(root);
     // Machine-made local commits: no hooks, no signing prompt mid-setup.
     const quiet = ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgSign=false'];
     const identity = missing.flatMap(([key, value]) => ['-c', `${key}=${value}`]);
@@ -119,6 +123,22 @@ export function commitSetupChanges(root: string, before: TreeSnapshot | null, me
       committed: changed,
       error: `Committed setup's files, but couldn't save a Git identity (${reason(err)}). Set user.name and user.email in this checkout before updating.`,
     };
+  }
+  // The startup tripwire binds the marker to the exact HEAD, which this commit
+  // just moved. A marker that matched the old HEAD is rewritten for the new
+  // one; one that already mismatched (raw pull, foreign commit) stays stale,
+  // so the host still stops.
+  if (marker) {
+    try {
+      writeUpgradeState({ via: marker.via, channel: marker.channel, ref: marker.ref, projectRoot: root });
+    } catch (err) {
+      return {
+        committed: changed,
+        error:
+          `Committed setup's files, but couldn't update the upgrade marker (${reason(err)}). ` +
+          'Run `pnpm exec tsx scripts/upgrade-state.ts set` before restarting NanoClaw.',
+      };
+    }
   }
   return { committed: changed };
 }

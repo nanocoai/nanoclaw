@@ -1,0 +1,9 @@
+{
+  "notes": "The conformance harness stubs shell execution. The supported/unsupported core check is the cursor_core_ready predicate in SKILL.md.",
+  "scenarios": [
+    {
+      "name": "supported core",
+      "exec": [{ "match": "PROVIDER_HOST_CONTRACT_SEAM_VERSION", "stdout": "yes\n" }]
+    }
+  ]
+}

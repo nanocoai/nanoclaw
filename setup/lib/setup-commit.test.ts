@@ -6,6 +6,12 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { prepareUpdate } from '../../scripts/update/transaction.js';
+import {
+  enforceUpgradeTripwire,
+  isUpgradeCurrent,
+  readUpgradeState,
+  writeUpgradeState,
+} from '../../src/upgrade-state.js';
 import { commitSetupChanges, snapshotTree, withSetupCommit } from './setup-commit.js';
 import { runSkill } from './skill-driver.js';
 
@@ -30,7 +36,8 @@ function install(): string {
   mkdirSync(join(root, 'src', 'providers'), { recursive: true });
   writeFileSync(join(root, 'src', 'providers', 'index.ts'), '// barrel\n');
   writeFileSync(join(root, 'README.md'), 'readme\n');
-  writeFileSync(join(root, '.gitignore'), '.env\n');
+  writeFileSync(join(root, '.gitignore'), '.env\ndata/\n');
+  writeFileSync(join(root, 'package.json'), '{ "version": "1.0.0" }\n');
   git(root, 'add', '-A');
   git(root, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'init');
   return root;
@@ -84,6 +91,140 @@ afterEach(() => {
   if (previousUpdateDir === undefined) delete process.env.NANOCLAW_UPDATE_DIR;
   else process.env.NANOCLAW_UPDATE_DIR = previousUpdateDir;
   for (const dir of temps.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
+describe('setup commits keep the upgrade marker on HEAD', () => {
+  // The service step stamped this checkout; a channel skill then commits.
+  it('carries a marker that matched forward to the setup commit', async () => {
+    const root = install();
+    const stamped = writeUpgradeState({ via: 'setup', channel: 'stable', ref: 'refs/tags/v1', projectRoot: root });
+    expect(stamped.commit).toBe(git(root, 'rev-parse', 'HEAD'));
+    const onError = vi.fn();
+
+    await withSetupCommit(
+      root,
+      'telegram',
+      async () => writeFileSync(join(root, 'src', 'telegram.ts'), '1\n'),
+      onError,
+    );
+
+    expect(onError).not.toHaveBeenCalled();
+    expect(git(root, 'log', '-1', '--format=%s')).toBe('setup: apply telegram');
+    const marker = readUpgradeState(root)!;
+    expect(marker.commit).toBe(git(root, 'rev-parse', 'HEAD'));
+    expect(marker.tree).toBe(git(root, 'rev-parse', 'HEAD^{tree}'));
+    expect(marker).toMatchObject({ via: 'setup', channel: 'stable', ref: 'refs/tags/v1' });
+    expect(isUpgradeCurrent(root)).toBe(true);
+  });
+
+  it('leaves a marker that already mismatched alone (a raw git pull stays tripped)', async () => {
+    const root = install();
+    const stamped = writeUpgradeState({ via: 'setup', projectRoot: root });
+    writeFileSync(join(root, 'README.md'), 'pulled\n');
+    git(root, 'add', '-A');
+    git(root, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'upstream pull');
+    expect(isUpgradeCurrent(root)).toBe(false);
+
+    await withSetupCommit(
+      root,
+      'telegram',
+      async () => writeFileSync(join(root, 'src', 'telegram.ts'), '1\n'),
+      vi.fn(),
+    );
+
+    expect(git(root, 'log', '-1', '--format=%s')).toBe('setup: apply telegram');
+    expect(readUpgradeState(root)).toEqual(stamped);
+    expect(isUpgradeCurrent(root)).toBe(false);
+  });
+
+  // HEAD still is the marked commit, but the code is not: an update left a
+  // new package.json in the tree. The marker is stale and must stay so.
+  it('leaves a marker that no longer matches the code alone even when HEAD did not move', async () => {
+    const root = install();
+    const stamped = writeUpgradeState({ via: 'setup', projectRoot: root });
+    writeFileSync(join(root, 'package.json'), '{ "version": "2.0.0" }\n');
+    expect(isUpgradeCurrent(root)).toBe(false);
+
+    await withSetupCommit(
+      root,
+      'telegram',
+      async () => writeFileSync(join(root, 'src', 'telegram.ts'), '1\n'),
+      vi.fn(),
+    );
+
+    expect(git(root, 'log', '-1', '--format=%s')).toBe('setup: apply telegram');
+    expect(git(root, 'show', '--name-only', '--format=', 'HEAD')).toBe('src/telegram.ts');
+    expect(readUpgradeState(root)).toEqual(stamped);
+  });
+
+  it('saves the fallback Git identity before it stamps', async () => {
+    const root = install();
+    writeUpgradeState({ via: 'setup', projectRoot: root });
+
+    await withSetupCommit(
+      root,
+      'telegram',
+      async () => writeFileSync(join(root, 'src', 'telegram.ts'), '1\n'),
+      vi.fn(),
+    );
+
+    expect(git(root, 'config', '--local', 'user.email')).toBe('setup@nanoclaw.invalid');
+    expect(isUpgradeCurrent(root)).toBe(true);
+  });
+
+  it('does not carry forward a marker recorded without Git', async () => {
+    const root = install();
+    writeUpgradeState({ via: 'setup', projectRoot: root });
+    const marker = readUpgradeState(root)!;
+    writeFileSync(
+      join(root, 'data', 'upgrade-state.json'),
+      JSON.stringify({ ...marker, commit: 'unknown', tree: 'unknown' }),
+    );
+
+    await withSetupCommit(
+      root,
+      'telegram',
+      async () => writeFileSync(join(root, 'src', 'telegram.ts'), '1\n'),
+      vi.fn(),
+    );
+
+    expect(git(root, 'log', '-1', '--format=%s')).toBe('setup: apply telegram');
+    expect(readUpgradeState(root)!.commit).toBe('unknown');
+  });
+
+  it('does not stamp a checkout that never had a marker', async () => {
+    const root = install();
+    await withSetupCommit(
+      root,
+      'telegram',
+      async () => writeFileSync(join(root, 'src', 'telegram.ts'), '1\n'),
+      vi.fn(),
+    );
+    expect(readUpgradeState(root)).toBeNull();
+  });
+
+  // Setup's order: service step (stamp + first start), then the channel
+  // skill apply (commit). The next start must pass the tripwire.
+  it('a channel skill applied after the service step still boots', async () => {
+    const root = install();
+    const skill = payloadSkill();
+    writeUpgradeState({ via: 'setup', projectRoot: root });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      throw new Error(`exit:${code}`);
+    }) as never);
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const exec = (cmd: string) => execFileSync('/bin/sh', ['-c', cmd], { cwd: root, encoding: 'utf8' });
+      await runSkill(skill, { projectRoot: root, exec, onEvent: () => {} });
+      expect(git(root, 'log', '-1', '--format=%s')).toMatch(/^setup: apply setup-commit-skill-/);
+      expect(git(root, 'status', '--porcelain')).toBe('');
+
+      expect(() => enforceUpgradeTripwire(root)).not.toThrow();
+    } finally {
+      exitSpy.mockRestore();
+      errSpy.mockRestore();
+    }
+  });
 });
 
 describe('setup skill applies leave an updatable checkout', () => {
