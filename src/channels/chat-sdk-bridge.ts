@@ -1655,7 +1655,9 @@ async function handleForwardedEvent(
         (interaction.user as Record<string, string> | undefined);
       const interactionId = interaction.id as string;
       const interactionToken = interaction.token as string;
-      /** Answers within Discord's 3 s; a failed ack must never drop the decision dispatched after it. */
+      /** Set while the ack is on its way: the interaction's webhook works only after it. */
+      let acking: Promise<void> | undefined;
+      /** Answers within Discord's 3 s; a failed ack must never drop the decision dispatched with it. */
       const ack = async (response: Record<string, unknown>) => {
         try {
           const result = await fetch(
@@ -1675,10 +1677,16 @@ async function handleForwardedEvent(
       };
       /** The interaction's webhook (a private follow-up, or the clicked message); a failure never stops the card edit. */
       const webhook = async (method: 'POST' | 'PATCH', path: string, body: Record<string, unknown>) => {
+        if (acking) await acking;
         try {
           const result = await fetch(
             `https://discord.com/api/v10/webhooks/${interaction.application_id as string}/${interactionToken}${path}`,
-            { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
+            {
+              method,
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+              signal: AbortSignal.timeout(INTERACTION_CALLBACK_TIMEOUT_MS),
+            },
           );
           if (!result.ok) log.error('Discord interaction webhook failed', { method, status: result.status });
           // eslint-disable-next-line no-catch-all/no-catch-all -- the host has decided either way
@@ -1707,8 +1715,11 @@ async function handleForwardedEvent(
         ((interaction.message as Record<string, unknown>)?.embeds as Array<Record<string, unknown>>) || [];
       const originalDescription = (originalEmbeds[0]?.description as string) || '';
       // Ack at once and keep the buttons (DEFERRED_UPDATE_MESSAGE): the card
-      // changes only after the host accepts the click.
-      await ack({ type: 6 });
+      // changes only after the host accepts the click. Not awaited: the listener
+      // forwards a channel's next event only once this one is answered.
+      acking = ack({ type: 6 }).then(() => {
+        acking = undefined;
+      });
       if (!questionId) return;
       // Encoded as the adapter encodes a click (a thread by its parent channel and
       // itself), as every other click and the card's messaging group carry it.
