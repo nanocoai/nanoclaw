@@ -34,6 +34,7 @@
     "@whiskeysockets/baileys": "7.0.0-rc14",
     "agent-browser": "0.27.1",
     "chat-adapter-imessage": "0.1.1",
+    "html-to-text": "10.0.1",
     "imapflow": "1.7.8",
     "mailparser": "3.9.47",
     "mcp-remote": "0.1.38",
@@ -221,6 +222,12 @@
       "version": "0.1.1",
       "sources": [
         ".claude/skills/add-imessage/SKILL.md nc:dep when:backend=local"
+      ]
+    },
+    "html-to-text": {
+      "version": "10.0.1",
+      "sources": [
+        ".claude/skills/add-proton-mail/SKILL.md nc:dep"
       ]
     },
     "imapflow": {

@@ -16,10 +16,17 @@ Then delete the copied adapter and its tests:
 rm -f src/channels/proton-mail.ts src/channels/proton-mail-registration.test.ts src/channels/proton-mail.test.ts src/channels/proton-mail-adapter.test.ts
 ```
 
+The fake IMAP server the tests used came with this skill. Delete it too, unless
+another test still imports it:
+
+```bash
+grep -rlq --include='*.ts' --exclude='fake-imap*' 'test-utils/fake-imap' src || rm -f src/test-utils/fake-imap.ts src/test-utils/fake-imap.test.ts
+```
+
 ## 2. Remove the dependencies
 
 ```bash
-pnpm remove imapflow mailparser nodemailer @types/mailparser @types/nodemailer
+pnpm remove imapflow mailparser html-to-text nodemailer @types/mailparser @types/nodemailer
 ```
 
 ## 3. Remove credentials and state
@@ -41,6 +48,7 @@ PROTON_MAIL_POLL_SECONDS
 PROTON_MAIL_MARK_SEEN
 PROTON_MAIL_PROCESS_BACKLOG
 PROTON_MAIL_DEFAULT_SUBJECT
+PROTON_MAIL_INTERNAL_DOMAINS
 ```
 
 Delete the adapter's state (mailbox cursor, threads, pending cards) and the
