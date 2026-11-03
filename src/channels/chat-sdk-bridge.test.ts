@@ -2177,10 +2177,11 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
     registerQuestionRenderResolver((id) => (id === questionId ? (render as never) : undefined));
     let webhookUrl = '';
     const editMessage = vi.fn(async () => ({ id: 'card-1', threadId: 't', raw: {} }));
+    const handleWebhook = vi.fn(async () => new Response('ok'));
     const adapter = stubAdapter({
       name: 'discord',
       initialize: async () => {},
-      handleWebhook: vi.fn(async () => new Response('ok')),
+      handleWebhook,
       // As the Discord adapter: a thread id is the channel's plus ':<thread>'.
       channelIdFromThreadId: (threadId: string) => threadId.split(':').slice(0, 3).join(':'),
       encodeThreadId: ({ guildId, channelId, threadId }: { guildId: string; channelId: string; threadId?: string }) =>
@@ -2203,32 +2204,35 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
       cardFits: (card) => (card.title ?? '').length <= 256 && texts(card).join('\n\n').length <= 4096,
     });
     await bridge.setup({ onInbound: () => {}, onInboundEvent: () => {}, onMetadata: () => {}, onAction });
+    /** Posts as the Gateway listener does: it sends a channel's next event only once this one is answered. */
+    const forward = (event: Record<string, unknown>) =>
+      realFetch(webhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-discord-gateway-token': BOT_TOKEN },
+        body: JSON.stringify(event),
+      });
     // Chat SDK 4.41+ encodes a button's custom_id as `${id}\n${value}`.
     const click = (
       user: Record<string, string>,
       customId = `ncq:${questionId}:0\n0`,
       extra: Record<string, unknown> = {},
     ) =>
-      realFetch(webhookUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-discord-gateway-token': BOT_TOKEN },
-        body: JSON.stringify({
-          type: 'GATEWAY_INTERACTION_CREATE',
-          data: {
-            type: 3,
-            id: 'interaction-2',
-            token: 'interaction-token',
-            application_id: 'app-1',
-            guild_id: 'G1',
-            channel_id: 'C1',
-            data: { custom_id: customId },
-            member: { user },
-            message: { id: 'card-1', embeds: [{ title: 'T'.repeat(256), description: 'Allow?' }] },
-            ...extra,
-          },
-        }),
+      forward({
+        type: 'GATEWAY_INTERACTION_CREATE',
+        data: {
+          type: 3,
+          id: 'interaction-2',
+          token: 'interaction-token',
+          application_id: 'app-1',
+          guild_id: 'G1',
+          channel_id: 'C1',
+          data: { custom_id: customId },
+          member: { user },
+          message: { id: 'card-1', embeds: [{ title: 'T'.repeat(256), description: 'Allow?' }] },
+          ...extra,
+        },
       });
-    return { bridge, click, onAction, editMessage };
+    return { bridge, click, forward, onAction, editMessage, handleWebhook };
   }
 
   const CALLBACK = 'https://discord.com/api/v10/interactions/interaction-2/interaction-token/callback';
@@ -2515,6 +2519,89 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
         expect(onAction).toHaveBeenCalledWith('q-discord-deferred', 'approve', 'clicker-1', expect.anything()),
       );
     } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('a stalled Discord ack holds neither the click nor the next event in its channel', async () => {
+    const { bridge, click, forward, onAction, handleWebhook } = await startDiscord('q-discord-ack-stall', review);
+    const deadlines = controlDeadlines();
+    vi.mocked(globalThis.fetch).mockImplementation(async (url, init) =>
+      String(url) === CALLBACK ? stalled(url, init) : new Response(null, { status: 204 }),
+    );
+    try {
+      expect((await click({ id: 'clicker-1', username: 'Ann' })).status).toBe(200);
+      await vi.waitFor(() =>
+        expect(onAction).toHaveBeenCalledWith('q-discord-ack-stall', 'approve', 'clicker-1', expect.anything()),
+      );
+      expect((await forward({ type: 'GATEWAY_MESSAGE_CREATE', data: { id: 'm-2', channel_id: 'C1' } })).status).toBe(
+        200,
+      );
+      expect(handleWebhook).toHaveBeenCalledTimes(1);
+      // Still bounded: the stalled ack ends at its own deadline.
+      expect(deadlines.asked).toEqual([10_000]);
+    } finally {
+      deadlines.restore();
+      await bridge.teardown();
+    }
+  });
+
+  it('ends a stalled Discord ack at its deadline, then still answers the clicker', async () => {
+    const { bridge, click, onAction } = await startDiscord('q-discord-ack-deadline', review);
+    onAction.mockResolvedValue('refused');
+    const deadlines = controlDeadlines();
+    vi.mocked(globalThis.fetch).mockImplementation(async (url, init) =>
+      String(url) === CALLBACK ? stalled(url, init) : new Response(null, { status: 204 }),
+    );
+    const errors = vi.spyOn(log, 'error').mockImplementation(() => {});
+    try {
+      await click({ id: 'bystander', username: 'Bob' });
+      await vi.waitFor(() => expect(onAction).toHaveBeenCalledTimes(1));
+      // The private note goes through the interaction's webhook, which needs the ack first.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(discordCalls()).toEqual([['POST', CALLBACK, ACK]]);
+      expect(deadlines.asked).toEqual([10_000]);
+
+      deadlines.expire();
+      await vi.waitFor(() =>
+        expect(discordCalls()).toEqual([
+          ['POST', CALLBACK, ACK],
+          ['POST', FOLLOW_UP, { content: 'Only an approver can answer this.', flags: 64 }],
+        ]),
+      );
+      expect(deadlines.asked).toEqual([10_000, 10_000]);
+      expect(errors).toHaveBeenCalledWith('Failed to acknowledge interaction', expect.anything());
+    } finally {
+      errors.mockRestore();
+      deadlines.restore();
+      await bridge.teardown();
+    }
+  });
+
+  it('ends a stalled Discord webhook call at its deadline, so the next click on the card goes ahead', async () => {
+    const { bridge, click, onAction } = await startDiscord('q-discord-webhook-deadline', review);
+    onAction.mockResolvedValue('refused');
+    const deadlines = controlDeadlines();
+    vi.mocked(globalThis.fetch).mockImplementation(async (url, init) =>
+      String(url) === FOLLOW_UP ? stalled(url, init) : new Response(null, { status: 204 }),
+    );
+    const errors = vi.spyOn(log, 'error').mockImplementation(() => {});
+    try {
+      await click({ id: 'bystander', username: 'Bob' });
+      await vi.waitFor(() => expect(discordCalls().map(([, url]) => url)).toEqual([CALLBACK, FOLLOW_UP]));
+      // Clicks on one card run one at a time: the second waits on the first one's stalled note.
+      await click({ id: 'bystander', username: 'Bob' });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(onAction).toHaveBeenCalledTimes(1);
+
+      deadlines.expire();
+      await vi.waitFor(() => expect(onAction).toHaveBeenCalledTimes(2));
+      // The first click's ack and note, and the second click's ack.
+      expect(deadlines.asked.slice(0, 3)).toEqual([10_000, 10_000, 10_000]);
+      expect(errors).toHaveBeenCalledWith('Discord interaction webhook failed', expect.anything());
+    } finally {
+      errors.mockRestore();
+      deadlines.restore();
       await bridge.teardown();
     }
   });
