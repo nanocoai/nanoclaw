@@ -595,7 +595,7 @@ describe('delivery deadline', () => {
     insertOutbound(session, 'out-z');
     const original = deferred<string>();
     const retry = deferred<string>();
-    const calls = recordingAdapter((text, call) => (call === 1 ? original.promise : retry.promise));
+    const calls = recordingAdapter((_text, call) => (call === 1 ? original.promise : retry.promise));
     vi.spyOn(log, 'warn').mockImplementation(() => {});
     const error = vi.spyOn(log, 'error').mockImplementation(() => {});
 
@@ -619,7 +619,7 @@ describe('delivery deadline', () => {
     insertOutbound(session, 'out-w');
     const original = deferred<string>();
     const retry = deferred<string>();
-    recordingAdapter((text, call) => (call === 1 ? original.promise : retry.promise));
+    recordingAdapter((_text, call) => (call === 1 ? original.promise : retry.promise));
     vi.spyOn(log, 'warn').mockImplementation(() => {});
     const info = vi.spyOn(log, 'info').mockImplementation(() => {});
     const error = vi.spyOn(log, 'error').mockImplementation(() => {});
@@ -650,7 +650,7 @@ describe('delivery deadline', () => {
   it("a parked retry's give-up after the original landed leaves no attempt row behind", async () => {
     insertOutbound(session, 'out-v');
     const original = deferred<string>();
-    recordingAdapter((text, call) => (call === 1 ? original.promise : new Promise<string>(() => {})));
+    recordingAdapter((_text, call) => (call === 1 ? original.promise : new Promise<string>(() => {})));
     vi.spyOn(log, 'warn').mockImplementation(() => {});
     vi.spyOn(log, 'info').mockImplementation(() => {});
     const error = vi.spyOn(log, 'error').mockImplementation(() => {});
