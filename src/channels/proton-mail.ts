@@ -84,6 +84,13 @@ const HOUR_MS = 60 * 60_000;
 const DEFERRED_PER_SENDER_MAX = INBOUND_PER_SENDER_PER_HOUR;
 const DEFERRED_MAX = 200;
 /**
+ * Of those, mail from addresses not yet approved. A new address over a
+ * domain's share can wait days for a slot (STRANGERS_PER_DOMAIN_MAX), so
+ * without this a flood of new addresses would fill the queue for a week and
+ * approved senders' over-limit mail would be refused instead of held.
+ */
+const DEFERRED_STRANGERS_MAX = DEFERRED_MAX / 2;
+/**
  * Addresses not yet approved whose mail was handed to the host, each of which
  * may raise an approval card that core never closes before CARD_TTL_MS. A new
  * address over the hourly figure waits for the hour; over the total it is left
@@ -1895,7 +1902,8 @@ registerChannelAdapter('proton-mail', {
         const waiting = Object.values(state.retry).filter((r) => r.deferred);
         if (
           waiting.length >= DEFERRED_MAX ||
-          waiting.filter((r) => r.from === from).length >= DEFERRED_PER_SENDER_MAX
+          waiting.filter((r) => r.from === from).length >= DEFERRED_PER_SENDER_MAX ||
+          (kind === 'strangers' && waiting.filter((r) => r.deferred === 'strangers').length >= DEFERRED_STRANGERS_MAX)
         ) {
           log.warn('Proton Mail: over an hourly limit with too much mail already waiting — left unread and flagged', {
             uid,

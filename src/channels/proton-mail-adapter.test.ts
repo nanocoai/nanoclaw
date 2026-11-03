@@ -1830,6 +1830,40 @@ describe('review 3 of #4218', () => {
     });
   });
 
+  describe('the shared hold queue', () => {
+    it('new senders’ held mail takes at most half of it, so approved senders’ over-limit mail is still held', async () => {
+      h.wired = false;
+      h.settled = { [OWNER]: 'approved' };
+      const now = Date.now();
+      // 100 held new-sender mails, waiting days for their domain's slot.
+      const retry = Object.fromEntries(
+        Array.from({ length: 100 }, (_, i) => [
+          String(9000 + i),
+          {
+            attempts: 0,
+            nextAt: new Date(now + 5 * 24 * 60 * 60_000).toISOString(),
+            deferred: 'strangers',
+            from: `w${i}@bulk.example`,
+          },
+        ]),
+      );
+      // This hour's ten new addresses are used up, so the next one would wait.
+      const strangers = Object.fromEntries(
+        Array.from({ length: 10 }, (_, i) => [`seen${i}@example.org`, new Date(now).toISOString()]),
+      );
+      seedState({ strangers, retry });
+      const { calls } = await start();
+      const refused = await arriveAll([mail({ from: 'new@example.org', body: 'hello' })]);
+      expect(flagged()).toContainEqual([refused, ['$NanoClawFailed']]);
+      expect(readState().retry[refused]).toBeUndefined();
+      // The approved sender's 21st mail in the hour is held, not refused.
+      const twentyFirst = await arriveAll(Array.from({ length: 21 }, (_, i) => mail({ body: `reply ${i}` })));
+      expect(calls.inbound).toHaveLength(20);
+      expect(readState().retry[twentyFirst]).toMatchObject({ deferred: 'sender', from: OWNER });
+      expect(flagged().filter(([u]) => u === twentyFirst)).toEqual([]);
+    }, 60_000);
+  });
+
   describe('fixes from the code review of 838caf44', () => {
     it('mail on an open card’s thread that is not an answer is counted by the hourly limit', async () => {
       const { adapter, calls, arrive } = await start();
