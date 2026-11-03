@@ -461,123 +461,168 @@ export function flagInvisibleText(text: string, token: string): { text: string; 
   return { text: out, flagged };
 }
 
-/** The parts of an htmlparser2 node the table formatter reads. */
-interface TableNode {
-  type: string;
-  name?: string;
-  children?: TableNode[];
-}
-/** The parts of html-to-text's BlockTextBuilder the table formatter calls. */
-interface TableBuilder {
-  openTable(): void;
-  openTableRow(): void;
-  openTableCell(): void;
-  closeTableCell(): void;
-  closeTableRow(): void;
-  closeTable(opts: { tableToString: (rows: Array<Array<{ text: string }>>) => string }): void;
-}
-
 /**
- * A table's rows as text: one row per line, cells split by " | ", a cell's own
- * lines joined by " / ". html-to-text's default puts a whole table on one line
- * with nothing between cells. A row with one cell of content, or with a cell
- * of more than three lines, is layout (newsletters are built of tables), not
- * data: each such cell is written as a block of its own, as it was converted.
- * Empty rows are dropped, and so are columns empty in every row (templates
- * space their columns with empty cells); a blank cell in a column that has
- * content elsewhere is kept, so data rows stay aligned. Self-contained: the
- * worker runs it from its source.
+ * The html-to-text formatter for `<table>`, as the worker's own JavaScript:
+ * written here as source, not taken from a compiled function, so no compiler
+ * (tsc, tsx/esbuild, vitest) can wrap it in helpers the worker lacks.
+ *
+ * html-to-text's default writes a whole table on one line with nothing
+ * between cells. Here each cell is rendered on its own by html-to-text's
+ * table builder (so a cell's paragraphs cannot split its row) and the table
+ * is laid out on a grid that honours colspan and rowspan:
+ * - A data table (some row has two or more cells with content, and no cell
+ *   is long) is one row per line: cells split by " | ", a cell's own lines
+ *   joined by " / ", a blank cell shown as "–" so rows stay aligned. Columns
+ *   empty in every row (a template's spacers) are dropped.
+ * - A layout table (newsletters are built of tables: no row with two cells
+ *   of content, or a cell of more than 10 lines or 500 characters) is its
+ *   cells' text, each as a block of its own, as html-to-text converted it.
+ * - A row of a single cell (a heading spanning the table) is a block.
+ * - Anything else inside the table that a mail client shows (a caption,
+ *   loose text, a stray block) is kept in place as a single-cell row; rows
+ *   inside a wrapper (`<center>`, `<form>`, …) are found through it. A nested
+ *   table is its cell's content.
  */
-export function tableRowsToText(rows: Array<Array<{ text: string }>>): string {
-  const cellLinesMax = 3;
-  const blocks: string[] = [];
-  let lines: string[] = [];
+const TABLE_FORMATTER_SOURCE = String.raw`
+function tableRowsToText(rows) {
+  const grid = [];
+  const carry = [];
+  for (const cells of rows) {
+    // null: a place covered by a colspan, shown empty, not as a blank. A
+    // rowspan's text is repeated in each row it covers, so every row says
+    // whose it is.
+    const line = [];
+    let col = 0;
+    let carried = 0;
+    const takeCarried = () => {
+      const c = carry[col];
+      line[col] = c.text;
+      carried++;
+      if (--c.left === 0) carry[col] = undefined;
+      col++;
+    };
+    for (const c of cells) {
+      while (carry[col]) takeCarried();
+      const span = Math.max(1, Math.min(Number(c.colspan) || 1, 50));
+      const down = Math.max(1, Math.min(Number(c.rowspan) || 1, 500));
+      for (let k = 0; k < span; k++) {
+        line[col + k] = k === 0 ? c.text : null;
+        if (down > 1) carry[col + k] = { left: down - 1, text: k === 0 ? c.text : null };
+      }
+      col += span;
+    }
+    for (; col < carry.length; ) {
+      if (carry[col]) takeCarried();
+      else col++;
+    }
+    const lined = [];
+    for (let i = 0; i < line.length; i++) {
+      lined.push((line[i] || '').split('\n').map((s) => s.trim()).filter(Boolean));
+    }
+    // cells: what the row itself holds plus what rowspans carry into it, so a
+    // row beside a rowspan is never taken for a lone heading row.
+    grid.push({ raw: line, lined, cells: cells.length + carried });
+  }
+  const full = (row) => row.lined.filter((t) => t.length > 0).length;
+  const long = grid.some((row) => row.lined.some((t) => t.length > 10 || t.join(' ').length > 500));
+  const data = !long && grid.some((row) => full(row) >= 2);
+  const blocks = [];
+  if (!data) {
+    for (const row of grid) {
+      for (let i = 0; i < row.raw.length; i++) if (row.lined[i].length) blocks.push((row.raw[i] || '').trim());
+    }
+    return blocks.join('\n\n');
+  }
+  const used = [];
+  for (const row of grid) row.lined.forEach((t, i) => (used[i] = used[i] || t.length > 0));
+  let lines = [];
   const flush = () => {
     if (lines.length) blocks.push(lines.join('\n'));
     lines = [];
   };
-  const lined = rows.map((cells) =>
-    cells.map((c) =>
-      c.text
-        .split('\n')
-        .map((s) => s.trim())
-        .filter(Boolean),
-    ),
-  );
-  const used: boolean[] = [];
-  for (const texts of lined) texts.forEach((t, i) => (used[i] = used[i] || t.length > 0));
-  rows.forEach((cells, r) => {
-    const texts = lined[r];
-    const full = cells.filter((_, i) => texts[i].length > 0);
-    if (full.length === 0) return;
-    if (full.length === 1 || texts.some((t) => t.length > cellLinesMax)) {
+  for (const row of grid) {
+    if (full(row) === 0) continue;
+    if (row.cells === 1) {
       flush();
-      for (const c of full) blocks.push(c.text.trim());
-    } else {
-      lines.push(
-        texts
-          .filter((_, i) => used[i])
-          .map((t) => t.join(' / '))
-          .join(' | ')
-          .trimEnd(),
-      );
+      blocks.push(row.lined.filter((t) => t.length).map((t) => t.join('\n')).join('\n'));
+      continue;
     }
-  });
+    const out = [];
+    for (let i = 0; i < used.length; i++) {
+      if (!used[i]) continue;
+      if (row.lined[i] && row.lined[i].length) out.push(row.lined[i].join(' / '));
+      else out.push(row.raw[i] === null ? '' : '–');
+    }
+    lines.push(out.join(' | '));
+  }
   flush();
   return blocks.join('\n\n');
 }
-
-/**
- * html-to-text formatter for `<table>`: each cell rendered on its own by
- * html-to-text's table builder (so a cell's paragraphs cannot split its row),
- * then laid out by tableRowsToText. Only the table's own rows count, direct or
- * in thead/tbody/tfoot; a nested table is a cell's content. Self-contained:
- * the worker runs it from its source.
- */
-export function formatTableRows(
-  elem: TableNode,
-  walk: (nodes: TableNode[] | undefined, builder: TableBuilder) => void,
-  builder: TableBuilder,
-): void {
-  const tag = (n: TableNode, ...names: string[]) => n.type === 'tag' && names.includes(n.name ?? '');
-  const rows: TableNode[] = [];
-  for (const c of elem.children ?? []) {
-    if (tag(c, 'tr')) rows.push(c);
-    else if (tag(c, 'thead', 'tbody', 'tfoot')) for (const r of c.children ?? []) if (tag(r, 'tr')) rows.push(r);
-  }
-  builder.openTable();
-  for (const tr of rows) {
+function formatTableRows(elem, walk, builder) {
+  const isTag = (n, names) => n.type === 'tag' && names.indexOf(n.name) >= 0;
+  const hasRow = (n) =>
+    (n.children || []).some((c) => isTag(c, ['tr']) || (c.type === 'tag' && c.name !== 'table' && hasRow(c)));
+  const row = (tr) => {
     builder.openTableRow();
-    for (const cell of (tr.children ?? []).filter((c) => tag(c, 'td', 'th'))) {
+    for (const c of tr.children || []) {
+      if (!isTag(c, ['td', 'th'])) continue;
+      const a = c.attribs || {};
       builder.openTableCell();
-      walk(cell.children, builder);
-      builder.closeTableCell();
+      walk(c.children, builder);
+      builder.closeTableCell({ colspan: parseInt(a.colspan, 10) || 1, rowspan: parseInt(a.rowspan, 10) || 1 });
     }
     builder.closeTableRow();
-  }
+  };
+  const visit = (nodes) => {
+    let stray = [];
+    const flushStray = () => {
+      if (stray.some((n) => n.type !== 'text' || n.data.trim())) {
+        builder.openTableRow();
+        builder.openTableCell();
+        walk(stray, builder);
+        builder.closeTableCell();
+        builder.closeTableRow();
+      }
+      stray = [];
+    };
+    for (const n of nodes || []) {
+      if (isTag(n, ['tr'])) {
+        flushStray();
+        row(n);
+      } else if (n.type === 'tag' && n.name !== 'table' && hasRow(n)) {
+        flushStray();
+        visit(n.children);
+      } else {
+        stray.push(n);
+      }
+    }
+    flushStray();
+  };
+  builder.openTable();
+  visit(elem.children);
   builder.closeTable({ tableToString: tableRowsToText });
 }
+`;
 
 /**
- * The worker's whole program: fixed code, with the style test and the table
- * formatter carried over as their own source; the HTML and this mail's mark
- * code arrive as data. Depth is
+ * The worker's whole program: fixed code, with the style test carried over
+ * as its own source and the table formatter written as source above; the
+ * HTML and this mail's mark code arrive as data. Depth is
  * counted with htmlparser2's own open/close events — the same tree the
  * conversion builds, implied closes and all (`<li><p>` nesting without end
  * slipped past a hand-written count) — and the count stops at the limit.
  * CommonJS, so it needs no file of its own in src or dist.
  */
 const HTML_WORKER_SOURCE = `
-// Functions below are carried over as their own source. Run under tsx, esbuild
-// wraps their inner functions in __name(fn, "name") calls, a helper the worker
-// does not have: this stands in for it (the name is not needed).
+// isHiddenStyle is carried over as its own (compiled) source. Should a
+// compiler ever wrap an inner function of it in __name(fn, "name") (esbuild
+// under tsx does, for functions that have them), this stands in for that helper.
 var __name = (fn) => fn;
 const { parentPort, workerData } = require('worker_threads');
 const { htmlToText } = require(workerData.module);
 const { Parser, parseDocument } = require(workerData.htmlparser2);
 ${isHiddenStyle.toString()}
-${tableRowsToText.toString()}
-${formatTableRows.toString()}
+${TABLE_FORMATTER_SOURCE}
 const STOP = {};
 function tooDeep(html, max) {
   let depth = 0;
@@ -604,20 +649,41 @@ if (tooDeep(html, workerData.maxDepth)) {
     const open = '[hidden ' + workerData.token + ': ';
     const close = ' /hidden ' + workerData.token + ']';
     const textOf = (n) => (n.type === 'text' ? n.data : (n.children || []).map(textOf).join(''));
+    // html-to-text prints a link's href even when the link has no text, so a
+    // link counts as content: a hidden empty link must not pass unmarked.
+    const hasLink = (n) =>
+      (n.children || []).some((c) => c.type === 'tag' && ((c.name === 'a' && c.attribs && c.attribs.href) || hasLink(c)));
+    const hasContent = (n) => !!textOf(n).trim() || hasLink(n);
     const wrap = (el) => {
       el.children.unshift(new Text(open));
       el.children.push(new Text(close));
     };
-    // A hidden table, row group or row is marked in each of its cells: the
-    // table formatter reads cells only, so a mark beside them would be lost
-    // while their text still came through.
+    // A hidden table, row group or row is marked piece by piece: each cell,
+    // and whatever else the table formatter keeps (a caption, loose text, a
+    // stray block); a mark beside the cells would be lost while their text
+    // still came through.
     const STRUCTURE = new Set(['table', 'thead', 'tbody', 'tfoot', 'tr']);
+    const hasRowInside = (n) =>
+      (n.children || []).some((c) => c.type === 'tag' && (c.name === 'tr' || (c.name !== 'table' && hasRowInside(c))));
     const wrapCells = (node) => {
-      for (const c of node.children || []) {
-        if (c.type !== 'tag') continue;
-        if (c.name === 'td' || c.name === 'th') {
-          if (textOf(c).trim()) wrap(c);
-        } else wrapCells(c);
+      const kids = node.children || [];
+      for (let i = 0; i < kids.length; i++) {
+        const c = kids[i];
+        if (c.type === 'text') {
+          if (c.data.trim()) {
+            kids.splice(i, 0, new Text(open));
+            kids.splice(i + 2, 0, new Text(close));
+            i += 2;
+          }
+        } else if (c.type === 'tag') {
+          if (c.name === 'td' || c.name === 'th') {
+            if (hasContent(c)) wrap(c);
+          } else if (STRUCTURE.has(c.name) || hasRowInside(c)) {
+            wrapCells(c);
+          } else if (hasContent(c)) {
+            wrap(c);
+          }
+        }
       }
     };
     const mark = (node) => {
@@ -625,7 +691,7 @@ if (tooDeep(html, workerData.maxDepth)) {
         if (child.type !== 'tag') continue;
         const a = child.attribs || {};
         const unseen = child.name === 'template' || child.name === 'noscript' || 'hidden' in a || isHiddenStyle(a.style || '');
-        if (unseen && textOf(child).trim()) {
+        if (unseen && hasContent(child)) {
           hidden++;
           if (STRUCTURE.has(child.name)) wrapCells(child);
           else wrap(child);

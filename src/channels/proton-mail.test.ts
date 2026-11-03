@@ -55,7 +55,6 @@ import {
   isHiddenStyle,
   stripInvisible,
   subjectStem,
-  tableRowsToText,
 } from './proton-mail.js';
 import { normalizeOptions } from './ask-question.js';
 
@@ -983,11 +982,47 @@ describe('HTML tables', () => {
   const TOK = 'K7Q2';
   const read = (html: string) => mailText({ html }, 5000, { token: TOK });
 
-  it('a data table is one row per line, cells split by " | ", blanks kept', async () => {
+  it('a data table is one row per line, cells split by " | ", a blank cell shown as "–"', async () => {
     const html =
       '<p>Results:</p><table><thead><tr><th>Name</th><th>Grade</th><th>Note</th></tr></thead>' +
       '<tbody><tr><td>Smith</td><td>A*</td><td></td></tr><tr><td>Jones</td><td>B</td><td>resit</td></tr></tbody></table><p>End</p>';
-    expect(await read(html)).toBe('Results:\n\nName | Grade | Note\nSmith | A* |\nJones | B | resit\n\nEnd');
+    expect(await read(html)).toBe('Results:\n\nName | Grade | Note\nSmith | A* | –\nJones | B | resit\n\nEnd');
+  });
+
+  it('a row with one value filled in stays in its table (key/value with a blank)', async () => {
+    const html =
+      '<table><tr><td>Name</td><td>Smith</td></tr><tr><td>Phone</td><td></td></tr><tr><td>Email</td><td>s@school.example</td></tr></table>';
+    expect(await read(html)).toBe('Name | Smith\nPhone | –\nEmail | s@school.example');
+  });
+
+  it('a short multi-line cell (an address) stays in its row', async () => {
+    const html =
+      '<table><tr><td>a</td><td>b</td></tr><tr><td>c</td><td>l1<br>l2<br>l3<br>l4</td></tr><tr><td>e</td><td>f</td></tr></table>';
+    expect(await read(html)).toBe('a | b\nc | l1 / l2 / l3 / l4\ne | f');
+  });
+
+  it('colspan keeps later columns in place; a rowspan’s value is repeated in each row it covers', async () => {
+    const colspan =
+      '<table><tr><th colspan="2">Grades</th><th>Name</th></tr><tr><td>A</td><td>B</td><td>Smith</td></tr></table>';
+    expect(await read(colspan)).toBe('Grades |  | Name\nA | B | Smith');
+    const rowspan =
+      '<table><tr><td rowspan="2">Smith</td><td>Latin</td><td>A</td></tr><tr><td>Greek</td><td>B</td></tr><tr><td>Jones</td><td>Latin</td><td>C</td></tr></table>';
+    expect(await read(rowspan)).toBe('Smith | Latin | A\nSmith | Greek | B\nJones | Latin | C');
+    // A row whose only own cell sits beside a rowspan is still a data row.
+    const lone = '<table><tr><td rowspan="2">S</td><td>L</td></tr><tr><td>G</td></tr></table>';
+    expect(await read(lone)).toBe('S | L\nS | G');
+  });
+
+  it('rows inside a wrapper (<center>, <form>) are kept', async () => {
+    expect(await read('<table><center><tr><td>c1</td><td>c2</td></tr></center></table>')).toBe('c1 | c2');
+    expect(await read('<table><form><tr><td>f1</td><td>f2</td></tr></form></table>')).toBe('f1 | f2');
+  });
+
+  it('a caption and loose text in a table are kept, in place', async () => {
+    expect(await read('<table><caption>Invoice 42</caption><tr><td>a</td><td>b</td></tr></table>')).toBe(
+      'Invoice 42\n\na | b',
+    );
+    expect(await read('<table>loose text<tr><td>a</td><td>b</td></tr></table>')).toBe('loose text\n\na | b');
   });
 
   it('Outlook’s cells, each a paragraph, stay on their row; a cell’s lines are joined by " / "', async () => {
@@ -997,13 +1032,14 @@ describe('HTML tables', () => {
     expect(await read(html)).toBe('Date | Event\n4 Nov | Trials begin / Room 6');
   });
 
-  it('layout tables (one cell of content, or a long cell) read as their paragraphs, with no separators', async () => {
+  it('layout tables (no row of two cells, or a long cell) read as their paragraphs, with no separators', async () => {
     const nested =
       '<table><tr><td><table><tr><td><h1>Newsletter</h1></td></tr><tr><td></td></tr>' +
       '<tr><td><p>Para one.</p><p>Para two.</p></td></tr></table></td></tr></table>';
     expect(await read(nested)).toBe('Newsletter\n\nPara one.\n\nPara two.');
-    const twoColumns = '<table><tr><td><p>a</p><p>b</p><p>c</p><p>d</p></td><td><p>side</p></td></tr></table>';
-    expect(await read(twoColumns)).toBe('a\n\nb\n\nc\n\nd\n\nside');
+    const paras = Array.from({ length: 11 }, (_, i) => `<p>p${i}</p>`).join('');
+    const twoColumns = `<table><tr><td>${paras}</td><td><p>side</p></td></tr></table>`;
+    expect(await read(twoColumns)).toBe([...Array.from({ length: 11 }, (_, i) => `p${i}`), 'side'].join('\n\n'));
   });
 
   it('an empty table leaves nothing behind; links in cells are kept', async () => {
@@ -1029,6 +1065,17 @@ describe('HTML tables', () => {
     expect(await read('<table><tbody hidden><tr><td>secret</td></tr></tbody></table>')).toBe(
       `[hidden ${TOK}: secret /hidden ${TOK}]`,
     );
+    // What the formatter keeps besides cells is marked too.
+    expect(await read('<table style="display:none"><caption>cap</caption><tr><td>a</td><td>b</td></tr></table>')).toBe(
+      `[hidden ${TOK}: cap /hidden ${TOK}]\n\n[hidden ${TOK}: a /hidden ${TOK}] | [hidden ${TOK}: b /hidden ${TOK}]`,
+    );
+  });
+
+  it('a hidden empty link is marked: html-to-text prints its address', async () => {
+    const row = '<p>Hi</p><table><tr style="display:none"><td><a href="https://pay.example/x"></a></td></tr></table>';
+    expect(await read(row)).toBe(`Hi\n\n[hidden ${TOK}: https://pay.example/x /hidden ${TOK}]`);
+    const div = '<p>Hi</p><div style="display:none"><a href="https://pay.example/y"></a></div>';
+    expect(await read(div)).toMatch(new RegExp(`\\[hidden ${TOK}:\\s*https://pay\\.example/y`));
   });
 
   it('columns empty in every row (a template’s spacers) are dropped', async () => {
@@ -1038,9 +1085,9 @@ describe('HTML tables', () => {
     expect(await read(html)).toBe('To | Smith | Re: trip\nDate | 4 Nov | x');
   });
 
-  it('the worker runs its embedded functions under tsx too (esbuild’s __name wrappers)', () => {
+  it('the worker converts tables under tsx too (no compiler helpers in its source)', () => {
     // vitest compiles without esbuild's keepNames; tsx (`pnpm run dev`) wraps
-    // inner functions in __name(…) calls, which the worker must tolerate.
+    // inner functions in __name(…) calls, which broke the worker once.
     const adapter = fileURLToPath(new URL('./proton-mail.ts', import.meta.url));
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'proton-mail-tsx-'));
     const script = path.join(dir, 'run.mts');
@@ -1061,14 +1108,7 @@ describe('HTML tables', () => {
     }
   }, 60_000);
 
-  it('tableRowsToText: rows of empty cells are dropped; a cell of more than three lines is layout', () => {
-    expect(
-      tableRowsToText([
-        [{ text: '' }, { text: '' }],
-        [{ text: 'a' }, { text: 'b' }],
-      ]),
-    ).toBe('a | b');
-    expect(tableRowsToText([[{ text: '1\n2\n3\n4' }, { text: 'x' }]])).toBe('1\n2\n3\n4\n\nx');
-    expect(tableRowsToText([[{ text: '1\n2\n3' }, { text: 'x' }]])).toBe('1 / 2 / 3 | x');
+  it('rows of empty cells are dropped', async () => {
+    expect(await read('<table><tr><td></td><td></td></tr><tr><td>a</td><td>b</td></tr></table>')).toBe('a | b');
   });
 });
