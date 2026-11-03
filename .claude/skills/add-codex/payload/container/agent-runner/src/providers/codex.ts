@@ -33,7 +33,21 @@ import {
   writeCodexConfigToml,
 } from './codex-app-server.js';
 
-const TURN_TIMEOUT_MS = 10 * 60 * 1000;
+// Match OpenCode's idle budget: active turns have no wall-clock limit.
+// Native tools own their execution deadlines and remain manually cancellable.
+const IDLE_TIMEOUT_MS = 15 * 60 * 1000;
+const WATCHDOG_INTERVAL_MS = 5000;
+const TOOL_ITEM_TYPES = new Set([
+  'commandExecution',
+  'mcpToolCall',
+  'dynamicToolCall',
+  'fileChange',
+  'webSearch',
+  'imageView',
+  'imageGeneration',
+  'collabAgentToolCall',
+  'sleep',
+]);
 
 export interface CodexRuntimeDeps {
   writeCodexConfigToml: typeof writeCodexConfigToml;
@@ -216,6 +230,7 @@ export class CodexProvider implements AgentProvider {
               wakeActiveTurn = waker;
             },
             self.runtime.startCodexTurn,
+            self.runtime.interruptCodexTurn,
           );
         }
       } finally {
@@ -260,11 +275,16 @@ async function* runOneTurn(
   isAborted: () => boolean,
   setAbortWaker: (waker: (() => void) | null) => void,
   startTurn: typeof startCodexTurn,
+  interruptTurn: typeof interruptCodexTurn,
 ): AsyncGenerator<ProviderEvent> {
   const state: { error: Error | null } = { error: null };
   let resultText = '';
   let turnDone = false;
   let turnId: string | null = null;
+  let lastActivityAt = performance.now();
+  const runningTools = new Set<string>();
+  let heartbeatDue = false;
+  let idleTimedOut = false;
 
   // A finished turn can no longer absorb steered input: codex's turn/steer
   // against a completed turn resolves as a no-op, so a follow-up routed there
@@ -285,6 +305,7 @@ async function* runOneTurn(
   setAbortWaker(kick);
 
   const handler = (n: JsonRpcNotification): void => {
+    if (turnDone || isAborted()) return;
     const method = n.method;
     const params = n.params ?? {};
     buffer.push({ type: 'activity' });
@@ -295,6 +316,28 @@ async function* runOneTurn(
     if (typeof params.threadId === 'string' && params.threadId !== threadId) {
       kick();
       return;
+    }
+
+    const notifiedTurnId = params.turnId ?? (params.turn as { id?: string } | undefined)?.id;
+    if (turnId && notifiedTurnId && notifiedTurnId !== turnId) {
+      kick();
+      return;
+    }
+    // Global app-server notifications are not evidence of turn progress.
+    if (
+      method.startsWith('item/') ||
+      method.startsWith('turn/') ||
+      method === 'thread/status/changed' ||
+      method === 'thread/tokenUsage/updated'
+    ) {
+      lastActivityAt = performance.now();
+    }
+    if (method === 'item/started' || method === 'item/completed') {
+      const item = params.item as { id?: string; type?: string } | undefined;
+      if (item?.id && item.type && TOOL_ITEM_TYPES.has(item.type)) {
+        if (method === 'item/started') runningTools.add(item.id);
+        else runningTools.delete(item.id);
+      }
     }
 
     switch (method) {
@@ -362,7 +405,7 @@ async function* runOneTurn(
   server.notificationHandlers.push(handler);
 
   // A dead app-server can't send the notification this turn is parked on —
-  // end the turn immediately with the real cause instead of the 10-min timeout.
+  // end the turn immediately with the real cause instead of the idle timeout.
   const onServerExit = (err: Error): void => {
     if (turnDone) return;
     state.error = err;
@@ -371,11 +414,20 @@ async function* runOneTurn(
   };
   server.exitHandlers.push(onServerExit);
 
-  const timer = setTimeout(() => {
-    state.error = new Error(`Turn timed out after ${TURN_TIMEOUT_MS}ms`);
-    finishTurn();
+  const timer = setInterval(() => {
+    if (turnDone || isAborted()) return;
+    if (runningTools.size === 0 && performance.now() - lastActivityAt >= IDLE_TIMEOUT_MS) {
+      idleTimedOut = true;
+      state.error = new Error(`Codex turn produced no activity for ${IDLE_TIMEOUT_MS}ms; aborted`);
+      finishTurn();
+    } else {
+      // The host supervises the runner, while this watchdog supervises the
+      // turn. A quiet native tool (including a sub-agent wait) is still work.
+      // Coalesce ticks; this heartbeat must never reset lastActivityAt.
+      heartbeatDue = true;
+    }
     kick();
-  }, TURN_TIMEOUT_MS);
+  }, WATCHDOG_INTERVAL_MS);
 
   try {
     if (!hasInit()) {
@@ -390,7 +442,7 @@ async function* runOneTurn(
       effort,
       cwd,
     });
-    setActiveTurn(turnId);
+    if (!turnDone && !isAborted()) setActiveTurn(turnId);
     const imagesBefore = listGeneratedImages(threadId);
     if (isAborted()) return;
 
@@ -399,6 +451,11 @@ async function* runOneTurn(
         yield buffer.shift()!;
       }
       if (turnDone || isAborted()) break;
+      if (heartbeatDue) {
+        heartbeatDue = false;
+        yield { type: 'activity' };
+        continue;
+      }
       await new Promise<void>((resolve) => {
         waker = resolve;
       });
@@ -410,6 +467,11 @@ async function* runOneTurn(
     if (isAborted()) return;
 
     if (state.error) {
+      // Cancelling the consumer alone does not stop native execution. The
+      // interrupt RPC is bounded; query cleanup also terminates the server.
+      if (idleTimedOut && turnId) {
+        await interruptTurn(server, threadId, turnId).catch(() => {});
+      }
       yield {
         type: 'error',
         message: state.error.message,
@@ -427,7 +489,7 @@ async function* runOneTurn(
 
     yield { type: 'result', text: resultText || null };
   } finally {
-    clearTimeout(timer);
+    clearInterval(timer);
     clearActiveTurn();
     setAbortWaker(null);
     const idx = server.notificationHandlers.indexOf(handler);

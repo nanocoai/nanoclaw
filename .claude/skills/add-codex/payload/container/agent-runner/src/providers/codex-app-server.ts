@@ -58,7 +58,7 @@ export interface AppServer {
    * request/response pairs are rejected separately via failPending — but a
    * turn in flight has NO pending request (turn/start already resolved); it
    * is parked on a notification waker that a dead process will never kick.
-   * Without these handlers a mid-turn crash surfaces as a 10-minute turn
+   * Without these handlers a mid-turn crash surfaces as an inactivity
    * timeout instead of the real exit code, after the --rm container has
    * already taken the server's stderr with it.
    */
