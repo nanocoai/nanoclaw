@@ -1857,6 +1857,40 @@ describe('review 3 of #4218', () => {
     });
   });
 
+  describe('the shared hold queue, per domain', () => {
+    it('one domain holds at most 20 new-sender mails; another domain’s new sender is still held', async () => {
+      h.wired = false;
+      const now = Date.now();
+      const twoDaysAgo = new Date(now - 2 * 24 * 60 * 60_000).toISOString();
+      const strangers: Record<string, string> = Object.fromEntries(
+        Array.from({ length: 20 }, (_, i) => [`u${i}@bulk.example`, twoDaysAgo]),
+      );
+      // This hour's ten new addresses are used up, so a new address waits.
+      for (let i = 0; i < 10; i++) strangers[`seen${i}@example.org`] = new Date(now).toISOString();
+      const retry = Object.fromEntries(
+        Array.from({ length: 20 }, (_, i) => [
+          String(9000 + i),
+          {
+            attempts: 0,
+            nextAt: new Date(now + 50 * 60_000).toISOString(),
+            deferred: 'strangers',
+            from: `held${i}@bulk.example`,
+          },
+        ]),
+      );
+      seedState({ strangers, retry });
+      const { calls } = await start();
+      const last = await arriveAll([
+        mail({ from: 'u40@bulk.example', body: 'one too many', auth: passFor('bulk.example') }),
+        mail({ from: 'new@other.example', body: 'another domain', auth: passFor('other.example') }),
+      ]);
+      expect(calls.inbound).toHaveLength(0);
+      expect(flagged()).toContainEqual([last - 1, ['$NanoClawFailed']]);
+      expect(readState().retry[last]).toMatchObject({ deferred: 'strangers', from: 'new@other.example' });
+      expect(flagged().filter(([u]) => u === last)).toEqual([]);
+    });
+  });
+
   describe('the shared hold queue', () => {
     it('new senders’ held mail takes at most half of it, so approved senders’ over-limit mail is still held', async () => {
       h.wired = false;

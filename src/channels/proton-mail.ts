@@ -90,6 +90,11 @@ const DEFERRED_MAX = 200;
  * approved senders' over-limit mail would be refused instead of held.
  */
 const DEFERRED_STRANGERS_MAX = DEFERRED_MAX / 2;
+/**
+ * Of those, mail from any one domain: a flood of new addresses at one domain
+ * cannot take the whole share and leave other domains' new senders refused.
+ */
+const DEFERRED_STRANGERS_PER_DOMAIN_MAX = 20;
 /** How long the adapter waits for the host's onHostStart before it logs an error (it keeps waiting). */
 const HOST_START_WARN_MS = 5 * 60_000;
 /** How often one new address may be looked up with core to see whether it was settled (pruneSettled). */
@@ -1025,6 +1030,11 @@ function asciiDomain(domain: string): string {
   return domainToASCII(domain) || domain;
 }
 
+/** An address's domain, in its ASCII form. */
+function addressDomain(address: string): string {
+  return asciiDomain(address.split('@').pop() ?? '');
+}
+
 /**
  * Reason this mail's sender is unverified, or null when Proton vouches for it.
  *
@@ -1933,7 +1943,11 @@ registerChannelAdapter('proton-mail', {
         if (
           waiting.length >= DEFERRED_MAX ||
           waiting.filter((r) => r.from === from).length >= DEFERRED_PER_SENDER_MAX ||
-          (kind === 'strangers' && waiting.filter((r) => r.deferred === 'strangers').length >= DEFERRED_STRANGERS_MAX)
+          (kind === 'strangers' &&
+            waiting.filter((r) => r.deferred === 'strangers').length >= DEFERRED_STRANGERS_MAX) ||
+          (kind === 'strangers' &&
+            waiting.filter((r) => r.deferred === 'strangers' && r.from && addressDomain(r.from) === addressDomain(from))
+              .length >= DEFERRED_STRANGERS_PER_DOMAIN_MAX)
         ) {
           log.warn('Proton Mail: over an hourly limit with too much mail already waiting — left unread and flagged', {
             uid,
@@ -1968,9 +1982,8 @@ registerChannelAdapter('proton-mail', {
         }
       }
       if (state.strangers[addr]) return 'ok';
-      const domainOf = (a: string) => asciiDomain(a.split('@').pop() ?? '');
-      const domain = domainOf(addr);
-      const ofDomain = () => Object.keys(state.strangers).filter((a) => domainOf(a) === domain);
+      const domain = addressDomain(addr);
+      const ofDomain = () => Object.keys(state.strangers).filter((a) => addressDomain(a) === domain);
       // Before either limit refuses or holds a mail, the addresses core has
       // since settled give their slots back.
       const all = Object.keys(state.strangers);
