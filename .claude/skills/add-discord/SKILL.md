@@ -47,8 +47,14 @@ pinned package drifts away from the patch:
 patches/@chat-adapter__discord@4.41.1.patch
 ```
 
+The reinstall applies the patch to an install that already has the adapter,
+since the step below skips a package that is already present. It runs only
+then: pnpm refuses a patch for a package that isn't installed, so a fresh
+install gets the patch from the step below instead:
+
 ```nc:run effect:refresh
 pnpm pkg set 'pnpm.patchedDependencies[@chat-adapter/discord@4.41.1]=patches/@chat-adapter__discord@4.41.1.patch'
+if node -e 'process.exit(require("./package.json").dependencies?.["@chat-adapter/discord"] ? 0 : 1)'; then pnpm install --no-frozen-lockfile; fi
 ```
 
 Adapter 4.42.0 and later carry the fix. Installs keep this registration, so the
