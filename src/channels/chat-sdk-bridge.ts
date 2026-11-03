@@ -1623,6 +1623,13 @@ function gatewayTokenMatches(header: string | string[] | undefined, botToken: st
   return timingSafeEqual(digest(header), digest(botToken));
 }
 
+/**
+ * Bounds each interaction call. Discord voids a first response after 3 s, so
+ * an ack still pending past this can only fail; unbounded, one stalled call
+ * held up its click for good, and what queued behind it.
+ */
+const INTERACTION_CALLBACK_TIMEOUT_MS = 10_000;
+
 async function handleForwardedEvent(
   body: string,
   adapter: GatewayAdapter,
@@ -1653,7 +1660,12 @@ async function handleForwardedEvent(
         try {
           const result = await fetch(
             `https://discord.com/api/v10/interactions/${interactionId}/${interactionToken}/callback`,
-            { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(response) },
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(response),
+              signal: AbortSignal.timeout(INTERACTION_CALLBACK_TIMEOUT_MS),
+            },
           );
           if (!result.ok) log.error('Failed to acknowledge interaction', { status: result.status });
           // eslint-disable-next-line no-catch-all/no-catch-all -- the decision is dispatched either way
