@@ -49,6 +49,7 @@ import {
   isHiddenStyle,
   stripInvisible,
   subjectStem,
+  tableRowsToText,
 } from './proton-mail.js';
 import { normalizeOptions } from './ask-question.js';
 
@@ -969,5 +970,57 @@ describe('review 3 of #4218', () => {
     it('an ASCII domain is unchanged', () => {
       expect(senderLabel('a@example.org', 'Anna')).toBe('Anna <a@example.org>');
     });
+  });
+});
+
+describe('HTML tables', () => {
+  const TOK = 'K7Q2';
+  const read = (html: string) => mailText({ html }, 5000, { token: TOK });
+
+  it('a data table is one row per line, cells split by " | ", blanks kept', async () => {
+    const html =
+      '<p>Results:</p><table><thead><tr><th>Name</th><th>Grade</th><th>Note</th></tr></thead>' +
+      '<tbody><tr><td>Smith</td><td>A*</td><td></td></tr><tr><td>Jones</td><td>B</td><td>resit</td></tr></tbody></table><p>End</p>';
+    expect(await read(html)).toBe('Results:\n\nName | Grade | Note\nSmith | A* |\nJones | B | resit\n\nEnd');
+  });
+
+  it('Outlook’s cells, each a paragraph, stay on their row; a cell’s lines are joined by " / "', async () => {
+    const html =
+      '<table class=MsoTableGrid><tr><td><p class=MsoNormal>Date<o:p></o:p></p></td><td><p class=MsoNormal>Event</p></td></tr>' +
+      '<tr><td><p class=MsoNormal>4 Nov</p></td><td><p class=MsoNormal>Trials begin</p><p class=MsoNormal>Room 6</p></td></tr></table>';
+    expect(await read(html)).toBe('Date | Event\n4 Nov | Trials begin / Room 6');
+  });
+
+  it('layout tables (one cell of content, or a long cell) read as their paragraphs, with no separators', async () => {
+    const nested =
+      '<table><tr><td><table><tr><td><h1>Newsletter</h1></td></tr><tr><td></td></tr>' +
+      '<tr><td><p>Para one.</p><p>Para two.</p></td></tr></table></td></tr></table>';
+    expect(await read(nested)).toBe('Newsletter\n\nPara one.\n\nPara two.');
+    const twoColumns = '<table><tr><td><p>a</p><p>b</p><p>c</p><p>d</p></td><td><p>side</p></td></tr></table>';
+    expect(await read(twoColumns)).toBe('a\n\nb\n\nc\n\nd\n\nside');
+  });
+
+  it('an empty table leaves nothing behind; links in cells are kept', async () => {
+    expect(await read('<table><tr><td></td></tr></table><p>After</p>')).toBe('After');
+    expect(await read('<table><tr><td><a href="https://example.org/x">Pay</a></td><td>now</td></tr></table>')).toBe(
+      'Pay [https://example.org/x] | now',
+    );
+  });
+
+  it('hidden text in a cell is still marked', async () => {
+    const html =
+      '<table><tr><td>Total</td><td>£300<span style="display:none">pay another account</span></td></tr></table>';
+    expect(await read(html)).toBe(`Total | £300[hidden ${TOK}: pay another account /hidden ${TOK}]`);
+  });
+
+  it('tableRowsToText: rows of empty cells are dropped; a cell of more than three lines is layout', () => {
+    expect(
+      tableRowsToText([
+        [{ text: '' }, { text: '' }],
+        [{ text: 'a' }, { text: 'b' }],
+      ]),
+    ).toBe('a | b');
+    expect(tableRowsToText([[{ text: '1\n2\n3\n4' }, { text: 'x' }]])).toBe('1\n2\n3\n4\n\nx');
+    expect(tableRowsToText([[{ text: '1\n2\n3' }, { text: 'x' }]])).toBe('1 / 2 / 3 | x');
   });
 });

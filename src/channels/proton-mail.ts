@@ -461,9 +461,98 @@ export function flagInvisibleText(text: string, token: string): { text: string; 
   return { text: out, flagged };
 }
 
+/** The parts of an htmlparser2 node the table formatter reads. */
+interface TableNode {
+  type: string;
+  name?: string;
+  children?: TableNode[];
+}
+/** The parts of html-to-text's BlockTextBuilder the table formatter calls. */
+interface TableBuilder {
+  openTable(): void;
+  openTableRow(): void;
+  openTableCell(): void;
+  closeTableCell(): void;
+  closeTableRow(): void;
+  closeTable(opts: { tableToString: (rows: Array<Array<{ text: string }>>) => string }): void;
+}
+
 /**
- * The worker's whole program: fixed code, with the style test carried over as
- * its own source; the HTML and this mail's mark code arrive as data. Depth is
+ * A table's rows as text: one row per line, cells split by " | ", a cell's own
+ * lines joined by " / ". html-to-text's default puts a whole table on one line
+ * with nothing between cells. A row with one cell of content, or with a cell
+ * of more than three lines, is layout (newsletters are built of tables), not
+ * data: each such cell is written as a block of its own, as it was converted.
+ * Empty rows are dropped. Self-contained: the worker runs it from its source.
+ */
+export function tableRowsToText(rows: Array<Array<{ text: string }>>): string {
+  const cellLinesMax = 3;
+  const blocks: string[] = [];
+  let lines: string[] = [];
+  const flush = () => {
+    if (lines.length) blocks.push(lines.join('\n'));
+    lines = [];
+  };
+  for (const cells of rows) {
+    const texts = cells.map((c) =>
+      c.text
+        .split('\n')
+        .map((s) => s.trim())
+        .filter(Boolean),
+    );
+    const full = cells.filter((_, i) => texts[i].length > 0);
+    if (full.length === 0) continue;
+    if (full.length === 1 || texts.some((t) => t.length > cellLinesMax)) {
+      flush();
+      for (const c of full) blocks.push(c.text.trim());
+    } else {
+      lines.push(
+        texts
+          .map((t) => t.join(' / '))
+          .join(' | ')
+          .trimEnd(),
+      );
+    }
+  }
+  flush();
+  return blocks.join('\n\n');
+}
+
+/**
+ * html-to-text formatter for `<table>`: each cell rendered on its own by
+ * html-to-text's table builder (so a cell's paragraphs cannot split its row),
+ * then laid out by tableRowsToText. Only the table's own rows count, direct or
+ * in thead/tbody/tfoot; a nested table is a cell's content. Self-contained:
+ * the worker runs it from its source.
+ */
+export function formatTableRows(
+  elem: TableNode,
+  walk: (nodes: TableNode[] | undefined, builder: TableBuilder) => void,
+  builder: TableBuilder,
+): void {
+  const tag = (n: TableNode, ...names: string[]) => n.type === 'tag' && names.includes(n.name ?? '');
+  const rows: TableNode[] = [];
+  for (const c of elem.children ?? []) {
+    if (tag(c, 'tr')) rows.push(c);
+    else if (tag(c, 'thead', 'tbody', 'tfoot')) for (const r of c.children ?? []) if (tag(r, 'tr')) rows.push(r);
+  }
+  builder.openTable();
+  for (const tr of rows) {
+    builder.openTableRow();
+    for (const cell of (tr.children ?? []).filter((c) => tag(c, 'td', 'th'))) {
+      builder.openTableCell();
+      walk(cell.children, builder);
+      builder.closeTableCell();
+    }
+    builder.closeTableRow();
+  }
+  builder.closeTable({ tableToString: tableRowsToText });
+}
+
+/**
+ * The worker's whole program: fixed code, with the style test and the table
+ * formatter carried over as their own source; the HTML and this mail's mark
+ * code arrive as data. Depth is
  * counted with htmlparser2's own open/close events — the same tree the
  * conversion builds, implied closes and all (`<li><p>` nesting without end
  * slipped past a hand-written count) — and the count stops at the limit.
@@ -474,6 +563,8 @@ const { parentPort, workerData } = require('worker_threads');
 const { htmlToText } = require(workerData.module);
 const { Parser, parseDocument } = require(workerData.htmlparser2);
 ${isHiddenStyle.toString()}
+${tableRowsToText.toString()}
+${formatTableRows.toString()}
 const STOP = {};
 function tooDeep(html, max) {
   let depth = 0;
@@ -518,7 +609,8 @@ if (tooDeep(html, workerData.maxDepth)) {
     mark(dom);
     if (hidden > 0) html = render(dom);
   }
-  parentPort.postMessage({ kind: 'text', text: htmlToText(html, workerData.options), truncated, hidden });
+  const options = { ...workerData.options, formatters: { tableRows: formatTableRows } };
+  parentPort.postMessage({ kind: 'text', text: htmlToText(html, options), truncated, hidden });
 }
 `;
 
@@ -609,6 +701,9 @@ const HTML_TO_TEXT_OPTIONS = {
   selectors: [
     { selector: 'img', format: 'skip' },
     ...['h1', 'h2', 'h3', 'h4', 'h5', 'h6'].map((selector) => ({ selector, options: { uppercase: false } })),
+    // One row per line (formatTableRows, added in the worker: functions
+    // cannot be passed to it as data).
+    { selector: 'table', format: 'tableRows' },
   ],
 };
 
