@@ -7,6 +7,7 @@ import type { Adapter, AdapterPostableMessage, CardElement, RawMessage } from 'c
 import { fenceForCard } from '../card-text.js';
 import { gatewayApprovalPresentation } from '../gateway-approval-presentation.js';
 import type { GatewayApprovalRequest } from '../gateway-providers/gateway-provider-registry.js';
+import { log } from '../log.js';
 import { CardTooLongError } from './ask-question.js';
 import {
   attachmentBytesToBase64,
@@ -2132,6 +2133,59 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
         platformId: 'chan-1',
       });
     } finally {
+      await bridge.teardown();
+    }
+  });
+
+  /** A Discord call that never answers: it ends only when its signal aborts. */
+  const stalled = (_url: unknown, init?: RequestInit) =>
+    new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(init.signal!.reason));
+    });
+  /**
+   * Hands out the bridge's Discord deadlines as signals the test fires, so a
+   * stall ends at once instead of after 10 s. `asked` is what each call wanted.
+   */
+  function controlDeadlines() {
+    const asked: number[] = [];
+    const pending: AbortController[] = [];
+    const spy = vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms) => {
+      asked.push(ms);
+      const controller = new AbortController();
+      pending.push(controller);
+      return controller.signal;
+    });
+    const expire = () => {
+      for (const controller of pending.splice(0)) {
+        controller.abort(new DOMException('The operation was aborted due to timeout', 'TimeoutError'));
+      }
+    };
+    const restore = () => {
+      expire();
+      spy.mockRestore();
+    };
+    return { asked, expire, restore };
+  }
+
+  it('ends a stalled Discord ack at its deadline, and the click still reaches the host', async () => {
+    const { bridge, click, onAction } = await startDiscord('q-discord-ack-deadline', review);
+    const deadlines = controlDeadlines();
+    vi.mocked(globalThis.fetch).mockImplementation(async (url, init) =>
+      String(url).endsWith('/callback') ? stalled(url, init) : new Response(null, { status: 204 }),
+    );
+    const errors = vi.spyOn(log, 'error').mockImplementation(() => {});
+    try {
+      const answered = click({ id: 'clicker-1', username: 'Ann' });
+      await vi.waitFor(() => expect(deadlines.asked).toEqual([10_000]));
+      deadlines.expire();
+      expect((await answered).status).toBe(200);
+      await vi.waitFor(() =>
+        expect(onAction).toHaveBeenCalledWith('q-discord-ack-deadline', 'approve', 'clicker-1', expect.anything()),
+      );
+      expect(errors).toHaveBeenCalledWith('Failed to acknowledge interaction', expect.anything());
+    } finally {
+      errors.mockRestore();
+      deadlines.restore();
       await bridge.teardown();
     }
   });
