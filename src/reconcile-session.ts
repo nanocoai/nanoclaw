@@ -37,10 +37,16 @@ import { getAgentGroup } from './db/agent-groups.js';
 import { ABSOLUTE_CEILING_MS_RAW, CLAIM_STUCK_MS_RAW } from './config.js';
 import { log } from './log.js';
 import { heartbeatPath, withExistingMailboxSession } from './session-manager.js';
-import { getContainerStartedAtMs, isContainerRunning, killContainer } from './container-runner.js';
+import {
+  getContainerStartedAtMs,
+  hasHostRuntime,
+  isClaimedByLivePeer,
+  isContainerRunning,
+  killContainer,
+} from './container-runner.js';
 import { requestWake } from './request-wake.js';
 import type { Session } from './types.js';
-import type { ContainerState, InboundMailbox, OutboundMailbox } from './mailbox/index.js';
+import { getAgentMailbox, type ContainerState, type InboundMailbox, type OutboundMailbox } from './mailbox/index.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -148,7 +154,7 @@ export async function reconcileSession(sessionId: string): Promise<void> {
   await reconcileActiveSession(session);
 }
 
-async function reconcileActiveSession(session: Session): Promise<void> {
+async function reconcileActiveSession(session: Session, afterRecovery = false): Promise<void> {
   const agentGroup = await getAgentGroup(session.agent_group_id);
   if (!agentGroup) return;
 
@@ -178,11 +184,48 @@ async function reconcileActiveSession(session: Session): Promise<void> {
       await maintainSessionMailbox(mailbox, session, agentGroup.id);
     });
   } catch (err) {
+    if (!afterRecovery && (await recoverResidue(err, agentGroup.id, session))) {
+      // Read cleanly now: run the sweep once more so due messages wake this tick.
+      await reconcileActiveSession(session, true);
+      return;
+    }
     log.error('Session mailbox sweep failed', {
       agentGroupId: agentGroup.id,
       sessionId: session.id,
       err,
     });
+  }
+}
+
+/**
+ * A container killed mid-write can leave residue that makes every host read of
+ * the session fail (for SQLite, a hot outbound journal). The failure comes
+ * before the due-message count, so without this the session would never be
+ * woken, and its messages and tasks would wait for an unrelated inbound
+ * message (upstream #4056). Clears it through the mailbox's writable path
+ * (the one deleteOrphanProcessingClaims already uses) only while no runtime
+ * can be writing it: nothing in this host holds the session (not registered,
+ * spawning, adopting, awaiting adoption or a pending stop) and no other live
+ * host process holds its claim. Spawns nothing. Never throws; true when residue
+ * was cleared.
+ */
+async function recoverResidue(err: unknown, agentGroupId: string, session: Session): Promise<boolean> {
+  try {
+    if (hasHostRuntime(session.id) || !getAgentMailbox().isRecoverableResidue?.(err)) return false;
+    if (await isClaimedByLivePeer(session.id)) return false;
+    const recovered = await withExistingMailboxSession(agentGroupId, session.id, (mailbox) => {
+      // Checked again with no await before the writable open: a wake may have
+      // started a spawn while the mailbox session opened.
+      if (!mailbox.recoverResidue || hasHostRuntime(session.id)) return false;
+      mailbox.recoverResidue();
+      return true;
+    });
+    if (!recovered) return false;
+    log.warn('Cleared crash residue in session storage', { agentGroupId, sessionId: session.id });
+    return true;
+  } catch (recoveryErr) {
+    log.error('Session storage recovery failed', { agentGroupId, sessionId: session.id, err: recoveryErr });
+    return false;
   }
 }
 

@@ -165,16 +165,13 @@ function claimantId(): string {
 async function claimSessionRun(sessionId: string, containerRef: string): Promise<number | null> {
   const current = await getSessionClaim(sessionId);
   const self = claimantId();
-  if (current?.claimed_by && current.claimed_by !== self) {
-    const holder = await getLiveHostInstance(current.claimed_by, new Date().toISOString());
-    if (holder) {
-      log.warn('Refusing session claim held by a live peer host', {
-        sessionId,
-        holder: current.claimed_by,
-        claimant: self,
-      });
-      return null;
-    }
+  if (await heldByLivePeer(current)) {
+    log.warn('Refusing session claim held by a live peer host', {
+      sessionId,
+      holder: current?.claimed_by,
+      claimant: self,
+    });
+    return null;
   }
   return tryClaimSession({
     sessionId,
@@ -183,6 +180,21 @@ async function claimSessionRun(sessionId: string, containerRef: string): Promise
     containerRef,
     now: new Date().toISOString(),
   });
+}
+
+/** True when another live host process (not stopped, lease unexpired) holds the claim. */
+async function heldByLivePeer(claim: { claimed_by: string | null } | undefined): Promise<boolean> {
+  if (!claim?.claimed_by || claim.claimed_by === claimantId()) return false;
+  return (await getLiveHostInstance(claim.claimed_by, new Date().toISOString())) !== undefined;
+}
+
+/**
+ * True when another live host process holds this session's claim, so its
+ * runtime may be writing the session's storage even though nothing in this
+ * process tracks it (see hasHostRuntime).
+ */
+export async function isClaimedByLivePeer(sessionId: string): Promise<boolean> {
+  return heldByLivePeer(await getSessionClaim(sessionId));
 }
 
 /** Release our claim at this incarnation. Never throws — a failed release is
@@ -219,6 +231,22 @@ export function getActiveContainerCount(): number {
 
 export function isContainerRunning(sessionId: string): boolean {
   return activeContainers.has(sessionId);
+}
+
+/**
+ * True while any path in this host holds, or is about to hold, the session's
+ * runtime: registered, spawning (its container may be starting before it
+ * registers), being re-adopted, or a live survivor awaiting adoption or a stop.
+ * The guard for host writes to container-owned storage.
+ */
+export function hasHostRuntime(sessionId: string): boolean {
+  return (
+    activeContainers.has(sessionId) ||
+    wakePromises.has(sessionId) ||
+    adoptionRetries.has(sessionId) ||
+    pendingAdoptions.has(sessionId) ||
+    pendingStops.has(sessionId)
+  );
 }
 
 export function getContainerStartedAtMs(sessionId: string): number | undefined {
