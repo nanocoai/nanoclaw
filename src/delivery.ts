@@ -136,14 +136,14 @@ async function clearAttemptRow(messageId: string): Promise<void> {
 const inflightDeliveries = new Set<string>();
 
 /**
- * Rows (overdueKey) whose send passed its deadline and has not
+ * Per session, ids of rows whose send passed its deadline and has not
  * settled. Drains skip them, so a send that may still land is never
  * repeated: a late success marks the row delivered, a late failure counts an
  * attempt and the next tick retries. A row leaves only after that bookkeeping.
  * Later rows keep going meanwhile, so a parked row can land after them, the
  * same reordering a failed-then-retried row already has.
  */
-const overdueDeliveries = new Set<string>();
+const overdueDeliveries = new Map<string, Set<string>>();
 
 /**
  * Per session, overdue sends that have not settled, including ones past the
@@ -152,8 +152,11 @@ const overdueDeliveries = new Set<string>();
  */
 const unsettledLateSends = new Map<string, number>();
 
-function overdueKey(sessionId: string, messageId: string): string {
-  return `${sessionId}\0${messageId}`;
+function unparkDelivery(sessionId: string, messageId: string): void {
+  const parked = overdueDeliveries.get(sessionId);
+  if (!parked) return;
+  parked.delete(messageId);
+  if (parked.size === 0) overdueDeliveries.delete(sessionId);
 }
 
 /**
@@ -334,10 +337,9 @@ async function drainSession(session: Session): Promise<void> {
   // Snapshot parked rows BEFORE reading the queue: a late send marks its row
   // delivered before it leaves overdueDeliveries, so every row reads as
   // delivered or parked, never as neither.
-  const parked = new Set(overdueDeliveries);
+  const parked = new Set(overdueDeliveries.get(session.id));
   const lateSendOut = (unsettledLateSends.get(session.id) ?? 0) > 0;
-  const sessionPrefix = overdueKey(session.id, '');
-  if ([...parked].filter((key) => key.startsWith(sessionPrefix)).length >= MAX_PARKED_PER_SESSION) return;
+  if (parked.size >= MAX_PARKED_PER_SESSION) return;
 
   // Read the queue in one short mailbox session, then deliver with NO
   // session held open: delivery handlers (agent-to-agent routing, approval
@@ -354,7 +356,7 @@ async function drainSession(session: Session): Promise<void> {
         delivered,
         pending: mailbox
           .getDueMessages(delivered)
-          .filter((candidate) => !delivered.has(candidate.id) && !parked.has(overdueKey(session.id, candidate.id))),
+          .filter((candidate) => !delivered.has(candidate.id) && !parked.has(candidate.id)),
       };
     });
     if (!existing) return;
@@ -565,8 +567,7 @@ function parkOverdueDelivery(
   agentGroup: AgentGroup,
   send: Promise<string | undefined>,
 ): void {
-  const key = overdueKey(session.id, msg.id);
-  overdueDeliveries.add(key);
+  overdueDeliveries.set(session.id, (overdueDeliveries.get(session.id) ?? new Set<string>()).add(msg.id));
   unsettledLateSends.set(session.id, (unsettledLateSends.get(session.id) ?? 0) + 1);
   const context = {
     messageId: msg.id,
@@ -590,7 +591,7 @@ function parkOverdueDelivery(
     });
     void failDelivery(msg, session, agentGroup, new Error(`send did not settle within ${OVERDUE_GIVE_UP_MS} ms`), true)
       .catch((err) => log.error('Overdue delivery bookkeeping failed', { messageId: msg.id, err }))
-      .finally(() => overdueDeliveries.delete(key));
+      .finally(() => unparkDelivery(session.id, msg.id));
   }, OVERDUE_GIVE_UP_MS);
   giveUp.unref();
 
@@ -600,7 +601,7 @@ function parkOverdueDelivery(
   const release = (): void => {
     if (released) return;
     released = true;
-    if (!gaveUp) overdueDeliveries.delete(key);
+    if (!gaveUp) unparkDelivery(session.id, msg.id);
     const left = (unsettledLateSends.get(session.id) ?? 1) - 1;
     if (left > 0) unsettledLateSends.set(session.id, left);
     else unsettledLateSends.delete(session.id);

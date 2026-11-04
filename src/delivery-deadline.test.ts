@@ -572,6 +572,23 @@ describe('delivery deadline', () => {
     expect(calls).toEqual(['out-dead-0', 'out-dead-1', 'out-dead-2']);
   });
 
+  it("one session's parked sends do not count toward another session's cap", async () => {
+    const { session: other } = await resolveSession('ag-1', 'mg-1', 'thread-other', 'per-thread');
+    for (let i = 0; i < MAX_PARKED; i++) insertOutbound(session, `out-dead-${i}`);
+    insertOutbound(other, 'out-other');
+    const calls = recordingAdapter((text) => (text.startsWith('out-dead') ? new Promise<string>(() => {}) : undefined));
+    vi.spyOn(log, 'warn').mockImplementation(() => {});
+
+    for (let tick = 0; tick < MAX_PARKED; tick++) {
+      const drain = track(deliverSessionMessages(session));
+      await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+      await drain.promise;
+    }
+    await deliverSessionMessages(other);
+    expect(calls).toEqual(['out-dead-0', 'out-dead-1', 'out-dead-2', 'out-other']);
+    expect(deliveredRow(other, 'out-other')?.status).toBe('delivered');
+  });
+
   it('a drain stops starting new rows after one deadline, so a tick at the cap waits about two at most', async () => {
     insertOutbound(session, 'out-s1');
     insertOutbound(session, 'out-s2');
