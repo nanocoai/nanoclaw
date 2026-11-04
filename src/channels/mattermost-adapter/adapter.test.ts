@@ -9,6 +9,7 @@ import { MattermostAdapter } from './adapter.js';
 import type { MattermostAdapterOptions } from './adapter.js';
 import { CALLBACK_SECRET_KEY } from './format.js';
 import { createMattermostAdapter } from './index.js';
+import { MattermostApiError, MattermostNetworkError } from './rest.js';
 import { buildMattermostAdapter } from '../mattermost.js';
 
 const BOT_ID = '7g4f95dymtrjmqnoozdyi57xbw';
@@ -421,5 +422,65 @@ describe('Mattermost callback configuration', () => {
     ).toBe(401);
     expect((await adapter.handleWebhook(request({ action_id: 'approve', callback_token: SECRET }))).status).toBe(200);
     expect(processAction).toHaveBeenCalledTimes(1);
+  });
+});
+
+// The host's setup retry (channel-registry) matches on `name === 'NetworkError'`.
+describe('Mattermost setup failures', () => {
+  function bootAdapter(fetchImpl: typeof fetch, options: Partial<MattermostAdapterOptions> = {}) {
+    const adapter = new MattermostAdapter({ ...BASE_OPTIONS, fetchImpl, skipSocket: true, ...options });
+    const logger = { debug: vi.fn(), error: vi.fn(), info: vi.fn(), warn: vi.fn() };
+    const chat = { getLogger: () => logger } as unknown as ChatInstance;
+    return { adapter, initialize: () => adapter.initialize(chat) };
+  }
+
+  it.each([500, 502, 503, 504, 408, 429])('tags a %i at boot as a NetworkError', async (status) => {
+    const { initialize } = bootAdapter(vi.fn(async () => new Response('<html>Bad Gateway</html>', { status })));
+    const error = await initialize().catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(MattermostApiError);
+    expect(error).toMatchObject({ name: 'NetworkError', status });
+  });
+
+  it('tags a fetch that got no reply as a NetworkError', async () => {
+    const refused = new TypeError('fetch failed', { cause: new Error('connect ECONNREFUSED 10.0.0.5:443') });
+    const { initialize } = bootAdapter(
+      vi.fn(async () => {
+        throw refused;
+      }),
+    );
+    const error = await initialize().catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(MattermostNetworkError);
+    expect(error).toMatchObject({ name: 'NetworkError', cause: refused });
+  });
+
+  it('tags the request timeout as a NetworkError', async () => {
+    const hang = vi.fn(
+      (_input: string | URL | Request, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(init.signal!.reason));
+        }),
+    );
+    const { initialize } = bootAdapter(hang, { requestTimeoutMs: 5 });
+    const error = await initialize().catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(MattermostNetworkError);
+    expect((error as Error).cause).toMatchObject({ name: 'TimeoutError' });
+  });
+
+  it.each([400, 401, 403, 404])('fails fast on a %i', async (status) => {
+    const { initialize } = bootAdapter(vi.fn(async () => Response.json({ id: 'api.error' }, { status })));
+    const error = await initialize().catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(MattermostApiError);
+    expect(error).toMatchObject({ name: 'MattermostApiError', status });
+  });
+
+  it('starts on the next attempt once the server is back', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response('Bad Gateway', { status: 502 }))
+      .mockResolvedValue(Response.json({ id: BOT_ID, username: 'nanoclaw-bot', is_bot: true }));
+    const { adapter, initialize } = bootAdapter(fetchImpl);
+    await expect(initialize()).rejects.toMatchObject({ name: 'NetworkError' });
+    await initialize();
+    expect(adapter.botUserId).toBe(BOT_ID);
   });
 });
