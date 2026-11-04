@@ -682,8 +682,11 @@ describe('delivery deadline', () => {
     );
     vi.spyOn(log, 'warn').mockImplementation(() => {});
     vi.spyOn(log, 'info').mockImplementation(() => {});
+    // Hooks can't be unregistered, so bind this one to this test's session:
+    // `session` is reassigned per test and would hang every later test.
+    const hungSessionId = session.id;
     registerPostDeliveryHook((_msg, hookSession) =>
-      hookSession.id === session.id ? new Promise<void>(() => {}) : undefined,
+      hookSession.id === hungSessionId ? new Promise<void>(() => {}) : undefined,
     );
 
     for (let i = 0; i < MAX_PARKED; i++) {

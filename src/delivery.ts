@@ -166,6 +166,7 @@ function overdueKey(sessionId: string, messageId: string): string {
 const backgroundDrains = new Set<Promise<void>>();
 
 export function _resetDeliveryStateForTesting(): void {
+  inflightDeliveries.clear();
   overdueDeliveries.clear();
   unsettledLateSends.clear();
   backgroundDrains.clear();
