@@ -75,11 +75,12 @@ First check that this checkout owns them: if another NanoClaw checkout on this
 host set up the Bridge, this stops, and nothing of that checkout's is removed.
 
 ```bash
-bash .claude/skills/add-proton-mail/bridge/owner-check.sh >/dev/null || exit 1
-docker rm -f nanoclaw-proton-bridge 2>/dev/null || true
-docker rmi nanoclaw-proton-bridge:latest 2>/dev/null || true
-docker network rm nanoclaw-mail 2>/dev/null || true
-docker volume rm nanoclaw-proton-bridge 2>/dev/null || true
+if bash .claude/skills/add-proton-mail/bridge/owner-check.sh >/dev/null; then
+  docker rm -f nanoclaw-proton-bridge 2>/dev/null || true
+  docker rmi nanoclaw-proton-bridge:latest 2>/dev/null || true
+  docker network rm nanoclaw-mail 2>/dev/null || true
+  docker volume rm nanoclaw-proton-bridge 2>/dev/null || true
+fi
 ```
 
 ## 5. Rebuild and restart

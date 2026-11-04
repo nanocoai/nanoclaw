@@ -43,7 +43,7 @@
         },
         {
           "match": "owner-check.sh",
-          "stdout": "nanoclaw-install=0123abcd"
+          "stdout": "nanoclaw-proton-owner=0123abcd"
         },
         {
           "match": "owner@example.com",
