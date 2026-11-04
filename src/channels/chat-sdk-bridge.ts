@@ -17,6 +17,8 @@ import {
   type Attachment,
   type CardChild,
   type Adapter,
+  type AdapterPostableMessage,
+  type RawMessage,
   type AssistantContextChangedEvent,
   type AssistantThreadStartedEvent,
   type ConcurrencyStrategy,
@@ -1794,7 +1796,30 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       // gets the raw platform message id Discord/etc. expect for native
       // reply chains. Empty/null → no reply pill.
       const replyToRaw = message.inReplyTo ?? null;
-      const replyTo = replyToRaw ? replyToRaw.split(':')[0] || null : null;
+      // Telegram's platform id is itself composite (<chatId>:<messageId>).
+      // Other adapters (including Discord) use a single segment.
+      const replyTo = replyToRaw
+        ? replyToRaw
+            .split(':')
+            .slice(0, adapter.name === 'telegram' ? 2 : 1)
+            .join(':') || null
+        : null;
+      const postReply = (post: AdapterPostableMessage, target: string | null) => {
+        if (adapter.name === 'telegram' && target) {
+          // Telegram 4.41+ accepts the native reply target as argument three,
+          // not the Discord-specific post.replyTo field. It builds
+          // reply_parameters with allow_sending_without_reply for deleted parents.
+          const telegram = adapter as Adapter & {
+            postMessage(
+              threadId: string,
+              message: AdapterPostableMessage,
+              replyToMessageId: string,
+            ): Promise<RawMessage<unknown>>;
+          };
+          return telegram.postMessage(tid, post, target);
+        }
+        return adapter.postMessage(tid, post);
+      };
 
       if (content.operation === 'edit' && content.messageId) {
         const render =
@@ -1982,7 +2007,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           if (message.suppressEmbeds) {
             (post as Record<string, unknown>).suppressEmbeds = true;
           }
-          const result = await adapter.postMessage(tid, post);
+          const result = await postReply(post, replyForChunk);
           if (i === 0) firstId = result?.id;
         }
         return firstId;
@@ -1994,7 +2019,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         }));
         const post: Record<string, unknown> = { markdown: '', files: fileUploads };
         if (replyTo) post.replyTo = replyTo;
-        const result = await adapter.postMessage(tid, post as never);
+        const result = await postReply(post as never, replyTo);
         return result?.id;
       }
     },
