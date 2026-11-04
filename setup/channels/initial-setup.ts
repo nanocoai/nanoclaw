@@ -1,6 +1,3 @@
-import fs from 'fs';
-import path from 'path';
-
 import type { BACK_TO_CHANNEL_SELECTION } from '../lib/back-nav.js';
 
 export type ChannelChoice =
@@ -53,12 +50,46 @@ export function initialChannelOptions(): { value: ChannelChoice; label: string; 
 }
 
 /**
- * Diagnostics value for a typed "Other" channel: the name only when this
- * checkout ships `.claude/skills/add-<name>`, so free text never leaves the machine.
+ * Public channel names a typed "Other" answer may report: the channel skills
+ * this repo ships plus common platforms people ask for. A fixed list, not a
+ * skill lookup, so a private `add-<name>` skill never names itself.
  */
-export function otherChannelDiagnostic(name: string, projectRoot: string = process.cwd()): string {
-  if (!/^[a-z0-9][a-z0-9-]{0,39}$/.test(name)) return 'unknown';
-  return fs.existsSync(path.join(projectRoot, '.claude', 'skills', `add-${name}`, 'SKILL.md')) ? name : 'unknown';
+const KNOWN_OTHER_CHANNELS: ReadonlySet<string> = new Set([
+  // shipped as .claude/skills/add-<name>
+  'deltachat',
+  'dial',
+  'discord',
+  'emacs',
+  'gchat',
+  'github',
+  'imessage',
+  'linear',
+  'matrix',
+  'mattermost',
+  'resend',
+  'signal',
+  'slack',
+  'teams',
+  'telegram',
+  'webex',
+  'wechat',
+  'whatsapp',
+  'whatsapp-cloud',
+  // asked for, not shipped
+  'email',
+  'irc',
+  'line',
+  'messenger',
+  'rocketchat',
+  'sms',
+  'viber',
+  'xmpp',
+  'zulip',
+]);
+
+/** Diagnostics value for a typed "Other" channel; free text never leaves the machine. */
+export function otherChannelDiagnostic(name: string): string {
+  return KNOWN_OTHER_CHANNELS.has(name) ? name : 'unknown';
 }
 
 export function runInitialChannel(
