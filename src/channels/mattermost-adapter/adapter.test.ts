@@ -453,6 +453,23 @@ describe('Mattermost setup failures', () => {
     expect(error).toMatchObject({ name: 'NetworkError', cause: refused });
   });
 
+  it('tags a reply whose body is cut off as a NetworkError', async () => {
+    const reset = new Error('socket hang up');
+    const cutOff = () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.error(reset);
+          },
+        }),
+        { status: 200 },
+      );
+    const { initialize } = bootAdapter(vi.fn(async () => cutOff()));
+    const error = await initialize().catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(MattermostNetworkError);
+    expect(error).toMatchObject({ name: 'NetworkError', cause: reset });
+  });
+
   it('tags the request timeout as a NetworkError', async () => {
     const hang = vi.fn(
       (_input: string | URL | Request, init?: RequestInit) =>

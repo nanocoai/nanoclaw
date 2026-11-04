@@ -20,7 +20,7 @@ import type {
 } from './types.js';
 
 /** A server or proxy that is down, slow or busy: a later retry can succeed. */
-function isTransientStatus(status: number): boolean {
+export function isTransientStatus(status: number): boolean {
   return status >= 500 || status === 408 || status === 429;
 }
 
@@ -49,13 +49,13 @@ export class MattermostApiError extends Error {
 }
 
 /**
- * A request that got no reply at all: refused, reset, DNS failure or the
- * request timeout. Named `NetworkError`, like the Chat SDK adapters' transport
- * errors, so the host's channel setup retry covers it.
+ * A request that got no full reply: refused, reset, DNS failure, a body cut
+ * off, or the request timeout. Named `NetworkError`, like the Chat SDK
+ * adapters' transport errors, so the host's channel setup retry covers it.
  */
 export class MattermostNetworkError extends Error {
   constructor(method: string, path: string, cause: unknown) {
-    super(`Mattermost ${method} ${path} got no reply: ${cause instanceof Error ? cause.message : String(cause)}`, {
+    super(`Mattermost ${method} ${path} got no full reply: ${cause instanceof Error ? cause.message : String(cause)}`, {
       cause,
     });
     this.name = 'NetworkError';
@@ -189,7 +189,7 @@ export class MattermostRestClient {
     if (response.status === 204) {
       return undefined as T;
     }
-    const text = await response.text();
+    const text = await this.transfer(method, path, () => response.text());
     return (text ? JSON.parse(text) : undefined) as T;
   }
 
@@ -208,36 +208,37 @@ export class MattermostRestClient {
         signal: this.signal(),
       }),
     );
-    const text = await response.text();
+    const text = await this.transfer('POST', path, () => response.text());
     return (text ? JSON.parse(text) : undefined) as T;
   }
 
   /**
-   * Run one request, converting non-2xx into {@link MattermostApiError}, a
-   * missing reply into {@link MattermostNetworkError}, and waiting out a
-   * single 429 when the server says how long.
+   * Run one request, converting non-2xx into {@link MattermostApiError} and
+   * waiting out a single 429 when the server says how long.
    */
   private async send(method: string, path: string, attempt: () => Promise<Response>): Promise<Response> {
-    const fetchOnce = async (): Promise<Response> => {
-      try {
-        return await attempt();
-      } catch (error) {
-        throw new MattermostNetworkError(method, path, error);
-      }
-    };
-    let response = await fetchOnce();
+    let response = await this.transfer(method, path, attempt);
     if (response.status === 429) {
       const delay = rateLimitDelayMs(response.headers);
       if (delay !== undefined && delay <= this.maxRateLimitWaitMs) {
         await response.text().catch(() => '');
         await this.sleep(delay);
-        response = await fetchOnce();
+        response = await this.transfer(method, path, attempt);
       }
     }
     if (!response.ok) {
       throw new MattermostApiError(response.status, method, path, await response.text().catch(() => ''));
     }
     return response;
+  }
+
+  /** Run a fetch or body read, turning a transport failure into {@link MattermostNetworkError}. */
+  private async transfer<T>(method: string, path: string, step: () => Promise<T>): Promise<T> {
+    try {
+      return await step();
+    } catch (error) {
+      throw new MattermostNetworkError(method, path, error);
+    }
   }
 
   private signal(): AbortSignal | undefined {
@@ -343,7 +344,7 @@ export class MattermostRestClient {
         signal: this.signal(),
       }),
     );
-    return Buffer.from(await response.arrayBuffer());
+    return Buffer.from(await this.transfer('GET', `/files/${fileId}`, () => response.arrayBuffer()));
   }
 
   // -- channels ------------------------------------------------------------
