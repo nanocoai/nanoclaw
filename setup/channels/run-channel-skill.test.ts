@@ -9,6 +9,7 @@ import { runSkill } from '../lib/skill-driver.js';
 import { fullyApplied } from '../../scripts/skill-apply.js';
 import { parseDirectives } from '../../scripts/skill-directives.js';
 import { BACK_TO_CHANNEL_SELECTION, backGate } from '../lib/back-nav.js';
+import type { FailOptions } from '../lib/runner.js';
 
 // Drive the first-prompt back gate (back-nav's brightSelect) from a queue
 // instead of opening a real TTY select. Hoisted so the vi.mock factory — which
@@ -527,9 +528,9 @@ describe('runChannelSkill adapter (Option A)', () => {
     );
     process.chdir(root);
 
-    const failCalls: Array<{ step: string; msg: string; hint?: string }> = [];
-    const fakeFail = (step: string, msg: string, hint?: string): Promise<never> => {
-      failCalls.push({ step, msg, hint });
+    const failCalls: Array<{ step: string; msg: string; hint?: string; opts?: FailOptions }> = [];
+    const fakeFail = (step: string, msg: string, hint?: string, opts?: FailOptions): Promise<never> => {
+      failCalls.push({ step, msg, hint, opts });
       // The real fail() process.exits and never returns; emulate that by aborting
       // the flow so control doesn't fall through to the resolve/wire steps.
       return Promise.reject(new Error('__failed__'));
@@ -554,6 +555,8 @@ describe('runChannelSkill adapter (Option A)', () => {
     expect(failCalls[0].msg).toBe('Register the webhook by hand'); // heading → headline
     expect(failCalls[0].hint).toContain('Open the Faily dashboard'); // prose → hint
     expect(failCalls[0].hint).not.toBe('See logs/setup-steps/ for details, then retry setup.'); // not the generic
+    // Diagnostics get the directive kind and line, never the headline or prose.
+    expect(failCalls[0].opts?.code).toBe('hand-wire:L5');
   });
 });
 

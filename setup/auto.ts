@@ -41,6 +41,7 @@ import { runChannelSkillWithPreStep } from './channels/run-channel-skill.js';
 import {
   channelDmLabel,
   initialChannelOptions,
+  otherChannelDiagnostic,
   runInitialChannel,
   type ChannelChoice,
 } from './channels/initial-setup.js';
@@ -255,6 +256,7 @@ async function main(): Promise<void> {
         'environment',
         "Your system doesn't look quite right.",
         'See logs/setup-steps/ for details, then retry.',
+        { code: 'step_failed' },
       );
     }
   }
@@ -305,6 +307,7 @@ async function main(): Promise<void> {
           'container',
           "Docker isn't available.",
           'Install Docker Desktop (or start it if already installed), then retry.',
+          { code: err },
         );
       }
       if (err === 'docker_group_not_active') {
@@ -312,6 +315,7 @@ async function main(): Promise<void> {
           'container',
           "Docker was just installed but your shell doesn't know yet.",
           'Log out and back in (or run `newgrp docker` in a new shell), then retry.',
+          { code: err },
         );
       }
       // The pull path fails for reasons a build never has, and "prune the build
@@ -321,6 +325,7 @@ async function main(): Promise<void> {
           'container',
           'This install is set to fetch a pre-built sandbox image, but nothing says which one.',
           `Set ${AGENT_IMAGE_REF_ENV_KEY} in .env (or add an "${AGENT_IMAGE_PIN}" pin to versions.json), or run \`${REGISTRY_STEP} -- --opt-out\` to build it here instead.`,
+          { code: err },
         );
       }
       if (err === 'image_pull_failed') {
@@ -328,12 +333,14 @@ async function main(): Promise<void> {
           'container',
           "Couldn't fetch the sandbox image.",
           `Check your connection and that authentication finished, then retry — or run \`${REGISTRY_STEP} -- --opt-out\` to build it here instead.`,
+          { code: err },
         );
       }
       await fail(
         'container',
         "Couldn't build the sandbox.",
         'If Docker has a stale cache, try: `docker builder prune -f`, then retry.',
+        { code: 'build_failed' },
       );
     }
     maybeReexecUnderSg();
@@ -358,6 +365,7 @@ async function main(): Promise<void> {
         'gateway',
         "Couldn't install the selected gateway.",
         error instanceof Error ? error.message : String(error),
+        { code: 'install_failed' },
       );
     }
   }
@@ -395,6 +403,7 @@ async function main(): Promise<void> {
           'auth',
           `${agentProvider} can't run on the pre-built sandbox image.`,
           'Re-run setup and choose Claude to keep the pre-built image.',
+          { code: 'needs_local_image' },
         );
       }
       writeImageSource('local');
@@ -421,12 +430,14 @@ async function main(): Promise<void> {
       } catch (err) {
         s.stop(`Couldn't install ${agentProvider}.`, 1);
         const message = err instanceof Error ? err.message : String(err);
-        await fail(`add-${agentProvider}`, `Couldn't install ${agentProvider}.`, message);
+        await fail(`add-${agentProvider}`, `Couldn't install ${agentProvider}.`, message, { code: 'install_error' });
         return; // unreachable — fail() exits — but narrows blockers for TS
       }
       if (blockers.length) {
         s.stop(`Couldn't install ${agentProvider}.`, 1);
-        await fail(`add-${agentProvider}`, `Couldn't install ${agentProvider}.`, blockers.join('; '));
+        await fail(`add-${agentProvider}`, `Couldn't install ${agentProvider}.`, blockers.join('; '), {
+          code: 'install_blocked',
+        });
       }
       s.stop(`${agentProvider} installed.`);
       p.log.info(brandBody('Rebuilding the container image with the new provider…'));
@@ -439,6 +450,7 @@ async function main(): Promise<void> {
           `add-${agentProvider}`,
           `Couldn't rebuild the container image for ${agentProvider}. ${rebuild.message}`,
           rebuild.hint,
+          { code: 'image_rebuild_failed' },
         );
       }
       // This process imported src/provider-contracts/index.ts at startup, and
@@ -458,6 +470,7 @@ async function main(): Promise<void> {
           'auth',
           `Couldn't authenticate or verify ${agentProvider}.`,
           err instanceof Error ? err.message : String(err),
+          { code: 'auth_failed' },
         );
       }
     } else {
@@ -483,7 +496,7 @@ async function main(): Promise<void> {
       ['--empty'],
     );
     if (!res.ok) {
-      await fail('mounts', "Couldn't write access rules.");
+      await fail('mounts', "Couldn't write access rules.", undefined, { code: 'step_failed' });
     }
   }
 
@@ -522,6 +535,7 @@ async function main(): Promise<void> {
         'container',
         'Could not finish Echo setup.',
         error instanceof Error ? error.message : 'Retry the image setup step.',
+        { code: 'echo_setup_failed' },
       );
     }
   }
@@ -532,7 +546,9 @@ async function main(): Promise<void> {
       done: 'NanoClaw is running.',
     });
     if (!res.ok) {
-      await fail('service', "Couldn't start NanoClaw.", 'See logs/nanoclaw.error.log for details.');
+      await fail('service', "Couldn't start NanoClaw.", 'See logs/nanoclaw.error.log for details.', {
+        code: 'step_failed',
+      });
     }
     if (res.terminal?.fields.PROXY === 'ignored_by_node') {
       p.log.warn(
@@ -582,6 +598,7 @@ async function main(): Promise<void> {
         'cli-agent',
         "Couldn't bring your assistant online.",
         `You can retry later with \`pnpm exec tsx scripts/init-cli-agent.ts --display-name "${displayName!}" --agent-name "${CLI_AGENT_NAME}"\`.`,
+        { code: 'step_failed' },
       );
     }
     if (!skip.has('first-chat')) {
@@ -652,6 +669,7 @@ async function main(): Promise<void> {
               'create-terminal-agent',
               `Couldn't create ${terminalAgentName}.`,
               'You can retry later with `pnpm exec tsx scripts/init-cli-agent.ts`.',
+              { code: 'step_failed' },
             );
           }
           await runFirstChat();
@@ -1534,7 +1552,7 @@ async function runTimezoneStep(): Promise<void> {
     done: 'Timezone set.',
   });
   if (!res.ok && res.terminal?.fields.NEEDS_USER_INPUT !== 'true') {
-    await fail('timezone', "Couldn't determine your timezone.");
+    await fail('timezone', "Couldn't determine your timezone.", undefined, { code: 'detect_failed' });
   }
 
   const fields = res.terminal?.fields ?? {};
@@ -1642,7 +1660,7 @@ async function runTimezoneStep(): Promise<void> {
     ['--tz', tz],
   );
   if (!persist.ok) {
-    await fail('timezone', `Couldn't save timezone ${tz}.`);
+    await fail('timezone', `Couldn't save timezone ${tz}.`, undefined, { code: 'save_failed' });
   }
 }
 
@@ -1701,7 +1719,7 @@ async function askOtherChannelName(): Promise<void | typeof BACK_TO_CHANNEL_SELE
     .toLowerCase()
     .replace(/^\/?(add-)?/, '');
   setupLog.userInput('other_channel', name);
-  phEmit('channel_other_named', { channel: name });
+  phEmit('channel_other_named', { channel: otherChannelDiagnostic(name) });
   p.log.info(
     brandBody(
       wrapForGutter(

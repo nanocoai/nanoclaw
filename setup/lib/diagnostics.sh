@@ -13,6 +13,20 @@
 NANOCLAW_PH_KEY='phc_fx1Hhx9ucz8GuaJC8LVZWO8u03yXZZJJ6ObS4yplnaP'
 NANOCLAW_PH_URL='https://us.i.posthog.com/capture/'
 
+# Lowercase uuid from uuidgen, the kernel, or a time+pid fallback.
+ph_uuid() {
+  { uuidgen 2>/dev/null \
+    || cat /proc/sys/kernel/random/uuid 2>/dev/null \
+    || printf 'fallback-%s-%s' "$(date +%s)" "$$"; } | tr -d '\n' | tr 'A-Z' 'a-z'
+}
+
+# One id per setup run. Exported so setup.sh and setup:auto (diagnostics.ts
+# reads the same variable) tag their events with it.
+if [ -z "${NANOCLAW_SETUP_RUN_ID:-}" ]; then
+  NANOCLAW_SETUP_RUN_ID=$(ph_uuid)
+  export NANOCLAW_SETUP_RUN_ID
+fi
+
 # Resolve or create the persisted install id. Echoes the id (lowercase uuid).
 # Creates data/install-id on first use. Safe to call pre-Node: uses only
 # bash + uuidgen/urandom fallback + mkdir.
@@ -21,13 +35,42 @@ ph_install_id() {
   local f="$root/data/install-id"
   if [ ! -s "$f" ]; then
     mkdir -p "$(dirname "$f")" 2>/dev/null || return 0
-    local id
-    id=$(uuidgen 2>/dev/null \
-      || cat /proc/sys/kernel/random/uuid 2>/dev/null \
-      || printf 'fallback-%s-%s' "$(date +%s)" "$$")
-    printf '%s' "$id" | tr 'A-Z' 'a-z' > "$f" 2>/dev/null || return 0
+    ph_uuid > "$f" 2>/dev/null || return 0
   fi
   cat "$f" 2>/dev/null
+}
+
+# The fields every event carries, as key=value lines; commonProps() in
+# diagnostics.ts sends the same set (arch uses Node's names).
+ph_common_props() {
+  local root="${NANOCLAW_PROJECT_ROOT:-${PROJECT_ROOT:-$PWD}}"
+  local arch version channel
+  arch=$(uname -m 2>/dev/null | tr 'A-Z' 'a-z')
+  case "$arch" in
+    x86_64 | amd64) arch=x64 ;;
+    aarch64) arch=arm64 ;;
+  esac
+  version=$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    "$root/package.json" 2>/dev/null | head -1)
+  # Same rule as scripts/update/channel.ts: the env var, else the last
+  # non-empty NANOCLAW_UPDATE_CHANNEL in .env, else stable.
+  channel=${NANOCLAW_UPDATE_CHANNEL:-$(grep -E '^[[:space:]]*NANOCLAW_UPDATE_CHANNEL[[:space:]]*=' "$root/.env" 2>/dev/null \
+    | sed 's/^[^=]*=//' | tr -d "\"' \t\r" | sed '/^$/d' | tail -1)}
+  channel=$(printf '%s' "${channel:-stable}" | tr 'A-Z' 'a-z')
+  case "$channel" in
+    stable | beta | edge) ;;
+    *) channel=unknown ;;
+  esac
+  printf 'arch=%s\nnanoclaw_version=%s\nrelease_channel=%s\nrun_id=%s\n' \
+    "${arch:-unknown}" "${version:-unknown}" "$channel" "${NANOCLAW_SETUP_RUN_ID:-unknown}"
+}
+
+# Append one key=value pair to the calling ph_event's $props as JSON.
+_ph_add_prop() {
+  local k="${1%%=*}" v="${1#*=}"
+  v=${v//\\/\\\\}
+  v=${v//\"/\\\"}
+  props+="${props:+,}\"$k\":\"$v\""
 }
 
 # Emit a PostHog event. First arg is the event name; remaining args are
@@ -41,15 +84,15 @@ ph_event() {
   id=$(ph_install_id)
   [ -z "$id" ] && return 0
 
-  local props='' first=1 kv k v
+  local props='' kv
   for kv in "$@"; do
-    k="${kv%%=*}"
-    v="${kv#*=}"
-    v=${v//\\/\\\\}
-    v=${v//\"/\\\"}
-    if [ "$first" = "1" ]; then first=0; else props+=','; fi
-    props+="\"$k\":\"$v\""
+    _ph_add_prop "$kv"
   done
+  while IFS= read -r kv; do
+    [ -z "$kv" ] || _ph_add_prop "$kv"
+  done <<EOF
+$(ph_common_props)
+EOF
 
   local payload
   payload=$(printf '{"api_key":"%s","event":"%s","distinct_id":"%s","properties":{%s}}' \

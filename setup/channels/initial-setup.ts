@@ -1,3 +1,6 @@
+import fs from 'fs';
+import path from 'path';
+
 import type { BACK_TO_CHANNEL_SELECTION } from '../lib/back-nav.js';
 
 export type ChannelChoice =
@@ -47,6 +50,15 @@ export function initialChannelOptions(): { value: ChannelChoice; label: string; 
     { value: 'other', label: 'Other…', hint: 'install via /add-<name> after setup' },
     { value: 'skip', label: 'Skip for now', hint: "I'll just use the terminal" },
   ];
+}
+
+/**
+ * Diagnostics value for a typed "Other" channel: the name only when this
+ * checkout ships `.claude/skills/add-<name>`, so free text never leaves the machine.
+ */
+export function otherChannelDiagnostic(name: string, projectRoot: string = process.cwd()): string {
+  if (!/^[a-z0-9][a-z0-9-]{0,39}$/.test(name)) return 'unknown';
+  return fs.existsSync(path.join(projectRoot, '.claude', 'skills', `add-${name}`, 'SKILL.md')) ? name : 'unknown';
 }
 
 export function runInitialChannel(
