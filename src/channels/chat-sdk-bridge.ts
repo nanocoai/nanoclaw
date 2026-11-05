@@ -657,7 +657,14 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     const widest = partLabel(questionId, MAX_OVERFLOW_PARTS, MAX_OVERFLOW_PARTS);
     const partTitle = fits(textCard(title, [widest])) ? title : OVERFLOW_TITLE;
     const body = partTitle === title ? question : `${title}\n\n${question}`;
+    // Halved sizes can miss a channel's limit, so the largest block a titled part
+    // holds is tried among them, and the largest an untitled part holds last.
+    const halved: number[] = [];
     for (let limit = CARD_TEXT_BLOCK_LENGTH; limit >= MIN_OVERFLOW_BLOCK; limit = Math.floor(limit / 2)) {
+      halved.push(limit);
+    }
+    const sizes = new Set([...[...halved, roomIn(partTitle, widest)].sort((a, b) => b - a), roomIn('', widest)]);
+    for (const limit of [...sizes].filter((n) => n >= MIN_OVERFLOW_BLOCK)) {
       const blocks = splitIfPossible(body, escape, limit);
       const parts = blocks && packParts(partTitle, questionId, blocks);
       if (!parts) continue;
@@ -667,6 +674,18 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       return { parts, card: withButtons(cardTitle, notice), title: cardTitle, text: notice.join('\n') };
     }
     throw new CardTooLongError('the request is too long to show in full on this channel');
+  }
+
+  /** The longest text block, after escaping, that a part with this title and label holds. */
+  function roomIn(title: string, label: string): number {
+    let lo = 0;
+    let hi = CARD_TEXT_BLOCK_LENGTH;
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2);
+      if (fits(textCard(title, [label, 'x'.repeat(mid)]))) lo = mid;
+      else hi = mid - 1;
+    }
+    return lo;
   }
 
   /** A split that can't be made at this size yields nothing, so a smaller size is tried next. */
