@@ -202,8 +202,7 @@ supported native backend. Automatic API-key configuration supports OpenAI,
 OpenRouter, DeepSeek, Google, and Anthropic; other native authentication schemes
 require separate integration. The command stores credentials in the configured
 credential gateway selected by `NANOCLAW_GATEWAY_PROVIDER` and backend defaults in
-`.env`; when that changes `.env`, the command restarts the host service so the
-running host reads the new endpoint. The full setup wizard also offers this flow and selects OpenCode for
+`.env`. The full setup wizard also offers this flow and selects OpenCode for
 new groups only after configuration succeeds. The standalone command leaves the
 instance default unchanged.
 

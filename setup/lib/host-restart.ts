@@ -1,17 +1,14 @@
 /**
  * Reload the running host after setup changed code it loads.
  *
- * The service runs the compiled `dist/` and reads `.env` only at start, so a
- * payload that adds host code stays invisible until the host is rebuilt and
- * restarted. `restart.sh` restarts whichever service this install uses
+ * The service runs the compiled `dist/` it loaded at start, so a payload that
+ * adds host code stays invisible until the host is rebuilt and restarted. `restart.sh` restarts whichever service this install uses
  * (launchd, systemd or the nohup wrapper) and waits for the new instance.
  *
  * The result is returned, never printed: the caller decides how loud a
  * failure is.
  */
 import { spawnSync } from 'child_process';
-import fs from 'fs';
-import path from 'path';
 
 /** What an operator runs by hand when the automatic reload fails. */
 export const HOST_RESTART_COMMAND = 'pnpm run build && bash setup/lib/restart.sh';
@@ -21,15 +18,6 @@ export type HostRestartResult =
   | { status: 'restarted' }
   | { status: 'no-service' }
   | { status: 'failed'; message: string };
-
-/** The `.env` text the host reads at start; compare two reads to see whether a restart is due. */
-export function readHostSettings(projectRoot: string = process.cwd()): string {
-  try {
-    return fs.readFileSync(path.join(projectRoot, '.env'), 'utf8');
-  } catch {
-    return '';
-  }
-}
 
 /** Rebuild the host and restart its service. Synchronous with inherited output. */
 export function restartHost(projectRoot: string = process.cwd()): HostRestartResult {

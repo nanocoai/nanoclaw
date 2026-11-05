@@ -6,12 +6,10 @@ const fixture = vi.hoisted(() => ({
   confirm: true as boolean | symbol,
   installed: true,
   changed: true,
-  hostChanged: true,
   offline: false,
   installModes: [] as unknown[],
   build: { ok: true } as { ok: boolean; message?: string },
   restart: { status: 'restarted' } as { status: string; message?: string },
-  hostSettings: '',
   blockers: [] as string[],
   contractModules: [] as string[],
   loadedContractModules: [] as string[],
@@ -49,12 +47,7 @@ vi.mock('./providers/install.js', () => ({
     fixture.order.push('install');
     fixture.installModes.push(options);
     if (fixture.offline) throw new Error('Registry and build dependencies are unavailable');
-    return {
-      changed: fixture.changed,
-      hostChanged: fixture.hostChanged,
-      blockers: fixture.blockers,
-      hostContractModules: fixture.contractModules,
-    };
+    return { changed: fixture.changed, blockers: fixture.blockers, hostContractModules: fixture.contractModules };
   },
   loadHostContractModules: async (modules: string[]) => {
     fixture.order.push('load-contracts');
@@ -73,7 +66,6 @@ vi.mock('./lib/host-restart.js', () => ({
     fixture.order.push('restart-host');
     return fixture.restart;
   },
-  readHostSettings: () => fixture.hostSettings,
 }));
 vi.mock('./lib/registry-state.js', () => ({
   HARDENED_IMAGE_ENV_KEY: 'NANOCLAW_HARDENED_IMAGE',
@@ -96,12 +88,10 @@ beforeEach(() => {
     confirm: true,
     installed: true,
     changed: true,
-    hostChanged: true,
     offline: false,
     installModes: [],
     build: { ok: true },
     restart: { status: 'restarted' },
-    hostSettings: 'OTHER=keep\n',
     blockers: [],
     contractModules: [],
     loadedContractModules: [],
@@ -189,98 +179,24 @@ describe('standalone provider setup flow', () => {
   });
   it('neither rebuilds nor restarts when applying the skill changed nothing', async () => {
     fixture.changed = false;
-    fixture.hostChanged = false;
     await run(['opencode', '--refresh']);
     expect(fixture.order).toEqual(['install', 'load-contracts', 'auth']);
     expect(fixture.check).toHaveBeenCalledTimes(1);
   });
 
-  // The service runs the host build it loaded at start, so a payload that
-  // changed host code is invisible to it until a rebuild and restart. It
+  // The service runs the host build it loaded at start, so a new payload is
+  // invisible to it until a rebuild and restart. It
   // restarts before auth because a failed sign-in exits the process, and a
   // re-run only re-authenticates. The fresh-install order is pinned above.
-  it('restarts the host once, after the image build and before auth, when a refresh changed host code', async () => {
+  it('restarts the host once, after the image build and before auth, when a refresh changed the payload', async () => {
     await run(['opencode', '--refresh']);
     expect(fixture.order).toEqual(['install', 'build', 'restart-host', 'load-contracts', 'auth']);
     expect(fixture.installModes).toEqual([{ mode: 'refresh' }]);
     expect(process.exitCode).toBeUndefined();
   });
-  // OpenCode saves its endpoint to .env during auth, and its host contract
-  // reads the endpoint only at start.
-  it('restarts again after auth only when auth changed the settings the host reads at start', async () => {
-    fixture.auth.mockImplementationOnce(async () => {
-      fixture.hostSettings = 'OTHER=keep\nOPENCODE_BASE_URL=http://host.docker.internal:11434/v1\n';
-    });
-    fixture.check.mockImplementationOnce(async () => {
-      fixture.order.push('check');
-    });
-    await run(['opencode', '--refresh']);
-    expect(fixture.order).toEqual([
-      'install',
-      'build',
-      'restart-host',
-      'load-contracts',
-      'auth',
-      'check',
-      'restart-host',
-    ]);
-  });
-  // Re-authenticating an installed provider can save a new endpoint; the
-  // running host still holds the old one until it restarts.
-  it('restarts after a re-auth that changed the settings the host reads at start', async () => {
-    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
-    fixture.auth.mockImplementationOnce(async () => {
-      fixture.hostSettings = 'OPENCODE_BASE_URL=native\n';
-    });
-    await run(['opencode']);
-    expect(fixture.order).toEqual(['auth', 'restart-host']);
-    expect(process.exitCode).toBeUndefined();
-    // Running agent containers keep the settings they started with.
-    expect(log.mock.calls.flat().join('\n')).toContain('bin/ncl groups restart --id');
-  });
-  it('does not restart a re-auth that left those settings unchanged', async () => {
-    await run(['opencode']);
-    expect(fixture.order).toEqual(['auth']);
-  });
-  it('says so, without failing, when a re-auth changed settings and no service is installed', async () => {
-    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
-    fixture.restart = { status: 'no-service' };
-    fixture.auth.mockImplementationOnce(async () => {
-      fixture.hostSettings = 'OPENCODE_BASE_URL=native\n';
-    });
-    await run(['opencode']);
-    expect(fixture.order).toEqual(['auth', 'restart-host']);
-    const out = log.mock.calls.flat().join('\n');
-    expect(out).toContain('No NanoClaw service is installed');
-    // A host run by hand may still hold agents; that clause rides in the same message.
-    expect(out).toContain('bin/ncl groups restart --id');
-    expect(out).not.toContain('Agents already running');
-    expect(process.exitCode).toBeUndefined();
-  });
-  // tsc can emit dist/ despite errors, so a failed build is never restarted onto.
-  it('keeps the running host on a failed build after a re-auth, with the credential saved', async () => {
-    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
-    fixture.restart = { status: 'failed', message: 'pnpm run build exited 2' };
-    fixture.auth.mockImplementationOnce(async () => {
-      fixture.hostSettings = 'OPENCODE_BASE_URL=native\n';
-    });
-    await run(['opencode']);
-    expect(fixture.order).toEqual(['auth', 'restart-host']);
-    expect(error.mock.calls[0][0]).toContain('pnpm run build && bash setup/lib/restart.sh');
-    expect(process.exitCode).toBe(1);
-  });
-  // What counts as a host change is applyProviderSkill's call (install.test.ts).
-  it('rebuilds the image but leaves the host alone when the apply changed no host files', async () => {
-    fixture.hostChanged = false;
-    await run(['opencode', '--refresh']);
-    expect(fixture.order).toEqual(['install', 'build', 'load-contracts', 'auth']);
-  });
   it('still authenticates when the restart fails, prints the command once, and exits non-zero', async () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     fixture.restart = { status: 'failed', message: 'restart.sh exited 1' };
-    fixture.auth.mockImplementationOnce(async () => {
-      fixture.hostSettings = 'OPENCODE_BASE_URL=native\n';
-    });
     await run(['opencode', '--refresh']);
     expect(fixture.order).toEqual(['install', 'build', 'restart-host', 'load-contracts', 'auth']);
     expect(fixture.check).toHaveBeenCalledTimes(1);
@@ -294,9 +210,6 @@ describe('standalone provider setup flow', () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
     fixture.restart = { status: 'no-service' };
-    fixture.auth.mockImplementationOnce(async () => {
-      fixture.hostSettings = 'OPENCODE_BASE_URL=native\n';
-    });
     await run(['opencode', '--refresh']);
     expect(fixture.order).toEqual(['install', 'build', 'restart-host', 'load-contracts', 'auth']);
     expect(error).not.toHaveBeenCalled();
