@@ -7,7 +7,8 @@ import { cardQuestionTooLong } from '../../channels/ask-question.js';
 import { buildGateQuestion, forwardAttachedFiles, isSafeAttachmentName, routeAgentMessage } from './agent-route.js';
 import { log } from '../../log.js';
 import { createDestination } from './db/agent-destinations.js';
-import { initTestDb, closeDb, runMigrations, createAgentGroup } from '../../db/index.js';
+import { initTestDb, closeDb, runMigrations, createAgentGroup, getDb } from '../../db/index.js';
+import * as sessionsDb from '../../db/sessions.js';
 import { createSession, updateSession } from '../../db/sessions.js';
 import { inboundDbPath } from '../../mailbox/sqlite/paths.js';
 import { initSessionFolder, sessionDir, writeSessionMessage } from '../../session-manager.js';
@@ -215,6 +216,7 @@ describe('routeAgentMessage return-path', () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await closeDb();
     if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   });
@@ -351,6 +353,58 @@ describe('routeAgentMessage return-path', () => {
     const s2Rows = readInbound(A, S2.id);
     expect(s1Rows).toHaveLength(0);
     expect(s2Rows).toHaveLength(1);
+  });
+
+  /**
+   * The interleaving a chat delete can cause: the inbox insert lands, then the delete's
+   * transaction commits while the last_active bump waits on it (the central driver holds
+   * other queries until a transaction ends), then the bump runs against a deleted row.
+   */
+  function deleteTargetsBeforeTheirBump(targets: (sessionId: string) => boolean): void {
+    const original = sessionsDb.updateSession;
+    vi.spyOn(sessionsDb, 'updateSession').mockImplementation(async (id, updates) => {
+      if (updates.last_active && targets(id)) await getDb().run('DELETE FROM sessions WHERE id = ?', id);
+      return original(id, updates);
+    });
+  }
+
+  function inboundStatus(agentGroupId: string, sessionId: string): Array<{ id: string; status: string }> {
+    const db = new Database(inboundDbPath(agentGroupId, sessionId), { readonly: true });
+    const rows = db.prepare('SELECT id, status FROM messages_in ORDER BY seq').all() as Array<{
+      id: string;
+      status: string;
+    }>;
+    db.close();
+    return rows;
+  }
+
+  it('routes again when the target session is deleted while its message lands', async () => {
+    deleteTargetsBeforeTheirBump((id) => id === SB.id);
+
+    await routeAgentMessage(
+      { id: 'msg-mid-delete', platform_id: B, content: JSON.stringify({ text: 'hello' }), in_reply_to: null },
+      S1,
+    );
+
+    const live = await getDb().all<{ id: string }>('SELECT id FROM sessions WHERE agent_group_id = ?', B);
+    expect(live).toHaveLength(1);
+    expect(live[0].id).not.toBe(SB.id);
+    const rows = readInbound(B, live[0].id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].source_session_id).toBe(S1.id);
+    // The copy left in the deleted session's inbox is failed, so its dying container skips it.
+    expect(inboundStatus(B, SB.id).map((row) => row.status)).toEqual(['failed']);
+  });
+
+  it('throws, leaving the message for delivery to retry, when every attempt loses its target', async () => {
+    deleteTargetsBeforeTheirBump(() => true);
+
+    await expect(
+      routeAgentMessage(
+        { id: 'msg-always-deleted', platform_id: B, content: JSON.stringify({ text: 'hello' }), in_reply_to: null },
+        S1,
+      ),
+    ).rejects.toThrow(/deleted on every routing attempt/);
   });
 
   it('cross-agent-group guard: origin session belonging to wrong agent group is rejected', async () => {

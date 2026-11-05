@@ -201,7 +201,7 @@ async function slackAwareCreateAgent(content: Record<string, unknown>, session: 
   // suppressed: it fires BEFORE Slack provisioning, so relaying it would
   // report "done" ~a minute early — this wrapper's successText/failureText
   // is the only completion signal. Upstream error notifies (collision,
-  // invalid path) still fire either way.
+  // invalid folder) still fire either way.
   await createAgent(content, session, slackOrigin ? { suppressCreatedNotify: true } : undefined);
 
   const after = await getDestinationByName(session.agent_group_id, localName);

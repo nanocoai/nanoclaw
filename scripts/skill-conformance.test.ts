@@ -186,7 +186,6 @@ describe('retired mechanisms', () => {
     const offenders = SKILL_DOCS.filter((d) => d.text.includes('data/env')).map((d) => d.doc);
     expect(offenders).toEqual([]);
   });
-
 });
 
 describe('add-dial ↔ add-dial-tool agent-scope duplication', () => {
@@ -209,6 +208,11 @@ describe('add-dial ↔ add-dial-tool agent-scope duplication', () => {
     expect(cp).toBeDefined();
     for (const attr of ['validate', 'flags', 'normalize'] as const) expect(pp!.attrs[attr]).toBe(cp!.attrs[attr]);
     expect(pp!.body).toEqual(cp!.body);
+  });
+
+  it('with no agents yet, the parent installs the tool with nobody holding the key (new groups never get Dial by default)', () => {
+    const step = parent.find((d) => d.kind === 'run' && d.attrs.effect === 'step' && d.attrs.when === 'has_agents=no');
+    expect(step?.body.join('\n')).toContain("--input 'dial_agents=none'");
   });
 
   it('the consent warning matches', () => {

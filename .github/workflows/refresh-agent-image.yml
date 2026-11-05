@@ -32,8 +32,10 @@ permissions:
 
 jobs:
   # The AWS role and the App key never share a job: this one reads the
-  # registry and holds no repository write.
+  # registry and holds no repository write. Forks have neither, so a fork with
+  # Actions on would only fail here every 6 hours; open-pr skips with it.
   find:
+    if: github.repository == 'nanocoai/nanoclaw'
     runs-on: ubuntu-26.04
     permissions:
       contents: read

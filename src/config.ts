@@ -1,3 +1,4 @@
+import net from 'net';
 import os from 'os';
 import path from 'path';
 
@@ -19,6 +20,7 @@ const envConfig = readEnvFile([
   'NANOCLAW_EGRESS_LOCKDOWN',
   'NANOCLAW_EGRESS_NETWORK',
   'WEBHOOK_PORT',
+  'WEBHOOK_HOST',
   'NANOCLAW_ABSOLUTE_CEILING_MS',
   'NANOCLAW_CLAIM_STUCK_MS',
 ]);
@@ -124,6 +126,19 @@ export function getWebhookPort(): number {
     throw new Error(`Invalid WEBHOOK_PORT ${JSON.stringify(raw)}: expected an integer from 1 to 65535`);
   }
   return port;
+}
+
+// Loopback by default: platforms reach the port through a tunnel or reverse
+// proxy on this machine, so other hosts on the network never see it. Set an
+// IP address (0.0.0.0 for every interface) when the proxy runs elsewhere.
+export function getWebhookHost(): string {
+  const host = process.env.WEBHOOK_HOST || envConfig.WEBHOOK_HOST || '127.0.0.1';
+  if (!net.isIP(host) || host.includes('%')) {
+    throw new Error(
+      `Invalid WEBHOOK_HOST ${JSON.stringify(host)}: expected an IP address such as 127.0.0.1 or 0.0.0.0`,
+    );
+  }
+  return host;
 }
 
 // Timezone for scheduled tasks, message formatting, etc.

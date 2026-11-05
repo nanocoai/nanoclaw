@@ -81,6 +81,20 @@ vi.mock('../../delivery.js', () => ({
   getDeliveryAdapter: () => ({ deliver: deliverMock }),
 }));
 
+// A pass-through newGroupFolder a test can hold, to land a click while a name reply is being checked.
+const folderGate = vi.hoisted(() => ({ hold: null as Promise<void> | null, entered: false }));
+vi.mock('../../group-folder.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../group-folder.js')>();
+  return {
+    ...actual,
+    newGroupFolder: async (base: string) => {
+      folderGate.entered = true;
+      if (folderGate.hold) await folderGate.hold;
+      return actual.newGroupFolder(base);
+    },
+  };
+});
+
 // Mock ensureUserDm — look up the owner's preconfigured DM row instead of
 // hitting a real openDM RPC.
 vi.mock('./user-dm.js', () => ({
@@ -791,6 +805,176 @@ describe('unknown-channel registration flow', () => {
     const mgaCount = await countRows('SELECT COUNT(*) AS c FROM messaging_group_agents');
     expect(mgaCount).toBe(0);
   });
+
+  /** An unwired group chat with its registration card pending; returns its messaging group id. */
+  async function pendingRegistration(platformId: string): Promise<string> {
+    const { routeInbound } = await import('../../router.js');
+    await expectAsyncDelivery(() => routeInbound(groupMention(platformId)));
+    return (await getMessagingGroupByPlatform('telegram', platformId))!.id;
+  }
+
+  /** The owner clicks "Connect new agent" on that card; the name prompt lands in their DM. */
+  async function clickNewAgent(messagingGroupId: string): Promise<void> {
+    const { getResponseHandlers } = await import('../../response-registry.js');
+    for (const handler of getResponseHandlers()) {
+      const claimed = await handler({
+        questionId: messagingGroupId,
+        value: 'new_agent',
+        userId: 'owner',
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+      });
+      if (claimed) break;
+    }
+  }
+
+  async function nameReply(id: string, text: string): Promise<void> {
+    const { routeInbound } = await import('../../router.js');
+    await routeInbound({
+      channelType: 'telegram',
+      platformId: 'dm-owner',
+      threadId: null,
+      message: {
+        id,
+        kind: 'chat' as const,
+        content: JSON.stringify({ senderId: 'owner', senderName: 'Owner', text }),
+        timestamp: now(),
+      },
+    });
+  }
+
+  async function expectCreatedAndWired(name: string, messagingGroupId: string): Promise<void> {
+    const created = await getDb().get<{ id: string }>('SELECT id FROM agent_groups WHERE name = ?', name);
+    expect(created).toBeDefined();
+    expect(
+      await countRows(
+        'SELECT COUNT(*) AS c FROM messaging_group_agents WHERE messaging_group_id = ? AND agent_group_id = ?',
+        messagingGroupId,
+        created!.id,
+      ),
+    ).toBe(1);
+  }
+
+  it('a name too long for a folder creates nothing and asks again; the next name is created', async () => {
+    const mgId = await pendingRegistration('chat-long-name');
+    await clickNewAgent(mgId);
+
+    const longName = 'a'.repeat(70);
+    const agentGroupsBefore = await countRows('SELECT COUNT(*) AS c FROM agent_groups');
+    await nameReply('name-reply-long', longName);
+
+    expect(await countRows('SELECT COUNT(*) AS c FROM agent_groups')).toBe(agentGroupsBefore);
+    expect(fs.existsSync(path.join(TEST_DIR, 'groups', longName))).toBe(false);
+    expect(await countRows('SELECT COUNT(*) AS c FROM messaging_group_agents')).toBe(0);
+    expect(await countRows('SELECT COUNT(*) AS c FROM pending_channel_approvals')).toBe(1);
+    const refusal = JSON.parse(deliverMock.mock.calls.at(-1)![4] as string).text as string;
+    expect(refusal).toBe(
+      `⚠️ Cannot create agent "${longName}": Invalid group folder "${longName}" — too long: 70 characters, at most 63. ` +
+        'Nothing was created. Reply with another name:',
+    );
+
+    // The prompt is re-armed: the next reply is taken as the name.
+    await nameReply('name-reply-retry', 'Newbie');
+
+    await expectCreatedAndWired('Newbie', mgId);
+  });
+
+  it("a failed re-prompt leaves another channel's newer name prompt in place", async () => {
+    const firstMgId = await pendingRegistration('chat-race-first');
+    const secondMgId = await pendingRegistration('chat-race-second');
+    await clickNewAgent(firstMgId);
+
+    // Hold the refusal's re-prompt in flight while the owner starts the second channel.
+    let failRePrompt: ((err: Error) => void) | undefined;
+    deliverMock.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          failRePrompt = reject;
+        }),
+    );
+    const refused = nameReply('name-reply-race', 'a'.repeat(70));
+    await vi.waitFor(() => expect(failRePrompt).toBeDefined());
+    await clickNewAgent(secondMgId);
+    failRePrompt!(new Error('delivery failed'));
+    await refused;
+
+    await nameReply('name-reply-second', 'Newbie');
+
+    await expectCreatedAndWired('Newbie', secondMgId);
+  });
+
+  it('a late failure of an earlier re-prompt leaves the newer one in place', async () => {
+    const mgId = await pendingRegistration('chat-late-failure');
+    await clickNewAgent(mgId);
+
+    // The first refusal's delivery hangs; the approver tries again and that refusal arrives.
+    let failFirst: ((err: Error) => void) | undefined;
+    deliverMock.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          failFirst = reject;
+        }),
+    );
+    const first = nameReply('name-reply-late-1', 'a'.repeat(70));
+    await vi.waitFor(() => expect(failFirst).toBeDefined());
+    await nameReply('name-reply-late-2', 'Global');
+    failFirst!(new Error('delivery failed'));
+    await first;
+
+    await nameReply('name-reply-late-3', 'Newbie');
+
+    await expectCreatedAndWired('Newbie', mgId);
+  });
+
+  it('a prompt opened for another channel while a name is checked is not replaced', async () => {
+    const firstMgId = await pendingRegistration('chat-held-first');
+    const secondMgId = await pendingRegistration('chat-held-second');
+    await clickNewAgent(firstMgId);
+
+    let release: (() => void) | undefined;
+    folderGate.entered = false;
+    folderGate.hold = new Promise((resolve) => {
+      release = resolve;
+    });
+    try {
+      const refused = nameReply('name-reply-held', 'a'.repeat(70));
+      await vi.waitFor(() => expect(folderGate.entered).toBe(true));
+      await clickNewAgent(secondMgId);
+      release!();
+      await refused;
+    } finally {
+      folderGate.hold = null;
+    }
+    // The refusal for the first name no longer asks for another: the next reply is the second channel's.
+    const texts = deliverMock.mock.calls.map((c) => JSON.parse(c[4] as string).text as string | undefined);
+    const refusal = texts.find((text) => text?.startsWith('⚠️ Cannot create agent'));
+
+    await nameReply('name-reply-held-second', 'Newbie');
+
+    await expectCreatedAndWired('Newbie', secondMgId);
+    expect(refusal).toMatch(/Nothing was created\.$/);
+  });
+
+  it("a late failure of the first name prompt leaves a refused name's re-arm in place", async () => {
+    const mgId = await pendingRegistration('chat-late-prompt');
+    let failPrompt: ((err: Error) => void) | undefined;
+    deliverMock.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          failPrompt = reject;
+        }),
+    );
+    const click = clickNewAgent(mgId);
+    await vi.waitFor(() => expect(failPrompt).toBeDefined());
+    await nameReply('name-reply-late-prompt-1', 'a'.repeat(70));
+    failPrompt!(new Error('delivery failed'));
+    await click;
+
+    await nameReply('name-reply-late-prompt-2', 'Newbie');
+
+    await expectCreatedAndWired('Newbie', mgId);
+  });
 });
 
 describe('no-owner / no-agent failure modes', () => {
@@ -834,9 +1018,32 @@ describe('createNewAgentGroup — disk-aware folder dedupe (A4)', () => {
 
     const ag = await createNewAgentGroup('My Agent');
 
-    expect(ag.folder).toBe('my-agent-2');
+    expect(ag).toMatchObject({ folder: 'my-agent-2' });
     // Residue untouched.
     expect(fs.readFileSync(path.join(residue, 'memory.md'), 'utf8')).toBe('old group memory\n');
+  });
+
+  it('refuses, writing nothing, when the suffix takes the folder past 63 characters, saying the name is taken', async () => {
+    const name = 'b'.repeat(62);
+    fs.mkdirSync(path.join(TEST_DIR, 'groups', name), { recursive: true });
+
+    expect(await createNewAgentGroup(name)).toBe(
+      `Invalid group folder "${name}-2" — too long: 64 characters, at most 63 ("${name}" is already taken)`,
+    );
+    expect(await countRows('SELECT COUNT(*) AS c FROM agent_groups WHERE name = ?', name)).toBe(0);
+    expect(fs.existsSync(path.join(TEST_DIR, 'groups', `${name}-2`))).toBe(false);
+  });
+
+  // A v1 migration copies groups/global onto disk; the refusal must not depend on it.
+  it.each([
+    ['a fresh install', false],
+    ['an install migrated from v1 (groups/global on disk)', true],
+  ])('refuses "Global", writing nothing, on %s', async (_install, migrated) => {
+    if (migrated) fs.mkdirSync(path.join(TEST_DIR, 'groups', 'global'), { recursive: true });
+
+    expect(await createNewAgentGroup('Global')).toBe('Invalid group folder "global" — reserved');
+    expect(await countRows("SELECT COUNT(*) AS c FROM agent_groups WHERE name = 'Global'")).toBe(0);
+    expect(fs.existsSync(path.join(TEST_DIR, 'groups', 'global-2'))).toBe(false);
   });
 });
 

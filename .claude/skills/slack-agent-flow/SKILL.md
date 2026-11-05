@@ -163,6 +163,7 @@ src/modules/slack-agent-flow/provision.prefetch.test.ts
 src/modules/slack-agent-flow/orchestrate.test.ts
 src/modules/slack-agent-flow/room-actions.test.ts
 src/modules/slack-agent-flow/room-canvas.test.ts
+src/modules/slack-agent-flow/create-agent-resume.test.ts
 scripts/slack-agent-flow-finish.ts
 container/agent-runner/src/mcp-tools/rooms.ts
 container/agent-runner/src/mcp-tools/rooms.test.ts

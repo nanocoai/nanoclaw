@@ -163,7 +163,9 @@ describe('createAgentFromTemplate', () => {
       created_at: new Date().toISOString(),
     });
 
-    await expect(createAgentFromTemplate('sales/sdr', { name })).rejects.toThrow(/Invalid group folder/);
+    await expect(createAgentFromTemplate('sales/sdr', { name })).rejects.toThrow(
+      `too long: 69 characters, at most 63 ("${name}" is already taken)`,
+    );
     expect(await getAllAgentGroups()).toHaveLength(1);
   });
 

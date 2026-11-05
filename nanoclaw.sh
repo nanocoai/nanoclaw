@@ -362,6 +362,18 @@ if [ "$(uname -s)" = "Darwin" ] && ! command -v brew >/dev/null 2>&1; then
   esac
 fi
 
+# ─── pre-flight: sudo password on Linux ────────────────────────────────
+# The Node installer calls sudo behind the bootstrap spinner, where its
+# password prompt can't be seen. Ask here instead; setup:auto asks for Docker
+# before its own step. Root, passwordless sudo and non-terminal runs skip it.
+# shellcheck source=setup/lib/sudo-preflight.sh
+source "$PROJECT_ROOT/setup/lib/sudo-preflight.sh"
+if ! sudo_preflight; then
+  ph_event setup_sudo_aborted
+  write_abort_entry sudo-preflight sudo-refused
+  exit 1
+fi
+
 # ─── first step: install the basics (Node + pnpm + native modules) ─────
 
 BOOTSTRAP_RAW="${STEPS_DIR}/01-bootstrap.log"
@@ -430,6 +442,18 @@ case ":$PATH:" in
   *":$HOME/.local/bin:"*) ;;
   *) export PATH="$HOME/.local/bin:$PATH" ;;
 esac
+
+# setup:auto registers the service with this shell's node, which can be an
+# older one ahead of the keg-only node@22 setup.sh used. Checked before the
+# npm probe, so npm runs on the node that meets the minimum.
+# shellcheck source=setup/lib/node-version.sh
+source "$PROJECT_ROOT/setup/lib/node-version.sh"
+if ! node_use_patched; then
+  printf '\n  %s %s\n\n' "$(red '✗')" \
+    "No Node on PATH meets the minimum (${NODE_MINIMUMS// / / }). Switch to one of these, then re-run."
+  write_abort_entry bootstrap node-below-minimum
+  exit 1
+fi
 
 # pnpm may instead have landed in npm's configured global prefix. Replay that
 # lookup here as a second recovery path before the final exec.

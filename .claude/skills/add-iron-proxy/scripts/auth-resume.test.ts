@@ -27,6 +27,7 @@ async function fixture() {
   let granted = false;
   let unavailable = false;
   let failGrant = false;
+  let storedSecret: string | undefined;
   const server = http.createServer(async (req, res) => {
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(Buffer.from(chunk));
@@ -39,6 +40,7 @@ async function fixture() {
     }
     if (resource === '/api/v1/static_secrets/nanoclaw-model' && req.method === 'PUT') {
       const value = JSON.parse(Buffer.concat(chunks).toString()).data;
+      storedSecret = value.source?.secret;
       credential = { ...value, id: 'model-id', foreign_id: 'nanoclaw-model', source: undefined };
       data = credential;
     } else if (resource?.startsWith('/api/v1/static_secrets/lookup/') && resource.endsWith('/nanoclaw-model')) {
@@ -105,6 +107,9 @@ async function fixture() {
     outage() {
       unavailable = true;
     },
+    storedSecret() {
+      return storedSecret;
+    },
   };
 }
 
@@ -129,4 +134,37 @@ it('reports a control outage instead of asking a connected user to sign in again
   control.outage();
   await expect(run('claude', control.root)).rejects.toThrow('503');
   expect(prompts.select).toHaveBeenCalledTimes(1);
+});
+
+it('stores a pasted service-account API key, and the API-key prompt accepts every API key type', async () => {
+  const control = await fixture();
+  vi.mocked(prompts.select).mockResolvedValueOnce('api');
+  vi.mocked(prompts.password).mockResolvedValueOnce(' sk-ant-svc01-\nfixture ');
+  await run('claude', control.root);
+  expect(control.storedSecret()).toBe('sk-ant-svc01-fixture');
+  expect(fs.readFileSync(path.join(control.root, '.env'), 'utf8')).toContain(
+    'NANOCLAW_IRON_PROXY_AUTH_ENV=ANTHROPIC_API_KEY',
+  );
+  const { message, validate } = vi.mocked(prompts.password).mock.calls[0][0];
+  expect(message).toMatch(/one workspace/);
+  for (const key of ['sk-ant-api03-x', 'sk-ant-usr01-x', 'sk-ant-svc01-x']) expect(validate?.(key)).toBeUndefined();
+});
+
+it('stores an OAuth token pasted into the API-key prompt as an OAuth token', async () => {
+  const control = await fixture();
+  vi.mocked(prompts.select).mockResolvedValueOnce('api');
+  vi.mocked(prompts.password).mockResolvedValueOnce(' sk-ant-oat01-\nfixture ');
+  await run('claude', control.root);
+  expect(control.storedSecret()).toBe('sk-ant-oat01-fixture');
+  expect(fs.readFileSync(path.join(control.root, '.env'), 'utf8')).toContain(
+    'NANOCLAW_IRON_PROXY_AUTH_ENV=CLAUDE_CODE_OAUTH_TOKEN',
+  );
+});
+
+it('rejects an API key in the OAuth-token prompt', async () => {
+  const control = await fixture();
+  await run('claude', control.root);
+  const { validate } = vi.mocked(prompts.password).mock.calls[0][0];
+  expect(validate?.('sk-ant-oat01-x')).toBeUndefined();
+  expect(validate?.('sk-ant-svc01-x')).toMatch(/sk-ant-oat/);
 });
