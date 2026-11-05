@@ -663,12 +663,20 @@ export async function processQuery(
             // Keep the reason in the runner log, since the skipped notice may
             // be the only place it would have been recorded.
             else log(`Error result — notice not sent on this route: ${notice}`);
-            // Requests folded into the failed turn failed with it.
+            // Requests folded into the failed turn failed with it. A failed
+            // write is logged, not thrown: the catch below would notice the
+            // routes already noticed here a second time.
             const noticed = [routing];
             for (const { routing: target } of foldedTurns) {
               if (!sendsFailureNotice(target) || noticed.some((prior) => sameNoticeRoute(prior, target))) continue;
               noticed.push(target);
-              await deliverErrorResult(target, notice);
+              try {
+                await deliverErrorResult(target, notice);
+              } catch (noticeError) {
+                log(
+                  `Failed to deliver folded error notice: ${noticeError instanceof Error ? noticeError.message : String(noticeError)}`,
+                );
+              }
             }
           }
           // An unwrapped final text only warrants the wrap-nudge when no

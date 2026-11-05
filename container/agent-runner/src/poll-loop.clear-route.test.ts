@@ -299,4 +299,36 @@ describe('a failed turn with a folded message', () => {
       [GENERIC_FAILURE_NOTICE, 'thread-b'],
     ]);
   });
+  it('never repeats a notice already sent when a folded notice write throws', async () => {
+    const provider = new FoldingProvider();
+    const release = provider.hold();
+    insertMessage('a', 'ask:a', 'thread-a');
+    const stop = startLoop(provider);
+    const ops = getAgentMailbox().operations;
+    const original = ops.writeMessageOut.bind(ops);
+    let writes = 0;
+    const write = spyOn(ops, 'writeMessageOut');
+    try {
+      await waitFor(() => provider.holding === 1);
+      insertMessage('b', 'ask:b', 'thread-b');
+      await waitFor(pushed(provider, 'b'));
+      provider.failNext = true;
+      write.mockImplementation(async (...args: Parameters<typeof ops.writeMessageOut>) => {
+        if (++writes === 2) throw new Error('Mailbox notice write rejected');
+        return original(...args);
+      });
+      release();
+      await waitFor(() => writes >= 2);
+      write.mockRestore();
+      insertMessage('c', 'ask:c', 'thread-c');
+      await waitFor(replied('re: c'));
+    } finally {
+      write.mockRestore();
+      await stop();
+    }
+    expect(replies()).toEqual([
+      ['Turn failed.', 'thread-a'],
+      ['re: c', 'thread-c'],
+    ]);
+  });
 });
