@@ -2,8 +2,6 @@ import path from 'path';
 
 import { commandExists, isWSL } from '../platform.js';
 
-const shellArg = (s: string): string => (/^[\w./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);
-
 /**
  * What to tell the user when the service step could not let the background
  * service reach Docker (DOCKER_GROUP_STALE in SETUP_SERVICE). Returns null
@@ -15,19 +13,6 @@ export function dockerAccessHint(
   host: { wsl: boolean; apt: boolean } = { wsl: isWSL(), apt: commandExists('apt-get') },
 ): { title: string; commands: string[]; note: string } | null {
   if (fields.DOCKER_GROUP_STALE !== 'true') return null;
-
-  // The socket ACL is in place, so the docker group is likely not the cause.
-  if (fields.DOCKER_ACL_APPLIED === 'true') {
-    const retry = host.wsl
-      ? 'Running `wsl --shutdown` in PowerShell, then reopening your Linux terminal, may still clear it.'
-      : 'A reboot may still clear it.';
-    return {
-      title:
-        "Setup gave you access to Docker, but NanoClaw's background service still can't reach it. To see why, run:",
-      commands: [`systemctl --user status ${unit}`, `journalctl --user -u ${unit} -n 50`],
-      note: `NanoClaw's own errors are in logs/nanoclaw.error.log. ${retry}`,
-    };
-  }
 
   const installAcl =
     fields.SETFACL_MISSING !== 'true'
@@ -46,7 +31,7 @@ export function dockerAccessHint(
     commands: [
       ...installAcl,
       'sudo setfacl -m u:$(whoami):rw /var/run/docker.sock',
-      `rm -f ${shellArg(breaker)}`,
+      `rm -f '${breaker}'`,
       `systemctl --user restart ${unit}`,
     ],
     note: `The setfacl fix lasts until Docker restarts. ${lasting}`,

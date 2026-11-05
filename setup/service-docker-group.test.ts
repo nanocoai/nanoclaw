@@ -16,14 +16,19 @@ const sys = vi.hoisted(() => ({
   apt: true,
   sudoCached: true,
   aclApplied: false,
-  aclReaches: true,
+  /** Whether data/circuit-breaker.json existed at each stop and restart. */
+  breakerAt: [] as string[],
 }));
 vi.mock('child_process', async (importOriginal) => ({
   ...(await importOriginal<typeof import('child_process')>()),
   execSync: vi.fn((command: string) => {
     sys.calls.push(command);
+    if (/^systemctl --user (stop|restart) /.test(command)) {
+      const breaker = fs.existsSync(path.join(sys.root, 'data', 'circuit-breaker.json'));
+      sys.breakerAt.push(`${command.split(' ')[2]}:${breaker ? 'counter' : 'clear'}`);
+    }
     if (command === 'systemd-run --user --pipe --wait docker info') {
-      if (!sys.stale || (sys.aclApplied && sys.aclReaches)) return '';
+      if (!sys.stale || sys.aclApplied) return '';
       throw new Error('permission denied while trying to connect to the docker API');
     }
     if (
@@ -82,7 +87,7 @@ beforeEach(() => {
     apt: true,
     sudoCached: true,
     aclApplied: false,
-    aclReaches: true,
+    breakerAt: [],
   });
   for (const key of ['HTTPS_PROXY', 'HTTP_PROXY', 'ALL_PROXY', 'NO_PROXY']) {
     vi.stubEnv(key, undefined);
@@ -99,17 +104,26 @@ afterEach(() => {
 });
 
 describe('user service and a docker group added mid-session', () => {
-  it('installs acl, applies the socket ACL before starting, and clears the flag once Docker answers', async () => {
+  it('installs acl and applies the socket ACL before starting the service', async () => {
     await run([]);
     expect(sudoCalls()).toEqual([aptCommand, aclCommand()]);
     const restart = sys.calls.indexOf(`systemctl --user restart ${getSystemdUnit(sys.root)}`);
-    const recheck = sys.calls.lastIndexOf('systemd-run --user --pipe --wait docker info');
-    expect(sys.calls.indexOf(aclCommand())).toBeLessThan(recheck);
-    expect(recheck).toBeLessThan(restart);
+    expect(sys.calls.indexOf(aclCommand())).toBeLessThan(restart);
     expect(fields()).toMatchObject({ SERVICE_TYPE: 'systemd-user', STATUS: 'success' });
     expect(fields()).not.toHaveProperty('DOCKER_GROUP_STALE');
     expect(fields()).not.toHaveProperty('SETFACL_MISSING');
-    expect(fields()).not.toHaveProperty('DOCKER_ACL_APPLIED');
+  });
+
+  it('stops the service and clears its crash counter after the repair, so the start is not held back', async () => {
+    // A service that crash-looped without Docker is at the 15-minute backoff.
+    fs.mkdirSync(path.join(sys.root, 'data'));
+    const counter = { attempt: 6, timestamp: new Date().toISOString() };
+    fs.writeFileSync(path.join(sys.root, 'data', 'circuit-breaker.json'), JSON.stringify(counter));
+    await run([]);
+    expect(sys.breakerAt).toEqual(['stop:counter', 'restart:clear']);
+    expect(sys.calls.indexOf(aclCommand())).toBeLessThan(
+      sys.calls.indexOf(`systemctl --user stop ${getSystemdUnit(sys.root)}`),
+    );
   });
 
   it('fails fast without a cached sudo ticket and reports setfacl as missing', async () => {
@@ -117,25 +131,16 @@ describe('user service and a docker group added mid-session', () => {
     await run([]);
     expect(sudoCalls()).toEqual([aptCommand]);
     expect(fields()).toMatchObject({ DOCKER_GROUP_STALE: true, SETFACL_MISSING: true, STATUS: 'success' });
-    expect(fields()).not.toHaveProperty('DOCKER_ACL_APPLIED');
   });
 
-  it('does not report the ACL as applied when setfacl itself fails', async () => {
+  it('keeps the flag and leaves the service alone when setfacl itself fails', async () => {
     sys.setfacl = true;
     sys.sudoCached = false;
     await run([]);
     expect(sudoCalls()).toEqual([aclCommand()]);
     expect(fields()).toMatchObject({ DOCKER_GROUP_STALE: true });
-    expect(fields()).not.toHaveProperty('DOCKER_ACL_APPLIED');
-  });
-
-  it('keeps the flag when the ACL is applied but the user manager still cannot reach Docker', async () => {
-    sys.setfacl = true;
-    sys.aclReaches = false;
-    await run([]);
-    expect(sudoCalls()).toEqual([aclCommand()]);
-    expect(fields()).toMatchObject({ DOCKER_GROUP_STALE: true, DOCKER_ACL_APPLIED: true });
     expect(fields()).not.toHaveProperty('SETFACL_MISSING');
+    expect(sys.breakerAt).toEqual(['restart:clear']);
   });
 
   it('does not reach for apt-get on other distributions', async () => {
@@ -149,6 +154,7 @@ describe('user service and a docker group added mid-session', () => {
     sys.stale = false;
     await run([]);
     expect(sudoCalls()).toEqual([]);
+    expect(sys.breakerAt).toEqual(['restart:clear']);
     expect(fields()).not.toHaveProperty('DOCKER_GROUP_STALE');
     expect(fields()).not.toHaveProperty('SETFACL_MISSING');
   });

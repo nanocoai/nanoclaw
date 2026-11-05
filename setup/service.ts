@@ -437,30 +437,29 @@ function killOrphanedProcesses(projectRoot: string): void {
 }
 
 /**
- * The shell reaches Docker but the user systemd manager does not, i.e. the
- * docker group was added after the manager started. Called only for a
- * non-root systemd user service; root and the nohup fallback skip it.
+ * Detect stale docker group membership in the user systemd session.
+ *
+ * When a user is added to the docker group mid-session, the user systemd
+ * daemon (user@UID.service) keeps the old group list from login time.
+ * Docker works in the terminal but not in the service context.
+ *
+ * Only relevant on Linux with user-level systemd (not root, not macOS, not WSL nohup).
  */
 function checkDockerGroupStale(): boolean {
-  if (userManagerReachesDocker()) return false;
-  // Check if docker works from the current shell (to distinguish stale group vs broken docker)
-  try {
-    execSync('docker info', { stdio: 'pipe', timeout: 5000 });
-    return true; // Works in shell but not systemd session → stale group
-  } catch {
-    return false; // Docker itself is not working, different issue
-  }
-}
-
-function userManagerReachesDocker(): boolean {
   try {
     execSync('systemd-run --user --pipe --wait docker info', {
       stdio: 'pipe',
       timeout: 10000,
     });
-    return true;
+    return false; // Docker works from systemd session
   } catch {
-    return false;
+    // Check if docker works from the current shell (to distinguish stale group vs broken docker)
+    try {
+      execSync('docker info', { stdio: 'pipe', timeout: 5000 });
+      return true; // Works in shell but not systemd session → stale group
+    } catch {
+      return false; // Docker itself is not working, different issue
+    }
   }
 }
 
@@ -484,8 +483,8 @@ function sudoNonInteractive(args: string[], timeout: number): boolean {
 interface DockerAccess {
   stale: boolean;
   setfaclMissing?: boolean;
-  /** The ACL went on but the user manager still can't reach Docker. */
-  aclApplied?: boolean;
+  /** The ACL went on, so a service that crash-looped without Docker can start. */
+  repaired?: boolean;
 }
 
 /**
@@ -510,12 +509,8 @@ function repairDockerGroupAccess(): DockerAccess {
   if (!sudoNonInteractive(['setfacl', '-m', `u:${os.userInfo().username}:rw`, DOCKER_SOCKET], 15_000)) {
     return { stale: true };
   }
-  if (!userManagerReachesDocker()) {
-    log.warn('Applied ACL to the Docker socket, but the user service still cannot reach Docker');
-    return { stale: true, aclApplied: true };
-  }
   log.info(`Applied temporary ACL to ${DOCKER_SOCKET} (resets on docker restart or reboot)`);
-  return { stale: false };
+  return { stale: false, repaired: true };
 }
 
 export function renderSystemdUnit(
@@ -617,6 +612,18 @@ async function setupSystemd(projectRoot: string, nodePath: string, homeDir: stri
     log.error('systemctl enable failed', { err });
   }
 
+  // A service that crash-looped without Docker would wait out its crash
+  // backoff (up to 15 min) before starting. Stop it first so no crash restart
+  // writes the counter back, then clear it.
+  if (dockerAccess.repaired) {
+    try {
+      execSync(`${systemctlPrefix} stop ${unitName}`, { stdio: 'ignore' });
+    } catch (err) {
+      log.warn('systemctl stop failed', { err });
+    }
+    fs.rmSync(path.join(projectRoot, 'data', 'circuit-breaker.json'), { force: true });
+  }
+
   // restart (not start) so a previously-running instance picks up edits to
   // the unit file. `start` on an active unit is a no-op, which would leave
   // the old ExecStart / WorkingDirectory in effect even after daemon-reload.
@@ -646,7 +653,6 @@ async function setupSystemd(projectRoot: string, nodePath: string, homeDir: stri
     SERVICE_LOADED: serviceLoaded,
     ...(dockerAccess.stale ? { DOCKER_GROUP_STALE: true } : {}),
     ...(dockerAccess.setfaclMissing ? { SETFACL_MISSING: true } : {}),
-    ...(dockerAccess.aclApplied ? { DOCKER_ACL_APPLIED: true } : {}),
     ...proxyStatusFields,
     LINGER_ENABLED: !runningAsRoot,
     STATUS: 'success',
