@@ -36,13 +36,15 @@ import {
 const TURN_TIMEOUT_MS = 10 * 60 * 1000;
 /** How long a turn's result waits for its steer replies before reporting. */
 const STEER_REPLY_WAIT_MS = 5_000;
+/** Sent to the thread of a steer whose reply never came, instead of running it again. */
+const UNCONFIRMED_STEER_NOTICE =
+  "This message came in while I was finishing another reply, and I couldn't confirm I got it. Please send it again.";
 
 /**
  * A follow-up steered into the running turn. `accepted` is unset until the
  * server replies or the turn's result stops waiting for that reply.
  */
 interface Steer {
-  message: string;
   reply: Promise<void>;
   accepted?: boolean;
 }
@@ -167,22 +169,15 @@ export class CodexProvider implements AgentProvider {
       waiting = null;
     };
 
-    // A rejected steer runs as its own turn ahead of everything queued
-    // meanwhile, all of which arrived after it.
-    const runAsOwnTurn = (steer: Steer): void => {
-      steer.accepted = false;
-      pending.unshift(steer.message);
-      wake();
-    };
-
     const pushOrSteer = (message: string): void => {
       // Inputs stay in push order: steer only with nothing queued and no
-      // steer awaiting its reply.
+      // steer awaiting its reply. A rejected steer runs as its own turn ahead
+      // of everything queued meanwhile, all of which arrived after it.
       if (activeServer && activeThreadId && activeTurnId && pending.length === 0 && !steerInFlight) {
         steerInFlight = true;
-        const steer: Steer = { message, reply: Promise.resolve() };
-        // A reply after the result stopped waiting changes nothing: the
-        // steer already runs as its own turn.
+        const steer: Steer = { reply: Promise.resolve() };
+        // A reply after the result stopped waiting changes nothing: that
+        // steer has already failed on its own route.
         steer.reply = this.runtime
           .steerCodexTurn(activeServer, activeThreadId, activeTurnId, message)
           .then(
@@ -190,7 +185,10 @@ export class CodexProvider implements AgentProvider {
               steer.accepted ??= true;
             },
             () => {
-              if (steer.accepted === undefined) runAsOwnTurn(steer);
+              if (steer.accepted !== undefined) return;
+              steer.accepted = false;
+              pending.unshift(message);
+              wake();
             },
           )
           .finally(() => {
@@ -273,13 +271,19 @@ export class CodexProvider implements AgentProvider {
               clearTimeout(timer);
               if (aborted) return;
               // A steer with no reply yet (at most one: one is in flight at a
-              // time) runs as its own turn, so its answer keeps its place in the
-              // poll loop's turn queue. If the server did take it, this answer
-              // covered it too and it is answered again in its own thread.
-              for (const steer of turnSteers) if (steer.accepted === undefined) runAsOwnTurn(steer);
+              // time) may or may not have reached this turn, and running it
+              // again could repeat what it asked for. It fails instead: an
+              // error result of its own, which the poll loop sends to its thread.
+              const unconfirmed = turnSteers.filter((steer) => steer.accepted === undefined);
+              for (const steer of unconfirmed) steer.accepted = false;
               const folded = turnSteers.filter((steer) => steer.accepted).length;
               // Assigned, not typed: a core without the field compiles and ignores it.
               if (folded > 0) Object.assign(event, { answeredInputs: 1 + folded });
+              yield event;
+              for (let i = 0; i < unconfirmed.length; i++) {
+                yield { type: 'result', text: null, isError: true, error: UNCONFIRMED_STEER_NOTICE };
+              }
+              continue;
             }
             yield event;
           }

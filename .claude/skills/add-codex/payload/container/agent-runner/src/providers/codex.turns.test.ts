@@ -185,7 +185,7 @@ describe('CodexProvider active turns', () => {
     ]);
   });
 
-  it('runs a steer still unanswered after the wait as its own turn, without holding the result', async () => {
+  it('fails a steer still unanswered after the wait on its own result, never running it again', async () => {
     let rejectSteer: (err: Error) => void = () => {};
     const fake = createFakeCodexRuntime({
       steerReply: () => new Promise<void>((_, reject) => (rejectSteer = reject)),
@@ -201,20 +201,19 @@ describe('CodexProvider active turns', () => {
     query.push('unanswered steer');
     await waitFor(() => fake.steerCalls.length === 1);
     fake.completeTurn('first answer');
-    await waitFor(() => fake.startCalls.length === 2);
-    // A late rejection never runs it a second time.
+    await waitFor(() => events.filter((event) => event.type === 'result').length === 2);
+    // The server may have taken it, so a late rejection never runs it.
     rejectSteer(new Error('steer rejected late'));
     await sleep(20);
     query.end();
-    fake.completeTurn('second answer');
 
     await collect;
 
-    expect(fake.startCalls.map((call) => call.inputText)).toEqual(['first prompt', 'unanswered steer']);
-    expect(events.filter((event) => event.type === 'result')).toEqual([
-      { type: 'result', text: 'first answer' },
-      { type: 'result', text: 'second answer' },
-    ]);
+    expect(fake.startCalls.map((call) => call.inputText)).toEqual(['first prompt']);
+    const results = events.filter((event) => event.type === 'result');
+    expect(results[0]).toEqual({ type: 'result', text: 'first answer' });
+    expect(results[1]).toMatchObject({ type: 'result', text: null, isError: true });
+    expect((results[1] as { error?: string }).error).toContain('send it again');
   });
 
   it('stops promptly on abort while a result waits for a steer reply', async () => {
@@ -419,7 +418,7 @@ describe('CodexProvider in the poll loop', () => {
       .map((m) => [(JSON.parse(m.content) as { text: string }).text, m.thread_id]);
   const labels = (prompt: string) => [...prompt.matchAll(/ask:(\w+)/g)].map((m) => m[1]);
 
-  it('answers a backlog in its own threads when a steer is rejected after the result stopped waiting', async () => {
+  it('fails an unconfirmed steer in its own thread and answers the backlog in theirs', async () => {
     const rejecters: Array<(err: Error) => void> = [];
     const fake = createFakeCodexRuntime({
       steerReply: () => new Promise<void>((_, reject) => rejecters.push(reject)),
@@ -446,23 +445,25 @@ describe('CodexProvider in the poll loop', () => {
       insertMessage('B'); // steered into A's turn; the reply is held
       await waitFor(() => fake.steerCalls.length === 1, 5000);
       await answerTurn();
-      await waitFor(() => replies().length === 1, 5000);
+      await waitFor(() => replies().length === 2, 5000);
       // Each follow-up reaches the provider as its own push.
       for (const label of ['C', 'D', 'E']) {
         insertMessage(label);
         await waitFor(claimed(label), 5000);
       }
       rejecters[0](new Error('steer rejected late'));
-      for (let i = 0; i < 4; i++) await answerTurn();
+      for (let i = 0; i < 3; i++) await answerTurn();
       await waitFor(() => replies().length === 5, 5000);
     } finally {
       controller.abort();
       await loop.catch(() => {});
     }
 
+    const notice = replies()[1][0];
+    expect(notice).toContain('send it again');
     expect(replies()).toEqual([
       ['re: A', 'thread-A'],
-      ['re: B', 'thread-B'],
+      [notice, 'thread-B'],
       ['re: C', 'thread-C'],
       ['re: D', 'thread-D'],
       ['re: E', 'thread-E'],
