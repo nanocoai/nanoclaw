@@ -332,10 +332,10 @@ async function testSkill(
   const byLine = new Map(directives.map((directive) => [directive.line, directive]));
   let current = directives[0];
 
-  const apply = () =>
+  const apply = (effects = skipEffects) =>
     applySkill(meta.dir, root, {
       inputs: fixture.inputs ?? {},
-      skipEffects,
+      skipEffects: effects,
       resolveRemote: () => 'skill-ci',
       onEvent: (event) => {
         if (event.type === 'step-start') current = byLine.get(event.line);
@@ -374,7 +374,9 @@ async function testSkill(
       }
       assertSnapshot('removed-state verification changed the checkout', before, snapshot(root));
     }
-    const reapplied = await apply();
+    // The snapshot below proves the re-add restores the first install byte for
+    // byte, so its build and test steps would only repeat the first pass.
+    const reapplied = await apply([...skipEffects, 'build', 'test']);
     if (!fullyApplied(reapplied)) throw new Error('provider add → remove → add round trip failed');
     if (installed)
       assertSnapshot('provider reapply did not restore the exact installed checkout', installed, snapshot(root));
@@ -432,8 +434,13 @@ async function testCombinedProviders(skills: RegistrySkill[]): Promise<void> {
   }
 }
 
-async function testOldProviderRefresh(commit: string): Promise<void> {
+async function testOldProviderRefresh(commit: string, only: string[] = []): Promise<void> {
   if (!/^[0-9a-f]{40}$/i.test(commit)) throw new Error('old trunk must be a full commit SHA');
+  const legacySkills = only.length
+    ? LEGACY_PROVIDER_SKILLS.filter((name) => only.includes(name))
+    : LEGACY_PROVIDER_SKILLS;
+  if (legacySkills.length !== (only.length || LEGACY_PROVIDER_SKILLS.length))
+    throw new Error(`legacy provider skills are ${LEGACY_PROVIDER_SKILLS.join(', ')}`);
 
   ensureCommit(commit);
   const currentRefs = resolveRegistryRefs();
@@ -447,7 +454,7 @@ async function testOldProviderRefresh(commit: string): Promise<void> {
     await command('pnpm install --frozen-lockfile --prefer-offline', root);
     await command('bun install --frozen-lockfile', join(root, 'container/agent-runner'));
 
-    const oldSkills = LEGACY_PROVIDER_SKILLS.map((name) =>
+    const oldSkills = legacySkills.map((name) =>
       discover(join(root, '.claude/skills')).find(({ skill }) => skill === name),
     );
     if (oldSkills.some((skill) => !skill)) throw new Error('old trunk is missing a provider skill');
@@ -469,11 +476,11 @@ async function testOldProviderRefresh(commit: string): Promise<void> {
     const report = await refreshInstalledSkills(root, 'all', {
       exec: (cmd, cwd) => command(cmd, cwd),
     });
-    const expected = ['codex', 'opencode'];
+    const expected = legacySkills.map((name) => name.replace(/^add-/, '')).sort();
     if (JSON.stringify(report.selected) !== JSON.stringify(expected) || !report.success) {
       throw new Error(`old-install provider refresh failed: ${JSON.stringify(report)}`);
     }
-    if (!existsSync(join(root, 'src/opencode-cli-tools.test.ts'))) {
+    if (legacySkills.includes('add-opencode') && !existsSync(join(root, 'src/opencode-cli-tools.test.ts'))) {
       throw new Error('OpenCode refresh lost src/opencode-cli-tools.test.ts');
     }
 
@@ -682,7 +689,7 @@ async function main(): Promise<void> {
   } else if (arg === '--combined-providers') {
     await testCombinedProviders(skills);
   } else if (arg === '--old-provider-refresh') {
-    await testOldProviderRefresh(process.argv[3] ?? '');
+    await testOldProviderRefresh(process.argv[3] ?? '', process.argv.slice(4));
   } else if (arg === '--pre-contract-providers') {
     await testPreContractProviders();
   } else if (arg === '--provider-payload-switch') {
@@ -690,10 +697,18 @@ async function main(): Promise<void> {
   } else if (arg) {
     const meta = skills.find((candidate) => candidate.skill === basename(arg));
     if (!meta) throw new Error(`unknown registry skill: ${arg}`);
+    // The matrix lists every skill; one whose registry source is missing is
+    // skipped here, as --list-available used to leave it out of the matrix.
+    const { unavailable } = partitionRegistryAvailability([meta], registrySourceCheck(resolveRegistryRefs()));
+    if (unavailable.length) {
+      warnUnavailable(unavailable);
+      console.log(`SKIP: ${meta.skill} has no registry source to install from`);
+      return;
+    }
     await testAll([meta]);
   } else {
     console.error(
-      'usage: pnpm exec tsx scripts/test-registry-skills.ts --list|--list-available|--all [skill...]|--combined-providers|--old-provider-refresh <sha>|--pre-contract-providers|--provider-payload-switch <sha>|<skill>',
+      'usage: pnpm exec tsx scripts/test-registry-skills.ts --list|--list-available|--all [skill...]|--combined-providers|--old-provider-refresh <sha> [skill...]|--pre-contract-providers|--provider-payload-switch <sha>|<skill>',
     );
     process.exitCode = 2;
   }
