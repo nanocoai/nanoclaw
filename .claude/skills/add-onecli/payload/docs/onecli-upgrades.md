@@ -126,7 +126,7 @@ curl -s "$GW/api/health"                        # its "version" must be the pin
 
 If the tag is not the pin, go back to step 2: the pin is not saved, or the compose file does not use it. If `version` reports anything other than the pin, including `unknown`, put the gateway on the pin (step 2). The grants check that tool skills run before they save a key (`check-grants-gateway.sh`) also refuses a gateway that reports `unknown`. From a NanoClaw host that only reaches a remote gateway, the `version` field is the only check.
 
-**Verify the bind interface.** On Linux, setup publishes a new gateway's admin API (`:10254`) and Postgres (`:5432`) on `127.0.0.1`. The gateway proxy port (`:10255`) stays on the Docker bridge (`host.docker.internal` → e.g. `172.17.0.1`). Check the published host ports directly:
+**Verify the bind interface.** On Linux, when the installer binds a new gateway to the Docker bridge, setup publishes its admin API (`:10254`) and Postgres (`:5432`) on `127.0.0.1`. The gateway proxy port (`:10255`) stays on the Docker bridge (`host.docker.internal` → e.g. `172.17.0.1`). Check the published host ports directly:
 
 ```bash
 docker port "${ONECLI_GATEWAY_CONTAINER:-onecli}" 10254/tcp   # 127.0.0.1:10254 only

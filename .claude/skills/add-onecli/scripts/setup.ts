@@ -246,6 +246,19 @@ export function nonLoopbackBindings(dockerPortOutput: string): string[] {
     .filter((line) => line && !/^(127\.\d+\.\d+\.\d+|\[::1\]):\d+$/.test(line));
 }
 
+/** The docker0 address, which the installer picks on bare-metal Linux. */
+function docker0Address(): string | null {
+  try {
+    const out = execFileSync('ip', ['-4', 'addr', 'show', 'docker0'], {
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return /inet (\d+\.\d+\.\d+\.\d+)/.exec(out)?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /** Returns the URL the host uses for the admin API. */
 function ensureLocalGatewayHostAccess(gatewayUrl: string): string {
   if (process.platform !== 'linux') return gatewayUrl;
@@ -253,8 +266,8 @@ function ensureLocalGatewayHostAccess(gatewayUrl: string): string {
   const current = fs.readFileSync(composeFile, 'utf8');
   let next = withLinuxHostGateway(current);
   const url = new URL(gatewayUrl);
-  // Only the installer's own pick moves; a bind set on purpose stays as chosen.
-  if (!process.env.ONECLI_BIND_HOST) {
+  // Only the installer's docker0 pick moves; a bind set on purpose stays as chosen.
+  if (!process.env.ONECLI_BIND_HOST && url.hostname === docker0Address()) {
     const loopback = withLoopbackAdmin(next);
     if (loopback === null) {
       log.warn('OneCLI compose layout not recognized; admin API and Postgres stay on the installer bind', {
