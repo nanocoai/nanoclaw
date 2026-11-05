@@ -37,8 +37,12 @@ const TURN_TIMEOUT_MS = 10 * 60 * 1000;
 /** How long a turn's result waits for its steer replies before reporting. */
 const STEER_REPLY_WAIT_MS = 5_000;
 
-/** A follow-up steered into the running turn; `accepted` is unset until the server replies. */
+/**
+ * A follow-up steered into the running turn. `accepted` is unset until the
+ * server replies or the turn's result stops waiting for that reply.
+ */
 interface Steer {
+  message: string;
   reply: Promise<void>;
   accepted?: boolean;
 }
@@ -163,23 +167,30 @@ export class CodexProvider implements AgentProvider {
       waiting = null;
     };
 
+    // A rejected steer runs as its own turn ahead of everything queued
+    // meanwhile, all of which arrived after it.
+    const runAsOwnTurn = (steer: Steer): void => {
+      steer.accepted = false;
+      pending.unshift(steer.message);
+      wake();
+    };
+
     const pushOrSteer = (message: string): void => {
       // Inputs stay in push order: steer only with nothing queued and no
-      // steer awaiting its reply. A rejected steer runs as its own turn ahead
-      // of everything queued meanwhile, all of which arrived after it.
+      // steer awaiting its reply.
       if (activeServer && activeThreadId && activeTurnId && pending.length === 0 && !steerInFlight) {
         steerInFlight = true;
-        const steer: Steer = { reply: Promise.resolve() };
+        const steer: Steer = { message, reply: Promise.resolve() };
+        // A reply after the result stopped waiting changes nothing: the
+        // steer already runs as its own turn.
         steer.reply = this.runtime
           .steerCodexTurn(activeServer, activeThreadId, activeTurnId, message)
           .then(
             () => {
-              steer.accepted = true;
+              steer.accepted ??= true;
             },
             () => {
-              steer.accepted = false;
-              pending.unshift(message);
-              wake();
+              if (steer.accepted === undefined) runAsOwnTurn(steer);
             },
           )
           .finally(() => {
@@ -261,10 +272,12 @@ export class CodexProvider implements AgentProvider {
               await Promise.race([Promise.all(turnSteers.map((steer) => steer.reply)), abortedP, waited]);
               clearTimeout(timer);
               if (aborted) return;
-              // A steer with no reply yet counts as folded: if it is rejected
-              // later it runs as its own turn and one reply is misrouted, but
-              // an uncounted fold would leave every later reply one behind.
-              const folded = turnSteers.filter((steer) => steer.accepted !== false).length;
+              // A steer with no reply yet (at most one: one is in flight at a
+              // time) runs as its own turn, so its answer keeps its place in the
+              // poll loop's turn queue. If the server did take it, this answer
+              // covered it too and it is answered again in its own thread.
+              for (const steer of turnSteers) if (steer.accepted === undefined) runAsOwnTurn(steer);
+              const folded = turnSteers.filter((steer) => steer.accepted).length;
               // Assigned, not typed: a core without the field compiles and ignores it.
               if (folded > 0) Object.assign(event, { answeredInputs: 1 + folded });
             }
