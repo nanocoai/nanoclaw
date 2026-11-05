@@ -208,6 +208,14 @@ describe('sudo pre-flight (nanoclaw.sh)', { timeout: 20_000 }, () => {
     expect(r.sudo).toEqual([]);
   });
 
+  // Only skills need jq, so a user without sudo can still install NanoClaw.
+  it('goes on without jq when sudo is refused and only jq needed it', () => {
+    const r = run({ node: 'v22.23.4', pkg: 'apt-get', sudo: { cached: false, validates: false }, interactive: true });
+    expect(r.rc).toBe(0);
+    expect(r.out).toContain('Going on without jq for now.');
+    expect(r.out).not.toContain("Couldn't get sudo access");
+  });
+
   it('names jq when sudo is refused', () => {
     const r = run({ pkg: 'apt-get', sudo: { cached: false, validates: false }, interactive: true });
     expect(r.out).toContain("Couldn't get sudo access to install Node and jq.");

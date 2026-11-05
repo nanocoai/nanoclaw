@@ -68,6 +68,11 @@ sudo_preflight() {
     printf '\n'
     return 0
   fi
+  # Only skills need jq, so a user without sudo can still install NanoClaw.
+  if [ "$needs" = "jq" ]; then
+    printf '\n  %s\n\n' "$(dim 'Going on without jq for now.')"
+    return 0
+  fi
   local minimum="Node (minimum ${NODE_MINIMUMS// / / })"
   printf '\n  %s %s\n' "$(red '✗')" "Couldn't get sudo access to install ${needs}."
   printf '  %s\n\n' \
