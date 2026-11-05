@@ -455,6 +455,9 @@ registerChannelAdapter('whatsapp', {
     // Chats already noted in the shared-mode once-per-chat debug log
     const sharedModeLoggedChats = new Set<string>();
 
+    // WhatsApp Channels already noted in the skipped-newsletter debug log
+    const newsletterLoggedJids = new Set<string>();
+
     // First-connect promise
     let resolveFirstOpen: (() => void) | undefined;
     let rejectFirstOpen: ((err: Error) => void) | undefined;
@@ -834,6 +837,17 @@ registerChannelAdapter('whatsapp', {
             if (!normalized) continue;
             const rawJid = msg.key.remoteJid;
             if (!rawJid || rawJid === 'status@broadcast') continue;
+            // A WhatsApp Channel (newsletter) is a read-only broadcast on the
+            // same stream. It is neither @g.us nor @s.whatsapp.net, so routed
+            // it looks like a fresh DM and raises an approval card the bot can
+            // never act on. Skip it and note each channel once for /debug.
+            if (rawJid.endsWith('@newsletter')) {
+              if (!newsletterLoggedJids.has(rawJid)) {
+                newsletterLoggedJids.add(rawJid);
+                log.debug('Skipping WhatsApp Channel (newsletter) message', { jid: rawJid });
+              }
+              continue;
+            }
 
             // Translate LID → phone JID using v7's alt JID from extractAddressingContext
             const chatJid = await translateJid(rawJid, msg.key.remoteJidAlt);
