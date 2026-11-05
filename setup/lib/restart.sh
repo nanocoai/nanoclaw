@@ -29,13 +29,15 @@ restart_darwin() {
   domain="gui/$(id -u)"
   plist="$HOME/Library/LaunchAgents/${label}.plist"
 
+  # A launchctl failure keeps its code, except 2: callers read that as "not
+  # installed".
   if launchctl print "$domain/$label" >/dev/null 2>&1; then
-    pid="$(launchctl kickstart -k -p "$domain/$label")" || return $?
+    pid="$(launchctl kickstart -k -p "$domain/$label")" || return $(($? == 2 ? 1 : $?))
   elif [ -f "$plist" ]; then
     # `kickstart` cannot load an installed-but-unloaded job. Bootstrap the
     # plist first, then demand-start it in case RunAtLoad remains pended.
-    launchctl bootstrap "$domain" "$plist" || return $?
-    pid="$(launchctl kickstart -p "$domain/$label")" || return $?
+    launchctl bootstrap "$domain" "$plist" || return $(($? == 2 ? 1 : $?))
+    pid="$(launchctl kickstart -p "$domain/$label")" || return $(($? == 2 ? 1 : $?))
   else
     echo "NanoClaw service is not installed. Run the setup service step first." >&2
     return 2

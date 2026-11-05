@@ -93,8 +93,8 @@ echo $! > ${JSON.stringify(path.join(root, 'nanoclaw.pid'))}
   }, 20000);
 
   // provider-auth tells "nothing to restart" apart from a failed restart by
-  // this code, which the macOS branch already returns.
-  it('exits 2 when neither systemd nor the nohup launcher runs the install', () => {
+  // this code, so only a missing service may return it.
+  function runRestart(platform: string, launchctl: string): ReturnType<typeof spawnSync> {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-restart-'));
     roots.push(root);
     const lib = path.join(root, 'setup', 'lib');
@@ -105,17 +105,25 @@ echo $! > ${JSON.stringify(path.join(root, 'nanoclaw.pid'))}
     for (const name of ['host-status.mjs', 'restart.sh', 'install-slug.sh']) {
       fs.copyFileSync(new URL(`./${name}`, import.meta.url), path.join(lib, name));
     }
-    fs.writeFileSync(path.join(bin, 'uname'), '#!/bin/sh\necho Linux\n', { mode: 0o755 });
+    fs.writeFileSync(path.join(bin, 'uname'), `#!/bin/sh\necho ${platform}\n`, { mode: 0o755 });
     fs.writeFileSync(path.join(bin, 'systemctl'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
-
-    const result = spawnSync('/bin/bash', [path.join(lib, 'restart.sh')], {
+    fs.writeFileSync(path.join(bin, 'launchctl'), `#!/bin/sh\n${launchctl}\n`, { mode: 0o755 });
+    return spawnSync('/bin/bash', [path.join(lib, 'restart.sh')], {
       cwd: root,
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}` },
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}`, HOME: root },
       encoding: 'utf8',
       timeout: 15000,
     });
+  }
 
+  it('exits 2 when neither systemd nor the nohup launcher runs the install', () => {
+    const result = runRestart('Linux', 'exit 1');
     expect(result.status).toBe(2);
     expect(result.stderr).toContain('no installed service or nohup launcher');
+  });
+
+  it('does not pass a launchctl failure off as a missing service', () => {
+    const result = runRestart('Darwin', 'case "$1" in print) exit 0 ;; *) exit 2 ;; esac');
+    expect(result.status).toBe(1);
   });
 });
