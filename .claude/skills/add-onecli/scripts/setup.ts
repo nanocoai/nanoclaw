@@ -17,11 +17,9 @@ import net from 'net';
 import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { parseEnv } from 'node:util';
 
 import { log } from '../../../../src/log.js';
 import { emitStatus } from '../../../../setup/status.js';
-import { bindingHost, isLoopbackHost, parsePublishedPorts, pinAdminToLoopback } from './admin-loopback.js';
 import { login } from './secret-input.js';
 
 const LOCAL_BIN = path.join(os.homedir(), '.local', 'bin');
@@ -92,7 +90,7 @@ function ensureShellProfilePath(): void {
 }
 
 export function withEnvVar(content: string, name: string, value: string): string {
-  const re = new RegExp(`^[ \\t]*(?:export[ \\t]+)?${name}[ \\t]*=.*$`, 'gm');
+  const re = new RegExp(`^${name}=.*$`, 'm');
   if (re.test(content)) {
     return content.replace(re, `${name}=${value}`);
   }
@@ -207,198 +205,77 @@ export function withLinuxHostGateway(compose: string, platform = process.platfor
   if (platform !== 'linux' || compose.includes('host.docker.internal:host-gateway')) {
     return compose;
   }
-  const newline = compose.includes('\r\n') ? '\r\n' : '\n';
-  const marker = `    container_name: onecli${newline}`;
+  const marker = '    container_name: onecli\n';
   if (!compose.includes(marker)) {
     throw new Error('OneCLI compose file has no onecli service marker');
   }
-  return compose.replace(
-    marker,
-    `${marker}    extra_hosts:${newline}      - "host.docker.internal:host-gateway"${newline}`,
-  );
+  return compose.replace(marker, `${marker}    extra_hosts:\n      - "host.docker.internal:host-gateway"\n`);
 }
 
-const ONECLI_DIR = path.join(os.homedir(), '.onecli');
-const ADMIN_CONTAINER_PORT = 10254;
+// The stock compose publishes every port on ONECLI_BIND_HOST. Agent
+// containers only need the gateway port there, so these lines move the admin
+// API, Postgres and the dashboard URL to loopback.
+const LOOPBACK_LINES: [string, string][] = [
+  [
+    '- "${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_APP_PORT:-10254}:10254"',
+    '- "127.0.0.1:${ONECLI_APP_PORT:-10254}:10254"',
+  ],
+  ['- "${ONECLI_BIND_HOST:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"', '- "127.0.0.1:${POSTGRES_PORT:-5432}:5432"'],
+  [
+    'APP_URL: ${APP_URL:-http://${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_APP_PORT:-10254}}',
+    'APP_URL: ${APP_URL:-http://127.0.0.1:${ONECLI_APP_PORT:-10254}}',
+  ],
+];
 
-/** The docker calls made against the local gateway's compose stack; tests pass a fake. */
-export interface LocalGatewayDocker {
-  /** Every host binding ("host:port"), or null when inspection failed. */
-  publishedPorts(service: 'onecli' | 'postgres', port: number): string[] | null;
-  /** Recreate whatever the compose files changed. */
-  up(): void;
-}
-
-const COMPOSE_PORT_VARS = ['ONECLI_APP_PORT', 'ONECLI_GATEWAY_PORT', 'POSTGRES_PORT'] as const;
-
-/** .env content with the port overrides the installer ran with saved, so later restarts keep them. */
-export function withInstallerPorts(content: string, env: NodeJS.ProcessEnv = process.env): string {
-  return COMPOSE_PORT_VARS.reduce((next, name) => {
-    const value = env[name];
-    return value !== undefined ? withEnvVar(next, name, value) : next;
-  }, content);
-}
-
-/**
- * Compose lets the shell override .env; the binds, ports and version saved
- * there must win. A shell APP_URL stays unless .env saves one.
- */
-export function composeEnv(env: NodeJS.ProcessEnv = process.env, saved: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
-  const next = { ...env };
-  for (const name of ['ONECLI_BIND_HOST', 'ONECLI_VERSION', ...COMPOSE_PORT_VARS]) {
-    delete next[name];
+/** The compose with LOOPBACK_LINES applied, or null when a stock line is missing. */
+export function withLoopbackAdmin(compose: string): string | null {
+  let next = compose;
+  for (const [stock, loopback] of LOOPBACK_LINES) {
+    const parts = next.split(stock);
+    if (parts.length === 2) next = parts.join(loopback);
+    else if (parts.length !== 1 || !next.includes(loopback)) return null;
   }
-  if (saved.APP_URL !== undefined) delete next.APP_URL;
   return next;
 }
 
-function readSavedEnv(envFile: string): NodeJS.ProcessEnv {
-  return fs.existsSync(envFile) ? parseEnv(fs.readFileSync(envFile, 'utf8')) : {};
+/** `docker port` bindings that are not on loopback ("172.17.0.1:10254"). */
+export function nonLoopbackBindings(dockerPortOutput: string): string[] {
+  return dockerPortOutput
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line && !/^(127\.\d+\.\d+\.\d+|\[::1\]):\d+$/.test(line));
 }
 
-function localGatewayDocker(dir = ONECLI_DIR): LocalGatewayDocker {
-  const composeFile = path.join(dir, 'docker-compose.yml');
-  const envFile = path.join(dir, '.env');
-  const composeArgs = () => ['compose', ...(fs.existsSync(envFile) ? ['--env-file', envFile] : []), '-f', composeFile];
-  const read = (args: string[]): string | null => {
-    try {
-      return execFileSync('docker', args, {
-        cwd: dir,
-        encoding: 'utf-8',
-        env: composeEnv(process.env, readSavedEnv(envFile)),
-        stdio: ['ignore', 'pipe', 'ignore'],
-      }).trim();
-    } catch {
-      return null;
-    }
-  };
-  return {
-    publishedPorts(service, port) {
-      // No local compose file: a remote or shared gateway, nothing published here.
-      if (!fs.existsSync(composeFile)) return [];
-      const ids = read([...composeArgs(), 'ps', '-q', service]);
-      if (ids === null) return null;
-      if (!ids) return [];
-      const bindings: string[] = [];
-      for (const id of ids.split('\n')) {
-        try {
-          // Inspect distinguishes an unpublished port from a failed command.
-          const ports = JSON.parse(read(['inspect', '-f', '{{json .NetworkSettings.Ports}}', id]) ?? '');
-          if (!ports || typeof ports !== 'object' || Array.isArray(ports)) return null;
-          const entries = ports[`${port}/tcp`] ?? [];
-          if (!Array.isArray(entries)) return null;
-          for (const entry of entries) {
-            if (typeof entry.HostIp !== 'string' || !/^\d+$/.test(entry.HostPort)) return null;
-            const host = entry.HostIp.includes(':') ? `[${entry.HostIp}]` : entry.HostIp;
-            const parsed = parsePublishedPorts(`${host}:${entry.HostPort}`);
-            if (parsed.length !== 1) return null;
-            bindings.push(...parsed);
-          }
-        } catch {
-          return null;
-        }
-      }
-      return bindings;
-    },
-    up() {
-      execFileSync('docker', [...composeArgs(), 'up', '-d'], {
-        cwd: dir,
-        env: composeEnv(process.env, readSavedEnv(envFile)),
-        stdio: ['ignore', 'ignore', 'pipe'],
-      });
-    },
-  };
-}
-
-/**
- * Fit a freshly installed Linux gateway to NanoClaw: add the host-service
- * mapping, and publish its admin API and Postgres on loopback only. Agent
- * containers only need the gateway proxy port (see admin-loopback.ts).
- * Other platforms are left as installed. Returns the host's admin API URL.
- */
-export function configureLocalGateway(
-  installerUrl: string,
-  platform: NodeJS.Platform = process.platform,
-  docker: LocalGatewayDocker = localGatewayDocker(),
-  dir = ONECLI_DIR,
-): string {
-  if (platform !== 'linux') return installerUrl;
-  const composeFile = path.join(dir, 'docker-compose.yml');
+/** Returns the URL the host uses for the admin API. */
+function ensureLocalGatewayHostAccess(gatewayUrl: string): string {
+  if (process.platform !== 'linux') return gatewayUrl;
+  const composeFile = path.join(os.homedir(), '.onecli', 'docker-compose.yml');
   const current = fs.readFileSync(composeFile, 'utf8');
-  let next = withLinuxHostGateway(current, platform);
-  let adminUrl = installerUrl;
-  const installer = new URL(installerUrl);
-  if (!isLoopbackHost(installer.hostname)) {
-    const pinned = pinAdminToLoopback(next);
-    if (installer.port !== String(ADMIN_CONTAINER_PORT)) {
-      log.warn('OneCLI admin API is on a custom port; leaving it on the installer bind', { installerUrl });
-    } else if (pinned.status === 'unrecognized') {
+  let next = withLinuxHostGateway(current);
+  const url = new URL(gatewayUrl);
+  // Only the installer's own pick moves; a bind set on purpose stays as chosen.
+  if (!process.env.ONECLI_BIND_HOST) {
+    const loopback = withLoopbackAdmin(next);
+    if (loopback === null) {
       log.warn('OneCLI compose layout not recognized; admin API and Postgres stay on the installer bind', {
         composeFile,
       });
     } else {
-      next = pinned.compose;
-      installer.hostname = '127.0.0.1';
-      adminUrl = installer.origin;
-      // Keep a public APP_URL (tunnel, proxy, domain); replace only the installer's bridge URL.
-      const envFile = path.join(dir, '.env');
-      // The shell wins over .env, as in Compose; save the result so later
-      // `docker compose up -d` runs keep it.
-      const savedAppUrl = readSavedEnv(envFile).APP_URL;
-      const appUrl = process.env.APP_URL || savedAppUrl;
-      if (!appUrl || sameOrigin(appUrl, installerUrl)) writeEnvVar('APP_URL', adminUrl, envFile);
-      else if (appUrl !== savedAppUrl && isHttpUrl(appUrl)) writeEnvVar('APP_URL', appUrl, envFile);
+      next = loopback;
+      url.hostname = '127.0.0.1';
     }
   }
-  if (next === current) return adminUrl;
-  fs.writeFileSync(composeFile, next);
-  docker.up();
-  return adminUrl;
-}
-
-function isHttpUrl(value: string): boolean {
-  try {
-    return ['http:', 'https:'].includes(new URL(value).protocol);
-  } catch {
-    return false;
-  }
-}
-
-function sameOrigin(a: string, b: string): boolean {
-  try {
-    return new URL(a).origin === new URL(b).origin;
-  } catch {
-    return false;
-  }
-}
-
-/** Admin API and Postgres bindings published off loopback, as "host:port". */
-export function nonLoopbackAdminPorts(docker: LocalGatewayDocker = localGatewayDocker()): string[] | null {
-  const admin = docker.publishedPorts('onecli', 10254);
-  const postgres = docker.publishedPorts('postgres', 5432);
-  if (admin === null || postgres === null) return null;
-  return [...admin, ...postgres].filter((binding) => !isLoopbackHost(bindingHost(binding)));
-}
-
-function adminNotLoopbackHint(where: string): string {
-  return (
-    `OneCLI's admin API and database are published at ${where} instead of 127.0.0.1. ` +
-    'Follow the manual steps under Verify the bind interface in docs/onecli-upgrades.md, then restart NanoClaw.'
-  );
-}
-
-function setApiHost(url: string): void {
-  try {
-    execFileSync('onecli', ['config', 'set', 'api-host', url], {
+  if (next !== current) {
+    fs.writeFileSync(composeFile, next);
+    execFileSync('docker', ['compose', '-f', composeFile, 'up', '-d'], {
+      cwd: path.dirname(composeFile),
       stdio: 'ignore',
-      env: childEnv(),
     });
-  } catch (err) {
-    log.warn('onecli config set api-host failed', { err });
   }
+  return url.origin;
 }
 
-function installOnecli(): { stdout: string; ok: boolean; adminUrl?: string } {
+function installOnecli(): { stdout: string; ok: boolean; url?: string } {
   let stdout = '';
 
   const cleanup = removeLegacyOnecliContainers();
@@ -419,15 +296,14 @@ function installOnecli(): { stdout: string; ok: boolean; adminUrl?: string } {
     log.error('OneCLI gateway install failed', { stderr: gw.stderr });
     return { stdout: stdout + (gw.stderr ?? ''), ok: false };
   }
-  let adminUrl: string;
+  let url: string;
   try {
     const gatewayUrl = extractUrlFromOutput(gw.stdout);
     if (!gatewayUrl) throw new Error('OneCLI installer did not report its URL');
-    const onecliEnv = path.join(ONECLI_DIR, '.env');
+    const onecliEnv = path.join(os.homedir(), '.onecli', '.env');
     writeEnvVar('ONECLI_VERSION', ONECLI_GATEWAY_VERSION, onecliEnv);
     writeEnvVar('ONECLI_BIND_HOST', new URL(gatewayUrl).hostname, onecliEnv);
-    fs.writeFileSync(onecliEnv, withInstallerPorts(fs.readFileSync(onecliEnv, 'utf8')));
-    adminUrl = configureLocalGateway(gatewayUrl);
+    url = ensureLocalGatewayHostAccess(gatewayUrl);
   } catch (err) {
     log.error('OneCLI gateway host mapping failed', { err });
     return { stdout, ok: false };
@@ -439,7 +315,7 @@ function installOnecli(): { stdout: string; ok: boolean; adminUrl?: string } {
     log.error('OneCLI CLI install failed');
     return { stdout, ok: false };
   }
-  return { stdout, ok: true, adminUrl };
+  return { stdout, ok: true, url };
 }
 
 function runInstall(cmd: string): {
@@ -643,16 +519,15 @@ export async function run(args: string[]): Promise<void> {
   }
 
   if (reuse) {
-    // Reuse-mode: don't touch the running gateway, since other apps may use
-    // its current binds. Verify it exists, read its api-host, write
-    // ONECLI_URL to .env, and move on.
+    // Reuse-mode: don't touch the running gateway at all. Just verify it
+    // exists, read its api-host, write ONECLI_URL to .env, and move on.
     const version = onecliVersion();
     if (!version) {
       emitStatus('ONECLI', {
         INSTALLED: false,
         STATUS: 'failed',
         ERROR: 'onecli_not_found_for_reuse',
-        HINT: 'onecli not on PATH. Restore the existing CLI before reusing the gateway.',
+        HINT: 'onecli not on PATH. Re-run setup and choose "install fresh".',
         LOG: 'logs/setup.log',
       });
       process.exit(1);
@@ -663,16 +538,26 @@ export async function run(args: string[]): Promise<void> {
         INSTALLED: true,
         STATUS: 'failed',
         ERROR: 'onecli_api_host_not_configured',
-        HINT: 'Existing onecli has no api-host set. Run `onecli config set api-host <url>` for the existing gateway.',
+        HINT: 'Existing onecli has no api-host set. Run `onecli config set api-host <url>` or re-run setup with install-fresh.',
         LOG: 'logs/setup.log',
       });
       process.exit(1);
     }
     writeEnvOnecliUrl(url);
     log.info('Reusing existing OneCLI', { url });
-    const nonLoopbackPorts = nonLoopbackAdminPorts();
-    if (nonLoopbackPorts?.length)
-      log.warn('OneCLI admin API or Postgres is published off loopback', { nonLoopbackPorts });
+    // Report only: other apps may use the reused gateway's current binds.
+    let adminBindings: string[] = [];
+    try {
+      adminBindings = nonLoopbackBindings(
+        execFileSync('docker', ['port', 'onecli', '10254/tcp'], {
+          encoding: 'utf-8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+        }),
+      );
+    } catch {
+      // No local onecli container (a remote gateway) or no Docker access.
+    }
+    if (adminBindings.length) log.warn('OneCLI admin API is published off loopback', { adminBindings });
     const healthy = await pollHealth(url, 5000);
     const v1Status = await verifyGatewayV1(url);
     const v1Hint = gatewayV1Hint(v1Status);
@@ -685,17 +570,11 @@ export async function run(args: string[]): Promise<void> {
       STATUS: readinessError ? 'failed' : 'success',
       ...(readinessError ? { ERROR: 'gateway_not_ready', HINT: readinessError } : {}),
       ...(v1Hint ? { GATEWAY_HINT: v1Hint } : {}),
-      ...(nonLoopbackPorts === null
+      ...(adminBindings.length
         ? {
-            ADMIN_BINDINGS_UNKNOWN: true,
+            ADMIN_NOT_LOOPBACK: adminBindings.join(', '),
             ADMIN_HINT:
-              'Admin and Postgres bindings are unknown because Docker inspection failed. See Verify the bind interface in docs/onecli-upgrades.md.',
-          }
-        : {}),
-      ...(nonLoopbackPorts?.length
-        ? {
-            ADMIN_NOT_LOOPBACK: nonLoopbackPorts.join(', '),
-            ADMIN_HINT: adminNotLoopbackHint(nonLoopbackPorts.join(', ')),
+              'Move the admin API and Postgres to 127.0.0.1 with the manual steps under "Verify the bind interface" in docs/onecli-upgrades.md.',
           }
         : {}),
       LOG: 'logs/setup.log',
@@ -726,7 +605,7 @@ export async function run(args: string[]): Promise<void> {
     process.exit(1);
   }
 
-  const url = res.adminUrl;
+  const url = res.url;
   if (!url) {
     emitStatus('ONECLI', {
       INSTALLED: true,
@@ -738,10 +617,17 @@ export async function run(args: string[]): Promise<void> {
     process.exit(1);
   }
 
-  setApiHost(url);
+  try {
+    execFileSync('onecli', ['config', 'set', 'api-host', url], {
+      stdio: 'ignore',
+      env: childEnv(),
+    });
+  } catch (err) {
+    log.warn('onecli config set api-host failed', { err });
+  }
+
   writeEnvOnecliUrl(url);
   log.info('Wrote ONECLI_URL to .env', { url });
-  const nonLoopbackPorts = nonLoopbackAdminPorts();
 
   const healthy = await pollHealth(url, 15000);
   const v1Status = await verifyGatewayV1(url);
@@ -755,19 +641,6 @@ export async function run(args: string[]): Promise<void> {
     STATUS: readinessError ? 'failed' : 'success',
     ...(readinessError ? { ERROR: 'gateway_not_ready', HINT: readinessError } : {}),
     ...(v1Hint ? { GATEWAY_HINT: v1Hint } : {}),
-    ...(nonLoopbackPorts === null
-      ? {
-          ADMIN_BINDINGS_UNKNOWN: true,
-          ADMIN_HINT:
-            'Admin and Postgres bindings are unknown because Docker inspection failed. See Verify the bind interface in docs/onecli-upgrades.md.',
-        }
-      : {}),
-    ...(nonLoopbackPorts?.length
-      ? {
-          ADMIN_NOT_LOOPBACK: nonLoopbackPorts.join(', '),
-          ADMIN_HINT: adminNotLoopbackHint(nonLoopbackPorts.join(', ')),
-        }
-      : {}),
     ...(healthy
       ? {}
       : {

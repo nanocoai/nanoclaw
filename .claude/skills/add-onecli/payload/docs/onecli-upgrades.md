@@ -126,7 +126,7 @@ curl -s "$GW/api/health"                        # its "version" must be the pin
 
 If the tag is not the pin, go back to step 2: the pin is not saved, or the compose file does not use it. If `version` reports anything other than the pin, including `unknown`, put the gateway on the pin (step 2). The grants check that tool skills run before they save a key (`check-grants-gateway.sh`) also refuses a gateway that reports `unknown`. From a NanoClaw host that only reaches a remote gateway, the `version` field is the only check.
 
-**Verify the bind interface.** The admin API (`:10254`) and Postgres (`:5432`) are published on `127.0.0.1`. The gateway proxy port (`:10255`) stays on the Docker bridge (`host.docker.internal` → e.g. `172.17.0.1`). Check the published host ports directly:
+**Verify the bind interface.** On Linux, setup publishes a new gateway's admin API (`:10254`) and Postgres (`:5432`) on `127.0.0.1`. The gateway proxy port (`:10255`) stays on the Docker bridge (`host.docker.internal` → e.g. `172.17.0.1`). Check the published host ports directly:
 
 ```bash
 docker port "${ONECLI_GATEWAY_CONTAINER:-onecli}" 10254/tcp   # 127.0.0.1:10254 only
@@ -134,7 +134,7 @@ docker port "${ONECLI_GATEWAY_CONTAINER:-onecli}" 10255/tcp   # the existing bri
 (cd ~/.onecli && docker port "$(docker compose ps -q postgres)" 5432/tcp)   # 127.0.0.1 and the existing Postgres port only
 ```
 
-An inspection failure means the binding is unknown. Resolve it before treating the check as complete. To check the default bridge's route through the host:
+To check the default bridge's route through the host:
 
 ```bash
 docker run --rm --add-host=host.docker.internal:host-gateway curlimages/curl sh -c '
@@ -148,9 +148,9 @@ On Linux with Docker Engine, `admin` should print `000` for this default-bridge 
 
 Re-running the upstream OneCLI installer downloads a new `~/.onecli/docker-compose.yml`, which publishes these ports on the bridge again; run the steps below afterwards.
 
-For a gateway installed before this change, setup leaves its binds alone and reports any non-loopback or unknown admin and Postgres bindings. To update it manually:
+For a gateway installed before this change, setup leaves its binds alone and reports an admin API published off loopback (`ADMIN_NOT_LOOPBACK`). Put the gateway on the pin first (the steps above), then update it manually:
 
-1. In `~/.onecli/docker-compose.yml`, publish the admin and Postgres port lines on `127.0.0.1`: `127.0.0.1:<admin port>:10254` under `onecli`, and `127.0.0.1:<Postgres port>:5432` under `postgres`. Keep the existing port numbers or substitutions. Leave the gateway proxy line alone. Under `onecli` → `environment`, point `APP_URL` at loopback. If that block has an `INTERNAL_API_URL` line (OneCLI 1.45), make it `APP_URL: ${APP_URL:-http://127.0.0.1:<admin port>}`, and in `~/.onecli/.env` set `APP_URL=http://127.0.0.1:<admin port>` unless it already sets a public `APP_URL` (a tunnel, proxy or domain). Without that line (OneCLI 1.42, which also calls its own API through `APP_URL` from inside the container), make it `APP_URL: http://127.0.0.1:10254`, the container's own port even if the admin API is published on another one.
+1. In `~/.onecli/docker-compose.yml`, publish the admin and Postgres port lines on `127.0.0.1`: `127.0.0.1:${ONECLI_APP_PORT:-10254}:10254` under `onecli`, and `127.0.0.1:${POSTGRES_PORT:-5432}:5432` under `postgres`, keeping any port numbers you changed. Leave the gateway proxy line alone. Under `onecli` → `environment`, make the `APP_URL` default loopback: `APP_URL: ${APP_URL:-http://127.0.0.1:${ONECLI_APP_PORT:-10254}}`. If `~/.onecli/.env` sets `APP_URL` to the bridge address, set it to `http://127.0.0.1:<admin port>` (keep a public `APP_URL`: a tunnel, proxy or domain).
 2. Run `cd ~/.onecli && env -u ONECLI_VERSION docker compose up -d`.
 3. If NanoClaw's `.env` `ONECLI_URL` or the CLI's api-host points at the bridge admin address, set both to `http://127.0.0.1:<admin port>`. For the CLI, run `onecli config set api-host http://127.0.0.1:<admin port>` with the actual admin port. Then restart NanoClaw using the service command below.
 4. Re-run the two probes above. On Linux with Docker Engine, the expected results are: `admin` prints `000` and `gateway` prints a code other than `000`.
