@@ -21,6 +21,7 @@ import { createChatSdkBridge, type ReplyContext } from './chat-sdk-bridge.js';
 import { registerChannelAdapter } from './channel-registry.js';
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage } from './adapter.js';
 import { tryConsume } from './telegram-pairing.js';
+import { registerTelegramBotAdmission } from './telegram-bot-admission.js';
 
 /**
  * Dedicated bot identity, non-threaded platform (supportsThreads:false), so
@@ -67,12 +68,18 @@ async function withRetry<T>(fn: () => Promise<T>, label: string, maxAttempts = 5
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function extractReplyContext(raw: Record<string, any>): ReplyContext | null {
+export function extractReplyContext(raw: Record<string, any>): ReplyContext | null {
   if (!raw.reply_to_message) return null;
   const reply = raw.reply_to_message;
+  const targetText = reply.text || reply.caption || '';
   return {
-    text: reply.text || reply.caption || '',
+    text: targetText,
     sender: reply.from?.first_name || reply.from?.username || 'Unknown',
+    senderUserId: reply.from?.id !== undefined && reply.from?.id !== null ? String(reply.from.id) : undefined,
+    // Topic anchors (and any textless service target) are forum plumbing, not
+    // conversational replies — the admission policy must not treat replies to
+    // them as "addressed".
+    replyToForumTopicAnchor: reply.forum_topic_created !== undefined || targetText === '',
   };
 }
 
@@ -450,6 +457,10 @@ registerChannelAdapter('telegram', {
   factory: () => createTelegramBridge(),
   defaults: TELEGRAM_DEFAULTS,
 });
+
+// Bot-to-bot admission doorman: a no-op unless TELEGRAM_BOT_INBOUND is set
+// (see telegram-bot-admission.ts).
+registerTelegramBotAdmission();
 
 // Named instances: registration is unconditional for every listed name (a
 // missing token is then reported at boot instead of leaving a bot silently
