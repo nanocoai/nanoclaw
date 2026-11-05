@@ -126,6 +126,21 @@ describe('user service and a docker group added mid-session', () => {
     );
   });
 
+  it('still issues the restart when the crash counter cannot be removed', async () => {
+    // The removal fails but the counter stays a readable file, so the host can still start.
+    fs.mkdirSync(path.join(sys.root, 'data'));
+    const breaker = path.join(sys.root, 'data', 'circuit-breaker.json');
+    fs.writeFileSync(breaker, JSON.stringify({ attempt: 6, timestamp: new Date().toISOString() }));
+    const rmSync = fs.rmSync;
+    vi.spyOn(fs, 'rmSync').mockImplementation((target, options) => {
+      if (target === breaker) throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+      return rmSync(target, options);
+    });
+    await run([]);
+    expect(sys.breakerAt).toEqual(['stop:counter', 'restart:counter']);
+    expect(fields()).toMatchObject({ STATUS: 'success' });
+  });
+
   it('fails fast without a cached sudo ticket and reports setfacl as missing', async () => {
     sys.sudoCached = false;
     await run([]);

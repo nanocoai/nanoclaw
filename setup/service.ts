@@ -621,7 +621,11 @@ async function setupSystemd(projectRoot: string, nodePath: string, homeDir: stri
     } catch (err) {
       log.warn('systemctl stop failed', { err });
     }
-    fs.rmSync(path.join(projectRoot, 'data', 'circuit-breaker.json'), { force: true });
+    try {
+      fs.rmSync(path.join(projectRoot, 'data', 'circuit-breaker.json'), { force: true });
+    } catch (err) {
+      log.warn('Could not clear the crash backoff', { err });
+    }
   }
 
   // restart (not start) so a previously-running instance picks up edits to
