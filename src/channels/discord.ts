@@ -39,6 +39,16 @@ export function fitsDiscordEmbed(card: CardElement): boolean {
   );
 }
 
+/**
+ * Discord renders card text as Markdown: `[text](url)` shows any text for a
+ * link, `<@id>` shows another user's name and `||text||` hides text. A word
+ * joiner breaks each (after every `|`, so longer pipe runs can't pair up), and
+ * a clicker's name or a request value can't pose as other text.
+ */
+export function escapeDiscordCardText(text: string): string {
+  return text.replace(/\]\(/g, ']\u2060(').replace(/</g, '<\u2060').replace(/\|/g, '|\u2060');
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function extractReplyContext(raw: Record<string, any>): ReplyContext | null {
   if (!raw.referenced_message) return null;
@@ -133,8 +143,8 @@ registerChannelAdapter('discord', {
       // Discord rejects messages over 2000 chars; without this the bridge
       // would let long agent replies fail instead of splitting them.
       maxTextLength: 2000,
-      // Spread, so an older core without this option still type-checks (and ignores it).
-      ...{ cardFits: fitsDiscordEmbed },
+      // Spread, so an older core without these options still type-checks (and ignores them).
+      ...{ escapeCardText: escapeDiscordCardText, cardFits: fitsDiscordEmbed },
     });
   },
   defaults: DISCORD_DEFAULTS,

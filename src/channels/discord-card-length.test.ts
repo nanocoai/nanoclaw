@@ -11,6 +11,23 @@ import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ChannelAdapter, ChannelRegistration } from './adapter.js';
 
 const registrations = vi.hoisted(() => new Map<string, ChannelRegistration>());
+const gateway = vi.hoisted(() => ({ url: '' }));
+
+// The bridge starts a gateway listener on setup; keep it local and note where
+// clicks are forwarded.
+vi.mock('@chat-adapter/discord', async (importOriginal) => {
+  const real = await importOriginal<typeof import('@chat-adapter/discord')>();
+  return {
+    ...real,
+    createDiscordAdapter: (...args: Parameters<typeof real.createDiscordAdapter>) =>
+      Object.assign(real.createDiscordAdapter(...args), {
+        startGatewayListener: async (_options: unknown, _ms: number, _signal: unknown, url: string) => {
+          gateway.url = url;
+          return new Response('{}');
+        },
+      }),
+  };
+});
 
 vi.mock('./channel-registry.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./channel-registry.js')>()),
@@ -25,13 +42,17 @@ vi.mock('../env.js', () => ({
   }),
 }));
 
+import { closeDb, initTestDb } from '../db/connection.js';
+import { runMigrations } from '../db/migrations/index.js';
 import { gatewayApprovalPresentation } from '../gateway-approval-presentation.js';
 import type { GatewayApprovalRequest } from '../gateway-providers/gateway-provider-registry.js';
 import { CardTooLongError } from './ask-question.js';
-import { clearButtonsOnCardEdits, fitsDiscordEmbed } from './discord.js';
+import { clearButtonsOnCardEdits, escapeDiscordCardText, fitsDiscordEmbed } from './discord.js';
+import { registerQuestionRenderResolver } from './question-render-registry.js';
 
 const posts: Array<{ embeds: Array<{ title?: string; description?: string }>; components?: unknown[] }> = [];
 const patches: Array<{ url: string; body: Record<string, unknown> }> = [];
+const realFetch = globalThis.fetch;
 
 vi.stubGlobal(
   'fetch',
@@ -206,5 +227,67 @@ describe('clearButtonsOnCardEdits', () => {
     });
     expect(patches).toHaveLength(1);
     expect(patches[0].body.components).toEqual([]);
+  });
+});
+
+describe('escapeDiscordCardText', () => {
+  it('breaks masked links, mentions and spoilers, and leaves host wording and escaped values alone', () => {
+    expect(escapeDiscordCardText('[Admin](https://x.co) <@1> ||hidden||')).toBe(
+      '[Admin]\u2060(https://x.co) <\u2060@1> |\u2060|\u2060hidden|\u2060|\u2060',
+    );
+    for (const pipes of ['||', '|||', '||||']) {
+      expect(escapeDiscordCardText(`${pipes}hidden${pipes}`)).not.toContain('||');
+    }
+    const host = '*Action:* Post a comment\n*Where:* \\[a\\]\\(b\\)';
+    expect(escapeDiscordCardText(host)).toBe(host);
+  });
+
+  it('keeps a clicker name from posing as a link or another user on the resolved card', async () => {
+    registerQuestionRenderResolver((id) =>
+      id === 'q-name'
+        ? {
+            title: 'Approve',
+            question: 'Run it?',
+            options: [{ label: 'Approve', selectedLabel: 'Approved', value: 'approve' }],
+          }
+        : undefined,
+    );
+    await runMigrations(await initTestDb());
+    const bridge = (await registrations.get('discord')!.factory())!;
+    await bridge.setup({
+      onInbound: () => {},
+      onInboundEvent: () => {},
+      onMetadata: () => {},
+      onAction: async () => 'accepted' as const,
+    });
+    try {
+      const response = await realFetch(gateway.url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-discord-gateway-token': 'test-bot-token' },
+        body: JSON.stringify({
+          type: 'GATEWAY_INTERACTION_CREATE',
+          data: {
+            type: 3,
+            id: 'i1',
+            token: 'interaction-token',
+            application_id: 'test-app-id',
+            guild_id: 'g1',
+            channel_id: 'c1',
+            data: { custom_id: 'ncq:q-name:0\napprove' },
+            member: { user: { id: 'u1', username: 'u1', global_name: '[Admin](https://x.co) <@1>' } },
+            message: { id: 'm9', embeds: [{ title: 'Approve', description: 'Run it?' }] },
+          },
+        }),
+      });
+      expect(response.status).toBe(200);
+      // The card edit, not the interaction's button removal.
+      const edits = () => patches.filter((patch) => patch.url.endsWith('/channels/c1/messages/m9'));
+      await vi.waitFor(() => expect(edits()).toHaveLength(1));
+      const [embed] = edits()[0].body.embeds as Array<{ description: string }>;
+      expect(embed.description).toContain('Approved by [Admin]\u2060(https://x.co) <\u2060@1>');
+    } finally {
+      await bridge.teardown();
+      await closeDb();
+    }
   });
 });
