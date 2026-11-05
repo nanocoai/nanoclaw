@@ -50,20 +50,6 @@ This integration supports exactly the gateway version pinned in `.claude/skills/
 pnpm exec tsx .claude/skills/add-onecli/scripts/setup.ts
 ```
 
-### Check the agent proxy address
-
-A remote gateway must tell agents its own address: `GATEWAY_BASE_URL=<gateway-host>:<published gateway port, 10255 by default>` in the gateway's environment (`~/.onecli/.env` for an installer setup), then the `onecli` service recreated (a restart keeps the old environment). Without it, OneCLI hands agents `host.docker.internal:10255`, their own machine, and every model call hangs with no reply. This check reads the address the gateway hands agents. It reports `warn` only for a gateway on another host that hands out such an address, and it never fails the install.
-
-```nc:run capture:proxy_check=.status,proxy_hint=.hint effect:fetch
-pnpm exec tsx .claude/skills/add-onecli/scripts/check-proxy.ts
-```
-
-If it reports `warn`, tell the user:
-
-```nc:operator when:proxy_check=warn
-{{proxy_hint}}
-```
-
 ## Provider credentials
 
 Provider skills such as `/add-opencode` store model credentials here through the
@@ -108,3 +94,7 @@ pnpm exec vitest run src/gateway-providers/onecli-files.test.ts src/gateway-prov
 The setup consumer writes `NANOCLAW_GATEWAY_PROVIDER=onecli` only after every directive above succeeds. Claude authentication is then completed through `scripts/auth.ts`; credentials never enter an agent container.
 
 During an atomic NanoClaw upgrade, `scripts/detect.ts` identifies an older implicit OneCLI installation so the generic updater can preserve that choice before the service restarts.
+
+## Remote gateway
+
+A gateway on another host must hand agents its own address in `GATEWAY_BASE_URL`. OneCLI 1.45 defaults it to `host.docker.internal:10255`, the agent's own machine, so with a remote gateway every model call hangs with no reply. For a remote gateway, setup reads the proxy address the gateway hands agents. When it is `host.docker.internal` or a loopback address, setup warns and reports `PROXY_HINT` with the exact `GATEWAY_BASE_URL=<host>:<port>` line to set on the gateway host; it never fails the install. Relay that hint to the user, and point them at "Remote gateway" in [Upgrading the OneCLI gateway](payload/docs/onecli-upgrades.md#remote-gateway).
