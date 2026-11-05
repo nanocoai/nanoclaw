@@ -817,6 +817,23 @@ describe('createChatSdkBridge.deliver — ask_question cards (button styles)', (
       expect(postedCards(calls).filter((card) => !card.hasButtons).length).toBeLessThanOrEqual(5);
     });
 
+    it('uses the largest block a part holds when the halved sizes would need more than 5 parts', async () => {
+      const { calls, postMessage } = numberedPosts();
+      const bridge = createChatSdkBridge({
+        adapter: stubAdapter({ postMessage }),
+        supportsThreads: false,
+        maxCardTextLength: 1024,
+      });
+      // Blocks of 1,000, 500 or 250 characters need 6 or more parts here; 978 needs 5.
+      const question = 'w'.repeat(4000);
+      await bridge.deliver('slack:D1', null, questionCard(question));
+      const cards = postedCards(calls);
+      expect(cards).toHaveLength(6);
+      expect(cards.at(-1)!.hasButtons).toBe(true);
+      for (const card of cards) expect(within(1024, card)).toBe(true);
+      expect(partText(cards.slice(0, -1))).toBe(question);
+    });
+
     it('refuses with the channel reason when no smaller split can be made', async () => {
       const { calls, postMessage } = numberedPosts();
       const bridge = createChatSdkBridge({
