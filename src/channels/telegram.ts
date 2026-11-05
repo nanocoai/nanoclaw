@@ -67,12 +67,22 @@ async function withRetry<T>(fn: () => Promise<T>, label: string, maxAttempts = 5
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function extractReplyContext(raw: Record<string, any>): ReplyContext | null {
-  if (!raw.reply_to_message) return null;
+export function extractReplyContext(raw: Record<string, any>): ReplyContext | null {
+  // A partial quote: the user selected part of the replied message.
+  const quote: string | undefined = raw.quote?.text || undefined;
   const reply = raw.reply_to_message;
+  // In a forum topic every message "replies" to the topic's creation message.
+  if (!reply || reply.forum_topic_created) {
+    if (!quote) return null;
+    // Reply to a message from another chat: only the quote is available.
+    const origin = raw.external_reply?.origin;
+    const sender = origin?.sender_user?.first_name || origin?.sender_user_name || origin?.chat?.title || 'Unknown';
+    return { text: quote, sender, quote };
+  }
   return {
     text: reply.text || reply.caption || '',
     sender: reply.from?.first_name || reply.from?.username || 'Unknown',
+    ...(quote ? { quote } : {}),
   };
 }
 

@@ -381,7 +381,11 @@ function formatReplyContext(replyTo: any): string {
   const sender = replyTo.sender;
   const text = replyTo.text;
   if (!sender || !text) return '';
-  return `\n  <quoted_message from="${escapeXml(sender)}">${escapeXml(text)}</quoted_message>\n`;
+  const quoted = `\n  <quoted_message from="${escapeXml(sender)}">${escapeXml(text)}</quoted_message>\n`;
+  // Telegram partial quote: the user replies to this part of the quoted message.
+  const part = typeof replyTo.quote === 'string' ? replyTo.quote : '';
+  if (!part || part === text) return quoted;
+  return `${quoted}  <quoted_part>${escapeXml(part)}</quoted_part>\n`;
 }
 
 /**
