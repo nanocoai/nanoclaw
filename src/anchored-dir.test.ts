@@ -26,6 +26,36 @@ function openOrThrow(segments: string[], create = false): AnchoredDir {
   return dir;
 }
 
+/** Make `root/name` hold `levels` nested directories with a file in the innermost. */
+function nestDirs(name: string, levels: number): void {
+  let dir = path.join(root, name);
+  fs.mkdirSync(dir);
+  for (let level = 1; level < levels; level++) {
+    dir = path.join(dir, 'd');
+    fs.mkdirSync(dir);
+  }
+  fs.writeFileSync(path.join(dir, 'file'), 'deep');
+}
+
+/** Record every descriptor fs.openSync hands out and drop it again on fs.closeSync. */
+function trackDescriptors(): { open: Set<number>; opened: () => number } {
+  const open = new Set<number>();
+  let opened = 0;
+  const openSync = fs.openSync;
+  const closeSync = fs.closeSync;
+  vi.spyOn(fs, 'openSync').mockImplementation((file, flags, mode) => {
+    const fd = openSync(file, flags, mode);
+    open.add(fd);
+    opened++;
+    return fd;
+  });
+  vi.spyOn(fs, 'closeSync').mockImplementation((fd) => {
+    open.delete(fd);
+    closeSync(fd);
+  });
+  return { open, opened: () => opened };
+}
+
 describe('AnchoredDir.open', () => {
   it('creates missing segments when asked, returns null otherwise', () => {
     expect(AnchoredDir.open(root, ['a', 'b'])).toBeNull();
@@ -251,6 +281,60 @@ describe('operations stay on the opened directory', () => {
     } finally {
       dir.close();
     }
+  });
+
+  it('removes a tree of 64 nested directories', () => {
+    nestDirs('tree', 64);
+    const dir = openOrThrow([]);
+    try {
+      dir.remove('tree', true);
+      expect(dir.entries()).toEqual([]);
+    } finally {
+      dir.close();
+    }
+  });
+
+  it('refuses a deeper tree before opening another level and closes every directory it pinned', () => {
+    nestDirs('tree', 65);
+    const fds = trackDescriptors();
+    const dir = openOrThrow([]);
+    try {
+      expect(() => dir.remove('tree', true)).toThrow(/too deep to remove safely/);
+      expect(dir.entries()).toEqual(['tree']);
+    } finally {
+      dir.close();
+    }
+    // The anchor plus the 64 allowed levels; the 65th is never opened.
+    expect(fds.opened()).toBe(1 + 64);
+    expect(fds.open.size).toBe(0);
+  });
+
+  it('stops a walk that a concurrent rename keeps sending back to the same two directories', () => {
+    // Before each listing after the first, the container swaps parent and child,
+    // so every level reopens one of the same two inodes and only the bound ends
+    // it. The swaps stop after 100 so an unbounded walk fails instead of hanging.
+    fs.mkdirSync(path.join(root, 'tree', 'c'), { recursive: true });
+    let outer = 'tree';
+    let inner = 'c';
+    let listings = 0;
+    const readdirSync = fs.readdirSync;
+    vi.spyOn(fs, 'readdirSync').mockImplementation(((dirPath: fs.PathLike, options?: unknown) => {
+      if (listings++ > 0 && listings <= 100) {
+        fs.renameSync(path.join(root, outer, inner), path.join(root, inner));
+        fs.renameSync(path.join(root, outer), path.join(root, inner, outer));
+        [outer, inner] = [inner, outer];
+      }
+      return readdirSync(dirPath, options as never);
+    }) as typeof fs.readdirSync);
+    const fds = trackDescriptors();
+    const dir = openOrThrow([]);
+    try {
+      expect(() => dir.remove('tree', true)).toThrow(/too deep to remove safely/);
+    } finally {
+      dir.close();
+    }
+    expect(listings).toBe(64);
+    expect(fds.open.size).toBe(0);
   });
 
   it('copies only the supplied file tree into the pinned directory and preserves executable permissions', () => {

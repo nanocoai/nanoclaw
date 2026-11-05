@@ -24,6 +24,12 @@ import { isSafeAttachmentName } from './attachment-safety.js';
 
 const { O_APPEND, O_CREAT, O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_NONBLOCK, O_RDONLY, O_WRONLY } = fs.constants;
 
+/**
+ * Caps the nested directories one recursive remove pins. The container picks
+ * the depth, and each level holds a descriptor and a stack frame.
+ */
+const MAX_REMOVE_DEPTH = 64;
+
 function errno(err: unknown): string | undefined {
   return (err as NodeJS.ErrnoException | null)?.code;
 }
@@ -203,7 +209,7 @@ export class AnchoredDir {
 
   /** Pin each directory before descending so removal never follows a symlink. Missing entries are ignored. */
   remove(name: string, recursive = false): void {
-    this.removeEntry(Buffer.from(this.entryPath(name)), recursive);
+    this.removeEntry(Buffer.from(this.entryPath(name)), recursive, 1);
   }
 
   // `path` is `<alias>/<component>` as raw bytes; lstat/unlink/rmdir never
@@ -211,15 +217,16 @@ export class AnchoredDir {
   // swapped-in link, so the walk stays inside the pinned tree. Children come
   // from a byte-mode readdir so a non-UTF8 or backslash filename is deleted by
   // its real name, not re-encoded into a miss that would strand it.
-  private removeEntry(path: Buffer, recursive: boolean): void {
+  private removeEntry(path: Buffer, recursive: boolean, depth: number): void {
     try {
       if (recursive && fs.lstatSync(path).isDirectory()) {
+        if (depth > MAX_REMOVE_DEPTH) throw new Error('directory tree too deep to remove safely');
         const fd = fs.openSync(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
         const dir = AnchoredDir.fromFd(fd);
-        const prefix = Buffer.from(`${dir.alias}/`);
         try {
+          const prefix = Buffer.from(`${dir.alias}/`);
           for (const entry of fs.readdirSync(dir.alias, { encoding: 'buffer' })) {
-            dir.removeEntry(Buffer.concat([prefix, entry]), true);
+            dir.removeEntry(Buffer.concat([prefix, entry]), true, depth + 1);
           }
         } finally {
           dir.close();
