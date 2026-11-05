@@ -100,7 +100,7 @@ describe('telegram multi-instance registration', () => {
       // group.engageMode 'mention' is TELEGRAM_DEFAULTS; the no-live-adapter
       // fallback would resolve 'mention-sticky'.
       expect(defaults.group.engageMode).toBe('mention');
-      expect(defaults.dm).toMatchObject({ engageMode: 'pattern', engagePattern: '.', threads: false });
+      expect(defaults.dm).toMatchObject({ engageMode: 'pattern', engagePattern: '.', threads: true });
     }
   });
 });
