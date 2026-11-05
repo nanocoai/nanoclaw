@@ -17,10 +17,14 @@ import {
   appendMediaFailureNote,
   computeIsMention,
   computeWhatsappDefaults,
+  formatAnswerConfirmation,
   hasMentionPills,
   isBotMentionedInGroup,
   isBotTypedMention,
+  matchPendingQuestion,
   parseWhatsAppMentions,
+  type PendingQuestion,
+  questionDetail,
   resolveSharedMode,
   rewriteBotLidMention,
 } from './whatsapp.js';
@@ -329,5 +333,126 @@ describe('appendMediaFailureNote', () => {
     expect(appendMediaFailureNote('', ['image', 'document'])).toBe(
       '[image could not be downloaded] [document could not be downloaded]',
     );
+  });
+});
+
+// Mirrors APPROVAL_OPTIONS in src/modules/approvals/primitive.ts — every
+// module approval card offers these three, with the same values on every card.
+const APPROVAL_OPTIONS = [
+  { label: 'Approve', selectedLabel: '✅ Approved', value: 'approve' },
+  { label: 'Reject', selectedLabel: '❌ Rejected', value: 'reject' },
+  { label: 'Reject with reason…', selectedLabel: '📝 Rejected (awaiting reason)', value: 'reject_with_reason' },
+];
+const installCard = (questionId: string, pkg: string): PendingQuestion => ({
+  questionId,
+  title: 'Install Packages Request',
+  detail: questionDetail(`Agent "main" is attempting to install a package + rebuild container:\napt: ${pkg}`),
+  options: APPROVAL_OPTIONS,
+});
+// An agent ask_user_question card: plain string options, value = label.
+const askCard = (questionId: string, labels: string[]): PendingQuestion => ({
+  questionId,
+  title: 'Deploy target',
+  detail: questionDetail('Where should I deploy this build?'),
+  options: labels.map((label) => ({ label, selectedLabel: label, value: label })),
+});
+
+describe('matchPendingQuestion', () => {
+  it('keeps an earlier question answerable after a second one arrives', () => {
+    // The real failure: pendingQuestions was keyed by chat and held one entry,
+    // so a second card silently overwrote the first and no reply could ever
+    // reach it — the card stayed on screen and its row stayed pending forever.
+    const pendings = [askCard('q1', ['Staging', 'Production']), installCard('q2', 'ffmpeg')];
+    expect(matchPendingQuestion(pendings, '/staging')?.pending.questionId).toBe('q1');
+  });
+
+  it('resolves the newest card when two cards share an option label', () => {
+    // Unavoidable ambiguity: WhatsApp replies are plain text, so nothing ties
+    // "/approve" to the card it came from. Newest wins — that is the card the
+    // user was just shown.
+    const pendings = [installCard('q1', 'ffmpeg'), installCard('q2', 'imagemagick')];
+    const hit = matchPendingQuestion(pendings, '/approve');
+    expect(hit?.pending.questionId).toBe('q2');
+    expect(hit?.option.value).toBe('approve');
+  });
+
+  it('reports the index so only the answered card is dropped and a second bare reply lands on the next', () => {
+    const pendings = [installCard('q1', 'ffmpeg'), installCard('q2', 'imagemagick')];
+    const hit = matchPendingQuestion(pendings, '/approve')!;
+    expect(hit.index).toBe(1);
+    pendings.splice(hit.index, 1);
+    // The other card survives and is still answerable — by the same command.
+    expect(matchPendingQuestion(pendings, '/approve')?.pending.questionId).toBe('q1');
+  });
+
+  it('returns undefined when no pending question offers the command', () => {
+    expect(matchPendingQuestion([installCard('q1', 'ffmpeg')], '/nope')).toBeUndefined();
+  });
+
+  it('returns undefined when nothing is pending', () => {
+    expect(matchPendingQuestion([], '/approve')).toBeUndefined();
+  });
+
+  it('matches regardless of case and surrounding whitespace', () => {
+    expect(matchPendingQuestion([installCard('q1', 'ffmpeg')], '  /APPROVE  ')?.option.value).toBe('approve');
+  });
+
+  it('matches a multi-word label through its slash command form', () => {
+    expect(matchPendingQuestion([installCard('q1', 'ffmpeg')], '/reject-with-reason…')?.option.value).toBe(
+      'reject_with_reason',
+    );
+  });
+});
+
+describe('questionDetail', () => {
+  it('keeps the line after the first, so two install requests read differently', () => {
+    expect(questionDetail('Agent "main" is attempting to install a package + rebuild container:\napt: ffmpeg')).toBe(
+      'Agent "main" is attempting to install a package + rebuild container: apt: ffmpeg',
+    );
+  });
+
+  it('clips a long question to one short line', () => {
+    const detail = questionDetail('x'.repeat(500));
+    expect(detail.length).toBe(120);
+    expect(detail.endsWith('…')).toBe(true);
+  });
+
+  it('is empty for a missing or blank question', () => {
+    expect(questionDetail(undefined)).toBe('');
+    expect(questionDetail('  \n ')).toBe('');
+  });
+});
+
+describe('formatAnswerConfirmation', () => {
+  const approve = APPROVAL_OPTIONS[0];
+
+  it('names the card that was answered', () => {
+    expect(formatAnswerConfirmation(installCard('q1', 'ffmpeg'), approve, 'Jason', [])).toBe(
+      '✅ Approved by Jason: Install Packages Request (Agent "main" is attempting to install a package + rebuild container: apt: ffmpeg)',
+    );
+  });
+
+  it('lists the cards still open, newest first — the order a bare reply resolves them', () => {
+    const stillOpen = [installCard('q1', 'ffmpeg'), askCard('q2', ['Staging', 'Production'])];
+    const lines = formatAnswerConfirmation(installCard('q3', 'imagemagick'), approve, 'Jason', stillOpen).split('\n');
+    expect(lines.slice(1)).toEqual([
+      '2 more waiting in this chat:',
+      '• Deploy target (Where should I deploy this build?)',
+      '• Install Packages Request (Agent "main" is attempting to install a package + rebuild container: apt: ffmpeg)',
+    ]);
+  });
+
+  it('summarises beyond the first few open cards', () => {
+    const stillOpen = ['a', 'b', 'c', 'd', 'e'].map((pkg, i) => installCard(`q${i}`, pkg));
+    const lines = formatAnswerConfirmation(installCard('q9', 'z'), approve, 'Jason', stillOpen).split('\n');
+    expect(lines[1]).toBe('5 more waiting in this chat:');
+    expect(lines).toHaveLength(6);
+    expect(lines[2]).toContain('apt: e');
+    expect(lines[5]).toBe('• …and 2 more');
+  });
+
+  it('falls back to the title when the card has no question body', () => {
+    const card = { ...askCard('q1', ['Yes']), detail: '' };
+    expect(formatAnswerConfirmation(card, card.options[0], 'Jason', [])).toBe('Yes by Jason: Deploy target');
   });
 });
