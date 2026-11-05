@@ -188,17 +188,23 @@ leaking the token to disk outweighs the debugging value.
 
 ## sudo up front (Linux)
 
-Installing or updating Node (bootstrap) and installing Docker, starting
-it or joining the docker group (container step) run sudo inside a
-captured step, where a password prompt would be hidden and time out. So
-each prompt comes first, in the open: `nanoclaw.sh` runs
+Installing or updating Node and installing jq (bootstrap) and installing
+Docker, starting it or joining the docker group (container step) run sudo
+inside a captured step, where a password prompt would be hidden and time
+out. So each prompt comes first, in the open: `nanoclaw.sh` runs
 `setup/lib/sudo-preflight.sh` before the bootstrap spinner when Node
-needs installing or updating, and `auto.ts` calls
+needs installing or updating or jq is missing, and `auto.ts` calls
 `setup/lib/sudo-preflight.ts` before the container step when Docker is
 missing, not answering or refusing the user. Both are a foreground
-`sudo -v` that the step's own sudo calls then reuse, so a password given
-for Node usually covers Docker too. Root, passwordless sudo and runs
-without a terminal skip it.
+`sudo -v` that the step's own sudo calls then reuse, so one password
+usually covers all three. Root, passwordless sudo and runs without a
+terminal skip it.
+
+The bootstrap installs jq (`setup/lib/jq.sh`: Homebrew on macOS, else
+apt, dnf, yum, zypper, pacman or apk) with `sudo -n` only. When that
+can't work it notes it after "Basics ready" and goes on, since only skills
+need jq; a skill step that pipes through a missing jq says how to install
+it instead of failing with exit 127.
 
 ## Channel installs are skill-driven
 
@@ -217,7 +223,7 @@ convention — [skill-engine-seam.md](skill-engine-seam.md) §6).
 | File | Role |
 |---|---|
 | `nanoclaw.sh` | Top-level wrapper. Phase 1 (bootstrap) and phase 2 (setup:auto) orchestration. Writes bootstrap's raw log + progression entry. Pre-flights (memory, cloud, root, Homebrew, sudo) run before the bootstrap spinner. `--uninstall` bypasses bootstrap entirely — it execs setup:auto directly (the flow lives in `setup/uninstall/`), or prints manual-cleanup guidance and exits 1 when the TS toolchain is missing. |
-| `setup.sh` | Phase 1 bootstrap: Node, pnpm, native-module verify. Emits its own `BOOTSTRAP` status block (historically printed to stdout; now goes to the bootstrap raw log). |
+| `setup.sh` | Phase 1 bootstrap: Node, jq, pnpm, native-module verify. Emits its own `BOOTSTRAP` status block (historically printed to stdout; now goes to the bootstrap raw log). |
 | `setup/auto.ts` | Phase 2 driver. Orchestrates the clack UI, step execution, user prompts, and writes to all three log levels for every step it spawns. |
 | `setup/logs.ts` | The logging primitives (`step`, `userInput`, `complete`, `stepRawLog`, `reset`). Single source of truth for level 2/3 formatting and file paths. |
 | `setup/<step>.ts` | Individual step implementations. Must emit one terminal status block; must not write directly to the terminal. |
