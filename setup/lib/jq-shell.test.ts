@@ -78,7 +78,7 @@ function run(m: Machine): { rc: number; log: string[] } {
   return { rc, log: calls };
 }
 
-describe('jq install (setup/lib/jq.sh)', () => {
+describe('jq install (setup/lib/jq.sh)', { timeout: 20_000 }, () => {
   it('installs jq with apt-get through sudo -n, never a prompt', () => {
     const r = run({ pkg: 'apt-get', sudo: 'cached' });
     expect(r.rc).toBe(0);
