@@ -299,7 +299,7 @@ describe('a failed turn with a folded message', () => {
       [GENERIC_FAILURE_NOTICE, 'thread-b'],
     ]);
   });
-  it('never repeats a notice already sent when a folded notice write throws', async () => {
+  it('retries a folded notice whose write threw, never repeating one already sent', async () => {
     const provider = new FoldingProvider();
     const release = provider.hold();
     insertMessage('a', 'ask:a', 'thread-a');
@@ -318,7 +318,7 @@ describe('a failed turn with a folded message', () => {
         return original(...args);
       });
       release();
-      await waitFor(() => writes >= 2);
+      await waitFor(() => replies().length >= 2);
       write.mockRestore();
       insertMessage('c', 'ask:c', 'thread-c');
       await waitFor(replied('re: c'));
@@ -328,6 +328,7 @@ describe('a failed turn with a folded message', () => {
     }
     expect(replies()).toEqual([
       ['Turn failed.', 'thread-a'],
+      [GENERIC_FAILURE_NOTICE, 'thread-b'],
       ['re: c', 'thread-c'],
     ]);
   });

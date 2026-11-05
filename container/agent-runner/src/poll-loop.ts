@@ -436,6 +436,9 @@ export async function processQuery(
     nudgedWindow?: SeqWindow;
   };
   const queuedTurns: QueuedTurn[] = [];
+  // Routes this turn's failure notice reached, so the catch below never
+  // notices them again when a later notice write throws.
+  let noticedFailure: RoutingContext[] = [];
   // On a wrap-nudge retry: the rows the nudged turn wrote. The turn boundary
   // moved past them, so both doors check retry blocks against this window and
   // skip exact repeats. Follow-ups queued in between keep their own window.
@@ -659,24 +662,21 @@ export async function processQuery(
             // Only the provider's dedicated error field is channel content;
             // unwrapped model output and raw diagnostics remain private.
             const notice = event.error ?? GENERIC_FAILURE_NOTICE;
-            if (sendsFailureNotice(routing)) await deliverErrorResult(routing, notice);
-            // Keep the reason in the runner log, since the skipped notice may
-            // be the only place it would have been recorded.
-            else log(`Error result — notice not sent on this route: ${notice}`);
-            // Requests folded into the failed turn failed with it. A failed
-            // write is logged, not thrown: the catch below would notice the
-            // routes already noticed here a second time.
+            if (sendsFailureNotice(routing)) {
+              await deliverErrorResult(routing, notice);
+              noticedFailure.push(routing);
+            } else {
+              // Keep the reason in the runner log, since the skipped notice may
+              // be the only place it would have been recorded.
+              log(`Error result — notice not sent on this route: ${notice}`);
+            }
+            // Requests folded into the failed turn failed with it.
             const noticed = [routing];
             for (const { routing: target } of foldedTurns) {
               if (!sendsFailureNotice(target) || noticed.some((prior) => sameNoticeRoute(prior, target))) continue;
               noticed.push(target);
-              try {
-                await deliverErrorResult(target, notice);
-              } catch (noticeError) {
-                log(
-                  `Failed to deliver folded error notice: ${noticeError instanceof Error ? noticeError.message : String(noticeError)}`,
-                );
-              }
+              await deliverErrorResult(target, notice);
+              noticedFailure.push(target);
             }
           }
           // An unwrapped final text only warrants the wrap-nudge when no
@@ -739,6 +739,7 @@ export async function processQuery(
         midTurnTail = '';
         nudgedWindow = undefined;
         queuedTurns.splice(0, folded);
+        noticedFailure = [];
         const next = queuedTurns.shift();
         if (next) adoptTurn(next);
         else answering = false;
@@ -763,7 +764,7 @@ export async function processQuery(
       // only one notice. The host picks an a2a reply's session by in_reply_to,
       // so agent routes also compare it.
       const failedRoutes = [...(answering ? [routing] : []), ...queuedTurns.map((turn) => turn.routing)];
-      const noticed: RoutingContext[] = [];
+      const noticed: RoutingContext[] = [...noticedFailure];
       for (const target of failedRoutes) {
         if (!sendsFailureNotice(target)) continue;
         if (noticed.some((prior) => sameNoticeRoute(prior, target))) continue;
