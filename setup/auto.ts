@@ -296,8 +296,8 @@ async function main(): Promise<void> {
     // reads it from there, so it survives a resume and a plain re-run alike.
     await chooseImageSource();
     // Installing or starting Docker runs sudo inside the windowed step, where
-    // its prompt is hidden. Ask here: bootstrap's sudo timestamp may have run
-    // out while the questions above were answered.
+    // its prompt is hidden, so ask here. A timestamp still cached from
+    // nanoclaw.sh's Node pre-flight skips the prompt.
     const dockerSudo = dockerSudoReason();
     if (dockerSudo) {
       const { task, diy } = DOCKER_SUDO_COPY[dockerSudo];
