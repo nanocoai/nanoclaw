@@ -1869,6 +1869,7 @@ describe('a run that pipes through jq', () => {
     ['an API error', 'HTTP 401'],
     ['jq rejecting a reply without the id', 'jq: error (at <stdin>:0): no channel id'],
     ['a test that names jq', '[ yes = jq ] failed'],
+    ['another missing command', 'bash: line 1: custom-jq: command not found'],
   ])('keeps %s as the reason', async (_case, stderr) => {
     const res = await applySkill(jskill, jroot, { inputs: {}, exec: failWith(stderr) });
     expect(res.agentTasks[0].reason).toContain(stderr);

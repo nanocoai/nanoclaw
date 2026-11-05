@@ -446,8 +446,8 @@ export function referenceProse(md: string): string {
 // Setup installs jq, but an install from before that never ran the step, and
 // a run that pipes through a missing jq fails as an opaque exit 127. Only the
 // shell's own "not found" (bash, then dash) names jq, so any other failure keeps
-// its message, wherever the exec ran.
-const JQ_NOT_FOUND = /\bjq: (command )?not found/;
+// its message, wherever the exec ran. A localized shell keeps its own message.
+const JQ_NOT_FOUND = /(^|\s)jq: (command )?not found/;
 const JQ_MISSING =
   'This step needs jq, which is not installed. Install it (macOS: brew install jq; Debian, Ubuntu or WSL: sudo apt-get install -y jq), then run it again.';
 
