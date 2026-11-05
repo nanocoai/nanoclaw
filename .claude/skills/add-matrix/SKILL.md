@@ -22,7 +22,9 @@ Fetch the `channels` branch and copy the Matrix adapter into `src/channels/`
 
 ```nc:copy from-branch:channels
 src/channels/matrix.ts
+src/channels/matrix-instances.ts
 src/channels/matrix-registration.test.ts
+src/channels/matrix-instances.test.ts
 ```
 
 ### 2. Register the adapter
@@ -72,7 +74,7 @@ pnpm run build
 node --input-type=module -e 'await import("@beeper/chat-adapter-matrix")'
 ```
 ```nc:run effect:test
-pnpm exec vitest run src/channels/matrix-registration.test.ts
+pnpm exec vitest run src/channels/matrix-registration.test.ts src/channels/matrix-instances.test.ts
 ```
 
 `matrix-registration.test.ts` imports the real channel barrel and asserts the
@@ -133,6 +135,30 @@ MATRIX_INVITE_AUTOJOIN_ALLOWLIST=@you:matrix.org  # Only accept invites from the
 MATRIX_RECOVERY_KEY=your-recovery-key          # Enable E2EE cross-signing
 MATRIX_DEVICE_ID=NANOCLAW01                    # Stable device ID across restarts
 ```
+
+### Additional accounts (optional)
+
+One install can run several Matrix accounts, e.g. a separate identity (name,
+avatar) per agent. `MATRIX_INSTANCES` lists only the **additional** accounts;
+the default account stays the unsuffixed `MATRIX_*` variables above. For each
+name, the same keys take a `_<NAME>` suffix (name uppercased, dashes to
+underscores):
+
+```bash
+MATRIX_INSTANCES=scotty
+MATRIX_BASE_URL_SCOTTY=https://matrix.org
+MATRIX_USERNAME_SCOTTY=scottybot
+MATRIX_PASSWORD_SCOTTY=your-bot-password
+MATRIX_BOT_USERNAME_SCOTTY=Scotty
+```
+
+Each name registers as the instance `matrix-<name>` (lowercase letters,
+digits and dashes). The channel type stays `matrix`, so user IDs and container
+config are shared. To move a chat to the new account, invite it to the room and
+run `ncl messaging-groups update <id> --instance matrix-<name>`. Two instances
+pointing at the same account are refused at startup (the second is skipped
+with a warning). Device IDs are generated and persisted per account; set
+`MATRIX_DEVICE_ID_<NAME>` only if you use E2EE and want a fixed one.
 
 ### Store the credentials
 
