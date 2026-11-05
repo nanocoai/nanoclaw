@@ -445,13 +445,17 @@ export function referenceProse(md: string): string {
 
 // Setup installs jq, but an install from before that never ran the step, and
 // a run that pipes through a missing jq fails as an opaque exit 127.
-const JQ_RUN = /(^|[\s|;&(])jq(\s|$)/;
+const JQ_RUN = /(^|[\s|;&(`])jq($|[\s<>|;&)])/;
 const JQ_MISSING =
   'This step needs jq, which is not installed. Install it (macOS: brew install jq; Debian, Ubuntu or WSL: sudo apt-get install -y jq), then run it again.';
 
 function onPath(name: string): boolean {
   return (process.env.PATH ?? '').split(delimiter).some((dir) => dir !== '' && existsSync(join(dir, name)));
 }
+
+// Asked only once a command has failed, so a mocked or remote exec is never
+// second-guessed and an unanswered {{var}} still defers first.
+const failedForJq = (cmd: string): boolean => JQ_RUN.test(cmd) && !onPath('jq');
 
 // A hardcoded `origin` breaks forks where the registry branch lives on
 // `upstream`. Generic mirror of channels-remote.sh: explicit override → the
@@ -758,7 +762,13 @@ async function applyOne(
       break;
     }
     case 'run': {
-      if (d.body.some((cmd) => JQ_RUN.test(cmd)) && !onPath('jq')) throw new StepFailure(JQ_MISSING);
+      const run = async (cmd: string): Promise<string | void> => {
+        try {
+          return await exec(cmd);
+        } catch (e) {
+          throw failedForJq(cmd) ? new StepFailure(JQ_MISSING) : e;
+        }
+      };
       // `capture:<var>` binds the command's stdout into a {{var}} — the twin of
       // `prompt` (which binds human input). Lets a run resolve a value from an
       // API (e.g. Slack conversations.open → the DM channel id) and feed it to a
@@ -776,7 +786,7 @@ async function applyOne(
       // (a restart, a pairing/QR step, a wire) that follow — a broken local
       // config or an un-registered app never reaches a doomed restart/QR.
       if (d.attrs.effect === 'check') {
-        for (const cmd of d.body) await exec(substitute(cmd, vars));
+        for (const cmd of d.body) await run(substitute(cmd, vars));
         break;
       }
       // effect:step runs a long-running, operator-interactive step (a pairing
@@ -788,7 +798,7 @@ async function applyOne(
         if (!ctx.execStream)
           throw new Error('effect:step needs a streaming exec — an agent runs the step from the prose');
         const { ok, fields } = await ctx.execStream(substitute(d.body.join('\n'), vars));
-        if (!ok) throw new StepFailure(fields.ERROR);
+        if (!ok) throw new StepFailure(failedForJq(d.body.join('\n')) ? JQ_MISSING : fields.ERROR);
         if (capture) {
           for (const pair of capture.split(',')) {
             const eq = pair.indexOf('=');
@@ -807,7 +817,7 @@ async function applyOne(
         // call `ncl ... {{owner_email}}` to wire from collected input. A command
         // with no {{...}} (build/test) is returned unchanged; an unresolved var
         // throws → caught → deferred (the prompt hasn't been answered yet).
-        const out = await exec(substitute(cmd, vars));
+        const out = await run(substitute(cmd, vars));
         // Last command wins for capture (a capture run should be a single command).
         // bindCapture binds stdout-as-is OR a multi-field JSON spec, and enforces
         // validate:<re> — a mismatch / unparseable JSON throws → bounced to an agent.
