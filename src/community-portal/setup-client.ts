@@ -116,7 +116,8 @@ export class SetupClient extends DeviceClient {
         if (LIVE_FLOW_STATES.includes((await this.status()).status)) return previous;
       } catch (error) {
         const status = errorStatus(error);
-        if (status !== 410 && status !== 401 && status !== 404) throw error;
+        // 403: the saved flow belongs to an earlier sign-in on this machine. Start a fresh one.
+        if (status !== 410 && status !== 401 && status !== 403 && status !== 404) throw error;
       }
     }
     this.flow = await this.request<SetupFlow>('POST', '/api/v1/setup/start', {

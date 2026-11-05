@@ -52,7 +52,17 @@ const http2EsmSnapshotStale = (await import('http2')).connect === pristineConnec
 const { MEMORY_SESSION_HOOK } = await import('../memory/session-hook.js');
 const { CursorProvider } = await import('./cursor.js');
 
-const provider = new CursorProvider({ assistantName: 'Gateway probe', model: 'nanoclaw-gateway-probe-model' });
+// The SDK retries a refused transport with 1, 2, 4 and 8 second backoffs
+// before it reports the failure. The first refusal already carries everything
+// the probe records, so its agent asks the SDK not to retry.
+class ProbeProvider extends CursorProvider {
+  protected override agentOptions(cwd: string) {
+    const options = super.agentOptions(cwd);
+    return { ...options, local: { ...options.local, enableAgentRetries: false } };
+  }
+}
+
+const provider = new ProbeProvider({ assistantName: 'Gateway probe', model: 'nanoclaw-gateway-probe-model' });
 provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
 
 const query = provider.query({ prompt: 'gateway probe', cwd: process.env.NANOCLAW_AGENT_DIR ?? process.cwd() });
