@@ -34,10 +34,7 @@ vi.mock('./central-db-inspection.js', () => ({
   inspectCentralDb: async () => ({
     registeredGroups: 1,
     derivedGroups: 0,
-    owners: 0,
-    approvers: 0,
-    wiredChannels: [],
-    droppedChannels: [],
+    lastWiredAt: {},
   }),
 }));
 vi.mock('./lib/registry-state.js', () => ({

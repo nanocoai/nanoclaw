@@ -759,6 +759,8 @@ async function main(): Promise<void> {
   // changes too — the last box must be the one remaining action, not a
   // premature "your assistant is saying hi" (no welcome DM exists yet).
   let wiringPending = false;
+  // Verify passed without a Slack job: none, or one a later good Slack run replaced.
+  let verifyClearedSlackJob = false;
 
   if (
     portalEnabled() &&
@@ -816,8 +818,6 @@ async function main(): Promise<void> {
           '• Want to chat from your phone? Add a messaging app with `/add-telegram`, `/add-slack`, or `/add-discord`.',
         );
       }
-      const ownerHint = res.terminal?.fields.OWNER_HINT;
-      if (ownerHint) notes.push(wrapForGutter(`• ${ownerHint}`, 6));
       if (notes.length > 0) {
         note(notes.join('\n'), "What's left");
       }
@@ -842,9 +842,7 @@ async function main(): Promise<void> {
       return;
     }
     wiringPending = res.terminal?.fields.WIRING === 'pending_first_dm';
-    // The pending-first-DM ending already names /init-first-agent.
-    const ownerHint = res.terminal?.fields.OWNER_HINT;
-    if (ownerHint && !wiringPending) note(wrapForGutter(ownerHint, 6), 'Owner');
+    verifyClearedSlackJob = !res.terminal?.fields.SLACK_INSTALL;
   }
 
   const rows: [string, string][] = [
@@ -867,7 +865,7 @@ async function main(): Promise<void> {
   );
 
   const slackJob = await readSlackJob();
-  const slackStatus = slackJobStatus(slackJob);
+  const slackStatus = verifyClearedSlackJob ? undefined : slackJobStatus(slackJob);
   if (slackStatus === 'failed' || slackStatus === 'expired') {
     const reason = slackJobFailure(slackJob);
     note(

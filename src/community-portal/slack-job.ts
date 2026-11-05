@@ -97,40 +97,6 @@ export function slackJobFailure(job: SlackJob | null): string | undefined {
 }
 
 /**
- * A Slack wire that succeeded with the saved job's own app finishes that job,
- * so a good re-run clears a failed or expired install. `appToken` is the app
- * token that run connected with. A job for another app, or one a live worker
- * still owns, is left as it is.
- */
-export async function settleSlackJob(
-  appToken: string | undefined,
-  root = process.cwd(),
-  { homeDir }: { homeDir?: string } = {},
-): Promise<boolean> {
-  const settles = (job: SlackJob | null): job is SlackJob =>
-    !!job && ['failed', 'expired'].includes(slackJobStatus(job) ?? '') && !!appToken && appToken === job.app?.appToken;
-  if (!settles(await readSlackJob(root))) return false;
-  const release = await processLock(`${slackJobFile(root)}.lock`);
-  if (!release) return false;
-  try {
-    const job = await readSlackJob(root);
-    if (!settles(job)) return false;
-    job.status = 'complete';
-    delete job.error;
-    delete job.reason;
-    // The worker reports completion with the saved identity; a sign-in since
-    // then replaced that token, and the old one would be refused.
-    const current = await readInstallIdentity(homeDir ? { homeDir } : {});
-    if (current?.accountId === job.identity.account_id && current.installId === job.identity.install_id)
-      job.identity.token = current.token;
-    await writePrivate(slackJobFile(root), job);
-    return true;
-  } finally {
-    release();
-  }
-}
-
-/**
  * Serialize checkout mutations between foreground setup and the worker. A
  * child spawned by the holder inherits the claim through NANOCLAW_SETUP_LOCK.
  */
@@ -156,9 +122,7 @@ export async function launchSlackJob(root = process.cwd()): Promise<boolean> {
     !job ||
     !(
       ['awaiting_approval', 'installing'].includes(job.status) ||
-      // Past its window the worker exits without reporting, so a launch
-      // here would only repeat on every supervisor check.
-      (job.status === 'complete' && job.reportedStatus !== 'complete' && Date.parse(job.expiresAt) > Date.now())
+      (job.status === 'complete' && job.reportedStatus !== 'complete')
     )
   )
     return false;

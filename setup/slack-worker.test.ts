@@ -375,9 +375,3 @@ it('the sanitizer drops token shapes, the job secrets and newlines', () => {
   expect(reason).toBe('line one SLACK_APP_TOKEN=[REDACTED] token [REDACTED] Bearer [REDACTED] done');
   expect(slackJobReason('x'.repeat(500)).length).toBeLessThanOrEqual(240);
 });
-
-it('never relaunches a finished job after its window: the worker would exit without reporting', async () => {
-  const { root, job } = await fixture();
-  await writePrivate(slackJobFile(root), { ...job, status: 'complete', expiresAt: new Date(0).toISOString() });
-  expect(await launchSlackJob(root)).toBe(false);
-});
