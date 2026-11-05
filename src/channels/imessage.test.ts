@@ -303,7 +303,7 @@ function makeFakeSdk(options: { missingReactionTarget?: boolean } = {}) {
   return { sdk, queue, sends, stop, reacted, makeSpace };
 }
 
-function makeHostConfig(outcomes: Array<'accepted' | 'refused' | 'ignored' | 'void'> = []) {
+function makeHostConfig(outcomes: Array<'accepted' | 'refused' | 'closed' | 'ignored' | 'void'> = []) {
   const inbound: Array<{ platformId: string; msg: InboundMessage }> = [];
   const metadata: Array<{ platformId: string; isGroup?: boolean }> = [];
   const actions: Array<{ questionId: string; option: string; userId: string }> = [];
@@ -662,6 +662,63 @@ describe('photon adapter (mocked SDK)', () => {
     await waitFor(() => confirmations().length === 1);
     expect(host.inbound).toHaveLength(0);
 
+    await adapter.teardown();
+  });
+
+  it('keeps the question open when the host decided nothing, so a retry still answers it', async () => {
+    const { sdk, queue, makeSpace } = makeFakeSdk();
+    const host = makeHostConfig(['ignored', 'accepted']);
+    const adapter = createPhotonAdapter(
+      { projectId: 'p', projectSecret: 's', markdown: true, telemetry: false, maxInlineAttachmentBytes: 1000 },
+      { loadSpectrum: async () => sdk },
+    );
+    await adapter.setup(host.config);
+    await adapter.deliver('+15551112222', null, {
+      kind: 'chat',
+      content: { type: 'ask_question', questionId: 'q1', title: 'Deploy?', question: 'Ship it?', options: ['Approve'] },
+    });
+    const space = makeSpace('+15551112222', 'dm', '+15551112222');
+    const reply = (id: string) =>
+      queue.push([
+        space,
+        { id, direction: 'inbound', sender: { id: '+15551112222' }, content: { type: 'text', text: '/approve' } },
+      ]);
+    reply('r1');
+    await waitFor(() => host.actions.length === 1);
+    await new Promise((r) => setTimeout(r, 20));
+    reply('r2');
+    await waitFor(() => host.actions.length === 2 || host.inbound.length === 1);
+    // The retry answers the question; it does not wake the agent as a plain "/approve".
+    expect(host.inbound).toHaveLength(0);
+    expect(host.actions).toHaveLength(2);
+    await adapter.teardown();
+  });
+
+  it('drops the question when the host says it is already closed', async () => {
+    const { sdk, queue, makeSpace } = makeFakeSdk();
+    const host = makeHostConfig(['closed']);
+    const adapter = createPhotonAdapter(
+      { projectId: 'p', projectSecret: 's', markdown: true, telemetry: false, maxInlineAttachmentBytes: 1000 },
+      { loadSpectrum: async () => sdk },
+    );
+    await adapter.setup(host.config);
+    await adapter.deliver('+15551112222', null, {
+      kind: 'chat',
+      content: { type: 'ask_question', questionId: 'q1', title: 'Deploy?', question: 'Ship it?', options: ['Approve'] },
+    });
+    const space = makeSpace('+15551112222', 'dm', '+15551112222');
+    const reply = (id: string) =>
+      queue.push([
+        space,
+        { id, direction: 'inbound', sender: { id: '+15551112222' }, content: { type: 'text', text: '/approve' } },
+      ]);
+    reply('r1');
+    await waitFor(() => host.actions.length === 1);
+    await new Promise((r) => setTimeout(r, 20));
+    // Nothing is left to answer, so the next "/approve" is an ordinary message.
+    reply('r2');
+    await waitFor(() => host.inbound.length === 1);
+    expect(host.actions).toHaveLength(1);
     await adapter.teardown();
   });
 

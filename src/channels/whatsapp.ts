@@ -124,8 +124,8 @@ const answering = new WeakMap<PendingQuestion, Promise<unknown>>();
 
 /**
  * Answers a pending question from a "/option" reply. The host decides: the chat
- * hears the answer only once it is accepted, and a refused one keeps the
- * question open for an approver (WhatsApp has no private reply, so nothing is
+ * hears the answer only once it is accepted; a refused one, or one that decided
+ * nothing, keeps the question open (WhatsApp has no private reply, so nothing is
  * posted). One answer at a time: a later reply waits for the earlier one and
  * counts only if the question is still open (so an approver's answer after a
  * refused one still counts). Undefined when the text answers no pending question.
@@ -150,7 +150,8 @@ export async function answerPendingQuestion(
     const outcome = typeof result === 'string' ? (result as AnswerOutcome) : undefined;
     // A core from before click outcomes returns nothing: answered as before.
     const shown = outcome ?? 'accepted';
-    if (shown !== 'refused' && pendingQuestions.get(chatJid) === pending) pendingQuestions.delete(chatJid);
+    const closes = shown === 'accepted' || shown === 'closed';
+    if (closes && pendingQuestions.get(chatJid) === pending) pendingQuestions.delete(chatJid);
     if (shown === 'accepted') await confirm(matched);
     return outcome;
   });

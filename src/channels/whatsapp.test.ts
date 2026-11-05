@@ -67,7 +67,27 @@ describe('answerPendingQuestion', () => {
     expect(questions.has('chat@g.us')).toBe(true);
   });
 
-  it('closes the question silently when the host decided nothing', async () => {
+  it('keeps the question open, posting nothing, when the host decided nothing', async () => {
+    const questions = fresh();
+    const onAction = vi.fn().mockResolvedValueOnce('ignored').mockResolvedValueOnce('accepted');
+    const confirm = vi.fn(async () => undefined);
+    await answerPendingQuestion(questions, 'chat@g.us', '/approve', 'owner@s.whatsapp.net', onAction, confirm);
+    expect(confirm).not.toHaveBeenCalled();
+    expect(questions.has('chat@g.us')).toBe(true);
+    // A second answer still reaches the host.
+    const retry = await answerPendingQuestion(
+      questions,
+      'chat@g.us',
+      '/approve',
+      'owner@s.whatsapp.net',
+      onAction,
+      confirm,
+    );
+    expect(onAction).toHaveBeenCalledTimes(2);
+    expect(retry?.outcome).toBe('accepted');
+  });
+
+  it('closes the question silently when the host says it is already closed', async () => {
     const questions = fresh();
     const confirm = vi.fn(async () => undefined);
     await answerPendingQuestion(
@@ -75,7 +95,7 @@ describe('answerPendingQuestion', () => {
       'chat@g.us',
       '/approve',
       'owner@s.whatsapp.net',
-      async () => 'ignored' as const,
+      async () => 'closed' as const,
       confirm,
     );
     expect(confirm).not.toHaveBeenCalled();
