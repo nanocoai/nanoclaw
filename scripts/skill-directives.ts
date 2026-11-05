@@ -114,6 +114,10 @@ export const FENCE = /^```(\S.*)?$/;
 export const EXACT_SEMVER = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
 const VAR_REF = /\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g;
 const KNOWN = new Set(['copy', 'append', 'dep', 'run', 'prompt', 'operator', 'env-set', 'json-merge']);
+/** The kinds the engine handles; any other `nc:<kind>` bounces to an agent. */
+export function isKnownDirective(kind: string): boolean {
+  return KNOWN.has(kind);
+}
 // Retired directives get a targeted lint error (not just "unknown") so an
 // author knows the removal was deliberate and what to do instead.
 const RETIRED: Record<string, string> = {

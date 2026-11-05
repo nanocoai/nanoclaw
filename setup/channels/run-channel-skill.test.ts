@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { runChannelSkill } from './run-channel-skill.js';
+import { bounceReasonCode, runChannelSkill } from './run-channel-skill.js';
 import { runSkill } from '../lib/skill-driver.js';
 import { fullyApplied } from '../../scripts/skill-apply.js';
 import { parseDirectives } from '../../scripts/skill-directives.js';
@@ -555,8 +555,16 @@ describe('runChannelSkill adapter (Option A)', () => {
     expect(failCalls[0].msg).toBe('Register the webhook by hand'); // heading → headline
     expect(failCalls[0].hint).toContain('Open the Faily dashboard'); // prose → hint
     expect(failCalls[0].hint).not.toBe('See logs/setup-steps/ for details, then retry setup.'); // not the generic
-    // Diagnostics get the directive kind and line, never the headline or prose.
-    expect(failCalls[0].opts?.code).toBe('hand-wire:L5');
+    // nc:hand-wire is a custom kind the engine does not handle: diagnostics get
+    // a fixed code and the line, never the kind, headline or prose.
+    expect(failCalls[0].opts?.code).toBe('unknown_directive:L5');
+  });
+
+  it('reports known directive kinds and hides custom ones', () => {
+    const task = (kind: string, line: number) => ({ kind, line, reason: 'exit 1: boom', prose: '' });
+    expect(bounceReasonCode(task('run', 12))).toBe('run:L12');
+    expect(bounceReasonCode(task('acme-internal-webhook', 7))).toBe('unknown_directive:L7');
+    expect(bounceReasonCode(undefined)).toBe('deferred');
   });
 });
 

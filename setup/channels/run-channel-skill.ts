@@ -20,7 +20,8 @@ import { join } from 'node:path';
 
 import * as p from '@clack/prompts';
 
-import { firstFailureHint, fullyApplied } from '../../scripts/skill-apply.js';
+import { firstFailureHint, fullyApplied, type AgentTask } from '../../scripts/skill-apply.js';
+import { isKnownDirective } from '../../scripts/skill-directives.js';
 import * as setupLog from '../logs.js';
 import { BACK_TO_CHANNEL_SELECTION, backGate, type ChannelFlowResult } from '../lib/back-nav.js';
 import { askOperatorRole, type OperatorRole } from '../lib/role-prompt.js';
@@ -233,6 +234,16 @@ export interface ChannelSkillOverrides extends Partial<RunSkillOptions> {
   fail?: (stepName: string, msg: string, hint?: string, opts?: FailOptions) => Promise<never>;
 }
 
+/**
+ * `reason_code` for a bounced install: the directive kind and SKILL.md line,
+ * which name the step without its output. A kind the engine does not handle is
+ * author text from a local skill, so only `unknown_directive` leaves the machine.
+ */
+export function bounceReasonCode(task: AgentTask | undefined): string {
+  if (!task) return 'deferred';
+  return `${isKnownDirective(task.kind) ? task.kind : 'unknown_directive'}:L${task.line}`;
+}
+
 export async function runChannelSkill(
   channel: string,
   displayName: string,
@@ -308,14 +319,11 @@ export async function runChannelSkill(
     // instead of a generic "couldn't finish" message. Only a real bounce yields a
     // diagnosis; a purely-deferred run (a missing input) falls back to the generic.
     const diag = firstFailureHint(res);
-    // The failing directive's kind and SKILL.md line: with nanoclaw_version it
-    // names the exact step, and unlike the headline it carries no skill output.
-    const bounced = res.agentTasks[0];
     await failWith(
       `${channel}-install`,
       diag?.headline ?? `Couldn't finish setting up ${channel}.`,
       diag?.hint ?? 'See logs/setup-steps/ for details, then retry setup.',
-      { rawLogPath: rawLog, code: bounced ? `${bounced.kind}:L${bounced.line}` : 'deferred' },
+      { rawLogPath: rawLog, code: bounceReasonCode(res.agentTasks[0]) },
     );
   }
 
