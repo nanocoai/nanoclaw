@@ -164,8 +164,9 @@ level 2, raw capture to level 3.
 ## The Anthropic exception
 
 Anthropic credential registration
-(`.claude/skills/add-onecli/scripts/register-claude-token.sh`) is
-the **one** permitted break in the visual flow. Why:
+(`.claude/skills/add-onecli/scripts/register-claude-token.sh`) is one
+of the two permitted breaks in the visual flow (the other is the sudo
+prompt, below). Why:
 
 - `claude setup-token` opens a browser, runs its own OAuth prompt, and
   prints the token. It owns the TTY via `script(1)`.
