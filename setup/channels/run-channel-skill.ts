@@ -24,7 +24,7 @@ import { firstFailureHint, fullyApplied } from '../../scripts/skill-apply.js';
 import * as setupLog from '../logs.js';
 import { BACK_TO_CHANNEL_SELECTION, backGate, type ChannelFlowResult } from '../lib/back-nav.js';
 import { askOperatorRole, type OperatorRole } from '../lib/role-prompt.js';
-import { ensureAnswer, fail, runQuietChild } from '../lib/runner.js';
+import { ensureAnswer, fail, runQuietChild, type FailOptions } from '../lib/runner.js';
 import { hostExec, runSkill, type RunSkillOptions } from '../lib/skill-driver.js';
 import { clearTemplatePick } from '../templates.js';
 import { launchSlackJob, readSlackJob, queueSlackJob } from '../../src/community-portal/slack-job.js';
@@ -230,7 +230,7 @@ export interface ChannelSkillOverrides extends Partial<RunSkillOptions> {
   /** The first-prompt back gate; defaults to back-nav.ts `backGate`. Injectable for tests. */
   backGate?: (label: string) => Promise<'continue' | typeof BACK_TO_CHANNEL_SELECTION>;
   /** The abort path; defaults to runner.ts `fail` (which exits). Injectable for tests. */
-  fail?: (stepName: string, msg: string, hint?: string, rawLogPath?: string) => Promise<never>;
+  fail?: (stepName: string, msg: string, hint?: string, opts?: FailOptions) => Promise<never>;
 }
 
 export async function runChannelSkill(
@@ -308,11 +308,14 @@ export async function runChannelSkill(
     // instead of a generic "couldn't finish" message. Only a real bounce yields a
     // diagnosis; a purely-deferred run (a missing input) falls back to the generic.
     const diag = firstFailureHint(res);
+    // The failing directive's kind and SKILL.md line: with nanoclaw_version it
+    // names the exact step, and unlike the headline it carries no skill output.
+    const bounced = res.agentTasks[0];
     await failWith(
       `${channel}-install`,
       diag?.headline ?? `Couldn't finish setting up ${channel}.`,
       diag?.hint ?? 'See logs/setup-steps/ for details, then retry setup.',
-      rawLog,
+      { rawLogPath: rawLog, code: bounced ? `${bounced.kind}:L${bounced.line}` : 'deferred' },
     );
   }
 
@@ -337,6 +340,7 @@ export async function runChannelSkill(
       `${channel}-resolve`,
       `Couldn't resolve your ${channel} address.`,
       'The skill did not produce owner_handle + platform_id.',
+      { code: 'no_owner_address' },
     );
   }
   if (overrides.wireIfResolved) {
@@ -367,6 +371,7 @@ export async function runChannelSkill(
       'init-first-agent',
       `Couldn't finish connecting ${agentName}.`,
       'You can retry later with `/init-first-agent`.',
+      { code: 'wire_failed' },
     );
   }
   // Idempotently clear any legacy/re-exec template pick after the targeted
