@@ -1195,13 +1195,6 @@ function gatewayTokenMatches(header: string | string[] | undefined, botToken: st
   return timingSafeEqual(digest(header), digest(botToken));
 }
 
-/**
- * Discord voids an interaction's first response after 3 s, so a callback
- * still pending past this can only fail; unbounded, a stalled request held
- * the forwarded event open for good.
- */
-const INTERACTION_CALLBACK_TIMEOUT_MS = 10_000;
-
 async function handleForwardedEvent(
   body: string,
   adapter: GatewayAdapter,
@@ -1249,18 +1242,11 @@ async function handleForwardedEvent(
       // construction). Decode back to the real option value for downstream.
       const selectedOption = resolveSelectedOption(render, tail, tail);
       if (render?.deferResolution && questionId) {
-        // A failed ack only costs the clicker Discord's "interaction failed"
-        // notice; the click itself still goes to the host.
-        try {
-          await fetch(`https://discord.com/api/v10/interactions/${interactionId}/${interactionToken}/callback`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ type: 6 }),
-            signal: AbortSignal.timeout(INTERACTION_CALLBACK_TIMEOUT_MS),
-          });
-        } catch (err) {
-          log.error('Failed to acknowledge interaction', { err });
-        }
+        await fetch(`https://discord.com/api/v10/interactions/${interactionId}/${interactionToken}/callback`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ type: 6 }),
+        });
         setupConfig.onAction(questionId, selectedOption, user?.id || '', {
           messageId: (interaction.message as Record<string, unknown> | undefined)?.id as string | undefined,
           platformId: interaction.channel_id as string | undefined,
@@ -1289,7 +1275,6 @@ async function handleForwardedEvent(
               components: [], // remove buttons
             },
           }),
-          signal: AbortSignal.timeout(INTERACTION_CALLBACK_TIMEOUT_MS),
         });
       } catch (err) {
         log.error('Failed to update interaction', { err });
