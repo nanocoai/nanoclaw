@@ -24,7 +24,7 @@
 
 import { execSync } from 'node:child_process';
 import { readFileSync, existsSync, writeFileSync, appendFileSync, copyFileSync, mkdirSync, rmSync } from 'node:fs';
-import { join, dirname, delimiter } from 'node:path';
+import { join, dirname } from 'node:path';
 import { gitFetchBranchCommand } from './git-fetch-branch.js';
 import { gitShowToFileCommand } from './git-show-to-file.js';
 import { parseDirectives, promptVar, type Directive } from './skill-directives.js';
@@ -444,18 +444,12 @@ export function referenceProse(md: string): string {
 }
 
 // Setup installs jq, but an install from before that never ran the step, and
-// a run that pipes through a missing jq fails as an opaque exit 127.
-const JQ_RUN = /(^|[\s|;&(`])jq($|[\s<>|;&)])/;
+// a run that pipes through a missing jq fails as an opaque exit 127. Only the
+// shell's own "not found" (bash, then dash) names jq, so any other failure keeps
+// its message, wherever the exec ran.
+const JQ_NOT_FOUND = /\bjq: (command )?not found/;
 const JQ_MISSING =
   'This step needs jq, which is not installed. Install it (macOS: brew install jq; Debian, Ubuntu or WSL: sudo apt-get install -y jq), then run it again.';
-
-function onPath(name: string): boolean {
-  return (process.env.PATH ?? '').split(delimiter).some((dir) => dir !== '' && existsSync(join(dir, name)));
-}
-
-// Asked only once a command has failed, so a mocked or remote exec is never
-// second-guessed and an unanswered {{var}} still defers first.
-const failedForJq = (cmd: string): boolean => JQ_RUN.test(cmd) && !onPath('jq');
 
 // A hardcoded `origin` breaks forks where the registry branch lives on
 // `upstream`. Generic mirror of channels-remote.sh: explicit override → the
@@ -766,7 +760,7 @@ async function applyOne(
         try {
           return await exec(cmd);
         } catch (e) {
-          throw failedForJq(cmd) ? new StepFailure(JQ_MISSING) : e;
+          throw e instanceof Error && JQ_NOT_FOUND.test(e.message) ? new StepFailure(JQ_MISSING) : e;
         }
       };
       // `capture:<var>` binds the command's stdout into a {{var}} — the twin of
@@ -798,7 +792,7 @@ async function applyOne(
         if (!ctx.execStream)
           throw new Error('effect:step needs a streaming exec — an agent runs the step from the prose');
         const { ok, fields } = await ctx.execStream(substitute(d.body.join('\n'), vars));
-        if (!ok) throw new StepFailure(failedForJq(d.body.join('\n')) ? JQ_MISSING : fields.ERROR);
+        if (!ok) throw new StepFailure(fields.ERROR);
         if (capture) {
           for (const pair of capture.split(',')) {
             const eq = pair.indexOf('=');

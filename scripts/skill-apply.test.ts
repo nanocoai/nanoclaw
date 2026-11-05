@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1831,75 +1831,68 @@ describe('referenceProse (reference-floor slice)', () => {
 });
 
 // An install that predates setup's jq step reaches a jq run with no jq: the
-// step should say what to install, not fail as an opaque exit 127.
+// step should say what to install, not fail as an opaque exit 127. Only the
+// shell's own "not found" counts, so another failure keeps its message.
 describe('a run that pipes through jq', () => {
   let jskill: string;
   let jroot: string;
-  let bin: string;
-  const jqSkill = (body: string) =>
-    writeFileSync(join(jskill, 'SKILL.md'), `# jq\n\n\`\`\`nc:run capture:dm effect:fetch\n${body}\n\`\`\`\n`);
-  const fail127 = () => {
-    throw new Error('Command failed\nbash: line 1: jq: command not found');
+  const jqSkill = (body: string, fence = 'nc:run capture:dm effect:fetch') =>
+    writeFileSync(join(jskill, 'SKILL.md'), `# jq\n\n\`\`\`${fence}\n${body}\n\`\`\`\n`);
+  const failWith = (stderr: string) => () => {
+    throw new Error(`exit 127: ${stderr}`);
   };
   beforeEach(() => {
     jskill = mkdtempSync(join(tmpdir(), 'nc-jq-skill-'));
     jroot = mkdtempSync(join(tmpdir(), 'nc-jq-proj-'));
-    bin = mkdtempSync(join(tmpdir(), 'nc-jq-bin-'));
     writeFileSync(join(jroot, '.env'), '');
     jqSkill('curl -s https://api.example.test/open | jq -er .id');
-    vi.stubEnv('PATH', bin);
   });
-  afterEach(() => vi.unstubAllEnvs());
 
-  it('says to install jq when a jq step fails on a host without it', async () => {
-    const res = await applySkill(jskill, jroot, { inputs: {}, exec: fail127 });
+  it.each([
+    ['bash', 'bash: line 1: jq: command not found'],
+    ['dash', 'sh: 1: jq: not found'],
+  ])('says to install jq when %s cannot find it', async (_shell, stderr) => {
+    const res = await applySkill(jskill, jroot, { inputs: {}, exec: failWith(stderr) });
     expect(res.agentTasks).toHaveLength(1);
     expect(res.agentTasks[0].reason).toMatch(/needs jq/);
     expect(res.agentTasks[0].reason).toContain('brew install jq');
     expect(res.agentTasks[0].reason).toContain('sudo apt-get install -y jq');
   });
 
-  it('catches jq reading a file too', async () => {
-    jqSkill('jq<reply.json -er .id');
-    const res = await applySkill(jskill, jroot, { inputs: {}, exec: fail127 });
-    expect(res.agentTasks[0].reason).toMatch(/needs jq/);
-  });
-
-  // The exec may be mocked or run elsewhere; only a failure is checked.
-  it('leaves a jq step that succeeds alone, whatever this PATH has', async () => {
+  it('leaves a jq step that succeeds alone', async () => {
     const res = await applySkill(jskill, jroot, { inputs: {}, exec: () => 'D123\n' });
     expect(res.agentTasks).toEqual([]);
     expect(res.vars.dm).toBe('D123');
   });
 
-  it('keeps the real failure when jq is installed', async () => {
-    writeFileSync(join(bin, 'jq'), '#!/bin/sh\n', { mode: 0o755 });
-    const res = await applySkill(jskill, jroot, {
-      inputs: {},
-      exec: () => {
-        throw new Error('HTTP 401');
-      },
-    });
-    expect(res.agentTasks[0].reason).toContain('HTTP 401');
+  it.each([
+    ['an API error', 'HTTP 401'],
+    ['jq rejecting a reply without the id', 'jq: error (at <stdin>:0): no channel id'],
+    ['a test that names jq', '[ yes = jq ] failed'],
+  ])('keeps %s as the reason', async (_case, stderr) => {
+    const res = await applySkill(jskill, jroot, { inputs: {}, exec: failWith(stderr) });
+    expect(res.agentTasks[0].reason).toContain(stderr);
     expect(res.agentTasks[0].reason).not.toMatch(/needs jq/);
   });
 
   it('still defers a jq step whose input is not answered yet', async () => {
     jqSkill('echo "{{token}}" | jq -r .');
-    const res = await applySkill(jskill, jroot, { inputs: {}, exec: fail127 });
+    const res = await applySkill(jskill, jroot, {
+      inputs: {},
+      exec: failWith('bash: line 1: jq: command not found'),
+    });
     expect(res.agentTasks).toEqual([]);
     expect(res.deferred.some((d) => /unresolved \{\{token\}\}/.test(d))).toBe(true);
   });
 
-  it('ignores jq inside a word', async () => {
-    jqSkill('echo jquery-ready');
+  it("keeps a streaming step's own error", async () => {
+    jqSkill('pair | jq -r .code', 'nc:run effect:step');
     const res = await applySkill(jskill, jroot, {
       inputs: {},
-      exec: () => {
-        throw new Error('boom');
-      },
+      exec: () => '',
+      execStream: async () => ({ ok: false, fields: { STATUS: 'failed', ERROR: 'pairing timed out' } }),
     });
-    expect(res.agentTasks[0].reason).toContain('boom');
+    expect(res.agentTasks[0].reason).toContain('pairing timed out');
     expect(res.agentTasks[0].reason).not.toMatch(/needs jq/);
   });
 });
