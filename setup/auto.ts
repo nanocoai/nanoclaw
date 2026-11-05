@@ -72,6 +72,7 @@ import { applyProviderSkill, loadHostContractModules } from './providers/install
 import {
   getInstallableProviderDescriptor,
   listInstallableProviderDescriptors,
+  providerDiagnostic,
   providerImagePolicy,
 } from './providers/skill-descriptor.js';
 // Provider payloads self-register their picker entry + auth on import.
@@ -421,6 +422,7 @@ async function main(): Promise<void> {
       // setup module so it self-registers.
       if (!providerDescriptor) throw new Error(`No install descriptor for provider '${agentProvider}'`);
       const skillDir = providerDescriptor.skillDir;
+      const diagnosticStep = `add-${providerDiagnostic(agentProvider)}`;
       const s = p.spinner();
       s.start(`Installing ${agentProvider}…`);
       let blockers: string[];
@@ -430,13 +432,17 @@ async function main(): Promise<void> {
       } catch (err) {
         s.stop(`Couldn't install ${agentProvider}.`, 1);
         const message = err instanceof Error ? err.message : String(err);
-        await fail(`add-${agentProvider}`, `Couldn't install ${agentProvider}.`, message, { code: 'install_error' });
+        await fail(`add-${agentProvider}`, `Couldn't install ${agentProvider}.`, message, {
+          code: 'install_error',
+          diagnosticStep,
+        });
         return; // unreachable — fail() exits — but narrows blockers for TS
       }
       if (blockers.length) {
         s.stop(`Couldn't install ${agentProvider}.`, 1);
         await fail(`add-${agentProvider}`, `Couldn't install ${agentProvider}.`, blockers.join('; '), {
           code: 'install_blocked',
+          diagnosticStep,
         });
       }
       s.stop(`${agentProvider} installed.`);
@@ -450,7 +456,7 @@ async function main(): Promise<void> {
           `add-${agentProvider}`,
           `Couldn't rebuild the container image for ${agentProvider}. ${rebuild.message}`,
           rebuild.hint,
-          { code: 'image_rebuild_failed' },
+          { code: 'image_rebuild_failed', diagnosticStep },
         );
       }
       // This process imported src/provider-contracts/index.ts at startup, and
@@ -1518,7 +1524,7 @@ async function askAgentProviderChoice(): Promise<string> {
       throw new Error(`NANOCLAW_AGENT_PROVIDER=${preset} is not available in this NanoClaw install`);
     }
     setupLog.userInput('agent_provider', preset);
-    phEmit('agent_provider_chosen', { provider: preset, preset: true });
+    phEmit('agent_provider_chosen', { provider: providerDiagnostic(preset), preset: true });
     return preset;
   }
   // The pick is persisted as the instance default (DEFAULT_AGENT_PROVIDER), so
@@ -1534,7 +1540,7 @@ async function askAgentProviderChoice(): Promise<string> {
     }),
   ) as string;
   setupLog.userInput('agent_provider', choice);
-  phEmit('agent_provider_chosen', { provider: choice });
+  phEmit('agent_provider_chosen', { provider: providerDiagnostic(choice) });
   return choice;
 }
 

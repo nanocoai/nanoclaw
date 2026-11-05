@@ -361,6 +361,8 @@ export interface FailOptions {
   rawLogPath?: string;
   /** Fixed identifier for this failure branch, sent as `reason_code`. */
   code?: string;
+  /** Step name to send instead of `stepName` when that holds a local name. */
+  diagnosticStep?: string;
 }
 
 /**
@@ -374,10 +376,10 @@ export interface FailOptions {
  * narrowing still works after `await`.
  */
 export async function fail(stepName: string, msg: string, hint?: string, opts: FailOptions = {}): Promise<never> {
-  const { rawLogPath, code = 'unspecified' } = opts;
+  const { rawLogPath, code = 'unspecified', diagnosticStep = stepName } = opts;
   setupLog.abort(stepName, msg);
   // `msg` can carry names the operator typed and local paths; only the fixed code leaves the machine.
-  phEmit('setup_aborted', { step: stepName, reason_code: code });
+  phEmit('setup_aborted', { step: diagnosticStep, reason_code: code });
   p.log.error(msg);
   if (hint) p.log.message(k.dim(hint));
   p.log.message(k.dim('Logs: logs/setup.log · Raw: logs/setup-steps/'));

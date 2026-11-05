@@ -43,4 +43,13 @@ it('sends only the fixed reason code, never the message', async () => {
   edge.emit.mockClear();
   await expect(fail('auth', 'Authentication failed')).rejects.toThrow('test exit');
   expect(edge.emit).toHaveBeenCalledWith('setup_aborted', { step: 'auth', reason_code: 'unspecified' });
+
+  edge.emit.mockClear();
+  await expect(
+    fail('add-acme-internal', "Couldn't install acme-internal.", undefined, {
+      code: 'install_error',
+      diagnosticStep: 'add-unknown',
+    }),
+  ).rejects.toThrow('test exit');
+  expect(edge.emit).toHaveBeenCalledWith('setup_aborted', { step: 'add-unknown', reason_code: 'install_error' });
 });

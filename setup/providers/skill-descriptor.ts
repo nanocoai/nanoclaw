@@ -15,6 +15,15 @@ export interface InstallableProviderDescriptor {
 
 const PREFIX = 'nanoclaw-provider-';
 
+// Only public provider names leave the machine, so a private provider skill
+// never names itself in diagnostics. A test keeps this in step with the skills.
+const PUBLIC_PROVIDERS: ReadonlySet<string> = new Set(['claude', 'codex', 'cursor', 'opencode']);
+
+/** Diagnostics value for a provider: its name if public, else `unknown`. */
+export function providerDiagnostic(provider: string): string {
+  return PUBLIC_PROVIDERS.has(provider) ? provider : 'unknown';
+}
+
 /** Read setup offers from the audited provider skills already in this checkout. */
 export function listInstallableProviderDescriptors(projectRoot = process.cwd()): InstallableProviderDescriptor[] {
   return listProviderDescriptors(projectRoot).filter((descriptor) => descriptor.offered);

@@ -183,6 +183,7 @@ describe('setup wizard interactive provider choice', () => {
     expect(fixture.applyProviderSkill).toHaveBeenCalledWith('.claude/skills/add-opencode', process.cwd());
     expect(fixture.fail).toHaveBeenCalledWith('add-opencode', "Couldn't install opencode.", 'installation boundary', {
       code: 'install_error',
+      diagnosticStep: 'add-opencode',
     });
     expect(fixture.runAuth).not.toHaveBeenCalled();
     expect(fixture.upsertEnvVar).not.toHaveBeenCalled();
