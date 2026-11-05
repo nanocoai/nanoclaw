@@ -78,56 +78,6 @@ describe('folded inputs', () => {
     expect(await results(() => [{}, {}])).toEqual([undefined, undefined]);
   });
 
-  it('counts folded inputs past the 64-entry uuid list from the queued count', async () => {
-    // Live shape (CLI 2.1.300): 71 inputs folded into one turn listed only
-    // the first 64 uuids, with queued_turn_count 0.
-    script = async function* (inputs) {
-      const uuids: string[] = [];
-      for (let i = 0; i < 70; i++) uuids.push(((await inputs.next()).value as UserInput).uuid);
-      yield { type: 'system', subtype: 'init', session_id: 'sess-1' };
-      yield {
-        type: 'result',
-        subtype: 'success',
-        result: 'ok',
-        user_message_uuids: uuids.slice(0, 64),
-        queued_turn_count: 1,
-      };
-      yield { type: 'result', subtype: 'success', result: 'ok', user_message_uuids: [uuids[69]], queued_turn_count: 0 };
-    };
-    const provider = createProvider('claude');
-    provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
-    const query = provider.query({ prompt: 'first', cwd: tmp });
-    // Input 70 is never taken by the SDK, so it cannot have been folded.
-    for (let i = 1; i <= 70; i++) query.push(`input ${i}`);
-    const answered: Array<number | undefined> = [];
-    for await (const e of query.events) if (e.type === 'result') answered.push(e.answeredInputs);
-    expect(answered).toEqual([69, undefined]);
-  });
-
-  it('retires the input a uuid-less result answered, so a later capped count stays exact', async () => {
-    script = async function* (inputs) {
-      const uuids: string[] = [];
-      for (let i = 0; i < 71; i++) uuids.push(((await inputs.next()).value as UserInput).uuid);
-      yield { type: 'system', subtype: 'init', session_id: 'sess-1' };
-      yield { type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['zeroed'] };
-      yield {
-        type: 'result',
-        subtype: 'success',
-        result: 'ok',
-        user_message_uuids: uuids.slice(1, 65),
-        queued_turn_count: 1,
-      };
-      yield { type: 'result', subtype: 'success', result: 'ok', user_message_uuids: [uuids[70]], queued_turn_count: 0 };
-    };
-    const provider = createProvider('claude');
-    provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
-    const query = provider.query({ prompt: 'first', cwd: tmp });
-    for (let i = 1; i <= 70; i++) query.push(`input ${i}`);
-    const answered: Array<number | undefined> = [];
-    for await (const e of query.events) if (e.type === 'result') answered.push(e.answeredInputs);
-    expect(answered).toEqual([undefined, 69, undefined]);
-  });
-
   it('never counts an input twice or one it did not send', async () => {
     expect(
       await results((a, b) => [{ user_message_uuids: [a, 'cron-trigger'] }, { user_message_uuids: [a, b] }]),

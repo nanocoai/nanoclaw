@@ -70,9 +70,6 @@ export function classifyRateLimitEvent(
 
 export { SDK_DISALLOWED_TOOLS, TOOL_ALLOWLIST } from './claude-config.js';
 
-/** Most entries a result's `user_message_uuids` carries (the SDK caps it). */
-const USER_MESSAGE_UUIDS_MAX = 64;
-
 interface SDKUserMessage {
   type: 'user';
   message: { role: 'user'; content: string };
@@ -88,11 +85,6 @@ class MessageStream {
   private queue: SDKUserMessage[] = [];
   private waiting: (() => void) | null = null;
   private done = false;
-
-  /** Inputs the SDK has not taken yet: they cannot have reached the CLI. */
-  get untaken(): number {
-    return this.queue.length;
-  }
 
   /** Returns the uuid the CLI echoes in the `result` that answers this input. */
   push(text: string): string {
@@ -277,8 +269,8 @@ export class ClaudeProvider implements AgentProvider {
     if (!this.memorySessionHook) throw new Error('Claude memory session hook was not registered');
     const stream = new MessageStream();
     // Inputs not yet answered. The CLI folds an input pushed mid-turn into
-    // the running turn between tool rounds; the result then lists every
-    // input it consumed in `user_message_uuids`.
+    // the running turn between tool rounds; the result then lists the
+    // inputs it consumed (the first 64) in `user_message_uuids`.
     const unanswered = [stream.push(input.prompt)];
 
     const instructions = input.systemContext?.instructions;
@@ -387,7 +379,6 @@ export class ClaudeProvider implements AgentProvider {
             errors?: string[];
             user_message_uuids?: string[];
             user_message_uuid?: string;
-            queued_turn_count?: number;
           };
           const isError = m.is_error === true;
           const consumed = m.user_message_uuids ?? (m.user_message_uuid ? [m.user_message_uuid] : []);
@@ -399,15 +390,6 @@ export class ClaudeProvider implements AgentProvider {
             if (at === -1) continue;
             unanswered.splice(at, 1);
             answeredInputs++;
-          }
-          // The list keeps only the first 64 inputs a turn consumed. Past
-          // that, every older input the CLI no longer holds queued was folded.
-          // One written but not yet read by the CLI would also count; that
-          // misroutes one answer, while undercounting stays behind for good.
-          if (consumed.length >= USER_MESSAGE_UUIDS_MAX && m.queued_turn_count !== undefined) {
-            const unlisted = Math.max(unanswered.length - stream.untaken - m.queued_turn_count, 0);
-            unanswered.splice(0, unlisted);
-            answeredInputs += unlisted;
           }
           // Some failures (e.g. an invalid API key) leave errors[] empty and put
           // the SDK's own notice in `result`. Other result text can echo upstream
