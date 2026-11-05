@@ -9,7 +9,7 @@
  *    behind until the query ended.
  */
 import { describe, it, expect, beforeEach, afterEach, spyOn } from 'bun:test';
-import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './mailbox/sqlite/connection.js';
+import { initTestSessionDb, closeSessionDb, getInboundDb } from './mailbox/sqlite/connection.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { MockProvider } from './providers/mock.js';
 import { runPollLoop } from './poll-loop.js';
@@ -32,14 +32,14 @@ afterEach(() => closeSessionDb());
 
 // Host-written rows carry even seq numbers in arrival order.
 let seq = 0;
-function insertMessage(id: string, text: string, threadId: string, trigger: 0 | 1 = 1) {
+function insertMessage(id: string, text: string, threadId: string) {
   seq += 2;
   getInboundDb()
     .prepare(
       `INSERT INTO messages_in (id, seq, kind, timestamp, status, platform_id, channel_type, thread_id, trigger, content)
-       VALUES (?, ?, 'chat', datetime('now'), 'pending', 'D123', 'slack', ?, ?, ?)`,
+       VALUES (?, ?, 'chat', datetime('now'), 'pending', 'D123', 'slack', ?, 1, ?)`,
     )
-    .run(id, seq, threadId, trigger, JSON.stringify({ sender: 'Admin', text }));
+    .run(id, seq, threadId, JSON.stringify({ sender: 'Admin', text }));
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -299,29 +299,4 @@ describe('a failed turn with a folded message', () => {
       [GENERIC_FAILURE_NOTICE, 'thread-b'],
     ]);
   });
-});
-
-describe('a command batched with accumulated context only', () => {
-  for (const command of ['/clear', '/upload-trace']) {
-    it(`${command}: starts no turn for the context, which rides along with the next message`, async () => {
-      const provider = new FoldingProvider();
-      insertMessage('ctx', 'ambient ask:ctx', 'thread-ctx', 0);
-      insertMessage('cmd', command, 'thread-cmd');
-      const stop = startLoop(provider);
-      try {
-        await waitFor(() => replies().some(([, thread]) => thread === 'thread-cmd'));
-        await sleep(1200);
-        expect(provider.queries).toBe(0);
-        const ack = getOutboundDb().prepare(`SELECT status FROM processing_ack WHERE message_id = 'ctx'`).get();
-        expect(ack).toBeNull();
-
-        insertMessage('q', 'ask:q', 'thread-q');
-        await waitFor(replied('re: ctx + q'));
-      } finally {
-        await stop();
-      }
-      // The context sorts first, but the reply goes where the turn was woken.
-      expect(replies().at(-1)).toEqual(['re: ctx + q', 'thread-q']);
-    });
-  }
 });
