@@ -1,4 +1,4 @@
-import { execFileSync } from 'child_process';
+import { execFileSync, spawnSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -615,6 +615,65 @@ describe('derived provider spawn surfaces', () => {
     expect(fs.existsSync(path.join(groupDir, '.agents', 'skills'))).toBe(true);
     expect(legacyOverlay).toHaveBeenCalledOnce();
   });
+
+  it('refuses a FIFO planted at an append-open-close file without blocking', () => {
+    const sessionDirectory = path.join(DATA_DIR, 'v2-sessions', 'fifo-session');
+    fs.mkdirSync(path.join(sessionDirectory, '.state'), { recursive: true });
+    execFileSync('mkfifo', [path.join(sessionDirectory, '.state', 'auth.json')]);
+    const contract: ProviderHostContract = {
+      ...backingContract(),
+      stateVolumes: [
+        {
+          id: 'state',
+          directory: '.state',
+          containerPath: '/state',
+          scope: 'session',
+          mode: 'rw',
+          mountClass: 'group-state',
+        },
+      ],
+      files: [
+        {
+          id: 'auth',
+          volumeId: 'state',
+          relativePath: 'auth.json',
+          prepare: { operation: 'append-open-close', when: 'every-spawn' },
+        },
+      ],
+    };
+    // Run in a child with a timeout: a blocking open would hang this worker
+    // instead of failing the test.
+    const source = `
+      const { realizeProviderSpawnSurfaces } = await import('./src/provider-contracts/realize.ts');
+      const [contract, groupDir, sessionDirectory] = process.argv.slice(1);
+      try {
+        await realizeProviderSpawnSurfaces('fifo', JSON.parse(contract), 'fifo-group', groupDir, sessionDirectory, [], {
+          legacyOverlay: async () => ({}),
+          composeProjectDocument: async () => {},
+        });
+        console.log('outcome=resolved');
+      } catch (err) {
+        console.log('outcome=' + err.code);
+      }
+    `;
+    const result = spawnSync(
+      process.execPath,
+      [
+        '--import',
+        'tsx',
+        '--input-type=module',
+        '--eval',
+        source,
+        JSON.stringify(contract),
+        path.join(GROUPS_DIR, 'fifo-group'),
+        sessionDirectory,
+      ],
+      { cwd: path.resolve(import.meta.dirname, '..'), encoding: 'utf8', timeout: 15_000 },
+    );
+    expect(result.signal, 'prepareSpawnFile blocked on a FIFO').toBeNull();
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain('outcome=ENXIO');
+  }, 30_000);
 
   it('ignores declared legacy callback mounts while retaining env', async () => {
     const realized = await realizeProviderSpawnSurfaces(

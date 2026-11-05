@@ -246,8 +246,10 @@ function prepareSpawnFile(
   const volumePath = providerStateVolumePath(volume, agentGroupId, sessionDirectory);
   const filePath = resolveWithinRoot(volumePath, file.relativePath);
   if (file.prepare.operation === 'append-open-close') {
-    const flags = fs.constants.O_APPEND | fs.constants.O_CREAT | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW;
-    fs.closeSync(fs.openSync(filePath, flags));
+    // O_NONBLOCK: the volume is container-writable, and a blocking open of a
+    // reader-less FIFO here would stall the host. It fails with ENXIO instead.
+    const { O_APPEND, O_CREAT, O_WRONLY, O_NOFOLLOW, O_NONBLOCK } = fs.constants;
+    fs.closeSync(fs.openSync(filePath, O_APPEND | O_CREAT | O_WRONLY | O_NOFOLLOW | O_NONBLOCK));
   }
 }
 

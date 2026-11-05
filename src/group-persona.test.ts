@@ -1,3 +1,4 @@
+import { execFileSync, spawnSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -48,6 +49,24 @@ describe('readGroupPersona', () => {
       expect.objectContaining({ file: path.join(TMP, PERSONA_PREPEND_FILE) }),
     );
   });
+
+  it('refuses a FIFO without blocking', () => {
+    execFileSync('mkfifo', [path.join(TMP, PERSONA_PREPEND_FILE)]);
+    // Run in a child with a timeout: a blocking open would hang this worker
+    // instead of failing the test.
+    const source = `
+      const { readGroupPersona } = await import('./src/group-persona.ts');
+      console.log('persona=' + JSON.stringify(readGroupPersona(process.argv[1])));
+    `;
+    const result = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '--eval', source, TMP], {
+      cwd: path.resolve(import.meta.dirname, '..'),
+      encoding: 'utf8',
+      timeout: 15_000,
+    });
+    expect(result.signal, 'readGroupPersona blocked on a FIFO').toBeNull();
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain('persona=null');
+  }, 30_000);
 });
 
 describe('stageGroupPersona', () => {
