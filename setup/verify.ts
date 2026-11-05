@@ -189,7 +189,7 @@ export async function run(_args: string[]): Promise<void> {
   //    plus how many agent groups pin an image of their own (reported in step 7).
   //    The two counts get their own try/catch: they read different tables, and a
   //    partially migrated DB must not hide one behind the other's failure.
-  const { registeredGroups, derivedGroups } = await inspectCentralDb(projectRoot);
+  const { owners, registeredGroups, derivedGroups } = await inspectCentralDb(projectRoot);
 
   // 6. Check mount allowlist
   let mountAllowlist = 'missing';
@@ -271,6 +271,9 @@ export async function run(_args: string[]): Promise<void> {
     IMAGE_DIGEST: image.registryDigest ?? '',
     DERIVED_GROUPS: derivedGroups,
     ...(slackInstall ? { SLACK_INSTALL: slackInstall } : {}),
+    // Informational: nobody can approve a new chat without one, but a
+    // terminal-only install needs none.
+    OWNER: owners > 0 ? 'present' : 'missing',
     ...(slackWiringPending ? { WIRING: 'pending_slack_install' } : wiringPending ? { WIRING: 'pending_first_dm' } : {}),
     STATUS: status,
     LOG: 'logs/setup.log',

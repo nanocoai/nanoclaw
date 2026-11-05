@@ -44,7 +44,7 @@ It does not provide automatic restart or boot persistence.
 - `setup/register.ts` creates entities (`agent_groups`, `messaging_groups`, `messaging_group_agents`) in `data/v2.db`
 - Accepts `--platform-id` flag
 - `getMessagingGroupAgentByPair()` prevents duplicate wiring
-- `setup/verify.ts` checks the central DB (counts agent groups with wiring)
+- `setup/verify.ts` checks the central DB (counts agent groups with wiring) and prints `OWNER: present|missing`; a missing owner never fails it
 
 ### Router Logging
 - `src/router.ts` logs `MESSAGE DROPPED` at WARN level when no agents wired, with actionable guidance

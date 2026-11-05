@@ -5,6 +5,8 @@ import type { DbDriver } from '../src/db/driver.js';
 
 export interface CentralDbInspection {
   displayName: string | null;
+  /** Global owners. init-cli-agent grants none, so a terminal-only install has zero. */
+  owners: number;
   registeredGroups: number;
   derivedGroups: number;
 }
@@ -20,7 +22,7 @@ function isMissingSqliteFile(error: unknown): boolean {
 
 /** Read-only setup inspection through the installed central-DB composition. */
 export async function inspectCentralDb(projectRoot: string): Promise<CentralDbInspection> {
-  const result: CentralDbInspection = { displayName: null, registeredGroups: 0, derivedGroups: 0 };
+  const result: CentralDbInspection = { displayName: null, owners: 0, registeredGroups: 0, derivedGroups: 0 };
   const dbPath = path.join(projectRoot, 'data', 'v2.db');
 
   let db: DbDriver;
@@ -35,6 +37,12 @@ export async function inspectCentralDb(projectRoot: string): Promise<CentralDbIn
     if (await db.hasTable('users')) {
       const row = await db.get<{ display_name: string }>(`SELECT display_name FROM users WHERE id = 'cli:local'`);
       result.displayName = row?.display_name?.trim() || null;
+    }
+    if (await db.hasTable('user_roles')) {
+      const row = await db.get<{ count: number }>(
+        `SELECT COUNT(*) AS count FROM user_roles WHERE role = 'owner' AND agent_group_id IS NULL`,
+      );
+      result.owners = Number(row?.count ?? 0);
     }
     if ((await db.hasTable('agent_groups')) && (await db.hasTable('messaging_group_agents'))) {
       const row = await db.get<{ count: number }>(
