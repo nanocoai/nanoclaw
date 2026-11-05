@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Restart this checkout and require a response from a new host instance.
-# Exits 2 when no service or nohup launcher is installed for it.
 set -euo pipefail
+# Exits 2 only when no service or nohup launcher is installed for it: callers
+# skip the restart on 2. Any other failure that returns 2 exits 1.
+not_installed=false
+trap 'rc=$?; if [ "$rc" = 2 ] && [ "$not_installed" = false ]; then exit 1; fi' EXIT
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
 # Always derive labels from this script's checkout, even when called elsewhere.
@@ -29,17 +32,16 @@ restart_darwin() {
   domain="gui/$(id -u)"
   plist="$HOME/Library/LaunchAgents/${label}.plist"
 
-  # A launchctl failure keeps its code, except 2: callers read that as "not
-  # installed".
   if launchctl print "$domain/$label" >/dev/null 2>&1; then
-    pid="$(launchctl kickstart -k -p "$domain/$label")" || return $(($? == 2 ? 1 : $?))
+    pid="$(launchctl kickstart -k -p "$domain/$label")" || return $?
   elif [ -f "$plist" ]; then
     # `kickstart` cannot load an installed-but-unloaded job. Bootstrap the
     # plist first, then demand-start it in case RunAtLoad remains pended.
-    launchctl bootstrap "$domain" "$plist" || return $(($? == 2 ? 1 : $?))
-    pid="$(launchctl kickstart -p "$domain/$label")" || return $(($? == 2 ? 1 : $?))
+    launchctl bootstrap "$domain" "$plist" || return $?
+    pid="$(launchctl kickstart -p "$domain/$label")" || return $?
   else
     echo "NanoClaw service is not installed. Run the setup service step first." >&2
+    not_installed=true
     return 2
   fi
 }
@@ -79,7 +81,13 @@ if [ "$restarted" = false ] && [ -x "$root/start-nanoclaw.sh" ]; then
 fi
 
 if [ "$restarted" = false ]; then
+  # A unit systemctl couldn't see (no user bus) is still installed.
+  if [ -n "${unit:-}" ] && { [ -f "$HOME/.config/systemd/user/$unit.service" ] || [ -f "/etc/systemd/system/$unit.service" ]; }; then
+    echo "nanoclaw: $unit is installed, but systemctl could not restart it" >&2
+    exit 1
+  fi
   echo "nanoclaw: no installed service or nohup launcher to restart" >&2
+  not_installed=true
   exit 2
 fi
 

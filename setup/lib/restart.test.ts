@@ -94,7 +94,10 @@ echo $! > ${JSON.stringify(path.join(root, 'nanoclaw.pid'))}
 
   // provider-auth tells "nothing to restart" apart from a failed restart by
   // this code, so only a missing service may return it.
-  function runRestart(platform: string, launchctl: string): ReturnType<typeof spawnSync> {
+  function runRestart(
+    platform: string,
+    { launchctl = 'exit 1', systemctl = 'exit 1', userUnit = false } = {},
+  ): ReturnType<typeof spawnSync> {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-restart-'));
     roots.push(root);
     const lib = path.join(root, 'setup', 'lib');
@@ -106,8 +109,17 @@ echo $! > ${JSON.stringify(path.join(root, 'nanoclaw.pid'))}
       fs.copyFileSync(new URL(`./${name}`, import.meta.url), path.join(lib, name));
     }
     fs.writeFileSync(path.join(bin, 'uname'), `#!/bin/sh\necho ${platform}\n`, { mode: 0o755 });
-    fs.writeFileSync(path.join(bin, 'systemctl'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    fs.writeFileSync(path.join(bin, 'systemctl'), `#!/bin/sh\n${systemctl}\n`, { mode: 0o755 });
     fs.writeFileSync(path.join(bin, 'launchctl'), `#!/bin/sh\n${launchctl}\n`, { mode: 0o755 });
+    if (userUnit) {
+      const unitDir = path.join(root, '.config', 'systemd', 'user');
+      const unit = execFileSync('bash', ['-c', `source ${path.join(lib, 'install-slug.sh')}; systemd_unit`], {
+        env: { ...process.env, NANOCLAW_PROJECT_ROOT: root },
+        encoding: 'utf8',
+      });
+      fs.mkdirSync(unitDir, { recursive: true });
+      fs.writeFileSync(path.join(unitDir, `${unit}.service`), '[Service]\n');
+    }
     return spawnSync('/bin/bash', [path.join(lib, 'restart.sh')], {
       cwd: root,
       env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}`, HOME: root },
@@ -117,13 +129,28 @@ echo $! > ${JSON.stringify(path.join(root, 'nanoclaw.pid'))}
   }
 
   it('exits 2 when neither systemd nor the nohup launcher runs the install', () => {
-    const result = runRestart('Linux', 'exit 1');
+    const result = runRestart('Linux');
     expect(result.status).toBe(2);
     expect(result.stderr).toContain('no installed service or nohup launcher');
   });
 
+  // An installed unit that systemctl can't be asked about (no user bus, e.g.
+  // without XDG_RUNTIME_DIR) is a failed restart, not a missing service.
+  it('does not pass an installed unit that systemctl cannot reach off as a missing service', () => {
+    const result = runRestart('Linux', { userUnit: true });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('is installed');
+  });
+
+  it.each([
+    ['restart', 'case "$2" in cat) exit 0 ;; *) exit 2 ;; esac'],
+    ['show', 'case "$2" in show) exit 2 ;; *) exit 0 ;; esac'],
+  ])('does not pass a failed systemctl %s off as a missing service', (_step, systemctl) => {
+    expect(runRestart('Linux', { systemctl }).status).toBe(1);
+  });
+
   it('does not pass a launchctl failure off as a missing service', () => {
-    const result = runRestart('Darwin', 'case "$1" in print) exit 0 ;; *) exit 2 ;; esac');
+    const result = runRestart('Darwin', { launchctl: 'case "$1" in print) exit 0 ;; *) exit 2 ;; esac' });
     expect(result.status).toBe(1);
   });
 });
