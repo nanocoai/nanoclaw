@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1827,5 +1827,51 @@ describe('referenceProse (reference-floor slice)', () => {
     expect(res.referenceProse).toContain('## Troubleshooting');
     expect(res.referenceProse).toContain('## Alternatives');
     expect(res.referenceProse).not.toContain('## Apply');
+  });
+});
+
+// An install that predates setup's jq step reaches a jq run with no jq: the
+// step should say what to install, not fail as an opaque exit 127.
+describe('a run that pipes through jq', () => {
+  let jskill: string;
+  let jroot: string;
+  let bin: string;
+  beforeEach(() => {
+    jskill = mkdtempSync(join(tmpdir(), 'nc-jq-skill-'));
+    jroot = mkdtempSync(join(tmpdir(), 'nc-jq-proj-'));
+    bin = mkdtempSync(join(tmpdir(), 'nc-jq-bin-'));
+    writeFileSync(join(jroot, '.env'), '');
+    writeFileSync(
+      join(jskill, 'SKILL.md'),
+      '# jq\n\n```nc:run capture:dm effect:fetch\ncurl -s https://api.example.test/open | jq -er .id\n```\n',
+    );
+  });
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('says to install jq when the host has none, without running the step', async () => {
+    vi.stubEnv('PATH', bin);
+    const { cmds, exec } = recordingExec();
+    const res = await applySkill(jskill, jroot, { inputs: {}, exec });
+    expect(cmds).toEqual([]);
+    expect(res.agentTasks).toHaveLength(1);
+    expect(res.agentTasks[0].reason).toMatch(/needs jq/);
+    expect(res.agentTasks[0].reason).toContain('brew install jq');
+    expect(res.agentTasks[0].reason).toContain('sudo apt-get install -y jq');
+  });
+
+  it('runs as before when jq is on PATH', async () => {
+    writeFileSync(join(bin, 'jq'), '#!/bin/sh\n', { mode: 0o755 });
+    vi.stubEnv('PATH', bin);
+    const res = await applySkill(jskill, jroot, { inputs: {}, exec: () => 'D123\n' });
+    expect(res.agentTasks).toEqual([]);
+    expect(res.vars.dm).toBe('D123');
+  });
+
+  it('leaves a run that only mentions jq inside a word alone', async () => {
+    writeFileSync(join(jskill, 'SKILL.md'), '# word\n\n```nc:run capture:dm effect:fetch\necho jquery-ready\n```\n');
+    vi.stubEnv('PATH', bin);
+    const res = await applySkill(jskill, jroot, { inputs: {}, exec: () => 'ok\n' });
+    expect(res.agentTasks).toEqual([]);
+    expect(res.vars.dm).toBe('ok');
   });
 });

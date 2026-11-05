@@ -24,7 +24,7 @@
 
 import { execSync } from 'node:child_process';
 import { readFileSync, existsSync, writeFileSync, appendFileSync, copyFileSync, mkdirSync, rmSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, delimiter } from 'node:path';
 import { gitFetchBranchCommand } from './git-fetch-branch.js';
 import { gitShowToFileCommand } from './git-show-to-file.js';
 import { parseDirectives, promptVar, type Directive } from './skill-directives.js';
@@ -443,6 +443,16 @@ export function referenceProse(md: string): string {
   return sections.filter(Boolean).join('\n\n').trim();
 }
 
+// Setup installs jq, but an install from before that never ran the step, and
+// a run that pipes through a missing jq fails as an opaque exit 127.
+const JQ_RUN = /(^|[\s|;&(])jq(\s|$)/;
+const JQ_MISSING =
+  'This step needs jq, which is not installed. Install it (macOS: brew install jq; Debian, Ubuntu or WSL: sudo apt-get install -y jq), then run it again.';
+
+function onPath(name: string): boolean {
+  return (process.env.PATH ?? '').split(delimiter).some((dir) => dir !== '' && existsSync(join(dir, name)));
+}
+
 // A hardcoded `origin` breaks forks where the registry branch lives on
 // `upstream`. Generic mirror of channels-remote.sh: explicit override → the
 // first remote that actually has the branch → origin.
@@ -748,6 +758,7 @@ async function applyOne(
       break;
     }
     case 'run': {
+      if (d.body.some((cmd) => JQ_RUN.test(cmd)) && !onPath('jq')) throw new StepFailure(JQ_MISSING);
       // `capture:<var>` binds the command's stdout into a {{var}} — the twin of
       // `prompt` (which binds human input). Lets a run resolve a value from an
       // API (e.g. Slack conversations.open → the DM channel id) and feed it to a
