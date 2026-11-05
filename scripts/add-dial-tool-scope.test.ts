@@ -809,7 +809,8 @@ describe('add-dial-tool: shared-gateway and first-run wording', () => {
 
   it('says the upgrade guide’s Dial delete reaches a shared gateway’s other install, as REMOVE.md does', () => {
     const guide = read('.claude/skills/add-onecli/payload/docs/onecli-upgrades.md');
-    const dial = guide.slice(guide.indexOf('Then, on every upgrade, delete any Dial key'));
-    expect(dial.slice(0, dial.indexOf('```'))).toMatch(/shared with another install, that install loses Dial too/);
+    const dial = guide.slice(guide.indexOf('dial-key-check.sh --delete'));
+    const after = dial.slice(dial.indexOf('```') + 3).trimStart();
+    expect(after.slice(0, after.indexOf('\n\n'))).toMatch(/shared with another install, that install loses Dial too/);
   });
 });
