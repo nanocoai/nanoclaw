@@ -377,8 +377,7 @@ async function drainSession(session: Session): Promise<void> {
   }
 
   for (const msg of pending) {
-    // A parked row may still land as the session's first delivery.
-    const firstDelivery = delivered.size === 0 && parked.size === 0;
+    const firstDelivery = delivered.size === 0;
     const send = deliverMessage(msg, session);
     if (!(await settlesWithin(send, DELIVERY_DEADLINE_MS))) {
       parkOverdueDelivery(msg, session, agentGroup, send, firstDelivery);
@@ -773,9 +772,10 @@ async function deliverMessage(
 export interface PostDeliveryInfo {
   /**
    * True when this is the first message ever marked delivered in this
-   * session — exactly one row per session carries it. Every delivered row
-   * counts toward the flag (including system rows the hook itself never
-   * fires for); the hook only ever observes user-facing rows.
+   * session. One row carries it, or two when the first was parked past its
+   * delivery deadline and the next went out before it landed. Every
+   * delivered row counts toward the flag (including system rows the hook
+   * itself never fires for); the hook only ever observes user-facing rows.
    */
   firstDelivery: boolean;
 }

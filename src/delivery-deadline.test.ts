@@ -243,12 +243,11 @@ describe('delivery deadline', () => {
     ]);
   });
 
-  it('firstDelivery stays exactly-once when a parked first reply lands while a later drain is mid-send', async () => {
+  it('a parked first reply that then fails still leaves a row with firstDelivery', async () => {
     insertOutbound(session, 'out-a');
     const slowA = deferred<string>();
-    const slowB = deferred<string>();
-    recordingAdapter((text) => (text === 'out-a' ? slowA.promise : text === 'out-b' ? slowB.promise : undefined));
-    vi.spyOn(log, 'warn').mockImplementation(() => {});
+    recordingAdapter((text, call) => (text === 'out-a' && call === 1 ? slowA.promise : undefined));
+    const warn = vi.spyOn(log, 'warn').mockImplementation(() => {});
     const seen: Array<{ id: string; firstDelivery: boolean }> = [];
     registerPostDeliveryHook((msg, hookSession, { firstDelivery }) => {
       if (hookSession.id === session.id) seen.push({ id: msg.id, firstDelivery });
@@ -258,17 +257,21 @@ describe('delivery deadline', () => {
     await vi.advanceTimersByTimeAsync(DEADLINE_MS);
     await first.promise;
 
-    // B's drain reads the queue while nothing is delivered yet, then A lands.
+    // B goes out while A is parked; then A fails and its retry lands.
     insertOutbound(session, 'out-b');
-    const second = track(deliverSessionMessages(session));
-    slowA.resolve('pm-a');
-    await vi.waitFor(() => expect(seen).toEqual([{ id: 'out-a', firstDelivery: true }]));
-    slowB.resolve('pm-b');
-    await second.promise;
+    await deliverSessionMessages(session);
+    slowA.reject(new Error('socket hang up'));
+    await vi.waitFor(() =>
+      expect(warn).toHaveBeenCalledWith(
+        'Message delivery failed, will retry',
+        expect.objectContaining({ messageId: 'out-a' }),
+      ),
+    );
+    await deliverSessionMessages(session);
 
     expect(seen).toEqual([
-      { id: 'out-a', firstDelivery: true },
-      { id: 'out-b', firstDelivery: false },
+      { id: 'out-b', firstDelivery: true },
+      { id: 'out-a', firstDelivery: false },
     ]);
   });
 
