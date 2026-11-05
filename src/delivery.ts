@@ -772,10 +772,11 @@ async function deliverMessage(
 export interface PostDeliveryInfo {
   /**
    * True when this is the first message ever marked delivered in this
-   * session. One row carries it, or two when the first was parked past its
-   * delivery deadline and the next went out before it landed. Every
-   * delivered row counts toward the flag (including system rows the hook
-   * itself never fires for); the hook only ever observes user-facing rows.
+   * session. One row carries it, except while rows sent before any landed
+   * are parked past their delivery deadline: each of those, and the next
+   * row that goes out, can carry it too. Every delivered row counts toward
+   * the flag (including system rows the hook itself never fires for); the
+   * hook only ever observes user-facing rows.
    */
   firstDelivery: boolean;
 }
