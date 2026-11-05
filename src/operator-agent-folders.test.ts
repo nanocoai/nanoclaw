@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { isValidGroupFolder } from './group-folder.js';
-import { cliAgentFolder, displayNameProblem, dmAgentFolder } from './operator-agent-folders.js';
+import { cliAgentFolder, dmAgentFolder } from './operator-agent-folders.js';
 
 describe('operator agent folders', () => {
   it('derives the terminal and DM agent folders from the display name', () => {
@@ -9,31 +9,24 @@ describe('operator agent folders', () => {
     expect(dmAgentFolder('Alex Smith')).toBe('dm-with-alex-smith');
   });
 
-  it('accepts the longest name that fits both folders', () => {
-    const name = 'x'.repeat(54);
-    expect(isValidGroupFolder(cliAgentFolder(name))).toBe(true);
-    expect(displayNameProblem(name)).toBeUndefined();
+  // The folder is at most 63 characters, and the user never sees it, so a long
+  // name is cut to fit instead of being refused.
+  it.each([
+    ['terminal', cliAgentFolder],
+    ['DM', dmAgentFolder],
+  ])('fits any display name into a valid %s agent folder', (_agent, folderFor) => {
+    for (const name of [
+      'x'.repeat(200),
+      'Maria Fernanda de los Ángeles García-Villanueva Rodríguez',
+      'a'.repeat(53) + ' b c d e f',
+    ]) {
+      const folder = folderFor(name);
+      expect(isValidGroupFolder(folder), folder).toBe(true);
+      expect(folder.length).toBeLessThanOrEqual(63);
+    }
   });
 
-  it('refuses a name one character longer, naming the limit', () => {
-    const name = 'x'.repeat(55);
-    // The DM folder still fits: the terminal agent's longer prefix sets the limit.
-    expect(isValidGroupFolder(dmAgentFolder(name))).toBe(true);
-    expect(isValidGroupFolder(cliAgentFolder(name))).toBe(false);
-    expect(displayNameProblem(name)).toBe("That name is too long for your agent's folder. Use at most 54 characters.");
-  });
-
-  it('checks only the folders it is given', () => {
-    const name = 'x'.repeat(55);
-    expect(displayNameProblem(name, [dmAgentFolder])).toBeUndefined();
-    expect(displayNameProblem('x'.repeat(56), [dmAgentFolder])).toBe(
-      "That name is too long for your agent's folder. Use at most 55 characters.",
-    );
-  });
-
-  it('measures the folder, so spaces and punctuation that collapse do not count against the name', () => {
-    const name = 'Ab. '.repeat(15);
-    expect(name.length).toBe(60);
-    expect(displayNameProblem(name)).toBeUndefined();
+  it('never ends the folder on a separator when the cut lands on one', () => {
+    expect(cliAgentFolder('a'.repeat(53) + ' bcd')).toBe(`cli-with-${'a'.repeat(53)}`);
   });
 });

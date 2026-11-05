@@ -62,12 +62,9 @@ describe('scripts/init-cli-agent.ts', () => {
     expect(column('SELECT folder FROM agent_groups')).toEqual([`cli-with-${name}`]);
   }, 60_000);
 
-  it('refuses a display name one character longer, in one line, before writing anything', async () => {
-    const name = 'a'.repeat(55);
-    const r = await run(name);
-    expect(r.status).toBe(1);
-    expect(r.stderr).toBe(`Invalid group folder "cli-with-${name}" — too long: 64 characters, at most 63\n`);
-    expect(column('SELECT folder FROM agent_groups')).toEqual([]);
-    expect(column('SELECT id FROM users')).toEqual([]);
+  it('cuts a display name one character longer to fit the folder', async () => {
+    const r = await run('a'.repeat(55));
+    expect(r.status, r.stderr).toBe(0);
+    expect(column('SELECT folder FROM agent_groups')).toEqual([`cli-with-${'a'.repeat(54)}`]);
   }, 60_000);
 });

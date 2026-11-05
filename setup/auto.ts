@@ -110,7 +110,6 @@ import { ensureAnswer, fail, runQuietChild, runQuietStep, spawnQuiet } from './l
 import { emit as phEmit } from './lib/diagnostics.js';
 import { accentGreen, brandBody, brandBold, brandChip, dimWrap, note, wrapForGutter } from './lib/theme.js';
 import { isValidTimezone } from '../src/timezone.js';
-import { displayNameProblem, dmAgentFolder, type FolderFor } from '../src/operator-agent-folders.js';
 import { DEFAULT_AGENT_PROVIDER, TEMPLATES_DIR } from '../src/config.js';
 import { SocketTransport } from '../src/cli/socket-client.js';
 import { heartbeatPath } from '../src/session-manager.js';
@@ -185,25 +184,6 @@ async function main(): Promise<void> {
     });
   }
 
-  const skip = new Set(
-    (process.env.NANOCLAW_SKIP ?? '')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean),
-  );
-
-  // The display name only has to fit the folders this run can create: a
-  // skipped cli-agent step creates no terminal agent.
-  const operatorFolders = () => (skip.has('cli-agent') ? [dmAgentFolder] : undefined);
-  // Checked before any step, so a preset that can't be used costs no waiting.
-  // Wired agents skip the cli-agent step later on (see there).
-  const presetDisplayName = process.env.NANOCLAW_DISPLAY_NAME?.trim();
-  if (presetDisplayName && displayNameProblem(presetDisplayName, operatorFolders())) {
-    const noTerminalAgent = skip.has('cli-agent') || (await detectRegisteredGroups(process.cwd()));
-    const presetProblem = displayNameProblem(presetDisplayName, noTerminalAgent ? [dmAgentFolder] : undefined);
-    if (presetProblem) throw new Error(`NANOCLAW_DISPLAY_NAME (--display-name): ${presetProblem}`);
-  }
-
   printIntro();
   initProgressionLog();
   phEmit('auto_started');
@@ -238,6 +218,13 @@ async function main(): Promise<void> {
     });
     applyToEnv(configValues);
   }
+
+  const skip = new Set(
+    (process.env.NANOCLAW_SKIP ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
 
   // Offer removal when setup lands on an existing install. Skipped on every
   // resume path — both the fail() retry and the sg-docker re-exec pass
@@ -603,10 +590,9 @@ async function main(): Promise<void> {
   async function resolveDisplayName(): Promise<string> {
     if (displayName) return displayName;
     const preset = process.env.NANOCLAW_DISPLAY_NAME?.trim();
-    const saved = await detectExistingDisplayName(process.cwd());
-    const existing = saved && !displayNameProblem(saved, operatorFolders()) ? saved : undefined;
+    const existing = await detectExistingDisplayName(process.cwd());
     const fallback = process.env.USER?.trim() || 'Operator';
-    displayName = preset || existing || (await askDisplayName(fallback, operatorFolders()));
+    displayName = preset || existing || (await askDisplayName(fallback));
     return displayName;
   }
 
@@ -1696,13 +1682,12 @@ async function runTimezoneStep(): Promise<void> {
 
 // ─── prompts owned by the sequencer ────────────────────────────────────
 
-async function askDisplayName(fallback: string, folders?: readonly FolderFor[]): Promise<string> {
+async function askDisplayName(fallback: string): Promise<string> {
   const answer = ensureAnswer(
     await p.text({
       message: `What should your assistant call ${accentGreen('you')}?`,
       placeholder: fallback,
       defaultValue: fallback,
-      validate: (v) => displayNameProblem(v?.trim() || fallback, folders),
     }),
   );
   const value = (answer as string).trim() || fallback;

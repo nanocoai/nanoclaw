@@ -155,16 +155,15 @@ describe('scripts/init-first-agent.ts', () => {
     expect(fs.existsSync(path.join(cwd, 'data', 'v2.db'))).toBe(false);
   }, 60_000);
 
-  // dm-with- is 8 characters, so a 56-character name makes a 64-character folder.
-  it('refuses a display name too long for its dm-with-<name> folder before writing anything', async () => {
-    const name = 'a'.repeat(56);
-    const r = await run(['--display-name', name]);
-    expect(r.status).toBe(1);
-    expect(r.stderr).toBe(`Invalid group folder "dm-with-${name}" — too long: 64 characters, at most 63\n`);
+  // dm-with- is 8 characters, so a 56-character name would make a 64-character folder.
+  it('cuts a display name too long for its dm-with-<name> folder to fit', async () => {
+    const w = welcome();
+    const r = await run(['--display-name', 'a'.repeat(56)]);
+    expect(r.status, r.stderr).toBe(0);
+    await w;
     const db = new Database(path.join(cwd, 'data', 'v2.db'), { readonly: true });
     try {
-      expect(db.prepare('SELECT COUNT(*) AS c FROM agent_groups').get()).toEqual({ c: 0 });
-      expect(db.prepare('SELECT COUNT(*) AS c FROM users').get()).toEqual({ c: 0 });
+      expect(db.prepare('SELECT folder FROM agent_groups').all()).toEqual([{ folder: `dm-with-${'a'.repeat(55)}` }]);
     } finally {
       db.close();
     }
