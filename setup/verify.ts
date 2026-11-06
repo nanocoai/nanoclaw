@@ -229,7 +229,7 @@ export async function run(_args: string[]): Promise<void> {
   const slackJob = await readSlackJob(projectRoot);
   // A good manual Slack run leaves an old failed or expired job saved. A set-up
   // Slack with a chat wired after the job began shows it no longer applies.
-  // Only the welcome runs after wiring, and a retry keeps the first wiring time.
+  // Only the welcome runs after wiring, and a same-app retry keeps the first start.
   const slackJobState = slackJobStatus(slackJob);
   const slackJobReplaced =
     (slackJobState === 'failed' || slackJobState === 'expired') &&

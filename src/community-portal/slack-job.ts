@@ -186,7 +186,9 @@ export async function queueSlackJob(context: SlackJob['context'], root = process
     const job: SlackJob = {
       id: randomUUID(),
       status: app.botToken ? 'installing' : 'awaiting_approval',
-      createdAt: new Date().toISOString(),
+      // A retry keeps the first start: verify sets a failed job aside once a
+      // chat was wired after it, and a retry keeps the wiring it finds.
+      createdAt: samePrior ? samePrior.createdAt : new Date().toISOString(),
       expiresAt: samePrior ? samePrior.expiresAt : new Date(Date.now() + APPROVAL_WINDOW_MS).toISOString(),
       setupId: saved.setupId,
       origin: local.origin,
