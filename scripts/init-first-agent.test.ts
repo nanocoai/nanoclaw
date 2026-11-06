@@ -163,7 +163,21 @@ describe('scripts/init-first-agent.ts', () => {
     await w;
     const db = new Database(path.join(cwd, 'data', 'v2.db'), { readonly: true });
     try {
-      expect(db.prepare('SELECT folder FROM agent_groups').all()).toEqual([{ folder: `dm-with-${'a'.repeat(55)}` }]);
+      const rows = db.prepare('SELECT folder FROM agent_groups').all() as { folder: string }[];
+      expect(rows.map((row) => row.folder)).toEqual([expect.stringMatching(/^dm-with-a{48}_[0-9a-f]{6}$/)]);
+    } finally {
+      db.close();
+    }
+  }, 60_000);
+
+  it("never puts a second user with a longer name that starts the same into the first user's agent", async () => {
+    expect((await run(['--display-name', 'a'.repeat(55)])).status).toBe(0);
+    const second = ['--user-id', 'telegram:43', '--platform-id', 'telegram:43', '--role', 'member'];
+    const r = await run([...second, '--display-name', 'a'.repeat(55) + 'b']);
+    expect(r.status, r.stderr).toBe(0);
+    const db = new Database(path.join(cwd, 'data', 'v2.db'), { readonly: true });
+    try {
+      expect(db.prepare('SELECT COUNT(DISTINCT folder) AS c FROM agent_groups').get()).toEqual({ c: 2 });
     } finally {
       db.close();
     }

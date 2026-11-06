@@ -65,6 +65,6 @@ describe('scripts/init-cli-agent.ts', () => {
   it('cuts a display name one character longer to fit the folder', async () => {
     const r = await run('a'.repeat(55));
     expect(r.status, r.stderr).toBe(0);
-    expect(column('SELECT folder FROM agent_groups')).toEqual([`cli-with-${'a'.repeat(54)}`]);
+    expect(column('SELECT folder FROM agent_groups')).toEqual([expect.stringMatching(/^cli-with-a{47}_[0-9a-f]{6}$/)]);
   }, 60_000);
 });
