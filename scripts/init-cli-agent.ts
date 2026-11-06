@@ -33,9 +33,9 @@ import {
 } from '../src/db/messaging-groups.js';
 import { runMigrations } from '../src/db/migrations/index.js';
 import { assertValidGroupFolder } from '../src/group-folder.js';
-import { normalizeName } from '../src/modules/agent-to-agent/db/agent-destinations.js';
 import { upsertUser } from '../src/modules/permissions/db/users.js';
 import { initGroupFilesystem } from '../src/group-init.js';
+import { cliAgentFolder } from '../src/operator-agent-folders.js';
 import type { AgentGroup, MessagingGroup } from '../src/types.js';
 
 const CLI_CHANNEL = 'cli';
@@ -93,7 +93,7 @@ async function main(): Promise<void> {
   const now = new Date().toISOString();
 
   // 1. Agent group + filesystem, first, so a refused folder leaves nothing behind.
-  const folder = args.folder || `cli-with-${normalizeName(args.displayName)}`;
+  const folder = args.folder || cliAgentFolder(args.displayName);
   const pickedProvider = process.env.NANOCLAW_PICKED_PROVIDER?.trim().toLowerCase();
   let ag: AgentGroup | undefined = await getAgentGroupByFolder(folder);
   if (!ag) {
