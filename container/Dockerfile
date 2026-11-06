@@ -17,7 +17,7 @@
 # never require an image rebuild.
 
 # Pinned by digest so a rebuild cannot reuse a cached older base; bump tag and digest together.
-FROM node:22.23.4-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d
+FROM node:22.23.4-slim@sha256:5ec23b7c622b00547753bc6ffd78085dd868a68aeb41c8e0a1418f033e13d96d
 
 # ---- Build-time arguments ----------------------------------------------------
 # CJK fonts add ~200MB. Opt in only if you render Chinese/Japanese/Korean text.
@@ -108,8 +108,26 @@ ENV PATH="$PNPM_HOME:$PATH"
 # silently skips claude-code's native-binary postinstall and agent-browser's
 # bin chmod — the agent then crashes at runtime with "native binary not
 # installed". Keep this in lockstep with package.json's `packageManager`.
-ARG PNPM_VERSION=10.34.5
+ARG PNPM_VERSION=10.34.9
 RUN corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
+
+# npm bundles undici and ip-address and lags their security releases, and no
+# npm release has caught up yet. Pin npm 11 and swap in the patched copies;
+# drop the swap once npm itself bundles these versions or newer.
+ARG NPM_VERSION=11.21.1
+ARG UNDICI_VERSION=6.29.1
+ARG IP_ADDRESS_VERSION=10.7.5
+RUN npm install -g npm@${NPM_VERSION} \
+    && cd /tmp && npm pack --silent undici@${UNDICI_VERSION} ip-address@${IP_ADDRESS_VERSION} >/dev/null \
+    && for p in undici ip-address; do \
+         rm -rf /tmp/pk && mkdir /tmp/pk && tar -xzf /tmp/$p-*.tgz -C /tmp/pk \
+         && rm -rf /usr/local/lib/node_modules/npm/node_modules/$p \
+         && mv /tmp/pk/package /usr/local/lib/node_modules/npm/node_modules/$p \
+         || exit 1; \
+       done \
+    && test "$(node -p "require('/usr/local/lib/node_modules/npm/node_modules/undici/package.json').version")" = "${UNDICI_VERSION}" \
+    && test "$(node -p "require('/usr/local/lib/node_modules/npm/node_modules/ip-address/package.json').version")" = "${IP_ADDRESS_VERSION}" \
+    && rm -rf /tmp/*.tgz /tmp/pk /root/.npm
 
 # Global Node CLIs the agent invokes at runtime live in cli-tools.json so a
 # skill can add one with a json-merge instead of editing this Dockerfile.
