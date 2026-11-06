@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { storedAccountId, stubNeedsAccountId, withAccountId } from './onecli-chatgpt-stub.js';
+import { storedAccountId, stubNeedsAccountId, withAccountId, withoutPlanClaim } from './onecli-chatgpt-stub.js';
 
 const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
 const claims = (token: string) => JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString());
@@ -66,6 +66,35 @@ describe('OneCLI ChatGPT login stand-in', () => {
     const out = JSON.parse(withAccountId(JSON.stringify(auth), 'ws-1'));
     expect(out.tokens.account_id).toBe('ws-1');
     expect(out.tokens.id_token).toBe('a.!!!.c');
+  });
+
+  it("drops the stand-in's made-up plan claim and keeps everything else", () => {
+    const out = JSON.parse(withoutPlanClaim(withAccountId(stub(), 'ws-1')));
+    expect(claims(out.tokens.id_token)).toEqual({
+      sub: 'onecli-managed',
+      'https://api.openai.com/auth': { chatgpt_user_id: 'onecli-managed', chatgpt_account_id: 'ws-1' },
+    });
+    expect(out.tokens.id_token.split('.')[2]).toBe('c2ln');
+    expect(out.tokens.access_token).toBe('onecli-managed');
+    expect(out.tokens.account_id).toBe('ws-1');
+    expect(out.last_refresh).toBe('2026-10-19T00:00:00.000Z');
+  });
+
+  it('keeps plan claims it did not make up, and other content, unchanged', () => {
+    const real = JSON.parse(stub());
+    real.tokens.id_token = `${encode({ alg: 'HS256' })}.${encode({
+      'https://api.openai.com/auth': { chatgpt_plan_type: 'plus', chatgpt_user_id: 'user-1' },
+    })}.c2ln`;
+    const unreadable = JSON.parse(stub());
+    unreadable.tokens.id_token = 'a.!!!.c';
+    for (const content of [
+      JSON.stringify(real),
+      JSON.stringify(unreadable),
+      JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: 'onecli-managed' }),
+      'plain',
+    ]) {
+      expect(withoutPlanClaim(content)).toBe(content);
+    }
   });
 
   it('returns the stored id only when every stored ChatGPT login names the same one', () => {
