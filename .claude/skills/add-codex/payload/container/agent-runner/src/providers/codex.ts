@@ -289,6 +289,14 @@ async function* runOneTurn(
     const params = n.params ?? {};
     buffer.push({ type: 'activity' });
 
+    // Codex also streams every sub-agent thread it spawns on this connection.
+    // Their work keeps the turn alive, but only this thread's events may
+    // retarget, fill or end it.
+    if (typeof params.threadId === 'string' && params.threadId !== threadId) {
+      kick();
+      return;
+    }
+
     switch (method) {
       case 'thread/started': {
         const thread = params.thread as { id?: string } | undefined;
