@@ -141,6 +141,7 @@ export async function run(_args: string[]): Promise<void> {
     'TELEGRAM_BOT_TOKEN',
     'SLACK_BOT_TOKEN',
     'SLACK_APP_TOKEN',
+    'SLACK_SIGNING_SECRET',
     'DISCORD_BOT_TOKEN',
     'GITHUB_TOKEN',
     'LINEAR_API_KEY',
@@ -168,7 +169,9 @@ export async function run(_args: string[]): Promise<void> {
   // Token-based channels
   if (has('DISCORD_BOT_TOKEN')) channelAuth.discord = 'configured';
   if (has('TELEGRAM_BOT_TOKEN')) channelAuth.telegram = 'configured';
-  if (has('SLACK_BOT_TOKEN') && has('SLACK_APP_TOKEN')) channelAuth.slack = 'configured';
+  // Socket Mode needs the app token; webhook delivery uses the signing secret.
+  if (has('SLACK_BOT_TOKEN') && (has('SLACK_APP_TOKEN') || has('SLACK_SIGNING_SECRET')))
+    channelAuth.slack = 'configured';
   if (has('GITHUB_TOKEN')) channelAuth.github = 'configured';
   if (has('LINEAR_API_KEY')) channelAuth.linear = 'configured';
   if (has('GCHAT_CREDENTIALS')) channelAuth.gchat = 'configured';
