@@ -39,9 +39,17 @@ describe('operator agent folders', () => {
     const first = folderFor('a'.repeat(56));
     expect(folderFor('a'.repeat(56) + 'b')).not.toBe(first);
     expect(folderFor('a'.repeat(55) + 'b')).not.toBe(first);
-    expect(first).toMatch(/_[0-9a-f]{6}$/);
+    expect(first).toMatch(/_[0-9a-f]{12}$/);
     // The hash is of the normalized name, as the folder itself is.
     expect(folderFor('A'.repeat(56))).toBe(first);
+  });
+
+  // These two shared the 6-hex hash 32c837.
+  it.each([
+    ['terminal', cliAgentFolder],
+    ['DM', dmAgentFolder],
+  ])('keeps the hash long enough that a found 6-hex pair gets different %s agent folders', (_agent, folderFor) => {
+    expect(folderFor('a'.repeat(56) + '3549')).not.toBe(folderFor('a'.repeat(56) + '3730'));
   });
 
   it.each([
@@ -58,11 +66,11 @@ describe('operator agent folders', () => {
   // Pinned, so a later change can't move an existing agent's folder.
   it('hashes the whole normalized name with sha256', () => {
     const name = 'A'.repeat(28) + '!! ' + 'a'.repeat(28);
-    expect(dmAgentFolder(name)).toBe(`dm-with-${'a'.repeat(28)}-${'a'.repeat(19)}_b132cd`);
-    expect(cliAgentFolder(name)).toBe(`cli-with-${'a'.repeat(28)}-${'a'.repeat(18)}_b132cd`);
+    expect(dmAgentFolder(name)).toBe(`dm-with-${'a'.repeat(28)}-${'a'.repeat(13)}_b132cde47756`);
+    expect(cliAgentFolder(name)).toBe(`cli-with-${'a'.repeat(28)}-${'a'.repeat(12)}_b132cde47756`);
   });
 
   it('never leaves a dash before the hash when the cut lands on one', () => {
-    expect(cliAgentFolder('a'.repeat(46) + ' bcdefghijk')).toMatch(/^cli-with-a{46}_[0-9a-f]{6}$/);
+    expect(cliAgentFolder('a'.repeat(40) + ' bcdefghijklmnopq')).toMatch(/^cli-with-a{40}_[0-9a-f]{12}$/);
   });
 });

@@ -164,7 +164,7 @@ describe('scripts/init-first-agent.ts', () => {
     const db = new Database(path.join(cwd, 'data', 'v2.db'), { readonly: true });
     try {
       const rows = db.prepare('SELECT folder FROM agent_groups').all() as { folder: string }[];
-      expect(rows.map((row) => row.folder)).toEqual([expect.stringMatching(/^dm-with-a{48}_[0-9a-f]{6}$/)]);
+      expect(rows.map((row) => row.folder)).toEqual([expect.stringMatching(/^dm-with-a{42}_[0-9a-f]{12}$/)]);
     } finally {
       db.close();
     }
