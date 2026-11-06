@@ -1077,10 +1077,16 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         for (let i = 0; i < chunks.length; i++) {
           const chunk = chunks[i];
           const attachFiles = i === 0 && fileUploads && fileUploads.length > 0;
-          const result = await adapter.postMessage(
-            tid,
-            attachFiles ? { markdown: chunk, files: fileUploads } : { markdown: chunk },
-          );
+          const result = await adapter
+            .postMessage(tid, attachFiles ? { markdown: chunk, files: fileUploads } : { markdown: chunk })
+            .catch((err: unknown) => {
+              // The earlier chunks are posted, and a retry posts them again:
+              // delivery keeps this send on its short retry cap.
+              if (i === 0) throw err;
+              throw Object.assign(new Error(`Reply partly sent (${i} of ${chunks.length} chunks)`, { cause: err }), {
+                code: 'PARTIAL_SEND',
+              });
+            });
           if (i === 0) firstId = result?.id;
         }
         return firstId;
