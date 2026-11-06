@@ -443,6 +443,14 @@ export function referenceProse(md: string): string {
   return sections.filter(Boolean).join('\n\n').trim();
 }
 
+// Setup installs jq, but an install from before that never ran the step, and
+// a run that pipes through a missing jq fails as an opaque exit 127. Only the
+// shell's own "not found" (bash, then dash) names jq, so any other failure keeps
+// its message, wherever the exec ran. A localized shell keeps its own message.
+const JQ_NOT_FOUND = /(^|\s)jq: (command )?not found/;
+const JQ_MISSING =
+  'This step needs jq, which is not installed. Install it (macOS: brew install jq; Debian, Ubuntu or WSL: sudo apt-get install -y jq), then run it again.';
+
 // A hardcoded `origin` breaks forks where the registry branch lives on
 // `upstream`. Generic mirror of channels-remote.sh: explicit override → the
 // first remote that actually has the branch → origin.
@@ -748,6 +756,13 @@ async function applyOne(
       break;
     }
     case 'run': {
+      const run = async (cmd: string): Promise<string | void> => {
+        try {
+          return await exec(cmd);
+        } catch (e) {
+          throw e instanceof Error && JQ_NOT_FOUND.test(e.message) ? new StepFailure(JQ_MISSING) : e;
+        }
+      };
       // `capture:<var>` binds the command's stdout into a {{var}} — the twin of
       // `prompt` (which binds human input). Lets a run resolve a value from an
       // API (e.g. Slack conversations.open → the DM channel id) and feed it to a
@@ -765,7 +780,7 @@ async function applyOne(
       // (a restart, a pairing/QR step, a wire) that follow — a broken local
       // config or an un-registered app never reaches a doomed restart/QR.
       if (d.attrs.effect === 'check') {
-        for (const cmd of d.body) await exec(substitute(cmd, vars));
+        for (const cmd of d.body) await run(substitute(cmd, vars));
         break;
       }
       // effect:step runs a long-running, operator-interactive step (a pairing
@@ -796,7 +811,7 @@ async function applyOne(
         // call `ncl ... {{owner_email}}` to wire from collected input. A command
         // with no {{...}} (build/test) is returned unchanged; an unresolved var
         // throws → caught → deferred (the prompt hasn't been answered yet).
-        const out = await exec(substitute(cmd, vars));
+        const out = await run(substitute(cmd, vars));
         // Last command wins for capture (a capture run should be a single command).
         // bindCapture binds stdout-as-is OR a multi-field JSON spec, and enforces
         // validate:<re> — a mismatch / unparseable JSON throws → bounced to an agent.
