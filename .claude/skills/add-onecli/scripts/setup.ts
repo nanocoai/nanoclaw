@@ -18,10 +18,8 @@ import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-import { readEnvFile } from '../../../../src/env.js';
 import { log } from '../../../../src/log.js';
 import { emitStatus } from '../../../../setup/status.js';
-import { advertisedProxy, remoteProxyHint } from './remote-proxy.js';
 import { login } from './secret-input.js';
 
 const LOCAL_BIN = path.join(os.homedir(), '.local', 'bin');
@@ -455,11 +453,6 @@ export async function run(args: string[]): Promise<void> {
     const v1Status = await verifyGatewayV1(remoteUrl);
     const v1Hint = gatewayV1Hint(v1Status);
     const readinessError = gatewayReadinessError(v1Status);
-    // A remote gateway must hand agents its own address, not their machine's.
-    // A rerun without the token still has the key saved above.
-    const apiKey = remoteToken || process.env.ONECLI_API_KEY || readEnvFile(['ONECLI_API_KEY']).ONECLI_API_KEY;
-    const proxyHint = readinessError ? null : remoteProxyHint(remoteUrl, await advertisedProxy(remoteUrl, apiKey));
-    if (proxyHint) log.warn(proxyHint);
     emitStatus('ONECLI', {
       INSTALLED: true,
       REMOTE: true,
@@ -468,7 +461,6 @@ export async function run(args: string[]): Promise<void> {
       STATUS: readinessError ? 'failed' : 'success',
       ...(readinessError ? { ERROR: 'gateway_not_ready', HINT: readinessError } : {}),
       ...(v1Hint ? { GATEWAY_HINT: v1Hint } : {}),
-      ...(proxyHint ? { PROXY_HINT: proxyHint } : {}),
       LOG: 'logs/setup.log',
     });
     if (readinessError) throw new Error(readinessError);
