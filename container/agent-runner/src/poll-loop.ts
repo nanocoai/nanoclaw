@@ -154,19 +154,28 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       continue;
     }
 
-    const ids = messages.map((m) => m.id);
+    // Command handling: the host router gates filtered and unauthorized
+    // admin commands before they reach the container. The runner handles
+    // /clear (session reset) and /upload-trace directly.
+    const isClear = (m: MessageInRow) => (m.kind === 'chat' || m.kind === 'chat-sdk') && isClearCommand(m);
+    // isSessionEcho guard: a copied "/upload-trace" from another session is
+    // ambient context, never a runner command (isClearCommand self-guards).
+    const isUploadTrace = (m: MessageInRow) =>
+      (m.kind === 'chat' || m.kind === 'chat-sdk') && !isSessionEcho(m) && isUploadTraceCommand(m);
+    const isCommand = (m: MessageInRow) => isClear(m) || isUploadTrace(m);
+    // Context rows beside a command never wake a turn on their own (the
+    // accumulate gate above): they stay pending for the next message.
+    const batch = messages.some((m) => m.trigger === 1 && !isCommand(m)) ? messages : messages.filter(isCommand);
+    const ids = batch.map((m) => m.id);
     markProcessing(ids);
 
-    const routing = extractRouting(messages);
+    const routing = extractRouting(batch);
 
-    // Command handling: the host router gates filtered and unauthorized
-    // admin commands before they reach the container. The only command
-    // the runner handles directly is /clear (session reset).
     const normalMessages: MessageInRow[] = [];
     const commandIds: string[] = [];
 
-    for (const msg of messages) {
-      if ((msg.kind === 'chat' || msg.kind === 'chat-sdk') && isClearCommand(msg)) {
+    for (const msg of batch) {
+      if (isClear(msg)) {
         log('Clearing session (resetting continuation)');
         continuation = undefined;
         clearContinuation(config.providerName);
@@ -181,9 +190,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         commandIds.push(msg.id);
         continue;
       }
-      // isSessionEcho guard: a copied "/upload-trace" from another session is
-      // ambient context, never a runner command (isClearCommand self-guards).
-      if ((msg.kind === 'chat' || msg.kind === 'chat-sdk') && !isSessionEcho(msg) && isUploadTraceCommand(msg)) {
+      if (isUploadTrace(msg)) {
         log('Uploading session trace to Hugging Face');
         await writeMessageOut({
           id: generateId(),
@@ -206,7 +213,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     if (normalMessages.length === 0) {
       const remainingIds = ids.filter((id) => !commandIds.includes(id));
       if (remainingIds.length > 0) markCompleted(remainingIds);
-      log(`All ${messages.length} message(s) were commands, skipping query`);
+      log(`All ${batch.length} message(s) were commands, skipping query`);
       continue;
     }
 
