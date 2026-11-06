@@ -160,8 +160,11 @@ export type ProviderEvent =
    * `text` is model output; `error` is an optional user-facing provider error
    * (e.g. a billing/quota notice), kept separate from model scratchpad and
    * raw diagnostics. Failures without `error` receive a generic notice.
+   * `answeredInputs` counts the inputs (prompt and pushes, oldest first) this
+   * result answers when it is more than one: a provider that folds pushes
+   * into the running turn reports them here. Absent means one.
    */
-  | { type: 'result'; text: string | null; isError?: boolean; error?: string }
+  | { type: 'result'; text: string | null; isError?: boolean; error?: string; answeredInputs?: number }
   /**
    * An assistant text segment emitted mid-turn (e.g. between tool calls).
    * The SDK's final `result` carries only the LAST assistant text, so a
