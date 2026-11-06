@@ -9,12 +9,15 @@
  * Same walk-through, same vault-only invariant, idempotent (each provider's
  * runAuth short-circuits when its secret already exists) — and unlike
  * re-running full setup, it touches nothing else: no install-wide default
- * provider rewrite, no service changes. Provider install skills call this as
- * their auth step so there is exactly one auth implementation per provider.
+ * provider rewrite. An install also rebuilds the host and restarts the
+ * service, so the running host knows the provider. Provider install skills
+ * call this as their auth step so there is exactly one auth implementation
+ * per provider.
  * Pass --refresh to intentionally replace the installed payload and update its
  * dependency pins before authentication.
  */
 import { buildContainerImage } from './lib/container-build.js';
+import { HOST_RESTART_COMMAND, restartHost } from './lib/host-restart.js';
 import * as p from '@clack/prompts';
 import { HARDENED_IMAGE_ENV_KEY, readImageSource, writeImageSource } from './lib/registry-state.js';
 import { getSetupProvider, listSetupProviders } from './providers/registry.js';
@@ -76,6 +79,9 @@ export async function run(args: string[]): Promise<void> {
         if (rebuild.hint) console.error(rebuild.hint);
         process.exit(1);
       }
+      // Before auth: a failed sign-in exits the process, and a re-run finds the
+      // provider registered and only re-authenticates, so it never restarts.
+      restartHostFor(name);
     }
     // This process imported src/provider-contracts/index.ts at startup, and
     // ESM caches the barrel, so a line appended to it now never evaluates
@@ -108,4 +114,26 @@ export async function run(args: string[]): Promise<void> {
 
   await entry.runAuth();
   await entry.runInstallCheck?.();
+}
+
+const SERVICE_STEP_COMMAND = 'pnpm exec tsx setup/index.ts --step service';
+
+function restartHostFor(name: string): void {
+  console.log(`Restarting NanoClaw so the running host loads ${name}…`);
+  const restart = restartHost();
+  if (restart.status === 'restarted') return;
+  if (restart.status === 'no-service') {
+    // Nothing failed: the service step starts the build made above. A host
+    // started by hand is not a service, so name it in the same line.
+    console.log(
+      `No NanoClaw service is installed, so nothing was restarted. To use ${name}, start one with ${SERVICE_STEP_COMMAND} (or restart a host you started by hand).`,
+    );
+    return;
+  }
+  // Auth only talks to the gateway, so it still runs; the exit code reports
+  // the restart the operator has to finish by hand.
+  console.error(
+    `Couldn't restart NanoClaw (${restart.message}); it runs without ${name} until you run: ${HOST_RESTART_COMMAND}`,
+  );
+  process.exitCode = 1;
 }
