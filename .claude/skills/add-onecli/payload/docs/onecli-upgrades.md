@@ -233,7 +233,7 @@ add-onecli skill.
 
 ## Remote gateway
 
-A gateway on another host must hand agents its own address. OneCLI 1.45 defaults `GATEWAY_BASE_URL` to `host.docker.internal:10255`, which an agent reads as its own machine, so every model call hangs with no reply. Setup warns when a remote gateway hands agents that address or a loopback one, and prints the line to set. On the gateway host, put it in `~/.onecli/.env`, with the gateway host's name or IP as agents reach it and its published gateway port (10255, or your `ONECLI_GATEWAY_PORT`). This keeps the file's other settings:
+A gateway on another host must hand agents its own address. OneCLI 1.45 defaults `GATEWAY_BASE_URL` to `host.docker.internal:10255`, which an agent reads as its own machine, so every model call hangs with no reply. Setup warns when a remote gateway hands agents that address or a loopback or wildcard one, and prints the line to set. On the gateway host, put it in `~/.onecli/.env`, with the gateway host's name or IP as agents reach it and its published gateway port (10255, or your `ONECLI_GATEWAY_PORT`). This keeps the file's other settings:
 
 ```bash
 cd ~/.onecli && (umask 077 && L='GATEWAY_BASE_URL=<gateway-host>:<gateway port>' && touch .env && { grep -v '^[[:space:]]*GATEWAY_BASE_URL[[:space:]]*=' .env; echo "$L"; } > .env.new && cat .env.new > .env && rm .env.new)
@@ -242,7 +242,7 @@ cd ~/.onecli && (umask 077 && L='GATEWAY_BASE_URL=<gateway-host>:<gateway port>'
 Recreating the container uses only this file and the compose defaults, so first check that `ONECLI_VERSION` there is the pin (step 2). Also save there every setting you gave on the command line when you started the gateway, such as `ONECLI_BIND_HOST`, `ONECLI_GATEWAY_PORT`, `ONECLI_APP_PORT` or `POSTGRES_PASSWORD`. Otherwise the gateway comes back on `latest`, on loopback only, or unable to reach its database. A restart keeps the old environment, so recreate it; `--no-deps` leaves the database container alone:
 
 ```bash
-cd ~/.onecli && env -u ONECLI_VERSION docker compose up -d --no-deps onecli
+cd ~/.onecli && env -u ONECLI_VERSION -u GATEWAY_BASE_URL docker compose up -d --no-deps onecli
 docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "${ONECLI_GATEWAY_CONTAINER:-onecli}" | grep '^GATEWAY_BASE_URL='
 ```
 

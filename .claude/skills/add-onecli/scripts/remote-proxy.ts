@@ -27,20 +27,29 @@ export async function advertisedProxy(
   }
 }
 
-/**
- * The warning, with the line to set, when a remote gateway hands agents
- * host.docker.internal or a loopback address; else null. Host and port only:
- * the proxy URL carries the agent's token.
- */
-export function remoteProxyHint(gatewayUrl: string, proxy: URL | null): string | null {
-  const host = proxy?.hostname.replace(/^\[|\]$/g, '').toLowerCase() ?? '';
-  const agentLocal =
-    host === 'host.docker.internal' ||
+/** Loopback, localhost or a wildcard address: whoever uses it reaches its own machine. */
+function ownMachine(hostname: string): boolean {
+  const host = hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  return (
     host === 'localhost' ||
     host === '::1' ||
+    host === '0.0.0.0' ||
+    host === '::' ||
     /^127\.\d+\.\d+\.\d+$/.test(host) ||
-    /^::ffff:7f[0-9a-f]{2}:/.test(host);
-  if (!proxy || !agentLocal) return null;
+    /^::ffff:7f[0-9a-f]{2}:/.test(host)
+  );
+}
+
+/**
+ * The warning, with the line to set, when a remote gateway hands agents
+ * host.docker.internal or another address of their own machine; else null.
+ * A gateway URL on this machine is local, so host.docker.internal is right.
+ * Host and port only: the proxy URL carries the agent's token.
+ */
+export function remoteProxyHint(gatewayUrl: string, proxy: URL | null): string | null {
+  if (!proxy || ownMachine(new URL(gatewayUrl).hostname)) return null;
+  const host = proxy.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  if (host !== 'host.docker.internal' && !ownMachine(host)) return null;
   const port = proxy.port || (proxy.protocol === 'https:' ? '443' : '80');
   return (
     `The remote OneCLI gateway tells agents to use the proxy ${host}:${port}, their own machine, so model calls ` +

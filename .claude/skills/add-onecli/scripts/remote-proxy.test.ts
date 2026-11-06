@@ -12,6 +12,8 @@ describe('remote gateway proxy hint', () => {
     'http://x:aoc_secret@localhost:10255',
     'http://x:aoc_secret@[::1]:10255',
     'http://x:aoc_secret@[::ffff:127.0.0.1]:10255',
+    'http://x:aoc_secret@0.0.0.0:10255',
+    'http://x:aoc_secret@[::]:10255',
   ])('names the exact line to set when agents are sent to their own machine (%s)', (advertised) => {
     const hint = remoteProxyHint(GATEWAY, proxy(advertised))!;
     expect(hint).toContain('GATEWAY_BASE_URL=gw.example.com:10255');
@@ -30,6 +32,15 @@ describe('remote gateway proxy hint', () => {
   it.each(['http://x:t@gw.example.com:10255', 'http://x:t@10.0.0.5:10255'])('says nothing for %s', (advertised) => {
     expect(remoteProxyHint(GATEWAY, proxy(advertised))).toBeNull();
   });
+
+  // A gateway reached at this machine's own address is local: host.docker.internal is right for it.
+  it.each(['http://127.0.0.1:10254', 'http://localhost:10254', 'http://0.0.0.0:10254', 'http://[::]:10254'])(
+    'says nothing when the gateway URL %s is this machine',
+    (gateway) => {
+      expect(remoteProxyHint(gateway, proxy('http://x:t@host.docker.internal:10255'))).toBeNull();
+      expect(remoteProxyHint(gateway, proxy('http://x:t@0.0.0.0:10255'))).toBeNull();
+    },
+  );
 
   it('says nothing when the proxy could not be read', () => {
     expect(remoteProxyHint(GATEWAY, null)).toBeNull();
