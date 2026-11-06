@@ -31,7 +31,7 @@ export function dockerAccessHint(
     commands: [
       ...installAcl,
       'sudo setfacl -m u:$(whoami):rw /var/run/docker.sock',
-      `rm -f '${breaker}'`,
+      `rm -f '${breaker.replace(/'/g, `'\\''`)}'`,
       `systemctl --user restart ${unit}`,
     ],
     note: `The setfacl fix lasts until Docker restarts. ${lasting}`,

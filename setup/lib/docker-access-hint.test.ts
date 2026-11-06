@@ -32,9 +32,11 @@ describe('dockerAccessHint', () => {
     ]);
   });
 
-  it('clears the crash backoff of the checkout the service runs from, quoted so a glob in the path matches nothing else', () => {
+  it('clears the crash backoff of the checkout the service runs from, quoted so a glob or quote in the path stays literal', () => {
     const globbed = dockerAccessHint({ ...stale, PROJECT_PATH: '/home/nc/nano[12]' }, unit, linux)!;
     expect(globbed.commands).toContain("rm -f '/home/nc/nano[12]/data/circuit-breaker.json'");
+    const quoted = dockerAccessHint({ ...stale, PROJECT_PATH: "/home/nc/my 'claw" }, unit, linux)!;
+    expect(quoted.commands).toContain(`rm -f '/home/nc/my '\\''claw/data/circuit-breaker.json'`);
     const unknown = dockerAccessHint({ DOCKER_GROUP_STALE: 'true' }, unit, linux)!;
     expect(unknown.commands).toContain("rm -f 'data/circuit-breaker.json'");
   });
