@@ -26,6 +26,7 @@ import {
 } from './container-runner.js';
 import type { SupervisedHandle } from './drivers/session-events.js';
 import { resetGatewayProvider } from './gateway-providers/index.js';
+import { LOCAL_PROXY_BYPASS } from './local-proxy-bypass.js';
 import { log } from './log.js';
 import type { VolumeMount } from './providers/provider-container-registry.js';
 import type { AgentGroup, Session } from './types.js';
@@ -182,6 +183,12 @@ describe('composeSessionSpec', () => {
       gateway: { env: { HTTPS_PROXY: 'http://gateway-must-win:15001' } },
     });
     expect(spec.containers[0].contributedEnv?.HTTPS_PROXY).toBe('http://gateway-must-win:15001');
+  });
+
+  it('adds a local-hop NO_PROXY when the gateway contributes a proxy', () => {
+    const spec = compose({ gateway: { env: { HTTPS_PROXY: 'http://host.docker.internal:10255' } } });
+    expect(spec.containers[0].contributedEnv?.NO_PROXY).toBe(LOCAL_PROXY_BYPASS);
+    expect(spec.containers[0].contributedEnv?.no_proxy).toBe(LOCAL_PROXY_BYPASS);
   });
 
   it('gateway mounts merge collision-free, shadowing a composed mount on the same target', () => {
