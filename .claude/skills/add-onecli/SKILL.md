@@ -46,6 +46,8 @@ The setup script safely reuses a healthy existing installation, installs the pin
 
 This integration supports exactly the gateway version pinned in `.claude/skills/add-onecli/versions.json` (`onecli-gateway`, today 1.45.0; not the `versions.json` at the project root). It uses the agent grants API, which OneCLI added in 1.44; older gateways do not have it, and OneCLI 2.x is not supported. Setup reuses an existing gateway without checking its version: follow [Upgrading the OneCLI gateway](payload/docs/onecli-upgrades.md) to check it and to move it to the pin. The CLI (`onecli-cli`, which needs 2.9 or later for `onecli agents grants`) and SDK (`onecli-sdk`) have their own pins.
 
+On Linux, when the installer binds a new local gateway to the Docker bridge (`docker0`), setup publishes its admin API and Postgres on `127.0.0.1` only. The gateway proxy port stays on the bridge. Any other bind, or one exported as `ONECLI_BIND_HOST` before setup, is left as chosen. Setup leaves a reused gateway's binds alone; `ADMIN_NOT_LOOPBACK` reports an admin API published off loopback. To update an existing gateway, follow the manual steps under "Verify the bind interface" in [docs/onecli-upgrades.md](payload/docs/onecli-upgrades.md).
+
 ```nc:run effect:external
 pnpm exec tsx .claude/skills/add-onecli/scripts/setup.ts
 ```
