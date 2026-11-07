@@ -256,9 +256,10 @@ export function wrapSqliteInbound(db: Database.Database, nextSequence = () => ne
         .prepare(
           `DELETE FROM messages_in
             WHERE channel_type = ? AND status = 'pending'
-              AND datetime(timestamp) < datetime(?)`,
+              AND datetime(timestamp) < datetime(?)
+          RETURNING id`,
         )
-        .run(channelType, before).changes;
+        .all(channelType, before) as Array<{ id: string }>;
       const overflow = db
         .prepare(
           `DELETE FROM messages_in
@@ -267,10 +268,11 @@ export function wrapSqliteInbound(db: Database.Database, nextSequence = () => ne
                 SELECT seq FROM messages_in
                  WHERE channel_type = ? AND status = 'pending'
                  ORDER BY seq DESC LIMIT ?
-              )`,
+              )
+          RETURNING id`,
         )
-        .run(channelType, channelType, keep).changes;
-      return expired + overflow;
+        .all(channelType, channelType, keep) as Array<{ id: string }>;
+      return [...expired, ...overflow].map((row) => row.id);
     },
     getInboundHistory: (limit) =>
       (

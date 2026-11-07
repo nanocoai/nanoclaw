@@ -215,7 +215,7 @@ async function maintainSessionMailbox(
   // MODULE-HOOK:cross-session-echo-prune:start
   try {
     const { pruneEchoBacklog } = await import('./modules/cross-session-context/index.js');
-    const pruned = pruneEchoBacklog(mailbox);
+    const pruned = pruneEchoBacklog(mailbox, { agentGroupId, sessionId: session.id });
     if (pruned > 0) log.info('Pruned session-echo backlog', { sessionId: session.id, pruned });
   } catch (err) {
     log.error('Echo backlog prune failed', { sessionId: session.id, err });

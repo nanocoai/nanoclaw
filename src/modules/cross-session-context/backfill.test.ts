@@ -10,6 +10,8 @@
  * user replies to the welcome tour offer, the reply roots a new thread, and
  * the fresh session knows nothing about the offer.
  */
+import fs from 'fs';
+import path from 'path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 type Row = { timestamp: string; content: string };
@@ -35,7 +37,11 @@ let recentSessions: Array<{
 }> = [];
 let topLevelSession: (typeof recentSessions)[number] | undefined;
 
+/** Real session folders for the attachment tests (the mailbox stays mocked). */
+const SESSIONS_ROOT = '/tmp/nanoclaw-test-backfill-attachments';
+
 vi.mock('../../session-manager.js', () => ({
+  sessionDir: (agentGroupId: string, sessionId: string) => path.join(SESSIONS_ROOT, agentGroupId, sessionId),
   withExistingMailboxSession: async (_g: string, sessionId: string, fn: (mailbox: unknown) => unknown) => {
     if (missingMailboxes.has(sessionId)) return undefined;
     if (brokenMailboxes.has(sessionId)) throw new Error(`mailbox ${sessionId} is broken`);
@@ -112,6 +118,7 @@ beforeEach(() => {
   targetHistory = [];
   missingMailboxes = new Set();
   brokenMailboxes = new Set();
+  fs.rmSync(SESSIONS_ROOT, { recursive: true, force: true });
   siblings = {
     'sess-old': {
       root: { timestamp: iso(NOW - 50 * 60_000), content: chat('hello there') },
@@ -294,5 +301,88 @@ describe('backfillSession — existing session', () => {
     const ids = written.map((w) => w.id as string);
     expect(new Set(ids).size).toBe(ids.length);
     expect(ids[0]).toMatch(/^sess-cold:backfill:.+:0$/);
+  });
+});
+
+describe('backfillSession — attachments', () => {
+  const SHOT = 'shot.png';
+  const SRC_PATH = `inbox/root-1:ag-1/${SHOT}`;
+
+  /** Stage a file in a sibling's inbox, as the inbound path does. */
+  function stageInSibling(sessionId: string, relPath: string, bytes: string): void {
+    const file = path.join(SESSIONS_ROOT, 'ag-1', sessionId, relPath);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, bytes);
+  }
+  function rootWith(text: string, attachments: unknown[]): Row {
+    return {
+      timestamp: iso(NOW - 50 * 60_000),
+      content: JSON.stringify({ text, sender: 'Alex', senderId: 'U1', attachments }),
+    };
+  }
+  function rowAttachments(i = 0): Array<Record<string, unknown>> {
+    return (
+      (JSON.parse(written[i]!.content as string) as { attachments?: Array<Record<string, unknown>> }).attachments ?? []
+    );
+  }
+
+  it("copies a sibling root's files into the new session and lists them on the history row", async () => {
+    stageInSibling('sess-old', SRC_PATH, 'PNGBYTES');
+    siblings['sess-old'] = {
+      root: rootWith('see screenshot', [
+        { type: 'image', name: SHOT, mimeType: 'image/png', size: 8, localPath: SRC_PATH },
+      ]),
+    };
+
+    await backfillSession(AG, NEW_SESSION, DM_MG, { created: true, now: NOW });
+
+    expect(texts()).toEqual(['see screenshot']);
+    const [att] = rowAttachments();
+    expect(att).toMatchObject({ type: 'image', name: SHOT, mimeType: 'image/png' });
+    // The copy lives in the TARGET session's own inbox (its /workspace), never the sibling's.
+    expect(att!.localPath).toMatch(new RegExp(`^inbox/[^/]+/${SHOT}$`));
+    expect(att!.localPath).not.toBe(SRC_PATH);
+    const copied = path.join(SESSIONS_ROOT, 'ag-1', 'sess-new', att!.localPath as string);
+    expect(fs.readFileSync(copied, 'utf8')).toBe('PNGBYTES');
+  });
+
+  it('backfills a media-only root (no text) instead of dropping it', async () => {
+    stageInSibling('sess-old', SRC_PATH, 'PNGBYTES');
+    siblings['sess-old'] = { root: rootWith('', [{ type: 'image', name: SHOT, localPath: SRC_PATH }]) };
+
+    await backfillSession(AG, NEW_SESSION, DM_MG, { created: true, now: NOW });
+
+    expect(written).toHaveLength(1);
+    expect(rowAttachments()[0]!.localPath).toMatch(/^inbox\//);
+  });
+
+  it('never follows a symlink planted in the sibling inbox; the file is still named', async () => {
+    const secret = path.join(SESSIONS_ROOT, 'host-secret.txt');
+    fs.mkdirSync(SESSIONS_ROOT, { recursive: true });
+    fs.writeFileSync(secret, 'TOKEN');
+    const link = path.join(SESSIONS_ROOT, 'ag-1', 'sess-old', SRC_PATH);
+    fs.mkdirSync(path.dirname(link), { recursive: true });
+    fs.symlinkSync(secret, link);
+    siblings['sess-old'] = { root: rootWith('look', [{ type: 'image', name: SHOT, localPath: SRC_PATH }]) };
+
+    await backfillSession(AG, NEW_SESSION, DM_MG, { created: true, now: NOW });
+
+    const [att] = rowAttachments();
+    expect(att).toMatchObject({ type: 'image', name: SHOT });
+    expect(att!.localPath).toBeUndefined();
+    const targetInbox = path.join(SESSIONS_ROOT, 'ag-1', 'sess-new', 'inbox');
+    const copies = fs.existsSync(targetInbox) ? fs.readdirSync(targetInbox, { recursive: true }) : [];
+    expect(copies.filter((f) => String(f).endsWith(SHOT))).toEqual([]);
+  });
+
+  it('refuses a source path that leaves the sibling inbox', async () => {
+    stageInSibling('sess-old', 'outbox/x/secret.png', 'NOPE');
+    siblings['sess-old'] = {
+      root: rootWith('look', [{ type: 'image', name: 'secret.png', localPath: 'inbox/../outbox/x/secret.png' }]),
+    };
+
+    await backfillSession(AG, NEW_SESSION, DM_MG, { created: true, now: NOW });
+
+    expect(rowAttachments()[0]!.localPath).toBeUndefined();
   });
 });

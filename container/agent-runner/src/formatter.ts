@@ -288,6 +288,9 @@ function formatEchoMessage(msg: MessageInRow): string {
   // `self` marks the agent's own post; the host sets it in backfill and the outbound fan.
   const sender = content.self ? 'you' : content.sender || 'Unknown';
   const time = formatLocalStamp(new Date(msg.timestamp), TIMEZONE);
+  // The host copies an echoed message's files into this session's own inbox
+  // and lists them like any inbound row's, so they render the same way.
+  const body = `${escapeXml(content.text || '')}${formatAttachments(content.attachments)}`;
   // Timeline rows are the conversation's own preceding history — FIRST-CLASS
   // context this thread continues from, unlike cross-session-context ambient
   // echoes from other live surfaces which must never be acted on in-place.
@@ -295,9 +298,9 @@ function formatEchoMessage(msg: MessageInRow): string {
   // (per-thread groups).
   if (content.echo?.surface === 'dm-timeline' || content.echo?.surface === 'channel-timeline') {
     const tag = content.echo.surface === 'channel-timeline' ? 'channel-history' : 'dm-history';
-    return `<${tag} sender="${escapeXml(sender)}" time="${escapeXml(time)}">${escapeXml(content.text || '')}</${tag}>`;
+    return `<${tag} sender="${escapeXml(sender)}" time="${escapeXml(time)}">${body}</${tag}>`;
   }
-  return `<cross-session-context from="${escapeXml(label)}" sender="${escapeXml(sender)}" time="${escapeXml(time)}">${escapeXml(content.text || '')}</cross-session-context>`;
+  return `<cross-session-context from="${escapeXml(label)}" sender="${escapeXml(sender)}" time="${escapeXml(time)}">${body}</cross-session-context>`;
 }
 
 /**

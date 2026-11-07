@@ -95,7 +95,7 @@ describe('formatter rendering', () => {
     expect(result).not.toContain('<message');
   });
 
-  it("renders the agent's own reply from a sibling thread with sender=\"you\"", () => {
+  it('renders the agent\'s own reply from a sibling thread with sender="you"', () => {
     insertMessage(
       'e-self',
       'chat',
@@ -114,7 +114,7 @@ describe('formatter rendering', () => {
     expect(result).not.toContain('sender="Pixel"');
   });
 
-  it("renders the agent's own timeline post with sender=\"you\"", () => {
+  it('renders the agent\'s own timeline post with sender="you"', () => {
     insertMessage(
       'bf-self',
       'chat',
@@ -150,6 +150,93 @@ describe('formatter rendering', () => {
     expect(result).toContain('<channel-history sender="Gavriel"');
     expect(result).toContain('earlier in the channel</channel-history>');
     expect(result).not.toContain('<message');
+  });
+
+  describe('attachments', () => {
+    const screenshot = {
+      type: 'image',
+      name: 'Screenshot 1.png',
+      mimeType: 'image/png',
+      localPath: 'inbox/root-1:echo:sess-2/Screenshot 1.png',
+    };
+
+    it.each([
+      ['channel-timeline', 'channel-history'],
+      ['dm-timeline', 'dm-history'],
+    ])('lists the files of a %s row the same way a <message> does', (surface, tag) => {
+      insertMessage(
+        'bf-att',
+        'chat',
+        {
+          text: 'see the screenshot',
+          sender: 'Eva',
+          senderId: 'slack:U1',
+          attachments: [screenshot],
+          echo: { surface, label: 'this channel, just before this conversation' },
+        },
+        { trigger: 0, channelType: 'session-echo' },
+      );
+
+      const result = formatMessages(getPendingMessages());
+      expect(result).toContain(
+        `see the screenshot\n[image: Screenshot 1.png — saved to /workspace/inbox/root-1:echo:sess-2/Screenshot 1.png]</${tag}>`,
+      );
+    });
+
+    it('lists the files of a cross-session-context echo', () => {
+      insertMessage(
+        'e-att',
+        'chat',
+        {
+          text: 'look at this',
+          sender: 'Eva',
+          senderId: 'slack:U1',
+          attachments: [screenshot],
+          echo: { surface: 'dm-thread', label: 'another conversation with Eva' },
+        },
+        { trigger: 0, channelType: 'session-echo' },
+      );
+
+      const result = formatMessages(getPendingMessages());
+      expect(result).toContain(
+        'look at this\n[image: Screenshot 1.png — saved to /workspace/inbox/root-1:echo:sess-2/Screenshot 1.png]</cross-session-context>',
+      );
+    });
+
+    it('names a file the host could not copy, so the agent knows it existed', () => {
+      insertMessage(
+        'bf-att-meta',
+        'chat',
+        {
+          text: '',
+          sender: 'Eva',
+          senderId: 'slack:U1',
+          attachments: [{ type: 'image', name: 'too-big.png' }],
+          echo: { surface: 'channel-timeline', label: 'this channel, just before this conversation' },
+        },
+        { trigger: 0, channelType: 'session-echo' },
+      );
+
+      const result = formatMessages(getPendingMessages());
+      expect(result).toContain('>\n[image: too-big.png]</channel-history>');
+    });
+
+    it('XML-escapes attachment names', () => {
+      insertMessage(
+        'bf-att-esc',
+        'chat',
+        {
+          text: 'x',
+          sender: 'Eva',
+          attachments: [{ type: 'file', name: '<a>&.pdf', localPath: 'inbox/f/<a>&.pdf' }],
+          echo: { surface: 'channel-timeline', label: 'this channel' },
+        },
+        { trigger: 0, channelType: 'session-echo' },
+      );
+
+      const result = formatMessages(getPendingMessages());
+      expect(result).toContain('[file: &lt;a&gt;&amp;.pdf — saved to /workspace/inbox/f/&lt;a&gt;&amp;.pdf]');
+    });
   });
 
   it('XML-escapes label, sender, and text', () => {

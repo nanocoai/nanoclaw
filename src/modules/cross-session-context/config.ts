@@ -25,6 +25,11 @@ export const ECHO_TASK_SURFACE = 'task-delivery';
 /** Per-message text cap on echo rows: head-truncated, '…' appended when cut. */
 export const ECHO_TEXT_MAX_CHARS = 500;
 
+/** Bytes of attachment files copied into each echo row's target inbox. Files
+ *  past the cap are still named on the row, just not copied. Bounds the disk
+ *  one message can use across up to K+1 target sessions. */
+export const ECHO_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
+
 /** Pending echo rows the sweep pruner keeps per session (newest first).
  *  One cap for all sessions: under the same-conversation audience rule,
  *  task sessions receive no echoes. */

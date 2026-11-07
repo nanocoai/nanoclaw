@@ -43,6 +43,7 @@ import { findSessionForAgent, getRecentConversationSessions, isTaskThread } from
 import { log } from '../../log.js';
 import { withExistingMailboxSession } from '../../session-manager.js';
 import type { AgentGroup, MessagingGroup, Session } from '../../types.js';
+import { copyEchoAttachments, hasAttachments } from './attachments.js';
 import {
   ECHO_CHANNEL_TYPE,
   ECHO_CONCURRENCY,
@@ -187,16 +188,22 @@ export async function loadHotCandidates(
   return topLevel ? [...recent, topLevel] : recent;
 }
 
-function parseContent(raw: string): { text: string; sender: string | null; senderId: string | null } {
+function parseContent(raw: string): {
+  text: string;
+  sender: string | null;
+  senderId: string | null;
+  attachments: unknown;
+} {
   try {
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     return {
       text: typeof parsed.text === 'string' ? parsed.text : '',
       sender: typeof parsed.sender === 'string' ? parsed.sender : null,
       senderId: typeof parsed.senderId === 'string' ? parsed.senderId : null,
+      attachments: parsed.attachments,
     };
   } catch {
-    return { text: raw, sender: null, senderId: null };
+    return { text: raw, sender: null, senderId: null, attachments: undefined };
   }
 }
 
@@ -216,6 +223,8 @@ interface EchoFanInput {
   senderId: string | null;
   /** The agent's own delivered message: the runner renders its sender as "you". */
   self?: boolean;
+  /** The source row's `attachments`, staged in the source session's inbox. */
+  attachments?: unknown;
 }
 
 /**
@@ -226,10 +235,20 @@ interface EchoFanInput {
  * A target whose mailbox is gone (operator reset) is skipped; its next real
  * message re-provisions it.
  */
-async function writeEcho(input: EchoFanInput, targetSessionId: string, content: string): Promise<boolean> {
+async function writeEcho(input: EchoFanInput, targetSessionId: string, baseContent: object): Promise<boolean> {
+  const id = echoRowId(input.origMessageId, targetSessionId);
   const landed = await withExistingMailboxSession(input.agentGroupId, targetSessionId, async (mailbox) => {
+    // Copied inside the session: the mailbox exists, so the folder does too.
+    const attachments = copyEchoAttachments({
+      agentGroupId: input.agentGroupId,
+      sourceSessionId: input.sourceSessionId,
+      targetSessionId,
+      targetMessageId: id,
+      attachments: input.attachments,
+    });
+    const content = JSON.stringify(attachments.length > 0 ? { ...baseContent, attachments } : baseContent);
     await mailbox.insertMessage({
-      id: echoRowId(input.origMessageId, targetSessionId),
+      id,
       kind: 'chat',
       timestamp: input.timestamp,
       platformId: input.platformId,
@@ -253,13 +272,13 @@ async function fanEcho(input: EchoFanInput): Promise<number> {
   const targets = selectEchoTargets(candidates, input.sourceSessionId, input.sourceMessagingGroupId);
   if (targets.length === 0) return 0;
 
-  const content = JSON.stringify({
+  const content = {
     text: truncateEchoText(input.text),
     sender: input.sender,
     senderId: input.senderId,
     ...(input.self ? { self: true } : {}),
     echo: { surface: input.surface, label: input.label },
-  });
+  };
 
   const results = await mapConcurrent(targets, ECHO_CONCURRENCY, (target) => writeEcho(input, target.id, content));
   let written = 0;
@@ -300,8 +319,10 @@ export async function settleEchoFans(): Promise<void> {
 
 /**
  * Router hook: fan a just-written trigger=1 inbound message into sibling
- * sessions. Call ONLY for the engaged (wake) branch — accumulate (trigger=0)
- * writes must never fan (D3). Never throws; resolves to rows written. Safe
+ * sessions. `content` is the row AS WRITTEN (attachments staged to the
+ * source inbox, base64 data stripped), so files are copied from disk. Call
+ * ONLY for the engaged (wake) branch — accumulate (trigger=0) writes must
+ * never fan (D3). Never throws; resolves to rows written. Safe
  * to leave unawaited (see settleEchoFans).
  */
 export function fanInboundMessage(args: {
@@ -329,7 +350,8 @@ async function fanInbound(args: Parameters<typeof fanInboundMessage>[0]): Promis
     // Task sessions are never a SOURCE (their traffic is series-internal).
     if (isTaskThread(session.thread_id)) return 0;
     const parsed = parseContent(args.content);
-    if (!parsed.text) return 0;
+    // A media-only message (no text) still fans: its files are the content.
+    if (!parsed.text && !hasAttachments(parsed.attachments)) return 0;
     // Targets are always sibling threads of the conversation the message
     // arrived on, so every echo is sibling-flavored.
     return await fanEcho({
@@ -344,6 +366,7 @@ async function fanInbound(args: Parameters<typeof fanInboundMessage>[0]): Promis
       text: parsed.text,
       sender: parsed.sender ?? 'unknown',
       senderId: parsed.senderId,
+      attachments: parsed.attachments,
     });
   } catch (err) {
     log.warn('Inbound echo fan failed', { sessionId: args.session.id, err });
