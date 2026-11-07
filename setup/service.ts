@@ -463,6 +463,56 @@ function checkDockerGroupStale(): boolean {
   }
 }
 
+const DOCKER_SOCKET = '/var/run/docker.sock';
+// A fresh VM's first-boot apt run can hold the dpkg lock for a while.
+const APT_INSTALL_ACL = 'env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq -o DPkg::Lock::Timeout=60 acl';
+
+// Steps run with stdin ignored, but sudo prompts on /dev/tty, which would hang
+// out of sight under the wizard spinner. -n uses a cached ticket or fails fast.
+function sudoNonInteractive(args: string[], timeout: number): boolean {
+  try {
+    execFileSync('sudo', ['-n', ...args], { stdio: ['ignore', 'pipe', 'pipe'], timeout });
+    return true;
+  } catch (err) {
+    const stderr = (err as { stderr?: Buffer }).stderr?.toString().trim();
+    log.warn('sudo command failed', { command: args.join(' '), stderr: stderr || String(err) });
+    return false;
+  }
+}
+
+interface DockerAccess {
+  stale: boolean;
+  setfaclMissing?: boolean;
+  /** The ACL went on, so a service that crash-looped without Docker can start. */
+  repaired?: boolean;
+}
+
+/**
+ * Let the user service reach Docker when the docker group was added after the
+ * user systemd manager started. Reports what is still wrong so the wizard can
+ * print commands that fit.
+ */
+function repairDockerGroupAccess(): DockerAccess {
+  if (!checkDockerGroupStale()) return { stale: false };
+  log.warn('Docker group not active in systemd session — user was likely added to docker group mid-session');
+
+  // Minimal Debian/Ubuntu images ship without the acl package.
+  if (!commandExists('setfacl') && commandExists('apt-get')) {
+    log.info('Installing acl for the socket workaround');
+    sudoNonInteractive(APT_INSTALL_ACL.split(' '), 180_000);
+  }
+  if (!commandExists('setfacl')) {
+    log.warn('setfacl not installed — cannot apply automatic workaround');
+    return { stale: true, setfaclMissing: true };
+  }
+
+  if (!sudoNonInteractive(['setfacl', '-m', `u:${os.userInfo().username}:rw`, DOCKER_SOCKET], 15_000)) {
+    return { stale: true };
+  }
+  log.info(`Applied temporary ACL to ${DOCKER_SOCKET} (resets on docker restart or reboot)`);
+  return { stale: false, repaired: true };
+}
+
 export function renderSystemdUnit(
   projectRoot: string,
   nodePath: string,
@@ -529,31 +579,11 @@ async function setupSystemd(projectRoot: string, nodePath: string, homeDir: stri
   fs.writeFileSync(unitPath, unit);
   log.info('Wrote systemd unit', { unitPath });
 
-  // Detect stale docker group before starting (user systemd only). The user
-  // systemd manager is a long-running process whose group list is frozen at
-  // login, so `usermod -aG docker` mid-session doesn't reach it. Rather than
-  // require the user to log out + back in, punch a POSIX ACL onto the socket
-  // that grants the current user rw directly. This is temporary — the socket
-  // is recreated by dockerd on restart (and by then the user has relogged, so
-  // normal group perms apply again).
-  let dockerGroupStale = !runningAsRoot && checkDockerGroupStale();
-  if (dockerGroupStale) {
-    log.warn('Docker group not active in systemd session — user was likely added to docker group mid-session');
-    if (commandExists('setfacl')) {
-      const user = execSync('whoami', { encoding: 'utf-8' }).trim();
-      try {
-        execSync(`sudo setfacl -m u:${user}:rw /var/run/docker.sock`, {
-          stdio: 'inherit',
-        });
-        log.info('Applied temporary ACL to /var/run/docker.sock (resets on docker restart or reboot)');
-        dockerGroupStale = false;
-      } catch (err) {
-        log.warn('Failed to apply setfacl workaround', { err });
-      }
-    } else {
-      log.warn('setfacl not installed — cannot apply automatic workaround');
-    }
-  }
+  // The user systemd manager keeps the groups it had at login, so a docker
+  // group added mid-session doesn't reach the service. A socket ACL bridges
+  // that until dockerd recreates the socket (restart or reboot); after a
+  // reboot the manager starts with the docker group.
+  const dockerAccess: DockerAccess = runningAsRoot ? { stale: false } : repairDockerGroupAccess();
 
   // Kill orphaned nanoclaw processes to avoid channel connection conflicts
   killOrphanedProcesses(projectRoot);
@@ -580,6 +610,22 @@ async function setupSystemd(projectRoot: string, nodePath: string, homeDir: stri
     execSync(`${systemctlPrefix} enable ${unitName}`, { stdio: 'ignore' });
   } catch (err) {
     log.error('systemctl enable failed', { err });
+  }
+
+  // A service that crash-looped without Docker would wait out its crash
+  // backoff (up to 15 min) before starting. Stop it first so no crash restart
+  // writes the counter back, then clear it.
+  if (dockerAccess.repaired) {
+    try {
+      execSync(`${systemctlPrefix} stop ${unitName}`, { stdio: 'ignore' });
+    } catch (err) {
+      log.warn('systemctl stop failed', { err });
+    }
+    try {
+      fs.rmSync(path.join(projectRoot, 'data', 'circuit-breaker.json'), { force: true });
+    } catch (err) {
+      log.warn('Could not clear the crash backoff', { err });
+    }
   }
 
   // restart (not start) so a previously-running instance picks up edits to
@@ -609,7 +655,8 @@ async function setupSystemd(projectRoot: string, nodePath: string, homeDir: stri
     PROJECT_PATH: projectRoot,
     UNIT_PATH: unitPath,
     SERVICE_LOADED: serviceLoaded,
-    ...(dockerGroupStale ? { DOCKER_GROUP_STALE: true } : {}),
+    ...(dockerAccess.stale ? { DOCKER_GROUP_STALE: true } : {}),
+    ...(dockerAccess.setfaclMissing ? { SETFACL_MISSING: true } : {}),
     ...proxyStatusFields,
     LINGER_ENABLED: !runningAsRoot,
     STATUS: 'success',
