@@ -2137,3 +2137,71 @@ describe('review 3 of #4218', () => {
     });
   });
 });
+
+/**
+ * Fourth review of #4218 (6 Nov 2026), and the decisions taken on it (7 Nov).
+ * Written failing against 57d4a78e.
+ */
+describe('review 4 of #4218', () => {
+  const FAILED = '$NanoClawFailed';
+  const seedState = (state: Record<string, unknown>) => {
+    fs.mkdirSync(STORE, { recursive: true });
+    fs.writeFileSync(
+      STATE,
+      JSON.stringify({ uidValidity: 1, lastUid: 0, threads: {}, cards: {}, retry: {}, strangers: {}, ...state }),
+    );
+  };
+  const passFor = (domain: string) => PASS.replace('header.from=example.org', `header.from=${domain}`);
+  const twoDaysAgo = () => new Date(Date.now() - 2 * 24 * 60 * 60_000).toISOString();
+
+  describe('per-domain shares are by registrable domain', () => {
+    it('addresses at subdomains share their parent domain’s 20 slots', async () => {
+      h.wired = false;
+      seedState({
+        strangers: Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`u@s${i}.bulk.example`, twoDaysAgo()])),
+      });
+      const { calls } = await start();
+      const last = await arriveAll([
+        mail({ from: 'u@s20.bulk.example', body: 'twenty-first subdomain', auth: passFor('s20.bulk.example') }),
+      ]);
+      expect(calls.inbound).toEqual([]);
+      expect(readState().retry[last]).toMatchObject({ deferred: 'strangers', from: 'u@s20.bulk.example' });
+    });
+
+    it('two organisations under co.uk are two domains, not one', async () => {
+      h.wired = false;
+      seedState({
+        strangers: Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`u${i}@one.co.uk`, twoDaysAgo()])),
+      });
+      const { calls } = await start();
+      await arriveAll([mail({ from: 'head@two.co.uk', body: 'a different school', auth: passFor('two.co.uk') })]);
+      expect(calls.inbound.map((m) => m.content.text)).toEqual([expect.stringContaining('a different school')]);
+    });
+  });
+
+  describe('denied senders', () => {
+    it('take no new-sender slot, even after pruneSettled has dropped them', async () => {
+      h.wired = false;
+      h.settled = { 'gone@example.net': 'denied' };
+      const { calls } = await start();
+      await arriveAll([
+        mail({ from: 'gone@example.net', body: 'one', auth: passFor('example.net') }),
+        mail({ from: 'gone@example.net', body: 'two', auth: passFor('example.net') }),
+      ]);
+      // Handed to core, which drops it; never counted against the limits.
+      expect(calls.inbound).toHaveLength(2);
+      expect(readState().strangers).toEqual({});
+      expect(flagged().filter(([, f]) => f.includes(FAILED))).toEqual([]);
+    });
+  });
+
+  describe('the truncation note', () => {
+    it('counts what the agent would have seen, not the quoted history that was cut', async () => {
+      const { calls } = await start();
+      const own = 'a'.repeat(60_000);
+      const history = `\r\n\r\nOn Mon, 1 Nov 2026, Acme <billing@acme.example> wrote:\r\n> ${'b'.repeat(30_000)}`;
+      await arriveAll([mail({ subject: 'Re: long', body: own + history })]);
+      expect(calls.inbound[0].content.text).toContain('[… truncated, 60000 characters in total]');
+    });
+  });
+});

@@ -91,8 +91,11 @@ const DEFERRED_MAX = 200;
  */
 const DEFERRED_STRANGERS_MAX = DEFERRED_MAX / 2;
 /**
- * Of those, mail from any one domain: a flood of new addresses at one domain
- * cannot take the whole share and leave other domains' new senders refused.
+ * Of those, mail from any one domain (addressDomain): a flood of new
+ * addresses at one domain cannot take the whole share and leave other
+ * domains' new senders refused. A domain's new sender beyond it is left
+ * unread and flagged, not held: on a large shared domain (gmail.com) under
+ * a flood, a genuine new sender may be among them.
  */
 const DEFERRED_STRANGERS_PER_DOMAIN_MAX = 20;
 /** How long the adapter waits for the host's onHostStart before it logs an error (it keeps waiting). */
@@ -113,8 +116,11 @@ const STRANGERS_MAX = 200;
  * many addresses cannot take every slot and keep genuine new senders out.
  * A full domain is pruned of addresses core has since settled, and a new
  * address beyond it waits (in `retry`), checked again hourly, until a slot
- * is free: delayed, not refused. Keyed by the exact domain (no public-suffix
- * list), so a flood spread over subdomains is bounded by STRANGERS_MAX instead.
+ * is free. Its mail is held only while the hold queue has room for it
+ * (DEFERRED_STRANGERS_PER_DOMAIN_MAX and the shares above): past that it is
+ * left unread and flagged for a human, not retried — refused, then, but
+ * never silently. Keyed by registrable domain (addressDomain), so subdomains
+ * share their parent's slots.
  */
 const STRANGERS_PER_DOMAIN_MAX = 20;
 const FAILURES_LISTED_MAX = 20;
@@ -1077,9 +1083,52 @@ function asciiDomain(domain: string): string {
   return domainToASCII(domain) || domain;
 }
 
-/** An address's domain, in its ASCII form. */
-function addressDomain(address: string): string {
-  return asciiDomain(address.split('@').pop() ?? '');
+/**
+ * Second-level labels under which domains are registered (example.co.uk),
+ * for the common country codes: enough to group by registrable domain
+ * without the public suffix list. A suffix missing here groups too widely
+ * (all of x.gen.tr as gen.tr), which only shares a limit more — the safe way.
+ */
+const TWO_LEVEL_SUFFIXES = new Set(
+  [
+    'co.uk org.uk ac.uk gov.uk ltd.uk plc.uk me.uk net.uk nhs.uk police.uk',
+    'com.au net.au org.au edu.au gov.au asn.au id.au',
+    'co.nz org.nz net.nz ac.nz govt.nz school.nz',
+    'co.jp ne.jp or.jp ac.jp go.jp ad.jp ed.jp',
+    'co.za org.za ac.za gov.za net.za',
+    'com.br net.br org.br gov.br edu.br',
+    'com.cn net.cn org.cn edu.cn gov.cn ac.cn',
+    'com.hk org.hk edu.hk gov.hk net.hk',
+    'com.sg edu.sg gov.sg org.sg net.sg',
+    'co.in net.in org.in ac.in gov.in edu.in firm.in',
+    'co.il ac.il org.il gov.il net.il',
+    'co.kr ac.kr or.kr go.kr ne.kr',
+    'com.mx org.mx gob.mx edu.mx net.mx',
+    'com.tr org.tr edu.tr gov.tr net.tr',
+    'com.tw org.tw edu.tw gov.tw net.tw',
+    'com.ar com.co com.pe com.ve com.ec com.uy com.py com.bo',
+    'com.pl net.pl org.pl com.ua com.ru com.cy com.mt com.gr',
+    'co.id ac.id or.id go.id com.my edu.my gov.my com.ph com.vn com.pk com.bd com.np com.lk',
+    'com.sa com.eg com.qa com.kw com.om com.bh co.ae ac.ae gov.ae',
+    'co.ke ac.ke com.ng co.tz co.ug com.gh co.zw co.th ac.th go.th in.th',
+  ]
+    .join(' ')
+    .split(' '),
+);
+
+/**
+ * The registrable domain an address belongs to, in ASCII: the last two
+ * labels, or three under a TWO_LEVEL_SUFFIXES ending. Per-domain shares are
+ * keyed on it, so a flood spread over subdomains (a.x.com, b.x.com …) is one
+ * domain's.
+ */
+export function addressDomain(address: string): string {
+  const labels = asciiDomain((address.split('@').pop() ?? '').toLowerCase())
+    .replace(/\.$/, '')
+    .split('.')
+    .filter(Boolean);
+  const lastTwo = labels.slice(-2).join('.');
+  return labels.slice(TWO_LEVEL_SUFFIXES.has(lastTwo) ? -3 : -2).join('.');
 }
 
 /**
@@ -1900,15 +1949,10 @@ registerChannelAdapter('proton-mail', {
     // --- Inbound ---
 
     /**
-     * Whether mail from this address already reaches an agent: its DM is
-     * wired and not denied. Until then a mail only raises an approval card,
-     * and the host keeps the whole event with the pending approval.
+     * Where core stands on an address: approved (its DM is wired to an agent
+     * and not denied), denied, or not yet settled — when a mail only raises an
+     * approval card, and the host keeps the whole event with it.
      */
-    async function senderApproved(addr: string): Promise<boolean> {
-      return (await senderStatus(addr)) === 'approved';
-    }
-
-    /** Where core stands on an address: approved (wired to an agent), denied, or not yet settled. */
     async function senderStatus(addr: string): Promise<'approved' | 'denied' | 'pending'> {
       const mg = await getMessagingGroupByPlatform('proton-mail', addr);
       if (!mg) return 'pending';
@@ -2050,7 +2094,8 @@ registerChannelAdapter('proton-mail', {
       // One domain's share. If it is still full, the mail waits: until the
       // domain's oldest slot expires, or for an hour, when it is checked
       // again (by then core may have settled some of the domain's
-      // addresses). A genuine sender is delayed, never refused for this.
+      // addresses) — if the hold queue has room for it (see `defer`);
+      // otherwise it is left unread and flagged.
       const mine = ofDomain();
       if (mine.length >= STRANGERS_PER_DOMAIN_MAX) {
         const oldest = Math.min(...mine.map((a) => Date.parse(state.strangers[a])));
@@ -2192,7 +2237,11 @@ registerChannelAdapter('proton-mail', {
         body += `\n\n${await forwardedMessageText(att.content, token)}`;
       }
       if (body.length > BODY_MAX_CHARS) {
-        body = body.slice(0, BODY_MAX_CHARS) + `\n\n[… truncated, ${fullText.length} characters in total]`;
+        // The total is of what the agent would have seen (quoted history cut,
+        // attached forwards read in); the text itself was capped at
+        // TEXT_MAX_CHARS before that, so past it the total is a floor.
+        const total = fullText.length > rawText.length ? `more than ${body.length}` : `${body.length}`;
+        body = body.slice(0, BODY_MAX_CHARS) + `\n\n[… truncated, ${total} characters in total]`;
       }
       const senderName = senderLabel(fromAddr, sender.name);
       // Message-ID threads replies; it is the sender's to choose, so it is
@@ -2304,8 +2353,11 @@ registerChannelAdapter('proton-mail', {
       // new addresses are limited, so strangers cannot fill the cards the
       // owner's approvals need. An approver answering on a card's thread is
       // not a stranger.
-      const approved = await senderApproved(fromAddr);
-      if (!approved && !Object.values(state.cards).some((c) => c.address === fromAddr)) {
+      // A denied address is not counted either: core drops its mail without
+      // a card, and pruneSettled has already given its slot back.
+      const status = await senderStatus(fromAddr);
+      const approved = status === 'approved';
+      if (status === 'pending' && !Object.values(state.cards).some((c) => c.address === fromAddr)) {
         const admitted = await admitStranger(uid, fromAddr);
         if (admitted !== 'ok') return admitted;
       }
