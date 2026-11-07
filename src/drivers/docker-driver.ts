@@ -69,6 +69,7 @@ const WATCH_RECOVERY_MAX_MS = 30_000;
  */
 const REMOVAL_IN_PROGRESS = /removal of container .+ is already in progress/i;
 const CONTAINER_NOT_FOUND = /No such (container|object)/i;
+const NETWORK_NOT_FOUND = /No such network|network .* not found/i;
 const REMOVAL_WAIT_BUDGET_MS = 15_000;
 const REMOVAL_WAIT_INTERVALS_MS = [200, 400, 800, 1_000];
 
@@ -497,8 +498,11 @@ class DockerHandle implements SessionHandle {
   #proc: SupervisedProcess | null = null;
   /** Log hygiene only — events are never intent-filtered here (that is the hub's job). */
   #stopping = false;
-  /** In-flight or completed teardown; cleared on failure so a later stop() retries. */
+  /** In-flight teardown only; cleared when it settles. Progress lives in the flags below. */
   #stopPromise: Promise<void> | undefined;
+  #mainContainerRemoved = false;
+  readonly #removedAuxiliaryNames = new Set<string>();
+  #privateNetworkRemoved = false;
   /** Exit code the attach process observed; undefined until it exits. */
   #attachExitCode: number | null | undefined;
   readonly #stderrTail: string[] = [];
@@ -606,36 +610,50 @@ class DockerHandle implements SessionHandle {
    * Full teardown. That this blocks until the container is gone is an
    * implementation behavior (it happens to serialize workspace single-writer
    * during termination), not a contract guarantee — see `SessionHandle.stop`.
+   *
+   * Concurrent stops share one in-flight teardown: the removal poll yields, and
+   * a second teardown could finish first and see a successor reuse this
+   * container name. Completed steps are remembered per handle, so a later stop
+   * never re-runs them and a failed teardown retries only what is left
+   * (container-runner's finishAndResolve relies on that). The memory is
+   * per-handle only: handles built independently by listSessions do not share it.
    */
   stop(reason: string): Promise<void> {
-    // Concurrent stops share one teardown: the removal poll yields, and a second
-    // teardown could finish first and see a successor reuse this container name.
-    // A failed teardown is not cached — container-runner's finishAndResolve
-    // relies on a second stop() to retry.
-    this.#stopPromise ??= this.#teardown(reason).catch((error: unknown) => {
-      this.#stopPromise = undefined;
-      throw error;
+    if (this.#stopPromise) {
+      log.info('Stopping session container', { containerName: this.name, reason, joined: true });
+      return this.#stopPromise;
+    }
+    log.info('Stopping session container', { containerName: this.name, reason });
+    const teardown = this.#teardown().finally(() => {
+      if (this.#stopPromise === teardown) this.#stopPromise = undefined;
     });
-    return this.#stopPromise;
+    this.#stopPromise = teardown;
+    return teardown;
   }
 
-  async #teardown(reason: string): Promise<void> {
+  async #teardown(): Promise<void> {
     this.#stopping = true;
-    log.info('Stopping session container', { containerName: this.name, reason });
-    const grace = String(this.pendingSpec?.stopGraceSeconds ?? 1);
-    try {
-      this.cli.run(['stop', '-t', grace, this.name]);
-    } catch {
-      // Already gone, or the daemon refused: fall back to killing the attach
-      // process so supervision never hangs waiting for an exit that cannot come.
-      this.#proc?.kill();
-    }
-    try {
-      this.cli.run(['rm', '--force', this.name]);
-    } catch (error) {
-      await this.#removeAfterFailure(this.name, error);
+    if (this.#mainContainerRemoved) {
+      // Removed by an earlier stop; the attach process may still be alive.
+      if (this.#proc && this.#attachExitCode === undefined) this.#proc.kill();
+    } else {
+      const grace = String(this.pendingSpec?.stopGraceSeconds ?? 1);
+      try {
+        this.cli.run(['stop', '-t', grace, this.name]);
+      } catch {
+        // Already gone, or the daemon refused: fall back to killing the attach
+        // process so supervision never hangs waiting for an exit that cannot come.
+        this.#proc?.kill();
+      }
+      try {
+        this.cli.run(['rm', '--force', this.name]);
+      } catch (error) {
+        await this.#removeAfterFailure(this.name, error);
+      }
+      this.#mainContainerRemoved = true;
     }
     for (const auxiliary of [...this.auxiliaryNames].reverse()) {
+      if (this.#removedAuxiliaryNames.has(auxiliary)) continue;
       try {
         this.cli.run(['stop', '-t', '1', auxiliary]);
       } catch {
@@ -646,13 +664,15 @@ class DockerHandle implements SessionHandle {
       } catch (error) {
         await this.#removeAfterFailure(auxiliary, error);
       }
+      this.#removedAuxiliaryNames.add(auxiliary);
     }
-    if (this.privateNetwork) {
+    if (this.privateNetwork && !this.#privateNetworkRemoved) {
       try {
         this.cli.run(['network', 'rm', this.privateNetwork]);
-      } catch {
-        /* already gone or still in use */
+      } catch (error) {
+        if (!NETWORK_NOT_FOUND.test(errorMessage(error))) throw normalizeDockerError(error);
       }
+      this.#privateNetworkRemoved = true;
     }
   }
 

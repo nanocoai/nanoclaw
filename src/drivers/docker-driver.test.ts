@@ -604,6 +604,81 @@ describe('lifecycle', () => {
       await assertion;
     });
 
+    describe('step memory across stops', () => {
+      const networkInUse = new Error(
+        'Error response from daemon: error while removing network: network ncl-spike-s1-net has active endpoints',
+      );
+
+      it('retries only the network step after a network removal failure', async () => {
+        const handle = await driver().prepare(fixtureSpecWithAux());
+        await handle.start();
+        cli.responses = [{ match: /^network rm /, throws: networkInUse, once: true }];
+
+        await expect(handle.stop('sweep-kill')).rejects.toMatchObject({ kind: 'unknown' });
+        const stopsAfterFirst = cli.joined().filter((call) => call.startsWith('stop -t ')).length;
+        const removalsAfterFirst = cli.joined().filter((call) => call.startsWith('rm --force ')).length;
+        expect(stopsAfterFirst).toBe(2);
+        expect(removalsAfterFirst).toBe(2);
+
+        await expect(handle.stop('sweep-kill')).resolves.toBeUndefined();
+        const networkRemovals = cli.joined().filter((call) => call.startsWith('network rm '));
+        expect(networkRemovals).toHaveLength(2);
+        expect(cli.joined().filter((call) => call.startsWith('stop -t '))).toHaveLength(stopsAfterFirst);
+        expect(cli.joined().filter((call) => call.startsWith('rm --force '))).toHaveLength(removalsAfterFirst);
+      });
+
+      it.each([
+        'Error response from daemon: network ncl-spike-s1-net not found',
+        'Error: No such network: ncl-spike-s1-net',
+      ])('treats a network that is already gone as removed (%s)', async (message) => {
+        const handle = await driver().prepare(fixtureSpecWithAux());
+        await handle.start();
+        cli.responses = [{ match: /^network rm /, throws: new Error(message) }];
+
+        await expect(handle.stop('sweep-kill')).resolves.toBeUndefined();
+      });
+
+      it.todo(
+        'a stop through an independently built handle never touches a same-name successor (deferred: name-keyed teardown)',
+      );
+
+      it('kills a still-running attach process on a later stop', async () => {
+        const handle = await driver().prepare(fixtureSpec());
+        await handle.start();
+        const proc = cli.started.at(-1)!.proc;
+
+        await handle.stop('sweep-kill');
+        expect(proc.killed).toBe(false);
+        await handle.stop('finish');
+        expect(proc.killed).toBe(true);
+      });
+
+      it('logs the reason of every stop call, joined or not', async () => {
+        const handle = await driver().prepare(fixtureSpec());
+        await handle.start();
+        vi.mocked(log.info).mockClear();
+
+        const first = handle.stop('sweep-kill');
+        const joined = handle.stop('host-shutdown');
+        await Promise.all([first, joined]);
+        await handle.stop('finish');
+
+        expect(log.info).toHaveBeenCalledWith('Stopping session container', {
+          containerName: 'ncl-spike-s1',
+          reason: 'sweep-kill',
+        });
+        expect(log.info).toHaveBeenCalledWith('Stopping session container', {
+          containerName: 'ncl-spike-s1',
+          reason: 'host-shutdown',
+          joined: true,
+        });
+        expect(log.info).toHaveBeenCalledWith('Stopping session container', {
+          containerName: 'ncl-spike-s1',
+          reason: 'finish',
+        });
+      });
+    });
+
     it('probes by exact container name, never by filter', async () => {
       const handle = await driver().prepare(fixtureSpec());
       await handle.start();
