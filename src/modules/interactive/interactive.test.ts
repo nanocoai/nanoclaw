@@ -104,7 +104,8 @@ describe('question answers', () => {
     expect(await answer('a')).toBe('accepted');
     expect(vi.mocked(writeSessionMessage).mock.calls[0][2].id).toBe('qr-q-1');
 
-    // The earlier answer was stored, but its question row is back (its delete failed).
+    // The earlier answer was stored, but its question row is still there (its delete
+    // failed, or the write failed after storing it).
     await createPendingQuestion({
       question_id: 'q-1',
       session_id: 'sess-1',

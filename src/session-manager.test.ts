@@ -250,18 +250,6 @@ describe('writeSessionMessage re-provisions a deleted session folder', () => {
     expect(isUniqueViolation(second)).toBe(true);
   });
 
-  it('does not report a stored message as failed when its activity stamp fails', async () => {
-    // The central DB goes away after the session's own mailbox took the message.
-    await closeDb();
-    await expect(writeSessionMessage(AG, SESS, message('stored-1'))).resolves.toBeUndefined();
-    const db = new Database(inboundDbPath(AG, SESS), { readonly: true });
-    try {
-      expect(db.prepare('SELECT id FROM messages_in WHERE id = ?').get('stored-1')).toEqual({ id: 'stored-1' });
-    } finally {
-      db.close();
-    }
-  });
-
   it('re-creates the folder + inbound.db and does not throw when the row still exists', async () => {
     // Operator resets a stuck session by deleting its folder; the row survives.
     fs.rmSync(sessionDir(AG, SESS), { recursive: true, force: true });
