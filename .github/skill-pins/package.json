@@ -18,6 +18,7 @@
     "@chat-adapter/whatsapp": "4.41.1",
     "@cursor/sdk": "1.0.28",
     "@deltachat/stdio-rpc-server": "2.49.0",
+    "@earendil-works/pi-coding-agent": "1.3.0",
     "@firecrawl/anydoc": "0.1.6",
     "@getdial/cli": "0.37.0",
     "@grpc/grpc-js": "1.14.5",
@@ -118,6 +119,12 @@
       "version": "2.49.0",
       "sources": [
         ".claude/skills/add-deltachat/SKILL.md nc:dep"
+      ]
+    },
+    "@earendil-works/pi-coding-agent": {
+      "version": "1.3.0",
+      "sources": [
+        ".claude/skills/add-pi/SKILL.md nc:dep manager:bun cwd:container/agent-runner when:pi_core_ready=yes"
       ]
     },
     "@firecrawl/anydoc": {

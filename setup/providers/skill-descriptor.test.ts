@@ -31,7 +31,12 @@ describe('provider skill descriptors', () => {
       offered: true,
       skillDir: path.join('.claude', 'skills', 'add-codex'),
     });
-    expect(listInstallableProviderDescriptors().map((entry) => entry.value)).toEqual(['codex', 'cursor', 'opencode']);
+    expect(listInstallableProviderDescriptors().map((entry) => entry.value)).toEqual([
+      'codex',
+      'cursor',
+      'opencode',
+      'pi',
+    ]);
     expect(providerImagePolicy('CODEX')).toBe('local-required');
     expect(providerImagePolicy('claude')).toBe('hardened-compatible');
     expect(providerImagePolicy('unknown-provider')).toBe('local-required');
