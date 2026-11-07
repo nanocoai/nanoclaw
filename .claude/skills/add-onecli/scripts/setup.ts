@@ -260,7 +260,7 @@ function docker0Address(): string | null {
 }
 
 /** Returns the URL the host uses for the admin API. */
-function ensureLocalGatewayHostAccess(gatewayUrl: string): string {
+export function ensureLocalGatewayHostAccess(gatewayUrl: string): string {
   if (process.platform !== 'linux') return gatewayUrl;
   const composeFile = path.join(os.homedir(), '.onecli', 'docker-compose.yml');
   const current = fs.readFileSync(composeFile, 'utf8');
