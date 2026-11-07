@@ -95,6 +95,22 @@ vi.mock('../../group-folder.js', async (importOriginal) => {
   };
 });
 
+// A pass-through card-options store a test can make fail once.
+const cardUpdate = vi.hoisted(() => ({ fail: false }));
+vi.mock('./db/pending-channel-approvals.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./db/pending-channel-approvals.js')>();
+  return {
+    ...actual,
+    updatePendingChannelApprovalCard: async (...args: Parameters<typeof actual.updatePendingChannelApprovalCard>) => {
+      if (cardUpdate.fail) {
+        cardUpdate.fail = false;
+        throw new Error('SQLITE_BUSY: database is locked');
+      }
+      return actual.updatePendingChannelApprovalCard(...args);
+    },
+  };
+});
+
 // Mock ensureUserDm — look up the owner's preconfigured DM row instead of
 // hitting a real openDM RPC.
 vi.mock('./user-dm.js', () => ({
@@ -867,6 +883,30 @@ describe('unknown-channel registration flow', () => {
         card.messaging_group_id,
       );
       expect(wired?.agent_group_id).toBe('ag-2');
+    });
+
+    it('a second tap while the first is still being prepared sends no second card', async () => {
+      const card = await firstCard('chat-choose-preparing');
+      const { ensureUserDm } = await import('./user-dm.js');
+      const lookup = vi.mocked(ensureUserDm).getMockImplementation()!;
+      let ready: (() => void) | undefined;
+      vi.mocked(ensureUserDm).mockImplementationOnce(async (...args) => {
+        await new Promise<void>((resolve) => (ready = resolve));
+        return lookup(...args);
+      });
+      const choosing = click(card.messaging_group_id, 'choose_existing', 'card-1');
+      await vi.waitFor(() => expect(ready).toBeDefined());
+      expect(await click(card.messaging_group_id, 'choose_existing', 'card-1')).toBe('ignored');
+      ready!();
+      expect(await choosing).toBe('accepted');
+      expect(deliverMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('a store that fails after the send leaves the first card usable', async () => {
+      const card = await firstCard('chat-choose-store-fails');
+      cardUpdate.fail = true;
+      expect(await click(card.messaging_group_id, 'choose_existing', 'card-1')).not.toBe('accepted');
+      expect(await click(card.messaging_group_id, 'choose_existing', 'card-1')).toBe('accepted');
     });
 
     it("leaves the first card as it was when the agent card can't be sent", async () => {

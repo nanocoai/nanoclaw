@@ -75,7 +75,7 @@ const awaitingNameInput = new Map<string, PendingNameInput>();
 // Card buttons are decoded by position against the stored options, and the
 // first card keeps its buttons until the host accepts. So while the agent card
 // is sent no card click counts, and after it a click from the first card is
-// ignored. Keyed by messaging group; lost on restart, when nothing was replaced.
+// ignored. Keyed by messaging group, in memory (the durable card check is later).
 const agentCards = new Map<string, { firstCardId?: string; sent: boolean }>();
 
 async function extractAndUpsertUser(event: InboundEvent): Promise<string | null> {
@@ -464,6 +464,62 @@ async function wireApprovedChannel(
   return 'accepted';
 }
 
+/** Sends the agent-selection card that replaces the first card, then stores its options. */
+async function sendAgentCard(
+  row: PendingChannelApproval,
+  payload: ResponsePayload,
+  approverId: string,
+): Promise<ResponseOutcome> {
+  const origin = await getMessagingGroup(row.messaging_group_id);
+  const approverDm = await ensureUserDm(row.approver_user_id, {
+    instance: payload.channelType === origin?.channel_type ? origin.instance : undefined,
+  });
+  if (!approverDm) {
+    log.error('Channel registration: no DM channel for approver', {
+      messagingGroupId: row.messaging_group_id,
+      approverUserId: row.approver_user_id,
+    });
+    return 'ignored';
+  }
+
+  const adapter = getDeliveryAdapter();
+  if (!adapter) return 'ignored';
+
+  const agentGroups = await getAllAgentGroups();
+  const options = await buildAgentSelectionOptions(agentGroups, approverId);
+  const title = '📋 Choose an agent';
+  const question = `Which agent should handle this channel? ${AGENT_ACCESS_SCOPE_WARNING}`;
+
+  // Sent before its options are stored, so a send that fails leaves the first card as it was.
+  try {
+    await adapter.deliver(
+      approverDm.channel_type,
+      approverDm.platform_id,
+      null,
+      'chat-sdk',
+      JSON.stringify({
+        type: 'ask_question',
+        questionId: row.messaging_group_id,
+        title,
+        question,
+        options,
+      }),
+      undefined,
+      approverDm.instance,
+    );
+  } catch (err) {
+    log.error('Channel registration: agent-selection card delivery failed', {
+      messagingGroupId: row.messaging_group_id,
+      err,
+    });
+    return 'ignored'; // the first card keeps its buttons for another try
+  }
+  // Decided meanwhile (a Reject): leave that decision on the card.
+  if (!(await updatePendingChannelApprovalCard(row.messaging_group_id, title, question, JSON.stringify(options))))
+    return 'ignored';
+  return 'accepted';
+}
+
 /**
  * Response handler for the unknown-channel registration card.
  *
@@ -524,58 +580,16 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
 
   // ── Choose existing agent — send agent-selection follow-up card ──
   if (payload.value === CHOOSE_EXISTING_VALUE) {
-    const origin = await getMessagingGroup(row.messaging_group_id);
-    const approverDm = await ensureUserDm(row.approver_user_id, {
-      instance: payload.channelType === origin?.channel_type ? origin.instance : undefined,
-    });
-    if (!approverDm) {
-      log.error('Channel registration: no DM channel for approver', {
-        messagingGroupId: row.messaging_group_id,
-        approverUserId: row.approver_user_id,
-      });
-      return 'ignored';
-    }
-
-    const adapter = getDeliveryAdapter();
-    if (!adapter) return 'ignored';
-
-    const agentGroups = await getAllAgentGroups();
-    const options = await buildAgentSelectionOptions(agentGroups, approverId);
-    const title = '📋 Choose an agent';
-    const question = `Which agent should handle this channel? ${AGENT_ACCESS_SCOPE_WARNING}`;
-
-    // Sent before its options are stored, so a send that fails leaves the first card as it was.
+    // Set before any wait, so a second tap can't start another; dropped unless the card went out.
     const card = { firstCardId: payload.messageId, sent: false };
     agentCards.set(row.messaging_group_id, card);
     try {
-      await adapter.deliver(
-        approverDm.channel_type,
-        approverDm.platform_id,
-        null,
-        'chat-sdk',
-        JSON.stringify({
-          type: 'ask_question',
-          questionId: row.messaging_group_id,
-          title,
-          question,
-          options,
-        }),
-        undefined,
-        approverDm.instance,
-      );
-    } catch (err) {
-      log.error('Channel registration: agent-selection card delivery failed', {
-        messagingGroupId: row.messaging_group_id,
-        err,
-      });
-      if (agentCards.get(row.messaging_group_id) === card) agentCards.delete(row.messaging_group_id);
-      return 'ignored'; // the first card keeps its buttons for another try
+      const outcome = await sendAgentCard(row, payload, approverId);
+      card.sent = outcome === 'accepted';
+      return outcome;
+    } finally {
+      if (!card.sent && agentCards.get(row.messaging_group_id) === card) agentCards.delete(row.messaging_group_id);
     }
-    // Decided meanwhile (a Reject): leave that decision on the card.
-    if (!(await updatePendingChannelApprovalCard(row.messaging_group_id, title, question, JSON.stringify(options))))
-      return 'ignored';
-    card.sent = true;
-    return 'accepted';
   }
 
   // ── Create new agent — prompt for free-text name ──
