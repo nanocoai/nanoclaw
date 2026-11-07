@@ -73,10 +73,10 @@ const awaitingNameInput = new Map<string, PendingNameInput>();
 
 // ── Agent card replacing the first card ──
 // Card buttons are decoded by position against the stored options, and the
-// first card keeps its buttons until the host accepts. So while the agent card
-// is sent no card click counts, and after it a click from the first card is
+// first card keeps its buttons until the host accepts. So while an agent card
+// is sent no card click counts, and once it is out the card clicked for it is
 // ignored. Keyed by messaging group, in memory (the durable card check is later).
-const agentCards = new Map<string, { firstCardId?: string; sent: boolean }>();
+const agentCards = new Map<string, { retired: Set<string>; sending: boolean }>();
 
 async function extractAndUpsertUser(event: InboundEvent): Promise<string | null> {
   let content: Record<string, unknown>;
@@ -464,11 +464,12 @@ async function wireApprovedChannel(
   return 'accepted';
 }
 
-/** Sends the agent-selection card that replaces the first card, then stores its options. */
+/** Sends the agent-selection card that replaces the clicked card (`sent` once it is out), then stores its options. */
 async function sendAgentCard(
   row: PendingChannelApproval,
   payload: ResponsePayload,
   approverId: string,
+  sent: () => void,
 ): Promise<ResponseOutcome> {
   const origin = await getMessagingGroup(row.messaging_group_id);
   const approverDm = await ensureUserDm(row.approver_user_id, {
@@ -514,6 +515,7 @@ async function sendAgentCard(
     });
     return 'ignored'; // the first card keeps its buttons for another try
   }
+  sent();
   // Decided meanwhile (a Reject): leave that decision on the card.
   if (!(await updatePendingChannelApprovalCard(row.messaging_group_id, title, question, JSON.stringify(options))))
     return 'ignored';
@@ -560,7 +562,7 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
   }
   const approverId = clickerId;
   const swap = agentCards.get(row.messaging_group_id);
-  if (swap && payload.messageId && (!swap.sent || payload.messageId === swap.firstCardId)) return 'ignored';
+  if (swap && payload.messageId && (swap.sending || swap.retired.has(payload.messageId))) return 'ignored';
 
   // ── Reject / Cancel ──
   if (payload.value === REJECT_VALUE) {
@@ -580,15 +582,18 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
 
   // ── Choose existing agent — send agent-selection follow-up card ──
   if (payload.value === CHOOSE_EXISTING_VALUE) {
-    // Set before any wait, so a second tap can't start another; dropped unless the card went out.
-    const card = { firstCardId: payload.messageId, sent: false };
-    agentCards.set(row.messaging_group_id, card);
+    // Set before any wait, so a second tap can't start another.
+    const guard = agentCards.get(row.messaging_group_id) ?? { retired: new Set<string>(), sending: false };
+    guard.sending = true;
+    agentCards.set(row.messaging_group_id, guard);
     try {
-      const outcome = await sendAgentCard(row, payload, approverId);
-      card.sent = outcome === 'accepted';
-      return outcome;
+      return await sendAgentCard(row, payload, approverId, () => {
+        if (payload.messageId) guard.retired.add(payload.messageId);
+      });
     } finally {
-      if (!card.sent && agentCards.get(row.messaging_group_id) === card) agentCards.delete(row.messaging_group_id);
+      guard.sending = false;
+      if (guard.retired.size === 0 && agentCards.get(row.messaging_group_id) === guard)
+        agentCards.delete(row.messaging_group_id);
     }
   }
 

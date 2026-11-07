@@ -902,11 +902,16 @@ describe('unknown-channel registration flow', () => {
       expect(deliverMock).toHaveBeenCalledTimes(2);
     });
 
-    it('a store that fails after the send leaves the first card usable', async () => {
+    it('a store that fails after the send keeps the first card retired, and the new card usable', async () => {
       const card = await firstCard('chat-choose-store-fails');
       cardUpdate.fail = true;
       expect(await click(card.messaging_group_id, 'choose_existing', 'card-1')).not.toBe('accepted');
-      expect(await click(card.messaging_group_id, 'choose_existing', 'card-1')).toBe('accepted');
+      // The new card's options weren't stored: its first button reads as "Choose existing agent".
+      expect(await click(card.messaging_group_id, 'choose_existing', 'card-2')).toBe('accepted');
+      // The first card's "Connect new agent" now reads as the second agent: it must not connect it.
+      expect(await click(card.messaging_group_id, 'connect:ag-2', 'card-1')).toBe('ignored');
+      expect(await click(card.messaging_group_id, 'connect:ag-2', 'card-2')).toBe('ignored');
+      expect(await click(card.messaging_group_id, 'connect:ag-2', 'card-3')).toBe('accepted');
     });
 
     it("leaves the first card as it was when the agent card can't be sent", async () => {
