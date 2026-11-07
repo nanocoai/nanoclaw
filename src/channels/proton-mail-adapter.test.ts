@@ -2431,7 +2431,7 @@ describe('review 4 of #4218', () => {
 
   describe('the truncation note', () => {
     it('never cuts through a forward line: the cut moves before it', async () => {
-      const { calls, arrive } = await start();
+      const { calls } = await start();
       // The forward line would start just before the 50,000-character cut.
       const own = 'a'.repeat(49_990);
       const body = `${own}\r\n\r\n---------- Forwarded message ---------\r\nFrom: Acme <billing@acme.example>\r\n\r\n${'b'.repeat(500)}`;
@@ -2443,7 +2443,7 @@ describe('review 4 of #4218', () => {
     });
 
     it('is a floor when an attached forward was itself cut short', async () => {
-      const { calls, arrive } = await start();
+      const { calls } = await start();
       const inner = `From: Sam <sam@example.org>\r\nSubject: Big\r\nContent-Type: text/plain\r\n\r\n${'c'.repeat(60_000)}`;
       const body = [
         '--b',
