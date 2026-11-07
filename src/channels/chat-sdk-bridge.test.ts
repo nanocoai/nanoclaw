@@ -2,7 +2,7 @@ import http from 'http';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { Adapter, AdapterPostableMessage, RawMessage } from 'chat';
+import { Card, CardText, type Adapter, type AdapterPostableMessage, type RawMessage } from 'chat';
 
 import { fenceForCard } from '../card-text.js';
 import { gatewayApprovalPresentation } from '../gateway-approval-presentation.js';
@@ -873,6 +873,104 @@ describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
     expect(calls).toHaveLength(1);
     const msg = calls[0].message as { markdown?: string };
     expect(msg.markdown).toBe('plain hello');
+  });
+});
+
+describe('createChatSdkBridge.deliver — send_card json-render parts', () => {
+  const postedCard = (call: PostCall) => (call.message as { card: { children: unknown[] } }).card;
+  const deliverCard = async (card: Record<string, unknown>) => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({ adapter: stubAdapter({ postMessage }), supportsThreads: false });
+    const delivery = bridge.deliver('slack:C1', null, { kind: 'chat-sdk', content: { type: 'card', card } });
+    return { calls, delivery };
+  };
+  const table = { type: 'Table', props: { headers: ['Scale', 'Before'], rows: [['1x', 40]] } };
+  const bar = {
+    type: 'Chart',
+    props: { title: 'Latency', chart: { type: 'bar', categories: ['1x'], series: [{ name: 'Before', values: [40] }] } },
+  };
+
+  it('builds each part as its Chat SDK element, in place among the text children', async () => {
+    const { calls, delivery } = await deliverCard({
+      title: 'Perf',
+      children: [
+        'intro',
+        { type: 'Fields', children: [{ type: 'Field', props: { label: 'p50', value: 42 } }] },
+        table,
+        bar,
+        { type: 'Divider' },
+        { type: 'Text', props: { content: 'footnote', style: 'muted' } },
+        'outro',
+      ],
+    });
+    await delivery;
+
+    const children = postedCard(calls[0]).children as Array<Record<string, unknown>>;
+    expect(children.map((c) => c.type)).toEqual(['text', 'fields', 'table', 'chart', 'divider', 'text', 'text']);
+    expect(children[1]).toEqual({ type: 'fields', children: [{ type: 'field', label: 'p50', value: '42' }] });
+    expect(children[2]).toMatchObject({ headers: ['Scale', 'Before'], rows: [['1x', '40']] });
+    expect(children[3]).toMatchObject({
+      title: 'Latency',
+      chart: { type: 'bar', categories: ['1x'], series: [{ name: 'Before', data: [{ label: '1x', value: 40 }] }] },
+    });
+    expect(children[6]).toEqual({ type: 'text', content: 'outro', style: undefined });
+  });
+
+  it.each([
+    ['a callback button', { type: 'Button', props: { id: 'ncq:q-1:0', label: 'Approve' } }],
+    ['an actions row', { type: 'Actions', children: [{ type: 'Button', props: { id: 'ncq:q-1:0', label: 'x' } }] }],
+    ['an image', { type: 'Image', props: { url: 'https://example.com/a.png', alt: 'x' } }],
+    ['a nested card', { type: 'Card', props: { title: 'Approve?' } }],
+    [
+      'a button inside Fields',
+      { type: 'Fields', children: [{ type: 'Button', props: { id: 'ncq:q-1:0', label: 'x' } }] },
+    ],
+    ['a malformed table', { type: 'Table', props: { headers: ['a', 'b'], rows: [['1']] } }],
+    ['a field named after an object method', { type: 'Fields', children: [{ type: 'constructor' }] }],
+    ['a table too long for Slack to draw', { type: 'Table', props: { headers: ['a'], rows: [['x'.repeat(10_000)]] } }],
+    [
+      'a too-long table given as object rows',
+      { type: 'Table', props: { headers: ['a'], rows: [{ a: 'x'.repeat(10_000) }] } },
+    ],
+    [
+      'a too-long table given as template cells',
+      { type: 'Table', props: { headers: ['a'], rows: [[{ $template: 'x'.repeat(10_000) }]] } },
+    ],
+  ])('refuses a card with %s instead of posting it', async (_, part) => {
+    const { calls, delivery } = await deliverCard({ title: 'Perf', children: ['intro', part] });
+
+    await expect(delivery).rejects.toThrow(/send_card card refused: children\[1\]/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('refuses a card over the per-card limits the tool enforces, whoever wrote the row', async () => {
+    const tables = await deliverCard({ children: [table, table] });
+    const charts = await deliverCard({ children: [bar, bar, bar] });
+
+    await expect(tables.delivery).rejects.toThrow(/at most 1 Table/);
+    await expect(charts.delivery).rejects.toThrow(/at most 2 Chart/);
+    expect([...tables.calls, ...charts.calls]).toHaveLength(0);
+  });
+
+  it('renders an old-style text card exactly as before', async () => {
+    const { calls, delivery } = await deliverCard({
+      title: 'Daily',
+      description: 'Your plate today',
+      children: ['• item one', { text: '• item two' }, { type: 'text', text: '• item three' }, '', 42],
+    });
+    await delivery;
+
+    expect(postedCard(calls[0])).toEqual(
+      Card({
+        title: 'Daily',
+        children: [
+          CardText('Your plate today'),
+          CardText('• item one'),
+          CardText('• item two'),
+          CardText('• item three'),
+        ],
+      }),
+    );
   });
 });
 

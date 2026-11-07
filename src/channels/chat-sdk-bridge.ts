@@ -7,6 +7,7 @@
 import { createHash, timingSafeEqual } from 'crypto';
 import http from 'http';
 
+import { CardSpecError, standardComponentDefinitions as parts, toCard } from '@json-render/chat';
 import {
   Chat,
   Card,
@@ -541,6 +542,117 @@ export function appendRawText(
   serialized.text = text ? `${text}\n\n${extra}` : extra;
 }
 
+/**
+ * The json-render parts a send_card child may be: the same names as the
+ * runner's list (container/agent-runner/src/mcp-tools/interactive.ts). The row
+ * is not trusted, so any other part, a callback button or an image, refuses
+ * the card.
+ */
+const CARD_PARTS = {
+  Text: parts.Text,
+  Fields: parts.Fields,
+  Table: parts.Table,
+  Chart: parts.Chart,
+  Divider: parts.Divider,
+};
+const CARD_COMPONENTS = { Card: parts.Card, Field: parts.Field, ...CARD_PARTS };
+/** The runner's limits, so a card it would refuse is refused here too, whoever wrote the row. */
+const CARD_LIMITS = {
+  tables: 1,
+  charts: 2,
+  fields: 10,
+  tableRows: 51,
+  tableColumns: 6,
+  chartSeries: 12,
+  chartPoints: 20,
+  chartTitle: 50,
+  chartLabel: 20,
+};
+/** Header and cell text per table. Past it Slack swaps the table for plain text cut at 3,000 characters. */
+const MAX_TABLE_TEXT = 10_000;
+
+/**
+ * Tables in the built card whose header and cell text, counted the way Slack
+ * counts it, is past the budget. Counted after toCard, which fills in rows
+ * given as objects or templates.
+ */
+function longTables(keys: string[], built: Array<{ type: string }>): string[] {
+  return built.flatMap((part, i) => {
+    if (part.type !== 'table') return [];
+    const { headers, rows } = part as { type: string; headers: string[]; rows: string[][] };
+    const text = [headers, ...rows].flat().reduce((total, cell) => total + String(cell).length, 0);
+    return text > MAX_TABLE_TEXT
+      ? [`${keys[i]}: the table holds ${text} characters of text; at most ${MAX_TABLE_TEXT}`]
+      : [];
+  });
+}
+
+type CardSpec = Parameters<typeof toCard>[0];
+type CardPart = { type: string; props?: unknown; children?: unknown };
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/** A child with a type is a json-render part; a text child keeps its old shape. */
+function isCardPart(child: unknown): child is CardPart {
+  return isRecord(child) && typeof child.type === 'string' && typeof child.text !== 'string';
+}
+
+/** Same as the runner's: the parts as a spec keyed by their place in `children`. */
+function partsSpec(children: unknown[]): { spec: CardSpec; keys: string[]; problems: string[] } {
+  const elements: CardSpec['elements'] = {};
+  const problems: string[] = [];
+  const root: string[] = [];
+  children.forEach((child, i) => {
+    if (!isCardPart(child)) return;
+    const key = `children[${i}]`;
+    if (!Object.hasOwn(CARD_PARTS, child.type)) {
+      problems.push(`${key}: unknown part "${child.type}"`);
+      return;
+    }
+    const fields = child.type === 'Fields' && Array.isArray(child.children) ? child.children : [];
+    if (child.type === 'Fields' && fields.length === 0) {
+      problems.push(`${key}: Fields needs at least one Field in children`);
+      return;
+    }
+    const notField = fields.findIndex((field) => !isRecord(field) || field.type !== 'Field');
+    if (notField !== -1) {
+      problems.push(`${key}.children[${notField}]: Fields holds only Field parts`);
+      return;
+    }
+    const fieldKeys = fields.map((_, j) => `${key}.children[${j}]`);
+    fields.forEach((field, j) => {
+      const props = isRecord(field) && isRecord(field.props) ? field.props : {};
+      elements[fieldKeys[j]] = { type: 'Field', props, children: [] };
+    });
+    elements[key] = { type: child.type, props: isRecord(child.props) ? child.props : {}, children: fieldKeys };
+    root.push(key);
+  });
+  elements.card = { type: 'Card', props: {}, children: root };
+  return { spec: { root: 'card', elements }, keys: root, problems };
+}
+
+/**
+ * A send_card card's parts as Chat SDK elements, one per part, in order.
+ * Throws when a part is refused, so the row fails instead of posting a card
+ * with a gap in it.
+ */
+function cardParts(children: unknown[]): CardChild[] {
+  const { spec, keys, problems } = partsSpec(children);
+  if (problems.length === 0) {
+    try {
+      const built = toCard(spec, { components: CARD_COMPONENTS, limits: CARD_LIMITS }).children;
+      if (built.length !== keys.length) problems.push('a part was dropped while building the card');
+      else problems.push(...longTables(keys, built));
+      if (problems.length === 0) return built;
+    } catch (error) {
+      if (!(error instanceof CardSpecError)) throw error;
+      problems.push(...error.issues);
+    }
+  }
+  throw new Error(`send_card card refused: ${problems.join('; ')}`);
+}
+
 export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter {
   const { adapter } = config;
   // The instance name becomes a webhook route segment (the route regex is
@@ -1010,8 +1122,12 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           cardChildren.push(CardText(cardSpec.description));
         }
         if (Array.isArray(cardSpec.children)) {
+          const builtParts = cardSpec.children.some(isCardPart) ? cardParts(cardSpec.children) : [];
+          let nextPart = 0;
           for (const child of cardSpec.children) {
-            if (typeof child === 'string' && child) {
+            if (isCardPart(child)) {
+              cardChildren.push(builtParts[nextPart++]);
+            } else if (typeof child === 'string' && child) {
               cardChildren.push(CardText(child));
             } else if (
               child &&

@@ -4,6 +4,7 @@
  * ask_user_question is a blocking tool call — it writes a messages_out row
  * with a question card, then polls messages_in for the response.
  */
+import { CardSpecError, standardComponentDefinitions, toCard } from '@json-render/chat';
 import { AjvJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/ajv';
 import { setTimeout as sleep } from 'node:timers/promises';
 
@@ -125,6 +126,130 @@ function partitionActions(card: Record<string, unknown>): { card: Record<string,
 
   return { card: { ...card, actions: valid }, dropped: actions.length - valid.length };
 }
+
+/**
+ * The json-render parts a send_card child may be, named one by one: a part a
+ * later json-render release adds reaches agents only once it is listed here, so
+ * none can bring a callback button that answers a pending question. Image is
+ * left out: the platform would fetch an address the agent chose, unclicked.
+ * The bridge (src/channels/chat-sdk-bridge.ts) keeps the same list.
+ */
+const { Card, Text, Fields, Field, Table, Chart, Divider } = standardComponentDefinitions;
+const CARD_PARTS = { Text, Fields, Table, Chart, Divider };
+const CARD_COMPONENTS = { Card, Field, ...CARD_PARTS };
+/**
+ * Per card. The chart limits are what Slack draws natively (past them it
+ * falls back to text). 50 rows of 6 columns keeps a table well inside a
+ * Teams bot message (100 KB, counted as UTF-16).
+ */
+const CARD_LIMITS = {
+  tables: 1,
+  charts: 2,
+  fields: 10,
+  tableRows: 51,
+  tableColumns: 6,
+  chartSeries: 12,
+  chartPoints: 20,
+  chartTitle: 50,
+  chartLabel: 20,
+};
+/** Header and cell text per table. Past it Slack swaps the table for plain text cut at 3,000 characters. */
+const MAX_TABLE_TEXT = 10_000;
+
+/**
+ * Tables in the built card whose header and cell text, counted the way Slack
+ * counts it, is past the budget. Counted after toCard, which fills in rows
+ * given as objects or templates.
+ */
+function longTables(keys: string[], built: Array<{ type: string }>): string[] {
+  return built.flatMap((part, i) => {
+    if (part.type !== 'table') return [];
+    const { headers, rows } = part as { type: string; headers: string[]; rows: string[][] };
+    const text = [headers, ...rows].flat().reduce((total, cell) => total + String(cell).length, 0);
+    return text > MAX_TABLE_TEXT ? [`${keys[i]}: the table holds ${text} characters of text; at most ${MAX_TABLE_TEXT}`] : [];
+  });
+}
+
+type CardSpec = Parameters<typeof toCard>[0];
+type CardPart = { type: string; props?: unknown; children?: unknown };
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/** A child with a type is a json-render part; a text child keeps its old shape. */
+function isCardPart(child: unknown): child is CardPart {
+  return isRecord(child) && typeof child.type === 'string' && typeof child.text !== 'string';
+}
+
+/**
+ * The card's parts as a json-render spec, each keyed by where it sits in
+ * `children` so toCard's messages point the agent at the child to fix. An
+ * empty Fields is refused here: toCard would drop it without a word.
+ */
+function partsSpec(children: unknown[]): { spec: CardSpec; keys: string[]; problems: string[] } {
+  const elements: CardSpec['elements'] = {};
+  const problems: string[] = [];
+  const root: string[] = [];
+  children.forEach((child, i) => {
+    if (!isCardPart(child)) return;
+    const key = `children[${i}]`;
+    if (!Object.hasOwn(CARD_PARTS, child.type)) {
+      problems.push(`${key}: unknown part "${child.type}"; use ${Object.keys(CARD_PARTS).join(', ')}`);
+      return;
+    }
+    const fields = child.type === 'Fields' && Array.isArray(child.children) ? child.children : [];
+    if (child.type === 'Fields' && fields.length === 0) {
+      problems.push(`${key}: Fields needs at least one Field in children`);
+      return;
+    }
+    const notField = fields.findIndex((field) => !isRecord(field) || field.type !== 'Field');
+    if (notField !== -1) {
+      problems.push(`${key}.children[${notField}]: Fields holds only Field parts`);
+      return;
+    }
+    const fieldKeys = fields.map((_, j) => `${key}.children[${j}]`);
+    fields.forEach((field, j) => {
+      const props = isRecord(field) && isRecord(field.props) ? field.props : {};
+      elements[fieldKeys[j]] = { type: 'Field', props, children: [] };
+    });
+    elements[key] = { type: child.type, props: isRecord(child.props) ? child.props : {}, children: fieldKeys };
+    root.push(key);
+  });
+  elements.card = { type: 'Card', props: {}, children: root };
+  return { spec: { root: 'card', elements }, keys: root, problems };
+}
+
+/** Why send_card would refuse the card's parts; empty when it would not. */
+function cardPartProblems(card: Record<string, unknown>): string[] {
+  const children: unknown[] = Array.isArray(card.children) ? card.children : [];
+  if (!children.some(isCardPart)) return [];
+  const { spec, keys, problems } = partsSpec(children);
+  if (problems.length > 0) return problems;
+  try {
+    return longTables(keys, toCard(spec, { components: CARD_COMPONENTS, limits: CARD_LIMITS }).children);
+  } catch (error) {
+    if (error instanceof CardSpecError) return error.issues;
+    throw error;
+  }
+}
+
+/**
+ * A part as the tool advertises it: its name, not its fields. The send_card
+ * schema reaches every provider on every request, so it stays small and uses
+ * only plain JSON Schema; the fields are in the tool's instructions, and a
+ * refusal names what to fix.
+ */
+const CARD_PART_SCHEMA = Object.freeze({
+  type: 'object' as const,
+  description:
+    'A json-render part: { type, props } (Fields: { type, children: Field parts }). Fields per part are in the send_card instructions.',
+  properties: {
+    type: { type: 'string' as const, enum: Object.keys(CARD_PARTS) },
+    props: { type: 'object' as const },
+    children: { type: 'array' as const, items: { type: 'object' as const } },
+  },
+  required: ['type'],
+});
 
 function ok(text: string) {
   return { content: [{ type: 'text' as const, text }] };
@@ -269,14 +394,14 @@ export const sendCard: McpToolDefinition = {
         card: {
           type: 'object',
           description:
-            'Display card with optional title, description, text children, and URL link actions. Each action requires a non-empty label and a url that is a web link (http or https); invalid actions are dropped. Callback buttons are unsupported; use ask_user_question for choices.',
+            'Display card with optional title, description, children (text and json-render parts) and URL link actions. Each action requires a non-empty label and a url that is a web link (http or https); invalid actions are dropped. Callback buttons are unsupported; use ask_user_question for choices.',
           properties: {
             title: { type: 'string' },
             description: { type: 'string' },
             children: {
               type: 'array',
               description:
-                'Text content only: strings or objects with a text field. Nested action blocks are unsupported.',
+                'Text (strings or objects with a text field) and json-render parts: Text, Fields, Table, Chart, Divider. At most 1 Table (50 rows, 6 columns) and 2 Charts per card. A card with an invalid part is not sent; the result says what to fix. Nested action blocks are unsupported.',
               items: {
                 anyOf: [
                   { type: 'string' },
@@ -285,6 +410,7 @@ export const sendCard: McpToolDefinition = {
                     properties: { text: { type: 'string' } },
                     required: ['text'],
                   },
+                  CARD_PART_SCHEMA,
                 ],
               },
             },
@@ -310,6 +436,8 @@ export const sendCard: McpToolDefinition = {
     const id = generateId();
     const r = routing();
     const { card: renderable, dropped } = partitionActions(card);
+    const problems = cardPartProblems(renderable);
+    if (problems.length > 0) return err(`Card not sent. Fix these and send it again: ${problems.join('; ')}`);
 
     await writeMessageOut({
       id,

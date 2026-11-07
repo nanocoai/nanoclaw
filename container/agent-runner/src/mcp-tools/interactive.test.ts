@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { closeSessionDb, getInboundDb, getOutboundDb, initTestSessionDb } from '../mailbox/sqlite/connection.js';
 import { getUndeliveredMessages } from '../db/messages-out.js';
 import { findQuestionResponse } from '../db/messages-in.js';
+import { standardComponentDefinitions } from '@json-render/chat';
+
 import { askUserQuestion, LINK_ACTION_SCHEMA, MAX_CARD_QUESTION_LENGTH, sendCard } from './interactive.js';
 
 beforeEach(() => initTestSessionDb());
@@ -296,13 +298,15 @@ describe('send_card', () => {
     }
   });
 
-  it('constrains children to text instead of promising nested action blocks', () => {
+  it('offers text and display parts as children, never a button or nested action blocks', () => {
     const cardSchema = sendCard.tool.inputSchema.properties.card as {
       properties: { children: { description: string; items: { anyOf: Array<Record<string, unknown>> } } };
     };
+    const advertised = JSON.stringify(cardSchema.properties.children.items.anyOf);
 
     expect(cardSchema.properties.children.description).toContain('Nested action blocks are unsupported');
-    expect(cardSchema.properties.children.items.anyOf).toHaveLength(2);
+    expect(advertised).toContain('"enum":["Text","Fields","Table","Chart","Divider"]');
+    expect(advertised).not.toMatch(/Button|Actions|Image|"const"|"null"/);
   });
 
   it('stays quiet when every action has a url', async () => {
@@ -317,6 +321,96 @@ describe('send_card', () => {
     const result = await sendCard.handler({ card: { title: 'Test', description: 'No actions' } });
 
     expect(result.content[0].text).toMatch(/^Card sent \(id: msg-[^)]+\)$/);
+  });
+});
+
+describe('send_card — json-render parts', () => {
+  const field = (label: string, value: string | number) => ({ type: 'Field', props: { label, value } });
+  const table = (rows: string[][], headers = ['Scale', 'Before', 'After']) => ({
+    type: 'Table',
+    props: { headers, rows },
+  });
+  const chart = (title: string, spec: Record<string, unknown>) => ({ type: 'Chart', props: { title, chart: spec } });
+  const bar = (title = 'Latency') =>
+    chart(title, { type: 'bar', categories: ['1x', '2x'], series: [{ name: 'Before', values: [40, 80] }] });
+  const pie = (value: number) => chart('Split', { type: 'pie', segments: [{ label: 'Render', value }] });
+  const sent = () => JSON.parse(getUndeliveredMessages()[0].content);
+
+  it('sends a card of every part as the agent wrote it, next to its text children', async () => {
+    const children = [
+      'Before/after the cache change.',
+      { type: 'Fields', children: [field('p50', '42 ms'), field('Errors', 0.2)] },
+      table([['1x', '40', '38']]),
+      bar(),
+      pie(55),
+      { type: 'Divider' },
+      { type: 'Text', props: { content: 'Measured on staging.', style: 'muted' } },
+      { type: 'text', text: 'A text child that also names a type stays text.' },
+    ];
+    const result = await sendCard.handler({ card: { title: 'Perf', children } });
+
+    expect(result.isError).toBeUndefined();
+    expect(sent().card.children).toEqual(children);
+  });
+
+  it.each([
+    ['a callback button', { type: 'Button', props: { id: 'ncq:q-1:0', label: 'Approve' } }, 'unknown part "Button"'],
+    ['an image', { type: 'Image', props: { url: 'https://example.com/a.png', alt: 'x' } }, 'unknown part "Image"'],
+    ['a nested card', { type: 'Card', props: { title: 'Approve?' } }, 'unknown part "Card"'],
+    ['a field outside Fields', field('p50', '42 ms'), 'unknown part "Field"'],
+    ['an empty Fields', { type: 'Fields', children: [] }, 'Fields needs at least one Field'],
+    [
+      'a button inside Fields',
+      { type: 'Fields', children: [{ type: 'Button', props: { id: 'ncq:q-1:0', label: 'x' } }] },
+      'Fields holds only Field parts',
+    ],
+    ['a field named after an object method', { type: 'Fields', children: [{ type: 'constructor' }] }, 'Fields holds only Field parts'],
+    ['a short table row', table([['1x', '40']]), 'row 0 has 2 cells, expected 3'],
+    ['a table of 51 rows', table(Array.from({ length: 51 }, () => ['1x', '40', '38'])), 'at most 51 rows'],
+    ['a table of 7 columns', table([['a', 'b', 'c', 'd', 'e', 'f', 'g']], ['1', '2', '3', '4', '5', '6', '7']), 'at most 6 columns'],
+    [
+      'a series missing a value',
+      chart('Latency', { type: 'line', categories: ['1x', '2x'], series: [{ name: 'Before', values: [40] }] }),
+      'has 1 values, expected 2',
+    ],
+    ['a pie slice of zero', pie(0), 'segments.0.value'],
+    ['a table too long for Slack to draw', table([['x'.repeat(10_000), 'a', 'b']]), 'at most 10000'],
+    [
+      'a too-long table given as object rows',
+      { type: 'Table', props: { headers: ['Evidence'], rows: [{ Evidence: 'x'.repeat(10_000) }] } },
+      'at most 10000',
+    ],
+    [
+      'a too-long table given as template cells',
+      { type: 'Table', props: { headers: ['Evidence'], rows: [[{ $template: 'x'.repeat(10_000) }]] } },
+      'at most 10000',
+    ],
+  ])('refuses %s and says which child to fix', async (_, part, reason) => {
+    const result = await sendCard.handler({ card: { title: 'Perf', children: ['intro', part] } });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('Card not sent');
+    expect(result.content[0].text).toContain('children[1]');
+    expect(result.content[0].text).toContain(reason);
+    expect(getUndeliveredMessages()).toHaveLength(0);
+  });
+
+  it('refuses a second table and a third chart', async () => {
+    const tables = await sendCard.handler({
+      card: { children: [table([['1x', '40', '38']]), table([['2x', '80', '61']])] },
+    });
+    const charts = await sendCard.handler({ card: { children: [bar('a'), bar('b'), bar('c')] } });
+
+    expect(tables.content[0].text).toContain('at most 1 Table');
+    expect(charts.content[0].text).toContain('at most 2 Chart');
+    expect(getUndeliveredMessages()).toHaveLength(0);
+  });
+
+  // A new json-render part fails this: decide whether agents get it, then update both lists.
+  it('knows every part json-render offers, so a new one is a decision', () => {
+    expect(Object.keys(standardComponentDefinitions).sort()).toEqual(
+      ['Actions', 'Button', 'Card', 'Chart', 'Divider', 'Field', 'Fields', 'Image', 'LinkButton', 'Section', 'Table', 'Text'].sort(),
+    );
   });
 });
 
