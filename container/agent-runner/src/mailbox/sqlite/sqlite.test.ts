@@ -157,4 +157,73 @@ describe('SQLite runner mailbox canonical serialization', () => {
     const mailbox = new SqliteAgentMailbox();
     expect(mailbox.getPendingMessages(10, false)).toEqual([]);
   });
+
+  /** Insert a messages_in row with just the columns these tests care about. */
+  function seedMessage(inbound: ReturnType<typeof initTestSessionDb>['inbound'], id: string, seq: number): void {
+    inbound
+      .prepare(
+        `INSERT INTO messages_in
+           (id, seq, kind, timestamp, status, tries, trigger, content, on_wake)
+         VALUES (?, ?, 'chat', ?, 'pending', 0, 1, '{}', 0)`,
+      )
+      .run(id, seq, new Date().toISOString());
+  }
+
+  test('clearStaleProcessingAcks drops acks whose message is gone, keeping the live ones', () => {
+    const { inbound, outbound } = initTestSessionDb();
+    seedMessage(inbound, 'chat:32:group', 2);
+
+    const ack = outbound.prepare(
+      'INSERT INTO processing_ack (message_id, status, status_changed) VALUES (?, ?, ?)',
+    );
+    ack.run('chat:32:group', 'completed', '2026-09-09T00:00:00.000Z'); // live — message exists
+    ack.run('chat:12:group', 'completed', '2026-08-12T00:00:00.000Z'); // orphan — pruned message
+    ack.run('chat:70:group', 'completed', '2026-08-27T00:00:00.000Z'); // orphan — pruned message
+
+    new SqliteAgentMailbox().operations.clearStaleProcessingAcks();
+
+    const left = (
+      outbound.prepare('SELECT message_id FROM processing_ack ORDER BY message_id').all() as Array<{
+        message_id: string;
+      }>
+    ).map(({ message_id }) => message_id);
+    expect(left).toEqual(['chat:32:group']);
+  });
+
+  test('a message reusing a pruned id is delivered, not swallowed by the old ack', () => {
+    const { inbound, outbound } = initTestSessionDb();
+    // The 2026-09 incident in miniature: a recreated bot restarts its counter,
+    // so a brand-new message arrives carrying an id an old ack already holds.
+    outbound
+      .prepare('INSERT INTO processing_ack (message_id, status, status_changed) VALUES (?, ?, ?)')
+      .run('chat:32:group', 'completed', '2026-08-24T17:32:07.539Z');
+
+    const mailbox = new SqliteAgentMailbox();
+    seedMessage(inbound, 'chat:32:group', 2);
+    // Without the sweep the stale ack hides it: the agent never sees the message.
+    expect(mailbox.getPendingMessages(10, false)).toEqual([]);
+
+    // The sweep runs at container start and removes the ack, because at that
+    // point no messages_in row carried that id.
+    outbound.prepare('DELETE FROM processing_ack').run();
+    outbound
+      .prepare('INSERT INTO processing_ack (message_id, status, status_changed) VALUES (?, ?, ?)')
+      .run('chat:99:gone', 'completed', '2026-08-24T17:32:07.539Z');
+    mailbox.operations.clearStaleProcessingAcks();
+
+    expect(mailbox.getPendingMessages(10, false).map((m) => m.id)).toEqual(['chat:32:group']);
+  });
+
+  test('clearStaleProcessingAcks still clears processing entries from a crashed turn', () => {
+    const { inbound, outbound } = initTestSessionDb();
+    seedMessage(inbound, 'chat:5:group', 2);
+    outbound
+      .prepare('INSERT INTO processing_ack (message_id, status, status_changed) VALUES (?, ?, ?)')
+      .run('chat:5:group', 'processing', new Date().toISOString());
+
+    const mailbox = new SqliteAgentMailbox();
+    expect(mailbox.getPendingMessages(10, false)).toEqual([]); // claimed, so hidden
+    mailbox.operations.clearStaleProcessingAcks();
+    expect(mailbox.getPendingMessages(10, false).map((m) => m.id)).toEqual(['chat:5:group']);
+  });
 });
