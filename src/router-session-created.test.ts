@@ -235,3 +235,26 @@ describe('registerSessionCreatedHook', () => {
     expect(vi.mocked(wakeContainer)).toHaveBeenCalled();
   });
 });
+
+describe('messageIdForAgent (filesystem-safe separator)', () => {
+  it('never emits a colon — NTFS-safe even for colon-bearing Telegram ids', async () => {
+    // Routed end-to-end: a Telegram-style inbound id `<chatId>:<msgId>` must
+    // land in the session DB with no `:` left (upstream issue: : is reserved
+    // on Windows NTFS, and the id becomes a directory name at attachment
+    // extraction). Assert on the row the router writes.
+    const { routeInbound } = await import('./router.js');
+    const events: Array<{ id: string }> = [];
+    await routeInbound(
+      {
+        message: {
+          id: '-1003904676273:5812',
+          kind: 'text',
+          timestamp: new Date().toISOString(),
+          content: { text: 'hello' },
+        },
+      } as never,
+      { onSessionMessage: async (row) => events.push(row as { id: string }) } as never,
+    );
+    for (const row of events) expect(row.id.includes(':')).toBe(false);
+  });
+});
