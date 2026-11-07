@@ -516,9 +516,15 @@ async function sendAgentCard(
     return 'ignored'; // the first card keeps its buttons for another try
   }
   sent();
-  // Decided meanwhile (a Reject): leave that decision on the card.
-  if (!(await updatePendingChannelApprovalCard(row.messaging_group_id, title, question, JSON.stringify(options))))
-    return 'ignored';
+  // Decided meanwhile (a Reject), or a newer request: leave that card as it is.
+  const stored = await updatePendingChannelApprovalCard(
+    row.messaging_group_id,
+    row.created_at,
+    title,
+    question,
+    JSON.stringify(options),
+  );
+  if (!stored) return 'ignored';
   return 'accepted';
 }
 

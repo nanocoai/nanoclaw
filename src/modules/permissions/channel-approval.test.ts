@@ -914,6 +914,36 @@ describe('unknown-channel registration flow', () => {
       expect(await click(card.messaging_group_id, 'connect:ag-2', 'card-3')).toBe('accepted');
     });
 
+    it('does not store its options over a newer request for the same chat', async () => {
+      const card = await firstCard('chat-choose-replaced');
+      let sent!: () => void;
+      deliverMock.mockImplementationOnce(() => new Promise((resolve) => (sent = () => resolve('plat-msg-2'))));
+      const choosing = click(card.messaging_group_id, 'choose_existing', 'card-1');
+      await vi.waitFor(() => expect(deliverMock).toHaveBeenCalledTimes(2));
+      // Meanwhile the request is removed (an admin's delete) and a new one is raised.
+      const old = (await getDb().get<Record<string, string>>(
+        'SELECT * FROM pending_channel_approvals WHERE messaging_group_id = ?',
+        card.messaging_group_id,
+      ))!;
+      await getDb().run('DELETE FROM pending_channel_approvals WHERE messaging_group_id = ?', card.messaging_group_id);
+      await getDb().run(
+        `INSERT INTO pending_channel_approvals
+           (messaging_group_id, agent_group_id, original_message, approver_user_id, created_at, title, question, options_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        old.messaging_group_id,
+        old.agent_group_id,
+        old.original_message,
+        old.approver_user_id,
+        new Date(Date.parse(old.created_at) + 1000).toISOString(),
+        old.title,
+        old.question,
+        old.options_json,
+      );
+      sent();
+      expect(await choosing).toBe('ignored');
+      expect(await storedOptions(card.messaging_group_id)).toBe(card.options_json);
+    });
+
     it("leaves the first card as it was when the agent card can't be sent", async () => {
       const card = await firstCard('chat-choose-fails');
       deliverMock.mockRejectedValueOnce(new Error('send failed'));
