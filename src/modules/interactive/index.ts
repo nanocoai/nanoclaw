@@ -61,7 +61,10 @@ async function handleInteractiveResponse(payload: ResponsePayload): Promise<Resp
         // Answered already, but that click failed after the write (the row's
         // delete or the activity stamp): close the card, and wake the agent.
         await deletePendingQuestion(payload.questionId);
-        await requestWake(session, 'interactive');
+        // Not awaited: a slow container start must not hold the card open.
+        void requestWake(session, 'interactive').catch((err: unknown) =>
+          log.warn('Wake after a repeat question answer failed', { questionId: payload.questionId, err }),
+        );
         return 'closed';
       }
       log.error('Question answer could not be written to the agent', { questionId: payload.questionId, err });
