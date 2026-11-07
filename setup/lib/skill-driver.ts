@@ -31,6 +31,7 @@ import {
 } from '../../scripts/skill-apply.js';
 import { parseDirectives, promptVar } from '../../scripts/skill-directives.js';
 import { extractOfferUrl, gatePolicy } from '../../scripts/skill-policy.js';
+import { redactSecrets } from '../../src/secret-redaction.js';
 import * as setupLog from '../logs.js';
 import { isHeadless } from '../platform.js';
 import { emitStatus } from '../status.js';
@@ -295,7 +296,7 @@ export function hostExec(
       });
       child.on('error', reject);
       child.on('close', (code) => {
-        const redact = context?.redact ?? ((text: string) => text);
+        const redact = (text: string): string => redactSecrets(context?.redact(text) ?? text);
         tee(redact(cmd), redact(out), redact(err));
         if (code === 0) return resolve(out);
         const stderr = redact(err).trim();

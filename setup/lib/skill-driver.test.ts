@@ -188,6 +188,17 @@ describe('thin skill driver', () => {
     expect(log).toContain('dying-gasp'); // the failing command's output survives too
   });
 
+  it('hostExec keeps key-shaped values out of the raw log and the failure message', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'driver-tee-secret-'));
+    const rawLog = join(root, 'raw.log');
+    const token = ['ghp', 'T3stT0kenQ9wErTy5uIoP1aSdFgH2jKlZx8C'].join('_');
+    const exec = hostExec(root, rawLog);
+    await exec(`echo "GITHUB_TOKEN=${token}"`);
+    const failure = exec(`echo "auth failed for ${token}" >&2; exit 4`);
+    await expect(failure).rejects.toThrow(/exit 4: auth failed for ghp_\[REDACTED\]…Zx8C/);
+    expect(readFileSync(rawLog, 'utf8')).not.toContain(token);
+  });
+
   it.each([0, 7])('redacts resolved secrets through the default executor (exit %s)', async (exit) => {
     const { root, skill } = scratch();
     const secret = 'test-credential-never-log-this';

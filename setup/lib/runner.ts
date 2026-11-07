@@ -17,6 +17,7 @@ import fs from 'fs';
 import * as p from '@clack/prompts';
 import k from 'kleur';
 
+import { createLineRedactor } from '../../src/secret-redaction.js';
 import * as setupLog from '../logs.js';
 import { offerClaudeOnFailure } from './claude-handoff.js';
 import { emit as phEmit } from './diagnostics.js';
@@ -48,6 +49,36 @@ export type SpinnerLabels = {
   skipped?: string;
   failed?: string;
 };
+
+/**
+ * A raw step log, redacted a whole line at a time so a secret split across
+ * output chunks is still seen in one piece. stdout and stderr buffer apart, or
+ * a partial line from one would glue onto the other. An unfinished line waits
+ * for its end: the step transcript already holds all output in memory. Writes
+ * are synchronous so the log is complete when the step resolves.
+ */
+function redactingLog(rawLogPath: string): { write(chunk: Buffer | string, from?: 'out' | 'err'): void; end(): void } {
+  const fd = fs.openSync(rawLogPath, 'w');
+  const streams = {
+    out: { pending: Buffer.alloc(0), redact: createLineRedactor() },
+    err: { pending: Buffer.alloc(0), redact: createLineRedactor() },
+  };
+  return {
+    write(chunk, from = 'out') {
+      const stream = streams[from];
+      const buf = Buffer.concat([stream.pending, Buffer.from(chunk)]);
+      // Cutting at a line-end byte never splits a UTF-8 character.
+      const at = Math.max(buf.lastIndexOf(0x0a), buf.lastIndexOf(0x0d)) + 1;
+      if (at > 0) fs.writeSync(fd, stream.redact(buf.subarray(0, at).toString('utf-8')));
+      stream.pending = buf.subarray(at);
+    },
+    end() {
+      const tails = [streams.out, streams.err].filter((s) => s.pending.length > 0);
+      fs.writeSync(fd, tails.map((s) => s.redact(s.pending.toString('utf-8'))).join('\n'));
+      fs.closeSync(fd);
+    },
+  };
+}
 
 /**
  * Streaming parser for `=== NANOCLAW SETUP: TYPE ===` blocks. Emits each
@@ -122,7 +153,7 @@ export function spawnStep(
 
     const child = spawn('pnpm', args, { stdio: ['ignore', 'pipe', 'pipe'] });
     const stream = new StatusStream(onBlock);
-    const raw = fs.createWriteStream(rawLogPath, { flags: 'w' });
+    const raw = redactingLog(rawLogPath);
     raw.write(`# ${stepName} — ${new Date().toISOString()}\n\n`);
 
     // Per-line forwarder for the optional onLine callback. We keep our own
@@ -151,7 +182,7 @@ export function spawnStep(
     child.stderr.on('data', (chunk: Buffer) => {
       const s = chunk.toString('utf-8');
       stream.transcript += s;
-      raw.write(chunk);
+      raw.write(chunk, 'err');
       pushLines(s);
     });
 
@@ -183,7 +214,7 @@ export function spawnQuiet(
       env: envOverride ? { ...process.env, ...envOverride } : process.env,
     });
     let transcript = '';
-    const raw = fs.createWriteStream(rawLogPath, { flags: 'w' });
+    const raw = redactingLog(rawLogPath);
     raw.write(`# ${[cmd, ...args].join(' ')} — ${new Date().toISOString()}\n\n`);
     const blocks: Block[] = [];
     const stream = new StatusStream((b) => blocks.push(b));
@@ -195,7 +226,7 @@ export function spawnQuiet(
     });
     child.stderr.on('data', (c: Buffer) => {
       transcript += c.toString('utf-8');
-      raw.write(c);
+      raw.write(c, 'err');
     });
     child.on('close', (code) => {
       raw.end();
