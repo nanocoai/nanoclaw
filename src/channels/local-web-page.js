@@ -277,6 +277,8 @@ import { createConversationController } from './local-web-conversation-ui.js';
           if (responseBody.resolution) resolveQuestion(card.questionId, responseBody.resolution);
           setState('Ready', 'ready');
         } catch (error) {
+          // Answered meanwhile (another tab won the race): keep that answer.
+          if (card.resolution) return;
           resolution.textContent = error instanceof Error ? error.message : 'Action could not be sent.';
           resolution.hidden = false;
           resolution.classList.add('question-error');

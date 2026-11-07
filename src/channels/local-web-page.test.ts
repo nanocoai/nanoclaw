@@ -48,5 +48,7 @@ describe('local web page assets', () => {
     expect(script).toContain('sidebarScrim.hidden = !drawerOpen');
     expect(script).toContain("mobileSidebar.addEventListener('change'");
     expect(script).toContain('pnpm local-web');
+    // A losing click's error never covers an answer another tab already drew.
+    expect(script).toContain('if (card.resolution) return;');
   });
 });
