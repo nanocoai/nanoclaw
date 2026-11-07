@@ -1,3 +1,4 @@
+import { rejectPendingApproval } from '../../modules/approvals/index.js';
 import { PENDING_APPROVAL_STATUSES } from '../../types.js';
 import { registerResource } from '../crud.js';
 
@@ -6,7 +7,7 @@ registerResource({
   plural: 'approvals',
   table: 'pending_approvals',
   description:
-    'Pending approval — in-flight approval cards waiting for an admin response. Created by registered modules or the selected gateway. Rows are deleted after the admin approves/rejects or the request expires.',
+    'Pending approval — in-flight approval cards waiting for an admin response. Created by registered modules or the selected gateway. Rows are deleted after the admin approves/rejects, after `ncl approvals reject`, or when the request expires (gateway TTL; module-initiated cards after 7 days unanswered).',
   idColumn: 'approval_id',
   columns: [
     {
@@ -51,4 +52,28 @@ registerResource({
     { name: 'options_json', type: 'json', description: 'Card button options as JSON array.' },
   ],
   operations: { list: 'open', get: 'open' },
+  customOperations: {
+    reject: {
+      access: 'open',
+      description:
+        'Reject a pending approval by id — the same outcome as pressing Reject on its card.\n\n' +
+        'For clearing a card whose buttons can no longer be used (a stale or lost card). The requesting ' +
+        'agent is told its request was rejected; if its session is gone the row is simply removed. ' +
+        'There is deliberately no by-id approve: approving stays a human decision made on the card.',
+      args: [
+        { name: 'id', type: 'string', description: 'Approval id (from `ncl approvals list`).', required: true },
+        { name: 'reason', type: 'string', description: 'Optional one-line reason relayed to the requesting agent.' },
+      ],
+      examples: [
+        'ncl approvals reject appr-1789503209201-6wqpil',
+        'ncl approvals reject appr-… --reason "No longer needed"',
+      ],
+      handler: async (args, ctx) => {
+        const approvalId = args.id as string;
+        const userId = ctx.caller === 'agent' ? `agent:${ctx.agentGroupId}` : 'host';
+        const outcome = await rejectPendingApproval(approvalId, userId, args.reason as string | undefined);
+        return { approval_id: approvalId, outcome };
+      },
+    },
+  },
 });
