@@ -534,8 +534,9 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
     const options = await buildAgentSelectionOptions(agentGroups, approverId);
     const title = '📋 Choose an agent';
     const question = `Which agent should handle this channel? ${AGENT_ACCESS_SCOPE_WARNING}`;
-    await updatePendingChannelApprovalCard(row.messaging_group_id, title, question, JSON.stringify(options));
 
+    // Sent before its options are stored: until then, a tap on the first card
+    // (a double tap, or Reject) still means that card's button, not an agent.
     try {
       await adapter.deliver(
         approverDm.channel_type,
@@ -557,7 +558,11 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
         messagingGroupId: row.messaging_group_id,
         err,
       });
+      return 'ignored'; // the first card keeps its buttons for another try
     }
+    // Decided meanwhile (a Reject): leave that decision on the card.
+    if (!(await updatePendingChannelApprovalCard(row.messaging_group_id, title, question, JSON.stringify(options))))
+      return 'ignored';
     return 'accepted';
   }
 

@@ -793,6 +793,72 @@ describe('unknown-channel registration flow', () => {
     expect(stillPending).toBe(1);
   });
 
+  describe('choose existing: the agent card', () => {
+    async function firstCard(platformId: string) {
+      await createAgentGroup({ id: 'ag-2', name: 'Bo', folder: 'bo', agent_provider: null, created_at: now() });
+      const { routeInbound } = await import('../../router.js');
+      await expectAsyncDelivery(() => routeInbound(groupMention(platformId)));
+      return (await getDb().get<{ messaging_group_id: string; options_json: string }>(
+        'SELECT messaging_group_id, options_json FROM pending_channel_approvals',
+      ))!;
+    }
+    async function click(questionId: string, value: string) {
+      const { dispatchResponse } = await import('../../response-registry.js');
+      return dispatchResponse({
+        questionId,
+        value,
+        userId: 'owner',
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+      });
+    }
+    async function storedOptions(questionId: string): Promise<string | undefined> {
+      return (
+        await getDb().get<{ options_json: string }>(
+          'SELECT options_json FROM pending_channel_approvals WHERE messaging_group_id = ?',
+          questionId,
+        )
+      )?.options_json;
+    }
+
+    it('stores its options only once it is sent, so a tap on the first card meanwhile keeps its meaning', async () => {
+      const card = await firstCard('chat-choose-slow');
+      let sent!: () => void;
+      deliverMock.mockImplementationOnce(() => new Promise((resolve) => (sent = () => resolve('plat-msg-2'))));
+      const choosing = click(card.messaging_group_id, 'choose_existing');
+      await vi.waitFor(() => expect(deliverMock).toHaveBeenCalledTimes(2));
+      // Buttons are decoded by position against the stored options: the first card's
+      // first button must not mean the first agent while the agent card is on its way.
+      expect(await storedOptions(card.messaging_group_id)).toBe(card.options_json);
+      sent();
+      expect(await choosing).toBe('accepted');
+      const values = (JSON.parse((await storedOptions(card.messaging_group_id))!) as Array<{ value: string }>).map(
+        (o) => o.value,
+      );
+      expect(values).toEqual(['connect:ag-1', 'connect:ag-2', 'reject']);
+    });
+
+    it("leaves the first card as it was when the agent card can't be sent", async () => {
+      const card = await firstCard('chat-choose-fails');
+      deliverMock.mockRejectedValueOnce(new Error('send failed'));
+      expect(await click(card.messaging_group_id, 'choose_existing')).toBe('ignored');
+      expect(await storedOptions(card.messaging_group_id)).toBe(card.options_json);
+    });
+
+    it('a Reject while the agent card is on its way decides, and the choice does not draw over it', async () => {
+      const card = await firstCard('chat-choose-then-reject');
+      let sent!: () => void;
+      deliverMock.mockImplementationOnce(() => new Promise((resolve) => (sent = () => resolve('plat-msg-2'))));
+      const choosing = click(card.messaging_group_id, 'choose_existing');
+      await vi.waitFor(() => expect(deliverMock).toHaveBeenCalledTimes(2));
+      expect(await click(card.messaging_group_id, 'reject')).toBe('accepted');
+      sent();
+      expect(await choosing).toBe('ignored');
+      expect(await storedOptions(card.messaging_group_id)).toBeUndefined();
+    });
+  });
+
   it('create new agent: the free-text name reply creates the group and wires the channel', async () => {
     const { routeInbound } = await import('../../router.js');
     const { getResponseHandlers } = await import('../../response-registry.js');
