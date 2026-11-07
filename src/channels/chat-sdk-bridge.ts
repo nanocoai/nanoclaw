@@ -15,7 +15,6 @@ import {
   Button,
   LinkButton,
   type CardChild,
-  type CardElement,
   type ActionEvent,
   type Adapter,
   type AssistantContextChangedEvent,
@@ -26,11 +25,10 @@ import {
 import { log } from '../log.js';
 import { SqliteStateAdapter } from '../state-sqlite.js';
 import { registerWebhookAdapter } from '../webhook-server.js';
-import type { ResponseOutcome } from '../response-registry.js';
 import { CardTooLongError, cardQuestionTooLong, normalizeOptions, type NormalizedOption } from './ask-question.js';
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage } from './adapter.js';
 import { INSTANCE_KEY_RE } from './channel-registry.js';
-import { resolveQuestionRender, dispatchQuestionAction, type QuestionRender } from './question-render-registry.js';
+import { resolveQuestionRender, dispatchQuestionAction } from './question-render-registry.js';
 
 /** Adapter with optional gateway support (e.g., Discord). */
 interface GatewayAdapter extends Adapter {
@@ -385,24 +383,11 @@ export interface ChatSdkBridgeConfig {
   escapeCardText?: (text: string) => string;
   /**
    * For a platform that caps a whole card's text: the longest ask_question
-   * title plus card text (after escapeCardText) it shows in full. Shorthand
-   * for cardFits; a longer card overflows the same way.
+   * title plus card text (after escapeCardText) it shows in full. A longer
+   * card is refused with CardTooLongError. Unset, long card text is posted
+   * in several text blocks, each under CARD_TEXT_BLOCK_LENGTH.
    */
   maxCardTextLength?: number;
-  /**
-   * Whether the platform shows this exact card with nothing cut or rejected.
-   * An ask_question card that doesn't fit posts its full text first as
-   * button-less cards, then a short card with the buttons; if any part can't
-   * fit, nothing posts (CardTooLongError). A resolved card that doesn't fit
-   * keeps less text. Unset, every card fits.
-   */
-  cardFits?: (card: CardElement) => boolean;
-  /**
-   * The clicked card's message id, where a click's own id isn't it (WhatsApp
-   * Cloud: a button reply is a new message that quotes the card). Default: the
-   * click's message id.
-   */
-  cardMessageIdOf?: (event: ActionEvent) => string | undefined;
   /**
    * Maximum text length the underlying adapter accepts in a single message.
    * When set, the bridge splits outbound text longer than this on paragraph
@@ -474,40 +459,10 @@ function terminalApprovalMessage(spec: TerminalApprovalCard) {
  */
 export const CARD_TEXT_BLOCK_LENGTH = 2000;
 
-interface PlannedCard {
-  card: CardElement;
-  fallbackText: string;
-}
-
-interface QuestionCardPlan {
-  /** Button-less cards posted first when the whole card doesn't fit. */
-  parts: PlannedCard[];
-  /** The card with the buttons, and its title and text for the fallback. */
-  card: CardElement;
-  title: string;
-  text: string;
-}
-
-/** Title for the button card when the request's own title doesn't fit it. */
-const OVERFLOW_TITLE = 'Approval request';
-/** Smallest text block an overflow split goes down to before giving up. */
-const MIN_OVERFLOW_BLOCK = 250;
-/** Each part is a message: more risks chat rate limits and is too long to review in a chat. */
-const MAX_OVERFLOW_PARTS = 5;
-const overflowNotice = (ref: string, parts: number) =>
-  `The full request is in the ${parts === 1 ? 'message' : `${parts} messages`} marked ref ${ref} above.`;
-const stoppedNotice = (ref: string, posted: number, parts: number) =>
-  `Request ref ${ref} stopped after part ${posted} of ${parts}. It can't be answered until all its parts and buttons arrive.`;
-/** How long a partly posted overflow card waits for a retry to resume it. */
-const OVERFLOW_RESUME_MS = 60 * 60_000;
-/** How long a failed delivery waits for its stopped note before reporting the failure. */
-const STOPPED_NOTE_WAIT_MS = 5_000;
 /** Shown only to a clicker the host refused, where the channel can post privately. */
 const REFUSED_CLICK_NOTE = 'Only an approver can answer this.';
-/** A clicked card whose request the host closed (its session, event or target is gone). */
+/** A clicked card whose request is gone. */
 const CLOSED_RESOLUTION = 'No longer available';
-/** How long one click may hold its card before the next goes ahead: a stalled card update must not block it. */
-const CARD_CLICK_HOLD_MS = 10_000;
 
 const FENCE = '```';
 /** A fence opens or closes only at the start of a line; backticks mid-line are text. */
@@ -544,11 +499,7 @@ export function splitCardText(text: string, escape: (t: string) => string, limit
       const afterLine = rest.lastIndexOf('\n', cut - 1) + 1;
       if (afterLine > cut / 2 && fits(afterLine)) cut = afterLine;
       // Backing off a fence marker can change which fences close, so recheck.
-      // A cut mid-line before backticks would turn them into a fence line.
-      const badCut = (n: number) =>
-        isHighSurrogate(rest.charCodeAt(n - 1)) ||
-        (rest[n - 1] === '`' && rest[n] === '`') ||
-        (rest[n - 1] !== '\n' && /^ {0,3}```/.test(rest.slice(n, n + 6)));
+      const badCut = (n: number) => isHighSurrogate(rest.charCodeAt(n - 1)) || (rest[n - 1] === '`' && rest[n] === '`');
       while (cut > 0 && (badCut(cut) || !fits(cut))) cut--;
       if (cut === 0) throw new CardTooLongError('the request cannot be split into card text blocks');
     }
@@ -562,19 +513,6 @@ export function splitCardText(text: string, escape: (t: string) => string, limit
 
 function isHighSurrogate(code: number): boolean {
   return code >= 0xd800 && code <= 0xdbff;
-}
-
-/** The longest start of `raw`, ending in "…", that `ok` accepts; never splits a surrogate pair. */
-function longestStart(raw: string, ok: (shortened: string) => boolean): string {
-  const shortened = (n: number) => `${raw.slice(0, n > 0 && isHighSurrogate(raw.charCodeAt(n - 1)) ? n - 1 : n)}…`;
-  let lo = 0;
-  let hi = raw.length - 1;
-  while (lo < hi) {
-    const mid = Math.ceil((lo + hi) / 2);
-    if (ok(shortened(mid))) lo = mid;
-    else hi = mid - 1;
-  }
-  return shortened(lo);
 }
 
 export function splitForLimit(text: string, limit: number): string[] {
@@ -626,393 +564,64 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
   }
   const transformText = (t: string): string => (config.transformOutboundText ? config.transformOutboundText(t) : t);
   const cardText = (t: string): string => (config.escapeCardText ? config.escapeCardText(t) : t);
-  const cardTextsOf = (card: CardElement): string[] =>
-    card.children.flatMap((child) => (child.type === 'text' ? [child.content] : []));
-  const fits = (card: CardElement): boolean =>
-    (config.maxCardTextLength === undefined ||
-      !cardQuestionTooLong(card.title ?? '', cardTextsOf(card).join('\n'), config.maxCardTextLength)) &&
-    (config.cardFits?.(card) ?? true);
-  const partLabel = (ref: string, i: number, n: number) => cardText(`Request ref ${ref}, part ${i} of ${n}`);
-  const textCard = (title: string, blocks: string[]) =>
-    Card({ ...(title ? { title } : {}), children: blocks.map((block) => CardText(block)) });
-
-  /**
-   * How an ask_question card goes out: whole when it fits; otherwise its full
-   * text as button-less parts, then a short card with the buttons. Every part
-   * is checked before anything posts, so buttons never sit next to cut text,
-   * and every part is labelled so concurrent requests can't be mixed up.
-   */
-  function planQuestionCard(
-    questionId: string,
-    title: string,
-    question: string,
-    actions: CardChild,
-    escape: (t: string) => string = cardText,
-  ): QuestionCardPlan {
-    const withButtons = (t: string, blocks: string[]) =>
-      Card({ title: t, children: [...blocks.map((block) => CardText(block)), actions] });
-    const whole = withButtons(title, splitCardText(question, escape, CARD_TEXT_BLOCK_LENGTH));
-    if (fits(whole)) return { parts: [], card: whole, title, text: escape(question) };
-    // A title too long for a part moves into the text, under a fixed title.
-    const widest = partLabel(questionId, MAX_OVERFLOW_PARTS, MAX_OVERFLOW_PARTS);
-    const partTitle = fits(textCard(title, [widest])) ? title : OVERFLOW_TITLE;
-    const body = partTitle === title ? question : `${title}\n\n${question}`;
-    // Halved sizes can miss a channel's limit, so the largest block a titled part
-    // holds is tried among them, and the largest an untitled part holds last.
-    const halved: number[] = [];
-    for (let limit = CARD_TEXT_BLOCK_LENGTH; limit >= MIN_OVERFLOW_BLOCK; limit = Math.floor(limit / 2)) {
-      halved.push(limit);
-    }
-    const sizes = new Set([...[...halved, roomIn(partTitle, widest)].sort((a, b) => b - a), roomIn('', widest)]);
-    for (const limit of [...sizes].filter((n) => n >= MIN_OVERFLOW_BLOCK)) {
-      const blocks = splitIfPossible(body, escape, limit);
-      const parts = blocks && packParts(partTitle, questionId, blocks);
-      if (!parts) continue;
-      const notice = [cardText(overflowNotice(questionId, parts.length))];
-      const cardTitle = [title, OVERFLOW_TITLE].find((t) => fits(withButtons(t, notice)));
-      if (cardTitle === undefined) throw new CardTooLongError('the approval card does not fit this channel');
-      return { parts, card: withButtons(cardTitle, notice), title: cardTitle, text: notice.join('\n') };
-    }
-    throw new CardTooLongError('the request is too long to show in full on this channel');
-  }
-
-  /** The longest text block, after escaping, that a part with this title and label holds. */
-  function roomIn(title: string, label: string): number {
-    let lo = 0;
-    let hi = CARD_TEXT_BLOCK_LENGTH;
-    while (lo < hi) {
-      const mid = Math.ceil((lo + hi) / 2);
-      if (fits(textCard(title, [label, 'x'.repeat(mid)]))) lo = mid;
-      else hi = mid - 1;
-    }
-    return lo;
-  }
-
-  /** A split that can't be made at this size yields nothing, so a smaller size is tried next. */
-  function splitIfPossible(text: string, escape: (t: string) => string, limit: number): string[] | undefined {
-    try {
-      return splitCardText(text, escape, limit);
-    } catch (err) {
-      if (err instanceof CardTooLongError) return undefined;
-      throw err;
-    }
-  }
-
-  /**
-   * Greedily packs blocks into button-less cards that each fit, labelled with
-   * the whole question id (unique per request), or undefined.
-   */
-  function packParts(title: string, ref: string, blocks: string[]): PlannedCard[] | undefined {
-    const widest = partLabel(ref, MAX_OVERFLOW_PARTS, MAX_OVERFLOW_PARTS);
-    const parts = [{ title, blocks: [] as string[] }];
-    if (!fits(textCard(title, [widest]))) return undefined;
-    for (const block of blocks) {
-      const current = parts[parts.length - 1];
-      if (fits(textCard(current.title, [widest, ...current.blocks, block]))) {
-        current.blocks.push(block);
-      } else if (fits(textCard('', [widest, block]))) {
-        parts.push({ title: '', blocks: [block] });
-      } else {
-        return undefined;
-      }
-    }
-    if (parts.length > MAX_OVERFLOW_PARTS) return undefined;
-    const labelled = parts.map((part, i) => {
-      const texts = [partLabel(ref, i + 1, parts.length), ...part.blocks];
-      return { card: textCard(part.title, texts), fallbackText: [part.title, ...texts].filter(Boolean).join('\n\n') };
-    });
-    return labelled.every((part) => fits(part.card)) ? labelled : undefined;
-  }
-
-  /**
-   * Overflow progress per question: parts already posted, so a retry resumes
-   * instead of reposting, and the button card's id once delivered, so a repeat
-   * of the same request doesn't post it again. Deliveries of one question run
-   * one at a time.
-   */
-  const overflowProgress = new Map<
-    string,
-    { key: string; posted: number; noted: boolean; at: number; deliveredId?: string | null }
-  >();
-  const overflowRuns = new Map<string, Promise<unknown>>();
-
-  async function postQuestionCard(tid: string, questionId: string, plan: QuestionCardPlan, fallbackText: string) {
-    const previous = overflowRuns.get(questionId) ?? Promise.resolve();
-    const run = previous
-      .catch(() => undefined)
-      .then(() =>
-        plan.parts.length
-          ? postOverflowOnce(tid, questionId, plan, fallbackText)
-          : postWholeCard(tid, questionId, plan, fallbackText),
-      );
-    overflowRuns.set(questionId, run);
-    try {
-      return await run;
-    } finally {
-      if (overflowRuns.get(questionId) === run) overflowRuns.delete(questionId);
-    }
-  }
-
-  async function postWholeCard(tid: string, questionId: string, plan: QuestionCardPlan, fallbackText: string) {
-    const result = await adapter.postMessage(tid, { card: plan.card, fallbackText });
-    overflowProgress.delete(questionId);
-    return result?.id;
-  }
-
-  /**
-   * Posts an overflowed card's parts, then its buttons. When posting stops
-   * partway, one short note (postMessage, which every adapter has; edits and
-   * deletes are not universal) says the request can't be answered yet.
-   */
-  async function postOverflowOnce(tid: string, questionId: string, plan: QuestionCardPlan, fallbackText: string) {
-    // The exact cards: text, button ids, labels and styles.
-    const key = createHash('sha256')
-      .update(JSON.stringify([tid, plan.parts, plan.card, fallbackText]))
-      .digest('hex');
-    const now = Date.now();
-    for (const [id, entry] of overflowProgress) {
-      if (id !== questionId && !overflowRuns.has(id) && now - entry.at > OVERFLOW_RESUME_MS)
-        overflowProgress.delete(id);
-    }
-    const saved = overflowProgress.get(questionId);
-    if (saved?.key === key && saved.deliveredId !== undefined) return saved.deliveredId ?? undefined;
-    const progress = saved?.key === key ? saved : { key, posted: 0, noted: false, at: now };
-    progress.at = now;
-    overflowProgress.set(questionId, progress);
-    try {
-      for (; progress.posted < plan.parts.length; progress.posted++) {
-        await adapter.postMessage(tid, plan.parts[progress.posted]);
-      }
-      const result = await adapter.postMessage(tid, { card: plan.card, fallbackText });
-      progress.deliveredId = result?.id ?? null;
-      progress.at = Date.now();
-      return result?.id;
-    } catch (err) {
-      if (progress.posted > 0 && !progress.noted) {
-        const note = cardText(stoppedNotice(questionId, progress.posted, plan.parts.length));
-        const card = textCard('', [note]);
-        if (fits(card)) {
-          // A stalled note must not hold back the failure (a gateway denies on it).
-          let timer: NodeJS.Timeout | undefined;
-          await Promise.race([
-            adapter.postMessage(tid, { card, fallbackText: note }).then(
-              () => (progress.noted = true),
-              (noteErr: unknown) => log.warn('Failed to post a stopped-card note', { questionId, err: noteErr }),
-            ),
-            new Promise<void>((resolve) => {
-              timer = setTimeout(resolve, STOPPED_NOTE_WAIT_MS);
-              timer.unref?.();
-            }),
-          ]);
-          clearTimeout(timer);
-        }
-      }
-      throw err;
-    }
-  }
-
-  // The resolved card replaces the buttons: the full request when it fits,
-  // else the request ref (its overflow parts carry it) and the resolution.
-  /** The longest start of a resolution, escaped and ending in "…", that `ok` accepts. */
-  /** Every clicked card resolves the same way, on every channel: escaped and within its limits. */
-  const editClickedCard = (
-    threadId: string,
-    messageId: string,
-    questionId: string | undefined,
-    clicked: { title: string; question: string; selectedLabel: string; actorName: string },
-  ) =>
-    adapter.editMessage(
-      threadId,
-      messageId,
-      terminalMessage(
-        { title: clicked.title, question: clicked.question, resolution: clicked.selectedLabel },
-        questionId,
-        clicked.actorName ? ` by ${clicked.actorName}` : '',
-      ),
-    );
-
-  /**
-   * `tail` (who decided) is kept whole whenever the resolution must be
-   * shortened; only the start before it is cut.
-   */
-  const terminalMessage = (spec: TerminalApprovalCard, questionId?: string, tail = '') => {
-    const shortened = (ok: (resolution: string) => boolean) =>
-      cardText(`${longestStart(spec.resolution, (start) => ok(cardText(`${start}${tail}`)))}${tail}`);
-    // One text block; a longer resolution keeps its start (the decision) and its tail.
-    const withinBlock = (r: string) => r.length <= CARD_TEXT_BLOCK_LENGTH;
-    const escaped = cardText(`${spec.resolution}${tail}`);
-    const resolution = withinBlock(escaped) ? escaped : shortened(withinBlock);
-    const full: TerminalApprovalCard = {
+  const terminalMessage = (spec: TerminalApprovalCard) =>
+    terminalApprovalMessage({
       ...spec,
       question: cardText(spec.question),
       questionBlocks: spec.question ? splitCardText(spec.question, cardText, CARD_TEXT_BLOCK_LENGTH) : undefined,
-      resolution,
-    };
-    if (fits(buildTerminalApprovalCard(full))) return terminalApprovalMessage(full);
-    const titles = [spec.title, OVERFLOW_TITLE, ''];
-    const card = (title: string, blocks: string[]): TerminalApprovalCard => ({
-      title,
-      question: blocks.join('\n'),
-      questionBlocks: blocks,
-      resolution,
+      resolution: cardText(spec.resolution),
     });
-    const firstFit = (cards: TerminalApprovalCard[]) => cards.find((c) => fits(buildTerminalApprovalCard(c)));
-    // A request posted in parts above: point to them.
-    if (questionId !== undefined && overflowProgress.get(questionId)?.deliveredId !== undefined) {
-      const ref = firstFit(titles.map((title) => card(title, [cardText(`Request ref ${questionId}`)])));
-      if (ref) return terminalApprovalMessage(ref);
-    }
-    // Otherwise the full request under a shorter title, then its start marked as cut (the card is resolved).
-    const fullFit = firstFit(titles.map((title) => card(title, full.questionBlocks ?? [])));
-    if (fullFit) return terminalApprovalMessage(fullFit);
-    const blocksOf = (text: string) => splitIfPossible(text, cardText, CARD_TEXT_BLOCK_LENGTH) ?? [];
-    for (const title of spec.question ? titles : []) {
-      const fitsWith = (shortened: string) => fits(buildTerminalApprovalCard(card(title, blocksOf(shortened))));
-      if (fitsWith('…')) return terminalApprovalMessage(card(title, blocksOf(longestStart(spec.question, fitsWith))));
-    }
-    const alone = firstFit(titles.map((title) => card(title, [])));
-    if (alone) return terminalApprovalMessage(alone);
-    // Nothing else fits: keep the start of the resolution, and its tail.
-    const last = shortened(
-      (r) =>
-        withinBlock(r) &&
-        fits(buildTerminalApprovalCard({ title: '', question: '', questionBlocks: [], resolution: r })),
-    );
-    return terminalApprovalMessage({ title: '', question: '', questionBlocks: [], resolution: last });
-  };
   /** Registry/routing key for this bridge — also the app-context cache
    *  namespace. Default instances key by the platform name. */
   const instanceKey = config.instance ?? adapter.name;
+
+  /**
+   * One click path for every transport: decode the option, hand it to the host,
+   * then show only what the host did. An accepted click shows the decision; a
+   * closed request says so; a refused clicker is told privately. Anything else
+   * (already decided, expired, not ours) leaves the card as it is.
+   */
+  const resolveClick: ResolveClick = async (click, transport) => {
+    // Resolve render metadata BEFORE dispatching onAction (which deletes the row).
+    const render = await resolveQuestionRender(click.questionId);
+    // New format: button id/value is an integer index into options (kept
+    // short to fit Telegram's 64-byte callback_data cap). Old format:
+    // the full value is embedded in actionId/value directly.
+    const selectedOption = resolveSelectedOption(render, click.value, click.tail);
+    // An empty value counts when it is a real option's value, or on a card the host updates itself.
+    if (!selectedOption && !render?.deferResolution && !render?.options.some((o) => o.value === selectedOption)) return;
+    const outcome = await setupConfig.onAction(click.questionId, selectedOption, click.userId, click.address);
+    try {
+      if (outcome === 'refused') return await transport.notePrivately(REFUSED_CLICK_NOTE);
+      // No render: already resolved (a late or repeated click), or a pending row
+      // without stored render metadata; deferred: the host updates the card itself.
+      if ((outcome !== 'accepted' && outcome !== 'closed') || !render || render.deferResolution || !click.messageId)
+        return;
+      transport.removeButtons?.();
+      const selectedLabel =
+        outcome === 'closed'
+          ? CLOSED_RESOLUTION
+          : (render.options.find((o) => o.value === selectedOption)?.selectedLabel ?? selectedOption);
+      const actorName = outcome === 'closed' ? '' : click.actorName;
+      // Every clicked card resolves the same way, on every channel: escaped.
+      await adapter.editMessage(
+        click.threadId,
+        click.messageId,
+        terminalMessage({
+          title: render.title,
+          question: render.question ?? click.fallbackQuestion ?? '',
+          resolution: actorName ? `${selectedLabel} by ${actorName}` : selectedLabel,
+        }),
+      );
+      // eslint-disable-next-line no-catch-all/no-catch-all -- logged; a failed card update never undoes the decision
+    } catch (err) {
+      log.warn('Failed to update card after action', { err });
+    }
+  };
   let chat: Chat;
   let state: SqliteStateAdapter;
   let setupConfig: ChannelSetup;
   let gatewayAbort: AbortController | null = null;
-
-  const cardClicks = new Map<string, Promise<unknown>>();
-  /**
-   * Clicks on one card run one at a time, display included, so a quick second
-   * click sees what the first one did and a slow first one can't draw over it.
-   */
-  const onCard = <T>(key: string, run: () => Promise<T>): Promise<T> => {
-    const previous = cardClicks.get(key) ?? Promise.resolve();
-    const next = previous.then(run);
-    const held = previous.then(() => {
-      let timer: NodeJS.Timeout | undefined;
-      return Promise.race([
-        next.then(
-          () => undefined,
-          () => undefined,
-        ),
-        new Promise<void>((resolve) => {
-          timer = setTimeout(resolve, CARD_CLICK_HOLD_MS);
-          timer.unref?.();
-        }),
-      ]).finally(() => clearTimeout(timer));
-    });
-    cardClicks.set(key, held);
-    void held.then(() => {
-      if (cardClicks.get(key) === held) cardClicks.delete(key);
-    });
-    return next;
-  };
-
-  /**
-   * One click pipeline for every transport: decode the option, hand it to the
-   * host, then show only what the host did. A render's afterClick hook may say
-   * what to show instead.
-   */
-  /** Per card, the latest click that drew it, and whether it showed a decision. */
-  const drawnBy = new Map<string, { seq: number; deciding: boolean }>();
-  let clicks = 0;
-  /**
-   * Claims the card for this click's drawing. A click the hold cap let go of
-   * doesn't draw over a later one, except that a decision always draws over a
-   * card that shows none, and such a card never draws over a decision.
-   */
-  const mayDraw = (key: string, seq: number, deciding: boolean) => {
-    const last = drawnBy.get(key);
-    if (last && (last.deciding ? !deciding || last.seq > seq : !deciding && last.seq > seq)) return false;
-    drawnBy.delete(key);
-    drawnBy.set(key, { seq, deciding });
-    if (drawnBy.size > 1000) drawnBy.delete(drawnBy.keys().next().value!);
-    return true;
-  };
-
-  const resolveClick: ResolveClick = (click, transport) => {
-    const seq = ++clicks;
-    return click.messageId
-      ? onCard(`${click.questionId}:${click.messageId}`, () => runClick(click, transport, seq))
-      : runClick(click, transport, seq);
-  };
-
-  const runClick = async (click: CardClick, transport: ClickTransport, seq: number) => {
-    const key = `${click.questionId}:${click.messageId}`;
-    const decide = async () => {
-      // Resolve render metadata BEFORE dispatching onAction (which deletes the row).
-      const render = await resolveQuestionRender(click.questionId);
-      // New format: button id/value is an integer index into options (kept
-      // short to fit Telegram's 64-byte callback_data cap). Old format:
-      // the full value is embedded in actionId/value directly.
-      const selectedOption = resolveSelectedOption(render, click.value, click.tail);
-      // An empty value counts when it is a real option's value, or on a card the host updates itself.
-      const decidable =
-        selectedOption || render?.deferResolution || render?.options.some((o) => o.value === selectedOption);
-      const outcome = decidable
-        ? ((await setupConfig.onAction(click.questionId, selectedOption, click.userId, click.address)) as
-            | ResponseOutcome
-            | undefined)
-        : undefined;
-      return { outcome, render, selectedOption };
-    };
-    const { outcome, render, selectedOption } = await decide();
-
-    let shown: Awaited<ReturnType<NonNullable<QuestionRender['afterClick']>>>;
-    try {
-      shown = await render?.afterClick?.({
-        outcome,
-        selectedOption,
-        userId: click.userId,
-        actorName: click.actorName,
-        messageId: click.address.messageId,
-        platformId: click.address.platformId,
-        threadId: click.address.threadId,
-      });
-      // eslint-disable-next-line no-catch-all/no-catch-all -- a failing hook falls back to the default display
-    } catch {
-      log.warn('Question afterClick hook failed', { code: 'after_click_failed' });
-    }
-    try {
-      if (shown) {
-        if (shown.privateNote) await transport.notePrivately(shown.privateNote);
-        // Drawn as returned: its own buttons, if any, stay.
-        const deciding = outcome === 'accepted' || outcome === 'closed';
-        if (shown.card && click.messageId && mayDraw(key, seq, deciding)) {
-          await adapter.editMessage(click.threadId, click.messageId, shown.card);
-        }
-        return;
-      }
-      if (outcome === 'refused') return await transport.notePrivately(REFUSED_CLICK_NOTE);
-      // The card shows a decision only once the host accepted it (or closed the request).
-      // No render: already resolved (a late or repeated click), or a pending row without
-      // stored render metadata; deferred: the host updates the card itself.
-      if ((outcome !== 'accepted' && outcome !== 'closed') || !render || render.deferResolution || !click.messageId)
-        return;
-      if (!mayDraw(key, seq, true)) return;
-      transport.removeButtons?.();
-      await editClickedCard(click.threadId, click.messageId, click.questionId, {
-        title: render.title,
-        question: render.question ?? click.fallbackQuestion ?? '',
-        selectedLabel:
-          outcome === 'closed'
-            ? CLOSED_RESOLUTION
-            : (render.options.find((o) => o.value === selectedOption)?.selectedLabel ?? selectedOption),
-        actorName: outcome === 'closed' ? '' : click.actorName,
-      });
-      // eslint-disable-next-line no-catch-all/no-catch-all -- logged; a failed card update never undoes the decision
-    } catch {
-      log.warn('Failed to update card after action', { code: 'platform_edit_failed' });
-    }
-  };
 
   async function messageToInbound(
     message: ChatMessage,
@@ -1219,25 +828,19 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         if (!event.actionId.startsWith('ncq:')) return;
         const parts = event.actionId.split(':');
         if (parts.length < 3) return;
-        const questionId = parts[1];
-        const tail = parts.slice(2).join(':');
-        const userId = event.user?.userId || '';
-
-        const messageId = config.cardMessageIdOf ? config.cardMessageIdOf(event) : event.messageId;
         await resolveClick(
           {
-            questionId,
-            tail,
+            questionId: parts[1],
+            tail: parts.slice(2).join(':'),
             value: event.value,
-            userId,
+            userId: event.user?.userId || '',
             actorName: event.user?.userName || event.user?.fullName || '',
-            messageId,
+            messageId: event.messageId,
             threadId: event.threadId,
             address: {
               instance: instanceKey,
-              messageId,
+              messageId: event.messageId,
               platformId: adapter.channelIdFromThreadId(event.threadId),
-              threadId: event.threadId,
             },
           },
           { notePrivately: (text) => tellPrivately(event, text) },
@@ -1351,10 +954,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           await adapter.editMessage(
             tid,
             content.messageId as string,
-            terminalMessage(
-              terminalCard as TerminalApprovalCard,
-              typeof content.questionId === 'string' ? content.questionId : undefined,
-            ),
+            terminalMessage(terminalCard as TerminalApprovalCard),
           );
         } else {
           await adapter.editMessage(tid, content.messageId as string, {
@@ -1385,24 +985,38 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         }
         if (content.requirePresentation) throw new Error('Approval presentation adapter is unavailable');
         // Long text goes out as several blocks, measured after escaping, so no
-        // per-block cap cuts it. A card the channel can't show whole posts its
-        // text first and the buttons after (planQuestionCard). Questions an
-        // agent asks itself keep their own markup (`fromAgent`).
+        // per-block cap cuts it. A platform that caps the whole card refuses
+        // what it can't show, counting the fences the split adds.
+        // Questions an agent asks itself keep their own markup (`fromAgent`).
         const escape = content.fromAgent === true ? (t: string) => t : cardText;
+        const text = escape(question);
+        const blocks = splitCardText(question, escape, CARD_TEXT_BLOCK_LENGTH);
+        if (config.maxCardTextLength !== undefined) {
+          const tooLong = cardQuestionTooLong(title, blocks.join('\n'), config.maxCardTextLength);
+          if (tooLong) throw new CardTooLongError(tooLong);
+        }
         const options: NormalizedOption[] = normalizeOptions(content.options as never);
-        const actions = Actions(
-          // Encode button id/value with the option index rather than the
-          // full value. Telegram caps callback_data at 64 bytes, and
-          // long values (e.g. ISO datetimes, URLs) push the JSON payload
-          // well past that. The onAction handlers resolve the index back
-          // to the real value via resolveQuestionRender(questionId).
-          options.map((opt, idx) =>
-            Button({ id: `ncq:${questionId}:${idx}`, label: opt.label, value: String(idx), style: opt.style }),
-          ),
-        );
-        const plan = planQuestionCard(questionId, title, question, actions, escape);
-        const fallbackText = `${plan.title}\n\n${plan.text}\nOptions: ${options.map((o) => o.label).join(', ')}`;
-        return await postQuestionCard(tid, questionId, plan, fallbackText);
+        const card = Card({
+          title,
+          children: [
+            ...blocks.map((block) => CardText(block)),
+            Actions(
+              // Encode button id/value with the option index rather than the
+              // full value. Telegram caps callback_data at 64 bytes, and
+              // long values (e.g. ISO datetimes, URLs) push the JSON payload
+              // well past that. The onAction handlers resolve the index back
+              // to the real value via resolveQuestionRender(questionId).
+              options.map((opt, idx) =>
+                Button({ id: `ncq:${questionId}:${idx}`, label: opt.label, value: String(idx), style: opt.style }),
+              ),
+            ),
+          ],
+        });
+        const result = await adapter.postMessage(tid, {
+          card,
+          fallbackText: `${title}\n\n${text}\nOptions: ${options.map((o) => o.label).join(', ')}`,
+        });
+        return result?.id;
       }
 
       // Display card (send_card MCP tool) — returns immediately, no callback flow.
@@ -1561,15 +1175,6 @@ async function tellPrivately(event: ActionEvent, text: string): Promise<void> {
   }
 }
 
-/**
- * Start a local HTTP server to receive forwarded Gateway events.
- * This is needed because the Gateway listener in webhook-forwarding mode
- * sends ALL raw events (including INTERACTION_CREATE for button clicks)
- * to the webhookUrl, which we handle here.
- *
- * Loopback is not a trust boundary, so only our own Gateway listener may post
- * here: it sends the bot token in x-discord-gateway-token on every forward.
- */
 /** A click on a card, whichever transport delivered it. */
 interface CardClick {
   questionId: string;
@@ -1582,7 +1187,7 @@ interface CardClick {
   /** The clicked card's message, when the transport knows it. */
   messageId: string | undefined;
   threadId: string;
-  address: { instance?: string; messageId?: string; platformId?: string; threadId?: string | null };
+  address: { instance?: string; messageId?: string; platformId?: string };
   /** Card text to keep when the render has none (Discord: the original embed's). */
   fallbackQuestion?: string;
 }
@@ -1591,12 +1196,21 @@ interface CardClick {
 interface ClickTransport {
   /** Only the clicker sees it; nothing is posted where the channel can't. */
   notePrivately(text: string): Promise<void>;
-  /** Removes the buttons apart from the card edit, where the transport can. */
+  /** Removes the buttons apart from the card edit, where the transport can; never awaited. */
   removeButtons?(): void;
 }
 
 type ResolveClick = (click: CardClick, transport: ClickTransport) => Promise<void>;
 
+/**
+ * Start a local HTTP server to receive forwarded Gateway events.
+ * This is needed because the Gateway listener in webhook-forwarding mode
+ * sends ALL raw events (including INTERACTION_CREATE for button clicks)
+ * to the webhookUrl, which we handle here.
+ *
+ * Loopback is not a trust boundary, so only our own Gateway listener may post
+ * here: it sends the bot token in x-discord-gateway-token on every forward.
+ */
 function startLocalWebhookServer(
   adapter: GatewayAdapter,
   botToken: string | undefined,
@@ -1645,7 +1259,7 @@ function gatewayTokenMatches(header: string | string[] | undefined, botToken: st
 /**
  * Bounds each interaction call. Discord voids a first response after 3 s, so
  * an ack still pending past this can only fail; unbounded, one stalled call
- * held up its click for good, and what queued behind it.
+ * held up its click for good, and the channel's events queued behind it.
  */
 const INTERACTION_CALLBACK_TIMEOUT_MS = 10_000;
 
@@ -1743,7 +1357,8 @@ async function handleForwardedEvent(
       // Encoded as the adapter encodes a click (a thread by its parent channel and
       // itself), as every other click and the card's messaging group carry it.
       const channel = interaction.channel as { type?: number; parent_id?: string } | undefined;
-      const inThread = (channel?.type === 11 || channel?.type === 12) && channel.parent_id; // public, private thread
+      // Announcement, public and private threads.
+      const inThread = (channel?.type === 10 || channel?.type === 11 || channel?.type === 12) && channel.parent_id;
       const threadId = adapter.encodeThreadId({
         guildId: (interaction.guild_id as string | undefined) || '@me',
         channelId: inThread ? channel.parent_id! : (interaction.channel_id as string),
@@ -1751,7 +1366,7 @@ async function handleForwardedEvent(
       });
 
       // The rest runs in the background: Discord forwards a channel's events in
-      // order, so neither an earlier click on this card nor the host may hold them.
+      // order, so the host's decision must not hold them.
       void (async () =>
         resolveClick(
           {
@@ -1763,7 +1378,7 @@ async function handleForwardedEvent(
             actorName: user?.global_name || user?.username || '',
             messageId,
             threadId,
-            address: { messageId, platformId: adapter.channelIdFromThreadId(threadId), threadId },
+            address: { messageId, platformId: adapter.channelIdFromThreadId(threadId) },
             fallbackQuestion: originalDescription,
           },
           {

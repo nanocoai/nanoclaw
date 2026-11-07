@@ -57,8 +57,6 @@ interface ReasonArming {
  * staleness, or restart.
  */
 const awaitingReason = new Map<string, ReasonArming>();
-/** Approvals whose reason reply is being relayed right now: a failed prompt must not overtake it. */
-const capturing = new Set<string>();
 
 function dmKey(channelType: string, platformId: string, instance: string = channelType): string {
   return `${instance}:${platformId}`;
@@ -84,8 +82,7 @@ function extractText(event: InboundEvent): string {
  * finalize outright. Prompts the admin's DM, then parks the row and arms
  * capture. If we can't reach the admin (no DM, no adapter, delivery throws) we
  * finalize a plain reject immediately rather than strand the requesting agent.
- * Returns false when another response already claimed the row. It returns only
- * once capture is armed, so the card can't invite a reason before one is caught.
+ * Returns false when another response already claimed the row.
  */
 export async function armReasonCapture(approval: PendingApproval, session: Session, userId: string): Promise<boolean> {
   const expiresAt = new Date(Date.now() + REASON_CAPTURE_WINDOW_MS).toISOString();
@@ -106,11 +103,6 @@ export async function armReasonCapture(approval: PendingApproval, session: Sessi
     return true;
   }
 
-  // Armed before the prompt goes out: a reason typed as soon as the prompt shows,
-  // before its delivery returns, is still caught.
-  const key = dmKey(channelType, platformId, instance);
-  const arming = { approvalId: approval.approval_id, userId };
-  awaitingReason.set(key, arming);
   try {
     // The prompt follows the card: same thread when the card sits in the requester's chat.
     const cardChat = await getMessagingGroupByPlatform(channelType, platformId, instance);
@@ -124,11 +116,6 @@ export async function armReasonCapture(approval: PendingApproval, session: Sessi
       instance,
     );
   } catch (err) {
-    if (awaitingReason.get(key) === arming) awaitingReason.delete(key);
-    // A reason caught meanwhile wins. Otherwise reject plainly now, also when a later
-    // "Reject with reason…" in this DM took the arming: this one can't be answered.
-    if (capturing.has(approval.approval_id)) return true;
-    if ((await getPendingApproval(approval.approval_id))?.status !== 'awaiting_reason') return true;
     log.error('reject-with-reason: reason prompt delivery failed, finalizing plain reject', {
       approvalId: approval.approval_id,
       err,
@@ -137,6 +124,9 @@ export async function armReasonCapture(approval: PendingApproval, session: Sessi
     return true;
   }
 
+  // Prompt is out — now hold the row and arm capture. Order matters: a reply
+  // can't arrive before the prompt is read, so there's no lost-message window.
+  awaitingReason.set(dmKey(channelType, platformId, instance), { approvalId: approval.approval_id, userId });
   log.info('reject-with-reason: awaiting reason reply', { approvalId: approval.approval_id, userId });
   return true;
 }
@@ -155,15 +145,7 @@ export async function captureReasonReply(event: InboundEvent): Promise<boolean> 
 
   // This DM is an armed reason channel — disarm regardless of outcome.
   awaitingReason.delete(key);
-  capturing.add(arming.approvalId);
-  try {
-    return await relayReason(arming, event);
-  } finally {
-    capturing.delete(arming.approvalId);
-  }
-}
 
-async function relayReason(arming: ReasonArming, event: InboundEvent): Promise<boolean> {
   const approval = await getPendingApproval(arming.approvalId);
   if (!approval || approval.status !== 'awaiting_reason') {
     // Already finalized (e.g. ghosted by the sweep). The reply is no longer a

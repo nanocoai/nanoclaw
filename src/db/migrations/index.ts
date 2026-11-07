@@ -26,7 +26,6 @@ import { migration022 } from './022-messaging-group-detached.js';
 import { migration023 } from './023-approvals-instance.js';
 import { migration024 } from './024-host-coordination.js';
 import { migration025 } from './025-container-config-speed.js';
-import { migration029 } from './029-channel-approval-card-message.js';
 
 interface MigrationBase {
   version: number;
@@ -94,7 +93,6 @@ export const migrations: Migration[] = [
   migration023,
   migration024,
   migration025,
-  migration029,
 ];
 
 /**

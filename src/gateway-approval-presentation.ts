@@ -10,8 +10,7 @@ const safe = (text: string) => safeMultiline(text.replace(/[\r\n]/g, ' '));
 /**
  * A rough cap, counted before escaping: channels cap or clip titles (the
  * tightest at 60), some after expanding emoji names. A longer title or action
- * goes in full into the body under a fixed title; a channel with cardFits
- * measures the real title and falls back to a fixed one too.
+ * goes in full into the body under a fixed title.
  */
 export const MAX_CARD_TITLE_CHARS = 60;
 
@@ -97,6 +96,7 @@ export function gatewayApprovalPresentation(request: GatewayApprovalRequest): { 
     : 'Approve allows this request once. It does not connect an account or change its permissions.';
   let title = 'Approve external request';
   if (detailed) title = action.length <= MAX_CARD_TITLE_CHARS ? action : 'Approve this action';
-  // Never cut: the bridge posts long text in several blocks.
+  // Never cut: the bridge posts long text in several blocks, and a channel
+  // that caps a whole card refuses one too long, so the approval fails closed.
   return { title, question: [...lines, scope].join('\n') };
 }
