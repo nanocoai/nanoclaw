@@ -2179,6 +2179,33 @@ describe('review 4 of #4218', () => {
     });
   });
 
+  describe('a reply on an open card that is not a command', () => {
+    it('gets a notice listing the commands, does not reach the agent, and the card still takes an answer', async () => {
+      const { adapter, calls, arrive } = await start();
+      const id = await adapter.deliver(OWNER, null, card('appr-N', 'Install jq?'));
+      const token = tokenOf(h.sent[0].subject);
+      await arrive(mail({ subject: `Re: [${token}] Install jq?`, body: 'Approve', inReplyTo: id }));
+      expect(calls.inbound).toHaveLength(0);
+      expect(calls.action).toEqual([]);
+      const notice = h.sent.at(-1);
+      expect(notice.text).toContain('the request is still waiting');
+      expect(notice.text).toContain('  /approve\n  /reject');
+      await arrive(mail({ subject: `Re: [${token}] Install jq?`, body: '/approve', inReplyTo: id }));
+      expect(calls.action.map((a) => a[0])).toEqual(['appr-N']);
+    });
+
+    it('a refusal for an answered card says why but not how to answer', async () => {
+      const { adapter, arrive } = await start();
+      const id = await adapter.deliver(OWNER, null, card('appr-M', 'Install jq?'));
+      const token = tokenOf(h.sent[0].subject);
+      await arrive(mail({ subject: `Re: [${token}] Install jq?`, body: '/approve', inReplyTo: id }));
+      await arrive(mail({ subject: `Re: [${token}] Install jq?`, body: '/reject', inReplyTo: id }));
+      const notice = h.sent.at(-1);
+      expect(notice.text).toContain('already answered');
+      expect(notice.text).not.toContain('To answer');
+    });
+  });
+
   describe('Proton-internal mail and the account’s own domain', () => {
     it('is not trusted from the account’s own domain unless PROTON_MAIL_INTERNAL_DOMAINS lists it', async () => {
       const { calls, arrive } = await start();

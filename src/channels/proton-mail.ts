@@ -1455,6 +1455,36 @@ export function optionCommands(options: NormalizedOption[]): string[] {
   });
 }
 
+/**
+ * A card's option lines: each command, and its label when the command alone
+ * does not say it (`/option-1` for an emoji label, `/tutor-2` for a second
+ * "Tutor"). Options sharing a label also show their value — two agents with
+ * one name are told apart by their id.
+ */
+export function optionLines(options: NormalizedOption[]): string[] {
+  const commands = optionCommands(options);
+  const labelCount = new Map<string, number>();
+  for (const o of options) labelCount.set(o.label, (labelCount.get(o.label) ?? 0) + 1);
+  return options.map((o, i) => {
+    const label = oneLine(o.label, 100);
+    const shared = (labelCount.get(o.label) ?? 0) > 1;
+    const said = optionToCommand(o.label) === commands[i];
+    const which = o.value && o.value !== o.label ? oneLine(o.value, 80) : `option ${i + 1}`;
+    const desc = shared ? `${label} (${which})` : said ? '' : label;
+    return desc ? `  ${commands[i]} — ${desc}` : `  ${commands[i]}`;
+  });
+}
+
+/**
+ * How to answer a card, for a refusal's notice: only while the card still
+ * waits (`card` given) or for a reference-less reply to some open card.
+ */
+export function howToAnswer(card?: CardRef): string {
+  return card
+    ? `To answer, reply to the request email itself, keeping its subject, with one of these on the first line:\n${optionLines(card.options).join('\n')}`
+    : 'To answer, reply to the request email itself, keeping its subject, with the command on the first line.';
+}
+
 /** Render an ask_question card as a plain-text mail body with slash-command replies. */
 export function renderAskQuestion(
   title: string,
@@ -1462,20 +1492,30 @@ export function renderAskQuestion(
   options: NormalizedOption[],
   token?: string,
 ): string {
-  const optionLines = optionCommands(options)
-    .map((c) => `  ${c}`)
-    .join('\n');
+  const lines = optionLines(options).join('\n');
   const how = token
     ? 'Reply to this email, keeping its subject, with one of these on the first line:'
     : 'Reply with one of:';
-  return `${title}\n\n${question}\n\n${how}\n${optionLines}${token ? `\n\nRef: ${token}` : ''}`;
+  return `${title}\n\n${question}\n\n${how}\n${lines}${token ? `\n\nRef: ${token}` : ''}`;
 }
 
+/**
+ * A reply's first line of its own: past any quoted history it starts with
+ * (an attribution, `>` lines), so a bottom-posted `/approve` is found.
+ */
 function firstLine(body: string): string | undefined {
-  return body
-    .split('\n')
-    .map((l) => l.trim())
-    .find((l) => l.length > 0);
+  const lines = body.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (!t || t.startsWith('>')) continue;
+    const k = attributionAt(lines, i);
+    if (k > 0) {
+      i += k - 1;
+      continue;
+    }
+    return t;
+  }
+  return undefined;
 }
 
 /** First non-empty line of a reply, if its first word is a slash command matching an option. */
@@ -1513,7 +1553,14 @@ export function closedCardReason(card: CardRef): string {
 export type CardReplyMatch =
   | { kind: 'none' }
   | { kind: 'answer'; token: string; card: CardRef; option: NormalizedOption }
-  | { kind: 'refused'; reason: string; notify: boolean; token?: string };
+  | {
+      kind: 'refused';
+      reason: string;
+      notify: boolean;
+      token?: string;
+      /** How to answer (howToAnswer), only when the card can still take one. */
+      howTo?: string;
+    };
 
 /**
  * Decide whether an inbound mail answers one of our cards. An answer needs all
@@ -1541,23 +1588,50 @@ export function matchCardReply(input: {
           !c.answeredAt && !c.closedAt && c.address === input.fromAddress && matchCommandReply(input.body, c.options),
       );
     return looksLikeAnswer
-      ? { kind: 'refused', reason: 'it does not carry the request’s reference', notify: true }
+      ? { kind: 'refused', reason: 'it does not carry the request’s reference', notify: true, howTo: howToAnswer() }
       : { kind: 'none' };
   }
   // Only someone who has been sent a card hears back about a refused answer,
   // so a stray token cannot turn the adapter into a mailer for strangers.
   const knownApprover = Object.values(input.cards).some((c) => c.address === input.fromAddress);
   const card = input.cards[token];
-  if (!isCommand) return { kind: 'none' };
+  const open = !!card && card.address === input.fromAddress && !card.answeredAt && !card.closedAt;
+  if (!isCommand) {
+    // The approver writing on a card that still waits ("Approve" without
+    // the slash, say) is told the card is still open, not taken for chat.
+    // Once answered, words on its thread (a reason after "Reject with
+    // reason…") go on to core as before.
+    return open
+      ? {
+          kind: 'refused',
+          reason: 'its first line is not one of the listed commands, and the request is still waiting',
+          notify: true,
+          token,
+          howTo: howToAnswer(card),
+        }
+      : { kind: 'none' };
+  }
   if (!card) return { kind: 'refused', reason: 'that request is no longer waiting', notify: knownApprover, token };
   if (card.address !== input.fromAddress) return { kind: 'refused', reason: 'not the approver', notify: false, token };
   if (card.answeredAt) return { kind: 'refused', reason: 'that request was already answered', notify: true, token };
   if (card.closedAt) return { kind: 'refused', reason: closedCardReason(card), notify: true, token };
   if (!messageIds(input.inReplyTo).includes(card.messageId))
-    return { kind: 'refused', reason: 'it is not a reply to the request email itself', notify: true, token };
+    return {
+      kind: 'refused',
+      reason: 'it is not a reply to the request email itself',
+      notify: true,
+      token,
+      howTo: howToAnswer(card),
+    };
   const option = matchCommandReply(input.body, card.options);
   if (!option)
-    return { kind: 'refused', reason: 'the first line is not one of the listed commands', notify: true, token };
+    return {
+      kind: 'refused',
+      reason: 'the first line is not one of the listed commands',
+      notify: true,
+      token,
+      howTo: howToAnswer(card),
+    };
   return { kind: 'answer', token, card, option };
 }
 
@@ -2336,12 +2410,12 @@ registerChannelAdapter('proton-mail', {
       // Exchange's X-Auto-Response-Suppress (All, AutoReply) asks for no
       // automatic answers: the mail is still read, but no notice goes back.
       const suppressAuto = /\b(all|autoreply)\b/i.test(headerString(parsed, 'x-auto-response-suppress') ?? '');
-      const refuse = async (reason: string, notify: boolean): Promise<Outcome> => {
+      const refuse = async (reason: string, notify: boolean, howTo?: string): Promise<Outcome> => {
         log.warn('Proton Mail: reply not taken as a card answer', { uid, from: fromAddr, reason });
         if (notify && !suppressAuto) {
           await sendNotice(
             fromAddr,
-            `That reply was not taken as an answer: ${reason}.\n\nTo answer, reply to the request email itself, keeping its subject, with the command on the first line.`,
+            `That reply was not taken as an answer: ${reason}.${howTo ? `\n\n${howTo}` : ''}`,
             replySubject(subjectPlain),
             messageId,
           );
@@ -2397,7 +2471,7 @@ registerChannelAdapter('proton-mail', {
         }
         return 'done';
       }
-      if (match.kind === 'refused') return refuse(match.reason, match.notify);
+      if (match.kind === 'refused') return refuse(match.reason, match.notify, match.howTo);
 
       // An address not yet approved raises a card core keeps open for days:
       // new addresses are limited, so strangers cannot fill the cards the

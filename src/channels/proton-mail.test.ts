@@ -27,6 +27,7 @@ import {
   isPlainAddress,
   matchCommandReply,
   normalizeAddress,
+  optionLines,
   optionCommands,
   optionToCommand,
   pollIntervalMs,
@@ -616,7 +617,21 @@ describe('ask_question over email', () => {
     expect(matchCommandReply('/cancel-2', agents)).toBe(agents[2]);
     expect(matchCommandReply('/cancel-2-2', agents)).toBe(agents[4]);
     expect(matchCommandReply('/option-4', agents)).toBe(agents[3]);
-    expect(renderAskQuestion('Pick', 'Which agent?', agents)).toContain('  /cancel-2\n');
+    expect(renderAskQuestion('Pick', 'Which agent?', agents)).toContain('  /cancel-2 — Cancel (option 3)\n');
+  });
+  it('shows a label the command does not say, and tells options with one label apart', () => {
+    const agents = normalizeOptions([
+      { label: 'Tutor', value: 'connect:ag-1' },
+      { label: 'Tutor', value: 'connect:ag-2' },
+      { label: '✅', value: 'ok' },
+      { label: 'Cancel', value: 'reject' },
+    ]);
+    expect(optionLines(agents)).toEqual([
+      '  /tutor — Tutor (connect:ag-1)',
+      '  /tutor-2 — Tutor (connect:ag-2)',
+      '  /option-3 — ✅',
+      '  /cancel',
+    ]);
   });
 });
 
@@ -797,9 +812,9 @@ describe('matchCardReply', () => {
   const A = 'NC-AAAAAAAAAAAAA';
   const B = 'NC-BBBBBBBBBBBBB';
   const cards = { [A]: card(A), [B]: card(B) };
-  const reply = (over: { subject?: string; body?: string; inReplyTo?: string; from?: string }) =>
+  const reply = (over: { subject?: string; body?: string; inReplyTo?: string; from?: string; answered?: boolean }) =>
     matchCardReply({
-      cards,
+      cards: over.answered ? { ...cards, [A]: { ...cards[A], answeredAt: '2026-11-01T00:00:00.000Z' } } : cards,
       fromAddress: over.from ?? 'owner@example.org',
       subject: over.subject ?? `Re: [${A}] Install jq?`,
       body: over.body ?? '/approve',
@@ -836,9 +851,23 @@ describe('matchCardReply', () => {
   it('refuses an unknown command', () => {
     expect(reply({ body: '/maybe' })).toMatchObject({ kind: 'refused' });
   });
-  it('passes prose on a card thread through to the agent', () => {
-    expect(reply({ body: 'Why does it need jq?' })).toEqual({ kind: 'none' });
+  it('tells the approver a card still waits when they write on it without a command', () => {
+    const r = reply({ body: 'Approve' });
+    expect(r).toMatchObject({ kind: 'refused', notify: true, reason: /still waiting/ });
+    expect(r.kind === 'refused' && r.howTo).toContain('  /approve');
     expect(reply({ subject: 'Lunch?', body: 'hello', inReplyTo: undefined })).toEqual({ kind: 'none' });
+  });
+  it('reads a bottom-posted command under the quoted card', () => {
+    const body = `On Mon, 1 Nov 2026, Bot <bot@bridge.example> wrote:\n> Install jq?\n> /approve\n\n/approve`;
+    expect(reply({ body }).kind).toBe('answer');
+  });
+  it('words on an answered card’s thread go on to core (a reason after "Reject with reason…")', () => {
+    expect(reply({ body: 'Too risky for now.', answered: true })).toEqual({ kind: 'none' });
+  });
+  it('refusals for a card that can no longer be answered do not say how to answer', () => {
+    const r = reply({ body: '/approve', answered: true });
+    expect(r).toMatchObject({ kind: 'refused', reason: /already answered/ });
+    expect(r.kind === 'refused' && r.howTo).toBeFalsy();
   });
   it('accepts the token on the first line when a client drops the subject', () => {
     expect(reply({ subject: 'Re: x', body: `/approve ${A}` }).kind).toBe('answer');
