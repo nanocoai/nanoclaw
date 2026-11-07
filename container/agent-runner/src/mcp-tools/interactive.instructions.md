@@ -15,7 +15,7 @@ Use this when you genuinely cannot proceed without a decision. For free-text inp
 
 ### Structured cards (`send_card`)
 
-`mcp__nanoclaw__send_card({ card, fallbackText? })` renders a structured card and **returns immediately** — it does not pause your turn or collect a response.
+`mcp__nanoclaw__send_card({ card, fallbackText?, to? })` renders a structured card and **returns immediately** — it does not pause your turn or collect a response. In a chat the card goes to the current conversation; `to` names a channel destination instead, exactly as in `send_message`. In a session with no attached chat — a scheduled task run — `to` is required, and `ask_user_question` cannot be used at all (nobody is there to answer); both tools refuse rather than write a card nobody receives.
 
 `card` supports: `title`, `description`, `children` (strings or objects with a `text` field), and top-level `actions`. Each action needs a non-empty `label` and a `url` that is a web link (http or https, like `https://example.com`) and renders as a link button. Invalid actions are dropped before the card is sent and the tool result tells you how many — that includes a placeholder such as `#`, and other schemes such as `mailto:` or `tel:`, which not every chat platform renders as a link button. If you want a button the user can act on, that is `ask_user_question`, not a fake link. An action's optional `style` is `primary`, `danger` or `default`; any other value still renders, as `default`. Nested action blocks are unsupported. `send_card` never renders callback buttons; if you want a button the user can click, use `ask_user_question`. `fallbackText` is the plain-text version used on channels that render cards as text; it has nothing to do with buttons.
 

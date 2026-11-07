@@ -110,7 +110,7 @@ function buildDestinationsSection(mode: SessionMode): string {
 
   if (mode.kind === 'task') {
     lines.push(
-      'This is an isolated task run with no attached chat. Only notify someone when the task asks you to. For a user-visible message, call `send_message({ to: "name", text: "..." })`; for a file, call `send_file` with `to`. Always pass the explicit named destination.',
+      'This is an isolated task run with no attached chat. Only notify someone when the task asks you to. For a user-visible message, call `send_message({ to: "name", text: "..." })`; for a file, call `send_file` with `to`; for a card, call `send_card` with `to`. Always pass the explicit named destination. `ask_user_question` has nobody to answer it here.',
     );
     const channelDestinations = all.filter((destination) => destination.type === 'channel');
     if (channelDestinations.length > 0) {
