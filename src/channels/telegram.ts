@@ -366,23 +366,25 @@ export interface TelegramBridgeOptions {
 }
 
 /** A line shaped like a Markdown table's delimiter row (`|---|:-:|`), also in a quote or a list. */
-const TABLE_DELIMITER_ROW = /^([ \t>]*)(\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*)(\r?)$/;
+const TABLE_DELIMITER_ROW = /^([ \t>]*)(\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*)$/;
 
 /**
  * The adapter draws a Markdown table as a padded text table, which can grow a
  * card's text many times over (a 1,100-character table became 50,000), past
  * any card limit. A look-alike for one hyphen in every line shaped like a
  * delimiter row keeps the text and its length, but leaves no table to draw.
- * Such a line in a code block, or a `---` rule, shows the look-alike too.
+ * Such a line in a code block, or a `---` rule or heading underline, shows the
+ * look-alike too.
  */
 export function escapeTelegramCardText(text: string): string {
+  // Every line break Markdown knows (\r\n, \r, \n), each kept as it was.
   return text
-    .split('\n')
-    .map((line) => {
-      const row = TABLE_DELIMITER_ROW.exec(line);
-      return row ? row[1] + row[2].replace('-', '\u2011') + row[3] : line;
+    .split(/(\r\n?|\n)/)
+    .map((part, i) => {
+      const row = i % 2 === 0 ? TABLE_DELIMITER_ROW.exec(part) : null;
+      return row ? row[1] + row[2].replace('-', '\u2011') : part;
     })
-    .join('\n');
+    .join('');
 }
 
 /**
