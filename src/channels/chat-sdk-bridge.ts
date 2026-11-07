@@ -7,14 +7,18 @@
 import { createHash, timingSafeEqual } from 'crypto';
 import http from 'http';
 
-import { CardSpecError, standardComponentDefinitions as parts, toCard } from '@json-render/chat';
 import {
   Chat,
   Card,
   CardText,
   Actions,
   Button,
+  Chart,
+  Divider,
+  Field,
+  Fields,
   LinkButton,
+  Table,
   type CardChild,
   type Adapter,
   type AssistantContextChangedEvent,
@@ -543,114 +547,232 @@ export function appendRawText(
 }
 
 /**
- * The json-render parts a send_card child may be: the same names as the
- * runner's list (container/agent-runner/src/mcp-tools/interactive.ts). The row
- * is not trusted, so any other part, a callback button or an image, refuses
- * the card.
+ * Per card, so every platform takes the whole card. The chart limits are what
+ * Slack draws natively; past 10,000 characters Slack swaps a table for plain
+ * text cut at 3,000; 3,000 is Slack's limit for a block of text and 2,000 for a
+ * field; 10 parts and 12,000 characters keep a card inside Slack's 50 blocks
+ * and a Teams bot message.
  */
-const CARD_PARTS = {
-  Text: parts.Text,
-  Fields: parts.Fields,
-  Table: parts.Table,
-  Chart: parts.Chart,
-  Divider: parts.Divider,
-};
-const CARD_COMPONENTS = { Card: parts.Card, Field: parts.Field, ...CARD_PARTS };
-/** The runner's limits, so a card it would refuse is refused here too, whoever wrote the row. */
 const CARD_LIMITS = {
-  tables: 1,
-  charts: 2,
+  parts: 10,
   fields: 10,
-  tableRows: 51,
+  tables: 1,
+  tableRows: 50,
   tableColumns: 6,
-  chartSeries: 12,
+  tableText: 10_000,
+  charts: 2,
   chartPoints: 20,
-  chartTitle: 50,
-  chartLabel: 20,
+  chartSeries: 12,
+  title: 50,
+  label: 20,
+  text: 3_000,
+  fieldText: 2_000,
+  cardText: 12_000,
 };
-/** Header and cell text per table. Past it Slack swaps the table for plain text cut at 3,000 characters. */
-const MAX_TABLE_TEXT = 10_000;
 
-/**
- * Tables in the built card whose header and cell text, counted the way Slack
- * counts it, is past the budget. Counted after toCard, which fills in rows
- * given as objects or templates.
- */
-function longTables(keys: string[], built: Array<{ type: string }>): string[] {
-  return built.flatMap((part, i) => {
-    if (part.type !== 'table') return [];
-    const { headers, rows } = part as { type: string; headers: string[]; rows: string[][] };
-    const text = [headers, ...rows].flat().reduce((total, cell) => total + String(cell).length, 0);
-    return text > MAX_TABLE_TEXT
-      ? [`${keys[i]}: the table holds ${text} characters of text; at most ${MAX_TABLE_TEXT}`]
-      : [];
-  });
-}
-
-type CardSpec = Parameters<typeof toCard>[0];
-type CardPart = { type: string; props?: unknown; children?: unknown };
+type CardPart = Record<string, unknown> & { type: string };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
-/** A child with a type is a json-render part; a text child keeps its old shape. */
+const isLabel = (value: unknown, max: number): value is string =>
+  typeof value === 'string' && value.trim().length > 0 && value.length <= max;
+
+/** A child with a type is a part; a text child keeps its old shape. */
 function isCardPart(child: unknown): child is CardPart {
   return isRecord(child) && typeof child.type === 'string' && typeof child.text !== 'string';
 }
 
-/** Same as the runner's: the parts as a spec keyed by their place in `children`. */
-function partsSpec(children: unknown[]): { spec: CardSpec; keys: string[]; problems: string[] } {
-  const elements: CardSpec['elements'] = {};
+/**
+ * Why the card's parts can't be sent, each naming the child to fix; empty when
+ * they can. The runner carries the same check (container/agent-runner/src/
+ * mcp-tools/interactive.ts); this copy stands because any producer can write
+ * the row. Parts are allowed by name, so none can carry a callback button.
+ */
+function cardPartProblems(children: unknown[]): string[] {
   const problems: string[] = [];
-  const root: string[] = [];
+  const count = { parts: 0, fields: 0, tables: 0, charts: 0, text: 0 };
   children.forEach((child, i) => {
     if (!isCardPart(child)) return;
-    const key = `children[${i}]`;
-    if (!Object.hasOwn(CARD_PARTS, child.type)) {
-      problems.push(`${key}: unknown part "${child.type}"`);
-      return;
+    count.parts++;
+    const at = `children[${i}]`;
+    const fail = (why: string) => problems.push(`${at}: ${why}`);
+    const props = isRecord(child.props) ? child.props : {};
+    switch (child.type) {
+      case 'Text': {
+        if (!isLabel(props.content, CARD_LIMITS.text))
+          fail(`props.content must be text of at most ${CARD_LIMITS.text} characters`);
+        else count.text += props.content.length;
+        if (props.style !== undefined && !['plain', 'bold', 'muted'].includes(props.style as string)) {
+          fail('props.style must be plain, bold or muted');
+        }
+        return;
+      }
+      case 'Fields': {
+        const fields = Array.isArray(child.children) ? child.children : [];
+        if (fields.length === 0) return fail('Fields needs at least one Field in children');
+        count.fields += fields.length;
+        fields.forEach((field, j) => {
+          const where = `${at}.children[${j}]`;
+          if (!isRecord(field) || field.type !== 'Field')
+            return problems.push(`${where}: Fields holds only Field parts`);
+          const fieldProps = isRecord(field.props) ? field.props : {};
+          const value = typeof fieldProps.value === 'number' ? String(fieldProps.value) : fieldProps.value;
+          if (!isLabel(fieldProps.label, CARD_LIMITS.fieldText) || !isLabel(value, CARD_LIMITS.fieldText)) {
+            return problems.push(`${where}: a Field needs props.label and props.value`);
+          }
+          const length = fieldProps.label.length + value.length;
+          if (length > CARD_LIMITS.fieldText)
+            return problems.push(`${where}: at most ${CARD_LIMITS.fieldText} characters`);
+          count.text += length;
+        });
+        return;
+      }
+      case 'Table': {
+        count.tables++;
+        const { headers, rows, align, caption } = props;
+        if (!Array.isArray(headers) || headers.length === 0 || !headers.every((h) => typeof h === 'string')) {
+          return fail('props.headers must be a list of column names');
+        }
+        if (headers.length > CARD_LIMITS.tableColumns) return fail(`at most ${CARD_LIMITS.tableColumns} columns`);
+        if (!Array.isArray(rows)) return fail('props.rows must be a list of rows');
+        if (rows.length > CARD_LIMITS.tableRows) return fail(`at most ${CARD_LIMITS.tableRows} rows`);
+        let text = headers.join('').length;
+        for (const [r, row] of rows.entries()) {
+          if (!Array.isArray(row)) return fail(`row ${r} must be a list of cells`);
+          if (row.length !== headers.length)
+            return fail(`row ${r} has ${row.length} cells, expected ${headers.length}`);
+          if (!row.every((cell) => typeof cell === 'string' || typeof cell === 'number')) {
+            return fail(`row ${r}: a cell must be text or a number`);
+          }
+          text += row.map(String).join('').length;
+        }
+        if (
+          align !== undefined &&
+          (!Array.isArray(align) || !align.every((a) => ['left', 'center', 'right'].includes(a as string)))
+        ) {
+          return fail('props.align must list left, center or right');
+        }
+        if (caption !== undefined && typeof caption !== 'string') return fail('props.caption must be text');
+        text += typeof caption === 'string' ? caption.length : 0;
+        if (text > CARD_LIMITS.tableText) {
+          return fail(`the table holds ${text} characters of text; at most ${CARD_LIMITS.tableText}`);
+        }
+        count.text += text;
+        return;
+      }
+      case 'Chart': {
+        count.charts++;
+        const chart = isRecord(props.chart) ? props.chart : {};
+        if (!isLabel(props.title, CARD_LIMITS.title))
+          return fail(`props.title must be text of at most ${CARD_LIMITS.title} characters`);
+        let labels: unknown[];
+        if (chart.type === 'pie') {
+          const segments = Array.isArray(chart.segments) ? chart.segments : [];
+          if (segments.length === 0 || segments.length > CARD_LIMITS.chartSeries) {
+            return fail(`props.chart.segments must list 1 to ${CARD_LIMITS.chartSeries} slices`);
+          }
+          const bad = segments.findIndex((s) => !isRecord(s) || typeof s.value !== 'number' || !(s.value > 0));
+          if (bad !== -1) return fail(`props.chart.segments[${bad}].value must be a number above 0`);
+          labels = segments.map((s) => (s as Record<string, unknown>).label);
+        } else if (chart.type === 'bar' || chart.type === 'line' || chart.type === 'area') {
+          const { categories, series, xLabel, yLabel } = chart;
+          if (!Array.isArray(categories) || categories.length === 0 || categories.length > CARD_LIMITS.chartPoints) {
+            return fail(`props.chart.categories must list 1 to ${CARD_LIMITS.chartPoints} categories`);
+          }
+          if (!Array.isArray(series) || series.length === 0 || series.length > CARD_LIMITS.chartSeries) {
+            return fail(`props.chart.series must list 1 to ${CARD_LIMITS.chartSeries} series`);
+          }
+          for (const s of series) {
+            const values = isRecord(s) && Array.isArray(s.values) ? s.values : [];
+            const name = isRecord(s) ? s.name : undefined;
+            if (values.length !== categories.length) {
+              return fail(`series "${String(name)}" has ${values.length} values, expected ${categories.length}`);
+            }
+            if (!values.every((v) => typeof v === 'number'))
+              return fail(`series "${String(name)}": values must be numbers`);
+          }
+          const names = series.map((s) => (s as Record<string, unknown>).name);
+          if (new Set(categories).size !== categories.length || new Set(names).size !== names.length) {
+            return fail('categories and series names must not repeat');
+          }
+          for (const axis of [xLabel, yLabel]) {
+            if (axis !== undefined && !isLabel(axis, CARD_LIMITS.title)) {
+              return fail(`axis labels must be text of at most ${CARD_LIMITS.title} characters`);
+            }
+          }
+          labels = [...categories, ...names];
+        } else {
+          return fail('props.chart.type must be pie, bar, line or area');
+        }
+        if (!labels.every((label) => isLabel(label, CARD_LIMITS.label))) {
+          return fail(`each label must be text of at most ${CARD_LIMITS.label} characters`);
+        }
+        count.text += props.title.length + labels.join('').length;
+        return;
+      }
+      case 'Divider':
+        return;
+      default:
+        fail(`unknown part "${child.type}"; use Text, Fields, Table, Chart, Divider`);
     }
-    const fields = child.type === 'Fields' && Array.isArray(child.children) ? child.children : [];
-    if (child.type === 'Fields' && fields.length === 0) {
-      problems.push(`${key}: Fields needs at least one Field in children`);
-      return;
-    }
-    const notField = fields.findIndex((field) => !isRecord(field) || field.type !== 'Field');
-    if (notField !== -1) {
-      problems.push(`${key}.children[${notField}]: Fields holds only Field parts`);
-      return;
-    }
-    const fieldKeys = fields.map((_, j) => `${key}.children[${j}]`);
-    fields.forEach((field, j) => {
-      const props = isRecord(field) && isRecord(field.props) ? field.props : {};
-      elements[fieldKeys[j]] = { type: 'Field', props, children: [] };
-    });
-    elements[key] = { type: child.type, props: isRecord(child.props) ? child.props : {}, children: fieldKeys };
-    root.push(key);
   });
-  elements.card = { type: 'Card', props: {}, children: root };
-  return { spec: { root: 'card', elements }, keys: root, problems };
+  if (count.parts > CARD_LIMITS.parts) problems.push(`at most ${CARD_LIMITS.parts} parts per card`);
+  if (count.fields > CARD_LIMITS.fields) problems.push(`at most ${CARD_LIMITS.fields} fields per card`);
+  if (count.tables > CARD_LIMITS.tables) problems.push(`at most ${CARD_LIMITS.tables} Table per card`);
+  if (count.charts > CARD_LIMITS.charts) problems.push(`at most ${CARD_LIMITS.charts} Charts per card`);
+  if (count.text > CARD_LIMITS.cardText) {
+    problems.push(`the parts hold ${count.text} characters of text; at most ${CARD_LIMITS.cardText} per card`);
+  }
+  return problems;
 }
 
-/**
- * A send_card card's parts as Chat SDK elements, one per part, in order.
- * Throws when a part is refused, so the row fails instead of posting a card
- * with a gap in it.
- */
-function cardParts(children: unknown[]): CardChild[] {
-  const { spec, keys, problems } = partsSpec(children);
-  if (problems.length === 0) {
-    try {
-      const built = toCard(spec, { components: CARD_COMPONENTS, limits: CARD_LIMITS }).children;
-      if (built.length !== keys.length) problems.push('a part was dropped while building the card');
-      else problems.push(...longTables(keys, built));
-      if (problems.length === 0) return built;
-    } catch (error) {
-      if (!(error instanceof CardSpecError)) throw error;
-      problems.push(...error.issues);
+/** A checked part as its Chat SDK element, rebuilt from the fields it may have and nothing else. */
+function buildCardPart(part: CardPart): CardChild {
+  const props = (isRecord(part.props) ? part.props : {}) as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+  switch (part.type) {
+    case 'Text':
+      return props.style ? CardText(props.content, { style: props.style }) : CardText(props.content);
+    case 'Fields':
+      return Fields(
+        (part.children as Array<{ props: { label: string; value: string | number } }>).map((field) =>
+          Field({ label: field.props.label, value: String(field.props.value) }),
+        ),
+      );
+    case 'Table':
+      return Table({
+        headers: props.headers,
+        rows: (props.rows as Array<Array<string | number>>).map((row) => row.map(String)),
+        ...(props.align ? { align: props.align } : {}),
+        ...(props.caption ? { caption: props.caption } : {}),
+      });
+    case 'Chart': {
+      const chart = props.chart;
+      if (chart.type === 'pie') {
+        const segments = (chart.segments as Array<{ label: string; value: number }>).map(({ label, value }) => ({
+          label,
+          value,
+        }));
+        return Chart({ title: props.title, chart: { type: 'pie', segments } });
+      }
+      const categories = chart.categories as string[];
+      return Chart({
+        title: props.title,
+        chart: {
+          type: chart.type,
+          categories,
+          ...(chart.xLabel ? { xLabel: chart.xLabel } : {}),
+          ...(chart.yLabel ? { yLabel: chart.yLabel } : {}),
+          series: (chart.series as Array<{ name: string; values: number[] }>).map((series) => ({
+            name: series.name,
+            data: series.values.map((value, i) => ({ label: categories[i], value })),
+          })),
+        },
+      });
     }
+    default:
+      return Divider();
   }
-  throw new Error(`send_card card refused: ${problems.join('; ')}`);
 }
 
 export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter {
@@ -1122,11 +1244,11 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           cardChildren.push(CardText(cardSpec.description));
         }
         if (Array.isArray(cardSpec.children)) {
-          const builtParts = cardSpec.children.some(isCardPart) ? cardParts(cardSpec.children) : [];
-          let nextPart = 0;
+          const problems = cardPartProblems(cardSpec.children);
+          if (problems.length > 0) throw new Error(`send_card card refused: ${problems.join('; ')}`);
           for (const child of cardSpec.children) {
             if (isCardPart(child)) {
-              cardChildren.push(builtParts[nextPart++]);
+              cardChildren.push(buildCardPart(child));
             } else if (typeof child === 'string' && child) {
               cardChildren.push(CardText(child));
             } else if (

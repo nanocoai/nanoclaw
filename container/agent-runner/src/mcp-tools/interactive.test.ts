@@ -3,8 +3,6 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { closeSessionDb, getInboundDb, getOutboundDb, initTestSessionDb } from '../mailbox/sqlite/connection.js';
 import { getUndeliveredMessages } from '../db/messages-out.js';
 import { findQuestionResponse } from '../db/messages-in.js';
-import { standardComponentDefinitions } from '@json-render/chat';
-
 import { askUserQuestion, LINK_ACTION_SCHEMA, MAX_CARD_QUESTION_LENGTH, sendCard } from './interactive.js';
 
 beforeEach(() => initTestSessionDb());
@@ -324,7 +322,7 @@ describe('send_card', () => {
   });
 });
 
-describe('send_card — json-render parts', () => {
+describe('send_card — card parts', () => {
   beforeEach(() => seedBoundThread('slack', 'C-fixture', null));
   const field = (label: string, value: string | number) => ({ type: 'Field', props: { label, value } });
   const table = (rows: string[][], headers = ['Scale', 'Before', 'After']) => ({
@@ -367,31 +365,85 @@ describe('send_card — json-render parts', () => {
     ],
     ['a field named after an object method', { type: 'Fields', children: [{ type: 'constructor' }] }, 'Fields holds only Field parts'],
     ['a short table row', table([['1x', '40']]), 'row 0 has 2 cells, expected 3'],
-    ['a table of 51 rows', table(Array.from({ length: 51 }, () => ['1x', '40', '38'])), 'at most 51 rows'],
+    ['a table of 51 rows', table(Array.from({ length: 51 }, () => ['1x', '40', '38'])), 'at most 50 rows'],
     ['a table of 7 columns', table([['a', 'b', 'c', 'd', 'e', 'f', 'g']], ['1', '2', '3', '4', '5', '6', '7']), 'at most 6 columns'],
     [
       'a series missing a value',
       chart('Latency', { type: 'line', categories: ['1x', '2x'], series: [{ name: 'Before', values: [40] }] }),
       'has 1 values, expected 2',
     ],
-    ['a pie slice of zero', pie(0), 'segments.0.value'],
+    ['a pie slice of zero', pie(0), 'segments[0].value'],
     ['a table too long for Slack to draw', table([['x'.repeat(10_000), 'a', 'b']]), 'at most 10000'],
+    ['a table given as object rows', { type: 'Table', props: { headers: ['Evidence'], rows: [{ Evidence: 'x' }] } }, 'row 0 must be a list of cells'],
     [
-      'a too-long table given as object rows',
-      { type: 'Table', props: { headers: ['Evidence'], rows: [{ Evidence: 'x'.repeat(10_000) }] } },
+      'a table cell given as a template',
+      { type: 'Table', props: { headers: ['Evidence'], rows: [[{ $template: 'x' }]] } },
+      'a cell must be text or a number',
+    ],
+    ['a text part over 3,000 characters', { type: 'Text', props: { content: 'x'.repeat(3_001) } }, 'at most 3000 characters'],
+    ['a text part with an unknown style', { type: 'Text', props: { content: 'x', style: 'huge' } }, 'plain, bold or muted'],
+    ['a field over 2,000 characters', { type: 'Fields', children: [field('p95', 'x'.repeat(2_000))] }, 'at most 2000 characters'],
+    ['a field with no value', { type: 'Fields', children: [{ type: 'Field', props: { label: 'p95' } }] }, 'props.label and props.value'],
+    [
+      'a table whose caption makes it too long',
+      { type: 'Table', props: { headers: ['a'], rows: [['b']], caption: 'x'.repeat(10_000) } },
       'at most 10000',
     ],
+    ['a chart title over 50 characters', bar('x'.repeat(51)), 'props.title'],
     [
-      'a too-long table given as template cells',
-      { type: 'Table', props: { headers: ['Evidence'], rows: [[{ $template: 'x'.repeat(10_000) }]] } },
-      'at most 10000',
+      'a chart label over 20 characters',
+      chart('Latency', { type: 'bar', categories: ['x'.repeat(21)], series: [{ name: 'Before', values: [1] }] }),
+      'at most 20 characters',
     ],
+    [
+      'an axis label over 50 characters',
+      chart('Latency', { type: 'bar', categories: ['1x'], series: [{ name: 'Before', values: [1] }], xLabel: 'x'.repeat(51) }),
+      'axis labels',
+    ],
+    [
+      'a chart of 21 categories',
+      chart('Latency', { type: 'line', categories: Array.from({ length: 21 }, (_, i) => `${i}`), series: [{ name: 'B', values: Array.from({ length: 21 }, () => 1) }] }),
+      '1 to 20 categories',
+    ],
+    [
+      'a chart of 13 series',
+      chart('Latency', { type: 'bar', categories: ['1x'], series: Array.from({ length: 13 }, (_, i) => ({ name: `s${i}`, values: [1] })) }),
+      '1 to 12 series',
+    ],
+    [
+      'a chart with a repeated category',
+      chart('Latency', { type: 'bar', categories: ['1x', '1x'], series: [{ name: 'B', values: [1, 2] }] }),
+      'must not repeat',
+    ],
+    ['a chart of an unknown type', chart('Latency', { type: 'radar' }), 'pie, bar, line or area'],
   ])('refuses %s and says which child to fix', async (_, part, reason) => {
     const result = await sendCard.handler({ card: { title: 'Perf', children: ['intro', part] } });
 
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain('Card not sent');
     expect(result.content[0].text).toContain('children[1]');
+    expect(result.content[0].text).toContain(reason);
+    expect(getUndeliveredMessages()).toHaveLength(0);
+  });
+
+  it.each([
+    ['11 parts', Array.from({ length: 11 }, () => ({ type: 'Divider' })), 'at most 10 parts per card'],
+    [
+      '11 fields across two Fields parts',
+      [
+        { type: 'Fields', children: Array.from({ length: 6 }, (_, i) => field(`f${i}`, '1')) },
+        { type: 'Fields', children: Array.from({ length: 5 }, (_, i) => field(`g${i}`, '1')) },
+      ],
+      'at most 10 fields per card',
+    ],
+    [
+      'over 12,000 characters of text across parts',
+      Array.from({ length: 5 }, () => ({ type: 'Text', props: { content: 'x'.repeat(2_500) } })),
+      'at most 12000 per card',
+    ],
+  ])('refuses a card of %s', async (_, children, reason) => {
+    const result = await sendCard.handler({ card: { title: 'Perf', children } });
+
     expect(result.content[0].text).toContain(reason);
     expect(getUndeliveredMessages()).toHaveLength(0);
   });
@@ -407,12 +459,6 @@ describe('send_card — json-render parts', () => {
     expect(getUndeliveredMessages()).toHaveLength(0);
   });
 
-  // A new json-render part fails this: decide whether agents get it, then update both lists.
-  it('knows every part json-render offers, so a new one is a decision', () => {
-    expect(Object.keys(standardComponentDefinitions).sort()).toEqual(
-      ['Actions', 'Button', 'Card', 'Chart', 'Divider', 'Field', 'Fields', 'Image', 'LinkButton', 'Section', 'Table', 'Text'].sort(),
-    );
-  });
 });
 
 // ── Thread of the chat being answered ──
