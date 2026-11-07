@@ -281,18 +281,36 @@ function installCliSymlink(projectRoot: string, homeDir: string): void {
   }
 }
 
-function setupLaunchd(projectRoot: string, nodePath: string, homeDir: string): void {
+// Put node's own dir first so bare `node`/`pnpm` in child processes match the
+// service's node (keg-only Homebrew node@22, nvm). A dir already listed keeps its
+// place, so /usr/bin/node does not push /usr/bin ahead of /usr/local/bin.
+function servicePath(nodePath: string, dirs: string[]): string {
+  const nodeDir = path.dirname(nodePath);
+  return (dirs.includes(nodeDir) ? dirs : [nodeDir, ...dirs]).join(':');
+}
+
+export function renderLaunchdPlist(
+  projectRoot: string,
+  nodePath: string,
+  homeDir: string,
+  proxyEnv: [string, string][] = [],
+): string {
   // Per-checkout service label so multiple NanoClaw installs can coexist
   // without clobbering each other's plist.
   const label = getLaunchdLabel(projectRoot);
-  const plistPath = path.join(homeDir, 'Library', 'LaunchAgents', `${label}.plist`);
-  fs.mkdirSync(path.dirname(plistPath), { recursive: true });
-
-  const proxyEntries = hostProxyEnvEntries(projectRoot)
+  const envPath = servicePath(nodePath, [
+    '/opt/homebrew/bin',
+    '/opt/homebrew/sbin',
+    '/usr/local/bin',
+    '/usr/bin',
+    '/bin',
+    `${homeDir}/.local/bin`,
+  ]);
+  const proxyEntries = proxyEnv
     .map(([key, value]) => `\n        <key>${key}</key>\n        <string>${xmlEscape(value)}</string>`)
     .join('');
 
-  const plist = `<?xml version="1.0" encoding="UTF-8"?>
+  return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -312,7 +330,7 @@ function setupLaunchd(projectRoot: string, nodePath: string, homeDir: string): v
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin</string>
+        <string>${envPath}</string>
         <key>HOME</key>
         <string>${homeDir}</string>${proxyEntries}
     </dict>
@@ -322,6 +340,13 @@ function setupLaunchd(projectRoot: string, nodePath: string, homeDir: string): v
     <string>${projectRoot}/logs/nanoclaw.error.log</string>
 </dict>
 </plist>`;
+}
+
+function setupLaunchd(projectRoot: string, nodePath: string, homeDir: string): void {
+  const label = getLaunchdLabel(projectRoot);
+  const plistPath = path.join(homeDir, 'Library', 'LaunchAgents', `${label}.plist`);
+  fs.mkdirSync(path.dirname(plistPath), { recursive: true });
+  const plist = renderLaunchdPlist(projectRoot, nodePath, homeDir, hostProxyEnvEntries(projectRoot));
 
   // launchd has no env-file option, so the plist that holds the proxy values is owner-only.
   writeOwnerOnly(plistPath, plist);
@@ -463,7 +488,7 @@ Restart=always
 RestartSec=5
 KillMode=process
 Environment=HOME=${homeDir}
-Environment=PATH=/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin${proxyLine}
+Environment=PATH=${servicePath(nodePath, ['/usr/local/bin', '/usr/bin', '/bin', `${homeDir}/.local/bin`])}${proxyLine}
 StandardOutput=append:${projectRoot}/logs/nanoclaw.log
 StandardError=append:${projectRoot}/logs/nanoclaw.error.log
 

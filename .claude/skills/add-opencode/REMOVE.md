@@ -20,10 +20,11 @@ and local work, and leave shared registry, contract, memory, and cwd-shim files 
 place. The install journal records which files the automatic apply actually wrote.
 
 Also remove `src/opencode-dockerfile.test.ts`, the legacy skill-owned guard from
-before the `cli-tools.json` migration:
+before the `cli-tools.json` migration, and the retired attachment test an older
+skill version copied:
 
 ```bash
-rm -f src/opencode-dockerfile.test.ts
+rm -f src/opencode-dockerfile.test.ts container/agent-runner/src/providers/opencode.attachments.test.ts
 ```
 
 If an older skill version installed the memory plugin and managed config, remove

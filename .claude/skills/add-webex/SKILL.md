@@ -103,7 +103,11 @@ The Chat SDK bridge automatically starts a shared webhook server on port 3000
 (`WEBHOOK_PORT` to change it), handling `/webhook/webex`. This port must be
 publicly reachable for Webex to deliver events. Running locally, expose it with
 ngrok (`ngrok http 3000`), a Cloudflare Tunnel, or a reverse proxy on a VPS —
-the resulting public URL is the base for the webhook URL above.
+the resulting public URL is the base for the webhook URL above. Tell the user:
+
+```nc:operator
+NanoClaw's webhook server listens on 127.0.0.1 only, so a tunnel or proxy on this machine works as is. If yours runs on another machine or in Docker on Linux, add `WEBHOOK_HOST=0.0.0.0` to `.env`; it takes effect at the next restart.
+```
 
 ## Next Steps
 
@@ -128,3 +132,5 @@ If you're in the middle of `/setup`, return to the setup flow now. Otherwise run
 **Events arrive but are rejected.** Signature mismatch: the secret set at webhook creation must equal `WEBEX_WEBHOOK_SECRET` exactly. Recreate the webhook with a known secret and update `.env` to match.
 
 **Adapter installed but silent.** Run `pnpm exec vitest run src/channels/webex-registration.test.ts` — red means the barrel import or the `@bitbasti/chat-adapter-webex` install drifted, so re-run the Apply steps. If green, restart the service so it loads the adapter and the tokens, then watch `logs/nanoclaw.log` for the webhook hit.
+
+**A proxy or tunnel on another machine, or in Docker on Linux, gets connection refused or times out.** The webhook server listens on 127.0.0.1 only. Add `WEBHOOK_HOST=0.0.0.0` to `.env` and restart; `Webhook server started` in `logs/nanoclaw.log` shows the host it bound.

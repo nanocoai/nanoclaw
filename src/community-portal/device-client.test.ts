@@ -406,6 +406,34 @@ describe('SetupClient', () => {
     await client.stop();
   });
 
+  it('starts a fresh flow when the saved one belongs to an earlier sign-in on this machine', async () => {
+    const client = await new SetupClient({ origin, file: journalFile, identity }).initialize();
+    client.local.setupFlow = {
+      id: 'flow-old',
+      code: 'code-old',
+      url: `${origin}/?setup=code-old`,
+      stage: 'echo',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+    handler = ({ route }) => {
+      if (route === '/api/v1/setup/code-old')
+        return { status: 403, body: { error: 'wrong_account', message: 'This setup belongs to another device.' } };
+      if (route === '/api/v1/setup/start')
+        return {
+          body: {
+            id: 'flow-new',
+            code: 'code-new',
+            url: `${origin}/?setup=code-new`,
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          },
+        };
+      return { status: 404, body: { error: 'not_found' } };
+    };
+    expect((await client.start('echo')).code).toBe('code-new');
+    expect((await journal()).setupFlow).toMatchObject({ code: 'code-new' });
+    await client.stop();
+  });
+
   it('reports failed flows and treats a rejected token or a missing perk as "not enabled"', async () => {
     const client = await new SetupClient({ origin, file: journalFile, identity }).initialize();
     let status = 'failed';

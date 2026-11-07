@@ -82,7 +82,7 @@ OpenCode configuration and plugins are unaffected.
 ## Installation and refresh
 
 An already installed provider's normal authentication command does not copy
-files, fetch provider branches, or rebuild its image. `--refresh` explicitly
+files or rebuild its image. `--refresh` explicitly
 replaces skill-owned payloads and pins, verifies them, and rebuilds before auth.
 Back up local payload edits before choosing refresh. Fresh installation uses the
 existing engine's install mode, which preserves destinations already present.

@@ -54,3 +54,36 @@ export async function inspectCentralDb(projectRoot: string): Promise<CentralDbIn
     await closeDb();
   }
 }
+
+export interface AgentSessionState {
+  agentGroupId: string;
+  sessionId: string;
+  containerStatus: string | null;
+}
+
+/** The newest active session of the agent group in `folder`, read-only. */
+export async function inspectAgentSession(projectRoot: string, folder: string): Promise<AgentSessionState | null> {
+  const dbPath = path.join(projectRoot, 'data', 'v2.db');
+
+  let db: DbDriver;
+  try {
+    db = await initDb(dbPath, { role: 'tool', readonly: true });
+  } catch (error) {
+    if (isMissingSqliteFile(error)) return null;
+    throw error;
+  }
+
+  try {
+    if (!(await db.hasTable('sessions')) || !(await db.hasTable('agent_groups'))) return null;
+    const row = await db.get<{ id: string; agent_group_id: string; container_status: string | null }>(
+      `SELECT s.id, s.agent_group_id, s.container_status FROM sessions s
+       JOIN agent_groups ag ON ag.id = s.agent_group_id
+       WHERE ag.folder = ? AND s.status = 'active'
+       ORDER BY s.created_at DESC LIMIT 1`,
+      folder,
+    );
+    return row ? { agentGroupId: row.agent_group_id, sessionId: row.id, containerStatus: row.container_status } : null;
+  } finally {
+    await closeDb();
+  }
+}

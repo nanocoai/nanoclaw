@@ -20,6 +20,9 @@ mkdir -p "$(dirname "$LOG_FILE")"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [bootstrap] $*" >> "$LOG_FILE"; }
 
+# shellcheck source=setup/lib/node-version.sh
+source "$PROJECT_ROOT/setup/lib/node-version.sh"
+
 # --- Platform detection ---
 
 detect_platform() {
@@ -56,14 +59,32 @@ check_node() {
   if command -v node >/dev/null 2>&1; then
     NODE_VERSION=$(node --version 2>/dev/null | sed 's/^v//')
     NODE_PATH_FOUND=$(command -v node)
-    local major
-    major=$(echo "$NODE_VERSION" | cut -d. -f1)
-    if [ "$major" -ge 22 ] 2>/dev/null; then
+    if node_meets_minimum "$NODE_VERSION"; then
       NODE_OK="true"
     fi
-    log "Node $NODE_VERSION at $NODE_PATH_FOUND (major=$major, ok=$NODE_OK)"
+    log "Node $NODE_VERSION at $NODE_PATH_FOUND (ok=$NODE_OK)"
   else
     log "Node not found"
+  fi
+}
+
+# --- Node.js install ---
+
+ensure_node() {
+  check_node
+  # An earlier install may have left a Node that meets the minimum off PATH.
+  if [ "$NODE_OK" = "false" ] && node_use_patched; then
+    check_node
+  fi
+  if [ "$NODE_OK" = "false" ]; then
+    log "Node missing or too old — running setup/install-node.sh"
+    echo "Node is missing or below the minimum (${NODE_MINIMUMS// / / }) — installing via setup/install-node.sh"
+    if bash "$PROJECT_ROOT/setup/install-node.sh" 2>&1 | tee -a "$LOG_FILE"; then
+      node_use_patched || true
+      check_node
+    else
+      log "install-node.sh failed"
+    fi
   fi
 }
 
@@ -226,24 +247,7 @@ log "=== Bootstrap started ==="
 
 detect_platform
 
-check_node
-if [ "$NODE_OK" = "false" ]; then
-  log "Node missing or too old — running setup/install-node.sh"
-  echo "Node 22+ not found — installing via setup/install-node.sh"
-  if bash "$PROJECT_ROOT/setup/install-node.sh" 2>&1 | tee -a "$LOG_FILE"; then
-    if [ -x "$HOME/.local/bin/node" ]; then
-      export PATH="$HOME/.local/bin:$PATH"
-    elif [ "$PLATFORM" = "macos" ] && command -v brew >/dev/null 2>&1; then
-      if NODE22_PREFIX="$(brew --prefix node@22 2>/dev/null)"; then
-        export PATH="$NODE22_PREFIX/bin:$PATH"
-      fi
-    fi
-    hash -r 2>/dev/null || true
-    check_node
-  else
-    log "install-node.sh failed"
-  fi
-fi
+ensure_node
 install_deps
 check_build_tools
 

@@ -28,7 +28,7 @@ concurrency:
 
 jobs:
   dispatch:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions: {}
     steps:
       - name: Verify dispatch source
@@ -48,7 +48,7 @@ jobs:
 
   verify:
     needs: dispatch
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       actions: read
       contents: read
@@ -57,14 +57,14 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ inputs.target_sha }}
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: pnpm
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.0
+          bun-version: 1.4.4
 
       - name: Verify protected release environment
         env:
@@ -190,7 +190,7 @@ jobs:
   publish:
     if: inputs.mode == 'publish'
     needs: verify
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # Both environments must be created and protected before the workflow lands.
     # GitHub otherwise auto-creates an unprotected environment on first use.
     # Only x.y.z-rc.N passes verify with a '-'; the verify job checks this same environment.

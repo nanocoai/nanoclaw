@@ -81,6 +81,19 @@ describe('Iron Proxy provider', () => {
     expect(chatgpt.tokens.id_token.split('.')).toHaveLength(3);
   });
 
+  it('carries the recorded workspace id in the ChatGPT stand-in, never a token', () => {
+    const chatgpt = JSON.parse(codexPlaceholder('chatgpt', 'ws-1234_abcd'));
+    const claims = JSON.parse(Buffer.from(chatgpt.tokens.id_token.split('.')[1], 'base64url').toString());
+    expect(chatgpt.tokens.account_id).toBe('ws-1234_abcd');
+    expect(claims['https://api.openai.com/auth'].chatgpt_account_id).toBe('ws-1234_abcd');
+    expect(chatgpt.tokens.access_token).toBe('nc-codex-token-v1');
+    expect(JSON.parse(codexPlaceholder('chatgpt', 'bad id\n')).tokens.account_id).toBe('nc-codex-token-v1');
+    expect(JSON.parse(codexPlaceholder('api', 'ws-1234_abcd'))).toEqual({
+      auth_mode: 'apikey',
+      OPENAI_API_KEY: 'nc-codex-token-v1',
+    });
+  });
+
   it('mounts only a read-only synthetic Codex file scoped to the agent group', () => {
     const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'iron-codex-mount-'));
     const configured = { ...readIronProxySettings({}, projectRoot), managed: true };
@@ -89,12 +102,17 @@ describe('Iron Proxy provider', () => {
       fs.writeFileSync(configured.identityKey, Buffer.alloc(32, 7));
       const metadata = path.join(projectRoot, 'data/session-materials/iron-control/codex.json');
       fs.mkdirSync(path.dirname(metadata), { recursive: true });
-      fs.writeFileSync(metadata, JSON.stringify({ mode: 'chatgpt', secretIds: ['private-id'] }));
+      fs.writeFileSync(
+        metadata,
+        JSON.stringify({ mode: 'chatgpt', secretIds: ['private-id'], brokerId: 'private-broker', accountId: 'ws-1' }),
+      );
       const contribution = ironProxyContribution(configured, input);
       const auth = contribution.mounts!.find((mount) => mount.containerPath.endsWith('/auth.json'))!;
       expect(auth).toMatchObject({ class: 'group-state', mode: 'ro', groupScope: 'group' });
       expect(auth.hostPath).toBe(path.join(projectRoot, 'data/v2-sessions/group/.iron-codex/auth.json'));
-      expect(fs.readFileSync(auth.hostPath, 'utf8')).not.toContain('private-id');
+      const written = fs.readFileSync(auth.hostPath, 'utf8');
+      expect(written).not.toMatch(/private-(id|broker)/);
+      expect(JSON.parse(written).tokens.account_id).toBe('ws-1');
       expect(contribution.mounts!.some((mount) => mount.hostPath.includes('session-materials'))).toBe(false);
       expect(() =>
         ironProxyContribution(configured, {
@@ -102,6 +120,28 @@ describe('Iron Proxy provider', () => {
           key: { ...input.key, agentGroupId: '../escape' },
         }),
       ).toThrow('Invalid agent group ID');
+    } finally {
+      fs.rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the placeholder and warns once for a ChatGPT login without a recorded workspace id', async () => {
+    const { log } = await import('../log.js');
+    const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'iron-codex-legacy-'));
+    const configured = { ...readIronProxySettings({}, projectRoot), managed: true };
+    try {
+      fs.mkdirSync(path.dirname(configured.identityKey), { recursive: true });
+      fs.writeFileSync(configured.identityKey, Buffer.alloc(32, 7));
+      const metadata = path.join(projectRoot, 'data/session-materials/iron-control/codex.json');
+      fs.mkdirSync(path.dirname(metadata), { recursive: true });
+      fs.writeFileSync(metadata, JSON.stringify({ mode: 'chatgpt', secretIds: [] }));
+      const first = ironProxyContribution(configured, input);
+      ironProxyContribution(configured, input);
+      const auth = first.mounts!.find((mount) => mount.containerPath.endsWith('/auth.json'))!;
+      expect(JSON.parse(fs.readFileSync(auth.hostPath, 'utf8')).tokens.account_id).toBe('nc-codex-token-v1');
+      expect(vi.mocked(log.warn).mock.calls.filter(([message]) => /workspace id/.test(String(message)))).toHaveLength(
+        1,
+      );
     } finally {
       fs.rmSync(projectRoot, { recursive: true, force: true });
     }

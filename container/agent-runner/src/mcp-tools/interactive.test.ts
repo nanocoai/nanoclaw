@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { closeSessionDb, getInboundDb, getOutboundDb, initTestSessionDb } from '../mailbox/sqlite/connection.js';
 import { getUndeliveredMessages } from '../db/messages-out.js';
 import { findQuestionResponse } from '../db/messages-in.js';
-import { askUserQuestion, LINK_ACTION_SCHEMA, sendCard } from './interactive.js';
+import { askUserQuestion, LINK_ACTION_SCHEMA, MAX_CARD_QUESTION_LENGTH, sendCard } from './interactive.js';
 
 beforeEach(() => initTestSessionDb());
 afterEach(() => closeSessionDb());
@@ -38,6 +38,81 @@ describe('ask_user_question cancellation', () => {
         JSON.stringify({ questionId, selectedOption: 'yes' }),
       );
     expect(findQuestionResponse(questionId)?.id).toBe('late-question-answer');
+  });
+});
+
+describe('ask_user_question length', () => {
+  it('refuses a title plus question too long for a card without publishing it', async () => {
+    const question = 'x'.repeat(MAX_CARD_QUESTION_LENGTH);
+    const result = await askUserQuestion.handler({ title: 'Fixture', question, options: ['yes'] });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('too long to show in full');
+    expect(getUndeliveredMessages()).toHaveLength(0);
+  });
+
+  it('publishes a question right at the limit', async () => {
+    const controller = new AbortController();
+    const question = 'x'.repeat(MAX_CARD_QUESTION_LENGTH - 'Fixture'.length);
+    const waiting = askUserQuestion.handler(
+      { title: 'Fixture', question, options: ['yes'] },
+      { signal: controller.signal },
+    );
+    while (!getUndeliveredMessages().length) await Bun.sleep(1);
+    controller.abort();
+    await waiting;
+    expect(JSON.parse(getUndeliveredMessages()[0].content).question).toBe(question);
+  });
+});
+
+/** The host's delivery outcome, as delivery.ts records it in the session's inbound.db. */
+function recordDelivery(messageOutId: string, status: 'delivered' | 'failed'): void {
+  getInboundDb()
+    .prepare('INSERT INTO delivered (message_out_id, platform_message_id, status, delivered_at) VALUES (?, NULL, ?, ?)')
+    .run(messageOutId, status, new Date().toISOString());
+}
+
+async function postedQuestionId(): Promise<string> {
+  while (!getUndeliveredMessages().length) await Bun.sleep(1);
+  return JSON.parse(getUndeliveredMessages()[0].content).questionId;
+}
+
+describe('ask_user_question — card the host could not post', () => {
+  const args = { title: 'Fixture', question: 'Choose', options: ['yes', 'no'] };
+
+  it('returns an error once the host gives up on the card, instead of waiting out the timeout', async () => {
+    const waiting = askUserQuestion.handler(args);
+    const questionId = await postedQuestionId();
+    const started = Date.now();
+    recordDelivery(questionId, 'failed');
+    const result = await waiting;
+    expect(Date.now() - started).toBeLessThan(2500);
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('could not be delivered');
+    expect(result.content[0].text).toContain('Shorten the title, question or option labels, or ask in a plain message');
+  });
+
+  it('still returns an answer that arrived by the time the host gave up on the card', async () => {
+    const waiting = askUserQuestion.handler(args);
+    const questionId = await postedQuestionId();
+    answerQuestion(questionId, null);
+    recordDelivery(questionId, 'failed');
+    const result = await waiting;
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0].text).toBe('yes');
+  });
+
+  it('keeps waiting for the answer while its card is delivered, whatever happened to other messages', async () => {
+    let settled = false;
+    const waiting = askUserQuestion.handler({ ...args, timeout: 10 }).finally(() => (settled = true));
+    const questionId = await postedQuestionId();
+    recordDelivery(questionId, 'delivered');
+    recordDelivery('msg-other-card', 'failed');
+    await Bun.sleep(1200);
+    expect(settled).toBe(false);
+    answerQuestion(questionId, null);
+    const result = await waiting;
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0].text).toBe('yes');
   });
 });
 

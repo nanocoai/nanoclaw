@@ -207,6 +207,12 @@ async function releaseClaimQuietly(sessionId: string, incarnation: number): Prom
  */
 const wakePromises = new Map<string, Promise<boolean>>();
 
+/**
+ * Sweep-run deferred-adoption retries in flight, keyed by session id (see
+ * `retryPendingAdoptions`). Resolves false when the retry failed.
+ */
+const adoptionRetries = new Map<string, Promise<boolean>>();
+
 export function getActiveContainerCount(): number {
   return activeContainers.size;
 }
@@ -259,9 +265,17 @@ export function resumeGatewaySessionAdmission(): void {
  * discovering the container gone, or on losing the claim to another live host.
  */
 const pendingAdoptions = new Set<string>();
+/**
+ * Pending sessions whose container a retry decided to stop but could not.
+ * Later retries only re-attempt that stop: the handle keeps its stop intent,
+ * so adopting it would leave its exit unobserved.
+ */
+const pendingStops = new Map<string, string>();
 
 export function _resetAdoptionRetryStateForTesting(): void {
   pendingAdoptions.clear();
+  pendingStops.clear();
+  adoptionRetries.clear();
 }
 
 /**
@@ -269,13 +283,48 @@ export function _resetAdoptionRetryStateForTesting(): void {
  * write. Re-lists from the driver (fresher truth than any cached handle):
  * container gone → false, a fresh spawn is correct; claim lost to a live
  * host → throws, no spawn either; store still down → throws, wake retries.
+ * Otherwise it follows startup adoption: a closed or deleted session's
+ * container, or one the gateway cannot adopt, is stopped.
  */
-async function retryPendingAdoption(session: Session): Promise<boolean> {
+async function retryPendingAdoption(sessionId: string): Promise<boolean> {
   const driver = getSessionDriver();
   const snapshots = await driver.listSessions(INSTALL_SLUG);
-  const snapshot = snapshots.find(({ handle, phase }) => handle.key.sessionId === session.id && phase === 'running');
+  const snapshot = snapshots.find(({ handle, phase }) => handle.key.sessionId === sessionId && phase === 'running');
   if (!snapshot) {
-    pendingAdoptions.delete(session.id);
+    pendingAdoptions.delete(sessionId);
+    pendingStops.delete(sessionId);
+    return false;
+  }
+  // Throws while the stop keeps failing, so neither path spawns beside it.
+  const stopUnadopted = async (reason: string): Promise<void> => {
+    try {
+      await snapshot.handle.stop(reason);
+    } catch (err) {
+      pendingStops.set(sessionId, reason);
+      throw new Error(`session ${sessionId}: surviving container could not be stopped (${reason})`, { cause: err });
+    }
+    pendingStops.delete(sessionId);
+    pendingAdoptions.delete(sessionId);
+  };
+  const pendingStop = pendingStops.get(sessionId);
+  if (pendingStop) {
+    // Re-fence first: a live peer may have claimed the session since, making the container its own.
+    const incarnation = await claimSessionRun(sessionId, snapshot.handle.name);
+    if (incarnation === null) {
+      pendingAdoptions.delete(sessionId);
+      pendingStops.delete(sessionId);
+      throw new Error(`session ${sessionId} is claimed by another live host process — leaving its container alone`);
+    }
+    try {
+      await stopUnadopted(pendingStop);
+    } finally {
+      await releaseClaimQuietly(sessionId, incarnation);
+    }
+    return false;
+  }
+  const session = await getSession(sessionId);
+  if (!session || session.status !== 'active') {
+    await stopUnadopted('orphan-at-startup');
     return false;
   }
   const claimIncarnation = await claimSessionRun(session.id, snapshot.handle.name);
@@ -298,7 +347,11 @@ async function retryPendingAdoption(session: Session): Promise<boolean> {
       capabilities: driver.capabilities(),
     });
   } catch (err) {
-    await releaseClaimQuietly(session.id, claimIncarnation);
+    try {
+      await stopUnadopted('gateway-adoption-failed');
+    } finally {
+      await releaseClaimQuietly(session.id, claimIncarnation);
+    }
     throw err;
   }
   const runtime = registerRuntime(session.id, snapshot.handle, gatewaySession, snapshot.handle.name, true);
@@ -307,6 +360,14 @@ async function retryPendingAdoption(session: Session): Promise<boolean> {
   snapshot.handle.onTerminal((failure) => {
     void finishAndResolve(session.id, runtime, failure);
   });
+  if (await stopIfOffNetworkPolicy(session.id, runtime)) {
+    pendingAdoptions.delete(session.id);
+    // A stop still being retried keeps the runtime registered; a spawn now would race its teardown.
+    if (activeContainers.get(session.id) === runtime) {
+      throw new Error(`session ${session.id} is still stopping — not spawning a replacement yet`);
+    }
+    return false;
+  }
   if (armGatewayAvailability(session.id, gatewaySession)) {
     await runtime.finishedPromise;
     return false;
@@ -327,6 +388,23 @@ async function retryPendingAdoption(session: Session): Promise<boolean> {
  * next tick.
  */
 export function wakeContainer(session: Session): Promise<boolean> {
+  // The sweep is re-fencing this session's survivor (checked first: it may be
+  // registered and mid-stop). Once it settles cleanly, wake again from a fresh
+  // read, so a container it stopped or found gone is replaced now, not a tick
+  // later; a failed retry or a closed session is not.
+  const retry = adoptionRetries.get(session.id);
+  if (retry) {
+    return retry
+      .then(async (settled) => {
+        if (!settled) return false;
+        const current = await getSession(session.id);
+        return current?.status === 'active' ? wakeContainer(current) : false;
+      })
+      .catch((err: unknown) => {
+        log.warn('wakeContainer failed — host-sweep will retry', { sessionId: session.id, err });
+        return false;
+      });
+  }
   if (activeContainers.has(session.id)) {
     log.debug('Container already running', { sessionId: session.id });
     return Promise.resolve(true);
@@ -354,7 +432,9 @@ async function spawnContainer(session: Session): Promise<void> {
     // A running container is waiting to be re-fenced after a failed adoption
     // claim. Reclaim it rather than spawning a duplicate; its poll loop picks
     // up any pending mail the moment it is ours again.
-    if (await retryPendingAdoption(session)) return;
+    if (await retryPendingAdoption(session.id)) return;
+    // The retry stops a closed session's survivor; never respawn it from a stale snapshot.
+    if ((await getSession(session.id))?.status !== 'active') return;
   }
   const agentGroup = await getAgentGroup(session.agent_group_id);
   if (!agentGroup) {
@@ -403,6 +483,7 @@ async function spawnContainer(session: Session): Promise<void> {
       sessionId: session.id,
     }),
     groupName: agentGroup.name,
+    provider,
     containerName,
     capabilities: driver.capabilities(),
   });
@@ -551,6 +632,33 @@ function registerRuntime(
   };
   activeContainers.set(sessionId, runtime);
   return runtime;
+}
+
+/**
+ * Stop an adopted runtime that is not on the network a new session would get
+ * (egress lockdown turned on while it ran), or whose network cannot be checked.
+ * The ordinary kill path ends it, so an in-flight turn is retried as after any
+ * other stop, and the next wake spawns it under the current policy.
+ */
+async function stopIfOffNetworkPolicy(sessionId: string, runtime: ActiveSessionRuntime): Promise<boolean> {
+  let reason: string;
+  /* eslint-disable no-catch-all/no-catch-all -- fail closed: a network that cannot be checked is stopped, never kept */
+  try {
+    const access = runtime.gateway.lease.contribution.networkAccess;
+    if ((await getSessionDriver().reconcileNetworkAccess?.(access, runtime.handle)) !== 'restart') return false;
+    reason = 'network-policy-changed';
+    log.warn('Stopping adopted session: it is not on the network the current policy requires', {
+      sessionId,
+      containerName: runtime.containerName,
+    });
+  } catch (err) {
+    reason = 'network-reconcile-failed';
+    log.error('Network could not be reconciled for adopted session; stopping it', { sessionId, err });
+  }
+  /* eslint-enable no-catch-all/no-catch-all */
+  killContainer(sessionId, reason);
+  await runtime.finishedPromise;
+  return true;
 }
 
 /** Returns true when registration reports an already-unavailable lease synchronously. */
@@ -848,7 +956,6 @@ export async function adoptRunningSessions(): Promise<{ adopted: number; stopped
         containerName: handle.name,
         capabilities: driver.capabilities(),
       });
-      await driver.reconcileNetworkAccess?.(gatewaySession.lease.contribution.networkAccess);
     } catch (err) {
       log.error('Gateway could not adopt running session; stopping it', { sessionId: session.id, err });
       await handle.stop('gateway-adoption-failed').catch(() => {});
@@ -862,6 +969,10 @@ export async function adoptRunningSessions(): Promise<{ adopted: number; stopped
     handle.onTerminal((failure) => {
       void finishAndResolve(session.id, runtime, failure);
     });
+    if (await stopIfOffNetworkPolicy(session.id, runtime)) {
+      stopped += 1;
+      continue;
+    }
     if (armGatewayAvailability(session.id, gatewaySession)) {
       await runtime.finishedPromise;
       stopped += 1;
@@ -913,6 +1024,29 @@ export async function stopOrphanedSessions(): Promise<number> {
     stopped += 1;
   }
   return stopped;
+}
+
+/**
+ * Retry adoptions a failed claim write deferred. Without this an idle session's
+ * surviving container stays unadopted, and unchecked against the network
+ * policy, until a message wakes it. Never spawns; a wake that arrives meanwhile
+ * waits on `adoptionRetries`, then wakes as usual.
+ */
+export async function retryPendingAdoptions(): Promise<void> {
+  for (const sessionId of [...pendingAdoptions]) {
+    if (activeContainers.has(sessionId) || wakePromises.has(sessionId)) continue;
+    const retry = retryPendingAdoption(sessionId)
+      .then(
+        () => true,
+        (err: unknown) => {
+          log.warn('Deferred adoption retry failed — the next sweep retries', { sessionId, err });
+          return false;
+        },
+      )
+      .finally(() => adoptionRetries.delete(sessionId));
+    adoptionRetries.set(sessionId, retry);
+    await retry;
+  }
 }
 
 /**

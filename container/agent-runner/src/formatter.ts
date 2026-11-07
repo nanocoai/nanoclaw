@@ -25,6 +25,10 @@ export function isSessionEcho(msg: MessageInRow): boolean {
  */
 export const FAILURE_NOTICE_FIELD = 'failureNotice';
 
+/** Notice text when the provider gave no error of its own. */
+export const GENERIC_FAILURE_NOTICE =
+  "Sorry, something went wrong and I couldn't answer. Whoever runs this NanoClaw can look into it using the logs: https://docs.nanoclaw.dev/operate/troubleshooting#start-here";
+
 export function isFailureNotice(msg: MessageInRow): boolean {
   try {
     return JSON.parse(msg.content)?.[FAILURE_NOTICE_FIELD] === true;
@@ -281,17 +285,17 @@ function formatSingleChat(msg: MessageInRow): string {
 function formatEchoMessage(msg: MessageInRow): string {
   const content = parseContent(msg.content);
   const label = content.echo?.label || 'another conversation';
-  const sender = content.sender || 'Unknown';
+  // `self` marks the agent's own post; the host sets it in backfill and the outbound fan.
+  const sender = content.self ? 'you' : content.sender || 'Unknown';
   const time = formatLocalStamp(new Date(msg.timestamp), TIMEZONE);
   // Timeline rows are the conversation's own preceding history — FIRST-CLASS
-  // context this thread continues from (the agent's own posts render as
-  // sender="you"), unlike cross-session-context ambient echoes from other
-  // live surfaces which must never be acted on in-place. dm-timeline = a DM's
-  // timeline; channel-timeline = a group conversation's (per-thread groups).
+  // context this thread continues from, unlike cross-session-context ambient
+  // echoes from other live surfaces which must never be acted on in-place.
+  // dm-timeline = a DM's timeline; channel-timeline = a group conversation's
+  // (per-thread groups).
   if (content.echo?.surface === 'dm-timeline' || content.echo?.surface === 'channel-timeline') {
-    const who = (content as { self?: boolean }).self ? 'you' : sender;
     const tag = content.echo.surface === 'channel-timeline' ? 'channel-history' : 'dm-history';
-    return `<${tag} sender="${escapeXml(who)}" time="${escapeXml(time)}">${escapeXml(content.text || '')}</${tag}>`;
+    return `<${tag} sender="${escapeXml(sender)}" time="${escapeXml(time)}">${escapeXml(content.text || '')}</${tag}>`;
   }
   return `<cross-session-context from="${escapeXml(label)}" sender="${escapeXml(sender)}" time="${escapeXml(time)}">${escapeXml(content.text || '')}</cross-session-context>`;
 }

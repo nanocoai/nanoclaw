@@ -10,7 +10,9 @@
 #
 #   NANOCLAW_AGENT_IMAGE_REF        What to acquire. Pin by digest so the bytes
 #                                   landing under the local tag are the ones you
-#                                   chose. Falls back to the `agent-image` pin in
+#                                   chose. Falls back to the image published for
+#                                   this checkout's release (release-image.sh),
+#                                   then to the `agent-image` pin in
 #                                   versions.json; refuses to guess without one.
 #   NANOCLAW_ALLOW_UNLABELED_IMAGE  Accept an image with no agent-runner lock
 #                                   label. Off by default — see the lock check.
@@ -129,6 +131,13 @@ HOST_PLATFORM="linux/${HOST_ARCH}"
 REF="${NANOCLAW_AGENT_IMAGE_REF:-}"
 if [ -z "$REF" ]; then
     REF="$(read_env_setting NANOCLAW_AGENT_IMAGE_REF)"
+fi
+if [ -z "$REF" ]; then
+    LISTED="$(bash "$SCRIPT_DIR/release-image.sh" --fetch)"
+    if [ -n "$LISTED" ]; then
+        REF="${LISTED#* }"
+        echo "Using the image published for ${LISTED%% *}."
+    fi
 fi
 if [ -z "$REF" ]; then
     # A single reference covers a multi-arch index digest — docker resolves that

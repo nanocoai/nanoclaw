@@ -297,18 +297,26 @@ export function signedWorkloadToken(identity: string, key: Buffer): string {
   return `${unsigned}.${createHmac('sha256', key).update(unsigned).digest('base64url')}`;
 }
 
-/** Synthetic login data only; real tokens and account headers stay inside Iron. */
-export function codexPlaceholder(mode: 'api' | 'chatgpt'): string {
+const CODEX_ACCOUNT_ID = /^[A-Za-z0-9_-]{1,128}$/;
+let warnedCodexAccount = false;
+
+/**
+ * Synthetic login data only; real tokens stay inside Iron. Clients match the
+ * account id against the login's workspace list, so the stored login's
+ * workspace id (an identifier, not a credential) replaces the placeholder.
+ */
+export function codexPlaceholder(mode: 'api' | 'chatgpt', accountId?: string): string {
   if (mode === 'api') return JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: CODEX_PLACEHOLDER });
+  const account = accountId && CODEX_ACCOUNT_ID.test(accountId) ? accountId : CODEX_PLACEHOLDER;
   const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
   const token = `${encode({ alg: 'none' })}.${encode({
     sub: CODEX_PLACEHOLDER,
-    'https://api.openai.com/auth': { chatgpt_account_id: CODEX_PLACEHOLDER, chatgpt_plan_type: 'plus' },
+    'https://api.openai.com/auth': { chatgpt_account_id: account, chatgpt_plan_type: 'plus' },
   })}.cGxhY2Vob2xkZXI`;
   return JSON.stringify({
     auth_mode: 'chatgpt',
     OPENAI_API_KEY: null,
-    tokens: { id_token: token, access_token: CODEX_PLACEHOLDER, refresh_token: '', account_id: CODEX_PLACEHOLDER },
+    tokens: { id_token: token, access_token: CODEX_PLACEHOLDER, refresh_token: '', account_id: account },
     last_refresh: new Date().toISOString(),
   });
 }
@@ -320,14 +328,22 @@ function codexAuthMount(
   if (!settings.managed || !settings.projectRoot) return [];
   const metadata = path.join(settings.projectRoot, 'data/session-materials/iron-control/codex.json');
   if (!fs.existsSync(metadata)) return [];
-  const { mode } = JSON.parse(fs.readFileSync(metadata, 'utf8'));
+  const { mode, accountId } = JSON.parse(fs.readFileSync(metadata, 'utf8'));
   if (mode !== 'api' && mode !== 'chatgpt') throw new Error('Invalid Iron Codex authentication mode');
+  const recorded = typeof accountId === 'string' && CODEX_ACCOUNT_ID.test(accountId) ? accountId : undefined;
+  if (mode === 'chatgpt' && !recorded && !warnedCodexAccount) {
+    // Logins saved before the id was recorded; Iron cannot read stored values back.
+    warnedCodexAccount = true;
+    log.warn('Iron Codex login has no recorded workspace id; sign in again', {
+      command: 'pnpm exec tsx setup/index.ts --step provider-auth codex',
+    });
+  }
   const group = input.key.agentGroupId;
   if (!/^[a-zA-Z0-9_-]+$/.test(group)) throw new Error('Invalid agent group ID');
   const directory = path.join(settings.projectRoot, 'data/v2-sessions', group, '.iron-codex');
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   const file = path.join(directory, 'auth.json');
-  fs.writeFileSync(file, codexPlaceholder(mode), { mode: 0o644 });
+  fs.writeFileSync(file, codexPlaceholder(mode, recorded), { mode: 0o644 });
   return [
     {
       class: 'group-state',

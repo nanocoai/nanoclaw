@@ -399,6 +399,34 @@ describe('gateway seam adapter', () => {
     await expect(createProviderCredentialConnection(key()).keep()).rejects.toThrow('Look up');
   });
 
+  it('limits an entry to the target path and reuses only an entry with the same path', async () => {
+    const writes: unknown[] = [];
+    let rows: unknown[] = [];
+    gateway(
+      () => rows,
+      (init) => writes.push(JSON.parse(init.body as string)),
+    );
+    const scoped = { ...key(), path: '/v1/exchange' };
+    const created = createProviderCredentialConnection(scoped);
+    expect(await created.find()).toBeNull();
+    await created.save('scoped-fixture');
+    expect(writes).toEqual([expect.objectContaining({ hostPattern: key().host, pathPattern: '/v1/exchange' })]);
+
+    rows = [{ ...metadata(), pathPattern: '/v1/exchange' }];
+    expect(await createProviderCredentialConnection(scoped).find()).toEqual({ reusable: true });
+    await expect(createProviderCredentialConnection(key()).find()).rejects.toThrow(
+      'unexpected metadata in: pathPattern',
+    );
+    rows = [{ ...metadata(), pathPattern: '/v1/other' }];
+    await expect(createProviderCredentialConnection(scoped).find()).rejects.toThrow(
+      'unexpected metadata in: pathPattern',
+    );
+    rows = [metadata()];
+    await expect(createProviderCredentialConnection(scoped).find()).rejects.toThrow(
+      'unexpected metadata in: pathPattern',
+    );
+  });
+
   it('translates the ChatGPT profile into the native openai record and nothing else', async () => {
     const writes: unknown[] = [];
     gateway(
@@ -419,6 +447,34 @@ describe('gateway seam adapter', () => {
     expect(() =>
       createProviderCredentialConnection({ ...chatgpt, oauth: { ...chatgpt.oauth, profile: 'other' as never } }),
     ).toThrow('only the ChatGPT subscription OAuth profile');
+  });
+
+  it('records the saved or kept id under the target provider, and nothing without one', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-record-'));
+    const record = () =>
+      JSON.parse(fs.readFileSync(path.join(root, 'data', 'onecli', 'provider-credentials.json'), 'utf8')).providers;
+    try {
+      let rows: unknown[] = [];
+      gateway(() => rows);
+      const created = createProviderCredentialConnection({ ...key(), provider: 'opencode' }, root);
+      await created.find();
+      await created.save('google-fixture');
+      expect(record()).toEqual({ opencode: ['created-id'] });
+      // A retried login that keeps the stored key records it again (here: an entry saved before ids were kept).
+      fs.rmSync(path.join(root, 'data'), { recursive: true });
+      rows = [metadata()];
+      const kept = createProviderCredentialConnection({ ...key(), provider: 'opencode' }, root);
+      await kept.find();
+      await kept.keep();
+      expect(record()).toEqual({ opencode: ['existing-key'] });
+      fs.rmSync(path.join(root, 'data'), { recursive: true });
+      const anonymous = createProviderCredentialConnection(key(), root);
+      await anonymous.find();
+      await anonymous.save('google-fixture');
+      expect(fs.existsSync(path.join(root, 'data'))).toBe(false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('rejects a string value for an api-key connection given an object and vice versa', async () => {

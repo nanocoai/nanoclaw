@@ -1,26 +1,23 @@
-# Gate on the one file that decides what other people's machines execute.
+# Gate on the files that decide what other people's machines execute:
+# the `agent-image` pin in versions.json, and agent-images.json, which maps each
+# release to the hardened image published for it.
 #
-# A digest bump in versions.json reaches every pinned install on its next
-# refresh, so this job is the last point at which anyone looks. Two tiers, and
-# the distinction is deliberate:
+# Either change reaches pinned installs on their next pull, so this job is the
+# last point at which anyone looks. Every check is BLOCKING:
 #
-#   BLOCKING   shape checks — index, platforms, lock label, provenance, size.
-#              These catch a wrong or mismatched image. They are things the
-#              image asserts about itself, so they detect drift, not forgery.
+#   shape      index, platforms, labels, size. Claims the image makes about
+#              itself, so they catch a wrong or mismatched image, not a forgery.
+#   signature  the publisher's keyless signature. The one check a registry
+#              write cannot satisfy on its own.
 #
-#   REPORTED   signature verification. The only check here that a registry
-#              write cannot satisfy on its own. Its result goes to the job
-#              summary for the person who merges; it never merges anything.
+# Nothing here approves or merges. A person merges every change.
 #
-# Nothing here approves or merges. A person merges every pin change.
-#
-# Runs on every pull request, deliberately, and NOT filtered on the versions.json
-# path. A required status check that is path-filtered never reports on a PR that
-# does not touch the path, and GitHub reads never-reported as forever-pending —
-# so a filtered job here would block every unrelated PR instead of gating this
-# one. Unchanged pin is therefore a fast, green no-op, which is what lets `verify`
-# be a required check at all. It was not one while this was filtered, and a pin
-# bump merged with this job red.
+# Runs on every pull request, deliberately, and NOT path-filtered. A required
+# status check that is path-filtered never reports on a PR that does not touch
+# the path, and GitHub reads never-reported as forever-pending — so a filtered
+# job here would block every unrelated PR instead of gating this one. Nothing
+# changed is therefore a fast, green no-op, which is what lets `verify` be a
+# required check at all.
 name: verify-agent-image
 
 on:
@@ -31,95 +28,154 @@ permissions:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
       id-token: write # OIDC for the pull-only ECR role
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          fetch-depth: 0
+          fetch-depth: 0 # release tags: each list entry is checked against its own
 
-      - name: Resolve the pin change
+      # Writes /tmp/targets.json: one entry per image to verify, with what its
+      # labels must say. Only images that are new or moved get pulled.
+      - name: Resolve what changed
         id: pin
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          read_pin() {
-            # Older long-lived branches may predate versions.json. Treat that
-            # as an empty old pin so the new pin still gets fully verified.
-            if ! git cat-file -e "$1:versions.json" 2>/dev/null; then
-              return 0
-            fi
-            # Single-reference form only. A per-platform object is deliberately
-            # not auto-bumped: the entries must move together, and a bot that
-            # bumps them independently can leave the architectures on bytes
-            # from two different builds.
-            git show "$1:versions.json" 2>/dev/null \
-              | tr -d '\n' \
-              | grep -o '"agent-image"[[:space:]]*:[[:space:]]*"[^"]*"' \
-              | head -n1 | sed 's/.*:[[:space:]]*"//; s/"$//'
-          }
-          NEW="$(read_pin "${{ github.event.pull_request.head.sha }}")"
-          OLD="$(read_pin "${{ github.event.pull_request.base.sha }}")"
-          echo "old=$OLD" >> "$GITHUB_OUTPUT"
-          echo "new=$NEW" >> "$GITHUB_OUTPUT"
+          python3 - <<'PY'
+          import hashlib, json, os, re, subprocess, sys
 
-          if [ "$NEW" = "$OLD" ]; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "The agent-image pin is unchanged — nothing to verify."
-            echo "(Most PRs land here: this job runs on all of them so it can be a required check.)"
-            exit 0
-          fi
-          echo "changed=true" >> "$GITHUB_OUTPUT"
+          def show(sha, path):
+              r = subprocess.run(['git', 'show', f'{sha}:{path}'], capture_output=True)
+              return r.stdout if r.returncode == 0 else None
 
-          if [ -z "$NEW" ]; then
-            echo "::error::The agent-image pin was removed or is no longer a single reference."
-            echo "A per-platform pin has to be reviewed and verified by hand." >&2
-            exit 1
-          fi
-          case "$NEW" in
-            *@sha256:*) ;;
-            *)
-              echo "::error::New pin '$NEW' is not digest-pinned."
-              echo "A mutable tag is fetched once and never re-checked, so what installs run" >&2
-              echo "would drift from what was reviewed here." >&2
-              exit 1
-              ;;
-          esac
-          echo "  old: ${OLD:-<none>}"
-          echo "  new: $NEW"
+          def fail(msg, detail=''):
+              print(f'::error::{msg}')
+              if detail:
+                  print(detail, file=sys.stderr)
+              sys.exit(1)
+
+          # json.loads keeps the last of two equal keys and release-image.sh the
+          # first, so a duplicate would verify one ref while installs pull another.
+          def no_duplicates(pairs):
+              keys = [k for k, _ in pairs]
+              dupes = sorted({k for k in keys if keys.count(k) > 1})
+              if dupes:
+                  fail(f'Duplicate keys: {dupes}.')
+              return dict(pairs)
+
+          def load(sha, path):
+              raw = show(sha, path)
+              return json.loads(raw, object_pairs_hook=no_duplicates) if raw else {}
+
+          head, base = os.environ['HEAD_SHA'], os.environ['BASE_SHA']
+          targets = []
+
+          # Every image must come from the repository the base branch already pins:
+          # the login below hands that registry's password to the hosts named here.
+          base_pin = load(base, 'versions.json').get('agent-image', '')
+          repo = base_pin.rsplit('@', 1)[0] if isinstance(base_pin, str) and '@' in base_pin else ''
+
+          def checked(ref, where):
+              if not repo or not isinstance(ref, str) or not re.fullmatch(re.escape(repo) + r'@sha256:[0-9a-f]{64}', ref):
+                  fail(f'{where} must be {repo or "<the base pin repository>"}@sha256:<digest>, got {ref!r}.',
+                       'A mutable tag is fetched once and never re-checked, and another registry would\n'
+                       'receive the login below.')
+              return ref
+
+          # The image built from exactly this release: its tag's commit and that
+          # commit's bun.lock.
+          def release_target(release, ref, old):
+              if not re.fullmatch(r'v\d+\.\d+\.\d+', release):
+                  fail(f'agent-images.json key {release!r} is not a release tag.')
+              r = subprocess.run(['git', 'rev-parse', '--verify', '--quiet', f'refs/tags/{release}^{{commit}}'],
+                                 capture_output=True, text=True)
+              if r.returncode != 0:
+                  fail(f'agent-images.json lists {release}, but there is no such tag.')
+              lock_bytes = show(release, 'container/agent-runner/bun.lock')
+              if lock_bytes is None:
+                  fail(f'{release} has no container/agent-runner/bun.lock.')
+              return {'ref': ref, 'old': old, 'lock': hashlib.sha256(lock_bytes).hexdigest(),
+                      'release': release, 'revision': r.stdout.strip()}
+
+          new_list, old_list = load(head, 'agent-images.json'), load(base, 'agent-images.json')
+          raw_list = show(head, 'agent-images.json')
+          if raw_list is not None and raw_list != (json.dumps(dict(sorted(new_list.items())), indent=2) + '\n').encode():
+              fail('agent-images.json is not in canonical form.',
+                   'Write it as json.dumps(dict(sorted(entries)), indent=2) plus a newline, as\n'
+                   'refresh-agent-image does, so release-image.sh reads exactly what this verified.')
+
+          # The versions.json pin. A release can never carry its own image, so the
+          # pin can move to an image listed for a release, checked against that
+          # release; anything else must match this branch's bun.lock.
+          new_pin = load(head, 'versions.json').get('agent-image', '')
+          if new_pin != base_pin:
+              # A per-platform object is deliberately not verified here: its entries
+              # must move together and are reviewed by hand.
+              if not isinstance(new_pin, str) or not new_pin:
+                  fail('The agent-image pin was removed or is no longer a single reference.',
+                       'A per-platform pin has to be reviewed and verified by hand.')
+              checked(new_pin, 'The agent-image pin')
+              old = base_pin if isinstance(base_pin, str) else ''
+              listed = {ref: release for release, ref in new_list.items()}
+              if new_pin in listed:
+                  targets.append(release_target(listed[new_pin], new_pin, old))
+              else:
+                  lock = hashlib.sha256(open('container/agent-runner/bun.lock', 'rb').read()).hexdigest()
+                  targets.append({'ref': new_pin, 'old': old, 'lock': lock, 'release': '', 'revision': ''})
+
+          # agent-images.json: each new or moved entry.
+          for release, ref in sorted(new_list.items()):
+              if old_list.get(release) == ref:
+                  continue
+              targets.append(release_target(release, checked(ref, f'agent-images.json entry {release}'),
+                                            old_list.get(release, '')))
+
+          json.dump(targets, open('/tmp/targets.json', 'w'), indent=2)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write(f"changed={'true' if targets else 'false'}\n")
+              out.write(f"hosts={' '.join(sorted({t['ref'].split('/', 1)[0] for t in targets}))}\n")
+          if not targets:
+              print('No agent image changed — nothing to verify.')
+              print('(Most PRs land here: this job runs on all of them so it can be a required check.)')
+          for t in targets:
+              print(f"  {t['release'] or 'versions.json pin'}: {t['ref']}  (was {t['old'] or '<none>'})")
+          PY
 
       - name: Assume the pull-only role
         if: steps.pin.outputs.changed == 'true'
-        id: aws
-        continue-on-error: true
         uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
         with:
           role-to-assume: ${{ vars.AGENT_IMAGE_CI_ROLE_ARN }}
           aws-region: us-east-1
 
       - name: Registry login
-        if: steps.pin.outputs.changed == 'true' && steps.aws.outcome == 'success'
+        if: steps.pin.outputs.changed == 'true'
+        env:
+          HOSTS: ${{ steps.pin.outputs.hosts }}
         run: |
           set -euo pipefail
-          REF='${{ steps.pin.outputs.new }}'
-          HOST="${REF%%/*}"
-          aws ecr get-login-password --region us-east-1 \
-            | docker login --username AWS --password-stdin "$HOST"
+          for host in $HOSTS; do
+            aws ecr get-login-password --region us-east-1 \
+              | docker login --username AWS --password-stdin "$host"
+          done
 
-      # Everything below is BLOCKING. A red job here cannot merge at all.
       - name: Manifest is a multi-arch index covering both platforms
         if: steps.pin.outputs.changed == 'true'
         run: |
           set -euo pipefail
-          REF='${{ steps.pin.outputs.new }}'
-          docker buildx imagetools inspect --raw "$REF" > /tmp/manifest.json
-          python3 - <<'PY'
-          import json, sys
+          for ref in $(python3 -c 'import json; print(" ".join(t["ref"] for t in json.load(open("/tmp/targets.json"))))'); do
+            docker buildx imagetools inspect --raw "$ref" > /tmp/manifest.json
+            REF="$ref" python3 - <<'PY'
+          import json, os, sys
+          ref = os.environ['REF']
           m = json.load(open('/tmp/manifest.json'))
-          mt = m.get('mediaType', '')
           if 'manifests' not in m:
-              print(f"::error::Pinned digest is a single-platform manifest ({mt}).")
+              print(f"::error::{ref} is a single-platform manifest ({m.get('mediaType', '')}).")
               print("One architecture would be served to every install, and the arch guard")
               print("in container/pull.sh refuses the rest. Publish a multi-arch index.")
               sys.exit(1)
@@ -130,129 +186,99 @@ jobs:
           }
           missing = {'linux/amd64', 'linux/arm64'} - plats
           if missing:
-              print(f"::error::Index is missing {sorted(missing)}; it has {sorted(plats)}.")
+              print(f"::error::{ref} is missing {sorted(missing)}; it has {sorted(plats)}.")
               sys.exit(1)
-          print(f"  index covers {sorted(plats)}")
+          print(f"  {ref}: index covers {sorted(plats)}")
           PY
+          done
 
+      # /app/node_modules is baked from bun.lock while /app/src is mounted from
+      # the user's checkout at spawn. A mismatch dies as a missing module inside
+      # a --rm container whose logs are discarded, so it has to fail here instead.
       - name: Pull and check the image's own claims
         if: steps.pin.outputs.changed == 'true'
         run: |
           set -euo pipefail
-          REF='${{ steps.pin.outputs.new }}'
-          docker pull -q "$REF"
+          python3 -c 'import json; [print(t["ref"], t["lock"], t["release"] or "-", t["revision"] or "-") for t in json.load(open("/tmp/targets.json"))]' \
+          | while read -r REF LOCK RELEASE REVISION; do
+            docker pull -q "$REF" >/dev/null
+            label() { docker image inspect --format "{{index .Config.Labels \"$1\"}}" "$REF"; }
 
-          LOCK_ACTUAL="$(sha256sum container/agent-runner/bun.lock | cut -d' ' -f1)"
-          LOCK_IMAGE="$(docker image inspect --format '{{index .Config.Labels "dev.nanoclaw.agent-runner-lock-sha256"}}' "$REF")"
-          SOURCE="$(docker image inspect --format '{{index .Config.Labels "dev.nanoclaw.image-source"}}' "$REF")"
-
-          # /app/node_modules is baked from bun.lock while /app/src is mounted
-          # from the user's checkout at spawn. A mismatch dies as a missing
-          # module inside a --rm container whose logs are discarded, so it has
-          # to fail here instead.
-          if [ "$LOCK_IMAGE" != "$LOCK_ACTUAL" ]; then
-            echo "::error::Lock label mismatch."
-            echo "  image:    ${LOCK_IMAGE:-<unset>}" >&2
-            echo "  this ref: $LOCK_ACTUAL" >&2
-            echo "This image was built against a different container/agent-runner/bun.lock." >&2
-            exit 1
-          fi
-          if [ "$SOURCE" != "hardened" ]; then
-            echo "::error::image-source label is '${SOURCE:-<unset>}', expected 'hardened'."
-            echo "A published image must be built with --build-arg IMAGE_SOURCE=hardened, or" >&2
-            echo "--status reports every pulled install as a local build." >&2
-            exit 1
-          fi
-          echo "  lock label matches; image declares itself hardened"
+            if [ "$(label dev.nanoclaw.agent-runner-lock-sha256)" != "$LOCK" ]; then
+              echo "::error::$REF: lock label is '$(label dev.nanoclaw.agent-runner-lock-sha256)', expected $LOCK."
+              echo "This image was built against a different container/agent-runner/bun.lock." >&2
+              exit 1
+            fi
+            if [ "$(label dev.nanoclaw.image-source)" != "hardened" ]; then
+              echo "::error::$REF: image-source label is '$(label dev.nanoclaw.image-source)', expected 'hardened'."
+              echo "--status would report every pulled install as a local build." >&2
+              exit 1
+            fi
+            if [ "$RELEASE" != "-" ]; then
+              if [ "$(label org.opencontainers.image.version)" != "$RELEASE" ]; then
+                echo "::error::$REF says it is '$(label org.opencontainers.image.version)', but is listed for $RELEASE."
+                exit 1
+              fi
+              if [ "$(label org.opencontainers.image.revision)" != "$REVISION" ]; then
+                echo "::error::$REF was built from '$(label org.opencontainers.image.revision)', not $RELEASE ($REVISION)."
+                exit 1
+              fi
+            fi
+            echo "  $REF: lock matches, hardened, built from ${RELEASE/#-/this branch}"
+          done
 
       - name: Size delta is plausible
-        if: steps.pin.outputs.changed == 'true' && steps.pin.outputs.old != ''
+        if: steps.pin.outputs.changed == 'true'
         run: |
           set -euo pipefail
           total() {
             docker buildx imagetools inspect --raw "$1" 2>/dev/null \
               | python3 -c 'import json,sys; m=json.load(sys.stdin); print(sum(e.get("size",0) for e in m.get("manifests",[])) or 1)'
           }
-          NEW=$(total '${{ steps.pin.outputs.new }}')
-          OLD=$(total '${{ steps.pin.outputs.old }}')
-          echo "  manifest bytes: old=$OLD new=$NEW"
-          # A coarse tripwire, not a measurement: catches a wholly different
-          # image landing on the pin. Real growth between CVE rebuilds is small.
-          python3 - "$OLD" "$NEW" <<'PY'
-          import sys
-          old, new = int(sys.argv[1]), int(sys.argv[2])
-          if old > 0 and (new > old * 3 or new * 3 < old):
-              print("::warning::Manifest size moved by more than 3x — worth a look before merging.")
-          PY
+          python3 -c 'import json; [print(t["ref"], t["old"]) for t in json.load(open("/tmp/targets.json")) if t["old"]]' \
+          | while read -r NEW OLD; do
+            N=$(total "$NEW"); O=$(total "$OLD")
+            echo "  manifest bytes: old=$O new=$N"
+            # A coarse tripwire, not a measurement: catches a wholly different
+            # image landing on the pin. Real growth between CVE rebuilds is small.
+            if [ "$O" -gt 0 ] && { [ "$N" -gt $((O * 3)) ] || [ $((N * 3)) -lt "$O" ]; }; then
+              echo "::warning::Manifest size moved by more than 3x for $NEW — worth a look before merging."
+            fi
+          done
 
-      # REPORTED, not blocking: the last step tells the person merging.
+      # Keyless Sigstore, so what is trusted is the publisher's build workflow
+      # identity rather than a key anybody could copy. The repo variables carry
+      # that identity; the defaults are the same values.
       #
-      # Keyless Sigstore, so what is being trusted is the publisher's build
-      # workflow identity rather than a key anybody could copy. The defaults
-      # below are that identity; the repo variables exist to point at a fork or
-      # a re-signed image without editing this file.
-      #
-      # Signatures and attestations are ordinary artifacts living beside the
-      # image, as `sha256-<digest>.sig` / `.att` tags IN THE SAME REPOSITORY.
-      # A plain `crane copy` moves the index and its children and leaves those
-      # behind, so a mirrored image verifies as unsigned — indistinguishable
-      # here from genuinely unsigned. Sync with `cosign copy` (or
-      # `crane copy --all-tags`), or set AGENT_IMAGE_SIGNATURE_REPO to the
-      # repository that does hold them: the signature covers the digest, so
-      # verifying it wherever it lives still says something true about these
-      # exact bytes.
+      # A signature is a sibling `sha256-<digest>.sig` tag IN THE SAME REPOSITORY,
+      # which the refresh worker copies over with the image. Set
+      # AGENT_IMAGE_SIGNATURE_REPO to verify against another repository that
+      # holds it: the signature covers the digest, so it says something true
+      # about these exact bytes wherever it lives.
       - name: Verify publisher signature
         if: steps.pin.outputs.changed == 'true'
-        id: sig
-        continue-on-error: true
+        env:
+          IDENTITY: ${{ vars.AGENT_IMAGE_SIGNER_IDENTITY || 'https://github.com/buildecho/images/.github/workflows/build-container.yml@refs/heads/main' }}
+          ISSUER: ${{ vars.AGENT_IMAGE_SIGNER_ISSUER || 'https://token.actions.githubusercontent.com' }}
+          SIG_REPO: ${{ vars.AGENT_IMAGE_SIGNATURE_REPO }}
         run: |
           set -euo pipefail
-          IDENTITY='${{ vars.AGENT_IMAGE_SIGNER_IDENTITY }}'
-          ISSUER='${{ vars.AGENT_IMAGE_SIGNER_ISSUER }}'
-          : "${IDENTITY:=https://github.com/buildecho/images/.github/workflows/build-container.yml@refs/heads/main}"
-          : "${ISSUER:=https://token.actions.githubusercontent.com}"
-
-          REF='${{ steps.pin.outputs.new }}'
-          DIGEST="${REF##*@}"
-          SIG_REPO='${{ vars.AGENT_IMAGE_SIGNATURE_REPO }}'
-          : "${SIG_REPO:=${REF%@*}}"
-
           # Pinned by version and hash: this binary decides whether the image is trusted.
           curl -fsSL https://github.com/sigstore/cosign/releases/download/v3.1.3/cosign-linux-amd64 -o /usr/local/bin/cosign
           echo "4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71  /usr/local/bin/cosign" | sha256sum -c -
           chmod +x /usr/local/bin/cosign
 
-          echo "Verifying the index signature at ${SIG_REPO}@${DIGEST}"
-          cosign verify \
-            --certificate-identity "$IDENTITY" \
-            --certificate-oidc-issuer "$ISSUER" \
-            "${SIG_REPO}@${DIGEST}" > /dev/null
+          for ref in $(python3 -c 'import json; print(" ".join(t["ref"] for t in json.load(open("/tmp/targets.json"))))'); do
+            repo="${SIG_REPO:-${ref%@*}}"
+            echo "Verifying the index signature at ${repo}@${ref##*@}"
+            if ! cosign verify --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" \
+                 "${repo}@${ref##*@}" > /dev/null; then
+              echo "::error::No verified publisher signature for $ref. The shape checks are claims the image makes about itself; only the signature is something whoever pushed it could not forge."
+              exit 1
+            fi
+          done
+          echo "Publisher signature verified." >> "$GITHUB_STEP_SUMMARY"
 
-          # Deliberately no attestation check. The publisher does not attach
-          # them: `.att` and `.sbom` are both absent upstream, and that is a
-          # considered choice on their side — BuildKit provenance embeds build
-          # environment detail they do not want redistributed. Verifying an SBOM
-          # that is never published would fail every run, which reads as
-          # "signature broken" rather than "attestations not offered".
-          #
-          # If that changes, the check belongs here and must name each CHILD
-          # digest from /tmp/manifest.json rather than the index: attestations
-          # attach per architecture, so verifying the index alone would pass
-          # without ever having looked at an SBOM.
-
-      # A missing signature stays a warning: the shape checks still hold, and an
-      # image promoted without its `.sig` tag is otherwise usable. The person
-      # merging decides, so the result goes where they look.
-      - name: Report the signature to the person merging
-        if: steps.pin.outputs.changed == 'true'
-        env:
-          SIG: ${{ steps.sig.outcome }}
-        run: |
-          if [ "$SIG" = "success" ]; then
-            MSG="Publisher signature verified for the new pin."
-            echo "::notice::$MSG"
-          else
-            MSG="No verified publisher signature for the new pin. The shape checks are claims the image makes about itself; only a signature is something whoever pushed it could not forge."
-            echo "::warning::$MSG"
-          fi
-          echo "$MSG" >> "$GITHUB_STEP_SUMMARY"
+          # Deliberately no attestation check: the publisher attaches no `.att` or
+          # `.sbom`, so verifying one would fail every run. If that changes, verify
+          # each CHILD digest, since attestations attach per architecture.

@@ -8,14 +8,15 @@
     "@anthropic-ai/claude-code": "2.1.296",
     "@beeper/chat-adapter-matrix": "0.2.0",
     "@bitbasti/chat-adapter-webex": "0.1.0",
-    "@chat-adapter/discord": "4.29.0",
-    "@chat-adapter/gchat": "4.29.0",
-    "@chat-adapter/github": "4.29.0",
-    "@chat-adapter/linear": "4.29.0",
-    "@chat-adapter/slack": "4.29.0",
-    "@chat-adapter/teams": "4.29.0",
-    "@chat-adapter/telegram": "4.29.0",
-    "@chat-adapter/whatsapp": "4.29.0",
+    "@chat-adapter/discord": "4.41.1",
+    "@chat-adapter/gchat": "4.41.1",
+    "@chat-adapter/github": "4.41.1",
+    "@chat-adapter/linear": "4.41.1",
+    "@chat-adapter/slack": "4.41.1",
+    "@chat-adapter/teams": "4.41.1",
+    "@chat-adapter/telegram": "4.41.1",
+    "@chat-adapter/whatsapp": "4.41.1",
+    "@cursor/sdk": "1.0.28",
     "@deltachat/stdio-rpc-server": "2.49.0",
     "@firecrawl/anydoc": "0.1.6",
     "@getdial/cli": "0.37.0",
@@ -25,7 +26,7 @@
     "@onecli-sh/sdk": "2.2.1",
     "@openai/codex": "0.162.1",
     "@opencode-ai/sdk": "1.18.25",
-    "@resend/chat-sdk-adapter": "0.1.1",
+    "@resend/chat-sdk-adapter": "0.3.0",
     "@types/qrcode": "1.5.6",
     "@types/ws": "8.18.1",
     "@whiskeysockets/baileys": "7.0.0-rc14",
@@ -60,51 +61,57 @@
       ]
     },
     "@chat-adapter/discord": {
-      "version": "4.29.0",
+      "version": "4.41.1",
       "sources": [
         ".claude/skills/add-discord/SKILL.md nc:dep"
       ]
     },
     "@chat-adapter/gchat": {
-      "version": "4.29.0",
+      "version": "4.41.1",
       "sources": [
         ".claude/skills/add-gchat/SKILL.md nc:dep"
       ]
     },
     "@chat-adapter/github": {
-      "version": "4.29.0",
+      "version": "4.41.1",
       "sources": [
         ".claude/skills/add-github/SKILL.md nc:dep"
       ]
     },
     "@chat-adapter/linear": {
-      "version": "4.29.0",
+      "version": "4.41.1",
       "sources": [
         ".claude/skills/add-linear/SKILL.md nc:dep"
       ]
     },
     "@chat-adapter/slack": {
-      "version": "4.29.0",
+      "version": "4.41.1",
       "sources": [
         ".claude/skills/add-slack/SKILL.md nc:dep"
       ]
     },
     "@chat-adapter/teams": {
-      "version": "4.29.0",
+      "version": "4.41.1",
       "sources": [
         ".claude/skills/add-teams/SKILL.md nc:dep"
       ]
     },
     "@chat-adapter/telegram": {
-      "version": "4.29.0",
+      "version": "4.41.1",
       "sources": [
         ".claude/skills/add-telegram/SKILL.md nc:dep"
       ]
     },
     "@chat-adapter/whatsapp": {
-      "version": "4.29.0",
+      "version": "4.41.1",
       "sources": [
         ".claude/skills/add-whatsapp-cloud/SKILL.md nc:dep"
+      ]
+    },
+    "@cursor/sdk": {
+      "version": "1.0.28",
+      "sources": [
+        ".claude/skills/add-cursor/SKILL.md nc:dep manager:bun cwd:container/agent-runner when:cursor_core_ready=yes"
       ]
     },
     "@deltachat/stdio-rpc-server": {
@@ -163,7 +170,7 @@
       ]
     },
     "@resend/chat-sdk-adapter": {
-      "version": "0.1.1",
+      "version": "0.3.0",
       "sources": [
         ".claude/skills/add-resend/SKILL.md nc:dep"
       ]
