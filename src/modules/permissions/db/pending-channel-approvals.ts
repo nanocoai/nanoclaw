@@ -54,19 +54,21 @@ export async function hasInFlightChannelApproval(messagingGroupId: string): Prom
   return row !== undefined;
 }
 
-/** False when the request is gone (decided meanwhile). */
+/** False when that request (`createdAt`) is gone: decided, or replaced by a newer one. */
 export async function updatePendingChannelApprovalCard(
   messagingGroupId: string,
+  createdAt: string,
   title: string,
   question: string,
   optionsJson: string,
 ): Promise<boolean> {
   const result = await getDb().run(
-    'UPDATE pending_channel_approvals SET title = ?, question = ?, options_json = ? WHERE messaging_group_id = ?',
+    'UPDATE pending_channel_approvals SET title = ?, question = ?, options_json = ? WHERE messaging_group_id = ? AND created_at = ?',
     title,
     question,
     optionsJson,
     messagingGroupId,
+    createdAt,
   );
   return result.changes > 0;
 }
