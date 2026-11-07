@@ -2276,7 +2276,9 @@ describe('review 4 of #4218', () => {
       await arrive(mail({ subject: 'Invoice', body }));
       const text = calls.inbound[0].content.text as string;
       expect(text).toContain('Pay up');
-      expect(text.indexOf('[forwarded ')).toBeLessThan(text.indexOf('Begin forwarded message:'));
+      const mark = text.indexOf('[forwarded ');
+      expect(mark).toBeGreaterThan(text.indexOf('For you.'));
+      expect(mark).toBeLessThan(text.indexOf('Begin forwarded message:'));
     });
   });
 
@@ -2332,7 +2334,7 @@ describe('review 4 of #4218', () => {
       await setup.catch(() => {});
       await down;
       expect(h.server.clients.length).toBeGreaterThan(0);
-      expect(h.server.clients.every((c: any) => !c.usable)).toBe(true);
+      expect(h.server.clients.every((c) => !c.usable)).toBe(true);
     });
   });
 
