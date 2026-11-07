@@ -1,0 +1,9 @@
+{
+  "name": "nwc-wallet",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "ws": "^8.19.0",
+    "nostr-tools": "^2.23.3"
+  }
+}
