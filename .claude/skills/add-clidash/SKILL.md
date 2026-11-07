@@ -2,6 +2,7 @@
 name: add-clidash
 description: Add clidash — a zero-dependency, read-only web dashboard that derives its tabs and tables at runtime from any CLI that lists resources as JSON. Ships pre-wired for NanoClaw's ncl CLI (agent groups, sessions, channels, users, roles), plus message-activity charts, a log tail, and a read-only file viewer for group skills/CLAUDE.md/profiles.
 ---
+> Contributed by [@leetwito](https://github.com/leetwito) — [PR #2795](https://github.com/nanocoai/nanoclaw/pull/2795)
 
 # /add-clidash — CLI-derived read-only dashboard
 
