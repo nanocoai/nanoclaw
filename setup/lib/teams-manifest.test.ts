@@ -119,6 +119,14 @@ describe('buildTeamsAppPackage', () => {
     expect(raw).not.toContain('nanoclaw.invalid');
   });
 
+  it('enables file uploads/deliveries (supportsFiles: true)', () => {
+    // Regression test for #2461: a hardcoded `supportsFiles: false` in the
+    // template disables the paperclip/upload UI in personal chats AND
+    // silently drops bot-side send_file deliveries.
+    const manifest = JSON.parse(entries[0].data.toString('utf8'));
+    expect(manifest.bots[0].supportsFiles).toBe(true);
+  });
+
   it('emits real PNGs for both icons', () => {
     expect(entries[1].data.subarray(0, 8).equals(PNG_SIG)).toBe(true);
     expect(entries[2].data.subarray(0, 8).equals(PNG_SIG)).toBe(true);
