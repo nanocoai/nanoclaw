@@ -62,6 +62,17 @@ export interface DockerDriverOptions extends MountPolicy {
 const WATCH_RECOVERY_BASE_MS = 1_000;
 const WATCH_RECOVERY_MAX_MS = 30_000;
 
+/**
+ * Docker rejects `docker rm --force` while its own `--rm` auto-removal is still
+ * running ("removal of container X is already in progress"). Only that error
+ * is waited out: sleep between probes (budget below), then give up.
+ */
+const REMOVAL_IN_PROGRESS = /removal of container .+ is already in progress/i;
+const CONTAINER_NOT_FOUND = /No such (container|object)/i;
+const NETWORK_NOT_FOUND = /No such network|network .* not found/i;
+const REMOVAL_WAIT_BUDGET_MS = 15_000;
+const REMOVAL_WAIT_INTERVALS_MS = [200, 400, 800, 1_000];
+
 interface InstallWatch {
   subscribers: Set<(event: SessionEvent) => void>;
   attempt: number;
@@ -487,6 +498,11 @@ class DockerHandle implements SessionHandle {
   #proc: SupervisedProcess | null = null;
   /** Log hygiene only — events are never intent-filtered here (that is the hub's job). */
   #stopping = false;
+  /** In-flight teardown only; cleared when it settles. Progress lives in the flags below. */
+  #stopPromise: Promise<void> | undefined;
+  #mainContainerRemoved = false;
+  readonly #removedAuxiliaryNames = new Set<string>();
+  #privateNetworkRemoved = false;
   /** Exit code the attach process observed; undefined until it exits. */
   #attachExitCode: number | null | undefined;
   readonly #stderrTail: string[] = [];
@@ -594,24 +610,50 @@ class DockerHandle implements SessionHandle {
    * Full teardown. That this blocks until the container is gone is an
    * implementation behavior (it happens to serialize workspace single-writer
    * during termination), not a contract guarantee — see `SessionHandle.stop`.
+   *
+   * Concurrent stops share one in-flight teardown: the removal poll yields, and
+   * a second teardown could finish first and see a successor reuse this
+   * container name. Completed steps are remembered per handle, so a later stop
+   * never re-runs them and a failed teardown retries only what is left
+   * (container-runner's finishAndResolve relies on that). The memory is
+   * per-handle only: handles built independently by listSessions do not share it.
    */
-  async stop(reason: string): Promise<void> {
-    this.#stopping = true;
-    log.info('Stopping session container', { containerName: this.name, reason });
-    const grace = String(this.pendingSpec?.stopGraceSeconds ?? 1);
-    try {
-      this.cli.run(['stop', '-t', grace, this.name]);
-    } catch {
-      // Already gone, or the daemon refused: fall back to killing the attach
-      // process so supervision never hangs waiting for an exit that cannot come.
-      this.#proc?.kill();
+  stop(reason: string): Promise<void> {
+    if (this.#stopPromise) {
+      log.info('Stopping session container', { containerName: this.name, reason, joined: true });
+      return this.#stopPromise;
     }
-    try {
-      this.cli.run(['rm', '--force', this.name]);
-    } catch (error) {
-      this.#confirmRemoved(this.name, error);
+    log.info('Stopping session container', { containerName: this.name, reason });
+    const teardown = this.#teardown().finally(() => {
+      if (this.#stopPromise === teardown) this.#stopPromise = undefined;
+    });
+    this.#stopPromise = teardown;
+    return teardown;
+  }
+
+  async #teardown(): Promise<void> {
+    this.#stopping = true;
+    if (this.#mainContainerRemoved) {
+      // Removed by an earlier stop; the attach process may still be alive.
+      if (this.#proc && this.#attachExitCode === undefined) this.#proc.kill();
+    } else {
+      const grace = String(this.pendingSpec?.stopGraceSeconds ?? 1);
+      try {
+        this.cli.run(['stop', '-t', grace, this.name]);
+      } catch {
+        // Already gone, or the daemon refused: fall back to killing the attach
+        // process so supervision never hangs waiting for an exit that cannot come.
+        this.#proc?.kill();
+      }
+      try {
+        this.cli.run(['rm', '--force', this.name]);
+      } catch (error) {
+        await this.#removeAfterFailure(this.name, error);
+      }
+      this.#mainContainerRemoved = true;
     }
     for (const auxiliary of [...this.auxiliaryNames].reverse()) {
+      if (this.#removedAuxiliaryNames.has(auxiliary)) continue;
       try {
         this.cli.run(['stop', '-t', '1', auxiliary]);
       } catch {
@@ -620,25 +662,61 @@ class DockerHandle implements SessionHandle {
       try {
         this.cli.run(['rm', '--force', auxiliary]);
       } catch (error) {
-        this.#confirmRemoved(auxiliary, error);
+        await this.#removeAfterFailure(auxiliary, error);
       }
+      this.#removedAuxiliaryNames.add(auxiliary);
     }
-    if (this.privateNetwork) {
+    if (this.privateNetwork && !this.#privateNetworkRemoved) {
       try {
         this.cli.run(['network', 'rm', this.privateNetwork]);
-      } catch {
-        /* already gone or still in use */
+      } catch (error) {
+        if (!NETWORK_NOT_FOUND.test(errorMessage(error))) throw normalizeDockerError(error);
       }
+      this.#privateNetworkRemoved = true;
     }
   }
 
-  /** A successful daemon query distinguishes auto-removal from a daemon outage. */
-  #confirmRemoved(name: string, error: unknown): void {
+  /** Container status from an exact-name inspect; `null` when the container is gone. Other failures throw. */
+  #probeStatus(name: string): string | null {
     try {
-      const remaining = this.cli.run(['ps', '-a', '--filter', `name=^/${name}$`, '--format', '{{.Names}}']);
-      if (!remaining.trim()) return;
+      return this.cli.run(['inspect', '--type', 'container', '--format', '{{.State.Status}}', name]).trim();
     } catch (probeError) {
+      if (CONTAINER_NOT_FOUND.test(errorMessage(probeError))) return null;
       throw normalizeDockerError(probeError);
+    }
+  }
+
+  /**
+   * `rm --force` failed. Only Docker's "removal already in progress" error is
+   * waited out; anything else gets a single existence probe and no sleep.
+   */
+  async #removeAfterFailure(name: string, error: unknown): Promise<void> {
+    const message = errorMessage(error);
+    if (CONTAINER_NOT_FOUND.test(message)) return;
+    if (!REMOVAL_IN_PROGRESS.test(message)) {
+      if (this.#probeStatus(name) === null) return;
+      throw normalizeDockerError(error);
+    }
+    let waited = 0;
+    for (let step = 0; ; step++) {
+      const status = this.#probeStatus(name);
+      if (status === null) return;
+      if (status !== 'removing') {
+        try {
+          this.cli.run(['rm', '--force', name]);
+          return;
+        } catch (retryError) {
+          const retryMessage = errorMessage(retryError);
+          if (CONTAINER_NOT_FOUND.test(retryMessage)) return;
+          if (!REMOVAL_IN_PROGRESS.test(retryMessage)) throw normalizeDockerError(retryError);
+        }
+      }
+      // The loop also probes once at the full budget, so a removal that finishes during the last sleep is seen.
+      if (waited >= REMOVAL_WAIT_BUDGET_MS) break;
+      const scheduledInterval = REMOVAL_WAIT_INTERVALS_MS[Math.min(step, REMOVAL_WAIT_INTERVALS_MS.length - 1)]!;
+      const interval = Math.min(scheduledInterval, REMOVAL_WAIT_BUDGET_MS - waited);
+      await new Promise((resolve) => setTimeout(resolve, interval));
+      waited += interval;
     }
     throw normalizeDockerError(error);
   }
@@ -855,6 +933,10 @@ export function envArgs(env: Record<string, string>): string[] {
 
 export function labelArgs(labels: Record<string, string>): string[] {
   return Object.entries(labels).flatMap(([k, v]) => ['--label', `${k}=${v}`]);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export function normalizeDockerError(error: unknown): Error & SessionFailure {
