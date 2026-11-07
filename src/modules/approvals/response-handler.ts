@@ -68,7 +68,7 @@ async function handleRegisteredApproval(
   // instead of finalizing now. The agent is notified exactly once: after the
   // reason arrives, or after the sweep's timeout if the admin ghosts.
   if (selectedOption === REJECT_WITH_REASON_VALUE) {
-    return (await armReasonCapture(approval, session, userId)) ? 'accepted' : 'ignored';
+    return (await armReasonCapture(approval, session, userId, accepted)) ? 'accepted' : 'ignored';
   }
 
   // Plain Reject (or any other non-approve value) — instant fast path. Only from
