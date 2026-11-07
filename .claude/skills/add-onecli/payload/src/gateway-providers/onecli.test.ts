@@ -58,7 +58,12 @@ vi.mock('../env.js', () => ({
   }),
 }));
 
-import { contributionFromConfig, grantProviderCredentials, withProviderEnv } from './onecli.js';
+import {
+  contributionFromConfig,
+  grantProviderCredentials,
+  HEALTH_FAILURE_THRESHOLD,
+  withProviderEnv,
+} from './onecli.js';
 import { recordProviderCredentials } from './onecli-provider-credentials.js';
 import { log } from '../log.js';
 import { getGatewayProviderRegistration } from './gateway-provider-registry.js';
@@ -833,12 +838,115 @@ describe('OneCLI gateway package', () => {
     second.onUnavailable?.(unavailable);
 
     expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(5_000 * (HEALTH_FAILURE_THRESHOLD - 1));
+    expect(fetchMock).toHaveBeenCalledTimes(HEALTH_FAILURE_THRESHOLD - 1);
+    expect(unavailable).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(5_000);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(HEALTH_FAILURE_THRESHOLD);
     expect(unavailable).toHaveBeenCalledTimes(2);
     expect(vi.getTimerCount()).toBe(0);
 
     firstController.abort();
+    secondController.abort();
+    fetchMock.mockRestore();
+  });
+
+  it('does not end sessions for a probe failure that recovers before the threshold', async () => {
+    vi.useFakeTimers();
+    const ok = new Response('{}', { status: 200 });
+    const fetchMock = vi.spyOn(globalThis, 'fetch');
+    // fail, fail, recover, fail, fail: never THRESHOLD in a row
+    fetchMock
+      .mockRejectedValueOnce(new Error('timeout'))
+      .mockRejectedValueOnce(new Error('timeout'))
+      .mockResolvedValueOnce(ok)
+      .mockRejectedValueOnce(new Error('timeout'))
+      .mockRejectedValueOnce(new Error('timeout'))
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+    const controller = new AbortController();
+    const lease = await provider.sessions.ensure(input('s1'), controller.signal);
+    const unavailable = vi.fn();
+    lease.onUnavailable?.(unavailable);
+
+    await vi.advanceTimersByTimeAsync(5_000 * 6);
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+    expect(unavailable).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(1);
+
+    controller.abort();
+    fetchMock.mockRestore();
+  });
+
+  it('counts an error status (503) as a failed probe', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async () => new Response('busy', { status: 503 }));
+    const controller = new AbortController();
+    const lease = await provider.sessions.ensure(input('s1'), controller.signal);
+    const unavailable = vi.fn();
+    lease.onUnavailable?.(unavailable);
+
+    await vi.advanceTimersByTimeAsync(5_000 * (HEALTH_FAILURE_THRESHOLD - 1));
+    expect(unavailable).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(unavailable).toHaveBeenCalledOnce();
+
+    controller.abort();
+    fetchMock.mockRestore();
+  });
+
+  it('tells a still-live lease again at a later outage (its earlier stop may have failed)', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('offline'));
+    const firstController = new AbortController();
+    const first = await provider.sessions.ensure(input('s1'), firstController.signal);
+    const firstUnavailable = vi.fn();
+    first.onUnavailable?.(firstUnavailable);
+    await vi.advanceTimersByTimeAsync(5_000 * HEALTH_FAILURE_THRESHOLD);
+    expect(firstUnavailable).toHaveBeenCalledTimes(1);
+
+    // the first lease never aborted (its teardown failed) when a new one starts the monitor again
+    const secondController = new AbortController();
+    const second = await provider.sessions.ensure(input('s2'), secondController.signal);
+    const secondUnavailable = vi.fn();
+    second.onUnavailable?.(secondUnavailable);
+    await vi.advanceTimersByTimeAsync(5_000 * HEALTH_FAILURE_THRESHOLD);
+    expect(secondUnavailable).toHaveBeenCalledTimes(1);
+    expect(firstUnavailable).toHaveBeenCalledTimes(2);
+
+    firstController.abort();
+    secondController.abort();
+    fetchMock.mockRestore();
+  });
+
+  it('a probe left hanging by a stopped monitor neither blocks nor counts toward the next monitor', async () => {
+    vi.useFakeTimers();
+    let hang: (() => void) | undefined;
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementationOnce(
+        () => new Promise<Response>((_resolve, reject) => (hang = () => reject(new Error('late')))),
+      )
+      .mockRejectedValue(new Error('offline'));
+    const firstController = new AbortController();
+    await provider.sessions.ensure(input('s1'), firstController.signal);
+    await vi.advanceTimersByTimeAsync(5_000); // first probe starts and hangs
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    firstController.abort(); // last lease closes: monitor stops mid-probe
+
+    const secondController = new AbortController();
+    const second = await provider.sessions.ensure(input('s2'), secondController.signal);
+    const unavailable = vi.fn();
+    second.onUnavailable?.(unavailable);
+    await vi.advanceTimersByTimeAsync(5_000); // the new monitor's first tick must probe
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(5_000 * (HEALTH_FAILURE_THRESHOLD - 2));
+    hang?.(); // the old monitor's probe fails late, one short of the new monitor's threshold
+    await vi.advanceTimersByTimeAsync(0);
+    expect(unavailable).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(5_000); // the new monitor's own THRESHOLD-th failure trips
+    expect(unavailable).toHaveBeenCalledOnce();
     secondController.abort();
     fetchMock.mockRestore();
   });

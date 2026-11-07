@@ -42,7 +42,23 @@ const onecli = new OneCLI({ url: onecliUrl, apiKey: onecliApiKey });
 const healthUrl = new URL('/v1/health', onecliUrl || 'https://api.onecli.sh').toString();
 const liveLeases = new Set<{ unavailable?: string; notify?: (reason: string) => void }>();
 let healthTimer: NodeJS.Timeout | null = null;
-let probing = false;
+/** Generation whose probe is in flight; a probe left over from a stopped monitor never blocks the new one. */
+let probingGeneration: number | null = null;
+let consecutiveProbeFailures = 0;
+/** Bumped whenever the monitor stops, so a probe in flight across a restart cannot touch the new count. */
+let monitorGeneration = 0;
+
+/**
+ * Probes that must fail in a row before every live session is told the gateway
+ * is gone. One slow `/health` on a loaded host is not an outage: the gateway
+ * can still be serving the sessions' own traffic, and declaring it unavailable
+ * stops every running agent mid-turn. Probes run every 5 s with a 5 s timeout,
+ * and a tick that lands while a probe is still waiting is skipped, so the
+ * sessions end about 15 s after a gateway starts refusing connections and
+ * 20–30 s after one stops answering. A dead gateway still ends them; a
+ * stall shorter than that does not.
+ */
+export const HEALTH_FAILURE_THRESHOLD = 3;
 
 type OneCLIContribution = Omit<GatewayContribution, 'networkAccess'>;
 type GatewayMount = NonNullable<GatewayContribution['mounts']>[number];
@@ -121,24 +137,47 @@ export function withProviderEnv(contribution: OneCLIContribution, baseUrl = anth
 function stopHealthMonitor(): void {
   if (healthTimer) clearInterval(healthTimer);
   healthTimer = null;
+  consecutiveProbeFailures = 0;
+  monitorGeneration += 1;
 }
 
 async function probeHealth(): Promise<void> {
-  if (probing || liveLeases.size === 0) return;
-  probing = true;
+  if (probingGeneration === monitorGeneration || liveLeases.size === 0) return;
+  const generation = monitorGeneration;
+  probingGeneration = generation;
   try {
     const response = await fetch(healthUrl, { signal: AbortSignal.timeout(5_000) });
+    // Release the connection; only the status matters. Best-effort: a reset
+    // while discarding a 200 body is not a failed probe.
+    await response.body?.cancel().catch(() => {});
     if (!response.ok) throw new Error(`status ${response.status}`);
+    if (generation !== monitorGeneration) return;
+    if (consecutiveProbeFailures > 0) {
+      log.info('OneCLI gateway health recovered', { failedProbes: consecutiveProbeFailures });
+    }
+    consecutiveProbeFailures = 0;
   } catch (err) {
+    if (generation !== monitorGeneration) return;
+    consecutiveProbeFailures += 1;
+    if (consecutiveProbeFailures < HEALTH_FAILURE_THRESHOLD) {
+      log.warn('OneCLI gateway health probe failed', {
+        err,
+        failedProbes: consecutiveProbeFailures,
+        threshold: HEALTH_FAILURE_THRESHOLD,
+      });
+      return;
+    }
     const reason = 'OneCLI gateway unavailable';
-    log.error(reason, { err });
+    log.error(reason, { err, failedProbes: consecutiveProbeFailures });
     stopHealthMonitor();
     for (const lease of liveLeases) {
+      // A lease still live at a later outage is told again: its earlier stop
+      // may have failed, and stop is idempotent.
       lease.unavailable = reason;
       lease.notify?.(reason);
     }
   } finally {
-    probing = false;
+    if (probingGeneration === generation) probingGeneration = null;
   }
 }
 
