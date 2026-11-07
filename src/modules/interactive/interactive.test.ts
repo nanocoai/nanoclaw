@@ -6,8 +6,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../container-runner.js', () => ({ wakeContainer: vi.fn().mockResolvedValue(undefined) }));
-/** Set by a test to hold one getSession call (a slow read). */
-const slowRead = vi.hoisted(() => ({ hold: undefined as Promise<void> | undefined }));
+/** Set by a test to hold one getSession or getPendingQuestion call (a slow read). */
+const slowRead = vi.hoisted(() => ({
+  hold: undefined as Promise<void> | undefined,
+  questionHold: undefined as Promise<void> | undefined,
+}));
 vi.mock('../../db/sessions.js', async () => {
   const actual = await vi.importActual<typeof import('../../db/sessions.js')>('../../db/sessions.js');
   return {
@@ -17,6 +20,12 @@ vi.mock('../../db/sessions.js', async () => {
       slowRead.hold = undefined;
       if (hold) await hold;
       return actual.getSession(id);
+    },
+    getPendingQuestion: async (id: string) => {
+      const hold = slowRead.questionHold;
+      slowRead.questionHold = undefined;
+      if (hold) await hold;
+      return actual.getPendingQuestion(id);
     },
   };
 });
@@ -28,9 +37,15 @@ vi.mock('../../session-manager.js', async () => ({
 import { wakeContainer } from '../../container-runner.js';
 import { closeDb, createAgentGroup, initTestDb, runMigrations } from '../../db/index.js';
 import { createPendingQuestion, createSession, getPendingQuestion } from '../../db/sessions.js';
-import { dispatchResponse } from '../../response-registry.js';
+import { dispatchResponse, registerResponseHandler } from '../../response-registry.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import './index.js';
+
+/** A later module's card (an approval), registered after this one as in the host. */
+const approvalClicks = vi.fn(async (payload: { questionId: string }) =>
+  payload.questionId === 'appr-1' ? ('accepted' as const) : false,
+);
+registerResponseHandler(approvalClicks);
 
 const now = () => new Date().toISOString();
 const answer = (value: string) =>
@@ -130,6 +145,26 @@ describe('question answers', () => {
     expect(outcome).toBe('closed');
     expect(await getPendingQuestion('q-1')).toBeUndefined();
     expect(wakeContainer).toHaveBeenCalledTimes(2);
+  });
+
+  it("leaves another module's card to its handler, even while a click on it is being read", async () => {
+    let release!: () => void;
+    slowRead.questionHold = new Promise((resolve) => (release = resolve));
+    const click = () =>
+      dispatchResponse({
+        questionId: 'appr-1',
+        value: 'approve',
+        userId: 'u',
+        channelType: 'slack',
+        platformId: 'C1',
+        threadId: null,
+      });
+    const first = click();
+    // A second click on the same approval card arrives while the first is read.
+    const second = await click();
+    release();
+    expect([await first, second]).toEqual(['accepted', 'accepted']);
+    expect(approvalClicks).toHaveBeenCalledTimes(2);
   });
 
   it('reports the answer accepted before the agent is woken', async () => {

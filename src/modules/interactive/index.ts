@@ -23,7 +23,9 @@ const answering = new Set<string>();
 
 async function handleInteractiveResponse(payload: ResponsePayload): Promise<ResponseOutcome | false> {
   if (!(await hasTable(getDb(), 'pending_questions'))) return false;
-  // Claimed before the row is read, and the row deleted only once the answer is
+  // Not a question (an approval card): its own handler decides, never this claim.
+  if (!(await getPendingQuestion(payload.questionId))) return false;
+  // Claimed, then read again, and the row deleted only once the answer is
   // written: a click that read it earlier can't answer twice, and a write that
   // fails (the mailbox busy) leaves the question open to answer again.
   if (answering.has(payload.questionId)) return 'ignored';
