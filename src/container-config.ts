@@ -16,7 +16,7 @@ import { getContainerConfig } from './db/container-configs.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { isValidTimezone } from './timezone.js';
 import { log } from './log.js';
-import type { AgentGroup, ContainerConfigRow, ContainerSpeed } from './types.js';
+import type { AgentGroup, ContainerConfigRow, ContainerSpeed, SystemPromptMode } from './types.js';
 
 /**
  * Container-side path where a group's stamped plugins are mounted read-only.
@@ -256,6 +256,8 @@ export interface ContainerConfig {
   fastMode?: true;
   /** Provider-declared speed tier (`standard` or `fast` for Claude); the group value overrides the install default. */
   speed?: ContainerSpeed;
+  /** Absent = `claude_code`, so a group that never set it writes the same file it always did. */
+  systemPromptMode?: SystemPromptMode;
   timezone?: string;
   /** Session isolation tier for the group's containers; absent = the composer's default ('container'). */
   runtimeTier?: 'container' | 'vm';
@@ -381,6 +383,7 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
     effort: row.effort ?? undefined,
     // A cleared group value falls back to the install-wide default.
     ...speedFields(parseContainerSpeed(row.speed) ?? (FAST_MODE ? 'fast' : undefined)),
+    systemPromptMode: row.system_prompt_mode === 'plain' ? 'plain' : undefined,
     timezone: row.timezone && isValidTimezone(row.timezone) ? row.timezone : undefined,
     runtimeTier: parseRuntimeTier(row.runtime_tier, group.name),
   };
