@@ -813,3 +813,141 @@ describe('task-run turn wiring (real processQuery)', () => {
     // diagnostic throw above (observed consistently on CI-hosted runners).
   }, 20_000);
 });
+
+describe('structured providerFailure on failure notices', () => {
+  const RAW = 'unexpected status 401 Unauthorized: token_expired sk-synthetic-secret {"error":"body"}';
+
+  async function notices(providerName: string, event: ProviderEvent, routing = ERR_ROUTING) {
+    const { query } = makeResultQuery(event);
+    await processQuery(query, routing, ['m1'], providerName, undefined, 'prompt', undefined);
+    return getUndeliveredMessages().map((row) => JSON.parse(row.content));
+  }
+
+  it.each(['unexpected status 401 Unauthorized', 'authentication failed: 401 authentication', 'token_expired'])(
+    'codex auth expiry (%s) ships generic text plus a narrow providerFailure',
+    async (error) => {
+      const sent = await notices('codex', { type: 'result', text: '', isError: true, error: `${error} ${RAW}` });
+      expect(sent).toEqual([
+        {
+          text: GENERIC_FAILURE_NOTICE,
+          failureNotice: true,
+          providerFailure: { provider: 'codex', kind: 'auth_expired' },
+        },
+      ]);
+      const wire = JSON.stringify(sent);
+      expect(wire).not.toContain('token_expired');
+      expect(wire).not.toContain('sk-synthetic-secret');
+      expect(wire).not.toContain('Unauthorized');
+    },
+  );
+
+  it('keeps unknown provider errors without providerFailure', async () => {
+    const sent = await notices('codex', { type: 'result', text: '', isError: true, error: 'billing hard-stop' });
+    expect(sent).toEqual([{ text: 'billing hard-stop', failureNotice: true }]);
+  });
+
+  it('ignores 401/token_expired in normal model text', async () => {
+    const sent = await notices('codex', { type: 'result', text: `The API said ${RAW}`, isError: true });
+    expect(sent).toEqual([{ text: GENERIC_FAILURE_NOTICE, failureNotice: true }]);
+  });
+
+  it('ignores the same error from another provider', async () => {
+    const sent = await notices('claude', { type: 'result', text: '', isError: true, error: RAW });
+    expect(sent).toHaveLength(1);
+    expect(sent[0].providerFailure).toBeUndefined();
+  });
+
+  const AUTH_MSG = 'unexpected status 401 Unauthorized: token_expired';
+
+  async function thrown(
+    providerName: string,
+    events: ProviderEvent[],
+    error: Error,
+    routing = ERR_ROUTING,
+  ): Promise<Record<string, unknown>[]> {
+    async function* gen(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 'sess-1' };
+      for (const e of events) yield e;
+      throw error;
+    }
+    const query: AgentQuery = { push: () => {}, end: () => {}, events: gen(), abort: () => {} };
+    await processQuery(query, routing, ['m1'], providerName, undefined, 'prompt', undefined).catch(() => {});
+    return getUndeliveredMessages().map((row) => JSON.parse(row.content));
+  }
+
+  const errorEvent = (message: string): ProviderEvent => ({
+    type: 'error',
+    message,
+    retryable: false,
+    classification: 'auth',
+  });
+
+  it('real codex path: type=error then the same error thrown carries providerFailure', async () => {
+    const sent = await thrown('codex', [errorEvent(AUTH_MSG)], new Error(AUTH_MSG));
+    expect(sent).toEqual([
+      {
+        text: GENERIC_FAILURE_NOTICE,
+        failureNotice: true,
+        providerFailure: { provider: 'codex', kind: 'auth_expired' },
+      },
+    ]);
+    expect(JSON.stringify(sent)).not.toContain('token_expired');
+  });
+
+  it('thrown error differing from the error event gets no providerFailure', async () => {
+    const sent = await thrown('codex', [errorEvent(AUTH_MSG)], new Error(`${AUTH_MSG} (different)`));
+    expect(sent).toEqual([{ text: GENERIC_FAILURE_NOTICE, failureNotice: true }]);
+  });
+
+  it('a thrown auth error with no error event (executor/CLI) gets no providerFailure', async () => {
+    const sent = await thrown('codex', [], new Error(AUTH_MSG));
+    expect(sent).toEqual([{ text: GENERIC_FAILURE_NOTICE, failureNotice: true }]);
+  });
+
+  it('a stale error event followed by other events is not correlated', async () => {
+    const sent = await thrown('codex', [errorEvent(AUTH_MSG), { type: 'activity' }], new Error(AUTH_MSG));
+    expect(sent).toEqual([{ text: GENERIC_FAILURE_NOTICE, failureNotice: true }]);
+  });
+
+  it('error event + throw from another provider gets no providerFailure', async () => {
+    const sent = await thrown('claude', [errorEvent(AUTH_MSG)], new Error(AUTH_MSG));
+    expect(sent).toEqual([{ text: GENERIC_FAILURE_NOTICE, failureNotice: true }]);
+  });
+
+  it('unknown codex error event + throw stays without providerFailure', async () => {
+    const sent = await thrown('codex', [errorEvent('billing hard-stop')], new Error('billing hard-stop'));
+    expect(sent).toEqual([{ text: GENERIC_FAILURE_NOTICE, failureNotice: true }]);
+  });
+
+  it.each([
+    'The tool replied "token_expired" earlier',
+    'upstream body: {"error":"token_expired"}',
+    'saw `401 Unauthorized` in the page',
+    'proxy log said: token_expired',
+    '"401 Unauthorized"',
+  ])('embedded or quoted text (%s) never classifies, on either path', async (msg) => {
+    const viaThrow = await thrown('codex', [errorEvent(msg)], new Error(msg));
+    expect(viaThrow).toEqual([{ text: GENERIC_FAILURE_NOTICE, failureNotice: true }]);
+    const viaResult = await notices('codex', { type: 'result', text: '', isError: true, error: msg });
+    expect(viaResult[0].providerFailure).toBeUndefined();
+  });
+
+  it('accepts an Error: prefix before a leading token_expired', async () => {
+    const sent = await notices('codex', { type: 'result', text: '', isError: true, error: 'Error: token_expired' });
+    expect(sent[0].providerFailure).toEqual({ provider: 'codex', kind: 'auth_expired' });
+  });
+
+  it('generic thrown failure notice is unchanged', async () => {
+    const sent = await thrown('mock', [], new Error('boom'));
+    expect(sent).toEqual([{ text: GENERIC_FAILURE_NOTICE, failureNotice: true }]);
+  });
+
+  it('sends nothing, hence no providerFailure, when answering a failure notice', async () => {
+    const sent = await notices(
+      'codex',
+      { type: 'result', text: '', isError: true, error: RAW },
+      { ...ERR_ROUTING, failureNoticeWake: true },
+    );
+    expect(sent).toHaveLength(0);
+  });
+});
