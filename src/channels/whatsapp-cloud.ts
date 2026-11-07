@@ -48,6 +48,11 @@ export const whatsappCloudRegistration: ChannelRegistration = {
       concurrency: 'concurrent',
       supportsThreads: false,
       defaults: WHATSAPP_CLOUD_DEFAULTS,
+      // A card with buttons is an interactive message: a 1,024-character
+      // body, cut past that with the buttons kept. The limit counts the
+      // title too, so a longer card is refused, never cut.
+      // Spread, so an older core without this option still type-checks (and ignores it).
+      ...{ maxCardTextLength: 1024 },
     });
   },
   defaults: WHATSAPP_CLOUD_DEFAULTS,

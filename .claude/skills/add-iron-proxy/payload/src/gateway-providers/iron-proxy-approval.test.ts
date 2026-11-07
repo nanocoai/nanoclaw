@@ -313,6 +313,19 @@ it('carries selected proxy display fields through the approval contract', async 
   expect(await pending.result).toMatchObject({ action: 2 });
 });
 
+it('marks a request path it shortens for display', async () => {
+  const pending = transformCall({
+    request: { method: 'DELETE', url: `/${'a'.repeat(239)}/delete-production`, host: 'api.github.com' },
+  });
+  await vi.waitFor(() => expect(held.size).toBe(1));
+  const decision = [...held.values()][0];
+  expect(decision.request.summary?.resource).toMatch(
+    /^DELETE api\.github\.com\/a+ … \(\d+ more characters not shown\)$/,
+  );
+  decision.resolve('deny');
+  expect(await pending.result).toMatchObject({ action: 2 });
+});
+
 it('rejects malformed proxy summary metadata', async () => {
   const md = metadata();
   md.set('x-iron-approval-summary', Buffer.from('{"action":"POST request","details":"invalid"}').toString('base64'));

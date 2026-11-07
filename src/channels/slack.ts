@@ -15,6 +15,7 @@
  * config, and the wiring-defaults declaration are shared across instances.
  */
 import { createSlackAdapter, type SlackAdapter } from '@chat-adapter/slack';
+import { isCardElement, type AdapterPostableMessage } from 'chat';
 
 import { readEnvFile } from '../env.js';
 import type { ChannelAdapter, ChannelContextDefaults, ChannelDefaults } from './adapter.js';
@@ -138,6 +139,52 @@ export async function slackAuthorIsBot(slackAdapter: SlackAdapter, userId: strin
   return user?.isBot ?? null;
 }
 
+/**
+ * Card text reaches Block Kit as raw mrkdwn, where `&`, `<` and `>` are control
+ * characters (links, mentions). Entity-escape them so untrusted values in
+ * approval cards show as typed; a word joiner after `@` keeps a bare
+ * @here/@channel/@everyone from becoming a mention.
+ */
+export function escapeSlackMrkdwn(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/@(here|channel|everyone)\b/gi, '@\u2060$1');
+}
+
+/**
+ * Slack shows a card's title as a plain-text header, but also puts it in the
+ * message's mrkdwn notification text, where `<...>` forms links and mentions.
+ * A full-width look-alike for `<` keeps the title inert there without changing
+ * its length. A bare @here stays as typed: no link_names is sent, so it forms
+ * no mention.
+ */
+export function escapeSlackTitle(title: string): string {
+  return title.replace(/</g, '\uff1c');
+}
+
+function withSafeTitle(message: AdapterPostableMessage): AdapterPostableMessage {
+  const card = isCardElement(message)
+    ? message
+    : typeof message === 'object' && 'card' in message
+      ? message.card
+      : null;
+  if (!card?.title) return message;
+  const safe = { ...card, title: escapeSlackTitle(card.title) };
+  return isCardElement(message) ? safe : { ...(message as object), card: safe };
+}
+
+/** Pass every card title through escapeSlackTitle on its way to Slack. */
+export function escapeCardTitles(adapter: Pick<SlackAdapter, 'postMessage' | 'editMessage'>): void {
+  const postMessage = adapter.postMessage?.bind(adapter);
+  if (postMessage) adapter.postMessage = (threadId, message) => postMessage(threadId, withSafeTitle(message));
+  const editMessage = adapter.editMessage?.bind(adapter);
+  if (editMessage) {
+    adapter.editMessage = (threadId, messageId, message) => editMessage(threadId, messageId, withSafeTitle(message));
+  }
+}
+
 /** Construction knobs for one Slack bot identity. */
 export interface SlackBridgeOptions {
   /**
@@ -186,9 +233,12 @@ export function createSlackBridge(options: SlackBridgeOptions = {}): ChannelAdap
     mode: appToken ? 'socket' : 'webhook',
   });
   setSlackAuthorIsBotResolver(options.instanceKey ?? 'slack', (userId) => slackAuthorIsBot(slackAdapter, userId));
+  escapeCardTitles(slackAdapter);
   const bridge = createChatSdkBridge({
     adapter: slackAdapter,
     extractRawText: slackRawTextExtractor(slackAdapter),
+    // Spread, so an older core without this option still type-checks (and ignores it).
+    ...{ escapeCardText: escapeSlackMrkdwn },
     instance: options.instanceKey, // undefined ⇒ default instance (keyed by channelType)
     concurrency: 'concurrent',
     supportsThreads: true,

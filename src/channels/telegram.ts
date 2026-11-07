@@ -365,6 +365,28 @@ export interface TelegramBridgeOptions {
   instanceKey?: string;
 }
 
+/** A line shaped like a Markdown table's delimiter row (`|---|:-:|`), also in a quote or a list. */
+const TABLE_DELIMITER_ROW = /^([ \t>]*)(\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*)$/;
+
+/**
+ * The adapter draws a Markdown table as a padded text table, which can grow a
+ * card's text many times over (a 1,100-character table became 50,000), past
+ * any card limit. A look-alike for one hyphen in every line shaped like a
+ * delimiter row keeps the text and its length, but leaves no table to draw.
+ * Such a line in a code block, or a `---` rule or heading underline, shows the
+ * look-alike too.
+ */
+export function escapeTelegramCardText(text: string): string {
+  // Every line break Markdown knows (\r\n, \r, \n), each kept as it was.
+  return text
+    .split(/(\r\n?|\n)/)
+    .map((part, i) => {
+      const row = i % 2 === 0 ? TABLE_DELIMITER_ROW.exec(part) : null;
+      return row ? row[1] + row[2].replace('-', '\u2011') : part;
+    })
+    .join('');
+}
+
 /**
  * Build one Telegram bot identity's bridge from its token. The default bot is
  * the zero-suffix call (used by the registration below); named instances pass
@@ -404,6 +426,13 @@ export function createTelegramBridge(options: TelegramBridgeOptions = {}): Chann
     // front of the new one, downgraded **bold** to *single-star* — which the
     // adapter then parsed as emphasis and rendered as _italic_.
     maxTextLength: 4000,
+    // A card goes out as one MarkdownV2 message, cut past 4,096 with its
+    // buttons kept. Escaping at most doubles plain text (tables aside, see
+    // escapeTelegramCardText), so a longer card is refused; 2,000 is also the
+    // agent's own question cap. Text packed with links or email addresses grows
+    // more and can still be cut.
+    // Spread, so an older core without these options still type-checks (and ignores them).
+    ...{ escapeCardText: escapeTelegramCardText, maxCardTextLength: 2000 },
   });
 
   const botUsernamePromise = fetchBotUsername(token);
