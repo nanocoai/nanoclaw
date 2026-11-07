@@ -407,14 +407,15 @@ describe('lifecycle', () => {
 
     expect(cli.joined()).toContain('stop -t 1 ncl-spike-s1');
     expect(cli.joined()).toContain('rm --force ncl-spike-s1');
-    expect(cli.joined().some((call) => call.startsWith('ps -a'))).toBe(false);
+    expect(cli.joined().some((call) => call.startsWith('inspect --type container'))).toBe(false);
   });
 
   describe('removal racing Docker auto-removal', () => {
     const inProgress = new Error(
       'Error response from daemon: removal of container ncl-spike-s1 is already in progress',
     );
-    const probeCount = () => cli.joined().filter((call) => call.startsWith('ps -a')).length;
+    const noSuchContainer = new Error('Error response from daemon: No such container: ncl-spike-s1');
+    const probeCount = () => cli.joined().filter((call) => call.startsWith('inspect --type container')).length;
     const commandCount = (prefix: string) => cli.joined().filter((call) => call === prefix).length;
 
     beforeEach(() => {
@@ -429,8 +430,8 @@ describe('lifecycle', () => {
       await handle.start();
       cli.responses = [
         { match: /^rm /, throws: inProgress },
-        { match: /^ps -a/, output: 'ncl-spike-s1\n', once: true },
-        { match: /^ps -a/, output: '' },
+        { match: /^inspect --type container/, output: 'removing\n', once: true },
+        { match: /^inspect --type container/, throws: noSuchContainer },
       ];
 
       const stopped = handle.stop('sweep-kill');
@@ -445,15 +446,14 @@ describe('lifecycle', () => {
       await handle.start();
       cli.responses = [
         { match: /^rm /, throws: inProgress },
-        { match: /^ps -a/, output: 'ncl-spike-s1\n' },
+        { match: /^inspect --type container/, output: 'removing\n' },
       ];
 
       const stopped = handle.stop('sweep-kill');
       const assertion = expect(stopped).rejects.toMatchObject({ kind: 'unknown' });
-      await vi.advanceTimersByTimeAsync(10_000);
+      await vi.advanceTimersByTimeAsync(16_000);
 
       await assertion;
-      expect(probeCount()).toBe(10);
     });
 
     it('reports a daemon outage without polling', async () => {
@@ -462,7 +462,7 @@ describe('lifecycle', () => {
       cli.responses = [
         { match: /^rm /, throws: inProgress },
         {
-          match: /^ps -a/,
+          match: /^inspect --type container/,
           throws: 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?',
         },
       ];
@@ -480,8 +480,8 @@ describe('lifecycle', () => {
       await handle.start();
       cli.responses = [
         { match: /^rm /, throws: inProgress },
-        { match: /^ps -a/, output: 'ncl-spike-s1\n', once: true },
-        { match: /^ps -a/, output: '' },
+        { match: /^inspect --type container/, output: 'removing\n', once: true },
+        { match: /^inspect --type container/, throws: noSuchContainer },
       ];
 
       const first = handle.stop('sweep-kill');
@@ -498,20 +498,125 @@ describe('lifecycle', () => {
       await handle.start();
       cli.responses = [
         { match: /^rm /, throws: inProgress },
-        { match: /^ps -a/, output: 'ncl-spike-s1\n' },
+        { match: /^inspect --type container/, output: 'removing\n' },
       ];
 
       const failed = handle.stop('sweep-kill');
       const assertion = expect(failed).rejects.toMatchObject({ kind: 'unknown' });
-      await vi.advanceTimersByTimeAsync(10_000);
+      await vi.advanceTimersByTimeAsync(16_000);
       await assertion;
 
       cli.responses = [
         { match: /^rm /, throws: inProgress },
-        { match: /^ps -a/, output: '' },
+        { match: /^inspect --type container/, throws: noSuchContainer },
       ];
       await expect(handle.stop('sweep-kill')).resolves.toBeUndefined();
       expect(commandCount('rm --force ncl-spike-s1')).toBe(2);
+    });
+
+    it('probes once without sleeping when rm fails for another reason and the container still exists', async () => {
+      const handle = await driver().prepare(fixtureSpec());
+      await handle.start();
+      cli.responses = [
+        { match: /^rm /, throws: new Error('Error response from daemon: permission denied') },
+        { match: /^inspect --type container/, output: 'running\n' },
+      ];
+
+      await expect(handle.stop('sweep-kill')).rejects.toMatchObject({ kind: 'unknown' });
+      expect(probeCount()).toBe(1);
+    });
+
+    it('treats a failed rm as success when the container is already gone', async () => {
+      const handle = await driver().prepare(fixtureSpec());
+      await handle.start();
+      cli.responses = [
+        { match: /^rm /, throws: new Error('Error response from daemon: permission denied') },
+        { match: /^inspect --type container/, throws: new Error('Error: No such object: ncl-spike-s1') },
+      ];
+
+      await expect(handle.stop('sweep-kill')).resolves.toBeUndefined();
+      expect(cli.joined()).toContain('inspect --type container --format {{.State.Status}} ncl-spike-s1');
+    });
+
+    it('retries rm once the container stops reporting removing', async () => {
+      const handle = await driver().prepare(fixtureSpec());
+      await handle.start();
+      cli.responses = [
+        { match: /^rm /, throws: inProgress, once: true },
+        { match: /^inspect --type container/, output: 'removing\n', once: true },
+        { match: /^inspect --type container/, output: 'dead\n', once: true },
+      ];
+
+      const stopped = handle.stop('sweep-kill');
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      await expect(stopped).resolves.toBeUndefined();
+      expect(commandCount('rm --force ncl-spike-s1')).toBe(2);
+    });
+
+    it('waits through a long removal until the container disappears', async () => {
+      const handle = await driver().prepare(fixtureSpec());
+      await handle.start();
+      const startedAt = Date.now();
+      cli.responses = [
+        { match: /^rm /, throws: inProgress },
+        { match: /^inspect --type container/, output: 'removing\n' },
+      ];
+      let settled = false;
+      const stopped = handle.stop('sweep-kill');
+      stopped.then(
+        () => (settled = true),
+        () => (settled = true),
+      );
+
+      await vi.advanceTimersByTimeAsync(8_000);
+      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(8_000);
+      expect(settled).toBe(false);
+      cli.responses = [
+        { match: /^rm /, throws: inProgress },
+        { match: /^inspect --type container/, throws: noSuchContainer },
+      ];
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      await expect(stopped).resolves.toBeUndefined();
+    });
+
+    it('gives up at exactly the wait budget, not a delay later', async () => {
+      const handle = await driver().prepare(fixtureSpec());
+      await handle.start();
+      cli.responses = [
+        { match: /^rm /, throws: inProgress },
+        { match: /^inspect --type container/, output: 'removing\n' },
+      ];
+
+      let settled = false;
+      const stopped = handle.stop('sweep-kill');
+      const assertion = expect(stopped).rejects.toMatchObject({ kind: 'unknown' });
+      stopped.then(
+        () => (settled = true),
+        () => (settled = true),
+      );
+
+      await vi.advanceTimersByTimeAsync(14_999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toBe(true);
+      await assertion;
+    });
+
+    it('probes by exact container name, never by filter', async () => {
+      const handle = await driver().prepare(fixtureSpec());
+      await handle.start();
+      cli.responses = [
+        { match: /^rm /, throws: inProgress },
+        { match: /^inspect --type container/, throws: noSuchContainer },
+      ];
+
+      await handle.stop('sweep-kill');
+
+      const probe = cli.callMatching(/^inspect --type container/)!.args;
+      expect(probe.at(-1)).toBe('ncl-spike-s1');
+      expect(probe).not.toContain('--filter');
     });
   });
 
@@ -918,6 +1023,6 @@ it('refuses a session-container target without its auxiliary before creating con
 
 it('does not report successful teardown when the Docker daemon refuses removal', async () => {
   const handle = await driver().prepare(fixtureSpec());
-  cli.responses.unshift({ match: /^(stop|rm|ps) /, throws: new Error('Cannot connect to the Docker daemon') });
+  cli.responses.unshift({ match: /^(stop|rm|inspect) /, throws: new Error('Cannot connect to the Docker daemon') });
   await expect(handle.stop('shutdown')).rejects.toMatchObject({ kind: 'runtime-unavailable' });
 });

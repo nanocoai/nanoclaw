@@ -63,11 +63,14 @@ const WATCH_RECOVERY_BASE_MS = 1_000;
 const WATCH_RECOVERY_MAX_MS = 30_000;
 
 /**
- * `docker rm --force` is rejected while Docker's own `--rm` auto-removal is
- * still running; poll briefly for the container to disappear (see `#confirmRemoved`).
+ * Docker rejects `docker rm --force` while its own `--rm` auto-removal is still
+ * running ("removal of container X is already in progress"). Only that error
+ * is waited out: sleep between probes (budget below), then give up.
  */
-const REMOVAL_CONFIRM_ATTEMPTS = 10;
-const REMOVAL_CONFIRM_INTERVAL_MS = 200;
+const REMOVAL_IN_PROGRESS = /removal of container .+ is already in progress/i;
+const CONTAINER_NOT_FOUND = /No such (container|object)/i;
+const REMOVAL_WAIT_BUDGET_MS = 15_000;
+const REMOVAL_WAIT_INTERVALS_MS = [200, 400, 800, 1_000];
 
 interface InstallWatch {
   subscribers: Set<(event: SessionEvent) => void>;
@@ -630,7 +633,7 @@ class DockerHandle implements SessionHandle {
     try {
       this.cli.run(['rm', '--force', this.name]);
     } catch (error) {
-      await this.#confirmRemoved(this.name, error);
+      await this.#removeAfterFailure(this.name, error);
     }
     for (const auxiliary of [...this.auxiliaryNames].reverse()) {
       try {
@@ -641,7 +644,7 @@ class DockerHandle implements SessionHandle {
       try {
         this.cli.run(['rm', '--force', auxiliary]);
       } catch (error) {
-        await this.#confirmRemoved(auxiliary, error);
+        await this.#removeAfterFailure(auxiliary, error);
       }
     }
     if (this.privateNetwork) {
@@ -653,18 +656,45 @@ class DockerHandle implements SessionHandle {
     }
   }
 
-  /** Polls until an in-flight auto-removal finishes; a failing probe (daemon outage) throws at once. */
-  async #confirmRemoved(name: string, error: unknown): Promise<void> {
-    for (let attempt = 1; attempt <= REMOVAL_CONFIRM_ATTEMPTS; attempt++) {
-      try {
-        const remaining = this.cli.run(['ps', '-a', '--filter', `name=^/${name}$`, '--format', '{{.Names}}']);
-        if (!remaining.trim()) return;
-      } catch (probeError) {
-        throw normalizeDockerError(probeError);
+  /** Container status from an exact-name inspect; `null` when the container is gone. Other failures throw. */
+  #probeStatus(name: string): string | null {
+    try {
+      return this.cli.run(['inspect', '--type', 'container', '--format', '{{.State.Status}}', name]).trim();
+    } catch (probeError) {
+      if (CONTAINER_NOT_FOUND.test(errorMessage(probeError))) return null;
+      throw normalizeDockerError(probeError);
+    }
+  }
+
+  /**
+   * `rm --force` failed. Only Docker's "removal already in progress" error is
+   * waited out; anything else gets a single existence probe and no sleep.
+   */
+  async #removeAfterFailure(name: string, error: unknown): Promise<void> {
+    const message = errorMessage(error);
+    if (CONTAINER_NOT_FOUND.test(message)) return;
+    if (!REMOVAL_IN_PROGRESS.test(message)) {
+      if (this.#probeStatus(name) === null) return;
+      throw normalizeDockerError(error);
+    }
+    let waited = 0;
+    for (let step = 0; waited < REMOVAL_WAIT_BUDGET_MS; step++) {
+      const status = this.#probeStatus(name);
+      if (status === null) return;
+      if (status !== 'removing') {
+        try {
+          this.cli.run(['rm', '--force', name]);
+          return;
+        } catch (retryError) {
+          const retryMessage = errorMessage(retryError);
+          if (CONTAINER_NOT_FOUND.test(retryMessage)) return;
+          if (!REMOVAL_IN_PROGRESS.test(retryMessage)) throw normalizeDockerError(retryError);
+        }
       }
-      if (attempt < REMOVAL_CONFIRM_ATTEMPTS) {
-        await new Promise((resolve) => setTimeout(resolve, REMOVAL_CONFIRM_INTERVAL_MS));
-      }
+      const scheduledInterval = REMOVAL_WAIT_INTERVALS_MS[Math.min(step, REMOVAL_WAIT_INTERVALS_MS.length - 1)]!;
+      const interval = Math.min(scheduledInterval, REMOVAL_WAIT_BUDGET_MS - waited);
+      await new Promise((resolve) => setTimeout(resolve, interval));
+      waited += interval;
     }
     throw normalizeDockerError(error);
   }
@@ -881,6 +911,10 @@ export function envArgs(env: Record<string, string>): string[] {
 
 export function labelArgs(labels: Record<string, string>): string[] {
   return Object.entries(labels).flatMap(([k, v]) => ['--label', `${k}=${v}`]);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export function normalizeDockerError(error: unknown): Error & SessionFailure {
