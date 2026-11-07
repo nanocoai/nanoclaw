@@ -13,7 +13,7 @@ vi.mock('../env.js', () => ({
 import { gatewayApprovalPresentation } from '../gateway-approval-presentation.js';
 import type { GatewayApprovalRequest } from '../gateway-providers/gateway-provider-registry.js';
 import { CardTooLongError } from './ask-question.js';
-import { createTelegramBridge } from './telegram.js';
+import { createTelegramBridge, escapeTelegramCardText } from './telegram.js';
 
 const calls: Array<{ method: string; body: { text?: string; reply_markup?: { inline_keyboard: unknown[][] } } }> = [];
 
@@ -76,9 +76,37 @@ describe('Telegram card limit through the bridge', () => {
     expect(sends()).toHaveLength(0);
   });
 
+  // The adapter draws a table padded to its widest cell: this one would become 120,000 characters.
+  it('sends a card with a table whole, as text', async () => {
+    const table = '| a | b |\n|---|---|\n| ' + 'x'.repeat(600) + ' | y |\n' + '| 1 | 2 |\n'.repeat(130);
+    expect(table.length).toBeLessThan(1993);
+    await ask('Approve', table);
+    const [message] = sends();
+    expect(message.text!.length).toBeLessThanOrEqual(4096);
+    // Every row is there: nothing was cut.
+    expect(message.text!.match(/\| 1 \\\| 2 \\\|/g)).toHaveLength(130);
+    expect(message.reply_markup?.inline_keyboard.flat()).toHaveLength(2);
+  });
+
   it('refuses a long gateway card instead of cutting it', async () => {
     const { title, question } = longGatewayCard();
     await expect(ask(title, question)).rejects.toBeInstanceOf(CardTooLongError);
     expect(sends()).toHaveLength(0);
+  });
+});
+
+describe('escapeTelegramCardText', () => {
+  it('keeps the length and leaves no table row, in quotes and lists too', () => {
+    for (const row of ['|---|---|', '--- | :-:', '> | - |', '  |:--|']) {
+      const escaped = escapeTelegramCardText(`| a | b |\n${row}`);
+      expect(escaped.length).toBe(row.length + 10);
+      expect(escaped).toContain('\u2011');
+    }
+  });
+
+  it('leaves code blocks and other text alone', () => {
+    for (const text of ['```\n|---|---|\n```', '- item\n---', 'a - b | c', '|a|b|']) {
+      expect(escapeTelegramCardText(text)).toBe(text);
+    }
   });
 });
