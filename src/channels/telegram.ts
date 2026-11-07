@@ -10,8 +10,7 @@
  * 'telegram' either way: user ids, formatting, and container config are one
  * namespace across bots. See .claude/skills/telegram-multi-instance.
  */
-import { createTelegramAdapter, TelegramFormatConverter } from '@chat-adapter/telegram';
-import { cardChildToFallbackText, convertEmojiPlaceholders, type CardChild, type CardElement } from 'chat';
+import { createTelegramAdapter } from '@chat-adapter/telegram';
 
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
@@ -343,50 +342,6 @@ export function createTelegramInboundInterceptor(
 }
 
 /**
- * Telegram sends a whole card as one MarkdownV2 message, cut at 4,096
- * characters with any buttons kept. Escaping and link expansion can make that
- * text several times longer than the request, so a card is measured with the
- * adapter's own pipeline: its fallback text with a bold title, as MarkdownV2.
- * Telegram also rejects a button whose callback data passes 64 bytes.
- */
-const TELEGRAM_MESSAGE_LIMIT = 4096;
-const TELEGRAM_CALLBACK_DATA_BYTES = 64;
-const markdownV2 = new TelegramFormatConverter();
-
-// The adapter's callback data for a button: `chat:` + JSON of its id and value.
-const callbackDataBytes = (button: { id: string; value?: string }) =>
-  Buffer.byteLength(
-    `chat:${JSON.stringify({ a: button.id, ...(button.value === undefined ? {} : { v: button.value }) })}`,
-  );
-
-const buttonsOf = (children: CardChild[]): Array<{ id: string; value?: string }> =>
-  children.flatMap((child) =>
-    child.type === 'actions'
-      ? child.children.flatMap((action) => (action.type === 'button' ? [action] : []))
-      : child.type === 'section'
-        ? buttonsOf(child.children)
-        : [],
-  );
-
-// The adapter's fallback text for a child: chat's, plus dividers.
-const fallbackText = (child: CardChild): string | null =>
-  child.type === 'divider'
-    ? '---'
-    : child.type === 'section'
-      ? child.children.map(fallbackText).filter(Boolean).join('\n')
-      : cardChildToFallbackText(child);
-
-export function fitsTelegramMessage(card: CardElement): boolean {
-  const text = [card.title && `**${card.title}**`, card.subtitle, ...card.children.map(fallbackText)]
-    .filter(Boolean)
-    .join('\n');
-  return (
-    convertEmojiPlaceholders(markdownV2.fromMarkdown(text), 'gchat').length <= TELEGRAM_MESSAGE_LIMIT &&
-    buttonsOf(card.children).every((button) => callbackDataBytes(button) <= TELEGRAM_CALLBACK_DATA_BYTES)
-  );
-}
-
-/**
  * Bot id (the part of a token before ':') to the instance key that claimed
  * it. Telegram allows one getUpdates poller per bot (a second one gets 409
  * conflicts), so a name whose bot another instance already holds is skipped
@@ -449,8 +404,12 @@ export function createTelegramBridge(options: TelegramBridgeOptions = {}): Chann
     // front of the new one, downgraded **bold** to *single-star* — which the
     // adapter then parsed as emphasis and rendered as _italic_.
     maxTextLength: 4000,
+    // A card goes out as one MarkdownV2 message, cut past 4,096 with its
+    // buttons kept. Escaping at most doubles plain text, so a longer card is
+    // refused; 2,000 is also the agent's own question cap. Text packed with
+    // links or email addresses grows more and can still be cut.
     // Spread, so an older core without this option still type-checks (and ignores it).
-    ...{ cardFits: fitsTelegramMessage },
+    ...{ maxCardTextLength: 2000 },
   });
 
   const botUsernamePromise = fetchBotUsername(token);

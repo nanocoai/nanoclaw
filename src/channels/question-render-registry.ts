@@ -8,7 +8,6 @@
 import type { Adapter, ActionEvent } from 'chat';
 import { getAskQuestionRender } from '../db/sessions.js';
 import { log } from '../log.js';
-import type { ResponseOutcome } from '../response-registry.js';
 import type { NormalizedOption } from './ask-question.js';
 
 export interface QuestionRender {
@@ -23,24 +22,6 @@ export interface QuestionRender {
   renderTerminal?: (resolution: string) => Parameters<Adapter['postMessage']>[1];
   /** The coordinator updates the card only after it authorizes and records the decision. */
   deferResolution?: boolean;
-  /**
-   * What to show once the host answered a click on this card; undefined keeps
-   * the default (the decision on an accepted click, the refusal note on a
-   * refused one). A returned card is drawn as returned, whatever the outcome;
-   * privateNote goes only to the clicker, where the channel can.
-   */
-  afterClick?: (click: {
-    /** Undefined when the click named no option. */
-    outcome: ResponseOutcome | undefined;
-    selectedOption: string;
-    /** The clicker's platform user id, and display name ('' when unknown). */
-    userId: string;
-    actorName: string;
-    /** Where the click came from: the card's message, channel and thread, as the host saw them. */
-    messageId: string | undefined;
-    platformId: string | undefined;
-    threadId: string | null | undefined;
-  }) => Promise<{ card?: Parameters<Adapter['postMessage']>[1]; privateNote?: string } | undefined>;
 }
 
 export type QuestionRenderResolver = (

@@ -15,7 +15,7 @@
  * config, and the wiring-defaults declaration are shared across instances.
  */
 import { createSlackAdapter, type SlackAdapter } from '@chat-adapter/slack';
-import { convertEmojiPlaceholders, isCardElement, type AdapterPostableMessage, type CardElement } from 'chat';
+import { isCardElement, type AdapterPostableMessage } from 'chat';
 
 import { readEnvFile } from '../env.js';
 import type { ChannelAdapter, ChannelContextDefaults, ChannelDefaults } from './adapter.js';
@@ -164,17 +164,6 @@ export function escapeSlackTitle(title: string): string {
   return title.replace(/</g, '\uff1c');
 }
 
-/**
- * Slack's header holds 150 characters: older adapters send a longer one and
- * Slack rejects it, newer ones cut it with an ellipsis. So the title is
- * measured after the header's own emoji expansion, untrimmed; a longer one
- * moves into the card text under a fixed title.
- */
-export function fitsSlackHeader(card: CardElement): boolean {
-  if (!card.title) return true;
-  return convertEmojiPlaceholders(escapeSlackTitle(card.title), 'slack').length <= 150;
-}
-
 function withSafeTitle(message: AdapterPostableMessage): AdapterPostableMessage {
   const card = isCardElement(message)
     ? message
@@ -248,8 +237,8 @@ export function createSlackBridge(options: SlackBridgeOptions = {}): ChannelAdap
   const bridge = createChatSdkBridge({
     adapter: slackAdapter,
     extractRawText: slackRawTextExtractor(slackAdapter),
-    // Spread, so an older core without these options still type-checks (and ignores them).
-    ...{ escapeCardText: escapeSlackMrkdwn, cardFits: fitsSlackHeader },
+    // Spread, so an older core without this option still type-checks (and ignores it).
+    ...{ escapeCardText: escapeSlackMrkdwn },
     instance: options.instanceKey, // undefined ⇒ default instance (keyed by channelType)
     concurrency: 'concurrent',
     supportsThreads: true,

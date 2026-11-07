@@ -51,8 +51,6 @@ import { addMember } from './db/agent-group-members.js';
 import {
   deletePendingChannelApproval,
   getPendingChannelApproval,
-  restorePendingChannelApprovalCard,
-  setPendingChannelApprovalCardMessage,
   updatePendingChannelApprovalCard,
   type PendingChannelApproval,
 } from './db/pending-channel-approvals.js';
@@ -72,28 +70,6 @@ interface PendingNameInput {
   dmInstance: string;
 }
 const awaitingNameInput = new Map<string, PendingNameInput>();
-
-/**
- * One response at a time per registration (keyed by its messaging group), so a
- * name reply and a button click can't interleave and leave an agent unconnected.
- */
-const registrationTurns = new Map<string, Promise<unknown>>();
-
-/** A decided registration takes no name reply: its replayed message, or a late reply, routes normally. */
-function disarmNamePrompts(messagingGroupId: string): void {
-  for (const [user, prompt] of awaitingNameInput) {
-    if (prompt.channelMgId === messagingGroupId) awaitingNameInput.delete(user);
-  }
-}
-function onRegistration<T>(messagingGroupId: string, run: () => Promise<T>): Promise<T> {
-  const next = (registrationTurns.get(messagingGroupId) ?? Promise.resolve()).then(run);
-  const settled = next.catch(() => undefined);
-  registrationTurns.set(messagingGroupId, settled);
-  void settled.then(() => {
-    if (registrationTurns.get(messagingGroupId) === settled) registrationTurns.delete(messagingGroupId);
-  });
-  return next;
-}
 
 async function extractAndUpsertUser(event: InboundEvent): Promise<string | null> {
   let content: Record<string, unknown>;
@@ -375,8 +351,7 @@ setChannelRequestGate(async (mg, event) => {
 });
 
 /**
- * Wire an approved channel to an agent group; the caller then replays the stored
- * event with replayRegisteredMessage, outside the registration's turn.
+ * Wire an approved channel to an agent group and replay the stored event.
  * Shared by both approve paths (connect-existing button, free-text new-agent
  * name reply) so they produce identical wirings. Returns 'accepted' when this
  * call claimed the request and created the wiring, 'ignored' when another
@@ -403,7 +378,6 @@ async function wireApprovedChannel(
       err,
     });
     await deletePendingChannelApproval(row.messaging_group_id);
-    disarmNamePrompts(row.messaging_group_id);
     return 'closed';
   }
 
@@ -427,7 +401,6 @@ async function wireApprovedChannel(
       err,
     });
     await deletePendingChannelApproval(row.messaging_group_id);
-    disarmNamePrompts(row.messaging_group_id);
     return 'closed';
   }
 
@@ -463,7 +436,6 @@ async function wireApprovedChannel(
     return true;
   });
   if (!claimed) return 'ignored';
-  disarmNamePrompts(row.messaging_group_id);
   // Recorded: the card can show it while the message is replayed.
   accepted?.();
   log.info('Channel registration approved — wiring created', {
@@ -473,23 +445,16 @@ async function wireApprovedChannel(
     engageMode: engage.engage_mode,
     approverId,
   });
-  return 'accepted';
-}
 
-/**
- * Replays the message that asked for the channel, once it is wired. Callers run
- * it after the registration's turn: the replay can reach this registration's own
- * name prompt, which waits for that turn.
- */
-async function replayRegisteredMessage(row: PendingChannelApproval): Promise<void> {
   try {
-    await routeInbound(JSON.parse(row.original_message) as InboundEvent);
+    await routeInbound(event);
   } catch (err) {
     log.error('Failed to replay message after channel approval', {
       messagingGroupId: row.messaging_group_id,
       err,
     });
   }
+  return 'accepted';
 }
 
 /**
@@ -509,12 +474,6 @@ async function replayRegisteredMessage(row: PendingChannelApproval): Promise<voi
 async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<ResponseOutcome | false> {
   const row = await getPendingChannelApproval(payload.questionId);
   if (!row) return false;
-
-  // Only a click from the card the question lives on counts: after the agent
-  // choice, an old card or a copy of it must not resolve against the new options.
-  if (row.card_message_id != null && payload.messageId !== undefined && payload.messageId !== row.card_message_id) {
-    return 'ignored';
-  }
 
   // Click authorization is the guard's channels.register decision (./guard.ts):
   // the delivered approver, or an admin of the pending row's anchor agent group.
@@ -540,16 +499,12 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
 
   // ── Reject / Cancel ──
   if (payload.value === REJECT_VALUE) {
-    // Claimed like a connect, in the registration's turn: of a racing Reject, connect
-    // or name reply, only one decides.
-    const claimed = await onRegistration(row.messaging_group_id, () =>
-      getDb().transaction(async () => {
-        if (!(await deletePendingChannelApproval(row.messaging_group_id))) return false;
-        await setMessagingGroupDeniedAt(row.messaging_group_id, new Date().toISOString());
-        return true;
-      }),
-    );
-    if (claimed) disarmNamePrompts(row.messaging_group_id);
+    // Claimed like a connect: of a racing Reject and connect, only one decides.
+    const claimed = await getDb().transaction(async () => {
+      if (!(await deletePendingChannelApproval(row.messaging_group_id))) return false;
+      await setMessagingGroupDeniedAt(row.messaging_group_id, new Date().toISOString());
+      return true;
+    });
     if (!claimed) return 'ignored';
     log.info('Channel registration denied', {
       messagingGroupId: row.messaging_group_id,
@@ -582,7 +537,7 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
     await updatePendingChannelApprovalCard(row.messaging_group_id, title, question, JSON.stringify(options));
 
     try {
-      const cardId = await adapter.deliver(
+      await adapter.deliver(
         approverDm.channel_type,
         approverDm.platform_id,
         null,
@@ -597,19 +552,11 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
         undefined,
         approverDm.instance,
       );
-      // An unidentified card counts as a failed delivery, unless this channel names
-      // no cards (the first had no id either): then it stays unchecked, as before.
-      if (!cardId && row.card_message_id != null) throw new Error('the agent-choice card was not identified');
-      await setPendingChannelApprovalCardMessage(row.messaging_group_id, cardId ?? null, '');
     } catch (err) {
       log.error('Channel registration: agent-selection card delivery failed', {
         messagingGroupId: row.messaging_group_id,
         err,
       });
-      // The first card keeps its buttons and their meaning; a choice card that did
-      // arrive (a lost response) isn't the live card, so its clicks are ignored.
-      await restorePendingChannelApprovalCard(row);
-      return 'ignored';
     }
     return 'accepted';
   }
@@ -641,14 +588,7 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
       dmPlatformId: approverDm.platform_id,
       dmInstance: approverDm.instance ?? approverDm.channel_type,
     };
-    // Armed in the registration's turn and only while it is undecided: a Connect or
-    // Reject that finished meanwhile must not leave a prompt that swallows a later DM.
-    const armed = await onRegistration(row.messaging_group_id, async () => {
-      if (!(await getPendingChannelApproval(row.messaging_group_id))) return false;
-      awaitingNameInput.set(row.approver_user_id, prompt);
-      return true;
-    });
-    if (!armed) return 'ignored';
+    awaitingNameInput.set(row.approver_user_id, prompt);
 
     try {
       await adapter.deliver(
@@ -683,12 +623,7 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
         messagingGroupId: row.messaging_group_id,
         targetAgentGroupId,
       });
-      // In the registration's turn, like every removal: a name reply may be creating meanwhile.
-      const removed = await onRegistration(row.messaging_group_id, () =>
-        deletePendingChannelApproval(row.messaging_group_id),
-      );
-      if (removed) disarmNamePrompts(row.messaging_group_id);
-      return removed ? 'closed' : 'ignored';
+      return (await deletePendingChannelApproval(row.messaging_group_id)) ? 'closed' : 'ignored';
     }
     if (!(await hasAdminPrivilege(approverId, targetAgentGroupId))) {
       log.warn('Channel registration: target agent group rejected for unauthorized approver', {
@@ -707,12 +642,7 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
   }
 
   // ── Wire + replay (shared path for connect and create) ──
-  // A failed wiring drops the row (closed); another choice may have won (ignored).
-  const wired = await onRegistration(row.messaging_group_id, () =>
-    wireApprovedChannel(row, targetAgentGroupId, approverId, payload.accepted),
-  );
-  if (wired === 'accepted') await replayRegisteredMessage(row);
-  return wired;
+  return wireApprovedChannel(row, targetAgentGroupId, approverId, payload.accepted);
 }
 
 registerResponseHandler(handleChannelApprovalResponse);
@@ -745,38 +675,11 @@ registerMessageInterceptor(async (event: InboundEvent): Promise<boolean> => {
     return true;
   }
 
-  return createFromNameReply(event, userId, pending, text);
-});
+  const row = await getPendingChannelApproval(pending.channelMgId);
+  if (!row) return true;
 
-/**
- * The name reply's work. Reading the row, creating the agent and wiring run in the
- * registration's turn, so a button click can't connect or reject it in between;
- * the replies to the approver go out after the turn.
- */
-async function createFromNameReply(
-  event: InboundEvent,
-  userId: string,
-  pending: PendingNameInput,
-  text: string,
-): Promise<boolean> {
-  const turn = await onRegistration(pending.channelMgId, async () => {
-    const row = await getPendingChannelApproval(pending.channelMgId);
-    if (!row) return undefined;
-    const created = await createNewAgentGroup(text);
-    if (typeof created === 'string') return { row, refused: created };
-    log.info('Channel registration: new agent group created', {
-      messagingGroupId: row.messaging_group_id,
-      agentGroupId: created.id,
-      agentName: created.name,
-      folder: created.folder,
-    });
-    return { row, ag: created, wired: await wireApprovedChannel(row, created.id, userId) };
-  });
-  if (turn && 'wired' in turn && turn.wired === 'accepted') await replayRegisteredMessage(turn.row);
-  if (!turn) return true;
-  const { row } = turn;
-
-  if ('refused' in turn) {
+  const created = await createNewAgentGroup(text);
+  if (typeof created === 'string') {
     const adapter = getDeliveryAdapter();
     if (!adapter) return true;
     // Nothing was written; re-arm so the approver's next reply is the name, unless they opened
@@ -790,7 +693,7 @@ async function createFromNameReply(
         null,
         'chat-sdk',
         JSON.stringify({
-          text: `⚠️ Cannot create agent "${text}": ${turn.refused}. Nothing was created.${rearmed ? ' Reply with another name:' : ''}`,
+          text: `⚠️ Cannot create agent "${text}": ${created}. Nothing was created.${rearmed ? ' Reply with another name:' : ''}`,
         }),
         undefined,
         event.instance,
@@ -805,7 +708,15 @@ async function createFromNameReply(
     }
     return true;
   }
-  const { ag, wired } = turn;
+  const ag = created;
+  log.info('Channel registration: new agent group created', {
+    messagingGroupId: row.messaging_group_id,
+    agentGroupId: ag.id,
+    agentName: ag.name,
+    folder: ag.folder,
+  });
+
+  const wired = await wireApprovedChannel(row, ag.id, userId);
 
   const adapter = getDeliveryAdapter();
   if (adapter) {
@@ -819,9 +730,7 @@ async function createFromNameReply(
           text:
             wired === 'accepted'
               ? `✅ Agent "${ag.name}" created and connected.`
-              : wired === 'ignored'
-                ? `⚠️ Agent "${ag.name}" was created, but this channel's request was answered or removed meanwhile, so it isn't connected.`
-                : `⚠️ Agent "${ag.name}" was created but the channel couldn't be connected — check the host logs.`,
+              : `⚠️ Agent "${ag.name}" was created but the channel couldn't be connected — check the host logs.`,
         }),
         undefined,
         event.instance,
@@ -829,4 +738,4 @@ async function createFromNameReply(
       .catch(() => {});
   }
   return true;
-}
+});

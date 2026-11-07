@@ -58,11 +58,7 @@ import { log } from '../../log.js';
 import type { InboundEvent, ResolvedConversation } from '../../channels/adapter.js';
 import type { AgentGroup, MessagingGroup } from '../../types.js';
 import { pickApprovalDelivery, pickApprover } from '../approvals/primitive.js';
-import {
-  createPendingChannelApproval,
-  hasInFlightChannelApproval,
-  setPendingChannelApprovalCardMessage,
-} from './db/pending-channel-approvals.js';
+import { createPendingChannelApproval, hasInFlightChannelApproval } from './db/pending-channel-approvals.js';
 import { hasAdminPrivilege } from './db/user-roles.js';
 
 // ── Value constants (response handler in index.ts parses these) ──
@@ -369,7 +365,7 @@ export async function requestChannelApproval(input: RequestChannelApprovalInput)
   }
 
   try {
-    const cardId = await adapter.deliver(
+    await adapter.deliver(
       delivery.messagingGroup.channel_type,
       delivery.messagingGroup.platform_id,
       null,
@@ -384,9 +380,6 @@ export async function requestChannelApproval(input: RequestChannelApprovalInput)
       undefined,
       delivery.messagingGroup.instance,
     );
-    if (cardId) {
-      await setPendingChannelApprovalCardMessage(messagingGroupId, cardId, { first: JSON.stringify(options) });
-    }
     log.info('Channel registration card delivered', {
       messagingGroupId,
       agentGroupCount: agentGroups.length,

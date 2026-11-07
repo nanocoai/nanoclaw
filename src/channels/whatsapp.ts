@@ -119,16 +119,12 @@ type PendingQuestion = { questionId: string; options: NormalizedOption[] };
  * of any age, and one from before click outcomes returns nothing (undefined).
  */
 type AnswerOutcome = 'accepted' | 'refused' | 'closed' | 'ignored' | undefined;
-/** Per question, the answer with the host right now: a later answer waits for it. */
-const answering = new WeakMap<PendingQuestion, Promise<unknown>>();
 
 /**
- * Answers a pending question from a "/option" reply. The host decides: the chat
- * hears the answer only once it is accepted; a refused one, or one that decided
- * nothing, keeps the question open (WhatsApp has no private reply, so nothing is
- * posted). One answer at a time: a later reply waits for the earlier one and
- * counts only if the question is still open (so an approver's answer after a
- * refused one still counts). Undefined when the text answers no pending question.
+ * Answers a pending question from a "/option" reply. The host decides, once: the
+ * chat hears the answer only once it is accepted. A refused answer, or one that
+ * decided nothing, keeps the question open (WhatsApp has no private reply, so
+ * nothing is posted). Undefined when the text answers no pending question.
  */
 export async function answerPendingQuestion(
   pendingQuestions: Map<string, PendingQuestion>,
@@ -143,23 +139,15 @@ export async function answerPendingQuestion(
   const cmd = text.trim().toLowerCase();
   const matched = pending.options.find((o) => optionToCommand(o.label) === cmd);
   if (!matched) return undefined;
-  const turn = (answering.get(pending) ?? Promise.resolve()).then(async () => {
-    // Closed by the answer before this one: swallowed, not sent to the agent.
-    if (pendingQuestions.get(chatJid) !== pending) return undefined;
-    const result: unknown = await onAction(pending.questionId, matched.value, sender);
-    const outcome = typeof result === 'string' ? (result as AnswerOutcome) : undefined;
-    // A core from before click outcomes returns nothing: answered as before.
-    const shown = outcome ?? 'accepted';
-    const closes = shown === 'accepted' || shown === 'closed';
-    if (closes && pendingQuestions.get(chatJid) === pending) pendingQuestions.delete(chatJid);
-    if (shown === 'accepted') await confirm(matched);
-    return outcome;
-  });
-  answering.set(
-    pending,
-    turn.catch(() => undefined),
-  );
-  return { questionId: pending.questionId, value: matched.value, outcome: await turn };
+  const result: unknown = await onAction(pending.questionId, matched.value, sender);
+  const outcome = typeof result === 'string' ? (result as AnswerOutcome) : undefined;
+  // A core from before click outcomes returns nothing: answered as before.
+  const shown = outcome ?? 'accepted';
+  // 'ignored' can mean the question is still pending, so only these close it.
+  const closes = shown === 'accepted' || shown === 'closed';
+  if (closes && pendingQuestions.get(chatJid) === pending) pendingQuestions.delete(chatJid);
+  if (shown === 'accepted') await confirm(matched);
+  return { questionId: pending.questionId, value: matched.value, outcome };
 }
 
 // --- Markdown → WhatsApp formatting ---

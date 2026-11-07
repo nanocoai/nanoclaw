@@ -119,44 +119,31 @@ describe('answerPendingQuestion', () => {
     expect(questions.get('chat@g.us')).toBe(newer);
   });
 
-  it('queues a second answer behind the first: after a refusal it still counts', async () => {
+  it('two answers at once both reach the host, which decides once: only the accepted one is confirmed', async () => {
     const questions = fresh();
-    let decideFirst!: (outcome: 'accepted' | 'refused') => void;
-    const onAction = vi
-      .fn()
-      .mockImplementationOnce(() => new Promise<'accepted' | 'refused'>((resolve) => (decideFirst = resolve)))
-      .mockResolvedValueOnce('accepted');
+    const onAction = vi.fn().mockResolvedValueOnce('accepted').mockResolvedValueOnce('ignored');
     const confirm = vi.fn(async () => undefined);
-    const first = answerPendingQuestion(
-      questions,
-      'chat@g.us',
-      '/approve',
-      'bystander@s.whatsapp.net',
-      onAction,
-      confirm,
-    );
-    const second = answerPendingQuestion(questions, 'chat@g.us', '/approve', 'owner@s.whatsapp.net', onAction, confirm);
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    // The second waits for the host's answer to the first.
-    expect(onAction).toHaveBeenCalledTimes(1);
-    decideFirst('refused');
-    expect((await first)?.outcome).toBe('refused');
-    expect((await second)?.outcome).toBe('accepted');
-    expect(onAction.mock.calls.map((call) => call[2])).toEqual(['bystander@s.whatsapp.net', 'owner@s.whatsapp.net']);
+    const [first, second] = await Promise.all([
+      answerPendingQuestion(questions, 'chat@g.us', '/approve', 'a@s.whatsapp.net', onAction, confirm),
+      answerPendingQuestion(questions, 'chat@g.us', '/approve', 'b@s.whatsapp.net', onAction, confirm),
+    ]);
+    // Both are answers, so neither goes on to the agent.
+    expect([first?.outcome, second?.outcome]).toEqual(['accepted', 'ignored']);
     expect(confirm).toHaveBeenCalledTimes(1);
     expect(questions.has('chat@g.us')).toBe(false);
   });
 
-  it('a queued answer to a question the first answer closed is swallowed, not sent to the agent', async () => {
+  it("an approver's answer at the same time as a refused one still counts", async () => {
     const questions = fresh();
-    const onAction = vi.fn(async () => 'accepted' as const);
+    const onAction = vi.fn().mockResolvedValueOnce('refused').mockResolvedValueOnce('accepted');
+    const confirm = vi.fn(async () => undefined);
     const [first, second] = await Promise.all([
-      answerPendingQuestion(questions, 'chat@g.us', '/approve', 'a@s.whatsapp.net', onAction, vi.fn()),
-      answerPendingQuestion(questions, 'chat@g.us', '/approve', 'b@s.whatsapp.net', onAction, vi.fn()),
+      answerPendingQuestion(questions, 'chat@g.us', '/approve', 'bystander@s.whatsapp.net', onAction, confirm),
+      answerPendingQuestion(questions, 'chat@g.us', '/approve', 'owner@s.whatsapp.net', onAction, confirm),
     ]);
-    expect(first?.outcome).toBe('accepted');
-    expect(second).toEqual({ questionId: 'q1', value: 'approve', outcome: undefined });
-    expect(onAction).toHaveBeenCalledTimes(1);
+    expect([first?.outcome, second?.outcome]).toEqual(['refused', 'accepted']);
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(questions.has('chat@g.us')).toBe(false);
   });
 
   it('confirms and closes the question when the host returns nothing (a core from before click outcomes)', async () => {

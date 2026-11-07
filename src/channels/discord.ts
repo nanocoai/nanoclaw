@@ -2,8 +2,7 @@
  * Discord channel adapter (v2) — uses Chat SDK bridge.
  * Self-registers on import.
  */
-import { cardToDiscordPayload, createDiscordAdapter } from '@chat-adapter/discord';
-import type { CardElement } from 'chat';
+import { createDiscordAdapter } from '@chat-adapter/discord';
 
 import { readEnvFile } from '../env.js';
 import type { ChannelDefaults } from './adapter.js';
@@ -21,23 +20,6 @@ const DISCORD_DEFAULTS: ChannelDefaults = {
   group: { engageMode: 'mention-sticky', threads: true, unknownSenderPolicy: 'request_approval' },
   mentions: 'platform',
 };
-
-/**
- * Discord shows a card as one embed and rejects a title over 256 characters, a
- * description over 4,096, more than 5 rows of buttons or a button label over
- * 80, so a card is measured with the adapter's own embed builder.
- */
-export function fitsDiscordEmbed(card: CardElement): boolean {
-  const { embeds, components } = cardToDiscordPayload(card);
-  const [embed] = embeds;
-  const labels = components.flatMap((row) => row.components.map((c) => ('label' in c ? (c.label ?? '') : '')));
-  return (
-    (embed?.title?.length ?? 0) <= 256 &&
-    (embed?.description?.length ?? 0) <= 4096 &&
-    components.length <= 5 &&
-    labels.every((label) => label.length <= 80)
-  );
-}
 
 /**
  * Discord renders card text as Markdown: `[text](url)` shows any text for a
@@ -107,8 +89,10 @@ export function unwrapForwards(adapter: ReturnType<typeof createDiscordAdapter>)
  */
 export function clearButtonsOnCardEdits(adapter: ReturnType<typeof createDiscordAdapter>): void {
   const a = adapter as unknown as {
-    discordFetch: (path: string, method: string, body?: unknown) => Promise<Response>;
+    discordFetch?: (path: string, method: string, body?: unknown) => Promise<Response>;
   };
+  // An adapter version without this internal keeps its own behaviour.
+  if (typeof a.discordFetch !== 'function') return;
   const discordFetch = a.discordFetch.bind(adapter);
   a.discordFetch = (path, method, body) => {
     const cardEdit =
@@ -143,8 +127,11 @@ registerChannelAdapter('discord', {
       // Discord rejects messages over 2000 chars; without this the bridge
       // would let long agent replies fail instead of splitting them.
       maxTextLength: 2000,
+      // A card is one embed, whose description Discord caps at 4,096. The
+      // limit counts the title and escaped text, and the embed adds only a
+      // blank line between blocks, so a longer card is refused, never cut.
       // Spread, so an older core without these options still type-checks (and ignores them).
-      ...{ escapeCardText: escapeDiscordCardText, cardFits: fitsDiscordEmbed },
+      ...{ escapeCardText: escapeDiscordCardText, maxCardTextLength: 4000 },
     });
   },
   defaults: DISCORD_DEFAULTS,

@@ -1,6 +1,7 @@
 /**
  * Answers to an agent's question (ask_user_question): only one answer reaches
- * the agent, and it is reported accepted before the agent is woken.
+ * the agent, a failed write leaves the question open, and the answer is
+ * reported accepted before the agent is woken.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -12,7 +13,7 @@ vi.mock('../../session-manager.js', async () => ({
 
 import { wakeContainer } from '../../container-runner.js';
 import { closeDb, createAgentGroup, initTestDb, runMigrations } from '../../db/index.js';
-import { createPendingQuestion, createSession } from '../../db/sessions.js';
+import { createPendingQuestion, createSession, getPendingQuestion } from '../../db/sessions.js';
 import { dispatchResponse } from '../../response-registry.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import './index.js';
@@ -61,14 +62,16 @@ describe('question answers', () => {
     const outcomes = await Promise.all([answer('a'), answer('b')]);
     expect([...outcomes].sort()).toEqual(['accepted', 'ignored']);
     expect(writeSessionMessage).toHaveBeenCalledTimes(1);
+    expect(await getPendingQuestion('q-1')).toBeUndefined();
   });
 
-  it('closes a question whose answer could not be written, without bringing it back for a second answer', async () => {
-    vi.mocked(writeSessionMessage).mockRejectedValueOnce(new Error('SQLITE_BUSY'));
-    // The write may have half-committed: the question isn't revived, so no second answer can follow.
-    expect(await answer('a')).toBe('closed');
-    expect(await answer('b')).toBe('ignored');
-    expect(writeSessionMessage).toHaveBeenCalledTimes(1);
+  it('keeps the question open when its answer could not be written, so a second click answers it', async () => {
+    vi.mocked(writeSessionMessage).mockRejectedValueOnce(new Error('SQLITE_BUSY: database is locked'));
+    expect(await answer('a')).toBe('ignored');
+    expect(await getPendingQuestion('q-1')).toBeDefined();
+    expect(await answer('b')).toBe('accepted');
+    expect(writeSessionMessage).toHaveBeenCalledTimes(2);
+    expect(await getPendingQuestion('q-1')).toBeUndefined();
   });
 
   it('reports the answer accepted before the agent is woken', async () => {

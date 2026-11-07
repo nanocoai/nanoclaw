@@ -17,6 +17,9 @@ import { registerResponseHandler, type ResponseOutcome, type ResponsePayload } f
 import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
 
+/** Questions whose answer is being written: of two clicks, only the first answers. */
+const answering = new Set<string>();
+
 async function handleInteractiveResponse(payload: ResponsePayload): Promise<ResponseOutcome | false> {
   if (!(await hasTable(getDb(), 'pending_questions'))) return false;
 
@@ -30,8 +33,10 @@ async function handleInteractiveResponse(payload: ResponsePayload): Promise<Resp
     return 'closed'; // ours, but the session that asked is gone
   }
 
-  // Deleting the row claims the answer: of two answers, only one reaches the agent.
-  if (!(await deletePendingQuestion(payload.questionId))) return 'ignored';
+  // Claimed here, and the row deleted only once the answer is written: a write
+  // that fails (the mailbox busy) leaves the question open to answer again.
+  if (answering.has(payload.questionId)) return 'ignored';
+  answering.add(payload.questionId);
   try {
     await writeSessionMessage(session.agent_group_id, session.id, {
       id: `qr-${payload.questionId}-${Date.now()}`,
@@ -47,16 +52,16 @@ async function handleInteractiveResponse(payload: ResponsePayload): Promise<Resp
         userId: payload.userId ?? '',
       }),
     });
-    // eslint-disable-next-line no-catch-all/no-catch-all -- logged; the question is closed either way
+    // eslint-disable-next-line no-catch-all/no-catch-all -- logged; the card keeps its buttons for another try
   } catch (err) {
-    // The write may have half-committed, so the question isn't brought back for a
-    // second answer: it is closed, and the lost answer logged.
+    answering.delete(payload.questionId);
     log.error('Question answer could not be written to the agent', { questionId: payload.questionId, err });
-    return 'closed';
+    return 'ignored';
   }
-  // Delivered: the card can show the answer while the agent wakes.
+  // Written: the card can show the answer. The claim stays until the row is gone.
   payload.accepted?.();
-
+  await deletePendingQuestion(payload.questionId);
+  answering.delete(payload.questionId);
   log.info('Question response routed', {
     questionId: payload.questionId,
     selectedOption: payload.value,
