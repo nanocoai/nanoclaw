@@ -144,6 +144,8 @@ const RETRY_BASE_MS = 60_000;
 const RETRY_MAX_MS = 60 * 60_000;
 /** IMAP keyword left on a mail the adapter gave up on, so a human can find it. */
 const FAILED_KEYWORD = '$NanoClawFailed';
+/** Mailing-list mail: left unread for a human, tagged, never read by an agent. */
+const LIST_KEYWORD = '$NanoClawList';
 
 /**
  * Whether core's startup has finished. The host holds routing until then
@@ -882,13 +884,19 @@ const SIGNATURE_START =
 /**
  * Subject prefixes mail clients add when forwarding, across common locales:
  * FW/Fwd, German WG, French TR, Swedish VB, Finnish VL, Spanish RV,
- * Portuguese ENC, Dutch Doorst, Italian I. Not VS: it is the Finnish reply
+ * Portuguese ENC, Dutch Doorst. Not Italian I:, which would take any
+ * subject starting "I:" for a forward and keep its quoted history. Not VS: it is the Finnish reply
  * prefix as well as the Danish and Norwegian forward one, and a reply taken
  * for a forward keeps its quoted history (core's emailed questions would get
  * the whole thread as the answer). A forward with a "Forwarded message" line
  * is kept whatever its subject.
  */
-const FORWARD_SUBJECT = /^(fw|fwd|wg|tr|vb|vl|rv|enc|doorst|i)\s*:/i;
+const FORWARD_PREFIXES = 'fw|fwd|wg|tr|vb|vl|rv|enc|doorst';
+const FORWARD_SUBJECT = new RegExp(`^(${FORWARD_PREFIXES})\\s*:`, 'i');
+/** Reply prefixes in common locales (VS: is a reply in Finnish, a forward in Danish and Norwegian). */
+const REPLY_PREFIXES = 're|aw|sv|antw|ref|vs';
+/** Any reply or forward prefix, for subjectStem: `Fwd: X`, `TR: X` and `VS: X` all stem to X. */
+const SUBJECT_PREFIX = new RegExp(`^(${REPLY_PREFIXES}|${FORWARD_PREFIXES})\\s*:\\s*`, 'i');
 /** Gmail's and Proton's inline-forward line, and Apple Mail's. */
 const FORWARD_MARKER = /^(-{2,}\s*Forwarded message\s*-{2,}|Begin forwarded message:)$/i;
 const ORIGINAL_MESSAGE = /^-{2,}\s*Original Message\s*-{2,}$/i;
@@ -980,7 +988,7 @@ export function subjectStem(subject: string | undefined): string {
   let s = (subject ?? '').trim();
   for (let prev = ''; prev !== s; ) {
     prev = s;
-    s = s.replace(/^(re|aw|sv|antw|ref|fwd?|wg)\s*:\s*/i, '');
+    s = s.replace(SUBJECT_PREFIX, '');
   }
   return s.toLowerCase();
 }
@@ -2114,6 +2122,11 @@ registerChannelAdapter('proton-mail', {
 
     /** Null when this mail fits the sender's hour (and is counted); else when the hour has room again. */
     function senderRateFreeAt(addr: string, now = Date.now()): number | null {
+      // Senders with nothing in the last hour are dropped, so the map holds
+      // only the hour's senders however many have written over time.
+      for (const [a, times] of recentBySender) {
+        if (times.every((t) => now - t >= HOUR_MS)) recentBySender.delete(a);
+      }
       const recent = (recentBySender.get(addr) ?? []).filter((t) => now - t < HOUR_MS);
       recentBySender.set(addr, recent);
       if (recent.length >= INBOUND_PER_SENDER_PER_HOUR) return Math.min(...recent) + HOUR_MS;
@@ -2274,9 +2287,13 @@ registerChannelAdapter('proton-mail', {
         listPost: rawHeaderValues(head, 'list-post')[0],
         precedence: headerString(head, 'precedence'),
       });
+      // Left unread and tagged, not marked read: list headers can be
+      // forged as easily as anything else, so a mail carrying them must
+      // stay where a human will see it.
       if (list) {
-        log.debug('Proton Mail inbound skipped', { uid, reason: 'mailing list', list, from: fromAddr });
-        return 'done';
+        log.info('Proton Mail: mailing-list mail left unread', { uid, list, from: fromAddr, keyword: LIST_KEYWORD });
+        await flag(uid, [LIST_KEYWORD]);
+        return 'leave-unread';
       }
 
       const skip = shouldSkipInbound({
@@ -2836,7 +2853,7 @@ registerChannelAdapter('proton-mail', {
             startWarnTimer = undefined;
             if (!accepting && !shuttingDown)
               log.error(
-                'Proton Mail: the host has not started this adapter (onHostStart never ran) — no mail is read',
+                'Proton Mail: the host has not yet started this adapter (no onHostStart after 5 minutes) — no mail is read until it does; still waiting',
                 {
                   waitedMs: HOST_START_WARN_MS,
                 },

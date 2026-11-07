@@ -40,6 +40,10 @@ const h = vi.hoisted(() => ({
   stalled: [] as any[],
   /** Callbacks given to core's onHostStart, run by firstPoll() as the host would after releasing inbound. */
   hostStart: [] as Array<(ctx: unknown) => unknown>,
+  /** Each address looked up with core (getMessagingGroupByPlatform), in order. */
+  lookups: [] as string[],
+  /** When set, every IMAP connect waits for it: a server slow to answer. */
+  connectGate: undefined as undefined | Promise<void>,
 }));
 
 vi.mock('../host-lifecycle.js', async (importOriginal) => ({
@@ -79,6 +83,7 @@ vi.mock('../env.js', () => ({ readEnvFile: () => h.env }));
 vi.mock('./question-render-registry.js', () => ({ resolveQuestionRender: async () => h.render }));
 vi.mock('../db/messaging-groups.js', () => ({
   getMessagingGroupByPlatform: async (_channel: string, addr: string) => {
+    h.lookups.push(addr);
     const s = h.settled[addr];
     if (s === 'denied') return { id: `mg:${addr}`, denied_at: '2026-11-01T00:00:00.000Z' };
     if (s === 'approved') return { id: `mg:${addr}`, denied_at: null };
@@ -107,6 +112,10 @@ vi.mock('imapflow', async () => {
     ImapFlow: class extends FakeImapClient {
       constructor(opts: any) {
         super(h.server, opts);
+      }
+      async connect() {
+        if (h.connectGate) await h.connectGate;
+        return super.connect();
       }
     },
   };
@@ -272,6 +281,8 @@ beforeEach(() => {
   h.stall = { html: 0, parse: 0 };
   h.stalled = [];
   h.hostStart = [];
+  h.lookups = [];
+  h.connectGate = undefined;
   // The adapter's timers and clock are faked (Date for the hourly rate
   // window); the tick() waits use the real setTimeout, captured above, and
   // the mail workers run on real time.
@@ -1250,7 +1261,7 @@ describe('loops and the hourly limit (fake IMAP server, faked clock)', () => {
     expect(flagged().filter(([u]) => u > last)).toHaveLength(end - last);
   }, 90_000); // 36 mails, each parsed in a worker thread
 
-  it('mailing-list mail (List-Id, List-Post, Precedence: list) is skipped and marked read; List-Unsubscribe alone is not a list', async () => {
+  it('mailing-list mail (List-Id, List-Post, Precedence: list) is left unread and tagged; List-Unsubscribe alone is not a list', async () => {
     const { calls } = await start();
     const uids = await arriveAll([
       mail({ body: 'post 1', extra: ['List-Id: Staff <staff.example.org>'] }),
@@ -1263,7 +1274,9 @@ describe('loops and the hourly limit (fake IMAP server, faked clock)', () => {
     expect(uids).toBe(5);
     // Only the order mail (List-Unsubscribe alone) reaches the agent.
     expect(calls.inbound.map((m) => m.content.text)).toEqual(['order']);
-    expect(flagged()).toEqual([1, 2, 3, 4, 5].map((u) => [u, ['\\Seen']]));
+    // List headers are as easy to forge as anything: such mail stays unread,
+    // tagged, where a human will see it — never marked read silently.
+    expect(flagged()).toEqual([...[1, 2, 3, 4].map((u) => [u, ['$NanoClawList']]), [5, ['\\Seen']]]);
     expect(h.sent).toEqual([]);
   });
 
@@ -2231,7 +2244,130 @@ describe('review 4 of #4218', () => {
     });
   });
 
+  describe('subject prefixes', () => {
+    it('TR: on a thread is a forward of it like Fwd:, so its subject is not shown again', async () => {
+      const { adapter, calls, arrive } = await start();
+      await arrive(mail({ subject: 'Planning', body: 'first' }));
+      await adapter.deliver(OWNER, null, { kind: 'chat', content: { text: 'noted' } });
+      await arrive(mail({ subject: 'TR: Planning', body: 'see below' }));
+      await arrive(mail({ subject: 'VS: Planning', body: 'kyllä' }));
+      expect(calls.inbound[1].content.text).not.toContain('Subject:');
+      expect(calls.inbound[2].content.text).not.toContain('Subject:');
+    });
+
+    it('a subject starting "I:" is not a forward: its quoted history is cut', async () => {
+      const { calls, arrive } = await start();
+      const body = ['Agreed.', '', 'On Mon, 1 Nov 2026, Acme <billing@acme.example> wrote:', '> old'].join('\r\n');
+      await arrive(mail({ subject: 'I: think so', body }));
+      expect(calls.inbound[0].content.text).not.toContain('old');
+    });
+
+    it('Apple Mail’s "Begin forwarded message:" keeps the forward, marked', async () => {
+      const { calls, arrive } = await start();
+      const body = [
+        'For you.',
+        '',
+        'Begin forwarded message:',
+        '',
+        'From: Acme <billing@acme.example>',
+        '',
+        'Pay up',
+      ].join('\r\n');
+      await arrive(mail({ subject: 'Invoice', body }));
+      const text = calls.inbound[0].content.text as string;
+      expect(text).toContain('Pay up');
+      expect(text.indexOf('[forwarded ')).toBeLessThan(text.indexOf('Begin forwarded message:'));
+    });
+  });
+
+  describe('startup and teardown', () => {
+    it('logs once after 5 minutes without onHostStart that it is still waiting, and reads mail when it comes', async () => {
+      const { calls, arrive } = await start({ firstPoll: false });
+      const { log } = await import('../log.js');
+      const error = vi.spyOn(log, 'error');
+      await arrive(mail({ body: 'early' }));
+      vi.advanceTimersByTime(5 * 60_000 - 1_000);
+      expect(error).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(2_000);
+      expect(error).toHaveBeenCalledTimes(1);
+      expect(String(error.mock.calls[0][0])).toMatch(/not yet started.*still waiting/);
+      await hostStarted();
+      await tick();
+      expect(calls.inbound.map((m) => m.content.text)).toEqual(['early']);
+    });
+
+    it('says nothing when the host starts within the 5 minutes', async () => {
+      await start({ firstPoll: false });
+      const { log } = await import('../log.js');
+      const error = vi.spyOn(log, 'error');
+      await hostStarted();
+      vi.advanceTimersByTime(10 * 60_000);
+      expect(error).not.toHaveBeenCalled();
+    });
+
+    it('torn down before the host starts: nothing is read, and a late onHostStart does nothing', async () => {
+      const { adapter, calls, arrive } = await start({ firstPoll: false });
+      const { log } = await import('../log.js');
+      const error = vi.spyOn(log, 'error');
+      await arrive(mail({ body: 'never' }));
+      await adapter.teardown();
+      await expect(hostStarted()).resolves.toBeUndefined();
+      await tick();
+      vi.advanceTimersByTime(10 * 60_000);
+      expect(calls.inbound).toEqual([]);
+      expect(flagged()).toEqual([]);
+      expect(error).not.toHaveBeenCalled();
+    });
+
+    it('a connect overtaken by teardown logs that session out and never uses it', async () => {
+      let release!: () => void;
+      h.connectGate = new Promise<void>((r) => (release = r));
+      await import('./proton-mail.js');
+      const adapter = h.reg.factory();
+      h.adapters.push(adapter);
+      const setup = adapter.setup({ onInbound() {}, onInboundEvent() {}, onMetadata() {}, onAction() {} });
+      await tick();
+      const down = adapter.teardown();
+      release();
+      await setup.catch(() => {});
+      await down;
+      expect(h.server.clients.length).toBeGreaterThan(0);
+      expect(h.server.clients.every((c: any) => !c.usable)).toBe(true);
+    });
+  });
+
+  describe('looking up whether new addresses were settled', () => {
+    it('asks core about each address at most once per 10 minutes', async () => {
+      h.wired = false;
+      seedState({
+        strangers: Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`u${i}@full.example`, twoDaysAgo()])),
+      });
+      await start();
+      const lookupsOf = (a: string) => h.lookups.filter((l) => l === a).length;
+      await arriveAll([mail({ from: 'n1@full.example', body: 'one', auth: passFor('full.example') })]);
+      expect(lookupsOf('u0@full.example')).toBe(1);
+      vi.advanceTimersByTime(5 * 60_000);
+      await arriveAll([mail({ from: 'n2@full.example', body: 'two', auth: passFor('full.example') })]);
+      expect(lookupsOf('u0@full.example')).toBe(1);
+      vi.advanceTimersByTime(6 * 60_000);
+      await arriveAll([mail({ from: 'n3@full.example', body: 'three', auth: passFor('full.example') })]);
+      expect(lookupsOf('u0@full.example')).toBe(2);
+    });
+  });
+
   describe('denied senders', () => {
+    it('a denied address that comes back is still not counted, and core still drops it', async () => {
+      h.wired = false;
+      const seenAt = twoDaysAgo();
+      seedState({ strangers: { 'back@example.net': seenAt } });
+      h.settled = { 'back@example.net': 'denied' };
+      const { calls } = await start();
+      await arriveAll([mail({ from: 'back@example.net', body: 'again', auth: passFor('example.net') })]);
+      expect(calls.inbound).toHaveLength(1);
+      // Its old slot is neither refreshed nor a new one taken.
+      expect(readState().strangers).toEqual({ 'back@example.net': seenAt });
+    });
+
     it('take no new-sender slot, even after pruneSettled has dropped them', async () => {
       h.wired = false;
       h.settled = { 'gone@example.net': 'denied' };
