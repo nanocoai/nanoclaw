@@ -549,8 +549,8 @@ export function appendRawText(
 /**
  * Per card, so every platform takes the whole card. The chart limits are what
  * Slack draws natively; past 10,000 characters Slack swaps a table for plain
- * text cut at 3,000; 3,000 is Slack's limit for a block of text and 2,000 for a
- * field; 10 parts, 30 table rows and 12,000 characters keep the largest card
+ * text cut at 3,000; text and fields stay well under Slack's 3,000 and 2,000
+ * (its adapter adds markup after this check); 10 parts, 30 table rows and 12,000 characters keep the largest card
  * near 75 KB of the 100 KB a Teams bot message may hold (counted as UTF-16),
  * and inside Slack's 50 blocks.
  */
@@ -566,8 +566,8 @@ const CARD_LIMITS = {
   chartSeries: 12,
   title: 50,
   label: 20,
-  text: 3_000,
-  fieldText: 2_000,
+  text: 2_500,
+  fieldText: 1_500,
   cardText: 12_000,
 };
 
@@ -618,7 +618,7 @@ function cardPartProblems(children: unknown[]): string[] {
           if (!isRecord(field) || field.type !== 'Field')
             return problems.push(`${where}: Fields holds only Field parts`);
           const fieldProps = isRecord(field.props) ? field.props : {};
-          const value = typeof fieldProps.value === 'number' ? String(fieldProps.value) : fieldProps.value;
+          const value = Number.isFinite(fieldProps.value) ? String(fieldProps.value) : fieldProps.value;
           if (!isLabel(fieldProps.label, CARD_LIMITS.fieldText) || !isLabel(value, CARD_LIMITS.fieldText)) {
             return problems.push(`${where}: a Field needs props.label and props.value`);
           }
@@ -643,7 +643,7 @@ function cardPartProblems(children: unknown[]): string[] {
           if (!Array.isArray(row)) return fail(`row ${r} must be a list of cells`);
           if (row.length !== headers.length)
             return fail(`row ${r} has ${row.length} cells, expected ${headers.length}`);
-          if (!row.every((cell) => typeof cell === 'string' || typeof cell === 'number')) {
+          if (!row.every((cell) => typeof cell === 'string' || Number.isFinite(cell))) {
             return fail(`row ${r}: a cell must be text or a number`);
           }
           text += row.map(String).join('').length;
@@ -674,7 +674,9 @@ function cardPartProblems(children: unknown[]): string[] {
           if (segments.length === 0 || segments.length > CARD_LIMITS.chartSeries) {
             return fail(`props.chart.segments must list 1 to ${CARD_LIMITS.chartSeries} slices`);
           }
-          const bad = segments.findIndex((s) => !isRecord(s) || typeof s.value !== 'number' || !(s.value > 0));
+          const bad = segments.findIndex(
+            (s) => !isRecord(s) || !Number.isFinite(s.value) || !((s.value as number) > 0),
+          );
           if (bad !== -1) return fail(`props.chart.segments[${bad}].value must be a number above 0`);
           labels = segments.map((s) => (s as Record<string, unknown>).label);
           if (new Set(labels).size !== labels.length) return fail('slice labels must not repeat');
@@ -692,7 +694,7 @@ function cardPartProblems(children: unknown[]): string[] {
             if (values.length !== categories.length) {
               return fail(`series "${String(name)}" has ${values.length} values, expected ${categories.length}`);
             }
-            if (!values.every((v) => typeof v === 'number'))
+            if (!values.every((v) => Number.isFinite(v)))
               return fail(`series "${String(name)}": values must be numbers`);
           }
           const names = series.map((s) => (s as Record<string, unknown>).name);

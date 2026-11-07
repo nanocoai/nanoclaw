@@ -382,9 +382,14 @@ describe('send_card — card parts', () => {
       { type: 'Table', props: { headers: ['Evidence'], rows: [[{ $template: 'x' }]] } },
       'a cell must be text or a number',
     ],
-    ['a text part over 3,000 characters', { type: 'Text', props: { content: 'x'.repeat(3_001) } }, 'at most 3000 characters'],
+    ['a text part over 2,500 characters', { type: 'Text', props: { content: 'x'.repeat(2_501) } }, 'at most 2500 characters'],
     ['a text part with an unknown style', { type: 'Text', props: { content: 'x', style: 'huge' } }, 'plain, bold or muted'],
-    ['a field over 2,000 characters', { type: 'Fields', children: [field('p95', 'x'.repeat(2_000))] }, 'at most 2000 characters'],
+    ['a field over 1,500 characters', { type: 'Fields', children: [field('p95', 'x'.repeat(1_500))] }, 'at most 1500 characters'],
+    [
+      'a chart value of Infinity, as JSON reads 1e400',
+      chart('Latency', { type: 'bar', categories: ['1x'], series: [{ name: 'Before', values: [Infinity] }] }),
+      'values must be numbers',
+    ],
     ['a field with no value', { type: 'Fields', children: [{ type: 'Field', props: { label: 'p95' } }] }, 'props.label and props.value'],
     [
       'a table whose caption makes it too long',

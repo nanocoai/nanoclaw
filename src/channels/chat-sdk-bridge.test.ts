@@ -1067,14 +1067,19 @@ describe('createChatSdkBridge.deliver — send_card json-render parts', () => {
       /at most 10 fields per card/,
     ],
     [
-      'a text part over 3,000 characters',
-      [{ type: 'Text', props: { content: 'x'.repeat(3_001) } }],
-      /at most 3000 characters/,
+      'a text part over 2,500 characters',
+      [{ type: 'Text', props: { content: 'x'.repeat(2_501) } }],
+      /at most 2500 characters/,
     ],
     [
-      'a field over 2,000 characters',
-      [{ type: 'Fields', children: [{ type: 'Field', props: { label: 'a', value: 'x'.repeat(2_000) } }] }],
-      /at most 2000/,
+      'a field over 1,500 characters',
+      [{ type: 'Fields', children: [{ type: 'Field', props: { label: 'a', value: 'x'.repeat(1_500) } }] }],
+      /at most 1500/,
+    ],
+    [
+      'a chart value of Infinity, as JSON reads 1e400',
+      [lineChart({ categories: ['a'], series: [{ name: 'b', values: [Infinity] }] })],
+      /values must be numbers/,
     ],
     [
       'a table of 31 rows',
