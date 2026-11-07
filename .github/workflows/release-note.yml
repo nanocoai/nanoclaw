@@ -1,0 +1,30 @@
+name: Release note
+
+# Verdict: scripts/check-release-note.mjs. `edited` is a trigger because the
+# description is what gets fixed; `synchronize` because a check run is per commit.
+# Plain `pull_request`, unlike label-pr.yml: no write access needed. The body is
+# read from env, never shell-interpolated: it is contributor-controlled text.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions: {}
+
+jobs:
+  release-note:
+    name: release-note
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check the release-note section of the description
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: node scripts/check-release-note.mjs
