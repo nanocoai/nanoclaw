@@ -1,0 +1,46 @@
+FROM node:22-slim
+
+# Build tools for native modules (better-sqlite3)
+RUN apt-get update && apt-get install -y \
+    python3 \
+    make \
+    g++ \
+    curl \
+    ca-certificates \
+    gnupg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Docker CLI (not daemon — uses host socket)
+RUN curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] \
+    https://download.docker.com/linux/debian bookworm stable" \
+    > /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && apt-get install -y docker-ce-cli \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install dependencies
+COPY package.json package-lock.json ./
+RUN npm ci
+
+# Copy source and build
+COPY tsconfig.json ./
+COPY src/ ./src/
+RUN npm run build
+
+# Copy runtime assets
+COPY container/ ./container/
+COPY groups/ ./groups/
+COPY .claude/ ./.claude/
+COPY setup/ ./setup/
+
+# Startup script — builds agent image if missing, then starts NanoClaw
+COPY docker-entrypoint.sh ./
+RUN chmod +x docker-entrypoint.sh
+
+# Persistent data volumes
+VOLUME ["/app/data", "/app/groups", "/app/logs", "/app/store"]
+
+ENTRYPOINT ["./docker-entrypoint.sh"]
