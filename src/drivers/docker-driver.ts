@@ -698,7 +698,7 @@ class DockerHandle implements SessionHandle {
       throw normalizeDockerError(error);
     }
     let waited = 0;
-    for (let step = 0; waited < REMOVAL_WAIT_BUDGET_MS; step++) {
+    for (let step = 0; ; step++) {
       const status = this.#probeStatus(name);
       if (status === null) return;
       if (status !== 'removing') {
@@ -711,6 +711,8 @@ class DockerHandle implements SessionHandle {
           if (!REMOVAL_IN_PROGRESS.test(retryMessage)) throw normalizeDockerError(retryError);
         }
       }
+      // The loop also probes once at the full budget, so a removal that finishes during the last sleep is seen.
+      if (waited >= REMOVAL_WAIT_BUDGET_MS) break;
       const scheduledInterval = REMOVAL_WAIT_INTERVALS_MS[Math.min(step, REMOVAL_WAIT_INTERVALS_MS.length - 1)]!;
       const interval = Math.min(scheduledInterval, REMOVAL_WAIT_BUDGET_MS - waited);
       await new Promise((resolve) => setTimeout(resolve, interval));

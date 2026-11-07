@@ -604,6 +604,35 @@ describe('lifecycle', () => {
       await assertion;
     });
 
+    it('probes once more at the wait budget after the final clamped sleep', async () => {
+      const handle = await driver().prepare(fixtureSpec());
+      await handle.start();
+      cli.responses = [
+        { match: /^rm /, throws: inProgress },
+        { match: /^inspect --type container/, output: 'removing\n' },
+      ];
+
+      let settled = false;
+      const stopped = handle.stop('sweep-kill');
+      stopped.then(
+        () => (settled = true),
+        () => (settled = true),
+      );
+
+      // The last probe before the final 600ms sleep runs at 14_400ms.
+      await vi.advanceTimersByTimeAsync(14_400);
+      expect(settled).toBe(false);
+      cli.responses = [
+        { match: /^rm /, throws: inProgress },
+        { match: /^inspect --type container/, throws: noSuchContainer },
+      ];
+      await vi.advanceTimersByTimeAsync(599);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+
+      await expect(stopped).resolves.toBeUndefined();
+    });
+
     describe('step memory across stops', () => {
       const networkInUse = new Error(
         'Error response from daemon: error while removing network: network ncl-spike-s1-net has active endpoints',
@@ -625,6 +654,9 @@ describe('lifecycle', () => {
         expect(networkRemovals).toHaveLength(2);
         expect(cli.joined().filter((call) => call.startsWith('stop -t '))).toHaveLength(stopsAfterFirst);
         expect(cli.joined().filter((call) => call.startsWith('rm --force '))).toHaveLength(removalsAfterFirst);
+
+        await expect(handle.stop('finish')).resolves.toBeUndefined();
+        expect(cli.joined().filter((call) => call.startsWith('network rm '))).toHaveLength(2);
       });
 
       it.each([
