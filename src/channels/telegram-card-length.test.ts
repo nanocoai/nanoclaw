@@ -96,11 +96,14 @@ describe('Telegram card limit through the bridge', () => {
 });
 
 describe('escapeTelegramCardText', () => {
-  it('keeps the length and leaves no table row, in quotes, lists, code and CRLF text too', () => {
-    for (const row of ['|---|---|', '--- | :-:', '> | - |', '  |:--|', ':---', '---', '|-|-|\r']) {
-      const escaped = escapeTelegramCardText(`| a | b |\n${row}`);
-      expect(escaped.length).toBe(row.length + 10);
-      expect(escaped).toContain('\u2011');
+  it('keeps the length and leaves no table row, in quotes, lists, code and any line break', () => {
+    for (const row of ['|---|---|', '--- | :-:', '> | - |', '  |:--|', ':---', '---']) {
+      for (const lineBreak of ['\n', '\r\n', '\r']) {
+        const text = `| a | b |${lineBreak}${row}${lineBreak}| 1 | 2 |`;
+        const escaped = escapeTelegramCardText(text);
+        expect(escaped.length).toBe(text.length);
+        expect(escaped.split('\u2011')).toHaveLength(2);
+      }
     }
     expect(escapeTelegramCardText('````\n```\n````\n|a|\n|-|')).toContain('\u2011');
   });
