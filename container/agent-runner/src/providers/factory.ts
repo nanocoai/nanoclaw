@@ -1,6 +1,5 @@
 import type { AgentProvider, ProviderOptions } from './types.js';
-import { getProviderFactory } from './provider-registry.js';
-import { getProviderRuntimeContract } from './provider-registry.js';
+import { getProviderFactory, getProviderRuntimeContract, getProviderWrappers } from './provider-registry.js';
 import {
   bindProviderRuntimeInputs,
   resolveRuntimeConfiguration,
@@ -13,14 +12,21 @@ export function createProvider(name: string, options: ProviderOptions = {}): Age
   const contract = getProviderRuntimeContract(name);
   // The core-owned inputs for this instance: one object, owned here, closed
   // over by the render path below.
-  const inputs: Partial<RuntimeConfigurationInputs> = {
-    inference: { model: options.model, effort: options.effort, speed: options.speed },
-    mcpServers: options.mcpServers ?? {},
-  };
+  const inputs = runtimeInputs(options);
   // Core resolves the declared configuration and hands the result to the
-  // provider; the provider does not call its own capabilities.
-  const configuration = contract ? resolveRuntimeConfiguration(contract, inputs) : undefined;
-  const provider = getProviderFactory(name)(options, configuration);
+  // provider; the provider does not call its own capabilities. Capabilities
+  // see the environment the provider itself runs with.
+  const build = (opts: ProviderOptions, optsInputs = runtimeInputs(opts)): AgentProvider =>
+    getProviderFactory(name)(
+      opts,
+      contract ? resolveRuntimeConfiguration(contract, optsInputs, opts.env ?? process.env) : undefined,
+    );
+  // Wrappers see the bare provider; the contract hooks below attach to what
+  // the runner actually holds, so they run once per query and exchange.
+  const provider = getProviderWrappers(name).reduce(
+    (inner, wrap) => wrap(inner, { name, options, create: (opts) => build(opts) }),
+    build(options, inputs),
+  );
   if (contract) {
     bindProviderRuntimeInputs(provider, inputs);
 
@@ -39,4 +45,11 @@ export function createProvider(name: string, options: ProviderOptions = {}): Age
     }
   }
   return provider;
+}
+
+function runtimeInputs(options: ProviderOptions): Partial<RuntimeConfigurationInputs> {
+  return {
+    inference: { model: options.model, effort: options.effort, speed: options.speed },
+    mcpServers: options.mcpServers ?? {},
+  };
 }
