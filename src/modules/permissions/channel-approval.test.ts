@@ -802,7 +802,7 @@ describe('unknown-channel registration flow', () => {
         'SELECT messaging_group_id, options_json FROM pending_channel_approvals',
       ))!;
     }
-    async function click(questionId: string, value: string) {
+    async function click(questionId: string, value: string, messageId?: string) {
       const { dispatchResponse } = await import('../../response-registry.js');
       return dispatchResponse({
         questionId,
@@ -811,6 +811,7 @@ describe('unknown-channel registration flow', () => {
         channelType: 'telegram',
         platformId: 'dm-owner',
         threadId: null,
+        messageId,
       });
     }
     async function storedOptions(questionId: string): Promise<string | undefined> {
@@ -837,6 +838,35 @@ describe('unknown-channel registration flow', () => {
         (o) => o.value,
       );
       expect(values).toEqual(['connect:ag-1', 'connect:ag-2', 'reject']);
+    });
+
+    it('ignores card clicks while the agent card is sent, and clicks from the first card after', async () => {
+      const card = await firstCard('chat-choose-double-tap');
+      let sent!: () => void;
+      deliverMock.mockImplementationOnce(() => new Promise((resolve) => (sent = () => resolve('plat-msg-2'))));
+      const choosing = click(card.messaging_group_id, 'choose_existing', 'card-1');
+      await vi.waitFor(() => expect(deliverMock).toHaveBeenCalledTimes(2));
+      // A double tap on the first card, or a tap on the new card before its options are stored.
+      expect(await click(card.messaging_group_id, 'choose_existing', 'card-1')).toBe('ignored');
+      expect(await click(card.messaging_group_id, 'new_agent', 'card-2')).toBe('ignored');
+      sent();
+      expect(await choosing).toBe('accepted');
+      expect(deliverMock).toHaveBeenCalledTimes(2);
+      // The first card's button 0 now decodes as the first agent: it must not connect it.
+      expect(await click(card.messaging_group_id, 'connect:ag-1', 'card-1')).toBe('ignored');
+      expect(
+        await countRows(
+          'SELECT COUNT(*) AS c FROM messaging_group_agents WHERE messaging_group_id = ?',
+          card.messaging_group_id,
+        ),
+      ).toBe(0);
+      // The agent card's own click connects the agent picked.
+      expect(await click(card.messaging_group_id, 'connect:ag-2', 'card-2')).toBe('accepted');
+      const wired = await getDb().get<{ agent_group_id: string }>(
+        'SELECT agent_group_id FROM messaging_group_agents WHERE messaging_group_id = ?',
+        card.messaging_group_id,
+      );
+      expect(wired?.agent_group_id).toBe('ag-2');
     });
 
     it("leaves the first card as it was when the agent card can't be sent", async () => {
