@@ -1,0 +1,8 @@
+{
+  "notes": "No prompts. Commands are stubbed by the conformance harness; provider-contract verification is covered by installed payload tests.",
+  "scenarios": [
+    {
+      "name": "default"
+    }
+  ]
+}
