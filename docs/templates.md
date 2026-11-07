@@ -371,22 +371,28 @@ starts there: codex sets it natively, and providers whose runtime cannot
 subdirectory named as `cwd` is created at stamp time; `./`/`${PLUGIN_ROOT}`
 directories must exist in the shipped plugin.
 
-Credentials are held by the **credentials proxy** and injected into outbound
-HTTPS calls at the proxy boundary, matched by API host, at request time. The key
-never sits in `mcp.json`, the container env, or chat context. See
+Credentials are held by the **credentials proxy** (the installed credential
+gateway) and injected into outbound HTTPS calls at the proxy boundary, matched
+by API host, at request time. The key never sits in `mcp.json`, the container
+env, or chat context. See
 [the credentials section in CLAUDE.md](../CLAUDE.md#secrets--credentials--gateways)
 for the model.
+
+The gateway also decides which agents receive a stored key. Some inject it for
+every agent; others only for agents it has been attached to. The installed
+gateway's `/add-<gateway>` skill says which, and how to attach a key.
 
 Two ways a credential gets connected:
 
 1. **Up front.** Register the secret with the credentials proxy (its web UI or
-   CLI), matched to the service's API host (e.g. `api.example.com`). Matching
-   credentials are injected automatically, so usually nothing else is needed.
+   CLI), matched to the service's API host (e.g. `api.example.com`). On a
+   gateway that attaches keys per agent, attach it to the agent too.
 2. **On demand (the common path).** Don't set anything up first. The first time
-   the agent calls a service with no credential, the API returns **401/403** and
-   the agent replies with a prefilled connect link for that host. The user opens
-   it, pastes the key, and asks the agent to retry. The key lands in the
-   credentials proxy, which injects it on every later call.
+   the agent calls a service with no credential, the call fails with an auth
+   error and the agent replies with the connect link the gateway returned for
+   that host. The user opens it and saves the key. A gateway that attaches keys
+   per agent may not attach a key saved this way to the agent that asked; if
+   so, attach it (see the gateway's skill). Then ask the agent to retry.
 
 ### MCP servers that require an env var to boot
 
@@ -423,12 +429,16 @@ named*, user-owned server with `ncl groups config add-mcp-server --headers`.
 
 The credentials proxy can _hold_ a credentialed outbound request and require a
 human to approve it before it leaves the proxy: enforcement the agent can't talk
-around. This is matched on the outbound HTTP request (host + method + path),
-configured on the credentials proxy, and answered by NanoClaw (it DMs an approver). The host side is
-already wired; see
-[the credentialed-approval flow in CLAUDE.md](../CLAUDE.md#requiring-approval-for-credential-use)
-and the [`sales/sdr` template README](https://github.com/nanocoai/nanoclaw-templates/blob/main/sales/sdr/README.md)
-for a worked example.
+around. The hold is configured on the gateway and answered by NanoClaw (it DMs
+an approver). What a gateway can hold differs: some match any request on host,
+method and path, others only named actions of an app connection, and a plain
+API key may not be holdable at all. The installed gateway's skill says what
+yours supports. The host side is already wired; see
+[Approvals in CLAUDE.md](../CLAUDE.md#approvals).
+
+The [`sales/sdr` template README](https://github.com/nanocoai/nanoclaw-templates/blob/main/sales/sdr/README.md)
+has a worked example. It needs a gateway that holds requests by host, method
+and path.
 
 ## Contributing a template
 
