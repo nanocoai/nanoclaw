@@ -328,7 +328,14 @@ export async function writeSessionMessage(
       onWake: message.onWake ?? false,
     });
   });
-  await updateSession(sessionId, { last_active: new Date().toISOString() });
+  // The message is stored: a failed activity stamp must not tell the caller it
+  // wasn't (a caller that retries would write it twice).
+  try {
+    await updateSession(sessionId, { last_active: new Date().toISOString() });
+    // eslint-disable-next-line no-catch-all/no-catch-all -- logged; the message is already durable
+  } catch (err) {
+    log.warn('Session activity not recorded after a message write', { sessionId, err });
+  }
   // Ask for a prompt reconcile now that the message is durable: a wake that
   // fails transiently is retried within the queue's cadence instead of
   // waiting for the next resync tick. No-op when the sweep isn't running.

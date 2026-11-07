@@ -30,6 +30,7 @@ import {
 import { inboundDbPath, outboundDbPath } from './mailbox/sqlite/paths.js';
 import { initTestDb, closeDb, runMigrations, createAgentGroup } from './db/index.js';
 import { createSession } from './db/sessions.js';
+import { isUniqueViolation } from './db/errors.js';
 import type { Session } from './types.js';
 
 const TEST_DIR = '/tmp/nanoclaw-test-write-outbound';
@@ -231,6 +232,34 @@ describe('writeSessionMessage re-provisions a deleted session folder', () => {
 
   afterEach(async () => {
     await closeDb();
+  });
+
+  const message = (id: string) => ({
+    id,
+    kind: 'system' as const,
+    timestamp: new Date().toISOString(),
+    content: JSON.stringify({ type: 'question_response', questionId: 'q-1' }),
+  });
+
+  it('refuses a second message with the same id as a unique violation', async () => {
+    await writeSessionMessage(AG, SESS, message('qr-q-1'));
+    const second = await writeSessionMessage(AG, SESS, message('qr-q-1')).then(
+      () => undefined,
+      (err: unknown) => err,
+    );
+    expect(isUniqueViolation(second)).toBe(true);
+  });
+
+  it('does not report a stored message as failed when its activity stamp fails', async () => {
+    // The central DB goes away after the session's own mailbox took the message.
+    await closeDb();
+    await expect(writeSessionMessage(AG, SESS, message('stored-1'))).resolves.toBeUndefined();
+    const db = new Database(inboundDbPath(AG, SESS), { readonly: true });
+    try {
+      expect(db.prepare('SELECT id FROM messages_in WHERE id = ?').get('stored-1')).toEqual({ id: 'stored-1' });
+    } finally {
+      db.close();
+    }
   });
 
   it('re-creates the folder + inbound.db and does not throw when the row still exists', async () => {

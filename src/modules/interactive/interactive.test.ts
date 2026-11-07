@@ -6,6 +6,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../container-runner.js', () => ({ wakeContainer: vi.fn().mockResolvedValue(undefined) }));
+/** Set by a test to hold one getSession call (a slow read). */
+const slowRead = vi.hoisted(() => ({ hold: undefined as Promise<void> | undefined }));
+vi.mock('../../db/sessions.js', async () => {
+  const actual = await vi.importActual<typeof import('../../db/sessions.js')>('../../db/sessions.js');
+  return {
+    ...actual,
+    getSession: async (id: string) => {
+      const hold = slowRead.hold;
+      slowRead.hold = undefined;
+      if (hold) await hold;
+      return actual.getSession(id);
+    },
+  };
+});
 vi.mock('../../session-manager.js', async () => ({
   ...(await vi.importActual('../../session-manager.js')),
   writeSessionMessage: vi.fn().mockResolvedValue(undefined),
@@ -71,6 +85,42 @@ describe('question answers', () => {
     expect(await getPendingQuestion('q-1')).toBeDefined();
     expect(await answer('b')).toBe('accepted');
     expect(writeSessionMessage).toHaveBeenCalledTimes(2);
+    expect(await getPendingQuestion('q-1')).toBeUndefined();
+  });
+
+  it('a click that started before an earlier answer finished never answers again', async () => {
+    let release!: () => void;
+    // The first click's session read waits; a second click starts meanwhile.
+    slowRead.hold = new Promise((resolve) => (release = resolve));
+    const first = answer('a');
+    // The second click is done before the first one's read returns.
+    const second = await answer('b');
+    release();
+    expect([await first, second].sort()).toEqual(['accepted', 'ignored']);
+    expect(writeSessionMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('writes one message id per question, and a repeat answer the mailbox refuses is no second answer', async () => {
+    expect(await answer('a')).toBe('accepted');
+    expect(vi.mocked(writeSessionMessage).mock.calls[0][2].id).toBe('qr-q-1');
+
+    // The earlier answer was stored, but its question row is back (its delete failed).
+    await createPendingQuestion({
+      question_id: 'q-1',
+      session_id: 'sess-1',
+      message_out_id: 'out-1',
+      platform_id: 'C1',
+      channel_type: 'slack',
+      thread_id: null,
+      title: 'Pick one',
+      options: [{ label: 'A', selectedLabel: 'A', value: 'a' }],
+      created_at: now(),
+    });
+    const duplicate = Object.assign(new Error('UNIQUE constraint failed: messages_in.id'), {
+      code: 'SQLITE_CONSTRAINT_PRIMARYKEY',
+    });
+    vi.mocked(writeSessionMessage).mockRejectedValueOnce(duplicate);
+    expect(await answer('b')).toBe('ignored');
     expect(await getPendingQuestion('q-1')).toBeUndefined();
   });
 

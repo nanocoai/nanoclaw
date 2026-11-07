@@ -73,6 +73,20 @@ describe('dispatchResponse', () => {
     expect(next).not.toHaveBeenCalled();
   });
 
+  it('keeps a click with the handler that accepted it, even if it then returns false', async () => {
+    const { dispatchResponse, registerResponseHandler } = await freshRegistry();
+    const next = vi.fn(async () => 'accepted' as const);
+    registerResponseHandler(async (payload) => {
+      payload.accepted?.();
+      return false;
+    });
+    registerResponseHandler(next);
+
+    expect(await dispatchResponse(click)).toBe('accepted');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(next).not.toHaveBeenCalled();
+  });
+
   it('treats an unowned or failed click as ignored', async () => {
     const { dispatchResponse, registerResponseHandler } = await freshRegistry();
     expect(await dispatchResponse(click)).toBe('ignored');

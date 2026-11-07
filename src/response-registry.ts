@@ -76,6 +76,8 @@ export function dispatchResponse(payload: ResponsePayload): Promise<ResponseOutc
           // So a skill author can see why the card didn't change.
           if (outcome === true) log.warn('Response handler returned true: nothing shown', { code: 'legacy_true' });
           if (outcome) return resolve(outcome === true ? 'ignored' : outcome);
+          // A handler that accepted the click owns it, whatever it returns.
+          if (accepted) return;
         } catch (err) {
           log.error('Response handler threw', { questionId: payload.questionId, err });
           // A handler that accepted the click owns it, even when its follow-up work throws.
