@@ -632,6 +632,12 @@ describe('ask_question over email', () => {
       '  /option-3 — ✅',
       '  /cancel',
     ]);
+    // Alike by command, not only by text: "Tutor" and "tutor" both stem to /tutor.
+    const cased = normalizeOptions([
+      { label: 'Tutor', value: 'connect:ag-1' },
+      { label: 'tutor', value: 'connect:ag-2' },
+    ]);
+    expect(optionLines(cased)).toEqual(['  /tutor — Tutor (connect:ag-1)', '  /tutor-2 — tutor (connect:ag-2)']);
   });
 });
 

@@ -100,6 +100,8 @@ const DEFERRED_STRANGERS_MAX = DEFERRED_MAX / 2;
 const DEFERRED_STRANGERS_PER_DOMAIN_MAX = 20;
 /** How long the adapter waits for the host's onHostStart before it logs an error (it keeps waiting). */
 const HOST_START_WARN_MS = 5 * 60_000;
+/** Past this many senders, recentBySender drops those with nothing in the last hour. */
+const RECENT_SENDERS_SWEEP_AT = 200;
 /** How often one new address may be looked up with core to see whether it was settled (pruneSettled). */
 const SETTLED_RECHECK_MS = 10 * 60_000;
 /**
@@ -470,6 +472,11 @@ export function forwardNote(token: string): string {
  * visibly the sender's: the channel's own notes come after the sender's text
  * and carry this mail's code, but a typed note with no code to check (in a
  * mail with nothing marked) would otherwise read as the channel's.
+ *
+ * Best effort only: a reworded or look-alike note ("[Nоte from …" with a
+ * Cyrillic о) gets past it. What holds is the code: every note that vouches
+ * for anything (hiddenNote, forwardNote) names this mail's code, which the
+ * sender cannot know.
  */
 export function disownTypedNotes(text: string): string {
   return text.replace(
@@ -704,12 +711,17 @@ export async function forwardedMessageText(source: Uint8Array, token = newMarkTo
       inner.date && `Date: ${formatLocalTime(inner.date.toISOString(), TIMEZONE)}`,
       inner.subject && `Subject: ${oneLine(inner.subject, SUBJECT_MAX_CHARS)}`,
     ].filter(Boolean);
-    const text = (await mailText(inner, HTML_TIMEOUT_MS, { token })).slice(0, BODY_MAX_CHARS).trim();
-    return `${lines.join('\n')}\n\n${text}`;
+    const full = await mailText(inner, HTML_TIMEOUT_MS, { token });
+    const text = full.slice(0, BODY_MAX_CHARS).trim();
+    const cut = full.length > BODY_MAX_CHARS ? `\n\n${FORWARD_CUT} ${full.length} characters in all]` : '';
+    return `${lines.join('\n')}\n\n${text}${cut}`;
   } catch {
     return `${head}\n[The forwarded message attached to this mail could not be read.]`;
   }
 }
+
+/** How an attached forward cut at BODY_MAX_CHARS ends (forwardedMessageText); the truncation note counts on it. */
+const FORWARD_CUT = '[… the forwarded message was cut short:';
 
 /**
  * A header block larger than this is refused unread. Real headers are a few
@@ -1095,9 +1107,10 @@ export const PROTON_AUTHSERV_ID = 'mail.protonmail.ch';
 export const PROTON_DOMAINS = ['proton.me', 'protonmail.com', 'protonmail.ch', 'pm.me'];
 /**
  * PROTON_MAIL_INTERNAL_DOMAINS, read: each entry a whole domain (at least two
- * labels, not a registry suffix such as co.uk), in ASCII. An entry like `com`
- * would trust Proton-internal mail from every .com domain, so anything else
- * is rejected (and logged at startup) rather than trusted.
+ * labels, not a registry suffix such as co.uk), in ASCII. Listed domains are
+ * matched exactly (isTrustedInternalDomain), so `com` would trust nothing; it
+ * is rejected and logged at startup all the same, as the sign of an operator
+ * expecting suffix matching that does not happen.
  */
 export function parseInternalDomains(raw: string | undefined): { domains: string[]; rejected: string[] } {
   const domains: string[] = [];
@@ -1118,6 +1131,8 @@ export function isTrustedInternalDomain(domain: string, internalDomains: string[
   const from = asciiDomain(domain.toLowerCase());
   if (!from) return false;
   if (PROTON_DOMAINS.some((d) => from === d || from.endsWith(`.${d}`))) return true;
+  // Normalised again here: checkSenderAuth may be given a list that did not
+  // come through parseInternalDomains.
   return internalDomains.some((d) => asciiDomain(d.trim().toLowerCase()) === from);
 }
 
@@ -1471,11 +1486,13 @@ export function optionCommands(options: NormalizedOption[]): string[] {
  */
 export function optionLines(options: NormalizedOption[]): string[] {
   const commands = optionCommands(options);
-  const labelCount = new Map<string, number>();
-  for (const o of options) labelCount.set(o.label, (labelCount.get(o.label) ?? 0) + 1);
+  // Labels are alike when their commands would be ("Tutor" and "tutor").
+  const stems = options.map((o) => optionToCommand(o.label));
+  const stemCount = new Map<string, number>();
+  for (const st of stems) stemCount.set(st, (stemCount.get(st) ?? 0) + 1);
   return options.map((o, i) => {
     const label = oneLine(o.label, 100);
-    const shared = (labelCount.get(o.label) ?? 0) > 1;
+    const shared = (stemCount.get(stems[i]) ?? 0) > 1;
     const said = optionToCommand(o.label) === commands[i];
     const which = o.value && o.value !== o.label ? oneLine(o.value, 80) : `option ${i + 1}`;
     const desc = shared ? `${label} (${which})` : said ? '' : label;
@@ -1546,6 +1563,12 @@ export interface CardRef {
   title: string;
   options: NormalizedOption[];
   sentAt: string;
+  /**
+   * When its approver was told, once, that a reply without a command was not
+   * taken: never again for this card, so an out-of-office reply cannot keep
+   * a notice loop going.
+   */
+  nudgedAt?: string;
   answeredAt?: string;
   /** Core closed the card without an answer from here (a gateway approval that timed out, say). */
   closedAt?: string;
@@ -1568,6 +1591,8 @@ export type CardReplyMatch =
       token?: string;
       /** How to answer (howToAnswer), only when the card can still take one. */
       howTo?: string;
+      /** A reply without a command on the open card: the adapter records `nudgedAt` once it has said so. */
+      nudge?: boolean;
     };
 
 /**
@@ -1612,10 +1637,14 @@ export function matchCardReply(input: {
     return open
       ? {
           kind: 'refused',
-          reason: 'its first line is not one of the listed commands, and the request is still waiting',
-          notify: true,
+          reason:
+            'its first line is not one of the listed commands, and the request is still waiting. ' +
+            'It was not passed to the agent either: to write to the agent, send a new email without ' +
+            'the request’s reference in its subject',
+          notify: !card.nudgedAt,
           token,
           howTo: howToAnswer(card),
+          nudge: true,
         }
       : { kind: 'none' };
   }
@@ -2122,10 +2151,12 @@ registerChannelAdapter('proton-mail', {
 
     /** Null when this mail fits the sender's hour (and is counted); else when the hour has room again. */
     function senderRateFreeAt(addr: string, now = Date.now()): number | null {
-      // Senders with nothing in the last hour are dropped, so the map holds
-      // only the hour's senders however many have written over time.
-      for (const [a, times] of recentBySender) {
-        if (times.every((t) => now - t >= HOUR_MS)) recentBySender.delete(a);
+      // Senders with nothing in the last hour are dropped once the map grows,
+      // so it holds about the hour's senders however many have written.
+      if (recentBySender.size > RECENT_SENDERS_SWEEP_AT) {
+        for (const [a, times] of recentBySender) {
+          if (times.every((t) => now - t >= HOUR_MS)) recentBySender.delete(a);
+        }
       }
       const recent = (recentBySender.get(addr) ?? []).filter((t) => now - t < HOUR_MS);
       recentBySender.set(addr, recent);
@@ -2164,6 +2195,7 @@ registerChannelAdapter('proton-mail', {
      */
     async function defer(uid: number, kind: 'sender' | 'strangers', from: string, at: number): Promise<Outcome> {
       if (state.retry[uid]?.deferred !== kind) {
+        const fromDomain = addressDomain(from);
         // Not counting this mail itself, held until now under the other kind.
         const waiting = Object.entries(state.retry)
           .filter(([u, r]) => r.deferred && u !== String(uid))
@@ -2174,7 +2206,7 @@ registerChannelAdapter('proton-mail', {
           (kind === 'strangers' &&
             waiting.filter((r) => r.deferred === 'strangers').length >= DEFERRED_STRANGERS_MAX) ||
           (kind === 'strangers' &&
-            waiting.filter((r) => r.deferred === 'strangers' && r.from && addressDomain(r.from) === addressDomain(from))
+            waiting.filter((r) => r.deferred === 'strangers' && r.from && addressDomain(r.from) === fromDomain)
               .length >= DEFERRED_STRANGERS_PER_DOMAIN_MAX)
         ) {
           log.warn('Proton Mail: over an hourly limit with too much mail already waiting — left unread and flagged', {
@@ -2379,10 +2411,18 @@ registerChannelAdapter('proton-mail', {
       }
       if (body.length > BODY_MAX_CHARS) {
         // The total is of what the agent would have seen (quoted history cut,
-        // attached forwards read in); the text itself was capped at
-        // TEXT_MAX_CHARS before that, so past it the total is a floor.
-        const total = fullText.length > rawText.length ? `more than ${body.length}` : `${body.length}`;
-        body = body.slice(0, BODY_MAX_CHARS) + `\n\n[… truncated, ${total} characters in total]`;
+        // attached forwards read in). The text was capped at TEXT_MAX_CHARS,
+        // and each attached forward at BODY_MAX_CHARS, before that: when
+        // either was, the total is a floor.
+        const floor = fullText.length > rawText.length || body.includes(FORWARD_CUT);
+        const total = floor ? `more than ${body.length}` : `${body.length}`;
+        // Never through the middle of a forward line: one cut short would
+        // carry this mail's code with no note to explain it.
+        const mark = forwardMark(token);
+        let cut = BODY_MAX_CHARS;
+        const markAt = body.lastIndexOf(mark, cut);
+        if (markAt >= 0 && markAt + mark.length > cut) cut = markAt;
+        body = body.slice(0, cut).trimEnd() + `\n\n[… truncated, ${total} characters in total]`;
       }
       const senderName = senderLabel(fromAddr, sender.name);
       // Message-ID threads replies; it is the sender's to choose, so it is
@@ -2488,7 +2528,16 @@ registerChannelAdapter('proton-mail', {
         }
         return 'done';
       }
-      if (match.kind === 'refused') return refuse(match.reason, match.notify, match.howTo);
+      if (match.kind === 'refused') {
+        const outcome = await refuse(match.reason, match.notify, match.howTo);
+        // Recorded once the notice has gone (a failed send is retried, and
+        // says it then).
+        if (match.nudge && match.notify && match.token && state.cards[match.token]) {
+          state.cards[match.token] = { ...state.cards[match.token], nudgedAt: new Date().toISOString() };
+          saveState(state);
+        }
+        return outcome;
+      }
 
       // An address not yet approved raises a card core keeps open for days:
       // new addresses are limited, so strangers cannot fill the cards the
@@ -2526,7 +2575,7 @@ registerChannelAdapter('proton-mail', {
       // Filenames are the sender's too: each is cut short, and only so many listed.
       const fail = (att: { filename?: string }, type: string, why: string) => {
         if (failures.length < FAILURES_LISTED_MAX)
-          failures.push(`${oneLine(stripInvisible(att.filename ?? type), 100)} (${why})`);
+          failures.push(`${disownTypedNotes(oneLine(stripInvisible(att.filename ?? type), 100))} (${why})`);
         else unlisted++;
       };
       for (const att of parsed.attachments) {
