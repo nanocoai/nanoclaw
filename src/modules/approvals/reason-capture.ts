@@ -82,9 +82,15 @@ function extractText(event: InboundEvent): string {
  * finalize outright. Prompts the admin's DM, then parks the row and arms
  * capture. If we can't reach the admin (no DM, no adapter, delivery throws) we
  * finalize a plain reject immediately rather than strand the requesting agent.
- * Returns false when another response already claimed the row.
+ * Returns false when another response already claimed the row. `accepted` is
+ * told as soon as a plain reject is recorded, before the agent is woken.
  */
-export async function armReasonCapture(approval: PendingApproval, session: Session, userId: string): Promise<boolean> {
+export async function armReasonCapture(
+  approval: PendingApproval,
+  session: Session,
+  userId: string,
+  accepted?: () => void,
+): Promise<boolean> {
   const expiresAt = new Date(Date.now() + REASON_CAPTURE_WINDOW_MS).toISOString();
   if (!(await markApprovalAwaitingReason(approval.approval_id, expiresAt))) return false;
 
@@ -99,7 +105,7 @@ export async function armReasonCapture(approval: PendingApproval, session: Sessi
       hasDeliveryAddress: Boolean(channelType && platformId),
       hasAdapter: Boolean(adapter),
     });
-    await finalizeReject(approval, session, userId, { from: 'awaiting_reason' });
+    await finalizeReject(approval, session, userId, { from: 'awaiting_reason', accepted });
     return true;
   }
 
@@ -120,7 +126,7 @@ export async function armReasonCapture(approval: PendingApproval, session: Sessi
       approvalId: approval.approval_id,
       err,
     });
-    await finalizeReject(approval, session, userId, { from: 'awaiting_reason' });
+    await finalizeReject(approval, session, userId, { from: 'awaiting_reason', accepted });
     return true;
   }
 

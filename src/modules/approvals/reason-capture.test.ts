@@ -24,6 +24,7 @@ import {
   getPendingApproval,
   markApprovalAwaitingReason,
 } from '../../db/sessions.js';
+import { wakeContainer } from '../../container-runner.js';
 import { setDeliveryAdapter, type ChannelDeliveryAdapter } from '../../delivery.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import { upsertUser } from '../permissions/db/users.js';
@@ -234,6 +235,30 @@ describe('reject with reason', () => {
     expect(accepted).not.toHaveBeenCalled();
     posted();
     expect(await outcome).toBe('accepted');
+  });
+
+  it("reports the plain reject accepted before the agent is woken when the reason prompt can't be sent", async () => {
+    const { handleApprovalsResponse } = await import('./response-handler.js');
+    await seedApproval('appr-prompt-fails', 'install_packages');
+    setDeliveryAdapter({
+      async deliver() {
+        throw new Error('send failed');
+      },
+    });
+    // The agent's container start hangs.
+    vi.mocked(wakeContainer).mockImplementationOnce(() => new Promise(() => {}));
+    const accepted = vi.fn();
+    void handleApprovalsResponse({
+      questionId: 'appr-prompt-fails',
+      value: REJECT_WITH_REASON_VALUE,
+      userId: 'admin-1',
+      channelType: DM_CHANNEL,
+      platformId: DM_PLATFORM,
+      threadId: null,
+      accepted,
+    });
+    await vi.waitFor(() => expect(lastRelayedText()).toBe('Your install_packages request was rejected by admin.'));
+    await vi.waitFor(() => expect(accepted).toHaveBeenCalledTimes(1));
   });
 
   it('truncates an over-long reason to 280 chars with an ellipsis', async () => {
