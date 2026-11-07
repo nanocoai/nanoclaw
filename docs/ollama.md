@@ -2,6 +2,8 @@
 
 NanoClaw agents can be routed to a local [Ollama](https://ollama.com) instance instead of the Anthropic API. This cuts API costs to zero and keeps all inference on your hardware.
 
+llmman is a sibling local-inference daemon that also speaks the Anthropic API; see [Running Agents on Local llmman](llmman.md) for the same setup on llmman.
+
 ## How It Works
 
 Ollama exposes an Anthropic-compatible `/v1/messages` endpoint. The Claude Code CLI (which runs inside agent containers) uses the Anthropic SDK, which reads `ANTHROPIC_BASE_URL` to find the API host. Pointing that variable at Ollama is all that's needed — no new provider code, no changes to the agent runtime.
@@ -167,5 +169,6 @@ Remove the `env` and `blockedHosts` keys from `groups/<folder>/container.json`, 
 ## See Also
 
 - `/add-ollama-provider` — step-by-step skill to configure any agent group for Ollama
+- [docs/llmman.md](llmman.md) — the same setup for llmman (`/add-llmman-provider`, `/add-llmman-tool`)
 - [Ollama Anthropic compatibility docs](https://ollama.com/blog/openai-compatibility) — upstream docs on the API bridge
 - `docs/architecture.md` — how the container spawn and env injection pipeline works
