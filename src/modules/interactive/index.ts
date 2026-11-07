@@ -58,9 +58,11 @@ async function handleInteractiveResponse(payload: ResponsePayload): Promise<Resp
       // eslint-disable-next-line no-catch-all/no-catch-all -- logged; the card keeps its buttons for another try
     } catch (err) {
       if (isUniqueViolation(err)) {
-        // Answered already; only the row's delete failed then.
+        // Answered already, but that click failed after the write (the row's
+        // delete or the activity stamp): close the card, and wake the agent.
         await deletePendingQuestion(payload.questionId);
-        return 'ignored';
+        await requestWake(session, 'interactive');
+        return 'closed';
       }
       log.error('Question answer could not be written to the agent', { questionId: payload.questionId, err });
       return 'ignored';

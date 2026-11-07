@@ -100,7 +100,7 @@ describe('question answers', () => {
     expect(writeSessionMessage).toHaveBeenCalledTimes(1);
   });
 
-  it('writes one message id per question, and a repeat answer the mailbox refuses is no second answer', async () => {
+  it('writes one message id per question; a repeat answer the mailbox refuses closes the card', async () => {
     expect(await answer('a')).toBe('accepted');
     expect(vi.mocked(writeSessionMessage).mock.calls[0][2].id).toBe('qr-q-1');
 
@@ -121,8 +121,9 @@ describe('question answers', () => {
       code: 'SQLITE_CONSTRAINT_PRIMARYKEY',
     });
     vi.mocked(writeSessionMessage).mockRejectedValueOnce(duplicate);
-    expect(await answer('b')).toBe('ignored');
+    expect(await answer('b')).toBe('closed');
     expect(await getPendingQuestion('q-1')).toBeUndefined();
+    expect(wakeContainer).toHaveBeenCalledTimes(2);
   });
 
   it('reports the answer accepted before the agent is woken', async () => {
