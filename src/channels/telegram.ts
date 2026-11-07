@@ -374,6 +374,28 @@ export interface TelegramBridgeOptions {
  * claimed by another instance) so the registry surfaces its normal
  * "credentials missing, skipping" warning.
  */
+/** A Markdown table's delimiter row (`|---|:-:|`), also inside a quote or a list. */
+const TABLE_DELIMITER_ROW = /^([ \t>]*)(\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*)$/;
+const FENCE_LINE = /^ {0,3}```/;
+
+/**
+ * The adapter draws a Markdown table as a padded text table, which can grow a
+ * card's text many times over (a 1,800-character table became 120,000), past
+ * any card limit. A look-alike for one hyphen in the delimiter row keeps the
+ * text and its length, but leaves no table to draw. Code blocks stay as typed.
+ */
+export function escapeTelegramCardText(text: string): string {
+  let inFence = false;
+  return text
+    .split('\n')
+    .map((line) => {
+      if (FENCE_LINE.test(line)) inFence = !inFence;
+      const row = inFence ? null : TABLE_DELIMITER_ROW.exec(line);
+      return row && row[2].includes('|') ? row[1] + row[2].replace('-', '\u2011') : line;
+    })
+    .join('\n');
+}
+
 export function createTelegramBridge(options: TelegramBridgeOptions = {}): ChannelAdapter | null {
   const tokenKey = `TELEGRAM_BOT_TOKEN${options.envKeySuffix ? `_${options.envKeySuffix}` : ''}`;
   const token = readEnvFile([tokenKey])[tokenKey];
@@ -405,11 +427,12 @@ export function createTelegramBridge(options: TelegramBridgeOptions = {}): Chann
     // adapter then parsed as emphasis and rendered as _italic_.
     maxTextLength: 4000,
     // A card goes out as one MarkdownV2 message, cut past 4,096 with its
-    // buttons kept. Escaping at most doubles plain text, so a longer card is
-    // refused; 2,000 is also the agent's own question cap. Text packed with
-    // links or email addresses grows more and can still be cut.
-    // Spread, so an older core without this option still type-checks (and ignores it).
-    ...{ maxCardTextLength: 2000 },
+    // buttons kept. Escaping at most doubles plain text (tables aside, see
+    // escapeTelegramCardText), so a longer card is refused; 2,000 is also the
+    // agent's own question cap. Text packed with links or email addresses grows
+    // more and can still be cut.
+    // Spread, so an older core without these options still type-checks (and ignores them).
+    ...{ escapeCardText: escapeTelegramCardText, maxCardTextLength: 2000 },
   });
 
   const botUsernamePromise = fetchBotUsername(token);
