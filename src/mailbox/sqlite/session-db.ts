@@ -319,8 +319,7 @@ export function migrateMessagesInTable(db: Database.Database): void {
  */
 export function getInboundSourceSessionId(db: Database.Database, messageId: string): string | null {
   const row = db.prepare('SELECT source_session_id FROM messages_in WHERE id = ?').get(messageId) as
-    | { source_session_id: string | null }
-    | undefined;
+    { source_session_id: string | null } | undefined;
   return row?.source_session_id ?? null;
 }
 

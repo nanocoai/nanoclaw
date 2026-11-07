@@ -620,8 +620,7 @@ export function registerPostDeliveryHook(hook: PostDeliveryHook): void {
 export type DeliveryActionHandler = (content: Record<string, unknown>, session: Session) => Promise<void>;
 
 type DeliveryEntry =
-  | { guard: Unguarded; handler: DeliveryActionHandler }
-  | { guard: DeliveryGuardSpec; handler: GuardedDeliveryHandler };
+  { guard: Unguarded; handler: DeliveryActionHandler } | { guard: DeliveryGuardSpec; handler: GuardedDeliveryHandler };
 
 const deliveryActions = new Map<string, DeliveryEntry>();
 

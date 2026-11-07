@@ -284,8 +284,7 @@ describe('deliverSessionMessages — retry and permanent failure', () => {
     // The row must end as status='failed', never 'delivered'
     const deliveryDb = new Database(inboundDbPath('ag-1', session.id), { readonly: true });
     const row = deliveryDb.prepare('SELECT * FROM delivered WHERE message_out_id = ?').get('out-offline') as
-      | { status: string; platform_message_id: string | null }
-      | undefined;
+      { status: string; platform_message_id: string | null } | undefined;
     deliveryDb.close();
     expect(row).toBeDefined();
     expect(row!.status).toBe('failed');
