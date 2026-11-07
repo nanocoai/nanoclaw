@@ -550,14 +550,15 @@ export function appendRawText(
  * Per card, so every platform takes the whole card. The chart limits are what
  * Slack draws natively; past 10,000 characters Slack swaps a table for plain
  * text cut at 3,000; 3,000 is Slack's limit for a block of text and 2,000 for a
- * field; 10 parts and 12,000 characters keep a card inside Slack's 50 blocks
- * and a Teams bot message.
+ * field; 10 parts, 30 table rows and 12,000 characters keep the largest card
+ * near 75 KB of the 100 KB a Teams bot message may hold (counted as UTF-16),
+ * and inside Slack's 50 blocks.
  */
 const CARD_LIMITS = {
   parts: 10,
   fields: 10,
   tables: 1,
-  tableRows: 50,
+  tableRows: 30,
   tableColumns: 6,
   tableText: 10_000,
   charts: 2,
@@ -647,11 +648,12 @@ function cardPartProblems(children: unknown[]): string[] {
           }
           text += row.map(String).join('').length;
         }
+        const aligns = ['left', 'center', 'right'];
         if (
           align !== undefined &&
-          (!Array.isArray(align) || !align.every((a) => ['left', 'center', 'right'].includes(a as string)))
+          (!Array.isArray(align) || align.length > headers.length || !align.every((a) => aligns.includes(a as string)))
         ) {
-          return fail('props.align must list left, center or right');
+          return fail('props.align must list left, center or right, one per column at most');
         }
         if (caption !== undefined && typeof caption !== 'string') return fail('props.caption must be text');
         text += typeof caption === 'string' ? caption.length : 0;
@@ -675,6 +677,7 @@ function cardPartProblems(children: unknown[]): string[] {
           const bad = segments.findIndex((s) => !isRecord(s) || typeof s.value !== 'number' || !(s.value > 0));
           if (bad !== -1) return fail(`props.chart.segments[${bad}].value must be a number above 0`);
           labels = segments.map((s) => (s as Record<string, unknown>).label);
+          if (new Set(labels).size !== labels.length) return fail('slice labels must not repeat');
         } else if (chart.type === 'bar' || chart.type === 'line' || chart.type === 'area') {
           const { categories, series, xLabel, yLabel } = chart;
           if (!Array.isArray(categories) || categories.length === 0 || categories.length > CARD_LIMITS.chartPoints) {

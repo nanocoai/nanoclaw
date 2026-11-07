@@ -1077,9 +1077,28 @@ describe('createChatSdkBridge.deliver — send_card json-render parts', () => {
       /at most 2000/,
     ],
     [
-      'a table of 51 rows',
-      [{ type: 'Table', props: { headers: ['a'], rows: Array.from({ length: 51 }, () => ['1']) } }],
-      /at most 50 rows/,
+      'a table of 31 rows',
+      [{ type: 'Table', props: { headers: ['a'], rows: Array.from({ length: 31 }, () => ['1']) } }],
+      /at most 30 rows/,
+    ],
+    [
+      'a pie with a repeated slice label',
+      [
+        {
+          type: 'Chart',
+          props: {
+            title: 'P',
+            chart: {
+              type: 'pie',
+              segments: [
+                { label: 'a', value: 1 },
+                { label: 'a', value: 2 },
+              ],
+            },
+          },
+        },
+      ],
+      /must not repeat/,
     ],
     [
       'a table of 7 columns',

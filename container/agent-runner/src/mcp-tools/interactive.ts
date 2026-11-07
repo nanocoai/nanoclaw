@@ -130,14 +130,15 @@ function partitionActions(card: Record<string, unknown>): { card: Record<string,
  * Per card, so every platform takes the whole card. The chart limits are what
  * Slack draws natively; past 10,000 characters Slack swaps a table for plain
  * text cut at 3,000; 3,000 is Slack's limit for a block of text and 2,000 for a
- * field; 10 parts and 12,000 characters keep a card inside Slack's 50 blocks
- * and a Teams bot message.
+ * field; 10 parts, 30 table rows and 12,000 characters keep the largest card
+ * near 75 KB of the 100 KB a Teams bot message may hold (counted as UTF-16),
+ * and inside Slack's 50 blocks.
  */
 const CARD_LIMITS = {
   parts: 10,
   fields: 10,
   tables: 1,
-  tableRows: 50,
+  tableRows: 30,
   tableColumns: 6,
   tableText: 10_000,
   charts: 2,
@@ -221,8 +222,9 @@ function cardPartProblems(children: unknown[]): string[] {
           }
           text += row.map(String).join('').length;
         }
-        if (align !== undefined && (!Array.isArray(align) || !align.every((a) => ['left', 'center', 'right'].includes(a as string)))) {
-          return fail('props.align must list left, center or right');
+        const aligns = ['left', 'center', 'right'];
+        if (align !== undefined && (!Array.isArray(align) || align.length > headers.length || !align.every((a) => aligns.includes(a as string)))) {
+          return fail('props.align must list left, center or right, one per column at most');
         }
         if (caption !== undefined && typeof caption !== 'string') return fail('props.caption must be text');
         text += typeof caption === 'string' ? caption.length : 0;
@@ -245,6 +247,7 @@ function cardPartProblems(children: unknown[]): string[] {
           const bad = segments.findIndex((s) => !isRecord(s) || typeof s.value !== 'number' || !(s.value > 0));
           if (bad !== -1) return fail(`props.chart.segments[${bad}].value must be a number above 0`);
           labels = segments.map((s) => (s as Record<string, unknown>).label);
+          if (new Set(labels).size !== labels.length) return fail('slice labels must not repeat');
         } else if (chart.type === 'bar' || chart.type === 'line' || chart.type === 'area') {
           const { categories, series, xLabel, yLabel } = chart;
           if (!Array.isArray(categories) || categories.length === 0 || categories.length > CARD_LIMITS.chartPoints) {
@@ -462,7 +465,7 @@ export const sendCard: McpToolDefinition = {
             children: {
               type: 'array',
               description:
-                'Text (strings or objects with a text field) and card parts: Text, Fields, Table, Chart, Divider. At most 10 parts, 1 Table (50 rows, 6 columns) and 2 Charts per card. A card with an invalid part is not sent; the result says what to fix. Nested action blocks are unsupported.',
+                'Text (strings or objects with a text field) and card parts: Text, Fields, Table, Chart, Divider. At most 10 parts, 1 Table (30 rows, 6 columns) and 2 Charts per card. A card with an invalid part is not sent; the result says what to fix. Nested action blocks are unsupported.',
               items: {
                 anyOf: [
                   { type: 'string' },

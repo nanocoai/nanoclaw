@@ -365,7 +365,9 @@ describe('send_card — card parts', () => {
     ],
     ['a field named after an object method', { type: 'Fields', children: [{ type: 'constructor' }] }, 'Fields holds only Field parts'],
     ['a short table row', table([['1x', '40']]), 'row 0 has 2 cells, expected 3'],
-    ['a table of 51 rows', table(Array.from({ length: 51 }, () => ['1x', '40', '38'])), 'at most 50 rows'],
+    ['a table of 31 rows', table(Array.from({ length: 31 }, () => ['1x', '40', '38'])), 'at most 30 rows'],
+    ['an align list longer than the headers', { type: 'Table', props: { headers: ['a'], rows: [['1']], align: ['left', 'right'] } }, 'one per column'],
+    ['a pie with a repeated slice label', chart('Split', { type: 'pie', segments: [{ label: 'a', value: 1 }, { label: 'a', value: 2 }] }), 'must not repeat'],
     ['a table of 7 columns', table([['a', 'b', 'c', 'd', 'e', 'f', 'g']], ['1', '2', '3', '4', '5', '6', '7']), 'at most 6 columns'],
     [
       'a series missing a value',
