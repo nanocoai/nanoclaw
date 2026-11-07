@@ -121,7 +121,13 @@ describe('question answers', () => {
       code: 'SQLITE_CONSTRAINT_PRIMARYKEY',
     });
     vi.mocked(writeSessionMessage).mockRejectedValueOnce(duplicate);
-    expect(await answer('b')).toBe('closed');
+    // The agent is woken, but a container start that hangs doesn't hold the card.
+    vi.mocked(wakeContainer).mockImplementationOnce(() => new Promise(() => {}));
+    const outcome = await Promise.race([
+      answer('b'),
+      new Promise((resolve) => setTimeout(() => resolve('still waiting'), 300)),
+    ]);
+    expect(outcome).toBe('closed');
     expect(await getPendingQuestion('q-1')).toBeUndefined();
     expect(wakeContainer).toHaveBeenCalledTimes(2);
   });
