@@ -14,7 +14,13 @@ vi.mock('@clack/prompts', () => ({
   text: (...args: unknown[]) => fixture.text(...args),
   log: { warn: vi.fn(), success: vi.fn(), info: vi.fn() },
 }));
-import { discoverRuntimeModels, parseRuntimeModels, runtimeModelArgs, validateModel } from './opencode-model-config.js';
+import {
+  discoverRuntimeModels,
+  filterOrdinaryModelChoices,
+  parseRuntimeModels,
+  runtimeModelArgs,
+  validateModel,
+} from './opencode-model-config.js';
 import { runModelSelection } from './opencode-models.js';
 
 const originalCwd = process.cwd();
@@ -107,6 +113,24 @@ describe('installed runtime catalog', () => {
 });
 
 describe('default model command', () => {
+  it('offers MiniMax Flash first and M3 second while filtering ordinary choices', () => {
+    expect(
+      filterOrdinaryModelChoices('minimax', [
+        'minimax/MiniMax-M3',
+        'minimax/MiniMax-M2.5',
+        'minimax/MiniMax-M3.1-Flash',
+        'minimax/image-01',
+      ]),
+    ).toEqual(['minimax/MiniMax-M3.1-Flash', 'minimax/MiniMax-M3']);
+  });
+
+  it('keeps non-MiniMax catalogs unchanged and leaves saved ids to the picker', () => {
+    expect(filterOrdinaryModelChoices('openai', ['openai/custom', 'openai/gpt-5'])).toEqual([
+      'openai/custom',
+      'openai/gpt-5',
+    ]);
+  });
+
   it('discovers from the configured local endpoint instead of offering native OpenAI models', async () => {
     fs.writeFileSync(
       '.env',
