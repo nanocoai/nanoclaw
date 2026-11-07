@@ -54,19 +54,21 @@ export async function hasInFlightChannelApproval(messagingGroupId: string): Prom
   return row !== undefined;
 }
 
+/** False when the request is gone (decided meanwhile). */
 export async function updatePendingChannelApprovalCard(
   messagingGroupId: string,
   title: string,
   question: string,
   optionsJson: string,
-): Promise<void> {
-  await getDb().run(
+): Promise<boolean> {
+  const result = await getDb().run(
     'UPDATE pending_channel_approvals SET title = ?, question = ?, options_json = ? WHERE messaging_group_id = ?',
     title,
     question,
     optionsJson,
     messagingGroupId,
   );
+  return result.changes > 0;
 }
 
 /** False when the row was already gone (another response took it). */
