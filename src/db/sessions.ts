@@ -321,6 +321,20 @@ export async function deletePendingApproval(approvalId: string): Promise<void> {
   await getDb().run('DELETE FROM pending_approvals WHERE approval_id = ?', approvalId);
 }
 
+/** Pending module approvals delivered to one chat whose id ends in `shortId`. */
+export async function getPendingApprovalsByShortId(
+  shortId: string,
+  channelType: string,
+  platformId: string,
+): Promise<PendingApproval[]> {
+  return getDb().all<PendingApproval>(
+    "SELECT * FROM pending_approvals WHERE approval_id LIKE ? AND status = 'pending' AND channel_type = ? AND platform_id = ?",
+    `appr-%-${shortId}`,
+    channelType,
+    platformId,
+  );
+}
+
 export async function getPendingApprovalsByAction(action: string): Promise<PendingApproval[]> {
   return getDb().all<PendingApproval>('SELECT * FROM pending_approvals WHERE action = ?', action);
 }
@@ -373,6 +387,13 @@ export async function getAskQuestionRender(id: string): Promise<
   }
 
   return undefined;
+}
+
+export async function getUnboundPendingApprovals(): Promise<PendingApproval[]> {
+  return getDb().all<PendingApproval>(
+    "SELECT * FROM pending_approvals WHERE status = 'pending' AND platform_message_id IS NULL AND (expires_at IS NULL OR expires_at > ?)",
+    new Date().toISOString(),
+  );
 }
 
 /** Bind the delivered platform card after its approval row is durable. */

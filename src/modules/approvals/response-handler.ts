@@ -13,21 +13,25 @@
  * The response handler is registered via core's `registerResponseHandler`;
  * core iterates handlers and the first one to return `true` claims the response.
  */
+import type { InboundEvent } from '../../channels/adapter.js';
+import { getDeliveryAdapter } from '../../delivery.js';
 import { requestWake } from '../../request-wake.js';
 import {
   deletePendingApproval,
   getPendingApproval,
+  getPendingApprovalsByShortId,
   getSession,
   transitionPendingApprovalStatus,
 } from '../../db/sessions.js';
 import type { ResponsePayload } from '../../response-registry.js';
 import { log } from '../../log.js';
+import { registerMessageInterceptor } from '../../router.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import type { PendingApproval } from '../../types.js';
 import { hasAdminPrivilege, isGlobalAdmin, isOwner } from '../permissions/db/user-roles.js';
 import { finalizeReject } from './finalize.js';
 import { getApprovalHandler, notifyApprovalResolved, REJECT_WITH_REASON_VALUE } from './primitive.js';
-import { armReasonCapture } from './reason-capture.js';
+import { armReasonCapture, clampReason, extractText } from './reason-capture.js';
 
 export async function handleApprovalsResponse(payload: ResponsePayload): Promise<boolean> {
   const approval = await getPendingApproval(payload.questionId);
@@ -51,6 +55,7 @@ async function handleRegisteredApproval(
   approval: PendingApproval,
   selectedOption: string,
   userId: string,
+  reason?: string,
 ): Promise<void> {
   if (!approval.session_id) {
     await deletePendingApproval(approval.approval_id);
@@ -72,7 +77,7 @@ async function handleRegisteredApproval(
 
   // Plain Reject (or any other non-approve value) — instant fast path.
   if (selectedOption !== 'approve') {
-    await finalizeReject(approval, session, userId);
+    await finalizeReject(approval, session, userId, reason);
     return;
   }
 
@@ -118,6 +123,64 @@ async function handleRegisteredApproval(
   await notifyApprovalResolved({ approval, session, outcome: 'approve', userId });
   await requestWake(session, 'approval-response');
 }
+
+const TEXT_REPLY = /^(approve|reject)\s+([a-z0-9]{6})(?:\s+(\S[\s\S]*))?$/i;
+
+/**
+ * Typed answer to an approval card on a channel that rendered it as text
+ * (see sendApprovalCard's fallbackText). Only the card's own chat can name it,
+ * and the sender is checked exactly like a button click.
+ */
+export async function handleApprovalTextReply(event: InboundEvent): Promise<boolean> {
+  const match = TEXT_REPLY.exec(extractText(event).trim());
+  if (!match) return false;
+  const [, verb, shortId, reason] = match;
+  const option = verb.toLowerCase();
+  if (option === 'approve' && reason) return false;
+
+  const instance = event.instance ?? event.channelType;
+  const reply = (text: string) =>
+    getDeliveryAdapter()?.deliver(
+      event.channelType,
+      event.platformId,
+      event.threadId,
+      'chat-sdk',
+      JSON.stringify({ text }),
+      undefined,
+      instance,
+    );
+  const approvals = (
+    await getPendingApprovalsByShortId(shortId.toLowerCase(), event.channelType, event.platformId)
+  ).filter((a) => (a.instance ?? a.channel_type) === instance);
+  if (approvals.length !== 1) {
+    await reply(`No pending approval ${shortId}.`);
+    return true;
+  }
+
+  const [approval] = approvals;
+  const { senderId } = JSON.parse(event.message.content) as { senderId?: unknown };
+  const payload: ResponsePayload = {
+    questionId: approval.approval_id,
+    value: option,
+    userId: typeof senderId === 'string' ? senderId : null,
+    channelType: event.channelType,
+    instance,
+    platformId: event.platformId,
+    threadId: event.threadId,
+  };
+  if (!(await isAuthorizedApprovalClick(approval, payload))) {
+    log.warn('Ignoring approval reply from a non-approver', {
+      approvalId: approval.approval_id,
+      userId: payload.userId,
+    });
+    return true;
+  }
+  await handleRegisteredApproval(approval, option, namespacedUserId(payload) ?? '', reason && clampReason(reason));
+  await reply(option === 'approve' ? '✅ Approved' : '❌ Rejected');
+  return true;
+}
+
+registerMessageInterceptor(handleApprovalTextReply);
 
 export function namespacedUserId(payload: ResponsePayload): string | null {
   if (!payload.userId) return null;
