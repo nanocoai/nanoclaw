@@ -325,6 +325,7 @@ describe('send_card', () => {
 });
 
 describe('send_card — json-render parts', () => {
+  beforeEach(() => seedBoundThread('slack', 'C-fixture', null));
   const field = (label: string, value: string | number) => ({ type: 'Field', props: { label, value } });
   const table = (rows: string[][], headers = ['Scale', 'Before', 'After']) => ({
     type: 'Table',
