@@ -131,6 +131,12 @@ if [ -z "${INSTALL_CJK_FONTS:-}" ] && [ -f "../.env" ]; then
 fi
 
 BUILD_ARGS=()
+# Apple container recreates its builder VM at a 2 GiB default on every bare
+# `container build`, which runs out of memory on the cli-tools layer. Pass the
+# memory on every invocation; a builder started separately does not keep it.
+if [ "$CONTAINER_RUNTIME" = "container" ]; then
+    BUILD_ARGS+=(-m "${CONTAINER_BUILDER_MEM:-8G}")
+fi
 if [ "${INSTALL_CJK_FONTS:-false}" = "true" ]; then
     if [ "$PULL" = "true" ]; then
         # A pulled image ships whatever font set its publisher baked in; this
@@ -181,6 +187,31 @@ build_image() {
     done
 }
 
+# Apple container leaves the previous unpacked snapshot behind whenever an image
+# is replaced under an existing tag, and reclaims it only in `image delete` and
+# `image prune` (apple/container#2164). Sweep dangling images after a successful
+# build so repeated rebuilds do not fill the disk. Dangling only: `prune -a`
+# would remove every image not in use, including the one just built. This
+# removes the previous build of this tag; set NANOCLAW_SKIP_SNAPSHOT_PRUNE=true
+# to keep it. Never fails the build.
+reclaim_snapshots() {
+    [ "$CONTAINER_RUNTIME" = "container" ] || return 0
+    command -v container >/dev/null 2>&1 || return 0
+    if [ "$(printf '%s' "${NANOCLAW_SKIP_SNAPSHOT_PRUNE:-false}" | tr '[:upper:]' '[:lower:]')" = "true" ]; then
+        return 0
+    fi
+    local out="" status=0 count=0
+    out="$(container image prune 2>&1)" || status=$?
+    if [ "$status" -ne 0 ]; then
+        echo "note: could not prune dangling images (apple/container#2164)." >&2
+        echo "      Disk only; the image built fine. Run: container image prune" >&2
+        return 0
+    fi
+    count="$(printf '%s\n' "$out" | grep -c '^deleted ' 2>/dev/null || true)"
+    [ "${count:-0}" -gt 0 ] && echo "Reclaimed ${count} orphaned image snapshot(s)."
+    return 0
+}
+
 if [ "$PULL" = "true" ]; then
     echo "Pulling NanoClaw agent container image..."
     # Not exec'd: pull.sh runs as a child so `set -e` still carries its exit
@@ -218,6 +249,8 @@ else
 
     build_image "${BUILD_ARGS[@]}" -t "${IMAGE_NAME}:${TAG}" .
 fi
+
+reclaim_snapshots
 
 echo ""
 if [ "$PULL" = "true" ]; then
