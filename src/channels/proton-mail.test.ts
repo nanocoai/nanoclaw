@@ -12,6 +12,8 @@ import { formatLocalTime } from '../timezone.js';
 import {
   cardSubject,
   checkSenderAuth,
+  isTrustedInternalDomain,
+  parseInternalDomains,
   classifyAttachment,
   frameInbound,
   isLoopbackHost,
@@ -55,6 +57,12 @@ import { normalizeOptions } from './ask-question.js';
 describe('normalizeAddress', () => {
   it('lowercases and trims', () => {
     expect(normalizeAddress('  Someone@Example.COM ')).toBe('someone@example.com');
+  });
+  it('gives one mailbox one spelling: the domain in ASCII, the address in NFC', () => {
+    expect(normalizeAddress('alice@Bücher.de')).toBe('alice@xn--bcher-kva.de');
+    expect(normalizeAddress('alice@xn--bcher-kva.de')).toBe('alice@xn--bcher-kva.de');
+    // "é" composed and decomposed are one local part.
+    expect(normalizeAddress('ren\u00e9@example.org')).toBe(normalizeAddress('rene\u0301@example.org'));
   });
 });
 
@@ -962,13 +970,31 @@ describe('review 3 of #4218', () => {
       expect(check('head@school.example', [], ['internal'], ['School.Example'])).toBeNull();
       expect(check('head@other.example', [], ['internal'], ['school.example'])).toMatch(/internal/);
     });
+    it('a listed domain is trusted exactly; Proton’s own with their subdomains', () => {
+      expect(isTrustedInternalDomain('school.example', ['school.example'])).toBe(true);
+      expect(isTrustedInternalDomain('evil.school.example', ['school.example'])).toBe(false);
+      expect(isTrustedInternalDomain('notify.proton.me')).toBe(true);
+      expect(isTrustedInternalDomain('bücher.example', ['xn--bcher-kva.example'])).toBe(true);
+    });
+    it('PROTON_MAIL_INTERNAL_DOMAINS keeps only whole domains', () => {
+      expect(
+        parseInternalDomains(' School.Example, com, co.uk, , bad_domain.example, -x.example, bücher.example.'),
+      ).toEqual({
+        domains: ['school.example', 'xn--bcher-kva.example'],
+        rejected: ['com', 'co.uk', 'bad_domain.example', '-x.example'],
+      });
+      expect(parseInternalDomains(undefined)).toEqual({ domains: [], rejected: [] });
+    });
   });
 
   describe('international domains are shown with their ASCII form', () => {
-    it('a non-ASCII domain shows its punycode beside it', () => {
+    it('a non-ASCII domain is shown in ASCII, its Unicode spelling beside it', () => {
       // The "а" is Cyrillic: a lookalike of paypal.
-      expect(senderLabel('billing@pаypal.example')).toContain('xn--');
-      expect(senderLabel('a@bücher.example', 'Anna')).toBe('Anna <a@bücher.example> (a@xn--bcher-kva.example)');
+      expect(senderLabel('billing@pаypal.example')).toMatch(/^billing@xn--/);
+      expect(senderLabel('a@bücher.example', 'Anna')).toBe(
+        'Anna <a@xn--bcher-kva.example> (in Unicode: a@bücher.example)',
+      );
+      expect(senderLabel('a@xn--bcher-kva.example', 'Anna')).toBe(senderLabel('a@bücher.example', 'Anna'));
     });
     it('an ASCII domain is unchanged', () => {
       expect(senderLabel('a@example.org', 'Anna')).toBe('Anna <a@example.org>');

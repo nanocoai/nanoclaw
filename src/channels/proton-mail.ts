@@ -29,7 +29,7 @@ import fs from 'fs';
 import { createRequire } from 'module';
 import path from 'path';
 import type { ConnectionOptions } from 'tls';
-import { domainToASCII } from 'url';
+import { domainToASCII, domainToUnicode } from 'url';
 import { Worker } from 'worker_threads';
 
 import { ImapFlow } from 'imapflow';
@@ -183,8 +183,18 @@ export const PROTON_MAIL_DEFAULTS: ChannelDefaults = {
 
 // --- Pure helpers (exported for tests) ---
 
+/**
+ * One spelling per mailbox: trimmed, NFC, lower case, and the domain in its
+ * ASCII (punycode) form — `alice@bücher.de` and `alice@xn--bcher-kva.de` are
+ * one sender, so approving or denying either covers both. senderLabel shows
+ * the Unicode spelling beside it.
+ */
 export function normalizeAddress(raw: string): string {
-  return raw.trim().toLowerCase();
+  const s = raw.trim().normalize('NFC').toLowerCase();
+  const at = s.lastIndexOf('@');
+  if (at < 0) return s;
+  const domain = s.slice(at + 1);
+  return `${s.slice(0, at)}@${domainToASCII(domain) || domain}`;
 }
 
 /** "Re: X" unless the subject already carries a reply prefix in a common locale. */
@@ -1075,6 +1085,34 @@ export function mailingListOf(input: { listId?: string; listPost?: string; prece
 export const PROTON_AUTHSERV_ID = 'mail.protonmail.ch';
 /** Proton's own mail domains: internal mail from these (or a subdomain) is trusted. */
 export const PROTON_DOMAINS = ['proton.me', 'protonmail.com', 'protonmail.ch', 'pm.me'];
+/**
+ * PROTON_MAIL_INTERNAL_DOMAINS, read: each entry a whole domain (at least two
+ * labels, not a registry suffix such as co.uk), in ASCII. An entry like `com`
+ * would trust Proton-internal mail from every .com domain, so anything else
+ * is rejected (and logged at startup) rather than trusted.
+ */
+export function parseInternalDomains(raw: string | undefined): { domains: string[]; rejected: string[] } {
+  const domains: string[] = [];
+  const rejected: string[] = [];
+  for (const entry of (raw ?? '').split(',').map((d) => d.trim().toLowerCase().replace(/\.$/, ''))) {
+    if (!entry) continue;
+    const ascii = asciiDomain(entry);
+    const valid =
+      /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/.test(ascii) &&
+      !TWO_LEVEL_SUFFIXES.has(ascii);
+    (valid ? domains : rejected).push(valid ? ascii : entry);
+  }
+  return { domains, rejected };
+}
+
+/** Whether Proton-internal mail from `domain` is trusted: Proton's own and their subdomains, or a listed domain exactly. */
+export function isTrustedInternalDomain(domain: string, internalDomains: string[] = []): boolean {
+  const from = asciiDomain(domain.toLowerCase());
+  if (!from) return false;
+  if (PROTON_DOMAINS.some((d) => from === d || from.endsWith(`.${d}`))) return true;
+  return internalDomains.some((d) => asciiDomain(d.trim().toLowerCase()) === from);
+}
+
 /** How checkSenderAuth's reason starts for internal mail from a domain not trusted (handleMessage flags it). */
 const INTERNAL_UNTRUSTED = 'internal mail from';
 
@@ -1159,10 +1197,11 @@ export function addressDomain(address: string): string {
  *
  * Internal mail is trusted only from Proton's own domains and their
  * subdomains (Proton's notices come from notify.proton.me), and from
- * `internalDomains`: the bridge account's own domain and any listed in
- * PROTON_MAIL_INTERNAL_DOMAINS, for a Proton custom domain. A Proton account
- * can send as an address outside Proton (a custom domain, or an external
- * address it has connected), and nothing Proton adds proves which.
+ * `internalDomains` exactly: those listed in PROTON_MAIL_INTERNAL_DOMAINS,
+ * for a Proton custom domain. A Proton account can send as an address
+ * outside Proton (a custom domain, or an external address it has connected,
+ * such as a Gmail one), and nothing Proton adds proves which — so not even
+ * the bridge account's own domain is trusted unless listed.
  *
  * `authResults` is the value of every Authentication-Results header line;
  * `pmOrigin` of every X-Pm-Origin line.
@@ -1193,9 +1232,7 @@ export function checkSenderAuth(
   if (origins.length > 1) return `${origins.length} X-Pm-Origin headers`;
   if (origins[0] === 'internal') {
     if (verdicts.length > 0) return 'internal mail carrying a DMARC verdict';
-    const trusted = [...PROTON_DOMAINS, ...internalDomains].map((d) => asciiDomain(d.trim().toLowerCase()));
-    const from = asciiDomain(fromDomain);
-    if (!trusted.some((d) => d && (from === d || from.endsWith(`.${d}`)))) {
+    if (!isTrustedInternalDomain(fromDomain, internalDomains)) {
       return `${INTERNAL_UNTRUSTED} ${fromDomain}, not a Proton domain or one in PROTON_MAIL_INTERNAL_DOMAINS`;
     }
     return null;
@@ -1325,16 +1362,18 @@ export function displayName(address: string, name?: string): string | undefined 
 }
 
 /** How a sender is shown to approvers and agents: the verified address, after the display name if there is one. */
-export function senderLabel(address: string, name?: string): string {
+export function senderLabel(rawAddress: string, name?: string): string {
+  const address = normalizeAddress(rawAddress);
   const n = displayName(address, name);
   const label = n ? `${n} <${address}>` : address;
-  // A domain in Unicode can look like another (a Cyrillic "а" in paypal):
-  // its ASCII form, shown beside it, cannot.
+  // The address is in its ASCII form (normalizeAddress), which cannot look
+  // like another domain the way Unicode can (a Cyrillic "а" in paypal); an
+  // internationalised domain's Unicode spelling is shown beside it.
   const at = address.lastIndexOf('@');
   const domain = address.slice(at + 1);
-  if (at < 0 || /^[\x20-\x7e]*$/.test(domain)) return label;
-  const ascii = asciiDomain(domain);
-  return ascii !== domain ? `${label} (${address.slice(0, at)}@${ascii})` : label;
+  if (at < 0 || !/(^|\.)xn--/.test(domain)) return label;
+  const unicode = domainToUnicode(domain);
+  return unicode && unicode !== domain ? `${label} (in Unicode: ${address.slice(0, at)}@${unicode})` : label;
 }
 
 /**
@@ -1821,6 +1860,7 @@ registerChannelAdapter('proton-mail', {
     }
     const rejectEnv = env.PROTON_MAIL_TLS_REJECT_UNAUTHORIZED;
     const rejectUnauthorized = rejectEnv === 'true' ? true : rejectEnv === 'false' ? false : undefined;
+    const internal = parseInternalDomains(env.PROTON_MAIL_INTERNAL_DOMAINS);
 
     const cfg = {
       address,
@@ -1837,14 +1877,24 @@ registerChannelAdapter('proton-mail', {
       defaultSubject: env.PROTON_MAIL_DEFAULT_SUBJECT || 'Message from your assistant',
       /**
        * Domains, beyond Proton's own, whose Proton-internal mail is trusted
-       * (checkSenderAuth): the bridge account's own, and a comma-separated
-       * PROTON_MAIL_INTERNAL_DOMAINS for other Proton custom domains.
+       * (checkSenderAuth): a comma-separated PROTON_MAIL_INTERNAL_DOMAINS, for
+       * Proton custom domains — the bridge account's own included, if it is one.
        */
-      internalDomains: [
-        address.split('@').pop() ?? '',
-        ...(env.PROTON_MAIL_INTERNAL_DOMAINS ?? '').split(',').map((d) => d.trim().toLowerCase()),
-      ].filter(Boolean),
+      internalDomains: internal.domains,
     };
+    if (internal.rejected.length > 0) {
+      log.warn('Proton Mail: PROTON_MAIL_INTERNAL_DOMAINS entries ignored — each must be a whole domain', {
+        rejected: internal.rejected,
+      });
+    }
+    const ownDomain = address.split('@').pop() ?? '';
+    if (ownDomain && !isTrustedInternalDomain(ownDomain, cfg.internalDomains)) {
+      log.warn(
+        "Proton Mail: the account's own domain is not trusted for Proton-internal mail — if it is a Proton " +
+          'custom domain, add it to PROTON_MAIL_INTERNAL_DOMAINS',
+        { domain: ownDomain },
+      );
+    }
     const imapTls = tlsOptions(cfg.imapHost, { ca, rejectUnauthorized });
     const smtpTls = tlsOptions(cfg.smtpHost, { ca, rejectUnauthorized });
     for (const [kind, host, t] of [

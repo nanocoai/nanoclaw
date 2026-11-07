@@ -2179,6 +2179,31 @@ describe('review 4 of #4218', () => {
     });
   });
 
+  describe('Proton-internal mail and the account’s own domain', () => {
+    it('is not trusted from the account’s own domain unless PROTON_MAIL_INTERNAL_DOMAINS lists it', async () => {
+      const { calls, arrive } = await start();
+      const uid = await arrive(mail({ from: 'colleague@bridge.example', body: 'hi', auth: 'X-Pm-Origin: internal' }));
+      expect(calls.inbound).toEqual([]);
+      expect(flagged().filter(([u]) => u === uid)).toEqual([[uid, [FAILED]]]);
+    });
+
+    it('is trusted from it once listed, and a bare suffix in the list trusts nothing', async () => {
+      h.env.PROTON_MAIL_INTERNAL_DOMAINS = 'example, bridge.example';
+      const { calls, arrive } = await start();
+      await arrive(mail({ from: 'colleague@bridge.example', body: 'listed', auth: 'X-Pm-Origin: internal' }));
+      await arrive(mail({ from: 'x@any.example', body: 'suffix', auth: 'X-Pm-Origin: internal' }));
+      expect(calls.inbound.map((m) => m.content.text)).toEqual(['listed']);
+    });
+  });
+
+  describe('one mailbox, one sender', () => {
+    it('a Unicode domain arrives as its ASCII form', async () => {
+      const { calls, arrive } = await start();
+      await arrive(mail({ from: 'Anna <a@bücher.example>', body: 'hallo', auth: passFor('xn--bcher-kva.example') }));
+      expect(calls.inbound[0].content.sender).toBe('a@xn--bcher-kva.example');
+    });
+  });
+
   describe('denied senders', () => {
     it('take no new-sender slot, even after pruneSettled has dropped them', async () => {
       h.wired = false;
