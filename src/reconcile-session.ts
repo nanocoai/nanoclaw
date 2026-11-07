@@ -35,6 +35,7 @@ import { getSessionClaim } from './db/coordination.js';
 import { getSession, isTaskThread, updateSession } from './db/sessions.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { ABSOLUTE_CEILING_MS_RAW, CLAIM_STUCK_MS_RAW } from './config.js';
+import { scheduleDueWake } from './due-wake.js';
 import { log } from './log.js';
 import { heartbeatPath, withExistingMailboxSession } from './session-manager.js';
 import { getContainerStartedAtMs, isContainerRunning, killContainer } from './container-runner.js';
@@ -158,6 +159,7 @@ async function reconcileActiveSession(session: Session): Promise<void> {
     const exists = await withExistingMailboxSession(agentGroup.id, session.id, async (mailbox) => {
       mailbox.applyProcessingAcks(mailbox.getTerminalProcessingAcks());
       dueCount = mailbox.countDueMessages();
+      scheduleDueWake(session.id, mailbox.nextDueAt());
       shouldWake = dueCount > 0 && !isContainerRunning(session.id);
       if (!shouldWake) {
         await maintainSessionMailbox(mailbox, session, agentGroup.id);

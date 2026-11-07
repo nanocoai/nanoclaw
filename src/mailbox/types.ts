@@ -95,6 +95,8 @@ export interface InboundMailbox {
   replaceDestinations(entries: Destination[]): void;
   insertMessage(message: InboundMessage): Promise<void>;
   countDueMessages(): number;
+  /** When the next pending wake-triggering message becomes due (ISO), or null if none is scheduled. */
+  nextDueAt(): string | null;
   markMessageFailed(messageId: string): void;
   retryWithBackoff(messageId: string, backoffSec: number): void;
   getMessageForRetry(messageId: string, status: 'pending' | 'processing'): MessageRetry | undefined;
