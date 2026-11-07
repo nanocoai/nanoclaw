@@ -3,7 +3,7 @@ name: migrate-nanoclaw
 description: Extracts user customizations from a fork, generates a replayable migration guide, and upgrades to upstream by reapplying customizations on a clean base. Replaces merge-based upgrades with intent-based migration.
 ---
 
-# Context
+# Migrate a NanoClaw fork to upstream
 
 NanoClaw users fork the repo and customize it — changing config values, editing source files, modifying personas, adding skills. When upstream ships updates or refactors, `git merge` produces painful conflicts because the same core files were changed on both sides.
 
