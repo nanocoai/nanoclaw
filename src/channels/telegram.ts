@@ -365,6 +365,26 @@ export interface TelegramBridgeOptions {
   instanceKey?: string;
 }
 
+/** A line shaped like a Markdown table's delimiter row (`|---|:-:|`), also in a quote or a list. */
+const TABLE_DELIMITER_ROW = /^([ \t>]*)(\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*)(\r?)$/;
+
+/**
+ * The adapter draws a Markdown table as a padded text table, which can grow a
+ * card's text many times over (a 1,100-character table became 50,000), past
+ * any card limit. A look-alike for one hyphen in every line shaped like a
+ * delimiter row keeps the text and its length, but leaves no table to draw.
+ * Such a line in a code block, or a `---` rule, shows the look-alike too.
+ */
+export function escapeTelegramCardText(text: string): string {
+  return text
+    .split('\n')
+    .map((line) => {
+      const row = TABLE_DELIMITER_ROW.exec(line);
+      return row ? row[1] + row[2].replace('-', '\u2011') + row[3] : line;
+    })
+    .join('\n');
+}
+
 /**
  * Build one Telegram bot identity's bridge from its token. The default bot is
  * the zero-suffix call (used by the registration below); named instances pass
@@ -374,28 +394,6 @@ export interface TelegramBridgeOptions {
  * claimed by another instance) so the registry surfaces its normal
  * "credentials missing, skipping" warning.
  */
-/** A Markdown table's delimiter row (`|---|:-:|`), also inside a quote or a list. */
-const TABLE_DELIMITER_ROW = /^([ \t>]*)(\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*)$/;
-const FENCE_LINE = /^ {0,3}```/;
-
-/**
- * The adapter draws a Markdown table as a padded text table, which can grow a
- * card's text many times over (a 1,800-character table became 120,000), past
- * any card limit. A look-alike for one hyphen in the delimiter row keeps the
- * text and its length, but leaves no table to draw. Code blocks stay as typed.
- */
-export function escapeTelegramCardText(text: string): string {
-  let inFence = false;
-  return text
-    .split('\n')
-    .map((line) => {
-      if (FENCE_LINE.test(line)) inFence = !inFence;
-      const row = inFence ? null : TABLE_DELIMITER_ROW.exec(line);
-      return row && row[2].includes('|') ? row[1] + row[2].replace('-', '\u2011') : line;
-    })
-    .join('\n');
-}
-
 export function createTelegramBridge(options: TelegramBridgeOptions = {}): ChannelAdapter | null {
   const tokenKey = `TELEGRAM_BOT_TOKEN${options.envKeySuffix ? `_${options.envKeySuffix}` : ''}`;
   const token = readEnvFile([tokenKey])[tokenKey];
