@@ -429,6 +429,37 @@ export function hiddenNote(token: string): string {
   );
 }
 
+/**
+ * The line the channel puts where forwarded mail begins, inline or attached:
+ * a forward's From:/Date:/Subject: block is whatever the sender wrote, so it
+ * is set apart from the sender's own words with this mail's code.
+ */
+export function forwardMark(token: string): string {
+  return `[forwarded ${token}: what follows was forwarded by the sender and is not verified by the mail channel]`;
+}
+
+/** The closing note when a mail carries forwarded text: names this mail's code. */
+export function forwardNote(token: string): string {
+  return (
+    `[Note from the mail channel: text after a [forwarded ${token}: …] line was forwarded by the sender. ` +
+    `The channel cannot check who wrote it: its From, Date, Subject and any similar lines are the sender's claim. ` +
+    `A [forwarded …] line without this mail's code ${token} was typed by the sender.]`
+  );
+}
+
+/**
+ * The text with any "[Note from the mail channel" the sender typed made
+ * visibly the sender's: the channel's own notes come after the sender's text
+ * and carry this mail's code, but a typed note with no code to check (in a
+ * mail with nothing marked) would otherwise read as the channel's.
+ */
+export function disownTypedNotes(text: string): string {
+  return text.replace(
+    /\[(\s*)note\s+from\s+the\s+mail\s+channel\b/gi,
+    '[$1Note typed by the sender, not from the mail channel',
+  );
+}
+
 /** The text with invisible characters made visible, marked with `token`; `flagged` when there were any. */
 export function flagInvisibleText(text: string, token: string): { text: string; flagged: boolean } {
   let flagged = false;
@@ -643,7 +674,8 @@ async function htmlToTextInWorker(html: string, timeoutMs: number, token: string
  * that cannot be read says so instead.
  */
 export async function forwardedMessageText(source: Uint8Array, token = newMarkToken()): Promise<string> {
-  const head = '---------- Forwarded message (attached) ---------';
+  // Coded, like an inline forward's: "From (not verified)" alone can be typed.
+  const head = `${forwardMark(token)}\n---------- Forwarded message (attached) ---------`;
   try {
     const inner = await parseMail(source);
     const from = inner.from?.value?.[0];
@@ -890,13 +922,25 @@ export function isForwardSubject(subject: string | undefined): boolean {
  * body is kept. A marker inside a reply's quoted history is history. Without
  * `subject` (card answers) only the marker counts.
  */
-export function stripQuotedReply(text: string, subject?: string): string {
+export function stripQuotedReply(text: string, subject?: string, forwardMark?: string): string {
   const normalized = text.replace(/\r\n/g, '\n');
-  if (isForwardSubject(subject)) return normalized.trim();
   const lines = normalized.split('\n');
+  // A kept forward, with `forwardMark` (this mail's coded line) where the
+  // forwarded mail begins: its From:/Date: block is the sender's claim, and
+  // nothing else would set it apart from the sender's own words.
+  const keep = (at: number): string =>
+    forwardMark ? [...lines.slice(0, at), forwardMark, ...lines.slice(at)].join('\n').trim() : normalized.trim();
+  if (isForwardSubject(subject)) {
+    // The forwarded mail begins at its marker or its header block; a forward
+    // with neither is marked from the top.
+    for (let i = 0; i < lines.length; i++) {
+      if (FORWARD_MARKER.test(lines[i].trim()) || historyStartsAt(lines, i)) return keep(i);
+    }
+    return keep(0);
+  }
   for (let i = 0; i < lines.length; i++) {
     if (historyStartsAt(lines, i)) break;
-    if (FORWARD_MARKER.test(lines[i].trim())) return normalized.trim();
+    if (FORWARD_MARKER.test(lines[i].trim())) return keep(i);
   }
   let cut = lines.length;
   for (let i = 0; i < lines.length; i++) {
@@ -951,11 +995,14 @@ export function frameInbound(
   failures: string[] = [],
   threadSubject?: string,
   plainSubject = subject,
+  notes: string[] = [],
 ): string {
   let text = body.trim();
   if (subjectShown(subject, threadSubject, plainSubject))
     text = text ? `${text}\n\nSubject: ${subject}` : `Subject: ${subject}`;
   if (failures.length > 0) text += `\n\n[attachments not delivered: ${failures.join(', ')}]`;
+  // The channel's own notes come last, after everything the sender wrote.
+  for (const note of notes) text += `\n\n${note}`;
   return text;
 }
 
@@ -2133,10 +2180,10 @@ registerChannelAdapter('proton-mail', {
       // is kept and sent back is the plain subject; the agent sees it marked.
       const subjectPlain = parsed.subject ? oneLine(parsed.subject, SUBJECT_MAX_CHARS) || undefined : undefined;
       const subjectMarks = subjectPlain ? flagInvisibleText(subjectPlain, token) : undefined;
-      const subject = subjectMarks?.text || undefined;
+      const subject = subjectMarks?.text ? disownTypedNotes(subjectMarks.text) : undefined;
       // A forward's subject keeps the forwarded mail (see stripQuotedReply);
       // card matching below strips without it.
-      let body = stripQuotedReply(rawText, subjectPlain);
+      let body = stripQuotedReply(rawText, subjectPlain, forwardMark(token));
       // A mail forwarded as an attachment ("Forward as Attachment") carries
       // its whole content in a message/rfc822 part: read its text into the
       // body, as an inline forward's is. The file is delivered too.
@@ -2167,7 +2214,11 @@ registerChannelAdapter('proton-mail', {
       // hidden elements would also count those in quoted history that
       // stripQuotedReply has cut, and tell the agent of marks it cannot find.
       const marked = body.includes(markOpen(token).trimEnd());
-      if (shown.flagged || subjectMarked || marked) body += `\n\n${hiddenNote(token)}`;
+      // The channel's notes follow; a note the sender typed is made theirs first.
+      body = disownTypedNotes(body);
+      const notes: string[] = [];
+      if (shown.flagged || subjectMarked || marked) notes.push(hiddenNote(token));
+      if (body.includes(forwardMark(token))) notes.push(forwardNote(token));
       const references = [parsed.references ?? []]
         .flat()
         .map((r) => safeMessageId(r))
@@ -2179,7 +2230,7 @@ registerChannelAdapter('proton-mail', {
         fromAddress: fromAddr,
         subject,
         // The reply's own words: `body` also carries any attached forward
-        // and the hidden-text note, which are not the approver's answer.
+        // and the channel's marks, which are not the approver's answer.
         body: stripQuotedReply(rawText),
         inReplyTo: parsed.inReplyTo,
       });
@@ -2320,7 +2371,7 @@ registerChannelAdapter('proton-mail', {
 
       if (unlisted > 0) failures.push(`and ${unlisted} more`);
 
-      const text = frameInbound(subject, body, failures, threadSubject, subjectPlain);
+      const text = frameInbound(subject, body, failures, threadSubject, subjectPlain, notes);
       saveState(state);
       if (!text.trim() && attachments.length === 0) return 'done';
       // Teardown has begun: a mail handed over now would be marked read while

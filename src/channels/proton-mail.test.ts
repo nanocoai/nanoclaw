@@ -625,6 +625,10 @@ describe('frameInbound', () => {
   it('puts the body first so a slash command stays a command', () => {
     expect(frameInbound('admin', '/clear')).toBe('/clear\n\nSubject: admin');
     expect(frameInbound(undefined, 'hello')).toBe('hello');
+    // The channel's notes follow everything the sender wrote, the subject too.
+    expect(
+      frameInbound('Other', 'hi', ['a.pdf (too large)'], 'Hello', 'Other', ['[Note from the mail channel: x]']),
+    ).toBe('hi\n\nSubject: Other\n\n[attachments not delivered: a.pdf (too large)]\n\n[Note from the mail channel: x]');
     expect(frameInbound('Only a subject', '')).toBe('Subject: Only a subject');
     expect(frameInbound('S', 'b', ['big.pdf (too large)'])).toBe(
       'b\n\nSubject: S\n\n[attachments not delivered: big.pdf (too large)]',
