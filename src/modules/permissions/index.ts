@@ -71,6 +71,13 @@ interface PendingNameInput {
 }
 const awaitingNameInput = new Map<string, PendingNameInput>();
 
+// ── Agent card replacing the first card ──
+// Card buttons are decoded by position against the stored options, and the
+// first card keeps its buttons until the host accepts. So while the agent card
+// is sent no card click counts, and after it a click from the first card is
+// ignored. Keyed by messaging group; lost on restart, when nothing was replaced.
+const agentCards = new Map<string, { firstCardId?: string; sent: boolean }>();
+
 async function extractAndUpsertUser(event: InboundEvent): Promise<string | null> {
   let content: Record<string, unknown>;
   try {
@@ -496,6 +503,8 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
     return 'refused';
   }
   const approverId = clickerId;
+  const swap = agentCards.get(row.messaging_group_id);
+  if (swap && payload.messageId && (!swap.sent || payload.messageId === swap.firstCardId)) return 'ignored';
 
   // ── Reject / Cancel ──
   if (payload.value === REJECT_VALUE) {
@@ -535,8 +544,9 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
     const title = '📋 Choose an agent';
     const question = `Which agent should handle this channel? ${AGENT_ACCESS_SCOPE_WARNING}`;
 
-    // Sent before its options are stored: until then, a tap on the first card
-    // (a double tap, or Reject) still means that card's button, not an agent.
+    // Sent before its options are stored, so a send that fails leaves the first card as it was.
+    const card = { firstCardId: payload.messageId, sent: false };
+    agentCards.set(row.messaging_group_id, card);
     try {
       await adapter.deliver(
         approverDm.channel_type,
@@ -558,11 +568,13 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
         messagingGroupId: row.messaging_group_id,
         err,
       });
+      if (agentCards.get(row.messaging_group_id) === card) agentCards.delete(row.messaging_group_id);
       return 'ignored'; // the first card keeps its buttons for another try
     }
     // Decided meanwhile (a Reject): leave that decision on the card.
     if (!(await updatePendingChannelApprovalCard(row.messaging_group_id, title, question, JSON.stringify(options))))
       return 'ignored';
+    card.sent = true;
     return 'accepted';
   }
 
