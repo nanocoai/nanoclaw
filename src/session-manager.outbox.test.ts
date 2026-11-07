@@ -86,6 +86,26 @@ describe('outbox root swapped while clearing', () => {
   });
 });
 
+describe('outbox operational errors are not unsafe-path refusals', () => {
+  it('propagates a permission error from opening the outbox instead of silently dropping the files', () => {
+    fs.mkdirSync(path.join(outboxRoot(), 'msg-err'));
+    fs.writeFileSync(path.join(outboxRoot(), 'msg-err', 'report.txt'), 'report');
+
+    // A transient host failure (here EACCES) while opening the session dir
+    // is not a planted symlink: returning undefined would deliver the message
+    // without its declared files and clear the outbox as if all went well.
+    const original = fs.openSync as (...args: unknown[]) => unknown;
+    vi.spyOn(fs, 'openSync').mockImplementation(((...args: unknown[]) => {
+      if (args[0] === sessionDir(AG, SESS)) {
+        throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+      }
+      return original.apply(fs, args);
+    }) as never);
+
+    expect(() => readOutboxFiles(AG, SESS, 'msg-err', ['report.txt'])).toThrow('permission denied');
+  });
+});
+
 describe('outbox happy path', () => {
   it('reads the declared files and clears the message dir', () => {
     fs.mkdirSync(path.join(outboxRoot(), 'msg-ok'));
