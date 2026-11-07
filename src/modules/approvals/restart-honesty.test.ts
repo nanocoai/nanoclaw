@@ -29,6 +29,7 @@ import {
   type GatewayApprovalRequest,
   type GatewayProviderDefinition,
 } from '../../gateway-providers/index.js';
+import type { ResponseOutcome } from '../../response-registry.js';
 import type { PendingApproval } from '../../types.js';
 import {
   GATEWAY_APPROVAL_ACTION,
@@ -77,7 +78,7 @@ const fakeProvider: GatewayProviderDefinition = {
   approvals: source,
 };
 
-async function resolveApproval(questionId: string, value: string): Promise<boolean> {
+async function resolveApproval(questionId: string, value: string): Promise<ResponseOutcome | false> {
   return handleGatewayApprovalResponse({
     questionId,
     value,
@@ -142,7 +143,7 @@ describe('row-keyed resolution after a restart', () => {
     await startGatewayApprovalCoordinator(fakeProvider, captureAdapter, vi.fn());
 
     // No in-memory state exists for this row — exactly the post-restart shape.
-    expect(await resolveApproval('oa-test0001', 'approve')).toBe(true);
+    expect(await resolveApproval('oa-test0001', 'approve')).toBe('accepted');
     expect(await getPendingApproval('oa-test0001')).toBeUndefined();
 
     const edit = delivered.find((call) => call.content.includes('retry'));
@@ -153,7 +154,7 @@ describe('row-keyed resolution after a restart', () => {
     await seedRow();
     await startGatewayApprovalCoordinator(fakeProvider, captureAdapter, vi.fn());
 
-    expect(await resolveApproval('oa-test0001', 'reject')).toBe(true);
+    expect(await resolveApproval('oa-test0001', 'reject')).toBe('accepted');
     expect(await getPendingApproval('oa-test0001')).toBeUndefined();
     expect(delivered).toHaveLength(1);
     expect(delivered[0].content).not.toContain('retry');
@@ -164,7 +165,7 @@ describe('row-keyed resolution after a restart', () => {
     await seedRow();
     await startGatewayApprovalCoordinator(fakeProvider, captureAdapter, vi.fn());
 
-    expect(await resolveApproval('oa-test0001', 'approve')).toBe(true);
+    expect(await resolveApproval('oa-test0001', 'approve')).toBe('accepted');
     expect(source.decide).toHaveBeenCalledWith('req-1', 'approve');
     // Delivered to the gateway — no caveat follow-up needed.
     expect(delivered).toHaveLength(1);
@@ -174,7 +175,7 @@ describe('row-keyed resolution after a restart', () => {
   it('a second click loses the row transition and reports unresolved', async () => {
     await seedRow();
     await startGatewayApprovalCoordinator(fakeProvider, captureAdapter, vi.fn());
-    expect(await resolveApproval('oa-test0001', 'approve')).toBe(true);
+    expect(await resolveApproval('oa-test0001', 'approve')).toBe('accepted');
     expect(await resolveApproval('oa-test0001', 'reject')).toBe(false);
   });
 });
@@ -225,7 +226,7 @@ describe('reconnect dedupe', () => {
     // Let the asynchronous DB reads re-arm the callback before clicking the card.
     await new Promise<void>((resolve) => setImmediate(resolve));
     await vi.waitFor(async () => {
-      expect(await resolveApproval('oa-test0001', 'approve')).toBe(true);
+      expect(await resolveApproval('oa-test0001', 'approve')).toBe('accepted');
     });
     await expect(decisionPromise).resolves.toBe('approve');
     // No ask_question card was delivered for the redelivery.
@@ -253,7 +254,7 @@ describe('reconnect dedupe', () => {
     expect(row?.approver_user_id).toBe('telegram:admin');
     expect(row?.request_id).toBe('req-fresh');
 
-    expect(await resolveApproval(approvalId, 'reject')).toBe(true);
+    expect(await resolveApproval(approvalId, 'reject')).toBe('accepted');
     await expect(decisionPromise).resolves.toBe('deny');
   });
 });

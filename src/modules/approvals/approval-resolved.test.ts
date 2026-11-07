@@ -101,7 +101,7 @@ describe('approval-resolved callbacks', () => {
       threadId: null,
     });
 
-    expect(claimed).toBe(true);
+    expect(claimed).toBe('accepted');
     expect(events).toHaveLength(1);
     expect(events[0].outcome).toBe('reject');
     expect(events[0].approval.approval_id).toBe('appr-reject-1');
@@ -152,7 +152,7 @@ describe('approval-resolved callbacks', () => {
       threadId: null,
     });
 
-    expect(claimed).toBe(true);
+    expect(claimed).toBe('accepted');
     expect(events).toEqual(['boom', 'after']);
   });
 });

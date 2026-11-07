@@ -29,7 +29,7 @@ import {
 import { log } from './log.js';
 import { pickApprovalDelivery, pickApprover } from './modules/approvals/primitive.js';
 import { isAuthorizedApprovalClick } from './modules/approvals/response-handler.js';
-import { registerResponseHandler, type ResponsePayload } from './response-registry.js';
+import { registerResponseHandler, type ResponseOutcome, type ResponsePayload } from './response-registry.js';
 import type { PendingApproval } from './types.js';
 
 export const GATEWAY_APPROVAL_ACTION = 'gateway_request';
@@ -539,13 +539,13 @@ function armPending(
   return promise;
 }
 
-export async function handleGatewayApprovalResponse(payload: ResponsePayload): Promise<boolean> {
+export async function handleGatewayApprovalResponse(payload: ResponsePayload): Promise<ResponseOutcome | false> {
   let state: PendingState | undefined;
   try {
     const approval = await getPendingApproval(payload.questionId);
     if (!approval || approval.action !== GATEWAY_APPROVAL_ACTION) return false;
     state = pending.get(payload.questionId);
-    if (!(await isAuthorizedApprovalClick(approval, payload))) return true;
+    if (!(await isAuthorizedApprovalClick(approval, payload))) return 'refused';
     if (
       approvalSource?.durable &&
       (payload.instance !== (approval.instance ?? approval.channel_type) ||
@@ -553,10 +553,10 @@ export async function handleGatewayApprovalResponse(payload: ResponsePayload): P
         (payload.messageId !== undefined && payload.messageId !== approval.platform_message_id) ||
         (payload.platformId && payload.platformId !== approval.platform_id))
     )
-      return true;
+      return 'ignored';
     if (!approval.expires_at || Date.parse(approval.expires_at) <= Date.now()) {
       await expireApproval(approval.approval_id, 'no response');
-      return true;
+      return 'ignored';
     }
     const decision: GatewayApprovalDecision = payload.value === 'approve' ? 'approve' : 'deny';
     const claimed = await transitionPendingApprovalStatus(
@@ -564,7 +564,7 @@ export async function handleGatewayApprovalResponse(payload: ResponsePayload): P
       'pending',
       decision === 'approve' ? 'approved' : 'rejected',
     );
-    if (!claimed) return true;
+    if (!claimed) return 'ignored';
     // The database claim owns the outcome; expiry must not override it while
     // card updates or gateway delivery are still in flight.
     if (state) {
@@ -575,7 +575,7 @@ export async function handleGatewayApprovalResponse(payload: ResponsePayload): P
       await editGatewayApprovalCard(approval, decision === 'approve' ? '✅ Approved' : '❌ Rejected');
       await deliverDurableDecision({ ...approval, status: decision === 'approve' ? 'approved' : 'rejected' });
       if (state) settle(approval.approval_id, state, decision);
-      return true;
+      return 'accepted';
     }
     await editGatewayApprovalCard(approval, decision === 'approve' ? '✅ Approved' : '❌ Rejected');
     await deletePendingApproval(approval.approval_id);
@@ -596,11 +596,11 @@ export async function handleGatewayApprovalResponse(payload: ResponsePayload): P
         );
       }
     }
-    return true;
+    return 'accepted';
   } catch (err) {
     if (state) settle(payload.questionId, state, unavailableDecision());
     log.error('Gateway approval response failed closed', { approvalId: payload.questionId, err });
-    return true;
+    return 'ignored';
   }
 }
 
