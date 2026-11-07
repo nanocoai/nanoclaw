@@ -712,10 +712,11 @@ it('keeps durable decisions until acknowledgement and retries after restart; onl
     platformId: 'owner',
     threadId: null,
   };
-  await coordinator.handleGatewayApprovalResponse(click);
+  // Refused: no decision, the request stays pending (fail closed).
+  expect(await coordinator.handleGatewayApprovalResponse(click)).toBe('refused');
   expect(submit).not.toHaveBeenCalled();
   expect((await getPendingApproval(questionId))?.status).toBe('pending');
-  await coordinator.handleGatewayApprovalResponse({ ...click, userId: 'fixture:selected' });
+  expect(await coordinator.handleGatewayApprovalResponse({ ...click, userId: 'fixture:selected' })).toBe('accepted');
   expect(await outcome).toBe('approve');
   expect(submit).toHaveBeenCalledWith(native.id, 'approve');
   expect((await getPendingApproval(questionId))?.status).toBe('approved');

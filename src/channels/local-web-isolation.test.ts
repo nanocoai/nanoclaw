@@ -46,7 +46,10 @@ async function startAdapter(): Promise<{
     onInbound: (_platformId: string, _threadId: string | null, _message: InboundMessage) => {},
     onInboundEvent: () => {},
     onMetadata: () => {},
-    onAction: (questionId, selectedOption, userId) => void actions.push({ questionId, selectedOption, userId }),
+    onAction: async (questionId, selectedOption, userId) => {
+      actions.push({ questionId, selectedOption, userId });
+      return 'accepted' as const;
+    },
   }));
   return {
     registry,

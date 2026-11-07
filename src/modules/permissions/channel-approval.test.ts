@@ -95,6 +95,22 @@ vi.mock('../../group-folder.js', async (importOriginal) => {
   };
 });
 
+// A pass-through card-options store a test can make fail once.
+const cardUpdate = vi.hoisted(() => ({ fail: false }));
+vi.mock('./db/pending-channel-approvals.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./db/pending-channel-approvals.js')>();
+  return {
+    ...actual,
+    updatePendingChannelApprovalCard: async (...args: Parameters<typeof actual.updatePendingChannelApprovalCard>) => {
+      if (cardUpdate.fail) {
+        cardUpdate.fail = false;
+        throw new Error('SQLITE_BUSY: database is locked');
+      }
+      return actual.updatePendingChannelApprovalCard(...args);
+    },
+  };
+});
+
 // Mock ensureUserDm — look up the owner's preconfigured DM row instead of
 // hitting a real openDM RPC.
 vi.mock('./user-dm.js', () => ({
@@ -598,24 +614,22 @@ describe('unknown-channel registration flow', () => {
 
   it('rejects clicks from an unauthorized user (prevents self-admit via forwarded card)', async () => {
     const { routeInbound } = await import('../../router.js');
-    const { getResponseHandlers } = await import('../../response-registry.js');
+    const { dispatchResponse } = await import('../../response-registry.js');
 
     await expectAsyncDelivery(() => routeInbound(groupMention('chat-unauth')));
     const pending = (await getDb().get<{ messaging_group_id: string }>(
       'SELECT messaging_group_id FROM pending_channel_approvals',
     ))!;
 
-    for (const handler of getResponseHandlers()) {
-      const claimed = await handler({
-        questionId: pending.messaging_group_id,
-        value: 'approve',
-        userId: 'random-bystander',
-        channelType: 'telegram',
-        platformId: 'dm-random',
-        threadId: null,
-      });
-      if (claimed) break;
-    }
+    const outcome = await dispatchResponse({
+      questionId: pending.messaging_group_id,
+      value: 'approve',
+      userId: 'random-bystander',
+      channelType: 'telegram',
+      platformId: 'dm-random',
+      threadId: null,
+    });
+    expect(outcome).toBe('refused');
 
     // No wiring created, pending row preserved so a real approver can act on it.
     const mgaCount = await countRows(
@@ -625,6 +639,89 @@ describe('unknown-channel registration flow', () => {
     expect(mgaCount).toBe(0);
     const stillPending = await countRows('SELECT COUNT(*) AS c FROM pending_channel_approvals');
     expect(stillPending).toBe(1);
+  });
+
+  it('wires a channel once when two choices race', async () => {
+    const { routeInbound } = await import('../../router.js');
+    const { dispatchResponse } = await import('../../response-registry.js');
+
+    await expectAsyncDelivery(() => routeInbound(groupMention('chat-connect-race')));
+    const { messaging_group_id: questionId } = (await getDb().get<{ messaging_group_id: string }>(
+      'SELECT messaging_group_id FROM pending_channel_approvals',
+    ))!;
+    const connect = () =>
+      dispatchResponse({
+        questionId,
+        value: 'connect:ag-1',
+        userId: 'owner',
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+      });
+    const outcomes = await Promise.all([connect(), connect()]);
+    expect([...outcomes].sort()).toEqual(['accepted', 'ignored']);
+    expect(
+      await countRows('SELECT COUNT(*) AS c FROM messaging_group_agents WHERE messaging_group_id = ?', questionId),
+    ).toBe(1);
+  });
+
+  it('a Reject racing a connect decides once: never both wired and denied', async () => {
+    const { routeInbound } = await import('../../router.js');
+    const { dispatchResponse } = await import('../../response-registry.js');
+
+    await expectAsyncDelivery(() => routeInbound(groupMention('chat-reject-race')));
+    const { messaging_group_id: questionId } = (await getDb().get<{ messaging_group_id: string }>(
+      'SELECT messaging_group_id FROM pending_channel_approvals',
+    ))!;
+    const click = (value: string) =>
+      dispatchResponse({
+        questionId,
+        value,
+        userId: 'owner',
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+      });
+    const outcomes = await Promise.all([click('connect:ag-1'), click('reject')]);
+    expect([...outcomes].sort()).toEqual(['accepted', 'ignored']);
+    const wired = await countRows(
+      'SELECT COUNT(*) AS c FROM messaging_group_agents WHERE messaging_group_id = ?',
+      questionId,
+    );
+    const denied = (await getDb().get<{ denied_at: string | null }>(
+      'SELECT denied_at FROM messaging_groups WHERE id = ?',
+      questionId,
+    ))!.denied_at;
+    expect(wired === 1 && denied !== null).toBe(false);
+  });
+
+  it('reports a connect accepted once the wiring is recorded, before the message is replayed', async () => {
+    const { routeInbound } = await import('../../router.js');
+    const { dispatchResponse } = await import('../../response-registry.js');
+    const { wakeContainer } = await import('../../container-runner.js');
+
+    await expectAsyncDelivery(() => routeInbound(groupMention('chat-connect-early')));
+    const { messaging_group_id: questionId } = (await getDb().get<{ messaging_group_id: string }>(
+      'SELECT messaging_group_id FROM pending_channel_approvals',
+    ))!;
+    let wake!: () => void;
+    vi.mocked(wakeContainer).mockImplementationOnce(
+      () => new Promise((resolve) => (wake = () => resolve(true as never))),
+    );
+    const outcome = await Promise.race([
+      dispatchResponse({
+        questionId,
+        value: 'connect:ag-1',
+        userId: 'owner',
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+      }),
+      new Promise((resolve) => setTimeout(() => resolve('still waiting'), 300)),
+    ]);
+    await vi.waitFor(() => expect(wake).toBeTypeOf('function'));
+    wake();
+    expect(outcome).toBe('accepted');
   });
 
   it('does not let a scoped admin connect an unknown channel to another agent group', async () => {
@@ -692,17 +789,16 @@ describe('unknown-channel registration flow', () => {
     expect(followupPayload.options.map((option) => option.value)).toContain('connect:ag-1');
     expect(followupPayload.options.map((option) => option.value)).not.toContain('connect:ag-2');
 
-    for (const handler of getResponseHandlers()) {
-      const claimed = await handler({
-        questionId: pending.messaging_group_id,
-        value: 'connect:ag-2',
-        userId: 'scoped-admin',
-        channelType: 'telegram',
-        platformId: 'dm-scoped-admin',
-        threadId: null,
-      });
-      if (claimed) break;
-    }
+    const { dispatchResponse } = await import('../../response-registry.js');
+    const outcome = await dispatchResponse({
+      questionId: pending.messaging_group_id,
+      value: 'connect:ag-2',
+      userId: 'scoped-admin',
+      channelType: 'telegram',
+      platformId: 'dm-scoped-admin',
+      threadId: null,
+    });
+    expect(outcome).toBe('refused');
 
     const mgaCount = await countRows(
       'SELECT COUNT(*) AS c FROM messaging_group_agents WHERE messaging_group_id = ?',
@@ -711,6 +807,161 @@ describe('unknown-channel registration flow', () => {
     expect(mgaCount).toBe(0);
     const stillPending = await countRows('SELECT COUNT(*) AS c FROM pending_channel_approvals');
     expect(stillPending).toBe(1);
+  });
+
+  describe('choose existing: the agent card', () => {
+    async function firstCard(platformId: string) {
+      await createAgentGroup({ id: 'ag-2', name: 'Bo', folder: 'bo', agent_provider: null, created_at: now() });
+      const { routeInbound } = await import('../../router.js');
+      await expectAsyncDelivery(() => routeInbound(groupMention(platformId)));
+      return (await getDb().get<{ messaging_group_id: string; options_json: string }>(
+        'SELECT messaging_group_id, options_json FROM pending_channel_approvals',
+      ))!;
+    }
+    async function click(questionId: string, value: string, messageId?: string) {
+      const { dispatchResponse } = await import('../../response-registry.js');
+      return dispatchResponse({
+        questionId,
+        value,
+        userId: 'owner',
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+        messageId,
+      });
+    }
+    async function storedOptions(questionId: string): Promise<string | undefined> {
+      return (
+        await getDb().get<{ options_json: string }>(
+          'SELECT options_json FROM pending_channel_approvals WHERE messaging_group_id = ?',
+          questionId,
+        )
+      )?.options_json;
+    }
+
+    it('stores its options only once it is sent, so a tap on the first card meanwhile keeps its meaning', async () => {
+      const card = await firstCard('chat-choose-slow');
+      let sent!: () => void;
+      deliverMock.mockImplementationOnce(() => new Promise((resolve) => (sent = () => resolve('plat-msg-2'))));
+      const choosing = click(card.messaging_group_id, 'choose_existing');
+      await vi.waitFor(() => expect(deliverMock).toHaveBeenCalledTimes(2));
+      // Buttons are decoded by position against the stored options: the first card's
+      // first button must not mean the first agent while the agent card is on its way.
+      expect(await storedOptions(card.messaging_group_id)).toBe(card.options_json);
+      sent();
+      expect(await choosing).toBe('accepted');
+      const values = (JSON.parse((await storedOptions(card.messaging_group_id))!) as Array<{ value: string }>).map(
+        (o) => o.value,
+      );
+      expect(values).toEqual(['connect:ag-1', 'connect:ag-2', 'reject']);
+    });
+
+    it('ignores card clicks while the agent card is sent, and clicks from the first card after', async () => {
+      const card = await firstCard('chat-choose-double-tap');
+      let sent!: () => void;
+      deliverMock.mockImplementationOnce(() => new Promise((resolve) => (sent = () => resolve('plat-msg-2'))));
+      const choosing = click(card.messaging_group_id, 'choose_existing', 'card-1');
+      await vi.waitFor(() => expect(deliverMock).toHaveBeenCalledTimes(2));
+      // A double tap on the first card, or a tap on the new card before its options are stored.
+      expect(await click(card.messaging_group_id, 'choose_existing', 'card-1')).toBe('ignored');
+      expect(await click(card.messaging_group_id, 'new_agent', 'card-2')).toBe('ignored');
+      sent();
+      expect(await choosing).toBe('accepted');
+      expect(deliverMock).toHaveBeenCalledTimes(2);
+      // The first card's button 0 now decodes as the first agent: it must not connect it.
+      expect(await click(card.messaging_group_id, 'connect:ag-1', 'card-1')).toBe('ignored');
+      expect(
+        await countRows(
+          'SELECT COUNT(*) AS c FROM messaging_group_agents WHERE messaging_group_id = ?',
+          card.messaging_group_id,
+        ),
+      ).toBe(0);
+      // The agent card's own click connects the agent picked.
+      expect(await click(card.messaging_group_id, 'connect:ag-2', 'card-2')).toBe('accepted');
+      const wired = await getDb().get<{ agent_group_id: string }>(
+        'SELECT agent_group_id FROM messaging_group_agents WHERE messaging_group_id = ?',
+        card.messaging_group_id,
+      );
+      expect(wired?.agent_group_id).toBe('ag-2');
+    });
+
+    it('a second tap while the first is still being prepared sends no second card', async () => {
+      const card = await firstCard('chat-choose-preparing');
+      const { ensureUserDm } = await import('./user-dm.js');
+      const lookup = vi.mocked(ensureUserDm).getMockImplementation()!;
+      let ready: (() => void) | undefined;
+      vi.mocked(ensureUserDm).mockImplementationOnce(async (...args) => {
+        await new Promise<void>((resolve) => (ready = resolve));
+        return lookup(...args);
+      });
+      const choosing = click(card.messaging_group_id, 'choose_existing', 'card-1');
+      await vi.waitFor(() => expect(ready).toBeDefined());
+      expect(await click(card.messaging_group_id, 'choose_existing', 'card-1')).toBe('ignored');
+      ready!();
+      expect(await choosing).toBe('accepted');
+      expect(deliverMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('a store that fails after the send keeps the first card retired, and the new card usable', async () => {
+      const card = await firstCard('chat-choose-store-fails');
+      cardUpdate.fail = true;
+      expect(await click(card.messaging_group_id, 'choose_existing', 'card-1')).not.toBe('accepted');
+      // The new card's options weren't stored: its first button reads as "Choose existing agent".
+      expect(await click(card.messaging_group_id, 'choose_existing', 'card-2')).toBe('accepted');
+      // The first card's "Connect new agent" now reads as the second agent: it must not connect it.
+      expect(await click(card.messaging_group_id, 'connect:ag-2', 'card-1')).toBe('ignored');
+      expect(await click(card.messaging_group_id, 'connect:ag-2', 'card-2')).toBe('ignored');
+      expect(await click(card.messaging_group_id, 'connect:ag-2', 'card-3')).toBe('accepted');
+    });
+
+    it('does not store its options over a newer request for the same chat', async () => {
+      const card = await firstCard('chat-choose-replaced');
+      let sent!: () => void;
+      deliverMock.mockImplementationOnce(() => new Promise((resolve) => (sent = () => resolve('plat-msg-2'))));
+      const choosing = click(card.messaging_group_id, 'choose_existing', 'card-1');
+      await vi.waitFor(() => expect(deliverMock).toHaveBeenCalledTimes(2));
+      // Meanwhile the request is removed (an admin's delete) and a new one is raised.
+      const old = (await getDb().get<Record<string, string>>(
+        'SELECT * FROM pending_channel_approvals WHERE messaging_group_id = ?',
+        card.messaging_group_id,
+      ))!;
+      await getDb().run('DELETE FROM pending_channel_approvals WHERE messaging_group_id = ?', card.messaging_group_id);
+      await getDb().run(
+        `INSERT INTO pending_channel_approvals
+           (messaging_group_id, agent_group_id, original_message, approver_user_id, created_at, title, question, options_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        old.messaging_group_id,
+        old.agent_group_id,
+        old.original_message,
+        old.approver_user_id,
+        new Date(Date.parse(old.created_at) + 1000).toISOString(),
+        old.title,
+        old.question,
+        old.options_json,
+      );
+      sent();
+      expect(await choosing).toBe('ignored');
+      expect(await storedOptions(card.messaging_group_id)).toBe(card.options_json);
+    });
+
+    it("leaves the first card as it was when the agent card can't be sent", async () => {
+      const card = await firstCard('chat-choose-fails');
+      deliverMock.mockRejectedValueOnce(new Error('send failed'));
+      expect(await click(card.messaging_group_id, 'choose_existing')).toBe('ignored');
+      expect(await storedOptions(card.messaging_group_id)).toBe(card.options_json);
+    });
+
+    it('a Reject while the agent card is on its way decides, and the choice does not draw over it', async () => {
+      const card = await firstCard('chat-choose-then-reject');
+      let sent!: () => void;
+      deliverMock.mockImplementationOnce(() => new Promise((resolve) => (sent = () => resolve('plat-msg-2'))));
+      const choosing = click(card.messaging_group_id, 'choose_existing');
+      await vi.waitFor(() => expect(deliverMock).toHaveBeenCalledTimes(2));
+      expect(await click(card.messaging_group_id, 'reject')).toBe('accepted');
+      sent();
+      expect(await choosing).toBe('ignored');
+      expect(await storedOptions(card.messaging_group_id)).toBeUndefined();
+    });
   });
 
   it('create new agent: the free-text name reply creates the group and wires the channel', async () => {

@@ -303,7 +303,7 @@ function makeFakeSdk(options: { missingReactionTarget?: boolean } = {}) {
   return { sdk, queue, sends, stop, reacted, makeSpace };
 }
 
-function makeHostConfig() {
+function makeHostConfig(outcomes: Array<'accepted' | 'refused' | 'closed' | 'ignored' | 'void'> = []) {
   const inbound: Array<{ platformId: string; msg: InboundMessage }> = [];
   const metadata: Array<{ platformId: string; isGroup?: boolean }> = [];
   const actions: Array<{ questionId: string; option: string; userId: string }> = [];
@@ -315,8 +315,11 @@ function makeHostConfig() {
     onMetadata: (platformId, _name, isGroup) => {
       metadata.push({ platformId, isGroup });
     },
-    onAction: (questionId, option, userId) => {
+    onAction: async (questionId, option, userId) => {
       actions.push({ questionId, option, userId });
+      const next = outcomes.shift() ?? 'accepted';
+      // 'void': a core from before click outcomes, whose onAction returns nothing.
+      return (next === 'void' ? undefined : next) as never;
     },
   };
   return { config, inbound, metadata, actions };
@@ -620,6 +623,127 @@ describe('photon adapter (mocked SDK)', () => {
     // The slash reply must NOT have woken the agent as a normal inbound.
     expect(host.inbound).toHaveLength(0);
 
+    await adapter.teardown();
+  });
+
+  it('confirms an answer only once the host accepts it; a refused one keeps the question open', async () => {
+    const { sdk, queue, sends, makeSpace } = makeFakeSdk();
+    const host = makeHostConfig(['refused', 'accepted']);
+    const adapter = createPhotonAdapter(
+      { projectId: 'p', projectSecret: 's', markdown: true, telemetry: false, maxInlineAttachmentBytes: 1000 },
+      { loadSpectrum: async () => sdk },
+    );
+    await adapter.setup(host.config);
+    await adapter.deliver('+15551112222', null, {
+      kind: 'chat',
+      content: { type: 'ask_question', questionId: 'q1', title: 'Deploy?', question: 'Ship it?', options: ['Approve'] },
+    });
+    // Confirmations only (an inbound reply may also send other things, e.g. a read receipt).
+    const confirmations = () =>
+      sends.filter(
+        (s) => String(s.builder.payload).includes('Approve') && !String(s.builder.payload).includes('Ship it?'),
+      );
+    const space = makeSpace('+15551112222', 'dm', '+15551112222');
+    const reply = (id: string, from: string) =>
+      queue.push([
+        space,
+        { id, direction: 'inbound', sender: { id: from }, content: { type: 'text', text: '/approve' } },
+      ]);
+
+    // The host refuses the first answer (as for someone who can't decide), accepts the second.
+    reply('r1', '+15551112222');
+    await waitFor(() => host.actions.length === 1);
+    await new Promise((r) => setTimeout(r, 20));
+    // Refused: nothing posted, and the approver can still answer.
+    expect(confirmations()).toHaveLength(0);
+
+    reply('r2', '+15551112222');
+    await waitFor(() => host.actions.length === 2);
+    await waitFor(() => confirmations().length === 1);
+    expect(host.inbound).toHaveLength(0);
+
+    await adapter.teardown();
+  });
+
+  it('keeps the question open when the host decided nothing, so a retry still answers it', async () => {
+    const { sdk, queue, makeSpace } = makeFakeSdk();
+    const host = makeHostConfig(['ignored', 'accepted']);
+    const adapter = createPhotonAdapter(
+      { projectId: 'p', projectSecret: 's', markdown: true, telemetry: false, maxInlineAttachmentBytes: 1000 },
+      { loadSpectrum: async () => sdk },
+    );
+    await adapter.setup(host.config);
+    await adapter.deliver('+15551112222', null, {
+      kind: 'chat',
+      content: { type: 'ask_question', questionId: 'q1', title: 'Deploy?', question: 'Ship it?', options: ['Approve'] },
+    });
+    const space = makeSpace('+15551112222', 'dm', '+15551112222');
+    const reply = (id: string) =>
+      queue.push([
+        space,
+        { id, direction: 'inbound', sender: { id: '+15551112222' }, content: { type: 'text', text: '/approve' } },
+      ]);
+    reply('r1');
+    await waitFor(() => host.actions.length === 1);
+    await new Promise((r) => setTimeout(r, 20));
+    reply('r2');
+    await waitFor(() => host.actions.length === 2 || host.inbound.length === 1);
+    // The retry answers the question; it does not wake the agent as a plain "/approve".
+    expect(host.inbound).toHaveLength(0);
+    expect(host.actions).toHaveLength(2);
+    await adapter.teardown();
+  });
+
+  it('drops the question when the host says it is already closed', async () => {
+    const { sdk, queue, makeSpace } = makeFakeSdk();
+    const host = makeHostConfig(['closed']);
+    const adapter = createPhotonAdapter(
+      { projectId: 'p', projectSecret: 's', markdown: true, telemetry: false, maxInlineAttachmentBytes: 1000 },
+      { loadSpectrum: async () => sdk },
+    );
+    await adapter.setup(host.config);
+    await adapter.deliver('+15551112222', null, {
+      kind: 'chat',
+      content: { type: 'ask_question', questionId: 'q1', title: 'Deploy?', question: 'Ship it?', options: ['Approve'] },
+    });
+    const space = makeSpace('+15551112222', 'dm', '+15551112222');
+    const reply = (id: string) =>
+      queue.push([
+        space,
+        { id, direction: 'inbound', sender: { id: '+15551112222' }, content: { type: 'text', text: '/approve' } },
+      ]);
+    reply('r1');
+    await waitFor(() => host.actions.length === 1);
+    await new Promise((r) => setTimeout(r, 20));
+    // Nothing is left to answer, so the next "/approve" is an ordinary message.
+    reply('r2');
+    await waitFor(() => host.inbound.length === 1);
+    expect(host.actions).toHaveLength(1);
+    await adapter.teardown();
+  });
+
+  it('confirms an answer when the host returns nothing (a core from before click outcomes)', async () => {
+    const { sdk, queue, sends, makeSpace } = makeFakeSdk();
+    const host = makeHostConfig(['void']);
+    const adapter = createPhotonAdapter(
+      { projectId: 'p', projectSecret: 's', markdown: true, telemetry: false, maxInlineAttachmentBytes: 1000 },
+      { loadSpectrum: async () => sdk },
+    );
+    await adapter.setup(host.config);
+    await adapter.deliver('+15551112222', null, {
+      kind: 'chat',
+      content: { type: 'ask_question', questionId: 'q1', title: 'Deploy?', question: 'Ship it?', options: ['Approve'] },
+    });
+    const confirmations = () =>
+      sends.filter(
+        (s) => String(s.builder.payload).includes('Approve') && !String(s.builder.payload).includes('Ship it?'),
+      );
+    const space = makeSpace('+15551112222', 'dm', '+15551112222');
+    queue.push([
+      space,
+      { id: 'r1', direction: 'inbound', sender: { id: '+15551112222' }, content: { type: 'text', text: '/approve' } },
+    ]);
+    await waitFor(() => confirmations().length === 1);
     await adapter.teardown();
   });
 

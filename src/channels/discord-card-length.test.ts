@@ -3,6 +3,8 @@
  * stubbed, so the test sees the exact embed the adapter posts. Discord rejects
  * an embed description over 4,096.
  */
+import { createDiscordAdapter } from '@chat-adapter/discord';
+import { Actions, Button, Card, CardText, type CardChild } from 'chat';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ChannelAdapter, ChannelRegistration } from './adapter.js';
@@ -39,13 +41,17 @@ vi.mock('../env.js', () => ({
   }),
 }));
 
+import { closeDb, initTestDb } from '../db/connection.js';
+import { runMigrations } from '../db/migrations/index.js';
 import { gatewayApprovalPresentation } from '../gateway-approval-presentation.js';
 import type { GatewayApprovalRequest } from '../gateway-providers/gateway-provider-registry.js';
 import { CardTooLongError } from './ask-question.js';
-import { escapeDiscordCardText } from './discord.js';
+import { clearButtonsOnCardEdits, escapeDiscordCardText } from './discord.js';
+import { registerQuestionRenderResolver } from './question-render-registry.js';
 
 const posts: Array<{ embeds: Array<{ title?: string; description?: string }>; components?: unknown[] }> = [];
 const patches: Array<{ url: string; body: Record<string, unknown> }> = [];
+const realFetch = globalThis.fetch;
 
 vi.stubGlobal(
   'fetch',
@@ -64,6 +70,15 @@ beforeEach(() => {
   posts.length = 0;
   patches.length = 0;
 });
+
+const adapter = createDiscordAdapter({
+  botToken: 'test-bot-token',
+  publicKey: 'a'.repeat(64),
+  applicationId: 'test-app-id',
+});
+const approve = Actions([Button({ id: 'ncq:q:0', label: 'Approve' })]);
+const card = (blocks: string[], rest: CardChild[] = [approve], title = 'Approve') =>
+  Card({ title, children: [...blocks.map((block) => CardText(block)), ...rest] });
 
 /** The review case: a 572-character resource and six 600-character details. */
 function longGatewayCard() {
@@ -115,6 +130,48 @@ describe('Discord card limit through the bridge', () => {
   });
 });
 
+describe('clearButtonsOnCardEdits', () => {
+  const resolved = Card({ title: 'Approve', children: [CardText('Approved by admin', { style: 'muted' })] });
+
+  it('shows the gap: the adapter edits a card without actions and sends no components', async () => {
+    await adapter.editMessage('discord:g1:c1', 'm9', { card: resolved });
+    expect(patches[0].body).not.toHaveProperty('components');
+  });
+
+  it('sends components: [] when a message is edited into a card without actions', async () => {
+    const wrapped = createDiscordAdapter({
+      botToken: 'test-bot-token',
+      publicKey: 'a'.repeat(64),
+      applicationId: 'test-app-id',
+    });
+    clearButtonsOnCardEdits(wrapped);
+
+    await wrapped.editMessage('discord:g1:c1', 'm9', { card: resolved });
+    expect(patches[0].url).toMatch(/\/channels\/c1\/messages\/m9$/);
+    expect(patches[0].body.components).toEqual([]);
+
+    await wrapped.editMessage('discord:g1:c1', 'm9', { card: card(['Approve?']) });
+    expect((patches[1].body.components as unknown[]).length).toBeGreaterThan(0);
+
+    await wrapped.editMessage('discord:g1:c1', 'm9', { markdown: 'plain text' });
+    expect(patches[2].body).not.toHaveProperty('components');
+  });
+
+  it('is wired into the Discord bridge: a resolved approval card loses its buttons', async () => {
+    const bridge = (await registrations.get('discord')!.factory())!;
+    await bridge.deliver('discord:g1:c1', null, {
+      kind: 'chat-sdk',
+      content: {
+        operation: 'edit',
+        messageId: 'm9',
+        terminalCard: { title: 'Approve', question: 'Run it?', resolution: 'Approved by admin' },
+      },
+    });
+    expect(patches).toHaveLength(1);
+    expect(patches[0].body.components).toEqual([]);
+  });
+});
+
 describe('escapeDiscordCardText', () => {
   it('breaks masked links, mentions and spoilers, and leaves host wording and escaped values alone', () => {
     expect(escapeDiscordCardText('[Admin](https://x.co) <@1> ||hidden||')).toBe(
@@ -125,5 +182,54 @@ describe('escapeDiscordCardText', () => {
     }
     const host = '*Action:* Post a comment\n*Where:* \\[a\\]\\(b\\)';
     expect(escapeDiscordCardText(host)).toBe(host);
+  });
+
+  it('keeps a clicker name from posing as a link or another user on the resolved card', async () => {
+    registerQuestionRenderResolver((id) =>
+      id === 'q-name'
+        ? {
+            title: 'Approve',
+            question: 'Run it?',
+            options: [{ label: 'Approve', selectedLabel: 'Approved', value: 'approve' }],
+          }
+        : undefined,
+    );
+    await runMigrations(await initTestDb());
+    const bridge = (await registrations.get('discord')!.factory())!;
+    await bridge.setup({
+      onInbound: () => {},
+      onInboundEvent: () => {},
+      onMetadata: () => {},
+      onAction: async () => 'accepted' as const,
+    });
+    try {
+      const response = await realFetch(gateway.url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-discord-gateway-token': 'test-bot-token' },
+        body: JSON.stringify({
+          type: 'GATEWAY_INTERACTION_CREATE',
+          data: {
+            type: 3,
+            id: 'i1',
+            token: 'interaction-token',
+            application_id: 'test-app-id',
+            guild_id: 'g1',
+            channel_id: 'c1',
+            data: { custom_id: 'ncq:q-name:0\napprove' },
+            member: { user: { id: 'u1', username: 'u1', global_name: '[Admin](https://x.co) <@1>' } },
+            message: { id: 'm9', embeds: [{ title: 'Approve', description: 'Run it?' }] },
+          },
+        }),
+      });
+      expect(response.status).toBe(200);
+      // The card edit, not the interaction's button removal.
+      const edits = () => patches.filter((patch) => patch.url.endsWith('/channels/c1/messages/m9'));
+      await vi.waitFor(() => expect(edits()).toHaveLength(1));
+      const [embed] = edits()[0].body.embeds as Array<{ description: string }>;
+      expect(embed.description).toContain('Approved by [Admin]\u2060(https://x.co) <\u2060@1>');
+    } finally {
+      await bridge.teardown();
+      await closeDb();
+    }
   });
 });

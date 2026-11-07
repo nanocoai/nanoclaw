@@ -2,11 +2,12 @@ import http from 'http';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { Adapter, AdapterPostableMessage, RawMessage } from 'chat';
+import type { Adapter, AdapterPostableMessage, CardElement, RawMessage } from 'chat';
 
 import { fenceForCard } from '../card-text.js';
 import { gatewayApprovalPresentation } from '../gateway-approval-presentation.js';
 import type { GatewayApprovalRequest } from '../gateway-providers/gateway-provider-registry.js';
+import { log } from '../log.js';
 import { CardTooLongError } from './ask-question.js';
 import {
   attachmentBytesToBase64,
@@ -975,6 +976,251 @@ it('forwards the authenticated instance and message address without editing a de
   }
 });
 
+it('edits a clicked card with no stored question into an escaped card, not raw markdown', async () => {
+  const { initTestDb, closeDb } = await import('../db/connection.js');
+  const { runMigrations } = await import('../db/migrations/index.js');
+  const { registerQuestionRenderResolver } = await import('./question-render-registry.js');
+  await runMigrations(await initTestDb());
+  registerQuestionRenderResolver((id) =>
+    id === 'click-plain'
+      ? { title: '<!channel> Pick one', options: [{ label: 'Yes', selectedLabel: '<!here> Yes', value: 'yes' }] }
+      : undefined,
+  );
+  const editMessage = vi.fn();
+  const adapter = stubAdapter({
+    name: 'fixture',
+    initialize: async () => {},
+    channelIdFromThreadId: (threadId: string) => threadId,
+    editMessage,
+  });
+  const bridge = createChatSdkBridge({
+    adapter,
+    instance: 'fixture-three',
+    supportsThreads: false,
+    escapeCardText: (t) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'),
+  });
+  try {
+    // The host accepts the click.
+    const onAction = vi.fn().mockResolvedValue('accepted');
+    await bridge.setup({ onInbound: () => {}, onInboundEvent: () => {}, onMetadata: () => {}, onAction });
+    const chat = (bridge as unknown as { _chat: import('chat').Chat })._chat;
+    await chat.processAction(
+      {
+        actionId: 'ncq:click-plain:0',
+        adapter,
+        messageId: 'button-card',
+        raw: {},
+        threadId: 'fixture:room',
+        user: { userId: 'selected', userName: 'ann' } as never,
+        value: '0',
+      },
+      undefined,
+    );
+    const edited = editMessage.mock.calls[0][2] as {
+      markdown?: string;
+      card?: { title: string; children: Array<{ content?: string }> };
+    };
+    expect(edited.markdown).toBeUndefined();
+    // The resolution is card text, so it's escaped; each channel escapes card titles itself.
+    expect(edited.card?.title).toBe('<!channel> Pick one');
+    expect(edited.card?.children.map((child) => child.content)).toEqual(['&lt;!here&gt; Yes by ann']);
+  } finally {
+    await bridge.teardown();
+    await closeDb();
+  }
+});
+
+it('leaves an already resolved card alone when a late click arrives', async () => {
+  const { initTestDb, closeDb } = await import('../db/connection.js');
+  const { runMigrations } = await import('../db/migrations/index.js');
+  await runMigrations(await initTestDb());
+  const editMessage = vi.fn();
+  const adapter = stubAdapter({
+    name: 'fixture',
+    initialize: async () => {},
+    channelIdFromThreadId: (threadId: string) => threadId,
+    editMessage,
+  });
+  const onAction = vi.fn();
+  const bridge = createChatSdkBridge({ adapter, instance: 'fixture-late', supportsThreads: false });
+  try {
+    await bridge.setup({ onInbound: () => {}, onInboundEvent: () => {}, onMetadata: () => {}, onAction });
+    const chat = (bridge as unknown as { _chat: import('chat').Chat })._chat;
+    await chat.processAction(
+      {
+        actionId: 'ncq:already-resolved:0',
+        adapter,
+        messageId: 'resolved-card',
+        raw: {},
+        threadId: 'fixture:room',
+        user: { userId: 'selected', userName: 'Ann' } as never,
+        value: '0',
+      },
+      undefined,
+    );
+    expect(editMessage).not.toHaveBeenCalled();
+    // The host decides: it ignores a resolved question, and still handles a pending row without render metadata.
+    expect(onAction).toHaveBeenCalledWith('already-resolved', '0', 'selected', expect.anything());
+  } finally {
+    await bridge.teardown();
+    await closeDb();
+  }
+});
+
+describe('createChatSdkBridge — a clicked card resolves only when the host accepts the click', () => {
+  const review = {
+    title: 'Review',
+    question: 'Allow?',
+    options: [{ label: 'Approve', selectedLabel: '✅ Approved', value: 'approve' }],
+  };
+
+  afterEach(async () => {
+    const { closeDb } = await import('../db/connection.js');
+    await closeDb();
+  });
+
+  async function startClicks(questionId: string, render: Record<string, unknown>) {
+    const { initTestDb } = await import('../db/connection.js');
+    const { runMigrations } = await import('../db/migrations/index.js');
+    const { registerQuestionRenderResolver } = await import('./question-render-registry.js');
+    await runMigrations(await initTestDb());
+    registerQuestionRenderResolver((id) => (id === questionId ? (render as never) : undefined));
+    const order: string[] = [];
+    const editMessage = vi.fn(async () => {
+      order.push('card edited');
+      return { id: 'card-1', threadId: 'fixture:room', raw: {} };
+    });
+    const postEphemeral = vi.fn(async () => ({ id: 'note-1', threadId: 'fixture:room', usedFallback: false, raw: {} }));
+    const adapter = stubAdapter({
+      name: 'fixture',
+      initialize: async () => {},
+      channelIdFromThreadId: (threadId: string) => threadId,
+      editMessage,
+      postEphemeral,
+    });
+    const onAction = vi.fn();
+    const bridge = createChatSdkBridge({ adapter, instance: `fixture-${questionId}`, supportsThreads: false });
+    await bridge.setup({ onInbound: () => {}, onInboundEvent: () => {}, onMetadata: () => {}, onAction });
+    const chat = (bridge as unknown as { _chat: import('chat').Chat })._chat;
+    const click = (userId: string, userName: string) =>
+      chat.processAction(
+        {
+          actionId: `ncq:${questionId}:0`,
+          adapter,
+          messageId: 'card-1',
+          raw: {},
+          threadId: 'fixture:room',
+          user: { userId, userName } as never,
+          value: '0',
+        },
+        undefined,
+      );
+    return { bridge, click, onAction, editMessage, postEphemeral, order };
+  }
+
+  it('keeps the buttons and tells only the clicker when a non-approver clicks', async () => {
+    const { bridge, click, onAction, editMessage, postEphemeral } = await startClicks('q-refused', review);
+    onAction.mockResolvedValue('refused');
+    try {
+      await click('bystander', 'Bob');
+      expect(onAction).toHaveBeenCalledWith('q-refused', 'approve', 'bystander', expect.anything());
+      // No "Approved by" edit: the card and its buttons stay for a real approver.
+      expect(editMessage).not.toHaveBeenCalled();
+      expect(postEphemeral).toHaveBeenCalledTimes(1);
+      const [threadId, userId, note, options] = postEphemeral.mock.calls[0] as unknown as unknown[];
+      expect([threadId, userId, options]).toEqual(['fixture:room', 'bystander', { fallbackToDM: false }]);
+      expect(JSON.stringify(note)).toContain('Only an approver can answer this.');
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('edits the card only after the host accepts an approver click', async () => {
+    const { bridge, click, onAction, editMessage, postEphemeral, order } = await startClicks('q-accepted', review);
+    onAction.mockImplementation(async () => {
+      order.push('host accepted');
+      return 'accepted';
+    });
+    try {
+      await click('approver', 'Ann');
+      expect(order).toEqual(['host accepted', 'card edited']);
+      const edited = editMessage.mock.calls[0] as unknown as [string, string, { card: CardElement }];
+      expect(edited.slice(0, 2)).toEqual(['fixture:room', 'card-1']);
+      expect(JSON.stringify(edited[2].card)).toContain('✅ Approved by Ann');
+      expect(postEphemeral).not.toHaveBeenCalled();
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('a click the host ignores (nothing decided) leaves the card as it is', async () => {
+    const { bridge, click, onAction, editMessage, postEphemeral } = await startClicks('q-ignored', review);
+    onAction.mockResolvedValue('ignored');
+    try {
+      await click('approver', 'Ann');
+      expect(onAction).toHaveBeenCalledTimes(1);
+      expect(editMessage).not.toHaveBeenCalled();
+      expect(postEphemeral).not.toHaveBeenCalled();
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('tells a refused clicker privately on a card the host resolves itself', async () => {
+    const { bridge, click, onAction, editMessage, postEphemeral } = await startClicks('q-gateway', {
+      ...review,
+      deferResolution: true,
+    });
+    onAction.mockResolvedValue('refused');
+    try {
+      await click('bystander', 'Bob');
+      expect(editMessage).not.toHaveBeenCalled();
+      expect(postEphemeral).toHaveBeenCalledWith('fixture:room', 'bystander', expect.anything(), {
+        fallbackToDM: false,
+      });
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('a refused click leaves the card open for the approver', async () => {
+    const { bridge, click, onAction, editMessage } = await startClicks('q-after-refusal', review);
+    onAction.mockResolvedValueOnce('refused').mockResolvedValueOnce('accepted');
+    try {
+      await Promise.all([click('bystander', 'Bob'), click('approver', 'Ann')]);
+      expect(onAction.mock.calls.map((call) => call[2])).toEqual(['bystander', 'approver']);
+      expect(JSON.stringify(editMessage.mock.calls)).toContain('✅ Approved by Ann');
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('says a request is no longer available when the host closed it, naming nobody', async () => {
+    const { bridge, click, onAction, editMessage } = await startClicks('q-closed', review);
+    onAction.mockResolvedValue('closed');
+    try {
+      await click('approver', 'Ann');
+      const card = JSON.stringify(editMessage.mock.calls[0]);
+      expect(card).toContain('No longer available');
+      expect(card).not.toContain('Ann');
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('posts nothing for a refused click where the channel has no private messages', async () => {
+    const { bridge, click, onAction, editMessage, postEphemeral } = await startClicks('q-no-private', review);
+    onAction.mockResolvedValue('refused');
+    postEphemeral.mockRejectedValue(new Error('not supported'));
+    try {
+      await click('bystander', 'Bob');
+      expect(editMessage).not.toHaveBeenCalled();
+    } finally {
+      await bridge.teardown();
+    }
+  });
+});
+
 describe('createChatSdkBridge — local Gateway webhook', () => {
   // The Gateway listener forwards raw events to a loopback server; only it may
   // post there. It sends the bot token in x-discord-gateway-token.
@@ -1003,7 +1249,9 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
       initialize: async () => {},
       handleWebhook,
       channelIdFromThreadId: (threadId: string) => threadId,
-    }) as Adapter & { startGatewayListener: unknown };
+      encodeThreadId: ({ guildId, channelId }: { guildId: string; channelId: string }) =>
+        `discord:${guildId}:${channelId}`,
+    } as never) as Adapter & { startGatewayListener: unknown };
     adapter.startGatewayListener = async (_opts: unknown, _ms: number, _signal: AbortSignal, url: string) => {
       webhookUrl = url;
       return new Response('{}');
@@ -1031,6 +1279,437 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
     vi.unstubAllGlobals();
     const { closeDb } = await import('../db/connection.js');
     await closeDb();
+  });
+
+  /** A Discord-shaped bridge: real thread-id encoding and editMessage capture. */
+  async function startDiscord(questionId: string, render: Record<string, unknown>) {
+    const { registerQuestionRenderResolver } = await import('./question-render-registry.js');
+    registerQuestionRenderResolver((id) => (id === questionId ? (render as never) : undefined));
+    let webhookUrl = '';
+    const editMessage = vi.fn(async () => ({ id: 'card-1', threadId: 't', raw: {} }));
+    const handleWebhook = vi.fn(async () => new Response('ok'));
+    const adapter = stubAdapter({
+      name: 'discord',
+      initialize: async () => {},
+      handleWebhook,
+      // As the Discord adapter: a thread id is the channel's plus ':<thread>'.
+      channelIdFromThreadId: (threadId: string) => threadId.split(':').slice(0, 3).join(':'),
+      encodeThreadId: ({ guildId, channelId, threadId }: { guildId: string; channelId: string; threadId?: string }) =>
+        `discord:${guildId}:${channelId}${threadId ? `:${threadId}` : ''}`,
+      editMessage,
+    } as never) as Adapter & { startGatewayListener: unknown };
+    adapter.startGatewayListener = async (_opts: unknown, _ms: number, _signal: AbortSignal, url: string) => {
+      webhookUrl = url;
+      return new Response('{}');
+    };
+    // The host accepts the click unless a test says otherwise.
+    const onAction = vi.fn().mockResolvedValue('accepted');
+    const bridge = createChatSdkBridge({
+      adapter,
+      supportsThreads: true,
+      botToken: BOT_TOKEN,
+    });
+    await bridge.setup({ onInbound: () => {}, onInboundEvent: () => {}, onMetadata: () => {}, onAction });
+    /** Posts as the Gateway listener does: it sends a channel's next event only once this one is answered. */
+    const forward = (event: Record<string, unknown>) =>
+      realFetch(webhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-discord-gateway-token': BOT_TOKEN },
+        body: JSON.stringify(event),
+      });
+    // Chat SDK 4.41+ encodes a button's custom_id as `${id}\n${value}`.
+    const click = (
+      user: Record<string, string>,
+      customId = `ncq:${questionId}:0\n0`,
+      extra: Record<string, unknown> = {},
+    ) =>
+      forward({
+        type: 'GATEWAY_INTERACTION_CREATE',
+        data: {
+          type: 3,
+          id: 'interaction-2',
+          token: 'interaction-token',
+          application_id: 'app-1',
+          guild_id: 'G1',
+          channel_id: 'C1',
+          data: { custom_id: customId },
+          member: { user },
+          message: { id: 'card-1', embeds: [{ title: 'Review', description: 'Allow?' }] },
+          ...extra,
+        },
+      });
+    return { bridge, click, forward, onAction, editMessage, handleWebhook };
+  }
+
+  const CALLBACK = 'https://discord.com/api/v10/interactions/interaction-2/interaction-token/callback';
+  const ORIGINAL = 'https://discord.com/api/v10/webhooks/app-1/interaction-token/messages/@original';
+  const FOLLOW_UP = 'https://discord.com/api/v10/webhooks/app-1/interaction-token';
+  const ACK = { type: 6 };
+  const ackBodies = () =>
+    vi.mocked(globalThis.fetch).mock.calls.map(([url, init]) => [String(url), JSON.parse(String(init?.body))]);
+  const discordCalls = () =>
+    vi
+      .mocked(globalThis.fetch)
+      .mock.calls.map(([url, init]) => [init?.method, String(url), JSON.parse(String(init?.body))]);
+  const review = {
+    title: 'Review',
+    question: 'Allow?',
+    options: [{ label: 'Approve', selectedLabel: 'Approved', value: 'approve' }],
+  };
+
+  it('acks a Discord click, then edits the card once the host accepts it', async () => {
+    const { bridge, click, onAction, editMessage } = await startDiscord('q-discord', review);
+    try {
+      expect((await click({ id: 'clicker-1', username: 'clicker', global_name: 'Clicker' })).status).toBe(200);
+      // Acked at once; the buttons go only once the host accepts the click (the embed is left for the edit below).
+      await vi.waitFor(() =>
+        expect(discordCalls()).toEqual([
+          ['POST', CALLBACK, ACK],
+          ['PATCH', ORIGINAL, { components: [] }],
+        ]),
+      );
+      await vi.waitFor(() => expect(editMessage).toHaveBeenCalled());
+      const [threadId, messageId, edited] = editMessage.mock.calls[0] as unknown as [
+        string,
+        string,
+        { card: CardElement },
+      ];
+      expect([threadId, messageId]).toEqual(['discord:G1:C1', 'card-1']);
+      expect(edited.card.title).toBe('Review');
+      expect(edited.card.children.map((child) => (child as { content?: string }).content)).toEqual([
+        'Allow?',
+        'Approved by Clicker',
+      ]);
+      expect(onAction).toHaveBeenCalledWith('q-discord', 'approve', 'clicker-1', expect.anything());
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('decodes the selected option from the custom_id the adapter wrote, and the older plain form', async () => {
+    const { bridge, click, onAction } = await startDiscord('q-discord-id', {
+      ...review,
+      options: [
+        { label: 'Approve', selectedLabel: 'Approved', value: 'approve' },
+        { label: 'Reject', selectedLabel: 'Rejected', value: 'reject' },
+      ],
+    });
+    // Nothing decided, so the same card takes the second click too.
+    onAction.mockResolvedValue('ignored');
+    try {
+      await click({ id: 'clicker-1', username: 'clicker' }, 'ncq:q-discord-id:1\n1');
+      await vi.waitFor(() => expect(onAction).toHaveBeenCalledTimes(1));
+      await click({ id: 'clicker-1', username: 'clicker' }, 'ncq:q-discord-id:0');
+      await vi.waitFor(() => expect(onAction.mock.calls.map((call) => call[1])).toEqual(['reject', 'approve']));
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('records an option whose value is empty', async () => {
+    const { bridge, click, onAction } = await startDiscord('q-discord-empty', {
+      ...review,
+      options: [{ label: 'No prefix', selectedLabel: 'No prefix', value: '' }],
+    });
+    try {
+      await click({ id: 'clicker-1', username: 'clicker' }, 'ncq:q-discord-empty:0\n0');
+      await vi.waitFor(() =>
+        expect(onAction).toHaveBeenCalledWith('q-discord-empty', '', 'clicker-1', expect.anything()),
+      );
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('acks within the time limit, then removes the buttons only after the host accepts the click', async () => {
+    const { bridge, click, onAction, editMessage } = await startDiscord('q-discord-order', review);
+    const order: string[] = [];
+    vi.mocked(globalThis.fetch).mockImplementation(async (_url, init) => {
+      order.push(init?.method === 'PATCH' ? 'buttons removed' : 'acked');
+      return new Response(null, { status: 204 });
+    });
+    let accept!: () => void;
+    onAction.mockImplementation(() => {
+      order.push('decision dispatched');
+      return new Promise((resolve) => (accept = () => resolve('accepted')));
+    });
+    editMessage.mockImplementation(async () => {
+      order.push('card edited');
+      return { id: 'card-1', threadId: 't', raw: {} };
+    });
+    try {
+      expect((await click({ id: 'clicker-1', username: 'clicker' })).status).toBe(200);
+      // The host has not answered yet: acked, buttons still there.
+      await vi.waitFor(() => expect(order).toEqual(['acked', 'decision dispatched']));
+      accept();
+      await vi.waitFor(() => expect(order).toEqual(['acked', 'decision dispatched', 'buttons removed', 'card edited']));
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('edits the card text even when the button removal stalls', async () => {
+    const { bridge, click, editMessage } = await startDiscord('q-discord-stalled-patch', review);
+    vi.mocked(globalThis.fetch).mockImplementation(async (_url, init) =>
+      init?.method === 'PATCH' ? new Promise<Response>(() => {}) : new Response(null, { status: 204 }),
+    );
+    try {
+      await click({ id: 'clicker-1', username: 'Ann' });
+      await vi.waitFor(() => expect(editMessage).toHaveBeenCalledTimes(1));
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('keeps the buttons and answers only the clicker when a non-approver clicks', async () => {
+    const { bridge, click, onAction, editMessage } = await startDiscord('q-discord-refused', review);
+    onAction.mockResolvedValue('refused');
+    try {
+      expect((await click({ id: 'bystander', username: 'Bob' })).status).toBe(200);
+      await vi.waitFor(() =>
+        expect(discordCalls()).toEqual([
+          ['POST', CALLBACK, ACK],
+          // flags 64: only the clicker sees it.
+          ['POST', FOLLOW_UP, { content: 'Only an approver can answer this.', flags: 64 }],
+        ]),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(editMessage).not.toHaveBeenCalled();
+      expect(discordCalls()).toHaveLength(2);
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it.each([10, 11, 12])(
+    'addresses a click in a thread (channel type %i) by its parent channel and the thread, as the adapter does',
+    async (type) => {
+      const { bridge, click, onAction } = await startDiscord('q-discord-thread', review);
+      try {
+        await click({ id: 'clicker-1', username: 'Ann' }, undefined, {
+          channel_id: 'T1',
+          channel: { id: 'T1', type, parent_id: 'P1' },
+        });
+        await vi.waitFor(() =>
+          expect(onAction).toHaveBeenCalledWith('q-discord-thread', 'approve', 'clicker-1', {
+            messageId: 'card-1',
+            platformId: 'discord:G1:P1',
+          }),
+        );
+      } finally {
+        await bridge.teardown();
+      }
+    },
+  );
+
+  it('a click the host ignores (a second click) leaves the card as it is', async () => {
+    const { bridge, click, onAction, editMessage } = await startDiscord('q-discord-second', review);
+    onAction.mockResolvedValue('ignored');
+    try {
+      await click({ id: 'clicker-1', username: 'Ann' });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(discordCalls()).toEqual([['POST', CALLBACK, ACK]]);
+      expect(editMessage).not.toHaveBeenCalled();
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('a second click on a Discord card reaches the host after the first; an ignored one changes nothing', async () => {
+    const { bridge, click, onAction, editMessage } = await startDiscord('q-discord-answered', review);
+    onAction.mockResolvedValueOnce('accepted').mockResolvedValueOnce('ignored');
+    try {
+      await click({ id: 'clicker-1', username: 'Ann' });
+      await vi.waitFor(() => expect(editMessage).toHaveBeenCalledTimes(1));
+      await click({ id: 'clicker-1', username: 'Ann' });
+      await vi.waitFor(() => expect(onAction).toHaveBeenCalledTimes(2));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(editMessage).toHaveBeenCalledTimes(1);
+      expect(discordCalls().map(([method, url]) => `${method} ${url}`)).toEqual([
+        `POST ${CALLBACK}`,
+        `PATCH ${ORIGINAL}`,
+        `POST ${CALLBACK}`,
+      ]);
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('Discord: says a closed request is no longer available', async () => {
+    const { bridge, click, onAction, editMessage } = await startDiscord('q-discord-closed', review);
+    onAction.mockResolvedValue('closed');
+    try {
+      await click({ id: 'clicker-1', username: 'Ann' });
+      await vi.waitFor(() => expect(editMessage).toHaveBeenCalledTimes(1));
+      expect(JSON.stringify(editMessage.mock.calls[0])).toContain('No longer available');
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('answers a refused click on a gateway (deferred) card privately too', async () => {
+    const { bridge, click, onAction, editMessage } = await startDiscord('q-discord-gw-refused', {
+      ...review,
+      deferResolution: true,
+    });
+    onAction.mockResolvedValue('refused');
+    try {
+      await click({ id: 'bystander', username: 'Bob' });
+      await vi.waitFor(() =>
+        expect(discordCalls()).toEqual([
+          ['POST', CALLBACK, ACK],
+          ['POST', FOLLOW_UP, { content: 'Only an approver can answer this.', flags: 64 }],
+        ]),
+      );
+      expect(editMessage).not.toHaveBeenCalled();
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('leaves an already resolved Discord card alone when a late click arrives', async () => {
+    const { bridge, click, onAction, editMessage } = await startDiscord('q-discord-other', review);
+    try {
+      expect((await click({ id: 'clicker-1', username: 'Ann' }, 'ncq:q-discord-resolved:0\n0')).status).toBe(200);
+      expect(ackBodies()).toEqual([[CALLBACK, { type: 6 }]]);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(editMessage).not.toHaveBeenCalled();
+      expect(onAction).toHaveBeenCalledWith('q-discord-resolved', '0', 'clicker-1', expect.anything());
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('still dispatches a click when the Discord ack fails', async () => {
+    const { bridge, click, onAction } = await startDiscord('q-discord-ackfail', review);
+    vi.mocked(globalThis.fetch).mockRejectedValue(new Error('ECONNRESET'));
+    try {
+      // One with stored render metadata, one without (a migrated pending row): both reach the host.
+      await click({ id: 'clicker-1', username: 'Ann' });
+      await vi.waitFor(() => expect(onAction).toHaveBeenCalledTimes(1));
+      await click({ id: 'clicker-1', username: 'Ann' }, 'ncq:q-discord-no-render:0\n0');
+      await vi.waitFor(() =>
+        expect(onAction.mock.calls.map((call) => call[0])).toEqual(['q-discord-ackfail', 'q-discord-no-render']),
+      );
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('still dispatches a gateway (deferred) click when the Discord ack fails', async () => {
+    const { bridge, click, onAction } = await startDiscord('q-discord-deferred', { ...review, deferResolution: true });
+    vi.mocked(globalThis.fetch).mockRejectedValue(new Error('ECONNRESET'));
+    try {
+      await click({ id: 'clicker-1', username: 'Ann' });
+      await vi.waitFor(() =>
+        expect(onAction).toHaveBeenCalledWith('q-discord-deferred', 'approve', 'clicker-1', expect.anything()),
+      );
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('a stalled Discord ack holds neither the click nor the next event in its channel', async () => {
+    const { bridge, click, forward, onAction, handleWebhook } = await startDiscord('q-discord-ack-stall', review);
+    const deadlines = controlDeadlines();
+    vi.mocked(globalThis.fetch).mockImplementation(async (url, init) =>
+      String(url) === CALLBACK ? stalled(url, init) : new Response(null, { status: 204 }),
+    );
+    try {
+      expect((await click({ id: 'clicker-1', username: 'Ann' })).status).toBe(200);
+      await vi.waitFor(() =>
+        expect(onAction).toHaveBeenCalledWith('q-discord-ack-stall', 'approve', 'clicker-1', expect.anything()),
+      );
+      expect((await forward({ type: 'GATEWAY_MESSAGE_CREATE', data: { id: 'm-2', channel_id: 'C1' } })).status).toBe(
+        200,
+      );
+      expect(handleWebhook).toHaveBeenCalledTimes(1);
+      // Still bounded: the stalled ack ends at its own deadline.
+      expect(deadlines.asked).toEqual([10_000]);
+    } finally {
+      deadlines.restore();
+      await bridge.teardown();
+    }
+  });
+
+  it('ends a stalled Discord ack at its deadline, then still answers the clicker', async () => {
+    const { bridge, click, onAction } = await startDiscord('q-discord-ack-deadline', review);
+    onAction.mockResolvedValue('refused');
+    const deadlines = controlDeadlines();
+    vi.mocked(globalThis.fetch).mockImplementation(async (url, init) =>
+      String(url) === CALLBACK ? stalled(url, init) : new Response(null, { status: 204 }),
+    );
+    const errors = vi.spyOn(log, 'error').mockImplementation(() => {});
+    try {
+      await click({ id: 'bystander', username: 'Bob' });
+      await vi.waitFor(() => expect(onAction).toHaveBeenCalledTimes(1));
+      // The private note goes through the interaction's webhook, which needs the ack first.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(discordCalls()).toEqual([['POST', CALLBACK, ACK]]);
+      expect(deadlines.asked).toEqual([10_000]);
+
+      deadlines.expire();
+      await vi.waitFor(() =>
+        expect(discordCalls()).toEqual([
+          ['POST', CALLBACK, ACK],
+          ['POST', FOLLOW_UP, { content: 'Only an approver can answer this.', flags: 64 }],
+        ]),
+      );
+      expect(deadlines.asked).toEqual([10_000, 10_000]);
+      expect(errors).toHaveBeenCalledWith('Failed to acknowledge interaction', expect.anything());
+    } finally {
+      errors.mockRestore();
+      deadlines.restore();
+      await bridge.teardown();
+    }
+  });
+
+  it('a stalled private note holds no later click, and ends at its deadline', async () => {
+    const { bridge, click, onAction } = await startDiscord('q-discord-webhook-deadline', review);
+    onAction.mockResolvedValue('refused');
+    const deadlines = controlDeadlines();
+    vi.mocked(globalThis.fetch).mockImplementation(async (url, init) =>
+      String(url) === FOLLOW_UP ? stalled(url, init) : new Response(null, { status: 204 }),
+    );
+    const errors = vi.spyOn(log, 'error').mockImplementation(() => {});
+    try {
+      await click({ id: 'bystander', username: 'Bob' });
+      await vi.waitFor(() => expect(discordCalls().map(([, url]) => url)).toEqual([CALLBACK, FOLLOW_UP]));
+      // The first click's note is stuck; the next click still reaches the host.
+      await click({ id: 'bystander', username: 'Bob' });
+      await vi.waitFor(() => expect(onAction).toHaveBeenCalledTimes(2));
+
+      deadlines.expire();
+      await vi.waitFor(() =>
+        expect(errors).toHaveBeenCalledWith('Discord interaction webhook failed', expect.anything()),
+      );
+      // Every call asked for the same bound.
+      expect(new Set(deadlines.asked)).toEqual(new Set([10_000]));
+    } finally {
+      errors.mockRestore();
+      deadlines.restore();
+      await bridge.teardown();
+    }
+  });
+
+  it('records the decision when the card edit fails or hangs', async () => {
+    for (const [questionId, outcome] of [
+      ['q-discord-fail', Promise.reject(new Error('Discord 400'))],
+      ['q-discord-hang', new Promise(() => {})],
+    ] as const) {
+      outcome.catch(() => {});
+      const { bridge, click, onAction, editMessage } = await startDiscord(questionId, review);
+      editMessage.mockReturnValueOnce(outcome as never);
+      try {
+        expect((await click({ id: 'clicker-1', username: 'clicker' })).status).toBe(200);
+        await vi.waitFor(() =>
+          expect(onAction).toHaveBeenCalledWith(questionId, 'approve', 'clicker-1', expect.anything()),
+        );
+        expect(ackBodies()[0]).toEqual([CALLBACK, ACK]);
+      } finally {
+        await bridge.teardown();
+      }
+    }
   });
 
   it.each([
@@ -1081,14 +1760,24 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
   });
 
   it('dispatches clicks and forwards other events when the gateway token matches', async () => {
+    const { registerQuestionRenderResolver } = await import('./question-render-registry.js');
+    // A pending question has a render; one without is already resolved and left alone.
+    registerQuestionRenderResolver((id) =>
+      id === 'q-1'
+        ? { title: 'Review', options: [{ label: 'Approve', selectedLabel: 'Approved', value: 'approve' }] }
+        : undefined,
+    );
     const { bridge, post, onAction, handleWebhook } = await startGateway(BOT_TOKEN);
     try {
       const auth = { 'x-discord-gateway-token': BOT_TOKEN };
       expect((await post(click, auth)).status).toBe(200);
-      expect(onAction).toHaveBeenCalledWith('q-1', 'approve', 'clicker-1', {
-        messageId: 'card-1',
-        platformId: 'chan-1',
-      });
+      await vi.waitFor(() =>
+        // The encoded channel, as the card's messaging group records it (not the raw Discord id).
+        expect(onAction).toHaveBeenCalledWith('q-1', 'approve', 'clicker-1', {
+          messageId: 'card-1',
+          platformId: 'discord:@me:chan-1',
+        }),
+      );
       expect((await post(message, auth)).status).toBe(200);
       expect(handleWebhook).toHaveBeenCalledTimes(1);
     } finally {
@@ -1125,11 +1814,66 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
     const { bridge, post, onAction } = await startGateway(BOT_TOKEN);
     try {
       expect((await post(encodedClick, { 'x-discord-gateway-token': BOT_TOKEN })).status).toBe(200);
-      expect(onAction).toHaveBeenCalledWith('q-index', 'approve', 'clicker-1', {
-        messageId: 'card-2',
-        platformId: 'chan-1',
-      });
+      await vi.waitFor(() =>
+        expect(onAction).toHaveBeenCalledWith('q-index', 'approve', 'clicker-1', {
+          messageId: 'card-2',
+          platformId: 'discord:@me:chan-1',
+        }),
+      );
     } finally {
+      await bridge.teardown();
+    }
+  });
+
+  /** A Discord call that never answers: it ends only when its signal aborts. */
+  const stalled = (_url: unknown, init?: RequestInit) =>
+    new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(init.signal!.reason));
+    });
+  /**
+   * Hands out the bridge's Discord deadlines as signals the test fires, so a
+   * stall ends at once instead of after 10 s. `asked` is what each call wanted.
+   */
+  function controlDeadlines() {
+    const asked: number[] = [];
+    const pending: AbortController[] = [];
+    const spy = vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms) => {
+      asked.push(ms);
+      const controller = new AbortController();
+      pending.push(controller);
+      return controller.signal;
+    });
+    const expire = () => {
+      for (const controller of pending.splice(0)) {
+        controller.abort(new DOMException('The operation was aborted due to timeout', 'TimeoutError'));
+      }
+    };
+    const restore = () => {
+      expire();
+      spy.mockRestore();
+    };
+    return { asked, expire, restore };
+  }
+
+  it('ends a stalled Discord ack at its deadline, and the click still reaches the host', async () => {
+    const { bridge, click, onAction } = await startDiscord('q-discord-ack-deadline', review);
+    const deadlines = controlDeadlines();
+    vi.mocked(globalThis.fetch).mockImplementation(async (url, init) =>
+      String(url).endsWith('/callback') ? stalled(url, init) : new Response(null, { status: 204 }),
+    );
+    const errors = vi.spyOn(log, 'error').mockImplementation(() => {});
+    try {
+      const answered = click({ id: 'clicker-1', username: 'Ann' });
+      await vi.waitFor(() => expect(deadlines.asked).toEqual([10_000]));
+      deadlines.expire();
+      expect((await answered).status).toBe(200);
+      await vi.waitFor(() =>
+        expect(onAction).toHaveBeenCalledWith('q-discord-ack-deadline', 'approve', 'clicker-1', expect.anything()),
+      );
+      expect(errors).toHaveBeenCalledWith('Failed to acknowledge interaction', expect.anything());
+    } finally {
+      errors.mockRestore();
+      deadlines.restore();
       await bridge.teardown();
     }
   });

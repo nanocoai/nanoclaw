@@ -459,13 +459,26 @@ function createAdapter(): ChannelAdapter {
         return;
       }
       const selected = render.options[parsed.option]!;
-      setup.onAction(parsed.questionId, selected.value, LOCAL_WEB_USER_ID);
-      publish(platformId, {
-        type: 'question-resolution',
-        questionId: parsed.questionId,
-        resolution: selected.selectedLabel,
-      });
-      sendJson(res, 202, { ok: true });
+      // The question shows as answered only once the host accepts the answer.
+      const result: unknown = await setup.onAction(parsed.questionId, selected.value, LOCAL_WEB_USER_ID);
+      // A core from before click outcomes returns nothing: answered as before.
+      const outcome = result === undefined ? 'accepted' : result;
+      if (outcome === 'refused') {
+        sendJson(res, 403, { error: 'Only an approver can answer this.' });
+        return;
+      }
+      if (outcome !== 'accepted' && outcome !== 'closed') {
+        sendJson(res, 409, { error: 'This question is no longer pending.' });
+        return;
+      }
+      // A card the host updates itself (a gateway approval) gets its final text from there.
+      if (outcome === 'accepted' && render.deferResolution) {
+        sendJson(res, 202, { ok: true });
+        return;
+      }
+      const resolution = outcome === 'closed' ? 'No longer available' : selected.selectedLabel;
+      publish(platformId, { type: 'question-resolution', questionId: parsed.questionId, resolution });
+      sendJson(res, 202, { ok: true, resolution });
       return;
     }
 
