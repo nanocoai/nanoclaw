@@ -231,7 +231,7 @@ describe('apply engine lifecycle', () => {
   });
 
   it('plan marks the unknown step ↳agent and the prompt ? needs-input before any write', () => {
-    const { steps, agentSteps, needsInput } = planSkill(skillDir, root);
+    const { agentSteps, needsInput } = planSkill(skillDir, root);
     expect(agentSteps).toBe(1);
     expect(needsInput).toContain('token');
     expect(existsSync(join(root, 'src/sample.ts'))).toBe(false); // planning mutated nothing

@@ -14,13 +14,12 @@ import { log } from '../src/log.js';
 import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
 import { inspectCentralDb } from './central-db-inspection.js';
 import { inspectAgentImage, readImageSource } from './lib/registry-state.js';
-import { getPlatform, getServiceManager, hasSystemd, isRoot } from './platform.js';
+import { getServiceManager, isRoot } from './platform.js';
 import { emitStatus } from './status.js';
 import { readSlackJob, slackJobFailure, slackJobStatus, type SlackJob } from '../src/community-portal/slack-job.js';
 
 export async function run(_args: string[]): Promise<void> {
   const projectRoot = process.cwd();
-  const platform = getPlatform();
   const homeDir = os.homedir();
 
   log.info('Starting verification');
