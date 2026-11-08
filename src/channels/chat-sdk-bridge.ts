@@ -24,6 +24,7 @@ import {
   type AssistantContextChangedEvent,
   type AssistantThreadStartedEvent,
   type ConcurrencyStrategy,
+  type Logger,
   type Message as ChatMessage,
 } from 'chat';
 import { log } from '../log.js';
@@ -201,6 +202,42 @@ export function attachmentBytesToBase64(data: Buffer | ArrayBuffer | Uint8Array)
   if (Buffer.isBuffer(data)) return data.toString('base64');
   if (data instanceof Uint8Array) return Buffer.from(data.buffer, data.byteOffset, data.byteLength).toString('base64');
   return Buffer.from(data).toString('base64');
+}
+
+/**
+ * The Chat SDK reports a handler that throws or a failed state write only
+ * through its logger, so `logger: 'silent'` dropped such a message without a
+ * trace. Warn and error reach our log; the SDK's debug and info lines go to
+ * our debug level.
+ */
+export function chatSdkLogger(prefix = 'chat-sdk'): Logger {
+  const to =
+    (level: 'debug' | 'warn' | 'error') =>
+    (message: string, ...args: unknown[]) =>
+      log[level](`${prefix}: ${message}`, sdkLogData(args));
+  return {
+    child: (name: string) => chatSdkLogger(`${prefix}:${name}`),
+    debug: to('debug'),
+    info: to('debug'),
+    warn: to('warn'),
+    error: to('error'),
+  };
+}
+
+/** Our log prints an Error's message and stack only under `err`; the SDK passes it as `error`. */
+function sdkLogData(args: unknown[]): Record<string, unknown> | undefined {
+  const data: Record<string, unknown> = {};
+  const extra: unknown[] = [];
+  for (const arg of args) {
+    if (arg instanceof Error) data.err ??= arg;
+    else if (isRecord(arg)) {
+      for (const [key, value] of Object.entries(arg)) {
+        data[value instanceof Error && data.err === undefined ? 'err' : key] = value;
+      }
+    } else if (arg !== undefined) extra.push(arg);
+  }
+  if (extra.length > 0) data.args = extra;
+  return Object.keys(data).length > 0 ? data : undefined;
 }
 
 /**
@@ -724,7 +761,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         userName: adapter.userName || 'NanoClaw',
         concurrency: config.concurrency ?? 'concurrent',
         state,
-        logger: 'silent',
+        logger: chatSdkLogger(),
       });
 
       // Four SDK dispatch paths — bridge just forwards. All per-wiring
