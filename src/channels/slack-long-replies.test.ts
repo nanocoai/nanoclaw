@@ -101,4 +101,31 @@ describe('Slack bridge splits long replies', () => {
     expect(sent.length).toBe(part.length + 2 * 500); // each bare @mention gains `<` and `>`
     expect(sent.length).toBeLessThanOrEqual(SLACK_MARKDOWN_LIMIT);
   });
+
+  it('the real bridge built from the Slack config posts a long reply in parts', async () => {
+    expect(slack.createSlackBridge()).not.toBeNull();
+    const config = lastBridgeConfig();
+    const actual = await vi.importActual<typeof import('./chat-sdk-bridge.js')>('./chat-sdk-bridge.js');
+    const posted: string[] = [];
+    const adapter = {
+      name: 'slack',
+      postMessage: async (threadId: string, message: { markdown: string }) => {
+        posted.push(message.markdown);
+        return { id: `part-${posted.length}`, threadId, raw: {} };
+      },
+    };
+    const bridge = actual.createChatSdkBridge({ ...config, adapter } as never);
+    const reply = Array.from({ length: 700 }, (_, i) => `Line ${i}: the deploy of service ${i} finished.`).join('\n');
+    expect(reply.length).toBeGreaterThan(2 * SLACK_MARKDOWN_LIMIT);
+
+    const id = await bridge.deliver('slack:C1', 'slack:C1:1700000000.000100', {
+      kind: 'chat',
+      content: { markdown: reply },
+    });
+
+    expect(id).toBe('part-1'); // the head of the reply, as for Discord and Telegram
+    expect(posted.length).toBeGreaterThan(2);
+    for (const part of posted) expect(slackMarkdownText(part).length).toBeLessThanOrEqual(SLACK_MARKDOWN_LIMIT);
+    expect(posted.join('\n')).toBe(reply);
+  });
 });
