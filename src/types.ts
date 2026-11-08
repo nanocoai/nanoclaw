@@ -218,6 +218,8 @@ export interface PendingQuestion {
   channel_type: string | null;
   thread_id: string | null;
   title: string;
+  /** Card body, kept so the answered card still shows it. Empty on older rows. */
+  question?: string;
   options: import('./channels/ask-question.js').NormalizedOption[];
   created_at: string;
 }

@@ -437,6 +437,8 @@ interface TerminalApprovalCard {
   /** The question as separate text blocks, when it was split to fit. */
   questionBlocks?: string[];
   resolution: string;
+  /** The question is the agent's own markup: don't escape it (the resolution still is). */
+  fromAgent?: boolean;
 }
 
 /**
@@ -612,13 +614,15 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
   }
   const transformText = (t: string): string => (config.transformOutboundText ? config.transformOutboundText(t) : t);
   const cardText = (t: string): string => (config.escapeCardText ? config.escapeCardText(t) : t);
-  const terminalMessage = (spec: TerminalApprovalCard) =>
-    terminalApprovalMessage({
+  const terminalMessage = ({ fromAgent, ...spec }: TerminalApprovalCard) => {
+    const questionText = fromAgent ? (t: string) => t : cardText;
+    return terminalApprovalMessage({
       ...spec,
-      question: cardText(spec.question),
-      questionBlocks: spec.question ? splitCardText(spec.question, cardText, CARD_TEXT_BLOCK_LENGTH) : undefined,
+      question: questionText(spec.question),
+      questionBlocks: spec.question ? splitCardText(spec.question, questionText, CARD_TEXT_BLOCK_LENGTH) : undefined,
       resolution: cardText(spec.resolution),
     });
+  };
   /** Registry/routing key for this bridge — also the app-context cache
    *  namespace. Default instances key by the platform name. */
   const instanceKey = config.instance ?? adapter.name;
@@ -863,7 +867,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
             tid,
             event.messageId,
             render?.question
-              ? terminalMessage({ title, question: render.question, resolution })
+              ? terminalMessage({ title, question: render.question, resolution, fromAgent: render.fromAgent })
               : { markdown: `${title}\n\n${resolution}` },
           );
         } catch (err) {
@@ -981,11 +985,9 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           typeof terminalCard.question === 'string' &&
           typeof terminalCard.resolution === 'string'
         ) {
-          await adapter.editMessage(
-            tid,
-            content.messageId as string,
-            terminalMessage(terminalCard as TerminalApprovalCard),
-          );
+          // Named fields only: a row must not switch off escaping with its own fromAgent.
+          const { title, question, resolution } = terminalCard as TerminalApprovalCard;
+          await adapter.editMessage(tid, content.messageId as string, terminalMessage({ title, question, resolution }));
         } else {
           await adapter.editMessage(tid, content.messageId as string, {
             markdown: transformText((content.text as string) || (content.markdown as string) || ''),

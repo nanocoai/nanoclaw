@@ -1320,6 +1320,95 @@ it('forwards the authenticated instance and message address without editing a de
   }
 });
 
+it('escapes a host terminal card even when its row claims fromAgent', async () => {
+  const edits: PostCall[] = [];
+  const bridge = createChatSdkBridge({
+    adapter: stubAdapter({
+      editMessage: async (threadId, _id, message) => {
+        edits.push({ threadId, message });
+        return { id: 'card', threadId, raw: {} };
+      },
+    }),
+    supportsThreads: false,
+    escapeCardText: (t) => `[${t}]`,
+  });
+  await bridge.deliver('stub:C1', null, {
+    kind: 'chat-sdk',
+    content: {
+      operation: 'edit',
+      messageId: 'card',
+      terminalCard: { title: 'Review', question: 'Allow <x>?', resolution: 'Approved', fromAgent: true },
+    },
+  });
+  const edited = edits[0].message as { card: { children: Array<{ content?: string }> } };
+  expect(edited.card.children.map((c) => c.content)).toEqual(['[Allow <x>?]', '[Approved]']);
+});
+
+it('keeps an answered agent question body on the card, unescaped, with an escaped resolution', async () => {
+  const { initTestDb, closeDb } = await import('../db/connection.js');
+  const { runMigrations } = await import('../db/migrations/index.js');
+  const { createAgentGroup, createSession, createPendingQuestion } = await import('../db/index.js');
+  await runMigrations(await initTestDb());
+  const created_at = new Date().toISOString();
+  await createAgentGroup({ id: 'ag-q', name: 'Agent', folder: 'agent-q', agent_provider: null, created_at });
+  await createSession({
+    id: 'sess-q',
+    agent_group_id: 'ag-q',
+    messaging_group_id: null,
+    thread_id: null,
+    agent_provider: null,
+    status: 'active',
+    container_status: 'stopped',
+    last_active: null,
+    created_at,
+  });
+  await createPendingQuestion({
+    question_id: 'body-fixture',
+    session_id: 'sess-q',
+    message_out_id: 'out-1',
+    platform_id: 'fixture:room',
+    channel_type: 'fixture',
+    thread_id: null,
+    title: 'Deploy',
+    question: 'Ship **v2** today?',
+    options: [{ label: 'Yes', selectedLabel: 'Yes', value: 'yes' }],
+    created_at,
+  });
+  const editMessage = vi.fn(async () => ({ id: 'card', threadId: 'fixture:room', raw: {} }));
+  const adapter = stubAdapter({
+    name: 'fixture',
+    initialize: async () => {},
+    channelIdFromThreadId: (threadId: string) => threadId,
+    editMessage,
+  });
+  const bridge = createChatSdkBridge({ adapter, supportsThreads: false, escapeCardText: (t) => `[${t}]` });
+  try {
+    await bridge.setup({ onInbound: () => {}, onInboundEvent: () => {}, onMetadata: () => {}, onAction: vi.fn() });
+    const chat = (bridge as unknown as { _chat: import('chat').Chat })._chat;
+    await chat.processAction(
+      {
+        actionId: 'ncq:body-fixture:0',
+        adapter,
+        messageId: 'card',
+        raw: {},
+        threadId: 'fixture:room',
+        user: { userId: 'u2', userName: 'ann' } as never,
+        value: '0',
+      },
+      undefined,
+    );
+    expect(editMessage).toHaveBeenCalledTimes(1);
+    const edited = (editMessage.mock.calls[0] as unknown[])[2] as {
+      card: { title: string; children: Array<{ type: string; content?: string }> };
+    };
+    expect(edited.card.title).toBe('Deploy');
+    expect(edited.card.children.map((c) => c.content)).toEqual(['Ship **v2** today?', '[Yes by ann]']);
+  } finally {
+    await bridge.teardown();
+    await closeDb();
+  }
+});
+
 describe('createChatSdkBridge — local Gateway webhook', () => {
   // The Gateway listener forwards raw events to a loopback server; only it may
   // post there. It sends the bot token in x-discord-gateway-token.
