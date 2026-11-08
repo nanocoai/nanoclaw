@@ -25,6 +25,7 @@ import { log } from '../log.js';
 import { CardTooLongError } from './ask-question.js';
 import {
   attachmentBytesToBase64,
+  CARD_EDIT_SETTLE_MS,
   CARD_TEXT_BLOCK_LENGTH,
   createChatSdkBridge,
   splitCardText,
@@ -1810,6 +1811,31 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
       finishEdit();
       await vi.waitFor(() => expect(patches()).toEqual([['PATCH', ORIGINAL, { components: [] }]]));
     } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('removes the buttons anyway once a card edit has stalled for the settle time', async () => {
+    const { bridge, click, editMessage } = await startDiscord('q-discord-edit-stalls', review);
+    editMessage.mockImplementation(() => new Promise(() => {}) as never);
+    const realSetTimeout = globalThis.setTimeout;
+    const settleTimers: Array<() => void> = [];
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void, ms?: number) => {
+      if (ms === CARD_EDIT_SETTLE_MS) {
+        settleTimers.push(fn);
+        return 0;
+      }
+      return realSetTimeout(fn, ms);
+    }) as never);
+    const patches = () => discordCalls().filter(([method]) => method === 'PATCH');
+    try {
+      await click({ id: 'clicker-1', username: 'Ann' });
+      await vi.waitFor(() => expect(settleTimers).toHaveLength(1));
+      expect(patches()).toEqual([]);
+      settleTimers[0]();
+      await vi.waitFor(() => expect(patches()).toEqual([['PATCH', ORIGINAL, { components: [] }]]));
+    } finally {
+      vi.mocked(globalThis.setTimeout).mockRestore();
       await bridge.teardown();
     }
   });

@@ -657,21 +657,19 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           : (render.options.find((o) => o.value === selectedOption)?.selectedLabel ?? selectedOption);
       const actorName = outcome === 'closed' ? '' : click.actorName;
       // Every clicked card resolves the same way, on every channel: escaped.
-      try {
-        await adapter.editMessage(
+      const messageId = click.messageId;
+      const edit = (async () =>
+        adapter.editMessage(
           click.threadId,
-          click.messageId,
+          messageId,
           terminalMessage({
             title: render.title,
             question: render.question ?? click.fallbackQuestion ?? '',
             resolution: actorName ? `${selectedLabel} by ${actorName}` : selectedLabel,
           }),
-        );
-      } finally {
-        // Only once the edit settles: two edits of one message in flight together
-        // can drop the edit's text (Discord kept only the button removal).
-        transport.removeButtons?.();
-      }
+        ))();
+      if (transport.removeButtons) removeButtonsAfter(edit, transport.removeButtons);
+      await edit;
       // eslint-disable-next-line no-catch-all/no-catch-all -- logged; a failed card update never undoes the decision
     } catch (err) {
       log.warn('Failed to update card after action', { err });
@@ -1261,11 +1259,32 @@ interface CardClick {
 interface ClickTransport {
   /** Only the clicker sees it; nothing is posted where the channel can't. */
   notePrivately(text: string): Promise<void>;
-  /** Removes the buttons apart from the card edit, where the transport can; starts after the edit settles, never awaited. */
+  /** Removes the buttons apart from the card edit, where the transport can; see removeButtonsAfter. Never awaited. */
   removeButtons?(): void;
 }
 
 type ResolveClick = (click: CardClick, transport: ClickTransport) => Promise<void>;
+
+/** How long a clicked card's edit may run before its buttons go anyway. */
+export const CARD_EDIT_SETTLE_MS = 5_000;
+
+/**
+ * Removes the buttons once the card edit settles, or once it has stalled for
+ * CARD_EDIT_SETTLE_MS. Not alongside it: two edits of one message in flight
+ * together can drop the edit's text (Discord kept only the button removal).
+ */
+function removeButtonsAfter(edit: Promise<unknown>, removeButtons: () => void): void {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const stalled = new Promise<void>((resolve) => (timer = setTimeout(resolve, CARD_EDIT_SETTLE_MS)));
+  const settled = edit.then(
+    () => undefined,
+    () => undefined,
+  );
+  void Promise.race([settled, stalled]).then(() => {
+    clearTimeout(timer);
+    removeButtons();
+  });
+}
 
 /**
  * Start a local HTTP server to receive forwarded Gateway events.
