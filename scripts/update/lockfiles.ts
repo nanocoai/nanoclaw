@@ -1,0 +1,117 @@
+import path from 'node:path';
+
+import { pinnedBunVersion } from '../provider-contract-verifier.js';
+import type { CommandRunner } from './service.js';
+
+/** Lockfiles the update can rebuild from the merged manifest, and where. */
+const LOCKFILES: Record<string, { dir: string; manager: 'pnpm' | 'bun' }> = {
+  'pnpm-lock.yaml': { dir: '.', manager: 'pnpm' },
+  'container/agent-runner/bun.lock': { dir: 'container/agent-runner', manager: 'bun' },
+};
+
+const REGENERATE_TIMEOUT_MS = 10 * 60 * 1000;
+
+export type LockfileOutcome =
+  | { kind: 'none' }
+  | { kind: 'mixed'; files: string[] }
+  | { kind: 'resolved'; files: string[] }
+  | { kind: 'failed'; files: string[]; message: string };
+
+function isLockfile(file: string): boolean {
+  return Object.hasOwn(LOCKFILES, file);
+}
+
+function lines(output: string): string[] {
+  return output.split('\n').filter(Boolean);
+}
+
+function tail(output: string): string {
+  return lines(output).slice(-15).join('\n') || '(no output)';
+}
+
+/** The pinned Bun writes the lockfile the image build reads with --frozen-lockfile. */
+function regenerateCommand(runner: CommandRunner, root: string, file: string): [string, string[]] {
+  const args = ['install', '--lockfile-only', '--ignore-scripts'];
+  if (LOCKFILES[file].manager === 'pnpm') return ['pnpm', args];
+  const version = pinnedBunVersion(root);
+  const host = runner.tryRun('bun', ['--version'], root);
+  if (host.ok && host.stdout.trim() === version) return ['bun', args];
+  return ['pnpm', [`--package=bun@${version}`, 'dlx', 'bun', ...args]];
+}
+
+const MANUAL_STEPS =
+  "To do it by hand in the stage: take upstream's copy (git checkout --theirs -- <file>), regenerate it " +
+  '(pnpm install --lockfile-only, or bun install --lockfile-only in container/agent-runner), ' +
+  'git add it, commit, then resume. Never merge a lockfile by hand.';
+
+/**
+ * Finish a merge whose only conflicts are lockfiles: take upstream's copy, let
+ * the package manager add back local dependencies from the merged manifest,
+ * and commit. Upstream's copy keeps its lockfile-only bumps (security fixes),
+ * which a fresh resolve from either side would drop. Any failure before the
+ * commit puts the conflict back exactly as git left it.
+ */
+export function resolveLockfileConflicts(runner: CommandRunner, root: string): LockfileOutcome {
+  if (!runner.tryRun('git', ['rev-parse', '-q', '--verify', 'MERGE_HEAD'], root).ok) return { kind: 'none' };
+  const unmerged = lines(runner.run('git', ['diff', '--name-only', '--diff-filter=U'], root));
+  const files = unmerged.filter(isLockfile);
+  if (files.length === 0) return { kind: 'none' };
+  if (files.length < unmerged.length) return { kind: 'mixed', files };
+
+  const fail = (reason: string): LockfileOutcome => {
+    runner.tryRun('git', ['checkout', '-m', '--', ...files], root);
+    return {
+      kind: 'failed',
+      files,
+      message: `Only lockfiles conflicted (${files.join(', ')}), but regenerating them failed: ${reason}\n${MANUAL_STEPS}`,
+    };
+  };
+
+  for (const file of files) {
+    const theirs = runner.tryRun('git', ['checkout', '--theirs', '--', file], root);
+    if (!theirs.ok) return fail(`upstream has no ${file} to start from: ${tail(theirs.stdout)}`);
+  }
+  for (const file of files) {
+    let command: [string, string[]];
+    try {
+      command = regenerateCommand(runner, root, file);
+    } catch (err) {
+      return fail(err instanceof Error ? err.message : String(err));
+    }
+    const cwd = path.join(root, LOCKFILES[file].dir);
+    const result = runner.tryRun(command[0], command[1], cwd, { timeoutMs: REGENERATE_TIMEOUT_MS });
+    if (!result.ok) return fail(`${command[0]} ${command[1].join(' ')}:\n${tail(result.stdout)}`);
+  }
+  // A package manager that touched anything else did more than regenerate.
+  const touched = [
+    ...lines(runner.run('git', ['diff', '--name-only'], root)),
+    ...lines(runner.run('git', ['ls-files', '--others', '--exclude-standard'], root)),
+  ];
+  const stray = [...new Set(touched.filter((file) => !files.includes(file)))];
+  if (stray.length > 0) return fail(`it also changed ${stray.join(', ')}`);
+
+  runner.run('git', ['add', '--', ...files], root);
+  const committed = runner.tryRun('git', ['commit', '--no-edit'], root);
+  if (!committed.ok) {
+    return {
+      kind: 'failed',
+      files,
+      message:
+        `Regenerated and staged ${files.join(', ')}, but the merge commit failed:\n${tail(committed.stdout)}\n` +
+        'Commit the merge in the stage, then resume.',
+    };
+  }
+  return { kind: 'resolved', files };
+}
+
+/** What to tell the operator about lockfiles in a merge that stays conflicted. */
+export function lockfileNote(outcome: LockfileOutcome): string | undefined {
+  if (outcome.kind === 'failed') return outcome.message;
+  if (outcome.kind === 'mixed') {
+    return (
+      `Leave ${outcome.files.join(', ')} as they are: resolve and git add the other files, ` +
+      'then run resume without committing. Resume regenerates the lockfiles and commits the merge.'
+    );
+  }
+  return undefined;
+}

@@ -7,6 +7,7 @@ import type { GatewayCatalogEntry } from '../../setup/gateways/catalog.js';
 import { getInstallSlug } from '../../src/install-slug.js';
 import { refreshInstalledSkills, type SkillsRefreshReport } from '../update-skills.js';
 import { stampChannel, type UpdateChannel } from './channel.js';
+import { lockfileNote, resolveLockfileConflicts } from './lockfiles.js';
 import {
   createCommandRunner,
   defaultServiceEnvironment,
@@ -58,6 +59,8 @@ export interface UpdateState {
   backupBranch: string;
   backupTag: string;
   changedFiles: string[];
+  /** Lockfile conflicts the controller resolved by regenerating them. */
+  regeneratedLockfiles?: string[];
   requirements: UpdateRequirement[];
   skillRefresh?: SkillsRefreshReport;
   service?: ServiceHandle;
@@ -309,10 +312,15 @@ export function prepareUpdate(options: PrepareOptions, runtime = createUpdateRun
   }
 
   if (!applied.ok) {
-    state.phase = 'conflict';
-    state.lastError = applied.stdout || `${strategy} needs conflict resolution`;
-    saveState(state);
-    return state;
+    const lockfiles = strategy === 'merge' ? resolveLockfileConflicts(runtime.runner, stageRoot) : undefined;
+    if (lockfiles?.kind !== 'resolved') {
+      state.phase = 'conflict';
+      const note = lockfiles && lockfileNote(lockfiles);
+      state.lastError = [applied.stdout || `${strategy} needs conflict resolution`, note].filter(Boolean).join('\n');
+      saveState(state);
+      return state;
+    }
+    state.regeneratedLockfiles = lockfiles.files;
   }
   refreshPreparedState(state, runtime);
   return state;
@@ -321,6 +329,16 @@ export function prepareUpdate(options: PrepareOptions, runtime = createUpdateRun
 export function resumePreparedUpdate(projectRoot: string, id: string, runtime = createUpdateRuntime()): UpdateState {
   const state = loadState(projectRoot, id);
   if (state.phase !== 'conflict' && state.phase !== 'prepared') throw new Error(`Cannot resume from ${state.phase}`);
+  // The operator may have resolved every other file and left the lockfiles to us.
+  if (state.phase === 'conflict' && state.strategy === 'merge') {
+    const lockfiles = resolveLockfileConflicts(runtime.runner, state.stageRoot);
+    if (lockfiles.kind === 'failed') {
+      state.lastError = lockfiles.message;
+      saveState(state);
+      return state;
+    }
+    if (lockfiles.kind === 'resolved') state.regeneratedLockfiles = lockfiles.files;
+  }
   refreshPreparedState(state, runtime);
   return state;
 }
@@ -1073,6 +1091,7 @@ export function summarizeState(state: UpdateState): Record<string, unknown> {
     stageRoot: state.stageRoot,
     stageCleanedAt: state.stageCleanedAt,
     changedFiles: state.changedFiles,
+    regeneratedLockfiles: state.regeneratedLockfiles,
     requirements: state.requirements,
     skillRefresh: state.skillRefresh,
     service: state.service,
