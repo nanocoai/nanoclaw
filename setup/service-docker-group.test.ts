@@ -3,11 +3,7 @@ import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-/**
- * A user added to the docker group after login: this shell reaches Docker but
- * the user systemd manager still has its old groups. Host commands are faked
- * and recorded in order in `sys.calls`.
- */
+/** A docker group added after login reaches this shell, not the user manager; host commands are faked. */
 const sys = vi.hoisted(() => ({
   root: '',
   calls: [] as string[],
@@ -141,28 +137,17 @@ describe('user service and a docker group added mid-session', () => {
     expect(fields()).toMatchObject({ STATUS: 'success' });
   });
 
-  it('fails fast without a cached sudo ticket and reports setfacl as missing', async () => {
-    sys.sudoCached = false;
+  it.each([
+    { why: 'without a cached sudo ticket', setfacl: false, apt: true, sudo: [aptCommand], missing: true },
+    { why: 'when setfacl itself fails', setfacl: true, apt: true, sudo: [aclCommand()], missing: undefined },
+    { why: 'without apt-get to install acl', setfacl: false, apt: false, sudo: [], missing: true },
+  ])('keeps the flag and still restarts the service $why', async ({ setfacl, apt, sudo, missing }) => {
+    Object.assign(sys, { setfacl, apt, sudoCached: false });
     await run([]);
-    expect(sudoCalls()).toEqual([aptCommand]);
-    expect(fields()).toMatchObject({ DOCKER_GROUP_STALE: true, SETFACL_MISSING: true, STATUS: 'success' });
-  });
-
-  it('keeps the flag and leaves the service alone when setfacl itself fails', async () => {
-    sys.setfacl = true;
-    sys.sudoCached = false;
-    await run([]);
-    expect(sudoCalls()).toEqual([aclCommand()]);
-    expect(fields()).toMatchObject({ DOCKER_GROUP_STALE: true });
-    expect(fields()).not.toHaveProperty('SETFACL_MISSING');
+    expect(sudoCalls()).toEqual(sudo);
+    expect(fields()).toMatchObject({ DOCKER_GROUP_STALE: true, STATUS: 'success' });
+    expect(fields()?.SETFACL_MISSING).toBe(missing);
     expect(sys.breakerAt).toEqual(['restart:clear']);
-  });
-
-  it('does not reach for apt-get on other distributions', async () => {
-    sys.apt = false;
-    await run([]);
-    expect(sudoCalls()).toEqual([]);
-    expect(fields()).toMatchObject({ DOCKER_GROUP_STALE: true, SETFACL_MISSING: true });
   });
 
   it('runs no sudo when the user manager already reaches Docker', async () => {

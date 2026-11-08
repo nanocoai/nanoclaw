@@ -2,11 +2,7 @@ import path from 'path';
 
 import { commandExists, isWSL } from '../platform.js';
 
-/**
- * What to tell the user when the service step could not let the background
- * service reach Docker (DOCKER_GROUP_STALE in SETUP_SERVICE). Returns null
- * when there is nothing to fix.
- */
+/** What to print when the service step left the service unable to reach Docker, or null. */
 export function dockerAccessHint(
   fields: Record<string, string>,
   unit: string,
@@ -18,8 +14,8 @@ export function dockerAccessHint(
     fields.SETFACL_MISSING !== 'true'
       ? []
       : [host.apt ? 'sudo apt-get install -y acl' : '# first install the acl package (it provides setfacl)'];
-  // A restart that lands in the gap between crash-loop restarts inherits the
-  // crash backoff (up to 15 min); clearing its state starts the host at once.
+  // A restart between crash-loop restarts inherits circuit-breaker.ts's backoff;
+  // clearing its file starts the host at once.
   const breaker = path.posix.join(fields.PROJECT_PATH ?? '', 'data', 'circuit-breaker.json');
   // Setup turns on linger, so logging out does not restart the user manager;
   // only a reboot (or a WSL shutdown) gives it the docker group.

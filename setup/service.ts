@@ -487,16 +487,12 @@ interface DockerAccess {
   repaired?: boolean;
 }
 
-/**
- * Let the user service reach Docker when the docker group was added after the
- * user systemd manager started. Reports what is still wrong so the wizard can
- * print commands that fit.
- */
+/** Lets the user service reach Docker after a mid-session docker group add; reports what is still wrong. */
 function repairDockerGroupAccess(): DockerAccess {
   if (!checkDockerGroupStale()) return { stale: false };
   log.warn('Docker group not active in systemd session — user was likely added to docker group mid-session');
 
-  // Minimal Debian/Ubuntu images ship without the acl package.
+  // Ubuntu's cloud images ship without acl.
   if (!commandExists('setfacl') && commandExists('apt-get')) {
     log.info('Installing acl for the socket workaround');
     sudoNonInteractive(APT_INSTALL_ACL.split(' '), 180_000);
@@ -579,10 +575,8 @@ async function setupSystemd(projectRoot: string, nodePath: string, homeDir: stri
   fs.writeFileSync(unitPath, unit);
   log.info('Wrote systemd unit', { unitPath });
 
-  // The user systemd manager keeps the groups it had at login, so a docker
-  // group added mid-session doesn't reach the service. A socket ACL bridges
-  // that until dockerd recreates the socket (restart or reboot); after a
-  // reboot the manager starts with the docker group.
+  // The user manager keeps its login groups, so a docker group added mid-session misses the service.
+  // A socket ACL bridges that until dockerd recreates the socket; after a reboot the manager has the group.
   const dockerAccess: DockerAccess = runningAsRoot ? { stale: false } : repairDockerGroupAccess();
 
   // Kill orphaned nanoclaw processes to avoid channel connection conflicts
@@ -612,9 +606,8 @@ async function setupSystemd(projectRoot: string, nodePath: string, homeDir: stri
     log.error('systemctl enable failed', { err });
   }
 
-  // A service that crash-looped without Docker would wait out its crash
-  // backoff (up to 15 min) before starting. Stop it first so no crash restart
-  // writes the counter back, then clear it.
+  // A service that crash-looped without Docker would wait out circuit-breaker.ts's backoff.
+  // Stop it first so no crash restart writes the counter back, then clear it.
   if (dockerAccess.repaired) {
     try {
       execSync(`${systemctlPrefix} stop ${unitName}`, { stdio: 'ignore' });
