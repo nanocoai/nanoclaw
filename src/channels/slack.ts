@@ -72,6 +72,14 @@ export const SLACK_DEFAULTS: ChannelDefaults = {
 };
 
 /**
+ * Slack caps a markdown message at 12,000 characters and the adapter neither
+ * cuts nor splits it, so a longer reply failed every retry. The bridge splits
+ * replies at this length; the gap leaves room for the `<@…>` brackets the
+ * adapter adds around bare @mentions.
+ */
+export const SLACK_MAX_TEXT_LENGTH = 11_000;
+
+/**
  * Classify a Slack conversation for consumers that render it to a human
  * (e.g. approval cards): a 1:1 DM, a group DM (MPDM), or a channel. Channels
  * resolve their name; MPDMs resolve their human participants through the
@@ -192,6 +200,7 @@ export function createSlackBridge(options: SlackBridgeOptions = {}): ChannelAdap
     instance: options.instanceKey, // undefined ⇒ default instance (keyed by channelType)
     concurrency: 'concurrent',
     supportsThreads: true,
+    maxTextLength: SLACK_MAX_TEXT_LENGTH,
     defaults: SLACK_DEFAULTS,
   });
   bridge.resolveChannelName = async (platformId: string) => {
