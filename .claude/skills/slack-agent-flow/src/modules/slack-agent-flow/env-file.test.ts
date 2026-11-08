@@ -73,6 +73,27 @@ describe('slack-agent-flow env-file', () => {
       expect(readEnvValue(rootDir, 'SAF_NEW')).toBe('v1');
     });
 
+    it('creates .env owner-only, since it holds live tokens', () => {
+      upsertEnvKey(rootDir, 'SAF_NEW', 'v1');
+      expect(fs.statSync(envPath()).mode & 0o777).toBe(0o600);
+    });
+
+    it('keeps the permissions of an existing .env', () => {
+      write('EXISTING=x\n');
+      fs.chmodSync(envPath(), 0o640);
+      upsertEnvKey(rootDir, 'SAF_NEW', 'v1');
+      expect(fs.statSync(envPath()).mode & 0o777).toBe(0o640);
+    });
+
+    it('throws rather than overwriting when .env exists but cannot be read', () => {
+      // Write-only: the old catch-all read this as empty and replaced the file.
+      write('KEEP_ME=1\n');
+      fs.chmodSync(envPath(), 0o200);
+      expect(() => upsertEnvKey(rootDir, 'SAF_NEW', 'v1')).toThrow(/EACCES/);
+      fs.chmodSync(envPath(), 0o600);
+      expect(read()).toBe('KEEP_ME=1\n');
+    });
+
     it('appends after a file without a trailing newline', () => {
       write('EXISTING=x');
       upsertEnvKey(rootDir, 'SAF_APPENDED', 'v2');
