@@ -123,8 +123,7 @@ function restartHostFor(name: string): void {
   const restart = restartHost();
   if (restart.status === 'restarted') return;
   if (restart.status === 'no-service') {
-    // Nothing failed: the service step starts the build made above. A host
-    // started by hand is not a service, so name it in the same line.
+    // Nothing failed: the service step starts the build made above.
     console.log(
       `No NanoClaw service is installed, so nothing was restarted. To use ${name}, start one with ${SERVICE_STEP_COMMAND} (or restart a host you started by hand).`,
     );

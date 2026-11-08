@@ -1,13 +1,4 @@
-/**
- * Reload the running host after setup changed code it loads.
- *
- * The service runs the compiled `dist/` it loaded at start, so a payload that
- * adds host code stays invisible until the host is rebuilt and restarted. `restart.sh` restarts whichever service this install uses
- * (launchd, systemd or the nohup wrapper) and waits for the new instance.
- *
- * The result is returned, never printed: the caller decides how loud a
- * failure is.
- */
+// The service runs the dist/ it loaded at start; rebuild and restart it after setup adds host code. Returns, never prints.
 import { spawnSync } from 'child_process';
 
 /** What an operator runs by hand when the automatic reload fails. */
@@ -19,7 +10,7 @@ export type HostRestartResult =
   | { status: 'no-service' }
   | { status: 'failed'; message: string };
 
-/** Rebuild the host and restart its service. Synchronous with inherited output. */
+/** Rebuild the host and restart its service. */
 export function restartHost(projectRoot: string = process.cwd()): HostRestartResult {
   const steps: Array<[string, string[]]> = [
     ['pnpm', ['run', 'build']],

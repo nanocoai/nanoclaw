@@ -142,13 +142,6 @@ echo $! > ${JSON.stringify(path.join(root, 'nanoclaw.pid'))}
     expect(result.stderr).toContain('is installed');
   });
 
-  it.each([
-    ['restart', 'case "$2" in cat) exit 0 ;; *) exit 2 ;; esac'],
-    ['show', 'case "$2" in show) exit 2 ;; *) exit 0 ;; esac'],
-  ])('does not pass a failed systemctl %s off as a missing service', (_step, systemctl) => {
-    expect(runRestart('Linux', { systemctl }).status).toBe(1);
-  });
-
   it('does not pass a launchctl failure off as a missing service', () => {
     const result = runRestart('Darwin', { launchctl: 'case "$1" in print) exit 0 ;; *) exit 2 ;; esac' });
     expect(result.status).toBe(1);

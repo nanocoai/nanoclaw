@@ -27,23 +27,14 @@ afterEach(() => {
 });
 
 describe.runIf(process.platform !== 'win32')('host restart', () => {
-  it('builds the host, then restarts the service', () => {
-    const root = checkout(0, 0);
-    expect(restartHost(root)).toEqual({ status: 'restarted' });
-    expect(ran(root)).toEqual(['build:run build', 'restart']);
-  });
-  it('does not restart onto a failed build', () => {
-    const root = checkout(2, 0);
-    expect(restartHost(root)).toEqual({ status: 'failed', message: 'pnpm run build exited 2' });
-    expect(ran(root)).toEqual(['build:run build']);
-  });
-  it('reports a failed restart', () => {
-    const root = checkout(0, 1);
-    expect(restartHost(root)).toEqual({ status: 'failed', message: 'bash setup/lib/restart.sh exited 1' });
-  });
-  it('tells a missing service apart from a failed restart', () => {
-    const root = checkout(0, 2);
-    expect(restartHost(root)).toEqual({ status: 'no-service' });
-    expect(ran(root)).toEqual(['build:run build', 'restart']);
+  it.each([
+    [0, 0, { status: 'restarted' }, ['build:run build', 'restart']],
+    [2, 0, { status: 'failed', message: 'pnpm run build exited 2' }, ['build:run build']],
+    [0, 1, { status: 'failed', message: 'bash setup/lib/restart.sh exited 1' }, ['build:run build', 'restart']],
+    [0, 2, { status: 'no-service' }, ['build:run build', 'restart']],
+  ])('build exits %i, restart exits %i', (buildExit, restartExit, result, steps) => {
+    const root = checkout(buildExit, restartExit);
+    expect(restartHost(root)).toEqual(result);
+    expect(ran(root)).toEqual(steps);
   });
 });

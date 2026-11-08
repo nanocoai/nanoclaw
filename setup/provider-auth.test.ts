@@ -139,6 +139,7 @@ describe('standalone provider setup flow', () => {
     expect(fixture.order).toEqual(['install', 'local-image', 'build', 'restart-host', 'load-contracts', 'auth']);
     expect(fixture.installModes).toEqual([{ mode: 'refresh' }]);
     expect(fixture.check).toHaveBeenCalledTimes(1);
+    expect(process.exitCode).toBeUndefined();
   });
   it('leaves the payload untouched when the image decision is declined or cancelled', async () => {
     fixture.image = 'hardened';
@@ -184,16 +185,6 @@ describe('standalone provider setup flow', () => {
     expect(fixture.check).toHaveBeenCalledTimes(1);
   });
 
-  // The service runs the host build it loaded at start, so a new payload is
-  // invisible to it until a rebuild and restart. It
-  // restarts before auth because a failed sign-in exits the process, and a
-  // re-run only re-authenticates. The fresh-install order is pinned above.
-  it('restarts the host once, after the image build and before auth, when a refresh changed the payload', async () => {
-    await run(['opencode', '--refresh']);
-    expect(fixture.order).toEqual(['install', 'build', 'restart-host', 'load-contracts', 'auth']);
-    expect(fixture.installModes).toEqual([{ mode: 'refresh' }]);
-    expect(process.exitCode).toBeUndefined();
-  });
   it('still authenticates when the restart fails, prints the command once, and exits non-zero', async () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     fixture.restart = { status: 'failed', message: 'restart.sh exited 1' };
