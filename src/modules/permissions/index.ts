@@ -467,13 +467,13 @@ async function wireApprovedChannel(
 
 /**
  * Sends the agent-selection card that replaces the clicked card (`sent` once it is out), then stores its
- * options (`unstored` with the card's id when they weren't; `failed` when the store threw).
+ * options. `unstored` gets the card's id when they weren't, and whether the first card's are still stored.
  */
 async function sendAgentCard(
   row: PendingChannelApproval,
   payload: ResponsePayload,
   approverId: string,
-  on: { sent: () => void; unstored: (cardId: string | undefined, failed: boolean) => void },
+  on: { sent: () => void; unstored: (cardId: string | undefined, firstCardStored: boolean) => void },
 ): Promise<ResponseOutcome> {
   const origin = await getMessagingGroup(row.messaging_group_id);
   const approverDm = await ensureUserDm(row.approver_user_id, {
@@ -536,7 +536,9 @@ async function sendAgentCard(
       messagingGroupId: row.messaging_group_id,
       err,
     });
-    on.unstored(cardId, true);
+    // The store may have failed after the row was replaced: check it is still this request.
+    const current = await getPendingChannelApproval(row.messaging_group_id).catch(() => undefined);
+    on.unstored(cardId, current?.created_at === row.created_at && current?.options_json === row.options_json);
     return 'ignored';
   }
   if (!stored) {
@@ -615,10 +617,10 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
         sent: () => {
           if (payload.messageId) guard.retired.add(payload.messageId);
         },
-        // A failed store leaves the first card's options stored, so the first card works again.
-        unstored: (cardId, failed) => {
+        // While the first card's options are still the stored ones it works again.
+        unstored: (cardId, firstCardStored) => {
           if (cardId) guard.retired.add(cardId);
-          if (failed && payload.messageId) guard.retired.delete(payload.messageId);
+          if (firstCardStored && payload.messageId) guard.retired.delete(payload.messageId);
         },
       });
     } finally {
