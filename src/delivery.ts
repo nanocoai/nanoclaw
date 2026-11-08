@@ -331,7 +331,10 @@ async function drainSession(session: Session): Promise<void> {
       }
     } catch (err) {
       const attempts = await recordAttemptRow(msg.id, session.id, err);
-      if (attempts !== null && attempts >= MAX_DELIVERY_ATTEMPTS) {
+      if (
+        (await import('./channels/sendblue-delivery.js')).isTerminalSendblueDeliveryError(err) ||
+        (attempts !== null && attempts >= MAX_DELIVERY_ATTEMPTS)
+      ) {
         log.error('Message delivery failed permanently, giving up', {
           messageId: msg.id,
           sessionId: session.id,
