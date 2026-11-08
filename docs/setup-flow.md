@@ -203,8 +203,7 @@ terminal skip it.
 The bootstrap installs jq (`setup/lib/jq.sh`: Homebrew on macOS, else
 apt, dnf, yum, zypper, pacman or apk) with `sudo -n` only. When that
 can't work it notes it after "Basics ready" and goes on, since only skills
-need jq; a skill step that pipes through a missing jq says how to install
-it instead of failing with exit 127.
+need jq.
 
 ## Channel installs are skill-driven
 
