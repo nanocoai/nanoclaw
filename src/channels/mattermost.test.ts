@@ -10,6 +10,7 @@ vi.mock('./channel-registry.js', () => ({ registerChannelAdapter: vi.fn() }));
 vi.mock('./chat-sdk-bridge.js', () => ({ createChatSdkBridge: vi.fn(() => ({})) }));
 
 import { createChatSdkBridge } from './chat-sdk-bridge.js';
+import { renderPostable } from './mattermost-adapter/format.js';
 import { registerChannelAdapter } from './channel-registry.js';
 import './mattermost.js';
 
@@ -28,15 +29,17 @@ describe('mattermost channel factory', () => {
     expect(config?.maxTextLength).toBe(16_383);
   });
 
-  it('caps each chunk at the server limit of 16383 runes', async () => {
+  it('keeps every rendered chunk within 16383 runes', async () => {
     const { splitForLimit: realSplit } =
       await vi.importActual<typeof import('./chat-sdk-bridge.js')>('./chat-sdk-bridge.js');
-    const reply = `${'word '.repeat(5_000)}\n\n${'😀'.repeat(9_000)}`;
-    const config = vi.mocked(registerChannelAdapter).mock.calls[0]![1];
-    await config.factory();
-    const limit = vi.mocked(createChatSdkBridge).mock.calls[0]![0].maxTextLength!;
-    const chunks = realSplit(reply, limit);
-    expect(chunks.length).toBeGreaterThan(1);
-    for (const chunk of chunks) expect(runes(chunk)).toBeLessThanOrEqual(16_383);
+    const registration = vi.mocked(registerChannelAdapter).mock.calls[0]![1];
+    await registration.factory();
+    const config = vi.mocked(createChatSdkBridge).mock.calls[0]![0];
+    // Emoji placeholders grow when rendered; astral emoji are 2 UTF-16 units each.
+    const reply = `${'word {{emoji:check}} '.repeat(1_200)}\n\n${'😀 '.repeat(6_000)}`;
+    const transform = config.transformOutboundText ?? ((text: string) => text);
+    const chunks = realSplit(transform(reply), config.maxTextLength!);
+    expect(chunks.length).toBeGreaterThan(2);
+    for (const chunk of chunks) expect(runes(renderPostable({ markdown: chunk }).message)).toBeLessThanOrEqual(16_383);
   });
 });

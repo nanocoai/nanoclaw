@@ -1,4 +1,5 @@
 /** Mattermost channel adapter — Chat SDK bridge registration. */
+import { emojify } from './mattermost-adapter/format.js';
 import { MattermostAdapter } from './mattermost-adapter/index.js';
 
 import { readEnvFile } from '../env.js';
@@ -54,9 +55,10 @@ registerChannelAdapter('mattermost', {
       concurrency: 'concurrent',
       supportsThreads: true,
       defaults: MATTERMOST_DEFAULTS,
-      // Mattermost rejects a longer post with a 400; without this a long
-      // agent reply fails instead of being split.
+      // Mattermost rejects a longer post with a 400. Emoji placeholders grow
+      // when rendered, so expand them before the bridge measures and splits.
       maxTextLength: MATTERMOST_MAX_POST_LENGTH,
+      transformOutboundText: emojify,
     });
     bridge.resolveChannelName = async (platformId: string) => {
       try {
