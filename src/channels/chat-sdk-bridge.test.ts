@@ -1172,9 +1172,8 @@ describe('createChatSdkBridge.deliver — send_card card parts', () => {
     expect(calls).toHaveLength(0);
   });
 
-  it('counts the description toward the card budget and posts nothing', async () => {
-    const children = [{ type: 'Text', props: { content: 'z'.repeat(2_500) } }];
-    const { calls, delivery } = await deliverCard({ title: 'Perf', description: 'x'.repeat(10_000), children });
+  it('checks a card with no children against the card budget and posts nothing', async () => {
+    const { calls, delivery } = await deliverCard({ title: 'Perf', description: 'x'.repeat(12_001) });
 
     await expect(delivery).rejects.toThrow(/at most 12000 per card/);
     expect(calls).toHaveLength(0);

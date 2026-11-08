@@ -6,8 +6,8 @@
  * Slack draws natively; past 10,000 characters Slack swaps a table for plain
  * text cut at 3,000; text and fields stay well under Slack's 3,000 and 2,000,
  * since its adapter adds markup after this check. 10 parts, 30 table rows and
- * 12,000 characters of text across the whole card keep the largest card near
- * 75 KB of the 100 KB a Teams bot message may hold, which Teams measures on the
+ * 12,000 characters of text across the whole card keep the largest card well
+ * inside the 100 KB a Teams bot message may hold, which Teams measures on the
  * JSON it receives, as UTF-16; and inside Slack's 50 blocks.
  */
 const CARD_LIMITS = {
@@ -120,11 +120,11 @@ export function cardProblems(card: Record<string, unknown>): string[] {
           return fail('props.align must list left, center or right, one per column at most');
         }
         if (caption !== undefined && typeof caption !== 'string') return fail('props.caption must be text');
-        const text = [...cells, caption ?? ''].join('');
-        if (text.length > CARD_LIMITS.tableText) {
-          return fail(`the table holds ${text.length} characters of text; at most ${CARD_LIMITS.tableText}`);
+        const length = [...cells, caption ?? ''].join('').length;
+        if (length > CARD_LIMITS.tableText) {
+          return fail(`the table holds ${length} characters of text; at most ${CARD_LIMITS.tableText}`);
         }
-        addText(text);
+        addText(...cells, caption);
         return;
       }
       case 'Chart': {
@@ -170,6 +170,7 @@ export function cardProblems(card: Record<string, unknown>): string[] {
               return fail(`axis labels must be text of at most ${CARD_LIMITS.title} characters`);
             }
           }
+          addText(xLabel, yLabel);
           labels = [...categories, ...names];
         } else {
           return fail('props.chart.type must be pie, bar, line or area');
@@ -192,7 +193,7 @@ export function cardProblems(card: Record<string, unknown>): string[] {
   if (count.charts > CARD_LIMITS.charts) problems.push(`at most ${CARD_LIMITS.charts} Charts per card`);
   if (count.text > CARD_LIMITS.cardText) {
     problems.push(
-      `the card holds ${count.text} characters of text, with quote marks, backslashes and control characters counting extra; at most ${CARD_LIMITS.cardText} per card`,
+      `the card holds ${count.text} characters of text, with quote marks, backslashes, line breaks and control characters counting extra; at most ${CARD_LIMITS.cardText} per card`,
     );
   }
   return problems;
