@@ -74,8 +74,9 @@ const awaitingNameInput = new Map<string, PendingNameInput>();
 // ── Agent card replacing the first card ──
 // Card buttons are decoded by position against the stored options, and the
 // first card keeps its buttons until the host accepts. So while an agent card
-// is sent no card click counts, and once it is out the card clicked for it is
-// ignored. Keyed by messaging group, in memory (the durable card check is later).
+// is sent no card click counts, once it is out the card clicked for it is
+// ignored, and an agent card whose options weren't stored is ignored for good.
+// Keyed by messaging group, in memory (the durable card check is later).
 const agentCards = new Map<string, { retired: Set<string>; sending: boolean }>();
 
 async function extractAndUpsertUser(event: InboundEvent): Promise<string | null> {
@@ -464,12 +465,15 @@ async function wireApprovedChannel(
   return 'accepted';
 }
 
-/** Sends the agent-selection card that replaces the clicked card (`sent` once it is out), then stores its options. */
+/**
+ * Sends the agent-selection card that replaces the clicked card (`sent` once it is out), then stores its
+ * options (`unstored` with the card's id when they weren't; `failed` when the store threw).
+ */
 async function sendAgentCard(
   row: PendingChannelApproval,
   payload: ResponsePayload,
   approverId: string,
-  sent: () => void,
+  on: { sent: () => void; unstored: (cardId: string | undefined, failed: boolean) => void },
 ): Promise<ResponseOutcome> {
   const origin = await getMessagingGroup(row.messaging_group_id);
   const approverDm = await ensureUserDm(row.approver_user_id, {
@@ -492,8 +496,9 @@ async function sendAgentCard(
   const question = `Which agent should handle this channel? ${AGENT_ACCESS_SCOPE_WARNING}`;
 
   // Sent before its options are stored, so a send that fails leaves the first card as it was.
+  let cardId: string | undefined;
   try {
-    await adapter.deliver(
+    cardId = await adapter.deliver(
       approverDm.channel_type,
       approverDm.platform_id,
       null,
@@ -515,16 +520,29 @@ async function sendAgentCard(
     });
     return 'ignored'; // the first card keeps its buttons for another try
   }
-  sent();
+  on.sent();
   // Decided meanwhile (a Reject), or a newer request: leave that card as it is.
-  const stored = await updatePendingChannelApprovalCard(
-    row.messaging_group_id,
-    row.created_at,
-    title,
-    question,
-    JSON.stringify(options),
-  );
-  if (!stored) return 'ignored';
+  let stored: boolean;
+  try {
+    stored = await updatePendingChannelApprovalCard(
+      row.messaging_group_id,
+      row.created_at,
+      title,
+      question,
+      JSON.stringify(options),
+    );
+  } catch (err) {
+    log.error('Channel registration: agent-selection card options not stored', {
+      messagingGroupId: row.messaging_group_id,
+      err,
+    });
+    on.unstored(cardId, true);
+    return 'ignored';
+  }
+  if (!stored) {
+    on.unstored(cardId, false);
+    return 'ignored';
+  }
   return 'accepted';
 }
 
@@ -593,8 +611,15 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
     guard.sending = true;
     agentCards.set(row.messaging_group_id, guard);
     try {
-      return await sendAgentCard(row, payload, approverId, () => {
-        if (payload.messageId) guard.retired.add(payload.messageId);
+      return await sendAgentCard(row, payload, approverId, {
+        sent: () => {
+          if (payload.messageId) guard.retired.add(payload.messageId);
+        },
+        // A failed store leaves the first card's options stored, so the first card works again.
+        unstored: (cardId, failed) => {
+          if (cardId) guard.retired.add(cardId);
+          if (failed && payload.messageId) guard.retired.delete(payload.messageId);
+        },
       });
     } finally {
       guard.sending = false;
