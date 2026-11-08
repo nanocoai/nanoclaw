@@ -217,14 +217,22 @@ export function chatSdkLogger(prefix = 'chat-sdk'): Logger {
       log[level](`${prefix}: ${message}`, sdkLogData(args));
   return {
     child: (name: string) => chatSdkLogger(`${prefix}:${name}`),
-    debug: to('debug'),
+    // SDK debug lines print each message's full text; drop them.
+    debug: () => {},
     info: to('debug'),
     warn: to('warn'),
     error: to('error'),
   };
 }
 
-/** Our log prints an Error's message and stack only under `err`; the SDK passes it as `error`. */
+/** Message-text fields the SDK puts in its log data. */
+const SDK_TEXT_KEYS = new Set(['text', 'messageText']);
+
+/**
+ * Our log prints an Error's message and stack only under `err`; the SDK passes
+ * it as `error`. Message text is cut to its length and a URL to its origin, so
+ * a callback URL's token never reaches the log.
+ */
 function sdkLogData(args: unknown[]): Record<string, unknown> | undefined {
   const data: Record<string, unknown> = {};
   const extra: unknown[] = [];
@@ -232,12 +240,19 @@ function sdkLogData(args: unknown[]): Record<string, unknown> | undefined {
     if (arg instanceof Error) data.err ??= arg;
     else if (isRecord(arg)) {
       for (const [key, value] of Object.entries(arg)) {
-        data[value instanceof Error && data.err === undefined ? 'err' : key] = value;
+        if (value instanceof Error && data.err === undefined) data.err = value;
+        else if (typeof value === 'string' && SDK_TEXT_KEYS.has(key)) data[key] = `[${value.length} chars]`;
+        else data[key] = typeof value === 'string' ? urlOrigin(value) : value;
       }
     } else if (arg !== undefined) extra.push(arg);
   }
   if (extra.length > 0) data.args = extra;
   return Object.keys(data).length > 0 ? data : undefined;
+}
+
+function urlOrigin(value: string): string {
+  if (!/^https?:\/\//i.test(value)) return value;
+  return URL.canParse(value) ? `${new URL(value).origin}/…` : '[url]';
 }
 
 /**

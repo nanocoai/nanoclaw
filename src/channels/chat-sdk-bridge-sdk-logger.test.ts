@@ -101,16 +101,34 @@ describe('Chat SDK logs reach our log', () => {
     await bridge.teardown();
   });
 
-  it('maps levels: warn and error stay, debug and info drop to our debug level', () => {
+  it('maps levels: warn and error stay, info drops to our debug level, debug is dropped', () => {
     const logger = chatSdkLogger();
     logger.warn('Could not acquire lock on thread', { threadId: 't1' });
-    logger.info('Incoming message', { threadId: 't1' });
-    logger.debug('Handler matched');
+    logger.info('message-dropped', { threadId: 't1' });
+    logger.debug('Pattern test', { text: 'secret plans' });
 
     expect(log.warn).toHaveBeenCalledWith('chat-sdk: Could not acquire lock on thread', { threadId: 't1' });
-    expect(log.debug).toHaveBeenCalledWith('chat-sdk: Incoming message', { threadId: 't1' });
-    expect(log.debug).toHaveBeenCalledWith('chat-sdk: Handler matched', undefined);
+    expect(log.debug).toHaveBeenCalledTimes(1);
+    expect(log.debug).toHaveBeenCalledWith('chat-sdk: message-dropped', { threadId: 't1' });
     expect(log.error).not.toHaveBeenCalled();
+  });
+
+  it('keeps message text and URL secrets out of the log', () => {
+    const err = new Error('Callback URL returned 503');
+    chatSdkLogger().error('Button callbackUrl POST failed', {
+      callbackUrl: 'https://hooks.example.com/cb/abc?token=s3cret',
+      error: err,
+    });
+    chatSdkLogger().error('Slash command processing error', { command: '/deploy', text: 'prod now' });
+
+    expect(log.error).toHaveBeenCalledWith('chat-sdk: Button callbackUrl POST failed', {
+      callbackUrl: 'https://hooks.example.com/…',
+      err,
+    });
+    expect(log.error).toHaveBeenCalledWith('chat-sdk: Slash command processing error', {
+      command: '/deploy',
+      text: '[8 chars]',
+    });
   });
 
   it('child loggers keep the prefix chain; bare errors and extra args are kept', () => {
