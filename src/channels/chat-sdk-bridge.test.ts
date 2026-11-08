@@ -1344,7 +1344,7 @@ it('escapes a host terminal card even when its row claims fromAgent', async () =
   expect(edited.card.children.map((c) => c.content)).toEqual(['[Allow <x>?]', '[Approved]']);
 });
 
-async function answerStoredQuestion(maxCardTextLength?: number) {
+async function answerStoredQuestion(caps: { maxCardTextLength?: number; maxTextLength?: number } = {}) {
   const { initTestDb, closeDb } = await import('../db/connection.js');
   const { runMigrations } = await import('../db/migrations/index.js');
   const { createAgentGroup, createSession, createPendingQuestion } = await import('../db/index.js');
@@ -1385,7 +1385,7 @@ async function answerStoredQuestion(maxCardTextLength?: number) {
     adapter,
     supportsThreads: false,
     escapeCardText: (t) => `[${t}]`,
-    maxCardTextLength,
+    ...caps,
   });
   try {
     await bridge.setup({ onInbound: () => {}, onInboundEvent: () => {}, onMetadata: () => {}, onAction: vi.fn() });
@@ -1420,7 +1420,22 @@ it('keeps an answered agent question body on the card, unescaped, with an escape
 
 it('drops the stored question when it no longer fits the card cap with its answer', async () => {
   // 'Deploy' + 'Ship **v2** today?' = 24 fits a cap of 30; with '[Yes by ann]' it would not.
-  expect(await answerStoredQuestion(30)).toEqual({ markdown: 'Deploy\n\nYes by ann' });
+  const edited = (await answerStoredQuestion({ maxCardTextLength: 30 })) as {
+    card: { title: string; children: Array<{ content?: string }> };
+  };
+  expect(edited.card.title).toBe('Deploy');
+  expect(edited.card.children.map((c) => c.content)).toEqual(['[Yes by ann]']);
+});
+
+it('measures a kept question against the text cap on a channel with no card cap', async () => {
+  const fits = (await answerStoredQuestion({ maxTextLength: 100 })) as {
+    card: { children: Array<{ content?: string }> };
+  };
+  expect(fits.card.children.map((c) => c.content)).toEqual(['Ship **v2** today?', '[Yes by ann]']);
+  const tooLong = (await answerStoredQuestion({ maxTextLength: 30 })) as {
+    card: { children: Array<{ content?: string }> };
+  };
+  expect(tooLong.card.children.map((c) => c.content)).toEqual(['[Yes by ann]']);
 });
 
 describe('createChatSdkBridge — local Gateway webhook', () => {

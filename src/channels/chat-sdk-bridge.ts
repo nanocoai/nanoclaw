@@ -623,11 +623,13 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       resolution: cardText(spec.resolution),
     });
   };
-  /** Whether a resolved card still fits the channel's whole-card cap with its question kept. */
+  /** Whether a resolved card still fits the channel's cap with its question kept.
+   *  A channel with no card cap (Telegram) renders the card as text, so its text cap applies. */
   const terminalFits = ({ title, question, resolution, fromAgent }: TerminalApprovalCard): boolean => {
-    if (config.maxCardTextLength === undefined) return true;
+    const cap = config.maxCardTextLength ?? config.maxTextLength;
+    if (cap === undefined) return true;
     const blocks = splitCardText(question, fromAgent ? (t: string) => t : cardText, CARD_TEXT_BLOCK_LENGTH);
-    return !cardQuestionTooLong(title, [...blocks, cardText(resolution)].join('\n'), config.maxCardTextLength);
+    return !cardQuestionTooLong(title, [...blocks, cardText(resolution)].join('\n'), cap);
   };
   /** Registry/routing key for this bridge — also the app-context cache
    *  namespace. Default instances key by the platform name. */
@@ -872,11 +874,13 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           const terminal = render?.question
             ? { title, question: render.question, resolution, fromAgent: render.fromAgent }
             : undefined;
-          // A question that no longer fits with its answer goes, as before it was stored.
+          // A question that no longer fits with its answer goes; the answer stays escaped.
           await adapter.editMessage(
             tid,
             event.messageId,
-            terminal && terminalFits(terminal) ? terminalMessage(terminal) : { markdown: `${title}\n\n${resolution}` },
+            terminal
+              ? terminalMessage(terminalFits(terminal) ? terminal : { ...terminal, question: '' })
+              : { markdown: `${title}\n\n${resolution}` },
           );
         } catch (err) {
           log.warn('Failed to update card after action', { err });
