@@ -1344,7 +1344,7 @@ it('escapes a host terminal card even when its row claims fromAgent', async () =
   expect(edited.card.children.map((c) => c.content)).toEqual(['[Allow <x>?]', '[Approved]']);
 });
 
-it('keeps an answered agent question body on the card, unescaped, with an escaped resolution', async () => {
+async function answerStoredQuestion(maxCardTextLength?: number) {
   const { initTestDb, closeDb } = await import('../db/connection.js');
   const { runMigrations } = await import('../db/migrations/index.js');
   const { createAgentGroup, createSession, createPendingQuestion } = await import('../db/index.js');
@@ -1381,7 +1381,12 @@ it('keeps an answered agent question body on the card, unescaped, with an escape
     channelIdFromThreadId: (threadId: string) => threadId,
     editMessage,
   });
-  const bridge = createChatSdkBridge({ adapter, supportsThreads: false, escapeCardText: (t) => `[${t}]` });
+  const bridge = createChatSdkBridge({
+    adapter,
+    supportsThreads: false,
+    escapeCardText: (t) => `[${t}]`,
+    maxCardTextLength,
+  });
   try {
     await bridge.setup({ onInbound: () => {}, onInboundEvent: () => {}, onMetadata: () => {}, onAction: vi.fn() });
     const chat = (bridge as unknown as { _chat: import('chat').Chat })._chat;
@@ -1398,15 +1403,24 @@ it('keeps an answered agent question body on the card, unescaped, with an escape
       undefined,
     );
     expect(editMessage).toHaveBeenCalledTimes(1);
-    const edited = (editMessage.mock.calls[0] as unknown[])[2] as {
-      card: { title: string; children: Array<{ type: string; content?: string }> };
-    };
-    expect(edited.card.title).toBe('Deploy');
-    expect(edited.card.children.map((c) => c.content)).toEqual(['Ship **v2** today?', '[Yes by ann]']);
+    return (editMessage.mock.calls[0] as unknown[])[2];
   } finally {
     await bridge.teardown();
     await closeDb();
   }
+}
+
+it('keeps an answered agent question body on the card, unescaped, with an escaped resolution', async () => {
+  const edited = (await answerStoredQuestion()) as {
+    card: { title: string; children: Array<{ type: string; content?: string }> };
+  };
+  expect(edited.card.title).toBe('Deploy');
+  expect(edited.card.children.map((c) => c.content)).toEqual(['Ship **v2** today?', '[Yes by ann]']);
+});
+
+it('drops the stored question when it no longer fits the card cap with its answer', async () => {
+  // 'Deploy' + 'Ship **v2** today?' = 24 fits a cap of 30; with '[Yes by ann]' it would not.
+  expect(await answerStoredQuestion(30)).toEqual({ markdown: 'Deploy\n\nYes by ann' });
 });
 
 describe('createChatSdkBridge — local Gateway webhook', () => {

@@ -623,6 +623,12 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       resolution: cardText(spec.resolution),
     });
   };
+  /** Whether a resolved card still fits the channel's whole-card cap with its question kept. */
+  const terminalFits = ({ title, question, resolution, fromAgent }: TerminalApprovalCard): boolean => {
+    if (config.maxCardTextLength === undefined) return true;
+    const blocks = splitCardText(question, fromAgent ? (t: string) => t : cardText, CARD_TEXT_BLOCK_LENGTH);
+    return !cardQuestionTooLong(title, [...blocks, cardText(resolution)].join('\n'), config.maxCardTextLength);
+  };
   /** Registry/routing key for this bridge — also the app-context cache
    *  namespace. Default instances key by the platform name. */
   const instanceKey = config.instance ?? adapter.name;
@@ -863,12 +869,14 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         const resolution = actorName ? `${selectedLabel} by ${actorName}` : selectedLabel;
         try {
           const tid = event.threadId;
+          const terminal = render?.question
+            ? { title, question: render.question, resolution, fromAgent: render.fromAgent }
+            : undefined;
+          // A question that no longer fits with its answer goes, as before it was stored.
           await adapter.editMessage(
             tid,
             event.messageId,
-            render?.question
-              ? terminalMessage({ title, question: render.question, resolution, fromAgent: render.fromAgent })
-              : { markdown: `${title}\n\n${resolution}` },
+            terminal && terminalFits(terminal) ? terminalMessage(terminal) : { markdown: `${title}\n\n${resolution}` },
           );
         } catch (err) {
           log.warn('Failed to update card after action', { err });
