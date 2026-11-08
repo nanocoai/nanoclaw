@@ -8,7 +8,9 @@
  * since its adapter adds markup after this check. 10 parts, 30 table rows and
  * 12,000 characters of text across the whole card keep the largest card well
  * inside the 100 KB a Teams bot message may hold, which Teams measures on the
- * JSON it receives, as UTF-16; and inside Slack's 50 blocks.
+ * JSON it receives, as UTF-16; and inside Slack's 50 blocks. Plain text children
+ * and link buttons aren't parts and have no count cap, so hundreds of them can
+ * still go over.
  */
 const CARD_LIMITS = {
   parts: 10,
