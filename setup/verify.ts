@@ -227,9 +227,7 @@ export async function run(_args: string[]): Promise<void> {
   // The detached Slack worker applies the channel after foreground setup
   // releases its checkout lock. No credentials/groups yet is expected here.
   const slackJob = await readSlackJob(projectRoot);
-  // A good manual Slack run leaves an old failed or expired job saved. A set-up
-  // Slack with a chat wired after the job began shows it no longer applies.
-  // Only the welcome runs after wiring, and a same-app retry keeps the first start.
+  // A failed or expired job is stale once set-up Slack has a chat wired after it began.
   const slackJobState = slackJobStatus(slackJob);
   const slackJobReplaced =
     (slackJobState === 'failed' || slackJobState === 'expired') &&

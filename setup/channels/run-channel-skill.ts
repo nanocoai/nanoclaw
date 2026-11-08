@@ -242,11 +242,7 @@ export interface ChannelSkillOverrides extends Partial<RunSkillOptions> {
   offerBack?: boolean;
   /** The first-prompt back gate; defaults to back-nav.ts `backGate`. Injectable for tests. */
   backGate?: (label: string) => Promise<'continue' | typeof BACK_TO_CHANNEL_SELECTION>;
-  /**
-   * The abort path; defaults to runner.ts `fail` (which exits). Injectable for
-   * tests. `detail` is the first line of the bounce reason, for a caller with
-   * no terminal to read the warnings.
-   */
+  /** The abort path; defaults to runner.ts `fail` (which exits). Injectable for tests. */
   fail?: (stepName: string, msg: string, hint?: string, rawLogPath?: string, detail?: string) => Promise<never>;
 }
 

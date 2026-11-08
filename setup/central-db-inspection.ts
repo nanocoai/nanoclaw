@@ -52,8 +52,9 @@ export async function inspectCentralDb(projectRoot: string): Promise<CentralDbIn
       result.derivedGroups = row?.count ?? 0;
     }
     if ((await db.hasTable('messaging_groups')) && (await db.hasTable('messaging_group_agents'))) {
-      // Verify reads the default credentials, so only default instances
-      // count. A database from before named instances has no other kind.
+      // Verify reads the default credentials, so only default instances count.
+      // Setup's first step reads this before anything migrates, and a database
+      // from before migration 016 has no instance column (all chats default).
       const query = (filter: string) =>
         db.all<{ channel: string; at: string }>(
           `SELECT mg.channel_type AS channel, MAX(mga.created_at) AS at FROM messaging_groups mg
