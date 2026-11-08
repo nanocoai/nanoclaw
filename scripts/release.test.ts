@@ -201,19 +201,31 @@ describe('release workflow safeguards', () => {
     expect(releaseWorkflow).not.toContain('git describe --tags --abbrev=0 "$TARGET_SHA^"');
   });
 
-  it('proves the target is on main before running any of its code, in both jobs', () => {
+  it('proves the target is on main before any setup action or target code runs, in both jobs', () => {
     const at = (needle: string) => {
       const found: number[] = [];
       for (let i = releaseWorkflow.indexOf(needle); i !== -1; i = releaseWorkflow.indexOf(needle, i + 1)) found.push(i);
       return found;
     };
+    const checkout = at('ref: ${{ inputs.target_sha }}');
     const onMain = at('git merge-base --is-ancestor "$TARGET_SHA" origin/main');
+    const firstSetup = Math.min(
+      ...['uses: pnpm/action-setup', 'uses: actions/setup-node', 'uses: oven-sh/setup-bun'].map((s) => at(s)[0]),
+    );
     const targetCode = at('node scripts/release.mjs verify "$RELEASE_VERSION"');
+    expect(checkout).toHaveLength(2);
     expect(onMain).toHaveLength(2);
     expect(targetCode).toHaveLength(2);
-    expect(onMain[0]).toBeLessThan(targetCode[0]);
-    expect(targetCode[0]).toBeLessThan(onMain[1]);
+    // verify job: checkout, then the git-only guard, then setup actions and target code.
+    expect(checkout[0]).toBeLessThan(onMain[0]);
+    expect(onMain[0]).toBeLessThan(firstSetup);
+    expect(firstSetup).toBeLessThan(targetCode[0]);
+    // publish job (no setup actions): the guard still runs before target code.
+    expect(targetCode[0]).toBeLessThan(checkout[1]);
+    expect(checkout[1]).toBeLessThan(onMain[1]);
     expect(onMain[1]).toBeLessThan(targetCode[1]);
+    expect(at('uses: pnpm/action-setup')).toHaveLength(1);
+    expect(at('uses: actions/setup-node')).toHaveLength(1);
   });
 
   it('bounds post-publication API propagation retries and fails closed after the deadline', () => {
