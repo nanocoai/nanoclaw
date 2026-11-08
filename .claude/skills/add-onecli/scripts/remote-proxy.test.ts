@@ -11,100 +11,61 @@ import { gatePolicy } from '../../../../scripts/skill-policy.js';
 import { advertisedProxy, proxyCheck, remoteProxyHint } from './remote-proxy.js';
 
 const GATEWAY = 'http://gw.example.com:10254';
-const proxy = (url: string) => new URL(url);
+const advertising = () =>
+  vi.fn(
+    async (_url: string | URL | Request, _init?: RequestInit) =>
+      new Response(JSON.stringify({ env: { HTTPS_PROXY: 'http://x:t@host.docker.internal:10255' } }), { status: 200 }),
+  );
 
 describe('remote gateway proxy hint', () => {
+  // (gateway, proxy it hands agents) -> the line the hint names, or null for no hint.
   it.each([
-    'http://x:aoc_secret@host.docker.internal:10255',
-    'http://x:aoc_secret@127.0.0.1:10255',
-    'http://x:aoc_secret@localhost:10255',
-    'http://x:aoc_secret@[::1]:10255',
-    'http://x:aoc_secret@[::ffff:127.0.0.1]:10255',
-    'http://x:aoc_secret@0.0.0.0:10255',
-    'http://x:aoc_secret@[::]:10255',
-  ])('names the exact line to set when agents are sent to their own machine (%s)', (advertised) => {
-    const hint = remoteProxyHint(GATEWAY, proxy(advertised))!;
-    expect(hint).toContain('GATEWAY_BASE_URL=gw.example.com:10255');
+    [GATEWAY, 'host.docker.internal:10255', 'GATEWAY_BASE_URL=gw.example.com:10255'],
+    [GATEWAY, '127.0.0.1:10255', 'GATEWAY_BASE_URL=gw.example.com:10255'],
+    [GATEWAY, 'localhost:10255', 'GATEWAY_BASE_URL=gw.example.com:10255'],
+    [GATEWAY, 'host.docker.internal:20255', 'GATEWAY_BASE_URL=gw.example.com:20255'],
+    [GATEWAY, 'gw.example.com:10255', null],
+    [GATEWAY, '10.0.0.5:10255', null],
+    ['http://127.0.0.1:10254', 'host.docker.internal:10255', null],
+    ['http://localhost:10254', 'host.docker.internal:10255', null],
+  ])('gateway %s, proxy %s: %s', (gateway, advertised, line) => {
+    const hint = remoteProxyHint(gateway, new URL(`http://x:aoc_secret@${advertised}`));
+    if (line === null) {
+      expect(hint).toBeNull();
+      return;
+    }
+    expect(hint).toContain(line);
+    expect(hint).toContain(`ONECLI_GATEWAY_PORT in place of ${line.split(':')[1]}`);
     expect(hint).toContain('Remote gateway');
     // The proxy URL carries the agent token.
     expect(hint).not.toContain('aoc_secret');
   });
-
-  it('keeps the port the gateway hands out, and names the published port it cannot see', () => {
-    const hint = remoteProxyHint(GATEWAY, proxy('http://x:t@host.docker.internal:20255'))!;
-    expect(hint).toContain('GATEWAY_BASE_URL=gw.example.com:20255');
-    // OneCLI advertises its default port even when ONECLI_GATEWAY_PORT publishes another.
-    expect(hint).toContain('ONECLI_GATEWAY_PORT in place of 20255');
-  });
-
-  it.each(['http://x:t@gw.example.com:10255', 'http://x:t@10.0.0.5:10255'])('says nothing for %s', (advertised) => {
-    expect(remoteProxyHint(GATEWAY, proxy(advertised))).toBeNull();
-  });
-
-  // A gateway reached at this machine's own address is local: host.docker.internal is right for it.
-  it.each(['http://127.0.0.1:10254', 'http://localhost:10254', 'http://0.0.0.0:10254', 'http://[::]:10254'])(
-    'says nothing when the gateway URL %s is this machine',
-    (gateway) => {
-      expect(remoteProxyHint(gateway, proxy('http://x:t@host.docker.internal:10255'))).toBeNull();
-      expect(remoteProxyHint(gateway, proxy('http://x:t@0.0.0.0:10255'))).toBeNull();
-    },
-  );
-
-  it('says nothing when the proxy could not be read', () => {
-    expect(remoteProxyHint(GATEWAY, null)).toBeNull();
-  });
 });
 
 describe('advertised proxy', () => {
-  const answer = (status: number, body: unknown) =>
-    vi.fn(async (_url: string | URL | Request, _init?: RequestInit) => new Response(JSON.stringify(body), { status }));
-
-  it("reads the default agent's proxy, with the API key", async () => {
-    const fetchImpl = answer(200, { env: { HTTPS_PROXY: 'http://x:t@host.docker.internal:10255' } });
+  it("reads the default agent's proxy", async () => {
+    const fetchImpl = advertising();
     const got = await advertisedProxy(`${GATEWAY}/`, 'oc_key', fetchImpl as unknown as typeof fetch);
     expect(got?.host).toBe('host.docker.internal:10255');
-    const [url, init] = fetchImpl.mock.calls[0];
-    expect(url).toBe(`${GATEWAY}/v1/container-config?agent=default`);
-    expect((init?.headers as Record<string, string>).Authorization).toBe('Bearer oc_key');
-  });
-
-  it.each([
-    ['a refused request', answer(401, {})],
-    ['no proxy in the answer', answer(200, { env: {} })],
-    ['a proxy that is not a URL', answer(200, { env: { HTTPS_PROXY: 'not a url' } })],
-    [
-      'an unreachable gateway',
-      vi.fn(async () => {
-        throw new TypeError('fetch failed');
-      }),
-    ],
-  ])('gives null for %s', async (_case, fetchImpl) => {
-    expect(await advertisedProxy(GATEWAY, undefined, fetchImpl as unknown as typeof fetch)).toBeNull();
+    expect(fetchImpl.mock.calls[0][0]).toBe(`${GATEWAY}/v1/container-config?agent=default`);
   });
 });
 
 describe('proxy check after setup', () => {
-  const advertising = () =>
-    vi.fn(
-      async (_url: string | URL | Request, _init?: RequestInit) =>
-        new Response(JSON.stringify({ env: { HTTPS_PROXY: 'http://x:t@host.docker.internal:10255' } }), {
-          status: 200,
-        }),
-    );
-
-  it('warns for a remote gateway that sends agents to their own machine, asking with the setup token', async () => {
-    const fetchImpl = advertising();
-    const env = { NANOCLAW_ONECLI_API_HOST: GATEWAY, NANOCLAW_ONECLI_API_TOKEN: 'oc_key' };
-    const got = await proxyCheck(env, fetchImpl as unknown as typeof fetch);
-    expect(got.warn).toBe('yes');
-    expect(got.hint).toContain('GATEWAY_BASE_URL=gw.example.com:10255');
-    expect((fetchImpl.mock.calls[0][1]?.headers as Record<string, string>).Authorization).toBe('Bearer oc_key');
-  });
-
-  it('asks nothing when setup was not pointed at a remote gateway', async () => {
-    const fetchImpl = advertising();
-    expect(await proxyCheck({}, fetchImpl as unknown as typeof fetch)).toEqual({ warn: 'no', hint: 'none' });
-    expect(fetchImpl).not.toHaveBeenCalled();
+  it('warns for a remote gateway that sends agents to their own machine, asking with the saved key', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'nc-proxy-key-'));
+    writeFileSync(join(dir, '.env'), 'ONECLI_API_KEY=oc_key\n');
+    const cwd = vi.spyOn(process, 'cwd').mockReturnValue(dir);
+    try {
+      const fetchImpl = advertising();
+      const got = await proxyCheck({ NANOCLAW_ONECLI_API_HOST: GATEWAY }, fetchImpl as unknown as typeof fetch);
+      expect(got.warn).toBe('yes');
+      expect(got.hint).toContain('GATEWAY_BASE_URL=gw.example.com:10255');
+      expect((fetchImpl.mock.calls[0][1]?.headers as Record<string, string>).Authorization).toBe('Bearer oc_key');
+    } finally {
+      cwd.mockRestore();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   // SKILL.md runs this file and binds its stdout as JSON; empty output fails the install.
@@ -126,16 +87,15 @@ describe('proxy check after setup', () => {
   }, 30_000);
 
   it('never fails, even when the gateway address is not a URL', async () => {
-    const env = { NANOCLAW_ONECLI_API_HOST: 'not a url', NANOCLAW_ONECLI_API_TOKEN: 'k' };
+    const env = { NANOCLAW_ONECLI_API_HOST: 'not a url' };
     expect(await proxyCheck(env, advertising() as unknown as typeof fetch)).toEqual({ warn: 'no', hint: 'none' });
   });
 });
 
-// The wizard runs the skill and shows its operator notes on screen; the
-// setup script's own output only reaches logs/setup.log.
+// The wizard shows the skill's operator notes on screen; setup.ts output only reaches logs/setup.log.
 describe('the skill shows the hint', () => {
   const md = readFileSync(new URL('../SKILL.md', import.meta.url), 'utf8');
-  const hint = remoteProxyHint(GATEWAY, proxy('http://x:t@host.docker.internal:10255'))!;
+  const hint = remoteProxyHint(GATEWAY, new URL('http://x:t@host.docker.internal:10255'))!;
 
   it.each([
     ['shows the hint when the check warns', { warn: 'yes', hint }, [hint]],

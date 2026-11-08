@@ -103,7 +103,7 @@ A gateway on another host must hand agents its own address in `GATEWAY_BASE_URL`
 pnpm exec tsx .claude/skills/add-onecli/scripts/proxy-check.ts || echo '{"warn":"no","hint":"none"}'
 ```
 
-When that address is `host.docker.internal` or a loopback or wildcard address, show the user the exact `GATEWAY_BASE_URL=<host>:<port>` line to set on the gateway host, and point them at "Remote gateway" in [Upgrading the OneCLI gateway](payload/docs/onecli-upgrades.md#remote-gateway):
+When that address is `host.docker.internal` or a loopback address, show the user the exact `GATEWAY_BASE_URL=<host>:<port>` line to set on the gateway host, and point them at "Remote gateway" in [Upgrading the OneCLI gateway](payload/docs/onecli-upgrades.md#remote-gateway):
 
 ```nc:operator when:proxy_warn=yes
 {{proxy_hint}}
