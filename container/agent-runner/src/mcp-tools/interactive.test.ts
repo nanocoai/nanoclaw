@@ -296,13 +296,15 @@ describe('send_card', () => {
     }
   });
 
-  it('constrains children to text instead of promising nested action blocks', () => {
+  it('offers text and display parts as children, never a button or nested action blocks', () => {
     const cardSchema = sendCard.tool.inputSchema.properties.card as {
       properties: { children: { description: string; items: { anyOf: Array<Record<string, unknown>> } } };
     };
+    const advertised = JSON.stringify(cardSchema.properties.children.items.anyOf);
 
     expect(cardSchema.properties.children.description).toContain('Nested action blocks are unsupported');
-    expect(cardSchema.properties.children.items.anyOf).toHaveLength(2);
+    expect(advertised).toContain('"enum":["Text","Fields","Table","Chart","Divider"]');
+    expect(advertised).not.toMatch(/Button|Actions|Image|"const"|"null"/);
   });
 
   it('stays quiet when every action has a url', async () => {
@@ -318,6 +320,153 @@ describe('send_card', () => {
 
     expect(result.content[0].text).toMatch(/^Card sent \(id: msg-[^)]+\)$/);
   });
+});
+
+describe('send_card — card parts', () => {
+  beforeEach(() => seedBoundThread('slack', 'C-fixture', null));
+  const field = (label: string, value: string | number) => ({ type: 'Field', props: { label, value } });
+  const table = (rows: string[][], headers = ['Scale', 'Before', 'After']) => ({
+    type: 'Table',
+    props: { headers, rows },
+  });
+  const chart = (title: string, spec: Record<string, unknown>) => ({ type: 'Chart', props: { title, chart: spec } });
+  const bar = (title = 'Latency') =>
+    chart(title, { type: 'bar', categories: ['1x', '2x'], series: [{ name: 'Before', values: [40, 80] }] });
+  const pie = (value: number) => chart('Split', { type: 'pie', segments: [{ label: 'Render', value }] });
+  const sent = () => JSON.parse(getUndeliveredMessages()[0].content);
+
+  it('sends a card of every part as the agent wrote it, next to its text children', async () => {
+    const children = [
+      'Before/after the cache change.',
+      { type: 'Fields', children: [field('p50', '42 ms'), field('Errors', 0.2)] },
+      table([['1x', '40', '38']]),
+      bar(),
+      pie(55),
+      { type: 'Divider' },
+      { type: 'Text', props: { content: 'Measured on staging.', style: 'muted' } },
+      { type: 'text', text: 'A text child that also names a type stays text.' },
+    ];
+    const result = await sendCard.handler({ card: { title: 'Perf', children } });
+
+    expect(result.isError).toBeUndefined();
+    expect(sent().card.children).toEqual(children);
+  });
+
+  it.each([
+    ['a callback button', { type: 'Button', props: { id: 'ncq:q-1:0', label: 'Approve' } }, 'unknown part "Button"'],
+    ['an image', { type: 'Image', props: { url: 'https://example.com/a.png', alt: 'x' } }, 'unknown part "Image"'],
+    ['a nested card', { type: 'Card', props: { title: 'Approve?' } }, 'unknown part "Card"'],
+    ['a field outside Fields', field('p50', '42 ms'), 'unknown part "Field"'],
+    ['an empty Fields', { type: 'Fields', children: [] }, 'Fields needs at least one Field'],
+    [
+      'a button inside Fields',
+      { type: 'Fields', children: [{ type: 'Button', props: { id: 'ncq:q-1:0', label: 'x' } }] },
+      'Fields holds only Field parts',
+    ],
+    ['a field named after an object method', { type: 'Fields', children: [{ type: 'constructor' }] }, 'Fields holds only Field parts'],
+    ['a short table row', table([['1x', '40']]), 'row 0 has 2 cells, expected 3'],
+    ['a table of 31 rows', table(Array.from({ length: 31 }, () => ['1x', '40', '38'])), 'at most 30 rows'],
+    ['an align list longer than the headers', { type: 'Table', props: { headers: ['a'], rows: [['1']], align: ['left', 'right'] } }, 'one per column'],
+    ['a pie with a repeated slice label', chart('Split', { type: 'pie', segments: [{ label: 'a', value: 1 }, { label: 'a', value: 2 }] }), 'must not repeat'],
+    ['a table of 7 columns', table([['a', 'b', 'c', 'd', 'e', 'f', 'g']], ['1', '2', '3', '4', '5', '6', '7']), 'at most 6 columns'],
+    [
+      'a series missing a value',
+      chart('Latency', { type: 'line', categories: ['1x', '2x'], series: [{ name: 'Before', values: [40] }] }),
+      'has 1 values, expected 2',
+    ],
+    ['a pie slice of zero', pie(0), 'segments[0].value'],
+    ['a table too long for Slack to draw', table([['x'.repeat(10_000), 'a', 'b']]), 'at most 10000'],
+    ['a table given as object rows', { type: 'Table', props: { headers: ['Evidence'], rows: [{ Evidence: 'x' }] } }, 'row 0 must be a list of cells'],
+    ['a table with no text', { type: 'Table', props: { headers: [' '], rows: [[' ']] } }, 'the table has no text to show'],
+    [
+      'a table cell given as a template',
+      { type: 'Table', props: { headers: ['Evidence'], rows: [[{ $template: 'x' }]] } },
+      'a cell must be text or a number',
+    ],
+    ['a text part over 2,500 characters', { type: 'Text', props: { content: 'x'.repeat(2_501) } }, 'at most 2500 characters'],
+    ['a text part with an unknown style', { type: 'Text', props: { content: 'x', style: 'huge' } }, 'plain, bold or muted'],
+    ['a field over 1,500 characters', { type: 'Fields', children: [field('p95', 'x'.repeat(1_500))] }, 'at most 1500 characters'],
+    [
+      'a chart value of Infinity, as JSON reads 1e400',
+      chart('Latency', { type: 'bar', categories: ['1x'], series: [{ name: 'Before', values: [Infinity] }] }),
+      'values must be numbers',
+    ],
+    ['a field with no value', { type: 'Fields', children: [{ type: 'Field', props: { label: 'p95' } }] }, 'props.label and props.value'],
+    [
+      'a table whose caption makes it too long',
+      { type: 'Table', props: { headers: ['a'], rows: [['b']], caption: 'x'.repeat(10_000) } },
+      'at most 10000',
+    ],
+    ['a chart title over 50 characters', bar('x'.repeat(51)), 'props.title'],
+    [
+      'a chart label over 20 characters',
+      chart('Latency', { type: 'bar', categories: ['x'.repeat(21)], series: [{ name: 'Before', values: [1] }] }),
+      'at most 20 characters',
+    ],
+    [
+      'an axis label over 50 characters',
+      chart('Latency', { type: 'bar', categories: ['1x'], series: [{ name: 'Before', values: [1] }], xLabel: 'x'.repeat(51) }),
+      'axis labels',
+    ],
+    [
+      'a chart of 21 categories',
+      chart('Latency', { type: 'line', categories: Array.from({ length: 21 }, (_, i) => `${i}`), series: [{ name: 'B', values: Array.from({ length: 21 }, () => 1) }] }),
+      '1 to 20 categories',
+    ],
+    [
+      'a chart of 13 series',
+      chart('Latency', { type: 'bar', categories: ['1x'], series: Array.from({ length: 13 }, (_, i) => ({ name: `s${i}`, values: [1] })) }),
+      '1 to 12 series',
+    ],
+    [
+      'a chart with a repeated category',
+      chart('Latency', { type: 'bar', categories: ['1x', '1x'], series: [{ name: 'B', values: [1, 2] }] }),
+      'must not repeat',
+    ],
+    ['a chart of an unknown type', chart('Latency', { type: 'radar' }), 'pie, bar, line or area'],
+  ])('refuses %s and says which child to fix', async (_, part, reason) => {
+    const result = await sendCard.handler({ card: { title: 'Perf', children: ['intro', part] } });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('Card not sent');
+    expect(result.content[0].text).toContain('children[1]');
+    expect(result.content[0].text).toContain(reason);
+    expect(getUndeliveredMessages()).toHaveLength(0);
+  });
+
+  it.each([
+    ['11 parts', Array.from({ length: 11 }, () => ({ type: 'Divider' })), 'at most 10 parts per card'],
+    [
+      '11 fields across two Fields parts',
+      [
+        { type: 'Fields', children: Array.from({ length: 6 }, (_, i) => field(`f${i}`, '1')) },
+        { type: 'Fields', children: Array.from({ length: 5 }, (_, i) => field(`g${i}`, '1')) },
+      ],
+      'at most 10 fields per card',
+    ],
+    [
+      'over 12,000 characters of text across parts',
+      Array.from({ length: 5 }, () => ({ type: 'Text', props: { content: 'x'.repeat(2_500) } })),
+      'at most 12000 per card',
+    ],
+  ])('refuses a card of %s', async (_, children, reason) => {
+    const result = await sendCard.handler({ card: { title: 'Perf', children } });
+
+    expect(result.content[0].text).toContain(reason);
+    expect(getUndeliveredMessages()).toHaveLength(0);
+  });
+
+  it('refuses a second table and a third chart', async () => {
+    const tables = await sendCard.handler({
+      card: { children: [table([['1x', '40', '38']]), table([['2x', '80', '61']])] },
+    });
+    const charts = await sendCard.handler({ card: { children: [bar('a'), bar('b'), bar('c')] } });
+
+    expect(tables.content[0].text).toContain('at most 1 Table');
+    expect(charts.content[0].text).toContain('at most 2 Chart');
+    expect(getUndeliveredMessages()).toHaveLength(0);
+  });
+
 });
 
 // ── Thread of the chat being answered ──
