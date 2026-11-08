@@ -651,22 +651,27 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       // without stored render metadata; deferred: the host updates the card itself.
       if ((outcome !== 'accepted' && outcome !== 'closed') || !render || render.deferResolution || !click.messageId)
         return;
-      transport.removeButtons?.();
       const selectedLabel =
         outcome === 'closed'
           ? CLOSED_RESOLUTION
           : (render.options.find((o) => o.value === selectedOption)?.selectedLabel ?? selectedOption);
       const actorName = outcome === 'closed' ? '' : click.actorName;
       // Every clicked card resolves the same way, on every channel: escaped.
-      await adapter.editMessage(
-        click.threadId,
-        click.messageId,
-        terminalMessage({
-          title: render.title,
-          question: render.question ?? click.fallbackQuestion ?? '',
-          resolution: actorName ? `${selectedLabel} by ${actorName}` : selectedLabel,
-        }),
-      );
+      try {
+        await adapter.editMessage(
+          click.threadId,
+          click.messageId,
+          terminalMessage({
+            title: render.title,
+            question: render.question ?? click.fallbackQuestion ?? '',
+            resolution: actorName ? `${selectedLabel} by ${actorName}` : selectedLabel,
+          }),
+        );
+      } finally {
+        // Only once the edit settles: two edits of one message in flight together
+        // can drop the edit's text (Discord kept only the button removal).
+        transport.removeButtons?.();
+      }
       // eslint-disable-next-line no-catch-all/no-catch-all -- logged; a failed card update never undoes the decision
     } catch (err) {
       log.warn('Failed to update card after action', { err });
@@ -1256,7 +1261,7 @@ interface CardClick {
 interface ClickTransport {
   /** Only the clicker sees it; nothing is posted where the channel can't. */
   notePrivately(text: string): Promise<void>;
-  /** Removes the buttons apart from the card edit, where the transport can; never awaited. */
+  /** Removes the buttons apart from the card edit, where the transport can; starts after the edit settles, never awaited. */
   removeButtons?(): void;
 }
 
