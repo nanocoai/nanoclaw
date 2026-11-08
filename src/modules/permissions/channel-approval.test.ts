@@ -902,16 +902,29 @@ describe('unknown-channel registration flow', () => {
       expect(deliverMock).toHaveBeenCalledTimes(2);
     });
 
-    it('a store that fails after the send keeps the first card retired, and the new card usable', async () => {
+    it('a store that fails after the send leaves the new card unused and the first card usable again', async () => {
       const card = await firstCard('chat-choose-store-fails');
+      await createAgentGroup({ id: 'ag-3', name: 'Cy', folder: 'cy', agent_provider: null, created_at: now() });
       cardUpdate.fail = true;
-      expect(await click(card.messaging_group_id, 'choose_existing', 'card-1')).not.toBe('accepted');
-      // The new card's options weren't stored: its first button reads as "Choose existing agent".
-      expect(await click(card.messaging_group_id, 'choose_existing', 'card-2')).toBe('accepted');
-      // The first card's "Connect new agent" now reads as the second agent: it must not connect it.
-      expect(await click(card.messaging_group_id, 'connect:ag-2', 'card-1')).toBe('ignored');
-      expect(await click(card.messaging_group_id, 'connect:ag-2', 'card-2')).toBe('ignored');
-      expect(await click(card.messaging_group_id, 'connect:ag-2', 'card-3')).toBe('accepted');
+      deliverMock.mockResolvedValueOnce('card-2');
+      expect(await click(card.messaging_group_id, 'choose_existing', 'card-1')).toBe('ignored');
+      // The new card's options weren't stored, so its third agent decodes as the first card's Reject.
+      expect(await click(card.messaging_group_id, 'reject', 'card-2')).toBe('ignored');
+      expect(await storedOptions(card.messaging_group_id)).toBe(card.options_json);
+      // The first card tries again: a new card goes out and its options are stored.
+      deliverMock.mockResolvedValueOnce('card-3');
+      expect(await click(card.messaging_group_id, 'choose_existing', 'card-1')).toBe('accepted');
+      const values = (JSON.parse((await storedOptions(card.messaging_group_id))!) as Array<{ value: string }>).map(
+        (o) => o.value,
+      );
+      expect(values).toEqual(['connect:ag-1', 'connect:ag-2', 'connect:ag-3', 'reject']);
+      expect(await click(card.messaging_group_id, 'connect:ag-3', 'card-2')).toBe('ignored');
+      expect(await click(card.messaging_group_id, 'connect:ag-3', 'card-3')).toBe('accepted');
+      const wired = await getDb().get<{ agent_group_id: string }>(
+        'SELECT agent_group_id FROM messaging_group_agents WHERE messaging_group_id = ?',
+        card.messaging_group_id,
+      );
+      expect(wired?.agent_group_id).toBe('ag-3');
     });
 
     it('does not store its options over a newer request for the same chat', async () => {
@@ -941,6 +954,9 @@ describe('unknown-channel registration flow', () => {
       );
       sent();
       expect(await choosing).toBe('ignored');
+      expect(await storedOptions(card.messaging_group_id)).toBe(card.options_json);
+      // The agent card's buttons would decode against the newer request's options: its Reject must not deny it.
+      expect(await click(card.messaging_group_id, 'reject', 'plat-msg-2')).toBe('ignored');
       expect(await storedOptions(card.messaging_group_id)).toBe(card.options_json);
     });
 
