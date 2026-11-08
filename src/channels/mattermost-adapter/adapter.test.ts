@@ -501,3 +501,38 @@ describe('Mattermost setup failures', () => {
     expect(adapter.botUserId).toBe(BOT_ID);
   });
 });
+
+describe('Mattermost mention detection', () => {
+  // Mattermost lists the receiving bot in a frame's `mentions` in DMs and group
+  // messages whether or not the post names it, so every frame here carries it.
+  async function isMention(channelType: 'O' | 'G', text: string): Promise<boolean> {
+    const fetchImpl = vi.fn(async (input: string | URL | Request) =>
+      String(input).endsWith('/users/me')
+        ? Response.json({ id: BOT_ID, username: 'nanoclaw', is_bot: true })
+        : Response.json({ id: USER_ID, username: 'operator' }),
+    );
+    const adapter = new MattermostAdapter({ ...BASE_OPTIONS, fetchImpl, skipSocket: true });
+    const processMessage = vi.fn();
+    const logger = { debug() {}, error() {}, info() {}, warn() {} };
+    await adapter.initialize({ getLogger: () => logger, processMessage } as unknown as ChatInstance);
+    const post = { id: POST_ID, channel_id: CHANNEL_ID, user_id: USER_ID, message: text, root_id: '', create_at: 1 };
+    adapter.handleSocketEvent({
+      event: 'posted',
+      data: { channel_type: channelType, mentions: JSON.stringify([BOT_ID]), post: JSON.stringify(post) },
+    });
+    await vi.waitFor(() => expect(processMessage).toHaveBeenCalledOnce());
+    return processMessage.mock.calls[0]![2].isMention;
+  }
+
+  it('does not treat a plain group message as a mention', async () => {
+    expect(await isMention('G', 'lunch at noon?')).toBe(false);
+  });
+
+  it('sees @bot in a group message', async () => {
+    expect(await isMention('G', 'hey @nanoclaw, lunch at noon?')).toBe(true);
+  });
+
+  it('trusts the server mention list in a channel', async () => {
+    expect(await isMention('O', 'hey @nanoclaw')).toBe(true);
+  });
+});

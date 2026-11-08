@@ -855,9 +855,10 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
 
     const threadId = threadIdForPost(post);
     const message = this.toMessage(post, threadId);
-    // Mattermost puts the other participant in `data.mentions` on every DM
-    // post, so only non-DM channels can report an explicit @-mention.
-    message.isMention = isExplicitMention(event.data, this.botUserId);
+    // `data.mentions` names every member on DM and group-message posts. A DM
+    // is always addressed to the bot; a group message needs `@bot` in the text.
+    message.isMention =
+      data?.channel_type === 'G' ? this.detectTextMention(post) : isExplicitMention(event.data, this.botUserId);
 
     void chat.processMessage(this, threadId, message);
   }
@@ -1412,8 +1413,8 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
 
   /**
    * `@bot` in the text, for posts that arrive without a `posted` frame (REST
-   * fetches, `parseMessage`). Frames carry the server's own `mentions` list,
-   * which is authoritative and is used instead when present. DM channels
+   * fetches, `parseMessage`) and for group messages, whose frame `mentions`
+   * list names every member. Other frames use that list instead. DM channels
    * never count as mentions, matching `isExplicitMention`.
    */
   private detectTextMention(post: MattermostPost): boolean {

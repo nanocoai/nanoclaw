@@ -277,8 +277,8 @@ export interface MattermostWebSocketEvent {
  *
  * `post` and `mentions` are JSON-encoded strings. `mentions` is omitted
  * entirely when nobody is mentioned — and is always present, containing the
- * bot's own id, in DM channels, because Mattermost implicitly mentions the
- * other participant. See {@link isExplicitMention}.
+ * bot's own id, in DM and group-message channels, because Mattermost
+ * implicitly mentions every member there. See {@link isExplicitMention}.
  */
 export interface MattermostPostedEventData {
   channel_display_name?: string;
@@ -365,16 +365,16 @@ export function decodeMentions(data: Record<string, unknown> | undefined): strin
 /**
  * Whether a `posted` frame explicitly @-mentions `botUserId`.
  *
- * DM channels are excluded on purpose: Mattermost puts the other participant's
- * id in `data.mentions` for every DM post, mention or not, so treating that as
- * an explicit address would make every DM look like a mention.
- * Live-verified 2026-07-24.
+ * DM and group-message channels are excluded on purpose: Mattermost puts the
+ * receiving member's id in `data.mentions` for every post there, mention or
+ * not, so treating that as an explicit address would make every post look like
+ * a mention. Live-verified for DMs 2026-07-24, group messages 2026-11-09.
  */
 export function isExplicitMention(data: Record<string, unknown> | undefined, botUserId: string | undefined): boolean {
   if (!botUserId) {
     return false;
   }
-  if (data?.channel_type === 'D') {
+  if (data?.channel_type === 'D' || data?.channel_type === 'G') {
     return false;
   }
   return decodeMentions(data).includes(botUserId);
