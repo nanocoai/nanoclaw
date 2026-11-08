@@ -889,7 +889,7 @@ describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
   });
 });
 
-describe('createChatSdkBridge.deliver — send_card json-render parts', () => {
+describe('createChatSdkBridge.deliver — send_card card parts', () => {
   const postedCard = (call: PostCall) => (call.message as { card: { children: unknown[] } }).card;
   const deliverCard = async (card: Record<string, unknown>) => {
     const { calls, postMessage } = makePostCapture();
