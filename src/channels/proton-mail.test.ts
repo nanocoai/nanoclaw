@@ -21,6 +21,7 @@ import {
   newCardToken,
   renderCardText,
   retryDelayMs,
+  addressDomain,
   singleSender,
   tlsOptions,
   type CardRef,
@@ -64,6 +65,21 @@ describe('normalizeAddress', () => {
     expect(normalizeAddress('alice@xn--bcher-kva.de')).toBe('alice@xn--bcher-kva.de');
     // "é" composed and decomposed are one local part.
     expect(normalizeAddress('ren\u00e9@example.org')).toBe(normalizeAddress('rene\u0301@example.org'));
+  });
+  it('never lets the URL parser rewrite a domain', () => {
+    for (const a of [
+      'a@x.example?.evil.example',
+      'a@x.example/y',
+      'a@x.example#y',
+      'a@x.example\\y',
+      'a@x%2eexample',
+    ]) {
+      expect(normalizeAddress(a)).toBe(a);
+    }
+    // Fullwidth letters and an ideographic stop do not fold into the real domain.
+    expect(normalizeAddress('a@ｓｃｈｏｏｌ.example')).toBe('a@ｓｃｈｏｏｌ.example');
+    expect(normalizeAddress('a@school。example')).toBe('a@school。example');
+    expect(senderLabel('a@ｓｃｈｏｏｌ.example')).toBe('a@ｓｃｈｏｏｌ.example (a@school.example)');
   });
 });
 
@@ -633,6 +649,12 @@ describe('ask_question over email', () => {
       '  /cancel',
     ]);
     // Alike by command, not only by text: "Tutor" and "tutor" both stem to /tutor.
+    // Emoji have commands of their own, so no internal value is shown.
+    const emoji = normalizeOptions([
+      { label: '✅', value: 'ok' },
+      { label: '❌', value: 'reject' },
+    ]);
+    expect(optionLines(emoji)).toEqual(['  /option-1 — ✅', '  /option-2 — ❌']);
     const cased = normalizeOptions([
       { label: 'Tutor', value: 'connect:ag-1' },
       { label: 'tutor', value: 'connect:ag-2' },
@@ -1034,5 +1056,17 @@ describe('review 3 of #4218', () => {
     it('an ASCII domain is unchanged', () => {
       expect(senderLabel('a@example.org', 'Anna')).toBe('Anna <a@example.org>');
     });
+  });
+});
+
+describe('addressDomain', () => {
+  it('is the registrable domain', () => {
+    expect(addressDomain('a@mail.example.com')).toBe('example.com');
+    expect(addressDomain('a@x.example.co.uk')).toBe('example.co.uk');
+    expect(addressDomain('a@xn--bcher-kva.example')).toBe('xn--bcher-kva.example');
+  });
+  it('keeps maintained schools apart: each registers under its county', () => {
+    expect(addressDomain('head@office.oakwood.kent.sch.uk')).toBe('oakwood.kent.sch.uk');
+    expect(addressDomain('head@beech.lancs.sch.uk')).toBe('beech.lancs.sch.uk');
   });
 });

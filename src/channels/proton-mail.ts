@@ -102,6 +102,7 @@ const DEFERRED_STRANGERS_PER_DOMAIN_MAX = 20;
 const HOST_START_WARN_MS = 5 * 60_000;
 /** Past this many senders, recentBySender drops those with nothing in the last hour. */
 const RECENT_SENDERS_SWEEP_AT = 200;
+const RECENT_SENDERS_SWEEP_MS = 5 * 60_000;
 /** How often one new address may be looked up with core to see whether it was settled (pruneSettled). */
 const SETTLED_RECHECK_MS = 10 * 60_000;
 /**
@@ -197,8 +198,7 @@ export function normalizeAddress(raw: string): string {
   const s = raw.trim().normalize('NFC').toLowerCase();
   const at = s.lastIndexOf('@');
   if (at < 0) return s;
-  const domain = s.slice(at + 1);
-  return `${s.slice(0, at)}@${domainToASCII(domain) || domain}`;
+  return `${s.slice(0, at)}@${asciiDomain(s.slice(at + 1))}`;
 }
 
 /** "Re: X" unless the subject already carries a reply prefix in a common locale. */
@@ -468,6 +468,18 @@ export function forwardNote(token: string): string {
 }
 
 /**
+ * Where to cut `text` at or before `at` so no coded mark is split: a part of
+ * one would carry this mail's code with no note to explain it.
+ */
+function cutBeforeMark(text: string, at: number, marks: string[]): number {
+  for (const mark of marks) {
+    const start = text.lastIndexOf(mark, at);
+    if (start >= 0 && start < at && start + mark.length > at) return start;
+  }
+  return at;
+}
+
+/**
  * The text with any "[Note from the mail channel" the sender typed made
  * visibly the sender's: the channel's own notes come after the sender's text
  * and carry this mail's code, but a typed note with no code to check (in a
@@ -711,17 +723,12 @@ export async function forwardedMessageText(source: Uint8Array, token = newMarkTo
       inner.date && `Date: ${formatLocalTime(inner.date.toISOString(), TIMEZONE)}`,
       inner.subject && `Subject: ${oneLine(inner.subject, SUBJECT_MAX_CHARS)}`,
     ].filter(Boolean);
-    const full = await mailText(inner, HTML_TIMEOUT_MS, { token });
-    const text = full.slice(0, BODY_MAX_CHARS).trim();
-    const cut = full.length > BODY_MAX_CHARS ? `\n\n${FORWARD_CUT} ${full.length} characters in all]` : '';
-    return `${lines.join('\n')}\n\n${text}${cut}`;
+    const text = (await mailText(inner, HTML_TIMEOUT_MS, { token })).slice(0, BODY_MAX_CHARS).trim();
+    return `${lines.join('\n')}\n\n${text}`;
   } catch {
     return `${head}\n[The forwarded message attached to this mail could not be read.]`;
   }
 }
-
-/** How an attached forward cut at BODY_MAX_CHARS ends (forwardedMessageText); the truncation note counts on it. */
-const FORWARD_CUT = '[… the forwarded message was cut short:';
 
 /**
  * A header block larger than this is refused unread. Real headers are a few
@@ -958,21 +965,23 @@ export function isForwardSubject(subject: string | undefined): boolean {
  * body is kept. A marker inside a reply's quoted history is history. Without
  * `subject` (card answers) only the marker counts.
  */
-export function stripQuotedReply(text: string, subject?: string, forwardMark?: string): string {
+export function stripQuotedReply(text: string, subject?: string, forwardLine?: string): string {
   const normalized = text.replace(/\r\n/g, '\n');
   const lines = normalized.split('\n');
-  // A kept forward, with `forwardMark` (this mail's coded line) where the
+  // A kept forward, with `forwardLine` (this mail's coded line) where the
   // forwarded mail begins: its From:/Date: block is the sender's claim, and
   // nothing else would set it apart from the sender's own words.
   const keep = (at: number): string =>
-    forwardMark ? [...lines.slice(0, at), forwardMark, ...lines.slice(at)].join('\n').trim() : normalized.trim();
+    forwardLine ? [...lines.slice(0, at), forwardLine, ...lines.slice(at)].join('\n').trim() : normalized.trim();
   if (isForwardSubject(subject)) {
-    // The forwarded mail begins at its marker or its header block; a forward
-    // with neither is marked from the top.
+    // The forwarded mail begins at its marker or its header block. With
+    // neither, the text is the sender's own (a note over a forward sent as an
+    // attachment, say) and carries no claim to set apart.
     for (let i = 0; i < lines.length; i++) {
-      if (FORWARD_MARKER.test(lines[i].trim()) || historyStartsAt(lines, i)) return keep(i);
+      const line = lines[i].trim();
+      if (FORWARD_MARKER.test(line) || historyStartsAt(lines, i) || /^From:\s.+/i.test(line)) return keep(i);
     }
-    return keep(0);
+    return normalized.trim();
   }
   for (let i = 0; i < lines.length; i++) {
     if (historyStartsAt(lines, i)) break;
@@ -992,7 +1001,10 @@ export function stripQuotedReply(text: string, subject?: string, forwardMark?: s
     kept.pop();
   }
   const out = kept.join('\n').trim();
-  return out || text.trim();
+  if (out) return out;
+  // Only a quote is still a message; one opening with a header block makes the
+  // same claim a forward's does, with or without a forward's subject.
+  return forwardLine && cut < lines.length && historyStartsAt(lines, cut) ? keep(cut) : text.trim();
 }
 
 /** A subject without its reply/forward prefixes, for comparing two subjects. */
@@ -1139,9 +1151,21 @@ export function isTrustedInternalDomain(domain: string, internalDomains: string[
 /** How checkSenderAuth's reason starts for internal mail from a domain not trusted (handleMessage flags it). */
 const INTERNAL_UNTRUSTED = 'internal mail from';
 
-/** A domain's ASCII (punycode) form, or the domain itself when it has none. */
+/**
+ * A domain's ASCII (punycode) form, or the domain itself when it has none.
+ * domainToASCII is a URL host parser: it stops at `/ ? # \\`, decodes `%2E` and
+ * folds fullwidth letters and `。`, each of which would turn a malformed or
+ * look-alike domain into a clean one. So only plain labels are converted, and a
+ * Unicode domain only when its ASCII form decodes back to the same spelling;
+ * anything else stays as written, for isPlainAddress to refuse or to remain an
+ * identity of its own.
+ */
 function asciiDomain(domain: string): string {
-  return domainToASCII(domain) || domain;
+  if (!/^[\p{L}\p{M}\p{N}.-]+$/u.test(domain)) return domain;
+  const ascii = domainToASCII(domain);
+  if (!ascii) return domain;
+  if (/^[\x21-\x7e]+$/.test(domain)) return ascii;
+  return domainToUnicode(ascii) === domain.normalize('NFC').toLowerCase() ? ascii : domain;
 }
 
 /**
@@ -1152,7 +1176,7 @@ function asciiDomain(domain: string): string {
  */
 const TWO_LEVEL_SUFFIXES = new Set(
   [
-    'co.uk org.uk ac.uk gov.uk ltd.uk plc.uk me.uk net.uk nhs.uk police.uk',
+    'co.uk org.uk ac.uk gov.uk ltd.uk plc.uk me.uk net.uk nhs.uk police.uk mod.uk',
     'com.au net.au org.au edu.au gov.au asn.au id.au',
     'co.nz org.nz net.nz ac.nz govt.nz school.nz',
     'co.jp ne.jp or.jp ac.jp go.jp ad.jp ed.jp',
@@ -1189,6 +1213,8 @@ export function addressDomain(address: string): string {
     .split('.')
     .filter(Boolean);
   const lastTwo = labels.slice(-2).join('.');
+  // Maintained schools register a level lower: school.county.sch.uk.
+  if (lastTwo === 'sch.uk') return labels.slice(-4).join('.');
   return labels.slice(TWO_LEVEL_SUFFIXES.has(lastTwo) ? -3 : -2).join('.');
 }
 
@@ -1376,7 +1402,7 @@ export function isPlainAddress(address: string): boolean {
  * goes through here, so a CR/LF in an encoded name never reaches stored state.
  */
 export function displayName(address: string, name?: string): string | undefined {
-  const n = name ? oneLine(stripInvisible(name).replace(/[<>"]/g, ''), 100) : '';
+  const n = name ? oneLine(disownTypedNotes(stripInvisible(name).replace(/[<>"]/g, '')), 100) : '';
   if (!n) return undefined;
   // NFKC folds the fullwidth and small @ (＠, ﹫) to @.
   const folded = n.normalize('NFKC');
@@ -1394,7 +1420,14 @@ export function senderLabel(rawAddress: string, name?: string): string {
   // internationalised domain's Unicode spelling is shown beside it.
   const at = address.lastIndexOf('@');
   const domain = address.slice(at + 1);
-  if (at < 0 || !/(^|\.)xn--/.test(domain)) return label;
+  if (at < 0) return label;
+  // A Unicode domain still here did not survive asciiDomain's round trip (a
+  // fullwidth look-alike, say): what it folds to is shown beside it.
+  if (!/^[\x21-\x7e]*$/.test(domain)) {
+    const folded = domainToASCII(domain);
+    return folded && folded !== domain ? `${label} (${address.slice(0, at)}@${folded})` : label;
+  }
+  if (!/(^|\.)xn--/.test(domain)) return label;
   const unicode = domainToUnicode(domain);
   return unicode && unicode !== domain ? `${label} (in Unicode: ${address.slice(0, at)}@${unicode})` : label;
 }
@@ -1486,14 +1519,15 @@ export function optionCommands(options: NormalizedOption[]): string[] {
  */
 export function optionLines(options: NormalizedOption[]): string[] {
   const commands = optionCommands(options);
-  // Labels are alike when their commands would be ("Tutor" and "tutor").
+  // Labels are alike when their commands would be ("Tutor" and "tutor"); those
+  // with no command of their own (emoji: /option-N) are told apart by theirs.
   const stems = options.map((o) => optionToCommand(o.label));
   const stemCount = new Map<string, number>();
-  for (const st of stems) stemCount.set(st, (stemCount.get(st) ?? 0) + 1);
+  for (const st of stems) if (st !== '/') stemCount.set(st, (stemCount.get(st) ?? 0) + 1);
   return options.map((o, i) => {
     const label = oneLine(o.label, 100);
     const shared = (stemCount.get(stems[i]) ?? 0) > 1;
-    const said = optionToCommand(o.label) === commands[i];
+    const said = stems[i] === commands[i];
     const which = o.value && o.value !== o.label ? oneLine(o.value, 80) : `option ${i + 1}`;
     const desc = shared ? `${label} (${which})` : said ? '' : label;
     return desc ? `  ${commands[i]} — ${desc}` : `  ${commands[i]}`;
@@ -1565,10 +1599,12 @@ export interface CardRef {
   sentAt: string;
   /**
    * When its approver was told, once, that a reply without a command was not
-   * taken: never again for this card, so an out-of-office reply cannot keep
-   * a notice loop going.
+   * taken: never again for this card, so an out-of-office reply cannot keep a
+   * notice loop going. Later such replies stay unread and flagged.
    */
   nudgedAt?: string;
+  /** That notice's Message-ID: a reply to it is a reply on the card, too. */
+  nudgeMessageId?: string;
   answeredAt?: string;
   /** Core closed the card without an answer from here (a gateway approval that timed out, say). */
   closedAt?: string;
@@ -1591,7 +1627,7 @@ export type CardReplyMatch =
       token?: string;
       /** How to answer (howToAnswer), only when the card can still take one. */
       howTo?: string;
-      /** A reply without a command on the open card: the adapter records `nudgedAt` once it has said so. */
+      /** A reply without a command on the open card: told once (nudgedAt), then left unread and flagged. */
       nudge?: boolean;
     };
 
@@ -1628,19 +1664,24 @@ export function matchCardReply(input: {
   // so a stray token cannot turn the adapter into a mailer for strangers.
   const knownApprover = Object.values(input.cards).some((c) => c.address === input.fromAddress);
   const card = input.cards[token];
-  const open = !!card && card.address === input.fromAddress && !card.answeredAt && !card.closedAt;
   if (!isCommand) {
-    // The approver writing on a card that still waits ("Approve" without
-    // the slash, say) is told the card is still open, not taken for chat.
-    // Once answered, words on its thread (a reason after "Reject with
-    // reason…") go on to core as before.
-    return open
+    // The approver replying to a card that still waits ("Approve" without the
+    // slash, say) is told the card is still open, not taken for chat. Anything
+    // else goes on as before: words on an answered card's thread (a reason
+    // after "Reject with reason…"), or a new mail that only names the token.
+    const replyIds = messageIds(input.inReplyTo);
+    const repliesToOpenCard =
+      !!card &&
+      card.address === input.fromAddress &&
+      !card.answeredAt &&
+      !card.closedAt &&
+      (replyIds.includes(card.messageId) || (!!card.nudgeMessageId && replyIds.includes(card.nudgeMessageId)));
+    return repliesToOpenCard
       ? {
           kind: 'refused',
           reason:
             'its first line is not one of the listed commands, and the request is still waiting. ' +
-            'It was not passed to the agent either: to write to the agent, send a new email without ' +
-            'the request’s reference in its subject',
+            'It was not passed to the agent either: to write to the agent, send a new email rather than a reply',
           notify: !card.nudgedAt,
           token,
           howTo: howToAnswer(card),
@@ -2148,12 +2189,14 @@ registerChannelAdapter('proton-mail', {
 
     /** Recent mail times per sender, for INBOUND_PER_SENDER_PER_HOUR; in memory only. */
     const recentBySender = new Map<string, number[]>();
+    let recentSweptAt = 0;
 
     /** Null when this mail fits the sender's hour (and is counted); else when the hour has room again. */
     function senderRateFreeAt(addr: string, now = Date.now()): number | null {
       // Senders with nothing in the last hour are dropped once the map grows,
       // so it holds about the hour's senders however many have written.
-      if (recentBySender.size > RECENT_SENDERS_SWEEP_AT) {
+      if (recentBySender.size > RECENT_SENDERS_SWEEP_AT && now - recentSweptAt >= RECENT_SENDERS_SWEEP_MS) {
+        recentSweptAt = now;
         for (const [a, times] of recentBySender) {
           if (times.every((t) => now - t >= HOUR_MS)) recentBySender.delete(a);
         }
@@ -2195,7 +2238,7 @@ registerChannelAdapter('proton-mail', {
      */
     async function defer(uid: number, kind: 'sender' | 'strangers', from: string, at: number): Promise<Outcome> {
       if (state.retry[uid]?.deferred !== kind) {
-        const fromDomain = addressDomain(from);
+        const fromDomain = kind === 'strangers' ? addressDomain(from) : '';
         // Not counting this mail itself, held until now under the other kind.
         const waiting = Object.entries(state.retry)
           .filter(([u, r]) => r.deferred && u !== String(uid))
@@ -2409,20 +2452,18 @@ registerChannelAdapter('proton-mail', {
       for (const att of forwarded.slice(0, FORWARDED_READ_MAX)) {
         body += `\n\n${await forwardedMessageText(att.content, token)}`;
       }
+      // A note the sender typed is made theirs before the cap: the rewrite is longer.
+      body = disownTypedNotes(body);
       if (body.length > BODY_MAX_CHARS) {
-        // The total is of what the agent would have seen (quoted history cut,
-        // attached forwards read in). The text was capped at TEXT_MAX_CHARS,
-        // and each attached forward at BODY_MAX_CHARS, before that: when
-        // either was, the total is a floor.
-        const floor = fullText.length > rawText.length || body.includes(FORWARD_CUT);
-        const total = floor ? `more than ${body.length}` : `${body.length}`;
-        // Never through the middle of a forward line: one cut short would
-        // carry this mail's code with no note to explain it.
-        const mark = forwardMark(token);
-        let cut = BODY_MAX_CHARS;
-        const markAt = body.lastIndexOf(mark, cut);
-        if (markAt >= 0 && markAt + mark.length > cut) cut = markAt;
-        body = body.slice(0, cut).trimEnd() + `\n\n[… truncated, ${total} characters in total]`;
+        // A floor: quoted history is left out, and the text, an attached forward
+        // and the HTML were each capped before this.
+        const total = body.length;
+        const cut = cutBeforeMark(body, BODY_MAX_CHARS, [
+          forwardMark(token),
+          markOpen(token).trimEnd(),
+          markClose(token),
+        ]);
+        body = body.slice(0, cut).trimEnd() + `\n\n[… truncated, at least ${total} characters in total]`;
       }
       const senderName = senderLabel(fromAddr, sender.name);
       // Message-ID threads replies; it is the sender's to choose, so it is
@@ -2444,8 +2485,7 @@ registerChannelAdapter('proton-mail', {
       // hidden elements would also count those in quoted history that
       // stripQuotedReply has cut, and tell the agent of marks it cannot find.
       const marked = body.includes(markOpen(token).trimEnd());
-      // The channel's notes follow; a note the sender typed is made theirs first.
-      body = disownTypedNotes(body);
+      // The channel's notes follow everything the sender wrote.
       const notes: string[] = [];
       if (shown.flagged || subjectMarked || marked) notes.push(hiddenNote(token));
       if (body.includes(forwardMark(token))) notes.push(forwardNote(token));
@@ -2467,10 +2507,11 @@ registerChannelAdapter('proton-mail', {
       // Exchange's X-Auto-Response-Suppress (All, AutoReply) asks for no
       // automatic answers: the mail is still read, but no notice goes back.
       const suppressAuto = /\b(all|autoreply)\b/i.test(headerString(parsed, 'x-auto-response-suppress') ?? '');
+      let noticeId: string | undefined;
       const refuse = async (reason: string, notify: boolean, howTo?: string): Promise<Outcome> => {
         log.warn('Proton Mail: reply not taken as a card answer', { uid, from: fromAddr, reason });
         if (notify && !suppressAuto) {
-          await sendNotice(
+          noticeId = await sendNotice(
             fromAddr,
             `That reply was not taken as an answer: ${reason}.${howTo ? `\n\n${howTo}` : ''}`,
             replySubject(subjectPlain),
@@ -2530,13 +2571,22 @@ registerChannelAdapter('proton-mail', {
       }
       if (match.kind === 'refused') {
         const outcome = await refuse(match.reason, match.notify, match.howTo);
-        // Recorded once the notice has gone (a failed send is retried, and
-        // says it then).
-        if (match.nudge && match.notify && match.token && state.cards[match.token]) {
-          state.cards[match.token] = { ...state.cards[match.token], nudgedAt: new Date().toISOString() };
+        if (!match.nudge) return outcome;
+        if (noticeId && match.token && state.cards[match.token]) {
+          state.cards[match.token] = {
+            ...state.cards[match.token],
+            nudgedAt: new Date().toISOString(),
+            nudgeMessageId: noticeId,
+          };
           saveState(state);
+          return outcome;
         }
-        return outcome;
+        // Nobody was told (the card's one notice has gone, or the mail asks
+        // for no automatic answers), and it does not reach the agent: it must
+        // not vanish, so it stays where a human will find it.
+        log.warn('Proton Mail: reply on an open card left unread and flagged', { uid, keyword: FAILED_KEYWORD });
+        await flag(uid, [FAILED_KEYWORD]);
+        return 'leave-unread';
       }
 
       // An address not yet approved raises a card core keeps open for days:
@@ -2603,7 +2653,10 @@ registerChannelAdapter('proton-mail', {
         totalBytes += att.size;
         const fallback = `${type}-${uid}-${attachments.length + 1}`;
         const rawName = att.filename ?? '';
-        const name = uniqueAttachmentName(cleanAttachmentName(rawName, att.contentType, fallback), takenNames);
+        const name = uniqueAttachmentName(
+          disownTypedNotes(cleanAttachmentName(rawName, att.contentType, fallback)),
+          takenNames,
+        );
         if (rawName && name !== rawName) {
           log.warn('Attachment filename changed — unsafe or misleading', { rawName, replacement: name });
         }
