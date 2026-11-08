@@ -90,7 +90,7 @@ overwritten):
 Paste the Resend API key — API Keys, starts with `re_`.
 ```
 ```nc:prompt webhook_secret secret
-Paste the webhook signing secret — Webhooks, the value you copied above.
+Paste the webhook signing secret — Webhooks, the value you copied above. NanoClaw's webhook server listens on 127.0.0.1 only; if the proxy or tunnel serving that URL runs on another machine or in Docker on Linux, add `WEBHOOK_HOST=0.0.0.0` to `.env` (it takes effect at the next restart).
 ```
 ```nc:prompt from_address
 The bot's sending email address on your verified domain (e.g. `bot@yourdomain.com`).
@@ -157,3 +157,5 @@ explicitly.)
 **Replies never reach the agent.** Inbound only flows via the webhook: Resend → **Webhooks** must point at your public host at `/webhook/resend` (shared webhook server, port 3000) with the **email.received** event selected, and `RESEND_WEBHOOK_SECRET` must match that webhook's signing secret. Resend's webhook page lists delivery attempts — a run of failures means the URL is unreachable or the secret mismatches.
 
 **Adapter installed but nothing flows.** Run `pnpm exec vitest run src/channels/resend-registration.test.ts` — red means the barrel import or the `@resend/chat-sdk-adapter` install drifted, so re-run the Apply steps. If green, restart the service so it loads the adapter and `.env`, then re-send the hello.
+
+**A proxy or tunnel on another machine, or in Docker on Linux, gets connection refused or times out.** The webhook server listens on 127.0.0.1 only. Add `WEBHOOK_HOST=0.0.0.0` to `.env` and restart; `Webhook server started` in `logs/nanoclaw.log` shows the host it bound.

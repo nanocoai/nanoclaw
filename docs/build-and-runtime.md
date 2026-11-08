@@ -37,8 +37,9 @@ Both are committed. CI and the Dockerfile run `--frozen-lockfile` variants — a
 
 ## Image build surface
 
-`container/Dockerfile` is a single-stage build on `node:22-slim`:
+`container/Dockerfile` is a single-stage build on `node:22.23.4-slim`:
 
+- **Pinned base** — tag and multi-arch digest, bumped together, at or above the minimum in `setup/lib/node-version.sh`.
 - **Pinned ARGs** — `BUN_VERSION`, `PNPM_VERSION`, `INSTALL_CJK_FONTS`. Bump deliberately in PRs. Global CLI versions (`@anthropic-ai/claude-code`, `agent-browser`, `vercel`) are pinned separately in `container/cli-tools.json`, not as ARGs.
 - **CJK fonts** — `ARG INSTALL_CJK_FONTS=false`. `container/build.sh` reads `INSTALL_CJK_FONTS` from `.env` and passes it through. Default build saves ~200MB; opt in when the user works with Chinese/Japanese/Korean content.
 - **BuildKit cache mounts** — `/var/cache/apt`, `/var/lib/apt`, `/root/.bun/install/cache`, `/root/.cache/pnpm`. Rebuilds where `package.json`/`bun.lock` haven't changed are fast. Requires BuildKit (default on Docker 23+, Apple Container-compat).

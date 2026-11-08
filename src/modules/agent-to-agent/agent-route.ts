@@ -21,7 +21,7 @@
 import { AnchoredDir, copyRegularFile } from '../../anchored-dir.js';
 import { fenceForCard, quoteForCard } from '../../card-text.js';
 import { MAX_CARD_QUESTION_LENGTH } from '../../channels/ask-question.js';
-import { isSafeAttachmentName } from '../../attachment-safety.js';
+import { inboxFolderName, isSafeAttachmentName } from '../../attachment-safety.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { getSession } from '../../db/sessions.js';
 import { requestWake } from '../../request-wake.js';
@@ -63,6 +63,11 @@ export function forwardAttachedFiles(
     log.warn('agent-route: rejecting unsafe source outbox message id', { sourceMsgId: source.messageId });
     return [];
   }
+  const targetFolder = inboxFolderName(target.messageId);
+  if (targetFolder === null) {
+    log.warn('agent-route: rejecting unsafe target inbox message id', { targetMsgId: target.messageId });
+    return [];
+  }
 
   // Both agents can write their own session folders, so either could turn
   // `outbox`, `inbox` or a message dir into a symlink at any time. Each side is
@@ -82,7 +87,7 @@ export function forwardAttachedFiles(
 
   let targetDir: AnchoredDir | null = null;
   try {
-    targetDir = AnchoredDir.open(sessionDir(target.agentGroupId, target.sessionId), ['inbox', target.messageId], true);
+    targetDir = AnchoredDir.open(sessionDir(target.agentGroupId, target.sessionId), ['inbox', targetFolder], true);
   } catch (err) {
     log.warn('agent-route: rejecting unsafe target inbox dir', {
       targetGroup: target.agentGroupId,
@@ -121,7 +126,7 @@ export function forwardAttachedFiles(
         name: filename,
         filename,
         type: 'file',
-        localPath: `inbox/${target.messageId}/${filename}`,
+        localPath: `inbox/${targetFolder}/${filename}`,
       });
     }
   } finally {

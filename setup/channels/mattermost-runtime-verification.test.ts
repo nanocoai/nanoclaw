@@ -186,6 +186,33 @@ describe('Mattermost runtime verification', () => {
     expect(requests).toEqual([]);
   });
 
+  it.each([
+    ['0.0.0.0', '127.0.0.1'],
+    ['::', '127.0.0.1'],
+    ['::1', '[::1]'],
+    ['192.168.1.10', '192.168.1.10'],
+  ])('probes the callback on the address a %s listener bound', async (host, expected) => {
+    const { connected, root } = await fixture();
+    const probed = new Set<string>();
+    // Record the probed host, then send the request to the loopback fixture.
+    const fetchImpl: typeof fetch = (input, init) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/webhook/mattermost') {
+        probed.add(url.hostname);
+        url.hostname = '127.0.0.1';
+      }
+      return fetch(url, init);
+    };
+    const status = await connected();
+    await expect(
+      verifyMattermostRuntime(root, BOT_ID, OWNER_ID, `mattermost:${CHANNEL_ID}`, {
+        fetchImpl,
+        queryHostImpl: async () => ({ ...status, webhook: { ...status.webhook, host } }),
+      }),
+    ).resolves.toBeUndefined();
+    expect([...probed]).toEqual([expected]);
+  });
+
   it('uses the effective service port even when .env specifies a different port', async () => {
     const { connected, root } = await fixture();
     const { appendFile } = await import('node:fs/promises');

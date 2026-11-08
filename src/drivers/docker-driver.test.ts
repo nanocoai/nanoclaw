@@ -468,6 +468,47 @@ describe('idempotency and adoption', () => {
     expect(cli.callMatching(/^create /)).toBeUndefined();
   });
 
+  it('replaces an existing session that is not on the network the spec requires', async () => {
+    cli.responses = [
+      { match: /^inspect --format \{\{json \.NetworkSettings\.Networks\}\}/, output: '{"bridge":{}}' },
+      { match: /^inspect /, output: 'spike|g1|s1\n' },
+    ];
+    const reconcile = vi.fn((_access: unknown, networks: () => string[]) =>
+      networks().includes('bridge') ? ('restart' as const) : ('kept' as const),
+    );
+
+    await new DockerSessionDriver({ ...FIXTURE_POLICY, cli, reconcileNetworkAccess: reconcile }).prepare(fixtureSpec());
+
+    const removed = cli.callMatching(/^rm --force ncl-spike-s1$/);
+    expect(removed).toBeDefined();
+    expect(createArgs()).toBeDefined();
+    expect(cli.callMatching(/^create /)!.seq).toBeGreaterThan(removed!.seq);
+  });
+
+  it('replaces an existing session whose networks cannot be read', async () => {
+    cli.responses = [
+      { match: /^inspect --format \{\{json \.NetworkSettings\.Networks\}\}/, throws: 'Error response from daemon' },
+      { match: /^inspect /, output: 'spike|g1|s1\n' },
+    ];
+    const reconcile = (_access: unknown, networks: () => string[]) => (networks().length ? 'kept' : 'restart');
+
+    await new DockerSessionDriver({ ...FIXTURE_POLICY, cli, reconcileNetworkAccess: reconcile }).prepare(fixtureSpec());
+
+    expect(cli.callMatching(/^rm --force ncl-spike-s1$/)).toBeDefined();
+    expect(createArgs()).toBeDefined();
+  });
+
+  it('reuses an existing session the network policy keeps', async () => {
+    cli.responses = [{ match: /^inspect /, output: 'spike|g1|s1\n' }];
+
+    await new DockerSessionDriver({ ...FIXTURE_POLICY, cli, reconcileNetworkAccess: () => 'kept' }).prepare(
+      fixtureSpec(),
+    );
+
+    expect(cli.callMatching(/^rm /)).toBeUndefined();
+    expect(cli.callMatching(/^create /)).toBeUndefined();
+  });
+
   it('refuses a name collision with a container that is not this session', async () => {
     // The name is key-derived, but a foreign container can wear it — another
     // install whose truncated identity collides, or an operator's hand-made

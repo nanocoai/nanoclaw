@@ -232,6 +232,12 @@ describe('Cursor gateway credentials', () => {
     }
   });
 
+  it('names the cursor provider on both entries, so a gateway that grants per agent attaches them to Cursor groups', async () => {
+    const { targets } = fakeGateway();
+    await cursorCredentialConnections();
+    expect(targets.map((target) => target.provider)).toEqual(['cursor', 'cursor']);
+  });
+
   installedIt('uses the same placeholder the host adapter hands the container', () => {
     const host = fs.readFileSync(path.join(process.cwd(), 'src', 'providers', 'cursor.ts'), 'utf-8');
     expect(host).toContain(`CURSOR_API_KEY_PLACEHOLDER = '${CURSOR_CREDENTIAL_PLACEHOLDER}'`);

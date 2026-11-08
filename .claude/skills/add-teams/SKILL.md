@@ -97,7 +97,7 @@ Before creating anything, tell the user:
 ```nc:operator when:have_creds=no
 Confirm you have everything Teams setup needs:
 1. A Microsoft 365 account that can create Entra app registrations and upload custom apps (sideloading) — free personal Teams does NOT qualify; you need a Microsoft 365 Business / EDU / developer tenant.
-2. A way to expose an HTTPS endpoint that forwards to this machine's webhook port 3000 (e.g. a Cloudflare Tunnel, or a reverse-proxied VPS). Start it now if it isn't running — e.g. `cloudflared tunnel --url http://localhost:3000` — the create step needs the URL up front. The next prompt asks for its public base URL: just the https:// origin, no trailing path.
+2. A way to expose an HTTPS endpoint that forwards to this machine's webhook port 3000 (e.g. a Cloudflare Tunnel, or a reverse-proxied VPS). Start it now if it isn't running — e.g. `cloudflared tunnel --url http://localhost:3000` — the create step needs the URL up front. The next prompt asks for its public base URL: just the https:// origin, no trailing path. NanoClaw's webhook server listens on 127.0.0.1 only, so a tunnel or proxy on this machine works as is. If yours runs on another machine or in Docker on Linux, add `WEBHOOK_HOST=0.0.0.0` to `.env` before the restart step.
 Note: the bot is created single-tenant (only your own Microsoft 365 tenant can install it) — the right default for a self-hosted assistant. If you need a bot other tenants can install, set it up manually via the Alternatives section of this skill instead.
 ```
 
@@ -582,3 +582,7 @@ a second, orphaned app.
 A Teams bot's platform ID is derived from the first inbound activity, so wire
 the messaging group that the router auto-creates after you DM the bot — don't
 guess the platform ID. See **Finish wiring** above.
+
+### Proxy or tunnel gets connection refused
+
+A proxy or tunnel on another machine, or in Docker on Linux, cannot reach the webhook server: it listens on 127.0.0.1 only. Add `WEBHOOK_HOST=0.0.0.0` to `.env` and restart; `Webhook server started` in `logs/nanoclaw.log` shows the host it bound.

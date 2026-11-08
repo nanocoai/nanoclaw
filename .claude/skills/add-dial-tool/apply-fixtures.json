@@ -1,5 +1,5 @@
 {
-  "notes": "Conformance fixtures for scripts/skill-conformance.test.ts \u2014 shaped fake values only, never real credentials. Two scenarios cover the sign-in branches: (1) host already signed in (connected_email read from `dial doctor`), (2) not signed in \u2192 email + OTP. The `/api/health` stub answers onecli_gateway (1.42.0, the only supported line); the `package.json` stub answers dial_ua; the `(.data|length)==0` stub (the agent-list capture's jq) answers agent_groups; the `unknown agent group` stub (the checked selection) answers dial_scope; `dial doctor` answers signed_in/connected_email; the `dial-policy.ts` stub answers dial_policy (the script's last line). The selective merge and the credential upsert run against the stubbed exec and capture nothing.",
+  "notes": "Conformance fixtures for scripts/skill-conformance.test.ts \u2014 shaped fake values only, never real credentials. Two scenarios cover the sign-in branches: (1) host already signed in (connected_email read from `dial doctor`), (2) not signed in \u2192 email + OTP. The `check-grants-gateway.sh` stub answers onecli_gateway (1.45.0, the pinned line; the shared gate also checks that no agent is in all mode); the `package.json` stub answers dial_ua; the `(.data|length)==0` stub (the agent-list capture's jq) answers agent_groups; the `unknown agent group` stub (the checked selection) answers dial_scope; `dial doctor` answers signed_in/connected_email. The `dial-secret.ts` stub answers dial_secret (the stored secret id); the attach step runs against the stubbed exec and captures nothing.",
   "scenarios": [
     {
       "name": "signed-in-pick-one",
@@ -8,8 +8,8 @@
       },
       "exec": [
         {
-          "match": "/api/health",
-          "stdout": "1.42.0"
+          "match": "check-grants-gateway.sh",
+          "stdout": "1.45.0"
         },
         {
           "match": "package.json",
@@ -24,12 +24,12 @@
           "stdout": "ag-11111111-1111-1111-1111-111111111111"
         },
         {
-          "match": "dial-policy.ts",
-          "stdout": "allowed:ag-11111111-1111-1111-1111-111111111111\npublished"
-        },
-        {
           "match": "dial doctor",
           "stdout": "{\"auth\":{\"signedIn\":true,\"email\":\"operator@example.com\"}}"
+        },
+        {
+          "match": "dial-secret.ts",
+          "stdout": "sec-11111111"
         }
       ]
     },
@@ -42,8 +42,8 @@
       },
       "exec": [
         {
-          "match": "/api/health",
-          "stdout": "1.42.0"
+          "match": "check-grants-gateway.sh",
+          "stdout": "1.45.0"
         },
         {
           "match": "package.json",
@@ -58,12 +58,12 @@
           "stdout": "all"
         },
         {
-          "match": "dial-policy.ts",
-          "stdout": "allowed:ag-11111111-1111-1111-1111-111111111111\npublished"
-        },
-        {
           "match": "dial doctor",
           "stdout": "{\"auth\":{\"signedIn\":false}}"
+        },
+        {
+          "match": "dial-secret.ts",
+          "stdout": "sec-11111111"
         }
       ]
     }

@@ -22,30 +22,23 @@ symlink to it is pruned automatically on the next spawn:
 rm -rf container/skills/dial-cli
 ```
 
-## 3. Remove the OneCLI credential, then the Dial policy
+## 3. Remove the OneCLI credential
 
-Deleting the secret is what revokes access for every agent, so it goes first
-and the policy only goes once every Dial secret is gone (the script refuses
-otherwise: the block is what keeps unchosen agents away from a key that is
-injected for every `all`-mode agent). Per-agent secret lists are not edited
-(`set-secrets` would switch an `all`-mode agent to `selective` and cut it off
-from its other secrets). The policy rules this skill keeps (`Dial: blocked
-agents`, and any `Dial: blocked for <group>` rule a legacy block was migrated
-to) are deleted through the policy API and the policy is published; an
-operator's own rules on `api.getdial.ai` stay. Publishing applies the whole
-policy draft, so finish or discard any edit left open in the OneCLI console
-first:
+Deleting the Dial secret revokes it for every agent, because its grants go with
+it; no agent's other grants are touched. On a gateway shared with another
+install, that install loses Dial too. This deletes every Dial secret the skill
+wrote (a name containing "dial", scoped to `api.getdial.ai`). It runs in a
+subshell, so a failure stops it without closing your shell:
 
 ```bash
-for id in $(onecli secrets list | jq -r '.data[] | select(.name | test("(?i)dial")) | .id'); do onecli secrets delete --id "$id" || exit 1; done && pnpm exec tsx .claude/skills/add-dial-tool/scripts/dial-policy.ts remove
+(
+L=$(onecli secrets list --max 0) && [ -n "$(printf '%s' "$L" | tr -d '[:space:]')" ] && ids=$(printf '%s' "$L" | jq -r '(if type == "array" then . elif (type == "object") and ((.data | type) == "array") then .data else error("not a secret list") end)[] | select(.hostPattern == "api.getdial.ai" and (.name | test("(?i)dial"))) | .id') || { echo "could not read the OneCLI secrets; nothing deleted" >&2; exit 1; }; for id in $(printf '%s' "$ids"); do onecli secrets delete --id "$id" || exit 1; done
+)
 ```
 
-On an OneCLI gateway older than 1.42 the policy API is not enforced and the
-script fails; the skill then scoped Dial with legacy rules, which go like this:
-
-```bash
-for id in $(onecli rules list | jq -r '.data[] | select(.hostPattern=="api.getdial.ai" and .action=="block" and (.name | startswith("Dial: blocked for "))) | .id'); do onecli rules delete --id "$id" || echo "could not delete rule $id: remove it in the OneCLI console"; done
-```
+An earlier version of this skill kept unchosen agents away with an OneCLI policy
+rule named `Dial: blocked agents`. The gateway's 1.44 conversion deleted it, so
+nothing is left to remove on the pinned gateway.
 
 ## 4. Rebuild and restart the agents
 
@@ -54,7 +47,7 @@ agents respawn without the CLI (each comes back on its next message):
 
 ```bash
 ./container/build.sh
-ncl groups list --json | jq -r '.data[].id' | while read -r gid; do ncl groups restart --id "$gid"; done
+ncl groups list --json --limit 100000 | jq -r '.data[].id' | while read -r gid; do ncl groups restart --id "$gid"; done
 ```
 
 The Dial account, its numbers, and the host `dial` CLI are managed by Dial, not

@@ -10,6 +10,13 @@ describe('Iron Proxy prompt-free credential', () => {
     });
   });
 
+  it.each(['sk-ant-usr01-fixture', 'sk-ant-svc01-fixture'])(
+    'stores the newer API key type %s under ANTHROPIC_API_KEY',
+    (key) => {
+      expect(suppliedCredential({ ANTHROPIC_API_KEY: key })).toEqual({ secret: key, authEnv: 'ANTHROPIC_API_KEY' });
+    },
+  );
+
   it('recognises an OAuth token handed over as the API key and stores it as a bearer token', () => {
     expect(suppliedCredential({ ANTHROPIC_API_KEY: 'sk-ant-oat01-fixture' })).toEqual({
       secret: 'sk-ant-oat01-fixture',
