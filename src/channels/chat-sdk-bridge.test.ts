@@ -1081,6 +1081,7 @@ describe('createChatSdkBridge.deliver — send_card json-render parts', () => {
       [lineChart({ categories: ['a'], series: [{ name: 'b', values: [Infinity] }] })],
       /values must be numbers/,
     ],
+    ['a table with no text', [{ type: 'Table', props: { headers: [' '], rows: [] } }], /the table has no text to show/],
     [
       'a table of 31 rows',
       [{ type: 'Table', props: { headers: ['a'], rows: Array.from({ length: 31 }, () => ['1']) } }],

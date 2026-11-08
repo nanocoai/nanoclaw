@@ -377,6 +377,7 @@ describe('send_card — card parts', () => {
     ['a pie slice of zero', pie(0), 'segments[0].value'],
     ['a table too long for Slack to draw', table([['x'.repeat(10_000), 'a', 'b']]), 'at most 10000'],
     ['a table given as object rows', { type: 'Table', props: { headers: ['Evidence'], rows: [{ Evidence: 'x' }] } }, 'row 0 must be a list of cells'],
+    ['a table with no text', { type: 'Table', props: { headers: [' '], rows: [[' ']] } }, 'the table has no text to show'],
     [
       'a table cell given as a template',
       { type: 'Table', props: { headers: ['Evidence'], rows: [[{ $template: 'x' }]] } },

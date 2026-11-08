@@ -101,6 +101,10 @@ export function cardPartProblems(children: unknown[]): string[] {
           }
           text += row.map(String).join('').length;
         }
+        const blank = (cell: unknown) => String(cell).trim().length === 0;
+        if (headers.every(blank) && rows.every((row) => (row as unknown[]).every(blank))) {
+          return fail('the table has no text to show');
+        }
         const aligns = ['left', 'center', 'right'];
         if (
           align !== undefined &&
