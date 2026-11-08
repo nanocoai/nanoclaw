@@ -75,9 +75,10 @@ const awaitingNameInput = new Map<string, PendingNameInput>();
 // Card buttons are decoded by position against the stored options, and the
 // first card keeps its buttons until the host accepts. So while an agent card
 // is sent no card click counts, once it is out the card clicked for it is
-// ignored, and an agent card whose options weren't stored is ignored for good.
+// ignored, and an agent card whose options weren't stored is ignored for good
+// (if its id is unknown, no card click for that chat counts: `blocked`).
 // Keyed by messaging group, in memory (the durable card check is later).
-const agentCards = new Map<string, { retired: Set<string>; sending: boolean }>();
+const agentCards = new Map<string, { retired: Set<string>; sending: boolean; blocked?: boolean }>();
 
 async function extractAndUpsertUser(event: InboundEvent): Promise<string | null> {
   let content: Record<string, unknown>;
@@ -588,7 +589,8 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
   }
   const approverId = clickerId;
   const swap = agentCards.get(row.messaging_group_id);
-  if (swap && payload.messageId && (swap.sending || swap.retired.has(payload.messageId))) return 'ignored';
+  if (swap && (swap.blocked || (payload.messageId && (swap.sending || swap.retired.has(payload.messageId)))))
+    return 'ignored';
 
   // ── Reject / Cancel ──
   if (payload.value === REJECT_VALUE) {
@@ -619,13 +621,14 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
         },
         // While the first card's options are still the stored ones it works again.
         unstored: (cardId, firstCardStored) => {
-          if (cardId) guard.retired.add(cardId);
-          if (firstCardStored && payload.messageId) guard.retired.delete(payload.messageId);
+          if (!cardId) guard.blocked = true;
+          else guard.retired.add(cardId);
+          if (cardId && firstCardStored && payload.messageId) guard.retired.delete(payload.messageId);
         },
       });
     } finally {
       guard.sending = false;
-      if (guard.retired.size === 0 && agentCards.get(row.messaging_group_id) === guard)
+      if (guard.retired.size === 0 && !guard.blocked && agentCards.get(row.messaging_group_id) === guard)
         agentCards.delete(row.messaging_group_id);
     }
   }
