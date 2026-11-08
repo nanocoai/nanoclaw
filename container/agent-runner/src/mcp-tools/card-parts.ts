@@ -5,9 +5,12 @@
  * Per card, so every platform takes the whole card. The chart limits are what
  * Slack draws natively; past 10,000 characters Slack swaps a table for plain
  * text cut at 3,000; text and fields stay well under Slack's 3,000 and 2,000,
- * since its adapter adds markup after this check; 10 parts, 30 table rows and
- * 12,000 characters keep the largest card near 75 KB of the 100 KB a Teams bot
- * message may hold (counted as UTF-16), and inside Slack's 50 blocks.
+ * since its adapter adds markup after this check. 10 parts, 30 table rows and
+ * 12,000 characters of text across the whole card keep the largest card well
+ * inside the 100 KB a Teams bot message may hold, which Teams measures on the
+ * JSON it receives, as UTF-16; and inside Slack's 50 blocks. Plain text children
+ * and link buttons aren't parts and have no count cap, so hundreds of them can
+ * still go over.
  */
 const CARD_LIMITS = {
   parts: 10,
@@ -34,20 +37,30 @@ export const isRecord = (value: unknown): value is Record<string, unknown> =>
 const isLabel = (value: unknown, max: number): value is string =>
   typeof value === 'string' && value.trim().length > 0 && value.length <= max;
 
+/** Length as Teams receives it: JSON escapes quote marks, backslashes and control characters. */
+const sizeInJson = (text: string) => JSON.stringify(text).length - 2;
+
 /** A child with a type is a part; a text child keeps its old shape. */
 export function isCardPart(child: unknown): child is CardPart {
   return isRecord(child) && typeof child.type === 'string' && typeof child.text !== 'string';
 }
 
 /**
- * Why the card's parts can't be sent, each naming the child to fix; empty when
- * they can. Parts are allowed by name, so none can carry a callback button.
+ * Why the card can't be sent, each naming what to fix; empty when it can. Parts
+ * are allowed by name, so none can carry a callback button.
  */
-export function cardPartProblems(children: unknown[]): string[] {
+export function cardProblems(card: Record<string, unknown>): string[] {
+  const children: unknown[] = Array.isArray(card.children) ? card.children : [];
+  const actions: unknown[] = Array.isArray(card.actions) ? card.actions : [];
   const problems: string[] = [];
   const count = { parts: 0, fields: 0, tables: 0, charts: 0, text: 0 };
+  const addText = (...texts: unknown[]) => {
+    for (const text of texts) if (typeof text === 'string') count.text += sizeInJson(text);
+  };
+  addText(card.title, card.description);
+  for (const action of actions) if (isRecord(action)) addText(action.label, action.url);
   children.forEach((child, i) => {
-    if (!isCardPart(child)) return;
+    if (!isCardPart(child)) return addText(isRecord(child) ? child.text : child);
     count.parts++;
     const at = `children[${i}]`;
     const fail = (why: string) => problems.push(`${at}: ${why}`);
@@ -56,7 +69,7 @@ export function cardPartProblems(children: unknown[]): string[] {
       case 'Text': {
         if (!isLabel(props.content, CARD_LIMITS.text))
           fail(`props.content must be text of at most ${CARD_LIMITS.text} characters`);
-        else count.text += props.content.length;
+        else addText(props.content);
         if (props.style !== undefined && !['plain', 'bold', 'muted'].includes(props.style as string)) {
           fail('props.style must be plain, bold or muted');
         }
@@ -75,10 +88,9 @@ export function cardPartProblems(children: unknown[]): string[] {
           if (!isLabel(fieldProps.label, CARD_LIMITS.fieldText) || !isLabel(value, CARD_LIMITS.fieldText)) {
             return problems.push(`${where}: a Field needs props.label and props.value`);
           }
-          const length = fieldProps.label.length + value.length;
-          if (length > CARD_LIMITS.fieldText)
+          if (fieldProps.label.length + value.length > CARD_LIMITS.fieldText)
             return problems.push(`${where}: at most ${CARD_LIMITS.fieldText} characters`);
-          count.text += length;
+          addText(fieldProps.label, value);
         });
         return;
       }
@@ -91,7 +103,6 @@ export function cardPartProblems(children: unknown[]): string[] {
         if (headers.length > CARD_LIMITS.tableColumns) return fail(`at most ${CARD_LIMITS.tableColumns} columns`);
         if (!Array.isArray(rows)) return fail('props.rows must be a list of rows');
         if (rows.length > CARD_LIMITS.tableRows) return fail(`at most ${CARD_LIMITS.tableRows} rows`);
-        let text = headers.join('').length;
         for (const [r, row] of rows.entries()) {
           if (!Array.isArray(row)) return fail(`row ${r} must be a list of cells`);
           if (row.length !== headers.length)
@@ -99,12 +110,10 @@ export function cardPartProblems(children: unknown[]): string[] {
           if (!row.every((cell) => typeof cell === 'string' || Number.isFinite(cell))) {
             return fail(`row ${r}: a cell must be text or a number`);
           }
-          text += row.map(String).join('').length;
         }
-        const blank = (cell: unknown) => String(cell).trim().length === 0;
-        if (headers.every(blank) && rows.every((row) => (row as unknown[]).every(blank))) {
-          return fail('the table has no text to show');
-        }
+        const cells: string[] = [...headers, ...(rows as unknown[][]).flat().map(String)];
+        if (cells.every((cell) => cell.trim().length === 0))
+          return fail('the table has no text in its headers or cells');
         const aligns = ['left', 'center', 'right'];
         if (
           align !== undefined &&
@@ -113,11 +122,11 @@ export function cardPartProblems(children: unknown[]): string[] {
           return fail('props.align must list left, center or right, one per column at most');
         }
         if (caption !== undefined && typeof caption !== 'string') return fail('props.caption must be text');
-        text += typeof caption === 'string' ? caption.length : 0;
-        if (text > CARD_LIMITS.tableText) {
-          return fail(`the table holds ${text} characters of text; at most ${CARD_LIMITS.tableText}`);
+        const length = [...cells, caption ?? ''].join('').length;
+        if (length > CARD_LIMITS.tableText) {
+          return fail(`the table holds ${length} characters of text; at most ${CARD_LIMITS.tableText}`);
         }
-        count.text += text;
+        addText(...cells, caption);
         return;
       }
       case 'Chart': {
@@ -163,6 +172,7 @@ export function cardPartProblems(children: unknown[]): string[] {
               return fail(`axis labels must be text of at most ${CARD_LIMITS.title} characters`);
             }
           }
+          addText(xLabel, yLabel);
           labels = [...categories, ...names];
         } else {
           return fail('props.chart.type must be pie, bar, line or area');
@@ -170,7 +180,7 @@ export function cardPartProblems(children: unknown[]): string[] {
         if (!labels.every((label) => isLabel(label, CARD_LIMITS.label))) {
           return fail(`each label must be text of at most ${CARD_LIMITS.label} characters`);
         }
-        count.text += props.title.length + labels.join('').length;
+        addText(props.title, ...labels);
         return;
       }
       case 'Divider':
@@ -184,7 +194,9 @@ export function cardPartProblems(children: unknown[]): string[] {
   if (count.tables > CARD_LIMITS.tables) problems.push(`at most ${CARD_LIMITS.tables} Table per card`);
   if (count.charts > CARD_LIMITS.charts) problems.push(`at most ${CARD_LIMITS.charts} Charts per card`);
   if (count.text > CARD_LIMITS.cardText) {
-    problems.push(`the parts hold ${count.text} characters of text; at most ${CARD_LIMITS.cardText} per card`);
+    problems.push(
+      `the card holds ${count.text} characters of text, with quote marks, backslashes, line breaks and control characters counting extra; at most ${CARD_LIMITS.cardText} per card`,
+    );
   }
   return problems;
 }
