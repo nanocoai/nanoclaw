@@ -272,6 +272,12 @@ export async function getDeliveryAttempt(messageId: string): Promise<DeliveryAtt
   return getDb().get<DeliveryAttemptRow>('SELECT * FROM delivery_attempts WHERE message_id = ?', messageId);
 }
 
+/** A session's attempt rows by message id: what the drain checks before a send. */
+export async function listDeliveryAttempts(sessionId: string): Promise<Map<string, DeliveryAttemptRow>> {
+  const rows = await getDb().all<DeliveryAttemptRow>('SELECT * FROM delivery_attempts WHERE session_id = ?', sessionId);
+  return new Map(rows.map((row) => [row.message_id, row]));
+}
+
 /** Delivered or terminally failed — the row's job is done. */
 export async function clearDeliveryAttempt(messageId: string): Promise<void> {
   await getDb().run('DELETE FROM delivery_attempts WHERE message_id = ?', messageId);
