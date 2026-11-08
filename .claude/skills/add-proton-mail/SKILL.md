@@ -204,6 +204,13 @@ Write it to `.env` (set-if-absent; edit `.env` directly to change it later):
 PROTON_MAIL_ADDRESS={{proton_address}}
 ```
 
+If that address is on a Proton custom domain (not `proton.me`, `protonmail.com`,
+`protonmail.ch` or `pm.me`), add the domain to `PROTON_MAIL_INTERNAL_DOMAINS` in
+`.env` so mail from colleagues' Proton accounts on it counts as verified. It is
+not trusted automatically (an account can send from a connected Gmail address,
+so its domain proves nothing); the adapter logs a warning at startup until it is
+listed.
+
 ## Run Bridge
 
 Start Bridge as a long-lived container. Its IMAP (1143) and SMTP (1025) ports are
@@ -272,7 +279,7 @@ Tell the user what to expect:
 ```nc:operator
 Proton Mail is connected as {{proton_address}}. Send it an email from {{owner_email}} and the agent replies in the same thread.
 
-Mail counts as from {{owner_email}} only when Proton vouches for the sender: a DMARC pass for that domain, or, for mail from a Proton account, Proton's own mark that it came from inside Proton (trusted for Proton's own domains, the agent's own domain, and any listed in PROTON_MAIL_INTERNAL_DOMAINS). Anything else is left unread in the inbox. Mail from anyone else is held for your approval the first time they write (unknown_sender_policy: request_approval) — nothing reaches the agent until you approve the sender. Bounces, auto-replies, mailing lists and mail from the agent's own address are filtered out automatically. Past 20 mails an hour from one sender, further mail waits unread and is handed over as the hour frees up: this slows two agents mailing each other, but does not stop them. Mail the adapter gives up on is left unread and flagged $NanoClawFailed, so you can find it.
+Mail counts as from {{owner_email}} only when Proton vouches for the sender: a DMARC pass for that domain, or, for mail from a Proton account, Proton's own mark that it came from inside Proton (trusted for Proton's own domains and any listed in PROTON_MAIL_INTERNAL_DOMAINS). Anything else is left unread in the inbox. Mail from anyone else is held for your approval the first time they write (unknown_sender_policy: request_approval) — nothing reaches the agent until you approve the sender. Bounces, auto-replies and mail from the agent's own address are filtered out automatically; mailing-list mail is left unread, tagged $NanoClawList. Past 20 mails an hour from one sender, further mail waits unread and is handed over as the hour frees up: this slows two agents mailing each other, but does not stop them. Mail the adapter gives up on is left unread and flagged $NanoClawFailed, so you can find it.
 
 Approval requests arrive as emails whose subject starts with a reference like [NC-…]. Answer by replying to that email itself, keeping its subject, with the command (e.g. /approve) on the first line.
 ```
@@ -304,8 +311,10 @@ What the adapter trusts, and why:
     domain, or a connected external address), and nothing Proton adds says
     which, so `internal` is trusted only from Proton's own domains
     (`proton.me`, `protonmail.com`, `protonmail.ch`, `pm.me` and their
-    subdomains), the Bridge account's own domain, and any listed in
-    `PROTON_MAIL_INTERNAL_DOMAINS`. Internal mail from any other domain is left
+    subdomains) and from domains listed exactly in
+    `PROTON_MAIL_INTERNAL_DOMAINS`. Not even the Bridge account's own domain
+    is trusted unless listed: an account can send from a connected Gmail
+    address, so its domain proves nothing. Internal mail from any other domain is left
     unread and flagged `$NanoClawFailed`: it is almost always a real Proton
     user on a custom domain nobody listed.
 
@@ -403,7 +412,7 @@ PROTON_MAIL_POLL_SECONDS=60                 # fallback poll behind IDLE; also wh
 PROTON_MAIL_MARK_SEEN=true                  # mark handled mail read in Proton
 PROTON_MAIL_PROCESS_BACKLOG=false           # true: ingest all existing mail on first start
 PROTON_MAIL_DEFAULT_SUBJECT=Message from your assistant   # for agent-initiated mail with no thread
-PROTON_MAIL_INTERNAL_DOMAINS=               # comma-separated Proton custom domains whose Proton-to-Proton mail is trusted (Proton's own and the account's domain always are)
+PROTON_MAIL_INTERNAL_DOMAINS=               # comma-separated Proton custom domains whose Proton-to-Proton mail is trusted, matched exactly (Proton's own always are). List the account's own domain here if it is a Proton custom domain; whole domains only (`com`, `co.uk` are ignored)
 ```
 
 On first connect the adapter records the mailbox's current position and only
