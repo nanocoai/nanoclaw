@@ -1422,7 +1422,10 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
       return false;
     }
     const handle = this.userName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    return new RegExp(`(^|[^\\w@])@${handle}(?![\\w.-])`, 'i').test(post.message ?? '');
+    // Mattermost ignores @-mentions in code, and a trailing `.` ends the
+    // sentence unless a handle character follows (`@bot.` vs `@bot.dev`).
+    const text = (post.message ?? '').replace(/```[\s\S]*?```/g, ' ').replace(/`[^`\n]*`/g, ' ');
+    return new RegExp(`(^|[^\\w@])@${handle}(?![\\w-]|\\.[\\w-])`, 'i').test(text);
   }
 
   private toMessage(post: MattermostPost, threadId: string): Message<MattermostPost> {
