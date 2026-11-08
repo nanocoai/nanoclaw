@@ -111,23 +111,11 @@ ENV PATH="$PNPM_HOME:$PATH"
 ARG PNPM_VERSION=10.34.9
 RUN corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
 
-# npm bundles undici and ip-address and lags their security releases, and no
-# npm release has caught up yet. Pin npm 11 and swap in the patched copies;
-# drop the swap once npm itself bundles these versions or newer.
-ARG NPM_VERSION=11.21.1
-ARG UNDICI_VERSION=6.29.1
-ARG IP_ADDRESS_VERSION=10.7.5
-RUN npm install -g npm@${NPM_VERSION} \
-    && cd /tmp && npm pack --silent undici@${UNDICI_VERSION} ip-address@${IP_ADDRESS_VERSION} >/dev/null \
-    && for p in undici ip-address; do \
-         rm -rf /tmp/pk && mkdir /tmp/pk && tar -xzf /tmp/$p-*.tgz -C /tmp/pk \
-         && rm -rf /usr/local/lib/node_modules/npm/node_modules/$p \
-         && mv /tmp/pk/package /usr/local/lib/node_modules/npm/node_modules/$p \
-         || exit 1; \
-       done \
-    && test "$(node -p "require('/usr/local/lib/node_modules/npm/node_modules/undici/package.json').version")" = "${UNDICI_VERSION}" \
-    && test "$(node -p "require('/usr/local/lib/node_modules/npm/node_modules/ip-address/package.json').version")" = "${IP_ADDRESS_VERSION}" \
-    && rm -rf /tmp/*.tgz /tmp/pk /root/.npm
+# The npm in node:22-slim (10.x) bundles libraries that lag their security
+# releases; npm 11.21.2 bundles the patched ones. Drop this pin once the
+# base image's npm has caught up.
+ARG NPM_VERSION=11.21.2
+RUN npm install -g npm@${NPM_VERSION}
 
 # Global Node CLIs the agent invokes at runtime live in cli-tools.json so a
 # skill can add one with a json-merge instead of editing this Dockerfile.
