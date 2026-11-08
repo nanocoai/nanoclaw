@@ -425,15 +425,18 @@ async function setupLinux(projectRoot: string, nodePath: string, homeDir: string
  * Kill any orphaned nanoclaw node processes left from previous runs or debugging.
  * Prevents connection conflicts when two instances connect to the same channel simultaneously.
  */
-function killOrphanedProcesses(projectRoot: string): void {
+export function killOrphanedProcesses(projectRoot: string): void {
   try {
-    execSync(`pkill -f '${projectRoot}/dist/index\\.js' || true`, {
-      stdio: 'ignore',
-    });
-    log.info('Stopped any orphaned nanoclaw processes');
+    // No shell, and the folder matched literally: it may hold spaces, quotes or regex characters.
+    execFileSync('pkill', ['-f', `${escapeRegex(projectRoot)}/dist/index\\.js`], { stdio: 'ignore' });
   } catch {
-    // pkill not available or no orphans
+    // Exit 1 means no orphans. A missing pkill stays best effort, as before.
   }
+  log.info('Stopped any orphaned nanoclaw processes');
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 /**
