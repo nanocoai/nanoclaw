@@ -838,6 +838,27 @@ describe('unknown-channel registration flow', () => {
         )
       )?.options_json;
     }
+    /** The request is removed (an admin's delete) and a new one is raised for the same chat. */
+    async function replaceRequest(questionId: string, optionsJson?: string): Promise<void> {
+      const old = (await getDb().get<Record<string, string>>(
+        'SELECT * FROM pending_channel_approvals WHERE messaging_group_id = ?',
+        questionId,
+      ))!;
+      await getDb().run('DELETE FROM pending_channel_approvals WHERE messaging_group_id = ?', questionId);
+      await getDb().run(
+        `INSERT INTO pending_channel_approvals
+           (messaging_group_id, agent_group_id, original_message, approver_user_id, created_at, title, question, options_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        old.messaging_group_id,
+        old.agent_group_id,
+        old.original_message,
+        old.approver_user_id,
+        new Date(Date.parse(old.created_at) + 1000).toISOString(),
+        old.title,
+        old.question,
+        optionsJson ?? old.options_json,
+      );
+    }
 
     it('stores its options only once it is sent, so a tap on the first card meanwhile keeps its meaning', async () => {
       const card = await firstCard('chat-choose-slow');
@@ -933,31 +954,30 @@ describe('unknown-channel registration flow', () => {
       deliverMock.mockImplementationOnce(() => new Promise((resolve) => (sent = () => resolve('plat-msg-2'))));
       const choosing = click(card.messaging_group_id, 'choose_existing', 'card-1');
       await vi.waitFor(() => expect(deliverMock).toHaveBeenCalledTimes(2));
-      // Meanwhile the request is removed (an admin's delete) and a new one is raised.
-      const old = (await getDb().get<Record<string, string>>(
-        'SELECT * FROM pending_channel_approvals WHERE messaging_group_id = ?',
-        card.messaging_group_id,
-      ))!;
-      await getDb().run('DELETE FROM pending_channel_approvals WHERE messaging_group_id = ?', card.messaging_group_id);
-      await getDb().run(
-        `INSERT INTO pending_channel_approvals
-           (messaging_group_id, agent_group_id, original_message, approver_user_id, created_at, title, question, options_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        old.messaging_group_id,
-        old.agent_group_id,
-        old.original_message,
-        old.approver_user_id,
-        new Date(Date.parse(old.created_at) + 1000).toISOString(),
-        old.title,
-        old.question,
-        old.options_json,
-      );
+      await replaceRequest(card.messaging_group_id);
       sent();
       expect(await choosing).toBe('ignored');
       expect(await storedOptions(card.messaging_group_id)).toBe(card.options_json);
       // The agent card's buttons would decode against the newer request's options: its Reject must not deny it.
       expect(await click(card.messaging_group_id, 'reject', 'plat-msg-2')).toBe('ignored');
       expect(await storedOptions(card.messaging_group_id)).toBe(card.options_json);
+    });
+
+    it('a store that fails after the request was replaced does not bring the first card back', async () => {
+      const card = await firstCard('chat-choose-replaced-store-fails');
+      let sent!: () => void;
+      deliverMock.mockImplementationOnce(() => new Promise((resolve) => (sent = () => resolve('plat-msg-2'))));
+      const choosing = click(card.messaging_group_id, 'choose_existing', 'card-1');
+      await vi.waitFor(() => expect(deliverMock).toHaveBeenCalledTimes(2));
+      // The newer request already shows its own agent card, so its first option connects an agent.
+      const newer = JSON.stringify([{ label: 'Bo', value: 'connect:ag-2' }]);
+      await replaceRequest(card.messaging_group_id, newer);
+      cardUpdate.fail = true;
+      sent();
+      expect(await choosing).toBe('ignored');
+      // The first card's "Choose existing agent" now decodes as the newer card's first agent.
+      expect(await click(card.messaging_group_id, 'connect:ag-2', 'card-1')).toBe('ignored');
+      expect(await storedOptions(card.messaging_group_id)).toBe(newer);
     });
 
     it("leaves the first card as it was when the agent card can't be sent", async () => {
