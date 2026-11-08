@@ -60,8 +60,8 @@ const DELIVERY_DEADLINE_MS = 60_000;
  */
 const TICK_DRAIN_WAIT_MS = 5_000;
 /**
- * How long a parked send may stay unsettled before its row is marked failed. Past the retry and timeout
- * bounds channel SDKs already have, so only a send with no bound at all gets this far.
+ * How long a parked send may stay unsettled before its row is marked failed. One hour, a policy set well past the
+ * retry and timeout bounds channel SDKs already have; any send still pending then is given up on.
  */
 const OVERDUE_GIVE_UP_MS = 60 * 60_000;
 /**
@@ -127,10 +127,10 @@ const inflightDeliveries = new Set<string>();
 
 /**
  * Per session, ids of rows whose send passed its deadline and has not settled. Drains skip them, so a send that
- * may still land is never repeated: a late success marks the row delivered, a late failure counts an attempt and
- * the next tick retries, and at OVERDUE_GIVE_UP_MS the row is marked failed (it stays failed if the send lands
- * later). A row leaves only after that bookkeeping. Later rows keep going meanwhile, so a parked row can land
- * after them, the same reordering a failed-then-retried row already has.
+ * may still land is not repeated once its row is recorded: a late success marks the row delivered, a late failure
+ * counts an attempt and the next tick retries, and at OVERDUE_GIVE_UP_MS the row is marked failed (it stays failed
+ * if the send lands later). A row leaves only after that bookkeeping. Later rows keep going meanwhile, so a parked
+ * row can land after them, the same reordering a failed-then-retried row already has.
  */
 const overdueDeliveries = new Map<string, Set<string>>();
 
