@@ -77,4 +77,56 @@ describe('Claude memory SessionStart registration', () => {
     registerProviderMemorySessionHook('claude', provider, MEMORY_SESSION_HOOK);
     expect(JSON.parse(fs.readFileSync(settingsFile, 'utf-8')).outputStyle).toBe('Learning');
   });
+
+  it('leaves a FIFO settings.json alone instead of blocking on it', () => {
+    const settingsFile = path.join(configDir, 'settings.json');
+    expect(Bun.spawnSync(['mkfifo', settingsFile]).exitCode).toBe(0);
+    // In a child with a deadline: a blocking open would hang this process,
+    // where a test timeout cannot interrupt it.
+    const src = path.resolve(import.meta.dir, '..');
+    const modules = ['modules/index.ts', 'providers/index.ts', 'provider-contracts/index.ts'];
+    const script = `
+      ${modules.map((m) => `import ${JSON.stringify(path.join(src, m))};`).join('\n')}
+      import { MEMORY_SESSION_HOOK } from ${JSON.stringify(path.join(src, 'memory/session-hook.ts'))};
+      import { registerProviderMemorySessionHook } from ${JSON.stringify(path.join(src, 'provider-contracts/realize.ts'))};
+      import { createProvider } from ${JSON.stringify(path.join(src, 'providers/factory.ts'))};
+      registerProviderMemorySessionHook('claude', createProvider('claude'), MEMORY_SESSION_HOOK);
+      console.log('returned');
+    `;
+    const child = Bun.spawnSync([process.execPath, '-e', script], {
+      env: { ...process.env, CLAUDE_CONFIG_DIR: configDir },
+      timeout: 10_000,
+    });
+    expect(child.signalCode ?? null).toBeNull();
+    expect(child.stdout.toString()).toContain('returned');
+    expect(child.stderr.toString()).toContain('not a regular file');
+    expect(fs.lstatSync(settingsFile).isFIFO()).toBe(true);
+  });
+
+  it('leaves a symlinked settings.json and its target alone', () => {
+    const target = path.join(configDir, 'elsewhere.json');
+    fs.writeFileSync(target, '{"keep":true}');
+    const settingsFile = path.join(configDir, 'settings.json');
+    fs.symlinkSync(target, settingsFile);
+    registerProviderMemorySessionHook('claude', createProvider('claude'), MEMORY_SESSION_HOOK);
+    expect(fs.lstatSync(settingsFile).isSymbolicLink()).toBe(true);
+    expect(fs.readFileSync(target, 'utf-8')).toBe('{"keep":true}');
+  });
+
+  it('leaves a directory at settings.json alone', () => {
+    const settingsFile = path.join(configDir, 'settings.json');
+    fs.mkdirSync(settingsFile);
+    registerProviderMemorySessionHook('claude', createProvider('claude'), MEMORY_SESSION_HOOK);
+    expect(fs.statSync(settingsFile).isDirectory()).toBe(true);
+  });
+
+  it('does not rewrite settings.json when nothing changed', () => {
+    const settingsFile = path.join(configDir, 'settings.json');
+    const provider = createProvider('claude');
+    registerProviderMemorySessionHook('claude', provider, MEMORY_SESSION_HOOK);
+    fs.utimesSync(settingsFile, 0, 0);
+    registerProviderMemorySessionHook('claude', provider, MEMORY_SESSION_HOOK);
+    expect(fs.statSync(settingsFile).mtimeMs).toBe(0);
+    expect(fs.readdirSync(configDir)).toEqual(['settings.json']);
+  });
 });
