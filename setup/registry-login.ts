@@ -771,14 +771,18 @@ function printDeviceCard(device: DeviceAuthorization, headless: boolean): void {
   console.log(lines.join('\n'));
 }
 
-/** Non-blocking best effort. Silent on failure — the URL is already on screen. */
-function openInBrowser(url: string): void {
+/**
+ * Non-blocking best effort. Silent on failure — the URL is already on screen.
+ * The URL is the provider's reply, so only an https link is opened, and never
+ * through a shell (no `cmd.exe /c start`, which re-parses `&` and `%`).
+ */
+export function openInBrowser(url: string): void {
+  if (!isHttpsUrl(url)) return;
   let cmd: [string, string[]] | undefined;
   if (process.platform === 'darwin') cmd = ['open', [url]];
   else if (process.platform === 'linux') {
     if (commandExists('xdg-open')) cmd = ['xdg-open', [url]];
     else if (isWSL() && commandExists('wslview')) cmd = ['wslview', [url]];
-    else if (isWSL()) cmd = ['cmd.exe', ['/c', 'start', '', url]];
   }
   if (!cmd) return;
   try {
@@ -789,6 +793,14 @@ function openInBrowser(url: string): void {
     child.unref();
   } catch {
     // No opener available. The card already printed the URL.
+  }
+}
+
+function isHttpsUrl(url: string): boolean {
+  try {
+    return new URL(url).protocol === 'https:';
+  } catch {
+    return false;
   }
 }
 
