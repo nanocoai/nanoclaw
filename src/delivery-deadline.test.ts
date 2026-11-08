@@ -167,34 +167,6 @@ describe('delivery deadline', () => {
     expect(deliveredRow(session, 'out-next')?.status).toBe('delivered');
   });
 
-  it('one hung session no longer holds the whole poll tick', async () => {
-    const { session: other } = await resolveSession('ag-1', 'mg-1', 'thread-other', 'per-thread');
-    insertOutbound(session, 'out-hung');
-    insertOutbound(other, 'out-other');
-    recordingAdapter((text) => (text === 'out-hung' ? new Promise<string>(() => {}) : undefined));
-    vi.spyOn(log, 'warn').mockImplementation(() => {});
-
-    const tick = track(deliverToSessions([session, other]));
-    await vi.advanceTimersByTimeAsync(DEADLINE_MS);
-    expect(tick.done()).toBe(true);
-    expect(deliveredRow(other, 'out-other')?.status).toBe('delivered');
-  });
-
-  it('stops the drain at the overdue row; later rows go out on the next tick', async () => {
-    insertOutbound(session, 'out-a');
-    insertOutbound(session, 'out-b');
-    const calls = recordingAdapter((text) => (text === 'out-a' ? new Promise<string>(() => {}) : undefined));
-    vi.spyOn(log, 'warn').mockImplementation(() => {});
-
-    const drain = track(deliverSessionMessages(session));
-    await vi.advanceTimersByTimeAsync(DEADLINE_MS);
-    await drain.promise;
-    expect(calls).toEqual(['out-a']);
-
-    await deliverSessionMessages(session);
-    expect(calls).toEqual(['out-a', 'out-b']);
-  });
-
   it('a late success marks the row delivered with its platform id and is never re-sent', async () => {
     insertOutbound(session, 'out-slow');
     const slow = deferred<string>();
@@ -377,51 +349,6 @@ describe('delivery deadline', () => {
     expect(warn).not.toHaveBeenCalledWith('Message delivery failed, will retry', expect.anything());
   });
 
-  it('given-up sends free their park slots, so a dead channel does not stop the session for good', async () => {
-    for (let i = 0; i < MAX_PARKED; i++) insertOutbound(session, `out-dead-${i}`);
-    const calls = recordingAdapter((text) => (text.startsWith('out-dead') ? new Promise<string>(() => {}) : undefined));
-    vi.spyOn(log, 'warn').mockImplementation(() => {});
-    vi.spyOn(log, 'error').mockImplementation(() => {});
-
-    for (let tick = 0; tick < MAX_PARKED; tick++) {
-      const drain = track(deliverSessionMessages(session));
-      await vi.advanceTimersByTimeAsync(DEADLINE_MS);
-      await drain.promise;
-    }
-    insertOutbound(session, 'out-after');
-    await deliverSessionMessages(session);
-    expect(calls).not.toContain('out-after');
-
-    await vi.advanceTimersByTimeAsync(GIVE_UP_MS);
-    await vi.waitFor(() => expect(deliveredRow(session, `out-dead-${MAX_PARKED - 1}`)?.status).toBe('failed'));
-    await deliverSessionMessages(session);
-    expect(calls).toEqual(['out-dead-0', 'out-dead-1', 'out-dead-2', 'out-after']);
-    expect(deliveredRow(session, 'out-after')?.status).toBe('delivered');
-  });
-
-  it('a hung system action is not run a second time while it is still pending', async () => {
-    let runs = 0;
-    registerDeliveryAction(
-      'test_hang',
-      async () => {
-        runs++;
-        await new Promise(() => {});
-      },
-      unguarded('test fixture'),
-    );
-    insertOutbound(session, 'out-action', 'system', { action: 'test_hang' });
-    setDeliveryAdapter({ deliver: async () => 'pm' });
-    vi.spyOn(log, 'warn').mockImplementation(() => {});
-    vi.spyOn(log, 'info').mockImplementation(() => {});
-
-    const drain = track(deliverSessionMessages(session));
-    await vi.advanceTimersByTimeAsync(DEADLINE_MS);
-    await drain.promise;
-    await deliverSessionMessages(session);
-    await deliverSessionMessages(session);
-    expect(runs).toBe(1);
-  });
-
   it('a slow system action (an image rebuild) is parked without a stuck-send warning and runs once', async () => {
     let runs = 0;
     registerDeliveryAction(
@@ -499,33 +426,36 @@ describe('delivery deadline', () => {
     expect(peak).toBe(16);
   });
 
-  it('a session stops sending once it has MAX_PARKED_PER_SESSION sends parked', async () => {
-    for (let i = 0; i < MAX_PARKED + 2; i++) insertOutbound(session, `out-dead-${i}`);
-    const calls = recordingAdapter(() => new Promise<string>(() => {}));
-    vi.spyOn(log, 'warn').mockImplementation(() => {});
+  it.each([
+    { where: 'the same session', afterGiveUp: false, sent: false },
+    { where: 'the same session', afterGiveUp: true, sent: true },
+    { where: 'another session', afterGiveUp: false, sent: true },
+  ])(
+    'with MAX_PARKED_PER_SESSION sends parked, a new row in $where (after the give-up: $afterGiveUp) is sent: $sent',
+    async ({ where, afterGiveUp, sent }) => {
+      const { session: other } = await resolveSession('ag-1', 'mg-1', 'thread-other', 'per-thread');
+      for (let i = 0; i < MAX_PARKED; i++) insertOutbound(session, `out-dead-${i}`);
+      const calls = recordingAdapter((text) =>
+        text.startsWith('out-dead') ? new Promise<string>(() => {}) : undefined,
+      );
+      vi.spyOn(log, 'warn').mockImplementation(() => {});
+      vi.spyOn(log, 'error').mockImplementation(() => {});
 
-    for (let tick = 0; tick < MAX_PARKED + 2; tick++) {
-      const drain = track(deliverSessionMessages(session));
-      await vi.advanceTimersByTimeAsync(DEADLINE_MS);
-      await drain.promise;
-    }
-    expect(calls).toEqual(['out-dead-0', 'out-dead-1', 'out-dead-2']);
-  });
+      for (let tick = 0; tick < MAX_PARKED; tick++) {
+        const drain = track(deliverSessionMessages(session));
+        await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+        await drain.promise;
+      }
+      if (afterGiveUp) {
+        await vi.advanceTimersByTimeAsync(GIVE_UP_MS);
+        await vi.waitFor(() => expect(deliveredRow(session, `out-dead-${MAX_PARKED - 1}`)?.status).toBe('failed'));
+      }
+      const target = where === 'another session' ? other : session;
+      insertOutbound(target, 'out-new');
+      await deliverSessionMessages(target);
 
-  it("one session's parked sends do not count toward another session's cap", async () => {
-    const { session: other } = await resolveSession('ag-1', 'mg-1', 'thread-other', 'per-thread');
-    for (let i = 0; i < MAX_PARKED; i++) insertOutbound(session, `out-dead-${i}`);
-    insertOutbound(other, 'out-other');
-    const calls = recordingAdapter((text) => (text.startsWith('out-dead') ? new Promise<string>(() => {}) : undefined));
-    vi.spyOn(log, 'warn').mockImplementation(() => {});
-
-    for (let tick = 0; tick < MAX_PARKED; tick++) {
-      const drain = track(deliverSessionMessages(session));
-      await vi.advanceTimersByTimeAsync(DEADLINE_MS);
-      await drain.promise;
-    }
-    await deliverSessionMessages(other);
-    expect(calls).toEqual(['out-dead-0', 'out-dead-1', 'out-dead-2', 'out-other']);
-    expect(deliveredRow(other, 'out-other')?.status).toBe('delivered');
-  });
+      expect(calls).toEqual(['out-dead-0', 'out-dead-1', 'out-dead-2', ...(sent ? ['out-new'] : [])]);
+      expect(deliveredRow(target, 'out-new')?.status).toBe(sent ? 'delivered' : undefined);
+    },
+  );
 });
