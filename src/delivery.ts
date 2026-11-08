@@ -52,34 +52,21 @@ const MAX_DELIVERY_ATTEMPTS = 3;
  */
 const DELIVERY_CONCURRENCY = 8;
 
-/**
- * How long a drain waits on one message's send. Past it the message is
- * parked (overdueDeliveries) and the drain returns, so one stuck send can't
- * hold its session until a restart. A slow but healthy send (a large upload)
- * is parked, not repeated.
- */
+/** How long a drain waits on one send. Past it the row is parked (overdueDeliveries) and the drain returns. */
 const DELIVERY_DEADLINE_MS = 60_000;
 /**
- * How long a poll tick waits on one session's drain. A slower drain (a whole
- * channel hanging) finishes in the background, still holding
- * inflightDeliveries (so one per session at most): later ticks skip that
- * session and other sessions keep the poll's cadence, up to the cap on
- * backgroundDrains.
+ * How long a poll tick waits on one session's drain. A slower drain finishes in the background, still holding
+ * inflightDeliveries, so later ticks skip that session; backgroundDrains caps how many.
  */
 const TICK_DRAIN_WAIT_MS = 5_000;
 /**
- * How long a parked send may stay unsettled before its row is marked failed.
- * Past the longest retry loop a channel SDK runs inside one send (Slack's
- * web-api: about 30 minutes) and undici's 5-minute timeouts, so only a send
- * with no bound at all gets this far. The row is not sent again: the send
- * may still land.
+ * How long a parked send may stay unsettled before its row is marked failed. Past the retry and timeout
+ * bounds channel SDKs already have, so only a send with no bound at all gets this far.
  */
 const OVERDUE_GIVE_UP_MS = 60 * 60_000;
 /**
- * Parked sends one session may have at once. Past it the session sends
- * nothing until one settles or is given up on. A given-up send frees its
- * slot while it may still be out, so this bounds new sends per give-up
- * window, not sends outstanding.
+ * Parked sends one session may have at once; past it the session sends nothing new. A given-up send frees its
+ * slot while it may still be out, so this bounds new sends per give-up window, not sends outstanding.
  */
 const MAX_PARKED_PER_SESSION = 3;
 
@@ -139,13 +126,11 @@ async function clearAttemptRow(messageId: string): Promise<void> {
 const inflightDeliveries = new Set<string>();
 
 /**
- * Per session, ids of rows whose send passed its deadline and has not
- * settled. Drains skip them, so a send that may still land is never
- * repeated: a late success marks the row delivered, a late failure counts an
- * attempt and the next tick retries, and the give-up marks it failed. A row
- * leaves only after that bookkeeping. Later rows keep going meanwhile, so a
- * parked row can land after them, the same reordering a failed-then-retried
- * row already has.
+ * Per session, ids of rows whose send passed its deadline and has not settled. Drains skip them, so a send that
+ * may still land is never repeated: a late success marks the row delivered, a late failure counts an attempt and
+ * the next tick retries, and at OVERDUE_GIVE_UP_MS the row is marked failed (it stays failed if the send lands
+ * later). A row leaves only after that bookkeeping. Later rows keep going meanwhile, so a parked row can land
+ * after them, the same reordering a failed-then-retried row already has.
  */
 const overdueDeliveries = new Map<string, Set<string>>();
 
@@ -413,10 +398,7 @@ async function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boo
   }
 }
 
-/**
- * A send landed: mark the row delivered, clear its attempt count, run the
- * user-facing follow-through. Throws only if marking fails.
- */
+/** Throws only if marking fails. */
 async function completeDelivery(
   msg: OutboundMessage,
   session: Session,
@@ -456,7 +438,7 @@ async function completeDelivery(
   }
 }
 
-/** A send failed: count the attempt; give up on the row at MAX_DELIVERY_ATTEMPTS. Never throws. */
+/** Never throws. */
 async function failDelivery(
   msg: OutboundMessage,
   session: Session,
@@ -484,7 +466,7 @@ async function failDelivery(
   }
 }
 
-/** Mark the row failed, so no drain sends it again, and clear its attempt count. Never throws. */
+/** Never throws. */
 async function markFailed(msg: OutboundMessage, session: Session, agentGroup: AgentGroup): Promise<void> {
   try {
     await withExistingMailboxSession(agentGroup.id, session.id, (mailbox) => mailbox.markDeliveryFailed(msg.id));
@@ -498,11 +480,7 @@ async function markFailed(msg: OutboundMessage, session: Session, agentGroup: Ag
   }
 }
 
-/**
- * The send passed the deadline: park the row and finish it when the send
- * settles. A send still pending at OVERDUE_GIVE_UP_MS marks the row failed
- * instead of sending it again; a landing after that leaves the row failed.
- */
+/** Park a send past its deadline; overdueDeliveries says what happens to the row next. */
 function parkOverdueDelivery(
   msg: OutboundMessage,
   session: Session,
