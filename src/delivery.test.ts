@@ -40,6 +40,7 @@ import { createChannelDeliveryAdapter } from './channels/channel-registry.js';
 import { createDestination } from './modules/agent-to-agent/db/agent-destinations.js';
 import { getAgentMailbox } from './mailbox/index.js';
 import { log } from './log.js';
+import { registerOperationalErrorSink, type OperationalError } from './operational-errors.js';
 
 function openInboundDb(agentGroupId: string, sessionId: string): Database.Database {
   return new Database(inboundDbPath(agentGroupId, sessionId));
@@ -256,6 +257,39 @@ describe('deliverSessionMessages — retry and permanent failure', () => {
     // Verify the message is in the delivered table with 'failed' status
     const delivered = await withMailboxSession('ag-1', session.id, (mailbox) => mailbox.getDeliveredIds());
     expect(delivered.has('out-flaky')).toBe(true);
+  });
+
+  it('reports a permanent delivery failure to registered sinks, once', async () => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertOutbound('ag-1', session.id, 'out-doomed');
+    setDeliveryAdapter({
+      async deliver() {
+        throw new Error('network timeout');
+      },
+    });
+    const reports: OperationalError[] = [];
+    const off = registerOperationalErrorSink((e) => {
+      reports.push(e);
+    });
+
+    try {
+      await deliverSessionMessages(session);
+      await deliverSessionMessages(session);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(reports).toHaveLength(0);
+
+      await deliverSessionMessages(session);
+      await deliverSessionMessages(session);
+      await vi.waitFor(() => expect(reports).toHaveLength(1));
+      expect(reports[0]).toMatchObject({
+        kind: 'delivery.failed',
+        key: `delivery.failed:${session.id}`,
+        details: { messageId: 'out-doomed', sessionId: session.id, channelType: 'telegram', error: 'network timeout' },
+      });
+    } finally {
+      off();
+    }
   });
 
   it('does not acknowledge a message when no channel adapter is registered (#2995)', async () => {
