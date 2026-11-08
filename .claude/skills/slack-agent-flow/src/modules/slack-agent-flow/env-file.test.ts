@@ -15,6 +15,7 @@ describe('slack-agent-flow env-file', () => {
   afterEach(() => {
     fs.rmSync(rootDir, { recursive: true, force: true });
     vi.unstubAllEnvs();
+    vi.restoreAllMocks();
   });
 
   const envPath = (): string => path.join(rootDir, '.env');
@@ -86,11 +87,21 @@ describe('slack-agent-flow env-file', () => {
     });
 
     it('throws rather than overwriting when .env exists but cannot be read', () => {
-      // Write-only: the old catch-all read this as empty and replaced the file.
+      // The old catch-all read this as empty and replaced the file. The EACCES
+      // is mocked because chmod cannot make a file unreadable to root.
       write('KEEP_ME=1\n');
-      fs.chmodSync(envPath(), 0o200);
+      const realRead = fs.readFileSync;
+      const readSpy = vi.spyOn(fs, 'readFileSync').mockImplementation(((
+        file: fs.PathOrFileDescriptor,
+        ...rest: unknown[]
+      ) => {
+        if (file === envPath()) {
+          throw Object.assign(new Error(`EACCES: permission denied, open '${envPath()}'`), { code: 'EACCES' });
+        }
+        return (realRead as (...args: unknown[]) => unknown)(file, ...rest);
+      }) as typeof fs.readFileSync);
       expect(() => upsertEnvKey(rootDir, 'SAF_NEW', 'v1')).toThrow(/EACCES/);
-      fs.chmodSync(envPath(), 0o600);
+      readSpy.mockRestore();
       expect(read()).toBe('KEEP_ME=1\n');
     });
 
