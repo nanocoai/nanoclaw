@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import * as p from '@clack/prompts';
 
@@ -198,7 +198,7 @@ export async function run(agentProvider = process.argv[2] || 'claude', root = pr
   p.log.success('Claude account connected through Iron Proxy.');
 }
 
-if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href) {
   void run().catch((error) => {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);

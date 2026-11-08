@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 /** Installation identity comes from config, not gateway uptime or API version. */
 export async function detectInstalledOneCLI(root = process.cwd()): Promise<boolean> {
@@ -15,6 +16,6 @@ export async function detectInstalledOneCLI(root = process.cwd()): Promise<boole
   }
 }
 
-if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href) {
   console.log((await detectInstalledOneCLI()) ? 'installed' : 'absent');
 }

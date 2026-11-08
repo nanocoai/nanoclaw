@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 function configuredContainer(projectRoot: string): string {
   try {
@@ -41,6 +42,6 @@ export function detectInstalledIronProxy(
   return container !== '' && inspect(container);
 }
 
-if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href) {
   console.log(detectInstalledIronProxy() ? 'installed' : 'absent');
 }
