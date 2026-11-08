@@ -201,6 +201,21 @@ describe('release workflow safeguards', () => {
     expect(releaseWorkflow).not.toContain('git describe --tags --abbrev=0 "$TARGET_SHA^"');
   });
 
+  it('proves the target is on main before running any of its code, in both jobs', () => {
+    const at = (needle: string) => {
+      const found: number[] = [];
+      for (let i = releaseWorkflow.indexOf(needle); i !== -1; i = releaseWorkflow.indexOf(needle, i + 1)) found.push(i);
+      return found;
+    };
+    const onMain = at('git merge-base --is-ancestor "$TARGET_SHA" origin/main');
+    const targetCode = at('node scripts/release.mjs verify "$RELEASE_VERSION"');
+    expect(onMain).toHaveLength(2);
+    expect(targetCode).toHaveLength(2);
+    expect(onMain[0]).toBeLessThan(targetCode[0]);
+    expect(targetCode[0]).toBeLessThan(onMain[1]);
+    expect(onMain[1]).toBeLessThan(targetCode[1]);
+  });
+
   it('bounds post-publication API propagation retries and fails closed after the deadline', () => {
     expect(releaseWorkflow).toContain('READBACK_ATTEMPTS=6');
     expect(releaseWorkflow).toContain('READBACK_DELAY_SECONDS=2');

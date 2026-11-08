@@ -137,10 +137,11 @@ jobs:
             echo "::error::target_sha must be a full lowercase 40-character commit SHA"
             exit 1
           fi
-          node scripts/release.mjs verify "$RELEASE_VERSION"
+          # Prove the target is on main before running any of its code.
           git fetch --force origin main:refs/remotes/origin/main --tags
           test "$(git rev-parse HEAD)" = "$TARGET_SHA"
           git merge-base --is-ancestor "$TARGET_SHA" origin/main
+          node scripts/release.mjs verify "$RELEASE_VERSION"
 
           TAG="v${RELEASE_VERSION}"
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
@@ -214,10 +215,11 @@ jobs:
             echo "::error::target_sha must be a full lowercase 40-character commit SHA"
             exit 1
           fi
-          node scripts/release.mjs verify "$RELEASE_VERSION"
+          # Prove the target is on main before running any of its code.
           git fetch --force origin main:refs/remotes/origin/main --tags
           test "$(git rev-parse HEAD)" = "$TARGET_SHA"
           git merge-base --is-ancestor "$TARGET_SHA" origin/main
+          node scripts/release.mjs verify "$RELEASE_VERSION"
 
           TAG="v${RELEASE_VERSION}"
           if git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null; then
