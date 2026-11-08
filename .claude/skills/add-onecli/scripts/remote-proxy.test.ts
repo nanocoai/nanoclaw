@@ -11,10 +11,9 @@ import { gatePolicy } from '../../../../scripts/skill-policy.js';
 import { advertisedProxy, proxyCheck, remoteProxyHint } from './remote-proxy.js';
 
 const GATEWAY = 'http://gw.example.com:10254';
-const advertising = () =>
+const advertising = (env: Record<string, string> = { HTTPS_PROXY: 'http://x:t@host.docker.internal:10255' }) =>
   vi.fn(
-    async (_url: string | URL | Request, _init?: RequestInit) =>
-      new Response(JSON.stringify({ env: { HTTPS_PROXY: 'http://x:t@host.docker.internal:10255' } }), { status: 200 }),
+    async (_url: string | URL | Request, _init?: RequestInit) => new Response(JSON.stringify({ env }), { status: 200 }),
   );
 
 describe('remote gateway proxy hint', () => {
@@ -28,8 +27,9 @@ describe('remote gateway proxy hint', () => {
     [GATEWAY, '10.0.0.5:10255', null],
     ['http://127.0.0.1:10254', 'host.docker.internal:10255', null],
     ['http://localhost:10254', 'host.docker.internal:10255', null],
+    [GATEWAY, null, null],
   ])('gateway %s, proxy %s: %s', (gateway, advertised, line) => {
-    const hint = remoteProxyHint(gateway, new URL(`http://x:aoc_secret@${advertised}`));
+    const hint = remoteProxyHint(gateway, advertised ? new URL(`http://x:aoc_secret@${advertised}`) : null);
     if (line === null) {
       expect(hint).toBeNull();
       return;
@@ -49,6 +49,10 @@ describe('advertised proxy', () => {
     expect(got?.host).toBe('host.docker.internal:10255');
     expect(fetchImpl.mock.calls[0][0]).toBe(`${GATEWAY}/v1/container-config?agent=default`);
   });
+
+  it('gives null for an answer with no proxy', async () => {
+    expect(await advertisedProxy(GATEWAY, undefined, advertising({}) as unknown as typeof fetch)).toBeNull();
+  });
 });
 
 describe('proxy check after setup', () => {
@@ -66,6 +70,12 @@ describe('proxy check after setup', () => {
       cwd.mockRestore();
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('asks nothing when setup was not pointed at a remote gateway', async () => {
+    const fetchImpl = advertising();
+    expect(await proxyCheck({}, fetchImpl as unknown as typeof fetch)).toEqual({ warn: 'no', hint: 'none' });
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   // SKILL.md runs this file and binds its stdout as JSON; empty output fails the install.
