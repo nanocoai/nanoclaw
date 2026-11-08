@@ -67,8 +67,16 @@ describe('openInBrowser', () => {
     onPlatform('linux');
     host.wsl = true;
     host.commands.add('wslview');
+    host.commands.add('xdg-open');
     openInBrowser(url);
     expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it('still opens a valid link with & or %2F on macOS, where open gets it as one argument', () => {
+    onPlatform('darwin');
+    const url = 'https://auth.example.invalid/device?user_code=ABCD-EFGH&state=a%2Fb';
+    openInBrowser(url);
+    expect(spawn).toHaveBeenCalledWith('open', [url], expect.anything());
   });
 
   it.each(['file:///Applications/Calculator.app', 'http://auth.example.invalid/device', '-a Calculator', 'not a url'])(

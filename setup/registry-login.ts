@@ -773,11 +773,13 @@ function printDeviceCard(device: DeviceAuthorization, headless: boolean): void {
 
 /**
  * Non-blocking best effort. Silent on failure — the URL is already on screen.
- * The URL is the provider's reply, and some openers (WSL helpers) pass it to
- * cmd.exe or PowerShell, so only a plain https link is opened.
+ * The URL is the provider's reply, so only an https link is opened. On WSL the
+ * opener (wslview, or xdg-open routed to it) may pass it to cmd.exe or
+ * PowerShell, so there it must also hold no shell characters.
  */
 export function openInBrowser(url: string): void {
-  if (!isPlainHttpsUrl(url)) return;
+  if (!isHttpsUrl(url)) return;
+  if (isWSL() && !SHELL_SAFE_URL.test(url)) return;
   let cmd: [string, string[]] | undefined;
   if (process.platform === 'darwin') cmd = ['open', [url]];
   else if (process.platform === 'linux') {
@@ -796,11 +798,10 @@ export function openInBrowser(url: string): void {
   }
 }
 
-/** https, and only characters no shell treats as special (no `&`, `%`, `$`, quotes or brackets). */
-const PLAIN_HTTPS_URL = /^https:\/\/[A-Za-z0-9\-._~:/?#=]+$/;
+/** Only characters no shell treats as special: no `&`, `%`, `$`, quotes, brackets or spaces. */
+const SHELL_SAFE_URL = /^https:\/\/[A-Za-z0-9\-._~:/?#=]+$/;
 
-function isPlainHttpsUrl(url: string): boolean {
-  if (!PLAIN_HTTPS_URL.test(url)) return false;
+function isHttpsUrl(url: string): boolean {
   try {
     return new URL(url).protocol === 'https:';
   } catch {
