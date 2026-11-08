@@ -1422,10 +1422,10 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
       return false;
     }
     const handle = this.userName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    // Mattermost ignores @-mentions in code, and a trailing `.` ends the
-    // sentence unless a handle character follows (`@bot.` vs `@bot.dev`).
-    const text = (post.message ?? '').replace(/```[\s\S]*?```/g, ' ').replace(/`[^`\n]*`/g, ' ');
-    return new RegExp(`(^|[^\\w@])@${handle}(?![\\w-]|\\.[\\w-])`, 'i').test(text);
+    // Mattermost ignores @-mentions in code, so read only the text outside it.
+    // A trailing `.` ends the sentence unless a handle follows (`@bot.dev`).
+    const text = textOutsideCode(toAst(post.message ?? ''));
+    return new RegExp(`(^|[^\\w@])@${handle}(?![\\w-]|\\.+[\\w-])`, 'i').test(text);
   }
 
   private toMessage(post: MattermostPost, threadId: string): Message<MattermostPost> {
@@ -1504,6 +1504,17 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
     }
     return { ...attachment, fetchData: () => this.rest.getFile(fileId) };
   }
+}
+
+/** Text of a markdown AST outside code spans and blocks, nodes joined by a space. */
+function textOutsideCode(node: { type: string; value?: unknown; children?: unknown[] }): string {
+  if (node.type === 'code' || node.type === 'inlineCode') {
+    return '';
+  }
+  if (node.type === 'text') {
+    return typeof node.value === 'string' ? node.value : '';
+  }
+  return (node.children ?? []).map((child) => textOutsideCode(child as { type: string })).join(' ');
 }
 
 /**

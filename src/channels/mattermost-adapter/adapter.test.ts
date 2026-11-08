@@ -528,19 +528,26 @@ describe('Mattermost mention detection', () => {
     expect(await isMention('G', 'lunch at noon?')).toBe(false);
   });
 
-  it.each(['hey @nanoclaw, lunch at noon?', 'Please help @nanoclaw.'])(
-    'sees @bot in a group message: %s',
-    async (text) => {
-      expect(await isMention('G', text)).toBe(true);
-    },
-  );
+  it.each([
+    'hey @nanoclaw, lunch at noon?',
+    'Please help @nanoclaw.',
+    '**@nanoclaw** can you look?',
+    '\\`please @nanoclaw\\`',
+  ])('sees @bot in a group message: %s', async (text) => {
+    expect(await isMention('G', text)).toBe(true);
+  });
 
-  it.each(['see `@nanoclaw` in the docs', '```\n@nanoclaw\n```', 'ask @nanoclaw.dev instead'])(
-    'ignores code and other handles in a group message: %s',
-    async (text) => {
-      expect(await isMention('G', text)).toBe(false);
-    },
-  );
+  it.each([
+    'see `@nanoclaw` in the docs',
+    'see ``@nanoclaw`` in the docs',
+    '```\n@nanoclaw\n```',
+    '~~~\n@nanoclaw\n~~~',
+    '```\n@nanoclaw',
+    'ask @nanoclaw.dev instead',
+    'ask @nanoclaw..dev instead',
+  ])('ignores code and other handles in a group message: %s', async (text) => {
+    expect(await isMention('G', text)).toBe(false);
+  });
 
   it('trusts the server mention list in a channel', async () => {
     expect(await isMention('O', 'the deploy is done')).toBe(true);
