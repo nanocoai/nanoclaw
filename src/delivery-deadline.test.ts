@@ -144,6 +144,7 @@ afterEach(async () => {
 describe('delivery deadline', () => {
   it('a send that never settles stops holding the session at the deadline, with a warn log', async () => {
     insertOutbound(session, 'out-hung');
+    insertOutbound(session, 'out-next');
     const calls = recordingAdapter((text) => (text === 'out-hung' ? new Promise<string>(() => {}) : undefined));
     const warn = vi.spyOn(log, 'warn').mockImplementation(() => {});
 
@@ -152,6 +153,7 @@ describe('delivery deadline', () => {
     expect(drain.done()).toBe(false);
     await vi.advanceTimersByTimeAsync(1);
     expect(drain.done()).toBe(true);
+    expect(calls).toEqual(['out-hung']);
 
     expect(warn).toHaveBeenCalledWith(
       expect.stringContaining('deadline'),
@@ -159,9 +161,8 @@ describe('delivery deadline', () => {
     );
     expect(deliveredRow(session, 'out-hung')).toBeUndefined();
 
-    // The session is not dark: a newer reply goes out on the next tick, and
+    // The session is not dark: the next reply goes out on the next tick, and
     // the parked row is not sent a second time while its send is pending.
-    insertOutbound(session, 'out-next');
     await deliverSessionMessages(session);
     expect(calls).toEqual(['out-hung', 'out-next']);
     expect(deliveredRow(session, 'out-next')?.status).toBe('delivered');
@@ -446,13 +447,14 @@ describe('delivery deadline', () => {
         await vi.advanceTimersByTimeAsync(DEADLINE_MS);
         await drain.promise;
       }
-      if (afterGiveUp) {
-        await vi.advanceTimersByTimeAsync(GIVE_UP_MS);
-        await vi.waitFor(() => expect(deliveredRow(session, `out-dead-${MAX_PARKED - 1}`)?.status).toBe('failed'));
-      }
       const target = where === 'another session' ? other : session;
       insertOutbound(target, 'out-new');
       await deliverSessionMessages(target);
+      if (afterGiveUp) {
+        await vi.advanceTimersByTimeAsync(GIVE_UP_MS);
+        await vi.waitFor(() => expect(deliveredRow(session, `out-dead-${MAX_PARKED - 1}`)?.status).toBe('failed'));
+        await deliverSessionMessages(target);
+      }
 
       expect(calls).toEqual(['out-dead-0', 'out-dead-1', 'out-dead-2', ...(sent ? ['out-new'] : [])]);
       expect(deliveredRow(target, 'out-new')?.status).toBe(sent ? 'delivered' : undefined);
