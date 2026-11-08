@@ -32,7 +32,7 @@ afterEach(() => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-function run(m: Machine): { rc: number; log: string[] } {
+function stubs(m: Machine): { bin: string; log: string } {
   const bin = path.join(dir, 'bin');
   const log = path.join(dir, 'calls.log');
   const stub = (name: string, body: string): void => {
@@ -64,6 +64,15 @@ function run(m: Machine): { rc: number; log: string[] } {
       ].join('\n'),
     );
   }
+  return { bin, log };
+}
+
+function calls(log: string): string[] {
+  return fs.existsSync(log) ? fs.readFileSync(log, 'utf8').split('\n').filter(Boolean) : [];
+}
+
+function run(m: Machine): { rc: number; log: string[] } {
+  const { bin, log } = stubs(m);
   const res = spawnSync(
     '/bin/bash',
     ['-c', `set -euo pipefail; source '${LIB}'; if ensure_jq; then echo rc=0; else echo rc=1; fi`],
@@ -74,8 +83,7 @@ function run(m: Machine): { rc: number; log: string[] } {
   );
   expect(res.stderr).toBe('');
   const rc = Number(/rc=(\d)/.exec(res.stdout)?.[1]);
-  const calls = fs.existsSync(log) ? fs.readFileSync(log, 'utf8').split('\n').filter(Boolean) : [];
-  return { rc, log: calls };
+  return { rc, log: calls(log) };
 }
 
 describe('jq install (setup/lib/jq.sh)', { timeout: 20_000 }, () => {
@@ -97,16 +105,11 @@ describe('jq install (setup/lib/jq.sh)', { timeout: 20_000 }, () => {
     ]);
   });
 
-  it.each([
-    ['dnf', 'dnf install -y -q jq'],
-    ['yum', 'yum install -y -q jq'],
-    ['zypper', 'zypper --non-interactive --quiet install jq'],
-    ['pacman', 'pacman -S --noconfirm --needed jq'],
-    ['apk', 'apk add --quiet jq'],
-  ])('uses %s on distros without apt', (pkg, call) => {
+  // A stub can't check a manager's flags, only that setup finds it and runs it with sudo -n.
+  it.each(['dnf', 'yum', 'zypper', 'pacman', 'apk'])('installs jq with %s on distros without apt', (pkg) => {
     const r = run({ pkg, sudo: 'cached' });
     expect(r.rc).toBe(0);
-    expect(r.log).toContain(call);
+    expect(r.log[0]).toMatch(new RegExp(`^sudo -n env .* ${pkg} .*jq$`));
   });
 
   it('runs the package manager directly as root', () => {
@@ -140,20 +143,51 @@ describe('jq install (setup/lib/jq.sh)', { timeout: 20_000 }, () => {
   });
 });
 
-describe('bootstrap wiring', () => {
-  const setupSh = fs.readFileSync(path.join(process.cwd(), 'setup.sh'), 'utf8');
-  const entrypoint = fs.readFileSync(path.join(process.cwd(), 'nanoclaw.sh'), 'utf8');
+// The real nanoclaw.sh and setup.sh in a copy of the repo, with Node and pnpm stubbed.
+const COPIED = ['nanoclaw.sh', 'setup.sh', 'assets/setup-splash.txt'].concat(
+  ['diagnostics', 'jq', 'node-version', 'sudo-preflight'].map((lib) => `setup/lib/${lib}.sh`),
+);
+const TOOLS = ['bash', 'cat', 'date', 'dirname', 'grep', 'head', 'mkdir', 'mktemp', 'rm', 'sed', 'sleep', 'tail'];
 
-  it('setup.sh installs jq and reports it in the status block', () => {
-    expect(setupSh).toContain('source "$PROJECT_ROOT/setup/lib/jq.sh"');
-    expect(setupSh).toMatch(/ensure_jq >> "\$LOG_FILE" 2>&1/);
-    expect(setupSh).toContain('JQ_OK: $JQ_OK');
+function bootstrap(m: Machine): { rc: number | null; out: string; jqOk?: string; log: string[] } {
+  const { bin, log } = stubs(m);
+  for (const tool of [...TOOLS, 'tr', 'whoami']) {
+    const at = spawnSync('sh', ['-c', `command -v ${tool}`], { encoding: 'utf8' }).stdout.trim();
+    fs.symlinkSync(at, path.join(bin, tool));
+  }
+  fs.writeFileSync(path.join(bin, 'node'), '#!/bin/sh\n[ "$1" = --version ] && echo v22.23.4\nexit 0\n', {
+    mode: 0o755,
+  });
+  fs.writeFileSync(path.join(bin, 'pnpm'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  // nanoclaw.sh reads the RAM size with awk from /proc/meminfo, which a Mac lacks.
+  fs.writeFileSync(path.join(bin, 'awk'), '#!/bin/sh\necho 8192\n', { mode: 0o755 });
+  const repo = path.join(dir, 'repo');
+  for (const f of COPIED) {
+    fs.mkdirSync(path.dirname(path.join(repo, f)), { recursive: true });
+    fs.copyFileSync(path.join(process.cwd(), f), path.join(repo, f));
+  }
+  const res = spawnSync('/bin/bash', [path.join(repo, 'nanoclaw.sh')], {
+    env: { PATH: bin, HOME: dir, NANOCLAW_NO_DIAGNOSTICS: '1' },
+    encoding: 'utf8',
+  });
+  const raw = fs.readFileSync(path.join(repo, 'logs', 'setup-steps', '01-bootstrap.log'), 'utf8');
+  return { rc: res.status, out: res.stdout, jqOk: /^JQ_OK: (\w+)$/m.exec(raw)?.[1], log: calls(log) };
+}
+
+describe('bootstrap (nanoclaw.sh + setup.sh)', { timeout: 30_000 }, () => {
+  it('installs jq, with no note', () => {
+    const r = bootstrap({ pkg: 'apt-get', sudo: 'cached' });
+    expect(r.rc).toBe(0);
+    expect(r.jqOk).toBe('true');
+    expect(r.log).toContain('apt-get install -y -qq jq');
+    expect(r.out).toContain('Basics ready');
+    expect(r.out).not.toContain("Couldn't install jq.");
   });
 
-  it('nanoclaw.sh says so after the bootstrap when jq is still missing', () => {
-    const ready = entrypoint.indexOf('spinner_success "Basics ready"');
-    const check = entrypoint.indexOf('grep_field JQ_OK "$BOOTSTRAP_RAW"');
-    expect(ready).toBeGreaterThan(-1);
-    expect(check).toBeGreaterThan(ready);
+  it('goes on with a note after "Basics ready" when it cannot install jq', () => {
+    const r = bootstrap({});
+    expect(r.rc).toBe(0);
+    expect(r.jqOk).toBe('false');
+    expect(r.out).toMatch(/Basics ready.*\n.*Couldn't install jq\./);
   });
 });

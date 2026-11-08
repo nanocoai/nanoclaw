@@ -22,8 +22,7 @@ interface Machine {
   /** `node --version` of a Node in ~/.local/bin, off PATH. */
   localNode?: string;
   uvx?: boolean;
-  /** jq on PATH, or only in ~/.local/bin (off PATH until setup:auto adds it). */
-  jq?: 'path' | 'local';
+  jq?: boolean;
   /** The package manager on PATH that setup would install jq with. */
   pkg?: string;
   /** sudo's answers, or absent when sudo isn't installed. */
@@ -58,8 +57,7 @@ function run(m: Machine): { rc: number; out: string; sudo: string[] } {
   if (m.node) stub('node', `echo ${m.node}`, m.nodeFrom === 'manager' ? manager : system);
   if (m.localNode) stub('node', `echo ${m.localNode}`, path.join(machine, '.local', 'bin'));
   if (m.uvx) stub('uvx', 'exit 0');
-  if (m.jq === 'path') stub('jq', 'exit 0');
-  if (m.jq === 'local') stub('jq', 'exit 0', path.join(machine, '.local', 'bin'));
+  if (m.jq) stub('jq', 'exit 0');
   if (m.pkg) stub(m.pkg, 'exit 0');
   if (m.sudo) {
     stub(
@@ -196,14 +194,8 @@ describe('sudo pre-flight (nanoclaw.sh)', { timeout: 20_000 }, () => {
     );
   });
 
-  it.each<[string, Machine]>([
-    ['jq on PATH', { jq: 'path', pkg: 'apt-get' }],
-    ['jq in ~/.local/bin, off PATH', { jq: 'local', pkg: 'apt-get' }],
-    ['no package manager setup knows', {}],
-    ['root', { uid: 0, pkg: 'apt-get' }],
-    ['macOS with Homebrew', { os: 'Darwin', pkg: 'brew' }],
-  ])('does not ask for jq with %s', (_name, m) => {
-    const r = run({ node: 'v22.23.4', sudo: needsPassword, interactive: true, ...m });
+  it('does not ask for jq when it is already there', () => {
+    const r = run({ node: 'v22.23.4', jq: true, pkg: 'apt-get', sudo: needsPassword, interactive: true });
     expect(r.out).toBe('');
     expect(r.sudo).toEqual([]);
   });

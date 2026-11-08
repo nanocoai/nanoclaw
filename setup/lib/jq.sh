@@ -1,17 +1,9 @@
-# jq.sh — install jq, which skills use to read API replies.
-#
-# Sourced by setup.sh, which installs it, and sudo-preflight.sh, which asks
-# for sudo before the bootstrap spinner. Recent macOS ships /usr/bin/jq; an
-# older Mac gets it from Homebrew, which nanoclaw.sh already requires.
-# Uses bash builtins plus uname/id/sudo only: Node may not exist yet.
+# jq.sh — install jq for skills; sourced by setup.sh and sudo-preflight.sh, before Node exists.
 
-# setup:auto puts ~/.local/bin on PATH, so a jq there already counts.
 jq_present() {
-  command -v jq >/dev/null 2>&1 || [ -x "$HOME/.local/bin/jq" ]
+  command -v jq >/dev/null 2>&1
 }
 
-# The package-manager command that installs jq here (without sudo), or nothing
-# when jq is present or no manager we know is on PATH.
 jq_install_command() {
   jq_present && return 0
   case "$(uname -s 2>/dev/null)" in
@@ -37,7 +29,6 @@ jq_install_command() {
   return 0
 }
 
-# True when installing jq here runs sudo: Linux, not root, a manager to run.
 jq_needs_sudo() {
   [ "$(uname -s 2>/dev/null)" = "Linux" ] || return 1
   [ "$(id -u 2>/dev/null)" != "0" ] || return 1
