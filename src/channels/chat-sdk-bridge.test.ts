@@ -1427,15 +1427,12 @@ it('drops the stored question when it no longer fits the card cap with its answe
   expect(edited.card.children.map((c) => c.content)).toEqual(['[Yes by ann]']);
 });
 
-it('measures a kept question against the text cap on a channel with no card cap', async () => {
-  const fits = (await answerStoredQuestion({ maxTextLength: 100 })) as {
+it('keeps the question on a channel with no card cap, whatever its text cap', async () => {
+  // Discord's 2,000 text cap is not its embed cap; only maxCardTextLength may drop the question.
+  const edited = (await answerStoredQuestion({ maxTextLength: 30 })) as {
     card: { children: Array<{ content?: string }> };
   };
-  expect(fits.card.children.map((c) => c.content)).toEqual(['Ship **v2** today?', '[Yes by ann]']);
-  const tooLong = (await answerStoredQuestion({ maxTextLength: 30 })) as {
-    card: { children: Array<{ content?: string }> };
-  };
-  expect(tooLong.card.children.map((c) => c.content)).toEqual(['[Yes by ann]']);
+  expect(edited.card.children.map((c) => c.content)).toEqual(['Ship **v2** today?', '[Yes by ann]']);
 });
 
 describe('createChatSdkBridge — local Gateway webhook', () => {

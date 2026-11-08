@@ -623,13 +623,12 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       resolution: cardText(spec.resolution),
     });
   };
-  /** Whether a resolved card still fits the channel's cap with its question kept.
-   *  A channel with no card cap (Telegram) renders the card as text, so its text cap applies. */
+  /** Whether a resolved card still fits the channel's whole-card cap with its question kept.
+   *  A text cap is not a card cap (Discord embeds outgrow it), so a channel without one is not checked. */
   const terminalFits = ({ title, question, resolution, fromAgent }: TerminalApprovalCard): boolean => {
-    const cap = config.maxCardTextLength ?? config.maxTextLength;
-    if (cap === undefined) return true;
+    if (config.maxCardTextLength === undefined) return true;
     const blocks = splitCardText(question, fromAgent ? (t: string) => t : cardText, CARD_TEXT_BLOCK_LENGTH);
-    return !cardQuestionTooLong(title, [...blocks, cardText(resolution)].join('\n'), cap);
+    return !cardQuestionTooLong(title, [...blocks, cardText(resolution)].join('\n'), config.maxCardTextLength);
   };
   /** Registry/routing key for this bridge — also the app-context cache
    *  namespace. Default instances key by the platform name. */
