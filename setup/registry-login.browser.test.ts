@@ -32,19 +32,42 @@ afterEach(() => {
 });
 
 describe('openInBrowser', () => {
-  it('passes an https link to xdg-open as a single argument', () => {
+  const PLAIN = 'https://auth.example.invalid/device?user_code=ABCD-EFGH';
+
+  it('passes a plain https link to xdg-open as a single argument', () => {
     onPlatform('linux');
     host.commands.add('xdg-open');
-    const url = 'https://auth.example.invalid/device?user_code=ABCD-EFGH&x=1';
-    openInBrowser(url);
+    openInBrowser(PLAIN);
     expect(spawn).toHaveBeenCalledTimes(1);
-    expect(spawn).toHaveBeenCalledWith('xdg-open', [url], expect.anything());
+    expect(spawn).toHaveBeenCalledWith('xdg-open', [PLAIN], expect.anything());
+  });
+
+  it('passes a plain https link to wslview on WSL', () => {
+    onPlatform('linux');
+    host.wsl = true;
+    host.commands.add('wslview');
+    openInBrowser(PLAIN);
+    expect(spawn).toHaveBeenCalledWith('wslview', [PLAIN], expect.anything());
   });
 
   it('opens nothing on WSL without xdg-open or wslview, instead of going through cmd.exe', () => {
     onPlatform('linux');
     host.wsl = true;
-    openInBrowser('https://auth.example.invalid/device?user_code=ABCD&calc');
+    openInBrowser(PLAIN);
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'https://auth.example.invalid/device?user_code=ABCD&calc',
+    'https://auth.example.invalid/$(calc.exe)',
+    'https://auth.example.invalid/`calc`',
+    'https://auth.example.invalid/%PATH%',
+    'https://auth.example.invalid/"|calc',
+  ])('opens nothing on WSL for a link with shell characters: %s', (url) => {
+    onPlatform('linux');
+    host.wsl = true;
+    host.commands.add('wslview');
+    openInBrowser(url);
     expect(spawn).not.toHaveBeenCalled();
   });
 
