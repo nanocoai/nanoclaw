@@ -26,7 +26,7 @@ describe('dockerAccessHint', () => {
     ],
   ])('%s', (_name, fields, host, commands) => {
     const hint = dockerAccessHint(fields, unit, host);
-    expect(hint?.commands ?? null).toEqual(commands);
+    expect(hint && hint.commands).toEqual(commands);
     expect(hint?.title).toBe(commands ? "NanoClaw can't reach Docker yet. To fix it now, run:" : undefined);
   });
 

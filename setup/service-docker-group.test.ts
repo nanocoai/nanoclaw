@@ -139,14 +139,15 @@ describe('user service and a docker group added mid-session', () => {
 
   it.each([
     { why: 'without a cached sudo ticket', setfacl: false, apt: true, sudo: [aptCommand], missing: true },
-    { why: 'when setfacl itself fails', setfacl: true, apt: true, sudo: [aclCommand()], missing: undefined },
+    { why: 'when setfacl itself fails', setfacl: true, apt: true, sudo: [aclCommand()], missing: false },
     { why: 'without apt-get to install acl', setfacl: false, apt: false, sudo: [], missing: true },
   ])('keeps the flag and still restarts the service $why', async ({ setfacl, apt, sudo, missing }) => {
     Object.assign(sys, { setfacl, apt, sudoCached: false });
     await run([]);
     expect(sudoCalls()).toEqual(sudo);
     expect(fields()).toMatchObject({ DOCKER_GROUP_STALE: true, STATUS: 'success' });
-    expect(fields()?.SETFACL_MISSING).toBe(missing);
+    expect(fields()?.SETFACL_MISSING).toBe(missing || undefined);
+    expect('SETFACL_MISSING' in fields()!).toBe(missing);
     expect(sys.breakerAt).toEqual(['restart:clear']);
   });
 
