@@ -36,14 +36,14 @@ function commit(root: string, message: string): void {
 }
 
 const manifest = (deps: string[]) =>
-  `${JSON.stringify({ name: 'x', dependencies: Object.fromEntries(deps.map((d) => [d, '1.0.0'])) })}\n`;
+  `${JSON.stringify({ name: 'x', dependencies: Object.fromEntries(deps.map((d) => [d, '^1.0.0'])) })}\n`;
 const lockfile = (entries: string[]) =>
   `lockfileVersion: '9.0'\n\npackages:\n${entries.map((e) => `  ${e}: {}\n`).join('')}`;
 
 /**
- * Upstream bumps `c` in the lockfile only (a security fix); the install's
- * setup commit adds `b` to the manifest and lockfile next to it. Git cannot
- * merge the two, though the manifests merge cleanly: the conflict this fixes.
+ * Upstream bumps `c` within its range in the lockfile only (a security fix);
+ * the install's setup commit adds `b` to the manifest and lockfile next to it.
+ * Git cannot merge the two, though the manifests merge cleanly.
  */
 function fixture(options: { bun?: boolean; otherConflict?: boolean } = {}): { install: string } {
   const seed = temp('lockfile-seed-');
@@ -60,8 +60,8 @@ function fixture(options: { bun?: boolean; otherConflict?: boolean } = {}): { in
   const official = temp('lockfile-official-');
   git(seed, ['clone', '-q', '--bare', seed, official]);
 
-  write(seed, 'pnpm-lock.yaml', lockfile(['a@1.0.0', 'c@2.0.0']));
-  if (options.bun) write(seed, 'container/agent-runner/bun.lock', lockfile(['a@1.0.0', 'c@2.0.0']));
+  write(seed, 'pnpm-lock.yaml', lockfile(['a@1.0.0', 'c@1.0.1']));
+  if (options.bun) write(seed, 'container/agent-runner/bun.lock', lockfile(['a@1.0.0', 'c@1.0.1']));
   write(seed, 'src/value.ts', 'export const value = "new";\n');
   commit(seed, 'upstream bump');
   git(seed, ['push', '-q', official, 'main']);
@@ -90,8 +90,14 @@ interface Call {
   cwd: string;
 }
 
-/** Real git; pnpm and bun stand-ins that add missing manifest entries to the lockfile. */
-function runner(options: { failRegenerate?: boolean; hostBun?: string; stray?: boolean } = {}) {
+/**
+ * Real git; pnpm and bun stand-ins that only add missing manifest entries to the
+ * lockfile. This checks the controller's git handling; the real package
+ * managers are exercised by the update e2e run.
+ */
+function runner(
+  options: { failRegenerate?: boolean; hostBun?: string; stray?: 'untracked' | 'tracked' | 'index' } = {},
+) {
   const calls: Call[] = [];
   const regenerate = (cwd: string): void => {
     const file = fs.existsSync(path.join(cwd, 'bun.lock')) ? 'bun.lock' : 'pnpm-lock.yaml';
@@ -99,7 +105,12 @@ function runner(options: { failRegenerate?: boolean; hostBun?: string; stray?: b
     let lock = read(cwd, file);
     for (const dep of deps) if (!lock.includes(`  ${dep}@`)) lock += `  ${dep}@1.0.0: {}\n`;
     write(cwd, file, lock);
-    if (options.stray) write(cwd, 'stray.txt', 'unexpected\n');
+    if (options.stray === 'untracked') write(cwd, 'stray.txt', 'unexpected\n');
+    if (options.stray === 'tracked') write(cwd, 'src/value.ts', 'export const value = "rewritten";\n');
+    if (options.stray === 'index') {
+      write(cwd, 'staged.txt', 'unexpected\n');
+      git(cwd, ['add', 'staged.txt']);
+    }
   };
   const exec = (command: string, args: string[], cwd: string): string => {
     if (command === 'git') return git(cwd, args);
@@ -164,7 +175,7 @@ describe('update lockfile conflicts', () => {
     expect(state.phase).toBe('prepared');
     expect(state.regeneratedLockfiles).toEqual(['pnpm-lock.yaml']);
     const lock = read(state.stageRoot, 'pnpm-lock.yaml');
-    expect(lock).toContain('c@2.0.0'); // upstream's lockfile-only bump kept
+    expect(lock).toContain('c@1.0.1'); // upstream's lockfile-only bump kept
     expect(lock).toContain('b@1.0.0'); // local dependency added back
     expect(lock).not.toMatch(/^[<=>]{7}/m);
     expect(read(state.stageRoot, 'src/value.ts')).toContain('"new"');
@@ -174,7 +185,7 @@ describe('update lockfile conflicts', () => {
       { command: 'pnpm', args: ['install', '--lockfile-only', '--ignore-scripts'], cwd: state.stageRoot },
     ]);
     // The live checkout is untouched.
-    expect(read(install, 'pnpm-lock.yaml')).not.toContain('c@2.0.0');
+    expect(read(install, 'pnpm-lock.yaml')).not.toContain('c@1.0.1');
   });
 
   it('regenerates the agent-runner bun.lock with the Bun the image pins', () => {
@@ -186,7 +197,7 @@ describe('update lockfile conflicts', () => {
     expect(state.phase).toBe('prepared');
     expect(state.regeneratedLockfiles).toEqual(['container/agent-runner/bun.lock', 'pnpm-lock.yaml']);
     expect(read(state.stageRoot, 'container/agent-runner/bun.lock')).toMatch(
-      /b@1\.0\.0[\s\S]*c@2\.0\.0|c@2\.0\.0[\s\S]*b@1\.0\.0/,
+      /b@1\.0\.0[\s\S]*c@1\.0\.1|c@1\.0\.1[\s\S]*b@1\.0\.0/,
     );
     const bun = calls.find((call) => call.args.includes('dlx'));
     expect(bun).toEqual({
@@ -211,7 +222,7 @@ describe('update lockfile conflicts', () => {
     expect(unmerged(state.stageRoot).sort()).toEqual(['pnpm-lock.yaml', 'src/value.ts']);
     expect(read(state.stageRoot, 'pnpm-lock.yaml')).toMatch(/^<{7}/m);
     expect(state.lastError).toContain('CONFLICT');
-    expect(state.lastError).toContain('Leave pnpm-lock.yaml as they are');
+    expect(state.lastError).toContain('Do not edit pnpm-lock.yaml: resolve and git add the other files');
     expect(calls).toEqual([]);
 
     // Resume refuses while the other file is still unresolved.
@@ -225,7 +236,7 @@ describe('update lockfile conflicts', () => {
     expect(state.phase).toBe('prepared');
     expect(state.regeneratedLockfiles).toEqual(['pnpm-lock.yaml']);
     expect(read(state.stageRoot, 'src/value.ts')).toContain('local and new');
-    expect(read(state.stageRoot, 'pnpm-lock.yaml')).toContain('c@2.0.0');
+    expect(read(state.stageRoot, 'pnpm-lock.yaml')).toContain('c@1.0.1');
   });
 
   it('falls back to the conflict as git left it when regenerating fails, and resume retries', () => {
@@ -247,14 +258,39 @@ describe('update lockfile conflicts', () => {
     expect(state.regeneratedLockfiles).toEqual(['pnpm-lock.yaml']);
   });
 
-  it('falls back when the package manager changes anything besides the lockfile', () => {
+  it.each([
+    ['untracked', 'stray.txt'],
+    ['tracked', 'src/value.ts'],
+    ['index', 'the git index'],
+  ] as const)('falls back when the package manager also changes a %s path, and undoes it', (stray, named) => {
     const { install } = fixture();
 
-    const state = prepare(install, runner({ stray: true }).runtime);
+    const state = prepare(install, runner({ stray }).runtime);
 
     expect(state.phase).toBe('conflict');
-    expect(state.lastError).toContain('it also changed stray.txt');
+    expect(state.lastError).toContain(`it also changed ${named}`);
     expect(unmerged(state.stageRoot)).toEqual(['pnpm-lock.yaml']);
+    expect(fs.existsSync(path.join(state.stageRoot, 'stray.txt'))).toBe(false);
+    expect(read(state.stageRoot, 'src/value.ts')).toContain('"new"');
+    if (stray === 'index') expect(state.lastError).toContain('abandon this update and prepare it again');
+  });
+
+  it('does not blame the package manager for files that were there before resume', () => {
+    const { install } = fixture({ otherConflict: true });
+    const { runtime } = runner();
+    let state = prepare(install, runtime);
+    write(state.stageRoot, 'src/value.ts', 'export const value = "resolved";\n');
+    git(state.stageRoot, ['add', 'src/value.ts']);
+    write(state.stageRoot, 'src/value.ts.orig', 'mergetool backup\n');
+
+    // The lockfiles are done; only the operator's leftover blocks the clean check.
+    expect(() => resumePreparedUpdate(install, state.id, runtime)).toThrow(/must be clean/);
+    fs.rmSync(path.join(state.stageRoot, 'src/value.ts.orig'));
+    state = resumePreparedUpdate(install, state.id, runtime);
+
+    expect(state.phase).toBe('prepared');
+    expect(state.regeneratedLockfiles).toEqual(['pnpm-lock.yaml']);
+    expect(read(state.stageRoot, 'pnpm-lock.yaml')).toContain('b@1.0.0');
   });
 
   it('leaves a rebase conflict to the operator', () => {

@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 
 import { pinnedBunVersion } from '../provider-contract-verifier.js';
@@ -39,17 +40,49 @@ function regenerateCommand(runner: CommandRunner, root: string, file: string): [
   return ['pnpm', [`--package=bun@${version}`, 'dlx', 'bun', ...args]];
 }
 
+interface Snapshot {
+  index: string;
+  modified: Set<string>;
+  untracked: Set<string>;
+}
+
+/** The index and every changed path besides the lockfiles, to compare after a regenerate. */
+function snapshot(runner: CommandRunner, root: string, files: string[]): Snapshot {
+  const others = (args: string[]) => new Set(lines(runner.run('git', args, root)).filter((f) => !files.includes(f)));
+  return {
+    index: runner.run('git', ['ls-files', '--stage'], root),
+    modified: others(['diff', '--name-only']),
+    untracked: others(['ls-files', '--others', '--exclude-standard']),
+  };
+}
+
+function changedSince(runner: CommandRunner, root: string, files: string[], before: Snapshot) {
+  const after = snapshot(runner, root, files);
+  return {
+    index: after.index !== before.index,
+    modified: [...after.modified].filter((f) => !before.modified.has(f)),
+    untracked: [...after.untracked].filter((f) => !before.untracked.has(f)),
+  };
+}
+
+/** Put back what a failed regenerate added; an index change can only be reported. */
+function undoStrays(runner: CommandRunner, root: string, files: string[], before: Snapshot): string | undefined {
+  const stray = changedSince(runner, root, files, before);
+  if (stray.modified.length > 0) runner.tryRun('git', ['checkout', '--', ...stray.modified], root);
+  for (const file of stray.untracked) fs.rmSync(path.join(root, file), { force: true });
+  return stray.index ? 'The git index changed too: abandon this update and prepare it again.' : undefined;
+}
+
 const MANUAL_STEPS =
   "To do it by hand in the stage: take upstream's copy (git checkout --theirs -- <file>), regenerate it " +
   '(pnpm install --lockfile-only, or bun install --lockfile-only in container/agent-runner), ' +
   'git add it, commit, then resume. Never merge a lockfile by hand.';
 
 /**
- * Finish a merge whose only conflicts are lockfiles: take upstream's copy, let
- * the package manager add back local dependencies from the merged manifest,
- * and commit. Upstream's copy keeps its lockfile-only bumps (security fixes),
- * which a fresh resolve from either side would drop. Any failure before the
- * commit puts the conflict back exactly as git left it.
+ * Finish a merge whose only conflicts are lockfiles: take upstream's copy (it
+ * carries upstream's lockfile-only security bumps), let the package manager add
+ * back local dependencies from the merged manifest, and commit. A failure before
+ * the commit puts the conflict back as git left it.
  */
 export function resolveLockfileConflicts(runner: CommandRunner, root: string): LockfileOutcome {
   if (!runner.tryRun('git', ['rev-parse', '-q', '--verify', 'MERGE_HEAD'], root).ok) return { kind: 'none' };
@@ -58,12 +91,17 @@ export function resolveLockfileConflicts(runner: CommandRunner, root: string): L
   if (files.length === 0) return { kind: 'none' };
   if (files.length < unmerged.length) return { kind: 'mixed', files };
 
+  const before = snapshot(runner, root, files);
   const fail = (reason: string): LockfileOutcome => {
+    const leftover = undoStrays(runner, root, files, before);
     runner.tryRun('git', ['checkout', '-m', '--', ...files], root);
     return {
       kind: 'failed',
       files,
-      message: `Only lockfiles conflicted (${files.join(', ')}), but regenerating them failed: ${reason}\n${MANUAL_STEPS}`,
+      message:
+        `Only lockfiles conflicted (${files.join(', ')}), but regenerating them failed: ${reason}\n` +
+        (leftover ? `${leftover}\n` : '') +
+        MANUAL_STEPS,
     };
   };
 
@@ -83,12 +121,11 @@ export function resolveLockfileConflicts(runner: CommandRunner, root: string): L
     if (!result.ok) return fail(`${command[0]} ${command[1].join(' ')}:\n${tail(result.stdout)}`);
   }
   // A package manager that touched anything else did more than regenerate.
-  const touched = [
-    ...lines(runner.run('git', ['diff', '--name-only'], root)),
-    ...lines(runner.run('git', ['ls-files', '--others', '--exclude-standard'], root)),
-  ];
-  const stray = [...new Set(touched.filter((file) => !files.includes(file)))];
-  if (stray.length > 0) return fail(`it also changed ${stray.join(', ')}`);
+  const stray = changedSince(runner, root, files, before);
+  if (stray.index || stray.modified.length + stray.untracked.length > 0) {
+    const what = [...stray.modified, ...stray.untracked, ...(stray.index ? ['the git index'] : [])];
+    return fail(`it also changed ${what.join(', ')}`);
+  }
 
   runner.run('git', ['add', '--', ...files], root);
   const committed = runner.tryRun('git', ['commit', '--no-edit'], root);
@@ -109,7 +146,7 @@ export function lockfileNote(outcome: LockfileOutcome): string | undefined {
   if (outcome.kind === 'failed') return outcome.message;
   if (outcome.kind === 'mixed') {
     return (
-      `Leave ${outcome.files.join(', ')} as they are: resolve and git add the other files, ` +
+      `Do not edit ${outcome.files.join(', ')}: resolve and git add the other files, ` +
       'then run resume without committing. Resume regenerates the lockfiles and commits the merge.'
     );
   }

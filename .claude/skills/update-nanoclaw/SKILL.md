@@ -133,7 +133,9 @@ pnpm exec tsx "$controller_dir/scripts/update-nanoclaw.ts" resume \
 
 Never merge a lockfile (`pnpm-lock.yaml`, `container/agent-runner/bun.lock`)
 by hand. With `merge`, `prepare` regenerates them itself when they are the only
-conflicts (listed under `regeneratedLockfiles`). If other files conflict too,
+conflicts (listed under `regeneratedLockfiles`): it starts from upstream's
+lockfile, so a version pinned only in the local lockfile, not in
+`package.json`, becomes upstream's. Tell the user. If other files conflict too,
 resolve and `git add` those, leave the lockfiles alone, and run `resume`
 without committing: it regenerates the lockfiles and commits the merge. With
 `rebase` or `cherry-pick`, check out upstream's copy (`--ours` during a rebase,

@@ -337,7 +337,11 @@ export function resumePreparedUpdate(projectRoot: string, id: string, runtime = 
       saveState(state);
       return state;
     }
-    if (lockfiles.kind === 'resolved') state.regeneratedLockfiles = lockfiles.files;
+    if (lockfiles.kind === 'resolved') {
+      // Saved now: the clean check below can still refuse an operator's leftover file.
+      state.regeneratedLockfiles = lockfiles.files;
+      saveState(state);
+    }
   }
   refreshPreparedState(state, runtime);
   return state;
