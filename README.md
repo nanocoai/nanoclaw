@@ -179,7 +179,7 @@ No channel or provider skills are currently requested — propose one via an iss
 ## Requirements
 
 - macOS or Linux (Windows via WSL2)
-- Node.js 22+ and pnpm 10+ (the installer will install both if missing)
+- Node.js 22.23.4+, 24.22.1+ or 26.12.1+ and pnpm 10+ (the installer will install or update both if needed)
 - [Docker Desktop](https://docker.com/products/docker-desktop) (macOS/Windows) or Docker Engine (Linux)
 - [Claude Code](https://claude.ai/download) for `/customize`, `/debug`, error recovery during setup, and all `/add-<channel>` skills
 

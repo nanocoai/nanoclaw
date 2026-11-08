@@ -18,9 +18,9 @@ vi.mock('./reconcile-session.js', () => ({
 vi.mock('./db/sessions.js', () => ({ getActiveSessions: vi.fn() }));
 vi.mock('./egress-lockdown.js', () => ({ ensureEgressNetwork: vi.fn() }));
 vi.mock('./modules/approvals/index.js', () => ({ sweepAwaitingReasonRejects: vi.fn() }));
-vi.mock('./container-runner.js', () => ({ stopOrphanedSessions: vi.fn() }));
+vi.mock('./container-runner.js', () => ({ stopOrphanedSessions: vi.fn(), retryPendingAdoptions: vi.fn() }));
 
-import { stopOrphanedSessions } from './container-runner.js';
+import { retryPendingAdoptions, stopOrphanedSessions } from './container-runner.js';
 import { getActiveSessions } from './db/sessions.js';
 import { ensureEgressNetwork } from './egress-lockdown.js';
 import { RECONCILE_CONCURRENCY, startHostSweep, stopHostSweep } from './host-sweep.js';
@@ -66,6 +66,7 @@ beforeEach(() => {
       order.push('orphans');
       return 0;
     });
+  vi.mocked(retryPendingAdoptions).mockReset();
   vi.mocked(getActiveSessions)
     .mockReset()
     .mockResolvedValue([{ id: 's-1' }, { id: 's-2' }] as Awaited<ReturnType<typeof getActiveSessions>>);
@@ -155,5 +156,7 @@ describe('sweep over the workqueue', () => {
 
     await runSweepTick();
     expect(stopOrphanedSessions).toHaveBeenCalledTimes(3);
+    // Deferred adoptions are retried every tick, even one whose orphan stop failed.
+    expect(retryPendingAdoptions).toHaveBeenCalledTimes(3);
   });
 });

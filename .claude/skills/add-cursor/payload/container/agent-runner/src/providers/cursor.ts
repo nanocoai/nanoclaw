@@ -818,7 +818,8 @@ export class CursorProvider implements AgentProvider {
     archiveCursorExchange(exchange);
   }
 
-  private agentOptions(cwd: string): AgentOptions {
+  // Protected so the gateway probe can tune the SDK options for its one run.
+  protected agentOptions(cwd: string): AgentOptions {
     return {
       apiKey: CURSOR_API_KEY_PLACEHOLDER,
       name: this.assistantName,

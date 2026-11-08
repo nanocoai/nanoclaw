@@ -50,6 +50,91 @@ describe('installed skill detection', () => {
       { name: 'slack', skillName: 'add-slack', kind: 'channel' },
     ]);
   });
+
+  it('attributes a companion import to the skill that appends it', () => {
+    const root = temp('nanoclaw-skills-detect-companion-');
+    // What /add-slack actually installs: the adapter plus its a2a guard, both
+    // appended to the barrel by the one skill.
+    write(root, 'src/channels/index.ts', "import './cli.js';\nimport './slack.js';\nimport './slack-a2a-guard.js';\n");
+    write(
+      root,
+      '.claude/skills/add-slack/SKILL.md',
+      [
+        '# Apply',
+        '```nc:append to:src/channels/index.ts',
+        "import './slack.js';",
+        '```',
+        '```nc:append to:src/channels/index.ts',
+        "import './slack-a2a-guard.js';",
+        '```',
+      ].join('\n'),
+    );
+
+    // One entry, not two: the guard is add-slack's, so it must not be
+    // attributed to a nonexistent add-slack-a2a-guard skill.
+    expect(detectInstalledSkills(root)).toEqual([{ name: 'slack', skillName: 'add-slack', kind: 'channel' }]);
+  });
+
+  it('attributes imports to a skill not named add-<name>, under the skill name', () => {
+    const root = temp('nanoclaw-skills-detect-companion-skill-');
+    write(
+      root,
+      'src/channels/index.ts',
+      "import './cli.js';\nimport './slack.js';\nimport './room-guard.js';\nimport './slack-a2a.js';\n",
+    );
+    write(
+      root,
+      '.claude/skills/add-slack/SKILL.md',
+      "```nc:append to:src/channels/index.ts\nimport './slack.js';\n```\n",
+    );
+    write(
+      root,
+      '.claude/skills/slack-a2a-rooms/SKILL.md',
+      "```nc:append to:src/channels/index.ts\nimport './slack-a2a.js';\nimport './room-guard.js';\n```\n",
+    );
+
+    expect(detectInstalledSkills(root)).toEqual([
+      { name: 'slack', skillName: 'add-slack', kind: 'channel' },
+      { name: 'slack-a2a-rooms', skillName: 'slack-a2a-rooms', kind: 'channel' },
+    ]);
+  });
+
+  it('reads a ./-prefixed append target as the same barrel', () => {
+    const root = temp('nanoclaw-skills-detect-dot-path-');
+    write(root, 'src/channels/index.ts', "import './cli.js';\nimport './slack.js';\nimport './slack-a2a-guard.js';\n");
+    write(
+      root,
+      '.claude/skills/add-slack/SKILL.md',
+      "```nc:append to:./src/channels/index.ts\nimport './slack.js';\nimport './slack-a2a-guard.js';\n```\n",
+    );
+
+    expect(detectInstalledSkills(root)).toEqual([{ name: 'slack', skillName: 'add-slack', kind: 'channel' }]);
+  });
+
+  it('keeps add-<name> as the owner when another skill declares the same import', () => {
+    const root = temp('nanoclaw-skills-detect-contested-');
+    write(root, 'src/channels/index.ts', "import './cli.js';\nimport './slack.js';\n");
+    // Sorts before add-slack, so a first-claim-wins scan would pick it.
+    write(
+      root,
+      '.claude/skills/add-a-thing/SKILL.md',
+      "```nc:append to:src/channels/index.ts\nimport './slack.js';\n```\n",
+    );
+    write(
+      root,
+      '.claude/skills/add-slack/SKILL.md',
+      "```nc:append to:src/channels/index.ts\nimport './slack.js';\n```\n",
+    );
+
+    expect(detectInstalledSkills(root)).toEqual([{ name: 'slack', skillName: 'add-slack', kind: 'channel' }]);
+  });
+
+  it('still attributes an unclaimed import to add-<name>', () => {
+    const root = temp('nanoclaw-skills-detect-unclaimed-');
+    write(root, 'src/channels/index.ts', "import './cli.js';\nimport './discord.js';\n");
+
+    expect(detectInstalledSkills(root)).toEqual([{ name: 'discord', skillName: 'add-discord', kind: 'channel' }]);
+  });
 });
 
 describe('registry refresh end to end', () => {

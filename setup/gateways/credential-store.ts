@@ -49,6 +49,8 @@ export type GatewayCredentialTarget = {
   path?: string;
   /** Non-secret marker the runtime sends; gateways doing selective replacement match it. */
   proxyValue: string;
+  /** The agent provider whose groups use this credential; gateways that grant per agent attach it to them. */
+  provider?: string;
 } & (
   | { kind: 'api-key'; injection: { headerName: string; valueFormat: string } }
   | { kind: 'oauth'; oauth: { profile: 'chatgpt'; clientId: string; tokenEndpoint: string } }
