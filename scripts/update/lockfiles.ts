@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 import { pinnedBunVersion } from '../provider-contract-verifier.js';
@@ -40,37 +41,21 @@ function regenerateCommand(runner: CommandRunner, root: string, file: string): [
   return ['pnpm', [`--package=bun@${version}`, 'dlx', 'bun', ...args]];
 }
 
-interface Snapshot {
-  index: string;
-  modified: Set<string>;
-  untracked: Set<string>;
-}
-
-/** The index and every changed path besides the lockfiles, to compare after a regenerate. */
-function snapshot(runner: CommandRunner, root: string, files: string[]): Snapshot {
-  const others = (args: string[]) => new Set(lines(runner.run('git', args, root)).filter((f) => !files.includes(f)));
+/** Paths besides the lockfiles that differ from the index, and untracked files. */
+function otherChanges(
+  runner: CommandRunner,
+  root: string,
+  files: string[],
+): { modified: string[]; untracked: string[] } {
+  const others = (args: string[]) =>
+    runner
+      .run('git', [...args, '-z'], root)
+      .split('\0')
+      .filter((file) => file && !files.includes(file));
   return {
-    index: runner.run('git', ['ls-files', '--stage'], root),
     modified: others(['diff', '--name-only']),
     untracked: others(['ls-files', '--others', '--exclude-standard']),
   };
-}
-
-function changedSince(runner: CommandRunner, root: string, files: string[], before: Snapshot) {
-  const after = snapshot(runner, root, files);
-  return {
-    index: after.index !== before.index,
-    modified: [...after.modified].filter((f) => !before.modified.has(f)),
-    untracked: [...after.untracked].filter((f) => !before.untracked.has(f)),
-  };
-}
-
-/** Put back what a failed regenerate added; an index change can only be reported. */
-function undoStrays(runner: CommandRunner, root: string, files: string[], before: Snapshot): string | undefined {
-  const stray = changedSince(runner, root, files, before);
-  if (stray.modified.length > 0) runner.tryRun('git', ['checkout', '--', ...stray.modified], root);
-  for (const file of stray.untracked) fs.rmSync(path.join(root, file), { force: true });
-  return stray.index ? 'The git index changed too: abandon this update and prepare it again.' : undefined;
 }
 
 const MANUAL_STEPS =
@@ -91,52 +76,65 @@ export function resolveLockfileConflicts(runner: CommandRunner, root: string): L
   if (files.length === 0) return { kind: 'none' };
   if (files.length < unmerged.length) return { kind: 'mixed', files };
 
-  const before = snapshot(runner, root, files);
+  // The clean check refuses anything else anyway, and starting clean means
+  // every later change besides the lockfiles is the package manager's.
+  const dirty = otherChanges(runner, root, files);
+  if (dirty.modified.length + dirty.untracked.length > 0) return { kind: 'none' };
+
+  // A copy of the index keeps git's conflict stages, so a failure can restore them exactly.
+  const index = path.resolve(root, runner.run('git', ['rev-parse', '--git-path', 'index'], root));
+  const backupDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-lockfiles-'));
+  const backup = path.join(backupDir, 'index');
+  fs.copyFileSync(index, backup);
+  const listing = runner.run('git', ['ls-files', '--stage'], root);
   const fail = (reason: string): LockfileOutcome => {
-    const leftover = undoStrays(runner, root, files, before);
+    fs.copyFileSync(backup, index);
+    const stray = otherChanges(runner, root, files);
+    if (stray.modified.length > 0) runner.tryRun('git', ['checkout', '--', ...stray.modified], root);
+    for (const file of stray.untracked) fs.rmSync(path.join(root, file), { force: true });
     runner.tryRun('git', ['checkout', '-m', '--', ...files], root);
     return {
       kind: 'failed',
       files,
-      message:
-        `Only lockfiles conflicted (${files.join(', ')}), but regenerating them failed: ${reason}\n` +
-        (leftover ? `${leftover}\n` : '') +
-        MANUAL_STEPS,
+      message: `Only lockfiles conflicted (${files.join(', ')}), but regenerating them failed: ${reason}\n${MANUAL_STEPS}`,
     };
   };
 
-  for (const file of files) {
-    const theirs = runner.tryRun('git', ['checkout', '--theirs', '--', file], root);
-    if (!theirs.ok) return fail(`upstream has no ${file} to start from: ${tail(theirs.stdout)}`);
-  }
-  for (const file of files) {
-    let command: [string, string[]];
-    try {
-      command = regenerateCommand(runner, root, file);
-    } catch (err) {
-      return fail(err instanceof Error ? err.message : String(err));
+  try {
+    for (const file of files) {
+      const theirs = runner.tryRun('git', ['checkout', '--theirs', '--', file], root);
+      if (!theirs.ok) return fail(`upstream has no ${file} to start from: ${tail(theirs.stdout)}`);
     }
-    const cwd = path.join(root, LOCKFILES[file].dir);
-    const result = runner.tryRun(command[0], command[1], cwd, { timeoutMs: REGENERATE_TIMEOUT_MS });
-    if (!result.ok) return fail(`${command[0]} ${command[1].join(' ')}:\n${tail(result.stdout)}`);
-  }
-  // A package manager that touched anything else did more than regenerate.
-  const stray = changedSince(runner, root, files, before);
-  if (stray.index || stray.modified.length + stray.untracked.length > 0) {
-    const what = [...stray.modified, ...stray.untracked, ...(stray.index ? ['the git index'] : [])];
-    return fail(`it also changed ${what.join(', ')}`);
-  }
+    for (const file of files) {
+      let command: [string, string[]];
+      try {
+        command = regenerateCommand(runner, root, file);
+      } catch (err) {
+        return fail(err instanceof Error ? err.message : String(err));
+      }
+      const cwd = path.join(root, LOCKFILES[file].dir);
+      const result = runner.tryRun(command[0], command[1], cwd, { timeoutMs: REGENERATE_TIMEOUT_MS });
+      if (!result.ok) return fail(`${command[0]} ${command[1].join(' ')}:\n${tail(result.stdout)}`);
+    }
+    // A package manager that touched anything else did more than regenerate.
+    const stray = otherChanges(runner, root, files);
+    const indexChanged = runner.run('git', ['ls-files', '--stage'], root) !== listing;
+    const what = [...stray.modified, ...stray.untracked, ...(indexChanged ? ['the git index'] : [])];
+    if (what.length > 0) return fail(`it also changed ${what.join(', ')}`);
 
-  runner.run('git', ['add', '--', ...files], root);
-  const committed = runner.tryRun('git', ['commit', '--no-edit'], root);
-  if (!committed.ok) {
-    return {
-      kind: 'failed',
-      files,
-      message:
-        `Regenerated and staged ${files.join(', ')}, but the merge commit failed:\n${tail(committed.stdout)}\n` +
-        'Commit the merge in the stage, then resume.',
-    };
+    runner.run('git', ['add', '--', ...files], root);
+    const committed = runner.tryRun('git', ['commit', '--no-edit'], root);
+    if (!committed.ok) {
+      return {
+        kind: 'failed',
+        files,
+        message:
+          `Regenerated and staged ${files.join(', ')}, but the merge commit failed:\n${tail(committed.stdout)}\n` +
+          'Commit the merge in the stage, then resume.',
+      };
+    }
+  } finally {
+    fs.rmSync(backupDir, { recursive: true, force: true });
   }
   return { kind: 'resolved', files };
 }

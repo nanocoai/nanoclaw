@@ -259,32 +259,40 @@ describe('update lockfile conflicts', () => {
   });
 
   it.each([
-    ['untracked', 'stray.txt'],
-    ['tracked', 'src/value.ts'],
-    ['index', 'the git index'],
-  ] as const)('falls back when the package manager also changes a %s path, and undoes it', (stray, named) => {
+    ['an untracked file', 'untracked', 'stray.txt'],
+    ['a tracked file', 'tracked', 'src/value.ts'],
+    ['the index', 'index', 'the git index'],
+  ] as const)('falls back when the package manager also changes %s, and undoes it', (_, stray, named) => {
     const { install } = fixture();
 
-    const state = prepare(install, runner({ stray }).runtime);
+    let state = prepare(install, runner({ stray }).runtime);
 
     expect(state.phase).toBe('conflict');
     expect(state.lastError).toContain(`it also changed ${named}`);
     expect(unmerged(state.stageRoot)).toEqual(['pnpm-lock.yaml']);
-    expect(fs.existsSync(path.join(state.stageRoot, 'stray.txt'))).toBe(false);
+    expect(read(state.stageRoot, 'pnpm-lock.yaml')).toMatch(/^<{7}/m);
     expect(read(state.stageRoot, 'src/value.ts')).toContain('"new"');
-    if (stray === 'index') expect(state.lastError).toContain('abandon this update and prepare it again');
+    for (const file of ['stray.txt', 'staged.txt']) expect(fs.existsSync(path.join(state.stageRoot, file))).toBe(false);
+
+    // Nothing the failed attempt staged rides along on the retry.
+    state = resumePreparedUpdate(install, state.id, runner().runtime);
+    expect(state.phase).toBe('prepared');
+    expect(git(state.stageRoot, ['ls-files', 'staged.txt', 'stray.txt'])).toBe('');
+    expect(read(state.stageRoot, 'src/value.ts')).toContain('"new"');
   });
 
-  it('does not blame the package manager for files that were there before resume', () => {
+  it("does not run the package manager while the operator's own changes are in the stage", () => {
     const { install } = fixture({ otherConflict: true });
-    const { runtime } = runner();
+    const { runtime, calls } = runner();
     let state = prepare(install, runtime);
     write(state.stageRoot, 'src/value.ts', 'export const value = "resolved";\n');
     git(state.stageRoot, ['add', 'src/value.ts']);
     write(state.stageRoot, 'src/value.ts.orig', 'mergetool backup\n');
 
-    // The lockfiles are done; only the operator's leftover blocks the clean check.
     expect(() => resumePreparedUpdate(install, state.id, runtime)).toThrow(/must be clean/);
+    expect(calls).toEqual([]);
+    expect(read(state.stageRoot, 'src/value.ts.orig')).toBe('mergetool backup\n');
+
     fs.rmSync(path.join(state.stageRoot, 'src/value.ts.orig'));
     state = resumePreparedUpdate(install, state.id, runtime);
 
