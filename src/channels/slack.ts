@@ -72,10 +72,10 @@ export const SLACK_DEFAULTS: ChannelDefaults = {
 };
 
 /**
- * Slack caps a markdown message at 12,000 characters and the adapter neither
- * cuts nor splits it, so a longer reply failed every retry. The bridge splits
- * at this length; the 2,000 gap absorbs what the adapter adds after the split
- * (`<@U…>` for @mentions, emoji names). A part dense with both can still fail.
+ * Slack caps markdown at 12,000 characters and the adapter doesn't split, so
+ * longer replies failed every retry. The 2,000 gap covers what the adapter adds
+ * after our split: each `@name` resolved to `<@U…>` grows ~10 characters, so a
+ * part with ~200 resolved mentions can still fail.
  */
 export const SLACK_MAX_TEXT_LENGTH = 10_000;
 
