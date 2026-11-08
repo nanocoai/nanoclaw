@@ -174,7 +174,16 @@ function bootstrap(m: Machine): { rc: number | null; out: string; jqOk?: string;
   return { rc: res.status, out: res.stdout, jqOk: /^JQ_OK: (\w+)$/m.exec(raw)?.[1], log: calls(log) };
 }
 
-describe('bootstrap (nanoclaw.sh + setup.sh)', { timeout: 30_000 }, () => {
+// On a Google Cloud VM nanoclaw.sh asks at /dev/tty, which a test can't answer.
+const onGce = ['product_name', 'sys_vendor'].some((f) => {
+  try {
+    return /google/i.test(fs.readFileSync(`/sys/class/dmi/id/${f}`, 'utf8'));
+  } catch {
+    return false;
+  }
+});
+
+describe.skipIf(onGce)('bootstrap (nanoclaw.sh + setup.sh)', { timeout: 30_000 }, () => {
   it('installs jq, with no note', () => {
     const r = bootstrap({ pkg: 'apt-get', sudo: 'cached' });
     expect(r.rc).toBe(0);
