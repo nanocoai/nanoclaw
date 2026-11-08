@@ -919,6 +919,8 @@ const SUBJECT_PREFIX = new RegExp(`^(${REPLY_PREFIXES}|${FORWARD_PREFIXES})\\s*:
 /** Gmail's and Proton's inline-forward line, and Apple Mail's. */
 const FORWARD_MARKER = /^(-{2,}\s*Forwarded message\s*-{2,}|Begin forwarded message:)$/i;
 const ORIGINAL_MESSAGE = /^-{2,}\s*Original Message\s*-{2,}$/i;
+/** A forward's From line: quoted or bold, in the languages of the prefixes above. */
+const FORWARD_FROM_LINE = /^[>\s*_]*(From|Von|De|Da|Van|Från|Fra|Lähettäjä|Od|От)\s*:[*_]*\s+\S/i;
 
 /** The first non-empty line from `from` on, trimmed ('' if none). */
 function nextNonEmpty(lines: string[], from: number): string {
@@ -979,7 +981,7 @@ export function stripQuotedReply(text: string, subject?: string, forwardLine?: s
     // attachment, say) and carries no claim to set apart.
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i].trim();
-      if (FORWARD_MARKER.test(line) || historyStartsAt(lines, i) || /^From:\s.+/i.test(line)) return keep(i);
+      if (FORWARD_MARKER.test(line) || historyStartsAt(lines, i) || FORWARD_FROM_LINE.test(line)) return keep(i);
     }
     return normalized.trim();
   }
@@ -1004,7 +1006,10 @@ export function stripQuotedReply(text: string, subject?: string, forwardLine?: s
   if (out) return out;
   // Only a quote is still a message; one opening with a header block makes the
   // same claim a forward's does, with or without a forward's subject.
-  return forwardLine && cut < lines.length && historyStartsAt(lines, cut) ? keep(cut) : text.trim();
+  if (forwardLine) {
+    for (let i = 0; i < lines.length; i++) if (historyStartsAt(lines, i)) return keep(i);
+  }
+  return text.trim();
 }
 
 /** A subject without its reply/forward prefixes, for comparing two subjects. */
@@ -1153,19 +1158,18 @@ const INTERNAL_UNTRUSTED = 'internal mail from';
 
 /**
  * A domain's ASCII (punycode) form, or the domain itself when it has none.
- * domainToASCII is a URL host parser: it stops at `/ ? # \\`, decodes `%2E` and
- * folds fullwidth letters and `。`, each of which would turn a malformed or
- * look-alike domain into a clean one. So only plain labels are converted, and a
- * Unicode domain only when its ASCII form decodes back to the same spelling;
- * anything else stays as written, for isPlainAddress to refuse or to remain an
- * identity of its own.
+ * domainToASCII is a URL host parser: it stops at `/ ? # \\`, decodes `%2E`,
+ * folds fullwidth letters and `。`, and reads `2130706433` as 127.0.0.1, each
+ * of which would turn a malformed or look-alike domain into a clean one. So its
+ * answer is taken only if it says the same thing as what went in (decoded back,
+ * for a Unicode domain). Otherwise the domain stays as written, for
+ * isPlainAddress to refuse or to remain an identity of its own.
  */
 function asciiDomain(domain: string): string {
-  if (!/^[\p{L}\p{M}\p{N}.-]+$/u.test(domain)) return domain;
   const ascii = domainToASCII(domain);
   if (!ascii) return domain;
-  if (/^[\x21-\x7e]+$/.test(domain)) return ascii;
-  return domainToUnicode(ascii) === domain.normalize('NFC').toLowerCase() ? ascii : domain;
+  const back = /^[\x21-\x7e]+$/.test(domain) ? ascii : domainToUnicode(ascii);
+  return back === domain.normalize('NFC').toLowerCase() ? ascii : domain;
 }
 
 /**
@@ -1425,7 +1429,9 @@ export function senderLabel(rawAddress: string, name?: string): string {
   // fullwidth look-alike, say): what it folds to is shown beside it.
   if (!/^[\x21-\x7e]*$/.test(domain)) {
     const folded = domainToASCII(domain);
-    return folded && folded !== domain ? `${label} (${address.slice(0, at)}@${folded})` : label;
+    return folded && folded !== domain
+      ? `${label} (a look-alike of ${address.slice(0, at)}@${folded}, not the same address)`
+      : label;
   }
   if (!/(^|\.)xn--/.test(domain)) return label;
   const unicode = domainToUnicode(domain);
@@ -1519,14 +1525,16 @@ export function optionCommands(options: NormalizedOption[]): string[] {
  */
 export function optionLines(options: NormalizedOption[]): string[] {
   const commands = optionCommands(options);
-  // Labels are alike when their commands would be ("Tutor" and "tutor"); those
-  // with no command of their own (emoji: /option-N) are told apart by theirs.
+  // Labels are alike when their commands would be ("Tutor" and "tutor"). Those
+  // with no command of their own (emoji: /option-N) are alike only when the
+  // same: ✅ and ❌ say what they are, two ✅ need their values.
   const stems = options.map((o) => optionToCommand(o.label));
+  const alike = options.map((o, i) => (stems[i] === '/' ? `label:${o.label}` : stems[i]));
   const stemCount = new Map<string, number>();
-  for (const st of stems) if (st !== '/') stemCount.set(st, (stemCount.get(st) ?? 0) + 1);
+  for (const key of alike) stemCount.set(key, (stemCount.get(key) ?? 0) + 1);
   return options.map((o, i) => {
     const label = oneLine(o.label, 100);
-    const shared = (stemCount.get(stems[i]) ?? 0) > 1;
+    const shared = (stemCount.get(alike[i]) ?? 0) > 1;
     const said = stems[i] === commands[i];
     const which = o.value && o.value !== o.label ? oneLine(o.value, 80) : `option ${i + 1}`;
     const desc = shared ? `${label} (${which})` : said ? '' : label;
@@ -1666,16 +1674,21 @@ export function matchCardReply(input: {
   const card = input.cards[token];
   if (!isCommand) {
     // The approver replying to a card that still waits ("Approve" without the
-    // slash, say) is told the card is still open, not taken for chat. Anything
-    // else goes on as before: words on an answered card's thread (a reason
-    // after "Reject with reason…"), or a new mail that only names the token.
+    // slash, say) is told the card is still open, not taken for chat. A mail
+    // keeping the card's token in its subject is such a reply however its
+    // client threaded it, unless it forwards the card. Anything else goes on
+    // as before: words on an answered card's thread (a reason after "Reject
+    // with reason…"), or a forward, or a token named only in the body.
     const replyIds = messageIds(input.inReplyTo);
+    const inSubject = CARD_TOKEN_RE.test(input.subject ?? '') && !isForwardSubject(input.subject);
     const repliesToOpenCard =
       !!card &&
       card.address === input.fromAddress &&
       !card.answeredAt &&
       !card.closedAt &&
-      (replyIds.includes(card.messageId) || (!!card.nudgeMessageId && replyIds.includes(card.nudgeMessageId)));
+      (inSubject ||
+        replyIds.includes(card.messageId) ||
+        (!!card.nudgeMessageId && replyIds.includes(card.nudgeMessageId)));
     return repliesToOpenCard
       ? {
           kind: 'refused',
@@ -2219,7 +2232,11 @@ registerChannelAdapter('proton-mail', {
       const ids = messageIds(inReplyTo);
       if (ids.length === 0) return false;
       return Object.values(state.cards).some(
-        (c) => c.address === addr && !c.answeredAt && !c.closedAt && ids.includes(c.messageId),
+        (c) =>
+          c.address === addr &&
+          !c.answeredAt &&
+          !c.closedAt &&
+          (ids.includes(c.messageId) || (!!c.nudgeMessageId && ids.includes(c.nudgeMessageId))),
       );
     }
 
@@ -2452,18 +2469,28 @@ registerChannelAdapter('proton-mail', {
       for (const att of forwarded.slice(0, FORWARDED_READ_MAX)) {
         body += `\n\n${await forwardedMessageText(att.content, token)}`;
       }
-      // A note the sender typed is made theirs before the cap: the rewrite is longer.
-      body = disownTypedNotes(body);
-      if (body.length > BODY_MAX_CHARS) {
+      // Invisible characters first: stripping one can complete a typed note
+      // ("[Note from the mail\u00AD channel"), so notes are disowned after. Both
+      // lengthen the text, so the cap comes last and holds for what the agent
+      // sees. The text is cut once before them, so a huge mail costs no more
+      // than a mail at the cap.
+      const total = body.length;
+      const uncuttable = [
+        forwardMark(token),
+        markOpen(token).trimEnd(),
+        markClose(token),
+        `[invisible characters ${token}]`,
+        `[text-direction characters ${token}]`,
+      ];
+      const shown = flagInvisibleText(body.slice(0, cutBeforeMark(body, BODY_MAX_CHARS, uncuttable)), token);
+      body = disownTypedNotes(shown.text);
+      if (total > BODY_MAX_CHARS || body.length > BODY_MAX_CHARS) {
         // A floor: quoted history is left out, and the text, an attached forward
         // and the HTML were each capped before this.
-        const total = body.length;
-        const cut = cutBeforeMark(body, BODY_MAX_CHARS, [
-          forwardMark(token),
-          markOpen(token).trimEnd(),
-          markClose(token),
-        ]);
-        body = body.slice(0, cut).trimEnd() + `\n\n[… truncated, at least ${total} characters in total]`;
+        const cut = cutBeforeMark(body, BODY_MAX_CHARS, uncuttable);
+        body =
+          body.slice(0, cut).trimEnd() +
+          `\n\n[… truncated, at least ${Math.max(total, body.length)} characters in total]`;
       }
       const senderName = senderLabel(fromAddr, sender.name);
       // Message-ID threads replies; it is the sender's to choose, so it is
@@ -2474,8 +2501,6 @@ registerChannelAdapter('proton-mail', {
       // not against its own subject, which rememberThread has since stored.
       const prior = state.threads[fromAddr];
       const threadSubject = prior?.messageId === messageId ? prior.framedAgainst : prior?.subject;
-      const shown = flagInvisibleText(body, token);
-      body = shown.text;
       // The subject's marks count only when the agent sees the subject.
       const subjectMarked = !!subjectMarks?.flagged && subjectShown(subject, threadSubject, subjectPlain);
       // The note follows the marks the agent will actually see: html-to-text
@@ -2653,8 +2678,9 @@ registerChannelAdapter('proton-mail', {
         totalBytes += att.size;
         const fallback = `${type}-${uid}-${attachments.length + 1}`;
         const rawName = att.filename ?? '';
+        // Disowned before it is cleaned: the rewrite is longer, and cleaning caps the length.
         const name = uniqueAttachmentName(
-          disownTypedNotes(cleanAttachmentName(rawName, att.contentType, fallback)),
+          cleanAttachmentName(disownTypedNotes(rawName), att.contentType, fallback),
           takenNames,
         );
         if (rawName && name !== rawName) {

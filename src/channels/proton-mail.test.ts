@@ -3,6 +3,7 @@
  * what reaches the agent (quote stripping, auto-reply filtering) and how replies
  * thread back (subjects, slash-command answers). No network.
  */
+import { domainToASCII } from 'url';
 import { describe, it, expect } from 'vitest';
 import { simpleParser } from 'mailparser';
 
@@ -79,7 +80,17 @@ describe('normalizeAddress', () => {
     // Fullwidth letters and an ideographic stop do not fold into the real domain.
     expect(normalizeAddress('a@ｓｃｈｏｏｌ.example')).toBe('a@ｓｃｈｏｏｌ.example');
     expect(normalizeAddress('a@school。example')).toBe('a@school。example');
-    expect(senderLabel('a@ｓｃｈｏｏｌ.example')).toBe('a@ｓｃｈｏｏｌ.example (a@school.example)');
+    expect(senderLabel('a@ｓｃｈｏｏｌ.example')).toBe(
+      'a@ｓｃｈｏｏｌ.example (a look-alike of a@school.example, not the same address)',
+    );
+    // Numeric hosts, which a URL parser reads as IP addresses.
+    expect(normalizeAddress('a@2130706433')).toBe('a@2130706433');
+    expect(normalizeAddress('a@0x7f.1')).toBe('a@0x7f.1');
+    expect(isPlainAddress(normalizeAddress('a@2130706433'))).toBe(false);
+  });
+  it('real internationalised domains stay one sender, whatever their characters', () => {
+    expect(normalizeAddress('a@☕.example')).toBe(normalizeAddress(`a@${domainToASCII('☕.example')}`));
+    expect(normalizeAddress('a@نامه\u200cنگار.example')).toMatch(/^a@xn--/);
   });
 });
 
@@ -655,6 +666,11 @@ describe('ask_question over email', () => {
       { label: '❌', value: 'reject' },
     ]);
     expect(optionLines(emoji)).toEqual(['  /option-1 — ✅', '  /option-2 — ❌']);
+    const twoTicks = normalizeOptions([
+      { label: '✅', value: 'a' },
+      { label: '✅', value: 'b' },
+    ]);
+    expect(optionLines(twoTicks)).toEqual(['  /option-1 — ✅ (a)', '  /option-2 — ✅ (b)']);
     const cased = normalizeOptions([
       { label: 'Tutor', value: 'connect:ag-1' },
       { label: 'tutor', value: 'connect:ag-2' },
@@ -1068,5 +1084,20 @@ describe('addressDomain', () => {
   it('keeps maintained schools apart: each registers under its county', () => {
     expect(addressDomain('head@office.oakwood.kent.sch.uk')).toBe('oakwood.kent.sch.uk');
     expect(addressDomain('head@beech.lancs.sch.uk')).toBe('beech.lancs.sch.uk');
+  });
+});
+
+describe('stripQuotedReply: where the forward line goes', () => {
+  const M = '[forwarded T: …]';
+  it('a forward’s header block in another language, quoted or bold', () => {
+    for (const line of ['Von: Acme <a@x.example>', '> From: Acme', '*From:* Acme', 'De : Acme']) {
+      const text = `Please see.\n\n${line}\n\nPay`;
+      expect(stripQuotedReply(text, 'WG: Rechnung', M)).toBe(`Please see.\n\n${M}\n${line}\n\nPay`);
+    }
+  });
+  it('a signature line above a header block does not lose the label', () => {
+    const body = 'From: head@school.example\nSent: Monday\n\nPlease release the funds';
+    expect(stripQuotedReply(`--\n${body}`, 'Report', M)).toBe(`--\n${M}\n${body}`);
+    expect(stripQuotedReply(`Sent from my iPhone\n${body}`, 'Report', M)).toContain(M);
   });
 });
