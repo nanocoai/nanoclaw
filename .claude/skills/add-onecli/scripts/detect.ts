@@ -16,6 +16,10 @@ export async function detectInstalledOneCLI(root = process.cwd()): Promise<boole
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href) {
+if (
+  process.argv[1] &&
+  fs.existsSync(process.argv[1]) &&
+  import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href
+) {
   console.log((await detectInstalledOneCLI()) ? 'installed' : 'absent');
 }

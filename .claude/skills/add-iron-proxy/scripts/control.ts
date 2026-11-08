@@ -257,7 +257,11 @@ export async function storeModelCredential(value: string, host: string, root: st
   await grantSecret('static', credential.id, root);
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href) {
+if (
+  process.argv[1] &&
+  fs.existsSync(process.argv[1]) &&
+  import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href
+) {
   const [command, kind, id] = process.argv.slice(2);
   const run = async () => {
     if (command === 'grant' && kind && id) await grantSecret(kind, id);

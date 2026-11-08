@@ -198,7 +198,11 @@ export async function run(agentProvider = process.argv[2] || 'claude', root = pr
   p.log.success('Claude account connected through Iron Proxy.');
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href) {
+if (
+  process.argv[1] &&
+  fs.existsSync(process.argv[1]) &&
+  import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href
+) {
   void run().catch((error) => {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);

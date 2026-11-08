@@ -42,6 +42,10 @@ export function detectInstalledIronProxy(
   return container !== '' && inspect(container);
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href) {
+if (
+  process.argv[1] &&
+  fs.existsSync(process.argv[1]) &&
+  import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href
+) {
   console.log(detectInstalledIronProxy() ? 'installed' : 'absent');
 }

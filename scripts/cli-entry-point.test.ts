@@ -23,5 +23,15 @@ describe('CLI entry-point check', () => {
     const run = spawnSync(resolve('node_modules/.bin/tsx'), [script, join(root, 'skill')], { encoding: 'utf8' });
     expect(run.status).toBe(0);
     expect(JSON.parse(run.stdout)).toMatchObject({ directives: [] });
+  }, 20_000);
+
+  it('does not throw on import when argv[1] is not a file', async () => {
+    const argv1 = process.argv[1];
+    process.argv[1] = join(tmpdir(), 'nanoclaw-no-such-entry');
+    try {
+      await expect(import('./skill-directives.js')).resolves.toBeDefined();
+    } finally {
+      process.argv[1] = argv1;
+    }
   });
 });

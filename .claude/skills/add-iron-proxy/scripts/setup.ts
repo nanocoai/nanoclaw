@@ -417,7 +417,11 @@ export async function run(args: string[], projectRoot = process.cwd()): Promise<
   console.log(`Central Iron Proxy ${pins['iron-proxy-commit']} is ready.`);
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href) {
+if (
+  process.argv[1] &&
+  fs.existsSync(process.argv[1]) &&
+  import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href
+) {
   void installStep(() => run(process.argv.slice(2))).then((ok) => {
     if (!ok) process.exitCode = 1;
   });

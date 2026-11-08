@@ -1131,7 +1131,11 @@ export async function removeSkill(
 }
 
 // CLI — the planner (no writes)
-if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
+if (
+  process.argv[1] &&
+  existsSync(process.argv[1]) &&
+  import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href
+) {
   const skillDir = process.argv[2];
   if (!skillDir) {
     console.error('usage: pnpm exec tsx scripts/skill-apply.ts <skillDir>');

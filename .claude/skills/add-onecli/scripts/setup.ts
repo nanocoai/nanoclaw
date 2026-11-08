@@ -581,6 +581,10 @@ export async function run(args: string[]): Promise<void> {
   if (readinessError) throw new Error(readinessError);
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href) {
+if (
+  process.argv[1] &&
+  fs.existsSync(process.argv[1]) &&
+  import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href
+) {
   void run(process.argv.slice(2));
 }
