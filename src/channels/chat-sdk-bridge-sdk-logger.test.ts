@@ -120,6 +120,8 @@ describe('Chat SDK logs reach our log', () => {
       error: err,
     });
     chatSdkLogger().error('Slash command processing error', { command: '/deploy', text: 'prod now' });
+    chatSdkLogger().error('Action processing error', { actionId: 'ncq:q-old:private release plan', messageId: 'm1' });
+    chatSdkLogger().error('Action processing error', { actionId: 'ncq:q-new', messageId: 'm2' });
 
     expect(log.error).toHaveBeenCalledWith('chat-sdk: Button callbackUrl POST failed', {
       callbackUrl: 'https://hooks.example.com/…',
@@ -128,6 +130,15 @@ describe('Chat SDK logs reach our log', () => {
     expect(log.error).toHaveBeenCalledWith('chat-sdk: Slash command processing error', {
       command: '/deploy',
       text: '[8 chars]',
+    });
+    // Old question cards carry the chosen answer after the second colon.
+    expect(log.error).toHaveBeenCalledWith('chat-sdk: Action processing error', {
+      actionId: 'ncq:q-old:…',
+      messageId: 'm1',
+    });
+    expect(log.error).toHaveBeenCalledWith('chat-sdk: Action processing error', {
+      actionId: 'ncq:q-new',
+      messageId: 'm2',
     });
   });
 

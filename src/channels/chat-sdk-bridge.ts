@@ -230,8 +230,8 @@ const SDK_TEXT_KEYS = new Set(['text', 'messageText']);
 
 /**
  * Our log prints an Error's message and stack only under `err`; the SDK passes
- * it as `error`. Message text is cut to its length and a URL to its origin, so
- * a callback URL's token never reaches the log.
+ * it as `error`. Message text is cut to its length, a URL to its origin and an
+ * action id to its first two parts (old question cards carry the answer there).
  */
 function sdkLogData(args: unknown[]): Record<string, unknown> | undefined {
   const data: Record<string, unknown> = {};
@@ -242,12 +242,18 @@ function sdkLogData(args: unknown[]): Record<string, unknown> | undefined {
       for (const [key, value] of Object.entries(arg)) {
         if (value instanceof Error && data.err === undefined) data.err = value;
         else if (typeof value === 'string' && SDK_TEXT_KEYS.has(key)) data[key] = `[${value.length} chars]`;
+        else if (typeof value === 'string' && key === 'actionId') data[key] = actionIdHead(value);
         else data[key] = typeof value === 'string' ? urlOrigin(value) : value;
       }
     } else if (arg !== undefined) extra.push(arg);
   }
   if (extra.length > 0) data.args = extra;
   return Object.keys(data).length > 0 ? data : undefined;
+}
+
+function actionIdHead(value: string): string {
+  const parts = value.split(':');
+  return parts.length > 2 ? `${parts.slice(0, 2).join(':')}:…` : value;
 }
 
 function urlOrigin(value: string): string {
