@@ -29,7 +29,7 @@ import {
 import { log } from '../log.js';
 import { SqliteStateAdapter } from '../state-sqlite.js';
 import { registerWebhookAdapter } from '../webhook-server.js';
-import { cardPartProblems, isCardPart, isRecord, type CardPart } from './card-parts.js';
+import { cardProblems, isCardPart, isRecord, type CardPart } from './card-parts.js';
 import { CardTooLongError, cardQuestionTooLong, normalizeOptions, type NormalizedOption } from './ask-question.js';
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage } from './adapter.js';
 import { INSTANCE_KEY_RE } from './channel-registry.js';
@@ -1059,14 +1059,15 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         const title = (cardSpec.title as string) || '';
         const fallbackText = (content.fallbackText as string) || (cardSpec.description as string) || title || '';
 
+        // Checked again here: anything in the container can write this row, not only send_card.
+        const problems = cardProblems(cardSpec);
+        if (problems.length > 0) throw new Error(`send_card card refused: ${problems.join('; ')}`);
+
         const cardChildren: CardChild[] = [];
         if (typeof cardSpec.description === 'string' && cardSpec.description) {
           cardChildren.push(CardText(cardSpec.description));
         }
         if (Array.isArray(cardSpec.children)) {
-          // Checked again here: anything in the container can write this row, not only send_card.
-          const problems = cardPartProblems(cardSpec.children);
-          if (problems.length > 0) throw new Error(`send_card card refused: ${problems.join('; ')}`);
           for (const child of cardSpec.children) {
             if (isCardPart(child)) {
               cardChildren.push(buildCardPart(child));

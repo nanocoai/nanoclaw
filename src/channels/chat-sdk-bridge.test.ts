@@ -1081,7 +1081,11 @@ describe('createChatSdkBridge.deliver — send_card card parts', () => {
       [lineChart({ categories: ['a'], series: [{ name: 'b', values: [Infinity] }] })],
       /values must be numbers/,
     ],
-    ['a table with no text', [{ type: 'Table', props: { headers: [' '], rows: [] } }], /the table has no text to show/],
+    [
+      'a table with no text',
+      [{ type: 'Table', props: { headers: [' '], rows: [] } }],
+      /the table has no text in its headers or cells/,
+    ],
     [
       'a table of 31 rows',
       [{ type: 'Table', props: { headers: ['a'], rows: Array.from({ length: 31 }, () => ['1']) } }],
@@ -1165,6 +1169,14 @@ describe('createChatSdkBridge.deliver — send_card card parts', () => {
     const { calls, delivery } = await deliverCard({ title: 'Perf', children });
 
     await expect(delivery).rejects.toThrow(reason);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('counts the description toward the card budget and posts nothing', async () => {
+    const children = [{ type: 'Text', props: { content: 'z'.repeat(2_500) } }];
+    const { calls, delivery } = await deliverCard({ title: 'Perf', description: 'x'.repeat(10_000), children });
+
+    await expect(delivery).rejects.toThrow(/at most 12000 per card/);
     expect(calls).toHaveLength(0);
   });
 

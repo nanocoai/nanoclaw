@@ -377,7 +377,7 @@ describe('send_card — card parts', () => {
     ['a pie slice of zero', pie(0), 'segments[0].value'],
     ['a table too long for Slack to draw', table([['x'.repeat(10_000), 'a', 'b']]), 'at most 10000'],
     ['a table given as object rows', { type: 'Table', props: { headers: ['Evidence'], rows: [{ Evidence: 'x' }] } }, 'row 0 must be a list of cells'],
-    ['a table with no text', { type: 'Table', props: { headers: [' '], rows: [[' ']] } }, 'the table has no text to show'],
+    ['a table with no text', { type: 'Table', props: { headers: [' '], rows: [[' ']] } }, 'the table has no text in its headers or cells'],
     [
       'a table cell given as a template',
       { type: 'Table', props: { headers: ['Evidence'], rows: [[{ $template: 'x' }]] } },
@@ -449,10 +449,23 @@ describe('send_card — card parts', () => {
       Array.from({ length: 5 }, () => ({ type: 'Text', props: { content: 'x'.repeat(2_500) } })),
       'at most 12000 per card',
     ],
+    [
+      '8,000 quote marks, which Teams receives as 16,000 characters',
+      Array.from({ length: 4 }, () => ({ type: 'Text', props: { content: '"'.repeat(2_000) } })),
+      'at most 12000 per card',
+    ],
   ])('refuses a card of %s', async (_, children, reason) => {
     const result = await sendCard.handler({ card: { title: 'Perf', children } });
 
     expect(result.content[0].text).toContain(reason);
+    expect(getUndeliveredMessages()).toHaveLength(0);
+  });
+
+  it('counts the description and text children toward the card budget', async () => {
+    const children = ['y'.repeat(1_000), { type: 'Text', props: { content: 'z'.repeat(1_500) } }];
+    const result = await sendCard.handler({ card: { title: 'Perf', description: 'x'.repeat(10_000), children } });
+
+    expect(result.content[0].text).toContain('at most 12000 per card');
     expect(getUndeliveredMessages()).toHaveLength(0);
   });
 
