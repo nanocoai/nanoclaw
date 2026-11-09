@@ -1510,7 +1510,8 @@ type MarkdownNode = { type: string; value?: unknown; alt?: unknown; url?: unknow
 
 /**
  * Text of a markdown AST where Mattermost looks for @-mentions, nodes joined
- * by a space: no code and no bare URLs, but HTML and image alt text count.
+ * by a space: no code and no bare URLs, but HTML and image alt text (inline
+ * or reference-style) count.
  */
 function textOutsideCode(node: MarkdownNode): string {
   if (node.type === 'code' || node.type === 'inlineCode' || isBareUrl(node)) {
@@ -1519,7 +1520,7 @@ function textOutsideCode(node: MarkdownNode): string {
   if (node.type === 'text' || node.type === 'html') {
     return typeof node.value === 'string' ? node.value : '';
   }
-  if (node.type === 'image') {
+  if (node.type === 'image' || node.type === 'imageReference') {
     return typeof node.alt === 'string' ? node.alt : '';
   }
   return (node.children ?? []).map(textOutsideCode).join(' ');
