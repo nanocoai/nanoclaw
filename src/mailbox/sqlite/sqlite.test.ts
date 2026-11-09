@@ -138,6 +138,7 @@ describe('SQLite mailbox canonical serialization', () => {
     const inbound = wrapSqliteInbound(inboundDb);
 
     insert.run('echo', 2, 'chat', 'session-echo', 1);
+    insert.run('cli-reply', 3, 'system', null, 0);
     expect(inbound.onlyAccumulated()).toBe(false);
 
     insert.run('ambient', 4, 'chat', 'slack', 0);

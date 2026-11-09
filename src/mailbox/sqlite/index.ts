@@ -223,10 +223,11 @@ export function wrapSqliteInbound(db: Database.Database, nextSequence = () => ne
     onlyAccumulated: () => {
       const row = db
         .prepare(
-          "SELECT COUNT(*) AS n, MAX(trigger) AS woke FROM messages_in WHERE channel_type IS NULL OR channel_type != 'session-echo'",
+          `SELECT SUM(kind IN ('chat', 'chat-sdk') AND trigger = 0) AS chatter, MAX(trigger) AS woke
+             FROM messages_in WHERE channel_type IS NULL OR channel_type != 'session-echo'`,
         )
-        .get() as { n: number; woke: number | null };
-      return row.n > 0 && row.woke === 0;
+        .get() as { chatter: number | null; woke: number | null };
+      return (row.chatter ?? 0) > 0 && row.woke === 0;
     },
     insertTask: async (task) => insertTaskRow(db, task, nextSequence()),
     armNextTask: async (originalId, task) => {

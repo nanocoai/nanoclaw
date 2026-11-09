@@ -1246,7 +1246,7 @@ describe('router — per-wiring thread policy', () => {
     });
   });
 
-  it('mention-sticky stays active when only routing data recreates a reset inbox', async () => {
+  it('mention-sticky stays active when routing data or a silent reply recreates a reset inbox', async () => {
     await getDb().run("UPDATE messaging_group_agents SET engage_mode = 'mention-sticky' WHERE id = 'mga-tp'");
 
     await withThreadedAdapter(async () => {
@@ -1260,6 +1260,13 @@ describe('router — per-wiring thread policy', () => {
       const session = await findSession('mg-tp', 'thread-42');
       fs.rmSync(sessionDir('ag-tp', session!.id), { recursive: true, force: true });
       await writeSessionRouting('ag-tp', session!.id);
+      await writeSessionMessage('ag-tp', session!.id, {
+        id: 'late-cli-reply',
+        kind: 'system',
+        timestamp: now(),
+        content: JSON.stringify({ text: 'cli done' }),
+        trigger: false,
+      });
 
       await routeInbound(threadedEvent('msg-after-routing-reset'));
       expect(wake).toHaveBeenCalledTimes(2);
