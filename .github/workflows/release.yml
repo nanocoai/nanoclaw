@@ -141,6 +141,12 @@ jobs:
           git fetch --force origin main:refs/remotes/origin/main --tags
           test "$(git rev-parse HEAD)" = "$TARGET_SHA"
           git merge-base --is-ancestor "$TARGET_SHA" origin/main
+          # Order check from this workflow's own commit: an older target's release.mjs lacks it.
+          # A failed lookup, an empty tag list or a missing success line fails the step.
+          git ls-remote --tags --refs origin 'refs/tags/v*' > "$RUNNER_TEMP/release-tags.txt"
+          git show "$GITHUB_SHA:scripts/release.mjs" > "$RUNNER_TEMP/release-order.mjs"
+          ORDER=$(node "$RUNNER_TEMP/release-order.mjs" order "$RELEASE_VERSION" "$RUNNER_TEMP/release-tags.txt")
+          test "$ORDER" = "v${RELEASE_VERSION} sorts above every existing tag of its version"
 
           TAG="v${RELEASE_VERSION}"
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
@@ -218,6 +224,12 @@ jobs:
           git fetch --force origin main:refs/remotes/origin/main --tags
           test "$(git rev-parse HEAD)" = "$TARGET_SHA"
           git merge-base --is-ancestor "$TARGET_SHA" origin/main
+          # Order check from this workflow's own commit: an older target's release.mjs lacks it.
+          # A failed lookup, an empty tag list or a missing success line fails the step.
+          git ls-remote --tags --refs origin 'refs/tags/v*' > "$RUNNER_TEMP/release-tags.txt"
+          git show "$GITHUB_SHA:scripts/release.mjs" > "$RUNNER_TEMP/release-order.mjs"
+          ORDER=$(node "$RUNNER_TEMP/release-order.mjs" order "$RELEASE_VERSION" "$RUNNER_TEMP/release-tags.txt")
+          test "$ORDER" = "v${RELEASE_VERSION} sorts above every existing tag of its version"
 
           TAG="v${RELEASE_VERSION}"
           if git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null; then
