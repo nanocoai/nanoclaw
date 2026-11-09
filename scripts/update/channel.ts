@@ -55,7 +55,10 @@ function isPrereleaseTag(tag: ParsedTag): boolean {
   return tag.beta !== undefined || tag.rc !== undefined;
 }
 
-/** Numeric per field, so CalVer v2026.10.0 sorts after v2.4.0; within a version beta.N < rc.N < the release. */
+/**
+ * Numeric per field, so CalVer v2026.10.0 sorts after v2.4.0; within a version beta.N < rc.N < the release.
+ * scripts/release.mjs keeps a copy for its release-time order check; release.test.ts checks they agree.
+ */
 export function compareReleaseTags(a: string, b: string): number {
   const x = parseReleaseTag(a);
   const y = parseReleaseTag(b);

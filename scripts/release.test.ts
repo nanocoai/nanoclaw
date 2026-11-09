@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,12 +9,16 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   assembleReleaseBody,
   changelogSection,
+  compareTags,
   isPrerelease,
   publicationPlan,
   publicationReadbackStatus,
+  tagsFromLsRemote,
   unreleasedSection,
   verifyRelease,
+  verifyReleaseOrder,
 } from './release.mjs';
+import { compareReleaseTags } from './update/channel.js';
 
 const releaseWorkflow = readFileSync(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8');
 const repositoryChangelog = readFileSync(new URL('../CHANGELOG.md', import.meta.url), 'utf8');
@@ -402,4 +406,240 @@ describe('release.mjs verify command', () => {
       expect(() => verify(version)).toThrow(/version must be x\.y\.z, x\.y\.z-beta\.N or x\.y\.z-rc\.N/);
     },
   );
+});
+
+describe('release order check', () => {
+  const existing = ['v2026.10.0', 'v2026.10.1-rc.1', 'v2026.10.1-rc.2', 'pre-update-x', 'v99.0.0-junk'];
+
+  it('refuses a beta once an rc of the same version exists', () => {
+    expect(() => verifyReleaseOrder('2026.11.0-beta.2', [...existing, 'v2026.11.0-rc.1'])).toThrow(
+      'v2026.11.0-beta.2 does not sort above v2026.11.0-rc.1, which already exists',
+    );
+  });
+
+  it('refuses a lower number after a higher one', () => {
+    expect(() => verifyReleaseOrder('2026.11.0-beta.2', [...existing, 'v2026.11.0-beta.3'])).toThrow(
+      'does not sort above v2026.11.0-beta.3',
+    );
+    expect(() => verifyReleaseOrder('2026.11.0-rc.1', [...existing, 'v2026.11.0-rc.2'])).toThrow(
+      'does not sort above v2026.11.0-rc.2',
+    );
+  });
+
+  it('refuses any pre-release once the release exists', () => {
+    for (const version of ['2026.11.0-beta.9', '2026.11.0-rc.3']) {
+      expect(() => verifyReleaseOrder(version, [...existing, 'v2026.11.0-rc.2', 'v2026.11.0'])).toThrow(
+        'does not sort above v2026.11.0,',
+      );
+    }
+  });
+
+  it('refuses a tie with a differently spelled tag', () => {
+    expect(() => verifyReleaseOrder('2026.11.0-rc.1', [...existing, 'v2026.11.0-rc.01'])).toThrow(
+      'does not sort above v2026.11.0-rc.01',
+    );
+  });
+
+  it('passes the normal next beta, rc and release', () => {
+    const tags = [...existing, 'v2026.11.0-beta.1', 'v2026.11.0-beta.2'];
+    expect(() => verifyReleaseOrder('2026.11.0-beta.3', tags)).not.toThrow();
+    expect(() => verifyReleaseOrder('2026.11.0-rc.1', tags)).not.toThrow();
+    expect(() => verifyReleaseOrder('2026.11.0-rc.2', [...tags, 'v2026.11.0-rc.1'])).not.toThrow();
+    expect(() => verifyReleaseOrder('2026.11.0', [...tags, 'v2026.11.0-rc.1'])).not.toThrow();
+  });
+
+  it('passes a version with no tags yet, ignoring other versions and junk', () => {
+    expect(() => verifyReleaseOrder('2026.11.0-beta.1', existing)).not.toThrow();
+    expect(() => verifyReleaseOrder('2026.11.0-rc.1', [...existing, 'v2026.12.0-beta.4'])).not.toThrow();
+  });
+
+  it('passes a publish rerun whose own tag was already pushed', () => {
+    expect(() => verifyReleaseOrder('2026.11.0-beta.1', [...existing, 'v2026.11.0-beta.1'])).not.toThrow();
+    expect(() => verifyReleaseOrder('2026.11.0', [...existing, 'v2026.11.0-rc.1', 'v2026.11.0'])).not.toThrow();
+  });
+
+  it('still rejects an unsupported version', () => {
+    expect(() => verifyReleaseOrder('2026.11.0-alpha.1', existing)).toThrow('x.y.z, x.y.z-beta.N or x.y.z-rc.N');
+  });
+
+  it('orders tags exactly as the update channel does', () => {
+    const tags = [
+      'v2.4.0',
+      'v2.10.0',
+      'v2026.10.0',
+      'v2026.10.1-rc.1',
+      'v2026.10.1-rc.01',
+      'v2026.10.1-rc.10',
+      'v2026.10.1',
+      'v2026.11.0-beta.1',
+      'v2026.11.0-beta.2',
+      'v2026.11.0-beta.10',
+      'v2026.11.0-rc.1',
+      'v2026.11.0',
+    ];
+    for (const a of tags) {
+      for (const b of tags) {
+        expect([a, b, Math.sign(compareTags(a, b))]).toEqual([a, b, Math.sign(compareReleaseTags(a, b))]);
+      }
+    }
+  });
+
+  it('reads tag names from git ls-remote output and refuses an empty list', () => {
+    const listing = [
+      'aaa\trefs/tags/v2026.11.0-beta.1',
+      'bbb\trefs/tags/v2026.11.0-beta.1^{}',
+      'ccc\trefs/tags/v2026.10.1',
+      '',
+    ].join('\n');
+    expect(tagsFromLsRemote(listing)).toEqual(['v2026.11.0-beta.1', 'v2026.10.1']);
+    expect(() => tagsFromLsRemote('')).toThrow('the tag list is empty');
+    expect(() => tagsFromLsRemote('warning: something\n')).toThrow('the tag list is empty');
+  });
+});
+
+describe('release.mjs order command', () => {
+  const script = fileURLToPath(new URL('./release.mjs', import.meta.url));
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  // An empty directory: the command must not need package.json or CHANGELOG.md.
+  function order(version: string, listing?: string): string {
+    const dir = mkdtempSync(path.join(tmpdir(), 'release-order-cli-'));
+    dirs.push(dir);
+    const args = [script, 'order', version];
+    if (listing !== undefined) {
+      writeFileSync(path.join(dir, 'tags.txt'), listing);
+      args.push('tags.txt');
+    }
+    return execFileSync(process.execPath, args, { cwd: dir, encoding: 'utf8', stdio: 'pipe' });
+  }
+
+  it('passes the next pre-release and refuses one below an existing tag', () => {
+    const listing = 'aaa\trefs/tags/v2026.10.1\nbbb\trefs/tags/v2026.11.0-rc.1\n';
+    expect(order('2026.11.0-rc.2', listing)).toBe('v2026.11.0-rc.2 sorts above every existing tag of its version\n');
+    expect(() => order('2026.11.0-beta.2', listing)).toThrow('does not sort above v2026.11.0-rc.1');
+  });
+
+  it('runs main() when started through a symlinked path', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'release-order-link-'));
+    dirs.push(dir);
+    symlinkSync(script, path.join(dir, 'release.mjs'));
+    writeFileSync(path.join(dir, 'tags.txt'), 'aaa\trefs/tags/v2026.11.0-rc.1\n');
+    expect(() =>
+      execFileSync(process.execPath, [path.join(dir, 'release.mjs'), 'order', '2026.11.0-beta.1', 'tags.txt'], {
+        cwd: dir,
+        stdio: 'pipe',
+      }),
+    ).toThrow('does not sort above v2026.11.0-rc.1');
+  });
+
+  it('fails without a tag list', () => {
+    expect(() => order('2026.11.0-beta.1')).toThrow('order requires the path to a git ls-remote tag list');
+    expect(() => order('2026.11.0-beta.1', '')).toThrow('the tag list is empty');
+  });
+});
+
+describe('release workflow order check', () => {
+  const script = fileURLToPath(new URL('./release.mjs', import.meta.url));
+  const lines = releaseWorkflow.split('\n');
+  const start = lines.findIndex((line) => line.includes("# Order check from this workflow's own commit"));
+  const block = lines
+    .slice(start, start + 6)
+    .map((line) => line.trim())
+    .join('\n');
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  const git = (cwd: string, ...args: string[]) =>
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'user.name=Test',
+        '-c',
+        'user.email=test@example.com',
+        '-c',
+        'commit.gpgsign=false',
+        '-c',
+        'tag.gpgsign=false',
+        '-c',
+        'core.hooksPath=/dev/null',
+        ...args,
+      ],
+      { cwd, encoding: 'utf8', stdio: 'pipe' },
+    ).trim();
+
+  /** The target commit carries an old release.mjs without `order`; GITHUB_SHA carries this one. */
+  function fixture(tags: string[], workflowScript = readFileSync(script, 'utf8')) {
+    const root = mkdtempSync(path.join(tmpdir(), 'release-order-workflow-'));
+    dirs.push(root);
+    const work = path.join(root, 'work');
+    mkdirSync(path.join(work, 'scripts'), { recursive: true });
+    mkdirSync(path.join(root, 'runner-temp'));
+    git(root, 'init', '-q', '-b', 'main', work);
+    writeFileSync(path.join(work, 'scripts/release.mjs'), "console.error('old release.mjs'); process.exit(1);\n");
+    git(work, 'add', '.');
+    git(work, 'commit', '-qm', 'old target');
+    const target = git(work, 'rev-parse', 'HEAD');
+    writeFileSync(path.join(work, 'scripts/release.mjs'), workflowScript);
+    git(work, 'commit', '-qam', 'workflow commit');
+    for (const tag of tags) git(work, 'tag', '-a', tag, '-m', tag);
+    const origin = path.join(root, 'origin.git');
+    git(root, 'clone', '-q', '--bare', work, origin);
+    const checkout = path.join(root, 'checkout');
+    git(root, 'clone', '-q', origin, checkout);
+    git(checkout, 'checkout', '-q', '--detach', target);
+    return { checkout, runnerTemp: path.join(root, 'runner-temp'), sha: git(work, 'rev-parse', 'HEAD') };
+  }
+
+  function run(f: ReturnType<typeof fixture>, version: string): string {
+    return execFileSync('bash', ['-c', `set -euo pipefail\n${block}`], {
+      cwd: f.checkout,
+      encoding: 'utf8',
+      stdio: 'pipe',
+      env: { ...process.env, GITHUB_SHA: f.sha, RELEASE_VERSION: version, RUNNER_TEMP: f.runnerTemp },
+    });
+  }
+
+  it('runs the same block in the verify and publish jobs, after the target checks', () => {
+    expect(block.split('\n').at(-1)).toBe(
+      'test "$ORDER" = "v${RELEASE_VERSION} sorts above every existing tag of its version"',
+    );
+    const indented = lines.slice(start, start + 6).join('\n');
+    expect(releaseWorkflow.split(indented)).toHaveLength(3);
+    expect(releaseWorkflow.split(`git merge-base --is-ancestor "$TARGET_SHA" origin/main\n${indented}`)).toHaveLength(
+      3,
+    );
+  });
+
+  it('keeps release.mjs free of non-builtin imports, so its copy runs from RUNNER_TEMP', () => {
+    const imports = [...readFileSync(script, 'utf8').matchAll(/^import .* from '([^']+)';$/gm)].map((m) => m[1]);
+    expect(imports.length).toBeGreaterThan(0);
+    expect(imports.every((name) => name.startsWith('node:'))).toBe(true);
+  });
+
+  it('checks the order with the workflow commit, not the target release.mjs', { timeout: 30_000 }, () => {
+    const f = fixture(['v2026.10.1', 'v2026.11.0-rc.1']);
+    expect(run(f, '2026.11.0-rc.2')).toBe('');
+    expect(() => run(f, '2026.11.0-beta.2')).toThrow('does not sort above v2026.11.0-rc.1');
+  });
+
+  it('fails when the tag list is empty', { timeout: 30_000 }, () => {
+    expect(() => run(fixture([]), '2026.11.0-beta.1')).toThrow('the tag list is empty');
+  });
+
+  it('fails when the order command exits 0 without its success line', { timeout: 30_000 }, () => {
+    expect(() => run(fixture(['v2026.10.1'], 'process.exit(0);\n'), '2026.11.0-beta.1')).toThrow();
+  });
+
+  it('fails when the tag lookup fails', { timeout: 30_000 }, () => {
+    const f = fixture(['v2026.10.1']);
+    git(f.checkout, 'remote', 'set-url', 'origin', path.join(f.runnerTemp, 'missing.git'));
+    expect(() => run(f, '2026.11.0-beta.1')).toThrow();
+    expect(readFileSync(path.join(f.runnerTemp, 'release-tags.txt'), 'utf8')).toBe('');
+  });
 });
