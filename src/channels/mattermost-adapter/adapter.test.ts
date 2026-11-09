@@ -78,6 +78,9 @@ async function initializePostedHarness(): Promise<{
     if (url.endsWith(`/users/${USER_ID}`)) {
       return response({ id: USER_ID, is_bot: false, username: 'operator' });
     }
+    if (url.endsWith(`/posts/${POST_ID}`)) {
+      return response({ channel_id: CHANNEL_ID, create_at: 1, id: POST_ID, message: 'hello', user_id: USER_ID });
+    }
     return response({ message: 'not found' }, 404);
   }) as unknown as typeof fetch;
   const processMessage = vi.fn();
@@ -119,6 +122,16 @@ describe('Mattermost posted-message threads', () => {
     const warm = adapter.parseMessage(post);
     expect(warm.threadId).toBe(`mattermost:${CHANNEL_ID}`);
     expect(warm.isMention).toBe(false);
+  });
+
+  it('fetches a top-level group post into the rooted thread it was delivered in', async () => {
+    const { adapter } = await initializePostedHarness();
+    const rooted = `mattermost:${CHANNEL_ID}:${POST_ID}`;
+
+    expect((await adapter.fetchMessage(rooted, POST_ID))?.threadId).toBe(rooted);
+    expect((await adapter.fetchMessage(`mattermost:${CHANNEL_ID}`, POST_ID))?.threadId).toBe(
+      `mattermost:${CHANNEL_ID}`,
+    );
   });
 
   it('opens a thread rooted at a top-level post that mentions the bot', async () => {

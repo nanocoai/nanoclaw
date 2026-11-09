@@ -586,9 +586,16 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
   // =========================================================================
 
   /** One post by id, or `null` when Mattermost has no such post. */
-  async fetchMessage(_threadId: string, messageId: string): Promise<Message<MattermostPost> | null> {
+  async fetchMessage(threadId: string, messageId: string): Promise<Message<MattermostPost> | null> {
     try {
       const post = await this.rest.getPost(toPostId(messageId));
+      // A live top-level group post lives in its own rooted thread, which the
+      // post alone can't show; keep the caller's thread when it is that one.
+      if (threadId === threadIdForPost(post, true)) {
+        const message = this.toMessage(post, threadId);
+        message.isMention = this.detectTextMention(post);
+        return message;
+      }
       return this.parseMessage(post);
     } catch (error) {
       if (error instanceof MattermostApiError && error.status === 404) {
