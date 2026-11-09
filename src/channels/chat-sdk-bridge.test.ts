@@ -1891,7 +1891,7 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
   it.each([10, 11, 12])(
     'addresses a click in a thread (channel type %i) by its parent channel and the thread, like a card sent into it',
     async (type) => {
-      const { bridge, click, onAction } = await startDiscord('q-discord-thread', review);
+      const { bridge, click, onAction, editMessage } = await startDiscord('q-discord-thread', review);
       try {
         await click({ id: 'clicker-1', username: 'Ann' }, undefined, {
           channel_id: 'T1',
@@ -1902,6 +1902,10 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
             messageId: 'card-1',
             platformId: 'discord:G1:P1',
           }),
+        );
+        // The card is edited in the thread itself.
+        await vi.waitFor(() =>
+          expect(editMessage).toHaveBeenCalledWith('discord:G1:P1:T1', 'card-1', expect.anything()),
         );
       } finally {
         await bridge.teardown();
