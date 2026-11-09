@@ -235,9 +235,42 @@ function breakingRequirements(runtime: UpdateRuntime, root: string, from: string
     }));
 }
 
-/** Clean, and no lockfile with conflict markers that `git add` let through. */
+/** What git keeps while a merge, rebase or cherry-pick is unfinished. */
+const UNFINISHED: Record<string, UpdateState['strategy']> = {
+  MERGE_HEAD: 'merge',
+  'rebase-merge': 'rebase',
+  'rebase-apply': 'rebase',
+  CHERRY_PICK_HEAD: 'cherry-pick',
+  sequencer: 'cherry-pick',
+};
+
+function unfinishedOperation(state: UpdateState, runtime: UpdateRuntime): UpdateState['strategy'] | undefined {
+  const names = Object.keys(UNFINISHED);
+  const paths = git(runtime, state.stageRoot, ['rev-parse', ...names.flatMap((name) => ['--git-path', name])]).split(
+    '\n',
+  );
+  const open = names.find((_, i) => fs.existsSync(path.resolve(state.stageRoot, paths[i])));
+  return open ? UNFINISHED[open] : undefined;
+}
+
+/** Clean, nothing unfinished, on the stage branch, and no lockfile with conflict markers that `git add` let through. */
 function assertStageReady(state: UpdateState, runtime: UpdateRuntime): void {
   assertClean(runtime, state.stageRoot, 'Staging worktree');
+  // A killed prepare, or a commit by hand mid-rebase, can leave a clean tree
+  // with only part of upstream applied.
+  const op = unfinishedOperation(state, runtime);
+  if (op) {
+    throw new Error(`The staging worktree has an unfinished ${op}: finish it (git ${op} --continue), then resume`);
+  }
+  // Every strategy ends on the stage branch. A rebase detaches HEAD first, and
+  // its apply backend does so before it records any state.
+  const branch = tryGit(runtime, state.stageRoot, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
+  if (!branch.ok || branch.stdout.trim() !== state.stageBranch) {
+    throw new Error(
+      `The staging worktree must be on ${state.stageBranch}: finish any rebase (git rebase --continue), ` +
+        'or abandon this update and prepare again',
+    );
+  }
   assertLockfilesUnmarked(runtime.runner, state.stageRoot, state.upstreamRef);
 }
 
@@ -266,6 +299,10 @@ export function prepareUpdate(options: PrepareOptions, runtime = createUpdateRun
   assertClean(runtime, projectRoot);
   currentBranch(runtime, projectRoot);
   git(runtime, projectRoot, ['rev-parse', '--verify', options.upstreamRef]);
+  const strategy = options.strategy ?? 'merge';
+  if (strategy === 'cherry-pick' && !options.commits?.length) {
+    throw new Error('Cherry-pick strategy requires at least one commit');
+  }
 
   const originalHead = git(runtime, projectRoot, ['rev-parse', 'HEAD']);
   const short = originalHead.slice(0, 8);
@@ -280,7 +317,6 @@ export function prepareUpdate(options: PrepareOptions, runtime = createUpdateRun
   const unique = id.slice(-8);
   const backupBranch = `backup/pre-update-${short}-${stamp}-${unique}`;
   const backupTag = `pre-update-${short}-${stamp}-${unique}`;
-  const strategy = options.strategy ?? 'merge';
 
   fs.mkdirSync(transactionRoot, { recursive: true });
   git(runtime, projectRoot, ['branch', backupBranch, originalHead]);
@@ -290,7 +326,10 @@ export function prepareUpdate(options: PrepareOptions, runtime = createUpdateRun
   const state: UpdateState = {
     schema: 'nanoclaw-update/v1',
     id,
-    phase: 'prepared',
+    // Prepared only once the strategy and any lockfile regenerate finish, so a
+    // prepare killed midway leaves a phase that resume picks up.
+    phase: 'conflict',
+    lastError: `Prepare stopped before the ${strategy} finished. Finish or resolve it in the stage, then resume.`,
     projectRoot,
     transactionRoot,
     stageRoot,
@@ -313,8 +352,7 @@ export function prepareUpdate(options: PrepareOptions, runtime = createUpdateRun
   } else if (strategy === 'rebase') {
     applied = tryGit(runtime, stageRoot, ['rebase', options.upstreamRef]);
   } else {
-    if (!options.commits?.length) throw new Error('Cherry-pick strategy requires at least one commit');
-    applied = tryGit(runtime, stageRoot, ['cherry-pick', ...options.commits]);
+    applied = tryGit(runtime, stageRoot, ['cherry-pick', ...(options.commits ?? [])]);
   }
 
   if (!applied.ok) {
@@ -332,9 +370,27 @@ export function prepareUpdate(options: PrepareOptions, runtime = createUpdateRun
   return state;
 }
 
+/** Still at the original head with nothing changed or in progress. */
+function stageUntouched(state: UpdateState, runtime: UpdateRuntime): boolean {
+  return (
+    git(runtime, state.stageRoot, ['rev-parse', 'HEAD']) === state.originalHead &&
+    !git(runtime, state.stageRoot, ['status', '--porcelain']) &&
+    !unfinishedOperation(state, runtime)
+  );
+}
+
 export function resumePreparedUpdate(projectRoot: string, id: string, runtime = createUpdateRuntime()): UpdateState {
   const state = loadState(projectRoot, id);
   if (state.phase !== 'conflict' && state.phase !== 'prepared') throw new Error(`Cannot resume from ${state.phase}`);
+  // Killed before git changed anything, or undone by hand. Not replayed: the
+  // refs may have moved since prepare.
+  if (state.phase === 'conflict' && stageUntouched(state, runtime)) {
+    state.lastError =
+      `The stage has none of the update: the ${state.strategy} never ran or was undone. ` +
+      'Abandon this update and prepare again.';
+    saveState(state);
+    return state;
+  }
   // The operator may have resolved every other file and left the lockfiles to us.
   if (state.phase === 'conflict' && state.strategy === 'merge') {
     const lockfiles = resolveLockfileConflicts(runtime.runner, state.stageRoot);

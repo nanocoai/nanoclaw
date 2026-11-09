@@ -115,6 +115,8 @@ function runner(
     failRegenerate?: boolean;
     hostBun?: string;
     interrupt?: boolean;
+    interruptGit?: string;
+    interruptWith?: (cwd: string, args: string[]) => void;
     markers?: boolean;
     stray?: 'untracked' | 'tracked' | 'index';
   } = {},
@@ -134,6 +136,18 @@ function runner(
     }
   };
   const exec = (command: string, args: string[], cwd: string): string => {
+    if (command === 'git' && args[0] === options.interruptGit) {
+      // Killed partway: by default after git stops, before the controller saves anything.
+      if (options.interruptWith) options.interruptWith(cwd, args);
+      else {
+        try {
+          git(cwd, args);
+        } catch {
+          // git exits non-zero when it stops on a conflict.
+        }
+      }
+      throw new Interrupted('killed');
+    }
     if (command === 'git') return git(cwd, args);
     calls.push({ command, args, cwd });
     if (command === 'bun' && args[0] === '--version') {
@@ -171,6 +185,14 @@ function runner(
 
 function prepare(install: string, runtime: ReturnType<typeof runner>['runtime'], strategy?: UpdateState['strategy']) {
   return prepareUpdate({ projectRoot: install, upstreamRef: 'origin/main', strategy }, runtime);
+}
+
+/** The id of the one transaction a killed prepare left behind. */
+function onlyTransaction(): string {
+  const root = process.env.NANOCLAW_UPDATE_DIR!;
+  const ids = fs.readdirSync(root).filter((id) => fs.existsSync(path.join(root, id, 'state.json')));
+  expect(ids).toHaveLength(1);
+  return ids[0];
 }
 
 function unmerged(stage: string): string[] {
@@ -419,6 +441,99 @@ describe('update lockfile conflicts', () => {
     expect(state.phase).toBe('prepared');
     expect(state.regeneratedLockfiles).toEqual(['pnpm-lock.yaml']);
     expect(git(state.stageRoot, ['show', 'HEAD:pnpm-lock.yaml'])).toContain('b@1.0.0');
+  });
+
+  it('resumes a prepare killed while it regenerates', () => {
+    const { install } = fixture();
+
+    expect(() => prepare(install, runner({ interrupt: true }).runtime)).toThrow('killed');
+    const id = onlyTransaction();
+    expect(loadState(install, id).phase).toBe('conflict');
+    const state = resumePreparedUpdate(install, id, runner().runtime);
+
+    expect(state.phase).toBe('prepared');
+    expect(state.lastError).toBeUndefined();
+    expect(state.regeneratedLockfiles).toEqual(['pnpm-lock.yaml']);
+    expect(git(state.stageRoot, ['show', 'HEAD:pnpm-lock.yaml'])).toContain('b@1.0.0');
+  });
+
+  it.each(['rebase', 'cherry-pick'] as const)('resumes a prepare killed mid-%s only once it finishes', (strategy) => {
+    const { install } = fixture();
+    // Cherry-pick gets two commits, so a commit by hand after the first leaves the second pending.
+    git(install, ['checkout', '-q', '-b', 'extra', 'origin/main']);
+    write(install, 'src/extra.ts', 'export const extra = 1;\n');
+    commit(install, 'upstream extra');
+    git(install, ['checkout', '-q', 'main']);
+    const commits = strategy === 'cherry-pick' ? [git(install, ['rev-parse', 'origin/main']), 'extra'] : undefined;
+    const { runtime } = runner({ interruptGit: strategy });
+
+    expect(() =>
+      prepareUpdate({ projectRoot: install, upstreamRef: 'origin/main', strategy, commits }, runtime),
+    ).toThrow('killed');
+    const id = onlyTransaction();
+    const { stageRoot } = loadState(install, id);
+    expect(loadState(install, id).phase).toBe('conflict');
+    write(stageRoot, 'pnpm-lock.yaml', lockfile(['a@1.0.0', 'b@1.0.0', 'c@1.0.1']));
+    git(stageRoot, ['add', 'pnpm-lock.yaml']);
+    git(stageRoot, ['commit', '-q', '-m', 'resolved']);
+
+    expect(() => resumePreparedUpdate(install, id, runner().runtime)).toThrow(
+      `The staging worktree has an unfinished ${strategy}: finish it (git ${strategy} --continue), then resume`,
+    );
+    git(stageRoot, ['-c', 'core.editor=true', strategy, '--continue']);
+    const state = resumePreparedUpdate(install, id, runner().runtime);
+
+    expect(state.phase).toBe('prepared');
+    expect(state.changedFiles).toContain('pnpm-lock.yaml');
+    if (strategy === 'cherry-pick') expect(state.changedFiles).toContain('src/extra.ts');
+  });
+
+  it.each(['merge', 'rebase', 'cherry-pick'] as const)(
+    'asks for a new prepare when prepare was killed before the %s ran',
+    (strategy) => {
+      const { install } = fixture();
+      const commits = strategy === 'cherry-pick' ? [git(install, ['rev-parse', 'origin/main'])] : undefined;
+      const killed = runner({ interruptGit: strategy, interruptWith: () => {} }).runtime;
+
+      expect(() =>
+        prepareUpdate({ projectRoot: install, upstreamRef: 'origin/main', strategy, commits }, killed),
+      ).toThrow('killed');
+      const id = onlyTransaction();
+      const state = resumePreparedUpdate(install, id, runner().runtime);
+
+      expect(state.phase).toBe('conflict');
+      expect(state.lastError).toBe(
+        `The stage has none of the update: the ${strategy} never ran or was undone. ` +
+          'Abandon this update and prepare again.',
+      );
+      expect(git(state.stageRoot, ['rev-parse', 'HEAD'])).toBe(state.originalHead);
+    },
+  );
+
+  it('refuses a rebase killed after it moved HEAD but before it recorded any state', () => {
+    const { install } = fixture();
+    // The apply backend checks out upstream before it writes rebase-apply.
+    const detach = (cwd: string) => git(cwd, ['checkout', '-q', '--detach', 'origin/main']);
+
+    expect(() => prepare(install, runner({ interruptGit: 'rebase', interruptWith: detach }).runtime, 'rebase')).toThrow(
+      'killed',
+    );
+    const id = onlyTransaction();
+
+    expect(() => resumePreparedUpdate(install, id, runner().runtime)).toThrow(
+      `The staging worktree must be on update-nanoclaw/${id}: finish any rebase`,
+    );
+    expect(loadState(install, id).phase).toBe('conflict');
+  });
+
+  it('refuses a cherry-pick with no commits before it creates anything', () => {
+    const { install } = fixture();
+
+    expect(() => prepare(install, runner().runtime, 'cherry-pick')).toThrow(
+      'Cherry-pick strategy requires at least one commit',
+    );
+    expect(fs.readdirSync(process.env.NANOCLAW_UPDATE_DIR!)).toEqual([]);
+    expect(git(install, ['branch', '--list', 'backup/*'])).toBe('');
   });
 
   it.each([
