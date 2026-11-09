@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 
 const VERSION_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const PRERELEASE_PATTERN = /^((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))-(?:beta|rc)\.[1-9]\d*$/;
@@ -301,10 +301,10 @@ export function main(argv) {
   throw new Error(`unknown command: ${command}`);
 }
 
-// realpath: a symlinked argv (macOS /var) would skip main() and exit 0 having done nothing.
-// No file argv (stdin, -e) means imported, not run.
+// Real paths on both sides: a symlinked argv (macOS /var, --preserve-symlinks-main) would
+// otherwise skip main() and exit 0 having done nothing. No file argv (stdin, -e) means imported.
 const entry = process.argv[1];
-if (entry && existsSync(entry) && import.meta.url === pathToFileURL(realpathSync(entry)).href) {
+if (entry && existsSync(entry) && realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url))) {
   try {
     main(process.argv.slice(2));
   } catch (error) {

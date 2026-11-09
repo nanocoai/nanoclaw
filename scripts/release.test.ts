@@ -529,12 +529,15 @@ describe('release.mjs order command', () => {
     dirs.push(dir);
     symlinkSync(script, path.join(dir, 'release.mjs'));
     writeFileSync(path.join(dir, 'tags.txt'), 'aaa\trefs/tags/v2026.11.0-rc.1\n');
-    expect(() =>
-      execFileSync(process.execPath, [path.join(dir, 'release.mjs'), 'order', '2026.11.0-beta.1', 'tags.txt'], {
-        cwd: dir,
-        stdio: 'pipe',
-      }),
-    ).toThrow('does not sort above v2026.11.0-rc.1');
+    for (const flags of [[], ['--preserve-symlinks-main']]) {
+      expect(() =>
+        execFileSync(
+          process.execPath,
+          [...flags, path.join(dir, 'release.mjs'), 'order', '2026.11.0-beta.1', 'tags.txt'],
+          { cwd: dir, stdio: 'pipe' },
+        ),
+      ).toThrow('does not sort above v2026.11.0-rc.1');
+    }
   });
 
   it('can be imported from a script on stdin without running main()', () => {
