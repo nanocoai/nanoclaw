@@ -228,8 +228,7 @@ export function wrapSqliteInbound(db: Database.Database, nextSequence = () => ne
       if (db.prepare(`SELECT 1 FROM messages_in WHERE trigger = 1 AND ${channelRow} LIMIT 1`).get()) return 'woken';
       const chatter = db
         .prepare(
-          `SELECT 1 FROM messages_in WHERE trigger = 0 AND kind IN ('chat', 'chat-sdk')
-           AND channel_type NOT IN ('session-echo', 'agent') LIMIT 1`,
+          `SELECT 1 FROM messages_in WHERE trigger = 0 AND kind IN ('chat', 'chat-sdk') AND ${channelRow} LIMIT 1`,
         )
         .get();
       return chatter ? 'chatter' : 'none';
