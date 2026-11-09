@@ -1354,12 +1354,13 @@ async function handleForwardedEvent(
         acking = undefined;
       });
       if (!questionId) return;
-      // Encoded as the adapter encodes a click (a thread by its parent channel and
-      // itself), as every other click and the card's messaging group carry it.
+      // A thread click carries its parent channel and the thread, as a card sent
+      // into that thread carries its messaging group.
       const channel = interaction.channel as { type?: number; parent_id?: string } | undefined;
-      // Public and private threads. The adapter (4.41.1) keeps an announcement
-      // thread (type 10) as its own channel, so its click does too.
-      const inThread = (channel?.type === 11 || channel?.type === 12) && channel.parent_id;
+      // Announcement (10), public and private threads. Adapter 4.41.1 gap: it keys
+      // messages inside an announcement thread by the thread alone, so a card sent
+      // to such a chat won't match this click.
+      const inThread = (channel?.type === 10 || channel?.type === 11 || channel?.type === 12) && channel.parent_id;
       const threadId = adapter.encodeThreadId({
         guildId: (interaction.guild_id as string | undefined) || '@me',
         channelId: inThread ? channel.parent_id! : (interaction.channel_id as string),
