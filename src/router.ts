@@ -500,17 +500,18 @@ async function evaluateEngage(
       if (mg.is_group === 0) return false; // DMs never use mention-sticky sensibly
       const [thread, release] = holdThread(threadKey(agent.agent_group_id, mg.id, threadId));
       try {
-        // A first mention still in the command gate decides for us.
-        if ((await gateVerdicts(thread)) || thread.wake > 0) return true;
+        if (thread.wake > 0) return true;
         const wakesBefore = thread.wakeStarted;
         const silentBefore = thread.silent > 0;
         const silentsBefore = thread.silentStarted;
         const existing = await findSessionForAgent(agent.agent_group_id, mg.id, threadId);
         const evidence = existing ? await inboxWakeEvidence(agent.agent_group_id, existing.id) : 'chatter';
-        // A wake that began while we looked counts. An inbox with no evidence
-        // (e.g. after a folder reset) keeps the thread active, unless a silent
-        // first row was being written at any point meanwhile.
-        if ((await gateVerdicts(thread)) || thread.wakeStarted !== wakesBefore || evidence === 'woken') return true;
+        // A wake that began while we looked counts. Only a thread not yet
+        // active waits for a first mention still in the command gate.
+        if (thread.wakeStarted !== wakesBefore || evidence === 'woken') return true;
+        if ((await gateVerdicts(thread)) || thread.wakeStarted !== wakesBefore) return true;
+        // An inbox with no evidence (e.g. after a folder reset) keeps the thread
+        // active, unless a silent first row was being written meanwhile.
         return evidence === 'none' && !silentBefore && thread.silentStarted === silentsBefore;
       } finally {
         release();

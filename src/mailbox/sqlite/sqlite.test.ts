@@ -153,21 +153,27 @@ describe('SQLite mailbox canonical serialization', () => {
     expect(inbound.wakeEvidence()).toBe('woken');
   });
 
-  it('answers the wake check from an index, also on inboxes made before it', () => {
+  it('answers the wake check and the conversation root from an index, also on inboxes made before it', () => {
     const legacy = new Database(':memory:');
     databases.push(legacy);
-    legacy.exec(INBOUND_SCHEMA.replace(/^CREATE INDEX IF NOT EXISTS idx_messages_in_wake .*$/m, ''));
-    expect(legacy.prepare("SELECT 1 FROM sqlite_master WHERE name = 'idx_messages_in_wake'").get()).toBeUndefined();
+    legacy.exec(INBOUND_SCHEMA.replace(/^CREATE INDEX IF NOT EXISTS idx_messages_in_trigger_seq .*$/m, ''));
+    expect(
+      legacy.prepare("SELECT 1 FROM sqlite_master WHERE name = 'idx_messages_in_trigger_seq'").get(),
+    ).toBeUndefined();
     migrateMessagesInTable(legacy);
 
-    for (const where of ['trigger = 1', "trigger = 0 AND kind IN ('chat', 'chat-sdk')"]) {
-      const plan = legacy
-        .prepare(
-          `EXPLAIN QUERY PLAN SELECT 1 FROM messages_in WHERE ${where}
-           AND (channel_type IS NULL OR channel_type NOT IN ('session-echo', 'agent')) LIMIT 1`,
-        )
-        .all() as Array<{ detail: string }>;
-      expect(plan.map((row) => row.detail).join('\n')).toContain('idx_messages_in_wake');
+    const channelRow = "(channel_type IS NULL OR channel_type NOT IN ('session-echo', 'agent'))";
+    for (const sql of [
+      `SELECT 1 FROM messages_in WHERE trigger = 1 AND ${channelRow} LIMIT 1`,
+      `SELECT 1 FROM messages_in WHERE trigger = 0 AND kind IN ('chat', 'chat-sdk') AND ${channelRow} LIMIT 1`,
+      `SELECT timestamp, content FROM messages_in WHERE kind IN ('chat','chat-sdk') AND trigger = 1 AND ${channelRow}
+       ORDER BY seq ASC LIMIT 1`,
+    ]) {
+      const plan = (legacy.prepare(`EXPLAIN QUERY PLAN ${sql}`).all() as Array<{ detail: string }>)
+        .map((row) => row.detail)
+        .join('\n');
+      expect(plan).toContain('idx_messages_in_trigger_seq');
+      expect(plan).not.toContain('TEMP B-TREE');
     }
   });
 
