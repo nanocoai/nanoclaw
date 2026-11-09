@@ -238,7 +238,7 @@ function breakingRequirements(runtime: UpdateRuntime, root: string, from: string
 /** Clean, and no lockfile with conflict markers that `git add` let through. */
 function assertStageReady(state: UpdateState, runtime: UpdateRuntime): void {
   assertClean(runtime, state.stageRoot, 'Staging worktree');
-  assertLockfilesUnmarked(state.stageRoot, state.upstreamRef);
+  assertLockfilesUnmarked(runtime.runner, state.stageRoot, state.upstreamRef);
 }
 
 function refreshPreparedState(state: UpdateState, runtime: UpdateRuntime): void {

@@ -32,19 +32,27 @@ function tail(output: string): string {
   return lines(output).slice(-15).join('\n') || '(no output)';
 }
 
-const CONFLICT_MARKER = /^(<{7}|={7}|>{7})( |$)/m;
+/** Git's conflict markers at the file's `conflict-marker-size` (7 unless set). */
+function markerPattern(runner: CommandRunner, root: string, file: string): RegExp {
+  const attr = runner.tryRun('git', ['check-attr', 'conflict-marker-size', '--', file], root);
+  const size = (attr.ok && Number(/: (\d+)$/.exec(attr.stdout)?.[1])) || 7;
+  return new RegExp(`^(<{${size},}|={${size},}|>{${size},})( |$)`, 'm');
+}
 
-/** Lockfiles whose copy in the stage still has conflict markers. */
-export function markedLockfiles(root: string): string[] {
+/** Lockfiles whose checkout or staged copy in the stage still has conflict markers. */
+export function markedLockfiles(runner: CommandRunner, root: string): string[] {
   return Object.keys(LOCKFILES).filter((file) => {
     const target = path.join(root, file);
-    return fs.existsSync(target) && CONFLICT_MARKER.test(fs.readFileSync(target, 'utf8'));
+    const staged = runner.tryRun('git', ['show', `:${file}`], root);
+    const copies = [fs.existsSync(target) ? fs.readFileSync(target, 'utf8') : '', staged.ok ? staged.stdout : ''];
+    const pattern = markerPattern(runner, root, file);
+    return copies.some((text) => pattern.test(text));
   });
 }
 
 /** Refuse a stage that would commit or install a lockfile with conflict markers. */
-export function assertLockfilesUnmarked(root: string, upstreamRef: string): void {
-  const marked = markedLockfiles(root);
+export function assertLockfilesUnmarked(runner: CommandRunner, root: string, upstreamRef: string): void {
+  const marked = markedLockfiles(runner, root);
   if (marked.length === 0) return;
   throw new Error(
     `${marked.join(', ')} in the stage still has conflict markers. Never merge a lockfile by hand: ` +
@@ -98,7 +106,7 @@ export function resolveLockfileConflicts(runner: CommandRunner, root: string): L
   const conflicted = unmerged.filter(isLockfile);
   // A `git add` with markers still in a lockfile drops it from the list above,
   // but upstream's copy fixes it the same way.
-  const files = [...conflicted, ...markedLockfiles(root).filter((file) => !conflicted.includes(file))];
+  const files = [...conflicted, ...markedLockfiles(runner, root).filter((file) => !conflicted.includes(file))];
   if (files.length === 0) return { kind: 'none' };
   if (conflicted.length < unmerged.length) return { kind: 'mixed', files };
 
@@ -113,6 +121,7 @@ export function resolveLockfileConflicts(runner: CommandRunner, root: string): L
   const backupDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-lockfiles-'));
   const backup = path.join(backupDir, 'index');
   fs.copyFileSync(index, backup);
+  const listing = runner.run('git', ['ls-files', '--stage'], root);
   const fail = (reason: string): LockfileOutcome => {
     fs.copyFileSync(backup, index);
     const stray = otherChanges(runner, root, files);
@@ -127,12 +136,14 @@ export function resolveLockfileConflicts(runner: CommandRunner, root: string): L
   };
 
   try {
+    // Worktree only: the index keeps the conflict (or the marked copy), so a
+    // run killed midway is still found and retried by the next resume.
     for (const file of files) {
-      const theirs = runner.tryRun('git', ['checkout', 'MERGE_HEAD', '--', file], root);
+      const theirs = conflicted.includes(file)
+        ? runner.tryRun('git', ['checkout', '--theirs', '--', file], root)
+        : runner.tryRun('git', ['restore', '--source=MERGE_HEAD', '--worktree', '--', file], root);
       if (!theirs.ok) return fail(`upstream has no ${file} to start from: ${tail(theirs.stdout)}`);
     }
-    // Taken after the checkout above, which stages upstream's copy itself.
-    const listing = runner.run('git', ['ls-files', '--stage'], root);
     for (const file of files) {
       let command: [string, string[]];
       try {
@@ -149,10 +160,10 @@ export function resolveLockfileConflicts(runner: CommandRunner, root: string): L
     const indexChanged = runner.run('git', ['ls-files', '--stage'], root) !== listing;
     const what = [...stray.modified, ...stray.untracked, ...(indexChanged ? ['the git index'] : [])];
     if (what.length > 0) return fail(`it also changed ${what.join(', ')}`);
-    const marked = markedLockfiles(root);
-    if (marked.length > 0) return fail(`${marked.join(', ')} still has conflict markers`);
 
     runner.run('git', ['add', '--', ...files], root);
+    const marked = markedLockfiles(runner, root);
+    if (marked.length > 0) return fail(`${marked.join(', ')} still has conflict markers`);
     const committed = runner.tryRun('git', ['commit', '--no-edit'], root);
     if (!committed.ok) {
       return {

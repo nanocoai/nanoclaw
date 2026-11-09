@@ -52,12 +52,13 @@ const lockfile = (entries: string[]) =>
  * the install's setup commit adds `b` to the manifest and lockfile next to it.
  * Git cannot merge the two, though the manifests merge cleanly.
  */
-function fixture(options: { bun?: boolean; otherConflict?: boolean } = {}): { install: string } {
+function fixture(options: { bun?: boolean; markerSize?: number; otherConflict?: boolean } = {}): { install: string } {
   const seed = temp('lockfile-seed-');
   git(seed, ['init', '-q', '-b', 'main']);
   write(seed, 'package.json', manifest(['a', 'c']));
   write(seed, 'pnpm-lock.yaml', lockfile(['a@1.0.0', 'c@1.0.0']));
   write(seed, 'src/value.ts', 'export const value = "old";\n');
+  if (options.markerSize) write(seed, '.gitattributes', `pnpm-lock.yaml conflict-marker-size=${options.markerSize}\n`);
   if (options.bun) {
     write(seed, 'container/Dockerfile', 'ARG BUN_VERSION=1.4.4\n');
     write(seed, 'container/agent-runner/package.json', manifest(['a', 'c']));
@@ -91,6 +92,9 @@ function fixture(options: { bun?: boolean; otherConflict?: boolean } = {}): { in
   return { install };
 }
 
+/** Stands in for the controller being killed while the package manager runs. */
+class Interrupted extends Error {}
+
 interface Call {
   command: string;
   args: string[];
@@ -106,6 +110,7 @@ function runner(
   options: {
     failRegenerate?: boolean;
     hostBun?: string;
+    interrupt?: boolean;
     markers?: boolean;
     stray?: 'untracked' | 'tracked' | 'index';
   } = {},
@@ -135,6 +140,7 @@ function runner(
       if (options.failRegenerate)
         throw Object.assign(new Error('failed'), { stdout: 'ERR_PNPM_FETCH_404 network down' });
       regenerate(cwd);
+      if (options.interrupt) throw new Interrupted('killed');
     }
     return '';
   };
@@ -144,6 +150,7 @@ function runner(
       try {
         return { ok: true, stdout: exec(command, args, cwd) };
       } catch (err) {
+        if (err instanceof Interrupted) throw err;
         const failed = err as { stdout?: Buffer | string; stderr?: Buffer | string };
         return {
           ok: false,
@@ -391,6 +398,37 @@ describe('update lockfile conflicts', () => {
     );
     expect(loadState(install, state.id).phase).toBe('conflict');
     expect(calls).toEqual([]);
+  });
+
+  it.each([
+    ['an unmerged lockfile', 'src/value.ts'],
+    ['a lockfile staged with markers', '-A'],
+  ] as const)('finds %s again after a regenerate is killed midway', (_, add) => {
+    const { install } = fixture({ otherConflict: true });
+    let state = prepare(install, runner().runtime);
+    write(state.stageRoot, 'src/value.ts', 'export const value = "local and new";\n');
+    git(state.stageRoot, ['add', add]);
+
+    expect(() => resumePreparedUpdate(install, state.id, runner({ interrupt: true }).runtime)).toThrow('killed');
+    state = resumePreparedUpdate(install, state.id, runner().runtime);
+
+    expect(state.phase).toBe('prepared');
+    expect(state.regeneratedLockfiles).toEqual(['pnpm-lock.yaml']);
+    expect(git(state.stageRoot, ['show', 'HEAD:pnpm-lock.yaml'])).toContain('b@1.0.0');
+  });
+
+  it('reads the marker size from a conflict-marker-size attribute', () => {
+    const { install } = fixture({ otherConflict: true, markerSize: 12 });
+    const { runtime } = runner();
+    const state = prepare(install, runtime);
+    expect(read(state.stageRoot, 'pnpm-lock.yaml')).toMatch(/^<{12} /m);
+    write(state.stageRoot, 'src/value.ts', 'export const value = "local and new";\n');
+    git(state.stageRoot, ['add', '-A']);
+    git(state.stageRoot, ['commit', '-q', '--no-edit']);
+
+    expect(() => resumePreparedUpdate(install, state.id, runtime)).toThrow(
+      'pnpm-lock.yaml in the stage still has conflict markers',
+    );
   });
 
   it('validate refuses a marked lockfile before installing', async () => {
