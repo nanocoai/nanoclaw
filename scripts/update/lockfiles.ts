@@ -32,10 +32,13 @@ function tail(output: string): string {
   return lines(output).slice(-15).join('\n') || '(no output)';
 }
 
-/** Git's conflict markers at the file's `conflict-marker-size` (7 unless set). */
+/**
+ * Git's conflict markers. Git sizes them by the attributes from before the merge,
+ * so accept any run of at least 7, or of `conflict-marker-size` if that is smaller.
+ */
 function markerPattern(runner: CommandRunner, root: string, file: string): RegExp {
   const attr = runner.tryRun('git', ['check-attr', 'conflict-marker-size', '--', file], root);
-  const size = (attr.ok && Number(/: (\d+)$/.exec(attr.stdout)?.[1])) || 7;
+  const size = Math.min(7, (attr.ok && Number(/: (\d+)$/.exec(attr.stdout)?.[1])) || 7);
   return new RegExp(`^(<{${size},}|={${size},}|>{${size},})( |$)`, 'm');
 }
 
