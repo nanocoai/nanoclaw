@@ -24,6 +24,8 @@ import {
 import { initChannelAdapters, registerChannelAdapter, teardownChannelAdapters } from './channels/channel-registry.js';
 import { setDeliveryAdapter, type ChannelDeliveryAdapter } from './delivery.js';
 import { routeInbound } from './router.js';
+import { findSessionForAgent } from './db/sessions.js';
+import { sessionDir } from './session-manager.js';
 import type { ChannelAdapter, ChannelDefaults } from './channels/adapter.js';
 
 vi.mock('./container-runner.js', () => ({
@@ -484,6 +486,56 @@ describe('command-gate denial', () => {
       gateHold.until = null;
 
       // The thread is already active, so the follow-up wakes while the gate is held.
+      const followup = message('m2', 'and keep the notes', false);
+      await Promise.race([followup, new Promise((resolve) => setTimeout(resolve, 200))]);
+      expect(vi.mocked(wakeContainer)).toHaveBeenCalledTimes(2);
+      release();
+      await Promise.all([clear, followup]);
+      expect(vi.mocked(wakeContainer)).toHaveBeenCalledTimes(2);
+    } finally {
+      gateHold.until = null;
+      release();
+    }
+  });
+  it('a follow-up in a thread whose inbox was reset does not wait for a pending command verdict', async () => {
+    await seed();
+    recordingAdapter(async () => 'platform-msg-1');
+    await getDb().run("UPDATE messaging_groups SET is_group = 1 WHERE id = 'mg-1'");
+    await getDb().run(
+      "UPDATE messaging_group_agents SET engage_mode = 'mention-sticky', ignored_message_policy = 'drop' WHERE id = 'mga-1'",
+    );
+    const message = (id: string, text: string, isMention: boolean) =>
+      routeInbound({
+        channelType: 'testchat',
+        platformId: 'testchat:C1',
+        threadId: null,
+        message: {
+          id,
+          kind: 'chat-sdk',
+          content: JSON.stringify({ sender: 'Alex', senderId: 'U1', text }),
+          timestamp: new Date().toISOString(),
+          isMention,
+          isGroup: true,
+        },
+      });
+    const { wakeContainer } = await import('./container-runner.js');
+    vi.mocked(wakeContainer).mockClear();
+    await message('m0', 'hello', true);
+    expect(vi.mocked(wakeContainer)).toHaveBeenCalledTimes(1);
+    const session = await findSessionForAgent('ag-1', 'mg-1', null);
+    fs.rmSync(sessionDir('ag-1', session!.id), { recursive: true, force: true });
+
+    let release: () => void = () => {};
+    gateHold.reached.mockClear();
+    gateHold.until = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    try {
+      const clear = sendClear(true);
+      await vi.waitFor(() => expect(gateHold.reached).toHaveBeenCalledTimes(1));
+      gateHold.until = null;
+
+      // An inbox with no evidence keeps the thread active, so the follow-up wakes while the gate is held.
       const followup = message('m2', 'and keep the notes', false);
       await Promise.race([followup, new Promise((resolve) => setTimeout(resolve, 200))]);
       expect(vi.mocked(wakeContainer)).toHaveBeenCalledTimes(2);

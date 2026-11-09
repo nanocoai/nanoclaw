@@ -506,13 +506,13 @@ async function evaluateEngage(
         const silentsBefore = thread.silentStarted;
         const existing = await findSessionForAgent(agent.agent_group_id, mg.id, threadId);
         const evidence = existing ? await inboxWakeEvidence(agent.agent_group_id, existing.id) : 'chatter';
-        // A wake that began while we looked counts. Only a thread not yet
-        // active waits for a first mention still in the command gate.
+        // A wake that began while we looked counts.
         if (thread.wakeStarted !== wakesBefore || evidence === 'woken') return true;
-        if ((await gateVerdicts(thread)) || thread.wakeStarted !== wakesBefore) return true;
         // An inbox with no evidence (e.g. after a folder reset) keeps the thread
         // active, unless a silent first row was being written meanwhile.
-        return evidence === 'none' && !silentBefore && thread.silentStarted === silentsBefore;
+        if (evidence === 'none' && !silentBefore && thread.silentStarted === silentsBefore) return true;
+        // Only a thread not yet active waits for a first mention still in the command gate.
+        return (await gateVerdicts(thread)) || thread.wakeStarted !== wakesBefore;
       } finally {
         release();
       }
