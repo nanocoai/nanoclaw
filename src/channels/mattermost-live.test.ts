@@ -36,7 +36,9 @@
  * which is the same server path a browser click takes. Mattermost then POSTs
  * the callback back to us, from inside its container, over the webhook server
  * this test starts — so the lab's compose needs `host.docker.internal` mapped
- * and allowed as an untrusted internal connection (see the lab README).
+ * and allowed as an untrusted internal connection (see the lab README), and
+ * the test binds that server on every interface, since on native Linux
+ * (`host-gateway`) the callback arrives through the Docker bridge, not loopback.
  *
  * It stands in for `mattermost.ts`'s factory rather than calling it: that
  * factory reads credentials from a `.env` file in the process CWD, and the lab
@@ -289,6 +291,11 @@ describe.skipIf(!HAS_LAB)('mattermost live round trip', () => {
     // letting the shared webhook server take an ephemeral one.
     webhookPort = await freePort();
     process.env.WEBHOOK_PORT = String(webhookPort);
+    // Mattermost calls back from its container. On Linux host.docker.internal
+    // is the bridge address, which a loopback-only webhook server refuses.
+    // Set in process.env on purpose: it wins over the repo .env, so a
+    // checkout's own WEBHOOK_HOST cannot break the run. A lab override stays.
+    process.env.WEBHOOK_HOST ||= '0.0.0.0';
 
     // The real builder the factory ships — not a copy of it.
     adapter = buildMattermostAdapter({

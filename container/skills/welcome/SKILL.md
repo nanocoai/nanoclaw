@@ -7,6 +7,14 @@ description: Introduce yourself to a newly connected channel. Triggered automati
 
 You've just been connected to a new user. This your time to shine and make a strong first impression. Introduce yourself and guide the user through what you can do. you got this!
 
+## Channel addenda
+
+The instruction that triggered this welcome may name a channel addendum file
+(e.g. `/app/skills/welcome/addenda/slack.md`). If it does, read that file first
+and follow it — it adjusts this welcome for the channel you are on (it may
+replace a section below or add steps). If no addendum is named, run this skill
+exactly as written.
+
 ## What to do
 
 1. Send a short, warm greeting
@@ -55,7 +63,7 @@ You can add new tools and MCP servers to yourself if a capability isn't built in
 After the capabilities tour (or woven in naturally), cover these two points. Frame them positively — users stay in control.
 
 ### Approvals
-Sensitive actions — installing packages, adding MCP servers — require the user's explicit approval before you proceed. They'll get a prompt; nothing happens automatically. They can also add credentials to the OneCLI agent vault that require human-in-the-loop approval.
+Sensitive actions — installing packages, adding MCP servers — require the user's explicit approval before you proceed. They'll get a prompt; nothing happens automatically. Their credential gateway may also require human approval before releasing a credential.
 
 ### Access Control
 The user owns who can talk to you. Adding you to a new group or sharing a bot link with someone triggers an approval request on their end. Nobody interacts with you without their say-so.
@@ -95,7 +103,7 @@ After the tour, finish with an open invitation. Ask if they want help with somet
 
 ## Tone
 
-Warm, confident, inviting. Make the user feel like they just unlocked something powerful. Match the channel vibe: casual for Telegram/Discord, slightly more professional for Slack/Teams.
+Warm, confident, inviting. Make the user feel like they just unlocked something powerful. Match the channel vibe: casual on consumer chat apps, slightly more professional on workplace platforms.
 
 ## Important
 

@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { execSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -55,7 +55,12 @@ describe('runChannelSkill adapter (Option A)', () => {
       // the secrets + handle a human would supply; the skill resolves platform_id.
       // Values are valid-shaped for the prompts' validate: regexes — validate-at-bind
       // now enforces them on `inputs` too (they used to bypass validation).
-      inputs: { connection: 'webhook', bot_token: 'xoxb-x', signing_secret: '0123456789abcdef', owner_handle: 'U12345678' },
+      inputs: {
+        connection: 'webhook',
+        bot_token: 'xoxb-x',
+        signing_secret: '0123456789abcdef',
+        owner_handle: 'U12345678',
+      },
       wire: (a) => {
         wired.push(a);
         return true;
@@ -77,6 +82,8 @@ describe('runChannelSkill adapter (Option A)', () => {
       role: 'owner',
       agentGroupId: 'ag-template',
     });
+    // no skill-resolved `instance` var: the wire targets the default instance
+    expect(wired[0].instance).toBeUndefined();
     // the adapter no longer emits any ncl wiring itself — that's init-first-agent's job
     expect(cmds.some((c) => c.startsWith('ncl '))).toBe(false);
     // clears the template pick exactly when the wire consumed the stamped
@@ -155,9 +162,7 @@ describe('runChannelSkill adapter (Option A)', () => {
   // from the document so the test can't drift from what ships.
   it('Teams have_creds probe: either credential key present answers yes', () => {
     const md = readFileSync(join(process.cwd(), '.claude/skills/add-teams/SKILL.md'), 'utf8');
-    const probe = parseDirectives(md).find(
-      (d) => d.kind === 'run' && d.attrs.capture === 'have_creds',
-    );
+    const probe = parseDirectives(md).find((d) => d.kind === 'run' && d.attrs.capture === 'have_creds');
     expect(probe).toBeDefined();
     const cmd = probe!.body.join('\n');
 
@@ -190,8 +195,7 @@ describe('runChannelSkill adapter (Option A)', () => {
     writeFileSync(join(root, '.env'), '');
     writeFileSync(join(root, 'package.json'), '{"name":"scratch"}');
 
-    const INSTALL_LINK =
-      'https://teams.microsoft.com/l/app/tapp-123?installAppPackage=true&appTenantId=tenant-1';
+    const INSTALL_LINK = 'https://teams.microsoft.com/l/app/tapp-123?installAppPackage=true&appTenantId=tenant-1';
     const log: string[] = [];
     const opened: string[] = [];
     const steps: string[] = [];
@@ -222,7 +226,12 @@ describe('runChannelSkill adapter (Option A)', () => {
         }
         // owner identity from the CLI session (status --json fence, plain exec)
         if (c.includes('status --json')) {
-          return JSON.stringify({ loggedIn: true, username: 'dan@acme.example', tenantId: 'tenant-1', userObjectId: 'aad-owner-1' });
+          return JSON.stringify({
+            loggedIn: true,
+            username: 'dan@acme.example',
+            tenantId: 'tenant-1',
+            userObjectId: 'aad-owner-1',
+          });
         }
         if (c.includes('login.microsoftonline.com')) return 'eyJfake.bot.token';
         // /members is a sub-path of /v3/conversations — match it FIRST
@@ -411,20 +420,27 @@ describe('runChannelSkill adapter (Option A)', () => {
     expect(fullyApplied(res)).toBe(true);
   });
 
-
   // The resolved leg of wireIfResolved, driven with a minimal fixture skill
   // (the real teams document needs a streaming exec runChannelSkill doesn't
   // expose): when the skill binds owner_handle + platform_id, the adapter asks
   // nothing extra (agentName/role injected) and reaches the shared wire with
-  // the composed teams user id.
+  // the composed teams user id. A skill-resolved `instance` var (a named
+  // bot's registry key) rides along to the wire; kill condition: drop
+  // `instance: res.vars.instance` from the wire call in run-channel-skill.ts.
+  //
+  // The engine reads `.claude/skills/add-<channel>/SKILL.md` relative to cwd, so
+  // the fixture skills here live in the temp root and run from there, as real
+  // setup does. Never write them under the checkout: other test files scan
+  // `.claude/skills` in parallel.
+  const repoCwd = process.cwd();
+  afterEach(() => process.chdir(repoCwd));
   const wireChannel = 'wiretest';
-  const wireSkillDir = join(process.cwd(), '.claude/skills', `add-${wireChannel}`);
-  afterEach(() => rmSync(wireSkillDir, { recursive: true, force: true }));
 
   it('wireIfResolved: a run that resolves owner_handle + platform_id wires through init-first-agent', async () => {
     const root = mkdtempSync(join(tmpdir(), 'rcs-wiretest-'));
     writeFileSync(join(root, 'package.json'), '{"name":"scratch"}');
     writeFileSync(join(root, '.env'), '');
+    const wireSkillDir = join(root, '.claude/skills', `add-${wireChannel}`);
     mkdirSync(wireSkillDir, { recursive: true });
     writeFileSync(
       join(wireSkillDir, 'SKILL.md'),
@@ -438,9 +454,13 @@ describe('runChannelSkill adapter (Option A)', () => {
         '```nc:run capture:platform_id effect:fetch',
         'echo-platform',
         '```',
+        '```nc:run capture:instance effect:fetch',
+        'echo-instance',
+        '```',
         '',
       ].join('\n'),
     );
+    process.chdir(root);
 
     const wired: Array<Record<string, unknown>> = [];
     let pickCleared = 0;
@@ -449,6 +469,7 @@ describe('runChannelSkill adapter (Option A)', () => {
       exec: (c) => {
         if (c === 'echo-owner') return '29:owner-xyz\n';
         if (c === 'echo-platform') return 'teams:enc-conv:enc-url\n';
+        if (c === 'echo-instance') return 'telegram-mega\n';
       },
       resolveRemote: () => 'origin',
       wireIfResolved: true,
@@ -469,18 +490,14 @@ describe('runChannelSkill adapter (Option A)', () => {
       displayName: 'Dan Mill',
       agentName: 'Nano',
       role: 'owner',
+      instance: 'telegram-mega',
     });
     // no template pick in play (NANOCLAW_TEMPLATE_AGENT_ID unset): a fresh-agent
     // wire must leave the persisted pick alone
     expect(pickCleared).toBe(0);
   });
 
-  // The engine reads `.claude/skills/add-<channel>/SKILL.md` relative to cwd (the
-  // repo root in tests — same as the real add-slack the test above drives), so a
-  // bounce-fixture skill is created there and torn down afterward.
   const failChannel = 'failtest';
-  const failSkillDir = join(process.cwd(), '.claude/skills', `add-${failChannel}`);
-  afterEach(() => rmSync(failSkillDir, { recursive: true, force: true }));
 
   // When the skill doesn't fully apply (a directive bounced to an agent), the
   // generic "couldn't finish" message is replaced by the bounced step's OWN
@@ -493,6 +510,7 @@ describe('runChannelSkill adapter (Option A)', () => {
     writeFileSync(join(root, '.env'), '');
     // A skill whose only directive bounces — the engine has no handler for
     // nc:hand-wire, so it degrades to an agent and the run is not fully applied.
+    const failSkillDir = join(root, '.claude/skills', `add-${failChannel}`);
     mkdirSync(failSkillDir, { recursive: true });
     writeFileSync(
       join(failSkillDir, 'SKILL.md'),
@@ -507,6 +525,7 @@ describe('runChannelSkill adapter (Option A)', () => {
         '',
       ].join('\n'),
     );
+    process.chdir(root);
 
     const failCalls: Array<{ step: string; msg: string; hint?: string }> = [];
     const fakeFail = (step: string, msg: string, hint?: string): Promise<never> => {
@@ -564,7 +583,12 @@ describe('backGate (first-prompt back-to-channel-selection)', () => {
       resolveRemote: () => 'origin',
       agentName: 'Nano',
       role: 'owner',
-      inputs: { connection: 'webhook', bot_token: 'xoxb-x', signing_secret: '0123456789abcdef', owner_handle: 'U12345678' },
+      inputs: {
+        connection: 'webhook',
+        bot_token: 'xoxb-x',
+        signing_secret: '0123456789abcdef',
+        owner_handle: 'U12345678',
+      },
       wire: (a) => {
         wired.push(a);
         return true;
@@ -575,4 +599,54 @@ describe('backGate (first-prompt back-to-channel-selection)', () => {
     expect(cmds).toHaveLength(0); // the skill never ran
     expect(wired).toHaveLength(0); // the wire was never reached
   });
+});
+
+describe('companionSkillPresent (in-tree presence check)', () => {
+  const makeRoot = (): string => mkdtempSync(join(tmpdir(), 'nc-companion-'));
+
+  it('SKILL.md in the checkout: true', async () => {
+    const { companionSkillPresent } = await import('./run-channel-skill.js');
+    const root = makeRoot();
+    mkdirSync(join(root, '.claude/skills/slack-a2a-rooms'), { recursive: true });
+    writeFileSync(join(root, '.claude/skills/slack-a2a-rooms/SKILL.md'), '# x\n');
+    expect(companionSkillPresent('slack-a2a-rooms', root)).toBe(true);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('a directory WITHOUT SKILL.md does not read as installed — a missing document parses as zero directives', async () => {
+    const { companionSkillPresent } = await import('./run-channel-skill.js');
+    const root = makeRoot();
+    mkdirSync(join(root, '.claude/skills/slack-a2a-rooms/src'), { recursive: true });
+    expect(companionSkillPresent('slack-a2a-rooms', root)).toBe(false);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('absent dir: false — no fetch fallback, the caller warns and skips', async () => {
+    const { companionSkillPresent } = await import('./run-channel-skill.js');
+    const root = makeRoot();
+    expect(companionSkillPresent('slack-agent-flow', root)).toBe(false);
+    rmSync(root, { recursive: true, force: true });
+  });
+});
+
+it('background Slack setup refuses to report ready when a required companion is missing', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'rcs-background-'));
+  try {
+    mkdirSync(join(root, 'src/channels'), { recursive: true });
+    writeFileSync(join(root, 'src/channels/index.ts'), '// barrel\n');
+    writeFileSync(join(root, '.env'), '');
+    writeFileSync(join(root, 'package.json'), '{"name":"scratch"}');
+    const wire = vi.fn(async () => true);
+    const cmds: string[] = [];
+    await expect(runChannelSkill('slack', 'User', {
+      projectRoot: root, agentName: 'Nova', role: 'owner', requireCompanions: true,
+      inputs: { connection: 'provisioned', bot_token: 'xoxb-test', app_token: 'xapp-test', owner_handle: 'U123456789' },
+      exec: async command => (cmds.push(command), command.includes('auth.test') ? '@bot in Test' : command.includes('conversations.open') ? 'slack:D123456789' : ''),
+      resolveRemote: () => 'origin', wire,
+    })).rejects.toThrow('companion installation needs attention');
+    // The companion check throws even when no skill ran, so pin that the real
+    // add-slack (read relative to cwd, the checkout) actually ran first.
+    expect(cmds.some((c) => c.includes('auth.test'))).toBe(true);
+    expect(wire).not.toHaveBeenCalled();
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

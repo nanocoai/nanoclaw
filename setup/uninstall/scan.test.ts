@@ -3,11 +3,8 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import Database from 'better-sqlite3';
-
-import { getLaunchdLabel, getSystemdUnit } from '../../src/install-slug.js';
-import type { RunCommand } from './onecli-agents.js';
-import { detectExistingInstall, scanInstall, type ScanDeps } from './scan.js';
+import { getInstallSlug, getLaunchdLabel, getSystemdUnit } from '../../src/install-slug.js';
+import { COMPOSE_PROJECT_LABEL, detectExistingInstall, scanInstall, type RunCommand, type ScanDeps } from './scan.js';
 
 let root: string;
 let home: string;
@@ -23,9 +20,7 @@ afterEach(() => {
 });
 
 /** Fake runCommand: unhandled commands fail (binary missing / daemon down). */
-function fakeRun(
-  handlers: Record<string, (args: string[]) => { status: number | null; stdout: string }>,
-): RunCommand {
+function fakeRun(handlers: Record<string, (args: string[]) => { status: number | null; stdout: string }>): RunCommand {
   return (cmd, args) => (handlers[cmd] ?? (() => ({ status: 1, stdout: '' })))(args);
 }
 
@@ -42,7 +37,12 @@ function deps(overrides: Partial<ScanDeps> = {}): ScanDeps {
 const dockerUp = (containerIds: string[], hasImage: boolean) =>
   fakeRun({
     docker: (args) => {
-      if (args[0] === 'ps') return { status: 0, stdout: containerIds.join('\n') + '\n' };
+      if (args[0] === 'ps' && args.some((a) => a.startsWith('label=nanoclaw-install='))) {
+        // Agent containers carry no Compose project label: docker prints an empty line for each.
+        const byProject = args.some((a) => a.includes('com.docker.compose.project'));
+        return { status: 0, stdout: containerIds.map((id) => (byProject ? '' : id)).join('\n') + '\n' };
+      }
+      if (args[0] === 'ps' || args[1] === 'ls') return { status: 0, stdout: '' };
       if (args[0] === 'image') return { status: hasImage ? 0 : 1, stdout: '' };
       return { status: 1, stdout: '' };
     },
@@ -55,6 +55,8 @@ describe('scanInstall path groups', () => {
     }
     fs.writeFileSync(path.join(root, '.env'), 'KEY=v');
     fs.writeFileSync(path.join(root, 'start-nanoclaw.sh'), '#!/bin/bash');
+    const updates = path.join(path.dirname(root), '.nanoclaw-updates', getInstallSlug(root));
+    fs.mkdirSync(updates, { recursive: true });
 
     const inv = scanInstall(deps());
 
@@ -63,11 +65,11 @@ describe('scanInstall path groups', () => {
       'logs',
       '.env',
       'start-nanoclaw.sh',
+      getInstallSlug(root),
     ]);
-    expect(inv.runtime.map((i) => path.basename(i.path))).toEqual([
-      'dist',
-      'node_modules',
-    ]);
+    expect(inv.data.at(-1)).toMatchObject({ what: 'Update rollback snapshots', path: updates });
+    fs.rmSync(updates, { recursive: true, force: true });
+    expect(inv.runtime.map((i) => path.basename(i.path))).toEqual(['dist', 'node_modules']);
     expect(inv.user.map((i) => path.basename(i.path))).toEqual(['groups', 'store']);
   });
 
@@ -83,12 +85,7 @@ describe('scanInstall path groups', () => {
 
 describe('scanInstall service artifacts', () => {
   it('detects the launchd plist on macOS', () => {
-    const plist = path.join(
-      home,
-      'Library',
-      'LaunchAgents',
-      `${getLaunchdLabel(root)}.plist`,
-    );
+    const plist = path.join(home, 'Library', 'LaunchAgents', `${getLaunchdLabel(root)}.plist`);
     fs.mkdirSync(path.dirname(plist), { recursive: true });
     fs.writeFileSync(plist, '<plist/>');
 
@@ -98,13 +95,7 @@ describe('scanInstall service artifacts', () => {
   });
 
   it('detects systemd user unit and pidfile on Linux', () => {
-    const unit = path.join(
-      home,
-      '.config',
-      'systemd',
-      'user',
-      `${getSystemdUnit(root)}.service`,
-    );
+    const unit = path.join(home, '.config', 'systemd', 'user', `${getSystemdUnit(root)}.service`);
     fs.mkdirSync(path.dirname(unit), { recursive: true });
     fs.writeFileSync(unit, '[Unit]');
     fs.writeFileSync(path.join(root, 'nanoclaw.pid'), '12345');
@@ -120,6 +111,7 @@ describe('scanInstall service artifacts', () => {
     expect(inv.service.containerIds).toEqual(['abc123', 'def456']);
     expect(inv.service.image).toMatch(/^nanoclaw-agent-v2-[0-9a-f]{8}:latest$/);
     expect(inv.notes).toEqual([]);
+    expect(inv.projects).toBeUndefined();
   });
 
   it('degrades with a manual-cleanup note when docker is unavailable', () => {
@@ -127,6 +119,98 @@ describe('scanInstall service artifacts', () => {
     expect(inv.service.containerIds).toEqual([]);
     expect(inv.service.image).toBeUndefined();
     expect(inv.notes.some((n) => n.includes("'docker' unavailable"))).toBe(true);
+  });
+});
+
+describe('scanInstall compose projects', () => {
+  interface Fake {
+    /** container name → [compose project, install slug] */
+    containers: Record<string, [string, string]>;
+    volumes: Record<string, string>;
+    networks: Record<string, string>;
+    fail?: (args: string[]) => boolean;
+  }
+  const projectOf = (args: string[]) =>
+    args.find((a) => a.startsWith(`label=${COMPOSE_PROJECT_LABEL}=`))?.split('=')[2];
+  /** Docker holding this copy's project next to a decoy copy's, answered by label filters only. */
+  const fakeDocker = (fake: Fake) =>
+    fakeRun({
+      docker: (args) => {
+        if (fake.fail?.(args)) return { status: 1, stdout: '' };
+        const project = projectOf(args);
+        const slug = args.find((a) => a.startsWith('label=nanoclaw-install='))?.split('=')[2];
+        if (args[0] === 'ps') {
+          const rows = Object.entries(fake.containers).filter(
+            ([, [proj, owner]]) => (project ? proj === project : true) && (slug ? owner === slug : true),
+          );
+          const format = args.includes('--format') ? args[args.indexOf('--format') + 1] : '{{.ID}}';
+          const render = ([name, [proj]]: [string, [string, string]]) =>
+            format.includes(COMPOSE_PROJECT_LABEL) ? proj : `id-${name}|${name}`;
+          // Like docker: one line per row (empty for a missing label), nothing at all for no rows.
+          return { status: 0, stdout: rows.length ? rows.map(render).join('\n') + '\n' : '' };
+        }
+        if (args[0] === 'volume' || args[0] === 'network') {
+          const table = args[0] === 'volume' ? fake.volumes : fake.networks;
+          const names = Object.entries(table)
+            .filter(([, proj]) => proj === project)
+            .map(([name]) => name);
+          return { status: 0, stdout: names.join('\n') + '\n' };
+        }
+        return { status: 1, stdout: '' };
+      },
+    });
+  const state = (): Fake => {
+    const slug = getInstallSlug(root);
+    return {
+      containers: {
+        [`gw-${slug}-web-1`]: [`gw-${slug}`, slug],
+        [`gw-${slug}-database-1`]: [`gw-${slug}`, slug],
+        agent1: ['', slug],
+        'gw-ffffffff-web-1': ['gw-ffffffff', 'ffffffff'],
+      },
+      volumes: { [`gw-${slug}_database`]: `gw-${slug}`, 'gw-ffffffff_database': 'gw-ffffffff', stray: 'other' },
+      networks: { [`gw-${slug}`]: `gw-${slug}`, 'gw-ffffffff': 'gw-ffffffff', bridge: '' },
+    };
+  };
+
+  it("lists this copy's project containers, volumes and networks, not a decoy copy's", () => {
+    const slug = getInstallSlug(root);
+    const inv = scanInstall(deps({ runCommand: fakeDocker(state()) }));
+    expect(inv.projects).toEqual({
+      names: [`gw-${slug}`],
+      containers: [`gw-${slug}-web-1`, `gw-${slug}-database-1`],
+      volumes: [`gw-${slug}_database`],
+      networks: [`gw-${slug}`],
+    });
+    expect(inv.notes).toEqual([]);
+  });
+
+  it("reports nothing when only the decoy copy's project exists", () => {
+    const fake = state();
+    const slug = getInstallSlug(root);
+    for (const name of [`gw-${slug}-web-1`, `gw-${slug}-database-1`]) delete fake.containers[name];
+    expect(scanInstall(deps({ runCommand: fakeDocker(fake) })).projects).toBeUndefined();
+  });
+
+  it('never reads a failed volume listing as "no volumes" and gives the exact commands', () => {
+    const slug = getInstallSlug(root);
+    const fake = state();
+    fake.fail = (args) => args[0] === 'volume';
+    const inv = scanInstall(deps({ runCommand: fakeDocker(fake) }));
+    expect(inv.projects).toBeUndefined();
+    expect(inv.notes).toEqual([
+      expect.stringContaining(
+        `docker ps -aq --filter label=${COMPOSE_PROJECT_LABEL}=gw-${slug} | xargs -r docker rm -f; ` +
+          `docker volume ls -q --filter label=${COMPOSE_PROJECT_LABEL}=gw-${slug} | xargs -r docker volume rm; ` +
+          `docker network ls -q --filter label=${COMPOSE_PROJECT_LABEL}=gw-${slug} | xargs -r docker network rm`,
+      ),
+    ]);
+  });
+
+  it('notes how to find and remove the projects when docker is unavailable', () => {
+    const inv = scanInstall(deps());
+    expect(inv.projects).toBeUndefined();
+    expect(inv.notes.some((n) => n.startsWith('Service volumes/networks:') && n.includes('<project>'))).toBe(true);
   });
 });
 
@@ -151,37 +235,6 @@ describe('scanInstall ncl symlink', () => {
   });
 });
 
-describe('scanInstall OneCLI agents', () => {
-  const vault = JSON.stringify({
-    data: [
-      { id: 'u-1', identifier: 'ag-mine', name: 'Mine', isDefault: false },
-      { id: 'u-2', identifier: 'ag-other', name: 'Other', isDefault: false },
-    ],
-  });
-  const onecliUp = fakeRun({ onecli: () => ({ status: 0, stdout: vault }) });
-
-  it('splits mine vs orphans against the central DB', () => {
-    fs.mkdirSync(path.join(root, 'data'));
-    const db = new Database(path.join(root, 'data', 'v2.db'));
-    db.exec('CREATE TABLE agent_groups (id TEXT PRIMARY KEY)');
-    db.prepare('INSERT INTO agent_groups (id) VALUES (?)').run('ag-mine');
-    db.close();
-
-    const inv = scanInstall(deps({ runCommand: onecliUp }));
-    expect(inv.onecli.idsKnown).toBe(true);
-    expect(inv.onecli.mine.map((a) => a.identifier)).toEqual(['ag-mine']);
-    expect(inv.onecli.orphans.map((a) => a.identifier)).toEqual(['ag-other']);
-  });
-
-  it('flags orphan labels as unreliable when the DB is unreadable', () => {
-    const inv = scanInstall(deps({ runCommand: onecliUp }));
-    expect(inv.onecli.idsKnown).toBe(false);
-    expect(inv.onecli.mine).toEqual([]);
-    expect(inv.onecli.orphans.map((a) => a.identifier)).toEqual(['ag-mine', 'ag-other']);
-    expect(inv.notes.some((n) => n.includes("Couldn't read agent_groups"))).toBe(true);
-  });
-});
-
 describe('detectExistingInstall', () => {
   it('is false for an empty checkout', () => {
     expect(detectExistingInstall(root)).toBe(false);
@@ -189,8 +242,7 @@ describe('detectExistingInstall', () => {
 
   it('is true when the central DB exists', () => {
     fs.mkdirSync(path.join(root, 'data'));
-    const db = new Database(path.join(root, 'data', 'v2.db'));
-    db.close();
+    fs.writeFileSync(path.join(root, 'data', 'v2.db'), '');
     expect(detectExistingInstall(root)).toBe(true);
   });
 });

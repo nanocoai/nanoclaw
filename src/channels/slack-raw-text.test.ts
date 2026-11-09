@@ -1,10 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { createSlackAdapter } from '@chat-adapter/slack';
 import { describe, expect, it } from 'vitest';
 
 import { appendRawText } from './chat-sdk-bridge.js';
-import { extractSlackRawText } from './slack-raw-text.js';
+import { extractSlackRawText, slackRawTextExtractor } from './slack-raw-text.js';
 
 const pastedTableEvent = {
   text: 'Analyze this attendee list:',
@@ -81,7 +82,25 @@ describe('Slack pasted-table ingestion', () => {
 
   it('keeps the default Slack factory wired to the extractor', () => {
     const source = readFileSync(join(new URL('.', import.meta.url).pathname, 'slack.ts'), 'utf8');
-    expect(source).toContain("import { extractSlackRawText } from './slack-raw-text.js';");
-    expect(source).toContain('extractRawText: extractSlackRawText');
+    expect(source).toContain("import { slackRawTextExtractor } from './slack-raw-text.js';");
+    expect(source).toContain('extractRawText: slackRawTextExtractor(slackAdapter)');
+  });
+
+  it('uses the extractor only for adapters that leave tables out of the text', () => {
+    expect(slackRawTextExtractor({})).toBe(extractSlackRawText);
+    expect(slackRawTextExtractor({ tableNode: () => null })).toBeUndefined();
+  });
+
+  it('delivers each pasted-table row once with the installed adapter', () => {
+    const adapter = createSlackAdapter({ botToken: 'xoxb-test', signingSecret: 'test', mode: 'webhook' });
+    const message = (
+      adapter as unknown as { parseSlackMessageSync: (e: unknown, t: string) => { text: string } }
+    ).parseSlackMessageSync(
+      { ...pastedTableEvent, type: 'message', ts: '1.0', user: 'U1', channel: 'C1' },
+      'slack:C1:1.0',
+    );
+    const serialized: Record<string, unknown> = { text: message.text };
+    appendRawText(serialized, pastedTableEvent, slackRawTextExtractor(adapter));
+    expect((serialized.text as string).match(/Agria Pet Insurance/g)).toHaveLength(1);
   });
 });

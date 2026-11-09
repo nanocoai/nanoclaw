@@ -1,6 +1,8 @@
+import { createDiscordAdapter } from '@chat-adapter/discord';
+import type { Message } from 'chat';
 import { describe, expect, it } from 'vitest';
 
-import { unwrapForwardedSnapshot } from './discord.js';
+import { unwrapForwardedSnapshot, unwrapForwards } from './discord.js';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function forwardPayload(snapshotMessage: Record<string, any> | null, overrides: Record<string, any> = {}) {
@@ -19,6 +21,7 @@ describe('unwrapForwardedSnapshot', () => {
     const data = forwardPayload({ content: 'hello from the past', attachments: [] });
     unwrapForwardedSnapshot(data);
     expect(data.content).toBe('[Forwarded message]\nhello from the past');
+    expect(data).not.toHaveProperty('message_snapshots');
   });
 
   it('unwraps attachment-only forwards: label + merged attachments', () => {
@@ -72,5 +75,44 @@ describe('unwrapForwardedSnapshot', () => {
     });
     unwrapForwardedSnapshot(data);
     expect(data.content).toBe('[Forwarded message]\none\ntwo');
+  });
+});
+
+describe('unwrapForwards with the installed Discord adapter', () => {
+  it('delivers a forwarded attachment once, labeled once', async () => {
+    const adapter = createDiscordAdapter({
+      botToken: 'test-token',
+      publicKey: '0'.repeat(64),
+      applicationId: 'app-1',
+    });
+    unwrapForwards(adapter);
+    const received: Message[] = [];
+    (adapter as unknown as { chat: unknown }).chat = {
+      handleIncomingMessage: async (_adapter: unknown, _threadId: string, message: Message) => {
+        received.push(message);
+      },
+    };
+
+    const att = { filename: 'fwd.jpg', content_type: 'image/jpeg', size: 2, url: 'https://cdn.example/fwd.jpg' };
+    await (
+      adapter as unknown as { handleForwardedMessage: (d: Record<string, unknown>) => Promise<void> }
+    ).handleForwardedMessage(
+      forwardPayload(
+        { content: 'look', attachments: [att] },
+        {
+          guild_id: 'g1',
+          channel_id: 'c1',
+          channel_type: 0,
+          timestamp: '2026-01-01T00:00:00.000Z',
+          mentions: [],
+          author: { id: 'u1', username: 'alice', bot: false },
+        },
+      ),
+    );
+
+    expect(received).toHaveLength(1);
+    expect(received[0].attachments.map((a) => a.name)).toEqual(['fwd.jpg']);
+    expect(received[0].text.match(/\[Forwarded message\]/g)).toHaveLength(1);
+    expect(received[0].text.match(/look/g)).toHaveLength(1);
   });
 });

@@ -120,3 +120,75 @@ describe('MattermostSocket heartbeat', () => {
     await socket.disconnect();
   });
 });
+
+// The host's setup retry (channel-registry) matches on `name === 'NetworkError'`.
+describe('MattermostSocket connect failures', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    FakeWebSocket.instances = [];
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function startConnect(): { connected: Promise<unknown>; transport: FakeWebSocket } {
+    const socket = new MattermostSocket({
+      baseUrl: 'http://mattermost.test',
+      logger: silentLogger,
+      onEvent: () => {},
+      token: 'test-token',
+      webSocketImpl: FakeWebSocket as unknown as typeof WebSocket,
+    });
+    const connected = socket.connect().then(
+      () => undefined,
+      (err: unknown) => err,
+    );
+    return { connected, transport: FakeWebSocket.instances.at(-1)! };
+  }
+
+  function open(transport: FakeWebSocket): void {
+    transport.readyState = 1;
+    transport.emit('open');
+  }
+
+  it.each([
+    ['a refused connection', new Error('connect ECONNREFUSED 10.0.0.5:443')],
+    ['a 502 upgrade reply', new Error('Unexpected server response: 502')],
+  ])('tags %s as a NetworkError', async (_label, cause) => {
+    const { connected, transport } = startConnect();
+    transport.emit('error', cause);
+    expect(await connected).toMatchObject({ name: 'NetworkError', cause });
+  });
+
+  it('tags a close before authentication as a NetworkError', async () => {
+    const { connected, transport } = startConnect();
+    open(transport);
+    transport.emit('close', 1006);
+    expect(await connected).toMatchObject({ name: 'NetworkError' });
+  });
+
+  it('tags an authentication timeout as a NetworkError', async () => {
+    const { connected, transport } = startConnect();
+    open(transport);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(await connected).toMatchObject({ name: 'NetworkError' });
+  });
+
+  it('fails fast on a 4xx upgrade reply', async () => {
+    const { connected, transport } = startConnect();
+    transport.emit('error', new Error('Unexpected server response: 400'));
+    expect(await connected).toMatchObject({ name: 'Error', message: 'Unexpected server response: 400' });
+  });
+
+  it('fails fast when the server rejects the token', async () => {
+    const { connected, transport } = startConnect();
+    open(transport);
+    const auth = JSON.parse(transport.sent.at(-1)!) as { seq: number };
+    transport.emit(
+      'message',
+      JSON.stringify({ status: 'FAIL', seq_reply: auth.seq, error: { message: 'invalid token' } }),
+    );
+    expect(await connected).toMatchObject({ name: 'Error', message: expect.stringContaining('authentication failed') });
+  });
+});

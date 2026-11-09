@@ -37,8 +37,9 @@ Both are committed. CI and the Dockerfile run `--frozen-lockfile` variants — a
 
 ## Image build surface
 
-`container/Dockerfile` is a single-stage build on `node:22-slim`:
+`container/Dockerfile` is a single-stage build on `node:22.23.4-slim`:
 
+- **Pinned base** — tag and multi-arch digest, bumped together, at or above the minimum in `setup/lib/node-version.sh`.
 - **Pinned ARGs** — `BUN_VERSION`, `PNPM_VERSION`, `INSTALL_CJK_FONTS`. Bump deliberately in PRs. Global CLI versions (`@anthropic-ai/claude-code`, `agent-browser`, `vercel`) are pinned separately in `container/cli-tools.json`, not as ARGs.
 - **CJK fonts** — `ARG INSTALL_CJK_FONTS=false`. `container/build.sh` reads `INSTALL_CJK_FONTS` from `.env` and passes it through. Default build saves ~200MB; opt in when the user works with Chinese/Japanese/Korean content.
 - **BuildKit cache mounts** — `/var/cache/apt`, `/var/lib/apt`, `/root/.bun/install/cache`, `/root/.cache/pnpm`. Rebuilds where `package.json`/`bun.lock` haven't changed are fast. Requires BuildKit (default on Docker 23+, Apple Container-compat).
@@ -69,7 +70,7 @@ Any failure fails the PR.
 
 ## Key invariants
 
-- **Session DBs must use `journal_mode=DELETE`.** WAL's `-shm` memory-map doesn't cross VirtioFS between host and guest. See the doc comment at the top of `container/agent-runner/src/db/connection.ts` and `src/session-manager.ts`.
+- **Session DBs must use `journal_mode=DELETE`.** WAL's `-shm` memory-map doesn't cross VirtioFS between host and guest. See `container/agent-runner/src/mailbox/sqlite/connection.ts` and `src/mailbox/sqlite/session-db.ts`.
 - **Named SQL parameters in the container require the prefix in JS object keys.** `bun:sqlite` does not auto-strip `@`/`$`/`:` the way `better-sqlite3` does on the host. Use `$name` in both SQL and keys: `.run({ $id: msg.id })`. Positional `?` params work normally.
 - **Agent-runner tests run under `bun:test`, not vitest.** `vitest.config.ts` excludes the `container/agent-runner/` tree because vitest runs on Node and can't load `bun:sqlite`.
 - **No tsc build step in the container image.** Re-adding one would reintroduce the ~200-500ms per-session-wake cost we removed.

@@ -26,10 +26,23 @@ if ! $needs_install; then
 fi
 
 echo "STEP: fetch-channels-branch"
-git fetch origin channels
+git fetch origin '+refs/heads/channels:refs/remotes/origin/channels'
 
 echo "STEP: copy-files"
-git show origin/channels:src/channels/github.ts > src/channels/github.ts
+# Publish only a complete Git result; a failed copy must remain retryable.
+(
+  [[ ! -d src/channels/github.ts ]] || {
+    echo "ERROR: src/channels/github.ts is a directory; refusing to copy the adapter into it" >&2
+    exit 1
+  }
+  nc_copy_dir="$(mktemp -d src/channels/.github.ts.XXXXXX)"
+  trap 'rm -rf -- "$nc_copy_dir"' EXIT
+  if [[ -f src/channels/github.ts ]]; then
+    cp -p -- src/channels/github.ts "$nc_copy_dir/payload"
+  fi
+  git show refs/remotes/origin/channels:src/channels/github.ts > "$nc_copy_dir/payload"
+  mv -- "$nc_copy_dir/payload" src/channels/github.ts
+)
 
 echo "STEP: register-import"
 if ! grep -q "import './github.js';" src/channels/index.ts; then
@@ -37,7 +50,7 @@ if ! grep -q "import './github.js';" src/channels/index.ts; then
 fi
 
 echo "STEP: pnpm-install"
-pnpm install @chat-adapter/github@4.29.0
+pnpm install @chat-adapter/github@4.41.1
 
 echo "STEP: pnpm-build"
 pnpm run build

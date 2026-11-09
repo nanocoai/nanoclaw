@@ -22,16 +22,14 @@ import path from 'path';
 
 import Database from 'better-sqlite3';
 
-import { DATA_DIR } from '../../src/config.js';
+import { CENTRAL_DB_PATH, DATA_DIR } from '../../src/config.js';
 import { initDb, closeDb } from '../../src/db/connection.js';
 import { getAllAgentGroups } from '../../src/db/agent-groups.js';
 import { getMessagingGroupsByAgentGroup } from '../../src/db/messaging-groups.js';
 import { runMigrations } from '../../src/db/migrations/index.js';
-import {
-  resolveSession,
-  writeSessionRouting,
-  outboundDbPath,
-} from '../../src/session-manager.js';
+import '../../src/mailbox/compose.js';
+import { outboundDbPath } from '../../src/mailbox/sqlite/paths.js';
+import { resolveSession, writeSessionRouting } from '../../src/session-manager.js';
 
 const SKIP_NAMES = new Set(['.DS_Store']);
 
@@ -59,7 +57,7 @@ function copyTree(src: string, dst: string): number {
   return written;
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const v1Path = process.argv[2];
   if (!v1Path) {
     console.error('Usage: tsx setup/migrate-v2/sessions.ts <v1-path>');
@@ -73,16 +71,16 @@ function main(): void {
   }
 
   // Init v2 central DB
-  const v2DbPath = path.join(DATA_DIR, 'v2.db');
+  const v2DbPath = CENTRAL_DB_PATH;
   if (!fs.existsSync(v2DbPath)) {
     console.error('v2.db not found — run db step first');
     process.exit(1);
   }
 
-  const v2Db = initDb(v2DbPath);
-  runMigrations(v2Db);
+  const v2Db = await initDb(v2DbPath);
+  await runMigrations(v2Db);
 
-  const agentGroups = getAllAgentGroups();
+  const agentGroups = await getAllAgentGroups();
   const folderToAg = new Map<string, { id: string; folder: string }>();
   for (const ag of agentGroups) {
     folderToAg.set(ag.folder, ag);
@@ -104,7 +102,7 @@ function main(): void {
     }
 
     // Find the messaging groups wired to this agent group
-    const messagingGroups = getMessagingGroupsByAgentGroup(ag.id);
+    const messagingGroups = await getMessagingGroupsByAgentGroup(ag.id);
     if (messagingGroups.length === 0) {
       sessionsSkipped++;
       continue;
@@ -113,11 +111,11 @@ function main(): void {
     // Create a session for each messaging group (v1 had one session per
     // folder, v2 has one per agent_group + messaging_group pair)
     for (const mg of messagingGroups) {
-      const { session, created } = resolveSession(ag.id, mg.id, null, 'shared');
+      const { session, created } = await resolveSession(ag.id, mg.id, null, 'shared');
 
       if (created) {
         // Write routing so the container knows where to reply
-        writeSessionRouting(ag.id, session.id);
+        await writeSessionRouting(ag.id, session.id);
         sessionsCreated++;
       } else {
         sessionsReused++;
@@ -158,9 +156,9 @@ function main(): void {
             .sort((a, b) => b.mtime - a.mtime)[0].name;
 
           // Write into each v2 session's outbound.db for this agent group
-          const sessions = getMessagingGroupsByAgentGroup(ag.id);
+          const sessions = await getMessagingGroupsByAgentGroup(ag.id);
           for (const mg of sessions) {
-            const { session } = resolveSession(ag.id, mg.id, null, 'shared');
+            const { session } = await resolveSession(ag.id, mg.id, null, 'shared');
             const obPath = outboundDbPath(ag.id, session.id);
             if (fs.existsSync(obPath)) {
               const ob = new Database(obPath);
@@ -175,9 +173,12 @@ function main(): void {
     }
   }
 
-  closeDb();
+  await closeDb();
 
   console.log(`OK:created=${sessionsCreated},reused=${sessionsReused},skipped=${sessionsSkipped},files=${filesCopied}`);
 }
 
-main();
+main().catch((err) => {
+  console.error(`FAIL:${err instanceof Error ? err.message : String(err)}`);
+  process.exit(1);
+});

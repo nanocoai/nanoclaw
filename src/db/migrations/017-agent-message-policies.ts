@@ -6,6 +6,7 @@ import type { Migration } from './index.js';
 export const migration017: Migration = {
   version: 17,
   name: 'agent-message-policies',
+  sqliteOnly: true,
   up(db: Database.Database) {
     db.exec(`
       CREATE TABLE agent_message_policies (

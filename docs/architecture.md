@@ -266,13 +266,13 @@ One-shot and recurring tasks use the same tables — no separate scheduler.
 
 **Recurring:** Same, plus a `recurrence` cron expression. After the host marks a row as handled/delivered, if `recurrence` is set, it inserts a new row with `process_after`/`deliver_after` advanced to the next cron occurrence. Next time is computed from the scheduled time (not wall clock) to prevent drift.
 
-**Host sweep** (every ~60s across all sessions):
+**Host sweep** (every ~60s across all sessions, up to 8 reconciled concurrently through the keyed workqueue):
 - `inbound.db` → `messages_in WHERE status = 'pending' AND (process_after IS NULL OR process_after <= now())` → wake agent
 - A `processing_ack` (in `outbound.db`) whose claim, or the `.heartbeat` mtime, is older than the stale threshold → stale detection, increment tries, reschedule `process_after` with backoff
 - `outbound.db` → due `messages_out` rows not yet in the host's `delivered` table (in `inbound.db`) → deliver
 - After completing/delivering a row with `recurrence`, insert next occurrence
 
-**Active container poll** (~1s) checks the same conditions but only for sessions with running containers.
+**Active container poll** (~1s) checks the same conditions but only for sessions with running containers. Both delivery polls drain up to 8 sessions at a time and re-arm at a fixed rate from each tick's start, so many sessions on a slow mailbox don't serialize into one long tick.
 
 **Agent-runner creates schedules** by emitting a `messages_out` row with `kind: 'system'` and an `action` (`schedule_task`, `cancel_task`, …) — it cannot write host-owned `inbound.db` directly. The host applies the action during delivery (`src/modules/scheduling/actions.ts`), inserting/updating the `kind: 'task'` `messages_in` row with `process_after` and optionally `recurrence`.
 
@@ -422,7 +422,7 @@ This is documented as a pattern, not a built-in feature.
 
 ## Core Properties
 - Container isolation via filesystem mounts
-- Credential proxy (OneCLI)
+- Credential proxy (skill-installed gateway behind `src/gateway-providers/`)
 - Per-agent-group workspace (folder, CLAUDE.md, skills)
 - Polling-based (not event-driven)
 - Per-agent-group agent-runner recompilation on container startup (agent can modify its own source, request rebuild/restart, changes persist across teardowns)
@@ -455,9 +455,9 @@ This is documented as a pattern, not a built-in feature.
     ... working files
 ```
 
-Two directory mounts: session folder at `/workspace`, agent group folder at `/workspace/agent/`. The agent-runner CDs into `/workspace/agent/` to run the agent. Claude SDK writes `.claude/` at `/workspace/.claude/` (root of the workspace).
+Two directory mounts: session folder at `/workspace`, agent group folder at `/workspace/agent/`, plus nested read-only file mounts over the group dir (the composed `CLAUDE.md`, `container.json`). The agent-runner CDs into `/workspace/agent/` to run the agent. Claude SDK writes `.claude/` at `/workspace/.claude/` (root of the workspace).
 
-The runtime is Docker (`src/container-runtime.ts` hardcodes the `docker` binary); nested bind mounts make this layout straightforward. The layout deliberately sticks to directory mounts (no file-level mounts) so it stays portable to runtimes that only support directory mounts.
+The runtime is Docker (`src/container-runtime.ts` hardcodes the `docker` binary); nested bind mounts make this layout straightforward. Directory mounts carry the bulk of the layout, so it stays close to portable for runtimes with weaker file-mount support; the nested file mounts exist to make individual files read-only on top of a read-write dir.
 
 **Cross-mount DB access:** The two files exist precisely so each has a single writer — the
 host writes `inbound.db`, the container writes `outbound.db` — which removes writer
@@ -488,7 +488,7 @@ The central DB session row creation is the serialization point. No provider sess
 
 NanoClaw does not stream tokens to users. The provider's query interface yields complete results, but a result's text is not delivered as-is: the agent-runner parses it for `<message to="name">...</message>` blocks (`dispatchResultText` in poll-loop.ts) and writes one messages_out row per block, addressed to that destination with its thread context resolved per destination. Everything outside a block — including `<internal>...</internal>` — is scratchpad: logged, never sent. A block naming an unknown destination is dropped into the scratchpad log.
 
-If a result produced text but no valid block, the agent-runner pushes a one-time `<system>` nudge into the live turn asking the agent to re-wrap its response. The exception is a non-retryable error result (e.g. a billing error) with no envelope, which is delivered as an error notice instead of being dropped as scratchpad. Mid-turn interim updates go out through the `send_message` MCP tool; the final-text envelope parsing is how a turn's reply reaches the user. The host delivers complete messages_out rows to channels.
+If a turn ends with text that was not delivered, the agent-runner pushes a one-time `<system>` nudge into the live turn. That covers a result with text but no valid block, a block that was never delivered (unknown destination, or missed by the stream), and unwrapped final text after a `send_message` send or a reaction: a tool send does not settle the turn by itself, because it may be only an "on it". When something already went out that turn, the nudge quotes it and the agent either answers `<internal>done</internal>` or sends only what is missing; otherwise it asks the agent to re-wrap its response. A block in the retry that exactly repeats a message the nudged turn already sent is not sent again. A block to another agent does not count as the reply, unless it goes back to the agent whose message woke the turn. The exception is a non-retryable error result (e.g. a billing error) with no envelope, which is delivered as an error notice instead of being dropped as scratchpad. Mid-turn interim updates go out through the `send_message` MCP tool; the final-text envelope parsing is how a turn's reply reaches the user. The host delivers complete messages_out rows to channels.
 
 Message editing is supported as an explicit operation (agent calls an `edit_message` tool), not as a streaming mechanism.
 
@@ -921,7 +921,7 @@ See [agent-runner-details.md](agent-runner-details.md) for full MCP tool paramet
 
 ### Cards
 
-**Agent-initiated (outbound):** Tool-based. Agent calls `ask_user_question` (interactive card with options) or `send_card` (structured card). Agent-runner writes the card structure to messages_out. Host/adapter handles platform-specific rendering (Slack Block Kit, Discord embeds, Telegram inline keyboard, text fallback).
+**Agent-initiated (outbound):** Tool-based. Agent calls `ask_user_question` for an interactive card with callback options, or `send_card` for a display card with optional URL link buttons. Agent-runner writes the card structure to messages_out. The host/adapter handles platform-specific rendering. `send_card` does not support callback buttons or nested action blocks; each top-level link action requires a non-empty label and a web (http or https) URL. Use `ask_user_question` when a selection must return to the agent.
 
 **Host-initiated (approval cards):** When an action requires approval, the host generates a standardized approval card and sends it to the admin's DM. These are not agent-initiated — the agent doesn't know about the approval step. The card format is fixed (action description + approve/deny buttons).
 
@@ -966,6 +966,26 @@ Pre-scripts: if a task message has a `script` field, run it first. If `wakeAgent
 - System prompt loading from CLAUDE.md files
 - PreCompact hook for transcript archiving (Claude provider)
 - Script execution for task-kind messages
+
+### Host Provider Contract
+
+Each agent provider tells the host, in plain data, what it needs on disk and in the container. This is the *host provider contract* (`src/provider-contracts/`). Claude's declaration is in `claude.ts`; a provider skill adds its own file and one import in `provider-contracts/index.ts`.
+
+A provider declares:
+
+- **Project document** — the file the host composes from every instruction source (for Claude, `CLAUDE.md`) and where it is mounted.
+- **State volumes** — provider-owned directories under `data/v2-sessions/<group>/` (group scope) or the session directory (session scope), with their container path and read/write mode.
+- **Skill backings and views** — where the provider's native skills directory lives and any extra bind mounts of it into the container. Core always keeps the shared-skill symlinks in every backing.
+- **Prepared files** — files core creates or reconciles inside a state volume (for Claude, `settings.json`). They are created with the process default mode; the contract does not pick one.
+
+Rules:
+
+- Contracts name only container paths and directory *names*; host paths are resolved by core. Every declared item is acted on — nothing is descriptive only.
+- The shape is validated when the contract registers, so a malformed provider skill fails when the host loads, not at first spawn.
+- A provider that also has a legacy host adapter (`src/providers/`) still gets that adapter's env passed through; its mounts are ignored because core now realizes the declared surfaces.
+- Mount order is fixed by core, not by the provider: state volumes, then skill views, then the project document.
+- The shipped base document (`container/CLAUDE.md`) is protected from operator mounts by core itself, not by any contract field.
+- A provider name with neither a contract nor an adapter spawns with the default (Claude) surfaces, plus a warning in the host log.
 
 ## Open Questions
 

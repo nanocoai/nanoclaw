@@ -26,8 +26,8 @@ import { resolveGroupFolderPath } from '../group-folder.js';
 import { PERSONA_PREPEND_FILE, readGroupPersona } from '../group-persona.js';
 import { log } from '../log.js';
 import { createScheduledTask, taskNameSlug } from '../modules/scheduling/create.js';
-import { deleteTask, parseTaskContent, updateTask } from '../modules/scheduling/db.js';
-import { inboundDbPath, withInboundDb } from '../session-manager.js';
+import { parseTaskContent } from '../modules/scheduling/task-content.js';
+import { withExistingMailboxSession } from '../session-manager.js';
 import type { AgentGroup } from '../types.js';
 import { groupSkillsOverlayDir, markPluginServers } from './create-agent.js';
 import { resolveLocalTemplate } from './local-dir.js';
@@ -63,7 +63,7 @@ export interface RestampResult {
  * manifest (the full walk/caps/lint pass runs in the stamp it gates, not in
  * this probe).
  */
-export function groupsCarryingPlugin(ref: string): AgentGroup[] {
+export async function groupsCarryingPlugin(ref: string, groups?: readonly AgentGroup[]): Promise<AgentGroup[]> {
   const dir = resolveLocalTemplate(ref);
   const manifestPath = path.join(dir, PLUGIN_MANIFEST_FILE);
   // The fast path reads ONLY a regular manifest file. Anything else — absent
@@ -74,7 +74,7 @@ export function groupsCarryingPlugin(ref: string): AgentGroup[] {
     parseTemplate(dir);
   }
   const manifest = parsePluginManifest(JSON.parse(fs.readFileSync(manifestPath, 'utf-8')));
-  return getAllAgentGroups().filter((g) =>
+  return (groups ?? (await getAllAgentGroups())).filter((g) =>
     fs.existsSync(path.join(resolveGroupFolderPath(g.folder), 'plugins', manifest.name, PLUGIN_MANIFEST_FILE)),
   );
 }
@@ -84,10 +84,14 @@ export function groupsCarryingPlugin(ref: string): AgentGroup[] {
  * before any mutation when the group is missing, the group doesn't carry this
  * plugin, either plugin copy fails validation, or a template task is invalid.
  */
-export function restampAgentFromTemplate(ref: string, agentGroupId: string, opts: { apply: boolean }): RestampResult {
-  const group = getAgentGroup(agentGroupId);
+export async function restampAgentFromTemplate(
+  ref: string,
+  agentGroupId: string,
+  opts: { apply: boolean },
+): Promise<RestampResult> {
+  const group = await getAgentGroup(agentGroupId);
   if (!group) throw new Error(`Agent group not found: ${agentGroupId}`);
-  const configRow = getContainerConfig(group.id);
+  const configRow = await getContainerConfig(group.id);
   if (!configRow) throw new Error(`No container config for group: ${group.id}`);
 
   const tpl = parseTemplate(resolveLocalTemplate(ref));
@@ -112,11 +116,11 @@ export function restampAgentFromTemplate(ref: string, agentGroupId: string, opts
   // can half-apply over an invalid task file. NEW-side only: the old parsed
   // copy is tolerated as-is, so an already-stamped bad template stays
   // restampable to a fixed version.
-  const preparedTasks = prepareTemplateTasks(tpl.tasks, resolveGroupTimezone(group.id));
+  const preparedTasks = prepareTemplateTasks(tpl.tasks, await resolveGroupTimezone(group.id));
   const newTaskSlugs = new Set(tpl.tasks.map((task) => taskNameSlug(task.name)));
 
   const changes: RestampChange[] = [];
-  const ops: Array<() => void> = [];
+  const ops: Array<() => void | Promise<void>> = [];
 
   // --- plugin files: plugins/<name> replaced wholesale ---------------------
   if (dirsEqual(tpl.dir, oldPluginDir)) {
@@ -316,7 +320,7 @@ export function restampAgentFromTemplate(ref: string, agentGroupId: string, opts
     delete next[name];
     mcpDirty = true;
   }
-  if (mcpDirty) ops.push(() => updateContainerConfigJson(group.id, 'mcp_servers', next));
+  if (mcpDirty) ops.push(async () => await updateContainerConfigJson(group.id, 'mcp_servers', next));
 
   // --- tasks (matched by name slug; pause/resume state is operator-owned) --
   // Old-side tasks are keyed by SLUG — the identity live series carry. A rename
@@ -325,7 +329,7 @@ export function restampAgentFromTemplate(ref: string, agentGroupId: string, opts
   const oldTasks = new Map(old.tasks.map((t) => [taskNameSlug(t.name), t]));
   for (const task of tpl.tasks) {
     const prepared = preparedTasks.get(task.name)!;
-    const match = findTaskSeriesBySlug(group.id, taskNameSlug(task.name));
+    const match = await findTaskSeriesBySlug(group.id, taskNameSlug(task.name));
     const oldTask = oldTasks.get(taskNameSlug(task.name));
     // A dead series (no live row, nothing armed to re-arm) is history, not a
     // task — a fresh series is created alongside it.
@@ -338,7 +342,9 @@ export function restampAgentFromTemplate(ref: string, agentGroupId: string, opts
           ? { customized: true, note: 'was removed locally; recreated paused' }
           : { note: 'created paused' }),
       });
-      ops.push(() => void createScheduledTask(group.id, prepared, { status: 'paused' }));
+      ops.push(async () => {
+        await createScheduledTask(group.id, prepared, { status: 'paused' });
+      });
       continue;
     }
     if (!match.live) {
@@ -371,9 +377,9 @@ export function restampAgentFromTemplate(ref: string, agentGroupId: string, opts
       ...(customized ? { customized: true } : {}),
       note: `series ${match.seriesId}; status "${match.status}" kept`,
     });
-    ops.push(() => {
-      withInboundDb(group.id, match.sessionId, (db) =>
-        updateTask(db, match.seriesId, {
+    ops.push(async () => {
+      await withExistingMailboxSession(group.id, match.sessionId, (mailbox) =>
+        mailbox.updateTask(match.seriesId, {
           prompt: prepared.prompt,
           script: prepared.script,
           ...(match.recurrence !== prepared.recurrence
@@ -385,7 +391,7 @@ export function restampAgentFromTemplate(ref: string, agentGroupId: string, opts
   }
   for (const [slug, oldTask] of oldTasks) {
     if (newTaskSlugs.has(slug)) continue;
-    const match = findTaskSeriesBySlug(group.id, slug);
+    const match = await findTaskSeriesBySlug(group.id, slug);
     // Nothing to remove when the series is already dead history.
     if (match === undefined || (!match.live && match.recurrence === null)) continue;
     changes.push({
@@ -394,8 +400,8 @@ export function restampAgentFromTemplate(ref: string, agentGroupId: string, opts
       action: 'remove',
       note: `series ${match.seriesId} deleted (was ${match.status})`,
     });
-    ops.push(() => {
-      withInboundDb(group.id, match.sessionId, (db) => deleteTask(db, match.seriesId));
+    ops.push(async () => {
+      await withExistingMailboxSession(group.id, match.sessionId, (mailbox) => mailbox.deleteTask(match.seriesId));
     });
   }
 
@@ -406,7 +412,7 @@ export function restampAgentFromTemplate(ref: string, agentGroupId: string, opts
   if (opts.apply) {
     for (const [index, op] of ops.entries()) {
       try {
-        op();
+        await op();
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         throw new Error(
@@ -518,26 +524,17 @@ interface TaskSeriesMatch {
  * match in ANY state — a recurring series between a run completing and the
  * sweep re-arming it (≤60s) has only completed rows but is still alive.
  */
-function findTaskSeriesBySlug(agentGroupId: string, slug: string): TaskSeriesMatch | undefined {
+async function findTaskSeriesBySlug(agentGroupId: string, slug: string): Promise<TaskSeriesMatch | undefined> {
   if (!slug) return undefined;
-  const pattern = `${slug}-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]`;
-  for (const session of [...findTaskSessions(agentGroupId)].reverse()) {
-    if (!fs.existsSync(inboundDbPath(agentGroupId, session.id))) continue;
-    const row = withInboundDb(agentGroupId, session.id, (db) =>
-      db
-        .prepare(
-          `SELECT series_id, status, recurrence, content FROM messages_in
-            WHERE kind = 'task' AND series_id GLOB ?
-            ORDER BY CASE WHEN status IN ('pending', 'paused') THEN 0 ELSE 1 END, seq DESC
-            LIMIT 1`,
-        )
-        .get(pattern),
-    ) as { series_id: string; status: string; recurrence: string | null; content: string } | undefined;
-    if (!row) continue;
+  for (const session of [...(await findTaskSessions(agentGroupId))].reverse()) {
+    const row = await withExistingMailboxSession(agentGroupId, session.id, (mailbox) =>
+      mailbox.findTaskBySeriesSlug(slug),
+    );
+    if (!row?.seriesId) continue;
     const content = parseTaskContent(row.content);
     return {
       sessionId: session.id,
-      seriesId: row.series_id,
+      seriesId: row.seriesId,
       live: row.status === 'pending' || row.status === 'paused',
       status: row.status,
       recurrence: row.recurrence,

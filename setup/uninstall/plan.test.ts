@@ -1,16 +1,9 @@
 import { describe, it, expect } from 'vitest';
 
-import type { VaultAgent } from './onecli-agents.js';
 import { buildRemovalPlan, type Decisions, type RemovalAction } from './plan.js';
 import type { Inventory, PathItem } from './scan.js';
 
 const item = (p: string, what: string): PathItem => ({ what, where: p, path: p });
-
-const agent = (uuid: string, identifier: string): VaultAgent => ({
-  uuid,
-  identifier,
-  name: identifier,
-});
 
 function inventory(overrides: Partial<Inventory> = {}): Inventory {
   return {
@@ -35,17 +28,15 @@ function inventory(overrides: Partial<Inventory> = {}): Inventory {
       item('/proj/dist', 'Build output'),
     ],
     user: [item('/proj/groups', 'Agent memory & files'), item('/proj/store', 'Migrated data store')],
-    onecli: { mine: [], orphans: [], idsKnown: true },
     notes: [],
     ...overrides,
   };
 }
 
-const allYes = (onecliDelete: VaultAgent[] = []): Decisions => ({
+const allYes = (): Decisions => ({
   service: true,
   data: true,
   user: true,
-  onecliDelete,
 });
 
 const kinds = (actions: RemovalAction[]) => actions.map((a) => a.kind);
@@ -54,13 +45,11 @@ describe('buildRemovalPlan ordering invariants', () => {
   it('removes .env only via the atomic backup action, never a bare delete', () => {
     const actions = buildRemovalPlan(inventory(), allYes());
     expect(actions.filter((a) => a.kind === 'backup-env')).toHaveLength(1);
-    expect(
-      actions.some((a) => a.kind === 'delete-path' && a.item.path === '/proj/.env'),
-    ).toBe(false);
+    expect(actions.some((a) => a.kind === 'delete-path' && a.item.path === '/proj/.env')).toBe(false);
   });
 
   it('puts the runtime tail strictly last, with node_modules final', () => {
-    const actions = buildRemovalPlan(inventory(), allYes([agent('u-1', 'ag-mine')]));
+    const actions = buildRemovalPlan(inventory(), allYes());
     const tail = actions.slice(-2);
     expect(tail.map((a) => a.kind)).toEqual(['delete-runtime-path', 'delete-runtime-path']);
     expect(tail.map((a) => (a.kind === 'delete-runtime-path' ? a.item.path : ''))).toEqual([
@@ -69,19 +58,7 @@ describe('buildRemovalPlan ordering invariants', () => {
     ]);
     // No non-tail action after the first runtime delete.
     const firstTailIdx = actions.findIndex((a) => a.kind === 'delete-runtime-path');
-    expect(
-      actions.slice(firstTailIdx).every((a) => a.kind === 'delete-runtime-path'),
-    ).toBe(true);
-  });
-
-  it('deletes OneCLI agents before the data group (which removes data/v2.db)', () => {
-    const actions = buildRemovalPlan(inventory(), allYes([agent('u-1', 'ag-mine')]));
-    const onecliIdx = actions.findIndex((a) => a.kind === 'delete-onecli-agent');
-    const dataIdx = actions.findIndex(
-      (a) => a.kind === 'delete-path' && a.item.path === '/proj/data',
-    );
-    expect(onecliIdx).toBeGreaterThanOrEqual(0);
-    expect(dataIdx).toBeGreaterThan(onecliIdx);
+    expect(actions.slice(firstTailIdx).every((a) => a.kind === 'delete-runtime-path')).toBe(true);
   });
 
   it('runs service teardown before container removal so the host cannot respawn them', () => {
@@ -100,13 +77,10 @@ describe('buildRemovalPlan declined groups', () => {
       service: true,
       data: false,
       user: true,
-      onecliDelete: [],
     });
     expect(kinds(actions)).not.toContain('backup-env');
     expect(kinds(actions)).not.toContain('delete-runtime-path');
-    expect(
-      actions.some((a) => a.kind === 'delete-path' && a.item.path.startsWith('/proj/data')),
-    ).toBe(false);
+    expect(actions.some((a) => a.kind === 'delete-path' && a.item.path.startsWith('/proj/data'))).toBe(false);
   });
 
   it('all declined yields an empty plan', () => {
@@ -114,7 +88,6 @@ describe('buildRemovalPlan declined groups', () => {
       service: false,
       data: false,
       user: false,
-      onecliDelete: [],
     });
     expect(actions).toEqual([]);
   });
@@ -124,11 +97,47 @@ describe('buildRemovalPlan declined groups', () => {
       service: false,
       data: true,
       user: false,
-      onecliDelete: [],
     });
     for (const kind of ['unload-service', 'pkill-host', 'rm-containers', 'rmi', 'rm-ncl-symlink']) {
       expect(kinds(actions)).not.toContain(kind);
     }
+  });
+});
+
+describe('buildRemovalPlan compose projects', () => {
+  const projects = {
+    names: ['gw-abcd1234'],
+    containers: ['gw-abcd1234-web-1'],
+    volumes: ['gw-abcd1234_database'],
+    networks: ['gw-abcd1234'],
+  };
+
+  it('removes project volumes and networks with the data group, after containers and before the keys in data/', () => {
+    const actions = buildRemovalPlan(inventory({ projects }), allYes());
+    const idx = actions.findIndex((a) => a.kind === 'rm-project-residue');
+    expect(actions[idx]).toEqual({
+      kind: 'rm-project-residue',
+      runtime: 'docker',
+      projects: ['gw-abcd1234'],
+    });
+    expect(idx).toBeGreaterThan(actions.findIndex((a) => a.kind === 'rm-containers'));
+    expect(idx).toBeLessThan(actions.findIndex((a) => a.kind === 'backup-env'));
+    expect(idx).toBeLessThan(actions.findIndex((a) => a.kind === 'delete-path'));
+  });
+
+  it('removes the project with the data group even when the service group is declined', () => {
+    const actions = buildRemovalPlan(inventory({ projects }), { service: false, data: true, user: false });
+    expect(kinds(actions)).not.toContain('rm-containers');
+    expect(kinds(actions).indexOf('rm-project-residue')).toBeLessThan(kinds(actions).indexOf('backup-env'));
+  });
+
+  it('keeps the volumes when the data group is declined', () => {
+    const actions = buildRemovalPlan(inventory({ projects }), { service: true, data: false, user: true });
+    expect(kinds(actions)).not.toContain('rm-project-residue');
+  });
+
+  it('plans nothing extra when the copy has no projects', () => {
+    expect(kinds(buildRemovalPlan(inventory(), allYes()))).not.toContain('rm-project-residue');
   });
 });
 
@@ -149,8 +158,6 @@ describe('buildRemovalPlan conditional actions', () => {
     // scan never saw. Removal re-lists by install label, not scan-time ids.
     expect(actionKinds).toContain('pkill-host');
     const rm = actions.find((a) => a.kind === 'rm-containers');
-    expect(rm && rm.kind === 'rm-containers' ? rm.labelFilter : '').toBe(
-      'nanoclaw-install=abcd1234',
-    );
+    expect(rm && rm.kind === 'rm-containers' ? rm.labelFilter : '').toBe('nanoclaw-install=abcd1234');
   });
 });

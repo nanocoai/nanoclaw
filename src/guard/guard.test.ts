@@ -36,14 +36,14 @@ afterEach(() => {
 });
 
 describe('decide is the decision', () => {
-  it('decide allow → allow', () => {
+  it('decide allow → allow', async () => {
     const action = defineGuardedAction({ action: 't.allow1', decide: () => ALLOW('ok') });
-    expect(guard(action, input()).effect).toBe('allow');
+    expect((await guard(action, input())).effect).toBe('allow');
   });
 
-  it('decide hold → hold, default approver chain', () => {
+  it('decide hold → hold, default approver chain', async () => {
     const action = defineGuardedAction({ action: 't.hold1', decide: () => HOLD('needs approval') });
-    const d = guard(action, input());
+    const d = await guard(action, input());
     expect(d.effect).toBe('hold');
     if (d.effect === 'hold') {
       expect(d.reason).toBe('needs approval');
@@ -51,23 +51,23 @@ describe('decide is the decision', () => {
     }
   });
 
-  it('decide hold → hold, carrying a named approver', () => {
+  it('decide hold → hold, carrying a named approver', async () => {
     const action = defineGuardedAction({ action: 't.hold2', decide: () => HOLD('policy row', 'telegram:dana') });
-    const d = guard(action, input());
+    const d = await guard(action, input());
     expect(d.effect).toBe('hold');
     if (d.effect === 'hold') expect(d.approverUserId).toBe('telegram:dana');
   });
 
-  it('decide deny → deny, carrying the reason', () => {
+  it('decide deny → deny, carrying the reason', async () => {
     const action = defineGuardedAction({ action: 't.deny1', decide: () => DENY('structurally unauthorized') });
-    const d = guard(action, input());
+    const d = await guard(action, input());
     expect(d.effect).toBe('deny');
     if (d.effect === 'deny') expect(d.reason).toBe('structurally unauthorized');
   });
 
-  it('a forged action value (not from defineGuardedAction) is denied', () => {
+  it('a forged action value (not from defineGuardedAction) is denied', async () => {
     const forged = { action: 't.forged', decide: () => ALLOW('never vetted') } as unknown as GuardedAction;
-    const d = guard(forged, input());
+    const d = await guard(forged, input());
     expect(d.effect).toBe('deny');
     if (d.effect === 'deny') expect(d.reason).toContain('undefined action');
   });
@@ -77,7 +77,7 @@ describe('grants', () => {
   const grantRow = (action: string) =>
     ({ approval_id: 'appr-1', action, payload: '{}' }) as unknown as NonNullable<GuardInput['grant']>;
 
-  it('a valid live grant satisfies a hold', () => {
+  it('a valid live grant satisfies a hold', async () => {
     const action = defineGuardedAction({
       action: 't.g1',
       grantActionName: 'g1_approved',
@@ -85,10 +85,10 @@ describe('grants', () => {
     });
     const grant = grantRow('g1_approved');
     mockGetPendingApproval.mockReturnValue(grant);
-    expect(guard(action, input({ grant })).effect).toBe('allow');
+    expect((await guard(action, input({ grant }))).effect).toBe('allow');
   });
 
-  it('a grant never satisfies a deny — the checks re-run live', () => {
+  it('a grant never satisfies a deny — the checks re-run live', async () => {
     const action = defineGuardedAction({
       action: 't.g2',
       grantActionName: 'g2_approved',
@@ -96,23 +96,23 @@ describe('grants', () => {
     });
     const grant = grantRow('g2_approved');
     mockGetPendingApproval.mockReturnValue(grant);
-    const d = guard(action, input({ grant }));
+    const d = await guard(action, input({ grant }));
     expect(d.effect).toBe('deny');
     if (d.effect === 'deny') expect(d.reason).toBe('revoked since');
   });
 
-  it('a dead grant (row deleted) refuses instead of re-holding', () => {
+  it('a dead grant (row deleted) refuses instead of re-holding', async () => {
     const action = defineGuardedAction({
       action: 't.g3',
       grantActionName: 'g3_approved',
       decide: () => HOLD('b'),
     });
     mockGetPendingApproval.mockReturnValue(undefined);
-    const d = guard(action, input({ grant: grantRow('g3_approved') }));
+    const d = await guard(action, input({ grant: grantRow('g3_approved') }));
     expect(d.effect).toBe('deny');
   });
 
-  it("a grant for a different action doesn't transfer", () => {
+  it("a grant for a different action doesn't transfer", async () => {
     const action = defineGuardedAction({
       action: 't.g4',
       grantActionName: 'g4_approved',
@@ -120,10 +120,10 @@ describe('grants', () => {
     });
     const grant = grantRow('other_action');
     mockGetPendingApproval.mockReturnValue(grant);
-    expect(guard(action, input({ grant })).effect).toBe('deny');
+    expect((await guard(action, input({ grant }))).effect).toBe('deny');
   });
 
-  it('a domain grantCoversRequest binding can refuse a payload mismatch', () => {
+  it('a domain grantCoversRequest binding can refuse a payload mismatch', async () => {
     const action = defineGuardedAction({
       action: 't.g5',
       grantActionName: 'g5_approved',
@@ -132,10 +132,10 @@ describe('grants', () => {
     });
     const grant = grantRow('g5_approved');
     mockGetPendingApproval.mockReturnValue(grant);
-    expect(guard(action, input({ grant })).effect).toBe('deny');
+    expect((await guard(action, input({ grant }))).effect).toBe('deny');
   });
 
-  it('a grant on an already-allowed action is a no-op', () => {
+  it('a grant on an already-allowed action is a no-op', async () => {
     const action = defineGuardedAction({
       action: 't.g6',
       grantActionName: 'g6_approved',
@@ -143,18 +143,18 @@ describe('grants', () => {
     });
     const grant = grantRow('g6_approved');
     mockGetPendingApproval.mockReturnValue(grant);
-    expect(guard(action, input({ grant })).effect).toBe('allow');
+    expect((await guard(action, input({ grant }))).effect).toBe('allow');
   });
 });
 
 describe('fail-closed posture', () => {
-  it('a throwing decide denies', () => {
+  it('a throwing decide denies', async () => {
     const action = defineGuardedAction({
       action: 't.f1',
       decide: () => {
         throw new Error('boom');
       },
     });
-    expect(guard(action, input()).effect).toBe('deny');
+    expect((await guard(action, input())).effect).toBe('deny');
   });
 });

@@ -4,6 +4,7 @@ import type { Migration } from './index.js';
 export const migration008: Migration = {
   version: 8,
   name: 'dropped-messages',
+  sqliteOnly: true,
   up: (db: Database.Database) => {
     db.exec(`
       CREATE TABLE IF NOT EXISTS unregistered_senders (

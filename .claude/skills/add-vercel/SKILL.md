@@ -47,13 +47,23 @@ head -5 container/skills/vercel-cli/SKILL.md
 
 ## Phase 3: Configure Credentials
 
+### Check the OneCLI gateway first
+
+The Vercel secret reaches only the groups it is attached to, through OneCLI agent grants. On an older gateway a saved secret reaches every agent and the attach step fails, so check the gateway and CLI before asking for a token or saving one. It reads only:
+
+```bash
+sh .claude/skills/add-onecli/scripts/check-grants-gateway.sh /add-vercel
+```
+
+If it fails, show the user the message as it is and stop: do not ask for the token or save it, and do not attach it to agents by hand.
+
 ### Check if Vercel credential already exists
 
 ```bash
-onecli secrets list 2>/dev/null | grep -i vercel
+onecli secrets list --max 0 2>/dev/null | jq -r '(if type == "array" then . else .data end)[] | select(.hostPattern == "api.vercel.com") | "\(.id)  \(.name)  created \(.createdAt)"'
 ```
 
-If a Vercel credential already exists, skip to Phase 4.
+If a Vercel credential already exists, skip to [Attach the secret to the groups that use Vercel](#attach-the-secret-to-the-groups-that-use-vercel): a re-run still asks which groups get it.
 
 ### Set up Vercel API credential
 
@@ -67,37 +77,74 @@ The agent needs a Vercel personal access token. Tell the user:
 >
 > After creating the token, copy it — you'll only see it once.
 
-Once the user provides the token, add it to OneCLI:
+Once the user provides the token, add it to OneCLI from a file in a private temporary directory. Never put the token in a shell command: any local user can read a running command's text with `ps`. Make the directory:
 
 ```bash
+mktemp -d "${TMPDIR:-/tmp}/nanoclaw-vercel-token.XXXXXX"
+```
+
+Write the token, and nothing else, to `token` in the printed directory with your file-writing tool, not a shell command. Then put the directory in `D` and run the block right away. If you are not going to run it (the user stops, or the token was wrong), delete the directory with `rm -rf` first. OneCLI's own output is dropped, since a gateway error can quote the token. The block also clears a directory of yours that an earlier run left more than 10 minutes ago, when it stopped before this step:
+
+```bash
+(
+D="<directory printed by mktemp -d>"
+trap 'rm -rf "$D"; find -H "${TMPDIR:-/tmp}" -maxdepth 1 -name "nanoclaw-vercel-token.*" -user "$(id -u)" -mmin +10 -exec rm -rf {} + 2>/dev/null' EXIT
 onecli secrets create \
   --name "Vercel API Token" \
   --type generic \
-  --value "<TOKEN>" \
+  --file "$D/token" \
   --host-pattern "api.vercel.com" \
   --header-name "Authorization" \
-  --value-format "Bearer {value}"
+  --value-format "Bearer {value}" >/dev/null 2>&1 \
+  || { echo "OneCLI did not save the token: check that onecli secrets list works, then ask for the token again" >&2; exit 1; }
+)
 ```
 
 Verify:
 
 ```bash
-onecli secrets list | grep -i vercel
+onecli secrets list --max 0 | jq -r '(if type == "array" then . else .data end)[] | select(.hostPattern == "api.vercel.com") | "\(.id)  \(.name)  created \(.createdAt)"'
 ```
 
-### Assign the secret to all agents
+### Attach the secret to the groups that use Vercel
 
-OneCLI uses selective secret mode — secrets must be explicitly assigned to each agent. Get the Vercel secret ID from the output above, then assign it to every agent:
+A OneCLI agent receives only the secrets attached to it, and NanoClaw gives a group only its model credential on its own. List the agent groups and ask the user which ones should be able to deploy to Vercel:
 
 ```bash
-# set-secrets replaces the entire list — read and merge for each agent.
-VERCEL_SECRET_ID=$(onecli secrets list | jq -r '.data[] | select(.name | test("(?i)vercel")) | .id' | head -1)
-for agent in $(onecli agents list | jq -r '.data[].id'); do
-  CURRENT=$(onecli agents secrets --id "$agent" | jq -r '[.data[]] | join(",")')
-  MERGED=$(printf '%s' "$CURRENT,$VERCEL_SECRET_ID" | tr ',' '\n' | sort -u | paste -sd ',' -)
-  onecli agents set-secrets --id "$agent" --secret-ids "$MERGED"
-done
+ncl groups list --json --limit 100000 | jq -r '.data[] | "\(.id)  \(.name)"'
 ```
+
+Put the chosen group ids, comma-separated, in `VERCEL_GROUPS` and run the block. If OneCLI holds more than one Vercel token, the block lists them (id, name, creation time) and stops: ask the user which one they saved and put its id in `VERCEL_SECRET`. The block attaches the Vercel secret to each chosen group's OneCLI agent, creating the agent for a group that has not run yet (NanoClaw adds its model credential on its first spawn). Attaching adds this one secret and leaves each agent's other grants alone; other groups, and groups created later, do not get it:
+
+```bash
+(
+VERCEL_GROUPS="<agent-group-id>,<agent-group-id>"
+VERCEL_SECRET=""
+L=$(onecli secrets list --max 0) && [ -n "$(printf '%s' "$L" | tr -d '[:space:]')" ] || { echo "could not list OneCLI secrets" >&2; exit 1; }
+T=$(printf '%s' "$L" | jq -c '[(if type == "array" then . else .data end)[] | select(.hostPattern == "api.vercel.com") | {id, name, createdAt}]') || { echo "could not read the OneCLI secret list" >&2; exit 1; }
+if [ -n "$VERCEL_SECRET" ]; then
+  S=$(printf '%s' "$T" | jq -r --arg s "$VERCEL_SECRET" '.[] | select(.id == $s) | .id'); [ -n "$S" ] || { echo "'$VERCEL_SECRET' is not a Vercel token in OneCLI" >&2; exit 1; }
+else
+  case "$(printf '%s' "$T" | jq length)" in
+    0) echo "no Vercel token in OneCLI yet: save it with the command above first" >&2; exit 1 ;;
+    1) S=$(printf '%s' "$T" | jq -r '.[0].id') ;;
+    *) echo "more than one Vercel token in OneCLI:" >&2; printf '%s' "$T" | jq -r '.[] | "  \(.id)  \(.name)  created \(.createdAt)"' >&2
+       echo "set VERCEL_SECRET to the one to attach (check its name and time; ask if unsure) and run this again" >&2; exit 1 ;;
+  esac
+fi
+G=$(ncl groups list --json --limit 100000) || { echo "could not list agent groups; is the NanoClaw host running?" >&2; exit 1; }
+AG=$(onecli agents list --max 0 | jq -ce 'if type == "array" then . else .data end | arrays') || { echo "could not list OneCLI agents" >&2; exit 1; }
+for gid in $(printf '%s' "$VERCEL_GROUPS" | tr ',' ' '); do
+  gname=$(printf '%s' "$G" | jq -r --arg g "$gid" '.data[] | select(.id==$g) | .name'); [ -n "$gname" ] || { echo "unknown agent group '$gid'; see: ncl groups list" >&2; exit 1; }
+  aid=$(printf '%s' "$AG" | jq -r --arg g "$gid" '.[] | select(.identifier==$g) | .id')
+  [ -n "$aid" ] || aid=$(onecli agents create --name "$gname" --identifier "$gid" | jq -r '.id // empty'); [ -n "$aid" ] || { echo "could not create a OneCLI agent for $gname ($gid)" >&2; exit 1; }
+  onecli agents grants attach-secret --id "$aid" --secret-id "$S" >/dev/null || { echo "could not attach the Vercel secret to $gname ($gid)" >&2; exit 1; }
+  echo "Vercel attached to $gname ($gid)"
+done
+)
+```
+
+To add a group later, run the block again with its id. To take Vercel away from one group: `onecli agents grants detach-secret --id <agent-id> --secret-id <vercel-secret-id>`. Check one agent with `onecli agents grants list --id <agent-id>`. This needs a OneCLI gateway with the grants API (1.44 or later; see `/add-onecli`).
 
 ## Phase 4: Ensure Vercel CLI in Container Image
 
@@ -159,7 +206,7 @@ done
 Stop all running agent containers so they pick up the new skills on next wake:
 
 ```bash
-docker ps --format "{{.ID}} {{.Names}}" | grep nanoclaw-v2 | awk '{print $1}' | xargs -r docker stop
+docker ps --filter label=nanoclaw-session -q | xargs -r docker stop
 ```
 
 ## Done

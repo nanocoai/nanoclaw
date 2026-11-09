@@ -25,13 +25,11 @@ function runFence(pred: (d: Directive) => boolean): Directive {
 
 // Substitute {{vars}} the way the engine does, then run through bash -c in cwd.
 function bash(body: string[], vars: Record<string, string>, cwd: string): string {
-  const cmd = body
-    .join('\n')
-    .replace(/\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g, (_, name) => {
-      const v = vars[name];
-      if (v === undefined) throw new Error(`unresolved {{${name}}}`);
-      return v;
-    });
+  const cmd = body.join('\n').replace(/\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g, (_, name) => {
+    const v = vars[name];
+    if (v === undefined) throw new Error(`unresolved {{${name}}}`);
+    return v;
+  });
   return execFileSync('bash', ['-c', cmd], { cwd, encoding: 'utf-8' });
 }
 
@@ -91,7 +89,9 @@ describe('.env write fences (replace, not append)', () => {
   it('a mode-switching re-run replaces the flag — no stale true left behind', () => {
     bash(dedicated.body, {}, dir);
     bash(shared.body, {}, dir);
-    const lines = env().split('\n').filter((l) => l.startsWith('ASSISTANT_HAS_OWN_NUMBER='));
+    const lines = env()
+      .split('\n')
+      .filter((l) => l.startsWith('ASSISTANT_HAS_OWN_NUMBER='));
     expect(lines).toEqual(['ASSISTANT_HAS_OWN_NUMBER=false']);
     expect(env()).not.toContain('=true');
   });
@@ -124,3 +124,29 @@ describe('.env write fences (replace, not append)', () => {
     expect(env().split('\n')).toContain('ASSISTANT_NAME=C-3PO (backup)');
   });
 });
+
+describe('Baileys pin', () => {
+  // /update-nanoclaw re-runs this pin on every install, so a stale value spreads
+  // to everyone. GHSA-qvv5-jq5g-4cgg (message spoofing) is fixed from 7.0.0-rc12
+  // on the v7 line the adapter needs.
+  it('pins a Baileys release with the GHSA-qvv5-jq5g-4cgg fix', () => {
+    const versions = directives
+      .filter((d) => d.kind === 'dep')
+      .flatMap((d) => d.body)
+      .filter((s) => s.startsWith('@whiskeysockets/baileys@'))
+      .map((s) => s.slice('@whiskeysockets/baileys@'.length));
+    expect(versions).not.toEqual([]);
+    for (const version of versions) {
+      expect(hasSpoofingFix(version), `add-whatsapp pins @whiskeysockets/baileys@${version}`).toBe(true);
+    }
+  });
+});
+
+/** 7.0.0-rcN with N >= 12, 7.0.0, or any later 7.x or higher release (rc names drop the dot after rc.9). */
+function hasSpoofingFix(version: string): boolean {
+  const m = /^(\d+)\.(\d+)\.(\d+)(?:-rc\.?(\d+))?(?:\+.*)?$/.exec(version);
+  if (!m) return false;
+  const [major, minor, patch, rc] = [Number(m[1]), Number(m[2]), Number(m[3]), m[4]];
+  if (major !== 7) return major > 7;
+  return minor > 0 || patch > 0 || rc === undefined || Number(rc) >= 12;
+}

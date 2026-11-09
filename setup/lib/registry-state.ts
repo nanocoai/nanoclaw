@@ -23,10 +23,11 @@ import { spawnSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { fileURLToPath } from 'url';
 
 import { readEnvFile } from '../../src/env.js';
 import { getDefaultContainerImage } from '../../src/install-slug.js';
-import { upsertEnvVar } from '../set-env.js';
+import { removeEnvVar, upsertEnvVar } from '../set-env.js';
 import { readVersionPinValue } from './version-pins.js';
 
 /** `.env` key carrying the opt-in. Read by setup and by `container/build.sh`. */
@@ -106,10 +107,42 @@ export function writeImageSource(source: ImageSource): void {
 }
 
 /**
+ * Put the question back: after this, `imageSourceDecided()` is false again and
+ * setup asks. For callers that ran the sign-in for a reason of their own and
+ * must not have it answer a question the operator has not been asked yet —
+ * writing `false` would be an answer too, and would suppress the prompt.
+ */
+export function clearImageSource(): void {
+  removeEnvVar(HARDENED_IMAGE_ENV_KEY);
+}
+
+const RELEASE_IMAGE_SCRIPT = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..',
+  '..',
+  'container',
+  'release-image.sh',
+);
+
+/**
+ * The image published for this checkout's release, from the same script
+ * `container/pull.sh` runs. Reads the last fetched list and never fetches, so
+ * --status stays offline.
+ *
+ * `script` is for tests, which run it inside a scratch repository.
+ */
+export function readReleaseImage(script: string = RELEASE_IMAGE_SCRIPT): string | undefined {
+  const res = spawnSync('bash', [script], { encoding: 'utf-8' });
+  if (res.status !== 0) return undefined;
+  return res.stdout.trim().split(/\s+/)[1] || undefined;
+}
+
+/**
  * The image reference this install pulls, or undefined when unpinned.
  *
- * Precedence mirrors `container/pull.sh` — env, then `.env`, then the
- * `versions.json` pin — so verify reports what actually got pulled.
+ * Precedence mirrors `container/pull.sh` — env, then `.env`, then the image
+ * published for this release, then the `versions.json` pin — so verify reports
+ * what actually got pulled.
  *
  * Soft where the read throws: "no pin" is the normal permanent state of
  * every local-build install. On the hardened path treat `undefined` as "not
@@ -119,6 +152,8 @@ export function readAgentImagePin(): string | undefined {
   const env = readEnvFile([AGENT_IMAGE_REF_ENV_KEY]);
   const override = process.env[AGENT_IMAGE_REF_ENV_KEY]?.trim() || env[AGENT_IMAGE_REF_ENV_KEY];
   if (override) return override;
+  const published = readReleaseImage();
+  if (published) return published;
   try {
     const pin = readVersionPinValue(AGENT_IMAGE_PIN);
     // Only the object shape needs to know the platform, and asking costs a
@@ -215,9 +250,7 @@ export function readRegistryHost(): string | undefined {
   const ref = readAgentImagePin();
   if (!ref || !ref.includes('/')) return undefined;
   const first = ref.slice(0, ref.indexOf('/'));
-  return first.includes('.') || first.includes(':') || first === 'localhost'
-    ? first
-    : undefined;
+  return first.includes('.') || first.includes(':') || first === 'localhost' ? first : undefined;
 }
 
 export interface AgentImageInspection {
@@ -284,10 +317,7 @@ interface DockerInspectEntry {
  * leaves it empty, a registry populates it. Only a fallback because a
  * `docker save`/`load` sneakernet image has none and would read as local.
  */
-function resolveActualSource(
-  labels: Record<string, string>,
-  registryDigest: string | undefined,
-): ActualImageSource {
+function resolveActualSource(labels: Record<string, string>, registryDigest: string | undefined): ActualImageSource {
   const declared = labels[IMAGE_SOURCE_LABEL];
   // `derived` is a per-group image built on top of one of the other two. It has
   // to be its own answer: it inherits the base's RepoDigest-derived provenance

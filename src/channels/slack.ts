@@ -20,7 +20,8 @@ import { readEnvFile } from '../env.js';
 import type { ChannelAdapter, ChannelContextDefaults, ChannelDefaults } from './adapter.js';
 import { createChatSdkBridge } from './chat-sdk-bridge.js';
 import { registerChannelAdapter } from './channel-registry.js';
-import { extractSlackRawText } from './slack-raw-text.js';
+import { setSlackAuthorIsBotResolver } from './slack-a2a-guard.js';
+import { slackRawTextExtractor } from './slack-raw-text.js';
 
 /**
  * Dedicated bot app on a threaded platform. group threads:true keeps
@@ -127,6 +128,16 @@ export async function resolveSlackConversation(
   }
 }
 
+/**
+ * The bot guard's DM author check: whether a Slack user is a bot, from the
+ * adapter's cached users.info. Null when the lookup finds no one, so the
+ * guard keeps the bot rule and the message stays dropped.
+ */
+export async function slackAuthorIsBot(slackAdapter: SlackAdapter, userId: string): Promise<boolean | null> {
+  const user = await slackAdapter.getUser(userId);
+  return user?.isBot ?? null;
+}
+
 /** Construction knobs for one Slack bot identity. */
 export interface SlackBridgeOptions {
   /**
@@ -174,9 +185,10 @@ export function createSlackBridge(options: SlackBridgeOptions = {}): ChannelAdap
     appToken,
     mode: appToken ? 'socket' : 'webhook',
   });
+  setSlackAuthorIsBotResolver(options.instanceKey ?? 'slack', (userId) => slackAuthorIsBot(slackAdapter, userId));
   const bridge = createChatSdkBridge({
     adapter: slackAdapter,
-    extractRawText: extractSlackRawText,
+    extractRawText: slackRawTextExtractor(slackAdapter),
     instance: options.instanceKey, // undefined ⇒ default instance (keyed by channelType)
     concurrency: 'concurrent',
     supportsThreads: true,

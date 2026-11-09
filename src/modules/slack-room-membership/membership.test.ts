@@ -29,6 +29,7 @@ const {
 } = vi.hoisted(() => {
   const mockApi = {
     slackAuthTest: vi.fn(),
+    slackCall: vi.fn(),
     slackConversationsInfo: vi.fn(),
     slackConversationsMembers: vi.fn(),
     slackPostMessage: vi.fn().mockResolvedValue(undefined),
@@ -51,6 +52,7 @@ const {
     agentGroups: [] as any[],
     sessions: [] as any[],
     roles: [] as any[],
+    containerConfigs: [] as any[],
   };
   const fakeDb = {
     reset(): void {
@@ -59,6 +61,7 @@ const {
       state.agentGroups = [];
       state.sessions = [];
       state.roles = [];
+      state.containerConfigs = [];
     },
     // messaging-groups
     createMessagingGroup(group: any): void {
@@ -129,6 +132,13 @@ const {
     getOwners(): any[] {
       return state.roles.filter((r) => r.role === 'owner');
     },
+    // container-configs
+    setAssistantName(agentGroupId: string, assistantName: string): void {
+      state.containerConfigs.push({ agent_group_id: agentGroupId, assistant_name: assistantName });
+    },
+    getContainerConfig(agentGroupId: string): any {
+      return state.containerConfigs.find((c) => c.agent_group_id === agentGroupId);
+    },
   };
   /* eslint-enable @typescript-eslint/no-explicit-any */
 
@@ -146,7 +156,7 @@ const {
 });
 
 vi.mock('../../channels/slack-lib.js', async (importOriginal) => ({
-  // botTokenKeyForInstance (and SlackApiError) stay real — only the four
+  // botTokenKeyForInstance (and SlackApiError) stay real — only the
   // network-touching calls are mocked. Tests never hit the Slack API.
   ...(await importOriginal<Record<string, unknown>>()),
   ...mockApi,
@@ -200,6 +210,9 @@ vi.mock('../permissions/db/user-roles.js', () => ({
   grantRole: fakeDb.grantRole,
   getOwners: fakeDb.getOwners,
 }));
+vi.mock('../../db/container-configs.js', () => ({
+  getContainerConfig: fakeDb.getContainerConfig,
+}));
 
 import { createAgentGroup } from '../../db/agent-groups.js';
 import {
@@ -228,6 +241,7 @@ import {
 const OWN_BOT = 'U0OWNBOT';
 const PIXEL_BOT = 'U0PIXELBOT';
 const OPERATOR = 'U0OPERATOR';
+const HOME_TEAM = 'T0HOME';
 
 const now = () => new Date().toISOString();
 
@@ -315,6 +329,7 @@ beforeEach(async () => {
   });
   mockApi.slackAuthTest.mockImplementation(async (token: string) => ({
     userId: token === 'xoxb-own' ? OWN_BOT : PIXEL_BOT,
+    teamId: HOME_TEAM,
   }));
   mockApi.slackConversationsInfo.mockResolvedValue({ isMpim: false });
   mockApi.slackConversationsMembers.mockResolvedValue([]);
@@ -920,6 +935,183 @@ describe('slack channel-card interceptor — owner-presence rule (B2/D24)', () =
     );
     expect(mockDeclineAndNotify).toHaveBeenCalledWith(expect.objectContaining({ agentGroupId: null }));
     expect(mockRecordDropped).toHaveBeenCalledWith(expect.objectContaining({ agent_group_id: null }));
+  });
+
+  describe('a bot that serves channels only (no DM wiring on its instance)', () => {
+    async function seedChannelsOnlyBot(channelIds: string[]): Promise<void> {
+      await grantRole({
+        user_id: `slack:${OPERATOR}`,
+        role: 'owner',
+        agent_group_id: null,
+        granted_by: null,
+        granted_at: now(),
+      });
+      for (const id of channelIds) {
+        const room = await mg({ id: `mg-${id}`, platform_id: `slack:${id}` });
+        await wire(room.id, 'ag-pixel', { engage_mode: 'pattern', engage_pattern: '.' });
+      }
+    }
+
+    beforeEach(() => {
+      mockApi.slackCall.mockImplementation(async (_token: string, method: string, body: { user?: string }) => {
+        if (method !== 'users.info') throw new Error(`unexpected Slack call ${method}`);
+        return { ok: true, user: { id: body.user, team_id: HOME_TEAM } };
+      });
+    });
+
+    async function dmFrom(senderId: string): Promise<{ dm: MessagingGroup; event: InboundEvent }> {
+      const dm = await mg({
+        id: `mg-dm-${senderId}`,
+        platform_id: `slack:D${senderId}`,
+        is_group: 0,
+        unknown_sender_policy: 'request_approval',
+      });
+      return { dm, event: mentionEvent(dm.platform_id, { isGroup: false, senderId, senderName: 'Sam' }) };
+    }
+
+    it('points a sender in its own workspace to its channel as its assistant, sends no FYI, routes nothing', async () => {
+      await seedChannelsOnlyBot(['C0TEAM']);
+      fakeDb.setAssistantName('ag-pixel', 'Pixel Helper');
+      const { dm, event } = await dmFrom('U0TEAMMATE');
+
+      expect(await intercept(dm, event)).toBe('handled');
+
+      expect(mockDeclineAndNotify).toHaveBeenCalledTimes(1);
+      expect(mockDeclineAndNotify).toHaveBeenCalledWith({
+        messagingGroupId: dm.id,
+        agentGroupId: 'ag-pixel',
+        senderIdentity: 'slack:U0TEAMMATE',
+        senderName: 'Sam',
+        event,
+        declineText: "I'm Pixel Helper. I answer in <#C0TEAM>, ask me there.",
+        fyiText: null,
+      });
+      // Placed in the workspace by Slack, through the instance's own token.
+      expect(mockApi.slackCall).toHaveBeenCalledWith('xoxb-own', 'users.info', { user: 'U0TEAMMATE' }, 'membership');
+      expect(mockApi.slackAuthTest).toHaveBeenCalledWith('xoxb-own', 'membership');
+      expect(mockRecordDropped).toHaveBeenCalledTimes(1);
+      expect(mockRouteInbound).not.toHaveBeenCalled();
+      expect(mockRequestChannelApproval).not.toHaveBeenCalled();
+      expect(await getMessagingGroupAgents(dm.id)).toHaveLength(0);
+      expect(await getMessagingGroup(dm.id)).toMatchObject({ unknown_sender_policy: 'decline_notify' });
+    });
+
+    it('a sender from another workspace (a Slack Connect user) gets no reply: no pointer, no FYI, nothing routed', async () => {
+      await seedChannelsOnlyBot(['C0TEAM']);
+      mockApi.slackCall.mockResolvedValue({
+        ok: true,
+        user: { id: 'U0PARTNER', team_id: 'T0PARTNER', is_stranger: false },
+      });
+      const { dm, event } = await dmFrom('U0PARTNER');
+
+      expect(await intercept(dm, event)).toBe('handled');
+
+      expect(mockDeclineAndNotify).not.toHaveBeenCalled();
+      expect(mockApi.slackPostMessage).not.toHaveBeenCalled();
+      expect(mockRouteInbound).not.toHaveBeenCalled();
+      expect(mockRequestChannelApproval).not.toHaveBeenCalled();
+      expect(await getMessagingGroupAgents(dm.id)).toHaveLength(0);
+      expect(mockRecordDropped).toHaveBeenCalledWith(
+        expect.objectContaining({ user_id: 'slack:U0PARTNER', reason: 'unknown_sender_decline_notify' }),
+      );
+    });
+
+    it.each<[string, () => void]>([
+      [
+        'users.info fails',
+        () => mockApi.slackCall.mockRejectedValue(new Error('slack users.info failed: user_not_found')),
+      ],
+      [
+        'users.info returns no team',
+        () => mockApi.slackCall.mockResolvedValue({ ok: true, user: { id: 'U0TEAMMATE' } }),
+      ],
+      [
+        'auth.test fails',
+        () => mockApi.slackAuthTest.mockRejectedValue(new Error('slack auth.test failed: invalid_auth')),
+      ],
+      ['auth.test returns no team', () => mockApi.slackAuthTest.mockResolvedValue({ userId: OWN_BOT })],
+      [
+        'neither lookup returns a team',
+        () => {
+          mockApi.slackAuthTest.mockResolvedValue({ userId: OWN_BOT });
+          mockApi.slackCall.mockResolvedValue({ ok: true, user: { id: 'U0TEAMMATE' } });
+        },
+      ],
+      ['the instance has no bot token', () => mockEnv.readEnvValue.mockReturnValue(undefined)],
+    ])('a sender Slack cannot place gets no reply (%s)', async (_label, arrange) => {
+      await seedChannelsOnlyBot(['C0TEAM']);
+      arrange();
+      const { dm, event } = await dmFrom('U0TEAMMATE');
+
+      expect(await intercept(dm, event)).toBe('handled');
+
+      expect(mockDeclineAndNotify).not.toHaveBeenCalled();
+      expect(mockApi.slackPostMessage).not.toHaveBeenCalled();
+      expect(mockRouteInbound).not.toHaveBeenCalled();
+      expect(mockRequestChannelApproval).not.toHaveBeenCalled();
+    });
+
+    it('names every channel it serves, and falls back to the agent name', async () => {
+      await seedChannelsOnlyBot(['C0A', 'C0B', 'C0C']);
+      const { dm, event } = await dmFrom('U0TEAMMATE');
+
+      await intercept(dm, event);
+
+      expect(mockDeclineAndNotify).toHaveBeenCalledWith(
+        expect.objectContaining({
+          declineText: "I'm Pixel. I answer in <#C0A>, <#C0B> and <#C0C>, ask me there.",
+          fyiText: null,
+        }),
+      );
+    });
+
+    it('never names a channel it has left: moved from C0OLD to C0NEW, it points to C0NEW only', async () => {
+      await seedChannelsOnlyBot(['C0OLD', 'C0NEW']);
+      await handle(joinEvent({ channelId: 'C0OLD', left: true }));
+      const { dm, event } = await dmFrom('U0TEAMMATE');
+
+      await intercept(dm, event);
+
+      expect(mockDeclineAndNotify).toHaveBeenCalledWith(
+        expect.objectContaining({ declineText: "I'm Pixel. I answer in <#C0NEW>, ask me there.", fyiText: null }),
+      );
+    });
+
+    it('removed from its only channel: says so as itself, still with no FYI', async () => {
+      await seedChannelsOnlyBot(['C0OLD']);
+      await handle(joinEvent({ channelId: 'C0OLD', left: true }));
+      const { dm, event } = await dmFrom('U0TEAMMATE');
+
+      expect(await intercept(dm, event)).toBe('handled');
+
+      const input = mockDeclineAndNotify.mock.calls[0][0] as { declineText?: string; fyiText?: string | null };
+      expect(input).toMatchObject({ agentGroupId: 'ag-pixel', fyiText: null });
+      expect(input.declineText).toMatch(/only answer in channels, and I'm not in any right now\.$/);
+      expect(input.declineText).not.toContain('C0OLD');
+    });
+
+    it('answers its owner the same way', async () => {
+      await seedChannelsOnlyBot(['C0TEAM']);
+      const { dm, event } = await dmFrom(OPERATOR);
+
+      expect(await intercept(dm, event)).toBe('handled');
+      expect(mockDeclineAndNotify).toHaveBeenCalledWith(
+        expect.objectContaining({ senderIdentity: `slack:${OPERATOR}`, fyiText: null }),
+      );
+    });
+
+    it('a personal bot that is also in a channel still declines as a personal agent', async () => {
+      await seedOwnerAndInstanceDm();
+      const room = await mg({ id: 'mg-room', platform_id: 'slack:C0ROOM' });
+      await wire(room.id, 'ag-andy');
+      const { dm, event } = await dmFrom('U0TEAMMATE');
+
+      await intercept(dm, event);
+
+      const input = mockDeclineAndNotify.mock.calls[0][0] as { declineText?: string; fyiText?: string | null };
+      expect(input.declineText).toBeUndefined();
+      expect(input.fyiText).toContain('private to its paired user');
+    });
   });
 
   it('conversations.members failure: card fallback (never silent loss)', async () => {

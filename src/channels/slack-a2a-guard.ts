@@ -14,9 +14,17 @@
  * same room can also feed each other into a loop.
  *
  * This guard replaces that implicit downstream drop with an explicit one at
- * the bridge boundary: bot-authored inbound is DROPPED by default, with a
- * debug log — the safe default every Slack install wants. Human-authored
- * messages are never touched.
+ * the bridge boundary: bot-authored inbound is DROPPED by default, with an
+ * info log — the safe default every Slack install wants. Messages a person
+ * types pass through unchanged.
+ *
+ * A person's message can carry a `bot_id` too: Slack stamps the posting app's
+ * on anything sent through its API with that person's user token. In a DM the
+ * guard asks the adapter who wrote it (see `setSlackAuthorIsBotResolver`): a
+ * person's account passes as that person, marked `sentViaApp`, and never
+ * reaches the policy's human observer, so an automation posting as a person
+ * cannot reset a hop counter. A bot account, an unknown or failed lookup, and
+ * every room that is not a DM keep the bot rule.
  *
  * Extension seam: an optional admission policy (`setBotInboundPolicy`) can
  * selectively admit bot traffic under its own rules — e.g. the
@@ -78,7 +86,10 @@ export interface SlackInboundContext {
 
 /** Bot-authored inbound context — adds the authoring bot's id. */
 export interface SlackBotInboundContext extends SlackInboundContext {
-  /** Slack `bot_id` of the authoring bot (adapter's `author.userId`). */
+  /**
+   * The authoring bot's id as the adapter reports it (`author.userId`): its
+   * bot user id (`U…`) from adapter 4.40, its `bot_id` (`B…`) before.
+   */
   botId: string;
 }
 
@@ -89,7 +100,7 @@ export type SlackBotInboundDecision =
       action: 'admit';
       /**
        * When set, replaces `content.senderId` before routing (e.g.
-       * `slack:bot:<bot_id>`). The permissions module uses a senderId that
+       * `slack:bot:<botId>`). The permissions module uses a senderId that
        * already contains a `:` verbatim (see extractAndUpsertUser), so the
        * users row becomes distinguishable from human `slack:U…` ids.
        */
@@ -119,6 +130,22 @@ export interface SlackBotInboundPolicy {
 
 let botInboundPolicy: SlackBotInboundPolicy | null = null;
 
+type SlackAuthorIsBotResolver = (userId: string) => Promise<boolean | null>;
+const authorIsBotResolvers = new Map<string, SlackAuthorIsBotResolver>();
+
+/**
+ * Resolve ambiguous Slack authors through the adapter's user directory.
+ * Some delegated file uploads, and every message a person sends through an app
+ * with their user token, carry both a human `user` and an app `bot_id`, which
+ * Chat SDK currently serializes as `isBot: true` for the human user. Asked in
+ * DMs only. Missing lookups and errors stay bot-authored so the guard fails
+ * closed.
+ */
+export function setSlackAuthorIsBotResolver(instanceKey: string, resolver: SlackAuthorIsBotResolver | null): void {
+  if (resolver) authorIsBotResolvers.set(instanceKey, resolver);
+  else authorIsBotResolvers.delete(instanceKey);
+}
+
 /**
  * Install THE admission policy for bot-authored Slack inbound (single
  * provider — a second installation overwrites with a warning, mirroring the
@@ -147,6 +174,29 @@ export function wrapSlackBotGuard(setup: ChannelSetup, instanceKey: string): Cha
     ...setup,
     async onInbound(platformId: string, threadId: string | null, message: InboundMessage) {
       const bot = botAuthorOf(message);
+      let authorLookup: 'person' | 'bot' | 'unknown' | 'failed' | undefined;
+      const resolveAuthorIsBot =
+        bot && message.isGroup === false && /^[UW]/.test(bot.botId) && authorIsBotResolvers.get(instanceKey);
+      if (bot && resolveAuthorIsBot) {
+        try {
+          const isBot = await resolveAuthorIsBot(bot.botId);
+          authorLookup = isBot === false ? 'person' : isBot ? 'bot' : 'unknown';
+        } catch (err) {
+          authorLookup = 'failed';
+          log.warn('slack-a2a-guard: author lookup failed — keeping bot classification', {
+            instanceKey,
+            platformId,
+            err,
+          });
+        }
+      }
+
+      if (authorLookup === 'person') {
+        // A person wrote it and an app carried it: delivered as that person,
+        // marked, and kept from the policy's human observer.
+        (message.content as Record<string, unknown>).sentViaApp = true;
+        return setup.onInbound(platformId, threadId, message);
+      }
 
       if (!bot) {
         // Human message — pass through untouched. The policy may observe it
@@ -166,10 +216,11 @@ export function wrapSlackBotGuard(setup: ChannelSetup, instanceKey: string): Cha
       }
 
       if (!botInboundPolicy) {
-        log.debug('slack-a2a-guard: bot-authored inbound dropped — no admission policy installed', {
+        log.info('slack-a2a-guard: bot-authored inbound dropped — no admission policy installed', {
           instanceKey,
           platformId,
           botId: bot.botId,
+          authorLookup,
         });
         return;
       }
@@ -189,11 +240,12 @@ export function wrapSlackBotGuard(setup: ChannelSetup, instanceKey: string): Cha
       }
 
       if (decision.action !== 'admit') {
-        log.debug('slack-a2a-guard: bot-authored inbound dropped by policy', {
+        log.info('slack-a2a-guard: bot-authored inbound dropped by policy', {
           instanceKey,
           platformId,
           botId: bot.botId,
           reason: decision.reason,
+          authorLookup,
         });
         return;
       }

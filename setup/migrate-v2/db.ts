@@ -15,7 +15,7 @@ import path from 'path';
 
 import Database from 'better-sqlite3';
 
-import { DATA_DIR } from '../../src/config.js';
+import { CENTRAL_DB_PATH } from '../../src/config.js';
 import { createAgentGroup, getAgentGroupByFolder } from '../../src/db/agent-groups.js';
 import { initDb } from '../../src/db/connection.js';
 import {
@@ -29,13 +29,7 @@ import {
 import { runMigrations } from '../../src/db/migrations/index.js';
 import { readEnvFile } from '../../src/env.js';
 import { buildDiscordResolver, type DiscordResolver } from './discord-resolver.js';
-import {
-  generateId,
-  inferIsGroup,
-  parseJid,
-  triggerToEngage,
-  v2PlatformId,
-} from './shared.js';
+import { generateId, inferIsGroup, parseJid, triggerToEngage, v2PlatformId } from './shared.js';
 
 interface V1Group {
   jid: string;
@@ -75,8 +69,8 @@ async function main(): Promise<void> {
 
   // Init v2 DB
   fs.mkdirSync(path.join(process.cwd(), 'data'), { recursive: true });
-  const v2Db = initDb(path.join(DATA_DIR, 'v2.db'));
-  runMigrations(v2Db);
+  const v2Db = await initDb(CENTRAL_DB_PATH);
+  await runMigrations(v2Db);
 
   let created = 0;
   let reused = 0;
@@ -136,16 +130,16 @@ async function main(): Promise<void> {
 
     try {
       // agent_group — one per folder
-      let ag = getAgentGroupByFolder(g.folder);
+      let ag = await getAgentGroupByFolder(g.folder);
       if (!ag) {
-        createAgentGroup({
+        await createAgentGroup({
           id: generateId('ag'),
           name: g.name || g.folder,
           folder: g.folder,
           agent_provider: null,
           created_at: createdAt,
         });
-        ag = getAgentGroupByFolder(g.folder)!;
+        ag = (await getAgentGroupByFolder(g.folder))!;
       }
 
       // messaging_group — one per (channel_type, platform_id).
@@ -157,9 +151,9 @@ async function main(): Promise<void> {
       // migration would have set if it had created the row first. Once
       // any wiring exists, the user has had a chance to tighten the
       // policy via the skill — leave it alone.
-      let mg = getMessagingGroupByPlatform(channelType, platformId);
+      let mg = await getMessagingGroupByPlatform(channelType, platformId);
       if (!mg) {
-        createMessagingGroup({
+        await createMessagingGroup({
           id: generateId('mg'),
           channel_type: channelType,
           platform_id: platformId,
@@ -168,23 +162,20 @@ async function main(): Promise<void> {
           unknown_sender_policy: 'public',
           created_at: createdAt,
         });
-        mg = getMessagingGroupByPlatform(channelType, platformId)!;
-      } else if (
-        mg.unknown_sender_policy !== 'public' &&
-        getMessagingGroupAgents(mg.id).length === 0
-      ) {
-        updateMessagingGroup(mg.id, { unknown_sender_policy: 'public' });
-        mg = getMessagingGroupByPlatform(channelType, platformId)!;
+        mg = (await getMessagingGroupByPlatform(channelType, platformId))!;
+      } else if (mg.unknown_sender_policy !== 'public' && (await getMessagingGroupAgents(mg.id)).length === 0) {
+        await updateMessagingGroup(mg.id, { unknown_sender_policy: 'public' });
+        mg = (await getMessagingGroupByPlatform(channelType, platformId))!;
       }
 
       // messaging_group_agents — wire them
-      const existing = getMessagingGroupAgentByPair(mg.id, ag.id);
+      const existing = await getMessagingGroupAgentByPair(mg.id, ag.id);
       if (!existing) {
         const engage = triggerToEngage({
           trigger_pattern: g.trigger_pattern,
           requires_trigger: g.requires_trigger,
         });
-        createMessagingGroupAgent({
+        await createMessagingGroupAgent({
           id: generateId('mga'),
           messaging_group_id: mg.id,
           agent_group_id: ag.id,
@@ -206,7 +197,7 @@ async function main(): Promise<void> {
     }
   }
 
-  v2Db.close();
+  await v2Db.close();
 
   // If every group was skipped, the migration didn't actually do anything.
   // Treat that as failure so the wrapper script surfaces it instead of

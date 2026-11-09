@@ -1,43 +1,61 @@
-# Opens the versions.json bump PR after the AWS worker promotes a new agent image.
+# Opens the agent-images.json PR for each image the AWS worker promotes: one
+# entry per release, naming the hardened image built from that release.
 #
 # The split is deliberate and is about which side holds which credential:
 #
-#   AWS   warms the Echo pull-through cache, verifies the image, and promotes it
-#         into nanoclaw/agent. It can push images; it cannot write this repo
-#         beyond firing the dispatch below.
+#   AWS   warms the Echo pull-through cache, checks the image against its
+#         release, and promotes it into nanoclaw/agent. It can push images; it
+#         holds no GitHub credential.
 #   here  reads the registry read-only and opens a pull request. It can write
 #         this repo; it cannot push an image.
 #
-# So neither side can complete a bump alone, and the copy never leaves AWS —
+# So neither side can complete a change alone, and the copy never leaves AWS:
 # a ~1.2 GB round trip through a runner would buy nothing.
 #
-# What arrives in client_payload is used for PROSE ONLY. Every decision this
-# workflow makes is re-derived from the registry, because a dispatch payload is
-# attacker-supplied the moment that token leaks. Payload values are passed
-# through env: rather than inlined into run: blocks, for the same reason.
+# Every 6 hours rather than on a dispatch from AWS: `find` reads the registry
+# itself, so a dispatch would only say "go look", and sending one would need a
+# key to this repo on the AWS side. Run it by hand to list a new image sooner.
+#
+# The PR is opened by the nanoclaw-image-refresh App, not GITHUB_TOKEN: GitHub
+# refuses PRs from GITHUB_TOKEN here, and one it did open would start no
+# workflows, so `verify` would never report. The App key lives in the
+# agent-image-pr environment, which only main can use. A person merges.
 name: refresh-agent-image
 
 on:
-  repository_dispatch:
-    types: [agent-image-promoted]
+  schedule:
+    - cron: '17 */6 * * *'
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  open-bump-pr:
-    runs-on: ubuntu-latest
+  # The AWS role and the App key never share a job: this one reads the
+  # registry and holds no repository write. Forks have neither, so a fork with
+  # Actions on would only fail here every 6 hours; open-pr skips with it.
+  find:
+    if: github.repository == 'nanocoai/nanoclaw'
+    runs-on: ubuntu-26.04
     permissions:
-      contents: write # create the bump branch
-      pull-requests: write # open the bump PR
+      contents: read
       id-token: write # OIDC for the read-only ECR role
+      pull-requests: read # the existing-PR check below
+    outputs:
+      found: ${{ steps.candidate.outputs.found == 'true' && steps.pr.outputs.skip == '' }}
+      tag: ${{ steps.candidate.outputs.tag }}
+      ref: ${{ steps.candidate.outputs.ref }}
+      branch: ${{ steps.candidate.outputs.branch }}
+      release: ${{ steps.candidate.outputs.release }}
+      listed: ${{ steps.candidate.outputs.listed }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Assume the read-only role
         id: aws
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
         with:
           role-to-assume: ${{ vars.AGENT_IMAGE_CI_ROLE_ARN }}
           aws-region: us-east-1
@@ -49,149 +67,232 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Newest image carrying a hardened-* tag. Read from the registry rather
-          # than from the dispatch payload: the payload says "go look", it does
-          # not get to say what we found.
+          # Newest image tagged <release>-<yyyymmdd>T<hhmm>, the tag the worker
+          # writes after checking the image against that release (date-only tags
+          # come from its first version). Only the newest image overall is
+          # proposed, so a release missed before a later one was listed needs its
+          # entry by hand.
           aws ecr describe-images --repository-name "$REPO_NAME" --region us-east-1 \
-            --query 'imageDetails[?imageTags]|[?length(imageTags[?starts_with(@,`hardened-`)])>`0`]' \
-            --output json > /tmp/candidates.json
+            --query 'imageDetails[?imageTags]' --output json > /tmp/candidates.json
 
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os, re
 
-          imgs = json.load(open('/tmp/candidates.json'))
+          RELEASE_TAG = re.compile(r'(v\d+\.\d+\.\d+)-(\d{8})(T\d{4})?')
+          tagged = json.load(open('/tmp/candidates.json'))
+          imgs = [i for i in tagged if any(RELEASE_TAG.fullmatch(t) for t in i['imageTags'])]
           if not imgs:
               print('found=false')
+              print('reason=no <release>-<date> image found')
               raise SystemExit(0)
 
           imgs.sort(key=lambda i: i['imagePushedAt'])
           newest = imgs[-1]
-          tag = sorted(t for t in newest['imageTags'] if t.startswith('hardened-'))[-1]
+          tag = sorted(t for t in newest['imageTags'] if RELEASE_TAG.fullmatch(t))[-1]
+          release = RELEASE_TAG.fullmatch(tag).group(1)
 
+          try:
+              listed_images = json.load(open('agent-images.json'))
+          except FileNotFoundError:
+              listed_images = {}
+          listed = listed_images.get(release, '')
+          listed_digest = listed.rsplit('@', 1)[-1] if '@' in listed else ''
+          if newest['imageDigest'] == listed_digest:
+              print('found=false')
+              print(f'reason=already listed for {release}')
+              raise SystemExit(0)
+
+          # Only ever move forward. If someone listed something newer by hand, any
+          # tag included, proposing this would be a silent rollback.
+          pushed = {i['imageDigest']: i['imagePushedAt'] for i in tagged}
+          if listed_digest in pushed and pushed[listed_digest] >= newest['imagePushedAt']:
+              print('found=false')
+              print(f'reason=the image listed for {release} is not older than the candidate')
+              raise SystemExit(0)
+
+          # The registry host comes from the versions.json pin, so this workflow
+          # can never point an install at a different registry. With no usable
+          # host there is nothing safe to synthesize — an empty one would commit
+          # "/nanoclaw/agent@sha256:…", which resolves nowhere.
           pin = json.load(open('versions.json')).get('agent-image', '')
-          if not isinstance(pin, str):
-              # A per-platform pin is a deliberate, hand-reviewed shape. Never
-              # rewrite one automatically — the entries must move together.
-              print('found=false')
-              print('reason=per-platform pin, needs a human')
-              raise SystemExit(0)
-
-          pinned_digest = pin.rsplit('@', 1)[-1] if '@' in pin else ''
-          if newest['imageDigest'] == pinned_digest:
-              print('found=false')
-              print('reason=already pinned')
-              raise SystemExit(0)
-
-          # Only ever move forward. If someone hand-pinned something newer than
-          # the newest hardened-* tag, proposing this would be a silent rollback.
-          pushed = {i['imageDigest']: i['imagePushedAt'] for i in imgs}
-          if pinned_digest in pushed and pushed[pinned_digest] >= newest['imagePushedAt']:
-              print('found=false')
-              print('reason=pinned image is not older than the candidate')
-              raise SystemExit(0)
-
-          if not re.fullmatch(r'[a-z0-9][a-z0-9.-]{0,60}', tag):
-              print('found=false')
-              print('reason=refusing an unexpected tag shape')
-              raise SystemExit(0)
-
-          # The registry host comes from the pin already in the file, so this
-          # workflow can never redirect the pin at a different registry. With no
-          # usable host there is nothing safe to synthesize — an empty one would
-          # commit "/nanoclaw/agent@sha256:…", which resolves nowhere.
-          registry = pin.split('/', 1)[0] if '/' in pin else ''
+          registry = pin.split('/', 1)[0] if isinstance(pin, str) and '/' in pin else ''
           if '.' not in registry:
               print('found=false')
-              print('reason=no registry host in the existing pin')
+              print('reason=no registry host in the versions.json pin')
               raise SystemExit(0)
 
           print('found=true')
           print(f'tag={tag}')
-          print(f'digest={newest["imageDigest"]}')
+          print(f'release={release}')
+          print(f'listed={listed}')
           print(f'ref={registry}/{os.environ["REPO_NAME"]}@{newest["imageDigest"]}')
-          print(f'branch=chore/repin-{tag}')
+          print(f'branch=chore/agent-image-{tag}')
           PY
 
-      - name: Skip when there is nothing to propose
-        if: steps.candidate.outputs.found != 'true'
-        run: |
-          echo "::notice::No bump to open — ${{ steps.candidate.outputs.reason || 'no hardened-* image found' }}."
-
-      # Deterministic branch name per image, so a duplicate dispatch finds the
-      # existing PR instead of opening a second one.
-      - name: Check whether this bump is already open
-        id: existing
+      # Every run while a PR waits for review would otherwise mint the App
+      # token and record a deployment. A PR closed without merging means a
+      # person declined this image, so it is not proposed again.
+      - name: Skip an image that already has a PR
+        id: pr
         if: steps.candidate.outputs.found == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           BRANCH: ${{ steps.candidate.outputs.branch }}
         run: |
           set -euo pipefail
-          if gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number' | grep -q '[0-9]'; then
-            echo "open=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::A PR for $BRANCH is already open."
-          else
-            echo "open=false" >> "$GITHUB_OUTPUT"
+          # Only this App's PRs count: --head alone also matches fork branches of
+          # the same name.
+          PR="$(gh pr list --repo "$GITHUB_REPOSITORY" --app nanoclaw-image-refresh \
+            --head "$BRANCH" --state all --json number,state \
+            --jq '.[0] | select(.) | "#\(.number), \(.state | ascii_downcase)"')"
+          if [ -n "$PR" ]; then
+            echo "skip=$PR" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Open the bump PR
-        if: steps.candidate.outputs.found == 'true' && steps.existing.outputs.open == 'false'
+      - name: Report the candidate
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.candidate.outputs.tag }}
+          FOUND: ${{ steps.candidate.outputs.found }}
+          REASON: ${{ steps.candidate.outputs.reason }}
           REF: ${{ steps.candidate.outputs.ref }}
-          BRANCH: ${{ steps.candidate.outputs.branch }}
-          # Prose only — never a decision input. See the header.
-          PAYLOAD_CREATED: ${{ github.event.client_payload.created }}
-          PAYLOAD_UPSTREAM: ${{ github.event.client_payload.upstream_digest }}
-          PAYLOAD_LOCK: ${{ github.event.client_payload.lock_sha256 }}
+          SKIP: ${{ steps.pr.outputs.skip }}
+        run: |
+          if [ "$FOUND" = "true" ] && [ -n "$SKIP" ]; then
+            MSG="No PR to open: ${REF} already has PR ${SKIP}."
+          elif [ "$FOUND" = "true" ]; then
+            MSG="Candidate: ${REF}"
+          else
+            MSG="No PR to open: ${REASON}."
+          fi
+          echo "::notice::$MSG"
+          echo "$MSG" >> "$GITHUB_STEP_SUMMARY"
+
+  open-pr:
+    needs: find
+    if: needs.find.outputs.found == 'true'
+    runs-on: ubuntu-26.04
+    environment: agent-image-pr
+    # One at a time, so two runs can't both find no PR and race the push.
+    concurrency:
+      group: agent-image-repin-pr
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      # Minted per run, scoped to this repository and to the two permissions a
+      # bump needs (v2.0.4+ honours the permission inputs; v1 ignored them).
+      # Nothing is pushed before this succeeds.
+      - name: Mint the App token
+        id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: Iv23li2a07KCTmbZpgDE # nanoclaw-image-refresh
+          private-key: ${{ secrets.AGENT_IMAGE_PR_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          token: ${{ steps.app.outputs.token }}
+
+      # Re-running only this job reuses find's outputs. If main's entry moved in
+      # between, the candidate could now be a rollback, so stop.
+      - name: Main still has the entry find compared against
+        env:
+          RELEASE: ${{ needs.find.outputs.release }}
+          LISTED: ${{ needs.find.outputs.listed }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          try:
+              now = json.load(open('agent-images.json')).get(os.environ['RELEASE'], '')
+          except FileNotFoundError:
+              now = ''
+          if now != os.environ['LISTED']:
+              print("::error::The entry on main changed since the candidate was chosen. Start a new run (the next scheduled one will do): a re-run keeps the old commit.")
+              sys.exit(1)
+          PY
+
+      # Deterministic branch name per image. `find` already skipped images with a
+      # PR; this repeats the check under the lock, for a run that raced it.
+      - name: Check whether this image already has a PR
+        id: existing
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          BRANCH: ${{ needs.find.outputs.branch }}
+        run: |
+          set -euo pipefail
+          # Captured first: inside `if … | grep` a failed lookup would read as
+          # "no PR" and let the push below overwrite a PR's branch.
+          # Not --app here: that goes through search, which can miss a PR opened
+          # seconds ago. Fork branches of the same name are filtered out instead.
+          PR="$(gh pr list --head "$BRANCH" --state all --limit 200 --json number,isCrossRepository \
+            --jq 'map(select(.isCrossRepository | not)) | .[0].number // empty')"
+          if [ -n "$PR" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::$BRANCH already has PR #$PR."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open the PR
+        if: steps.existing.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          APP_SLUG: ${{ steps.app.outputs.app-slug }}
+          TAG: ${{ needs.find.outputs.tag }}
+          RELEASE: ${{ needs.find.outputs.release }}
+          LISTED: ${{ needs.find.outputs.listed }}
+          REF: ${{ needs.find.outputs.ref }}
+          BRANCH: ${{ needs.find.outputs.branch }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
           import json, os
-          v = json.load(open('versions.json'))
-          v['agent-image'] = os.environ['REF']
-          with open('versions.json', 'w') as f:
-              json.dump(v, f, indent=2)
+          try:
+              images = json.load(open('agent-images.json'))
+          except FileNotFoundError:
+              images = {}
+          images[os.environ['RELEASE']] = os.environ['REF']
+          with open('agent-images.json', 'w') as f:
+              json.dump(dict(sorted(images.items())), f, indent=2)
               f.write('\n')
           PY
           git diff --stat
 
-          git config user.name  'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          # Commit as the App's bot user, so the commit and the PR share an author.
+          BOT_ID="$(gh api "/users/${APP_SLUG}%5Bbot%5D" --jq .id)"
+          git config user.name  "${APP_SLUG}[bot]"
+          git config user.email "${BOT_ID}+${APP_SLUG}[bot]@users.noreply.github.com"
           git switch -c "$BRANCH"
-          git add versions.json
-          git commit -m "versions: repin the agent image to ${TAG}"
-          git push -u origin "$BRANCH"
+          git add agent-images.json
+          git commit -m "agent-images: ${RELEASE} -> ${TAG}"
+          # The branch name belongs to this workflow and no PR was ever opened
+          # from it, so a run after a failed `gh pr create` replaces it. The
+          # lease only overwrites the head seen here.
+          SEEN="$(git ls-remote origin "refs/heads/${BRANCH}" | cut -f1)"
+          git push --force-with-lease="refs/heads/${BRANCH}:${SEEN}" origin "HEAD:refs/heads/${BRANCH}"
 
           {
-            echo "Repins the agent image to \`${TAG}\`."
+            echo "Lists \`${TAG}\` as the hardened image for \`${RELEASE}\`."
             echo
             echo '```'
             echo "${REF}"
             echo '```'
             echo
-            if [ -n "${PAYLOAD_CREATED:-}" ]; then
-              echo "Built \`${PAYLOAD_CREATED}\`."
+            if [ -n "${LISTED:-}" ]; then
+              echo "Replaces \`${LISTED}\`, an earlier build of the same release."
+              echo
             fi
-            if [ -n "${PAYLOAD_UPSTREAM:-}" ]; then
-              echo "Upstream digest \`${PAYLOAD_UPSTREAM}\` — compare against the current pin's to see"
-              echo "whether the NanoClaw content changed or only the hardened base underneath it."
-            fi
-            if [ -n "${PAYLOAD_LOCK:-}" ]; then
-              echo "Agent-runner lock label \`${PAYLOAD_LOCK}\`."
-            fi
+            echo "Promoted into \`nanoclaw/agent\` by the AWS refresh worker, which checked the"
+            echo "image's release and commit labels and its lock label against \`${RELEASE}\`."
+            echo "\`verify-agent-image\` checks all of them again on this PR, plus the publisher"
+            echo "signature, under a different role, and is a required check."
             echo
-            echo "Promoted into \`nanoclaw/agent\` by the AWS refresh worker, which verified the"
-            echo "index shape, both platforms, the provenance label and the lock label before"
-            echo "copying. Those figures come from the dispatch payload and are here to read, not"
-            echo "to trust — \`verify-agent-image\` re-derives all of them on this PR from the"
-            echo "registry, under a different role, and is a required check."
-            echo
-            echo "Opened automatically. A human still merges."
+            echo "Opened automatically by the \`${APP_SLUG}\` App. A person merges."
           } > /tmp/pr-body.md
 
           gh pr create \
             --base main --head "$BRANCH" \
-            --title "versions: repin the agent image to ${TAG}" \
+            --title "agent-images: ${RELEASE} -> ${TAG}" \
             --body-file /tmp/pr-body.md

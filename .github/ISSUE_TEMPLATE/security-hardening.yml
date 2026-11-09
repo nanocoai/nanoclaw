@@ -1,0 +1,95 @@
+name: "🛡️ Security hardening"
+description: Suggest a security improvement that does not fix an exploitable vulnerability.
+title: "[hardening] "
+labels:
+  - kind/hardening
+  - triage/unresolved
+body:
+  - type: markdown
+    attributes:
+      value: |
+        > [!CAUTION]
+        > Could this be exploited on a normal, correctly configured NanoClaw install? Stop here and [report it privately](https://github.com/nanocoai/nanoclaw/security/advisories/new).
+
+        Use this form for public hardening work that makes NanoClaw safer but does not fix an exploitable vulnerability. Read the [NanoClaw security model](https://docs.nanoclaw.dev/concepts/security) before filing.
+
+        ### Required information
+
+  - type: checkboxes
+    id: not-a-vulnerability
+    attributes:
+      label: Confirmation
+      options:
+        - label: I confirm that this is not an exploitable vulnerability and can be discussed in public.
+          required: true
+
+  - type: textarea
+    id: concern
+    attributes:
+      label: What should be safer?
+      description: Describe the concern and what should be more resilient.
+      placeholder: A forged callback is rejected, but the shared card still changes before authorization succeeds.
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: How can we verify the concern?
+      description: Show how you reached it. Say whether it needs host access, source changes, or an unsafe mount or configuration.
+      placeholder: |
+        1. Start from a normal install.
+        2. Change ...
+        3. Send ...
+        4. Observe ...
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Affected version
+      description: Use the exact NanoClaw version or commit you tested.
+      placeholder: v2.3.0 or 294ef2ae
+    validations:
+      required: true
+
+  - type: dropdown
+    id: ai-assistance
+    attributes:
+      label: AI assistance
+      description: Did you use an AI tool to find, reproduce, or write up this concern?
+      options:
+        - "No"
+        - Yes. I verified it myself and can explain it
+    validations:
+      required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        ### Optional context
+
+  - type: textarea
+    id: ai-details
+    attributes:
+      label: AI assistance details
+      description: If yes, name the tool and say what it helped with. Leave this blank if you selected No.
+      placeholder: I used Claude to trace the callback path. I reproduced the result myself.
+
+  - type: dropdown
+    id: trust-boundary
+    attributes:
+      label: Related trust boundary
+      description: Choose every related boundary you recognize. Select Other or unsure if none fit.
+      multiple: true
+      options:
+        - Container isolation
+        - Credentials
+        - Network egress
+        - Filesystem mounts
+        - Message authorization
+        - Human approval
+        - Command gate
+        - Supply chain
+        - Other or unsure

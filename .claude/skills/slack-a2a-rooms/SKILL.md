@@ -1,6 +1,6 @@
 ---
 name: slack-a2a-rooms
-description: Agent-to-agent Slack rooms — a group DM (MPIM) holding a human plus two or more NanoClaw sibling bots, where each bot hears the room over its own Socket Mode connection. Registers the admission policy on the Slack channel's bot-inbound guard so bot-authored inbound is admitted only for rooms allowlisted in SLACK_A2A_ROOMS (re-attributed as slack:bot:<bot_id>, hop-limited via SLACK_A2A_MAX_HOPS), plus scripts/open-a2a-room.ts to open a room and register it.
+description: Agent-to-agent Slack rooms — a group DM (MPIM) holding a human plus two or more NanoClaw sibling bots, where each bot hears the room over its own Socket Mode connection. Registers the admission policy on the Slack channel's bot-inbound guard so bot-authored inbound is admitted only for rooms allowlisted in SLACK_A2A_ROOMS (re-attributed as slack:bot:<botId>, hop-limited via SLACK_A2A_MAX_HOPS), plus scripts/open-a2a-room.ts to open a room and register it.
 ---
 
 # Slack agent-to-agent rooms (SLACK_A2A_ROOMS)
@@ -13,6 +13,11 @@ receive each other's messages over their own Socket Mode connections as plain
 `message` events with `channel_type: "mpim"`, `bot_id` set, and `subtype`
 null.
 
+**Canonical home.** This directory on `main` is the skill's canonical source —
+the setup wizard and any direct apply read it from the checkout. The copy on
+the `channels` branch is a compatibility mirror for older checkouts whose
+setup fetches companions from there; edits land here, never there.
+
 **Where sibling-bot messages die today.** The adapter/Chat-SDK stack's only
 bot filter is self-protection (`isMe`); a sibling bot's message arrives with
 `isMe: false`, `isBot: true` and flows into the Slack channel's bot-inbound
@@ -23,7 +28,7 @@ seam, `setBotInboundPolicy`; this skill registers the policy that opens it up
 selectively:
 
 - Rooms listed in `SLACK_A2A_ROOMS`: bot-authored inbound passes, attributed
-  to the user id `slack:bot:<bot_id>`, under a consecutive-hop limit.
+  to the user id `slack:bot:<botId>`, under a consecutive-hop limit.
 - Everywhere else: bot-authored inbound stays dropped at the bridge, exactly
   as the guard's default already does.
 
@@ -77,7 +82,7 @@ scripts/open-a2a-room.ts
 - `slack-a2a.ts` — the admission policy: `SLACK_A2A_ROOMS` /
   `SLACK_A2A_MAX_HOPS` parsing (re-read with a ~30s cache so a freshly opened
   room needs no restart), the per-room, per-identity consecutive-hop counter
-  with human reset, and the `slack:bot:<bot_id>` re-attribution. The module
+  with human reset, and the `slack:bot:<botId>` re-attribution. The module
   registers itself onto the guard's admission seam on import.
 - `slack-a2a.test.ts` — the guard: drives the real channel barrel and the
   real bot-inbound guard end-to-end (see step 4 for what it pins).
@@ -98,7 +103,7 @@ import './slack-a2a.js';
 Build first — it guards the typed `setBotInboundPolicy` call against guard
 drift. The test imports the real channel barrel (a deleted or broken barrel
 line goes red) and asserts the policy end-to-end: allowlisted-room admission
-with `slack:bot:<bot_id>` re-attribution, non-listed-room drop, the hop limit
+with `slack:bot:<botId>` re-attribution, non-listed-room drop, the hop limit
 with human reset, per-room/per-identity budgets, and that a downstream throw
 consumes no hop budget:
 
@@ -139,16 +144,20 @@ two-party open into a 1:1 IM).
 
 The room allowlist gets bot messages *to* the router; the permissions module
 still gates them like any sender. Bot senders arrive as user id
-`slack:bot:<bot_id>`, which starts unknown. After the first human mention in
+`slack:bot:<botId>`, which starts unknown. After the first human mention in
 the room auto-creates its messaging group, either set the room public:
 
 ```bash
 pnpm exec tsx scripts/q.ts data/v2.db "UPDATE messaging_groups SET unknown_sender_policy='public' WHERE platform_id='slack:<channel id>'"
 ```
 
-or keep `request_approval` and approve each `slack:bot:<bot_id>` sender once
+or keep `request_approval` and approve each `slack:bot:<botId>` sender once
 (or add them as members of the agent group). A private A2A room with known
 humans is a reasonable place for `public`.
+
+`<botId>` is the sibling bot's user id (`U…`) from `@chat-adapter/slack` 4.40,
+and its `bot_id` (`B…`) before. After that upgrade, bots approved under their
+`B…` id arrive as new senders and need approving once more.
 
 ## Engagement: A2A conversation is mention-driven
 
@@ -191,7 +200,7 @@ bot-authored inbound is dropped in every room.
   workspace app posting into a channel the agent watches), add that room to
   `SLACK_A2A_ROOMS`. Human messages are never affected.
 - **Access-gate story is manual.** The recipe deliberately leaves letting
-  `slack:bot:<bot_id>` senders through the gate as an operator step (public
+  `slack:bot:<botId>` senders through the gate as an operator step (public
   policy or per-bot approval). Should `open-a2a-room.ts` instead pre-create
   the messaging group + wirings + members via `ncl` so a room works with zero
   extra steps? That needs the host running and a choice of agent group per
@@ -209,7 +218,7 @@ bot-authored inbound is dropped in every room.
   `.env` manually.
 - **`message_changed` / edited bot messages** are not admitted (the adapter
   only forwards unfurl data for edits) — fine for v1.
-- **Attribution name.** The `users` row for `slack:bot:<bot_id>` takes
+- **Attribution name.** The `users` row for `slack:bot:<botId>` takes
   whatever display name the bridge serialized (often `unknown` for bot
   events, since `event.username` is frequently absent and `event.user` is
   unset). A nicety would be resolving the bot's profile name via

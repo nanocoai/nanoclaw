@@ -9,48 +9,36 @@ The adapter drives the `@deltachat/stdio-rpc-server` JSON-RPC subprocess directl
 
 ## Install
 
-### Pre-flight (idempotent)
+### 1. Copy the adapter and its registration test
 
-Skip to **Credentials** if all of these are already in place:
+Fetch the `channels` branch from the configured remote that carries it, then
+overwrite the skill-owned files with the canonical registry copies:
 
-- `src/channels/deltachat.ts` exists
-- `src/channels/deltachat-registration.test.ts` exists
-- `src/channels/index.ts` contains `import './deltachat.js';`
-- `@deltachat/stdio-rpc-server` is listed in `package.json` dependencies
-
-Otherwise continue. Every step below is safe to re-run.
-
-### 1. Fetch the channels branch
-
-```bash
-git fetch origin channels
+```nc:copy from-branch:channels
+src/channels/deltachat.ts
+src/channels/deltachat-registration.test.ts
 ```
 
-### 2. Copy the adapter and its registration test
-
-```bash
-git show origin/channels:src/channels/deltachat.ts                 > src/channels/deltachat.ts
-git show origin/channels:src/channels/deltachat-registration.test.ts > src/channels/deltachat-registration.test.ts
-```
-
-### 3. Append the self-registration import
+### 2. Append the self-registration import
 
 Append to `src/channels/index.ts` (skip if already present):
 
-```typescript
+```nc:append to:src/channels/index.ts
 import './deltachat.js';
 ```
 
-### 4. Install the adapter package (pinned)
+### 3. Install the adapter package (pinned)
 
-```bash
-pnpm install @deltachat/stdio-rpc-server@2.49.0
+```nc:dep
+@deltachat/stdio-rpc-server@2.49.0
 ```
 
-### 5. Build and validate
+### 4. Build and validate
 
-```bash
+```nc:run effect:build
 pnpm run build
+```
+```nc:run effect:test
 pnpm exec vitest run src/channels/deltachat-registration.test.ts
 ```
 

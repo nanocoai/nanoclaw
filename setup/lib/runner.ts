@@ -157,8 +157,7 @@ export function spawnStep(
 
     child.on('close', (code) => {
       raw.end();
-      const terminal =
-        [...stream.blocks].reverse().find((b) => b.fields.STATUS) ?? null;
+      const terminal = [...stream.blocks].reverse().find((b) => b.fields.STATUS) ?? null;
       const status = terminal?.fields.STATUS;
       const ok = code === 0 && (status === 'success' || status === 'skipped');
       resolve({
@@ -200,8 +199,7 @@ export function spawnQuiet(
     });
     child.on('close', (code) => {
       raw.end();
-      const terminal =
-        [...blocks].reverse().find((b) => b.fields.STATUS) ?? null;
+      const terminal = [...blocks].reverse().find((b) => b.fields.STATUS) ?? null;
       resolve({ ok: code === 0, exitCode: code ?? 1, transcript, terminal, blocks });
     });
   });
@@ -216,9 +214,7 @@ export async function runQuietStep(
   const rawLog = setupLog.stepRawLog(stepName);
   const start = Date.now();
   phEmit('step_started', { step: stepName });
-  const result = await runUnderSpinner(labels, () =>
-    spawnStep(stepName, extra, () => {}, rawLog),
-  );
+  const result = await runUnderSpinner(labels, () => spawnStep(stepName, extra, () => {}, rawLog));
   const durationMs = Date.now() - start;
   writeStepEntry(stepName, result, durationMs, rawLog);
   phEmit('step_completed', {
@@ -245,9 +241,7 @@ export async function runQuietChild(
   const rawLog = setupLog.stepRawLog(logName);
   const start = Date.now();
   phEmit('step_started', { step: logName });
-  const result = await runUnderSpinner(labels, () =>
-    spawnQuiet(cmd, args, rawLog, opts?.env),
-  );
+  const result = await runUnderSpinner(labels, () => spawnQuiet(cmd, args, rawLog, opts?.env));
   const durationMs = Date.now() - start;
 
   const blockFields = summariseTerminalFields(result.terminal);
@@ -271,12 +265,7 @@ function outcomeStatus(result: StepResult): 'success' | 'skipped' | 'failed' {
 }
 
 /** Turn a step's terminal-block fields into a concise progression-log entry. */
-export function writeStepEntry(
-  stepName: string,
-  result: StepResult,
-  durationMs: number,
-  rawLog: string,
-): void {
+export function writeStepEntry(stepName: string, result: StepResult, durationMs: number, rawLog: string): void {
   const rawStatus = result.terminal?.fields.STATUS;
   const logStatus: 'success' | 'skipped' | 'failed' = !result.ok
     ? 'failed'
@@ -339,9 +328,7 @@ export function startSpinner(labels: SpinnerLabels): {
   };
 }
 
-async function runUnderSpinner<
-  T extends { ok: boolean; transcript: string; terminal?: Block | null },
->(
+async function runUnderSpinner<T extends { ok: boolean; transcript: string; terminal?: Block | null }>(
   labels: SpinnerLabels,
   work: () => Promise<T>,
 ): Promise<T> {
@@ -379,28 +366,23 @@ export function dumpTranscriptOnFailure(transcript: string): void {
  * process.exit. The return type is `Promise<never>`; control-flow
  * narrowing still works after `await`.
  */
-export async function fail(
-  stepName: string,
-  msg: string,
-  hint?: string,
-  rawLogPath?: string,
-): Promise<never> {
+export async function fail(stepName: string, msg: string, hint?: string, rawLogPath?: string): Promise<never> {
   setupLog.abort(stepName, msg);
   phEmit('setup_aborted', { step: stepName, reason: msg });
   p.log.error(msg);
   if (hint) p.log.message(k.dim(hint));
   p.log.message(k.dim('Logs: logs/setup.log · Raw: logs/setup-steps/'));
 
-  const ranFix = await offerClaudeOnFailure({ stepName, msg, hint, rawLogPath });
+  const assisted = await offerClaudeOnFailure({ stepName, msg, hint, rawLogPath });
 
-  // If the user just ran a Claude-suggested fix, offer to resume the flow
-  // at the step that failed instead of aborting. We re-exec via spawnSync
+  // Returning from assistance does not prove that the failure was repaired.
+  // Offer to verify by resuming the failed step. We re-exec via spawnSync
   // and pass NANOCLAW_SKIP with every step that already completed so the
   // child skips them and picks up where we left off.
-  if (ranFix) {
+  if (assisted) {
     const retry = ensureAnswer(
       await p.confirm({
-        message: `Fix applied. Retry the ${stepName} step?`,
+        message: `Retry the ${stepName} step to check whether the problem is resolved?`,
         initialValue: true,
       }),
     );
@@ -409,9 +391,7 @@ export async function fail(
         .split(',')
         .map((s) => s.trim())
         .filter(Boolean);
-      const skipList = [
-        ...new Set([...existingSkip, ...setupLog.completedStepNames()]),
-      ].join(',');
+      const skipList = [...new Set([...existingSkip, ...setupLog.completedStepNames()])].join(',');
       p.log.step(brandBody(`Retrying from ${stepName}…`));
       const result = spawnSync('pnpm', ['--silent', 'run', 'setup:auto'], {
         stdio: 'inherit',

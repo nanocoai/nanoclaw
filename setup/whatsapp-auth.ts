@@ -1,5 +1,5 @@
 /**
- * Step: whatsapp-auth — standalone WhatsApp (Baileys v7) authentication.
+ * Step: whatsapp-auth — standalone WhatsApp (Baileys) authentication.
  *
  * Forked from the channels-branch version so setup:auto's driver can render
  * the terminal UX itself (inside clack) instead of the step dumping a raw QR
@@ -41,29 +41,11 @@ import {
   useMultiFileAuthState,
 } from '@whiskeysockets/baileys';
 import { emitStatus } from './status.js';
+import { resolveWaWebVersion, type WaWebVersion } from './whatsapp-auth-version.js';
 
 const AUTH_DIR = path.join(process.cwd(), 'store', 'auth');
 const PAIRING_CODE_FILE = path.join(process.cwd(), 'store', 'pairing-code.txt');
 const baileysLogger = pino({ level: 'silent' });
-
-/** Fetch current WA Web version — wppconnect tracker, then Baileys sw.js scrape. */
-async function resolveWaWebVersion(): Promise<[number, number, number]> {
-  try {
-    const res = await fetch('https://wppconnect.io/whatsapp-versions/', {
-      signal: AbortSignal.timeout(5000),
-    });
-    if (res.ok) {
-      const html = await res.text();
-      const match = html.match(/2\.3000\.(\d+)/);
-      if (match) return [2, 3000, Number(match[1])];
-    }
-  } catch { /* fall through */ }
-  try {
-    const { version } = await fetchLatestWaWebVersion({});
-    if (version) return version as [number, number, number];
-  } catch { /* fall through */ }
-  throw new Error('Could not fetch current WhatsApp Web version — cannot connect with stale version');
-}
 
 type AuthMethod = 'qr' | 'pairing-code';
 
@@ -163,6 +145,16 @@ export async function run(args: string[]): Promise<void> {
     return;
   }
 
+  // Once, before connecting: a failure is reported as this step's own block,
+  // and the 515 reconnect reuses the version instead of looking it up mid-link.
+  let version: WaWebVersion;
+  try {
+    version = await resolveWaWebVersion(fetchLatestWaWebVersion);
+  } catch (err) {
+    emitStatus('WHATSAPP_AUTH', { STATUS: 'failed', ERROR: err instanceof Error ? err.message : String(err) });
+    process.exit(1);
+  }
+
   fs.mkdirSync(AUTH_DIR, { recursive: true });
 
   return new Promise<void>((resolve) => {
@@ -195,7 +187,6 @@ export async function run(args: string[]): Promise<void> {
 
     async function connectSocket(isReconnect = false): Promise<void> {
       const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
-      const version = await resolveWaWebVersion();
 
       const sock = makeWASocket({
         version,
@@ -209,12 +200,7 @@ export async function run(args: string[]): Promise<void> {
       });
 
       // Request pairing code only on first connect (not reconnect after 515).
-      if (
-        !isReconnect &&
-        method === 'pairing-code' &&
-        phone &&
-        !state.creds.registered
-      ) {
+      if (!isReconnect && method === 'pairing-code' && phone && !state.creds.registered) {
         setTimeout(async () => {
           try {
             const code = await sock.requestPairingCode(phone);
@@ -250,9 +236,7 @@ export async function run(args: string[]): Promise<void> {
         }
 
         if (connection === 'close') {
-          const reason = (
-            lastDisconnect?.error as { output?: { statusCode?: number } }
-          )?.output?.statusCode;
+          const reason = (lastDisconnect?.error as { output?: { statusCode?: number } })?.output?.statusCode;
           if (reason === DisconnectReason.loggedOut) {
             clearTimeout(timeout);
             emitStatus('WHATSAPP_AUTH', {

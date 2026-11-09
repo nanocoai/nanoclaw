@@ -10,8 +10,9 @@ import fs from 'fs';
 import path from 'path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { ensureSchema, openInboundDb } from '../../db/session-db.js';
-import { insertTaskRow } from './db.js';
+import { ensureSchema, openInboundDb } from '../../mailbox/sqlite/session-db.js';
+import { insertTaskRow } from '../../mailbox/sqlite/tasks.js';
+import { wrapSqliteInbound } from '../../mailbox/sqlite/index.js';
 import { handleRecurrence, scriptBackoffMinutes } from './recurrence.js';
 import type { Session } from '../../types.js';
 
@@ -76,7 +77,7 @@ describe('handleRecurrence', () => {
     });
     db.prepare(`UPDATE messages_in SET status='completed' WHERE id='task-1'`).run();
 
-    await handleRecurrence(db, fakeSession());
+    await handleRecurrence(wrapSqliteInbound(db), fakeSession());
 
     const rows = db
       .prepare(`SELECT id, status, process_after, recurrence, series_id FROM messages_in ORDER BY seq`)
@@ -108,7 +109,7 @@ describe('handleRecurrence', () => {
     });
     db.prepare(`UPDATE messages_in SET status='completed' WHERE id='task-tz'`).run();
 
-    await handleRecurrence(db, fakeSession());
+    await handleRecurrence(wrapSqliteInbound(db), fakeSession());
 
     const follow = db.prepare(`SELECT process_after FROM messages_in WHERE id != 'task-tz'`).get() as {
       process_after: string;
@@ -132,7 +133,7 @@ describe('handleRecurrence', () => {
     });
     db.prepare(`UPDATE messages_in SET status='completed' WHERE id='task-group-tz'`).run();
 
-    await handleRecurrence(db, fakeSession());
+    await handleRecurrence(wrapSqliteInbound(db), fakeSession());
 
     const follow = db.prepare(`SELECT process_after FROM messages_in WHERE id != 'task-group-tz'`).get() as {
       process_after: string;
@@ -151,7 +152,7 @@ describe('handleRecurrence', () => {
     });
     db.prepare(`UPDATE messages_in SET status='completed' WHERE id='task-1'`).run();
 
-    await handleRecurrence(db, fakeSession());
+    await handleRecurrence(wrapSqliteInbound(db), fakeSession());
 
     const count = (db.prepare(`SELECT COUNT(*) AS c FROM messages_in`).get() as { c: number }).c;
     expect(count).toBe(1);
@@ -195,7 +196,7 @@ describe('handleRecurrence — script-failure backoff (streak derived from faile
   it('pushes the clone past raw cron cadence while the script is failing', async () => {
     const db = freshDb();
     seedFailedStreak(db, 3); // streak 3 → backoff 8 min; cron next ≈ +1 min
-    await handleRecurrence(db, fakeSession());
+    await handleRecurrence(wrapSqliteInbound(db), fakeSession());
 
     const next = clone(db);
     expect(next.status).toBe('pending');
@@ -206,7 +207,7 @@ describe('handleRecurrence — script-failure backoff (streak derived from faile
   it('a healthy series (trailing run completed) re-arms on the raw cron grid', async () => {
     const db = freshDb();
     seedFailedStreak(db, 0);
-    await handleRecurrence(db, fakeSession());
+    await handleRecurrence(wrapSqliteInbound(db), fakeSession());
 
     const next = clone(db);
     expect(next.status).toBe('pending');
@@ -217,7 +218,7 @@ describe('handleRecurrence — script-failure backoff (streak derived from faile
   it('auto-pauses the series at the cap instead of re-arming', async () => {
     const db = freshDb();
     const liveId = seedFailedStreak(db, 8);
-    await handleRecurrence(db, fakeSession());
+    await handleRecurrence(wrapSqliteInbound(db), fakeSession());
 
     const next = clone(db);
     expect(next.status).toBe('paused'); // `ncl tasks resume` revives in place
@@ -231,7 +232,7 @@ describe('handleRecurrence — script-failure backoff (streak derived from faile
   it('writes the auto-pause note into the series run log via the shared appendRunLog', async () => {
     const db = freshDb();
     seedFailedStreak(db, 8);
-    await handleRecurrence(db, fakeSession());
+    await handleRecurrence(wrapSqliteInbound(db), fakeSession());
 
     // Same file + format appendRunLog owns: groups/<folder>/tasks/<series>.md
     const logFile = path.join(TEST_DIR, 'groups', 'g-test', 'tasks', 'task-s-0.md');

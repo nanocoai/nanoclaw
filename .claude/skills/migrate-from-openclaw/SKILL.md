@@ -377,25 +377,37 @@ Find the agent's model credentials in OpenClaw. Check, in order:
 3. Config `models.providers` — Anthropic provider `apiKey`.
 
 These are container-facing, so they go to the OneCLI vault. Do **not** write
-them to `.env` or thread them into a container. Register each in the vault:
+them to `.env` or thread them into a container. Register each in the vault
+from a private temporary file, never with `--value`: on the command line any
+local user can read the key with `ps`. Fill the file straight from its source
+(for example `jq -r '.profiles["anthropic:<identifier>"].key'
+<STATE_DIR>/auth-profiles.json`) so the value never lands in the chat
+transcript either. OneCLI's own output is dropped, since a gateway error can
+quote the key:
 
 ```bash
+(
+D=$(mktemp -d) || exit 1
+trap 'rm -rf "$D"' EXIT
+jq -er '<path to the key>' <source file> > "$D/key" 2>/dev/null \
+  || { echo "no key at that path in that file" >&2; exit 1; }
 onecli secrets create --name Anthropic --type anthropic \
-  --value <key-or-token> --host-pattern api.anthropic.com
+  --file "$D/key" --host-pattern api.anthropic.com >/dev/null 2>&1 \
+  || { echo "OneCLI did not save the key: check that onecli secrets list works, then retry" >&2; exit 1; }
+)
 ```
 
-For other container-facing keys discovered in plugins (e.g. OpenAI):
+For other container-facing keys discovered in plugins (e.g. OpenAI), the same
+way with `--name OpenAI --type api_key --host-pattern api.openai.com`.
 
-```bash
-onecli secrets create --name OpenAI --type api_key \
-  --value <key> --host-pattern api.openai.com
-```
-
-Run the command on the user's behalf so the value never lands in the chat
-transcript; confirm with `onecli secrets list`.
+Run it on the user's behalf; confirm with `onecli secrets list`.
 
 **Caveats:** `keyRef`/`tokenRef` with `source:"exec"` or `source:"file"` can't
-be auto-extracted — ask the user to paste it. For an `oauth` profile with a
+be auto-extracted — ask the user to paste it. Then, as in `/add-vercel`, run
+`mktemp -d`, write the value to `key` in that directory with your file-writing
+tool (never a shell command), and run the block right away with `D` set to it
+and no `jq` line. If you will not run it, delete the directory with `rm -rf`
+first. For an `oauth` profile with a
 past expiry, warn that the token may need refreshing; the user can run
 `claude setup-token` and register the fresh token.
 
@@ -403,10 +415,12 @@ If OneCLI isn't installed yet, defer this: tell the user that during `/setup`
 (or `/init-onecli`) they'll register the Anthropic credential, and note the
 discovered profile in `migration-state.md` so it isn't lost.
 
-> If the user explicitly wants `.env`-based credentials instead of the OneCLI
-> vault, that's the `/use-native-credential-proxy` opt-out — the one place
-> credentials are read from `.env` and injected into container requests without
-> OneCLI. Only go there if the user asks for it.
+> There is no supported `.env`-credentials opt-out anymore: the session spec's
+> admission rules refuse credential values in container env on every lane, by
+> design (the retired `/use-native-credential-proxy` skill would be denied at
+> every spawn). Credentials go through the OneCLI vault; custom Anthropic
+> endpoints use `ANTHROPIC_BASE_URL` plus the placeholder-token pattern from
+> setup, with the gateway rewriting the header on the wire.
 
 ## Phase 5: Scheduled Tasks
 

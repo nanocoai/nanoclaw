@@ -33,17 +33,19 @@ export const A2A_MESSAGE_GATE_ACTION = 'a2a_message_gate';
 export const agentsCreate = defineGuardedAction({
   action: 'agents.create',
   grantActionName: 'create_agent',
-  // Bind a create_agent grant to the name that was approved.
+  // Bind a create_agent grant to the name AND template that were approved, so
+  // an approval for one never covers a request built from another.
   grantCoversRequest: (grant, input) => {
     try {
-      return (JSON.parse(grant.payload) as { name?: string }).name === input.payload.name;
+      const approved = JSON.parse(grant.payload) as { name?: string; template?: string };
+      return approved.name === input.payload.name && (approved.template ?? null) === (input.payload.template ?? null);
     } catch {
       return false;
     }
   },
-  decide: (input) => {
+  decide: async (input) => {
     if (input.actor.kind !== 'agent') return DENY('create_agent is a container-originated action.');
-    const cliScope = getContainerConfig(input.actor.agentGroupId)?.cli_scope ?? 'group';
+    const cliScope = (await getContainerConfig(input.actor.agentGroupId))?.cli_scope ?? 'group';
     if (cliScope === 'global') {
       // Trusted owner agent group — an approval tap on every sub-agent spawn
       // would be needless friction.
@@ -67,19 +69,19 @@ export const a2aSend = defineGuardedAction({
       return false;
     }
   },
-  decide: (input) => {
+  decide: async (input) => {
     if (input.actor.kind !== 'agent') return DENY('agent-to-agent send requires an agent actor');
     const from = input.actor.agentGroupId;
     const to = input.resource?.to ?? '';
     const isSelf = to === from;
-    if (!isSelf && !hasDestination(from, 'agent', to)) {
+    if (!isSelf && !(await hasDestination(from, 'agent', to))) {
       return DENY(`unauthorized agent-to-agent: ${from} has no destination for ${to}`);
     }
-    if (!getAgentGroup(to)) {
+    if (!(await getAgentGroup(to))) {
       return DENY(`target agent group ${to} not found for message ${String(input.payload.id)}`);
     }
     if (isSelf) return ALLOW('self-send');
-    const policy = getMessagePolicy(from, to);
+    const policy = await getMessagePolicy(from, to);
     if (policy) {
       return HOLD(`a2a message policy ${from}→${to} holds for ${policy.approver}`, policy.approver);
     }

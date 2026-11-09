@@ -42,12 +42,14 @@ import type { InboundEvent } from '../../channels/adapter.js';
 import {
   botTokenKeyForInstance,
   slackAuthTest,
+  slackCall,
   slackConversationsInfo,
   slackConversationsMembers,
   slackPostMessage,
 } from '../../channels/slack-lib.js';
 import { projectDestinationsToSessions } from '../../cli/resources/destinations.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
+import { getContainerConfig } from '../../db/container-configs.js';
 import { recordDroppedMessage } from '../../db/dropped-messages.js';
 import {
   createMessagingGroup,
@@ -487,27 +489,64 @@ async function resolveOwnerSlackUserIds(): Promise<string[]> {
 
 /**
  * The agent group a Slack instance "is": the distinct agent group across the
- * instance's existing wirings, DM wirings first (every per-agent instance has
- * one). Exactly one distinct hit wins; ambiguous or empty → undefined and the
- * caller falls back to the approval card.
+ * instance's existing wirings, DM wirings first. Exactly one distinct hit
+ * wins; ambiguous or empty → undefined and the caller falls back to the
+ * approval card. `channels` is set only for an instance with no DM wiring: a
+ * bot that serves its channels alone. It lists the channels the bot is still
+ * in, and is empty once it has left them all.
  */
-async function resolveInstanceAgentGroup(instance: string): Promise<{ id: string; name: string } | undefined> {
+async function resolveInstanceAgentGroup(
+  instance: string,
+): Promise<{ id: string; name: string; channels?: string[] } | undefined> {
   const rows = (await getAllMessagingGroups()).filter(
     (m) => m.channel_type === 'slack' && (m.instance ?? m.channel_type) === instance,
   );
   for (const dmOnly of [true, false]) {
     const ids = new Set<string>();
+    const wired: string[] = [];
     for (const m of rows) {
       if (dmOnly && m.is_group !== 0) continue;
-      for (const wiring of await getMessagingGroupAgents(m.id)) ids.add(wiring.agent_group_id);
+      const wirings = await getMessagingGroupAgents(m.id);
+      for (const wiring of wirings) ids.add(wiring.agent_group_id);
+      // A channel the bot left keeps its wiring but is no place to send people.
+      if (wirings.length > 0 && !m.detached_at) wired.push(m.platform_id);
     }
     if (ids.size === 1) {
       const id = [...ids][0]!;
       const ag = await getAgentGroup(id);
-      if (ag) return { id, name: ag.name };
+      if (ag) return { id, name: ag.name, ...(dmOnly ? {} : { channels: wired }) };
     }
   }
   return undefined;
+}
+
+/** The DM reply of a bot that serves channels only: its name and where to find it. */
+async function channelPointerText(agentGroupId: string, agentName: string, channels: string[]): Promise<string> {
+  const name = (await getContainerConfig(agentGroupId))?.assistant_name ?? agentName;
+  if (channels.length === 0) return `I'm ${name}. I only answer in channels, and I'm not in any right now.`;
+  const links = channels.map((p) => `<#${p.startsWith('slack:') ? p.slice('slack:'.length) : p}>`);
+  const where = links.length === 1 ? links[0] : `${links.slice(0, -1).join(', ')} and ${links.at(-1)}`;
+  return `I'm ${name}. I answer in ${where}, ask me there.`;
+}
+
+/**
+ * Whether Slack places a user in the bot's own workspace: the user's
+ * users.info team_id against the bot token's auth.test team_id, Slack's
+ * documented test for an external user. A failed lookup or a missing team
+ * counts as no.
+ */
+async function isOwnWorkspaceUser(token: string, userId: string): Promise<boolean> {
+  try {
+    const [bot, info] = await Promise.all([
+      slackAuthTest(token, 'membership'),
+      slackCall(token, 'users.info', { user: userId.replace(/^slack:/, '') }, 'membership'),
+    ]);
+    const userTeam = (info.user as { team_id?: unknown } | undefined)?.team_id;
+    return Boolean(bot.teamId) && userTeam === bot.teamId;
+  } catch (err) {
+    log.warn('slack-room-membership: users.info or auth.test failed placing a DM sender', { userId, err });
+    return false;
+  }
 }
 
 /**
@@ -624,7 +663,9 @@ function senderFromEvent(event: InboundEvent): { userId: string | null; name: st
  *   - Slackbot-created shadow channel (canvas comment container) → silent
  *     'handled' — mirrors handleOwnJoin's guard for events that arrive via
  *     the mention path (canvases created outside our flow).
- *   - 1:1 DM, unknown sender → polite decline + owner FYI ('handled').
+ *   - 1:1 DM, unknown sender → polite decline + owner FYI ('handled'); a
+ *     bot that serves channels only points to them instead, with no FYI,
+ *     and only for a sender in its own workspace (anyone else: no reply).
  *     Keyed on D24 itself, not on a pre-set policy value: the Slack
  *     adapter's declared DM default is still the pre-B2 'request_approval'
  *     (the declaration lives on the channels branch), so rows carrying that
@@ -689,6 +730,29 @@ export async function slackChannelCardInterceptor(
       messaging_group_id: mg.id,
       agent_group_id: agentGroup?.id ?? null,
     });
+    // A bot that serves channels only is asked in them: point the sender
+    // there. Nothing here is for its owner to act on, so no FYI. The pointer
+    // names its channels, so only its own workspace gets it; anyone else, or
+    // anyone Slack cannot place, gets no reply.
+    if (agentGroup?.channels) {
+      if (token && sender.userId && (await isOwnWorkspaceUser(token, sender.userId))) {
+        await declineAndNotify({
+          messagingGroupId: mg.id,
+          agentGroupId: agentGroup.id,
+          senderIdentity: sender.userId,
+          senderName: sender.name,
+          event,
+          declineText: await channelPointerText(agentGroup.id, agentGroup.name, agentGroup.channels),
+          fyiText: null,
+        });
+      } else {
+        log.info('Channels-only bot: DM sender not confirmed in its workspace — no reply', {
+          messagingGroupId: mg.id,
+          senderIdentity: sender.userId,
+        });
+      }
+      return 'handled';
+    }
     const senderDisplay = sender.name ?? sender.userId ?? 'An unknown sender';
     const who =
       sender.userId && senderDisplay !== sender.userId ? `${senderDisplay} (${sender.userId})` : senderDisplay;

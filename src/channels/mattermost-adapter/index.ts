@@ -1,7 +1,7 @@
 /**
  * In-tree Chat SDK `Adapter` for Mattermost.
  *
- * Built against `chat@4.29.0` (pinned exactly). WebSocket inbound with
+ * Built against `chat@4.41.1` (pinned exactly). WebSocket inbound with
  * liveness pings and reliable-websocket resume, REST outbound with timeouts
  * and 429 handling, plain-text/markdown round trip with emoji placeholders
  * resolved, interactive cards (buttons, selects, fields, images, plus an
@@ -19,7 +19,13 @@ import type { MattermostAdapterOptions } from './adapter.js';
 export { MattermostAdapter } from './adapter.js';
 export type { MattermostAdapterOptions } from './adapter.js';
 
-export { MattermostApiError, MattermostRestClient, normalizeBaseUrl, rateLimitDelayMs } from './rest.js';
+export {
+  MattermostApiError,
+  MattermostNetworkError,
+  MattermostRestClient,
+  normalizeBaseUrl,
+  rateLimitDelayMs,
+} from './rest.js';
 export type { MattermostRestOptions } from './rest.js';
 
 export {
@@ -75,7 +81,8 @@ export interface MattermostAdapterConfig extends Partial<Omit<MattermostAdapterO
  * Falls back to `MATTERMOST_URL`, `MATTERMOST_BOT_TOKEN`,
  * `MATTERMOST_CALLBACK_URL`, `MATTERMOST_CALLBACK_SECRET` and
  * `MATTERMOST_TEAM` (all but the first two optional) for anything `config`
- * leaves out.
+ * leaves out. Without a nonblank secret, the adapter derives one from the
+ * bot token.
  *
  * Returns `null` when the URL or the bot token is absent from both sources,
  * per the NanoClaw channel-registry contract (spec §7) — an unconfigured
@@ -93,7 +100,7 @@ export function createMattermostAdapter(config: MattermostAdapterConfig = {}): M
   }
 
   const resolvedCallbackUrl = callbackUrl || env.MATTERMOST_CALLBACK_URL;
-  const resolvedCallbackSecret = callbackSecret || env.MATTERMOST_CALLBACK_SECRET;
+  const resolvedCallbackSecret = callbackSecret?.trim() ? callbackSecret : env.MATTERMOST_CALLBACK_SECRET;
   const resolvedTeam = team || env.MATTERMOST_TEAM;
 
   return new MattermostAdapter({

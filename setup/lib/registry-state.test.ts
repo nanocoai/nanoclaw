@@ -53,9 +53,7 @@ describe('resolvePinForPlatform', () => {
   });
 
   it('trims, so a stray newline in a hand-edited pin still resolves', () => {
-    expect(resolvePinForPlatform({ 'linux/arm64': ' repo@sha256:dddd\n' }, 'linux/arm64')).toBe(
-      'repo@sha256:dddd',
-    );
+    expect(resolvePinForPlatform({ 'linux/arm64': ' repo@sha256:dddd\n' }, 'linux/arm64')).toBe('repo@sha256:dddd');
   });
 });
 
@@ -70,9 +68,7 @@ describe('pinnedPlatforms', () => {
   });
 
   it('omits entries that are not usable references', () => {
-    expect(pinnedPlatforms({ 'linux/amd64': 'repo@sha256:aaaa', 'linux/arm64': '' })).toEqual([
-      'linux/amd64',
-    ]);
+    expect(pinnedPlatforms({ 'linux/amd64': 'repo@sha256:aaaa', 'linux/arm64': '' })).toEqual(['linux/amd64']);
   });
 });
 
@@ -92,5 +88,11 @@ describe('the shell reader stays in step', () => {
 
   it('keys per-platform lookups on linux/<arch>, as this module does', () => {
     expect(pullSh).toContain('HOST_PLATFORM="linux/${HOST_ARCH}"');
+  });
+
+  it('asks release-image.sh, as readAgentImagePin does, before the versions.json pin', () => {
+    const listed = pullSh.indexOf('release-image.sh" --fetch');
+    expect(listed).toBeGreaterThan(-1);
+    expect(listed).toBeLessThan(pullSh.indexOf('REF="$(read_version_pin agent-image)"'));
   });
 });

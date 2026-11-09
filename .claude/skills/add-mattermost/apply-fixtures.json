@@ -1,0 +1,166 @@
+{
+  "notes": "Fake values only. API responses and the configuration helper are stubbed.",
+  "scenarios": [
+    {
+      "name": "self-hosted-bot",
+      "inputs": {
+        "entered_url_new": "https://mattermost.example.test/",
+        "site_url_ready": "ready",
+        "bot_token": "fakeMattermostBotToken_123456",
+        "callback_url": "http://host.docker.internal:3000/webhook/mattermost/",
+        "owner_username": "owner.test"
+      },
+      "exec": [
+        {
+          "match": "discover-server.mjs",
+          "stdout": "{\"discovery\":\"none\",\"base_url\":\"none\",\"config_access\":\"unavailable\",\"mattermost_container\":\"none\"}"
+        },
+        {
+          "match": "select-server.mjs enter",
+          "stdout": "{\"base_url\":\"https://mattermost.example.test\",\"config_access\":\"unavailable\",\"mattermost_container\":\"none\"}"
+        },
+        {
+          "match": "/api/v4/config/client?format=old",
+          "stdout": "https://mattermost.example.test\n\n"
+        },
+        {
+          "match": "scripts/configure.ts",
+          "stdout": "{\"id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbb\",\"username\":\"nanoclaw\"}"
+        },
+        {
+          "match": "/api/v4/users/username/owner.test",
+          "stdout": "{\"id\":\"oooooooooooooooooooooooooo\"}"
+        },
+        {
+          "match": "/api/v4/channels/direct",
+          "stdout": "mattermost:dddddddddddddddddddddddddd"
+        },
+        {
+          "match": "scripts/verify-runtime.ts",
+          "stdout": "Mattermost runtime verification passed."
+        }
+      ]
+    },
+    {
+      "name": "detected-but-enter-another",
+      "inputs": {
+        "server_choice": "enter",
+        "entered_url": "https://other.example.test",
+        "site_url_ready": "ready",
+        "bot_token": "fakeMattermostBotToken_123456",
+        "callback_url": "https://nanoclaw.example.test",
+        "owner_username": "owner.test"
+      },
+      "exec": [
+        {
+          "match": "discover-server.mjs",
+          "stdout": "{\"discovery\":\"found\",\"base_url\":\"http://localhost:8065\",\"config_access\":\"host\",\"mattermost_container\":\"none\"}"
+        },
+        {
+          "match": "select-server.mjs enter",
+          "stdout": "{\"base_url\":\"https://other.example.test\",\"config_access\":\"unavailable\",\"mattermost_container\":\"none\"}"
+        },
+        {
+          "match": "/api/v4/config/client?format=old",
+          "stdout": "https://other.example.test\n\n"
+        },
+        {
+          "match": "scripts/configure.ts",
+          "stdout": "{\"id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbb\",\"username\":\"nanoclaw\"}"
+        },
+        {
+          "match": "/api/v4/users/username/owner.test",
+          "stdout": "{\"id\":\"oooooooooooooooooooooooooo\"}"
+        },
+        {
+          "match": "/api/v4/channels/direct",
+          "stdout": "mattermost:dddddddddddddddddddddddddd"
+        },
+        {
+          "match": "scripts/verify-runtime.ts",
+          "stdout": "Mattermost runtime verification passed."
+        }
+      ]
+    },
+    {
+      "name": "detected-host-mmctl",
+      "inputs": {
+        "server_choice": "use",
+        "site_url_action": "set",
+        "bot_token": "fakeMattermostBotToken_123456",
+        "callback_url": "http://localhost:3000/webhook/mattermost/",
+        "owner_username": "owner.test"
+      },
+      "exec": [
+        {
+          "match": "discover-server.mjs",
+          "stdout": "{\"discovery\":\"found\",\"base_url\":\"http://localhost:8065\",\"config_access\":\"host\",\"mattermost_container\":\"none\"}"
+        },
+        {
+          "match": "select-server.mjs use",
+          "stdout": "{\"base_url\":\"http://localhost:8065\",\"config_access\":\"host\",\"mattermost_container\":\"none\"}"
+        },
+        {
+          "match": "/api/v4/config/client?format=old",
+          "stdout": "http://localhost:8065\n\n"
+        },
+        {
+          "match": "scripts/configure.ts",
+          "stdout": "{\"id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbb\",\"username\":\"nanoclaw\"}"
+        },
+        {
+          "match": "/api/v4/users/username/owner.test",
+          "stdout": "{\"id\":\"oooooooooooooooooooooooooo\"}"
+        },
+        {
+          "match": "/api/v4/channels/direct",
+          "stdout": "mattermost:dddddddddddddddddddddddddd"
+        },
+        {
+          "match": "scripts/verify-runtime.ts",
+          "stdout": "Mattermost runtime verification passed."
+        }
+      ]
+    },
+    {
+      "name": "detected-local-server",
+      "inputs": {
+        "server_choice": "use",
+        "site_url_action_docker": "set",
+        "bot_token": "fakeMattermostBotToken_123456",
+        "callback_url": "http://host.docker.internal:3000/webhook/mattermost/",
+        "owner_username": "owner.test"
+      },
+      "exec": [
+        {
+          "match": "discover-server.mjs",
+          "stdout": "{\"discovery\":\"found\",\"base_url\":\"http://localhost:8065\",\"config_access\":\"docker\",\"mattermost_container\":\"nanoclaw-mattermost-mattermost-1\"}"
+        },
+        {
+          "match": "select-server.mjs use",
+          "stdout": "{\"base_url\":\"http://localhost:8065\",\"config_access\":\"docker\",\"mattermost_container\":\"nanoclaw-mattermost-mattermost-1\"}"
+        },
+        {
+          "match": "/api/v4/config/client?format=old",
+          "stdout": "http://localhost:8065\n\n"
+        },
+        {
+          "match": "scripts/configure.ts",
+          "stdout": "{\"id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbb\",\"username\":\"nanoclaw\"}"
+        },
+        {
+          "match": "/api/v4/users/username/owner.test",
+          "stdout": "{\"id\":\"oooooooooooooooooooooooooo\"}"
+        },
+        {
+          "match": "/api/v4/channels/direct",
+          "stdout": "mattermost:dddddddddddddddddddddddddd"
+        },
+        {
+          "match": "scripts/verify-runtime.ts",
+          "stdout": "Mattermost runtime verification passed."
+        }
+      ]
+    }
+  ]
+}

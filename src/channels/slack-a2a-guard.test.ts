@@ -25,6 +25,7 @@ import type { ChannelSetup, InboundMessage } from './adapter.js';
 import {
   botAuthorOf,
   registerSlackBotGuard,
+  setSlackAuthorIsBotResolver,
   setBotInboundPolicy,
   wrapSlackBotGuard,
   type SlackBotInboundContext,
@@ -65,6 +66,11 @@ function botMessage(botId = 'B0AGENT', text = 'beep'): InboundMessage {
   return makeInbound({ userId: botId, userName: 'sibling-agent', isBot: true, isMe: false }, text);
 }
 
+/** The same message as the bridge delivers a DM (onDirectMessage passes isGroup false). */
+function inDm(message: InboundMessage): InboundMessage {
+  return { ...message, isGroup: false };
+}
+
 interface InboundCall {
   platformId: string;
   threadId: string | null;
@@ -88,6 +94,7 @@ function makeSetup(onInbound?: ChannelSetup['onInbound']): { setup: ChannelSetup
 
 afterEach(() => {
   setBotInboundPolicy(null);
+  setSlackAuthorIsBotResolver('slack', null);
   vi.clearAllMocks();
 });
 
@@ -128,17 +135,103 @@ describe('wrapSlackBotGuard — default (no admission policy)', () => {
     expect(calls[0].message).toEqual(snapshot); // and no field was mutated
   });
 
-  it('drops bot-authored inbound with a debug log — never reaches the host', async () => {
+  it('drops bot-authored inbound with an info log — never reaches the host', async () => {
     const { setup, calls } = makeSetup();
     const wrapped = wrapSlackBotGuard(setup, 'slack');
 
     await wrapped.onInbound('slack:C1', 'slack:C1:T1', botMessage('B0FOREIGN'));
 
     expect(calls).toHaveLength(0);
-    expect(log.debug).toHaveBeenCalledWith(
+    expect(log.info).toHaveBeenCalledWith(
       expect.stringContaining('bot-authored inbound dropped'),
       expect.objectContaining({ botId: 'B0FOREIGN', platformId: 'slack:C1', instanceKey: 'slack' }),
     );
+  });
+
+  it('passes a delegated upload when Slack confirms its author is human', async () => {
+    const { setup, calls } = makeSetup();
+    const wrapped = wrapSlackBotGuard(setup, 'slack');
+    setSlackAuthorIsBotResolver('slack', async () => false);
+    const message = inDm(botMessage('U123', 'file'));
+
+    await wrapped.onInbound('slack:D1', null, message);
+
+    expect(calls).toEqual([{ platformId: 'slack:D1', threadId: null, message }]);
+    expect((message.content as Record<string, unknown>).sentViaApp).toBe(true);
+  });
+
+  it('fails closed when an ambiguous author lookup fails', async () => {
+    const { setup, calls } = makeSetup();
+    const wrapped = wrapSlackBotGuard(setup, 'slack');
+    setSlackAuthorIsBotResolver('slack', async () => {
+      throw new Error('lookup failed');
+    });
+
+    await wrapped.onInbound('slack:D1', null, inDm(botMessage('U123', 'file')));
+
+    expect(calls).toHaveLength(0);
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.stringContaining('keeping bot classification'),
+      expect.objectContaining({ instanceKey: 'slack', platformId: 'slack:D1' }),
+    );
+    expect(log.info).toHaveBeenCalledWith(
+      expect.stringContaining('bot-authored inbound dropped'),
+      expect.objectContaining({ botId: 'U123', authorLookup: 'failed' }),
+    );
+  });
+
+  it('keeps the bot rule for a person-via-app message outside a DM, without asking', async () => {
+    const { setup, calls } = makeSetup();
+    const wrapped = wrapSlackBotGuard(setup, 'slack');
+    const resolve = vi.fn(async () => false);
+    setSlackAuthorIsBotResolver('slack', resolve);
+
+    await wrapped.onInbound('slack:C1', 'slack:C1:T1', botMessage('U123'));
+
+    expect(calls).toHaveLength(0);
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
+  it('drops a DM whose author Slack says is a bot account', async () => {
+    const { setup, calls } = makeSetup();
+    const wrapped = wrapSlackBotGuard(setup, 'slack');
+    setSlackAuthorIsBotResolver('slack', async () => true);
+
+    await wrapped.onInbound('slack:D1', null, inDm(botMessage('U0AGENT')));
+
+    expect(calls).toHaveLength(0);
+    expect(log.info).toHaveBeenCalledWith(
+      expect.stringContaining('bot-authored inbound dropped'),
+      expect.objectContaining({ botId: 'U0AGENT', platformId: 'slack:D1', authorLookup: 'bot' }),
+    );
+  });
+
+  it('drops a DM whose author Slack cannot name (lookup answers null)', async () => {
+    const { setup, calls } = makeSetup();
+    const wrapped = wrapSlackBotGuard(setup, 'slack');
+    setSlackAuthorIsBotResolver('slack', async () => null);
+
+    await wrapped.onInbound('slack:D1', null, inDm(botMessage('U123')));
+
+    expect(calls).toHaveLength(0);
+    expect(log.info).toHaveBeenCalledWith(
+      expect.stringContaining('bot-authored inbound dropped'),
+      expect.objectContaining({ botId: 'U123', authorLookup: 'unknown' }),
+    );
+  });
+
+  it('never asks about a bot id (B…) or another bridge instance', async () => {
+    const { setup, calls } = makeSetup();
+    const resolve = vi.fn(async () => false);
+    setSlackAuthorIsBotResolver('slack-other', resolve);
+
+    await wrapSlackBotGuard(setup, 'slack').onInbound('slack:D1', null, inDm(botMessage('U123')));
+    setSlackAuthorIsBotResolver('slack', resolve);
+    await wrapSlackBotGuard(setup, 'slack').onInbound('slack:D1', null, inDm(botMessage('B0FOREIGN')));
+
+    expect(calls).toHaveLength(0);
+    expect(resolve).not.toHaveBeenCalled();
+    setSlackAuthorIsBotResolver('slack-other', null);
   });
 
   it('leaves the other ChannelSetup members untouched (pass-through references)', () => {
@@ -232,7 +325,7 @@ describe('wrapSlackBotGuard — admission-policy seam', () => {
     await wrapped.onInbound('slack:C1', null, botMessage());
 
     expect(calls).toHaveLength(0);
-    expect(log.debug).toHaveBeenCalledWith(
+    expect(log.info).toHaveBeenCalledWith(
       expect.stringContaining('dropped by policy'),
       expect.objectContaining({ reason: 'room not allowlisted' }),
     );
@@ -270,6 +363,21 @@ describe('wrapSlackBotGuard — admission-policy seam', () => {
       message,
     });
     expect(calls).toHaveLength(1); // observe-only — the human message still passes
+  });
+
+  it('keeps a person-via-app DM from the policy: neither decided nor observed (no hop reset)', async () => {
+    const { setup, calls } = makeSetup();
+    const wrapped = wrapSlackBotGuard(setup, 'slack');
+    const decideBotInbound = vi.fn((): SlackBotInboundDecision => ({ action: 'drop' }));
+    const onHumanInbound = vi.fn();
+    setBotInboundPolicy({ decideBotInbound, onHumanInbound });
+    setSlackAuthorIsBotResolver('slack', async () => false);
+
+    await wrapped.onInbound('slack:D1', null, inDm(botMessage('U123')));
+
+    expect(calls).toHaveLength(1);
+    expect(decideBotInbound).not.toHaveBeenCalled();
+    expect(onHumanInbound).not.toHaveBeenCalled();
   });
 
   it('passes human messages through even when the onHumanInbound observer throws', async () => {

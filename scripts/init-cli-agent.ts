@@ -15,16 +15,14 @@
  *
  * Usage:
  *   pnpm exec tsx scripts/init-cli-agent.ts \
- *     --display-name "Gavriel" \
+ *     --display-name "Alex" \
  *     [--agent-name "Andy"]
  */
-import path from 'path';
-
 // Registration-only: makes the in-tree cli adapter's declared defaults
 // (pattern '.', no threads, 'public') resolvable below.
 import '../src/channels/index.js';
 import { resolveUnknownSenderPolicy, resolveWiringDefaults } from '../src/channels/channel-defaults.js';
-import { DATA_DIR } from '../src/config.js';
+import { CENTRAL_DB_PATH } from '../src/config.js';
 import { createAgentGroup, getAgentGroupByFolder } from '../src/db/agent-groups.js';
 import { initDb } from '../src/db/connection.js';
 import {
@@ -34,6 +32,7 @@ import {
   getMessagingGroupByPlatform,
 } from '../src/db/messaging-groups.js';
 import { runMigrations } from '../src/db/migrations/index.js';
+import { assertValidGroupFolder } from '../src/group-folder.js';
 import { normalizeName } from '../src/modules/agent-to-agent/db/agent-destinations.js';
 import { upsertUser } from '../src/modules/permissions/db/users.js';
 import { initGroupFilesystem } from '../src/group-init.js';
@@ -88,42 +87,31 @@ function generateId(prefix: string): string {
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
 
-  const db = initDb(path.join(DATA_DIR, 'v2.db'));
-  runMigrations(db);
+  const db = await initDb(CENTRAL_DB_PATH);
+  await runMigrations(db);
 
   const now = new Date().toISOString();
 
-  // 1. Synthetic CLI user + owner grant if none exists.
-  upsertUser({
-    id: CLI_SYNTHETIC_USER_ID,
-    kind: CLI_CHANNEL,
-    display_name: args.displayName,
-    created_at: now,
-  });
-
-  // Owner grant deferred to init-first-agent when the real channel user is
-  // wired — cli:local is a scratch identity, not the operator.
-  const promotedToOwner = false;
-
-  // 2. Agent group + filesystem.
+  // 1. Agent group + filesystem, first, so a refused folder leaves nothing behind.
   const folder = args.folder || `cli-with-${normalizeName(args.displayName)}`;
   const pickedProvider = process.env.NANOCLAW_PICKED_PROVIDER?.trim().toLowerCase();
-  let ag: AgentGroup | undefined = getAgentGroupByFolder(folder);
+  let ag: AgentGroup | undefined = await getAgentGroupByFolder(folder);
   if (!ag) {
+    assertValidGroupFolder(folder);
     const agId = generateId('ag');
-    createAgentGroup({
+    await createAgentGroup({
       id: agId,
       name: args.agentName,
       folder,
       agent_provider: null,
       created_at: now,
     });
-    ag = getAgentGroupByFolder(folder)!;
+    ag = (await getAgentGroupByFolder(folder))!;
     console.log(`Created agent group: ${ag.id} (${folder})`);
   } else {
     console.log(`Reusing agent group: ${ag.id} (${folder})`);
   }
-  initGroupFilesystem(ag, {
+  await initGroupFilesystem(ag, {
     instructions:
       `# ${args.agentName}\n\n` +
       `You are ${args.agentName}, a personal NanoClaw agent for ${args.displayName}. ` +
@@ -134,8 +122,20 @@ async function main(): Promise<void> {
     provider: pickedProvider,
   });
 
+  // 2. Synthetic CLI user + owner grant if none exists.
+  await upsertUser({
+    id: CLI_SYNTHETIC_USER_ID,
+    kind: CLI_CHANNEL,
+    display_name: args.displayName,
+    created_at: now,
+  });
+
+  // Owner grant deferred to init-first-agent when the real channel user is
+  // wired — cli:local is a scratch identity, not the operator.
+  const promotedToOwner = false;
+
   // 3. CLI messaging group + wiring.
-  let cliMg: MessagingGroup | undefined = getMessagingGroupByPlatform(CLI_CHANNEL, CLI_PLATFORM_ID);
+  let cliMg: MessagingGroup | undefined = await getMessagingGroupByPlatform(CLI_CHANNEL, CLI_PLATFORM_ID);
   if (!cliMg) {
     cliMg = {
       id: generateId('mg'),
@@ -148,16 +148,16 @@ async function main(): Promise<void> {
       unknown_sender_policy: resolveUnknownSenderPolicy(CLI_CHANNEL, false),
       created_at: now,
     };
-    createMessagingGroup(cliMg);
+    await createMessagingGroup(cliMg);
     console.log(`Created CLI messaging group: ${cliMg.id}`);
   }
 
-  const existing = getMessagingGroupAgentByPair(cliMg.id, ag.id);
+  const existing = await getMessagingGroupAgentByPair(cliMg.id, ag.id);
   if (!existing) {
     // cli declares pattern '.' for DMs — every line the operator types is
     // for the agent. Identical to the pre-declaration hardcodes.
     const engage = resolveWiringDefaults(CLI_CHANNEL, false, ag.name);
-    createMessagingGroupAgent({
+    await createMessagingGroupAgent({
       id: generateId('mga'),
       messaging_group_id: cliMg.id,
       agent_group_id: ag.id,
@@ -184,6 +184,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  console.error(err);
+  console.error(err instanceof Error ? err.message : err);
   process.exit(1);
 });

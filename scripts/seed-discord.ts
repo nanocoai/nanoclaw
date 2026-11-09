@@ -3,28 +3,22 @@
  *
  * Usage: pnpm exec tsx scripts/seed-discord.ts
  */
-import path from 'path';
-
-import { DATA_DIR } from '../src/config.js';
+import { CENTRAL_DB_PATH } from '../src/config.js';
 import { initDb } from '../src/db/connection.js';
 import { runMigrations } from '../src/db/migrations/index.js';
 import { createAgentGroup, getAgentGroup } from '../src/db/agent-groups.js';
-import {
-  createMessagingGroup,
-  createMessagingGroupAgent,
-  getMessagingGroup,
-} from '../src/db/messaging-groups.js';
+import { createMessagingGroup, createMessagingGroupAgent, getMessagingGroup } from '../src/db/messaging-groups.js';
 
-const db = initDb(path.join(DATA_DIR, 'v2.db'));
-runMigrations(db);
+const db = await initDb(CENTRAL_DB_PATH);
+await runMigrations(db);
 
 const AGENT_GROUP_ID = 'ag-main';
 const MESSAGING_GROUP_ID = 'mg-discord';
 const CHANNEL_ID = 'discord:1470188214710046894:1491569326447132673';
 
 // Agent group
-if (!getAgentGroup(AGENT_GROUP_ID)) {
-  createAgentGroup({
+if (!(await getAgentGroup(AGENT_GROUP_ID))) {
+  await createAgentGroup({
     id: AGENT_GROUP_ID,
     name: 'Main',
     folder: 'main',
@@ -37,8 +31,8 @@ if (!getAgentGroup(AGENT_GROUP_ID)) {
 }
 
 // Messaging group
-if (!getMessagingGroup(MESSAGING_GROUP_ID)) {
-  createMessagingGroup({
+if (!(await getMessagingGroup(MESSAGING_GROUP_ID))) {
+  await createMessagingGroup({
     id: MESSAGING_GROUP_ID,
     channel_type: 'discord',
     platform_id: CHANNEL_ID,
@@ -54,7 +48,7 @@ if (!getMessagingGroup(MESSAGING_GROUP_ID)) {
 
 // Link
 try {
-  createMessagingGroupAgent({
+  await createMessagingGroupAgent({
     id: 'mga-discord',
     messaging_group_id: MESSAGING_GROUP_ID,
     agent_group_id: AGENT_GROUP_ID,

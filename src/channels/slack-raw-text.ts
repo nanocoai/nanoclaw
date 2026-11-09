@@ -2,11 +2,20 @@
  * Recover pasted-table content from a raw Slack event.
  *
  * Slack sends pasted tables as attachment blocks instead of message text or
- * files. The Chat SDK adapter currently leaves those blocks only in
+ * files. Chat SDK adapters before 4.38.1 leave those blocks only in
  * `message.raw`, which the host deliberately drops before persistence.
  */
 
 const MAX_TABLE_CHARS = 100_000;
+
+/**
+ * The extractor for this adapter, or undefined when the adapter already puts
+ * pasted tables in the message text (>= 4.38.1, which has `tableNode`), so the
+ * rows are not delivered twice.
+ */
+export function slackRawTextExtractor(adapter: object): typeof extractSlackRawText | undefined {
+  return typeof (adapter as { tableNode?: unknown }).tableNode === 'function' ? undefined : extractSlackRawText;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);

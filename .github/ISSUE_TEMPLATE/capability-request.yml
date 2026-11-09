@@ -1,0 +1,90 @@
+name: "🧩 Capability or skill request"
+description: Tell us about something you want NanoClaw to do through a skill.
+title: "[capability] "
+labels:
+  - kind/feature
+  - delivery/skill
+  - triage/unresolved
+body:
+  - type: markdown
+    attributes:
+      value: |
+        NanoClaw keeps the core small. New capabilities usually ship as [skills](https://docs.nanoclaw.dev/extend/overview). Describe the problem and the result you want. You do not need to explain how to build it.
+
+        ### Required information
+
+  - type: textarea
+    id: user-problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Tell us what is hard or impossible today.
+      placeholder: I cannot connect NanoClaw to a channel my team already uses.
+    validations:
+      required: true
+
+  - type: textarea
+    id: desired-outcome
+    attributes:
+      label: What should be possible?
+      description: Tell us what a user could do after this exists.
+      placeholder: A user can add the channel with one skill and remove it cleanly later.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: capability-category
+    attributes:
+      label: What kind of skill is this?
+      description: Choose the closest category. Select Unsure if you do not know.
+      options:
+        - Channel install
+        - Provider install
+        - Tool install
+        - Operational host skill
+        - Container skill
+        - Unsure
+    validations:
+      required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        ### Optional context
+
+        If you already have a design, see [Writing skills](https://docs.nanoclaw.dev/extend/writing-skills) for how to apply, remove, and test a skill.
+
+  - type: textarea
+    id: beneficiaries
+    attributes:
+      label: Who benefits?
+      description: Tell us which users or operators have this problem.
+      placeholder: Teams that already use Microsoft Teams for support work.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What have you tried?
+      description: Share any workarounds or related skills you tried.
+      placeholder: I tried the Discord channel, but it does not fit our existing workflow.
+
+  - type: textarea
+    id: footprint
+    attributes:
+      label: What would this change?
+      description: If you have a design in mind, list the files or dependencies it would add and how removal would work.
+      placeholder: Adds one adapter and one package. Removal deletes both and restores the channel registry.
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: How could we test it?
+      description: Tell us how to prove it works on a fresh clone.
+      placeholder: Install the skill, send one message, verify the reply, then remove the skill.
+
+  - type: checkboxes
+    id: maintenance-help
+    attributes:
+      label: Can you help maintain it?
+      description: You can leave this blank.
+      options:
+        - label: I can help maintain this skill.

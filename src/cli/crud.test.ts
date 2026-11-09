@@ -9,9 +9,9 @@ const ensureContainerConfigSpy = vi.fn();
 vi.mock('../group-init.js', async () => {
   const { ensureContainerConfig } = await import('../db/container-configs.js');
   return {
-    initGroupFilesystem: vi.fn((group: { id: string }) => {
+    initGroupFilesystem: vi.fn(async (group: { id: string }) => {
       ensureContainerConfigSpy(group.id);
-      ensureContainerConfig(group.id);
+      await ensureContainerConfig(group.id);
     }),
   };
 });
@@ -69,15 +69,72 @@ registerResource({
   },
 });
 
-beforeEach(() => {
-  const db = initTestDb();
-  runMigrations(db);
-  ensureContainerConfigSpy.mockClear();
-  writeDestinationsSpy.mockClear();
+registerResource({
+  name: 'listtest',
+  plural: 'listtests',
+  table: 'listtest_rows',
+  description: 'Synthetic resource for portable list filtering and ordering.',
+  idColumn: 'id',
+  columns: [
+    { name: 'id', type: 'string', description: 'ID.', generated: true },
+    { name: 'enabled', type: 'boolean', description: 'Boolean filter.' },
+    { name: 'score', type: 'number', description: 'Numeric filter.' },
+    { name: 'payload', type: 'json', description: 'JSON filter.' },
+    { name: 'created_at', type: 'string', description: 'Timestamp.', generated: true },
+  ],
+  operations: { list: 'open' },
 });
 
-afterEach(() => {
-  closeDb();
+beforeEach(async () => {
+  const db = await initTestDb({ fresh: true });
+  await runMigrations(db);
+  ensureContainerConfigSpy.mockClear();
+  writeDestinationsSpy.mockClear();
+  await getDb().exec(
+    `CREATE TABLE listtest_rows (
+      id TEXT PRIMARY KEY,
+      enabled INTEGER NOT NULL,
+      score INTEGER NOT NULL,
+      payload TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    )`,
+  );
+});
+
+describe('genericList portable filters and ordering', () => {
+  beforeEach(async () => {
+    const sql = 'INSERT INTO listtest_rows (id, enabled, score, payload, created_at) VALUES (?, ?, ?, ?, ?)';
+    await getDb().run(sql, 'b', 1, 2, '{"kind":"match"}', '2026-08-17T10:00:00.000Z');
+    await getDb().run(sql, 'a', 1, 2, '{"kind":"match"}', '2026-08-17T10:00:00.000Z');
+    await getDb().run(sql, 'c', 0, 3, '{"kind":"other"}', '2026-08-17T11:00:00.000Z');
+  });
+
+  it('coerces boolean, number, and JSON filters by column type', async () => {
+    const rows = (await lookup('listtests-list')!.handler(
+      { enabled: 'true', score: '2', payload: { kind: 'match' } },
+      hostCtx,
+    )) as Array<{ id: string }>;
+
+    expect(rows.map((row) => row.id)).toEqual(['a', 'b']);
+  });
+
+  it('orders by the first timestamp descending and the id as a stable tie-breaker', async () => {
+    const rows = (await lookup('listtests-list')!.handler({}, hostCtx)) as Array<{ id: string }>;
+    expect(rows.map((row) => row.id)).toEqual(['c', 'a', 'b']);
+  });
+
+  it('rejects invalid typed filters', async () => {
+    await expect(lookup('listtests-list')!.handler({ enabled: 'sometimes' }, hostCtx)).rejects.toThrow(
+      '--enabled must be true or false',
+    );
+    await expect(lookup('listtests-list')!.handler({ score: 'many' }, hostCtx)).rejects.toThrow(
+      '--score must be a number',
+    );
+  });
+});
+
+afterEach(async () => {
+  await closeDb();
 });
 
 describe('genericCreate postCreate hook', () => {
@@ -93,21 +150,21 @@ describe('genericCreate postCreate hook', () => {
     // Visible side effect: container_configs row exists for the new group.
     // Without postCreate, this was empty and the first spawn threw
     // "Container config not found" — issue #2415.
-    const config = getContainerConfig(result.id);
+    const config = await getContainerConfig(result.id);
     expect(config).toBeDefined();
     expect(config!.agent_group_id).toBe(result.id);
   });
 
   it('wirings-create writes the companion agent_destinations row', async () => {
     // Seed the FKs that the wiring references.
-    createAgentGroup({
+    await createAgentGroup({
       id: 'ag-1',
       name: 'Agent One',
       folder: 'agent-one',
       agent_provider: null,
       created_at: new Date().toISOString(),
     });
-    createMessagingGroup({
+    await createMessagingGroup({
       id: 'mg-1',
       channel_type: 'discord',
       platform_id: 'channel-123',
@@ -126,7 +183,7 @@ describe('genericCreate postCreate hook', () => {
     // address this chat as a delivery target. Without postCreate, this was
     // empty and the agent's replies were silently dropped by the delivery
     // ACL — issue #2389.
-    const destinations = getDestinations('ag-1');
+    const destinations = await getDestinations('ag-1');
     expect(destinations).toHaveLength(1);
     expect(destinations[0].target_type).toBe('channel');
     expect(destinations[0].target_id).toBe('mg-1');
@@ -135,14 +192,14 @@ describe('genericCreate postCreate hook', () => {
 
 describe('genericCreate postCommit hook', () => {
   it('wirings-create projects the new destination into live sessions', async () => {
-    createAgentGroup({
+    await createAgentGroup({
       id: 'ag-1',
       name: 'Agent One',
       folder: 'agent-one',
       agent_provider: null,
       created_at: new Date().toISOString(),
     });
-    createMessagingGroup({
+    await createMessagingGroup({
       id: 'mg-1',
       channel_type: 'discord',
       platform_id: 'channel-123',
@@ -153,7 +210,7 @@ describe('genericCreate postCommit hook', () => {
     });
     // A container is already running for this agent — its session inbound.db
     // holds a stale destination projection.
-    createSession({
+    await createSession({
       id: 'sess-1',
       agent_group_id: 'ag-1',
       messaging_group_id: null,
@@ -175,14 +232,14 @@ describe('genericCreate postCommit hook', () => {
   });
 
   it('wirings-create projection is a no-op when no sessions are running', async () => {
-    createAgentGroup({
+    await createAgentGroup({
       id: 'ag-2',
       name: 'Agent Two',
       folder: 'agent-two',
       agent_provider: null,
       created_at: new Date().toISOString(),
     });
-    createMessagingGroup({
+    await createMessagingGroup({
       id: 'mg-2',
       channel_type: 'discord',
       platform_id: 'channel-456',
@@ -202,8 +259,8 @@ describe('genericCreate postCommit hook', () => {
 });
 
 describe('genericCreate resolveDefaults hook (two-pass create)', () => {
-  beforeEach(() => {
-    getDb().exec(
+  beforeEach(async () => {
+    await getDb().exec(
       `CREATE TABLE hooktest_rows (id TEXT PRIMARY KEY, kind TEXT NOT NULL, mode TEXT, created_at TEXT NOT NULL)`,
     );
     hookCalls.length = 0;
@@ -232,7 +289,7 @@ describe('genericCreate resolveDefaults hook (two-pass create)', () => {
 
   it('a hook throw rejects the create and nothing is inserted', async () => {
     await expect(lookup('hooktests-create')!.handler({ kind: 'boom' }, hostCtx)).rejects.toThrow('hook rejected');
-    const count = getDb().prepare('SELECT COUNT(*) AS n FROM hooktest_rows').get() as { n: number };
-    expect(count.n).toBe(0);
+    const count = await getDb().get<{ n: number }>('SELECT COUNT(*) AS n FROM hooktest_rows');
+    expect(count!.n).toBe(0);
   });
 });

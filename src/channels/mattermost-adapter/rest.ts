@@ -19,13 +19,20 @@ import type {
   MattermostUser,
 } from './types.js';
 
+/** A server or proxy that is down, slow or busy: a later retry can succeed. */
+export function isTransientStatus(status: number): boolean {
+  return status >= 500 || status === 408 || status === 429;
+}
+
 export class MattermostApiError extends Error {
   readonly body: string;
   readonly status: number;
 
   constructor(status: number, method: string, path: string, body: string) {
     super(`Mattermost ${method} ${path} failed with ${status}: ${body}`);
-    this.name = 'MattermostApiError';
+    // The host retries channel setup only for errors named `NetworkError`, so
+    // a 502 from a proxy at boot is retried while a bad token fails fast.
+    this.name = isTransientStatus(status) ? 'NetworkError' : 'MattermostApiError';
     this.status = status;
     this.body = body;
   }
@@ -38,6 +45,20 @@ export class MattermostApiError extends Error {
     } catch {
       return undefined;
     }
+  }
+}
+
+/**
+ * A request that got no full reply: refused, reset, DNS failure, a body cut
+ * off, or the request timeout. Named `NetworkError`, like the Chat SDK
+ * adapters' transport errors, so the host's channel setup retry covers it.
+ */
+export class MattermostNetworkError extends Error {
+  constructor(method: string, path: string, cause: unknown) {
+    super(`Mattermost ${method} ${path} got no full reply: ${cause instanceof Error ? cause.message : String(cause)}`, {
+      cause,
+    });
+    this.name = 'NetworkError';
   }
 }
 
@@ -168,7 +189,7 @@ export class MattermostRestClient {
     if (response.status === 204) {
       return undefined as T;
     }
-    const text = await response.text();
+    const text = await this.transfer(method, path, () => response.text());
     return (text ? JSON.parse(text) : undefined) as T;
   }
 
@@ -187,7 +208,7 @@ export class MattermostRestClient {
         signal: this.signal(),
       }),
     );
-    const text = await response.text();
+    const text = await this.transfer('POST', path, () => response.text());
     return (text ? JSON.parse(text) : undefined) as T;
   }
 
@@ -196,19 +217,28 @@ export class MattermostRestClient {
    * waiting out a single 429 when the server says how long.
    */
   private async send(method: string, path: string, attempt: () => Promise<Response>): Promise<Response> {
-    let response = await attempt();
+    let response = await this.transfer(method, path, attempt);
     if (response.status === 429) {
       const delay = rateLimitDelayMs(response.headers);
       if (delay !== undefined && delay <= this.maxRateLimitWaitMs) {
         await response.text().catch(() => '');
         await this.sleep(delay);
-        response = await attempt();
+        response = await this.transfer(method, path, attempt);
       }
     }
     if (!response.ok) {
       throw new MattermostApiError(response.status, method, path, await response.text().catch(() => ''));
     }
     return response;
+  }
+
+  /** Run a fetch or body read, turning a transport failure into {@link MattermostNetworkError}. */
+  private async transfer<T>(method: string, path: string, step: () => Promise<T>): Promise<T> {
+    try {
+      return await step();
+    } catch (error) {
+      throw new MattermostNetworkError(method, path, error);
+    }
   }
 
   private signal(): AbortSignal | undefined {
@@ -314,7 +344,7 @@ export class MattermostRestClient {
         signal: this.signal(),
       }),
     );
-    return Buffer.from(await response.arrayBuffer());
+    return Buffer.from(await this.transfer('GET', `/files/${fileId}`, () => response.arrayBuffer()));
   }
 
   // -- channels ------------------------------------------------------------

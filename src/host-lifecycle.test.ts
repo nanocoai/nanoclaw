@@ -58,7 +58,7 @@ describe('host module lifecycle registry', () => {
     const lifecycle = await import('./host-lifecycle.js');
     const order: string[] = [];
     const controller = new AbortController();
-    const ctx = { db: {} as never, signal: controller.signal };
+    const ctx = { db: {} as never, deliveryAdapter: {} as never, signal: controller.signal };
 
     lifecycle.onHostStart(async (received) => {
       expect(received).toBe(ctx);
@@ -89,9 +89,13 @@ describe('host module lifecycle registry', () => {
     });
     lifecycle.onHostStart(later);
 
-    await expect(lifecycle.startHostModules({ db: {} as never, signal: new AbortController().signal })).rejects.toBe(
-      failure,
-    );
+    await expect(
+      lifecycle.startHostModules({
+        db: {} as never,
+        deliveryAdapter: {} as never,
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toBe(failure);
     expect(later).not.toHaveBeenCalled();
     expect(log.error).toHaveBeenCalledWith('Host module startup callback threw', { err: failure });
   });
@@ -122,25 +126,42 @@ describe('host module lifecycle registry', () => {
     });
   });
 
-  it('registers built-in approvals cleanup with the host lifecycle', async () => {
+  it('does not let gateway providers register application lifecycle callbacks', async () => {
     const lifecycle = await import('./host-lifecycle.js');
 
     expect(lifecycle.getHostShutdownCallbacks()).toHaveLength(0);
     await import('./modules/approvals/index.js');
-    expect(lifecycle.getHostShutdownCallbacks()).toHaveLength(1);
+    expect(lifecycle.getHostShutdownCallbacks()).toHaveLength(0);
+    await import('./gateway-providers/installed.js');
+    expect(lifecycle.getHostShutdownCallbacks()).toHaveLength(0);
   });
 });
 
 describe('host lifecycle orchestration', () => {
+  it('does not validate provider host conformance during startup', () => {
+    const source = fs.readFileSync(path.join(process.cwd(), 'src', 'index.ts'), 'utf8');
+
+    expect(source).not.toContain('assertProviderHostConformance()');
+  });
+
   it('starts after delivery is ready and before delivery polling', () => {
     const source = fs.readFileSync(path.join(process.cwd(), 'src', 'index.ts'), 'utf8');
-    const deliveryReady = source.indexOf('setDeliveryAdapter(createChannelDeliveryAdapter())');
+    const deliveryReady = source.indexOf('setDeliveryAdapter(deliveryAdapter)');
     const modulesStart = source.indexOf('await startHostModules(');
     const pollingStart = source.indexOf('startActiveDeliveryPoll()');
 
     expect(deliveryReady).toBeGreaterThan(-1);
     expect(modulesStart).toBeGreaterThan(deliveryReady);
     expect(pollingStart).toBeGreaterThan(modulesStart);
+  });
+
+  it('stops approval and session observation without revoking surviving resources', () => {
+    const source = fs.readFileSync(path.join(process.cwd(), 'src', 'index.ts'), 'utf8');
+    const approvalsStop = source.indexOf('await stopGatewayApprovalCoordinator()');
+    const observationStop = source.indexOf('abortGatewaySessionObservers()');
+    expect(approvalsStop).toBeGreaterThan(-1);
+    expect(observationStop).toBeGreaterThan(approvalsStop);
+    expect(observationStop).toBeLessThan(source.indexOf('await stopHostModules()'));
   });
 
   it('aborts modules and awaits their LIFO shutdown before host cleanup', () => {

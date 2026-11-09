@@ -7,9 +7,12 @@ import { log } from './log.js';
  * Does NOT load anything into process.env — callers decide what to
  * do with the values. This keeps secrets out of the process environment
  * so they don't leak to child processes.
+ *
+ * `projectRoot` defaults to the current working directory; pass it when
+ * reading a .env that is not the running process's own.
  */
-export function readEnvFile(keys: string[]): Record<string, string> {
-  const envFile = path.join(process.cwd(), '.env');
+export function readEnvFile(keys: string[], projectRoot?: string): Record<string, string> {
+  const envFile = path.join(projectRoot ?? process.cwd(), '.env');
   let content: string;
   try {
     content = fs.readFileSync(envFile, 'utf-8');
@@ -39,4 +42,15 @@ export function readEnvFile(keys: string[]): Record<string, string> {
   }
 
   return result;
+}
+
+/**
+ * Read one key from the .env file. Same parser, same rules as `readEnvFile` —
+ * this is the single-key form of it, so a caller wanting one value does not
+ * hand-roll `readEnvFile([KEY])[KEY]` and does not grow a second parser.
+ *
+ * Returns undefined when the file, the key, or the value is absent.
+ */
+export function envValue(key: string, projectRoot?: string): string | undefined {
+  return readEnvFile([key], projectRoot)[key];
 }

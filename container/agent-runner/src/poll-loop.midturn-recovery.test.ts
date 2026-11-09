@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
-import { initTestSessionDb, closeSessionDb, getInboundDb } from './db/connection.js';
+import { initTestSessionDb, closeSessionDb, getInboundDb } from './mailbox/sqlite/connection.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { processQuery } from './poll-loop.js';
 import type { AgentQuery, ProviderEvent } from './providers/types.js';
@@ -203,7 +203,7 @@ describe('mid-turn recovery when the final result is empty', () => {
 });
 
 // The result door is still a live delivery path for providers that do NOT
-// declare emitsMidTurnText — these run without the capability so the final
+// declare mid-turn delivery — these run without the capability so the final
 // text actually delivers, and the <internal> exclusion must hold there too.
 describe('final-text <internal> exclusion (the result-door half of the guarantee)', () => {
   it('never delivers a block wrapped in <internal> in the FINAL result text', async () => {

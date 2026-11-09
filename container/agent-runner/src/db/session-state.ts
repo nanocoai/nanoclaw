@@ -1,6 +1,5 @@
 /**
- * Persistent key/value state for the container. Lives in outbound.db
- * (container-owned, already scoped per channel/thread).
+ * Persistent key/value state owned by the registered mailbox.
  *
  * Primary use: remember each provider's opaque continuation id so the
  * agent's conversation resumes across container restarts. Keyed per
@@ -9,7 +8,7 @@
  * providers is therefore lossless: each provider's last thread stays
  * on file and resumes cleanly if the user flips back.
  */
-import { getOutboundDb } from './connection.js';
+import { getAgentMailbox } from '../mailbox/index.js';
 
 const LEGACY_KEY = 'sdk_session_id';
 
@@ -18,20 +17,15 @@ function continuationKey(providerName: string): string {
 }
 
 function getValue(key: string): string | undefined {
-  const row = getOutboundDb()
-    .prepare('SELECT value FROM session_state WHERE key = ?')
-    .get(key) as { value: string } | undefined;
-  return row?.value;
+  return getAgentMailbox().operations.getState(key)?.value;
 }
 
 function setValue(key: string, value: string): void {
-  getOutboundDb()
-    .prepare('INSERT OR REPLACE INTO session_state (key, value, updated_at) VALUES (?, ?, ?)')
-    .run(key, value, new Date().toISOString());
+  getAgentMailbox().operations.setState(key, value);
 }
 
 function deleteValue(key: string): void {
-  getOutboundDb().prepare('DELETE FROM session_state WHERE key = ?').run(key);
+  getAgentMailbox().operations.deleteState(key);
 }
 
 /**
@@ -79,45 +73,64 @@ export function clearContinuation(providerName: string): void {
 }
 
 /**
- * The a2a reply stamp: the id of the first inbound message in the batch the
- * agent is currently processing. The poll loop publishes it at batch start;
- * MCP tools (`send_message`, `send_file`) read it and stamp it onto outbound
- * rows so the host's a2a return-path routing can correlate replies back to
- * the originating session.
- *
- * This lives in outbound.db rather than module state because the MCP server
- * runs as a separate stdio subprocess from the poll loop — module state set
- * by the poll loop is invisible to it. Both processes open outbound.db
- * (journal_mode=DELETE + busy_timeout make intra-container access safe).
+ * Where the message being answered came from, plus its id for the a2a return
+ * path. Null routing fields mean the batch has no channel (a task run).
  */
-const IN_REPLY_TO_KEY = 'current_in_reply_to';
-
-/**
- * Ignore a stamp older than this. The poll loop clears the stamp in a
- * finally, but a container killed mid-batch (SIGKILL) can leave one behind;
- * the guard stops a later out-of-batch read from picking up a dead stamp.
- * Generous so a long-running batch's late sends still stamp correctly.
- */
-const IN_REPLY_TO_MAX_AGE_MS = 30 * 60 * 1000;
-
-export function setCurrentInReplyTo(id: string | null): void {
-  if (id === null) {
-    clearCurrentInReplyTo();
-    return;
-  }
-  setValue(IN_REPLY_TO_KEY, id);
+export interface ReplyRoute {
+  inReplyTo: string;
+  channelType: string | null;
+  platformId: string | null;
+  threadId: string | null;
 }
 
-export function clearCurrentInReplyTo(): void {
-  deleteValue(IN_REPLY_TO_KEY);
+/**
+ * The reply stamp: the route of the first inbound message in the batch the
+ * agent is currently processing. The poll loop publishes it at batch start;
+ * MCP tools (`send_message`, `send_file`) read it to thread a reply into the
+ * conversation being answered and to stamp `in_reply_to` onto outbound rows so
+ * the host's a2a return-path routing can correlate replies back to the
+ * originating session.
+ *
+ * This lives in mailbox state because the MCP server runs as a separate stdio
+ * subprocess; module state set by the poll loop is invisible to it.
+ *
+ * No age limit: the tools only run inside a query, and every query publishes
+ * (or clears) the stamp before it starts, so a stamp is never older than the
+ * turn it belongs to. A container killed mid-batch (SIGKILL) skips the
+ * clearing finally, so the poll loop clears any leftover at startup instead.
+ */
+const REPLY_ROUTE_KEY = 'current_reply_route';
+
+export function setCurrentReplyRoute(route: ReplyRoute | null): void {
+  if (route === null) {
+    clearCurrentReplyRoute();
+    return;
+  }
+  const { inReplyTo, channelType, platformId, threadId } = route;
+  setValue(REPLY_ROUTE_KEY, JSON.stringify({ inReplyTo, channelType, platformId, threadId }));
+}
+
+export function clearCurrentReplyRoute(): void {
+  deleteValue(REPLY_ROUTE_KEY);
+}
+
+export function getCurrentReplyRoute(): ReplyRoute | null {
+  const row = getAgentMailbox().operations.getState(REPLY_ROUTE_KEY);
+  if (!row) return null;
+  try {
+    const parsed = JSON.parse(row.value) as Partial<ReplyRoute>;
+    if (typeof parsed.inReplyTo !== 'string') return null;
+    return {
+      inReplyTo: parsed.inReplyTo,
+      channelType: parsed.channelType ?? null,
+      platformId: parsed.platformId ?? null,
+      threadId: parsed.threadId ?? null,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export function getCurrentInReplyTo(): string | null {
-  const row = getOutboundDb()
-    .prepare('SELECT value, updated_at FROM session_state WHERE key = ?')
-    .get(IN_REPLY_TO_KEY) as { value: string; updated_at: string } | undefined;
-  if (!row) return null;
-  const age = Date.now() - new Date(row.updated_at).getTime();
-  if (!Number.isFinite(age) || age > IN_REPLY_TO_MAX_AGE_MS) return null;
-  return row.value;
+  return getCurrentReplyRoute()?.inReplyTo ?? null;
 }

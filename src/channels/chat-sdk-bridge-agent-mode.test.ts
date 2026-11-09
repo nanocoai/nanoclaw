@@ -1,6 +1,7 @@
 /**
  * Agent-mode bridge surfaces:
- *  - app_context: assistant_thread_started / app_context_changed events cache
+ *  - app_context: assistant_thread_started / assistant_thread_context_changed
+ *    events cache
  *    the latest context per (instance, channel, user); the next inbound DM
  *    message consumes it as content.app_context = { entities }.
  *  - agent-DM opened hook: assistant_thread_started additionally notifies the
@@ -41,7 +42,11 @@ const hostConfig = {
 /** Drive a Chat process* dispatcher and await its internal task. */
 async function dispatch(fire: (options: { waitUntil: (p: Promise<unknown>) => void }) => void): Promise<void> {
   let task: Promise<unknown> | undefined;
-  fire({ waitUntil: (p) => (task = p) });
+  fire({
+    waitUntil: (p) => {
+      task = p;
+    },
+  });
   await task;
 }
 
@@ -51,12 +56,12 @@ const chatOf = (bridge: unknown): Chat => (bridge as any)._chat as Chat;
 beforeEach(async () => {
   const { initTestDb } = await import('../db/connection.js');
   const { runMigrations } = await import('../db/migrations/index.js');
-  runMigrations(initTestDb());
+  await runMigrations(await initTestDb());
 });
 
 afterEach(async () => {
   const { closeDb } = await import('../db/connection.js');
-  closeDb();
+  await closeDb();
   // Module-level singleton: leave no handler behind for the next test file.
   setAgentDmOpenedHandler(() => {});
 });

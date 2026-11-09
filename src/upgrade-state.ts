@@ -8,29 +8,59 @@
  *
  * The marker lives in `data/` (gitignored), so a `git pull` can't touch it.
  * Only the sanctioned paths call writeUpgradeState(); clearing the tripwire
- * by hand is the same `set` — see docs/upgrade-recovery.md.
+ * by hand is the same `set` — see docs/upgrade-recovery.md. Setup's own local
+ * commits (setup/lib/setup-commit.ts) carry a current marker forward.
  */
 import fs from 'fs';
 import path from 'path';
+import { execFileSync } from 'child_process';
 
 import { DATA_DIR } from './config.js';
 import { log } from './log.js';
 
 export interface UpgradeState {
   version: string;
+  commit: string;
+  tree: string;
   updatedAt: string;
   via: string;
+  /** Update channel and ref the updater merged; absent for setup and older stamps. */
+  channel?: string;
+  ref?: string;
+}
+
+export interface CodeIdentity {
+  version: string;
+  commit: string;
+  tree: string;
 }
 
 const MARKER_PATH = path.join(DATA_DIR, 'upgrade-state.json');
 const FIX_COMMAND = 'pnpm exec tsx scripts/upgrade-state.ts set';
 
 /** Version the running code declares, read from package.json. */
-export function getCodeVersion(): string {
-  const pkgPath = path.join(process.cwd(), 'package.json');
+export function getCodeVersion(projectRoot: string = process.cwd()): string {
+  const pkgPath = path.join(projectRoot, 'package.json');
   const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8')) as { version?: string };
   if (!pkg.version) throw new Error(`No version field in ${pkgPath}`);
   return pkg.version;
+}
+
+/** Git identity of the exact checkout the host is about to run. */
+export function getCodeIdentity(projectRoot: string = process.cwd()): CodeIdentity {
+  const git = (rev: string): string =>
+    execFileSync('git', ['rev-parse', '--verify', rev], {
+      cwd: projectRoot,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+
+  const version = getCodeVersion(projectRoot);
+  try {
+    return { version, commit: git('HEAD'), tree: git('HEAD^{tree}') };
+  } catch {
+    return { version, commit: 'unknown', tree: 'unknown' };
+  }
 }
 
 /**
@@ -38,19 +68,20 @@ export function getCodeVersion(): string {
  * Never throws — a boot gate must fail closed (treat anything it can't trust
  * as "no valid marker" → trip), not crash with a stack trace.
  */
-export function readUpgradeState(): UpgradeState | null {
+export function readUpgradeState(projectRoot?: string): UpgradeState | null {
+  const marker = markerPath(projectRoot);
   let raw: string;
   try {
-    raw = fs.readFileSync(MARKER_PATH, 'utf8');
+    raw = fs.readFileSync(marker, 'utf8');
   } catch (e: unknown) {
     if ((e as NodeJS.ErrnoException).code === 'ENOENT') return null;
-    log.warn('Could not read upgrade marker; treating as absent', { path: MARKER_PATH, err: String(e) });
+    log.warn('Could not read upgrade marker; treating as absent', { path: marker, err: String(e) });
     return null;
   }
   try {
     return JSON.parse(raw) as UpgradeState;
   } catch {
-    log.warn('Upgrade marker is corrupt; treating as absent', { path: MARKER_PATH });
+    log.warn('Upgrade marker is corrupt; treating as absent', { path: marker });
     return null;
   }
 }
@@ -59,26 +90,64 @@ export function readUpgradeState(): UpgradeState | null {
  * Stamp the marker. Only the sanctioned paths (setup / update / migrate)
  * call this on success; `version` defaults to the current code version.
  */
-export function writeUpgradeState(opts: { version?: string; via: string }): UpgradeState {
+export function writeUpgradeState(opts: {
+  version?: string;
+  via: string;
+  channel?: string;
+  ref?: string;
+  projectRoot?: string;
+}): UpgradeState {
+  const identity = getCodeIdentity(opts.projectRoot);
   const state: UpgradeState = {
-    version: opts.version ?? getCodeVersion(),
+    ...identity,
+    version: opts.version ?? identity.version,
     updatedAt: new Date().toISOString(),
     via: opts.via,
   };
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(MARKER_PATH, JSON.stringify(state, null, 2) + '\n');
+  if (opts.channel !== undefined) state.channel = opts.channel;
+  if (opts.ref !== undefined) state.ref = opts.ref;
+  const marker = markerPath(opts.projectRoot);
+  fs.mkdirSync(path.dirname(marker), { recursive: true });
+  fs.writeFileSync(marker, JSON.stringify(state, null, 2) + '\n');
   return state;
 }
 
-/** True when the marker exists and matches the running code version. */
-export function isUpgradeCurrent(): boolean {
-  const state = readUpgradeState();
-  return state !== null && state.version === getCodeVersion();
+/** The marker when it matches the checkout exactly, else null. */
+export function currentUpgradeState(projectRoot?: string): UpgradeState | null {
+  return isUpgradeCurrent(projectRoot) ? readUpgradeState(projectRoot) : null;
 }
 
-/** Absolute path to the marker file. */
-export function markerPath(): string {
-  return MARKER_PATH;
+/** True when the marker exists and matches the exact running checkout. */
+export function isUpgradeCurrent(projectRoot?: string): boolean {
+  const state = readUpgradeState(projectRoot);
+  if (state === null) return false;
+  try {
+    const code = getCodeIdentity(projectRoot);
+    if (state.version !== code.version) return false;
+    if (code.commit === 'unknown' || code.tree === 'unknown') {
+      // Git cannot identify this checkout (no git binary, or a tree
+      // exported/mounted without .git). Commit and tree cannot strengthen
+      // the check here — the sanctioned recovery path in this world records
+      // 'unknown' for both — so the version match is the whole signal.
+      // Accept it, loudly, rather than making the tripwire a permanent
+      // boot-stop wherever Git is absent.
+      log.warn('Upgrade marker accepted on version match alone — Git cannot identify this checkout', {
+        version: code.version,
+      });
+      return true;
+    }
+    return state.commit === code.commit && state.tree === code.tree;
+  } catch (err) {
+    log.warn('Could not resolve running code identity; upgrade marker fails closed', {
+      err: String(err),
+    });
+    return false;
+  }
+}
+
+/** Absolute path to the marker file: this process's data dir, or `<projectRoot>/data`. */
+export function markerPath(projectRoot?: string): string {
+  return projectRoot === undefined ? MARKER_PATH : path.join(projectRoot, 'data', 'upgrade-state.json');
 }
 
 /**
@@ -86,11 +155,34 @@ export function markerPath(): string {
  * sanctioned path, stop with a message written for the coding agent that
  * just ran the upgrade to act on automatically.
  */
-export function enforceUpgradeTripwire(): void {
-  if (isUpgradeCurrent()) return;
+export function enforceUpgradeTripwire(projectRoot?: string): void {
+  if (isUpgradeCurrent(projectRoot)) return;
 
-  const code = getCodeVersion();
-  const recorded = readUpgradeState()?.version ?? 'none';
+  const code = getCodeIdentity(projectRoot);
+  const recorded = readUpgradeState(projectRoot);
+  const gitUnavailable = code.commit === 'unknown' || code.tree === 'unknown';
+  const exactCheckoutChanged =
+    recorded !== null &&
+    recorded.version === code.version &&
+    (recorded.commit !== code.commit || recorded.tree !== code.tree);
+  const humanGuidance = gitUnavailable
+    ? [
+        'Git could not identify this checkout. Restore Git access, then run',
+        '/update-nanoclaw. If a supported update already completed, the coding',
+        `agent can use the recovery command below even while Git is unavailable.`,
+      ]
+    : exactCheckoutChanged
+      ? [
+          'The code changed without a matching update record. This can happen',
+          'after pulling upstream changes or committing a local customization.',
+          'Run /update-nanoclaw for upstream changes. For an intentional local',
+          'commit, follow the local-customization steps in the recovery guide.',
+        ]
+      : [
+          "You most likely ran `git pull` directly. Don't fix this by hand —",
+          'open Claude Code in this folder and run /update-nanoclaw, which',
+          'repairs the install and clears this stop.',
+        ];
 
   console.error(
     [
@@ -99,14 +191,15 @@ export function enforceUpgradeTripwire(): void {
       'NanoClaw stopped: update did not go through the supported path',
       '='.repeat(64),
       'This install was updated outside the sanctioned upgrade flow',
-      '(no upgrade marker, or the marker version does not match the code).',
+      '(no upgrade marker, or its version/commit/tree does not match the code).',
       '',
-      `  code version:     ${code}`,
-      `  recorded version: ${recorded}`,
+      `  code version:     ${code?.version ?? 'unknown'}`,
+      `  code commit:      ${code?.commit ?? 'unknown'}`,
+      `  recorded version: ${recorded?.version ?? 'none'}`,
+      `  recorded commit:  ${recorded?.commit ?? 'none'}`,
       '',
-      "IF YOU'RE A HUMAN: you most likely ran `git pull` directly. Don't",
-      'fix this by hand — open Claude Code in this folder and run',
-      '/update-nanoclaw, which repairs the install and clears this stop.',
+      "IF YOU'RE A HUMAN:",
+      ...humanGuidance,
       '',
       'CODING AGENT: if you just ran /update-nanoclaw, /migrate-nanoclaw, or',
       'setup and it completed successfully, clear this automatically by running:',

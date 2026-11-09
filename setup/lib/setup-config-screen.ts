@@ -14,7 +14,7 @@ import * as p from '@clack/prompts';
 
 import { brightSelect } from './bright-select.js';
 import { ensureAnswer } from './runner.js';
-import { CONFIG, type Entry } from './setup-config.js';
+import { CONFIG, type Entry, type EnumOption } from './setup-config.js';
 import type { ConfigValues } from './setup-config-parse.js';
 
 const SKIP_SENTINEL = '__leave_unchanged__';
@@ -23,6 +23,7 @@ const MASK = '••••••••';
 
 export async function runAdvancedScreen(
   initial: ConfigValues,
+  enumOptions: Record<string, EnumOption[]> = {},
 ): Promise<ConfigValues> {
   const result: ConfigValues = { ...initial };
   const visible = CONFIG.filter((e) => e.surface === 'flag+ui');
@@ -47,7 +48,7 @@ export async function runAdvancedScreen(
 
     if (choice === DONE_SENTINEL) return result;
     const entry = visible.find((e) => e.key === choice);
-    if (entry) await promptOne(entry, result);
+    if (entry) await promptOne(entry, result, enumOptions[entry.key]);
   }
 }
 
@@ -58,15 +59,10 @@ function hintFor(e: Entry, values: ConfigValues): string {
   return String(v);
 }
 
-async function promptOne(e: Entry, values: ConfigValues): Promise<void> {
+async function promptOne(e: Entry, values: ConfigValues, options?: EnumOption[]): Promise<void> {
   if (e.type === 'boolean') {
-    const init =
-      typeof values[e.key] === 'boolean'
-        ? (values[e.key] as boolean)
-        : (e.default ?? false);
-    const ans = ensureAnswer(
-      await p.confirm({ message: e.label, initialValue: init }),
-    );
+    const init = typeof values[e.key] === 'boolean' ? (values[e.key] as boolean) : (e.default ?? false);
+    const ans = ensureAnswer(await p.confirm({ message: e.label, initialValue: init }));
     values[e.key] = ans as boolean;
     return;
   }
@@ -75,10 +71,7 @@ async function promptOne(e: Entry, values: ConfigValues): Promise<void> {
     const ans = ensureAnswer(
       await brightSelect<string>({
         message: e.label,
-        options: [
-          { value: SKIP_SENTINEL, label: 'Leave unchanged' },
-          ...e.options,
-        ],
+        options: [{ value: SKIP_SENTINEL, label: 'Leave unchanged' }, ...(options ?? e.options)],
         initialValue: SKIP_SENTINEL,
       }),
     );

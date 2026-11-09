@@ -8,6 +8,7 @@ import type { Migration } from './index.js';
 export const migration018: Migration = {
   version: 18,
   name: 'approvals-approver-user-id',
+  sqliteOnly: true,
   up(db) {
     db.exec(`ALTER TABLE pending_approvals ADD COLUMN approver_user_id TEXT;`);
   },

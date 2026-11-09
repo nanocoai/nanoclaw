@@ -1,0 +1,54 @@
+name: nanoclaw-mattermost
+
+services:
+  postgres:
+    image: postgres:15.14-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: mmuser
+      POSTGRES_PASSWORD: "${MATTERMOST_DB_PASSWORD:?set MATTERMOST_DB_PASSWORD in .env}"
+      POSTGRES_DB: mattermost
+    volumes:
+      - database:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mmuser -d mattermost"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  mattermost:
+    image: mattermost/mattermost-team-edition:11.10.0
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      MM_SQLSETTINGS_DRIVERNAME: postgres
+      MM_SQLSETTINGS_DATASOURCE: "postgres://mmuser:${MATTERMOST_DB_PASSWORD:?set MATTERMOST_DB_PASSWORD in .env}@postgres:5432/mattermost?sslmode=disable&connect_timeout=10"
+      MM_SERVICESETTINGS_SITEURL: "http://localhost:8065"
+      MM_SERVICESETTINGS_ENABLEBOTACCOUNTCREATION: "true"
+      MM_SERVICESETTINGS_ENABLEUSERACCESSTOKENS: "true"
+      # Open signup stays off: the first browser visit still creates the
+      # System Admin, and further accounts are invited from the System Console.
+      MM_TEAMSETTINGS_ENABLEOPENSERVER: "false"
+      MM_SERVICESETTINGS_ALLOWEDUNTRUSTEDINTERNALCONNECTIONS: "host.docker.internal"
+    volumes:
+      - data:/mattermost/data
+      - config:/mattermost/config
+      - logs:/mattermost/logs
+      - plugins:/mattermost/plugins
+      - client-plugins:/mattermost/client/plugins
+      - bleve:/mattermost/bleve-indexes
+    ports:
+      - "127.0.0.1:8065:8065"
+
+volumes:
+  database:
+  data:
+  config:
+  logs:
+  plugins:
+  client-plugins:
+  bleve:

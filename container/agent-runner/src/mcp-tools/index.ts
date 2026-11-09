@@ -12,13 +12,26 @@ import './self-mod.js';
 // slack canvas tools (canvas_update / canvas_read). On user installs this
 // import is appended by /add-slack; kept live here — the fully-loaded branch.
 import './canvas.js';
+// Module barrel — loads registration modules, including the singular mailbox slot.
+import '../modules/index.js';
+import { getAgentMailbox, readMailboxContext } from '../mailbox/index.js';
 import { startMcpServer } from './server.js';
 
 function log(msg: string): void {
   console.error(`[mcp-tools] ${msg}`);
 }
 
-startMcpServer().catch((err) => {
+async function main(): Promise<void> {
+  const mailbox = getAgentMailbox();
+  await mailbox.start(await readMailboxContext());
+  try {
+    await startMcpServer((action) => mailbox.run(action));
+  } finally {
+    await mailbox.stop();
+  }
+}
+
+main().catch((err) => {
   log(`MCP server error: ${err instanceof Error ? err.message : String(err)}`);
   process.exit(1);
 });

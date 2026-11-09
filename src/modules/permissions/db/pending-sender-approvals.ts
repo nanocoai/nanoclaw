@@ -27,10 +27,9 @@ export interface PendingSenderApproval {
   options_json: string;
 }
 
-export function createPendingSenderApproval(row: PendingSenderApproval): void {
-  getDb()
-    .prepare(
-      `INSERT INTO pending_sender_approvals (
+export async function createPendingSenderApproval(row: PendingSenderApproval): Promise<void> {
+  await getDb().run(
+    `INSERT INTO pending_sender_approvals (
          id, messaging_group_id, agent_group_id, sender_identity,
          sender_name, original_message, approver_user_id, created_at,
          title, question, options_json
@@ -40,25 +39,25 @@ export function createPendingSenderApproval(row: PendingSenderApproval): void {
          @sender_name, @original_message, @approver_user_id, @created_at,
          @title, @question, @options_json
        )`,
-    )
-    .run(row);
+    row,
+  );
 }
 
-export function getPendingSenderApproval(id: string): PendingSenderApproval | undefined {
-  return getDb().prepare('SELECT * FROM pending_sender_approvals WHERE id = ?').get(id) as
-    | PendingSenderApproval
-    | undefined;
+export async function getPendingSenderApproval(id: string): Promise<PendingSenderApproval | undefined> {
+  return getDb().get<PendingSenderApproval>('SELECT * FROM pending_sender_approvals WHERE id = ?', id);
 }
 
-export function hasInFlightSenderApproval(messagingGroupId: string, senderIdentity: string): boolean {
-  const row = getDb()
-    .prepare('SELECT 1 AS x FROM pending_sender_approvals WHERE messaging_group_id = ? AND sender_identity = ?')
-    .get(messagingGroupId, senderIdentity) as { x: number } | undefined;
+export async function hasInFlightSenderApproval(messagingGroupId: string, senderIdentity: string): Promise<boolean> {
+  const row = await getDb().get<{ x: number }>(
+    'SELECT 1 AS x FROM pending_sender_approvals WHERE messaging_group_id = ? AND sender_identity = ?',
+    messagingGroupId,
+    senderIdentity,
+  );
   return row !== undefined;
 }
 
-export function deletePendingSenderApproval(id: string): void {
-  getDb().prepare('DELETE FROM pending_sender_approvals WHERE id = ?').run(id);
+export async function deletePendingSenderApproval(id: string): Promise<void> {
+  await getDb().run('DELETE FROM pending_sender_approvals WHERE id = ?', id);
 }
 
 // ── Decline stamps (decline_notify dedupe) ──
@@ -75,28 +74,27 @@ export function deletePendingSenderApproval(id: string): void {
 const DECLINE_STAMP_ID_PREFIX = 'decline:';
 
 /** ISO timestamp of the last decline for this pair, if any. */
-export function getDeclineStampAt(messagingGroupId: string, senderIdentity: string): string | undefined {
-  const row = getDb()
-    .prepare(
-      `SELECT created_at FROM pending_sender_approvals
-        WHERE messaging_group_id = ? AND sender_identity = ? AND id LIKE '${DECLINE_STAMP_ID_PREFIX}%'`,
-    )
-    .get(messagingGroupId, senderIdentity) as { created_at: string } | undefined;
+export async function getDeclineStampAt(messagingGroupId: string, senderIdentity: string): Promise<string | undefined> {
+  const row = await getDb().get<{ created_at: string }>(
+    `SELECT created_at FROM pending_sender_approvals
+      WHERE messaging_group_id = ? AND sender_identity = ? AND id LIKE '${DECLINE_STAMP_ID_PREFIX}%'`,
+    messagingGroupId,
+    senderIdentity,
+  );
   return row?.created_at;
 }
 
 /** Record (or refresh) the decline stamp. `agent_group_id` must reference a
  *  real agent group (FK). title/options_json keep their '' / '[]' defaults. */
-export function upsertDeclineStamp(stamp: {
+export async function upsertDeclineStamp(stamp: {
   messaging_group_id: string;
   agent_group_id: string;
   sender_identity: string;
   sender_name: string | null;
   original_message: string;
-}): void {
-  getDb()
-    .prepare(
-      `INSERT INTO pending_sender_approvals (
+}): Promise<void> {
+  await getDb().run(
+    `INSERT INTO pending_sender_approvals (
          id, messaging_group_id, agent_group_id, sender_identity,
          sender_name, original_message, approver_user_id, created_at
        )
@@ -112,20 +110,20 @@ export function upsertDeclineStamp(stamp: {
          approver_user_id = excluded.approver_user_id,
          title = excluded.title,
          options_json = excluded.options_json`,
-    )
-    .run({
+    {
       id: `${DECLINE_STAMP_ID_PREFIX}${stamp.messaging_group_id}:${stamp.sender_identity}`,
       ...stamp,
       created_at: new Date().toISOString(),
-    });
+    },
+  );
 }
 
 /** Remove any decline stamp for this pair — real card rows are untouched. */
-export function clearDeclineStamp(messagingGroupId: string, senderIdentity: string): void {
-  getDb()
-    .prepare(
-      `DELETE FROM pending_sender_approvals
-        WHERE messaging_group_id = ? AND sender_identity = ? AND id LIKE '${DECLINE_STAMP_ID_PREFIX}%'`,
-    )
-    .run(messagingGroupId, senderIdentity);
+export async function clearDeclineStamp(messagingGroupId: string, senderIdentity: string): Promise<void> {
+  await getDb().run(
+    `DELETE FROM pending_sender_approvals
+      WHERE messaging_group_id = ? AND sender_identity = ? AND id LIKE '${DECLINE_STAMP_ID_PREFIX}%'`,
+    messagingGroupId,
+    senderIdentity,
+  );
 }

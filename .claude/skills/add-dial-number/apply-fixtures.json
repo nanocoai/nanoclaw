@@ -1,0 +1,32 @@
+{
+  "notes": "Conformance fixture for the fully directive-based add-dial-number workflow. Values are shaped fakes: the Dial CLI path and user-agent token are captured, the number and agent lists are displayed, and all account checks, wiring, restart, and verification commands stay stubbed.",
+  "scenarios": [
+    {
+      "name": "wire-existing-number",
+      "inputs": {
+        "platform_id": "+14155550123",
+        "agent_group_id": "ag-11111111-1111-1111-1111-111111111111",
+        "line_name": "Support line",
+        "inbound_access": "public"
+      },
+      "exec": [
+        {
+          "match": "command -v dial",
+          "stdout": "/usr/local/bin/dial"
+        },
+        {
+          "match": "package.json",
+          "stdout": "nanoclaw/2.2.0"
+        },
+        {
+          "match": "number list --json | jq -r",
+          "stdout": "+14155550123, +14155550124"
+        },
+        {
+          "match": "ncl groups list --json | jq -r",
+          "stdout": "ag-11111111-1111-1111-1111-111111111111 (Support)"
+        }
+      ]
+    }
+  ]
+}

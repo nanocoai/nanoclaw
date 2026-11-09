@@ -6,13 +6,12 @@
   "scripts": {
     "start": "bun src/index.ts",
     "typecheck": "tsc --noEmit",
-    "test": "bun test"
+    "test": "bun test --isolate"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.197",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.296",
     "@anthropic-ai/sdk": "^0.108.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "cron-parser": "^5.0.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {

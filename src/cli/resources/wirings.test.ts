@@ -45,8 +45,8 @@ const neverDeclared: ChannelDefaults = {
 };
 registerChannelAdapter('neverchan', { factory: () => null, defaults: neverDeclared });
 
-function mg(id: string, channelType: string, isGroup: number) {
-  createMessagingGroup({
+async function mg(id: string, channelType: string, isGroup: number): Promise<void> {
+  await createMessagingGroup({
     id,
     channel_type: channelType,
     platform_id: `pid-${id}`,
@@ -65,23 +65,23 @@ async function update(args: Record<string, unknown>) {
   return (await lookup('wirings-update')!.handler(args, hostCtx)) as Record<string, unknown>;
 }
 
-beforeEach(() => {
-  runMigrations(initTestDb());
-  createAgentGroup({
+beforeEach(async () => {
+  await runMigrations(await initTestDb());
+  await createAgentGroup({
     id: 'ag-1',
     name: 'Helper Bot',
     folder: 'helper-bot',
     agent_provider: null,
     created_at: now(),
   });
-  mg('mg-dm', 'declchan', 0);
-  mg('mg-group', 'declchan', 1);
-  mg('mg-never', 'neverchan', 1);
-  mg('mg-stale', 'stalechan', 1); // no declaration anywhere
+  await mg('mg-dm', 'declchan', 0);
+  await mg('mg-group', 'declchan', 1);
+  await mg('mg-never', 'neverchan', 1);
+  await mg('mg-stale', 'stalechan', 1); // no declaration anywhere
 });
 
-afterEach(() => {
-  closeDb();
+afterEach(async () => {
+  await closeDb();
 });
 
 it('declares its agent-group scope field', () => {
@@ -98,7 +98,7 @@ describe('wirings-create — declaration-derived defaults', () => {
   it('fills group defaults from the declaration', async () => {
     const row = await create({ messaging_group_id: 'mg-group', agent_group_id: 'ag-1' });
     expect(row.engage_mode).toBe('mention-sticky');
-    const persisted = getMessagingGroupAgent(row.id as string);
+    const persisted = await getMessagingGroupAgent(row.id as string);
     expect(persisted!.engage_pattern).toBeNull();
   });
 
@@ -152,14 +152,14 @@ describe('wirings-create — validation', () => {
 describe('wirings — threads and priority columns', () => {
   it('omitted --threads stores NULL (inherit declaration)', async () => {
     const row = await create({ messaging_group_id: 'mg-group', agent_group_id: 'ag-1' });
-    expect(getMessagingGroupAgent(row.id as string)!.threads).toBeNull();
+    expect((await getMessagingGroupAgent(row.id as string))!.threads).toBeNull();
   });
 
   it('--threads true/false stores 1/0', async () => {
     const on = await create({ messaging_group_id: 'mg-group', agent_group_id: 'ag-1', threads: 'true' });
-    expect(getMessagingGroupAgent(on.id as string)!.threads).toBe(1);
+    expect((await getMessagingGroupAgent(on.id as string))!.threads).toBe(1);
     const off = await create({ messaging_group_id: 'mg-dm', agent_group_id: 'ag-1', threads: 'false' });
-    expect(getMessagingGroupAgent(off.id as string)!.threads).toBe(0);
+    expect((await getMessagingGroupAgent(off.id as string))!.threads).toBe(0);
   });
 
   it('rejects a non-boolean --threads value', async () => {
@@ -212,7 +212,7 @@ describe('wirings-update — same validation as create', () => {
   it('allows unrelated updates to a legacy pattern row with NULL engage_pattern', async () => {
     // Rows created on main before engage_pattern defaults existed: pattern
     // mode + NULL pattern, which the router evaluates as match-all.
-    createMessagingGroupAgent({
+    await createMessagingGroupAgent({
       id: 'mga-legacy',
       messaging_group_id: 'mg-stale',
       agent_group_id: 'ag-1',
@@ -228,7 +228,7 @@ describe('wirings-update — same validation as create', () => {
     const updated = (await update({ id: 'mga-legacy', priority: '5' })) as { priority: number };
     expect(updated.priority).toBe(5);
     // The pattern fields stay untouched — no silent backfill.
-    expect(getMessagingGroupAgent('mga-legacy')!.engage_pattern).toBeNull();
+    expect((await getMessagingGroupAgent('mga-legacy'))!.engage_pattern).toBeNull();
 
     // But actually changing the pattern fields to an invalid combination
     // still rejects.

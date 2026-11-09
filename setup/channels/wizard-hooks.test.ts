@@ -230,7 +230,7 @@ describe('companion skills', () => {
     expect(cmds.indexOf('bash setup/lib/restart.sh')).toBeGreaterThan(bAt);
   });
 
-  it('a partially-failed companion degrades with the exact re-apply command; the restart still runs', async () => {
+  it('a partially-failed companion degrades with the exact re-apply command; the restart is held', async () => {
     const root = scratchRoot('wh-degraded-');
     roots.push(root);
     writeChannelSkill(root, 'fixturedeg');
@@ -252,12 +252,17 @@ describe('companion skills', () => {
       wire: () => true,
     });
 
-    // Degraded, not fatal: the warning names the skill and the re-apply command.
+    // Degraded, not fatal: the warning names the skill and the re-apply command
+    // (the driver CLI, which actually applies — not the planner).
     const degraded = warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes('fixture-companion-bad'));
     expect(degraded).toHaveLength(1);
-    expect(degraded[0]).toContain('pnpm exec tsx scripts/skill-apply.ts .claude/skills/fixture-companion-bad');
-    // The applied companion still triggers the single deferred restart.
-    expect(cmds.filter((c) => c === 'bash setup/lib/restart.sh')).toHaveLength(1);
+    expect(degraded[0]).toContain('pnpm exec tsx setup/lib/skill-driver.ts .claude/skills/fixture-companion-bad');
+    // The deferred restart is HELD: the failed companion may have copied files
+    // and appended barrel imports before failing, and restarting could boot
+    // that half-applied state. The operator is told to repair, then restart.
+    expect(cmds.filter((c) => c === 'bash setup/lib/restart.sh')).toHaveLength(0);
+    const held = warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes('Skipping the deferred service restart'));
+    expect(held).toHaveLength(1);
   });
 
   it('no declaration: no companion runs, no deferred restart (unchanged flow)', async () => {

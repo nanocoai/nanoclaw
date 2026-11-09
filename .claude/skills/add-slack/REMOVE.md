@@ -13,6 +13,7 @@ Delete the appended lines (skip any already gone):
 ```bash
 rm -f src/channels/slack.ts src/channels/slack-lib.ts src/channels/slack-lib.test.ts \
   src/channels/slack-a2a-guard.ts src/channels/slack-a2a-guard.test.ts \
+  src/channels/slack-raw-text.ts src/channels/slack-raw-text.test.ts \
   src/channels/slack-registration.test.ts \
   src/channels/slack-instances-registration.test.ts \
   src/provisioning/slack-app.ts src/provisioning/slack-app.test.ts \
