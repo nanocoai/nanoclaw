@@ -623,11 +623,20 @@ describe('release workflow order check', () => {
     expect(block.split('\n').at(-1)).toBe(
       'test "$ORDER" = "v${RELEASE_VERSION} sorts above every existing tag of its version"',
     );
-    const indented = lines.slice(start, start + 6).join('\n');
-    expect(releaseWorkflow.split(indented)).toHaveLength(3);
-    expect(releaseWorkflow.split(`git merge-base --is-ancestor "$TARGET_SHA" origin/main\n${indented}`)).toHaveLength(
-      3,
-    );
+    const at = (needle: string) => {
+      const found: number[] = [];
+      for (let i = releaseWorkflow.indexOf(needle); i !== -1; i = releaseWorkflow.indexOf(needle, i + 1)) found.push(i);
+      return found;
+    };
+    const order = at(lines.slice(start, start + 6).join('\n'));
+    const checkout = at('ref: ${{ inputs.target_sha }}');
+    const onMain = at('git merge-base --is-ancestor "$TARGET_SHA" origin/main');
+    expect([order.length, checkout.length, onMain.length]).toEqual([2, 2, 2]);
+    // By position, not adjacency: each job proves the target is on main before the order check.
+    expect(onMain[0]).toBeLessThan(order[0]);
+    expect(order[0]).toBeLessThan(checkout[1]);
+    expect(checkout[1]).toBeLessThan(onMain[1]);
+    expect(onMain[1]).toBeLessThan(order[1]);
   });
 
   it('keeps release.mjs free of non-builtin imports, so its copy runs from RUNNER_TEMP', () => {
