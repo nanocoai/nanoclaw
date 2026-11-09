@@ -221,10 +221,11 @@ export function wrapSqliteInbound(db: Database.Database, nextSequence = () => ne
         .prepare("SELECT 1 FROM messages_in WHERE channel_type = 'agent' AND platform_id != ? LIMIT 1")
         .get(selfAgentGroupId) !== undefined,
     wakeEvidence: () => {
-      // Two LIMIT 1 probes, both answered from idx_messages_in_wake. Chatter
-      // is channel traffic only: host notes use channel_type 'agent'.
-      const notEcho = "(channel_type IS NULL OR channel_type != 'session-echo')";
-      if (db.prepare(`SELECT 1 FROM messages_in WHERE trigger = 1 AND ${notEcho} LIMIT 1`).get()) return 'woken';
+      // Two LIMIT 1 probes, both answered from idx_messages_in_wake. Only
+      // channel traffic counts, as for the conversation root: channel_type
+      // 'agent' is host notes and agent-to-agent mail.
+      const channelRow = "(channel_type IS NULL OR channel_type NOT IN ('session-echo', 'agent'))";
+      if (db.prepare(`SELECT 1 FROM messages_in WHERE trigger = 1 AND ${channelRow} LIMIT 1`).get()) return 'woken';
       const chatter = db
         .prepare(
           `SELECT 1 FROM messages_in WHERE trigger = 0 AND kind IN ('chat', 'chat-sdk')

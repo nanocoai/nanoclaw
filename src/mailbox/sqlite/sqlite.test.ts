@@ -128,7 +128,7 @@ describe('SQLite mailbox canonical serialization', () => {
     ]);
   });
 
-  it('reports wake evidence: none, then chatter, then woken; echoes, host notes and silent replies do not count', () => {
+  it('reports wake evidence: none, then chatter, then woken; echoes, agent rows and silent replies do not count', () => {
     const inboundDb = new Database(':memory:');
     databases.push(inboundDb);
     inboundDb.exec(INBOUND_SCHEMA);
@@ -146,6 +146,8 @@ describe('SQLite mailbox canonical serialization', () => {
 
     insert.run('ambient', 4, 'chat', 'slack', 0);
     expect(inbound.wakeEvidence()).toBe('chatter');
+    insert.run('a2a', 5, 'chat', 'agent', 1);
+    expect(inbound.wakeEvidence()).toBe('chatter');
 
     insert.run('answer', 6, 'system', null, 1);
     expect(inbound.wakeEvidence()).toBe('woken');
@@ -162,7 +164,7 @@ describe('SQLite mailbox canonical serialization', () => {
       const plan = legacy
         .prepare(
           `EXPLAIN QUERY PLAN SELECT 1 FROM messages_in WHERE ${where}
-           AND (channel_type IS NULL OR channel_type != 'session-echo') LIMIT 1`,
+           AND (channel_type IS NULL OR channel_type NOT IN ('session-echo', 'agent')) LIMIT 1`,
         )
         .all() as Array<{ detail: string }>;
       expect(plan.map((row) => row.detail).join('\n')).toContain('idx_messages_in_wake');
