@@ -582,7 +582,7 @@ describe('local web adapter', () => {
     }
   });
 
-  it('keeps a question open when the host refuses the answer, and shows it resolved only once accepted', async () => {
+  it('keeps a question open when the host refuses the answer or decides nothing, and shows it resolved only once accepted', async () => {
     const { registry, actions, host, url, auth } = await startAdapter();
     const abort = new AbortController();
     try {
@@ -635,6 +635,14 @@ describe('local web adapter', () => {
       expect(refused.status).toBe(403);
       expect(await refused.json()).toEqual({ error: 'Only an approver can answer this.' });
 
+      // Nothing decided (a failed write): the question stays open, so don't say it ended.
+      host.outcome = 'ignored';
+      const ignored = await answer();
+      expect(ignored.status).toBe(409);
+      expect(await ignored.json()).toEqual({
+        error: 'Your answer was not recorded. If the question is still open, try again.',
+      });
+
       // A core from before click outcomes returns nothing: answered as before.
       host.outcome = undefined;
       const fromOldCore = await answer();
@@ -647,8 +655,8 @@ describe('local web adapter', () => {
       expect(accepted.status).toBe(202);
       // The browser shows the resolution the server gives it.
       expect(await accepted.json()).toEqual({ ok: true, resolution: 'Approved' });
-      expect(actions).toHaveLength(3);
-      // The next event is this answer's resolution: the refused answer published nothing.
+      expect(actions).toHaveLength(4);
+      // The next event is this answer's resolution: the refused and undecided answers published nothing.
       expect(new TextDecoder().decode((await reader.read()).value)).toContain(
         '"type":"question-resolution","questionId":"appr-local-refused","resolution":"Approved"',
       );

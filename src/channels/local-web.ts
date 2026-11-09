@@ -467,8 +467,9 @@ function createAdapter(): ChannelAdapter {
         sendJson(res, 403, { error: 'Only an approver can answer this.' });
         return;
       }
+      // Nothing was decided, but the question may still be open (a failed write): don't say it ended.
       if (outcome !== 'accepted' && outcome !== 'closed') {
-        sendJson(res, 409, { error: 'This question is no longer pending.' });
+        sendJson(res, 409, { error: 'Your answer was not recorded. If the question is still open, try again.' });
         return;
       }
       // A card the host updates itself (a gateway approval) gets its final text from there.
