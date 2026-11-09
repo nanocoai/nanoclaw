@@ -33,6 +33,26 @@ vi.mock('./container-runner.js', () => ({
   killContainer: vi.fn(),
 }));
 
+// Lets a test hold the command gate (e.g. a slow admin lookup) and pick its answer.
+const gateHold = vi.hoisted(() => ({
+  until: null as Promise<void> | null,
+  pass: false,
+  reached: vi.fn(),
+}));
+vi.mock('./command-gate.js', async () => {
+  const actual = await vi.importActual<typeof import('./command-gate.js')>('./command-gate.js');
+  return {
+    ...actual,
+    gateCommand: async (...args: Parameters<typeof actual.gateCommand>) => {
+      if (gateHold.until) {
+        gateHold.reached();
+        await gateHold.until;
+      }
+      return gateHold.pass ? { action: 'pass' as const } : actual.gateCommand(...args);
+    },
+  };
+});
+
 vi.mock('./config.js', async () => {
   const actual = await vi.importActual('./config.js');
   return { ...actual, DATA_DIR: '/tmp/nanoclaw-test-command-gate-deny' };
@@ -219,5 +239,48 @@ describe('command-gate denial', () => {
 
     await expect(sendClear()).resolves.toBeUndefined();
     expect(calls).toHaveLength(1);
+  });
+
+  it('a follow-up routed while a first mentioned command is gated still engages', async () => {
+    await seed();
+    recordingAdapter(async () => 'platform-msg-1');
+    await getDb().run("UPDATE messaging_groups SET is_group = 1 WHERE id = 'mg-1'");
+    await getDb().run(
+      "UPDATE messaging_group_agents SET engage_mode = 'mention-sticky', ignored_message_policy = 'drop' WHERE id = 'mga-1'",
+    );
+    const { wakeContainer } = await import('./container-runner.js');
+    vi.mocked(wakeContainer).mockClear();
+    let release: () => void = () => {};
+    gateHold.reached.mockClear();
+    gateHold.pass = true;
+    gateHold.until = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    try {
+      const clear = sendClear(true);
+      await vi.waitFor(() => expect(gateHold.reached).toHaveBeenCalledTimes(1));
+      gateHold.until = null;
+
+      await routeInbound({
+        channelType: 'testchat',
+        platformId: 'testchat:C1',
+        threadId: null,
+        message: {
+          id: 'm2',
+          kind: 'chat-sdk',
+          content: JSON.stringify({ sender: 'Alex', senderId: 'U1', text: 'and keep the notes' }),
+          timestamp: new Date().toISOString(),
+          isGroup: true,
+        },
+      });
+      expect(vi.mocked(wakeContainer)).toHaveBeenCalledTimes(1);
+      release();
+      await clear;
+      expect(vi.mocked(wakeContainer)).toHaveBeenCalledTimes(2);
+    } finally {
+      gateHold.until = null;
+      gateHold.pass = false;
+      release();
+    }
   });
 });
