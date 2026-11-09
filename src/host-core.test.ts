@@ -74,6 +74,24 @@ vi.mock('./db/sessions.js', async () => {
   };
 });
 
+// Lets a test hold the next inbox write from the router, after its session exists.
+const writeHold = vi.hoisted(() => ({ until: null as Promise<void> | null, reached: vi.fn() }));
+vi.mock('./session-manager.js', async () => {
+  const actual = await vi.importActual<typeof import('./session-manager.js')>('./session-manager.js');
+  return {
+    ...actual,
+    writeSessionMessage: async (...args: Parameters<typeof actual.writeSessionMessage>) => {
+      const hold = writeHold.until;
+      if (hold) {
+        writeHold.until = null;
+        writeHold.reached();
+        await hold;
+      }
+      return actual.writeSessionMessage(...args);
+    },
+  };
+});
+
 // Override DATA_DIR for tests
 vi.mock('./config.js', async () => {
   const actual = await vi.importActual('./config.js');
@@ -1270,6 +1288,46 @@ describe('router — per-wiring thread policy', () => {
 
       await routeInbound(threadedEvent('msg-after-routing-reset'));
       expect(wake).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it('mention-sticky is not activated by chatter that overlaps the first silent write', async () => {
+    await getDb().run(
+      "UPDATE messaging_group_agents SET engage_mode = 'mention-sticky', ignored_message_policy = 'accumulate' WHERE id = 'mga-tp'",
+    );
+
+    await withThreadedAdapter(async () => {
+      const { routeInbound } = await import('./router.js');
+      const { wakeContainer } = await import('./container-runner.js');
+      const wake = wakeContainer as unknown as ReturnType<typeof vi.fn>;
+      wake.mockClear();
+
+      let release: () => void = () => {};
+      writeHold.reached.mockClear();
+      writeHold.until = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      try {
+        const firstDone = routeInbound(threadedEvent('msg-first-chatter'));
+        await vi.waitFor(() => expect(writeHold.reached).toHaveBeenCalledTimes(1));
+
+        // The session exists but its inbox is still empty.
+        await routeInbound(threadedEvent('msg-overlapping-chatter'));
+        release();
+        await firstDone;
+
+        expect(wake).not.toHaveBeenCalled();
+        const session = await findSession('mg-tp', 'thread-42');
+        const db = new Database(inboundDbPath('ag-tp', session!.id));
+        expect(db.prepare('SELECT trigger FROM messages_in ORDER BY seq').all()).toEqual([
+          { trigger: 0 },
+          { trigger: 0 },
+        ]);
+        db.close();
+      } finally {
+        writeHold.until = null;
+        release();
+      }
     });
   });
 

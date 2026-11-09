@@ -36,6 +36,7 @@ import { resolveSession, withExistingMailboxSession, writeSessionMessage } from 
 import { requestWake } from './request-wake.js';
 import { getSession } from './db/sessions.js';
 import type { AgentGroup, MessagingGroup, MessagingGroupAgent, Session } from './types.js';
+import type { WakeEvidence } from './mailbox/types.js';
 import type { InboundEvent } from './channels/adapter.js';
 
 function generateId(): string {
@@ -397,15 +398,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     const scopeOk = engages && (!senderScopeGate || (await senderScopeGate(event, userId, mg, agent)).allowed);
 
     if (engages && accessOk && scopeOk) {
-      const engagingKey = threadKey(agent.agent_group_id, mg.id, effectiveThreadId);
-      engagingNow.set(engagingKey, (engagingNow.get(engagingKey) ?? 0) + 1);
-      try {
-        await deliverToAgent(agent, agentGroup, mg, event, userId, threadsEnabled, effectiveThreadId, true);
-      } finally {
-        const left = (engagingNow.get(engagingKey) ?? 1) - 1;
-        if (left > 0) engagingNow.set(engagingKey, left);
-        else engagingNow.delete(engagingKey);
-      }
+      await deliverToAgent(agent, agentGroup, mg, event, userId, threadsEnabled, effectiveThreadId, true);
       engagedCount++;
 
       // Mention-sticky: ask the adapter to subscribe the thread so the
@@ -506,11 +499,16 @@ async function evaluateEngage(
       if (isMention) return true;
       if (mg.is_group === 0) return false; // DMs never use mention-sticky sensibly
       const key = threadKey(agent.agent_group_id, mg.id, threadId);
-      if (engagingNow.has(key)) return true;
+      if (writesInFlight.get(key)?.wake) return true;
+      const silentBefore = (writesInFlight.get(key)?.silent ?? 0) > 0;
       const existing = await findSessionForAgent(agent.agent_group_id, mg.id, threadId);
-      if (existing && !(await holdsOnlyChatter(agent.agent_group_id, existing.id))) return true;
-      // A mention in this thread may have started delivery while we looked.
-      return engagingNow.has(key);
+      const evidence = existing ? await inboxWakeEvidence(agent.agent_group_id, existing.id) : 'chatter';
+      const after = writesInFlight.get(key);
+      // A wake that began while we looked counts. An inbox with no evidence
+      // (e.g. after a folder reset) keeps the thread active, unless a silent
+      // first row was still being written.
+      if (after?.wake || evidence === 'woken') return true;
+      return evidence === 'none' && !silentBefore && !after?.silent;
     }
     default:
       // Unrecognized engage_mode (e.g. stale data from a past CLI version,
@@ -524,28 +522,38 @@ async function evaluateEngage(
   }
 }
 
-// (agent, mg, thread) deliveries in flight. A follow-up routed before the
-// first wake's row lands in the inbox must still count as sticky.
-const engagingNow = new Map<string, number>();
+// Session writes in flight per (agent, mg, thread), from the engage decision
+// until the row is in the inbox; a follow-up routed meanwhile reads these.
+const writesInFlight = new Map<string, { wake: number; silent: number }>();
 
 function threadKey(agentGroupId: string, messagingGroupId: string, threadId: string | null): string {
   return JSON.stringify([agentGroupId, messagingGroupId, threadId]);
 }
 
+function startWrite(key: string, wake: boolean): () => void {
+  const entry = writesInFlight.get(key) ?? { wake: 0, silent: 0 };
+  writesInFlight.set(key, entry);
+  if (wake) entry.wake++;
+  else entry.silent++;
+  return () => {
+    if (wake) entry.wake--;
+    else entry.silent--;
+    if (entry.wake === 0 && entry.silent === 0 && writesInFlight.get(key) === entry) writesInFlight.delete(key);
+  };
+}
+
 /**
- * True only when the inbox proves the agent was never woken here: it has rows
- * and all are silent context (ignored_message_policy='accumulate'). A missing,
- * empty or unreadable inbox (e.g. after the documented folder reset) proves
- * nothing, so the thread keeps the old session-only rule.
+ * What a session's inbox shows: 'woken' once anything woke the agent there,
+ * 'chatter' when it holds only silent context (ignored_message_policy=
+ * 'accumulate'), 'none' when missing, empty or unreadable.
  */
-async function holdsOnlyChatter(agentGroupId: string, sessionId: string): Promise<boolean> {
+async function inboxWakeEvidence(agentGroupId: string, sessionId: string): Promise<WakeEvidence> {
   try {
-    const chatter = await withExistingMailboxSession(agentGroupId, sessionId, (mailbox) => mailbox.onlyAccumulated());
-    return chatter === true;
+    return (await withExistingMailboxSession(agentGroupId, sessionId, (mailbox) => mailbox.wakeEvidence())) ?? 'none';
     // eslint-disable-next-line no-catch-all/no-catch-all -- an unreadable inbox must not drop the message
   } catch (err) {
     log.warn('mention-sticky: could not read session inbox, treating thread as active', { sessionId, err });
-    return false;
+    return 'none';
   }
 }
 
@@ -619,34 +627,36 @@ async function deliverToAgent(
 
   // After the command gate: a filtered or denied command must not leave an
   // empty session behind, which mention-sticky would read as an active thread.
-  const { session, created } = await resolveSession(
-    agent.agent_group_id,
-    mg.id,
-    effectiveThreadId,
-    effectiveSessionMode,
-  );
-
-  if (wake) {
-    // Cross-session context backfill: a just-born or long-idle session is
-    // seeded with its conversation's recent top-level timeline from the
-    // conversation's hot set BEFORE the triggering message is written, so
-    // replying to something said in another thread lands with that context
-    // in view. Bounded (K sources, read concurrently); a hot session is a
-    // one-query no-op. Never throws.
-    await backfillSession(agentGroup, session, mg, { created });
-  }
-
+  const endWrite = startWrite(threadKey(agent.agent_group_id, mg.id, effectiveThreadId), wake);
   const messageId = messageIdForAgent(event.message.id, agent.agent_group_id);
-  await writeSessionMessage(session.agent_group_id, session.id, {
-    id: messageId,
-    kind: event.message.kind,
-    timestamp: event.message.timestamp,
-    platformId: deliveryAddr.platformId,
-    channelType: deliveryAddr.channelType,
-    threadId: deliveryAddr.threadId,
-    content: event.message.content,
-    trigger: wake,
-  });
+  let session: Session;
+  let created: boolean;
+  try {
+    ({ session, created } = await resolveSession(agent.agent_group_id, mg.id, effectiveThreadId, effectiveSessionMode));
+
+    if (wake) {
+      // Cross-session context backfill: a just-born or long-idle session is
+      // seeded with its conversation's recent top-level timeline from the
+      // conversation's hot set BEFORE the triggering message is written, so
+      // replying to something said in another thread lands with that context
+      // in view. Bounded (K sources, read concurrently); a hot session is a
+      // one-query no-op. Never throws.
+      await backfillSession(agentGroup, session, mg, { created });
+    }
+
+    await writeSessionMessage(session.agent_group_id, session.id, {
+      id: messageId,
+      kind: event.message.kind,
+      timestamp: event.message.timestamp,
+      platformId: deliveryAddr.platformId,
+      channelType: deliveryAddr.channelType,
+      threadId: deliveryAddr.threadId,
+      content: event.message.content,
+      trigger: wake,
+    });
+  } finally {
+    endWrite();
+  }
 
   if (wake && created) {
     // A brand-new engaged session: notify registered modules with the

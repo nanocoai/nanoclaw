@@ -220,14 +220,14 @@ export function wrapSqliteInbound(db: Database.Database, nextSequence = () => ne
       db
         .prepare("SELECT 1 FROM messages_in WHERE channel_type = 'agent' AND platform_id != ? LIMIT 1")
         .get(selfAgentGroupId) !== undefined,
-    onlyAccumulated: () => {
-      const row = db
-        .prepare(
-          `SELECT SUM(kind IN ('chat', 'chat-sdk') AND trigger = 0) AS chatter, MAX(trigger) AS woke
-             FROM messages_in WHERE channel_type IS NULL OR channel_type != 'session-echo'`,
-        )
-        .get() as { chatter: number | null; woke: number | null };
-      return (row.chatter ?? 0) > 0 && row.woke === 0;
+    wakeEvidence: () => {
+      // Two early-exit probes: an active thread hits a waking row quickly.
+      const notEcho = "(channel_type IS NULL OR channel_type != 'session-echo')";
+      if (db.prepare(`SELECT 1 FROM messages_in WHERE trigger = 1 AND ${notEcho} LIMIT 1`).get()) return 'woken';
+      const chatter = db
+        .prepare(`SELECT 1 FROM messages_in WHERE trigger = 0 AND kind IN ('chat', 'chat-sdk') AND ${notEcho} LIMIT 1`)
+        .get();
+      return chatter ? 'chatter' : 'none';
     },
     insertTask: async (task) => insertTaskRow(db, task, nextSequence()),
     armNextTask: async (originalId, task) => {

@@ -19,6 +19,7 @@ import {
   createAgentGroup,
   createMessagingGroup,
   createMessagingGroupAgent,
+  getDb,
 } from './db/index.js';
 import { initChannelAdapters, registerChannelAdapter, teardownChannelAdapters } from './channels/channel-registry.js';
 import { setDeliveryAdapter, type ChannelDeliveryAdapter } from './delivery.js';
@@ -106,7 +107,7 @@ async function seed(): Promise<void> {
   });
 }
 
-function sendClear(): Promise<void> {
+function sendClear(isGroup = false): Promise<void> {
   return routeInbound({
     channelType: 'testchat',
     platformId: 'testchat:C1',
@@ -117,7 +118,7 @@ function sendClear(): Promise<void> {
       content: JSON.stringify({ sender: 'Alex', senderId: 'U1', text: '/clear' }),
       timestamp: new Date().toISOString(),
       isMention: true,
-      isGroup: false,
+      isGroup,
     },
   });
 }
@@ -171,6 +172,41 @@ describe('command-gate denial', () => {
     ]);
     // A denied command creates no session, so no outbound.db exists at all.
     expect(outboundRowCounts()).toEqual([]);
+    const { wakeContainer } = await import('./container-runner.js');
+    expect(vi.mocked(wakeContainer)).not.toHaveBeenCalled();
+  });
+
+  it('a mentioned denied command does not make a mention-sticky thread active', async () => {
+    await seed();
+    await getDb().run("UPDATE messaging_groups SET is_group = 1 WHERE id = 'mg-1'");
+    await getDb().run("UPDATE messaging_group_agents SET engage_mode = 'mention-sticky' WHERE id = 'mga-1'");
+    let release: () => void = () => {};
+    const replyHeld = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const calls = recordingAdapter(async () => {
+      await replyHeld;
+      return 'platform-msg-1';
+    });
+
+    const clear = sendClear(true);
+    await vi.waitFor(() => expect(calls).toHaveLength(1));
+    // An unmentioned follow-up while the denial reply is still being sent.
+    await routeInbound({
+      channelType: 'testchat',
+      platformId: 'testchat:C1',
+      threadId: null,
+      message: {
+        id: 'm2',
+        kind: 'chat-sdk',
+        content: JSON.stringify({ sender: 'Alex', senderId: 'U1', text: 'so what now' }),
+        timestamp: new Date().toISOString(),
+        isGroup: true,
+      },
+    });
+    release();
+    await clear;
+
     const { wakeContainer } = await import('./container-runner.js');
     expect(vi.mocked(wakeContainer)).not.toHaveBeenCalled();
   });
