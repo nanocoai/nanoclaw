@@ -92,7 +92,8 @@ git archive "$upstream_ref" scripts src/install-slug.ts | tar -x -C "$controller
 
 Channels (`NANOCLAW_UPDATE_CHANNEL` in `.env`; `--channel <name>` overrides it
 once): `stable` (default) = newest annotated `vX.Y.Z` tag; `beta` = newest
-`-rc.N` if newer than stable; `edge` = upstream `main`. Change the default only
+`-beta.N` or `-rc.N` if newer than stable (beta.N < rc.N < the release);
+`edge` = upstream `main`. Change the default only
 with `set-channel` (below), never by editing `.env`.
 
 Default to `merge`. Use `rebase` only when the user explicitly wants linear

@@ -2,7 +2,7 @@
  * Update channels: which upstream ref /update-nanoclaw merges.
  *
  *   stable (default)  newest annotated vX.Y.Z tag on the remote
- *   beta              newest vX.Y.Z-rc.N tag newer than stable, else stable
+ *   beta              newest vX.Y.Z-beta.N or vX.Y.Z-rc.N tag newer than stable, else stable
  *   edge              tip of the remote's main branch
  *
  * release.yml creates the annotated tag only when it publishes the release, so
@@ -34,26 +34,41 @@ interface ParsedTag {
   major: number;
   minor: number;
   patch: number;
+  beta?: number;
   rc?: number;
 }
 
 // Only release tags; the remote also carries pre-update-*, pre-squash/* and similar.
-const RELEASE_TAG = /^v(\d+)\.(\d+)\.(\d+)(?:-rc\.(\d+))?$/;
+const RELEASE_TAG = /^v(\d+)\.(\d+)\.(\d+)(?:-(beta|rc)\.(\d+))?$/;
 
 export function parseReleaseTag(tag: string): ParsedTag | null {
   const match = RELEASE_TAG.exec(tag);
   if (!match) return null;
   const [major, minor, patch] = [match[1], match[2], match[3]].map(Number);
-  return match[4] === undefined ? { major, minor, patch } : { major, minor, patch, rc: Number(match[4]) };
+  if (match[4] === undefined) return { major, minor, patch };
+  return match[4] === 'beta'
+    ? { major, minor, patch, beta: Number(match[5]) }
+    : { major, minor, patch, rc: Number(match[5]) };
 }
 
-/** Numeric per field, so CalVer v2026.10.0 sorts after v2.4.0; a release sorts after its rcs. */
+function isPrereleaseTag(tag: ParsedTag): boolean {
+  return tag.beta !== undefined || tag.rc !== undefined;
+}
+
+/** Numeric per field, so CalVer v2026.10.0 sorts after v2.4.0; within a version beta.N < rc.N < the release. */
 export function compareReleaseTags(a: string, b: string): number {
   const x = parseReleaseTag(a);
   const y = parseReleaseTag(b);
   if (!x || !y) throw new Error(`Not a release tag: ${!x ? a : b}`);
-  const rank = (t: ParsedTag) => (t.rc === undefined ? Number.POSITIVE_INFINITY : t.rc);
-  return x.major - y.major || x.minor - y.minor || x.patch - y.patch || Math.sign(rank(x) - rank(y)) || 0;
+  const stage = (t: ParsedTag) => (t.beta !== undefined ? 0 : t.rc !== undefined ? 1 : 2);
+  const number = (t: ParsedTag) => t.beta ?? t.rc ?? 0;
+  return (
+    x.major - y.major ||
+    x.minor - y.minor ||
+    x.patch - y.patch ||
+    stage(x) - stage(y) ||
+    Math.sign(number(x) - number(y))
+  );
 }
 
 /** Same KEY=value rules as src/env.ts, which the archived controller cannot import. */
@@ -131,8 +146,8 @@ function remoteReleaseTags(runner: CommandRunner, root: string, remote: string):
 }
 
 function pickTag(tags: string[], channel: 'stable' | 'beta'): string | undefined {
-  // A release sorts after its own rcs, so beta's newest is an rc only when it is newer than stable.
-  const eligible = channel === 'stable' ? tags.filter((tag) => parseReleaseTag(tag)!.rc === undefined) : tags;
+  // A release sorts after its own pre-releases, so beta's newest is one only when it is newer than stable.
+  const eligible = channel === 'stable' ? tags.filter((tag) => !isPrereleaseTag(parseReleaseTag(tag)!)) : tags;
   return eligible.sort(compareReleaseTags).at(-1);
 }
 

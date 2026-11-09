@@ -80,9 +80,10 @@ function fixture(installAt: string) {
 }
 
 describe('release tag parsing', () => {
-  it('accepts only vX.Y.Z and vX.Y.Z-rc.N', () => {
-    expect(parseReleaseTag('v2.4.0')).toMatchObject({ major: 2, minor: 4, patch: 0 });
-    expect(parseReleaseTag('v2.5.0-rc.3')).toMatchObject({ rc: 3 });
+  it('accepts only vX.Y.Z, vX.Y.Z-beta.N and vX.Y.Z-rc.N', () => {
+    expect(parseReleaseTag('v2.4.0')).toEqual({ major: 2, minor: 4, patch: 0 });
+    expect(parseReleaseTag('v2.5.0-rc.3')).toEqual({ major: 2, minor: 5, patch: 0, rc: 3 });
+    expect(parseReleaseTag('v2.5.0-beta.2')).toEqual({ major: 2, minor: 5, patch: 0, beta: 2 });
     for (const junk of [
       'pre-update-852435f4-20260827',
       'pre-squash/x',
@@ -90,6 +91,9 @@ describe('release tag parsing', () => {
       'v2.4',
       '2.4.0',
       'v2.4.0-beta',
+      'v2.4.0-Beta.1',
+      'v2.4.0-alpha.1',
+      'v2.4.0-beta.1-rc.1',
     ]) {
       expect(parseReleaseTag(junk)).toBeNull();
     }
@@ -100,6 +104,32 @@ describe('release tag parsing', () => {
       compareReleaseTags,
     );
     expect(sorted).toEqual(['v2.4.0', 'v2.10.0', 'v2026.9.1', 'v2026.10.0-rc.2', 'v2026.10.0-rc.10', 'v2026.10.0']);
+  });
+
+  it('sorts beta.N before rc.N before the release, and versions before suffixes', () => {
+    const sorted = [
+      'v2026.11.0',
+      'v2026.11.0-rc.1',
+      'v2026.11.0-beta.10',
+      'v2026.10.1-rc.2',
+      'v2026.11.0-beta.2',
+      'v2026.10.1',
+      'v2026.11.0-rc.2',
+      'v2026.11.0-beta.1',
+    ].sort(compareReleaseTags);
+    expect(sorted).toEqual([
+      'v2026.10.1-rc.2',
+      'v2026.10.1',
+      'v2026.11.0-beta.1',
+      'v2026.11.0-beta.2',
+      'v2026.11.0-beta.10',
+      'v2026.11.0-rc.1',
+      'v2026.11.0-rc.2',
+      'v2026.11.0',
+    ]);
+    expect(compareReleaseTags('v2026.10.1-rc.2', 'v2026.11.0-beta.1')).toBeLessThan(0);
+    expect(compareReleaseTags('v2026.11.0-beta.9', 'v2026.11.0-rc.1')).toBeLessThan(0);
+    expect(compareReleaseTags('v2026.11.0-beta.1', 'v2026.11.0-beta.1')).toBe(0);
   });
 });
 
@@ -165,6 +195,21 @@ describe('resolveUpdateTarget', () => {
   it('beta resolves to the newest release candidate newer than stable', () => {
     const { install } = fixture('v2.3.0');
     expect(resolve(install, 'beta')).toMatchObject({ channel: 'beta', ref: 'refs/tags/v2.5.0-rc.1' });
+  });
+
+  it('stable never picks a beta; beta picks it once it is the newest', () => {
+    const { seed, official, install } = fixture('v2.3.0');
+    tag(seed, 'v2.6.0-beta.1');
+    git(seed, ['push', '-q', official, 'refs/tags/v2.6.0-beta.1']);
+    expect(resolve(install, 'stable').tag).toBe('v2.4.0');
+    expect(resolve(install, 'beta')).toMatchObject({ channel: 'beta', tag: 'v2.6.0-beta.1' });
+  });
+
+  it('beta prefers an rc over any beta of the same version', () => {
+    const { seed, official, install } = fixture('v2.3.0');
+    tag(seed, 'v2.5.0-beta.7'); // newer commit than v2.5.0-rc.1, lower rank
+    git(seed, ['push', '-q', official, 'refs/tags/v2.5.0-beta.7']);
+    expect(resolve(install, 'beta').tag).toBe('v2.5.0-rc.1');
   });
 
   it('edge resolves to the remote main branch', () => {
