@@ -74,8 +74,10 @@ vi.mock('./db/sessions.js', async () => {
   };
 });
 
-// Lets a test hold the next inbox write from the router, after its session exists.
+// Lets a test hold the next inbox write from the router, after its session
+// exists, or the next inbox read after it has run.
 const writeHold = vi.hoisted(() => ({ until: null as Promise<void> | null, reached: vi.fn() }));
+const readHold = vi.hoisted(() => ({ until: null as Promise<void> | null, reached: vi.fn() }));
 vi.mock('./session-manager.js', async () => {
   const actual = await vi.importActual<typeof import('./session-manager.js')>('./session-manager.js');
   return {
@@ -88,6 +90,16 @@ vi.mock('./session-manager.js', async () => {
         await hold;
       }
       return actual.writeSessionMessage(...args);
+    },
+    withExistingMailboxSession: async (...args: Parameters<typeof actual.withExistingMailboxSession>) => {
+      const result = await actual.withExistingMailboxSession(...args);
+      const hold = readHold.until;
+      if (hold) {
+        readHold.until = null;
+        readHold.reached();
+        await hold;
+      }
+      return result;
     },
   };
 });
@@ -1326,6 +1338,41 @@ describe('router — per-wiring thread policy', () => {
         db.close();
       } finally {
         writeHold.until = null;
+        release();
+      }
+    });
+  });
+
+  it('mention-sticky engages a follow-up whose inbox read overlaps a whole mention', async () => {
+    await getDb().run(
+      "UPDATE messaging_group_agents SET engage_mode = 'mention-sticky', ignored_message_policy = 'accumulate' WHERE id = 'mga-tp'",
+    );
+
+    await withThreadedAdapter(async () => {
+      const { routeInbound } = await import('./router.js');
+      const { wakeContainer } = await import('./container-runner.js');
+      const wake = wakeContainer as unknown as ReturnType<typeof vi.fn>;
+      await routeInbound(threadedEvent('msg-chatter-before-read'));
+      wake.mockClear();
+
+      let release: () => void = () => {};
+      readHold.reached.mockClear();
+      readHold.until = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      try {
+        // The follow-up reads 'chatter', then the mention lands in full.
+        const followupDone = routeInbound(threadedEvent('msg-read-overlap-followup'));
+        await vi.waitFor(() => expect(readHold.reached).toHaveBeenCalledTimes(1));
+        const mention = threadedEvent('msg-read-overlap-mention');
+        await routeInbound({ ...mention, message: { ...mention.message, isMention: true } });
+        expect(wake).toHaveBeenCalledTimes(1);
+
+        release();
+        await followupDone;
+        expect(wake).toHaveBeenCalledTimes(2);
+      } finally {
+        readHold.until = null;
         release();
       }
     });
