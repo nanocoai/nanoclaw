@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { readFileSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 const VERSION_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
@@ -46,14 +46,15 @@ export function tagsFromLsRemote(output) {
 }
 
 // The beta channel offers only the newest tag, so a version that does not sort above
-// every existing tag of the same x.y.z would publish and never be offered.
+// every existing tag of the same x.y.z would publish and never be offered. A tag that
+// already exists was ordered when it was pushed; a publish rerun only finishes its release.
 export function verifyReleaseOrder(version, tags) {
   isPrerelease(version);
   const tag = `v${version}`;
+  if (tags.includes(tag)) return;
   const wanted = parseTag(tag);
   const blockers = tags
     .filter((other) => {
-      if (other === tag) return false; // a publish rerun after the tag was pushed
       const t = parseTag(other);
       return (
         t !== null &&
@@ -301,7 +302,9 @@ export function main(argv) {
 }
 
 // realpath: a symlinked argv (macOS /var) would skip main() and exit 0 having done nothing.
-if (import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
+// No file argv (stdin, -e) means imported, not run.
+const entry = process.argv[1];
+if (entry && existsSync(entry) && import.meta.url === pathToFileURL(realpathSync(entry)).href) {
   try {
     main(process.argv.slice(2));
   } catch (error) {

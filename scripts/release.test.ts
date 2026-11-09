@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -453,9 +453,11 @@ describe('release order check', () => {
     expect(() => verifyReleaseOrder('2026.11.0-rc.1', [...existing, 'v2026.12.0-beta.4'])).not.toThrow();
   });
 
-  it('passes a publish rerun whose own tag was already pushed', () => {
+  it('passes a publish rerun whose own tag was already pushed, even once a newer tag exists', () => {
     expect(() => verifyReleaseOrder('2026.11.0-beta.1', [...existing, 'v2026.11.0-beta.1'])).not.toThrow();
     expect(() => verifyReleaseOrder('2026.11.0', [...existing, 'v2026.11.0-rc.1', 'v2026.11.0'])).not.toThrow();
+    const later = [...existing, 'v2026.11.0-beta.1', 'v2026.11.0-beta.2', 'v2026.11.0-rc.1', 'v2026.11.0'];
+    expect(() => verifyReleaseOrder('2026.11.0-beta.1', later)).not.toThrow();
   });
 
   it('still rejects an unsupported version', () => {
@@ -533,6 +535,15 @@ describe('release.mjs order command', () => {
         stdio: 'pipe',
       }),
     ).toThrow('does not sort above v2026.11.0-rc.1');
+  });
+
+  it('can be imported from a script on stdin without running main()', () => {
+    const out = execFileSync(process.execPath, ['--input-type=module', '-'], {
+      input: `const m = await import(${JSON.stringify(pathToFileURL(script).href)}); console.log(typeof m.verifyReleaseOrder);`,
+      encoding: 'utf8',
+      stdio: 'pipe',
+    });
+    expect(out).toBe('function\n');
   });
 
   it('fails without a tag list', () => {
