@@ -2,23 +2,36 @@ import fs from 'fs';
 import path from 'path';
 import { log } from './log.js';
 
+export interface EnvFileReadResult {
+  values: Record<string, string>;
+  /** Set only when `.env` exists but could not be read; ENOENT is not an error. */
+  error?: NodeJS.ErrnoException;
+}
+
 /**
- * Parse the .env file and return values for the requested keys.
- * Does NOT load anything into process.env — callers decide what to
- * do with the values. This keeps secrets out of the process environment
- * so they don't leak to child processes.
+ * Parse the .env file and return values for the requested keys, plus whether
+ * an existing file was unreadable.
+ *
+ * A missing `.env` is the documented first-run default and is not an error.
+ * A file that exists but cannot be read is different: callers that derive a
+ * security boundary from it must treat the value as unknown, not as unset.
  *
  * `projectRoot` defaults to the current working directory; pass it when
  * reading a .env that is not the running process's own.
  */
-export function readEnvFile(keys: string[], projectRoot?: string): Record<string, string> {
+export function readEnvFileResult(keys: string[], projectRoot?: string): EnvFileReadResult {
   const envFile = path.join(projectRoot ?? process.cwd(), '.env');
   let content: string;
   try {
     content = fs.readFileSync(envFile, 'utf-8');
   } catch (err) {
-    log.debug('.env file not found, using defaults', { err });
-    return {};
+    const error = err as NodeJS.ErrnoException;
+    if (error.code === 'ENOENT') {
+      log.debug('.env file not found, using defaults', { err });
+      return { values: {} };
+    }
+    log.warn('.env file exists but could not be read', { err });
+    return { values: {}, error };
   }
 
   const result: Record<string, string> = {};
@@ -41,7 +54,21 @@ export function readEnvFile(keys: string[], projectRoot?: string): Record<string
     if (value) result[key] = value;
   }
 
-  return result;
+  return { values: result };
+}
+
+/**
+ * Parse the .env file and return values for the requested keys.
+ * Does NOT load anything into process.env — callers decide what to
+ * do with the values. This keeps secrets out of the process environment
+ * so they don't leak to child processes.
+ *
+ * Callers that need to distinguish "missing" from "exists but unreadable"
+ * should use `readEnvFileResult` instead; this wrapper keeps the existing
+ * call sites' return type.
+ */
+export function readEnvFile(keys: string[], projectRoot?: string): Record<string, string> {
+  return readEnvFileResult(keys, projectRoot).values;
 }
 
 /**
