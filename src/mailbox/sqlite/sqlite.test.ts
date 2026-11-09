@@ -128,7 +128,7 @@ describe('SQLite mailbox canonical serialization', () => {
     ]);
   });
 
-  it('reports wake evidence: none, then chatter, then woken; echoes and silent replies do not count', () => {
+  it('reports wake evidence: none, then chatter, then woken; echoes, host notes and silent replies do not count', () => {
     const inboundDb = new Database(':memory:');
     databases.push(inboundDb);
     inboundDb.exec(INBOUND_SCHEMA);
@@ -141,6 +141,7 @@ describe('SQLite mailbox canonical serialization', () => {
     expect(inbound.wakeEvidence()).toBe('none');
     insert.run('echo', 2, 'chat', 'session-echo', 1);
     insert.run('cli-reply', 3, 'system', null, 0);
+    insert.run('member-note', 7, 'chat', 'agent', 0);
     expect(inbound.wakeEvidence()).toBe('none');
 
     insert.run('ambient', 4, 'chat', 'slack', 0);

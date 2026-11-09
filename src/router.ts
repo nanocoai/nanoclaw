@@ -522,7 +522,7 @@ async function evaluateEngage(
   }
 }
 
-// Session writes in flight per (agent, mg, thread), from the engage decision
+// Session writes in flight per (agent, mg, thread), from the command gate
 // until the row is in the inbox; a follow-up routed meanwhile reads these.
 const writesInFlight = new Map<string, { wake: number; silent: number }>();
 
@@ -535,7 +535,10 @@ function startWrite(key: string, wake: boolean): () => void {
   writesInFlight.set(key, entry);
   if (wake) entry.wake++;
   else entry.silent++;
+  let ended = false;
   return () => {
+    if (ended) return;
+    ended = true;
     if (wake) entry.wake--;
     else entry.silent--;
     if (entry.wake === 0 && entry.silent === 0 && writesInFlight.get(key) === entry) writesInFlight.delete(key);
@@ -590,48 +593,50 @@ async function deliverToAgent(
     threadId: effectiveThreadId,
   };
 
-  // Command gate: classify slash commands before they reach the container.
-  // Filtered commands are dropped silently. Denied admin commands get a
-  // permission-denied reply sent straight to the chat: outbound.db belongs to
-  // the container, and a host write there can collide with its writes.
-  if (event.message.kind === 'chat' || event.message.kind === 'chat-sdk') {
-    const gate = await gateCommand(event.message.content, userId, agent.agent_group_id);
-    if (gate.action === 'filter') {
-      log.debug('Filtered command dropped by gate', { agentGroupId: agent.agent_group_id });
-      return;
-    }
-    if (gate.action === 'deny') {
-      log.info('Admin command denied by gate', { command: gate.command, userId, agentGroupId: agent.agent_group_id });
-      const adapter = getDeliveryAdapter();
-      if (!adapter) {
-        log.warn('Permission-denied reply not sent: no delivery adapter', { command: gate.command });
-        return;
-      }
-      try {
-        await adapter.deliver(
-          deliveryAddr.channelType,
-          deliveryAddr.platformId,
-          deliveryAddr.threadId,
-          'chat',
-          JSON.stringify({ text: `Permission denied: ${gate.command} requires admin access.` }),
-          undefined,
-          event.replyTo ? undefined : mg.instance,
-        );
-        // eslint-disable-next-line no-catch-all/no-catch-all -- a failed reply must not fail inbound routing
-      } catch (err) {
-        log.error('Failed to deliver permission-denied reply', { command: gate.command, err });
-      }
-      return;
-    }
-  }
-
-  // After the command gate: a filtered or denied command must not leave an
-  // empty session behind, which mention-sticky would read as an active thread.
+  // Marked before the command gate so a follow-up routed during an admin
+  // lookup sees this write. A filtered or denied command drops the mark and
+  // creates no session, which mention-sticky would read as an active thread.
   const endWrite = startWrite(threadKey(agent.agent_group_id, mg.id, effectiveThreadId), wake);
   const messageId = messageIdForAgent(event.message.id, agent.agent_group_id);
   let session: Session;
   let created: boolean;
   try {
+    // Command gate: classify slash commands before they reach the container.
+    // Filtered commands are dropped silently. Denied admin commands get a
+    // permission-denied reply sent straight to the chat: outbound.db belongs to
+    // the container, and a host write there can collide with its writes.
+    if (event.message.kind === 'chat' || event.message.kind === 'chat-sdk') {
+      const gate = await gateCommand(event.message.content, userId, agent.agent_group_id);
+      if (gate.action === 'filter') {
+        log.debug('Filtered command dropped by gate', { agentGroupId: agent.agent_group_id });
+        return;
+      }
+      if (gate.action === 'deny') {
+        endWrite();
+        log.info('Admin command denied by gate', { command: gate.command, userId, agentGroupId: agent.agent_group_id });
+        const adapter = getDeliveryAdapter();
+        if (!adapter) {
+          log.warn('Permission-denied reply not sent: no delivery adapter', { command: gate.command });
+          return;
+        }
+        try {
+          await adapter.deliver(
+            deliveryAddr.channelType,
+            deliveryAddr.platformId,
+            deliveryAddr.threadId,
+            'chat',
+            JSON.stringify({ text: `Permission denied: ${gate.command} requires admin access.` }),
+            undefined,
+            event.replyTo ? undefined : mg.instance,
+          );
+          // eslint-disable-next-line no-catch-all/no-catch-all -- a failed reply must not fail inbound routing
+        } catch (err) {
+          log.error('Failed to deliver permission-denied reply', { command: gate.command, err });
+        }
+        return;
+      }
+    }
+
     ({ session, created } = await resolveSession(agent.agent_group_id, mg.id, effectiveThreadId, effectiveSessionMode));
 
     if (wake) {
