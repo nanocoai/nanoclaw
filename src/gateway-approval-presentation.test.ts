@@ -85,7 +85,7 @@ it('moves a long legacy title, escaped, to the top of the body', () => {
   const title = 'Delete *all* backups '.repeat(4);
   const card = gatewayApprovalPresentation({ title, question: 'Legacy question' } as GatewayApprovalRequest);
   expect(card.title).toBe('Approve external request');
-  expect(card.question).toBe(`*Request:* ${title.replace(/\*/g, '\\*')}\nLegacy question`);
+  expect(card.question).toBe(`*Request:* ${'Delete \\*all\\* backups '.repeat(4)}\nLegacy question`);
   const fits = 'x'.repeat(MAX_CARD_TITLE_CHARS);
   expect(gatewayApprovalPresentation({ title: fits, question: 'q' } as GatewayApprovalRequest).title).toBe(fits);
 });
