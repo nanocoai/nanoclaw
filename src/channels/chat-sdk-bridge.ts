@@ -1357,8 +1357,9 @@ async function handleForwardedEvent(
       // Encoded as the adapter encodes a click (a thread by its parent channel and
       // itself), as every other click and the card's messaging group carry it.
       const channel = interaction.channel as { type?: number; parent_id?: string } | undefined;
-      // Announcement, public and private threads.
-      const inThread = (channel?.type === 10 || channel?.type === 11 || channel?.type === 12) && channel.parent_id;
+      // Public and private threads. The adapter (4.41.1) keeps an announcement
+      // thread (type 10) as its own channel, so its click does too.
+      const inThread = (channel?.type === 11 || channel?.type === 12) && channel.parent_id;
       const threadId = adapter.encodeThreadId({
         guildId: (interaction.guild_id as string | undefined) || '@me',
         channelId: inThread ? channel.parent_id! : (interaction.channel_id as string),
