@@ -32,15 +32,9 @@ function tail(output: string): string {
   return lines(output).slice(-15).join('\n') || '(no output)';
 }
 
-/**
- * Git's conflict markers. Git sizes them by the attributes from before the merge,
- * so accept any run of at least 7, or of `conflict-marker-size` if that is smaller.
- */
-function markerPattern(runner: CommandRunner, root: string, file: string): RegExp {
-  const attr = runner.tryRun('git', ['check-attr', 'conflict-marker-size', '--', file], root);
-  const size = Math.min(7, (attr.ok && Number(/: (\d+)$/.exec(attr.stdout)?.[1])) || 7);
-  return new RegExp(`^(<{${size},}|={${size},}|>{${size},})( |$)`, 'm');
-}
+// Any length: conflict-marker-size sets it, and can change within the merge.
+// No valid pnpm or bun lockfile starts a line with <, = or >.
+const CONFLICT_MARKER = /^(<+|=+|>+)( |$)/m;
 
 /** Lockfiles whose checkout or staged copy in the stage still has conflict markers. */
 export function markedLockfiles(runner: CommandRunner, root: string): string[] {
@@ -48,8 +42,7 @@ export function markedLockfiles(runner: CommandRunner, root: string): string[] {
     const target = path.join(root, file);
     const staged = runner.tryRun('git', ['show', `:${file}`], root);
     const copies = [fs.existsSync(target) ? fs.readFileSync(target, 'utf8') : '', staged.ok ? staged.stdout : ''];
-    const pattern = markerPattern(runner, root, file);
-    return copies.some((text) => pattern.test(text));
+    return copies.some((text) => CONFLICT_MARKER.test(text));
   });
 }
 

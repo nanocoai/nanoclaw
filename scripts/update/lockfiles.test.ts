@@ -53,15 +53,15 @@ const lockfile = (entries: string[]) =>
  * Git cannot merge the two, though the manifests merge cleanly.
  */
 function fixture(
-  options: { bun?: boolean; markerSize?: { size: number; from: 'base' | 'upstream' }; otherConflict?: boolean } = {},
+  options: { bun?: boolean; markerSize?: { base?: number; upstream?: number }; otherConflict?: boolean } = {},
 ): { install: string } {
-  const attributes = `pnpm-lock.yaml conflict-marker-size=${options.markerSize?.size}\n`;
+  const attributes = (size: number) => `pnpm-lock.yaml conflict-marker-size=${size}\n`;
   const seed = temp('lockfile-seed-');
   git(seed, ['init', '-q', '-b', 'main']);
   write(seed, 'package.json', manifest(['a', 'c']));
   write(seed, 'pnpm-lock.yaml', lockfile(['a@1.0.0', 'c@1.0.0']));
   write(seed, 'src/value.ts', 'export const value = "old";\n');
-  if (options.markerSize?.from === 'base') write(seed, '.gitattributes', attributes);
+  if (options.markerSize?.base) write(seed, '.gitattributes', attributes(options.markerSize.base));
   if (options.bun) {
     write(seed, 'container/Dockerfile', 'ARG BUN_VERSION=1.4.4\n');
     write(seed, 'container/agent-runner/package.json', manifest(['a', 'c']));
@@ -74,7 +74,7 @@ function fixture(
   write(seed, 'pnpm-lock.yaml', lockfile(['a@1.0.0', 'c@1.0.1']));
   if (options.bun) write(seed, 'container/agent-runner/bun.lock', lockfile(['a@1.0.0', 'c@1.0.1']));
   write(seed, 'src/value.ts', 'export const value = "new";\n');
-  if (options.markerSize?.from === 'upstream') write(seed, '.gitattributes', attributes);
+  if (options.markerSize?.upstream) write(seed, '.gitattributes', attributes(options.markerSize.upstream));
   commit(seed, 'upstream bump');
   git(seed, ['push', '-q', official, 'main']);
 
@@ -421,23 +421,25 @@ describe('update lockfile conflicts', () => {
     expect(git(state.stageRoot, ['show', 'HEAD:pnpm-lock.yaml'])).toContain('b@1.0.0');
   });
 
-  it.each(['base', 'upstream'] as const)(
-    'finds markers when the %s commit sets conflict-marker-size on the lockfile',
-    (from) => {
-      const { install } = fixture({ otherConflict: true, markerSize: { size: 12, from } });
-      const { runtime } = runner();
-      const state = prepare(install, runtime);
-      // git sizes the markers by the attributes it had before the merge.
-      expect(read(state.stageRoot, 'pnpm-lock.yaml')).toMatch(from === 'base' ? /^<{12} /m : /^<{7} /m);
-      write(state.stageRoot, 'src/value.ts', 'export const value = "local and new";\n');
-      git(state.stageRoot, ['add', '-A']);
-      git(state.stageRoot, ['commit', '-q', '--no-edit']);
+  it.each([
+    ['set before the merge', { base: 12 }],
+    ['added by upstream', { upstream: 12 }],
+    ['changed by upstream', { base: 3, upstream: 12 }],
+  ] as const)('finds markers when conflict-marker-size is %s', (_, markerSize) => {
+    const { install } = fixture({ otherConflict: true, markerSize });
+    const { runtime } = runner();
+    const state = prepare(install, runtime);
+    // git sizes the markers by the attributes it had before the merge.
+    const size = 'base' in markerSize ? markerSize.base : 7;
+    expect(read(state.stageRoot, 'pnpm-lock.yaml')).toMatch(new RegExp(`^<{${size}} `, 'm'));
+    write(state.stageRoot, 'src/value.ts', 'export const value = "local and new";\n');
+    git(state.stageRoot, ['add', '-A']);
+    git(state.stageRoot, ['commit', '-q', '--no-edit']);
 
-      expect(() => resumePreparedUpdate(install, state.id, runtime)).toThrow(
-        'pnpm-lock.yaml in the stage still has conflict markers',
-      );
-    },
-  );
+    expect(() => resumePreparedUpdate(install, state.id, runtime)).toThrow(
+      'pnpm-lock.yaml in the stage still has conflict markers',
+    );
+  });
 
   it('validate refuses a marked lockfile before installing', async () => {
     const { install } = fixture();
