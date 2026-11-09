@@ -221,7 +221,7 @@ export function wrapSqliteInbound(db: Database.Database, nextSequence = () => ne
         .prepare("SELECT 1 FROM messages_in WHERE channel_type = 'agent' AND platform_id != ? LIMIT 1")
         .get(selfAgentGroupId) !== undefined,
     wakeEvidence: () => {
-      // Two early-exit probes: an active thread hits a waking row quickly.
+      // Two LIMIT 1 probes, both answered from idx_messages_in_wake.
       const notEcho = "(channel_type IS NULL OR channel_type != 'session-echo')";
       if (db.prepare(`SELECT 1 FROM messages_in WHERE trigger = 1 AND ${notEcho} LIMIT 1`).get()) return 'woken';
       const chatter = db
