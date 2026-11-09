@@ -343,6 +343,55 @@ describe('command-gate denial', () => {
     }
   });
 
+  it('a follow-up waiting on a gated command wakes when a later mention passes first', async () => {
+    await seed();
+    recordingAdapter(async () => 'platform-msg-1');
+    await getDb().run("UPDATE messaging_groups SET is_group = 1 WHERE id = 'mg-1'");
+    await getDb().run(
+      "UPDATE messaging_group_agents SET engage_mode = 'mention-sticky', ignored_message_policy = 'drop' WHERE id = 'mga-1'",
+    );
+    const message = (id: string, text: string, isMention: boolean) =>
+      routeInbound({
+        channelType: 'testchat',
+        platformId: 'testchat:C1',
+        threadId: null,
+        message: {
+          id,
+          kind: 'chat-sdk',
+          content: JSON.stringify({ sender: 'Alex', senderId: 'U1', text }),
+          timestamp: new Date().toISOString(),
+          isMention,
+          isGroup: true,
+        },
+      });
+    const { wakeContainer } = await import('./container-runner.js');
+    vi.mocked(wakeContainer).mockClear();
+    let release: () => void = () => {};
+    gateHold.reached.mockClear();
+    gateHold.until = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    try {
+      const clear = sendClear(true);
+      await vi.waitFor(() => expect(gateHold.reached).toHaveBeenCalledTimes(1));
+      gateHold.until = null;
+
+      const followup = message('m2', 'and keep the notes', false);
+      // Let the follow-up reach the gate wait, then a plain mention passes.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await message('m3', 'hello', true);
+      await Promise.race([followup, new Promise((resolve) => setTimeout(resolve, 200))]);
+      expect(vi.mocked(wakeContainer)).toHaveBeenCalledTimes(2);
+      release();
+      await Promise.all([clear, followup]);
+      // The held /clear is denied (no admin), so it adds no wake.
+      expect(vi.mocked(wakeContainer)).toHaveBeenCalledTimes(2);
+    } finally {
+      gateHold.until = null;
+      release();
+    }
+  });
+
   it('a follow-up in an already active thread does not wait for a pending command verdict', async () => {
     await seed();
     recordingAdapter(async () => 'platform-msg-1');

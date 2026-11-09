@@ -538,6 +538,8 @@ async function evaluateEngage(
 interface ThreadInFlight {
   holders: number;
   gates: Set<Promise<boolean>>;
+  /** Called when a wake starts, so a follow-up waiting on gates stops at once. */
+  onWake: Set<() => void>;
   wake: number;
   silent: number;
   wakeStarted: number;
@@ -553,6 +555,7 @@ function holdThread(key: string): [ThreadInFlight, () => void] {
   const thread = threadsInFlight.get(key) ?? {
     holders: 0,
     gates: new Set(),
+    onWake: new Set(),
     wake: 0,
     silent: 0,
     wakeStarted: 0,
@@ -571,11 +574,22 @@ function holdThread(key: string): [ThreadInFlight, () => void] {
   ];
 }
 
-/** True as soon as a pending command gate lets its wake through; false once all refuse. */
+/**
+ * True once any wake starts on the thread (a passing gate starts one), false
+ * once every gate pending now has refused.
+ */
 async function gateVerdicts(thread: ThreadInFlight): Promise<boolean> {
   if (thread.gates.size === 0) return false;
-  const passes = [...thread.gates].map((gate) => gate.then((pass) => pass || Promise.reject(new Error('refused'))));
-  return Promise.any(passes).catch(() => false);
+  let woke = (): void => {};
+  try {
+    return await new Promise<boolean>((resolve) => {
+      woke = () => resolve(true);
+      thread.onWake.add(woke);
+      void Promise.all(thread.gates).then(() => resolve(false));
+    });
+  } finally {
+    thread.onWake.delete(woke);
+  }
 }
 
 /** Registers a pending gate verdict; settling it again is a no-op. */
@@ -689,6 +703,7 @@ async function deliverToAgent(
     if (wake) {
       thread.wake++;
       thread.wakeStarted++;
+      thread.onWake.forEach((woke) => woke());
     } else {
       thread.silent++;
       thread.silentStarted++;
