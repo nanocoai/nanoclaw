@@ -334,7 +334,7 @@ describe.skipIf(!HAS_LAB)('mattermost live round trip', () => {
   afterAll(async () => {
     await bridge?.teardown().catch(() => {});
     await stopWebhookServer();
-    closeDb();
+    await closeDb();
   }, 30_000);
 
   it('a. initializes: bot resolved over REST, WebSocket connected', () => {
@@ -461,7 +461,7 @@ describe.skipIf(!HAS_LAB)('mattermost live round trip', () => {
     // `pending_approvals` rather than `pending_questions` only because the
     // latter's session_id is a foreign key and this test has no session —
     // getAskQuestionRender reads either.
-    createPendingApproval({
+    await createPendingApproval({
       approval_id: questionId,
       request_id: `req-${stamp}`,
       action: 'ask_question',
@@ -674,7 +674,7 @@ describe.skipIf(!HAS_LAB)('mattermost live round trip', () => {
       { label: 'Staging', selectedLabel: '🟡 Staging', value: 'staging' },
       { label: 'Production', selectedLabel: '🔴 Production', value: 'prod' },
     ];
-    createPendingApproval({
+    await createPendingApproval({
       approval_id: selectQuestionId,
       request_id: `reqsel-${stamp}`,
       action: 'ask_question',
