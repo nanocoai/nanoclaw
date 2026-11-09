@@ -220,12 +220,14 @@ export function wrapSqliteInbound(db: Database.Database, nextSequence = () => ne
       db
         .prepare("SELECT 1 FROM messages_in WHERE channel_type = 'agent' AND platform_id != ? LIMIT 1")
         .get(selfAgentGroupId) !== undefined,
-    hasWoken: () =>
-      db
+    onlyAccumulated: () => {
+      const row = db
         .prepare(
-          "SELECT 1 FROM messages_in WHERE trigger = 1 AND (channel_type IS NULL OR channel_type != 'session-echo') LIMIT 1",
+          "SELECT COUNT(*) AS n, MAX(trigger) AS woke FROM messages_in WHERE channel_type IS NULL OR channel_type != 'session-echo'",
         )
-        .get() !== undefined,
+        .get() as { n: number; woke: number | null };
+      return row.n > 0 && row.woke === 0;
+    },
     insertTask: async (task) => insertTaskRow(db, task, nextSequence()),
     armNextTask: async (originalId, task) => {
       const sequence = nextSequence();

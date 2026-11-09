@@ -127,7 +127,7 @@ describe('SQLite mailbox canonical serialization', () => {
     ]);
   });
 
-  it('reports a session as woken only by a non-echo triggering row', () => {
+  it('reports an inbox as accumulate-only only when it has silent rows and no wake', () => {
     const inboundDb = new Database(':memory:');
     databases.push(inboundDb);
     inboundDb.exec(INBOUND_SCHEMA);
@@ -137,12 +137,14 @@ describe('SQLite mailbox canonical serialization', () => {
     );
     const inbound = wrapSqliteInbound(inboundDb);
 
-    insert.run('ambient', 2, 'chat', 'slack', 0);
-    insert.run('echo', 4, 'chat', 'session-echo', 1);
-    expect(inbound.hasWoken()).toBe(false);
+    insert.run('echo', 2, 'chat', 'session-echo', 1);
+    expect(inbound.onlyAccumulated()).toBe(false);
+
+    insert.run('ambient', 4, 'chat', 'slack', 0);
+    expect(inbound.onlyAccumulated()).toBe(true);
 
     insert.run('answer', 6, 'system', null, 1);
-    expect(inbound.hasWoken()).toBe(true);
+    expect(inbound.onlyAccumulated()).toBe(false);
   });
 
   it('returns only the conversation root and top-level outbound timeline', () => {

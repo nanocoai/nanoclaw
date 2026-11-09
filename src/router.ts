@@ -505,10 +505,12 @@ async function evaluateEngage(
     case 'mention-sticky': {
       if (isMention) return true;
       if (mg.is_group === 0) return false; // DMs never use mention-sticky sensibly
-      if (engagingNow.has(threadKey(agent.agent_group_id, mg.id, threadId))) return true;
+      const key = threadKey(agent.agent_group_id, mg.id, threadId);
+      if (engagingNow.has(key)) return true;
       const existing = await findSessionForAgent(agent.agent_group_id, mg.id, threadId);
-      if (!existing) return false;
-      return wasWokenInSession(agent.agent_group_id, existing.id);
+      if (existing && !(await holdsOnlyChatter(agent.agent_group_id, existing.id))) return true;
+      // A mention in this thread may have started delivery while we looked.
+      return engagingNow.has(key);
     }
     default:
       // Unrecognized engage_mode (e.g. stale data from a past CLI version,
@@ -531,19 +533,19 @@ function threadKey(agentGroupId: string, messagingGroupId: string, threadId: str
 }
 
 /**
- * Whether anything ever woke this session. With ignored_message_policy=
- * 'accumulate' a session can hold only unmentioned chatter; that must not make
- * the thread sticky. A missing or unreadable inbox (e.g. the documented folder
- * reset) keeps the old session-only rule.
+ * True only when the inbox proves the agent was never woken here: it has rows
+ * and all are silent context (ignored_message_policy='accumulate'). A missing,
+ * empty or unreadable inbox (e.g. after the documented folder reset) proves
+ * nothing, so the thread keeps the old session-only rule.
  */
-async function wasWokenInSession(agentGroupId: string, sessionId: string): Promise<boolean> {
+async function holdsOnlyChatter(agentGroupId: string, sessionId: string): Promise<boolean> {
   try {
-    const woken = await withExistingMailboxSession(agentGroupId, sessionId, (mailbox) => mailbox.hasWoken());
-    return woken !== false;
+    const chatter = await withExistingMailboxSession(agentGroupId, sessionId, (mailbox) => mailbox.onlyAccumulated());
+    return chatter === true;
     // eslint-disable-next-line no-catch-all/no-catch-all -- an unreadable inbox must not drop the message
   } catch (err) {
     log.warn('mention-sticky: could not read session inbox, treating thread as active', { sessionId, err });
-    return true;
+    return false;
   }
 }
 
