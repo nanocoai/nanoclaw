@@ -38,6 +38,24 @@ vi.mock('./container-runner.js', () => ({
   killContainer: vi.fn(),
 }));
 
+// Lets a test hold a delivery inside backfill, before its inbox row lands.
+const backfillHold = vi.hoisted(() => ({ until: null as Promise<void> | null, reached: vi.fn() }));
+vi.mock('./modules/cross-session-context/index.js', async () => {
+  const actual = await vi.importActual<typeof import('./modules/cross-session-context/index.js')>(
+    './modules/cross-session-context/index.js',
+  );
+  return {
+    ...actual,
+    backfillSession: async (...args: Parameters<typeof actual.backfillSession>) => {
+      if (backfillHold.until) {
+        backfillHold.reached();
+        await backfillHold.until;
+      }
+      return actual.backfillSession(...args);
+    },
+  };
+});
+
 // Override DATA_DIR for tests
 vi.mock('./config.js', async () => {
   const actual = await vi.importActual('./config.js');
@@ -1085,6 +1103,58 @@ describe('router — per-wiring thread policy', () => {
 
       release(true);
       await mentionDone;
+    });
+  });
+
+  it('mention-sticky engages a follow-up routed before the mention reaches the inbox', async () => {
+    await getDb().run("UPDATE messaging_group_agents SET engage_mode = 'mention-sticky' WHERE id = 'mga-tp'");
+
+    await withThreadedAdapter(async () => {
+      const { routeInbound } = await import('./router.js');
+      const { wakeContainer } = await import('./container-runner.js');
+      const wake = wakeContainer as unknown as ReturnType<typeof vi.fn>;
+      wake.mockClear();
+      let release: () => void = () => {};
+      backfillHold.until = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      backfillHold.reached.mockClear();
+
+      try {
+        const mention = threadedEvent('msg-held-mention');
+        const mentionDone = routeInbound({ ...mention, message: { ...mention.message, isMention: true } });
+        await vi.waitFor(() => expect(backfillHold.reached).toHaveBeenCalledTimes(1));
+        backfillHold.until = null;
+
+        await routeInbound(threadedEvent('msg-early-followup'));
+        expect(wake).toHaveBeenCalledTimes(1);
+
+        release();
+        await mentionDone;
+        expect(wake).toHaveBeenCalledTimes(2);
+      } finally {
+        backfillHold.until = null;
+        release();
+      }
+    });
+  });
+
+  it('mention-sticky keeps a thread active after its session folder is reset', async () => {
+    await getDb().run("UPDATE messaging_group_agents SET engage_mode = 'mention-sticky' WHERE id = 'mga-tp'");
+
+    await withThreadedAdapter(async () => {
+      const { routeInbound } = await import('./router.js');
+      const { wakeContainer } = await import('./container-runner.js');
+      const wake = wakeContainer as unknown as ReturnType<typeof vi.fn>;
+      wake.mockClear();
+
+      const mention = threadedEvent('msg-before-reset');
+      await routeInbound({ ...mention, message: { ...mention.message, isMention: true } });
+      const session = await findSession('mg-tp', 'thread-42');
+      fs.rmSync(sessionDir('ag-tp', session!.id), { recursive: true, force: true });
+
+      await routeInbound(threadedEvent('msg-after-reset'));
+      expect(wake).toHaveBeenCalledTimes(2);
     });
   });
 

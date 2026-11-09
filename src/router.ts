@@ -397,7 +397,15 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     const scopeOk = engages && (!senderScopeGate || (await senderScopeGate(event, userId, mg, agent)).allowed);
 
     if (engages && accessOk && scopeOk) {
-      await deliverToAgent(agent, agentGroup, mg, event, userId, threadsEnabled, effectiveThreadId, true);
+      const engagingKey = threadKey(agent.agent_group_id, mg.id, effectiveThreadId);
+      engagingNow.set(engagingKey, (engagingNow.get(engagingKey) ?? 0) + 1);
+      try {
+        await deliverToAgent(agent, agentGroup, mg, event, userId, threadsEnabled, effectiveThreadId, true);
+      } finally {
+        const left = (engagingNow.get(engagingKey) ?? 1) - 1;
+        if (left > 0) engagingNow.set(engagingKey, left);
+        else engagingNow.delete(engagingKey);
+      }
       engagedCount++;
 
       // Mention-sticky: ask the adapter to subscribe the thread so the
@@ -497,6 +505,7 @@ async function evaluateEngage(
     case 'mention-sticky': {
       if (isMention) return true;
       if (mg.is_group === 0) return false; // DMs never use mention-sticky sensibly
+      if (engagingNow.has(threadKey(agent.agent_group_id, mg.id, threadId))) return true;
       const existing = await findSessionForAgent(agent.agent_group_id, mg.id, threadId);
       if (!existing) return false;
       return wasWokenInSession(agent.agent_group_id, existing.id);
@@ -513,16 +522,26 @@ async function evaluateEngage(
   }
 }
 
+// (agent, mg, thread) deliveries in flight. A follow-up routed before the
+// first wake's row lands in the inbox must still count as sticky.
+const engagingNow = new Map<string, number>();
+
+function threadKey(agentGroupId: string, messagingGroupId: string, threadId: string | null): string {
+  return JSON.stringify([agentGroupId, messagingGroupId, threadId]);
+}
+
 /**
  * Whether this session ever woke its agent with a chat message. With
  * ignored_message_policy='accumulate' a session can hold only unmentioned
- * chatter; that must not make the thread sticky. A read error keeps the old
- * session-only rule rather than dropping the message.
+ * chatter; that must not make the thread sticky. A missing or unreadable
+ * inbox (e.g. the documented folder reset) keeps the old session-only rule.
  */
 async function wasWokenInSession(agentGroupId: string, sessionId: string): Promise<boolean> {
   try {
-    const root = await withExistingMailboxSession(agentGroupId, sessionId, (mailbox) => mailbox.getConversationRoot());
-    return root !== undefined;
+    const inbox = await withExistingMailboxSession(agentGroupId, sessionId, (mailbox) => ({
+      root: mailbox.getConversationRoot(),
+    }));
+    return inbox === undefined || inbox.root !== undefined;
     // eslint-disable-next-line no-catch-all/no-catch-all -- an unreadable inbox must not drop the message
   } catch (err) {
     log.warn('mention-sticky: could not read session inbox, treating thread as active', { sessionId, err });
