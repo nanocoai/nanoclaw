@@ -145,13 +145,13 @@ export interface AccountCredential {
  * Deliberately not a field on `AccountCredential`: that shape is written to
  * disk, and a marketing preference has no business in a credential file.
  */
-interface EnrollResult {
+export interface EnrollResult {
   credential: AccountCredential;
   emailUpdates: boolean | null;
 }
 
 /** Sign-in failure with a sentence for the user and, where possible, a way out. */
-class LoginError extends Error {
+export class LoginError extends Error {
   constructor(
     message: string,
     readonly hint?: string,
@@ -373,7 +373,7 @@ function resolveRegistryHost(fromBroker: string | undefined): string | undefined
  * worth trusting. Any cached password the helper stashed there is dropped: a
  * new token invalidates it.
  */
-function persistCredential(cred: AccountCredential): void {
+export function persistCredential(cred: AccountCredential): void {
   const record: AccountCredential = { ...cred, registry: resolveRegistryHost(cred.registry) };
   writeSecretFile(ACCOUNT_FILE, `${JSON.stringify(record, null, 2)}\n`);
   ensureHostId();
@@ -427,7 +427,7 @@ function wireDockerCredentialHelper(registry?: string): void {
 // ---------------------------------------------------------------------------
 // Broker
 
-function resolveApiBase(override?: string): string {
+export function resolveApiBase(override?: string): string {
   // process.env, then .env, then the default — same order and same key as
   // setup/lib/registry-state.ts, which states outright that the two must stay
   // in lockstep. A process.env-only read diverges the moment an operator sets
@@ -443,7 +443,7 @@ interface ClientRecord {
   host_id: string;
 }
 
-function clientRecord(): ClientRecord {
+export function clientRecord(): ClientRecord {
   let version = 'unknown';
   try {
     const pkg: unknown = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'package.json'), 'utf-8'));
@@ -480,7 +480,7 @@ async function probeSession(api: string, token: string): Promise<ProbeState> {
   };
 }
 
-type EnrollBody =
+export type EnrollBody =
   | { method: 'code'; code: string; client: ClientRecord }
   | { method: 'idp'; provider: 'workos'; access_token: string; client: ClientRecord };
 
@@ -499,7 +499,7 @@ function enrollWire(body: EnrollBody): Record<string, unknown> {
   return body.method === 'idp' ? { ...common, workos_token: body.access_token } : common;
 }
 
-async function enroll(api: string, body: EnrollBody): Promise<EnrollResult> {
+export async function enroll(api: string, body: EnrollBody): Promise<EnrollResult> {
   let res: HttpResult;
   try {
     res = await http(`${api}/v1/enroll`, json(enrollWire(body)), HTTP_TIMEOUT_MS);
@@ -608,7 +608,7 @@ function enrollFailure(api: string, method: 'code' | 'idp', res: HttpResult): Lo
 // ---------------------------------------------------------------------------
 // Device flow
 
-interface IdpConfig {
+export interface IdpConfig {
   clientId: string;
   deviceEndpoint: string;
   tokenEndpoint: string;
@@ -631,9 +631,12 @@ interface IdpConfig {
  * and answers 404 from the marketing site, so "unreachable" is not a safe proxy
  * for "misconfigured" either.
  */
-type BrokerProbe = { kind: 'idp'; config: IdpConfig } | { kind: 'no-idp' } | { kind: 'not-a-broker'; detail: string };
+export type BrokerProbe =
+  | { kind: 'idp'; config: IdpConfig }
+  | { kind: 'no-idp' }
+  | { kind: 'not-a-broker'; detail: string };
 
-async function probeBroker(api: string): Promise<BrokerProbe> {
+export async function probeBroker(api: string): Promise<BrokerProbe> {
   const fromEnv = str(process.env[ENV.clientId]);
   if (fromEnv) {
     return {
@@ -685,16 +688,18 @@ function misconfiguredClient(): LoginError {
   );
 }
 
-interface DeviceAuthorization {
+export interface DeviceAuthorization {
   deviceCode: string;
   userCode: string;
   verificationUri: string;
   verificationUriComplete?: string;
   expiresInS: number;
+  /** ISO stamp of `expiresInS` from the moment the code was issued. */
+  expiresAt: string;
   intervalS: number;
 }
 
-async function requestDeviceAuthorization(cfg: IdpConfig): Promise<DeviceAuthorization> {
+export async function requestDeviceAuthorization(cfg: IdpConfig): Promise<DeviceAuthorization> {
   let res: HttpResult;
   try {
     res = await http(cfg.deviceEndpoint, form({ client_id: cfg.clientId }), HTTP_TIMEOUT_MS);
@@ -717,13 +722,15 @@ async function requestDeviceAuthorization(cfg: IdpConfig): Promise<DeviceAuthori
   if (!deviceCode || !userCode || !verificationUri) {
     throw new LoginError('The sign-in provider returned an incomplete device authorization response.');
   }
+  // Defaults are RFC 8628's own; a provider that omits them is unusual, not fatal.
+  const expiresInS = num(res.body?.expires_in) ?? 300;
   return {
     deviceCode,
     userCode,
     verificationUri,
     verificationUriComplete: str(res.body?.verification_uri_complete),
-    // Defaults are RFC 8628's own; a provider that omits them is unusual, not fatal.
-    expiresInS: num(res.body?.expires_in) ?? 300,
+    expiresInS,
+    expiresAt: new Date(Date.now() + expiresInS * 1000).toISOString(),
     intervalS: Math.max(1, num(res.body?.interval) ?? 5),
   };
 }
@@ -785,7 +792,7 @@ function openInBrowser(url: string): void {
   }
 }
 
-async function pollForIdpToken(cfg: IdpConfig, device: DeviceAuthorization): Promise<string> {
+export async function pollForIdpToken(cfg: IdpConfig, device: DeviceAuthorization): Promise<string> {
   let intervalMs = device.intervalS * 1000;
   const deadline = Date.now() + Math.min(device.expiresInS * 1000, MAX_DEVICE_WAIT_MS);
   let transportFailures = 0;
@@ -848,6 +855,57 @@ async function pollForIdpToken(cfg: IdpConfig, device: DeviceAuthorization): Pro
       }
     }
   }
+}
+
+function notABroker(api: string, detail: string): LoginError {
+  return new LoginError(
+    `No NanoClaw registry at ${api} (${detail}).`,
+    `Nothing at that address answers as a NanoClaw registry. If ${ENV.api} is set, check it points at one — unset, this reaches the hosted service. Either way \`./container/build.sh\` builds the image locally and needs no account.`,
+  );
+}
+
+/** A device flow in progress: where to poll and what the user must approve. */
+export interface DeviceFlow {
+  api: string;
+  idp: IdpConfig;
+  device: DeviceAuthorization;
+}
+
+/**
+ * The device flow's first step for a caller that presents the code its own
+ * way (setup/portal.ts folds sign-in into the portal's own page): probe the
+ * broker and request a device authorization. Prints and opens nothing. Every
+ * refusal is a LoginError worded as the standalone run would word it.
+ */
+export async function startDeviceFlow(apiOverride?: string): Promise<DeviceFlow> {
+  const api = resolveApiBase(apiOverride);
+  const probe = await probeBroker(api);
+  if (probe.kind === 'not-a-broker') throw notABroker(api, probe.detail);
+  if (probe.kind === 'no-idp') {
+    throw new LoginError(
+      'Browser authentication is not configured for this registry.',
+      'Run setup/registry-login.sh to sign in with an enrollment code instead.',
+    );
+  }
+  return { api, idp: probe.config, device: await requestDeviceAuthorization(probe.config) };
+}
+
+/**
+ * The rest of that flow: poll the token endpoint until the sign-in is approved
+ * (RFC 8628 §3.5 back-off), enroll at the broker, and persist the credential
+ * exactly as a standalone sign-in does (account.json, registry-auth.json, the
+ * docker credential helper).
+ */
+export async function finishDeviceFlow({ api, idp, device }: DeviceFlow): Promise<AccountCredential> {
+  const idpToken = await pollForIdpToken(idp, device);
+  const { credential } = await enroll(api, {
+    method: 'idp',
+    provider: 'workos',
+    access_token: idpToken,
+    client: clientRecord(),
+  });
+  persistCredential(credential);
+  return credential;
 }
 
 async function deviceLogin(api: string, cfg: IdpConfig): Promise<EnrollResult> {
@@ -1147,12 +1205,7 @@ export async function run(argv: string[]): Promise<void> {
   }
 
   const probe = await probeBroker(api);
-  if (probe.kind === 'not-a-broker') {
-    throw new LoginError(
-      `No NanoClaw registry at ${api} (${probe.detail}).`,
-      `Nothing at that address answers as a NanoClaw registry. If ${ENV.api} is set, check it points at one — unset, this reaches the hosted service. Either way \`./container/build.sh\` builds the image locally and needs no account.`,
-    );
-  }
+  if (probe.kind === 'not-a-broker') throw notABroker(api, probe.detail);
   const idp = probe.kind === 'idp' ? probe.config : undefined;
   if (!idp) {
     // A real registry with no identity provider. Supported: the enrollment-code

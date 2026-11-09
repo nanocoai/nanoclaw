@@ -91,6 +91,16 @@ Reading the flow:
 - `messages_out` has a reply but the user never received it → a delivery problem (see issue 1 below).
 - `messages_in` is empty → routing never reached this session (check the router log lines and the central wiring with `ncl wirings list`).
 
+## Repairing the gateway
+
+If the installed credential gateway is unreachable, unhealthy, or its containers are missing, re-run its setup step from the checkout:
+
+```bash
+pnpm exec tsx setup/index.ts --step gateway
+```
+
+The step detects the installed gateway and checks it. For a gateway whose setup manages its own services, it also refreshes the payload and reconciles those services; otherwise it only reports whether the gateway is up, so follow that gateway's own start instructions. Don't recreate gateway containers by hand with `docker run`/`docker rm`, and keep the gateway's database volumes and keys together: never generate replacement keys for an existing database. After the step succeeds, retry the failed setup step, or restart the service (see issue 1 below) on a finished install.
+
 ## Common Issues
 
 ### 1. "No adapter for channel type" / Messages silently lost (null platform_message_id)
@@ -140,12 +150,13 @@ Messages marked delivered with a null `platform_message_id` are not automaticall
 
 A spawned container that exits without writing to `outbound.db` shows up in `logs/nanoclaw.log` as a `Container exited` line with a non-zero `code`, often preceded by streamed `container=<folder>` stderr (at debug level).
 
-**Authentication errors:** secrets are injected per request by the OneCLI gateway — none are passed in env vars or chat context. A `401` from an API whose credential is in the vault usually means the agent is in `selective` secret mode and that secret was never assigned:
+**Authentication errors:** secrets are injected per request by the OneCLI gateway — none are passed in env vars or chat context. Check the error code before the status: when the gateway injected nothing it keeps the upstream status (401, 403, or 400) and adds a code. `access_restricted` ("credentials exist in OneCLI but this agent does not have access") means that secret is not attached to the agent group's OneCLI agent; `credential_not_found` or `app_not_connected` means no stored secret matched the request (none for that host, or one limited to another path). A `401` with none of these codes comes from the API itself and means the stored value is wrong or expired. NanoClaw attaches only the group's model credential, on each spawn; a tool secret is attached to the groups chosen when the skill that added it ran:
 ```bash
-onecli agents list                                        # check secretMode
-onecli agents set-secret-mode --id <agent-id> --mode all  # inject all matching secrets
+onecli agents list --max 0                                           # find the agent: identifier = agent group id
+onecli agents grants list --id <agent-id>                            # the secrets it holds
+onecli agents grants attach-secret --id <agent-id> --secret-id <id>  # attach the missing one
 ```
-If the gateway itself is unreachable, the container runner refuses to spawn (`OneCLI gateway not applied — refusing to spawn container without credentials` in the host log). Confirm the gateway is up at `http://127.0.0.1:10254`.
+If the gateway itself is unreachable, the container runner refuses to spawn (`OneCLI gateway not applied — refusing to spawn container without credentials` in the host log). Confirm the gateway is up at `http://127.0.0.1:10254`. If it isn't, follow [Repairing the gateway](#repairing-the-gateway).
 
 **MCP server failures:** a misconfigured MCP server can abort the agent run. Look for MCP initialization errors in the streamed container stderr (`LOG_LEVEL=debug`).
 

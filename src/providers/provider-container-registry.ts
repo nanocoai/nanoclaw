@@ -7,9 +7,9 @@
  * the registered config fn, and merges the returned mounts/env into the spawn
  * args.
  *
- * Providers without host-side needs (e.g. `claude`) don't appear in
- * this registry at all — the lookup returns `undefined` and the spawn path
- * proceeds with only the default mounts and env.
+ * Providers without host-side needs don't appear in this registry at all —
+ * the lookup returns `undefined` and the spawn path proceeds with only the
+ * default mounts and env.
  *
  * Skills add a new provider's host config by creating `src/providers/<name>.ts`
  * with a top-level `registerProviderContainerConfig(...)` call, then appending
@@ -50,6 +50,13 @@ export interface ProviderContainerContext {
   selectedSkills: string[];
   /** `process.env` at spawn time — pull passthrough values from here. */
   hostEnv: NodeJS.ProcessEnv;
+  /**
+   * Mixed-version handshake. Present only when this host loaded a declaration
+   * and will realize its surfaces. Updated legacy callbacks keep returning env
+   * but suppress their old filesystem/mount work when this is true. Old hosts
+   * omit the field, so refreshed payloads retain their old behavior.
+   */
+  coreOwnsProviderSurfaces?: true;
 }
 
 export interface ProviderContainerContribution {

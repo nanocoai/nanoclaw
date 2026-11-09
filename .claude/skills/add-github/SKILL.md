@@ -44,7 +44,7 @@ import './github.js';
 Pinned to an exact version — the supply-chain policy rejects ranges and `latest`:
 
 ```nc:dep
-@chat-adapter/github@4.29.0
+@chat-adapter/github@4.41.1
 ```
 
 ### 4. Build and validate
@@ -102,7 +102,7 @@ never overwritten):
 Paste the Fine-grained Personal Access Token for the bot account — starts with `github_pat_`.
 ```
 ```nc:prompt webhook_secret secret
-Paste the webhook secret you generated for the repo webhook(s).
+Paste the webhook secret you generated for the repo webhook(s). NanoClaw's webhook server listens on 127.0.0.1 only; if the proxy or tunnel serving that URL runs on another machine or in Docker on Linux, add `WEBHOOK_HOST=0.0.0.0` to `.env` (it takes effect at the next restart).
 ```
 ```nc:prompt bot_username
 Enter the bot account's GitHub username exactly (used for @-mention detection).
@@ -184,3 +184,5 @@ systemctl --user restart $(systemd_unit)              # Linux
 **Comments never trigger the agent.** The @-mention must match `GITHUB_BOT_USERNAME` exactly, and the webhook must subscribe to **Issue comments** and **Pull request review comments** (not just pushes). Comments authored by the bot account itself are filtered by design — test from a different account than the bot.
 
 **Adapter installed but the channel is dead.** Run `pnpm exec vitest run src/channels/github-registration.test.ts` — red means the barrel import or the `@chat-adapter/github` install drifted, so re-run the Apply steps. If green, restart the service (see Next Steps) so it loads the adapter and the new `.env` values.
+
+**A proxy or tunnel on another machine, or in Docker on Linux, gets connection refused or times out.** The webhook server listens on 127.0.0.1 only. Add `WEBHOOK_HOST=0.0.0.0` to `.env` and restart; `Webhook server started` in `logs/nanoclaw.log` shows the host it bound.

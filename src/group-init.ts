@@ -5,34 +5,11 @@ import { DATA_DIR, DEFAULT_AGENT_PROVIDER, GROUPS_DIR } from './config.js';
 import { ensureContainerConfig } from './db/container-configs.js';
 import { stageGroupPersona } from './group-persona.js';
 import { log } from './log.js';
-import { migrateClaudeMemorySettings } from './migrate-claude-memory-settings.js';
+import { prepareClaudeMemorySettings } from './migrate-claude-memory-settings.js';
+import { getProviderHostContract } from './provider-contracts/registry.js';
+import { initializeProviderGroupSurfaces } from './provider-contracts/realize.js';
 import { providerProvidesAgentSurfaces } from './providers/provider-container-registry.js';
 import type { AgentGroup } from './types.js';
-
-const DEFAULT_SETTINGS_JSON =
-  JSON.stringify(
-    {
-      autoMemoryEnabled: false,
-      env: {
-        CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
-        CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
-      },
-      hooks: {
-        PreCompact: [
-          {
-            hooks: [
-              {
-                type: 'command',
-                command: 'bun /app/src/compact-instructions.ts',
-              },
-            ],
-          },
-        ],
-      },
-    },
-    null,
-    2,
-  ) + '\n';
 
 /**
  * Initialize the on-disk filesystem state for an agent group. Idempotent —
@@ -65,7 +42,8 @@ export async function initGroupFilesystem(
 
   // Default agent surfaces apply unless the provider declares (at registration)
   // that it provides its own.
-  const defaultSurfaces = !providerProvidesAgentSurfaces(providerHint);
+  const contract = getProviderHostContract(providerHint);
+  const defaultSurfaces = !contract && !providerProvidesAgentSurfaces(providerHint);
 
   // 1. groups/<folder>/ — group memory + working dir
   const groupDir = path.resolve(GROUPS_DIR, group.folder);
@@ -94,20 +72,18 @@ export async function initGroupFilesystem(
   initialized.push('container_configs');
 
   // 2. data/v2-sessions/<id>/.claude-shared/ — Claude state + per-group skills
-  if (defaultSurfaces) {
+  if (contract) {
+    initialized.push(...initializeProviderGroupSurfaces(providerHint, contract, group.id, groupDir));
+  } else if (defaultSurfaces) {
     const claudeDir = path.join(DATA_DIR, 'v2-sessions', group.id, '.claude-shared');
     if (!fs.existsSync(claudeDir)) {
       fs.mkdirSync(claudeDir, { recursive: true });
       initialized.push('.claude-shared');
     }
 
-    const settingsFile = path.join(claudeDir, 'settings.json');
-    if (!fs.existsSync(settingsFile)) {
-      fs.writeFileSync(settingsFile, DEFAULT_SETTINGS_JSON);
-      initialized.push('settings.json');
-    } else if (migrateClaudeMemorySettings(settingsFile)) {
-      initialized.push('settings.json (reconciled Claude settings)');
-    }
+    const settings = prepareClaudeMemorySettings(claudeDir);
+    if (settings === 'created') initialized.push('settings.json');
+    else if (settings === 'reconciled') initialized.push('settings.json (reconciled Claude settings)');
 
     // Skills directory — created empty here; symlinks are synced at spawn
     // time by container-runner.ts based on container.json skills selection.

@@ -31,7 +31,9 @@ mock.module('@anthropic-ai/claude-agent-sdk', () => ({
     })(),
 }));
 
-const { ClaudeProvider } = await import('./claude.js');
+await import('./index.js');
+await import('../provider-contracts/index.js');
+const { createProvider } = await import('./factory.js');
 const { MEMORY_SESSION_HOOK } = await import('../memory/session-hook.js');
 
 type Fixture = { gist: string; messages: unknown[] };
@@ -80,7 +82,7 @@ function load(id: string): void {
 
 async function providerEvents(id: string): Promise<Array<{ type: string; text?: string | null }>> {
   load(id);
-  const provider = new ClaudeProvider({});
+  const provider = createProvider('claude');
   provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
   const q = provider.query({ prompt: 'hi', cwd: tmp });
   const events: Array<{ type: string; text?: string | null }> = [];
@@ -90,7 +92,7 @@ async function providerEvents(id: string): Promise<Array<{ type: string; text?: 
 
 async function runThroughPollLoop(id: string): Promise<{ delivered: string[]; pushes: string[] }> {
   load(id);
-  const provider = new ClaudeProvider({});
+  const provider = createProvider('claude');
   provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
   const query = provider.query({ prompt: 'hi', cwd: tmp });
   const pushes: string[] = [];

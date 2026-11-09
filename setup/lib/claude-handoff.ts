@@ -46,7 +46,7 @@ import {
   offerClaudeAssist,
   STEP_FILES,
 } from './claude-assist.js';
-import { getPickedProvider } from './picked-provider.js';
+import { resolveSelectedProvider } from './picked-provider.js';
 import { ensureAnswer } from './runner.js';
 import { brandBody, note } from './theme.js';
 
@@ -226,24 +226,33 @@ function buildHandoffPrompt(ctx: HandoffContext): string {
 /**
  * Dispatcher for every setup-failure assist offer.
  *
- * On a non-claude install (the operator picked codex/opencode/… this run),
- * the picked provider owns failure assist: its registered
- * `offerFailureAssist` hook runs first, and Claude is only a fallback —
- * a guarded one, offered when already installed and signed in, never
- * installed or signed in on the spot.
+ * On a non-claude install (the runtime picked this run, preset through
+ * NANOCLAW_AGENT_PROVIDER, or stamped in `.env` by an earlier run), that
+ * provider owns failure assist: its registered `offerFailureAssist` hook
+ * runs first, and Claude is only a fallback — a guarded one, offered when
+ * already installed and signed in, never installed or signed in on the spot.
  *
- * On a claude install (no pick), behavior is unchanged: checks
- * NANOCLAW_SETUP_ASSIST_MODE and delegates to either the interactive
- * failure handoff (default) or the non-interactive assist.
+ * Before anything has been chosen (a fresh run that fails ahead of the
+ * picker — environment, container, gateway), the same guard applies: there
+ * is no provider hook to run, and Claude is offered only when already
+ * usable. Nothing is installed for a runtime the operator has not picked.
+ *
+ * On a claude install (picked this run, preset, or stamped), behavior is
+ * unchanged: checks NANOCLAW_SETUP_ASSIST_MODE and delegates to either the
+ * interactive failure handoff (default) or the non-interactive assist.
+ *
+ * This is the only place that looks at the runtime: `ensureClaudeReady`,
+ * reached through both delegates, installs and signs in Claude on the spot
+ * whenever it is called, so it must not be called from anywhere else.
  *
  * Drop-in replacement for `offerClaudeAssist` at failure call sites.
  */
 export async function offerClaudeOnFailure(ctx: AssistContext, projectRoot: string = process.cwd()): Promise<boolean> {
   if (process.env.NANOCLAW_SKIP_CLAUDE_ASSIST === '1') return false;
 
-  const provider = getPickedProvider();
-  if (provider) {
-    const assist = getSetupProvider(provider)?.offerFailureAssist;
+  const provider = resolveSelectedProvider(projectRoot);
+  if (provider !== 'claude') {
+    const assist = provider ? getSetupProvider(provider)?.offerFailureAssist : undefined;
     if (assist) {
       const outcome = await assist(ctx, projectRoot);
       if (outcome === 'launched') return true;
@@ -252,11 +261,7 @@ export async function offerClaudeOnFailure(ctx: AssistContext, projectRoot: stri
       // through to the guarded Claude offer.
     }
     if (!isClaudeReady()) {
-      p.log.warn(
-        brandBody(
-          `Skipping the Claude debug offer — this install uses ${provider} and Claude isn't set up here. The failure details are in logs/setup.log.`,
-        ),
-      );
+      p.log.warn(brandBody(claudeOfferSkippedMessage(provider)));
       return false;
     }
   }
@@ -265,6 +270,16 @@ export async function offerClaudeOnFailure(ctx: AssistContext, projectRoot: stri
     return offerClaudeAssist(ctx, projectRoot);
   }
   return offerFailureHandoff(ctx, projectRoot);
+}
+
+/**
+ * The one line a failure gets instead of a Claude offer: `provider` is the
+ * runtime this run serves, or undefined when nothing has been chosen yet (a
+ * fresh run that failed before the picker).
+ */
+function claudeOfferSkippedMessage(provider: string | undefined): string {
+  const why = provider ? `this install uses ${provider}` : 'no agent runtime has been chosen yet';
+  return `Skipping the Claude debug offer — ${why} and Claude isn't set up here. The failure details are in logs/setup.log.`;
 }
 
 /**

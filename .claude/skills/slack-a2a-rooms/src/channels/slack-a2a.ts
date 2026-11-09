@@ -1,6 +1,6 @@
 /**
  * Slack agent-to-agent (A2A) rooms — the admission policy for bot-authored
- * inbound: room allowlist + consecutive-hop limit + `slack:bot:<bot_id>`
+ * inbound: room allowlist + consecutive-hop limit + `slack:bot:<botId>`
  * re-attribution.
  *
  * The Slack channel layer's bot-inbound guard (src/channels/slack-a2a-guard.ts,
@@ -12,7 +12,7 @@
  *
  *   - Rooms allowlisted in `SLACK_A2A_ROOMS` (comma-separated Slack channel
  *     ids, e.g. the MPIM ids printed by scripts/open-a2a-room.ts): bot-authored
- *     inbound is admitted, re-attributed with sender id `slack:bot:<bot_id>`,
+ *     inbound is admitted, re-attributed with sender id `slack:bot:<botId>`,
  *     under a consecutive-hop limit (`SLACK_A2A_MAX_HOPS`, default 6) that any
  *     human message in the room resets.
  *   - Every other room: bot-authored inbound stays dropped (the guard logs the
@@ -114,7 +114,7 @@ export function createA2aRoomPolicy(getConfig: () => A2aConfig = readA2aConfig):
         action: 'admit',
         // The permissions module uses a senderId that already contains a ':'
         // verbatim (see extractAndUpsertUser), so the users row becomes
-        // `slack:bot:<bot_id>` — distinguishable from human `slack:U…` ids.
+        // `slack:bot:<botId>` — distinguishable from human `slack:U…` ids.
         senderId: `slack:bot:${ctx.botId}`,
         // The guard fires this only after downstream accepted the message —
         // a throw in the host's onInbound must not consume budget for a

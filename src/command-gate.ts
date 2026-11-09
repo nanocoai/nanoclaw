@@ -4,15 +4,24 @@
  *
  * - Filtered commands: dropped silently (never reach the container)
  * - Admin commands: checked against user_roles; denied senders get a
- *   "Permission denied" response written directly to messages_out
+ *   "Permission denied" reply sent straight to the chat by the router
  * - Normal messages: pass through unchanged
  */
 import { hasAdminPrivilege } from './modules/permissions/db/user-roles.js';
+import './provider-contracts/index.js';
+import { listProviderHostContracts } from './provider-contracts/registry.js';
+import { commandText, slashCommandName } from './slash-command.js';
 
 export type GateResult = { action: 'pass' } | { action: 'filter' } | { action: 'deny'; command: string };
 
-const FILTERED_COMMANDS = new Set(['/start', '/help', '/login', '/logout', '/doctor', '/config', '/remote-control']);
-const ADMIN_COMMANDS = new Set(['/clear', '/compact', '/context', '/cost', '/files', '/upload-trace']);
+const FILTERED_COMMANDS = new Set(
+  listProviderHostContracts().flatMap((contract) => contract.commands?.nativeFiltered ?? []),
+);
+const ADMIN_COMMANDS = new Set([
+  '/clear',
+  '/upload-trace',
+  ...listProviderHostContracts().flatMap((contract) => contract.commands?.nativeAdmin ?? []),
+]);
 
 /**
  * Classify a message and decide whether it should reach the container.
@@ -21,17 +30,10 @@ const ADMIN_COMMANDS = new Set(['/clear', '/compact', '/context', '/cost', '/fil
  * admin commands.
  */
 export async function gateCommand(content: string, userId: string | null, agentGroupId: string): Promise<GateResult> {
-  let text: string;
-  try {
-    const parsed = JSON.parse(content);
-    text = (parsed.text || '').trim();
-  } catch {
-    text = content.trim();
-  }
-
-  if (!text.startsWith('/')) return { action: 'pass' };
-
-  const command = text.split(/\s/)[0].toLowerCase();
+  // The runner names commands with the same parse, so what is gated here is
+  // exactly what it executes.
+  const command = slashCommandName(commandText(content));
+  if (command === null) return { action: 'pass' };
 
   if (FILTERED_COMMANDS.has(command)) return { action: 'filter' };
 

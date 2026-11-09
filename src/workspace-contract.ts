@@ -2,7 +2,7 @@
  * Workspace composition contract.
  *
  * Today the host composes a group's workspace at spawn time by writing files
- * (CLAUDE.md via claude-md-compose.ts, scaffold + skill links via
+ * (CLAUDE.md via project-doc-compose.ts, scaffold + skill links via
  * group-init.ts, container.json materialized from the `container_configs`
  * row). This type freezes what a composer implementation may need: data
  * reachable through the central DB alone. Nothing here may ever require

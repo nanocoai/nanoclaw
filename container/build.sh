@@ -146,6 +146,41 @@ if [ -n "$LOCK_SHA" ]; then
     BUILD_ARGS+=(--build-arg "AGENT_RUNNER_LOCK_SHA256=$LOCK_SHA")
 fi
 
+# Docker Hub returns the occasional 5xx on a manifest request (two registry-
+# skills legs went red on one on 2026-09-07 with the code untouched) and BuildKit
+# gives up on the first. Three attempts, ten seconds apart, and only when the
+# failure reads as a registry status error: a 429 or a 5xx after "unexpected
+# status". Anything else is a real build failure and fails once, on the first
+# attempt, with the same exit code docker gave. Output streams through tee onto
+# stderr, where BuildKit already writes it, so a watcher still sees progress and
+# no caller sees a stream it did not see before.
+BUILD_ATTEMPTS=3
+BUILD_RETRY_WAIT=10
+build_image() {
+    local attempt=1 status log
+    log="$(mktemp)"
+    while :; do
+        # No pipefail in this script, so the pipeline's status is tee's and
+        # `set -e` stays quiet; docker's own status is read from PIPESTATUS.
+        "${CONTAINER_RUNTIME}" build "$@" 2>&1 | tee "$log" >&2
+        status=${PIPESTATUS[0]}
+        if [ "$status" -eq 0 ]; then
+            rm -f "$log"
+            return 0
+        fi
+        if [ "$attempt" -ge "$BUILD_ATTEMPTS" ] \
+            || ! grep -qE 'unexpected status.*: (429|5[0-9][0-9])( |$)' "$log"; then
+            rm -f "$log"
+            return "$status"
+        fi
+        echo "" >&2
+        echo "The registry answered with a transient error (attempt ${attempt}/${BUILD_ATTEMPTS})." >&2
+        echo "Retrying in ${BUILD_RETRY_WAIT}s..." >&2
+        sleep "$BUILD_RETRY_WAIT"
+        attempt=$((attempt + 1))
+    done
+}
+
 if [ "$PULL" = "true" ]; then
     echo "Pulling NanoClaw agent container image..."
     # Not exec'd: pull.sh runs as a child so `set -e` still carries its exit
@@ -176,12 +211,12 @@ elif [ "$OVERLAY" = "true" ]; then
         echo "LABEL dev.nanoclaw.unhardened-additions=\"cli-tools.json\""
     } > "$OVERLAY_DOCKERFILE"
 
-    ${CONTAINER_RUNTIME} build -f "$OVERLAY_DOCKERFILE" -t "${IMAGE_NAME}:${TAG}" .
+    build_image -f "$OVERLAY_DOCKERFILE" -t "${IMAGE_NAME}:${TAG}" .
 else
     echo "Building NanoClaw agent container image..."
     echo "Image: ${IMAGE_NAME}:${TAG}"
 
-    ${CONTAINER_RUNTIME} build "${BUILD_ARGS[@]}" -t "${IMAGE_NAME}:${TAG}" .
+    build_image "${BUILD_ARGS[@]}" -t "${IMAGE_NAME}:${TAG}" .
 fi
 
 echo ""

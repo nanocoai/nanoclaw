@@ -16,7 +16,7 @@ import { getContainerConfig } from './db/container-configs.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { isValidTimezone } from './timezone.js';
 import { log } from './log.js';
-import type { AgentGroup, ContainerConfigRow } from './types.js';
+import type { AgentGroup, ContainerConfigRow, ContainerSpeed } from './types.js';
 
 /**
  * Container-side path where a group's stamped plugins are mounted read-only.
@@ -77,7 +77,7 @@ export type McpServerConfig = McpStdioServerConfig | McpHttpServerConfig;
  * matched as whole words between [_.-] separators: `author` never matches
  * `auth`, but `authToken`, `clientSecret`, and `x-auth` all do. A match
  * hard-blocks registration — the URL persists to the container config and
- * renders on the approval card, so secrets must ride via OneCLI. Non-secret
+ * renders on the approval card, so secrets must ride via the selected gateway. Non-secret
  * query params are legitimate endpoint config (e.g. Datadog's `?toolsets=apm`).
  */
 const SECRET_QUERY_KEY_RE =
@@ -159,11 +159,11 @@ export function parseMcpServerConfig(input: Record<string, unknown>): McpServerC
       throw new Error('url must use HTTPS (plain HTTP is allowed only for localhost and host.docker.internal)');
     }
     if (parsed.username || parsed.password || parsed.hash) {
-      throw new Error('url must not contain credentials or fragments; use OneCLI for authentication');
+      throw new Error('url must not contain credentials or fragments; use the credential gateway');
     }
     for (const key of parsed.searchParams.keys()) {
       if (SECRET_QUERY_KEY_RE.test(key.replace(CAMEL_SPLIT_RE, '$1_$2'))) {
-        throw new Error(`url query parameter "${key}" looks like a credential; use OneCLI for authentication`);
+        throw new Error(`url query parameter "${key}" looks like a credential; use the credential gateway`);
       }
     }
     const headers = parseStringRecord(input.headers, 'headers');
@@ -249,8 +249,13 @@ export interface ContainerConfig {
   maxMessagesPerPrompt?: number;
   model?: string;
   effort?: string;
-  /** API fast serving tier for this container; absent = the provider default. */
-  fastMode?: boolean;
+  /**
+   * Legacy mirror of `speed: 'fast'`, written exactly as the host did before
+   * `speed` existed so an agent image built then keeps fast mode working.
+   */
+  fastMode?: true;
+  /** Provider-declared speed tier (`standard` or `fast` for Claude); the group value overrides the install default. */
+  speed?: ContainerSpeed;
   timezone?: string;
   /** Session isolation tier for the group's containers; absent = the composer's default ('container'). */
   runtimeTier?: 'container' | 'vm';
@@ -374,10 +379,26 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
     // that have none. Both absent leaves the field out and the SDK decides.
     model: row.model ?? (DEFAULT_MODEL || undefined),
     effort: row.effort ?? undefined,
-    fastMode: FAST_MODE || undefined,
+    // A cleared group value falls back to the install-wide default.
+    ...speedFields(parseContainerSpeed(row.speed) ?? (FAST_MODE ? 'fast' : undefined)),
     timezone: row.timezone && isValidTimezone(row.timezone) ? row.timezone : undefined,
     runtimeTier: parseRuntimeTier(row.runtime_tier, group.name),
   };
+}
+
+/** The stored tier was validated against the provider's declaration when written; empty means unset. */
+function parseContainerSpeed(value: string | null): ContainerSpeed | undefined {
+  return value ? value : undefined;
+}
+
+/**
+ * Unset writes neither key, so an install that sets nothing produces the same
+ * file it always did. `fast` also writes the legacy `fastMode: true`, in the
+ * position it always had, for agent images that still read only that key.
+ */
+function speedFields(speed: ContainerSpeed | undefined): Pick<ContainerConfig, 'fastMode' | 'speed'> {
+  if (speed === undefined) return {};
+  return speed === 'fast' ? { fastMode: true, speed } : { speed };
 }
 
 /**

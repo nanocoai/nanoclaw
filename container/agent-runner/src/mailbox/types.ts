@@ -1,4 +1,5 @@
 import type {
+  DeliveryRecord,
   DestinationRecord,
   InboundRecord,
   OutboundRecord,
@@ -54,6 +55,11 @@ export interface MailboxOperations {
   getRoutingBySeq(sequence: number): SessionRouting | null;
   getLatestInboundRoute(channelType: string, platformId: string): { threadId: string | null; inReplyTo: string } | null;
   getUndeliveredMessages(): OutboundMessage[];
+  /**
+   * The host's delivery outcome for an outbound message, null until it has one.
+   * Optional: without it, a question whose card fails to post waits out its timeout.
+   */
+  getDeliveryStatus?(messageOutId: string): DeliveryRecord['status'] | null;
   getState(key: string): StateValue | undefined;
   setState(key: string, value: string): void;
   deleteState(key: string): void;

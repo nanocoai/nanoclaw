@@ -64,7 +64,7 @@ async function run(
     inputs,
     exec: (cmd) => {
       execs.push(cmd);
-      if (/^(git|pnpm|bash)\b/.test(cmd)) return '';
+      if (/^(git|pnpm|bash)\b/.test(cmd) || cmd.includes('git show ')) return '';
       if (cmd.startsWith('curl')) return getMe(cmd);
       return execFileSync('bash', ['-c', cmd], { cwd: root, encoding: 'utf-8' });
     },

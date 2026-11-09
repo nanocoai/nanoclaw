@@ -76,7 +76,7 @@ function parseArgs(argv: string[]): Args {
 
 /** Run one ncl command against the running host and return its parsed data. */
 function ncl(...cliArgs: string[]): unknown {
-  const res = spawnSync('pnpm', ['exec', 'tsx', 'src/cli/client.ts', ...cliArgs, '--json'], {
+  const res = spawnSync('pnpm', ['--silent', 'exec', 'tsx', 'src/cli/client.ts', ...cliArgs, '--json'], {
     cwd: PROJECT_ROOT,
     encoding: 'utf-8',
   });

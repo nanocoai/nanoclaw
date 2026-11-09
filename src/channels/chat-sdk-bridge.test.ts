@@ -1,8 +1,33 @@
+import http from 'http';
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { Adapter, AdapterPostableMessage, RawMessage } from 'chat';
+import {
+  Actions,
+  Card,
+  CardText,
+  Chart,
+  Divider,
+  Field,
+  Fields,
+  LinkButton,
+  Table,
+  type Adapter,
+  type AdapterPostableMessage,
+  type RawMessage,
+} from 'chat';
 
-import { createChatSdkBridge, splitForLimit } from './chat-sdk-bridge.js';
+import { fenceForCard } from '../card-text.js';
+import { gatewayApprovalPresentation } from '../gateway-approval-presentation.js';
+import type { GatewayApprovalRequest } from '../gateway-providers/gateway-provider-registry.js';
+import { CardTooLongError } from './ask-question.js';
+import {
+  attachmentBytesToBase64,
+  CARD_TEXT_BLOCK_LENGTH,
+  createChatSdkBridge,
+  splitCardText,
+  splitForLimit,
+} from './chat-sdk-bridge.js';
 
 vi.mock('../webhook-server.js', () => ({
   registerWebhookAdapter: vi.fn(),
@@ -54,6 +79,27 @@ describe('splitForLimit', () => {
   });
 });
 
+describe('attachmentBytesToBase64', () => {
+  const bytes = Buffer.from('telegram attachment');
+  const expected = bytes.toString('base64');
+
+  it('encodes a Buffer', () => {
+    expect(attachmentBytesToBase64(Buffer.from(bytes))).toBe(expected);
+  });
+
+  it('encodes an ArrayBuffer (Telegram fetchData since 4.39)', () => {
+    const ab = new ArrayBuffer(bytes.length);
+    new Uint8Array(ab).set(bytes);
+    expect(attachmentBytesToBase64(ab)).toBe(expected);
+  });
+
+  it('encodes only the viewed range of a Uint8Array', () => {
+    const backing = new Uint8Array(bytes.length + 4);
+    backing.set(bytes, 2);
+    expect(attachmentBytesToBase64(backing.subarray(2, 2 + bytes.length))).toBe(expected);
+  });
+});
+
 describe('createChatSdkBridge', () => {
   // The bridge is now transport-only: forward inbound events, relay outbound
   // ops. All per-wiring engage / accumulate / drop / subscribe decisions live
@@ -94,6 +140,22 @@ describe('createChatSdkBridge', () => {
       supportsThreads: true,
     });
     expect(typeof bridge.subscribe).toBe('function');
+  });
+
+  it('reports an adapter transport probe when one is available', () => {
+    let connected = false;
+    const adapter = stubAdapter({}) as Adapter & { isConnected(): boolean };
+    adapter.isConnected = () => connected;
+    const bridge = createChatSdkBridge({ adapter, supportsThreads: true });
+
+    expect(bridge.isConnected()).toBe(false);
+    connected = true;
+    expect(bridge.isConnected()).toBe(true);
+  });
+
+  it('keeps adapters without a transport probe available after setup', () => {
+    const bridge = createChatSdkBridge({ adapter: stubAdapter({}), supportsThreads: true });
+    expect(bridge.isConnected()).toBe(true);
   });
 });
 
@@ -374,6 +436,290 @@ describe('createChatSdkBridge.deliver — ask_question cards (button styles)', (
     ]);
     expect(edited.card.children.some((child) => child.type === 'actions')).toBe(false);
   });
+
+  it('splits a long fenced host card into blocks that each keep their own fences', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+      escapeCardText: (t) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'),
+    });
+    const body = Array.from({ length: 150 }, (_, i) => `line ${i}: \`code\` <x|y> & more`).join('\n');
+
+    await bridge.deliver('slack:D1', null, {
+      kind: 'chat-sdk',
+      content: {
+        type: 'ask_question',
+        questionId: 'q-long',
+        title: 'Message approval',
+        question: `Agent "A" wants to send a message to "B":\n\n${fenceForCard(body)}\n\nApprove?`,
+        options: ['Approve'],
+      },
+    });
+    const card = (calls[0].message as { card: { children: Array<{ type: string; content?: string }> } }).card;
+    const blocks = card.children.filter((c) => c.type === 'text').map((c) => c.content!);
+    expect(blocks.length).toBeGreaterThan(1);
+    for (const block of blocks) {
+      expect(block.length).toBeLessThanOrEqual(CARD_TEXT_BLOCK_LENGTH);
+      expect((block.match(/^ {0,3}```/gm) ?? []).length % 2).toBe(0);
+      expect(block).not.toMatch(/[<>]/);
+    }
+  });
+
+  it('leaves a question the agent asked itself (fromAgent) unescaped', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+      escapeCardText: (t) => `[${t}]`,
+    });
+
+    await bridge.deliver('slack:C1', null, {
+      kind: 'chat-sdk',
+      content: {
+        type: 'ask_question',
+        questionId: 'q-4',
+        title: 'Pick one',
+        question: 'See <https://example.com|docs>?',
+        options: ['Yes'],
+        fromAgent: true,
+      },
+    });
+    const posted = calls[0].message as {
+      card: { children: Array<{ type: string; content?: string }> };
+      fallbackText: string;
+    };
+    expect(posted.card.children[0]).toEqual({ type: 'text', content: 'See <https://example.com|docs>?' });
+    expect(posted.fallbackText).toBe('Pick one\n\nSee <https://example.com|docs>?\nOptions: Yes');
+  });
+
+  it('runs open and resolved card text through escapeCardText, leaving the title alone', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const edits: PostCall[] = [];
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({
+        postMessage,
+        editMessage: async (threadId, _messageId, message) => {
+          edits.push({ threadId, message });
+          return { id: 'msg-1', threadId, raw: {} };
+        },
+      }),
+      supportsThreads: false,
+      escapeCardText: (t) => `[${t}]`,
+    });
+
+    await bridge.deliver('slack:D1', null, {
+      kind: 'chat-sdk',
+      content: {
+        type: 'ask_question',
+        questionId: 'q-3',
+        title: 'Approval needed',
+        question: 'Allow?',
+        options: ['Approve'],
+      },
+    });
+    const posted = calls[0].message as {
+      card: { title: string; children: Array<{ type: string; content?: string }> };
+      fallbackText: string;
+    };
+    expect(posted.card.title).toBe('Approval needed');
+    expect(posted.card.children[0]).toEqual({ type: 'text', content: '[Allow?]' });
+    expect(posted.fallbackText).toBe('Approval needed\n\n[Allow?]\nOptions: Approve');
+
+    await bridge.deliver('slack:D1', null, {
+      kind: 'chat-sdk',
+      content: {
+        operation: 'edit',
+        messageId: 'msg-1',
+        terminalCard: { title: 'Approval needed', question: 'Allow?', resolution: 'Approve by Ann' },
+      },
+    });
+    const edited = edits[0].message as {
+      card: { title: string; children: Array<{ type: string; content?: string; style?: string }> };
+    };
+    expect(edited.card.title).toBe('Approval needed');
+    expect(edited.card.children).toEqual([
+      { type: 'text', content: '[Allow?]' },
+      { type: 'text', content: '[Approve by Ann]', style: 'muted' },
+    ]);
+  });
+
+  const CARD_TITLE = 'Approval needed';
+  function questionCard(question: string, title = CARD_TITLE) {
+    return {
+      kind: 'chat-sdk',
+      content: { type: 'ask_question', questionId: 'q-len', title, question, options: ['Approve'] },
+    };
+  }
+
+  function postedBlocks(calls: PostCall[]): { text: string[]; hasButtons: boolean } {
+    const posted = calls[0].message as { card: { children: Array<{ type: string; content?: string }> } };
+    return {
+      text: posted.card.children.filter((child) => child.type === 'text').map((child) => child.content ?? ''),
+      hasButtons: posted.card.children.some((child) => child.type === 'actions'),
+    };
+  }
+
+  it('posts a full-size gateway summary card whole, in text blocks under the block cap', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({ adapter: stubAdapter({ postMessage }), supportsThreads: false });
+    const { title, question } = gatewayApprovalPresentation({
+      title: 'Legacy',
+      question: 'Legacy question',
+      summary: {
+        agent: 'Nano',
+        action: 'Read external data',
+        resource: 'GET api.example.test/repos',
+        reason: 'Policy requires approval',
+        details: Array.from({ length: 6 }, (_, i) => ({ label: `Detail ${i}`, value: `${i}`.repeat(600) })),
+      },
+    } as GatewayApprovalRequest);
+    expect(question.length).toBeGreaterThan(CARD_TEXT_BLOCK_LENGTH);
+
+    await bridge.deliver('slack:D1', null, questionCard(question, title));
+    const { text, hasButtons } = postedBlocks(calls);
+    expect(text.length).toBeGreaterThan(1);
+    for (const block of text) expect(block.length).toBeLessThanOrEqual(CARD_TEXT_BLOCK_LENGTH);
+    expect(text.join('')).toBe(question);
+    expect(hasButtons).toBe(true);
+  });
+
+  it("refuses a card over the channel's declared limit, counting the title, posting nothing", async () => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+      maxCardTextLength: 100,
+    });
+
+    const fits = 'x'.repeat(100 - CARD_TITLE.length);
+    await expect(bridge.deliver('slack:D1', null, questionCard(`${fits}x`))).rejects.toThrow(CardTooLongError);
+    expect(calls).toHaveLength(0);
+    await bridge.deliver('slack:D1', null, questionCard(fits));
+    expect(calls).toHaveLength(1);
+  });
+
+  it('counts the fences a split adds toward the declared limit', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+      escapeCardText: (t) => t.replace(/&/g, '&amp;'),
+      maxCardTextLength: 3000,
+    });
+
+    // Title + escaped text is exactly 3,000; the split's extra fences push it over.
+    const question = '```\n' + '&'.repeat(598) + '\n```';
+    await expect(bridge.deliver('slack:D1', null, questionCard(question, 'OK'))).rejects.toThrow(CardTooLongError);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('splits the resolved card the same way as the open one', async () => {
+    const edits: PostCall[] = [];
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({
+        editMessage: async (threadId, _messageId, message) => {
+          edits.push({ threadId, message });
+          return { id: 'msg-1', threadId, raw: {} };
+        },
+      }),
+      supportsThreads: false,
+      escapeCardText: (t) => t.replace(/&/g, '&amp;'),
+    });
+
+    const question = '&'.repeat(1000);
+    await bridge.deliver('slack:D1', null, {
+      kind: 'chat-sdk',
+      content: {
+        operation: 'edit',
+        messageId: 'msg-1',
+        terminalCard: { title: 'Approval needed', question, resolution: 'Approved' },
+      },
+    });
+    const edited = edits[0].message as { card: { children: Array<{ content?: string; style?: string }> } };
+    const blocks = edited.card.children.filter((child) => !child.style).map((child) => child.content ?? '');
+    expect(blocks.length).toBeGreaterThan(1);
+    for (const block of blocks) expect(block.length).toBeLessThanOrEqual(CARD_TEXT_BLOCK_LENGTH);
+    expect(blocks.join('')).toBe('&amp;'.repeat(1000));
+    expect(edited.card.children.at(-1)).toEqual({ type: 'text', content: 'Approved', style: 'muted' });
+  });
+
+  it('measures the declared limit after escaping', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+      escapeCardText: (t) => t.replace(/&/g, '&amp;'),
+      maxCardTextLength: 100,
+    });
+
+    await expect(bridge.deliver('slack:D1', null, questionCard('&'.repeat(20)))).rejects.toThrow(/limit 100/);
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe('splitCardText', () => {
+  const ampEscape = (t: string) => t.replace(/&/g, '&amp;');
+
+  it('keeps text that fits as one block', () => {
+    expect(splitCardText('Allow?', (t) => t, 100)).toEqual(['Allow?']);
+  });
+
+  it('measures each block after escaping and never cuts an escape in half', () => {
+    const blocks = splitCardText('&'.repeat(100), ampEscape, 42);
+    for (const block of blocks) {
+      expect(block.length).toBeLessThanOrEqual(42);
+      expect(block).toMatch(/^(&amp;)+$/);
+    }
+    expect(blocks.join('')).toBe(ampEscape('&'.repeat(100)));
+  });
+
+  it('splits at a line break when one is near the limit', () => {
+    expect(splitCardText(`${'a'.repeat(30)}\n${'b'.repeat(30)}`, (t) => t, 40)).toEqual([
+      `${'a'.repeat(30)}\n`,
+      'b'.repeat(30),
+    ]);
+  });
+
+  it('closes a code fence at the end of a block and reopens it in the next', () => {
+    const text = 'Run:\n```\n' + 'y'.repeat(100) + '\n```';
+    const blocks = splitCardText(text, (t) => t, 50);
+    expect(blocks.length).toBeGreaterThan(1);
+    for (const block of blocks) {
+      expect(block.length).toBeLessThanOrEqual(50);
+      expect((block.match(/```/g) ?? []).length % 2).toBe(0);
+    }
+    // Each split inside the fence adds a closing and a reopening fence.
+    expect(blocks.join('').split('\n``````\n').join('')).toBe(text);
+  });
+
+  it('never cuts a fence marker in half', () => {
+    expect(splitCardText('x'.repeat(48) + '```\ncode\n```', (t) => t, 50)).toEqual(['x'.repeat(48), '```\ncode\n```']);
+  });
+
+  it('treats backticks inside a code line as text, not a fence', () => {
+    const blocks = splitCardText(
+      '```\nprintf "```"\n' + 'x'.repeat(1980) + '\n**delete everything**\n```',
+      (t) => t,
+      2000,
+    );
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0].endsWith('\n```')).toBe(true);
+    expect(blocks[1].startsWith('```\n')).toBe(true);
+  });
+
+  it('rechecks the length after backing off a long fence marker', () => {
+    const blocks = splitCardText('```\n' + 'x'.repeat(1992) + '\n````\n' + 'y'.repeat(10), (t) => t, 2000);
+    for (const block of blocks) expect(block.length).toBeLessThanOrEqual(2000);
+  });
+
+  it('never splits a surrogate pair', () => {
+    const blocks = splitCardText('😀'.repeat(50), (t) => t, 31);
+    for (const block of blocks) {
+      expect(block).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
+    }
+    expect(blocks.join('')).toBe('😀'.repeat(50));
+  });
 });
 
 describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
@@ -459,6 +805,60 @@ describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
     expect(buttons[0].url).toBe('https://example.com');
   });
 
+  it('survives a null action instead of throwing on a property read', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+    });
+    await bridge.deliver('discord:guild:chan', null, {
+      kind: 'chat-sdk',
+      content: {
+        type: 'card',
+        card: {
+          title: 'Docs',
+          actions: [null, { label: 'Open', url: 'https://example.com' }],
+        },
+      },
+    });
+    const msg = calls[0].message as {
+      card?: { children?: Array<{ type?: string; children?: Array<{ type?: string; url?: string }> }> };
+    };
+    const buttons = msg.card?.children?.find((c) => c.type === 'actions')?.children ?? [];
+    expect(buttons).toHaveLength(1);
+    expect(buttons[0].url).toBe('https://example.com');
+  });
+
+  it('renders an unknown style as the default button style rather than dropping the action', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+    });
+    await bridge.deliver('discord:guild:chan', null, {
+      kind: 'chat-sdk',
+      content: {
+        type: 'card',
+        card: {
+          title: 'Docs',
+          actions: [
+            { label: 'Open', url: 'https://example.com', style: 'chartreuse' },
+            { label: 'Also', url: 'https://example.org', style: null },
+          ],
+        },
+      },
+    });
+    const msg = calls[0].message as {
+      card?: {
+        children?: Array<{ type?: string; children?: Array<{ type?: string; url?: string; style?: string }> }>;
+      };
+    };
+    const buttons = msg.card?.children?.find((c) => c.type === 'actions')?.children ?? [];
+    expect(buttons).toHaveLength(2);
+    expect(buttons[0].style).toBeUndefined();
+    expect(buttons[1].style).toBeUndefined();
+  });
+
   it('skips delivery when the card has neither title nor body content', async () => {
     const { calls, postMessage } = makePostCapture();
     const bridge = createChatSdkBridge({
@@ -486,5 +886,596 @@ describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
     expect(calls).toHaveLength(1);
     const msg = calls[0].message as { markdown?: string };
     expect(msg.markdown).toBe('plain hello');
+  });
+});
+
+describe('createChatSdkBridge.deliver — send_card card parts', () => {
+  const postedCard = (call: PostCall) => (call.message as { card: { children: unknown[] } }).card;
+  const deliverCard = async (card: Record<string, unknown>) => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({ adapter: stubAdapter({ postMessage }), supportsThreads: false });
+    const delivery = bridge.deliver('slack:C1', null, { kind: 'chat-sdk', content: { type: 'card', card } });
+    return { calls, delivery };
+  };
+  const table = { type: 'Table', props: { headers: ['Scale', 'Before'], rows: [['1x', 40]] } };
+  const bar = {
+    type: 'Chart',
+    props: { title: 'Latency', chart: { type: 'bar', categories: ['1x'], series: [{ name: 'Before', values: [40] }] } },
+  };
+
+  // The card Slack and Teams received in the live run: a change to how parts are built must keep it.
+  it('posts exactly the card the Chat SDK builders make for the parts', async () => {
+    const { calls, delivery } = await deliverCard({
+      title: 'Perf review',
+      children: [
+        'Before/after the cache change.',
+        {
+          type: 'Fields',
+          children: [
+            { type: 'Field', props: { label: 'p95', value: '118 ms' } },
+            { type: 'Field', props: { label: 'Errors', value: 0.2 } },
+          ],
+        },
+        {
+          type: 'Table',
+          props: {
+            headers: ['Load', 'Before (ms)'],
+            rows: [
+              ['1x', 40],
+              ['20x', 990],
+            ],
+            align: ['left', 'right'],
+            caption: 'Latency before vs after',
+          },
+        },
+        {
+          type: 'Chart',
+          props: {
+            title: 'Latency (ms)',
+            chart: {
+              type: 'bar',
+              categories: ['1x', '20x'],
+              series: [{ name: 'Before', values: [40, 990] }],
+              xLabel: 'Load',
+              yLabel: 'ms',
+            },
+          },
+        },
+        {
+          type: 'Chart',
+          props: { title: 'Where time goes', chart: { type: 'pie', segments: [{ label: 'Render', value: 55 }] } },
+        },
+        { type: 'Divider' },
+        { type: 'Text', props: { content: 'Measured on staging.', style: 'muted' } },
+      ],
+      actions: [{ label: 'Open report', url: 'https://example.com/report' }],
+    });
+    await delivery;
+
+    expect(JSON.parse(JSON.stringify(postedCard(calls[0])))).toEqual(
+      JSON.parse(
+        JSON.stringify(
+          Card({
+            title: 'Perf review',
+            children: [
+              CardText('Before/after the cache change.'),
+              Fields([Field({ label: 'p95', value: '118 ms' }), Field({ label: 'Errors', value: '0.2' })]),
+              Table({
+                headers: ['Load', 'Before (ms)'],
+                rows: [
+                  ['1x', '40'],
+                  ['20x', '990'],
+                ],
+                align: ['left', 'right'],
+                caption: 'Latency before vs after',
+              }),
+              Chart({
+                title: 'Latency (ms)',
+                chart: {
+                  type: 'bar',
+                  categories: ['1x', '20x'],
+                  xLabel: 'Load',
+                  yLabel: 'ms',
+                  series: [
+                    {
+                      name: 'Before',
+                      data: [
+                        { label: '1x', value: 40 },
+                        { label: '20x', value: 990 },
+                      ],
+                    },
+                  ],
+                },
+              }),
+              Chart({ title: 'Where time goes', chart: { type: 'pie', segments: [{ label: 'Render', value: 55 }] } }),
+              Divider(),
+              CardText('Measured on staging.', { style: 'muted' }),
+              Actions([LinkButton({ label: 'Open report', url: 'https://example.com/report' })]),
+            ],
+          }),
+        ),
+      ),
+    );
+  });
+
+  it('builds each part as its Chat SDK element, in place among the text children', async () => {
+    const { calls, delivery } = await deliverCard({
+      title: 'Perf',
+      children: [
+        'intro',
+        { type: 'Fields', children: [{ type: 'Field', props: { label: 'p50', value: 42 } }] },
+        table,
+        bar,
+        { type: 'Divider' },
+        { type: 'Text', props: { content: 'footnote', style: 'muted' } },
+        'outro',
+      ],
+    });
+    await delivery;
+
+    const children = postedCard(calls[0]).children as Array<Record<string, unknown>>;
+    expect(children.map((c) => c.type)).toEqual(['text', 'fields', 'table', 'chart', 'divider', 'text', 'text']);
+    expect(children[1]).toEqual({ type: 'fields', children: [{ type: 'field', label: 'p50', value: '42' }] });
+    expect(children[2]).toMatchObject({ headers: ['Scale', 'Before'], rows: [['1x', '40']] });
+    expect(children[3]).toMatchObject({
+      title: 'Latency',
+      chart: { type: 'bar', categories: ['1x'], series: [{ name: 'Before', data: [{ label: '1x', value: 40 }] }] },
+    });
+    expect(children[6]).toEqual({ type: 'text', content: 'outro', style: undefined });
+  });
+
+  it.each([
+    ['a callback button', { type: 'Button', props: { id: 'ncq:q-1:0', label: 'Approve' } }],
+    ['an actions row', { type: 'Actions', children: [{ type: 'Button', props: { id: 'ncq:q-1:0', label: 'x' } }] }],
+    ['an image', { type: 'Image', props: { url: 'https://example.com/a.png', alt: 'x' } }],
+    ['a nested card', { type: 'Card', props: { title: 'Approve?' } }],
+    [
+      'a button inside Fields',
+      { type: 'Fields', children: [{ type: 'Button', props: { id: 'ncq:q-1:0', label: 'x' } }] },
+    ],
+    ['a malformed table', { type: 'Table', props: { headers: ['a', 'b'], rows: [['1']] } }],
+    ['a field named after an object method', { type: 'Fields', children: [{ type: 'constructor' }] }],
+    ['a table too long for Slack to draw', { type: 'Table', props: { headers: ['a'], rows: [['x'.repeat(10_000)]] } }],
+    [
+      'a too-long table given as object rows',
+      { type: 'Table', props: { headers: ['a'], rows: [{ a: 'x'.repeat(10_000) }] } },
+    ],
+    [
+      'a too-long table given as template cells',
+      { type: 'Table', props: { headers: ['a'], rows: [[{ $template: 'x'.repeat(10_000) }]] } },
+    ],
+  ])('refuses a card with %s instead of posting it', async (_, part) => {
+    const { calls, delivery } = await deliverCard({ title: 'Perf', children: ['intro', part] });
+
+    await expect(delivery).rejects.toThrow(/send_card card refused: children\[1\]/);
+    expect(calls).toHaveLength(0);
+  });
+
+  const field = (label: string) => ({ type: 'Field', props: { label, value: '1' } });
+  const lineChart = (chart: Record<string, unknown>, title = 'Latency') => ({
+    type: 'Chart',
+    props: { title, chart: { type: 'line', ...chart } },
+  });
+  it.each([
+    ['11 parts', Array.from({ length: 11 }, () => ({ type: 'Divider' })), /at most 10 parts per card/],
+    [
+      '11 fields across two Fields parts',
+      [
+        { type: 'Fields', children: Array.from({ length: 6 }, (_, i) => field(`f${i}`)) },
+        { type: 'Fields', children: Array.from({ length: 5 }, (_, i) => field(`g${i}`)) },
+      ],
+      /at most 10 fields per card/,
+    ],
+    [
+      'a text part over 2,500 characters',
+      [{ type: 'Text', props: { content: 'x'.repeat(2_501) } }],
+      /at most 2500 characters/,
+    ],
+    [
+      'a field over 1,500 characters',
+      [{ type: 'Fields', children: [{ type: 'Field', props: { label: 'a', value: 'x'.repeat(1_500) } }] }],
+      /at most 1500/,
+    ],
+    [
+      'a chart value of Infinity, as JSON reads 1e400',
+      [lineChart({ categories: ['a'], series: [{ name: 'b', values: [Infinity] }] })],
+      /values must be numbers/,
+    ],
+    [
+      'a table with no text',
+      [{ type: 'Table', props: { headers: [' '], rows: [] } }],
+      /the table has no text in its headers or cells/,
+    ],
+    [
+      'a table of 31 rows',
+      [{ type: 'Table', props: { headers: ['a'], rows: Array.from({ length: 31 }, () => ['1']) } }],
+      /at most 30 rows/,
+    ],
+    [
+      'a pie with a repeated slice label',
+      [
+        {
+          type: 'Chart',
+          props: {
+            title: 'P',
+            chart: {
+              type: 'pie',
+              segments: [
+                { label: 'a', value: 1 },
+                { label: 'a', value: 2 },
+              ],
+            },
+          },
+        },
+      ],
+      /must not repeat/,
+    ],
+    [
+      'a table of 7 columns',
+      [{ type: 'Table', props: { headers: ['1', '2', '3', '4', '5', '6', '7'], rows: [] } }],
+      /at most 6 columns/,
+    ],
+    [
+      'a table whose caption makes it too long',
+      [{ type: 'Table', props: { headers: ['a'], rows: [], caption: 'x'.repeat(10_000) } }],
+      /at most 10000/,
+    ],
+    [
+      'a chart title over 50 characters',
+      [lineChart({ categories: ['a'], series: [{ name: 'b', values: [1] }] }, 'x'.repeat(51))],
+      /props\.title/,
+    ],
+    [
+      'a chart label over 20 characters',
+      [lineChart({ categories: ['x'.repeat(21)], series: [{ name: 'b', values: [1] }] })],
+      /at most 20 characters/,
+    ],
+    [
+      'an axis label over 50 characters',
+      [lineChart({ categories: ['a'], series: [{ name: 'b', values: [1] }], yLabel: 'x'.repeat(51) })],
+      /axis labels/,
+    ],
+    [
+      '21 categories',
+      [
+        lineChart({
+          categories: Array.from({ length: 21 }, (_, i) => `${i}`),
+          series: [{ name: 'b', values: Array.from({ length: 21 }, () => 1) }],
+        }),
+      ],
+      /1 to 20 categories/,
+    ],
+    [
+      '13 series',
+      [
+        lineChart({
+          categories: ['a'],
+          series: Array.from({ length: 13 }, (_, i) => ({ name: `s${i}`, values: [1] })),
+        }),
+      ],
+      /1 to 12 series/,
+    ],
+    [
+      'a repeated category',
+      [lineChart({ categories: ['a', 'a'], series: [{ name: 'b', values: [1, 2] }] })],
+      /must not repeat/,
+    ],
+    [
+      'over 12,000 characters across parts',
+      Array.from({ length: 5 }, () => ({ type: 'Text', props: { content: 'x'.repeat(2_500) } })),
+      /at most 12000 per card/,
+    ],
+  ])('refuses a card with %s and posts nothing', async (_, children, reason) => {
+    const { calls, delivery } = await deliverCard({ title: 'Perf', children });
+
+    await expect(delivery).rejects.toThrow(reason);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('checks a card with no children against the card budget and posts nothing', async () => {
+    const { calls, delivery } = await deliverCard({ title: 'Perf', description: 'x'.repeat(12_001) });
+
+    await expect(delivery).rejects.toThrow(/at most 12000 per card/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('posts a part with only the fields it may have, so a stray key such as an ncq: id never goes out', async () => {
+    const { calls, delivery } = await deliverCard({
+      children: [
+        { type: 'Table', id: 'ncq:q-1:0', props: { headers: ['a'], rows: [['1']], actions: [{ id: 'ncq:q-1:0' }] } },
+      ],
+    });
+    await delivery;
+
+    expect(JSON.stringify(postedCard(calls[0]))).not.toContain('ncq:');
+  });
+
+  it('refuses a card over the per-card limits the tool enforces, whoever wrote the row', async () => {
+    const tables = await deliverCard({ children: [table, table] });
+    const charts = await deliverCard({ children: [bar, bar, bar] });
+
+    await expect(tables.delivery).rejects.toThrow(/at most 1 Table/);
+    await expect(charts.delivery).rejects.toThrow(/at most 2 Chart/);
+    expect([...tables.calls, ...charts.calls]).toHaveLength(0);
+  });
+
+  it('renders an old-style text card exactly as before', async () => {
+    const { calls, delivery } = await deliverCard({
+      title: 'Daily',
+      description: 'Your plate today',
+      children: ['• item one', { text: '• item two' }, { type: 'text', text: '• item three' }, '', 42],
+    });
+    await delivery;
+
+    expect(postedCard(calls[0])).toEqual(
+      Card({
+        title: 'Daily',
+        children: [
+          CardText('Your plate today'),
+          CardText('• item one'),
+          CardText('• item two'),
+          CardText('• item three'),
+        ],
+      }),
+    );
+  });
+});
+
+it('uses a registered approval presentation losslessly for initial and terminal cards', async () => {
+  const { registerQuestionRenderResolver } = await import('./question-render-registry.js');
+  const evidence = 'full evidence\n'.repeat(500);
+  registerQuestionRenderResolver((id) =>
+    id === 'presentation-fixture'
+      ? {
+          title: 'Review',
+          options: [],
+          deferResolution: true,
+          renderMessage: () => ({ markdown: evidence }),
+          renderTerminal: (resolution) => ({ markdown: `${evidence}\n${resolution}` }),
+        }
+      : undefined,
+  );
+  const { calls, postMessage } = makePostCapture();
+  const edits: PostCall[] = [];
+  const bridge = createChatSdkBridge({
+    adapter: stubAdapter({
+      postMessage,
+      editMessage: async (threadId, _id, message) => {
+        edits.push({ threadId, message });
+        return { id: 'card', threadId, raw: {} };
+      },
+    }),
+    supportsThreads: false,
+  });
+  await bridge.deliver('stub:C1', null, {
+    kind: 'chat-sdk',
+    content: {
+      type: 'ask_question',
+      questionId: 'presentation-fixture',
+      title: 'Review',
+      options: [],
+      requirePresentation: true,
+    },
+  });
+  expect(calls[0].message).toEqual({ markdown: evidence });
+  await bridge.deliver('stub:C1', null, {
+    kind: 'chat-sdk',
+    content: {
+      operation: 'edit',
+      questionId: 'presentation-fixture',
+      messageId: 'card',
+      terminalCard: { resolution: 'Rejected' },
+    },
+  });
+  expect(edits[0].message).toEqual({ markdown: `${evidence}\nRejected` });
+});
+
+it('forwards the authenticated instance and message address without editing a deferred approval', async () => {
+  const { initTestDb, closeDb } = await import('../db/connection.js');
+  const { runMigrations } = await import('../db/migrations/index.js');
+  const { registerQuestionRenderResolver } = await import('./question-render-registry.js');
+  await runMigrations(await initTestDb());
+  registerQuestionRenderResolver((id) =>
+    id === 'address-fixture'
+      ? {
+          title: 'Review',
+          options: [{ label: 'Approve', selectedLabel: 'Approved', value: 'approve' }],
+          deferResolution: true,
+        }
+      : undefined,
+  );
+  const editMessage = vi.fn();
+  const adapter = stubAdapter({
+    name: 'fixture',
+    initialize: async () => {},
+    channelIdFromThreadId: (threadId: string) => threadId,
+    editMessage,
+  });
+  const bridge = createChatSdkBridge({ adapter, instance: 'fixture-one', supportsThreads: false });
+  const onAction = vi.fn();
+  try {
+    await bridge.setup({ onInbound: () => {}, onInboundEvent: () => {}, onMetadata: () => {}, onAction });
+    const chat = (bridge as unknown as { _chat: import('chat').Chat })._chat;
+    await chat.processAction(
+      {
+        actionId: 'ncq:address-fixture:0',
+        adapter,
+        messageId: 'original-card',
+        raw: {},
+        threadId: 'fixture:room',
+        user: { userId: 'selected' } as never,
+        value: '0',
+      },
+      undefined,
+    );
+    expect(onAction).toHaveBeenCalledWith('address-fixture', 'approve', 'selected', {
+      instance: 'fixture-one',
+      messageId: 'original-card',
+      platformId: 'fixture:room',
+    });
+    expect(editMessage).not.toHaveBeenCalled();
+  } finally {
+    await bridge.teardown();
+    await closeDb();
+  }
+});
+
+describe('createChatSdkBridge — local Gateway webhook', () => {
+  // The Gateway listener forwards raw events to a loopback server; only it may
+  // post there. It sends the bot token in x-discord-gateway-token.
+  const BOT_TOKEN = 'test-bot-token';
+  const realFetch = globalThis.fetch;
+
+  const click = JSON.stringify({
+    type: 'GATEWAY_INTERACTION_CREATE',
+    data: {
+      type: 3,
+      id: 'interaction-1',
+      token: 'interaction-token',
+      channel_id: 'chan-1',
+      data: { custom_id: 'ncq:q-1:approve' },
+      member: { user: { id: 'clicker-1', username: 'clicker' } },
+      message: { id: 'card-1', embeds: [] },
+    },
+  });
+  const message = JSON.stringify({ type: 'GATEWAY_MESSAGE_CREATE', data: { id: 'm-1', content: 'hi' } });
+
+  async function startGateway(botToken?: string) {
+    let webhookUrl = '';
+    const handleWebhook = vi.fn(async () => new Response('ok'));
+    const adapter = stubAdapter({
+      name: 'discord',
+      initialize: async () => {},
+      handleWebhook,
+      channelIdFromThreadId: (threadId: string) => threadId,
+    }) as Adapter & { startGatewayListener: unknown };
+    adapter.startGatewayListener = async (_opts: unknown, _ms: number, _signal: AbortSignal, url: string) => {
+      webhookUrl = url;
+      return new Response('{}');
+    };
+    const onAction = vi.fn();
+    const bridge = createChatSdkBridge({ adapter, supportsThreads: true, botToken });
+    await bridge.setup({ onInbound: () => {}, onInboundEvent: () => {}, onMetadata: () => {}, onAction });
+    const post = (body: string, headers: Record<string, string> = {}) =>
+      realFetch(webhookUrl, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body });
+    return { bridge, post, onAction, handleWebhook, webhookUrl };
+  }
+
+  beforeEach(async () => {
+    const { initTestDb } = await import('../db/connection.js');
+    const { runMigrations } = await import('../db/migrations/index.js');
+    await runMigrations(await initTestDb());
+    // Interaction acks go to the Discord API; keep them off the network.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(null, { status: 204 })),
+    );
+  });
+
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    const { closeDb } = await import('../db/connection.js');
+    await closeDb();
+  });
+
+  it.each([
+    ['no gateway token', {}],
+    ['a wrong gateway token', { 'x-discord-gateway-token': 'not-the-token' }],
+  ])('rejects a request with %s before it reaches the adapter or the host', async (_label, headers) => {
+    const { bridge, post, onAction, handleWebhook } = await startGateway(BOT_TOKEN);
+    try {
+      for (const body of [click, message]) {
+        const res = await post(body, headers);
+        expect(res.status).toBe(401);
+      }
+      expect(onAction).not.toHaveBeenCalled();
+      expect(handleWebhook).not.toHaveBeenCalled();
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('answers 401 without waiting for the request body', async () => {
+    const { bridge, webhookUrl } = await startGateway(BOT_TOKEN);
+    try {
+      const status = await new Promise<number | undefined>((resolve, reject) => {
+        const req = http.request(webhookUrl, { method: 'POST', headers: { 'Content-Length': '1000' } }, (res) => {
+          resolve(res.statusCode);
+          req.destroy();
+        });
+        req.on('error', reject);
+        req.flushHeaders(); // the body never follows
+      });
+      expect(status).toBe(401);
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('rejects every request when no bot token is configured', async () => {
+    const { bridge, post, onAction, handleWebhook } = await startGateway(undefined);
+    try {
+      const res = await post(click, { 'x-discord-gateway-token': '' });
+      expect(res.status).toBe(401);
+      expect((await post(message)).status).toBe(401);
+      expect(onAction).not.toHaveBeenCalled();
+      expect(handleWebhook).not.toHaveBeenCalled();
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('dispatches clicks and forwards other events when the gateway token matches', async () => {
+    const { bridge, post, onAction, handleWebhook } = await startGateway(BOT_TOKEN);
+    try {
+      const auth = { 'x-discord-gateway-token': BOT_TOKEN };
+      expect((await post(click, auth)).status).toBe(200);
+      expect(onAction).toHaveBeenCalledWith('q-1', 'approve', 'clicker-1', {
+        messageId: 'card-1',
+        platformId: 'chan-1',
+      });
+      expect((await post(message, auth)).status).toBe(200);
+      expect(handleWebhook).toHaveBeenCalledTimes(1);
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('decodes the option index when @chat-adapter/discord appends "\\n<value>" to custom_id', async () => {
+    const { registerQuestionRenderResolver } = await import('./question-render-registry.js');
+    registerQuestionRenderResolver((id) =>
+      id === 'q-index'
+        ? {
+            title: 'Install Packages Request',
+            options: [
+              { label: 'Approve', selectedLabel: '✅ Approved', value: 'approve' },
+              { label: 'Reject', selectedLabel: '❌ Rejected', value: 'reject' },
+            ],
+          }
+        : undefined,
+    );
+    const encodedClick = JSON.stringify({
+      type: 'GATEWAY_INTERACTION_CREATE',
+      data: {
+        type: 3,
+        id: 'interaction-2',
+        token: 'interaction-token',
+        channel_id: 'chan-1',
+        // Button({ id: 'ncq:q-index:0', value: '0' }) as encoded by the Discord adapter.
+        data: { custom_id: 'ncq:q-index:0\n0' },
+        member: { user: { id: 'clicker-1', username: 'clicker' } },
+        message: { id: 'card-2', embeds: [] },
+      },
+    });
+    const { bridge, post, onAction } = await startGateway(BOT_TOKEN);
+    try {
+      expect((await post(encodedClick, { 'x-discord-gateway-token': BOT_TOKEN })).status).toBe(200);
+      expect(onAction).toHaveBeenCalledWith('q-index', 'approve', 'clicker-1', {
+        messageId: 'card-2',
+        platformId: 'chan-1',
+      });
+    } finally {
+      await bridge.teardown();
+    }
   });
 });

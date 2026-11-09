@@ -4,6 +4,7 @@
  *
  * Used by Discord, Slack, and other Chat SDK-supported platforms.
  */
+import { createHash, timingSafeEqual } from 'crypto';
 import http from 'http';
 
 import {
@@ -12,7 +13,12 @@ import {
   CardText,
   Actions,
   Button,
+  Chart,
+  Divider,
+  Field,
+  Fields,
   LinkButton,
+  Table,
   type CardChild,
   type Adapter,
   type AssistantContextChangedEvent,
@@ -23,10 +29,11 @@ import {
 import { log } from '../log.js';
 import { SqliteStateAdapter } from '../state-sqlite.js';
 import { registerWebhookAdapter } from '../webhook-server.js';
-import { normalizeOptions, type NormalizedOption } from './ask-question.js';
+import { cardProblems, isCardPart, isRecord, type CardPart } from './card-parts.js';
+import { CardTooLongError, cardQuestionTooLong, normalizeOptions, type NormalizedOption } from './ask-question.js';
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage } from './adapter.js';
 import { INSTANCE_KEY_RE } from './channel-registry.js';
-import { resolveQuestionRender } from './question-render-registry.js';
+import { resolveQuestionRender, dispatchQuestionAction } from './question-render-registry.js';
 
 /** Adapter with optional gateway support (e.g., Discord). */
 interface GatewayAdapter extends Adapter {
@@ -36,6 +43,11 @@ interface GatewayAdapter extends Adapter {
     abortSignal?: AbortSignal,
     webhookUrl?: string,
   ): Promise<Response>;
+}
+
+/** Adapter that can expose authenticated transport liveness to host status. */
+interface ConnectionAwareAdapter extends Adapter {
+  isConnected?(): boolean;
 }
 
 /** Reply context extracted from a platform's raw message. */
@@ -87,8 +99,8 @@ export interface AppContextEntity {
  * Latest assistant context per (instance, DM channel, user), attached to the
  * NEXT inbound DM message as content.app_context and consumed. Platforms
  * whose DM surface materializes threads and reports client context send
- * app_context as its own event (assistant_thread_started legacy /
- * app_context_changed in agent view), not on the message payload, so the
+ * app_context as its own event (assistant_thread_started /
+ * assistant_thread_context_changed), not on the message payload, so the
  * bridge has to hold it across the event → message gap. Short TTL: a stale
  * "viewing X" is worse than none.
  */
@@ -104,8 +116,8 @@ function appContextKey(instance: string, channelId: string, userId: string): str
 
 /**
  * Derive ordered entities from an SDK assistant event. The installed chat
- * core (4.29.0) parses assistant_thread_started / app_context_changed into a
- * `context` object (channelId/teamId/threadEntryPoint — the legacy assistant
+ * core (4.41.1) parses assistant_thread_started /
+ * assistant_thread_context_changed into a `context` object (channelId/teamId/threadEntryPoint — the legacy assistant
  * context shape) with no entities array; prefer a real `entities` array
  * whenever a future SDK forwards the platform's ordered agent-context
  * entities.
@@ -182,6 +194,16 @@ export function attachAppContext(
 }
 
 /**
+ * Base64-encode attachment bytes. Adapters may return ArrayBuffer (Telegram
+ * since 4.39), whose toString() yields "[object ArrayBuffer]", not bytes.
+ */
+export function attachmentBytesToBase64(data: Buffer | ArrayBuffer | Uint8Array): string {
+  if (Buffer.isBuffer(data)) return data.toString('base64');
+  if (data instanceof Uint8Array) return Buffer.from(data.buffer, data.byteOffset, data.byteLength).toString('base64');
+  return Buffer.from(data).toString('base64');
+}
+
+/**
  * Root-thread a top-level DM message: on platforms whose DM surface
  * materializes conversation threads (agent-view semantics), every top-level
  * DM message is the root of a conversation thread — replying in-thread and
@@ -225,7 +247,7 @@ export type RawTextExtractor = (raw: Record<string, unknown>) => string | null;
  * A member joined (or left) a channel/group conversation one of our bridge
  * instances is in. Forwarded from the Chat SDK's member_joined_channel
  * dispatch; `left` is reserved for member_left_channel, which the installed
- * chat core (4.29.0) does NOT dispatch — see the TODO at the
+ * chat core (4.41.1) does NOT dispatch — see the TODO at the
  * onMemberJoinedChannel registration in setup().
  */
 export interface MembershipEvent {
@@ -358,6 +380,20 @@ export interface ChatSdkBridgeConfig {
    */
   transformOutboundText?: (text: string) => string;
   /**
+   * Optional escape for host-built ask_question card text (open and resolved
+   * cards). Approval cards mix host wording with untrusted values (agent
+   * arguments, sender names); channels whose card text is raw platform markup
+   * set this. Questions an agent asks itself (`fromAgent`) keep their markup.
+   */
+  escapeCardText?: (text: string) => string;
+  /**
+   * For a platform that caps a whole card's text: the longest ask_question
+   * title plus card text (after escapeCardText) it shows in full. A longer
+   * card is refused with CardTooLongError. Unset, long card text is posted
+   * in several text blocks, each under CARD_TEXT_BLOCK_LENGTH.
+   */
+  maxCardTextLength?: number;
+  /**
    * Maximum text length the underlying adapter accepts in a single message.
    * When set, the bridge splits outbound text longer than this on paragraph
    * → line → hard-char boundaries and posts multiple messages. Without this,
@@ -398,6 +434,8 @@ function resolveSelectedOption(
 interface TerminalApprovalCard {
   title: string;
   question: string;
+  /** The question as separate text blocks, when it was split to fit. */
+  questionBlocks?: string[];
   resolution: string;
 }
 
@@ -406,9 +444,9 @@ interface TerminalApprovalCard {
  * replaces the actions row, making the card visibly inactive without
  * discarding the request an admin decided on.
  */
-export function buildTerminalApprovalCard({ title, question, resolution }: TerminalApprovalCard) {
+export function buildTerminalApprovalCard({ title, question, questionBlocks, resolution }: TerminalApprovalCard) {
   const children: CardChild[] = [];
-  if (question) children.push(CardText(question));
+  for (const block of questionBlocks ?? (question ? [question] : [])) children.push(CardText(block));
   children.push(CardText(resolution, { style: 'muted' }));
   return Card({ title, children });
 }
@@ -418,6 +456,63 @@ function terminalApprovalMessage(spec: TerminalApprovalCard) {
     card: buildTerminalApprovalCard(spec),
     fallbackText: [spec.title, spec.question, spec.resolution].filter(Boolean).join('\n\n'),
   };
+}
+
+/**
+ * Longest text in one card text block. Some platforms cap each block, and an
+ * adapter can still lengthen text (emoji names) after the bridge measures it.
+ */
+export const CARD_TEXT_BLOCK_LENGTH = 2000;
+
+const FENCE = '```';
+/** A fence opens or closes only at the start of a line; backticks mid-line are text. */
+const FENCE_LINE = /^ {0,3}```/gm;
+
+/**
+ * Split card text into blocks of at most `limit` characters after `escape`, so
+ * a per-block cap never cuts one. Prefers a line break near the limit, never
+ * splits a surrogate pair or a fence marker, and closes and reopens a code
+ * fence that spans two blocks.
+ */
+export function splitCardText(text: string, escape: (t: string) => string, limit: number): string[] {
+  const blocks: string[] = [];
+  let rest = text;
+  let reopen = false;
+  const render = (raw: string) => {
+    const body = (reopen ? `${FENCE}\n` : '') + raw;
+    const open = (body.match(FENCE_LINE)?.length ?? 0) % 2 === 1;
+    return { block: escape(open ? `${body}\n${FENCE}` : body), open };
+  };
+  const fits = (n: number) => render(rest.slice(0, n)).block.length <= limit;
+  while (rest) {
+    let cut = rest.length;
+    if (!fits(cut)) {
+      // Longest prefix that fits; the search only ever keeps lengths that fit.
+      let lo = 0;
+      let hi = rest.length - 1;
+      while (lo < hi) {
+        const mid = Math.ceil((lo + hi) / 2);
+        if (fits(mid)) lo = mid;
+        else hi = mid - 1;
+      }
+      cut = lo;
+      const afterLine = rest.lastIndexOf('\n', cut - 1) + 1;
+      if (afterLine > cut / 2 && fits(afterLine)) cut = afterLine;
+      // Backing off a fence marker can change which fences close, so recheck.
+      const badCut = (n: number) => isHighSurrogate(rest.charCodeAt(n - 1)) || (rest[n - 1] === '`' && rest[n] === '`');
+      while (cut > 0 && (badCut(cut) || !fits(cut))) cut--;
+      if (cut === 0) throw new CardTooLongError('the request cannot be split into card text blocks');
+    }
+    const { block, open } = render(rest.slice(0, cut));
+    blocks.push(block);
+    rest = rest.slice(cut);
+    reopen = open;
+  }
+  return blocks;
+}
+
+function isHighSurrogate(code: number): boolean {
+  return code >= 0xd800 && code <= 0xdbff;
 }
 
 export function splitForLimit(text: string, limit: number): string[] {
@@ -452,6 +547,54 @@ export function appendRawText(
   serialized.text = text ? `${text}\n\n${extra}` : extra;
 }
 
+/** A checked part as its Chat SDK element, rebuilt from the fields it may have and nothing else. */
+function buildCardPart(part: CardPart): CardChild {
+  const props = (isRecord(part.props) ? part.props : {}) as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+  switch (part.type) {
+    case 'Text':
+      return props.style ? CardText(props.content, { style: props.style }) : CardText(props.content);
+    case 'Fields':
+      return Fields(
+        (part.children as Array<{ props: { label: string; value: string | number } }>).map((field) =>
+          Field({ label: field.props.label, value: String(field.props.value) }),
+        ),
+      );
+    case 'Table':
+      return Table({
+        headers: props.headers,
+        rows: (props.rows as Array<Array<string | number>>).map((row) => row.map(String)),
+        ...(props.align ? { align: props.align } : {}),
+        ...(props.caption ? { caption: props.caption } : {}),
+      });
+    case 'Chart': {
+      const chart = props.chart;
+      if (chart.type === 'pie') {
+        const segments = (chart.segments as Array<{ label: string; value: number }>).map(({ label, value }) => ({
+          label,
+          value,
+        }));
+        return Chart({ title: props.title, chart: { type: 'pie', segments } });
+      }
+      const categories = chart.categories as string[];
+      return Chart({
+        title: props.title,
+        chart: {
+          type: chart.type,
+          categories,
+          ...(chart.xLabel ? { xLabel: chart.xLabel } : {}),
+          ...(chart.yLabel ? { yLabel: chart.yLabel } : {}),
+          series: (chart.series as Array<{ name: string; values: number[] }>).map((series) => ({
+            name: series.name,
+            data: series.values.map((value, i) => ({ label: categories[i], value })),
+          })),
+        },
+      });
+    }
+    default:
+      return Divider();
+  }
+}
+
 export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter {
   const { adapter } = config;
   // The instance name becomes a webhook route segment (the route regex is
@@ -468,6 +611,14 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     );
   }
   const transformText = (t: string): string => (config.transformOutboundText ? config.transformOutboundText(t) : t);
+  const cardText = (t: string): string => (config.escapeCardText ? config.escapeCardText(t) : t);
+  const terminalMessage = (spec: TerminalApprovalCard) =>
+    terminalApprovalMessage({
+      ...spec,
+      question: cardText(spec.question),
+      questionBlocks: spec.question ? splitCardText(spec.question, cardText, CARD_TEXT_BLOCK_LENGTH) : undefined,
+      resolution: cardText(spec.resolution),
+    });
   /** Registry/routing key for this bridge — also the app-context cache
    *  namespace. Default instances key by the platform name. */
   const instanceKey = config.instance ?? adapter.name;
@@ -499,8 +650,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         };
         if (att.fetchData) {
           try {
-            const buffer = await att.fetchData();
-            entry.data = buffer.toString('base64');
+            entry.data = attachmentBytesToBase64(await att.fetchData());
           } catch (err) {
             log.warn('Failed to download attachment', { type: att.type, err });
           }
@@ -645,9 +795,10 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       });
 
       // Agent-mode assistant context: cache the latest "what the user is
-      // viewing" per (channel, user). The installed chat core (4.29.0)
-      // dispatches both the legacy assistant_thread_started and the
-      // agent_view app_context_changed events into these handlers.
+      // viewing" per (channel, user). The installed chat core (4.41.1)
+      // dispatches assistant_thread_started and
+      // assistant_thread_context_changed into these handlers. Agent-view
+      // app_context_changed goes to onAppContextChanged, not registered here.
       const rememberAppContext = (event: AssistantThreadStartedEvent | AssistantContextChangedEvent): void => {
         cacheAppContext(instanceKey, event.channelId, event.userId, appContextEntities(event));
       };
@@ -661,7 +812,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       // channel type (setMembershipHandler); no-op when none is registered.
       // The chat core dispatches only member_joined_channel;
       // member_left_channel arrives at the adapter but has no SDK handler
-      // in 4.29.0.
+      // in 4.41.1.
       // TODO(member-left): when the chat core grows an onMemberLeftChannel
       // dispatch, register it here and forward with { left: true } — the
       // MembershipEvent type and dispatchMembership already carry it.
@@ -677,6 +828,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
 
       // Handle button clicks (ask_user_question)
       chat.onAction(async (event) => {
+        if (await dispatchQuestionAction(event, adapter, instanceKey)) return;
         if (!event.actionId.startsWith('ncq:')) return;
         const parts = event.actionId.split(':');
         if (parts.length < 3) return;
@@ -690,6 +842,14 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         // short to fit Telegram's 64-byte callback_data cap). Old format:
         // the full value is embedded in actionId/value directly.
         const selectedOption = resolveSelectedOption(render, event.value, tail);
+        if (render?.deferResolution) {
+          setupConfig.onAction(questionId, selectedOption, userId, {
+            instance: instanceKey,
+            messageId: event.messageId,
+            platformId: adapter.channelIdFromThreadId(event.threadId),
+          });
+          return;
+        }
         const title = render?.title ?? '❓ Question';
         const matched = render?.options.find((o) => o.value === selectedOption);
         const selectedLabel = matched?.selectedLabel ?? selectedOption ?? '(clicked)';
@@ -703,14 +863,18 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
             tid,
             event.messageId,
             render?.question
-              ? terminalApprovalMessage({ title, question: render.question, resolution })
+              ? terminalMessage({ title, question: render.question, resolution })
               : { markdown: `${title}\n\n${resolution}` },
           );
         } catch (err) {
           log.warn('Failed to update card after action', { err });
         }
 
-        setupConfig.onAction(questionId, selectedOption, userId);
+        setupConfig.onAction(questionId, selectedOption, userId, {
+          instance: instanceKey,
+          messageId: event.messageId,
+          platformId: adapter.channelIdFromThreadId(event.threadId),
+        });
       });
 
       await chat.initialize();
@@ -803,6 +967,13 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       const content = message.content as Record<string, unknown>;
 
       if (content.operation === 'edit' && content.messageId) {
+        const render =
+          typeof content.questionId === 'string' ? await resolveQuestionRender(content.questionId) : undefined;
+        if (render?.renderTerminal && content.terminalCard) {
+          const terminal = content.terminalCard as { resolution: string };
+          await adapter.editMessage(tid, content.messageId as string, render.renderTerminal(terminal.resolution));
+          return;
+        }
         const terminalCard = content.terminalCard as Partial<TerminalApprovalCard> | undefined;
         if (
           terminalCard &&
@@ -813,7 +984,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           await adapter.editMessage(
             tid,
             content.messageId as string,
-            terminalApprovalMessage(terminalCard as TerminalApprovalCard),
+            terminalMessage(terminalCard as TerminalApprovalCard),
           );
         } else {
           await adapter.editMessage(tid, content.messageId as string, {
@@ -837,11 +1008,28 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           log.error('ask_question missing required title — skipping delivery', { questionId });
           return;
         }
+        const render = content.requirePresentation ? await resolveQuestionRender(questionId) : undefined;
+        if (render?.renderMessage) {
+          const result = await adapter.postMessage(tid, render.renderMessage(questionId));
+          return result?.id;
+        }
+        if (content.requirePresentation) throw new Error('Approval presentation adapter is unavailable');
+        // Long text goes out as several blocks, measured after escaping, so no
+        // per-block cap cuts it. A platform that caps the whole card refuses
+        // what it can't show, counting the fences the split adds.
+        // Questions an agent asks itself keep their own markup (`fromAgent`).
+        const escape = content.fromAgent === true ? (t: string) => t : cardText;
+        const text = escape(question);
+        const blocks = splitCardText(question, escape, CARD_TEXT_BLOCK_LENGTH);
+        if (config.maxCardTextLength !== undefined) {
+          const tooLong = cardQuestionTooLong(title, blocks.join('\n'), config.maxCardTextLength);
+          if (tooLong) throw new CardTooLongError(tooLong);
+        }
         const options: NormalizedOption[] = normalizeOptions(content.options as never);
         const card = Card({
           title,
           children: [
-            CardText(question),
+            ...blocks.map((block) => CardText(block)),
             Actions(
               // Encode button id/value with the option index rather than the
               // full value. Telegram caps callback_data at 64 bytes, and
@@ -856,7 +1044,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         });
         const result = await adapter.postMessage(tid, {
           card,
-          fallbackText: `${title}\n\n${question}\nOptions: ${options.map((o) => o.label).join(', ')}`,
+          fallbackText: `${title}\n\n${text}\nOptions: ${options.map((o) => o.label).join(', ')}`,
         });
         return result?.id;
       }
@@ -864,10 +1052,16 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       // Display card (send_card MCP tool) — returns immediately, no callback flow.
       // Non-URL actions are dropped: send_card's contract is fire-and-forget, so a
       // callback button would have nowhere to land. URL actions render as link buttons.
+      // The runner filters these against LINK_ACTION_SCHEMA before writing the row;
+      // the checks below still stand because any producer can write this payload.
       if (content.type === 'card' && content.card && typeof content.card === 'object') {
         const cardSpec = content.card as Record<string, unknown>;
         const title = (cardSpec.title as string) || '';
         const fallbackText = (content.fallbackText as string) || (cardSpec.description as string) || title || '';
+
+        // Checked again here: anything in the container can write this row, not only send_card.
+        const problems = cardProblems(cardSpec);
+        if (problems.length > 0) throw new Error(`send_card card refused: ${problems.join('; ')}`);
 
         const cardChildren: CardChild[] = [];
         if (typeof cardSpec.description === 'string' && cardSpec.description) {
@@ -875,7 +1069,9 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         }
         if (Array.isArray(cardSpec.children)) {
           for (const child of cardSpec.children) {
-            if (typeof child === 'string' && child) {
+            if (isCardPart(child)) {
+              cardChildren.push(buildCardPart(child));
+            } else if (typeof child === 'string' && child) {
               cardChildren.push(CardText(child));
             } else if (
               child &&
@@ -887,8 +1083,16 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           }
         }
         if (Array.isArray(cardSpec.actions)) {
-          const linkButtons = (cardSpec.actions as Array<Record<string, unknown>>)
-            .filter((a) => typeof a.url === 'string' && a.url && typeof a.label === 'string' && a.label)
+          const linkButtons = (cardSpec.actions as Array<Record<string, unknown> | null | undefined>)
+            .filter(
+              (a): a is Record<string, unknown> =>
+                !!a &&
+                typeof a === 'object' &&
+                typeof a.url === 'string' &&
+                !!a.url &&
+                typeof a.label === 'string' &&
+                !!a.label,
+            )
             .map((a) => {
               const style = a.style;
               const safeStyle: 'primary' | 'danger' | 'default' | undefined =
@@ -963,7 +1167,8 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     },
 
     isConnected() {
-      return true;
+      const probe = (adapter as ConnectionAwareAdapter).isConnected;
+      return probe ? probe.call(adapter) : true;
     },
 
     async subscribe(_platformId: string, threadId: string) {
@@ -1001,6 +1206,9 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
  * This is needed because the Gateway listener in webhook-forwarding mode
  * sends ALL raw events (including INTERACTION_CREATE for button clicks)
  * to the webhookUrl, which we handle here.
+ *
+ * Loopback is not a trust boundary, so only our own Gateway listener may post
+ * here: it sends the bot token in x-discord-gateway-token on every forward.
  */
 function startLocalWebhookServer(
   adapter: GatewayAdapter,
@@ -1009,6 +1217,11 @@ function startLocalWebhookServer(
 ): Promise<string> {
   return new Promise((resolve) => {
     const server = http.createServer((req, res) => {
+      if (!gatewayTokenMatches(req.headers['x-discord-gateway-token'], botToken)) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end('{"error":"unauthorized"}');
+        return;
+      }
       const chunks: Buffer[] = [];
       req.on('data', (chunk: Buffer) => chunks.push(chunk));
       req.on('end', () => {
@@ -1033,6 +1246,13 @@ function startLocalWebhookServer(
       resolve(url);
     });
   });
+}
+
+/** Constant-time check; hashing first keeps the lengths equal. No token configured means no match. */
+function gatewayTokenMatches(header: string | string[] | undefined, botToken: string | undefined): boolean {
+  if (!botToken || typeof header !== 'string') return false;
+  const digest = (s: string) => createHash('sha256').update(s).digest();
+  return timingSafeEqual(digest(header), digest(botToken));
 }
 
 async function handleForwardedEvent(
@@ -1068,7 +1288,8 @@ async function handleForwardedEvent(
         const colonIdx = customId.indexOf(':', 4); // after "ncq:"
         if (colonIdx !== -1) {
           questionId = customId.slice(4, colonIdx);
-          tail = customId.slice(colonIdx + 1);
+          // @chat-adapter/discord encodes custom_id as '<actionId>\n<value>'; keep only the index.
+          tail = customId.slice(colonIdx + 1).split('\n')[0];
         }
       }
 
@@ -1080,6 +1301,18 @@ async function handleForwardedEvent(
       // Discord custom_id mirrors the new index-based encoding (see Button
       // construction). Decode back to the real option value for downstream.
       const selectedOption = resolveSelectedOption(render, tail, tail);
+      if (render?.deferResolution && questionId) {
+        await fetch(`https://discord.com/api/v10/interactions/${interactionId}/${interactionToken}/callback`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ type: 6 }),
+        });
+        setupConfig.onAction(questionId, selectedOption, user?.id || '', {
+          messageId: (interaction.message as Record<string, unknown> | undefined)?.id as string | undefined,
+          platformId: interaction.channel_id as string | undefined,
+        });
+        return;
+      }
       const cardTitle = render?.title ?? ((originalEmbeds[0]?.title as string) || '❓ Question');
       const matchedOpt = render?.options.find((o) => o.value === selectedOption);
       const selectedLabel = matchedOpt?.selectedLabel ?? selectedOption ?? customId;
@@ -1109,7 +1342,10 @@ async function handleForwardedEvent(
 
       // Dispatch to host
       if (questionId && selectedOption) {
-        setupConfig.onAction(questionId, selectedOption, user?.id || '');
+        setupConfig.onAction(questionId, selectedOption, user?.id || '', {
+          messageId: (interaction.message as Record<string, unknown> | undefined)?.id as string | undefined,
+          platformId: interaction.channel_id as string | undefined,
+        });
       }
       return;
     }

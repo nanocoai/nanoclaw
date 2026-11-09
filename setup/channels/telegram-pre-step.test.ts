@@ -167,7 +167,7 @@ async function runTelegramWizard(root: string) {
     projectRoot: root,
     exec: (cmd: string): string => {
       execs.push(cmd);
-      if (/^(git|pnpm|bash)\b/.test(cmd)) return '';
+      if (/^(git|pnpm|bash)\b/.test(cmd) || cmd.includes('git show ')) return '';
       if (cmd.startsWith('curl')) return cmd.includes(NEW_TOKEN) ? 'mega_bot' : 'nanoclaw_bot';
       return execFileSync('bash', ['-c', cmd], { cwd: root, encoding: 'utf-8' });
     },

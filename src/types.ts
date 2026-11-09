@@ -9,6 +9,14 @@ export interface AgentGroup {
   created_at: string;
 }
 
+/**
+ * A provider-declared speed tier name (`inference.speedTiers` on the provider's
+ * host contract; `standard` | `fast` for Claude). Validated at `ncl groups
+ * config update --speed` time against the group's provider, then stored and
+ * passed through by core as an opaque token.
+ */
+export type ContainerSpeed = string;
+
 /** Per-agent-group container runtime config. Source of truth in the DB;
  *  materialized to `groups/<folder>/container.json` at spawn time. */
 export interface ContainerConfigRow {
@@ -26,6 +34,7 @@ export interface ContainerConfigRow {
   additional_mounts: string; // JSON: AdditionalMountConfig[]
   cli_scope: string; // 'disabled' | 'group' | 'global'
   timezone: string | null; // IANA id; NULL = follow the install-global timezone
+  speed: ContainerSpeed | null; // NULL = install/provider default
   /**
    * Session isolation tier ('container' | 'vm') — see SessionSpec.runtimeTier.
    * Optional on the TS type because the trunk schema does not carry the
@@ -36,7 +45,9 @@ export interface ContainerConfigRow {
   updated_at: string;
 }
 
-export type UnknownSenderPolicy = 'strict' | 'request_approval' | 'decline_notify' | 'public';
+/** Every unknown_sender_policy value a messaging group can hold. */
+export const UNKNOWN_SENDER_POLICIES = ['strict', 'request_approval', 'decline_notify', 'public'] as const;
+export type UnknownSenderPolicy = (typeof UNKNOWN_SENDER_POLICIES)[number];
 
 export interface MessagingGroup {
   id: string;
@@ -213,6 +224,10 @@ export interface PendingQuestion {
 
 // ── Pending approvals (central DB) ──
 
+/** Every status a pending_approvals row can hold. */
+export const PENDING_APPROVAL_STATUSES = ['pending', 'approved', 'rejected', 'expired', 'awaiting_reason'] as const;
+export type PendingApprovalStatus = (typeof PENDING_APPROVAL_STATUSES)[number];
+
 export interface PendingApproval {
   approval_id: string;
   session_id: string | null;
@@ -232,12 +247,12 @@ export interface PendingApproval {
   instance: string | null;
   platform_message_id: string | null;
   /**
-   * For OneCLI credential rows, the gateway's request TTL. For a module
+   * For gateway approval rows, the provider request TTL. For a module
    * approval held by "Reject with reason…", the deadline after which the
    * host sweep finalizes a plain reject (set by markApprovalAwaitingReason).
    */
   expires_at: string | null;
-  status: 'pending' | 'approved' | 'rejected' | 'expired' | 'awaiting_reason';
+  status: PendingApprovalStatus;
   title: string;
   /** Original approval-card body, retained when the card reaches a terminal state. */
   question: string;

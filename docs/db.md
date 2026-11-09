@@ -106,14 +106,14 @@ These rules are enforced by convention in `src/session-manager.ts` and `containe
 | `sessions` | central | `src/db/sessions.ts`, `src/session-manager.ts` | delivery, sweep, container runner |
 | `pending_questions` | central | `src/db/sessions.ts` (via `ask_user_question`) | container response matcher |
 | `agent_destinations` | central | `src/db/agent-destinations.ts`, migration 004 backfill | `writeDestinations()`, delivery ACL |
-| `pending_approvals` | central | `src/db/sessions.ts`, `src/onecli-approvals.ts` | admin-card delivery, sweep |
+| `pending_approvals` | central | `src/db/sessions.ts`, `src/gateway-approval-coordinator.ts` | admin-card delivery, sweep |
 | `unregistered_senders` | central | `src/db/dropped-messages.ts` | ops tooling |
 | `chat_sdk_*` | central | `src/state-sqlite.ts` | Chat SDK bridge |
 | `schema_version` | central | `src/db/migrations/index.ts` | migration runner |
 | `messages_in` | inbound | `src/mailbox/sqlite/` | `container/agent-runner/src/mailbox/sqlite/` |
 | `delivered` | inbound | `src/mailbox/sqlite/session-db.ts` (`markDelivered`) | container edit/reaction targeting |
 | `destinations` | inbound | `writeDestinations()` in `src/session-manager.ts` | container routing / ACL |
-| `session_routing` | inbound | `writeSessionRouting()` in `src/session-manager.ts` | container `send_message` defaults |
+| `session_routing` | inbound | `writeSessionRouting()` in `src/session-manager.ts` | container interactive tools, task-session detection |
 | `messages_out` | outbound | `container/agent-runner/src/db/messages-out.ts` | `src/delivery.ts` poll loop |
 | `processing_ack` | outbound | `container/agent-runner/src/db/messages-in.ts` | `src/host-sweep.ts` (`syncProcessingAcks`) |
 | `session_state` | outbound | `container/agent-runner/src/db/session-state.ts` | container on startup |

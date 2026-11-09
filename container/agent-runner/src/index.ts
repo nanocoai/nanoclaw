@@ -4,7 +4,7 @@
  * Runs inside a container. All message IO goes through the registered mailbox.
  *
  * Config is read from /workspace/agent/container.json (mounted RO).
- * Only TZ and OneCLI networking vars come from env.
+ * Only TZ and gateway networking vars come from env.
  *
  * Mount structure:
  *   /workspace/
@@ -23,6 +23,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
+import { trustGatewayCaForChromium } from './browser-trust.js';
 import { loadConfig } from './config.js';
 import { buildSystemPromptAddendum } from './destinations.js';
 import { getTaskSeriesId } from './db/session-routing.js';
@@ -34,8 +35,14 @@ import { getAgentMailbox, readMailboxContext } from './mailbox/index.js';
 // Providers barrel — each enabled provider self-registers on import.
 // Provider skills append imports to providers/index.ts.
 import './providers/index.js';
-import { createProvider, type ProviderName } from './providers/factory.js';
+// Provider-contracts barrel — each provider's runtime contract attaches to its
+// registration on import. Provider skills append imports to
+// provider-contracts/index.ts alongside the providers barrel line.
+import './provider-contracts/index.js';
+import { createProvider } from './providers/factory.js';
+import { getProviderRuntimeContract, requireProviderName } from './providers/provider-registry.js';
 import { resolvePluginServer } from './plugin-mcp.js';
+import { registerProviderMemorySessionHook } from './provider-contracts/realize.js';
 import type { McpServerConfig } from './providers/types.js';
 import { runPollLoop } from './poll-loop.js';
 
@@ -47,7 +54,7 @@ const CWD = '/workspace/agent';
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const providerName = config.provider.toLowerCase() as ProviderName;
+  const providerName = requireProviderName(config.provider);
   const mailbox = getAgentMailbox();
   await mailbox.start(await readMailboxContext());
 
@@ -56,6 +63,9 @@ async function main(): Promise<void> {
   // Every provider shares one persistent memory tree. Legacy imports are an
   // operator-run migration and never happen in this normal startup path.
   ensureMemoryScaffold();
+
+  // The agent browser trusts only NSS, not the gateway CA env vars.
+  trustGatewayCaForChromium({ log });
 
   // Runtime-generated system-prompt addendum: agent identity (name) plus
   // the live destinations map. Everything else (capabilities, per-module
@@ -115,13 +125,14 @@ async function main(): Promise<void> {
     additionalDirectories: additionalDirectories.length > 0 ? additionalDirectories : undefined,
     model: config.model,
     effort: config.effort,
-    fastMode: config.fastMode,
+    speed: config.speed,
   });
-  provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
+  registerProviderMemorySessionHook(providerName, provider, MEMORY_SESSION_HOOK);
 
   try {
     await runPollLoop({
       provider,
+      providerContract: getProviderRuntimeContract(providerName),
       providerName,
       cwd: CWD,
       systemContext: { instructions },

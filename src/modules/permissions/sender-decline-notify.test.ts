@@ -10,6 +10,7 @@
  *  - An expired (>24h) stamp declines again
  *  - Policy flip back to request_approval: the stale stamp is cleared and
  *    the normal card flow works
+ *  - fyiText null: the decline goes out with no owner FYI
  */
 import fs from 'fs';
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
@@ -216,7 +217,7 @@ describe('unknown-sender decline_notify flow', () => {
     expect(fyi.type).toBeUndefined(); // not ask_question
     expect(fyi.options).toBeUndefined();
     expect(fyi.text).toContain('FYI');
-    expect(fyi.text).toContain('Stranger (tg:stranger)');
+    expect(fyi.text).toContain('"Stranger" ("tg:stranger")');
     expect(fyi.text).toContain('ncl members add');
 
     // Drop recorded. (The gate writes reason 'unknown_sender_decline_notify';
@@ -367,5 +368,27 @@ describe('unknown-sender decline_notify flow', () => {
     const rows = await getDb().all<{ id: string }>('SELECT id FROM pending_sender_approvals');
     expect(rows).toHaveLength(1);
     expect(rows[0].id).toMatch(/^nsa-/); // real card row; stamp gone
+  });
+
+  it('fyiText null: declines, sends the owner nothing, and still dedupes', async () => {
+    const { declineAndNotify } = await import('./sender-approval.js');
+    const input = {
+      messagingGroupId: 'mg-dm-stranger',
+      agentGroupId: 'ag-1',
+      senderIdentity: 'telegram:stranger-1',
+      senderName: 'Stranger One',
+      event: strangerDm('hello'),
+      declineText: 'Ask me in the team channel.',
+      fyiText: null,
+    };
+
+    await declineAndNotify(input);
+    await declineAndNotify(input);
+    await settle();
+
+    expect(deliverMock).toHaveBeenCalledTimes(1);
+    const [, platform, , , content] = deliverMock.mock.calls[0];
+    expect(platform).toBe('dm-stranger');
+    expect(JSON.parse(content as string).text).toBe(input.declineText);
   });
 });

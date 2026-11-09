@@ -95,6 +95,44 @@ describe('formatter rendering', () => {
     expect(result).not.toContain('<message');
   });
 
+  it("renders the agent's own reply from a sibling thread with sender=\"you\"", () => {
+    insertMessage(
+      'e-self',
+      'chat',
+      {
+        text: 'here is the summary',
+        sender: 'Pixel',
+        senderId: 'ag-1',
+        self: true,
+        echo: { surface: 'dm-thread', label: 'another conversation in #Pixel room' },
+      },
+      { trigger: 0, channelType: 'session-echo' },
+    );
+
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('<cross-session-context from="another conversation in #Pixel room" sender="you"');
+    expect(result).not.toContain('sender="Pixel"');
+  });
+
+  it("renders the agent's own timeline post with sender=\"you\"", () => {
+    insertMessage(
+      'bf-self',
+      'chat',
+      {
+        text: 'earlier answer',
+        sender: 'Pixel',
+        senderId: 'ag-1',
+        self: true,
+        echo: { surface: 'dm-timeline', label: 'this DM, just before this conversation' },
+      },
+      { trigger: 0, channelType: 'session-echo' },
+    );
+
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('<dm-history sender="you"');
+    expect(result).not.toContain('sender="Pixel"');
+  });
+
   it('renders channel-timeline backfill rows as <channel-history> (group-surface prelude)', () => {
     insertMessage(
       'bf-ch-1',
@@ -192,7 +230,7 @@ describe('command classification', () => {
 
     const [msg] = getPendingMessages();
     expect(isSessionEcho(msg)).toBe(true);
-    expect(categorizeMessage(msg).category).toBe('none');
+    expect(categorizeMessage(msg, 'claude').category).toBe('none');
   });
 
   it('echoed /clear and /compact are never runner commands', () => {
@@ -201,7 +239,7 @@ describe('command classification', () => {
 
     const messages = getPendingMessages();
     expect(messages.some((m) => isClearCommand(m))).toBe(false);
-    expect(messages.some((m) => isRunnerCommand(m))).toBe(false);
+    expect(messages.some((m) => isRunnerCommand(m, 'claude'))).toBe(false);
   });
 
   it('a real /clear in the same batch still classifies normally', () => {

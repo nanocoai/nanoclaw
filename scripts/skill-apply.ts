@@ -25,6 +25,8 @@
 import { execSync } from 'node:child_process';
 import { readFileSync, existsSync, writeFileSync, appendFileSync, copyFileSync, mkdirSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
+import { gitFetchBranchCommand } from './git-fetch-branch.js';
+import { gitShowToFileCommand } from './git-show-to-file.js';
 import { parseDirectives, promptVar, type Directive } from './skill-directives.js';
 
 // What an `nc:prompt` DECLARES about the value it needs — the core seam's input
@@ -72,7 +74,28 @@ export type ApplyEvent =
 // the terminal status block's fields, which `capture:<var>=<FIELD>` binds.
 export interface StepOutcome {
   ok: boolean;
+  /** `ERROR` holds the step's own one-line failure message when it reports one. */
   fields: Record<string, string>;
+}
+
+/**
+ * A streaming step that ended without success. `reported` is true when the
+ * step's terminal block named its own cause, which then stands as the bounce
+ * reason verbatim instead of the engine's generic wrapper.
+ */
+export class StepFailure extends Error {
+  readonly reported: boolean;
+  constructor(reportedError?: string) {
+    const message = reportedError?.trim();
+    super(message || 'the step did not complete');
+    this.reported = Boolean(message);
+  }
+}
+
+// Consumers must use this filter for command logs, diagnostics and live output.
+// Raw stdout remains available for captures; secret-derived captures stay private.
+export interface ExecContext {
+  redact: (text: string) => string;
 }
 
 export type StepStatus = 'skip' | 'apply' | 'needs-input' | 'agent';
@@ -294,7 +317,7 @@ export interface ApplyOptions {
   onEvent?: (e: ApplyEvent) => void | Promise<void>;
   // dep/run/branch-fetch; injectable for tests. Returns the command's stdout so
   // a `run capture:<var>` can bind it into a {{var}} (the twin of `prompt`).
-  exec?: (cmd: string) => string | void | Promise<string | void>;
+  exec?: (cmd: string, context?: ExecContext) => string | void | Promise<string | void>;
   // Override dependency commands when the declared package manager is not
   // directly available on the host (for example, run the container's pinned
   // Bun through pnpm dlx during a refresh).
@@ -304,7 +327,7 @@ export interface ApplyOptions {
   // `=== NANOCLAW SETUP: … ===` status blocks, renders them to the operator live,
   // and resolves with the terminal block's fields (bound via capture:<var>=<FIELD>).
   // Absent ⇒ a step directive degrades to an agent (runs the step from the prose).
-  execStream?: (cmd: string) => Promise<StepOutcome>;
+  execStream?: (cmd: string, context?: ExecContext) => Promise<StepOutcome>;
   // Run effects the CALLER owns and will perform itself — those runs are skipped
   // (not executed). e.g. a headless rebuild or a setup that restarts once at the
   // end passes ['restart']; applyProviderSkill passes ['build','test'].
@@ -605,6 +628,8 @@ function dotPath(obj: unknown, path: string): unknown {
 // An optional `validate:<re>` is enforced against every bound value; a mismatch
 // THROWS so the run bounces to an agent — a command's output has no human to
 // re-prompt, so an invalid capture is a real failure, not a re-ask.
+// Neither error quotes the output: it can come from a remote server, and the
+// bounce reason reaches the terminal and the setup assistant.
 function bindCapture(
   spec: string,
   stdout: string,
@@ -613,14 +638,19 @@ function bindCapture(
 ): void {
   const re = validate ? new RegExp(validate) : undefined;
   const set = (name: string, value: string): void => {
-    if (re && !re.test(value)) throw new Error(`captured ${name}="${value}" does not match validate:${validate}`);
-    vars.set(name, { value, secret: false });
+    if (re && !re.test(value)) throw new Error(`captured ${name} does not match validate:${validate}`);
+    vars.set(name, { value, secret: [...vars.values()].some((v) => v.secret && v.value && value.includes(v.value)) });
   };
   if (!spec.includes('=')) {
     set(spec, stdout);
     return;
   }
-  const json = JSON.parse(stdout) as unknown; // not JSON → throws → outer catch bounces
+  let json: unknown;
+  try {
+    json = JSON.parse(stdout);
+  } catch {
+    throw new Error('capture output is not valid JSON'); // → outer catch bounces
+  }
   for (const pair of spec.split(',')) {
     const eq = pair.indexOf('=');
     if (eq < 1) continue;
@@ -646,27 +676,32 @@ async function applyOne(
 ): Promise<void> {
   const { root, skillDir, exec, vars, journal } = ctx;
   switch (d.kind) {
-    case 'copy':
+    case 'copy': {
+      // Install fills gaps; only an explicit refresh replaces existing files.
+      // The block can contain both, so honor selfStatus's per-file decision.
+      const lines = d.body.filter((line) => ctx.mode === 'refresh' || !has(root, destOf(line)));
+      if (lines.length === 0) break;
       if (d.attrs['from-branch']) {
         const b = String(d.attrs['from-branch']);
         const remote = ctx.resolveRemote(b);
-        await exec(`git fetch ${remote} ${b}`);
-        for (const l of d.body) {
+        await exec(gitFetchBranchCommand(remote, b));
+        for (const l of lines) {
           // The shell redirect can't create parent directories, and the dest
           // may not exist on trunk (e.g. container skills that live only on
           // the channels branch). Mirror the local-copy path's mkdir.
           mkdirSync(dirname(join(root, destOf(l))), { recursive: true });
-          await exec(`git show ${remote}/${b}:${srcOf(l)} > ${destOf(l)}`);
+          await exec(gitShowToFileCommand(`refs/remotes/${remote}/${b}`, srcOf(l), destOf(l)));
         }
       } else {
-        for (const l of d.body) {
+        for (const l of lines) {
           const dst = join(root, destOf(l));
           mkdirSync(dirname(dst), { recursive: true });
           copyFileSync(join(skillDir, srcOf(l)), dst);
         }
       }
-      for (const l of d.body) journal.push({ op: 'wrote', path: destOf(l) });
+      for (const l of lines) journal.push({ op: 'wrote', path: destOf(l) });
       break;
+    }
     case 'append': {
       const to = String(d.attrs.to);
       const marker = typeof d.attrs.at === 'string' ? d.attrs.at : undefined;
@@ -742,7 +777,7 @@ async function applyOne(
         if (!ctx.execStream)
           throw new Error('effect:step needs a streaming exec — an agent runs the step from the prose');
         const { ok, fields } = await ctx.execStream(substitute(d.body.join('\n'), vars));
-        if (!ok) throw new Error('the step did not complete');
+        if (!ok) throw new StepFailure(fields.ERROR);
         if (capture) {
           for (const pair of capture.split(',')) {
             const eq = pair.indexOf('=');
@@ -824,13 +859,19 @@ export async function applySkill(skillDir: string, root: string, opts: ApplyOpti
   // caught, or one newer than this engine) bounces to an agent, never blocks.
   const md = read(join(skillDir, 'SKILL.md'));
   const directives = parseDirectives(md);
-  const exec =
+  const execute =
     opts.exec ??
     (() => {
       throw new Error('no exec provided');
     });
   const resolveRemote = opts.resolveRemote ?? ((b: string) => defaultResolveRemote(b, root));
   const vars = new Map<string, { value: string; secret: boolean }>();
+  const redact = (text: string): string => {
+    const secrets = [...vars.values()].filter((v) => v.secret && v.value).map((v) => v.value);
+    for (const secret of secrets.sort((a, b) => b.length - a.length)) text = text.split(secret).join('[REDACTED]');
+    return text;
+  };
+  const exec = (cmd: string) => execute(cmd, { redact });
   const res: ApplyResult = {
     applied: [],
     skipped: [],
@@ -852,6 +893,10 @@ export async function applySkill(skillDir: string, root: string, opts: ApplyOpti
   // `blocked` stays false and a later restart remains runnable.
   let blocked = false;
   const SIDE_EFFECTS = new Set(['restart', 'step', 'wire']);
+  // Validation of an install that already failed only delays the failure the
+  // operator needs to read. It is not run once `blocked` latches, but it is
+  // bounced, so the agent's recovery tasks still include it.
+  const VALIDATION = new Set(['build', 'test']);
   const bounce = (d: Directive, reason: string) => {
     blocked = true;
     res.agentTasks.push({ kind: d.kind, line: d.line, reason, prose: proseFor(md, d.line) });
@@ -958,7 +1003,8 @@ export async function applySkill(skillDir: string, root: string, opts: ApplyOpti
       // own — bounce it too so the agent runs it from the prose once the upstream
       // failure is fixed. (A deferred prompt did NOT set `blocked`, so this only
       // trips on a real failure, never a headless rebuild's missing input.)
-      if (d.kind === 'run' && typeof d.attrs.effect === 'string' && SIDE_EFFECTS.has(d.attrs.effect) && blocked) {
+      const effect = d.kind === 'run' && typeof d.attrs.effect === 'string' ? d.attrs.effect : '';
+      if (blocked && (SIDE_EFFECTS.has(effect) || VALIDATION.has(effect))) {
         bounce(d, 'skipped: an earlier step did not complete — run this from the prose after fixing it');
         continue;
       }
@@ -983,7 +1029,7 @@ export async function applySkill(skillDir: string, root: string, opts: ApplyOpti
         root,
         skillDir,
         exec,
-        execStream: opts.execStream,
+        execStream: opts.execStream ? (cmd) => opts.execStream!(cmd, { redact }) : undefined,
         resolveRemote,
         resolveDependencyCommand: opts.resolveDependencyCommand,
         vars,
@@ -996,7 +1042,7 @@ export async function applySkill(skillDir: string, root: string, opts: ApplyOpti
         await opts.onEvent({ type: 'step-end', kind: d.kind, line: d.line, label, ok: true, durationMs });
       res.applied.push(`${d.kind}: ${st.detail}`);
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = redact(e instanceof Error ? e.message : String(e));
       // Close the step as failed before classifying — keeps step-start/step-end
       // balanced whether the throw becomes a deferred (unresolved input) or a
       // bounce (a real failure, handled below). The failure-path close is
@@ -1017,7 +1063,11 @@ export async function applySkill(skillDir: string, root: string, opts: ApplyOpti
           /* already failing — the close is best-effort */
         }
       }
-      if (/unresolved \{\{/.test(msg))
+      // A step's own ERROR text is checked first: it is the step's to write, so
+      // one that reads like the engine's deferred-input marker is still a
+      // failure (the gate must latch), never a missing answer.
+      if (e instanceof StepFailure && e.reported) bounce(d, msg);
+      else if (/unresolved \{\{/.test(msg))
         res.deferred.push(msg); // blocked on a prompt input
       else bounce(d, `engine could not apply (${msg}) — an agent applies it from the prose`);
     }

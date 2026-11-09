@@ -39,9 +39,11 @@ export function registerSlackAutoProvision(
   register: (channel: string, step: ChannelPreStep) => void,
   registerCompanions: (channel: string, skills: readonly string[]) => void,
 ): void {
-  register('slack', async (agentName) => {
+  register('slack', async (agentName, options) => {
     const { maybeAutoProvisionSlack } = await import('./slack-auto.js');
-    return maybeAutoProvisionSlack(agentName);
+    return options?.browserConsent
+      ? maybeAutoProvisionSlack(agentName, { browserConsent: true })
+      : maybeAutoProvisionSlack(agentName);
   });
   registerCompanions('slack', SLACK_AGENTS_COMPANION_SKILLS);
 }

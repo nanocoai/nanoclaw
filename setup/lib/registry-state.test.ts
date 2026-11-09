@@ -89,4 +89,10 @@ describe('the shell reader stays in step', () => {
   it('keys per-platform lookups on linux/<arch>, as this module does', () => {
     expect(pullSh).toContain('HOST_PLATFORM="linux/${HOST_ARCH}"');
   });
+
+  it('asks release-image.sh, as readAgentImagePin does, before the versions.json pin', () => {
+    const listed = pullSh.indexOf('release-image.sh" --fetch');
+    expect(listed).toBeGreaterThan(-1);
+    expect(listed).toBeLessThan(pullSh.indexOf('REF="$(read_version_pin agent-image)"'));
+  });
 });

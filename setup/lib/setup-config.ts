@@ -39,9 +39,15 @@ interface StringEntry extends BaseEntry {
   validate?: (v: string) => string | undefined;
 }
 
+export interface EnumOption {
+  value: string;
+  label: string;
+  hint?: string;
+}
+
 interface EnumEntry extends BaseEntry {
   type: 'enum';
-  options: { value: string; label: string; hint?: string }[];
+  options: EnumOption[];
   default?: string;
 }
 
@@ -63,28 +69,6 @@ const httpUrl = (v: string): string | undefined => (/^https?:\/\/\S+/.test(v) ? 
 
 export const CONFIG: Entry[] = [
   {
-    key: 'onecliApiHost',
-    label: 'OneCLI vault URL',
-    help: 'Use a remote OneCLI vault instead of installing one locally.',
-    surface: 'flag+ui',
-    group: 'OneCLI',
-    type: 'url',
-    default: 'https://api.onecli.sh',
-    placeholder: 'https://api.onecli.sh',
-    validate: httpUrl,
-  },
-  {
-    key: 'onecliApiToken',
-    label: 'OneCLI access token',
-    help: 'Bearer token for the remote vault. Required if --onecli-api-host is set.',
-    surface: 'flag+ui',
-    group: 'OneCLI',
-    type: 'string',
-    secret: true,
-    placeholder: 'oc_…',
-    validate: (v) => (v.startsWith('oc_') ? undefined : 'Must start with oc_'),
-  },
-  {
     key: 'anthropicBaseUrl',
     label: 'Anthropic API base URL',
     help: 'Use a proxy or alternative endpoint instead of api.anthropic.com.',
@@ -103,6 +87,15 @@ export const CONFIG: Entry[] = [
     type: 'string',
     secret: true,
     validate: (v) => (v.trim() ? undefined : 'Required'),
+  },
+  {
+    key: 'gatewayProvider',
+    label: 'Credential gateway',
+    help: 'Select the credential and egress gateway installed for this NanoClaw copy.',
+    surface: 'flag+ui',
+    group: 'Agent',
+    type: 'enum',
+    options: [],
   },
   {
     key: 'templatePath',

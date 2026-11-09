@@ -68,7 +68,7 @@ import './slack-a2a-guard.js';
 
 Pinned exactly — the supply-chain policy rejects ranges and `latest`:
 ```nc:dep
-@chat-adapter/slack@4.29.0
+@chat-adapter/slack@4.41.1
 ```
 
 ### 4. Build and validate
@@ -153,6 +153,7 @@ With webhook delivery, the bridge serves port 3000 at `/webhook/slack`; that
 URL must be publicly reachable and registered with Slack. Tell the user:
 ```nc:operator when:connection=webhook
 Set up event delivery (needs a public HTTPS URL for port 3000 — ngrok, a Cloudflare Tunnel, or a reverse proxy on a VPS):
+NanoClaw's webhook server listens on 127.0.0.1 only, so a tunnel or proxy on this machine works as is. If yours runs on another machine or in Docker on Linux, add `WEBHOOK_HOST=0.0.0.0` to `.env` before the restart step.
 1. Event Subscriptions → Enable Events. Set the Request URL to https://<your-public-host>/webhook/slack and wait for the challenge to pass.
 2. Subscribe to bot events: message.channels, message.groups, message.im, app_mention. Save Changes.
 3. Interactivity & Shortcuts → toggle Interactivity on, set the same Request URL, Save Changes, then reinstall the app when Slack prompts.
@@ -209,3 +210,4 @@ then `/slack-agent-flow` — the setup wizard does both automatically by default
 - **The greeting arrives but your replies vanish.** Sending works with just the bot token; *receiving* needs the event path. Socket Mode: the toggle on, `SLACK_APP_TOKEN` set with `connections:write`, and the bot events (`message.im`, `message.channels`, `message.groups`, `app_mention`) subscribed. Webhook: the Request URL must have passed Slack's challenge and the same events subscribed. Either way, App Home's Messages Tab must be enabled or Slack refuses DMs to the app.
 - **Adapter registered but Slack never connects.** Run `pnpm exec vitest run src/channels/slack-registration.test.ts` — red means the barrel import or the `@chat-adapter/slack` install drifted, so re-run the Apply steps. If green, restart the service (`bash setup/lib/restart.sh`) and check `logs/nanoclaw.error.log`.
 - **Rooms, canvases, or DM onboarding are missing.** Those are the agents feature, not this adapter install — they arrive with `/slack-a2a-rooms` + `/slack-agent-flow` (setup applies both by default). If those skills were applied, check `src/modules/index.ts` carries their module imports, then restart.
+- **A proxy or tunnel on another machine, or in Docker on Linux, gets connection refused or times out.** The webhook server listens on 127.0.0.1 only. Add `WEBHOOK_HOST=0.0.0.0` to `.env` and restart; `Webhook server started` in `logs/nanoclaw.log` shows the host it bound.

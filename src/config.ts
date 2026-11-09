@@ -1,3 +1,4 @@
+import net from 'net';
 import os from 'os';
 import path from 'path';
 
@@ -9,8 +10,6 @@ import { isValidTimezone } from './timezone.js';
 const envConfig = readEnvFile([
   'ASSISTANT_NAME',
   'ASSISTANT_HAS_OWN_NUMBER',
-  'ONECLI_URL',
-  'ONECLI_API_KEY',
   'TZ',
   'DEFAULT_AGENT_PROVIDER',
   'NANOCLAW_DEFAULT_MODEL',
@@ -20,7 +19,10 @@ const envConfig = readEnvFile([
   'CONTAINER_PIDS_LIMIT',
   'NANOCLAW_EGRESS_LOCKDOWN',
   'NANOCLAW_EGRESS_NETWORK',
-  'ONECLI_GATEWAY_CONTAINER',
+  'WEBHOOK_PORT',
+  'WEBHOOK_HOST',
+  'NANOCLAW_ABSOLUTE_CEILING_MS',
+  'NANOCLAW_CLAIM_STUCK_MS',
 ]);
 
 /**
@@ -74,9 +76,9 @@ export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
 export const CENTRAL_DB_PATH = path.join(DATA_DIR, 'v2.db');
-// Local agent-template library. Committed but ships empty (+ README). Resolved
-// once at load. Override to another LOCAL path via NANOCLAW_TEMPLATES_DIR; never
-// a remote URL, never an ncl flag, never runtime-mutable.
+// Local agent-template library: ships with only a README; setup and create_agent
+// copy library templates in (gitignored). Resolved once at load. Override to
+// another LOCAL path via NANOCLAW_TEMPLATES_DIR; never a remote URL or an ncl flag.
 export const TEMPLATES_DIR = process.env.NANOCLAW_TEMPLATES_DIR
   ? path.resolve(process.env.NANOCLAW_TEMPLATES_DIR)
   : path.resolve(PROJECT_ROOT, 'templates');
@@ -90,8 +92,6 @@ export const CONTAINER_IMAGE = process.env.CONTAINER_IMAGE || getDefaultContaine
 // reaping only ever see this install's sessions, not a peer's.
 export const INSTALL_SLUG = getInstallSlug(PROJECT_ROOT);
 export const CONTAINER_INSTALL_LABEL = `nanoclaw-install=${INSTALL_SLUG}`;
-export const ONECLI_URL = process.env.ONECLI_URL || envConfig.ONECLI_URL;
-export const ONECLI_API_KEY = process.env.ONECLI_API_KEY || envConfig.ONECLI_API_KEY;
 // Per-container resource caps, passed through to `docker run`. Default empty =
 // no flag added = today's unbounded behavior (don't OOM existing OSS workloads).
 // Operators opt in: CONTAINER_CPU_LIMIT=2, CONTAINER_MEMORY_LIMIT=8g.
@@ -105,13 +105,41 @@ export const CONTAINER_MEMORY_LIMIT = process.env.CONTAINER_MEMORY_LIMIT || envC
 // Empty = no cap.
 export const CONTAINER_PIDS_LIMIT = process.env.CONTAINER_PIDS_LIMIT ?? envConfig.CONTAINER_PIDS_LIMIT ?? '2048';
 
-// Egress lockdown — force all agent traffic through the OneCLI gateway on a
+// Egress lockdown — force all agent traffic through the selected gateway on a
 // no-internet Docker network. Off by default; consumed by src/egress-lockdown.ts.
 export const EGRESS_LOCKDOWN = (process.env.NANOCLAW_EGRESS_LOCKDOWN || envConfig.NANOCLAW_EGRESS_LOCKDOWN) === 'true';
 export const EGRESS_NETWORK =
   process.env.NANOCLAW_EGRESS_NETWORK || envConfig.NANOCLAW_EGRESS_NETWORK || 'nanoclaw-egress';
-export const ONECLI_GATEWAY_CONTAINER =
-  process.env.ONECLI_GATEWAY_CONTAINER || envConfig.ONECLI_GATEWAY_CONTAINER || 'onecli';
+
+// Global overrides for the host sweep's two stuck-container timers (see
+// src/reconcile-session.ts). Raw strings: parsed and range-checked where they
+// are consumed so a bad value falls back to the built-in default, not NaN.
+export const ABSOLUTE_CEILING_MS_RAW =
+  process.env.NANOCLAW_ABSOLUTE_CEILING_MS || envConfig.NANOCLAW_ABSOLUTE_CEILING_MS || '';
+export const CLAIM_STUCK_MS_RAW = process.env.NANOCLAW_CLAIM_STUCK_MS || envConfig.NANOCLAW_CLAIM_STUCK_MS || '';
+
+// Resolve when the listener starts so a late process override still wins.
+export function getWebhookPort(): number {
+  const raw = process.env.WEBHOOK_PORT || envConfig.WEBHOOK_PORT || '3000';
+  const port = Number(raw);
+  if (!/^[1-9]\d*$/.test(raw) || !Number.isInteger(port) || port > 65_535) {
+    throw new Error(`Invalid WEBHOOK_PORT ${JSON.stringify(raw)}: expected an integer from 1 to 65535`);
+  }
+  return port;
+}
+
+// Loopback by default: platforms reach the port through a tunnel or reverse
+// proxy on this machine, so other hosts on the network never see it. Set an
+// IP address (0.0.0.0 for every interface) when the proxy runs elsewhere.
+export function getWebhookHost(): string {
+  const host = process.env.WEBHOOK_HOST || envConfig.WEBHOOK_HOST || '127.0.0.1';
+  if (!net.isIP(host) || host.includes('%')) {
+    throw new Error(
+      `Invalid WEBHOOK_HOST ${JSON.stringify(host)}: expected an IP address such as 127.0.0.1 or 0.0.0.0`,
+    );
+  }
+  return host;
+}
 
 // Timezone for scheduled tasks, message formatting, etc.
 // Validates each candidate is a real IANA identifier before accepting.

@@ -124,3 +124,29 @@ describe('.env write fences (replace, not append)', () => {
     expect(env().split('\n')).toContain('ASSISTANT_NAME=C-3PO (backup)');
   });
 });
+
+describe('Baileys pin', () => {
+  // /update-nanoclaw re-runs this pin on every install, so a stale value spreads
+  // to everyone. GHSA-qvv5-jq5g-4cgg (message spoofing) is fixed from 7.0.0-rc12
+  // on the v7 line the adapter needs.
+  it('pins a Baileys release with the GHSA-qvv5-jq5g-4cgg fix', () => {
+    const versions = directives
+      .filter((d) => d.kind === 'dep')
+      .flatMap((d) => d.body)
+      .filter((s) => s.startsWith('@whiskeysockets/baileys@'))
+      .map((s) => s.slice('@whiskeysockets/baileys@'.length));
+    expect(versions).not.toEqual([]);
+    for (const version of versions) {
+      expect(hasSpoofingFix(version), `add-whatsapp pins @whiskeysockets/baileys@${version}`).toBe(true);
+    }
+  });
+});
+
+/** 7.0.0-rcN with N >= 12, 7.0.0, or any later 7.x or higher release (rc names drop the dot after rc.9). */
+function hasSpoofingFix(version: string): boolean {
+  const m = /^(\d+)\.(\d+)\.(\d+)(?:-rc\.?(\d+))?(?:\+.*)?$/.exec(version);
+  if (!m) return false;
+  const [major, minor, patch, rc] = [Number(m[1]), Number(m[2]), Number(m[3]), m[4]];
+  if (major !== 7) return major > 7;
+  return minor > 0 || patch > 0 || rc === undefined || Number(rc) >= 12;
+}

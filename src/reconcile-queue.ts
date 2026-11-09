@@ -12,9 +12,10 @@
  * - A thrown reconcile backs off per key (5s doubling, capped) without ever
  *   holding up other keys. The cap stays under the sweep's resync interval —
  *   past that point the resync re-add would fire first anyway.
- * - Execution is serial by default (`concurrency: 1`) — the same profile as
- *   the sweep loop this queue replaces. The knob exists so raising it later
- *   is a config change, not a rewrite.
+ * - Execution is serial by default (`concurrency: 1`). The sweep raises it
+ *   (RECONCILE_CONCURRENCY in src/host-sweep.ts) so a tick over many session
+ *   mailboxes overlaps their IO; a key still never runs concurrently with
+ *   itself.
  *
  * `idle()` (beyond the contract) resolves when nothing is running and nothing
  * is immediately ready; delayed retries don't count. The sweep uses it to end

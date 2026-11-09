@@ -233,6 +233,59 @@ describe('session manager', () => {
     }
   });
 
+  it('should reject inbound attachments when messageId is an absolute path', async () => {
+    initSessionFolder('ag-1', 'sess-test');
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    const outside = path.join(TEST_DIR, 'outside-abs');
+
+    await writeSessionMessage('ag-1', session.id, {
+      id: outside,
+      kind: 'chat',
+      timestamp: now(),
+      content: JSON.stringify({
+        text: 'abs',
+        attachments: [{ name: 'photo.png', data: Buffer.from('PNGBYTES').toString('base64'), size: 8 }],
+      }),
+    });
+
+    expect(fs.existsSync(outside)).toBe(false);
+    const inboxRoot = path.join(sessionDir('ag-1', session.id), 'inbox');
+    if (fs.existsSync(inboxRoot)) {
+      expect(fs.readdirSync(inboxRoot)).toEqual([]);
+    }
+  });
+
+  it('should stage inbound attachments when messageId contains a path separator', async () => {
+    initSessionFolder('ag-1', 'sess-test');
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    const messageId = 'spaces/AAA/messages/BBB.BBB:ag-1';
+
+    await writeSessionMessage('ag-1', session.id, {
+      id: messageId,
+      kind: 'chat',
+      timestamp: now(),
+      content: JSON.stringify({
+        text: 'photo',
+        attachments: [{ name: 'photo.png', data: Buffer.from('PNGBYTES').toString('base64'), size: 8 }],
+      }),
+    });
+
+    const inboxRoot = path.join(sessionDir('ag-1', session.id), 'inbox');
+    const folders = fs.readdirSync(inboxRoot);
+    expect(folders).toHaveLength(1);
+    const folder = folders[0];
+    expect(folder).toMatch(/^~spaces-AAA-messages-BBB\.BBB-ag-1-[0-9a-f]{16}$/);
+    expect(fs.readFileSync(path.join(inboxRoot, folder, 'photo.png'), 'utf-8')).toBe('PNGBYTES');
+
+    const db = new Database(inboundDbPath('ag-1', session.id));
+    const row = db.prepare('SELECT id, content FROM messages_in').get() as { id: string; content: string };
+    db.close();
+    expect(row.id).toBe(messageId);
+    const [att] = JSON.parse(row.content).attachments;
+    expect(att.localPath).toBe(`inbox/${folder}/photo.png`);
+    expect(att.data).toBeUndefined();
+  });
+
   it('should still save inbound attachments with safe basenames', async () => {
     initSessionFolder('ag-1', 'sess-test');
     const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');

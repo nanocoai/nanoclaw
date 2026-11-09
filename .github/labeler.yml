@@ -9,7 +9,8 @@
 # hand and the workflow will not put it back.
 #
 # Paths with no confident owner are deliberately left unmapped rather than
-# guessed. See .github/workflows/label-area.yml for the runner side.
+# guessed. The runner side is the actions/labeler step at the end of
+# .github/workflows/label-pr.yml.
 
 "area/agent-memory":
   - changed-files:
@@ -110,7 +111,6 @@
           - "docs/build-and-runtime.md"
           - "docs/hardened-image.md"
           - "docs/host-lifecycle-migration.md"
-          - ".github/workflows/approve-agent-image.yml"
           - ".github/workflows/refresh-agent-image.yml"
           - ".github/workflows/verify-agent-image.yml"
           - ".claude/skills/manage-mounts/**"
@@ -186,9 +186,13 @@
           - ".claude/skills/add-ollama-provider/**"
 
 "area/repository-maintenance":
+  # Skill PRs regenerate .github/skill-pins; that alone is not repo maintenance.
+  - changed-files:
+      - all-globs-to-any-file:
+          - ".github/**"
+          - "!.github/skill-pins/**"
   - changed-files:
       - any-glob-to-any-file:
-          - ".github/**"
           - ".husky/**"
           - ".gitignore"
           - ".npmrc"
@@ -238,7 +242,7 @@
           - "src/modules/permissions/**"
           - "src/modules/mount-security/**"
           - "src/attachment-safety*"
-          - "src/inbox-safety*"
+          - "src/anchored-dir*"
           - "container/agent-runner/src/harness-tag-strip*"
           - "docs/SECURITY.md"
 

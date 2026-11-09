@@ -11,8 +11,10 @@ describe('Claude memory hook wiring', () => {
   );
 
   it('passes the shared hook to Claude without a second SDK hook path', () => {
-    expect(runnerSource).toMatch(/provider\.registerMemorySessionHook\(MEMORY_SESSION_HOOK\)/);
-    expect(providerSource).toMatch(/registerMemorySessionHook\(hook: MemorySessionHookRegistration\)/);
+    expect(runnerSource).toMatch(/registerProviderMemorySessionHook\(providerName, provider, MEMORY_SESSION_HOOK\)/);
+    expect(providerSource).toMatch(
+      /registerMemorySessionHook\(hook: MemorySessionHookRegistration, memory\?: unknown\)/,
+    );
     expect(providerSource).not.toContain('memorySessionStartHook');
     expect(providerSource).not.toContain('providesMemorySessionHook');
     expect(groupInitSource).not.toContain('MEMORY_SESSION_START_MATCHER');
