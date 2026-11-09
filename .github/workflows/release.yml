@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Exact package version to release (x.y.z, or x.y.z-rc.N for a pre-release; no v prefix)
+        description: Exact package version to release (x.y.z, or x.y.z-beta.N / x.y.z-rc.N for a pre-release; no v prefix)
         required: true
         type: string
       target_sha:
@@ -87,7 +87,7 @@ jobs:
           set -euo pipefail
           # Stable releases need a second person; pre-releases are approved by their sole reviewer.
           # Same rule as the publish job's environment expression; release.mjs verify rejects
-          # any '-' suffix other than -rc.N. Kept in shell so older target commits still verify.
+          # any '-' suffix other than -beta.N or -rc.N. Kept in shell so older target commits still verify.
           case "$RELEASE_VERSION" in *-*) ENVIRONMENT=prerelease ;; *) ENVIRONMENT=release ;; esac
           case "$ENVIRONMENT" in
             release)
@@ -147,6 +147,12 @@ jobs:
         run: |
           set -euo pipefail
           node scripts/release.mjs verify "$RELEASE_VERSION"
+          # Order check from this workflow's own commit: an older target's release.mjs lacks it.
+          # A failed lookup, an empty tag list or a missing success line fails the step.
+          git ls-remote --tags --refs origin 'refs/tags/v*' > "$RUNNER_TEMP/release-tags.txt"
+          git show "$GITHUB_SHA:scripts/release.mjs" > "$RUNNER_TEMP/release-order.mjs"
+          ORDER=$(node "$RUNNER_TEMP/release-order.mjs" order "$RELEASE_VERSION" "$RUNNER_TEMP/release-tags.txt")
+          test "$ORDER" = "v${RELEASE_VERSION} sorts above every existing tag of its version"
 
           TAG="v${RELEASE_VERSION}"
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
@@ -199,7 +205,7 @@ jobs:
     runs-on: ubuntu-26.04
     # Both environments must be created and protected before the workflow lands.
     # GitHub otherwise auto-creates an unprotected environment on first use.
-    # Only x.y.z-rc.N passes verify with a '-'; the verify job checks this same environment.
+    # Only x.y.z-beta.N and x.y.z-rc.N pass verify with a '-'; the verify job checks this same environment.
     environment: ${{ contains(inputs.version, '-') && 'prerelease' || 'release' }}
     permissions:
       contents: write
@@ -224,6 +230,12 @@ jobs:
           git fetch --force origin main:refs/remotes/origin/main --tags
           test "$(git rev-parse HEAD)" = "$TARGET_SHA"
           git merge-base --is-ancestor "$TARGET_SHA" origin/main
+          # Order check from this workflow's own commit: an older target's release.mjs lacks it.
+          # A failed lookup, an empty tag list or a missing success line fails the step.
+          git ls-remote --tags --refs origin 'refs/tags/v*' > "$RUNNER_TEMP/release-tags.txt"
+          git show "$GITHUB_SHA:scripts/release.mjs" > "$RUNNER_TEMP/release-order.mjs"
+          ORDER=$(node "$RUNNER_TEMP/release-order.mjs" order "$RELEASE_VERSION" "$RUNNER_TEMP/release-tags.txt")
+          test "$ORDER" = "v${RELEASE_VERSION} sorts above every existing tag of its version"
           node scripts/release.mjs verify "$RELEASE_VERSION"
 
           TAG="v${RELEASE_VERSION}"
