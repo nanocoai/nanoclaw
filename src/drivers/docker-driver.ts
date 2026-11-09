@@ -66,12 +66,22 @@ const WATCH_RECOVERY_MAX_MS = 30_000;
  * Docker rejects `docker rm --force` while its own `--rm` auto-removal is still
  * running ("removal of container X is already in progress"). Only that error
  * is waited out: sleep between probes (budget below), then give up.
+ * The budget is elapsed time on a monotonic clock, counted from Docker's first
+ * "already in progress" reply. Each probe and retry call inside it gets the time
+ * left as its timeout, but never under REMOVAL_PROBE_FLOOR_MS (1s), so the probe
+ * at the deadline still runs. A Docker that honours timeouts therefore ends the
+ * wait at most about two floors past the budget (a last inspect, then one
+ * `rm --force`). The first `rm` before that reply keeps the normal CLI timeout,
+ * and since `Cli.run` is synchronous, a Docker process that ignores the timeout
+ * kill can still overrun.
  */
 const REMOVAL_IN_PROGRESS = /removal of container .+ is already in progress/i;
 const CONTAINER_NOT_FOUND = /No such (container|object)/i;
 const NETWORK_NOT_FOUND = /No such network|network .* not found/i;
 const REMOVAL_WAIT_BUDGET_MS = 15_000;
 const REMOVAL_WAIT_INTERVALS_MS = [200, 400, 800, 1_000];
+/** Minimum timeout for any Docker call inside the removal wait, so the probe at the deadline still runs (`execFileSync` treats 0 as no timeout). */
+const REMOVAL_PROBE_FLOOR_MS = 1_000;
 
 interface InstallWatch {
   subscribers: Set<(event: SessionEvent) => void>;
@@ -677,9 +687,11 @@ class DockerHandle implements SessionHandle {
   }
 
   /** Container status from an exact-name inspect; `null` when the container is gone. Other failures throw. */
-  #probeStatus(name: string): string | null {
+  #probeStatus(name: string, timeoutMs?: number): string | null {
     try {
-      return this.cli.run(['inspect', '--type', 'container', '--format', '{{.State.Status}}', name]).trim();
+      return this.cli
+        .run(['inspect', '--type', 'container', '--format', '{{.State.Status}}', name], { timeoutMs })
+        .trim();
     } catch (probeError) {
       if (CONTAINER_NOT_FOUND.test(errorMessage(probeError))) return null;
       throw normalizeDockerError(probeError);
@@ -697,13 +709,15 @@ class DockerHandle implements SessionHandle {
       if (this.#probeStatus(name) === null) return;
       throw normalizeDockerError(error);
     }
-    let waited = 0;
+    // Monotonic elapsed-time deadline: Docker call latency counts against the budget, not just the sleeps.
+    const deadline = performance.now() + REMOVAL_WAIT_BUDGET_MS;
+    const callTimeoutMs = () => Math.max(Math.ceil(deadline - performance.now()), REMOVAL_PROBE_FLOOR_MS);
     for (let step = 0; ; step++) {
-      const status = this.#probeStatus(name);
+      const status = this.#probeStatus(name, callTimeoutMs());
       if (status === null) return;
       if (status !== 'removing') {
         try {
-          this.cli.run(['rm', '--force', name]);
+          this.cli.run(['rm', '--force', name], { timeoutMs: callTimeoutMs() });
           return;
         } catch (retryError) {
           const retryMessage = errorMessage(retryError);
@@ -712,11 +726,10 @@ class DockerHandle implements SessionHandle {
         }
       }
       // The loop also probes once at the full budget, so a removal that finishes during the last sleep is seen.
-      if (waited >= REMOVAL_WAIT_BUDGET_MS) break;
+      const remainingMs = deadline - performance.now();
+      if (remainingMs <= 0) break;
       const scheduledInterval = REMOVAL_WAIT_INTERVALS_MS[Math.min(step, REMOVAL_WAIT_INTERVALS_MS.length - 1)]!;
-      const interval = Math.min(scheduledInterval, REMOVAL_WAIT_BUDGET_MS - waited);
-      await new Promise((resolve) => setTimeout(resolve, interval));
-      waited += interval;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(scheduledInterval, remainingMs)));
     }
     throw normalizeDockerError(error);
   }

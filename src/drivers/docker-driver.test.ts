@@ -633,6 +633,60 @@ describe('lifecycle', () => {
       await expect(stopped).resolves.toBeUndefined();
     });
 
+    it('counts Docker call latency against the wait budget', async () => {
+      const handle = await driver().prepare(fixtureSpec());
+      await handle.start();
+      cli.responses = [
+        { match: /^rm /, throws: inProgress },
+        { match: /^inspect --type container/, output: 'removing\n' },
+      ];
+      // Every probe takes 1s of wall time. `vi.setSystemTime` moves Date but not performance.now, so advance the fake clock.
+      cli.beforeRun = (args) => {
+        if (args[0] === 'inspect') vi.advanceTimersByTime(1_000);
+      };
+
+      const stopped = handle.stop('sweep-kill');
+      const assertion = expect(stopped).rejects.toMatchObject({ kind: 'unknown' });
+      await vi.advanceTimersByTimeAsync(40_000);
+      await assertion;
+
+      // Sleeps alone would allow 18 probes (~33s with 1s probes); counting probe time stops it near 15s.
+      // Each timeout is the budget left when the probe starts, and the last one is the 1s floor.
+      const probes = cli.calls.filter((call) => call.args[0] === 'inspect' && call.args[1] === '--type');
+      expect(probes.map((probe) => probe.timeoutMs)).toEqual([
+        15_000, 13_800, 12_400, 10_600, 8_600, 6_600, 4_600, 2_600, 1_000,
+      ]);
+    });
+
+    it('gives the retry rm the budget left after a probe that finds the container not removing', async () => {
+      const handle = await driver().prepare(fixtureSpec());
+      await handle.start();
+      cli.responses = [
+        { match: /^rm /, throws: inProgress, once: true },
+        { match: /^inspect --type container/, output: 'removing\n', once: true },
+        { match: /^inspect --type container/, output: 'removing\n', once: true },
+        { match: /^inspect --type container/, output: 'removing\n', once: true },
+        { match: /^inspect --type container/, output: 'exited\n', once: true },
+      ];
+      cli.beforeRun = (args) => {
+        if (args[0] === 'inspect') vi.advanceTimersByTime(1_000);
+      };
+
+      const stopped = handle.stop('sweep-kill');
+      const assertion = expect(stopped).resolves.toBeUndefined();
+      await vi.advanceTimersByTimeAsync(40_000);
+      await assertion;
+
+      // Timeline: probes start at 0s, 1.2s, 2.6s and 4.4s (each takes 1s, sleeps are 200, 400, 800ms).
+      // The fourth probe returns 'exited' at 5.4s, so the retry rm gets 15_000 - 5_400 = 9_600 ms.
+      const rmCalls = cli.calls.filter((call) => call.args[0] === 'rm');
+      const initialRm = rmCalls.find((call) => call.timeoutMs === undefined);
+      const retryRm = rmCalls.find((call) => call.timeoutMs !== undefined);
+      expect(initialRm).toBeDefined();
+      expect(retryRm?.timeoutMs).toBe(9_600);
+      expect(retryRm!.timeoutMs!).toBeGreaterThanOrEqual(1_000);
+    });
+
     describe('step memory across stops', () => {
       const networkInUse = new Error(
         'Error response from daemon: error while removing network: network ncl-spike-s1-net has active endpoints',
