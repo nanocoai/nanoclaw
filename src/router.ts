@@ -498,17 +498,22 @@ async function evaluateEngage(
     case 'mention-sticky': {
       if (isMention) return true;
       if (mg.is_group === 0) return false; // DMs never use mention-sticky sensibly
-      const key = threadKey(agent.agent_group_id, mg.id, threadId);
-      if (writesInFlight.get(key)?.wake) return true;
-      const silentBefore = (writesInFlight.get(key)?.silent ?? 0) > 0;
-      const existing = await findSessionForAgent(agent.agent_group_id, mg.id, threadId);
-      const evidence = existing ? await inboxWakeEvidence(agent.agent_group_id, existing.id) : 'chatter';
-      const after = writesInFlight.get(key);
-      // A wake that began while we looked counts. An inbox with no evidence
-      // (e.g. after a folder reset) keeps the thread active, unless a silent
-      // first row was still being written.
-      if (after?.wake || evidence === 'woken') return true;
-      return evidence === 'none' && !silentBefore && !after?.silent;
+      const [thread, release] = holdThread(threadKey(agent.agent_group_id, mg.id, threadId));
+      try {
+        // A first mention still in the command gate decides for us.
+        if ((await gateVerdicts(thread)) || thread.wake > 0) return true;
+        const wakesBefore = thread.wakeStarted;
+        const silentBefore = thread.silent > 0;
+        const existing = await findSessionForAgent(agent.agent_group_id, mg.id, threadId);
+        const evidence = existing ? await inboxWakeEvidence(agent.agent_group_id, existing.id) : 'chatter';
+        // A wake that began while we looked counts. An inbox with no evidence
+        // (e.g. after a folder reset) keeps the thread active, unless a silent
+        // first row was still being written.
+        if ((await gateVerdicts(thread)) || thread.wakeStarted !== wakesBefore || evidence === 'woken') return true;
+        return evidence === 'none' && !silentBefore && thread.silent === 0;
+      } finally {
+        release();
+      }
     }
     default:
       // Unrecognized engage_mode (e.g. stale data from a past CLI version,
@@ -522,26 +527,55 @@ async function evaluateEngage(
   }
 }
 
-// Session writes in flight per (agent, mg, thread), from the command gate
-// until the row is in the inbox; a follow-up routed meanwhile reads these.
-const writesInFlight = new Map<string, { wake: number; silent: number }>();
+/**
+ * Routing in flight per (agent, mg, thread) that a sticky follow-up must see:
+ * command-gate verdicts pending for a wake, inbox writes not yet landed, and a
+ * count of wakes ever started. The entry lives while anyone holds it, so a
+ * reader can tell that a wake started and finished during its own lookup.
+ */
+interface ThreadInFlight {
+  holders: number;
+  gates: Set<Promise<boolean>>;
+  wake: number;
+  silent: number;
+  wakeStarted: number;
+}
+const threadsInFlight = new Map<string, ThreadInFlight>();
 
 function threadKey(agentGroupId: string, messagingGroupId: string, threadId: string | null): string {
   return JSON.stringify([agentGroupId, messagingGroupId, threadId]);
 }
 
-function startWrite(key: string, wake: boolean): () => void {
-  const entry = writesInFlight.get(key) ?? { wake: 0, silent: 0 };
-  writesInFlight.set(key, entry);
-  if (wake) entry.wake++;
-  else entry.silent++;
-  let ended = false;
-  return () => {
-    if (ended) return;
-    ended = true;
-    if (wake) entry.wake--;
-    else entry.silent--;
-    if (entry.wake === 0 && entry.silent === 0 && writesInFlight.get(key) === entry) writesInFlight.delete(key);
+function holdThread(key: string): [ThreadInFlight, () => void] {
+  const thread = threadsInFlight.get(key) ?? { holders: 0, gates: new Set(), wake: 0, silent: 0, wakeStarted: 0 };
+  threadsInFlight.set(key, thread);
+  thread.holders++;
+  let released = false;
+  return [
+    thread,
+    () => {
+      if (released) return;
+      released = true;
+      if (--thread.holders === 0 && threadsInFlight.get(key) === thread) threadsInFlight.delete(key);
+    },
+  ];
+}
+
+/** True when a pending command gate on this thread lets its wake through. */
+async function gateVerdicts(thread: ThreadInFlight): Promise<boolean> {
+  if (thread.gates.size === 0) return false;
+  return (await Promise.all(thread.gates)).some(Boolean);
+}
+
+/** Registers a pending gate verdict; settling it again is a no-op. */
+function openGate(thread: ThreadInFlight): (pass: boolean) => void {
+  let settle: (pass: boolean) => void = () => {};
+  const verdict = new Promise<boolean>((resolve) => {
+    settle = resolve;
+  });
+  thread.gates.add(verdict);
+  return (pass) => {
+    if (thread.gates.delete(verdict)) settle(pass);
   };
 }
 
@@ -593,11 +627,13 @@ async function deliverToAgent(
     threadId: effectiveThreadId,
   };
 
-  // Marked before the command gate so a follow-up routed during an admin
-  // lookup sees this write. A filtered or denied command drops the mark and
-  // creates no session, which mention-sticky would read as an active thread.
-  const endWrite = startWrite(threadKey(agent.agent_group_id, mg.id, effectiveThreadId), wake);
+  // A wake's gate verdict is pending from here: a follow-up routed meanwhile
+  // waits for it. A filtered or denied command creates no session, which
+  // mention-sticky would read as an active thread.
+  const [thread, release] = holdThread(threadKey(agent.agent_group_id, mg.id, effectiveThreadId));
+  const settleGate = wake ? openGate(thread) : undefined;
   const messageId = messageIdForAgent(event.message.id, agent.agent_group_id);
+  let writing = false;
   let session: Session;
   let created: boolean;
   try {
@@ -612,7 +648,7 @@ async function deliverToAgent(
         return;
       }
       if (gate.action === 'deny') {
-        endWrite();
+        settleGate?.(false);
         log.info('Admin command denied by gate', { command: gate.command, userId, agentGroupId: agent.agent_group_id });
         const adapter = getDeliveryAdapter();
         if (!adapter) {
@@ -637,6 +673,14 @@ async function deliverToAgent(
       }
     }
 
+    // Mark the write before releasing waiters, so none sees a gap.
+    writing = true;
+    if (wake) {
+      thread.wake++;
+      thread.wakeStarted++;
+    } else thread.silent++;
+    settleGate?.(true);
+
     ({ session, created } = await resolveSession(agent.agent_group_id, mg.id, effectiveThreadId, effectiveSessionMode));
 
     if (wake) {
@@ -660,7 +704,12 @@ async function deliverToAgent(
       trigger: wake,
     });
   } finally {
-    endWrite();
+    settleGate?.(false);
+    if (writing) {
+      if (wake) thread.wake--;
+      else thread.silent--;
+    }
+    release();
   }
 
   if (wake && created) {
