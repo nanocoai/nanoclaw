@@ -14,6 +14,9 @@ import { renderPostable } from './mattermost-adapter/format.js';
 import { registerChannelAdapter } from './channel-registry.js';
 import './mattermost.js';
 
+// Vitest 5 clears mock calls before each test, so read the import-time registration now.
+const registration = vi.mocked(registerChannelAdapter).mock.calls[0]?.[1];
+
 /** Mattermost counts runes; JS `length` counts UTF-16 units, so it is never smaller. */
 const runes = (text: string) => [...text].length;
 
@@ -21,7 +24,6 @@ describe('mattermost channel factory', () => {
   beforeEach(() => vi.mocked(createChatSdkBridge).mockClear());
 
   it('tells the bridge to split replies longer than a Mattermost post', async () => {
-    const registration = vi.mocked(registerChannelAdapter).mock.calls[0]?.[1];
     expect(registration).toBeDefined();
     await registration!.factory();
 
@@ -32,8 +34,7 @@ describe('mattermost channel factory', () => {
   it('keeps every rendered chunk within 16383 runes', async () => {
     const { splitForLimit: realSplit } =
       await vi.importActual<typeof import('./chat-sdk-bridge.js')>('./chat-sdk-bridge.js');
-    const registration = vi.mocked(registerChannelAdapter).mock.calls[0]![1];
-    await registration.factory();
+    await registration!.factory();
     const config = vi.mocked(createChatSdkBridge).mock.calls[0]![0];
     // Emoji placeholders grow when rendered; astral emoji are 2 UTF-16 units each.
     const reply = `${'word {{emoji:check}} '.repeat(1_200)}\n\n${'😀 '.repeat(6_000)}`;
