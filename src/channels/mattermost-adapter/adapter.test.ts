@@ -533,6 +533,10 @@ describe('Mattermost mention detection', () => {
     'Please help @nanoclaw.',
     '**@nanoclaw** can you look?',
     '\\`please @nanoclaw\\`',
+    '<div>\n@nanoclaw help\n</div>',
+    '![help @nanoclaw](https://example.org/a.png)',
+    '[ask @nanoclaw](https://example.org/docs)',
+    '[@nanoclaw](https://example.org/@nanoclaw)',
   ])('sees @bot in a group message: %s', async (text) => {
     expect(await isMention('G', text)).toBe(true);
   });
@@ -545,6 +549,8 @@ describe('Mattermost mention detection', () => {
     '```\n@nanoclaw',
     'ask @nanoclaw.dev instead',
     'ask @nanoclaw..dev instead',
+    'https://example.org/@nanoclaw',
+    '<https://example.org/@nanoclaw>',
   ])('ignores code and other handles in a group message: %s', async (text) => {
     expect(await isMention('G', text)).toBe(false);
   });

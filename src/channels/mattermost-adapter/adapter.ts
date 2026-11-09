@@ -1506,15 +1506,30 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
   }
 }
 
-/** Text of a markdown AST outside code spans and blocks, nodes joined by a space. */
-function textOutsideCode(node: { type: string; value?: unknown; children?: unknown[] }): string {
-  if (node.type === 'code' || node.type === 'inlineCode') {
+type MarkdownNode = { type: string; value?: unknown; alt?: unknown; url?: unknown; children?: MarkdownNode[] };
+
+/**
+ * Text of a markdown AST where Mattermost looks for @-mentions, nodes joined
+ * by a space: no code and no bare URLs, but HTML and image alt text count.
+ */
+function textOutsideCode(node: MarkdownNode): string {
+  if (node.type === 'code' || node.type === 'inlineCode' || isBareUrl(node)) {
     return '';
   }
-  if (node.type === 'text') {
+  if (node.type === 'text' || node.type === 'html') {
     return typeof node.value === 'string' ? node.value : '';
   }
-  return (node.children ?? []).map((child) => textOutsideCode(child as { type: string })).join(' ');
+  if (node.type === 'image') {
+    return typeof node.alt === 'string' ? node.alt : '';
+  }
+  return (node.children ?? []).map(textOutsideCode).join(' ');
+}
+
+/** A link whose visible text is its own URL (`https://x/@bot`, `<https://x>`). */
+function isBareUrl(node: MarkdownNode): boolean {
+  const only = node.type === 'link' && node.children?.length === 1 ? node.children[0] : undefined;
+  const text = only?.type === 'text' && typeof only.value === 'string' ? only.value : undefined;
+  return text !== undefined && [text, `http://${text}`, `mailto:${text}`].includes(String(node.url));
 }
 
 /**
