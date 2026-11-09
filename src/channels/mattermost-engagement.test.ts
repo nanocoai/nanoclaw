@@ -148,7 +148,6 @@ describe('Mattermost mention-sticky engagement', () => {
             timestamp: message.timestamp,
             isMention: message.isMention,
             isGroup: message.isGroup,
-            isSubscribed: message.isSubscribed,
           },
         });
         routed.push({ threadId, done });

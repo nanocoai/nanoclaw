@@ -127,6 +127,28 @@ describe('SQLite mailbox canonical serialization', () => {
     ]);
   });
 
+  it('reports wake evidence: none, then chatter, then woken; echoes and silent replies do not count', () => {
+    const inboundDb = new Database(':memory:');
+    databases.push(inboundDb);
+    inboundDb.exec(INBOUND_SCHEMA);
+    const insert = inboundDb.prepare(
+      `INSERT INTO messages_in (id, seq, timestamp, kind, channel_type, content, trigger)
+       VALUES (?, ?, '2026-01-01T00:00:00.000Z', ?, ?, '{}', ?)`,
+    );
+    const inbound = wrapSqliteInbound(inboundDb);
+
+    expect(inbound.wakeEvidence()).toBe('none');
+    insert.run('echo', 2, 'chat', 'session-echo', 1);
+    insert.run('cli-reply', 3, 'system', null, 0);
+    expect(inbound.wakeEvidence()).toBe('none');
+
+    insert.run('ambient', 4, 'chat', 'slack', 0);
+    expect(inbound.wakeEvidence()).toBe('chatter');
+
+    insert.run('answer', 6, 'system', null, 1);
+    expect(inbound.wakeEvidence()).toBe('woken');
+  });
+
   it('returns only the conversation root and top-level outbound timeline', () => {
     const inboundDb = new Database(':memory:');
     const outboundDb = new Database(':memory:');

@@ -32,10 +32,11 @@ import { findSessionForAgent } from './db/sessions.js';
 import { backfillSession, fanInboundMessage } from './modules/cross-session-context/index.js';
 import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
-import { resolveSession, writeSessionMessage } from './session-manager.js';
+import { resolveSession, withExistingMailboxSession, writeSessionMessage } from './session-manager.js';
 import { requestWake } from './request-wake.js';
 import { getSession } from './db/sessions.js';
 import type { AgentGroup, MessagingGroup, MessagingGroupAgent, Session } from './types.js';
+import type { WakeEvidence } from './mailbox/types.js';
 import type { InboundEvent } from './channels/adapter.js';
 
 function generateId(): string {
@@ -232,7 +233,6 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   }
 
   const isMention = event.message.isMention === true;
-  const isSubscribed = event.message.isSubscribed;
 
   // 1. Combined lookup: messaging_group row + count of wired agents in a
   //    single query. Cheap short-circuit for the common "unwired channel"
@@ -392,7 +392,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     );
     const effectiveThreadId = threadsEnabled ? event.threadId : null;
 
-    const engages = await evaluateEngage(agent, messageText, isMention, isSubscribed, mg, effectiveThreadId);
+    const engages = await evaluateEngage(agent, messageText, isMention, mg, effectiveThreadId);
 
     const accessOk = engages && (!accessGate || (await accessGate(event, userId, mg, agent.agent_group_id)).allowed);
     const scopeOk = engages && (!senderScopeGate || (await senderScopeGate(event, userId, mg, agent)).allowed);
@@ -470,17 +470,15 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
  *                      user wants to disambiguate between multiple agents
  *                      wired to one chat, use engage_mode='pattern' with
  *                      the disambiguator as the regex.
- *   'mention-sticky' — platform mention OR a message delivered through a
- *                      persisted platform-thread subscription. Chat SDK
- *                      bridges mark both subscribed and unsubscribed paths
- *                      explicitly. Legacy adapters that omit the signal keep
- *                      the historical active-session fallback.
+ *   'mention-sticky' — platform mention OR this agent was already woken
+ *                      in an active per-thread session for (agent, mg,
+ *                      thread). A session that holds only accumulated
+ *                      chatter does not count.
  */
 async function evaluateEngage(
   agent: MessagingGroupAgent,
   text: string,
   isMention: boolean,
-  isSubscribed: boolean | undefined,
   mg: MessagingGroup,
   threadId: string | null,
 ): Promise<boolean> {
@@ -500,15 +498,17 @@ async function evaluateEngage(
     case 'mention-sticky': {
       if (isMention) return true;
       if (mg.is_group === 0) return false; // DMs never use mention-sticky sensibly
-      // The Chat SDK's persisted subscription is the authoritative activated
-      // state. A session can also exist because ignored_message_policy was
-      // `accumulate`; that must not turn an unmentioned thread sticky.
-      if (isSubscribed !== undefined) return isSubscribed;
-      // Native and legacy adapters do not yet expose subscription state. Keep
-      // their previous session-based behavior rather than changing them as a
-      // side effect of tightening the Chat SDK path.
+      const key = threadKey(agent.agent_group_id, mg.id, threadId);
+      if (writesInFlight.get(key)?.wake) return true;
+      const silentBefore = (writesInFlight.get(key)?.silent ?? 0) > 0;
       const existing = await findSessionForAgent(agent.agent_group_id, mg.id, threadId);
-      return existing !== undefined;
+      const evidence = existing ? await inboxWakeEvidence(agent.agent_group_id, existing.id) : 'chatter';
+      const after = writesInFlight.get(key);
+      // A wake that began while we looked counts. An inbox with no evidence
+      // (e.g. after a folder reset) keeps the thread active, unless a silent
+      // first row was still being written.
+      if (after?.wake || evidence === 'woken') return true;
+      return evidence === 'none' && !silentBefore && !after?.silent;
     }
     default:
       // Unrecognized engage_mode (e.g. stale data from a past CLI version,
@@ -519,6 +519,41 @@ async function evaluateEngage(
         wiring_id: agent.id,
       });
       return false;
+  }
+}
+
+// Session writes in flight per (agent, mg, thread), from the engage decision
+// until the row is in the inbox; a follow-up routed meanwhile reads these.
+const writesInFlight = new Map<string, { wake: number; silent: number }>();
+
+function threadKey(agentGroupId: string, messagingGroupId: string, threadId: string | null): string {
+  return JSON.stringify([agentGroupId, messagingGroupId, threadId]);
+}
+
+function startWrite(key: string, wake: boolean): () => void {
+  const entry = writesInFlight.get(key) ?? { wake: 0, silent: 0 };
+  writesInFlight.set(key, entry);
+  if (wake) entry.wake++;
+  else entry.silent++;
+  return () => {
+    if (wake) entry.wake--;
+    else entry.silent--;
+    if (entry.wake === 0 && entry.silent === 0 && writesInFlight.get(key) === entry) writesInFlight.delete(key);
+  };
+}
+
+/**
+ * What a session's inbox shows: 'woken' once anything woke the agent there,
+ * 'chatter' when it holds only silent context (ignored_message_policy=
+ * 'accumulate'), 'none' when missing, empty or unreadable.
+ */
+async function inboxWakeEvidence(agentGroupId: string, sessionId: string): Promise<WakeEvidence> {
+  try {
+    return (await withExistingMailboxSession(agentGroupId, sessionId, (mailbox) => mailbox.wakeEvidence())) ?? 'none';
+    // eslint-disable-next-line no-catch-all/no-catch-all -- an unreadable inbox must not drop the message
+  } catch (err) {
+    log.warn('mention-sticky: could not read session inbox, treating thread as active', { sessionId, err });
+    return 'none';
   }
 }
 
@@ -542,13 +577,6 @@ async function deliverToAgent(
   if (threadsEnabled && effectiveSessionMode !== 'agent-shared' && mg.is_group !== 0) {
     effectiveSessionMode = 'per-thread';
   }
-
-  const { session, created } = await resolveSession(
-    agent.agent_group_id,
-    mg.id,
-    effectiveThreadId,
-    effectiveSessionMode,
-  );
 
   // The inbound row's (channel_type, platform_id, thread_id) is the address
   // the agent's reply will be delivered to. Normally it mirrors the source
@@ -597,27 +625,38 @@ async function deliverToAgent(
     }
   }
 
-  if (wake) {
-    // Cross-session context backfill: a just-born or long-idle session is
-    // seeded with its conversation's recent top-level timeline from the
-    // conversation's hot set BEFORE the triggering message is written, so
-    // replying to something said in another thread lands with that context
-    // in view. Bounded (K sources, read concurrently); a hot session is a
-    // one-query no-op. Never throws.
-    await backfillSession(agentGroup, session, mg, { created });
-  }
-
+  // After the command gate: a filtered or denied command must not leave an
+  // empty session behind, which mention-sticky would read as an active thread.
+  const endWrite = startWrite(threadKey(agent.agent_group_id, mg.id, effectiveThreadId), wake);
   const messageId = messageIdForAgent(event.message.id, agent.agent_group_id);
-  await writeSessionMessage(session.agent_group_id, session.id, {
-    id: messageId,
-    kind: event.message.kind,
-    timestamp: event.message.timestamp,
-    platformId: deliveryAddr.platformId,
-    channelType: deliveryAddr.channelType,
-    threadId: deliveryAddr.threadId,
-    content: event.message.content,
-    trigger: wake,
-  });
+  let session: Session;
+  let created: boolean;
+  try {
+    ({ session, created } = await resolveSession(agent.agent_group_id, mg.id, effectiveThreadId, effectiveSessionMode));
+
+    if (wake) {
+      // Cross-session context backfill: a just-born or long-idle session is
+      // seeded with its conversation's recent top-level timeline from the
+      // conversation's hot set BEFORE the triggering message is written, so
+      // replying to something said in another thread lands with that context
+      // in view. Bounded (K sources, read concurrently); a hot session is a
+      // one-query no-op. Never throws.
+      await backfillSession(agentGroup, session, mg, { created });
+    }
+
+    await writeSessionMessage(session.agent_group_id, session.id, {
+      id: messageId,
+      kind: event.message.kind,
+      timestamp: event.message.timestamp,
+      platformId: deliveryAddr.platformId,
+      channelType: deliveryAddr.channelType,
+      threadId: deliveryAddr.threadId,
+      content: event.message.content,
+      trigger: wake,
+    });
+  } finally {
+    endWrite();
+  }
 
   if (wake && created) {
     // A brand-new engaged session: notify registered modules with the
