@@ -398,15 +398,14 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     const scopeOk = engages && (!senderScopeGate || (await senderScopeGate(event, userId, mg, agent)).allowed);
 
     if (engages && accessOk && scopeOk) {
-      await deliverToAgent(agent, agentGroup, mg, event, userId, threadsEnabled, effectiveThreadId, true);
-      engagedCount++;
-
       // Mention-sticky: ask the adapter to subscribe the thread so the
       // platform's subscribed-message path carries follow-ups without
       // requiring another @mention. Uses this wiring's OWN effective thread
       // id — a non-null value already implies the adapter supports threads
       // (resolveThreadPolicy hard-ANDs the capability). DMs, non-threaded
-      // platforms, and thread-opted-out wirings skip.
+      // platforms, and thread-opted-out wirings skip. Subscribe before
+      // delivery: the wake can take seconds, and a follow-up sent meanwhile
+      // must already arrive subscribed.
       if (
         !subscribed &&
         agent.engage_mode === 'mention-sticky' &&
@@ -422,6 +421,9 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
           log.warn('adapter.subscribe failed', { channelType: event.channelType, threadId: effectiveThreadId, err });
         });
       }
+
+      await deliverToAgent(agent, agentGroup, mg, event, userId, threadsEnabled, effectiveThreadId, true);
+      engagedCount++;
     } else if (agent.ignored_message_policy === 'accumulate' && !(engages && (!accessOk || !scopeOk))) {
       // Accumulate stores the message as silent context. We allow it when
       // engagement simply didn't fire, but NOT when engagement fired and
@@ -470,11 +472,12 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
  *                      user wants to disambiguate between multiple agents
  *                      wired to one chat, use engage_mode='pattern' with
  *                      the disambiguator as the regex.
- *   'mention-sticky' — platform mention OR a message delivered through a
- *                      persisted platform-thread subscription. Chat SDK
- *                      bridges mark both subscribed and unsubscribed paths
- *                      explicitly. Legacy adapters that omit the signal keep
- *                      the historical active-session fallback.
+ *   'mention-sticky' — platform mention OR an active per-thread session
+ *                      already exists for this (agent, mg, thread). Chat SDK
+ *                      bridges also report whether the message came through
+ *                      a persisted thread subscription; when they say it did
+ *                      not, the session is only accumulated context and the
+ *                      message does not engage.
  */
 async function evaluateEngage(
   agent: MessagingGroupAgent,
@@ -500,15 +503,12 @@ async function evaluateEngage(
     case 'mention-sticky': {
       if (isMention) return true;
       if (mg.is_group === 0) return false; // DMs never use mention-sticky sensibly
-      // The Chat SDK's persisted subscription is the authoritative activated
-      // state. A session can also exist because ignored_message_policy was
-      // `accumulate`; that must not turn an unmentioned thread sticky.
-      if (isSubscribed !== undefined) return isSubscribed;
-      // Native and legacy adapters do not yet expose subscription state. Keep
-      // their previous session-based behavior rather than changing them as a
-      // side effect of tightening the Chat SDK path.
+      // Sticky needs this agent's own session in the thread. When the bridge
+      // reports subscription state it must also be true: a session alone may
+      // hold only accumulated chatter, and a subscription spans every agent.
+      // Adapters that omit the flag keep the session-only rule.
       const existing = await findSessionForAgent(agent.agent_group_id, mg.id, threadId);
-      return existing !== undefined;
+      return existing !== undefined && isSubscribed !== false;
     }
     default:
       // Unrecognized engage_mode (e.g. stale data from a past CLI version,

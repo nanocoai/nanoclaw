@@ -922,10 +922,10 @@ describe('router — per-wiring thread policy', () => {
     });
   });
 
-  async function withThreadedAdapter(fn: () => Promise<void>): Promise<void> {
+  async function withThreadedAdapter(fn: () => Promise<void>, extra: Record<string, unknown> = {}): Promise<void> {
     const { registerChannelAdapter, initChannelAdapters, teardownChannelAdapters } =
       await import('./channels/channel-registry.js');
-    registerChannelAdapter('tp-slack', { factory: makeThreadedAdapter });
+    registerChannelAdapter('tp-slack', { factory: () => ({ ...makeThreadedAdapter(), ...extra }) });
     await initChannelAdapters(() => ({
       onInbound: () => {},
       onInboundEvent: () => {},
@@ -1068,6 +1068,90 @@ describe('router — per-wiring thread policy', () => {
         { trigger: 1 },
       ]);
       after.close();
+    });
+  });
+
+  it('mention-sticky subscribes the thread before the agent wakes, so a quick follow-up still engages', async () => {
+    await getDb().run("UPDATE messaging_group_agents SET engage_mode = 'mention-sticky' WHERE id = 'mga-tp'");
+    const subscribedThreads = new Set<string>();
+    const subscribe = vi.fn(async (_platformId: string, threadId: string) => {
+      subscribedThreads.add(threadId);
+    });
+
+    await withThreadedAdapter(
+      async () => {
+        const { routeInbound } = await import('./router.js');
+        const { wakeContainer } = await import('./container-runner.js');
+        const wake = wakeContainer as unknown as ReturnType<typeof vi.fn>;
+        wake.mockClear();
+        let release: (value: boolean) => void = () => {};
+        const slowWake = new Promise<boolean>((resolve) => {
+          release = resolve;
+        });
+        wake.mockReturnValueOnce(slowWake);
+
+        const mention = threadedEvent('msg-slow-mention');
+        const mentionDone = routeInbound({
+          ...mention,
+          message: { ...mention.message, isMention: true, isSubscribed: false },
+        });
+        await vi.waitFor(() => expect(wake).toHaveBeenCalledTimes(1));
+
+        // The bridge marks a message subscribed only once the thread is.
+        const followup = threadedEvent('msg-quick-followup');
+        await routeInbound({
+          ...followup,
+          message: { ...followup.message, isSubscribed: subscribedThreads.has('thread-42') },
+        });
+        expect(wake).toHaveBeenCalledTimes(2);
+
+        release(true);
+        await mentionDone;
+      },
+      { subscribe },
+    );
+  });
+
+  it('a thread subscription wakes only agents that already have a session in that thread', async () => {
+    await getDb().run("UPDATE messaging_group_agents SET engage_mode = 'mention-sticky' WHERE id = 'mga-tp'");
+
+    await withThreadedAdapter(async () => {
+      const { routeInbound } = await import('./router.js');
+      const { getSessionsByAgentGroup } = await import('./db/sessions.js');
+      const { wakeContainer } = await import('./container-runner.js');
+      const wake = wakeContainer as unknown as ReturnType<typeof vi.fn>;
+      wake.mockClear();
+
+      const mention = threadedEvent('msg-first-agent-mention');
+      await routeInbound({ ...mention, message: { ...mention.message, isMention: true, isSubscribed: false } });
+      expect(wake).toHaveBeenCalledTimes(1);
+
+      // A second sticky agent is wired after the thread was activated.
+      await createAgentGroup({
+        id: 'ag-tp2',
+        name: 'Late Agent',
+        folder: 'late-agent',
+        agent_provider: null,
+        created_at: now(),
+      });
+      await createMessagingGroupAgent({
+        id: 'mga-tp2',
+        messaging_group_id: 'mg-tp',
+        agent_group_id: 'ag-tp2',
+        engage_mode: 'mention-sticky',
+        engage_pattern: null,
+        sender_scope: 'all',
+        ignored_message_policy: 'drop',
+        session_mode: 'shared',
+        priority: 1,
+        created_at: now(),
+      });
+
+      const followup = threadedEvent('msg-subscribed-followup');
+      await routeInbound({ ...followup, message: { ...followup.message, isSubscribed: true } });
+      expect(wake).toHaveBeenCalledTimes(2);
+      expect((wake.mock.calls[1][0] as { agent_group_id: string }).agent_group_id).toBe('ag-tp');
+      expect(await getSessionsByAgentGroup('ag-tp2')).toHaveLength(0);
     });
   });
 
