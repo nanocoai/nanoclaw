@@ -1273,6 +1273,27 @@ describe('router — per-wiring thread policy', () => {
     });
   });
 
+  it('mention-sticky is not activated by a filtered command posted without a mention', async () => {
+    await getDb().run(
+      "UPDATE messaging_group_agents SET engage_mode = 'mention-sticky', ignored_message_policy = 'accumulate' WHERE id = 'mga-tp'",
+    );
+
+    await withThreadedAdapter(async () => {
+      const { routeInbound } = await import('./router.js');
+      const { wakeContainer } = await import('./container-runner.js');
+      const wake = wakeContainer as unknown as ReturnType<typeof vi.fn>;
+      wake.mockClear();
+
+      const command = threadedEvent('msg-filtered-command');
+      await routeInbound({
+        ...command,
+        message: { ...command.message, content: JSON.stringify({ sender: 'U', text: '/remote-control' }) },
+      });
+      await routeInbound(threadedEvent('msg-after-command'));
+      expect(wake).not.toHaveBeenCalled();
+    });
+  });
+
   it('mention-sticky does not wake an agent that was never mentioned in the thread', async () => {
     await getDb().run("UPDATE messaging_group_agents SET engage_mode = 'mention-sticky' WHERE id = 'mga-tp'");
 

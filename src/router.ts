@@ -570,13 +570,6 @@ async function deliverToAgent(
     effectiveSessionMode = 'per-thread';
   }
 
-  const { session, created } = await resolveSession(
-    agent.agent_group_id,
-    mg.id,
-    effectiveThreadId,
-    effectiveSessionMode,
-  );
-
   // The inbound row's (channel_type, platform_id, thread_id) is the address
   // the agent's reply will be delivered to. Normally it mirrors the source
   // (stamped from the event, with the wiring's thread policy applied). When
@@ -623,6 +616,15 @@ async function deliverToAgent(
       return;
     }
   }
+
+  // After the command gate: a filtered or denied command must not leave an
+  // empty session behind, which mention-sticky would read as an active thread.
+  const { session, created } = await resolveSession(
+    agent.agent_group_id,
+    mg.id,
+    effectiveThreadId,
+    effectiveSessionMode,
+  );
 
   if (wake) {
     // Cross-session context backfill: a just-born or long-idle session is

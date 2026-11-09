@@ -169,9 +169,8 @@ describe('command-gate denial', () => {
         'testchat',
       ],
     ]);
-    const counts = outboundRowCounts();
-    expect(counts.length).toBeGreaterThan(0);
-    expect(counts.every((count) => count === 0)).toBe(true);
+    // A denied command creates no session, so no outbound.db exists at all.
+    expect(outboundRowCounts()).toEqual([]);
     const { wakeContainer } = await import('./container-runner.js');
     expect(vi.mocked(wakeContainer)).not.toHaveBeenCalled();
   });
