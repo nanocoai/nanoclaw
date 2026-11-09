@@ -640,7 +640,7 @@ describe('local web adapter', () => {
       const ignored = await answer();
       expect(ignored.status).toBe(409);
       expect(await ignored.json()).toEqual({
-        error: 'Your answer was not recorded. If the question is still open, try again.',
+        error: 'Your answer was not confirmed. If the question is still open, try again.',
       });
 
       // A core from before click outcomes returns nothing: answered as before.
