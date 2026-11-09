@@ -91,6 +91,8 @@ describe('release tag parsing', () => {
       'v2.4',
       '2.4.0',
       'v2.4.0-beta',
+      'v2.4.0-beta.0',
+      'v2.4.0-beta.01',
       'v2.4.0-Beta.1',
       'v2.4.0-alpha.1',
       'v2.4.0-beta.1-rc.1',

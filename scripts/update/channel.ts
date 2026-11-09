@@ -39,16 +39,16 @@ interface ParsedTag {
 }
 
 // Only release tags; the remote also carries pre-update-*, pre-squash/* and similar.
-const RELEASE_TAG = /^v(\d+)\.(\d+)\.(\d+)(?:-(beta|rc)\.(\d+))?$/;
+// beta.N matches release.mjs (N >= 1, no leading zero); rc keeps its original looser match.
+const RELEASE_TAG = /^v(\d+)\.(\d+)\.(\d+)(?:-rc\.(\d+)|-beta\.([1-9]\d*))?$/;
 
 export function parseReleaseTag(tag: string): ParsedTag | null {
   const match = RELEASE_TAG.exec(tag);
   if (!match) return null;
   const [major, minor, patch] = [match[1], match[2], match[3]].map(Number);
-  if (match[4] === undefined) return { major, minor, patch };
-  return match[4] === 'beta'
-    ? { major, minor, patch, beta: Number(match[5]) }
-    : { major, minor, patch, rc: Number(match[5]) };
+  if (match[4] !== undefined) return { major, minor, patch, rc: Number(match[4]) };
+  if (match[5] !== undefined) return { major, minor, patch, beta: Number(match[5]) };
+  return { major, minor, patch };
 }
 
 function isPrereleaseTag(tag: ParsedTag): boolean {
