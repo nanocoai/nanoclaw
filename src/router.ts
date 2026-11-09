@@ -571,10 +571,11 @@ function holdThread(key: string): [ThreadInFlight, () => void] {
   ];
 }
 
-/** True when a pending command gate on this thread lets its wake through. */
+/** True as soon as a pending command gate lets its wake through; false once all refuse. */
 async function gateVerdicts(thread: ThreadInFlight): Promise<boolean> {
   if (thread.gates.size === 0) return false;
-  return (await Promise.all(thread.gates)).some(Boolean);
+  const passes = [...thread.gates].map((gate) => gate.then((pass) => pass || Promise.reject(new Error('refused'))));
+  return Promise.any(passes).catch(() => false);
 }
 
 /** Registers a pending gate verdict; settling it again is a no-op. */
