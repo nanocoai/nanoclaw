@@ -610,8 +610,9 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
 
   // ── Choose existing agent — send agent-selection follow-up card ──
   if (payload.value === CHOOSE_EXISTING_VALUE) {
-    // Set before any wait, so a second tap can't start another.
+    // Set before any wait, so a second tap can't start another, nor a typed answer (no card id).
     const guard = agentCards.get(row.messaging_group_id) ?? { retired: new Set<string>(), sending: false };
+    if (guard.sending) return 'ignored';
     guard.sending = true;
     agentCards.set(row.messaging_group_id, guard);
     try {

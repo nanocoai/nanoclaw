@@ -906,6 +906,19 @@ describe('unknown-channel registration flow', () => {
       expect(wired?.agent_group_id).toBe('ag-2');
     });
 
+    it('a second typed answer (no card id) while the agent card is sent sends no second card', async () => {
+      const card = await firstCard('chat-choose-typed-twice');
+      let sent!: () => void;
+      deliverMock.mockImplementationOnce(() => new Promise((resolve) => (sent = () => resolve('plat-msg-2'))));
+      // WhatsApp and iMessage answers name no card message.
+      const choosing = click(card.messaging_group_id, 'choose_existing');
+      await vi.waitFor(() => expect(deliverMock).toHaveBeenCalledTimes(2));
+      expect(await click(card.messaging_group_id, 'choose_existing')).toBe('ignored');
+      sent();
+      expect(await choosing).toBe('accepted');
+      expect(deliverMock).toHaveBeenCalledTimes(2);
+    });
+
     it('a second tap while the first is still being prepared sends no second card', async () => {
       const card = await firstCard('chat-choose-preparing');
       const { ensureUserDm } = await import('./user-dm.js');
