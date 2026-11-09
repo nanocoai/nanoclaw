@@ -1888,8 +1888,8 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
     }
   });
 
-  it.each([11, 12])(
-    'addresses a click in a public or private thread (channel type %i) by its parent channel and the thread, as the adapter does',
+  it.each([10, 11, 12])(
+    'addresses a click in a thread (channel type %i) by its parent channel and the thread, like a card sent into it',
     async (type) => {
       const { bridge, click, onAction } = await startDiscord('q-discord-thread', review);
       try {
@@ -1908,24 +1908,6 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
       }
     },
   );
-
-  it('addresses a click in an announcement thread (channel type 10) by the thread alone, as the adapter does', async () => {
-    const { bridge, click, onAction } = await startDiscord('q-discord-announcement', review);
-    try {
-      await click({ id: 'clicker-1', username: 'Ann' }, undefined, {
-        channel_id: 'T1',
-        channel: { id: 'T1', type: 10, parent_id: 'P1' },
-      });
-      await vi.waitFor(() =>
-        expect(onAction).toHaveBeenCalledWith('q-discord-announcement', 'approve', 'clicker-1', {
-          messageId: 'card-1',
-          platformId: 'discord:G1:T1',
-        }),
-      );
-    } finally {
-      await bridge.teardown();
-    }
-  });
 
   it('a click the host ignores (a second click) leaves the card as it is', async () => {
     const { bridge, click, onAction, editMessage } = await startDiscord('q-discord-second', review);
