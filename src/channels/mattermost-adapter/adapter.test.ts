@@ -69,6 +69,7 @@ function postedEvent(options: {
 async function initializePostedHarness(): Promise<{
   adapter: MattermostAdapter;
   processMessage: ReturnType<typeof vi.fn>;
+  processReaction: ReturnType<typeof vi.fn>;
 }> {
   const fetchImpl = vi.fn(async (input: string | URL | Request) => {
     const url = String(input);
@@ -84,6 +85,7 @@ async function initializePostedHarness(): Promise<{
     return response({ message: 'not found' }, 404);
   }) as unknown as typeof fetch;
   const processMessage = vi.fn();
+  const processReaction = vi.fn();
   const logger = {
     child: () => logger,
     debug: vi.fn(),
@@ -97,8 +99,8 @@ async function initializePostedHarness(): Promise<{
     token: 'bot-token',
     url: 'https://mattermost.example.com',
   });
-  await adapter.initialize({ getLogger: () => logger, processMessage } as unknown as ChatInstance);
-  return { adapter, processMessage };
+  await adapter.initialize({ getLogger: () => logger, processMessage, processReaction } as unknown as ChatInstance);
+  return { adapter, processMessage, processReaction };
 }
 
 describe('Mattermost posted-message threads', () => {
@@ -122,6 +124,25 @@ describe('Mattermost posted-message threads', () => {
     const warm = adapter.parseMessage(post);
     expect(warm.threadId).toBe(`mattermost:${CHANNEL_ID}`);
     expect(warm.isMention).toBe(false);
+  });
+
+  it('roots a reaction in the same thread as the reacted-to post', async () => {
+    const { adapter, processReaction } = await initializePostedHarness();
+    const reaction = (): MattermostWebSocketEvent => ({
+      broadcast: { channel_id: CHANNEL_ID },
+      data: { reaction: JSON.stringify({ emoji_name: '+1', post_id: POST_ID, user_id: USER_ID }) },
+      event: 'reaction_added',
+    });
+
+    adapter.handleSocketEvent(reaction());
+    await vi.waitFor(() => expect(processReaction).toHaveBeenCalledTimes(1));
+    expect(processReaction.mock.calls[0][0].threadId).toBe(`mattermost:${CHANNEL_ID}:${POST_ID}`);
+
+    // In a DM a top-level post stays channel-level, and so does its reaction.
+    adapter.handleSocketEvent(postedEvent({ channelType: 'D' }));
+    adapter.handleSocketEvent(reaction());
+    await vi.waitFor(() => expect(processReaction).toHaveBeenCalledTimes(2));
+    expect(processReaction.mock.calls[1][0].threadId).toBe(`mattermost:${CHANNEL_ID}`);
   });
 
   it('fetches a top-level group post into the rooted thread it was delivered in', async () => {

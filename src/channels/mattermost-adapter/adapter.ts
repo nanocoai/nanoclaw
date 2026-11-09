@@ -879,10 +879,10 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
    *    channel comes off `broadcast.channel_id` (see `reactionChannelId`);
    *  - the frame says nothing about the reacted-to post's thread. Slack pays a
    *    REST read to root a reaction in its parent thread, and so do we — one
-   *    `GetPost` — so reacting inside a thread does not surface as a
-   *    channel-level event. The same read supplies the event's `message`. A
-   *    failed read degrades to the channel-level thread id rather than
-   *    dropping the reaction.
+   *    `GetPost` — so a reaction lands in the same thread as its post (a
+   *    top-level group post is its own thread root). The same read supplies
+   *    the event's `message`. A failed read degrades to the channel-level
+   *    thread id rather than dropping the reaction.
    */
   private async handleReaction(event: MattermostWebSocketEvent): Promise<void> {
     const chat = this.chat;
@@ -911,8 +911,10 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
         error,
       });
     }
-    const rootId = post?.root_id || undefined;
-    const threadId = encodeThreadId({ channelId, ...(rootId ? { rootId } : {}) });
+    // Same thread as the post itself; the channel type keeps a DM channel-level.
+    if (post) await this.onThreadSubscribe(encodeThreadId({ channelId }));
+    const isDirect = this.channelTypes.get(channelId) === 'D';
+    const threadId = post ? threadIdForPost(post, !isDirect) : encodeThreadId({ channelId });
     await this.ensureUserResolved(reaction.user_id);
 
     const reactionEvent: Omit<ReactionEvent<MattermostPost>, 'adapter' | 'thread'> = {
