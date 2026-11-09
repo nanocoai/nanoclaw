@@ -76,6 +76,29 @@ describe('claude maybeRotateContinuation', () => {
     expect(fs.readdirSync(dir).some((f) => f.startsWith('sess-big.jsonl.rotated-'))).toBe(true);
   });
 
+  it('checks a warm transcript without moving it while the query is open', () => {
+    process.env.CLAUDE_TRANSCRIPT_ROTATE_BYTES = String(64 * 1024);
+    const p = writeTranscript('sess-warm', 200 * 1024);
+    const provider = createProvider('claude');
+    expect(provider.shouldRotateContinuation!('sess-warm', CWD)).toContain('MB');
+    expect(fs.existsSync(p)).toBe(true);
+    expect(fs.readdirSync(path.dirname(p)).filter((f) => f.startsWith('sess-warm.jsonl.rotated-'))).toEqual([]);
+  });
+
+  it('keeps the continuation when moving its transcript fails', () => {
+    process.env.CLAUDE_TRANSCRIPT_ROTATE_BYTES = String(64 * 1024);
+    const p = writeTranscript('sess-rename-fails', 200 * 1024);
+    const renameSpy = spyOn(fs, 'renameSync').mockImplementation(() => {
+      throw new Error('rename failed');
+    });
+    try {
+      expect(createProvider('claude').maybeRotateContinuation!('sess-rename-fails', CWD)).toBeNull();
+      expect(fs.existsSync(p)).toBe(true);
+    } finally {
+      renameSpy.mockRestore();
+    }
+  });
+
   it('rotates by size when the first line and archive read both fail', () => {
     process.env.CLAUDE_TRANSCRIPT_ROTATE_BYTES = String(64 * 1024);
     const p = writeTranscript('sess-unreadable', 200 * 1024);
