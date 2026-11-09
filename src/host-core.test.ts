@@ -1343,6 +1343,50 @@ describe('router — per-wiring thread policy', () => {
     });
   });
 
+  it('mention-sticky is not activated by a first silent write that starts and ends during a lookup', async () => {
+    await getDb().run(
+      "UPDATE messaging_group_agents SET engage_mode = 'mention-sticky', ignored_message_policy = 'accumulate' WHERE id = 'mga-tp'",
+    );
+
+    await withThreadedAdapter(async () => {
+      const { routeInbound } = await import('./router.js');
+      const { wakeContainer } = await import('./container-runner.js');
+      const wake = wakeContainer as unknown as ReturnType<typeof vi.fn>;
+      wake.mockClear();
+
+      const releases: (() => void)[] = [];
+      const hold = () => new Promise<void>((resolve) => releases.push(resolve));
+      lookupHold.reached.mockClear();
+      writeHold.reached.mockClear();
+      readHold.reached.mockClear();
+      try {
+        // The second chatter starts its lookup before the first one exists.
+        lookupHold.until = hold();
+        const secondDone = routeInbound(threadedEvent('msg-lookup-chatter'));
+        await vi.waitFor(() => expect(lookupHold.reached).toHaveBeenCalledTimes(1));
+        writeHold.until = hold();
+        const firstDone = routeInbound(threadedEvent('msg-first-silent'));
+        await vi.waitFor(() => expect(writeHold.reached).toHaveBeenCalledTimes(1));
+
+        // It reads the still-empty inbox; the first write then lands in full.
+        readHold.until = hold();
+        releases[0]();
+        await vi.waitFor(() => expect(readHold.reached).toHaveBeenCalledTimes(1));
+        releases[1]();
+        await firstDone;
+        releases[2]();
+        await secondDone;
+
+        expect(wake).not.toHaveBeenCalled();
+      } finally {
+        lookupHold.until = null;
+        writeHold.until = null;
+        readHold.until = null;
+        releases.forEach((release) => release());
+      }
+    });
+  });
+
   it('mention-sticky engages a follow-up whose inbox read overlaps a whole mention', async () => {
     await getDb().run(
       "UPDATE messaging_group_agents SET engage_mode = 'mention-sticky', ignored_message_policy = 'accumulate' WHERE id = 'mga-tp'",

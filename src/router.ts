@@ -504,13 +504,14 @@ async function evaluateEngage(
         if ((await gateVerdicts(thread)) || thread.wake > 0) return true;
         const wakesBefore = thread.wakeStarted;
         const silentBefore = thread.silent > 0;
+        const silentsBefore = thread.silentStarted;
         const existing = await findSessionForAgent(agent.agent_group_id, mg.id, threadId);
         const evidence = existing ? await inboxWakeEvidence(agent.agent_group_id, existing.id) : 'chatter';
         // A wake that began while we looked counts. An inbox with no evidence
         // (e.g. after a folder reset) keeps the thread active, unless a silent
-        // first row was still being written.
+        // first row was being written at any point meanwhile.
         if ((await gateVerdicts(thread)) || thread.wakeStarted !== wakesBefore || evidence === 'woken') return true;
-        return evidence === 'none' && !silentBefore && thread.silent === 0;
+        return evidence === 'none' && !silentBefore && thread.silentStarted === silentsBefore;
       } finally {
         release();
       }
@@ -529,9 +530,9 @@ async function evaluateEngage(
 
 /**
  * Routing in flight per (agent, mg, thread) that a sticky follow-up must see:
- * command-gate verdicts pending for a wake, inbox writes not yet landed, and a
- * count of wakes ever started. The entry lives while anyone holds it, so a
- * reader can tell that a wake started and finished during its own lookup.
+ * command-gate verdicts pending for a wake, inbox writes not yet landed, and
+ * counts of writes ever started. The entry lives while anyone holds it, so a
+ * reader can tell that a write started and finished during its own lookup.
  */
 interface ThreadInFlight {
   holders: number;
@@ -539,6 +540,7 @@ interface ThreadInFlight {
   wake: number;
   silent: number;
   wakeStarted: number;
+  silentStarted: number;
 }
 const threadsInFlight = new Map<string, ThreadInFlight>();
 
@@ -547,7 +549,14 @@ function threadKey(agentGroupId: string, messagingGroupId: string, threadId: str
 }
 
 function holdThread(key: string): [ThreadInFlight, () => void] {
-  const thread = threadsInFlight.get(key) ?? { holders: 0, gates: new Set(), wake: 0, silent: 0, wakeStarted: 0 };
+  const thread = threadsInFlight.get(key) ?? {
+    holders: 0,
+    gates: new Set(),
+    wake: 0,
+    silent: 0,
+    wakeStarted: 0,
+    silentStarted: 0,
+  };
   threadsInFlight.set(key, thread);
   thread.holders++;
   let released = false;
@@ -678,7 +687,10 @@ async function deliverToAgent(
     if (wake) {
       thread.wake++;
       thread.wakeStarted++;
-    } else thread.silent++;
+    } else {
+      thread.silent++;
+      thread.silentStarted++;
+    }
     settleGate?.(true);
 
     ({ session, created } = await resolveSession(agent.agent_group_id, mg.id, effectiveThreadId, effectiveSessionMode));
