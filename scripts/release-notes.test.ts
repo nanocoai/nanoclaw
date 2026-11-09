@@ -180,6 +180,13 @@ describe('draft assembly', () => {
     expect(markdown).toContain('- [BREAKING] The seam moved.\n\n  Migration: run the detector. ([#20](u), @ada)');
   });
 
+  it('keeps the breaking warning visible when the author has not written a note', () => {
+    const collected = collectReleaseNotes([
+      { ...pullRequests[2], body: '- [x] Breaking change — migration required\n' + TEMPLATE_BLOCK },
+    ]);
+    expect(renderDraftChangelog(collected)).toContain('- [BREAKING] ([#12](https://example.test/12), @linus)');
+  });
+
   it('says so when nothing in the range needs a line', () => {
     const markdown = renderDraftChangelog(collectReleaseNotes([pullRequests[0]]));
     expect(markdown).toContain('Every merged pull request in this range carried a release note.');

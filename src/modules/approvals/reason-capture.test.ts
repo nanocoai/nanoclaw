@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { InboundEvent } from '../../channels/adapter.js';
 import { initTestDb, closeDb, runMigrations } from '../../db/index.js';
 import { createAgentGroup } from '../../db/agent-groups.js';
+import { createMessagingGroup } from '../../db/messaging-groups.js';
 import {
   createSession,
   createPendingApproval,
@@ -52,19 +53,25 @@ function now(): string {
   return new Date().toISOString();
 }
 
-let delivered: Array<{ channelType: string; platformId: string; content: string; instance?: string }>;
+let delivered: Array<{
+  channelType: string;
+  platformId: string;
+  threadId: string | null;
+  content: string;
+  instance?: string;
+}>;
 
 const fakeAdapter: ChannelDeliveryAdapter = {
-  async deliver(channelType, platformId, _threadId, _kind, content, _files, instance) {
-    delivered.push({ channelType, platformId, content, instance });
+  async deliver(channelType, platformId, threadId, _kind, content, _files, instance) {
+    delivered.push({ channelType, platformId, threadId, content, instance });
     return 'pm-1';
   },
 };
 
-async function seedApproval(approvalId: string, action = 'create_agent'): Promise<void> {
+async function seedApproval(approvalId: string, action = 'create_agent', sessionId = 'sess-1'): Promise<void> {
   await createPendingApproval({
     approval_id: approvalId,
-    session_id: 'sess-1',
+    session_id: sessionId,
     request_id: approvalId,
     action,
     payload: JSON.stringify({ name: 'child' }),
@@ -77,14 +84,14 @@ async function seedApproval(approvalId: string, action = 'create_agent'): Promis
   });
 }
 
-function dmReply(text?: string): InboundEvent {
+function dmReply(text?: string, threadId: string | null = null): InboundEvent {
   const content: Record<string, unknown> = { sender: 'admin-1', senderId: 'admin-1' };
   if (text !== undefined) content.text = text;
   return {
     channelType: DM_CHANNEL,
     instance: DM_INSTANCE,
     platformId: DM_PLATFORM,
-    threadId: null,
+    threadId,
     message: { id: 'm-1', kind: 'chat', content: JSON.stringify(content), timestamp: now() },
   };
 }
@@ -161,6 +168,7 @@ describe('reject with reason', () => {
     expect(delivered[0].channelType).toBe(DM_CHANNEL);
     expect(delivered[0].platformId).toBe(DM_PLATFORM);
     expect(delivered[0].instance).toBe(DM_INSTANCE);
+    expect(delivered[0].threadId).toBeNull();
     expect((JSON.parse(delivered[0].content) as { text: string }).text).toMatch(/reason/i);
 
     // Agent is not notified yet — the hold is still open.
@@ -213,6 +221,50 @@ describe('reject with reason', () => {
     const consumed = await captureReasonReply(dmReply('late reason'));
 
     expect(consumed).toBe(false);
+  });
+
+  it("prompts in the card's thread and captures the reply there when the card sits in the requester's chat", async () => {
+    const { captureReasonReply } = await import('./reason-capture.js');
+    await createMessagingGroup({
+      id: 'mg-dm-1',
+      channel_type: DM_CHANNEL,
+      platform_id: DM_PLATFORM,
+      instance: DM_INSTANCE,
+      name: 'Admin DM',
+      is_group: 0,
+      unknown_sender_policy: 'strict',
+      created_at: now(),
+    });
+    // Same platform id on the default instance: the lookup must pick the card's own instance.
+    await createMessagingGroup({
+      id: 'mg-dm-default',
+      channel_type: DM_CHANNEL,
+      platform_id: DM_PLATFORM,
+      instance: DM_CHANNEL,
+      name: 'Admin DM (default bot)',
+      is_group: 0,
+      unknown_sender_policy: 'strict',
+      created_at: now(),
+    });
+    await createSession({
+      id: 'sess-thread',
+      agent_group_id: 'ag-1',
+      messaging_group_id: 'mg-dm-1',
+      thread_id: 'thread-1',
+      agent_provider: null,
+      status: 'active',
+      container_status: 'stopped',
+      last_active: now(),
+      created_at: now(),
+    });
+    await seedApproval('appr-thread', 'create_agent', 'sess-thread');
+    await clickRejectWithReason('appr-thread');
+
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0].threadId).toBe('thread-1');
+
+    expect(await captureReasonReply(dmReply('not now', 'thread-1'))).toBe(true);
+    expect(lastRelayedText()).toBe('Your create_agent request was rejected by admin: "not now"');
   });
 
   it('ignores DMs on channels with no armed reason capture', async () => {

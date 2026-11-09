@@ -8,13 +8,18 @@
  * raw routes must coexist with Chat SDK adapter routes on the same
  * server, and stopWebhookServer must clear them.
  */
-import { afterAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import type { Chat } from 'chat';
 
+import { allocateFreePort } from './test-utils/free-port.js';
 import { registerWebhookAdapter, registerWebhookHandler, stopWebhookServer } from './webhook-server.js';
 
-const PORT = 21000 + Math.floor(Math.random() * 20000);
+let PORT: number;
+
+beforeAll(async () => {
+  PORT = await allocateFreePort();
+});
 
 async function post(path: string, body = '{}'): Promise<globalThis.Response> {
   for (let attempt = 0; ; attempt++) {
@@ -30,11 +35,13 @@ async function post(path: string, body = '{}'): Promise<globalThis.Response> {
 afterAll(async () => {
   await stopWebhookServer();
   delete process.env.WEBHOOK_PORT;
+  delete process.env.WEBHOOK_HOST;
 });
 
 describe('webhook server raw routes', () => {
   it('dispatches a registered raw route to its handler', async () => {
     process.env.WEBHOOK_PORT = String(PORT);
+    process.env.WEBHOOK_HOST = '127.0.0.1';
     const methods: string[] = [];
     registerWebhookHandler('ping', (req, res) => {
       methods.push(req.method || '');
@@ -48,9 +55,14 @@ describe('webhook server raw routes', () => {
     expect(methods).toEqual(['POST']);
   });
 
-  it('returns 404 for paths with no registered route', async () => {
-    const res = await post('nope');
-    expect(res.status).toBe(404);
+  it('returns the same plain 404 for every unknown path', async () => {
+    const unknownRoute = await post('nope<script>');
+    const outsideWebhook = await fetch(`http://127.0.0.1:${PORT}/admin`, { method: 'POST', body: '{}' });
+
+    for (const res of [unknownRoute, outsideWebhook]) {
+      expect(res.status).toBe(404);
+      expect(await res.text()).toBe('Not found');
+    }
   });
 
   it('turns a throwing handler into a 500 response', async () => {

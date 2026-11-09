@@ -17,10 +17,16 @@ import fs from 'fs';
 import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// Override DATA_DIR for tests
+// Override DATA_DIR for tests. Pin the sweep-timer overrides to unset so a
+// developer's .env or shell cannot change the default windows asserted below.
 vi.mock('./config.js', async () => {
   const actual = await vi.importActual('./config.js');
-  return { ...actual, DATA_DIR: '/tmp/nanoclaw-test-host-sweep-grace' };
+  return {
+    ...actual,
+    DATA_DIR: '/tmp/nanoclaw-test-host-sweep-grace',
+    ABSOLUTE_CEILING_MS_RAW: '',
+    CLAIM_STUCK_MS_RAW: '',
+  };
 });
 
 // Mock container runner to prevent actual Docker spawning

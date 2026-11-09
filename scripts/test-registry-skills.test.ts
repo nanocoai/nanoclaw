@@ -1,6 +1,10 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  discover,
   formatUnavailable,
   missingRegistrySources,
   partitionRegistryAvailability,
@@ -73,5 +77,42 @@ describe('--combined-providers selection', () => {
   it('selects nothing only when trunk ships no provider skill at all', () => {
     const channel = skill('add-slack', ['src/channels/slack.ts'], { branches: ['channels'] });
     expect(selectCombinedProviders([channel], hasSource)).toEqual([]);
+  });
+});
+
+describe('self-contained provider discovery', () => {
+  it('includes a local payload in the CI matrix and combined-provider selection without a registry branch', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'local-provider-discovery-'));
+    try {
+      const dir = path.join(root, 'add-local');
+      fs.mkdirSync(dir);
+      fs.writeFileSync(
+        path.join(dir, 'SKILL.md'),
+        [
+          '---',
+          'name: add-local',
+          'description: Local provider',
+          'metadata:',
+          '  nanoclaw-provider: local',
+          '  nanoclaw-provider-label: Local',
+          '  nanoclaw-provider-hint: Test provider',
+          "  nanoclaw-provider-offered: 'false'",
+          '  nanoclaw-provider-image: local-required',
+          '---',
+          '```nc:copy',
+          'payload/src/providers/local.ts -> src/providers/local.ts',
+          '```',
+        ].join('\n'),
+      );
+      const skills = discover(root);
+      expect(skills).toHaveLength(1);
+      expect(skills[0]).toMatchObject({ skill: 'add-local', provider: 'local', branches: [], executable: true });
+      const lookup = vi.fn(() => false);
+      expect(partitionRegistryAvailability(skills, lookup).available).toEqual(skills);
+      expect(selectCombinedProviders(skills, lookup)).toEqual(skills);
+      expect(lookup).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });

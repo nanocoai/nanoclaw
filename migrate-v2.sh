@@ -39,7 +39,7 @@ MIGRATE_LOG="$LOGS_DIR/migrate-v2.log"
 # Defaults for variables that may not be set if we exit early
 V1_PATH=""
 V1_VERSION="unknown"
-ONECLI_OK=false
+GATEWAY_OK=false
 SERVICE_SWITCHED=false
 SELECTED_CHANNELS=()
 ABORTED_AT=""
@@ -87,7 +87,7 @@ write_handoff() {
   "aborted_at": "$ABORTED_AT",
   "source": "migrate-v2.sh",
   "channels_installed": [$(printf '"%s",' "${SELECTED_CHANNELS[@]}" 2>/dev/null | sed 's/,$//')],
-  "onecli_healthy": $ONECLI_OK,
+  "gateway_healthy": $GATEWAY_OK,
   "service_switched": $SERVICE_SWITCHED,
   "steps": $steps_json,
   "step_logs_dir": "logs/migrate-steps",
@@ -150,9 +150,10 @@ BOOTSTRAP_RAW="$STEPS_DIR/01-bootstrap.log"
 export NANOCLAW_BOOTSTRAP_LOG="$BOOTSTRAP_RAW"
 
 if bash "$PROJECT_ROOT/setup.sh" > "$BOOTSTRAP_RAW" 2>&1; then
-  # Parse the status block from setup.sh output
-  STATUS=$(grep '^STATUS:' "$BOOTSTRAP_RAW" | head -1 | sed 's/^STATUS: *//')
-  NODE_VERSION=$(grep '^NODE_VERSION:' "$BOOTSTRAP_RAW" | head -1 | sed 's/^NODE_VERSION: *//')
+  # Parse setup.sh's own BOOTSTRAP block: install-node.sh, when it ran, wrote
+  # its STATUS lines into the same log.
+  STATUS=$(awk '/^=== NANOCLAW SETUP: BOOTSTRAP ===/{b=1} b && sub(/^STATUS: */, "") {print; exit}' "$BOOTSTRAP_RAW")
+  NODE_VERSION=$(awk '/^=== NANOCLAW SETUP: BOOTSTRAP ===/{b=1} b && sub(/^NODE_VERSION: */, "") {print; exit}' "$BOOTSTRAP_RAW")
 
   if [ "$STATUS" = "success" ]; then
     step_ok "Prerequisites ready $(dim "(node $NODE_VERSION)")"
@@ -173,6 +174,15 @@ else
   dim "  Full log: $BOOTSTRAP_RAW"
   echo
   abort "bootstrap"
+fi
+
+# Later steps, and the service they register, use this shell's node, which can
+# be an older one ahead of the keg-only node@22 setup.sh used.
+# shellcheck source=setup/lib/node-version.sh
+source "$PROJECT_ROOT/setup/lib/node-version.sh"
+if ! node_use_patched; then
+  step_fail "No Node on PATH meets the minimum (${NODE_MINIMUMS// / / }). Switch to one of these, then re-run."
+  abort "node-below-minimum"
 fi
 
 # setup.sh may have installed pnpm to a prefix not on our PATH — replay
@@ -429,7 +439,7 @@ echo
 echo "$(bold 'Phase 3: Infrastructure')"
 echo
 
-# 3a. Docker — install if missing (OneCLI needs it)
+# 3a. Docker — install if missing
 if command -v docker >/dev/null 2>&1; then
   DOCKER_V=$(docker --version 2>/dev/null | head -1)
   step_ok "Docker available $(dim "($DOCKER_V)")"
@@ -449,44 +459,34 @@ else
   fi
 fi
 
-# 3b. OneCLI — detect or install via setup step (requires Docker)
-ONECLI_OK=false
-ONECLI_URL_FROM_ENV=$(grep '^ONECLI_URL=' .env 2>/dev/null | head -1 | sed 's/^ONECLI_URL=//')
-ONECLI_URL_CHECK="${ONECLI_URL_FROM_ENV:-http://127.0.0.1:10254}"
-
-if curl -sf "${ONECLI_URL_CHECK}/api/health" >/dev/null 2>&1; then
-  step_ok "OneCLI running at $(dim "$ONECLI_URL_CHECK")"
-  ONECLI_OK=true
-  log "OneCLI: running at $ONECLI_URL_CHECK"
-elif command -v docker >/dev/null 2>&1; then
-  step_info "Setting up OneCLI…"
-  ONECLI_LOG="$STEPS_DIR/3b-onecli.log"
-  ONECLI_ERR="$STEPS_DIR/3b-onecli.err"
-  if pnpm exec tsx setup/index.ts --step onecli > "$ONECLI_LOG" 2>"$ONECLI_ERR"; then
-    step_ok "OneCLI ready"
-    ONECLI_OK=true
-    record_step "3b-onecli" "success"
-    log "OneCLI: installed/configured"
+# 3b. Gateway — preserve a detected install or install the catalog default
+GATEWAY_OK=false
+if command -v docker >/dev/null 2>&1; then
+  step_info "Setting up credential gateway…"
+  GATEWAY_LOG="$STEPS_DIR/3b-gateway.log"
+  GATEWAY_ERR="$STEPS_DIR/3b-gateway.err"
+  if pnpm exec tsx setup/index.ts --step gateway > "$GATEWAY_LOG" 2>"$GATEWAY_ERR"; then
+    step_ok "Credential gateway ready"
+    GATEWAY_OK=true
+    record_step "3b-gateway" "success"
+    log "Credential gateway: installed/configured"
   else
-    step_fail "OneCLI setup failed $(dim "(see $ONECLI_LOG)")"
-    record_step "3b-onecli" "failed"
-    log "OneCLI: FAILED"
+    step_fail "Gateway setup failed $(dim "(see $GATEWAY_LOG)")"
+    record_step "3b-gateway" "failed"
+    log "Credential gateway: FAILED"
   fi
 else
-  step_fail "OneCLI needs Docker $(dim "(install Docker first)")"
-  record_step "3b-onecli" "failed"
-  log "OneCLI: skipped (no Docker)"
+  step_fail "Credential gateway needs Docker $(dim "(install Docker first)")"
+  record_step "3b-gateway" "failed"
+  log "Credential gateway: skipped (no Docker)"
 fi
 
-# 3c. Anthropic credential — run the auth setup step if no credential found
-if grep -qE '^(ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN)=' .env 2>/dev/null; then
-  step_ok "Anthropic credential found in .env"
-  log "Anthropic credential: found in .env"
-elif [ "$ONECLI_OK" = "true" ]; then
+# 3c. Anthropic credential — the selected gateway owns migration and auth
+if [ "$GATEWAY_OK" = "true" ]; then
   step_info "Registering Anthropic credential…"
   AUTH_LOG="$STEPS_DIR/3c-auth.log"
   AUTH_ERR="$STEPS_DIR/3c-auth.err"
-  if pnpm exec tsx setup/index.ts --step auth > "$AUTH_LOG" 2>"$AUTH_ERR"; then
+  if pnpm exec tsx setup/index.ts --step gateway-auth claude > "$AUTH_LOG" 2>"$AUTH_ERR"; then
     step_ok "Anthropic credential registered"
     record_step "3c-auth" "success"
     log "Anthropic credential: registered via auth step"
@@ -496,8 +496,8 @@ elif [ "$ONECLI_OK" = "true" ]; then
     log "Anthropic credential: FAILED"
   fi
 else
-  step_info "No Anthropic credential $(dim "(OneCLI not available — add manually to .env)")"
-  log "Anthropic credential: skipped (no OneCLI)"
+  step_info "No Anthropic credential $(dim "(gateway not available — add it after migration)")"
+  log "Anthropic credential: skipped (no gateway)"
 fi
 
 # 3d. Copy container skills from v1 that v2 doesn't have
@@ -728,11 +728,11 @@ fi
 fi
 echo
 echo "  $(bold 'What still needs a human:')"
-if [ "$ONECLI_OK" = "false" ]; then
-echo "    $(dim '·')  Set up OneCLI: pnpm exec tsx setup/index.ts --step onecli"
+if [ "$GATEWAY_OK" = "false" ]; then
+echo "    $(dim '·')  Set up the credential gateway: pnpm exec tsx setup/index.ts --step gateway"
 fi
-if ! grep -qE '^(ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN)=' .env 2>/dev/null; then
-echo "    $(dim '·')  Add Anthropic credential to .env or OneCLI vault"
+if [ "$GATEWAY_OK" = "false" ]; then
+echo "    $(dim '·')  Add the Anthropic credential through the selected gateway"
 fi
 echo "    $(dim '·')  Run $(bold '/migrate-from-v1') in Claude to finish:"
 echo "       $(dim '- Seed your owner account')"

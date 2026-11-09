@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -156,6 +156,7 @@ function track(root: string): string {
 }
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
@@ -173,6 +174,27 @@ describe('provisioning-core bootstrap', () => {
     await expect(loadProvisioningCore({ root, exec, importModule })).resolves.toBe(core);
     expect(exec).not.toHaveBeenCalled();
     expect(importModule).toHaveBeenCalledExactlyOnceWith(pathToFileURL(path.join(root, PROVISIONING_MODULE)).href);
+  });
+
+  it('module absent in a Git checkout: commits the fetched file so the install stays updatable', async () => {
+    vi.stubEnv('NANOCLAW_SETUP_COMMIT', '');
+    vi.stubEnv('GIT_CONFIG_GLOBAL', '/dev/null');
+    vi.stubEnv('GIT_CONFIG_NOSYSTEM', '1');
+    const root = track(fs.mkdtempSync(path.join(os.tmpdir(), 'slack-auto-git-')));
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
+    git('init', '-q');
+    git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'init');
+    const exec = vi.fn((command: string): string => {
+      if (command === 'git remote') return 'origin\n';
+      if (command.startsWith('git ls-remote')) return 'abc123\trefs/heads/channels\n';
+      if (command.includes('git show')) fs.writeFileSync(path.join(root, PROVISIONING_MODULE), 'export {};\n');
+      return '';
+    });
+
+    await loadProvisioningCore({ root, exec, importModule: vi.fn(async () => fakeCore()) });
+
+    expect(git('status', '--porcelain')).toBe('');
+    expect(git('show', '--name-only', '--format=', 'HEAD')).toBe(PROVISIONING_MODULE);
   });
 
   it('module absent: fetches the channels branch and materializes the one file, engine-style', async () => {
@@ -804,7 +826,6 @@ describe('a workspace that has to approve the install', () => {
   });
 });
 
-
 describe('community portal entry point', () => {
   it('uses browser setup for an unenrolled installation without legacy login or provisioning', async () => {
     state.portalEnabled.mockReturnValue(true);
@@ -812,13 +833,16 @@ describe('community portal entry point', () => {
     const root = track(rootWithModule());
     const core = fakeCore();
     state.installToken = undefined;
-    state.runInheritScript.mockClear(); state.brokerProvision.mockClear();
+    state.runInheritScript.mockClear();
+    state.brokerProvision.mockClear();
     try {
       const result = await maybeAutoProvisionSlack('Nano', { root, importModule: async () => core });
       expect(result).toEqual({ __portal_skip: 'slack' });
       expect(state.runSlackPortal).toHaveBeenCalledWith(core, 'Nano', undefined);
       expect(state.runInheritScript).not.toHaveBeenCalled();
       expect(state.brokerProvision).not.toHaveBeenCalled();
-    } finally { state.portalEnabled.mockReturnValue(false); }
+    } finally {
+      state.portalEnabled.mockReturnValue(false);
+    }
   });
 });

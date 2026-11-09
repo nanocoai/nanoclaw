@@ -91,7 +91,7 @@ export const installPackages: McpToolDefinition = {
  * Query keys that name a credential: camelCase-normalized, then matched as
  * whole words between [_.-] separators (`author` never matches `auth`, but
  * `authToken` does) — the URL persists to the container config and renders
- * on the approval card, so secrets must ride via OneCLI.
+ * on the approval card, so secrets must ride via the configured gateway.
  */
 const SECRET_QUERY_KEY_RE =
   /(^|[_.-])(o?auth(orization)?|(auth|access|api|session|id)?[_-]?token|secret|passw(or)?d|pwd|api[_-]?key|private[_-]?key|credentials?|bearer|jwt|sig(nature)?)([_.-]|$)/i;
@@ -136,11 +136,13 @@ function parseMcpServerInput(args: Record<string, unknown>): { config: ParsedMcp
       return { error: 'url must use HTTPS (plain HTTP is allowed only for localhost and host.docker.internal)' };
     }
     if (parsed.username || parsed.password || parsed.hash) {
-      return { error: 'url must not contain credentials or fragments; use OneCLI for authentication' };
+      return { error: 'url must not contain credentials or fragments; use the credential gateway for authentication' };
     }
     for (const key of parsed.searchParams.keys()) {
       if (SECRET_QUERY_KEY_RE.test(key.replace(CAMEL_SPLIT_RE, '$1_$2'))) {
-        return { error: `url query parameter "${key}" looks like a credential; use OneCLI for authentication` };
+        return {
+          error: `url query parameter "${key}" looks like a credential; use the credential gateway for authentication`,
+        };
       }
     }
     return { config: { type: 'http', url } };

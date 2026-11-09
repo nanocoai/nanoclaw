@@ -3,6 +3,7 @@ import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const TEST_ROOT = '/tmp/nanoclaw-project-doc-compose-test';
+const REPO_ROOT = process.cwd();
 
 vi.mock('./log.js', () => ({
   log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn() },
@@ -59,10 +60,19 @@ beforeEach(async () => {
   vi.clearAllMocks();
   fs.rmSync(TEST_ROOT, { recursive: true, force: true });
   fs.mkdirSync(TEST_ROOT, { recursive: true });
+  const sourceRoot = path.join(TEST_ROOT, 'source');
+  const skillDir = path.join(sourceRoot, 'container', 'skills', 'fixture-gateway');
+  fs.mkdirSync(skillDir, { recursive: true });
+  fs.writeFileSync(path.join(skillDir, 'instructions.md'), 'Fixture credential guidance.');
+  for (const entry of ['CLAUDE.md', 'agent-runner']) {
+    fs.symlinkSync(path.join(REPO_ROOT, 'container', entry), path.join(sourceRoot, 'container', entry));
+  }
+  process.chdir(sourceRoot);
   await runMigrations(await initTestDb());
 });
 
 afterEach(async () => {
+  process.chdir(REPO_ROOT);
   await closeDb();
   fs.rmSync(TEST_ROOT, { recursive: true, force: true });
 });
@@ -99,7 +109,7 @@ describe('composeGroupProjectDoc delivery', () => {
     // here means adding a paragraph to it cannot break this test.
     const read = (...p: string[]): string => fs.readFileSync(path.join(process.cwd(), ...p), 'utf-8').trim();
     expect(doc).toContain(renderBaseInstructions(read('container', 'CLAUDE.md')));
-    expect(doc).toContain(read('container', 'skills', 'onecli-gateway', 'instructions.md'));
+    expect(doc).toContain(read('container', 'skills', 'fixture-gateway', 'instructions.md'));
     expect(doc).toContain(read('container', 'agent-runner', 'src', 'mcp-tools', 'cli.instructions.md'));
     expect(doc).toContain(read('container', 'agent-runner', 'src', 'mcp-tools', 'core.instructions.md'));
   });
@@ -194,7 +204,7 @@ describe('composeGroupProjectDoc corrupt skill selection', () => {
 
     const doc = await compose(ag);
 
-    expect(doc).toContain('# NanoClaw Skill: onecli-gateway');
+    expect(doc).toContain('# NanoClaw Skill: fixture-gateway');
     expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('skill selection'), expect.anything());
   });
 
@@ -202,7 +212,7 @@ describe('composeGroupProjectDoc corrupt skill selection', () => {
     const ag = await seed('ag-substr', 'substr-group');
     await getDb().run(
       'UPDATE container_configs SET skills = ? WHERE agent_group_id = ?',
-      JSON.stringify('xx-onecli-gateway-xx'),
+      JSON.stringify('xx-fixture-gateway-xx'),
       ag.id,
     );
 
@@ -211,7 +221,7 @@ describe('composeGroupProjectDoc corrupt skill selection', () => {
     // Treated as corrupt and widened to 'all', never as a selection that
     // happens to contain the skill's name as a substring.
     expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('skill selection'), expect.anything());
-    expect(doc).toContain('# NanoClaw Skill: onecli-gateway');
+    expect(doc).toContain('# NanoClaw Skill: fixture-gateway');
   });
 });
 
@@ -260,7 +270,7 @@ describe('composeGroupProjectDoc skill selection', () => {
 
     const doc = await compose(ag);
 
-    expect(doc).not.toContain('# NanoClaw Skill: onecli-gateway');
+    expect(doc).not.toContain('# NanoClaw Skill: fixture-gateway');
     expect(doc).toContain('# NanoClaw Module: core');
   });
 
@@ -269,7 +279,7 @@ describe('composeGroupProjectDoc skill selection', () => {
 
     const doc = await compose(ag);
 
-    expect(doc).toContain('# NanoClaw Skill: onecli-gateway');
+    expect(doc).toContain('# NanoClaw Skill: fixture-gateway');
   });
 });
 

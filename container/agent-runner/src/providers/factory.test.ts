@@ -99,6 +99,7 @@ describe('createProvider', () => {
         configuration: {
           executionPolicy: (_input, environment) => ({ home: environment.HOME ?? null }),
           inference: (input) => ({ chosen: input.model ?? 'default' }),
+          tone: { default: 'brief', toSettings: (tone) => ({ style: tone }) },
           memory: (hook) => ({ hookCommand: hook.command }),
           mcpServers: { constant: { fixed: true } },
         },
@@ -112,6 +113,7 @@ describe('createProvider', () => {
     expect(seen[0]!.configuration).toEqual({
       executionPolicy: { home: process.env.HOME ?? null },
       inference: { chosen: 'opus' },
+      tone: { style: 'brief' },
       mcpServers: { fixed: true },
     });
 

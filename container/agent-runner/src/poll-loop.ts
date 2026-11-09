@@ -6,7 +6,7 @@ import {
   markScriptSkipped,
   type MessageInRow,
 } from './db/messages-in.js';
-import { getUndeliveredMessages, writeMessageOut } from './db/messages-out.js';
+import { getUndeliveredMessages, writeMessageOut, type MessageOutRow } from './db/messages-out.js';
 import { clearStaleProcessingAcks } from './db/container-state.js';
 import { resolveDestinationThread } from './db/session-routing.js';
 import { touchHeartbeat } from './heartbeat.js';
@@ -22,6 +22,8 @@ import {
   formatMessages,
   extractRouting,
   categorizeMessage,
+  FAILURE_NOTICE_FIELD,
+  GENERIC_FAILURE_NOTICE,
   isClearCommand,
   isRunnerCommand,
   isSessionEcho,
@@ -271,14 +273,14 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         prompt,
         continuation,
         midTurnCompleteDelivery,
+        config.signal,
       );
       if (result.continuation && result.continuation !== continuation) {
         continuation = result.continuation;
         setContinuation(config.providerName, continuation);
       }
     } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      log(`Query error: ${errMsg}`);
+      log(`Query error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
 
       // Stale/corrupt continuation recovery: ask the provider whether
       // this error means the stored continuation is unusable, and clear
@@ -289,15 +291,8 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         clearContinuation(config.providerName);
       }
 
-      // Write error response so the user knows something went wrong
-      await writeMessageOut({
-        id: generateId(),
-        kind: 'chat',
-        platform_id: routing.platformId,
-        channel_type: routing.channelType,
-        thread_id: routing.threadId,
-        content: JSON.stringify({ text: `Error: ${errMsg}` }),
-      });
+      // processQuery owns failure notices: it knows which active and queued
+      // turns the failure abandoned. The opening batch may already be done.
 
       // The batch is still acked completed below (no redelivery). Without
       // this line the only log trace of the errored turn is "Query error"
@@ -375,9 +370,9 @@ export async function processQuery(
    * delivery-inert and the final result stays the single delivery door.
    */
   midTurnCompleteDelivery = false,
+  signal?: AbortSignal,
 ): Promise<QueryResult> {
-  // adoptTurn mutates routing in place; copy so the caller's batch routing
-  // (used for the query error notice) stays the first message's.
+  // adoptTurn mutates routing in place; keep the caller's batch route intact.
   routing = { ...routing };
   let queryContinuation: string | undefined;
   let done = false;
@@ -393,6 +388,9 @@ export async function processQuery(
   // in-flight turn, and its result's nudge decision still describes the
   // turn that is streaming.
   let midTurnSent = 0;
+  // The subset of midTurnSent that counts as the reply: blocks to another
+  // agent are left out (see answersBatch).
+  let midTurnReplied = 0;
   // Outbound seq high-water mark at the turn boundary — a frame-local NUMBER,
   // not a content record. Two uses: (1) the mid-turn door recognizes a block
   // that is a verbatim repeat of a message already written to outbound.db
@@ -431,20 +429,26 @@ export async function processQuery(
     routing: RoutingContext;
     unwrappedNudged: boolean;
     taskBlockNudged: boolean;
+    nudgedWindow?: SeqWindow;
   };
   const queuedTurns: QueuedTurn[] = [];
+  // On a wrap-nudge retry: the rows the nudged turn wrote. The turn boundary
+  // moved past them, so both doors check retry blocks against this window and
+  // skip exact repeats. Follow-ups queued in between keep their own window.
+  let nudgedWindow: SeqWindow | undefined;
   const adoptTurn = (next: QueuedTurn): void => {
     Object.assign(routing, next.routing);
     unwrappedNudged = next.unwrappedNudged;
     taskBlockNudged = next.taskBlockNudged;
+    nudgedWindow = next.nudgedWindow;
     publishReplyRoute(routing);
     answering = true;
   };
   // A retry is another provider input, behind any follow-ups already pushed.
   // Preserve its original route, prompt and retry guards until it is answered.
-  const pushRetry = (prompt: string): void => {
+  const pushRetry = (prompt: string, retryOf?: SeqWindow): void => {
     query.push(prompt);
-    queuedTurns.push({ routing: { ...routing }, unwrappedNudged, taskBlockNudged });
+    queuedTurns.push({ routing: { ...routing }, unwrappedNudged, taskBlockNudged, nudgedWindow: retryOf });
     archivePrompts.push(archivePrompts[0] ?? initialPrompt);
   };
 
@@ -599,8 +603,9 @@ export async function processQuery(
         // delivery the result stays the only delivery door, so a stray text
         // event must not open a second one.
         if (midTurnCompleteDelivery) {
-          const scan = await deliverMidTurnBlocks(event.text, routing, turnStartSeq, midTurnTail);
+          const scan = await deliverMidTurnBlocks(event.text, routing, turnStartSeq, midTurnTail, nudgedWindow);
           midTurnSent += scan.delivered;
+          midTurnReplied += scan.replied;
           midTurnTail = scan.tail;
         }
       } else if (event.type === 'result') {
@@ -611,78 +616,83 @@ export async function processQuery(
         // (send_message) mid-turn, or the message may not need a response
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
-        if (event.text) {
-          const { sent, hasUnwrapped, taskBlocks, resultBlocks } = await dispatchResultText(event.text, routing, {
+        const resultText = event.text ?? '';
+        const failed = event.isError === true;
+        if (resultText || failed) {
+          const { hasUnwrapped, taskBlocks, undelivered } = await dispatchResultText(resultText, routing, {
             midTurnSent,
+            midTurnReplied,
+            turnStartSeq,
+            nudgedWindow,
             // For mid-turn delivery providers the result door NEVER delivers
-            // content (error results excepted, below): mid-turn streaming is
-            // the single content door. The result door's remaining job is
-            // the nudge decision — see turnDelivered.
+            // content: mid-turn streaming is the single content door. The
+            // result door's remaining job is the nudge decision.
             suppressDelivery: midTurnCompleteDelivery,
-            // "Did anything user-visible go out this turn?" — door
-            // deliveries (midTurnSent) plus any chat row written since the
-            // turn boundary (which also sees MCP send_message calls the
-            // frame-local count can't). When false and the result still
-            // carries content, the wrap-nudge fires so the model re-sends
-            // and the retry streams through the mid-turn door.
-            turnDelivered: midTurnCompleteDelivery ? midTurnSent > 0 || chatRowWrittenSince(turnStartSeq) : undefined,
           });
-          const willRetryTaskBlocks = shouldNudgeTaskBlocks(routing.taskRun, taskBlocks, taskBlockNudged);
+          // Completed partial output remains deliverable, but an explicit
+          // provider failure must keep its status and never trigger a retry.
+          const willRetryTaskBlocks = !failed && shouldNudgeTaskBlocks(routing.taskRun, taskBlocks, taskBlockNudged);
           // One-door task delivery: the final text becomes the run log entry
           // while explicit append-log calls remain optional additive notes.
           // Errors included: a failed run's text belongs in its log, not chat.
           // A corrective retry handles delivery only; its result is not a
           // second run summary.
-          if (routing.taskRun && !taskBlockNudged) await autoAppendTaskLog(event.text);
-          if (resultBlocks === 0 && event.isError === true && !routing.taskRun) {
-            // Non-retryable error turn (e.g. a 403 billing_error) with no
-            // <message> envelope: deliver the notice instead of dropping it as
-            // scratchpad, and skip the re-wrap nudge — it would just re-hammer
-            // the failing gateway turn after turn.
-            await deliverErrorResult(event.text, routing);
-            notifyExchangeComplete(onExchangeComplete, {
-              prompt: archivePrompts[0] ?? initialPrompt,
-              result: event.text,
-              continuation: queryContinuation ?? initialContinuation,
-              status: 'error',
-            });
-            archivePrompts.shift();
-          } else {
-            // An unwrapped final text only warrants the wrap-nudge when NOTHING
-            // was delivered this turn — hasUnwrapped already folds in the
-            // turn's mid-turn sent count. If a reply already went out as a
-            // mid-turn block, the unwrapped tail is a self-summary; nudging
-            // coaxes a redundant second message (live-observed). It stays in
-            // the scratchpad log.
-            const willRetryWrapping = hasUnwrapped && !unwrappedNudged;
-            notifyExchangeComplete(onExchangeComplete, {
-              prompt: archivePrompts[0] ?? initialPrompt,
-              result: event.text,
-              continuation: queryContinuation ?? initialContinuation,
-              status: hasUnwrapped || willRetryTaskBlocks ? 'undelivered' : 'completed',
-            });
-            if (willRetryWrapping) {
-              unwrappedNudged = true;
-              const destinations = getAllDestinations();
-              const names = destinations.map((d) => d.name).join(', ');
-              pushRetry(
-                `<system>Your response was not delivered — it was not wrapped in <message to="name">...</message> blocks. ` +
-                  `All output must be wrapped: use <message to="name"> for content to send, or <internal> for scratchpad. ` +
-                  `Your destinations: ${names}. ` +
-                  `Please re-send your response with the correct wrapping.</system>`,
-              );
-            }
-            if (willRetryTaskBlocks) {
-              taskBlockNudged = true;
-              const names = getAllDestinations()
-                .map((d) => d.name)
-                .join(', ');
-              pushRetry(buildTaskBlockNudge(taskBlocks, names));
-            }
-            // Each result consumes one input; retries carry their original
-            // user prompt at their own position in the FIFO queue.
-            archivePrompts.shift();
+          const archivedResult = [resultText, failed ? event.error : undefined].filter(Boolean).join('\n');
+          if (routing.taskRun && !taskBlockNudged) await autoAppendTaskLog(archivedResult);
+          if (failed) {
+            // A failed turn needs a visible notice even after a partial reply.
+            // Only the provider's dedicated error field is channel content;
+            // unwrapped model output and raw diagnostics remain private.
+            const notice = event.error ?? GENERIC_FAILURE_NOTICE;
+            if (sendsFailureNotice(routing)) await deliverErrorResult(routing, notice);
+            // Keep the reason in the runner log, since the skipped notice may
+            // be the only place it would have been recorded.
+            else log(`Error result — notice not sent on this route: ${notice}`);
           }
+          // An unwrapped final text only warrants the wrap-nudge when no
+          // <message> block was delivered this turn. If a reply already went
+          // out as a block, the unwrapped tail stays in the scratchpad log.
+          const willRetryWrapping = !failed && hasUnwrapped && !unwrappedNudged;
+          notifyExchangeComplete(onExchangeComplete, {
+            prompt: archivePrompts[0] ?? initialPrompt,
+            result: archivedResult,
+            continuation: queryContinuation ?? initialContinuation,
+            status: failed ? 'error' : hasUnwrapped || willRetryTaskBlocks ? 'undelivered' : 'completed',
+          });
+          if (willRetryWrapping) {
+            unwrappedNudged = true;
+            // Everything that went out this turn: tool sends, door sends and
+            // reactions alike, so a reaction-only turn can also answer done.
+            const sentThisTurn = chatRowsInWindow(turnStartSeq);
+            const destinations = getAllDestinations();
+            const names = destinations.map((d) => d.name).join(', ');
+            // A tool send can't be told apart from an "on it" ack, so after
+            // one the model sees what went out and decides; never a silent drop.
+            log(
+              sentThisTurn.length > 0
+                ? `Wrap-nudge pushed: quoting ${sentThisTurn.length} send(s) from this turn`
+                : 'Wrap-nudge pushed: nothing was sent this turn',
+            );
+            pushRetry(
+              sentThisTurn.length > 0
+                ? buildInformedWrapNudge(sentThisTurn, undelivered, destinations)
+                : `<system>Your response was not delivered — it was not wrapped in <message to="name">...</message> blocks. ` +
+                    `All output must be wrapped: use <message to="name"> for content to send, or <internal> for scratchpad. ` +
+                    `Your destinations: ${names}. ` +
+                    `Please re-send your response with the correct wrapping.</system>`,
+              { after: turnStartSeq, upto: maxOutboundSeq() },
+            );
+          }
+          if (willRetryTaskBlocks) {
+            taskBlockNudged = true;
+            const names = getAllDestinations()
+              .map((d) => d.name)
+              .join(', ');
+            pushRetry(buildTaskBlockNudge(taskBlocks, names));
+          }
+          // Each result consumes one input; retries carry their original
+          // user prompt at their own position in the FIFO queue.
+          archivePrompts.shift();
         } else archivePrompts.shift();
         // Turn boundary: reset the per-turn sent count after the result's
         // nudge decision has used it. A nudge retry re-counts via its own
@@ -694,14 +704,20 @@ export async function processQuery(
         // buffer dies with the turn: a fragment that never closed is not
         // carried into the next turn — the wrap-nudge owns that case.
         midTurnSent = 0;
+        midTurnReplied = 0;
         turnStartSeq = maxOutboundSeq();
         midTurnTail = '';
+        nudgedWindow = undefined;
         const next = queuedTurns.shift();
         if (next) adoptTurn(next);
         else answering = false;
       }
     }
   } catch (err) {
+    // Freeze the queue before awaiting notices. Follow-ups have already been
+    // acknowledged, so an abandoned queued turn cannot rely on redelivery.
+    done = true;
+    const cancelled = endedForCommand || signal?.aborted;
     const errMsg = err instanceof Error ? err.message : String(err);
     notifyExchangeComplete(onExchangeComplete, {
       prompt: archivePrompts[0] ?? initialPrompt,
@@ -709,6 +725,38 @@ export async function processQuery(
       continuation: queryContinuation ?? initialContinuation,
       status: 'error',
     });
+    if (!cancelled) {
+      // Completed turns are no longer answering or queued. Preserve partial
+      // output from unfinished turns and report that the run did not finish.
+      // Retrying the same route or several queued turns in one thread needs
+      // only one notice. The host picks an a2a reply's session by in_reply_to,
+      // so agent routes also compare it.
+      const failedRoutes = [...(answering ? [routing] : []), ...queuedTurns.map((turn) => turn.routing)];
+      const noticed: RoutingContext[] = [];
+      for (const target of failedRoutes) {
+        if (!sendsFailureNotice(target)) continue;
+        if (
+          noticed.some(
+            (prior) =>
+              prior.platformId === target.platformId &&
+              prior.channelType === target.channelType &&
+              prior.threadId === target.threadId &&
+              (target.channelType !== 'agent' || prior.inReplyTo === target.inReplyTo),
+          )
+        )
+          continue;
+        noticed.push(target);
+        try {
+          await deliverErrorResult(target, GENERIC_FAILURE_NOTICE);
+        } catch (noticeError) {
+          log(
+            `Failed to deliver query error notice: ${noticeError instanceof Error ? noticeError.message : String(noticeError)}`,
+          );
+        }
+      }
+    }
+    // Continuation recovery receives the original error; diagnostics remain
+    // in the exchange archive and runner log, never in the channel notice.
     throw err;
   } finally {
     done = true;
@@ -750,14 +798,17 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
 }
 
 /**
- * Deliver a turn's text straight to the channel the batch arrived on. Used when
- * a turn ends in a provider error (e.g. a non-retryable 403 billing_error) with
- * no <message> envelope: the notice would otherwise be dropped as scratchpad.
- * This is the same user-facing write the outer catch block does, minus the
- * `Error:` prefix — the provider's text is already a user-facing message.
+ * Does a failure on this route get a notice? Task runs report through their
+ * run log. A turn woken only by failure notices sends none, so an a2a or
+ * self-addressed failure chain stops after one notice.
  */
-async function deliverErrorResult(text: string, routing: RoutingContext): Promise<void> {
-  log('Error result with no <message> envelope — delivering to channel');
+function sendsFailureNotice(routing: RoutingContext): boolean {
+  return !routing.taskRun && !!routing.platformId && !!routing.channelType && !routing.failureNoticeWake;
+}
+
+/** Send the dedicated provider error or a generic failure notice. */
+async function deliverErrorResult(routing: RoutingContext, text: string): Promise<void> {
+  log('Error result notice — delivering to channel');
   await writeMessageOut({
     id: generateId(),
     in_reply_to: routing.inReplyTo,
@@ -765,7 +816,7 @@ async function deliverErrorResult(text: string, routing: RoutingContext): Promis
     platform_id: routing.platformId,
     channel_type: routing.channelType,
     thread_id: routing.threadId,
-    content: JSON.stringify({ text: stripHarnessTagArtifacts(text) }),
+    content: JSON.stringify({ text: stripHarnessTagArtifacts(text), [FAILURE_NOTICE_FIELD]: true }),
   });
 }
 
@@ -783,14 +834,22 @@ export interface TaskMessageBlock {
 }
 
 /** Options for `dispatchResultText`, describing the turn it closes. */
-export interface ResultDispatchOptions {
+export type ResultDispatchOptions = ResultDispatchCounts &
+  ({ suppressDelivery: true; turnStartSeq: number } | { suppressDelivery?: false; turnStartSeq?: number });
+
+interface ResultDispatchCounts {
   /**
    * How many <message> blocks were already delivered from streamed text
    * events this turn. Folds into the returned `sent` total so a bare final
    * text after a mid-turn delivery reads as a self-summary, not an
-   * undelivered reply.
+   * undelivered reply. Tool sends never settle the turn here: the caller
+   * turns an unwrapped result after one into an informed nudge.
    */
   midTurnSent?: number;
+  /** The midTurnSent blocks that count as the reply (see answersBatch). Defaults to midTurnSent. */
+  midTurnReplied?: number;
+  /** On a wrap-nudge retry: rows the nudged turn wrote. An exact repeat of one is not sent again. */
+  nudgedWindow?: SeqWindow;
   /**
    * Providers declaring `textDelivery: 'mid-turn-complete'`: the result door NEVER delivers
    * content. Mid-turn streaming (parse-time block delivery plus cross-
@@ -799,24 +858,15 @@ export interface ResultDispatchOptions {
    * at worst content the streaming door missed — either way it is not sent
    * from here. The result door keeps exactly two jobs: surfacing error
    * results (see the isError branch in processQuery) and the wrap-nudge
-   * decision (`turnDelivered` below). Task runs, unknown destinations and
-   * empty bodies keep their existing result-door handling, none of which
-   * delivers content.
+   * decision. When nothing streamed and the result still carries content,
+   * wrapped or not, the turn counts as undelivered and the wrap-nudge fires,
+   * so the retry streams through the mid-turn door: the degradation path
+   * for streaming-door misses, never a direct result-door send. Task runs,
+   * unknown destinations and empty bodies keep their existing result-door
+   * handling, none of which delivers content. Requires `turnStartSeq`, the
+   * outbound seq at the turn boundary: a result block is a repeat only if
+   * this exact message was written since then.
    */
-  suppressDelivery?: boolean;
-  /**
-   * Did anything user-visible go out this turn? True when the mid-turn door
-   * delivered (midTurnSent > 0) OR any chat row landed in outbound.db since
-   * the turn boundary (covers MCP send_message calls the frame-local count
-   * cannot see). Only meaningful with `suppressDelivery`. When false and the
-   * result carries content — wrapped blocks or unwrapped prose — the turn
-   * counts as undelivered and the wrap-nudge fires, so the model re-sends
-   * and the retry streams through the mid-turn door. This is the deliberate
-   * degradation path for streaming-door misses (SDK drift, a destination
-   * appearing only after streaming, a block that never closed): nudge and
-   * retry, never a direct result-door send.
-   */
-  turnDelivered?: boolean;
 }
 /**
  * `<internal>…</internal>` spans are explicitly not-for-delivery scratchpad.
@@ -858,6 +908,8 @@ const INTERNAL_SPAN_RE = /<internal\b[\s\S]*?<\/internal>/gi;
  */
 export interface MidTurnScanResult {
   delivered: number;
+  /** Delivered blocks that count as the reply (see answersBatch). */
+  replied: number;
   tail: string;
 }
 
@@ -866,8 +918,9 @@ export async function deliverMidTurnBlocks(
   routing: RoutingContext,
   turnStartSeq?: number,
   carry = '',
+  nudgedWindow?: SeqWindow,
 ): Promise<MidTurnScanResult> {
-  if (routing.taskRun) return { delivered: 0, tail: '' };
+  if (routing.taskRun) return { delivered: 0, replied: 0, tail: '' };
   const input = carry + text;
   const tailStart = unresolvedTailStart(input);
   const settled = input.slice(0, tailStart);
@@ -885,6 +938,7 @@ export async function deliverMidTurnBlocks(
   const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
   let match: RegExpExecArray | null;
   let delivered = 0;
+  let replied = 0;
   while ((match = MESSAGE_RE.exec(visible)) !== null) {
     const toName = match[1];
     const rawBody = match[2];
@@ -910,11 +964,27 @@ export async function deliverMidTurnBlocks(
       log(`Mid-turn <message to="${toName}"> is a verbatim repeat of a message already sent this turn — skipped`);
       continue;
     }
+    if (wasWrittenInWindow(dest, body, nudgedWindow)) {
+      log(`Mid-turn <message to="${toName}"> repeats a message the nudged turn already sent — skipped`);
+      continue;
+    }
     await sendToDestination(dest, body, routing);
     delivered++;
+    if (answersBatch(dest, routing)) replied++;
     log(`Mid-turn delivery: <message to="${toName}"> (${body.length} chars)`);
   }
-  return { delivered, tail };
+  return { delivered, replied, tail };
+}
+
+/**
+ * Does a block sent to `dest` count as the reply? Not when it goes to another
+ * agent: that may be delegation, so unwrapped text after it still gets the
+ * nudge. The exception is a block back to the agent whose message woke this
+ * turn: that is the reply it is waiting for.
+ */
+function answersBatch(dest: DestinationEntry, routing: RoutingContext): boolean {
+  if (dest.type !== 'agent') return true;
+  return routing.channelType === 'agent' && routing.platformId === dest.agentGroupId;
 }
 
 const OPEN_INTERNAL_RE = /<internal\b/i;
@@ -974,22 +1044,90 @@ function maxOutboundSeq(): number {
   return getUndeliveredMessages().reduce((max, message) => Math.max(max, message.seq ?? 0), 0);
 }
 
+/** Outbound seq window (after, upto]. */
+type SeqWindow = { after: number; upto: number };
+
 /**
- * Has ANY chat row been written to outbound.db after `afterSeq`? Feeds the
- * result door's nudge decision: unlike the frame-local midTurnSent count,
- * this also sees MCP send_message / send_file deliveries made this turn, so
- * an agent that already replied via tools is not nudged into repeating
- * itself. Fail-open to false: if the lookup breaks, the nudge may fire
- * spuriously (a repeat coax), never silently swallow an undelivered turn.
+ * Chat rows written to outbound.db in the seq window (afterSeq, uptoSeq]:
+ * door, tool and error sends alike. Every caller fails toward a nudge or a
+ * delivery, so a lookup error returns none.
  */
-function chatRowWrittenSince(afterSeq: number): boolean {
+function chatRowsInWindow(afterSeq: number, uptoSeq = Infinity): MessageOutRow[] {
   try {
     // ponytail: reuse the existing semantic read; add a cursor operation only if history scans show up in profiles.
-    return getUndeliveredMessages().some((message) => (message.seq ?? 0) > afterSeq && message.kind === 'chat');
+    return getUndeliveredMessages().filter(
+      (message) => (message.seq ?? 0) > afterSeq && (message.seq ?? 0) <= uptoSeq && message.kind === 'chat',
+    );
   } catch (err) {
-    log(`chatRowWrittenSince failed: ${err instanceof Error ? err.message : String(err)}`);
-    return false;
+    log(`Outbound lookup failed: ${err instanceof Error ? err.message : String(err)}`);
+    return [];
   }
+}
+
+const INFORMED_NUDGE_QUOTE_MAX = 200;
+const INFORMED_NUDGE_ROWS_MAX = 3;
+
+/**
+ * Wrap-nudge after tool sends plus an unwrapped final text. The rows can't
+ * tell an "on it" from the full reply, so show the model both and let it
+ * answer `<internal>done</internal>` or send only what is missing. Quoting
+ * the final text also ties a retry queued behind a follow-up to its turn.
+ */
+export function buildInformedWrapNudge(
+  rows: MessageOutRow[],
+  finalText: string,
+  destinations: DestinationEntry[],
+): string {
+  const names = destinations.map((d) => d.name).join(', ');
+  // Name where each send went, so a reply sent to the wrong place is not taken as done.
+  const destinationOf = (row: MessageOutRow): string =>
+    destinations.find((d) =>
+      d.type === 'agent'
+        ? row.channel_type === 'agent' && row.platform_id === d.agentGroupId
+        : row.channel_type === d.channelType && row.platform_id === d.platformId,
+    )?.name ?? 'unknown';
+  const clip = (text: string): string => escapePromptXml(clipCodePoints(text, INFORMED_NUDGE_QUOTE_MAX));
+  const sent = rows.slice(0, INFORMED_NUDGE_ROWS_MAX).map((row) => {
+    let text = '';
+    try {
+      const content = JSON.parse(row.content) as {
+        text?: unknown;
+        files?: unknown;
+        operation?: unknown;
+        emoji?: unknown;
+      };
+      const files = Array.isArray(content.files) ? `[file: ${content.files.join(', ')}]` : '';
+      // A reaction is quoted as one, so the model can tell it from a reply.
+      text =
+        content.operation === 'reaction'
+          ? `[reaction: ${typeof content.emoji === 'string' ? content.emoji : '?'}]`
+          : [typeof content.text === 'string' ? content.text : '', files].filter(Boolean).join(' ');
+    } catch {
+      // Unparseable row: quote a placeholder.
+    }
+    return `<sent_message to="${escapePromptXml(destinationOf(row))}">${clip(text || '[non-text message]')}</sent_message>`;
+  });
+  if (rows.length > INFORMED_NUDGE_ROWS_MAX) sent.push(`(+${rows.length - INFORMED_NUDGE_ROWS_MAX} more)`);
+  return (
+    `<system>Your final text was not delivered — it was not wrapped in <message to="name">...</message> blocks:\n` +
+    `<undelivered_text>${clip(finalText)}</undelivered_text>\n` +
+    `Earlier in that turn you already sent:\n${sent.join('\n')}\n` +
+    `If what was sent is the full reply, to where it was owed, respond with only <internal>done</internal> and nothing more will be sent. ` +
+    `Otherwise send only what is still missing, wrapped in <message to="name">...</message>, without repeating what already went out. ` +
+    `Your destinations: ${escapePromptXml(names)}.</system>`
+  );
+}
+
+/** First `max` code points of `text`, with an ellipsis when cut. Never splits a surrogate pair. */
+function clipCodePoints(text: string, max: number): string {
+  let end = 0;
+  let count = 0;
+  for (const char of text) {
+    if (count === max) return `${text.slice(0, end)}…`;
+    end += char.length;
+    count++;
+  }
+  return text;
 }
 
 /**
@@ -1002,33 +1140,41 @@ function chatRowWrittenSince(afterSeq: number): boolean {
  */
 function wasWrittenInSeqWindow(dest: DestinationEntry, body: string, afterSeq: number, uptoSeq: number): boolean {
   if (uptoSeq <= afterSeq) return false;
-  try {
-    const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
-    const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
-    const content = JSON.stringify({ text: body });
-    return getUndeliveredMessages().some(
-      (message) =>
-        (message.seq ?? 0) > afterSeq &&
-        (message.seq ?? 0) <= uptoSeq &&
-        message.kind === 'chat' &&
-        message.platform_id === platformId &&
-        message.channel_type === channelType &&
-        message.content === content,
-    );
-  } catch (err) {
-    // The guard is an anti-duplication refinement; if the lookup itself
-    // fails, fall through to delivery (the write will surface any real DB
-    // breakage loudly).
-    log(`Echo-guard lookup failed: ${err instanceof Error ? err.message : String(err)}`);
-    return false;
-  }
+  const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
+  const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
+  const content = JSON.stringify({ text: body });
+  // A lookup error reads as "not written": the guard falls through to
+  // delivery, and the write surfaces any real DB breakage loudly.
+  return chatRowsInWindow(afterSeq, uptoSeq).some(
+    (message) =>
+      message.platform_id === platformId && message.channel_type === channelType && message.content === content,
+  );
+}
+
+/**
+ * Did the nudged turn already send this body to this destination? Compares
+ * trimmed text, since a tool send keeps the whitespace a block loses.
+ */
+function wasWrittenInWindow(dest: DestinationEntry, body: string, window: SeqWindow | undefined): boolean {
+  if (!window) return false;
+  const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
+  const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
+  return chatRowsInWindow(window.after, window.upto).some((message) => {
+    if (message.platform_id !== platformId || message.channel_type !== channelType) return false;
+    try {
+      const content = JSON.parse(message.content) as { text?: unknown; operation?: unknown };
+      return content.operation === undefined && typeof content.text === 'string' && content.text.trim() === body;
+    } catch {
+      return false;
+    }
+  });
 }
 
 export async function dispatchResultText(
   text: string,
   routing: RoutingContext,
   options?: ResultDispatchOptions,
-): Promise<{ sent: number; hasUnwrapped: boolean; taskBlocks: TaskMessageBlock[]; resultBlocks: number }> {
+): Promise<{ sent: number; hasUnwrapped: boolean; taskBlocks: TaskMessageBlock[]; undelivered: string }> {
   // <internal> spans are not-for-delivery scratchpad. Remove them BEFORE block
   // extraction so a <message> drafted inside one is never delivered from the
   // final text either — the mid-turn seam already guarantees this; without the
@@ -1043,10 +1189,10 @@ export async function dispatchResultText(
   // text with no (new) blocks after a mid-turn delivery is scratchpad, not an
   // undelivered reply.
   let sent = options?.midTurnSent ?? 0;
-  // <message> blocks present in THIS result text (delivered, stripped, task
-  // or dropped alike) — drives the bare-error-text delivery gate, which must
-  // key on the error result itself, not on earlier mid-turn deliveries.
-  let resultBlocks = 0;
+  let replied = options?.midTurnReplied ?? sent;
+  // Result blocks that were not delivered (unknown destination, or missed by
+  // the stream): always nudge, even when another block went out this turn.
+  let missed = 0;
   // <message to> blocks left inert in a task run — drives the same-turn
   // "use send_message" nudge in processQuery.
   const taskBlocks: TaskMessageBlock[] = [];
@@ -1060,7 +1206,6 @@ export async function dispatchResultText(
     const toName = match[1];
     const body = stripHarnessTagArtifacts(match[2].trim());
     lastIndex = MESSAGE_RE.lastIndex;
-    resultBlocks++;
 
     // One-door delivery in task sessions: only the send_message tool delivers.
     // A final-text <message to> block here is either an echo of a tool send the
@@ -1078,6 +1223,9 @@ export async function dispatchResultText(
     if (!dest) {
       log(`Unknown destination in <message to="${toName}">, dropping block`);
       scratchpadParts.push(`[dropped: unknown destination "${toName}"] ${body}`);
+      // Possibly lost: always nudge. If it already went out before its destination
+      // was removed, the informed nudge quotes that send and the model answers done.
+      missed++;
       continue;
     }
     // Never deliver a blank message: a body that is empty (or was only
@@ -1090,24 +1238,32 @@ export async function dispatchResultText(
     }
     // One content door: with a mid-turn delivery provider the result door
     // never sends. A deliverable block here is either a repeat of a mid-turn
-    // delivery (turnDelivered — keep it out of the scratchpad so it does not
-    // read as an undelivered reply) or content the streaming door missed —
-    // then it goes to the scratchpad as undelivered content, which makes the
-    // turn count as undelivered and fires the wrap-nudge: the model re-sends
-    // and the retry streams through the mid-turn door.
+    // delivery (keep it out of the scratchpad so it does not read as an
+    // undelivered reply) or content the streaming door missed — then it goes
+    // to the scratchpad as undelivered content, which makes the turn count as
+    // undelivered and fires the wrap-nudge: the model re-sends and the retry
+    // streams through the mid-turn door.
     if (options?.suppressDelivery) {
-      if (options.turnDelivered) {
+      // Exact match, so a streamed delegation can't hide an unstreamed answer.
+      const repeat =
+        wasWrittenInWindow(dest, body, options.nudgedWindow) ||
+        wasWrittenInSeqWindow(dest, body, options.turnStartSeq, maxOutboundSeq());
+      if (repeat) {
         log(`<message to="${toName}"> in final result after a same-turn delivery — repeat, result door does not send`);
       } else {
-        log(
-          `<message to="${toName}"> in final result but nothing was delivered this turn — nudging for a mid-turn resend`,
-        );
+        log(`<message to="${toName}"> in final result was not delivered this turn — nudging for a mid-turn resend`);
         scratchpadParts.push(`[not delivered — the result door does not send; to="${toName}"] ${body}`);
+        missed++;
       }
+      continue;
+    }
+    if (wasWrittenInWindow(dest, body, options?.nudgedWindow)) {
+      log(`<message to="${toName}"> repeats a message the nudged turn already sent — not sent again`);
       continue;
     }
     await sendToDestination(dest, body, routing);
     sent++;
+    if (answersBatch(dest, routing)) replied++;
   }
   if (lastIndex < text.length) {
     scratchpadParts.push(text.slice(lastIndex));
@@ -1121,15 +1277,15 @@ export async function dispatchResultText(
 
   // In a task run, plain final text is the NORMAL ending (it becomes the run
   // log) — never treat it as an undelivered reply or nudge the agent to wrap it.
-  // With suppressDelivery the delivered-this-turn question is answered by
-  // turnDelivered (door deliveries + DB-visible sends like MCP send_message);
-  // otherwise by this dispatch's own send count.
-  const anythingDelivered = options?.suppressDelivery ? options.turnDelivered === true : sent > 0;
-  const hasUnwrapped = !routing.taskRun && !anythingDelivered && !!scratchpad;
+  const hasUnwrapped = !routing.taskRun && (missed > 0 || (replied === 0 && !!scratchpad));
   if (hasUnwrapped) {
-    log(`WARNING: agent output had no <message to="..."> blocks — nothing was sent`);
+    log(
+      replied > 0
+        ? `WARNING: a <message to="..."> block in the final text was not delivered`
+        : `WARNING: agent output had no <message to="..."> blocks — nothing was sent`,
+    );
   }
-  return { sent, hasUnwrapped, taskBlocks, resultBlocks };
+  return { sent, hasUnwrapped, taskBlocks, undelivered: scratchpad };
 }
 
 /**

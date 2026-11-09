@@ -23,11 +23,12 @@ consequences:
 
 Templates are purely additive and require no DB migration. **Templates
 are stamped only from a local directory**: `templates/` at the
-project root by default (committed but shipped empty), or whatever
+project root by default (only its README is committed; everything else there
+is gitignored), or whatever
 `NANOCLAW_TEMPLATES_DIR` points at (a local path only). The public registry
 ([`nanocoai/nanoclaw-templates`](https://github.com/nanocoai/nanoclaw-templates))
-is a copy source: setup can fetch a chosen template into that local directory,
-or you can populate it yourself.
+is a copy source: setup and an agent's `create_agent` can fetch a chosen
+template into that local directory, or you can populate it yourself.
 
 > **Migrating from the pre-plugin layout?** The old format (a bare
 > `context/instructions.md` marker, `.mcp.json`) is no longer read; stamping
@@ -82,6 +83,21 @@ unsupported MCP transport, an unknown manifest field), the create response
 carries a `templateReport` listing each item by name — components are never
 silently stripped.
 
+**From chat:** ask an agent for one ("I need an SDR agent"). The agent lists
+what exists with `ncl templates list` (this machine, no network) or
+`ncl templates list --registry` (the public library's index), offers a match,
+and once you pick it calls `create_agent({ name, template: "sales/sdr" })`.
+
+- A template not yet on this machine is fetched into the templates directory
+  first; a local copy always wins and is never overwritten.
+- `create_agent` keeps its usual approval rule: a trusted (`cli_scope: global`)
+  agent creates directly, any other agent's request waits for an admin. The
+  approval card names the template and whether approving downloads it, and the
+  approval covers only that template.
+- Nothing is downloaded before approval, and a failed download creates nothing.
+- The new agent runs on its creator's provider and is wired to it like any
+  agent made with `create_agent`. In Slack it also gets its own bot, as usual.
+
 ### The template ref
 
 `--template <ref>` is a path **relative to the local templates directory**
@@ -90,9 +106,9 @@ e.g. `sales/sdr` → `templates/sales/sdr`. The plugin root is the leaf folder;
 its manifest `name` is just `sdr`.
 
 For safety the ref must stay inside the templates directory: absolute paths, a
-leading `~`, and `../` escapes are rejected. There is no `--source`, no git URL,
-and no remote fetch at `ncl` time. Populate `templates/` first by hand or with
-setup's library picker, then stamp.
+leading `~`, and `../` escapes are rejected. There is no `--source` and no git
+URL, and `ncl groups create --template` never fetches. Populate `templates/`
+first by hand or with setup's library picker, then stamp.
 
 `NANOCLAW_TEMPLATES_DIR` may point the library at another **local** directory; it
 is never a URL and never changes at runtime.
@@ -137,7 +153,8 @@ Notes:
 
 - **No provider, model, effort, or packages in a template.** Those are set on
   the agent later via `ncl groups config update`. The runtime defaults to the
-  install's configured provider.
+  install's configured provider; an agent made by `create_agent` takes its
+  creator's.
 - **The persona is optional**, to the loader and to the first-party registry
   alike (registry CI only rejects an `instructions.md` that exists but is
   empty). Without one, the stamped agent uses NanoClaw's default project doc.
@@ -280,7 +297,7 @@ tasks.
 The script is passed unchanged to NanoClaw's normal task creation and execution
 path. See [Scheduled Tasks](scheduled-tasks.md#script-gates) for the script
 contract, testing workflow, frequency limit, and failure behavior. Avoid putting
-secrets directly in scripts; prefer runtime credential injection through OneCLI.
+secrets directly in scripts; prefer runtime credential injection through the installed gateway.
 
 Tasks start **paused**, so stamping a template never starts background work
 without user consent. Until the setup welcome flow offers activation, inspect
@@ -357,7 +374,7 @@ directories must exist in the shipped plugin.
 Credentials are held by the **credentials proxy** and injected into outbound
 HTTPS calls at the proxy boundary, matched by API host, at request time. The key
 never sits in `mcp.json`, the container env, or chat context. See
-[the credentials proxy section in CLAUDE.md](../CLAUDE.md#secrets--credentials--onecli)
+[the credentials section in CLAUDE.md](../CLAUDE.md#secrets--credentials--gateways)
 for the model.
 
 Two ways a credential gets connected:

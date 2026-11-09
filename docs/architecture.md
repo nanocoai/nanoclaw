@@ -266,13 +266,13 @@ One-shot and recurring tasks use the same tables — no separate scheduler.
 
 **Recurring:** Same, plus a `recurrence` cron expression. After the host marks a row as handled/delivered, if `recurrence` is set, it inserts a new row with `process_after`/`deliver_after` advanced to the next cron occurrence. Next time is computed from the scheduled time (not wall clock) to prevent drift.
 
-**Host sweep** (every ~60s across all sessions):
+**Host sweep** (every ~60s across all sessions, up to 8 reconciled concurrently through the keyed workqueue):
 - `inbound.db` → `messages_in WHERE status = 'pending' AND (process_after IS NULL OR process_after <= now())` → wake agent
 - A `processing_ack` (in `outbound.db`) whose claim, or the `.heartbeat` mtime, is older than the stale threshold → stale detection, increment tries, reschedule `process_after` with backoff
 - `outbound.db` → due `messages_out` rows not yet in the host's `delivered` table (in `inbound.db`) → deliver
 - After completing/delivering a row with `recurrence`, insert next occurrence
 
-**Active container poll** (~1s) checks the same conditions but only for sessions with running containers.
+**Active container poll** (~1s) checks the same conditions but only for sessions with running containers. Both delivery polls drain up to 8 sessions at a time and re-arm at a fixed rate from each tick's start, so many sessions on a slow mailbox don't serialize into one long tick.
 
 **Agent-runner creates schedules** by emitting a `messages_out` row with `kind: 'system'` and an `action` (`schedule_task`, `cancel_task`, …) — it cannot write host-owned `inbound.db` directly. The host applies the action during delivery (`src/modules/scheduling/actions.ts`), inserting/updating the `kind: 'task'` `messages_in` row with `process_after` and optionally `recurrence`.
 
@@ -422,7 +422,7 @@ This is documented as a pattern, not a built-in feature.
 
 ## Core Properties
 - Container isolation via filesystem mounts
-- Credential proxy (OneCLI)
+- Credential proxy (skill-installed gateway behind `src/gateway-providers/`)
 - Per-agent-group workspace (folder, CLAUDE.md, skills)
 - Polling-based (not event-driven)
 - Per-agent-group agent-runner recompilation on container startup (agent can modify its own source, request rebuild/restart, changes persist across teardowns)
@@ -488,7 +488,7 @@ The central DB session row creation is the serialization point. No provider sess
 
 NanoClaw does not stream tokens to users. The provider's query interface yields complete results, but a result's text is not delivered as-is: the agent-runner parses it for `<message to="name">...</message>` blocks (`dispatchResultText` in poll-loop.ts) and writes one messages_out row per block, addressed to that destination with its thread context resolved per destination. Everything outside a block — including `<internal>...</internal>` — is scratchpad: logged, never sent. A block naming an unknown destination is dropped into the scratchpad log.
 
-If a result produced text but no valid block, the agent-runner pushes a one-time `<system>` nudge into the live turn asking the agent to re-wrap its response. The exception is a non-retryable error result (e.g. a billing error) with no envelope, which is delivered as an error notice instead of being dropped as scratchpad. Mid-turn interim updates go out through the `send_message` MCP tool; the final-text envelope parsing is how a turn's reply reaches the user. The host delivers complete messages_out rows to channels.
+If a turn ends with text that was not delivered, the agent-runner pushes a one-time `<system>` nudge into the live turn. That covers a result with text but no valid block, a block that was never delivered (unknown destination, or missed by the stream), and unwrapped final text after a `send_message` send or a reaction: a tool send does not settle the turn by itself, because it may be only an "on it". When something already went out that turn, the nudge quotes it and the agent either answers `<internal>done</internal>` or sends only what is missing; otherwise it asks the agent to re-wrap its response. A block in the retry that exactly repeats a message the nudged turn already sent is not sent again. A block to another agent does not count as the reply, unless it goes back to the agent whose message woke the turn. The exception is a non-retryable error result (e.g. a billing error) with no envelope, which is delivered as an error notice instead of being dropped as scratchpad. Mid-turn interim updates go out through the `send_message` MCP tool; the final-text envelope parsing is how a turn's reply reaches the user. The host delivers complete messages_out rows to channels.
 
 Message editing is supported as an explicit operation (agent calls an `edit_message` tool), not as a streaming mechanism.
 

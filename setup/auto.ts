@@ -15,7 +15,7 @@
  *   NANOCLAW_AGENT_PROVIDER preselect the setup provider and skip the picker
  *                          (for packaged flows). Example: claude.
  *   NANOCLAW_SKIP          comma-separated step names to skip
- *                          (environment|container|onecli|auth|mounts|
+ *                          (environment|container|gateway|auth|mounts|
  *                           service|cli-agent|timezone|channel|
  *                           verify|first-chat)
  *
@@ -46,9 +46,28 @@ import {
 } from './channels/initial-setup.js';
 import { runInheritScript } from './lib/inherit-script.js';
 import { offerPortalReminder, portalEnabled, runImagePortal } from './portal.js';
-import { pingCliAgent, PING_AGENT_FOLDER, type PingResult } from './lib/agent-ping.js';
+import {
+  firstChatEventProps,
+  logFirstChat,
+  pingFailureCopy,
+  PING_AGENT_FOLDER,
+  startCliPing,
+  type FirstChatWait,
+  type PingOutcome,
+} from './lib/agent-ping.js';
+import { EXTRA_WAIT_MS, MAX_WAIT_MS, waitForFirstReply, type WaitChoice } from './lib/first-chat-wait.js';
+import {
+  createStageProbe,
+  fill,
+  FIRST_CHAT_COPY,
+  keepWaitingQuestion,
+  skippedWaitCopy,
+  StageDisplay,
+  type FirstChatStage,
+} from './lib/first-chat-progress.js';
+import { inspectAgentSession } from './central-db-inspection.js';
 import { getSetupProvider, listSetupProviders } from './providers/registry.js';
-import { applyProviderSkill } from './providers/install.js';
+import { applyProviderSkill, loadHostContractModules } from './providers/install.js';
 import {
   getInstallableProviderDescriptor,
   listInstallableProviderDescriptors,
@@ -75,42 +94,42 @@ import { upsertEnvVar } from './set-env.js';
 import { applyToEnv, parseFlags, printHelp, readFromEnv } from './lib/setup-config-parse.js';
 import { runAdvancedScreen } from './lib/setup-config-screen.js';
 import { runWindowedStep } from './lib/windowed-runner.js';
+import { dockerSudoReason, sudoUpFront, type DockerSudoReason } from './lib/sudo-preflight.js';
+import { isWSL } from './platform.js';
 import { runUninstallFlow } from './uninstall/flow.js';
 import { detectExistingInstall } from './uninstall/scan.js';
 import { detectRegisteredGroups, detectExistingDisplayName, readEnvKey } from './environment.js';
-import { pollHealth } from './onecli.js';
+import { installGateway, runGatewayAuth } from './gateways/install.js';
+import { loadGatewayCatalog } from './gateways/catalog.js';
+import { configuredGatewayKind, detectInstalledGateway } from './gateways/selection.js';
 import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
 import type { AgentGroup } from '../src/types.js';
 import { claudeCliAvailable, resolveTimezoneViaClaude } from './lib/tz-from-claude.js';
+import { dockerAccessHint } from './lib/docker-access-hint.js';
 import * as setupLog from './logs.js';
 import { ensureAnswer, fail, runQuietChild, runQuietStep, spawnQuiet } from './lib/runner.js';
 import { emit as phEmit } from './lib/diagnostics.js';
-import {
-  accentGreen,
-  brandBody,
-  brandBold,
-  brandChip,
-  dimWrap,
-  fitToWidth,
-  fmtDuration,
-  note,
-  wrapForGutter,
-} from './lib/theme.js';
+import { accentGreen, brandBody, brandBold, brandChip, dimWrap, note, wrapForGutter } from './lib/theme.js';
 import { isValidTimezone } from '../src/timezone.js';
 import { DEFAULT_AGENT_PROVIDER, TEMPLATES_DIR } from '../src/config.js';
 import { SocketTransport } from '../src/cli/socket-client.js';
+import { heartbeatPath } from '../src/session-manager.js';
+import {
+  cloneRegistry,
+  ensureTemplateLocal,
+  listTemplatesFromDir,
+  readTemplateIndex,
+  type ClonedRegistry,
+  type LibraryTemplate,
+  type TemplateEntry,
+} from '../src/templates/library.js';
 import {
   applyTemplatePick,
   clearTemplatePick,
-  cloneRegistry,
-  copyTemplate,
   installTemplateAgent,
   listTemplateAgents,
-  listTemplatesFromDir,
   validateNewTemplateAgentName,
-  type ClonedRegistry,
   type SetupTemplateAgent,
-  type TemplateEntry,
   type TemplateOperation,
 } from './templates.js';
 
@@ -123,12 +142,19 @@ const REGISTRY_STEP = 'pnpm exec tsx setup/index.ts --step registry';
 /** `setup/registry-login.sh`'s "nothing was signed in, and that is fine" code. */
 const LOGIN_EXIT_SKIPPED = 2;
 
+/** What the container step needs sudo for, and how to do it without setup. */
+const DOCKER_SUDO_COPY: Record<DockerSudoReason, { task: string; diy: string }> = {
+  install: { task: 'install Docker', diy: 'install Docker yourself first' },
+  start: { task: 'start Docker', diy: 'start Docker yourself first' },
+  group: {
+    task: 'add you to the docker group',
+    diy: 'add yourself to the docker group and run setup from a `newgrp docker` shell',
+  },
+};
+
 async function main(): Promise<void> {
   // Make sure ~/.local/bin is on PATH for every child process we spawn.
-  // Installers we run mid-setup (OneCLI, claude) drop binaries there and
-  // append a PATH line to the user's shell rc, but rc updates don't reach
-  // an already-running Node process — so without this patch a freshly
-  // installed `onecli` is invisible to a subsequent `runInheritScript`.
+  // Installable gateways and agent providers may place binaries there.
   ensureLocalBinOnPath();
 
   // Parse CLI flags first — `--help` short-circuits before we render anything,
@@ -181,7 +207,16 @@ async function main(): Promise<void> {
     setupLog.userInput('start_choice', startChoice);
   }
   if (startChoice === 'advanced') {
-    configValues = await runAdvancedScreen(configValues);
+    const gatewayCatalog = loadGatewayCatalog();
+    configValues.gatewayProvider ??=
+      configuredGatewayKind(process.cwd()) || detectInstalledGateway(process.cwd()) || gatewayCatalog.default;
+    configValues = await runAdvancedScreen(configValues, {
+      gatewayProvider: gatewayCatalog.gateways.map(({ kind, label, description }) => ({
+        value: kind,
+        label,
+        hint: description,
+      })),
+    });
     applyToEnv(configValues);
   }
 
@@ -258,9 +293,26 @@ async function main(): Promise<void> {
       brandBody(dimWrap('Your assistant lives in its own sandbox. It can only see what you explicitly share.', 4)),
     );
     // Asked before the step runs, because the step is what acts on the answer.
-    // An explicit "build it here" is a decision; the perk reminder for this
-    // question is only for installs that fell back to a local build unasked.
-    if ((await chooseImageSource()) === 'local') skip.add('echo-reminder');
+    // The answer lives in `.env` (imageSourceDecided); the perk reminder below
+    // reads it from there, so it survives a resume and a plain re-run alike.
+    await chooseImageSource();
+    // Installing or starting Docker runs sudo inside the windowed step, where
+    // its prompt is hidden, so ask here. A timestamp still cached from
+    // nanoclaw.sh's Node pre-flight skips the prompt.
+    const dockerSudo = dockerSudoReason();
+    if (dockerSudo) {
+      const { task, diy } = DOCKER_SUDO_COPY[dockerSudo];
+      const sudo = await sudoUpFront(() =>
+        p.log.message(brandBody(dimWrap(`Setup needs to ${task}, so it will ask for your Linux password (sudo).`, 4))),
+      );
+      if (sudo === 'refused') {
+        await fail(
+          'container',
+          `Couldn't get sudo access to ${task}.`,
+          `Run setup again and enter your Linux password, or ${diy}.`,
+        );
+      }
+    }
     p.log.message(
       brandBody(
         dimWrap(
@@ -286,10 +338,15 @@ async function main(): Promise<void> {
         );
       }
       if (err === 'docker_group_not_active') {
+        // Closing a WSL terminal doesn't log the user out, so the new group
+        // only shows up once WSL itself restarts.
+        const distro = process.env.WSL_DISTRO_NAME?.trim() || 'Ubuntu';
         await fail(
           'container',
           "Docker was just installed but your shell doesn't know yet.",
-          'Log out and back in (or run `newgrp docker` in a new shell), then retry.',
+          isWSL()
+            ? `Close ${distro}, run \`wsl --shutdown\` in PowerShell, then reopen ${distro}, go back to the NanoClaw folder and run \`bash nanoclaw.sh\`.`
+            : 'Log out and back in (or run `newgrp docker` in a new shell), then retry.',
         );
       }
       // The pull path fails for reasons a build never has, and "prune the build
@@ -317,103 +374,26 @@ async function main(): Promise<void> {
     maybeReexecUnderSg();
   }
 
-  if (!skip.has('onecli')) {
+  let gatewayKind = process.env.NANOCLAW_GATEWAY_PROVIDER?.trim().toLowerCase();
+  if (!skip.has('gateway')) {
     p.log.message(
       brandBody(
         dimWrap(
-          'Your assistant never gets your API keys directly. The vault adds them to approved requests as they leave the sandbox.',
+          'Your assistant never receives real credentials. The selected gateway adds them only at the network boundary.',
           4,
         ),
       ),
     );
-
-    const remoteHost = process.env.NANOCLAW_ONECLI_API_HOST?.trim();
-
-    if (remoteHost) {
-      // Advanced-settings override: user has already named a remote vault,
-      // so skip the local-vs-fresh prompt entirely. Health-check it here
-      // rather than letting the step fail silently — a typo in the URL is a
-      // common mistake and the answer is human-fixable.
-      const s = p.spinner();
-      s.start(`Checking remote OneCLI at ${remoteHost}…`);
-      const healthy = await pollHealth(remoteHost, 5000);
-      if (!healthy) {
-        s.stop(`Couldn't reach OneCLI at ${remoteHost}.`, 1);
-        await fail(
-          'onecli',
-          `Couldn't reach OneCLI at ${remoteHost}.`,
-          'Check the URL and that OneCLI is running on the remote machine, then retry.',
-        );
-      }
-      s.stop('Remote OneCLI is reachable.');
-
-      const res = await runQuietStep(
-        'onecli',
-        {
-          running: `Connecting to remote OneCLI at ${remoteHost}…`,
-          done: 'OneCLI vault ready.',
-        },
-        ['--remote-url', remoteHost],
+    try {
+      const gateway = await installGateway(gatewayKind);
+      gatewayKind = gateway.kind;
+      p.log.success(`${gateway.label} gateway ready.`);
+    } catch (error) {
+      await fail(
+        'gateway',
+        "Couldn't install the selected gateway.",
+        error instanceof Error ? error.message : String(error),
       );
-      if (!res.ok) {
-        const err = res.terminal?.fields.ERROR;
-        await fail(
-          'onecli',
-          `Couldn't connect to remote OneCLI (${err ?? 'unknown error'}).`,
-          'Check the URL and that OneCLI is running on the remote machine, then retry.',
-        );
-      }
-    } else {
-      // Respect an existing OneCLI install. Re-running the installer would
-      // rebind the listener and knock any other app using that gateway
-      // offline — confirm with the user before doing that.
-      const existing = detectExistingOnecli();
-      let reuse = false;
-      if (existing) {
-        const choice = ensureAnswer(
-          await brightSelect({
-            message: `Found an existing OneCLI at ${existing.apiHost}. What would you like to do?`,
-            options: [
-              {
-                value: 'reuse',
-                label: 'Use the existing instance',
-                hint: 'recommended — keeps other apps bound to this vault working',
-              },
-              {
-                value: 'fresh',
-                label: 'Install a fresh instance for NanoClaw',
-                hint: 'reinstalls onecli; other apps may need to reconnect',
-              },
-            ],
-          }),
-        ) as 'reuse' | 'fresh';
-        setupLog.userInput('onecli_choice', choice);
-        reuse = choice === 'reuse';
-      }
-
-      const res = await runQuietStep(
-        'onecli',
-        {
-          running: reuse ? 'Hooking up to your existing OneCLI…' : "Setting up OneCLI, your agent's vault…",
-          done: 'OneCLI vault ready.',
-        },
-        reuse ? ['--reuse'] : [],
-      );
-      if (!res.ok) {
-        const err = res.terminal?.fields.ERROR;
-        if (err === 'onecli_not_on_path_after_install') {
-          await fail(
-            'onecli',
-            'OneCLI was installed but your shell needs to refresh to see it.',
-            'Open a new shell or run `export PATH="$HOME/.local/bin:$PATH"`, then retry.',
-          );
-        }
-        await fail(
-          'onecli',
-          `Couldn't set up OneCLI (${err ?? 'unknown error'}).`,
-          'Make sure curl is installed and ~/.local/bin is writable, then retry.',
-        );
-      }
     }
   }
 
@@ -470,8 +450,9 @@ async function main(): Promise<void> {
       const s = p.spinner();
       s.start(`Installing ${agentProvider}…`);
       let blockers: string[];
+      let hostContractModules: string[];
       try {
-        ({ blockers } = await applyProviderSkill(skillDir, process.cwd()));
+        ({ blockers, hostContractModules } = await applyProviderSkill(skillDir, process.cwd()));
       } catch (err) {
         s.stop(`Couldn't install ${agentProvider}.`, 1);
         const message = err instanceof Error ? err.message : String(err);
@@ -495,14 +476,28 @@ async function main(): Promise<void> {
           rebuild.hint,
         );
       }
+      // This process imported src/provider-contracts/index.ts at startup, and
+      // ESM caches the barrel, so a line appended to it now never evaluates
+      // here; load the contract module directly before the auth step asks the
+      // gateway store for model endpoints.
+      await loadHostContractModules(hostContractModules);
       await import(`./providers/${agentProvider}.js`);
       providerEntry = getSetupProvider(agentProvider);
     }
     if (providerEntry?.runAuth) {
-      await providerEntry.runAuth();
-      await providerEntry.runInstallCheck?.();
+      try {
+        await providerEntry.runAuth();
+        await providerEntry.runInstallCheck?.();
+      } catch (err) {
+        await fail(
+          'auth',
+          `Couldn't authenticate or verify ${agentProvider}.`,
+          err instanceof Error ? err.message : String(err),
+        );
+      }
     } else {
-      await runAuthStep();
+      if (!gatewayKind) throw new Error('No gateway is selected for agent authentication');
+      runGatewayAuth(gatewayKind, agentProvider);
     }
     // Persist the pick as the instance-wide default so every future group
     // (channel-approved, ncl-created) is created on this provider. Read from
@@ -527,10 +522,16 @@ async function main(): Promise<void> {
     }
   }
 
+  // Only for a run that never reached the sandbox-image question. Any answer
+  // to it — a browser choice, a declined handoff, a skipped or failed sign-in
+  // — is written to `.env`, and that is the one store every kind of re-entry
+  // (fail()'s retry, the sg-docker re-exec, a plain re-run) still sees. An
+  // in-memory skip entry would not survive the first two, and the question is
+  // not asked again on any of them.
   if (
     portalEnabled() &&
     !skip.has('echo-reminder') &&
-    readImageSource() !== 'hardened' &&
+    !imageSourceDecided() &&
     readAgentImagePin() &&
     (process.env.NANOCLAW_AGENT_PROVIDER || readEnvKey('DEFAULT_AGENT_PROVIDER') || DEFAULT_AGENT_PROVIDER || 'claude')
       .trim()
@@ -551,7 +552,6 @@ async function main(): Promise<void> {
           },
         }),
       );
-      skip.add('echo-reminder');
     } catch (error) {
       await fail(
         'container',
@@ -569,13 +569,19 @@ async function main(): Promise<void> {
     if (!res.ok) {
       await fail('service', "Couldn't start NanoClaw.", 'See logs/nanoclaw.error.log for details.');
     }
-    if (res.terminal?.fields.DOCKER_GROUP_STALE === 'true') {
-      p.log.warn(brandBody("NanoClaw's permissions need a tweak before it can reach Docker."));
-      p.log.message(
+    if (res.terminal?.fields.PROXY === 'ignored_by_node') {
+      p.log.warn(
         brandBody(
-          '  sudo setfacl -m u:$(whoami):rw /var/run/docker.sock\n' + `  systemctl --user restart ${getSystemdUnit()}`,
+          `Node ${res.terminal.fields.PROXY_NODE_VERSION} ignores the outbound proxy, so NanoClaw will connect directly. ` +
+            'Upgrade to Node 22.21+ or 24.5+ to use it.',
         ),
       );
+    }
+    const dockerFix = dockerAccessHint(res.terminal?.fields ?? {}, getSystemdUnit());
+    if (dockerFix) {
+      p.log.warn(brandBody(dockerFix.title));
+      p.log.message(brandBody(dockerFix.commands.map((c) => `  ${c}`).join('\n')));
+      p.log.message(brandBody(dockerFix.note));
     }
   }
 
@@ -612,17 +618,14 @@ async function main(): Promise<void> {
       );
     }
     if (!skip.has('first-chat')) {
-      p.log.message(
-        brandBody(
-          dimWrap(
-            "Your assistant runs in an isolated sandbox. I'm going to send it a quick test message (ping) and wait for a reply (pong) to confirm it's responding. First startup typically takes 30–60 seconds while the sandbox warms up.",
-            4,
-          ),
-        ),
-      );
-      const ping = await confirmAssistantResponds();
+      p.log.message(brandBody(dimWrap(FIRST_CHAT_COPY.intro, 4)));
+      const pingStart = Date.now();
+      const { outcome, wait } = await confirmAssistantResponds();
+      const waitedMs = Date.now() - pingStart;
+      logFirstChat(outcome, waitedMs, wait);
+      const ping = outcome.result;
       if (ping === 'ok') {
-        phEmit('first_chat_ready');
+        phEmit('first_chat_ready', firstChatEventProps(outcome, wait));
         const cleanupRawLog = setupLog.stepRawLog('cleanup-cli-agent');
         const cleanupStart = Date.now();
         const cleanup = await spawnQuiet(
@@ -686,20 +689,14 @@ async function main(): Promise<void> {
           }
           await runFirstChat();
         }
+      } else if (wait.skipped) {
+        phEmit('first_chat_failed', firstChatEventProps(outcome, wait));
+        note(skippedWaitCopy(wait.stage).note, FIRST_CHAT_COPY.skippedTitle);
       } else {
-        phEmit('first_chat_failed', { reason: ping });
-        renderPingFailureNote(ping);
-        await offerClaudeOnFailure({
-          stepName: 'cli-agent',
-          msg:
-            ping === 'socket_error'
-              ? "NanoClaw service isn't listening on its CLI socket."
-              : 'No reply from the assistant within 30 seconds.',
-          hint:
-            ping === 'socket_error'
-              ? 'Socket at data/cli.sock did not accept a connection.'
-              : 'Agent container may be failing to start or authenticate.',
-        });
+        phEmit('first_chat_failed', firstChatEventProps(outcome, wait));
+        const copy = pingFailureCopy(outcome, waitedMs);
+        note(copy.note, FIRST_CHAT_COPY.skippedTitle);
+        await offerClaudeOnFailure({ stepName: 'cli-agent', msg: copy.assistMsg, hint: copy.assistHint });
       }
     }
   }
@@ -902,52 +899,67 @@ async function main(): Promise<void> {
 
 /**
  * Round-trip ping against the CLI socket before we ask the user to chat.
- * Renders its own spinner with elapsed time because a cold-start container
- * boot can take 30–60s — the elapsed counter is the difference between
- * "patient" and "is this hung?". Returns the raw result so the caller can
- * branch between the chat loop (ok) and a diagnostic note (anything else).
+ * A first reply waits on the sandbox, the agent runtime and the model, which
+ * can take minutes with a local model, so each stage gets its own line and
+ * timer, and a long wait asks whether to keep going instead of failing.
+ * Returns the outcome so the caller can branch between the chat loop (ok)
+ * and a diagnostic note (anything else).
  */
-async function confirmAssistantResponds(): Promise<PingResult> {
-  const s = p.spinner();
+async function confirmAssistantResponds(): Promise<{ outcome: PingOutcome; wait: FirstChatWait }> {
   const start = Date.now();
-  const label = 'Waking your assistant…';
-  s.start(fitToWidth(label, ' (99m 59s)'));
-  const tick = setInterval(() => {
-    const suffix = ` (${fmtDuration(Date.now() - start)})`;
-    s.message(`${fitToWidth(label, suffix)}${k.dim(suffix)}`);
-  }, 1000);
+  const ping = startCliPing(MAX_WAIT_MS);
+  const probe = createStageProbe({
+    since: start,
+    readSession: () => inspectAgentSession(process.cwd(), PING_AGENT_FOLDER),
+    heartbeatFile: heartbeatPath,
+  });
+  const display = new StageDisplay(probe, {}, start);
+  display.start();
+  void display.tick();
+  const tick = setInterval(() => void display.tick(), 1000);
 
-  const result = await pingCliAgent();
+  const { outcome, keptWaiting, skipped } = await waitForFirstReply({
+    ping,
+    interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY),
+    ask: async (waitedMs, signal) => {
+      display.pause();
+      const choice = await askKeepWaiting(display.seenStage, waitedMs, signal);
+      // Otherwise the wait is over; the closing lines print without a spinner.
+      if (choice === 'wait') display.resume();
+      return choice;
+    },
+  });
 
   clearInterval(tick);
-  const suffix = ` (${fmtDuration(Date.now() - start)})`;
-  if (result === 'ok') {
-    s.stop(`${k.bold(fitToWidth('Your assistant is ready.', suffix))}${k.dim(suffix)}`);
-  } else {
-    const msg =
-      result === 'socket_error' ? "Couldn't reach the NanoClaw service." : "Your assistant didn't reply in time.";
-    s.stop(`${k.bold(fitToWidth(msg, suffix))}${k.dim(suffix)}`, 1);
-  }
-  return result;
+  await display.idle();
+  if (outcome.result === 'ok') display.succeed(FIRST_CHAT_COPY.ready);
+  else display.fail(skipped ? skippedWaitCopy(display.seenStage).spinner : pingFailureCopy(outcome).spinner);
+  return { outcome, wait: { keptWaiting, skipped, stage: display.seenStage } };
 }
 
-function renderPingFailureNote(result: PingResult): void {
-  const body =
-    result === 'socket_error'
-      ? [
-          wrapForGutter(
-            "The NanoClaw service isn't listening on its local socket. Try restarting it, then chat with `pnpm run chat hi`:",
-            6,
-          ),
-          '',
-          `  macOS:  launchctl kickstart -k gui/$(id -u)/${getLaunchdLabel()}`,
-          `  Linux:  systemctl --user restart ${getSystemdUnit()}`,
-        ].join('\n')
-      : wrapForGutter(
-          'No reply from your assistant within 30 seconds. Check `logs/nanoclaw.log` for clues, then try `pnpm run chat hi`.',
-          6,
-        );
-  note(body, 'Skipping the first chat');
+async function askKeepWaiting(
+  stage: FirstChatStage | undefined,
+  waitedMs: number,
+  signal: AbortSignal,
+): Promise<WaitChoice | undefined> {
+  const answer = await brightSelect<WaitChoice>({
+    message: keepWaitingQuestion(stage, waitedMs),
+    options: [
+      {
+        value: 'wait',
+        label: FIRST_CHAT_COPY.keepWaiting,
+        hint: fill(FIRST_CHAT_COPY.keepWaitingHint, { minutes: EXTRA_WAIT_MS / 60_000 }),
+      },
+      { value: 'skip', label: FIRST_CHAT_COPY.skip, hint: FIRST_CHAT_COPY.skipHint },
+    ],
+    signal,
+    abortedLabel: (outcome) =>
+      (outcome as PingOutcome | undefined)?.result === 'ok' ? FIRST_CHAT_COPY.replied : FIRST_CHAT_COPY.waitEnded,
+  });
+  if (signal.aborted) return undefined;
+  const choice = ensureAnswer(answer) as WaitChoice;
+  setupLog.userInput('first_chat_wait', choice);
+  return choice;
 }
 
 /**
@@ -1086,22 +1098,27 @@ function listLocalTemplates(): TemplateEntry[] {
   }
 }
 
+// One git clone (git honors HTTPS_PROXY; setup's own fetch does not): the list
+// comes from the clone's index.json, and the pick is copied out of the same clone.
 async function pickLibraryTemplate(): Promise<string | undefined> {
   const spinner = p.spinner();
   spinner.start('Fetching the template library…');
-  let registry: ClonedRegistry;
+  let registry: ClonedRegistry | undefined;
+  let templates: LibraryTemplate[];
   try {
-    registry = cloneRegistry();
+    registry = await cloneRegistry();
+    templates = readTemplateIndex(registry.dir);
   } catch (err) {
-    spinner.stop('Could not reach the template library.');
+    registry?.cleanup();
+    spinner.stop('Could not load the template library.');
     const message = err instanceof Error ? err.message : String(err);
     setupLog.step('template-source', 'interactive', 0, { source: 'library', error: message });
     p.log.warn(message);
     return undefined;
   }
 
+  const clone = registry;
   try {
-    const templates = listTemplatesFromDir(registry.dir).filter((template) => template.ref !== '.');
     if (templates.length === 0) {
       spinner.stop('The template library is empty.');
       return undefined;
@@ -1110,26 +1127,25 @@ async function pickLibraryTemplate(): Promise<string | undefined> {
     const ref = await chooseTemplate(templates);
     if (!ref) return undefined;
 
-    const destination = path.join(TEMPLATES_DIR, ref);
-    if (fs.existsSync(destination)) {
+    if (fs.existsSync(path.join(TEMPLATES_DIR, ref))) {
       if (!listLocalTemplates().some((template) => template.ref === ref)) {
         p.log.warn(`Can't install "${ref}": that path already exists but isn't a valid template.`);
         return undefined;
       }
       p.log.info(`Keeping your existing local copy of "${ref}".`);
-    } else {
-      try {
-        copyTemplate(registry.dir, ref, TEMPLATES_DIR);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        setupLog.step('template-copy', 'interactive', 0, { ref, error: message });
-        p.log.warn(`Couldn't copy "${ref}" into templates/: ${message}`);
-        return undefined;
-      }
+      return ref;
+    }
+    try {
+      await ensureTemplateLocal(ref, { clone: async () => ({ ...clone, cleanup: () => {} }) });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setupLog.step('template-copy', 'interactive', 0, { ref, error: message });
+      p.log.warn(`Couldn't copy "${ref}" into templates/: ${message}`);
+      return undefined;
     }
     return ref;
   } finally {
-    registry.cleanup();
+    clone.cleanup();
   }
 }
 
@@ -1144,7 +1160,7 @@ async function pickLocalTemplate(): Promise<string | undefined> {
 
 const BACK_TO_TEMPLATE_SOURCE = '\0back';
 
-async function chooseTemplate(templates: TemplateEntry[]): Promise<string | undefined> {
+async function chooseTemplate(templates: Array<TemplateEntry & { description?: string }>): Promise<string | undefined> {
   const ref = ensureAnswer(
     await p.autocomplete<string>({
       message: 'Choose a template',
@@ -1152,7 +1168,7 @@ async function chooseTemplate(templates: TemplateEntry[]): Promise<string | unde
         ...templates.map((template) => ({
           value: template.ref,
           label: template.name,
-          hint: template.ref.includes('/') ? template.ref : undefined,
+          hint: template.description || (template.ref.includes('/') ? template.ref : undefined),
         })),
         { value: BACK_TO_TEMPLATE_SOURCE, label: '← Back' },
       ],
@@ -1537,240 +1553,6 @@ async function askAgentProviderChoice(): Promise<string> {
   return choice;
 }
 
-async function runAuthStep(): Promise<void> {
-  if (anthropicSecretExists()) {
-    p.log.success(brandBody('Your Claude account is already connected.'));
-    setupLog.step('auth', 'skipped', 0, { REASON: 'secret-already-present' });
-    return;
-  }
-
-  // Custom Anthropic-compatible endpoint flow. Both URL and token must be set;
-  // OneCLI stores the token as a generic Bearer secret keyed to the URL host,
-  // so the container only ever sees ANTHROPIC_BASE_URL + a placeholder.
-  const customBaseUrl = process.env.NANOCLAW_ANTHROPIC_BASE_URL?.trim();
-  const customAuthToken = process.env.NANOCLAW_ANTHROPIC_AUTH_TOKEN?.trim();
-  if (customBaseUrl && customAuthToken) {
-    await runCustomEndpointAuth(customBaseUrl, customAuthToken);
-    return;
-  }
-
-  const method = ensureAnswer(
-    await brightSelect({
-      message: 'How would you like to connect to Claude?',
-      options: [
-        {
-          value: 'subscription',
-          label: 'Sign in with my Claude subscription',
-          hint: 'recommended if you have Pro or Max',
-        },
-        {
-          value: 'oauth',
-          label: 'Paste an OAuth token I already have',
-          hint: 'sk-ant-oat…',
-        },
-        {
-          value: 'api',
-          label: 'Paste an Anthropic API key',
-          hint: 'pay-per-use via console.anthropic.com',
-        },
-        {
-          value: 'skip',
-          label: "Skip — I'll connect later",
-          hint: 'not recommended — Claude helps debug setup issues',
-        },
-      ],
-    }),
-  ) as 'subscription' | 'oauth' | 'api' | 'skip';
-  setupLog.userInput('auth_method', method);
-  phEmit('auth_method_chosen', { method });
-
-  if (method === 'skip') {
-    const confirmed = ensureAnswer(
-      await p.confirm({
-        message:
-          "Skip Claude sign-in? The agent won't be able to run until you connect, and we won't be able to help debug setup errors.",
-        initialValue: false,
-      }),
-    );
-    if (!confirmed) {
-      // Loop back to the auth picker so they can choose a real method.
-      return runAuthStep();
-    }
-    setupLog.step('auth', 'skipped', 0, { REASON: 'user-skipped' });
-    p.log.warn(brandBody('Claude sign-in skipped. Re-run setup or run `bash nanoclaw.sh` to finish later.'));
-    return;
-  }
-
-  if (method === 'subscription') {
-    await runSubscriptionAuth();
-  } else {
-    await runPasteAuth(method);
-  }
-}
-
-async function runSubscriptionAuth(): Promise<void> {
-  p.log.step(brandBody('Opening the Claude sign-in flow…'));
-  console.log(k.dim('   (a browser will open for sign-in; this part is interactive)'));
-  console.log();
-  const start = Date.now();
-  const code = await runInheritScript('bash', ['setup/register-claude-token.sh']);
-  const durationMs = Date.now() - start;
-  console.log();
-  if (code !== 0) {
-    setupLog.step('auth', 'failed', durationMs, {
-      EXIT_CODE: code,
-      METHOD: 'subscription',
-    });
-    await fail(
-      'auth',
-      "Couldn't complete the Claude sign-in.",
-      'Re-run setup and try again, or choose a paste option instead.',
-    );
-  }
-  setupLog.step('auth', 'interactive', durationMs, { METHOD: 'subscription' });
-  p.log.success(brandBody('Claude account connected.'));
-}
-
-async function runPasteAuth(method: 'oauth' | 'api'): Promise<void> {
-  const label = method === 'oauth' ? 'OAuth token' : 'API key';
-  const prefix = method === 'oauth' ? 'sk-ant-oat' : 'sk-ant-api';
-
-  const answer = ensureAnswer(
-    await p.password({
-      message: `Paste your ${label}`,
-      clearOnError: true,
-      validate: (v) => {
-        // Strip any internal whitespace so a line-wrapped paste that did
-        // survive into clack can still validate. The mid-token-newline
-        // case where clack only sees the first line is caught by the
-        // shape check below.
-        const cleaned = (v ?? '').replace(/\s+/g, '');
-        if (!cleaned) return 'Required';
-        if (!cleaned.startsWith(prefix)) {
-          return `Should start with ${prefix}…`;
-        }
-        if (method === 'oauth' && !/^sk-ant-oat[A-Za-z0-9_-]{80,500}AA$/.test(cleaned)) {
-          return cleaned.length < 90
-            ? 'Token looks truncated — line breaks in the paste can cut it off. Widen your terminal so the token fits on one line, then paste again.'
-            : "Token shape doesn't look right (expected sk-ant-oat…AA).";
-        }
-        return undefined;
-      },
-    }),
-  );
-  const token = (answer as string).replace(/\s+/g, '');
-
-  const res = await runQuietChild(
-    'auth',
-    'onecli',
-    [
-      'secrets',
-      'create',
-      '--name',
-      'Anthropic',
-      '--type',
-      'anthropic',
-      '--value',
-      token,
-      '--host-pattern',
-      'api.anthropic.com',
-    ],
-    {
-      running: `Saving your ${label} to your OneCLI vault…`,
-      done: 'Claude account connected.',
-    },
-    {
-      extraFields: { METHOD: method },
-    },
-  );
-  if (!res.ok) {
-    await fail(
-      'auth',
-      `Couldn't save your ${label} to the vault.`,
-      'Make sure OneCLI is running (`onecli version`), then retry.',
-    );
-  }
-}
-
-/**
- * Set up Anthropic auth for a custom endpoint. The token is stored as a
- * OneCLI generic secret with header injection so the proxy rewrites the
- * Authorization header on the wire — the container only ever sees
- * ANTHROPIC_BASE_URL + a placeholder bearer.
- */
-async function runCustomEndpointAuth(baseUrl: string, token: string): Promise<void> {
-  let host: string;
-  try {
-    host = new URL(baseUrl).hostname;
-  } catch {
-    await fail('auth', `Invalid Anthropic base URL: ${baseUrl}`, 'Check --anthropic-base-url and retry.');
-    return;
-  }
-
-  const res = await runQuietChild(
-    'auth',
-    'onecli',
-    [
-      'secrets',
-      'create',
-      '--name',
-      'Anthropic',
-      '--type',
-      'generic',
-      '--value',
-      token,
-      '--host-pattern',
-      host,
-      '--header-name',
-      'Authorization',
-      '--value-format',
-      'Bearer {value}',
-    ],
-    {
-      running: `Saving your Anthropic auth token to your OneCLI vault…`,
-      done: 'Claude account connected.',
-    },
-    { extraFields: { METHOD: 'custom-endpoint', HOST: host } },
-  );
-  if (!res.ok) {
-    await fail(
-      'auth',
-      `Couldn't save your Anthropic auth token to the vault.`,
-      'Make sure OneCLI is running (`onecli version`), then retry.',
-    );
-  }
-
-  // ANTHROPIC_BASE_URL has to be in .env so the runtime provider config
-  // reads it when building container env. The token is *not* written —
-  // OneCLI holds it.
-  writeEnvLine('ANTHROPIC_BASE_URL', baseUrl);
-
-  // Register the claude provider so the runtime passes ANTHROPIC_BASE_URL
-  // and the placeholder bearer into the container. Only appended when the
-  // user has configured a custom endpoint; standard installs don't load
-  // the file at all.
-  appendProviderImport('./claude.js');
-}
-
-function writeEnvLine(key: string, value: string): void {
-  const envFile = path.join(process.cwd(), '.env');
-  const content = fs.existsSync(envFile) ? fs.readFileSync(envFile, 'utf-8') : '';
-  const re = new RegExp(`^${key}=.*$`, 'm');
-  const next = re.test(content)
-    ? content.replace(re, `${key}=${value}`)
-    : content.trimEnd() + (content ? '\n' : '') + `${key}=${value}\n`;
-  fs.writeFileSync(envFile, next);
-}
-
-function appendProviderImport(modulePath: string): void {
-  const file = path.join(process.cwd(), 'src', 'providers', 'index.ts');
-  const content = fs.existsSync(file) ? fs.readFileSync(file, 'utf-8') : '';
-  const line = `import '${modulePath}';`;
-  if (content.includes(line)) return;
-  const sep = content && !content.endsWith('\n') ? '\n' : '';
-  fs.writeFileSync(file, content + sep + line + '\n');
-}
-
 // ─── timezone step ─────────────────────────────────────────────────────
 
 /**
@@ -1973,66 +1755,6 @@ function ensureLocalBinOnPath(): void {
   process.env.PATH = current ? `${localBin}${path.delimiter}${current}` : localBin;
 }
 
-function anthropicSecretExists(): boolean {
-  try {
-    const res = spawnSync('onecli', ['secrets', 'list'], {
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    if (res.status !== 0) return false;
-    return /anthropic/i.test(res.stdout ?? '');
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Probe the host for a working OneCLI install so we can offer to reuse it
- * instead of re-running the installer (which rebinds the listener and breaks
- * any other app already using that gateway).
- */
-function detectExistingOnecli(): { version: string; apiHost: string } | null {
-  try {
-    const ver = spawnSync('onecli', ['version'], {
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
-    if (ver.status !== 0) return null;
-    const version = (ver.stdout ?? '').trim();
-    if (!version) return null;
-
-    const host = spawnSync('onecli', ['config', 'get', 'api-host'], {
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
-    if (host.status !== 0) return null;
-    const raw = (host.stdout ?? '').trim();
-    if (!raw) return null;
-
-    // onecli 1.3+ emits JSON by default. Older versions would print raw text.
-    try {
-      const parsed = JSON.parse(raw) as { data?: unknown; value?: unknown };
-      const val = parsed.data ?? parsed.value;
-      if (typeof val === 'string' && val.trim()) {
-        return { version, apiHost: val.trim() };
-      }
-    } catch {
-      // not JSON — try to extract a URL directly
-    }
-    const m = raw.match(/https?:\/\/[\w.-]+(?::\d+)?/);
-    return m ? { version, apiHost: m[0] } : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * After installing Docker, this process's supplementary groups are still
- * frozen from login — subsequent steps that talk to /var/run/docker.sock
- * (onecli install, service start, …) fail with EACCES even though the
- * daemon is up. Detect that and re-exec the whole driver under `sg docker`
- * so the rest of the run inherits the docker group without a re-login.
- */
 function maybeReexecUnderSg(): void {
   if (process.env.NANOCLAW_REEXEC_SG === '1') return;
   if (process.platform !== 'linux') return;

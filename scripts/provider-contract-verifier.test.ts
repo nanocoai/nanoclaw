@@ -69,7 +69,7 @@ describe('provider contract verifier', () => {
     expect(commands).toContain(
       'pnpm exec vitest run src/provider-contracts src/providers setup/provider-contract.test.ts setup/providers',
     );
-    expect(commands).toContain('pnpm --package=bun@1.3.12 dlx bun test src/provider-contracts src/providers');
+    expect(commands).toContain('pnpm --package=bun@1.3.12 dlx bun run test src/provider-contracts src/providers');
     expect(result.checks.slice(-2)).toEqual(['runtime contract inventory', 'runtime conformance test files']);
   });
 
@@ -346,4 +346,29 @@ describe('provider contract verifier', () => {
       error: 'compile failed',
     });
   });
+});
+
+it('runs installed provider host-helper tests without a separate host-maintenance contract', async () => {
+  const root = fixture();
+  const commands: string[] = [];
+  fs.mkdirSync(path.join(root, 'scripts'));
+  fs.writeFileSync(path.join(root, 'scripts/opencode-host.test.ts'), '');
+  fs.writeFileSync(path.join(root, 'scripts/example$(touch injected)-host.test.ts'), '');
+  const result = await verifyProviderContracts(root, {
+    commandAvailable: () => true,
+    exec: (command) => {
+      commands.push(command);
+      if (command.includes('provider-contract-names.ts'))
+        return JSON.stringify({ host: ['claude'], hostProviders: [], setupProviders: ['claude'] });
+      if (command.includes('src/provider-contracts/names.ts'))
+        return JSON.stringify({ contracts: ['claude'], providers: ['claude'] });
+    },
+  });
+  expect(result.status).toBe('passed');
+  expect(
+    commands.some(
+      (command) => command.startsWith('pnpm exec vitest run ') && command.includes('scripts/opencode-host.test.ts'),
+    ),
+  ).toBe(true);
+  expect(commands.every((command) => !command.includes('$(touch'))).toBe(true);
 });

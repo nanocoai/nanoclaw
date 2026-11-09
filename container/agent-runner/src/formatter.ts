@@ -4,6 +4,7 @@ import { TIMEZONE, formatLocalTime, formatLocalStamp } from './timezone.js';
 import './providers/index.js';
 import './provider-contracts/index.js';
 import { getProviderRuntimeContract } from './providers/provider-registry.js';
+import { commandText, slashCommandName, withoutBotSuffix } from './slash-command.generated.js';
 
 /**
  * channel_type marking cross-session context copies (accumulate fan-out from
@@ -15,6 +16,25 @@ export const SESSION_ECHO_CHANNEL = 'session-echo';
 
 export function isSessionEcho(msg: MessageInRow): boolean {
   return msg.channel_type === SESSION_ECHO_CHANNEL;
+}
+
+/**
+ * Content flag the runner sets on its own failure notices. The host passes
+ * a2a content through unchanged, so the flag reaches the receiving agent and
+ * a failure there sends no notice back (never answer an error with an error).
+ */
+export const FAILURE_NOTICE_FIELD = 'failureNotice';
+
+/** Notice text when the provider gave no error of its own. */
+export const GENERIC_FAILURE_NOTICE =
+  "Sorry, something went wrong and I couldn't answer. Whoever runs this NanoClaw can look into it using the logs: https://docs.nanoclaw.dev/operate/troubleshooting#start-here";
+
+export function isFailureNotice(msg: MessageInRow): boolean {
+  try {
+    return JSON.parse(msg.content)?.[FAILURE_NOTICE_FIELD] === true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -65,7 +85,7 @@ function commandSets(providerName: string): CommandSets {
 export interface CommandInfo {
   category: CommandCategory;
   command: string; // the command name (e.g., '/clear')
-  text: string; // full original text
+  text: string; // full text; a command's `@botname` suffix is dropped
   senderId: string | null;
 }
 
@@ -82,29 +102,29 @@ export interface CommandInfo {
  * that populate `senderId` directly) and leave it alone.
  */
 export function categorizeMessage(msg: MessageInRow, providerName: string): CommandInfo {
-  const content = parseContent(msg.content);
-  const text = (content.text || '').trim();
-  const senderId = extractSenderId(msg, content);
+  const text = commandText(msg.content);
+  const senderId = extractSenderId(msg, parseContent(msg.content));
 
   // Cross-session echo rows are ambient copies of another conversation —
-  // a copied "/clear" etc. must never execute here.
-  if (isSessionEcho(msg) || !text.startsWith('/')) {
+  // a copied "/clear" etc. must never execute here. Nor may a failure
+  // notice whose error text happens to start with a slash.
+  // The host gate names commands with the same parse (slash-command.generated.ts).
+  const command = isSessionEcho(msg) || isFailureNotice(msg) ? null : slashCommandName(text);
+  if (command === null) {
     return { category: 'none', command: '', text, senderId };
   }
 
-  // Extract the command name (e.g., '/clear' from '/clear some args')
-  const command = text.split(/\s/)[0].toLowerCase();
-
+  const dispatchText = withoutBotSuffix(text);
   const commands = commandSets(providerName);
   if (commands.admin.has(command)) {
-    return { category: 'admin', command, text, senderId };
+    return { category: 'admin', command, text: dispatchText, senderId };
   }
 
   if (commands.filtered.has(command)) {
-    return { category: 'filtered', command, text, senderId };
+    return { category: 'filtered', command, text: dispatchText, senderId };
   }
 
-  return { category: 'passthrough', command, text, senderId };
+  return { category: 'passthrough', command, text: dispatchText, senderId };
 }
 
 /**
@@ -113,10 +133,9 @@ export function categorizeMessage(msg: MessageInRow, providerName: string): Comm
  * before messages reach the container.
  */
 export function isClearCommand(msg: MessageInRow): boolean {
-  if (isSessionEcho(msg)) return false;
-  const content = parseContent(msg.content);
-  const text = (content.text || '').trim();
-  return text.toLowerCase().startsWith('/clear');
+  if (isSessionEcho(msg) || isFailureNotice(msg)) return false;
+  // Exact name, never a prefix: the host gate only admin-checks '/clear'.
+  return slashCommandName(commandText(msg.content)) === '/clear';
 }
 
 /**
@@ -155,6 +174,8 @@ export interface RoutingContext {
    *  delivers from a task session; final-text `<message to>` blocks are inert
    *  and the final text auto-appends to the series run log. */
   taskRun: boolean;
+  /** Every non-echo row that woke this turn is a failure notice. */
+  failureNoticeWake?: boolean;
 }
 
 /**
@@ -163,10 +184,15 @@ export interface RoutingContext {
  * row must never decide where the reply goes (its routing is NULL by
  * contract, but even a malformed row with routing set is skipped). Falls
  * back to the plain first row if the batch is somehow all echo (shouldn't
- * happen — echo rows never trigger).
+ * happen — echo rows never trigger). A batch that opens with a failure
+ * notice routes by its first real waking message instead, so a failure
+ * answers the requester, not the agent that failed.
  */
 export function extractRouting(messages: MessageInRow[]): RoutingContext {
-  const first = messages.find((m) => !isSessionEcho(m)) ?? messages[0];
+  const nonEcho = messages.filter((m) => !isSessionEcho(m));
+  const waking = nonEcho.filter((m) => m.trigger !== 0);
+  const preferred = nonEcho[0] && isFailureNotice(nonEcho[0]) ? waking.find((m) => !isFailureNotice(m)) : undefined;
+  const first = preferred ?? nonEcho[0] ?? messages[0];
   return {
     platformId: first?.platform_id ?? null,
     channelType: first?.channel_type ?? null,
@@ -175,6 +201,8 @@ export function extractRouting(messages: MessageInRow[]): RoutingContext {
     // Echo rows riding along with a task must not disable one-door delivery:
     // taskRun as long as at least one task row and no non-task/non-echo row.
     taskRun: messages.some((m) => m.kind === 'task') && messages.every((m) => m.kind === 'task' || isSessionEcho(m)),
+    // Accumulated trigger=0 context rides along but did not wake the turn.
+    failureNoticeWake: waking.length > 0 && waking.every(isFailureNotice),
   };
 }
 
@@ -257,17 +285,17 @@ function formatSingleChat(msg: MessageInRow): string {
 function formatEchoMessage(msg: MessageInRow): string {
   const content = parseContent(msg.content);
   const label = content.echo?.label || 'another conversation';
-  const sender = content.sender || 'Unknown';
+  // `self` marks the agent's own post; the host sets it in backfill and the outbound fan.
+  const sender = content.self ? 'you' : content.sender || 'Unknown';
   const time = formatLocalStamp(new Date(msg.timestamp), TIMEZONE);
   // Timeline rows are the conversation's own preceding history — FIRST-CLASS
-  // context this thread continues from (the agent's own posts render as
-  // sender="you"), unlike cross-session-context ambient echoes from other
-  // live surfaces which must never be acted on in-place. dm-timeline = a DM's
-  // timeline; channel-timeline = a group conversation's (per-thread groups).
+  // context this thread continues from, unlike cross-session-context ambient
+  // echoes from other live surfaces which must never be acted on in-place.
+  // dm-timeline = a DM's timeline; channel-timeline = a group conversation's
+  // (per-thread groups).
   if (content.echo?.surface === 'dm-timeline' || content.echo?.surface === 'channel-timeline') {
-    const who = (content as { self?: boolean }).self ? 'you' : sender;
     const tag = content.echo.surface === 'channel-timeline' ? 'channel-history' : 'dm-history';
-    return `<${tag} sender="${escapeXml(who)}" time="${escapeXml(time)}">${escapeXml(content.text || '')}</${tag}>`;
+    return `<${tag} sender="${escapeXml(sender)}" time="${escapeXml(time)}">${escapeXml(content.text || '')}</${tag}>`;
   }
   return `<cross-session-context from="${escapeXml(label)}" sender="${escapeXml(sender)}" time="${escapeXml(time)}">${escapeXml(content.text || '')}</cross-session-context>`;
 }

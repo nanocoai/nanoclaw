@@ -8,7 +8,8 @@
  *
  * The marker lives in `data/` (gitignored), so a `git pull` can't touch it.
  * Only the sanctioned paths call writeUpgradeState(); clearing the tripwire
- * by hand is the same `set` — see docs/upgrade-recovery.md.
+ * by hand is the same `set` — see docs/upgrade-recovery.md. Setup's own local
+ * commits (setup/lib/setup-commit.ts) carry a current marker forward.
  */
 import fs from 'fs';
 import path from 'path';
@@ -23,6 +24,9 @@ export interface UpgradeState {
   tree: string;
   updatedAt: string;
   via: string;
+  /** Update channel and ref the updater merged; absent for setup and older stamps. */
+  channel?: string;
+  ref?: string;
 }
 
 export interface CodeIdentity {
@@ -64,19 +68,20 @@ export function getCodeIdentity(projectRoot: string = process.cwd()): CodeIdenti
  * Never throws — a boot gate must fail closed (treat anything it can't trust
  * as "no valid marker" → trip), not crash with a stack trace.
  */
-export function readUpgradeState(): UpgradeState | null {
+export function readUpgradeState(projectRoot?: string): UpgradeState | null {
+  const marker = markerPath(projectRoot);
   let raw: string;
   try {
-    raw = fs.readFileSync(MARKER_PATH, 'utf8');
+    raw = fs.readFileSync(marker, 'utf8');
   } catch (e: unknown) {
     if ((e as NodeJS.ErrnoException).code === 'ENOENT') return null;
-    log.warn('Could not read upgrade marker; treating as absent', { path: MARKER_PATH, err: String(e) });
+    log.warn('Could not read upgrade marker; treating as absent', { path: marker, err: String(e) });
     return null;
   }
   try {
     return JSON.parse(raw) as UpgradeState;
   } catch {
-    log.warn('Upgrade marker is corrupt; treating as absent', { path: MARKER_PATH });
+    log.warn('Upgrade marker is corrupt; treating as absent', { path: marker });
     return null;
   }
 }
@@ -85,7 +90,13 @@ export function readUpgradeState(): UpgradeState | null {
  * Stamp the marker. Only the sanctioned paths (setup / update / migrate)
  * call this on success; `version` defaults to the current code version.
  */
-export function writeUpgradeState(opts: { version?: string; via: string; projectRoot?: string }): UpgradeState {
+export function writeUpgradeState(opts: {
+  version?: string;
+  via: string;
+  channel?: string;
+  ref?: string;
+  projectRoot?: string;
+}): UpgradeState {
   const identity = getCodeIdentity(opts.projectRoot);
   const state: UpgradeState = {
     ...identity,
@@ -93,14 +104,22 @@ export function writeUpgradeState(opts: { version?: string; via: string; project
     updatedAt: new Date().toISOString(),
     via: opts.via,
   };
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(MARKER_PATH, JSON.stringify(state, null, 2) + '\n');
+  if (opts.channel !== undefined) state.channel = opts.channel;
+  if (opts.ref !== undefined) state.ref = opts.ref;
+  const marker = markerPath(opts.projectRoot);
+  fs.mkdirSync(path.dirname(marker), { recursive: true });
+  fs.writeFileSync(marker, JSON.stringify(state, null, 2) + '\n');
   return state;
 }
 
+/** The marker when it matches the checkout exactly, else null. */
+export function currentUpgradeState(projectRoot?: string): UpgradeState | null {
+  return isUpgradeCurrent(projectRoot) ? readUpgradeState(projectRoot) : null;
+}
+
 /** True when the marker exists and matches the exact running checkout. */
-export function isUpgradeCurrent(projectRoot: string = process.cwd()): boolean {
-  const state = readUpgradeState();
+export function isUpgradeCurrent(projectRoot?: string): boolean {
+  const state = readUpgradeState(projectRoot);
   if (state === null) return false;
   try {
     const code = getCodeIdentity(projectRoot);
@@ -126,9 +145,9 @@ export function isUpgradeCurrent(projectRoot: string = process.cwd()): boolean {
   }
 }
 
-/** Absolute path to the marker file. */
-export function markerPath(): string {
-  return MARKER_PATH;
+/** Absolute path to the marker file: this process's data dir, or `<projectRoot>/data`. */
+export function markerPath(projectRoot?: string): string {
+  return projectRoot === undefined ? MARKER_PATH : path.join(projectRoot, 'data', 'upgrade-state.json');
 }
 
 /**
@@ -136,11 +155,11 @@ export function markerPath(): string {
  * sanctioned path, stop with a message written for the coding agent that
  * just ran the upgrade to act on automatically.
  */
-export function enforceUpgradeTripwire(): void {
-  if (isUpgradeCurrent()) return;
+export function enforceUpgradeTripwire(projectRoot?: string): void {
+  if (isUpgradeCurrent(projectRoot)) return;
 
-  const code = getCodeIdentity();
-  const recorded = readUpgradeState();
+  const code = getCodeIdentity(projectRoot);
+  const recorded = readUpgradeState(projectRoot);
   const gitUnavailable = code.commit === 'unknown' || code.tree === 'unknown';
   const exactCheckoutChanged =
     recorded !== null &&

@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 const execFileAsync = promisify(execFile);
 const script = '.claude/skills/add-mattermost/scripts/discover-server.mjs';
+const selectScript = '.claude/skills/add-mattermost/scripts/select-server.mjs';
 
 describe('Mattermost server discovery', () => {
   const cleanups: (() => Promise<unknown>)[] = [];
@@ -22,10 +23,7 @@ describe('Mattermost server discovery', () => {
     await chmod(path, 0o755);
   }
 
-  async function discover(
-    commandSetup: (directory: string, port: number) => Promise<void>,
-    basePath = '',
-  ) {
+  async function discover(commandSetup: (directory: string, port: number) => Promise<void>, basePath = '') {
     const server = createServer((request, response) => {
       response.setHeader('content-type', 'application/json');
       response.end(request.url === `${basePath}/api/v4/system/ping` ? '{"status":"OK"}' : '{}');
@@ -46,12 +44,9 @@ describe('Mattermost server discovery', () => {
   }
 
   it('detects host-local mmctl without replacing the selected URL', async () => {
-    const { result, baseUrl } = await discover(
-      async (bin) => {
-        await fakeCommand(bin, 'mmctl', 'exit 0');
-      },
-      '/mattermost',
-    );
+    const { result, baseUrl } = await discover(async (bin) => {
+      await fakeCommand(bin, 'mmctl', 'exit 0');
+    }, '/mattermost');
     expect(result).toEqual({
       discovery: 'found',
       base_url: baseUrl,
@@ -82,5 +77,9 @@ describe('Mattermost server discovery', () => {
       );
     });
     expect(result).toMatchObject({ config_access: 'unavailable', mattermost_container: 'none' });
+  });
+
+  it('rejects the retired managed-server selection', async () => {
+    await expect(execFileAsync(process.execPath, [selectScript, 'create'])).rejects.toMatchObject({ code: 1 });
   });
 });

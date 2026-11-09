@@ -14,6 +14,7 @@
  */
 import { createHash } from 'node:crypto';
 
+import { escapeInvisibles, quoteForCard } from '../../card-text.js';
 import { mcpServerPluginOwner, parseMcpServerConfig, validateMcpServerName } from '../../container-config.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { getContainerConfig } from '../../db/container-configs.js';
@@ -71,7 +72,7 @@ export async function requestInstallPackagesHold(content: Record<string, unknown
     action: 'install_packages',
     payload: { apt, npm, reason },
     title: 'Install Packages Request',
-    question: `Agent "${agentGroup.name}" is attempting to install a package + rebuild container:\n${packageList}${reason ? `\nReason: ${reason}` : ''}`,
+    question: `Agent ${quoteForCard(agentGroup.name)} is attempting to install a package + rebuild container:\n${packageList}${reason ? `\nReason: ${quoteForCard(reason)}` : ''}`,
   });
 }
 
@@ -102,21 +103,6 @@ export const SECRET_VALUE_RE = /^(sk-|ghp_|github_pat_|xox[a-z]-|AKIA|-----BEGIN
 function redactSecret(value: string): string {
   const digest = createHash('sha256').update(value).digest('hex').slice(0, 8);
   return `<redacted: ${Buffer.byteLength(value, 'utf8')} bytes, sha256 ${digest}>`;
-}
-
-/**
- * Render every control/format/invisible/bidi character — and backtick, so a
- * payload can never close the card's code fence — as a visible \uXXXX
- * escape. Applied to JSON-encoded payload fields: JSON.stringify already
- * escapes chars below 0x20, this covers the rest (Cf bidi/zero-width chars,
- * U+2028/U+2029 line separators, private-use, lone surrogates).
- * Exported for tests.
- */
-export function escapeInvisibles(s: string): string {
-  return s.replace(/[\p{Cc}\p{Cf}\p{Co}\p{Cs}\u2028\u2029`]/gu, (c) => {
-    const cp = c.codePointAt(0) ?? 0;
-    return cp > 0xffff ? `\\u{${cp.toString(16)}}` : `\\u${cp.toString(16).padStart(4, '0')}`;
-  });
 }
 
 export async function validateAddMcpServer(content: Record<string, unknown>, session: Session): Promise<boolean> {
@@ -246,7 +232,11 @@ export async function requestAddMcpServerHold(content: Record<string, unknown>, 
   // in a code fence — no payload content can add lines to the card, spoof
   // another field, or break out of the fence.
   const question =
-    `Agent "${agentGroup.name}" is attempting to add a new MCP server:\n` + '```\n' + fields.join('\n') + '\n' + '```';
+    `Agent ${quoteForCard(agentGroup.name)} is attempting to add a new MCP server:\n` +
+    '```\n' +
+    fields.join('\n') +
+    '\n' +
+    '```';
   if (Buffer.byteLength(question, 'utf8') > MCP_APPROVAL_CARD_MAX_BYTES) {
     await notifyAgent(
       session,

@@ -151,6 +151,23 @@ const postToolUseHook: HookCallback = async () => {
   return { continue: true };
 };
 
+/** Minimum spacing between `activity` frames derived from streaming deltas. */
+const STREAM_ACTIVITY_INTERVAL_MS = 1000;
+
+// The notices are written for a terminal user; a chat user can't act on them
+// and must never be invited to paste a key.
+const OWNER_FIX_HINT =
+  "Whoever runs this NanoClaw needs to fix this outside the chat. Please don't send keys or passwords here.";
+
+/** The Claude CLI's own fixed failure notices (exact strings), safe to show in a channel, and the hint added to each. */
+const SDK_NOTICES = new Map([
+  ['Not logged in · Please run /login', OWNER_FIX_HINT],
+  ['Invalid API key · Fix external API key', OWNER_FIX_HINT],
+  ['Invalid auth token · Fix external auth token', OWNER_FIX_HINT],
+  ['Credit balance is too low', OWNER_FIX_HINT],
+  ['Prompt is too long', 'This conversation got too long. An admin can send /clear to start a new one.'],
+]);
+
 /** The real clock for archive names and rotation stamps; tests hand the history functions a fixed one. */
 const REAL_CLOCK = { now: () => Date.now() };
 
@@ -178,9 +195,9 @@ function createPreCompactHook(assistantName?: string): HookCallback {
  * Claude Code auto-compacts context at this window (tokens). Kept here so
  * the generic bootstrap doesn't need to know about Claude-specific env vars.
  *
- * Operator override: set CLAUDE_CODE_AUTO_COMPACT_WINDOW in the host env to
- * raise or lower the threshold without editing source — useful when running
- * with a 1M-context model variant or when emergency-tuning a deployment.
+ * Operator override: set CLAUDE_CODE_AUTO_COMPACT_WINDOW in the host env or
+ * `.env`; the host-side claude provider (src/providers/claude.ts) passes it
+ * into the container. Useful with a 1M-context model variant.
  */
 const CLAUDE_CODE_AUTO_COMPACT_WINDOW = process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW || '165000';
 
@@ -257,11 +274,21 @@ export class ClaudeProvider implements AgentProvider {
         additionalDirectories: this.additionalDirectories,
         resume: input.continuation,
         pathToClaudeCodeExecutable: '/pnpm/claude',
+        // The append (agent name + destinations) is rebuilt at every container
+        // start. Left to the SDK default, Claude Code records the prompt on a
+        // session's first request and resends that record on every resume, so
+        // a resumed agent would keep its old name and destination list until
+        // compaction. snapshot: false renders it fresh each time.
         systemPrompt: instructions
-          ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions }
+          ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions, snapshot: false }
           : undefined,
         allowedTools: [...this.mcp.allowedTools],
         disallowedTools: [...this.executionPolicy.disallowedTools],
+        // The SDK emits `assistant` only per completed content block, so a long
+        // block is silent and the host sweep kills the container mid-generation.
+        // Streaming deltas are the liveness signal for that window; translateEvents
+        // turns them into throttled `activity` and nothing else.
+        includePartialMessages: true,
         env: this.env,
         model: this.inference.model,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -269,10 +296,11 @@ export class ClaudeProvider implements AgentProvider {
         permissionMode: this.executionPolicy.permissionMode,
         allowDangerouslySkipPermissions: this.executionPolicy.allowDangerouslySkipPermissions,
         settingSources: ['project', 'user', 'local'],
-        // Only sent when enabled, so an install that never turns it on passes
-        // exactly the options it always did. `fastMode` is a Settings member
-        // rather than a query option, which is why it rides `settings`.
-        ...(this.inference.settings ? { settings: this.inference.settings } : {}),
+        // Flag-level settings: `fastMode` only when the install turns it on,
+        // then the execution policy's fixed keys, spread last so per-group
+        // input can never override them. Both are Settings members rather
+        // than query options, which is why they ride `settings`.
+        settings: { ...this.inference.settings, ...this.executionPolicy.settings },
         mcpServers: this.mcp.mcpServers,
         hooks: {
           PreToolUse: [{ hooks: [preToolUseHook] }],
@@ -287,11 +315,21 @@ export class ClaudeProvider implements AgentProvider {
 
     async function* translateEvents(): AsyncGenerator<ProviderEvent> {
       let messageCount = 0;
+      let lastStreamActivityAt = 0;
       for await (const message of sdkResult) {
         if (aborted) return;
-        messageCount++;
 
-        // Yield activity for every SDK event so the poll loop knows the agent is working
+        // Yield activity for every SDK event so the poll loop knows the agent
+        // is working. Deltas arrive per token and carry no content for us, so
+        // they count at most once per second, and not as messages.
+        if (message.type === 'stream_event') {
+          const now = Date.now();
+          if (now - lastStreamActivityAt < STREAM_ACTIVITY_INTERVAL_MS) continue;
+          lastStreamActivityAt = now;
+          yield { type: 'activity' };
+          continue;
+        }
+        messageCount++;
         yield { type: 'activity' };
 
         if (message.type === 'system' && message.subtype === 'init') {
@@ -325,11 +363,23 @@ export class ClaudeProvider implements AgentProvider {
         } else if (message.type === 'result') {
           // `result` text exists only on subtype:"success"; error subtypes
           // (e.g. a non-retryable 403 billing_error) carry their message in
-          // `errors[]` instead. Surface either so the poll-loop can deliver a
-          // billing/quota notice to the user rather than dropping the turn.
+          // `errors[]` instead. Keep that actionable notice separate from
+          // model output so the poll-loop can deliver it without scratchpad.
           const m = message as { result?: string; is_error?: boolean; errors?: string[] };
-          const text = m.result ?? (m.errors && m.errors.length > 0 ? m.errors.join('\n') : null);
-          yield { type: 'result', text, isError: m.is_error === true };
+          const isError = m.is_error === true;
+          // Some failures (e.g. an invalid API key) leave errors[] empty and put
+          // the SDK's own notice in `result`. Other result text can echo upstream
+          // bodies, so only exact fixed notices are reused; the rest stay generic.
+          const candidate = isError && !m.errors?.length ? (m.result?.trim() ?? '') : '';
+          // Notice first, hint on its own line: setup's ping shows only the first line.
+          const hint = SDK_NOTICES.get(candidate);
+          const resultAsError = hint ? `${candidate}\n${hint}` : '';
+          yield {
+            type: 'result',
+            text: resultAsError ? null : (m.result ?? null),
+            isError,
+            error: m.errors?.length ? m.errors.join('\n') : resultAsError || undefined,
+          };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
           yield { type: 'error', message: 'API retry', retryable: true };
         } else if (message.type === 'rate_limit_event') {

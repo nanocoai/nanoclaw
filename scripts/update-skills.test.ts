@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { detectInstalledSkills, refreshInstalledSkills } from './update-skills.js';
 
@@ -50,9 +50,103 @@ describe('installed skill detection', () => {
       { name: 'slack', skillName: 'add-slack', kind: 'channel' },
     ]);
   });
+
+  it('attributes a companion import to the skill that appends it', () => {
+    const root = temp('nanoclaw-skills-detect-companion-');
+    // What /add-slack actually installs: the adapter plus its a2a guard, both
+    // appended to the barrel by the one skill.
+    write(root, 'src/channels/index.ts', "import './cli.js';\nimport './slack.js';\nimport './slack-a2a-guard.js';\n");
+    write(
+      root,
+      '.claude/skills/add-slack/SKILL.md',
+      [
+        '# Apply',
+        '```nc:append to:src/channels/index.ts',
+        "import './slack.js';",
+        '```',
+        '```nc:append to:src/channels/index.ts',
+        "import './slack-a2a-guard.js';",
+        '```',
+      ].join('\n'),
+    );
+
+    // One entry, not two: the guard is add-slack's, so it must not be
+    // attributed to a nonexistent add-slack-a2a-guard skill.
+    expect(detectInstalledSkills(root)).toEqual([{ name: 'slack', skillName: 'add-slack', kind: 'channel' }]);
+  });
+
+  it('attributes imports to a skill not named add-<name>, under the skill name', () => {
+    const root = temp('nanoclaw-skills-detect-companion-skill-');
+    write(
+      root,
+      'src/channels/index.ts',
+      "import './cli.js';\nimport './slack.js';\nimport './room-guard.js';\nimport './slack-a2a.js';\n",
+    );
+    write(
+      root,
+      '.claude/skills/add-slack/SKILL.md',
+      "```nc:append to:src/channels/index.ts\nimport './slack.js';\n```\n",
+    );
+    write(
+      root,
+      '.claude/skills/slack-a2a-rooms/SKILL.md',
+      "```nc:append to:src/channels/index.ts\nimport './slack-a2a.js';\nimport './room-guard.js';\n```\n",
+    );
+
+    expect(detectInstalledSkills(root)).toEqual([
+      { name: 'slack', skillName: 'add-slack', kind: 'channel' },
+      { name: 'slack-a2a-rooms', skillName: 'slack-a2a-rooms', kind: 'channel' },
+    ]);
+  });
+
+  it('reads a ./-prefixed append target as the same barrel', () => {
+    const root = temp('nanoclaw-skills-detect-dot-path-');
+    write(root, 'src/channels/index.ts', "import './cli.js';\nimport './slack.js';\nimport './slack-a2a-guard.js';\n");
+    write(
+      root,
+      '.claude/skills/add-slack/SKILL.md',
+      "```nc:append to:./src/channels/index.ts\nimport './slack.js';\nimport './slack-a2a-guard.js';\n```\n",
+    );
+
+    expect(detectInstalledSkills(root)).toEqual([{ name: 'slack', skillName: 'add-slack', kind: 'channel' }]);
+  });
+
+  it('keeps add-<name> as the owner when another skill declares the same import', () => {
+    const root = temp('nanoclaw-skills-detect-contested-');
+    write(root, 'src/channels/index.ts', "import './cli.js';\nimport './slack.js';\n");
+    // Sorts before add-slack, so a first-claim-wins scan would pick it.
+    write(
+      root,
+      '.claude/skills/add-a-thing/SKILL.md',
+      "```nc:append to:src/channels/index.ts\nimport './slack.js';\n```\n",
+    );
+    write(
+      root,
+      '.claude/skills/add-slack/SKILL.md',
+      "```nc:append to:src/channels/index.ts\nimport './slack.js';\n```\n",
+    );
+
+    expect(detectInstalledSkills(root)).toEqual([{ name: 'slack', skillName: 'add-slack', kind: 'channel' }]);
+  });
+
+  it('still attributes an unclaimed import to add-<name>', () => {
+    const root = temp('nanoclaw-skills-detect-unclaimed-');
+    write(root, 'src/channels/index.ts', "import './cli.js';\nimport './discord.js';\n");
+
+    expect(detectInstalledSkills(root)).toEqual([{ name: 'discord', skillName: 'add-discord', kind: 'channel' }]);
+  });
 });
 
 describe('registry refresh end to end', () => {
+  // A registry override in the caller's environment would redirect these fixtures.
+  beforeEach(() => {
+    vi.stubEnv('NANOCLAW_REGISTRY_REMOTE', undefined);
+    vi.stubEnv('NANOCLAW_CHANNELS_REMOTE', undefined);
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it('uses the container-pinned Bun through pnpm when Bun is unavailable on the host', async () => {
     const root = temp('nanoclaw-skills-bun-fallback-');
     write(root, 'src/channels/index.ts', "import './cli.js';\n");
@@ -128,6 +222,49 @@ describe('registry refresh end to end', () => {
     expect(report.remotes).toEqual({ channels: 'upstream' });
     expect(report.skills).toMatchObject([{ name: 'demo', status: 'refreshed' }]);
     expect(fs.readFileSync(path.join(install, 'src/channels/demo.ts'), 'utf8')).toContain('upstream-current');
+  });
+
+  it('refreshes an included gateway skill that detection cannot see, code only', async () => {
+    const root = temp('nanoclaw-skills-gateway-');
+    write(root, 'src/gateway-providers/installed.ts', '// barrel\n');
+    write(root, '.claude/skills/add-demo-gw/payload/demo-gw.ts', 'export const v = 2;\n');
+    write(root, 'src/gateway-providers/demo-gw.ts', 'export const v = 1;\n');
+    write(
+      root,
+      '.claude/skills/add-demo-gw/SKILL.md',
+      [
+        '# Apply',
+        '```nc:copy',
+        'payload/demo-gw.ts -> src/gateway-providers/demo-gw.ts',
+        '```',
+        '```nc:append to:src/gateway-providers/installed.ts',
+        "import './demo-gw.js';",
+        '```',
+        '```nc:dep manager:pnpm',
+        'demo-sdk@1.0.0',
+        '```',
+        '```nc:run effect:external',
+        'echo setup',
+        '```',
+      ].join('\n'),
+    );
+    const commands: string[] = [];
+    const gateway = { name: 'demo-gw', skillName: 'add-demo-gw', kind: 'gateway' as const };
+
+    const report = await refreshInstalledSkills(root, ['add-demo-gw'], {
+      include: [gateway],
+      exec: (command) => {
+        commands.push(command);
+      },
+    });
+
+    expect(report.success, JSON.stringify(report, null, 2)).toBe(true);
+    expect(report.skills).toMatchObject([{ ...gateway, status: 'refreshed' }]);
+    expect(fs.readFileSync(path.join(root, 'src/gateway-providers/demo-gw.ts'), 'utf8')).toContain('v = 2');
+    expect(fs.readFileSync(path.join(root, 'src/gateway-providers/installed.ts'), 'utf8')).toContain(
+      "import './demo-gw.js';",
+    );
+    expect(commands).toEqual(['pnpm add demo-sdk@1.0.0']);
   });
 
   it('returns a blocking structured failure for prose-only installed skills', async () => {

@@ -79,7 +79,7 @@ describe('turn routing — a later turn from another thread on the same open que
   });
 });
 
-import type { AgentQuery, ProviderEvent, QueryInput } from './providers/types.js';
+import type { AgentQuery, ProviderEvent, ProviderExchange, QueryInput } from './providers/types.js';
 
 /** Turn 1 streams a partial block, then stalls until release(); later pushes are answered after it. */
 class StallingProvider extends MockProvider {
@@ -185,6 +185,12 @@ describe('reply stamp — startup', () => {
 
 /** Answers turn 1, answers one pushed follow-up, then the stream fails. */
 class FailingAfterFollowUpProvider extends MockProvider {
+  failureReported = false;
+
+  onExchangeComplete(exchange: ProviderExchange): void {
+    if (exchange.status === 'error') this.failureReported = true;
+  }
+
   query(_input: QueryInput): AgentQuery {
     const pending: string[] = [];
     let waiting: (() => void) | null = null;
@@ -222,7 +228,7 @@ class FailingAfterFollowUpProvider extends MockProvider {
 }
 
 describe('turn routing — a query error after later turns', () => {
-  it('addresses the error notice to the batch that opened the query, not the last turn', async () => {
+  it('does not add an error notice after both the opening turn and follow-up delivered', async () => {
     insertMessage('m-a', 'first question', 'thread-A');
     const provider = new FailingAfterFollowUpProvider();
     const controller = new AbortController();
@@ -234,18 +240,22 @@ describe('turn routing — a query error after later turns', () => {
       signal: controller.signal,
     });
 
-    await waitFor(() => getUndeliveredMessages().length >= 1, 3000);
-    await sleep(300); // turn 1 over, query open
-    insertMessage('m-b', 'second question', 'thread-B');
-    await waitFor(() => getUndeliveredMessages().length >= 3, 5000); // done B + error notice
-    controller.abort();
-    await loop.catch(() => {});
+    try {
+      await waitFor(() => getUndeliveredMessages().length >= 1, 3000);
+      await sleep(300); // turn 1 over, query open
+      insertMessage('m-b', 'second question', 'thread-B');
+      // Error completion is observable without waiting for an extra message:
+      // both requests were answered, so the failure owes neither a notice.
+      await waitFor(() => provider.failureReported, 3000);
+    } finally {
+      controller.abort();
+      await loop;
+    }
 
-    const out = getUndeliveredMessages().map((m) => [JSON.parse(m.content).text, m.thread_id]);
+    const out = getUndeliveredMessages().map((m) => [JSON.parse(m.content).text, m.thread_id, m.in_reply_to]);
     expect(out).toEqual([
-      ['done A', 'thread-A'],
-      ['done B', 'thread-B'],
-      ['Error: stream broke', 'thread-A'],
+      ['done A', 'thread-A', 'm-a'],
+      ['done B', 'thread-B', 'm-b'],
     ]);
   });
 });
