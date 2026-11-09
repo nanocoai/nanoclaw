@@ -7,7 +7,7 @@ import type { GatewayCatalogEntry } from '../../setup/gateways/catalog.js';
 import { getInstallSlug } from '../../src/install-slug.js';
 import { refreshInstalledSkills, type SkillsRefreshReport } from '../update-skills.js';
 import { stampChannel, type UpdateChannel } from './channel.js';
-import { lockfileNote, resolveLockfileConflicts } from './lockfiles.js';
+import { assertLockfilesUnmarked, lockfileNote, resolveLockfileConflicts } from './lockfiles.js';
 import {
   createCommandRunner,
   defaultServiceEnvironment,
@@ -235,8 +235,14 @@ function breakingRequirements(runtime: UpdateRuntime, root: string, from: string
     }));
 }
 
-function refreshPreparedState(state: UpdateState, runtime: UpdateRuntime): void {
+/** Clean, and no lockfile with conflict markers that `git add` let through. */
+function assertStageReady(state: UpdateState, runtime: UpdateRuntime): void {
   assertClean(runtime, state.stageRoot, 'Staging worktree');
+  assertLockfilesUnmarked(state.stageRoot, state.upstreamRef);
+}
+
+function refreshPreparedState(state: UpdateState, runtime: UpdateRuntime): void {
+  assertStageReady(state, runtime);
   state.targetHead = git(runtime, state.stageRoot, ['rev-parse', 'HEAD']);
   state.changedFiles = git(runtime, state.stageRoot, ['diff', '--name-only', state.originalHead, state.targetHead])
     .split('\n')
@@ -332,8 +338,8 @@ export function resumePreparedUpdate(projectRoot: string, id: string, runtime = 
   // The operator may have resolved every other file and left the lockfiles to us.
   if (state.phase === 'conflict' && state.strategy === 'merge') {
     const lockfiles = resolveLockfileConflicts(runtime.runner, state.stageRoot);
-    if (lockfiles.kind === 'failed') {
-      state.lastError = lockfiles.message;
+    if (lockfiles.kind === 'failed' || lockfiles.kind === 'blocked') {
+      state.lastError = lockfileNote(lockfiles);
       saveState(state);
       return state;
     }
@@ -364,7 +370,8 @@ export async function validateUpdate(
 ): Promise<UpdateState> {
   const state = loadState(projectRoot, id);
   if (state.phase !== 'prepared' && state.phase !== 'validated') throw new Error(`Cannot validate from ${state.phase}`);
-  assertClean(runtime, state.stageRoot, 'Staging worktree');
+  // Markers committed after prepare would otherwise surface only as a frozen-lockfile install failure.
+  assertStageReady(state, runtime);
 
   try {
     state.skillRefresh = await refreshInstalledSkills(state.stageRoot);

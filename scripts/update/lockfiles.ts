@@ -16,6 +16,7 @@ const REGENERATE_TIMEOUT_MS = 10 * 60 * 1000;
 export type LockfileOutcome =
   | { kind: 'none' }
   | { kind: 'mixed'; files: string[] }
+  | { kind: 'blocked'; files: string[]; others: string[] }
   | { kind: 'resolved'; files: string[] }
   | { kind: 'failed'; files: string[]; message: string };
 
@@ -29,6 +30,28 @@ function lines(output: string): string[] {
 
 function tail(output: string): string {
   return lines(output).slice(-15).join('\n') || '(no output)';
+}
+
+const CONFLICT_MARKER = /^(<{7}|={7}|>{7})( |$)/m;
+
+/** Lockfiles whose copy in the stage still has conflict markers. */
+export function markedLockfiles(root: string): string[] {
+  return Object.keys(LOCKFILES).filter((file) => {
+    const target = path.join(root, file);
+    return fs.existsSync(target) && CONFLICT_MARKER.test(fs.readFileSync(target, 'utf8'));
+  });
+}
+
+/** Refuse a stage that would commit or install a lockfile with conflict markers. */
+export function assertLockfilesUnmarked(root: string, upstreamRef: string): void {
+  const marked = markedLockfiles(root);
+  if (marked.length === 0) return;
+  throw new Error(
+    `${marked.join(', ')} in the stage still has conflict markers. Never merge a lockfile by hand: ` +
+      `take a clean copy (git checkout ${upstreamRef} -- <file>), regenerate it ` +
+      '(pnpm install --lockfile-only, or bun install --lockfile-only in container/agent-runner), ' +
+      'commit, then resume.',
+  );
 }
 
 /** The pinned Bun writes the lockfile the image build reads with --frozen-lockfile. */
@@ -59,7 +82,7 @@ function otherChanges(
 }
 
 const MANUAL_STEPS =
-  "To do it by hand in the stage: take upstream's copy (git checkout --theirs -- <file>), regenerate it " +
+  "To do it by hand in the stage: take upstream's copy (git checkout MERGE_HEAD -- <file>), regenerate it " +
   '(pnpm install --lockfile-only, or bun install --lockfile-only in container/agent-runner), ' +
   'git add it, commit, then resume. Never merge a lockfile by hand.';
 
@@ -72,21 +95,24 @@ const MANUAL_STEPS =
 export function resolveLockfileConflicts(runner: CommandRunner, root: string): LockfileOutcome {
   if (!runner.tryRun('git', ['rev-parse', '-q', '--verify', 'MERGE_HEAD'], root).ok) return { kind: 'none' };
   const unmerged = lines(runner.run('git', ['diff', '--name-only', '--diff-filter=U'], root));
-  const files = unmerged.filter(isLockfile);
+  const conflicted = unmerged.filter(isLockfile);
+  // A `git add` with markers still in a lockfile drops it from the list above,
+  // but upstream's copy fixes it the same way.
+  const files = [...conflicted, ...markedLockfiles(root).filter((file) => !conflicted.includes(file))];
   if (files.length === 0) return { kind: 'none' };
-  if (files.length < unmerged.length) return { kind: 'mixed', files };
+  if (conflicted.length < unmerged.length) return { kind: 'mixed', files };
 
   // The clean check refuses anything else anyway, and starting clean means
   // every later change besides the lockfiles is the package manager's.
   const dirty = otherChanges(runner, root, files);
-  if (dirty.modified.length + dirty.untracked.length > 0) return { kind: 'none' };
+  const others = [...dirty.modified, ...dirty.untracked];
+  if (others.length > 0) return { kind: 'blocked', files, others };
 
   // A copy of the index keeps git's conflict stages, so a failure can restore them exactly.
   const index = path.resolve(root, runner.run('git', ['rev-parse', '--git-path', 'index'], root));
   const backupDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-lockfiles-'));
   const backup = path.join(backupDir, 'index');
   fs.copyFileSync(index, backup);
-  const listing = runner.run('git', ['ls-files', '--stage'], root);
   const fail = (reason: string): LockfileOutcome => {
     fs.copyFileSync(backup, index);
     const stray = otherChanges(runner, root, files);
@@ -102,9 +128,11 @@ export function resolveLockfileConflicts(runner: CommandRunner, root: string): L
 
   try {
     for (const file of files) {
-      const theirs = runner.tryRun('git', ['checkout', '--theirs', '--', file], root);
+      const theirs = runner.tryRun('git', ['checkout', 'MERGE_HEAD', '--', file], root);
       if (!theirs.ok) return fail(`upstream has no ${file} to start from: ${tail(theirs.stdout)}`);
     }
+    // Taken after the checkout above, which stages upstream's copy itself.
+    const listing = runner.run('git', ['ls-files', '--stage'], root);
     for (const file of files) {
       let command: [string, string[]];
       try {
@@ -121,6 +149,8 @@ export function resolveLockfileConflicts(runner: CommandRunner, root: string): L
     const indexChanged = runner.run('git', ['ls-files', '--stage'], root) !== listing;
     const what = [...stray.modified, ...stray.untracked, ...(indexChanged ? ['the git index'] : [])];
     if (what.length > 0) return fail(`it also changed ${what.join(', ')}`);
+    const marked = markedLockfiles(root);
+    if (marked.length > 0) return fail(`${marked.join(', ')} still has conflict markers`);
 
     runner.run('git', ['add', '--', ...files], root);
     const committed = runner.tryRun('git', ['commit', '--no-edit'], root);
@@ -142,6 +172,14 @@ export function resolveLockfileConflicts(runner: CommandRunner, root: string): L
 /** What to tell the operator about lockfiles in a merge that stays conflicted. */
 export function lockfileNote(outcome: LockfileOutcome): string | undefined {
   if (outcome.kind === 'failed') return outcome.message;
+  if (outcome.kind === 'blocked') {
+    const shown = outcome.others.slice(0, 10).join(', ');
+    const more = outcome.others.length > 10 ? ` and ${outcome.others.length - 10} more` : '';
+    return (
+      `Did not regenerate ${outcome.files.join(', ')}: the stage has changes that are not added ` +
+      `(${shown}${more}). git add or remove them, then resume.`
+    );
+  }
   if (outcome.kind === 'mixed') {
     return (
       `Do not edit ${outcome.files.join(', ')}: resolve and git add the other files, ` +

@@ -5,7 +5,14 @@ import path from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { createUpdateRuntime, prepareUpdate, resumePreparedUpdate, type UpdateState } from './transaction.js';
+import {
+  createUpdateRuntime,
+  loadState,
+  prepareUpdate,
+  resumePreparedUpdate,
+  validateUpdate,
+  type UpdateState,
+} from './transaction.js';
 import type { CommandRunner } from './service.js';
 
 const roots: string[] = [];
@@ -96,7 +103,12 @@ interface Call {
  * managers are exercised by the update e2e run.
  */
 function runner(
-  options: { failRegenerate?: boolean; hostBun?: string; stray?: 'untracked' | 'tracked' | 'index' } = {},
+  options: {
+    failRegenerate?: boolean;
+    hostBun?: string;
+    markers?: boolean;
+    stray?: 'untracked' | 'tracked' | 'index';
+  } = {},
 ) {
   const calls: Call[] = [];
   const regenerate = (cwd: string): void => {
@@ -104,7 +116,7 @@ function runner(
     const deps = Object.keys(JSON.parse(read(cwd, 'package.json')).dependencies);
     let lock = read(cwd, file);
     for (const dep of deps) if (!lock.includes(`  ${dep}@`)) lock += `  ${dep}@1.0.0: {}\n`;
-    write(cwd, file, lock);
+    write(cwd, file, options.markers ? `<<<<<<< HEAD\n${lock}=======\n>>>>>>> x\n` : lock);
     if (options.stray === 'untracked') write(cwd, 'stray.txt', 'unexpected\n');
     if (options.stray === 'tracked') write(cwd, 'src/value.ts', 'export const value = "rewritten";\n');
     if (options.stray === 'index') {
@@ -281,24 +293,123 @@ describe('update lockfile conflicts', () => {
     expect(read(state.stageRoot, 'src/value.ts')).toContain('"new"');
   });
 
-  it("does not run the package manager while the operator's own changes are in the stage", () => {
+  it("does not run the package manager while the operator's own changes are in the stage, and says why", () => {
     const { install } = fixture({ otherConflict: true });
     const { runtime, calls } = runner();
     let state = prepare(install, runtime);
     write(state.stageRoot, 'src/value.ts', 'export const value = "resolved";\n');
     git(state.stageRoot, ['add', 'src/value.ts']);
+    write(state.stageRoot, 'src/value.ts', 'export const value = "resolved again";\n');
     write(state.stageRoot, 'src/value.ts.orig', 'mergetool backup\n');
 
-    expect(() => resumePreparedUpdate(install, state.id, runtime)).toThrow(/must be clean/);
+    state = resumePreparedUpdate(install, state.id, runtime);
+
+    expect(state.phase).toBe('conflict');
+    expect(state.lastError).toBe(
+      'Did not regenerate pnpm-lock.yaml: the stage has changes that are not added ' +
+        '(src/value.ts, src/value.ts.orig). git add or remove them, then resume.',
+    );
+    expect(loadState(install, state.id).lastError).toBe(state.lastError);
     expect(calls).toEqual([]);
+    expect(unmerged(state.stageRoot)).toEqual(['pnpm-lock.yaml']);
     expect(read(state.stageRoot, 'src/value.ts.orig')).toBe('mergetool backup\n');
 
+    git(state.stageRoot, ['add', 'src/value.ts']);
     fs.rmSync(path.join(state.stageRoot, 'src/value.ts.orig'));
     state = resumePreparedUpdate(install, state.id, runtime);
 
     expect(state.phase).toBe('prepared');
     expect(state.regeneratedLockfiles).toEqual(['pnpm-lock.yaml']);
     expect(read(state.stageRoot, 'pnpm-lock.yaml')).toContain('b@1.0.0');
+  });
+
+  it('never commits a lockfile the package manager left with conflict markers', () => {
+    const { install } = fixture();
+
+    const state = prepare(install, runner({ markers: true }).runtime);
+
+    expect(state.phase).toBe('conflict');
+    expect(state.lastError).toContain('pnpm-lock.yaml still has conflict markers');
+    expect(unmerged(state.stageRoot)).toEqual(['pnpm-lock.yaml']);
+    expect(git(state.stageRoot, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).not.toBe('');
+  });
+
+  it('regenerates a lockfile that was staged with its conflict markers', () => {
+    const { install } = fixture({ otherConflict: true });
+    const { runtime } = runner();
+    let state = prepare(install, runtime);
+    write(state.stageRoot, 'src/value.ts', 'export const value = "local and new";\n');
+    git(state.stageRoot, ['add', '-A']);
+    expect(unmerged(state.stageRoot)).toEqual([]);
+    expect(read(state.stageRoot, 'pnpm-lock.yaml')).toMatch(/^<{7}/m);
+
+    state = resumePreparedUpdate(install, state.id, runtime);
+
+    expect(state.phase).toBe('prepared');
+    expect(state.regeneratedLockfiles).toEqual(['pnpm-lock.yaml']);
+    const committed = git(state.stageRoot, ['show', 'HEAD:pnpm-lock.yaml']);
+    expect(committed).not.toMatch(/^[<=>]{7}/m);
+    expect(committed).toContain('c@1.0.1');
+    expect(committed).toContain('b@1.0.0');
+    expect(read(state.stageRoot, 'src/value.ts')).toContain('local and new');
+    expect(git(state.stageRoot, ['rev-list', '--parents', '-n', '1', 'HEAD']).split(' ')).toHaveLength(3);
+  });
+
+  it('puts a staged marked lockfile back to the conflict when regenerating fails', () => {
+    const { install } = fixture();
+    let state = prepare(install, runner({ failRegenerate: true }).runtime);
+    git(state.stageRoot, ['add', '-A']);
+    expect(unmerged(state.stageRoot)).toEqual([]);
+    const head = git(state.stageRoot, ['rev-parse', 'HEAD']);
+
+    state = resumePreparedUpdate(install, state.id, runner({ failRegenerate: true }).runtime);
+
+    expect(state.phase).toBe('conflict');
+    expect(state.lastError).toContain('regenerating them failed');
+    expect(state.lastError).toContain('git checkout MERGE_HEAD -- <file>');
+    expect(git(state.stageRoot, ['rev-parse', 'HEAD'])).toBe(head);
+    // git's resolve-undo record lets `checkout -m` restore the unmerged entry, so it cannot be committed.
+    expect(unmerged(state.stageRoot)).toEqual(['pnpm-lock.yaml']);
+    expect(read(state.stageRoot, 'pnpm-lock.yaml')).toMatch(/^<{7}/m);
+
+    state = resumePreparedUpdate(install, state.id, runner().runtime);
+    expect(state.phase).toBe('prepared');
+    expect(git(state.stageRoot, ['show', 'HEAD:pnpm-lock.yaml'])).not.toMatch(/^[<=>]{7}/m);
+  });
+
+  it('refuses a lockfile committed with conflict markers', () => {
+    const { install } = fixture({ otherConflict: true });
+    const { runtime, calls } = runner();
+    const state = prepare(install, runtime);
+    write(state.stageRoot, 'src/value.ts', 'export const value = "local and new";\n');
+    git(state.stageRoot, ['add', '-A']);
+    git(state.stageRoot, ['commit', '-q', '--no-edit']);
+
+    expect(() => resumePreparedUpdate(install, state.id, runtime)).toThrow(
+      'pnpm-lock.yaml in the stage still has conflict markers. Never merge a lockfile by hand: ' +
+        'take a clean copy (git checkout origin/main -- <file>)',
+    );
+    expect(loadState(install, state.id).phase).toBe('conflict');
+    expect(calls).toEqual([]);
+  });
+
+  it('validate refuses a marked lockfile before installing', async () => {
+    const { install } = fixture();
+    const { runtime, calls } = runner();
+    const state = prepare(install, runtime);
+    expect(state.phase).toBe('prepared');
+    write(
+      state.stageRoot,
+      'pnpm-lock.yaml',
+      `<<<<<<< HEAD\n${read(state.stageRoot, 'pnpm-lock.yaml')}=======\n>>>>>>> x\n`,
+    );
+    git(state.stageRoot, ['commit', '-q', '-am', 'marked']);
+    calls.length = 0;
+
+    await expect(validateUpdate(install, state.id, runtime)).rejects.toThrow(
+      /pnpm-lock\.yaml in the stage still has conflict markers/,
+    );
+    expect(calls).toEqual([]);
   });
 
   it('leaves a rebase conflict to the operator', () => {
