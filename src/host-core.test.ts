@@ -922,10 +922,10 @@ describe('router — per-wiring thread policy', () => {
     });
   });
 
-  async function withThreadedAdapter(fn: () => Promise<void>, extra: Record<string, unknown> = {}): Promise<void> {
+  async function withThreadedAdapter(fn: () => Promise<void>): Promise<void> {
     const { registerChannelAdapter, initChannelAdapters, teardownChannelAdapters } =
       await import('./channels/channel-registry.js');
-    registerChannelAdapter('tp-slack', { factory: () => ({ ...makeThreadedAdapter(), ...extra }) });
+    registerChannelAdapter('tp-slack', { factory: makeThreadedAdapter });
     await initChannelAdapters(() => ({
       onInbound: () => {},
       onInboundEvent: () => {},
@@ -1022,7 +1022,7 @@ describe('router — per-wiring thread policy', () => {
     });
   });
 
-  it('mention-sticky wakes only mentions and transport-subscribed follow-ups, not accumulated sessions', async () => {
+  it('mention-sticky wakes on a mention and its follow-ups, not on accumulated chatter', async () => {
     await getDb().run(
       "UPDATE messaging_group_agents SET engage_mode = 'mention-sticky', ignored_message_policy = 'accumulate' WHERE id = 'mga-tp'",
     );
@@ -1033,10 +1033,8 @@ describe('router — per-wiring thread policy', () => {
       const wake = wakeContainer as unknown as ReturnType<typeof vi.fn>;
       wake.mockClear();
 
-      const ambient1 = threadedEvent('msg-ambient-1');
-      const ambient2 = threadedEvent('msg-ambient-2');
-      await routeInbound({ ...ambient1, message: { ...ambient1.message, isSubscribed: false } });
-      await routeInbound({ ...ambient2, message: { ...ambient2.message, isSubscribed: false } });
+      await routeInbound(threadedEvent('msg-ambient-1'));
+      await routeInbound(threadedEvent('msg-ambient-2'));
 
       expect(wake).not.toHaveBeenCalled();
       const session = await findSession('mg-tp', 'thread-42');
@@ -1049,15 +1047,8 @@ describe('router — per-wiring thread policy', () => {
       db.close();
 
       const mention = threadedEvent('msg-mention');
-      const followup = threadedEvent('msg-followup');
-      await routeInbound({
-        ...mention,
-        message: { ...mention.message, isMention: true, isSubscribed: false },
-      });
-      await routeInbound({
-        ...followup,
-        message: { ...followup.message, isMention: false, isSubscribed: true },
-      });
+      await routeInbound({ ...mention, message: { ...mention.message, isMention: true } });
+      await routeInbound(threadedEvent('msg-followup'));
 
       expect(wake).toHaveBeenCalledTimes(2);
       const after = new Database(inboundDbPath('ag-tp', session!.id));
@@ -1071,48 +1062,33 @@ describe('router — per-wiring thread policy', () => {
     });
   });
 
-  it('mention-sticky subscribes the thread before the agent wakes, so a quick follow-up still engages', async () => {
+  it('mention-sticky engages a follow-up sent while the first wake is still starting', async () => {
     await getDb().run("UPDATE messaging_group_agents SET engage_mode = 'mention-sticky' WHERE id = 'mga-tp'");
-    const subscribedThreads = new Set<string>();
-    const subscribe = vi.fn(async (_platformId: string, threadId: string) => {
-      subscribedThreads.add(threadId);
+
+    await withThreadedAdapter(async () => {
+      const { routeInbound } = await import('./router.js');
+      const { wakeContainer } = await import('./container-runner.js');
+      const wake = wakeContainer as unknown as ReturnType<typeof vi.fn>;
+      wake.mockClear();
+      let release: (value: boolean) => void = () => {};
+      const slowWake = new Promise<boolean>((resolve) => {
+        release = resolve;
+      });
+      wake.mockReturnValueOnce(slowWake);
+
+      const mention = threadedEvent('msg-slow-mention');
+      const mentionDone = routeInbound({ ...mention, message: { ...mention.message, isMention: true } });
+      await vi.waitFor(() => expect(wake).toHaveBeenCalledTimes(1));
+
+      await routeInbound(threadedEvent('msg-quick-followup'));
+      expect(wake).toHaveBeenCalledTimes(2);
+
+      release(true);
+      await mentionDone;
     });
-
-    await withThreadedAdapter(
-      async () => {
-        const { routeInbound } = await import('./router.js');
-        const { wakeContainer } = await import('./container-runner.js');
-        const wake = wakeContainer as unknown as ReturnType<typeof vi.fn>;
-        wake.mockClear();
-        let release: (value: boolean) => void = () => {};
-        const slowWake = new Promise<boolean>((resolve) => {
-          release = resolve;
-        });
-        wake.mockReturnValueOnce(slowWake);
-
-        const mention = threadedEvent('msg-slow-mention');
-        const mentionDone = routeInbound({
-          ...mention,
-          message: { ...mention.message, isMention: true, isSubscribed: false },
-        });
-        await vi.waitFor(() => expect(wake).toHaveBeenCalledTimes(1));
-
-        // The bridge marks a message subscribed only once the thread is.
-        const followup = threadedEvent('msg-quick-followup');
-        await routeInbound({
-          ...followup,
-          message: { ...followup.message, isSubscribed: subscribedThreads.has('thread-42') },
-        });
-        expect(wake).toHaveBeenCalledTimes(2);
-
-        release(true);
-        await mentionDone;
-      },
-      { subscribe },
-    );
   });
 
-  it('a thread subscription wakes only agents that already have a session in that thread', async () => {
+  it('mention-sticky does not wake an agent that was never mentioned in the thread', async () => {
     await getDb().run("UPDATE messaging_group_agents SET engage_mode = 'mention-sticky' WHERE id = 'mga-tp'");
 
     await withThreadedAdapter(async () => {
@@ -1123,10 +1099,11 @@ describe('router — per-wiring thread policy', () => {
       wake.mockClear();
 
       const mention = threadedEvent('msg-first-agent-mention');
-      await routeInbound({ ...mention, message: { ...mention.message, isMention: true, isSubscribed: false } });
+      await routeInbound({ ...mention, message: { ...mention.message, isMention: true } });
       expect(wake).toHaveBeenCalledTimes(1);
 
-      // A second sticky agent is wired after the thread was activated.
+      // A second sticky agent is wired after the thread was activated. It
+      // stores chatter, so it gets a session of its own without a mention.
       await createAgentGroup({
         id: 'ag-tp2',
         name: 'Late Agent',
@@ -1141,17 +1118,18 @@ describe('router — per-wiring thread policy', () => {
         engage_mode: 'mention-sticky',
         engage_pattern: null,
         sender_scope: 'all',
-        ignored_message_policy: 'drop',
+        ignored_message_policy: 'accumulate',
         session_mode: 'shared',
         priority: 1,
         created_at: now(),
       });
 
-      const followup = threadedEvent('msg-subscribed-followup');
-      await routeInbound({ ...followup, message: { ...followup.message, isSubscribed: true } });
-      expect(wake).toHaveBeenCalledTimes(2);
-      expect((wake.mock.calls[1][0] as { agent_group_id: string }).agent_group_id).toBe('ag-tp');
-      expect(await getSessionsByAgentGroup('ag-tp2')).toHaveLength(0);
+      await routeInbound(threadedEvent('msg-followup-1'));
+      await routeInbound(threadedEvent('msg-followup-2'));
+      expect(wake).toHaveBeenCalledTimes(3);
+      const woken = wake.mock.calls.map((call) => (call[0] as { agent_group_id: string }).agent_group_id);
+      expect(woken).toEqual(['ag-tp', 'ag-tp', 'ag-tp']);
+      expect(await getSessionsByAgentGroup('ag-tp2')).toHaveLength(1);
     });
   });
 

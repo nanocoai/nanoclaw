@@ -32,7 +32,7 @@ import { findSessionForAgent } from './db/sessions.js';
 import { backfillSession, fanInboundMessage } from './modules/cross-session-context/index.js';
 import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
-import { resolveSession, writeSessionMessage } from './session-manager.js';
+import { resolveSession, withExistingMailboxSession, writeSessionMessage } from './session-manager.js';
 import { requestWake } from './request-wake.js';
 import { getSession } from './db/sessions.js';
 import type { AgentGroup, MessagingGroup, MessagingGroupAgent, Session } from './types.js';
@@ -232,7 +232,6 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   }
 
   const isMention = event.message.isMention === true;
-  const isSubscribed = event.message.isSubscribed;
 
   // 1. Combined lookup: messaging_group row + count of wired agents in a
   //    single query. Cheap short-circuit for the common "unwired channel"
@@ -392,20 +391,21 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     );
     const effectiveThreadId = threadsEnabled ? event.threadId : null;
 
-    const engages = await evaluateEngage(agent, messageText, isMention, isSubscribed, mg, effectiveThreadId);
+    const engages = await evaluateEngage(agent, messageText, isMention, mg, effectiveThreadId);
 
     const accessOk = engages && (!accessGate || (await accessGate(event, userId, mg, agent.agent_group_id)).allowed);
     const scopeOk = engages && (!senderScopeGate || (await senderScopeGate(event, userId, mg, agent)).allowed);
 
     if (engages && accessOk && scopeOk) {
+      await deliverToAgent(agent, agentGroup, mg, event, userId, threadsEnabled, effectiveThreadId, true);
+      engagedCount++;
+
       // Mention-sticky: ask the adapter to subscribe the thread so the
       // platform's subscribed-message path carries follow-ups without
       // requiring another @mention. Uses this wiring's OWN effective thread
       // id — a non-null value already implies the adapter supports threads
       // (resolveThreadPolicy hard-ANDs the capability). DMs, non-threaded
-      // platforms, and thread-opted-out wirings skip. Subscribe before
-      // delivery: the wake can take seconds, and a follow-up sent meanwhile
-      // must already arrive subscribed.
+      // platforms, and thread-opted-out wirings skip.
       if (
         !subscribed &&
         agent.engage_mode === 'mention-sticky' &&
@@ -421,9 +421,6 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
           log.warn('adapter.subscribe failed', { channelType: event.channelType, threadId: effectiveThreadId, err });
         });
       }
-
-      await deliverToAgent(agent, agentGroup, mg, event, userId, threadsEnabled, effectiveThreadId, true);
-      engagedCount++;
     } else if (agent.ignored_message_policy === 'accumulate' && !(engages && (!accessOk || !scopeOk))) {
       // Accumulate stores the message as silent context. We allow it when
       // engagement simply didn't fire, but NOT when engagement fired and
@@ -472,18 +469,15 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
  *                      user wants to disambiguate between multiple agents
  *                      wired to one chat, use engage_mode='pattern' with
  *                      the disambiguator as the regex.
- *   'mention-sticky' — platform mention OR an active per-thread session
- *                      already exists for this (agent, mg, thread). Chat SDK
- *                      bridges also report whether the message came through
- *                      a persisted thread subscription; when they say it did
- *                      not, the session is only accumulated context and the
- *                      message does not engage.
+ *   'mention-sticky' — platform mention OR this agent was already woken
+ *                      in an active per-thread session for (agent, mg,
+ *                      thread). A session that holds only accumulated
+ *                      chatter does not count.
  */
 async function evaluateEngage(
   agent: MessagingGroupAgent,
   text: string,
   isMention: boolean,
-  isSubscribed: boolean | undefined,
   mg: MessagingGroup,
   threadId: string | null,
 ): Promise<boolean> {
@@ -503,12 +497,9 @@ async function evaluateEngage(
     case 'mention-sticky': {
       if (isMention) return true;
       if (mg.is_group === 0) return false; // DMs never use mention-sticky sensibly
-      // Sticky needs this agent's own session in the thread. When the bridge
-      // reports subscription state it must also be true: a session alone may
-      // hold only accumulated chatter, and a subscription spans every agent.
-      // Adapters that omit the flag keep the session-only rule.
       const existing = await findSessionForAgent(agent.agent_group_id, mg.id, threadId);
-      return existing !== undefined && isSubscribed !== false;
+      if (!existing) return false;
+      return wasWokenInSession(agent.agent_group_id, existing.id);
     }
     default:
       // Unrecognized engage_mode (e.g. stale data from a past CLI version,
@@ -519,6 +510,23 @@ async function evaluateEngage(
         wiring_id: agent.id,
       });
       return false;
+  }
+}
+
+/**
+ * Whether this session ever woke its agent with a chat message. With
+ * ignored_message_policy='accumulate' a session can hold only unmentioned
+ * chatter; that must not make the thread sticky. A read error keeps the old
+ * session-only rule rather than dropping the message.
+ */
+async function wasWokenInSession(agentGroupId: string, sessionId: string): Promise<boolean> {
+  try {
+    const root = await withExistingMailboxSession(agentGroupId, sessionId, (mailbox) => mailbox.getConversationRoot());
+    return root !== undefined;
+    // eslint-disable-next-line no-catch-all/no-catch-all -- an unreadable inbox must not drop the message
+  } catch (err) {
+    log.warn('mention-sticky: could not read session inbox, treating thread as active', { sessionId, err });
+    return true;
   }
 }
 
