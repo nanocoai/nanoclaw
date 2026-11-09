@@ -171,7 +171,7 @@ describe('gateway approval coordinator', () => {
     expect(await pending).toBe('deny');
   });
 
-  it('delivers a long action in full in the card body under a short title', async () => {
+  it('delivers a long action in full in the card body under the action cut to fit', async () => {
     const coordinator = await import('./gateway-approval-coordinator.js');
     await coordinator.startGatewayApprovalCoordinator(provider(), delivery, vi.fn());
     const action = 'Transfer funds '.repeat(40);
@@ -188,6 +188,7 @@ describe('gateway approval coordinator', () => {
     );
     await vi.waitFor(() => expect(delivered).toHaveLength(1));
     const card = JSON.parse(delivered[0].content);
+    expect(card.title).toBe('Transfer funds Transfer funds Transfer funds Transfer funds…');
     expect(card.title.length).toBeLessThanOrEqual(MAX_CARD_TITLE_CHARS);
     expect(card.question.split('\n')[0]).toBe(`*Action:* ${action}`);
     expect(card.question).toContain(`*Detail 5:* ${'5'.repeat(600)}`);
@@ -195,13 +196,14 @@ describe('gateway approval coordinator', () => {
     expect(await pending).toBe('deny');
   });
 
-  it('puts a long title in full at the top of the card body, under a short title', async () => {
+  it('puts a long title in full at the top of the card body, under the title cut to fit', async () => {
     const coordinator = await import('./gateway-approval-coordinator.js');
     await coordinator.startGatewayApprovalCoordinator(provider(), delivery, vi.fn());
     const title = 'Delete repository '.repeat(4);
     const pending = decide(request({ title }));
     await vi.waitFor(() => expect(delivered).toHaveLength(1));
     const card = JSON.parse(delivered[0].content);
+    expect(card.title).toBe('Delete repository Delete repository Delete repository Delet…');
     expect(card.title.length).toBeLessThanOrEqual(MAX_CARD_TITLE_CHARS);
     expect(card.question).toBe(`*Request:* ${title}\nAllow POST api.example.test/resource?`);
     await coordinator.stopGatewayApprovalCoordinator();
