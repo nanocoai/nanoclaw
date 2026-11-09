@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { INBOUND_SCHEMA, OUTBOUND_SCHEMA } from './schema.js';
 import { wrapSqliteInbound, wrapSqliteOutbound } from './index.js';
+import { migrateMessagesInTable } from './session-db.js';
 
 describe('SQLite mailbox canonical serialization', () => {
   const databases: Database.Database[] = [];
@@ -147,6 +148,24 @@ describe('SQLite mailbox canonical serialization', () => {
 
     insert.run('answer', 6, 'system', null, 1);
     expect(inbound.wakeEvidence()).toBe('woken');
+  });
+
+  it('answers the wake check from an index, also on inboxes made before it', () => {
+    const legacy = new Database(':memory:');
+    databases.push(legacy);
+    legacy.exec(INBOUND_SCHEMA.replace(/^CREATE INDEX IF NOT EXISTS idx_messages_in_wake .*$/m, ''));
+    expect(legacy.prepare("SELECT 1 FROM sqlite_master WHERE name = 'idx_messages_in_wake'").get()).toBeUndefined();
+    migrateMessagesInTable(legacy);
+
+    for (const where of ['trigger = 1', "trigger = 0 AND kind IN ('chat', 'chat-sdk')"]) {
+      const plan = legacy
+        .prepare(
+          `EXPLAIN QUERY PLAN SELECT 1 FROM messages_in WHERE ${where}
+           AND (channel_type IS NULL OR channel_type != 'session-echo') LIMIT 1`,
+        )
+        .all() as Array<{ detail: string }>;
+      expect(plan.map((row) => row.detail).join('\n')).toContain('idx_messages_in_wake');
+    }
   });
 
   it('returns only the conversation root and top-level outbound timeline', () => {
