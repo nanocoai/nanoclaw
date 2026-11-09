@@ -38,7 +38,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@clack/core": "^1.2.0",
+    "@clack/core": "^1.5.1",
     "@clack/prompts": "^1.2.0",
     "better-sqlite3": "13.0.3",
     "chat": "4.41.1",
