@@ -45,22 +45,31 @@ it('escapes supplied formatting and mentions, and keeps every detail in full', (
   expect(card.question.endsWith('\nApprove once to allow this action.')).toBe(true);
 });
 
-it('shows a long action in full in the body, under a short fixed title', () => {
+it('shows a long action in full in the body, under the action cut to fit', () => {
   const action = 'Transfer funds '.repeat(40);
   const card = gatewayApprovalPresentation(
     request({ ...summary, action, details: [{ label: 'To', value: 'Savings' }] }),
   );
-  expect(card.title).toBe('Approve this action');
+  expect(card.title).toBe('Transfer funds Transfer funds Transfer funds Transfer funds…');
   expect(card.question.split('\n')[0]).toBe(`*Action:* ${action}`);
 });
 
-it('uses the action as the title only while it fits, measured after escaping', () => {
+it('cuts the action title to fit after escaping, never inside an escape or a character', () => {
   const titleFor = (action: string) =>
     gatewayApprovalPresentation(request({ ...summary, action, details: [{ label: 'To', value: 'Savings' }] })).title;
-  expect(titleFor('a'.repeat(MAX_CARD_TITLE_CHARS))).toBe('a'.repeat(MAX_CARD_TITLE_CHARS));
-  expect(titleFor('a'.repeat(MAX_CARD_TITLE_CHARS + 1))).toBe('Approve this action');
+  const a = (n: number) => 'a'.repeat(n);
+  expect(titleFor(a(MAX_CARD_TITLE_CHARS))).toBe(a(MAX_CARD_TITLE_CHARS));
+  expect(titleFor(a(MAX_CARD_TITLE_CHARS + 1))).toBe(`${a(MAX_CARD_TITLE_CHARS - 1)}…`);
   expect(titleFor('_'.repeat(MAX_CARD_TITLE_CHARS / 2))).toBe('\\_'.repeat(MAX_CARD_TITLE_CHARS / 2));
-  expect(titleFor('_'.repeat(MAX_CARD_TITLE_CHARS / 2 + 1))).toBe('Approve this action');
+  expect(titleFor('_'.repeat(MAX_CARD_TITLE_CHARS / 2 + 1))).toBe(`${'\\_'.repeat(MAX_CARD_TITLE_CHARS / 2 - 1)}…`);
+  expect(titleFor(`${a(MAX_CARD_TITLE_CHARS - 2)}_b`)).toBe(`${a(MAX_CARD_TITLE_CHARS - 2)}…`);
+  expect(titleFor(`${a(MAX_CARD_TITLE_CHARS - 3)}😀😀`)).toBe(`${a(MAX_CARD_TITLE_CHARS - 3)}😀…`);
+  expect(titleFor(`${a(MAX_CARD_TITLE_CHARS - 5)}👨‍👩‍👧b`)).toBe(`${a(MAX_CARD_TITLE_CHARS - 5)}…`);
+  expect(titleFor(`${a(MAX_CARD_TITLE_CHARS - 2)} bb`)).toBe(`${a(MAX_CARD_TITLE_CHARS - 2)}…`);
+  expect(titleFor(`${a(MAX_CARD_TITLE_CHARS - 2)}\u0000bb`)).toBe(`${a(MAX_CARD_TITLE_CHARS - 2)}…`);
+  expect(titleFor(`${a(MAX_CARD_TITLE_CHARS - 2)}؀\nbb`)).toBe(`${a(MAX_CARD_TITLE_CHARS - 2)}…`);
+  // U+0600 joins the following space into one character, which stays whole.
+  expect(titleFor(`${a(MAX_CARD_TITLE_CHARS - 3)}؀ bb`)).toBe(`${a(MAX_CARD_TITLE_CHARS - 3)}؀ …`);
 });
 
 it('rejects malformed structured details instead of trusting them', () => {
@@ -81,11 +90,11 @@ it('keeps legacy adapters compatible', () => {
   expect(gatewayApprovalPresentation(request())).toEqual({ title: 'Legacy', question: 'Legacy question' });
 });
 
-it('moves a long legacy title, escaped, to the top of the body', () => {
+it('cuts a long legacy title to fit and puts it in full, escaped, at the top of the body', () => {
   const title = 'Delete *all* backups '.repeat(4);
   const card = gatewayApprovalPresentation({ title, question: 'Legacy question' } as GatewayApprovalRequest);
-  expect(card.title).toBe('Approve external request');
-  expect(card.question).toBe(`*Request:* ${title.replace(/\*/g, '\\*')}\nLegacy question`);
+  expect(card.title).toBe('Delete *all* backups Delete *all* backups Delete *all* back…');
+  expect(card.question).toBe(`*Request:* ${'Delete \\*all\\* backups '.repeat(4)}\nLegacy question`);
   const fits = 'x'.repeat(MAX_CARD_TITLE_CHARS);
   expect(gatewayApprovalPresentation({ title: fits, question: 'q' } as GatewayApprovalRequest).title).toBe(fits);
 });

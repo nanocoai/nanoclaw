@@ -4,7 +4,7 @@ import { markedCut, normalizeGatewayApprovalSummary } from './gateway-approval-s
 import type { GatewayApprovalRequest } from './gateway-providers/gateway-provider-registry.js';
 
 const request = { agent: 'Nano', method: 'POST', host: 'api.example.test', path: '/issues/1/comments?token=x' };
-const MARKER = / … \((\d+) more characters not shown\)$/;
+const MARKER = / … (\d+) more characters not shown$/;
 
 it('keeps short values and every detail unchanged', () => {
   const summary = normalizeGatewayApprovalSummary(request, {
@@ -29,7 +29,7 @@ it('marks a cut value instead of dropping its tail silently', () => {
   const value = details![0].value;
   expect(value.length).toBeLessThanOrEqual(600);
   const kept = value.indexOf(' …');
-  expect(value).toBe(`${comment.slice(0, kept)} … (${614 - kept} more characters not shown)`);
+  expect(value).toBe(`${comment.slice(0, kept)} … ${614 - kept} more characters not shown`);
 });
 
 it('counts the details it leaves out', () => {
@@ -69,6 +69,6 @@ it('shows the cut marker and the left-out count on the card', () => {
       details: Array.from({ length: 7 }, (_, i) => ({ label: `F${i}`, value: i ? `${i}` : 'c'.repeat(614) })),
     }),
   } as GatewayApprovalRequest);
-  expect(card.question).toMatch(/\*F0:\* c+ … \\\(\d+ more characters not shown\\\)\n/);
+  expect(card.question).toMatch(/\*F0:\* c+ … \d+ more characters not shown\n/);
   expect(card.question).toContain('\n… 1 more field not shown\n');
 });
