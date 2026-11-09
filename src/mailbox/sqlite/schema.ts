@@ -19,8 +19,9 @@ CREATE TABLE IF NOT EXISTS messages_in (
   on_wake        INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_messages_in_series ON messages_in(series_id);
--- The mention-sticky wake check finds a waking or chatter row without a scan.
-CREATE INDEX IF NOT EXISTS idx_messages_in_wake ON messages_in("trigger", kind);
+-- The mention-sticky wake check and the conversation root find their first
+-- waking or silent row without a scan or a sort.
+CREATE INDEX IF NOT EXISTS idx_messages_in_trigger_seq ON messages_in("trigger", seq);
 
 CREATE TABLE IF NOT EXISTS delivered (
   message_out_id      TEXT PRIMARY KEY,
