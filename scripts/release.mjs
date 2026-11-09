@@ -4,12 +4,12 @@ import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 const VERSION_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
-const PRERELEASE_PATTERN = /^((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))-rc\.[1-9]\d*$/;
+const PRERELEASE_PATTERN = /^((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))-(?:beta|rc)\.[1-9]\d*$/;
 
 export function isPrerelease(version) {
   if (PRERELEASE_PATTERN.test(version)) return true;
   if (VERSION_PATTERN.test(version)) return false;
-  throw new Error(`version must be x.y.z or x.y.z-rc.N without a v prefix: ${version}`);
+  throw new Error(`version must be x.y.z, x.y.z-beta.N or x.y.z-rc.N without a v prefix: ${version}`);
 }
 
 function bulletedSection(remainder, label) {
@@ -178,7 +178,7 @@ export function main(argv) {
   const [command, version, ...args] = argv;
   if (!command || !version) {
     throw new Error(
-      'usage: node scripts/release.mjs <verify|extract|assemble|plan|readback> <x.y.z[-rc.N]> [command arguments]',
+      'usage: node scripts/release.mjs <verify|extract|assemble|plan|readback> <x.y.z[-beta.N|-rc.N]> [command arguments]',
     );
   }
 

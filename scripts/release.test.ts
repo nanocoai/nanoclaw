@@ -1,6 +1,10 @@
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   assembleReleaseBody,
@@ -98,24 +102,41 @@ describe('pre-release metadata', () => {
     '## [Unreleased]\n\nNext release in progress.\n\n- Pending change.\n',
   );
 
-  it('treats only x.y.z-rc.N as a pre-release', () => {
+  it('treats only x.y.z-beta.N and x.y.z-rc.N as pre-releases', () => {
+    expect(isPrerelease('2.5.0-beta.1')).toBe(true);
+    expect(isPrerelease('2.5.0-beta.12')).toBe(true);
     expect(isPrerelease('2.5.0-rc.1')).toBe(true);
     expect(isPrerelease('2.5.0-rc.12')).toBe(true);
     expect(isPrerelease('2.5.0')).toBe(false);
   });
 
-  it.each(['2.5.0-beta.1', '2.5.0-rc.0', '2.5.0-rc.01', '2.5.0-rc', 'v2.5.0-rc.1', '2.5.0-rc.1+build', '2.5'])(
-    'rejects the unsupported version %s',
-    (version) => {
-      expect(() => isPrerelease(version)).toThrow('x.y.z or x.y.z-rc.N');
-    },
-  );
+  it.each([
+    '2.5.0-rc.0',
+    '2.5.0-rc.01',
+    '2.5.0-rc',
+    'v2.5.0-rc.1',
+    '2.5.0-rc.1+build',
+    '2.5.0-beta.0',
+    '2.5.0-beta.01',
+    '2.5.0-beta',
+    'v2.5.0-beta.1',
+    '2.5.0-Beta.1',
+    '2.5.0-beta.1.rc.1',
+    '2.5.0-alpha.1',
+    '2.5.0-dev.1',
+    '2.5',
+  ])('rejects the unsupported version %s', (version) => {
+    expect(() => isPrerelease(version)).toThrow('x.y.z, x.y.z-beta.N or x.y.z-rc.N');
+  });
 
   it('publishes the Unreleased notes without needing a dated section', () => {
     expect(verifyRelease({ changelog: withUnreleased, packageVersion: '2.2.0-rc.1', version: '2.2.0-rc.1' })).toBe(
       'Next release in progress.\n\n- Pending change.',
     );
     expect(changelogSection(withUnreleased, '2.2.0-rc.1')).not.toContain('2.1.54');
+    expect(verifyRelease({ changelog: withUnreleased, packageVersion: '2.2.0-beta.1', version: '2.2.0-beta.1' })).toBe(
+      'Next release in progress.\n\n- Pending change.',
+    );
   });
 
   it('requires the package version, Unreleased bullets, and an unreleased base version', () => {
@@ -127,6 +148,9 @@ describe('pre-release metadata', () => {
     );
     expect(() =>
       verifyRelease({ changelog: withUnreleased, packageVersion: '2.1.54-rc.1', version: '2.1.54-rc.1' }),
+    ).toThrow('already records as released');
+    expect(() =>
+      verifyRelease({ changelog: withUnreleased, packageVersion: '2.1.54-beta.1', version: '2.1.54-beta.1' }),
     ).toThrow('already records as released');
   });
 
@@ -302,6 +326,11 @@ describe('publication recovery', () => {
       'is not marked as a prerelease',
     );
     expect(plan({ version: '2.2.0-rc.1' })).toBe('create-tag-and-release');
+    const betaRelease = { ...rcRelease, name: 'v2.2.0-beta.1', tag_name: 'v2.2.0-beta.1' };
+    expect(plan({ release: betaRelease, tagState: annotatedTag, version: '2.2.0-beta.1' })).toBe('already-published');
+    expect(() =>
+      plan({ release: { ...betaRelease, prerelease: false }, tagState: annotatedTag, version: '2.2.0-beta.1' }),
+    ).toThrow('is not marked as a prerelease');
   });
 
   it('retries only exact release states that are still propagating', () => {
@@ -342,4 +371,35 @@ describe('publication recovery', () => {
   ])('rejects a mismatched %s', (_name, overrides, message) => {
     expect(() => plan(overrides)).toThrow(message);
   });
+});
+
+describe('release.mjs verify command', () => {
+  const script = fileURLToPath(new URL('./release.mjs', import.meta.url));
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  function verify(version: string): string {
+    const dir = mkdtempSync(path.join(tmpdir(), 'release-verify-'));
+    dirs.push(dir);
+    writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ version }));
+    writeFileSync(
+      path.join(dir, 'CHANGELOG.md'),
+      '# Changelog\n\n## [Unreleased]\n\n- Pending change.\n\n## [2026.10.1] - 2026-10-23\n\n- Old.\n',
+    );
+    return execFileSync(process.execPath, [script, 'verify', version], { cwd: dir, encoding: 'utf8', stdio: 'pipe' });
+  }
+
+  it('accepts a beta and an rc of the next version', () => {
+    expect(verify('2026.11.0-beta.1')).toBe('release metadata verified for v2026.11.0-beta.1\n');
+    expect(verify('2026.11.0-rc.1')).toBe('release metadata verified for v2026.11.0-rc.1\n');
+  });
+
+  it.each(['2026.11.0-alpha.1', '2026.11.0-beta', '2026.11.0-beta.0', '2026.11.0-preview.1'])(
+    'rejects %s',
+    (version) => {
+      expect(() => verify(version)).toThrow(/version must be x\.y\.z, x\.y\.z-beta\.N or x\.y\.z-rc\.N/);
+    },
+  );
 });
