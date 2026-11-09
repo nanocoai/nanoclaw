@@ -151,6 +151,18 @@ describe('SQLite mailbox canonical serialization', () => {
 
     insert.run('answer', 6, 'system', null, 1);
     expect(inbound.wakeEvidence()).toBe('woken');
+
+    // A silent chat row with no channel is chatter too, as for the wake probe.
+    const bare = new Database(':memory:');
+    databases.push(bare);
+    bare.exec(INBOUND_SCHEMA);
+    bare
+      .prepare(
+        `INSERT INTO messages_in (id, seq, timestamp, kind, channel_type, content, trigger)
+         VALUES ('bare', 1, '2026-01-01T00:00:00.000Z', 'chat', NULL, '{}', 0)`,
+      )
+      .run();
+    expect(wrapSqliteInbound(bare).wakeEvidence()).toBe('chatter');
   });
 
   it('answers the wake check and the conversation root from an index, also on inboxes made before it', () => {

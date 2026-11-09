@@ -576,7 +576,7 @@ function holdThread(key: string): [ThreadInFlight, () => void] {
 
 /**
  * True once any wake starts on the thread (a passing gate starts one), false
- * once every gate pending now has refused.
+ * once no gate is pending, including gates opened while we wait.
  */
 async function gateVerdicts(thread: ThreadInFlight): Promise<boolean> {
   if (thread.gates.size === 0) return false;
@@ -585,7 +585,11 @@ async function gateVerdicts(thread: ThreadInFlight): Promise<boolean> {
     return await new Promise<boolean>((resolve) => {
       woke = () => resolve(true);
       thread.onWake.add(woke);
-      void Promise.all(thread.gates).then(() => resolve(false));
+      // A settled gate leaves the set (see openGate).
+      void (async () => {
+        while (thread.gates.size > 0) await Promise.all(thread.gates);
+        resolve(false);
+      })();
     });
   } finally {
     thread.onWake.delete(woke);
