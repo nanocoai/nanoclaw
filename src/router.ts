@@ -531,17 +531,15 @@ function threadKey(agentGroupId: string, messagingGroupId: string, threadId: str
 }
 
 /**
- * Whether this session ever woke its agent with a chat message. With
- * ignored_message_policy='accumulate' a session can hold only unmentioned
- * chatter; that must not make the thread sticky. A missing or unreadable
- * inbox (e.g. the documented folder reset) keeps the old session-only rule.
+ * Whether anything ever woke this session. With ignored_message_policy=
+ * 'accumulate' a session can hold only unmentioned chatter; that must not make
+ * the thread sticky. A missing or unreadable inbox (e.g. the documented folder
+ * reset) keeps the old session-only rule.
  */
 async function wasWokenInSession(agentGroupId: string, sessionId: string): Promise<boolean> {
   try {
-    const inbox = await withExistingMailboxSession(agentGroupId, sessionId, (mailbox) => ({
-      root: mailbox.getConversationRoot(),
-    }));
-    return inbox === undefined || inbox.root !== undefined;
+    const woken = await withExistingMailboxSession(agentGroupId, sessionId, (mailbox) => mailbox.hasWoken());
+    return woken !== false;
     // eslint-disable-next-line no-catch-all/no-catch-all -- an unreadable inbox must not drop the message
   } catch (err) {
     log.warn('mention-sticky: could not read session inbox, treating thread as active', { sessionId, err });

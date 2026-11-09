@@ -1158,6 +1158,31 @@ describe('router — per-wiring thread policy', () => {
     });
   });
 
+  it('mention-sticky stays active when a card answer is the first row after a folder reset', async () => {
+    await getDb().run("UPDATE messaging_group_agents SET engage_mode = 'mention-sticky' WHERE id = 'mga-tp'");
+
+    await withThreadedAdapter(async () => {
+      const { routeInbound } = await import('./router.js');
+      const { wakeContainer } = await import('./container-runner.js');
+      const wake = wakeContainer as unknown as ReturnType<typeof vi.fn>;
+      wake.mockClear();
+
+      const mention = threadedEvent('msg-before-reset-answer');
+      await routeInbound({ ...mention, message: { ...mention.message, isMention: true } });
+      const session = await findSession('mg-tp', 'thread-42');
+      fs.rmSync(sessionDir('ag-tp', session!.id), { recursive: true, force: true });
+      await writeSessionMessage('ag-tp', session!.id, {
+        id: 'answer-after-reset',
+        kind: 'system',
+        timestamp: now(),
+        content: JSON.stringify({ type: 'question_response', answer: 'yes' }),
+      });
+
+      await routeInbound(threadedEvent('msg-after-answer'));
+      expect(wake).toHaveBeenCalledTimes(2);
+    });
+  });
+
   it('mention-sticky does not wake an agent that was never mentioned in the thread', async () => {
     await getDb().run("UPDATE messaging_group_agents SET engage_mode = 'mention-sticky' WHERE id = 'mga-tp'");
 

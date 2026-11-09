@@ -106,6 +106,8 @@ export interface InboundMailbox {
   getMostRecentPeerSourceSessionId(peerAgentGroupId: string): string | null;
   /** True once another agent has messaged this session, answered or not. */
   hasMessagesFromOtherAgents(selfAgentGroupId: string): boolean;
+  /** True once any row other than a cross-session echo has woken this session. */
+  hasWoken(): boolean;
   insertTask(task: Task): Promise<void>;
   cancelTask(taskId?: string): number;
   pauseTask(taskId: string): number;

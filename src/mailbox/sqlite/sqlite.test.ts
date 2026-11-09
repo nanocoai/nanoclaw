@@ -127,6 +127,24 @@ describe('SQLite mailbox canonical serialization', () => {
     ]);
   });
 
+  it('reports a session as woken only by a non-echo triggering row', () => {
+    const inboundDb = new Database(':memory:');
+    databases.push(inboundDb);
+    inboundDb.exec(INBOUND_SCHEMA);
+    const insert = inboundDb.prepare(
+      `INSERT INTO messages_in (id, seq, timestamp, kind, channel_type, content, trigger)
+       VALUES (?, ?, '2026-01-01T00:00:00.000Z', ?, ?, '{}', ?)`,
+    );
+    const inbound = wrapSqliteInbound(inboundDb);
+
+    insert.run('ambient', 2, 'chat', 'slack', 0);
+    insert.run('echo', 4, 'chat', 'session-echo', 1);
+    expect(inbound.hasWoken()).toBe(false);
+
+    insert.run('answer', 6, 'system', null, 1);
+    expect(inbound.hasWoken()).toBe(true);
+  });
+
   it('returns only the conversation root and top-level outbound timeline', () => {
     const inboundDb = new Database(':memory:');
     const outboundDb = new Database(':memory:');
