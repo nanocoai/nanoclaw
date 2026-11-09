@@ -253,6 +253,20 @@ function unfinishedOperation(state: UpdateState, runtime: UpdateRuntime): Update
   return open ? UNFINISHED[open] : undefined;
 }
 
+/**
+ * Every strategy ends on the stage branch. A rebase detaches HEAD first, and
+ * its apply backend does so before it records any state.
+ */
+function assertOnStageBranch(state: UpdateState, runtime: UpdateRuntime): void {
+  const branch = tryGit(runtime, state.stageRoot, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
+  if (!branch.ok || branch.stdout.trim() !== state.stageBranch) {
+    throw new Error(
+      `The staging worktree must be on ${state.stageBranch}: finish any rebase (git rebase --continue) ` +
+        'or put HEAD back on that branch, then resume',
+    );
+  }
+}
+
 /** Clean, nothing unfinished, on the stage branch, and no lockfile with conflict markers that `git add` let through. */
 function assertStageReady(state: UpdateState, runtime: UpdateRuntime): void {
   assertClean(runtime, state.stageRoot, 'Staging worktree');
@@ -262,15 +276,7 @@ function assertStageReady(state: UpdateState, runtime: UpdateRuntime): void {
   if (op) {
     throw new Error(`The staging worktree has an unfinished ${op}: finish it (git ${op} --continue), then resume`);
   }
-  // Every strategy ends on the stage branch. A rebase detaches HEAD first, and
-  // its apply backend does so before it records any state.
-  const branch = tryGit(runtime, state.stageRoot, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
-  if (!branch.ok || branch.stdout.trim() !== state.stageBranch) {
-    throw new Error(
-      `The staging worktree must be on ${state.stageBranch}: finish any rebase (git rebase --continue), ` +
-        'or abandon this update and prepare again',
-    );
-  }
+  assertOnStageBranch(state, runtime);
   assertLockfilesUnmarked(runtime.runner, state.stageRoot, state.upstreamRef);
 }
 
@@ -393,6 +399,8 @@ export function resumePreparedUpdate(projectRoot: string, id: string, runtime = 
   }
   // The operator may have resolved every other file and left the lockfiles to us.
   if (state.phase === 'conflict' && state.strategy === 'merge') {
+    // Before the resolver, which commits the merge wherever HEAD is.
+    assertOnStageBranch(state, runtime);
     const lockfiles = resolveLockfileConflicts(runtime.runner, state.stageRoot);
     if (lockfiles.kind === 'failed' || lockfiles.kind === 'blocked') {
       state.lastError = lockfileNote(lockfiles);

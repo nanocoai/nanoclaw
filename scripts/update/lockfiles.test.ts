@@ -521,9 +521,28 @@ describe('update lockfile conflicts', () => {
     const id = onlyTransaction();
 
     expect(() => resumePreparedUpdate(install, id, runner().runtime)).toThrow(
-      `The staging worktree must be on update-nanoclaw/${id}: finish any rebase`,
+      `The staging worktree must be on update-nanoclaw/${id}: finish any rebase (git rebase --continue) ` +
+        'or put HEAD back on that branch, then resume',
     );
     expect(loadState(install, id).phase).toBe('conflict');
+  });
+
+  it('leaves a renamed stage branch alone instead of regenerating on it', () => {
+    const { install } = fixture({ otherConflict: true });
+    const { runtime, calls } = runner();
+    const state = prepare(install, runtime);
+    write(state.stageRoot, 'src/value.ts', 'export const value = "local and new";\n');
+    git(state.stageRoot, ['add', 'src/value.ts']);
+    git(state.stageRoot, ['branch', '-m', 'renamed']);
+    const head = git(state.stageRoot, ['rev-parse', 'HEAD']);
+
+    expect(() => resumePreparedUpdate(install, state.id, runtime)).toThrow(
+      `The staging worktree must be on ${state.stageBranch}:`,
+    );
+    expect(calls).toEqual([]);
+    expect(git(state.stageRoot, ['rev-parse', 'HEAD'])).toBe(head);
+    expect(unmerged(state.stageRoot)).toEqual(['pnpm-lock.yaml']);
+    expect(loadState(install, state.id).phase).toBe('conflict');
   });
 
   it('refuses a cherry-pick with no commits before it creates anything', () => {
