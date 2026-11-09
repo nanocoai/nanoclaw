@@ -139,13 +139,65 @@ interval is a complete fix.
 
 An API key raises the ceiling and is created at
 <https://keenable.ai/console>. Store it through OneCLI on the host, so the
-gateway injects it per request and the agent never sees it. This needs OneCLI
-configured; run `/init-onecli` first if `command -v onecli` finds nothing.
+gateway injects it per request and the agent never sees it. This needs OneCLI;
+run `/add-onecli` first if `command -v onecli` finds nothing.
+
+A saved key reaches only the groups it is attached to, through OneCLI agent
+grants. On an older gateway a saved key reaches every agent and the attach step
+fails, so check the gateway and CLI before saving one. It reads only:
 
 ```bash
-onecli secrets create --name keenable --type generic \
+sh .claude/skills/add-onecli/scripts/check-grants-gateway.sh /add-keenable-tool
+```
+
+If it fails, show the operator the message as it is and stop: keep the keyless
+setup, and do not save or attach the key by hand.
+
+Otherwise, the operator saves the key on the host from a file they wrote
+(never ask for the key in chat):
+
+```bash
+onecli secrets create --name Keenable --type generic \
   --host-pattern api.keenable.ai --header-name X-API-Key --file <key-file>
 ```
+
+Then attach it to the groups that run Keenable. Put their ids, comma-separated,
+in `KEENABLE_GROUPS` and run the block. If OneCLI holds more than one Keenable
+key, the block lists them and stops: ask which one was saved and put its id in
+`KEENABLE_SECRET`. Attaching adds this one secret and leaves each agent's other
+grants alone; groups created later do not get it.
+
+```bash
+(
+KEENABLE_GROUPS="<agent-group-id>,<agent-group-id>"
+KEENABLE_SECRET=""
+L=$(onecli secrets list --max 0) && [ -n "$(printf '%s' "$L" | tr -d '[:space:]')" ] || { echo "could not list OneCLI secrets" >&2; exit 1; }
+T=$(printf '%s' "$L" | jq -c '[(if type == "array" then . else .data end)[] | select(.hostPattern == "api.keenable.ai") | {id, name, createdAt}]') || { echo "could not read the OneCLI secret list" >&2; exit 1; }
+if [ -n "$KEENABLE_SECRET" ]; then
+  S=$(printf '%s' "$T" | jq -r --arg s "$KEENABLE_SECRET" '.[] | select(.id == $s) | .id'); [ -n "$S" ] || { echo "'$KEENABLE_SECRET' is not a Keenable key in OneCLI" >&2; exit 1; }
+else
+  case "$(printf '%s' "$T" | jq length)" in
+    0) echo "no Keenable key in OneCLI yet: save it with the command above first" >&2; exit 1 ;;
+    1) S=$(printf '%s' "$T" | jq -r '.[0].id') ;;
+    *) echo "more than one Keenable key in OneCLI:" >&2; printf '%s' "$T" | jq -r '.[] | "  \(.id)  \(.name)  created \(.createdAt)"' >&2
+       echo "set KEENABLE_SECRET to the one to attach and run this again" >&2; exit 1 ;;
+  esac
+fi
+G=$(ncl groups list --json --limit 100000) || { echo "could not list agent groups; is the NanoClaw host running?" >&2; exit 1; }
+AG=$(onecli agents list --max 0 | jq -ce 'if type == "array" then . else .data end | arrays') || { echo "could not list OneCLI agents" >&2; exit 1; }
+for gid in $(printf '%s' "$KEENABLE_GROUPS" | tr ',' ' '); do
+  gname=$(printf '%s' "$G" | jq -r --arg g "$gid" '.data[] | select(.id==$g) | .name'); [ -n "$gname" ] || { echo "unknown agent group '$gid'; see: ncl groups list" >&2; exit 1; }
+  aid=$(printf '%s' "$AG" | jq -r --arg g "$gid" '.[] | select(.identifier==$g) | .id')
+  [ -n "$aid" ] || aid=$(onecli agents create --name "$gname" --identifier "$gid" | jq -r '.id // empty'); [ -n "$aid" ] || { echo "could not create a OneCLI agent for $gname ($gid)" >&2; exit 1; }
+  onecli agents grants attach-secret --id "$aid" --secret-id "$S" >/dev/null || { echo "could not attach the Keenable key to $gname ($gid)" >&2; exit 1; }
+  echo "Keenable key attached to $gname ($gid)"
+done
+)
+```
+
+The server URL and registration stay the same; restart the groups so the
+gateway starts injecting the key. To take it away from one group:
+`onecli agents grants detach-secret --id <agent-id> --secret-id <keenable-secret-id>`.
 
 ## Troubleshooting
 
