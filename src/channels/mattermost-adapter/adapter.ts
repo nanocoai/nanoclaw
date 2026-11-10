@@ -1445,13 +1445,16 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
     return this.mentionsBotHandle(post.message ?? '');
   }
 
-  /** `@<bot handle>` in the text. A trailing `.` ends the sentence unless a handle follows (`@bot.dev`). */
+  /**
+   * `@<bot handle>` in the text. Trailing `.`, `-` or `_` is punctuation, as
+   * for Mattermost, unless more handle follows (`@bot-dev` is someone else).
+   */
   private mentionsBotHandle(text: string): boolean {
     if (!this.userName) {
       return false;
     }
     const handle = this.userName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    return new RegExp(`(^|[^\\w@])@${handle}(?![\\w-]|\\.+[\\w-])`, 'i').test(text);
+    return new RegExp(`(^|[^\\w@])@${handle}(?![a-z0-9]|[-._]+[a-z0-9])`, 'i').test(text);
   }
 
   private toMessage(post: MattermostPost, threadId: string): Message<MattermostPost> {

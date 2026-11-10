@@ -227,6 +227,8 @@ describe('Mattermost posted-message threads', () => {
       '@here @nanoclaw-bot standup',
       '@channel ping @nanoclaw-bot.',
       '@here _@nanoclaw-bot_ standup',
+      '@channel help @nanoclaw-bot-',
+      '@channel ask @nanoclaw-bot-dev',
     ];
 
     // The server lists the bot in `mentions` for each of these.
@@ -245,6 +247,8 @@ describe('Mattermost posted-message threads', () => {
       true,
       true,
       true,
+      true,
+      false,
     ]);
   });
 
