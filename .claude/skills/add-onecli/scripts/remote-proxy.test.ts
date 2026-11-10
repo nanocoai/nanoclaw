@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import os, { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -22,11 +22,19 @@ describe('remote gateway proxy hint', () => {
     [GATEWAY, 'host.docker.internal:10255', 'GATEWAY_BASE_URL=gw.example.com:10255'],
     [GATEWAY, '127.0.0.1:10255', 'GATEWAY_BASE_URL=gw.example.com:10255'],
     [GATEWAY, 'localhost:10255', 'GATEWAY_BASE_URL=gw.example.com:10255'],
+    [GATEWAY, 'localhost.:10255', 'GATEWAY_BASE_URL=gw.example.com:10255'],
+    [GATEWAY, '[::1]:10255', 'GATEWAY_BASE_URL=gw.example.com:10255'],
+    [GATEWAY, '0.0.0.0:10255', 'GATEWAY_BASE_URL=gw.example.com:10255'],
+    [GATEWAY, '[::]:10255', 'GATEWAY_BASE_URL=gw.example.com:10255'],
     [GATEWAY, 'host.docker.internal:20255', 'GATEWAY_BASE_URL=gw.example.com:20255'],
     [GATEWAY, 'gw.example.com:10255', null],
     [GATEWAY, '10.0.0.5:10255', null],
     ['http://127.0.0.1:10254', 'host.docker.internal:10255', null],
     ['http://localhost:10254', 'host.docker.internal:10255', null],
+    ['http://localhost.:10254', 'host.docker.internal:10255', null],
+    ['http://[::1]:10254', 'host.docker.internal:10255', null],
+    ['http://0.0.0.0:10254', 'host.docker.internal:10255', null],
+    ['http://[::]:10254', 'host.docker.internal:10255', null],
     [GATEWAY, null, null],
   ])('gateway %s, proxy %s: %s', (gateway, advertised, line) => {
     const hint = remoteProxyHint(gateway, advertised ? new URL(`http://x:aoc_secret@${advertised}`) : null);
@@ -39,6 +47,24 @@ describe('remote gateway proxy hint', () => {
     expect(hint).toContain('Remote gateway');
     // The proxy URL carries the agent token.
     expect(hint).not.toContain('aoc_secret');
+  });
+
+  it("treats a gateway URL on one of this machine's own addresses as local", () => {
+    const nic = { netmask: '', mac: '00:00:00:00:00:00', internal: false, cidr: null };
+    const spy = vi.spyOn(os, 'networkInterfaces').mockReturnValue({
+      en0: [
+        { ...nic, address: '192.168.1.20', family: 'IPv4' },
+        { ...nic, address: 'fd00::20', family: 'IPv6', scopeid: 0 },
+      ],
+    });
+    try {
+      const proxy = new URL('http://x:t@host.docker.internal:10255');
+      expect(remoteProxyHint('http://192.168.1.20:10254', proxy)).toBeNull();
+      expect(remoteProxyHint('http://[fd00::20]:10254', proxy)).toBeNull();
+      expect(remoteProxyHint('http://192.168.1.21:10254', proxy)).toContain('GATEWAY_BASE_URL=192.168.1.21:10255');
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 

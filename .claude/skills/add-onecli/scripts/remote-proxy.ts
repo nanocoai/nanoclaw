@@ -1,4 +1,6 @@
 /** A remote OneCLI gateway must hand agents its own address as their proxy, or every model call hangs. */
+import os from 'os';
+
 import { readEnvFile } from '../../../../src/env.js';
 
 /** The proxy a gateway hands its default agent, or null when its answer has none. */
@@ -19,14 +21,20 @@ export async function advertisedProxy(
   return typeof raw === 'string' ? new URL(raw) : null;
 }
 
-/** Loopback or localhost: whoever uses it reaches its own machine. */
+/** Loopback, localhost or a wildcard: whoever uses it reaches its own machine. URL writes IPv6 as [::1] and [::]. */
 function ownMachine(hostname: string): boolean {
-  return hostname === 'localhost' || /^127\.\d+\.\d+\.\d+$/.test(hostname);
+  return /^(localhost\.?|127\.\d+\.\d+\.\d+|0\.0\.0\.0|\[::1?\])$/.test(hostname);
+}
+
+/** A gateway URL that names this machine, including one of its own network addresses. */
+function thisMachine(hostname: string): boolean {
+  const own = Object.values(os.networkInterfaces()).flatMap((nics) => nics ?? []);
+  return ownMachine(hostname) || own.some((n) => hostname === (n.family === 'IPv6' ? `[${n.address}]` : n.address));
 }
 
 /** The hint naming the line to set, or null; host and port only, as the proxy URL carries the agent's token. */
 export function remoteProxyHint(gatewayUrl: string, proxy: URL | null): string | null {
-  if (!proxy || ownMachine(new URL(gatewayUrl).hostname)) return null;
+  if (!proxy || thisMachine(new URL(gatewayUrl).hostname)) return null;
   const host = proxy.hostname.toLowerCase();
   if (host !== 'host.docker.internal' && !ownMachine(host)) return null;
   const port = proxy.port || (proxy.protocol === 'https:' ? '443' : '80');
