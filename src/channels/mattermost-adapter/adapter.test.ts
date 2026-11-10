@@ -18,6 +18,7 @@ const USER_ID = '7mx5jdcrnby18yrpnzont8ggwo';
 const CHANNEL_ID = 'tyzg1xpaeinqzypmh6h9j9ysyy';
 const POST_ID = 'mjhbignk4inf7kh9w5wi8snchw';
 const ROOT_ID = 'or6atyakftywuq6jjo44oytu7h';
+const OTHER_BOT_ID = '1g3di8tu4jnxu8zjypnouyo4qo';
 
 function response(payload: unknown, status = 200): Response {
   return new Response(JSON.stringify(payload), {
@@ -45,15 +46,18 @@ function postedEvent(options: {
   id?: string;
   mentions?: string[];
   message?: string;
+  props?: Record<string, string>;
   rootId?: string;
+  userId?: string;
 }): MattermostWebSocketEvent {
   const post: MattermostPost = {
     channel_id: CHANNEL_ID,
     create_at: 1,
     id: options.id ?? POST_ID,
     message: options.message ?? (options.mentions?.includes(BOT_ID) ? '@nanoclaw-bot hello' : 'hello'),
+    ...(options.props ? { props: options.props } : {}),
     ...(options.rootId ? { root_id: options.rootId } : {}),
-    user_id: USER_ID,
+    user_id: options.userId ?? USER_ID,
   };
   return {
     broadcast: { channel_id: CHANNEL_ID },
@@ -79,6 +83,9 @@ async function initializePostedHarness(): Promise<{
     }
     if (url.endsWith(`/users/${USER_ID}`)) {
       return response({ id: USER_ID, is_bot: false, username: 'operator' });
+    }
+    if (url.endsWith(`/users/${OTHER_BOT_ID}`)) {
+      return response({ id: OTHER_BOT_ID, is_bot: true, username: 'other-bot' });
     }
     if (url.endsWith(`/posts/${POST_ID}`)) {
       return response({ channel_id: CHANNEL_ID, create_at: 1, id: POST_ID, message: 'hello', user_id: USER_ID });
@@ -218,6 +225,22 @@ describe('Mattermost posted-message threads', () => {
 
     await vi.waitFor(() => expect(processMessage).toHaveBeenCalledTimes(texts.length));
     expect(processMessage.mock.calls.map((call) => call[2].isMention)).toEqual([false, false, false, true]);
+  });
+
+  it("drops other bots' posts so two agents can't wake each other", async () => {
+    const { adapter, processMessage } = await initializePostedHarness();
+    const id = (i: number) => `${POST_ID.slice(0, 25)}${i}`;
+
+    // Flagged by the server; a bot account without the flag; a person; a webhook.
+    adapter.handleSocketEvent(
+      postedEvent({ id: id(1), props: { from_bot: 'true' }, rootId: ROOT_ID, userId: OTHER_BOT_ID }),
+    );
+    adapter.handleSocketEvent(postedEvent({ id: id(2), rootId: ROOT_ID, userId: OTHER_BOT_ID }));
+    adapter.handleSocketEvent(postedEvent({ id: id(3), rootId: ROOT_ID }));
+    adapter.handleSocketEvent(postedEvent({ id: id(4), props: { from_webhook: 'true' }, rootId: ROOT_ID }));
+
+    await vi.waitFor(() => expect(processMessage).toHaveBeenCalledTimes(2));
+    expect(processMessage.mock.calls.map((call) => call[2].id)).toEqual([id(3), id(4)]);
   });
 
   it('preserves the existing root for a reply that also mentions the bot', async () => {
