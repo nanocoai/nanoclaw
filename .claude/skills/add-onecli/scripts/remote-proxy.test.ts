@@ -20,6 +20,7 @@ describe('remote gateway proxy hint', () => {
   // (gateway, proxy it hands agents) -> the line the hint names, or null for no hint.
   it.each([
     [GATEWAY, 'host.docker.internal:10255', 'GATEWAY_BASE_URL=gw.example.com:10255'],
+    [GATEWAY, 'host.docker.internal.:10255', 'GATEWAY_BASE_URL=gw.example.com:10255'],
     [GATEWAY, '127.0.0.1:10255', 'GATEWAY_BASE_URL=gw.example.com:10255'],
     [GATEWAY, 'localhost:10255', 'GATEWAY_BASE_URL=gw.example.com:10255'],
     [GATEWAY, 'localhost.:10255', 'GATEWAY_BASE_URL=gw.example.com:10255'],

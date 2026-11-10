@@ -42,7 +42,8 @@ function thisMachine(hostname: string): boolean {
 export function remoteProxyHint(gatewayUrl: string, proxy: URL | null): string | null {
   if (!proxy || thisMachine(new URL(gatewayUrl).hostname)) return null;
   const host = proxy.hostname.toLowerCase();
-  if (host !== 'host.docker.internal' && !ownMachine(host)) return null;
+  // URL keeps a trailing dot, and `host.docker.internal.` names the same host.
+  if (host.replace(/\.$/, '') !== 'host.docker.internal' && !ownMachine(host)) return null;
   const port = proxy.port || (proxy.protocol === 'https:' ? '443' : '80');
   return (
     `The remote OneCLI gateway tells agents to use the proxy ${host}:${port}, their own machine, so model calls ` +
