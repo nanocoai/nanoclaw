@@ -82,7 +82,7 @@ const DEFAULT_FETCH_LIMIT = 60;
 const MAX_PAGE_SIZE = 200;
 const MATTERMOST_ID = /^[a-z0-9]{26}$/;
 // Read on plain text, so `_@here_` counts; `@channel-ops` is a user, `@here.` is not.
-const CHANNEL_WIDE_MENTION = /(^|[^\w@])@(?:all|channel|here)(?!\w|[-.]+\w)/i;
+const CHANNEL_WIDE_MENTION = /(^|[^\w@])@(?:all|channel|here)(?![a-z0-9]|[-._]+[a-z0-9])/i;
 
 /**
  * Path segment the NanoClaw host's webhook server routes to this adapter
@@ -877,7 +877,7 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
     // lists the bot for `@channel`, `@all` and `@here`; then only `@bot` counts.
     message.isMention =
       isExplicitMention(event.data, this.botUserId) &&
-      (!CHANNEL_WIDE_MENTION.test(message.text) || this.detectTextMention(post));
+      (!CHANNEL_WIDE_MENTION.test(message.text) || this.mentionsBotHandle(message.text));
 
     void chat.processMessage(this, threadId, message);
   }
@@ -1439,12 +1439,19 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
    * never count as mentions, matching `isExplicitMention`.
    */
   private detectTextMention(post: MattermostPost): boolean {
-    if (!this.userName || this.channelTypes.get(post.channel_id) === 'D') {
+    if (this.channelTypes.get(post.channel_id) === 'D') {
+      return false;
+    }
+    return this.mentionsBotHandle(post.message ?? '');
+  }
+
+  /** `@<bot handle>` in the text. A trailing `.` ends the sentence unless a handle follows (`@bot.dev`). */
+  private mentionsBotHandle(text: string): boolean {
+    if (!this.userName) {
       return false;
     }
     const handle = this.userName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    // A trailing `.` ends the sentence unless a handle follows (`@bot.dev`).
-    return new RegExp(`(^|[^\\w@])@${handle}(?![\\w-]|\\.+[\\w-])`, 'i').test(post.message ?? '');
+    return new RegExp(`(^|[^\\w@])@${handle}(?![\\w-]|\\.+[\\w-])`, 'i').test(text);
   }
 
   private toMessage(post: MattermostPost, threadId: string): Message<MattermostPost> {
