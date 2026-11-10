@@ -236,7 +236,8 @@ describe.skipIf(onGce)('bootstrap (nanoclaw.sh + setup.sh)', { timeout: 30_000 }
 /** Skills whose host-side steps or scripts call jq; the container's own skills and payload code don't count. */
 function skillsRunningJq(): string[] {
   const root = path.join(process.cwd(), '.claude', 'skills');
-  const callsJq = /(^|[|;&(]\s*)jq\s+[-'"]/m;
+  // jq at a line or pipe start, before a flag, a quote or a bare filter like `length`.
+  const callsJq = /(^\s*|[|;&(]\s*)jq\s+[-'".\w$]/m;
   return fs
     .readdirSync(root)
     .filter((skill) => fs.statSync(path.join(root, skill)).isDirectory())
