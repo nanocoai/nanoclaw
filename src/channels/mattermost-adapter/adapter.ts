@@ -81,7 +81,7 @@ const DEFAULT_FETCH_LIMIT = 60;
 /** Mattermost caps `per_page` at 200 on the post endpoints. */
 const MAX_PAGE_SIZE = 200;
 const MATTERMOST_ID = /^[a-z0-9]{26}$/;
-// Read on plain text, so `_@here_` counts; `@channel-ops` is a user, `@here.` is not.
+// Read outside code, so `_@here_` counts; `@channel-ops` is a user, `@here.` is not.
 const CHANNEL_WIDE_MENTION = /(^|[^\w@])@(?:all|channel|here)(?![a-z0-9]|[-._]+[a-z0-9])/i;
 
 /**
@@ -875,9 +875,11 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
     // Mattermost puts the other participant in `data.mentions` on every DM
     // post, so only non-DM channels can report an explicit @-mention. It also
     // lists the bot for `@channel`, `@all` and `@here`; then only `@bot` counts.
+    // Both are read outside code, as the server reads mentions.
+    const mentionText = textOutsideCode(message.formatted);
     message.isMention =
       isExplicitMention(event.data, this.botUserId) &&
-      (!CHANNEL_WIDE_MENTION.test(message.text) || this.mentionsBotHandle(message.text));
+      (!CHANNEL_WIDE_MENTION.test(mentionText) || this.mentionsBotHandle(mentionText));
 
     void chat.processMessage(this, threadId, message);
   }
@@ -1533,6 +1535,33 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
     }
     return { ...attachment, fetchData: () => this.rest.getFile(fileId) };
   }
+}
+
+type MarkdownNode = { type: string; value?: unknown; alt?: unknown; url?: unknown; children?: MarkdownNode[] };
+
+/**
+ * Text of a markdown AST where Mattermost looks for @-mentions, nodes joined
+ * by a space: no code and no bare URLs, but HTML and image alt text (inline
+ * or reference-style) count.
+ */
+function textOutsideCode(node: MarkdownNode): string {
+  if (node.type === 'code' || node.type === 'inlineCode' || isBareUrl(node)) {
+    return '';
+  }
+  if (node.type === 'text' || node.type === 'html') {
+    return typeof node.value === 'string' ? node.value : '';
+  }
+  if (node.type === 'image' || node.type === 'imageReference') {
+    return typeof node.alt === 'string' ? node.alt : '';
+  }
+  return (node.children ?? []).map(textOutsideCode).join(' ');
+}
+
+/** A link whose visible text is its own URL (`https://x/@bot`, `<https://x>`). */
+function isBareUrl(node: MarkdownNode): boolean {
+  const only = node.type === 'link' && node.children?.length === 1 ? node.children[0] : undefined;
+  const text = only?.type === 'text' && typeof only.value === 'string' ? only.value : undefined;
+  return text !== undefined && [text, `http://${text}`, `mailto:${text}`].includes(String(node.url));
 }
 
 /**

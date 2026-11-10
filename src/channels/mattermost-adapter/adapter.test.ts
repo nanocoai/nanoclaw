@@ -234,6 +234,12 @@ describe('Mattermost posted-message threads', () => {
       ['@channel-ops standup', true],
       ['@channel_ops standup', true],
       ['@here.team standup', true],
+      // Mattermost reads no mentions in code, so neither does this check.
+      ['@channel `@nanoclaw-bot` standup', false],
+      ['@here\n\n```\n@nanoclaw-bot\n```', false],
+      ['@here `ls` @nanoclaw-bot', true],
+      ['`@here` standup', true],
+      ['@channel**standup**', false],
     ];
 
     // The server lists the bot in `mentions` for each of these (for the last
