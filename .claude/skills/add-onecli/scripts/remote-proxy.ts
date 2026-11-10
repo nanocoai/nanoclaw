@@ -52,7 +52,12 @@ function thisMachine(hostname: string): boolean {
   } catch {
     return false; // Some sandboxes can't list interfaces; the address checks above still hold.
   }
-  return own.some((n) => hostname === (n.family === 'IPv6' ? `[${n.address}]` : n.address));
+  // URL brackets IPv6 and writes an IPv4 address given in IPv6 form as [::ffff:hex:hex]; compare its spelling.
+  return own.some((n) =>
+    n.family === 'IPv6'
+      ? hostname === `[${n.address}]`
+      : hostname === n.address || hostname === new URL(`http://[::ffff:${n.address}]`).hostname,
+  );
 }
 
 /** The hint naming the line to set, or null; host and port only, as the proxy URL carries the agent's token. */

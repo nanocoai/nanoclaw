@@ -74,6 +74,26 @@ describe('remote gateway proxy hint', () => {
     }
   });
 
+  // (gateway URL, line the hint names or null) with 192.168.1.20 as this machine's only IPv4 address.
+  it.each([
+    ['http://[::ffff:192.168.1.20]:10254', null],
+    ['http://[0:0:0:0:0:ffff:c0a8:114]:10254', null],
+    ['http://[::ffff:192.168.1.21]:10254', 'GATEWAY_BASE_URL=[::ffff:c0a8:115]:10255'],
+    ['http://[::ffff:10.0.0.5]:10254', 'GATEWAY_BASE_URL=[::ffff:a00:5]:10255'],
+  ])('mapped own address: gateway %s, hint %s', (gateway, line) => {
+    const nic = { netmask: '', mac: '00:00:00:00:00:00', internal: false, cidr: null };
+    const spy = vi.spyOn(os, 'networkInterfaces').mockReturnValue({
+      en0: [{ ...nic, address: '192.168.1.20', family: 'IPv4' }],
+    });
+    try {
+      const hint = remoteProxyHint(gateway, new URL('http://x:t@host.docker.internal:10255'));
+      if (line === null) expect(hint).toBeNull();
+      else expect(hint).toContain(line);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("still warns for a remote gateway when this machine's addresses can't be listed", () => {
     const spy = vi.spyOn(os, 'networkInterfaces').mockImplementation(() => {
       throw new Error('uv_interface_addresses failed');
