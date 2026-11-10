@@ -28,8 +28,14 @@ function ownMachine(hostname: string): boolean {
 
 /** A gateway URL that names this machine, including one of its own network addresses. */
 function thisMachine(hostname: string): boolean {
-  const own = Object.values(os.networkInterfaces()).flatMap((nics) => nics ?? []);
-  return ownMachine(hostname) || own.some((n) => hostname === (n.family === 'IPv6' ? `[${n.address}]` : n.address));
+  if (ownMachine(hostname)) return true;
+  let own: os.NetworkInterfaceInfo[];
+  try {
+    own = Object.values(os.networkInterfaces()).flatMap((nics) => nics ?? []);
+  } catch {
+    return false; // Some sandboxes can't list interfaces; the address checks above still hold.
+  }
+  return own.some((n) => hostname === (n.family === 'IPv6' ? `[${n.address}]` : n.address));
 }
 
 /** The hint naming the line to set, or null; host and port only, as the proxy URL carries the agent's token. */

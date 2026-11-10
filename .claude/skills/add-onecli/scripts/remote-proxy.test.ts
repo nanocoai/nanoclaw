@@ -66,6 +66,19 @@ describe('remote gateway proxy hint', () => {
       spy.mockRestore();
     }
   });
+
+  it("still warns for a remote gateway when this machine's addresses can't be listed", () => {
+    const spy = vi.spyOn(os, 'networkInterfaces').mockImplementation(() => {
+      throw new Error('uv_interface_addresses failed');
+    });
+    try {
+      const proxy = new URL('http://x:t@host.docker.internal:10255');
+      expect(remoteProxyHint(GATEWAY, proxy)).toContain('GATEWAY_BASE_URL=gw.example.com:10255');
+      expect(remoteProxyHint('http://127.0.0.1:10254', proxy)).toBeNull();
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
 
 describe('advertised proxy', () => {
