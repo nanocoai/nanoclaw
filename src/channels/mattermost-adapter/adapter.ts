@@ -81,6 +81,7 @@ const DEFAULT_FETCH_LIMIT = 60;
 /** Mattermost caps `per_page` at 200 on the post endpoints. */
 const MAX_PAGE_SIZE = 200;
 const MATTERMOST_ID = /^[a-z0-9]{26}$/;
+const CHANNEL_WIDE_MENTION = /(^|[^\w@])@(?:all|channel|here)(?![\w-])/i;
 
 /**
  * Path segment the NanoClaw host's webhook server routes to this adapter
@@ -864,8 +865,11 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
     const threadId = threadIdForPost(post, !isDirect);
     const message = this.toMessage(post, threadId);
     // Mattermost puts the other participant in `data.mentions` on every DM
-    // post, so only non-DM channels can report an explicit @-mention.
-    message.isMention = isExplicitMention(event.data, this.botUserId);
+    // post, so only non-DM channels can report an explicit @-mention. It also
+    // lists the bot for `@channel`, `@all` and `@here`; then only `@bot` counts.
+    message.isMention =
+      isExplicitMention(event.data, this.botUserId) &&
+      (!CHANNEL_WIDE_MENTION.test(post.message ?? '') || this.detectTextMention(post));
 
     void chat.processMessage(this, threadId, message);
   }

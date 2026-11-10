@@ -44,13 +44,14 @@ function postedEvent(options: {
   channelType?: 'D' | 'O';
   id?: string;
   mentions?: string[];
+  message?: string;
   rootId?: string;
 }): MattermostWebSocketEvent {
   const post: MattermostPost = {
     channel_id: CHANNEL_ID,
     create_at: 1,
     id: options.id ?? POST_ID,
-    message: options.mentions?.includes(BOT_ID) ? '@nanoclaw-bot hello' : 'hello',
+    message: options.message ?? (options.mentions?.includes(BOT_ID) ? '@nanoclaw-bot hello' : 'hello'),
     ...(options.rootId ? { root_id: options.rootId } : {}),
     user_id: USER_ID,
   };
@@ -204,6 +205,19 @@ describe('Mattermost posted-message threads', () => {
         threadId: `mattermost:${CHANNEL_ID}`,
       }),
     );
+  });
+
+  it('does not count @channel, @all or @here as a mention of the bot', async () => {
+    const { adapter, processMessage } = await initializePostedHarness();
+    const texts = ['@channel standup', '@ALL standup', 'standup @here.', '@here @nanoclaw-bot standup'];
+
+    // The server lists the bot in `mentions` for each of these.
+    texts.forEach((message, i) =>
+      adapter.handleSocketEvent(postedEvent({ id: `${POST_ID.slice(0, 25)}${i}`, mentions: [BOT_ID], message })),
+    );
+
+    await vi.waitFor(() => expect(processMessage).toHaveBeenCalledTimes(texts.length));
+    expect(processMessage.mock.calls.map((call) => call[2].isMention)).toEqual([false, false, false, true]);
   });
 
   it('preserves the existing root for a reply that also mentions the bot', async () => {
