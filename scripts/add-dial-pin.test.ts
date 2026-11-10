@@ -9,6 +9,7 @@ import { parseDirectives } from './skill-directives.js';
 
 const realJq = spawnSync('sh', ['-c', 'command -v jq'], { encoding: 'utf8' }).stdout.trim();
 const hasJq = realJq !== '';
+const realMv = spawnSync('sh', ['-c', 'command -v mv'], { encoding: 'utf8' }).stdout.trim();
 
 // The pin rewrites the Dial auth file, which holds the account's token, so
 // the rewrite must never sit on disk readable by other users.
@@ -36,11 +37,24 @@ describe.skipIf(!hasJq)('Dial default-sender pin', () => {
       // Records the umask each jq runs under; the last run writes the new file.
       const jq = `#!/bin/sh\numask > '${dir}/umask'\nexec '${realJq}' "$@"\n`;
       fs.writeFileSync(path.join(bin, 'jq'), jq, { mode: 0o755 });
-      const r = spawnSync('bash', ['-c', cmd], {
+      // Records the new file's mode as it is moved into place, before the
+      // step's trailing chmod can hide a file that was created loose.
+      const srcMode = `(require('fs').statSync(process.argv.at(-2)).mode & 0o777).toString(8)`;
+      const mv = [
+        '#!/bin/sh',
+        `'${process.execPath}' -p "${srcMode}" -- "$@" > '${dir}/mode'`,
+        `exec '${realMv}' "$@"`,
+        '',
+      ].join('\n');
+      fs.writeFileSync(path.join(bin, 'mv'), mv, { mode: 0o755 });
+      // A loose umask, so the result does not depend on the runner's own.
+      const r = spawnSync('bash', ['-c', `umask 022; ${cmd}`], {
         env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, XDG_DATA_HOME: dir },
         encoding: 'utf8',
       });
       expect(r.stdout.trim()).toBe('default sender pinned to +15551234567');
+      expect(fs.readFileSync(path.join(dir, 'mode'), 'utf8').trim()).toBe('600');
+      expect((fs.statSync(auth).mode & 0o777).toString(8)).toBe('600');
       expect(fs.readFileSync(path.join(dir, 'umask'), 'utf8').trim()).toBe('0077');
       expect(JSON.parse(fs.readFileSync(auth, 'utf8'))).toEqual({
         token: 'secret',
