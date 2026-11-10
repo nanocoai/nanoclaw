@@ -217,39 +217,36 @@ describe('Mattermost posted-message threads', () => {
 
   it('does not count @channel, @all or @here as a mention of the bot', async () => {
     const { adapter, processMessage } = await initializePostedHarness();
-    const texts = [
-      '@channel standup',
-      '@ALL standup',
-      'standup @here.',
-      '_@here_ standup',
-      '@channel- standup',
-      '@channel_ standup',
-      '@here @nanoclaw-bot standup',
-      '@channel ping @nanoclaw-bot.',
-      '@here _@nanoclaw-bot_ standup',
-      '@channel help @nanoclaw-bot-',
-      '@channel ask @nanoclaw-bot-dev',
+    const cases: [text: string, isMention: boolean][] = [
+      ['@channel standup', false],
+      ['@ALL standup', false],
+      ['standup @here.', false],
+      ['_@here_ standup', false],
+      ['@channel- standup', false],
+      ['@channel_ standup', false],
+      ['@here @nanoclaw-bot standup', true],
+      ['@channel ping @nanoclaw-bot.', true],
+      ['@here _@nanoclaw-bot_ standup', true],
+      ['@channel help @nanoclaw-bot-', true],
+      ['@channel ask @nanoclaw-bot-dev', false],
+      // Handles that only start with a keyword are people, not a broadcast.
+      ['@allison standup', true],
+      ['@channel-ops standup', true],
+      ['@channel_ops standup', true],
+      ['@here.team standup', true],
     ];
 
-    // The server lists the bot in `mentions` for each of these.
-    texts.forEach((message, i) =>
-      adapter.handleSocketEvent(postedEvent({ id: `${POST_ID.slice(0, 25)}${i}`, mentions: [BOT_ID], message })),
+    // The server lists the bot in `mentions` for each of these (for the last
+    // rows, through a group the bot is in).
+    cases.forEach(([message], i) =>
+      adapter.handleSocketEvent(
+        postedEvent({ id: `${POST_ID.slice(0, 24)}${String(i).padStart(2, '0')}`, mentions: [BOT_ID], message }),
+      ),
     );
 
-    await vi.waitFor(() => expect(processMessage).toHaveBeenCalledTimes(texts.length));
-    expect(processMessage.mock.calls.map((call) => call[2].isMention)).toEqual([
-      false,
-      false,
-      false,
-      false,
-      false,
-      false,
-      true,
-      true,
-      true,
-      true,
-      false,
-    ]);
+    await vi.waitFor(() => expect(processMessage).toHaveBeenCalledTimes(cases.length));
+    // Frames are processed in order, so call i belongs to case i.
+    expect(processMessage.mock.calls.map((call, i) => [cases[i][0], call[2].isMention])).toEqual(cases);
   });
 
   it("drops other bots' posts so two agents can't wake each other", async () => {
