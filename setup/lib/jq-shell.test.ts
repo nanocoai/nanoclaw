@@ -20,8 +20,10 @@ interface Machine {
   jq?: boolean;
   /** Whether sudo -n works (a cached or passwordless sudo), or no sudo at all. */
   sudo?: 'cached' | 'password';
-  /** apt-get can't find jq until `apt-get update` runs (a fresh distro). */
+  /** The manager can't find jq until it refreshes its lists (`apt-get update`, `pacman -Sy…`). */
   staleLists?: boolean;
+  /** pacman's sync databases exist, i.e. it has synced before. */
+  pacmanSynced?: boolean;
 }
 
 let dir: string;
@@ -48,11 +50,16 @@ function stubs(m: Machine): { bin: string; log: string } {
       m.pkg,
       [
         `echo "${m.pkg} $*" >> '${log}'`,
-        `case "$*" in *update*) : > '${dir}/updated'; exit 0 ;; esac`,
+        `case "$*" in *update*) : > '${dir}/updated'; exit 0 ;; -Sy*) : > '${dir}/updated' ;; esac`,
         m.staleLists ? `[ -e '${dir}/updated' ] || exit 100` : '',
         `printf '#!/bin/sh\\n' > '${bin}/jq' && /bin/chmod +x '${bin}/jq'`,
       ].join('\n'),
     );
+  }
+  if (m.pkg === 'pacman') {
+    fs.mkdirSync(path.join(dir, 'pacman', 'sync'), { recursive: true });
+    if (m.pacmanSynced) fs.writeFileSync(path.join(dir, 'pacman', 'sync', 'core.db'), '');
+    stub('pacman-conf', `[ "$1" = DBPath ] && echo '${dir}/pacman/'`);
   }
   if (m.sudo) {
     stub(
@@ -103,6 +110,23 @@ describe('jq install (setup/lib/jq.sh)', { timeout: 20_000 }, () => {
       'apt-get update -qq',
       'apt-get install -y -qq jq',
     ]);
+  });
+
+  // A never-synced pacman has no lists, and -Sy alone would be an Arch partial upgrade.
+  it('syncs a never-synced pacman with a full -Syu, then installs jq', () => {
+    const r = run({ pkg: 'pacman', sudo: 'cached', staleLists: true });
+    expect(r.rc).toBe(0);
+    expect(r.log.filter((l) => l.startsWith('pacman'))).toEqual([
+      'pacman -S --noconfirm --needed jq',
+      'pacman -Syu --noconfirm --needed jq',
+    ]);
+    expect(r.log).toContain('sudo -n pacman -Syu --noconfirm --needed jq');
+  });
+
+  it('never upgrades a pacman system that has synced before', () => {
+    const r = run({ pkg: 'pacman', sudo: 'cached', staleLists: true, pacmanSynced: true });
+    expect(r.rc).toBe(1);
+    expect(r.log.filter((l) => l.startsWith('pacman'))).toEqual(['pacman -S --noconfirm --needed jq']);
   });
 
   // A stub can't check a manager's flags, only that setup finds it and runs it with sudo -n.
@@ -199,4 +223,28 @@ describe.skipIf(onGce)('bootstrap (nanoclaw.sh + setup.sh)', { timeout: 30_000 }
     expect(r.jqOk).toBe('false');
     expect(r.out).toMatch(/Basics ready.*\n.*Couldn't install jq\./);
   });
+
+  it('names skills in the note only as examples when more skills run jq', () => {
+    const note = /Couldn't install jq\..*/.exec(bootstrap({}).out)?.[0] ?? '';
+    const users = skillsRunningJq();
+    const named = users.filter((skill) => new RegExp(`\\b${skill.replace(/^add-/, '')}\\b`, 'i').test(note));
+    expect(named.length).toBeGreaterThan(0);
+    expect(named.length === users.length || /\bincluding\b/.test(note), `${note}\njq skills: ${users}`).toBe(true);
+  });
 });
+
+/** Skills whose host-side steps or scripts call jq; the container's own skills and payload code don't count. */
+function skillsRunningJq(): string[] {
+  const root = path.join(process.cwd(), '.claude', 'skills');
+  const callsJq = /(^|[|;&(]\s*)jq\s+[-'"]/m;
+  return fs
+    .readdirSync(root)
+    .filter((skill) => fs.statSync(path.join(root, skill)).isDirectory())
+    .filter((skill) =>
+      (fs.readdirSync(path.join(root, skill), { recursive: true }) as string[]).some((file) => {
+        const full = path.join(root, skill, file);
+        if (!/\.(md|sh)$/.test(file) || /^(container-skills|payload)\//.test(file)) return false;
+        return fs.statSync(full).isFile() && callsJq.test(fs.readFileSync(full, 'utf8'));
+      }),
+    );
+}

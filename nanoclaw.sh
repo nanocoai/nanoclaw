@@ -416,9 +416,9 @@ BOOTSTRAP_DUR=$(( $(date +%s) - BOOTSTRAP_START ))
 if [ "$BOOTSTRAP_RC" -eq 0 ]; then
   spinner_success "Basics ready" "$BOOTSTRAP_DUR"
   write_bootstrap_entry success "$BOOTSTRAP_DUR" "$BOOTSTRAP_RAW"
-  # Only channel skills need jq, so setup carries on; say it now, not at the first one.
+  # Only skills need jq, so setup carries on; say it now, not at the first one.
   if [ "$(grep_field JQ_OK "$BOOTSTRAP_RAW")" = "false" ]; then
-    printf '  %s\n' "$(dim "Couldn't install jq. Adding Slack, Discord, Telegram, Teams or Dial needs it, so install jq first.")"
+    printf '  %s\n' "$(dim "Couldn't install jq. Many skills need it, including Slack, Discord, Telegram, Teams and Dial, so install jq first.")"
   fi
 else
   spinner_failure "Couldn't install the basics" "$BOOTSTRAP_DUR"

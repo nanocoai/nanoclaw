@@ -35,6 +35,17 @@ jq_needs_sudo() {
   [ -n "$(jq_install_command)" ]
 }
 
+# True when pacman has never synced its package lists (container and cloud images).
+pacman_never_synced() {
+  local db dir
+  dir=$(pacman-conf DBPath 2>/dev/null) || true
+  dir=${dir:-/var/lib/pacman}
+  for db in "${dir%/}"/sync/*.db; do
+    [ -e "$db" ] && return 1
+  done
+  return 0
+}
+
 # Installs jq when missing; returns 1 when it is still missing. Never prompts:
 # its output goes to a log behind a spinner, so sudo runs with -n and reuses
 # the password nanoclaw.sh's pre-flight asked for.
@@ -52,6 +63,9 @@ ensure_jq() {
     # A fresh distro can have empty package lists: refresh once and retry.
     case "$cmd" in
       apt-get*) $sudo apt-get update -qq && $sudo env DEBIAN_FRONTEND=noninteractive $cmd || return 1 ;;
+      # pacman -Sy alone is a partial upgrade, which Arch doesn't support: sync with a full -Syu,
+      # and only on a host that never synced, so setup never upgrades a system someone maintains.
+      pacman*) pacman_never_synced && $sudo pacman -Syu --noconfirm --needed jq || return 1 ;;
       *) return 1 ;;
     esac
   fi
