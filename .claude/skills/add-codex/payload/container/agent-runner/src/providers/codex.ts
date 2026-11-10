@@ -1,6 +1,3 @@
-import fs from 'fs';
-import path from 'path';
-
 // This module never imports the runtime contract (provider-contracts/codex.ts):
 // registration is two-step, so it compiles and runs on a core that predates the
 // contract seam. The contract attaches itself through registerProviderContract.
@@ -158,6 +155,25 @@ export class CodexProvider implements AgentProvider {
       wake();
     };
 
+    // An image note belongs to the turn that made the image, which the event
+    // names (a sub-agent's turn/started can move activeTurnId); a sub-agent's
+    // image is noted in its own turn, so only a sub-agent that can send_file
+    // delivers it. Never queued as a new turn: the runner never asked for one.
+    const steerImageNote = (savedPath: string, threadId: string, turnId: string): void => {
+      if (!activeServer) {
+        console.error(`[codex] image note dropped, query ended: ${savedPath}`);
+        return;
+      }
+      const note = codexImageSavedNote(savedPath);
+      void this.runtime.steerCodexTurn(activeServer, threadId, turnId, note).then(
+        () => console.error(`[codex] image note steered: ${savedPath}`),
+        (err) =>
+          console.error(
+            `[codex] image note dropped: ${savedPath}: ${err instanceof Error ? err.message : String(err)}`,
+          ),
+      );
+    };
+
     const self = this;
 
     async function* gen(): AsyncGenerator<ProviderEvent> {
@@ -216,6 +232,7 @@ export class CodexProvider implements AgentProvider {
               wakeActiveTurn = waker;
             },
             self.runtime.startCodexTurn,
+            steerImageNote,
           );
         }
       } finally {
@@ -260,6 +277,7 @@ async function* runOneTurn(
   isAborted: () => boolean,
   setAbortWaker: (waker: (() => void) | null) => void,
   startTurn: typeof startCodexTurn,
+  onImageSaved: (savedPath: string, threadId: string, turnId: string) => void,
 ): AsyncGenerator<ProviderEvent> {
   const state: { error: Error | null } = { error: null };
   let resultText = '';
@@ -312,8 +330,12 @@ async function* runOneTurn(
         break;
       }
       case 'item/completed': {
-        const item = params.item as { type?: string; text?: string } | undefined;
+        const item = params.item as { type?: string; text?: string; savedPath?: string } | undefined;
         if (item?.type === 'agentMessage' && item.text) resultText = item.text;
+        const { threadId: itemThread, turnId: itemTurn } = params as { threadId?: string; turnId?: string };
+        if (item?.type === 'imageGeneration' && item.savedPath && itemThread && itemTurn) {
+          onImageSaved(item.savedPath, itemThread, itemTurn);
+        }
         break;
       }
       case 'thread/status/changed': {
@@ -383,7 +405,6 @@ async function* runOneTurn(
       cwd,
     });
     setActiveTurn(turnId);
-    const imagesBefore = listGeneratedImages(threadId);
     if (isAborted()) return;
 
     while (true) {
@@ -411,12 +432,6 @@ async function* runOneTurn(
       throw state.error;
     }
 
-    for (const imagePath of listGeneratedImages(threadId)) {
-      if (!imagesBefore.has(imagePath)) {
-        yield { type: 'file', path: imagePath };
-      }
-    }
-
     yield { type: 'result', text: resultText || null };
   } finally {
     clearTimeout(timer);
@@ -430,19 +445,16 @@ async function* runOneTurn(
 }
 
 /**
- * Codex's built-in image generation saves into CODEX_HOME/generated_images/
- * <threadId>/ — its native client renders those to the user, so the model
- * believes delivery already happened and won't send_file them. The runner
- * must deliver them itself: snapshot the dir at turn start, emit a `file`
- * event for anything new at turn end.
+ * Codex's native clients show a generated image to the user, so the model
+ * believes it was delivered and never sends it. Steered into the same turn,
+ * this note gives the agent the saved path; the agent sends the file with
+ * send_file to whoever asked, like any other file.
  */
-function listGeneratedImages(threadId: string): Set<string> {
-  const dir = path.join(process.env.CODEX_HOME || '/home/node/.codex', 'generated_images', threadId);
-  try {
-    return new Set(fs.readdirSync(dir).map((f) => path.join(dir, f)));
-  } catch {
-    return new Set();
-  }
+export function codexImageSavedNote(savedPath: string): string {
+  return (
+    `<system>Your image generation tool saved ${savedPath}. ` +
+    'The user has not seen it: send it with send_file to whoever asked for it.</system>'
+  );
 }
 
 // Function-form registration only — the one shape both core generations

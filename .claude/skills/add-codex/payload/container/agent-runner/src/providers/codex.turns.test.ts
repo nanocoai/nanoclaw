@@ -1,9 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import fs from 'fs';
-import os from 'os';
-import path from 'path';
 
-import { CodexProvider, type CodexRuntimeDeps } from './codex.js';
+import { CodexProvider, codexImageSavedNote, type CodexRuntimeDeps } from './codex.js';
 import type { AppServer, JsonRpcNotification, TurnParams } from './codex-app-server.js';
 import type { ProviderEvent } from './types.js';
 
@@ -140,37 +137,76 @@ describe('CodexProvider active turns', () => {
     expect(events.filter((event) => event.type === 'result')).toEqual([{ type: 'result', text: 'final answer' }]);
   });
 
-  it('delivers harness-generated images as file events — the model never sends them itself', async () => {
-    const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-home-'));
-    const prevHome = process.env.CODEX_HOME;
-    process.env.CODEX_HOME = codexHome;
-    try {
-      const fake = createFakeCodexRuntime();
-      const provider = createCodexProvider({}, fake.runtime);
-      const query = provider.query({ prompt: 'make an image', cwd: '/workspace/agent' });
-      const events: ProviderEvent[] = [];
-      const collect = collectEvents(query.events, events);
+  it('tells the agent mid-turn where a generated image is saved, so it sends the file itself', async () => {
+    const fake = createFakeCodexRuntime();
+    const provider = createCodexProvider({}, fake.runtime);
+    const query = provider.query({ prompt: 'make an image', cwd: '/workspace/agent' });
+    const events: ProviderEvent[] = [];
+    const collect = collectEvents(query.events, events);
 
-      await waitFor(() => fake.startCalls.length === 1);
-      // Codex's built-in image_gen writes into CODEX_HOME mid-turn.
-      const imagesDir = path.join(codexHome, 'generated_images', 'thread-1');
-      fs.mkdirSync(imagesDir, { recursive: true });
-      fs.writeFileSync(path.join(imagesDir, 'ig_abc.png'), 'png-bytes');
+    await waitFor(() => fake.startCalls.length === 1);
+    // Codex's built-in image tool reports each saved image mid-turn; one that
+    // failed to save has no path and gets no note. A sub-agent's turn/started
+    // arrives on the same connection, so the note must follow the image's own
+    // thread and turn, not the last turn started.
+    const savedPath = '/home/node/.codex/generated_images/thread-1/ig_abc.png';
+    fake.notify('turn/started', { threadId: 'child-thread', turn: { id: 'child-turn' } });
+    fake.notify('item/completed', {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      item: { type: 'imageGeneration', status: 'failed' },
+    });
+    fake.notify('item/completed', {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      item: { type: 'imageGeneration', status: 'completed', savedPath },
+    });
+    // A sub-agent's image is noted in the sub-agent's own turn.
+    const childPath = '/home/node/.codex/generated_images/child-thread/ig_def.png';
+    fake.notify('item/completed', {
+      threadId: 'child-thread',
+      turnId: 'child-turn',
+      item: { type: 'imageGeneration', status: 'completed', savedPath: childPath },
+    });
+    await waitFor(() => fake.steerCalls.length === 2);
 
-      query.end();
-      fake.completeTurn('Here you go — created the image.');
-      await collect;
+    query.end();
+    fake.completeTurn('Sent it.');
+    await collect;
 
-      const files = events.filter((event) => event.type === 'file') as Array<{ type: 'file'; path: string }>;
-      expect(files).toHaveLength(1);
-      expect(files[0].path).toBe(path.join(imagesDir, 'ig_abc.png'));
-      // file events arrive before the result so delivery shares the turn.
-      expect(events.findIndex((e) => e.type === 'file')).toBeLessThan(events.findIndex((e) => e.type === 'result'));
-    } finally {
-      if (prevHome === undefined) delete process.env.CODEX_HOME;
-      else process.env.CODEX_HOME = prevHome;
-      fs.rmSync(codexHome, { recursive: true, force: true });
-    }
+    expect(fake.steerCalls).toEqual([
+      { threadId: 'thread-1', turnId: 'turn-1', inputText: codexImageSavedNote(savedPath) },
+      { threadId: 'child-thread', turnId: 'child-turn', inputText: codexImageSavedNote(childPath) },
+    ]);
+    expect(codexImageSavedNote(savedPath)).toContain(savedPath);
+    expect(codexImageSavedNote(savedPath)).toContain('send_file');
+    expect(fake.startCalls).toHaveLength(1);
+    expect(events.filter((event) => event.type === 'result')).toEqual([{ type: 'result', text: 'Sent it.' }]);
+  });
+
+  it('drops an image note it cannot steer instead of starting a turn the runner never asked for', async () => {
+    const fake = createFakeCodexRuntime({ rejectSteer: true });
+    const provider = createCodexProvider({}, fake.runtime);
+    const query = provider.query({ prompt: 'make an image', cwd: '/workspace/agent' });
+    const events: ProviderEvent[] = [];
+    const collect = collectEvents(query.events, events);
+
+    await waitFor(() => fake.startCalls.length === 1);
+    const savedPath = '/home/node/.codex/generated_images/thread-1/ig_abc.png';
+    fake.notify('item/completed', {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      item: { type: 'imageGeneration', status: 'completed', savedPath },
+    });
+    await waitFor(() => fake.steerCalls.length === 1);
+    await sleep(0);
+
+    query.end();
+    fake.completeTurn('Done.');
+    await collect;
+
+    expect(fake.startCalls).toHaveLength(1);
+    expect(events.filter((event) => event.type === 'result')).toEqual([{ type: 'result', text: 'Done.' }]);
   });
 
   it('ends the turn immediately with the real cause when the app-server dies mid-turn', async () => {
@@ -240,6 +276,7 @@ function createFakeCodexRuntime(opts: { rejectSteer?: boolean } = {}) {
     get killed() {
       return killed;
     },
+    notify,
     completeTurn(text: string) {
       notify('turn/completed', { turn: { items: [{ type: 'agentMessage', text }] } });
     },

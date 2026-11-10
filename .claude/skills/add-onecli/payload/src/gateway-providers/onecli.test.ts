@@ -727,7 +727,11 @@ describe('OneCLI gateway package', () => {
       OPENAI_API_KEY: null,
       tokens: {
         id_token: `${encode({ alg: 'HS256' })}.${encode({
-          'https://api.openai.com/auth': { chatgpt_account_id: 'onecli-managed' },
+          'https://api.openai.com/auth': {
+            chatgpt_plan_type: 'free',
+            chatgpt_user_id: 'onecli-managed',
+            chatgpt_account_id: 'onecli-managed',
+          },
         })}.c2ln`,
         access_token: 'onecli-managed',
         refresh_token: 'onecli-managed',
@@ -748,6 +752,10 @@ describe('OneCLI gateway package', () => {
           'utf8',
         ),
       );
+    const authClaims = (staged: { tokens: { id_token: string } }) =>
+      JSON.parse(Buffer.from(staged.tokens.id_token.split('.')[1], 'base64url').toString())[
+        'https://api.openai.com/auth'
+      ];
 
     it('stages the stored login workspace id from OneCLI secret metadata', async () => {
       withStub();
@@ -767,6 +775,8 @@ describe('OneCLI gateway package', () => {
         const staged = stagedStub(lease);
         expect(staged.tokens.account_id).toBe('ws-real-1');
         expect(staged.tokens.access_token).toBe('onecli-managed');
+        // A made-up free plan hides plan-gated tools such as image generation.
+        expect(authClaims(staged)).toEqual({ chatgpt_user_id: 'onecli-managed', chatgpt_account_id: 'ws-real-1' });
       } finally {
         controller.abort();
         fetchMock.mockRestore();
@@ -800,6 +810,7 @@ describe('OneCLI gateway package', () => {
         try {
           const lease = await provider.sessions.ensure(input('s1'), controller.signal);
           expect(stagedStub(lease).tokens.account_id).toBe('onecli-managed');
+          expect(authClaims(stagedStub(lease))).not.toHaveProperty('chatgpt_plan_type');
           expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('placeholder account id'), expect.anything());
         } finally {
           controller.abort();
