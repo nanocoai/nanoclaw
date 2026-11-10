@@ -21,9 +21,14 @@ export async function advertisedProxy(
   return typeof raw === 'string' ? new URL(raw) : null;
 }
 
-/** Loopback, localhost or a wildcard: whoever uses it reaches its own machine. URL writes IPv6 as [::1] and [::]. */
+/**
+ * Loopback, localhost or a wildcard: whoever uses it reaches its own machine. URL writes IPv6 as [::1] and [::],
+ * and an IPv4-mapped 127.x as [::ffff:7fxx:yyyy].
+ */
 function ownMachine(hostname: string): boolean {
-  return /^(localhost\.?|127\.\d+\.\d+\.\d+|0\.0\.0\.0|\[::1?\])$/.test(hostname);
+  return /^(localhost\.?|127\.\d+\.\d+\.\d+|0\.0\.0\.0|\[::1?\]|\[::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}\])$/.test(
+    hostname,
+  );
 }
 
 /**

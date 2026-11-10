@@ -27,6 +27,9 @@ describe('remote gateway proxy hint', () => {
     [GATEWAY, '[::1]:10255', 'GATEWAY_BASE_URL=gw.example.com:10255'],
     [GATEWAY, '0.0.0.0:10255', 'GATEWAY_BASE_URL=gw.example.com:10255'],
     [GATEWAY, '[::]:10255', 'GATEWAY_BASE_URL=gw.example.com:10255'],
+    [GATEWAY, '[::ffff:127.0.0.1]:10255', 'GATEWAY_BASE_URL=gw.example.com:10255'],
+    [GATEWAY, '[::ffff:127.1.2.3]:10255', 'GATEWAY_BASE_URL=gw.example.com:10255'],
+    [GATEWAY, '[::ffff:10.0.0.5]:10255', null],
     [GATEWAY, 'host.docker.internal:20255', 'GATEWAY_BASE_URL=gw.example.com:20255'],
     [GATEWAY, 'gw.example.com:10255', null],
     [GATEWAY, '10.0.0.5:10255', null],
@@ -36,6 +39,7 @@ describe('remote gateway proxy hint', () => {
     ['http://[::1]:10254', 'host.docker.internal:10255', null],
     ['http://0.0.0.0:10254', 'host.docker.internal:10255', null],
     ['http://[::]:10254', 'host.docker.internal:10255', null],
+    ['http://[::ffff:127.0.0.1]:10254', 'host.docker.internal:10255', null],
     [GATEWAY, null, null],
   ])('gateway %s, proxy %s: %s', (gateway, advertised, line) => {
     const hint = remoteProxyHint(gateway, advertised ? new URL(`http://x:aoc_secret@${advertised}`) : null);
