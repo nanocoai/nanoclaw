@@ -113,4 +113,15 @@ describe('escapeTelegramCardText', () => {
       expect(escapeTelegramCardText(text)).toBe(text);
     }
   });
+
+  // The old pattern took about 15 s on each line below, so the test timeout
+  // (5 s) catches a return of the backtracking; the fixed one takes under 1 ms.
+  it('checks a long line full of spaces without backtracking', () => {
+    const pad = ' '.repeat(3000);
+    for (const text of [`${pad}-${pad}x`, `>${pad}-${pad}x`]) {
+      expect(escapeTelegramCardText(text)).toBe(text);
+    }
+    const row = `>${pad}|${' - |'.repeat(1500)}${pad}`;
+    expect(escapeTelegramCardText(row)).toBe(row.replace('-', '‑'));
+  });
 });
