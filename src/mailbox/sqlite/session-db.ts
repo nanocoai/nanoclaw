@@ -309,6 +309,8 @@ export function migrateMessagesInTable(db: Database.Database): void {
     // All existing rows are normal messages, so default 0.
     db.prepare('ALTER TABLE messages_in ADD COLUMN on_wake INTEGER NOT NULL DEFAULT 0').run();
   }
+  // Inboxes created before this index existed (see INBOUND_SCHEMA).
+  db.prepare('CREATE INDEX IF NOT EXISTS idx_messages_in_trigger_seq ON messages_in("trigger", seq)').run();
 }
 
 /**
