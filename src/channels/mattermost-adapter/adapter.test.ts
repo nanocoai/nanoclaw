@@ -812,6 +812,8 @@ describe('Mattermost mention detection', () => {
     '```\n@nanoclaw',
     'ask @nanoclaw.dev instead',
     'ask @nanoclaw..dev instead',
+    'mail josé@nanoclaw',
+    'ask @nanoclawé instead',
     'https://example.org/@nanoclaw',
     '<https://example.org/@nanoclaw>',
   ])('ignores code and other handles in a group message: %s', async (text) => {

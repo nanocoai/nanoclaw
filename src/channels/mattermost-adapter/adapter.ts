@@ -1452,13 +1452,15 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
   /**
    * `@<bot handle>` in the text. Trailing `.`, `-` or `_` is punctuation, as
    * for Mattermost, unless more handle follows (`@bot-dev` is someone else).
+   * Any Unicode letter or digit joins the word, as in Mattermost's parser, so
+   * `josé@bot` and `@boté` are not the bot.
    */
   private mentionsBotHandle(text: string): boolean {
     if (!this.userName) {
       return false;
     }
     const handle = this.userName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    return new RegExp(`(^|[^\\w@])@${handle}(?![a-z0-9]|[-._]+[a-z0-9])`, 'i').test(text);
+    return new RegExp(`(^|[^\\p{L}\\p{N}_@])@${handle}(?![\\p{L}\\p{N}]|[-._]+[\\p{L}\\p{N}])`, 'iu').test(text);
   }
 
   private toMessage(post: MattermostPost, threadId: string): Message<MattermostPost> {
