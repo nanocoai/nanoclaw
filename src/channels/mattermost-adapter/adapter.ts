@@ -861,9 +861,10 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
     // the display name or bot flag, and the host bylines messages with the
     // former. Failure is tolerated — the handle is still a fine name.
     await this.ensureUserResolved(post.user_id);
-    // As on Slack, other bots' posts never reach the router: two agents in one
-    // followed thread would wake each other in a loop. A webhook owned by a
-    // person posts without `from_bot`, so it still passes.
+    // As on Slack, other bots' posts never reach the router, even when they
+    // @mention the bot: agents name each other when they reply, so two in one
+    // thread would wake each other in a loop. A webhook owned by a person
+    // posts without `from_bot`, so it still passes.
     if (post.props?.from_bot === 'true' || this.users.get(post.user_id)?.isBot === true) {
       this.logger.info('Mattermost WS: post from another bot dropped', { userId: post.user_id });
       return;

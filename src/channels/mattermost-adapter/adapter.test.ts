@@ -260,11 +260,14 @@ describe('Mattermost posted-message threads', () => {
     const id = (i: number) => `${POST_ID.slice(0, 25)}${i}`;
 
     // Flagged by the server (profile lookup fails); a bot account without the
-    // flag; a person; a person's webhook.
+    // flag; a bot that @mentions this bot; a person; a person's webhook.
     adapter.handleSocketEvent(
       postedEvent({ id: id(1), props: { from_bot: 'true' }, rootId: ROOT_ID, userId: UNKNOWN_USER_ID }),
     );
     adapter.handleSocketEvent(postedEvent({ id: id(2), rootId: ROOT_ID, userId: OTHER_BOT_ID }));
+    adapter.handleSocketEvent(
+      postedEvent({ id: id(5), mentions: [BOT_ID], props: { from_bot: 'true' }, userId: OTHER_BOT_ID }),
+    );
     adapter.handleSocketEvent(postedEvent({ id: id(3), rootId: ROOT_ID }));
     adapter.handleSocketEvent(postedEvent({ id: id(4), props: { from_webhook: 'true' }, rootId: ROOT_ID }));
 
