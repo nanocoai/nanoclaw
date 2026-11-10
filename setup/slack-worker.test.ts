@@ -375,3 +375,16 @@ it('the sanitizer drops token shapes, the job secrets and newlines', () => {
   expect(reason).toBe('line one SLACK_APP_TOKEN=[REDACTED] token [REDACTED] Bearer [REDACTED] done');
   expect(slackJobReason('x'.repeat(500)).length).toBeLessThanOrEqual(240);
 });
+
+// Each input reaches one rule only: no KEY= prefix, and the Slack tokens are under 32 characters.
+it.each([
+  [
+    'a bare Slack token',
+    'invalid_auth for xoxb-1234-5678-abcd and xapp-1-A1-xyz',
+    'invalid_auth for [REDACTED] and [REDACTED]',
+  ],
+  ['any 32+ character run', `request ${'a1B2'.repeat(8)} failed`, 'request [REDACTED] failed'],
+  ['nothing shorter than 32', `request ${'a'.repeat(31)} failed`, `request ${'a'.repeat(31)} failed`],
+])('the sanitizer drops %s', (_name, text, reason) => {
+  expect(slackJobReason(text)).toBe(reason);
+});
