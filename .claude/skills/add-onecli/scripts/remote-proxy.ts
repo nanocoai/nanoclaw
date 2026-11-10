@@ -26,9 +26,21 @@ function ownMachine(hostname: string): boolean {
   return /^(localhost\.?|127\.\d+\.\d+\.\d+|0\.0\.0\.0|\[::1?\])$/.test(hostname);
 }
 
-/** A gateway URL that names this machine, including one of its own network addresses. */
+/**
+ * This machine's host name as `os.hostname()` gives it. No short or `.local` form and no DNS lookup: those
+ * can name another machine, and taking a remote gateway for this one hides the warning it needs.
+ */
+function ownName(): string | null {
+  try {
+    return os.hostname().toLowerCase().replace(/\.$/, '') || null;
+  } catch {
+    return null;
+  }
+}
+
+/** A gateway URL that names this machine: loopback, a wildcard, its host name or one of its own addresses. */
 function thisMachine(hostname: string): boolean {
-  if (ownMachine(hostname)) return true;
+  if (ownMachine(hostname) || hostname.replace(/\.$/, '') === ownName()) return true;
   let own: os.NetworkInterfaceInfo[];
   try {
     own = Object.values(os.networkInterfaces()).flatMap((nics) => nics ?? []);

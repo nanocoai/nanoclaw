@@ -80,6 +80,39 @@ describe('remote gateway proxy hint', () => {
       spy.mockRestore();
     }
   });
+
+  // (this machine's host name, gateway URL) -> the line the hint names, or null for no hint.
+  it.each([
+    ['Maximus.home', 'http://maximus.home:10254', null],
+    ['Maximus.home', 'http://MAXIMUS.HOME.:10254', null],
+    ['Maximus.home.', 'http://maximus.home:10254', null],
+    ['nc-host', 'http://nc-host:10254', null],
+    // Other names can belong to another machine (a search domain, an mDNS rename), so they stay remote.
+    ['Maximus.home', 'http://maximus:10254', 'GATEWAY_BASE_URL=maximus:10255'],
+    ['Maximus.home', 'http://maximus.local:10254', 'GATEWAY_BASE_URL=maximus.local:10255'],
+    ['nc-host', 'http://nc-host.example.com:10254', 'GATEWAY_BASE_URL=nc-host.example.com:10255'],
+  ])('host name %s, gateway %s: %s', (name, gateway, line) => {
+    const spy = vi.spyOn(os, 'hostname').mockReturnValue(name);
+    try {
+      const hint = remoteProxyHint(gateway, new URL('http://x:t@host.docker.internal:10255'));
+      if (line === null) expect(hint).toBeNull();
+      else expect(hint).toContain(line);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("still warns for a remote gateway when this machine's host name can't be read", () => {
+    const spy = vi.spyOn(os, 'hostname').mockImplementation(() => {
+      throw new Error('uv_os_gethostname failed');
+    });
+    try {
+      const proxy = new URL('http://x:t@host.docker.internal:10255');
+      expect(remoteProxyHint(GATEWAY, proxy)).toContain('GATEWAY_BASE_URL=gw.example.com:10255');
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
 
 describe('advertised proxy', () => {
