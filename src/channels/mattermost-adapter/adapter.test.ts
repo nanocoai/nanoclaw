@@ -19,6 +19,7 @@ const CHANNEL_ID = 'tyzg1xpaeinqzypmh6h9j9ysyy';
 const POST_ID = 'mjhbignk4inf7kh9w5wi8snchw';
 const ROOT_ID = 'or6atyakftywuq6jjo44oytu7h';
 const OTHER_BOT_ID = '1g3di8tu4jnxu8zjypnouyo4qo';
+const UNKNOWN_USER_ID = 'kq9wq3s8ojbzmc6hzg5wxkd1ra';
 
 function response(payload: unknown, status = 200): Response {
   return new Response(JSON.stringify(payload), {
@@ -216,7 +217,15 @@ describe('Mattermost posted-message threads', () => {
 
   it('does not count @channel, @all or @here as a mention of the bot', async () => {
     const { adapter, processMessage } = await initializePostedHarness();
-    const texts = ['@channel standup', '@ALL standup', 'standup @here.', '@here @nanoclaw-bot standup'];
+    const texts = [
+      '@channel standup',
+      '@ALL standup',
+      'standup @here.',
+      '_@here_ standup',
+      '@channel- standup',
+      '@here @nanoclaw-bot standup',
+      '@channel ping @nanoclaw-bot.',
+    ];
 
     // The server lists the bot in `mentions` for each of these.
     texts.forEach((message, i) =>
@@ -224,16 +233,25 @@ describe('Mattermost posted-message threads', () => {
     );
 
     await vi.waitFor(() => expect(processMessage).toHaveBeenCalledTimes(texts.length));
-    expect(processMessage.mock.calls.map((call) => call[2].isMention)).toEqual([false, false, false, true]);
+    expect(processMessage.mock.calls.map((call) => call[2].isMention)).toEqual([
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+    ]);
   });
 
   it("drops other bots' posts so two agents can't wake each other", async () => {
     const { adapter, processMessage } = await initializePostedHarness();
     const id = (i: number) => `${POST_ID.slice(0, 25)}${i}`;
 
-    // Flagged by the server; a bot account without the flag; a person; a webhook.
+    // Flagged by the server (profile lookup fails); a bot account without the
+    // flag; a person; a person's webhook.
     adapter.handleSocketEvent(
-      postedEvent({ id: id(1), props: { from_bot: 'true' }, rootId: ROOT_ID, userId: OTHER_BOT_ID }),
+      postedEvent({ id: id(1), props: { from_bot: 'true' }, rootId: ROOT_ID, userId: UNKNOWN_USER_ID }),
     );
     adapter.handleSocketEvent(postedEvent({ id: id(2), rootId: ROOT_ID, userId: OTHER_BOT_ID }));
     adapter.handleSocketEvent(postedEvent({ id: id(3), rootId: ROOT_ID }));

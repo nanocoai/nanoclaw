@@ -81,7 +81,8 @@ const DEFAULT_FETCH_LIMIT = 60;
 /** Mattermost caps `per_page` at 200 on the post endpoints. */
 const MAX_PAGE_SIZE = 200;
 const MATTERMOST_ID = /^[a-z0-9]{26}$/;
-const CHANNEL_WIDE_MENTION = /(^|[^\w@])@(?:all|channel|here)(?![\w-])/i;
+// Read on plain text, so `_@here_` counts; `@channel-ops` is a user, `@here.` is not.
+const CHANNEL_WIDE_MENTION = /(^|[^\w@])@(?:all|channel|here)(?!\w|[-.]+\w)/i;
 
 /**
  * Path segment the NanoClaw host's webhook server routes to this adapter
@@ -861,8 +862,8 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
     // former. Failure is tolerated — the handle is still a fine name.
     await this.ensureUserResolved(post.user_id);
     // As on Slack, other bots' posts never reach the router: two agents in one
-    // followed thread would wake each other in a loop. Webhook posts carry a
-    // person's user id, so they still pass.
+    // followed thread would wake each other in a loop. A webhook owned by a
+    // person posts without `from_bot`, so it still passes.
     if (post.props?.from_bot === 'true' || this.users.get(post.user_id)?.isBot === true) {
       this.logger.info('Mattermost WS: post from another bot dropped', { userId: post.user_id });
       return;
@@ -876,7 +877,7 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
     // lists the bot for `@channel`, `@all` and `@here`; then only `@bot` counts.
     message.isMention =
       isExplicitMention(event.data, this.botUserId) &&
-      (!CHANNEL_WIDE_MENTION.test(post.message ?? '') || this.detectTextMention(post));
+      (!CHANNEL_WIDE_MENTION.test(message.text) || this.detectTextMention(post));
 
     void chat.processMessage(this, threadId, message);
   }
@@ -1442,7 +1443,8 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
       return false;
     }
     const handle = this.userName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    return new RegExp(`(^|[^\\w@])@${handle}(?![\\w.-])`, 'i').test(post.message ?? '');
+    // A trailing `.` ends the sentence unless a handle follows (`@bot.dev`).
+    return new RegExp(`(^|[^\\w@])@${handle}(?![\\w-]|\\.+[\\w-])`, 'i').test(post.message ?? '');
   }
 
   private toMessage(post: MattermostPost, threadId: string): Message<MattermostPost> {
