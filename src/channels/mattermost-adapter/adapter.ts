@@ -1459,12 +1459,13 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
     if (!this.userName) {
       return false;
     }
-    const handle = this.userName.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    // Lower-case both sides as the server does; with `u`, the `i` flag would
-    // also fold look-alikes such as `ſ` into `s`.
-    return new RegExp(`(^|[^\\p{L}\\p{N}_@])@${handle}(?![\\p{L}\\p{N}]|[-._]+[\\p{L}\\p{N}])`, 'u').test(
-      text.toLowerCase(),
-    );
+    // Handles are ASCII, so match their letters in either case by hand: with
+    // `u`, the `i` flag folds look-alikes (`ſ` into `s`), and lower-casing the
+    // text turns `İ` into `i` plus a mark that reads as a word break.
+    const handle = [...this.userName.toLowerCase()]
+      .map((c) => (/[a-z]/.test(c) ? `[${c}${c.toUpperCase()}]` : c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+      .join('');
+    return new RegExp(`(^|[^\\p{L}\\p{N}_@])@${handle}(?![\\p{L}\\p{N}]|[-._]+[\\p{L}\\p{N}])`, 'u').test(text);
   }
 
   private toMessage(post: MattermostPost, threadId: string): Message<MattermostPost> {

@@ -836,6 +836,7 @@ describe('Mattermost mention detection', () => {
   it.each([
     ['@ASSISTANT help', true],
     ['@aſſiſtant help', false],
+    ['personİ@assistant help', false],
   ])('matches the handle in any case, but not look-alike letters: %s', async (text, expected) => {
     const { adapter } = await initialized('assistant');
     expect(adapter.parseMessage(postWith(text)).isMention).toBe(expected);
