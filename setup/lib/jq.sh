@@ -36,10 +36,10 @@ jq_needs_sudo() {
 }
 
 # True when pacman has never synced its package lists (container and cloud images).
+# False when pacman-conf can't say where they live, so an odd host is never upgraded.
 pacman_never_synced() {
   local db dir
-  dir=$(pacman-conf DBPath 2>/dev/null) || true
-  dir=${dir:-/var/lib/pacman}
+  dir=$(pacman-conf DBPath 2>/dev/null) && [ -n "$dir" ] || return 1
   for db in "${dir%/}"/sync/*.db; do
     [ -e "$db" ] && return 1
   done

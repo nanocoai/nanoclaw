@@ -24,6 +24,8 @@ interface Machine {
   staleLists?: boolean;
   /** pacman's sync databases exist, i.e. it has synced before. */
   pacmanSynced?: boolean;
+  /** pacman-conf is missing, so nothing says where pacman keeps its lists. */
+  noPacmanConf?: boolean;
 }
 
 let dir: string;
@@ -59,7 +61,7 @@ function stubs(m: Machine): { bin: string; log: string } {
   if (m.pkg === 'pacman') {
     fs.mkdirSync(path.join(dir, 'pacman', 'sync'), { recursive: true });
     if (m.pacmanSynced) fs.writeFileSync(path.join(dir, 'pacman', 'sync', 'core.db'), '');
-    stub('pacman-conf', `[ "$1" = DBPath ] && echo '${dir}/pacman/'`);
+    if (!m.noPacmanConf) stub('pacman-conf', `[ "$1" = DBPath ] && echo '${dir}/pacman/'`);
   }
   if (m.sudo) {
     stub(
@@ -123,8 +125,11 @@ describe('jq install (setup/lib/jq.sh)', { timeout: 20_000 }, () => {
     expect(r.log).toContain('sudo -n pacman -Syu --noconfirm --needed jq');
   });
 
-  it('never upgrades a pacman system that has synced before', () => {
-    const r = run({ pkg: 'pacman', sudo: 'cached', staleLists: true, pacmanSynced: true });
+  it.each<[string, Machine]>([
+    ['has synced before', { pacmanSynced: true }],
+    ['has no pacman-conf to say where its lists are', { noPacmanConf: true }],
+  ])('never upgrades a pacman system that %s', (_name, m) => {
+    const r = run({ pkg: 'pacman', sudo: 'cached', staleLists: true, ...m });
     expect(r.rc).toBe(1);
     expect(r.log.filter((l) => l.startsWith('pacman'))).toEqual(['pacman -S --noconfirm --needed jq']);
   });
