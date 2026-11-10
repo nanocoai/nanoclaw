@@ -9,7 +9,7 @@ const fixture = vi.hoisted(() => ({
   offline: false,
   installModes: [] as unknown[],
   build: { ok: true } as { ok: boolean; message?: string },
-  restart: { status: 'restarted' } as { status: string; message?: string },
+  restart: { status: 'restarted' } as { status: string; step?: string; message?: string },
   blockers: [] as string[],
   contractModules: [] as string[],
   loadedContractModules: [] as string[],
@@ -187,12 +187,23 @@ describe('standalone provider setup flow', () => {
 
   it('still authenticates when the restart fails, prints the command once, and exits non-zero', async () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
-    fixture.restart = { status: 'failed', message: 'restart.sh exited 1' };
+    fixture.restart = { status: 'failed', step: 'restart', message: 'restart.sh exited 1' };
     await run(['opencode', '--refresh']);
     expect(fixture.order).toEqual(['install', 'build', 'restart-host', 'load-contracts', 'auth']);
     expect(fixture.check).toHaveBeenCalledTimes(1);
     expect(error).toHaveBeenCalledTimes(1);
     expect(error.mock.calls[0][0]).toContain('pnpm run build && bash setup/lib/restart.sh');
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('says to fix the build errors first when the host build itself fails', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    fixture.restart = { status: 'failed', step: 'build', message: 'pnpm run build --noEmitOnError exited 1' };
+    await run(['opencode', '--refresh']);
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(error.mock.calls[0][0]).toMatch(
+      /stays on its last build.*Fix the build errors above, then run: pnpm run build/,
+    );
     expect(process.exitCode).toBe(1);
   });
   // Installing before the service step: no host runs yet, and the service
