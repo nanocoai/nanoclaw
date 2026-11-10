@@ -36,8 +36,8 @@ fi
 LIST="$(git_ show "$REMOTE/main:agent-images.json" 2>/dev/null)" || exit 0
 
 # Newest first. A release whose image is not built yet falls back to the one
-# before it, never past it to the versions.json pin. Release candidates never
-# get an image.
+# before it, never past it to the versions.json pin. Pre-releases (beta, rc)
+# never get an image.
 for RELEASE in $(git_ tag --merged HEAD --list 'v[0-9]*' --sort=-v:refname 2>/dev/null); do
     case "$RELEASE" in *-*) continue ;; esac
     # Flat, one level, string values: grep is enough, as in pull.sh.
