@@ -758,10 +758,10 @@ describe('Mattermost setup failures', () => {
 describe('Mattermost mention detection', () => {
   // Mattermost lists the receiving bot in a frame's `mentions` in DMs and group
   // messages whether or not the post names it, so every frame here carries it.
-  async function initialized() {
+  async function initialized(username = 'nanoclaw') {
     const fetchImpl = vi.fn(async (input: string | URL | Request) =>
       String(input).endsWith('/users/me')
-        ? Response.json({ id: BOT_ID, username: 'nanoclaw', is_bot: true })
+        ? Response.json({ id: BOT_ID, username, is_bot: true })
         : Response.json({ id: USER_ID, username: 'operator' }),
     );
     const adapter = new MattermostAdapter({ ...BASE_OPTIONS, fetchImpl, skipSocket: true });
@@ -830,6 +830,14 @@ describe('Mattermost mention detection', () => {
     ['```\n@nanoclaw\n```', false],
   ])('reads @bot outside code in a fetched post: %s', async (text, expected) => {
     const { adapter } = await initialized();
+    expect(adapter.parseMessage(postWith(text)).isMention).toBe(expected);
+  });
+
+  it.each([
+    ['@ASSISTANT help', true],
+    ['@aſſiſtant help', false],
+  ])('matches the handle in any case, but not look-alike letters: %s', async (text, expected) => {
+    const { adapter } = await initialized('assistant');
     expect(adapter.parseMessage(postWith(text)).isMention).toBe(expected);
   });
 });

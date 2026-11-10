@@ -1459,8 +1459,12 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
     if (!this.userName) {
       return false;
     }
-    const handle = this.userName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    return new RegExp(`(^|[^\\p{L}\\p{N}_@])@${handle}(?![\\p{L}\\p{N}]|[-._]+[\\p{L}\\p{N}])`, 'iu').test(text);
+    const handle = this.userName.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // Lower-case both sides as the server does; with `u`, the `i` flag would
+    // also fold look-alikes such as `ſ` into `s`.
+    return new RegExp(`(^|[^\\p{L}\\p{N}_@])@${handle}(?![\\p{L}\\p{N}]|[-._]+[\\p{L}\\p{N}])`, 'u').test(
+      text.toLowerCase(),
+    );
   }
 
   private toMessage(post: MattermostPost, threadId: string): Message<MattermostPost> {
