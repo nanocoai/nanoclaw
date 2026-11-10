@@ -17,7 +17,7 @@
 # never require an image rebuild.
 
 # Pinned by digest so a rebuild cannot reuse a cached older base; bump tag and digest together.
-FROM node:22.23.4-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d
+FROM node:22.23.4-slim@sha256:5ec23b7c622b00547753bc6ffd78085dd868a68aeb41c8e0a1418f033e13d96d
 
 # ---- Build-time arguments ----------------------------------------------------
 # CJK fonts add ~200MB. Opt in only if you render Chinese/Japanese/Korean text.
@@ -108,8 +108,14 @@ ENV PATH="$PNPM_HOME:$PATH"
 # silently skips claude-code's native-binary postinstall and agent-browser's
 # bin chmod — the agent then crashes at runtime with "native binary not
 # installed". Keep this in lockstep with package.json's `packageManager`.
-ARG PNPM_VERSION=10.34.5
+ARG PNPM_VERSION=10.34.9
 RUN corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
+
+# The npm in node:22-slim (10.x) bundles libraries that lag their security
+# releases; npm 11.21.2 bundles the patched ones. Drop this pin once the
+# base image's npm has caught up.
+ARG NPM_VERSION=11.21.2
+RUN npm install -g npm@${NPM_VERSION}
 
 # Global Node CLIs the agent invokes at runtime live in cli-tools.json so a
 # skill can add one with a json-merge instead of editing this Dockerfile.

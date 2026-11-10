@@ -22,6 +22,8 @@ log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [bootstrap] $*" >> "$LOG_FILE"; }
 
 # shellcheck source=setup/lib/node-version.sh
 source "$PROJECT_ROOT/setup/lib/node-version.sh"
+# shellcheck source=setup/lib/jq.sh
+source "$PROJECT_ROOT/setup/lib/jq.sh"
 
 # --- Platform detection ---
 
@@ -86,6 +88,16 @@ ensure_node() {
       log "install-node.sh failed"
     fi
   fi
+}
+
+# --- jq (skills read API replies with it) ---
+
+install_jq() {
+  JQ_OK="false"
+  if ensure_jq >> "$LOG_FILE" 2>&1; then
+    JQ_OK="true"
+  fi
+  log "jq: $JQ_OK"
 }
 
 # --- pnpm install ---
@@ -248,6 +260,7 @@ log "=== Bootstrap started ==="
 detect_platform
 
 ensure_node
+install_jq
 install_deps
 check_build_tools
 
@@ -284,6 +297,7 @@ IS_ROOT: $IS_ROOT
 NODE_VERSION: $NODE_VERSION
 NODE_OK: $NODE_OK
 NODE_PATH: ${NODE_PATH_FOUND:-not_found}
+JQ_OK: $JQ_OK
 DEPS_OK: $DEPS_OK
 NATIVE_OK: $NATIVE_OK
 HAS_BUILD_TOOLS: $HAS_BUILD_TOOLS

@@ -362,6 +362,18 @@ if [ "$(uname -s)" = "Darwin" ] && ! command -v brew >/dev/null 2>&1; then
   esac
 fi
 
+# ─── pre-flight: sudo password on Linux ────────────────────────────────
+# The Node installer calls sudo behind the bootstrap spinner, where its
+# password prompt can't be seen. Ask here instead; setup:auto asks for Docker
+# before its own step. Root, passwordless sudo and non-terminal runs skip it.
+# shellcheck source=setup/lib/sudo-preflight.sh
+source "$PROJECT_ROOT/setup/lib/sudo-preflight.sh"
+if ! sudo_preflight; then
+  ph_event setup_sudo_aborted
+  write_abort_entry sudo-preflight sudo-refused
+  exit 1
+fi
+
 # ─── first step: install the basics (Node + pnpm + native modules) ─────
 
 BOOTSTRAP_RAW="${STEPS_DIR}/01-bootstrap.log"
@@ -401,6 +413,10 @@ BOOTSTRAP_DUR=$(( $(date +%s) - BOOTSTRAP_START ))
 if [ "$BOOTSTRAP_RC" -eq 0 ]; then
   spinner_success "Basics ready" "$BOOTSTRAP_DUR"
   write_bootstrap_entry success "$BOOTSTRAP_DUR" "$BOOTSTRAP_RAW"
+  # Only channel skills need jq, so setup carries on; say it now, not at the first one.
+  if [ "$(grep_field JQ_OK "$BOOTSTRAP_RAW")" = "false" ]; then
+    printf '  %s\n' "$(dim "Couldn't install jq. Adding Slack, Discord, Telegram, Teams or Dial needs it, so install jq first.")"
+  fi
 else
   spinner_failure "Couldn't install the basics" "$BOOTSTRAP_DUR"
   write_bootstrap_entry failed "$BOOTSTRAP_DUR" "$BOOTSTRAP_RAW"

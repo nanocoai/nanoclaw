@@ -9,6 +9,7 @@ const fixture = vi.hoisted(() => ({
   offline: false,
   installModes: [] as unknown[],
   build: { ok: true } as { ok: boolean; message?: string },
+  restart: { status: 'restarted' } as { status: string; message?: string },
   blockers: [] as string[],
   contractModules: [] as string[],
   loadedContractModules: [] as string[],
@@ -59,6 +60,13 @@ vi.mock('./lib/container-build.js', () => ({
     return fixture.build;
   },
 }));
+vi.mock('./lib/host-restart.js', () => ({
+  HOST_RESTART_COMMAND: 'pnpm run build && bash setup/lib/restart.sh',
+  restartHost: () => {
+    fixture.order.push('restart-host');
+    return fixture.restart;
+  },
+}));
 vi.mock('./lib/registry-state.js', () => ({
   HARDENED_IMAGE_ENV_KEY: 'NANOCLAW_HARDENED_IMAGE',
   readImageSource: () => fixture.image,
@@ -83,6 +91,7 @@ beforeEach(() => {
     offline: false,
     installModes: [],
     build: { ok: true },
+    restart: { status: 'restarted' },
     blockers: [],
     contractModules: [],
     loadedContractModules: [],
@@ -95,13 +104,14 @@ beforeEach(() => {
   });
 });
 afterEach(() => {
+  process.exitCode = undefined;
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
 });
 
 describe('standalone provider setup flow', () => {
   it.each(['codex', 'opencode'])(
-    'authenticates installed %s without installation, rebuilding, or an image-mode change',
+    'authenticates installed %s without installation, rebuilding, a host restart, or an image-mode change',
     async (provider) => {
       fixture.image = 'hardened';
       fixture.offline = true;
@@ -118,7 +128,7 @@ describe('standalone provider setup flow', () => {
     fixture.installed = false;
     fixture.contractModules = ['/install/src/provider-contracts/claude.ts'];
     await run(['claude']);
-    expect(fixture.order).toEqual(['install', 'build', 'load-contracts', 'load-adapter', 'auth']);
+    expect(fixture.order).toEqual(['install', 'build', 'restart-host', 'load-contracts', 'load-adapter', 'auth']);
     expect(fixture.loadedContractModules).toEqual(['/install/src/provider-contracts/claude.ts']);
     expect(fixture.installModes).toEqual([{ mode: 'install' }]);
     expect(fixture.check).toHaveBeenCalledTimes(1);
@@ -126,9 +136,10 @@ describe('standalone provider setup flow', () => {
   it('persists the local image choice after successful apply, then builds before auth', async () => {
     fixture.image = 'hardened';
     await run(['opencode', '--refresh']);
-    expect(fixture.order).toEqual(['install', 'local-image', 'build', 'load-contracts', 'auth']);
+    expect(fixture.order).toEqual(['install', 'local-image', 'build', 'restart-host', 'load-contracts', 'auth']);
     expect(fixture.installModes).toEqual([{ mode: 'refresh' }]);
     expect(fixture.check).toHaveBeenCalledTimes(1);
+    expect(process.exitCode).toBeUndefined();
   });
   it('leaves the payload untouched when the image decision is declined or cancelled', async () => {
     fixture.image = 'hardened';
@@ -167,10 +178,33 @@ describe('standalone provider setup flow', () => {
     expect(fixture.order).toEqual(['install', 'build']);
     expect(fixture.auth).not.toHaveBeenCalled();
   });
-  it('does not rebuild when applying a skill made no image changes', async () => {
+  it('neither rebuilds nor restarts when applying the skill changed nothing', async () => {
     fixture.changed = false;
     await run(['opencode', '--refresh']);
     expect(fixture.order).toEqual(['install', 'load-contracts', 'auth']);
     expect(fixture.check).toHaveBeenCalledTimes(1);
+  });
+
+  it('still authenticates when the restart fails, prints the command once, and exits non-zero', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    fixture.restart = { status: 'failed', message: 'restart.sh exited 1' };
+    await run(['opencode', '--refresh']);
+    expect(fixture.order).toEqual(['install', 'build', 'restart-host', 'load-contracts', 'auth']);
+    expect(fixture.check).toHaveBeenCalledTimes(1);
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(error.mock.calls[0][0]).toContain('pnpm run build && bash setup/lib/restart.sh');
+    expect(process.exitCode).toBe(1);
+  });
+  // Installing before the service step: no host runs yet, and the service
+  // step starts the build this run already made.
+  it('treats a missing service as nothing to restart, not a failure', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    fixture.restart = { status: 'no-service' };
+    await run(['opencode', '--refresh']);
+    expect(fixture.order).toEqual(['install', 'build', 'restart-host', 'load-contracts', 'auth']);
+    expect(error).not.toHaveBeenCalled();
+    expect(log.mock.calls.flat().join('\n')).toContain('pnpm exec tsx setup/index.ts --step service');
+    expect(process.exitCode).toBeUndefined();
   });
 });

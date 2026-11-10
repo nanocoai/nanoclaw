@@ -2,7 +2,20 @@ import http from 'http';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { Adapter, AdapterPostableMessage, RawMessage } from 'chat';
+import {
+  Actions,
+  Card,
+  CardText,
+  Chart,
+  Divider,
+  Field,
+  Fields,
+  LinkButton,
+  Table,
+  type Adapter,
+  type AdapterPostableMessage,
+  type RawMessage,
+} from 'chat';
 
 import { fenceForCard } from '../card-text.js';
 import { gatewayApprovalPresentation } from '../gateway-approval-presentation.js';
@@ -873,6 +886,338 @@ describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
     expect(calls).toHaveLength(1);
     const msg = calls[0].message as { markdown?: string };
     expect(msg.markdown).toBe('plain hello');
+  });
+});
+
+describe('createChatSdkBridge.deliver — send_card card parts', () => {
+  const postedCard = (call: PostCall) => (call.message as { card: { children: unknown[] } }).card;
+  const deliverCard = async (card: Record<string, unknown>) => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({ adapter: stubAdapter({ postMessage }), supportsThreads: false });
+    const delivery = bridge.deliver('slack:C1', null, { kind: 'chat-sdk', content: { type: 'card', card } });
+    return { calls, delivery };
+  };
+  const table = { type: 'Table', props: { headers: ['Scale', 'Before'], rows: [['1x', 40]] } };
+  const bar = {
+    type: 'Chart',
+    props: { title: 'Latency', chart: { type: 'bar', categories: ['1x'], series: [{ name: 'Before', values: [40] }] } },
+  };
+
+  // The card Slack and Teams received in the live run: a change to how parts are built must keep it.
+  it('posts exactly the card the Chat SDK builders make for the parts', async () => {
+    const { calls, delivery } = await deliverCard({
+      title: 'Perf review',
+      children: [
+        'Before/after the cache change.',
+        {
+          type: 'Fields',
+          children: [
+            { type: 'Field', props: { label: 'p95', value: '118 ms' } },
+            { type: 'Field', props: { label: 'Errors', value: 0.2 } },
+          ],
+        },
+        {
+          type: 'Table',
+          props: {
+            headers: ['Load', 'Before (ms)'],
+            rows: [
+              ['1x', 40],
+              ['20x', 990],
+            ],
+            align: ['left', 'right'],
+            caption: 'Latency before vs after',
+          },
+        },
+        {
+          type: 'Chart',
+          props: {
+            title: 'Latency (ms)',
+            chart: {
+              type: 'bar',
+              categories: ['1x', '20x'],
+              series: [{ name: 'Before', values: [40, 990] }],
+              xLabel: 'Load',
+              yLabel: 'ms',
+            },
+          },
+        },
+        {
+          type: 'Chart',
+          props: { title: 'Where time goes', chart: { type: 'pie', segments: [{ label: 'Render', value: 55 }] } },
+        },
+        { type: 'Divider' },
+        { type: 'Text', props: { content: 'Measured on staging.', style: 'muted' } },
+      ],
+      actions: [{ label: 'Open report', url: 'https://example.com/report' }],
+    });
+    await delivery;
+
+    expect(JSON.parse(JSON.stringify(postedCard(calls[0])))).toEqual(
+      JSON.parse(
+        JSON.stringify(
+          Card({
+            title: 'Perf review',
+            children: [
+              CardText('Before/after the cache change.'),
+              Fields([Field({ label: 'p95', value: '118 ms' }), Field({ label: 'Errors', value: '0.2' })]),
+              Table({
+                headers: ['Load', 'Before (ms)'],
+                rows: [
+                  ['1x', '40'],
+                  ['20x', '990'],
+                ],
+                align: ['left', 'right'],
+                caption: 'Latency before vs after',
+              }),
+              Chart({
+                title: 'Latency (ms)',
+                chart: {
+                  type: 'bar',
+                  categories: ['1x', '20x'],
+                  xLabel: 'Load',
+                  yLabel: 'ms',
+                  series: [
+                    {
+                      name: 'Before',
+                      data: [
+                        { label: '1x', value: 40 },
+                        { label: '20x', value: 990 },
+                      ],
+                    },
+                  ],
+                },
+              }),
+              Chart({ title: 'Where time goes', chart: { type: 'pie', segments: [{ label: 'Render', value: 55 }] } }),
+              Divider(),
+              CardText('Measured on staging.', { style: 'muted' }),
+              Actions([LinkButton({ label: 'Open report', url: 'https://example.com/report' })]),
+            ],
+          }),
+        ),
+      ),
+    );
+  });
+
+  it('builds each part as its Chat SDK element, in place among the text children', async () => {
+    const { calls, delivery } = await deliverCard({
+      title: 'Perf',
+      children: [
+        'intro',
+        { type: 'Fields', children: [{ type: 'Field', props: { label: 'p50', value: 42 } }] },
+        table,
+        bar,
+        { type: 'Divider' },
+        { type: 'Text', props: { content: 'footnote', style: 'muted' } },
+        'outro',
+      ],
+    });
+    await delivery;
+
+    const children = postedCard(calls[0]).children as Array<Record<string, unknown>>;
+    expect(children.map((c) => c.type)).toEqual(['text', 'fields', 'table', 'chart', 'divider', 'text', 'text']);
+    expect(children[1]).toEqual({ type: 'fields', children: [{ type: 'field', label: 'p50', value: '42' }] });
+    expect(children[2]).toMatchObject({ headers: ['Scale', 'Before'], rows: [['1x', '40']] });
+    expect(children[3]).toMatchObject({
+      title: 'Latency',
+      chart: { type: 'bar', categories: ['1x'], series: [{ name: 'Before', data: [{ label: '1x', value: 40 }] }] },
+    });
+    expect(children[6]).toEqual({ type: 'text', content: 'outro', style: undefined });
+  });
+
+  it.each([
+    ['a callback button', { type: 'Button', props: { id: 'ncq:q-1:0', label: 'Approve' } }],
+    ['an actions row', { type: 'Actions', children: [{ type: 'Button', props: { id: 'ncq:q-1:0', label: 'x' } }] }],
+    ['an image', { type: 'Image', props: { url: 'https://example.com/a.png', alt: 'x' } }],
+    ['a nested card', { type: 'Card', props: { title: 'Approve?' } }],
+    [
+      'a button inside Fields',
+      { type: 'Fields', children: [{ type: 'Button', props: { id: 'ncq:q-1:0', label: 'x' } }] },
+    ],
+    ['a malformed table', { type: 'Table', props: { headers: ['a', 'b'], rows: [['1']] } }],
+    ['a field named after an object method', { type: 'Fields', children: [{ type: 'constructor' }] }],
+    ['a table too long for Slack to draw', { type: 'Table', props: { headers: ['a'], rows: [['x'.repeat(10_000)]] } }],
+    [
+      'a too-long table given as object rows',
+      { type: 'Table', props: { headers: ['a'], rows: [{ a: 'x'.repeat(10_000) }] } },
+    ],
+    [
+      'a too-long table given as template cells',
+      { type: 'Table', props: { headers: ['a'], rows: [[{ $template: 'x'.repeat(10_000) }]] } },
+    ],
+  ])('refuses a card with %s instead of posting it', async (_, part) => {
+    const { calls, delivery } = await deliverCard({ title: 'Perf', children: ['intro', part] });
+
+    await expect(delivery).rejects.toThrow(/send_card card refused: children\[1\]/);
+    expect(calls).toHaveLength(0);
+  });
+
+  const field = (label: string) => ({ type: 'Field', props: { label, value: '1' } });
+  const lineChart = (chart: Record<string, unknown>, title = 'Latency') => ({
+    type: 'Chart',
+    props: { title, chart: { type: 'line', ...chart } },
+  });
+  it.each([
+    ['11 parts', Array.from({ length: 11 }, () => ({ type: 'Divider' })), /at most 10 parts per card/],
+    [
+      '11 fields across two Fields parts',
+      [
+        { type: 'Fields', children: Array.from({ length: 6 }, (_, i) => field(`f${i}`)) },
+        { type: 'Fields', children: Array.from({ length: 5 }, (_, i) => field(`g${i}`)) },
+      ],
+      /at most 10 fields per card/,
+    ],
+    [
+      'a text part over 2,500 characters',
+      [{ type: 'Text', props: { content: 'x'.repeat(2_501) } }],
+      /at most 2500 characters/,
+    ],
+    [
+      'a field over 1,500 characters',
+      [{ type: 'Fields', children: [{ type: 'Field', props: { label: 'a', value: 'x'.repeat(1_500) } }] }],
+      /at most 1500/,
+    ],
+    [
+      'a chart value of Infinity, as JSON reads 1e400',
+      [lineChart({ categories: ['a'], series: [{ name: 'b', values: [Infinity] }] })],
+      /values must be numbers/,
+    ],
+    [
+      'a table with no text',
+      [{ type: 'Table', props: { headers: [' '], rows: [] } }],
+      /the table has no text in its headers or cells/,
+    ],
+    [
+      'a table of 31 rows',
+      [{ type: 'Table', props: { headers: ['a'], rows: Array.from({ length: 31 }, () => ['1']) } }],
+      /at most 30 rows/,
+    ],
+    [
+      'a pie with a repeated slice label',
+      [
+        {
+          type: 'Chart',
+          props: {
+            title: 'P',
+            chart: {
+              type: 'pie',
+              segments: [
+                { label: 'a', value: 1 },
+                { label: 'a', value: 2 },
+              ],
+            },
+          },
+        },
+      ],
+      /must not repeat/,
+    ],
+    [
+      'a table of 7 columns',
+      [{ type: 'Table', props: { headers: ['1', '2', '3', '4', '5', '6', '7'], rows: [] } }],
+      /at most 6 columns/,
+    ],
+    [
+      'a table whose caption makes it too long',
+      [{ type: 'Table', props: { headers: ['a'], rows: [], caption: 'x'.repeat(10_000) } }],
+      /at most 10000/,
+    ],
+    [
+      'a chart title over 50 characters',
+      [lineChart({ categories: ['a'], series: [{ name: 'b', values: [1] }] }, 'x'.repeat(51))],
+      /props\.title/,
+    ],
+    [
+      'a chart label over 20 characters',
+      [lineChart({ categories: ['x'.repeat(21)], series: [{ name: 'b', values: [1] }] })],
+      /at most 20 characters/,
+    ],
+    [
+      'an axis label over 50 characters',
+      [lineChart({ categories: ['a'], series: [{ name: 'b', values: [1] }], yLabel: 'x'.repeat(51) })],
+      /axis labels/,
+    ],
+    [
+      '21 categories',
+      [
+        lineChart({
+          categories: Array.from({ length: 21 }, (_, i) => `${i}`),
+          series: [{ name: 'b', values: Array.from({ length: 21 }, () => 1) }],
+        }),
+      ],
+      /1 to 20 categories/,
+    ],
+    [
+      '13 series',
+      [
+        lineChart({
+          categories: ['a'],
+          series: Array.from({ length: 13 }, (_, i) => ({ name: `s${i}`, values: [1] })),
+        }),
+      ],
+      /1 to 12 series/,
+    ],
+    [
+      'a repeated category',
+      [lineChart({ categories: ['a', 'a'], series: [{ name: 'b', values: [1, 2] }] })],
+      /must not repeat/,
+    ],
+    [
+      'over 12,000 characters across parts',
+      Array.from({ length: 5 }, () => ({ type: 'Text', props: { content: 'x'.repeat(2_500) } })),
+      /at most 12000 per card/,
+    ],
+  ])('refuses a card with %s and posts nothing', async (_, children, reason) => {
+    const { calls, delivery } = await deliverCard({ title: 'Perf', children });
+
+    await expect(delivery).rejects.toThrow(reason);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('checks a card with no children against the card budget and posts nothing', async () => {
+    const { calls, delivery } = await deliverCard({ title: 'Perf', description: 'x'.repeat(12_001) });
+
+    await expect(delivery).rejects.toThrow(/at most 12000 per card/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('posts a part with only the fields it may have, so a stray key such as an ncq: id never goes out', async () => {
+    const { calls, delivery } = await deliverCard({
+      children: [
+        { type: 'Table', id: 'ncq:q-1:0', props: { headers: ['a'], rows: [['1']], actions: [{ id: 'ncq:q-1:0' }] } },
+      ],
+    });
+    await delivery;
+
+    expect(JSON.stringify(postedCard(calls[0]))).not.toContain('ncq:');
+  });
+
+  it('refuses a card over the per-card limits the tool enforces, whoever wrote the row', async () => {
+    const tables = await deliverCard({ children: [table, table] });
+    const charts = await deliverCard({ children: [bar, bar, bar] });
+
+    await expect(tables.delivery).rejects.toThrow(/at most 1 Table/);
+    await expect(charts.delivery).rejects.toThrow(/at most 2 Chart/);
+    expect([...tables.calls, ...charts.calls]).toHaveLength(0);
+  });
+
+  it('renders an old-style text card exactly as before', async () => {
+    const { calls, delivery } = await deliverCard({
+      title: 'Daily',
+      description: 'Your plate today',
+      children: ['• item one', { text: '• item two' }, { type: 'text', text: '• item three' }, '', 42],
+    });
+    await delivery;
+
+    expect(postedCard(calls[0])).toEqual(
+      Card({
+        title: 'Daily',
+        children: [
+          CardText('Your plate today'),
+          CardText('• item one'),
+          CardText('• item two'),
+          CardText('• item three'),
+        ],
+      }),
+    );
   });
 });
 
