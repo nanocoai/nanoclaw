@@ -23,17 +23,26 @@ Fetch the `channels` branch and copy the Resend adapter into `src/channels/`
 
 An install from before `resend.test.ts` existed has an older `resend.ts` without
 the `resendRegistration` export the test imports, and the copy below only fills
-missing files. So this step deletes an older `resend.ts` first and the copy
+missing files. So this step moves an older `resend.ts` aside first and the copy
 brings the current one:
 
 ```nc:run effect:refresh
-grep -qsF 'export const resendRegistration' src/channels/resend.ts || rm -f src/channels/resend.ts
+[ ! -f src/channels/resend.ts ] || grep -qF 'export const resendRegistration' src/channels/resend.ts || mv -f src/channels/resend.ts src/channels/resend.ts.old
 ```
 
 ```nc:copy from-branch:channels
 src/channels/resend.ts
 src/channels/resend.test.ts
 src/channels/resend-registration.test.ts
+```
+
+If the copy failed (no network, say), put the older `resend.ts` back: the channel
+barrel still imports it, and without the file the service stops starting after
+the next clean build. Then drop the set-aside copy:
+
+```nc:run effect:refresh
+[ -f src/channels/resend.ts ] || [ ! -f src/channels/resend.ts.old ] || mv -f src/channels/resend.ts.old src/channels/resend.ts
+rm -f src/channels/resend.ts.old
 ```
 
 ### 2. Register the adapter

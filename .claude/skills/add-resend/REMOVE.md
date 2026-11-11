@@ -10,10 +10,11 @@ Delete the self-registration import from `src/channels/index.ts` (skip if alread
 import './resend.js';
 ```
 
-Then delete the copied adapter and its tests:
+Then delete the copied adapter and its tests (`resend.ts.old` is the set-aside
+copy a cut-off re-run can leave):
 
 ```bash
-rm -f src/channels/resend.ts src/channels/resend.test.ts src/channels/resend-registration.test.ts
+rm -f src/channels/resend.ts src/channels/resend.ts.old src/channels/resend.test.ts src/channels/resend-registration.test.ts
 ```
 
 ## 2. Remove credentials
