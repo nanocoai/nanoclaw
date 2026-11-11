@@ -685,6 +685,7 @@ async function deliverMessage(
         channel_type: msg.channelType,
         thread_id: msg.threadId,
         title,
+        question: typeof content.question === 'string' ? content.question : '',
         options: normalizeOptions(rawOptions as never),
         created_at: new Date().toISOString(),
       });

@@ -26,7 +26,14 @@ vi.mock('./config.js', async () => {
 
 const TEST_DIR = '/tmp/nanoclaw-test-delivery';
 
-import { initTestDb, closeDb, runMigrations, createAgentGroup, createMessagingGroup } from './db/index.js';
+import {
+  initTestDb,
+  closeDb,
+  runMigrations,
+  createAgentGroup,
+  createMessagingGroup,
+  getPendingQuestion,
+} from './db/index.js';
 import { getDeliveredIds } from './mailbox/sqlite/session-db.js';
 import { inboundDbPath, outboundDbPath } from './mailbox/sqlite/paths.js';
 import { resolveSession, resolveTaskSession, withMailboxSession } from './session-manager.js';
@@ -763,5 +770,7 @@ describe('deliverSessionMessages — agent questions', () => {
     await deliverSessionMessages(session);
     expect(delivered).toContainEqual({ ...question, fromAgent: true });
     expect(delivered).toContainEqual({ text: 'hello' });
+    // The body is stored too, so the answered card can keep it.
+    expect((await getPendingQuestion('q-1'))?.question).toBe('Which?');
   });
 });
