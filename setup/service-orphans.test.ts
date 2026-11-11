@@ -53,7 +53,7 @@ describe('killOrphanedProcesses', () => {
 
     killOrphanedProcesses(root);
 
-    expect(await exited(child, 5000)).toBe(true);
+    expect(await exited(child, 2000)).toBe(true);
   });
 
   it('leaves a host under a look-alike folder alone (a.c is not abc)', async () => {
