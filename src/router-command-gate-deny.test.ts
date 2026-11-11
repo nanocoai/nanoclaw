@@ -497,6 +497,82 @@ describe('command-gate denial', () => {
       release();
     }
   });
+  it("a follow-up reaches an active agent while another agent's mentioned command is gated", async () => {
+    await seed();
+    recordingAdapter(async () => 'platform-msg-1');
+    await getDb().run("UPDATE messaging_groups SET is_group = 1 WHERE id = 'mg-1'");
+    await getDb().run(
+      "UPDATE messaging_group_agents SET engage_mode = 'mention-sticky', ignored_message_policy = 'drop' WHERE id = 'mga-1'",
+    );
+    const message = (id: string, text: string, isMention: boolean) =>
+      routeInbound({
+        channelType: 'testchat',
+        platformId: 'testchat:C1',
+        threadId: null,
+        message: {
+          id,
+          kind: 'chat-sdk',
+          content: JSON.stringify({ sender: 'Alex', senderId: 'U1', text }),
+          timestamp: new Date().toISOString(),
+          isMention,
+          isGroup: true,
+        },
+      });
+    const { wakeContainer } = await import('./container-runner.js');
+    vi.mocked(wakeContainer).mockClear();
+    // ag-1 is active in the thread before a second agent is wired.
+    await message('m0', 'hello', true);
+    expect(vi.mocked(wakeContainer)).toHaveBeenCalledTimes(1);
+    const created_at = new Date().toISOString();
+    await createAgentGroup({
+      id: 'ag-2',
+      name: 'Second Agent',
+      folder: 'second-agent',
+      agent_provider: null,
+      created_at,
+    });
+    await createMessagingGroupAgent({
+      id: 'mga-2',
+      messaging_group_id: 'mg-1',
+      agent_group_id: 'ag-2',
+      engage_mode: 'mention-sticky',
+      engage_pattern: null,
+      sender_scope: 'all',
+      ignored_message_policy: 'drop',
+      session_mode: 'shared',
+      priority: 1,
+      threads: 1,
+      created_at,
+    });
+
+    let release: () => void = () => {};
+    gateHold.reached.mockClear();
+    gateHold.until = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    try {
+      // ag-2 (higher priority, routed first) holds the /clear in its role lookup.
+      const clear = sendClear(true);
+      await vi.waitFor(() => expect(gateHold.reached).toHaveBeenCalledTimes(1));
+      gateHold.until = null;
+
+      const followup = message('m2', 'and keep the notes', false);
+      await Promise.race([followup, new Promise((resolve) => setTimeout(resolve, 200))]);
+      expect(vi.mocked(wakeContainer)).toHaveBeenCalledTimes(2);
+      const woken = vi
+        .mocked(wakeContainer)
+        .mock.calls.map((call) => (call[0] as { agent_group_id: string }).agent_group_id);
+      expect(woken).toEqual(['ag-1', 'ag-1']);
+      release();
+      await Promise.all([clear, followup]);
+      // Both /clear verdicts are denials (no admin), so they add no wake.
+      expect(vi.mocked(wakeContainer)).toHaveBeenCalledTimes(2);
+    } finally {
+      gateHold.until = null;
+      release();
+    }
+  });
+
   it('a follow-up in a thread whose inbox was reset does not wait for a pending command verdict', async () => {
     await seed();
     recordingAdapter(async () => 'platform-msg-1');
