@@ -365,8 +365,12 @@ export interface TelegramBridgeOptions {
   instanceKey?: string;
 }
 
-/** A line shaped like a Markdown table's delimiter row (`|---|:-:|`), also in a quote or a list. */
-const TABLE_DELIMITER_ROW = /^([ \t>]*)(\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*)$/;
+/**
+ * A line shaped like a Markdown table's delimiter row (`|---|:-:|`), also in a quote or a list.
+ * Only one part of the pattern can take any given space, so a long line that is not a row
+ * fails fast instead of backtracking.
+ */
+const TABLE_DELIMITER_ROW = /^([ \t>]*)((?:\|[ \t]*)?:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*(?:\|[ \t]*)?)$/;
 
 /**
  * The adapter draws a Markdown table as a padded text table, which can grow a

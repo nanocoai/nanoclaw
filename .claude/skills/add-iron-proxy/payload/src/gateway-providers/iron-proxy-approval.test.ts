@@ -319,9 +319,7 @@ it('marks a request path it shortens for display', async () => {
   });
   await vi.waitFor(() => expect(held.size).toBe(1));
   const decision = [...held.values()][0];
-  expect(decision.request.summary?.resource).toMatch(
-    /^DELETE api\.github\.com\/a+ … \(\d+ more characters not shown\)$/,
-  );
+  expect(decision.request.summary?.resource).toMatch(/^DELETE api\.github\.com\/a+ … \d+ more characters not shown$/);
   decision.resolve('deny');
   expect(await pending.result).toMatchObject({ action: 2 });
 });

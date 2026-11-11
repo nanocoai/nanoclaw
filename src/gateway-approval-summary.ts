@@ -7,7 +7,7 @@ export function markedCut(value: string, max: number): string {
   let keep = max - 40;
   const code = value.charCodeAt(keep - 1);
   if (code >= 0xd800 && code <= 0xdbff) keep -= 1;
-  return `${value.slice(0, keep)} … (${value.length - keep} more characters not shown)`;
+  return `${value.slice(0, keep)} … ${value.length - keep} more characters not shown`;
 }
 
 /** One normalization boundary for OneCLI's native summary and compatible gateways. */
