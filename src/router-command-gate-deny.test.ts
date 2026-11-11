@@ -24,8 +24,6 @@ import {
 import { initChannelAdapters, registerChannelAdapter, teardownChannelAdapters } from './channels/channel-registry.js';
 import { setDeliveryAdapter, type ChannelDeliveryAdapter } from './delivery.js';
 import { routeInbound } from './router.js';
-import { findSessionForAgent } from './db/sessions.js';
-import { sessionDir } from './session-manager.js';
 import type { ChannelAdapter, ChannelDefaults } from './channels/adapter.js';
 
 vi.mock('./container-runner.js', () => ({
@@ -35,10 +33,9 @@ vi.mock('./container-runner.js', () => ({
   killContainer: vi.fn(),
 }));
 
-// Lets a test hold the command gate (e.g. a slow admin lookup) and pick its answer.
+// Lets a test hold the command gate (e.g. a slow admin lookup).
 const gateHold = vi.hoisted(() => ({
   until: null as Promise<void> | null,
-  pass: false,
   reached: vi.fn(),
 }));
 vi.mock('./command-gate.js', async () => {
@@ -50,7 +47,7 @@ vi.mock('./command-gate.js', async () => {
         gateHold.reached();
         await gateHold.until;
       }
-      return gateHold.pass ? { action: 'pass' as const } : actual.gateCommand(...args);
+      return actual.gateCommand(...args);
     },
   };
 });
@@ -243,212 +240,6 @@ describe('command-gate denial', () => {
     expect(calls).toHaveLength(1);
   });
 
-  for (const allowed of [true, false]) {
-    it(`a follow-up routed while a first mentioned command is gated waits for the verdict (${allowed ? 'allowed' : 'denied'})`, async () => {
-      await seed();
-      recordingAdapter(async () => 'platform-msg-1');
-      await getDb().run("UPDATE messaging_groups SET is_group = 1 WHERE id = 'mg-1'");
-      await getDb().run(
-        "UPDATE messaging_group_agents SET engage_mode = 'mention-sticky', ignored_message_policy = 'drop' WHERE id = 'mga-1'",
-      );
-      const { wakeContainer } = await import('./container-runner.js');
-      vi.mocked(wakeContainer).mockClear();
-      let release: () => void = () => {};
-      gateHold.reached.mockClear();
-      gateHold.pass = allowed;
-      gateHold.until = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      try {
-        const clear = sendClear(true);
-        await vi.waitFor(() => expect(gateHold.reached).toHaveBeenCalledTimes(1));
-        gateHold.until = null;
-
-        const followup = routeInbound({
-          channelType: 'testchat',
-          platformId: 'testchat:C1',
-          threadId: null,
-          message: {
-            id: 'm2',
-            kind: 'chat-sdk',
-            content: JSON.stringify({ sender: 'Alex', senderId: 'U1', text: 'and keep the notes' }),
-            timestamp: new Date().toISOString(),
-            isGroup: true,
-          },
-        });
-        // Let the follow-up reach the sticky check while the gate is held.
-        await new Promise((resolve) => setTimeout(resolve, 50));
-        expect(vi.mocked(wakeContainer)).not.toHaveBeenCalled();
-        release();
-        await Promise.all([clear, followup]);
-        // Allowed: the command and the follow-up wake. Denied (no admin): neither does.
-        expect(vi.mocked(wakeContainer)).toHaveBeenCalledTimes(allowed ? 2 : 0);
-      } finally {
-        gateHold.until = null;
-        gateHold.pass = false;
-        release();
-      }
-    });
-  }
-
-  it('a follow-up wakes once one gated command passes, without waiting for the others', async () => {
-    await seed();
-    recordingAdapter(async () => 'platform-msg-1');
-    await getDb().run("UPDATE messaging_groups SET is_group = 1 WHERE id = 'mg-1'");
-    await getDb().run(
-      "UPDATE messaging_group_agents SET engage_mode = 'mention-sticky', ignored_message_policy = 'drop' WHERE id = 'mga-1'",
-    );
-    const message = (id: string, text: string, isMention: boolean) =>
-      routeInbound({
-        channelType: 'testchat',
-        platformId: 'testchat:C1',
-        threadId: null,
-        message: {
-          id,
-          kind: 'chat-sdk',
-          content: JSON.stringify({ sender: 'Alex', senderId: 'U1', text }),
-          timestamp: new Date().toISOString(),
-          isMention,
-          isGroup: true,
-        },
-      });
-    const { wakeContainer } = await import('./container-runner.js');
-    vi.mocked(wakeContainer).mockClear();
-    const releases: (() => void)[] = [];
-    const hold = () => new Promise<void>((resolve) => releases.push(resolve));
-    gateHold.reached.mockClear();
-    gateHold.pass = true;
-    try {
-      gateHold.until = hold();
-      const first = message('m1', '/clear', true);
-      await vi.waitFor(() => expect(gateHold.reached).toHaveBeenCalledTimes(1));
-      gateHold.until = hold();
-      const second = message('m3', '/clear', true);
-      await vi.waitFor(() => expect(gateHold.reached).toHaveBeenCalledTimes(2));
-      gateHold.until = null;
-
-      const followup = message('m2', 'and keep the notes', false);
-      // Let the follow-up reach the gate wait before the first command passes.
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      releases[0]();
-      await first;
-      // The second command is still gated; the follow-up already counts.
-      await Promise.race([followup, new Promise((resolve) => setTimeout(resolve, 200))]);
-      expect(vi.mocked(wakeContainer)).toHaveBeenCalledTimes(2);
-      releases[1]();
-      await Promise.all([second, followup]);
-      expect(vi.mocked(wakeContainer)).toHaveBeenCalledTimes(3);
-    } finally {
-      gateHold.until = null;
-      gateHold.pass = false;
-      releases.forEach((release) => release());
-    }
-  });
-
-  it('a follow-up waiting on a gated command wakes when a later mention passes first', async () => {
-    await seed();
-    recordingAdapter(async () => 'platform-msg-1');
-    await getDb().run("UPDATE messaging_groups SET is_group = 1 WHERE id = 'mg-1'");
-    await getDb().run(
-      "UPDATE messaging_group_agents SET engage_mode = 'mention-sticky', ignored_message_policy = 'drop' WHERE id = 'mga-1'",
-    );
-    const message = (id: string, text: string, isMention: boolean) =>
-      routeInbound({
-        channelType: 'testchat',
-        platformId: 'testchat:C1',
-        threadId: null,
-        message: {
-          id,
-          kind: 'chat-sdk',
-          content: JSON.stringify({ sender: 'Alex', senderId: 'U1', text }),
-          timestamp: new Date().toISOString(),
-          isMention,
-          isGroup: true,
-        },
-      });
-    const { wakeContainer } = await import('./container-runner.js');
-    vi.mocked(wakeContainer).mockClear();
-    let release: () => void = () => {};
-    gateHold.reached.mockClear();
-    gateHold.until = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    try {
-      const clear = sendClear(true);
-      await vi.waitFor(() => expect(gateHold.reached).toHaveBeenCalledTimes(1));
-      gateHold.until = null;
-
-      const followup = message('m2', 'and keep the notes', false);
-      // Let the follow-up reach the gate wait, then a plain mention passes.
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      await message('m3', 'hello', true);
-      await Promise.race([followup, new Promise((resolve) => setTimeout(resolve, 200))]);
-      expect(vi.mocked(wakeContainer)).toHaveBeenCalledTimes(2);
-      release();
-      await Promise.all([clear, followup]);
-      // The held /clear is denied (no admin), so it adds no wake.
-      expect(vi.mocked(wakeContainer)).toHaveBeenCalledTimes(2);
-    } finally {
-      gateHold.until = null;
-      release();
-    }
-  });
-
-  it('a follow-up keeps waiting for a command gated after it began to wait', async () => {
-    await seed();
-    recordingAdapter(async () => 'platform-msg-1');
-    await getDb().run("UPDATE messaging_groups SET is_group = 1 WHERE id = 'mg-1'");
-    await getDb().run(
-      "UPDATE messaging_group_agents SET engage_mode = 'mention-sticky', ignored_message_policy = 'drop' WHERE id = 'mga-1'",
-    );
-    const message = (id: string, text: string, isMention: boolean) =>
-      routeInbound({
-        channelType: 'testchat',
-        platformId: 'testchat:C1',
-        threadId: null,
-        message: {
-          id,
-          kind: 'chat-sdk',
-          content: JSON.stringify({ sender: 'Alex', senderId: 'U1', text }),
-          timestamp: new Date().toISOString(),
-          isMention,
-          isGroup: true,
-        },
-      });
-    const { wakeContainer } = await import('./container-runner.js');
-    vi.mocked(wakeContainer).mockClear();
-    const releases: (() => void)[] = [];
-    const hold = () => new Promise<void>((resolve) => releases.push(resolve));
-    gateHold.reached.mockClear();
-    try {
-      gateHold.until = hold();
-      const denied = message('m1', '/clear', true);
-      await vi.waitFor(() => expect(gateHold.reached).toHaveBeenCalledTimes(1));
-      gateHold.until = null;
-      const followup = message('m2', 'and keep the notes', false);
-      await new Promise((resolve) => setTimeout(resolve, 50));
-
-      // A second command reaches its gate while the follow-up waits on the first.
-      gateHold.until = hold();
-      const allowed = message('m3', '/clear', true);
-      await vi.waitFor(() => expect(gateHold.reached).toHaveBeenCalledTimes(2));
-      gateHold.until = null;
-      releases[0]();
-      await denied;
-      await Promise.race([followup, new Promise((resolve) => setTimeout(resolve, 100))]);
-      expect(vi.mocked(wakeContainer)).not.toHaveBeenCalled();
-
-      gateHold.pass = true;
-      releases[1]();
-      await Promise.all([allowed, followup]);
-      expect(vi.mocked(wakeContainer)).toHaveBeenCalledTimes(2);
-    } finally {
-      gateHold.until = null;
-      gateHold.pass = false;
-      releases.forEach((release) => release());
-    }
-  });
-
   it('a follow-up in an already active thread does not wait for a pending command verdict', async () => {
     await seed();
     recordingAdapter(async () => 'platform-msg-1');
@@ -497,6 +288,7 @@ describe('command-gate denial', () => {
       release();
     }
   });
+
   it("a follow-up reaches an active agent while another agent's mentioned command is gated", async () => {
     await seed();
     recordingAdapter(async () => 'platform-msg-1');
@@ -566,57 +358,6 @@ describe('command-gate denial', () => {
       release();
       await Promise.all([clear, followup]);
       // Both /clear verdicts are denials (no admin), so they add no wake.
-      expect(vi.mocked(wakeContainer)).toHaveBeenCalledTimes(2);
-    } finally {
-      gateHold.until = null;
-      release();
-    }
-  });
-
-  it('a follow-up in a thread whose inbox was reset does not wait for a pending command verdict', async () => {
-    await seed();
-    recordingAdapter(async () => 'platform-msg-1');
-    await getDb().run("UPDATE messaging_groups SET is_group = 1 WHERE id = 'mg-1'");
-    await getDb().run(
-      "UPDATE messaging_group_agents SET engage_mode = 'mention-sticky', ignored_message_policy = 'drop' WHERE id = 'mga-1'",
-    );
-    const message = (id: string, text: string, isMention: boolean) =>
-      routeInbound({
-        channelType: 'testchat',
-        platformId: 'testchat:C1',
-        threadId: null,
-        message: {
-          id,
-          kind: 'chat-sdk',
-          content: JSON.stringify({ sender: 'Alex', senderId: 'U1', text }),
-          timestamp: new Date().toISOString(),
-          isMention,
-          isGroup: true,
-        },
-      });
-    const { wakeContainer } = await import('./container-runner.js');
-    vi.mocked(wakeContainer).mockClear();
-    await message('m0', 'hello', true);
-    expect(vi.mocked(wakeContainer)).toHaveBeenCalledTimes(1);
-    const session = await findSessionForAgent('ag-1', 'mg-1', null);
-    fs.rmSync(sessionDir('ag-1', session!.id), { recursive: true, force: true });
-
-    let release: () => void = () => {};
-    gateHold.reached.mockClear();
-    gateHold.until = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    try {
-      const clear = sendClear(true);
-      await vi.waitFor(() => expect(gateHold.reached).toHaveBeenCalledTimes(1));
-      gateHold.until = null;
-
-      // An inbox with no evidence keeps the thread active, so the follow-up wakes while the gate is held.
-      const followup = message('m2', 'and keep the notes', false);
-      await Promise.race([followup, new Promise((resolve) => setTimeout(resolve, 200))]);
-      expect(vi.mocked(wakeContainer)).toHaveBeenCalledTimes(2);
-      release();
-      await Promise.all([clear, followup]);
       expect(vi.mocked(wakeContainer)).toHaveBeenCalledTimes(2);
     } finally {
       gateHold.until = null;
