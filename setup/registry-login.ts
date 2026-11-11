@@ -739,7 +739,7 @@ export async function requestDeviceAuthorization(cfg: IdpConfig): Promise<Device
  * Plain stdout on purpose. A status block here would be parsed and discarded by
  * every runner in the tree, and this is the one thing the user must actually see.
  */
-function printDeviceCard(device: DeviceAuthorization, headless: boolean): void {
+export function printDeviceCard(device: DeviceAuthorization, headless: boolean, opened: boolean): void {
   const minutes = Math.max(1, Math.round(device.expiresInS / 60));
   const lines = ['', '   Finish authenticating in a browser:', ''];
 
@@ -762,9 +762,13 @@ function printDeviceCard(device: DeviceAuthorization, headless: boolean): void {
   }
   lines.push(
     '',
+    // A browser is promised only when one was started, so nobody waits for a
+    // page that a refused link or a missing opener will never bring up.
     headless
       ? `   No browser on this machine — open that link on your phone or laptop.`
-      : `   Your browser should open on its own; if it doesn't, use the link above.`,
+      : opened
+        ? `   Your browser should open on its own; if it doesn't, use the link above.`
+        : `   Couldn't open a browser here — open that link yourself.`,
     `   Waiting… this code expires in about ${minutes} minute${minutes === 1 ? '' : 's'}.`,
     '',
   );
@@ -772,40 +776,46 @@ function printDeviceCard(device: DeviceAuthorization, headless: boolean): void {
 }
 
 /**
- * Non-blocking best effort. Silent on failure — the URL is already on screen.
- * The URL is the provider's reply, so only an https link is opened. On WSL the
- * opener (wslview, or xdg-open routed to it) may pass it to cmd.exe or
- * PowerShell, so there it must also hold no shell characters.
+ * Non-blocking best effort. Returns whether an opener was started, so the card
+ * can say so. The URL is the provider's reply, so only an https link is opened.
+ * On WSL the opener (wslview, or xdg-open routed to it) may pass it to cmd.exe
+ * or PowerShell, so there it must also hold no shell characters.
  */
-export function openInBrowser(url: string): void {
-  if (!isHttpsUrl(url)) return;
-  if (isWSL() && !SHELL_SAFE_URL.test(url)) return;
+export function openInBrowser(url: string): boolean {
+  // The parsed form is what gets checked and opened, so the opener never sees
+  // text the https check read differently (leading space, `https:host`).
+  const href = httpsHref(url);
+  if (!href) return false;
+  if (isWSL() && !SHELL_SAFE_URL.test(href)) return false;
   let cmd: [string, string[]] | undefined;
-  if (process.platform === 'darwin') cmd = ['open', [url]];
+  if (process.platform === 'darwin') cmd = ['open', [href]];
   else if (process.platform === 'linux') {
-    if (commandExists('xdg-open')) cmd = ['xdg-open', [url]];
-    else if (isWSL() && commandExists('wslview')) cmd = ['wslview', [url]];
+    if (commandExists('xdg-open')) cmd = ['xdg-open', [href]];
+    else if (isWSL() && commandExists('wslview')) cmd = ['wslview', [href]];
   }
-  if (!cmd) return;
+  if (!cmd) return false;
   try {
     // Detached and unref'd: some xdg-open implementations don't return until the
     // browser exits, and this process has minutes of polling left to do.
     const child = spawn(cmd[0], cmd[1], { stdio: 'ignore', detached: true });
     child.on('error', () => {});
     child.unref();
+    return true;
   } catch {
-    // No opener available. The card already printed the URL.
+    // No opener available. The card still shows the URL.
+    return false;
   }
 }
 
 /** Only characters no shell treats as special: no `&`, `%`, `$`, quotes, brackets or spaces. */
 const SHELL_SAFE_URL = /^https:\/\/[A-Za-z0-9\-._~:/?#=]+$/;
 
-function isHttpsUrl(url: string): boolean {
+function httpsHref(url: string): string | undefined {
   try {
-    return new URL(url).protocol === 'https:';
+    const parsed = new URL(url);
+    return parsed.protocol === 'https:' ? parsed.href : undefined;
   } catch {
-    return false;
+    return undefined;
   }
 }
 
@@ -928,8 +938,9 @@ export async function finishDeviceFlow({ api, idp, device }: DeviceFlow): Promis
 async function deviceLogin(api: string, cfg: IdpConfig): Promise<EnrollResult> {
   const device = await requestDeviceAuthorization(cfg);
   const headless = isHeadless();
-  printDeviceCard(device, headless);
-  if (!headless) openInBrowser(device.verificationUriComplete ?? device.verificationUri);
+  // Opened before the card prints, so the card can report what happened.
+  const opened = !headless && openInBrowser(device.verificationUriComplete ?? device.verificationUri);
+  printDeviceCard(device, headless, opened);
 
   const idpToken = await pollForIdpToken(cfg, device);
   return enroll(api, { method: 'idp', provider: 'workos', access_token: idpToken, client: clientRecord() });
