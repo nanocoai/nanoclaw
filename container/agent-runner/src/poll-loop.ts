@@ -32,6 +32,7 @@ import {
 } from './formatter.js';
 import { stripHarnessTagArtifacts } from './harness-tag-strip.js';
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
+import { runBeforeTurn, runOnError, runPrepareQuery, runProviderEvent, type TurnContext } from './turn-hooks.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
 import type { ProviderRuntimeContract } from './provider-contracts/registry.js';
 
@@ -233,18 +234,25 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       continue;
     }
 
+    const turn: TurnContext = { messages: keep, routing, followUp: false };
+    await runBeforeTurn(turn);
+
     // Format messages: passthrough commands get raw text (only if the
     // provider natively handles slash commands), others get XML.
     const prompt = formatMessagesWithCommands(keep, nativeSlashCommands, config.providerName);
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 
-    const query = config.provider.query({
-      prompt,
-      continuation,
-      cwd: config.cwd,
-      systemContext: config.systemContext,
-    });
+    const input = await runPrepareQuery(
+      {
+        prompt,
+        continuation,
+        cwd: config.cwd,
+        systemContext: config.systemContext,
+      },
+      turn,
+    );
+    const query = config.provider.query(input);
     // Process the query while concurrently polling for new messages
     const skippedSet = new Set(skipped.map((s) => s.id));
     const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
@@ -270,8 +278,8 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         processingIds,
         config.providerName,
         config.provider.onExchangeComplete?.bind(config.provider),
-        prompt,
-        continuation,
+        input.prompt,
+        input.continuation,
         midTurnCompleteDelivery,
         config.signal,
       );
@@ -281,6 +289,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       }
     } catch (err) {
       log(`Query error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
+      await runOnError(err, turn);
 
       // Stale/corrupt continuation recovery: ask the provider whether
       // this error means the stored continuation is unusable, and clear
@@ -530,8 +539,10 @@ export async function processQuery(
         // MODULE-HOOK:scheduling-pre-task-followup:end
 
         if (keep.length === 0) return;
-        // Re-check done — the outer query may have finished while the script
-        // was awaited. Pushing into a closed stream is wasted work; the
+        const followUpRouting = extractRouting(keep);
+        await runBeforeTurn({ messages: keep, routing: followUpRouting, followUp: true });
+        // Re-check done — the outer query may have finished while scripts/hooks
+        // were awaited. Pushing into a closed stream is wasted work; the
         // claimed messages get released by the host's processing-claim sweep.
         if (done) return;
 
@@ -541,7 +552,7 @@ export async function processQuery(
         query.push(prompt);
         archivePrompts.push(prompt);
         const next: QueuedTurn = {
-          routing: extractRouting(keep),
+          routing: followUpRouting,
           unwrappedNudged: false,
           taskBlockNudged: false,
         };
@@ -583,6 +594,7 @@ export async function processQuery(
   try {
     for await (const event of query.events) {
       handleEvent(event, routing);
+      runProviderEvent(event, routing);
       touchHeartbeat();
 
       if (event.type === 'init') {
