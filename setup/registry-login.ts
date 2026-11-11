@@ -800,7 +800,8 @@ export function openInBrowser(url: string): boolean {
     const child = spawn(cmd[0], cmd[1], { stdio: 'ignore', detached: true });
     child.on('error', () => {});
     child.unref();
-    return true;
+    // A failed launch does not throw: it leaves no pid and reports later.
+    return child.pid !== undefined;
   } catch {
     // No opener available. The card still shows the URL.
     return false;

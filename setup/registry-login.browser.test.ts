@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { openInBrowser, printDeviceCard } from './registry-login.js';
 
-const spawn = vi.hoisted(() => vi.fn(() => ({ on: vi.fn(), unref: vi.fn() })));
+const spawn = vi.hoisted(() => vi.fn(() => ({ pid: 4242 as number | undefined, on: vi.fn(), unref: vi.fn() })));
 const host = vi.hoisted(() => ({ wsl: false, commands: new Set<string>() }));
 
 vi.mock('child_process', () => ({ spawn }));
@@ -153,6 +153,14 @@ describe('openInBrowser', () => {
       throw new Error('spawn failed');
     });
     expect(openInBrowser(PLAIN)).toBe(false);
+  });
+
+  // A missing or unrunnable opener makes spawn return a child with no pid.
+  it('returns false when the opener fails to start without throwing', () => {
+    onPlatform('darwin');
+    spawn.mockImplementationOnce(() => ({ pid: undefined, on: vi.fn(), unref: vi.fn() }));
+    expect(openInBrowser(PLAIN)).toBe(false);
+    expect(spawn).toHaveBeenCalledTimes(1);
   });
 });
 
