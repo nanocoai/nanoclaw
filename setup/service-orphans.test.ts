@@ -21,10 +21,10 @@ afterEach(() => {
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
-function standIn(projectRoot: string): ChildProcess {
+function standIn(projectRoot: string, suffix = ''): ChildProcess {
   const child = spawn(
     process.execPath,
-    ['-e', 'setInterval(() => {}, 1000)', path.join(projectRoot, 'dist/index.js')],
+    ['-e', 'setInterval(() => {}, 1000)', path.join(projectRoot, 'dist/index.js') + suffix],
     {
       stdio: 'ignore',
     },
@@ -65,5 +65,31 @@ describe('killOrphanedProcesses', () => {
     killOrphanedProcesses(path.join(parent, 'a.c'));
 
     expect(await exited(child, 500)).toBe(false);
+  });
+
+  it('leaves a host under a longer path that ends with this folder alone', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "orphans-Dan's (nano)claw+"));
+    roots.push(root);
+    const host = standIn(root);
+    const other = standIn(path.join(os.tmpdir(), 'backup', root));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    killOrphanedProcesses(root);
+
+    expect(await exited(host, 2000)).toBe(true);
+    expect(await exited(other, 500)).toBe(false);
+  });
+
+  it('leaves a process that names dist/index.js.map alone', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "orphans-Dan's (nano)claw+"));
+    roots.push(root);
+    const host = standIn(root);
+    const other = standIn(root, '.map');
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    killOrphanedProcesses(root);
+
+    expect(await exited(host, 2000)).toBe(true);
+    expect(await exited(other, 500)).toBe(false);
   });
 });

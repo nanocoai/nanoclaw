@@ -428,11 +428,20 @@ async function setupLinux(projectRoot: string, nodePath: string, homeDir: string
 export function killOrphanedProcesses(projectRoot: string): void {
   try {
     // No shell, and the folder matched literally: it may hold spaces, quotes or regex characters.
-    execFileSync('pkill', ['-f', `${escapeRegex(projectRoot)}/dist/index\\.js`], { stdio: 'ignore' });
+    execFileSync('pkill', ['-f', hostProcessPattern(projectRoot)], { stdio: 'ignore' });
   } catch {
     // Exit 1 means no orphans. A missing pkill stays best effort, as before.
   }
   log.info('Stopped any orphaned nanoclaw processes');
+}
+
+/**
+ * `pkill -f` pattern for this install's host. Every launcher runs
+ * `<node> <projectRoot>/dist/index.js`, so the path has whitespace or a line
+ * end on each side; a longer path ending in it, or `index.js.map`, is not it.
+ */
+export function hostProcessPattern(projectRoot: string): string {
+  return `(^|[[:space:]])${escapeRegex(projectRoot)}/dist/index\\.js([[:space:]]|$)`;
 }
 
 function escapeRegex(value: string): string {
