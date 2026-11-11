@@ -31,7 +31,8 @@ export const HELPER_BINARY_NAME = `docker-credential-${CRED_HELPER_NAME}`;
 /**
  * Must match `HELPER_ID` in `setup/registry/credential-helper.mjs`. Install
  * verifies the installed binary prints it, so drift fails at install time
- * rather than silently making uninstall refuse to clean up.
+ * rather than silently making uninstall refuse to clean up. `container/pull.sh`
+ * looks for the same string before it re-points a helper whose node has moved.
  */
 const HELPER_MARKER = 'nanoclaw-docker-credential-helper';
 

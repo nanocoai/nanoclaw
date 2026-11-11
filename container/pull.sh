@@ -125,6 +125,47 @@ lock_sha256() {
     fi
 }
 
+# The credential helper's first line names one exact node binary. That path
+# goes away when node is upgraded or replaced, and docker then fails the pull
+# before any credential is asked for. Re-point a helper of ours that no longer
+# starts at the node on PATH; HELPER_BROKEN is set when that is not possible.
+HELPER_BROKEN=""
+HELPER_ID="nanoclaw-docker-credential-helper"
+# The installer's own test: the helper runs and prints its id. An exit code
+# alone is not enough, since bash runs a file with no first line as a script.
+helper_starts() {
+    "$1" version 2>/dev/null | grep -q "$HELPER_ID"
+}
+repair_credential_helper() {
+    local helper node tmp
+    helper="$(command -v docker-credential-nanoclaw 2>/dev/null || true)"
+    if [ -z "$helper" ] || helper_starts "$helper"; then
+        return 0
+    fi
+    # Only a file setup/install-cred-helper.ts wrote: its marker, and a first
+    # line that is ours to replace.
+    if ! grep -q "$HELPER_ID" "$helper" 2>/dev/null \
+        || [ "$(head -c 2 "$helper" 2>/dev/null)" != "#!" ]; then
+        return 0
+    fi
+    node="$(node -p process.execPath 2>/dev/null || true)"
+    # Prove the new copy starts before it replaces the old one. No dot in its
+    # name: node refuses to run a file with an extension it does not know.
+    tmp="$(mktemp "${helper}-XXXXXX" 2>/dev/null || true)"
+    if [ -n "$node" ] && [ -n "$tmp" ] \
+        && { printf '#!%s\n' "$node"; tail -n +2 "$helper"; } 2>/dev/null > "$tmp" \
+        && chmod 755 "$tmp" 2>/dev/null \
+        && helper_starts "$tmp" \
+        && mv -f "$tmp" "$helper" 2>/dev/null; then
+        echo "The credential helper no longer started on the Node it was installed with; re-pointed it at ${node}."
+        return 0
+    fi
+    if [ -n "$tmp" ]; then
+        rm -f "$tmp" 2>/dev/null || true
+    fi
+    HELPER_BROKEN="$helper"
+}
+
 HOST_ARCH="$(host_arch)"
 HOST_PLATFORM="linux/${HOST_ARCH}"
 
@@ -227,10 +268,21 @@ else
         echo "Warning: couldn't create ${NONCE_DIR}; a gated pull will be refused by the credential helper." >&2
     fi
 
+    repair_credential_helper
+
     if ! ${CONTAINER_RUNTIME} pull "$REF"; then
         echo "" >&2
         echo "Pull failed for ${REF}." >&2
-        echo "  If the registry needs credentials, run \`docker login <registry>\` and" >&2
+        # A helper that cannot start only matters for a registry wired to it,
+        # and this script does not read docker's config: say both.
+        if [ -n "$HELPER_BROKEN" ]; then
+            echo "  The NanoClaw credential helper does not start: ${HELPER_BROKEN}" >&2
+            echo "  If this registry signs in through it, re-create it, then retry:" >&2
+            echo "    pnpm exec tsx setup/install-cred-helper.ts --bin-dir \"$(dirname "$HELPER_BROKEN")\"" >&2
+            echo "  Otherwise, if the registry needs credentials, run \`docker login <registry>\` and" >&2
+        else
+            echo "  If the registry needs credentials, run \`docker login <registry>\` and" >&2
+        fi
         echo "  retry — this script deliberately has no credential handling of its own." >&2
         exit 1
     fi
