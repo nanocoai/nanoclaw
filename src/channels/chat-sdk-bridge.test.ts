@@ -11,6 +11,7 @@ import { log } from '../log.js';
 import { CardTooLongError } from './ask-question.js';
 import {
   attachmentBytesToBase64,
+  CARD_EDIT_SETTLE_MS,
   CARD_TEXT_BLOCK_LENGTH,
   createChatSdkBridge,
   splitCardText,
@@ -1361,7 +1362,7 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
     const { bridge, click, onAction, editMessage } = await startDiscord('q-discord', review);
     try {
       expect((await click({ id: 'clicker-1', username: 'clicker', global_name: 'Clicker' })).status).toBe(200);
-      // Acked at once; the buttons go only once the host accepts the click (the embed is left for the edit below).
+      // Acked at once; the buttons go only once the host accepts the click and the card edit settles.
       await vi.waitFor(() =>
         expect(discordCalls()).toEqual([
           ['POST', CALLBACK, ACK],
@@ -1421,7 +1422,7 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
     }
   });
 
-  it('acks within the time limit, then removes the buttons only after the host accepts the click', async () => {
+  it('acks within the time limit, then edits the card and removes the buttons only after the host accepts', async () => {
     const { bridge, click, onAction, editMessage } = await startDiscord('q-discord-order', review);
     const order: string[] = [];
     vi.mocked(globalThis.fetch).mockImplementation(async (_url, init) => {
@@ -1442,7 +1443,67 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
       // The host has not answered yet: acked, buttons still there.
       await vi.waitFor(() => expect(order).toEqual(['acked', 'decision dispatched']));
       accept();
-      await vi.waitFor(() => expect(order).toEqual(['acked', 'decision dispatched', 'buttons removed', 'card edited']));
+      await vi.waitFor(() => expect(order).toEqual(['acked', 'decision dispatched', 'card edited', 'buttons removed']));
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('never has the button removal and the card edit in flight together', async () => {
+    const { bridge, click, editMessage } = await startDiscord('q-discord-serial', review);
+    let finishEdit!: () => void;
+    editMessage.mockImplementation(
+      () => new Promise((resolve) => (finishEdit = () => resolve({ id: 'card-1', threadId: 't', raw: {} }))) as never,
+    );
+    const patches = () => discordCalls().filter(([method]) => method === 'PATCH');
+    try {
+      await click({ id: 'clicker-1', username: 'Ann' });
+      await vi.waitFor(() => expect(editMessage).toHaveBeenCalledTimes(1));
+      // Two edits of one message at once can drop the card text: the removal waits.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(patches()).toEqual([]);
+      finishEdit();
+      await vi.waitFor(() => expect(patches()).toEqual([['PATCH', ORIGINAL, { components: [] }]]));
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('removes the buttons anyway once a card edit has stalled for the settle time', async () => {
+    const { bridge, click, editMessage } = await startDiscord('q-discord-edit-stalls', review);
+    editMessage.mockImplementation(() => new Promise(() => {}) as never);
+    const realSetTimeout = globalThis.setTimeout;
+    const settleTimers: Array<() => void> = [];
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void, ms?: number) => {
+      if (ms === CARD_EDIT_SETTLE_MS) {
+        settleTimers.push(fn);
+        return 0;
+      }
+      return realSetTimeout(fn, ms);
+    }) as never);
+    const patches = () => discordCalls().filter(([method]) => method === 'PATCH');
+    try {
+      await click({ id: 'clicker-1', username: 'Ann' });
+      await vi.waitFor(() => expect(settleTimers).toHaveLength(1));
+      expect(patches()).toEqual([]);
+      settleTimers[0]();
+      await vi.waitFor(() => expect(patches()).toEqual([['PATCH', ORIGINAL, { components: [] }]]));
+    } finally {
+      vi.mocked(globalThis.setTimeout).mockRestore();
+      await bridge.teardown();
+    }
+  });
+
+  it('still removes the buttons when the card edit fails', async () => {
+    const { bridge, click, editMessage } = await startDiscord('q-discord-edit-fails', review);
+    editMessage.mockRejectedValue(new Error('embed too long'));
+    try {
+      await click({ id: 'clicker-1', username: 'Ann' });
+      await vi.waitFor(() =>
+        expect(discordCalls().filter(([method]) => method === 'PATCH')).toEqual([
+          ['PATCH', ORIGINAL, { components: [] }],
+        ]),
+      );
     } finally {
       await bridge.teardown();
     }
