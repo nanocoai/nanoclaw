@@ -13,6 +13,7 @@ import path from 'path';
 
 import { describe, it, expect, vi } from 'vitest';
 
+import { log } from '../log.js';
 import type { ChannelSetup, InboundMessage } from './adapter.js';
 import {
   appendMediaFailureNote,
@@ -745,6 +746,175 @@ describe('photon adapter (mocked SDK)', () => {
     ]);
     await waitFor(() => confirmations().length === 1);
     await adapter.teardown();
+  });
+
+  it('takes only the first of two quick answers when the host returns nothing', async () => {
+    const { sdk, queue, sends, makeSpace } = makeFakeSdk();
+    const host = makeHostConfig();
+    // A core from before click outcomes: onAction is a plain call that returns nothing.
+    host.config.onAction = (questionId, option, userId) => {
+      host.actions.push({ questionId, option, userId });
+    };
+    const adapter = createPhotonAdapter(
+      { projectId: 'p', projectSecret: 's', markdown: true, telemetry: false, maxInlineAttachmentBytes: 1000 },
+      { loadSpectrum: async () => sdk },
+    );
+    await adapter.setup(host.config);
+    await adapter.deliver('group-abc', null, {
+      kind: 'chat',
+      content: {
+        type: 'ask_question',
+        questionId: 'q1',
+        title: 'Deploy?',
+        question: 'Ship it?',
+        options: ['Approve', 'Reject'],
+      },
+    });
+    const confirmations = (label: string) =>
+      sends.filter((s) => String(s.builder.payload).includes(label) && !String(s.builder.payload).includes('Ship it?'));
+    const space = makeSpace('group-abc', 'group');
+    const say = (id: string, from: string, text: string) =>
+      queue.push([space, { id, direction: 'inbound', sender: { id: from }, content: { type: 'text', text } }]);
+    say('r1', '+15550000001', '/approve');
+    say('r2', '+15550000002', '/reject');
+
+    // The first answer closed the question, so the second is an ordinary message.
+    await waitFor(() => host.inbound.length === 1);
+    expect((host.inbound[0].msg.content as { text: string }).text).toBe('/reject');
+    expect(host.actions).toEqual([{ questionId: 'q1', option: 'Approve', userId: '+15550000001' }]);
+    await waitFor(() => confirmations('Approve').length === 1);
+    expect(confirmations('Reject')).toHaveLength(0);
+    await adapter.teardown();
+  });
+
+  describe('an answer the host is still deciding', () => {
+    /** Asks q1 in `chat`, on a host that holds every answer until the test settles it. */
+    async function askOnSlowHost(chat: string, options: string[]) {
+      const { sdk, queue, sends, makeSpace } = makeFakeSdk();
+      const host = makeHostConfig();
+      const held: Array<{ settle: (outcome: 'accepted' | 'refused') => void; fail: (err: Error) => void }> = [];
+      host.config.onAction = (questionId, option, userId) => {
+        host.actions.push({ questionId, option, userId });
+        return new Promise((resolve, reject) => held.push({ settle: resolve, fail: reject })) as never;
+      };
+      const adapter = createPhotonAdapter(
+        { projectId: 'p', projectSecret: 's', markdown: true, telemetry: false, maxInlineAttachmentBytes: 1000 },
+        { loadSpectrum: async () => sdk },
+      );
+      await adapter.setup(host.config);
+      const ask = (questionId: string) =>
+        adapter.deliver(chat, null, {
+          kind: 'chat',
+          content: { type: 'ask_question', questionId, title: 'Deploy?', question: 'Ship it?', options },
+        });
+      await ask('q1');
+      let sent = 0;
+      const say = (inChat: string, from: string, text: string) =>
+        queue.push([
+          inChat.startsWith('+') ? makeSpace(inChat, 'dm', inChat) : makeSpace(inChat, 'group'),
+          { id: `m${++sent}`, direction: 'inbound', sender: { id: from }, content: { type: 'text', text } },
+        ]);
+      // Confirmations only: the question card and read receipts are sends too.
+      const confirmations = (label: string) =>
+        sends.filter(
+          (s) => String(s.builder.payload).includes(label) && !String(s.builder.payload).includes('Ship it?'),
+        );
+      return { adapter, host, held, ask, say, confirmations };
+    }
+
+    it('does not hold up other messages, in that chat or any other', async () => {
+      const { adapter, host, held, say, confirmations } = await askOnSlowHost('+15551112222', ['Approve']);
+      say('+15551112222', '+15551112222', '/approve');
+      await waitFor(() => host.actions.length === 1);
+
+      say('+15553334444', '+15553334444', 'hello from another chat');
+      say('+15551112222', '+15551112222', 'still here');
+      await waitFor(() => host.inbound.length === 2);
+      expect(host.inbound.map((i) => i.platformId)).toEqual(['+15553334444', '+15551112222']);
+
+      // The answer is still confirmed once the host accepts it, however late.
+      expect(confirmations('Approve')).toHaveLength(0);
+      held[0].settle('accepted');
+      await waitFor(() => confirmations('Approve').length === 1);
+      await adapter.teardown();
+    });
+
+    it('hands the answers in one chat to the host one at a time, in the order they came', async () => {
+      const { adapter, host, held, say, confirmations } = await askOnSlowHost('group-abc', ['Approve', 'Reject']);
+      say('group-abc', '+15550000001', '/approve');
+      say('group-abc', '+15550000002', '/reject');
+      await waitFor(() => host.actions.length >= 1);
+      await new Promise((r) => setTimeout(r, 20));
+      // The second answer waits for the host to finish with the first.
+      expect(host.actions).toEqual([{ questionId: 'q1', option: 'Approve', userId: '+15550000001' }]);
+
+      // Refused (say, not an approver): the question stays open for the answer behind it.
+      held[0].settle('refused');
+      await waitFor(() => host.actions.length === 2);
+      expect(host.actions[1]).toEqual({ questionId: 'q1', option: 'Reject', userId: '+15550000002' });
+      held[1].settle('accepted');
+      await waitFor(() => confirmations('Reject').length === 1);
+      expect(confirmations('Approve')).toHaveLength(0);
+      // Neither answer woke the agent as a plain message.
+      expect(host.inbound).toHaveLength(0);
+      await adapter.teardown();
+    });
+
+    it('logs an answer the host fails on, and still takes the next one', async () => {
+      const errors = vi.spyOn(log, 'error').mockImplementation(() => {});
+      try {
+        const { adapter, host, held, say, confirmations } = await askOnSlowHost('+15551112222', ['Approve']);
+        say('+15551112222', '+15551112222', '/approve');
+        await waitFor(() => host.actions.length === 1);
+        const failure = new Error('host is down');
+        held[0].fail(failure);
+        await waitFor(() => errors.mock.calls.some(([, data]) => data?.err === failure));
+
+        // The question is still open: a retry answers it instead of waking the agent.
+        say('+15551112222', '+15551112222', '/approve');
+        await waitFor(() => host.actions.length === 2);
+        held[1].settle('accepted');
+        await waitFor(() => confirmations('Approve').length === 1);
+        expect(host.inbound).toHaveLength(0);
+        // Logged once, by the adapter: nothing was left for the process-wide handler.
+        expect(errors.mock.calls.filter(([, data]) => data?.err === failure)).toHaveLength(1);
+        expect(errors.mock.calls.map(([message]) => message)).not.toContain('Unhandled rejection');
+        await adapter.teardown();
+      } finally {
+        errors.mockRestore();
+      }
+    });
+
+    it('drops an answer still waiting its turn when the adapter stops', async () => {
+      const { adapter, host, held, say } = await askOnSlowHost('group-abc', ['Approve', 'Reject']);
+      say('group-abc', '+15550000001', '/approve');
+      say('group-abc', '+15550000002', '/reject');
+      // Messages are read one at a time: once this one is through, the second answer is waiting.
+      say('+15553334444', '+15553334444', 'hello from another chat');
+      await waitFor(() => host.inbound.length === 1);
+      expect(host.actions).toHaveLength(1);
+
+      await adapter.teardown();
+      held[0].settle('refused');
+      await new Promise((r) => setTimeout(r, 20));
+      expect(host.actions).toEqual([{ questionId: 'q1', option: 'Approve', userId: '+15550000001' }]);
+    });
+
+    it('leaves a newer question open when an answer to the one before it is accepted late', async () => {
+      const { adapter, host, held, ask, say, confirmations } = await askOnSlowHost('+15551112222', ['Approve']);
+      say('+15551112222', '+15551112222', '/approve');
+      await waitFor(() => host.actions.length === 1);
+      // The next question arrives in the chat while the host still has the first answer.
+      await ask('q2');
+      held[0].settle('accepted');
+      await waitFor(() => confirmations('Approve').length === 1);
+
+      say('+15551112222', '+15551112222', '/approve');
+      await waitFor(() => host.actions.length === 2 || host.inbound.length === 1);
+      expect(host.actions[1]).toEqual({ questionId: 'q2', option: 'Approve', userId: '+15551112222' });
+      expect(host.inbound).toHaveLength(0);
+      await adapter.teardown();
+    });
   });
 
   it('sends a tapback reaction using the raw Photon id and emoji', async () => {
