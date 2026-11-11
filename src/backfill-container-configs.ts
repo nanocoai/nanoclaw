@@ -67,6 +67,7 @@ export async function backfillContainerConfigs(): Promise<void> {
       cli_scope: 'group',
       timezone: null,
       speed: null,
+      system_prompt_mode: null,
       updated_at: new Date().toISOString(),
     };
 
