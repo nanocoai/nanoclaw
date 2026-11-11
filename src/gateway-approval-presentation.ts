@@ -8,11 +8,31 @@ const safeMultiline = (text: string) =>
 const safe = (text: string) => safeMultiline(text.replace(/[\r\n]/g, ' '));
 
 /**
- * A rough cap, counted before escaping: channels cap or clip titles (the
- * tightest at 60), some after expanding emoji names. A longer title or action
- * goes in full into the body under a fixed title.
+ * Longest card title, counted after escaping: the tightest channel header
+ * holds 60. A longer title is cut with "…", and the full text goes at the top
+ * of the body.
  */
 export const MAX_CARD_TITLE_CHARS = 60;
+
+const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
+/** Cuts the raw text a whole character at a time, so a cut never splits a character or an escape. */
+function cardTitle(text: string, escape: (text: string) => string): string {
+  const full = escape(text);
+  if (full.length <= MAX_CARD_TITLE_CHARS) return full;
+  let title = '';
+  let kept = '';
+  // Control bytes show as spaces; group characters the way they show.
+  // eslint-disable-next-line no-control-regex -- control bytes in gateway-supplied display text
+  for (const { segment } of graphemes.segment(text.replace(/[\x00-\x1f]/g, ' '))) {
+    const shown = escape(segment);
+    title += shown;
+    if (title.length >= MAX_CARD_TITLE_CHARS) break;
+    // Drop trailing spaces a whole character at a time, like the cut.
+    if (shown.trim()) kept = title;
+  }
+  return `${kept}…`;
+}
 
 /** One renderer for every gateway; no inference of business intent from HTTP methods. */
 export function gatewayApprovalPresentation(request: GatewayApprovalRequest): { title: string; question: string } {
@@ -51,7 +71,9 @@ export function gatewayApprovalPresentation(request: GatewayApprovalRequest): { 
   const summary = request.summary;
   if (!summary) {
     if (request.title.length <= MAX_CARD_TITLE_CHARS) return { title: request.title, question: request.question };
-    return { title: 'Approve external request', question: `*Request:* ${safe(request.title)}\n${request.question}` };
+    // Like a short legacy title, a cut one is not escaped.
+    const title = cardTitle(request.title, (text) => text);
+    return { title, question: `*Request:* ${safe(request.title)}\n${request.question}` };
   }
   for (const field of ['agent', 'action', 'resource', 'reason'] as const) {
     if (typeof summary[field] !== 'string' || !summary[field].trim() || summary[field].length > 600) {
@@ -94,9 +116,8 @@ export function gatewayApprovalPresentation(request: GatewayApprovalRequest): { 
   const scope = detailed
     ? 'Approve once to allow this action.'
     : 'Approve allows this request once. It does not connect an account or change its permissions.';
-  let title = 'Approve external request';
-  if (detailed) title = action.length <= MAX_CARD_TITLE_CHARS ? action : 'Approve this action';
-  // Never cut: the bridge posts long text in several blocks, and a channel
+  const title = detailed ? cardTitle(summary.action, safe) : 'Approve external request';
+  // Never cut the body: the bridge posts long text in several blocks, and a channel
   // that caps a whole card refuses one too long, so the approval fails closed.
   return { title, question: [...lines, scope].join('\n') };
 }
