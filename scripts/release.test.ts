@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -582,6 +582,85 @@ describe('release.mjs order command', () => {
   });
 });
 
+/** Git for fixture repositories: a fixed identity, and no signing or hooks from the machine's own config. */
+const git = (cwd: string, ...args: string[]) =>
+  execFileSync(
+    'git',
+    [
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      '-c',
+      'commit.gpgsign=false',
+      '-c',
+      'tag.gpgsign=false',
+      '-c',
+      'core.hooksPath=/dev/null',
+      ...args,
+    ],
+    { cwd, encoding: 'utf8', stdio: 'pipe' },
+  ).trim();
+
+describe('release workflow target check', () => {
+  const steps = ['Verify target is on main', 'Re-verify immutable release inputs'];
+  const lines = releaseWorkflow.split('\n');
+  const after = (from: number, text: string) => lines.findIndex((line, i) => i > from && line.includes(text));
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** The step's script through the on-main check: what has to pass before any target code runs. */
+  function guard(step: string): string {
+    const first = after(after(-1, `- name: ${step}`), 'run: |') + 1;
+    return lines
+      .slice(first, after(first, 'git merge-base --is-ancestor "$TARGET_SHA" origin/main') + 1)
+      .map((line) => line.trim())
+      .join('\n');
+  }
+
+  /** A checkout detached at the target, as actions/checkout leaves it; origin's main is one commit ahead. */
+  function fixture() {
+    const root = mkdtempSync(path.join(tmpdir(), 'release-target-workflow-'));
+    dirs.push(root);
+    const origin = path.join(root, 'origin');
+    git(root, 'init', '-q', '-b', 'main', origin);
+    git(origin, 'commit', '-q', '--allow-empty', '-m', 'target');
+    const target = git(origin, 'rev-parse', 'HEAD');
+    git(origin, 'commit', '-q', '--allow-empty', '-m', 'later on main');
+    const checkout = path.join(root, 'checkout');
+    git(root, 'clone', '-q', origin, checkout);
+    git(checkout, 'checkout', '-q', '--detach', target);
+    return { checkout, target };
+  }
+
+  const run = (step: string, checkout: string, targetSha: string) =>
+    spawnSync('bash', ['-c', guard(step)], {
+      cwd: checkout,
+      encoding: 'utf8',
+      env: { ...process.env, TARGET_SHA: targetSha },
+    });
+
+  it.each(steps)('%s: refuses a target that is not the checked-out commit', { timeout: 30_000 }, (step) => {
+    const { checkout, target } = fixture();
+    expect(run(step, checkout, target).status).toBe(0);
+    // The target is still a commit on main, but the code in the checkout is now another commit.
+    git(checkout, 'checkout', '-q', '--detach', 'origin/main');
+    expect(run(step, checkout, target).status).toBe(1);
+  });
+
+  it.each(steps)('%s: refuses a target that is not a full lowercase SHA, and says so', { timeout: 30_000 }, (step) => {
+    const { checkout, target } = fixture();
+    for (const malformed of [target.slice(0, 12), target.toUpperCase(), `${target}0`, 'main']) {
+      expect(run(step, checkout, malformed)).toMatchObject({
+        status: 1,
+        stdout: '::error::target_sha must be a full lowercase 40-character commit SHA\n',
+      });
+    }
+  });
+});
+
 describe('release workflow order check', () => {
   const script = fileURLToPath(new URL('./release.mjs', import.meta.url));
   const lines = releaseWorkflow.split('\n');
@@ -594,25 +673,6 @@ describe('release workflow order check', () => {
   afterEach(() => {
     for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
   });
-
-  const git = (cwd: string, ...args: string[]) =>
-    execFileSync(
-      'git',
-      [
-        '-c',
-        'user.name=Test',
-        '-c',
-        'user.email=test@example.com',
-        '-c',
-        'commit.gpgsign=false',
-        '-c',
-        'tag.gpgsign=false',
-        '-c',
-        'core.hooksPath=/dev/null',
-        ...args,
-      ],
-      { cwd, encoding: 'utf8', stdio: 'pipe' },
-    ).trim();
 
   /** The target commit carries an old release.mjs without `order`; GITHUB_SHA carries this one. */
   function fixture(tags: string[], workflowScript = readFileSync(script, 'utf8')) {
