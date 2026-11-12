@@ -1,14 +1,15 @@
 import { escapeInvisibles } from './card-text.js';
 import type { GatewayApprovalRequest } from './gateway-providers/gateway-provider-registry.js';
 
-// Escape Markdown syntax instead of changing the displayed account or resource.
-const safeMultiline = (text: string) =>
+// Gateway values are Markdown text, not fenced JSON: keep ordinary whitespace
+// and backticks, while making bidi/hidden characters visible.
+const visible = (text: string) =>
   text
-    .split('\n')
-    .map(escapeInvisibles)
-    .join('\n')
-    .replace(/[\\<>&`*_~[\]()]/g, '\\$&');
-
+    .split(/([\t\r\n`])/)
+    .map((part) => (/^[\t\r\n`]$/.test(part) ? part : escapeInvisibles(part)))
+    .join('');
+const safeMultiline = (text: string) => visible(text).replace(/[\\<>&`*_~[\]()]/g, '\\$&');
+const plainTitle = (text: string) => visible(text.replace(/[\r\n]/g, ' '));
 const safe = (text: string) => safeMultiline(text.replace(/[\r\n]/g, ' '));
 
 /**
@@ -56,7 +57,7 @@ export function gatewayApprovalPresentation(request: GatewayApprovalRequest): { 
   if (!summary) {
     const title = safe(request.title);
     const question = safeMultiline(request.question);
-    if (title.length <= MAX_CARD_TITLE_CHARS) return { title, question };
+    if (title.length <= MAX_CARD_TITLE_CHARS) return { title: plainTitle(request.title), question };
     return { title: 'Approve external request', question: `*Request:* ${title}\n${question}` };
   }
   for (const field of ['agent', 'action', 'resource', 'reason'] as const) {
@@ -101,7 +102,7 @@ export function gatewayApprovalPresentation(request: GatewayApprovalRequest): { 
     ? 'Approve once to allow this action.'
     : 'Approve allows this request once. It does not connect an account or change its permissions.';
   let title = 'Approve external request';
-  if (detailed) title = action.length <= MAX_CARD_TITLE_CHARS ? action : 'Approve this action';
+  if (detailed) title = action.length <= MAX_CARD_TITLE_CHARS ? plainTitle(summary.action) : 'Approve this action';
   // Never cut: the bridge posts long text in several blocks, and a channel
   // that caps a whole card refuses one too long, so the approval fails closed.
   return { title, question: [...lines, scope].join('\n') };
