@@ -9,7 +9,7 @@ import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { HELPER_BINARY_NAME, refreshInstalledCredentialHelper, renderHelper } from './install-cred-helper.js';
 
@@ -160,6 +160,35 @@ describe('refreshInstalledCredentialHelper', () => {
 
     expect(fs.readFileSync(dockerConfigPath, 'utf-8')).toBe(JSON.stringify(routes));
     expect(fs.readFileSync(helper, 'utf-8')).toBe(renderHelper(SOURCE, process.execPath));
+  });
+
+  it('rewrites a linked helper at its target and keeps the link', () => {
+    const { binDir, helper: link, dockerConfigPath } = install('');
+    const target = path.join(scratchDir(), 'helper');
+    fs.writeFileSync(target, olderSetup, { mode: 0o755 });
+    fs.rmSync(link);
+    fs.symlinkSync(target, link);
+
+    refreshInstalledCredentialHelper({ binDir, dockerConfigPath });
+
+    expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(fs.readFileSync(target, 'utf-8')).toBe(renderHelper(SOURCE, process.execPath));
+    expect(version(link, nodeDir('broken')).status).toBe(0);
+  });
+
+  it('does not write through a link that now points at a file that is not the helper', () => {
+    const { binDir, dockerConfigPath } = install(olderSetup);
+    const other = path.join(scratchDir(), 'notes.txt');
+    fs.writeFileSync(other, 'not a helper\n');
+    const resolve = vi.spyOn(fs, 'realpathSync').mockReturnValue(other);
+
+    try {
+      refreshInstalledCredentialHelper({ binDir, dockerConfigPath });
+    } finally {
+      resolve.mockRestore();
+    }
+
+    expect(fs.readFileSync(other, 'utf-8')).toBe('not a helper\n');
   });
 
   it('does nothing when no helper is installed', () => {

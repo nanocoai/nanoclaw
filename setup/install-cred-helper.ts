@@ -314,7 +314,10 @@ export function refreshInstalledCredentialHelper(options: CredHelperOptions = {}
   // With no registry wired to the helper, docker never starts it.
   if (!helper.helperPath || helper.wiredHosts.length === 0) return;
   try {
-    writeHelper(helper.helperPath);
+    // A linked helper is rewritten at its target, so the link stays a link.
+    // The target is checked itself: the link can point elsewhere by now.
+    const target = fs.realpathSync(helper.helperPath);
+    if (isOurBinary(target)) writeHelper(target);
   } catch (err) {
     log.warn('Could not re-install the docker credential helper', { helperPath: helper.helperPath, err });
   }
