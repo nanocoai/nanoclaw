@@ -140,7 +140,7 @@ describe('structured chat links', () => {
     const result = formatMessages(getPendingMessages());
 
     expect(result).toContain(
-      'read example.com/assets/…/review\n[link: https://example.com/assets/a_123/review?x=1&amp;y=2]',
+      'read example.com/assets/…/review\n[link: https://example.com/assets/a_123/review?x=1&y=2]',
     );
   });
 
@@ -246,20 +246,19 @@ describe('reply_to + quoted_message rendering', () => {
     });
     const result = formatMessages(getPendingMessages());
     expect(result).toContain('from="A &amp; B"');
-    expect(result).toContain('&lt;script&gt;');
-    expect(result).toContain('&quot;xss&quot;');
+    expect(result).toContain('&lt;script>alert("xss")&lt;/script>');
   });
 });
 
 describe('XML escaping', () => {
-  it('escapes <, >, &, " in sender and body', () => {
+  it('escapes <, >, &, " in sender; in the body, only a < that could start a tag', () => {
     insertMessage('m1', 'chat', {
       sender: 'A & B <Co>',
       text: '<script>alert("xss")</script>',
     });
     const result = formatMessages(getPendingMessages());
     expect(result).toContain('sender="A &amp; B &lt;Co&gt;"');
-    expect(result).toContain('&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;');
+    expect(result).toContain('&lt;script>alert("xss")&lt;/script>');
   });
 });
 
@@ -339,7 +338,7 @@ describe('app_context rendering (Slack agent mode, contract C4)', () => {
       app_context: { entities: [{ type: 'channel', id: 'C1<&>' }] },
     });
     const result = formatMessages(getPendingMessages());
-    expect(result).toContain('(viewing: channel C1&lt;&amp;&gt;)');
+    expect(result).toContain('(viewing: channel C1<&>)');
   });
 });
 
