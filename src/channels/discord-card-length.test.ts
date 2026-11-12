@@ -356,3 +356,40 @@ describe('escapeDiscordCardText', () => {
     }
   });
 });
+
+describe('parent Discord resolved-card size budget', () => {
+  it.each([
+    ['request', true],
+    ['q'.repeat(3987), false],
+  ] as const)('keeps request text only when the full edit fits', async (question, keepsRequest) => {
+    const bridge = (await registrations.get('discord')!.factory())!;
+    const resolution = 'Approved by ' + 'n'.repeat(100);
+    await bridge.deliver('discord:g1:c1', null, {
+      kind: 'chat-sdk',
+      content: {
+        operation: 'edit',
+        messageId: 'card',
+        terminalCard: { title: 'Review', question, resolution },
+      },
+    });
+    expect(patches).toHaveLength(1);
+    const embed = (patches[0].body.embeds as Array<{ description: string }>)[0];
+    expect(embed.description.length).toBeLessThanOrEqual(4096);
+    expect(embed.description).toContain(resolution);
+    expect(embed.description.includes(question)).toBe(keepsRequest);
+  });
+  it('refuses a decision that cannot fit even without the request', async () => {
+    const bridge = (await registrations.get('discord')!.factory())!;
+    await expect(
+      bridge.deliver('discord:g1:c1', null, {
+        kind: 'chat-sdk',
+        content: {
+          operation: 'edit',
+          messageId: 'card',
+          terminalCard: { title: 'Review', question: 'Allow?', resolution: 'n'.repeat(4200) },
+        },
+      }),
+    ).rejects.toBeInstanceOf(CardTooLongError);
+    expect(patches).toHaveLength(0);
+  });
+});
