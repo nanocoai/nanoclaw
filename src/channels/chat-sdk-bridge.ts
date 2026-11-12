@@ -652,6 +652,9 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     const outcome = await setupConfig.onAction(click.questionId, selectedOption, click.userId, address);
     try {
       if (outcome === 'refused') return await transport.notePrivately(REFUSED_CLICK_NOTE);
+      // The host redraws a deferred card itself and is done with it, redrawn or
+      // not, by the time it accepts: only the buttons are left to remove.
+      if (outcome === 'accepted' && render?.deferResolution) return transport.removeButtons?.();
       // No render: already resolved (a late or repeated click), or a pending row
       // without stored render metadata; deferred: the host updates the card itself.
       if ((outcome !== 'accepted' && outcome !== 'closed') || !render || render.deferResolution || !click.messageId)
