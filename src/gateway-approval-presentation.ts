@@ -1,14 +1,18 @@
+import { escapeInvisibles } from './card-text.js';
 import type { GatewayApprovalRequest } from './gateway-providers/gateway-provider-registry.js';
 
 // Escape Markdown syntax instead of changing the displayed account or resource.
 const safeMultiline = (text: string) =>
-  // eslint-disable-next-line no-control-regex -- strip control bytes from gateway-supplied display text
-  text.replace(/[\x00-\x09\x0b-\x1f]/g, ' ').replace(/[\\<>&`*_~[\]()]/g, '\\$&');
+  text
+    .split('\n')
+    .map(escapeInvisibles)
+    .join('\n')
+    .replace(/[\\<>&`*_~[\]()]/g, '\\$&');
 
 const safe = (text: string) => safeMultiline(text.replace(/[\r\n]/g, ' '));
 
 /**
- * A rough cap, counted before escaping: channels cap or clip titles (the
+ * A rough cap, counted after escaping: channels cap or clip titles (the
  * tightest at 60), some after expanding emoji names. A longer title or action
  * goes in full into the body under a fixed title.
  */
@@ -50,8 +54,10 @@ export function gatewayApprovalPresentation(request: GatewayApprovalRequest): { 
   }
   const summary = request.summary;
   if (!summary) {
-    if (request.title.length <= MAX_CARD_TITLE_CHARS) return { title: request.title, question: request.question };
-    return { title: 'Approve external request', question: `*Request:* ${safe(request.title)}\n${request.question}` };
+    const title = safe(request.title);
+    const question = safeMultiline(request.question);
+    if (title.length <= MAX_CARD_TITLE_CHARS) return { title, question };
+    return { title: 'Approve external request', question: `*Request:* ${title}\n${question}` };
   }
   for (const field of ['agent', 'action', 'resource', 'reason'] as const) {
     if (typeof summary[field] !== 'string' || !summary[field].trim() || summary[field].length > 600) {

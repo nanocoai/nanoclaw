@@ -1,3 +1,4 @@
+import { CardTooLongError } from './channels/ask-question.js';
 import fs from 'node:fs';
 import * as approvalDb from './db/sessions.js';
 
@@ -206,6 +207,25 @@ describe('gateway approval coordinator', () => {
     expect(card.question).toBe(`*Request:* ${title}\nAllow POST api.example.test/resource?`);
     await coordinator.stopGatewayApprovalCoordinator();
     expect(await pending).toBe('deny');
+  });
+
+  it('tells the approver when a request cannot be displayed in full, still denying it', async () => {
+    const coordinator = await import('./gateway-approval-coordinator.js');
+    const deliver = vi.fn().mockRejectedValueOnce(new CardTooLongError('too long')).mockResolvedValue('notice');
+    await coordinator.startGatewayApprovalCoordinator(provider(), { deliver }, vi.fn());
+    expect(await decide(request())).toBe('deny');
+    expect(deliver).toHaveBeenCalledTimes(2);
+    expect(deliver.mock.calls[1]).toEqual([
+      'fixture',
+      'owner',
+      null,
+      'chat',
+      JSON.stringify({
+        text: 'Approval request denied: this channel cannot display the complete request. No approval was granted.',
+      }),
+      undefined,
+      'fixture-primary',
+    ]);
   });
 
   it('denies when the card fails to post', async () => {

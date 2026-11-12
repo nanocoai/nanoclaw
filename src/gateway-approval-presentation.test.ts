@@ -142,3 +142,20 @@ it('preserves account names and resource punctuation in summaries and typed fiel
   expect(typed.question).toContain(escaped);
   expect(typed.question).toContain('some\\_file\\(1\\).txt');
 });
+
+it('makes bidi and line-separator characters visible in gateway values', () => {
+  const card = gatewayApprovalPresentation(request({ ...summary, resource: 'abc\u202Edef\u2028ghi' }));
+  expect(card.question).not.toContain('\u202E');
+  expect(card.question).not.toContain('\u2028');
+  expect(card.question).toContain('u202e');
+  expect(card.question).toContain('u2028');
+});
+it('escapes legacy provider markup before rendering', () => {
+  const card = gatewayApprovalPresentation({
+    title: '[Admin](https://evil.test)',
+    question: '[Approve](https://evil.test)\n<@123>',
+  } as GatewayApprovalRequest);
+  expect(card.title).toContain('\\[');
+  expect(card.question).toContain('\\[');
+  expect(card.question).toContain('\\<');
+});
