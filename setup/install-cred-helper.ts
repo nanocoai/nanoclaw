@@ -391,12 +391,15 @@ export function credentialHelperStatus(options: CredHelperOptions = {}): CredHel
   return { installed: helperPath !== undefined, helperPath, wiredHosts, dockerConfigPath: configFile };
 }
 
-function parseArgs(args: string[]): { mode: 'install' | 'uninstall' | 'status'; options: CredHelperOptions } {
+type Mode = 'install' | 'uninstall' | 'status' | 'refresh';
+
+function parseArgs(args: string[]): { mode: Mode; options: CredHelperOptions } {
   const options: CredHelperOptions = {};
-  let mode: 'install' | 'uninstall' | 'status' = 'install';
+  let mode: Mode = 'install';
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--uninstall') mode = 'uninstall';
     else if (args[i] === '--status') mode = 'status';
+    else if (args[i] === '--refresh-installed') mode = 'refresh';
     else if (args[i] === '--registry-host' && args[i + 1]) options.registryHost = args[++i];
     else if (args[i] === '--bin-dir' && args[i + 1]) options.binDir = args[++i];
     else if (args[i] === '--docker-config' && args[i + 1]) options.dockerConfigPath = args[++i];
@@ -408,7 +411,10 @@ function parseArgs(args: string[]): { mode: 'install' | 'uninstall' | 'status'; 
 export async function run(args: string[]): Promise<void> {
   const { mode, options } = parseArgs(args);
 
-  if (mode === 'status') {
+  if (mode === 'status' || mode === 'refresh') {
+    // `--refresh-installed` is for container/pull.sh: re-install what is
+    // there, never a first install, then report as `--status` does.
+    if (mode === 'refresh') refreshInstalledCredentialHelper(options);
     const status = credentialHelperStatus(options);
     emitStatus('CRED_HELPER', {
       INSTALLED: status.installed,
