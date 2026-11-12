@@ -425,15 +425,27 @@ async function setupLinux(projectRoot: string, nodePath: string, homeDir: string
  * Kill any orphaned nanoclaw node processes left from previous runs or debugging.
  * Prevents connection conflicts when two instances connect to the same channel simultaneously.
  */
-function killOrphanedProcesses(projectRoot: string): void {
+export function killOrphanedProcesses(projectRoot: string): void {
   try {
-    execSync(`pkill -f '${projectRoot}/dist/index\\.js' || true`, {
-      stdio: 'ignore',
-    });
-    log.info('Stopped any orphaned nanoclaw processes');
+    // No shell, and the folder matched literally: it may hold spaces, quotes or regex characters.
+    execFileSync('pkill', ['-f', hostProcessPattern(projectRoot)], { stdio: 'ignore' });
   } catch {
-    // pkill not available or no orphans
+    // Exit 1 means no orphans. A missing pkill stays best effort, as before.
   }
+  log.info('Stopped any orphaned nanoclaw processes');
+}
+
+/**
+ * `pkill -f` pattern for this install's host. Every launcher runs
+ * `<node> <projectRoot>/dist/index.js`, so the path has whitespace or a line
+ * end on each side; a longer path ending in it, or `index.js.map`, is not it.
+ */
+export function hostProcessPattern(projectRoot: string): string {
+  return `(^|[[:space:]])${escapeRegex(projectRoot)}/dist/index\\.js([[:space:]]|$)`;
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 /**
@@ -461,6 +473,52 @@ function checkDockerGroupStale(): boolean {
       return false; // Docker itself is not working, different issue
     }
   }
+}
+
+const DOCKER_SOCKET = '/var/run/docker.sock';
+// A fresh VM's first-boot apt run can hold the dpkg lock for a while.
+const APT_INSTALL_ACL = 'env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq -o DPkg::Lock::Timeout=60 acl';
+
+// Steps run with stdin ignored, but sudo prompts on /dev/tty, which would hang
+// out of sight under the wizard spinner. -n uses a cached ticket or fails fast.
+function sudoNonInteractive(args: string[], timeout: number): boolean {
+  try {
+    execFileSync('sudo', ['-n', ...args], { stdio: ['ignore', 'pipe', 'pipe'], timeout });
+    return true;
+  } catch (err) {
+    const stderr = (err as { stderr?: Buffer }).stderr?.toString().trim();
+    log.warn('sudo command failed', { command: args.join(' '), stderr: stderr || String(err) });
+    return false;
+  }
+}
+
+interface DockerAccess {
+  stale: boolean;
+  setfaclMissing?: boolean;
+  /** The ACL went on, so a service that crash-looped without Docker can start. */
+  repaired?: boolean;
+}
+
+/** Lets the user service reach Docker after a mid-session docker group add; reports what is still wrong. */
+function repairDockerGroupAccess(): DockerAccess {
+  if (!checkDockerGroupStale()) return { stale: false };
+  log.warn('Docker group not active in systemd session — user was likely added to docker group mid-session');
+
+  // Ubuntu's cloud images ship without acl.
+  if (!commandExists('setfacl') && commandExists('apt-get')) {
+    log.info('Installing acl for the socket workaround');
+    sudoNonInteractive(APT_INSTALL_ACL.split(' '), 180_000);
+  }
+  if (!commandExists('setfacl')) {
+    log.warn('setfacl not installed — cannot apply automatic workaround');
+    return { stale: true, setfaclMissing: true };
+  }
+
+  if (!sudoNonInteractive(['setfacl', '-m', `u:${os.userInfo().username}:rw`, DOCKER_SOCKET], 15_000)) {
+    return { stale: true };
+  }
+  log.info(`Applied temporary ACL to ${DOCKER_SOCKET} (resets on docker restart or reboot)`);
+  return { stale: false, repaired: true };
 }
 
 export function renderSystemdUnit(
@@ -529,31 +587,9 @@ async function setupSystemd(projectRoot: string, nodePath: string, homeDir: stri
   fs.writeFileSync(unitPath, unit);
   log.info('Wrote systemd unit', { unitPath });
 
-  // Detect stale docker group before starting (user systemd only). The user
-  // systemd manager is a long-running process whose group list is frozen at
-  // login, so `usermod -aG docker` mid-session doesn't reach it. Rather than
-  // require the user to log out + back in, punch a POSIX ACL onto the socket
-  // that grants the current user rw directly. This is temporary — the socket
-  // is recreated by dockerd on restart (and by then the user has relogged, so
-  // normal group perms apply again).
-  let dockerGroupStale = !runningAsRoot && checkDockerGroupStale();
-  if (dockerGroupStale) {
-    log.warn('Docker group not active in systemd session — user was likely added to docker group mid-session');
-    if (commandExists('setfacl')) {
-      const user = execSync('whoami', { encoding: 'utf-8' }).trim();
-      try {
-        execSync(`sudo setfacl -m u:${user}:rw /var/run/docker.sock`, {
-          stdio: 'inherit',
-        });
-        log.info('Applied temporary ACL to /var/run/docker.sock (resets on docker restart or reboot)');
-        dockerGroupStale = false;
-      } catch (err) {
-        log.warn('Failed to apply setfacl workaround', { err });
-      }
-    } else {
-      log.warn('setfacl not installed — cannot apply automatic workaround');
-    }
-  }
+  // The user manager keeps its login groups, so a docker group added mid-session misses the service.
+  // A socket ACL bridges that until dockerd recreates the socket; after a reboot the manager has the group.
+  const dockerAccess: DockerAccess = runningAsRoot ? { stale: false } : repairDockerGroupAccess();
 
   // Kill orphaned nanoclaw processes to avoid channel connection conflicts
   killOrphanedProcesses(projectRoot);
@@ -580,6 +616,21 @@ async function setupSystemd(projectRoot: string, nodePath: string, homeDir: stri
     execSync(`${systemctlPrefix} enable ${unitName}`, { stdio: 'ignore' });
   } catch (err) {
     log.error('systemctl enable failed', { err });
+  }
+
+  // A service that crash-looped without Docker would wait out circuit-breaker.ts's backoff.
+  // Stop it first so no crash restart writes the counter back, then clear it.
+  if (dockerAccess.repaired) {
+    try {
+      execSync(`${systemctlPrefix} stop ${unitName}`, { stdio: 'ignore' });
+    } catch (err) {
+      log.warn('systemctl stop failed', { err });
+    }
+    try {
+      fs.rmSync(path.join(projectRoot, 'data', 'circuit-breaker.json'), { force: true });
+    } catch (err) {
+      log.warn('Could not clear the crash backoff', { err });
+    }
   }
 
   // restart (not start) so a previously-running instance picks up edits to
@@ -609,7 +660,8 @@ async function setupSystemd(projectRoot: string, nodePath: string, homeDir: stri
     PROJECT_PATH: projectRoot,
     UNIT_PATH: unitPath,
     SERVICE_LOADED: serviceLoaded,
-    ...(dockerGroupStale ? { DOCKER_GROUP_STALE: true } : {}),
+    ...(dockerAccess.stale ? { DOCKER_GROUP_STALE: true } : {}),
+    ...(dockerAccess.setfaclMissing ? { SETFACL_MISSING: true } : {}),
     ...proxyStatusFields,
     LINGER_ENABLED: !runningAsRoot,
     STATUS: 'success',

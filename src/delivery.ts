@@ -685,6 +685,7 @@ async function deliverMessage(
         channel_type: msg.channelType,
         thread_id: msg.threadId,
         title,
+        question: typeof content.question === 'string' ? content.question : '',
         options: normalizeOptions(rawOptions as never),
         created_at: new Date().toISOString(),
       });
@@ -796,8 +797,7 @@ export function registerPostDeliveryHook(hook: PostDeliveryHook): void {
 export type DeliveryActionHandler = (content: Record<string, unknown>, session: Session) => Promise<void>;
 
 type DeliveryEntry =
-  | { guard: Unguarded; handler: DeliveryActionHandler }
-  | { guard: DeliveryGuardSpec; handler: GuardedDeliveryHandler };
+  { guard: Unguarded; handler: DeliveryActionHandler } | { guard: DeliveryGuardSpec; handler: GuardedDeliveryHandler };
 
 const deliveryActions = new Map<string, DeliveryEntry>();
 

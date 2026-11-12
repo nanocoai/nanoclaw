@@ -13,6 +13,8 @@ import type { NormalizedOption } from './ask-question.js';
 export interface QuestionRender {
   title: string;
   question?: string;
+  /** The question is the agent's own markup, sent unescaped, so the resolved card keeps it unescaped too. */
+  fromAgent?: boolean;
   options: NormalizedOption[];
   /**
    * Optional channel presentation. Decision authorization always remains in core.

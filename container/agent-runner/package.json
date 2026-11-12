@@ -9,10 +9,10 @@
     "test": "bun test --isolate"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.296",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.321",
     "@anthropic-ai/sdk": "^0.108.0",
-    "@modelcontextprotocol/sdk": "^1.29.0",
-    "zod": "^4.0.0"
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/bun": "^1.1.0",
