@@ -222,6 +222,13 @@ export function addressesNotNormalized(stored: string[]): Array<{ stored: string
   return stored.map((a) => ({ stored: a, normal: normalizeAddress(a) })).filter((x) => x.normal !== x.stored);
 }
 
+/** Drops from the hourly limit's map the senders with nothing in the last hour. */
+export function sweepQuietSenders(recent: Map<string, number[]>, now: number): void {
+  for (const [a, times] of recent) {
+    if (times.every((t) => now - t >= HOUR_MS)) recent.delete(a);
+  }
+}
+
 /** "Re: X" unless the subject already carries a reply prefix in a common locale. */
 export function replySubject(subject: string | undefined): string {
   const s = (subject ?? '').trim();
@@ -2316,9 +2323,7 @@ registerChannelAdapter('proton-mail', {
       // so it holds about the hour's senders however many have written.
       if (recentBySender.size > RECENT_SENDERS_SWEEP_AT && now - recentSweptAt >= RECENT_SENDERS_SWEEP_MS) {
         recentSweptAt = now;
-        for (const [a, times] of recentBySender) {
-          if (times.every((t) => now - t >= HOUR_MS)) recentBySender.delete(a);
-        }
+        sweepQuietSenders(recentBySender, now);
       }
       const recent = (recentBySender.get(addr) ?? []).filter((t) => now - t < HOUR_MS);
       recentBySender.set(addr, recent);

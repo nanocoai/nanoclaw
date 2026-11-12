@@ -46,6 +46,7 @@ import {
   mailText,
   cleanAttachmentName,
   addressesNotNormalized,
+  sweepQuietSenders,
   disownTypedNotes,
   forwardedMessageText,
   flagInvisibleText,
@@ -210,6 +211,20 @@ describe('mailText hidden elements', () => {
     const html = '<span>a</span>'.repeat(30_000);
     await expect(mailText({ text: undefined, html }, 1, { retryable: true })).rejects.toThrow(/HTML conversion/);
     expect(await mailText({ text: undefined, html }, 1)).toMatch(/took too long/);
+  });
+});
+
+describe('sweepQuietSenders', () => {
+  it('drops senders with nothing in the last hour and keeps the rest', () => {
+    const now = Date.parse('2026-11-12T12:00:00.000Z');
+    const hour = 60 * 60_000;
+    const recent = new Map([
+      ['quiet@x.example', [now - 2 * hour, now - hour]],
+      ['busy@x.example', [now - 2 * hour, now - hour + 1]],
+      ['empty@x.example', []],
+    ]);
+    sweepQuietSenders(recent, now);
+    expect([...recent.keys()]).toEqual(['busy@x.example']);
   });
 });
 

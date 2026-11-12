@@ -2559,16 +2559,19 @@ describe('review 4 of #4218', () => {
   });
 
   describe('denied senders', () => {
-    it('a denied address that comes back is still not counted, and core still drops it', async () => {
+    it('a denied address is not held by a full hour of new addresses: core drops it', async () => {
       h.wired = false;
-      const seenAt = twoDaysAgo();
-      seedState({ strangers: { 'back@example.net': seenAt } });
+      // This hour's ten new addresses are used up: a new sender would wait.
+      const strangers = Object.fromEntries(
+        Array.from({ length: 10 }, (_, i) => [`seen${i}@example.org`, new Date().toISOString()]),
+      );
+      seedState({ strangers });
       h.settled = { 'back@example.net': 'denied' };
       const { calls } = await start();
-      await arriveAll([mail({ from: 'back@example.net', body: 'again', auth: passFor('example.net') })]);
+      const uid = await arriveAll([mail({ from: 'back@example.net', body: 'again', auth: passFor('example.net') })]);
       expect(calls.inbound).toHaveLength(1);
-      // Its old slot is neither refreshed nor a new one taken.
-      expect(readState().strangers).toEqual({ 'back@example.net': seenAt });
+      expect(readState().retry[uid]).toBeUndefined();
+      expect(readState().strangers).toEqual(strangers);
     });
 
     it('take no new-sender slot, even after pruneSettled has dropped them', async () => {
@@ -2638,9 +2641,11 @@ describe('review 4 of #4218', () => {
         '',
       ].join('\r\n');
       await arriveAll([mail({ subject: 'See attached', contentType: 'multipart/mixed; boundary="b"', body })]);
-      expect(calls.inbound[0].content.text).toMatch(
-        /\[… truncated by the mail channel [0-9a-f]{8}, at least \d+ characters in total\]/,
-      );
+      const text = calls.inbound[0].content.text as string;
+      const atLeast = Number(/truncated by the mail channel [0-9a-f]{8}, at least (\d+) characters/.exec(text)![1]);
+      // More than the agent was shown, and no more than the mail really held.
+      expect(atLeast).toBeGreaterThan(50_000);
+      expect(atLeast).toBeLessThanOrEqual(60_000 + 200);
     });
 
     it('counts what the agent would have seen, not the quoted history that was cut', async () => {
