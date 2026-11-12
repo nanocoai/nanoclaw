@@ -86,6 +86,12 @@ const HOUR_MS = 60 * 60_000;
  * left unread for good: a loop would otherwise queue without end.
  */
 const DEFERRED_PER_SENDER_MAX = INBOUND_PER_SENDER_PER_HOUR;
+/**
+ * The same for an address not yet approved: under the per-domain figure
+ * (DEFERRED_STRANGERS_PER_DOMAIN_MAX), so one new address cannot take its
+ * whole domain's share of the new senders' holds.
+ */
+const DEFERRED_STRANGER_PER_SENDER_MAX = 5;
 const DEFERRED_MAX = 200;
 /**
  * Of those, mail from addresses not yet approved, held for either limit (a
@@ -501,11 +507,15 @@ function cutBeforeMark(text: string, at: number, marks: string[]): number {
  * this one inside a word would get the note past the rewrite unseen.
  */
 const TYPED_NOTE = (() => {
-  const ignorable = '[\\p{Default_Ignorable_Code_Point}\\p{Cc}]*';
+  const anyIgnorable = '[\\s\\p{Default_Ignorable_Code_Point}\\p{Cc}]*';
+  // Never white space (tab, the line breaks and U+FEFF are both kinds): with
+  // the two apart, each step of the match has one way through, so a body of
+  // newlines cannot make it backtrack.
+  const ignorable = '(?:(?!\\s)[\\p{Default_Ignorable_Code_Point}\\p{Cc}])*';
   const word = (w: string) => [...w].join(ignorable);
-  const gap = `${ignorable}\\s[\\s\\p{Default_Ignorable_Code_Point}\\p{Cc}]*`;
+  const gap = `${ignorable}\\s${anyIgnorable}`;
   const phrase = ['note', 'from', 'the', 'mail', 'channel'].map(word).join(gap);
-  return new RegExp(`\\[(\\s*)${ignorable}${phrase}(?![\\p{L}\\p{N}_])`, 'giu');
+  return new RegExp(`\\[(${anyIgnorable})${phrase}(?![\\p{L}\\p{N}_])`, 'giu');
 })();
 
 /**
@@ -520,7 +530,20 @@ const TYPED_NOTE = (() => {
  * sender cannot know.
  */
 export function disownTypedNotes(text: string): string {
-  return text.replace(TYPED_NOTE, '[$1Note typed by the sender, not from the mail channel');
+  return text.replace(
+    TYPED_NOTE,
+    (_m, lead: string) => `[${lead.replace(/\S/gu, '')}Note typed by the sender, not from the mail channel`,
+  );
+}
+
+/**
+ * A sender-supplied label (a display name, a filename in a list) as one
+ * line: invisible characters out, control characters to spaces, a typed
+ * channel note disowned, then capped — in that order, so nothing hides a
+ * note from the rewrite and the cap cannot cut one in half first.
+ */
+export function senderLine(text: string, max: number): string {
+  return oneLine(disownTypedNotes(stripInvisible(text).replace(/\p{Cc}/gu, ' ')), max);
 }
 
 /** The text with invisible characters made visible, marked with `token`; `flagged` when there were any. */
@@ -1436,16 +1459,7 @@ export function isPlainAddress(address: string): boolean {
  * goes through here, so a CR/LF in an encoded name never reaches stored state.
  */
 export function displayName(address: string, name?: string): string | undefined {
-  const n = name
-    ? oneLine(
-        disownTypedNotes(
-          stripInvisible(name)
-            .replace(/[<>"]/g, '')
-            .replace(/\p{Cc}/gu, ' '),
-        ),
-        100,
-      )
-    : '';
+  const n = name ? senderLine(name.replace(/[<>"]/g, ''), 100) : '';
   if (!n) return undefined;
   // NFKC folds the fullwidth and small @ (＠, ﹫) to @.
   const folded = n.normalize('NFKC');
@@ -1686,6 +1700,15 @@ export type CardReplyMatch =
  * refused, never forwarded — a stray `/approve` must not reach the agent as
  * chat, and must never resolve some other card.
  */
+/**
+ * Whether a mail's In-Reply-To ids name the card's request email or the
+ * reminder about it (nudgeMessageId): both went only to the approver, with
+ * the card's token, so a reply to either proves the same.
+ */
+function repliesToCard(card: CardRef, replyIds: string[]): boolean {
+  return replyIds.includes(card.messageId) || (!!card.nudgeMessageId && replyIds.includes(card.nudgeMessageId));
+}
+
 export function matchCardReply(input: {
   cards: Record<string, CardRef>;
   fromAddress: string;
@@ -1725,9 +1748,7 @@ export function matchCardReply(input: {
       card.address === input.fromAddress &&
       !card.answeredAt &&
       !card.closedAt &&
-      (inSubject ||
-        replyIds.includes(card.messageId) ||
-        (!!card.nudgeMessageId && replyIds.includes(card.nudgeMessageId)));
+      (inSubject || repliesToCard(card, replyIds));
     return repliesToOpenCard
       ? {
           kind: 'refused',
@@ -1745,10 +1766,7 @@ export function matchCardReply(input: {
   if (card.address !== input.fromAddress) return { kind: 'refused', reason: 'not the approver', notify: false, token };
   if (card.answeredAt) return { kind: 'refused', reason: 'that request was already answered', notify: true, token };
   if (card.closedAt) return { kind: 'refused', reason: closedCardReason(card), notify: true, token };
-  // A reply to the reminder the approver was sent (nudgeMessageId) proves as
-  // much as a reply to the request: both went only to them, with the token.
-  const replyIds = messageIds(input.inReplyTo);
-  if (!replyIds.includes(card.messageId) && !(card.nudgeMessageId && replyIds.includes(card.nudgeMessageId)))
+  if (!repliesToCard(card, messageIds(input.inReplyTo)))
     return {
       kind: 'refused',
       reason: 'it is not a reply to the request email, or to the reminder about it',
@@ -2280,11 +2298,7 @@ registerChannelAdapter('proton-mail', {
       const ids = messageIds(inReplyTo);
       if (ids.length === 0) return false;
       return Object.values(state.cards).some(
-        (c) =>
-          c.address === addr &&
-          !c.answeredAt &&
-          !c.closedAt &&
-          (ids.includes(c.messageId) || (!!c.nudgeMessageId && ids.includes(c.nudgeMessageId))),
+        (c) => c.address === addr && !c.answeredAt && !c.closedAt && repliesToCard(c, ids),
       );
     }
 
@@ -2323,7 +2337,8 @@ registerChannelAdapter('proton-mail', {
         const strangers = waiting.filter((r) => r.deferred === 'strangers' || r.stranger);
         if (
           waiting.length >= DEFERRED_MAX ||
-          waiting.filter((r) => r.from === from).length >= DEFERRED_PER_SENDER_MAX ||
+          waiting.filter((r) => r.from === from).length >=
+            (stranger ? DEFERRED_STRANGER_PER_SENDER_MAX : DEFERRED_PER_SENDER_MAX) ||
           (stranger && strangers.length >= DEFERRED_STRANGERS_MAX) ||
           (stranger &&
             strangers.filter((r) => r.from && addressDomain(r.from) === fromDomain).length >=
@@ -2353,6 +2368,22 @@ registerChannelAdapter('proton-mail', {
         until: state.retry[uid].nextAt,
       });
       return 'deferred';
+    }
+
+    /**
+     * A mail over its sender's hourly limit. The sender's standing decides:
+     * a denied address's mail is done with unread by the agent and unfetched
+     * (core would drop it without a card, so holding it would only take
+     * room); an address not yet approved has its mail held as a new sender's
+     * (`defer` counts it in their share); an approved sender's is held.
+     */
+    async function overLimit(uid: number, fromAddr: string, freeAt: number): Promise<Outcome> {
+      const status = await senderStatus(fromAddr);
+      if (status === 'denied') {
+        log.debug('Proton Mail inbound skipped', { uid, reason: 'denied sender over the hourly limit' });
+        return 'done';
+      }
+      return defer(uid, 'sender', fromAddr, freeAt, status === 'approved');
     }
 
     /**
@@ -2504,20 +2535,13 @@ registerChannelAdapter('proton-mail', {
       // never held: a held answer would let a gateway approval time out. A
       // mail that only looks like one on its headers is counted once it is
       // read and turns out not to be an answer (after matchCardReply).
-      // Over the limit, the sender's standing decides the hold: mail from an
-      // address not yet approved is a new sender's and shares their part of
-      // the queue; a denied address's is not held at all, since core drops it
-      // without a card (see senderStatus below).
+      // Over the limit, see overLimit.
       const retry = state.retry[uid];
       const limited = !retry || retry.deferred === 'sender';
       const mayAnswerCard = answersOpenCard(fromAddr, head.inReplyTo);
-      let status: Awaited<ReturnType<typeof senderStatus>> | undefined;
       if (limited && !mayAnswerCard) {
         const freeAt = senderRateFreeAt(fromAddr);
-        if (freeAt !== null) {
-          status = await senderStatus(fromAddr);
-          if (status !== 'denied') return defer(uid, 'sender', fromAddr, freeAt, status === 'approved');
-        }
+        if (freeAt !== null) return overLimit(uid, fromAddr, freeAt);
       }
 
       // Through every check: now the whole mail.
@@ -2624,7 +2648,7 @@ registerChannelAdapter('proton-mail', {
       // one): the hourly limit applies after all, before any notice goes back.
       if (limited && mayAnswerCard && match.kind !== 'answer') {
         const freeAt = senderRateFreeAt(fromAddr);
-        if (freeAt !== null) return defer(uid, 'sender', fromAddr, freeAt);
+        if (freeAt !== null) return overLimit(uid, fromAddr, freeAt);
       }
 
       if (match.kind === 'answer') {
@@ -2694,7 +2718,7 @@ registerChannelAdapter('proton-mail', {
       // not a stranger.
       // A denied address is not counted either: core drops its mail without
       // a card, and pruneSettled has already given its slot back.
-      status ??= await senderStatus(fromAddr);
+      const status = await senderStatus(fromAddr);
       const approved = status === 'approved';
       if (status === 'pending' && !Object.values(state.cards).some((c) => c.address === fromAddr)) {
         const admitted = await admitStranger(uid, fromAddr);
@@ -2723,10 +2747,7 @@ registerChannelAdapter('proton-mail', {
       let unlisted = 0;
       // Filenames are the sender's too: each is cut short, and only so many listed.
       const fail = (att: { filename?: string }, type: string, why: string) => {
-        if (failures.length < FAILURES_LISTED_MAX)
-          failures.push(
-            `${oneLine(disownTypedNotes(stripInvisible(att.filename ?? type).replace(/\p{Cc}/gu, ' ')), 100)} (${why})`,
-          );
+        if (failures.length < FAILURES_LISTED_MAX) failures.push(`${senderLine(att.filename ?? type, 100)} (${why})`);
         else unlisted++;
       };
       for (const att of parsed.attachments) {

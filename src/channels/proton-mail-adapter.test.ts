@@ -2703,13 +2703,38 @@ describe('review 5 of #4218', () => {
       expect(readState().retry[refused]).toBeUndefined();
     }, 60_000);
 
-    it('a denied sender’s over-limit mail is not held: core drops it without a card', async () => {
+    it('a denied sender’s over-limit mail is neither held nor handed on: core would drop it', async () => {
       h.wired = false;
       h.settled = { [OWNER]: 'approved', 'x@denied.example': 'denied' };
       const { calls } = await start();
       const last = await arriveAll(burst('x@denied.example', 'denied.example'));
       expect(readState().retry[last]).toBeUndefined();
-      expect(calls.inbound).toHaveLength(21);
+      expect(calls.inbound).toHaveLength(20);
+      expect(flagged().filter(([u]) => u === last)).toEqual([[last, ['\\Seen']]]);
+    }, 60_000);
+
+    it('one new address holds at most 5 mails, so it cannot take its domain’s share', async () => {
+      h.wired = false;
+      h.settled = { [OWNER]: 'approved' };
+      await start();
+      const from = 'x@new.example';
+      const first = await arriveAll(
+        Array.from({ length: 26 }, (_, i) => mail({ from, body: `mail ${i}`, auth: passFor('new.example') })),
+      );
+      const uids = Array.from({ length: 26 }, (_, i) => first - 25 + i);
+      const held = uids.filter((u) => readState().retry[u]?.stranger);
+      expect(held).toEqual(uids.slice(20, 25));
+      expect(flagged()).toContainEqual([first, [FAILED]]);
+    }, 90_000);
+
+    it('a new sender’s over-limit reply on a card’s thread is held as a new sender’s too', async () => {
+      h.wired = false;
+      const { adapter } = await start();
+      const id = await adapter.deliver(OWNER, null, card('appr-S', 'Install jq?'));
+      const token = tokenOf(h.sent[0].subject);
+      await arriveAll(Array.from({ length: 20 }, (_, i) => mail({ body: `mail ${i}` })));
+      const reply = await arriveAll([mail({ subject: `Re: [${token}] Install jq?`, body: 'Approve', inReplyTo: id })]);
+      expect(readState().retry[reply]).toMatchObject({ deferred: 'sender', from: OWNER, stranger: true });
     }, 60_000);
   });
 

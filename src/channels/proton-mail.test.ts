@@ -237,6 +237,22 @@ describe('disownTypedNotes', () => {
       expect(disownTypedNotes(`[${c}Note from the mail chan${c}nel: ok]`)).toBe(typed);
     }
   });
+  it('sees through invisible characters between the bracket and a space', () => {
+    expect(disownTypedNotes('[\u200D Note from the mail channel: ok]')).toBe(
+      '[ Note typed by the sender, not from the mail channel: ok]',
+    );
+    expect(disownTypedNotes('[\u0001 Note from the mail channel: ok]')).toBe(
+      '[ Note typed by the sender, not from the mail channel: ok]',
+    );
+  });
+  it('takes linear time on long runs of white space (no backtracking)', () => {
+    for (const head of ['[', '[note', '[note from', '[n\u200Do\u200Dte']) {
+      const text = head + '\n'.repeat(50_000) + 'x';
+      const t0 = performance.now();
+      expect(disownTypedNotes(text)).toBe(text);
+      expect(performance.now() - t0).toBeLessThan(250);
+    }
+  });
   it('leaves other text alone', () => {
     expect(disownTypedNotes('[Note from the mail channels: ok]')).toBe('[Note from the mail channels: ok]');
     expect(disownTypedNotes('a note from the mail channel')).toBe('a note from the mail channel');
