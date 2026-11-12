@@ -897,6 +897,32 @@ describe('matchCardReply', () => {
       inReplyTo: over.inReplyTo ?? `<${A}@bridge.example>`,
     });
 
+  it('takes a command replying to the reminder notice as an answer, as a reply to the request is', () => {
+    const nudged = {
+      [A]: card(A, { nudgeMessageId: '<notice-1@bridge.example>', nudgedAt: '2026-11-09T00:00:00.000Z' }),
+    };
+    const m = matchCardReply({
+      cards: nudged,
+      fromAddress: 'owner@example.org',
+      subject: `Re: [${A}] Install jq?`,
+      body: '/approve',
+      inReplyTo: '<notice-1@bridge.example>',
+    });
+    expect(m.kind).toBe('answer');
+    // Another mail's id still is not enough.
+    const other = matchCardReply({
+      cards: nudged,
+      fromAddress: 'owner@example.org',
+      subject: `Re: [${A}] Install jq?`,
+      body: '/approve',
+      inReplyTo: '<other@x.example>',
+    });
+    expect(other).toMatchObject({
+      kind: 'refused',
+      reason: 'it is not a reply to the request email, or to the reminder about it',
+    });
+  });
+
   it('answers the card the reply names — never a newer one', () => {
     const m = reply({});
     expect(m.kind).toBe('answer');

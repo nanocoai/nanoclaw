@@ -1462,7 +1462,9 @@ describe('wiring the unit tests cannot see', () => {
     expect(calls.inbound).toHaveLength(19);
     vi.advanceTimersByTime(120_000);
     await waitFor(() => readState().retry['1'] === undefined, 20_000);
-    expect(h.sent.at(-1).text).toMatch(/not taken as an answer: it is not a reply to the request email itself/);
+    expect(h.sent.at(-1).text).toMatch(
+      /not taken as an answer: it is not a reply to the request email, or to the reminder about it/,
+    );
   }, 120_000);
 
   it('at most three forwarded mails are read into the body, and every .eml is delivered as a file', async () => {
@@ -2762,6 +2764,20 @@ describe('review 5 of #4218', () => {
       const text = calls.inbound[0].content.text as string;
       expect(text).not.toMatch(/\[\s*N\W*o\W*t\W*e\W+from/i);
       expect(text.match(/Note typed by the sender, not from the mail channel/g)).toHaveLength(2);
+    }, 30_000);
+  });
+
+  describe('a command replying to the reminder notice', () => {
+    it('answers the card', async () => {
+      const { adapter, calls, arrive } = await start();
+      const id = await adapter.deliver(OWNER, null, card('appr-R5', 'Install jq?'));
+      const token = tokenOf(h.sent[0].subject);
+      await arrive(mail({ subject: `Re: [${token}] Install jq?`, body: 'Approve', inReplyTo: id }));
+      expect(h.sent.at(-1).text).toContain('the request is still waiting');
+      const notice = `<out-${h.nextId}@bridge.example>`;
+      await arrive(mail({ subject: `Re: Re: [${token}] Install jq?`, body: '/approve', inReplyTo: notice }));
+      expect(calls.action.map((a) => a[0])).toEqual(['appr-R5']);
+      expect(calls.inbound).toHaveLength(0);
     }, 30_000);
   });
 });

@@ -1731,10 +1731,13 @@ export function matchCardReply(input: {
   if (card.address !== input.fromAddress) return { kind: 'refused', reason: 'not the approver', notify: false, token };
   if (card.answeredAt) return { kind: 'refused', reason: 'that request was already answered', notify: true, token };
   if (card.closedAt) return { kind: 'refused', reason: closedCardReason(card), notify: true, token };
-  if (!messageIds(input.inReplyTo).includes(card.messageId))
+  // A reply to the reminder the approver was sent (nudgeMessageId) proves as
+  // much as a reply to the request: both went only to them, with the token.
+  const replyIds = messageIds(input.inReplyTo);
+  if (!replyIds.includes(card.messageId) && !(card.nudgeMessageId && replyIds.includes(card.nudgeMessageId)))
     return {
       kind: 'refused',
-      reason: 'it is not a reply to the request email itself',
+      reason: 'it is not a reply to the request email, or to the reminder about it',
       notify: true,
       token,
       howTo: howToAnswer(card),
