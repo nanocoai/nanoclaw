@@ -50,10 +50,12 @@ import { escapeDiscordCardText } from './discord.js';
 import { registerQuestionRenderResolver } from './question-render-registry.js';
 
 const posts: Array<{ embeds: Array<{ title?: string; description?: string }>; components?: unknown[] }> = [];
-const patches: Array<{ url: string; body: Record<string, unknown> }> = [];
+const patches: Array<{ url: string; body: Record<string, unknown>; refused?: boolean }> = [];
 const realFetch = globalThis.fetch;
 /** Set by a test: Discord refuses every edit of a channel message. */
 let cardEditsFail = false;
+/** Set by a test: as Discord, an edit whose embed description is over 4,096 is refused. */
+let oversizedEditsFail = false;
 /** Card edits Discord has not answered yet, and whether a button removal arrived during one. */
 let editsInFlight = 0;
 let removedDuringEdit = false;
@@ -70,6 +72,11 @@ vi.stubGlobal(
       await new Promise((resolve) => setTimeout(resolve, 20));
       editsInFlight--;
       if (cardEditsFail) return new Response('{"message":"Internal Server Error"}', { status: 500 });
+      const [embed] = (patches.at(-1)!.body.embeds ?? []) as Array<{ description?: string }>;
+      if (oversizedEditsFail && (embed?.description?.length ?? 0) > 4096) {
+        patches.at(-1)!.refused = true;
+        return new Response('{"message":"Invalid Form Body","code":50035}', { status: 400 });
+      }
     }
     return new Response(JSON.stringify({ id: `m${posts.length}`, channel_id: 'c1' }), { status: 200 });
   }),
@@ -82,7 +89,7 @@ afterAll(() => {
 beforeEach(() => {
   posts.length = 0;
   patches.length = 0;
-  cardEditsFail = false;
+  cardEditsFail = oversizedEditsFail = false;
   editsInFlight = 0;
   removedDuringEdit = false;
 });
@@ -196,16 +203,80 @@ describe('Discord card edits and buttons', () => {
         }),
       });
       expect(response.status).toBe(200);
-      // The card edit first, and the removal only once Discord has answered it.
+      // The card edit first (refused: the whole card, then the decision only), and
+      // the removal only once Discord has answered the last one.
+      const cardEdit = '/channels/c1/messages/m9';
       await vi.waitFor(() =>
         expect(patches.map((patch) => patch.url.replace(/^.*\/api\/v10/, ''))).toEqual([
-          '/channels/c1/messages/m9',
+          ...(editFails ? [cardEdit, cardEdit] : [cardEdit]),
           '/webhooks/test-app-id/interaction-token/messages/@original',
         ]),
       );
-      expect(removedDuringEdit).toBe(false);
       expect(patches[0].body).not.toHaveProperty('components');
-      expect(patches[1].body).toEqual({ components: [] });
+      expect(patches.at(-1)!.body).toEqual({ components: [] });
+      expect(removedDuringEdit).toBe(false);
+    } finally {
+      await bridge.teardown();
+      await closeDb();
+    }
+  });
+});
+
+// A 3,994-character card may be posted. With an 80-character label and a
+// 32-character name its resolved form is past Discord's 4,096.
+describe('a Discord card near the limit when it is clicked', () => {
+  it('shows the decision, and loses its buttons only after that', async () => {
+    const label = 'L'.repeat(80);
+    const name = 'N'.repeat(32);
+    registerQuestionRenderResolver((id) =>
+      id === 'q-near-limit'
+        ? {
+            title: 'Approve',
+            question: 'q'.repeat(3987),
+            options: [{ label: 'Approve', selectedLabel: label, value: 'approve' }],
+          }
+        : undefined,
+    );
+    await runMigrations(await initTestDb());
+    const bridge = (await registrations.get('discord')!.factory())!;
+    await bridge.setup({
+      onInbound: () => {},
+      onInboundEvent: () => {},
+      onMetadata: () => {},
+      onAction: async () => 'accepted' as const,
+    });
+    oversizedEditsFail = true;
+    try {
+      const response = await realFetch(gateway.url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-discord-gateway-token': 'test-bot-token' },
+        body: JSON.stringify({
+          type: 'GATEWAY_INTERACTION_CREATE',
+          data: {
+            type: 3,
+            id: 'i1',
+            token: 'interaction-token',
+            application_id: 'test-app-id',
+            guild_id: 'g1',
+            channel_id: 'c1',
+            data: { custom_id: 'ncq:q-near-limit:0\napprove' },
+            member: { user: { id: 'u1', username: 'ann', global_name: name } },
+            message: { id: 'm9', embeds: [{ title: 'Approve', description: 'q'.repeat(3987) }] },
+          },
+        }),
+      });
+      expect(response.status).toBe(200);
+      await vi.waitFor(() => expect(patches.at(-1)?.url).toMatch(/\/messages\/@original$/));
+      // The card Discord took carries the decision.
+      const taken = patches.filter((patch) => patch.url.endsWith('/channels/c1/messages/m9') && !patch.refused);
+      expect(taken).toHaveLength(1);
+      const [embed] = taken[0].body.embeds as Array<{ title: string; description: string }>;
+      expect(embed.title).toBe('Approve');
+      expect(embed.description).toContain(`${label} by ${name}`);
+      expect(embed.description.length).toBeLessThanOrEqual(4096);
+      // The buttons went last, with no card edit still in flight.
+      expect(patches.at(-1)!.body).toEqual({ components: [] });
+      expect(removedDuringEdit).toBe(false);
     } finally {
       await bridge.teardown();
       await closeDb();

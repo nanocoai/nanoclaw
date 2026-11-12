@@ -345,7 +345,8 @@ describe('a Discord thread, from the raw message to the raw click on its approva
     const { outcome, decision } = await messageThenCardThenClick(rawMessage('T1', { channel_type: 11 }));
     expect(outcome).toBe('accepted');
     expect(await decision).toBe('approve');
-    await vi.waitFor(() => expect(cardWrites).toEqual(['edit', 'buttons removed']));
+    // The host tried the whole card, then the card with its decision only.
+    await vi.waitFor(() => expect(cardWrites).toEqual(['edit', 'edit', 'buttons removed']));
     expect(removedDuringEdit).toBe(false);
     expect(interactionEdits).toEqual([{ components: [] }]);
   });
