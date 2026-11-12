@@ -1109,8 +1109,9 @@ describe('createChatSdkBridge — a clicked card resolves only when the host acc
     const bridge = createChatSdkBridge({ adapter, instance: `fixture-${questionId}`, supportsThreads: false });
     await bridge.setup({ onInbound: () => {}, onInboundEvent: () => {}, onMetadata: () => {}, onAction });
     const chat = (bridge as unknown as { _chat: import('chat').Chat })._chat;
-    const click = async (userId: string, userName: string) => {
-      await chat.processAction(
+    /** The click handler alone: done when the handler returns. */
+    const handle = (userId: string, userName: string) =>
+      chat.processAction(
         {
           actionId: `ncq:${questionId}:0`,
           adapter,
@@ -1122,9 +1123,11 @@ describe('createChatSdkBridge — a clicked card resolves only when the host acc
         },
         undefined,
       );
+    const click = async (userId: string, userName: string) => {
+      await handle(userId, userName);
       await afterClick();
     };
-    return { bridge, click, onAction, editMessage, postEphemeral, order };
+    return { bridge, click, handle, onAction, editMessage, postEphemeral, order };
   }
 
   it('keeps the buttons and tells only the clicker when a non-approver clicks', async () => {
@@ -1220,12 +1223,14 @@ describe('createChatSdkBridge — a clicked card resolves only when the host acc
   // Some transports (Telegram's polling) read their next events only once the
   // handler returns, so one slow decision must not keep it.
   it('hands a click to the host and returns before the host has decided', async () => {
-    const { bridge, click, onAction, editMessage } = await startClicks('q-slow-host', review);
+    const { bridge, handle, onAction, editMessage } = await startClicks('q-slow-host', review);
     let decide!: (outcome: string) => void;
     onAction.mockReturnValue(new Promise((resolve) => (decide = resolve)));
     try {
-      await click('approver', 'Ann');
+      // The handler is done, and the host already has the click.
+      await handle('approver', 'Ann');
       expect(onAction).toHaveBeenCalledTimes(1);
+      await afterClick();
       expect(editMessage).not.toHaveBeenCalled();
       decide('accepted');
       await vi.waitFor(() => expect(editMessage).toHaveBeenCalledTimes(1));
@@ -1236,13 +1241,16 @@ describe('createChatSdkBridge — a clicked card resolves only when the host acc
   });
 
   it('hands clicks that come one after another to the host in that order, each shown when it is decided', async () => {
-    const { bridge, click, onAction, editMessage, postEphemeral } = await startClicks('q-two-clicks', review);
+    const { bridge, handle, onAction, editMessage, postEphemeral } = await startClicks('q-two-clicks', review);
     let decideFirst!: (outcome: string) => void;
     onAction.mockReturnValueOnce(new Promise((resolve) => (decideFirst = resolve))).mockResolvedValueOnce('accepted');
     try {
-      await click('bystander', 'Bob');
-      await click('approver', 'Ann');
+      // The host has each click by the time its handler returns.
+      await handle('bystander', 'Bob');
+      expect(onAction.mock.calls.map((call) => call[2])).toEqual(['bystander']);
+      await handle('approver', 'Ann');
       expect(onAction.mock.calls.map((call) => call[2])).toEqual(['bystander', 'approver']);
+      await afterClick();
       // The second click is shown while the first is still with the host.
       expect(JSON.stringify(editMessage.mock.calls)).toContain('✅ Approved by Ann');
       expect(postEphemeral).not.toHaveBeenCalled();
