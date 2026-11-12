@@ -45,6 +45,7 @@ import {
   uniqueAttachmentName,
   mailText,
   cleanAttachmentName,
+  addressesNotNormalized,
   disownTypedNotes,
   forwardedMessageText,
   flagInvisibleText,
@@ -209,6 +210,15 @@ describe('mailText hidden elements', () => {
     const html = '<span>a</span>'.repeat(30_000);
     await expect(mailText({ text: undefined, html }, 1, { retryable: true })).rejects.toThrow(/HTML conversion/);
     expect(await mailText({ text: undefined, html }, 1)).toMatch(/took too long/);
+  });
+});
+
+describe('addressesNotNormalized', () => {
+  it('names stored addresses mail would never match, with the form it arrives in', () => {
+    expect(addressesNotNormalized(['a@example.org', 'Bob@Example.org', 'c@bücher.example'])).toEqual([
+      { stored: 'Bob@Example.org', normal: 'bob@example.org' },
+      { stored: 'c@bücher.example', normal: 'c@xn--bcher-kva.example' },
+    ]);
   });
 });
 

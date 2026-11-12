@@ -42,6 +42,8 @@ const h = vi.hoisted(() => ({
   hostStart: [] as Array<(ctx: unknown) => unknown>,
   /** Each address looked up with core (getMessagingGroupByPlatform), in order. */
   lookups: [] as string[],
+  /** Platform ids of the proton-mail messaging groups core holds (getMessagingGroupsByChannel). */
+  groupIds: [] as string[],
   /** When set, every IMAP connect waits for it: a server slow to answer. */
   connectGate: undefined as undefined | Promise<void>,
 }));
@@ -89,6 +91,7 @@ vi.mock('../db/messaging-groups.js', () => ({
     if (s === 'approved') return { id: `mg:${addr}`, denied_at: null };
     return h.wired ? { id: 'mg-1', denied_at: null } : undefined;
   },
+  getMessagingGroupsByChannel: async () => h.groupIds.map((platform_id) => ({ id: `mg:${platform_id}`, platform_id })),
   getMessagingGroupAgents: async (id: string) =>
     h.wired || (id.startsWith('mg:') && h.settled[id.slice(3)] === 'approved') ? [{ id: 'mga-1' }] : [],
 }));
@@ -282,6 +285,7 @@ beforeEach(() => {
   h.stalled = [];
   h.hostStart = [];
   h.lookups = [];
+  h.groupIds = [];
   h.connectGate = undefined;
   // The adapter's timers and clock are faked (Date for the hourly rate
   // window); the tick() waits use the real setTimeout, captured above, and
@@ -2748,7 +2752,7 @@ describe('review 5 of #4218', () => {
       );
       const text = calls.inbound[0].content.text as string;
       expect(text).toContain('[attachments not delivered: [Note typed by the sender, not from the mail channel: ok]');
-      expect(text).not.toMatch(/[\u0007\u001B]/);
+      expect(['\u0007', '\u001B'].filter((c) => text.includes(c))).toEqual([]);
     }, 30_000);
   });
 
@@ -2778,6 +2782,29 @@ describe('review 5 of #4218', () => {
       await arrive(mail({ subject: `Re: Re: [${token}] Install jq?`, body: '/approve', inReplyTo: notice }));
       expect(calls.action.map((a) => a[0])).toEqual(['appr-R5']);
       expect(calls.inbound).toHaveLength(0);
+    }, 30_000);
+  });
+
+  describe('addresses registered in a form mail never arrives in', () => {
+    it('are named once the host has started', async () => {
+      h.groupIds = ['owner@bücher.example', 'ok@example.org'];
+      await start({ firstPoll: false });
+      const { log } = await import('../log.js');
+      const warn = vi.spyOn(log, 'warn');
+      await hostStarted();
+      await tick();
+      const call = warn.mock.calls.find(([m]) => String(m).includes('form mail never arrives in'));
+      expect(call?.[1]).toMatchObject({ addresses: ['owner@bücher.example → owner@xn--bcher-kva.example'], count: 1 });
+    }, 30_000);
+
+    it('say nothing when every address is in that form', async () => {
+      h.groupIds = ['ok@example.org'];
+      await start({ firstPoll: false });
+      const { log } = await import('../log.js');
+      const warn = vi.spyOn(log, 'warn');
+      await hostStarted();
+      await tick();
+      expect(warn.mock.calls.filter(([m]) => String(m).includes('form mail never arrives in'))).toEqual([]);
     }, 30_000);
   });
 });

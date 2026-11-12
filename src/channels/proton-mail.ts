@@ -39,7 +39,11 @@ import nodemailer, { type Transporter } from 'nodemailer';
 import { extForMime } from '../attachment-naming.js';
 import { isSafeAttachmentName } from '../attachment-safety.js';
 import { STORE_DIR, TIMEZONE } from '../config.js';
-import { getMessagingGroupAgents, getMessagingGroupByPlatform } from '../db/messaging-groups.js';
+import {
+  getMessagingGroupAgents,
+  getMessagingGroupByPlatform,
+  getMessagingGroupsByChannel,
+} from '../db/messaging-groups.js';
 import { readEnvFile } from '../env.js';
 import { onHostStart } from '../host-lifecycle.js';
 import { log } from '../log.js';
@@ -200,6 +204,16 @@ export function normalizeAddress(raw: string): string {
   const at = s.lastIndexOf('@');
   if (at < 0) return s;
   return `${s.slice(0, at)}@${asciiDomain(s.slice(at + 1))}`;
+}
+
+/**
+ * Stored addresses (messaging-group platform ids) not in normalizeAddress's
+ * form, with the form mail arrives in: a row registered by hand with a
+ * Unicode domain or capitals never matches inbound mail, so that sender is
+ * treated as new.
+ */
+export function addressesNotNormalized(stored: string[]): Array<{ stored: string; normal: string }> {
+  return stored.map((a) => ({ stored: a, normal: normalizeAddress(a) })).filter((x) => x.normal !== x.stored);
 }
 
 /** "Re: X" unless the subject already carries a reply prefix in a common locale. */
@@ -3008,6 +3022,29 @@ registerChannelAdapter('proton-mail', {
       return Object.entries(state.cards).find(([, c]) => c.messageId === messageId);
     }
 
+    /**
+     * Once at start, with the central DB ready: name any proton-mail
+     * messaging group whose address mail can never match (addressesNotNormalized).
+     */
+    async function warnUnnormalizedAddresses(): Promise<void> {
+      try {
+        const groups = await getMessagingGroupsByChannel('proton-mail');
+        const stale = addressesNotNormalized(groups.map((g) => g.platform_id));
+        if (stale.length === 0) return;
+        log.warn(
+          'Proton Mail: addresses registered in a form mail never arrives in — those senders are treated as new',
+          {
+            addresses: stale.slice(0, 10).map((x) => `${x.stored} → ${x.normal}`),
+            count: stale.length,
+            remedy:
+              'store each address as shown after the arrow, in the messaging group and in the user id (proton-mail:<address>) with its roles',
+          },
+        );
+      } catch (err) {
+        log.debug('Proton Mail: could not check registered addresses', { err: String(err) });
+      }
+    }
+
     const adapter: ChannelAdapter = {
       name: 'Proton Mail',
       channelType: 'proton-mail',
@@ -3028,6 +3065,7 @@ registerChannelAdapter('proton-mail', {
           if (shuttingDown) return;
           accepting = true;
           void drain();
+          void warnUnnormalizedAddresses();
         };
         if (hostStarted) begin();
         else {
