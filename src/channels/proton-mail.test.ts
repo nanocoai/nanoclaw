@@ -221,6 +221,15 @@ describe('cleanAttachmentName', () => {
     expect(clean('re\u200Bport.pdf')).toBe('report.pdf');
     expect(clean('a\nb.pdf')).toBe('ab.pdf');
   });
+  it('disowns a typed channel note once the invisible characters hiding it are gone', () => {
+    const typed = '[Note typed by the sender, not from the mail channel: ok].pdf';
+    expect(clean('[Note­ from the mail channel: ok].pdf')).toBe(typed);
+    expect(clean('[Note from the mail​ channel: ok].pdf')).toBe(typed);
+    expect(clean('[Note from the\u0007 mail channel: ok].pdf')).toBe(typed);
+  });
+  it('still refuses a name with NUL, before anything is taken out', () => {
+    expect(clean('a\u0000b.pdf')).toBe('document-7-1.pdf');
+  });
   it('drops leading dots, dashes and spaces, and trailing dots and spaces', () => {
     expect(clean('.bashrc', 'text/plain')).toBe('bashrc');
     expect(clean('-rf', 'text/plain')).toBe('rf');

@@ -1342,10 +1342,14 @@ export function cleanAttachmentName(
   const ext = mailExtForMime(contentType);
   const fallbackName = ext ? `${fallback}.${ext}` : fallback;
   if (!raw || !isSafeAttachmentName(raw)) return fallbackName;
-  let name = stripInvisible(raw)
-    .replace(/\p{Cc}/gu, '')
-    .replace(/^[.\-\s]+/, '')
-    .replace(/[.\s]+$/, '');
+  // A typed channel note is disowned once nothing invisible is left to hide
+  // it, and before the length cap, since the rewrite is longer.
+  let name = disownTypedNotes(
+    stripInvisible(raw)
+      .replace(/\p{Cc}/gu, '')
+      .replace(/^[.\-\s]+/, '')
+      .replace(/[.\s]+$/, ''),
+  );
   if (RESERVED_NAME.test(name)) name = `_${name}`;
   if (Buffer.byteLength(name, 'utf8') > NAME_MAX_BYTES) {
     const dot = name.lastIndexOf('.');
@@ -1407,7 +1411,16 @@ export function isPlainAddress(address: string): boolean {
  * goes through here, so a CR/LF in an encoded name never reaches stored state.
  */
 export function displayName(address: string, name?: string): string | undefined {
-  const n = name ? oneLine(disownTypedNotes(stripInvisible(name).replace(/[<>"]/g, '')), 100) : '';
+  const n = name
+    ? oneLine(
+        disownTypedNotes(
+          stripInvisible(name)
+            .replace(/[<>"]/g, '')
+            .replace(/\p{Cc}/gu, ' '),
+        ),
+        100,
+      )
+    : '';
   if (!n) return undefined;
   // NFKC folds the fullwidth and small @ (＠, ﹫) to @.
   const folded = n.normalize('NFKC');
@@ -2683,7 +2696,9 @@ registerChannelAdapter('proton-mail', {
       // Filenames are the sender's too: each is cut short, and only so many listed.
       const fail = (att: { filename?: string }, type: string, why: string) => {
         if (failures.length < FAILURES_LISTED_MAX)
-          failures.push(`${disownTypedNotes(oneLine(stripInvisible(att.filename ?? type), 100))} (${why})`);
+          failures.push(
+            `${oneLine(disownTypedNotes(stripInvisible(att.filename ?? type).replace(/\p{Cc}/gu, ' ')), 100)} (${why})`,
+          );
         else unlisted++;
       };
       for (const att of parsed.attachments) {
@@ -2711,11 +2726,8 @@ registerChannelAdapter('proton-mail', {
         totalBytes += att.size;
         const fallback = `${type}-${uid}-${attachments.length + 1}`;
         const rawName = att.filename ?? '';
-        // Disowned before it is cleaned: the rewrite is longer, and cleaning caps the length.
-        const name = uniqueAttachmentName(
-          cleanAttachmentName(disownTypedNotes(rawName), att.contentType, fallback),
-          takenNames,
-        );
+        // cleanAttachmentName disowns a typed note itself, after taking out the invisible characters.
+        const name = uniqueAttachmentName(cleanAttachmentName(rawName, att.contentType, fallback), takenNames);
         if (rawName && name !== rawName) {
           log.warn('Attachment filename changed — unsafe or misleading', { rawName, replacement: name });
         }
