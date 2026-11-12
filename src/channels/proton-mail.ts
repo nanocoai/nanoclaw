@@ -481,6 +481,20 @@ function cutBeforeMark(text: string, at: number, marks: string[]): number {
 }
 
 /**
+ * "[Note from the mail channel", allowing invisible and control characters
+ * anywhere in it: a joiner, a lone variation selector or a C0 control is not
+ * marked as hidden text (emoji and scripts need the first two), so without
+ * this one inside a word would get the note past the rewrite unseen.
+ */
+const TYPED_NOTE = (() => {
+  const ignorable = '[\\p{Default_Ignorable_Code_Point}\\p{Cc}]*';
+  const word = (w: string) => [...w].join(ignorable);
+  const gap = `${ignorable}\\s[\\s\\p{Default_Ignorable_Code_Point}\\p{Cc}]*`;
+  const phrase = ['note', 'from', 'the', 'mail', 'channel'].map(word).join(gap);
+  return new RegExp(`\\[(\\s*)${ignorable}${phrase}(?![\\p{L}\\p{N}_])`, 'giu');
+})();
+
+/**
  * The text with any "[Note from the mail channel" the sender typed made
  * visibly the sender's: the channel's own notes come after the sender's text
  * and carry this mail's code, but a typed note with no code to check (in a
@@ -492,10 +506,7 @@ function cutBeforeMark(text: string, at: number, marks: string[]): number {
  * sender cannot know.
  */
 export function disownTypedNotes(text: string): string {
-  return text.replace(
-    /\[(\s*)note\s+from\s+the\s+mail\s+channel\b/gi,
-    '[$1Note typed by the sender, not from the mail channel',
-  );
+  return text.replace(TYPED_NOTE, '[$1Note typed by the sender, not from the mail channel');
 }
 
 /** The text with invisible characters made visible, marked with `token`; `flagged` when there were any. */
