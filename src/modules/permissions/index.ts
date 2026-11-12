@@ -76,9 +76,9 @@ const awaitingNameInput = new Map<string, PendingNameInput>();
 // first card keeps its buttons until the host accepts. So while an agent card
 // is sent no card click counts, once it is out the card clicked for it is
 // ignored, and an agent card whose options weren't stored is ignored for good
-// (if its id is unknown, no card click for that chat counts: `blocked`).
+// (if its id is unknown, no card click for that request counts: `blocked`).
 // Keyed by messaging group, in memory (the durable card check is later).
-const agentCards = new Map<string, { retired: Set<string>; sending: boolean; blocked?: boolean }>();
+const agentCards = new Map<string, { retired: Set<string>; sending: boolean; blocked?: string }>();
 
 async function extractAndUpsertUser(event: InboundEvent): Promise<string | null> {
   let content: Record<string, unknown>;
@@ -589,6 +589,8 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
   }
   const approverId = clickerId;
   const swap = agentCards.get(row.messaging_group_id);
+  // A replaced request can recover; keep known retired message IDs inert.
+  if (swap?.blocked && swap.blocked !== row.created_at) swap.blocked = undefined;
   if (swap && (swap.blocked || (payload.messageId && (swap.sending || swap.retired.has(payload.messageId)))))
     return 'ignored';
 
@@ -622,7 +624,7 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
         },
         // While the first card's options are still the stored ones it works again.
         unstored: (cardId, firstCardStored) => {
-          if (!cardId) guard.blocked = true;
+          if (!cardId) guard.blocked = row.created_at;
           else guard.retired.add(cardId);
           if (cardId && firstCardStored && payload.messageId) guard.retired.delete(payload.messageId);
         },
