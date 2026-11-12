@@ -46,6 +46,23 @@ function longGatewayCard() {
   return gatewayApprovalPresentation({ title: 'Credentials Request', question: '', summary } as GatewayApprovalRequest);
 }
 
+/** An email approval with 80 Cc and 80 Bcc addresses; Telegram turns each address into a link. */
+function emailGatewayCard() {
+  const addresses = Array.from({ length: 80 }, () => 'a@b.co').join(' ');
+  const summary = {
+    agent: 'agent',
+    action: 'Send an email',
+    resource: 'POST mail.example.com/send',
+    reason: 'The gateway policy requires human approval for this request.',
+    details: [
+      { label: 'Cc', value: addresses },
+      { label: 'Bcc', value: addresses },
+      { label: 'To', value: 'ceo@example.com' },
+    ],
+  };
+  return gatewayApprovalPresentation({ title: 'Credentials Request', question: '', summary } as GatewayApprovalRequest);
+}
+
 describe('Telegram card limit through the bridge', () => {
   const bridge = createTelegramBridge()!;
   const sends = () => calls.filter((c) => c.method === 'sendMessage').map((c) => c.body);
@@ -80,5 +97,67 @@ describe('Telegram card limit through the bridge', () => {
     const { title, question } = longGatewayCard();
     await expect(ask(title, question)).rejects.toBeInstanceOf(CardTooLongError);
     expect(sends()).toHaveLength(0);
+  });
+
+  // An empty list item is 3 characters as typed and about 7 as MarkdownV2.
+  it('refuses a card under the limit whose list grows past 4,096 as sent', async () => {
+    const question = '\n\n' + '1.\n'.repeat(650) + 'DELETE production';
+    expect('Approve'.length + question.length).toBeLessThan(2000);
+    await expect(ask('Approve', question)).rejects.toBeInstanceOf(CardTooLongError);
+    expect(sends()).toHaveLength(0);
+  });
+
+  // An email address is sent as a link, four times as long.
+  it('sends a card of exactly 4,096 characters as sent whole, and refuses one more', async () => {
+    const addresses = 'a@b.co '.repeat(160);
+    await ask('Approve', addresses + 'x'.repeat(86));
+    const [message, ...rest] = sends();
+    expect(rest).toHaveLength(0);
+    expect(message.text).toHaveLength(4096);
+    expect(message.text!.endsWith('x'.repeat(86))).toBe(true);
+    expect(message.reply_markup?.inline_keyboard.flat()).toHaveLength(2);
+
+    calls.length = 0;
+    await expect(ask('Approve', addresses + 'x'.repeat(87))).rejects.toBeInstanceOf(CardTooLongError);
+    expect(sends()).toHaveLength(0);
+  });
+
+  it('refuses a gateway card under the limit whose email addresses grow past 4,096 as sent', async () => {
+    const { title, question } = emailGatewayCard();
+    expect(title.length + question.length).toBeLessThan(2000);
+    await expect(ask(title, question)).rejects.toBeInstanceOf(CardTooLongError);
+    expect(sends()).toHaveLength(0);
+  });
+
+  // The adapter swaps an emoji name for its character after converting, which shortens the text.
+  it('sends a card whole that fits once the adapter swaps its emoji names', async () => {
+    const hearts = '{{emoji:heart}}'.repeat(30);
+    await ask('Approve', 'a@b.co '.repeat(150) + '\n```\n' + hearts + '\n```');
+    const [message, ...rest] = sends();
+    expect(rest).toHaveLength(0);
+    expect(message.text!.length).toBeLessThanOrEqual(4096);
+    expect(message.text!.endsWith('```')).toBe(true);
+    expect(message.reply_markup?.inline_keyboard.flat()).toHaveLength(2);
+  });
+
+  it('leaves a card without answer buttons alone', async () => {
+    const actions = [{ label: 'Open', url: 'https://example.com' }];
+    const card = { title: 'Report', description: 'a@b.co '.repeat(200), actions };
+    await bridge.deliver('telegram:42', null, { kind: 'chat-sdk', content: { type: 'card', card } });
+    expect(sends()).toHaveLength(1);
+  });
+
+  it('changes nothing on a core without CardTooLongError', async () => {
+    vi.resetModules();
+    vi.doMock('./ask-question.js', async (importOriginal) => ({
+      ...(await importOriginal<typeof import('./ask-question.js')>()),
+      CardTooLongError: undefined,
+    }));
+    const { refuseCutCards } = await import('./telegram.js');
+    const postMessage = vi.fn();
+    const adapter = { postMessage };
+    refuseCutCards(adapter as never);
+    expect(adapter.postMessage).toBe(postMessage);
+    vi.doUnmock('./ask-question.js');
   });
 });

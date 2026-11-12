@@ -10,7 +10,8 @@
  * 'telegram' either way: user ids, formatting, and container config are one
  * namespace across bots. See .claude/skills/telegram-multi-instance.
  */
-import { createTelegramAdapter } from '@chat-adapter/telegram';
+import { createTelegramAdapter, TelegramFormatConverter } from '@chat-adapter/telegram';
+import { cardChildToFallbackText, convertEmojiPlaceholders } from 'chat';
 
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
@@ -20,6 +21,7 @@ import { upsertUser } from '../modules/permissions/db/users.js';
 import { createChatSdkBridge, type ReplyContext } from './chat-sdk-bridge.js';
 import { registerChannelAdapter } from './channel-registry.js';
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage } from './adapter.js';
+import * as askQuestion from './ask-question.js';
 import { tryConsume } from './telegram-pairing.js';
 
 /**
@@ -42,6 +44,37 @@ const TELEGRAM_DEFAULTS: ChannelDefaults = {
 export function keepCommandsAsMessages(adapter: ReturnType<typeof createTelegramAdapter>): void {
   const a = adapter as unknown as { handleSlashCommandUpdate?: unknown };
   if (typeof a.handleSlashCommandUpdate === 'function') a.handleSlashCommandUpdate = () => false;
+}
+
+const TELEGRAM_MESSAGE_LIMIT = 4096;
+
+/**
+ * Refuse a question card that Telegram would cut. The adapter sends a card as
+ * MarkdownV2 and cuts it past 4,096 with its buttons kept, and lists, links
+ * and email addresses grow well past double on the way. A core without
+ * CardTooLongError has no refusal to raise, so there this is a no-op.
+ */
+export function refuseCutCards(adapter: ReturnType<typeof createTelegramAdapter>): void {
+  const { CardTooLongError } = askQuestion as { CardTooLongError?: new (reason: string) => Error };
+  if (!CardTooLongError) return;
+  const converter = new TelegramFormatConverter();
+  const post = adapter.postMessage.bind(adapter);
+  adapter.postMessage = async (...args) => {
+    const message = args[1];
+    const card = typeof message === 'object' && 'card' in message ? message.card : undefined;
+    if (card?.children.some((child) => child.type === 'actions' && child.children.some((b) => b.type === 'button'))) {
+      // The adapter's own steps for a card of title, text and buttons, which is
+      // what the bridge builds: Markdown, MarkdownV2, emoji names swapped.
+      const parts = [card.title && `**${card.title}**`, ...card.children.map(cardChildToFallbackText)];
+      const { length } = convertEmojiPlaceholders(converter.fromMarkdown(parts.filter(Boolean).join('\n')), 'gchat');
+      if (length > TELEGRAM_MESSAGE_LIMIT) {
+        throw new CardTooLongError(
+          `the request is too long to show in full on a card (${length} characters as Telegram sends it, limit ${TELEGRAM_MESSAGE_LIMIT})`,
+        );
+      }
+    }
+    return post(...args);
+  };
 }
 
 /**
@@ -391,6 +424,7 @@ export function createTelegramBridge(options: TelegramBridgeOptions = {}): Chann
     mode: 'polling',
   });
   keepCommandsAsMessages(telegramAdapter);
+  refuseCutCards(telegramAdapter);
   const bridge = createChatSdkBridge({
     adapter: telegramAdapter,
     instance: options.instanceKey, // undefined ⇒ default instance (keyed by channelType)
@@ -404,11 +438,10 @@ export function createTelegramBridge(options: TelegramBridgeOptions = {}): Chann
     // front of the new one, downgraded **bold** to *single-star* — which the
     // adapter then parsed as emphasis and rendered as _italic_.
     maxTextLength: 4000,
-    // A card goes out as one MarkdownV2 message, cut past 4,096 with its
-    // buttons kept. Escaping at most doubles plain text, so a longer card is
-    // refused; 2,000 is also the agent's own question cap. A Markdown table, or
-    // text packed with links or email addresses, grows more and can still be cut.
-    // Spread, so an older core without this option still type-checks (and ignores it).
+    // The agent's own question cap. MarkdownV2 escaping at most doubles plain
+    // text, so a card under it stays within Telegram's 4,096; text that grows
+    // more is refused by refuseCutCards. Spread, so an older core without this
+    // option still type-checks (and ignores it).
     ...{ maxCardTextLength: 2000 },
   });
 
