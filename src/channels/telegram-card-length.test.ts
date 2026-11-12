@@ -3,6 +3,7 @@
  * stubbed, so the test sees the exact MarkdownV2 text the adapter sends, which
  * Telegram cuts past 4,096.
  */
+import { Actions, Button, Card, CardText } from 'chat';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../env.js', () => ({
@@ -13,6 +14,7 @@ vi.mock('../env.js', () => ({
 import { gatewayApprovalPresentation } from '../gateway-approval-presentation.js';
 import type { GatewayApprovalRequest } from '../gateway-providers/gateway-provider-registry.js';
 import { CardTooLongError } from './ask-question.js';
+import { registerQuestionRenderResolver } from './question-render-registry.js';
 import { createTelegramBridge } from './telegram.js';
 
 const calls: Array<{ method: string; body: { text?: string; reply_markup?: { inline_keyboard: unknown[][] } } }> = [];
@@ -145,6 +147,20 @@ describe('Telegram card limit through the bridge', () => {
     const card = { title: 'Report', description: 'a@b.co '.repeat(200), actions };
     await bridge.deliver('telegram:42', null, { kind: 'chat-sdk', content: { type: 'card', card } });
     expect(sends()).toHaveLength(1);
+  });
+
+  // A custom presentation must show the whole request itself, so its card is not measured.
+  it('sends a custom-rendered card as before, answer buttons and all', async () => {
+    const buttons = Actions([Button({ id: 'ncq:custom-1:0', label: 'Approve', value: '0' })]);
+    const card = Card({ title: 'Review', children: [CardText('a@b.co '.repeat(200)), buttons] });
+    registerQuestionRenderResolver((id) =>
+      id === 'custom-1' ? { title: 'Review', options: [], renderMessage: () => ({ card }) } : undefined,
+    );
+    const content = { type: 'ask_question', questionId: 'custom-1', title: 'Review', options: [] };
+    await bridge.deliver('telegram:42', null, { kind: 'chat-sdk', content: { ...content, requirePresentation: true } });
+    const [message, ...rest] = sends();
+    expect(rest).toHaveLength(0);
+    expect(message.reply_markup?.inline_keyboard.flat()).toHaveLength(1);
   });
 
   it('changes nothing on a core without CardTooLongError', async () => {

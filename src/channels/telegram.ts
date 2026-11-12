@@ -10,6 +10,8 @@
  * 'telegram' either way: user ids, formatting, and container config are one
  * namespace across bots. See .claude/skills/telegram-multi-instance.
  */
+import { AsyncLocalStorage } from 'node:async_hooks';
+
 import { createTelegramAdapter, TelegramFormatConverter } from '@chat-adapter/telegram';
 import { cardChildToFallbackText, convertEmojiPlaceholders } from 'chat';
 
@@ -48,6 +50,9 @@ export function keepCommandsAsMessages(adapter: ReturnType<typeof createTelegram
 
 const TELEGRAM_MESSAGE_LIMIT = 4096;
 
+/** Set while the bridge delivers a custom presentation, which must show the whole request itself. */
+const customPresentation = new AsyncLocalStorage<true>();
+
 /**
  * Refuse a question card that Telegram would cut. The adapter sends a card as
  * MarkdownV2 and cuts it past 4,096 with its buttons kept, and lists, links
@@ -61,7 +66,8 @@ export function refuseCutCards(adapter: ReturnType<typeof createTelegramAdapter>
   const post = adapter.postMessage.bind(adapter);
   adapter.postMessage = async (...args) => {
     const message = args[1];
-    const card = typeof message === 'object' && 'card' in message ? message.card : undefined;
+    const own = !customPresentation.getStore() && typeof message === 'object' && 'card' in message;
+    const card = own ? message.card : undefined;
     if (card?.children.some((child) => child.type === 'actions' && child.children.some((b) => b.type === 'button'))) {
       // The adapter's own steps for a card of title, text and buttons, which is
       // what the bridge builds: Markdown, MarkdownV2, emoji names swapped.
@@ -449,6 +455,10 @@ export function createTelegramBridge(options: TelegramBridgeOptions = {}): Chann
 
   const wrapped: ChannelAdapter = {
     ...bridge,
+    deliver: (...args) =>
+      (args[2].content as { requirePresentation?: unknown } | null)?.requirePresentation
+        ? customPresentation.run(true, () => bridge.deliver(...args))
+        : bridge.deliver(...args),
     resolveChannelName: async (platformId: string) => {
       const chatId = platformId.split(':').slice(1).join(':');
       if (!chatId) return null;
