@@ -84,6 +84,8 @@ async function fireAction(
     },
     undefined,
   );
+  // The handler returns once the host has the click; let the card edit that follows finish.
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
   return { edits, actions };
 }
 

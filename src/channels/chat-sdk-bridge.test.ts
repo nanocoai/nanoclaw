@@ -26,6 +26,9 @@ function stubAdapter(partial: Partial<Adapter>): Adapter {
   return { name: 'stub', ...partial } as unknown as Adapter;
 }
 
+/** A click handler returns once the host has the click. This lets what follows it (card edit, private note) finish. */
+const afterClick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
 interface PostCall {
   threadId: string;
   message: AdapterPostableMessage;
@@ -965,6 +968,7 @@ it('forwards the authenticated instance and message address without editing a de
       },
       undefined,
     );
+    await afterClick();
     expect(onAction).toHaveBeenCalledWith('address-fixture', 'approve', 'selected', {
       instance: 'fixture-one',
       messageId: 'original-card',
@@ -1017,6 +1021,7 @@ it('edits a clicked card with no stored question into an escaped card, not raw m
       },
       undefined,
     );
+    await afterClick();
     const edited = editMessage.mock.calls[0][2] as {
       markdown?: string;
       card?: { title: string; children: Array<{ content?: string }> };
@@ -1059,6 +1064,7 @@ it('leaves an already resolved card alone when a late click arrives', async () =
       },
       undefined,
     );
+    await afterClick();
     expect(editMessage).not.toHaveBeenCalled();
     // The host decides: it ignores a resolved question, and still handles a pending row without render metadata.
     expect(onAction).toHaveBeenCalledWith('already-resolved', '0', 'selected', expect.anything());
@@ -1103,8 +1109,8 @@ describe('createChatSdkBridge — a clicked card resolves only when the host acc
     const bridge = createChatSdkBridge({ adapter, instance: `fixture-${questionId}`, supportsThreads: false });
     await bridge.setup({ onInbound: () => {}, onInboundEvent: () => {}, onMetadata: () => {}, onAction });
     const chat = (bridge as unknown as { _chat: import('chat').Chat })._chat;
-    const click = (userId: string, userName: string) =>
-      chat.processAction(
+    const click = async (userId: string, userName: string) => {
+      await chat.processAction(
         {
           actionId: `ncq:${questionId}:0`,
           adapter,
@@ -1116,6 +1122,8 @@ describe('createChatSdkBridge — a clicked card resolves only when the host acc
         },
         undefined,
       );
+      await afterClick();
+    };
     return { bridge, click, onAction, editMessage, postEphemeral, order };
   }
 
@@ -1205,6 +1213,57 @@ describe('createChatSdkBridge — a clicked card resolves only when the host acc
       expect(card).toContain('No longer available');
       expect(card).not.toContain('Ann');
     } finally {
+      await bridge.teardown();
+    }
+  });
+
+  // Some transports (Telegram's polling) read their next events only once the
+  // handler returns, so one slow decision must not keep it.
+  it('hands a click to the host and returns before the host has decided', async () => {
+    const { bridge, click, onAction, editMessage } = await startClicks('q-slow-host', review);
+    let decide!: (outcome: string) => void;
+    onAction.mockReturnValue(new Promise((resolve) => (decide = resolve)));
+    try {
+      await click('approver', 'Ann');
+      expect(onAction).toHaveBeenCalledTimes(1);
+      expect(editMessage).not.toHaveBeenCalled();
+      decide('accepted');
+      await vi.waitFor(() => expect(editMessage).toHaveBeenCalledTimes(1));
+      expect(JSON.stringify(editMessage.mock.calls[0])).toContain('✅ Approved by Ann');
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('hands clicks to the host in the order they came, and shows each when its own decision comes', async () => {
+    const { bridge, click, onAction, editMessage, postEphemeral } = await startClicks('q-two-clicks', review);
+    let decideFirst!: (outcome: string) => void;
+    onAction.mockReturnValueOnce(new Promise((resolve) => (decideFirst = resolve))).mockResolvedValueOnce('accepted');
+    try {
+      await click('bystander', 'Bob');
+      await click('approver', 'Ann');
+      expect(onAction.mock.calls.map((call) => call[2])).toEqual(['bystander', 'approver']);
+      // The second click is shown while the first is still with the host.
+      expect(JSON.stringify(editMessage.mock.calls)).toContain('✅ Approved by Ann');
+      expect(postEphemeral).not.toHaveBeenCalled();
+      decideFirst('refused');
+      await vi.waitFor(() => expect(postEphemeral).toHaveBeenCalledTimes(1));
+      expect(editMessage).toHaveBeenCalledTimes(1);
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('logs a click the host fails on, and leaves the card as it is', async () => {
+    const { bridge, click, onAction, editMessage } = await startClicks('q-host-fails', review);
+    const errors = vi.spyOn(log, 'error').mockImplementation(() => {});
+    onAction.mockRejectedValue(new Error('host down'));
+    try {
+      await click('approver', 'Ann');
+      expect(errors).toHaveBeenCalledWith('Failed to handle a card click', { err: expect.any(Error) });
+      expect(editMessage).not.toHaveBeenCalled();
+    } finally {
+      errors.mockRestore();
       await bridge.teardown();
     }
   });
