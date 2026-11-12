@@ -103,8 +103,9 @@ describe('Discord card limit through the bridge', () => {
     expect(posts[0].components?.length).toBeGreaterThan(0);
   });
 
+  // One plain character, not one more pipe: a pipe adds two and would skip 4,001.
   it('refuses a card one character longer and posts nothing', async () => {
-    await expect(ask('Approve', '|'.repeat(1997))).rejects.toBeInstanceOf(CardTooLongError);
+    await expect(ask('Approve', '|'.repeat(1996) + 'x')).rejects.toBeInstanceOf(CardTooLongError);
     expect(posts).toHaveLength(0);
   });
 
