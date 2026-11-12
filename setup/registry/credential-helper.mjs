@@ -21,9 +21,10 @@
  * useful line. Docker gives the helper its own stderr, so diagnostics go there
  * and reach the terminal alongside whatever docker prints next.
  *
- * The installed copy's shebang is rewritten to an absolute node path by
- * setup/install-cred-helper.ts — nvm/asdf shims are not reliably resolvable
- * from docker's spawn environment.
+ * The installed copy starts with a `/bin/sh` header written by
+ * setup/install-cred-helper.ts: it runs this file on the node setup ran on, or
+ * on the node on PATH once that binary is gone. Docker starts a helper with
+ * the CLI's own environment, which is also how NANOCLAW_PULL_NONCE reaches it.
  */
 import { timingSafeEqual } from 'node:crypto';
 import { readFileSync, statSync, writeFileSync } from 'node:fs';

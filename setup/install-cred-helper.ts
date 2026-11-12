@@ -5,9 +5,9 @@
  * The helper is a standalone script, not a repo module: docker execs it from an
  * arbitrary cwd, and uninstalling NanoClaw deletes this checkout while the
  * helper stays on PATH. So installing means copying the source out of the tree
- * and stamping an absolute shebang onto the copy — `#!/usr/bin/env node` would
- * resolve through whatever nvm/asdf shim happens to be in the spawning
- * process's PATH, which is not reliably anything when the spawner is docker.
+ * behind a `/bin/sh` header that starts it on the node setup ran on, or on the
+ * node on PATH once that binary is gone. A bare `#!<node>` line stops working
+ * at the next node upgrade and cannot hold a path with a space.
  *
  * Wiring is one `credHelpers` key in `~/.docker/config.json`, read-modify-write
  * around every other key. That key is a pointer — no secret is written there,
@@ -31,8 +31,7 @@ export const HELPER_BINARY_NAME = `docker-credential-${CRED_HELPER_NAME}`;
 /**
  * Must match `HELPER_ID` in `setup/registry/credential-helper.mjs`. Install
  * verifies the installed binary prints it, so drift fails at install time
- * rather than silently making uninstall refuse to clean up. `container/pull.sh`
- * looks for the same string before it re-points a helper whose node has moved.
+ * rather than silently making uninstall refuse to clean up.
  */
 const HELPER_MARKER = 'nanoclaw-docker-credential-helper';
 
@@ -155,10 +154,15 @@ function chooseBinDir(override?: string): string {
   return fallback;
 }
 
-/** Swap the source's shebang for one naming this exact node binary. */
+/**
+ * Swap the source's shebang for a `/bin/sh` header. Its second line is a bare
+ * string and a comment to node, and a command to sh: run this file on
+ * `nodePath` while that binary exists, else on the node on PATH.
+ */
 export function renderHelper(source: string, nodePath: string): string {
   const body = source.startsWith('#!') ? source.slice(source.indexOf('\n') + 1) : source;
-  return `#!${nodePath}\n${body}`;
+  const pinned = `'${nodePath.replace(/'/g, `'\\''`)}'`;
+  return `#!/bin/sh\n':' //; N=${pinned}; [ -x "$N" ] || N=node; exec "$N" "$0" "$@"\n${body}`;
 }
 
 /**
@@ -245,6 +249,20 @@ function writeDockerConfig(file: string, config: DockerConfig): void {
   fs.renameSync(tmp, file);
 }
 
+/** Write the helper binary and nothing else: docker's config is not this function's to touch. */
+function writeHelper(helperPath: string): void {
+  writeExecutable(helperPath, renderHelper(fs.readFileSync(helperSourcePath(), 'utf-8'), process.execPath));
+
+  // Proves the header resolves and that this binary is the one uninstall will
+  // recognize — both silent failures otherwise, discovered mid-pull.
+  const check = spawnSync(helperPath, ['version'], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] });
+  if (check.status !== 0 || !(check.stdout ?? '').includes(HELPER_MARKER)) {
+    throw new Error(
+      `${helperPath} did not run after install (exit ${check.status}): ${(check.stderr ?? check.error?.message ?? '').trim()}`,
+    );
+  }
+}
+
 export function installCredentialHelper(options: CredHelperOptions = {}): CredHelperInstallResult {
   const registryHost = resolveRegistryHost(options.registryHost);
 
@@ -255,16 +273,7 @@ export function installCredentialHelper(options: CredHelperOptions = {}): CredHe
 
   const binDir = chooseBinDir(options.binDir);
   const helperPath = path.join(binDir, HELPER_BINARY_NAME);
-  writeExecutable(helperPath, renderHelper(fs.readFileSync(helperSourcePath(), 'utf-8'), process.execPath));
-
-  // Proves the shebang resolves and that this binary is the one uninstall will
-  // recognize — both silent failures otherwise, discovered mid-pull.
-  const check = spawnSync(helperPath, ['version'], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] });
-  if (check.status !== 0 || !(check.stdout ?? '').includes(HELPER_MARKER)) {
-    throw new Error(
-      `${helperPath} did not run after install (exit ${check.status}): ${(check.stderr ?? check.error?.message ?? '').trim()}`,
-    );
-  }
+  writeHelper(helperPath);
 
   const credHelpers = config.credHelpers ?? {};
   const dockerConfigChanged = credHelpers[registryHost] !== CRED_HELPER_NAME;
@@ -290,6 +299,23 @@ export function installCredentialHelper(options: CredHelperOptions = {}): CredHe
   }
 
   return { helperPath, registryHost, dockerConfigPath: configFile, dockerConfigChanged, onPath: reachable };
+}
+
+/**
+ * Rewrite a helper docker is wired to, where it already is, so one written by
+ * an older setup gets the current header before a pull needs it: sign-in is
+ * skipped on a machine already signed in. Only the binary is written, never
+ * docker's config. Not fatal: the pull that follows reports its own failure.
+ */
+export function refreshInstalledCredentialHelper(options: CredHelperOptions = {}): void {
+  const helper = credentialHelperStatus(options);
+  // With no registry wired to the helper, docker never starts it.
+  if (!helper.helperPath || helper.wiredHosts.length === 0) return;
+  try {
+    writeHelper(helper.helperPath);
+  } catch (err) {
+    log.warn('Could not re-install the docker credential helper', { helperPath: helper.helperPath, err });
+  }
 }
 
 /**
