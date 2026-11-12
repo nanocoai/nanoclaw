@@ -22,6 +22,8 @@ export interface QuestionRender {
   renderTerminal?: (resolution: string) => Parameters<Adapter['postMessage']>[1];
   /** The coordinator updates the card only after it authorizes and records the decision. */
   deferResolution?: boolean;
+  /** The chat the card was sent to, where its row records one. */
+  platformId?: string;
 }
 
 export type QuestionRenderResolver = (

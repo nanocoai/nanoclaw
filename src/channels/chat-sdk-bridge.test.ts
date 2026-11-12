@@ -1288,6 +1288,11 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
     registerQuestionRenderResolver((id) => (id === questionId ? (render as never) : undefined));
     let webhookUrl = '';
     const editMessage = vi.fn(async () => ({ id: 'card-1', threadId: 't', raw: {} }));
+    const postMessage = vi.fn(async (threadId: string, _message: AdapterPostableMessage) => ({
+      id: 'card-1',
+      threadId,
+      raw: {},
+    }));
     const handleWebhook = vi.fn(async () => new Response('ok'));
     const adapter = stubAdapter({
       name: 'discord',
@@ -1298,6 +1303,7 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
       encodeThreadId: ({ guildId, channelId, threadId }: { guildId: string; channelId: string; threadId?: string }) =>
         `discord:${guildId}:${channelId}${threadId ? `:${threadId}` : ''}`,
       editMessage,
+      postMessage,
     } as never) as Adapter & { startGatewayListener: unknown };
     adapter.startGatewayListener = async (_opts: unknown, _ms: number, _signal: AbortSignal, url: string) => {
       webhookUrl = url;
@@ -1339,7 +1345,7 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
           ...extra,
         },
       });
-    return { bridge, click, forward, onAction, editMessage, handleWebhook };
+    return { bridge, click, forward, onAction, editMessage, postMessage, handleWebhook };
   }
 
   const CALLBACK = 'https://discord.com/api/v10/interactions/interaction-2/interaction-token/callback';
@@ -1562,6 +1568,181 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
           expect(editMessage).toHaveBeenCalledWith('discord:G1:P1:T1', 'card-1', expect.anything()),
         );
       } finally {
+        await bridge.teardown();
+      }
+    },
+  );
+
+  // The adapter keys a thread's chat by the thread alone when it could not tell the parent.
+  it.each([10, 11, 12])(
+    'addresses a click in a thread (channel type %i) by the thread alone when its card was sent to a chat keyed that way',
+    async (type) => {
+      const { bridge, click, onAction, editMessage } = await startDiscord('q-discord-thread-chat', {
+        ...review,
+        platformId: 'discord:G1:T1',
+      });
+      try {
+        await click({ id: 'clicker-1', username: 'Ann' }, undefined, {
+          channel_id: 'T1',
+          channel: { id: 'T1', type, parent_id: 'P1' },
+        });
+        await vi.waitFor(() =>
+          expect(onAction).toHaveBeenCalledWith('q-discord-thread-chat', 'approve', 'clicker-1', {
+            messageId: 'card-1',
+            platformId: 'discord:G1:T1',
+          }),
+        );
+        await vi.waitFor(() =>
+          expect(editMessage).toHaveBeenCalledWith('discord:G1:P1:T1', 'card-1', expect.anything()),
+        );
+      } finally {
+        await bridge.teardown();
+      }
+    },
+  );
+
+  it("keeps a thread click's own address when its card was sent to another chat", async () => {
+    const { bridge, click, onAction } = await startDiscord('q-discord-other-chat', {
+      ...review,
+      platformId: 'discord:G1:T9',
+    });
+    try {
+      await click({ id: 'clicker-1', username: 'Ann' }, undefined, {
+        channel_id: 'T1',
+        channel: { id: 'T1', type: 11, parent_id: 'P1' },
+      });
+      await vi.waitFor(() =>
+        expect(onAction).toHaveBeenCalledWith('q-discord-other-chat', 'approve', 'clicker-1', {
+          messageId: 'card-1',
+          platformId: 'discord:G1:P1',
+        }),
+      );
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  // The real coordinator decides a durable approval only for a click from the
+  // chat its card was sent to. A thread's chat is keyed one of two ways.
+  it.each([
+    ['its parent channel and the thread', 'discord:G1:P1', 'discord:G1:P1:T1'],
+    ['the thread alone', 'discord:G1:T1', 'discord:G1:T1'],
+  ])(
+    'a durable gateway approval sent to a thread whose chat is keyed by %s is decided by a click in that thread',
+    async (_name, platformId, threadId) => {
+      const { createAgentGroup, createSession, getPendingApproval } = await import('../db/index.js');
+      const { createMessagingGroup } = await import('../db/messaging-groups.js');
+      const { gatewayRuntimeIdentity } = await import('../gateway-providers/index.js');
+      const { INSTALL_SLUG } = await import('../config.js');
+      const { dispatchResponse } = await import('../response-registry.js');
+      const coordinator = await import('../gateway-approval-coordinator.js');
+      const now = new Date().toISOString();
+      await createAgentGroup({ id: 'ag-1', name: 'Fixture', folder: 'fixture', agent_provider: null, created_at: now });
+      await createSession({
+        id: 'session-1',
+        agent_group_id: 'ag-1',
+        messaging_group_id: null,
+        thread_id: null,
+        agent_provider: null,
+        status: 'active',
+        container_status: 'running',
+        last_active: now,
+        created_at: now,
+      });
+      await createMessagingGroup({
+        id: 'mg-thread',
+        channel_type: 'discord',
+        platform_id: platformId,
+        name: null,
+        is_group: 1,
+        unknown_sender_policy: 'request_approval',
+        created_at: now,
+      });
+      const { bridge, click, onAction, postMessage, editMessage } = await startDiscord('q-unused', review);
+      // As src/index.ts wires it.
+      onAction.mockImplementation((questionId, value, userId, address) =>
+        dispatchResponse({
+          questionId,
+          value,
+          userId,
+          channelType: 'discord',
+          instance: address?.instance ?? 'discord',
+          messageId: address?.messageId,
+          platformId: address?.platformId ?? '',
+          threadId: null,
+        }),
+      );
+      const submitted: string[] = [];
+      let decide!: (request: GatewayApprovalRequest) => Promise<string>;
+      await coordinator.startGatewayApprovalCoordinator(
+        {
+          kind: 'fixture',
+          agentSkills: [],
+          sessions: {
+            ensure: async () => ({
+              contribution: { networkAccess: { endpoint: 'localhost', target: { kind: 'host' } } },
+            }),
+          },
+          approvals: {
+            durable: true,
+            decide: async (_id, decision) => {
+              submitted.push(decision);
+              return true;
+            },
+            listPending: async () => [],
+            async subscribe(callback, signal) {
+              decide = callback;
+              await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }));
+            },
+          },
+        },
+        {
+          deliver: (_channelType, chat, thread, kind, content) =>
+            bridge.deliver(chat, thread, { kind, content: JSON.parse(content) }),
+        },
+        vi.fn(),
+      );
+      try {
+        const decision = decide({
+          id: 'native-request',
+          agentGroupId: 'ag-1',
+          sessionId: 'session-1',
+          runtimeIdentity: gatewayRuntimeIdentity({
+            installSlug: INSTALL_SLUG,
+            agentGroupId: 'ag-1',
+            sessionId: 'session-1',
+          }),
+          createdAt: now,
+          title: 'Credential request',
+          question: 'Allow POST api.example.test/resource?',
+          audit: { method: 'POST', host: 'api.example.test' },
+          approverUserId: 'discord:clicker-1',
+          delivery: { messagingGroupId: 'mg-thread', threadId },
+        });
+        // The card goes into the thread under either key.
+        await vi.waitFor(() => expect(postMessage).toHaveBeenCalledWith(threadId, expect.anything()));
+        const approvalId = /ncq:([^:"]+):0/.exec(JSON.stringify(postMessage.mock.calls[0][1]))![1];
+        await vi.waitFor(async () =>
+          expect((await getPendingApproval(approvalId))?.platform_message_id).toBe('card-1'),
+        );
+        const inThread = (id: string, parent: string) => ({
+          channel_id: id,
+          channel: { id, type: 11, parent_id: parent },
+        });
+
+        // The same card clicked from another thread decides nothing.
+        await click({ id: 'clicker-1', username: 'Ann' }, `ncq:${approvalId}:0\n0`, inThread('T2', 'P2'));
+        await vi.waitFor(async () => expect(await onAction.mock.results.at(-1)?.value).toBe('ignored'));
+        expect((await getPendingApproval(approvalId))?.status).toBe('pending');
+
+        await click({ id: 'clicker-1', username: 'Ann' }, `ncq:${approvalId}:0\n0`, inThread('T1', 'P1'));
+        expect(await decision).toBe('approve');
+        expect(onAction.mock.lastCall?.[3]).toEqual({ messageId: 'card-1', platformId });
+        expect(submitted).toEqual(['approve']);
+        // The host edits a gateway card itself, in the thread.
+        await vi.waitFor(() => expect(editMessage).toHaveBeenCalledWith(threadId, 'card-1', expect.anything()));
+      } finally {
+        await coordinator.stopGatewayApprovalCoordinator();
         await bridge.teardown();
       }
     },
