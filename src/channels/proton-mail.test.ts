@@ -1179,6 +1179,28 @@ describe('stripQuotedReply: where the forward line goes', () => {
       expect(stripQuotedReply(text, 'WG: Rechnung', M)).toBe(`Please see.\n\n${M}\n${line}\n\nPay`);
     }
   });
+  it('a forward’s header block in Japanese, Chinese, Korean and other languages', () => {
+    for (const line of [
+      '差出人: 山田 <a@x.example>',
+      '寄件者：Acme <a@x.example>',
+      '发件人: a@x.example',
+      '보낸 사람: Acme <a@x.example>',
+      'Kimden: Acme <a@x.example>',
+      'Από: Acme <a@x.example>',
+    ]) {
+      const text = `Please see.\n\n${line}\n\nPay`;
+      expect(stripQuotedReply(text, 'Fwd: Invoice', M)).toBe(`Please see.\n\n${M}\n${line}\n\nPay`);
+    }
+  });
+  it('a forward’s header line in an unlisted language: any short label then an address', () => {
+    const line = 'Expéditeur : Acme <billing@acme.example>';
+    expect(stripQuotedReply(`FYI\n\n${line}\nObjet : Facture\n\nPay now`, 'TR: Facture', M)).toBe(
+      `FYI\n\n${M}\n${line}\nObjet : Facture\n\nPay now`,
+    );
+  });
+  it('a forward subject with no header line or address keeps the text unlabelled', () => {
+    expect(stripQuotedReply('See the attached file: thanks', 'Fwd: report', M)).toBe('See the attached file: thanks');
+  });
   it('a signature line above a header block does not lose the label', () => {
     const body = 'From: head@school.example\nSent: Monday\n\nPlease release the funds';
     expect(stripQuotedReply(`--\n${body}`, 'Report', M)).toBe(`--\n${M}\n${body}`);

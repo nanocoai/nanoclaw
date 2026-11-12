@@ -968,8 +968,26 @@ const SUBJECT_PREFIX = new RegExp(`^(${REPLY_PREFIXES}|${FORWARD_PREFIXES})\\s*:
 /** Gmail's and Proton's inline-forward line, and Apple Mail's. */
 const FORWARD_MARKER = /^(-{2,}\s*Forwarded message\s*-{2,}|Begin forwarded message:)$/i;
 const ORIGINAL_MESSAGE = /^-{2,}\s*Original Message\s*-{2,}$/i;
-/** A forward's From line: quoted or bold, in the languages of the prefixes above. */
-const FORWARD_FROM_LINE = /^[>\s*_]*(From|Von|De|Da|Van|Från|Fra|Lähettäjä|Od|От)\s*:[*_]*\s+\S/i;
+/**
+ * A forward's From line: quoted or bold, in the languages of the prefixes
+ * above and the common others (Japanese, Chinese, Korean, Greek, Hebrew,
+ * Turkish, Hungarian; the CJK clients write a full-width colon).
+ */
+const FORWARD_FROM_LINE =
+  /^[>\s*_]*(From|Von|De|Da|Van|Från|Fra|Lähettäjä|Od|От|Kimden|Feladó|Από|מאת|差出人|送信者|发件人|寄件者|寄件人|보낸\s?사람)\s*[:：][*_]*\s*\S/iu;
+/**
+ * In a mail whose subject says it is a forward, any short label followed by
+ * an address ("Expéditeur : Acme <a@x.example>"): a header line in a
+ * language FORWARD_FROM_LINE does not list. Taking the sender's own line
+ * for one only labels more text as forwarded, the safe way.
+ */
+const FORWARD_LABEL = /^[>\s*_]*[^\s:：<>@][^:：<>@]{0,30}[:：]/u;
+/** An address, looked for in a bounded slice: no run in it can match two ways. */
+const ADDRESS_IN_LINE = /[^\s@<>"]@[^\s@<>".]+\.[^\s@<>"]/u;
+function forwardAddressLine(line: string): boolean {
+  const label = FORWARD_LABEL.exec(line);
+  return !!label && ADDRESS_IN_LINE.test(line.slice(label[0].length, label[0].length + 200));
+}
 
 /** The first non-empty line from `from` on, trimmed ('' if none). */
 function nextNonEmpty(lines: string[], from: number): string {
@@ -1030,7 +1048,13 @@ export function stripQuotedReply(text: string, subject?: string, forwardLine?: s
     // attachment, say) and carries no claim to set apart.
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i].trim();
-      if (FORWARD_MARKER.test(line) || historyStartsAt(lines, i) || FORWARD_FROM_LINE.test(line)) return keep(i);
+      if (
+        FORWARD_MARKER.test(line) ||
+        historyStartsAt(lines, i) ||
+        FORWARD_FROM_LINE.test(line) ||
+        forwardAddressLine(line)
+      )
+        return keep(i);
     }
     return normalized.trim();
   }
