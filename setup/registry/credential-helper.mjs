@@ -23,8 +23,9 @@
  *
  * The installed copy starts with a `/bin/sh` header written by
  * setup/install-cred-helper.ts: it runs this file on the node setup ran on, or
- * on the node on PATH once that binary is gone. Docker starts a helper with
- * the CLI's own environment, which is also how NANOCLAW_PULL_NONCE reaches it.
+ * on the node on PATH once that binary is gone or cannot run. Docker starts a
+ * helper with the CLI's own environment, which is also how NANOCLAW_PULL_NONCE
+ * reaches it.
  */
 import { timingSafeEqual } from 'node:crypto';
 import { readFileSync, statSync, writeFileSync } from 'node:fs';

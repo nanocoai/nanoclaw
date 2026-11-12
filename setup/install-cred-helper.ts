@@ -6,8 +6,8 @@
  * arbitrary cwd, and uninstalling NanoClaw deletes this checkout while the
  * helper stays on PATH. So installing means copying the source out of the tree
  * behind a `/bin/sh` header that starts it on the node setup ran on, or on the
- * node on PATH once that binary is gone. A bare `#!<node>` line stops working
- * at the next node upgrade and cannot hold a path with a space.
+ * node on PATH once that binary is gone or cannot run. A bare `#!<node>` line
+ * stops working at the next node upgrade and cannot hold a path with a space.
  *
  * Wiring is one `credHelpers` key in `~/.docker/config.json`, read-modify-write
  * around every other key. That key is a pointer — no secret is written there,
@@ -157,12 +157,14 @@ function chooseBinDir(override?: string): string {
 /**
  * Swap the source's shebang for a `/bin/sh` header. Its second line is a bare
  * string and a comment to node, and a command to sh: run this file on
- * `nodePath` while that binary exists, else on the node on PATH.
+ * `nodePath` while that binary starts, else on the node on PATH. The start
+ * test gets no stdin: docker's request on it is for the helper, not the test.
  */
 export function renderHelper(source: string, nodePath: string): string {
   const body = source.startsWith('#!') ? source.slice(source.indexOf('\n') + 1) : source;
   const pinned = `'${nodePath.replace(/'/g, `'\\''`)}'`;
-  return `#!/bin/sh\n':' //; N=${pinned}; [ -x "$N" ] || N=node; exec "$N" "$0" "$@"\n${body}`;
+  const starts = `[ -x "$N" ] && "$N" -v </dev/null >/dev/null 2>&1`;
+  return `#!/bin/sh\n':' //; N=${pinned}; ${starts} || N=node; exec "$N" "$0" "$@"\n${body}`;
 }
 
 /**

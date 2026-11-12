@@ -90,6 +90,30 @@ describe('renderHelper', () => {
     expect(res.status).not.toBe(0);
     expect(res.stderr).toContain('node');
   });
+
+  it('falls back to the node on PATH when the node it was installed with cannot run here', () => {
+    // Executable, yet nothing this machine can start: what another OS's node
+    // looks like in a home directory two systems share.
+    const foreign = path.join(scratchDir(), 'node');
+    fs.writeFileSync(foreign, '#!/nonexistent/interpreter\n', { mode: 0o755 });
+    const helper = writeHelper(scratchDir(), renderHelper(SOURCE, foreign));
+
+    const res = version(helper, nodeDir('real'));
+
+    expect(res.stdout).toContain(HELPER_ID);
+    expect(res.status).toBe(0);
+  });
+
+  it('leaves stdin for the helper, where docker sends its request', () => {
+    // A stand-in node that would swallow stdin during the start test, if it were handed it.
+    const standIn = path.join(scratchDir(), 'node');
+    fs.writeFileSync(standIn, '#!/bin/sh\nif [ "$1" = "-v" ]; then cat >/dev/null; exit 0; fi\ncat\n', { mode: 0o755 });
+    const helper = writeHelper(scratchDir(), renderHelper(SOURCE, standIn));
+
+    const res = spawnSync(helper, ['get'], { encoding: 'utf-8', input: `${HOST}\n`, env: { PATH: '/usr/bin:/bin' } });
+
+    expect(res.stdout).toBe(`${HOST}\n`);
+  });
 });
 
 describe('refreshInstalledCredentialHelper', () => {
