@@ -61,6 +61,7 @@ describe('a Telegram click the host is slow to decide', () => {
   /** Clicks at the host, each held until the test settles it. */
   const held: Array<{ questionId: string; settle: (outcome: 'accepted' | 'ignored') => void }> = [];
   const edits = () => sent.filter((call) => call.method === 'editMessageText');
+  const nearLimit = 'a@b.co '.repeat(160) + 'x'.repeat(86);
 
   /** Sends a card through the bridge and returns the click Telegram would send for its first button. */
   const cardAndClick = async (questionId: string, chatId: number, updateId: number) => {
@@ -71,7 +72,7 @@ describe('a Telegram click the host is slow to decide', () => {
         type: 'ask_question',
         questionId,
         title: 'Review',
-        question: 'Allow?',
+        question: questionId === 'q-held-long' ? nearLimit : 'Allow?',
         options: [{ label: 'Approve' }],
       },
     });
@@ -106,7 +107,7 @@ describe('a Telegram click the host is slow to decide', () => {
       id.startsWith('q-held')
         ? {
             title: 'Review',
-            question: 'Allow?',
+            question: id === 'q-held-long' ? nearLimit : 'Allow?',
             options: [{ label: 'Approve', selectedLabel: 'Approved', value: 'approve' }],
           }
         : undefined,
@@ -139,6 +140,19 @@ describe('a Telegram click the host is slow to decide', () => {
     held[0].settle('accepted');
     await vi.waitFor(() => expect(edits()).toHaveLength(1));
     expect(JSON.stringify(edits()[0].body)).toContain('Approved');
+  });
+
+  it('shows a near-limit clicked card decision without silently truncating it', async () => {
+    const click = await cardAndClick('q-held-long', 42, 1);
+    arrive(click);
+    await vi.waitFor(() => expect(held).toHaveLength(1));
+    held[0].settle('accepted');
+    await vi.waitFor(() => expect(edits()).toHaveLength(1));
+    const edited = edits()[0].body;
+    expect(edited.message_id).toBe(click.callback_query.message.message_id);
+    expect(edited.text).toContain('Approved by Ann');
+    expect(String(edited.text).length).toBeLessThanOrEqual(4096);
+    expect(edited.reply_markup).toEqual({ inline_keyboard: [] });
   });
 
   it('hands a second click in the same chat to the host in the order it came, the first still undecided', async () => {

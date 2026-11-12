@@ -13,7 +13,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 
 import { createTelegramAdapter, TelegramFormatConverter } from '@chat-adapter/telegram';
-import { cardChildToFallbackText, convertEmojiPlaceholders } from 'chat';
+import { cardChildToFallbackText, convertEmojiPlaceholders, type CardElement } from 'chat';
 
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
@@ -63,16 +63,18 @@ export function refuseCutCards(adapter: ReturnType<typeof createTelegramAdapter>
   const { CardTooLongError } = askQuestion as { CardTooLongError?: new (reason: string) => Error };
   if (!CardTooLongError) return;
   const converter = new TelegramFormatConverter();
+  // Match the adapter's card rendering before its truncation step.
+  const sentLength = (card: CardElement): number => {
+    const parts = [card.title && `**${card.title}**`, ...card.children.map(cardChildToFallbackText)];
+    return convertEmojiPlaceholders(converter.fromMarkdown(parts.filter(Boolean).join('\n')), 'gchat').length;
+  };
   const post = adapter.postMessage.bind(adapter);
   adapter.postMessage = async (...args) => {
     const message = args[1];
     const own = !customPresentation.getStore() && typeof message === 'object' && 'card' in message;
     const card = own ? message.card : undefined;
     if (card?.children.some((child) => child.type === 'actions' && child.children.some((b) => b.type === 'button'))) {
-      // The adapter's own steps for a card of title, text and buttons, which is
-      // what the bridge builds: Markdown, MarkdownV2, emoji names swapped.
-      const parts = [card.title && `**${card.title}**`, ...card.children.map(cardChildToFallbackText)];
-      const { length } = convertEmojiPlaceholders(converter.fromMarkdown(parts.filter(Boolean).join('\n')), 'gchat');
+      const length = sentLength(card);
       if (length > TELEGRAM_MESSAGE_LIMIT) {
         throw new CardTooLongError(
           `the request is too long to show in full on a card (${length} characters as Telegram sends it, limit ${TELEGRAM_MESSAGE_LIMIT})`,
@@ -80,6 +82,24 @@ export function refuseCutCards(adapter: ReturnType<typeof createTelegramAdapter>
       }
     }
     return post(...args);
+  };
+  // The bridge's resolved card ends with a muted decision. Refuse an edit
+  // that would silently cut it, so the bridge retries with title and decision
+  // only. Moving the decision ahead of the request is insufficient: Markdown
+  // spanning the cut can cause the adapter to drop that whole span.
+  const edit = adapter.editMessage.bind(adapter);
+  adapter.editMessage = async (...args) => {
+    const message = args[2];
+    if (!customPresentation.getStore() && typeof message === 'object' && 'card' in message) {
+      const { card } = message;
+      const outcome = card.children.at(-1);
+      const request = card.children.slice(0, -1);
+      const own = !card.subtitle && !card.imageUrl && request.every((child) => child.type === 'text' && !child.style);
+      if (own && outcome?.type === 'text' && outcome.style === 'muted' && sentLength(card) > TELEGRAM_MESSAGE_LIMIT) {
+        throw new CardTooLongError('the resolved card is too long to show its decision in full on Telegram');
+      }
+    }
+    return edit(...args);
   };
 }
 
