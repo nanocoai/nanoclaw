@@ -4,7 +4,7 @@
  * an embed description over 4,096.
  */
 import { createDiscordAdapter } from '@chat-adapter/discord';
-import { Actions, Button, Card, CardText, type CardChild } from 'chat';
+import { Card, CardText } from 'chat';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ChannelAdapter, ChannelRegistration } from './adapter.js';
@@ -46,7 +46,7 @@ import { runMigrations } from '../db/migrations/index.js';
 import { gatewayApprovalPresentation } from '../gateway-approval-presentation.js';
 import type { GatewayApprovalRequest } from '../gateway-providers/gateway-provider-registry.js';
 import { CardTooLongError } from './ask-question.js';
-import { clearButtonsOnCardEdits, escapeDiscordCardText } from './discord.js';
+import { escapeDiscordCardText } from './discord.js';
 import { registerQuestionRenderResolver } from './question-render-registry.js';
 
 const posts: Array<{ embeds: Array<{ title?: string; description?: string }>; components?: unknown[] }> = [];
@@ -81,9 +81,6 @@ const adapter = createDiscordAdapter({
   publicKey: 'a'.repeat(64),
   applicationId: 'test-app-id',
 });
-const approve = Actions([Button({ id: 'ncq:q:0', label: 'Approve' })]);
-const card = (blocks: string[], rest: CardChild[] = [approve], title = 'Approve') =>
-  Card({ title, children: [...blocks.map((block) => CardText(block)), ...rest] });
 
 /** The review case: a 572-character resource and six 600-character details. */
 function longGatewayCard() {
@@ -135,52 +132,22 @@ describe('Discord card limit through the bridge', () => {
   });
 });
 
-describe('clearButtonsOnCardEdits', () => {
+describe('Discord card edits and buttons', () => {
   const resolved = Card({ title: 'Approve', children: [CardText('Approved by admin', { style: 'muted' })] });
 
-  it('shows the gap: the adapter edits a card without actions and sends no components', async () => {
+  // Discord keeps a message's buttons on an edit that sends no components, so
+  // a clicked card's buttons are removed apart from its edit, through the click.
+  it('the adapter edits a message into a card without actions and sends no components', async () => {
     await adapter.editMessage('discord:g1:c1', 'm9', { card: resolved });
     expect(patches[0].body).not.toHaveProperty('components');
   });
 
-  it('sends components: [] when a message is edited into a card without actions', async () => {
-    const wrapped = createDiscordAdapter({
-      botToken: 'test-bot-token',
-      publicKey: 'a'.repeat(64),
-      applicationId: 'test-app-id',
-    });
-    clearButtonsOnCardEdits(wrapped);
-
-    await wrapped.editMessage('discord:g1:c1', 'm9', { card: resolved });
-    expect(patches[0].url).toMatch(/\/channels\/c1\/messages\/m9$/);
-    expect(patches[0].body.components).toEqual([]);
-
-    await wrapped.editMessage('discord:g1:c1', 'm9', { card: card(['Approve?']) });
-    expect((patches[1].body.components as unknown[]).length).toBeGreaterThan(0);
-
-    await wrapped.editMessage('discord:g1:c1', 'm9', { markdown: 'plain text' });
-    expect(patches[2].body).not.toHaveProperty('components');
-  });
-
-  it('is wired into the Discord bridge: a resolved approval card loses its buttons', async () => {
-    const bridge = (await registrations.get('discord')!.factory())!;
-    await bridge.deliver('discord:g1:c1', null, {
-      kind: 'chat-sdk',
-      content: {
-        operation: 'edit',
-        messageId: 'm9',
-        terminalCard: { title: 'Approve', question: 'Run it?', resolution: 'Approved by admin' },
-      },
-    });
-    expect(patches).toHaveLength(1);
-    expect(patches[0].body.components).toEqual([]);
-  });
-
-  // What riding on the card edit cannot do: when Discord refuses the edit, its
-  // `components: []` never lands, and only the click's own removal is left.
-  it('leaves a refused click edit to the interaction, which still removes the buttons', async () => {
+  it.each([
+    ['after its edit', false],
+    ['even when Discord refuses its edit', true],
+  ])("removes a clicked card's buttons through the click, %s", async (_name, editFails) => {
     registerQuestionRenderResolver((id) =>
-      id === 'q-edit-fails'
+      id === 'q-buttons'
         ? {
             title: 'Approve',
             question: 'Run it?',
@@ -196,7 +163,7 @@ describe('clearButtonsOnCardEdits', () => {
       onMetadata: () => {},
       onAction: async () => 'accepted' as const,
     });
-    cardEditsFail = true;
+    cardEditsFail = editFails;
     try {
       const response = await realFetch(gateway.url, {
         method: 'POST',
@@ -210,20 +177,21 @@ describe('clearButtonsOnCardEdits', () => {
             application_id: 'test-app-id',
             guild_id: 'g1',
             channel_id: 'c1',
-            data: { custom_id: 'ncq:q-edit-fails:0\napprove' },
+            data: { custom_id: 'ncq:q-buttons:0\napprove' },
             member: { user: { id: 'u1', username: 'ann' } },
             message: { id: 'm9', embeds: [{ title: 'Approve', description: 'Run it?' }] },
           },
         }),
       });
       expect(response.status).toBe(200);
+      // The card edit first, then the removal: never both at once.
       await vi.waitFor(() =>
         expect(patches.map((patch) => patch.url.replace(/^.*\/api\/v10/, ''))).toEqual([
           '/channels/c1/messages/m9',
           '/webhooks/test-app-id/interaction-token/messages/@original',
         ]),
       );
-      expect(patches[0].body.components).toEqual([]);
+      expect(patches[0].body).not.toHaveProperty('components');
       expect(patches[1].body).toEqual({ components: [] });
     } finally {
       await bridge.teardown();

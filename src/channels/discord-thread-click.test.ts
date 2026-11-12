@@ -66,10 +66,14 @@ const realFetch = globalThis.fetch;
 /** What the fake Discord API knows: each channel as `GET /channels/{id}` returns it. */
 let channels: Record<string, { type: number; parent_id?: string }>;
 let channelLookupFails: boolean;
+/** Set by a test: Discord refuses every edit of a channel message. */
+let cardEditsFail: boolean;
 const posts: Array<{ channel: string; id: string; body: Record<string, unknown> }> = [];
 const edits: Array<{ channel: string; id: string; body: Record<string, unknown> }> = [];
 /** Writes to the clicked message through the interaction's own webhook. */
 const interactionEdits: Array<Record<string, unknown>> = [];
+/** Every write to a card after it was posted, in the order Discord got them. */
+const cardWrites: string[] = [];
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 
@@ -102,9 +106,14 @@ vi.stubGlobal(
     }
     if (message && method === 'PATCH') {
       edits.push({ channel: message[1], id: message[2], body });
+      cardWrites.push('edit');
+      if (cardEditsFail) return json({ message: 'Internal Server Error' }, 500);
       return json({ id: message[2], channel_id: message[1] });
     }
-    if (method === 'PATCH' && path.endsWith('/messages/@original')) interactionEdits.push(body);
+    if (method === 'PATCH' && path.endsWith('/messages/@original')) {
+      interactionEdits.push(body);
+      cardWrites.push('buttons removed');
+    }
     // Interaction callbacks, private notes, typing: nothing to check here.
     return json({});
   }),
@@ -242,8 +251,8 @@ describe('a Discord thread, from the raw message to the raw click on its approva
 
   beforeEach(async () => {
     inbound.length = posts.length = edits.length = outcomes.length = submitted.length = 0;
-    interactionEdits.length = 0;
-    channelLookupFails = false;
+    interactionEdits.length = cardWrites.length = 0;
+    channelLookupFails = cardEditsFail = false;
     channels = { C1: { type: 0 }, T1: { type: 11, parent_id: 'C1' } };
     await runMigrations(await initTestDb());
     const now = new Date().toISOString();
@@ -310,16 +319,24 @@ describe('a Discord thread, from the raw message to the raw click on its approva
     await vi.waitFor(() => expect(edits.map((edit) => `${edit.channel}/${edit.id}`)).toContain('T1/card-1'));
   });
 
-  // The host edits a gateway card itself, so the click path writes nothing to
-  // it: the buttons go with that edit (clearButtonsOnCardEdits).
-  it("removes a decided gateway card's buttons with the host's own edit", async () => {
+  // The host redraws a gateway card itself, and the adapter sends no components
+  // on that edit. The click removes the buttons once the host has accepted.
+  it("removes a decided gateway card's buttons through the click, after the host's redraw", async () => {
     const { outcome } = await messageThenCardThenClick(rawMessage('T1', { channel_type: 11 }));
     expect(outcome).toBe('accepted');
-    await vi.waitFor(() => expect(edits).toHaveLength(1));
-    expect(edits[0].body.components).toEqual([]);
+    await vi.waitFor(() => expect(cardWrites).toEqual(['edit', 'buttons removed']));
+    expect(edits[0].body).not.toHaveProperty('components');
     expect(JSON.stringify(edits[0].body.embeds)).toContain('Approved');
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(interactionEdits).toEqual([]);
+    expect(interactionEdits).toEqual([{ components: [] }]);
+  });
+
+  it("still removes a decided gateway card's buttons when Discord refuses the host's redraw", async () => {
+    cardEditsFail = true;
+    const { outcome, decision } = await messageThenCardThenClick(rawMessage('T1', { channel_type: 11 }));
+    expect(outcome).toBe('accepted');
+    expect(await decision).toBe('approve');
+    await vi.waitFor(() => expect(cardWrites).toEqual(['edit', 'buttons removed']));
+    expect(interactionEdits).toEqual([{ components: [] }]);
   });
 
   // The adapter keys a thread message by the thread alone when it can't tell
@@ -388,6 +405,7 @@ describe('a Discord thread, from the raw message to the raw click on its approva
       expect(await click(elsewhere)).toBe('ignored');
       expect((await getPendingApproval(approvalId))?.status).toBe('pending');
       expect(submitted).toEqual([]);
+      expect(cardWrites).toEqual([]);
       expect(await click(rawClick(card))).toBe('accepted');
       expect(await decision).toBe('approve');
     },
