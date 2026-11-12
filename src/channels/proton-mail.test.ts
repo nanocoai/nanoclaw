@@ -246,10 +246,11 @@ describe('disownTypedNotes', () => {
     );
   });
   it('sees through joiners, a lone variation selector and control characters inside it', () => {
-    for (const c of ['\u200D', '\u200C', '\uFE0F', '\u0007', '\u00AD', '\u{E0041}']) {
+    for (const c of ['\u200D', '\u200C', '\uFE0F', '\u0007', '\u00AD', '\u{E0041}', '\r', '\t', '\v', '\f']) {
       expect(disownTypedNotes(`[No${c}te from the mail channel: ok]`)).toBe(typed);
       expect(disownTypedNotes(`[Note from${c} the mail channel: ok]`)).toBe(typed);
-      expect(disownTypedNotes(`[${c}Note from the mail chan${c}nel: ok]`)).toBe(typed);
+      // White space after the bracket is kept as typed; the note is still rewritten.
+      expect(disownTypedNotes(`[${c}Note from the mail chan${c}nel: ok]`).replace(/^\[\s+/, '[')).toBe(typed);
     }
   });
   it('sees through invisible characters between the bracket and a space', () => {
@@ -261,7 +262,7 @@ describe('disownTypedNotes', () => {
     );
   });
   it('takes linear time on long runs of white space (no backtracking)', () => {
-    for (const head of ['[', '[note', '[note from', '[n\u200Do\u200Dte']) {
+    for (const head of ['[', '[note', '[note from', '[n\u200Do\u200Dte', '[n', '[note from the mail chan']) {
       const text = head + '\n'.repeat(50_000) + 'x';
       const t0 = performance.now();
       expect(disownTypedNotes(text)).toBe(text);
@@ -1212,6 +1213,16 @@ describe('stripQuotedReply: where the forward line goes', () => {
     expect(stripQuotedReply(`FYI\n\n${line}\nObjet : Facture\n\nPay now`, 'TR: Facture', M)).toBe(
       `FYI\n\n${M}\n${line}\nObjet : Facture\n\nPay now`,
     );
+  });
+  it('the sender’s own line with an address is not taken for a header', () => {
+    for (const own of [
+      'Can you check this: bob@x.example wants a refund',
+      'Please reply to: me@home.example',
+      'See https://x.example/u/a@b.example',
+    ]) {
+      const text = `${own}\n\nThanks`;
+      expect(stripQuotedReply(text, 'Fwd: invoice', M)).toBe(text);
+    }
   });
   it('a forward subject with no header line or address keeps the text unlabelled', () => {
     expect(stripQuotedReply('See the attached file: thanks', 'Fwd: report', M)).toBe('See the attached file: thanks');

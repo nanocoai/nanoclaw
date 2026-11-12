@@ -377,6 +377,15 @@ export function newMarkToken(): string {
 }
 const markOpen = (token: string) => `[hidden ${token}: `;
 const markClose = (token: string) => ` /hidden ${token}]`;
+const invisibleMark = (token: string) => `[invisible characters ${token}]`;
+const directionMark = (token: string) => `[text-direction characters ${token}]`;
+/** Every mark flagInvisibleText or the HTML worker writes, as the agent's text shows it. */
+const marksOf = (token: string) => [
+  markOpen(token).trimEnd(),
+  markClose(token),
+  invisibleMark(token),
+  directionMark(token),
+];
 /** A cheap test of the raw HTML, so the marking parse runs only when something may be hidden. */
 const HIDDEN_HINT = /style\s*=|\shidden\b|<template|<noscript/i;
 
@@ -531,12 +540,15 @@ function cutBeforeMark(text: string, at: number, marks: string[]): number {
  */
 const TYPED_NOTE = (() => {
   const anyIgnorable = '[\\s\\p{Default_Ignorable_Code_Point}\\p{Cc}]*';
-  // Never white space (tab, the line breaks and U+FEFF are both kinds): with
-  // the two apart, each step of the match has one way through, so a body of
-  // newlines cannot make it backtrack.
-  const ignorable = '(?:(?!\\s)[\\p{Default_Ignorable_Code_Point}\\p{Cc}])*';
-  const word = (w: string) => [...w].join(ignorable);
-  const gap = `${ignorable}\\s${anyIgnorable}`;
+  // Inside a word, any of them (a tab or CR splitting "Note" too): each run
+  // there ends at a fixed letter, so it cannot match two ways.
+  const inWord = '[\\p{Default_Ignorable_Code_Point}\\p{Cc}]*';
+  // Before the space between words, never white space itself (tab, the line
+  // breaks and U+FEFF are both kinds): with the two apart, each step of the
+  // match has one way through, so a body of newlines cannot make it backtrack.
+  const beforeGap = '(?:(?!\\s)[\\p{Default_Ignorable_Code_Point}\\p{Cc}])*';
+  const word = (w: string) => [...w].join(inWord);
+  const gap = `${beforeGap}\\s${anyIgnorable}`;
   const phrase = ['note', 'from', 'the', 'mail', 'channel'].map(word).join(gap);
   return new RegExp(`\\[(${anyIgnorable})${phrase}(?![\\p{L}\\p{N}_])`, 'giu');
 })();
@@ -586,17 +598,17 @@ export function flagInvisibleText(text: string, token: string): { text: string; 
     })
     .replace(SELECTOR_RUN, () => {
       flagged = true;
-      return `[invisible characters ${token}]`;
+      return invisibleMark(token);
     })
     .replace(BIDI_RUN, (run: string, offset: number, whole: string) => {
       if (ordinaryBidiMark(run, offset, whole)) return run;
       flagged = true;
-      return `[text-direction characters ${token}]`;
+      return directionMark(token);
     })
     .replace(INVISIBLE_RUN, (run: string, offset: number, whole: string) => {
       if (ordinaryWordBreak(run, offset, whole)) return run;
       flagged = true;
-      return `[invisible characters ${token}]`;
+      return invisibleMark(token);
     });
   return { text: out, flagged };
 }
@@ -999,17 +1011,23 @@ const ORIGINAL_MESSAGE = /^-{2,}\s*Original Message\s*-{2,}$/i;
 const FORWARD_FROM_LINE =
   /^[>\s*_]*(From|Von|De|Da|Van|Från|Fra|Lähettäjä|Od|От|Kimden|Feladó|Από|מאת|差出人|送信者|发件人|寄件者|寄件人|보낸\s?사람)\s*[:：][*_]*\s*\S/iu;
 /**
- * In a mail whose subject says it is a forward, any short label followed by
- * an address ("Expéditeur : Acme <a@x.example>"): a header line in a
- * language FORWARD_FROM_LINE does not list. Taking the sender's own line
- * for one only labels more text as forwarded, the safe way.
+ * In a mail whose subject says it is a forward, a header line in a language
+ * FORWARD_FROM_LINE does not list ("Expéditeur : Acme <a@x.example>"): a short
+ * label, then a name and an address and nothing else, with another label line
+ * straight after it, as a header block has (Date, Subject …). The sender's own
+ * line ("Can you check this: bob@x.example wants a refund", "Reply to:
+ * me@home.example" on its own) is neither.
  */
 const FORWARD_LABEL = /^[>\s*_]*[^\s:：<>@][^:：<>@]{0,30}[:：]/u;
-/** An address, looked for in a bounded slice: no run in it can match two ways. */
-const ADDRESS_IN_LINE = /[^\s@<>"]@[^\s@<>".]+\.[^\s@<>"]/u;
-function forwardAddressLine(line: string): boolean {
+/** A name and an address, or an address alone; no run in it can match two ways. */
+const NAME_AND_ADDRESS =
+  /^(?:[^<>@\n]{0,100}<[^\s@<>"/]+@[^\s@<>".]+\.[^\s@<>"]+>|"?[^\s@<>"/]+@[^\s@<>".]+\.[^\s@<>"]+"?)$/u;
+function forwardAddressLine(lines: string[], i: number): boolean {
+  const line = lines[i].trim();
   const label = FORWARD_LABEL.exec(line);
-  return !!label && ADDRESS_IN_LINE.test(line.slice(label[0].length, label[0].length + 200));
+  if (!label) return false;
+  const rest = line.slice(label[0].length).replace(/^[*_\s]+/, '');
+  return rest.length <= 200 && NAME_AND_ADDRESS.test(rest) && FORWARD_LABEL.test((lines[i + 1] ?? '').trim());
 }
 
 /** The first non-empty line from `from` on, trimmed ('' if none). */
@@ -1075,7 +1093,7 @@ export function stripQuotedReply(text: string, subject?: string, forwardLine?: s
         FORWARD_MARKER.test(line) ||
         historyStartsAt(lines, i) ||
         FORWARD_FROM_LINE.test(line) ||
-        forwardAddressLine(line)
+        forwardAddressLine(lines, i)
       )
         return keep(i);
     }
@@ -1145,11 +1163,13 @@ export function frameInbound(
   threadSubject?: string,
   plainSubject = subject,
   notes: string[] = [],
+  token?: string,
 ): string {
   let text = body.trim();
   if (subjectShown(subject, threadSubject, plainSubject))
     text = text ? `${text}\n\nSubject: ${subject}` : `Subject: ${subject}`;
-  if (failures.length > 0) text += `\n\n[attachments not delivered: ${failures.join(', ')}]`;
+  if (failures.length > 0)
+    text += `\n\n[attachments not delivered${token ? ` by the mail channel ${token}` : ''}: ${failures.join(', ')}]`;
   // The channel's own notes come last, after everything the sender wrote.
   for (const note of notes) text += `\n\n${note}`;
   return text;
@@ -2618,13 +2638,7 @@ registerChannelAdapter('proton-mail', {
       // sees. The text is cut once before them, so a huge mail costs no more
       // than a mail at the cap.
       const total = body.length;
-      const uncuttable = [
-        forwardMark(token),
-        markOpen(token).trimEnd(),
-        markClose(token),
-        `[invisible characters ${token}]`,
-        `[text-direction characters ${token}]`,
-      ];
+      const uncuttable = [forwardMark(token), ...marksOf(token)];
       body = disownTypedNotes(
         flagInvisibleText(body.slice(0, cutBeforeMark(body, BODY_MAX_CHARS, uncuttable)), token).text,
       );
@@ -2658,11 +2672,7 @@ registerChannelAdapter('proton-mail', {
       // stripQuotedReply has cut, and tell the agent of marks it cannot find.
       // Likewise the invisible and direction marks: looked for in the text
       // as cut, so a mark the cut dropped brings no note.
-      const marked = [
-        markOpen(token).trimEnd(),
-        `[invisible characters ${token}]`,
-        `[text-direction characters ${token}]`,
-      ].some((m) => body.includes(m));
+      const marked = marksOf(token).some((m) => body.includes(m));
       // The channel's notes follow everything the sender wrote.
       const notes: string[] = [];
       if (subjectMarked || marked) notes.push(hiddenNote(token));
@@ -2841,7 +2851,7 @@ registerChannelAdapter('proton-mail', {
 
       if (unlisted > 0) failures.push(`and ${unlisted} more`);
 
-      const text = frameInbound(subject, body, failures, threadSubject, subjectPlain, notes);
+      const text = frameInbound(subject, body, failures, threadSubject, subjectPlain, notes, token);
       saveState(state);
       if (!text.trim() && attachments.length === 0) return 'done';
       // Teardown has begun: a mail handed over now would be marked read while
