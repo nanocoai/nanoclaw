@@ -1741,6 +1741,12 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
         expect(submitted).toEqual(['approve']);
         // The host edits a gateway card itself, in the thread.
         await vi.waitFor(() => expect(editMessage).toHaveBeenCalledWith(threadId, 'card-1', expect.anything()));
+        // Only the accepted click removes the buttons; the ignored one wrote nothing.
+        await vi.waitFor(() =>
+          expect(discordCalls().filter(([method]) => method === 'PATCH')).toEqual([
+            ['PATCH', ORIGINAL, { components: [] }],
+          ]),
+        );
       } finally {
         await coordinator.stopGatewayApprovalCoordinator();
         await bridge.teardown();
@@ -1788,6 +1794,91 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
       await click({ id: 'clicker-1', username: 'Ann' });
       await vi.waitFor(() => expect(editMessage).toHaveBeenCalledTimes(1));
       expect(JSON.stringify(editMessage.mock.calls[0])).toContain('No longer available');
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  /** The host's own redraw of a gateway card, as the coordinator sends it through the bridge. */
+  const hostRedraw = (bridge: { deliver: ReturnType<typeof createChatSdkBridge>['deliver'] }) =>
+    bridge.deliver('discord:G1:C1', null, {
+      kind: 'chat-sdk',
+      content: {
+        operation: 'edit',
+        messageId: 'card-1',
+        terminalCard: { title: 'Review', question: 'Allow?', resolution: '✅ Approved' },
+      },
+    });
+
+  it("removes a gateway (deferred) card's buttons once the host has redrawn it and accepts", async () => {
+    const { bridge, click, onAction, editMessage } = await startDiscord('q-discord-gw-accepted', {
+      ...review,
+      deferResolution: true,
+    });
+    const order: string[] = [];
+    editMessage.mockImplementation(async () => {
+      order.push('host redraw');
+      return { id: 'card-1', threadId: 't', raw: {} };
+    });
+    vi.mocked(globalThis.fetch).mockImplementation(async (url) => {
+      if (String(url) === ORIGINAL) order.push('buttons removed');
+      return new Response(null, { status: 204 });
+    });
+    onAction.mockImplementation(async () => {
+      await hostRedraw(bridge);
+      return 'accepted';
+    });
+    try {
+      await click({ id: 'clicker-1', username: 'Ann' });
+      await vi.waitFor(() => expect(order).toEqual(['host redraw', 'buttons removed']));
+      expect(discordCalls()).toEqual([
+        ['POST', CALLBACK, ACK],
+        ['PATCH', ORIGINAL, { components: [] }],
+      ]);
+      // The redraw is the host's alone: the click path edits nothing.
+      expect(editMessage).toHaveBeenCalledTimes(1);
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it("still removes a gateway (deferred) card's buttons when the host's redraw fails", async () => {
+    const { bridge, click, onAction, editMessage } = await startDiscord('q-discord-gw-redraw-fails', {
+      ...review,
+      deferResolution: true,
+    });
+    editMessage.mockRejectedValue(new Error('Discord API error: 500'));
+    onAction.mockImplementation(async () => {
+      // As the coordinator: a failed redraw is logged, and the decision stands.
+      await hostRedraw(bridge).catch(() => {});
+      return 'accepted';
+    });
+    try {
+      await click({ id: 'clicker-1', username: 'Ann' });
+      await vi.waitFor(() =>
+        expect(discordCalls()).toEqual([
+          ['POST', CALLBACK, ACK],
+          ['PATCH', ORIGINAL, { components: [] }],
+        ]),
+      );
+      expect(editMessage).toHaveBeenCalledTimes(1);
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it("keeps a gateway (deferred) card's buttons when the host ignores the click", async () => {
+    const { bridge, click, onAction, editMessage } = await startDiscord('q-discord-gw-ignored', {
+      ...review,
+      deferResolution: true,
+    });
+    onAction.mockResolvedValue('ignored');
+    try {
+      await click({ id: 'clicker-1', username: 'Ann' });
+      await vi.waitFor(() => expect(onAction).toHaveBeenCalledTimes(1));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(discordCalls()).toEqual([['POST', CALLBACK, ACK]]);
+      expect(editMessage).not.toHaveBeenCalled();
     } finally {
       await bridge.teardown();
     }
