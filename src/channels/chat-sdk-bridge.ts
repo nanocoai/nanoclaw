@@ -649,7 +649,23 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       click.otherPlatformId && render?.platformId === click.otherPlatformId
         ? { ...click.address, platformId: click.otherPlatformId }
         : click.address;
-    const outcome = await setupConfig.onAction(click.questionId, selectedOption, click.userId, address);
+    // Handed to the host here, in the order the clicks came. Its decision is
+    // waited for off the caller: a transport that reads its next events only
+    // once this returns (Telegram's polling) must not be held by one decision.
+    const decided = setupConfig.onAction(click.questionId, selectedOption, click.userId, address);
+    void showOutcome(click, transport, render, selectedOption, decided).catch((err: unknown) =>
+      log.error('Failed to handle a card click', { err }),
+    );
+  };
+  /** Waits for the host's decision on a click, then shows only what the host did. */
+  const showOutcome = async (
+    click: CardClick,
+    transport: ClickTransport,
+    render: Awaited<ReturnType<typeof resolveQuestionRender>>,
+    selectedOption: string,
+    decided: ReturnType<ChannelSetup['onAction']>,
+  ): Promise<void> => {
+    const outcome = await decided;
     try {
       if (outcome === 'refused') return await transport.notePrivately(REFUSED_CLICK_NOTE);
       // The host redraws a deferred card itself before it accepts, whether or
