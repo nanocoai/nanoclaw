@@ -201,8 +201,8 @@ export async function deleteSession(id: string): Promise<void> {
  */
 export async function createPendingQuestion(pq: PendingQuestion): Promise<boolean> {
   const result = await getDb().run(
-    `INSERT INTO pending_questions (question_id, session_id, message_out_id, platform_id, channel_type, thread_id, title, options_json, created_at)
-       VALUES (@question_id, @session_id, @message_out_id, @platform_id, @channel_type, @thread_id, @title, @options_json, @created_at)
+    `INSERT INTO pending_questions (question_id, session_id, message_out_id, platform_id, channel_type, thread_id, title, question, options_json, created_at)
+       VALUES (@question_id, @session_id, @message_out_id, @platform_id, @channel_type, @thread_id, @title, @question, @options_json, @created_at)
        ON CONFLICT (question_id) DO NOTHING`,
     {
       question_id: pq.question_id,
@@ -212,6 +212,7 @@ export async function createPendingQuestion(pq: PendingQuestion): Promise<boolea
       channel_type: pq.channel_type,
       thread_id: pq.thread_id,
       title: pq.title,
+      question: pq.question ?? '',
       options_json: JSON.stringify(pq.options),
       created_at: pq.created_at,
     },
@@ -326,22 +327,24 @@ export async function getPendingApprovalsByAction(action: string): Promise<Pendi
 }
 
 /**
- * Resolve ask_question render metadata for any card. Approval-backed rows
- * include the original question body so the bridge can retain it when the
- * card resolves; generic pending_questions intentionally keep their existing
- * title + options shape.
+ * Resolve ask_question render metadata for any card. Every row type includes
+ * the original question body (empty on rows older than its migration) so the
+ * bridge can retain it when the card resolves.
  */
 export async function getAskQuestionRender(id: string): Promise<
   | {
       title: string;
       question?: string;
+      fromAgent?: boolean;
       options: import('../channels/ask-question.js').NormalizedOption[];
       deferResolution?: boolean;
     }
   | undefined
 > {
   const q = await getPendingQuestion(id);
-  if (q) return { title: q.title, options: q.options };
+  // Only agent-asked questions land in pending_questions (delivery.ts).
+  if (q)
+    return { title: q.title, ...(q.question ? { question: q.question, fromAgent: true } : {}), options: q.options };
   const a = await getDb().get<{ title: string; question: string; options_json: string; action: string }>(
     'SELECT title, question, options_json, action FROM pending_approvals WHERE approval_id = ?',
     id,

@@ -1196,7 +1196,7 @@ esac
     ['1 verify-failed', OK_LINE.replace('0 verify-failed', '1 verify-failed')],
     ['10 failed', OK_LINE.replace(', 0 failed,', ', 10 failed,')],
     ['a missing result in this boot', ''],
-    ['a preempted conversion', OK_LINE.replace('0 converted', '0 converted').replace('0 preempted', '1 preempted')],
+    ['a preempted conversion', OK_LINE.replace('0 preempted', '1 preempted')],
   ])('is not done with %s', (_name, conversion) => {
     const r = post({ conversion });
     expect(r.status).toBe(1);

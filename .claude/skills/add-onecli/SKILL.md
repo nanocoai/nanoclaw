@@ -94,3 +94,17 @@ pnpm exec vitest run src/gateway-providers/onecli-files.test.ts src/gateway-prov
 The setup consumer writes `NANOCLAW_GATEWAY_PROVIDER=onecli` only after every directive above succeeds. Claude authentication is then completed through `scripts/auth.ts`; credentials never enter an agent container.
 
 During an atomic NanoClaw upgrade, `scripts/detect.ts` identifies an older implicit OneCLI installation so the generic updater can preserve that choice before the service restarts.
+
+## Check the proxy address
+
+A gateway on another host must hand agents its own address in `GATEWAY_BASE_URL`. OneCLI 1.45 defaults it to `host.docker.internal:10255`, the agent's own machine, so with a remote gateway every model call hangs with no reply. When setup was pointed at a remote gateway (`NANOCLAW_ONECLI_API_HOST`), this check reads the proxy address the gateway hands agents. It never fails the install.
+
+```nc:run effect:fetch capture:proxy_warn=.warn,proxy_hint=.hint
+pnpm exec tsx .claude/skills/add-onecli/scripts/proxy-check.ts || echo '{"warn":"no","hint":"none"}'
+```
+
+When that address is `host.docker.internal`, a loopback address or a wildcard address, show the user the exact `GATEWAY_BASE_URL=<host>:<port>` line to set on the gateway host, and point them at "Remote gateway" in [Upgrading the OneCLI gateway](payload/docs/onecli-upgrades.md#remote-gateway):
+
+```nc:operator when:proxy_warn=yes
+{{proxy_hint}}
+```
