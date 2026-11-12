@@ -14,6 +14,9 @@ import { cardToBlockKit, cardToFallbackText } from '@chat-adapter/slack';
 import type { AdapterPostableMessage } from 'chat';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { gatewayApprovalPresentation } from '../gateway-approval-presentation.js';
+import type { GatewayApprovalRequest } from '../gateway-providers/gateway-provider-registry.js';
+
 import { escapeCardTitles, escapeSlackMrkdwn, escapeSlackTitle, slackInstanceBridgeFactory } from './slack.js';
 
 const posted: AdapterPostableMessage[] = [];
@@ -144,6 +147,17 @@ describe('Slack approval card text', () => {
     // The plain-text header preserves the exact title.
     const header = cardToBlockKit(card).find((b) => b.type === 'header') as unknown as { text: { text: string } };
     expect(header.text.text).toBe(title);
+  });
+
+  it('renders a legacy gateway title without Markdown backslashes in its plain header', async () => {
+    const title = 'file_a.txt `draft`';
+    const presentation = gatewayApprovalPresentation({ title, question: 'Allow?' } as GatewayApprovalRequest);
+    await slackInstanceBridgeFactory('cards')!.deliver('slack:D1', null, {
+      kind: 'chat-sdk',
+      content: { type: 'ask_question', questionId: 'legacy-title', ...presentation, options: ['Approve'] },
+    });
+    const blocks = notifications.at(-1)!.blocks as Array<{ type: string; text?: { type: string; text: string } }>;
+    expect(blocks.find((block) => block.type === 'header')!.text).toMatchObject({ type: 'plain_text', text: title });
   });
 
   it('escapes every block when a long host card is split into several sections', async () => {

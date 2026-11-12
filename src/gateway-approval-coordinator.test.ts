@@ -228,6 +228,43 @@ describe('gateway approval coordinator', () => {
     ]);
   });
 
+  it('denies an oversized request and delivers the refusal through the actual WhatsApp Cloud registration', async () => {
+    const env = await import('./env.js');
+    vi.spyOn(env, 'readEnvFile').mockReturnValue({
+      WHATSAPP_ACCESS_TOKEN: 'fixture',
+      WHATSAPP_PHONE_NUMBER_ID: 'phone',
+      WHATSAPP_APP_SECRET: 'fixture',
+      WHATSAPP_VERIFY_TOKEN: 'fixture',
+    });
+    const sent: Array<{ type: string; text?: { body: string } }> = [];
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      sent.push(JSON.parse(init!.body as string));
+      return new Response(JSON.stringify({ messages: [{ id: 'notice' }] }), { status: 200 });
+    });
+    const { whatsappCloudRegistration } = await import('./channels/whatsapp-cloud.js');
+    const bridge = (await whatsappCloudRegistration.factory())!;
+    const realDelivery: ChannelDeliveryAdapter = {
+      async deliver(_channel, _platform, thread, kind, content) {
+        return bridge.deliver('whatsapp:phone:15550001111', thread, { kind, content: JSON.parse(content) });
+      },
+    };
+    const coordinator = await import('./gateway-approval-coordinator.js');
+    await coordinator.startGatewayApprovalCoordinator(provider(), realDelivery, vi.fn());
+    expect(await decide(request({ question: 'x'.repeat(2000) }))).toBe('deny');
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(sent).toMatchObject([
+      {
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to: '15550001111',
+        type: 'text',
+        text: {
+          body: 'Approval request denied: this channel cannot display the complete request. No approval was granted.',
+        },
+      },
+    ]);
+  });
+
   it('denies when the card fails to post', async () => {
     const coordinator = await import('./gateway-approval-coordinator.js');
     const failing: ChannelDeliveryAdapter = {
