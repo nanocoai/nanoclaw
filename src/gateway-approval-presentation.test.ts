@@ -59,7 +59,7 @@ it('uses the action as the title only while it fits, measured after escaping', (
     gatewayApprovalPresentation(request({ ...summary, action, details: [{ label: 'To', value: 'Savings' }] })).title;
   expect(titleFor('a'.repeat(MAX_CARD_TITLE_CHARS))).toBe('a'.repeat(MAX_CARD_TITLE_CHARS));
   expect(titleFor('a'.repeat(MAX_CARD_TITLE_CHARS + 1))).toBe('Approve this action');
-  expect(titleFor('_'.repeat(MAX_CARD_TITLE_CHARS / 2))).toBe('\\_'.repeat(MAX_CARD_TITLE_CHARS / 2));
+  expect(titleFor('_'.repeat(MAX_CARD_TITLE_CHARS / 2))).toBe('_'.repeat(MAX_CARD_TITLE_CHARS / 2));
   expect(titleFor('_'.repeat(MAX_CARD_TITLE_CHARS / 2 + 1))).toBe('Approve this action');
 });
 
@@ -155,7 +155,25 @@ it('escapes legacy provider markup before rendering', () => {
     title: '[Admin](https://evil.test)',
     question: '[Approve](https://evil.test)\n<@123>',
   } as GatewayApprovalRequest);
-  expect(card.title).toContain('\\[');
+  expect(card.title).toBe('[Admin](https://evil.test)');
   expect(card.question).toContain('\\[');
   expect(card.question).toContain('\\<');
+});
+
+// The title is a plain-text Card field; body values are Markdown.
+it('keeps ordinary whitespace and backticks readable in gateway text', () => {
+  const value = 'first\tcolumn\r\n`command`\rnext';
+  const card = gatewayApprovalPresentation({ ...request(), displayFields: [{ label: 'Value', type: 'text', value }] });
+  expect(card.question).toContain('first\tcolumn\r\n\\`command\\`\rnext');
+  expect(card.question).not.toMatch(/\\u00(?:09|0d|60)/);
+});
+
+it('measures legacy title budget after escaping, but returns a plain title', () => {
+  const title = 'file_' + '_'.repeat(27);
+  const fits = gatewayApprovalPresentation({ ...request(), title });
+  expect(fits.title).toBe(title);
+  const oversized = title + '_';
+  const card = gatewayApprovalPresentation({ ...request(), title: oversized });
+  expect(card.title).toBe('Approve external request');
+  expect(card.question).toContain('*Request:* ' + oversized.replaceAll('_', '\\_'));
 });
