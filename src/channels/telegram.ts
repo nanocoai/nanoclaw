@@ -70,8 +70,15 @@ export function refuseCutCards(adapter: ReturnType<typeof createTelegramAdapter>
     const parts = [card.title && `**${card.title}**`, card.subtitle, ...card.children.map(fallback)];
     return convertEmojiPlaceholders(converter.fromMarkdown(parts.filter(Boolean).join('\n')), 'gchat').length;
   };
+  // Card titles are plain text. The Telegram adapter interpolates them into
+  // Markdown, so escape at this boundary (Slack instead uses a plain header).
+  const literalTitle = (card: CardElement): CardElement => ({
+    ...card,
+    title: card.title?.replace(/[\\`*_~[\]()<>]/g, '\\$&'),
+  });
   const post = adapter.postMessage.bind(adapter);
   adapter.postMessage = async (...args) => {
+    if (typeof args[1] === 'object' && 'card' in args[1]) args[1] = { ...args[1], card: literalTitle(args[1].card) };
     const message = args[1];
     const own = typeof message === 'object' && 'card' in message;
     const card = own ? message.card : undefined;
@@ -97,6 +104,7 @@ export function refuseCutCards(adapter: ReturnType<typeof createTelegramAdapter>
   // spanning the cut can cause the adapter to drop that whole span.
   const edit = adapter.editMessage.bind(adapter);
   adapter.editMessage = async (...args) => {
+    if (typeof args[2] === 'object' && 'card' in args[2]) args[2] = { ...args[2], card: literalTitle(args[2].card) };
     const message = args[2];
     if (typeof message === 'object' && 'card' in message) {
       const { card } = message;

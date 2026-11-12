@@ -81,6 +81,16 @@ describe('Telegram card limit through the bridge', () => {
       },
     });
 
+  it('keeps a plain gateway title inert after Telegram MarkdownV2 conversion', async () => {
+    const card = gatewayApprovalPresentation({
+      title: '[Admin](https://evil.test)',
+      question: 'Allow?',
+    } as GatewayApprovalRequest);
+    await ask(card.title, card.question);
+    expect(sends()[0].text).toContain('\\[Admin\\]\\(');
+    expect(sends()[0].text).not.toContain('[Admin](https://evil.test)');
+  });
+
   // MarkdownV2 escapes every dot, doubling the text.
   it('sends a card at the limit whole, even when escaping doubles its text', async () => {
     await ask('Approve', '.'.repeat(1993));
