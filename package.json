@@ -96,7 +96,8 @@
   },
   "pnpm": {
     "patchedDependencies": {
-      "@beeper/chat-adapter-matrix@0.2.0": "patches/@beeper__chat-adapter-matrix@0.2.0.patch"
+      "@beeper/chat-adapter-matrix@0.2.0": "patches/@beeper__chat-adapter-matrix@0.2.0.patch",
+      "@chat-adapter/discord@4.41.1": "patches/@chat-adapter__discord@4.41.1.patch"
     }
   }
 }

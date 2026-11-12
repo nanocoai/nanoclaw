@@ -19,7 +19,13 @@ import type { MattermostAdapterOptions } from './adapter.js';
 export { MattermostAdapter } from './adapter.js';
 export type { MattermostAdapterOptions } from './adapter.js';
 
-export { MattermostApiError, MattermostRestClient, normalizeBaseUrl, rateLimitDelayMs } from './rest.js';
+export {
+  MattermostApiError,
+  MattermostNetworkError,
+  MattermostRestClient,
+  normalizeBaseUrl,
+  rateLimitDelayMs,
+} from './rest.js';
 export type { MattermostRestOptions } from './rest.js';
 
 export {

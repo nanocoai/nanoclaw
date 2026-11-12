@@ -32,10 +32,11 @@ import { findSessionForAgent } from './db/sessions.js';
 import { backfillSession, fanInboundMessage } from './modules/cross-session-context/index.js';
 import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
-import { resolveSession, writeSessionMessage } from './session-manager.js';
+import { resolveSession, withExistingMailboxSession, writeSessionMessage } from './session-manager.js';
 import { requestWake } from './request-wake.js';
 import { getSession } from './db/sessions.js';
 import type { AgentGroup, MessagingGroup, MessagingGroupAgent, Session } from './types.js';
+import type { WakeEvidence } from './mailbox/types.js';
 import type { InboundEvent } from './channels/adapter.js';
 
 function generateId(): string {
@@ -469,11 +470,10 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
  *                      user wants to disambiguate between multiple agents
  *                      wired to one chat, use engage_mode='pattern' with
  *                      the disambiguator as the regex.
- *   'mention-sticky' — platform mention OR an active per-thread session
- *                      already exists for this (agent, mg, thread). The
- *                      session existence IS our subscription state; once
- *                      a thread has engaged us once, follow-ups arrive
- *                      with no mention and should still fire.
+ *   'mention-sticky' — platform mention OR this agent was already woken
+ *                      in an active per-thread session for (agent, mg,
+ *                      thread). A session that holds only accumulated
+ *                      chatter does not count.
  */
 async function evaluateEngage(
   agent: MessagingGroupAgent,
@@ -497,11 +497,11 @@ async function evaluateEngage(
       return isMention;
     case 'mention-sticky': {
       if (isMention) return true;
-      // Sticky follow-up: session already exists for this (agent, mg, thread)
-      // — the thread was activated before, keep firing.
       if (mg.is_group === 0) return false; // DMs never use mention-sticky sensibly
       const existing = await findSessionForAgent(agent.agent_group_id, mg.id, threadId);
-      return existing !== undefined;
+      if (!existing) return false;
+      // An inbox with no evidence (e.g. after a folder reset) keeps the thread active.
+      return (await inboxWakeEvidence(agent.agent_group_id, existing.id)) !== 'chatter';
     }
     default:
       // Unrecognized engage_mode (e.g. stale data from a past CLI version,
@@ -512,6 +512,21 @@ async function evaluateEngage(
         wiring_id: agent.id,
       });
       return false;
+  }
+}
+
+/**
+ * What a session's inbox shows: 'woken' once anything woke the agent there,
+ * 'chatter' when it holds only silent context (ignored_message_policy=
+ * 'accumulate'), 'none' when missing, empty or unreadable.
+ */
+async function inboxWakeEvidence(agentGroupId: string, sessionId: string): Promise<WakeEvidence> {
+  try {
+    return (await withExistingMailboxSession(agentGroupId, sessionId, (mailbox) => mailbox.wakeEvidence())) ?? 'none';
+    // eslint-disable-next-line no-catch-all/no-catch-all -- an unreadable inbox must not drop the message
+  } catch (err) {
+    log.warn('mention-sticky: could not read session inbox, treating thread as active', { sessionId, err });
+    return 'none';
   }
 }
 
@@ -536,13 +551,6 @@ async function deliverToAgent(
     effectiveSessionMode = 'per-thread';
   }
 
-  const { session, created } = await resolveSession(
-    agent.agent_group_id,
-    mg.id,
-    effectiveThreadId,
-    effectiveSessionMode,
-  );
-
   // The inbound row's (channel_type, platform_id, thread_id) is the address
   // the agent's reply will be delivered to. Normally it mirrors the source
   // (stamped from the event, with the wiring's thread policy applied). When
@@ -558,7 +566,9 @@ async function deliverToAgent(
   // Command gate: classify slash commands before they reach the container.
   // Filtered commands are dropped silently. Denied admin commands get a
   // permission-denied reply sent straight to the chat: outbound.db belongs to
-  // the container, and a host write there can collide with its writes.
+  // the container, and a host write there can collide with its writes. It runs
+  // before resolveSession: a filtered or denied command creates no session,
+  // which mention-sticky would read as an active thread.
   if (event.message.kind === 'chat' || event.message.kind === 'chat-sdk') {
     const gate = await gateCommand(event.message.content, userId, agent.agent_group_id);
     if (gate.action === 'filter') {
@@ -589,6 +599,13 @@ async function deliverToAgent(
       return;
     }
   }
+
+  const { session, created } = await resolveSession(
+    agent.agent_group_id,
+    mg.id,
+    effectiveThreadId,
+    effectiveSessionMode,
+  );
 
   if (wake) {
     // Cross-session context backfill: a just-born or long-idle session is

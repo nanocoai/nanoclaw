@@ -26,6 +26,7 @@
 
 import WebSocket from 'ws';
 
+import { isTransientStatus } from './rest.js';
 import type { MattermostHelloEventData, MattermostWebSocketEvent, MattermostWebSocketFrame } from './types.js';
 import { isWebSocketReply } from './types.js';
 
@@ -81,6 +82,29 @@ export function webSocketUrl(baseUrl: string, resume?: { connectionId: string; s
 export function backoffDelay(attempt: number, min: number, max: number): number {
   const ceiling = Math.min(max, min * 2 ** Math.max(0, attempt - 1));
   return Math.round(ceiling / 2 + Math.random() * (ceiling / 2));
+}
+
+/** `ws` rejects an upgrade answered with anything but 101 with this message. */
+const UPGRADE_REPLY = /^Unexpected server response: (\d+)$/;
+
+/**
+ * Named `NetworkError`, the name the host's channel setup retry matches: a
+ * server that drops the socket before accepting the token is down or
+ * restarting, not misconfigured.
+ */
+function networkError(message: string, cause?: unknown): Error {
+  const error = new Error(message, cause === undefined ? undefined : { cause });
+  error.name = 'NetworkError';
+  return error;
+}
+
+/** A socket error before authentication is retryable unless the upgrade got a 4xx (e.g. a proxy without WebSockets). */
+function handshakeError(error: unknown): unknown {
+  const message = error instanceof Error ? error.message : String(error);
+  const status = UPGRADE_REPLY.exec(message)?.[1];
+  return status === undefined || isTransientStatus(Number(status))
+    ? networkError(`Mattermost WebSocket failed before authentication: ${message}`, error)
+    : error;
 }
 
 type Timer = ReturnType<typeof setTimeout>;
@@ -185,7 +209,7 @@ export class MattermostSocket {
         this.authenticate();
         authTimer = setTimeout(() => {
           this.options.logger.warn('Mattermost WS: authentication timed out');
-          settle(new Error('Mattermost WebSocket authentication timed out'));
+          settle(networkError('Mattermost WebSocket authentication timed out'));
           this.terminate(socket);
         }, this.options.authTimeoutMs);
         authTimer.unref?.();
@@ -234,7 +258,7 @@ export class MattermostSocket {
 
       socket.on('error', (error: unknown) => {
         this.options.logger.warn('Mattermost WS: error', { error });
-        settle(error);
+        settle(handshakeError(error));
         // `ws` normally follows an error with `close`, but the transport does
         // not guarantee that every implementation will. Terminate explicitly
         // so an initial `connect()` rejection cannot leave a live socket that
@@ -252,7 +276,7 @@ export class MattermostSocket {
         if (this.socket === socket) {
           this.socket = undefined;
         }
-        settle(new Error(`Mattermost WebSocket closed before authentication (code ${code})`));
+        settle(networkError(`Mattermost WebSocket closed before authentication (code ${code})`));
         // Before the first successful authentication, `connect()`'s caller
         // owns failure handling. Starting a background reconnect here leaves
         // an adapter whose `initialize()` rejected alive and able to consume

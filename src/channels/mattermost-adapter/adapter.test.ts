@@ -9,6 +9,8 @@ import { MattermostAdapter } from './adapter.js';
 import type { MattermostAdapterOptions } from './adapter.js';
 import { CALLBACK_SECRET_KEY } from './format.js';
 import { createMattermostAdapter } from './index.js';
+import { MattermostApiError, MattermostNetworkError } from './rest.js';
+import type { MattermostPost, MattermostWebSocketEvent } from './types.js';
 import { buildMattermostAdapter } from '../mattermost.js';
 
 const BOT_ID = '7g4f95dymtrjmqnoozdyi57xbw';
@@ -16,6 +18,8 @@ const USER_ID = '7mx5jdcrnby18yrpnzont8ggwo';
 const CHANNEL_ID = 'tyzg1xpaeinqzypmh6h9j9ysyy';
 const POST_ID = 'mjhbignk4inf7kh9w5wi8snchw';
 const ROOT_ID = 'or6atyakftywuq6jjo44oytu7h';
+const OTHER_BOT_ID = '1g3di8tu4jnxu8zjypnouyo4qo';
+const UNKNOWN_USER_ID = 'kq9wq3s8ojbzmc6hzg5wxkd1ra';
 
 function response(payload: unknown, status = 200): Response {
   return new Response(JSON.stringify(payload), {
@@ -37,6 +41,256 @@ function callbackRequest(): Request {
     }),
   });
 }
+
+function postedEvent(options: {
+  channelType?: 'D' | 'O';
+  id?: string;
+  mentions?: string[];
+  message?: string;
+  props?: Record<string, string>;
+  rootId?: string;
+  userId?: string;
+}): MattermostWebSocketEvent {
+  const post: MattermostPost = {
+    channel_id: CHANNEL_ID,
+    create_at: 1,
+    id: options.id ?? POST_ID,
+    message: options.message ?? (options.mentions?.includes(BOT_ID) ? '@nanoclaw-bot hello' : 'hello'),
+    ...(options.props ? { props: options.props } : {}),
+    ...(options.rootId ? { root_id: options.rootId } : {}),
+    user_id: options.userId ?? USER_ID,
+  };
+  return {
+    broadcast: { channel_id: CHANNEL_ID },
+    data: {
+      channel_type: options.channelType ?? 'O',
+      mentions: JSON.stringify(options.mentions ?? []),
+      post: JSON.stringify(post),
+      sender_name: '@operator',
+    },
+    event: 'posted',
+  };
+}
+
+async function initializePostedHarness(): Promise<{
+  adapter: MattermostAdapter;
+  processMessage: ReturnType<typeof vi.fn>;
+  processReaction: ReturnType<typeof vi.fn>;
+}> {
+  const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.endsWith('/users/me')) {
+      return response({ id: BOT_ID, is_bot: true, username: 'nanoclaw-bot' });
+    }
+    if (url.endsWith(`/users/${USER_ID}`)) {
+      return response({ id: USER_ID, is_bot: false, username: 'operator' });
+    }
+    if (url.endsWith(`/users/${OTHER_BOT_ID}`)) {
+      return response({ id: OTHER_BOT_ID, is_bot: true, username: 'other-bot' });
+    }
+    if (url.endsWith(`/posts/${POST_ID}`)) {
+      return response({ channel_id: CHANNEL_ID, create_at: 1, id: POST_ID, message: 'hello', user_id: USER_ID });
+    }
+    return response({ message: 'not found' }, 404);
+  }) as unknown as typeof fetch;
+  const processMessage = vi.fn();
+  const processReaction = vi.fn();
+  const logger = {
+    child: () => logger,
+    debug: vi.fn(),
+    error: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+  };
+  const adapter = new MattermostAdapter({
+    fetchImpl,
+    skipSocket: true,
+    token: 'bot-token',
+    url: 'https://mattermost.example.com',
+  });
+  await adapter.initialize({ getLogger: () => logger, processMessage, processReaction } as unknown as ChatInstance);
+  return { adapter, processMessage, processReaction };
+}
+
+describe('Mattermost posted-message threads', () => {
+  it('reports no live transport when initialized without a socket', async () => {
+    const { adapter } = await initializePostedHarness();
+    expect(adapter.isConnected()).toBe(false);
+  });
+
+  it('keeps fetched-message thread identity stable as DM state warms', async () => {
+    const { adapter, processMessage } = await initializePostedHarness();
+    const event = postedEvent({ mentions: [BOT_ID] });
+    const post = JSON.parse(String(event.data?.post ?? '{}')) as MattermostPost;
+
+    const cold = adapter.parseMessage(post);
+    expect(cold.threadId).toBe(`mattermost:${CHANNEL_ID}`);
+    expect(cold.isMention).toBe(true);
+
+    adapter.handleSocketEvent(postedEvent({ channelType: 'D' }));
+    await vi.waitFor(() => expect(processMessage).toHaveBeenCalledOnce());
+
+    const warm = adapter.parseMessage(post);
+    expect(warm.threadId).toBe(`mattermost:${CHANNEL_ID}`);
+    expect(warm.isMention).toBe(false);
+  });
+
+  it('roots a reaction in the same thread as the reacted-to post', async () => {
+    const { adapter, processReaction } = await initializePostedHarness();
+    const reaction = (): MattermostWebSocketEvent => ({
+      broadcast: { channel_id: CHANNEL_ID },
+      data: { reaction: JSON.stringify({ emoji_name: '+1', post_id: POST_ID, user_id: USER_ID }) },
+      event: 'reaction_added',
+    });
+
+    adapter.handleSocketEvent(reaction());
+    await vi.waitFor(() => expect(processReaction).toHaveBeenCalledTimes(1));
+    expect(processReaction.mock.calls[0][0].threadId).toBe(`mattermost:${CHANNEL_ID}:${POST_ID}`);
+
+    // In a DM a top-level post stays channel-level, and so does its reaction.
+    adapter.handleSocketEvent(postedEvent({ channelType: 'D' }));
+    adapter.handleSocketEvent(reaction());
+    await vi.waitFor(() => expect(processReaction).toHaveBeenCalledTimes(2));
+    expect(processReaction.mock.calls[1][0].threadId).toBe(`mattermost:${CHANNEL_ID}`);
+  });
+
+  it('fetches a top-level group post into the rooted thread it was delivered in', async () => {
+    const { adapter } = await initializePostedHarness();
+    const rooted = `mattermost:${CHANNEL_ID}:${POST_ID}`;
+
+    expect((await adapter.fetchMessage(rooted, POST_ID))?.threadId).toBe(rooted);
+    expect((await adapter.fetchMessage(`mattermost:${CHANNEL_ID}`, POST_ID))?.threadId).toBe(
+      `mattermost:${CHANNEL_ID}`,
+    );
+  });
+
+  it('opens a thread rooted at a top-level post that mentions the bot', async () => {
+    const { adapter, processMessage } = await initializePostedHarness();
+
+    adapter.handleSocketEvent(postedEvent({ mentions: [BOT_ID] }));
+
+    await vi.waitFor(() => expect(processMessage).toHaveBeenCalledOnce());
+    expect(processMessage).toHaveBeenCalledWith(
+      adapter,
+      `mattermost:${CHANNEL_ID}:${POST_ID}`,
+      expect.objectContaining({
+        id: POST_ID,
+        isMention: true,
+        threadId: `mattermost:${CHANNEL_ID}:${POST_ID}`,
+      }),
+    );
+  });
+
+  it('gives ordinary top-level group chatter its own inactive thread identity', async () => {
+    const { adapter, processMessage } = await initializePostedHarness();
+
+    adapter.handleSocketEvent(postedEvent({}));
+
+    await vi.waitFor(() => expect(processMessage).toHaveBeenCalledOnce());
+    expect(processMessage).toHaveBeenCalledWith(
+      adapter,
+      `mattermost:${CHANNEL_ID}:${POST_ID}`,
+      expect.objectContaining({
+        id: POST_ID,
+        isMention: false,
+        threadId: `mattermost:${CHANNEL_ID}:${POST_ID}`,
+      }),
+    );
+  });
+
+  it('does not open a thread for the implicit mention on a DM post', async () => {
+    const { adapter, processMessage } = await initializePostedHarness();
+
+    adapter.handleSocketEvent(postedEvent({ channelType: 'D', mentions: [BOT_ID] }));
+
+    await vi.waitFor(() => expect(processMessage).toHaveBeenCalledOnce());
+    expect(processMessage).toHaveBeenCalledWith(
+      adapter,
+      `mattermost:${CHANNEL_ID}`,
+      expect.objectContaining({
+        id: POST_ID,
+        isMention: false,
+        threadId: `mattermost:${CHANNEL_ID}`,
+      }),
+    );
+  });
+
+  it('does not count @channel, @all or @here as a mention of the bot', async () => {
+    const { adapter, processMessage } = await initializePostedHarness();
+    const cases: [text: string, isMention: boolean][] = [
+      ['@channel standup', false],
+      ['@ALL standup', false],
+      ['standup @here.', false],
+      ['_@here_ standup', false],
+      ['@channel- standup', false],
+      ['@channel_ standup', false],
+      ['@here @nanoclaw-bot standup', true],
+      ['@channel ping @nanoclaw-bot.', true],
+      ['@here _@nanoclaw-bot_ standup', true],
+      ['@channel help @nanoclaw-bot-', true],
+      ['@channel ask @nanoclaw-bot-dev', false],
+      // Handles that only start with a keyword are people, not a broadcast.
+      ['@allison standup', true],
+      ['@channel-ops standup', true],
+      ['@channel_ops standup', true],
+      ['@here.team standup', true],
+      // Mattermost reads no mentions in code, so neither does this check.
+      ['@channel `@nanoclaw-bot` standup', false],
+      ['@here\n\n```\n@nanoclaw-bot\n```', false],
+      ['@here `ls` @nanoclaw-bot', true],
+      ['`@here` standup', true],
+      ['@channel**standup**', false],
+    ];
+
+    // The server lists the bot in `mentions` for each of these (for the last
+    // rows, through a group the bot is in).
+    cases.forEach(([message], i) =>
+      adapter.handleSocketEvent(
+        postedEvent({ id: `${POST_ID.slice(0, 24)}${String(i).padStart(2, '0')}`, mentions: [BOT_ID], message }),
+      ),
+    );
+
+    await vi.waitFor(() => expect(processMessage).toHaveBeenCalledTimes(cases.length));
+    // Frames are processed in order, so call i belongs to case i.
+    expect(processMessage.mock.calls.map((call, i) => [cases[i][0], call[2].isMention])).toEqual(cases);
+  });
+
+  it("drops other bots' posts so two agents can't wake each other", async () => {
+    const { adapter, processMessage } = await initializePostedHarness();
+    const id = (i: number) => `${POST_ID.slice(0, 25)}${i}`;
+
+    // Flagged by the server (profile lookup fails); a bot account without the
+    // flag; a bot that @mentions this bot; a person; a person's webhook.
+    adapter.handleSocketEvent(
+      postedEvent({ id: id(1), props: { from_bot: 'true' }, rootId: ROOT_ID, userId: UNKNOWN_USER_ID }),
+    );
+    adapter.handleSocketEvent(postedEvent({ id: id(2), rootId: ROOT_ID, userId: OTHER_BOT_ID }));
+    adapter.handleSocketEvent(
+      postedEvent({ id: id(5), mentions: [BOT_ID], props: { from_bot: 'true' }, userId: OTHER_BOT_ID }),
+    );
+    adapter.handleSocketEvent(postedEvent({ id: id(3), rootId: ROOT_ID }));
+    adapter.handleSocketEvent(postedEvent({ id: id(4), props: { from_webhook: 'true' }, rootId: ROOT_ID }));
+
+    await vi.waitFor(() => expect(processMessage).toHaveBeenCalledTimes(2));
+    expect(processMessage.mock.calls.map((call) => call[2].id)).toEqual([id(3), id(4)]);
+  });
+
+  it('preserves the existing root for a reply that also mentions the bot', async () => {
+    const { adapter, processMessage } = await initializePostedHarness();
+
+    adapter.handleSocketEvent(postedEvent({ id: 'c7ad5obm3fn7byqnhqskc3b8so', mentions: [BOT_ID], rootId: ROOT_ID }));
+
+    await vi.waitFor(() => expect(processMessage).toHaveBeenCalledOnce());
+    expect(processMessage).toHaveBeenCalledWith(
+      adapter,
+      `mattermost:${CHANNEL_ID}:${ROOT_ID}`,
+      expect.objectContaining({
+        isMention: true,
+        threadId: `mattermost:${CHANNEL_ID}:${ROOT_ID}`,
+      }),
+    );
+  });
+});
 
 describe('Mattermost action callbacks', () => {
   it('recovers a card thread and props after a process restart', async () => {
@@ -421,5 +675,82 @@ describe('Mattermost callback configuration', () => {
     ).toBe(401);
     expect((await adapter.handleWebhook(request({ action_id: 'approve', callback_token: SECRET }))).status).toBe(200);
     expect(processAction).toHaveBeenCalledTimes(1);
+  });
+});
+
+// The host's setup retry (channel-registry) matches on `name === 'NetworkError'`.
+describe('Mattermost setup failures', () => {
+  function bootAdapter(fetchImpl: typeof fetch, options: Partial<MattermostAdapterOptions> = {}) {
+    const adapter = new MattermostAdapter({ ...BASE_OPTIONS, fetchImpl, skipSocket: true, ...options });
+    const logger = { debug: vi.fn(), error: vi.fn(), info: vi.fn(), warn: vi.fn() };
+    const chat = { getLogger: () => logger } as unknown as ChatInstance;
+    return { adapter, initialize: () => adapter.initialize(chat) };
+  }
+
+  it.each([500, 502, 503, 504, 408, 429])('tags a %i at boot as a NetworkError', async (status) => {
+    const { initialize } = bootAdapter(vi.fn(async () => new Response('<html>Bad Gateway</html>', { status })));
+    const error = await initialize().catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(MattermostApiError);
+    expect(error).toMatchObject({ name: 'NetworkError', status });
+  });
+
+  it('tags a fetch that got no reply as a NetworkError', async () => {
+    const refused = new TypeError('fetch failed', { cause: new Error('connect ECONNREFUSED 10.0.0.5:443') });
+    const { initialize } = bootAdapter(
+      vi.fn(async () => {
+        throw refused;
+      }),
+    );
+    const error = await initialize().catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(MattermostNetworkError);
+    expect(error).toMatchObject({ name: 'NetworkError', cause: refused });
+  });
+
+  it('tags a reply whose body is cut off as a NetworkError', async () => {
+    const reset = new Error('socket hang up');
+    const cutOff = () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.error(reset);
+          },
+        }),
+        { status: 200 },
+      );
+    const { initialize } = bootAdapter(vi.fn(async () => cutOff()));
+    const error = await initialize().catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(MattermostNetworkError);
+    expect(error).toMatchObject({ name: 'NetworkError', cause: reset });
+  });
+
+  it('tags the request timeout as a NetworkError', async () => {
+    const hang = vi.fn(
+      (_input: string | URL | Request, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(init.signal!.reason));
+        }),
+    );
+    const { initialize } = bootAdapter(hang, { requestTimeoutMs: 5 });
+    const error = await initialize().catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(MattermostNetworkError);
+    expect((error as Error).cause).toMatchObject({ name: 'TimeoutError' });
+  });
+
+  it.each([400, 401, 403, 404])('fails fast on a %i', async (status) => {
+    const { initialize } = bootAdapter(vi.fn(async () => Response.json({ id: 'api.error' }, { status })));
+    const error = await initialize().catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(MattermostApiError);
+    expect(error).toMatchObject({ name: 'MattermostApiError', status });
+  });
+
+  it('starts on the next attempt once the server is back', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response('Bad Gateway', { status: 502 }))
+      .mockResolvedValue(Response.json({ id: BOT_ID, username: 'nanoclaw-bot', is_bot: true }));
+    const { adapter, initialize } = bootAdapter(fetchImpl);
+    await expect(initialize()).rejects.toMatchObject({ name: 'NetworkError' });
+    await initialize();
+    expect(adapter.botUserId).toBe(BOT_ID);
   });
 });

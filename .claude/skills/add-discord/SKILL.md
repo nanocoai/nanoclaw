@@ -15,14 +15,15 @@ safe to re-run; anything a parser can't apply falls back to the prose beside it.
 
 ## Apply
 
-### 1. Copy the adapter and its registration test
+### 1. Copy the adapter and its tests
 
-Fetch the `channels` branch and copy the Discord adapter and its registration
-test into `src/channels/` (overwrite — the branch is canonical):
+Fetch the `channels` branch and copy the Discord adapter, its registration test
+and its gateway test into `src/channels/` (overwrite — the branch is canonical):
 
 ```nc:copy from-branch:channels
 src/channels/discord.ts
 src/channels/discord-registration.test.ts
+src/channels/discord-gateway.test.ts
 ```
 
 ### 2. Register the adapter
@@ -34,7 +35,35 @@ is already present). This one line is the skill's only reach-in into core:
 import './discord.js';
 ```
 
-### 3. Install the adapter package
+### 3. Configure the adapter patch
+
+Adapter 4.41.1 drops every server message that @mentions anyone. It serializes
+the Discord gateway packet after discord.js has patched it in place into a
+circular object, so the forward throws and the message never arrives. The
+committed pnpm patch backports the fix from adapter 4.42.0. Register it before
+installing the package. pnpm reapplies it after every install and fails if the
+pinned package drifts away from the patch:
+
+```nc:copy
+patches/@chat-adapter__discord@4.41.1.patch
+```
+
+The reinstall applies the patch to an install that already has the adapter,
+since the step below skips a package that is already present. It runs only
+then: pnpm refuses a patch for a package that isn't installed, so a fresh
+install gets the patch from the step below instead:
+
+```nc:run effect:refresh
+pnpm pkg set 'pnpm.patchedDependencies[@chat-adapter/discord@4.41.1]=patches/@chat-adapter__discord@4.41.1.patch'
+if node -e 'process.exit(require("./package.json").dependencies?.["@chat-adapter/discord"] ? 0 : 1)'; then pnpm install --no-frozen-lockfile; fi
+```
+
+Adapter 4.42.0 and later carry the fix. Installs keep this registration, so the
+bump past 4.41.1 must replace this step with an `effect:refresh` step that
+removes it before the install (see `ERR_PNPM_UNUSED_PATCH` under
+Troubleshooting).
+
+### 4. Install the adapter package
 
 Pinned to an exact version — the supply-chain policy rejects ranges and `latest`:
 
@@ -42,23 +71,28 @@ Pinned to an exact version — the supply-chain policy rejects ranges and `lates
 @chat-adapter/discord@4.41.1
 ```
 
-### 4. Build and validate
+### 5. Build and validate
 
 Build first: it guards the typed `createChatSdkBridge(...)` core call and proves
-the dependency is installed. Then run the one integration test.
+the dependency is installed. Then run the two tests.
 
 ```nc:run effect:build
 pnpm run build
 ```
 ```nc:run effect:test
-pnpm exec vitest run src/channels/discord-registration.test.ts
+pnpm exec vitest run src/channels/discord-registration.test.ts src/channels/discord-gateway.test.ts
 ```
 
 `discord-registration.test.ts` imports the real channel barrel and asserts the
 registry contains `discord`. It goes red if the import line is deleted or drifts,
 if the barrel fails to evaluate, or if `@chat-adapter/discord` isn't installed
-(the import throws) — so it also covers the dependency from step 3. End-to-end
+(the import throws) — so it also covers the dependency from step 4. End-to-end
 delivery against a real server is verified manually once the service runs.
+
+`discord-gateway.test.ts` feeds the installed adapter a server message that
+@mentions the bot, with the in-place change discord.js makes to it, and asserts
+the message reaches the webhook as sent. It goes red when the adapter lacks the
+step 3 patch.
 
 ## Credentials
 
@@ -162,5 +196,7 @@ this channel with `/init-first-agent` (or `/manage-channels`).
 **`applications/@me` returns 401.** The token was reset since you copied it, or a stray space/newline came along with the paste. Reset the token in the Bot tab and re-run the check — it fails here on purpose, before the restart, while the credential is still cheap to fix.
 
 **The bot is online but never sees your messages.** Two usual causes: Message Content Intent is off (Bot tab → Privileged Gateway Intents), so message bodies arrive empty and nothing triggers; or the bot doesn't share a server with you — in which case `POST /users/@me/channels` also refuses. Open the invite URL and add the bot to a server you're in, then retry.
+
+**`pnpm install` fails with `ERR_PNPM_UNUSED_PATCH` for `@chat-adapter/discord@4.41.1`.** The adapter has moved past 4.41.1, which already carries the fix, but `package.json` still registers the old patch. Run `pnpm pkg delete 'pnpm.patchedDependencies[@chat-adapter/discord@4.41.1]'` and `rm -f patches/@chat-adapter__discord@4.41.1.patch`, then re-run the install.
 
 **Adapter looks installed but Discord never connects.** Run `pnpm exec vitest run src/channels/discord-registration.test.ts` — red means the barrel import or the `@chat-adapter/discord` install drifted, so re-run the Apply steps. If it's green, the service probably hasn't restarted since the credentials were stored: `bash setup/lib/restart.sh`, then check `logs/nanoclaw.error.log` for missing `DISCORD_PUBLIC_KEY` / `DISCORD_APPLICATION_ID` complaints.
