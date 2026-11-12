@@ -537,7 +537,7 @@ describe('messaging-groups CLI delete cascades dependent rows', () => {
     });
 
     /** Run `deliver` right after the peer scan has read SHARED's mailbox. */
-    function afterScanOfShared(deliver: () => Promise<void>): { delivered: () => boolean } {
+    function afterScanOfShared(deliver: () => Promise<unknown>): { delivered: () => boolean } {
       const original = sessionManager.withExistingMailboxSession;
       let delivered = false;
       vi.spyOn(sessionManager, 'withExistingMailboxSession').mockImplementation(

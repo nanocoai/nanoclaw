@@ -266,7 +266,9 @@ export async function writeSessionRouting(agentGroupId: string, sessionId: strin
 }
 
 /**
- * Write a message to a session's inbound mailbox. Host-only.
+ * Write a message to a session's inbound mailbox. Host-only. Resolves to the
+ * content as written: attachments staged to the inbox (`localPath`), with
+ * their base64 `data` removed.
  */
 export async function writeSessionMessage(
   agentGroupId: string,
@@ -300,7 +302,7 @@ export async function writeSessionMessage(
      */
     onWake?: boolean;
   },
-): Promise<void> {
+): Promise<string> {
   // Documented reset: operators `rm -rf` a session folder to clear a stuck
   // session. The sessions row survives, so the next message takes the
   // existing-session path and lands here with a missing mailbox — the open
@@ -333,6 +335,7 @@ export async function writeSessionMessage(
   // fails transiently is retried within the queue's cadence instead of
   // waiting for the next resync tick. No-op when the sweep isn't running.
   enqueueSessionReconcile(sessionId);
+  return content;
 }
 
 /**

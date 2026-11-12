@@ -991,6 +991,40 @@ describe('router — per-wiring thread policy', () => {
     });
   });
 
+  it("a sibling thread's echo of a message with a file carries its own copy of the file", async () => {
+    await withThreadedAdapter(async () => {
+      const { routeInbound } = await import('./router.js');
+      const { getSessionsByAgentGroup } = await import('./db/sessions.js');
+      const { settleEchoFans } = await import('./modules/cross-session-context/index.js');
+
+      await routeInbound(threadedEvent('msg-first-thread'));
+      await routeInbound({
+        ...threadedEvent('msg-with-file'),
+        threadId: 'thread-43',
+        message: {
+          ...threadedEvent('msg-with-file').message,
+          content: JSON.stringify({
+            sender: 'U',
+            text: 'here is the screenshot',
+            attachments: [{ type: 'image', name: 'shot.png', data: Buffer.from('PNGBYTES').toString('base64') }],
+          }),
+        },
+      });
+      await settleEchoFans();
+
+      const sibling = (await getSessionsByAgentGroup('ag-tp')).find((s) => s.thread_id === 'thread-42')!;
+      const db = new Database(inboundDbPath('ag-tp', sibling.id));
+      const echo = db.prepare("SELECT content FROM messages_in WHERE channel_type = 'session-echo'").get() as {
+        content: string;
+      };
+      db.close();
+      const [att] = JSON.parse(echo.content).attachments;
+      expect(att).toMatchObject({ type: 'image', name: 'shot.png' });
+      expect(att.data).toBeUndefined();
+      expect(fs.readFileSync(path.join(sessionDir('ag-tp', sibling.id), att.localPath), 'utf8')).toBe('PNGBYTES');
+    });
+  });
+
   it('wiring threads=0 nulls the event-derived thread for session and delivery', async () => {
     await getDb().run("UPDATE messaging_group_agents SET threads = 0 WHERE id = 'mga-tp'");
 

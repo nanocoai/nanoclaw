@@ -77,6 +77,6 @@ describe('mail-written reconcile feed', () => {
         timestamp: new Date().toISOString(),
         content: JSON.stringify({ text: 'again' }),
       }),
-    ).resolves.toBeUndefined();
+    ).resolves.toBeTypeOf('string');
   });
 });
