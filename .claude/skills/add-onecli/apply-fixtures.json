@@ -1,0 +1,23 @@
+{
+  "notes": "Conformance fixtures for scripts/skill-conformance.test.ts: shaped fake values only. The `scripts/proxy-check.ts` stub answers proxy_warn/proxy_hint: (1) a local or well-set gateway, no note; (2) a remote gateway that hands agents host.docker.internal, so the note shows.",
+  "scenarios": [
+    {
+      "name": "no-warning",
+      "exec": [
+        {
+          "match": "scripts/proxy-check.ts",
+          "stdout": "{\"warn\":\"no\",\"hint\":\"none\"}"
+        }
+      ]
+    },
+    {
+      "name": "remote-gateway-sends-agents-home",
+      "exec": [
+        {
+          "match": "scripts/proxy-check.ts",
+          "stdout": "{\"warn\":\"yes\",\"hint\":\"The remote OneCLI gateway tells agents to use the proxy host.docker.internal:10255, their own machine, so model calls will hang with no reply. On the gateway host, set GATEWAY_BASE_URL=gw.example.com:10255 in ~/.onecli/.env and recreate the onecli container.\"}"
+        }
+      ]
+    }
+  ]
+}

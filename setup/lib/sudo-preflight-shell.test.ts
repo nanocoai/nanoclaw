@@ -22,6 +22,9 @@ interface Machine {
   /** `node --version` of a Node in ~/.local/bin, off PATH. */
   localNode?: string;
   uvx?: boolean;
+  jq?: boolean;
+  /** The package manager on PATH that setup would install jq with. */
+  pkg?: string;
   /** sudo's answers, or absent when sudo isn't installed. */
   sudo?: { cached: boolean; validates: boolean };
   interactive?: boolean;
@@ -54,6 +57,8 @@ function run(m: Machine): { rc: number; out: string; sudo: string[] } {
   if (m.node) stub('node', `echo ${m.node}`, m.nodeFrom === 'manager' ? manager : system);
   if (m.localNode) stub('node', `echo ${m.localNode}`, path.join(machine, '.local', 'bin'));
   if (m.uvx) stub('uvx', 'exit 0');
+  if (m.jq) stub('jq', 'exit 0');
+  if (m.pkg) stub(m.pkg, 'exit 0');
   if (m.sudo) {
     stub(
       'sudo',
@@ -164,6 +169,49 @@ describe('sudo pre-flight (nanoclaw.sh)', { timeout: 20_000 }, () => {
     expect(r.rc).toBe(0);
     expect(r.out).toBe('');
     expect(r.sudo).toEqual([]);
+  });
+
+  // The bootstrap installs jq with sudo -n, so it needs the same answer.
+  it('asks to install jq when it is missing and a package manager can install it', () => {
+    const r = run({ node: 'v22.23.4', pkg: 'apt-get', sudo: needsPassword, interactive: true });
+    expect(r.out).toContain('Setup needs to install jq, so it will ask for your Linux password');
+    expect(r.sudo).toEqual(['-n true', '-v -p   [sudo] password for %p: ']);
+  });
+
+  it('names Node and jq together', () => {
+    const fresh = { pkg: 'apt-get', sudo: needsPassword, interactive: true };
+    expect(run(fresh).out).toContain('Setup needs to install Node and jq,');
+    expect(run({ ...fresh, node: 'v22.12.0' }).out).toContain('Setup needs to install a newer Node and jq,');
+  });
+
+  // These install Node without sudo; jq still needs it.
+  it.each<[string, Machine]>([
+    ["a version manager's Node", { node: 'v22.12.0', nodeFrom: 'manager' }],
+    ['uvx', { uvx: true }],
+  ])('asks for jq alone with %s', (_name, m) => {
+    expect(run({ ...m, pkg: 'dnf', sudo: needsPassword, interactive: true }).out).toContain(
+      'Setup needs to install jq,',
+    );
+  });
+
+  it('does not ask for jq when it is already there', () => {
+    const r = run({ node: 'v22.23.4', jq: true, pkg: 'apt-get', sudo: needsPassword, interactive: true });
+    expect(r.out).toBe('');
+    expect(r.sudo).toEqual([]);
+  });
+
+  // Only skills need jq, so a user without sudo can still install NanoClaw.
+  it('goes on without jq when sudo is refused and only jq needed it', () => {
+    const r = run({ node: 'v22.23.4', pkg: 'apt-get', sudo: { cached: false, validates: false }, interactive: true });
+    expect(r.rc).toBe(0);
+    expect(r.out).toContain('Going on without jq for now.');
+    expect(r.out).not.toContain("Couldn't get sudo access");
+  });
+
+  it('names jq when sudo is refused', () => {
+    const r = run({ pkg: 'apt-get', sudo: { cached: false, validates: false }, interactive: true });
+    expect(r.out).toContain("Couldn't get sudo access to install Node and jq.");
+    expect(r.out).toContain('install Node (minimum 22.23.4 / 24.22.1 / 26.12.1) and jq yourself first.');
   });
 
   it('keeps the old behaviour without a terminal, never prompting', () => {

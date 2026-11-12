@@ -437,6 +437,8 @@ interface TerminalApprovalCard {
   /** The question as separate text blocks, when it was split to fit. */
   questionBlocks?: string[];
   resolution: string;
+  /** The question is the agent's own markup: don't escape it (the resolution still is). */
+  fromAgent?: boolean;
 }
 
 /**
@@ -612,19 +614,22 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
   }
   const transformText = (t: string): string => (config.transformOutboundText ? config.transformOutboundText(t) : t);
   const cardText = (t: string): string => (config.escapeCardText ? config.escapeCardText(t) : t);
-  const terminalMessage = (spec: TerminalApprovalCard) =>
-    terminalApprovalMessage({
+  const terminalMessage = ({ fromAgent, ...spec }: TerminalApprovalCard) => {
+    const questionText = fromAgent ? (t: string) => t : cardText;
+    return terminalApprovalMessage({
       ...spec,
-      question: cardText(spec.question),
-      questionBlocks: spec.question ? splitCardText(spec.question, cardText, CARD_TEXT_BLOCK_LENGTH) : undefined,
+      question: questionText(spec.question),
+      questionBlocks: spec.question ? splitCardText(spec.question, questionText, CARD_TEXT_BLOCK_LENGTH) : undefined,
       resolution: cardText(spec.resolution),
     });
+  };
   /**
    * Redraws a resolved card. A channel refuses a redraw past its size limit,
    * and a card near that limit grew by its decision line. The title and the
    * decision still fit, so a decided card is never left showing no decision.
    */
   const redrawResolved = async (threadId: string, messageId: string, spec: TerminalApprovalCard) => {
+    if (!terminalFits(spec)) spec = { ...spec, question: '' };
     try {
       return await adapter.editMessage(threadId, messageId, terminalMessage(spec));
     } catch (err) {
@@ -635,6 +640,13 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       log.warn('Retrying resolved card edit', { err, shortened: tooLong });
       return adapter.editMessage(threadId, messageId, terminalMessage(tooLong ? { ...spec, question: '' } : spec));
     }
+  };
+  /** Whether a resolved card still fits the channel's whole-card cap with its question kept.
+   *  A text cap is not a card cap (Discord embeds outgrow it), so a channel without one is not checked. */
+  const terminalFits = ({ title, question, resolution, fromAgent }: TerminalApprovalCard): boolean => {
+    if (config.maxCardTextLength === undefined) return true;
+    const blocks = splitCardText(question, fromAgent ? (t: string) => t : cardText, CARD_TEXT_BLOCK_LENGTH);
+    return !cardQuestionTooLong(title, [...blocks, cardText(resolution)].join('\n'), config.maxCardTextLength);
   };
   /** Registry/routing key for this bridge — also the app-context cache
    *  namespace. Default instances key by the platform name. */
@@ -877,7 +889,12 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         try {
           const tid = event.threadId;
           if (render?.question) {
-            await redrawResolved(tid, event.messageId, { title, question: render.question, resolution });
+            await redrawResolved(tid, event.messageId, {
+              title,
+              question: render.question,
+              resolution,
+              fromAgent: render.fromAgent,
+            });
           } else {
             await adapter.editMessage(tid, event.messageId, { markdown: `${title}\n\n${resolution}` });
           }
@@ -996,7 +1013,9 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           typeof terminalCard.question === 'string' &&
           typeof terminalCard.resolution === 'string'
         ) {
-          await redrawResolved(tid, content.messageId as string, terminalCard as TerminalApprovalCard);
+          // Named fields only: a row must not switch off escaping with its own fromAgent.
+          const { title, question, resolution } = terminalCard as TerminalApprovalCard;
+          await redrawResolved(tid, content.messageId as string, { title, question, resolution });
         } else {
           await adapter.editMessage(tid, content.messageId as string, {
             markdown: transformText((content.text as string) || (content.markdown as string) || ''),
