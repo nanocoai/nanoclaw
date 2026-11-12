@@ -86,11 +86,14 @@ vi.stubGlobal(
       if (channelLookupFails || !channels[channel[1]]) return json({ message: 'unavailable' }, 503);
       return json({ id: channel[1], ...channels[channel[1]] });
     }
-    // A mention in a channel opens a thread on that message; Discord refuses one inside a thread.
-    const thread = /^\/channels\/([^/]+)\/messages\/[^/]+\/threads$/.exec(path);
+    // A mention in a channel opens a thread on that message, under the message's
+    // own id (an announcement thread in an announcement channel). Not inside a thread.
+    const thread = /^\/channels\/([^/]+)\/messages\/([^/]+)\/threads$/.exec(path);
     if (thread && method === 'POST') {
-      if (channels[thread[1]]?.parent_id) return json({ message: 'Cannot start a thread in a thread' }, 400);
-      return json({ id: 'T1', name: body.name });
+      const parent = channels[thread[1]];
+      if (!parent || parent.parent_id) return json({ message: 'Cannot start a thread in a thread' }, 400);
+      channels[thread[2]] = { type: parent.type === 5 ? 10 : 11, parent_id: thread[1] };
+      return json({ id: thread[2], name: body.name, ...channels[thread[2]] });
     }
     const message = /^\/channels\/([^/]+)\/messages(?:\/([^/]+))?$/.exec(path);
     if (message && method === 'POST') {
@@ -346,11 +349,13 @@ describe('a Discord thread, from the raw message to the raw click on its approva
       const { platformId, threadId, card, decision, outcome } = await messageThenCardThenClick(
         rawMessage('C1', { channel_type: 5, mentions: [{ id: 'bot-app', username: 'bot' }] }),
       );
+      // The new thread has the id of the message it was opened on.
       expect({ platformId, threadId, cardChannel: card.channel }).toEqual({
         platformId: 'discord:G1:C1',
-        threadId: 'discord:G1:C1:T1',
-        cardChannel: 'T1',
+        threadId: 'discord:G1:C1:M1',
+        cardChannel: 'M1',
       });
+      expect(channels.M1).toEqual({ type: 10, parent_id: 'C1' });
       expect(outcome).toBe('accepted');
       expect(await decision).toBe('approve');
     });
@@ -374,14 +379,17 @@ describe('a Discord thread, from the raw message to the raw click on its approva
   it.each([
     ['its parent channel', { channel_type: 11 }],
     ['the thread alone', {}],
-  ])('ignores the same card clicked from another thread, when the chat is keyed by %s', async (_name, extra) => {
-    const { card, approvalId, decision } = await messageThenCard(rawMessage('T1', extra));
-    channels.T2 = { type: 11, parent_id: 'C2' };
-    const elsewhere = { ...rawClick(card), channel_id: 'T2', channel: { id: 'T2', ...channels.T2 } };
-    expect(await click(elsewhere)).toBe('ignored');
-    expect((await getPendingApproval(approvalId))?.status).toBe('pending');
-    expect(submitted).toEqual([]);
-    expect(await click(rawClick(card))).toBe('accepted');
-    expect(await decision).toBe('approve');
-  });
+  ])(
+    'ignores the same card clicked from a thread of another channel, when the chat is keyed by %s',
+    async (_name, extra) => {
+      const { card, approvalId, decision } = await messageThenCard(rawMessage('T1', extra));
+      channels.T2 = { type: 11, parent_id: 'C2' };
+      const elsewhere = { ...rawClick(card), channel_id: 'T2', channel: { id: 'T2', ...channels.T2 } };
+      expect(await click(elsewhere)).toBe('ignored');
+      expect((await getPendingApproval(approvalId))?.status).toBe('pending');
+      expect(submitted).toEqual([]);
+      expect(await click(rawClick(card))).toBe('accepted');
+      expect(await decision).toBe('approve');
+    },
+  );
 });
