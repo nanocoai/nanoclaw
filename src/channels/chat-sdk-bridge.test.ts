@@ -1235,7 +1235,7 @@ describe('createChatSdkBridge — a clicked card resolves only when the host acc
     }
   });
 
-  it('hands clicks to the host in the order they came, and shows each when its own decision comes', async () => {
+  it('hands clicks that come one after another to the host in that order, each shown when it is decided', async () => {
     const { bridge, click, onAction, editMessage, postEphemeral } = await startClicks('q-two-clicks', review);
     let decideFirst!: (outcome: string) => void;
     onAction.mockReturnValueOnce(new Promise((resolve) => (decideFirst = resolve))).mockResolvedValueOnce('accepted');

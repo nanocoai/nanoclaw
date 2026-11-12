@@ -609,9 +609,10 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       click.otherPlatformId && render?.platformId === click.otherPlatformId
         ? { ...click.address, platformId: click.otherPlatformId }
         : click.address;
-    // Handed to the host here, in the order the clicks came. Its decision is
-    // waited for off the caller: a transport that reads its next events only
-    // once this returns (Telegram's polling) must not be held by one decision.
+    // Handed to the host before this returns, so clicks a transport delivers
+    // one after another reach it in that order. Its decision is waited for off
+    // the caller: a transport that reads its next events only once this returns
+    // (Telegram's polling) must not be held by one decision.
     const decided = setupConfig.onAction(click.questionId, selectedOption, click.userId, address);
     void showOutcome(click, transport, render, selectedOption, decided).catch((err: unknown) =>
       log.error('Failed to handle a card click', { err }),
