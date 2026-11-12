@@ -644,7 +644,12 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     const selectedOption = resolveSelectedOption(render, click.value, click.tail);
     // An empty value counts when it is a real option's value, or on a card the host updates itself.
     if (!selectedOption && !render?.deferResolution && !render?.options.some((o) => o.value === selectedOption)) return;
-    const outcome = await setupConfig.onAction(click.questionId, selectedOption, click.userId, click.address);
+    // A Discord thread's chat goes by one of two addresses: name the one the card was sent to.
+    const address =
+      click.otherPlatformId && render?.platformId === click.otherPlatformId
+        ? { ...click.address, platformId: click.otherPlatformId }
+        : click.address;
+    const outcome = await setupConfig.onAction(click.questionId, selectedOption, click.userId, address);
     try {
       if (outcome === 'refused') return await transport.notePrivately(REFUSED_CLICK_NOTE);
       // No render: already resolved (a late or repeated click), or a pending row
@@ -1251,6 +1256,8 @@ interface CardClick {
   messageId: string | undefined;
   threadId: string;
   address: { instance?: string; messageId?: string; platformId?: string };
+  /** The chat's second address, where a transport has two for one place (a Discord thread). */
+  otherPlatformId?: string;
   /** Card text to keep when the render has none (Discord: the original embed's). */
   fallbackQuestion?: string;
 }
@@ -1438,17 +1445,18 @@ async function handleForwardedEvent(
         acking = undefined;
       });
       if (!questionId) return;
-      // A thread click carries its parent channel and the thread, as a card sent
-      // into that thread carries its messaging group.
+      // Announcement (10), public and private threads. The adapter keys a thread's
+      // messages by parent channel and thread when it knows the parent, and by the
+      // thread alone when it does not (a failed lookup, or a later message in an
+      // announcement thread). A card's chat can be either, so the click carries both.
       const channel = interaction.channel as { type?: number; parent_id?: string } | undefined;
-      // Announcement (10), public and private threads. Adapter 4.41.1 gap: it keys
-      // messages inside an announcement thread by the thread alone, so a card sent
-      // to such a chat won't match this click.
       const inThread = (channel?.type === 10 || channel?.type === 11 || channel?.type === 12) && channel.parent_id;
+      const guildId = (interaction.guild_id as string | undefined) || '@me';
+      const channelId = interaction.channel_id as string;
       const threadId = adapter.encodeThreadId({
-        guildId: (interaction.guild_id as string | undefined) || '@me',
-        channelId: inThread ? channel.parent_id! : (interaction.channel_id as string),
-        ...(inThread ? { threadId: interaction.channel_id as string } : {}),
+        guildId,
+        channelId: inThread ? channel.parent_id! : channelId,
+        ...(inThread ? { threadId: channelId } : {}),
       });
 
       // The rest runs in the background: Discord forwards a channel's events in
@@ -1465,6 +1473,7 @@ async function handleForwardedEvent(
             messageId,
             threadId,
             address: { messageId, platformId: adapter.channelIdFromThreadId(threadId) },
+            ...(inThread ? { otherPlatformId: adapter.encodeThreadId({ guildId, channelId }) } : {}),
             fallbackQuestion: originalDescription,
           },
           {
