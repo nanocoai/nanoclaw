@@ -124,30 +124,33 @@ type AnswerOutcome = 'accepted' | 'refused' | 'closed' | 'ignored' | undefined;
  * Answers a pending question from a "/option" reply. The host decides, once: the
  * chat hears the answer only once it is accepted. A refused answer, or one that
  * decided nothing, keeps the question open (WhatsApp has no private reply, so
- * nothing is posted). Undefined when the text answers no pending question.
+ * nothing is posted). Undefined, at once, when the text answers no pending
+ * question; else the host has the answer on return, and the promise is the rest.
  */
-export async function answerPendingQuestion(
+export function answerPendingQuestion(
   pendingQuestions: Map<string, PendingQuestion>,
   chatJid: string,
   text: string,
   sender: string,
   onAction: ChannelSetup['onAction'],
   confirm: (option: NormalizedOption) => Promise<unknown>,
-): Promise<{ questionId: string; value: string; outcome: AnswerOutcome } | undefined> {
+): Promise<{ questionId: string; value: string; outcome: AnswerOutcome }> | undefined {
   const pending = pendingQuestions.get(chatJid);
   if (!pending || !text.startsWith('/')) return undefined;
   const cmd = text.trim().toLowerCase();
   const matched = pending.options.find((o) => optionToCommand(o.label) === cmd);
   if (!matched) return undefined;
-  const result: unknown = await onAction(pending.questionId, matched.value, sender);
-  const outcome = typeof result === 'string' ? (result as AnswerOutcome) : undefined;
-  // A core from before click outcomes returns nothing: answered as before.
-  const shown = outcome ?? 'accepted';
-  // 'ignored' can mean the question is still pending, so only these close it.
-  const closes = shown === 'accepted' || shown === 'closed';
-  if (closes && pendingQuestions.get(chatJid) === pending) pendingQuestions.delete(chatJid);
-  if (shown === 'accepted') await confirm(matched);
-  return { questionId: pending.questionId, value: matched.value, outcome };
+  return (async () => {
+    const result: unknown = await onAction(pending.questionId, matched.value, sender);
+    const outcome = typeof result === 'string' ? (result as AnswerOutcome) : undefined;
+    // A core from before click outcomes returns nothing: answered as before.
+    const shown = outcome ?? 'accepted';
+    // 'ignored' can mean the question is still pending, so only these close it.
+    const closes = shown === 'accepted' || shown === 'closed';
+    if (closes && pendingQuestions.get(chatJid) === pending) pendingQuestions.delete(chatJid);
+    if (shown === 'accepted') await confirm(matched);
+    return { questionId: pending.questionId, value: matched.value, outcome };
+  })();
 }
 
 // --- Markdown → WhatsApp formatting ---
@@ -920,7 +923,7 @@ registerChannelAdapter('whatsapp', {
 
             // Check if this reply answers a pending question via slash command
             const voterName = msg.pushName || sender.split('@')[0];
-            const answered = await answerPendingQuestion(
+            const answering = answerPendingQuestion(
               pendingQuestions,
               chatJid,
               content,
@@ -928,8 +931,13 @@ registerChannelAdapter('whatsapp', {
               (...args) => setupConfig.onAction(...args),
               (option) => sendRawMessage(chatJid, `${option.selectedLabel} by ${voterName}`),
             );
-            if (answered) {
-              log.info('Question answered', { ...answered, voterName });
+            if (answering) {
+              // Not awaited: the host may take its time, and the rest of this batch
+              // (after a reconnect, every chat's buffered messages) must not wait.
+              void answering.then(
+                (answered) => log.info('Question answered', { ...answered, voterName }),
+                (err: unknown) => log.error('Error answering a WhatsApp question', { err, chatJid }),
+              );
               continue; // Don't forward this reply to the agent
             }
 

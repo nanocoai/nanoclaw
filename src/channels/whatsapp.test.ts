@@ -119,6 +119,33 @@ describe('answerPendingQuestion', () => {
     expect(questions.get('chat@g.us')).toBe(newer);
   });
 
+  // The caller is the message batch loop: it must know at once, and not wait for the host.
+  it('says at once whether a reply is an answer, with the host still deciding', async () => {
+    const questions = fresh();
+    const confirm = vi.fn(async () => undefined);
+    let decide!: (outcome: string) => void;
+    const onAction = vi.fn(() => new Promise<string>((resolve) => (decide = resolve)));
+    const answering = answerPendingQuestion(
+      questions,
+      'chat@g.us',
+      '/approve',
+      'owner@s.whatsapp.net',
+      onAction as never,
+      confirm,
+    );
+    // An answer, known without waiting; the host already has it.
+    expect(answering).toBeInstanceOf(Promise);
+    expect(onAction).toHaveBeenCalledWith('q1', 'approve', 'owner@s.whatsapp.net');
+    // A plain message is known at once too, and the host is not asked.
+    expect(answerPendingQuestion(questions, 'chat@g.us', 'hello', 'u', onAction as never, confirm)).toBeUndefined();
+    expect(onAction).toHaveBeenCalledTimes(1);
+    expect(confirm).not.toHaveBeenCalled();
+
+    decide('accepted');
+    expect(await answering).toEqual({ questionId: 'q1', value: 'approve', outcome: 'accepted' });
+    expect(confirm).toHaveBeenCalledWith(approve);
+  });
+
   it('two answers at once both reach the host, which decides once: only the accepted one is confirmed', async () => {
     const questions = fresh();
     const onAction = vi.fn().mockResolvedValueOnce('accepted').mockResolvedValueOnce('ignored');
