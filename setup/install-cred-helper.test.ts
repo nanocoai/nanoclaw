@@ -11,12 +11,15 @@ import { fileURLToPath } from 'url';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { HELPER_BINARY_NAME, refreshInstalledCredentialHelper, renderHelper } from './install-cred-helper.js';
+import {
+  HELPER_BINARY_NAME,
+  installCredentialHelper,
+  refreshInstalledCredentialHelper,
+  renderHelper,
+} from './install-cred-helper.js';
 
-const SOURCE = fs.readFileSync(
-  path.join(path.dirname(fileURLToPath(import.meta.url)), 'registry', 'credential-helper.mjs'),
-  'utf-8',
-);
+const here = path.dirname(fileURLToPath(import.meta.url));
+const SOURCE = fs.readFileSync(path.join(here, 'registry', 'credential-helper.mjs'), 'utf-8');
 const HELPER_ID = 'nanoclaw-docker-credential-helper';
 const GONE_NODE = '/nonexistent/node/1.0.0/bin/node';
 const HOST = 'reg.example.com';
@@ -44,6 +47,20 @@ function writeHelper(dir: string, contents: string): string {
   const file = path.join(dir, HELPER_BINARY_NAME);
   fs.writeFileSync(file, contents, { mode: 0o755 });
   return file;
+}
+
+/** Run `write` so that the helper it writes cannot start: its node gone, and none on PATH. */
+function withNoNode(write: () => void): void {
+  const { execPath } = process;
+  const { PATH } = process.env;
+  Object.defineProperty(process, 'execPath', { value: GONE_NODE, configurable: true });
+  process.env.PATH = scratchDir();
+  try {
+    write();
+  } finally {
+    Object.defineProperty(process, 'execPath', { value: execPath, configurable: true });
+    process.env.PATH = PATH;
+  }
 }
 
 /** Start the helper as docker does: by path, with nothing but this PATH to find a node on. */
@@ -208,5 +225,43 @@ describe('refreshInstalledCredentialHelper', () => {
     refreshInstalledCredentialHelper({ binDir, dockerConfigPath });
 
     expect(fs.readFileSync(helper, 'utf-8')).toBe(foreign);
+  });
+
+  it('does not fail its caller when the helper it rewrote does not start', () => {
+    const { binDir, dockerConfigPath } = install(olderSetup);
+
+    expect(() => withNoNode(() => refreshInstalledCredentialHelper({ binDir, dockerConfigPath }))).not.toThrow();
+  });
+});
+
+describe('installCredentialHelper', () => {
+  it('refuses to wire docker to a helper that does not start', () => {
+    const binDir = scratchDir();
+    const dockerConfigPath = path.join(scratchDir(), 'config.json');
+    const install = (): unknown => installCredentialHelper({ binDir, dockerConfigPath, registryHost: HOST });
+
+    expect(() => withNoNode(install)).toThrow(/did not run after install/);
+    expect(fs.existsSync(dockerConfigPath)).toBe(false);
+  });
+});
+
+// The two setup steps that pull are not run here: they need docker and a
+// registry. What can drift unnoticed is the order inside them.
+describe('setup rewrites an installed helper before it pulls', () => {
+  const PULL = `'container', 'pull.sh')`;
+  const CALL = 'refreshInstalledCredentialHelper();';
+
+  it('in the container step', () => {
+    const src = fs.readFileSync(path.join(here, 'container.ts'), 'utf-8');
+
+    expect(src.indexOf(CALL)).toBeGreaterThan(src.indexOf(`if (source === 'pull')`));
+    expect(src.indexOf(CALL)).toBeLessThan(src.indexOf(PULL));
+  });
+
+  it('in the registry refresh', () => {
+    const src = fs.readFileSync(path.join(here, 'registry.ts'), 'utf-8');
+
+    expect(src.indexOf(CALL)).toBeGreaterThan(src.indexOf('async function refresh('));
+    expect(src.indexOf(CALL)).toBeLessThan(src.indexOf(PULL));
   });
 });
