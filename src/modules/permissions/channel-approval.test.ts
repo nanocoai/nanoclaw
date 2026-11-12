@@ -96,11 +96,20 @@ vi.mock('../../group-folder.js', async (importOriginal) => {
 });
 
 // A pass-through card-options store a test can make fail once.
-const cardUpdate = vi.hoisted(() => ({ fail: false }));
+const cardUpdate = vi.hoisted(() => ({ fail: false, loseRejectClaim: false }));
 vi.mock('./db/pending-channel-approvals.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./db/pending-channel-approvals.js')>();
   return {
     ...actual,
+    deletePendingChannelApproval: async (...args: Parameters<typeof actual.deletePendingChannelApproval>) => {
+      if (cardUpdate.loseRejectClaim) {
+        cardUpdate.loseRejectClaim = false;
+        // Another response removed the row after the handler read it.
+        await actual.deletePendingChannelApproval(...args);
+        return false;
+      }
+      return actual.deletePendingChannelApproval(...args);
+    },
     updatePendingChannelApprovalCard: async (...args: Parameters<typeof actual.updatePendingChannelApprovalCard>) => {
       if (cardUpdate.fail) {
         cardUpdate.fail = false;
@@ -665,6 +674,32 @@ describe('unknown-channel registration flow', () => {
     ).toBe(1);
   });
 
+  it('a Reject that loses its claim neither denies the channel nor reports acceptance', async () => {
+    const { routeInbound } = await import('../../router.js');
+    const { dispatchResponse } = await import('../../response-registry.js');
+    await expectAsyncDelivery(() => routeInbound(groupMention('chat-lost-reject-claim')));
+    const { messaging_group_id: questionId } = (await getDb().get<{ messaging_group_id: string }>(
+      'SELECT messaging_group_id FROM pending_channel_approvals',
+    ))!;
+    cardUpdate.loseRejectClaim = true;
+    expect(
+      await dispatchResponse({
+        questionId,
+        value: 'reject',
+        userId: 'owner',
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+      }),
+    ).toBe('ignored');
+    expect(
+      (await getDb().get<{ denied_at: string | null }>(
+        'SELECT denied_at FROM messaging_groups WHERE id = ?',
+        questionId,
+      ))!.denied_at,
+    ).toBeNull();
+  });
+
   it('a Reject racing a connect decides once: never both wired and denied', async () => {
     const { routeInbound } = await import('../../router.js');
     const { dispatchResponse } = await import('../../response-registry.js');
@@ -1004,6 +1039,10 @@ describe('unknown-channel registration flow', () => {
       expect(await click(card.messaging_group_id, 'reject')).toBe('ignored');
       expect(await click(card.messaging_group_id, 'choose_existing', 'card-1')).toBe('ignored');
       expect(await storedOptions(card.messaging_group_id)).toBe(card.options_json);
+      await replaceRequest(card.messaging_group_id);
+      // The known old card stays retired, but a fresh request is usable.
+      expect(await click(card.messaging_group_id, 'reject', 'card-1')).toBe('ignored');
+      expect(await click(card.messaging_group_id, 'reject', 'new-card')).toBe('accepted');
     });
 
     it("leaves the first card as it was when the agent card can't be sent", async () => {
