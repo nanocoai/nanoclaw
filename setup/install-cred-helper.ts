@@ -164,7 +164,7 @@ export function renderHelper(source: string, nodePath: string): string {
   const body = source.startsWith('#!') ? source.slice(source.indexOf('\n') + 1) : source;
   const pinned = `'${nodePath.replace(/'/g, `'\\''`)}'`;
   const starts = `[ -x "$N" ] && "$N" -v </dev/null >/dev/null 2>&1`;
-  return `#!/bin/sh\n':' //; N=${pinned}; ${starts} || N=node; exec "$N" "$0" "$@"\n${body}`;
+  return `#!/bin/sh\n':' //; N=${pinned}; ${starts} || { if command -v node >/dev/null 2>&1; then N=node; fi; }; exec "$N" "$0" "$@"\n${body}`;
 }
 
 /**
@@ -173,10 +173,25 @@ export function renderHelper(source: string, nodePath: string): string {
  * in flight; a rename is atomic and gives the old inode to whoever holds it.
  */
 function writeExecutable(dest: string, contents: string): void {
+  let previous: fs.Stats | undefined;
+  try {
+    const entry = fs.lstatSync(dest);
+    if (entry.isFile()) previous = entry;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
   const tmp = `${dest}.tmp-${process.pid}`;
   try {
-    fs.writeFileSync(tmp, contents, { mode: 0o755 });
-    fs.chmodSync(tmp, 0o755);
+    fs.writeFileSync(tmp, contents, { mode: 0o600 });
+    if (previous) {
+      const created = fs.statSync(tmp);
+      if (created.uid !== previous.uid || created.gid !== previous.gid) {
+        // If this is not permitted, keep the original file rather than changing its owner.
+        fs.chownSync(tmp, previous.uid, previous.gid);
+      }
+    }
+    // chown can clear mode bits, so restore permissions after ownership.
+    fs.chmodSync(tmp, previous ? previous.mode & 0o7777 : 0o755);
     fs.renameSync(tmp, dest);
   } catch (err) {
     try {
@@ -317,7 +332,13 @@ export function refreshInstalledCredentialHelper(options: CredHelperOptions = {}
     // A linked helper is rewritten at its target, so the link stays a link.
     // The target is checked itself: the link can point elsewhere by now.
     const target = fs.realpathSync(helper.helperPath);
-    if (isOurBinary(target)) writeHelper(target);
+    if (!isOurBinary(target)) return;
+    const installed = fs.statSync(target);
+    const source = fs.statSync(helperSourcePath());
+    // A developer may link the installed helper straight to this checkout.
+    // Replace that link with a standalone copy, never rewrite the source.
+    const pointsToSource = installed.dev === source.dev && installed.ino === source.ino;
+    writeHelper(pointsToSource ? helper.helperPath : target);
   } catch (err) {
     log.warn('Could not re-install the docker credential helper', { helperPath: helper.helperPath, err });
   }

@@ -121,6 +121,18 @@ describe('renderHelper', () => {
     expect(res.status).toBe(0);
   });
 
+  it('keeps the pinned node diagnostic when no fallback node exists', () => {
+    const helper = writeHelper(scratchDir(), renderHelper(SOURCE, process.execPath));
+    const res = spawnSync(helper, ['version'], {
+      encoding: 'utf-8',
+      env: { PATH: scratchDir(), NODE_OPTIONS: '--nanoclaw-invalid-option' },
+    });
+
+    expect(res.status).not.toBe(0);
+    expect(res.stderr).toContain('--nanoclaw-invalid-option is not allowed in NODE_OPTIONS');
+    expect(res.stderr).not.toContain('node: not found');
+  });
+
   it('leaves stdin for the helper, where docker sends its request', () => {
     // A stand-in node that would swallow stdin during the start test, if it were handed it.
     const standIn = path.join(scratchDir(), 'node');
@@ -191,6 +203,66 @@ describe('refreshInstalledCredentialHelper', () => {
     expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
     expect(fs.readFileSync(target, 'utf-8')).toBe(renderHelper(SOURCE, process.execPath));
     expect(version(link, nodeDir('broken')).status).toBe(0);
+  });
+
+  it('replaces a link to the checkout source without changing that source, even on repeated refresh', () => {
+    const { binDir, helper, dockerConfigPath } = install('');
+    const source = fs.realpathSync(path.join(here, 'registry', 'credential-helper.mjs'));
+    const before = fs.readFileSync(source, 'utf-8');
+    fs.rmSync(helper);
+    fs.symlinkSync(source, helper);
+    // Keep a regression from actually modifying this checkout's source.
+    const rename = fs.renameSync.bind(fs);
+    const guard = vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+      if (String(to) === source) throw new Error('Attempt to overwrite checkout source');
+      rename(from, to);
+    });
+    try {
+      refreshInstalledCredentialHelper({ binDir, dockerConfigPath });
+      refreshInstalledCredentialHelper({ binDir, dockerConfigPath });
+      expect(fs.lstatSync(helper).isSymbolicLink()).toBe(false);
+      expect(fs.readFileSync(source, 'utf-8')).toBe(before);
+      expect(fs.readFileSync(helper, 'utf-8')).toBe(renderHelper(SOURCE, process.execPath));
+      expect(version(helper, nodeDir('broken')).status).toBe(0);
+    } finally {
+      guard.mockRestore();
+    }
+  });
+
+  it('preserves the existing helper permissions and ownership on refresh', () => {
+    const { binDir, helper, dockerConfigPath } = install(olderSetup);
+    fs.chmodSync(helper, 0o710);
+    const before = fs.statSync(helper);
+
+    refreshInstalledCredentialHelper({ binDir, dockerConfigPath });
+
+    const after = fs.statSync(helper);
+    expect(after.mode & 0o7777).toBe(before.mode & 0o7777);
+    expect([after.uid, after.gid]).toEqual([before.uid, before.gid]);
+    expect(fs.readFileSync(helper, 'utf-8')).toBe(renderHelper(SOURCE, process.execPath));
+  });
+
+  it('leaves the original intact if its ownership cannot be preserved', () => {
+    const { binDir, helper, dockerConfigPath } = install(olderSetup);
+    const target = fs.realpathSync(helper);
+    const stat = fs.lstatSync.bind(fs);
+    const metadata = vi.spyOn(fs, 'lstatSync').mockImplementation((...args) => {
+      const result = stat(...args);
+      if (String(args[0]) === target) return Object.assign(result, { uid: result.uid + 1 });
+      return result;
+    });
+    const chown = vi.spyOn(fs, 'chownSync').mockImplementation(() => {
+      throw Object.assign(new Error('Not permitted'), { code: 'EPERM' });
+    });
+    try {
+      refreshInstalledCredentialHelper({ binDir, dockerConfigPath });
+      expect(chown).toHaveBeenCalled();
+      expect(fs.readFileSync(helper, 'utf-8')).toBe(olderSetup);
+      expect(fs.readdirSync(binDir)).toEqual([HELPER_BINARY_NAME]);
+    } finally {
+      metadata.mockRestore();
+      chown.mockRestore();
+    }
   });
 
   it('does not write through a link that now points at a file that is not the helper', () => {
