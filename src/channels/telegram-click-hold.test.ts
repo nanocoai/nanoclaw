@@ -142,15 +142,21 @@ describe('a Telegram click the host is slow to decide', () => {
   });
 
   it('hands a second click in the same chat to the host in the order it came, the first still undecided', async () => {
-    arrive(await cardAndClick('q-held-1', 42, 1));
+    const first = await cardAndClick('q-held-1', 42, 1);
+    arrive(first);
     await vi.waitFor(() => expect(held).toHaveLength(1));
-    arrive(await cardAndClick('q-held-2', 42, 2));
+    const second = await cardAndClick('q-held-2', 42, 2);
+    arrive(second);
     await vi.waitFor(() => expect(held.map((click) => click.questionId)).toEqual(['q-held-1', 'q-held-2']));
 
-    // Each card changes when its own click is decided.
+    // Each card changes when its own click is decided, whichever comes first.
+    const edited = () => edits().map((call) => call.body.message_id);
     held[1].settle('accepted');
-    await vi.waitFor(() => expect(edits()).toHaveLength(1));
+    await vi.waitFor(() => expect(edited()).toEqual([second.callback_query.message.message_id]));
     held[0].settle('accepted');
-    await vi.waitFor(() => expect(edits()).toHaveLength(2));
+    await vi.waitFor(() =>
+      expect(edited()).toEqual([second.callback_query.message.message_id, first.callback_query.message.message_id]),
+    );
+    expect(first.callback_query.message.message_id).not.toBe(second.callback_query.message.message_id);
   });
 });

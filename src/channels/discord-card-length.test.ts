@@ -274,6 +274,9 @@ describe('a Discord card near the limit when it is clicked', () => {
       expect(embed.title).toBe('Approve');
       expect(embed.description).toContain(`${label} by ${name}`);
       expect(embed.description.length).toBeLessThanOrEqual(4096);
+      // The request text is not just dropped up front: either it is still on the
+      // card, or Discord refused the whole card before the short one was sent.
+      expect(embed.description.includes('qqq') || patches.some((patch) => patch.refused)).toBe(true);
       // The buttons went last, with no card edit still in flight.
       expect(patches.at(-1)!.body).toEqual({ components: [] });
       expect(removedDuringEdit).toBe(false);
