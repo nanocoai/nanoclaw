@@ -348,6 +348,8 @@ describe('escapeDiscordCardText', () => {
       // The card edit, not the interaction's button removal.
       const edits = () => patches.filter((patch) => patch.url.endsWith('/channels/c1/messages/m9'));
       await vi.waitFor(() => expect(edits()).toHaveLength(1));
+      // Wait for the completed click flow before the next test resets transport state.
+      await vi.waitFor(() => expect(patches.at(-1)?.url).toMatch(/\/messages\/@original$/));
       const [embed] = edits()[0].body.embeds as Array<{ description: string }>;
       expect(embed.description).toContain('Approved by [Admin]\u2060(https://x.co) <\u2060@1>');
     } finally {
