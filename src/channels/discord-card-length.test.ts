@@ -52,12 +52,16 @@ import { registerQuestionRenderResolver } from './question-render-registry.js';
 const posts: Array<{ embeds: Array<{ title?: string; description?: string }>; components?: unknown[] }> = [];
 const patches: Array<{ url: string; body: Record<string, unknown> }> = [];
 const realFetch = globalThis.fetch;
+/** Set by a test: Discord refuses every edit of a channel message. */
+let cardEditsFail = false;
 
 vi.stubGlobal(
   'fetch',
   vi.fn(async (url: string, init: { method?: string; body?: string }) => {
     if (init.method === 'PATCH') patches.push({ url, body: JSON.parse(init.body!) });
     else posts.push(JSON.parse(init.body!));
+    if (cardEditsFail && init.method === 'PATCH' && /\/channels\/[^/]+\/messages\//.test(url))
+      return new Response('{"message":"Internal Server Error"}', { status: 500 });
     return new Response(JSON.stringify({ id: `m${posts.length}`, channel_id: 'c1' }), { status: 200 });
   }),
 );
@@ -69,6 +73,7 @@ afterAll(() => {
 beforeEach(() => {
   posts.length = 0;
   patches.length = 0;
+  cardEditsFail = false;
 });
 
 const adapter = createDiscordAdapter({
@@ -169,6 +174,61 @@ describe('clearButtonsOnCardEdits', () => {
     });
     expect(patches).toHaveLength(1);
     expect(patches[0].body.components).toEqual([]);
+  });
+
+  // What riding on the card edit cannot do: when Discord refuses the edit, its
+  // `components: []` never lands, and only the click's own removal is left.
+  it('leaves a refused click edit to the interaction, which still removes the buttons', async () => {
+    registerQuestionRenderResolver((id) =>
+      id === 'q-edit-fails'
+        ? {
+            title: 'Approve',
+            question: 'Run it?',
+            options: [{ label: 'Approve', selectedLabel: 'Approved', value: 'approve' }],
+          }
+        : undefined,
+    );
+    await runMigrations(await initTestDb());
+    const bridge = (await registrations.get('discord')!.factory())!;
+    await bridge.setup({
+      onInbound: () => {},
+      onInboundEvent: () => {},
+      onMetadata: () => {},
+      onAction: async () => 'accepted' as const,
+    });
+    cardEditsFail = true;
+    try {
+      const response = await realFetch(gateway.url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-discord-gateway-token': 'test-bot-token' },
+        body: JSON.stringify({
+          type: 'GATEWAY_INTERACTION_CREATE',
+          data: {
+            type: 3,
+            id: 'i1',
+            token: 'interaction-token',
+            application_id: 'test-app-id',
+            guild_id: 'g1',
+            channel_id: 'c1',
+            data: { custom_id: 'ncq:q-edit-fails:0\napprove' },
+            member: { user: { id: 'u1', username: 'ann' } },
+            message: { id: 'm9', embeds: [{ title: 'Approve', description: 'Run it?' }] },
+          },
+        }),
+      });
+      expect(response.status).toBe(200);
+      await vi.waitFor(() =>
+        expect(patches.map((patch) => patch.url.replace(/^.*\/api\/v10/, ''))).toEqual([
+          '/channels/c1/messages/m9',
+          '/webhooks/test-app-id/interaction-token/messages/@original',
+        ]),
+      );
+      expect(patches[0].body.components).toEqual([]);
+      expect(patches[1].body).toEqual({ components: [] });
+    } finally {
+      await bridge.teardown();
+      await closeDb();
+    }
   });
 });
 
