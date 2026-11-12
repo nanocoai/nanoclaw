@@ -10,10 +10,9 @@
  * 'telegram' either way: user ids, formatting, and container config are one
  * namespace across bots. See .claude/skills/telegram-multi-instance.
  */
-import { AsyncLocalStorage } from 'node:async_hooks';
 
 import { createTelegramAdapter, TelegramFormatConverter } from '@chat-adapter/telegram';
-import { cardChildToFallbackText, convertEmojiPlaceholders, type CardElement } from 'chat';
+import { cardChildToFallbackText, convertEmojiPlaceholders, type CardChild, type CardElement } from 'chat';
 
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
@@ -50,9 +49,6 @@ export function keepCommandsAsMessages(adapter: ReturnType<typeof createTelegram
 
 const TELEGRAM_MESSAGE_LIMIT = 4096;
 
-/** Set while the bridge delivers a custom presentation, which must show the whole request itself. */
-const customPresentation = new AsyncLocalStorage<true>();
-
 /**
  * Refuse a question card that Telegram would cut. The adapter sends a card as
  * MarkdownV2 and cuts it past 4,096 with its buttons kept, and lists, links
@@ -65,15 +61,27 @@ export function refuseCutCards(adapter: ReturnType<typeof createTelegramAdapter>
   const converter = new TelegramFormatConverter();
   // Match the adapter's card rendering before its truncation step.
   const sentLength = (card: CardElement): number => {
-    const parts = [card.title && `**${card.title}**`, ...card.children.map(cardChildToFallbackText)];
+    const fallback = (child: CardChild): string | null =>
+      child.type === 'divider'
+        ? '---'
+        : child.type === 'section'
+          ? child.children.map(fallback).filter(Boolean).join('\n')
+          : cardChildToFallbackText(child);
+    const parts = [card.title && `**${card.title}**`, card.subtitle, ...card.children.map(fallback)];
     return convertEmojiPlaceholders(converter.fromMarkdown(parts.filter(Boolean).join('\n')), 'gchat').length;
   };
   const post = adapter.postMessage.bind(adapter);
   adapter.postMessage = async (...args) => {
     const message = args[1];
-    const own = !customPresentation.getStore() && typeof message === 'object' && 'card' in message;
+    const own = typeof message === 'object' && 'card' in message;
     const card = own ? message.card : undefined;
-    if (card?.children.some((child) => child.type === 'actions' && child.children.some((b) => b.type === 'button'))) {
+    const hasAnswerButtons = (children: CardChild[]): boolean =>
+      children.some((child) =>
+        child.type === 'actions'
+          ? child.children.some((button) => button.type === 'button')
+          : child.type === 'section' && hasAnswerButtons(child.children),
+      );
+    if (card && hasAnswerButtons(card.children)) {
       const length = sentLength(card);
       if (length > TELEGRAM_MESSAGE_LIMIT) {
         throw new CardTooLongError(
@@ -90,12 +98,9 @@ export function refuseCutCards(adapter: ReturnType<typeof createTelegramAdapter>
   const edit = adapter.editMessage.bind(adapter);
   adapter.editMessage = async (...args) => {
     const message = args[2];
-    if (!customPresentation.getStore() && typeof message === 'object' && 'card' in message) {
+    if (typeof message === 'object' && 'card' in message) {
       const { card } = message;
-      const outcome = card.children.at(-1);
-      const request = card.children.slice(0, -1);
-      const own = !card.subtitle && !card.imageUrl && request.every((child) => child.type === 'text' && !child.style);
-      if (own && outcome?.type === 'text' && outcome.style === 'muted' && sentLength(card) > TELEGRAM_MESSAGE_LIMIT) {
+      if (sentLength(card) > TELEGRAM_MESSAGE_LIMIT) {
         throw new CardTooLongError('the resolved card is too long to show its decision in full on Telegram');
       }
     }
@@ -475,10 +480,6 @@ export function createTelegramBridge(options: TelegramBridgeOptions = {}): Chann
 
   const wrapped: ChannelAdapter = {
     ...bridge,
-    deliver: (...args) =>
-      (args[2].content as { requirePresentation?: unknown } | null)?.requirePresentation
-        ? customPresentation.run(true, () => bridge.deliver(...args))
-        : bridge.deliver(...args),
     resolveChannelName: async (platformId: string) => {
       const chatId = platformId.split(':').slice(1).join(':');
       if (!chatId) return null;

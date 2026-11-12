@@ -581,8 +581,11 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       return await adapter.editMessage(threadId, messageId, terminalMessage(spec));
     } catch (err) {
       if (!spec.question) throw err;
-      log.warn('Resolved card refused, redrawing it with its decision only', { err });
-      return adapter.editMessage(threadId, messageId, terminalMessage({ ...spec, question: '' }));
+      // Only a known size refusal justifies discarding request text. A lost
+      // reply or transient API failure retries the same idempotent edit.
+      const tooLong = err instanceof CardTooLongError;
+      log.warn('Retrying resolved card edit', { err, shortened: tooLong });
+      return adapter.editMessage(threadId, messageId, terminalMessage(tooLong ? { ...spec, question: '' } : spec));
     }
   };
   /** Registry/routing key for this bridge — also the app-context cache

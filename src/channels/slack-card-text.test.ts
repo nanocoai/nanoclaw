@@ -14,21 +14,29 @@ import { cardToBlockKit, cardToFallbackText } from '@chat-adapter/slack';
 import type { AdapterPostableMessage } from 'chat';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { escapeSlackMrkdwn, escapeSlackTitle, slackInstanceBridgeFactory } from './slack.js';
+import { escapeCardTitles, escapeSlackMrkdwn, escapeSlackTitle, slackInstanceBridgeFactory } from './slack.js';
 
 const posted: AdapterPostableMessage[] = [];
+const notifications: Array<{ text?: string; blocks?: unknown }> = [];
 
 vi.mock('@chat-adapter/slack', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@chat-adapter/slack')>();
   return {
     ...actual,
-    createSlackAdapter: () => ({
-      name: 'slack',
-      postMessage: async (threadId: string, message: AdapterPostableMessage) => {
+    createSlackAdapter: (...args: Parameters<typeof actual.createSlackAdapter>) => {
+      const adapter = actual.createSlackAdapter(...args);
+      const transport = adapter as unknown as { _client: typeof adapter.webClient };
+      transport._client.chat.postMessage = vi.fn(async (payload) => {
+        notifications.push(payload);
+        return { ok: true, ts: 'm1' };
+      });
+      const post = adapter.postMessage.bind(adapter);
+      adapter.postMessage = async (threadId, message) => {
         posted.push(message);
-        return { id: 'm1', threadId, raw: {} };
-      },
-    }),
+        return post(threadId, message);
+      };
+      return adapter;
+    },
   };
 });
 
@@ -38,7 +46,7 @@ const originalCwd = process.cwd();
 
 beforeAll(() => {
   const dir = mkdtempSync(join(tmpdir(), 'slack-card-text-'));
-  writeFileSync(join(dir, '.env'), 'SLACK_BOT_TOKEN_CARDS=xoxb-placeholder\n');
+  writeFileSync(join(dir, '.env'), 'SLACK_BOT_TOKEN_CARDS=xoxb-placeholder\nSLACK_SIGNING_SECRET_CARDS=test-secret\n');
   process.chdir(dir);
 });
 
@@ -63,10 +71,9 @@ describe('escapeSlackMrkdwn', () => {
 });
 
 describe('escapeSlackTitle', () => {
-  it('swaps < for a full-width look-alike, keeping the length and a bare @here as typed', () => {
+  it('escapes the notification title without look-alike characters', () => {
     const title = 'Create agent: "<!channel>" @here a@b & x';
-    expect(escapeSlackTitle(title)).toBe('Create agent: "\uff1c!channel>" @here a@b & x');
-    expect(escapeSlackTitle(title)).toHaveLength(title.length);
+    expect(escapeSlackTitle(title)).toBe('Create agent: "&lt;!channel&gt;" @here a@b &amp; x');
   });
 });
 
@@ -81,6 +88,7 @@ describe('Slack approval card text', () => {
 
   beforeEach(() => {
     posted.length = 0;
+    notifications.length = 0;
   });
 
   it('renders link and mention syntax in the question as plain text', async () => {
@@ -117,15 +125,25 @@ describe('Slack approval card text', () => {
 
     const card = (posted.at(-1) as { card: Parameters<typeof cardToBlockKit>[0] }).card;
     // Slack's top-level `text`, the mrkdwn fallback for notifications.
-    const notification = cardToFallbackText(card);
+    const postMessage = vi.fn();
+    const update = vi.fn();
+    const payload = { text: cardToFallbackText(card), blocks: cardToBlockKit(card) };
+    // Test both Web API methods after the real Block Kit/fallback conversion.
+    const client = { webClient: { chat: { postMessage, update } } };
+    escapeCardTitles(client as never);
+    client.webClient.chat.postMessage(payload);
+    client.webClient.chat.update(payload);
+    expect(postMessage.mock.calls[0]).toEqual(update.mock.calls[0]);
+    const notification = notifications.at(-1)!.text!;
+    expect(postMessage.mock.calls[0][0].text).toBe(notification);
     expect(notification).not.toContain('<!channel>');
     expect(notification).not.toContain('<https://');
     // A bare @here stays as typed; without `<!here>` (and no link_names) it is no mention.
     expect(notification).toContain('@here');
     expect(notification).not.toContain('<!');
-    // The plain-text header shows the title with the look-alike, at the same length.
+    // The plain-text header preserves the exact title.
     const header = cardToBlockKit(card).find((b) => b.type === 'header') as unknown as { text: { text: string } };
-    expect(header.text.text).toBe(escapeSlackTitle(title));
+    expect(header.text.text).toBe(title);
   });
 
   it('escapes every block when a long host card is split into several sections', async () => {

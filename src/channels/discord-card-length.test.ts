@@ -274,9 +274,8 @@ describe('a Discord card near the limit when it is clicked', () => {
       expect(embed.title).toBe('Approve');
       expect(embed.description).toContain(`${label} by ${name}`);
       expect(embed.description.length).toBeLessThanOrEqual(4096);
-      // The request text is not just dropped up front: either it is still on the
-      // card, or Discord refused the whole card before the short one was sent.
-      expect(embed.description.includes('qqq') || patches.some((patch) => patch.refused)).toBe(true);
+      // The adapter refuses oversized edits before making an HTTP request.
+      expect(patches.filter((patch) => 'embeds' in patch.body)).toHaveLength(1);
       // The buttons went last, with no card edit still in flight.
       expect(patches.at(-1)!.body).toEqual({ components: [] });
       expect(removedDuringEdit).toBe(false);
@@ -288,6 +287,15 @@ describe('a Discord card near the limit when it is clicked', () => {
 });
 
 describe('escapeDiscordCardText', () => {
+  it('keeps copyable shell code and lone pipes byte-for-byte', () => {
+    for (const fence of ['`', '```', '````']) {
+      const code = fence + '\ncat <input | sed "s/](//"\n' + fence;
+      expect(escapeDiscordCardText(code)).toBe(code);
+    }
+    expect(escapeDiscordCardText('cat input | sort')).toBe('cat input | sort');
+    expect(escapeDiscordCardText('\\`<@1>\\`')).toContain('<\u2060@1>');
+  });
+
   it('breaks masked links, mentions and spoilers, and leaves host wording and escaped values alone', () => {
     expect(escapeDiscordCardText('[Admin](https://x.co) <@1> ||hidden||')).toBe(
       '[Admin]\u2060(https://x.co) <\u2060@1> |\u2060|\u2060hidden|\u2060|\u2060',

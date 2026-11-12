@@ -1280,7 +1280,7 @@ describe('createChatSdkBridge — a clicked card resolves only when the host acc
   it('redraws a card with its title and decision only when the channel refuses the whole card', async () => {
     const { bridge, click, onAction, editMessage } = await startClicks('q-too-long', review);
     onAction.mockResolvedValue('accepted');
-    editMessage.mockRejectedValueOnce(new Error('embed description is over 4096'));
+    editMessage.mockRejectedValueOnce(new CardTooLongError('embed description is over 4096'));
     try {
       await click('approver', 'Ann');
       await vi.waitFor(() => expect(editMessage).toHaveBeenCalledTimes(2));
@@ -1293,6 +1293,24 @@ describe('createChatSdkBridge — a clicked card resolves only when the host acc
       await bridge.teardown();
     }
   });
+
+  it.each(['HTTP 500', 'response lost after edit'])(
+    'preserves request text on a transient edit failure: %s',
+    async (reason) => {
+      const { bridge, click, onAction, editMessage } = await startClicks('q-retry-full', review);
+      onAction.mockResolvedValue('accepted');
+      editMessage.mockRejectedValueOnce(new Error(reason));
+      try {
+        await click('approver', 'Ann');
+        await vi.waitFor(() => expect(editMessage).toHaveBeenCalledTimes(2));
+        expect(editMessage.mock.calls[1]).toEqual(editMessage.mock.calls[0]);
+        expect(JSON.stringify(editMessage.mock.calls[1])).toContain('Allow?');
+        expect(JSON.stringify(editMessage.mock.calls[1])).toContain('✅ Approved by Ann');
+      } finally {
+        await bridge.teardown();
+      }
+    },
+  );
 
   it('tries no shorter card when the refused card had no question to drop', async () => {
     const { bridge, click, onAction, editMessage } = await startClicks('q-no-question', {
@@ -1321,7 +1339,7 @@ describe('createChatSdkBridge — a clicked card resolves only when the host acc
         },
       });
     try {
-      editMessage.mockRejectedValueOnce(new Error('embed description is over 4096'));
+      editMessage.mockRejectedValueOnce(new CardTooLongError('embed description is over 4096'));
       await redraw();
       expect(editMessage).toHaveBeenCalledTimes(2);
       const short = JSON.stringify((editMessage.mock.calls[1] as unknown[])[2]);
@@ -1645,7 +1663,7 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
     const { bridge, click, editMessage } = await startDiscord('q-discord-short-redraw', review);
     let endShort!: () => void;
     editMessage
-      .mockRejectedValueOnce(new Error('embed description is over 4096'))
+      .mockRejectedValueOnce(new CardTooLongError('embed description is over 4096'))
       .mockImplementationOnce(
         () => new Promise((resolve) => (endShort = () => resolve({ id: 'card-1', threadId: 't', raw: {} }))),
       );
