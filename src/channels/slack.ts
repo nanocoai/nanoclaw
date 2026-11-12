@@ -15,10 +15,9 @@
  * config, and the wiring-defaults declaration are shared across instances.
  */
 import { createSlackAdapter, type SlackAdapter } from '@chat-adapter/slack';
-import { isCardElement, type AdapterPostableMessage } from 'chat';
 
 import { readEnvFile } from '../env.js';
-import type { ChannelAdapter, ChannelContextDefaults, ChannelDefaults } from './adapter.js';
+import type { ChannelAdapter, ChannelDefaults } from './adapter.js';
 import { createChatSdkBridge } from './chat-sdk-bridge.js';
 import { registerChannelAdapter } from './channel-registry.js';
 import { setSlackAuthorIsBotResolver } from './slack-a2a-guard.js';
@@ -153,36 +152,30 @@ export function escapeSlackMrkdwn(text: string): string {
     .replace(/@(here|channel|everyone)\b/gi, '@\u2060$1');
 }
 
-/**
- * Slack shows a card's title as a plain-text header, but also puts it in the
- * message's mrkdwn notification text, where `<...>` forms links and mentions.
- * A full-width look-alike for `<` keeps the title inert there without changing
- * its length. A bare @here stays as typed: no link_names is sent, so it forms
- * no mention.
- */
+/** Escape only the notification title; the Block Kit plain-text header stays exact. */
 export function escapeSlackTitle(title: string): string {
-  return title.replace(/</g, '\uff1c');
+  return title.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-function withSafeTitle(message: AdapterPostableMessage): AdapterPostableMessage {
-  const card = isCardElement(message)
-    ? message
-    : typeof message === 'object' && 'card' in message
-      ? message.card
-      : null;
-  if (!card?.title) return message;
-  const safe = { ...card, title: escapeSlackTitle(card.title) };
-  return isCardElement(message) ? safe : { ...(message as object), card: safe };
-}
-
-/** Pass every card title through escapeSlackTitle on its way to Slack. */
-export function escapeCardTitles(adapter: Pick<SlackAdapter, 'postMessage' | 'editMessage'>): void {
-  const postMessage = adapter.postMessage?.bind(adapter);
-  if (postMessage) adapter.postMessage = (threadId, message) => postMessage(threadId, withSafeTitle(message));
-  const editMessage = adapter.editMessage?.bind(adapter);
-  if (editMessage) {
-    adapter.editMessage = (threadId, messageId, message) => editMessage(threadId, messageId, withSafeTitle(message));
-  }
+export function escapeCardTitles(adapter: Pick<SlackAdapter, 'webClient'>): void {
+  // The SDK posts cards through its transport client; webClient is a separate
+  // token-scoped client in newer releases. Older releases use webClient itself.
+  const transport = adapter as unknown as { _client?: SlackAdapter['webClient'] };
+  const chat = (transport._client ?? adapter.webClient)?.chat;
+  if (!chat) return;
+  const safeNotification = <T extends object>(args: T): T => {
+    const payload = args as { text?: unknown; blocks?: unknown };
+    if (typeof payload.text !== 'string' || !Array.isArray(payload.blocks)) return args;
+    const header = payload.blocks.find((block) => block.type === 'header' && block.text?.type === 'plain_text');
+    const title = header?.text?.text;
+    return typeof title === 'string' && title
+      ? { ...args, text: payload.text.replace(title, escapeSlackTitle(title)) }
+      : args;
+  };
+  const post = chat.postMessage.bind(chat);
+  chat.postMessage = (args) => post(safeNotification(args));
+  const update = chat.update.bind(chat);
+  chat.update = (args) => update(safeNotification(args));
 }
 
 /** Construction knobs for one Slack bot identity. */

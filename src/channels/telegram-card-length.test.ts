@@ -4,6 +4,7 @@
  * Telegram cuts past 4,096.
  */
 import { Actions, Button, Card, CardText } from 'chat';
+import { createTelegramAdapter } from '@chat-adapter/telegram';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../env.js', () => ({
@@ -15,7 +16,7 @@ import { gatewayApprovalPresentation } from '../gateway-approval-presentation.js
 import type { GatewayApprovalRequest } from '../gateway-providers/gateway-provider-registry.js';
 import { CardTooLongError } from './ask-question.js';
 import { registerQuestionRenderResolver } from './question-render-registry.js';
-import { createTelegramBridge } from './telegram.js';
+import { createTelegramBridge, refuseCutCards } from './telegram.js';
 
 const calls: Array<{ method: string; body: { text?: string; reply_markup?: { inline_keyboard: unknown[][] } } }> = [];
 
@@ -149,18 +150,97 @@ describe('Telegram card limit through the bridge', () => {
     expect(sends()).toHaveLength(1);
   });
 
-  // A custom presentation must show the whole request itself, so its card is not measured.
-  it('sends a custom-rendered card as before, answer buttons and all', async () => {
+  // Custom presentations must also show the whole request before exposing buttons.
+  it.each([false, true])('refuses a custom-rendered card whose request would be cut (nested=%s)', async (nested) => {
     const buttons = Actions([Button({ id: 'ncq:custom-1:0', label: 'Approve', value: '0' })]);
-    const card = Card({ title: 'Review', children: [CardText('a@b.co '.repeat(200)), buttons] });
+    const children = [CardText('a@b.co '.repeat(200)), buttons];
+    const card = Card({ title: 'Review', children: nested ? [{ type: 'section', children }] : children });
     registerQuestionRenderResolver((id) =>
       id === 'custom-1' ? { title: 'Review', options: [], renderMessage: () => ({ card }) } : undefined,
     );
     const content = { type: 'ask_question', questionId: 'custom-1', title: 'Review', options: [] };
-    await bridge.deliver('telegram:42', null, { kind: 'chat-sdk', content: { ...content, requirePresentation: true } });
-    const [message, ...rest] = sends();
-    expect(rest).toHaveLength(0);
-    expect(message.reply_markup?.inline_keyboard.flat()).toHaveLength(1);
+    await expect(
+      bridge.deliver('telegram:42', null, { kind: 'chat-sdk', content: { ...content, requirePresentation: true } }),
+    ).rejects.toBeInstanceOf(CardTooLongError);
+    expect(sends()).toHaveLength(0);
+  });
+
+  it.each([
+    ['Approve', 'a@b.co '.repeat(160) + 'x'.repeat(86)],
+    ['*Approve', 'q'.repeat(4100) + '*'],
+    ['Approve', '.'.repeat(2200)],
+  ])('keeps a host-resolved decision when Telegram would cut the request (%s)', async (title, question) => {
+    await bridge.deliver('telegram:42', null, {
+      kind: 'chat-sdk',
+      content: {
+        operation: 'edit',
+        messageId: '42:123',
+        terminalCard: { title, question, resolution: 'Approved by Ann' },
+      },
+    });
+    const edits = calls.filter((call) => call.method === 'editMessageText');
+    expect(edits).toHaveLength(1);
+    expect(edits[0].body.text).toContain('Approved by Ann');
+    expect(edits[0].body.text!.length).toBeLessThanOrEqual(4096);
+    expect(edits[0].body.reply_markup?.inline_keyboard.flat()).toEqual([]);
+  });
+
+  it('keeps the full request on a resolved card that fits', async () => {
+    await bridge.deliver('telegram:42', null, {
+      kind: 'chat-sdk',
+      content: {
+        operation: 'edit',
+        messageId: '42:123',
+        terminalCard: { title: 'Review', question: 'Keep this request', resolution: 'Rejected by Ann' },
+      },
+    });
+    const edits = calls.filter((call) => call.method === 'editMessageText');
+    expect(edits).toHaveLength(1);
+    expect(edits[0].body.text).toContain('Keep this request');
+    expect(edits[0].body.text).toContain('Rejected by Ann');
+  });
+
+  it('refuses a decision that cannot fit even without the request rather than silently cutting it', async () => {
+    await expect(
+      bridge.deliver('telegram:42', null, {
+        kind: 'chat-sdk',
+        content: {
+          operation: 'edit',
+          messageId: '42:123',
+          terminalCard: { title: 'Review', question: 'Request', resolution: 'Approved by ' + 'a'.repeat(4100) },
+        },
+      }),
+    ).rejects.toBeInstanceOf(CardTooLongError);
+    expect(calls.filter((call) => call.method === 'editMessageText')).toHaveLength(0);
+  });
+
+  it.each([
+    Card({ title: 'Custom', subtitle: 'x'.repeat(4200), children: [CardText('Done', { style: 'muted' })] }),
+    Card({
+      title: 'Custom',
+      subtitle: 'Details',
+      children: [CardText('x'.repeat(4200)), CardText('Done', { style: 'muted' })],
+    }),
+    Card({
+      title: 'Custom',
+      imageUrl: 'https://example.com/image.png',
+      children: [CardText('x'.repeat(4200)), CardText('Done', { style: 'muted' })],
+    }),
+    Card({
+      title: 'Custom',
+      children: [CardText('x'.repeat(4200), { style: 'bold' }), CardText('Done', { style: 'muted' })],
+    }),
+  ])('refuses oversized custom resolved-card layouts before truncation', async (card) => {
+    const adapter = createTelegramAdapter({ botToken: '100:test-token' });
+    const edit = vi.spyOn(adapter, 'editMessage').mockResolvedValue({
+      id: '123',
+      threadId: 'telegram:42',
+      raw: { message_id: 123, chat: { id: 42, type: 'private' }, date: 0 },
+    });
+    refuseCutCards(adapter);
+    const message = { card };
+    await expect(adapter.editMessage('telegram:42', '123', message)).rejects.toBeInstanceOf(CardTooLongError);
+    expect(edit).not.toHaveBeenCalled();
   });
 
   it('changes nothing on a core without CardTooLongError', async () => {

@@ -2,7 +2,10 @@
  * Discord channel adapter (v2) — uses Chat SDK bridge.
  * Self-registers on import.
  */
-import { createDiscordAdapter } from '@chat-adapter/discord';
+import { cardToDiscordPayload, createDiscordAdapter } from '@chat-adapter/discord';
+import { parseMarkdown, walkAst } from 'chat';
+
+import * as askQuestion from './ask-question.js';
 
 import { readEnvFile } from '../env.js';
 import type { ChannelDefaults } from './adapter.js';
@@ -24,11 +27,33 @@ const DISCORD_DEFAULTS: ChannelDefaults = {
 /**
  * Discord renders card text as Markdown: `[text](url)` shows any text for a
  * link, `<@id>` shows another user's name and `||text||` hides text. A word
- * joiner breaks each (after every `|`, so longer pipe runs can't pair up), and
+ * joiner breaks each outside code (including every pipe in a spoiler run), and
  * a clicker's name or a request value can't pose as other text.
  */
 export function escapeDiscordCardText(text: string): string {
-  return text.replace(/\]\(/g, ']\u2060(').replace(/</g, '<\u2060').replace(/\|/g, '|\u2060');
+  // Code is already literal on Discord. Keep commands inside matched code
+  // spans/fences byte-for-byte, and escape only the surrounding prose.
+  const escape = (prose: string) =>
+    prose
+      .replace(/\]\(/g, ']\u2060(')
+      .replace(/</g, '<\u2060')
+      .replace(/\|{2,}/g, (pipes) => pipes.split('').join('\u2060') + '\u2060');
+  let result = '';
+  let offset = 0;
+  const code: Array<{ start: number; end: number }> = [];
+  walkAst(parseMarkdown(text), (node) => {
+    if (node.type === 'code' || node.type === 'inlineCode') {
+      const start = node.position?.start.offset;
+      const end = node.position?.end.offset;
+      if (start !== undefined && end !== undefined) code.push({ start, end });
+    }
+    return node;
+  });
+  for (const { start, end } of code) {
+    result += escape(text.slice(offset, start)) + text.slice(start, end);
+    offset = end;
+  }
+  return result + escape(text.slice(offset));
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -91,6 +116,18 @@ registerChannelAdapter('discord', {
       publicKey: env.DISCORD_PUBLIC_KEY,
       applicationId: env.DISCORD_APPLICATION_ID,
     });
+    const edit = discordAdapter.editMessage.bind(discordAdapter);
+    discordAdapter.editMessage = async (...args) => {
+      const message = args[2];
+      const { CardTooLongError } = askQuestion as { CardTooLongError?: new (reason: string) => Error };
+      if (CardTooLongError && typeof message === 'object' && 'card' in message) {
+        const payload = cardToDiscordPayload(message.card);
+        if (payload.embeds.some((embed) => (embed.description?.length ?? 0) > 4096)) {
+          throw new CardTooLongError('the resolved card exceeds the Discord embed description limit');
+        }
+      }
+      return edit(...args);
+    };
     unwrapForwards(discordAdapter);
     return createChatSdkBridge({
       adapter: discordAdapter,

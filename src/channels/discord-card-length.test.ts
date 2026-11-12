@@ -117,6 +117,16 @@ describe('Discord card limit through the bridge', () => {
 });
 
 describe('escapeDiscordCardText', () => {
+  it('keeps copyable shell code and lone pipes byte-for-byte', () => {
+    for (const fence of ['`', '```', '````']) {
+      const code = fence + '\ncat <input | sed "s/](//"\n' + fence;
+      expect(escapeDiscordCardText(code)).toBe(code);
+    }
+    expect(escapeDiscordCardText('cat input | sort')).toBe('cat input | sort');
+    expect(escapeDiscordCardText('\\`<@1>\\`')).toContain('<\u2060@1>');
+  });
+
+
   it('breaks masked links, mentions and spoilers, and leaves host wording and escaped values alone', () => {
     expect(escapeDiscordCardText('[Admin](https://x.co) <@1> ||hidden||')).toBe(
       '[Admin]\u2060(https://x.co) <\u2060@1> |\u2060|\u2060hidden|\u2060|\u2060',
@@ -126,5 +136,27 @@ describe('escapeDiscordCardText', () => {
     }
     const host = '*Action:* Post a comment\n*Where:* \\[a\\]\\(b\\)';
     expect(escapeDiscordCardText(host)).toBe(host);
+  });
+});
+
+describe('parent Discord resolved-card size budget', () => {
+  it.each([['request', true], ['q'.repeat(3987), false]] as const)('keeps request text only when the full edit fits', async (question, keepsRequest) => {
+    const bridge = (await registrations.get('discord')!.factory())!;
+    const resolution = 'Approved by ' + 'n'.repeat(100);
+    await bridge.deliver('discord:g1:c1', null, { kind: 'chat-sdk', content: {
+      operation: 'edit', messageId: 'card', terminalCard: { title: 'Review', question, resolution },
+    } });
+    expect(patches).toHaveLength(1);
+    const embed = (patches[0].body.embeds as Array<{ description: string }>)[0];
+    expect(embed.description.length).toBeLessThanOrEqual(4096);
+    expect(embed.description).toContain(resolution);
+    expect(embed.description.includes(question)).toBe(keepsRequest);
+  });
+  it('refuses a decision that cannot fit even without the request', async () => {
+    const bridge = (await registrations.get('discord')!.factory())!;
+    await expect(bridge.deliver('discord:g1:c1', null, { kind: 'chat-sdk', content: {
+      operation: 'edit', messageId: 'card', terminalCard: { title: 'Review', question: 'Allow?', resolution: 'n'.repeat(4200) },
+    } })).rejects.toBeInstanceOf(CardTooLongError);
+    expect(patches).toHaveLength(0);
   });
 });
