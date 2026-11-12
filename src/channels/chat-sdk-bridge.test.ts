@@ -1614,6 +1614,65 @@ describe('createChatSdkBridge — a clicked card resolves only when the host acc
     }
   });
 
+  // A channel refuses a redraw past its size limit: a card near that limit grew by its decision line.
+  it('redraws a card with its title and decision only when the channel refuses the whole card', async () => {
+    const { bridge, click, onAction, editMessage } = await startClicks('q-too-long', review);
+    onAction.mockResolvedValue('accepted');
+    editMessage.mockRejectedValueOnce(new Error('embed description is over 4096'));
+    try {
+      await click('approver', 'Ann');
+      await vi.waitFor(() => expect(editMessage).toHaveBeenCalledTimes(2));
+      const [whole, short] = editMessage.mock.calls.map((call) => JSON.stringify((call as unknown[])[2]));
+      expect(whole).toContain('Allow?');
+      expect(short).not.toContain('Allow?');
+      expect(short).toContain('Review');
+      expect(short).toContain('✅ Approved by Ann');
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('tries no shorter card when the refused card had no question to drop', async () => {
+    const { bridge, click, onAction, editMessage } = await startClicks('q-no-question', {
+      title: 'Review',
+      options: review.options,
+    });
+    onAction.mockResolvedValue('accepted');
+    editMessage.mockRejectedValue(new Error('platform down'));
+    try {
+      await click('approver', 'Ann');
+      expect(editMessage).toHaveBeenCalledTimes(1);
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('redraws a card the host resolves with its decision only when the channel refuses the whole card', async () => {
+    const { bridge, editMessage } = await startClicks('q-host-redraw', review);
+    const redraw = () =>
+      bridge.deliver('fixture:room', null, {
+        kind: 'chat-sdk',
+        content: {
+          operation: 'edit',
+          messageId: 'card-1',
+          terminalCard: { title: 'Review', question: 'Allow?', resolution: '⏱️ Timed out' },
+        },
+      });
+    try {
+      editMessage.mockRejectedValueOnce(new Error('embed description is over 4096'));
+      await redraw();
+      expect(editMessage).toHaveBeenCalledTimes(2);
+      const short = JSON.stringify((editMessage.mock.calls[1] as unknown[])[2]);
+      expect(short).not.toContain('Allow?');
+      expect(short).toContain('⏱️ Timed out');
+      // Refused both times: the host hears it, as before.
+      editMessage.mockRejectedValue(new Error('platform down'));
+      await expect(redraw()).rejects.toThrow('platform down');
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
   it('posts nothing for a refused click where the channel has no private messages', async () => {
     const { bridge, click, onAction, editMessage, postEphemeral } = await startClicks('q-no-private', review);
     onAction.mockResolvedValue('refused');
@@ -1912,6 +1971,32 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
       await click({ id: 'clicker-1', username: 'Ann' });
       await vi.waitFor(() =>
         expect(discordCalls().filter(([method]) => method === 'PATCH')).toEqual([
+          ['PATCH', ORIGINAL, { components: [] }],
+        ]),
+      );
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('removes the buttons only after the shorter redraw of a refused card has ended', async () => {
+    const { bridge, click, editMessage } = await startDiscord('q-discord-short-redraw', review);
+    let endShort!: () => void;
+    editMessage
+      .mockRejectedValueOnce(new Error('embed description is over 4096'))
+      .mockImplementationOnce(
+        () => new Promise((resolve) => (endShort = () => resolve({ id: 'card-1', threadId: 't', raw: {} }))),
+      );
+    try {
+      await click({ id: 'clicker-1', username: 'Ann' });
+      await vi.waitFor(() => expect(editMessage).toHaveBeenCalledTimes(2));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      // The shorter redraw is still in flight: the buttons stay.
+      expect(discordCalls()).toEqual([['POST', CALLBACK, ACK]]);
+      endShort();
+      await vi.waitFor(() =>
+        expect(discordCalls()).toEqual([
+          ['POST', CALLBACK, ACK],
           ['PATCH', ORIGINAL, { components: [] }],
         ]),
       );
@@ -2266,7 +2351,8 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
           ['PATCH', ORIGINAL, { components: [] }],
         ]),
       );
-      expect(editMessage).toHaveBeenCalledTimes(1);
+      // The host tried the whole card, then the card with its decision only.
+      expect(editMessage).toHaveBeenCalledTimes(2);
     } finally {
       await bridge.teardown();
     }

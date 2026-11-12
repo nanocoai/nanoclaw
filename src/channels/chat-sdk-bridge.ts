@@ -625,6 +625,20 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       questionBlocks: spec.question ? splitCardText(spec.question, cardText, CARD_TEXT_BLOCK_LENGTH) : undefined,
       resolution: cardText(spec.resolution),
     });
+  /**
+   * Redraws a resolved card. A channel refuses a redraw past its size limit,
+   * and a card near that limit grew by its decision line. The title and the
+   * decision still fit, so a decided card is never left showing no decision.
+   */
+  const redrawResolved = async (threadId: string, messageId: string, spec: TerminalApprovalCard) => {
+    try {
+      return await adapter.editMessage(threadId, messageId, terminalMessage(spec));
+    } catch (err) {
+      if (!spec.question) throw err;
+      log.warn('Resolved card refused, redrawing it with its decision only', { err });
+      return adapter.editMessage(threadId, messageId, terminalMessage({ ...spec, question: '' }));
+    }
+  };
   /** Registry/routing key for this bridge — also the app-context cache
    *  namespace. Default instances key by the platform name. */
   const instanceKey = config.instance ?? adapter.name;
@@ -682,16 +696,11 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       const actorName = outcome === 'closed' ? '' : click.actorName;
       // Every clicked card resolves the same way, on every channel: escaped.
       const messageId = click.messageId;
-      const edit = (async () =>
-        adapter.editMessage(
-          click.threadId,
-          messageId,
-          terminalMessage({
-            title: render.title,
-            question: render.question ?? click.fallbackQuestion ?? '',
-            resolution: actorName ? `${selectedLabel} by ${actorName}` : selectedLabel,
-          }),
-        ))();
+      const edit = redrawResolved(click.threadId, messageId, {
+        title: render.title,
+        question: render.question ?? click.fallbackQuestion ?? '',
+        resolution: actorName ? `${selectedLabel} by ${actorName}` : selectedLabel,
+      });
       if (transport.removeButtons) removeButtonsAfter(edit, transport.removeButtons);
       await edit;
       // eslint-disable-next-line no-catch-all/no-catch-all -- logged; a failed card update never undoes the decision
@@ -1032,11 +1041,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           typeof terminalCard.question === 'string' &&
           typeof terminalCard.resolution === 'string'
         ) {
-          await adapter.editMessage(
-            tid,
-            content.messageId as string,
-            terminalMessage(terminalCard as TerminalApprovalCard),
-          );
+          await redrawResolved(tid, content.messageId as string, terminalCard as TerminalApprovalCard);
         } else {
           await adapter.editMessage(tid, content.messageId as string, {
             markdown: transformText((content.text as string) || (content.markdown as string) || ''),
