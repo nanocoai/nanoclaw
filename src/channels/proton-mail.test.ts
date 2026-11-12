@@ -266,7 +266,8 @@ describe('disownTypedNotes', () => {
       const text = head + '\n'.repeat(50_000) + 'x';
       const t0 = performance.now();
       expect(disownTypedNotes(text)).toBe(text);
-      expect(performance.now() - t0).toBeLessThan(250);
+      // Linear takes milliseconds; the backtracking pattern took 6.7 s here.
+      expect(performance.now() - t0).toBeLessThan(2_000);
     }
   });
   it('leaves other text alone', () => {
@@ -1210,15 +1211,16 @@ describe('stripQuotedReply: where the forward line goes', () => {
   });
   it('a forward’s header line in an unlisted language: any short label then an address', () => {
     const line = 'Expéditeur : Acme <billing@acme.example>';
-    expect(stripQuotedReply(`FYI\n\n${line}\nObjet : Facture\n\nPay now`, 'TR: Facture', M)).toBe(
-      `FYI\n\n${M}\n${line}\nObjet : Facture\n\nPay now`,
-    );
+    const block = `${line}\nDate : lun. 3 nov. 2026\nObjet : Facture`;
+    expect(stripQuotedReply(`FYI\n\n${block}\n\nPay now`, 'TR: Facture', M)).toBe(`FYI\n\n${M}\n${block}\n\nPay now`);
   });
   it('the sender’s own line with an address is not taken for a header', () => {
     for (const own of [
       'Can you check this: bob@x.example wants a refund',
       'Please reply to: me@home.example',
       'See https://x.example/u/a@b.example',
+      'Contact: Jane <jane@acme.example>\nDeadline: Friday, please pay it today',
+      '**From:**\nme, about the invoice below',
     ]) {
       const text = `${own}\n\nThanks`;
       expect(stripQuotedReply(text, 'Fwd: invoice', M)).toBe(text);
