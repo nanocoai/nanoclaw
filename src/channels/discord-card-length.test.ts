@@ -54,14 +54,23 @@ const patches: Array<{ url: string; body: Record<string, unknown> }> = [];
 const realFetch = globalThis.fetch;
 /** Set by a test: Discord refuses every edit of a channel message. */
 let cardEditsFail = false;
+/** Card edits Discord has not answered yet, and whether a button removal arrived during one. */
+let editsInFlight = 0;
+let removedDuringEdit = false;
 
 vi.stubGlobal(
   'fetch',
   vi.fn(async (url: string, init: { method?: string; body?: string }) => {
     if (init.method === 'PATCH') patches.push({ url, body: JSON.parse(init.body!) });
     else posts.push(JSON.parse(init.body!));
-    if (cardEditsFail && init.method === 'PATCH' && /\/channels\/[^/]+\/messages\//.test(url))
-      return new Response('{"message":"Internal Server Error"}', { status: 500 });
+    if (url.endsWith('/messages/@original') && editsInFlight > 0) removedDuringEdit = true;
+    if (init.method === 'PATCH' && /\/channels\/[^/]+\/messages\//.test(url)) {
+      // Slow enough that a removal sent alongside the edit would land inside it.
+      editsInFlight++;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      editsInFlight--;
+      if (cardEditsFail) return new Response('{"message":"Internal Server Error"}', { status: 500 });
+    }
     return new Response(JSON.stringify({ id: `m${posts.length}`, channel_id: 'c1' }), { status: 200 });
   }),
 );
@@ -74,6 +83,8 @@ beforeEach(() => {
   posts.length = 0;
   patches.length = 0;
   cardEditsFail = false;
+  editsInFlight = 0;
+  removedDuringEdit = false;
 });
 
 const adapter = createDiscordAdapter({
@@ -185,13 +196,14 @@ describe('Discord card edits and buttons', () => {
         }),
       });
       expect(response.status).toBe(200);
-      // The card edit first, then the removal: never both at once.
+      // The card edit first, and the removal only once Discord has answered it.
       await vi.waitFor(() =>
         expect(patches.map((patch) => patch.url.replace(/^.*\/api\/v10/, ''))).toEqual([
           '/channels/c1/messages/m9',
           '/webhooks/test-app-id/interaction-token/messages/@original',
         ]),
       );
+      expect(removedDuringEdit).toBe(false);
       expect(patches[0].body).not.toHaveProperty('components');
       expect(patches[1].body).toEqual({ components: [] });
     } finally {

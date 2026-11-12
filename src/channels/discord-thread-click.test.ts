@@ -74,6 +74,9 @@ const edits: Array<{ channel: string; id: string; body: Record<string, unknown> 
 const interactionEdits: Array<Record<string, unknown>> = [];
 /** Every write to a card after it was posted, in the order Discord got them. */
 const cardWrites: string[] = [];
+/** Card edits Discord has not answered yet, and whether a button removal arrived during one. */
+let editsInFlight = 0;
+let removedDuringEdit = false;
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 
@@ -107,12 +110,17 @@ vi.stubGlobal(
     if (message && method === 'PATCH') {
       edits.push({ channel: message[1], id: message[2], body });
       cardWrites.push('edit');
+      // Slow enough that a removal sent alongside the edit would land inside it.
+      editsInFlight++;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      editsInFlight--;
       if (cardEditsFail) return json({ message: 'Internal Server Error' }, 500);
       return json({ id: message[2], channel_id: message[1] });
     }
     if (method === 'PATCH' && path.endsWith('/messages/@original')) {
       interactionEdits.push(body);
       cardWrites.push('buttons removed');
+      if (editsInFlight > 0) removedDuringEdit = true;
     }
     // Interaction callbacks, private notes, typing: nothing to check here.
     return json({});
@@ -251,7 +259,8 @@ describe('a Discord thread, from the raw message to the raw click on its approva
 
   beforeEach(async () => {
     inbound.length = posts.length = edits.length = outcomes.length = submitted.length = 0;
-    interactionEdits.length = cardWrites.length = 0;
+    interactionEdits.length = cardWrites.length = editsInFlight = 0;
+    removedDuringEdit = false;
     channelLookupFails = cardEditsFail = false;
     channels = { C1: { type: 0 }, T1: { type: 11, parent_id: 'C1' } };
     await runMigrations(await initTestDb());
@@ -325,6 +334,7 @@ describe('a Discord thread, from the raw message to the raw click on its approva
     const { outcome } = await messageThenCardThenClick(rawMessage('T1', { channel_type: 11 }));
     expect(outcome).toBe('accepted');
     await vi.waitFor(() => expect(cardWrites).toEqual(['edit', 'buttons removed']));
+    expect(removedDuringEdit).toBe(false);
     expect(edits[0].body).not.toHaveProperty('components');
     expect(JSON.stringify(edits[0].body.embeds)).toContain('Approved');
     expect(interactionEdits).toEqual([{ components: [] }]);
@@ -336,6 +346,7 @@ describe('a Discord thread, from the raw message to the raw click on its approva
     expect(outcome).toBe('accepted');
     expect(await decision).toBe('approve');
     await vi.waitFor(() => expect(cardWrites).toEqual(['edit', 'buttons removed']));
+    expect(removedDuringEdit).toBe(false);
     expect(interactionEdits).toEqual([{ components: [] }]);
   });
 
