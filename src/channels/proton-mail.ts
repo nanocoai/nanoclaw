@@ -84,7 +84,8 @@ const HOUR_MS = 60 * 60_000;
 const DEFERRED_PER_SENDER_MAX = INBOUND_PER_SENDER_PER_HOUR;
 const DEFERRED_MAX = 200;
 /**
- * Of those, mail from addresses not yet approved. A new address over a
+ * Of those, mail from addresses not yet approved, held for either limit (a
+ * new sender's own hourly figure too, RetryRef.stranger). A new address over a
  * domain's share can wait days for a slot (STRANGERS_PER_DOMAIN_MAX), so
  * without this a flood of new addresses would fill the queue for a week and
  * approved senders' over-limit mail would be refused instead of held.
@@ -1796,6 +1797,12 @@ interface RetryRef {
   deferred?: 'sender' | 'strangers';
   /** The sender of a deferred mail, for DEFERRED_PER_SENDER_MAX. */
   from?: string;
+  /**
+   * A mail held for the sender limit whose sender was not yet approved: it
+   * counts against the new senders' share (DEFERRED_STRANGERS_MAX and the
+   * per-domain figure) as 'strangers' holds do.
+   */
+  stranger?: boolean;
 }
 
 interface AdapterState {
@@ -2251,23 +2258,35 @@ registerChannelAdapter('proton-mail', {
      * too much mail already waits, when it is left unread for good, and
      * flagged for a human to find. The caps are checked whenever a mail joins
      * a kind of hold, also when one held for the sender limit is held again
-     * as a new sender's (the share DEFERRED_STRANGERS_MAX bounds).
+     * as a new sender's (the share DEFERRED_STRANGERS_MAX bounds), and when
+     * a sender not yet approved has mail held for the sender limit: that
+     * mail is a new sender's too (`stranger`), so it counts in the same
+     * share, and approved senders' over-limit mail always has room.
      */
-    async function defer(uid: number, kind: 'sender' | 'strangers', from: string, at: number): Promise<Outcome> {
-      if (state.retry[uid]?.deferred !== kind) {
-        const fromDomain = kind === 'strangers' ? addressDomain(from) : '';
+    async function defer(
+      uid: number,
+      kind: 'sender' | 'strangers',
+      from: string,
+      at: number,
+      approved = true,
+    ): Promise<Outcome> {
+      const stranger = kind === 'strangers' || !approved;
+      const prior = state.retry[uid];
+      const priorStranger = prior?.deferred === 'strangers' || !!prior?.stranger;
+      if (prior?.deferred !== kind || (stranger && !priorStranger)) {
+        const fromDomain = addressDomain(from);
         // Not counting this mail itself, held until now under the other kind.
         const waiting = Object.entries(state.retry)
           .filter(([u, r]) => r.deferred && u !== String(uid))
           .map(([, r]) => r);
+        const strangers = waiting.filter((r) => r.deferred === 'strangers' || r.stranger);
         if (
           waiting.length >= DEFERRED_MAX ||
           waiting.filter((r) => r.from === from).length >= DEFERRED_PER_SENDER_MAX ||
-          (kind === 'strangers' &&
-            waiting.filter((r) => r.deferred === 'strangers').length >= DEFERRED_STRANGERS_MAX) ||
-          (kind === 'strangers' &&
-            waiting.filter((r) => r.deferred === 'strangers' && r.from && addressDomain(r.from) === fromDomain)
-              .length >= DEFERRED_STRANGERS_PER_DOMAIN_MAX)
+          (stranger && strangers.length >= DEFERRED_STRANGERS_MAX) ||
+          (stranger &&
+            strangers.filter((r) => r.from && addressDomain(r.from) === fromDomain).length >=
+              DEFERRED_STRANGERS_PER_DOMAIN_MAX)
         ) {
           log.warn('Proton Mail: over an hourly limit with too much mail already waiting — left unread and flagged', {
             uid,
@@ -2279,7 +2298,13 @@ registerChannelAdapter('proton-mail', {
           return 'leave-unread';
         }
       }
-      state.retry[uid] = { attempts: 0, nextAt: new Date(at).toISOString(), deferred: kind, from };
+      state.retry[uid] = {
+        attempts: 0,
+        nextAt: new Date(at).toISOString(),
+        deferred: kind,
+        from,
+        ...(kind === 'sender' && !approved && { stranger: true }),
+      };
       log.warn('Proton Mail: over an hourly limit — mail held until the hour has room', {
         uid,
         from,
@@ -2438,12 +2463,20 @@ registerChannelAdapter('proton-mail', {
       // never held: a held answer would let a gateway approval time out. A
       // mail that only looks like one on its headers is counted once it is
       // read and turns out not to be an answer (after matchCardReply).
+      // Over the limit, the sender's standing decides the hold: mail from an
+      // address not yet approved is a new sender's and shares their part of
+      // the queue; a denied address's is not held at all, since core drops it
+      // without a card (see senderStatus below).
       const retry = state.retry[uid];
       const limited = !retry || retry.deferred === 'sender';
       const mayAnswerCard = answersOpenCard(fromAddr, head.inReplyTo);
+      let status: Awaited<ReturnType<typeof senderStatus>> | undefined;
       if (limited && !mayAnswerCard) {
         const freeAt = senderRateFreeAt(fromAddr);
-        if (freeAt !== null) return defer(uid, 'sender', fromAddr, freeAt);
+        if (freeAt !== null) {
+          status = await senderStatus(fromAddr);
+          if (status !== 'denied') return defer(uid, 'sender', fromAddr, freeAt, status === 'approved');
+        }
       }
 
       // Through every check: now the whole mail.
@@ -2620,7 +2653,7 @@ registerChannelAdapter('proton-mail', {
       // not a stranger.
       // A denied address is not counted either: core drops its mail without
       // a card, and pruneSettled has already given its slot back.
-      const status = await senderStatus(fromAddr);
+      status ??= await senderStatus(fromAddr);
       const approved = status === 'approved';
       if (status === 'pending' && !Object.values(state.cards).some((c) => c.address === fromAddr)) {
         const admitted = await admitStranger(uid, fromAddr);

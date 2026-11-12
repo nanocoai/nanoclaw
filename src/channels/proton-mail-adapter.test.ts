@@ -2642,3 +2642,68 @@ describe('review 4 of #4218', () => {
     });
   });
 });
+describe('review 5 of #4218', () => {
+  const FAILED = '$NanoClawFailed';
+  const seedState = (state: Record<string, unknown>) => {
+    fs.mkdirSync(STORE, { recursive: true });
+    fs.writeFileSync(
+      STATE,
+      JSON.stringify({ uidValidity: 1, lastUid: 0, threads: {}, cards: {}, retry: {}, strangers: {}, ...state }),
+    );
+  };
+  const passFor = (domain: string) => PASS.replace('header.from=example.org', `header.from=${domain}`);
+  const held = (from: (i: number) => string, n: number, extra: Record<string, unknown>) =>
+    Object.fromEntries(
+      Array.from({ length: n }, (_, i) => [
+        String(9000 + i),
+        { attempts: 0, nextAt: new Date(Date.now() + 50 * 60_000).toISOString(), from: from(i), ...extra },
+      ]),
+    );
+  const burst = (from: string, domain: string) =>
+    Array.from({ length: 21 }, (_, i) => mail({ from, body: `mail ${i}`, auth: passFor(domain) }));
+
+  describe('a new sender’s mail held for the hourly limit counts in the new senders’ share', () => {
+    it('is held marked as a new sender’s', async () => {
+      h.wired = false;
+      h.settled = { [OWNER]: 'approved' };
+      const { calls } = await start();
+      const last = await arriveAll(burst('x@new.example', 'new.example'));
+      expect(calls.inbound).toHaveLength(20);
+      expect(readState().retry[last]).toMatchObject({ deferred: 'sender', from: 'x@new.example', stranger: true });
+    }, 60_000);
+
+    it('past the share it is flagged, while an approved sender’s over-limit mail is still held', async () => {
+      h.wired = false;
+      h.settled = { [OWNER]: 'approved' };
+      seedState({ retry: held((i) => `s${i}@d${i}.example`, 100, { deferred: 'sender', stranger: true }) });
+      const { calls } = await start();
+      const refused = await arriveAll(burst('x@new.example', 'new.example'));
+      expect(flagged()).toContainEqual([refused, [FAILED]]);
+      expect(readState().retry[refused]).toBeUndefined();
+      const twentyFirst = await arriveAll(Array.from({ length: 21 }, (_, i) => mail({ body: `reply ${i}` })));
+      expect(calls.inbound).toHaveLength(40);
+      expect(readState().retry[twentyFirst]).toMatchObject({ deferred: 'sender', from: OWNER });
+      expect(readState().retry[twentyFirst].stranger).toBeUndefined();
+      expect(flagged().filter(([u]) => u === twentyFirst)).toEqual([]);
+    }, 90_000);
+
+    it('a domain’s new senders hold at most 20 between them, whichever limit held them', async () => {
+      h.wired = false;
+      h.settled = { [OWNER]: 'approved' };
+      seedState({ retry: held((i) => `held${i}@bulk.example`, 20, { deferred: 'strangers' }) });
+      await start();
+      const refused = await arriveAll(burst('x@mail.bulk.example', 'mail.bulk.example'));
+      expect(flagged()).toContainEqual([refused, [FAILED]]);
+      expect(readState().retry[refused]).toBeUndefined();
+    }, 60_000);
+
+    it('a denied sender’s over-limit mail is not held: core drops it without a card', async () => {
+      h.wired = false;
+      h.settled = { [OWNER]: 'approved', 'x@denied.example': 'denied' };
+      const { calls } = await start();
+      const last = await arriveAll(burst('x@denied.example', 'denied.example'));
+      expect(readState().retry[last]).toBeUndefined();
+      expect(calls.inbound).toHaveLength(21);
+    }, 60_000);
+  });
+});
