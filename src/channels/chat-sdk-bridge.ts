@@ -619,6 +619,23 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       questionBlocks: spec.question ? splitCardText(spec.question, cardText, CARD_TEXT_BLOCK_LENGTH) : undefined,
       resolution: cardText(spec.resolution),
     });
+  /**
+   * Redraws a resolved card. A channel refuses a redraw past its size limit,
+   * and a card near that limit grew by its decision line. The title and the
+   * decision still fit, so a decided card is never left showing no decision.
+   */
+  const redrawResolved = async (threadId: string, messageId: string, spec: TerminalApprovalCard) => {
+    try {
+      return await adapter.editMessage(threadId, messageId, terminalMessage(spec));
+    } catch (err) {
+      if (!spec.question) throw err;
+      // Only a known size refusal justifies discarding request text. A lost
+      // reply or transient API failure retries the same idempotent edit.
+      const tooLong = err instanceof CardTooLongError;
+      log.warn('Retrying resolved card edit', { err, shortened: tooLong });
+      return adapter.editMessage(threadId, messageId, terminalMessage(tooLong ? { ...spec, question: '' } : spec));
+    }
+  };
   /** Registry/routing key for this bridge — also the app-context cache
    *  namespace. Default instances key by the platform name. */
   const instanceKey = config.instance ?? adapter.name;
@@ -859,13 +876,11 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         const resolution = actorName ? `${selectedLabel} by ${actorName}` : selectedLabel;
         try {
           const tid = event.threadId;
-          await adapter.editMessage(
-            tid,
-            event.messageId,
-            render?.question
-              ? terminalMessage({ title, question: render.question, resolution })
-              : { markdown: `${title}\n\n${resolution}` },
-          );
+          if (render?.question) {
+            await redrawResolved(tid, event.messageId, { title, question: render.question, resolution });
+          } else {
+            await adapter.editMessage(tid, event.messageId, { markdown: `${title}\n\n${resolution}` });
+          }
         } catch (err) {
           log.warn('Failed to update card after action', { err });
         }
@@ -981,11 +996,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           typeof terminalCard.question === 'string' &&
           typeof terminalCard.resolution === 'string'
         ) {
-          await adapter.editMessage(
-            tid,
-            content.messageId as string,
-            terminalMessage(terminalCard as TerminalApprovalCard),
-          );
+          await redrawResolved(tid, content.messageId as string, terminalCard as TerminalApprovalCard);
         } else {
           await adapter.editMessage(tid, content.messageId as string, {
             markdown: transformText((content.text as string) || (content.markdown as string) || ''),
