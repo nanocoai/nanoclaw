@@ -46,6 +46,8 @@ import {
   NEW_AGENT_VALUE,
   REJECT_VALUE,
   requestChannelApproval,
+  recordChannelApprovalCard,
+  isCurrentChannelApprovalCard,
 } from './channel-approval.js';
 import { addMember } from './db/agent-group-members.js';
 import {
@@ -76,8 +78,8 @@ const awaitingNameInput = new Map<string, PendingNameInput>();
 // first card keeps its buttons until the host accepts. So while an agent card
 // is sent no card click counts, once it is out the card clicked for it is
 // ignored, and an agent card whose options weren't stored is ignored for good
-// (if its id is unknown, no card click for that request counts: `blocked`).
-// Keyed by messaging group, in memory (the durable card check is later).
+// (if its id is unknown, that request is blocked; replacements require a known card).
+// Keyed by messaging group, in memory alongside the delivery receipts.
 const agentCards = new Map<string, { retired: Set<string>; sending: boolean; blocked?: string }>();
 
 async function extractAndUpsertUser(event: InboundEvent): Promise<string | null> {
@@ -546,6 +548,7 @@ async function sendAgentCard(
     on.unstored(cardId, false);
     return 'ignored';
   }
+  recordChannelApprovalCard(row.messaging_group_id, row.created_at, cardId);
   return 'accepted';
 }
 
@@ -589,10 +592,15 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
   }
   const approverId = clickerId;
   const swap = agentCards.get(row.messaging_group_id);
-  // A replaced request can recover; keep known retired message IDs inert.
-  if (swap?.blocked && swap.blocked !== row.created_at) swap.blocked = undefined;
-  if (swap && (swap.blocked || (payload.messageId && (swap.sending || swap.retired.has(payload.messageId)))))
+  // Never forget an unknown stale card just because the request was replaced.
+  // A newer request recovers only through its positively identified current card.
+  if (
+    swap?.blocked &&
+    (swap.blocked === row.created_at ||
+      !isCurrentChannelApprovalCard(row.messaging_group_id, row.created_at, payload.messageId))
+  )
     return 'ignored';
+  if (swap && payload.messageId && (swap.sending || swap.retired.has(payload.messageId))) return 'ignored';
 
   // ── Reject / Cancel ──
   if (payload.value === REJECT_VALUE) {
