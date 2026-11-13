@@ -145,12 +145,20 @@ describe('Discord card limit through the bridge', () => {
   });
 
   // The bridge escapes each block alone; Discord shows them in one embed.
+  const filler = ('w'.repeat(79) + '\n').repeat(24) + 'w'.repeat(38) + '\n';
   it('keeps a stray backtick in one block from pairing with code in the next', async () => {
-    const filler = ('w'.repeat(79) + '\n').repeat(24) + 'w'.repeat(38) + '\n';
     await ask('Approve', filler + 'x `y\n`foo [Admin](https://evil.test) <@1>`');
     const { description } = posts[0].embeds[0];
     expect(description).toContain('x \\`y\n');
     expect(description).toContain('\n`foo [Admin](https://evil.test) <@1>`');
+  });
+
+  // The cut falls after [Admin, and the next block reopens the fence raw.
+  it("keeps a link in an escaped block from ending in the next block's code", async () => {
+    await ask('Approve', filler + '```x`\n[Admin\n](https://evil.test) <@1>\n```');
+    const { description } = posts[0].embeds[0];
+    expect(description).toContain('\\`\\`\\`x\\`\n\\[Admin\n');
+    expect(description).toContain('\n```\n](https://evil.test) <@1>\n```');
   });
 
   it('refuses a long gateway card instead of cutting it', async () => {
@@ -297,8 +305,8 @@ describe('a Discord card near the limit when it is clicked', () => {
 
 describe('escapeDiscordCardText', () => {
   it('keeps copyable shell code and lone pipes byte-for-byte', () => {
-    for (const fence of ['`', '``', '```']) {
-      const code = fence + '\ncat <input | sed "s/](//"\n' + fence;
+    const command = 'cat <input | sed "s/](//"';
+    for (const code of ['`' + command + '`', '``' + command + '``', '```\n' + command + '\n```']) {
       expect(escapeDiscordCardText(code)).toBe(code);
     }
     expect(escapeDiscordCardText('cat input | sort')).toBe('cat input | sort');
@@ -307,7 +315,7 @@ describe('escapeDiscordCardText', () => {
 
   it('breaks masked links, mentions and spoilers, and leaves host wording and escaped values alone', () => {
     expect(escapeDiscordCardText('[Admin](https://x.co) <@1> ||hidden||')).toBe(
-      '[Admin]\u2060(https://x.co) <\u2060@1> |\u2060|\u2060hidden|\u2060|\u2060',
+      '\\[Admin]\u2060(https://x.co) <\u2060@1> |\u2060|\u2060hidden|\u2060|\u2060',
     );
     for (const pipes of ['||', '|||', '||||']) {
       expect(escapeDiscordCardText(`${pipes}hidden${pipes}`)).not.toContain('||');
@@ -423,16 +431,23 @@ describe('Discord prose that CommonMark treats as code', () => {
     // Discord needs a line in a block, so it skips a blank fence's close.
     '```\n```\n```\n[Admin](https://evil.test) <@1> ||hidden||\n```',
     '```sh\n\n```\n```\n[Admin](https://evil.test) <@1> ||hidden||\n```',
+    // Discord ends a quote or subtext at the line, so the span never closes.
+    '> `x\n[Admin](https://evil.test) <@1> ||hidden||`',
+    '-# `x\n[Admin](https://evil.test) <@1> ||hidden||`',
   ])('escapes text Discord shows as prose in %j', (text) => {
     const result = escapeDiscordCardText(text);
     expect(result).toContain(']\u2060(');
     expect(result).toContain('<\u2060@1>');
     expect(result).not.toContain('||');
   });
-  it('puts a backslash before a backtick in prose, but not before one already escaped', () => {
-    expect(escapeDiscordCardText('x `y')).toBe('x \\`y');
-    expect(escapeDiscordCardText('x \\`y')).toBe('x \\`y');
-    expect(escapeDiscordCardText('x \\\\`y')).toBe('x \\\\\\`y');
+  it.each(['`', '['])('puts a backslash before %s in prose, but not before one already escaped', (mark) => {
+    expect(escapeDiscordCardText(`x ${mark}y`)).toBe(`x \\${mark}y`);
+    expect(escapeDiscordCardText(`x \\${mark}y`)).toBe(`x \\${mark}y`);
+    expect(escapeDiscordCardText(`x \\\\${mark}y`)).toBe(`x \\\\\\${mark}y`);
+  });
+  // A link opened in prose would otherwise end at a ]( kept raw in code.
+  it('keeps a link from running from prose into code', () => {
+    expect(escapeDiscordCardText('[Admin `](https://evil.test)`')).toBe('\\[Admin `](https://evil.test)`');
   });
   it('keeps a ``` fence with single backticks inside byte-for-byte', () => {
     const code = '```sh\ncat <input; echo `date` ``x``\n```';
