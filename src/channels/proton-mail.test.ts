@@ -267,7 +267,8 @@ describe('disownTypedNotes', () => {
       const t0 = performance.now();
       expect(disownTypedNotes(text)).toBe(text);
       // Linear takes milliseconds; the backtracking pattern took 6.7 s here.
-      expect(performance.now() - t0).toBeLessThan(2_000);
+      // 750 ms leaves room for a loaded host and still catches a quadratic one.
+      expect(performance.now() - t0).toBeLessThan(750);
     }
   });
   it('leaves other text alone', () => {
@@ -1195,6 +1196,20 @@ describe('stripQuotedReply: where the forward line goes', () => {
       const text = `Please see.\n\n${line}\n\nPay`;
       expect(stripQuotedReply(text, 'WG: Rechnung', M)).toBe(`Please see.\n\n${M}\n${line}\n\nPay`);
     }
+  });
+  it('a From line whose name is set in emphasis, as Gmail’s plain text writes it', () => {
+    for (const line of [
+      'From: *John Smith* <john@x.example>',
+      'Von: _Hans_ <h@x.example>',
+      '> *From:* *Acme* <a@x.example>',
+    ]) {
+      const text = `Please see.\n\n${line}\n\nPay`;
+      expect(stripQuotedReply(text, 'Fwd: Rechnung', M)).toBe(`Please see.\n\n${M}\n${line}\n\nPay`);
+    }
+  });
+  it('an unlisted-language header block whose To line wraps', () => {
+    const block = 'Expéditeur : A <a@x.example>\nÀ : b@x.example, c@x.example,\n  d@x.example\nObjet : Facture';
+    expect(stripQuotedReply(`FYI\n\n${block}\n\nPay`, 'TR: Facture', M)).toBe(`FYI\n\n${M}\n${block}\n\nPay`);
   });
   it('a forward’s header block in Japanese, Chinese, Korean and other languages', () => {
     for (const line of [

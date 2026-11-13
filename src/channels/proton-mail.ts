@@ -94,8 +94,9 @@ const DEFERRED_PER_SENDER_MAX = INBOUND_PER_SENDER_PER_HOUR;
 const DEFERRED_STRANGER_PER_SENDER_MAX = 5;
 const DEFERRED_MAX = 200;
 /**
- * Of those, mail from addresses not yet approved, held for either limit (a
- * new sender's own hourly figure too, RetryRef.stranger). A new address over a
+ * Of those, mail from addresses not yet approved (someone a card was mailed
+ * to is not counted here), held for either limit (a new sender's own hourly
+ * figure too, RetryRef.stranger). A new address over a
  * domain's share can wait days for a slot (STRANGERS_PER_DOMAIN_MAX), so
  * without this a flood of new addresses would fill the queue for a week and
  * approved senders' over-limit mail would be refused instead of held.
@@ -1009,7 +1010,7 @@ const ORIGINAL_MESSAGE = /^-{2,}\s*Original Message\s*-{2,}$/i;
  * Turkish, Hungarian; the CJK clients write a full-width colon).
  */
 const FORWARD_FROM_LINE =
-  /^[>\s*_]*(From|Von|De|Da|Van|Från|Fra|Lähettäjä|Od|От|Kimden|Feladó|Από|מאת|差出人|送信者|发件人|寄件者|寄件人|보낸\s?사람)\s*[:：][*_]*\s*[^\s*_]/iu;
+  /^[>\s*_]*(From|Von|De|Da|Van|Från|Fra|Lähettäjä|Od|От|Kimden|Feladó|Από|מאת|差出人|送信者|发件人|寄件者|寄件人|보낸\s?사람)\s*[:：][*_]*\s*(?![*_\s]*$)\S/iu;
 /**
  * In a mail whose subject says it is a forward, a header line in a language
  * FORWARD_FROM_LINE does not list ("Expéditeur : Acme <a@x.example>"): a short
@@ -1027,9 +1028,13 @@ function forwardAddressLine(lines: string[], i: number): boolean {
   const label = FORWARD_LABEL.exec(line);
   if (!label) return false;
   const rest = line.slice(label[0].length).replace(/^[*_\s]+/, '');
-  // A header block runs at least three lines (From, Date or Sent, To, Subject).
-  const labelled = (j: number) => FORWARD_LABEL.test((lines[j] ?? '').trim());
-  return rest.length <= 200 && NAME_AND_ADDRESS.test(rest) && labelled(i + 1) && labelled(i + 2);
+  if (rest.length > 200 || !NAME_AND_ADDRESS.test(rest)) return false;
+  // A header block runs at least three lines (From, Date or Sent, To, Subject);
+  // a wrapped header's continuation (indented) belongs to the line above.
+  const next: string[] = [];
+  for (let j = i + 1; j < lines.length && next.length < 2; j++)
+    if (!/^\s+\S/.test(lines[j])) next.push(lines[j].trim());
+  return next.length === 2 && next.every((l) => FORWARD_LABEL.test(l));
 }
 
 /** The first non-empty line from `from` on, trimmed ('' if none). */
@@ -1931,6 +1936,13 @@ interface RetryRef {
    * per-domain figure) as 'strangers' holds do.
    */
   stranger?: boolean;
+  /**
+   * The mail has been counted against its sender's hour, so a retry does not
+   * count it again (one failing mail would use up the hour). A mail held for
+   * the sender limit, or one that failed before it was counted, is checked
+   * against the limit again.
+   */
+  counted?: boolean;
 }
 
 interface AdapterState {
@@ -2427,6 +2439,7 @@ registerChannelAdapter('proton-mail', {
         deferred: kind,
         from,
         ...(kind === 'sender' && !approved && { stranger: true }),
+        ...(countedUids.has(uid) && { counted: true }),
       };
       log.warn('Proton Mail: over an hourly limit — mail held until the hour has room', {
         uid,
@@ -2441,28 +2454,28 @@ registerChannelAdapter('proton-mail', {
      * A mail over its sender's hourly limit. The sender's standing decides:
      * a denied address's mail is done with unread by the agent and unfetched
      * (core would drop it without a card, so holding it would only take
-     * room); an address not yet approved has its mail held as a new sender's
-     * (`defer` counts it in their share); an approved sender's is held.
+     * room); an address not yet approved, unless a card was mailed to it, has
+     * its mail held as a new sender's (`defer` counts it in their share); an
+     * approved sender's, or a card addressee's, is held in the rest.
      */
     async function overLimit(uid: number, fromAddr: string, freeAt: number): Promise<Outcome> {
-      // A failed lookup holds the mail as a new sender's: a failure here would
-      // otherwise reach the retry list without `deferred`, and the retry would
-      // skip the hourly limit.
-      const status = await senderStatus(fromAddr).catch((err: unknown) => {
-        log.warn('Proton Mail: sender lookup failed — over-limit mail held as a new sender’s', {
-          uid,
-          err: String(err),
-        });
-        return 'pending' as const;
-      });
+      // A failed lookup throws: the mail is retried uncounted (RetryRef.counted),
+      // so the retry checks the limit again.
+      const status = await senderStatus(fromAddr);
       if (status === 'denied') {
         log.debug('Proton Mail inbound skipped', { uid, reason: 'denied sender over the hourly limit' });
         return 'done';
       }
-      // Someone a card was mailed to is not a stranger (as below, admitStranger).
-      const approved = status === 'approved' || Object.values(state.cards).some((c) => c.address === fromAddr);
-      return defer(uid, 'sender', fromAddr, freeAt, approved);
+      return defer(uid, 'sender', fromAddr, freeAt, status === 'approved' || cardMailedTo(fromAddr));
     }
+
+    /** Whether a card still within its TTL was mailed to this address: its approver is not a stranger. */
+    function cardMailedTo(addr: string, now = Date.now()): boolean {
+      return Object.values(state.cards).some((c) => c.address === addr && now - Date.parse(c.sentAt) <= CARD_TTL_MS);
+    }
+
+    /** Mail counted against its sender's hour in this pass (RetryRef.counted); cleared when the pass ends. */
+    const countedUids = new Set<number>();
 
     /**
      * Whether a mail from an address not yet approved may go to the host now
@@ -2607,19 +2620,20 @@ registerChannelAdapter('proton-mail', {
         return 'leave-unread';
       }
 
-      // A failed mail's retry was counted when it first came in; counting it
-      // again would let one failing mail use up the sender's hour. A mail
-      // held for this limit is checked again. An answer to an open card is
+      // A mail counted against the hour once is not counted again on a retry
+      // (RetryRef.counted): one failing mail would use up the sender's hour.
+      // One held for this limit, or one that failed before it was counted, is
+      // checked again. An answer to an open card is
       // never held: a held answer would let a gateway approval time out. A
       // mail that only looks like one on its headers is counted once it is
       // read and turns out not to be an answer (after matchCardReply).
       // Over the limit, see overLimit.
-      const retry = state.retry[uid];
-      const limited = !retry || retry.deferred === 'sender';
+      const limited = !state.retry[uid]?.counted;
       const mayAnswerCard = answersOpenCard(fromAddr, head.inReplyTo);
       if (limited && !mayAnswerCard) {
         const freeAt = senderRateFreeAt(fromAddr);
         if (freeAt !== null) return overLimit(uid, fromAddr, freeAt);
+        countedUids.add(uid);
       }
 
       // Through every check: now the whole mail.
@@ -2727,6 +2741,7 @@ registerChannelAdapter('proton-mail', {
       if (limited && mayAnswerCard && match.kind !== 'answer') {
         const freeAt = senderRateFreeAt(fromAddr);
         if (freeAt !== null) return overLimit(uid, fromAddr, freeAt);
+        countedUids.add(uid);
       }
 
       if (match.kind === 'answer') {
@@ -2798,7 +2813,7 @@ registerChannelAdapter('proton-mail', {
       // a card, and pruneSettled has already given its slot back.
       const status = await senderStatus(fromAddr);
       const approved = status === 'approved';
-      if (status === 'pending' && !Object.values(state.cards).some((c) => c.address === fromAddr)) {
+      if (status === 'pending' && !cardMailedTo(fromAddr)) {
         const admitted = await admitStranger(uid, fromAddr);
         if (admitted !== 'ok') return admitted;
       }
@@ -2927,7 +2942,8 @@ registerChannelAdapter('proton-mail', {
         return;
       }
       const delay = retryDelayMs(attempts);
-      state.retry[uid] = { attempts, nextAt: new Date(Date.now() + delay).toISOString() };
+      const counted = !!state.retry[uid]?.counted || countedUids.has(uid);
+      state.retry[uid] = { attempts, nextAt: new Date(Date.now() + delay).toISOString(), ...(counted && { counted }) };
       log.warn('Proton Mail: handling a mail failed — will retry', { uid, attempts, inMs: delay, err });
     }
 
@@ -2974,6 +2990,7 @@ registerChannelAdapter('proton-mail', {
           await recordFailure(uid, err);
         }
       }
+      countedUids.delete(uid);
       // The cursor moves on either way, so one bad mail never holds up the
       // rest; a failed or deferred one waits in `retry`. Retries cover what fails here —
       // fetching, parsing, the card lookup, sending a refusal notice. Routing

@@ -2753,18 +2753,51 @@ describe('review 5 of #4218', () => {
       expect(readState().retry[reply].stranger).toBeUndefined();
     }, 60_000);
 
-    it('a failed sender lookup over the limit holds the mail as a new sender’s, so its retry keeps the limit', async () => {
+    it('a card past its 7-day life no longer makes its addressee an approver', async () => {
+      h.wired = false;
+      h.settled = { [OWNER]: 'approved' };
+      // A minute short of its life at startup (so not pruned then); it expires while running.
+      const old = new Date(Date.now() - 7 * 24 * 60 * 60_000 + 60_000).toISOString();
+      const cards = {
+        'NC-AAAAAAAAAAAAA': {
+          questionId: 'q-old',
+          address: 'x@new.example',
+          messageId: '<old@bridge.example>',
+          subject: '[NC-AAAAAAAAAAAAA] Old',
+          title: 'Old',
+          options: [],
+          sentAt: old,
+        },
+      };
+      seedState({ cards });
+      await start();
+      vi.advanceTimersByTime(2 * 60_000);
+      const last = await arriveAll(burst('x@new.example', 'new.example'));
+      expect(readState().retry[last]).toMatchObject({ deferred: 'sender', stranger: true });
+    }, 60_000);
+
+    it('a failed sender lookup over the limit is retried uncounted, so the retry checks the limit again', async () => {
       h.wired = false;
       h.settled = { [OWNER]: 'approved' };
       await start();
-      await arriveAll(
-        Array.from({ length: 20 }, (_, i) =>
-          mail({ from: 'x@new.example', body: `m ${i}`, auth: passFor('new.example') }),
-        ),
-      );
+      await arriveAll(Array.from({ length: 20 }, (_, i) => mail({ body: `m ${i}` })));
       h.lookupFails = true;
-      const held = await arriveAll([mail({ from: 'x@new.example', body: 'one more', auth: passFor('new.example') })]);
-      expect(readState().retry[held]).toMatchObject({ deferred: 'sender', from: 'x@new.example', stranger: true });
+      const failed = await arriveAll([mail({ body: 'one more' })]);
+      // Not held under anyone's share, not counted: an ordinary retry.
+      expect(readState().retry[failed]).toMatchObject({ attempts: 1 });
+      expect(readState().retry[failed].counted).toBeUndefined();
+      expect(readState().retry[failed].stranger).toBeUndefined();
+      expect(flagged().filter(([u]) => u === failed)).toEqual([]);
+    }, 60_000);
+
+    it('a mail that failed after it was counted is not counted again on its retry', async () => {
+      h.wired = false;
+      h.settled = { [OWNER]: 'approved' };
+      h.lookupFails = true;
+      await start();
+      // Under the limit, so counted; then the approval lookup after it fails.
+      const failed = await arriveAll([mail({ body: 'hello' })]);
+      expect(readState().retry[failed]).toMatchObject({ attempts: 1, counted: true });
     }, 60_000);
   });
 
