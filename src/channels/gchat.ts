@@ -55,10 +55,15 @@ const GCHAT_DEFAULTS: ChannelDefaults = {
 /**
  * Card text reaches Google Chat as textParagraph HTML, where `<` and `&` start
  * tags and entities. Entity-escape them so untrusted values in approval cards
- * show as typed.
+ * show as typed. Google Chat shows Markdown as typed too, so first drop the
+ * backslash a gateway card puts before a Markdown mark for other channels.
  */
 export function escapeGChatHtml(text: string): string {
-  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return text
+    .replace(/\\([\\`*_~[\]()<>&])/g, '$1')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
 // The file name comes from the sender. JSON-quote it and show invisible
