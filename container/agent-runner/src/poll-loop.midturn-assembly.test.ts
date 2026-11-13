@@ -197,6 +197,20 @@ describe('cross-segment block assembly', () => {
     expect(deliveredTexts()).toEqual(['body  rest']);
   });
 
+  it('a complete block whose body mentions `<internal>` delivers mid-turn, with no nudge', async () => {
+    seedDest();
+    const block = '<message to="discord-main">That reply sat in an `<internal>` note, which is never sent.</message>';
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      yield { type: 'text', text: block };
+      yield { type: 'result', text: block };
+    }
+    const pushes = await run(events());
+
+    expect(deliveredTexts()).toEqual(['That reply sat in an `<internal>` note, which is never sent.']);
+    expect(pushes).toHaveLength(0);
+  });
+
   it('the buffer dies at the turn boundary: a fragment is not resurrected by the next turn', async () => {
     seedDest();
     async function* events(): AsyncGenerator<ProviderEvent> {
@@ -271,6 +285,11 @@ describe('unresolvedTailStart', () => {
   it('an unclosed <message before a later unclosed <internal wins (earliest unresolved)', () => {
     const s = '<message to="x">body <internal>note';
     expect(unresolvedTailStart(s)).toBe(0);
+  });
+
+  it('an <internal mention inside a COMPLETE <message> block is body text, not a buffer trigger', () => {
+    const s = '<message to="x">I keep notes in `<internal>` tags.</message>';
+    expect(unresolvedTailStart(s)).toBe(s.length);
   });
 
   it('constructs inside COMPLETE internal spans are settled garbage, not buffer triggers', () => {

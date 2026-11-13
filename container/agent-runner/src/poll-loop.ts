@@ -989,6 +989,7 @@ function answersBatch(dest: DestinationEntry, routing: RoutingContext): boolean 
 
 const OPEN_INTERNAL_RE = /<internal\b/i;
 const OPEN_MESSAGE_RE = /<message\b/;
+const COMPLETE_MESSAGE_RE = /<message\s+to="[^"]+"\s*>[\s\S]*?<\/message>/g;
 
 /**
  * Index where the UNRESOLVED tail of a mid-turn scan begins — everything
@@ -1007,12 +1008,16 @@ const OPEN_MESSAGE_RE = /<message\b/;
  *
  * Complete <internal> spans are blanked (same length, positions preserved)
  * before looking: an unclosed construct inside a COMPLETED span is settled
- * garbage, not a reason to buffer.
+ * garbage, not a reason to buffer. Likewise, an `<internal` inside a COMPLETE
+ * <message> block is body text (e.g. a reply explaining "my `<internal>`
+ * notes"), not a scratchpad span: buffering on it would hold the finished
+ * block back for the rest of the turn.
  */
 export function unresolvedTailStart(input: string): number {
   const masked = input.replace(INTERNAL_SPAN_RE, (m) => ' '.repeat(m.length));
   const candidates: number[] = [];
-  const internalOpen = OPEN_INTERNAL_RE.exec(masked);
+  const outsideBlocks = masked.replace(COMPLETE_MESSAGE_RE, (m) => ' '.repeat(m.length));
+  const internalOpen = OPEN_INTERNAL_RE.exec(outsideBlocks);
   if (internalOpen) candidates.push(internalOpen.index);
   const lastClose = masked.lastIndexOf('</message>');
   const searchFrom = lastClose === -1 ? 0 : lastClose + '</message>'.length;
