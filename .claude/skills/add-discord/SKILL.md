@@ -167,7 +167,7 @@ the conversation address `discord:@me:<channelId>` (if Discord refuses, the bot
 doesn't share a server with you yet — invite it, then retry):
 
 ```nc:run capture:platform_id effect:fetch
-curl -s -X POST https://discord.com/api/v10/users/@me/channels -H "Authorization: Bot {{bot_token}}" -H "Content-Type: application/json" -d '{"recipient_id":"{{owner_handle}}"}' | jq -er '"discord:@me:" + .id'
+curl -s -X POST https://discord.com/api/v10/users/@me/channels -H "Authorization: Bot {{bot_token}}" -H "Content-Type: application/json" -d '{"recipient_id":"{{owner_handle}}"}' | jq -er '.id // error("no channel id") | "discord:@me:" + .'
 ```
 
 `owner_handle` and `platform_id` are what the owner-wiring step needs. The

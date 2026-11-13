@@ -162,6 +162,7 @@ Want a skill that doesn't exist yet? Search the open issues, then open a [capabi
 - macOS or Linux (Windows through WSL2)
 - About 4 GB of RAM or more (setup warns below that)
 - Node.js 22.23.4+, 24.22.1+, or 26.12.1+, and pnpm 10 (setup installs them if missing: Node through Homebrew on macOS or NodeSource on Debian and Ubuntu)
+- jq, which the channel skills use (setup installs it if missing)
 - [Docker Desktop](https://docker.com/products/docker-desktop) (macOS, Windows) or Docker Engine (Linux); setup can install it
 - An account with your model provider: Claude (subscription or API key), or the provider you add
 - [Claude Code](https://claude.ai/download) is optional. Setup installs it when you choose Claude subscription sign-in or ask it to diagnose a failure. Skills that setup doesn't run for you (`/customize`, `/debug`, most `/add-<name>`) run inside a coding agent.

@@ -255,8 +255,7 @@ describe('writeSessionMessage re-provisions a deleted session folder', () => {
     const db = new Database(inboundDbPath(AG, SESS), { readonly: true });
     try {
       const row = db.prepare('SELECT id, content FROM messages_in WHERE id = ?').get('after-reset-1') as
-        | { id: string; content: string }
-        | undefined;
+        { id: string; content: string } | undefined;
       expect(row?.id).toBe('after-reset-1');
       expect(JSON.parse(row!.content).text).toBe('still here?');
     } finally {
