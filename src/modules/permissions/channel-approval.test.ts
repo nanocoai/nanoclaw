@@ -1067,6 +1067,21 @@ describe('unknown-channel registration flow', () => {
       expect(await click(card.messaging_group_id, 'reject', 'new-agent-card')).toBe('accepted');
     });
 
+    it('after a card with an unknown id, a replacement card with none is not the card a click with none hit', async () => {
+      const card = await firstCard('chat-choose-no-id-twice');
+      cardUpdate.fail = true;
+      deliverMock.mockResolvedValueOnce(undefined);
+      expect(await click(card.messaging_group_id, 'choose_existing', 'card-1')).toBe('ignored');
+      await getDb().run('DELETE FROM pending_channel_approvals WHERE messaging_group_id = ?', card.messaging_group_id);
+      cardUpdate.fail = false;
+      deliverMock.mockResolvedValueOnce(undefined);
+      const { routeInbound } = await import('../../router.js');
+      await expectAsyncDelivery(() => routeInbound(groupMention('chat-choose-no-id-twice')));
+      // Both ids are unknown, so this could be the old agent card's third agent.
+      expect(await click(card.messaging_group_id, 'reject')).toBe('ignored');
+      expect(await storedOptions(card.messaging_group_id)).toBeDefined();
+    });
+
     it("leaves the first card as it was when the agent card can't be sent", async () => {
       const card = await firstCard('chat-choose-fails');
       deliverMock.mockRejectedValueOnce(new Error('send failed'));
