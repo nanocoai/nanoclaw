@@ -434,6 +434,9 @@ describe('Discord prose that CommonMark treats as code', () => {
     // Discord ends a quote or subtext at the line, so the span never closes.
     '> `x\n[Admin](https://evil.test) <@1> ||hidden||`',
     '-# `x\n[Admin](https://evil.test) <@1> ||hidden||`',
+    // Discord reads \r and \r\n as a line break too.
+    '> `x\r[Admin](https://evil.test) <@1> ||hidden||`',
+    '```\r\n\r\n```\n```\n[Admin](https://evil.test) <@1> ||hidden||\n```',
   ])('escapes text Discord shows as prose in %j', (text) => {
     const result = escapeDiscordCardText(text);
     expect(result).toContain(']\u2060(');
@@ -448,6 +451,10 @@ describe('Discord prose that CommonMark treats as code', () => {
   // A link opened in prose would otherwise end at a ]( kept raw in code.
   it('keeps a link from running from prose into code', () => {
     expect(escapeDiscordCardText('[Admin `](https://evil.test)`')).toBe('\\[Admin `](https://evil.test)`');
+  });
+  // Discord drops a form feed, so a backslash before one escapes the next mark.
+  it('reads a backslash before a form feed as Discord does', () => {
+    expect(escapeDiscordCardText('\\\f[Admin `](https://evil.test)`')).toBe('\\[Admin `](https://evil.test)`');
   });
   it('keeps a ``` fence with single backticks inside byte-for-byte', () => {
     const code = '```sh\ncat <input; echo `date` ``x``\n```';
