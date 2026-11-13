@@ -592,8 +592,10 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
   }
   const approverId = clickerId;
   const swap = agentCards.get(row.messaging_group_id);
-  // Never forget an unknown stale card just because the request was replaced.
-  // A newer request recovers only through its positively identified current card.
+  // Never forget an unknown stale card just because the request was replaced:
+  // a tap on it would decide the newer request by button position and could
+  // connect the chat to the wrong agent. A newer request recovers only through
+  // a card with a known id; if that has none either, it waits for a restart.
   if (
     swap?.blocked &&
     (swap.blocked === row.created_at ||
