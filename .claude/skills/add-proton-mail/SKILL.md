@@ -16,8 +16,9 @@ and exposes ordinary IMAP/SMTP. Proton only ships Bridge binaries for x86; this
 skill builds it from source inside Docker, which works on arm64 (Raspberry Pi
 4/5) and x86 alike. Bridge runs as an unprivileged user on a Docker network of
 its own (`nanoclaw-mail`), with its ports published on the host's `127.0.0.1`
-only: the NanoClaw host process is the only thing that reaches it — not agent
-containers, not the network.
+only, never the network. On Linux the NanoClaw host process is the only thing
+that reaches them; on Docker Desktop (macOS, Windows) an agent container can
+reach the host's loopback, but holds no bridge password (see SECURITY.md).
 
 The mechanical steps under **Apply** carry `nc:` directive fences: an agent
 reads the prose and applies them, and a parser can apply them deterministically
@@ -36,7 +37,7 @@ Proton Mail Bridge requires a paid Proton plan (Mail Plus, Unlimited, Family/Duo
 ```
 
 ```nc:run effect:check
-[ "{{plan_ok}}" = "yes" ]
+[ '{{plan_ok}}' = yes ]
 ```
 
 Bridge runs as a Docker container, so Docker must be installed and the current
@@ -188,10 +189,13 @@ grep -Eq '^PROTON_MAIL_BRIDGE_PASSWORD=[A-Za-z0-9+/_-]{20,}$' .env && grep -q '^
 
 The account's primary address is in the vault too. Read it, then confirm which
 address the agent should send from — the primary, or any alias on the same
-account (all aliases share one inbox and one bridge password):
+account (all aliases share one inbox and one bridge password). If Bridge holds
+more than one account, these steps and `store-secrets.sh` refuse to guess: add
+`PROTON_BRIDGE_ACCOUNT=<primary address>` to `.env` (where every later run
+reads it) and re-run them:
 
 ```nc:run effect:fetch capture:primary_email validate:^[^@\s]+@[^@\s]+\.[^@\s]+$
-docker run --rm --log-driver none -v nanoclaw-proton-bridge:/root nanoclaw-proton-bridge:latest secrets address
+acct=$(bash .claude/skills/add-proton-mail/bridge/bridge-account.sh) && docker run --rm --log-driver none -e PROTON_BRIDGE_ACCOUNT="$acct" -v nanoclaw-proton-bridge:/root nanoclaw-proton-bridge:latest secrets address
 ```
 
 ```nc:prompt proton_address normalize:lower validate:^[^@\s]+@[^@\s]+\.[^@\s]+$
@@ -217,9 +221,10 @@ Start Bridge as a long-lived container. Its IMAP (1143) and SMTP (1025) ports ar
 published on `127.0.0.1` only — anyone who can reach them with the bridge
 password can read the whole mailbox, so they must never be exposed on `0.0.0.0`.
 It runs on a Docker network of its own (`nanoclaw-mail`), not the default
-`bridge` network agent containers use when egress lockdown is off, so no agent
-container can reach its ports directly; the host reaches it through the loopback
-ports. It runs with no Linux capabilities. `--restart unless-stopped` brings it
+`bridge` network agent containers use when egress lockdown is off, so on Linux
+no agent container can reach its ports directly (Docker Desktop: see
+SECURITY.md); the host reaches it through the loopback ports. It runs with no
+Linux capabilities. `--restart unless-stopped` brings it
 back across reboots. Re-running replaces the container in place (the login lives
 in the volume, not the container):
 
@@ -254,15 +259,20 @@ Email has no "self-chat": you write to the agent's Proton address from a
 different address of your own, and the agent replies there. That address is
 both the conversation id and your owner handle. Collect it:
 
-```nc:prompt owner_email normalize:lower validate:^[^@\s]+@[^@\s]+\.[^@\s]+$
+```nc:prompt owner_email normalize:lower validate:^[^@\s']+@[^@\s']+\.[^@\s']+$
 Your own email address — the one you'll write to the agent from (any provider). Not the agent's Proton address.
 ```
 
-```nc:run capture:platform_id effect:fetch
-echo "{{owner_email}}"
+The address is stored in the form mail arrives in — the adapter's own
+`normalizeAddress` (lower case, the domain in its ASCII/punycode form); a row
+in any other form would never match your mail. It is passed in single quotes,
+which is why the prompt refuses an address containing one:
+
+```nc:run capture:platform_id effect:fetch validate:^[^@\s']+@[\x21-\x7e]+$
+set -o pipefail; pnpm exec tsx .claude/skills/add-proton-mail/scripts/normalize-address.ts '{{owner_email}}' | sed -n 's/^.*NORMALIZED=//p'
 ```
 ```nc:run capture:owner_handle effect:fetch
-echo "{{platform_id}}"
+echo '{{platform_id}}'
 ```
 
 `owner_handle` and `platform_id` are what the owner-wiring step needs. The
@@ -286,95 +296,27 @@ Approval requests arrive as emails whose subject starts with a reference like [N
 
 ## Security
 
-What the adapter trusts, and why:
+What the adapter trusts, in brief — the full account, with the checks behind
+each point, is in [SECURITY.md](SECURITY.md):
 
-- **Who a mail is from.** The `From:` header is the sender's own claim, so the
-  adapter takes it only when Proton vouches for it, in one of two ways:
-  - *Mail from outside Proton.* Proton's inbound servers check SPF, DKIM and
-    DMARC alignment of the `From:` domain and record the result in
-    `Authentication-Results` headers under their own authserv-id,
-    `mail.protonmail.ch`; Bridge serves those headers as Proton stored them.
-    The mail counts as from its address only when there is exactly one Proton
-    DMARC verdict, it is `pass`, and it names the `From:` domain. Proton strips
-    a sender-supplied `mail.protonmail.ch` header (checked on Bridge 3.27.0),
-    and one that slipped through would sit beside Proton's own and be refused
-    as two. A domain's DMARC policy doesn't matter: with `p=none` Proton still
-    delivers forged mail, but records `dmarc=fail`.
-  - *Mail from another Proton account.* This carries no DMARC verdict. Proton
-    marks it `X-Pm-Origin: internal`, and its `From:` comes from Proton's
-    record of the sending account, which can only send as its own addresses.
-    It counts as verified with exactly one `X-Pm-Origin`, `internal`, and no
-    Proton DMARC verdict. Proton strips a sender-supplied `X-Pm-Origin` from
-    outside mail and adds its own `external` (checked on Bridge 3.27.0), so a
-    forged `internal` would show as two values and be refused. A Proton
-    account can also send as an address outside Proton's domains (a custom
-    domain, or a connected external address), and nothing Proton adds says
-    which, so `internal` is trusted only from Proton's own domains
-    (`proton.me`, `protonmail.com`, `protonmail.ch`, `pm.me` and their
-    subdomains) and from domains listed exactly in
-    `PROTON_MAIL_INTERNAL_DOMAINS`. Not even the Bridge account's own domain
-    is trusted unless listed: an account can send from a connected Gmail
-    address, so its domain proves nothing. Internal mail from any other domain is left
-    unread and flagged `$NanoClawFailed`: it is almost always a real Proton
-    user on a custom domain nobody listed.
-
-  Either way the `From:` must be a single plain address on a single `From:`
-  line (no quoted local part, no second address), and a display name that
-  names another address is dropped. Mail from the Bridge account's own address
-  is never delivered. Refused mail is logged and left unread.
-- **What this does not prove.** DMARC vouches for a domain, not a mailbox: for
-  outside mail the adapter relies on the sender's own domain to stop its users
-  sending as each other, and any shared service in the domain's SPF record
-  widens who can send for it. That covers ordinary mail and `/` admin commands,
-  not only approvals, so the owner should write from a Proton address
-  (identified by mailbox) or from a domain with tight sending controls. Anyone
-  can open a free Proton account, and they are then verified as their *own*
-  address only; unknown senders still need your approval.
-- **Approvals.** Because of that, an approval needs more than a verified
-  sender. Each card mail carries a random token in its subject; an answer counts
-  only from the card's approver, quoting the token, sent `In-Reply-To` the card
-  mail itself, with one of the card's commands on the first line — so only
-  someone who can read the approver's mailbox can answer, and a reply always
-  answers the card it replies to. Cards are kept in `store/proton-mail/state.json`
-  and survive a restart.
-- **Admin commands.** A `/` command on the first line of a verified owner's mail
-  reaches core's command gate like any other channel's.
-- **Text hidden from the reader.** HTML a mail client would not show
-  (`display:none`, `hidden`, zero-size or transparent text, `<template>`, …)
-  is kept but marked `[hidden CODE: … /hidden CODE]`, and invisible or
-  text-direction characters are marked too, with a code chosen at random for
-  each mail; when the agent's text carries any mark, a note tells it to treat
-  marked text as suspect and never as instructions. A mark without the code
-  was written by the sender. A lone direction mark beside Hebrew or Arabic
-  letters, or a zero-width space between Thai, Lao, Khmer or Myanmar letters,
-  is ordinary text and left alone. Parsing and HTML conversion run in worker
-  threads with timeouts and a memory ceiling, so a crafted mail cannot stall
-  the host.
-- **Limits on strangers and loops.** New addresses not yet approved are
-  limited to 10 an hour, 200 in any 7 days and 20 per domain in the same 7
-  days (an address core has since approved or denied gives its slot back), so
-  strangers cannot fill the approval cards the owner's own approvals need. At
-  most 20 mails an hour from one sender reach the agent; the rest wait and are
-  handed over as the hour frees up. That is a throttle, not a loop breaker:
-  Bridge drops every loop marker on outgoing mail, and NanoClaw has no loop
-  handling for any channel yet, so two agents mailing each other are slowed to
-  about 20 mails an hour each, not stopped. Waiting mail is capped (200 in all,
-  of which new senders may use 100 and any one domain 20); past a cap, mail is
-  left unread and flagged `$NanoClawFailed`.
-- **Transport.** IMAP requires STARTTLS (never opportunistic) and SMTP requires
-  TLS. With `PROTON_MAIL_TLS_CA_FILE` set (the default from setup) Bridge's own
-  certificate is verified on every connection, so a process squatting the
-  loopback port while Bridge is down cannot collect the bridge password.
-- **What anyone with the volume holds.** The `nanoclaw-proton-bridge` volume is
-  the Proton login. Its keyring key is unprotected (headless), so anyone with
-  root or Docker on this host can read the mailbox — as with any credential on
-  the host.
+- Mail counts as from its `From:` address only when Proton vouches for it (a
+  single Proton DMARC pass for that domain, or `X-Pm-Origin: internal` from a
+  Proton domain or one listed in `PROTON_MAIL_INTERNAL_DOMAINS`); anything else
+  is left unread. DMARC vouches for a domain, not a mailbox.
+- An approval counts only as a reply to the card mail (or its reminder) from
+  the approver, quoting its token, with a listed command on the first line.
+- Hidden HTML and invisible characters are marked with a per-mail code; the
+  channel's own bracketed lines (forward boundaries, attachments held back,
+  truncation, notes) carry it too.
+- New senders, per-sender hourly mail and waiting mail are all capped; the
+  hourly limit slows two agents mailing each other but does not stop them.
+- Bridge listens on `127.0.0.1` only and its certificate is pinned.
 
 ## Channel Info
 
 - **type**: `proton-mail`
 - **terminology**: Email has correspondents, not chats or groups. Each sender address is its own conversation.
-- **platform-id-format**: the correspondent's address, lowercased, as-is — `someone@example.com`. Native adapter — no `proton-mail:` prefix. User ids are `proton-mail:someone@example.com`. When registering an address by hand (`/init-first-agent`, `ncl`), type it in lowercase: those store it as given, and a mixed-case row never matches the adapter's lowercased mail.
+- **platform-id-format**: the correspondent's address, lower case, with the domain in its ASCII (punycode) form — `someone@example.com`, `someone@xn--bcher-kva.de`. Native adapter — no `proton-mail:` prefix. User ids are `proton-mail:someone@example.com`. When registering an address by hand (`/init-first-agent`, `ncl`), type it in that form: those store it as given, and a row in any other form never matches mail (the adapter names such rows at startup).
 - **how-to-find-id**: It's the sender's email address. Auto-discovered on first mail — check `pnpm exec tsx scripts/q.ts data/v2.db "SELECT platform_id, name FROM messaging_groups WHERE channel_type='proton-mail'"`.
 - **supports-threads**: no — one session per correspondent. Replies are threaded in the correspondent's mail client via `In-Reply-To`/`References`.
 - **typical-use**: Email in, email out. Forward a document for summary; email the agent a question; let it send scheduled reports.
@@ -414,6 +356,9 @@ PROTON_MAIL_PROCESS_BACKLOG=false           # true: ingest all existing mail on 
 PROTON_MAIL_DEFAULT_SUBJECT=Message from your assistant   # for agent-initiated mail with no thread
 PROTON_MAIL_INTERNAL_DOMAINS=               # comma-separated Proton custom domains whose Proton-to-Proton mail is trusted, matched exactly (Proton's own always are). List the account's own domain here if it is a Proton custom domain; whole domains only (`com`, `co.uk` are ignored)
 ```
+
+Setup alone (not the adapter) reads `PROTON_BRIDGE_ACCOUNT`: the Bridge
+account's primary address, needed only when Bridge holds more than one.
 
 On first connect the adapter records the mailbox's current position and only
 processes mail that arrives afterwards; set `PROTON_MAIL_PROCESS_BACKLOG=true`
@@ -494,7 +439,7 @@ always re-exports the certificate) and restart.
 
 `grep "not taken as a card answer" logs/nanoclaw.error.log | tail` names the reason,
 and the sender gets a short mail saying why. The reply must be to the request
-email itself (not a new mail), keep its `[NC-…]` subject, and start with one of
+email itself or the reminder about it (not a new mail), keep its `[NC-…]` subject, and start with one of
 the listed commands. A request that was already answered, or expired, cannot be
 answered again. Gateway approvals expire after 120 s, which is short for email:
 an approver who answers by email may find the request gone.
@@ -509,7 +454,15 @@ an approver who answers by email may find the request gone.
 
 `docker logs nanoclaw-proton-bridge`. A vault that can't be unlocked (the `pass`
 keyring in the volume is damaged) prints GPG errors; recover by removing the
-volume and logging in again: `docker rm -f nanoclaw-proton-bridge; docker volume rm nanoclaw-proton-bridge`, then the `chown` and **init** steps, `store-secrets.sh` (delete the old `PROTON_MAIL_BRIDGE_PASSWORD` line first), and **Run Bridge**.
+volume and logging in again — behind the owner check, so another checkout's
+Bridge is never touched:
+
+```bash
+bash .claude/skills/add-proton-mail/bridge/owner-check.sh >/dev/null && { docker rm -f nanoclaw-proton-bridge; docker volume rm nanoclaw-proton-bridge; }
+```
+
+Then the `chown` and **init** steps, `store-secrets.sh` (delete the old
+`PROTON_MAIL_BRIDGE_PASSWORD` line first), and **Run Bridge**.
 
 ### Bot not responding — service side
 

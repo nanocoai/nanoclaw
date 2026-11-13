@@ -17,8 +17,13 @@ VOLUME=${PROTON_BRIDGE_VOLUME:-nanoclaw-proton-bridge}
 ENV_FILE=.env
 CERT=store/proton-mail/bridge-cert.pem
 
+# PROTON_BRIDGE_ACCOUNT (primary address) picks the account when Bridge
+# holds several (see bridge-secrets.sh): from the environment, else from
+# .env, where it is kept so every later run picks the same account.
+PROTON_BRIDGE_ACCOUNT=$(bash "$(dirname "$0")/bridge-account.sh" "$ENV_FILE")
+export PROTON_BRIDGE_ACCOUNT
 read_field() {
-  docker run --rm --log-driver none -v "$VOLUME:/root" "$IMAGE" secrets "$1"
+  docker run --rm --log-driver none -e PROTON_BRIDGE_ACCOUNT -v "$VOLUME:/root" "$IMAGE" secrets "$1"
 }
 has_key() {
   grep -Eq "^$1=.+" "$ENV_FILE" 2>/dev/null

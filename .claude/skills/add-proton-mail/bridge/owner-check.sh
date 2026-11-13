@@ -6,7 +6,7 @@
 # have host-global names and fixed loopback ports (one Bridge per host), while
 # NanoClaw supports several checkouts side by side. Each resource this skill
 # creates carries the label nanoclaw-proton-owner=<this checkout's install
-# slug>. If one of them exists with ANOTHER checkout's label, this exits 1 and
+# slug>. If one of them exists with ANOTHER checkout's label, this exits 3 and
 # the caller stops, so a second checkout (another clone, or a git worktree of
 # this one) never replaces a running Bridge or deletes its login.
 #
@@ -45,6 +45,15 @@ else
   mine=$(_nanoclaw_install_slug)
 fi
 
+# With no docker at all, no Bridge image, container, volume or network can
+# exist here, so there is nothing of another checkout's to protect (REMOVE.md
+# on a host where Docker was already uninstalled can then finish).
+if ! command -v docker >/dev/null 2>&1; then
+  echo "owner-check: docker is not installed — no Bridge resources can exist on this host" >&2
+  printf '%s=%s\n' "$KEY" "$mine"
+  exit 0
+fi
+
 configured_here() {
   grep -Eq '^PROTON_MAIL_BRIDGE_PASSWORD=.+' .env 2>/dev/null
 }
@@ -56,7 +65,7 @@ refuse() {
     return 0
   fi
   echo "owner-check: one Proton Mail Bridge serves one checkout. Remove Proton Mail from that checkout first (its REMOVE.md), or keep using it there. If that checkout no longer exists (moved or deleted), re-run with PROTON_BRIDGE_ADOPT=1." >&2
-  exit 1
+  exit 3
 }
 
 check() { # kind name format

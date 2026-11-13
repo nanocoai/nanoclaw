@@ -167,7 +167,7 @@ printf '%s\\n' "$val"
       expect(run(all(label)).status).toBe(0);
       project.setEnvFile(false);
       const r = run(all(label));
-      expect(r.status).toBe(1);
+      expect(r.status).toBe(3);
       expect(r.stdout).toBe('');
       expect(r.stderr).toContain('predates ownership labels');
     },
@@ -178,7 +178,7 @@ printf '%s\\n' "$val"
     (kind) => {
       project.setEnvFile(true);
       const r = run({ [`FAKE_${kind.toUpperCase()}`]: 'deadbeef' });
-      expect(r.status).toBe(1);
+      expect(r.status).toBe(3);
       expect(r.stdout).toBe('');
       expect(r.stderr).toContain(`the ${kind} `);
       expect(r.stderr).toContain('install deadbeef');
@@ -243,7 +243,7 @@ describe.skipIf(!hasDocker)('owner-check.sh against real docker', () => {
     expect(run().status).toBe(0); // nothing exists yet: every kind reports "not found"
     for (const kind of ['volume', 'network']) {
       create(kind);
-      expect(run().status, `unlabelled ${kind}, no .env`).toBe(1);
+      expect(run().status, `unlabelled ${kind}, no .env`).toBe(3);
       project.setEnvFile(true);
       expect(run().status, `unlabelled ${kind}, .env set up`).toBe(0);
       project.setEnvFile(false);
@@ -253,7 +253,7 @@ describe.skipIf(!hasDocker)('owner-check.sh against real docker', () => {
       cleanup();
       create(kind, `${KEY}=deadbeef`);
       const r = run();
-      expect(r.status, `foreign ${kind}`).toBe(1);
+      expect(r.status, `foreign ${kind}`).toBe(3);
       expect(r.stderr).toContain('install deadbeef');
       cleanup();
     }
@@ -331,16 +331,17 @@ describe('IMAP readiness probe in SKILL.md', () => {
 });
 
 describe('step ordering and stdout rules', () => {
-  /** Shell commands of nc:run blocks in SKILL.md, and bash blocks in REMOVE.md. */
+  /** Shell commands of nc:run blocks in SKILL.md, its manual bash blocks (troubleshooting), and REMOVE.md's. */
   const runBlocks = [...skill.matchAll(/```nc:run[^\n]*\n([\s\S]*?)```/g)].map((m) => m[1]);
+  const manualBlocks = [...skill.matchAll(/```bash\n([\s\S]*?)```/g)].map((m) => m[1]);
   const removeBlocks = [...remove.matchAll(/```bash\n([\s\S]*?)```/g)].map((m) => m[1]);
   const touchesBridge = /docker (build|rmi|rm|stop|run -d|volume (create|rm)|network (create|rm))\b/;
 
   it('every step that builds, creates, stops, replaces or removes Bridge resources runs the owner check first', () => {
-    const touching = [...runBlocks, ...removeBlocks].filter(
+    const touching = [...runBlocks, ...manualBlocks, ...removeBlocks].filter(
       (b) => touchesBridge.test(b) && /nanoclaw-(proton-bridge|mail)/.test(b),
     );
-    expect(touching.length).toBeGreaterThanOrEqual(5); // build, volume, stop, run, remove
+    expect(touching.length).toBeGreaterThanOrEqual(6); // build, volume, stop, run, recovery, remove
     for (const block of touching) {
       const check = block.indexOf('owner-check.sh');
       expect(check, block).toBeGreaterThanOrEqual(0);
@@ -373,10 +374,190 @@ describe('step ordering and stdout rules', () => {
     expect(entrypoint).not.toMatch(/^\s*pkill/m);
   });
 
+  it('REMOVE.md checks ownership before it edits .env: an unlabelled Bridge is ours only while .env has its password', () => {
+    const check = remove.indexOf('owner-check.sh');
+    expect(check).toBeGreaterThan(0);
+    expect(check).toBeLessThan(remove.indexOf('`PROTON_MAIL_BRIDGE_PASSWORD`'));
+    expect(check).toBeLessThan(remove.indexOf('rm -rf store/proton-mail'));
+  });
+
+  it('REMOVE.md tells the operator to stop when the check refuses, before .env loses the password', () => {
+    const block = removeBlocks.find((b) => b.includes('owner-check.sh'))!;
+    expect(block).toMatch(/\nelse\n\s*rc=\$\?\n\s*if \[ "\$rc" -eq 3 \]; then\n\s*echo "[^"]*Carry on with step 2\." >&2\n\s*else\n\s*echo "Bridge NOT removed[^"]*Stop here[^"]*" >&2\n\s*false\n/);
+  });
+
+  it('no setup command splices a value into double quotes: values go in single quotes, which the prompts refuse', () => {
+    for (const block of runBlocks) expect(block, block).not.toMatch(/"\{\{/);
+    expect(skill).toMatch(/nc:prompt owner_email[^\n]*validate:\^\[\^@\\s'\]\+@/);
+    expect(skill).toContain("set -o pipefail; pnpm exec tsx .claude/skills/add-proton-mail/scripts/normalize-address.ts '{{owner_email}}' | sed -n 's/^.*NORMALIZED=//p'");
+  });
+
+  it('REMOVE.md lists the .env keys as text, not as a shell block', () => {
+    for (const block of removeBlocks) expect(block).not.toMatch(/^PROTON_MAIL_/m);
+    expect(remove).toMatch(/^- `PROTON_MAIL_BRIDGE_PASSWORD`$/m);
+  });
+
   it('the entrypoint prints nothing on stdout before the `secrets` dispatch', () => {
     const before = entrypoint.slice(0, entrypoint.indexOf('== "secrets"'));
     const writes = before.split('\n').filter((l) => /^\s*(echo|printf)\b/.test(l));
     expect(writes.length).toBeGreaterThan(0);
     for (const line of writes) expect(line, line).toMatch(/>&2\s*$/);
+  });
+});
+
+describe('bridge-secrets.sh with a fake vault', () => {
+  const script = join(skillDir, 'bridge', 'bridge-secrets.sh');
+  let dir: string;
+  const user = (email: string, pass: string) => ({ PrimaryEmail: email, BridgePass: Buffer.from(pass).toString('base64') });
+  function run(field: string, vault: unknown, account?: string) {
+    const editor = join(dir, 'vault-editor');
+    writeFileSync(join(dir, 'vault.json'), JSON.stringify(vault));
+    writeFileSync(editor, `#!/bin/bash\ncat ${JSON.stringify(join(dir, 'vault.json'))}\n`);
+    chmodSync(editor, 0o755);
+    const env: NodeJS.ProcessEnv = { ...process.env, BRIDGE_VAULT_EDITOR: editor };
+    delete env.PROTON_BRIDGE_ACCOUNT;
+    if (account !== undefined) env.PROTON_BRIDGE_ACCOUNT = account;
+    return spawnSync('bash', [script, field], { env, encoding: 'utf8' });
+  }
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), 'bridge-secrets-'));
+  });
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+  it('one account: its password (unpadded base64) and its address, lowercased', () => {
+    const vault = { Users: [user('Agent@Example.org', 'abcd')] };
+    expect(run('password', vault).stdout).toBe('YWJjZA\n');
+    expect(run('address', vault).stdout).toBe('agent@example.org\n');
+  });
+
+  it('several accounts: refuses to guess, naming them, unless PROTON_BRIDGE_ACCOUNT picks one', () => {
+    const vault = { Users: [user('a@example.org', 'first-pass'), user('b@example.org', 'second-pass')] };
+    const refused = run('password', vault);
+    expect(refused.status).toBe(1);
+    expect(refused.stdout).toBe('');
+    expect(refused.stderr).toMatch(/several accounts: a@example\.org, b@example\.org/);
+    expect(refused.stderr).toMatch(/PROTON_BRIDGE_ACCOUNT=.* to \.env/);
+    expect(run('password', vault, 'B@example.org').stdout).toBe(
+      `${Buffer.from('second-pass').toString('base64').replace(/=+$/, '')}\n`,
+    );
+    expect(run('address', vault, 'b@example.org').stdout).toBe('b@example.org\n');
+  });
+
+  it('an account with no primary address is still counted and shown as ?', () => {
+    const r = run('password', { Users: [user('a@example.org', 'p'), { BridgePass: 'cQ' }] });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/several accounts: a@example\.org, \?/);
+  });
+
+  it('PROTON_BRIDGE_ACCOUNT naming no account in the vault is refused', () => {
+    const r = run('password', { Users: [user('a@example.org', 'p')] }, 'c@example.org');
+    expect(r.status).toBe(1);
+    expect(r.stdout).toBe('');
+  });
+
+  it('a vault reader that fails says so, rather than "not signed in"', () => {
+    const editor = join(dir, 'failing-editor');
+    writeFileSync(editor, '#!/bin/bash\necho "gpg: decryption failed" >&2\nexit 2\n');
+    chmodSync(editor, 0o755);
+    const r = spawnSync('bash', [script, 'password'], {
+      env: { ...process.env, BRIDGE_VAULT_EDITOR: editor },
+      encoding: 'utf8',
+    });
+    expect(r.status).toBe(1);
+    expect(r.stdout).toBe('');
+    expect(r.stderr).toMatch(/could not read Bridge's vault/);
+    expect(r.stderr).not.toMatch(/signed in/);
+  });
+
+  it('an empty vault says the account is not signed in', () => {
+    const r = run('password', { Users: [] });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/signed in/);
+  });
+});
+
+describe('store-secrets.sh keeps the account choice in .env', () => {
+  it('passes PROTON_BRIDGE_ACCOUNT from .env to the vault read when the shell has none', () => {
+    const work = mkdtempSync(join(tmpdir(), 'store-secrets-'));
+    try {
+      const bin = join(work, 'bin');
+      mkdirSync(bin);
+      const seen = join(work, 'seen');
+      // A fake docker: records the account it was given, answers the password
+      // read, and fails the certificate read so the script stops there.
+      writeFileSync(
+        join(bin, 'docker'),
+        `#!/bin/bash\nprintf '%s\\n' "\${PROTON_BRIDGE_ACCOUNT-unset}" >> ${JSON.stringify(seen)}\n` +
+          `case "\${@: -1}" in password) echo AAAAAAAAAAAAAAAAAAAAAAAA ;; *) exit 1 ;; esac\n`,
+      );
+      chmodSync(join(bin, 'docker'), 0o755);
+      // Quoted, with a Windows line ending: both are taken off.
+      writeFileSync(join(work, '.env'), 'PROTON_BRIDGE_ACCOUNT="b@example.org"\r\n');
+      const env: NodeJS.ProcessEnv = { ...process.env, PATH: `${bin}:${process.env.PATH}` };
+      delete env.PROTON_BRIDGE_ACCOUNT;
+      spawnSync('bash', [join(skillDir, 'bridge', 'store-secrets.sh')], { cwd: work, env, encoding: 'utf8' });
+      expect(readFileSync(seen, 'utf8').trim().split('\n')[0]).toBe('b@example.org');
+      expect(readFileSync(join(work, '.env'), 'utf8')).toMatch(/^PROTON_MAIL_BRIDGE_PASSWORD=A{24}$/m);
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('bridge-account.sh reads the account as a .env value', () => {
+  const script = join(skillDir, 'bridge', 'bridge-account.sh');
+  function read(envText: string, fromShell?: string) {
+    const work = mkdtempSync(join(tmpdir(), 'bridge-account-'));
+    try {
+      writeFileSync(join(work, '.env'), envText);
+      const env: NodeJS.ProcessEnv = { ...process.env };
+      delete env.PROTON_BRIDGE_ACCOUNT;
+      if (fromShell !== undefined) env.PROTON_BRIDGE_ACCOUNT = fromShell;
+      return spawnSync('bash', [script], { cwd: work, env, encoding: 'utf8' }).stdout;
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  }
+  it.each([
+    ['plain', 'PROTON_BRIDGE_ACCOUNT=b@example.org\n'],
+    ['double-quoted', 'PROTON_BRIDGE_ACCOUNT="b@example.org"\n'],
+    ['single-quoted', "PROTON_BRIDGE_ACCOUNT='b@example.org'\n"],
+    ['trailing space and CRLF', 'PROTON_BRIDGE_ACCOUNT=b@example.org  \r\n'],
+    ['the last of two lines', 'PROTON_BRIDGE_ACCOUNT=a@example.org\nPROTON_BRIDGE_ACCOUNT=b@example.org\n'],
+  ])('%s', (_name, text) => {
+    expect(read(text)).toBe('b@example.org\n');
+  });
+  it('drops an inline comment after an unquoted value, and keeps one inside quotes', () => {
+    expect(read('PROTON_BRIDGE_ACCOUNT=b@example.org  # the main one\n')).toBe('b@example.org\n');
+    expect(read('PROTON_BRIDGE_ACCOUNT=                      # setup only\n')).toBe('\n');
+    expect(read('PROTON_BRIDGE_ACCOUNT="b@example.org" # main\n')).toBe('b@example.org\n');
+  });
+  it('keeps an unmatched quote, prints nothing when unset, and lets the shell win', () => {
+    expect(read('PROTON_BRIDGE_ACCOUNT="b@example.org\n')).toBe('"b@example.org\n');
+    expect(read('OTHER=1\n')).toBe('\n');
+    expect(read('PROTON_BRIDGE_ACCOUNT=a@example.org\n', 'b@example.org')).toBe('b@example.org\n');
+  });
+});
+
+describe('owner-check.sh without docker', () => {
+  it('passes, printing the label: no Bridge resources can exist (REMOVE.md can finish)', () => {
+    const bin = mkdtempSync(join(tmpdir(), 'no-docker-'));
+    try {
+      // Only what the script needs besides docker.
+      for (const tool of ['bash', 'sha1sum', 'cut', 'grep', 'realpath', 'dirname', 'pwd', 'cat', 'printf']) {
+        const found = spawnSync('bash', ['-c', `command -v ${tool}`], { encoding: 'utf8' }).stdout.trim();
+        if (found.startsWith('/')) symlinkSync(found, join(bin, tool));
+      }
+      const r = spawnSync('bash', [ownerCheck], {
+        cwd: repoRoot,
+        env: { PATH: bin, NANOCLAW_INSTALL_ID: 'testslug' },
+        encoding: 'utf8',
+      });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toBe(`${KEY}=testslug\n`);
+      expect(r.stderr).toMatch(/docker is not installed/);
+    } finally {
+      rmSync(bin, { recursive: true, force: true });
+    }
   });
 });
