@@ -38,7 +38,7 @@ export interface SocketLogger {
 }
 
 export interface MattermostSocketOptions {
-  /** How long to wait for the server to acknowledge the token. Default 10s. */
+  /** Deadline for each opening handshake and token acknowledgment. Default 10s. */
   authTimeoutMs?: number;
   /** Instance base URL (no trailing slash). */
   baseUrl: string;
@@ -178,7 +178,7 @@ export class MattermostSocket {
     return new Promise<void>((resolve, reject) => {
       let socket: WebSocket;
       try {
-        socket = new Impl(url);
+        socket = new Impl(url, { handshakeTimeout: this.options.authTimeoutMs });
       } catch (error) {
         reject(error);
         return;
