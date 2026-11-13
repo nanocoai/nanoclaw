@@ -1598,8 +1598,8 @@ describe('size limits and worker timeouts', () => {
     await until(() => h.stalled.length === 2);
     vi.advanceTimersByTime(10_000);
     await waitFor(() => calls.inbound.length === 1, 20_000);
-    expect(calls.inbound[0].content.text).toBe(
-      '[The HTML body of this mail took too long to read; it was not converted.]\n\nSubject: Slow',
+    expect(calls.inbound[0].content.text).toMatch(
+      /^\[HTML body not converted by the mail channel [0-9a-f]{8}: it took too long to read\]\n\nSubject: Slow$/,
     );
     expect(readState().retry).toEqual({});
     expect(flagged()).toEqual([[1, ['\\Seen']]]);
@@ -2785,7 +2785,7 @@ describe('review 5 of #4218', () => {
       const held = await arriveAll([mail({ body: 'one more' })]);
       expect(readState().retry[held]).toMatchObject({ deferred: 'sender', from: OWNER });
       expect(readState().retry[held].stranger).toBeUndefined();
-      expect(readState().retry[held].counted).toBeUndefined();
+      expect(readState().retry[held].counted).toBe(false);
       expect(flagged().filter(([u]) => u === held)).toEqual([]);
     }, 60_000);
 
@@ -2895,6 +2895,53 @@ describe('review 5 of #4218', () => {
       await tick();
       expect(warn.mock.calls.filter(([m]) => String(m).includes('form mail never arrives in'))).toEqual([]);
     }, 30_000);
+  });
+
+  describe('retries and holds', () => {
+    it('a held mail’s first read may retry a slow HTML conversion: a hold is not a failure', async () => {
+      h.wired = false;
+      h.settled = { [OWNER]: 'approved' };
+      // UID 1 is in the mailbox, seen, and held for the hourly limit.
+      h.server.deliver(mail({ subject: 'Slow', body: '<p>hello</p>', contentType: 'text/html; charset=utf-8' }));
+      seedState({
+        lastUid: 1,
+        retry: {
+          '1': {
+            attempts: 0,
+            nextAt: new Date(Date.now() + 30_000).toISOString(),
+            deferred: 'sender',
+            from: OWNER,
+            counted: false,
+          },
+        },
+      });
+      h.stall.html = 1;
+      const { calls } = await start();
+      vi.advanceTimersByTime(61_000);
+      await until(() => h.stalled.length === 1);
+      vi.advanceTimersByTime(10_000);
+      await waitFor(() => (readState().retry['1']?.attempts ?? 0) === 1 || calls.inbound.length === 1, 20_000);
+      // Tried again later, not delivered as a "not converted" placeholder.
+      expect(calls.inbound).toEqual([]);
+      expect(readState().retry['1'].attempts).toBe(1);
+    }, 60_000);
+
+    it('entries saved before `counted` existed are read by their old rule', async () => {
+      h.wired = false;
+      h.settled = { [OWNER]: 'approved' };
+      // UID 21 is in the mailbox, seen, with a pre-upgrade failure retry (no
+      // `counted`): it had been counted, so it is not counted again.
+      for (let i = 0; i < 21; i++) h.server.deliver(mail({ body: `old ${i}` }));
+      seedState({ lastUid: 21, retry: { '21': { attempts: 1, nextAt: new Date(Date.now() + 30_000).toISOString() } } });
+      const { calls } = await start();
+      // The sender's hour fills up first.
+      await arriveAll(Array.from({ length: 20 }, (_, i) => mail({ body: `m ${i}` })));
+      expect(calls.inbound).toHaveLength(20);
+      vi.advanceTimersByTime(61_000);
+      await waitFor(() => calls.inbound.length === 21 || readState().retry['21']?.deferred === 'sender', 20_000);
+      expect(readState().retry['21']).toBeUndefined();
+      expect(calls.inbound).toHaveLength(21);
+    }, 90_000);
   });
 
   describe('the lines the channel adds', () => {

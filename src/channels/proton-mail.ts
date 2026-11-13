@@ -332,7 +332,8 @@ export async function mailText(
   } = {},
 ): Promise<string> {
   if (!parsed.html) return parsed.text ?? '';
-  const result = await htmlToTextInWorker(parsed.html, timeoutMs, opts.token ?? newMarkToken());
+  const token = opts.token ?? newMarkToken();
+  const result = await htmlToTextInWorker(parsed.html, timeoutMs, token);
   if (opts.retryable && (result.kind === 'timeout' || result.kind === 'failed')) {
     // A worker that could not start or finish under load is no reason to lose
     // the body for good: one more attempt, then the placeholder below.
@@ -343,18 +344,18 @@ export async function mailText(
       if (result.hidden > 0)
         log.info('Proton Mail: hidden HTML text flagged for the agent', { elements: result.hidden });
       return result.truncated
-        ? `${result.text}\n\n[… the HTML body was cut at ${HTML_MAX_CHARS} characters]`
+        ? `${result.text}\n\n[… HTML body cut by the mail channel ${token} at ${HTML_MAX_CHARS} characters]`
         : result.text;
     case 'too-deep':
       log.warn('Proton Mail: HTML body nested too deep to convert', { maxDepth: HTML_MAX_DEPTH });
-      return '[The HTML body of this mail is nested too deeply to read; it was not converted.]';
+      return `[HTML body not converted by the mail channel ${token}: it is nested too deeply to read]`;
     case 'timeout':
       log.warn('Proton Mail: HTML body took too long to convert — worker stopped', { timeoutMs });
-      return '[The HTML body of this mail took too long to read; it was not converted.]';
+      return `[HTML body not converted by the mail channel ${token}: it took too long to read]`;
     case 'failed':
       // The error's kind only: a message could quote the mail.
       log.warn('Proton Mail: HTML body could not be converted to text', { error: result.error });
-      return '[The HTML body of this mail could not be read; it was not converted.]';
+      return `[HTML body not converted by the mail channel ${token}: it could not be read]`;
   }
 }
 
@@ -811,7 +812,7 @@ export async function forwardedMessageText(source: Uint8Array, token = newMarkTo
     const text = (await mailText(inner, HTML_TIMEOUT_MS, { token })).slice(0, BODY_MAX_CHARS).trim();
     return `${lines.join('\n')}\n\n${text}`;
   } catch {
-    return `${head}\n[The forwarded message attached to this mail could not be read.]`;
+    return `${head}\n[forwarded message not read by the mail channel ${token}: the attachment could not be read]`;
   }
 }
 
@@ -2054,9 +2055,14 @@ function rememberThread(state: AdapterState, address: string, ref: Omit<ThreadRe
   }
 }
 
+/** Whether a card is still within its life (CARD_TTL_MS): pruned past it, and no longer counted. */
+function cardLive(card: CardRef, now = Date.now()): boolean {
+  return now - Date.parse(card.sentAt) <= CARD_TTL_MS;
+}
+
 function pruneCards(state: AdapterState, now = Date.now()): void {
   for (const [token, card] of Object.entries(state.cards)) {
-    if (now - Date.parse(card.sentAt) > CARD_TTL_MS) delete state.cards[token];
+    if (!cardLive(card, now)) delete state.cards[token];
   }
   // Over the cap, answered and closed cards go, oldest first. An unanswered
   // card stays until its TTL, so mail from many new addresses cannot push out
@@ -2382,12 +2388,7 @@ registerChannelAdapter('proton-mail', {
       if (ids.length === 0) return false;
       const now = Date.now();
       return Object.values(state.cards).some(
-        (c) =>
-          c.address === addr &&
-          !c.answeredAt &&
-          !c.closedAt &&
-          now - Date.parse(c.sentAt) <= CARD_TTL_MS &&
-          repliesToCard(c, ids),
+        (c) => c.address === addr && !c.answeredAt && !c.closedAt && cardLive(c, now) && repliesToCard(c, ids),
       );
     }
 
@@ -2449,7 +2450,7 @@ registerChannelAdapter('proton-mail', {
         deferred: kind,
         from,
         ...(kind === 'sender' && !approved && { stranger: true }),
-        ...(wasCounted(uid) && { counted: true }),
+        counted: wasCounted(uid),
       };
       log.warn('Proton Mail: over an hourly limit — mail held until the hour has room', {
         uid,
@@ -2489,13 +2490,23 @@ registerChannelAdapter('proton-mail', {
 
     /** Whether a card still within its TTL was mailed to this address: its approver is not a stranger. */
     function cardMailedTo(addr: string, now = Date.now()): boolean {
-      return Object.values(state.cards).some((c) => c.address === addr && now - Date.parse(c.sentAt) <= CARD_TTL_MS);
+      return Object.values(state.cards).some((c) => c.address === addr && cardLive(c, now));
     }
 
     /** Mail counted against its sender's hour in this pass (RetryRef.counted); cleared when the pass ends. */
     const countedUids = new Set<number>();
-    /** Whether a mail has been counted against its sender's hour, in this pass or an earlier one. */
-    const wasCounted = (uid: number) => countedUids.has(uid) || !!state.retry[uid]?.counted;
+    /**
+     * Whether a mail has been counted against its sender's hour, in this pass
+     * or an earlier one. Entries saved before `counted` existed are read by
+     * the rule they were written under: everything but a sender-limit hold
+     * had been counted.
+     */
+    const wasCounted = (uid: number): boolean => {
+      if (countedUids.has(uid)) return true;
+      const r = state.retry[uid];
+      if (!r) return false;
+      return r.counted ?? r.deferred !== 'sender';
+    };
 
     /**
      * Whether a mail from an address not yet approved may go to the host now
@@ -2661,7 +2672,10 @@ registerChannelAdapter('proton-mail', {
 
       // This mail's mark code (see newMarkToken).
       const token = newMarkToken();
-      const fullText = await mailText(parsed, HTML_TIMEOUT_MS, { retryable: !state.retry[uid], token });
+      const fullText = await mailText(parsed, HTML_TIMEOUT_MS, {
+        retryable: (state.retry[uid]?.attempts ?? 0) === 0,
+        token,
+      });
       const rawText = fullText.slice(0, TEXT_MAX_CHARS);
       // Subject, Message-ID and References come from any sender and are kept
       // in the state file and sent back in headers, so each is capped. What
@@ -2681,9 +2695,10 @@ registerChannelAdapter('proton-mail', {
       }
       // Invisible characters first: stripping one can complete a typed note
       // ("[Note from the mail\u00AD channel"), so notes are disowned after. Both
-      // lengthen the text, so the cap comes last and holds for what the agent
-      // sees. The text is cut once before them, so a huge mail costs no more
-      // than a mail at the cap.
+      // lengthen the text, so the cap comes last and holds for the sender's
+      // text the agent sees; the channel's own closing lines (the end of a
+      // forward, the truncation line) come after it. The text is cut once
+      // before them, so a huge mail costs no more than a mail at the cap.
       const total = body.length;
       const uncuttable = [forwardMark(token), ...marksOf(token)];
       body = disownTypedNotes(
@@ -2962,8 +2977,7 @@ registerChannelAdapter('proton-mail', {
         return;
       }
       const delay = retryDelayMs(attempts);
-      const counted = wasCounted(uid);
-      state.retry[uid] = { attempts, nextAt: new Date(Date.now() + delay).toISOString(), ...(counted && { counted }) };
+      state.retry[uid] = { attempts, nextAt: new Date(Date.now() + delay).toISOString(), counted: wasCounted(uid) };
       log.warn('Proton Mail: handling a mail failed — will retry', { uid, attempts, inMs: delay, err });
     }
 

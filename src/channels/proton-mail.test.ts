@@ -474,7 +474,7 @@ describe('mailText', () => {
   });
   it('caps the HTML it converts and says so', async () => {
     const text = await mailText({ text: undefined, html: '<p>a</p>'.repeat(100_000) });
-    expect(text).toMatch(/cut at 512000 characters/);
+    expect(text).toMatch(/cut by the mail channel [0-9a-f]{8} at 512000 characters/);
   });
   it('stops a conversion that runs past the timeout, off the event loop', async () => {
     let ticks = 0;
