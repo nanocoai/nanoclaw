@@ -109,6 +109,15 @@ describe('Discord card limit through the bridge', () => {
     expect(posts).toHaveLength(0);
   });
 
+  // The bridge escapes each block alone; Discord shows them in one embed.
+  it('keeps a stray backtick in one block from pairing with code in the next', async () => {
+    const filler = ('w'.repeat(79) + '\n').repeat(24) + 'w'.repeat(38) + '\n';
+    await ask('Approve', filler + 'x `y\n`foo [Admin](https://evil.test) <@1>`');
+    const { description } = posts[0].embeds[0];
+    expect(description).toContain('x \\`y\n');
+    expect(description).toContain('\n`foo [Admin](https://evil.test) <@1>`');
+  });
+
   it('refuses a long gateway card instead of cutting it', async () => {
     const { title, question } = longGatewayCard();
     await expect(ask(title, question)).rejects.toBeInstanceOf(CardTooLongError);
@@ -190,11 +199,19 @@ describe('Discord prose that CommonMark treats as code', () => {
     '```\nx ``` [Admin](https://evil.test) <@1> ||hidden||\n```',
     '````\n```\n[Admin](https://evil.test) <@1> ||hidden||\n```\n````',
     'x ``` y\n```\n[Admin](https://evil.test) <@1> ||hidden||\n```',
+    // Discord needs a line in a block, so it skips a blank fence's close.
+    '```\n```\n```\n[Admin](https://evil.test) <@1> ||hidden||\n```',
+    '```sh\n\n```\n```\n[Admin](https://evil.test) <@1> ||hidden||\n```',
   ])('escapes text Discord shows as prose in %j', (text) => {
     const result = escapeDiscordCardText(text);
     expect(result).toContain(']\u2060(');
     expect(result).toContain('<\u2060@1>');
     expect(result).not.toContain('||');
+  });
+  it('puts a backslash before a backtick in prose, but not before one already escaped', () => {
+    expect(escapeDiscordCardText('x `y')).toBe('x \\`y');
+    expect(escapeDiscordCardText('x \\`y')).toBe('x \\`y');
+    expect(escapeDiscordCardText('x \\\\`y')).toBe('x \\\\\\`y');
   });
   it('keeps a ``` fence with single backticks inside byte-for-byte', () => {
     const code = '```sh\ncat <input; echo `date` ``x``\n```';
