@@ -936,7 +936,7 @@ export async function finishDeviceFlow({ api, idp, device }: DeviceFlow): Promis
   return credential;
 }
 
-async function deviceLogin(api: string, cfg: IdpConfig): Promise<EnrollResult> {
+export async function deviceLogin(api: string, cfg: IdpConfig): Promise<EnrollResult> {
   const device = await requestDeviceAuthorization(cfg);
   const headless = isHeadless();
   // Opened before the card prints, so the card can report what happened.

@@ -4,7 +4,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { openInBrowser, printDeviceCard } from './registry-login.js';
+import { deviceLogin, openInBrowser, printDeviceCard } from './registry-login.js';
 
 const spawn = vi.hoisted(() => vi.fn(() => ({ pid: 4242 as number | undefined, on: vi.fn(), unref: vi.fn() })));
 const host = vi.hoisted(() => ({ wsl: false, commands: new Set<string>() }));
@@ -15,6 +15,14 @@ vi.mock('./platform.js', () => ({
   isHeadless: () => false,
   isWSL: () => host.wsl,
 }));
+// The device poll waits the provider's interval before each request.
+vi.mock('timers/promises', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('timers/promises')>()),
+  setTimeout: async () => undefined,
+}));
+
+const OPENING = 'Your browser should open on its own';
+const NOT_OPENED = "Couldn't open a browser here — open that link yourself.";
 
 const realPlatform = process.platform;
 function onPlatform(value: NodeJS.Platform): void {
@@ -173,7 +181,6 @@ describe('printDeviceCard', () => {
     expiresAt: new Date(0).toISOString(),
     intervalS: 5,
   };
-  const OPENING = 'Your browser should open on its own';
 
   function card(headless: boolean, opened: boolean): string {
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -185,7 +192,7 @@ describe('printDeviceCard', () => {
 
   it('tells the user to open the link themselves when no browser was opened', () => {
     const text = card(false, false);
-    expect(text).toContain("Couldn't open a browser here — open that link yourself.");
+    expect(text).toContain(NOT_OPENED);
     expect(text).not.toContain(OPENING);
     expect(text).not.toContain('No browser on this machine');
   });
@@ -196,5 +203,69 @@ describe('printDeviceCard', () => {
 
   it('keeps the headless wording when the machine has no display', () => {
     expect(card(true, false)).toContain('No browser on this machine — open that link on your phone or laptop.');
+  });
+});
+
+describe('deviceLogin', () => {
+  const IDP = {
+    clientId: 'client_test',
+    deviceEndpoint: 'https://auth.example.invalid/device_authorization',
+    tokenEndpoint: 'https://auth.example.invalid/token',
+  };
+  const LINK = 'https://auth.example.invalid/device?user_code=ABCD-EFGH';
+
+  beforeEach(() => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) =>
+        url === IDP.deviceEndpoint
+          ? reply(200, {
+              device_code: 'device-code',
+              user_code: 'ABCD-EFGH',
+              verification_uri: 'https://auth.example.invalid/device',
+              verification_uri_complete: LINK,
+              expires_in: 300,
+              interval: 5,
+            })
+          : reply(400, { error: 'access_denied' }),
+      ),
+    );
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function reply(status: number, body: unknown) {
+    return { status, text: async () => JSON.stringify(body) };
+  }
+
+  // The first poll is declined, so the login stops after the card and never
+  // reaches clientRecord(), which writes a host id under the real HOME.
+  async function cardFromLogin(): Promise<string> {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      await expect(deviceLogin('https://registry.example.invalid', IDP)).rejects.toThrow('declined');
+      return log.mock.calls.map((call) => String(call[0])).join('\n');
+    } finally {
+      log.mockRestore();
+    }
+  }
+
+  it('tells the card a browser should open when the opener starts', async () => {
+    onPlatform('darwin');
+    const text = await cardFromLogin();
+    expect(spawn).toHaveBeenCalledWith('open', [LINK], expect.anything());
+    expect(text).toContain(OPENING);
+    expect(text).not.toContain(NOT_OPENED);
+  });
+
+  it('tells the card no browser opened when the opener fails to start', async () => {
+    onPlatform('darwin');
+    spawn.mockImplementationOnce(() => ({ pid: undefined, on: vi.fn(), unref: vi.fn() }));
+    const text = await cardFromLogin();
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(text).toContain(NOT_OPENED);
+    expect(text).not.toContain(OPENING);
   });
 });
