@@ -49,9 +49,13 @@ export function gatewayApprovalPresentation(request: GatewayApprovalRequest): { 
         lines.push(`*${safe(field.label)}:* ${safeMultiline(field.value)}`);
       }
     }
-    const question = lines.join('\n');
+    let question = lines.join('\n');
+    // Shown hidden characters can push a valid title past 256 (Discord's cap).
+    let title = plainTitle(request.title);
+    if (title.length > 256)
+      [title, question] = ['Approve external request', `*Request:* ${safe(request.title)}\n${question}`];
     if (Buffer.byteLength(question, 'utf8') > 262144) throw new Error('Gateway display too large');
-    return { title: plainTitle(request.title), question };
+    return { title, question };
   }
   const summary = request.summary;
   if (!summary) {
