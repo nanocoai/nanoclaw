@@ -174,6 +174,13 @@ export type ProviderEvent =
    * gets the wrap-nudge instead.
    */
   | { type: 'text'; text: string }
+  /**
+   * The assistant requested tool calls (names as the provider reports them,
+   * e.g. "mcp__nanoclaw__send_message", "WebFetch"). Optional: the poll-loop
+   * uses it to tell a reply sent after the work apart from an "on it" sent
+   * before it. Providers that don't emit it fall back to whole-turn checks.
+   */
+  | { type: 'tool_use'; names: string[] }
   | { type: 'error'; message: string; retryable: boolean; classification?: string }
   | { type: 'progress'; message: string }
   | { type: 'file'; path: string }
