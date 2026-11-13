@@ -91,6 +91,22 @@ describe('Telegram card limit through the bridge', () => {
     expect(sends()[0].text).not.toContain('[Admin](https://evil.test)');
   });
 
+  it('shows an entity or hidden character in a gateway title as text, not the character', async () => {
+    for (const action of ['Pay &#x202E;txt.exe', 'Pay \u202Etxt.exe\u200B']) {
+      const summary = {
+        agent: 'a',
+        action,
+        resource: 'POST x.test/y',
+        reason: 'r',
+        details: [{ label: 'To', value: 'S' }],
+      };
+      const card = gatewayApprovalPresentation({ title: 'T', question: '', summary } as GatewayApprovalRequest);
+      await ask(card.title, card.question);
+    }
+    const titles = sends().map((message) => message.text!.split('\n')[0]);
+    expect(titles).toEqual(['*Pay &\\#x202E;txt\\.exe*', '*Pay \\\\u202etxt\\.exe\\\\u200b*']);
+  });
+
   // MarkdownV2 escapes every dot, doubling the text.
   it('sends a card at the limit whole, even when escaping doubles its text', async () => {
     await ask('Approve', '.'.repeat(1993));

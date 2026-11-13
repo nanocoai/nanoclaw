@@ -288,7 +288,7 @@ describe('a Discord card near the limit when it is clicked', () => {
 
 describe('escapeDiscordCardText', () => {
   it('keeps copyable shell code and lone pipes byte-for-byte', () => {
-    for (const fence of ['`', '```', '````']) {
+    for (const fence of ['`', '``', '```']) {
       const code = fence + '\ncat <input | sed "s/](//"\n' + fence;
       expect(escapeDiscordCardText(code)).toBe(code);
     }
@@ -405,5 +405,16 @@ describe('Discord prose that CommonMark treats as code', () => {
   });
   it('escapes tilde-fenced text even with a closing fence', () => {
     expect(escapeDiscordCardText('~~~\n<@1>\n~~~')).toContain('<\u2060@1>');
+  });
+  // Discord ends the block at the inner ```, or pairs a stray ``` with the fence.
+  it.each([
+    '```\nx ``` [Admin](https://evil.test) <@1> ||hidden||\n```',
+    '````\n```\n[Admin](https://evil.test) <@1> ||hidden||\n```\n````',
+    'x ``` y\n```\n[Admin](https://evil.test) <@1> ||hidden||\n```',
+  ])('escapes text Discord shows as prose in %j', (text) => {
+    const result = escapeDiscordCardText(text);
+    expect(result).toContain(']\u2060(');
+    expect(result).toContain('<\u2060@1>');
+    expect(result).not.toContain('||');
   });
 });
