@@ -169,7 +169,7 @@ export function escapeCardTitles(adapter: Pick<SlackAdapter, 'webClient'>): void
     const header = payload.blocks.find((block) => block.type === 'header' && block.text?.type === 'plain_text');
     const title = header?.text?.text;
     return typeof title === 'string' && title
-      ? { ...args, text: payload.text.replace(title, escapeSlackTitle(title)) }
+      ? { ...args, text: payload.text.replace(title, () => escapeSlackTitle(title)) }
       : args;
   };
   const post = chat.postMessage.bind(chat);

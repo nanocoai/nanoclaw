@@ -75,8 +75,8 @@ describe('escapeSlackMrkdwn', () => {
 
 describe('escapeSlackTitle', () => {
   it('escapes the notification title without look-alike characters', () => {
-    const title = 'Create agent: "<!channel>" @here a@b & x';
-    expect(escapeSlackTitle(title)).toBe('Create agent: "&lt;!channel&gt;" @here a@b &amp; x');
+    const title = '$& $` $\' Create agent: "<!channel>" @here a@b & x';
+    expect(escapeSlackTitle(title)).toBe('$&amp; $` $\' Create agent: "&lt;!channel&gt;" @here a@b &amp; x');
   });
 });
 
@@ -120,7 +120,7 @@ describe('Slack approval card text', () => {
 
   it('keeps link and mention syntax in the title inert in the notification text', async () => {
     const bridge = slackInstanceBridgeFactory('cards');
-    const title = 'Create agent: "<!channel>" @here <https://example.com|click>';
+    const title = '$& $` $\' Create agent: "<!channel>" @here <https://example.com|click>';
     await bridge!.deliver('slack:D1', null, {
       kind: 'chat-sdk',
       content: { type: 'ask_question', questionId: 'appr-2', title, question: 'Approve?', options: ['Approve'] },

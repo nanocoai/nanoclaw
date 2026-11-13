@@ -465,6 +465,8 @@ export function createTelegramBridge(options: TelegramBridgeOptions = {}): Chann
   keepCommandsAsMessages(telegramAdapter);
   refuseCutCards(telegramAdapter);
   const bridge = createChatSdkBridge({
+    // refuseCutCards owns title encoding before measuring the actual wire text.
+    ...{ escapeCardTitle: (title: string) => title },
     adapter: telegramAdapter,
     instance: options.instanceKey, // undefined ⇒ default instance (keyed by channelType)
     concurrency: 'concurrent',
