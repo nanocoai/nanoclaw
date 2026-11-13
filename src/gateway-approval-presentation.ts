@@ -51,7 +51,7 @@ export function gatewayApprovalPresentation(request: GatewayApprovalRequest): { 
     }
     const question = lines.join('\n');
     if (Buffer.byteLength(question, 'utf8') > 262144) throw new Error('Gateway display too large');
-    return { title: request.title, question };
+    return { title: plainTitle(request.title), question };
   }
   const summary = request.summary;
   if (!summary) {
