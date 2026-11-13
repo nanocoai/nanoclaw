@@ -30,7 +30,10 @@ const DISCORD_DEFAULTS: ChannelDefaults = {
  * joiner breaks each outside code (including every pipe in a spoiler run), and
  * a clicker's name or a request value can't pose as other text.
  */
-export function escapeDiscordCardText(text: string): string {
+export function escapeDiscordCardText(card: string): string {
+  // Discord reads \r and \r\n as a line break and drops form feeds before it
+  // parses, so check and send the text as Discord will read it.
+  const text = card.replace(/\r\n?/g, '\n').replace(/\f/g, '');
   // Code is already literal on Discord. Keep commands inside matched code
   // spans/fences byte-for-byte, and escape only the surrounding prose. Its
   // backticks and [ get a backslash: Discord pairs a backtick, or ends a link,
