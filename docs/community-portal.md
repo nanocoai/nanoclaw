@@ -37,6 +37,26 @@ Under the hood, for every stage: sign in if needed, ensure the device key, regis
 (`POST /api/v1/devices`, idempotent), start the stage, wait for the browser, apply the result,
 report completion. The wizard polls the portal; nothing calls back into your machine.
 
+## What the account sends
+
+- your email address
+- a random host id with your OS and CPU type, at sign-in and on every image pull
+- your NanoClaw version at sign-in; the image digest, Node version, and helper version on each pull
+- a device label (`<hostname> · <folder name>`)
+- for Slack, the agent's name, your workspace, your Slack user id, and your NanoClaw version; for
+  a teammate made from chat, also its template and the app that made it; and up to 300 characters
+  of its instructions (or its template's description) to draw its avatar
+
+While signed in, the host stays connected to portal.nanoclaw.dev so perk changes reach it (see
+[Presence and the link](#presence-and-the-link)). It sends nothing about your agents, messages, or
+files. Building the image yourself needs no account and contacts no NanoClaw service (the build
+still downloads its base image and packages); see [hardened-image.md](hardened-image.md).
+
+The sign-in record, device key, and perk state live in `~/.config/nanoclaw/` and
+`data/community-portal.json`, mode `0600` (table below). Revisit a perk with
+`pnpm exec tsx setup/portal.ts --stage echo` (or `--stage slack`). To sign out, see
+[Signing a machine out](#signing-a-machine-out).
+
 ## Files and locks on your machine
 
 | File | Mode | Holds |
@@ -100,6 +120,11 @@ account service, the host is disconnected and logs `sign_in_required`, and the p
 the journal are dropped. Run a setup stage again to register the machine afresh under the same
 account; `pnpm exec tsx setup/index.ts --step registry -- --status` shows the sign-in state.
 Signing out of the browser only ends that browser session.
+
+To sign out from the terminal, run `pnpm exec tsx setup/index.ts --step registry -- --logout`. It
+removes the local credential and the docker credential helper, and revokes the session at the
+account service when it can reach it. If it says it could not, forget the machine under
+**Devices** so a copied token stops working.
 
 ## Troubleshooting
 
