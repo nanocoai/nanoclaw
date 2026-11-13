@@ -150,6 +150,16 @@ it('makes bidi and line-separator characters visible in gateway values', () => {
   expect(card.question).toContain('u202e');
   expect(card.question).toContain('u2028');
 });
+it('makes bidi and zero-width characters in a title visible', () => {
+  const hidden = 'Pay \u202Etxt.exe\u200B';
+  const shown = 'Pay \\u202etxt.exe\\u200b';
+  expect(gatewayApprovalPresentation({ ...request(), title: hidden }).title).toBe(shown);
+  const action = gatewayApprovalPresentation(
+    request({ ...summary, action: hidden, details: [{ label: 'To', value: 'Savings' }] }),
+  );
+  expect(action.title).toBe(shown);
+});
+
 it('escapes legacy provider markup before rendering', () => {
   const card = gatewayApprovalPresentation({
     title: '[Admin](https://evil.test)',

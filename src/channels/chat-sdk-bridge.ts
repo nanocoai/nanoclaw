@@ -622,10 +622,12 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
   }
   const transformText = (t: string): string => (config.transformOutboundText ? config.transformOutboundText(t) : t);
   const cardText = (t: string): string => (config.escapeCardText ? config.escapeCardText(t) : t);
+  // Card titles are plain text, but these adapters put them into Markdown as
+  // is. `&` too, or a Markdown parser decodes `&#x202E;` into a hidden character.
+  const markdownTitles = ['telegram', 'teams', 'webex', 'mattermost'].includes(adapter.name);
   const cardTitle =
     config.escapeCardTitle ??
-    ((title: string): string =>
-      adapter.name === 'telegram' || adapter.name === 'teams' ? title.replace(/[\\`*_~[\]()<>]/g, '\\$&') : title);
+    ((title: string): string => (markdownTitles ? title.replace(/[\\`*_~[\]()<>&]/g, '\\$&') : title));
   const terminalMessage = ({ fromAgent, ...spec }: TerminalApprovalCard) => {
     const questionText = fromAgent ? (t: string) => t : cardText;
     return terminalApprovalMessage({
