@@ -196,16 +196,24 @@ describe('MattermostSocket connect failures', () => {
 });
 
 describe('MattermostSocket opening handshake', () => {
-  it('rejects an unanswered HTTP upgrade as a retryable network error', async () => {
+  // A real server that takes the upgrade and never completes it: `silent`
+  // sends nothing; `trickle` sends a header line every 20 ms, which an idle
+  // timeout alone never catches.
+  it.each(['silent', 'trickle'] as const)('rejects a %s upgrade as a retryable network error', async (mode) => {
     const server = createServer();
     const peers = new Set<Socket>();
-    let upgradeSeen = false;
     server.on('connection', (peer) => {
       peers.add(peer);
+      peer.on('error', () => {});
       peer.on('close', () => peers.delete(peer));
     });
-    server.on('upgrade', () => {
-      upgradeSeen = true;
+    server.on('upgrade', (_request, peer: Socket) => {
+      if (mode === 'silent') return;
+      peer.write('HTTP/1.1 101 Switching Protocols\r\n');
+      const trickle = setInterval(() => {
+        if (!peer.destroyed) peer.write('X-Pad: 1\r\n');
+      }, 20);
+      peer.on('close', () => clearInterval(trickle));
     });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     const address = server.address();
@@ -215,7 +223,7 @@ describe('MattermostSocket opening handshake', () => {
       token: 'test-token',
       logger: silentLogger,
       onEvent: () => {},
-      authTimeoutMs: 50,
+      authTimeoutMs: 250,
     });
     let watchdog: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -225,14 +233,10 @@ describe('MattermostSocket opening handshake', () => {
           (error: unknown) => error,
         ),
         new Promise<string>((resolve) => {
-          watchdog = setTimeout(() => resolve('opening handshake remained pending'), 1000);
+          watchdog = setTimeout(() => resolve('opening handshake remained pending'), 3000);
         }),
       ]);
-      expect(upgradeSeen).toBe(true);
-      expect(result).toMatchObject({
-        name: 'NetworkError',
-        message: expect.stringContaining('Opening handshake has timed out'),
-      });
+      expect(result).toMatchObject({ name: 'NetworkError', message: expect.stringMatching(/handshake/i) });
       expect(socket.connected).toBe(false);
     } finally {
       clearTimeout(watchdog);

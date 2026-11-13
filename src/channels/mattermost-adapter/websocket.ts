@@ -178,7 +178,7 @@ export class MattermostSocket {
     return new Promise<void>((resolve, reject) => {
       let socket: WebSocket;
       try {
-        socket = new Impl(url, { handshakeTimeout: this.options.authTimeoutMs });
+        socket = new Impl(url);
       } catch (error) {
         reject(error);
         return;
@@ -194,6 +194,7 @@ export class MattermostSocket {
           return;
         }
         settled = true;
+        clearTimeout(openTimer);
         if (authTimer) {
           clearTimeout(authTimer);
         }
@@ -204,7 +205,18 @@ export class MattermostSocket {
         }
       };
 
+      // `ws`'s own handshakeTimeout is an idle timeout, so a server that
+      // trickles header bytes could hold the upgrade open forever. This is a
+      // hard deadline from connect to `open`; the auth timer takes over there.
+      const openTimer = setTimeout(() => {
+        this.options.logger.warn('Mattermost WS: opening handshake timed out');
+        settle(networkError('Mattermost WebSocket opening handshake timed out'));
+        this.terminate(socket);
+      }, this.options.authTimeoutMs);
+      openTimer.unref?.();
+
       socket.on('open', () => {
+        clearTimeout(openTimer);
         authSeq = this.seq;
         this.authenticate();
         authTimer = setTimeout(() => {
