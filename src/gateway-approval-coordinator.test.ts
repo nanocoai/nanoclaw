@@ -221,7 +221,7 @@ describe('gateway approval coordinator', () => {
       null,
       'chat',
       JSON.stringify({
-        text: 'Approval request denied: this channel cannot display the complete request. No approval was granted.',
+        text: 'Approval request not shown: this channel cannot display the complete request. No approval was granted.',
       }),
       undefined,
       'fixture-primary',
@@ -786,6 +786,21 @@ it('records durable expiry as unavailable rather than a human rejection', async 
   expect(await outcome).toBe('unavailable');
   expect(submit).toHaveBeenCalledWith('native-request', 'unavailable');
   expect((await getPendingApproval(questionId))?.status).toBe('expired');
+});
+
+// A durable gateway is told `unavailable`, not denied, so the notice says neither.
+it('tells the approver a durable request too long to show was not shown, and reports it unavailable', async () => {
+  const coordinator = await import('./gateway-approval-coordinator.js');
+  const gateway = provider();
+  gateway.approvals.durable = true;
+  gateway.approvals.decide = vi.fn(async () => true);
+  gateway.approvals.listPending = async () => [];
+  const deliver = vi.fn().mockRejectedValueOnce(new CardTooLongError('too long')).mockResolvedValue('notice');
+  await coordinator.startGatewayApprovalCoordinator(gateway, { deliver }, vi.fn());
+  expect(await decide(request())).toBe('unavailable');
+  expect(JSON.parse(deliver.mock.calls[1][4])).toEqual({
+    text: 'Approval request not shown: this channel cannot display the complete request. No approval was granted.',
+  });
 });
 
 it('persists before sending a durable card and does not resend an uncertain delivery after restart', async () => {

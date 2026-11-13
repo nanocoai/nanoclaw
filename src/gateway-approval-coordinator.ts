@@ -478,7 +478,7 @@ async function processGatewayRequest(
               request.delivery?.threadId ?? null,
               'chat',
               JSON.stringify({
-                text: 'Approval request denied: this channel cannot display the complete request. No approval was granted.',
+                text: 'Approval request not shown: this channel cannot display the complete request. No approval was granted.',
               }),
               undefined,
               target.messagingGroup.instance,
