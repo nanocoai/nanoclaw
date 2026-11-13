@@ -50,10 +50,11 @@ export function gatewayApprovalPresentation(request: GatewayApprovalRequest): { 
       }
     }
     let question = lines.join('\n');
-    // Shown hidden characters can push a valid title past 256 (Discord's cap).
-    let title = plainTitle(request.title);
-    if (title.length > 256)
-      [title, question] = ['Approve external request', `*Request:* ${safe(request.title)}\n${question}`];
+    let title = request.title;
+    // Showing hidden characters can make a title too long for a channel, so a
+    // title with any goes, shown, into the body under a fixed title.
+    if (plainTitle(title) !== title)
+      [title, question] = ['Approve external request', `*Request:* ${safe(title)}\n${question}`];
     if (Buffer.byteLength(question, 'utf8') > 262144) throw new Error('Gateway display too large');
     return { title, question };
   }

@@ -158,14 +158,15 @@ it('makes bidi and zero-width characters in a title visible', () => {
     request({ ...summary, action: hidden, details: [{ label: 'To', value: 'Savings' }] }),
   );
   expect(action.title).toBe(shown);
-  expect(gatewayApprovalPresentation({ ...request(), title: hidden, displayFields: [] }).title).toBe(shown);
 });
 
-it('moves a typed title into the body when its shown hidden characters pass 256', () => {
-  const card = gatewayApprovalPresentation({ ...request(), title: 'Pay ' + '\u202E'.repeat(50), displayFields: [] });
+// Shown hidden characters can push a title past a channel's title cap.
+it('moves a typed title with hidden characters into the body, and keeps a plain one', () => {
+  const card = gatewayApprovalPresentation({ ...request(), title: 'Pay ' + '\u202E'.repeat(30), displayFields: [] });
   expect(card.title).toBe('Approve external request');
   // The body is Markdown, so the shown backslash is escaped too.
-  expect(card.question.startsWith('*Request:* Pay ' + '\\\\u202e'.repeat(50))).toBe(true);
+  expect(card.question.startsWith('*Request:* Pay ' + '\\\\u202e'.repeat(30) + '\n')).toBe(true);
+  expect(gatewayApprovalPresentation({ ...request(), title: 'Pay rent', displayFields: [] }).title).toBe('Pay rent');
 });
 
 it('escapes legacy provider markup before rendering', () => {
