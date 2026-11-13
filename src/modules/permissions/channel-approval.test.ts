@@ -1072,11 +1072,17 @@ describe('unknown-channel registration flow', () => {
       cardUpdate.fail = true;
       deliverMock.mockResolvedValueOnce(undefined);
       expect(await click(card.messaging_group_id, 'choose_existing', 'card-1')).toBe('ignored');
+      const createdAt = async () =>
+        (await getDb().get<{ created_at: string }>('SELECT created_at FROM pending_channel_approvals'))?.created_at;
+      const first = await createdAt();
       await getDb().run('DELETE FROM pending_channel_approvals WHERE messaging_group_id = ?', card.messaging_group_id);
       cardUpdate.fail = false;
       deliverMock.mockResolvedValueOnce(undefined);
+      // A new millisecond, so the click reaches the message-id check, not the blocked-row check.
+      await new Promise((r) => setTimeout(r, 5));
       const { routeInbound } = await import('../../router.js');
       await expectAsyncDelivery(() => routeInbound(groupMention('chat-choose-no-id-twice')));
+      expect(await createdAt()).not.toBe(first);
       // Both ids are unknown, so this could be the old agent card's third agent.
       expect(await click(card.messaging_group_id, 'reject')).toBe('ignored');
       expect(await storedOptions(card.messaging_group_id)).toBeDefined();
