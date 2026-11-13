@@ -161,6 +161,13 @@ it('makes bidi and zero-width characters in a title visible', () => {
   expect(gatewayApprovalPresentation({ ...request(), title: hidden, displayFields: [] }).title).toBe(shown);
 });
 
+it('moves a typed title into the body when its shown hidden characters pass 256', () => {
+  const card = gatewayApprovalPresentation({ ...request(), title: 'Pay ' + '\u202E'.repeat(50), displayFields: [] });
+  expect(card.title).toBe('Approve external request');
+  // The body is Markdown, so the shown backslash is escaped too.
+  expect(card.question.startsWith('*Request:* Pay ' + '\\\\u202e'.repeat(50))).toBe(true);
+});
+
 it('escapes legacy provider markup before rendering', () => {
   const card = gatewayApprovalPresentation({
     title: '[Admin](https://evil.test)',
