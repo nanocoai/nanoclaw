@@ -1010,7 +1010,7 @@ const ORIGINAL_MESSAGE = /^-{2,}\s*Original Message\s*-{2,}$/i;
  * Turkish, Hungarian; the CJK clients write a full-width colon).
  */
 const FORWARD_FROM_LINE =
-  /^[>\s*_]*(From|Von|De|Da|Van|Från|Fra|Lähettäjä|Od|От|Kimden|Feladó|Από|מאת|差出人|送信者|发件人|寄件者|寄件人|보낸\s?사람)\s*[:：][*_]*\s*(?![*_\s]*$)\S/iu;
+  /^[>\s*_]*(From|Von|De|Da|Van|Från|Fra|Lähettäjä|Od|От|Kimden|Feladó|Από|מאת|差出人|送信者|发件人|寄件者|寄件人|보낸\s?사람)\s*[:：][*_\s]*[^*_\s]/iu;
 /**
  * In a mail whose subject says it is a forward, a header line in a language
  * FORWARD_FROM_LINE does not list ("Expéditeur : Acme <a@x.example>"): a short
@@ -1030,10 +1030,14 @@ function forwardAddressLine(lines: string[], i: number): boolean {
   const rest = line.slice(label[0].length).replace(/^[*_\s]+/, '');
   if (rest.length > 200 || !NAME_AND_ADDRESS.test(rest)) return false;
   // A header block runs at least three lines (From, Date or Sent, To, Subject);
-  // a wrapped header's continuation (indented) belongs to the line above.
+  // a wrapped header's continuation, indented further than the header line,
+  // belongs to the line above. A few lines are enough to look at.
+  const indent = (l: string) => /^\s*/.exec(l)![0].length;
   const next: string[] = [];
-  for (let j = i + 1; j < lines.length && next.length < 2; j++)
-    if (!/^\s+\S/.test(lines[j])) next.push(lines[j].trim());
+  for (let j = i + 1; j < Math.min(lines.length, i + 8) && next.length < 2; j++) {
+    if (lines[j].trim() && indent(lines[j]) > indent(lines[i])) continue;
+    next.push(lines[j].trim());
+  }
   return next.length === 2 && next.every((l) => FORWARD_LABEL.test(l));
 }
 
@@ -2376,8 +2380,14 @@ registerChannelAdapter('proton-mail', {
     function answersOpenCard(addr: string, inReplyTo: string | undefined): boolean {
       const ids = messageIds(inReplyTo);
       if (ids.length === 0) return false;
+      const now = Date.now();
       return Object.values(state.cards).some(
-        (c) => c.address === addr && !c.answeredAt && !c.closedAt && repliesToCard(c, ids),
+        (c) =>
+          c.address === addr &&
+          !c.answeredAt &&
+          !c.closedAt &&
+          now - Date.parse(c.sentAt) <= CARD_TTL_MS &&
+          repliesToCard(c, ids),
       );
     }
 
@@ -2439,7 +2449,7 @@ registerChannelAdapter('proton-mail', {
         deferred: kind,
         from,
         ...(kind === 'sender' && !approved && { stranger: true }),
-        ...(countedUids.has(uid) && { counted: true }),
+        ...(wasCounted(uid) && { counted: true }),
       };
       log.warn('Proton Mail: over an hourly limit — mail held until the hour has room', {
         uid,
@@ -2459,9 +2469,17 @@ registerChannelAdapter('proton-mail', {
      * approved sender's, or a card addressee's, is held in the rest.
      */
     async function overLimit(uid: number, fromAddr: string, freeAt: number): Promise<Outcome> {
-      // A failed lookup throws: the mail is retried uncounted (RetryRef.counted),
-      // so the retry checks the limit again.
-      const status = await senderStatus(fromAddr);
+      // A failed lookup holds the mail as an approved sender's: under the
+      // hold caps, not given up after the failure retries, and looked up again
+      // when its hour has room (defer re-checks the caps if it turns out to be
+      // a new sender's then).
+      const status = await senderStatus(fromAddr).catch((err: unknown) => {
+        log.warn('Proton Mail: sender lookup failed — over-limit mail held, checked again later', {
+          uid,
+          err: String(err),
+        });
+        return 'approved' as const;
+      });
       if (status === 'denied') {
         log.debug('Proton Mail inbound skipped', { uid, reason: 'denied sender over the hourly limit' });
         return 'done';
@@ -2476,6 +2494,8 @@ registerChannelAdapter('proton-mail', {
 
     /** Mail counted against its sender's hour in this pass (RetryRef.counted); cleared when the pass ends. */
     const countedUids = new Set<number>();
+    /** Whether a mail has been counted against its sender's hour, in this pass or an earlier one. */
+    const wasCounted = (uid: number) => countedUids.has(uid) || !!state.retry[uid]?.counted;
 
     /**
      * Whether a mail from an address not yet approved may go to the host now
@@ -2628,7 +2648,7 @@ registerChannelAdapter('proton-mail', {
       // mail that only looks like one on its headers is counted once it is
       // read and turns out not to be an answer (after matchCardReply).
       // Over the limit, see overLimit.
-      const limited = !state.retry[uid]?.counted;
+      const limited = !wasCounted(uid);
       const mayAnswerCard = answersOpenCard(fromAddr, head.inReplyTo);
       if (limited && !mayAnswerCard) {
         const freeAt = senderRateFreeAt(fromAddr);
@@ -2942,7 +2962,7 @@ registerChannelAdapter('proton-mail', {
         return;
       }
       const delay = retryDelayMs(attempts);
-      const counted = !!state.retry[uid]?.counted || countedUids.has(uid);
+      const counted = wasCounted(uid);
       state.retry[uid] = { attempts, nextAt: new Date(Date.now() + delay).toISOString(), ...(counted && { counted }) };
       log.warn('Proton Mail: handling a mail failed — will retry', { uid, attempts, inMs: delay, err });
     }

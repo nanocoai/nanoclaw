@@ -2776,18 +2776,17 @@ describe('review 5 of #4218', () => {
       expect(readState().retry[last]).toMatchObject({ deferred: 'sender', stranger: true });
     }, 60_000);
 
-    it('a failed sender lookup over the limit is retried uncounted, so the retry checks the limit again', async () => {
+    it('a failed sender lookup over the limit holds the mail, unpenalised, to be checked again', async () => {
       h.wired = false;
       h.settled = { [OWNER]: 'approved' };
       await start();
       await arriveAll(Array.from({ length: 20 }, (_, i) => mail({ body: `m ${i}` })));
       h.lookupFails = true;
-      const failed = await arriveAll([mail({ body: 'one more' })]);
-      // Not held under anyone's share, not counted: an ordinary retry.
-      expect(readState().retry[failed]).toMatchObject({ attempts: 1 });
-      expect(readState().retry[failed].counted).toBeUndefined();
-      expect(readState().retry[failed].stranger).toBeUndefined();
-      expect(flagged().filter(([u]) => u === failed)).toEqual([]);
+      const held = await arriveAll([mail({ body: 'one more' })]);
+      expect(readState().retry[held]).toMatchObject({ deferred: 'sender', from: OWNER });
+      expect(readState().retry[held].stranger).toBeUndefined();
+      expect(readState().retry[held].counted).toBeUndefined();
+      expect(flagged().filter(([u]) => u === held)).toEqual([]);
     }, 60_000);
 
     it('a mail that failed after it was counted is not counted again on its retry', async () => {

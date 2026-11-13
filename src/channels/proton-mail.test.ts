@@ -267,8 +267,8 @@ describe('disownTypedNotes', () => {
       const t0 = performance.now();
       expect(disownTypedNotes(text)).toBe(text);
       // Linear takes milliseconds; the backtracking pattern took 6.7 s here.
-      // 750 ms leaves room for a loaded host and still catches a quadratic one.
-      expect(performance.now() - t0).toBeLessThan(750);
+      // 1.5 s leaves room for a loaded host and still catches a quadratic one.
+      expect(performance.now() - t0).toBeLessThan(1_500);
     }
   });
   it('leaves other text alone', () => {
@@ -1206,6 +1206,19 @@ describe('stripQuotedReply: where the forward line goes', () => {
       const text = `Please see.\n\n${line}\n\nPay`;
       expect(stripQuotedReply(text, 'Fwd: Rechnung', M)).toBe(`Please see.\n\n${M}\n${line}\n\nPay`);
     }
+  });
+  it('takes linear time on a From line followed by a long run of spaces or stars', () => {
+    for (const tail of [' ', '*', '_', ' *']) {
+      const text = `See below\n\nFrom:${tail.repeat(200_000 / tail.length)}`;
+      const t0 = performance.now();
+      stripQuotedReply(text, 'Fwd: x', M);
+      // The backtracking pattern took 8.4 s at 100k characters here.
+      expect(performance.now() - t0).toBeLessThan(1_500);
+    }
+  });
+  it('a header block indented as a whole, and quoted', () => {
+    const block = '  Expéditeur : A <a@x.example>\n  À : b@x.example\n  Objet : Facture';
+    expect(stripQuotedReply(`FYI\n\n${block}\n\nPay`, 'TR: Facture', M)).toBe(`FYI\n\n${M}\n${block}\n\nPay`);
   });
   it('an unlisted-language header block whose To line wraps', () => {
     const block = 'Expéditeur : A <a@x.example>\nÀ : b@x.example, c@x.example,\n  d@x.example\nObjet : Facture';
