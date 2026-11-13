@@ -417,4 +417,8 @@ describe('Discord prose that CommonMark treats as code', () => {
     expect(result).toContain('<\u2060@1>');
     expect(result).not.toContain('||');
   });
+  it('keeps a ``` fence with single backticks inside byte-for-byte', () => {
+    const code = '```sh\ncat <input; echo `date` ``x``\n```';
+    expect(escapeDiscordCardText(code)).toBe(code);
+  });
 });
