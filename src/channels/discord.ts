@@ -33,22 +33,24 @@ const DISCORD_DEFAULTS: ChannelDefaults = {
 export function escapeDiscordCardText(text: string): string {
   // Code is already literal on Discord. Keep commands inside matched code
   // spans/fences byte-for-byte, and escape only the surrounding prose. Its
-  // backticks get a backslash: each card block is escaped alone, but Discord
-  // pairs backticks across all the blocks of one embed.
+  // backticks and [ get a backslash: Discord pairs a backtick, or ends a link,
+  // past code and across the blocks of one embed, which are escaped one by one.
   const escape = (prose: string) =>
     prose
       .replace(/\]\(/g, ']\u2060(')
       .replace(/</g, '<\u2060')
       .replace(/\|{2,}/g, (pipes) => pipes.split('').join('\u2060') + '\u2060')
-      .replace(/(\\*)`/g, (match, slashes: string) => (slashes.length % 2 ? match : `${slashes}\\\``));
+      .replace(/(\\*)([`[])/g, (match, slashes: string, mark: string) =>
+        slashes.length % 2 ? match : `${slashes}\\${mark}`,
+      );
   let result = '';
   let offset = 0;
   let code: Array<{ start: number; end: number }> = [];
   // Discord ends ``` code at the next ```, even mid-line, inside a longer
-  // fence or past a blank fence's close, and shows indented, tilde and
-  // unclosed fences as prose. So only a backtick-free span, or a ``` fence
-  // holding a non-blank line and no ```, stays raw.
-  const plain = /^(?:(`{1,2})[^`]+\1|```[^`\n]*\n\n*(?:[^`\n]|`(?!``))(?:[^`]|`(?!``))*\n```[ \t]*)$/;
+  // fence or past a blank fence's close, shows indented, tilde and unclosed
+  // fences as prose, and ends a quote at the line. So only a one-line span
+  // with no backtick, or a ``` fence holding a non-blank line and no ```, stays raw.
+  const plain = /^(?:(`{1,2})[^`\n]+\1|```[^`\n]*\n\n*(?:[^`\n]|`(?!``))(?:[^`]|`(?!``))*\n```[ \t]*)$/;
   walkAst(parseMarkdown(text), (node) => {
     if (node.type === 'code' || node.type === 'inlineCode') {
       const start = node.position?.start.offset;
