@@ -649,7 +649,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     }
   };
   /** Whether a resolved card still fits the channel's whole-card cap with its question kept.
-   *  A text cap is not a card cap (Discord embeds outgrow it), so a channel without one is not checked. */
+   *  Older Discord configurations get a conservative embed cap; other channels opt in. */
   const terminalFits = ({ title, question, resolution, fromAgent }: TerminalApprovalCard): boolean => {
     const limit = config.maxCardTextLength ?? (adapter.name === 'discord' ? 4000 : undefined);
     if (limit === undefined) return true;
