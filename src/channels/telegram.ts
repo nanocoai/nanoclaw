@@ -72,9 +72,10 @@ export function refuseCutCards(adapter: ReturnType<typeof createTelegramAdapter>
   };
   // Card titles are plain text. The Telegram adapter interpolates them into
   // Markdown, so escape at this boundary (Slack instead uses a plain header).
+  // `&` too: the adapter's parser decodes `&#x202E;` into a hidden character.
   const literalTitle = (card: CardElement): CardElement => ({
     ...card,
-    title: card.title?.replace(/[\\`*_~[\]()<>]/g, '\\$&'),
+    title: card.title?.replace(/[\\`*_~[\]()<>&]/g, '\\$&'),
   });
   const post = adapter.postMessage.bind(adapter);
   adapter.postMessage = async (...args) => {
