@@ -2506,3 +2506,38 @@ it('keeps the question on a channel with no card cap, whatever its text cap', as
   };
   expect(edited.card.children.map((c) => c.content)).toEqual(['Ship **v2** today?', '[Yes by ann]']);
 });
+
+describe('plain card titles at Markdown adapter boundaries', () => {
+  it.each(['telegram', 'teams', 'slack'])('encodes posts and resolved edits for %s', async (name) => {
+    const { calls, postMessage } = makePostCapture();
+    const editMessage = vi.fn(async () => ({ id: 'm', threadId: 't', raw: {} }));
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ name, postMessage, editMessage }),
+      supportsThreads: false,
+    });
+    const title = '[Admin](https://evil.test) file_a';
+    await bridge.deliver('t', null, {
+      kind: 'chat-sdk',
+      content: {
+        type: 'ask_question',
+        questionId: 'literal-title',
+        title,
+        question: 'Allow?',
+        options: ['Approve'],
+      },
+    });
+    await bridge.deliver('t', null, {
+      kind: 'chat-sdk',
+      content: {
+        operation: 'edit',
+        messageId: 'm',
+        terminalCard: { title, question: 'Allow?', resolution: 'Approved' },
+      },
+    });
+    const expected = name === 'slack' ? title : '\\[Admin\\]\\(https://evil.test\\) file\\_a';
+    expect((calls[0].message as { card: { title: string } }).card.title).toBe(expected);
+    expect((editMessage.mock.calls[0] as unknown as [string, string, { card: { title: string } }])[2].card.title).toBe(
+      expected,
+    );
+  });
+});

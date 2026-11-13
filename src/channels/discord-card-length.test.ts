@@ -395,3 +395,15 @@ describe('parent Discord resolved-card size budget', () => {
     expect(patches).toHaveLength(0);
   });
 });
+
+describe('Discord prose that CommonMark treats as code', () => {
+  it.each(['    ', '~~~\n', '```\n'])('escapes active syntax after %j', (prefix) => {
+    const result = escapeDiscordCardText(prefix + '[Admin](https://evil.test) <@1> ||hidden||');
+    expect(result).toContain(']\u2060(');
+    expect(result).toContain('<\u2060@1>');
+    expect(result).not.toContain('||');
+  });
+  it('escapes tilde-fenced text even with a closing fence', () => {
+    expect(escapeDiscordCardText('~~~\n<@1>\n~~~')).toContain('<\u2060@1>');
+  });
+});

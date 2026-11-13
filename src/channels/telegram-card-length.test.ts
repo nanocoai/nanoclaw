@@ -3,7 +3,7 @@
  * stubbed, so the test sees the exact MarkdownV2 text the adapter sends, which
  * Telegram cuts past 4,096.
  */
-import { Actions, Button, Card, CardText } from 'chat';
+import { Actions, Button, Card, CardText, Divider } from 'chat';
 import { createTelegramAdapter } from '@chat-adapter/telegram';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -265,5 +265,40 @@ describe('Telegram card limit through the bridge', () => {
     refuseCutCards(adapter as never);
     expect(adapter.postMessage).toBe(postMessage);
     vi.doUnmock('./ask-question.js');
+  });
+});
+
+describe('Telegram exact wire boundaries', () => {
+  it('counts dividers and finds buttons nested separately from the text', async () => {
+    const adapter = createTelegramAdapter({ botToken: '100:test-token' });
+    refuseCutCards(adapter);
+    const card = Card({
+      children: [
+        CardText('x'.repeat(4095)),
+        Divider(),
+        { type: 'section', children: [Actions([Button({ id: 'a', label: 'Yes', value: '0' })])] },
+      ],
+    });
+    await expect(adapter.postMessage('telegram:42', { card })).rejects.toBeInstanceOf(CardTooLongError);
+    expect(calls).toHaveLength(0);
+  });
+  it('accepts edits at 4096 wire characters and rejects 4097', async () => {
+    const adapter = createTelegramAdapter({ botToken: '100:test-token' });
+    refuseCutCards(adapter);
+    await adapter.editMessage('telegram:42', '123', { card: Card({ children: [CardText('x'.repeat(4096))] }) });
+    expect(calls.at(-1)!.body.text).toHaveLength(4096);
+    const count = calls.length;
+    await expect(
+      adapter.editMessage('telegram:42', '123', { card: Card({ children: [CardText('x'.repeat(4097))] }) }),
+    ).rejects.toBeInstanceOf(CardTooLongError);
+    expect(calls).toHaveLength(count);
+  });
+  it('escapes a title on the actual edit wire', async () => {
+    const adapter = createTelegramAdapter({ botToken: '100:test-token' });
+    refuseCutCards(adapter);
+    await adapter.editMessage('telegram:42', '123', {
+      card: Card({ title: '[Admin](https://evil.test)', children: [CardText('Approved')] }),
+    });
+    expect(calls.at(-1)!.body.text).toContain('\\[Admin\\]\\(');
   });
 });

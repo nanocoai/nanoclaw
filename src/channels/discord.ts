@@ -45,7 +45,14 @@ export function escapeDiscordCardText(text: string): string {
     if (node.type === 'code' || node.type === 'inlineCode') {
       const start = node.position?.start.offset;
       const end = node.position?.end.offset;
-      if (start !== undefined && end !== undefined) code.push({ start, end });
+      if (start !== undefined && end !== undefined) {
+        const raw = text.slice(start, end);
+        // CommonMark also calls indentation, tilde fences and unclosed fences
+        // code; Discord still interprets their links and mentions as prose.
+        const fence = raw.match(/^(`{3,})[^`\n]*\n/);
+        const closedFence = fence && new RegExp('\\n' + fence[1] + '`*[ \t]*$').test(raw);
+        if (node.type === 'inlineCode' || closedFence) code.push({ start, end });
+      }
     }
     return node;
   });
