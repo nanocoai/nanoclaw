@@ -43,8 +43,8 @@ export function escapeDiscordCardText(text: string): string {
   let code: Array<{ start: number; end: number }> = [];
   // Discord ends ``` code at the next ```, even mid-line or inside a longer
   // fence, and shows indented, tilde and unclosed fences as prose. So only a
-  // backtick-free span or ``` fence stays raw.
-  const plain = /^(?:(`{1,2})[^`]+\1|```[^`\n]*\n(?:[^`]*\n)?```[ \t]*)$/;
+  // backtick-free span, or a ``` fence with no ``` inside, stays raw.
+  const plain = /^(?:(`{1,2})[^`]+\1|```[^`\n]*\n(?:(?:[^`]|`(?!``))*\n)?```[ \t]*)$/;
   walkAst(parseMarkdown(text), (node) => {
     if (node.type === 'code' || node.type === 'inlineCode') {
       const start = node.position?.start.offset;
