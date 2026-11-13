@@ -158,6 +158,7 @@ it('makes bidi and zero-width characters in a title visible', () => {
     request({ ...summary, action: hidden, details: [{ label: 'To', value: 'Savings' }] }),
   );
   expect(action.title).toBe(shown);
+  expect(gatewayApprovalPresentation({ ...request(), title: hidden, displayFields: [] }).title).toBe(shown);
 });
 
 it('escapes legacy provider markup before rendering', () => {
