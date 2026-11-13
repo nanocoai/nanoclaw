@@ -368,7 +368,7 @@ describe('escapeDiscordCardText', () => {
       // Wait for the completed click flow before the next test resets transport state.
       await vi.waitFor(() => expect(patches.at(-1)?.url).toMatch(/\/messages\/@original$/));
       const [embed] = edits()[0].body.embeds as Array<{ description: string }>;
-      expect(embed.description).toContain('Approved by [Admin]\u2060(https://x.co) <\u2060@1>');
+      expect(embed.description).toContain('Approved by \\[Admin]\u2060(https://x.co) <\u2060@1>');
     } finally {
       await bridge.teardown();
       await closeDb();
