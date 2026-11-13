@@ -40,22 +40,22 @@ export function escapeDiscordCardText(text: string): string {
       .replace(/\|{2,}/g, (pipes) => pipes.split('').join('\u2060') + '\u2060');
   let result = '';
   let offset = 0;
-  const code: Array<{ start: number; end: number }> = [];
+  let code: Array<{ start: number; end: number }> = [];
+  // Discord ends ``` code at the next ```, even mid-line or inside a longer
+  // fence, and shows indented, tilde and unclosed fences as prose. So only a
+  // backtick-free span or ``` fence stays raw.
+  const plain = /^(?:(`{1,2})[^`]+\1|```[^`\n]*\n(?:[^`]*\n)?```[ \t]*)$/;
   walkAst(parseMarkdown(text), (node) => {
     if (node.type === 'code' || node.type === 'inlineCode') {
       const start = node.position?.start.offset;
       const end = node.position?.end.offset;
-      if (start !== undefined && end !== undefined) {
-        const raw = text.slice(start, end);
-        // CommonMark also calls indentation, tilde fences and unclosed fences
-        // code; Discord still interprets their links and mentions as prose.
-        const fence = raw.match(/^(`{3,})[^`\n]*\n/);
-        const closedFence = fence && new RegExp('\\n' + fence[1] + '`*[ \t]*$').test(raw);
-        if (node.type === 'inlineCode' || closedFence) code.push({ start, end });
-      }
+      if (start !== undefined && end !== undefined && plain.test(text.slice(start, end))) code.push({ start, end });
     }
     return node;
   });
+  // Any other unescaped backtick can shift Discord's pairing: keep nothing raw.
+  const outside = [...code.map((c, i) => text.slice(i ? code[i - 1].end : 0, c.start)), text.slice(code.at(-1)?.end)];
+  if (outside.some((part) => /(?:^|[^\\])(?:\\\\)*`/.test(part))) code = [];
   for (const { start, end } of code) {
     result += escape(text.slice(offset, start)) + text.slice(start, end);
     offset = end;
