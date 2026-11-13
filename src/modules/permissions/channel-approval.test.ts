@@ -1040,9 +1040,31 @@ describe('unknown-channel registration flow', () => {
       expect(await click(card.messaging_group_id, 'choose_existing', 'card-1')).toBe('ignored');
       expect(await storedOptions(card.messaging_group_id)).toBe(card.options_json);
       await replaceRequest(card.messaging_group_id);
-      // The known old card stays retired, but a fresh request is usable.
+      // Neither the known first card nor the unknown agent card may decide the replacement.
       expect(await click(card.messaging_group_id, 'reject', 'card-1')).toBe('ignored');
-      expect(await click(card.messaging_group_id, 'reject', 'new-card')).toBe('accepted');
+      expect(await click(card.messaging_group_id, 'reject', 'card-2')).toBe('ignored');
+      expect(await click(card.messaging_group_id, 'reject')).toBe('ignored');
+      expect(await storedOptions(card.messaging_group_id)).toBeDefined();
+      expect(
+        (
+          await getDb().get<{ denied_at: string | null }>(
+            'SELECT denied_at FROM messaging_groups WHERE id = ?',
+            card.messaging_group_id,
+          )
+        )?.denied_at,
+      ).toBeNull();
+      // Reissuing through the real request path recovers using its known new card.
+      await getDb().run('DELETE FROM pending_channel_approvals WHERE messaging_group_id = ?', card.messaging_group_id);
+      cardUpdate.fail = false;
+      deliverMock.mockResolvedValueOnce('new-card');
+      const { routeInbound } = await import('../../router.js');
+      await expectAsyncDelivery(() => routeInbound(groupMention('chat-choose-store-fails-no-id')));
+      expect(await click(card.messaging_group_id, 'reject', 'card-2')).toBe('ignored');
+      deliverMock.mockResolvedValueOnce('new-agent-card');
+      expect(await click(card.messaging_group_id, 'choose_existing', 'new-card')).toBe('accepted');
+      expect(await click(card.messaging_group_id, 'reject', 'card-2')).toBe('ignored');
+      expect(await click(card.messaging_group_id, 'reject', 'new-card')).toBe('ignored');
+      expect(await click(card.messaging_group_id, 'reject', 'new-agent-card')).toBe('accepted');
     });
 
     it("leaves the first card as it was when the agent card can't be sent", async () => {
