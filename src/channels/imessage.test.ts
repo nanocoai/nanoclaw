@@ -900,6 +900,24 @@ describe('photon adapter (mocked SDK)', () => {
       expect(host.actions).toEqual([{ questionId: 'q1', option: 'Approve', userId: '+15550000001' }]);
     });
 
+    // Choose an existing agent answers by sending a new card, which replaces the question.
+    it('drops a queued answer once the answer ahead of it replaced the question', async () => {
+      const { adapter, host, held, ask, say, confirmations } = await askOnSlowHost('+15551112222', ['Approve']);
+      say('+15551112222', '+15551112222', '/approve');
+      say('+15551112222', '+15551112222', '/approve');
+      // Messages are read one at a time: once this one is through, the second answer is waiting.
+      say('+15553334444', '+15553334444', 'hello from another chat');
+      await waitFor(() => host.inbound.length === 1);
+      await ask('q2');
+      held[0].settle('accepted');
+      await waitFor(() => confirmations('Approve').length === 1);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(host.actions).toEqual([{ questionId: 'q1', option: 'Approve', userId: '+15551112222' }]);
+      expect(confirmations('Approve')).toHaveLength(1);
+      expect(host.inbound).toHaveLength(1);
+      await adapter.teardown();
+    });
+
     it('leaves a newer question open when an answer to the one before it is accepted late', async () => {
       const { adapter, host, held, ask, say, confirmations } = await askOnSlowHost('+15551112222', ['Approve']);
       say('+15551112222', '+15551112222', '/approve');

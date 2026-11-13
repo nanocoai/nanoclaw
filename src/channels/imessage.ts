@@ -520,6 +520,9 @@ export function createPhotonAdapter(
     sender: string,
   ): void {
     const run = async (): Promise<void> => {
+      // An answer queued behind one that closed or replaced its question was
+      // typed for options no longer shown, and the host would act on it again.
+      if (pendingQuestions.get(platformId) !== pending) return;
       // Confirmed only once the host accepts it. A refused answer, or one that
       // decided nothing, keeps the question open (no private reply here, so nothing is sent).
       const result: unknown = await setupConfig.onAction(pending.questionId, matched.value, sender);
