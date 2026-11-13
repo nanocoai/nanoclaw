@@ -386,6 +386,8 @@ export interface ChatSdkBridgeConfig {
    * set this. Questions an agent asks itself (`fromAgent`) keep their markup.
    */
   escapeCardText?: (text: string) => string;
+  /** Override title encoding when the adapter already handles plain card titles. */
+  escapeCardTitle?: (title: string) => string;
   /**
    * For a platform that caps a whole card's text: the longest ask_question
    * title plus card text (after escapeCardText) it shows in full. A longer
@@ -614,10 +616,15 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
   }
   const transformText = (t: string): string => (config.transformOutboundText ? config.transformOutboundText(t) : t);
   const cardText = (t: string): string => (config.escapeCardText ? config.escapeCardText(t) : t);
+  const cardTitle =
+    config.escapeCardTitle ??
+    ((title: string): string =>
+      adapter.name === 'telegram' || adapter.name === 'teams' ? title.replace(/[\\`*_~[\]()<>]/g, '\\$&') : title);
   const terminalMessage = ({ fromAgent, ...spec }: TerminalApprovalCard) => {
     const questionText = fromAgent ? (t: string) => t : cardText;
     return terminalApprovalMessage({
       ...spec,
+      title: cardTitle(spec.title),
       question: questionText(spec.question),
       questionBlocks: spec.question ? splitCardText(spec.question, questionText, CARD_TEXT_BLOCK_LENGTH) : undefined,
       resolution: cardText(spec.resolution),
@@ -644,9 +651,10 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
   /** Whether a resolved card still fits the channel's whole-card cap with its question kept.
    *  A text cap is not a card cap (Discord embeds outgrow it), so a channel without one is not checked. */
   const terminalFits = ({ title, question, resolution, fromAgent }: TerminalApprovalCard): boolean => {
-    if (config.maxCardTextLength === undefined) return true;
+    const limit = config.maxCardTextLength ?? (adapter.name === 'discord' ? 4000 : undefined);
+    if (limit === undefined) return true;
     const blocks = splitCardText(question, fromAgent ? (t: string) => t : cardText, CARD_TEXT_BLOCK_LENGTH);
-    return !cardQuestionTooLong(title, [...blocks, cardText(resolution)].join('\n'), config.maxCardTextLength);
+    return !cardQuestionTooLong(cardTitle(title), [...blocks, cardText(resolution)].join('\n'), limit);
   };
   /** Registry/routing key for this bridge — also the app-context cache
    *  namespace. Default instances key by the platform name. */
@@ -1052,12 +1060,12 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         const text = escape(question);
         const blocks = splitCardText(question, escape, CARD_TEXT_BLOCK_LENGTH);
         if (config.maxCardTextLength !== undefined) {
-          const tooLong = cardQuestionTooLong(title, blocks.join('\n'), config.maxCardTextLength);
+          const tooLong = cardQuestionTooLong(cardTitle(title), blocks.join('\n'), config.maxCardTextLength);
           if (tooLong) throw new CardTooLongError(tooLong);
         }
         const options: NormalizedOption[] = normalizeOptions(content.options as never);
         const card = Card({
-          title,
+          title: cardTitle(title),
           children: [
             ...blocks.map((block) => CardText(block)),
             Actions(
@@ -1143,7 +1151,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           return;
         }
 
-        const card = Card({ title, children: cardChildren });
+        const card = Card({ title: cardTitle(title), children: cardChildren });
         const result = await adapter.postMessage(tid, { card, fallbackText });
         return result?.id;
       }

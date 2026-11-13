@@ -1594,3 +1594,54 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
     }
   });
 });
+
+describe('plain card titles at Markdown adapter boundaries', () => {
+  it.each(['telegram', 'teams', 'slack'])('encodes posts and resolved edits for %s', async (name) => {
+    const { calls, postMessage } = makePostCapture();
+    const editMessage = vi.fn(async () => ({ id: 'm', threadId: 't', raw: {} }));
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ name, postMessage, editMessage }),
+      supportsThreads: false,
+    });
+    const title = '[Admin](https://evil.test) file_a';
+    await bridge.deliver('t', null, {
+      kind: 'chat-sdk',
+      content: {
+        type: 'ask_question',
+        questionId: 'literal-title',
+        title,
+        question: 'Allow?',
+        options: ['Approve'],
+      },
+    });
+    await bridge.deliver('t', null, {
+      kind: 'chat-sdk',
+      content: {
+        operation: 'edit',
+        messageId: 'm',
+        terminalCard: { title, question: 'Allow?', resolution: 'Approved' },
+      },
+    });
+    const expected = name === 'slack' ? title : '\\[Admin\\]\\(https://evil.test\\) file\\_a';
+    expect((calls[0].message as { card: { title: string } }).card.title).toBe(expected);
+    expect((editMessage.mock.calls[0] as unknown as [string, string, { card: { title: string } }])[2].card.title).toBe(
+      expected,
+    );
+  });
+});
+
+it('shows the Discord decision near the embed limit with an older adapter config', async () => {
+  const editMessage = vi.fn(async () => ({ id: 'm', threadId: 't', raw: {} }));
+  const bridge = createChatSdkBridge({ adapter: stubAdapter({ name: 'discord', editMessage }), supportsThreads: true });
+  await bridge.deliver('t', null, {
+    kind: 'chat-sdk',
+    content: {
+      operation: 'edit',
+      messageId: 'm',
+      terminalCard: { title: 'Approval', question: 'x'.repeat(3990), resolution: 'Approved by Alice' },
+    },
+  });
+  const message = (editMessage.mock.calls[0] as unknown as [string, string, { fallbackText: string }])[2];
+  expect(message.fallbackText).toContain('Approved by Alice');
+  expect(message.fallbackText).not.toContain('x'.repeat(3990));
+});
