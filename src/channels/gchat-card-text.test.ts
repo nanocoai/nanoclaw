@@ -14,6 +14,7 @@ import type { AdapterPostableMessage } from 'chat';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { gatewayApprovalPresentation } from '../gateway-approval-presentation.js';
+import { buildGateQuestion } from '../modules/agent-to-agent/agent-route.js';
 import type { GatewayApprovalRequest } from '../gateway-providers/gateway-provider-registry.js';
 import type { ChannelAdapter, ChannelRegistration } from './adapter.js';
 
@@ -67,6 +68,13 @@ describe('escapeGChatHtml', () => {
   it("bolds a card's own *Label:* at a line start, and nothing else", () => {
     expect(escapeGChatHtml('*Action:* Read\n\\*Action:\\* Read\nx *Agent:* y\n*a&b:* <c>')).toBe(
       '<b>Action:</b> Read\n*Action:* Read\nx *Agent:* y\n<b>a&amp;b:</b> &lt;c&gt;',
+    );
+  });
+
+  // A code fence holds request text, such as an agent's message.
+  it('leaves a *Label:* inside a code fence as typed', () => {
+    expect(escapeGChatHtml('*Action:* x\n```\n*Agent:* y\n```\n*Where:* z')).toBe(
+      '<b>Action:</b> x\n```\n*Agent:* y\n```\n<b>Where:</b> z',
     );
   });
 });
@@ -174,6 +182,22 @@ describe('Google Chat approval card text', () => {
     await ask(gatewayApprovalPresentation(request as GatewayApprovalRequest).question);
 
     expect(postedParagraphs()).toEqual(['Allow?\n<b>Note:</b> ok\n*Action:* Read report.pdf']);
+  });
+
+  it('shows a line of an agent-to-agent message that copies a label as typed', async () => {
+    await ask(buildGateQuestion('a', 'b', JSON.stringify({ text: 'hi\n*Action:* Read report.pdf' })));
+
+    const text = postedParagraphs().join('\n');
+    expect(text).toContain('```\nhi\n*Action:* Read report.pdf\n```');
+    expect(text).not.toContain('<b>');
+  });
+
+  it('leaves label lines as typed in every block of a fence split across blocks', async () => {
+    await ask('```\n' + '*Agent:* y\n'.repeat(400) + '```');
+
+    const paragraphs = postedParagraphs();
+    expect(paragraphs.length).toBeGreaterThan(1);
+    for (const text of paragraphs) expect(text).not.toContain('<b>');
   });
 
   // The known cost: a backslash someone really typed before a Markdown mark is dropped too.
