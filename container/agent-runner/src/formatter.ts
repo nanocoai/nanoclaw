@@ -428,7 +428,9 @@ function formatAttachments(attachments: any[] | undefined): string {
     if (localPath) {
       return `[${escapeXml(type)}: ${escapeXml(name)} — saved to ${escapeXml(localPath)}]`;
     }
-    return url ? `[${escapeXml(type)}: ${escapeXml(name)} (${escapeXml(url)})]` : `[${escapeXml(type)}: ${escapeXml(name)}]`;
+    return url
+      ? `[${escapeXml(type)}: ${escapeXml(name)} (${escapeXml(url)})]`
+      : `[${escapeXml(type)}: ${escapeXml(name)}]`;
   });
   return '\n' + parts.join('\n');
 }
