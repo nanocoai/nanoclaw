@@ -802,10 +802,10 @@ describe('photon adapter (mocked SDK)', () => {
         { loadSpectrum: async () => sdk },
       );
       await adapter.setup(host.config);
-      const ask = (questionId: string) =>
+      const ask = (questionId: string, choices = options) =>
         adapter.deliver(chat, null, {
           kind: 'chat',
-          content: { type: 'ask_question', questionId, title: 'Deploy?', question: 'Ship it?', options },
+          content: { type: 'ask_question', questionId, title: 'Deploy?', question: 'Ship it?', options: choices },
         });
       await ask('q1');
       let sent = 0;
@@ -901,14 +901,18 @@ describe('photon adapter (mocked SDK)', () => {
     });
 
     // Choose an existing agent answers by sending a new card, which replaces the question.
-    it('drops a queued answer once the answer ahead of it replaced the question', async () => {
+    // That agent card keeps the first card's id, so an id check alone would let the answer through.
+    it.each([
+      ['a new id', 'q2'],
+      ['the same id, as the agent card does', 'q1'],
+    ])('drops a queued answer once the answer ahead of it replaced the question under %s', async (_, nextId) => {
       const { adapter, host, held, ask, say, confirmations } = await askOnSlowHost('+15551112222', ['Approve']);
       say('+15551112222', '+15551112222', '/approve');
       say('+15551112222', '+15551112222', '/approve');
       // Messages are read one at a time: once this one is through, the second answer is waiting.
       say('+15553334444', '+15553334444', 'hello from another chat');
       await waitFor(() => host.inbound.length === 1);
-      await ask('q2');
+      await ask(nextId, ['Main agent']);
       held[0].settle('accepted');
       await waitFor(() => confirmations('Approve').length === 1);
       await new Promise((r) => setTimeout(r, 20));
@@ -918,21 +922,28 @@ describe('photon adapter (mocked SDK)', () => {
       await adapter.teardown();
     });
 
-    it('leaves a newer question open when an answer to the one before it is accepted late', async () => {
-      const { adapter, host, held, ask, say, confirmations } = await askOnSlowHost('+15551112222', ['Approve']);
-      say('+15551112222', '+15551112222', '/approve');
-      await waitFor(() => host.actions.length === 1);
-      // The next question arrives in the chat while the host still has the first answer.
-      await ask('q2');
-      held[0].settle('accepted');
-      await waitFor(() => confirmations('Approve').length === 1);
+    it.each([
+      ['a new id', 'q2'],
+      ['the same id, as the agent card does', 'q1'],
+    ])(
+      'leaves a newer question under %s open when an answer to the one before it is accepted late',
+      async (_, nextId) => {
+        const { adapter, host, held, ask, say, confirmations } = await askOnSlowHost('+15551112222', ['Approve']);
+        say('+15551112222', '+15551112222', '/approve');
+        await waitFor(() => host.actions.length === 1);
+        // The next question arrives in the chat while the host still has the first answer.
+        await ask(nextId, ['Main agent']);
+        held[0].settle('accepted');
+        await waitFor(() => confirmations('Approve').length === 1);
 
-      say('+15551112222', '+15551112222', '/approve');
-      await waitFor(() => host.actions.length === 2 || host.inbound.length === 1);
-      expect(host.actions[1]).toEqual({ questionId: 'q2', option: 'Approve', userId: '+15551112222' });
-      expect(host.inbound).toHaveLength(0);
-      await adapter.teardown();
-    });
+        // Only the new card's options answer it, so the first question can't be the one left open.
+        say('+15551112222', '+15551112222', '/main-agent');
+        await waitFor(() => host.actions.length === 2 || host.inbound.length === 1);
+        expect(host.actions[1]).toEqual({ questionId: nextId, option: 'Main agent', userId: '+15551112222' });
+        expect(host.inbound).toHaveLength(0);
+        await adapter.teardown();
+      },
+    );
   });
 
   it('sends a tapback reaction using the raw Photon id and emoji', async () => {
