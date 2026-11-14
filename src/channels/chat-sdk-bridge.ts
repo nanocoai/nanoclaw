@@ -1277,6 +1277,10 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
             ? splitForLimit(text, config.maxTextLength)
             : [text];
         let firstId: string | undefined;
+        // Known limits: posted parts aren't tracked, so a failed part fails the
+        // delivery and each retry posts again from part 1: earlier parts repeat,
+        // and a part that keeps failing blocks the rest. Resume waits for #4227,
+        // which rewrites this loop. The number of parts has no cap.
         for (let i = 0; i < chunks.length; i++) {
           const chunk = chunks[i];
           const attachFiles = i === 0 && fileUploads && fileUploads.length > 0;
