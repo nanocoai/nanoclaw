@@ -13,6 +13,7 @@
  */
 import { INSTALL_SLUG } from './config.js';
 import { retryPendingAdoptions, stopOrphanedSessions } from './container-runner.js';
+import { clearDueWakes } from './due-wake.js';
 import { ensureEgressNetwork } from './egress-lockdown.js';
 import { getActiveSessions } from './db/sessions.js';
 import { peekSessionDriver } from './drivers/index.js';
@@ -126,9 +127,10 @@ export function startHostSweep(): void {
       // MODULE-HOOK:approvals-reason-sweep:end
     },
   });
-  // Event feeds — additive over the resync floor: mail writes and runtime
-  // terminal events land as coalesced enqueues, so behavior only gets
-  // faster, never different, and a lost event costs at most one tick.
+  // Event feeds — additive over the resync floor: mail writes, runtime
+  // terminal events and due-time timers (src/due-wake.ts) land as coalesced
+  // enqueues, so behavior only gets faster, never different, and a lost event
+  // costs at most one tick.
   registerReconcileEnqueue(feedEnqueue);
   armRuntimeWatch();
   void sweep();
@@ -137,6 +139,7 @@ export function startHostSweep(): void {
 export function stopHostSweep(): void {
   running = false;
   registerReconcileEnqueue(null);
+  clearDueWakes();
   const stoppingWatch = runtimeWatch;
   runtimeWatch = null;
   if (stoppingWatch) {
