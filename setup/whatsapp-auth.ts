@@ -235,8 +235,10 @@ export async function run(args: string[]): Promise<void> {
           sock.end(undefined);
         }
 
-        if (connection === 'close') {
-          const reason = (lastDisconnect?.error as { output?: { statusCode?: number } })?.output?.statusCode;
+        // Our own sock.end() after a successful link closes too; that is not a failure.
+        if (connection === 'close' && !succeeded) {
+          const err = lastDisconnect?.error as { message?: string; output?: { statusCode?: number } } | undefined;
+          const reason = err?.output?.statusCode;
           if (reason === DisconnectReason.loggedOut) {
             clearTimeout(timeout);
             emitStatus('WHATSAPP_AUTH', {
@@ -255,6 +257,16 @@ export async function run(args: string[]): Promise<void> {
             // 515 = stream error after pairing succeeds but before registration
             // completes. Reconnect to finish the handshake.
             connectSocket(true);
+          } else {
+            // Nothing reconnects after any other close (405 = WhatsApp refused this
+            // WhatsApp Web version), so waiting would only end in a misleading timeout.
+            clearTimeout(timeout);
+            const detail = `${reason ?? 'no status'} ${err?.message ?? ''}`.replace(/\s+/g, ' ').trim();
+            emitStatus('WHATSAPP_AUTH', {
+              STATUS: 'failed',
+              ERROR: `WhatsApp closed the connection before linking (${detail}). Clear store/auth/ and run the step again.`,
+            });
+            process.exit(1);
           }
         }
       });
