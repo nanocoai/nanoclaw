@@ -4,6 +4,7 @@
  * Channel adapters bridge NanoClaw with messaging platforms (Discord, Slack, etc.).
  * Two patterns: native adapters (implement directly) or Chat SDK bridge (wrap a Chat SDK adapter).
  */
+import type { ResponseOutcome } from '../response-registry.js';
 
 /** Passed to the adapter at setup time. */
 export interface ChannelSetup {
@@ -21,7 +22,10 @@ export interface ChannelSetup {
   /** Called when the adapter discovers metadata about a conversation. */
   onMetadata(platformId: string, name?: string, isGroup?: boolean): void;
 
-  /** Called when a user clicks a button/action in a card (e.g., ask_user_question response). */
+  /**
+   * Called when a user clicks a button/action in a card (e.g., ask_user_question response).
+   * Resolves with what the host did: a card shows a resolution only for 'accepted'.
+   */
   onAction(
     questionId: string,
     selectedOption: string,
@@ -32,7 +36,7 @@ export interface ChannelSetup {
       platformId?: string;
       threadId?: string | null;
     },
-  ): void;
+  ): void | Promise<ResponseOutcome>;
 }
 
 /** Delivery address used for reply-to overrides and (normally) the inbound's own origin. */

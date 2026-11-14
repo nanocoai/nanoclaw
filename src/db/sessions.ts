@@ -338,6 +338,7 @@ export async function getAskQuestionRender(id: string): Promise<
       fromAgent?: boolean;
       options: import('../channels/ask-question.js').NormalizedOption[];
       deferResolution?: boolean;
+      platformId?: string;
     }
   | undefined
 > {
@@ -345,16 +346,20 @@ export async function getAskQuestionRender(id: string): Promise<
   // Only agent-asked questions land in pending_questions (delivery.ts).
   if (q)
     return { title: q.title, ...(q.question ? { question: q.question, fromAgent: true } : {}), options: q.options };
-  const a = await getDb().get<{ title: string; question: string; options_json: string; action: string }>(
-    'SELECT title, question, options_json, action FROM pending_approvals WHERE approval_id = ?',
-    id,
-  );
+  const a = await getDb().get<{
+    title: string;
+    question: string;
+    options_json: string;
+    action: string;
+    platform_id: string | null;
+  }>('SELECT title, question, options_json, action, platform_id FROM pending_approvals WHERE approval_id = ?', id);
   if (a?.title)
     return {
       title: a.title,
       question: a.question,
       options: JSON.parse(a.options_json),
       ...(a.action === 'gateway_request' ? { deferResolution: true } : {}),
+      ...(a.platform_id ? { platformId: a.platform_id } : {}),
     };
 
   // Channel-registration + unknown-sender approvals persist the same render
