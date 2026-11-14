@@ -157,6 +157,17 @@ describe('paths NanoClaw mounts itself', () => {
     expect(validateMount({ hostPath: runnerSrc, containerPath: 'runner' }, linked).allowed).toBe(false);
   });
 
+  it("rejects a group's stamped plugins tree", () => {
+    // The driver pins `groups/<folder>/plugins` to install-surface through the
+    // session's folder label, so the same silent refusal follows.
+    const plugins = path.join(installRoot, 'groups', 'g1', 'plugins');
+    fs.mkdirSync(plugins, { recursive: true });
+    expect(validateMount({ hostPath: plugins, containerPath: 'plugins' }, policy).reason).toMatch(/install-surface/);
+    expect(
+      validateMount({ hostPath: path.join(installRoot, 'groups', 'g1'), containerPath: 'g1' }, policy).allowed,
+    ).toBe(true);
+  });
+
   it('still allows a sibling of a protected path', () => {
     const sibling = path.join(installRoot, 'container', 'notes');
     fs.mkdirSync(sibling, { recursive: true });

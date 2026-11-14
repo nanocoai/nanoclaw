@@ -236,7 +236,10 @@ describe('an operator mount of a path NanoClaw mounts itself', () => {
     // An operator who allowlists the install's container/ tree.
     fs.writeFileSync(
       allowlist.path,
-      JSON.stringify({ allowedRoots: [{ path: path.join(process.cwd(), 'container') }], blockedPatterns: [] }),
+      JSON.stringify({
+        allowedRoots: [{ path: path.join(process.cwd(), 'container') }, { path: GROUPS_DIR }],
+        blockedPatterns: [],
+      }),
     );
   });
 
@@ -248,6 +251,7 @@ describe('an operator mount of a path NanoClaw mounts itself', () => {
   it.each([
     ['container/agent-runner/src', 'runner-src'],
     ['container/skills', 'skills'],
+    [`groups/${FOLDER}/plugins`, 'plugins'],
   ])('drops %s at the mount check, so the spec the driver sees still validates', async (rel, containerPath) => {
     // The live failure: the allowlist accepted it, composition classed it
     // allowlisted-extra, and the driver refused every start with

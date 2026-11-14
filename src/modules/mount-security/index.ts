@@ -259,17 +259,27 @@ export function protectedMountReason(hostPath: string, policy: MountPolicy = mou
   const real = (p: string) => getRealPath(p) ?? p;
   const resolved: MountPolicy = {
     ...policy,
+    groupsRoot: real(policy.groupsRoot),
     surfaceRoots: policy.surfaceRoots.map(real),
     materialsRoot: real(policy.materialsRoot),
     gatewayTrustRoot: real(policy.gatewayTrustRoot),
   };
   const target = getRealPath(expandPath(hostPath)) ?? expandPath(hostPath);
-  const required = classRequiredByPath(target, policy) ?? classRequiredByPath(target, resolved);
+  const required =
+    classRequiredByPath(target, policy) ??
+    classRequiredByPath(target, resolved) ??
+    ([policy, resolved].some((p) => underStampedPlugins(target, p.groupsRoot)) ? 'install-surface' : null);
   if (!required) return null;
-  return (
-    `"${target}" is a path NanoClaw mounts itself (${required}); ` +
-    'it cannot be an additional mount, or the container driver refuses every start of this group'
-  );
+  return `"${target}" is protected NanoClaw content (${required}) and cannot be an additional mount`;
+}
+
+/**
+ * `groups/<folder>/plugins`, which the driver pins to install-surface per session
+ * (`stampedPluginsRoot`). Any group's counts: it is code that group's agent executes.
+ */
+function underStampedPlugins(target: string, groupsRoot: string): boolean {
+  const [folder, sub] = path.relative(groupsRoot, target).split(path.sep);
+  return Boolean(folder) && folder !== '..' && sub === 'plugins';
 }
 
 /**
