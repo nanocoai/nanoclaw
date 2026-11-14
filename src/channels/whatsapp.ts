@@ -107,10 +107,98 @@ const GROUP_METADATA_CACHE_TTL_MS = 60_000; // 1 min for outbound sends
 const SENT_MESSAGE_CACHE_MAX = 256;
 const RECONNECT_DELAY_MS = 5000;
 const PENDING_QUESTIONS_MAX = 64;
+/** Per chat. A chat can hold several unanswered cards at once, but not without
+ *  bound: nothing clears an entry whose question was resolved elsewhere. */
+const PENDING_QUESTIONS_PER_CHAT_MAX = 16;
 
 /** Normalize an option label to a slash command: "Approve" → "/approve" */
 function optionToCommand(option: string): string {
   return '/' + option.toLowerCase().replace(/\s+/g, '-');
+}
+
+/** Longest question detail kept for confirmations — enough to tell two cards
+ *  with the same title apart without echoing the whole card back. */
+const PENDING_QUESTION_DETAIL_MAX = 120;
+/** How many still-open cards a confirmation names before summarising the rest. */
+const PENDING_QUESTIONS_LISTED_MAX = 3;
+
+export interface PendingQuestion {
+  questionId: string;
+  /** Card title, e.g. "Install Packages Request". */
+  title: string;
+  /** Short form of the question body — see `questionDetail`. */
+  detail: string;
+  options: NormalizedOption[];
+}
+
+/**
+ * Short, single-line form of a question body for the answer confirmation.
+ *
+ * Flattened rather than cut at the first line: the install_packages card
+ * puts the package list on its second line, so a first-line detail would
+ * render two install requests identically — the exact case the confirmation
+ * exists to tell apart.
+ */
+export function questionDetail(question: string | undefined): string {
+  const flat = (question ?? '').replace(/\s+/g, ' ').trim();
+  if (flat.length <= PENDING_QUESTION_DETAIL_MAX) return flat;
+  return flat.slice(0, PENDING_QUESTION_DETAIL_MAX - 1).trimEnd() + '…';
+}
+
+function describePendingQuestion(pending: PendingQuestion): string {
+  return pending.detail ? `${pending.title} (${pending.detail})` : pending.title;
+}
+
+/**
+ * Confirmation sent after a slash-command reply resolves a card.
+ *
+ * Names the card that was answered and every card still open in the chat,
+ * newest first — the order a bare reply resolves them. A WhatsApp reply
+ * carries nothing tying it to a card, so a second bare `/approve` lands on
+ * the next card in line; this does not stop that, but it makes it visible.
+ */
+export function formatAnswerConfirmation(
+  answered: PendingQuestion,
+  option: NormalizedOption,
+  voterName: string,
+  stillOpen: PendingQuestion[],
+): string {
+  const lines = [`${option.selectedLabel} by ${voterName}: ${describePendingQuestion(answered)}`];
+  if (stillOpen.length > 0) {
+    lines.push(`${stillOpen.length} more waiting in this chat:`);
+    const newestFirst = [...stillOpen].reverse();
+    for (const pending of newestFirst.slice(0, PENDING_QUESTIONS_LISTED_MAX)) {
+      lines.push(`• ${describePendingQuestion(pending)}`);
+    }
+    const unlisted = newestFirst.length - PENDING_QUESTIONS_LISTED_MAX;
+    if (unlisted > 0) lines.push(`• …and ${unlisted} more`);
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Match a slash-command reply against a chat's pending questions.
+ *
+ * Scanned newest first: two cards live in the same chat can offer the same
+ * option label (two approvals both rendering `/approve`), and nothing in the
+ * reply distinguishes them — WhatsApp gives us plain text, not a callback
+ * carrying the card it came from. The newest card is the one the user just
+ * saw, so it wins the ambiguity.
+ *
+ * Returns the array index so the caller can drop exactly the question that
+ * was answered and leave the others answerable.
+ */
+export function matchPendingQuestion(
+  pendings: PendingQuestion[],
+  content: string,
+): { index: number; pending: PendingQuestion; option: NormalizedOption } | undefined {
+  const cmd = content.trim().toLowerCase();
+  for (let index = pendings.length - 1; index >= 0; index--) {
+    const pending = pendings[index];
+    const option = pending.options.find((o) => optionToCommand(o.label) === cmd);
+    if (option) return { index, pending, option };
+  }
+  return undefined;
 }
 
 // --- Markdown → WhatsApp formatting ---
@@ -438,15 +526,11 @@ registerChannelAdapter('whatsapp', {
     // Group metadata cache with TTL
     const groupMetadataCache = new Map<string, { metadata: GroupMetadata; expiresAt: number }>();
 
-    // Pending questions: chatJid → { questionId, options }
-    // User replies with /approve, /reject, etc. to answer
-    const pendingQuestions = new Map<
-      string,
-      {
-        questionId: string;
-        options: NormalizedOption[];
-      }
-    >();
+    // Pending questions: chatJid → questions awaiting an answer, oldest first.
+    // User replies with /approve, /reject, etc. to answer.
+    // A list, not a single entry: nothing stops the agent asking a second
+    // question before the first is answered, and each has to stay answerable.
+    const pendingQuestions = new Map<string, PendingQuestion[]>();
 
     // Group sync tracking
     let lastGroupSync = 0;
@@ -888,18 +972,20 @@ registerChannelAdapter('whatsapp', {
             const isBotMessage = WHATSAPP_SHARED ? content.startsWith(`${ASSISTANT_NAME}:`) : false;
 
             // Check if this reply answers a pending question via slash command
-            const pending = pendingQuestions.get(chatJid);
-            if (pending && content.startsWith('/')) {
-              const cmd = content.trim().toLowerCase();
-              const matched = pending.options.find((o) => optionToCommand(o.label) === cmd);
-              if (matched) {
+            const pendings = pendingQuestions.get(chatJid);
+            if (pendings && content.startsWith('/')) {
+              const hit = matchPendingQuestion(pendings, content);
+              if (hit) {
                 const voterName = msg.pushName || sender.split('@')[0];
-                setupConfig.onAction(pending.questionId, matched.value, sender);
-                pendingQuestions.delete(chatJid);
-                await sendRawMessage(chatJid, `${matched.selectedLabel} by ${voterName}`);
+                setupConfig.onAction(hit.pending.questionId, hit.option.value, sender);
+                // Drop only the question that was answered — any other card
+                // open in this chat stays answerable.
+                pendings.splice(hit.index, 1);
+                if (pendings.length === 0) pendingQuestions.delete(chatJid);
+                await sendRawMessage(chatJid, formatAnswerConfirmation(hit.pending, hit.option, voterName, pendings));
                 log.info('Question answered', {
-                  questionId: pending.questionId,
-                  value: matched.value,
+                  questionId: hit.pending.questionId,
+                  value: hit.option.value,
                   voterName,
                 });
                 continue; // Don't forward this reply to the agent
@@ -1009,7 +1095,20 @@ registerChannelAdapter('whatsapp', {
           const text = `*${title}*\n\n${question}\n\nReply with:\n${optionLines}`;
           const msgId = await sendRawMessage(platformId, text);
           if (msgId) {
-            pendingQuestions.set(platformId, { questionId, options });
+            const pendings = pendingQuestions.get(platformId) ?? [];
+            pendings.push({ questionId, title, detail: questionDetail(question), options });
+            if (pendings.length > PENDING_QUESTIONS_PER_CHAT_MAX) {
+              // The dropped card stays on screen but can no longer be answered
+              // here, and its approval row stays pending — say so.
+              const dropped = pendings.shift()!;
+              log.warn('Pending question limit reached for chat — oldest card is no longer answerable', {
+                platformId,
+                droppedQuestionId: dropped.questionId,
+                droppedTitle: dropped.title,
+                limit: PENDING_QUESTIONS_PER_CHAT_MAX,
+              });
+            }
+            pendingQuestions.set(platformId, pendings);
             if (pendingQuestions.size > PENDING_QUESTIONS_MAX) {
               const oldest = pendingQuestions.keys().next().value!;
               pendingQuestions.delete(oldest);
