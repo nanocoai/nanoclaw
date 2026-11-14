@@ -118,11 +118,14 @@ install_deps() {
   # is invisible but corepack still blocks on stdin. Auto-accept.
   export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 
+  # The pnpm lookups below append to PATH, so a node in those dirs can't
+  # shadow the one check_node accepted.
+
   # A previous run (or the manual recovery printed below) may have left pnpm
   # in ~/.local/bin, which a fresh login shell doesn't always have on PATH.
   if ! command -v pnpm >/dev/null 2>&1 && [ -x "$HOME/.local/bin/pnpm" ]; then
-    export PATH="$HOME/.local/bin:$PATH"
-    log "Found pnpm in $HOME/.local/bin — prepended to PATH"
+    export PATH="$PATH:$HOME/.local/bin"
+    log "Found pnpm in $HOME/.local/bin — appended to PATH"
   fi
 
   # Preferred path: enable corepack so `pnpm` shim lands on PATH.
@@ -140,7 +143,7 @@ install_deps() {
       if mkdir -p "$user_bin" >> "$LOG_FILE" 2>&1 \
           && corepack enable --install-directory "$user_bin" pnpm >> "$LOG_FILE" 2>&1 \
           && [ -x "$user_bin/pnpm" ]; then
-        export PATH="$user_bin:$PATH"
+        export PATH="$PATH:$user_bin"
         hash -r 2>/dev/null || true
         log "corepack pnpm shim installed in $user_bin"
       else
@@ -183,7 +186,7 @@ install_deps() {
       NPM_LOCAL_PREFIX="$HOME/.local"
       if mkdir -p "$NPM_LOCAL_PREFIX" \
           && npm install -g "pnpm@${pinned}" --prefix "$NPM_LOCAL_PREFIX" >> "$LOG_FILE" 2>&1; then
-        export PATH="$NPM_LOCAL_PREFIX/bin:$PATH"
+        export PATH="$PATH:$NPM_LOCAL_PREFIX/bin"
         log "Installed pnpm@${pinned} to user-owned prefix: $NPM_LOCAL_PREFIX"
       else
         log "pnpm install via user-owned prefix also failed"
@@ -194,14 +197,14 @@ install_deps() {
   # `npm install -g` writes to npm's global prefix, which isn't always on the
   # shell PATH — common on macOS where the user has `npm config set prefix
   # ~/.npm-global` to avoid sudo, or on Linux where /usr/local/bin isn't in
-  # PATH. Discover the prefix and prepend its bin dir so `command -v pnpm`
+  # PATH. Discover the prefix and append its bin dir so `command -v pnpm`
   # sees the new install.
   if ! command -v pnpm >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
     local npm_prefix
     npm_prefix=$(npm config get prefix 2>/dev/null)
     if [ -n "$npm_prefix" ] && [ -x "$npm_prefix/bin/pnpm" ]; then
-      export PATH="$npm_prefix/bin:$PATH"
-      log "Prepended npm prefix bin to PATH: $npm_prefix/bin"
+      export PATH="$PATH:$npm_prefix/bin"
+      log "Appended npm prefix bin to PATH: $npm_prefix/bin"
     fi
   fi
 
