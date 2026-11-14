@@ -56,8 +56,7 @@ export interface DeviceProof {
 }
 
 export type ProofVerdict =
-  | { valid: true; proof: DeviceProof }
-  | { valid: false; reason: 'malformed' | 'stale' | 'nonce' | 'kid' | 'signature' };
+  { valid: true; proof: DeviceProof } | { valid: false; reason: 'malformed' | 'stale' | 'nonce' | 'kid' | 'signature' };
 
 export interface DeviceKeyOptions {
   homeDir?: string;

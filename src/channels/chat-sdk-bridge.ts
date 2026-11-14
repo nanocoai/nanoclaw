@@ -13,7 +13,12 @@ import {
   CardText,
   Actions,
   Button,
+  Chart,
+  Divider,
+  Field,
+  Fields,
   LinkButton,
+  Table,
   type CardChild,
   type Adapter,
   type AssistantContextChangedEvent,
@@ -25,6 +30,7 @@ import {
 import { log } from '../log.js';
 import { SqliteStateAdapter } from '../state-sqlite.js';
 import { registerWebhookAdapter } from '../webhook-server.js';
+import { cardProblems, isCardPart, isRecord, type CardPart } from './card-parts.js';
 import { CardTooLongError, cardQuestionTooLong, normalizeOptions, type NormalizedOption } from './ask-question.js';
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage } from './adapter.js';
 import { INSTANCE_KEY_RE } from './channel-registry.js';
@@ -432,6 +438,8 @@ interface TerminalApprovalCard {
   /** The question as separate text blocks, when it was split to fit. */
   questionBlocks?: string[];
   resolution: string;
+  /** The question is the agent's own markup: don't escape it (the resolution still is). */
+  fromAgent?: boolean;
 }
 
 /**
@@ -660,6 +668,54 @@ export async function enrichAttachments(
   return enriched;
 }
 
+/** A checked part as its Chat SDK element, rebuilt from the fields it may have and nothing else. */
+function buildCardPart(part: CardPart): CardChild {
+  const props = (isRecord(part.props) ? part.props : {}) as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+  switch (part.type) {
+    case 'Text':
+      return props.style ? CardText(props.content, { style: props.style }) : CardText(props.content);
+    case 'Fields':
+      return Fields(
+        (part.children as Array<{ props: { label: string; value: string | number } }>).map((field) =>
+          Field({ label: field.props.label, value: String(field.props.value) }),
+        ),
+      );
+    case 'Table':
+      return Table({
+        headers: props.headers,
+        rows: (props.rows as Array<Array<string | number>>).map((row) => row.map(String)),
+        ...(props.align ? { align: props.align } : {}),
+        ...(props.caption ? { caption: props.caption } : {}),
+      });
+    case 'Chart': {
+      const chart = props.chart;
+      if (chart.type === 'pie') {
+        const segments = (chart.segments as Array<{ label: string; value: number }>).map(({ label, value }) => ({
+          label,
+          value,
+        }));
+        return Chart({ title: props.title, chart: { type: 'pie', segments } });
+      }
+      const categories = chart.categories as string[];
+      return Chart({
+        title: props.title,
+        chart: {
+          type: chart.type,
+          categories,
+          ...(chart.xLabel ? { xLabel: chart.xLabel } : {}),
+          ...(chart.yLabel ? { yLabel: chart.yLabel } : {}),
+          series: (chart.series as Array<{ name: string; values: number[] }>).map((series) => ({
+            name: series.name,
+            data: series.values.map((value, i) => ({ label: categories[i], value })),
+          })),
+        },
+      });
+    }
+    default:
+      return Divider();
+  }
+}
+
 export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter {
   const { adapter } = config;
   // The instance name becomes a webhook route segment (the route regex is
@@ -677,13 +733,22 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
   }
   const transformText = (t: string): string => (config.transformOutboundText ? config.transformOutboundText(t) : t);
   const cardText = (t: string): string => (config.escapeCardText ? config.escapeCardText(t) : t);
-  const terminalMessage = (spec: TerminalApprovalCard) =>
-    terminalApprovalMessage({
+  const terminalMessage = ({ fromAgent, ...spec }: TerminalApprovalCard) => {
+    const questionText = fromAgent ? (t: string) => t : cardText;
+    return terminalApprovalMessage({
       ...spec,
-      question: cardText(spec.question),
-      questionBlocks: spec.question ? splitCardText(spec.question, cardText, CARD_TEXT_BLOCK_LENGTH) : undefined,
+      question: questionText(spec.question),
+      questionBlocks: spec.question ? splitCardText(spec.question, questionText, CARD_TEXT_BLOCK_LENGTH) : undefined,
       resolution: cardText(spec.resolution),
     });
+  };
+  /** Whether a resolved card still fits the channel's whole-card cap with its question kept.
+   *  A text cap is not a card cap (Discord embeds outgrow it), so a channel without one is not checked. */
+  const terminalFits = ({ title, question, resolution, fromAgent }: TerminalApprovalCard): boolean => {
+    if (config.maxCardTextLength === undefined) return true;
+    const blocks = splitCardText(question, fromAgent ? (t: string) => t : cardText, CARD_TEXT_BLOCK_LENGTH);
+    return !cardQuestionTooLong(title, [...blocks, cardText(resolution)].join('\n'), config.maxCardTextLength);
+  };
   /** Registry/routing key for this bridge — also the app-context cache
    *  namespace. Default instances key by the platform name. */
   const instanceKey = config.instance ?? adapter.name;
@@ -904,11 +969,15 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         const resolution = actorName ? `${selectedLabel} by ${actorName}` : selectedLabel;
         try {
           const tid = event.threadId;
+          const terminal = render?.question
+            ? { title, question: render.question, resolution, fromAgent: render.fromAgent }
+            : undefined;
+          // A question that no longer fits with its answer goes; the answer stays escaped.
           await adapter.editMessage(
             tid,
             event.messageId,
-            render?.question
-              ? terminalMessage({ title, question: render.question, resolution })
+            terminal
+              ? terminalMessage(terminalFits(terminal) ? terminal : { ...terminal, question: '' })
               : { markdown: `${title}\n\n${resolution}` },
           );
         } catch (err) {
@@ -1026,11 +1095,9 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           typeof terminalCard.question === 'string' &&
           typeof terminalCard.resolution === 'string'
         ) {
-          await adapter.editMessage(
-            tid,
-            content.messageId as string,
-            terminalMessage(terminalCard as TerminalApprovalCard),
-          );
+          // Named fields only: a row must not switch off escaping with its own fromAgent.
+          const { title, question, resolution } = terminalCard as TerminalApprovalCard;
+          await adapter.editMessage(tid, content.messageId as string, terminalMessage({ title, question, resolution }));
         } else {
           await adapter.editMessage(tid, content.messageId as string, {
             markdown: transformText((content.text as string) || (content.markdown as string) || ''),
@@ -1104,13 +1171,19 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         const title = (cardSpec.title as string) || '';
         const fallbackText = (content.fallbackText as string) || (cardSpec.description as string) || title || '';
 
+        // Checked again here: anything in the container can write this row, not only send_card.
+        const problems = cardProblems(cardSpec);
+        if (problems.length > 0) throw new Error(`send_card card refused: ${problems.join('; ')}`);
+
         const cardChildren: CardChild[] = [];
         if (typeof cardSpec.description === 'string' && cardSpec.description) {
           cardChildren.push(CardText(cardSpec.description));
         }
         if (Array.isArray(cardSpec.children)) {
           for (const child of cardSpec.children) {
-            if (typeof child === 'string' && child) {
+            if (isCardPart(child)) {
+              cardChildren.push(buildCardPart(child));
+            } else if (typeof child === 'string' && child) {
               cardChildren.push(CardText(child));
             } else if (
               child &&
