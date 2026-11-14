@@ -754,3 +754,91 @@ describe('Mattermost setup failures', () => {
     expect(adapter.botUserId).toBe(BOT_ID);
   });
 });
+
+describe('Mattermost mention detection', () => {
+  // Mattermost lists the receiving bot in a frame's `mentions` in DMs and group
+  // messages whether or not the post names it, so every frame here carries it.
+  async function initialized(username = 'nanoclaw') {
+    const fetchImpl = vi.fn(async (input: string | URL | Request) =>
+      String(input).endsWith('/users/me')
+        ? Response.json({ id: BOT_ID, username, is_bot: true })
+        : Response.json({ id: USER_ID, username: 'operator' }),
+    );
+    const adapter = new MattermostAdapter({ ...BASE_OPTIONS, fetchImpl, skipSocket: true });
+    const processMessage = vi.fn();
+    const logger = { debug() {}, error() {}, info() {}, warn() {} };
+    await adapter.initialize({ getLogger: () => logger, processMessage } as unknown as ChatInstance);
+    return { adapter, processMessage };
+  }
+
+  function postWith(text: string): MattermostPost {
+    return { id: POST_ID, channel_id: CHANNEL_ID, user_id: USER_ID, message: text, root_id: '', create_at: 1 };
+  }
+
+  async function isMention(channelType: 'O' | 'G', text: string): Promise<boolean> {
+    const { adapter, processMessage } = await initialized();
+    adapter.handleSocketEvent({
+      event: 'posted',
+      data: { channel_type: channelType, mentions: JSON.stringify([BOT_ID]), post: JSON.stringify(postWith(text)) },
+    });
+    await vi.waitFor(() => expect(processMessage).toHaveBeenCalledOnce());
+    return processMessage.mock.calls[0]![2].isMention;
+  }
+
+  it('does not treat a plain group message as a mention', async () => {
+    expect(await isMention('G', 'lunch at noon?')).toBe(false);
+  });
+
+  it.each([
+    'hey @nanoclaw, lunch at noon?',
+    'Please help @nanoclaw.',
+    '**@nanoclaw** can you look?',
+    '\\`please @nanoclaw\\`',
+    '<div>\n@nanoclaw help\n</div>',
+    '![help @nanoclaw](https://example.org/a.png)',
+    '![help @nanoclaw][pic]\n\n[pic]: https://example.org/a.png',
+    '[ask @nanoclaw](https://example.org/docs)',
+    '[ask @nanoclaw][docs]\n\n[docs]: https://example.org/docs',
+    '[@nanoclaw](https://example.org/@nanoclaw)',
+  ])('sees @bot in a group message: %s', async (text) => {
+    expect(await isMention('G', text)).toBe(true);
+  });
+
+  it.each([
+    'see `@nanoclaw` in the docs',
+    'see ``@nanoclaw`` in the docs',
+    '```\n@nanoclaw\n```',
+    '~~~\n@nanoclaw\n~~~',
+    '```\n@nanoclaw',
+    'ask @nanoclaw.dev instead',
+    'ask @nanoclaw..dev instead',
+    'mail josé@nanoclaw',
+    'ask @nanoclawé instead',
+    'https://example.org/@nanoclaw',
+    '<https://example.org/@nanoclaw>',
+  ])('ignores code and other handles in a group message: %s', async (text) => {
+    expect(await isMention('G', text)).toBe(false);
+  });
+
+  it('trusts the server mention list in a channel', async () => {
+    expect(await isMention('O', 'the deploy is done')).toBe(true);
+  });
+
+  it.each([
+    ['ask @nanoclaw', true],
+    ['see `@nanoclaw` in the docs', false],
+    ['```\n@nanoclaw\n```', false],
+  ])('reads @bot outside code in a fetched post: %s', async (text, expected) => {
+    const { adapter } = await initialized();
+    expect(adapter.parseMessage(postWith(text)).isMention).toBe(expected);
+  });
+
+  it.each([
+    ['@ASSISTANT help', true],
+    ['@aſſiſtant help', false],
+    ['personİ@assistant help', false],
+  ])('matches the handle in any case, but not look-alike letters: %s', async (text, expected) => {
+    const { adapter } = await initialized('assistant');
+    expect(adapter.parseMessage(postWith(text)).isMention).toBe(expected);
+  });
+});
