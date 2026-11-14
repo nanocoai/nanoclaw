@@ -169,12 +169,12 @@ Your Slack member ID (Profile → ⋮ → "Copy member ID"; starts with U).
 
 `auth.test` confirms the bot token works and captures the bot identity:
 ```nc:run capture:connected_as effect:fetch
-curl -sf -X POST https://slack.com/api/auth.test -H "Authorization: Bearer {{bot_token}}" | jq -er '"@" + .user + " in " + .team'
+curl -sf -X POST https://slack.com/api/auth.test -H "Authorization: Bearer {{bot_token}}" | jq -er '"@" + (.user // error("no user")) + " in " + (.team // error("no team"))'
 ```
 
 `conversations.open` yields the DM address `slack:<channelId>` (no channel back = the `im:write` scope is missing — add it and reinstall):
 ```nc:run capture:platform_id effect:fetch
-curl -s -X POST https://slack.com/api/conversations.open -H "Authorization: Bearer {{bot_token}}" -H "Content-Type: application/json" -d '{"users":"{{owner_handle}}"}' | jq -er '"slack:" + .channel.id'
+curl -s -X POST https://slack.com/api/conversations.open -H "Authorization: Bearer {{bot_token}}" -H "Content-Type: application/json" -d '{"users":"{{owner_handle}}"}' | jq -er '.channel.id // error("no channel id") | "slack:" + .'
 ```
 
 `owner_handle` and `platform_id` feed the owner-wiring step. Sending works immediately;

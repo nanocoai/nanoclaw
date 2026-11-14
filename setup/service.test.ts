@@ -112,6 +112,44 @@ describe('systemd unit generation', () => {
   });
 });
 
+// The service does not inherit the setup shell, so without this the host would
+// fall back to the path hash for its image and labels.
+describe('install id in the service environment', () => {
+  const saved = process.env.NANOCLAW_INSTALL_ID;
+  const plist = () => renderLaunchdPlist('/Users/u/nanoclaw', '/opt/homebrew/bin/node', '/Users/u');
+  const unit = () => renderSystemdUnit('/home/user/nanoclaw', '/usr/bin/node', '/home/user', false);
+  afterEach(() => {
+    if (saved === undefined) delete process.env.NANOCLAW_INSTALL_ID;
+    else process.env.NANOCLAW_INSTALL_ID = saved;
+  });
+
+  it('gives the launchd host the id its label uses', () => {
+    process.env.NANOCLAW_INSTALL_ID = 'prod-eks_1';
+    expect(plist()).toContain('<string>com.nanoclaw-v2-prod-eks_1</string>');
+    expect(plist()).toContain('<key>NANOCLAW_INSTALL_ID</key>\n        <string>prod-eks_1</string>');
+  });
+
+  it('gives the systemd host the id its unit name uses', () => {
+    process.env.NANOCLAW_INSTALL_ID = 'prod-eks_1';
+    expect(unit()).toContain('Environment=NANOCLAW_INSTALL_ID=prod-eks_1\n');
+  });
+
+  it('writes the same files for an empty id as for none', () => {
+    delete process.env.NANOCLAW_INSTALL_ID;
+    const [unsetPlist, unsetUnit] = [plist(), unit()];
+    process.env.NANOCLAW_INSTALL_ID = '';
+    expect(plist()).toBe(unsetPlist);
+    expect(unit()).toBe(unsetUnit);
+    expect(unsetPlist + unsetUnit).not.toContain('NANOCLAW_INSTALL_ID');
+  });
+
+  it('refuses an invalid id', () => {
+    process.env.NANOCLAW_INSTALL_ID = 'UPPER';
+    expect(plist).toThrow(/NANOCLAW_INSTALL_ID/);
+    expect(unit).toThrow(/NANOCLAW_INSTALL_ID/);
+  });
+});
+
 describe('hostProxyEnv', () => {
   let root: string;
 

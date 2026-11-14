@@ -1320,6 +1320,121 @@ it('forwards the authenticated instance and message address without editing a de
   }
 });
 
+it('escapes a host terminal card even when its row claims fromAgent', async () => {
+  const edits: PostCall[] = [];
+  const bridge = createChatSdkBridge({
+    adapter: stubAdapter({
+      editMessage: async (threadId, _id, message) => {
+        edits.push({ threadId, message });
+        return { id: 'card', threadId, raw: {} };
+      },
+    }),
+    supportsThreads: false,
+    escapeCardText: (t) => `[${t}]`,
+  });
+  await bridge.deliver('stub:C1', null, {
+    kind: 'chat-sdk',
+    content: {
+      operation: 'edit',
+      messageId: 'card',
+      terminalCard: { title: 'Review', question: 'Allow <x>?', resolution: 'Approved', fromAgent: true },
+    },
+  });
+  const edited = edits[0].message as { card: { children: Array<{ content?: string }> } };
+  expect(edited.card.children.map((c) => c.content)).toEqual(['[Allow <x>?]', '[Approved]']);
+});
+
+async function answerStoredQuestion(caps: { maxCardTextLength?: number; maxTextLength?: number } = {}) {
+  const { initTestDb, closeDb } = await import('../db/connection.js');
+  const { runMigrations } = await import('../db/migrations/index.js');
+  const { createAgentGroup, createSession, createPendingQuestion } = await import('../db/index.js');
+  await runMigrations(await initTestDb());
+  const created_at = new Date().toISOString();
+  await createAgentGroup({ id: 'ag-q', name: 'Agent', folder: 'agent-q', agent_provider: null, created_at });
+  await createSession({
+    id: 'sess-q',
+    agent_group_id: 'ag-q',
+    messaging_group_id: null,
+    thread_id: null,
+    agent_provider: null,
+    status: 'active',
+    container_status: 'stopped',
+    last_active: null,
+    created_at,
+  });
+  await createPendingQuestion({
+    question_id: 'body-fixture',
+    session_id: 'sess-q',
+    message_out_id: 'out-1',
+    platform_id: 'fixture:room',
+    channel_type: 'fixture',
+    thread_id: null,
+    title: 'Deploy',
+    question: 'Ship **v2** today?',
+    options: [{ label: 'Yes', selectedLabel: 'Yes', value: 'yes' }],
+    created_at,
+  });
+  const editMessage = vi.fn(async () => ({ id: 'card', threadId: 'fixture:room', raw: {} }));
+  const adapter = stubAdapter({
+    name: 'fixture',
+    initialize: async () => {},
+    channelIdFromThreadId: (threadId: string) => threadId,
+    editMessage,
+  });
+  const bridge = createChatSdkBridge({
+    adapter,
+    supportsThreads: false,
+    escapeCardText: (t) => `[${t}]`,
+    ...caps,
+  });
+  try {
+    await bridge.setup({ onInbound: () => {}, onInboundEvent: () => {}, onMetadata: () => {}, onAction: vi.fn() });
+    const chat = (bridge as unknown as { _chat: import('chat').Chat })._chat;
+    await chat.processAction(
+      {
+        actionId: 'ncq:body-fixture:0',
+        adapter,
+        messageId: 'card',
+        raw: {},
+        threadId: 'fixture:room',
+        user: { userId: 'u2', userName: 'ann' } as never,
+        value: '0',
+      },
+      undefined,
+    );
+    expect(editMessage).toHaveBeenCalledTimes(1);
+    return (editMessage.mock.calls[0] as unknown[])[2];
+  } finally {
+    await bridge.teardown();
+    await closeDb();
+  }
+}
+
+it('keeps an answered agent question body on the card, unescaped, with an escaped resolution', async () => {
+  const edited = (await answerStoredQuestion()) as {
+    card: { title: string; children: Array<{ type: string; content?: string }> };
+  };
+  expect(edited.card.title).toBe('Deploy');
+  expect(edited.card.children.map((c) => c.content)).toEqual(['Ship **v2** today?', '[Yes by ann]']);
+});
+
+it('drops the stored question when it no longer fits the card cap with its answer', async () => {
+  // 'Deploy' + 'Ship **v2** today?' = 24 fits a cap of 30; with '[Yes by ann]' it would not.
+  const edited = (await answerStoredQuestion({ maxCardTextLength: 30 })) as {
+    card: { title: string; children: Array<{ content?: string }> };
+  };
+  expect(edited.card.title).toBe('Deploy');
+  expect(edited.card.children.map((c) => c.content)).toEqual(['[Yes by ann]']);
+});
+
+it('keeps the question on a channel with no card cap, whatever its text cap', async () => {
+  // Discord's 2,000 text cap is not its embed cap; only maxCardTextLength may drop the question.
+  const edited = (await answerStoredQuestion({ maxTextLength: 30 })) as {
+    card: { children: Array<{ content?: string }> };
+  };
+  expect(edited.card.children.map((c) => c.content)).toEqual(['Ship **v2** today?', '[Yes by ann]']);
+});
+
 describe('createChatSdkBridge — local Gateway webhook', () => {
   // The Gateway listener forwards raw events to a loopback server; only it may
   // post there. It sends the bot token in x-discord-gateway-token.
@@ -1478,4 +1593,55 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
       await bridge.teardown();
     }
   });
+});
+
+describe('plain card titles at Markdown adapter boundaries', () => {
+  it.each(['telegram', 'teams', 'webex', 'mattermost', 'slack'])('encodes card titles for %s', async (name) => {
+    const { calls, postMessage } = makePostCapture();
+    const editMessage = vi.fn(async () => ({ id: 'm', threadId: 't', raw: {} }));
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ name, postMessage, editMessage }),
+      supportsThreads: false,
+    });
+    const title = '[Admin](https://evil.test) file_a &#x202E;';
+    await bridge.deliver('t', null, {
+      kind: 'chat-sdk',
+      content: {
+        type: 'ask_question',
+        questionId: 'literal-title',
+        title,
+        question: 'Allow?',
+        options: ['Approve'],
+      },
+    });
+    await bridge.deliver('t', null, {
+      kind: 'chat-sdk',
+      content: {
+        operation: 'edit',
+        messageId: 'm',
+        terminalCard: { title, question: 'Allow?', resolution: 'Approved' },
+      },
+    });
+    const expected = name === 'slack' ? title : '\\[Admin\\]\\(https://evil.test\\) file\\_a \\&#x202E;';
+    expect((calls[0].message as { card: { title: string } }).card.title).toBe(expected);
+    expect((editMessage.mock.calls[0] as unknown as [string, string, { card: { title: string } }])[2].card.title).toBe(
+      expected,
+    );
+  });
+});
+
+it('shows the Discord decision near the embed limit with an older adapter config', async () => {
+  const editMessage = vi.fn(async () => ({ id: 'm', threadId: 't', raw: {} }));
+  const bridge = createChatSdkBridge({ adapter: stubAdapter({ name: 'discord', editMessage }), supportsThreads: true });
+  await bridge.deliver('t', null, {
+    kind: 'chat-sdk',
+    content: {
+      operation: 'edit',
+      messageId: 'm',
+      terminalCard: { title: 'Approval', question: 'x'.repeat(3990), resolution: 'Approved by Alice' },
+    },
+  });
+  const message = (editMessage.mock.calls[0] as unknown as [string, string, { fallbackText: string }])[2];
+  expect(message.fallbackText).toContain('Approved by Alice');
+  expect(message.fallbackText).not.toContain('x'.repeat(3990));
 });
