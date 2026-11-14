@@ -40,13 +40,15 @@ function now(): string {
   return new Date().toISOString();
 }
 
-function fakeHandle(sessionId: string, name: string): SupervisedHandle {
+function fakeHandle(sessionId: string, name: string, options: { stopFiresTerminal?: boolean } = {}): SupervisedHandle {
+  const { stopFiresTerminal = true } = options;
   const terminalCallbacks: Array<(failure?: unknown) => void> = [];
   return {
     key: { installSlug: 'test-install', agentGroupId: 'ag-1', sessionId },
     name,
     async start() {},
     async stop() {
+      if (!stopFiresTerminal) return;
       for (const callback of terminalCallbacks) callback(undefined);
     },
     async status() {
@@ -153,6 +155,19 @@ describe('session claim lifecycle', () => {
     handle.stop = stop;
     await vi.waitFor(() => expect(release).toHaveBeenCalledWith({ kind: 'session-ended', reason: 'test-stop' }));
     _setFinishFenceScheduleForTesting();
+  });
+
+  it('killContainer stops the handle twice: once directly and once from finish', async () => {
+    // Supervision is gone: stop() resolves without firing terminal callbacks,
+    // so only killContainer's post-stop fallback can reach finish().
+    const handle = fakeHandle('sess-1', 'container-a', { stopFiresTerminal: false });
+    const stop = vi.spyOn(handle, 'stop');
+    snapshots.push({ handle, phase: 'running' } as SupervisedSnapshot);
+    await adoptRunningSessions();
+    killContainer('sess-1', 'test-stop');
+    await vi.waitFor(() => expect(release).toHaveBeenCalledWith({ kind: 'session-ended', reason: 'test-stop' }));
+    expect(stop).toHaveBeenCalledTimes(2);
+    expect(stop.mock.calls.map(([reason]) => reason)).toEqual(['test-stop', 'test-stop']);
   });
 
   it('awaits detachment on host replacement while leaving the session running', async () => {
