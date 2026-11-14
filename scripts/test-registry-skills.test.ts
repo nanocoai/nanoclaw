@@ -4,7 +4,8 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
-  barrelLines,
+  appendLines,
+  appendProblems,
   copySources,
   dependencyProblems,
   discover,
@@ -152,9 +153,39 @@ describe('copy sources', () => {
         '```',
       ].join('\n'),
     });
-    expect(barrelLines(meta)).toEqual(["import './imessage.js';"]);
+    expect(appendLines(meta)).toEqual([{ to: 'src/channels/index.ts', line: "import './imessage.js';" }]);
     // Its guard hangs on install answers the harness does not reproduce, so the job names it instead.
     expect(guardedDirectives(meta)).toEqual([4]);
+  });
+
+  it('names each unguarded append line its file does not hold exactly once, barrel or not', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'append-lines-'));
+    try {
+      fs.mkdirSync(path.join(root, 'src/channels'), { recursive: true });
+      fs.mkdirSync(path.join(root, 'setup'));
+      fs.writeFileSync(path.join(root, 'src/channels/index.ts'), "import './telegram.js';\nimport './telegram.js';\n");
+      fs.writeFileSync(
+        path.join(root, 'setup/index.ts'),
+        '  // >>> nanoclaw:setup-steps\n  // <<< nanoclaw:setup-steps\n',
+      );
+      const meta = skill('add-telegram', [], {
+        channel: true,
+        markdown: [
+          '```nc:append to:src/channels/index.ts',
+          "import './telegram.js';",
+          '```',
+          '```nc:append to:setup/index.ts at:nanoclaw:setup-steps',
+          "'pair-telegram': () => import('./pair-telegram.js'),",
+          '```',
+        ].join('\n'),
+      });
+      expect(appendProblems(root, [meta])).toEqual([
+        `add-telegram: src/channels/index.ts must hold "import './telegram.js';" exactly once`,
+        `add-telegram: setup/index.ts must hold "'pair-telegram': () => import('./pair-telegram.js')," exactly once`,
+      ]);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 
