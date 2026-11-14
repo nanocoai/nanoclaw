@@ -44,7 +44,10 @@ export async function startCliServer(socketPath: string = DEFAULT_SOCKET_PATH): 
   // file behind, and net.createServer refuses to bind to an existing path.
   // Only a socket nobody answers is stale: a live listener means another
   // host instance owns this path, and startup must fail rather than steal it.
-  if (fs.existsSync(socketPath)) {
+  // On Windows the transport is a named pipe: the OS auto-cleans pipes when
+  // the owning process exits, so the stale-file dance below (and the chmod
+  // after listen) is POSIX-only.
+  if (process.platform !== 'win32' && fs.existsSync(socketPath)) {
     if (await probeLiveServer(socketPath)) {
       throw new Error(
         `another host instance is already serving ncl at ${socketPath} — ` +
@@ -67,10 +70,13 @@ export async function startCliServer(socketPath: string = DEFAULT_SOCKET_PATH): 
   await new Promise<void>((resolve, reject) => {
     s.once('error', reject);
     s.listen(socketPath, () => {
-      try {
-        fs.chmodSync(socketPath, 0o600);
-      } catch (err) {
-        log.warn('Failed to chmod ncl socket (continuing)', { socketPath, err });
+      // chmod is POSIX-only: named pipes (`\\.\pipe\`) carry no fs mode.
+      if (process.platform !== 'win32') {
+        try {
+          fs.chmodSync(socketPath, 0o600);
+        } catch (err) {
+          log.warn('Failed to chmod ncl socket (continuing)', { socketPath, err });
+        }
       }
       log.info('ncl CLI server listening', { socketPath });
       resolve();
