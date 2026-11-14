@@ -13,12 +13,13 @@ import './matrix.js';
 Then delete the copied adapter and its registration test:
 
 ```bash
-rm -f src/channels/matrix.ts src/channels/matrix-registration.test.ts
+rm -f src/channels/matrix.ts src/channels/matrix-registration.test.ts \
+  src/channels/matrix-instances.ts src/channels/matrix-instances.test.ts
 ```
 
 ## 2. Remove credentials
 
-Remove the Matrix env vars apply set — `MATRIX_BASE_URL`, `MATRIX_USER_ID`, `MATRIX_BOT_USERNAME`, and whichever auth path you chose (`MATRIX_USERNAME` + `MATRIX_PASSWORD`, or `MATRIX_ACCESS_TOKEN`) — from `.env`.
+Remove the Matrix env vars apply set — `MATRIX_BASE_URL`, `MATRIX_USER_ID`, `MATRIX_BOT_USERNAME`, and whichever auth path you chose (`MATRIX_USERNAME` + `MATRIX_PASSWORD`, or `MATRIX_ACCESS_TOKEN`) — from `.env`, plus `MATRIX_INSTANCES` and any `MATRIX_*_<NAME>` variables of additional accounts.
 
 ## 3. Remove the package
 
