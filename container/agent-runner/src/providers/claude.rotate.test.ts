@@ -160,4 +160,16 @@ describe('claude maybeRotateContinuation', () => {
     }
     expect(reason!).toBeNull();
   });
+
+  it.skipIf(process.getuid?.() === 0)('keeps resuming when a project dir cannot be searched', () => {
+    const dir = path.dirname(writeTranscript('sess-locked', 4096));
+    fs.chmodSync(dir, 0o600);
+    let reason: string | null;
+    try {
+      reason = createProvider('claude').maybeRotateContinuation!('sess-locked', CWD);
+    } finally {
+      fs.chmodSync(dir, 0o755);
+    }
+    expect(reason!).toBeNull();
+  });
 });

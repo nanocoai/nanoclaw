@@ -221,7 +221,7 @@ export function rotateClaudeContinuation(
     path.join(claudeConfigDirectory(), 'projects'),
     `${input.continuation}.jsonl`,
   );
-  // An unlistable projects dir proves nothing, so keep resuming.
+  // A failed lookup proves nothing, so keep resuming.
   if (transcriptPath === undefined) return null;
   // Claude Code deletes old transcripts (cleanupPeriodDays, 30 by default).
   // Resuming one fails the turn with "No conversation found", so start fresh.
@@ -289,7 +289,7 @@ function decideContinuationRotation(
   return null;
 }
 
-/** The transcript's path, null when it does not exist, undefined when `root` can't be listed. */
+/** The transcript's path, null when it does not exist, undefined when the lookup itself failed. */
 function findContinuationFile(root: string, fileName: string): string | null | undefined {
   let directories: string[];
   try {
@@ -299,7 +299,13 @@ function findContinuationFile(root: string, fileName: string): string | null | u
   }
   for (const directory of directories) {
     const candidate = path.join(root, directory, fileName);
-    if (fs.existsSync(candidate)) return candidate;
+    try {
+      fs.statSync(candidate);
+      return candidate;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') return undefined;
+    }
   }
   return null;
 }
