@@ -187,6 +187,8 @@ pnpm exec tsx setup/index.ts --step whatsapp-auth -- --method pairing-code --pho
 
 If the handshake fails (`logged_out` or a timeout), the code expired — clear
 `store/auth/` and run the step again for a fresh one. See Troubleshooting.
+If it fails with `WhatsApp closed the connection before linking`, also clear
+`store/auth/` first: a requested pairing code leaves credentials behind.
 
 A successful link reports the number back as `bot_phone`. If it came back empty,
 the device never confirmed (an expired QR or pairing code), so don't restart or
@@ -488,6 +490,17 @@ has a noticeably higher success rate:
 
 ```bash
 pnpm exec tsx .claude/skills/add-whatsapp/scripts/wa-qr-browser.ts --clean
+```
+
+### "WhatsApp closed the connection before linking"
+
+WhatsApp ended the connection before the device was linked, so the step stopped
+at once. The status code in brackets says why: `405` means WhatsApp refused this
+WhatsApp Web version. A requested pairing code leaves credentials behind, so
+clear the auth state before you run the step again:
+
+```bash
+rm -rf store/auth/ && pnpm exec tsx setup/index.ts --step whatsapp-auth -- --method qr
 ```
 
 ### "waiting for this message" on reactions
