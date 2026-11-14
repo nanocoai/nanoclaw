@@ -465,7 +465,7 @@ fi
 # pnpm may instead have landed in npm's configured global prefix. Replay that
 # lookup here as a second recovery path before the final exec.
 if ! command -v pnpm >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
-  NPM_PREFIX="$(npm config get prefix 2>/dev/null)"
+  NPM_PREFIX="$(npm config get prefix 2>/dev/null)" || true
   if [ -n "$NPM_PREFIX" ] && [ -x "$NPM_PREFIX/bin/pnpm" ]; then
     export PATH="$NPM_PREFIX/bin:$PATH"
   fi
