@@ -127,8 +127,10 @@ export interface InboundMailbox {
    * the completed original — one durable step. Split writes tear on a crash:
    * an inserted next occurrence with the original's recurrence intact
    * re-clones the series on the following tick (duplicate runs), while the
-   * reverse order silently kills the series. Durable when the promise
-   * resolves, like insertTask.
+   * reverse order silently kills the series. The same step drops the content
+   * of the series' older finished occurrences, so a series keeps one copy of
+   * its payload instead of one per run. Durable when the promise resolves,
+   * like insertTask.
    */
   armNextTask(originalId: string, task: Task): Promise<void>;
   countLiveTasks(): number;
