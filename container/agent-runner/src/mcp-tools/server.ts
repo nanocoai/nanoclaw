@@ -16,6 +16,7 @@
  */
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 
 import { withOutboundPassthrough } from '../db/messages-out.js';
@@ -142,11 +143,49 @@ export function createMcpServer(
   return server;
 }
 
+/**
+ * Serve until the connection has ended and every tool call it started has
+ * settled, so the caller can then tear down what the tools use. The SDK's
+ * stdio transport does not close when the client ends stdin, so that is
+ * routed through server.close() (which also aborts in-flight calls).
+ */
 export async function startMcpServer(
   run: <T>(action: () => T | Promise<T>) => Promise<T> = async (action) => action(),
+  transport: Transport = new StdioServerTransport(),
 ): Promise<void> {
-  const server = createMcpServer(run);
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  log(`MCP server started with ${allTools.length} tools: ${allTools.map((t) => t.tool.name).join(', ')}`);
+  const inFlight = new Set<Promise<unknown>>();
+  const tracked = <T>(action: () => T | Promise<T>): Promise<T> => {
+    const call = run(action);
+    inFlight.add(call);
+    const done = (): void => {
+      inFlight.delete(call);
+    };
+    call.then(done, done);
+    return call;
+  };
+  const server = createMcpServer(tracked);
+  const closed = new Promise<void>((resolve) => {
+    server.onclose = resolve;
+  });
+
+  const stdin = transport instanceof StdioServerTransport ? process.stdin : null;
+  let ending = false;
+  const endInput = (): void => {
+    if (ending) return;
+    ending = true;
+    server
+      .close()
+      .catch((err: unknown) => log(`close on stdin end failed: ${err instanceof Error ? err.message : String(err)}`));
+  };
+  stdin?.once('end', endInput);
+  stdin?.once('close', endInput);
+  try {
+    await server.connect(transport);
+    log(`MCP server started with ${allTools.length} tools: ${allTools.map((t) => t.tool.name).join(', ')}`);
+    await closed;
+  } finally {
+    stdin?.off('end', endInput);
+    stdin?.off('close', endInput);
+  }
+  await Promise.allSettled(inFlight);
 }
