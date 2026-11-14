@@ -211,6 +211,21 @@ export function describeResolvedRule(
   }
 }
 
+// Receipt for the currently delivered card. Unknown IDs are never evidence that
+// a click belongs to a replacement request after an ambiguous failed delivery.
+const deliveredCards = new Map<string, { createdAt: string; messageId: string | undefined }>();
+export function recordChannelApprovalCard(groupId: string, createdAt: string, messageId: string | undefined): void {
+  deliveredCards.set(groupId, { createdAt, messageId });
+}
+export function isCurrentChannelApprovalCard(
+  groupId: string,
+  createdAt: string,
+  messageId: string | undefined,
+): boolean {
+  const card = deliveredCards.get(groupId);
+  return !!messageId && card?.createdAt === createdAt && card.messageId === messageId;
+}
+
 // ── Main flow ──
 
 export interface RequestChannelApprovalInput {
@@ -347,12 +362,13 @@ export async function requestChannelApproval(input: RequestChannelApprovalInput)
   );
   const options = normalizeOptions(await buildApprovalOptions(agentGroups, delivery.userId));
 
+  const createdAt = new Date().toISOString();
   await createPendingChannelApproval({
     messaging_group_id: messagingGroupId,
     agent_group_id: referenceGroup.id,
     original_message: JSON.stringify(event),
     approver_user_id: delivery.userId,
-    created_at: new Date().toISOString(),
+    created_at: createdAt,
     title,
     question,
     options_json: JSON.stringify(options),
@@ -365,7 +381,7 @@ export async function requestChannelApproval(input: RequestChannelApprovalInput)
   }
 
   try {
-    await adapter.deliver(
+    const messageId = await adapter.deliver(
       delivery.messagingGroup.channel_type,
       delivery.messagingGroup.platform_id,
       null,
@@ -380,6 +396,7 @@ export async function requestChannelApproval(input: RequestChannelApprovalInput)
       undefined,
       delivery.messagingGroup.instance,
     );
+    recordChannelApprovalCard(messagingGroupId, createdAt, messageId);
     log.info('Channel registration card delivered', {
       messagingGroupId,
       agentGroupCount: agentGroups.length,
