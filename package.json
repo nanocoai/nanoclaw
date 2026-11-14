@@ -1,9 +1,9 @@
 {
   "name": "nanoclaw",
-  "version": "2026.10.1-rc.2",
+  "version": "2026.11.0-beta.3",
   "description": "Personal AI assistant. Lightweight, secure, customizable.",
   "type": "module",
-  "packageManager": "pnpm@10.34.5",
+  "packageManager": "pnpm@10.34.9",
   "main": "dist/index.js",
   "bin": {
     "ncl": "bin/ncl"
@@ -47,19 +47,19 @@
     "yaml": "^2.9.0"
   },
   "devDependencies": {
-    "@eslint/js": "^9.35.0",
+    "@eslint/js": "^9.39.5",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.10.0",
     "eslint": "^9.35.0",
     "eslint-plugin-no-catch-all": "^1.1.0",
-    "globals": "^15.12.0",
+    "globals": "^17.13.0",
     "husky": "^9.1.7",
-    "prettier": "^3.8.1",
+    "prettier": "^3.9.10",
     "tsx": "^4.23.15",
     "typescript": "^5.7.0",
     "typescript-eslint": "^8.35.0",
     "vite": "^8.0.16",
-    "vitest": "^4.1.11"
+    "vitest": "^5.0.5"
   },
   "engines": {
     "node": ">=22"

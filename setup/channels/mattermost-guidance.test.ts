@@ -42,7 +42,7 @@ describe('Mattermost bot setup guidance', () => {
     expect(skill).toContain('src/channels/mattermost-adapter/adapter.test.ts');
     expect(skill).toContain('src/channels/mattermost-adapter/websocket.test.ts');
     expect(skill).toContain(
-      'pnpm exec vitest run src/channels/mattermost-registration.test.ts src/channels/mattermost-adapter/adapter.test.ts src/channels/mattermost-adapter/websocket.test.ts',
+      'pnpm exec vitest run src/channels/mattermost.test.ts src/channels/mattermost-registration.test.ts src/channels/mattermost-adapter/adapter.test.ts src/channels/mattermost-adapter/websocket.test.ts',
     );
   });
 

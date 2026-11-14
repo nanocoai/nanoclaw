@@ -31,7 +31,11 @@ vi.mock('./platform.js', () => ({
   hasSystemd: () => true,
 }));
 vi.mock('./central-db-inspection.js', () => ({
-  inspectCentralDb: async () => ({ registeredGroups: 1, derivedGroups: 0 }),
+  inspectCentralDb: async () => ({
+    registeredGroups: 1,
+    derivedGroups: 0,
+    lastWiredAt: {},
+  }),
 }));
 vi.mock('./lib/registry-state.js', () => ({
   readImageSource: () => 'build',

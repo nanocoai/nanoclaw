@@ -527,9 +527,9 @@ describe('runChannelSkill adapter (Option A)', () => {
     );
     process.chdir(root);
 
-    const failCalls: Array<{ step: string; msg: string; hint?: string }> = [];
-    const fakeFail = (step: string, msg: string, hint?: string): Promise<never> => {
-      failCalls.push({ step, msg, hint });
+    const failCalls: Array<{ step: string; msg: string; hint?: string; detail?: string }> = [];
+    const fakeFail = (step: string, msg: string, hint?: string, _raw?: string, detail?: string): Promise<never> => {
+      failCalls.push({ step, msg, hint, detail });
       // The real fail() process.exits and never returns; emulate that by aborting
       // the flow so control doesn't fall through to the resolve/wire steps.
       return Promise.reject(new Error('__failed__'));
@@ -554,6 +554,9 @@ describe('runChannelSkill adapter (Option A)', () => {
     expect(failCalls[0].msg).toBe('Register the webhook by hand'); // heading → headline
     expect(failCalls[0].hint).toContain('Open the Faily dashboard'); // prose → hint
     expect(failCalls[0].hint).not.toBe('See logs/setup-steps/ for details, then retry setup.'); // not the generic
+    // The first line of the bounce reason rides along for callers with no terminal.
+    expect(failCalls[0].detail).toMatch(/\S/);
+    expect(failCalls[0].detail).not.toContain('\n');
   });
 });
 
@@ -643,7 +646,7 @@ it('background Slack setup refuses to report ready when a required companion is 
       inputs: { connection: 'provisioned', bot_token: 'xoxb-test', app_token: 'xapp-test', owner_handle: 'U123456789' },
       exec: async command => (cmds.push(command), command.includes('auth.test') ? '@bot in Test' : command.includes('conversations.open') ? 'slack:D123456789' : ''),
       resolveRemote: () => 'origin', wire,
-    })).rejects.toThrow('companion installation needs attention');
+    })).rejects.toThrow(/companion installation needs attention \(slack-[\w-]+ is missing/);
     // The companion check throws even when no skill ran, so pin that the real
     // add-slack (read relative to cwd, the checkout) actually ran first.
     expect(cmds.some((c) => c.includes('auth.test'))).toBe(true);

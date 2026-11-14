@@ -64,8 +64,9 @@ async function fireAction(
     onInbound: async () => {},
     onInboundEvent: async () => {},
     onMetadata: () => {},
-    onAction: (questionId: string, selectedOption: string, userId: string) => {
+    onAction: async (questionId: string, selectedOption: string, userId: string) => {
       actions.push(`${questionId}:${selectedOption}:${userId}`);
+      return 'accepted' as const;
     },
   } as ChannelSetup);
 
@@ -83,6 +84,8 @@ async function fireAction(
     },
     undefined,
   );
+  // The handler returns once the host has the click; let the card edit that follows finish.
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
   return { edits, actions };
 }
 
@@ -168,9 +171,9 @@ describe('chat-sdk-bridge approval-card terminal state', () => {
       'ncq:module-compact-question:0',
     );
 
-    const message = edits[0].message as { markdown: string };
-    expect(message.markdown).toContain('Custom approval');
-    expect(message.markdown).toContain('Approved safely by reviewer');
+    const message = edits[0].message as { card: { title: string; children: Array<{ content?: string }> } };
+    expect(message.card.title).toBe('Custom approval');
+    expect(message.card.children.map((child) => child.content)).toEqual(['Approved safely by reviewer']);
     expect(actions).toEqual(['module-compact-question:approve-real-value:U4']);
   });
 });

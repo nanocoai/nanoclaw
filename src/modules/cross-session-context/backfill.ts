@@ -23,7 +23,7 @@
  */
 import { isTaskThread } from '../../db/sessions.js';
 import { log } from '../../log.js';
-import { withExistingMailboxSession } from '../../session-manager.js';
+import { withExistingMailboxSession, withMailboxSession } from '../../session-manager.js';
 import type { AgentGroup, MessagingGroup, Session } from '../../types.js';
 import {
   ECHO_CHANNEL_TIMELINE_SURFACE,
@@ -184,7 +184,8 @@ export async function backfillSession(
     const surface = isGroupSurface ? ECHO_CHANNEL_TIMELINE_SURFACE : ECHO_TIMELINE_SURFACE;
     // One batch id per wake keeps repeated catch-ups of the same session collision-free.
     const batch = new Date(now).toISOString();
-    await withExistingMailboxSession(agentGroup.id, session.id, async (mailbox) => {
+    // A writer prepares: a just-born session's mailbox may not exist before its first write.
+    await withMailboxSession(agentGroup.id, session.id, async (mailbox) => {
       for (const [i, row] of newest.entries()) {
         // The most recent entry is what a short opener ("sure") is usually
         // answering — deliver it whole; earlier entries get the normal cap.
