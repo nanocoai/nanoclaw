@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import { execFileSync, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -171,6 +172,46 @@ function replaceDirectoryAfterOpen(directory: string, outside: string): string {
     return dir;
   });
   return moved;
+}
+
+// Exits 1 when a reader was waiting on the FIFO (the write-open succeeds), 0 when none was.
+const UNBLOCK_FIFO = `
+  const fs = require('fs');
+  setTimeout(() => {
+    try {
+      fs.closeSync(fs.openSync(process.argv[1], fs.constants.O_WRONLY | fs.constants.O_NONBLOCK));
+      process.exit(1);
+    } catch {
+      process.exit(0);
+    }
+  }, 1000);
+`;
+
+/**
+ * Swap `file` for a FIFO the moment the host opens or reads it by path: the
+ * worst case of a race with the container. A helper process, started only
+ * once the FIFO exists, opens it for writing a second later; that frees a
+ * host read stuck on it, so a regression fails instead of hanging the
+ * worker. Resolves true if a read was stuck.
+ */
+function swapToFifoWhenOpened(file: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    let swapped = false;
+    for (const method of ['openSync', 'readFileSync'] as const) {
+      const original = fs[method] as (...args: unknown[]) => unknown;
+      vi.spyOn(fs, method).mockImplementation(((target: unknown, ...rest: unknown[]) => {
+        if (!swapped && target === file) {
+          swapped = true;
+          fs.rmSync(file);
+          execFileSync('mkfifo', [file]);
+          spawn(process.execPath, ['-e', UNBLOCK_FIFO, file], { stdio: 'ignore' }).once('exit', (code) =>
+            resolve(code === 1),
+          );
+        }
+        return original(target, ...rest);
+      }) as never);
+    }
+  });
 }
 
 beforeEach(async () => {
@@ -394,6 +435,43 @@ describe('restampAgentFromTemplate', () => {
     expect(fs.lstatSync(path.join(groupDir, PERSONA_PREPEND_FILE)).isSymbolicLink()).toBe(false);
     expect(fs.readFileSync(path.join(groupDir, PERSONA_PREPEND_FILE), 'utf-8')).toBe('You are an SDR agent v2.\n');
     expect(fs.readFileSync(path.join(groupDir, 'playbook.md'), 'utf-8')).toBe('# Playbook v2\n');
+  });
+
+  it('plans a symlinked context file as absent instead of reading through it', async () => {
+    const g = await stamp();
+    const groupDir = path.join(GROUPS_DIR, g.folder);
+    // The link's target already holds exactly what v2 wants.
+    const outside = path.join(TEST_ROOT, 'outside-playbook.md');
+    fs.writeFileSync(outside, '# Playbook v2\n');
+    fs.rmSync(path.join(groupDir, 'playbook.md'));
+    fs.symlinkSync(outside, path.join(groupDir, 'playbook.md'));
+    writeTemplateV2();
+
+    const plan = await restampAgentFromTemplate('sales/sdr', g.id, { apply: false });
+
+    expect(change(plan.changes, 'context', 'playbook.md').action).toBe('create');
+  });
+
+  it('reads a context file without blocking when it turns into a FIFO', async () => {
+    const g = await stamp();
+    writeTemplateV2();
+    const stuck = swapToFifoWhenOpened(path.join(GROUPS_DIR, g.folder, 'playbook.md'));
+
+    const plan = await restampAgentFromTemplate('sales/sdr', g.id, { apply: false });
+
+    expect(await stuck, 'the plan blocked on a FIFO').toBe(false);
+    expect(change(plan.changes, 'context', 'playbook.md').action).toBe('create');
+  });
+
+  it('compares a skill overlay without blocking when a file turns into a FIFO', async () => {
+    const g = await stamp();
+    writeTemplateV2();
+    const stuck = swapToFifoWhenOpened(overlaySkill(g.id, 'widget'));
+
+    const plan = await restampAgentFromTemplate('sales/sdr', g.id, { apply: false });
+
+    expect(await stuck, 'the plan blocked on a FIFO').toBe(false);
+    expect(change(plan.changes, 'skill', 'widget').action).toBe('update');
   });
 
   it('refuses to write context through a symlinked directory', async () => {

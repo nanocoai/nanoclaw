@@ -190,7 +190,7 @@ export async function restampAgentFromTemplate(
     const target = contextTarget(groupDir, name);
     const segments = name.split('/');
     const leaf = segments.pop()!;
-    const live = fs.existsSync(target) && fs.statSync(target).isFile() ? fs.readFileSync(target, 'utf-8') : undefined;
+    const live = readRegularFile(target)?.toString('utf-8');
     const wanted = newContext.get(name);
     if (wanted !== undefined) {
       if (live === wanted) {
@@ -495,9 +495,34 @@ function dirsEqual(a: string, b: string): boolean {
     const absB = filesB.get(rel);
     if (absB === undefined) return false;
     if ((fs.lstatSync(absA).mode & 0o111) !== (fs.lstatSync(absB).mode & 0o111)) return false;
-    if (!fs.readFileSync(absA).equals(fs.readFileSync(absB))) return false;
+    const bytesA = readRegularFile(absA);
+    const bytesB = readRegularFile(absB);
+    if (bytesA === undefined || bytesB === undefined || !bytesA.equals(bytesB)) return false;
   }
   return true;
+}
+
+// Open errors that mean the name is not a regular file (or its folder is not a folder).
+const NOT_A_REGULAR_FILE = new Set(['ENOENT', 'ENOTDIR', 'ELOOP', 'ENXIO', 'EOPNOTSUPP']);
+
+/**
+ * The bytes of `file`, or undefined unless it is a regular file. Group and
+ * overlay folders are container-writable, so the name can change type after
+ * any earlier check: open without following a symlink or blocking on a FIFO.
+ */
+function readRegularFile(file: string): Buffer | undefined {
+  let fd: number;
+  try {
+    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+  } catch (err) {
+    if (NOT_A_REGULAR_FILE.has((err as NodeJS.ErrnoException).code ?? '')) return undefined;
+    throw err;
+  }
+  try {
+    return fs.fstatSync(fd).isFile() ? fs.readFileSync(fd) : undefined;
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 interface TaskSeriesMatch {
