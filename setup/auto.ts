@@ -33,7 +33,13 @@ import * as p from '@clack/prompts';
 import k from 'kleur';
 
 import { BACK_TO_CHANNEL_SELECTION } from './lib/back-nav.js';
-import { withSetupLock, launchSlackJob, readSlackJob, slackJobStatus } from '../src/community-portal/slack-job.js';
+import {
+  withSetupLock,
+  launchSlackJob,
+  readSlackJob,
+  slackJobFailure,
+  slackJobStatus,
+} from '../src/community-portal/slack-job.js';
 // The pre-step-aware entry point consults each channel's registered wizard
 // extensions (setup/channels/companions.ts) before running its install skill
 // — the wizard itself stays free of channel-specific imports.
@@ -94,6 +100,8 @@ import { upsertEnvVar } from './set-env.js';
 import { applyToEnv, parseFlags, printHelp, readFromEnv } from './lib/setup-config-parse.js';
 import { runAdvancedScreen } from './lib/setup-config-screen.js';
 import { runWindowedStep } from './lib/windowed-runner.js';
+import { dockerSudoReason, sudoUpFront, type DockerSudoReason } from './lib/sudo-preflight.js';
+import { isWSL } from './platform.js';
 import { runUninstallFlow } from './uninstall/flow.js';
 import { detectExistingInstall } from './uninstall/scan.js';
 import { detectRegisteredGroups, detectExistingDisplayName, readEnvKey } from './environment.js';
@@ -103,6 +111,7 @@ import { configuredGatewayKind, detectInstalledGateway } from './gateways/select
 import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
 import type { AgentGroup } from '../src/types.js';
 import { claudeCliAvailable, resolveTimezoneViaClaude } from './lib/tz-from-claude.js';
+import { dockerAccessHint } from './lib/docker-access-hint.js';
 import * as setupLog from './logs.js';
 import { ensureAnswer, fail, runQuietChild, runQuietStep, spawnQuiet } from './lib/runner.js';
 import { emit as phEmit } from './lib/diagnostics.js';
@@ -138,6 +147,16 @@ const REGISTRY_STEP = 'pnpm exec tsx setup/index.ts --step registry';
 
 /** `setup/registry-login.sh`'s "nothing was signed in, and that is fine" code. */
 const LOGIN_EXIT_SKIPPED = 2;
+
+/** What the container step needs sudo for, and how to do it without setup. */
+const DOCKER_SUDO_COPY: Record<DockerSudoReason, { task: string; diy: string }> = {
+  install: { task: 'install Docker', diy: 'install Docker yourself first' },
+  start: { task: 'start Docker', diy: 'start Docker yourself first' },
+  group: {
+    task: 'add you to the docker group',
+    diy: 'add yourself to the docker group and run setup from a `newgrp docker` shell',
+  },
+};
 
 async function main(): Promise<void> {
   // Make sure ~/.local/bin is on PATH for every child process we spawn.
@@ -283,6 +302,23 @@ async function main(): Promise<void> {
     // The answer lives in `.env` (imageSourceDecided); the perk reminder below
     // reads it from there, so it survives a resume and a plain re-run alike.
     await chooseImageSource();
+    // Installing or starting Docker runs sudo inside the windowed step, where
+    // its prompt is hidden, so ask here. A timestamp still cached from
+    // nanoclaw.sh's Node pre-flight skips the prompt.
+    const dockerSudo = dockerSudoReason();
+    if (dockerSudo) {
+      const { task, diy } = DOCKER_SUDO_COPY[dockerSudo];
+      const sudo = await sudoUpFront(() =>
+        p.log.message(brandBody(dimWrap(`Setup needs to ${task}, so it will ask for your Linux password (sudo).`, 4))),
+      );
+      if (sudo === 'refused') {
+        await fail(
+          'container',
+          `Couldn't get sudo access to ${task}.`,
+          `Run setup again and enter your Linux password, or ${diy}.`,
+        );
+      }
+    }
     p.log.message(
       brandBody(
         dimWrap(
@@ -308,10 +344,15 @@ async function main(): Promise<void> {
         );
       }
       if (err === 'docker_group_not_active') {
+        // Closing a WSL terminal doesn't log the user out, so the new group
+        // only shows up once WSL itself restarts.
+        const distro = process.env.WSL_DISTRO_NAME?.trim() || 'Ubuntu';
         await fail(
           'container',
           "Docker was just installed but your shell doesn't know yet.",
-          'Log out and back in (or run `newgrp docker` in a new shell), then retry.',
+          isWSL()
+            ? `Close ${distro}, run \`wsl --shutdown\` in PowerShell, then reopen ${distro}, go back to the NanoClaw folder and run \`bash nanoclaw.sh\`.`
+            : 'Log out and back in (or run `newgrp docker` in a new shell), then retry.',
         );
       }
       // The pull path fails for reasons a build never has, and "prune the build
@@ -542,13 +583,11 @@ async function main(): Promise<void> {
         ),
       );
     }
-    if (res.terminal?.fields.DOCKER_GROUP_STALE === 'true') {
-      p.log.warn(brandBody("NanoClaw's permissions need a tweak before it can reach Docker."));
-      p.log.message(
-        brandBody(
-          '  sudo setfacl -m u:$(whoami):rw /var/run/docker.sock\n' + `  systemctl --user restart ${getSystemdUnit()}`,
-        ),
-      );
+    const dockerFix = dockerAccessHint(res.terminal?.fields ?? {}, getSystemdUnit());
+    if (dockerFix) {
+      p.log.warn(brandBody(dockerFix.title));
+      p.log.message(brandBody(dockerFix.commands.map((c) => `  ${c}`).join('\n')));
+      p.log.message(brandBody(dockerFix.note));
     }
   }
 
@@ -719,6 +758,8 @@ async function main(): Promise<void> {
   // changes too — the last box must be the one remaining action, not a
   // premature "your assistant is saying hi" (no welcome DM exists yet).
   let wiringPending = false;
+  // Verify passed without a Slack job: none, or one a later good Slack run replaced.
+  let verifyClearedSlackJob = false;
 
   if (
     portalEnabled() &&
@@ -761,9 +802,10 @@ async function main(): Promise<void> {
         );
       }
       const slackInstall = res.terminal?.fields.SLACK_INSTALL;
+      const slackReason = res.terminal?.fields.SLACK_INSTALL_REASON;
       if (slackInstall === 'failed') {
         notes.push(
-          '• Slack installation needs attention. Check its progress in the portal, then resume with `pnpm exec tsx setup/portal.ts --stage slack`.',
+          `• Slack installation needs attention${slackReason ? ` (${slackReason})` : ''}. Check its progress in the portal, then resume with \`pnpm exec tsx setup/portal.ts --stage slack\`.`,
         );
       } else if (slackInstall === 'expired') {
         notes.push('• Slack approval expired. Review the existing app in the portal before restarting Slack setup.');
@@ -799,6 +841,7 @@ async function main(): Promise<void> {
       return;
     }
     wiringPending = res.terminal?.fields.WIRING === 'pending_first_dm';
+    verifyClearedSlackJob = !res.terminal?.fields.SLACK_INSTALL;
   }
 
   const rows: [string, string][] = [
@@ -820,12 +863,14 @@ async function main(): Promise<void> {
     'Heads up',
   );
 
-  const slackStatus = slackJobStatus(await readSlackJob());
+  const slackJob = await readSlackJob();
+  const slackStatus = verifyClearedSlackJob ? undefined : slackJobStatus(slackJob);
   if (slackStatus === 'failed' || slackStatus === 'expired') {
+    const reason = slackJobFailure(slackJob);
     note(
       slackStatus === 'expired'
         ? 'Slack approval expired. Review the existing app in the portal before restarting Slack setup.'
-        : 'Slack installation needs attention. Check its progress in the portal, then resume with `pnpm exec tsx setup/portal.ts --stage slack`.',
+        : `Slack installation needs attention${reason ? ` (${reason})` : ''}. Check its progress in the portal, then resume with \`pnpm exec tsx setup/portal.ts --stage slack\`.`,
       'Slack setup',
     );
     p.outro(k.yellow('NanoClaw is running. Slack needs attention.'));

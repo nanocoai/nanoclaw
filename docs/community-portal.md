@@ -12,15 +12,17 @@ checkout at a different portal; leave it unset.
 
 ## How setup uses it
 
-**Not signed in yet.** The wizard asks before opening a browser, then prints one link and opens
-it. The page, "Approve your terminal", shows a short code and one button, "Sign in and approve".
-Signing in there is the account sign-in (WorkOS, the OAuth device flow); approving binds this
-machine to your account. The dashboard then opens with the perk's activation modal. Enable it and
-the terminal continues on its own. Headless machine: the link, the code and the sign-in page are
-printed on their own lines so you can open them from a phone or laptop.
+**Not signed in yet.** The wizard asks before opening a browser, then prints one link and a short
+code, and opens the link. The page, "Approve your terminal", leads to "Sign in and approve".
+Signing in there is the account sign-in (WorkOS, the OAuth device flow): approve only if the
+sign-in page shows the code your terminal printed. Approving binds this machine to your account.
+The dashboard then opens with the perk's activation modal. Enable it and the terminal continues on
+its own. Headless machine: open the printed link from a phone or laptop.
 
 **Already signed in** (from an earlier step, or from `bash setup/registry-login.sh`): the wizard
-skips sign-in, makes sure this machine is registered at the portal, and opens the dashboard link.
+names the account and asks "Continue as <email>" or "Use a different account". Continuing skips
+sign-in, makes sure this machine is registered at the portal, and opens the dashboard link. A
+different account signs in as above, and the terminal says who signed in.
 
 **Enabling Echo** is where you agree to Echo's terms, including whether you want product and
 security email from NanoClaw and from Echo. Only Echo carries terms; Slack activation is a
@@ -64,13 +66,15 @@ setup serialise checkout changes through `data/setup-mutation.lock`.
 The running NanoClaw service supervises the saved job and resumes it after a service or machine
 restart, with the terminal and browser closed. Verification reports success while approval is
 pending (`SLACK_INSTALL: awaiting_approval` or `installing`, `WIRING: pending_slack_install`); a
-failed or expired job still fails it.
+failed or expired job still fails it, and `SLACK_INSTALL_REASON` says why (the step that stopped
+and its first error line, with tokens removed).
 
 Recovery:
 
 - Retry a failed job, or resume the Slack step after fixing what it reported:
   `pnpm exec tsx setup/portal.ts --stage slack`. The saved app is reused; a resumed setup never
-  creates a duplicate.
+  creates a duplicate. Once Slack is set up and a Slack chat is wired, verification passes again,
+  even with the old failed job still saved.
 - Re-check and resume the worker: `pnpm exec tsx setup/index.ts --step verify`.
 - After the seven-day window expires the job is marked expired. Review or revoke the old app in
   the portal, then start a new installation with the command above.

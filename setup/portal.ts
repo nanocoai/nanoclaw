@@ -2,6 +2,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import * as p from '@clack/prompts';
+import { brightSelect } from './lib/bright-select.js';
 import { openUrl } from './lib/browser.js';
 import {
   clearImageSource,
@@ -9,6 +10,7 @@ import {
   readImageSource,
   readRegistryAccount,
   writeImageSource,
+  type RegistryAccount,
 } from './lib/registry-state.js';
 import { LoginError, finishDeviceFlow, startDeviceFlow, type DeviceFlow } from './registry-login.js';
 import {
@@ -25,14 +27,15 @@ import { readSlackJob } from '../src/community-portal/slack-job.js';
 
 /**
  * The wizard's browser handoffs to the community portal. An enrolled machine
- * makes sure it has its device key and is registered, then starts the stage,
- * opens its link and waits for the browser. A machine without an account gets
- * one browser visit for everything: the registry's device flow (WorkOS, RFC
- * 8628) is started here but its page is not opened; the flow starts
- * anonymously at the portal carrying the user code, the single portal link is
- * printed and opened, and once the sign-in lands the machine registers,
- * claims the flow and waits as usual. Sign-in writes account.json through the
- * sign-in driver's own persist step; nothing here saves credentials.
+ * names its account (switching signs in afresh), makes sure it has its device
+ * key and is registered, then starts the stage, opens its link and waits for
+ * the browser. A machine without an account gets one browser visit for
+ * everything: the registry's device flow (WorkOS, RFC 8628) is started here
+ * but its page is not opened; the flow starts anonymously at the portal
+ * carrying the user code, the single portal link is printed and opened, and
+ * once the sign-in lands the machine registers, claims the flow and waits as
+ * usual. Sign-in writes account.json through the sign-in driver's own persist
+ * step; nothing here saves credentials.
  */
 export type PortalStage = 'echo' | 'slack';
 export const portalEnabled = () => true;
@@ -95,8 +98,9 @@ function skippedSignIn(error: unknown): void {
 
 /**
  * The not-enrolled path: start the device flow without opening its page,
- * start the stage anonymously with the user code, print and open the single
- * portal link, wait for the sign-in, persist it, then register and claim.
+ * start the stage anonymously with the user code, print the single portal link
+ * and the code, open the link, wait for the sign-in, persist it, then register
+ * and claim.
  * Declined, expired or failed → null; the stage is skipped and nothing else
  * happens.
  */
@@ -114,12 +118,15 @@ async function signInThroughPortal(client: SetupClient, stage: PortalStage, name
     'Open the link below to sign in, approve this terminal, and choose your perk. Setup continues automatically once you decide.',
   );
   // Keep the URL unwrapped so it stays clickable and copyable. It is the only
-  // link: the portal page carries the user code and opens the sign-in itself,
-  // from any device. A bare sign-in link would leave the perk undecided.
+  // link: the portal page opens the sign-in itself, from any device, and a bare
+  // sign-in link would leave the perk undecided.
   process.stdout.write(`\n${setup.url}\n\n`);
+  // The code lets the user check that the sign-in page belongs to this terminal.
+  process.stdout.write(`Code: ${flow.device.userCode} — approve only if the sign-in page shows this code.\n\n`);
   openUrl(setup.url);
+  let credential;
   try {
-    await finishDeviceFlow(flow);
+    credential = await finishDeviceFlow(flow);
   } catch (error) {
     skippedSignIn(error);
     return false;
@@ -129,7 +136,33 @@ async function signInThroughPortal(client: SetupClient, stage: PortalStage, name
   client.deviceKey = deviceKey;
   if (!(await registerDevice(client))) return false;
   await client.claim();
+  p.log.info(`Signed in as ${credential.email ?? credential.account_id}. Choose your perk in the browser.`);
   return true;
+}
+
+/** The echo and Slack stages of one run share a sign-in: once kept or switched, the question is not asked again. */
+let accountChosen = false;
+
+/**
+ * A machine already signed in names the account before opening the browser:
+ * a browser signed in to another account is refused while setup waits.
+ * Cancel skips the stage, as the perk question does.
+ */
+async function chooseAccount(account: RegistryAccount): Promise<'keep' | 'switch' | 'skip'> {
+  if (accountChosen) return 'keep';
+  const who = account.email ?? account.account_id;
+  const choice = await brightSelect<'keep' | 'switch'>({
+    message: `This machine is signed in to NanoClaw as ${who}.`,
+    options: [
+      { value: 'keep', label: `Continue as ${who}` },
+      { value: 'switch', label: 'Use a different account' },
+    ],
+    initialValue: 'keep',
+  });
+  if (p.isCancel(choice)) return 'skip';
+  // A switch counts only once its sign-in lands; until then the old account is still on disk.
+  if (choice === 'keep') accountChosen = true;
+  return choice;
 }
 
 /** One later offer per perk per checkout. Explicit setup commands still work. */
@@ -199,7 +232,13 @@ export async function beginPortal(
   name = 'Nano',
   { browserConsent = false } = {},
 ): Promise<SetupClient | null> {
-  const enrolled = Boolean(readRegistryAccount());
+  const account = readRegistryAccount();
+  const choice = account ? await chooseAccount(account) : 'keep';
+  if (choice === 'skip') {
+    p.log.info('Skipped for now. You can enable it later.');
+    return null;
+  }
+  const enrolled = Boolean(account) && choice === 'keep';
   const client = await portalClient(enrolled ? await portalIdentity() : {}).initialize();
   const skip = async (): Promise<null> => {
     await client.stop();
@@ -235,7 +274,11 @@ export async function beginPortal(
       p.log.info('Skipped for now. You can enable it later.');
       return await skip();
     }
-    if (!enrolled) return (await signInThroughPortal(client, stage, name)) ? client : await skip();
+    if (!enrolled) {
+      if (!(await signInThroughPortal(client, stage, name))) return await skip();
+      accountChosen = true;
+      return client;
+    }
     const flow = await client.start(stage, name);
     p.log.info('Activate your perk in the dashboard. Setup continues automatically as soon as it is enabled.');
     // Keep the URL unwrapped so headless users can copy it into another browser.

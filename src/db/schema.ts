@@ -133,7 +133,8 @@ CREATE TABLE pending_questions (
   thread_id      TEXT,
   title          TEXT NOT NULL,
   options_json   TEXT NOT NULL,
-  created_at     TEXT NOT NULL
+  created_at     TEXT NOT NULL,
+  question       TEXT NOT NULL DEFAULT ''  -- card body, added by migration 026
 );
 
 -- Pending approvals for unknown senders (unknown_sender_policy='request_approval').

@@ -249,6 +249,84 @@ describe('unknown-sender request_approval flow', () => {
     expect(wakeContainer).toHaveBeenCalled();
   });
 
+  it('decides once when an approve and a reject arrive together', async () => {
+    const { routeInbound } = await import('../../router.js');
+    const { dispatchResponse } = await import('../../response-registry.js');
+
+    await expectAsyncDelivery(() => routeInbound(stranger('let me in')));
+    const { getDb } = await import('../../db/connection.js');
+    const pending = (await getDb().get<{ id: string }>('SELECT id FROM pending_sender_approvals'))!;
+    const click = (value: string) =>
+      dispatchResponse({
+        questionId: pending.id,
+        value,
+        userId: 'owner',
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+      });
+
+    const outcomes = await Promise.all([click('approve'), click('reject')]);
+    // Only one of them decided, so only one can be shown or confirmed.
+    expect([...outcomes].sort()).toEqual(['accepted', 'ignored']);
+    const member = await getDb().get(
+      'SELECT 1 AS x FROM agent_group_members WHERE user_id = ? AND agent_group_id = ?',
+      'tg:stranger',
+      'ag-1',
+    );
+    expect(member !== undefined).toBe(outcomes[0] === 'accepted');
+  });
+
+  it('reports an approval accepted once it is recorded, before the held message is replayed', async () => {
+    const { routeInbound } = await import('../../router.js');
+    const { dispatchResponse } = await import('../../response-registry.js');
+    const { wakeContainer } = await import('../../container-runner.js');
+
+    await expectAsyncDelivery(() => routeInbound(stranger('early please')));
+    const { getDb } = await import('../../db/connection.js');
+    const pending = (await getDb().get<{ id: string }>('SELECT id FROM pending_sender_approvals'))!;
+    // The replay's wake is slow (a cold start).
+    let wake!: () => void;
+    vi.mocked(wakeContainer).mockImplementationOnce(
+      () => new Promise((resolve) => (wake = () => resolve(true as never))),
+    );
+    const outcome = await Promise.race([
+      dispatchResponse({
+        questionId: pending.id,
+        value: 'approve',
+        userId: 'owner',
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+      }),
+      new Promise((resolve) => setTimeout(() => resolve('still waiting'), 300)),
+    ]);
+    await vi.waitFor(() => expect(wake).toBeTypeOf('function'));
+    wake();
+    expect(outcome).toBe('accepted');
+  });
+
+  it('keeps the request pending when adding the member fails', async () => {
+    const { routeInbound } = await import('../../router.js');
+    const { dispatchResponse } = await import('../../response-registry.js');
+
+    await expectAsyncDelivery(() => routeInbound(stranger('add me')));
+    const { getDb } = await import('../../db/connection.js');
+    const pending = (await getDb().get<{ id: string }>('SELECT id FROM pending_sender_approvals'))!;
+    // Make the member insert fail.
+    await getDb().exec('DROP TABLE agent_group_members');
+    await dispatchResponse({
+      questionId: pending.id,
+      value: 'approve',
+      userId: 'owner',
+      channelType: 'telegram',
+      platformId: 'dm-owner',
+      threadId: null,
+    });
+    const stillPending = (await getDb().get<{ c: number }>('SELECT COUNT(*) AS c FROM pending_sender_approvals'))!.c;
+    expect(stillPending).toBe(1);
+  });
+
   it('deny → deletes the pending row without adding a member', async () => {
     const { routeInbound } = await import('../../router.js');
     const { getResponseHandlers } = await import('../../response-registry.js');
@@ -284,7 +362,7 @@ describe('unknown-sender request_approval flow', () => {
   it('rejects clicks from an unauthorized user (prevents self-admit via forwarded card)', async () => {
     // Stranger triggers the approval flow; card goes to the owner.
     const { routeInbound } = await import('../../router.js');
-    const { getResponseHandlers } = await import('../../response-registry.js');
+    const { dispatchResponse } = await import('../../response-registry.js');
 
     await expectAsyncDelivery(() => routeInbound(stranger('can I play')));
 
@@ -294,18 +372,16 @@ describe('unknown-sender request_approval flow', () => {
 
     // A random user (not the stranger, not the owner, not an admin) tries to
     // click the approval — e.g. they got the card forwarded. Should be
-    // rejected without admitting them.
-    for (const handler of getResponseHandlers()) {
-      const claimed = await handler({
-        questionId: pending.id,
-        value: 'approve',
-        userId: 'random-bystander', // not owner, not admin
-        channelType: 'telegram',
-        platformId: 'dm-random',
-        threadId: null,
-      });
-      if (claimed) break;
-    }
+    // refused without admitting them, so the card keeps its buttons.
+    const outcome = await dispatchResponse({
+      questionId: pending.id,
+      value: 'approve',
+      userId: 'random-bystander', // not owner, not admin
+      channelType: 'telegram',
+      platformId: 'dm-random',
+      threadId: null,
+    });
+    expect(outcome).toBe('refused');
 
     // No member added for the stranger.
     const member = await getDb().get(

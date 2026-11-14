@@ -134,6 +134,7 @@ run `/update-skills` to refresh Mattermost before rerunning this skill.
 
 ```nc:copy from-branch:channels
 src/channels/mattermost.ts
+src/channels/mattermost.test.ts
 src/channels/mattermost-registration.test.ts
 src/channels/mattermost-adapter/adapter.ts
 src/channels/mattermost-adapter/adapter.test.ts
@@ -254,7 +255,7 @@ Run the registration test through the channel barrel. Also run the installed
 adapter regression tests.
 
 ```nc:run effect:test
-pnpm exec vitest run src/channels/mattermost-registration.test.ts src/channels/mattermost-adapter/adapter.test.ts src/channels/mattermost-adapter/websocket.test.ts
+pnpm exec vitest run src/channels/mattermost.test.ts src/channels/mattermost-registration.test.ts src/channels/mattermost-adapter/adapter.test.ts src/channels/mattermost-adapter/websocket.test.ts
 ```
 
 Restart NanoClaw so the channel and credentials load.
