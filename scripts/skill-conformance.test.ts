@@ -371,15 +371,20 @@ describe.each(SKILLS)('%s', (name) => {
 
   // On a re-run nc:dep skips a package that is already present, so a pnpm
   // setting added since the first install sits unapplied and the lockfile no
-  // longer matches package.json. The run that sets it must reinstall.
+  // longer matches package.json. The run that sets it must install; a patch
+  // must `pnpm add` its exact version, since an older install won't match it.
   it('pnpm settings reinstall, so a re-run applies them to a dep already present', () => {
     for (const d of directives) {
       if (d.kind !== 'run') continue;
       const at = d.body.findIndex((cmd) => /\bpnpm pkg set ["']?pnpm\./.test(cmd));
       if (at < 0 || !directives.some((dep) => dep.kind === 'dep' && !exclusive(d, dep))) continue;
+      const patched = d.body[at].match(/pnpm\.patchedDependencies\[([^\]]+)\]/)?.[1];
+      const later = d.body.slice(at + 1);
       expect(
-        d.body.slice(at + 1).some((cmd) => /\bpnpm (install|add)\b/.test(cmd)),
-        `nc:run at line ${d.line} sets a pnpm setting but never reinstalls`,
+        patched
+          ? later.some((cmd) => cmd.includes(`pnpm add ${patched}`))
+          : later.some((cmd) => /\bpnpm (install|add)\b/.test(cmd)),
+        `nc:run at line ${d.line} sets a pnpm setting but never ${patched ? `runs pnpm add ${patched}` : 'reinstalls'}`,
       ).toBe(true);
     }
   });
