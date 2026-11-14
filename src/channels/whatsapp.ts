@@ -329,6 +329,36 @@ export function rewriteBotLidMention(
 }
 
 /**
+ * The text an inbound message carries, wherever WhatsApp put it.
+ *
+ * One reviewable list of the caption-bearing types, because a type missing
+ * here does not degrade gracefully: the message reaches the router with empty
+ * text, so a pattern-engage wiring cannot match it and the whole message —
+ * attachment included — is dropped as `no_agent_engaged`. `documentMessage`
+ * was missing exactly that way, so a PDF captioned "@Bot read this" vanished
+ * while the same words typed alone routed fine.
+ *
+ * Keep in sync with the media types downloadInboundMedia handles: every media
+ * type that can carry a caption belongs in both.
+ */
+export function extractMessageText(normalized: {
+  conversation?: string | null;
+  extendedTextMessage?: { text?: string | null } | null;
+  imageMessage?: { caption?: string | null } | null;
+  videoMessage?: { caption?: string | null } | null;
+  documentMessage?: { caption?: string | null } | null;
+}): string {
+  return (
+    normalized.conversation ||
+    normalized.extendedTextMessage?.text ||
+    normalized.imageMessage?.caption ||
+    normalized.videoMessage?.caption ||
+    normalized.documentMessage?.caption ||
+    ''
+  );
+}
+
+/**
  * Append a visible note for media that failed to download, so the agent knows
  * something was sent rather than silently losing the attachment — or the whole
  * message, when an uncaptioned image would otherwise be dropped by the
@@ -844,12 +874,7 @@ registerChannelAdapter('whatsapp', {
             // Notify metadata for group discovery
             setupConfig.onMetadata(chatJid, undefined, isGroup);
 
-            let content =
-              normalized.conversation ||
-              normalized.extendedTextMessage?.text ||
-              normalized.imageMessage?.caption ||
-              normalized.videoMessage?.caption ||
-              '';
+            let content = extractMessageText(normalized);
 
             // Normalize bot LID mention → assistant name for trigger matching
             // (dedicated mode only — see rewriteBotLidMention)
