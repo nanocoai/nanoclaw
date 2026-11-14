@@ -128,19 +128,20 @@ describe('Discord card limit through the bridge', () => {
     });
   };
 
-  // A pipe doubles when escaped, and the limit counts the escaped text.
+  // A pipe doubles when escaped, and the limit counts the escaped text, with
+  // the word joiner that starts the second block.
   it('posts a card at the limit whole, as one embed Discord accepts', async () => {
-    await ask('Approve', '|'.repeat(1996));
+    await ask('Approve', '|'.repeat(1995) + 'x');
     expect(posts).toHaveLength(1);
     const { description } = posts[0].embeds[0];
     expect(description!.length).toBeLessThanOrEqual(4096);
-    expect(description!.match(/\|/g)).toHaveLength(1996);
+    expect(description!.match(/\|/g)).toHaveLength(1995);
     expect(posts[0].components?.length).toBeGreaterThan(0);
   });
 
   // One plain character, not one more pipe: a pipe adds two and would skip 4,001.
   it('refuses a card one character longer and posts nothing', async () => {
-    await expect(ask('Approve', '|'.repeat(1996) + 'x')).rejects.toBeInstanceOf(CardTooLongError);
+    await expect(ask('Approve', '|'.repeat(1995) + 'xy')).rejects.toBeInstanceOf(CardTooLongError);
     expect(posts).toHaveLength(0);
   });
 
@@ -165,6 +166,21 @@ describe('Discord card limit through the bridge', () => {
     const { title, question } = longGatewayCard();
     await expect(ask(title, question)).rejects.toBeInstanceOf(CardTooLongError);
     expect(posts).toHaveLength(0);
+  });
+
+  // A long line is cut mid-way, and Discord shows the next block from a line
+  // start. A quoted name there must not read as the card's own *Action:* label.
+  it('keeps a split name from posing as a label', async () => {
+    let atCut = 0;
+    // The cut moves across the name; one lands just before *Action:*.
+    for (let filler = 0; filler <= 40; filler++) {
+      const name = '<'.repeat(960) + 'b'.repeat(filler) + '*Action:* x.txt';
+      await ask('Approve', `Agent "A" wants to send a message to "B":\n\nAttachments: "${name}"`);
+      const { description } = posts.at(-1)!.embeds[0];
+      expect(description, `filler ${filler}`).not.toMatch(/(^|\n)\*Action:\*/);
+      if (/\n\n\u2060\\?\*Action:/.test(description!)) atCut++;
+    }
+    expect(atCut).toBeGreaterThan(0);
   });
 });
 

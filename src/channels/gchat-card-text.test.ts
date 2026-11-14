@@ -14,6 +14,7 @@ import type { AdapterPostableMessage } from 'chat';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { gatewayApprovalPresentation } from '../gateway-approval-presentation.js';
+import { buildGateQuestion } from '../modules/agent-to-agent/agent-route.js';
 import type { GatewayApprovalRequest } from '../gateway-providers/gateway-provider-registry.js';
 import type { ChannelAdapter, ChannelRegistration } from './adapter.js';
 
@@ -172,5 +173,22 @@ describe('Google Chat approval card text', () => {
     await ask('See <a href="https://example.com">the docs</a>?', { fromAgent: true });
 
     expect(postedParagraphs()).toEqual(['See <a href="https://example.com">the docs</a>?']);
+  });
+
+  // A long line is cut mid-way, and each block shows from a line start. A file
+  // name there must not read as the card's own *Action:* label.
+  it('keeps a split file name from posing as a label', async () => {
+    let atCut = 0;
+    // The cut moves across the name; one lands just before *Action:*.
+    for (let filler = 0; filler <= 40; filler++) {
+      const files = ['&'.repeat(200), '&'.repeat(180) + 'b'.repeat(filler) + '*Action:* harmless.txt'];
+      await ask(buildGateQuestion('A', 'B', JSON.stringify({ text: 'hi', files })));
+      for (const text of postedParagraphs()) {
+        expect(text, `filler ${filler}`).not.toContain('<b>');
+        expect(text, `filler ${filler}`).not.toMatch(/(^|\n)\*Action:\*/);
+        if (text.startsWith('\u2060*Action:*')) atCut++;
+      }
+    }
+    expect(atCut).toBeGreaterThan(0);
   });
 });

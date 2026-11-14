@@ -632,7 +632,7 @@ describe('createChatSdkBridge.deliver — ask_question cards (button styles)', (
     const blocks = edited.card.children.filter((child) => !child.style).map((child) => child.content ?? '');
     expect(blocks.length).toBeGreaterThan(1);
     for (const block of blocks) expect(block.length).toBeLessThanOrEqual(CARD_TEXT_BLOCK_LENGTH);
-    expect(blocks.join('')).toBe('&amp;'.repeat(1000));
+    expect(blocks.join('').replace(/\u2060/g, '')).toBe('&amp;'.repeat(1000));
     expect(edited.card.children.at(-1)).toEqual({ type: 'text', content: 'Approved', style: 'muted' });
   });
 
@@ -661,9 +661,9 @@ describe('splitCardText', () => {
     const blocks = splitCardText('&'.repeat(100), ampEscape, 42);
     for (const block of blocks) {
       expect(block.length).toBeLessThanOrEqual(42);
-      expect(block).toMatch(/^(&amp;)+$/);
+      expect(block).toMatch(/^\u2060?(&amp;)+$/);
     }
-    expect(blocks.join('')).toBe(ampEscape('&'.repeat(100)));
+    expect(blocks.join('').replace(/\u2060/g, '')).toBe(ampEscape('&'.repeat(100)));
   });
 
   it('splits at a line break when one is near the limit', () => {
@@ -685,8 +685,12 @@ describe('splitCardText', () => {
     expect(blocks.join('').split('\n``````\n').join('')).toBe(text);
   });
 
+  // The first marker is mid-line, as in the whole text, so only the last opens a fence.
   it('never cuts a fence marker in half', () => {
-    expect(splitCardText('x'.repeat(48) + '```\ncode\n```', (t) => t, 50)).toEqual(['x'.repeat(48), '```\ncode\n```']);
+    expect(splitCardText('x'.repeat(48) + '```\ncode\n```', (t) => t, 50)).toEqual([
+      'x'.repeat(48),
+      '\u2060```\ncode\n```\n```',
+    ]);
   });
 
   it('treats backticks inside a code line as text, not a fence', () => {
@@ -710,7 +714,39 @@ describe('splitCardText', () => {
     for (const block of blocks) {
       expect(block).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
     }
-    expect(blocks.join('')).toBe('😀'.repeat(50));
+    expect(blocks.join('').replace(/\u2060/g, '')).toBe('😀'.repeat(50));
+  });
+
+  // A channel escape reads the start of its text as a line start, as a label rule does.
+  const boldLabels = (t: string) => t.replace(/^\*([^*\n]+:)\*/gm, '<b>$1</b>');
+
+  it('starts a block that continues a line with a word joiner, so it is no line start', () => {
+    // The cut moves across the label; one lands just before it.
+    for (let k = 30; k <= 50; k++) {
+      const blocks = splitCardText('a'.repeat(k) + '*Action:* x', boldLabels, 40);
+      expect(blocks.join('')).not.toContain('<b>');
+      for (const block of blocks.slice(1)) expect(block.startsWith('\u2060')).toBe(true);
+      for (const block of blocks) expect(block.length).toBeLessThanOrEqual(40);
+    }
+  });
+
+  it('adds no joiner to a block that starts after a line break', () => {
+    expect(splitCardText('a'.repeat(30) + '\n*Action:* x', boldLabels, 40)).toEqual([
+      'a'.repeat(30) + '\n',
+      '<b>Action:</b> x',
+    ]);
+  });
+
+  it('adds no joiner to a block that starts after a carriage return', () => {
+    expect(splitCardText('x'.repeat(38) + '\r```\ncode\n```', (t) => t, 40)).toEqual([
+      'x'.repeat(38) + '\r',
+      '```\ncode\n```',
+    ]);
+  });
+  it('adds no joiner to a block that reopens a fence, so the code keeps its bytes', () => {
+    const blocks = splitCardText('```\n' + 'x'.repeat(60) + '\n```', (t) => t, 40);
+    expect(blocks.length).toBeGreaterThan(1);
+    for (const block of blocks.slice(1)) expect(block.startsWith('```\n')).toBe(true);
   });
 });
 

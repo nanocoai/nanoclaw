@@ -476,14 +476,19 @@ const FENCE_LINE = /^ {0,3}```/gm;
  * Split card text into blocks of at most `limit` characters after `escape`, so
  * a per-block cap never cuts one. Prefers a line break near the limit, never
  * splits a surrogate pair or a fence marker, and closes and reopens a code
- * fence that spans two blocks.
+ * fence that spans two blocks. A block that continues a line outside a fence
+ * starts with a word joiner (U+2060), so no escape reads a line start there.
  */
 export function splitCardText(text: string, escape: (t: string) => string, limit: number): string[] {
   const blocks: string[] = [];
   let rest = text;
   let reopen = false;
+  let midLine = false;
   const render = (raw: string) => {
-    const body = (reopen ? `${FENCE}\n` : '') + raw;
+    // A channel shows each block from a line start, where a value could pose as
+    // a label. Count fences as sent: a mid-line marker opens none, as in the
+    // whole text, and each block stays balanced.
+    const body = (reopen ? `${FENCE}\n` : midLine ? '\u2060' : '') + raw;
     const open = (body.match(FENCE_LINE)?.length ?? 0) % 2 === 1;
     return { block: escape(open ? `${body}\n${FENCE}` : body), open };
   };
@@ -509,6 +514,8 @@ export function splitCardText(text: string, escape: (t: string) => string, limit
     }
     const { block, open } = render(rest.slice(0, cut));
     blocks.push(block);
+    // Discord and FENCE_LINE read a lone \r as a line break too.
+    midLine = rest[cut - 1] !== '\n' && rest[cut - 1] !== '\r';
     rest = rest.slice(cut);
     reopen = open;
   }
