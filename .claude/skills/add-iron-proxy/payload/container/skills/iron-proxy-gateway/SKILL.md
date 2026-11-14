@@ -20,8 +20,12 @@ A bare `403` does not prove which layer rejected the request. It may be the dest
 Run the shared command for the API hostname requested by the user:
 
 ```bash
-ncl groups connect --host <API hostname>
+ncl groups connect --host '<API hostname>'
 ```
+
+Pass a bare hostname such as `api.github.com`, single-quoted, as one argument.
+If the user's value has anything other than letters, digits, dots and hyphens,
+ask for the hostname instead of running it.
 
 Return the exact `connect_url` and describe its `action`. An `operator_console`
 handoff requires the operator to configure the credential, grant, and destination

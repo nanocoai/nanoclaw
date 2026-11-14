@@ -1,6 +1,7 @@
 # Credentials and egress
 
-For any external-account connection, run `ncl groups connect --host <API hostname>`.
+For any external-account connection, run `ncl groups connect --host '<API hostname>'`
+with a bare, single-quoted hostname (letters, digits, dots and hyphens only).
 Show the exact connect_url and explain whether it opens an operator console or
 OAuth consent. A handoff or request approval does not mean the account is connected.
 Use the requested CLI or HTTP client, not a new MCP server or local credential login.
