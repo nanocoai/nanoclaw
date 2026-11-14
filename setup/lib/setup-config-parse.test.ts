@@ -5,7 +5,9 @@ import { spawnSync } from 'child_process';
 
 import { describe, expect, it } from 'vitest';
 
-import { parseFlags } from './setup-config-parse.js';
+import { CHANNELS } from '../../scripts/update/channel.js';
+import { CONFIG } from './setup-config.js';
+import { applyToEnv, envErrors, parseFlags, readFromEnv } from './setup-config-parse.js';
 
 describe('public setup flags', () => {
   it('forwards nanoclaw.sh arguments without an end-of-options marker', () => {
@@ -52,5 +54,49 @@ describe('public setup flags', () => {
 
   it('parses an explicit gateway selection', () => {
     expect(parseFlags(['--gateway-provider', 'onecli']).values).toEqual({ gatewayProvider: 'onecli' });
+  });
+
+  it('lists the update channel in the shell help', () => {
+    const entrypoint = fs.readFileSync(path.join(process.cwd(), 'nanoclaw.sh'), 'utf8');
+    expect(entrypoint).toContain('--update-channel <name>');
+  });
+});
+
+describe('update channel setting', () => {
+  it('offers exactly the channels the updater knows, on the Advanced screen', () => {
+    const entry = CONFIG.find((e) => e.key === 'updateChannel');
+    expect(entry).toMatchObject({ type: 'enum', surface: 'flag+ui', group: 'Updates' });
+    expect(entry?.type === 'enum' && entry.options.map((o) => o.value)).toEqual([...CHANNELS]);
+  });
+
+  it('parses from the flag in both forms', () => {
+    expect(parseFlags(['--update-channel', 'edge']).values).toEqual({ updateChannel: 'edge' });
+    expect(parseFlags(['--update-channel=Beta']).values).toEqual({ updateChannel: 'beta' });
+  });
+
+  it('rejects other values from the flag', () => {
+    const result = parseFlags(['--update-channel', 'nightly']);
+    expect(result.values).toEqual({});
+    expect(result.errors).toEqual(['Invalid enum for --update-channel: nightly (use one of: stable, beta, edge)']);
+  });
+
+  it('parses from NANOCLAW_UPDATE_CHANNEL and writes the canonical value back', () => {
+    expect(readFromEnv({ NANOCLAW_UPDATE_CHANNEL: 'EDGE' })).toEqual({ updateChannel: 'edge' });
+    expect(envErrors({ NANOCLAW_UPDATE_CHANNEL: 'edge' })).toEqual([]);
+    const env: NodeJS.ProcessEnv = {};
+    applyToEnv({ updateChannel: 'beta' }, env);
+    expect(env).toEqual({ NANOCLAW_UPDATE_CHANNEL: 'beta' });
+  });
+
+  it('rejects other values from the environment', () => {
+    expect(readFromEnv({ NANOCLAW_UPDATE_CHANNEL: 'nightly' })).toEqual({});
+    expect(envErrors({ NANOCLAW_UPDATE_CHANNEL: 'nightly' })).toEqual([
+      'Invalid value for NANOCLAW_UPDATE_CHANNEL: nightly (use one of: stable, beta, edge)',
+    ]);
+  });
+
+  it('still accepts any gateway kind, whose options are filled in at runtime', () => {
+    expect(parseFlags(['--gateway-provider', 'anything']).errors).toEqual([]);
+    expect(envErrors({ NANOCLAW_GATEWAY_PROVIDER: 'anything' })).toEqual([]);
   });
 });

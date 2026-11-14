@@ -97,7 +97,8 @@ import {
   type ImageSource,
 } from './lib/registry-state.js';
 import { upsertEnvVar } from './set-env.js';
-import { applyToEnv, parseFlags, printHelp, readFromEnv } from './lib/setup-config-parse.js';
+import { CHANNELS, writeChannelSetting } from '../scripts/update/channel.js';
+import { applyToEnv, envErrors, parseFlags, printHelp, readFromEnv } from './lib/setup-config-parse.js';
 import { runAdvancedScreen } from './lib/setup-config-screen.js';
 import { runWindowedStep } from './lib/windowed-runner.js';
 import { dockerSudoReason, sudoUpFront, type DockerSudoReason } from './lib/sudo-preflight.js';
@@ -171,8 +172,12 @@ async function main(): Promise<void> {
     printHelp();
     process.exit(0);
   }
-  if (flagResult.errors.length > 0) {
-    for (const err of flagResult.errors) console.error(`error: ${err}`);
+  // A flag overrides its env var, so a bad env value only counts when it would be used.
+  const envWithFlags = { ...process.env };
+  applyToEnv(flagResult.values, envWithFlags);
+  const setupErrors = [...flagResult.errors, ...envErrors(envWithFlags)];
+  if (setupErrors.length > 0) {
+    for (const err of setupErrors) console.error(`error: ${err}`);
     console.error('');
     console.error('Run with --help for the full list of supported flags.');
     process.exit(1);
@@ -216,6 +221,10 @@ async function main(): Promise<void> {
     const gatewayCatalog = loadGatewayCatalog();
     configValues.gatewayProvider ??=
       configuredGatewayKind(process.cwd()) || detectInstalledGateway(process.cwd()) || gatewayCatalog.default;
+    const savedChannel = readEnvKey('NANOCLAW_UPDATE_CHANNEL')?.trim().toLowerCase();
+    if (savedChannel && (CHANNELS as readonly string[]).includes(savedChannel)) {
+      configValues.updateChannel ??= savedChannel;
+    }
     configValues = await runAdvancedScreen(configValues, {
       gatewayProvider: gatewayCatalog.gateways.map(({ kind, label, description }) => ({
         value: kind,
@@ -262,6 +271,12 @@ async function main(): Promise<void> {
     if (action === 'uninstall') {
       await runUninstallFlow({ dryRun: false, yes: false, invokedFrom: 'setup-detection' });
     }
+  }
+
+  // Saved before any step runs, so a setup that stops midway keeps the choice.
+  if (typeof configValues.updateChannel === 'string') {
+    writeChannelSetting(process.cwd(), configValues.updateChannel, upsertEnvVar);
+    setupLog.userInput('update_channel', configValues.updateChannel);
   }
 
   if (!skip.has('environment')) {
@@ -842,6 +857,17 @@ async function main(): Promise<void> {
     }
     wiringPending = res.terminal?.fields.WIRING === 'pending_first_dm';
     verifyClearedSlackJob = !res.terminal?.fields.SLACK_INSTALL;
+  }
+
+  if (!readEnvKey('NANOCLAW_UPDATE_CHANNEL')) {
+    p.log.message(
+      brandBody(
+        dimWrap(
+          'Updates follow releases. To follow main instead: pnpm exec tsx scripts/update-nanoclaw.ts set-channel --channel edge',
+          4,
+        ),
+      ),
+    );
   }
 
   const rows: [string, string][] = [
