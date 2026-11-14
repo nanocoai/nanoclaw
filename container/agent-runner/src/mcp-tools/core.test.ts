@@ -13,7 +13,7 @@ import fs from 'fs';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '../mailbox/sqlite/connection.js';
 import { getUndeliveredMessages } from '../db/messages-out.js';
-import { sendFile, sendMessage } from './core.js';
+import { addReaction, sendFile, sendMessage } from './core.js';
 
 /**
  * Publish the reply stamp the way the poll loop does: a direct write to
@@ -72,22 +72,20 @@ let hostSeq = 0;
  * owns even sequence numbers and the container odd ones — that parity is what
  * `getMessageIdBySeq` routes on, so an odd inbound row could never exist.
  */
-function seedInbound(id: string, channelType: string, platformId: string, threadId: string | null): void {
+function seedInbound(
+  id: string,
+  channelType: string,
+  platformId: string,
+  threadId: string | null,
+  content: Record<string, unknown> = { sender: 'Alice', text: 'hi' },
+): void {
   hostSeq += 2;
   getInboundDb()
     .prepare(
       `INSERT INTO messages_in (id, seq, kind, timestamp, status, platform_id, channel_type, thread_id, content)
        VALUES (?, ?, 'chat', ?, 'completed', ?, ?, ?, ?)`,
     )
-    .run(
-      id,
-      hostSeq,
-      new Date().toISOString(),
-      platformId,
-      channelType,
-      threadId,
-      JSON.stringify({ sender: 'Alice', text: 'hi' }),
-    );
+    .run(id, hostSeq, new Date().toISOString(), platformId, channelType, threadId, JSON.stringify(content));
 }
 
 beforeEach(() => {
@@ -203,5 +201,35 @@ describe('send_message / send_file — thread for a channel destination', () => 
     publishReplyRoute({ inReplyTo: 'in-1', channelType: 'discord', platformId: 'chan-9', threadId: 'discord-thread' });
 
     expect(await sendBoth()).toEqual([null, null]);
+  });
+});
+
+describe('add_reaction', () => {
+  it('queues a reaction on a message someone posted', async () => {
+    seedInbound('chat-msg-1', 'telegram', 'telegram:123', null);
+    const result = (await addReaction.handler({ messageId: 2, emoji: 'heart' })) as { isError?: boolean };
+    expect(result.isError).toBeUndefined();
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0].content)).toMatchObject({
+      operation: 'reaction',
+      messageId: 'chat-msg-1',
+      emoji: 'heart',
+    });
+  });
+
+  it('refuses a note the host wrote, queueing nothing', async () => {
+    seedInbound('approval-note-1', 'telegram', 'telegram:123', null, {
+      text: 'Your request was approved.',
+      sender: 'system',
+      senderId: 'system',
+    });
+    const result = (await addReaction.handler({ messageId: 2, emoji: 'check' })) as {
+      isError?: boolean;
+      content: { text: string }[];
+    };
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('note from the host');
+    expect(getUndeliveredMessages()).toHaveLength(0);
   });
 });
