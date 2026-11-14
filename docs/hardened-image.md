@@ -242,6 +242,7 @@ account-takeover bugs happen — and there is no way to merge them today. Pick o
 | Pull fails: architecture mismatch | The reference names one architecture and it isn't this daemon's. Use a multi-arch index, or the reference for this architecture. |
 | "No agent-image reference for linux/…" | The pin is per-platform and has no entry for this machine. Build locally, or set `NANOCLAW_AGENT_IMAGE_REF`. |
 | Pull fails: auth | `--status` shows whether the credential helper is wired; `--force` re-runs sign-in. |
+| Pull fails: `error getting credentials` … `docker-credential-nanoclaw: no such file or directory` | The helper was installed by an older setup and names a Node that has since moved: an upgrade, a version manager, or a home directory shared with another OS. A pull re-installs such a helper first, and the new one finds Node on its own. If the error still shows, re-run setup or `pnpm exec tsx setup/index.ts --step registry -- --refresh`. |
 | Signed in, but `--status` says "build here" | Re-run sign-in with `--force`. |
 | Sign-in code expired | It lives 5 minutes. Run it again. |
 | "No NanoClaw registry at &lt;url&gt;" | `NANOCLAW_REGISTRY_API` is unset or wrong. The default host resolves but is not a registry, so this is a configuration error, not an outage. |
