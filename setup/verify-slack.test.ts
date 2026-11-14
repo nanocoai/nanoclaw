@@ -271,3 +271,27 @@ await runSlackJob(${JSON.stringify(host.root)}, {
     }
   }, 10_000);
 });
+
+describe('a webhook Slack', () => {
+  // add-slack's webhook mode saves the signing secret and no app token.
+  it('counts as set up with the bot token and the signing secret', async () => {
+    host.channels = { SLACK_BOT_TOKEN: 'fixture-only', SLACK_SIGNING_SECRET: 'fixture-only' };
+    host.groups = 1;
+    await expect(run([])).resolves.toBeUndefined();
+    expect(fields()).toMatchObject({ STATUS: 'success', CONFIGURED_CHANNELS: 'slack' });
+    host.channels = { SLACK_BOT_TOKEN: 'fixture-only' };
+    await expect(run([])).resolves.toBeUndefined();
+    expect(fields()).toMatchObject({ CONFIGURED_CHANNELS: '' });
+  });
+
+  it('is not hidden behind a Teams wire that waits for its first DM', async () => {
+    host.channels = {
+      TEAMS_APP_ID: 'fixture-only',
+      TEAMS_APP_PASSWORD: 'fixture-only',
+      SLACK_BOT_TOKEN: 'fixture-only',
+      SLACK_SIGNING_SECRET: 'fixture-only',
+    };
+    await expect(run([])).rejects.toThrow('verify_exit');
+    expect(fields()).toMatchObject({ STATUS: 'failed', CONFIGURED_CHANNELS: 'slack,teams' });
+  });
+});
