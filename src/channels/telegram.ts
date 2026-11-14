@@ -24,6 +24,7 @@ import { registerChannelAdapter } from './channel-registry.js';
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage } from './adapter.js';
 import * as askQuestion from './ask-question.js';
 import { tryConsume } from './telegram-pairing.js';
+import { fixTelegramRichText } from './telegram-rich-text.js';
 
 /**
  * Dedicated bot identity, non-threaded platform (supportsThreads:false), so
@@ -479,6 +480,9 @@ export function createTelegramBridge(options: TelegramBridgeOptions = {}): Chann
     // sanitizer this replaced was written for the old converter and, run in
     // front of the new one, downgraded **bold** to *single-star* — which the
     // adapter then parsed as emphasis and rendered as _italic_.
+    // fixTelegramRichText only escapes what the rich-message parser misreads
+    // (`$` as inline math, single newlines as soft breaks); see that file.
+    transformOutboundText: fixTelegramRichText,
     maxTextLength: 4000,
     // The agent's own question cap. MarkdownV2 escaping at most doubles plain
     // text, so a card under it stays within Telegram's 4,096; text that grows
