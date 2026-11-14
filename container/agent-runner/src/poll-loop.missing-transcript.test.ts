@@ -114,6 +114,7 @@ describe('poll loop — continuation whose transcript was deleted', () => {
 
     const texts = getUndeliveredMessages().map((m) => (JSON.parse(m.content) as { text: string }).text);
     expect(texts).toEqual(['fresh reply']);
+    expect(resumes).toEqual([undefined]);
     expect(getContinuation('claude')).toBe(FRESH_ID);
   });
 });

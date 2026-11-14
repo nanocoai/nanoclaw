@@ -146,4 +146,18 @@ describe('claude maybeRotateContinuation', () => {
     expect(fs.existsSync(path.join(tmp, 'conversations'))).toBe(false);
     expect(fs.readdirSync(path.dirname(other))).toEqual(['sess-other.jsonl']);
   });
+
+  it('keeps resuming when the projects dir cannot be listed', () => {
+    writeTranscript('sess-hidden', 4096);
+    const readdirSpy = spyOn(fs, 'readdirSync').mockImplementation(() => {
+      throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+    });
+    let reason: string | null;
+    try {
+      reason = createProvider('claude').maybeRotateContinuation!('sess-hidden', CWD);
+    } finally {
+      readdirSpy.mockRestore();
+    }
+    expect(reason!).toBeNull();
+  });
 });
