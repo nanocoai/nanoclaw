@@ -802,10 +802,10 @@ describe('photon adapter (mocked SDK)', () => {
         { loadSpectrum: async () => sdk },
       );
       await adapter.setup(host.config);
-      const ask = (questionId: string) =>
+      const ask = (questionId: string, choices = options) =>
         adapter.deliver(chat, null, {
           kind: 'chat',
-          content: { type: 'ask_question', questionId, title: 'Deploy?', question: 'Ship it?', options },
+          content: { type: 'ask_question', questionId, title: 'Deploy?', question: 'Ship it?', options: choices },
         });
       await ask('q1');
       let sent = 0;
@@ -912,7 +912,7 @@ describe('photon adapter (mocked SDK)', () => {
       // Messages are read one at a time: once this one is through, the second answer is waiting.
       say('+15553334444', '+15553334444', 'hello from another chat');
       await waitFor(() => host.inbound.length === 1);
-      await ask(nextId);
+      await ask(nextId, ['Main agent']);
       held[0].settle('accepted');
       await waitFor(() => confirmations('Approve').length === 1);
       await new Promise((r) => setTimeout(r, 20));
@@ -932,13 +932,14 @@ describe('photon adapter (mocked SDK)', () => {
         say('+15551112222', '+15551112222', '/approve');
         await waitFor(() => host.actions.length === 1);
         // The next question arrives in the chat while the host still has the first answer.
-        await ask(nextId);
+        await ask(nextId, ['Main agent']);
         held[0].settle('accepted');
         await waitFor(() => confirmations('Approve').length === 1);
 
-        say('+15551112222', '+15551112222', '/approve');
+        // Only the new card's options answer it, so the first question can't be the one left open.
+        say('+15551112222', '+15551112222', '/main-agent');
         await waitFor(() => host.actions.length === 2 || host.inbound.length === 1);
-        expect(host.actions[1]).toEqual({ questionId: nextId, option: 'Approve', userId: '+15551112222' });
+        expect(host.actions[1]).toEqual({ questionId: nextId, option: 'Main agent', userId: '+15551112222' });
         expect(host.inbound).toHaveLength(0);
         await adapter.teardown();
       },
