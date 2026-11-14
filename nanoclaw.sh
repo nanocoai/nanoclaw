@@ -71,6 +71,9 @@ for arg in "$@"; do
     export NANOCLAW_PROJECT_ROOT="$PROJECT_ROOT"
     # shellcheck source=setup/lib/install-slug.sh
     source "$PROJECT_ROOT/setup/lib/install-slug.sh"
+    # An invalid NANOCLAW_INSTALL_ID fails the helper. Stop here: `echo` would
+    # hide that failure and print cleanup commands with an empty slug.
+    UNINSTALL_SLUG="$(_nanoclaw_install_slug)" || exit 1
     UNINSTALL_RUNTIME="${CONTAINER_RUNTIME:-docker}"
     echo "Can't run the uninstaller: dependencies are missing (node_modules/)."
     echo "Either re-run 'bash nanoclaw.sh' once to restore them, or clean up manually:"
@@ -82,10 +85,10 @@ for arg in "$@"; do
       echo "  systemctl --user disable --now $(systemd_unit).service"
       echo "  rm -f ~/.config/systemd/user/$(systemd_unit).service && systemctl --user daemon-reload"
     fi
-    echo "  $UNINSTALL_RUNTIME ps -aq --filter label=nanoclaw-install=$(_nanoclaw_install_slug) | xargs -r $UNINSTALL_RUNTIME rm -f"
+    echo "  $UNINSTALL_RUNTIME ps -aq --filter label=nanoclaw-install=$UNINSTALL_SLUG | xargs -r $UNINSTALL_RUNTIME rm -f"
     echo "  $UNINSTALL_RUNTIME rmi $(container_image_base):latest"
     echo "  rm -f ~/.local/bin/ncl    # only if it points at this folder"
-    echo "  rm -rf \"$(dirname "$PROJECT_ROOT")/.nanoclaw-updates/$(_nanoclaw_install_slug)\""
+    echo "  rm -rf \"$(dirname "$PROJECT_ROOT")/.nanoclaw-updates/$UNINSTALL_SLUG\""
     echo ""
     echo "Then back up $PROJECT_ROOT/.env if you need the keys, and delete the folder."
     exit 1
@@ -413,6 +416,10 @@ BOOTSTRAP_DUR=$(( $(date +%s) - BOOTSTRAP_START ))
 if [ "$BOOTSTRAP_RC" -eq 0 ]; then
   spinner_success "Basics ready" "$BOOTSTRAP_DUR"
   write_bootstrap_entry success "$BOOTSTRAP_DUR" "$BOOTSTRAP_RAW"
+  # Only channel skills need jq, so setup carries on; say it now, not at the first one.
+  if [ "$(grep_field JQ_OK "$BOOTSTRAP_RAW")" = "false" ]; then
+    printf '  %s\n' "$(dim "Couldn't install jq. Adding Slack, Discord, Telegram, Teams or Dial needs it, so install jq first.")"
+  fi
 else
   spinner_failure "Couldn't install the basics" "$BOOTSTRAP_DUR"
   write_bootstrap_entry failed "$BOOTSTRAP_DUR" "$BOOTSTRAP_RAW"

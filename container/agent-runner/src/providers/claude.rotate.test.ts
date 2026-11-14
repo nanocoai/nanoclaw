@@ -127,6 +127,18 @@ describe('claude maybeRotateContinuation', () => {
     expect(provider.maybeRotateContinuation!('sess-old', CWD)).toContain('d');
   });
 
+  it('rotates an aged transcript whose first line is a session-owner record with no timestamp', () => {
+    process.env.CLAUDE_TRANSCRIPT_ROTATE_BYTES = String(1024 * 1024);
+    process.env.CLAUDE_TRANSCRIPT_ROTATE_AGE_DAYS = '7';
+    const old = new Date(Date.now() - 10 * 86400_000).toISOString();
+    const p = writeTranscript('sess-owned', 2048, old);
+    const owner = JSON.stringify({ type: 'session-owner', sessionId: 'sess-owned' });
+    fs.writeFileSync(p, `${owner}\n${fs.readFileSync(p, 'utf-8')}`);
+    const provider = createProvider('claude');
+    expect(provider.maybeRotateContinuation!('sess-owned', CWD)).toContain('d old');
+    expect(fs.existsSync(p)).toBe(false);
+  });
+
   it('returns null for an unknown session id', () => {
     const provider = createProvider('claude');
     expect(provider.maybeRotateContinuation!('does-not-exist', CWD)).toBeNull();

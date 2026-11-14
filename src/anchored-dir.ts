@@ -308,7 +308,7 @@ export function copyRegularFile(src: AnchoredDir, srcName: string, dst: Anchored
       let read: number;
       while ((read = fs.readSync(srcFd, buffer, 0, buffer.length, null)) > 0) {
         // writeSync may return a short count; drain the chunk before the next read.
-        for (let written = 0; written < read; ) {
+        for (let written = 0; written < read;) {
           written += fs.writeSync(dstFd, buffer, written, read - written);
         }
       }

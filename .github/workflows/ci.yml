@@ -8,6 +8,10 @@ on:
   push:
     branches: [main]
 
+# Read-only token for every job, whatever the repository default is.
+permissions:
+  contents: read
+
 # The static checks, the host suite and the container suite are independent,
 # so each gets its own runner and the gate waits for the slowest one, not the
 # sum. The host suite is cut into shards; vitest assigns files to a shard by a
