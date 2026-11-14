@@ -716,14 +716,9 @@ export async function waitForNohupStartup(projectRoot: string, pid: number, time
   throw new Error('Timed out waiting for NanoClaw admin socket');
 }
 
-async function setupNohupFallback(projectRoot: string, nodePath: string): Promise<void> {
-  log.warn('No usable systemd service — starting with nohup');
-
-  const wrapperPath = path.join(projectRoot, 'start-nanoclaw.sh');
+export function renderNohupWrapper(projectRoot: string, nodePath: string, proxyEnvFile?: string): string {
   const pidFile = path.join(projectRoot, 'nanoclaw.pid');
   const entrypoint = path.join(projectRoot, 'dist', 'index.js');
-  const proxyEnvFile = writeServiceProxyEnv(projectRoot);
-
   const lines = [
     '#!/bin/bash',
     '# start-nanoclaw.sh — Start NanoClaw without systemd',
@@ -773,6 +768,8 @@ socket.setTimeout(1000, () => {
 `)} ${shellQuote(path.join(projectRoot, 'data', 'ncl.sock'))}`,
     '',
     ...(proxyEnvFile ? ['set -a', `. ${shellQuote(proxyEnvFile)}`, 'set +a'] : []),
+    // restart.sh and the updater run this from shells that may not set the id.
+    ...installIdEnv(projectRoot).map(([key, value]) => `export ${key}=${shellQuote(value)}`),
     'echo "Starting NanoClaw..."',
     // Node resets the inherited SIGHUP ignore; detach from the wizard terminal.
     `setsid nohup ${shellQuote(nodePath)} ${shellQuote(entrypoint)} \\`,
@@ -781,7 +778,16 @@ socket.setTimeout(1000, () => {
     `echo $! > ${shellQuote(pidFile)}`,
     'echo "NanoClaw launched (PID $!)"',
   ];
-  fs.writeFileSync(wrapperPath, lines.join('\n') + '\n', { mode: 0o755 });
+  return lines.join('\n') + '\n';
+}
+
+async function setupNohupFallback(projectRoot: string, nodePath: string): Promise<void> {
+  log.warn('No usable systemd service — starting with nohup');
+
+  const wrapperPath = path.join(projectRoot, 'start-nanoclaw.sh');
+  const pidFile = path.join(projectRoot, 'nanoclaw.pid');
+  const wrapper = renderNohupWrapper(projectRoot, nodePath, writeServiceProxyEnv(projectRoot));
+  fs.writeFileSync(wrapperPath, wrapper, { mode: 0o755 });
   log.info('Wrote nohup wrapper script', { wrapperPath });
 
   let failure: unknown;
