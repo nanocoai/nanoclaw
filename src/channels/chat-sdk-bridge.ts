@@ -209,7 +209,7 @@ export function attachmentBytesToBase64(data: Buffer | ArrayBuffer | Uint8Array)
  * The Chat SDK reports a handler that throws or a failed state write only
  * through its logger, so `logger: 'silent'` dropped such a message without a
  * trace. Warn and error reach our log; the SDK's debug and info lines go to
- * our debug level.
+ * our debug level, except the info lines that report a lost inbound message.
  */
 export function chatSdkLogger(prefix = 'chat-sdk'): Logger {
   const to =
@@ -220,10 +220,22 @@ export function chatSdkLogger(prefix = 'chat-sdk'): Logger {
     child: (name: string) => chatSdkLogger(`${prefix}:${name}`),
     // SDK debug lines print each message's full text; drop them.
     debug: () => {},
-    info: to('debug'),
+    info: (message, ...args) => to(isLostMessage(message, args[0]) ? 'warn' : 'debug')(message, ...args),
     warn: to('warn'),
     error: to('error'),
   };
+}
+
+/**
+ * In queue mode the SDK drops a held message that waited past its TTL, and
+ * passes older held messages over for the newest (our handlers ignore the
+ * skipped list). It reports both only at info.
+ */
+function isLostMessage(message: string, data: unknown): boolean {
+  if (message === 'message-expired') return true;
+  return (
+    message === 'message-dequeued' && isRecord(data) && typeof data.skippedCount === 'number' && data.skippedCount > 0
+  );
 }
 
 /** Message-text fields the SDK puts in its log data. */

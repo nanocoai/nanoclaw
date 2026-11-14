@@ -7,7 +7,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { Adapter } from 'chat';
+import { Message, type Adapter } from 'chat';
 
 import { log } from '../log.js';
 import type { ChannelSetup } from './adapter.js';
@@ -73,6 +73,7 @@ function throwingHost(error: Error): ChannelSetup {
 beforeEach(async () => {
   vi.mocked(log.error).mockClear();
   vi.mocked(log.warn).mockClear();
+  vi.mocked(log.info).mockClear();
   vi.mocked(log.debug).mockClear();
   const { initTestDb } = await import('../db/connection.js');
   const { runMigrations } = await import('../db/migrations/index.js');
@@ -149,6 +150,128 @@ describe('Chat SDK logs reach our log', () => {
     expect(log.error).toHaveBeenCalledWith('chat-sdk:slack: Adapter disconnect failed', {
       err: bare,
       args: ['extra', 42],
+    });
+  });
+
+  it('cuts every message-text key to its length', () => {
+    chatSdkLogger().warn('Checking message patterns', { messageText: 'secret plans', text: 'more plans' });
+
+    expect(log.warn).toHaveBeenCalledWith('chat-sdk: Checking message patterns', {
+      messageText: '[12 chars]',
+      text: '[10 chars]',
+    });
+  });
+
+  it('logs a URL it cannot parse as [url], never the raw string', () => {
+    // Port out of range: looks like a URL, but URL.canParse rejects it.
+    chatSdkLogger().error('Button callbackUrl POST failed', {
+      callbackUrl: 'https://hooks.example.com:99999/cb?token=s3cret',
+    });
+
+    expect(log.error).toHaveBeenCalledWith('chat-sdk: Button callbackUrl POST failed', { callbackUrl: '[url]' });
+  });
+});
+
+/** A message the SDK can queue: it stores and rebuilds a real Message. */
+function queuedMessage(id: string, threadId: string, text: string): Message {
+  return new Message({
+    id,
+    threadId,
+    text,
+    formatted: { type: 'root', children: [] },
+    raw: {},
+    author: { userId: 'U1', userName: 'human', fullName: 'A Human', isBot: false, isMe: false },
+    metadata: { dateSent: new Date('2026-01-01T00:00:00.000Z'), edited: false },
+    attachments: [],
+    isMention: false,
+  });
+}
+
+/** The first inbound message holds the thread until released, so later ones queue behind it. */
+function holdingHost() {
+  const seen: string[] = [];
+  let release = () => {};
+  const held = new Promise<void>((resolve) => (release = resolve));
+  let started = () => {};
+  const firstStarted = new Promise<void>((resolve) => (started = resolve));
+  const host: ChannelSetup = {
+    onInbound: async (_platformId, _threadId, message) => {
+      seen.push(message.id);
+      if (seen.length > 1) return;
+      started();
+      await held;
+    },
+    onInboundEvent: () => {},
+    onMetadata: () => {},
+    onAction: () => {},
+  };
+  return { host, seen, firstStarted, release: () => release() };
+}
+
+function loggedText(): string {
+  const calls = [log.debug, log.info, log.warn, log.error].flatMap((fn) => vi.mocked(fn).mock.calls);
+  return JSON.stringify(calls);
+}
+
+describe('queue mode: a held message the SDK drops is logged at warn', () => {
+  const tid = 'github:R1:T1';
+
+  it('older held messages passed over for the newest', async () => {
+    const { adapter, chat } = makeStubAdapter('github');
+    const bridge = createChatSdkBridge({ adapter, supportsThreads: true, concurrency: 'queue' });
+    const { host, seen, firstStarted, release } = holdingHost();
+    await bridge.setup(host);
+
+    const first = chat().processMessage(adapter, tid, queuedMessage('m1', tid, 'first secret'));
+    await firstStarted;
+    await chat().processMessage(adapter, tid, queuedMessage('m2', tid, 'second secret'));
+    await chat().processMessage(adapter, tid, queuedMessage('m3', tid, 'third secret'));
+    release();
+    await first;
+
+    expect(seen).toEqual(['m1', 'm3']);
+    expect(log.warn).toHaveBeenCalledWith(
+      'chat-sdk: message-dequeued',
+      expect.objectContaining({ threadId: tid, messageId: 'm3', skippedCount: 1 }),
+    );
+    expect(loggedText()).not.toContain('secret');
+
+    await bridge.teardown();
+  });
+
+  it('a held message that expires', async () => {
+    const { adapter, chat } = makeStubAdapter('github');
+    // The SDK holds a message for 90 s; its config object takes a shorter hold.
+    const concurrency = { strategy: 'queue', queueEntryTtlMs: 0 } as never;
+    const bridge = createChatSdkBridge({ adapter, supportsThreads: true, concurrency });
+    const { host, seen, firstStarted, release } = holdingHost();
+    await bridge.setup(host);
+
+    const first = chat().processMessage(adapter, tid, queuedMessage('m1', tid, 'first secret'));
+    await firstStarted;
+    await chat().processMessage(adapter, tid, queuedMessage('m2', tid, 'second secret'));
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    release();
+    await first;
+
+    expect(seen).toEqual(['m1']);
+    expect(log.warn).toHaveBeenCalledWith(
+      'chat-sdk: message-expired',
+      expect.objectContaining({ threadId: tid, messageId: 'm2' }),
+    );
+    expect(loggedText()).not.toContain('secret');
+
+    await bridge.teardown();
+  });
+
+  it('a drain that passes nothing over stays at debug', () => {
+    chatSdkLogger().info('message-dequeued', { threadId: tid, messageId: 'm1', skippedCount: 0 });
+
+    expect(log.warn).not.toHaveBeenCalled();
+    expect(log.debug).toHaveBeenCalledWith('chat-sdk: message-dequeued', {
+      threadId: tid,
+      messageId: 'm1',
+      skippedCount: 0,
     });
   });
 });
