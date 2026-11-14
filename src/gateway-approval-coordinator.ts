@@ -1,3 +1,4 @@
+import { CardTooLongError } from './channels/ask-question.js';
 import { gatewayApprovalPresentation } from './gateway-approval-presentation.js';
 import { permitsConfiguredGatewayRead, permitsUncredentialedGatewayRead } from './gateway-read-policy.js';
 import { getContainerConfig } from './db/container-configs.js';
@@ -450,23 +451,45 @@ async function processGatewayRequest(
     if (!current()) return unavailableDecision();
     const presentation = gatewayApprovalPresentation(request);
     const approvalId = `ga-${randomBytes(10).toString('hex')}`;
-    const sendCard = () =>
-      adapter!.deliver(
-        target.messagingGroup.channel_type,
-        target.messagingGroup.platform_id,
-        request.delivery?.threadId ?? null,
-        'chat-sdk',
-        JSON.stringify({
-          type: 'ask_question',
-          requirePresentation: Boolean(request.displayFields),
-          questionId: approvalId,
-          title: presentation.title,
-          question: presentation.question,
-          options: OPTIONS,
-        }),
-        undefined,
-        target.messagingGroup.instance,
-      );
+    const sendCard = async () => {
+      try {
+        return await adapter!.deliver(
+          target.messagingGroup.channel_type,
+          target.messagingGroup.platform_id,
+          request.delivery?.threadId ?? null,
+          'chat-sdk',
+          JSON.stringify({
+            type: 'ask_question',
+            requirePresentation: Boolean(request.displayFields),
+            questionId: approvalId,
+            title: presentation.title,
+            question: presentation.question,
+            options: OPTIONS,
+          }),
+          undefined,
+          target.messagingGroup.instance,
+        );
+      } catch (err) {
+        if (err instanceof CardTooLongError) {
+          try {
+            await adapter!.deliver(
+              target.messagingGroup.channel_type,
+              target.messagingGroup.platform_id,
+              request.delivery?.threadId ?? null,
+              'chat',
+              JSON.stringify({
+                text: 'Approval request not shown: this channel cannot display the complete request. No approval was granted.',
+              }),
+              undefined,
+              target.messagingGroup.instance,
+            );
+          } catch (noticeError) {
+            log.warn('Could not deliver approval refusal notice', { err: noticeError });
+          }
+        }
+        throw err;
+      }
+    };
     const row = {
       approval_id: approvalId,
       session_id: request.sessionId ?? null,
