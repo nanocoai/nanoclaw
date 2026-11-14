@@ -132,7 +132,9 @@ function restartHostFor(name: string): void {
   // Auth only talks to the gateway, so it still runs; the exit code reports
   // the restart the operator has to finish by hand.
   console.error(
-    `Couldn't restart NanoClaw (${restart.message}); it runs without ${name} until you run: ${HOST_RESTART_COMMAND}`,
+    restart.step === 'build'
+      ? `Couldn't build NanoClaw (${restart.message}), so it stays on its last build, without ${name}. Fix the build errors above, then run: ${HOST_RESTART_COMMAND}`
+      : `Couldn't restart NanoClaw (${restart.message}); it runs without ${name} until you run: ${HOST_RESTART_COMMAND}`,
   );
   process.exitCode = 1;
 }

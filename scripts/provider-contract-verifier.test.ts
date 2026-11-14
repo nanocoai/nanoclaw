@@ -332,11 +332,26 @@ describe('provider contract verifier', () => {
     expect(() => parseProviderContractVerifierArgs(['--unknown'])).toThrow(/Usage/);
   });
 
+  // A type error must not leave new JS in dist/: the service loads it on its next restart.
+  it('builds the host without emitting on a type error', async () => {
+    const commands: string[] = [];
+    await verifyProviderContracts(fixture(), {
+      commandAvailable: () => true,
+      exec: (command) => {
+        commands.push(command);
+      },
+    });
+
+    expect(commands.filter((command) => command.startsWith('pnpm run build'))).toEqual([
+      'pnpm run build --noEmitOnError',
+    ]);
+  });
+
   it('returns a structured blocking failure', async () => {
     const result = await verifyProviderContracts(fixture(), {
       commandAvailable: () => true,
       exec: (command) => {
-        if (command === 'pnpm run build') throw new Error('compile failed');
+        if (command.startsWith('pnpm run build')) throw new Error('compile failed');
       },
     });
 
