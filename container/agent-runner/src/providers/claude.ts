@@ -75,6 +75,7 @@ interface SDKUserMessage {
   message: { role: 'user'; content: string };
   parent_tool_use_id: null;
   session_id: string;
+  uuid: ReturnType<typeof crypto.randomUUID>;
 }
 
 /**
@@ -85,14 +86,18 @@ class MessageStream {
   private waiting: (() => void) | null = null;
   private done = false;
 
-  push(text: string): void {
+  /** Returns the uuid the CLI echoes in the `result` that answers this input. */
+  push(text: string): string {
+    const uuid = crypto.randomUUID();
     this.queue.push({
       type: 'user',
       message: { role: 'user', content: text },
       parent_tool_use_id: null,
       session_id: '',
+      uuid,
     });
     this.waiting?.();
+    return uuid;
   }
 
   end(): void {
@@ -263,7 +268,10 @@ export class ClaudeProvider implements AgentProvider {
   query(input: QueryInput): AgentQuery {
     if (!this.memorySessionHook) throw new Error('Claude memory session hook was not registered');
     const stream = new MessageStream();
-    stream.push(input.prompt);
+    // Inputs not yet answered. The CLI folds an input pushed mid-turn into
+    // the running turn between tool rounds; the result then lists the
+    // inputs it consumed (the first 64) in `user_message_uuids`.
+    const unanswered = [stream.push(input.prompt)];
 
     const instructions = input.systemContext?.instructions;
 
@@ -365,8 +373,24 @@ export class ClaudeProvider implements AgentProvider {
           // (e.g. a non-retryable 403 billing_error) carry their message in
           // `errors[]` instead. Keep that actionable notice separate from
           // model output so the poll-loop can deliver it without scratchpad.
-          const m = message as { result?: string; is_error?: boolean; errors?: string[] };
+          const m = message as {
+            result?: string;
+            is_error?: boolean;
+            errors?: string[];
+            user_message_uuids?: string[];
+            user_message_uuid?: string;
+          };
           const isError = m.is_error === true;
+          const consumed = m.user_message_uuids ?? (m.user_message_uuid ? [m.user_message_uuid] : []);
+          // Older CLIs and zeroed results echo no uuids: they answer the oldest input.
+          if (consumed.length === 0) unanswered.shift();
+          let answeredInputs = 0;
+          for (const uuid of consumed) {
+            const at = unanswered.indexOf(uuid);
+            if (at === -1) continue;
+            unanswered.splice(at, 1);
+            answeredInputs++;
+          }
           // Some failures (e.g. an invalid API key) leave errors[] empty and put
           // the SDK's own notice in `result`. Other result text can echo upstream
           // bodies, so only exact fixed notices are reused; the rest stay generic.
@@ -379,6 +403,7 @@ export class ClaudeProvider implements AgentProvider {
             text: resultAsError ? null : (m.result ?? null),
             isError,
             error: m.errors?.length ? m.errors.join('\n') : resultAsError || undefined,
+            ...(answeredInputs > 1 ? { answeredInputs } : {}),
           };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
           yield { type: 'error', message: 'API retry', retryable: true };
@@ -428,7 +453,9 @@ export class ClaudeProvider implements AgentProvider {
     }
 
     return {
-      push: (msg) => stream.push(msg),
+      push: (msg) => {
+        unanswered.push(stream.push(msg));
+      },
       end: () => stream.end(),
       events: translateEvents(),
       abort: () => {

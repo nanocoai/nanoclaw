@@ -95,7 +95,7 @@ describe('formatter rendering', () => {
     expect(result).not.toContain('<message');
   });
 
-  it("renders the agent's own reply from a sibling thread with sender=\"you\"", () => {
+  it('renders the agent\'s own reply from a sibling thread with sender="you"', () => {
     insertMessage(
       'e-self',
       'chat',
@@ -114,7 +114,7 @@ describe('formatter rendering', () => {
     expect(result).not.toContain('sender="Pixel"');
   });
 
-  it("renders the agent's own timeline post with sender=\"you\"", () => {
+  it('renders the agent\'s own timeline post with sender="you"', () => {
     insertMessage(
       'bf-self',
       'chat',
@@ -186,6 +186,25 @@ describe('routing (extractRouting)', () => {
     const routing = extractRouting(getPendingMessages());
     expect(routing.platformId).toBe('C123');
     expect(routing.channelType).toBe('slack');
+    expect(routing.threadId).toBe('th-1');
+    expect(routing.inReplyTo).toBe('m1');
+  });
+
+  it('never takes reply routing from accumulated context, even when it sorts first', () => {
+    insertMessage(
+      'ctx',
+      'chat',
+      { sender: 'Bob', text: 'ambient' },
+      { seq: 2, trigger: 0, platformId: 'C123', channelType: 'slack', threadId: 'th-ctx' },
+    );
+    insertMessage(
+      'm1',
+      'chat',
+      { sender: 'Alice', text: 'the real trigger' },
+      { seq: 4, platformId: 'C123', channelType: 'slack', threadId: 'th-1' },
+    );
+
+    const routing = extractRouting(getPendingMessages());
     expect(routing.threadId).toBe('th-1');
     expect(routing.inReplyTo).toBe('m1');
   });

@@ -6,6 +6,9 @@ import path from 'path';
 import { CodexProvider, type CodexRuntimeDeps } from './codex.js';
 import type { AppServer, JsonRpcNotification, TurnParams } from './codex-app-server.js';
 import type { ProviderEvent } from './types.js';
+import { closeSessionDb, getInboundDb, getOutboundDb, initTestSessionDb } from '../mailbox/sqlite/connection.js';
+import { getUndeliveredMessages } from '../db/messages-out.js';
+import { runPollLoop } from '../poll-loop.js';
 
 const MEMORY_SESSION_HOOK = {
   command: 'bun /app/src/memory/hook.ts',
@@ -40,7 +43,196 @@ describe('CodexProvider active turns', () => {
     expect(fake.startCalls[0].inputText).toBe('first prompt');
     expect(fake.steerCalls).toEqual([{ threadId: 'thread-1', turnId: 'turn-1', inputText: 'follow-up prompt' }]);
     expect(events.filter((event) => event.type === 'activity').length).toBeGreaterThanOrEqual(2);
-    expect(events.filter((event) => event.type === 'result')).toEqual([{ type: 'result', text: 'final answer' }]);
+    // The one result answers both inputs; the poll loop retires the steered turn.
+    expect(events.filter((event) => event.type === 'result')).toEqual([
+      { type: 'result', text: 'final answer', answeredInputs: 2 },
+    ] as ProviderEvent[]);
+    expect(fake.killed).toBe(true);
+  });
+
+  it('counts steered follow-ups per turn, so the next turn reports only itself', async () => {
+    const fake = createFakeCodexRuntime();
+    const provider = createCodexProvider({}, fake.runtime);
+    const query = provider.query({ prompt: 'first prompt', cwd: '/workspace/agent' });
+    const events: ProviderEvent[] = [];
+
+    const collect = collectEvents(query.events, events);
+
+    await waitFor(() => fake.startCalls.length === 1);
+    query.push('steered one');
+    await waitFor(() => fake.steerCalls.length === 1);
+    await sleep(0); // its reply settles before the next follow-up
+    query.push('steered two');
+    await waitFor(() => fake.steerCalls.length === 2);
+    await sleep(0);
+    fake.completeTurn('first answer');
+    await sleep(0);
+    query.push('next turn');
+    await waitFor(() => fake.startCalls.length === 2);
+    query.end();
+    fake.completeTurn('second answer');
+
+    await collect;
+
+    expect(fake.startCalls.map((call) => call.inputText)).toEqual(['first prompt', 'next turn']);
+    expect(events.filter((event) => event.type === 'result')).toEqual([
+      { type: 'result', text: 'first answer', answeredInputs: 3 },
+      { type: 'result', text: 'second answer' },
+    ] as ProviderEvent[]);
+  });
+
+  it('never steers a follow-up past an earlier one still waiting for its turn', async () => {
+    let threadReady: () => void = () => {};
+    const fake = createFakeCodexRuntime({ threadReady: new Promise<void>((r) => (threadReady = r)) });
+    const provider = createCodexProvider({}, fake.runtime);
+    const query = provider.query({ prompt: 'first prompt', cwd: '/workspace/agent' });
+    const events: ProviderEvent[] = [];
+
+    const collect = collectEvents(query.events, events);
+
+    query.push('waiting follow-up'); // no turn yet: queued
+    threadReady();
+    await waitFor(() => fake.startCalls.length === 1);
+    query.push('later follow-up'); // a turn runs, but an earlier input is queued
+    fake.completeTurn('first answer');
+    await waitFor(() => fake.startCalls.length === 2);
+    fake.completeTurn('second answer');
+    await waitFor(() => fake.startCalls.length === 3);
+    query.end();
+    fake.completeTurn('third answer');
+
+    await collect;
+
+    expect(fake.steerCalls).toHaveLength(0);
+    expect(fake.startCalls.map((call) => call.inputText)).toEqual([
+      'first prompt',
+      'waiting follow-up',
+      'later follow-up',
+    ]);
+    expect(events.filter((event) => event.type === 'result')).toEqual([
+      { type: 'result', text: 'first answer' },
+      { type: 'result', text: 'second answer' },
+      { type: 'result', text: 'third answer' },
+    ]);
+  });
+
+  it('waits for a steer reply before counting it, so a late rejection is not reported as answered', async () => {
+    let rejectSteer: (err: Error) => void = () => {};
+    const fake = createFakeCodexRuntime({
+      steerReply: () => new Promise<void>((_, reject) => (rejectSteer = reject)),
+    });
+    const provider = createCodexProvider({}, fake.runtime);
+    const query = provider.query({ prompt: 'first prompt', cwd: '/workspace/agent' });
+    const events: ProviderEvent[] = [];
+
+    const collect = collectEvents(query.events, events);
+
+    await waitFor(() => fake.startCalls.length === 1);
+    query.push('rejected follow-up');
+    await waitFor(() => fake.steerCalls.length === 1);
+    fake.completeTurn('first answer');
+    await sleep(20);
+    expect(events.filter((event) => event.type === 'result')).toHaveLength(0);
+    rejectSteer(new Error('steer rejected late'));
+    await waitFor(() => fake.startCalls.length === 2);
+    query.end();
+    fake.completeTurn('second answer');
+
+    await collect;
+
+    expect(fake.startCalls.map((call) => call.inputText)).toEqual(['first prompt', 'rejected follow-up']);
+    expect(events.filter((event) => event.type === 'result')).toEqual([
+      { type: 'result', text: 'first answer' },
+      { type: 'result', text: 'second answer' },
+    ]);
+  });
+
+  it('queues a follow-up that arrives while a steer awaits its reply, behind that steer if it is rejected', async () => {
+    let rejectSteer: (err: Error) => void = () => {};
+    const fake = createFakeCodexRuntime({
+      steerReply: () => new Promise<void>((_, reject) => (rejectSteer = reject)),
+    });
+    const provider = createCodexProvider({}, fake.runtime);
+    const query = provider.query({ prompt: 'first prompt', cwd: '/workspace/agent' });
+    const events: ProviderEvent[] = [];
+
+    const collect = collectEvents(query.events, events);
+
+    await waitFor(() => fake.startCalls.length === 1);
+    query.push('rejected follow-up');
+    await waitFor(() => fake.steerCalls.length === 1);
+    query.push('later follow-up'); // the steer has no reply yet: queued
+    rejectSteer(new Error('steer rejected'));
+    fake.completeTurn('first answer');
+    await waitFor(() => fake.startCalls.length === 2);
+    fake.completeTurn('second answer');
+    await waitFor(() => fake.startCalls.length === 3);
+    query.end();
+    fake.completeTurn('third answer');
+
+    await collect;
+
+    expect(fake.steerCalls).toHaveLength(1);
+    expect(fake.startCalls.map((call) => call.inputText)).toEqual([
+      'first prompt',
+      'rejected follow-up',
+      'later follow-up',
+    ]);
+    expect(events.filter((event) => event.type === 'result')).toEqual([
+      { type: 'result', text: 'first answer' },
+      { type: 'result', text: 'second answer' },
+      { type: 'result', text: 'third answer' },
+    ]);
+  });
+
+  it('fails a steer still unanswered after the wait on its own result, never running it again', async () => {
+    let rejectSteer: (err: Error) => void = () => {};
+    const fake = createFakeCodexRuntime({
+      steerReply: () => new Promise<void>((_, reject) => (rejectSteer = reject)),
+      steerReplyWaitMs: 50,
+    });
+    const provider = createCodexProvider({}, fake.runtime);
+    const query = provider.query({ prompt: 'first prompt', cwd: '/workspace/agent' });
+    const events: ProviderEvent[] = [];
+
+    const collect = collectEvents(query.events, events);
+
+    await waitFor(() => fake.startCalls.length === 1);
+    query.push('unanswered steer');
+    await waitFor(() => fake.steerCalls.length === 1);
+    fake.completeTurn('first answer');
+    await waitFor(() => events.filter((event) => event.type === 'result').length === 2);
+    // The server may have taken it, so a late rejection never runs it.
+    rejectSteer(new Error('steer rejected late'));
+    await sleep(20);
+    query.end();
+
+    await collect;
+
+    expect(fake.startCalls.map((call) => call.inputText)).toEqual(['first prompt']);
+    const results = events.filter((event) => event.type === 'result');
+    expect(results[0]).toEqual({ type: 'result', text: 'first answer' });
+    expect(results[1]).toMatchObject({ type: 'result', text: null, isError: true });
+    expect((results[1] as { error?: string }).error).toContain('send it again');
+  });
+
+  it('stops promptly on abort while a result waits for a steer reply', async () => {
+    const fake = createFakeCodexRuntime({ steerReply: () => new Promise<void>(() => {}) });
+    const provider = createCodexProvider({}, fake.runtime);
+    const query = provider.query({ prompt: 'first prompt', cwd: '/workspace/agent' });
+    const events: ProviderEvent[] = [];
+
+    const collect = collectEvents(query.events, events);
+
+    await waitFor(() => fake.startCalls.length === 1);
+    query.push('unanswered steer');
+    await waitFor(() => fake.steerCalls.length === 1);
+    fake.completeTurn('first answer');
+    await sleep(20);
+    query.abort();
+    await Promise.race([collect, sleep(500).then(() => Promise.reject(new Error('abort did not stop the stream')))]);
+
+    expect(events.filter((event) => event.type === 'result')).toHaveLength(0);
     expect(fake.killed).toBe(true);
   });
 
@@ -196,7 +388,97 @@ describe('CodexProvider active turns', () => {
   });
 });
 
-function createFakeCodexRuntime(opts: { rejectSteer?: boolean } = {}) {
+describe('CodexProvider in the poll loop', () => {
+  beforeEach(() => {
+    initTestSessionDb();
+    getInboundDb()
+      .prepare(
+        `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+         VALUES ('slack-test', 'Slack Test', 'channel', 'slack', 'D123', NULL)`,
+      )
+      .run();
+  });
+  afterEach(() => closeSessionDb());
+
+  let seq = 0;
+  const insertMessage = (label: string): void => {
+    seq += 2;
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, seq, kind, timestamp, status, platform_id, channel_type, thread_id, trigger, content)
+         VALUES (?, ?, 'chat', datetime('now'), 'pending', 'D123', 'slack', ?, 1, ?)`,
+      )
+      .run(label, seq, `thread-${label}`, JSON.stringify({ sender: 'Admin', text: `ask:${label}` }));
+  };
+  const claimed = (label: string) => () =>
+    getOutboundDb().prepare('SELECT 1 FROM processing_ack WHERE message_id = ?').get(label) != null;
+  const replies = (): Array<[string, string | null]> =>
+    getUndeliveredMessages()
+      .filter((m) => m.kind === 'chat')
+      .map((m) => [(JSON.parse(m.content) as { text: string }).text, m.thread_id]);
+  const labels = (prompt: string) => [...prompt.matchAll(/ask:(\w+)/g)].map((m) => m[1]);
+
+  it('fails an unconfirmed steer in its own thread and answers the backlog in theirs', async () => {
+    const rejecters: Array<(err: Error) => void> = [];
+    const fake = createFakeCodexRuntime({
+      steerReply: () => new Promise<void>((_, reject) => rejecters.push(reject)),
+      steerReplyWaitMs: 50,
+    });
+    const provider = createCodexProvider({}, fake.runtime);
+    const controller = new AbortController();
+    const loop = runPollLoop({
+      provider,
+      providerContract: { textDelivery: 'result', commands: { formatting: 'xml' } },
+      providerName: 'codex',
+      cwd: '/tmp',
+      signal: controller.signal,
+    });
+    let answered = 0;
+    const answerTurn = async (): Promise<void> => {
+      await waitFor(() => fake.startCalls.length > answered, 5000);
+      const asked = labels(fake.startCalls[answered++].inputText).join(' + ');
+      fake.completeTurn(`<message to="slack-test">re: ${asked}</message>`);
+    };
+    try {
+      insertMessage('A');
+      await waitFor(() => fake.startCalls.length === 1, 5000);
+      insertMessage('B'); // steered into A's turn; the reply is held
+      await waitFor(() => fake.steerCalls.length === 1, 5000);
+      await answerTurn();
+      await waitFor(() => replies().length === 2, 5000);
+      // Each follow-up reaches the provider as its own push.
+      for (const label of ['C', 'D', 'E']) {
+        insertMessage(label);
+        await waitFor(claimed(label), 5000);
+      }
+      rejecters[0](new Error('steer rejected late'));
+      for (let i = 0; i < 3; i++) await answerTurn();
+      await waitFor(() => replies().length === 5, 5000);
+    } finally {
+      controller.abort();
+      await loop.catch(() => {});
+    }
+
+    const notice = replies()[1][0];
+    expect(notice).toContain('send it again');
+    expect(replies()).toEqual([
+      ['re: A', 'thread-A'],
+      [notice, 'thread-B'],
+      ['re: C', 'thread-C'],
+      ['re: D', 'thread-D'],
+      ['re: E', 'thread-E'],
+    ]);
+  });
+});
+
+function createFakeCodexRuntime(
+  opts: {
+    rejectSteer?: boolean;
+    threadReady?: Promise<void>;
+    steerReply?: () => Promise<void>;
+    steerReplyWaitMs?: number;
+  } = {},
+) {
   const server = fakeServer();
   const startCalls: TurnParams[] = [];
   const steerCalls: Array<{ threadId: string; turnId: string; inputText: string }> = [];
@@ -213,7 +495,10 @@ function createFakeCodexRuntime(opts: { rejectSteer?: boolean } = {}) {
     spawnCodexAppServer: () => server,
     attachCodexAutoApproval: () => {},
     initializeCodexAppServer: async () => {},
-    startOrResumeCodexThread: async (_server, threadId) => threadId ?? 'thread-1',
+    startOrResumeCodexThread: async (_server, threadId) => {
+      await opts.threadReady;
+      return threadId ?? 'thread-1';
+    },
     startCodexTurn: async (_server, params) => {
       startCalls.push(params);
       const turnId = `turn-${startCalls.length}`;
@@ -222,6 +507,7 @@ function createFakeCodexRuntime(opts: { rejectSteer?: boolean } = {}) {
     },
     steerCodexTurn: async (_server, threadId, turnId, inputText) => {
       steerCalls.push({ threadId, turnId, inputText });
+      if (opts.steerReply) return opts.steerReply();
       if (opts.rejectSteer) throw new Error('steer rejected');
     },
     interruptCodexTurn: async (_server, threadId, turnId) => {
@@ -230,6 +516,7 @@ function createFakeCodexRuntime(opts: { rejectSteer?: boolean } = {}) {
     killCodexAppServer: () => {
       killed = true;
     },
+    steerReplyWaitMs: opts.steerReplyWaitMs,
   };
 
   return {
