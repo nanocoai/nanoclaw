@@ -1,0 +1,19 @@
+[Unit]
+Description=mem0 Memory Bridge for NanoClaw
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=%h/projects/nanoclaw/services/mem0-bridge
+EnvironmentFile=%h/projects/nanoclaw/services/mem0-bridge/.env
+ExecStart=%h/projects/nanoclaw/services/mem0-bridge/venv/bin/uvicorn app:app --host 127.0.0.1 --port 8095 --log-level info
+Restart=on-failure
+RestartSec=5
+
+# Disable mem0 telemetry
+Environment=MEM0_TELEMETRY=false
+
+[Install]
+WantedBy=default.target
