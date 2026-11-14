@@ -549,11 +549,12 @@ export function splitCardText(text: string, escape: (t: string) => string, limit
   let reopen = false;
   let midLine = false;
   const render = (raw: string) => {
-    const body = (reopen ? `${FENCE}\n` : '') + raw;
+    // A channel shows each block from a line start, where a value could pose as
+    // a label. Count fences as sent: a mid-line marker opens none, as in the
+    // whole text, and each block stays balanced.
+    const body = (reopen ? `${FENCE}\n` : midLine ? '\u2060' : '') + raw;
     const open = (body.match(FENCE_LINE)?.length ?? 0) % 2 === 1;
-    // A channel shows each block from a line start, where a value could pose as a label.
-    const joiner = midLine && !reopen ? '⁠' : '';
-    return { block: escape(joiner + (open ? `${body}\n${FENCE}` : body)), open };
+    return { block: escape(open ? `${body}\n${FENCE}` : body), open };
   };
   const fits = (n: number) => render(rest.slice(0, n)).block.length <= limit;
   while (rest) {
