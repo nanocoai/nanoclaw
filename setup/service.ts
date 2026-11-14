@@ -72,6 +72,12 @@ export async function run(_args: string[]): Promise<void> {
       labels: peerReport.removed.map((p) => p.label),
     });
   }
+  if (peerReport.retired.length > 0) {
+    log.warn('Retired other NanoClaw services for this checkout (install id changed)', {
+      count: peerReport.retired.length,
+      labels: peerReport.retired.map((p) => p.label),
+    });
+  }
 
   proxyStatusFields = proxyStatus(projectRoot, nodePath);
   tightenCredentialFiles(projectRoot, homeDir);
