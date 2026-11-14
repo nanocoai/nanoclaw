@@ -8,7 +8,7 @@ How the long-lived branches on `nanocoai/nanoclaw` relate to `main` and how to k
 
 **Registry branch** (`channels`) — a long-lived branch carrying the code that channel skills install: every channel adapter with its tests (`src/channels/telegram.ts`, `src/channels/telegram-registration.test.ts`, …). The channel `/add-*` skills on `main` fetch files from it (`git show origin/channels:<path> > <path>`) — an additive copy into the user's clone, never a merge.
 
-**Provider payloads** — alternative agent providers (OpenCode, Codex, Cursor) have no registry branch. Each `/add-<provider>` skill ships its code and tests in its own `payload/` folder on `main` and copies them in from there. (`/add-ollama-provider` is configuration-only and redirects the built-in Claude path.)
+**Provider payloads** — alternative agent providers (OpenCode, Codex, Cursor) have no registry branch. Each `/add-<provider>` skill ships its code and tests in its own `payload/` folder on `main` and copies them in from there. (`/add-ollama-provider` and `/add-llmman-provider` are configuration-only and redirect the built-in Claude path.)
 
 **`providers`** — the former provider registry branch. It is locked by the `providers-locked` ruleset (no pushes, no deletion) and kept, never deleted, for two reasons: `/add-codex` in v2026.10.0 and earlier still copies from it, and the registry-skills workflow fetches it on every PR to prove those installs still refresh onto today's payload. An install that copied Codex from this branch needs no migration step: after it updates to a `main` that carries the payload, the next `/update-skills` rewrites every skill-owned file from `payload/`. Provider fixes land on `main`, in the skill's `payload/`.
 

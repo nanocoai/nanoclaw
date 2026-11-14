@@ -181,9 +181,11 @@
           - "setup/lib/picked-provider*"
           - "docs/provider-migration.md"
           - "docs/ollama.md"
+          - "docs/llmman.md"
           - ".claude/skills/add-codex/**"
           - ".claude/skills/add-opencode/**"
           - ".claude/skills/add-ollama-provider/**"
+          - ".claude/skills/add-llmman-provider/**"
 
 "area/repository-maintenance":
   # Skill PRs regenerate .github/skill-pins; that alone is not repo maintenance.
@@ -317,6 +319,7 @@
           - ".claude/skills/add-clidash/**"
           - ".claude/skills/add-dashboard/**"
           - ".claude/skills/add-dial-tool/**"
+          - ".claude/skills/add-llmman-tool/**"
           - ".claude/skills/add-macos-statusbar/**"
           - ".claude/skills/add-ollama-tool/**"
           - ".claude/skills/add-rtk/**"

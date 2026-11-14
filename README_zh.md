@@ -46,9 +46,9 @@ bash nanoclaw.sh
 
 **AI 原生，混合式设计。** 安装与上手流程走的是经过优化的脚本路径，快速且确定。当某一步需要判断（安装失败、引导决策、定制化）时，控制权会无缝地交给 Claude Code。安装之后也不提供监控仪表盘或调试 UI：您在聊天中描述问题，Claude Code 来处理。
 
-**技能优于功能。** 主干只发布注册表和基础设施，不包含具体的渠道适配器或替代智能体提供者。各个渠道（Discord、Slack、Telegram、WhatsApp……）放在长期存在的 `channels` 分支上；替代提供者（OpenCode、Ollama）放在 `providers` 分支上。您运行 `/add-telegram`、`/add-opencode` 等，技能会把您所需要的模块精确地复制到您的 fork 里。不会出现您没要求的功能。
+**技能优于功能。** 主干只发布注册表和基础设施，不包含具体的渠道适配器或替代智能体提供者。各个渠道（Discord、Slack、Telegram、WhatsApp……）放在长期存在的 `channels` 分支上；替代提供者（OpenCode、Ollama、llmman）放在 `providers` 分支上。您运行 `/add-telegram`、`/add-opencode` 等，技能会把您所需要的模块精确地复制到您的 fork 里。不会出现您没要求的功能。
 
-**最强的 harness，最强的模型。** NanoClaw 通过 Anthropic 官方的 Claude Agent SDK 原生使用 Claude Code，所以您能用上最新的 Claude 模型以及 Claude Code 的完整工具集——包括修改和扩展自己的 NanoClaw fork 的能力。其他提供者是可插拔选项：`/add-codex` 对应 OpenAI 的 Codex（ChatGPT 订阅或 API key），`/add-opencode` 通过 OpenCode 接入 OpenRouter、Google、DeepSeek 等，`/add-ollama-provider` 用于本地开源权重模型。提供者可按智能体组单独配置。
+**最强的 harness，最强的模型。** NanoClaw 通过 Anthropic 官方的 Claude Agent SDK 原生使用 Claude Code，所以您能用上最新的 Claude 模型以及 Claude Code 的完整工具集——包括修改和扩展自己的 NanoClaw fork 的能力。其他提供者是可插拔选项：`/add-codex` 对应 OpenAI 的 Codex（ChatGPT 订阅或 API key），`/add-opencode` 通过 OpenCode 接入 OpenRouter、Google、DeepSeek 等，`/add-ollama-provider` 或 `/add-llmman-provider` 用于本地开源权重模型。提供者可按智能体组单独配置。
 
 ## 功能支持
 
@@ -157,7 +157,7 @@ Docker 提供跨平台支持（macOS、Linux、Windows via WSL2）和成熟的�
 
 **我可以使用第三方或开源模型吗？**
 
-可以。推荐做法是 `/add-opencode`（通过 OpenCode 配置接入 OpenRouter、OpenAI、Google、DeepSeek 等）或 `/add-ollama-provider`（通过 Ollama 使用本地开源权重模型）。两者都可以按智能体组单独配置，所以同一套安装里不同的智能体可以运行在不同的后端上。
+可以。推荐做法是 `/add-opencode`（通过 OpenCode 配置接入 OpenRouter、OpenAI、Google、DeepSeek 等）、`/add-ollama-provider`（通过 Ollama 使用本地开源权重模型）或 `/add-llmman-provider`（通过 llmman 使用本地开源权重模型）。三者都可以按智能体组单独配置，所以同一套安装里不同的智能体可以运行在不同的后端上。
 
 对于一次性实验，任何 Claude API 兼容的端点也可以通过 `.env` 使用：
 
