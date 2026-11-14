@@ -4,7 +4,8 @@
  * Responsibility: orchestrate the sequence of steps end-to-end and route
  * between them. The runner, spawning, status parsing, spinner, abort, and
  * prompt primitives live in `setup/lib/runner.ts`; theming in
- * `setup/lib/theme.ts`; Telegram's full flow in `setup/channels/telegram.ts`.
+ * `setup/lib/theme.ts`; channel flows in each channel skill's SKILL.md, run by
+ * `setup/channels/run-channel-skill.ts`.
  *
  * Config via env:
  *   NANOCLAW_DISPLAY_NAME  how the agents address the operator — skips the

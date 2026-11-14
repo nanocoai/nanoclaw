@@ -1,6 +1,5 @@
 /**
  * Step: mounts — Write mount allowlist config file.
- * Replaces 07-configure-mounts.sh
  */
 import fs from 'fs';
 import path from 'path';

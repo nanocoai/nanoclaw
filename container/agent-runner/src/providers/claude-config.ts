@@ -79,8 +79,8 @@ export function mcpAllowPattern(serverName: string): string {
 
 /**
  * Claude runs unrestricted inside the container: NanoClaw's container
- * isolation and the OneCLI allow-list are the security boundary, not the
- * SDK's own permission prompts. The disallowed builtins are policy too —
+ * isolation and the credential gateway's allow-list are the security
+ * boundary, not the SDK's own permission prompts. The disallowed builtins are policy too —
  * they are the SDK surfaces that would bypass nanoclaw's scheduling or hang
  * a headless session.
  *

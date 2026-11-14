@@ -39,7 +39,8 @@ export function isFailureNotice(msg: MessageInRow): boolean {
 
 /**
  * Command categories for messages starting with '/'.
- * - admin: sender must be in NANOCLAW_ADMIN_USER_IDS
+ * - admin: admin-only; the host router gates them on channel messages
+ *   (src/command-gate.ts)
  * - filtered: silently drop (mark completed without processing)
  * - passthrough: pass raw to the agent (no XML wrapping)
  * - none: not a command — format normally
@@ -94,12 +95,12 @@ export interface CommandInfo {
  * Only applies to chat/chat-sdk messages. `providerName` is the active
  * provider whose contract supplies the native command lists.
  *
- * The extracted `senderId` is compared against `NANOCLAW_ADMIN_USER_IDS`
- * which stores ids in the namespaced form `<channel_type>:<raw>` (see
- * src/db/users.ts). chat-sdk-bridge serializes `author.userId` as a raw
- * platform id with no prefix, so we prefix it here. If the id already
- * contains a `:` we assume it's pre-namespaced (non-chat-sdk adapters
- * that populate `senderId` directly) and leave it alone.
+ * The extracted `senderId` uses the namespaced user-id form
+ * `<channel_type>:<raw>` (see src/cli/resources/users.ts). chat-sdk-bridge
+ * serializes `author.userId` as a raw platform id with no prefix, so we
+ * prefix it here. If the id already contains a `:` we assume it's
+ * pre-namespaced (non-chat-sdk adapters that populate `senderId` directly)
+ * and leave it alone.
  */
 export function categorizeMessage(msg: MessageInRow, providerName: string): CommandInfo {
   const text = commandText(msg.content);
