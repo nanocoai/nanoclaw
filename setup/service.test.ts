@@ -11,6 +11,7 @@ import {
   hostProxyEnv,
   nodeHonorsEnvProxy,
   renderLaunchdPlist,
+  renderNohupWrapper,
   renderSystemdUnit,
   serviceProxyEnvPath,
   tightenCredentialFiles,
@@ -118,6 +119,7 @@ describe('install id in the service environment', () => {
   const saved = process.env.NANOCLAW_INSTALL_ID;
   const plist = () => renderLaunchdPlist('/Users/u/nanoclaw', '/opt/homebrew/bin/node', '/Users/u');
   const unit = () => renderSystemdUnit('/home/user/nanoclaw', '/usr/bin/node', '/home/user', false);
+  const wrapper = () => renderNohupWrapper('/home/user/nanoclaw', '/usr/bin/node');
   afterEach(() => {
     if (saved === undefined) delete process.env.NANOCLAW_INSTALL_ID;
     else process.env.NANOCLAW_INSTALL_ID = saved;
@@ -134,19 +136,30 @@ describe('install id in the service environment', () => {
     expect(unit()).toContain('Environment=NANOCLAW_INSTALL_ID=prod-eks_1\n');
   });
 
+  // restart.sh and the updater run the wrapper from shells that may not set it.
+  it('gives the nohup host the id before it starts', () => {
+    process.env.NANOCLAW_INSTALL_ID = 'prod-eks_1';
+    const lines = wrapper().split('\n');
+    const exported = lines.indexOf("export NANOCLAW_INSTALL_ID='prod-eks_1'");
+    expect(exported).toBeGreaterThan(-1);
+    expect(exported).toBeLessThan(lines.findIndex((line) => line.startsWith('setsid nohup ')));
+  });
+
   it('writes the same files for an empty id as for none', () => {
     delete process.env.NANOCLAW_INSTALL_ID;
-    const [unsetPlist, unsetUnit] = [plist(), unit()];
+    const [unsetPlist, unsetUnit, unsetWrapper] = [plist(), unit(), wrapper()];
     process.env.NANOCLAW_INSTALL_ID = '';
     expect(plist()).toBe(unsetPlist);
     expect(unit()).toBe(unsetUnit);
-    expect(unsetPlist + unsetUnit).not.toContain('NANOCLAW_INSTALL_ID');
+    expect(wrapper()).toBe(unsetWrapper);
+    expect(unsetPlist + unsetUnit + unsetWrapper).not.toContain('NANOCLAW_INSTALL_ID');
   });
 
   it('refuses an invalid id', () => {
     process.env.NANOCLAW_INSTALL_ID = 'UPPER';
     expect(plist).toThrow(/NANOCLAW_INSTALL_ID/);
     expect(unit).toThrow(/NANOCLAW_INSTALL_ID/);
+    expect(wrapper).toThrow(/NANOCLAW_INSTALL_ID/);
   });
 });
 
