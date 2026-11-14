@@ -359,7 +359,8 @@ function retireSystemUnits(projectRoot: string, unitDir: string, result: PeerCle
       },
       'system unit',
       undefined,
-      systemdMayStillRun,
+      // Only a successful disable counts: systemctl missing from root's PATH is not proof.
+      (disableError) => disableError !== undefined,
     );
   }
 }

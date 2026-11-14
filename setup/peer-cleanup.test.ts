@@ -480,6 +480,22 @@ describe('cleanupUnhealthyPeers — system units for this checkout', () => {
     expect(result.failures.map((f) => f.label)).toEqual(['nanoclaw-v2-old']);
   });
 
+  // systemctl missing from PATH does not mean the system manager is gone.
+  it('as root, keeps the system unit when systemctl cannot be found', () => {
+    const { systemDir, projectRoot, entry } = rootCheckout(0);
+    const old = path.join(systemDir, 'nanoclaw-v2-old.service');
+    writeUnit(old, entry);
+    vi.mocked(execFileSync).mockImplementation(() => {
+      throw Object.assign(new Error('spawnSync systemctl ENOENT'), { code: 'ENOENT' });
+    });
+
+    const result = cleanupUnhealthyPeers(projectRoot, systemDir);
+
+    expect(fs.existsSync(old)).toBe(true);
+    expect(result.retired).toEqual([]);
+    expect(result.failures.map((f) => f.label)).toEqual(['nanoclaw-v2-old']);
+  });
+
   it('as a normal user, logs the sudo command for the old system unit and leaves it', () => {
     const { systemDir, projectRoot, entry } = rootCheckout(1000);
     const old = path.join(systemDir, 'nanoclaw-v2-old.service');
