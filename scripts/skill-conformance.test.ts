@@ -369,10 +369,8 @@ describe.each(SKILLS)('%s', (name) => {
     });
   });
 
-  // On a re-run nc:dep skips a package that is already present, so a pnpm
-  // setting added since the first install sits unapplied and the lockfile no
-  // longer matches package.json. The run that sets it must install; a patch
-  // must `pnpm add` its exact version, since an older install won't match it.
+  // nc:dep skips an installed package, so on a re-run a new pnpm setting is never
+  // applied. The run that sets it must reinstall; a patch must `pnpm add` its version.
   it('pnpm settings reinstall, so a re-run applies them to a dep already present', () => {
     for (const d of directives) {
       if (d.kind !== 'run') continue;

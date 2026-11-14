@@ -48,12 +48,10 @@ pinned package drifts away from the patch:
 patches/@chat-adapter__discord@4.41.1.patch
 ```
 
-The step below skips a package that is already in `package.json`, so a re-run
-over an existing install would leave the adapter unpatched, or on an older
-version the patch doesn't match. The `pnpm add` here does that step's work
-then, moving the adapter to 4.41.1 with the patch. It runs only then: pnpm
-refuses a patch that matches no installed package, so a fresh install gets the
-patch from the step below instead:
+Re-runs only: the step below skips an adapter that is already installed, so this
+`pnpm add` moves it to 4.41.1 with the patch. A fresh install gets the patch
+from the step below (pnpm rejects a patch for a package that isn't installed
+yet):
 
 ```nc:run effect:refresh
 pnpm pkg set 'pnpm.patchedDependencies[@chat-adapter/discord@4.41.1]=patches/@chat-adapter__discord@4.41.1.patch'
