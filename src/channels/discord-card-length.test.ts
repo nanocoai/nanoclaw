@@ -4,7 +4,7 @@
  * an embed description over 4,096.
  */
 import { createDiscordAdapter } from '@chat-adapter/discord';
-import { Card, CardText } from 'chat';
+import { Actions, Button, Card, CardText, type CardChild } from 'chat';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ChannelAdapter, ChannelRegistration } from './adapter.js';
@@ -46,7 +46,7 @@ import { runMigrations } from '../db/migrations/index.js';
 import { gatewayApprovalPresentation } from '../gateway-approval-presentation.js';
 import type { GatewayApprovalRequest } from '../gateway-providers/gateway-provider-registry.js';
 import { CardTooLongError } from './ask-question.js';
-import { escapeDiscordCardText } from './discord.js';
+import { clearButtonsOnCardEdits, escapeDiscordCardText } from './discord.js';
 import { registerQuestionRenderResolver } from './question-render-registry.js';
 
 const posts: Array<{ embeds: Array<{ title?: string; description?: string }>; components?: unknown[] }> = [];
@@ -99,6 +99,9 @@ const adapter = createDiscordAdapter({
   publicKey: 'a'.repeat(64),
   applicationId: 'test-app-id',
 });
+const approve = Actions([Button({ id: 'ncq:q:0', label: 'Approve' })]);
+const card = (blocks: string[], rest: CardChild[] = [approve], title = 'Approve') =>
+  Card({ title, children: [...blocks.map((block) => CardText(block)), ...rest] });
 
 /** The review case: a 572-character resource and six 600-character details. */
 function longGatewayCard() {
@@ -171,11 +174,44 @@ describe('Discord card limit through the bridge', () => {
 describe('Discord card edits and buttons', () => {
   const resolved = Card({ title: 'Approve', children: [CardText('Approved by admin', { style: 'muted' })] });
 
-  // Discord keeps a message's buttons on an edit that sends no components, so
-  // a clicked card's buttons are removed apart from its edit, through the click.
-  it('the adapter edits a message into a card without actions and sends no components', async () => {
+  // Discord keeps a message's buttons on an edit that sends no components.
+  it('shows the gap: the adapter edits a message into a card without actions and sends no components', async () => {
     await adapter.editMessage('discord:g1:c1', 'm9', { card: resolved });
     expect(patches[0].body).not.toHaveProperty('components');
+  });
+
+  it('sends components: [] when a message is edited into a card without actions', async () => {
+    const wrapped = createDiscordAdapter({
+      botToken: 'test-bot-token',
+      publicKey: 'a'.repeat(64),
+      applicationId: 'test-app-id',
+    });
+    clearButtonsOnCardEdits(wrapped);
+
+    await wrapped.editMessage('discord:g1:c1', 'm9', { card: resolved });
+    expect(patches[0].url).toMatch(/\/channels\/c1\/messages\/m9$/);
+    expect(patches[0].body.components).toEqual([]);
+
+    await wrapped.editMessage('discord:g1:c1', 'm9', { card: card(['Approve?']) });
+    expect((patches[1].body.components as unknown[]).length).toBeGreaterThan(0);
+
+    await wrapped.editMessage('discord:g1:c1', 'm9', { markdown: 'plain text' });
+    expect(patches[2].body).not.toHaveProperty('components');
+  });
+
+  // No click, so no interaction: the host's own edit is the only write.
+  it('is wired into the Discord bridge: a card the host closes loses its buttons', async () => {
+    const bridge = (await registrations.get('discord')!.factory())!;
+    await bridge.deliver('discord:g1:c1', null, {
+      kind: 'chat-sdk',
+      content: {
+        operation: 'edit',
+        messageId: 'm9',
+        terminalCard: { title: 'Approve', question: 'Run it?', resolution: '⏱️ Timed out — no response' },
+      },
+    });
+    expect(patches).toHaveLength(1);
+    expect(patches[0].body.components).toEqual([]);
   });
 
   it.each([
@@ -229,7 +265,9 @@ describe('Discord card edits and buttons', () => {
           '/webhooks/test-app-id/interaction-token/messages/@original',
         ]),
       );
-      expect(patches[0].body).not.toHaveProperty('components');
+      // The card edit clears the buttons itself, the same as a close with no
+      // click; the click's removal still follows, for an edit Discord refused.
+      expect(patches[0].body.components).toEqual([]);
       expect(patches.at(-1)!.body).toEqual({ components: [] });
       expect(removedDuringEdit).toBe(false);
     } finally {
