@@ -513,25 +513,41 @@ function addsBarrelImport(meta: RegistrySkill): boolean {
   return parseDirectives(meta.markdown).some((d) => d.kind === 'append' && d.attrs.to === CHANNEL_BARREL);
 }
 
-export function barrelLines(meta: RegistrySkill): string[] {
+/** Each unguarded nc:append line, with the file it goes into. */
+export function appendLines(meta: RegistrySkill): { to: string; line: string }[] {
   return parseDirectives(meta.markdown)
     .filter(
-      (directive) => directive.kind === 'append' && directive.attrs.to === CHANNEL_BARREL && !directive.attrs.when,
+      (directive) => directive.kind === 'append' && typeof directive.attrs.to === 'string' && !directive.attrs.when,
     )
-    .flatMap((directive) => directive.body.map((line) => line.trim()));
+    .flatMap((directive) =>
+      directive.body.map((line) => ({ to: String(directive.attrs.to), line: line.trim() })).filter(({ line }) => line),
+    );
 }
 
-/** Every adapter registers itself in the barrel exactly once. */
-function barrelProblems(root: string, installed: RegistrySkill[]): string[] {
-  const barrel = readFileSync(join(root, CHANNEL_BARREL), 'utf8')
-    .split('\n')
-    .map((line) => line.trim());
+/**
+ * Every adapter registers itself in the barrel, and each unguarded append line is in
+ * its file exactly once, so a later install-mode apply cannot be what adds it.
+ */
+export function appendProblems(root: string, installed: RegistrySkill[]): string[] {
+  const files = new Map<string, string[]>();
+  const linesOf = (file: string): string[] => {
+    let lines = files.get(file);
+    if (!lines) {
+      const path = join(root, file);
+      lines = existsSync(path)
+        ? readFileSync(path, 'utf8')
+            .split('\n')
+            .map((line) => line.trim())
+        : [];
+      files.set(file, lines);
+    }
+    return lines;
+  };
   return installed.flatMap((meta) => {
-    const lines = barrelLines(meta);
     if (meta.channel && !addsBarrelImport(meta)) return [`${meta.skill} adds no ${CHANNEL_BARREL} import`];
-    return lines
-      .filter((line) => barrel.filter((candidate) => candidate === line).length !== 1)
-      .map((line) => `${meta.skill}: ${CHANNEL_BARREL} must hold "${line}" exactly once`);
+    return appendLines(meta)
+      .filter(({ to, line }) => linesOf(to).filter((candidate) => candidate === line).length !== 1)
+      .map(({ to, line }) => `${meta.skill}: ${to} must hold "${line}" exactly once`);
   });
 }
 
@@ -554,7 +570,7 @@ export function dependencyProblems(root: string, meta: RegistrySkill): string[] 
 
 /**
  * Refresh every installed skill against the pinned channels commit, then check
- * what it left: the selection, each copy against its source, the barrel and the
+ * what it left: the selection, each copy against its source, every append and the
  * dependency pins. Copies go stale first, so a copy the refresh skipped shows.
  */
 async function channelRefreshProblems(
@@ -599,7 +615,7 @@ async function channelRefreshProblems(
   }
   return [
     ...problems,
-    ...barrelProblems(root, installed),
+    ...appendProblems(root, installed),
     ...installed.flatMap((meta) => dependencyProblems(root, meta)),
   ];
 }
@@ -636,7 +652,7 @@ async function testCombinedChannels(skills: RegistrySkill[]): Promise<void> {
       console.log(`\n==> ${meta.skill}`);
       await testSkill(meta, fixtureScenarios(meta)[0] ?? {}, root, refs, false, [...SKIPPED_EFFECTS, 'build', 'test']);
     }
-    const problems = barrelProblems(root, selected);
+    const problems = appendProblems(root, selected);
     await check(problems, 'host typecheck', () => command('pnpm exec tsc --noEmit', root));
     await check(problems, 'container typecheck', () =>
       command('pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit', root),
