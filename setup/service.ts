@@ -12,7 +12,7 @@ import path from 'path';
 
 import { readEnvFile } from '../src/env.js';
 import { log } from '../src/log.js';
-import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
+import { getInstallSlug, getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
 import { writeUpgradeState } from '../src/upgrade-state.js';
 import { cleanupUnhealthyPeers } from './peer-cleanup.js';
 import { commandExists, getPlatform, getNodePath, getServiceManager, isRoot } from './platform.js';
@@ -289,6 +289,13 @@ function servicePath(nodePath: string, dirs: string[]): string {
   return (dirs.includes(nodeDir) ? dirs : [nodeDir, ...dirs]).join(':');
 }
 
+// The host names its image and container labels from the install id, and the
+// service does not inherit the setup shell's environment. Unset or empty adds
+// nothing; an invalid id throws. A valid id needs no quoting.
+function installIdEnv(projectRoot: string): [string, string][] {
+  return process.env.NANOCLAW_INSTALL_ID ? [['NANOCLAW_INSTALL_ID', getInstallSlug(projectRoot)]] : [];
+}
+
 export function renderLaunchdPlist(
   projectRoot: string,
   nodePath: string,
@@ -306,7 +313,7 @@ export function renderLaunchdPlist(
     '/bin',
     `${homeDir}/.local/bin`,
   ]);
-  const proxyEntries = proxyEnv
+  const extraEntries = [...installIdEnv(projectRoot), ...proxyEnv]
     .map(([key, value]) => `\n        <key>${key}</key>\n        <string>${xmlEscape(value)}</string>`)
     .join('');
 
@@ -332,7 +339,7 @@ export function renderLaunchdPlist(
         <key>PATH</key>
         <string>${envPath}</string>
         <key>HOME</key>
-        <string>${homeDir}</string>${proxyEntries}
+        <string>${homeDir}</string>${extraEntries}
     </dict>
     <key>StandardOutPath</key>
     <string>${projectRoot}/logs/nanoclaw.log</string>
@@ -425,15 +432,27 @@ async function setupLinux(projectRoot: string, nodePath: string, homeDir: string
  * Kill any orphaned nanoclaw node processes left from previous runs or debugging.
  * Prevents connection conflicts when two instances connect to the same channel simultaneously.
  */
-function killOrphanedProcesses(projectRoot: string): void {
+export function killOrphanedProcesses(projectRoot: string): void {
   try {
-    execSync(`pkill -f '${projectRoot}/dist/index\\.js' || true`, {
-      stdio: 'ignore',
-    });
-    log.info('Stopped any orphaned nanoclaw processes');
+    // No shell, and the folder matched literally: it may hold spaces, quotes or regex characters.
+    execFileSync('pkill', ['-f', hostProcessPattern(projectRoot)], { stdio: 'ignore' });
   } catch {
-    // pkill not available or no orphans
+    // Exit 1 means no orphans. A missing pkill stays best effort, as before.
   }
+  log.info('Stopped any orphaned nanoclaw processes');
+}
+
+/**
+ * `pkill -f` pattern for this install's host. Every launcher runs
+ * `<node> <projectRoot>/dist/index.js`, so the path has whitespace or a line
+ * end on each side; a longer path ending in it, or `index.js.map`, is not it.
+ */
+export function hostProcessPattern(projectRoot: string): string {
+  return `(^|[[:space:]])${escapeRegex(projectRoot)}/dist/index\\.js([[:space:]]|$)`;
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 /**
@@ -521,6 +540,9 @@ export function renderSystemdUnit(
   const proxyLine = proxyEnvFile
     ? `\nEnvironmentFile=${proxyEnvFile.replace(/%/g, '%%').replace(/[[\]*?\\]/g, '\\$&')}`
     : '';
+  const idLine = installIdEnv(projectRoot)
+    .map(([key, value]) => `\nEnvironment=${key}=${value}`)
+    .join('');
 
   return `[Unit]
 Description=NanoClaw Personal Assistant
@@ -534,7 +556,7 @@ Restart=always
 RestartSec=5
 KillMode=process
 Environment=HOME=${homeDir}
-Environment=PATH=${servicePath(nodePath, ['/usr/local/bin', '/usr/bin', '/bin', `${homeDir}/.local/bin`])}${proxyLine}
+Environment=PATH=${servicePath(nodePath, ['/usr/local/bin', '/usr/bin', '/bin', `${homeDir}/.local/bin`])}${idLine}${proxyLine}
 StandardOutput=append:${projectRoot}/logs/nanoclaw.log
 StandardError=append:${projectRoot}/logs/nanoclaw.error.log
 
