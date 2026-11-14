@@ -102,22 +102,40 @@ describe('answerPendingQuestion', () => {
     expect(questions.has('chat@g.us')).toBe(false);
   });
 
-  it('leaves a newer question alone when it replaced this one meanwhile', async () => {
-    const questions = fresh();
-    const newer = { questionId: 'q2', options: [approve] };
-    await answerPendingQuestion(
-      questions,
-      'chat@g.us',
-      '/approve',
-      'owner@s.whatsapp.net',
-      async () => {
-        questions.set('chat@g.us', newer);
-        return 'ignored' as const;
-      },
-      vi.fn(),
-    );
-    expect(questions.get('chat@g.us')).toBe(newer);
-  });
+  // Choose an existing agent answers by sending a new card under the first card's
+  // id, so an id check alone would close it.
+  it.each([
+    ['a new id', 'ignored', 'q2'],
+    ['a new id', 'accepted', 'q2'],
+    ['a new id', 'closed', 'q2'],
+    ['the same id, as the agent card does', 'accepted', 'q1'],
+    ['the same id, as the agent card does', 'closed', 'q1'],
+  ] as const)(
+    'leaves a newer question alone when it replaced this one meanwhile under %s (%s)',
+    async (_, outcome, nextId) => {
+      const questions = fresh();
+      const mainAgent = { label: 'Main agent', selectedLabel: '✅ Main agent', value: 'ag-main' };
+      const newer = { questionId: nextId, options: [mainAgent] };
+      await answerPendingQuestion(
+        questions,
+        'chat@g.us',
+        '/approve',
+        'owner@s.whatsapp.net',
+        async () => {
+          questions.set('chat@g.us', newer);
+          return outcome;
+        },
+        vi.fn(),
+      );
+      expect(questions.get('chat@g.us')).toBe(newer);
+      // Only the new card's options answer it, so the first question can't be the one left open.
+      const onAction = vi.fn(async () => 'accepted' as const);
+      expect(answerPendingQuestion(questions, 'chat@g.us', '/approve', 'u', onAction, vi.fn())).toBeUndefined();
+      expect(
+        await answerPendingQuestion(questions, 'chat@g.us', '/main-agent', 'owner@s.whatsapp.net', onAction, vi.fn()),
+      ).toEqual({ questionId: nextId, value: 'ag-main', outcome: 'accepted' });
+    },
+  );
 
   // The caller is the message batch loop: it must know at once, and not wait for the host.
   it('says at once whether a reply is an answer, with the host still deciding', async () => {
