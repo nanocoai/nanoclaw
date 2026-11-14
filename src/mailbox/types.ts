@@ -143,6 +143,14 @@ export interface OutboundMailbox {
   getTerminalProcessingAcks(): ProcessingAck[];
   getProcessingClaims(): ProcessingClaim[];
   deleteOrphanProcessingClaims(): number;
+  /**
+   * Clear crash residue a runtime killed mid-write left behind (see
+   * AgentMailbox.isRecoverableResidue). Call only while no runtime can be
+   * writing the session: none registered, spawning, being adopted or stopped
+   * by this host, and no live peer host holding its claim. isContainerRunning
+   * alone is not enough.
+   */
+  recoverResidue?(): void;
   getContainerState(): ContainerState | null;
   getDueMessages(excludeIds?: ReadonlySet<string>): OutboundMessage[];
   writeDirect(message: DirectOutboundMessage): Promise<void>;
@@ -160,6 +168,13 @@ export interface AgentMailbox {
   /** Authorize/provision this implementation's storage for a later session(). */
   prepare(key: MailboxSessionKey): void;
   destroy(key: MailboxSessionKey): Promise<void>;
+  /**
+   * True when `err` means crash residue blocks the host's reads of a session
+   * (for SQLite, a hot journal left by a container killed mid-write, which the
+   * read-only outbound handle cannot roll back), so OutboundMailbox.recoverResidue
+   * would clear it. Optional: implementations without crash residue omit it.
+   */
+  isRecoverableResidue?(err: unknown): boolean;
   runnerContext(key: MailboxSessionKey): Promise<unknown>;
   /** Non-secret runner configuration only; never credentials, authorization material, or identity. */
   runnerEnvironment(key: MailboxSessionKey): Promise<Record<string, string>>;

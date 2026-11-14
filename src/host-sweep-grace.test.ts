@@ -32,6 +32,8 @@ vi.mock('./config.js', async () => {
 // Mock container runner to prevent actual Docker spawning
 vi.mock('./container-runner.js', () => ({
   getContainerStartedAtMs: vi.fn(() => Date.now()),
+  hasHostRuntime: vi.fn().mockReturnValue(false),
+  isClaimedByLivePeer: vi.fn().mockResolvedValue(false),
   isContainerRunning: vi.fn().mockReturnValue(false),
   wakeContainer: vi.fn().mockResolvedValue(true),
   killContainer: vi.fn(),

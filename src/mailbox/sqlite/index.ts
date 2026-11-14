@@ -348,6 +348,12 @@ export function wrapSqliteOutbound(
         return { messageId: record.messageId, statusChanged: record.statusChanged };
       }),
     deleteOrphanProcessingClaims: () => deleteOrphanProcessingClaims(writable()),
+    // The writable connection's first statement rolls a hot journal back (the
+    // same connection deleteOrphanProcessingClaims already uses while no
+    // container runs).
+    recoverResidue: () => {
+      writable().prepare('PRAGMA schema_version').get();
+    },
     getContainerState: () => {
       const row = getContainerState(readable());
       if (!row) return null;
@@ -463,6 +469,17 @@ export class SqliteAgentMailbox implements AgentMailbox {
       const db = sessionMailboxPath(key, side);
       for (const suffix of ['', '-journal', '-shm', '-wal']) fs.rmSync(`${db}${suffix}`, { force: true });
     }
+  }
+
+  /**
+   * A container killed mid-transaction leaves `outbound.db-journal` behind
+   * (journal_mode=DELETE). The host's read-only outbound handle cannot roll a
+   * hot journal back, so every host read fails with SQLITE_READONLY_ROLLBACK
+   * until a writable connection opens the DB. Only outbound reads can raise it:
+   * the host opens inbound.db read-write.
+   */
+  isRecoverableResidue(err: unknown): boolean {
+    return (err as { code?: unknown } | null)?.code === 'SQLITE_READONLY_ROLLBACK';
   }
 
   async runnerContext(_key: MailboxSessionKey): Promise<null> {
