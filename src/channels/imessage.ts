@@ -425,6 +425,9 @@ export function createPhotonAdapter(
   // The user answers by replying with a slash command (iMessage has no buttons).
   const pendingQuestions = new Map<string, { questionId: string; options: NormalizedOption[] }>();
 
+  // Answers the host is still deciding, by platformId: the tail of that chat's queue.
+  const answersInFlight = new Map<string, Promise<void>>();
+
   function cacheSpace(key: string, space: SpectrumSpace): void {
     if (!key || !space) return;
     if (spaceCache.has(key)) spaceCache.delete(key);
@@ -505,6 +508,47 @@ export function createPhotonAdapter(
     };
   }
 
+  /**
+   * Hands an answer to the host and finishes it (close, confirm) off the inbound
+   * loop: the host may take its time, and one slow answer must not hold every
+   * chat. Answers in one chat still reach the host one at a time, in order.
+   */
+  function answerQuestion(
+    platformId: string,
+    pending: { questionId: string; options: NormalizedOption[] },
+    matched: NormalizedOption,
+    sender: string,
+  ): void {
+    const run = async (): Promise<void> => {
+      // An answer queued behind one that closed or replaced its question was
+      // typed for options no longer shown, and the host would act on it again.
+      if (pendingQuestions.get(platformId) !== pending) return;
+      // Confirmed only once the host accepts it. A refused answer, or one that
+      // decided nothing, keeps the question open (no private reply here, so nothing is sent).
+      const result: unknown = await setupConfig.onAction(pending.questionId, matched.value, sender);
+      // A core from before click outcomes returns nothing: answered as before.
+      const outcome = result === undefined ? 'accepted' : result;
+      const closes = outcome === 'accepted' || outcome === 'closed';
+      if (closes && pendingQuestions.get(platformId) === pending) pendingQuestions.delete(platformId);
+      if (outcome === 'accepted') {
+        await deliverText(platformId, `${matched.selectedLabel}`).catch((err) =>
+          log.debug('Photon: failed to confirm question answer', { err }),
+        );
+      }
+    };
+    const earlier = answersInFlight.get(platformId);
+    // With nothing ahead of it, the host hears the answer before any later message.
+    // One still waiting its turn when the adapter stops is dropped: the host stops too.
+    const turn = earlier ? earlier.then(() => (shuttingDown ? undefined : run())) : run();
+    const settled = turn.catch((err) =>
+      log.error('Photon: error answering a question', { platformId, questionId: pending.questionId, err }),
+    );
+    answersInFlight.set(platformId, settled);
+    void settled.then(() => {
+      if (answersInFlight.get(platformId) === settled) answersInFlight.delete(platformId);
+    });
+  }
+
   async function handleInbound(space: SpectrumSpace, message: SpectrumMessage): Promise<void> {
     // Ignore our own outbound echoes. `direction` is only set on messages the
     // provider has classified; when absent we treat it as inbound.
@@ -549,11 +593,7 @@ export function createPhotonAdapter(
       const cmd = text.trim().toLowerCase();
       const matched = pending.options.find((o) => optionToCommand(o.label) === cmd);
       if (matched) {
-        setupConfig.onAction(pending.questionId, matched.value, sender);
-        pendingQuestions.delete(platformId);
-        await deliverText(platformId, `${matched.selectedLabel}`).catch((err) =>
-          log.debug('Photon: failed to confirm question answer', { err }),
-        );
+        answerQuestion(platformId, pending, matched, sender);
         return;
       }
     }
