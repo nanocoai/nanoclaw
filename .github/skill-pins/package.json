@@ -22,6 +22,7 @@
     "@getdial/cli": "0.37.0",
     "@grpc/grpc-js": "1.14.5",
     "@grpc/proto-loader": "0.8.1",
+    "@mailtrap/chat-sdk-adapter": "0.1.0",
     "@microsoft/teams.cli": "3.0.2",
     "@onecli-sh/sdk": "2.2.1",
     "@openai/codex": "0.162.1",
@@ -143,6 +144,12 @@
       "version": "0.8.1",
       "sources": [
         ".claude/skills/add-iron-proxy/SKILL.md nc:dep manager:pnpm"
+      ]
+    },
+    "@mailtrap/chat-sdk-adapter": {
+      "version": "0.1.0",
+      "sources": [
+        ".claude/skills/add-mailtrap/SKILL.md nc:dep"
       ]
     },
     "@microsoft/teams.cli": {
