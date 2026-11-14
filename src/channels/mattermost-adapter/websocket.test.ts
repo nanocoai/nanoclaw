@@ -1,3 +1,5 @@
+import { createServer } from 'node:http';
+import type { Socket } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type WebSocket from 'ws';
 
@@ -190,5 +192,57 @@ describe('MattermostSocket connect failures', () => {
       JSON.stringify({ status: 'FAIL', seq_reply: auth.seq, error: { message: 'invalid token' } }),
     );
     expect(await connected).toMatchObject({ name: 'Error', message: expect.stringContaining('authentication failed') });
+  });
+});
+
+describe('MattermostSocket opening handshake', () => {
+  // A real server that takes the upgrade and never completes it: `silent`
+  // sends nothing; `trickle` sends a header line every 20 ms, which an idle
+  // timeout alone never catches.
+  it.each(['silent', 'trickle'] as const)('rejects a %s upgrade as a retryable network error', async (mode) => {
+    const server = createServer();
+    const peers = new Set<Socket>();
+    server.on('connection', (peer) => {
+      peers.add(peer);
+      peer.on('error', () => {});
+      peer.on('close', () => peers.delete(peer));
+    });
+    server.on('upgrade', (_request, peer: Socket) => {
+      if (mode === 'silent') return;
+      peer.write('HTTP/1.1 101 Switching Protocols\r\n');
+      const trickle = setInterval(() => {
+        if (!peer.destroyed) peer.write('X-Pad: 1\r\n');
+      }, 20);
+      peer.on('close', () => clearInterval(trickle));
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Missing test server address');
+    const socket = new MattermostSocket({
+      baseUrl: `http://127.0.0.1:${address.port}`,
+      token: 'test-token',
+      logger: silentLogger,
+      onEvent: () => {},
+      authTimeoutMs: 250,
+    });
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const result = await Promise.race([
+        socket.connect().then(
+          () => 'unexpected success',
+          (error: unknown) => error,
+        ),
+        new Promise<string>((resolve) => {
+          watchdog = setTimeout(() => resolve('opening handshake remained pending'), 3000);
+        }),
+      ]);
+      expect(result).toMatchObject({ name: 'NetworkError', message: expect.stringMatching(/handshake/i) });
+      expect(socket.connected).toBe(false);
+    } finally {
+      clearTimeout(watchdog);
+      await socket.disconnect();
+      for (const peer of peers) peer.destroy();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });

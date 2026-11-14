@@ -38,7 +38,7 @@ export interface SocketLogger {
 }
 
 export interface MattermostSocketOptions {
-  /** How long to wait for the server to acknowledge the token. Default 10s. */
+  /** Deadline for each opening handshake and token acknowledgment. Default 10s. */
   authTimeoutMs?: number;
   /** Instance base URL (no trailing slash). */
   baseUrl: string;
@@ -194,6 +194,7 @@ export class MattermostSocket {
           return;
         }
         settled = true;
+        clearTimeout(openTimer);
         if (authTimer) {
           clearTimeout(authTimer);
         }
@@ -204,7 +205,18 @@ export class MattermostSocket {
         }
       };
 
+      // `ws`'s own handshakeTimeout is an idle timeout, so a server that
+      // trickles header bytes could hold the upgrade open forever. This is a
+      // hard deadline from connect to `open`; the auth timer takes over there.
+      const openTimer = setTimeout(() => {
+        this.options.logger.warn('Mattermost WS: opening handshake timed out');
+        settle(networkError('Mattermost WebSocket opening handshake timed out'));
+        this.terminate(socket);
+      }, this.options.authTimeoutMs);
+      openTimer.unref?.();
+
       socket.on('open', () => {
+        clearTimeout(openTimer);
         authSeq = this.seq;
         this.authenticate();
         authTimer = setTimeout(() => {
