@@ -51,6 +51,7 @@ vi.mock('./delivery.js', () => ({
   startSweepDeliveryPoll: vi.fn(),
   setDeliveryAdapter: vi.fn(),
   stopDeliveryPolls: vi.fn(),
+  wrapDeliveryAdapter: (adapter: unknown) => adapter,
 }));
 vi.mock('./host-sweep.js', () => ({ startHostSweep: vi.fn(), stopHostSweep: vi.fn() }));
 vi.mock('./host-lifecycle.js', () => ({ startHostModules: vi.fn(), stopHostModules: vi.fn() }));
