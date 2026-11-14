@@ -118,11 +118,14 @@ describe('release-image.sh', () => {
     expect(run(dir)).toBe('');
   });
 
-  it('skips release candidates, which never get an image', () => {
+  it('skips pre-releases, which never get an image', () => {
     const { root, work, bare } = officialRemote();
+    commit(work, 'beta.txt', 'beta\n');
+    git(work, 'tag', '-a', 'v1.3.0-beta.1', '-m', 'beta');
     commit(work, 'next.txt', 'rc\n');
     git(work, 'tag', '-a', 'v1.3.0-rc.1', '-m', 'rc');
-    publish(work, bare, { 'v1.2.0': REF_A });
+    // Listed on purpose: the script must skip them by name, not miss them in the list.
+    publish(work, bare, { 'v1.2.0': REF_A, 'v1.3.0-beta.1': REF_B, 'v1.3.0-rc.1': REF_B });
     git(work, 'push', '-q', bare, '--tags');
     const dir = install(root, bare);
     git(dir, 'checkout', '-q', 'v1.3.0-rc.1');

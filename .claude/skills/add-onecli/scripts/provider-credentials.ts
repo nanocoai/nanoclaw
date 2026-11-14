@@ -1,4 +1,7 @@
+import path from 'node:path';
+
 import { readEnvFile } from '../../../../src/env.js';
+import { recordProviderCredentials } from '../payload/src/gateway-providers/onecli-provider-credentials.js';
 import type {
   GatewayCredentialConnection,
   GatewayCredentialTarget,
@@ -252,6 +255,10 @@ export function createProviderCredentialConnection(
     if (observed === undefined) throw new Error(`Look up the ${target.name} credential before keeping or saving it.`);
     return observed;
   };
+  // Groups running this provider are granted the recorded ids; keeping records too, so a retried login repairs it.
+  const record = async (id: string) => {
+    if (target.provider) await recordProviderCredentials(path.join(root, 'data'), target.provider, [id]);
+  };
   return {
     async find(options) {
       observed = await vault.find(options);
@@ -262,10 +269,12 @@ export function createProviderCredentialConnection(
       const id = require();
       if (id === null) throw new Error(`No stored ${target.name} credential to keep; enter a value.`);
       await vault.keep(id);
+      await record(id);
     },
     async save(value) {
       const id = require();
       observed = await vault.save(encodeOneCliValue(target, value), id);
+      await record(observed);
     },
   };
 }
@@ -279,7 +288,7 @@ export function encodeOneCliValue(target: GatewayCredentialTarget, value: string
   if (typeof value === 'string' || value.profile !== target.oauth.profile) {
     throw new Error(`This connection stores the ${target.oauth.profile} OAuth profile.`);
   }
-  // NanoClaw's pinned OneCLI cannot refresh this record on its own; see
+  // Unattended refresh through the pinned OneCLI is not yet verified; see
   // .claude/skills/add-onecli/references/chatgpt-oauth-refresh.md for the manual procedure.
   return JSON.stringify({
     tokens: {

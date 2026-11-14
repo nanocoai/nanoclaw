@@ -225,13 +225,13 @@ export function rotateClaudeContinuation(
 
   try {
     const size = fs.statSync(transcriptPath).size;
-    let firstLine = '';
+    let firstDatedLine = '';
     try {
-      firstLine = readFirstLine(transcriptPath);
+      firstDatedLine = readFirstDatedLine(transcriptPath);
     } catch {
       // Size-only rotation must survive an unreadable first entry.
     }
-    const decision = decideContinuationRotation({ size, firstLine }, fx);
+    const decision = decideContinuationRotation({ size, firstDatedLine }, fx);
     if (!decision?.reason) return null;
 
     archiveClaudeTranscript(
@@ -255,7 +255,7 @@ export function rotateClaudeContinuation(
 }
 
 function decideContinuationRotation(
-  input: { size: number; firstLine: string },
+  input: { size: number; firstDatedLine: string },
   fx: ClaudeHistoryClock,
 ): ClaudeContinuationRotationDecision | null {
   const maxBytes = Number(process.env.CLAUDE_TRANSCRIPT_ROTATE_BYTES) || 12 * 1024 * 1024;
@@ -264,7 +264,7 @@ function decideContinuationRotation(
   const maxAgeMs = !Number.isFinite(days) ? 14 * 86_400_000 : days > 0 ? days * 86_400_000 : Infinity;
   let startMs: number | null = null;
   try {
-    const timestamp = JSON.parse(input.firstLine)?.timestamp;
+    const timestamp = JSON.parse(input.firstDatedLine)?.timestamp;
     const parsed = timestamp ? Date.parse(timestamp) : NaN;
     if (!Number.isNaN(parsed)) startMs = parsed;
   } catch {
@@ -299,12 +299,21 @@ function findContinuationFile(root: string, fileName: string): string | null {
   return null;
 }
 
-function readFirstLine(filePath: string): string {
+// A transcript's age is its first entry that carries a timestamp, not its first line: Claude Code
+// 2.1.321 opens a transcript with a session-owner record that has none.
+function readFirstDatedLine(filePath: string): string {
   const fd = fs.openSync(filePath, 'r');
   try {
-    const buffer = Buffer.alloc(4096);
+    const buffer = Buffer.alloc(64 * 1024);
     const bytes = fs.readSync(fd, buffer, 0, buffer.length, 0);
-    return buffer.toString('utf-8', 0, bytes).split('\n', 1)[0];
+    for (const line of buffer.toString('utf-8', 0, bytes).split('\n')) {
+      try {
+        if (typeof JSON.parse(line)?.timestamp === 'string') return line;
+      } catch {
+        // A line cut off by the read window, or one that is not JSON, dates nothing.
+      }
+    }
+    return '';
   } finally {
     fs.closeSync(fd);
   }

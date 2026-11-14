@@ -11,6 +11,7 @@
  */
 import path from 'path';
 
+import { hostProcessPattern } from '../service.js';
 import type { Inventory, PathItem } from './scan.js';
 
 export interface Decisions {
@@ -84,7 +85,7 @@ export function buildRemovalPlan(inv: Inventory, d: Decisions): RemovalAction[] 
     if (s.pidFile) actions.push({ kind: 'kill-pid', pidFile: s.pidFile });
     actions.push({
       kind: 'pkill-host',
-      pattern: `${inv.projectRoot}/dist/index.js`,
+      pattern: hostProcessPattern(inv.projectRoot),
     });
     // Unconditional (like pkill): the scan may have found zero containers
     // while the still-running host spawned one since.

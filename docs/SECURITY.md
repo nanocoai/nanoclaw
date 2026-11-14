@@ -201,13 +201,20 @@ degrading.
 - **Self-healing:** the gateway is re-attached to the network at every spawn and
   on each host-sweep tick, so an out-of-band detach (e.g. restarting the
   gateway's own stack) recovers automatically.
-- **Fail-fast:** if lockdown is on but the network can't be created or the
-  gateway can't be attached (e.g. the gateway isn't running), nanoclaw
+- **Fail-fast:** if lockdown is on but the network can't be created, a network
+  with that name exists but is not internal, or the gateway can't be attached
+  (e.g. the gateway isn't running), nanoclaw
   **refuses to spawn the agent** and surfaces a clear error — it never silently
   falls back to open egress. Fix the cause (or set
   `NANOCLAW_EGRESS_LOCKDOWN=false`) and retry. The host-sweep re-heal is the
   exception: a heal failure there is logged but not fatal, since already-running
   agents stay on the internal net (no leak) until the gateway returns.
+- **Agents already running:** the setting is read when the host starts. An
+  agent that was running when lockdown was turned on is stopped as the host
+  restarts, and its next turn starts on the locked network. A turn it was in
+  the middle of is retried, as after any other container stop. Turning
+  lockdown off affects only new agents: a container already on the egress
+  network stays there until it restarts.
 
 **Default: egress is open.** Lockdown is **off** unless you opt in; by default
 the agent reaches the gateway over the host-gateway path and outbound traffic is

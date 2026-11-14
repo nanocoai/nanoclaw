@@ -56,8 +56,9 @@ export async function hasInFlightSenderApproval(messagingGroupId: string, sender
   return row !== undefined;
 }
 
-export async function deletePendingSenderApproval(id: string): Promise<void> {
-  await getDb().run('DELETE FROM pending_sender_approvals WHERE id = ?', id);
+/** False when the row was already gone (another response decided it). */
+export async function deletePendingSenderApproval(id: string): Promise<boolean> {
+  return (await getDb().run('DELETE FROM pending_sender_approvals WHERE id = ?', id)).changes > 0;
 }
 
 // ── Decline stamps (decline_notify dedupe) ──

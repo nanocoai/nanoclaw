@@ -54,21 +54,29 @@ export async function hasInFlightChannelApproval(messagingGroupId: string): Prom
   return row !== undefined;
 }
 
+/** False when that request (`createdAt`) is gone: decided, or replaced by a newer one. */
 export async function updatePendingChannelApprovalCard(
   messagingGroupId: string,
+  createdAt: string,
   title: string,
   question: string,
   optionsJson: string,
-): Promise<void> {
-  await getDb().run(
-    'UPDATE pending_channel_approvals SET title = ?, question = ?, options_json = ? WHERE messaging_group_id = ?',
+): Promise<boolean> {
+  const result = await getDb().run(
+    'UPDATE pending_channel_approvals SET title = ?, question = ?, options_json = ? WHERE messaging_group_id = ? AND created_at = ?',
     title,
     question,
     optionsJson,
     messagingGroupId,
+    createdAt,
   );
+  return result.changes > 0;
 }
 
-export async function deletePendingChannelApproval(messagingGroupId: string): Promise<void> {
-  await getDb().run('DELETE FROM pending_channel_approvals WHERE messaging_group_id = ?', messagingGroupId);
+/** False when the row was already gone (another response took it). */
+export async function deletePendingChannelApproval(messagingGroupId: string): Promise<boolean> {
+  return (
+    (await getDb().run('DELETE FROM pending_channel_approvals WHERE messaging_group_id = ?', messagingGroupId))
+      .changes > 0
+  );
 }

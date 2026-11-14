@@ -20,6 +20,7 @@ import { fileURLToPath } from 'url';
 
 import { log } from '../../../../src/log.js';
 import { emitStatus } from '../../../../setup/status.js';
+import { login } from './secret-input.js';
 
 const LOCAL_BIN = path.join(os.homedir(), '.local', 'bin');
 
@@ -441,10 +442,7 @@ export async function run(args: string[]): Promise<void> {
       // secret via `onecli secrets list`), and ONECLI_API_KEY in .env is
       // read by the runtime SDK at request time. Both are needed.
       try {
-        execFileSync('onecli', ['auth', 'login', '--api-key', remoteToken], {
-          stdio: 'ignore',
-          env: childEnv(),
-        });
+        login(remoteToken, childEnv());
       } catch (err) {
         log.warn('onecli auth login failed', { err });
       }

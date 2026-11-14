@@ -115,6 +115,7 @@ named after your project number. So it needs both values. Tell the user:
 In Google Cloud Console, open Google Chat API → Configuration. Make sure "Build this Chat app as a Google Workspace add-on" is checked, and that under Connection settings → Triggers, "Use a common HTTP endpoint URL for all triggers" is selected with a URL ending in /webhook/gchat. Save.
 An existing Chat app that is not an add-on has no such checkbox: it needs Google's "Convert to add-on" steps first (https://developers.google.com/workspace/chat/convert), and that conversion can't be undone.
 Then find the project number: the same page shows a Service Account Email like service-123456789012@gcp-sa-gsuiteaddons.iam.gserviceaccount.com, and the digits in it are your project number.
+NanoClaw's webhook server listens on 127.0.0.1 only, so a tunnel or proxy on this machine works as is. If yours runs on another machine or in Docker on Linux, add `WEBHOOK_HOST=0.0.0.0` to `.env`; it takes effect at the next restart.
 ```
 
 Store both in `.env` (set-if-absent). The URL must match the console exactly,
@@ -190,3 +191,5 @@ If you're in the middle of `/setup`, return to the setup flow now. Otherwise run
 **The app doesn't appear when adding it to a space.** Check the Chat API Configuration page: the app status must be live and its visibility must include your domain or user, and you must be adding it from the same Google Workspace the Cloud project belongs to.
 
 **Everything configured but still silent.** Run `pnpm exec vitest run src/channels/gchat-registration.test.ts` — red means the barrel import or the `@chat-adapter/gchat` install drifted, so re-run the Apply steps. If green, restart the service so it picks up the adapter and `.env`, then watch `logs/nanoclaw.log` for the inbound webhook hit.
+
+**A proxy or tunnel on another machine, or in Docker on Linux, gets connection refused or times out.** The webhook server listens on 127.0.0.1 only. Add `WEBHOOK_HOST=0.0.0.0` to `.env` and restart; `Webhook server started` in `logs/nanoclaw.log` shows the host it bound.

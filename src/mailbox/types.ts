@@ -90,6 +90,8 @@ export interface MailboxTimelineMessage {
 }
 
 /** Host-visible inbound mailbox behavior. Storage layout and lifecycle are implementation-private. */
+export type WakeEvidence = 'woken' | 'chatter' | 'none';
+
 export interface InboundMailbox {
   setRouting(routing: SessionRouting): void;
   replaceDestinations(entries: Destination[]): void;
@@ -106,6 +108,8 @@ export interface InboundMailbox {
   getMostRecentPeerSourceSessionId(peerAgentGroupId: string): string | null;
   /** True once another agent has messaged this session, answered or not. */
   hasMessagesFromOtherAgents(selfAgentGroupId: string): boolean;
+  /** Whether anything woke this session, or it holds only silent chat (echoes ignored). */
+  wakeEvidence(): WakeEvidence;
   insertTask(task: Task): Promise<void>;
   cancelTask(taskId?: string): number;
   pauseTask(taskId: string): number;
