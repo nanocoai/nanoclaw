@@ -492,6 +492,17 @@ has a noticeably higher success rate:
 pnpm exec tsx .claude/skills/add-whatsapp/scripts/wa-qr-browser.ts --clean
 ```
 
+### "WhatsApp closed the connection before linking"
+
+WhatsApp ended the connection before the device was linked, so the step stopped
+at once. The status code in brackets says why: `405` means WhatsApp refused this
+WhatsApp Web version. A requested pairing code leaves credentials behind, so
+clear the auth state before you run the step again:
+
+```bash
+rm -rf store/auth/ && pnpm exec tsx setup/index.ts --step whatsapp-auth -- --method qr
+```
+
 ### "waiting for this message" on reactions
 
 WhatsApp sessions corrupted from rapid restarts. Clear sessions, then restart the

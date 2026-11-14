@@ -18,6 +18,8 @@
  *   WHATSAPP_AUTH                { STATUS: success }          — terminal
  *                                { STATUS: skipped, AUTH_DIR, REASON }
  *                                { STATUS: failed, ERROR: <reason> }
+ *                                  also sent at once, with the status code,
+ *                                  for any close that nothing reconnects (405)
  *
  * STATUS values are kept in the runner's vocabulary (success/skipped/failed)
  * so `spawnStep` recognises them and sets `ok` correctly; WhatsApp-specific
