@@ -45,8 +45,16 @@ every install and fails if the pinned package drifts away from the patch:
 patches/@beeper__chat-adapter-matrix@0.2.0.patch
 ```
 
+The step below skips a package that is already in `package.json`, so a re-run
+over an existing install would leave the adapter unpatched, or on an older
+version the patch doesn't match. The `pnpm add` here does that step's work
+then, moving the adapter to 0.2.0 with the patch. It runs only then: pnpm
+refuses a patch that matches no installed package, so a fresh install gets the
+patch from the step below instead:
+
 ```nc:run effect:refresh
 pnpm pkg set 'pnpm.patchedDependencies[@beeper/chat-adapter-matrix@0.2.0]=patches/@beeper__chat-adapter-matrix@0.2.0.patch'
+if node -e 'const p = require("./package.json"); process.exit(p.dependencies?.["@beeper/chat-adapter-matrix"] || p.devDependencies?.["@beeper/chat-adapter-matrix"] ? 0 : 1)'; then pnpm add @beeper/chat-adapter-matrix@0.2.0; fi
 ```
 
 ### 4. Install the adapter package
@@ -78,7 +86,7 @@ pnpm exec vitest run src/channels/matrix-registration.test.ts
 `matrix-registration.test.ts` imports the real channel barrel and asserts the
 registry contains `matrix`. It goes red if the import line is deleted or drifts,
 if the barrel fails to evaluate, or if `@beeper/chat-adapter-matrix` isn't
-installed (the import throws) — so it also covers the dependency from step 3.
+installed (the import throws) — so it also covers the dependency from step 4.
 
 End-to-end message delivery against a real Matrix homeserver is verified
 manually once the service is running — see Next Steps.

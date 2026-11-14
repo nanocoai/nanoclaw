@@ -51,6 +51,7 @@
     "@beeper/chat-adapter-matrix": {
       "version": "0.2.0",
       "sources": [
+        ".claude/skills/add-matrix/SKILL.md nc:run",
         ".claude/skills/add-matrix/SKILL.md nc:dep"
       ]
     },
@@ -63,6 +64,7 @@
     "@chat-adapter/discord": {
       "version": "4.41.1",
       "sources": [
+        ".claude/skills/add-discord/SKILL.md nc:run",
         ".claude/skills/add-discord/SKILL.md nc:dep"
       ]
     },
