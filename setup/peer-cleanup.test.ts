@@ -412,6 +412,24 @@ describe('cleanupUnhealthyPeers — another name for this checkout', () => {
     expect(fs.existsSync(unit)).toBe(true);
     expect(result.retired).toEqual([]);
   });
+
+  // Setup writes no drop-ins; one may point ExecStart somewhere else.
+  it('leaves a systemd unit with drop-ins alone', () => {
+    const { home, systemDir, projectRoot, entry } = checkout('linux');
+    const unit = path.join(home, '.config', 'systemd', 'user', 'nanoclaw-v2-old.service');
+    fs.mkdirSync(`${unit}.d`, { recursive: true });
+    writeUnit(unit, entry);
+
+    const result = cleanupUnhealthyPeers(projectRoot, systemDir);
+
+    expect(execFileSync).not.toHaveBeenCalledWith(
+      'systemctl',
+      ['--user', 'disable', '--now', 'nanoclaw-v2-old.service'],
+      expect.anything(),
+    );
+    expect(fs.existsSync(unit)).toBe(true);
+    expect(result.retired).toEqual([]);
+  });
 });
 
 // Setup run as root writes its unit to /etc/systemd/system instead of the user dir.
@@ -511,6 +529,21 @@ describe('cleanupUnhealthyPeers — system units for this checkout', () => {
       'An old system unit also starts this checkout. To stop it, run: ' +
         `sudo systemctl disable --now nanoclaw-v2-old.service && sudo rm ${old} && sudo systemctl daemon-reload`,
     ]);
+  });
+
+  it.each([0, 1000])('uid %i leaves a system unit with drop-ins alone', (uid) => {
+    const { systemDir, projectRoot, entry } = rootCheckout(uid);
+    const old = path.join(systemDir, 'nanoclaw-v2-old.service');
+    fs.mkdirSync(`${old}.d`);
+    writeUnit(old, entry);
+    const warn = vi.spyOn(log, 'warn');
+
+    const result = cleanupUnhealthyPeers(projectRoot, systemDir);
+
+    expect(systemCalls()).toEqual([]);
+    expect(fs.existsSync(old)).toBe(true);
+    expect(result.retired).toEqual([]);
+    expect(sudoWarnings(warn)).toEqual([]);
   });
 
   // Dead and unhealthy system units may belong to other installs or users.

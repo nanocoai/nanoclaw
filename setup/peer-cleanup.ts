@@ -377,8 +377,12 @@ function launchdStartsEntry(plistPath: string, entry: string): boolean {
   return readConfig(plistPath)?.includes(`<string>${entry}</string>`) ?? false;
 }
 
-/** ExecStart=<nodePath> <entry>; the leading space keeps the match exact. */
+/**
+ * ExecStart=<nodePath> <entry>; the leading space keeps the match exact. Setup
+ * writes no drop-ins, and one could point ExecStart elsewhere, so they rule it out.
+ */
 function systemdStartsEntry(unitPath: string, entry: string): boolean {
+  if (fs.existsSync(`${unitPath}.d`)) return false;
   return (readConfig(unitPath) ?? '')
     .split('\n')
     .some((line) => line.startsWith('ExecStart=') && line.trimEnd().endsWith(` ${entry}`));
