@@ -350,13 +350,9 @@ it('keeps the real reason for an apply failure, one line and with secrets redact
     },
     sleep: async () => {},
     install: async () => {
-      await failInstall(
-        'slack-install',
-        'Resolve your DM channel',
-        'prose',
-        undefined,
-        'exit 127: curl -H "Authorization: Bearer xoxb-delivered-test-only" | jq: command not found',
-      );
+      await failInstall('slack-install', 'Resolve your DM channel', 'prose', {
+        detail: 'exit 127: curl -H "Authorization: Bearer xoxb-delivered-test-only" | jq: command not found',
+      });
     },
   });
   const saved = await readSlackJob(root);

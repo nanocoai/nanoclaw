@@ -157,6 +157,7 @@ describe('container step: sudo up front', () => {
       'container',
       `Couldn't get sudo access to ${task}.`,
       `Run setup again and enter your Linux password, or ${diy}.`,
+      { code: 'sudo_refused' },
     );
     expect(fixture.runWindowedStep).not.toHaveBeenCalled();
   });
@@ -177,6 +178,7 @@ describe('container step: docker group not active', () => {
       'container',
       "Docker was just installed but your shell doesn't know yet.",
       'Log out and back in (or run `newgrp docker` in a new shell), then retry.',
+      { code: 'docker_group_not_active' },
     );
   });
 
@@ -187,6 +189,7 @@ describe('container step: docker group not active', () => {
       'container',
       "Docker was just installed but your shell doesn't know yet.",
       'Close Ubuntu, run `wsl --shutdown` in PowerShell, then reopen Ubuntu, go back to the NanoClaw folder and run `bash nanoclaw.sh`.',
+      { code: 'docker_group_not_active' },
     );
   });
 
@@ -198,6 +201,7 @@ describe('container step: docker group not active', () => {
       'container',
       expect.any(String),
       'Close Debian, run `wsl --shutdown` in PowerShell, then reopen Debian, go back to the NanoClaw folder and run `bash nanoclaw.sh`.',
+      { code: 'docker_group_not_active' },
     );
   });
 });

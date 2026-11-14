@@ -4,11 +4,12 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { runChannelSkill } from './run-channel-skill.js';
+import { bounceReasonCode, runChannelSkill } from './run-channel-skill.js';
 import { runSkill } from '../lib/skill-driver.js';
 import { fullyApplied } from '../../scripts/skill-apply.js';
 import { parseDirectives } from '../../scripts/skill-directives.js';
 import { BACK_TO_CHANNEL_SELECTION, backGate } from '../lib/back-nav.js';
+import type { FailOptions } from '../lib/runner.js';
 
 // Drive the first-prompt back gate (back-nav's brightSelect) from a queue
 // instead of opening a real TTY select. Hoisted so the vi.mock factory — which
@@ -527,9 +528,9 @@ describe('runChannelSkill adapter (Option A)', () => {
     );
     process.chdir(root);
 
-    const failCalls: Array<{ step: string; msg: string; hint?: string; detail?: string }> = [];
-    const fakeFail = (step: string, msg: string, hint?: string, _raw?: string, detail?: string): Promise<never> => {
-      failCalls.push({ step, msg, hint, detail });
+    const failCalls: Array<{ step: string; msg: string; hint?: string; opts?: FailOptions }> = [];
+    const fakeFail = (step: string, msg: string, hint?: string, opts?: FailOptions): Promise<never> => {
+      failCalls.push({ step, msg, hint, opts });
       // The real fail() process.exits and never returns; emulate that by aborting
       // the flow so control doesn't fall through to the resolve/wire steps.
       return Promise.reject(new Error('__failed__'));
@@ -555,8 +556,18 @@ describe('runChannelSkill adapter (Option A)', () => {
     expect(failCalls[0].hint).toContain('Open the Faily dashboard'); // prose → hint
     expect(failCalls[0].hint).not.toBe('See logs/setup-steps/ for details, then retry setup.'); // not the generic
     // The first line of the bounce reason rides along for callers with no terminal.
-    expect(failCalls[0].detail).toMatch(/\S/);
-    expect(failCalls[0].detail).not.toContain('\n');
+    expect(failCalls[0].opts?.detail).toMatch(/\S/);
+    expect(failCalls[0].opts?.detail).not.toContain('\n');
+    // nc:hand-wire is a custom kind the engine does not handle: diagnostics get
+    // a fixed code and the line, never the kind, headline or prose.
+    expect(failCalls[0].opts?.code).toBe('unknown_directive:L5');
+  });
+
+  it('reports known directive kinds and hides custom ones', () => {
+    const task = (kind: string, line: number) => ({ kind, line, reason: 'exit 1: boom', prose: '' });
+    expect(bounceReasonCode(task('run', 12))).toBe('run:L12');
+    expect(bounceReasonCode(task('acme-internal-webhook', 7))).toBe('unknown_directive:L7');
+    expect(bounceReasonCode(undefined)).toBe('deferred');
   });
 });
 

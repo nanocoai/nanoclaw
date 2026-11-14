@@ -10,6 +10,7 @@ import {
   withSetupLock,
   type SlackJob,
 } from '../src/community-portal/slack-job.js';
+import type { FailOptions } from './lib/runner.js';
 
 type Delivery = { status?: string; bot_token?: string; delivery_id?: string };
 export interface WorkerDependencies {
@@ -41,14 +42,8 @@ async function receive(job: SlackJob, body: object): Promise<Delivery> {
   return response.json() as Promise<Delivery>;
 }
 /** No terminal sees this failure, so the error carries the bounce headline and its first reason line. */
-export async function failInstall(
-  _step: string,
-  msg: string,
-  _hint?: string,
-  _rawLog?: string,
-  detail?: string,
-): Promise<never> {
-  throw new Error(detail ? `${msg}: ${detail}` : msg);
+export async function failInstall(_step: string, msg: string, _hint?: string, opts: FailOptions = {}): Promise<never> {
+  throw new Error(opts.detail ? `${msg}: ${opts.detail}` : msg);
 }
 async function install(job: SlackJob): Promise<void> {
   const { runChannelSkill } = await import('./channels/run-channel-skill.js');

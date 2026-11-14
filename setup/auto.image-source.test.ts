@@ -84,7 +84,9 @@ async function runWizardUntilExit(): Promise<void> {
   }) as typeof process.exit);
   await import('./auto.js');
   await exited;
-  expect(fixture.fail).toHaveBeenCalledWith('cli-agent', expect.any(String), expect.any(String));
+  expect(fixture.fail).toHaveBeenCalledWith('cli-agent', expect.any(String), expect.any(String), {
+    code: 'step_failed',
+  });
 }
 
 it('does not re-offer Echo on a re-entered run once the sandbox-image question has an answer in .env', async () => {

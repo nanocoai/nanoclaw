@@ -110,6 +110,7 @@ describe('setup wizard provider authentication failures', () => {
         'auth',
         "Couldn't authenticate or verify opencode.",
         `${callback} failed`,
+        { code: 'auth_failed' },
       );
       expect(fixture.upsertEnvVar).not.toHaveBeenCalled();
       expect(process.exit).toHaveBeenCalledWith(1);
@@ -154,6 +155,7 @@ describe('setup wizard interactive provider choice', () => {
         'auth',
         "Couldn't authenticate or verify opencode.",
         'authentication boundary',
+        { code: 'auth_failed' },
       );
       expect(fixture.upsertEnvVar).not.toHaveBeenCalled();
     },
@@ -179,7 +181,10 @@ describe('setup wizard interactive provider choice', () => {
       }),
     );
     expect(fixture.applyProviderSkill).toHaveBeenCalledWith('.claude/skills/add-opencode', process.cwd());
-    expect(fixture.fail).toHaveBeenCalledWith('add-opencode', "Couldn't install opencode.", 'installation boundary');
+    expect(fixture.fail).toHaveBeenCalledWith('add-opencode', "Couldn't install opencode.", 'installation boundary', {
+      code: 'install_error',
+      diagnosticStep: 'add-opencode',
+    });
     expect(fixture.runAuth).not.toHaveBeenCalled();
     expect(fixture.upsertEnvVar).not.toHaveBeenCalled();
   });
