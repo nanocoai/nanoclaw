@@ -401,7 +401,7 @@ export function wakeContainer(session: Session): Promise<boolean> {
         return current?.status === 'active' ? wakeContainer(current) : false;
       })
       .catch((err: unknown) => {
-        log.warn('wakeContainer failed — host-sweep will retry', { sessionId: session.id, err });
+        logWakeFailure(session.id, err);
         return false;
       });
   }
@@ -416,8 +416,8 @@ export function wakeContainer(session: Session): Promise<boolean> {
   }
   const promise = spawnContainer(session)
     .then(() => true)
-    .catch((err) => {
-      log.warn('wakeContainer failed — host-sweep will retry', { sessionId: session.id, err });
+    .catch((err: unknown) => {
+      logWakeFailure(session.id, err);
       return false;
     })
     .finally(() => {
@@ -425,6 +425,23 @@ export function wakeContainer(session: Session): Promise<boolean> {
     });
   wakePromises.set(session.id, promise);
   return promise;
+}
+
+/**
+ * A spec the driver refuses fails identically on every sweep retry, so it is
+ * logged as an error naming the cause, not as a transient retry warning.
+ */
+function logWakeFailure(sessionId: string, err: unknown): void {
+  const failure = err as { kind?: unknown; detail?: unknown } | null;
+  if (failure?.kind === 'denied-by-policy' || failure?.kind === 'spec-invalid') {
+    log.error('Container start refused — every retry will fail the same way until the cause is fixed', {
+      sessionId,
+      kind: failure.kind,
+      detail: failure.detail,
+    });
+    return;
+  }
+  log.warn('wakeContainer failed — host-sweep will retry', { sessionId, err });
 }
 
 async function spawnContainer(session: Session): Promise<void> {

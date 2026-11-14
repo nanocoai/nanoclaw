@@ -10,6 +10,8 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { MOUNT_ALLOWLIST_PATH } from '../../config.js';
+import { mountPolicy } from '../../drivers/index.js';
+import { classRequiredByPath, type MountPolicy } from '../../drivers/types.js';
 import { log } from '../../log.js';
 
 export interface AdditionalMount {
@@ -248,6 +250,29 @@ function matchesBlockedPattern(realPath: string, blockedPatterns: string[]): str
 }
 
 /**
+ * Why a host path cannot be an additional mount, or null. The driver pins these
+ * roots to their own class, and an additional mount is `allowlisted-extra`, so it
+ * would refuse every start. Roots are matched as given and resolved: the policy
+ * spells the install as the service sees it, callers pass a resolved path.
+ */
+export function protectedMountReason(hostPath: string, policy: MountPolicy = mountPolicy()): string | null {
+  const real = (p: string) => getRealPath(p) ?? p;
+  const resolved: MountPolicy = {
+    ...policy,
+    surfaceRoots: policy.surfaceRoots.map(real),
+    materialsRoot: real(policy.materialsRoot),
+    gatewayTrustRoot: real(policy.gatewayTrustRoot),
+  };
+  const target = getRealPath(expandPath(hostPath)) ?? expandPath(hostPath);
+  const required = classRequiredByPath(target, policy) ?? classRequiredByPath(target, resolved);
+  if (!required) return null;
+  return (
+    `"${target}" is a path NanoClaw mounts itself (${required}); ` +
+    'it cannot be an additional mount, or the container driver refuses every start of this group'
+  );
+}
+
+/**
  * Check if a real path is under an allowed root
  */
 function findAllowedRoot(realPath: string, allowedRoots: AllowedRoot[]): AllowedRoot | null {
@@ -309,7 +334,7 @@ export interface MountValidationResult {
  * Validate a single additional mount against the allowlist.
  * Returns validation result with reason.
  */
-export function validateMount(mount: AdditionalMount): MountValidationResult {
+export function validateMount(mount: AdditionalMount, policy?: MountPolicy): MountValidationResult {
   const allowlist = loadMountAllowlist();
 
   // If no allowlist, block all additional mounts
@@ -340,6 +365,11 @@ export function validateMount(mount: AdditionalMount): MountValidationResult {
       allowed: false,
       reason: `Host path does not exist: "${mount.hostPath}" (expanded: "${expandedPath}")`,
     };
+  }
+
+  const protectedReason = protectedMountReason(realPath, policy);
+  if (protectedReason !== null) {
+    return { allowed: false, reason: protectedReason };
   }
 
   // Check against blocked patterns

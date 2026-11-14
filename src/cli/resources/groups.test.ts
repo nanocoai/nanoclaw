@@ -13,6 +13,7 @@
  */
 import Database from 'better-sqlite3';
 import fs from 'fs';
+import path from 'path';
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 
 vi.mock('../../container-runner.js', () => ({
@@ -438,6 +439,25 @@ describe('groups config (host-only)', () => {
       { caller: 'host' },
     );
     expect(rm.ok).toBe(true);
+    expect(JSON.parse((await getContainerConfig(GID))!.additional_mounts)).toEqual([]);
+  });
+
+  it('refuses to add a mount of a path NanoClaw mounts itself, naming why', async () => {
+    // Stored, it would pass the old mount check and then make the driver refuse
+    // every start of the group, silently.
+    const GID = 'ag-mount-protected';
+    await createAgentGroup({ id: GID, name: 'p', folder: 'p', agent_provider: null, created_at: now() });
+    await ensureContainerConfig(GID);
+    const resp = await dispatch(
+      {
+        id: 'r-protected',
+        command: 'groups-config-add-mount',
+        args: { id: GID, host: path.join(process.cwd(), 'container', 'agent-runner', 'src'), container: 'runner' },
+      },
+      { caller: 'host' },
+    );
+    expect(resp.ok).toBe(false);
+    expect((resp as { ok: false; error: { message: string } }).error.message).toMatch(/install-surface/);
     expect(JSON.parse((await getContainerConfig(GID))!.additional_mounts)).toEqual([]);
   });
 

@@ -23,6 +23,7 @@ import {
 import { getSessionDriver } from '../../drivers/index.js';
 import { assertValidGroupFolder, groupFolderExistsOnDisk } from '../../group-folder.js';
 import { initGroupFilesystem } from '../../group-init.js';
+import { protectedMountReason } from '../../modules/mount-security/index.js';
 import { getProviderHostContract } from '../../provider-contracts/registry.js';
 import { resolveProviderName } from '../../providers/provider-name.js';
 import { createAgentFromTemplate } from '../../templates/create-agent.js';
@@ -632,6 +633,10 @@ registerResource({
         const hostPath = (args.host ?? args['host-path']) as string | undefined;
         const containerPath = (args.container ?? args['container-path']) as string | undefined;
         if (!hostPath || !containerPath) throw new Error('Provide --host <host-path> and --container <container-path>');
+
+        // Stored, it would make the driver refuse every start of the group.
+        const protectedReason = protectedMountReason(hostPath);
+        if (protectedReason) throw new Error(protectedReason);
 
         const row = await getContainerConfig(id);
         if (!row) throw new Error(`No container config for group: ${id}`);
