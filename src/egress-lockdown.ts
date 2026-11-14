@@ -9,7 +9,7 @@
  */
 import { execFileSync } from 'child_process';
 
-import { EGRESS_LOCKDOWN, EGRESS_NETWORK } from './config.js';
+import { EGRESS_LOCKDOWN, EGRESS_NETWORK, ENV_FILE_UNREADABLE } from './config.js';
 import { CONTAINER_RUNTIME_BIN } from './container-runtime.js';
 import type { NetworkAccessIntent } from './drivers/types.js';
 import { log } from './log.js';
@@ -26,6 +26,21 @@ export class EgressLockdownError extends Error {
   constructor(reason: string) {
     super(`Egress lockdown is on (NANOCLAW_EGRESS_LOCKDOWN=true) but ${reason}. Refusing to spawn with open egress.`);
     this.name = 'EgressLockdownError';
+  }
+}
+
+/**
+ * Raised when `.env` exists but cannot be read, so the operator's egress
+ * setting is unknown. Falling back to the default (off) would spawn an agent
+ * with open egress; refuse instead.
+ */
+export class EgressPolicyUnknownError extends Error {
+  constructor(reason: string) {
+    super(
+      `Refusing to spawn: ${reason}. The egress policy cannot be determined from .env; ` +
+        'fix the file permissions or remove the file.',
+    );
+    this.name = 'EgressPolicyUnknownError';
   }
 }
 
@@ -84,6 +99,9 @@ function gatewayAttached(identity: string): boolean {
  * spawn an agent with open egress.
  */
 export function ensureEgressNetwork(access = selectedAccess): boolean {
+  if (ENV_FILE_UNREADABLE) {
+    throw new EgressPolicyUnknownError('the .env file exists but cannot be read');
+  }
   if (!EGRESS_LOCKDOWN) return false;
   if (!access) return false;
   selectedAccess = access;

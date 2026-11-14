@@ -17,7 +17,7 @@ vi.mock('child_process', async (importOriginal) => ({
   ...(await importOriginal<typeof import('child_process')>()),
   execFileSync: state.execFileSync,
 }));
-vi.mock('./config.js', () => ({ EGRESS_LOCKDOWN: true, EGRESS_NETWORK: 'fixture-egress' }));
+vi.mock('./config.js', () => ({ EGRESS_LOCKDOWN: true, EGRESS_NETWORK: 'fixture-egress', ENV_FILE_UNREADABLE: false }));
 vi.mock('./container-runtime.js', () => ({ CONTAINER_RUNTIME_BIN: 'docker' }));
 // Every level, for the same reason the child_process mock is partial: the
 // gateway barrel imports the installed provider, whose module-scope work can
