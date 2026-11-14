@@ -616,11 +616,8 @@ describe('derived provider spawn surfaces', () => {
     expect(legacyOverlay).toHaveBeenCalledOnce();
   });
 
-  it('refuses a FIFO planted at an append-open-close file without blocking', () => {
-    const sessionDirectory = path.join(DATA_DIR, 'v2-sessions', 'fifo-session');
-    fs.mkdirSync(path.join(sessionDirectory, '.state'), { recursive: true });
-    execFileSync('mkfifo', [path.join(sessionDirectory, '.state', 'auth.json')]);
-    const contract: ProviderHostContract = {
+  function appendOpenCloseContract(): ProviderHostContract {
+    return {
       ...backingContract(),
       stateVolumes: [
         {
@@ -641,6 +638,19 @@ describe('derived provider spawn surfaces', () => {
         },
       ],
     };
+  }
+
+  /** The refusal must name the file and say how to clear it. */
+  function notRegularFileMessage(file: string): RegExp {
+    const escaped = file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`${escaped} is not a regular file.*remove it`);
+  }
+
+  it('refuses a FIFO planted at an append-open-close file without blocking', () => {
+    const sessionDirectory = path.join(DATA_DIR, 'v2-sessions', 'fifo-session');
+    const fifo = path.join(sessionDirectory, '.state', 'auth.json');
+    fs.mkdirSync(path.dirname(fifo), { recursive: true });
+    execFileSync('mkfifo', [fifo]);
     // Run in a child with a timeout: a blocking open would hang this worker
     // instead of failing the test.
     const source = `
@@ -653,7 +663,7 @@ describe('derived provider spawn surfaces', () => {
         });
         console.log('outcome=resolved');
       } catch (err) {
-        console.log('outcome=' + err.code);
+        console.log('outcome=' + err.message);
       }
     `;
     const result = spawnSync(
@@ -664,7 +674,7 @@ describe('derived provider spawn surfaces', () => {
         '--input-type=module',
         '--eval',
         source,
-        JSON.stringify(contract),
+        JSON.stringify(appendOpenCloseContract()),
         path.join(GROUPS_DIR, 'fifo-group'),
         sessionDirectory,
       ],
@@ -672,8 +682,55 @@ describe('derived provider spawn surfaces', () => {
     );
     expect(result.signal, 'prepareSpawnFile blocked on a FIFO').toBeNull();
     expect(result.status, result.stderr).toBe(0);
-    expect(result.stdout).toContain('outcome=ENXIO');
+    expect(result.stdout).toMatch(notRegularFileMessage(fifo));
   }, 30_000);
+
+  it('refuses a FIFO at an append-open-close file even while something reads it', async () => {
+    const sessionDirectory = path.join(DATA_DIR, 'v2-sessions', 'read-fifo-session');
+    const fifo = path.join(sessionDirectory, '.state', 'auth.json');
+    fs.mkdirSync(path.dirname(fifo), { recursive: true });
+    execFileSync('mkfifo', [fifo]);
+    // With a reader present the host's write-open returns at once, so this
+    // runs in-process; only the regular-file check can refuse the FIFO.
+    const reader = fs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+    try {
+      await expect(
+        realizeProviderSpawnSurfaces(
+          'fifo',
+          appendOpenCloseContract(),
+          'fifo-group',
+          path.join(GROUPS_DIR, 'fifo-group'),
+          sessionDirectory,
+          [],
+          { legacyOverlay: async () => ({}), composeProjectDocument: async () => {} },
+        ),
+      ).rejects.toThrow(notRegularFileMessage(fifo));
+    } finally {
+      fs.closeSync(reader);
+    }
+  });
+
+  it('names a symlink planted at an append-open-close file and leaves its target alone', async () => {
+    const sessionDirectory = path.join(DATA_DIR, 'v2-sessions', 'link-session');
+    const link = path.join(sessionDirectory, '.state', 'auth.json');
+    const victim = path.join(TEST_ROOT, 'victim-auth.json');
+    fs.mkdirSync(path.dirname(link), { recursive: true });
+    fs.writeFileSync(victim, 'precious\n');
+    fs.symlinkSync(victim, link);
+
+    await expect(
+      realizeProviderSpawnSurfaces(
+        'link',
+        appendOpenCloseContract(),
+        'link-group',
+        path.join(GROUPS_DIR, 'link-group'),
+        sessionDirectory,
+        [],
+        { legacyOverlay: async () => ({}), composeProjectDocument: async () => {} },
+      ),
+    ).rejects.toThrow(notRegularFileMessage(link));
+    expect(fs.readFileSync(victim, 'utf-8')).toBe('precious\n');
+  });
 
   it('ignores declared legacy callback mounts while retaining env', async () => {
     const realized = await realizeProviderSpawnSurfaces(
