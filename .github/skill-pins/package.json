@@ -51,6 +51,7 @@
     "@beeper/chat-adapter-matrix": {
       "version": "0.2.0",
       "sources": [
+        ".claude/skills/add-matrix/SKILL.md nc:run",
         ".claude/skills/add-matrix/SKILL.md nc:dep"
       ]
     },
