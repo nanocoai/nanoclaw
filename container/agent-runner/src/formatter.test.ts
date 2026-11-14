@@ -154,6 +154,21 @@ describe('structured chat links', () => {
   });
 });
 
+describe('staged attachments', () => {
+  it('shows the host-staged path, not one rebuilt from the message id', () => {
+    const folder = '~spaces-AAA-messages-BBB.BBB-ag-1-0123456789abcdef';
+    insertMessage('spaces/AAA/messages/BBB.BBB:ag-1', 'chat-sdk', {
+      sender: 'Joel',
+      text: 'look',
+      attachments: [{ type: 'image', name: 'photo.png', localPath: `inbox/${folder}/photo.png` }],
+    });
+
+    const result = formatMessages(getPendingMessages());
+
+    expect(result).toContain(`[image: photo.png — saved to /workspace/inbox/${folder}/photo.png]`);
+  });
+});
+
 describe('timestamp formatting', () => {
   it('renders time via formatLocalTime (user TZ)', () => {
     // 2026-06-15T12:00:00Z — timezone-agnostic assertions (year is stable)

@@ -25,7 +25,6 @@ import {
   mapCronToRecurrence,
   maskCredential,
   resolveSecretInput,
-  vaultCreateCommand,
   type OpenClawSchedule,
 } from './transform.js';
 
@@ -119,15 +118,6 @@ describe('classifyCredential — vault vs .env routing', () => {
 
   it('returns null for unknown credential kinds', () => {
     expect(classifyCredential('nonexistent')).toBeNull();
-  });
-});
-
-describe('vaultCreateCommand', () => {
-  it('renders the onecli secrets create command for a vault plan', () => {
-    const plan = { name: 'Anthropic', type: 'anthropic' as const, hostPattern: 'api.anthropic.com' };
-    expect(vaultCreateCommand(plan, 'sk-ant-xyz')).toBe(
-      'onecli secrets create --name Anthropic --type anthropic --value sk-ant-xyz --host-pattern api.anthropic.com',
-    );
   });
 });
 

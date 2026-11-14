@@ -121,7 +121,7 @@ Paste the OAuth Client ID — Linear Settings > API > OAuth Applications. Paste 
 Paste the OAuth Client Secret. Paste `none` if using a Personal API key instead.
 ```
 ```nc:prompt linear_webhook_secret secret
-Paste the webhook signing secret from the webhook you just created.
+Paste the webhook signing secret from the webhook you just created. NanoClaw's webhook server listens on 127.0.0.1 only; if the proxy or tunnel serving that URL runs on another machine or in Docker on Linux, add `WEBHOOK_HOST=0.0.0.0` to `.env` (it takes effect at the next restart).
 ```
 ```nc:prompt linear_team_key
 Enter the Linear team key (e.g. `ENG`, `NAN`) — Settings > Teams.
@@ -206,3 +206,5 @@ systemctl --user restart $(systemd_unit)              # Linux
 **Sender-policy answer rejected, or issues route nowhere.** The policy must be exactly `public` or `strict` (lowercase), and `LINEAR_TEAM_KEY` must be the short team key (e.g. `ENG`) from Settings → Teams — all issues in that one team route to the messaging group.
 
 **Wired but dead.** Run `pnpm exec vitest run src/channels/linear-registration.test.ts` — red means the barrel import or the `@chat-adapter/linear` install drifted, so re-run the Apply steps. If green, restart the service (see Next Steps) so the adapter and `.env` values are live.
+
+**A proxy or tunnel on another machine, or in Docker on Linux, gets connection refused or times out.** The webhook server listens on 127.0.0.1 only. Add `WEBHOOK_HOST=0.0.0.0` to `.env` and restart; `Webhook server started` in `logs/nanoclaw.log` shows the host it bound.

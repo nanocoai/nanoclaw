@@ -92,7 +92,8 @@ git archive "$upstream_ref" scripts src/install-slug.ts | tar -x -C "$controller
 
 Channels (`NANOCLAW_UPDATE_CHANNEL` in `.env`; `--channel <name>` overrides it
 once): `stable` (default) = newest annotated `vX.Y.Z` tag; `beta` = newest
-`-rc.N` if newer than stable; `edge` = upstream `main`. Change the default only
+`-beta.N` or `-rc.N` if newer than stable (beta.N < rc.N < the release);
+`edge` = upstream `main`. Change the default only
 with `set-channel` (below), never by editing `.env`.
 
 Default to `merge`. Use `rebase` only when the user explicitly wants linear
@@ -130,6 +131,17 @@ commit it, then run:
 pnpm exec tsx "$controller_dir/scripts/update-nanoclaw.ts" resume \
   --project-root "$PWD" --id "$id"
 ```
+
+Never merge a lockfile (`pnpm-lock.yaml`, `container/agent-runner/bun.lock`)
+by hand. With `merge`, `prepare` regenerates them itself when they are the only
+conflicts (listed under `regeneratedLockfiles`): it starts from upstream's
+lockfile, so a version pinned only in the local lockfile, not in
+`package.json`, becomes upstream's. Tell the user. If other files conflict too,
+resolve and `git add` those, leave the lockfiles alone, and run `resume`
+without committing: it regenerates the lockfiles and commits the merge. With
+`rebase` or `cherry-pick`, check out upstream's copy (`--ours` during a rebase,
+`--theirs` in a cherry-pick), run `pnpm install --lockfile-only` (or
+`bun install --lockfile-only` in `container/agent-runner`), and add it.
 
 Run every transaction command from `$controller_dir`, not from `stageRoot`: a
 cherry-pick stage can still hold the old controller. If `$controller_dir` is

@@ -232,22 +232,23 @@ One pair, same facts, the shape is the difference.
 
 Hard to review:
 
-> The host sweep's ABSOLUTE_CEILING_MS was a hardcoded 30 minutes, so a slow
-> local-model backend that legitimately spends longer decoding one turn gets
-> cold-killed mid-turn, and this change makes the ceiling configurable by
-> resolving it per group from the new turn_ceiling_ms column added by
-> migration 024, falling back to the NANOCLAW_TURN_CEILING_MS env var and
-> then the built-in default, while invalid values fall through a level and
-> values below 60s are refused and a declared Bash timeout still extends
-> whatever ceiling wins.
+> The host sweep's ABSOLUTE_CEILING_MS (30 minutes) and CLAIM_STUCK_MS (60
+> seconds) were hard-coded, so a slow local model got killed mid-turn with
+> no way to raise either, and this change adds the global env overrides
+> NANOCLAW_ABSOLUTE_CEILING_MS and NANOCLAW_CLAIM_STUCK_MS, read from the
+> process env or .env at host start, while a value that is not a whole
+> number of milliseconds or falls outside 60 s to 24 h for the ceiling or
+> 10 s to 24 h for the claim timer logs one warning and keeps the default,
+> and a declared Bash timeout still extends both timers.
 
 Easy to review:
 
-> **Problem**: `ABSOLUTE_CEILING_MS` is a hardcoded 30 minutes — slow
-> local-model turns get cold-killed mid-decode.
+> **Problem**: `ABSOLUTE_CEILING_MS` (30 min) and `CLAIM_STUCK_MS` (60 s) are
+> hard-coded. A slow local model gets killed mid-turn.
 >
-> **Fix**: ceiling resolved per group: (1) `turn_ceiling_ms` (migration 024),
-> (2) `NANOCLAW_TURN_CEILING_MS`, (3) the unchanged 30-minute default.
+> **Fix**: one global env override each, `NANOCLAW_ABSOLUTE_CEILING_MS` and
+> `NANOCLAW_CLAIM_STUCK_MS`, read from the process env or `.env` at host start.
 >
-> **Guardrails**: invalid values fall through a level; sub-60s refused; a
-> declared Bash timeout still extends whatever ceiling wins.
+> **Fallback**: a value that is not a whole number of ms, or is outside 60 s
+> to 24 h (ceiling) or 10 s to 24 h (claim), logs one warning and keeps the
+> default. A declared Bash timeout still extends both timers.

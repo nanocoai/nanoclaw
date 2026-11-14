@@ -12,6 +12,12 @@ import { getInstallSlug } from '../../../../src/install-slug.js';
 import { upsertEnvVar } from '../../../../setup/set-env.js';
 import { configureCredential, statePaths } from './setup.js';
 import { assertCredentialIsolation, ironHeaderName } from './credential-isolation.js';
+import {
+  anthropicCredentialError,
+  anthropicCredentialPrompt,
+  isAnthropicOAuthToken,
+  pastedCredential,
+} from '../../../../setup/lib/anthropic-credential.js';
 
 type Method = 'subscription' | 'oauth' | 'api' | 'skip';
 
@@ -33,7 +39,7 @@ export function suppliedCredential(
   if (token) return { secret: token, authEnv: 'CLAUDE_CODE_OAUTH_TOKEN' };
   const key = (env.NANOCLAW_ANTHROPIC_API_KEY || env.ANTHROPIC_API_KEY)?.trim();
   if (!key) return undefined;
-  return { secret: key, authEnv: key.startsWith('sk-ant-oat') ? 'CLAUDE_CODE_OAUTH_TOKEN' : 'ANTHROPIC_API_KEY' };
+  return { secret: key, authEnv: isAnthropicOAuthToken(key) ? 'CLAUDE_CODE_OAUTH_TOKEN' : 'ANTHROPIC_API_KEY' };
 }
 
 export async function existingCredential(root = process.cwd()): Promise<boolean> {
@@ -109,7 +115,7 @@ function capturedSubscriptionToken(): string {
     const result = spawnSync('bash', [script, output], { stdio: 'inherit' });
     if (result.status !== 0 || !fs.existsSync(output)) throw new Error('Claude subscription sign-in failed');
     const token = fs.readFileSync(output, 'utf8').trim();
-    if (!token.startsWith('sk-ant-oat')) throw new Error('Claude subscription sign-in returned an invalid token');
+    if (!isAnthropicOAuthToken(token)) throw new Error('Claude subscription sign-in returned an invalid token');
     return token;
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -171,21 +177,20 @@ export async function run(agentProvider = process.argv[2] || 'claude', root = pr
   const secret =
     method === 'subscription'
       ? capturedSubscriptionToken()
-      : answer<string>(
-          await p.password({
-            message: method === 'oauth' ? 'Paste your OAuth token' : 'Paste your API key',
-            clearOnError: true,
-            validate: (raw) => {
-              const value = (raw ?? '').replace(/\s+/g, '');
-              const prefix = method === 'oauth' ? 'sk-ant-oat' : 'sk-ant-api';
-              return value.startsWith(prefix) ? undefined : `Must start with ${prefix}`;
-            },
-          }),
-        ).replace(/\s+/g, '');
+      : pastedCredential(
+          answer<string>(
+            await p.password({
+              message: anthropicCredentialPrompt(method),
+              clearOnError: true,
+              validate: (raw) => anthropicCredentialError(method, raw),
+            }),
+          ),
+        );
   await configureCredential(
     {
       secret,
-      authEnv: method === 'api' ? 'ANTHROPIC_API_KEY' : 'CLAUDE_CODE_OAUTH_TOKEN',
+      // The value decides, as in suppliedCredential: the API-key prompt also takes an OAuth token.
+      authEnv: isAnthropicOAuthToken(secret) ? 'CLAUDE_CODE_OAUTH_TOKEN' : 'ANTHROPIC_API_KEY',
       modelHost: new URL(getProviderModelEndpoint('claude', 'api')).hostname,
     },
     root,

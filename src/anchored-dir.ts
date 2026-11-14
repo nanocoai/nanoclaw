@@ -24,6 +24,12 @@ import { isSafeAttachmentName } from './attachment-safety.js';
 
 const { O_APPEND, O_CREAT, O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_NONBLOCK, O_RDONLY, O_WRONLY } = fs.constants;
 
+/**
+ * Caps the nested directories one recursive remove pins. The container picks
+ * the depth, and each level holds a descriptor and a stack frame.
+ */
+const MAX_REMOVE_DEPTH = 64;
+
 function errno(err: unknown): string | undefined {
   return (err as NodeJS.ErrnoException | null)?.code;
 }
@@ -72,14 +78,14 @@ export class AnchoredDir {
     }
   }
 
-  /** Open the subdirectory `name`, creating it first when asked. Null if missing. */
-  openDir(name: string, create = false): AnchoredDir | null {
+  /** Open `name`, optionally creating it. Exclusive creation refuses any existing entry. Null if missing. */
+  openDir(name: string, create: boolean | 'exclusive' = false): AnchoredDir | null {
     const entry = this.entryPath(name);
     if (create) {
       try {
         fs.mkdirSync(entry);
       } catch (err) {
-        if (errno(err) !== 'EEXIST') throw err;
+        if (create === 'exclusive' || errno(err) !== 'EEXIST') throw err;
       }
     }
     let fd: number;
@@ -201,6 +207,73 @@ export class AnchoredDir {
     fs.rmdirSync(this.entryPath(name));
   }
 
+  /** Pin each directory before descending so removal never follows a symlink. Missing entries are ignored. */
+  remove(name: string, recursive = false): void {
+    this.removeEntry(Buffer.from(this.entryPath(name)), recursive, 1);
+  }
+
+  // `path` is `<alias>/<component>` as raw bytes; lstat/unlink/rmdir never
+  // follow the final component and the O_DIRECTORY|O_NOFOLLOW open refuses a
+  // swapped-in link, so the walk stays inside the pinned tree. Children come
+  // from a byte-mode readdir so a non-UTF8 or backslash filename is deleted by
+  // its real name, not re-encoded into a miss that would strand it.
+  private removeEntry(path: Buffer, recursive: boolean, depth: number): void {
+    try {
+      if (recursive && fs.lstatSync(path).isDirectory()) {
+        if (depth > MAX_REMOVE_DEPTH) throw new Error('directory tree too deep to remove safely');
+        const fd = fs.openSync(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+        const dir = AnchoredDir.fromFd(fd);
+        try {
+          const prefix = Buffer.from(`${dir.alias}/`);
+          for (const entry of fs.readdirSync(dir.alias, { encoding: 'buffer' })) {
+            dir.removeEntry(Buffer.concat([prefix, entry]), true, depth + 1);
+          }
+        } finally {
+          dir.close();
+        }
+        fs.rmdirSync(path);
+      } else {
+        fs.unlinkSync(path);
+      }
+    } catch (err) {
+      if (errno(err) !== 'ENOENT') throw err;
+    }
+  }
+
+  /**
+   * Copy only the validated relative file names supplied by the caller.
+   * Pinned parents contain writes; exclusive creation prevents reuse of existing entries.
+   */
+  copyFiles(src: AnchoredDir, name: string, files: readonly string[]): void {
+    const dest = this.openDir(name, 'exclusive');
+    if (!dest) throw new Error(`copy destination '${name}' disappeared`);
+    try {
+      const subdirs = new Map<string, string[]>();
+      for (const file of files) {
+        const slash = file.indexOf('/');
+        if (slash === -1) {
+          copyRegularFile(src, file, dest, file);
+        } else {
+          const sub = file.slice(0, slash);
+          const children = subdirs.get(sub) ?? [];
+          children.push(file.slice(slash + 1));
+          subdirs.set(sub, children);
+        }
+      }
+      for (const [sub, children] of subdirs) {
+        const source = src.openDir(sub);
+        if (!source) throw new Error(`copy source '${sub}' disappeared`);
+        try {
+          dest.copyFiles(source, sub, children);
+        } finally {
+          source.close();
+        }
+      }
+    } finally {
+      dest.close();
+    }
+  }
+
   symlink(target: string, name: string): void {
     fs.symlinkSync(target, this.entryPath(name));
   }
@@ -235,7 +308,7 @@ export function copyRegularFile(src: AnchoredDir, srcName: string, dst: Anchored
       let read: number;
       while ((read = fs.readSync(srcFd, buffer, 0, buffer.length, null)) > 0) {
         // writeSync may return a short count; drain the chunk before the next read.
-        for (let written = 0; written < read; ) {
+        for (let written = 0; written < read;) {
           written += fs.writeSync(dstFd, buffer, written, read - written);
         }
       }

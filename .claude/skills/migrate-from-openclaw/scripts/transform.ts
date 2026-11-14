@@ -196,20 +196,6 @@ export function channelEnvVars(channel: string): string[] {
   return CHANNEL_ENV_VARS[channel] ?? [];
 }
 
-/**
- * Render a OneCLI vault plan into the exact command the operator runs.
- * The credential value is passed through unmasked here because the caller
- * runs the command directly — it must never be echoed to a chat transcript.
- */
-export function vaultCreateCommand(plan: VaultPlan, value: string): string {
-  return [
-    'onecli secrets create',
-    `--name ${plan.name}`,
-    `--type ${plan.type}`,
-    `--value ${value}`,
-    `--host-pattern ${plan.hostPattern}`,
-  ].join(' ');
-}
 
 // ---------------------------------------------------------------------------
 // Cron → v2 recurrence mapping

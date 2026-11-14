@@ -150,9 +150,10 @@ BOOTSTRAP_RAW="$STEPS_DIR/01-bootstrap.log"
 export NANOCLAW_BOOTSTRAP_LOG="$BOOTSTRAP_RAW"
 
 if bash "$PROJECT_ROOT/setup.sh" > "$BOOTSTRAP_RAW" 2>&1; then
-  # Parse the status block from setup.sh output
-  STATUS=$(grep '^STATUS:' "$BOOTSTRAP_RAW" | head -1 | sed 's/^STATUS: *//')
-  NODE_VERSION=$(grep '^NODE_VERSION:' "$BOOTSTRAP_RAW" | head -1 | sed 's/^NODE_VERSION: *//')
+  # Parse setup.sh's own BOOTSTRAP block: install-node.sh, when it ran, wrote
+  # its STATUS lines into the same log.
+  STATUS=$(awk '/^=== NANOCLAW SETUP: BOOTSTRAP ===/{b=1} b && sub(/^STATUS: */, "") {print; exit}' "$BOOTSTRAP_RAW")
+  NODE_VERSION=$(awk '/^=== NANOCLAW SETUP: BOOTSTRAP ===/{b=1} b && sub(/^NODE_VERSION: */, "") {print; exit}' "$BOOTSTRAP_RAW")
 
   if [ "$STATUS" = "success" ]; then
     step_ok "Prerequisites ready $(dim "(node $NODE_VERSION)")"
@@ -173,6 +174,15 @@ else
   dim "  Full log: $BOOTSTRAP_RAW"
   echo
   abort "bootstrap"
+fi
+
+# Later steps, and the service they register, use this shell's node, which can
+# be an older one ahead of the keg-only node@22 setup.sh used.
+# shellcheck source=setup/lib/node-version.sh
+source "$PROJECT_ROOT/setup/lib/node-version.sh"
+if ! node_use_patched; then
+  step_fail "No Node on PATH meets the minimum (${NODE_MINIMUMS// / / }). Switch to one of these, then re-run."
+  abort "node-below-minimum"
 fi
 
 # setup.sh may have installed pnpm to a prefix not on our PATH — replay

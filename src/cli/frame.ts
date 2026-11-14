@@ -29,12 +29,7 @@ export type ResponseFrame =
   | { id: string; ok: false; error: { code: ErrorCode; message: string } };
 
 export type ErrorCode =
-  | 'unknown-command'
-  | 'invalid-args'
-  | 'forbidden'
-  | 'approval-pending'
-  | 'handler-error'
-  | 'transport-error';
+  'unknown-command' | 'invalid-args' | 'forbidden' | 'approval-pending' | 'handler-error' | 'transport-error';
 
 /**
  * Filled in by the transport adapter on the server side. Handlers read
