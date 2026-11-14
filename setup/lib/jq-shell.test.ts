@@ -26,6 +26,8 @@ interface Machine {
   pacmanSynced?: boolean;
   /** pacman-conf is missing, so nothing says where pacman keeps its lists. */
   noPacmanConf?: boolean;
+  /** This user can't list pacman's lists: the sync folder, or the DBPath above it, is root-only. */
+  pacmanLocked?: 'sync' | 'dbpath';
 }
 
 let dir: string;
@@ -33,6 +35,9 @@ beforeEach(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'jq-install-'));
 });
 afterEach(() => {
+  for (const locked of [path.join(dir, 'pacman'), path.join(dir, 'pacman', 'sync')]) {
+    if (fs.existsSync(locked)) fs.chmodSync(locked, 0o755);
+  }
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -62,6 +67,7 @@ function stubs(m: Machine): { bin: string; log: string } {
     fs.mkdirSync(path.join(dir, 'pacman', 'sync'), { recursive: true });
     if (m.pacmanSynced) fs.writeFileSync(path.join(dir, 'pacman', 'sync', 'core.db'), '');
     if (!m.noPacmanConf) stub('pacman-conf', `[ "$1" = DBPath ] && echo '${dir}/pacman/'`);
+    if (m.pacmanLocked) fs.chmodSync(path.join(dir, 'pacman', ...(m.pacmanLocked === 'sync' ? ['sync'] : [])), 0);
   }
   if (m.sudo) {
     stub(
@@ -128,6 +134,8 @@ describe('jq install (setup/lib/jq.sh)', { timeout: 20_000 }, () => {
   it.each<[string, Machine]>([
     ['has synced before', { pacmanSynced: true }],
     ['has no pacman-conf to say where its lists are', { noPacmanConf: true }],
+    ['synced into a sync folder this user cannot list', { pacmanSynced: true, pacmanLocked: 'sync' }],
+    ['synced under a DBPath this user cannot enter', { pacmanSynced: true, pacmanLocked: 'dbpath' }],
   ])('never upgrades a pacman system that %s', (_name, m) => {
     const r = run({ pkg: 'pacman', sudo: 'cached', staleLists: true, ...m });
     expect(r.rc).toBe(1);
