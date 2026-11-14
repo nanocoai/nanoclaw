@@ -1,0 +1,10 @@
+[Unit]
+Description=Run NanoClaw watchdog every 15 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+Unit=nanoclaw-watchdog.service
+
+[Install]
+WantedBy=timers.target
