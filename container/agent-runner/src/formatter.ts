@@ -273,7 +273,7 @@ function formatSingleChat(msg: MessageInRow): string {
 
   const fromAttr = originAttr(msg);
 
-  return `<message${idAttr}${fromAttr} sender="${escapeXml(sender)}" time="${escapeXml(time)}"${replyAttr}>${replyPrefix}${escapeXml(text)}${linksSuffix}${attachmentsSuffix}${appContextSuffix}</message>`;
+  return `<message${idAttr}${fromAttr} sender="${escapeXml(sender)}" time="${escapeXml(time)}"${replyAttr}>${replyPrefix}${escapeText(text)}${linksSuffix}${attachmentsSuffix}${appContextSuffix}</message>`;
 }
 
 /**
@@ -295,9 +295,9 @@ function formatEchoMessage(msg: MessageInRow): string {
   // (per-thread groups).
   if (content.echo?.surface === 'dm-timeline' || content.echo?.surface === 'channel-timeline') {
     const tag = content.echo.surface === 'channel-timeline' ? 'channel-history' : 'dm-history';
-    return `<${tag} sender="${escapeXml(sender)}" time="${escapeXml(time)}">${escapeXml(content.text || '')}</${tag}>`;
+    return `<${tag} sender="${escapeXml(sender)}" time="${escapeXml(time)}">${escapeText(content.text || '')}</${tag}>`;
   }
-  return `<cross-session-context from="${escapeXml(label)}" sender="${escapeXml(sender)}" time="${escapeXml(time)}">${escapeXml(content.text || '')}</cross-session-context>`;
+  return `<cross-session-context from="${escapeXml(label)}" sender="${escapeXml(sender)}" time="${escapeXml(time)}">${escapeText(content.text || '')}</cross-session-context>`;
 }
 
 /**
@@ -357,7 +357,7 @@ function formatWebhookMessage(msg: MessageInRow): string {
   const source = content.source || 'unknown';
   const event = content.event || 'unknown';
   const from = originAttr(msg);
-  return `<webhook${from} source="${escapeXml(source)}" event="${escapeXml(event)}">${JSON.stringify(content.payload || content, null, 2)}</webhook>`;
+  return `<webhook${from} source="${escapeXml(source)}" event="${escapeXml(event)}">${escapeText(JSON.stringify(content.payload || content, null, 2))}</webhook>`;
 }
 
 function formatSystemMessage(msg: MessageInRow): string {
@@ -381,7 +381,7 @@ function formatReplyContext(replyTo: any): string {
   const sender = replyTo.sender;
   const text = replyTo.text;
   if (!sender || !text) return '';
-  return `\n  <quoted_message from="${escapeXml(sender)}">${escapeXml(text)}</quoted_message>\n`;
+  return `\n  <quoted_message from="${escapeXml(sender)}">${escapeText(text)}</quoted_message>\n`;
 }
 
 /**
@@ -399,7 +399,7 @@ function formatAppContext(appContext: any): string {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     .map((e: any) => `${e.type} ${e.id}`);
   if (items.length === 0) return '';
-  return `\n(viewing: ${escapeXml(items.join(', '))})`;
+  return `\n(viewing: ${escapeText(items.join(', '))})`;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -412,7 +412,7 @@ function formatLinks(links: any[] | undefined, text: string): string {
       ),
     ),
   ];
-  return urls.length === 0 ? '' : `\n${urls.map((url) => `[link: ${escapeXml(url)}]`).join('\n')}`;
+  return urls.length === 0 ? '' : `\n${urls.map((url) => `[link: ${escapeText(url)}]`).join('\n')}`;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -424,9 +424,9 @@ function formatAttachments(attachments: any[] | undefined): string {
     const localPath = a.localPath ? `/workspace/${a.localPath}` : '';
     const url = a.url || '';
     if (localPath) {
-      return `[${type}: ${escapeXml(name)} — saved to ${escapeXml(localPath)}]`;
+      return `[${type}: ${escapeText(name)} — saved to ${escapeText(localPath)}]`;
     }
-    return url ? `[${type}: ${escapeXml(name)} (${escapeXml(url)})]` : `[${type}: ${escapeXml(name)}]`;
+    return url ? `[${type}: ${escapeText(name)} (${escapeText(url)})]` : `[${type}: ${escapeText(name)}]`;
   });
   return '\n' + parts.join('\n');
 }
@@ -442,6 +442,17 @@ function parseContent(json: string): any {
 
 function escapeXml(str: string): string {
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+/**
+ * Escape text that sits inside an element's body. Only a `<` that could open or
+ * close a tag (before a letter, `/`, `!`, `?`, `_` or `:`) becomes `&lt;`, so the
+ * text can't close its own element, open another message, or carry a tag the
+ * model or its harness treats as its own. `>`, `"`, `&` and a bare `<` stay as
+ * typed, so code and links reach the agent as written. Attributes keep escapeXml.
+ */
+function escapeText(str: string): string {
+  return str.replace(/<(?=[\p{L}/!?_:])/gu, '&lt;');
 }
 
 /**
