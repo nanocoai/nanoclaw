@@ -168,6 +168,15 @@ describe('paths NanoClaw mounts itself', () => {
     ).toBe(true);
   });
 
+  it('rejects a stamped plugins tree named through a symlinked group folder', () => {
+    const real = path.join(tmpDir, 'srv', 'g2');
+    fs.mkdirSync(path.join(real, 'plugins'), { recursive: true });
+    fs.mkdirSync(policy.groupsRoot, { recursive: true });
+    fs.symlinkSync(real, path.join(policy.groupsRoot, 'g2'));
+    const plugins = path.join(policy.groupsRoot, 'g2', 'plugins');
+    expect(validateMount({ hostPath: plugins, containerPath: 'plugins' }, policy).allowed).toBe(false);
+  });
+
   it('still allows a sibling of a protected path', () => {
     const sibling = path.join(installRoot, 'container', 'notes');
     fs.mkdirSync(sibling, { recursive: true });
@@ -179,5 +188,11 @@ describe('paths NanoClaw mounts itself', () => {
       /install-surface/,
     );
     expect(protectedMountReason(path.join(tmpDir, 'elsewhere'), policy)).toBeNull();
+    // ...also when it is reached through a symlinked install root.
+    const alias = path.join(tmpDir, 'alias');
+    fs.symlinkSync(installRoot, alias);
+    expect(protectedMountReason(path.join(alias, 'container', 'skills', 'new-skill'), policy)).toMatch(
+      /install-surface/,
+    );
   });
 });

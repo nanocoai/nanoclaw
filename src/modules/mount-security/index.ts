@@ -252,25 +252,34 @@ function matchesBlockedPattern(realPath: string, blockedPatterns: string[]): str
 /**
  * Why a host path cannot be an additional mount, or null. The driver pins these
  * roots to their own class, and an additional mount is `allowlisted-extra`, so it
- * would refuse every start. Roots are matched as given and resolved: the policy
- * spells the install as the service sees it, callers pass a resolved path.
+ * would refuse every start. Paths and roots are matched both as written and
+ * resolved, since either side may be spelled through a symlink.
  */
 export function protectedMountReason(hostPath: string, policy: MountPolicy = mountPolicy()): string | null {
-  const real = (p: string) => getRealPath(p) ?? p;
   const resolved: MountPolicy = {
     ...policy,
-    groupsRoot: real(policy.groupsRoot),
-    surfaceRoots: policy.surfaceRoots.map(real),
-    materialsRoot: real(policy.materialsRoot),
-    gatewayTrustRoot: real(policy.gatewayTrustRoot),
+    groupsRoot: resolveExisting(policy.groupsRoot),
+    surfaceRoots: policy.surfaceRoots.map(resolveExisting),
+    materialsRoot: resolveExisting(policy.materialsRoot),
+    gatewayTrustRoot: resolveExisting(policy.gatewayTrustRoot),
   };
-  const target = getRealPath(expandPath(hostPath)) ?? expandPath(hostPath);
-  const required =
-    classRequiredByPath(target, policy) ??
-    classRequiredByPath(target, resolved) ??
-    ([policy, resolved].some((p) => underStampedPlugins(target, p.groupsRoot)) ? 'install-surface' : null);
-  if (!required) return null;
-  return `"${target}" is protected NanoClaw content (${required}) and cannot be an additional mount`;
+  const expanded = expandPath(hostPath);
+  for (const target of new Set([expanded, resolveExisting(expanded)])) {
+    const required =
+      classRequiredByPath(target, policy) ??
+      classRequiredByPath(target, resolved) ??
+      ([policy, resolved].some((p) => underStampedPlugins(target, p.groupsRoot)) ? 'install-surface' : null);
+    if (required) return `"${hostPath}" is protected NanoClaw content (${required}) and cannot be an additional mount`;
+  }
+  return null;
+}
+
+/** Real path of `p`, or of its nearest existing ancestor with the rest appended. */
+function resolveExisting(p: string): string {
+  const real = getRealPath(p);
+  if (real !== null) return real;
+  const parent = path.dirname(p);
+  return parent === p ? p : path.join(resolveExisting(parent), path.basename(p));
 }
 
 /**
@@ -377,7 +386,7 @@ export function validateMount(mount: AdditionalMount, policy?: MountPolicy): Mou
     };
   }
 
-  const protectedReason = protectedMountReason(realPath, policy);
+  const protectedReason = protectedMountReason(mount.hostPath, policy);
   if (protectedReason !== null) {
     return { allowed: false, reason: protectedReason };
   }
