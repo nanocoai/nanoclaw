@@ -27,8 +27,7 @@ function escapeRegex(text: string): string {
  * Substitute the (regex-escaped) agent name for `{name}` in a declared
  * pattern. A `\b` adjacent to a non-word character can never match, so when
  * the name starts/ends with one (e.g. "Nano!", "Andy (backup)") the adjacent
- * declared boundary is dropped — mirrors selfChatEngagePattern in
- * setup/channels/whatsapp.ts.
+ * declared boundary is dropped.
  */
 function substituteName(pattern: string, name: string): string {
   let out = pattern;

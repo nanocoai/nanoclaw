@@ -1,6 +1,5 @@
 /**
  * Step: container — Build container image and verify with test run.
- * Replaces 03-setup-container.sh
  */
 import { execSync, spawnSync } from 'child_process';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'fs';

@@ -1,6 +1,5 @@
 /**
  * Step: verify — End-to-end health check of the full installation.
- * Replaces 09-verify.sh
  *
  * Uses the configured central-DB driver and platform-aware service checks.
  */
