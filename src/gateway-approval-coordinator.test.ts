@@ -1,3 +1,4 @@
+import { CardTooLongError } from './channels/ask-question.js';
 import fs from 'node:fs';
 import * as approvalDb from './db/sessions.js';
 
@@ -15,6 +16,7 @@ import {
   runMigrations,
 } from './db/index.js';
 import type { ChannelDeliveryAdapter } from './delivery.js';
+import { MAX_CARD_TITLE_CHARS } from './gateway-approval-presentation.js';
 import {
   gatewayRuntimeIdentity,
   type GatewayApprovalRequest,
@@ -168,6 +170,123 @@ describe('gateway approval coordinator', () => {
     });
     await coordinator.stopGatewayApprovalCoordinator();
     expect(await pending).toBe('deny');
+  });
+
+  it('delivers a long action in full in the card body under a short title', async () => {
+    const coordinator = await import('./gateway-approval-coordinator.js');
+    await coordinator.startGatewayApprovalCoordinator(provider(), delivery, vi.fn());
+    const action = 'Transfer funds '.repeat(40);
+    const pending = decide(
+      request({
+        summary: {
+          agent: 'Nano',
+          action,
+          resource: 'bank.example.test',
+          reason: 'An explicit policy requires approval',
+          details: Array.from({ length: 6 }, (_, i) => ({ label: `Detail ${i}`, value: `${i}`.repeat(600) })),
+        },
+      }),
+    );
+    await vi.waitFor(() => expect(delivered).toHaveLength(1));
+    const card = JSON.parse(delivered[0].content);
+    expect(card.title.length).toBeLessThanOrEqual(MAX_CARD_TITLE_CHARS);
+    expect(card.question.split('\n')[0]).toBe(`*Action:* ${action}`);
+    expect(card.question).toContain(`*Detail 5:* ${'5'.repeat(600)}`);
+    await coordinator.stopGatewayApprovalCoordinator();
+    expect(await pending).toBe('deny');
+  });
+
+  it('puts a long title in full at the top of the card body, under a short title', async () => {
+    const coordinator = await import('./gateway-approval-coordinator.js');
+    await coordinator.startGatewayApprovalCoordinator(provider(), delivery, vi.fn());
+    const title = 'Delete repository '.repeat(4);
+    const pending = decide(request({ title }));
+    await vi.waitFor(() => expect(delivered).toHaveLength(1));
+    const card = JSON.parse(delivered[0].content);
+    expect(card.title.length).toBeLessThanOrEqual(MAX_CARD_TITLE_CHARS);
+    expect(card.question).toBe(`*Request:* ${title}\nAllow POST api.example.test/resource?`);
+    await coordinator.stopGatewayApprovalCoordinator();
+    expect(await pending).toBe('deny');
+  });
+
+  it('tells the approver when a request cannot be displayed in full, still denying it', async () => {
+    const coordinator = await import('./gateway-approval-coordinator.js');
+    const deliver = vi.fn().mockRejectedValueOnce(new CardTooLongError('too long')).mockResolvedValue('notice');
+    await coordinator.startGatewayApprovalCoordinator(provider(), { deliver }, vi.fn());
+    expect(await decide(request())).toBe('deny');
+    expect(deliver).toHaveBeenCalledTimes(2);
+    expect(deliver.mock.calls[1]).toEqual([
+      'fixture',
+      'owner',
+      null,
+      'chat',
+      JSON.stringify({
+        text: 'Approval request not shown: this channel cannot display the complete request. No approval was granted.',
+      }),
+      undefined,
+      'fixture-primary',
+    ]);
+  });
+
+  it('denies an oversized request and delivers the refusal through the actual WhatsApp Cloud registration', async () => {
+    const env = await import('./env.js');
+    vi.spyOn(env, 'readEnvFile').mockReturnValue({
+      WHATSAPP_ACCESS_TOKEN: 'fixture',
+      WHATSAPP_PHONE_NUMBER_ID: 'phone',
+      WHATSAPP_APP_SECRET: 'fixture',
+      WHATSAPP_VERIFY_TOKEN: 'fixture',
+    });
+    const sent: Array<{ type: string; text?: { body: string } }> = [];
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      sent.push(JSON.parse(init!.body as string));
+      return new Response(JSON.stringify({ messages: [{ id: 'notice' }] }), { status: 200 });
+    });
+    const { whatsappCloudRegistration } = await import('./channels/whatsapp-cloud.js');
+    const bridge = (await whatsappCloudRegistration.factory())!;
+    const realDelivery: ChannelDeliveryAdapter = {
+      async deliver(_channel, _platform, thread, kind, content) {
+        return bridge.deliver('whatsapp:phone:15550001111', thread, { kind, content: JSON.parse(content) });
+      },
+    };
+    const coordinator = await import('./gateway-approval-coordinator.js');
+    await coordinator.startGatewayApprovalCoordinator(provider(), realDelivery, vi.fn());
+    expect(await decide(request({ question: 'x'.repeat(2000) }))).toBe('deny');
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(sent).toMatchObject([
+      {
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to: '15550001111',
+        type: 'text',
+        text: {
+          body: 'Approval request not shown: this channel cannot display the complete request. No approval was granted.',
+        },
+      },
+    ]);
+  });
+
+  it('denies when the card fails to post', async () => {
+    const coordinator = await import('./gateway-approval-coordinator.js');
+    const failing: ChannelDeliveryAdapter = {
+      async deliver() {
+        throw new Error('platform down');
+      },
+    };
+    await coordinator.startGatewayApprovalCoordinator(provider(), failing, vi.fn());
+    expect(await decide(request())).toBe('deny');
+  });
+
+  it('allows a configured read with a long title and no summary without a card', async () => {
+    vi.stubEnv('NANOCLAW_GATEWAY_READ_ONLY_HOSTS', 'api.example.test');
+    const coordinator = await import('./gateway-approval-coordinator.js');
+    await coordinator.startGatewayApprovalCoordinator(provider(), delivery, vi.fn());
+    const read = request({
+      trigger: 'default',
+      title: 'x'.repeat(MAX_CARD_TITLE_CHARS + 1),
+      destination: { host: 'api.example.test', method: 'GET' },
+    });
+    expect(await decide(read)).toBe('approve');
+    expect(delivered).toHaveLength(0);
   });
 
   it.each(['first-gateway', 'second-gateway'])('allows configured reads without cards for %s', async (kind) => {
@@ -704,6 +823,21 @@ it('records durable expiry as unavailable rather than a human rejection', async 
   expect(await outcome).toBe('unavailable');
   expect(submit).toHaveBeenCalledWith('native-request', 'unavailable');
   expect((await getPendingApproval(questionId))?.status).toBe('expired');
+});
+
+// A durable gateway is told `unavailable`, not denied, so the notice says neither.
+it('tells the approver a durable request too long to show was not shown, and reports it unavailable', async () => {
+  const coordinator = await import('./gateway-approval-coordinator.js');
+  const gateway = provider();
+  gateway.approvals.durable = true;
+  gateway.approvals.decide = vi.fn(async () => true);
+  gateway.approvals.listPending = async () => [];
+  const deliver = vi.fn().mockRejectedValueOnce(new CardTooLongError('too long')).mockResolvedValue('notice');
+  await coordinator.startGatewayApprovalCoordinator(gateway, { deliver }, vi.fn());
+  expect(await decide(request())).toBe('unavailable');
+  expect(JSON.parse(deliver.mock.calls[1][4])).toEqual({
+    text: 'Approval request not shown: this channel cannot display the complete request. No approval was granted.',
+  });
 });
 
 it('persists before sending a durable card and does not resend an uncertain delivery after restart', async () => {
