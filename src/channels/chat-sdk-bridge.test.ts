@@ -737,6 +737,12 @@ describe('splitCardText', () => {
     ]);
   });
 
+  it('adds no joiner to a block that starts after a carriage return', () => {
+    expect(splitCardText('x'.repeat(38) + '\r```\ncode\n```', (t) => t, 40)).toEqual([
+      'x'.repeat(38) + '\r',
+      '```\ncode\n```',
+    ]);
+  });
   it('adds no joiner to a block that reopens a fence, so the code keeps its bytes', () => {
     const blocks = splitCardText('```\n' + 'x'.repeat(60) + '\n```', (t) => t, 40);
     expect(blocks.length).toBeGreaterThan(1);

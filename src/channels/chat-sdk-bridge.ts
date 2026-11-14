@@ -514,7 +514,8 @@ export function splitCardText(text: string, escape: (t: string) => string, limit
     }
     const { block, open } = render(rest.slice(0, cut));
     blocks.push(block);
-    midLine = rest[cut - 1] !== '\n';
+    // Discord and FENCE_LINE read a lone \r as a line break too.
+    midLine = rest[cut - 1] !== '\n' && rest[cut - 1] !== '\r';
     rest = rest.slice(cut);
     reopen = open;
   }
