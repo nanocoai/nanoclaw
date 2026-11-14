@@ -12,7 +12,7 @@ const { prepare } = vi.hoisted(() => ({ prepare: vi.fn() }));
 vi.mock('./config.js', async () => {
   const actual = await vi.importActual<typeof import('./config.js')>('./config.js');
   const root = `/tmp/nanoclaw-test-gateway-input-${process.pid}`;
-  return { ...actual, DATA_DIR: `${root}/data`, GROUPS_DIR: `${root}/groups` };
+  return { ...actual, DATA_DIR: `${root}/data`, GROUPS_DIR: `${root}/groups`, DEFAULT_AGENT_PROVIDER: 'claude' };
 });
 vi.mock('./drivers/index.js', () => {
   const driver = { kind: 'fake', listSessions: async () => [], prepare, capabilities: () => ({}) };
