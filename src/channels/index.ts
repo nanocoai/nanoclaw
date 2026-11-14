@@ -73,3 +73,6 @@ import './deltachat.js';
 
 // wechat (native, no Chat SDK)
 import './wechat.js';
+
+// proton mail (native IMAP/SMTP against a local Proton Mail Bridge, no Chat SDK)
+import './proton-mail.js';
