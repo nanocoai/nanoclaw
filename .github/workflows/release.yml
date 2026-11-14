@@ -57,6 +57,19 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ inputs.target_sha }}
+      # Git only, before any setup action: pnpm and node tooling load files from the checkout.
+      - name: Verify target is on main
+        env:
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::target_sha must be a full lowercase 40-character commit SHA"
+            exit 1
+          fi
+          git fetch --force origin main:refs/remotes/origin/main --tags
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          git merge-base --is-ancestor "$TARGET_SHA" origin/main
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -133,14 +146,7 @@ jobs:
           TARGET_SHA: ${{ inputs.target_sha }}
         run: |
           set -euo pipefail
-          if [[ ! "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::target_sha must be a full lowercase 40-character commit SHA"
-            exit 1
-          fi
           node scripts/release.mjs verify "$RELEASE_VERSION"
-          git fetch --force origin main:refs/remotes/origin/main --tags
-          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
-          git merge-base --is-ancestor "$TARGET_SHA" origin/main
           # Order check from this workflow's own commit: an older target's release.mjs lacks it.
           # A failed lookup, an empty tag list or a missing success line fails the step.
           git ls-remote --tags --refs origin 'refs/tags/v*' > "$RUNNER_TEMP/release-tags.txt"
@@ -220,7 +226,7 @@ jobs:
             echo "::error::target_sha must be a full lowercase 40-character commit SHA"
             exit 1
           fi
-          node scripts/release.mjs verify "$RELEASE_VERSION"
+          # Prove the target is on main before running any of its code.
           git fetch --force origin main:refs/remotes/origin/main --tags
           test "$(git rev-parse HEAD)" = "$TARGET_SHA"
           git merge-base --is-ancestor "$TARGET_SHA" origin/main
@@ -230,6 +236,7 @@ jobs:
           git show "$GITHUB_SHA:scripts/release.mjs" > "$RUNNER_TEMP/release-order.mjs"
           ORDER=$(node "$RUNNER_TEMP/release-order.mjs" order "$RELEASE_VERSION" "$RUNNER_TEMP/release-tags.txt")
           test "$ORDER" = "v${RELEASE_VERSION} sorts above every existing tag of its version"
+          node scripts/release.mjs verify "$RELEASE_VERSION"
 
           TAG="v${RELEASE_VERSION}"
           if git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null; then

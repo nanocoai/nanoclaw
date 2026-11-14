@@ -555,6 +555,9 @@ describe('runChannelSkill adapter (Option A)', () => {
     expect(failCalls[0].msg).toBe('Register the webhook by hand'); // heading → headline
     expect(failCalls[0].hint).toContain('Open the Faily dashboard'); // prose → hint
     expect(failCalls[0].hint).not.toBe('See logs/setup-steps/ for details, then retry setup.'); // not the generic
+    // The first line of the bounce reason rides along for callers with no terminal.
+    expect(failCalls[0].opts?.detail).toMatch(/\S/);
+    expect(failCalls[0].opts?.detail).not.toContain('\n');
     // nc:hand-wire is a custom kind the engine does not handle: diagnostics get
     // a fixed code and the line, never the kind, headline or prose.
     expect(failCalls[0].opts?.code).toBe('unknown_directive:L5');
@@ -654,7 +657,7 @@ it('background Slack setup refuses to report ready when a required companion is 
       inputs: { connection: 'provisioned', bot_token: 'xoxb-test', app_token: 'xapp-test', owner_handle: 'U123456789' },
       exec: async command => (cmds.push(command), command.includes('auth.test') ? '@bot in Test' : command.includes('conversations.open') ? 'slack:D123456789' : ''),
       resolveRemote: () => 'origin', wire,
-    })).rejects.toThrow('companion installation needs attention');
+    })).rejects.toThrow(/companion installation needs attention \(slack-[\w-]+ is missing/);
     // The companion check throws even when no skill ran, so pin that the real
     // add-slack (read relative to cwd, the checkout) actually ran first.
     expect(cmds.some((c) => c.includes('auth.test'))).toBe(true);

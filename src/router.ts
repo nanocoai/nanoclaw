@@ -498,24 +498,10 @@ async function evaluateEngage(
     case 'mention-sticky': {
       if (isMention) return true;
       if (mg.is_group === 0) return false; // DMs never use mention-sticky sensibly
-      const [thread, release] = holdThread(threadKey(agent.agent_group_id, mg.id, threadId));
-      try {
-        if (thread.wake > 0) return true;
-        const wakesBefore = thread.wakeStarted;
-        const silentBefore = thread.silent > 0;
-        const silentsBefore = thread.silentStarted;
-        const existing = await findSessionForAgent(agent.agent_group_id, mg.id, threadId);
-        const evidence = existing ? await inboxWakeEvidence(agent.agent_group_id, existing.id) : 'chatter';
-        // A wake that began while we looked counts.
-        if (thread.wakeStarted !== wakesBefore || evidence === 'woken') return true;
-        // An inbox with no evidence (e.g. after a folder reset) keeps the thread
-        // active, unless a silent first row was being written meanwhile.
-        if (evidence === 'none' && !silentBefore && thread.silentStarted === silentsBefore) return true;
-        // Only a thread not yet active waits for a first mention still in the command gate.
-        return (await gateVerdicts(thread)) || thread.wakeStarted !== wakesBefore;
-      } finally {
-        release();
-      }
+      const existing = await findSessionForAgent(agent.agent_group_id, mg.id, threadId);
+      if (!existing) return false;
+      // An inbox with no evidence (e.g. after a folder reset) keeps the thread active.
+      return (await inboxWakeEvidence(agent.agent_group_id, existing.id)) !== 'chatter';
     }
     default:
       // Unrecognized engage_mode (e.g. stale data from a past CLI version,
@@ -527,85 +513,6 @@ async function evaluateEngage(
       });
       return false;
   }
-}
-
-/**
- * Routing in flight per (agent, mg, thread) that a sticky follow-up must see:
- * command-gate verdicts pending for a wake, inbox writes not yet landed, and
- * counts of writes ever started. The entry lives while anyone holds it, so a
- * reader can tell that a write started and finished during its own lookup.
- */
-interface ThreadInFlight {
-  holders: number;
-  gates: Set<Promise<boolean>>;
-  /** Called when a wake starts, so a follow-up waiting on gates stops at once. */
-  onWake: Set<() => void>;
-  wake: number;
-  silent: number;
-  wakeStarted: number;
-  silentStarted: number;
-}
-const threadsInFlight = new Map<string, ThreadInFlight>();
-
-function threadKey(agentGroupId: string, messagingGroupId: string, threadId: string | null): string {
-  return JSON.stringify([agentGroupId, messagingGroupId, threadId]);
-}
-
-function holdThread(key: string): [ThreadInFlight, () => void] {
-  const thread = threadsInFlight.get(key) ?? {
-    holders: 0,
-    gates: new Set(),
-    onWake: new Set(),
-    wake: 0,
-    silent: 0,
-    wakeStarted: 0,
-    silentStarted: 0,
-  };
-  threadsInFlight.set(key, thread);
-  thread.holders++;
-  let released = false;
-  return [
-    thread,
-    () => {
-      if (released) return;
-      released = true;
-      if (--thread.holders === 0 && threadsInFlight.get(key) === thread) threadsInFlight.delete(key);
-    },
-  ];
-}
-
-/**
- * True once any wake starts on the thread (a passing gate starts one), false
- * once no gate is pending, including gates opened while we wait.
- */
-async function gateVerdicts(thread: ThreadInFlight): Promise<boolean> {
-  if (thread.gates.size === 0) return false;
-  let woke = (): void => {};
-  try {
-    return await new Promise<boolean>((resolve) => {
-      woke = () => resolve(true);
-      thread.onWake.add(woke);
-      // A settled gate leaves the set (see openGate).
-      void (async () => {
-        while (thread.gates.size > 0) await Promise.all(thread.gates);
-        resolve(false);
-      })();
-    });
-  } finally {
-    thread.onWake.delete(woke);
-  }
-}
-
-/** Registers a pending gate verdict; settling it again is a no-op. */
-function openGate(thread: ThreadInFlight): (pass: boolean) => void {
-  let settle: (pass: boolean) => void = () => {};
-  const verdict = new Promise<boolean>((resolve) => {
-    settle = resolve;
-  });
-  thread.gates.add(verdict);
-  return (pass) => {
-    if (thread.gates.delete(verdict)) settle(pass);
-  };
 }
 
 /**
@@ -656,94 +563,71 @@ async function deliverToAgent(
     threadId: effectiveThreadId,
   };
 
-  // A wake's gate verdict is pending from here: a follow-up routed meanwhile
-  // waits for it. A filtered or denied command creates no session, which
-  // mention-sticky would read as an active thread.
-  const [thread, release] = holdThread(threadKey(agent.agent_group_id, mg.id, effectiveThreadId));
-  const settleGate = wake ? openGate(thread) : undefined;
-  const messageId = messageIdForAgent(event.message.id, agent.agent_group_id);
-  let writing = false;
-  let session: Session;
-  let created: boolean;
-  try {
-    // Command gate: classify slash commands before they reach the container.
-    // Filtered commands are dropped silently. Denied admin commands get a
-    // permission-denied reply sent straight to the chat: outbound.db belongs to
-    // the container, and a host write there can collide with its writes.
-    if (event.message.kind === 'chat' || event.message.kind === 'chat-sdk') {
-      const gate = await gateCommand(event.message.content, userId, agent.agent_group_id);
-      if (gate.action === 'filter') {
-        log.debug('Filtered command dropped by gate', { agentGroupId: agent.agent_group_id });
+  // Command gate: classify slash commands before they reach the container.
+  // Filtered commands are dropped silently. Denied admin commands get a
+  // permission-denied reply sent straight to the chat: outbound.db belongs to
+  // the container, and a host write there can collide with its writes. It runs
+  // before resolveSession: a filtered or denied command creates no session,
+  // which mention-sticky would read as an active thread.
+  if (event.message.kind === 'chat' || event.message.kind === 'chat-sdk') {
+    const gate = await gateCommand(event.message.content, userId, agent.agent_group_id);
+    if (gate.action === 'filter') {
+      log.debug('Filtered command dropped by gate', { agentGroupId: agent.agent_group_id });
+      return;
+    }
+    if (gate.action === 'deny') {
+      log.info('Admin command denied by gate', { command: gate.command, userId, agentGroupId: agent.agent_group_id });
+      const adapter = getDeliveryAdapter();
+      if (!adapter) {
+        log.warn('Permission-denied reply not sent: no delivery adapter', { command: gate.command });
         return;
       }
-      if (gate.action === 'deny') {
-        settleGate?.(false);
-        log.info('Admin command denied by gate', { command: gate.command, userId, agentGroupId: agent.agent_group_id });
-        const adapter = getDeliveryAdapter();
-        if (!adapter) {
-          log.warn('Permission-denied reply not sent: no delivery adapter', { command: gate.command });
-          return;
-        }
-        try {
-          await adapter.deliver(
-            deliveryAddr.channelType,
-            deliveryAddr.platformId,
-            deliveryAddr.threadId,
-            'chat',
-            JSON.stringify({ text: `Permission denied: ${gate.command} requires admin access.` }),
-            undefined,
-            event.replyTo ? undefined : mg.instance,
-          );
-          // eslint-disable-next-line no-catch-all/no-catch-all -- a failed reply must not fail inbound routing
-        } catch (err) {
-          log.error('Failed to deliver permission-denied reply', { command: gate.command, err });
-        }
-        return;
+      try {
+        await adapter.deliver(
+          deliveryAddr.channelType,
+          deliveryAddr.platformId,
+          deliveryAddr.threadId,
+          'chat',
+          JSON.stringify({ text: `Permission denied: ${gate.command} requires admin access.` }),
+          undefined,
+          event.replyTo ? undefined : mg.instance,
+        );
+        // eslint-disable-next-line no-catch-all/no-catch-all -- a failed reply must not fail inbound routing
+      } catch (err) {
+        log.error('Failed to deliver permission-denied reply', { command: gate.command, err });
       }
+      return;
     }
-
-    // Mark the write before releasing waiters, so none sees a gap.
-    writing = true;
-    if (wake) {
-      thread.wake++;
-      thread.wakeStarted++;
-      thread.onWake.forEach((woke) => woke());
-    } else {
-      thread.silent++;
-      thread.silentStarted++;
-    }
-    settleGate?.(true);
-
-    ({ session, created } = await resolveSession(agent.agent_group_id, mg.id, effectiveThreadId, effectiveSessionMode));
-
-    if (wake) {
-      // Cross-session context backfill: a just-born or long-idle session is
-      // seeded with its conversation's recent top-level timeline from the
-      // conversation's hot set BEFORE the triggering message is written, so
-      // replying to something said in another thread lands with that context
-      // in view. Bounded (K sources, read concurrently); a hot session is a
-      // one-query no-op. Never throws.
-      await backfillSession(agentGroup, session, mg, { created });
-    }
-
-    await writeSessionMessage(session.agent_group_id, session.id, {
-      id: messageId,
-      kind: event.message.kind,
-      timestamp: event.message.timestamp,
-      platformId: deliveryAddr.platformId,
-      channelType: deliveryAddr.channelType,
-      threadId: deliveryAddr.threadId,
-      content: event.message.content,
-      trigger: wake,
-    });
-  } finally {
-    settleGate?.(false);
-    if (writing) {
-      if (wake) thread.wake--;
-      else thread.silent--;
-    }
-    release();
   }
+
+  const { session, created } = await resolveSession(
+    agent.agent_group_id,
+    mg.id,
+    effectiveThreadId,
+    effectiveSessionMode,
+  );
+
+  if (wake) {
+    // Cross-session context backfill: a just-born or long-idle session is
+    // seeded with its conversation's recent top-level timeline from the
+    // conversation's hot set BEFORE the triggering message is written, so
+    // replying to something said in another thread lands with that context
+    // in view. Bounded (K sources, read concurrently); a hot session is a
+    // one-query no-op. Never throws.
+    await backfillSession(agentGroup, session, mg, { created });
+  }
+
+  const messageId = messageIdForAgent(event.message.id, agent.agent_group_id);
+  await writeSessionMessage(session.agent_group_id, session.id, {
+    id: messageId,
+    kind: event.message.kind,
+    timestamp: event.message.timestamp,
+    platformId: deliveryAddr.platformId,
+    channelType: deliveryAddr.channelType,
+    threadId: deliveryAddr.threadId,
+    content: event.message.content,
+    trigger: wake,
+  });
 
   if (wake && created) {
     // A brand-new engaged session: notify registered modules with the

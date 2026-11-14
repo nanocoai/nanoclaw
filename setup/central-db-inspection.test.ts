@@ -28,6 +28,7 @@ describe('setup central-DB inspection', () => {
       displayName: null,
       registeredGroups: 0,
       derivedGroups: 0,
+      lastWiredAt: {},
     });
     expect(fs.existsSync(path.join(projectRoot, 'data', 'v2.db'))).toBe(false);
   });
@@ -54,11 +55,45 @@ describe('setup central-DB inspection', () => {
       displayName: 'Operator',
       registeredGroups: 1,
       derivedGroups: 1,
+      lastWiredAt: {},
     });
 
     const inspected = new Database(dbPath, { readonly: true });
     expect(inspected.pragma('journal_mode', { simple: true })).toBe('delete');
     inspected.close();
+  });
+
+  it('reports when each channel was last wired, without cli', async () => {
+    const projectRoot = tempRoot();
+    fs.mkdirSync(path.join(projectRoot, 'data'));
+    const raw = new Database(path.join(projectRoot, 'data', 'v2.db'));
+    raw.exec(`
+      CREATE TABLE messaging_groups (id TEXT PRIMARY KEY, channel_type TEXT);
+      CREATE TABLE messaging_group_agents (id TEXT PRIMARY KEY, messaging_group_id TEXT, agent_group_id TEXT, created_at TEXT);
+      INSERT INTO messaging_groups VALUES ('mg-cli', 'cli'), ('mg-tg', 'telegram'), ('mg-slack', 'slack'), ('mg-tg2', 'telegram');
+      INSERT INTO messaging_group_agents VALUES ('w1', 'mg-cli', 'ag-1', '2026-11-03T00:00:00.000Z'),
+        ('w2', 'mg-tg', 'ag-1', '2026-11-01T00:00:00.000Z'), ('w3', 'mg-tg2', 'ag-1', '2026-11-02T00:00:00.000Z');
+    `);
+    raw.close();
+    await expect(inspectCentralDb(projectRoot)).resolves.toMatchObject({
+      lastWiredAt: { telegram: '2026-11-02T00:00:00.000Z' },
+    });
+  });
+
+  it('counts only the default adapter instance as wired', async () => {
+    const projectRoot = tempRoot();
+    fs.mkdirSync(path.join(projectRoot, 'data'));
+    const raw = new Database(path.join(projectRoot, 'data', 'v2.db'));
+    raw.exec(`
+      CREATE TABLE messaging_groups (id TEXT PRIMARY KEY, channel_type TEXT, instance TEXT NOT NULL);
+      CREATE TABLE messaging_group_agents (id TEXT PRIMARY KEY, messaging_group_id TEXT, agent_group_id TEXT, created_at TEXT);
+      INSERT INTO messaging_groups VALUES ('mg-slack-ops', 'slack', 'slack-ops'), ('mg-tg', 'telegram', 'telegram');
+      INSERT INTO messaging_group_agents VALUES ('w1', 'mg-slack-ops', 'ag-1', '2026-11-01T00:00:00.000Z'),
+        ('w2', 'mg-tg', 'ag-1', '2026-11-01T00:00:00.000Z');
+    `);
+    raw.close();
+    const { lastWiredAt } = await inspectCentralDb(projectRoot);
+    expect(Object.keys(lastWiredAt)).toEqual(['telegram']);
   });
 
   it('finds the newest active session of an agent group by folder', async () => {

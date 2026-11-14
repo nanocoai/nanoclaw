@@ -20,7 +20,9 @@
  * unload and delete the orphaned config file outright.
  *
  * Healthy peers are left alone — multiple installs can coexist fine now that
- * container-reaper is label-scoped.
+ * container-reaper is label-scoped. The exception is a registration that starts
+ * this same checkout under another name, left behind when NANOCLAW_INSTALL_ID
+ * changes: one checkout runs one host, so it is retired like a dead one.
  */
 import { execFileSync } from 'child_process';
 import fs from 'fs';
@@ -44,6 +46,7 @@ export interface PeerCleanupResult {
   checked: PeerStatus[];
   unloaded: PeerStatus[];
   removed: Array<{ label: string; configPath: string }>;
+  retired: Array<{ label: string; configPath: string }>;
   failures: Array<{ label: string; err: string }>;
 }
 
@@ -59,37 +62,48 @@ export function cleanupUnhealthyPeers(projectRoot: string = process.cwd()): Peer
   if (platform === 'linux') {
     return cleanupSystemdPeers(projectRoot);
   }
-  return { checked: [], unloaded: [], removed: [], failures: [] };
+  return { checked: [], unloaded: [], removed: [], retired: [], failures: [] };
 }
 
 /**
- * Unload a dead peer's job (best-effort) and delete its orphaned config file.
- * `unload` runs first and may throw harmlessly when the job isn't loaded or the
- * service-manager binary is absent (e.g. exercising launchd cleanup on Linux).
+ * Unload a peer's job (best-effort) and delete its config file: a dead one
+ * (`missingTarget` set) or another name for this checkout. `unload` runs first
+ * and may throw harmlessly when the job isn't loaded or the service-manager
+ * binary is absent (e.g. exercising launchd cleanup on Linux).
  */
-function reapDeadPeer(
+function reapPeer(
   result: PeerCleanupResult,
   peer: { label: string; configPath: string },
   unload: () => void,
   kind: string,
-  missingTarget: string,
+  missingTarget?: string,
+  mayStillRun?: (unloadError: unknown) => boolean,
 ): void {
+  const what = missingTarget ? `dead peer ${kind}` : `${kind} that also starts this checkout`;
+  let unloadError: unknown;
   try {
     unload();
-  } catch {
-    /* job not loaded — nothing to unload */
+  } catch (err) {
+    unloadError = err; // usually: job not loaded — nothing to unload
+  }
+  // A live peer not confirmed stopped keeps its file, so it can still be stopped.
+  // A dead one has no program to run, so its file goes either way.
+  if (!missingTarget && mayStillRun?.(unloadError)) {
+    log.warn(`Could not stop ${what}; kept its file`, { label: peer.label, configPath: peer.configPath });
+    result.failures.push({ label: peer.label, err: 'not confirmed stopped' });
+    return;
   }
   try {
     fs.rmSync(peer.configPath, { force: true });
-    log.info(`Removed dead peer ${kind}`, {
+    log.info(`Removed ${what}`, {
       label: peer.label,
       configPath: peer.configPath,
-      missingTarget,
+      ...(missingTarget ? { missingTarget } : {}),
     });
-    result.removed.push(peer);
+    (missingTarget ? result.removed : result.retired).push(peer);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    log.warn(`Failed to remove dead peer ${kind}`, { label: peer.label, err: message });
+    log.warn(`Failed to remove ${what}`, { label: peer.label, err: message });
     result.failures.push({ label: peer.label, err: message });
   }
 }
@@ -98,8 +112,9 @@ function reapDeadPeer(
 
 function cleanupLaunchdPeers(projectRoot: string): PeerCleanupResult {
   const ownLabel = getLaunchdLabel(projectRoot);
+  const entry = path.join(projectRoot, 'dist', 'index.js');
   const agentsDir = path.join(os.homedir(), 'Library', 'LaunchAgents');
-  const result: PeerCleanupResult = { checked: [], unloaded: [], removed: [], failures: [] };
+  const result: PeerCleanupResult = { checked: [], unloaded: [], removed: [], retired: [], failures: [] };
 
   let plists: string[];
   try {
@@ -118,8 +133,8 @@ function cleanupLaunchdPeers(projectRoot: string): PeerCleanupResult {
     if (label === ownLabel) continue;
 
     const missingTarget = deadLaunchdTarget(plistPath);
-    if (missingTarget) {
-      reapDeadPeer(
+    if (missingTarget || launchdStartsEntry(plistPath, entry)) {
+      reapPeer(
         result,
         { label, configPath: plistPath },
         // Best-effort unload in case launchd still has it registered; throwing
@@ -127,6 +142,7 @@ function cleanupLaunchdPeers(projectRoot: string): PeerCleanupResult {
         () => execFileSync('launchctl', ['unload', plistPath], { stdio: 'pipe' }),
         'launchd plist',
         missingTarget,
+        () => launchdLoaded(label, uid),
       );
       continue;
     }
@@ -200,8 +216,9 @@ function deadLaunchdTarget(plistPath: string): string | undefined {
 
 function cleanupSystemdPeers(projectRoot: string): PeerCleanupResult {
   const ownUnit = getSystemdUnit(projectRoot);
+  const entry = path.join(projectRoot, 'dist', 'index.js');
   const unitDir = path.join(os.homedir(), '.config', 'systemd', 'user');
-  const result: PeerCleanupResult = { checked: [], unloaded: [], removed: [], failures: [] };
+  const result: PeerCleanupResult = { checked: [], unloaded: [], removed: [], retired: [], failures: [] };
 
   let units: string[];
   try {
@@ -218,8 +235,8 @@ function cleanupSystemdPeers(projectRoot: string): PeerCleanupResult {
 
     const unitPath = path.join(unitDir, `${unit}.service`);
     const missingTarget = deadSystemdTarget(unitPath);
-    if (missingTarget) {
-      reapDeadPeer(
+    if (missingTarget || systemdStartsEntry(unitPath, entry)) {
+      reapPeer(
         result,
         { label: unit, configPath: unitPath },
         () => {
@@ -228,6 +245,7 @@ function cleanupSystemdPeers(projectRoot: string): PeerCleanupResult {
         },
         'systemd unit',
         missingTarget,
+        systemdMayStillRun,
       );
       continue;
     }
@@ -291,4 +309,46 @@ function deadSystemdTarget(unitPath: string): string | undefined {
   const target = /^ExecStart=\S+\s+(\S+\/dist\/index\.js)\s*$/m.exec(unit)?.[1];
   if (!target) return undefined;
   return fs.existsSync(target) ? undefined : target;
+}
+
+// ---- same checkout under another name ----------------------------------------
+
+/** ProgramArguments holds the entry point as its own <string>. */
+function launchdStartsEntry(plistPath: string, entry: string): boolean {
+  return readConfig(plistPath)?.includes(`<string>${entry}</string>`) ?? false;
+}
+
+/** ExecStart=<nodePath> <entry>; the leading space keeps the match exact. */
+function systemdStartsEntry(unitPath: string, entry: string): boolean {
+  return (readConfig(unitPath) ?? '')
+    .split('\n')
+    .some((line) => line.startsWith('ExecStart=') && line.trimEnd().endsWith(` ${entry}`));
+}
+
+function launchdLoaded(label: string, uid: number): boolean {
+  try {
+    execFileSync('launchctl', ['print', `gui/${uid}/${label}`], { stdio: 'pipe' });
+    return true;
+  } catch (err) {
+    return !confirmsStopped(err, [113]); // 113: no such service
+  }
+}
+
+/** `disable --now` waits for the stop, so only its success (or no systemd at all) proves it. */
+function systemdMayStillRun(disableError: unknown): boolean {
+  return disableError !== undefined && !confirmsStopped(disableError, []);
+}
+
+/** Only these exit codes, or no service manager at all, prove it stopped; no bus or no permission does not. */
+function confirmsStopped(err: unknown, stoppedStatus: number[]): boolean {
+  const { code, status } = err as { code?: string; status?: number | null };
+  return code === 'ENOENT' || (typeof status === 'number' && stoppedStatus.includes(status));
+}
+
+function readConfig(configPath: string): string | undefined {
+  try {
+    return fs.readFileSync(configPath, 'utf-8');
+  } catch {
+    return undefined;
+  }
 }

@@ -66,8 +66,7 @@ function deliveredRow(
 ): { status: string; platform_message_id: string | null } | undefined {
   const db = new Database(inboundDbPath(session.agent_group_id, session.id), { readonly: true });
   const row = db.prepare('SELECT status, platform_message_id FROM delivered WHERE message_out_id = ?').get(msgId) as
-    | { status: string; platform_message_id: string | null }
-    | undefined;
+    { status: string; platform_message_id: string | null } | undefined;
   db.close();
   return row;
 }

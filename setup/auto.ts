@@ -33,7 +33,13 @@ import * as p from '@clack/prompts';
 import k from 'kleur';
 
 import { BACK_TO_CHANNEL_SELECTION } from './lib/back-nav.js';
-import { withSetupLock, launchSlackJob, readSlackJob, slackJobStatus } from '../src/community-portal/slack-job.js';
+import {
+  withSetupLock,
+  launchSlackJob,
+  readSlackJob,
+  slackJobFailure,
+  slackJobStatus,
+} from '../src/community-portal/slack-job.js';
 // The pre-step-aware entry point consults each channel's registered wizard
 // extensions (setup/channels/companions.ts) before running its install skill
 // — the wizard itself stays free of channel-specific imports.
@@ -777,6 +783,8 @@ async function main(): Promise<void> {
   // changes too — the last box must be the one remaining action, not a
   // premature "your assistant is saying hi" (no welcome DM exists yet).
   let wiringPending = false;
+  // Verify passed without a Slack job: none, or one a later good Slack run replaced.
+  let verifyClearedSlackJob = false;
 
   if (
     portalEnabled() &&
@@ -819,9 +827,10 @@ async function main(): Promise<void> {
         );
       }
       const slackInstall = res.terminal?.fields.SLACK_INSTALL;
+      const slackReason = res.terminal?.fields.SLACK_INSTALL_REASON;
       if (slackInstall === 'failed') {
         notes.push(
-          '• Slack installation needs attention. Check its progress in the portal, then resume with `pnpm exec tsx setup/portal.ts --stage slack`.',
+          `• Slack installation needs attention${slackReason ? ` (${slackReason})` : ''}. Check its progress in the portal, then resume with \`pnpm exec tsx setup/portal.ts --stage slack\`.`,
         );
       } else if (slackInstall === 'expired') {
         notes.push('• Slack approval expired. Review the existing app in the portal before restarting Slack setup.');
@@ -857,6 +866,7 @@ async function main(): Promise<void> {
       return;
     }
     wiringPending = res.terminal?.fields.WIRING === 'pending_first_dm';
+    verifyClearedSlackJob = !res.terminal?.fields.SLACK_INSTALL;
   }
 
   const rows: [string, string][] = [
@@ -878,12 +888,14 @@ async function main(): Promise<void> {
     'Heads up',
   );
 
-  const slackStatus = slackJobStatus(await readSlackJob());
+  const slackJob = await readSlackJob();
+  const slackStatus = verifyClearedSlackJob ? undefined : slackJobStatus(slackJob);
   if (slackStatus === 'failed' || slackStatus === 'expired') {
+    const reason = slackJobFailure(slackJob);
     note(
       slackStatus === 'expired'
         ? 'Slack approval expired. Review the existing app in the portal before restarting Slack setup.'
-        : 'Slack installation needs attention. Check its progress in the portal, then resume with `pnpm exec tsx setup/portal.ts --stage slack`.',
+        : `Slack installation needs attention${reason ? ` (${reason})` : ''}. Check its progress in the portal, then resume with \`pnpm exec tsx setup/portal.ts --stage slack\`.`,
       'Slack setup',
     );
     p.outro(k.yellow('NanoClaw is running. Slack needs attention.'));

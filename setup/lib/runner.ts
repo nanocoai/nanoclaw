@@ -363,6 +363,8 @@ export interface FailOptions {
   code?: string;
   /** Step name to send instead of `stepName` when that holds a local name. */
   diagnosticStep?: string;
+  /** First line of the bounce reason, for a caller with no terminal. Never sent. */
+  detail?: string;
 }
 
 /**

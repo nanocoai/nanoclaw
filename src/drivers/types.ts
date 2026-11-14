@@ -26,11 +26,7 @@ export interface SessionKey {
 export type ContainerRole = string;
 
 export type MountClass =
-  | 'group-state'
-  | 'install-surface'
-  | 'identity-material'
-  | 'gateway-trust'
-  | 'allowlisted-extra';
+  'group-state' | 'install-surface' | 'identity-material' | 'gateway-trust' | 'allowlisted-extra';
 
 export interface MountSpec {
   /**
