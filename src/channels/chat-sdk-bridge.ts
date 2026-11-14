@@ -380,6 +380,8 @@ export interface ChatSdkBridgeConfig {
    * set this. Questions an agent asks itself (`fromAgent`) keep their markup.
    */
   escapeCardText?: (text: string) => string;
+  /** Override title encoding when the adapter already handles plain card titles. */
+  escapeCardTitle?: (title: string) => string;
   /**
    * For a platform that caps a whole card's text: the longest ask_question
    * title plus card text (after escapeCardText) it shows in full. A longer
@@ -558,13 +560,37 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
   }
   const transformText = (t: string): string => (config.transformOutboundText ? config.transformOutboundText(t) : t);
   const cardText = (t: string): string => (config.escapeCardText ? config.escapeCardText(t) : t);
+  // Card titles are plain text, but these adapters put them into Markdown as
+  // is. `&` too, or a Markdown parser decodes `&#x202E;` into a hidden character.
+  const markdownTitles = ['telegram', 'teams', 'webex', 'mattermost'].includes(adapter.name);
+  const cardTitle =
+    config.escapeCardTitle ??
+    ((title: string): string => (markdownTitles ? title.replace(/[\\`*_~[\]()<>&]/g, '\\$&') : title));
   const terminalMessage = (spec: TerminalApprovalCard) =>
     terminalApprovalMessage({
       ...spec,
+      title: cardTitle(spec.title),
       question: cardText(spec.question),
       questionBlocks: spec.question ? splitCardText(spec.question, cardText, CARD_TEXT_BLOCK_LENGTH) : undefined,
       resolution: cardText(spec.resolution),
     });
+  /**
+   * Redraws a resolved card. A channel refuses a redraw past its size limit,
+   * and a card near that limit grew by its decision line. The title and the
+   * decision still fit, so a decided card is never left showing no decision.
+   */
+  const redrawResolved = async (threadId: string, messageId: string, spec: TerminalApprovalCard) => {
+    try {
+      return await adapter.editMessage(threadId, messageId, terminalMessage(spec));
+    } catch (err) {
+      if (!spec.question) throw err;
+      // Only a known size refusal justifies discarding request text. A lost
+      // reply or transient API failure retries the same idempotent edit.
+      const tooLong = err instanceof CardTooLongError;
+      log.warn('Retrying resolved card edit', { err, shortened: tooLong });
+      return adapter.editMessage(threadId, messageId, terminalMessage(tooLong ? { ...spec, question: '' } : spec));
+    }
+  };
   /** Registry/routing key for this bridge — also the app-context cache
    *  namespace. Default instances key by the platform name. */
   const instanceKey = config.instance ?? adapter.name;
@@ -805,13 +831,11 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         const resolution = actorName ? `${selectedLabel} by ${actorName}` : selectedLabel;
         try {
           const tid = event.threadId;
-          await adapter.editMessage(
-            tid,
-            event.messageId,
-            render?.question
-              ? terminalMessage({ title, question: render.question, resolution })
-              : { markdown: `${title}\n\n${resolution}` },
-          );
+          if (render?.question) {
+            await redrawResolved(tid, event.messageId, { title, question: render.question, resolution });
+          } else {
+            await adapter.editMessage(tid, event.messageId, { markdown: `${title}\n\n${resolution}` });
+          }
         } catch (err) {
           log.warn('Failed to update card after action', { err });
         }
@@ -927,11 +951,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           typeof terminalCard.question === 'string' &&
           typeof terminalCard.resolution === 'string'
         ) {
-          await adapter.editMessage(
-            tid,
-            content.messageId as string,
-            terminalMessage(terminalCard as TerminalApprovalCard),
-          );
+          await redrawResolved(tid, content.messageId as string, terminalCard as TerminalApprovalCard);
         } else {
           await adapter.editMessage(tid, content.messageId as string, {
             markdown: transformText((content.text as string) || (content.markdown as string) || ''),
@@ -968,12 +988,12 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         const text = escape(question);
         const blocks = splitCardText(question, escape, CARD_TEXT_BLOCK_LENGTH);
         if (config.maxCardTextLength !== undefined) {
-          const tooLong = cardQuestionTooLong(title, blocks.join('\n'), config.maxCardTextLength);
+          const tooLong = cardQuestionTooLong(cardTitle(title), blocks.join('\n'), config.maxCardTextLength);
           if (tooLong) throw new CardTooLongError(tooLong);
         }
         const options: NormalizedOption[] = normalizeOptions(content.options as never);
         const card = Card({
-          title,
+          title: cardTitle(title),
           children: [
             ...blocks.map((block) => CardText(block)),
             Actions(
@@ -1053,7 +1073,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           return;
         }
 
-        const card = Card({ title, children: cardChildren });
+        const card = Card({ title: cardTitle(title), children: cardChildren });
         const result = await adapter.postMessage(tid, { card, fallbackText });
         return result?.id;
       }

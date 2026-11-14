@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { INBOUND_SCHEMA, OUTBOUND_SCHEMA } from './schema.js';
 import { wrapSqliteInbound, wrapSqliteOutbound } from './index.js';
+import { migrateMessagesInTable } from './session-db.js';
 
 describe('SQLite mailbox canonical serialization', () => {
   const databases: Database.Database[] = [];
@@ -125,6 +126,67 @@ describe('SQLite mailbox canonical serialization', () => {
         inReplyTo: null,
       },
     ]);
+  });
+
+  it('reports wake evidence: none, then chatter, then woken; echoes, agent rows and silent replies do not count', () => {
+    const inboundDb = new Database(':memory:');
+    databases.push(inboundDb);
+    inboundDb.exec(INBOUND_SCHEMA);
+    const insert = inboundDb.prepare(
+      `INSERT INTO messages_in (id, seq, timestamp, kind, channel_type, content, trigger)
+       VALUES (?, ?, '2026-01-01T00:00:00.000Z', ?, ?, '{}', ?)`,
+    );
+    const inbound = wrapSqliteInbound(inboundDb);
+
+    expect(inbound.wakeEvidence()).toBe('none');
+    insert.run('echo', 2, 'chat', 'session-echo', 1);
+    insert.run('cli-reply', 3, 'system', null, 0);
+    insert.run('member-note', 7, 'chat', 'agent', 0);
+    expect(inbound.wakeEvidence()).toBe('none');
+
+    insert.run('ambient', 4, 'chat', 'slack', 0);
+    expect(inbound.wakeEvidence()).toBe('chatter');
+    insert.run('a2a', 5, 'chat', 'agent', 1);
+    expect(inbound.wakeEvidence()).toBe('chatter');
+
+    insert.run('answer', 6, 'system', null, 1);
+    expect(inbound.wakeEvidence()).toBe('woken');
+
+    // A silent chat row with no channel is chatter too, as for the wake probe.
+    const bare = new Database(':memory:');
+    databases.push(bare);
+    bare.exec(INBOUND_SCHEMA);
+    bare
+      .prepare(
+        `INSERT INTO messages_in (id, seq, timestamp, kind, channel_type, content, trigger)
+         VALUES ('bare', 1, '2026-01-01T00:00:00.000Z', 'chat', NULL, '{}', 0)`,
+      )
+      .run();
+    expect(wrapSqliteInbound(bare).wakeEvidence()).toBe('chatter');
+  });
+
+  it('answers the wake check and the conversation root from an index, also on inboxes made before it', () => {
+    const legacy = new Database(':memory:');
+    databases.push(legacy);
+    legacy.exec(INBOUND_SCHEMA.replace(/^CREATE INDEX IF NOT EXISTS idx_messages_in_trigger_seq .*$/m, ''));
+    expect(
+      legacy.prepare("SELECT 1 FROM sqlite_master WHERE name = 'idx_messages_in_trigger_seq'").get(),
+    ).toBeUndefined();
+    migrateMessagesInTable(legacy);
+
+    const channelRow = "(channel_type IS NULL OR channel_type NOT IN ('session-echo', 'agent'))";
+    for (const sql of [
+      `SELECT 1 FROM messages_in WHERE trigger = 1 AND ${channelRow} LIMIT 1`,
+      `SELECT 1 FROM messages_in WHERE trigger = 0 AND kind IN ('chat', 'chat-sdk') AND ${channelRow} LIMIT 1`,
+      `SELECT timestamp, content FROM messages_in WHERE kind IN ('chat','chat-sdk') AND trigger = 1 AND ${channelRow}
+       ORDER BY seq ASC LIMIT 1`,
+    ]) {
+      const plan = (legacy.prepare(`EXPLAIN QUERY PLAN ${sql}`).all() as Array<{ detail: string }>)
+        .map((row) => row.detail)
+        .join('\n');
+      expect(plan).toContain('idx_messages_in_trigger_seq');
+      expect(plan).not.toContain('TEMP B-TREE');
+    }
   });
 
   it('returns only the conversation root and top-level outbound timeline', () => {
