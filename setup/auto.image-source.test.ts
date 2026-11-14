@@ -38,7 +38,12 @@ vi.mock('./environment.js', () => ({
   detectRegisteredGroups: async () => false,
   detectExistingDisplayName: async () => undefined,
 }));
-vi.mock('./logs.js', () => ({ userInput: vi.fn(), step: vi.fn(), completedStepNames: () => [] }));
+vi.mock('./logs.js', () => ({
+  userInput: vi.fn(),
+  step: vi.fn(),
+  completedStepNames: () => [],
+  redactBootstrapLog: vi.fn(),
+}));
 vi.mock('./lib/diagnostics.js', () => ({ emit: vi.fn() }));
 vi.mock('./lib/runner.js', async (original) => ({
   ...(await original<typeof import('./lib/runner.js')>()),

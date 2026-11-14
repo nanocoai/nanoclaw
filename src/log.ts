@@ -1,3 +1,11 @@
+import {
+  isRedactionPlaceholder,
+  isSecretName,
+  maskSecretValue,
+  redactSecrets,
+  SECRET_MASK,
+} from './secret-redaction.js';
+
 const LEVELS = { debug: 20, info: 30, warn: 40, error: 50, fatal: 60 } as const;
 type Level = keyof typeof LEVELS;
 
@@ -21,8 +29,9 @@ function safeStringify(v: unknown): string {
   const ancestors: unknown[] = [];
   /* eslint-disable no-catch-all/no-catch-all -- logging must never throw */
   try {
-    return JSON.stringify(v, function (this: unknown, _key, value: unknown) {
+    return JSON.stringify(v, function (this: unknown, key, value: unknown) {
       if (typeof value === 'bigint') return `${value}n`;
+      if (isSecretName(key) && isMaskable(value)) return maskField(value);
       if (typeof value !== 'object' || value === null) return value;
       while (ancestors.length && ancestors[ancestors.length - 1] !== this) ancestors.pop();
       if (ancestors.includes(value)) return '[Circular]';
@@ -36,6 +45,16 @@ function safeStringify(v: unknown): string {
   /* eslint-enable no-catch-all/no-catch-all */
 }
 
+/** Strings and objects under a secret-named key; a value that is already a placeholder stays. */
+function isMaskable(value: unknown): boolean {
+  if (typeof value === 'string') return value !== '' && !isRedactionPlaceholder(value);
+  return typeof value === 'object' && value !== null;
+}
+
+function maskField(value: unknown): string {
+  return typeof value === 'string' ? maskSecretValue(value) : SECRET_MASK;
+}
+
 function formatErr(err: unknown): string {
   if (err instanceof Error) {
     return `{ type: "${err.constructor.name}", message: "${err.message}", stack: ${err.stack} }`;
@@ -46,7 +65,8 @@ function formatErr(err: unknown): string {
 function formatData(data: Record<string, unknown>): string {
   const parts: string[] = [];
   for (const [k, v] of Object.entries(data)) {
-    parts.push(`${KEY_COLOR}${k}${RESET}=${k === 'err' ? formatErr(v) : safeStringify(v)}`);
+    const value = isSecretName(k) && isMaskable(v) ? maskField(v) : k === 'err' ? formatErr(v) : safeStringify(v);
+    parts.push(`${KEY_COLOR}${k}${RESET}=${redactSecrets(value)}`);
   }
   return parts.length ? ' ' + parts.join(' ') : '';
 }
@@ -66,11 +86,11 @@ function emit(level: Level, msg: string, data?: Record<string, unknown>): void {
   const stream = LEVELS[level] >= LEVELS.warn ? process.stderr : process.stdout;
   /* eslint-disable no-catch-all/no-catch-all -- logging must never throw: a throw here reaches uncaughtException, which exits the host */
   try {
-    stream.write(`[${ts()}] ${tag} ${MSG_COLOR}${msg}${RESET}${data ? formatData(data) : ''}\n`);
+    stream.write(`[${ts()}] ${tag} ${MSG_COLOR}${redactSecrets(msg)}${RESET}${data ? formatData(data) : ''}\n`);
   } catch {
     // e.g. a throwing getter on the data bag itself, read before safeStringify sees it.
     try {
-      process.stderr.write(`[${ts()}] ${tag} ${MSG_COLOR}${msg}${RESET} [log data unserializable]\n`);
+      process.stderr.write(`[${ts()}] ${tag} ${MSG_COLOR}${redactSecrets(msg)}${RESET} [log data unserializable]\n`);
     } catch {
       /* nowhere left to report it */
     }

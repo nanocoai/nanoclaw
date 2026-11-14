@@ -1,0 +1,3 @@
+# Built by scripts/gen-secret-rules.ts; collapsed in GitHub diffs.
+src/secret-rules.generated.ts linguist-generated=true
+src/secret-rules.samples.generated.json linguist-generated=true
