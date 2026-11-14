@@ -1,4 +1,4 @@
-import { realpathSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { processLock, writePrivate } from '../src/community-portal/index.js';
@@ -172,7 +172,11 @@ export async function runSlackJob(
     release();
   }
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
+if (
+  process.argv[1] &&
+  existsSync(process.argv[1]) &&
+  import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href
+) {
   runSlackJob(process.cwd(), {}, () => {
     if (process.send) {
       process.send({ type: 'slack-worker-ready' });

@@ -23,8 +23,18 @@
 // Usage: pnpm exec tsx scripts/skill-apply.ts <skillDir>     # plan (no writes)
 
 import { execSync } from 'node:child_process';
-import { readFileSync, existsSync, writeFileSync, appendFileSync, copyFileSync, mkdirSync, rmSync } from 'node:fs';
+import {
+  readFileSync,
+  existsSync,
+  writeFileSync,
+  appendFileSync,
+  copyFileSync,
+  mkdirSync,
+  rmSync,
+  realpathSync,
+} from 'node:fs';
 import { join, dirname } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { gitFetchBranchCommand } from './git-fetch-branch.js';
 import { gitShowToFileCommand } from './git-show-to-file.js';
 import { parseDirectives, promptVar, type Directive } from './skill-directives.js';
@@ -1121,7 +1131,11 @@ export async function removeSkill(
 }
 
 // CLI — the planner (no writes)
-if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
+if (
+  process.argv[1] &&
+  existsSync(process.argv[1]) &&
+  import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href
+) {
   const skillDir = process.argv[2];
   if (!skillDir) {
     console.error('usage: pnpm exec tsx scripts/skill-apply.ts <skillDir>');

@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import { assertCredentialIsolation } from './credential-isolation.js';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { installCommand } from './install-command.js';
 
 import { stringify as yaml } from 'yaml';
@@ -257,7 +257,11 @@ export async function storeModelCredential(value: string, host: string, root: st
   await grantSecret('static', credential.id, root);
 }
 
-if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
+if (
+  process.argv[1] &&
+  fs.existsSync(process.argv[1]) &&
+  import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href
+) {
   const [command, kind, id] = process.argv.slice(2);
   const run = async () => {
     if (command === 'grant' && kind && id) await grantSecret(kind, id);
