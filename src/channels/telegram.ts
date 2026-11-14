@@ -26,15 +26,94 @@ import * as askQuestion from './ask-question.js';
 import { tryConsume } from './telegram-pairing.js';
 
 /**
- * Dedicated bot identity, non-threaded platform (supportsThreads:false), so
- * group engagement can never be sticky-per-thread — 'mention' keeps a group
- * wiring from staying engaged forever in the single shared session.
+ * Dedicated bot identity. Topics are threaded: the Chat SDK encodes a topic
+ * as `telegram:<chatId>:<topicId>` and replies back into it. That covers forum
+ * supergroups and private chats of a bot with threaded mode on (BotFather;
+ * Bot API 9.3). A DM wiring keeps one shared session unless it opts into
+ * `session_mode 'per-thread'`; replies still land in the topic they came
+ * from. Non-forum groups are folded back to the chat by
+ * normalizeTopicThreadId, since Telegram also stamps reply-chains there with
+ * a message_thread_id.
  */
 const TELEGRAM_DEFAULTS: ChannelDefaults = {
-  dm: { engageMode: 'pattern', engagePattern: '.', threads: false, unknownSenderPolicy: 'request_approval' },
-  group: { engageMode: 'mention', threads: false, unknownSenderPolicy: 'request_approval' },
+  dm: { engageMode: 'pattern', engagePattern: '.', threads: true, unknownSenderPolicy: 'request_approval' },
+  group: { engageMode: 'mention', threads: true, unknownSenderPolicy: 'request_approval' },
   mentions: 'platform',
 };
+
+/** chatId → is_forum. Only successful getChat lookups are cached. */
+const forumChats = new Map<string, boolean>();
+
+async function isForumChat(token: string, chatId: string): Promise<boolean> {
+  const cached = forumChats.get(chatId);
+  if (cached !== undefined) return cached;
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${token}/getChat`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId }),
+    });
+    const data = (await res.json()) as { ok?: boolean; result?: { is_forum?: boolean } };
+    if (!data.ok) return false;
+    const isForum = data.result?.is_forum === true;
+    forumChats.set(chatId, isForum);
+    return isForum;
+  } catch (err) {
+    log.warn('Telegram getChat failed, treating chat as non-forum', { chatId, err });
+    return false;
+  }
+}
+
+/** Bot token → has_topics_enabled (getMe) and when it was read. */
+const botTopics = new Map<string, { enabled: boolean; at: number }>();
+const BOT_TOPICS_TTL_MS = 5 * 60_000;
+/** A "disabled" answer is re-checked sooner, so turning topics on takes effect fast. */
+const BOT_TOPICS_OFF_TTL_MS = 30_000;
+
+/**
+ * Does the bot have topics in private chats (threaded mode)? Telegram only
+ * sends a private-chat message_thread_id for topics, so when getMe can't be
+ * read and nothing is cached, assume yes: stripping a real topic would merge
+ * topic sessions and send replies outside the topic.
+ */
+async function botHasTopics(token: string): Promise<boolean> {
+  const cached = botTopics.get(token);
+  if (cached && Date.now() - cached.at < (cached.enabled ? BOT_TOPICS_TTL_MS : BOT_TOPICS_OFF_TTL_MS)) {
+    return cached.enabled;
+  }
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${token}/getMe`, { method: 'POST' });
+    const data = (await res.json()) as { ok?: boolean; result?: { has_topics_enabled?: boolean } };
+    if (!data.ok) return cached?.enabled ?? true;
+    const enabled = data.result?.has_topics_enabled === true;
+    botTopics.set(token, { enabled, at: Date.now() });
+    return enabled;
+  } catch (err) {
+    log.warn('Telegram getMe failed, keeping the private-chat topic id', { err });
+    return cached?.enabled ?? true;
+  }
+}
+
+/**
+ * Thread ids as the router should see them:
+ *  - forum supergroups and private chats with topics keep
+ *    `telegram:<chatId>:<topicId>`;
+ *  - any other third segment is a reply-chain root, not a topic, so it
+ *    collapses to the chat-level id;
+ *  - a private-chat message outside any topic gets no thread id at all, so a
+ *    per-thread DM wiring resumes the chat's thread-less session instead of
+ *    opening a `telegram:<chatId>` one beside it.
+ */
+export async function normalizeTopicThreadId(token: string, threadId: string | null): Promise<string | null> {
+  if (!threadId) return threadId;
+  const parts = threadId.split(':');
+  const isPrivate = parts.length >= 2 && /^\d+$/.test(parts[1]);
+  if (parts.length === 2) return isPrivate ? null : threadId;
+  if (parts.length !== 3) return threadId;
+  const isTopic = isPrivate ? await botHasTopics(token) : await isForumChat(token, parts[1]);
+  if (isTopic) return threadId;
+  return isPrivate ? null : `${parts[0]}:${parts[1]}`;
+}
 
 /**
  * Keep `/commands` on the message path. Adapters >= 4.31 send a message that
@@ -302,7 +381,8 @@ export function createTelegramInboundInterceptor(
   token: string,
   instanceKey: string,
 ): ChannelSetup['onInbound'] {
-  return async (platformId, threadId, message) => {
+  return async (platformId, rawThreadId, message) => {
+    const threadId = await normalizeTopicThreadId(token, rawThreadId);
     const { text, authorUserId } = readInboundFields(message);
     const botUsername = await botUsernamePromise;
 
@@ -472,7 +552,7 @@ export function createTelegramBridge(options: TelegramBridgeOptions = {}): Chann
     instance: options.instanceKey, // undefined ⇒ default instance (keyed by channelType)
     concurrency: 'concurrent',
     extractReplyContext,
-    supportsThreads: false,
+    supportsThreads: true,
     defaults: TELEGRAM_DEFAULTS,
     // No transformOutboundText: @chat-adapter/telegram >= 4.29 parses
     // CommonMark and renders escaped MarkdownV2 itself. The legacy-Markdown
