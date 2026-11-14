@@ -39,6 +39,7 @@ vi.mock('../env.js', () => ({
   }),
 }));
 
+import { fenceForCard, quoteForCard } from '../card-text.js';
 import { gatewayApprovalPresentation } from '../gateway-approval-presentation.js';
 import type { GatewayApprovalRequest } from '../gateway-providers/gateway-provider-registry.js';
 import { CardTooLongError } from './ask-question.js';
@@ -124,6 +125,14 @@ describe('Discord card limit through the bridge', () => {
     const { description } = posts[0].embeds[0];
     expect(description).toContain('\\`\\`\\`x\\`\n\\[Admin\n');
     expect(description).toContain('\n```\n](https://evil.test) <@1>\n```');
+  });
+
+  // A mark in one block would pair with the same mark in the next block's raw code.
+  it("keeps a mark in one block from pairing with the next block's code", async () => {
+    await ask('Approve', '_scratch ' + filler + '```\ny_ [Admin](https://evil.test) <@1>\n```');
+    const { description } = posts[0].embeds[0];
+    expect(description).toContain('\\_scratch ');
+    expect(description).toContain('\n```\ny_ [Admin](https://evil.test) <@1>\n```');
   });
 
   it('refuses a long gateway card instead of cutting it', async () => {
@@ -222,14 +231,34 @@ describe('Discord prose that CommonMark treats as code', () => {
     expect(result).toContain('<\u2060@1>');
     expect(result).not.toContain('||');
   });
-  it.each(['`', '['])('puts a backslash before %s in prose, but not before one already escaped', (mark) => {
-    expect(escapeDiscordCardText(`x ${mark}y`)).toBe(`x \\${mark}y`);
-    expect(escapeDiscordCardText(`x \\${mark}y`)).toBe(`x \\${mark}y`);
-    expect(escapeDiscordCardText(`x \\\\${mark}y`)).toBe(`x \\\\\\${mark}y`);
-  });
+  it.each(['`', '[', '*', '_', '~'])(
+    'puts a backslash before %s in prose, but not before one already escaped',
+    (mark) => {
+      expect(escapeDiscordCardText(`x ${mark}y`)).toBe(`x \\${mark}y`);
+      expect(escapeDiscordCardText(`x \\${mark}y`)).toBe(`x \\${mark}y`);
+      expect(escapeDiscordCardText(`x \\\\${mark}y`)).toBe(`x \\\\\\${mark}y`);
+    },
+  );
   // A link opened in prose would otherwise end at a ]( kept raw in code.
   it('keeps a link from running from prose into code', () => {
     expect(escapeDiscordCardText('[Admin `](https://evil.test)`')).toBe('\\[Admin `](https://evil.test)`');
+  });
+  // Discord pairs a mark in prose with the same mark in raw code, which ends the code early.
+  it.each(['**', '*', '~~', '__', '_'])('keeps %s in prose from pairing with code', (mark) => {
+    const code = '`b' + mark + ' [Admin](https://evil.test) <@1> ||hidden||`';
+    expect(escapeDiscordCardText(mark + 'a ' + code)).toBe(mark.replace(/./g, '\\$&') + 'a ' + code);
+  });
+  it('keeps an agent name from pairing with the message fence of an agent-to-agent card', () => {
+    const fence = fenceForCard('hi_ [Admin](https://evil.test) <@1>');
+    expect(escapeDiscordCardText(`Agent ${quoteForCard('_scratch')} wants to send a message:\n\n${fence}`)).toBe(
+      `Agent "\\_scratch" wants to send a message:\n\n${fence}`,
+    );
+  });
+  // A card's own *Label:* closes on its line, so only one at a line start stays.
+  it('keeps a label at a line start and escapes marks anywhere else', () => {
+    expect(escapeDiscordCardText('*Action:* x *y* _z_ ~~w~~\nq *Agent:* r\n*Bad: x*')).toBe(
+      '*Action:* x \\*y\\* \\_z\\_ \\~\\~w\\~\\~\nq \\*Agent:\\* r\n\\*Bad: x\\*',
+    );
   });
   // Discord drops a form feed, so a backslash before one escapes the next mark.
   it('reads a backslash before a form feed as Discord does', () => {
