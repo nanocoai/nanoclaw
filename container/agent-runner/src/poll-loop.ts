@@ -876,6 +876,30 @@ interface ResultDispatchCounts {
  * mid-turn scan.
  */
 const INTERNAL_SPAN_RE = /<internal\b[\s\S]*?<\/internal>/gi;
+
+/**
+ * An <internal> tag written as inline code — `<internal>` or `</internal>`,
+ * backticks hugging the tag, nothing word-like or another backtick outside
+ * them — is the agent TALKING ABOUT the tag, not opening or closing a
+ * scratchpad span. Shielding swaps the tag's `<` for a private-use character
+ * of the same length, so every parser below sees plain text there and string
+ * positions are unchanged; unshield restores it in whatever gets delivered.
+ *
+ * Deliberately narrow. Any other spelling of the tag keeps its markup
+ * meaning, and an <internal> that is opened and never closed keeps the text
+ * after it private (fail closed): a looser rule could turn real scratchpad
+ * into delivered text.
+ */
+const QUOTED_INTERNAL_TAG_RE = /(?<![\w`])`<(\/?internal\b[^`<>]*>`)(?![\w`])/gi;
+const SHIELDED_LT = '\uE000';
+
+export function shieldQuotedInternalTags(text: string): string {
+  return text.replace(QUOTED_INTERNAL_TAG_RE, `\`${SHIELDED_LT}$1`);
+}
+
+function unshield(text: string): string {
+  return text.includes(SHIELDED_LT) ? text.split(SHIELDED_LT).join('<') : text;
+}
 /**
  * Deliver complete <message to="...">...</message> blocks found in a mid-turn
  * assistant text segment. The SDK's final result carries only the last
@@ -934,7 +958,7 @@ export async function deliverMidTurnBlocks(
   // an explicit double-send and still delivers twice, exactly as the result
   // door always treated it.
   const segStartSeq = turnStartSeq === undefined ? 0 : maxOutboundSeq();
-  const visible = settled.replace(INTERNAL_SPAN_RE, '');
+  const visible = shieldQuotedInternalTags(settled).replace(INTERNAL_SPAN_RE, '');
   const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
   let match: RegExpExecArray | null;
   let delivered = 0;
@@ -942,7 +966,7 @@ export async function deliverMidTurnBlocks(
   while ((match = MESSAGE_RE.exec(visible)) !== null) {
     const toName = match[1];
     const rawBody = match[2];
-    const body = stripHarnessTagArtifacts(rawBody.trim());
+    const body = unshield(stripHarnessTagArtifacts(rawBody.trim()));
     const dest = findByName(toName);
     if (!dest) continue;
     // Never deliver a blank message: a body that is empty (or was only
@@ -1010,7 +1034,9 @@ const OPEN_MESSAGE_RE = /<message\b/;
  * garbage, not a reason to buffer.
  */
 export function unresolvedTailStart(input: string): number {
-  const masked = input.replace(INTERNAL_SPAN_RE, (m) => ' '.repeat(m.length));
+  // Inline-code mentions of the tag are text, not span opens. Shielding keeps
+  // the length, so the index returned is valid for the raw input.
+  const masked = shieldQuotedInternalTags(input).replace(INTERNAL_SPAN_RE, (m) => ' '.repeat(m.length));
   const candidates: number[] = [];
   const internalOpen = OPEN_INTERNAL_RE.exec(masked);
   if (internalOpen) candidates.push(internalOpen.index);
@@ -1181,7 +1207,7 @@ export async function dispatchResultText(
   // same strip here the guarantee had a final-text hole. Span content still
   // never reaches the user (the closing stripInternalTags pass removed it from
   // the scratchpad already), so nudge/scratchpad semantics are unchanged.
-  text = text.replace(INTERNAL_SPAN_RE, '');
+  text = shieldQuotedInternalTags(text).replace(INTERNAL_SPAN_RE, '');
   const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
 
   let match: RegExpExecArray | null;
@@ -1204,7 +1230,7 @@ export async function dispatchResultText(
       scratchpadParts.push(text.slice(lastIndex, match.index));
     }
     const toName = match[1];
-    const body = stripHarnessTagArtifacts(match[2].trim());
+    const body = unshield(stripHarnessTagArtifacts(match[2].trim()));
     lastIndex = MESSAGE_RE.lastIndex;
 
     // One-door delivery in task sessions: only the send_message tool delivers.
@@ -1269,7 +1295,7 @@ export async function dispatchResultText(
     scratchpadParts.push(text.slice(lastIndex));
   }
 
-  const scratchpad = stripInternalTags(scratchpadParts.join(''));
+  const scratchpad = unshield(stripInternalTags(scratchpadParts.join('')));
 
   if (scratchpad) {
     log(`[scratchpad] ${scratchpad.slice(0, 500)}${scratchpad.length > 500 ? '…' : ''}`);

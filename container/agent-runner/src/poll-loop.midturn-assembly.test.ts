@@ -278,3 +278,93 @@ describe('unresolvedTailStart', () => {
     expect(unresolvedTailStart(s)).toBe(s.length);
   });
 });
+
+// ── Inline-code mentions of the tag are text; everything else stays fail-closed ──
+//
+// A reply may talk about the tag ("my `<internal>` notes"). Only the inline-
+// code spelling is treated as text. Any other unclosed <internal> keeps what
+// follows private: the last four cases pin shapes where a looser rule (e.g.
+// "an <internal> inside a complete <message> block is body text") delivers
+// scratchpad.
+
+describe('inline-code <internal> mentions', () => {
+  const M = '<message to="discord-main">';
+
+  async function runTexts(texts: string[]): Promise<string[]> {
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      for (const text of texts) yield { type: 'text', text };
+      yield { type: 'result', text: texts[texts.length - 1] };
+    }
+    return run(events());
+  }
+  const leaked = () => deliveredTexts().filter((t) => /SECRET|DRAFT/.test(t));
+
+  it('unresolvedTailStart: an inline-code mention is settled; a bare unclosed <internal> is not', () => {
+    const quoted = `${M}I keep notes in \`<internal>\` tags.</message>`;
+    expect(unresolvedTailStart(quoted)).toBe(quoted.length);
+    const bare = `${M}part one <internal>SECRET ${M}DRAFT</message> hmm`;
+    expect(unresolvedTailStart(bare)).toBe(`${M}part one `.length);
+  });
+
+  it('a complete block whose body mentions `<internal>` delivers mid-turn, with no nudge', async () => {
+    seedDest();
+    const pushes = await runTexts([`${M}That reply sat in an \`<internal>\` note, which is never sent.</message>`]);
+
+    expect(deliveredTexts()).toEqual(['That reply sat in an `<internal>` note, which is never sent.']);
+    expect(pushes).toHaveLength(0);
+  });
+
+  it('a mention followed by a real closing scratchpad note: the reply is delivered intact', async () => {
+    seedDest();
+    const pushes = await runTexts([
+      `${M}Notes live in \`<internal>\` and \`</internal>\` tags.</message>\n<internal>done</internal>`,
+    ]);
+
+    expect(deliveredTexts()).toEqual(['Notes live in `<internal>` and `</internal>` tags.']);
+    expect(pushes).toHaveLength(0);
+  });
+
+  it('a mention split across two text events reunites and delivers once', async () => {
+    seedDest();
+    await runTexts([`${M}Notes live in \`<inter`, 'nal>` tags.</message>']);
+
+    expect(deliveredTexts()).toEqual(['Notes live in `<internal>` tags.']);
+  });
+
+  it('split block, then an unclosed scratchpad quoting a draft: nothing private is delivered', async () => {
+    seedDest();
+    await runTexts([
+      `${M}part one `,
+      `<internal>SECRET tool output. draft: ${M}DRAFT</message> not sure`,
+      ' yet</internal> part two</message>',
+    ]);
+
+    expect(leaked()).toEqual([]);
+  });
+
+  it('prose mentioning the message tag, then an unclosed scratchpad with a draft: only the real reply', async () => {
+    seedDest();
+    await runTexts([
+      `I will wrap with ${M} from now on.\n<internal>SECRET plan. draft: ${M}DRAFT</message> hmm`,
+      ` more SECRET</internal>${M}real reply</message>`,
+    ]);
+
+    expect(leaked()).toEqual([]);
+    expect(deliveredTexts()).toContain('real reply');
+  });
+
+  it('a scratchpad opened inside a block and never closed is not delivered', async () => {
+    seedDest();
+    await runTexts([`${M}part one <internal>SECRET: remember to end with </message> later`]);
+
+    expect(deliveredTexts()).toEqual([]);
+  });
+
+  it('backticks that belong to neighbouring code spans do not turn a real scratchpad into text', async () => {
+    seedDest();
+    await runTexts([`${M}ran \`ls\`<internal>\`cmd\` SECRET</internal> all good</message>`]);
+
+    expect(deliveredTexts()).toEqual(['ran `ls` all good']);
+  });
+});
