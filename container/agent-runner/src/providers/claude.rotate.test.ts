@@ -139,8 +139,11 @@ describe('claude maybeRotateContinuation', () => {
     expect(fs.existsSync(p)).toBe(false);
   });
 
-  it('returns null for an unknown session id', () => {
+  it('rotates a session whose transcript is gone, with nothing to archive or move', () => {
+    const other = writeTranscript('sess-other', 4096);
     const provider = createProvider('claude');
-    expect(provider.maybeRotateContinuation!('does-not-exist', CWD)).toBeNull();
+    expect(provider.maybeRotateContinuation!('does-not-exist', CWD)).toBe('transcript not found');
+    expect(fs.existsSync(path.join(tmp, 'conversations'))).toBe(false);
+    expect(fs.readdirSync(path.dirname(other))).toEqual(['sess-other.jsonl']);
   });
 });

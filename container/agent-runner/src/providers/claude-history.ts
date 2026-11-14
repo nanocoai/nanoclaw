@@ -209,9 +209,9 @@ function formatTranscriptMarkdown(
 }
 
 /**
- * Before resuming, drop a transcript that has grown too large or too old to
- * cold-resume within the host's idle ceiling. Archives what it can, moves the
- * `.jsonl` aside, and returns the reason; null keeps resuming.
+ * Before resuming, drop a transcript that is gone or has grown too large or too
+ * old to cold-resume within the host's idle ceiling. Archives what it can, moves
+ * the `.jsonl` aside, and returns the reason; null keeps resuming.
  */
 export function rotateClaudeContinuation(
   input: ClaudeContinuationRotationInput,
@@ -221,7 +221,9 @@ export function rotateClaudeContinuation(
     path.join(claudeConfigDirectory(), 'projects'),
     `${input.continuation}.jsonl`,
   );
-  if (!transcriptPath) return null;
+  // Claude Code deletes old transcripts (cleanupPeriodDays, 30 by default).
+  // Resuming one fails the turn with "No conversation found", so start fresh.
+  if (!transcriptPath) return 'transcript not found';
 
   try {
     const size = fs.statSync(transcriptPath).size;
