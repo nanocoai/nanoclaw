@@ -26,6 +26,7 @@ describe('setup central-DB inspection', () => {
     const projectRoot = tempRoot();
     await expect(inspectCentralDb(projectRoot)).resolves.toEqual({
       displayName: null,
+      owners: 0,
       registeredGroups: 0,
       derivedGroups: 0,
     });
@@ -52,6 +53,7 @@ describe('setup central-DB inspection', () => {
 
     await expect(inspectCentralDb(projectRoot)).resolves.toEqual({
       displayName: 'Operator',
+      owners: 0,
       registeredGroups: 1,
       derivedGroups: 1,
     });
@@ -59,6 +61,18 @@ describe('setup central-DB inspection', () => {
     const inspected = new Database(dbPath, { readonly: true });
     expect(inspected.pragma('journal_mode', { simple: true })).toBe('delete');
     inspected.close();
+  });
+
+  it('counts global owners only', async () => {
+    const projectRoot = tempRoot();
+    fs.mkdirSync(path.join(projectRoot, 'data'));
+    const raw = new Database(path.join(projectRoot, 'data', 'v2.db'));
+    raw.exec(`
+      CREATE TABLE user_roles (user_id TEXT, role TEXT, agent_group_id TEXT);
+      INSERT INTO user_roles VALUES ('slack:U1', 'owner', NULL), ('slack:U2', 'admin', NULL), ('slack:U3', 'owner', 'ag-1');
+    `);
+    raw.close();
+    await expect(inspectCentralDb(projectRoot)).resolves.toMatchObject({ owners: 1 });
   });
 
   it('finds the newest active session of an agent group by folder', async () => {
