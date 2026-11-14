@@ -5,6 +5,7 @@ import { processLock, writePrivate } from '../src/community-portal/index.js';
 import {
   readSlackJob,
   slackJobFile,
+  slackJobReason,
   slackProgressClient,
   withSetupLock,
   type SlackJob,
@@ -39,6 +40,16 @@ async function receive(job: SlackJob, body: object): Promise<Delivery> {
   if (!response.ok) throw Object.assign(new Error('Slack installation request failed.'), { status: response.status });
   return response.json() as Promise<Delivery>;
 }
+/** No terminal sees this failure, so the error carries the bounce headline and its first reason line. */
+export async function failInstall(
+  _step: string,
+  msg: string,
+  _hint?: string,
+  _rawLog?: string,
+  detail?: string,
+): Promise<never> {
+  throw new Error(detail ? `${msg}: ${detail}` : msg);
+}
 async function install(job: SlackJob): Promise<void> {
   const { runChannelSkill } = await import('./channels/run-channel-skill.js');
   if (job.context.templateAgentId) process.env.NANOCLAW_TEMPLATE_AGENT_ID = job.context.templateAgentId;
@@ -58,9 +69,7 @@ async function install(job: SlackJob): Promise<void> {
     },
     confirm: async () => false,
     openUrl: async () => {},
-    fail: async () => {
-      throw new Error('Slack channel installation needs attention.');
-    },
+    fail: failInstall,
   });
 }
 export async function runSlackJob(
@@ -154,6 +163,8 @@ export async function runSlackJob(
         ) {
           job.status = 'failed';
           job.error = [401, 403].includes(error.status) ? 'sign_in_required' : error.code || 'install_needs_attention';
+          if (applying && error instanceof Error && error.message)
+            job.reason = slackJobReason(error.message, [job.identity.token, job.app.appToken, job.app.botToken]);
           await save();
           await deps.report(job).catch(() => {});
           return;

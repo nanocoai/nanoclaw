@@ -6,7 +6,13 @@ import { pathToFileURL } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const host = vi.hoisted(() => ({ root: '', service: 'running', groups: 0, channels: {} as Record<string, string> }));
+const host = vi.hoisted(() => ({
+  root: '',
+  service: 'running',
+  groups: 0,
+  wired: {} as Record<string, string>,
+  channels: {} as Record<string, string>,
+}));
 vi.mock('child_process', async (importOriginal) => ({
   ...(await importOriginal<typeof import('child_process')>()),
   execSync: vi.fn((command: string) => {
@@ -30,7 +36,11 @@ vi.mock('./platform.js', () => ({
   hasSystemd: () => true,
 }));
 vi.mock('./central-db-inspection.js', () => ({
-  inspectCentralDb: async () => ({ registeredGroups: host.groups, derivedGroups: 0 }),
+  inspectCentralDb: async () => ({
+    registeredGroups: host.groups,
+    derivedGroups: 0,
+    lastWiredAt: host.wired,
+  }),
 }));
 vi.mock('./lib/registry-state.js', () => ({
   readImageSource: () => 'hardened',
@@ -46,6 +56,7 @@ beforeEach(() => {
   host.root = fs.mkdtempSync(path.join(os.tmpdir(), 'nc-verify-slack-'));
   host.service = 'running';
   host.groups = 0;
+  host.wired = {};
   host.channels = {};
   fs.mkdirSync(path.join(host.root, 'data'));
   fs.writeFileSync(path.join(host.root, '.env'), 'ANTHROPIC_API_KEY=fixture-only\n');
@@ -60,11 +71,17 @@ afterEach(() => {
   fs.rmSync(host.root, { recursive: true, force: true });
 });
 
-function saveJob(status: string, expiresAt = new Date(Date.now() + 60_000).toISOString()): void {
+function saveJob(
+  status: string,
+  expiresAt = new Date(Date.now() + 60_000).toISOString(),
+  extra: Record<string, string> = {},
+): void {
   fs.writeFileSync(
     path.join(host.root, 'data/slack-install.json'),
     JSON.stringify({
+      ...extra,
       status,
+      createdAt: '2026-11-01T00:00:00.000Z',
       expiresAt,
       app: { appId: 'A_TEST', appToken: 'xapp-private-fixture' },
       identity: { token: 'private-install-fixture', account_id: 'acct-fixture', install_id: 'install-fixture' },
@@ -97,6 +114,55 @@ describe('verification during background Slack installation', () => {
     host.groups = 1;
     await expect(run([])).rejects.toThrow('verify_exit');
     expect(fields()).toMatchObject({ STATUS: 'failed', SLACK_INSTALL: status });
+  });
+
+  it('names why a job failed, without its secrets', async () => {
+    saveJob('failed', undefined, {
+      error: 'install_needs_attention',
+      reason: 'Resolve your DM channel: exit 127: jq: command not found\nBearer xapp-private-fixture',
+    });
+    host.groups = 1;
+    await expect(run([])).rejects.toThrow('verify_exit');
+    expect(fields()).toMatchObject({
+      STATUS: 'failed',
+      SLACK_INSTALL: 'failed',
+      SLACK_INSTALL_REASON: 'Resolve your DM channel: exit 127: jq: command not found Bearer [REDACTED]',
+    });
+    saveJob('failed', undefined, { error: 'sign_in_required' });
+    await expect(run([])).rejects.toThrow('verify_exit');
+    expect(fields()).toMatchObject({ SLACK_INSTALL_REASON: 'sign_in_required' });
+  });
+
+  it.each(['failed', 'expired'])(
+    'sets aside a saved %s job once Slack is set up and a Slack chat was wired since',
+    async (status) => {
+      saveJob(status, undefined, { error: 'install_needs_attention', reason: 'Resolve your DM channel: exit 127' });
+      host.channels = { SLACK_BOT_TOKEN: 'fixture-only', SLACK_APP_TOKEN: 'fixture-only' };
+      host.groups = 1;
+      host.wired = { slack: '2026-11-02T00:00:00.000Z' };
+      await expect(run([])).resolves.toBeUndefined();
+      expect(fields()).toMatchObject({ STATUS: 'success', CONFIGURED_CHANNELS: 'slack' });
+      expect(fields()).not.toHaveProperty('SLACK_INSTALL');
+      expect(fields()).not.toHaveProperty('SLACK_INSTALL_REASON');
+    },
+  );
+
+  it('keeps a failed job unless a Slack chat was wired after it began and Slack is set up', async () => {
+    saveJob('failed');
+    host.groups = 1;
+    host.channels = { SLACK_BOT_TOKEN: 'fixture-only', SLACK_APP_TOKEN: 'fixture-only' };
+    host.wired = { telegram: '2026-11-02T00:00:00.000Z' };
+    await expect(run([])).rejects.toThrow('verify_exit');
+    expect(fields()).toMatchObject({ STATUS: 'failed', SLACK_INSTALL: 'failed' });
+    // A chat wired before the job began (an older Slack app) proves nothing.
+    host.wired = { slack: '2026-10-31T00:00:00.000Z' };
+    await expect(run([])).rejects.toThrow('verify_exit');
+    expect(fields()).toMatchObject({ STATUS: 'failed', SLACK_INSTALL: 'failed' });
+    host.wired = { slack: '2026-11-02T00:00:00.000Z' };
+    await expect(run([])).resolves.toBeUndefined();
+    host.channels = {};
+    await expect(run([])).rejects.toThrow('verify_exit');
+    expect(fields()).toMatchObject({ STATUS: 'failed', SLACK_INSTALL: 'failed' });
   });
 
   it('does not mistake an expired pending job for progress', async () => {
