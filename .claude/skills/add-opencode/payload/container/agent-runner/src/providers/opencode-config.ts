@@ -198,10 +198,8 @@ export function buildOpenCodeConfig(
   options: ProviderOptions,
   configuration?: ResolvedRuntimeConfiguration,
 ): Record<string, unknown> {
-  const inference = (configuration?.inference ?? resolveOpenCodeInference(options, process.env)) as Record<
-    string,
-    unknown
-  >;
+  const inference = (configuration?.inference ??
+    resolveOpenCodeInference(options, options.env ?? process.env)) as Record<string, unknown>;
   return {
     ...inference,
     permission: configuration ? configuration.executionPolicy : resolveOpenCodeExecutionPolicy(),
