@@ -317,6 +317,7 @@
           - ".claude/skills/add-clidash/**"
           - ".claude/skills/add-dashboard/**"
           - ".claude/skills/add-dial-tool/**"
+          - ".claude/skills/add-keenable-tool/**"
           - ".claude/skills/add-macos-statusbar/**"
           - ".claude/skills/add-ollama-tool/**"
           - ".claude/skills/add-rtk/**"

@@ -209,6 +209,7 @@
     "mcp-remote": {
       "version": "0.1.38",
       "sources": [
+        ".claude/skills/add-keenable-tool/SKILL.md json block",
         ".claude/skills/add-tavily-tool/SKILL.md json block"
       ]
     },
