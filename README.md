@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="assets/nanoclaw-logo.png" alt="NanoClaw" width="400">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/nanoclaw-logo-dark.png">
+    <img src="assets/nanoclaw-logo.png" alt="NanoClaw" width="400">
+  </picture>
 </p>
 
 <p align="center">
@@ -28,7 +31,8 @@ NanoClaw provides that same core functionality in a codebase small enough to und
 
 ## Quick start
 
-You need macOS or Linux (on Windows, run inside WSL2), git, about 4 GB of RAM, and an account with a model provider such as Claude. Setup installs Node, pnpm, jq, and Docker if they are missing.
+> [!IMPORTANT]
+> You need macOS or Linux (on Windows, run inside WSL2), git, about 4 GB of RAM, and an account with a model provider such as Claude. Setup installs Node, pnpm, jq, and Docker if they are missing.
 
 ```bash
 git clone https://github.com/nanocoai/nanoclaw.git
@@ -96,7 +100,7 @@ See the [Migrate from v1](https://docs.nanoclaw.dev/migrate-from-v1) guide, [doc
 
 ## What it supports
 
-- **Chat apps.** A built-in terminal chat, plus skills for Slack, Microsoft Teams, Telegram, Discord, WhatsApp (linked device or Cloud API), Signal, iMessage, Matrix, Mattermost, Google Chat, Webex, WeChat, Delta Chat, Dial (phone calls and SMS), email via Resend, GitHub, Linear, and Emacs. Setup connects the common ones for you; the rest install with `/add-<channel>`. Run one or many at once.
+- **Chat apps.** A built-in terminal chat, plus a skill for each chat app (list below). Setup's menu connects nine of them; the rest install with `/add-<channel>`. Run one or many at once.
 - **One Slack app per agent.** With a free NanoClaw account, setup creates each agent's own Slack app (manifest, avatar, and workspace install), so there are no tokens to paste. Teammates you spawn from chat get their own bot and memory too.
 - **Agent runtimes.** Claude is built in, through Anthropic's Claude Agent SDK with Claude Code's full toolset. Codex, Cursor, and OpenCode install as skills (`/add-codex`, `/add-cursor`, `/add-opencode`). Each agent group picks its own. An agent group is one agent with its own folder, memory, and settings.
 - **Credential gateways.** Agents never hold your keys. A gateway outside the container adds credentials to outbound requests and can hold a request until you approve it in chat. Setup installs OneCLI by default; Iron Proxy is the other choice under **Advanced**. Both are skills behind one gateway seam. See [Gateways](https://docs.nanoclaw.dev/operate/gateways).
@@ -104,6 +108,33 @@ See the [Migrate from v1](https://docs.nanoclaw.dev/migrate-from-v1) guide, [doc
 - **Scheduled tasks.** One-off or recurring jobs, with optional [gate scripts](https://docs.nanoclaw.dev/guides/scheduled-tasks) that skip waking the agent when there is no work.
 - **Web access.** Search and fetch, plus a headless Chromium browser in the agent image.
 - **Agent templates.** `ncl groups create --template <ref>` stamps a ready-to-run agent (instructions, MCP tools, and skills, no secrets) from the local `templates/` folder. Setup, and an agent creating another agent, can also fetch one from the [public library](https://github.com/nanocoai/nanoclaw-templates). See [Templates](https://docs.nanoclaw.dev/templates/overview).
+
+<details>
+<summary><strong>All chat apps</strong></summary>
+
+| Chat app | Skill | In setup's menu |
+|---|---|---|
+| Slack | `/add-slack` | ✓ |
+| Microsoft Teams | `/add-teams` | ✓ |
+| Telegram | `/add-telegram` | ✓ |
+| Discord | `/add-discord` | ✓ |
+| WhatsApp (linked device) | `/add-whatsapp` | ✓ |
+| Signal | `/add-signal` | ✓ |
+| iMessage | `/add-imessage` | ✓ |
+| Mattermost | `/add-mattermost` | ✓ |
+| Dial (phone calls and SMS) | `/add-dial` | ✓ |
+| WhatsApp Cloud API | `/add-whatsapp-cloud` | |
+| Matrix | `/add-matrix` | |
+| Google Chat | `/add-gchat` | |
+| Webex | `/add-webex` | |
+| WeChat | `/add-wechat` | |
+| Delta Chat | `/add-deltachat` | |
+| Email via Resend | `/add-resend` | |
+| GitHub | `/add-github` | |
+| Linear | `/add-linear` | |
+| Emacs | `/add-emacs` | |
+
+</details>
 
 ## Philosophy
 
@@ -117,7 +148,8 @@ See the [Migrate from v1](https://docs.nanoclaw.dev/migrate-from-v1) guide, [doc
 
 ## Accounts and what leaves your machine
 
-NanoClaw works without an account.
+> [!NOTE]
+> NanoClaw works without an account.
 
 - **Setup diagnostics.** Setup sends anonymous events (which steps ran, how they ended, your platform) to PostHog under a random install id. To turn them off, run `export NANOCLAW_NO_DIAGNOSTICS=1` before `bash nanoclaw.sh`.
 - **Your model and chat apps.** Your messages and files go to the model provider and chat apps you connect, not to NanoClaw.
@@ -199,8 +231,14 @@ Want a skill that doesn't exist yet? Search the open issues, then open a [capabi
 
 ## Architecture
 
-```
-chat apps → host (router) → inbound.db → agent container → outbound.db → host (delivery) → chat apps
+```mermaid
+flowchart LR
+  chat([Chat app]) -->|message| router[Host: router]
+  router -->|writes| inbound[(inbound.db)]
+  inbound -->|polls| agent[Agent container]
+  agent -->|writes| outbound[(outbound.db)]
+  outbound -->|polls| delivery[Host: delivery]
+  delivery -->|reply| chat
 ```
 
 1. One Node host process routes each incoming message from its messaging group to every wired agent group, and from there to a session.
@@ -225,7 +263,8 @@ See [Architecture](https://docs.nanoclaw.dev/concepts/architecture).
 
 ## FAQ
 
-### Is this secure?
+<details>
+<summary><strong>Is this secure?</strong></summary>
 
 Agents run in containers and see only what you mount. On top of that:
 
@@ -236,26 +275,41 @@ Agents run in containers and see only what you mount. On top of that:
 
 You should still review what you run, and the codebase is small enough that you can. See the [security model](docs/SECURITY.md).
 
-### Why Docker?
+</details>
+
+<details>
+<summary><strong>Why Docker?</strong></summary>
 
 It works the same on macOS, Linux, and Windows (WSL2), with a mature ecosystem. Docker is the only container runtime that ships today; the runtime sits behind a driver seam.
 
-### Can I use other models?
+</details>
+
+<details>
+<summary><strong>Can I use other models?</strong></summary>
 
 Yes:
 
 - **Other runtimes.** Add a skill (`/add-opencode` for OpenRouter, OpenAI, Google, DeepSeek, and more; `/add-codex`; `/add-cursor`) and pick it per agent group.
 - **Any Claude API-compatible endpoint.** Choose **Advanced** in setup and fill in *Anthropic API base URL* and *Anthropic auth token*. The token is stored in the gateway, not in `.env`.
 
-### How do I debug issues?
+</details>
+
+<details>
+<summary><strong>How do I debug issues?</strong></summary>
 
 Ask your coding agent in the checkout: "Why isn't the scheduler running?" "What's in the recent logs?" "Why did this message not get a response?" Or run `/debug`. See [Troubleshooting](https://docs.nanoclaw.dev/operate/troubleshooting).
 
-### Why isn't setup working for me?
+</details>
+
+<details>
+<summary><strong>Why isn't setup working for me?</strong></summary>
 
 When a step fails, setup can hand it to Claude Code to diagnose and retry. Running `bash nanoclaw.sh` again is safe: it keeps your install and carries on. Still stuck? Run `/debug` in your coding agent. If you find an issue likely to affect other users, open a PR against the setup step or skill.
 
-### How do I uninstall NanoClaw?
+</details>
+
+<details>
+<summary><strong>How do I uninstall NanoClaw?</strong></summary>
 
 ```bash
 bash nanoclaw.sh --uninstall
@@ -267,6 +321,8 @@ bash nanoclaw.sh --uninstall
 - **Backs up** your `.env` inside the folder. Copy the backup out before you delete the folder.
 
 See [Uninstall](https://docs.nanoclaw.dev/operate/uninstall).
+
+</details>
 
 ## Community
 
