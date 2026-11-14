@@ -262,4 +262,40 @@ describe('approval response authorization', () => {
     expect(handler).toHaveBeenCalledTimes(1);
     expect(await getPendingApproval('appr-4')).toBeUndefined();
   });
+
+  it('a typed approval reply resolves only for the approver in the card chat', async () => {
+    const { registerApprovalHandler } = await import('./primitive.js');
+    const { handleApprovalTextReply } = await import('./response-handler.js');
+    const handler = vi.fn().mockResolvedValue(undefined);
+    registerApprovalHandler('typed_reply_action', handler);
+
+    await createPendingApproval({
+      approval_id: 'appr-5-abc123',
+      session_id: 'sess-1',
+      request_id: 'appr-5-abc123',
+      action: 'typed_reply_action',
+      payload: JSON.stringify({}),
+      created_at: now(),
+      channel_type: 'matrix',
+      platform_id: 'matrix:@dana:hs',
+      title: 'Typed approval',
+      options_json: JSON.stringify([]),
+      approver_user_id: 'matrix:@dana:hs',
+    });
+    const reply = (senderId: string, text: string) =>
+      handleApprovalTextReply({
+        channelType: 'matrix',
+        platformId: 'matrix:@dana:hs',
+        threadId: null,
+        message: { id: 'm', kind: 'chat-sdk', content: JSON.stringify({ text, senderId }), timestamp: now() },
+      });
+
+    expect(await reply('matrix:@mallory:hs', 'approve abc123')).toBe(true);
+    expect(handler).not.toHaveBeenCalled();
+    expect(await getPendingApproval('appr-5-abc123')).toBeDefined();
+
+    expect(await reply('matrix:@dana:hs', 'APPROVE abc123')).toBe(true);
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(await getPendingApproval('appr-5-abc123')).toBeUndefined();
+  });
 });
