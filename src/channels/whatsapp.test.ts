@@ -116,17 +116,19 @@ describe('answerPendingQuestion', () => {
       const questions = fresh();
       const mainAgent = { label: 'Main agent', selectedLabel: '✅ Main agent', value: 'ag-main' };
       const newer = { questionId: nextId, options: [mainAgent] };
-      await answerPendingQuestion(
+      let decide!: (result: typeof outcome) => void;
+      const answering = answerPendingQuestion(
         questions,
         'chat@g.us',
         '/approve',
         'owner@s.whatsapp.net',
-        async () => {
-          questions.set('chat@g.us', newer);
-          return outcome;
-        },
+        () => new Promise((resolve) => (decide = resolve)),
         vi.fn(),
       );
+      // The new card arrives while the host still holds the answer.
+      questions.set('chat@g.us', newer);
+      decide(outcome);
+      await answering;
       expect(questions.get('chat@g.us')).toBe(newer);
       // Only the new card's options answer it, so the first question can't be the one left open.
       const onAction = vi.fn(async () => 'accepted' as const);
