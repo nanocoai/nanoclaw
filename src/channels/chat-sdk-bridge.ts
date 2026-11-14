@@ -592,6 +592,8 @@ export function splitForLimit(text: string, limit: number): string[] {
     if (cut <= 0) cut = remaining.lastIndexOf('\n', limit);
     if (cut <= 0) cut = remaining.lastIndexOf(' ', limit);
     if (cut <= 0) cut = limit;
+    // A lone half of an emoji can't be encoded: Slack's client throws "URI malformed" and retries for ~30 min.
+    if (cut > 1 && isHighSurrogate(remaining.charCodeAt(cut - 1))) cut--;
     chunks.push(remaining.slice(0, cut).trimEnd());
     remaining = remaining.slice(cut).trimStart();
   }
