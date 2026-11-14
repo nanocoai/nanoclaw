@@ -685,10 +685,11 @@ describe('splitCardText', () => {
     expect(blocks.join('').split('\n``````\n').join('')).toBe(text);
   });
 
+  // The first marker is mid-line, as in the whole text, so only the last opens a fence.
   it('never cuts a fence marker in half', () => {
     expect(splitCardText('x'.repeat(48) + '```\ncode\n```', (t) => t, 50)).toEqual([
       'x'.repeat(48),
-      '\u2060```\ncode\n```',
+      '\u2060```\ncode\n```\n```',
     ]);
   });
 
