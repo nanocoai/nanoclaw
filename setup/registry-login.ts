@@ -1073,7 +1073,9 @@ async function maybeAskEmailConsent(api: string, cred: AccountCredential, curren
   p.log.message(CONSENT_LINES.join('\n'));
   const answer = await p.confirm({
     message: 'Email me security and project updates?',
-    initialValue: true,
+    // Explicit, because clack preselects Yes when this is left out. Enter
+    // must mean no: a preselected yes is not consent.
+    initialValue: false,
     active: 'Yes',
     inactive: 'No',
   });
