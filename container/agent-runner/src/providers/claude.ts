@@ -359,6 +359,10 @@ export class ClaudeProvider implements AgentProvider {
               .map((block) => block.text)
               .join('');
             if (text) yield { type: 'text', text };
+            const toolNames = (content as Array<{ type?: string; name?: string }>)
+              .filter((block) => block.type === 'tool_use' && typeof block.name === 'string')
+              .map((block) => block.name as string);
+            if (toolNames.length > 0) yield { type: 'tool_use', names: toolNames };
           }
         } else if (message.type === 'result') {
           // `result` text exists only on subtype:"success"; error subtypes

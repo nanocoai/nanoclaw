@@ -413,6 +413,11 @@ export async function processQuery(
   // never re-matched. Dropped at the turn boundary: a block that never
   // closes anywhere is the wrap-nudge's job, not the buffer's.
   let midTurnTail = '';
+  // Outbound seq when the agent last started work other than sending (any
+  // tool call except send_message & co.). A reply row after it means the user
+  // heard back once the work was done; an "on it" sent before the work does
+  // not. Without tool_use events this stays at the turn boundary.
+  let lastWorkSeq = turnStartSeq;
   // Prompt queue for the exchange hook — each result event consumes the
   // oldest unanswered prompt. Retries append the original user prompt at
   // their position in the provider input queue.
@@ -450,6 +455,27 @@ export async function processQuery(
     query.push(prompt);
     queuedTurns.push({ routing: { ...routing }, unwrappedNudged, taskBlockNudged, nudgedWindow: retryOf });
     archivePrompts.push(archivePrompts[0] ?? initialPrompt);
+  };
+  // A chat turn that ends without a reply after its last work: the final
+  // output has no <message> block (only <internal> notes, or nothing) and the
+  // only send, if any, was an "on it" made before the work. The wrap-nudge
+  // never sees this (nothing unwrapped), so the user waits forever. A final
+  // block — delivered, a skipped repeat, or missed — is the wrap-nudge's
+  // business, not this one's. Shares the wrap-nudge's once-per-turn guard.
+  const endedWithoutReply = (turn: RoutingContext, afterSeq: number, finalText: string): boolean =>
+    !unwrappedNudged &&
+    !/<message\b/.test(finalText.replace(INTERNAL_SPAN_RE, '')) &&
+    !turn.taskRun &&
+    !turn.failureNoticeWake &&
+    !!turn.platformId &&
+    !!turn.channelType &&
+    turn.channelType !== 'agent' &&
+    !chatRowsInWindow(afterSeq).some(isUserReplyRow);
+  const pushSilentEndNudge = (): void => {
+    unwrappedNudged = true;
+    const sentThisTurn = chatRowsInWindow(turnStartSeq);
+    log(`Silent-end nudge pushed: no reply after the last tool call (quoting ${sentThisTurn.length} send(s))`);
+    pushRetry(buildSilentEndNudge(sentThisTurn, getAllDestinations()), { after: turnStartSeq, upto: maxOutboundSeq() });
   };
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
@@ -608,6 +634,8 @@ export async function processQuery(
           midTurnReplied += scan.replied;
           midTurnTail = scan.tail;
         }
+      } else if (event.type === 'tool_use') {
+        if (event.names.some((name) => !isDeliveryTool(name))) lastWorkSeq = maxOutboundSeq();
       } else if (event.type === 'result') {
         // A result — with or without text — means the turn is done. Mark
         // the initial batch completed now so the host sweep doesn't see
@@ -653,11 +681,17 @@ export async function processQuery(
           // <message> block was delivered this turn. If a reply already went
           // out as a block, the unwrapped tail stays in the scratchpad log.
           const willRetryWrapping = !failed && hasUnwrapped && !unwrappedNudged;
+          const willNudgeSilentEnd =
+            !failed && !willRetryWrapping && !willRetryTaskBlocks && endedWithoutReply(routing, lastWorkSeq, resultText);
           notifyExchangeComplete(onExchangeComplete, {
             prompt: archivePrompts[0] ?? initialPrompt,
             result: archivedResult,
             continuation: queryContinuation ?? initialContinuation,
-            status: failed ? 'error' : hasUnwrapped || willRetryTaskBlocks ? 'undelivered' : 'completed',
+            status: failed
+              ? 'error'
+              : hasUnwrapped || willRetryTaskBlocks || willNudgeSilentEnd
+                ? 'undelivered'
+                : 'completed',
           });
           if (willRetryWrapping) {
             unwrappedNudged = true;
@@ -690,10 +724,14 @@ export async function processQuery(
               .join(', ');
             pushRetry(buildTaskBlockNudge(taskBlocks, names));
           }
+          if (willNudgeSilentEnd) pushSilentEndNudge();
           // Each result consumes one input; retries carry their original
           // user prompt at their own position in the FIFO queue.
           archivePrompts.shift();
-        } else archivePrompts.shift();
+        } else {
+          if (endedWithoutReply(routing, lastWorkSeq, '')) pushSilentEndNudge();
+          archivePrompts.shift();
+        }
         // Turn boundary: reset the per-turn sent count after the result's
         // nudge decision has used it. A nudge retry re-counts via its own
         // text events before the retry result, so resetting on every result
@@ -706,6 +744,7 @@ export async function processQuery(
         midTurnSent = 0;
         midTurnReplied = 0;
         turnStartSeq = maxOutboundSeq();
+        lastWorkSeq = turnStartSeq;
         midTurnTail = '';
         nudgedWindow = undefined;
         const next = queuedTurns.shift();
@@ -1064,6 +1103,24 @@ function chatRowsInWindow(afterSeq: number, uptoSeq = Infinity): MessageOutRow[]
   }
 }
 
+/** NanoClaw MCP tools that put something in front of the user. */
+const DELIVERY_TOOLS = new Set(['send_message', 'send_file', 'send_card', 'ask_user_question', 'edit_message']);
+
+function isDeliveryTool(name: string): boolean {
+  const m = /^mcp__nanoclaw__(.+)$/.exec(name);
+  return !!m && DELIVERY_TOOLS.has(m[1]);
+}
+
+/** A row the user reads as a reply: not a reaction, not a message to another agent. */
+function isUserReplyRow(row: MessageOutRow): boolean {
+  if (row.channel_type === 'agent') return false;
+  try {
+    return (JSON.parse(row.content) as { operation?: unknown }).operation !== 'reaction';
+  } catch {
+    return true;
+  }
+}
+
 const INFORMED_NUDGE_QUOTE_MAX = 200;
 const INFORMED_NUDGE_ROWS_MAX = 3;
 
@@ -1079,6 +1136,39 @@ export function buildInformedWrapNudge(
   destinations: DestinationEntry[],
 ): string {
   const names = destinations.map((d) => d.name).join(', ');
+  const clip = (text: string): string => escapePromptXml(clipCodePoints(text, INFORMED_NUDGE_QUOTE_MAX));
+  const sent = quoteSentRows(rows, destinations);
+  return (
+    `<system>Your final text was not delivered — it was not wrapped in <message to="name">...</message> blocks:\n` +
+    `<undelivered_text>${clip(finalText)}</undelivered_text>\n` +
+    `Earlier in that turn you already sent:\n${sent.join('\n')}\n` +
+    `If what was sent is the full reply, to where it was owed, respond with only <internal>done</internal> and nothing more will be sent. ` +
+    `Otherwise send only what is still missing, wrapped in <message to="name">...</message>, without repeating what already went out. ` +
+    `Your destinations: ${escapePromptXml(names)}.</system>`
+  );
+}
+
+/**
+ * Nudge for a chat turn that ended without a reply after its last tool call
+ * (see endedWithoutReply). Quotes what did go out, so an "on it" is visibly
+ * not the answer, and leaves a `done` exit when nothing is owed.
+ */
+export function buildSilentEndNudge(rows: MessageOutRow[], destinations: DestinationEntry[]): string {
+  const names = destinations.map((d) => d.name).join(', ');
+  const said =
+    rows.length > 0
+      ? `Earlier in that turn you sent:\n${quoteSentRows(rows, destinations).join('\n')}\n`
+      : 'Nothing was sent in that turn.\n';
+  return (
+    `<system>Your turn ended without a reply after your last tool call: the final output had no <message to="name">...</message> block, and <internal> content is never sent.\n` +
+    said +
+    `If the user still needs an answer (an acknowledgement like "on it" is not an answer), send it now wrapped in <message to="name">...</message>, without repeating what already went out. ` +
+    `If they already have everything, or no reply is owed, respond with only <internal>done</internal>. ` +
+    `Your destinations: ${escapePromptXml(names)}.</system>`
+  );
+}
+
+function quoteSentRows(rows: MessageOutRow[], destinations: DestinationEntry[]): string[] {
   // Name where each send went, so a reply sent to the wrong place is not taken as done.
   const destinationOf = (row: MessageOutRow): string =>
     destinations.find((d) =>
@@ -1108,14 +1198,7 @@ export function buildInformedWrapNudge(
     return `<sent_message to="${escapePromptXml(destinationOf(row))}">${clip(text || '[non-text message]')}</sent_message>`;
   });
   if (rows.length > INFORMED_NUDGE_ROWS_MAX) sent.push(`(+${rows.length - INFORMED_NUDGE_ROWS_MAX} more)`);
-  return (
-    `<system>Your final text was not delivered — it was not wrapped in <message to="name">...</message> blocks:\n` +
-    `<undelivered_text>${clip(finalText)}</undelivered_text>\n` +
-    `Earlier in that turn you already sent:\n${sent.join('\n')}\n` +
-    `If what was sent is the full reply, to where it was owed, respond with only <internal>done</internal> and nothing more will be sent. ` +
-    `Otherwise send only what is still missing, wrapped in <message to="name">...</message>, without repeating what already went out. ` +
-    `Your destinations: ${escapePromptXml(names)}.</system>`
-  );
+  return sent;
 }
 
 /** First `max` code points of `text`, with an ellipsis when cut. Never splits a surrogate pair. */
