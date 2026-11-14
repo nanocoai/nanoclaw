@@ -20,19 +20,23 @@
  * unload and delete the orphaned config file outright.
  *
  * Healthy peers are left alone — multiple installs can coexist fine now that
- * container-reaper is label-scoped. The exception is a registration that starts
+ * container-reaper is label-scoped. The exception is a service setup wrote for
  * this same checkout under another name, left behind when NANOCLAW_INSTALL_ID
- * changes: one checkout runs one host, so it is retired like a dead one.
+ * changes: one checkout runs one host, so it is retired like a dead one. That
+ * includes setup's system unit when we run as root; a normal user gets the sudo
+ * command. Hand-written services are left alone.
  */
 import { execFileSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
+import { getLaunchdLabel, getSystemdUnit, INSTALL_ID_PATTERN } from '../src/install-slug.js';
 import { log } from '../src/log.js';
+import { isRoot } from './platform.js';
 
 const UNHEALTHY_RUNS_THRESHOLD = 10;
+const SYSTEM_UNIT_DIR = '/etc/systemd/system';
 
 export interface PeerStatus {
   label: string;
@@ -54,13 +58,18 @@ export interface PeerCleanupResult {
  * Scan for peer NanoClaw services and unload any that are crash-looping.
  * Returns a summary suitable for emitStatus / setup-log reporting.
  */
-export function cleanupUnhealthyPeers(projectRoot: string = process.cwd()): PeerCleanupResult {
+export function cleanupUnhealthyPeers(
+  projectRoot: string = process.cwd(),
+  systemUnitDir: string = SYSTEM_UNIT_DIR,
+): PeerCleanupResult {
   const platform = os.platform();
   if (platform === 'darwin') {
     return cleanupLaunchdPeers(projectRoot);
   }
   if (platform === 'linux') {
-    return cleanupSystemdPeers(projectRoot);
+    const result = cleanupSystemdPeers(projectRoot);
+    retireSystemUnits(projectRoot, systemUnitDir, result);
+    return result;
   }
   return { checked: [], unloaded: [], removed: [], retired: [], failures: [] };
 }
@@ -133,7 +142,7 @@ function cleanupLaunchdPeers(projectRoot: string): PeerCleanupResult {
     if (label === ownLabel) continue;
 
     const missingTarget = deadLaunchdTarget(plistPath);
-    if (missingTarget || launchdStartsEntry(plistPath, entry)) {
+    if (missingTarget || (isSetupName(label, 'com.nanoclaw-v2-') && launchdStartsEntry(plistPath, entry))) {
       reapPeer(
         result,
         { label, configPath: plistPath },
@@ -235,7 +244,7 @@ function cleanupSystemdPeers(projectRoot: string): PeerCleanupResult {
 
     const unitPath = path.join(unitDir, `${unit}.service`);
     const missingTarget = deadSystemdTarget(unitPath);
-    if (missingTarget || systemdStartsEntry(unitPath, entry)) {
+    if (missingTarget || (isSetupName(unit, 'nanoclaw-v2-') && systemdStartsEntry(unitPath, entry))) {
       reapPeer(
         result,
         { label: unit, configPath: unitPath },
@@ -311,15 +320,69 @@ function deadSystemdTarget(unitPath: string): string | undefined {
   return fs.existsSync(target) ? undefined : target;
 }
 
+/**
+ * Setup run as root writes its unit here. An old one for this checkout is
+ * retired like a user unit; a normal user cannot stop it, so it gets the sudo
+ * command. Dead and unhealthy system units may belong to other installs, so
+ * they are left alone.
+ */
+function retireSystemUnits(projectRoot: string, unitDir: string, result: PeerCleanupResult): void {
+  const ownUnit = getSystemdUnit(projectRoot);
+  const entry = path.join(projectRoot, 'dist', 'index.js');
+  let files: string[];
+  try {
+    files = fs.readdirSync(unitDir).filter((f) => f.endsWith('.service'));
+  } catch {
+    return;
+  }
+
+  for (const file of files) {
+    const unit = file.slice(0, -'.service'.length);
+    const unitPath = path.join(unitDir, file);
+    if (unit === ownUnit || !isSetupName(unit, 'nanoclaw-v2-') || !systemdStartsEntry(unitPath, entry)) continue;
+
+    if (!isRoot()) {
+      const fix = `sudo systemctl disable --now ${file} && sudo rm ${unitPath} && sudo systemctl daemon-reload`;
+      log.warn(`An old system unit also starts this checkout. To stop it, run: ${fix}`, {
+        label: unit,
+        configPath: unitPath,
+        fix,
+      });
+      continue;
+    }
+    reapPeer(
+      result,
+      { label: unit, configPath: unitPath },
+      () => {
+        execFileSync('systemctl', ['disable', '--now', file], { stdio: 'pipe' });
+        execFileSync('systemctl', ['daemon-reload'], { stdio: 'pipe' });
+      },
+      'system unit',
+      undefined,
+      // Only a successful disable counts: systemctl missing from root's PATH is not proof.
+      (disableError) => disableError !== undefined,
+    );
+  }
+}
+
 // ---- same checkout under another name ----------------------------------------
+
+/** Setup writes `<prefix><slug>` only; other names were written by hand. */
+function isSetupName(name: string, prefix: string): boolean {
+  return name.startsWith(prefix) && INSTALL_ID_PATTERN.test(name.slice(prefix.length));
+}
 
 /** ProgramArguments holds the entry point as its own <string>. */
 function launchdStartsEntry(plistPath: string, entry: string): boolean {
   return readConfig(plistPath)?.includes(`<string>${entry}</string>`) ?? false;
 }
 
-/** ExecStart=<nodePath> <entry>; the leading space keeps the match exact. */
+/**
+ * ExecStart=<nodePath> <entry>; the leading space keeps the match exact. Setup
+ * writes no drop-ins, and one could point ExecStart elsewhere, so they rule it out.
+ */
 function systemdStartsEntry(unitPath: string, entry: string): boolean {
+  if (fs.existsSync(`${unitPath}.d`)) return false;
   return (readConfig(unitPath) ?? '')
     .split('\n')
     .some((line) => line.startsWith('ExecStart=') && line.trimEnd().endsWith(` ${entry}`));

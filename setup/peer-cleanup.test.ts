@@ -6,6 +6,7 @@ import path from 'path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
+import { log } from '../src/log.js';
 import { cleanupUnhealthyPeers } from './peer-cleanup.js';
 
 // The reaper deletes config files from ~/Library/LaunchAgents (or the systemd
@@ -118,6 +119,17 @@ describe('cleanupUnhealthyPeers — dead launchd registrations', () => {
     expect(result.removed).toHaveLength(0);
   });
 
+  it('removes a dead plist under a name setup never writes', () => {
+    const { agentsDir, projectRoot } = setup();
+    const dead = path.join(agentsDir, 'com.nanoclaw.plist');
+    writePlist(dead, path.join(agentsDir, 'gone', 'dist', 'index.js'));
+
+    const result = cleanupUnhealthyPeers(projectRoot);
+
+    expect(fs.existsSync(dead)).toBe(false);
+    expect(result.removed.map((r) => r.label)).toEqual(['com.nanoclaw']);
+  });
+
   it('ignores an unrecognized plist (no dist/index.js target)', () => {
     const { agentsDir, projectRoot } = setup();
     const weird = path.join(agentsDir, 'com.nanoclaw-v2-weird.plist');
@@ -131,34 +143,46 @@ describe('cleanupUnhealthyPeers — dead launchd registrations', () => {
 });
 
 describe('cleanupUnhealthyPeers — dead systemd registrations', () => {
-  function setup(): { unitDir: string; projectRoot: string } {
+  function setup(): { unitDir: string; systemDir: string; projectRoot: string } {
     const home = tempHome();
     created.push(home);
     const unitDir = path.join(home, '.config', 'systemd', 'user');
     fs.mkdirSync(unitDir, { recursive: true });
     vi.spyOn(os, 'homedir').mockReturnValue(home);
     vi.spyOn(os, 'platform').mockReturnValue('linux');
-    return { unitDir, projectRoot: path.join(home, 'install') };
+    vi.spyOn(process, 'getuid').mockReturnValue(1000);
+    return { unitDir, systemDir: path.join(home, 'etc-systemd-system'), projectRoot: path.join(home, 'install') };
   }
 
   it('removes a unit whose target binary is gone', () => {
-    const { unitDir, projectRoot } = setup();
+    const { unitDir, systemDir, projectRoot } = setup();
     const dead = path.join(unitDir, 'nanoclaw-v2-dead.service');
     writeUnit(dead, path.join(unitDir, 'gone', 'dist', 'index.js'));
 
-    const result = cleanupUnhealthyPeers(projectRoot);
+    const result = cleanupUnhealthyPeers(projectRoot, systemDir);
 
     expect(fs.existsSync(dead)).toBe(false);
     expect(result.removed.map((r) => r.label)).toContain('nanoclaw-v2-dead');
   });
 
+  it('removes a dead unit under a name setup never writes', () => {
+    const { unitDir, systemDir, projectRoot } = setup();
+    const dead = path.join(unitDir, 'nanoclaw.service');
+    writeUnit(dead, path.join(unitDir, 'gone', 'dist', 'index.js'));
+
+    const result = cleanupUnhealthyPeers(projectRoot, systemDir);
+
+    expect(fs.existsSync(dead)).toBe(false);
+    expect(result.removed.map((r) => r.label)).toEqual(['nanoclaw']);
+  });
+
   it("never reaps this install's own unit", () => {
-    const { unitDir, projectRoot } = setup();
+    const { unitDir, systemDir, projectRoot } = setup();
     const ownUnit = getSystemdUnit(projectRoot);
     const own = path.join(unitDir, `${ownUnit}.service`);
     writeUnit(own, path.join(unitDir, 'gone', 'dist', 'index.js'));
 
-    const result = cleanupUnhealthyPeers(projectRoot);
+    const result = cleanupUnhealthyPeers(projectRoot, systemDir);
 
     expect(fs.existsSync(own)).toBe(true);
     expect(result.removed).toHaveLength(0);
@@ -168,17 +192,25 @@ describe('cleanupUnhealthyPeers — dead systemd registrations', () => {
 // A changed NANOCLAW_INSTALL_ID gives this checkout a new service name. The old
 // registration would start a second host on the same checkout, so it goes.
 describe('cleanupUnhealthyPeers — another name for this checkout', () => {
-  function checkout(platform: 'darwin' | 'linux'): { home: string; projectRoot: string; entry: string } {
+  function checkout(platform: 'darwin' | 'linux'): {
+    home: string;
+    systemDir: string;
+    projectRoot: string;
+    entry: string;
+  } {
     const home = tempHome();
     created.push(home);
     vi.spyOn(os, 'homedir').mockReturnValue(home);
     vi.spyOn(os, 'platform').mockReturnValue(platform);
+    vi.spyOn(process, 'getuid').mockReturnValue(1000);
+    const systemDir = path.join(home, 'etc-systemd-system');
+    fs.mkdirSync(systemDir, { recursive: true });
     const projectRoot = path.join(home, 'install');
     const entry = path.join(projectRoot, 'dist', 'index.js');
     // A live target, so the dead-registration path does not apply.
     fs.mkdirSync(path.dirname(entry), { recursive: true });
     fs.writeFileSync(entry, '// host entry');
-    return { home, projectRoot, entry };
+    return { home, systemDir, projectRoot, entry };
   }
 
   const directions: Array<[string, string | undefined, string | undefined]> = [
@@ -208,7 +240,7 @@ describe('cleanupUnhealthyPeers — another name for this checkout', () => {
   });
 
   it.each(directions)('retires the systemd unit from before, %s', (_name, before, after) => {
-    const { home, projectRoot, entry } = checkout('linux');
+    const { home, systemDir, projectRoot, entry } = checkout('linux');
     const unitDir = path.join(home, '.config', 'systemd', 'user');
     fs.mkdirSync(unitDir, { recursive: true });
     vi.stubEnv('NANOCLAW_INSTALL_ID', before);
@@ -219,7 +251,7 @@ describe('cleanupUnhealthyPeers — another name for this checkout', () => {
     const own = path.join(unitDir, `${getSystemdUnit(projectRoot)}.service`);
     writeUnit(own, entry);
 
-    const result = cleanupUnhealthyPeers(projectRoot);
+    const result = cleanupUnhealthyPeers(projectRoot, systemDir);
 
     expect(execFileSync).toHaveBeenCalledWith('systemctl', ['--user', 'disable', '--now', `${unit}.service`], {
       stdio: 'pipe',
@@ -249,7 +281,7 @@ describe('cleanupUnhealthyPeers — another name for this checkout', () => {
 
   // is-active also says inactive (3) while a unit waits to auto-restart, so only disable --now counts.
   it('keeps the systemd unit when disable --now fails', () => {
-    const { home, projectRoot, entry } = checkout('linux');
+    const { home, systemDir, projectRoot, entry } = checkout('linux');
     const old = path.join(home, '.config', 'systemd', 'user', 'nanoclaw-v2-old.service');
     fs.mkdirSync(path.dirname(old), { recursive: true });
     writeUnit(old, entry);
@@ -258,7 +290,7 @@ describe('cleanupUnhealthyPeers — another name for this checkout', () => {
       throw Object.assign(new Error('Failed to disable unit: Read-only file system'), { status: 1 });
     });
 
-    const result = cleanupUnhealthyPeers(projectRoot);
+    const result = cleanupUnhealthyPeers(projectRoot, systemDir);
 
     expect(fs.existsSync(old)).toBe(true);
     expect(result.retired).toEqual([]);
@@ -281,7 +313,7 @@ describe('cleanupUnhealthyPeers — another name for this checkout', () => {
   });
 
   it('keeps the systemd unit when the user bus cannot be reached', () => {
-    const { home, projectRoot, entry } = checkout('linux');
+    const { home, systemDir, projectRoot, entry } = checkout('linux');
     const old = path.join(home, '.config', 'systemd', 'user', 'nanoclaw-v2-old.service');
     fs.mkdirSync(path.dirname(old), { recursive: true });
     writeUnit(old, entry);
@@ -289,14 +321,14 @@ describe('cleanupUnhealthyPeers — another name for this checkout', () => {
       throw Object.assign(new Error('Failed to connect to bus'), { status: 1 });
     });
 
-    const result = cleanupUnhealthyPeers(projectRoot);
+    const result = cleanupUnhealthyPeers(projectRoot, systemDir);
 
     expect(fs.existsSync(old)).toBe(true);
     expect(result.failures.map((f) => f.label)).toEqual(['nanoclaw-v2-old']);
   });
 
   it('retires the systemd unit when systemctl is not installed', () => {
-    const { home, projectRoot, entry } = checkout('linux');
+    const { home, systemDir, projectRoot, entry } = checkout('linux');
     const old = path.join(home, '.config', 'systemd', 'user', 'nanoclaw-v2-old.service');
     fs.mkdirSync(path.dirname(old), { recursive: true });
     writeUnit(old, entry);
@@ -304,7 +336,7 @@ describe('cleanupUnhealthyPeers — another name for this checkout', () => {
       throw Object.assign(new Error('spawnSync systemctl ENOENT'), { code: 'ENOENT' });
     });
 
-    const result = cleanupUnhealthyPeers(projectRoot);
+    const result = cleanupUnhealthyPeers(projectRoot, systemDir);
 
     expect(fs.existsSync(old)).toBe(false);
     expect(result.retired.map((r) => r.label)).toEqual(['nanoclaw-v2-old']);
@@ -332,12 +364,12 @@ describe('cleanupUnhealthyPeers — another name for this checkout', () => {
   });
 
   it('leaves a systemd service for another checkout alone', () => {
-    const { home, projectRoot } = checkout('linux');
+    const { home, systemDir, projectRoot } = checkout('linux');
     const other = path.join(home, '.config', 'systemd', 'user', 'nanoclaw-v2-other.service');
     fs.mkdirSync(path.dirname(other), { recursive: true });
     writeUnit(other, otherEntry(home, projectRoot));
 
-    const result = cleanupUnhealthyPeers(projectRoot);
+    const result = cleanupUnhealthyPeers(projectRoot, systemDir);
 
     expect(execFileSync).not.toHaveBeenCalledWith(
       'systemctl',
@@ -347,4 +379,205 @@ describe('cleanupUnhealthyPeers — another name for this checkout', () => {
     expect(fs.existsSync(other)).toBe(true);
     expect(result.retired).toEqual([]);
   });
+
+  // Setup only writes com.nanoclaw-v2-<slug> / nanoclaw-v2-<slug>; anything else was written by hand.
+  const notSetupNames = ['nanoclaw', 'nanoclaw-mine', 'nanoclaw-v2-Backup.old'];
+
+  it.each(notSetupNames)('leaves the launchd plist com.%s alone though it starts this checkout', (name) => {
+    const { home, projectRoot, entry } = checkout('darwin');
+    const plist = path.join(home, 'Library', 'LaunchAgents', `com.${name}.plist`);
+    fs.mkdirSync(path.dirname(plist), { recursive: true });
+    writePlist(plist, entry);
+
+    const result = cleanupUnhealthyPeers(projectRoot);
+
+    expect(execFileSync).not.toHaveBeenCalledWith('launchctl', ['unload', plist], expect.anything());
+    expect(fs.existsSync(plist)).toBe(true);
+    expect(result.retired).toEqual([]);
+  });
+
+  it.each(notSetupNames)('leaves the systemd unit %s alone though it starts this checkout', (name) => {
+    const { home, systemDir, projectRoot, entry } = checkout('linux');
+    const unit = path.join(home, '.config', 'systemd', 'user', `${name}.service`);
+    fs.mkdirSync(path.dirname(unit), { recursive: true });
+    writeUnit(unit, entry);
+
+    const result = cleanupUnhealthyPeers(projectRoot, systemDir);
+
+    expect(execFileSync).not.toHaveBeenCalledWith(
+      'systemctl',
+      ['--user', 'disable', '--now', `${name}.service`],
+      expect.anything(),
+    );
+    expect(fs.existsSync(unit)).toBe(true);
+    expect(result.retired).toEqual([]);
+  });
+
+  // Setup writes no drop-ins; one may point ExecStart somewhere else.
+  it('leaves a systemd unit with drop-ins alone', () => {
+    const { home, systemDir, projectRoot, entry } = checkout('linux');
+    const unit = path.join(home, '.config', 'systemd', 'user', 'nanoclaw-v2-old.service');
+    fs.mkdirSync(`${unit}.d`, { recursive: true });
+    writeUnit(unit, entry);
+
+    const result = cleanupUnhealthyPeers(projectRoot, systemDir);
+
+    expect(execFileSync).not.toHaveBeenCalledWith(
+      'systemctl',
+      ['--user', 'disable', '--now', 'nanoclaw-v2-old.service'],
+      expect.anything(),
+    );
+    expect(fs.existsSync(unit)).toBe(true);
+    expect(result.retired).toEqual([]);
+  });
+});
+
+// Setup run as root writes its unit to /etc/systemd/system instead of the user dir.
+describe('cleanupUnhealthyPeers — system units for this checkout', () => {
+  function rootCheckout(uid: number): { systemDir: string; projectRoot: string; entry: string; home: string } {
+    const home = tempHome();
+    created.push(home);
+    vi.spyOn(os, 'homedir').mockReturnValue(home);
+    vi.spyOn(os, 'platform').mockReturnValue('linux');
+    vi.spyOn(process, 'getuid').mockReturnValue(uid);
+    const systemDir = path.join(home, 'etc-systemd-system');
+    fs.mkdirSync(systemDir, { recursive: true });
+    const projectRoot = path.join(home, 'install');
+    const entry = path.join(projectRoot, 'dist', 'index.js');
+    fs.mkdirSync(path.dirname(entry), { recursive: true });
+    fs.writeFileSync(entry, '// host entry');
+    return { systemDir, projectRoot, entry, home };
+  }
+
+  /** Any systemctl call without --user reaches the system manager. */
+  const systemCalls = (): unknown[][] =>
+    vi.mocked(execFileSync).mock.calls.filter(([cmd, args]) => cmd === 'systemctl' && !args?.includes('--user'));
+
+  const sudoWarnings = (warn: { mock: { calls: unknown[][] } }): string[] =>
+    warn.mock.calls.map(([message]) => String(message)).filter((message) => message.includes('sudo'));
+
+  const directions: Array<[string, string | undefined, string | undefined]> = [
+    ['hash to id', undefined, 'prod-eks_1'],
+    ['id to hash', 'prod-eks_1', undefined],
+    ['id to id', 'prod-eks_1', 'staging'],
+  ];
+
+  it.each(directions)('as root, retires the system unit from before, %s', (_name, before, after) => {
+    const { systemDir, projectRoot, entry } = rootCheckout(0);
+    vi.stubEnv('NANOCLAW_INSTALL_ID', before);
+    const unit = getSystemdUnit(projectRoot);
+    const old = path.join(systemDir, `${unit}.service`);
+    writeUnit(old, entry);
+    vi.stubEnv('NANOCLAW_INSTALL_ID', after);
+    const own = path.join(systemDir, `${getSystemdUnit(projectRoot)}.service`);
+    writeUnit(own, entry);
+
+    const result = cleanupUnhealthyPeers(projectRoot, systemDir);
+
+    expect(systemCalls()).toEqual([
+      ['systemctl', ['disable', '--now', `${unit}.service`], { stdio: 'pipe' }],
+      ['systemctl', ['daemon-reload'], { stdio: 'pipe' }],
+    ]);
+    expect(fs.existsSync(old)).toBe(false);
+    expect(fs.existsSync(own)).toBe(true);
+    expect(result.retired).toEqual([{ label: unit, configPath: old }]);
+  });
+
+  it('as root, keeps the system unit when disable --now fails', () => {
+    const { systemDir, projectRoot, entry } = rootCheckout(0);
+    const old = path.join(systemDir, 'nanoclaw-v2-old.service');
+    writeUnit(old, entry);
+    vi.mocked(execFileSync).mockImplementation(() => {
+      throw Object.assign(new Error('Failed to disable unit: Access denied'), { status: 1 });
+    });
+
+    const result = cleanupUnhealthyPeers(projectRoot, systemDir);
+
+    expect(fs.existsSync(old)).toBe(true);
+    expect(result.retired).toEqual([]);
+    expect(result.failures.map((f) => f.label)).toEqual(['nanoclaw-v2-old']);
+  });
+
+  // systemctl missing from PATH does not mean the system manager is gone.
+  it('as root, keeps the system unit when systemctl cannot be found', () => {
+    const { systemDir, projectRoot, entry } = rootCheckout(0);
+    const old = path.join(systemDir, 'nanoclaw-v2-old.service');
+    writeUnit(old, entry);
+    vi.mocked(execFileSync).mockImplementation(() => {
+      throw Object.assign(new Error('spawnSync systemctl ENOENT'), { code: 'ENOENT' });
+    });
+
+    const result = cleanupUnhealthyPeers(projectRoot, systemDir);
+
+    expect(fs.existsSync(old)).toBe(true);
+    expect(result.retired).toEqual([]);
+    expect(result.failures.map((f) => f.label)).toEqual(['nanoclaw-v2-old']);
+  });
+
+  it('as a normal user, logs the sudo command for the old system unit and leaves it', () => {
+    const { systemDir, projectRoot, entry } = rootCheckout(1000);
+    const old = path.join(systemDir, 'nanoclaw-v2-old.service');
+    writeUnit(old, entry);
+    const warn = vi.spyOn(log, 'warn');
+
+    const result = cleanupUnhealthyPeers(projectRoot, systemDir);
+
+    expect(systemCalls()).toEqual([]);
+    expect(fs.existsSync(old)).toBe(true);
+    expect(result.retired).toEqual([]);
+    expect(sudoWarnings(warn)).toEqual([
+      'An old system unit also starts this checkout. To stop it, run: ' +
+        `sudo systemctl disable --now nanoclaw-v2-old.service && sudo rm ${old} && sudo systemctl daemon-reload`,
+    ]);
+  });
+
+  it.each([0, 1000])('uid %i leaves a system unit with drop-ins alone', (uid) => {
+    const { systemDir, projectRoot, entry } = rootCheckout(uid);
+    const old = path.join(systemDir, 'nanoclaw-v2-old.service');
+    fs.mkdirSync(`${old}.d`);
+    writeUnit(old, entry);
+    const warn = vi.spyOn(log, 'warn');
+
+    const result = cleanupUnhealthyPeers(projectRoot, systemDir);
+
+    expect(systemCalls()).toEqual([]);
+    expect(fs.existsSync(old)).toBe(true);
+    expect(result.retired).toEqual([]);
+    expect(sudoWarnings(warn)).toEqual([]);
+  });
+
+  // Dead and unhealthy system units may belong to other installs or users.
+  const leftAlone: Array<[string, string, (home: string, projectRoot: string, entry: string) => string]> = [
+    [
+      'another checkout',
+      'nanoclaw-v2-other',
+      (home, projectRoot) => {
+        const other = path.join(home, 'nested', projectRoot, 'dist', 'index.js');
+        fs.mkdirSync(path.dirname(other), { recursive: true });
+        fs.writeFileSync(other, '// host entry');
+        return other;
+      },
+    ],
+    ['a dead one', 'nanoclaw-v2-dead', (home) => path.join(home, 'gone', 'dist', 'index.js')],
+    ['a hand-written one for this checkout', 'nanoclaw', (_home, _root, entry) => entry],
+    ['this install', '', (_home, _root, entry) => entry],
+  ];
+
+  it.each([0, 1000].flatMap((uid) => leftAlone.map(([what, name, target]) => [uid, what, name, target] as const)))(
+    'uid %i leaves the system unit of %s alone',
+    (uid, _what, name, target) => {
+      const { home, systemDir, projectRoot, entry } = rootCheckout(uid);
+      const unitPath = path.join(systemDir, `${name || getSystemdUnit(projectRoot)}.service`);
+      writeUnit(unitPath, target(home, projectRoot, entry));
+      const warn = vi.spyOn(log, 'warn');
+
+      const result = cleanupUnhealthyPeers(projectRoot, systemDir);
+
+      expect(systemCalls()).toEqual([]);
+      expect(fs.existsSync(unitPath)).toBe(true);
+      expect(result.removed).toEqual([]);
+      expect(result.retired).toEqual([]);
+      expect(sudoWarnings(warn)).toEqual([]);
+    },
+  );
 });
