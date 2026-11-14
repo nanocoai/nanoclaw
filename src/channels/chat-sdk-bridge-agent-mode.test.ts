@@ -1,6 +1,7 @@
 /**
  * Agent-mode bridge surfaces:
- *  - app_context: assistant_thread_started / app_context_changed events cache
+ *  - app_context: assistant_thread_started / assistant_thread_context_changed
+ *    events cache
  *    the latest context per (instance, channel, user); the next inbound DM
  *    message consumes it as content.app_context = { entities }.
  *  - agent-DM opened hook: assistant_thread_started additionally notifies the

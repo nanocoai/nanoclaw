@@ -36,27 +36,31 @@ let recentSessions: Array<{
 let topLevelSession: (typeof recentSessions)[number] | undefined;
 
 vi.mock('../../session-manager.js', () => ({
-  withExistingMailboxSession: async (_g: string, sessionId: string, fn: (mailbox: unknown) => unknown) => {
-    if (missingMailboxes.has(sessionId)) return undefined;
-    if (brokenMailboxes.has(sessionId)) throw new Error(`mailbox ${sessionId} is broken`);
-    opened.push(sessionId);
-    const sibling = siblings[sessionId];
-    return fn({
-      getConversationRoot: () => {
-        inboundSql.push(`getConversationRoot:${sessionId}`);
-        return sibling?.root;
-      },
-      getTopLevelOutbound: () => {
-        outboundSql.push(`getTopLevelOutbound:${sessionId}`);
-        return sibling?.outbound ?? [];
-      },
-      getInboundHistory: (limit: number) => targetHistory.slice(0, limit),
-      insertMessage: async (msg: Record<string, unknown>) => {
-        written.push({ sessionId, ...msg });
-      },
-    });
-  },
+  withExistingMailboxSession: async (g: string, sessionId: string, fn: (mailbox: unknown) => unknown) =>
+    missingMailboxes.has(sessionId) ? undefined : openMailbox(g, sessionId, fn),
+  /** Prepares first, so a mailbox that does not exist yet is made. */
+  withMailboxSession: async (g: string, sessionId: string, fn: (mailbox: unknown) => unknown) =>
+    openMailbox(g, sessionId, fn),
 }));
+async function openMailbox(_g: string, sessionId: string, fn: (mailbox: unknown) => unknown) {
+  if (brokenMailboxes.has(sessionId)) throw new Error(`mailbox ${sessionId} is broken`);
+  opened.push(sessionId);
+  const sibling = siblings[sessionId];
+  return fn({
+    getConversationRoot: () => {
+      inboundSql.push(`getConversationRoot:${sessionId}`);
+      return sibling?.root;
+    },
+    getTopLevelOutbound: () => {
+      outboundSql.push(`getTopLevelOutbound:${sessionId}`);
+      return sibling?.outbound ?? [];
+    },
+    getInboundHistory: (limit: number) => targetHistory.slice(0, limit),
+    insertMessage: async (msg: Record<string, unknown>) => {
+      written.push({ sessionId, ...msg });
+    },
+  });
+}
 vi.mock('../../db/sessions.js', () => ({
   getRecentConversationSessions: async () => recentSessions,
   findSessionForAgent: async () => topLevelSession,
@@ -123,6 +127,12 @@ beforeEach(() => {
 });
 
 describe('backfillSession — new session', () => {
+  it('seeds a new session whose mailbox does not exist yet: a store may create it on its first write', async () => {
+    missingMailboxes = new Set(['sess-new']);
+    await backfillSession(AG, NEW_SESSION, DM_MG, { created: true, now: NOW });
+    expect(texts()).toEqual(['hello there', 'Hey Alex! I am Pete… tour?']);
+  });
+
   it('seeds the new session with hot sibling roots + top-level agent posts, ordered by time, in ONE mailbox session', async () => {
     await backfillSession(AG, NEW_SESSION, DM_MG, { created: true, now: NOW });
 

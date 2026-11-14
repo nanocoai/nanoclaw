@@ -8,6 +8,8 @@ Each release ships:
 - A `CHANGELOG.md` entry under `## [<version>] - <YYYY-MM-DD>`.
 - A GitHub Release whose body mirrors the CHANGELOG entry plus a contributors section.
 
+Versions are calendar-based, `YYYY.M.PATCH`, starting with 2026.10.0 (after 2.4.0): the year, the month of the release without a leading zero (`2026.9.0`, never `2026.09.0`), and a patch number that starts at 0 each month. A version says how old an install is, and it still sorts after every 2.x release.
+
 ## When to cut a release
 
 A release is cut by a maintainer publishing it. The trigger is a release PR that bumps `package.json` and adds its `CHANGELOG.md` entry. There is no fixed schedule, and back-to-back changes may be rolled into one release. Cutting at least weekly is preferable to batching: smaller releases are easier to read, pin, and revert.
@@ -70,7 +72,7 @@ gh api repos/nanocoai/nanoclaw/rulesets \
 
 The first command must return `{"enabled":true,...}`; a 404 is a hard stop. Use the returned tag-ruleset ID to read its full configuration and confirm that it targets `refs/tags/v*`, restricts updates and deletions, and has no bypass actors. Record the administrator, timestamp, immutable-setting response, and ruleset ID in the release tracker. Do not dispatch based only on a “done” message.
 
-The Release workflow independently checks the protected environment for the requested version (`release`, or `prerelease` for `x.y.z-rc.N`) in both `verify` and `publish` modes. Each roster is an exact authorization boundary, not a minimum: roster changes require a reviewed workflow and runbook update. Dispatching from any ref other than `main` fails before verification starts.
+The Release workflow independently checks the protected environment for the requested version (`release`, or `prerelease` for `x.y.z-beta.N` and `x.y.z-rc.N`) in both `verify` and `publish` modes. Each roster is an exact authorization boundary, not a minimum: roster changes require a reviewed workflow and runbook update. Dispatching from any ref other than `main` fails before verification starts.
 
 1. Open one release PR that:
    - bumps `package.json` to the exact version being released;
@@ -95,17 +97,18 @@ If multiple `package.json` bumps land between two GitHub Releases (as happened b
 
 A pre-release lets people test the next version early. It uses the same workflow and the same steps as above, with these differences:
 
-- **Version** is `X.Y.Z-rc.N` (N starts at 1), where `X.Y.Z` is the next stable version. Other suffixes are rejected.
-- **The release PR** bumps `package.json` to `X.Y.Z-rc.N` and leaves `CHANGELOG.md` alone. The notes are the `## [Unreleased]` section as it stands, which must hold at least one bullet. Verification fails if `## [X.Y.Z]` is already in the changelog.
+- **Version** is `X.Y.Z-beta.N` or `X.Y.Z-rc.N` (N starts at 1), where `X.Y.Z` is the next stable version. Use `beta` for early builds that are not release quality yet. Switch to `rc` only for the last build or two, when the release is close. Other suffixes are rejected.
+- **Order**: within one version, every `beta.N` comes before every `rc.N`, and both come before `X.Y.Z`. Verification refuses a new tag that does not sort above every existing tag of `X.Y.Z`, because the beta channel would never offer it: a beta after an rc, `beta.2` after `beta.3`, or any pre-release once `vX.Y.Z` exists. A publish rerun for a tag that already exists is not refused. The workflow runs this check from its own commit against the tag list from `git ls-remote`, so it also covers older target commits; a failed or empty tag lookup fails the run.
+- **The release PR** bumps `package.json` to the pre-release version and leaves `CHANGELOG.md` alone. The notes are the `## [Unreleased]` section as it stands, which must hold at least one bullet. Verification fails if `## [X.Y.Z]` is already in the changelog.
 - **Approval** comes from the `prerelease` environment: `glifocat` is its only reviewer and may approve his own run, so a pre-release needs no second person. The `release` environment and its reviewers still gate every stable version.
-- **Publication** creates an annotated, immutable `vX.Y.Z-rc.N` tag and a GitHub Release marked Pre-release and never latest. On the first pre-release, confirm GitHub reports it as immutable; the read-back step fails closed until it does.
+- **Publication** creates an annotated, immutable `vX.Y.Z-beta.N` or `vX.Y.Z-rc.N` tag and a GitHub Release marked Pre-release and never latest. On the first pre-release, confirm GitHub reports it as immutable; the read-back step fails closed until it does.
 
-Contributor lists and the compare link always start from the previous stable tag, so the stable `X.Y.Z` release covers everything its release candidates covered. To promote, open the normal stable release PR: bump `package.json` to `X.Y.Z` and move `Unreleased` to the dated `X.Y.Z` section.
+Contributor lists and the compare link always start from the previous stable tag, so the stable `X.Y.Z` release covers everything its pre-releases covered. To promote, open the normal stable release PR: bump `package.json` to `X.Y.Z` and move `Unreleased` to the dated `X.Y.Z` section.
 
 ## Channels and stability
 
 - **Stable** — the newest non-prerelease release, shown as "Latest release" on the GitHub Releases page. Consumers that want auto-bump follow GitHub's `/releases/latest` pointer, which never returns a pre-release.
-- **Beta** — the newest `vX.Y.Z-rc.N` release marked Pre-release. Optional; there may be none between stable releases.
+- **Beta** — the newest `vX.Y.Z-beta.N` or `vX.Y.Z-rc.N` release marked Pre-release, when it is newer than stable. Optional; there may be none between stable releases.
 - **Pinned** — any tagged release. Reproducible and the recommended choice for packagers and forks; published tags are not moved or retracted.
 
 The tag is the source of truth — a GitHub Release's `target_commitish` always points to a tagged commit.

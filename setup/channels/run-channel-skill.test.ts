@@ -427,14 +427,20 @@ describe('runChannelSkill adapter (Option A)', () => {
   // the composed teams user id. A skill-resolved `instance` var (a named
   // bot's registry key) rides along to the wire; kill condition: drop
   // `instance: res.vars.instance` from the wire call in run-channel-skill.ts.
+  //
+  // The engine reads `.claude/skills/add-<channel>/SKILL.md` relative to cwd, so
+  // the fixture skills here live in the temp root and run from there, as real
+  // setup does. Never write them under the checkout: other test files scan
+  // `.claude/skills` in parallel.
+  const repoCwd = process.cwd();
+  afterEach(() => process.chdir(repoCwd));
   const wireChannel = 'wiretest';
-  const wireSkillDir = join(process.cwd(), '.claude/skills', `add-${wireChannel}`);
-  afterEach(() => rmSync(wireSkillDir, { recursive: true, force: true }));
 
   it('wireIfResolved: a run that resolves owner_handle + platform_id wires through init-first-agent', async () => {
     const root = mkdtempSync(join(tmpdir(), 'rcs-wiretest-'));
     writeFileSync(join(root, 'package.json'), '{"name":"scratch"}');
     writeFileSync(join(root, '.env'), '');
+    const wireSkillDir = join(root, '.claude/skills', `add-${wireChannel}`);
     mkdirSync(wireSkillDir, { recursive: true });
     writeFileSync(
       join(wireSkillDir, 'SKILL.md'),
@@ -454,6 +460,7 @@ describe('runChannelSkill adapter (Option A)', () => {
         '',
       ].join('\n'),
     );
+    process.chdir(root);
 
     const wired: Array<Record<string, unknown>> = [];
     let pickCleared = 0;
@@ -490,12 +497,7 @@ describe('runChannelSkill adapter (Option A)', () => {
     expect(pickCleared).toBe(0);
   });
 
-  // The engine reads `.claude/skills/add-<channel>/SKILL.md` relative to cwd (the
-  // repo root in tests — same as the real add-slack the test above drives), so a
-  // bounce-fixture skill is created there and torn down afterward.
   const failChannel = 'failtest';
-  const failSkillDir = join(process.cwd(), '.claude/skills', `add-${failChannel}`);
-  afterEach(() => rmSync(failSkillDir, { recursive: true, force: true }));
 
   // When the skill doesn't fully apply (a directive bounced to an agent), the
   // generic "couldn't finish" message is replaced by the bounced step's OWN
@@ -508,6 +510,7 @@ describe('runChannelSkill adapter (Option A)', () => {
     writeFileSync(join(root, '.env'), '');
     // A skill whose only directive bounces — the engine has no handler for
     // nc:hand-wire, so it degrades to an agent and the run is not fully applied.
+    const failSkillDir = join(root, '.claude/skills', `add-${failChannel}`);
     mkdirSync(failSkillDir, { recursive: true });
     writeFileSync(
       join(failSkillDir, 'SKILL.md'),
@@ -522,10 +525,11 @@ describe('runChannelSkill adapter (Option A)', () => {
         '',
       ].join('\n'),
     );
+    process.chdir(root);
 
-    const failCalls: Array<{ step: string; msg: string; hint?: string }> = [];
-    const fakeFail = (step: string, msg: string, hint?: string): Promise<never> => {
-      failCalls.push({ step, msg, hint });
+    const failCalls: Array<{ step: string; msg: string; hint?: string; detail?: string }> = [];
+    const fakeFail = (step: string, msg: string, hint?: string, _raw?: string, detail?: string): Promise<never> => {
+      failCalls.push({ step, msg, hint, detail });
       // The real fail() process.exits and never returns; emulate that by aborting
       // the flow so control doesn't fall through to the resolve/wire steps.
       return Promise.reject(new Error('__failed__'));
@@ -550,6 +554,9 @@ describe('runChannelSkill adapter (Option A)', () => {
     expect(failCalls[0].msg).toBe('Register the webhook by hand'); // heading → headline
     expect(failCalls[0].hint).toContain('Open the Faily dashboard'); // prose → hint
     expect(failCalls[0].hint).not.toBe('See logs/setup-steps/ for details, then retry setup.'); // not the generic
+    // The first line of the bounce reason rides along for callers with no terminal.
+    expect(failCalls[0].detail).toMatch(/\S/);
+    expect(failCalls[0].detail).not.toContain('\n');
   });
 });
 
@@ -633,12 +640,16 @@ it('background Slack setup refuses to report ready when a required companion is 
     writeFileSync(join(root, '.env'), '');
     writeFileSync(join(root, 'package.json'), '{"name":"scratch"}');
     const wire = vi.fn(async () => true);
+    const cmds: string[] = [];
     await expect(runChannelSkill('slack', 'User', {
       projectRoot: root, agentName: 'Nova', role: 'owner', requireCompanions: true,
       inputs: { connection: 'provisioned', bot_token: 'xoxb-test', app_token: 'xapp-test', owner_handle: 'U123456789' },
-      exec: async command => command.includes('auth.test') ? '@bot in Test' : command.includes('conversations.open') ? 'slack:D123456789' : '',
+      exec: async command => (cmds.push(command), command.includes('auth.test') ? '@bot in Test' : command.includes('conversations.open') ? 'slack:D123456789' : ''),
       resolveRemote: () => 'origin', wire,
-    })).rejects.toThrow('companion installation needs attention');
+    })).rejects.toThrow(/companion installation needs attention \(slack-[\w-]+ is missing/);
+    // The companion check throws even when no skill ran, so pin that the real
+    // add-slack (read relative to cwd, the checkout) actually ran first.
+    expect(cmds.some((c) => c.includes('auth.test'))).toBe(true);
     expect(wire).not.toHaveBeenCalled();
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

@@ -11,8 +11,8 @@ import type { GatewaySessionInput } from './gateway-provider-registry.js';
 vi.mock('../env.js', () => ({ readEnvFile: () => ({}) }));
 vi.mock('node:child_process', () => ({
   execFile: vi.fn(
-    (_bin: string, _args: string[], _opts: unknown, done: (e: unknown, stdout: string, stderr: string) => void) =>
-      done(null, 'true\n', ''),
+    (_bin: string, args: string[], _opts: unknown, done: (e: unknown, stdout: string, stderr: string) => void) =>
+      done(null, args.includes('{{.State.StartedAt}}') ? '2999-01-01T00:00:00.000000000Z\n' : 'true\n', ''),
   ),
 }));
 vi.mock('../container-runtime.js', () => ({ CONTAINER_RUNTIME_BIN: 'docker' }));
@@ -29,6 +29,7 @@ import {
   readIronProxySettings,
   type IronProxySettings,
 } from './iron-proxy.js';
+import { localConfigRules, ruleCovers } from './iron-proxy-credential-scope.js';
 
 const digest = `ghcr.io/example/iron-proxy@sha256:${'a'.repeat(64)}`;
 const root = '/tmp/nanoclaw-iron-test';
@@ -80,6 +81,19 @@ describe('Iron Proxy provider', () => {
     expect(chatgpt.tokens.id_token.split('.')).toHaveLength(3);
   });
 
+  it('carries the recorded workspace id in the ChatGPT stand-in, never a token', () => {
+    const chatgpt = JSON.parse(codexPlaceholder('chatgpt', 'ws-1234_abcd'));
+    const claims = JSON.parse(Buffer.from(chatgpt.tokens.id_token.split('.')[1], 'base64url').toString());
+    expect(chatgpt.tokens.account_id).toBe('ws-1234_abcd');
+    expect(claims['https://api.openai.com/auth'].chatgpt_account_id).toBe('ws-1234_abcd');
+    expect(chatgpt.tokens.access_token).toBe('nc-codex-token-v1');
+    expect(JSON.parse(codexPlaceholder('chatgpt', 'bad id\n')).tokens.account_id).toBe('nc-codex-token-v1');
+    expect(JSON.parse(codexPlaceholder('api', 'ws-1234_abcd'))).toEqual({
+      auth_mode: 'apikey',
+      OPENAI_API_KEY: 'nc-codex-token-v1',
+    });
+  });
+
   it('mounts only a read-only synthetic Codex file scoped to the agent group', () => {
     const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'iron-codex-mount-'));
     const configured = { ...readIronProxySettings({}, projectRoot), managed: true };
@@ -88,12 +102,17 @@ describe('Iron Proxy provider', () => {
       fs.writeFileSync(configured.identityKey, Buffer.alloc(32, 7));
       const metadata = path.join(projectRoot, 'data/session-materials/iron-control/codex.json');
       fs.mkdirSync(path.dirname(metadata), { recursive: true });
-      fs.writeFileSync(metadata, JSON.stringify({ mode: 'chatgpt', secretIds: ['private-id'] }));
+      fs.writeFileSync(
+        metadata,
+        JSON.stringify({ mode: 'chatgpt', secretIds: ['private-id'], brokerId: 'private-broker', accountId: 'ws-1' }),
+      );
       const contribution = ironProxyContribution(configured, input);
       const auth = contribution.mounts!.find((mount) => mount.containerPath.endsWith('/auth.json'))!;
       expect(auth).toMatchObject({ class: 'group-state', mode: 'ro', groupScope: 'group' });
       expect(auth.hostPath).toBe(path.join(projectRoot, 'data/v2-sessions/group/.iron-codex/auth.json'));
-      expect(fs.readFileSync(auth.hostPath, 'utf8')).not.toContain('private-id');
+      const written = fs.readFileSync(auth.hostPath, 'utf8');
+      expect(written).not.toMatch(/private-(id|broker)/);
+      expect(JSON.parse(written).tokens.account_id).toBe('ws-1');
       expect(contribution.mounts!.some((mount) => mount.hostPath.includes('session-materials'))).toBe(false);
       expect(() =>
         ironProxyContribution(configured, {
@@ -101,6 +120,28 @@ describe('Iron Proxy provider', () => {
           key: { ...input.key, agentGroupId: '../escape' },
         }),
       ).toThrow('Invalid agent group ID');
+    } finally {
+      fs.rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the placeholder and warns once for a ChatGPT login without a recorded workspace id', async () => {
+    const { log } = await import('../log.js');
+    const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'iron-codex-legacy-'));
+    const configured = { ...readIronProxySettings({}, projectRoot), managed: true };
+    try {
+      fs.mkdirSync(path.dirname(configured.identityKey), { recursive: true });
+      fs.writeFileSync(configured.identityKey, Buffer.alloc(32, 7));
+      const metadata = path.join(projectRoot, 'data/session-materials/iron-control/codex.json');
+      fs.mkdirSync(path.dirname(metadata), { recursive: true });
+      fs.writeFileSync(metadata, JSON.stringify({ mode: 'chatgpt', secretIds: [] }));
+      const first = ironProxyContribution(configured, input);
+      ironProxyContribution(configured, input);
+      const auth = first.mounts!.find((mount) => mount.containerPath.endsWith('/auth.json'))!;
+      expect(JSON.parse(fs.readFileSync(auth.hostPath, 'utf8')).tokens.account_id).toBe('nc-codex-token-v1');
+      expect(vi.mocked(log.warn).mock.calls.filter(([message]) => /workspace id/.test(String(message)))).toHaveLength(
+        1,
+      );
     } finally {
       fs.rmSync(projectRoot, { recursive: true, force: true });
     }
@@ -119,6 +160,38 @@ describe('Iron Proxy provider', () => {
     expect(front.summary_command).toBe('/usr/local/bin/gateway-approval-summary');
     expect(JSON.stringify(config)).not.toContain('/run/secrets/upstream');
     expect(front).toEqual(JSON.parse(ironFrontConfig(settings)));
+  });
+
+  it('reads back exactly the credential rule its own unmanaged config writes', () => {
+    const rules = localConfigRules(ironProxyConfig(settings));
+    const covered = (host: string, method: string) => rules.some((rule) => ruleCovers(rule, { host, method }));
+    for (const method of ['GET', 'HEAD', 'POST']) expect(covered(settings.modelHost, method)).toBe(true);
+    expect(covered('docs.example.test', 'GET')).toBe(false);
+    expect(localConfigRules(ironProxyConfig({ ...settings, managed: true }))).toEqual([]);
+  });
+
+  it('answers credential scope from the live configuration file', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'iron-scope-provider-'));
+    const configFile = path.join(dir, 'config.yaml');
+    fs.writeFileSync(configFile, ironProxyConfig(settings));
+    vi.useFakeTimers({ toFake: ['Date'], now: 0 });
+    try {
+      const provider = defineIronProxyProvider({ ...settings, configFile, projectRoot: dir, managed: false });
+      const scope = provider.approvals.credentialScope!;
+      expect(await scope({ host: 'api.anthropic.com', method: 'GET' })).toBe('credential');
+      expect(await scope({ host: 'docs.example.test', method: 'GET' })).toBe('credential');
+      vi.setSystemTime(60_000);
+      expect(await scope({ host: 'docs.example.test', method: 'GET' })).toBe('none');
+      expect(JSON.parse(fs.readFileSync(path.join(dir, 'seen-credential-rules.json'), 'utf8'))).toContainEqual({
+        host: 'api.anthropic.com',
+        methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'],
+      });
+      fs.rmSync(configFile);
+      await expect(scope({ host: 'other.example.test', method: 'GET' })).rejects.toThrow();
+    } finally {
+      vi.useRealTimers();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('keeps the local model host out of the front config; the bridge decides its port', () => {

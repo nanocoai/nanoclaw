@@ -628,6 +628,8 @@ function dotPath(obj: unknown, path: string): unknown {
 // An optional `validate:<re>` is enforced against every bound value; a mismatch
 // THROWS so the run bounces to an agent — a command's output has no human to
 // re-prompt, so an invalid capture is a real failure, not a re-ask.
+// Neither error quotes the output: it can come from a remote server, and the
+// bounce reason reaches the terminal and the setup assistant.
 function bindCapture(
   spec: string,
   stdout: string,
@@ -636,14 +638,19 @@ function bindCapture(
 ): void {
   const re = validate ? new RegExp(validate) : undefined;
   const set = (name: string, value: string): void => {
-    if (re && !re.test(value)) throw new Error(`captured ${name}="${value}" does not match validate:${validate}`);
+    if (re && !re.test(value)) throw new Error(`captured ${name} does not match validate:${validate}`);
     vars.set(name, { value, secret: [...vars.values()].some((v) => v.secret && v.value && value.includes(v.value)) });
   };
   if (!spec.includes('=')) {
     set(spec, stdout);
     return;
   }
-  const json = JSON.parse(stdout) as unknown; // not JSON → throws → outer catch bounces
+  let json: unknown;
+  try {
+    json = JSON.parse(stdout);
+  } catch {
+    throw new Error('capture output is not valid JSON'); // → outer catch bounces
+  }
   for (const pair of spec.split(',')) {
     const eq = pair.indexOf('=');
     if (eq < 1) continue;

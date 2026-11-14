@@ -4,6 +4,17 @@ import { OneCLI, ApprovalClient, type ContainerConfig, type ApprovalRequest } fr
 
 import { DATA_DIR } from '../config.js';
 import { combinedCaBundle, stageOnecliFile } from './onecli-files.js';
+import { storedAccountId, stubNeedsAccountId, withAccountId } from './onecli-chatgpt-stub.js';
+import {
+  adoptSavedProviderCredentials,
+  hasSavedProviderNames,
+  providerCredentialFile,
+  type ProviderCredentialRecord,
+  readProviderCredentials,
+  RecordLockedError,
+  unrecordedModelKeys,
+  updateProviderCredentials,
+} from './onecli-provider-credentials.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 
@@ -41,6 +52,7 @@ export function contributionFromConfig(
   config: ContainerConfig,
   groupScope: string,
   dataDir = DATA_DIR,
+  accountId?: string,
 ): OneCLIContribution {
   const env = { ...config.env };
   const mounts: GatewayMount[] = [];
@@ -61,8 +73,41 @@ export function contributionFromConfig(
     env.SSL_CERT_FILE = target;
     env.DENO_CERT = target;
   }
-  for (const stub of config.credentialStubs ?? []) mount('stub', stub.content, stub.containerPath);
+  for (const stub of config.credentialStubs ?? []) {
+    mount('stub', accountId ? withAccountId(stub.content, accountId) : stub.content, stub.containerPath);
+  }
   return { env, mounts };
+}
+
+/**
+ * The stand-in's fixed account id fails a client's workspace check; OneCLI
+ * keeps the real id as secret metadata. An unreachable API stops the spawn,
+ * as a failed container-config fetch does; a stored login without one usable
+ * id leaves the stand-in unchanged.
+ */
+export async function stubAccountId(config: ContainerConfig): Promise<string | undefined> {
+  if (!(config.credentialStubs ?? []).some((stub) => stubNeedsAccountId(stub.content))) return undefined;
+  const headers: Record<string, string> = {};
+  const apiKey = onecliApiKey ?? process.env.ONECLI_API_KEY;
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+  if (process.env.ONECLI_PROJECT_ID) headers['X-Project-Id'] = process.env.ONECLI_PROJECT_ID;
+  const base = (onecliUrl || 'https://api.onecli.sh').replace(/\/+$/, '');
+  const response = await fetch(`${base}/v1/secrets`, { headers, signal: AbortSignal.timeout(5_000) });
+  if (response.status >= 500) throw new Error(`OneCLI secret metadata unavailable: status ${response.status}`);
+  if (!response.ok) {
+    log.warn('OneCLI secret metadata refused; login stand-in keeps its placeholder account id', {
+      status: response.status,
+    });
+    return undefined;
+  }
+  const { accountId, logins } = storedAccountId(await response.json());
+  if (!accountId) {
+    log.warn('OneCLI login stand-in keeps its placeholder account id', {
+      storedLogins: logins,
+      hint: 'keep one ChatGPT login in OneCLI (onecli secrets list / delete), then sign in again',
+    });
+  }
+  return accountId;
 }
 
 export function withProviderEnv(contribution: OneCLIContribution, baseUrl = anthropicBaseUrl): OneCLIContribution {
@@ -118,16 +163,163 @@ function monitorLease(signal: AbortSignal): Pick<GatewaySessionLease, 'onUnavail
   };
 }
 
+export interface ProviderGrantOptions {
+  baseUrl: string;
+  apiKey?: string;
+  projectId?: string | null;
+  fetchImpl?: typeof fetch;
+  dataDir?: string;
+}
+
+async function isUnknownRoute(res: Response): Promise<boolean> {
+  const body = (await res.json().catch(() => null)) as { error?: { type?: unknown; message?: unknown } } | null;
+  const error = body?.error;
+  return (
+    error?.type === 'invalid_request_error' ||
+    (typeof error?.message === 'string' && error.message.startsWith('Unrecognized request URL'))
+  );
+}
+
+/**
+ * From 1.44 an agent receives only the secrets attached to it, so attach the
+ * model credentials this install recorded for the group's provider; tool
+ * secrets and app connections stay opt-in. Runs on every spawn and only adds,
+ * so later spawns repair an interrupted setup or a provider switch. Returns the
+ * ids attached, or null on a gateway without grants (1.43 and older).
+ */
+export async function grantProviderCredentials(
+  identifier: string,
+  provider: string,
+  opts: ProviderGrantOptions,
+): Promise<string[] | null> {
+  const doFetch = opts.fetchImpl ?? fetch;
+  const dataDir = opts.dataDir ?? DATA_DIR;
+  const base = opts.baseUrl.replace(/\/+$/, '');
+  const headers: Record<string, string> = {};
+  if (opts.apiKey) headers.Authorization = `Bearer ${opts.apiKey}`;
+  if (opts.projectId) headers['X-Project-Id'] = opts.projectId;
+  const request = (path: string, method = 'GET') =>
+    doFetch(`${base}${path}`, { method, headers, signal: AbortSignal.timeout(10_000) });
+  const list = async (path: string): Promise<Array<Record<string, unknown>>> => {
+    const res = await request(path);
+    if (!res.ok) throw new Error(`GET ${path} returned ${res.status}`);
+    const body = (await res.json()) as unknown;
+    const rows = Array.isArray(body) ? body : (body as { data?: unknown }).data;
+    if (!Array.isArray(rows)) throw new Error(`GET ${path} did not return a list`);
+    return rows as Array<Record<string, unknown>>;
+  };
+
+  const agent = (await list('/v1/agents')).find((a) => a.identifier === identifier);
+  if (typeof agent?.id !== 'string') throw new Error(`OneCLI agent ${identifier} not found`);
+  const agentPath = `/v1/agents/${encodeURIComponent(agent.id)}`;
+  const grants = await request(`${agentPath}/grants`);
+  // Only a gateway that does not know the route at all lacks grants (1.42
+  // answers `invalid_request_error`, "Unrecognized request URL"); any other
+  // 404, such as "Agent not found.", is a failure.
+  if (grants.status === 404 && (await isUnknownRoute(grants))) return null;
+  if (!grants.ok) throw new Error(`GET ${agentPath}/grants returned ${grants.status}`);
+  const granted = ((await grants.json()) as { secrets?: unknown }).secrets;
+  if (!Array.isArray(granted)) throw new Error(`GET ${agentPath}/grants did not return a secrets list`);
+  const held = new Set(granted.map((g) => (g as { secretId?: unknown }).secretId));
+
+  let record = readProviderCredentials(dataDir);
+  const vault = await list('/v1/secrets');
+  const live = new Set(vault.map((secret) => secret.id).filter((id): id is string => typeof id === 'string'));
+  if (!record.matched.includes(provider) && hasSavedProviderNames(provider)) {
+    // Duplicate saved names throw here, after the record is read again.
+    const adopt = (r: ProviderCredentialRecord) => adoptSavedProviderCredentials(r, provider, vault);
+    try {
+      record = await updateProviderCredentials(dataDir, adopt, { lockTimeoutMs: 1_000 });
+    } catch (err) {
+      if (!(err instanceof RecordLockedError)) throw err;
+      // Never stall or fail a spawn on the record: use the match now, record it on a later spawn.
+      log.warn('OneCLI could not record the matched model credential; using it for this spawn only', {
+        agentGroupId: identifier,
+        provider,
+        lock: `${providerCredentialFile(dataDir)}.lock`,
+      });
+      // Re-read: the holder may have committed its match before stalling.
+      record = readProviderCredentials(dataDir);
+      adopt(record);
+    }
+  }
+  const ids = (record.providers[provider] ?? []).filter((id) => live.has(id));
+  const missing = ids.filter((id) => !held.has(id));
+  for (const id of missing) {
+    const res = await request(`${agentPath}/grants/secrets/${encodeURIComponent(id)}`, 'PUT');
+    if (!res.ok) throw new Error(`attaching secret ${id} returned ${res.status}`);
+  }
+  if (ids.length === 0) {
+    const unrecorded = unrecordedModelKeys(record, provider, vault);
+    if (unrecorded.length) {
+      // A group that still holds one (converted on upgrade) works; a new one gets no key.
+      const level = unrecorded.some((s) => held.has(s.id)) ? 'warn' : 'error';
+      log[level](
+        `OneCLI holds a ${provider} model key NanoClaw never recorded, so new groups get no key: ` +
+          `run \`pnpm exec tsx setup/index.ts --step gateway-auth ${provider}\` to sign in and record one`,
+        { agentGroupId: identifier, provider, unrecorded: unrecorded.map((s) => s.name) },
+      );
+    } else {
+      log.warn(
+        'No model credential recorded for this provider is in the OneCLI vault; the group gets none until its login is run again',
+        {
+          agentGroupId: identifier,
+          provider,
+        },
+      );
+    }
+  }
+  return missing;
+}
+
+// One in-flight agent setup per agent group and provider in this host process:
+// concurrent spawns share one ensureAgent call and one grants check.
+const agentSetup = new Map<string, Promise<void>>();
+
+function ensureAgentReady(identifier: string, name: string, provider: string | undefined): Promise<void> {
+  const key = `${identifier}\0${provider ?? ''}`;
+  const inFlight = agentSetup.get(key);
+  if (inFlight) return inFlight;
+  const setup = (async () => {
+    await onecli.ensureAgent({ name, identifier });
+    if (!provider) return;
+    let attached: string[] | null;
+    try {
+      attached = await grantProviderCredentials(identifier, provider, {
+        baseUrl: onecliUrl || 'https://api.onecli.sh',
+        apiKey: onecliApiKey,
+        projectId: process.env.ONECLI_PROJECT_ID,
+      });
+    } catch (err) {
+      throw new Error(
+        `OneCLI: could not grant the ${provider} model credential to agent group ${identifier} ` +
+          `(${(err as Error).message}); the next spawn retries`,
+        { cause: err },
+      );
+    }
+    if (attached?.length) {
+      log.info('OneCLI model credential granted', { agentGroupId: identifier, provider, secrets: attached.length });
+    }
+  })();
+  agentSetup.set(key, setup);
+  const clear = () => {
+    if (agentSetup.get(key) === setup) agentSetup.delete(key);
+  };
+  setup.then(clear, clear);
+  return setup;
+}
+
 async function ensureSession(input: GatewaySessionInput, signal: AbortSignal): Promise<GatewaySessionLease> {
   // The OneCLI agent identifier is always the agent group id — stable across
   // sessions and reversible via getAgentGroup() for approval routing.
-  await onecli.ensureAgent({ name: input.groupName, identifier: input.key.agentGroupId });
+  await ensureAgentReady(input.key.agentGroupId, input.groupName, input.provider);
   const config = await onecli.getContainerConfig({ agent: input.key.agentGroupId });
+  const accountId = await stubAccountId(config);
   log.info('OneCLI gateway applied', { agentGroupId: input.key.agentGroupId, sessionId: input.key.sessionId });
   return {
     ...monitorLease(signal),
     contribution: {
-      ...withProviderEnv(contributionFromConfig(config, input.key.agentGroupId)),
+      ...withProviderEnv(contributionFromConfig(config, input.key.agentGroupId, DATA_DIR, accountId)),
       networkAccess: {
         endpoint: 'host.docker.internal',
         target: { kind: 'runtime', identity: gatewayContainer },

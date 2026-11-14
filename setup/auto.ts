@@ -33,7 +33,13 @@ import * as p from '@clack/prompts';
 import k from 'kleur';
 
 import { BACK_TO_CHANNEL_SELECTION } from './lib/back-nav.js';
-import { withSetupLock, launchSlackJob, readSlackJob, slackJobStatus } from '../src/community-portal/slack-job.js';
+import {
+  withSetupLock,
+  launchSlackJob,
+  readSlackJob,
+  slackJobFailure,
+  slackJobStatus,
+} from '../src/community-portal/slack-job.js';
 // The pre-step-aware entry point consults each channel's registered wizard
 // extensions (setup/channels/companions.ts) before running its install skill
 // — the wizard itself stays free of channel-specific imports.
@@ -46,7 +52,26 @@ import {
 } from './channels/initial-setup.js';
 import { runInheritScript } from './lib/inherit-script.js';
 import { offerPortalReminder, portalEnabled, runImagePortal } from './portal.js';
-import { logFirstChat, pingCliAgent, PING_AGENT_FOLDER, type PingResult } from './lib/agent-ping.js';
+import {
+  firstChatEventProps,
+  logFirstChat,
+  pingFailureCopy,
+  PING_AGENT_FOLDER,
+  startCliPing,
+  type FirstChatWait,
+  type PingOutcome,
+} from './lib/agent-ping.js';
+import { EXTRA_WAIT_MS, MAX_WAIT_MS, waitForFirstReply, type WaitChoice } from './lib/first-chat-wait.js';
+import {
+  createStageProbe,
+  fill,
+  FIRST_CHAT_COPY,
+  keepWaitingQuestion,
+  skippedWaitCopy,
+  StageDisplay,
+  type FirstChatStage,
+} from './lib/first-chat-progress.js';
+import { inspectAgentSession } from './central-db-inspection.js';
 import { getSetupProvider, listSetupProviders } from './providers/registry.js';
 import { applyProviderSkill, loadHostContractModules } from './providers/install.js';
 import {
@@ -75,6 +100,8 @@ import { upsertEnvVar } from './set-env.js';
 import { applyToEnv, parseFlags, printHelp, readFromEnv } from './lib/setup-config-parse.js';
 import { runAdvancedScreen } from './lib/setup-config-screen.js';
 import { runWindowedStep } from './lib/windowed-runner.js';
+import { dockerSudoReason, sudoUpFront, type DockerSudoReason } from './lib/sudo-preflight.js';
+import { isWSL } from './platform.js';
 import { runUninstallFlow } from './uninstall/flow.js';
 import { detectExistingInstall } from './uninstall/scan.js';
 import { detectRegisteredGroups, detectExistingDisplayName, readEnvKey } from './environment.js';
@@ -84,35 +111,31 @@ import { configuredGatewayKind, detectInstalledGateway } from './gateways/select
 import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
 import type { AgentGroup } from '../src/types.js';
 import { claudeCliAvailable, resolveTimezoneViaClaude } from './lib/tz-from-claude.js';
+import { dockerAccessHint } from './lib/docker-access-hint.js';
 import * as setupLog from './logs.js';
 import { ensureAnswer, fail, runQuietChild, runQuietStep, spawnQuiet } from './lib/runner.js';
 import { emit as phEmit } from './lib/diagnostics.js';
-import {
-  accentGreen,
-  brandBody,
-  brandBold,
-  brandChip,
-  dimWrap,
-  fitToWidth,
-  fmtDuration,
-  note,
-  wrapForGutter,
-} from './lib/theme.js';
+import { accentGreen, brandBody, brandBold, brandChip, dimWrap, note, wrapForGutter } from './lib/theme.js';
 import { isValidTimezone } from '../src/timezone.js';
 import { DEFAULT_AGENT_PROVIDER, TEMPLATES_DIR } from '../src/config.js';
 import { SocketTransport } from '../src/cli/socket-client.js';
+import { heartbeatPath } from '../src/session-manager.js';
+import {
+  cloneRegistry,
+  ensureTemplateLocal,
+  listTemplatesFromDir,
+  readTemplateIndex,
+  type ClonedRegistry,
+  type LibraryTemplate,
+  type TemplateEntry,
+} from '../src/templates/library.js';
 import {
   applyTemplatePick,
   clearTemplatePick,
-  cloneRegistry,
-  copyTemplate,
   installTemplateAgent,
   listTemplateAgents,
-  listTemplatesFromDir,
   validateNewTemplateAgentName,
-  type ClonedRegistry,
   type SetupTemplateAgent,
-  type TemplateEntry,
   type TemplateOperation,
 } from './templates.js';
 
@@ -124,6 +147,16 @@ const REGISTRY_STEP = 'pnpm exec tsx setup/index.ts --step registry';
 
 /** `setup/registry-login.sh`'s "nothing was signed in, and that is fine" code. */
 const LOGIN_EXIT_SKIPPED = 2;
+
+/** What the container step needs sudo for, and how to do it without setup. */
+const DOCKER_SUDO_COPY: Record<DockerSudoReason, { task: string; diy: string }> = {
+  install: { task: 'install Docker', diy: 'install Docker yourself first' },
+  start: { task: 'start Docker', diy: 'start Docker yourself first' },
+  group: {
+    task: 'add you to the docker group',
+    diy: 'add yourself to the docker group and run setup from a `newgrp docker` shell',
+  },
+};
 
 async function main(): Promise<void> {
   // Make sure ~/.local/bin is on PATH for every child process we spawn.
@@ -269,6 +302,23 @@ async function main(): Promise<void> {
     // The answer lives in `.env` (imageSourceDecided); the perk reminder below
     // reads it from there, so it survives a resume and a plain re-run alike.
     await chooseImageSource();
+    // Installing or starting Docker runs sudo inside the windowed step, where
+    // its prompt is hidden, so ask here. A timestamp still cached from
+    // nanoclaw.sh's Node pre-flight skips the prompt.
+    const dockerSudo = dockerSudoReason();
+    if (dockerSudo) {
+      const { task, diy } = DOCKER_SUDO_COPY[dockerSudo];
+      const sudo = await sudoUpFront(() =>
+        p.log.message(brandBody(dimWrap(`Setup needs to ${task}, so it will ask for your Linux password (sudo).`, 4))),
+      );
+      if (sudo === 'refused') {
+        await fail(
+          'container',
+          `Couldn't get sudo access to ${task}.`,
+          `Run setup again and enter your Linux password, or ${diy}.`,
+        );
+      }
+    }
     p.log.message(
       brandBody(
         dimWrap(
@@ -294,10 +344,15 @@ async function main(): Promise<void> {
         );
       }
       if (err === 'docker_group_not_active') {
+        // Closing a WSL terminal doesn't log the user out, so the new group
+        // only shows up once WSL itself restarts.
+        const distro = process.env.WSL_DISTRO_NAME?.trim() || 'Ubuntu';
         await fail(
           'container',
           "Docker was just installed but your shell doesn't know yet.",
-          'Log out and back in (or run `newgrp docker` in a new shell), then retry.',
+          isWSL()
+            ? `Close ${distro}, run \`wsl --shutdown\` in PowerShell, then reopen ${distro}, go back to the NanoClaw folder and run \`bash nanoclaw.sh\`.`
+            : 'Log out and back in (or run `newgrp docker` in a new shell), then retry.',
         );
       }
       // The pull path fails for reasons a build never has, and "prune the build
@@ -528,13 +583,11 @@ async function main(): Promise<void> {
         ),
       );
     }
-    if (res.terminal?.fields.DOCKER_GROUP_STALE === 'true') {
-      p.log.warn(brandBody("NanoClaw's permissions need a tweak before it can reach Docker."));
-      p.log.message(
-        brandBody(
-          '  sudo setfacl -m u:$(whoami):rw /var/run/docker.sock\n' + `  systemctl --user restart ${getSystemdUnit()}`,
-        ),
-      );
+    const dockerFix = dockerAccessHint(res.terminal?.fields ?? {}, getSystemdUnit());
+    if (dockerFix) {
+      p.log.warn(brandBody(dockerFix.title));
+      p.log.message(brandBody(dockerFix.commands.map((c) => `  ${c}`).join('\n')));
+      p.log.message(brandBody(dockerFix.note));
     }
   }
 
@@ -571,19 +624,14 @@ async function main(): Promise<void> {
       );
     }
     if (!skip.has('first-chat')) {
-      p.log.message(
-        brandBody(
-          dimWrap(
-            "Your assistant runs in an isolated sandbox. I'm going to send it a quick test message (ping) and wait for a reply (pong) to confirm it's responding. First startup typically takes 30–60 seconds while the sandbox warms up.",
-            4,
-          ),
-        ),
-      );
+      p.log.message(brandBody(dimWrap(FIRST_CHAT_COPY.intro, 4)));
       const pingStart = Date.now();
-      const ping = await confirmAssistantResponds();
-      logFirstChat(ping, Date.now() - pingStart);
+      const { outcome, wait } = await confirmAssistantResponds();
+      const waitedMs = Date.now() - pingStart;
+      logFirstChat(outcome, waitedMs, wait);
+      const ping = outcome.result;
       if (ping === 'ok') {
-        phEmit('first_chat_ready');
+        phEmit('first_chat_ready', firstChatEventProps(outcome, wait));
         const cleanupRawLog = setupLog.stepRawLog('cleanup-cli-agent');
         const cleanupStart = Date.now();
         const cleanup = await spawnQuiet(
@@ -647,20 +695,14 @@ async function main(): Promise<void> {
           }
           await runFirstChat();
         }
+      } else if (wait.skipped) {
+        phEmit('first_chat_failed', firstChatEventProps(outcome, wait));
+        note(skippedWaitCopy(wait.stage).note, FIRST_CHAT_COPY.skippedTitle);
       } else {
-        phEmit('first_chat_failed', { reason: ping });
-        renderPingFailureNote(ping);
-        await offerClaudeOnFailure({
-          stepName: 'cli-agent',
-          msg:
-            ping === 'socket_error'
-              ? "NanoClaw service isn't listening on its CLI socket."
-              : 'No reply from the assistant within 30 seconds.',
-          hint:
-            ping === 'socket_error'
-              ? 'Socket at data/cli.sock did not accept a connection.'
-              : 'Agent container may be failing to start or authenticate.',
-        });
+        phEmit('first_chat_failed', firstChatEventProps(outcome, wait));
+        const copy = pingFailureCopy(outcome, waitedMs);
+        note(copy.note, FIRST_CHAT_COPY.skippedTitle);
+        await offerClaudeOnFailure({ stepName: 'cli-agent', msg: copy.assistMsg, hint: copy.assistHint });
       }
     }
   }
@@ -716,6 +758,8 @@ async function main(): Promise<void> {
   // changes too — the last box must be the one remaining action, not a
   // premature "your assistant is saying hi" (no welcome DM exists yet).
   let wiringPending = false;
+  // Verify passed without a Slack job: none, or one a later good Slack run replaced.
+  let verifyClearedSlackJob = false;
 
   if (
     portalEnabled() &&
@@ -758,9 +802,10 @@ async function main(): Promise<void> {
         );
       }
       const slackInstall = res.terminal?.fields.SLACK_INSTALL;
+      const slackReason = res.terminal?.fields.SLACK_INSTALL_REASON;
       if (slackInstall === 'failed') {
         notes.push(
-          '• Slack installation needs attention. Check its progress in the portal, then resume with `pnpm exec tsx setup/portal.ts --stage slack`.',
+          `• Slack installation needs attention${slackReason ? ` (${slackReason})` : ''}. Check its progress in the portal, then resume with \`pnpm exec tsx setup/portal.ts --stage slack\`.`,
         );
       } else if (slackInstall === 'expired') {
         notes.push('• Slack approval expired. Review the existing app in the portal before restarting Slack setup.');
@@ -796,6 +841,7 @@ async function main(): Promise<void> {
       return;
     }
     wiringPending = res.terminal?.fields.WIRING === 'pending_first_dm';
+    verifyClearedSlackJob = !res.terminal?.fields.SLACK_INSTALL;
   }
 
   const rows: [string, string][] = [
@@ -817,12 +863,14 @@ async function main(): Promise<void> {
     'Heads up',
   );
 
-  const slackStatus = slackJobStatus(await readSlackJob());
+  const slackJob = await readSlackJob();
+  const slackStatus = verifyClearedSlackJob ? undefined : slackJobStatus(slackJob);
   if (slackStatus === 'failed' || slackStatus === 'expired') {
+    const reason = slackJobFailure(slackJob);
     note(
       slackStatus === 'expired'
         ? 'Slack approval expired. Review the existing app in the portal before restarting Slack setup.'
-        : 'Slack installation needs attention. Check its progress in the portal, then resume with `pnpm exec tsx setup/portal.ts --stage slack`.',
+        : `Slack installation needs attention${reason ? ` (${reason})` : ''}. Check its progress in the portal, then resume with \`pnpm exec tsx setup/portal.ts --stage slack\`.`,
       'Slack setup',
     );
     p.outro(k.yellow('NanoClaw is running. Slack needs attention.'));
@@ -863,52 +911,67 @@ async function main(): Promise<void> {
 
 /**
  * Round-trip ping against the CLI socket before we ask the user to chat.
- * Renders its own spinner with elapsed time because a cold-start container
- * boot can take 30–60s — the elapsed counter is the difference between
- * "patient" and "is this hung?". Returns the raw result so the caller can
- * branch between the chat loop (ok) and a diagnostic note (anything else).
+ * A first reply waits on the sandbox, the agent runtime and the model, which
+ * can take minutes with a local model, so each stage gets its own line and
+ * timer, and a long wait asks whether to keep going instead of failing.
+ * Returns the outcome so the caller can branch between the chat loop (ok)
+ * and a diagnostic note (anything else).
  */
-async function confirmAssistantResponds(): Promise<PingResult> {
-  const s = p.spinner();
+async function confirmAssistantResponds(): Promise<{ outcome: PingOutcome; wait: FirstChatWait }> {
   const start = Date.now();
-  const label = 'Waking your assistant…';
-  s.start(fitToWidth(label, ' (99m 59s)'));
-  const tick = setInterval(() => {
-    const suffix = ` (${fmtDuration(Date.now() - start)})`;
-    s.message(`${fitToWidth(label, suffix)}${k.dim(suffix)}`);
-  }, 1000);
+  const ping = startCliPing(MAX_WAIT_MS);
+  const probe = createStageProbe({
+    since: start,
+    readSession: () => inspectAgentSession(process.cwd(), PING_AGENT_FOLDER),
+    heartbeatFile: heartbeatPath,
+  });
+  const display = new StageDisplay(probe, {}, start);
+  display.start();
+  void display.tick();
+  const tick = setInterval(() => void display.tick(), 1000);
 
-  const result = await pingCliAgent();
+  const { outcome, keptWaiting, skipped } = await waitForFirstReply({
+    ping,
+    interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY),
+    ask: async (waitedMs, signal) => {
+      display.pause();
+      const choice = await askKeepWaiting(display.seenStage, waitedMs, signal);
+      // Otherwise the wait is over; the closing lines print without a spinner.
+      if (choice === 'wait') display.resume();
+      return choice;
+    },
+  });
 
   clearInterval(tick);
-  const suffix = ` (${fmtDuration(Date.now() - start)})`;
-  if (result === 'ok') {
-    s.stop(`${k.bold(fitToWidth('Your assistant is ready.', suffix))}${k.dim(suffix)}`);
-  } else {
-    const msg =
-      result === 'socket_error' ? "Couldn't reach the NanoClaw service." : "Your assistant didn't reply in time.";
-    s.stop(`${k.bold(fitToWidth(msg, suffix))}${k.dim(suffix)}`, 1);
-  }
-  return result;
+  await display.idle();
+  if (outcome.result === 'ok') display.succeed(FIRST_CHAT_COPY.ready);
+  else display.fail(skipped ? skippedWaitCopy(display.seenStage).spinner : pingFailureCopy(outcome).spinner);
+  return { outcome, wait: { keptWaiting, skipped, stage: display.seenStage } };
 }
 
-function renderPingFailureNote(result: PingResult): void {
-  const body =
-    result === 'socket_error'
-      ? [
-          wrapForGutter(
-            "The NanoClaw service isn't listening on its local socket. Try restarting it, then chat with `pnpm run chat hi`:",
-            6,
-          ),
-          '',
-          `  macOS:  launchctl kickstart -k gui/$(id -u)/${getLaunchdLabel()}`,
-          `  Linux:  systemctl --user restart ${getSystemdUnit()}`,
-        ].join('\n')
-      : wrapForGutter(
-          'No reply from your assistant within 30 seconds. Check `logs/nanoclaw.log` for clues, then try `pnpm run chat hi`.',
-          6,
-        );
-  note(body, 'Skipping the first chat');
+async function askKeepWaiting(
+  stage: FirstChatStage | undefined,
+  waitedMs: number,
+  signal: AbortSignal,
+): Promise<WaitChoice | undefined> {
+  const answer = await brightSelect<WaitChoice>({
+    message: keepWaitingQuestion(stage, waitedMs),
+    options: [
+      {
+        value: 'wait',
+        label: FIRST_CHAT_COPY.keepWaiting,
+        hint: fill(FIRST_CHAT_COPY.keepWaitingHint, { minutes: EXTRA_WAIT_MS / 60_000 }),
+      },
+      { value: 'skip', label: FIRST_CHAT_COPY.skip, hint: FIRST_CHAT_COPY.skipHint },
+    ],
+    signal,
+    abortedLabel: (outcome) =>
+      (outcome as PingOutcome | undefined)?.result === 'ok' ? FIRST_CHAT_COPY.replied : FIRST_CHAT_COPY.waitEnded,
+  });
+  if (signal.aborted) return undefined;
+  const choice = ensureAnswer(answer) as WaitChoice;
+  setupLog.userInput('first_chat_wait', choice);
+  return choice;
 }
 
 /**
@@ -1047,22 +1110,27 @@ function listLocalTemplates(): TemplateEntry[] {
   }
 }
 
+// One git clone (git honors HTTPS_PROXY; setup's own fetch does not): the list
+// comes from the clone's index.json, and the pick is copied out of the same clone.
 async function pickLibraryTemplate(): Promise<string | undefined> {
   const spinner = p.spinner();
   spinner.start('Fetching the template library…');
-  let registry: ClonedRegistry;
+  let registry: ClonedRegistry | undefined;
+  let templates: LibraryTemplate[];
   try {
-    registry = cloneRegistry();
+    registry = await cloneRegistry();
+    templates = readTemplateIndex(registry.dir);
   } catch (err) {
-    spinner.stop('Could not reach the template library.');
+    registry?.cleanup();
+    spinner.stop('Could not load the template library.');
     const message = err instanceof Error ? err.message : String(err);
     setupLog.step('template-source', 'interactive', 0, { source: 'library', error: message });
     p.log.warn(message);
     return undefined;
   }
 
+  const clone = registry;
   try {
-    const templates = listTemplatesFromDir(registry.dir).filter((template) => template.ref !== '.');
     if (templates.length === 0) {
       spinner.stop('The template library is empty.');
       return undefined;
@@ -1071,26 +1139,25 @@ async function pickLibraryTemplate(): Promise<string | undefined> {
     const ref = await chooseTemplate(templates);
     if (!ref) return undefined;
 
-    const destination = path.join(TEMPLATES_DIR, ref);
-    if (fs.existsSync(destination)) {
+    if (fs.existsSync(path.join(TEMPLATES_DIR, ref))) {
       if (!listLocalTemplates().some((template) => template.ref === ref)) {
         p.log.warn(`Can't install "${ref}": that path already exists but isn't a valid template.`);
         return undefined;
       }
       p.log.info(`Keeping your existing local copy of "${ref}".`);
-    } else {
-      try {
-        copyTemplate(registry.dir, ref, TEMPLATES_DIR);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        setupLog.step('template-copy', 'interactive', 0, { ref, error: message });
-        p.log.warn(`Couldn't copy "${ref}" into templates/: ${message}`);
-        return undefined;
-      }
+      return ref;
+    }
+    try {
+      await ensureTemplateLocal(ref, { clone: async () => ({ ...clone, cleanup: () => {} }) });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setupLog.step('template-copy', 'interactive', 0, { ref, error: message });
+      p.log.warn(`Couldn't copy "${ref}" into templates/: ${message}`);
+      return undefined;
     }
     return ref;
   } finally {
-    registry.cleanup();
+    clone.cleanup();
   }
 }
 
@@ -1105,7 +1172,7 @@ async function pickLocalTemplate(): Promise<string | undefined> {
 
 const BACK_TO_TEMPLATE_SOURCE = '\0back';
 
-async function chooseTemplate(templates: TemplateEntry[]): Promise<string | undefined> {
+async function chooseTemplate(templates: Array<TemplateEntry & { description?: string }>): Promise<string | undefined> {
   const ref = ensureAnswer(
     await p.autocomplete<string>({
       message: 'Choose a template',
@@ -1113,7 +1180,7 @@ async function chooseTemplate(templates: TemplateEntry[]): Promise<string | unde
         ...templates.map((template) => ({
           value: template.ref,
           label: template.name,
-          hint: template.ref.includes('/') ? template.ref : undefined,
+          hint: template.description || (template.ref.includes('/') ? template.ref : undefined),
         })),
         { value: BACK_TO_TEMPLATE_SOURCE, label: '← Back' },
       ],

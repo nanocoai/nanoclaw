@@ -90,6 +90,8 @@ export interface MailboxTimelineMessage {
 }
 
 /** Host-visible inbound mailbox behavior. Storage layout and lifecycle are implementation-private. */
+export type WakeEvidence = 'woken' | 'chatter' | 'none';
+
 export interface InboundMailbox {
   setRouting(routing: SessionRouting): void;
   replaceDestinations(entries: Destination[]): void;
@@ -104,6 +106,10 @@ export interface InboundMailbox {
   markDeliveryFailed(messageOutId: string): void;
   getInboundSourceSessionId(messageId: string): string | null;
   getMostRecentPeerSourceSessionId(peerAgentGroupId: string): string | null;
+  /** True once another agent has messaged this session, answered or not. */
+  hasMessagesFromOtherAgents(selfAgentGroupId: string): boolean;
+  /** Whether anything woke this session, or it holds only silent chat (echoes ignored). */
+  wakeEvidence(): WakeEvidence;
   insertTask(task: Task): Promise<void>;
   cancelTask(taskId?: string): number;
   pauseTask(taskId: string): number;
@@ -142,6 +148,8 @@ export interface OutboundMailbox {
   writeDirect(message: DirectOutboundMessage): Promise<void>;
   getOutboundHistory(limit: number): MailboxHistoryMessage[];
   getTopLevelOutbound(limit: number): MailboxTimelineMessage[];
+  /** True once this session has messaged another agent, which routes its replies back here. */
+  hasMessagesToOtherAgents(selfAgentGroupId: string): boolean;
 }
 
 export interface MailboxSession extends InboundMailbox, OutboundMailbox {}

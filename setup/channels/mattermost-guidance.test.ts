@@ -42,7 +42,7 @@ describe('Mattermost bot setup guidance', () => {
     expect(skill).toContain('src/channels/mattermost-adapter/adapter.test.ts');
     expect(skill).toContain('src/channels/mattermost-adapter/websocket.test.ts');
     expect(skill).toContain(
-      'pnpm exec vitest run src/channels/mattermost-registration.test.ts src/channels/mattermost-adapter/adapter.test.ts src/channels/mattermost-adapter/websocket.test.ts',
+      'pnpm exec vitest run src/channels/mattermost.test.ts src/channels/mattermost-registration.test.ts src/channels/mattermost-adapter/adapter.test.ts src/channels/mattermost-adapter/websocket.test.ts',
     );
   });
 
@@ -103,6 +103,7 @@ describe('Mattermost bot setup guidance', () => {
         directive.body.some((line) => line.includes('/api/v4/users/username/{{owner_username}}')),
     );
     expect(ownerLookup?.attrs.capture).toBe('owner_user_id=.id,owner_handle=.id');
+    expect(ownerLookup?.attrs.validate).toBe('^[a-z0-9]{26}$');
   });
 
   it('replaces a stale canonical URL without changing existing credentials', () => {

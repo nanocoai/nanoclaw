@@ -19,7 +19,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 
 import { initTestDb, closeDb, runMigrations, getDb } from '../../db/index.js';
 import { createAgentGroup } from '../../db/agent-groups.js';
-import { AGENT_ACCESS_SCOPE_WARNING, createNewAgentGroup } from './channel-approval.js';
+import { AGENT_ACCESS_SCOPE_WARNING, createNewAgentGroup, describeResolvedRule } from './channel-approval.js';
 import { createMessagingGroup, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
 import {
   initChannelAdapters,
@@ -59,6 +59,13 @@ const slackAdapter: ChannelAdapter = {
   defaults: telegramDefaults,
 };
 registerChannelAdapter('slack', { factory: () => slackAdapter, defaults: telegramDefaults });
+registerChannelAdapter('namepattern', {
+  factory: () => null,
+  defaults: {
+    ...telegramDefaults,
+    group: { ...telegramDefaults.group, engageMode: 'pattern', engagePattern: '\\b{name}\\b' },
+  },
+});
 
 // Mock container runner — prevent actual docker spawn.
 vi.mock('../../container-runner.js', () => ({
@@ -73,6 +80,45 @@ const deliverMock = vi.fn().mockResolvedValue('plat-msg-id');
 vi.mock('../../delivery.js', () => ({
   getDeliveryAdapter: () => ({ deliver: deliverMock }),
 }));
+
+// A pass-through newGroupFolder a test can hold, to land a click while a name reply is being checked.
+const folderGate = vi.hoisted(() => ({ hold: null as Promise<void> | null, entered: false }));
+vi.mock('../../group-folder.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../group-folder.js')>();
+  return {
+    ...actual,
+    newGroupFolder: async (base: string) => {
+      folderGate.entered = true;
+      if (folderGate.hold) await folderGate.hold;
+      return actual.newGroupFolder(base);
+    },
+  };
+});
+
+// A pass-through card-options store a test can make fail once.
+const cardUpdate = vi.hoisted(() => ({ fail: false, loseRejectClaim: false }));
+vi.mock('./db/pending-channel-approvals.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./db/pending-channel-approvals.js')>();
+  return {
+    ...actual,
+    deletePendingChannelApproval: async (...args: Parameters<typeof actual.deletePendingChannelApproval>) => {
+      if (cardUpdate.loseRejectClaim) {
+        cardUpdate.loseRejectClaim = false;
+        // Another response removed the row after the handler read it.
+        await actual.deletePendingChannelApproval(...args);
+        return false;
+      }
+      return actual.deletePendingChannelApproval(...args);
+    },
+    updatePendingChannelApprovalCard: async (...args: Parameters<typeof actual.updatePendingChannelApprovalCard>) => {
+      if (cardUpdate.fail) {
+        cardUpdate.fail = false;
+        throw new Error('SQLITE_BUSY: database is locked');
+      }
+      return actual.updatePendingChannelApprovalCard(...args);
+    },
+  };
+});
 
 // Mock ensureUserDm — look up the owner's preconfigured DM row instead of
 // hitting a real openDM RPC.
@@ -245,7 +291,7 @@ describe('unknown-channel registration flow', () => {
     expect(payload.type).toBe('ask_question');
     expect(payload.title).toBe('📣 Bot mentioned in new channel');
     expect(payload.question).toBe(
-      `Caller mentioned your bot in a telegram channel. If connected, the agent will respond to @-mentions in this group. ${AGENT_ACCESS_SCOPE_WARNING} How would you like to handle this channel?`,
+      `"Caller" mentioned your bot in a telegram channel. If connected, the agent will respond to @-mentions in this group. ${AGENT_ACCESS_SCOPE_WARNING} How would you like to handle this channel?`,
     );
     // Card tells the approver the resolved engage rule.
     expect(payload.question).toContain('will respond to @-mentions in this group');
@@ -254,6 +300,7 @@ describe('unknown-channel registration flow', () => {
     const connectOption = payload.options.find((o: { value: string }) => o.value.startsWith('connect:'));
     expect(connectOption).toBeDefined();
     expect(connectOption.label).toContain('Andy');
+    expect(connectOption.selectedLabel).toBe('✅ Connected to "Andy"');
 
     const rows = await getDb().all<{ messaging_group_id: string }>('SELECT * FROM pending_channel_approvals');
     expect(rows).toHaveLength(1);
@@ -273,7 +320,9 @@ describe('unknown-channel registration flow', () => {
 
     const payload = JSON.parse(deliverMock.mock.calls[0][4] as string) as { title: string; question: string };
     expect(payload.title).toBe('👥 Bot mentioned in new group chat');
-    expect(payload.question).toContain('Alice Doe mentioned your bot in a group chat with Bob and Carol on slack.');
+    expect(payload.question).toContain(
+      '"Alice Doe" mentioned your bot in a group chat with "Bob" and "Carol" on slack.',
+    );
     expect(payload.question).toContain(AGENT_ACCESS_SCOPE_WARNING);
     expect(payload.question).toContain('How would you like to handle this group chat?');
     expect(payload.question).not.toContain('mpdm-');
@@ -289,7 +338,7 @@ describe('unknown-channel registration flow', () => {
 
     const payload = JSON.parse(deliverMock.mock.calls[0][4] as string) as { title: string; question: string };
     expect(payload.title).toBe('📣 Bot mentioned in new channel');
-    expect(payload.question).toContain('Alice Doe mentioned your bot in growth-team on slack.');
+    expect(payload.question).toContain('"Alice Doe" mentioned your bot in "growth-team" on slack.');
     expect(payload.question).toContain('How would you like to handle this channel?');
     expect(resolveChannelNameMock).not.toHaveBeenCalled();
     expect((await getMessagingGroupByPlatform('slack', 'C_GROWTH'))?.name).toBe('growth-team');
@@ -574,24 +623,22 @@ describe('unknown-channel registration flow', () => {
 
   it('rejects clicks from an unauthorized user (prevents self-admit via forwarded card)', async () => {
     const { routeInbound } = await import('../../router.js');
-    const { getResponseHandlers } = await import('../../response-registry.js');
+    const { dispatchResponse } = await import('../../response-registry.js');
 
     await expectAsyncDelivery(() => routeInbound(groupMention('chat-unauth')));
     const pending = (await getDb().get<{ messaging_group_id: string }>(
       'SELECT messaging_group_id FROM pending_channel_approvals',
     ))!;
 
-    for (const handler of getResponseHandlers()) {
-      const claimed = await handler({
-        questionId: pending.messaging_group_id,
-        value: 'approve',
-        userId: 'random-bystander',
-        channelType: 'telegram',
-        platformId: 'dm-random',
-        threadId: null,
-      });
-      if (claimed) break;
-    }
+    const outcome = await dispatchResponse({
+      questionId: pending.messaging_group_id,
+      value: 'approve',
+      userId: 'random-bystander',
+      channelType: 'telegram',
+      platformId: 'dm-random',
+      threadId: null,
+    });
+    expect(outcome).toBe('refused');
 
     // No wiring created, pending row preserved so a real approver can act on it.
     const mgaCount = await countRows(
@@ -601,6 +648,115 @@ describe('unknown-channel registration flow', () => {
     expect(mgaCount).toBe(0);
     const stillPending = await countRows('SELECT COUNT(*) AS c FROM pending_channel_approvals');
     expect(stillPending).toBe(1);
+  });
+
+  it('wires a channel once when two choices race', async () => {
+    const { routeInbound } = await import('../../router.js');
+    const { dispatchResponse } = await import('../../response-registry.js');
+
+    await expectAsyncDelivery(() => routeInbound(groupMention('chat-connect-race')));
+    const { messaging_group_id: questionId } = (await getDb().get<{ messaging_group_id: string }>(
+      'SELECT messaging_group_id FROM pending_channel_approvals',
+    ))!;
+    const connect = () =>
+      dispatchResponse({
+        questionId,
+        value: 'connect:ag-1',
+        userId: 'owner',
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+      });
+    const outcomes = await Promise.all([connect(), connect()]);
+    expect([...outcomes].sort()).toEqual(['accepted', 'ignored']);
+    expect(
+      await countRows('SELECT COUNT(*) AS c FROM messaging_group_agents WHERE messaging_group_id = ?', questionId),
+    ).toBe(1);
+  });
+
+  it('a Reject that loses its claim neither denies the channel nor reports acceptance', async () => {
+    const { routeInbound } = await import('../../router.js');
+    const { dispatchResponse } = await import('../../response-registry.js');
+    await expectAsyncDelivery(() => routeInbound(groupMention('chat-lost-reject-claim')));
+    const { messaging_group_id: questionId } = (await getDb().get<{ messaging_group_id: string }>(
+      'SELECT messaging_group_id FROM pending_channel_approvals',
+    ))!;
+    cardUpdate.loseRejectClaim = true;
+    expect(
+      await dispatchResponse({
+        questionId,
+        value: 'reject',
+        userId: 'owner',
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+      }),
+    ).toBe('ignored');
+    expect(
+      (await getDb().get<{ denied_at: string | null }>(
+        'SELECT denied_at FROM messaging_groups WHERE id = ?',
+        questionId,
+      ))!.denied_at,
+    ).toBeNull();
+  });
+
+  it('a Reject racing a connect decides once: never both wired and denied', async () => {
+    const { routeInbound } = await import('../../router.js');
+    const { dispatchResponse } = await import('../../response-registry.js');
+
+    await expectAsyncDelivery(() => routeInbound(groupMention('chat-reject-race')));
+    const { messaging_group_id: questionId } = (await getDb().get<{ messaging_group_id: string }>(
+      'SELECT messaging_group_id FROM pending_channel_approvals',
+    ))!;
+    const click = (value: string) =>
+      dispatchResponse({
+        questionId,
+        value,
+        userId: 'owner',
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+      });
+    const outcomes = await Promise.all([click('connect:ag-1'), click('reject')]);
+    expect([...outcomes].sort()).toEqual(['accepted', 'ignored']);
+    const wired = await countRows(
+      'SELECT COUNT(*) AS c FROM messaging_group_agents WHERE messaging_group_id = ?',
+      questionId,
+    );
+    const denied = (await getDb().get<{ denied_at: string | null }>(
+      'SELECT denied_at FROM messaging_groups WHERE id = ?',
+      questionId,
+    ))!.denied_at;
+    expect(wired === 1 && denied !== null).toBe(false);
+  });
+
+  it('reports a connect accepted once the wiring is recorded, before the message is replayed', async () => {
+    const { routeInbound } = await import('../../router.js');
+    const { dispatchResponse } = await import('../../response-registry.js');
+    const { wakeContainer } = await import('../../container-runner.js');
+
+    await expectAsyncDelivery(() => routeInbound(groupMention('chat-connect-early')));
+    const { messaging_group_id: questionId } = (await getDb().get<{ messaging_group_id: string }>(
+      'SELECT messaging_group_id FROM pending_channel_approvals',
+    ))!;
+    let wake!: () => void;
+    vi.mocked(wakeContainer).mockImplementationOnce(
+      () => new Promise((resolve) => (wake = () => resolve(true as never))),
+    );
+    const outcome = await Promise.race([
+      dispatchResponse({
+        questionId,
+        value: 'connect:ag-1',
+        userId: 'owner',
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+      }),
+      new Promise((resolve) => setTimeout(() => resolve('still waiting'), 300)),
+    ]);
+    await vi.waitFor(() => expect(wake).toBeTypeOf('function'));
+    wake();
+    expect(outcome).toBe('accepted');
   });
 
   it('does not let a scoped admin connect an unknown channel to another agent group', async () => {
@@ -668,17 +824,16 @@ describe('unknown-channel registration flow', () => {
     expect(followupPayload.options.map((option) => option.value)).toContain('connect:ag-1');
     expect(followupPayload.options.map((option) => option.value)).not.toContain('connect:ag-2');
 
-    for (const handler of getResponseHandlers()) {
-      const claimed = await handler({
-        questionId: pending.messaging_group_id,
-        value: 'connect:ag-2',
-        userId: 'scoped-admin',
-        channelType: 'telegram',
-        platformId: 'dm-scoped-admin',
-        threadId: null,
-      });
-      if (claimed) break;
-    }
+    const { dispatchResponse } = await import('../../response-registry.js');
+    const outcome = await dispatchResponse({
+      questionId: pending.messaging_group_id,
+      value: 'connect:ag-2',
+      userId: 'scoped-admin',
+      channelType: 'telegram',
+      platformId: 'dm-scoped-admin',
+      threadId: null,
+    });
+    expect(outcome).toBe('refused');
 
     const mgaCount = await countRows(
       'SELECT COUNT(*) AS c FROM messaging_group_agents WHERE messaging_group_id = ?',
@@ -687,6 +842,270 @@ describe('unknown-channel registration flow', () => {
     expect(mgaCount).toBe(0);
     const stillPending = await countRows('SELECT COUNT(*) AS c FROM pending_channel_approvals');
     expect(stillPending).toBe(1);
+  });
+
+  describe('choose existing: the agent card', () => {
+    async function firstCard(platformId: string) {
+      await createAgentGroup({ id: 'ag-2', name: 'Bo', folder: 'bo', agent_provider: null, created_at: now() });
+      const { routeInbound } = await import('../../router.js');
+      await expectAsyncDelivery(() => routeInbound(groupMention(platformId)));
+      return (await getDb().get<{ messaging_group_id: string; options_json: string }>(
+        'SELECT messaging_group_id, options_json FROM pending_channel_approvals',
+      ))!;
+    }
+    async function click(questionId: string, value: string, messageId?: string) {
+      const { dispatchResponse } = await import('../../response-registry.js');
+      return dispatchResponse({
+        questionId,
+        value,
+        userId: 'owner',
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+        messageId,
+      });
+    }
+    async function storedOptions(questionId: string): Promise<string | undefined> {
+      return (
+        await getDb().get<{ options_json: string }>(
+          'SELECT options_json FROM pending_channel_approvals WHERE messaging_group_id = ?',
+          questionId,
+        )
+      )?.options_json;
+    }
+    /** The request is removed (an admin's delete) and a new one is raised for the same chat. */
+    async function replaceRequest(questionId: string, optionsJson?: string): Promise<void> {
+      const old = (await getDb().get<Record<string, string>>(
+        'SELECT * FROM pending_channel_approvals WHERE messaging_group_id = ?',
+        questionId,
+      ))!;
+      await getDb().run('DELETE FROM pending_channel_approvals WHERE messaging_group_id = ?', questionId);
+      await getDb().run(
+        `INSERT INTO pending_channel_approvals
+           (messaging_group_id, agent_group_id, original_message, approver_user_id, created_at, title, question, options_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        old.messaging_group_id,
+        old.agent_group_id,
+        old.original_message,
+        old.approver_user_id,
+        new Date(Date.parse(old.created_at) + 1000).toISOString(),
+        old.title,
+        old.question,
+        optionsJson ?? old.options_json,
+      );
+    }
+
+    it('stores its options only once it is sent, so a tap on the first card meanwhile keeps its meaning', async () => {
+      const card = await firstCard('chat-choose-slow');
+      let sent!: () => void;
+      deliverMock.mockImplementationOnce(() => new Promise((resolve) => (sent = () => resolve('plat-msg-2'))));
+      const choosing = click(card.messaging_group_id, 'choose_existing');
+      await vi.waitFor(() => expect(deliverMock).toHaveBeenCalledTimes(2));
+      // Buttons are decoded by position against the stored options: the first card's
+      // first button must not mean the first agent while the agent card is on its way.
+      expect(await storedOptions(card.messaging_group_id)).toBe(card.options_json);
+      sent();
+      expect(await choosing).toBe('accepted');
+      const values = (JSON.parse((await storedOptions(card.messaging_group_id))!) as Array<{ value: string }>).map(
+        (o) => o.value,
+      );
+      expect(values).toEqual(['connect:ag-1', 'connect:ag-2', 'reject']);
+    });
+
+    it('ignores card clicks while the agent card is sent, and clicks from the first card after', async () => {
+      const card = await firstCard('chat-choose-double-tap');
+      let sent!: () => void;
+      deliverMock.mockImplementationOnce(() => new Promise((resolve) => (sent = () => resolve('plat-msg-2'))));
+      const choosing = click(card.messaging_group_id, 'choose_existing', 'card-1');
+      await vi.waitFor(() => expect(deliverMock).toHaveBeenCalledTimes(2));
+      // A double tap on the first card, or a tap on the new card before its options are stored.
+      expect(await click(card.messaging_group_id, 'choose_existing', 'card-1')).toBe('ignored');
+      expect(await click(card.messaging_group_id, 'new_agent', 'card-2')).toBe('ignored');
+      sent();
+      expect(await choosing).toBe('accepted');
+      expect(deliverMock).toHaveBeenCalledTimes(2);
+      // The first card's button 0 now decodes as the first agent: it must not connect it.
+      expect(await click(card.messaging_group_id, 'connect:ag-1', 'card-1')).toBe('ignored');
+      expect(
+        await countRows(
+          'SELECT COUNT(*) AS c FROM messaging_group_agents WHERE messaging_group_id = ?',
+          card.messaging_group_id,
+        ),
+      ).toBe(0);
+      // The agent card's own click connects the agent picked.
+      expect(await click(card.messaging_group_id, 'connect:ag-2', 'card-2')).toBe('accepted');
+      const wired = await getDb().get<{ agent_group_id: string }>(
+        'SELECT agent_group_id FROM messaging_group_agents WHERE messaging_group_id = ?',
+        card.messaging_group_id,
+      );
+      expect(wired?.agent_group_id).toBe('ag-2');
+    });
+
+    it('a second typed answer (no card id) while the agent card is sent sends no second card', async () => {
+      const card = await firstCard('chat-choose-typed-twice');
+      let sent!: () => void;
+      deliverMock.mockImplementationOnce(() => new Promise((resolve) => (sent = () => resolve('plat-msg-2'))));
+      // WhatsApp and iMessage answers name no card message.
+      const choosing = click(card.messaging_group_id, 'choose_existing');
+      await vi.waitFor(() => expect(deliverMock).toHaveBeenCalledTimes(2));
+      expect(await click(card.messaging_group_id, 'choose_existing')).toBe('ignored');
+      sent();
+      expect(await choosing).toBe('accepted');
+      expect(deliverMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('a second tap while the first is still being prepared sends no second card', async () => {
+      const card = await firstCard('chat-choose-preparing');
+      const { ensureUserDm } = await import('./user-dm.js');
+      const lookup = vi.mocked(ensureUserDm).getMockImplementation()!;
+      let ready: (() => void) | undefined;
+      vi.mocked(ensureUserDm).mockImplementationOnce(async (...args) => {
+        await new Promise<void>((resolve) => (ready = resolve));
+        return lookup(...args);
+      });
+      const choosing = click(card.messaging_group_id, 'choose_existing', 'card-1');
+      await vi.waitFor(() => expect(ready).toBeDefined());
+      expect(await click(card.messaging_group_id, 'choose_existing', 'card-1')).toBe('ignored');
+      ready!();
+      expect(await choosing).toBe('accepted');
+      expect(deliverMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('a store that fails after the send leaves the new card unused and the first card usable again', async () => {
+      const card = await firstCard('chat-choose-store-fails');
+      await createAgentGroup({ id: 'ag-3', name: 'Cy', folder: 'cy', agent_provider: null, created_at: now() });
+      cardUpdate.fail = true;
+      deliverMock.mockResolvedValueOnce('card-2');
+      expect(await click(card.messaging_group_id, 'choose_existing', 'card-1')).toBe('ignored');
+      // The new card's options weren't stored, so its third agent decodes as the first card's Reject.
+      expect(await click(card.messaging_group_id, 'reject', 'card-2')).toBe('ignored');
+      expect(await storedOptions(card.messaging_group_id)).toBe(card.options_json);
+      // The first card tries again: a new card goes out and its options are stored.
+      deliverMock.mockResolvedValueOnce('card-3');
+      expect(await click(card.messaging_group_id, 'choose_existing', 'card-1')).toBe('accepted');
+      const values = (JSON.parse((await storedOptions(card.messaging_group_id))!) as Array<{ value: string }>).map(
+        (o) => o.value,
+      );
+      expect(values).toEqual(['connect:ag-1', 'connect:ag-2', 'connect:ag-3', 'reject']);
+      expect(await click(card.messaging_group_id, 'connect:ag-3', 'card-2')).toBe('ignored');
+      expect(await click(card.messaging_group_id, 'connect:ag-3', 'card-3')).toBe('accepted');
+      const wired = await getDb().get<{ agent_group_id: string }>(
+        'SELECT agent_group_id FROM messaging_group_agents WHERE messaging_group_id = ?',
+        card.messaging_group_id,
+      );
+      expect(wired?.agent_group_id).toBe('ag-3');
+    });
+
+    it('does not store its options over a newer request for the same chat', async () => {
+      const card = await firstCard('chat-choose-replaced');
+      let sent!: () => void;
+      deliverMock.mockImplementationOnce(() => new Promise((resolve) => (sent = () => resolve('plat-msg-2'))));
+      const choosing = click(card.messaging_group_id, 'choose_existing', 'card-1');
+      await vi.waitFor(() => expect(deliverMock).toHaveBeenCalledTimes(2));
+      await replaceRequest(card.messaging_group_id);
+      sent();
+      expect(await choosing).toBe('ignored');
+      expect(await storedOptions(card.messaging_group_id)).toBe(card.options_json);
+      // The agent card's buttons would decode against the newer request's options: its Reject must not deny it.
+      expect(await click(card.messaging_group_id, 'reject', 'plat-msg-2')).toBe('ignored');
+      expect(await storedOptions(card.messaging_group_id)).toBe(card.options_json);
+    });
+
+    it('a store that fails after the request was replaced does not bring the first card back', async () => {
+      const card = await firstCard('chat-choose-replaced-store-fails');
+      let sent!: () => void;
+      deliverMock.mockImplementationOnce(() => new Promise((resolve) => (sent = () => resolve('plat-msg-2'))));
+      const choosing = click(card.messaging_group_id, 'choose_existing', 'card-1');
+      await vi.waitFor(() => expect(deliverMock).toHaveBeenCalledTimes(2));
+      // The newer request already shows its own agent card, so its first option connects an agent.
+      const newer = JSON.stringify([{ label: 'Bo', value: 'connect:ag-2' }]);
+      await replaceRequest(card.messaging_group_id, newer);
+      cardUpdate.fail = true;
+      sent();
+      expect(await choosing).toBe('ignored');
+      // The first card's "Choose existing agent" now decodes as the newer card's first agent.
+      expect(await click(card.messaging_group_id, 'connect:ag-2', 'card-1')).toBe('ignored');
+      expect(await storedOptions(card.messaging_group_id)).toBe(newer);
+    });
+
+    it('a store that fails for a card whose id is unknown leaves no card for that chat usable', async () => {
+      const card = await firstCard('chat-choose-store-fails-no-id');
+      await createAgentGroup({ id: 'ag-3', name: 'Cy', folder: 'cy', agent_provider: null, created_at: now() });
+      cardUpdate.fail = true;
+      deliverMock.mockResolvedValueOnce(undefined);
+      expect(await click(card.messaging_group_id, 'choose_existing', 'card-1')).toBe('ignored');
+      // Its clicks can't be told apart, and its third agent decodes as the first card's Reject.
+      expect(await click(card.messaging_group_id, 'reject', 'card-2')).toBe('ignored');
+      expect(await click(card.messaging_group_id, 'reject')).toBe('ignored');
+      expect(await click(card.messaging_group_id, 'choose_existing', 'card-1')).toBe('ignored');
+      expect(await storedOptions(card.messaging_group_id)).toBe(card.options_json);
+      await replaceRequest(card.messaging_group_id);
+      // Neither the known first card nor the unknown agent card may decide the replacement.
+      expect(await click(card.messaging_group_id, 'reject', 'card-1')).toBe('ignored');
+      expect(await click(card.messaging_group_id, 'reject', 'card-2')).toBe('ignored');
+      expect(await click(card.messaging_group_id, 'reject')).toBe('ignored');
+      expect(await storedOptions(card.messaging_group_id)).toBeDefined();
+      expect(
+        (
+          await getDb().get<{ denied_at: string | null }>(
+            'SELECT denied_at FROM messaging_groups WHERE id = ?',
+            card.messaging_group_id,
+          )
+        )?.denied_at,
+      ).toBeNull();
+      // Reissuing through the real request path recovers using its known new card.
+      await getDb().run('DELETE FROM pending_channel_approvals WHERE messaging_group_id = ?', card.messaging_group_id);
+      cardUpdate.fail = false;
+      deliverMock.mockResolvedValueOnce('new-card');
+      const { routeInbound } = await import('../../router.js');
+      await expectAsyncDelivery(() => routeInbound(groupMention('chat-choose-store-fails-no-id')));
+      expect(await click(card.messaging_group_id, 'reject', 'card-2')).toBe('ignored');
+      deliverMock.mockResolvedValueOnce('new-agent-card');
+      expect(await click(card.messaging_group_id, 'choose_existing', 'new-card')).toBe('accepted');
+      expect(await click(card.messaging_group_id, 'reject', 'card-2')).toBe('ignored');
+      expect(await click(card.messaging_group_id, 'reject', 'new-card')).toBe('ignored');
+      expect(await click(card.messaging_group_id, 'reject', 'new-agent-card')).toBe('accepted');
+    });
+
+    it('after a card with an unknown id, a replacement card with none is not the card a click with none hit', async () => {
+      const card = await firstCard('chat-choose-no-id-twice');
+      cardUpdate.fail = true;
+      deliverMock.mockResolvedValueOnce(undefined);
+      expect(await click(card.messaging_group_id, 'choose_existing', 'card-1')).toBe('ignored');
+      const createdAt = async () =>
+        (await getDb().get<{ created_at: string }>('SELECT created_at FROM pending_channel_approvals'))?.created_at;
+      const first = await createdAt();
+      await getDb().run('DELETE FROM pending_channel_approvals WHERE messaging_group_id = ?', card.messaging_group_id);
+      cardUpdate.fail = false;
+      deliverMock.mockResolvedValueOnce(undefined);
+      // A new millisecond, so the click reaches the message-id check, not the blocked-row check.
+      await new Promise((r) => setTimeout(r, 5));
+      const { routeInbound } = await import('../../router.js');
+      await expectAsyncDelivery(() => routeInbound(groupMention('chat-choose-no-id-twice')));
+      expect(await createdAt()).not.toBe(first);
+      // Both ids are unknown, so this could be the old agent card's third agent.
+      expect(await click(card.messaging_group_id, 'reject')).toBe('ignored');
+      expect(await storedOptions(card.messaging_group_id)).toBeDefined();
+    });
+
+    it("leaves the first card as it was when the agent card can't be sent", async () => {
+      const card = await firstCard('chat-choose-fails');
+      deliverMock.mockRejectedValueOnce(new Error('send failed'));
+      expect(await click(card.messaging_group_id, 'choose_existing')).toBe('ignored');
+      expect(await storedOptions(card.messaging_group_id)).toBe(card.options_json);
+    });
+
+    it('a Reject while the agent card is on its way decides, and the choice does not draw over it', async () => {
+      const card = await firstCard('chat-choose-then-reject');
+      let sent!: () => void;
+      deliverMock.mockImplementationOnce(() => new Promise((resolve) => (sent = () => resolve('plat-msg-2'))));
+      const choosing = click(card.messaging_group_id, 'choose_existing');
+      await vi.waitFor(() => expect(deliverMock).toHaveBeenCalledTimes(2));
+      expect(await click(card.messaging_group_id, 'reject')).toBe('accepted');
+      sent();
+      expect(await choosing).toBe('ignored');
+      expect(await storedOptions(card.messaging_group_id)).toBeUndefined();
+    });
   });
 
   it('create new agent: the free-text name reply creates the group and wires the channel', async () => {
@@ -781,6 +1200,176 @@ describe('unknown-channel registration flow', () => {
     const mgaCount = await countRows('SELECT COUNT(*) AS c FROM messaging_group_agents');
     expect(mgaCount).toBe(0);
   });
+
+  /** An unwired group chat with its registration card pending; returns its messaging group id. */
+  async function pendingRegistration(platformId: string): Promise<string> {
+    const { routeInbound } = await import('../../router.js');
+    await expectAsyncDelivery(() => routeInbound(groupMention(platformId)));
+    return (await getMessagingGroupByPlatform('telegram', platformId))!.id;
+  }
+
+  /** The owner clicks "Connect new agent" on that card; the name prompt lands in their DM. */
+  async function clickNewAgent(messagingGroupId: string): Promise<void> {
+    const { getResponseHandlers } = await import('../../response-registry.js');
+    for (const handler of getResponseHandlers()) {
+      const claimed = await handler({
+        questionId: messagingGroupId,
+        value: 'new_agent',
+        userId: 'owner',
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+      });
+      if (claimed) break;
+    }
+  }
+
+  async function nameReply(id: string, text: string): Promise<void> {
+    const { routeInbound } = await import('../../router.js');
+    await routeInbound({
+      channelType: 'telegram',
+      platformId: 'dm-owner',
+      threadId: null,
+      message: {
+        id,
+        kind: 'chat' as const,
+        content: JSON.stringify({ senderId: 'owner', senderName: 'Owner', text }),
+        timestamp: now(),
+      },
+    });
+  }
+
+  async function expectCreatedAndWired(name: string, messagingGroupId: string): Promise<void> {
+    const created = await getDb().get<{ id: string }>('SELECT id FROM agent_groups WHERE name = ?', name);
+    expect(created).toBeDefined();
+    expect(
+      await countRows(
+        'SELECT COUNT(*) AS c FROM messaging_group_agents WHERE messaging_group_id = ? AND agent_group_id = ?',
+        messagingGroupId,
+        created!.id,
+      ),
+    ).toBe(1);
+  }
+
+  it('a name too long for a folder creates nothing and asks again; the next name is created', async () => {
+    const mgId = await pendingRegistration('chat-long-name');
+    await clickNewAgent(mgId);
+
+    const longName = 'a'.repeat(70);
+    const agentGroupsBefore = await countRows('SELECT COUNT(*) AS c FROM agent_groups');
+    await nameReply('name-reply-long', longName);
+
+    expect(await countRows('SELECT COUNT(*) AS c FROM agent_groups')).toBe(agentGroupsBefore);
+    expect(fs.existsSync(path.join(TEST_DIR, 'groups', longName))).toBe(false);
+    expect(await countRows('SELECT COUNT(*) AS c FROM messaging_group_agents')).toBe(0);
+    expect(await countRows('SELECT COUNT(*) AS c FROM pending_channel_approvals')).toBe(1);
+    const refusal = JSON.parse(deliverMock.mock.calls.at(-1)![4] as string).text as string;
+    expect(refusal).toBe(
+      `⚠️ Cannot create agent "${longName}": Invalid group folder "${longName}" — too long: 70 characters, at most 63. ` +
+        'Nothing was created. Reply with another name:',
+    );
+
+    // The prompt is re-armed: the next reply is taken as the name.
+    await nameReply('name-reply-retry', 'Newbie');
+
+    await expectCreatedAndWired('Newbie', mgId);
+  });
+
+  it("a failed re-prompt leaves another channel's newer name prompt in place", async () => {
+    const firstMgId = await pendingRegistration('chat-race-first');
+    const secondMgId = await pendingRegistration('chat-race-second');
+    await clickNewAgent(firstMgId);
+
+    // Hold the refusal's re-prompt in flight while the owner starts the second channel.
+    let failRePrompt: ((err: Error) => void) | undefined;
+    deliverMock.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          failRePrompt = reject;
+        }),
+    );
+    const refused = nameReply('name-reply-race', 'a'.repeat(70));
+    await vi.waitFor(() => expect(failRePrompt).toBeDefined());
+    await clickNewAgent(secondMgId);
+    failRePrompt!(new Error('delivery failed'));
+    await refused;
+
+    await nameReply('name-reply-second', 'Newbie');
+
+    await expectCreatedAndWired('Newbie', secondMgId);
+  });
+
+  it('a late failure of an earlier re-prompt leaves the newer one in place', async () => {
+    const mgId = await pendingRegistration('chat-late-failure');
+    await clickNewAgent(mgId);
+
+    // The first refusal's delivery hangs; the approver tries again and that refusal arrives.
+    let failFirst: ((err: Error) => void) | undefined;
+    deliverMock.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          failFirst = reject;
+        }),
+    );
+    const first = nameReply('name-reply-late-1', 'a'.repeat(70));
+    await vi.waitFor(() => expect(failFirst).toBeDefined());
+    await nameReply('name-reply-late-2', 'Global');
+    failFirst!(new Error('delivery failed'));
+    await first;
+
+    await nameReply('name-reply-late-3', 'Newbie');
+
+    await expectCreatedAndWired('Newbie', mgId);
+  });
+
+  it('a prompt opened for another channel while a name is checked is not replaced', async () => {
+    const firstMgId = await pendingRegistration('chat-held-first');
+    const secondMgId = await pendingRegistration('chat-held-second');
+    await clickNewAgent(firstMgId);
+
+    let release: (() => void) | undefined;
+    folderGate.entered = false;
+    folderGate.hold = new Promise((resolve) => {
+      release = resolve;
+    });
+    try {
+      const refused = nameReply('name-reply-held', 'a'.repeat(70));
+      await vi.waitFor(() => expect(folderGate.entered).toBe(true));
+      await clickNewAgent(secondMgId);
+      release!();
+      await refused;
+    } finally {
+      folderGate.hold = null;
+    }
+    // The refusal for the first name no longer asks for another: the next reply is the second channel's.
+    const texts = deliverMock.mock.calls.map((c) => JSON.parse(c[4] as string).text as string | undefined);
+    const refusal = texts.find((text) => text?.startsWith('⚠️ Cannot create agent'));
+
+    await nameReply('name-reply-held-second', 'Newbie');
+
+    await expectCreatedAndWired('Newbie', secondMgId);
+    expect(refusal).toMatch(/Nothing was created\.$/);
+  });
+
+  it("a late failure of the first name prompt leaves a refused name's re-arm in place", async () => {
+    const mgId = await pendingRegistration('chat-late-prompt');
+    let failPrompt: ((err: Error) => void) | undefined;
+    deliverMock.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          failPrompt = reject;
+        }),
+    );
+    const click = clickNewAgent(mgId);
+    await vi.waitFor(() => expect(failPrompt).toBeDefined());
+    await nameReply('name-reply-late-prompt-1', 'a'.repeat(70));
+    failPrompt!(new Error('delivery failed'));
+    await click;
+
+    await nameReply('name-reply-late-prompt-2', 'Newbie');
+
+    await expectCreatedAndWired('Newbie', mgId);
+  });
 });
 
 describe('no-owner / no-agent failure modes', () => {
@@ -824,8 +1413,39 @@ describe('createNewAgentGroup — disk-aware folder dedupe (A4)', () => {
 
     const ag = await createNewAgentGroup('My Agent');
 
-    expect(ag.folder).toBe('my-agent-2');
+    expect(ag).toMatchObject({ folder: 'my-agent-2' });
     // Residue untouched.
     expect(fs.readFileSync(path.join(residue, 'memory.md'), 'utf8')).toBe('old group memory\n');
+  });
+
+  it('refuses, writing nothing, when the suffix takes the folder past 63 characters, saying the name is taken', async () => {
+    const name = 'b'.repeat(62);
+    fs.mkdirSync(path.join(TEST_DIR, 'groups', name), { recursive: true });
+
+    expect(await createNewAgentGroup(name)).toBe(
+      `Invalid group folder "${name}-2" — too long: 64 characters, at most 63 ("${name}" is already taken)`,
+    );
+    expect(await countRows('SELECT COUNT(*) AS c FROM agent_groups WHERE name = ?', name)).toBe(0);
+    expect(fs.existsSync(path.join(TEST_DIR, 'groups', `${name}-2`))).toBe(false);
+  });
+
+  // A v1 migration copies groups/global onto disk; the refusal must not depend on it.
+  it.each([
+    ['a fresh install', false],
+    ['an install migrated from v1 (groups/global on disk)', true],
+  ])('refuses "Global", writing nothing, on %s', async (_install, migrated) => {
+    if (migrated) fs.mkdirSync(path.join(TEST_DIR, 'groups', 'global'), { recursive: true });
+
+    expect(await createNewAgentGroup('Global')).toBe('Invalid group folder "global" — reserved');
+    expect(await countRows("SELECT COUNT(*) AS c FROM agent_groups WHERE name = 'Global'")).toBe(0);
+    expect(fs.existsSync(path.join(TEST_DIR, 'groups', 'global-2'))).toBe(false);
+  });
+});
+
+describe('describeResolvedRule', () => {
+  it('shows a name-based pattern in a code span an agent name cannot leave', () => {
+    expect(describeResolvedRule('namepattern', true, 'Scout\n# Trusted `x`', 'namepattern')).toBe(
+      'will respond to messages matching `\\bScout\\u000a# Trusted \\u0060x\\u0060`',
+    );
   });
 });

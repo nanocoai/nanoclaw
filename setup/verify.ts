@@ -16,7 +16,7 @@ import { inspectCentralDb } from './central-db-inspection.js';
 import { inspectAgentImage, readImageSource } from './lib/registry-state.js';
 import { getPlatform, getServiceManager, hasSystemd, isRoot } from './platform.js';
 import { emitStatus } from './status.js';
-import { readSlackJob, slackJobStatus, type SlackJob } from '../src/community-portal/slack-job.js';
+import { readSlackJob, slackJobFailure, slackJobStatus, type SlackJob } from '../src/community-portal/slack-job.js';
 
 export async function run(_args: string[]): Promise<void> {
   const projectRoot = process.cwd();
@@ -189,7 +189,7 @@ export async function run(_args: string[]): Promise<void> {
   //    plus how many agent groups pin an image of their own (reported in step 7).
   //    The two counts get their own try/catch: they read different tables, and a
   //    partially migrated DB must not hide one behind the other's failure.
-  const { registeredGroups, derivedGroups } = await inspectCentralDb(projectRoot);
+  const { registeredGroups, derivedGroups, lastWiredAt } = await inspectCentralDb(projectRoot);
 
   // 6. Check mount allowlist
   let mountAllowlist = 'missing';
@@ -226,8 +226,16 @@ export async function run(_args: string[]): Promise<void> {
 
   // The detached Slack worker applies the channel after foreground setup
   // releases its checkout lock. No credentials/groups yet is expected here.
-  const slackInstall = slackJobStatus(await readSlackJob(projectRoot));
+  const slackJob = await readSlackJob(projectRoot);
+  // A failed or expired job is stale once set-up Slack has a chat wired after it began.
+  const slackJobState = slackJobStatus(slackJob);
+  const slackJobReplaced =
+    (slackJobState === 'failed' || slackJobState === 'expired') &&
+    configuredChannels.includes('slack') &&
+    Date.parse(lastWiredAt.slack ?? '') > Date.parse(slackJob?.createdAt ?? '');
+  const slackInstall = slackJobReplaced ? undefined : slackJobState;
   const slackWiringPending = registeredGroups === 0 && canDeferSlackWiring(slackInstall, configuredChannels);
+  const slackReason = slackJobReplaced ? undefined : slackJobFailure(slackJob);
 
   // Determine overall status. The cli-agent step earlier in setup already
   // proved the agent round-trip works; verify is a static health check.
@@ -245,6 +253,7 @@ export async function run(_args: string[]): Promise<void> {
     channelAuth,
     wiringPending,
     slackInstall,
+    slackJobReplaced,
     imageSource,
     imageSourceActual: image.source,
     derivedGroups,
@@ -271,6 +280,7 @@ export async function run(_args: string[]): Promise<void> {
     IMAGE_DIGEST: image.registryDigest ?? '',
     DERIVED_GROUPS: derivedGroups,
     ...(slackInstall ? { SLACK_INSTALL: slackInstall } : {}),
+    ...(slackReason ? { SLACK_INSTALL_REASON: slackReason } : {}),
     ...(slackWiringPending ? { WIRING: 'pending_slack_install' } : wiringPending ? { WIRING: 'pending_first_dm' } : {}),
     STATUS: status,
     LOG: 'logs/setup.log',

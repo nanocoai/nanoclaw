@@ -36,7 +36,8 @@ stranger on day one.
 
 Rules:
 - **No discontinuity.** Every sub-step belongs to the same visual flow.
-  The only exception is Anthropic credential registration (see below).
+  The only exceptions are Anthropic credential registration and the
+  sudo password prompt on Linux (see below).
 - **No raw child output.** Never `stdio: 'inherit'` a child whose output
   wasn't written by us. Capture it and show it on failure only.
 - **No debug-style prefixes** (`[add-telegram] …`, `INFO …`, timestamps).
@@ -162,8 +163,10 @@ level 2, raw capture to level 3.
 
 ## The Anthropic exception
 
-Anthropic credential registration (`setup/register-claude-token.sh`) is
-the **one** permitted break in the visual flow. Why:
+Anthropic credential registration
+(`.claude/skills/add-onecli/scripts/register-claude-token.sh`) is one
+of the two permitted breaks in the visual flow (the other is the sudo
+prompt, below). Why:
 
 - `claude setup-token` opens a browser, runs its own OAuth prompt, and
   prints the token. It owns the TTY via `script(1)`.
@@ -183,6 +186,25 @@ with the method — subscription / oauth / api). Level-3 captures
 are optional here; mirroring `script -q` output is tricky and the risk of
 leaking the token to disk outweighs the debugging value.
 
+## sudo up front (Linux)
+
+Installing or updating Node and installing jq (bootstrap) and installing
+Docker, starting it or joining the docker group (container step) run sudo
+inside a captured step, where a password prompt would be hidden and time
+out. So each prompt comes first, in the open: `nanoclaw.sh` runs
+`setup/lib/sudo-preflight.sh` before the bootstrap spinner when Node
+needs installing or updating or jq is missing, and `auto.ts` calls
+`setup/lib/sudo-preflight.ts` before the container step when Docker is
+missing, not answering or refusing the user. Both are a foreground
+`sudo -v` that the step's own sudo calls then reuse, so one password
+usually covers all three. Root, passwordless sudo and runs without a
+terminal skip it.
+
+The bootstrap installs jq (`setup/lib/jq.sh`: Homebrew on macOS, else
+apt, dnf, yum, zypper, pacman or apk) with `sudo -n` only. When that
+can't work it notes it after "Basics ready" and goes on, since only skills
+need jq.
+
 ## Channel installs are skill-driven
 
 There are no per-channel setup scripts. Each channel's `/add-<channel>`
@@ -199,12 +221,12 @@ convention — [skill-engine-seam.md](skill-engine-seam.md) §6).
 
 | File | Role |
 |---|---|
-| `nanoclaw.sh` | Top-level wrapper. Phase 1 (bootstrap) and phase 2 (setup:auto) orchestration. Writes bootstrap's raw log + progression entry. `--uninstall` bypasses bootstrap entirely — it execs setup:auto directly (the flow lives in `setup/uninstall/`), or prints manual-cleanup guidance and exits 1 when the TS toolchain is missing. |
-| `setup.sh` | Phase 1 bootstrap: Node, pnpm, native-module verify. Emits its own `BOOTSTRAP` status block (historically printed to stdout; now goes to the bootstrap raw log). |
+| `nanoclaw.sh` | Top-level wrapper. Phase 1 (bootstrap) and phase 2 (setup:auto) orchestration. Writes bootstrap's raw log + progression entry. Pre-flights (memory, cloud, root, Homebrew, sudo) run before the bootstrap spinner. `--uninstall` bypasses bootstrap entirely — it execs setup:auto directly (the flow lives in `setup/uninstall/`), or prints manual-cleanup guidance and exits 1 when the TS toolchain is missing. |
+| `setup.sh` | Phase 1 bootstrap: Node, jq, pnpm, native-module verify. Emits its own `BOOTSTRAP` status block (historically printed to stdout; now goes to the bootstrap raw log). |
 | `setup/auto.ts` | Phase 2 driver. Orchestrates the clack UI, step execution, user prompts, and writes to all three log levels for every step it spawns. |
 | `setup/logs.ts` | The logging primitives (`step`, `userInput`, `complete`, `stepRawLog`, `reset`). Single source of truth for level 2/3 formatting and file paths. |
 | `setup/<step>.ts` | Individual step implementations. Must emit one terminal status block; must not write directly to the terminal. |
-| `setup/register-claude-token.sh` | The Anthropic exception. Inherits stdio, prints its own UI, returns a status to the driver. |
+| `.claude/skills/add-onecli/scripts/register-claude-token.sh` | The Anthropic exception. Inherits stdio, prints its own UI, and writes the captured token to the file it is given; the skill's `auth.ts` saves it. |
 | `setup/lib/skill-driver.ts` | Generic skill runner: applies a SKILL.md's `nc:` directives via the engine (`scripts/skill-apply.ts`) and renders its events through clack — prompts via `resolveInput`, spinners for step events, operator notes with the gate/URL-offer policy from `scripts/skill-policy.ts`. Owns all prompting/gating presentation; the engine only declares and emits. |
 | `setup/channels/run-channel-skill.ts` | The generic channel-install entry: drives the channel's `/add-<channel>` SKILL.md through the skill driver, then owns the shared wire (agent name + operator role → `scripts/init-first-agent.ts`). One flow for every channel — no bespoke per-channel code. |
 | `setup/pair-telegram.ts` | Emits `PAIR_TELEGRAM_CODE` / `PAIR_TELEGRAM_ATTEMPT` / `PAIR_TELEGRAM` status blocks. Never prints UI. The driver renders it via clack notes. |

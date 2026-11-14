@@ -35,6 +35,7 @@ import {
   type DriverCapabilities,
   type MountPolicy,
   type NetworkAccessIntent,
+  type NetworkReconcile,
   type MountSpec,
   type SessionDriver,
   type SessionEvent,
@@ -53,7 +54,8 @@ export interface DockerDriverOptions extends MountPolicy {
   cli?: Cli;
   /** Docker network the session's containers attach to, resolved by the overlay. */
   networkArgsFor?: (spec: SessionSpec) => string[];
-  reconcileNetworkAccess?: (access: NetworkAccessIntent) => void;
+  /** `attachedNetworks` lists the adopted container's networks, read only when called. */
+  reconcileNetworkAccess?: (access: NetworkAccessIntent, attachedNetworks: () => string[]) => NetworkReconcile | void;
 }
 
 /** Watch reconnection: bounded backoff, never give up (see `watchSessions`). */
@@ -103,8 +105,8 @@ export class DockerSessionDriver implements SessionDriver {
     ensureDockerRunning(this.#cli);
   }
 
-  async reconcileNetworkAccess(access: NetworkAccessIntent): Promise<void> {
-    this.opts.reconcileNetworkAccess?.(access);
+  async reconcileNetworkAccess(access: NetworkAccessIntent, handle: SessionHandle): Promise<NetworkReconcile | void> {
+    return this.opts.reconcileNetworkAccess?.(access, () => attachedNetworks(this.#cli, handle.name));
   }
 
   async prepare(spec: SessionSpec): Promise<SessionHandle> {
@@ -126,9 +128,28 @@ export class DockerSessionDriver implements SessionDriver {
 
     this.#remember(spec.key);
 
-    // Idempotency on key: an existing live container for this key is the session.
+    // Idempotency on key: an existing live container for this key is the session,
+    // unless it is not on the network this spec would give it, or that cannot be
+    // checked — then it is replaced, never left running unsupervised.
     if (this.#existingSession(name, spec.key)) {
-      return new DockerHandle(spec.key, name, this.#cli, null, auxiliaryNames, privateNetwork, this.#emit);
+      let verdict: NetworkReconcile | void = 'restart';
+      try {
+        verdict = this.opts.reconcileNetworkAccess?.(spec.networkAccess, () => attachedNetworks(this.#cli, name));
+      } catch (error) {
+        log.warn('Network check failed for existing container', { containerName: name, error });
+      }
+      if (verdict !== 'restart') {
+        return new DockerHandle(spec.key, name, this.#cli, null, auxiliaryNames, privateNetwork, this.#emit);
+      }
+      log.warn('Replacing existing container that is not on the required network', { containerName: name });
+      // A bare remove is enough: no host runtime supervises this container (a
+      // registered one makes the wake a no-op before prepare), and an
+      // off-network verdict only comes for targets without auxiliary containers.
+      try {
+        this.#cli.run(['rm', '--force', name]);
+      } catch (error) {
+        throw normalizeDockerError(error);
+      }
     }
 
     // Composition existsSync-gates mount sources; re-check here so a
@@ -738,6 +759,21 @@ function auxiliaryContainerNames(cli: Cli, key: SessionKey): string[] {
       .map(([name]) => validateRuntimeName(name, 'container'));
   } catch {
     return [];
+  }
+}
+
+/** The networks a container is attached to. Throws when they cannot be read. */
+function attachedNetworks(cli: Cli, name: string): string[] {
+  try {
+    const out = cli.run([
+      'inspect',
+      '--format',
+      '{{json .NetworkSettings.Networks}}',
+      validateRuntimeName(name, 'container'),
+    ]);
+    return Object.keys((JSON.parse(out) as Record<string, unknown> | null) ?? {});
+  } catch (error) {
+    throw normalizeDockerError(error);
   }
 }
 

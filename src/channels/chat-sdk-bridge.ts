@@ -13,18 +13,26 @@ import {
   CardText,
   Actions,
   Button,
+  Chart,
+  Divider,
+  Field,
+  Fields,
   LinkButton,
+  Table,
   type CardChild,
+  type ActionEvent,
   type Adapter,
   type AssistantContextChangedEvent,
   type AssistantThreadStartedEvent,
   type ConcurrencyStrategy,
+  type Logger,
   type Message as ChatMessage,
 } from 'chat';
 import { log } from '../log.js';
 import { SqliteStateAdapter } from '../state-sqlite.js';
 import { registerWebhookAdapter } from '../webhook-server.js';
-import { normalizeOptions, type NormalizedOption } from './ask-question.js';
+import { cardProblems, isCardPart, isRecord, type CardPart } from './card-parts.js';
+import { CardTooLongError, cardQuestionTooLong, normalizeOptions, type NormalizedOption } from './ask-question.js';
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage } from './adapter.js';
 import { INSTANCE_KEY_RE } from './channel-registry.js';
 import { resolveQuestionRender, dispatchQuestionAction } from './question-render-registry.js';
@@ -93,8 +101,8 @@ export interface AppContextEntity {
  * Latest assistant context per (instance, DM channel, user), attached to the
  * NEXT inbound DM message as content.app_context and consumed. Platforms
  * whose DM surface materializes threads and reports client context send
- * app_context as its own event (assistant_thread_started legacy /
- * app_context_changed in agent view), not on the message payload, so the
+ * app_context as its own event (assistant_thread_started /
+ * assistant_thread_context_changed), not on the message payload, so the
  * bridge has to hold it across the event → message gap. Short TTL: a stale
  * "viewing X" is worse than none.
  */
@@ -110,8 +118,8 @@ function appContextKey(instance: string, channelId: string, userId: string): str
 
 /**
  * Derive ordered entities from an SDK assistant event. The installed chat
- * core (4.29.0) parses assistant_thread_started / app_context_changed into a
- * `context` object (channelId/teamId/threadEntryPoint — the legacy assistant
+ * core (4.41.1) parses assistant_thread_started /
+ * assistant_thread_context_changed into a `context` object (channelId/teamId/threadEntryPoint — the legacy assistant
  * context shape) with no entities array; prefer a real `entities` array
  * whenever a future SDK forwards the platform's ordered agent-context
  * entities.
@@ -188,6 +196,73 @@ export function attachAppContext(
 }
 
 /**
+ * Base64-encode attachment bytes. Adapters may return ArrayBuffer (Telegram
+ * since 4.39), whose toString() yields "[object ArrayBuffer]", not bytes.
+ */
+export function attachmentBytesToBase64(data: Buffer | ArrayBuffer | Uint8Array): string {
+  if (Buffer.isBuffer(data)) return data.toString('base64');
+  if (data instanceof Uint8Array) return Buffer.from(data.buffer, data.byteOffset, data.byteLength).toString('base64');
+  return Buffer.from(data).toString('base64');
+}
+
+/**
+ * The Chat SDK reports a handler that throws or a failed state write only
+ * through its logger, so `logger: 'silent'` dropped such a message without a
+ * trace. Warn and error reach our log; the SDK's debug and info lines go to
+ * our debug level.
+ */
+export function chatSdkLogger(prefix = 'chat-sdk'): Logger {
+  const to =
+    (level: 'debug' | 'warn' | 'error') =>
+    (message: string, ...args: unknown[]) =>
+      log[level](`${prefix}: ${message}`, sdkLogData(args));
+  return {
+    child: (name: string) => chatSdkLogger(`${prefix}:${name}`),
+    // SDK debug lines print each message's full text; drop them.
+    debug: () => {},
+    info: to('debug'),
+    warn: to('warn'),
+    error: to('error'),
+  };
+}
+
+/** Message-text fields the SDK puts in its log data. */
+const SDK_TEXT_KEYS = new Set(['text', 'messageText']);
+
+/**
+ * Our log prints an Error's message and stack only under `err`; the SDK passes
+ * it as `error`. Message text is cut to its length, a URL to its origin and an
+ * action id to its first two parts (old question cards carry the answer there).
+ */
+function sdkLogData(args: unknown[]): Record<string, unknown> | undefined {
+  const data: Record<string, unknown> = {};
+  const extra: unknown[] = [];
+  for (const arg of args) {
+    if (arg instanceof Error) data.err ??= arg;
+    else if (isRecord(arg)) {
+      for (const [key, value] of Object.entries(arg)) {
+        if (value instanceof Error && data.err === undefined) data.err = value;
+        else if (typeof value === 'string' && SDK_TEXT_KEYS.has(key)) data[key] = `[${value.length} chars]`;
+        else if (typeof value === 'string' && key === 'actionId') data[key] = actionIdHead(value);
+        else data[key] = typeof value === 'string' ? urlOrigin(value) : value;
+      }
+    } else if (arg !== undefined) extra.push(arg);
+  }
+  if (extra.length > 0) data.args = extra;
+  return Object.keys(data).length > 0 ? data : undefined;
+}
+
+function actionIdHead(value: string): string {
+  const parts = value.split(':');
+  return parts.length > 2 ? `${parts.slice(0, 2).join(':')}:…` : value;
+}
+
+function urlOrigin(value: string): string {
+  if (!/^https?:\/\//i.test(value)) return value;
+  return URL.canParse(value) ? `${new URL(value).origin}/…` : '[url]';
+}
+
+/**
  * Root-thread a top-level DM message: on platforms whose DM surface
  * materializes conversation threads (agent-view semantics), every top-level
  * DM message is the root of a conversation thread — replying in-thread and
@@ -231,7 +306,7 @@ export type RawTextExtractor = (raw: Record<string, unknown>) => string | null;
  * A member joined (or left) a channel/group conversation one of our bridge
  * instances is in. Forwarded from the Chat SDK's member_joined_channel
  * dispatch; `left` is reserved for member_left_channel, which the installed
- * chat core (4.29.0) does NOT dispatch — see the TODO at the
+ * chat core (4.41.1) does NOT dispatch — see the TODO at the
  * onMemberJoinedChannel registration in setup().
  */
 export interface MembershipEvent {
@@ -364,6 +439,22 @@ export interface ChatSdkBridgeConfig {
    */
   transformOutboundText?: (text: string) => string;
   /**
+   * Optional escape for host-built ask_question card text (open and resolved
+   * cards). Approval cards mix host wording with untrusted values (agent
+   * arguments, sender names); channels whose card text is raw platform markup
+   * set this. Questions an agent asks itself (`fromAgent`) keep their markup.
+   */
+  escapeCardText?: (text: string) => string;
+  /** Override title encoding when the adapter already handles plain card titles. */
+  escapeCardTitle?: (title: string) => string;
+  /**
+   * For a platform that caps a whole card's text: the longest ask_question
+   * title plus card text (after escapeCardText) it shows in full. A longer
+   * card is refused with CardTooLongError. Unset, long card text is posted
+   * in several text blocks, each under CARD_TEXT_BLOCK_LENGTH.
+   */
+  maxCardTextLength?: number;
+  /**
    * Maximum text length the underlying adapter accepts in a single message.
    * When set, the bridge splits outbound text longer than this on paragraph
    * → line → hard-char boundaries and posts multiple messages. Without this,
@@ -404,7 +495,11 @@ function resolveSelectedOption(
 interface TerminalApprovalCard {
   title: string;
   question: string;
+  /** The question as separate text blocks, when it was split to fit. */
+  questionBlocks?: string[];
   resolution: string;
+  /** The question is the agent's own markup: don't escape it (the resolution still is). */
+  fromAgent?: boolean;
 }
 
 /**
@@ -412,9 +507,9 @@ interface TerminalApprovalCard {
  * replaces the actions row, making the card visibly inactive without
  * discarding the request an admin decided on.
  */
-export function buildTerminalApprovalCard({ title, question, resolution }: TerminalApprovalCard) {
+export function buildTerminalApprovalCard({ title, question, questionBlocks, resolution }: TerminalApprovalCard) {
   const children: CardChild[] = [];
-  if (question) children.push(CardText(question));
+  for (const block of questionBlocks ?? (question ? [question] : [])) children.push(CardText(block));
   children.push(CardText(resolution, { style: 'muted' }));
   return Card({ title, children });
 }
@@ -424,6 +519,68 @@ function terminalApprovalMessage(spec: TerminalApprovalCard) {
     card: buildTerminalApprovalCard(spec),
     fallbackText: [spec.title, spec.question, spec.resolution].filter(Boolean).join('\n\n'),
   };
+}
+
+/**
+ * Longest text in one card text block. Some platforms cap each block, and an
+ * adapter can still lengthen text (emoji names) after the bridge measures it.
+ */
+export const CARD_TEXT_BLOCK_LENGTH = 2000;
+
+/** Shown only to a clicker the host refused, where the channel can post privately. */
+const REFUSED_CLICK_NOTE = 'Only an approver can answer this.';
+/** A clicked card whose request is gone. */
+const CLOSED_RESOLUTION = 'No longer available';
+
+const FENCE = '```';
+/** A fence opens or closes only at the start of a line; backticks mid-line are text. */
+const FENCE_LINE = /^ {0,3}```/gm;
+
+/**
+ * Split card text into blocks of at most `limit` characters after `escape`, so
+ * a per-block cap never cuts one. Prefers a line break near the limit, never
+ * splits a surrogate pair or a fence marker, and closes and reopens a code
+ * fence that spans two blocks.
+ */
+export function splitCardText(text: string, escape: (t: string) => string, limit: number): string[] {
+  const blocks: string[] = [];
+  let rest = text;
+  let reopen = false;
+  const render = (raw: string) => {
+    const body = (reopen ? `${FENCE}\n` : '') + raw;
+    const open = (body.match(FENCE_LINE)?.length ?? 0) % 2 === 1;
+    return { block: escape(open ? `${body}\n${FENCE}` : body), open };
+  };
+  const fits = (n: number) => render(rest.slice(0, n)).block.length <= limit;
+  while (rest) {
+    let cut = rest.length;
+    if (!fits(cut)) {
+      // Longest prefix that fits; the search only ever keeps lengths that fit.
+      let lo = 0;
+      let hi = rest.length - 1;
+      while (lo < hi) {
+        const mid = Math.ceil((lo + hi) / 2);
+        if (fits(mid)) lo = mid;
+        else hi = mid - 1;
+      }
+      cut = lo;
+      const afterLine = rest.lastIndexOf('\n', cut - 1) + 1;
+      if (afterLine > cut / 2 && fits(afterLine)) cut = afterLine;
+      // Backing off a fence marker can change which fences close, so recheck.
+      const badCut = (n: number) => isHighSurrogate(rest.charCodeAt(n - 1)) || (rest[n - 1] === '`' && rest[n] === '`');
+      while (cut > 0 && (badCut(cut) || !fits(cut))) cut--;
+      if (cut === 0) throw new CardTooLongError('the request cannot be split into card text blocks');
+    }
+    const { block, open } = render(rest.slice(0, cut));
+    blocks.push(block);
+    rest = rest.slice(cut);
+    reopen = open;
+  }
+  return blocks;
+}
+
+function isHighSurrogate(code: number): boolean {
+  return code >= 0xd800 && code <= 0xdbff;
 }
 
 export function splitForLimit(text: string, limit: number): string[] {
@@ -458,6 +615,54 @@ export function appendRawText(
   serialized.text = text ? `${text}\n\n${extra}` : extra;
 }
 
+/** A checked part as its Chat SDK element, rebuilt from the fields it may have and nothing else. */
+function buildCardPart(part: CardPart): CardChild {
+  const props = (isRecord(part.props) ? part.props : {}) as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+  switch (part.type) {
+    case 'Text':
+      return props.style ? CardText(props.content, { style: props.style }) : CardText(props.content);
+    case 'Fields':
+      return Fields(
+        (part.children as Array<{ props: { label: string; value: string | number } }>).map((field) =>
+          Field({ label: field.props.label, value: String(field.props.value) }),
+        ),
+      );
+    case 'Table':
+      return Table({
+        headers: props.headers,
+        rows: (props.rows as Array<Array<string | number>>).map((row) => row.map(String)),
+        ...(props.align ? { align: props.align } : {}),
+        ...(props.caption ? { caption: props.caption } : {}),
+      });
+    case 'Chart': {
+      const chart = props.chart;
+      if (chart.type === 'pie') {
+        const segments = (chart.segments as Array<{ label: string; value: number }>).map(({ label, value }) => ({
+          label,
+          value,
+        }));
+        return Chart({ title: props.title, chart: { type: 'pie', segments } });
+      }
+      const categories = chart.categories as string[];
+      return Chart({
+        title: props.title,
+        chart: {
+          type: chart.type,
+          categories,
+          ...(chart.xLabel ? { xLabel: chart.xLabel } : {}),
+          ...(chart.yLabel ? { yLabel: chart.yLabel } : {}),
+          series: (chart.series as Array<{ name: string; values: number[] }>).map((series) => ({
+            name: series.name,
+            data: series.values.map((value, i) => ({ label: categories[i], value })),
+          })),
+        },
+      });
+    }
+    default:
+      return Divider();
+  }
+}
+
 export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter {
   const { adapter } = config;
   // The instance name becomes a webhook route segment (the route regex is
@@ -474,9 +679,120 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     );
   }
   const transformText = (t: string): string => (config.transformOutboundText ? config.transformOutboundText(t) : t);
+  const cardText = (t: string): string => (config.escapeCardText ? config.escapeCardText(t) : t);
+  // Card titles are plain text, but these adapters put them into Markdown as
+  // is. `&` too, or a Markdown parser decodes `&#x202E;` into a hidden character.
+  const markdownTitles = ['telegram', 'teams', 'webex', 'mattermost'].includes(adapter.name);
+  const cardTitle =
+    config.escapeCardTitle ??
+    ((title: string): string => (markdownTitles ? title.replace(/[\\`*_~[\]()<>&]/g, '\\$&') : title));
+  const terminalMessage = ({ fromAgent, ...spec }: TerminalApprovalCard) => {
+    const questionText = fromAgent ? (t: string) => t : cardText;
+    return terminalApprovalMessage({
+      ...spec,
+      title: cardTitle(spec.title),
+      question: questionText(spec.question),
+      questionBlocks: spec.question ? splitCardText(spec.question, questionText, CARD_TEXT_BLOCK_LENGTH) : undefined,
+      resolution: cardText(spec.resolution),
+    });
+  };
+  /**
+   * Redraws a resolved card. A channel refuses a redraw past its size limit,
+   * and a card near that limit grew by its decision line. The title and the
+   * decision still fit, so a decided card is never left showing no decision.
+   */
+  const redrawResolved = async (threadId: string, messageId: string, spec: TerminalApprovalCard) => {
+    if (!terminalFits(spec)) spec = { ...spec, question: '' };
+    try {
+      return await adapter.editMessage(threadId, messageId, terminalMessage(spec));
+    } catch (err) {
+      if (!spec.question) throw err;
+      // Only a known size refusal justifies discarding request text. A lost
+      // reply or transient API failure retries the same idempotent edit.
+      const tooLong = err instanceof CardTooLongError;
+      log.warn('Retrying resolved card edit', { err, shortened: tooLong });
+      return adapter.editMessage(threadId, messageId, terminalMessage(tooLong ? { ...spec, question: '' } : spec));
+    }
+  };
+  /** Whether a resolved card still fits the channel's whole-card cap with its question kept.
+   *  Older Discord configurations get a conservative embed cap; other channels opt in. */
+  const terminalFits = ({ title, question, resolution, fromAgent }: TerminalApprovalCard): boolean => {
+    const limit = config.maxCardTextLength ?? (adapter.name === 'discord' ? 4000 : undefined);
+    if (limit === undefined) return true;
+    const blocks = splitCardText(question, fromAgent ? (t: string) => t : cardText, CARD_TEXT_BLOCK_LENGTH);
+    return !cardQuestionTooLong(cardTitle(title), [...blocks, cardText(resolution)].join('\n'), limit);
+  };
   /** Registry/routing key for this bridge — also the app-context cache
    *  namespace. Default instances key by the platform name. */
   const instanceKey = config.instance ?? adapter.name;
+
+  /**
+   * One click path for every transport: decode the option, hand it to the host,
+   * then show only what the host did. An accepted click shows the decision; a
+   * closed request says so; a refused clicker is told privately. Anything else
+   * (already decided, expired, not ours) leaves the card as it is.
+   */
+  const resolveClick: ResolveClick = async (click, transport) => {
+    // Resolve render metadata BEFORE dispatching onAction (which deletes the row).
+    const render = await resolveQuestionRender(click.questionId);
+    // New format: button id/value is an integer index into options (kept
+    // short to fit Telegram's 64-byte callback_data cap). Old format:
+    // the full value is embedded in actionId/value directly.
+    const selectedOption = resolveSelectedOption(render, click.value, click.tail);
+    // An empty value counts when it is a real option's value, or on a card the host updates itself.
+    if (!selectedOption && !render?.deferResolution && !render?.options.some((o) => o.value === selectedOption)) return;
+    // A Discord thread's chat goes by one of two addresses: name the one the card was sent to.
+    const address =
+      click.otherPlatformId && render?.platformId === click.otherPlatformId
+        ? { ...click.address, platformId: click.otherPlatformId }
+        : click.address;
+    // Handed to the host before this returns, so clicks a transport delivers
+    // one after another reach it in that order. Its decision is waited for off
+    // the caller: a transport that reads its next events only once this returns
+    // (Telegram's polling) must not be held by one decision.
+    const decided = setupConfig.onAction(click.questionId, selectedOption, click.userId, address);
+    void showOutcome(click, transport, render, selectedOption, decided).catch((err: unknown) =>
+      log.error('Failed to handle a card click', { err }),
+    );
+  };
+  /** Waits for the host's decision on a click, then shows only what the host did. */
+  const showOutcome = async (
+    click: CardClick,
+    transport: ClickTransport,
+    render: Awaited<ReturnType<typeof resolveQuestionRender>>,
+    selectedOption: string,
+    decided: ReturnType<ChannelSetup['onAction']>,
+  ): Promise<void> => {
+    const outcome = await decided;
+    try {
+      if (outcome === 'refused') return await transport.notePrivately(REFUSED_CLICK_NOTE);
+      // The host redraws a deferred card itself before it accepts, whether or
+      // not that redraw worked: only the buttons are left to remove.
+      if (outcome === 'accepted' && render?.deferResolution) return transport.removeButtons?.();
+      // No render: already resolved (a late or repeated click), or a pending row
+      // without stored render metadata; deferred: the host updates the card itself.
+      if ((outcome !== 'accepted' && outcome !== 'closed') || !render || render.deferResolution || !click.messageId)
+        return;
+      const selectedLabel =
+        outcome === 'closed'
+          ? CLOSED_RESOLUTION
+          : (render.options.find((o) => o.value === selectedOption)?.selectedLabel ?? selectedOption);
+      const actorName = outcome === 'closed' ? '' : click.actorName;
+      // Every clicked card resolves the same way, on every channel: escaped.
+      const messageId = click.messageId;
+      const edit = redrawResolved(click.threadId, messageId, {
+        title: render.title,
+        question: render.question ?? click.fallbackQuestion ?? '',
+        fromAgent: render.fromAgent,
+        resolution: actorName ? `${selectedLabel} by ${actorName}` : selectedLabel,
+      });
+      if (transport.removeButtons) removeButtonsAfter(edit, transport.removeButtons);
+      await edit;
+      // eslint-disable-next-line no-catch-all/no-catch-all -- logged; a failed card update never undoes the decision
+    } catch (err) {
+      log.warn('Failed to update card after action', { err });
+    }
+  };
   let chat: Chat;
   let state: SqliteStateAdapter;
   let setupConfig: ChannelSetup;
@@ -505,8 +821,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         };
         if (att.fetchData) {
           try {
-            const buffer = await att.fetchData();
-            entry.data = buffer.toString('base64');
+            entry.data = attachmentBytesToBase64(await att.fetchData());
           } catch (err) {
             log.warn('Failed to download attachment', { type: att.type, err });
           }
@@ -580,7 +895,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         userName: adapter.userName || 'NanoClaw',
         concurrency: config.concurrency ?? 'concurrent',
         state,
-        logger: 'silent',
+        logger: chatSdkLogger(),
       });
 
       // Four SDK dispatch paths — bridge just forwards. All per-wiring
@@ -651,9 +966,10 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       });
 
       // Agent-mode assistant context: cache the latest "what the user is
-      // viewing" per (channel, user). The installed chat core (4.29.0)
-      // dispatches both the legacy assistant_thread_started and the
-      // agent_view app_context_changed events into these handlers.
+      // viewing" per (channel, user). The installed chat core (4.41.1)
+      // dispatches assistant_thread_started and
+      // assistant_thread_context_changed into these handlers. Agent-view
+      // app_context_changed goes to onAppContextChanged, not registered here.
       const rememberAppContext = (event: AssistantThreadStartedEvent | AssistantContextChangedEvent): void => {
         cacheAppContext(instanceKey, event.channelId, event.userId, appContextEntities(event));
       };
@@ -667,7 +983,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       // channel type (setMembershipHandler); no-op when none is registered.
       // The chat core dispatches only member_joined_channel;
       // member_left_channel arrives at the adapter but has no SDK handler
-      // in 4.29.0.
+      // in 4.41.1.
       // TODO(member-left): when the chat core grows an onMemberLeftChannel
       // dispatch, register it here and forward with { left: true } — the
       // MembershipEvent type and dispatchMembership already carry it.
@@ -687,49 +1003,23 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         if (!event.actionId.startsWith('ncq:')) return;
         const parts = event.actionId.split(':');
         if (parts.length < 3) return;
-        const questionId = parts[1];
-        const tail = parts.slice(2).join(':');
-        const userId = event.user?.userId || '';
-
-        // Resolve render metadata BEFORE dispatching onAction (which deletes the row).
-        const render = await resolveQuestionRender(questionId);
-        // New format: button id/value is an integer index into options (kept
-        // short to fit Telegram's 64-byte callback_data cap). Old format:
-        // the full value is embedded in actionId/value directly.
-        const selectedOption = resolveSelectedOption(render, event.value, tail);
-        if (render?.deferResolution) {
-          setupConfig.onAction(questionId, selectedOption, userId, {
-            instance: instanceKey,
+        await resolveClick(
+          {
+            questionId: parts[1],
+            tail: parts.slice(2).join(':'),
+            value: event.value,
+            userId: event.user?.userId || '',
+            actorName: event.user?.userName || event.user?.fullName || '',
             messageId: event.messageId,
-            platformId: adapter.channelIdFromThreadId(event.threadId),
-          });
-          return;
-        }
-        const title = render?.title ?? '❓ Question';
-        const matched = render?.options.find((o) => o.value === selectedOption);
-        const selectedLabel = matched?.selectedLabel ?? selectedOption ?? '(clicked)';
-
-        // Update the card to show the selected answer, who acted, and remove buttons
-        const actorName = event.user?.userName || event.user?.fullName || '';
-        const resolution = actorName ? `${selectedLabel} by ${actorName}` : selectedLabel;
-        try {
-          const tid = event.threadId;
-          await adapter.editMessage(
-            tid,
-            event.messageId,
-            render?.question
-              ? terminalApprovalMessage({ title, question: render.question, resolution })
-              : { markdown: `${title}\n\n${resolution}` },
-          );
-        } catch (err) {
-          log.warn('Failed to update card after action', { err });
-        }
-
-        setupConfig.onAction(questionId, selectedOption, userId, {
-          instance: instanceKey,
-          messageId: event.messageId,
-          platformId: adapter.channelIdFromThreadId(event.threadId),
-        });
+            threadId: event.threadId,
+            address: {
+              instance: instanceKey,
+              messageId: event.messageId,
+              platformId: adapter.channelIdFromThreadId(event.threadId),
+            },
+          },
+          { notePrivately: (text) => tellPrivately(event, text) },
+        );
       });
 
       await chat.initialize();
@@ -746,7 +1036,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         gatewayAbort = new AbortController();
 
         // Start local HTTP server to receive forwarded Gateway events (including interactions)
-        const webhookUrl = await startLocalWebhookServer(gatewayAdapter, setupConfig, config.botToken);
+        const webhookUrl = await startLocalWebhookServer(gatewayAdapter, config.botToken, resolveClick);
 
         // Exponential backoff capped at 1h. Without this, an unrecoverable
         // failure (e.g., TokenInvalid) restarts ~10×/sec and Discord's
@@ -836,11 +1126,9 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           typeof terminalCard.question === 'string' &&
           typeof terminalCard.resolution === 'string'
         ) {
-          await adapter.editMessage(
-            tid,
-            content.messageId as string,
-            terminalApprovalMessage(terminalCard as TerminalApprovalCard),
-          );
+          // A host row must not disable escaping by supplying fromAgent.
+          const { title, question, resolution } = terminalCard as TerminalApprovalCard;
+          await redrawResolved(tid, content.messageId as string, { title, question, resolution });
         } else {
           await adapter.editMessage(tid, content.messageId as string, {
             markdown: transformText((content.text as string) || (content.markdown as string) || ''),
@@ -869,11 +1157,22 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           return result?.id;
         }
         if (content.requirePresentation) throw new Error('Approval presentation adapter is unavailable');
+        // Long text goes out as several blocks, measured after escaping, so no
+        // per-block cap cuts it. A platform that caps the whole card refuses
+        // what it can't show, counting the fences the split adds.
+        // Questions an agent asks itself keep their own markup (`fromAgent`).
+        const escape = content.fromAgent === true ? (t: string) => t : cardText;
+        const text = escape(question);
+        const blocks = splitCardText(question, escape, CARD_TEXT_BLOCK_LENGTH);
+        if (config.maxCardTextLength !== undefined) {
+          const tooLong = cardQuestionTooLong(cardTitle(title), blocks.join('\n'), config.maxCardTextLength);
+          if (tooLong) throw new CardTooLongError(tooLong);
+        }
         const options: NormalizedOption[] = normalizeOptions(content.options as never);
         const card = Card({
-          title,
+          title: cardTitle(title),
           children: [
-            CardText(question),
+            ...blocks.map((block) => CardText(block)),
             Actions(
               // Encode button id/value with the option index rather than the
               // full value. Telegram caps callback_data at 64 bytes, and
@@ -888,7 +1187,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         });
         const result = await adapter.postMessage(tid, {
           card,
-          fallbackText: `${title}\n\n${question}\nOptions: ${options.map((o) => o.label).join(', ')}`,
+          fallbackText: `${title}\n\n${text}\nOptions: ${options.map((o) => o.label).join(', ')}`,
         });
         return result?.id;
       }
@@ -903,13 +1202,19 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         const title = (cardSpec.title as string) || '';
         const fallbackText = (content.fallbackText as string) || (cardSpec.description as string) || title || '';
 
+        // Checked again here: anything in the container can write this row, not only send_card.
+        const problems = cardProblems(cardSpec);
+        if (problems.length > 0) throw new Error(`send_card card refused: ${problems.join('; ')}`);
+
         const cardChildren: CardChild[] = [];
         if (typeof cardSpec.description === 'string' && cardSpec.description) {
           cardChildren.push(CardText(cardSpec.description));
         }
         if (Array.isArray(cardSpec.children)) {
           for (const child of cardSpec.children) {
-            if (typeof child === 'string' && child) {
+            if (isCardPart(child)) {
+              cardChildren.push(buildCardPart(child));
+            } else if (typeof child === 'string' && child) {
               cardChildren.push(CardText(child));
             } else if (
               child &&
@@ -951,7 +1256,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           return;
         }
 
-        const card = Card({ title, children: cardChildren });
+        const card = Card({ title: cardTitle(title), children: cardChildren });
         const result = await adapter.postMessage(tid, { card, fallbackText });
         return result?.id;
       }
@@ -1039,6 +1344,66 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
   return bridge;
 }
 
+/** Only the clicker sees it; nothing is posted where the channel has no private message (no DM fallback). */
+async function tellPrivately(event: ActionEvent, text: string): Promise<void> {
+  try {
+    await event.thread?.postEphemeral(event.user, text, { fallbackToDM: false });
+    // eslint-disable-next-line no-catch-all/no-catch-all -- a failed note leaves the card as it is either way
+  } catch (err) {
+    log.warn('Failed to tell a clicker privately', { err });
+  }
+}
+
+/** A click on a card, whichever transport delivered it. */
+interface CardClick {
+  questionId: string;
+  /** The action id after the question id (old format: the option value itself). */
+  tail: string;
+  /** The button's value (new format: an option index). */
+  value: string | undefined;
+  userId: string;
+  actorName: string;
+  /** The clicked card's message, when the transport knows it. */
+  messageId: string | undefined;
+  threadId: string;
+  address: { instance?: string; messageId?: string; platformId?: string };
+  /** The chat's second address, where a transport has two for one place (a Discord thread). */
+  otherPlatformId?: string;
+  /** Card text to keep when the render has none (Discord: the original embed's). */
+  fallbackQuestion?: string;
+}
+
+/** How a transport answers the clicker. */
+interface ClickTransport {
+  /** Only the clicker sees it; nothing is posted where the channel can't. */
+  notePrivately(text: string): Promise<void>;
+  /** Removes the buttons apart from the card edit, where the transport can; see removeButtonsAfter. Never awaited. */
+  removeButtons?(): void;
+}
+
+type ResolveClick = (click: CardClick, transport: ClickTransport) => Promise<void>;
+
+/** How long a clicked card's edit may run before its buttons go anyway. */
+export const CARD_EDIT_SETTLE_MS = 5_000;
+
+/**
+ * Removes the buttons once the card edit settles, or once it has stalled for
+ * CARD_EDIT_SETTLE_MS. Not alongside it: two edits of one message in flight
+ * together can drop the edit's text (Discord kept only the button removal).
+ */
+function removeButtonsAfter(edit: Promise<unknown>, removeButtons: () => void): void {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const stalled = new Promise<void>((resolve) => (timer = setTimeout(resolve, CARD_EDIT_SETTLE_MS)));
+  const settled = edit.then(
+    () => undefined,
+    () => undefined,
+  );
+  void Promise.race([settled, stalled]).then(() => {
+    clearTimeout(timer);
+    removeButtons();
+  });
+}
+
 /**
  * Start a local HTTP server to receive forwarded Gateway events.
  * This is needed because the Gateway listener in webhook-forwarding mode
@@ -1050,8 +1415,8 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
  */
 function startLocalWebhookServer(
   adapter: GatewayAdapter,
-  setupConfig: ChannelSetup,
-  botToken?: string,
+  botToken: string | undefined,
+  resolveClick: ResolveClick,
 ): Promise<string> {
   return new Promise((resolve) => {
     const server = http.createServer((req, res) => {
@@ -1064,7 +1429,7 @@ function startLocalWebhookServer(
       req.on('data', (chunk: Buffer) => chunks.push(chunk));
       req.on('end', () => {
         const body = Buffer.concat(chunks).toString();
-        handleForwardedEvent(body, adapter, setupConfig, botToken)
+        handleForwardedEvent(body, adapter, botToken, resolveClick)
           .then(() => {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end('{"ok":true}');
@@ -1093,11 +1458,18 @@ function gatewayTokenMatches(header: string | string[] | undefined, botToken: st
   return timingSafeEqual(digest(header), digest(botToken));
 }
 
+/**
+ * Bounds each interaction call. Discord voids a first response after 3 s, so
+ * an ack still pending past this can only fail; unbounded, one stalled call
+ * held up its click for good, and the channel's events queued behind it.
+ */
+const INTERACTION_CALLBACK_TIMEOUT_MS = 10_000;
+
 async function handleForwardedEvent(
   body: string,
   adapter: GatewayAdapter,
-  setupConfig: ChannelSetup,
-  botToken?: string,
+  botToken: string | undefined,
+  resolveClick: ResolveClick,
 ): Promise<void> {
   let event: { type: string; data: Record<string, unknown> };
   try {
@@ -1118,72 +1490,110 @@ async function handleForwardedEvent(
         (interaction.user as Record<string, string> | undefined);
       const interactionId = interaction.id as string;
       const interactionToken = interaction.token as string;
+      /** Set while the ack is on its way: the interaction's webhook works only after it. */
+      let acking: Promise<void> | undefined;
+      /** Answers within Discord's 3 s; a failed ack must never drop the decision dispatched with it. */
+      const ack = async (response: Record<string, unknown>) => {
+        try {
+          const result = await fetch(
+            `https://discord.com/api/v10/interactions/${interactionId}/${interactionToken}/callback`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(response),
+              signal: AbortSignal.timeout(INTERACTION_CALLBACK_TIMEOUT_MS),
+            },
+          );
+          if (!result.ok) log.error('Failed to acknowledge interaction', { status: result.status });
+          // eslint-disable-next-line no-catch-all/no-catch-all -- the decision is dispatched either way
+        } catch (err) {
+          log.error('Failed to acknowledge interaction', { err });
+        }
+      };
+      /** The interaction's webhook (a private follow-up, or the clicked message); a failure never stops the card edit. */
+      const webhook = async (method: 'POST' | 'PATCH', path: string, body: Record<string, unknown>) => {
+        if (acking) await acking;
+        try {
+          const result = await fetch(
+            `https://discord.com/api/v10/webhooks/${interaction.application_id as string}/${interactionToken}${path}`,
+            {
+              method,
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+              signal: AbortSignal.timeout(INTERACTION_CALLBACK_TIMEOUT_MS),
+            },
+          );
+          if (!result.ok) log.error('Discord interaction webhook failed', { method, status: result.status });
+          // eslint-disable-next-line no-catch-all/no-catch-all -- the host has decided either way
+        } catch (err) {
+          log.error('Discord interaction webhook failed', { method, err });
+        }
+      };
+      const messageId = (interaction.message as Record<string, unknown> | undefined)?.id as string | undefined;
 
-      // Parse the selected option from custom_id
+      // Parse the selected option from custom_id. The adapter writes
+      // `${buttonId}\n${value}` (Chat SDK 4.41+); older cards carry the id alone.
+      const delimiter = customId?.indexOf('\n') ?? -1;
+      const actionId = delimiter === -1 ? customId : customId.slice(0, delimiter);
+      const encodedValue = delimiter === -1 ? undefined : customId.slice(delimiter + 1);
       let questionId: string | undefined;
       let tail: string | undefined;
-      if (customId?.startsWith('ncq:')) {
-        const colonIdx = customId.indexOf(':', 4); // after "ncq:"
+      if (actionId?.startsWith('ncq:')) {
+        const colonIdx = actionId.indexOf(':', 4); // after "ncq:"
         if (colonIdx !== -1) {
-          questionId = customId.slice(4, colonIdx);
-          tail = customId.slice(colonIdx + 1);
+          questionId = actionId.slice(4, colonIdx);
+          tail = actionId.slice(colonIdx + 1);
         }
       }
 
-      // Update the card to show the selected answer and remove buttons
       const originalEmbeds =
         ((interaction.message as Record<string, unknown>)?.embeds as Array<Record<string, unknown>>) || [];
       const originalDescription = (originalEmbeds[0]?.description as string) || '';
-      const render = questionId ? await resolveQuestionRender(questionId) : undefined;
-      // Discord custom_id mirrors the new index-based encoding (see Button
-      // construction). Decode back to the real option value for downstream.
-      const selectedOption = resolveSelectedOption(render, tail, tail);
-      if (render?.deferResolution && questionId) {
-        await fetch(`https://discord.com/api/v10/interactions/${interactionId}/${interactionToken}/callback`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ type: 6 }),
-        });
-        setupConfig.onAction(questionId, selectedOption, user?.id || '', {
-          messageId: (interaction.message as Record<string, unknown> | undefined)?.id as string | undefined,
-          platformId: interaction.channel_id as string | undefined,
-        });
-        return;
-      }
-      const cardTitle = render?.title ?? ((originalEmbeds[0]?.title as string) || '❓ Question');
-      const matchedOpt = render?.options.find((o) => o.value === selectedOption);
-      const selectedLabel = matchedOpt?.selectedLabel ?? selectedOption ?? customId;
-      const actorName = user?.global_name || user?.username || '';
-      const resolution = actorName ? `${selectedLabel} by ${actorName}` : selectedLabel;
-      try {
-        await fetch(`https://discord.com/api/v10/interactions/${interactionId}/${interactionToken}/callback`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            type: 7, // UPDATE_MESSAGE — acknowledge + update in one call
-            data: {
-              embeds: [
-                {
-                  title: cardTitle,
-                  description: originalDescription || render?.question || '',
-                  footer: { text: resolution },
-                },
-              ],
-              components: [], // remove buttons
-            },
-          }),
-        });
-      } catch (err) {
-        log.error('Failed to update interaction', { err });
-      }
+      // Ack at once and keep the buttons (DEFERRED_UPDATE_MESSAGE): the card
+      // changes only after the host accepts the click. Not awaited: the listener
+      // forwards a channel's next event only once this one is answered.
+      acking = ack({ type: 6 }).then(() => {
+        acking = undefined;
+      });
+      if (!questionId) return;
+      // Announcement (10), public and private threads. The adapter keys a thread's
+      // messages by parent channel and thread when it knows the parent, and by the
+      // thread alone when it does not (a failed lookup, or a later message in an
+      // announcement thread). A card's chat can be either, so the click carries both.
+      const channel = interaction.channel as { type?: number; parent_id?: string } | undefined;
+      const inThread = (channel?.type === 10 || channel?.type === 11 || channel?.type === 12) && channel.parent_id;
+      const guildId = (interaction.guild_id as string | undefined) || '@me';
+      const channelId = interaction.channel_id as string;
+      const threadId = adapter.encodeThreadId({
+        guildId,
+        channelId: inThread ? channel.parent_id! : channelId,
+        ...(inThread ? { threadId: channelId } : {}),
+      });
 
-      // Dispatch to host
-      if (questionId && selectedOption) {
-        setupConfig.onAction(questionId, selectedOption, user?.id || '', {
-          messageId: (interaction.message as Record<string, unknown> | undefined)?.id as string | undefined,
-          platformId: interaction.channel_id as string | undefined,
-        });
-      }
+      // The rest runs in the background: Discord forwards a channel's events in
+      // order, so the host's decision must not hold them.
+      void (async () =>
+        resolveClick(
+          {
+            questionId,
+            tail: tail ?? '',
+            // Discord custom_id mirrors the index-based encoding (see Button construction).
+            value: encodedValue ?? tail,
+            userId: user?.id || '',
+            actorName: user?.global_name || user?.username || '',
+            messageId,
+            threadId,
+            address: { messageId, platformId: adapter.channelIdFromThreadId(threadId) },
+            ...(inThread ? { otherPlatformId: adapter.encodeThreadId({ guildId, channelId }) } : {}),
+            fallbackQuestion: originalDescription,
+          },
+          {
+            // flags 64: only the clicker sees it.
+            notePrivately: (text) => webhook('POST', '', { content: text, flags: 64 }),
+            // Components only: the embed stays, so no length limit can reject it.
+            removeButtons: () => void webhook('PATCH', '/messages/@original', { components: [] }),
+          },
+        ))().catch((err: unknown) => log.error('Failed to update interaction', { err }));
       return;
     }
   }

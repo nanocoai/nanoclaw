@@ -20,6 +20,7 @@ import { fileURLToPath } from 'url';
 
 import { log } from '../../../../src/log.js';
 import { emitStatus } from '../../../../setup/status.js';
+import { login } from './secret-input.js';
 
 const LOCAL_BIN = path.join(os.homedir(), '.local', 'bin');
 
@@ -235,7 +236,11 @@ function installOnecli(): { stdout: string; ok: boolean } {
   // be a foreign shell (exe.dev images ship /exe.dev/bin/sh first on PATH; its
   // builtin lsof always exits 0, so the installer's port probe reports every
   // port as busy and the install fails with "Port 5432 is already in use").
-  const gw = runInstall(`export ONECLI_VERSION=${ONECLI_GATEWAY_VERSION} && curl -fsSL onecli.sh/install | /bin/sh`);
+  // The script runs in a shell, so fetch it over HTTPS only: a scheme-less URL
+  // makes curl use plain HTTP, and --proto-redir blocks a redirect downgrade.
+  const gw = runInstall(
+    `export ONECLI_VERSION=${ONECLI_GATEWAY_VERSION} && curl --proto '=https' --proto-redir '=https' -fsSL https://onecli.sh/install | /bin/sh`,
+  );
   stdout += gw.stdout;
   if (!gw.ok) {
     log.error('OneCLI gateway install failed', { stderr: gw.stderr });
@@ -437,10 +442,7 @@ export async function run(args: string[]): Promise<void> {
       // secret via `onecli secrets list`), and ONECLI_API_KEY in .env is
       // read by the runtime SDK at request time. Both are needed.
       try {
-        execFileSync('onecli', ['auth', 'login', '--api-key', remoteToken], {
-          stdio: 'ignore',
-          env: childEnv(),
-        });
+        login(remoteToken, childEnv());
       } catch (err) {
         log.warn('onecli auth login failed', { err });
       }

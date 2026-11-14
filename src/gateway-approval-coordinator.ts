@@ -1,5 +1,6 @@
+import { CardTooLongError } from './channels/ask-question.js';
 import { gatewayApprovalPresentation } from './gateway-approval-presentation.js';
-import { permitsConfiguredGatewayRead } from './gateway-read-policy.js';
+import { permitsConfiguredGatewayRead, permitsUncredentialedGatewayRead } from './gateway-read-policy.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { getProviderHostContract } from './provider-contracts/index.js';
 import { resolveProviderName } from './providers/provider-name.js';
@@ -29,7 +30,7 @@ import {
 import { log } from './log.js';
 import { pickApprovalDelivery, pickApprover } from './modules/approvals/primitive.js';
 import { isAuthorizedApprovalClick } from './modules/approvals/response-handler.js';
-import { registerResponseHandler, type ResponsePayload } from './response-registry.js';
+import { registerResponseHandler, type ResponseOutcome, type ResponsePayload } from './response-registry.js';
 import type { PendingApproval } from './types.js';
 
 export const GATEWAY_APPROVAL_ACTION = 'gateway_request';
@@ -42,6 +43,7 @@ const MAX_TITLE_CHARS = 200;
 const MAX_QUESTION_CHARS = 2_600;
 const MAX_AUDIT_BYTES = 8_192;
 const MAX_PROVIDER_APPROVAL_MS = 60 * 60_000;
+const CREDENTIAL_SCOPE_TIMEOUT_MS = 5_000;
 /**
  * A bridge that fails fast — a socket that will not bind, a gateway that is
  * down — rejects well inside this window. One that is still running after it
@@ -57,6 +59,8 @@ interface PendingState {
   requestKey: string;
   promise: Promise<GatewayApprovalDecision>;
   binding: string;
+  /** Set once a response or gateway event claims the outcome; expiry then leaves it alone, row or not. */
+  decided?: boolean;
 }
 
 export interface GatewayApprovalCoordinatorOptions {
@@ -412,6 +416,18 @@ async function processGatewayRequest(
         (contract?.modelAuthorities ?? []).includes(request.destination.host.toLowerCase())
       )
         return current() ? 'approve' : unavailableDecision();
+      if (await attachesNoCredential(request.destination)) {
+        // The lookup can outlast the request's own deadline.
+        if (!current() || Date.now() >= deadline) return unavailableDecision();
+        log.info('Gateway request approved without a card: no credential in scope', {
+          gatewayProvider: providerKind,
+          requestId: request.id,
+          agentGroupId: request.agentGroupId,
+          sessionId: request.sessionId,
+          audit: request.audit,
+        });
+        return 'approve';
+      }
     }
 
     const approvers = request.approverUserId ? [request.approverUserId] : await pickApprover(request.agentGroupId);
@@ -435,23 +451,45 @@ async function processGatewayRequest(
     if (!current()) return unavailableDecision();
     const presentation = gatewayApprovalPresentation(request);
     const approvalId = `ga-${randomBytes(10).toString('hex')}`;
-    const sendCard = () =>
-      adapter!.deliver(
-        target.messagingGroup.channel_type,
-        target.messagingGroup.platform_id,
-        request.delivery?.threadId ?? null,
-        'chat-sdk',
-        JSON.stringify({
-          type: 'ask_question',
-          requirePresentation: Boolean(request.displayFields),
-          questionId: approvalId,
-          title: presentation.title,
-          question: presentation.question,
-          options: OPTIONS,
-        }),
-        undefined,
-        target.messagingGroup.instance,
-      );
+    const sendCard = async () => {
+      try {
+        return await adapter!.deliver(
+          target.messagingGroup.channel_type,
+          target.messagingGroup.platform_id,
+          request.delivery?.threadId ?? null,
+          'chat-sdk',
+          JSON.stringify({
+            type: 'ask_question',
+            requirePresentation: Boolean(request.displayFields),
+            questionId: approvalId,
+            title: presentation.title,
+            question: presentation.question,
+            options: OPTIONS,
+          }),
+          undefined,
+          target.messagingGroup.instance,
+        );
+      } catch (err) {
+        if (err instanceof CardTooLongError) {
+          try {
+            await adapter!.deliver(
+              target.messagingGroup.channel_type,
+              target.messagingGroup.platform_id,
+              request.delivery?.threadId ?? null,
+              'chat',
+              JSON.stringify({
+                text: 'Approval request not shown: this channel cannot display the complete request. No approval was granted.',
+              }),
+              undefined,
+              target.messagingGroup.instance,
+            );
+          } catch (noticeError) {
+            log.warn('Could not deliver approval refusal notice', { err: noticeError });
+          }
+        }
+        throw err;
+      }
+    };
     const row = {
       approval_id: approvalId,
       session_id: request.sessionId ?? null,
@@ -524,13 +562,13 @@ function armPending(
   return promise;
 }
 
-export async function handleGatewayApprovalResponse(payload: ResponsePayload): Promise<boolean> {
+export async function handleGatewayApprovalResponse(payload: ResponsePayload): Promise<ResponseOutcome | false> {
   let state: PendingState | undefined;
   try {
     const approval = await getPendingApproval(payload.questionId);
     if (!approval || approval.action !== GATEWAY_APPROVAL_ACTION) return false;
     state = pending.get(payload.questionId);
-    if (!(await isAuthorizedApprovalClick(approval, payload))) return true;
+    if (!(await isAuthorizedApprovalClick(approval, payload))) return 'refused';
     if (
       approvalSource?.durable &&
       (payload.instance !== (approval.instance ?? approval.channel_type) ||
@@ -538,10 +576,10 @@ export async function handleGatewayApprovalResponse(payload: ResponsePayload): P
         (payload.messageId !== undefined && payload.messageId !== approval.platform_message_id) ||
         (payload.platformId && payload.platformId !== approval.platform_id))
     )
-      return true;
+      return 'ignored';
     if (!approval.expires_at || Date.parse(approval.expires_at) <= Date.now()) {
       await expireApproval(approval.approval_id, 'no response');
-      return true;
+      return 'ignored';
     }
     const decision: GatewayApprovalDecision = payload.value === 'approve' ? 'approve' : 'deny';
     const claimed = await transitionPendingApprovalStatus(
@@ -549,15 +587,18 @@ export async function handleGatewayApprovalResponse(payload: ResponsePayload): P
       'pending',
       decision === 'approve' ? 'approved' : 'rejected',
     );
-    if (!claimed) return true;
+    if (!claimed) return 'ignored';
     // The database claim owns the outcome; expiry must not override it while
     // card updates or gateway delivery are still in flight.
-    if (state) clearTimeout(state.timer);
+    if (state) {
+      clearTimeout(state.timer);
+      state.decided = true;
+    }
     if (approvalSource?.durable) {
       await editGatewayApprovalCard(approval, decision === 'approve' ? '✅ Approved' : '❌ Rejected');
       await deliverDurableDecision({ ...approval, status: decision === 'approve' ? 'approved' : 'rejected' });
       if (state) settle(approval.approval_id, state, decision);
-      return true;
+      return 'accepted';
     }
     await editGatewayApprovalCard(approval, decision === 'approve' ? '✅ Approved' : '❌ Rejected');
     await deletePendingApproval(approval.approval_id);
@@ -578,11 +619,11 @@ export async function handleGatewayApprovalResponse(payload: ResponsePayload): P
         );
       }
     }
-    return true;
+    return 'accepted';
   } catch (err) {
     if (state) settle(payload.questionId, state, unavailableDecision());
     log.error('Gateway approval response failed closed', { approvalId: payload.questionId, err });
-    return true;
+    return 'ignored';
   }
 }
 
@@ -599,6 +640,10 @@ async function expireApproval(
       await editExpiredGatewayApprovalCard(row, reason);
       if (approvalSource?.durable) await deliverDurableDecision({ ...row, status: 'expired' });
       else await deletePendingApproval(approvalId);
+    } else if (state && !(await getPendingApproval(approvalId)) && !state.decided) {
+      // Row deleted under a live hold (group or messaging-group delete): nothing
+      // can decide it now, so release the hold instead of leaking it.
+      expired = true;
     }
   } catch (err) {
     if (state) settle(approvalId, state, unavailableDecision());
@@ -730,6 +775,9 @@ function validateRequest(request: GatewayApprovalRequest): void {
   ) {
     throw new Error('Gateway destination host is invalid');
   }
+  if (request.destination?.sendsPayload !== undefined && typeof request.destination.sendsPayload !== 'boolean') {
+    throw new Error('Gateway destination payload flag is invalid');
+  }
   if (!request.id || request.id.length > 200) throw new Error('Gateway approval id is invalid');
   if (!request.agentGroupId || request.agentGroupId.length > 200) throw new Error('Gateway agent identity is invalid');
   if (request.sessionId !== undefined && (!request.sessionId || request.sessionId.length > 200)) {
@@ -762,6 +810,29 @@ function validateRequest(request: GatewayApprovalRequest): void {
   }
 }
 
+/** Only a timely, explicit 'none' skips the card; an error, a delay or any other answer keeps it. */
+async function attachesNoCredential(destination: NonNullable<GatewayApprovalRequest['destination']>): Promise<boolean> {
+  const source = approvalSource;
+  if (!source?.credentialScope || !permitsUncredentialedGatewayRead(destination)) return false;
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const scope = await Promise.race([
+      source.credentialScope({ host: destination.host, method: destination.method }),
+      new Promise<'timeout'>((resolve) => {
+        timer = setTimeout(() => resolve('timeout'), CREDENTIAL_SCOPE_TIMEOUT_MS);
+        timer.unref();
+      }),
+    ]);
+    if (scope === 'timeout') log.warn('Gateway credential scope timed out; card kept');
+    return scope === 'none';
+  } catch (err) {
+    log.warn('Gateway credential scope failed; card kept', { err });
+    return false;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function unavailableDecision(): GatewayApprovalDecision {
   return approvalSource?.durable ? 'unavailable' : 'deny';
 }
@@ -787,6 +858,8 @@ async function resolveGatewayRequest(requestId: string): Promise<void> {
     await transitionPendingApprovalStatus(row.approval_id, 'pending', 'expired');
     const current = await getPendingApproval(row.approval_id);
     if (!current) continue;
+    const state = pending.get(row.approval_id);
+    if (state) state.decided = true;
     const decision =
       current.status === 'approved' ? 'approve' : current.status === 'rejected' ? 'deny' : unavailableDecision();
     await editGatewayApprovalCard(
@@ -798,7 +871,6 @@ async function resolveGatewayRequest(requestId: string): Promise<void> {
           : 'Request ended at the gateway.',
     );
     await deletePendingApproval(row.approval_id);
-    const state = pending.get(row.approval_id);
     if (state) settle(row.approval_id, state, decision);
   }
 }

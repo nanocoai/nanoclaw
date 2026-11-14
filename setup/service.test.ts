@@ -10,6 +10,8 @@ import { log } from '../src/log.js';
 import {
   hostProxyEnv,
   nodeHonorsEnvProxy,
+  renderLaunchdPlist,
+  renderNohupWrapper,
   renderSystemdUnit,
   serviceProxyEnvPath,
   tightenCredentialFiles,
@@ -24,112 +26,140 @@ import {
  * without actually loading services.
  */
 
-// Helper: generate a plist string the same way service.ts does
-function generatePlist(nodePath: string, projectRoot: string, homeDir: string): string {
-  const label = getLaunchdLabel(projectRoot);
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>${label}</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>${nodePath}</string>
-        <string>${projectRoot}/dist/index.js</string>
-    </array>
-    <key>WorkingDirectory</key>
-    <string>${projectRoot}</string>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin</string>
-        <key>HOME</key>
-        <string>${homeDir}</string>
-    </dict>
-    <key>StandardOutPath</key>
-    <string>${projectRoot}/logs/nanoclaw.log</string>
-    <key>StandardErrorPath</key>
-    <string>${projectRoot}/logs/nanoclaw.error.log</string>
-</dict>
-</plist>`;
-}
-
-function generateSystemdUnit(nodePath: string, projectRoot: string, homeDir: string, isSystem: boolean): string {
-  return `[Unit]
-Description=NanoClaw Personal Assistant
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=${nodePath} ${projectRoot}/dist/index.js
-WorkingDirectory=${projectRoot}
-Restart=always
-RestartSec=5
-KillMode=process
-Environment=HOME=${homeDir}
-Environment=PATH=/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin
-StandardOutput=append:${projectRoot}/logs/nanoclaw.log
-StandardError=append:${projectRoot}/logs/nanoclaw.error.log
-
-[Install]
-WantedBy=${isSystem ? 'multi-user.target' : 'default.target'}`;
-}
-
 describe('plist generation', () => {
   it('contains the slug-scoped label', () => {
     const projectRoot = '/home/user/nanoclaw';
-    const plist = generatePlist('/usr/local/bin/node', projectRoot, '/home/user');
+    const plist = renderLaunchdPlist(projectRoot, '/usr/local/bin/node', '/home/user');
     expect(plist).toContain(`<string>${getLaunchdLabel(projectRoot)}</string>`);
     expect(plist).toMatch(/<string>com\.nanoclaw-v2-[0-9a-f]{8}<\/string>/);
   });
 
   it('uses the correct node path', () => {
-    const plist = generatePlist('/opt/node/bin/node', '/home/user/nanoclaw', '/home/user');
+    const plist = renderLaunchdPlist('/home/user/nanoclaw', '/opt/node/bin/node', '/home/user');
     expect(plist).toContain('<string>/opt/node/bin/node</string>');
   });
 
   it('points to dist/index.js', () => {
-    const plist = generatePlist('/usr/local/bin/node', '/home/user/nanoclaw', '/home/user');
+    const plist = renderLaunchdPlist('/home/user/nanoclaw', '/usr/local/bin/node', '/home/user');
     expect(plist).toContain('/home/user/nanoclaw/dist/index.js');
   });
 
   it('sets log paths', () => {
-    const plist = generatePlist('/usr/local/bin/node', '/home/user/nanoclaw', '/home/user');
+    const plist = renderLaunchdPlist('/home/user/nanoclaw', '/usr/local/bin/node', '/home/user');
     expect(plist).toContain('nanoclaw.log');
     expect(plist).toContain('nanoclaw.error.log');
+  });
+
+  it("puts node's dir first in PATH, then Homebrew", () => {
+    const plist = renderLaunchdPlist('/Users/u/nanoclaw', '/opt/homebrew/opt/node@22/bin/node', '/Users/u');
+    expect(plist).toContain(
+      '<key>PATH</key>\n        <string>/opt/homebrew/opt/node@22/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/Users/u/.local/bin</string>',
+    );
+  });
+
+  it('keeps the standard PATH order when node is already in a standard dir', () => {
+    const plist = renderLaunchdPlist('/Users/u/nanoclaw', '/usr/local/bin/node', '/Users/u');
+    expect(plist).toContain(
+      '<string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/Users/u/.local/bin</string>',
+    );
+  });
+
+  it('writes proxy entries XML-escaped', () => {
+    const plist = renderLaunchdPlist('/Users/u/nanoclaw', '/opt/homebrew/bin/node', '/Users/u', [
+      ['HTTPS_PROXY', 'http://u:a&b@proxy:3128'],
+    ]);
+    expect(plist).toContain('<key>HTTPS_PROXY</key>\n        <string>http://u:a&amp;b@proxy:3128</string>');
   });
 });
 
 describe('systemd unit generation', () => {
   it('user unit uses default.target', () => {
-    const unit = generateSystemdUnit('/usr/bin/node', '/home/user/nanoclaw', '/home/user', false);
+    const unit = renderSystemdUnit('/home/user/nanoclaw', '/usr/bin/node', '/home/user', false);
     expect(unit).toContain('WantedBy=default.target');
   });
 
   it('system unit uses multi-user.target', () => {
-    const unit = generateSystemdUnit('/usr/bin/node', '/home/user/nanoclaw', '/home/user', true);
+    const unit = renderSystemdUnit('/home/user/nanoclaw', '/usr/bin/node', '/home/user', true);
     expect(unit).toContain('WantedBy=multi-user.target');
   });
 
   it('contains restart policy', () => {
-    const unit = generateSystemdUnit('/usr/bin/node', '/home/user/nanoclaw', '/home/user', false);
+    const unit = renderSystemdUnit('/home/user/nanoclaw', '/usr/bin/node', '/home/user', false);
     expect(unit).toContain('Restart=always');
     expect(unit).toContain('RestartSec=5');
   });
 
   it('uses KillMode=process to preserve detached children', () => {
-    const unit = generateSystemdUnit('/usr/bin/node', '/home/user/nanoclaw', '/home/user', false);
+    const unit = renderSystemdUnit('/home/user/nanoclaw', '/usr/bin/node', '/home/user', false);
     expect(unit).toContain('KillMode=process');
   });
 
   it('sets correct ExecStart', () => {
-    const unit = generateSystemdUnit('/usr/bin/node', '/srv/nanoclaw', '/home/user', false);
+    const unit = renderSystemdUnit('/srv/nanoclaw', '/usr/bin/node', '/home/user', false);
     expect(unit).toContain('ExecStart=/usr/bin/node /srv/nanoclaw/dist/index.js');
+  });
+
+  it("puts node's dir first in PATH", () => {
+    const nvmNode = '/home/user/.nvm/versions/node/v22.12.0/bin/node';
+    const unit = renderSystemdUnit('/home/user/nanoclaw', nvmNode, '/home/user', false);
+    expect(unit).toContain(
+      'Environment=PATH=/home/user/.nvm/versions/node/v22.12.0/bin:/usr/local/bin:/usr/bin:/bin:/home/user/.local/bin\n',
+    );
+  });
+
+  it('keeps the standard PATH order for /usr/bin/node', () => {
+    const unit = renderSystemdUnit('/home/user/nanoclaw', '/usr/bin/node', '/home/user', false);
+    expect(unit).toContain('Environment=PATH=/usr/local/bin:/usr/bin:/bin:/home/user/.local/bin\n');
+  });
+});
+
+// The service does not inherit the setup shell, so without this the host would
+// fall back to the path hash for its image and labels.
+describe('install id in the service environment', () => {
+  const saved = process.env.NANOCLAW_INSTALL_ID;
+  const plist = () => renderLaunchdPlist('/Users/u/nanoclaw', '/opt/homebrew/bin/node', '/Users/u');
+  const unit = () => renderSystemdUnit('/home/user/nanoclaw', '/usr/bin/node', '/home/user', false);
+  const wrapper = () => renderNohupWrapper('/home/user/nanoclaw', '/usr/bin/node');
+  afterEach(() => {
+    if (saved === undefined) delete process.env.NANOCLAW_INSTALL_ID;
+    else process.env.NANOCLAW_INSTALL_ID = saved;
+  });
+
+  it('gives the launchd host the id its label uses', () => {
+    process.env.NANOCLAW_INSTALL_ID = 'prod-eks_1';
+    expect(plist()).toContain('<string>com.nanoclaw-v2-prod-eks_1</string>');
+    expect(plist()).toContain('<key>NANOCLAW_INSTALL_ID</key>\n        <string>prod-eks_1</string>');
+  });
+
+  it('gives the systemd host the id its unit name uses', () => {
+    process.env.NANOCLAW_INSTALL_ID = 'prod-eks_1';
+    expect(unit()).toContain('Environment=NANOCLAW_INSTALL_ID=prod-eks_1\n');
+  });
+
+  // restart.sh and the updater run the wrapper from shells that may not set it.
+  it('gives the nohup host the id before it starts', () => {
+    process.env.NANOCLAW_INSTALL_ID = 'prod-eks_1';
+    const lines = wrapper().split('\n');
+    const exported = lines.indexOf("export NANOCLAW_INSTALL_ID='prod-eks_1'");
+    expect(exported).toBeGreaterThan(-1);
+    expect(exported).toBeLessThan(lines.findIndex((line) => line.startsWith('setsid nohup ')));
+  });
+
+  it('writes the same files for an empty id as for none', () => {
+    delete process.env.NANOCLAW_INSTALL_ID;
+    const [unsetPlist, unsetUnit, unsetWrapper] = [plist(), unit(), wrapper()];
+    process.env.NANOCLAW_INSTALL_ID = '';
+    expect(plist()).toBe(unsetPlist);
+    expect(unit()).toBe(unsetUnit);
+    expect(wrapper()).toBe(unsetWrapper);
+    expect(unsetPlist + unsetUnit + unsetWrapper).not.toContain('NANOCLAW_INSTALL_ID');
+  });
+
+  it('refuses an invalid id', () => {
+    process.env.NANOCLAW_INSTALL_ID = 'UPPER';
+    expect(plist).toThrow(/NANOCLAW_INSTALL_ID/);
+    expect(unit).toThrow(/NANOCLAW_INSTALL_ID/);
+    expect(wrapper).toThrow(/NANOCLAW_INSTALL_ID/);
   });
 });
 

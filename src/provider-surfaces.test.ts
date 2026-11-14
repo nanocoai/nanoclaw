@@ -1,3 +1,4 @@
+import { execFileSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -214,6 +215,68 @@ describe('initGroupFilesystem agent surfaces', () => {
     );
   });
 
+  async function makeGroupLocal(id: string) {
+    const ag = group(id, `${id}-group`);
+    await createAgentGroup(ag);
+    return ag;
+  }
+
+  describe('declared settings.json planted by the container', () => {
+    // `.claude-shared` is the container's read-write mount: any name under it
+    // may be a symlink or FIFO by the time the host prepares the next spawn.
+    const hostile = JSON.stringify({ autoMemoryEnabled: true, env: {}, hooks: {} }, null, 2) + '\n';
+
+    it('refuses a symlink to a host file: nothing read, nothing written through it', async () => {
+      const ag = await makeGroupLocal('ag-settings-link');
+      await initGroupFilesystem(ag, {});
+      const claudeDir = path.join(DATA_DIR, 'v2-sessions', ag.id, '.claude-shared');
+      const settingsFile = path.join(claudeDir, 'settings.json');
+      const hostFile = path.join(TEST_ROOT, 'host-settings.json');
+      fs.writeFileSync(hostFile, hostile);
+      fs.rmSync(settingsFile);
+      fs.symlinkSync(hostFile, settingsFile);
+
+      await initGroupFilesystem(ag, {}); // next spawn
+
+      expect(fs.readFileSync(hostFile, 'utf-8')).toBe(hostile);
+      expect(fs.lstatSync(settingsFile).isSymbolicLink()).toBe(true);
+      expect(log.warn).toHaveBeenCalledWith(
+        expect.stringContaining('Claude settings'),
+        expect.objectContaining({ settingsFile }),
+      );
+    });
+
+    it('does not create a host file through a dangling symlink', async () => {
+      const ag = await makeGroupLocal('ag-settings-dangling');
+      await initGroupFilesystem(ag, {});
+      const settingsFile = path.join(DATA_DIR, 'v2-sessions', ag.id, '.claude-shared', 'settings.json');
+      const hostFile = path.join(TEST_ROOT, 'never-created.json');
+      fs.rmSync(settingsFile);
+      fs.symlinkSync(hostFile, settingsFile);
+
+      await initGroupFilesystem(ag, {});
+
+      expect(fs.existsSync(hostFile)).toBe(false);
+      expect(fs.lstatSync(settingsFile).isSymbolicLink()).toBe(true);
+    });
+
+    it('refuses a FIFO without blocking the spawn', async () => {
+      const ag = await makeGroupLocal('ag-settings-fifo');
+      await initGroupFilesystem(ag, {});
+      const settingsFile = path.join(DATA_DIR, 'v2-sessions', ag.id, '.claude-shared', 'settings.json');
+      fs.rmSync(settingsFile);
+      execFileSync('mkfifo', [settingsFile]);
+
+      await initGroupFilesystem(ag, {});
+
+      expect(fs.lstatSync(settingsFile).isFIFO()).toBe(true);
+      expect(log.warn).toHaveBeenCalledWith(
+        expect.stringContaining('Claude settings'),
+        expect.objectContaining({ settingsFile }),
+      );
+    });
+  });
+
   it('stages the same provider-neutral instructions for a provider with its own surfaces', async () => {
     const ag = group('ag-surfy', 'surfy-group');
     await createAgentGroup(ag);
@@ -336,7 +399,7 @@ describe('buildMounts agent surfaces', () => {
     }
   });
 
-  it('follows a symlinked .claude-shared/skills directory exactly as the legacy path does', async () => {
+  it('refuses a symlinked .claude-shared/skills directory exactly as the legacy path does', async () => {
     const declared = group('ag-declared-symlink', 'declared-symlink');
     const legacy = group('ag-legacy-symlink', 'legacy-symlink');
     await createAgentGroup(declared);
@@ -346,7 +409,8 @@ describe('buildMounts agent surfaces', () => {
     await initGroupFilesystem(declared, { provider: 'claude' });
     await initGroupFilesystem(legacy, { provider: 'not-registered' });
 
-    // Operator relocated the skills directory and left a symlink in its place.
+    // A symlink in place of the skills directory. The container can write
+    // there, so the host cannot tell an operator's link from an agent's.
     const relocated = new Map<string, string>();
     for (const ag of [declared, legacy]) {
       const skills = path.join(DATA_DIR, 'v2-sessions', ag.id, '.claude-shared', 'skills');
@@ -375,11 +439,13 @@ describe('buildMounts agent surfaces', () => {
     for (const ag of [declared, legacy]) {
       const skills = path.join(DATA_DIR, 'v2-sessions', ag.id, '.claude-shared', 'skills');
       expect(fs.lstatSync(skills).isSymbolicLink()).toBe(true);
-      // The link was written through the symlink into the relocated directory.
-      const link = path.join(relocated.get(ag.id)!, 'welcome');
-      expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
-      expect(fs.readlinkSync(link)).toBe('/app/skills/welcome');
+      // Nothing was written through the symlink.
+      expect(fs.readdirSync(relocated.get(ag.id)!)).toEqual([]);
     }
+    expect(log.warn).toHaveBeenCalledWith(
+      'Shared skills not synced: unsafe skills directory',
+      expect.objectContaining({ path: expect.stringContaining('skills') }),
+    );
   });
 
   it('materializes the Claude surface access contract', async () => {
@@ -606,6 +672,84 @@ describe('derived provider spawn surfaces', () => {
     });
 
     expect(log.warn).toHaveBeenCalledTimes(expectedWarning ? 1 : 0);
+    vi.mocked(log.warn).mockClear();
+  });
+
+  it('leaves a host directory alone when a state-volume skills dir is a symlink to it', async () => {
+    const hostDir = path.join(TEST_ROOT, 'host-outside-skills');
+    fs.mkdirSync(hostDir, { recursive: true });
+    fs.symlinkSync('/somewhere', path.join(hostDir, 'stale-link'));
+    const volumeDir = path.join(DATA_DIR, 'v2-sessions', 'linked-skills', '.linked-state');
+    fs.mkdirSync(volumeDir, { recursive: true });
+    fs.symlinkSync(hostDir, path.join(volumeDir, 'skills'));
+    const contract: ProviderHostContract = {
+      ...backingContract({
+        id: 'skills',
+        location: { kind: 'state-volume', volumeId: 'state', subdirectory: '' },
+        skillsSubdirectory: 'skills',
+        conflictDiagnostics: 'warn',
+        templateCopies: 'in-place',
+      }),
+      stateVolumes: [
+        {
+          id: 'state',
+          directory: '.linked-state',
+          containerPath: '/state',
+          scope: 'group',
+          mode: 'rw',
+          mountClass: 'group-state',
+        },
+      ],
+    };
+
+    await realizeProviderSpawnSurfaces('linked', contract, 'linked-skills', GROUPS_DIR, DATA_DIR, ['welcome'], {
+      legacyOverlay: async () => ({}),
+      composeProjectDocument: async () => {},
+    });
+
+    expect(fs.readdirSync(hostDir)).toEqual(['stale-link']);
+    vi.mocked(log.warn).mockClear();
+  });
+
+  it('refuses a session-scoped state volume whose own directory is a symlink', async () => {
+    const hostDir = path.join(TEST_ROOT, 'host-outside-session');
+    fs.mkdirSync(hostDir, { recursive: true });
+    fs.symlinkSync('/somewhere', path.join(hostDir, 'stale-link'));
+    // The session volume directory itself is swapped for a symlink — the case
+    // where the anchor must be the session dir, not the volume directory.
+    const sessionDirectory = path.join(DATA_DIR, 'v2-sessions', 'session-linked-vol');
+    fs.mkdirSync(sessionDirectory, { recursive: true });
+    fs.symlinkSync(hostDir, path.join(sessionDirectory, '.sess-state'));
+    const contract: ProviderHostContract = {
+      ...backingContract({
+        id: 'skills',
+        location: { kind: 'state-volume', volumeId: 'state', subdirectory: '' },
+        skillsSubdirectory: 'skills',
+        conflictDiagnostics: 'warn',
+        templateCopies: 'in-place',
+      }),
+      stateVolumes: [
+        {
+          id: 'state',
+          directory: '.sess-state',
+          containerPath: '/state',
+          scope: 'session',
+          mode: 'rw',
+          mountClass: 'group-state',
+        },
+      ],
+    };
+
+    await realizeProviderSpawnSurfaces('sesslinked', contract, 'g', GROUPS_DIR, sessionDirectory, ['welcome'], {
+      legacyOverlay: async () => ({}),
+      composeProjectDocument: async () => {},
+    });
+
+    expect(fs.readdirSync(hostDir)).toEqual(['stale-link']);
+    expect(log.warn).toHaveBeenCalledWith(
+      'Shared skills not synced: unsafe skills directory',
+      expect.objectContaining({ path: expect.stringContaining('skills') }),
+    );
     vi.mocked(log.warn).mockClear();
   });
 

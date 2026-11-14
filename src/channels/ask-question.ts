@@ -50,4 +50,32 @@ export interface AskQuestionPayload {
   title: string;
   question: string;
   options: NormalizedOption[];
+  /** Set by host delivery on questions an agent asks; their markup is the agent's own and is not escaped. */
+  fromAgent?: boolean;
+}
+
+/**
+ * Longest title plus question an approval request may carry, so it shows in
+ * full even where a platform caps a whole card's text, with room for markup
+ * escaping to double it. A channel with a lower cap declares its own.
+ */
+export const MAX_CARD_QUESTION_LENGTH = 2000;
+
+/** A card refused because the platform can't show it in full; the message says why. */
+export class CardTooLongError extends Error {
+  constructor(reason: string) {
+    super(reason);
+    this.name = 'CardTooLongError';
+  }
+}
+
+/** Why a card with this title and question can't be sent, or undefined when it fits. */
+export function cardQuestionTooLong(
+  title: string,
+  question: string,
+  max = MAX_CARD_QUESTION_LENGTH,
+): string | undefined {
+  const length = title.length + question.length;
+  if (length <= max) return undefined;
+  return `the request is too long to show in full on a card (${length} characters, limit ${max})`;
 }

@@ -14,6 +14,7 @@ vi.mock('../log.js', () => ({
 
 import {
   IRON_PROXY_IDENTITY_METADATA,
+  IRON_PROXY_PAYLOAD_METADATA,
   IronProxyApprovalBridge,
   type IronApprovalIdentity,
 } from './iron-proxy-approval.js';
@@ -141,7 +142,7 @@ describe('Iron Proxy approval transport', () => {
     await vi.waitFor(() => expect(held.size).toBe(1));
     const decision = [...held.values()][0];
     expect(decision.request.trigger).toBe('default');
-    expect(decision.request.destination).toEqual({ host, method: 'POST' });
+    expect(decision.request.destination).toEqual({ host, method: 'POST', sendsPayload: true });
     decision.resolve('approve');
     expect(await pending.result).toMatchObject({ action: 1 });
   });
@@ -173,7 +174,11 @@ describe('Iron Proxy approval transport', () => {
     await vi.waitFor(() => expect(held.size).toBe(1));
     const decision = [...held.values()][0];
     expect(decision.request.trigger).toBe('default');
-    expect(decision.request.destination).toEqual({ host: 'host.docker.internal:8000', method: 'POST' });
+    expect(decision.request.destination).toEqual({
+      host: 'host.docker.internal:8000',
+      method: 'POST',
+      sendsPayload: true,
+    });
     decision.resolve('approve');
     expect(await pending.result).toMatchObject({ action: 1 });
   });
@@ -308,6 +313,17 @@ it('carries selected proxy display fields through the approval contract', async 
   expect(await pending.result).toMatchObject({ action: 2 });
 });
 
+it('marks a request path it shortens for display', async () => {
+  const pending = transformCall({
+    request: { method: 'DELETE', url: `/${'a'.repeat(239)}/delete-production`, host: 'api.github.com' },
+  });
+  await vi.waitFor(() => expect(held.size).toBe(1));
+  const decision = [...held.values()][0];
+  expect(decision.request.summary?.resource).toMatch(/^DELETE api\.github\.com\/a+ … \d+ more characters not shown$/);
+  decision.resolve('deny');
+  expect(await pending.result).toMatchObject({ action: 2 });
+});
+
 it('rejects malformed proxy summary metadata', async () => {
   const md = metadata();
   md.set('x-iron-approval-summary', Buffer.from('{"action":"POST request","details":"invalid"}').toString('base64'));
@@ -334,6 +350,35 @@ it.each(compatibilityFixtures)('preserves OneCLI approval content: $name', async
     resource: `${fixture.request.method} ${fixture.request.host}${fixture.request.path}`,
     reason: 'The gateway policy requires human approval for this request.',
   });
+  decision.resolve('deny');
+  expect(await pending.result).toMatchObject({ action: 2 });
+});
+
+it.each([
+  [['none'], false],
+  [['present'], true],
+  [['none', 'none'], true],
+  [['NONE'], true],
+  [[], true],
+])('passes on only an exact payload-free attestation from the front: %j', async (values, expected) => {
+  const md = metadata();
+  for (const value of values) md.add(IRON_PROXY_PAYLOAD_METADATA, value);
+  const pending = transformCall({ request: { method: 'GET', host: 'docs.example.test', url: '/guide' } }, md);
+  await vi.waitFor(() => expect(held.size).toBe(1));
+  const decision = [...held.values()][0];
+  expect(decision.request.destination).toEqual({ host: 'docs.example.test', method: 'GET', sendsPayload: expected });
+  decision.resolve('deny');
+  expect(await pending.result).toMatchObject({ action: 2 });
+});
+
+it('hands core the method exactly as the front received it', async () => {
+  const md = metadata();
+  md.set(IRON_PROXY_PAYLOAD_METADATA, 'none');
+  const pending = transformCall({ request: { method: 'get', host: 'docs.example.test', url: '/write' } }, md);
+  await vi.waitFor(() => expect(held.size).toBe(1));
+  const decision = [...held.values()][0];
+  expect(decision.request.destination).toEqual({ host: 'docs.example.test', method: 'get', sendsPayload: false });
+  expect(decision.request.audit).toEqual({ method: 'GET', host: 'docs.example.test', path: '/write' });
   decision.resolve('deny');
   expect(await pending.result).toMatchObject({ action: 2 });
 });

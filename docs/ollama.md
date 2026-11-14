@@ -151,6 +151,15 @@ Three files need to support this feature. See `/add-ollama-provider` for the exa
 
 For personal automation on capable hardware, the tradeoff favors local. For complex multi-step tasks requiring large context or high reliability, Claude is still ahead.
 
+## If Containers Get Killed Mid-Turn
+
+The host sweep kills a container when either of two timers runs out. The host log says which one:
+
+- `NANOCLAW_ABSOLUTE_CEILING_MS` (default 30 minutes, log reason `absolute-ceiling`): no activity at all for this long. Streamed output counts as activity, so this is usually the one a slow model hits, for example while it loads or reads a long prompt.
+- `NANOCLAW_CLAIM_STUCK_MS` (default 60 seconds, log reason `claim-stuck`): the container picked up a message and has shown no activity since. The agent's first event usually arrives before the model call, so this mostly catches an agent stuck while starting up.
+
+Raising one does not raise the other. Set the one you hit, or both, in `.env` to a larger number of milliseconds, then restart the host. Out-of-range or unparseable values are logged and ignored. If the kill comes before the agent's first reply, the messages it started with are usually retried, waiting at least 5, 10, 20, 40 and 80 seconds between tries, then marked failed. Messages sent while it was already working usually are not.
+
 ## Reverting to Claude
 
 Remove the `env` and `blockedHosts` keys from `groups/<folder>/container.json`, remove `"model"` from the shared settings file, and restart the service. No rebuild needed.

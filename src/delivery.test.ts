@@ -26,7 +26,14 @@ vi.mock('./config.js', async () => {
 
 const TEST_DIR = '/tmp/nanoclaw-test-delivery';
 
-import { initTestDb, closeDb, runMigrations, createAgentGroup, createMessagingGroup } from './db/index.js';
+import {
+  initTestDb,
+  closeDb,
+  runMigrations,
+  createAgentGroup,
+  createMessagingGroup,
+  getPendingQuestion,
+} from './db/index.js';
 import { getDeliveredIds } from './mailbox/sqlite/session-db.js';
 import { inboundDbPath, outboundDbPath } from './mailbox/sqlite/paths.js';
 import { resolveSession, resolveTaskSession, withMailboxSession } from './session-manager.js';
@@ -284,8 +291,7 @@ describe('deliverSessionMessages — retry and permanent failure', () => {
     // The row must end as status='failed', never 'delivered'
     const deliveryDb = new Database(inboundDbPath('ag-1', session.id), { readonly: true });
     const row = deliveryDb.prepare('SELECT * FROM delivered WHERE message_out_id = ?').get('out-offline') as
-      | { status: string; platform_message_id: string | null }
-      | undefined;
+      { status: string; platform_message_id: string | null } | undefined;
     deliveryDb.close();
     expect(row).toBeDefined();
     expect(row!.status).toBe('failed');
@@ -737,5 +743,34 @@ describe('deliverSessionMessages — post-delivery hooks', () => {
     const delivered = getDeliveredIds(openInboundDb('ag-1', session.id));
     expect(delivered.has('th-1')).toBe(true);
     expect(delivered.has('th-2')).toBe(true);
+  });
+});
+
+describe('deliverSessionMessages — agent questions', () => {
+  it('marks an ask_question row as fromAgent and leaves other rows unchanged', async () => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    const question = { type: 'ask_question', questionId: 'q-1', title: 'Pick', question: 'Which?', options: ['A'] };
+    const db = new Database(outboundDbPath('ag-1', session.id));
+    db.prepare(
+      `INSERT INTO messages_out (id, timestamp, kind, platform_id, channel_type, content)
+       VALUES ('out-q', datetime('now'), 'chat-sdk', 'telegram:123', 'telegram', ?)`,
+    ).run(JSON.stringify(question));
+    db.close();
+    insertOutbound('ag-1', session.id, 'out-text');
+
+    const delivered: unknown[] = [];
+    setDeliveryAdapter({
+      async deliver(_ct, _pid, _tid, _kind, content) {
+        delivered.push(JSON.parse(content));
+        return 'plat-q';
+      },
+    });
+
+    await deliverSessionMessages(session);
+    expect(delivered).toContainEqual({ ...question, fromAgent: true });
+    expect(delivered).toContainEqual({ text: 'hello' });
+    // The body is stored too, so the answered card can keep it.
+    expect((await getPendingQuestion('q-1'))?.question).toBe('Which?');
   });
 });

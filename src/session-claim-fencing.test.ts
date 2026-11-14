@@ -24,10 +24,20 @@ import {
   honorPendingStopIntents,
   isContainerRunning,
   killContainer,
+  retryPendingAdoptions,
   wakeContainer,
 } from './container-runner.js';
 import { getSessionClaim, setStopIntent, tryClaimSession } from './db/coordination.js';
-import { initTestDb, closeDb, runMigrations, createAgentGroup, createSession, getSession } from './db/index.js';
+import {
+  initTestDb,
+  closeDb,
+  runMigrations,
+  createAgentGroup,
+  createSession,
+  deleteSession,
+  getSession,
+  updateSession,
+} from './db/index.js';
 import { resetGatewayProvider } from './gateway-providers/index.js';
 import type { Session } from './types.js';
 
@@ -301,6 +311,143 @@ describe('fail-closed adoption', () => {
     expect(wake).not.toHaveBeenCalled();
     // The intent row survives for the pass that runs after fenced adoption.
     expect((await getSessionClaim('sess-1'))?.stop_intent).toBe('respawn_after_stop');
+  });
+
+  async function deferAdoption(): Promise<FakeHandleControls> {
+    const coordination = await import('./db/coordination.js');
+    vi.spyOn(coordination, 'tryClaimSession').mockRejectedValueOnce(new Error('store down'));
+    const controls = fakeHandle('sess-1', 'container-alive');
+    snapshots.push({ handle: controls.handle, phase: 'running' } as SupervisedSnapshot);
+    await adoptRunningSessions();
+    expect(controls.stopped).toHaveLength(0);
+    return controls;
+  }
+
+  // The deferred retry follows startup adoption's rules once the store answers.
+  it('the sweep retry adopts a deferred container whose session is still active', async () => {
+    const controls = await deferAdoption();
+
+    await retryPendingAdoptions();
+
+    expect(isContainerRunning('sess-1')).toBe(true);
+    expect(controls.stopped).toHaveLength(0);
+  });
+
+  it('the sweep retry stops a deferred container whose session was closed or deleted', async () => {
+    const closed = await deferAdoption();
+    await updateSession('sess-1', { status: 'closed' });
+    await retryPendingAdoptions();
+    expect(closed.stopped).toEqual(['orphan-at-startup']);
+
+    snapshots.length = 0;
+    await updateSession('sess-1', { status: 'active' });
+    const deleted = await deferAdoption();
+    await deleteSession('sess-1');
+    await retryPendingAdoptions();
+    expect(deleted.stopped).toEqual(['orphan-at-startup']);
+    expect(isContainerRunning('sess-1')).toBe(false);
+  });
+
+  it('a wake from a stale snapshot does not respawn a session closed before its retry', async () => {
+    const controls = await deferAdoption();
+    const stale = (await getSession('sess-1'))!;
+    await updateSession('sess-1', { status: 'closed' });
+    const groups = await import('./db/agent-groups.js');
+    const groupLookups = vi.spyOn(groups, 'getAgentGroup');
+
+    await wakeContainer(stale);
+
+    expect(controls.stopped).toEqual(['orphan-at-startup']);
+    expect(groupLookups).not.toHaveBeenCalled();
+    groupLookups.mockRestore();
+  });
+
+  it('a wake waiting on the sweep retry does not restart a session the retry found closed', async () => {
+    const controls = await deferAdoption();
+    const stale = (await getSession('sess-1'))!;
+    await updateSession('sess-1', { status: 'closed' });
+    // A spawn would read the group first; end it there so nothing is written.
+    const groups = await import('./db/agent-groups.js');
+    const groupLookups = vi.spyOn(groups, 'getAgentGroup').mockResolvedValue(undefined);
+
+    try {
+      const sweep = retryPendingAdoptions();
+      const woke = wakeContainer(stale);
+      await sweep;
+
+      expect(await woke).toBe(false);
+      expect(controls.stopped).toEqual(['orphan-at-startup']);
+      expect(groupLookups).not.toHaveBeenCalled();
+    } finally {
+      groupLookups.mockRestore();
+    }
+  });
+
+  it('a deferred container whose stop failed is stopped by a later retry, never adopted', async () => {
+    const controls = await deferAdoption();
+    const stop = controls.handle.stop.bind(controls.handle);
+    controls.handle.stop = vi.fn(async () => Promise.reject(new Error('daemon refused')));
+    resetGatewayProvider({
+      kind: 'fixture',
+      agentSkills: [],
+      sessions: { ensure: async () => Promise.reject(new Error('gateway down')) },
+      approvals: { subscribe: async () => {} },
+    });
+    await retryPendingAdoptions();
+    // While the stop keeps failing, a wake spawns nothing beside it.
+    expect(await wakeContainer((await getSession('sess-1'))!)).toBe(false);
+    controls.handle.stop = stop;
+    resetGatewayProvider({
+      kind: 'fixture',
+      agentSkills: [],
+      sessions: {
+        ensure: async () => ({ contribution: { networkAccess: { endpoint: 'localhost', target: { kind: 'host' } } } }),
+      },
+      approvals: { subscribe: async () => {} },
+    });
+
+    await retryPendingAdoptions();
+
+    expect(controls.stopped).toEqual(['gateway-adoption-failed']);
+    expect(isContainerRunning('sess-1')).toBe(false);
+  });
+
+  it('a retried stop leaves the container alone once a live peer holds the claim', async () => {
+    const controls = await deferAdoption();
+    const stop = controls.handle.stop.bind(controls.handle);
+    controls.handle.stop = vi.fn(async () => Promise.reject(new Error('daemon refused')));
+    resetGatewayProvider({
+      kind: 'fixture',
+      agentSkills: [],
+      sessions: { ensure: async () => Promise.reject(new Error('gateway down')) },
+      approvals: { subscribe: async () => {} },
+    });
+    await retryPendingAdoptions();
+    controls.handle.stop = stop;
+    const coordination = await import('./db/coordination.js');
+    const casSpy = vi.spyOn(coordination, 'tryClaimSession').mockResolvedValueOnce(null);
+
+    await retryPendingAdoptions();
+    await retryPendingAdoptions();
+    casSpy.mockRestore();
+
+    expect(controls.stopped).toHaveLength(0);
+  });
+
+  it('the sweep retry stops a deferred container the gateway cannot adopt', async () => {
+    const controls = await deferAdoption();
+    resetGatewayProvider({
+      kind: 'fixture',
+      agentSkills: [],
+      sessions: { ensure: async () => Promise.reject(new Error('gateway down')) },
+      approvals: { subscribe: async () => {} },
+    });
+
+    await retryPendingAdoptions();
+
+    expect(controls.stopped).toEqual(['gateway-adoption-failed']);
+    expect(isContainerRunning('sess-1')).toBe(false);
+    expect((await getSessionClaim('sess-1'))?.claimed_by).toBeNull();
   });
 });
 
