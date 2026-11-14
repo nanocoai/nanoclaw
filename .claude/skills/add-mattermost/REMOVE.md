@@ -10,7 +10,7 @@ it is already absent.
 ## 2. Remove the channel files
 
 ```bash
-rm -f src/channels/mattermost.ts src/channels/mattermost-registration.test.ts
+rm -f src/channels/mattermost.ts src/channels/mattermost.test.ts src/channels/mattermost-registration.test.ts
 rm -rf src/channels/mattermost-adapter
 ```
 
