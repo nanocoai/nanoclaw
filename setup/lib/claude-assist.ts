@@ -58,12 +58,22 @@ export const STEP_FILES: Record<string, string[]> = {
   channel: ['setup/auto.ts'],
   verify: ['setup/verify.ts'],
   // Channel-specific sub-steps:
-  'telegram-install': ['.claude/skills/add-telegram/SKILL.md', 'scripts/skill-apply.ts', 'setup/channels/telegram.ts'],
-  'telegram-validate': ['setup/channels/telegram.ts'],
-  'pair-telegram': ['setup/pair-telegram.ts', 'setup/channels/telegram.ts'],
-  'discord-install': ['.claude/skills/add-discord/SKILL.md', 'scripts/skill-apply.ts', 'setup/channels/discord.ts'],
-  'slack-install': ['.claude/skills/add-slack/SKILL.md', 'scripts/skill-apply.ts', 'setup/channels/slack.ts'],
-  'slack-validate': ['setup/channels/slack.ts'],
+  'telegram-install': [
+    '.claude/skills/add-telegram/SKILL.md',
+    'scripts/skill-apply.ts',
+    'setup/channels/run-channel-skill.ts',
+  ],
+  'pair-telegram': ['setup/pair-telegram.ts', '.claude/skills/add-telegram/SKILL.md'],
+  'discord-install': [
+    '.claude/skills/add-discord/SKILL.md',
+    'scripts/skill-apply.ts',
+    'setup/channels/run-channel-skill.ts',
+  ],
+  'slack-install': [
+    '.claude/skills/add-slack/SKILL.md',
+    'scripts/skill-apply.ts',
+    'setup/channels/run-channel-skill.ts',
+  ],
   'imessage-install': ['.claude/skills/add-imessage/SKILL.md', 'scripts/skill-apply.ts', 'scripts/photon-setup.ts'],
   imessage: ['setup/channels/run-channel-skill.ts', 'scripts/photon-setup.ts'],
   'teams-install': [
@@ -72,7 +82,7 @@ export const STEP_FILES: Record<string, string[]> = {
     'setup/channels/run-channel-skill.ts',
   ],
   'teams-manifest': ['setup/lib/teams-manifest.ts', 'setup/channels/teams-manifest-build.ts'],
-  'init-first-agent': ['scripts/init-first-agent.ts', 'setup/channels/telegram.ts', 'setup/channels/discord.ts'],
+  'init-first-agent': ['scripts/init-first-agent.ts'],
 };
 
 export const BIG_PICTURE_FILES = ['README.md', 'setup/auto.ts'];
