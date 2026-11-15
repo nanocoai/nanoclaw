@@ -35,6 +35,7 @@ vi.mock('../../config.js', async () => {
 
 const TEST_DIR = '/tmp/nanoclaw-test-cli-groups';
 
+import { GROUPS_DIR } from '../../config.js';
 import { initTestDb, closeDb, runMigrations, createAgentGroup, getDb } from '../../db/index.js';
 import { createSession } from '../../db/sessions.js';
 import { inboundDbPath } from '../../mailbox/sqlite/paths.js';
@@ -442,18 +443,16 @@ describe('groups config (host-only)', () => {
     expect(JSON.parse((await getContainerConfig(GID))!.additional_mounts)).toEqual([]);
   });
 
-  it('refuses to add a mount of a path NanoClaw mounts itself, naming why', async () => {
-    // Stored, it would pass the old mount check and then make the driver refuse
-    // every start of the group, silently.
+  // Stored, these would make the driver refuse every start of the group.
+  it.each([
+    ['the runner source', () => path.join(process.cwd(), 'container', 'agent-runner', 'src')],
+    ["the group's stamped plugins", () => path.join(GROUPS_DIR, 'p', 'plugins')],
+  ])('refuses to add a mount of %s, naming why', async (_label, host) => {
     const GID = 'ag-mount-protected';
     await createAgentGroup({ id: GID, name: 'p', folder: 'p', agent_provider: null, created_at: now() });
     await ensureContainerConfig(GID);
     const resp = await dispatch(
-      {
-        id: 'r-protected',
-        command: 'groups-config-add-mount',
-        args: { id: GID, host: path.join(process.cwd(), 'container', 'agent-runner', 'src'), container: 'runner' },
-      },
+      { id: 'r-protected', command: 'groups-config-add-mount', args: { id: GID, host: host(), container: 'x' } },
       { caller: 'host' },
     );
     expect(resp.ok).toBe(false);

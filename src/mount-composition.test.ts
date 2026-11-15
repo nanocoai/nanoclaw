@@ -17,7 +17,6 @@
  * that produced them could not detect a wrong one.
  */
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
@@ -30,17 +29,6 @@ vi.mock('./project-doc-compose.js', async (importOriginal) => ({
 vi.mock('./log.js', () => ({
   log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn() },
 }));
-// The operator's mount allowlist lives outside the repo; point it at a temp file.
-const allowlist = vi.hoisted(() => ({ path: '' }));
-vi.mock('./config.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('./config.js')>();
-  return {
-    ...actual,
-    get MOUNT_ALLOWLIST_PATH() {
-      return allowlist.path || actual.MOUNT_ALLOWLIST_PATH;
-    },
-  };
-});
 
 import { DATA_DIR, GROUPS_DIR, INSTALL_SLUG } from './config.js';
 import type { ContainerConfig } from './container-config.js';
@@ -224,44 +212,5 @@ describe('buildMounts against the policy the drivers enforce', () => {
       groupScope: GROUP_ID,
     });
     expect(() => validateSpec(spec, mountPolicy())).toThrow(/denied-by-policy/);
-  });
-});
-
-describe('an operator mount of a path NanoClaw mounts itself', () => {
-  let allowlistDir: string;
-
-  beforeAll(() => {
-    allowlistDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mount-composition-allowlist-'));
-    allowlist.path = path.join(allowlistDir, 'mount-allowlist.json');
-    // An operator who allowlists the install's container/ tree.
-    fs.writeFileSync(
-      allowlist.path,
-      JSON.stringify({
-        allowedRoots: [{ path: path.join(process.cwd(), 'container') }, { path: GROUPS_DIR }],
-        blockedPatterns: [],
-      }),
-    );
-  });
-
-  afterAll(() => {
-    allowlist.path = '';
-    fs.rmSync(allowlistDir, { recursive: true, force: true });
-  });
-
-  it.each([
-    ['container/agent-runner/src', 'runner-src'],
-    ['container/skills', 'skills'],
-    [`groups/${FOLDER}/plugins`, 'plugins'],
-  ])('drops %s at the mount check, so the spec the driver sees still validates', async (rel, containerPath) => {
-    // The live failure: the allowlist accepted it, composition classed it
-    // allowlisted-extra, and the driver refused every start with
-    // `must be classed install-surface` while the user heard nothing.
-    const config = {
-      ...containerConfig,
-      additionalMounts: [{ hostPath: path.join(process.cwd(), rel), containerPath }],
-    } as ContainerConfig;
-    const mounts = await buildMounts(agentGroup, session, config, 'claude', {});
-    expect(mounts.map((m) => m.containerPath)).not.toContain(`/workspace/extra/${containerPath}`);
-    expect(() => validateSpec(specFrom(mounts), mountPolicy())).not.toThrow();
   });
 });

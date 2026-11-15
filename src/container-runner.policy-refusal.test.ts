@@ -2,7 +2,8 @@
  * A start the driver refuses on policy fails the same way on every retry, so
  * it must not read like a transient blip. The live case: a bad mount made the
  * driver deny every start, and the only trace was a once-a-minute warning
- * promising that host-sweep would retry.
+ * promising that host-sweep would retry. The warning stays as it is: installed
+ * skills anchor on that exact line.
  */
 import fs from 'fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -78,17 +79,17 @@ afterEach(async () => {
 const RETRY_WARNING = 'wakeContainer failed — host-sweep will retry';
 
 describe('wakeContainer when the driver refuses the start', () => {
-  it('logs a policy refusal as an error naming the cause, not a retry warning', async () => {
+  it('adds an error naming the cause of a policy refusal, after the unchanged retry warning', async () => {
     const detail = 'mount /install/container/agent-runner/src must be classed install-surface, not allowlisted-extra';
     prepare.mockRejectedValue(deniedByPolicy(detail));
 
     expect(await wakeContainer(session())).toBe(false);
 
+    expect(log.warn).toHaveBeenCalledWith(RETRY_WARNING, expect.objectContaining({ sessionId: 'sess-1' }));
     expect(log.error).toHaveBeenCalledWith(
       expect.stringMatching(/refused/i),
       expect.objectContaining({ sessionId: 'sess-1', kind: 'denied-by-policy', detail }),
     );
-    expect(log.warn).not.toHaveBeenCalledWith(RETRY_WARNING, expect.anything());
   });
 
   it('keeps the retry warning for a failure a retry can clear', async () => {

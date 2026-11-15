@@ -11,7 +11,7 @@ import {
 import { buildAgentGroupImage, killContainer } from '../../container-runner.js';
 import { requestWake } from '../../request-wake.js';
 import { restartAgentGroupContainers } from '../../container-restart.js';
-import { createAgentGroup, getAgentGroupByFolder } from '../../db/agent-groups.js';
+import { createAgentGroup, getAgentGroup, getAgentGroupByFolder } from '../../db/agent-groups.js';
 import { getDb, hasTable } from '../../db/connection.js';
 import { getSession } from '../../db/sessions.js';
 import { writeSessionMessage } from '../../session-manager.js';
@@ -20,10 +20,11 @@ import {
   updateContainerConfigScalars,
   updateContainerConfigJson,
 } from '../../db/container-configs.js';
-import { getSessionDriver } from '../../drivers/index.js';
+import { getSessionDriver, mountPolicy } from '../../drivers/index.js';
+import { GROUP_FOLDER_LABEL, requiredMountClass } from '../../drivers/types.js';
 import { assertValidGroupFolder, groupFolderExistsOnDisk } from '../../group-folder.js';
 import { initGroupFilesystem } from '../../group-init.js';
-import { protectedMountReason } from '../../modules/mount-security/index.js';
+import { resolveMountHostPath } from '../../modules/mount-security/index.js';
 import { getProviderHostContract } from '../../provider-contracts/registry.js';
 import { resolveProviderName } from '../../providers/provider-name.js';
 import { createAgentFromTemplate } from '../../templates/create-agent.js';
@@ -634,12 +635,18 @@ registerResource({
         const containerPath = (args.container ?? args['container-path']) as string | undefined;
         if (!hostPath || !containerPath) throw new Error('Provide --host <host-path> and --container <container-path>');
 
-        // Stored, it would make the driver refuse every start of the group.
-        const protectedReason = protectedMountReason(hostPath);
-        if (protectedReason) throw new Error(protectedReason);
-
         const row = await getContainerConfig(id);
         if (!row) throw new Error(`No container config for group: ${id}`);
+
+        // Stored, a path the driver reserves would make it refuse every start of the group.
+        const group = await getAgentGroup(id);
+        const labels: Record<string, string> = group ? { [GROUP_FOLDER_LABEL]: group.folder } : {};
+        const reserved = requiredMountClass(resolveMountHostPath(hostPath), { labels }, mountPolicy());
+        if (reserved) {
+          throw new Error(
+            `${hostPath} is NanoClaw's own ${reserved} content; only NanoClaw mounts it. Mount a copy instead.`,
+          );
+        }
 
         const mount: AdditionalMountConfig = {
           hostPath,

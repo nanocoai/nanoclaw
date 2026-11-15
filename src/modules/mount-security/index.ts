@@ -10,8 +10,6 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { MOUNT_ALLOWLIST_PATH } from '../../config.js';
-import { mountPolicy } from '../../drivers/index.js';
-import { classRequiredByPath, type MountPolicy } from '../../drivers/types.js';
 import { log } from '../../log.js';
 
 export interface AdditionalMount {
@@ -219,6 +217,12 @@ function getRealPath(p: string): string | null {
   }
 }
 
+/** The path the mount check judges: expanded, and resolved when it exists. */
+export function resolveMountHostPath(hostPath: string): string {
+  const expanded = expandPath(hostPath);
+  return getRealPath(expanded) ?? expanded;
+}
+
 /**
  * Check if a path matches any blocked pattern.
  *
@@ -247,48 +251,6 @@ function matchesBlockedPattern(realPath: string, blockedPatterns: string[]): str
   }
 
   return null;
-}
-
-/**
- * Why a host path cannot be an additional mount, or null. The driver pins these
- * roots to their own class, and an additional mount is `allowlisted-extra`, so it
- * would refuse every start. Paths and roots are matched both as written and
- * resolved, since either side may be spelled through a symlink.
- */
-export function protectedMountReason(hostPath: string, policy: MountPolicy = mountPolicy()): string | null {
-  const resolved: MountPolicy = {
-    ...policy,
-    groupsRoot: resolveExisting(policy.groupsRoot),
-    surfaceRoots: policy.surfaceRoots.map(resolveExisting),
-    materialsRoot: resolveExisting(policy.materialsRoot),
-    gatewayTrustRoot: resolveExisting(policy.gatewayTrustRoot),
-  };
-  const expanded = expandPath(hostPath);
-  for (const target of new Set([expanded, resolveExisting(expanded)])) {
-    const required =
-      classRequiredByPath(target, policy) ??
-      classRequiredByPath(target, resolved) ??
-      ([policy, resolved].some((p) => underStampedPlugins(target, p.groupsRoot)) ? 'install-surface' : null);
-    if (required) return `"${hostPath}" is protected NanoClaw content (${required}) and cannot be an additional mount`;
-  }
-  return null;
-}
-
-/** Real path of `p`, or of its nearest existing ancestor with the rest appended. */
-function resolveExisting(p: string): string {
-  const real = getRealPath(p);
-  if (real !== null) return real;
-  const parent = path.dirname(p);
-  return parent === p ? p : path.join(resolveExisting(parent), path.basename(p));
-}
-
-/**
- * `groups/<folder>/plugins`, which the driver pins to install-surface per session
- * (`stampedPluginsRoot`). Any group's counts: it is code that group's agent executes.
- */
-function underStampedPlugins(target: string, groupsRoot: string): boolean {
-  const [folder, sub] = path.relative(groupsRoot, target).split(path.sep);
-  return Boolean(folder) && folder !== '..' && sub === 'plugins';
 }
 
 /**
@@ -353,7 +315,7 @@ export interface MountValidationResult {
  * Validate a single additional mount against the allowlist.
  * Returns validation result with reason.
  */
-export function validateMount(mount: AdditionalMount, policy?: MountPolicy): MountValidationResult {
+export function validateMount(mount: AdditionalMount): MountValidationResult {
   const allowlist = loadMountAllowlist();
 
   // If no allowlist, block all additional mounts
@@ -384,11 +346,6 @@ export function validateMount(mount: AdditionalMount, policy?: MountPolicy): Mou
       allowed: false,
       reason: `Host path does not exist: "${mount.hostPath}" (expanded: "${expandedPath}")`,
     };
-  }
-
-  const protectedReason = protectedMountReason(mount.hostPath, policy);
-  if (protectedReason !== null) {
-    return { allowed: false, reason: protectedReason };
   }
 
   // Check against blocked patterns
