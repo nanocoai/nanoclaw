@@ -10,6 +10,7 @@ import { channelDmLabel, initialChannelOptions, runInitialChannel } from './init
 
 const skill = readFileSync('.claude/skills/add-mattermost/SKILL.md', 'utf8');
 const serverSetup = readFileSync('.claude/skills/add-mattermost/SERVER_SETUP.md', 'utf8');
+const removeGuide = readFileSync('.claude/skills/add-mattermost/REMOVE.md', 'utf8');
 const fixtureReadme = readFileSync('setup/channels/fixtures/mattermost/README.md', 'utf8');
 const compose = readFileSync('setup/channels/fixtures/mattermost/compose.yml', 'utf8');
 const directives = parseDirectives(skill);
@@ -44,6 +45,42 @@ describe('Mattermost bot setup guidance', () => {
     expect(skill).toContain(
       'pnpm exec vitest run src/channels/mattermost.test.ts src/channels/mattermost-registration.test.ts src/channels/mattermost-adapter/adapter.test.ts src/channels/mattermost-adapter/websocket.test.ts',
     );
+  });
+
+  // `vitest run` skips a named file that is missing, so the run line alone
+  // can't catch a test dropped from the copy list.
+  it('copies the channel payload from the channels branch, factory test included', () => {
+    const copy = directives.find((directive) => directive.kind === 'copy');
+    expect(copy?.attrs['from-branch']).toBe('channels');
+    expect(copy?.body).toEqual([
+      'src/channels/mattermost.ts',
+      'src/channels/mattermost.test.ts',
+      'src/channels/mattermost-registration.test.ts',
+      'src/channels/mattermost-adapter/adapter.ts',
+      'src/channels/mattermost-adapter/adapter.test.ts',
+      'src/channels/mattermost-adapter/format.ts',
+      'src/channels/mattermost-adapter/index.ts',
+      'src/channels/mattermost-adapter/rest.ts',
+      'src/channels/mattermost-adapter/thread-id.ts',
+      'src/channels/mattermost-adapter/types.ts',
+      'src/channels/mattermost-adapter/websocket.ts',
+      'src/channels/mattermost-adapter/websocket.test.ts',
+    ]);
+  });
+
+  it('removes every file the skill copies', () => {
+    const copied = directives.find((directive) => directive.kind === 'copy')?.body ?? [];
+    // Only `rm -rf` removes a directory's files.
+    const removed = [...removeGuide.matchAll(/^rm (-r?f) (.+)$/gm)].flatMap(([, flags, paths]) =>
+      paths.split(/\s+/).map((path) => ({ path, recursive: flags === '-rf' })),
+    );
+    expect(copied.length).toBeGreaterThan(0);
+    for (const file of copied) {
+      expect(
+        removed.some(({ path, recursive }) => file === path || (recursive && file.startsWith(`${path}/`))),
+        `${file} is copied but REMOVE.md leaves it`,
+      ).toBe(true);
+    }
   });
 
   it('selects an existing server without offering NanoClaw-managed installation', () => {
