@@ -873,10 +873,11 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
     const isDirect = data?.channel_type === 'D' || this.channelTypes.get(post.channel_id) === 'D';
     const threadId = threadIdForPost(post, !isDirect);
     const message = this.toMessage(post, threadId);
-    // `data.mentions` names every member on DM and group-message posts, so a
-    // group message needs `@bot` in the text. Elsewhere it also lists the bot
-    // for `@channel`, `@all` and `@here`; then only `@bot` counts. Both are
-    // read outside code, as the server reads mentions.
+    // Mattermost puts the other participant in `data.mentions` on every DM
+    // post, so only non-DM channels can report an explicit @-mention. It also
+    // lists the bot for `@channel`, `@all` and `@here`; then only `@bot` counts.
+    // Both are read outside code, as the server reads mentions. In a group
+    // message it lists every member, so only `@bot` in the text counts.
     const mentionText = textOutsideCode(message.formatted);
     message.isMention =
       data?.channel_type === 'G'
@@ -1438,34 +1439,28 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
   }
 
   /**
-   * `@bot` in the text outside code, for posts that arrive without a `posted`
-   * frame (REST fetches, `parseMessage`). Frames are read in `handlePosted`
-   * instead. DM channels never count as mentions, matching `isExplicitMention`.
+   * `@bot` in the text, for posts that arrive without a `posted` frame (REST
+   * fetches, `parseMessage`). Frames carry the server's own `mentions` list,
+   * which is authoritative and is used instead when present. DM channels
+   * never count as mentions, matching `isExplicitMention`.
    */
   private detectTextMention(post: MattermostPost): boolean {
     if (this.channelTypes.get(post.channel_id) === 'D') {
       return false;
     }
-    return this.mentionsBotHandle(textOutsideCode(toAst(post.message ?? '')));
+    return this.mentionsBotHandle(post.message ?? '');
   }
 
   /**
    * `@<bot handle>` in the text. Trailing `.`, `-` or `_` is punctuation, as
    * for Mattermost, unless more handle follows (`@bot-dev` is someone else).
-   * Any Unicode letter or digit joins the word, as in Mattermost's parser, so
-   * `josé@bot` and `@boté` are not the bot.
    */
   private mentionsBotHandle(text: string): boolean {
     if (!this.userName) {
       return false;
     }
-    // Handles are ASCII, so match their letters in either case by hand: with
-    // `u`, the `i` flag folds look-alikes (`ſ` into `s`), and lower-casing the
-    // text turns `İ` into `i` plus a mark that reads as a word break.
-    const handle = [...this.userName.toLowerCase()]
-      .map((c) => (/[a-z]/.test(c) ? `[${c}${c.toUpperCase()}]` : c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
-      .join('');
-    return new RegExp(`(^|[^\\p{L}\\p{N}_@])@${handle}(?![\\p{L}\\p{N}]|[-._]+[\\p{L}\\p{N}])`, 'u').test(text);
+    const handle = this.userName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(^|[^\\w@])@${handle}(?![a-z0-9]|[-._]+[a-z0-9])`, 'i').test(text);
   }
 
   private toMessage(post: MattermostPost, threadId: string): Message<MattermostPost> {
