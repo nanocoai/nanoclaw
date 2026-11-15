@@ -11,6 +11,7 @@ import {
   getContainerState,
   getDeliveredIds,
   getDueOutboundMessages,
+  SQLITE_IN_CHUNK,
   getInboundSourceSessionId,
   getMessageForRetry,
   getMostRecentPeerSourceSessionId,
@@ -69,6 +70,29 @@ function sqliteTimestamp(value: string): string {
   const source = SQLITE_TIMESTAMP.test(value) ? `${value.replace(' ', 'T')}Z` : value;
   const milliseconds = Date.parse(source);
   return Number.isFinite(milliseconds) ? new Date(milliseconds).toISOString() : value;
+}
+
+type TerminalAckRow = { message_id: string; status: ProcessingAck['status']; status_changed: string };
+const TERMINAL_ACK_SQL =
+  "SELECT message_id, status, status_changed FROM processing_ack WHERE status IN ('completed', 'failed', 'script-skip:error')";
+
+/**
+ * With `messageIds`, read only those acks. processing_ack is never
+ * pruned, so reading (and re-applying) every terminal ack each sweep grows with
+ * the session's whole history.
+ */
+function terminalAckRows(db: Database.Database, messageIds?: readonly string[]): TerminalAckRow[] {
+  if (messageIds === undefined) return db.prepare(TERMINAL_ACK_SQL).all() as TerminalAckRow[];
+  const rows: TerminalAckRow[] = [];
+  for (let i = 0; i < messageIds.length; i += SQLITE_IN_CHUNK) {
+    const chunk = messageIds.slice(i, i + SQLITE_IN_CHUNK);
+    rows.push(
+      ...(db
+        .prepare(`${TERMINAL_ACK_SQL} AND message_id IN (${chunk.map(() => '?').join(',')})`)
+        .all(...chunk) as TerminalAckRow[]),
+    );
+  }
+  return rows;
 }
 
 function applyProcessingAcks(db: Database.Database, acks: ProcessingAck[]): void {
@@ -211,6 +235,12 @@ export function wrapSqliteInbound(db: Database.Database, nextSequence = () => ne
       );
     },
     applyProcessingAcks: (acks) => applyProcessingAcks(db, acks),
+    getUnsettledMessageIds: () =>
+      (
+        db.prepare("SELECT id FROM messages_in WHERE status NOT IN ('completed', 'failed')").all() as Array<{
+          id: string;
+        }>
+      ).map((r) => String(r.id)),
     getDeliveredIds: () => getDeliveredIds(db),
     markDelivered: (messageOutId, platformMessageId) => markDelivered(db, messageOutId, platformMessageId),
     markDeliveryFailed: (messageOutId) => markDeliveryFailed(db, messageOutId),
@@ -324,14 +354,8 @@ export function wrapSqliteOutbound(
 ): OutboundMailbox {
   const readable = () => (typeof source === 'function' ? source() : source);
   return {
-    getTerminalProcessingAcks: () =>
-      (
-        readable()
-          .prepare(
-            "SELECT message_id, status, status_changed FROM processing_ack WHERE status IN ('completed', 'failed', 'script-skip:error')",
-          )
-          .all() as Array<{ message_id: string; status: ProcessingAck['status']; status_changed: string }>
-      ).map((row) =>
+    getTerminalProcessingAcks: (messageIds) =>
+      terminalAckRows(readable(), messageIds).map((row) =>
         parseProcessingAckRecord({
           messageId: row.message_id,
           status: row.status,
@@ -364,45 +388,43 @@ export function wrapSqliteOutbound(
       };
     },
     getDueMessages: (excludeIds) =>
-      getDueOutboundMessages(readable())
-        .filter((row) => !excludeIds?.has(String(row.id)))
-        .map((row) => {
-          try {
-            return outboundDelivery(
-              parseOutboundRecord({
-                id: row.id,
-                sequence: row.seq,
-                inReplyTo: row.in_reply_to,
-                timestamp: sqliteTimestamp(row.timestamp),
-                deliverAfter: row.deliver_after === null ? null : sqliteTimestamp(row.deliver_after),
-                recurrence: row.recurrence,
-                kind: row.kind,
-                platformId: row.platform_id,
-                channelType: row.channel_type,
-                threadId: row.thread_id,
-                content: row.content,
-              }),
-            );
-          } catch (err) {
-            // One malformed row must not block the whole delivery queue: fall
-            // back to a best-effort read so the row goes through the normal
-            // per-message retry → mark-failed containment instead of throwing
-            // out of the entire drain on every poll.
-            log.warn('Malformed outbound row — delivering best-effort', { id: String(row.id), err });
-            const text = (value: unknown): string =>
-              typeof value === 'string' ? value : value == null ? '' : String(value);
-            const nullableText = (value: unknown): string | null => (value == null ? null : String(value));
-            return {
-              id: text(row.id),
-              kind: text(row.kind),
-              platformId: nullableText(row.platform_id),
-              channelType: nullableText(row.channel_type),
-              threadId: nullableText(row.thread_id),
-              content: text(row.content),
-              inReplyTo: nullableText(row.in_reply_to),
-            };
-          }
-        }),
+      getDueOutboundMessages(readable(), excludeIds).map((row) => {
+        try {
+          return outboundDelivery(
+            parseOutboundRecord({
+              id: row.id,
+              sequence: row.seq,
+              inReplyTo: row.in_reply_to,
+              timestamp: sqliteTimestamp(row.timestamp),
+              deliverAfter: row.deliver_after === null ? null : sqliteTimestamp(row.deliver_after),
+              recurrence: row.recurrence,
+              kind: row.kind,
+              platformId: row.platform_id,
+              channelType: row.channel_type,
+              threadId: row.thread_id,
+              content: row.content,
+            }),
+          );
+        } catch (err) {
+          // One malformed row must not block the whole delivery queue: fall
+          // back to a best-effort read so the row goes through the normal
+          // per-message retry → mark-failed containment instead of throwing
+          // out of the entire drain on every poll.
+          log.warn('Malformed outbound row — delivering best-effort', { id: String(row.id), err });
+          const text = (value: unknown): string =>
+            typeof value === 'string' ? value : value == null ? '' : String(value);
+          const nullableText = (value: unknown): string | null => (value == null ? null : String(value));
+          return {
+            id: text(row.id),
+            kind: text(row.kind),
+            platformId: nullableText(row.platform_id),
+            channelType: nullableText(row.channel_type),
+            threadId: nullableText(row.thread_id),
+            content: text(row.content),
+            inReplyTo: nullableText(row.in_reply_to),
+          };
+        }
+      }),
     writeDirect: async (message) => {
       const writer = writable();
       const sequence = nextSequence();

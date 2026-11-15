@@ -156,7 +156,10 @@ async function reconcileActiveSession(session: Session): Promise<void> {
     let dueCount = 0;
     let shouldWake = false;
     const exists = await withExistingMailboxSession(agentGroup.id, session.id, async (mailbox) => {
-      mailbox.applyProcessingAcks(mailbox.getTerminalProcessingAcks());
+      // Only unsettled inbound rows can still change; skipping the full ack
+      // history keeps this sweep O(open work), not O(session lifetime).
+      const unsettled = mailbox.getUnsettledMessageIds();
+      if (unsettled.length > 0) mailbox.applyProcessingAcks(mailbox.getTerminalProcessingAcks(unsettled));
       dueCount = mailbox.countDueMessages();
       shouldWake = dueCount > 0 && !isContainerRunning(session.id);
       if (!shouldWake) {

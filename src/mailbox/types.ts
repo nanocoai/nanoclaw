@@ -101,6 +101,12 @@ export interface InboundMailbox {
   retryWithBackoff(messageId: string, backoffSec: number): void;
   getMessageForRetry(messageId: string, status: 'pending' | 'processing'): MessageRetry | undefined;
   applyProcessingAcks(acks: ProcessingAck[]): void;
+  /**
+   * Ids of inbound rows not yet completed/failed — the only rows a processing
+   * ack can still change. Lets the sweep skip re-reading a session's whole ack
+   * history every minute.
+   */
+  getUnsettledMessageIds(): string[];
   getDeliveredIds(): Set<string>;
   markDelivered(messageOutId: string, platformMessageId: string | null): void;
   markDeliveryFailed(messageOutId: string): void;
@@ -140,7 +146,8 @@ export interface InboundMailbox {
 
 /** Host-visible outbound mailbox behavior. Storage layout and lifecycle are implementation-private. */
 export interface OutboundMailbox {
-  getTerminalProcessingAcks(): ProcessingAck[];
+  /** Terminal acks, optionally limited to `messageIds` (see InboundMailbox.getUnsettledMessageIds). */
+  getTerminalProcessingAcks(messageIds?: readonly string[]): ProcessingAck[];
   getProcessingClaims(): ProcessingClaim[];
   deleteOrphanProcessingClaims(): number;
   getContainerState(): ContainerState | null;

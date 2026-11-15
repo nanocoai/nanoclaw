@@ -1,3 +1,7 @@
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+
 import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -187,6 +191,90 @@ describe('SQLite mailbox canonical serialization', () => {
       expect(plan).toContain('idx_messages_in_trigger_seq');
       expect(plan).not.toContain('TEMP B-TREE');
     }
+  });
+
+  it('scopes ack and due-outbound reads to open work (history is never re-read)', () => {
+    const inboundDb = new Database(':memory:');
+    const outboundDb = new Database(':memory:');
+    databases.push(inboundDb, outboundDb);
+    inboundDb.exec(INBOUND_SCHEMA);
+    outboundDb.exec(OUTBOUND_SCHEMA);
+    let sequence = 0;
+    const nextSequence = () => (sequence += 2);
+    const inbound = wrapSqliteInbound(inboundDb, nextSequence);
+    const outbound = wrapSqliteOutbound(
+      () => outboundDb,
+      () => outboundDb,
+      nextSequence,
+    );
+
+    const insertIn = inboundDb.prepare(
+      "INSERT INTO messages_in (id, seq, timestamp, kind, status, content) VALUES (?, ?, '2026-01-01 00:00:00', 'chat', ?, '{}')",
+    );
+    insertIn.run('done', 2, 'completed');
+    insertIn.run('failed', 4, 'failed');
+    insertIn.run('open', 6, 'processing');
+    insertIn.run('waiting', 8, 'pending');
+    expect(inbound.getUnsettledMessageIds().sort()).toEqual(['open', 'waiting']);
+
+    const ack = outboundDb.prepare(
+      "INSERT INTO processing_ack (message_id, status, status_changed) VALUES (?, ?, '2026-01-01 00:00:00')",
+    );
+    ack.run('done', 'completed');
+    ack.run('open', 'completed');
+    ack.run('waiting', 'processing');
+    expect(outbound.getTerminalProcessingAcks(inbound.getUnsettledMessageIds()).map((a) => a.messageId)).toEqual([
+      'open',
+    ]);
+    expect(outbound.getTerminalProcessingAcks([])).toEqual([]);
+    expect(
+      outbound
+        .getTerminalProcessingAcks()
+        .map((a) => a.messageId)
+        .sort(),
+    ).toEqual(['done', 'open']);
+
+    const insertOut = outboundDb.prepare(
+      "INSERT INTO messages_out (id, seq, timestamp, kind, content) VALUES (?, ?, ?, 'chat', '{}')",
+    );
+    insertOut.run('sent', 1, '2026-01-01 00:00:00');
+    insertOut.run('b', 5, '2026-01-01 00:00:02');
+    insertOut.run('a', 3, '2026-01-01 00:00:01');
+    expect(outbound.getDueMessages(new Set(['sent'])).map((m) => m.id)).toEqual(['a', 'b']);
+    expect(outbound.getDueMessages(new Set(['sent', 'a', 'b']))).toEqual([]);
+  });
+
+  it('delivered watermark never skips a row that was not yet due or not yet delivered', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mbx-wm-'));
+    const outboundDb = new Database(path.join(dir, 'outbound.db'));
+    databases.push(outboundDb);
+    outboundDb.exec(OUTBOUND_SCHEMA);
+    const outbound = wrapSqliteOutbound(
+      () => outboundDb,
+      () => outboundDb,
+      () => 0,
+    );
+    const insert = outboundDb.prepare(
+      "INSERT INTO messages_out (id, seq, timestamp, deliver_after, kind, content) VALUES (?, ?, ?, ?, 'chat', '{}')",
+    );
+    insert.run('d1', 1, '2026-01-01 00:00:01', null);
+    insert.run('later', 3, '2026-01-01 00:00:02', '2999-01-01 00:00:00');
+    insert.run('d2', 5, '2026-01-01 00:00:03', null);
+    insert.run('open', 7, '2026-01-01 00:00:04', null);
+
+    const delivered = new Set(['d1', 'd2']);
+    expect(outbound.getDueMessages(delivered).map((m) => m.id)).toEqual(['open']);
+    delivered.add('open');
+    expect(outbound.getDueMessages(delivered)).toEqual([]);
+
+    outboundDb.prepare("UPDATE messages_out SET deliver_after = NULL WHERE id = 'later'").run();
+    insert.run('new', 9, '2026-01-01 00:00:05', null);
+    expect(outbound.getDueMessages(delivered).map((m) => m.id)).toEqual(['later', 'new']);
+    delivered.add('later').add('new');
+    expect(outbound.getDueMessages(delivered)).toEqual([]);
+    insert.run('newest', 11, '2026-01-01 00:00:06', null);
+    expect(outbound.getDueMessages(delivered).map((m) => m.id)).toEqual(['newest']);
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 
   it('returns only the conversation root and top-level outbound timeline', () => {
