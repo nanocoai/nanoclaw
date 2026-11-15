@@ -139,8 +139,37 @@ describe('claude maybeRotateContinuation', () => {
     expect(fs.existsSync(p)).toBe(false);
   });
 
-  it('returns null for an unknown session id', () => {
+  it('rotates a session whose transcript is gone, with nothing to archive or move', () => {
+    const other = writeTranscript('sess-other', 4096);
     const provider = createProvider('claude');
-    expect(provider.maybeRotateContinuation!('does-not-exist', CWD)).toBeNull();
+    expect(provider.maybeRotateContinuation!('does-not-exist', CWD)).toBe('transcript not found');
+    expect(fs.existsSync(path.join(tmp, 'conversations'))).toBe(false);
+    expect(fs.readdirSync(path.dirname(other))).toEqual(['sess-other.jsonl']);
+  });
+
+  it('keeps resuming when the projects dir cannot be listed', () => {
+    writeTranscript('sess-hidden', 4096);
+    const readdirSpy = spyOn(fs, 'readdirSync').mockImplementation(() => {
+      throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+    });
+    let reason: string | null;
+    try {
+      reason = createProvider('claude').maybeRotateContinuation!('sess-hidden', CWD);
+    } finally {
+      readdirSpy.mockRestore();
+    }
+    expect(reason!).toBeNull();
+  });
+
+  it.skipIf(process.getuid?.() === 0)('keeps resuming when a project dir cannot be searched', () => {
+    const dir = path.dirname(writeTranscript('sess-locked', 4096));
+    fs.chmodSync(dir, 0o600);
+    let reason: string | null;
+    try {
+      reason = createProvider('claude').maybeRotateContinuation!('sess-locked', CWD);
+    } finally {
+      fs.chmodSync(dir, 0o755);
+    }
+    expect(reason!).toBeNull();
   });
 });
