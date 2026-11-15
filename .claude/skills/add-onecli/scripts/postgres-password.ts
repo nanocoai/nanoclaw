@@ -8,6 +8,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { pathToFileURL } from 'url';
 
 export const COMPOSE_DEFAULT_PASSWORD = 'onecli';
 const PROJECT = 'onecli';
@@ -153,6 +154,14 @@ interface Container {
 
 // The only settings a recreate is meant to change.
 const PASSWORD_SETTINGS = [VAR, 'DATABASE_URL'];
+// OneCLI's compose file uses these only for the image tag and the published ports.
+const IMAGE_AND_PORT_SETTINGS = [
+  'ONECLI_VERSION',
+  'ONECLI_BIND_HOST',
+  'ONECLI_APP_PORT',
+  'ONECLI_GATEWAY_PORT',
+  'POSTGRES_PORT',
+];
 
 function projectContainers(exec: Exec): Container[] {
   const ids = exec('docker', ['ps', '-aq', '--filter', `label=com.docker.compose.project=${PROJECT}`])
@@ -200,12 +209,17 @@ export function recreateDrift(exec: Exec, paths: Paths, containers: Container[])
     if (wantMounts.join() !== haveMounts.join()) {
       return `${name} would mount ${show(wantMounts)} instead of ${show(haveMounts)}`;
     }
-    // A changed setting such as PGDATA can point the same volume at other data.
+    // A changed setting such as PGDATA can point the same volume at other data, and so can a new one,
+    // unless it only picks the image tag and ports checked above: setup saves ONECLI_VERSION and
+    // ONECLI_BIND_HOST to .env after macOS starts OneCLI, and compose hands .env to the app too.
     const env = new Map((c.Config.Env ?? []).map((e) => [e.slice(0, e.indexOf('=')), e.slice(e.indexOf('=') + 1)]));
     const changed = Object.entries(svc.environment ?? {}).find(
-      ([key, value]) => value !== null && !PASSWORD_SETTINGS.includes(key) && env.get(key) !== value,
+      ([key, value]) =>
+        value !== null &&
+        !PASSWORD_SETTINGS.includes(key) &&
+        (env.has(key) ? env.get(key) !== value : !IMAGE_AND_PORT_SETTINGS.includes(key)),
     );
-    if (changed) return `${name} would change ${changed[0]}`;
+    if (changed) return `${name} would ${env.has(changed[0]) ? 'change' : 'add'} ${changed[0]}`;
     // So can dropping one, unless the image sets the same value.
     if (!imageEnv.has(c.Image)) {
       const [image] = JSON.parse(exec('docker', ['image', 'inspect', c.Image])) as Array<{
@@ -355,7 +369,16 @@ export const REFUSED_HINT =
   'Save the settings OneCLI runs with in ~/.onecli/.env (for example ONECLI_VERSION; see docs/onecli-upgrades.md), ' +
   'then run: pnpm exec tsx .claude/skills/add-onecli/scripts/postgres-password.ts';
 
-if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
+// Compare real file URLs, so a checkout path with a space or a symlink still runs.
+function runDirectly(): boolean {
+  try {
+    return !!process.argv[1] && import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href;
+  } catch {
+    return false; // argv[1] is not a file, as under `node -e`
+  }
+}
+
+if (runDirectly()) {
   const result = rotateDefaultPassword();
   if (result.status === 'refused') {
     console.error(`Not changed: ${result.detail}. ${REFUSED_HINT}`);

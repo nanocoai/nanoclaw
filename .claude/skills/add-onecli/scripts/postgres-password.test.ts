@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -55,6 +56,8 @@ function fakeDocker(
     configService?: string;
     configPgdata?: string;
     configLiteralUrl?: boolean;
+    // The app's `env_file: .env`, which compose folds into its environment.
+    envFile?: boolean;
     containerExtra?: string;
     stopped?: boolean;
     readFails?: boolean;
@@ -96,6 +99,15 @@ function fakeDocker(
     return service === 'postgres'
       ? { POSTGRES_PASSWORD: pw, PGDATA: opts.configPgdata ?? '/var/lib/postgresql/18/docker', POSTGRES_DB: null }
       : {
+          ...(opts.envFile
+            ? Object.fromEntries(
+                fs
+                  .readFileSync(paths.envFile, 'utf8')
+                  .split('\n')
+                  .filter((line) => line.includes('='))
+                  .map((line) => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]),
+              )
+            : {}),
           DATABASE_URL: `postgresql://onecli:${opts.configLiteralUrl ? COMPOSE_DEFAULT_PASSWORD : pw}@postgres:5432/onecli`,
           NODE_ENV: 'production',
         };
@@ -276,6 +288,27 @@ describe('rotateDefaultPassword (existing installs)', () => {
     for (const call of docker.calls) expect(JSON.stringify(call)).not.toContain(password);
   });
 
+  it('moves a macOS install, whose app started before setup saved ONECLI_VERSION in .env', () => {
+    // compose config now has .env's ONECLI_VERSION and ONECLI_BIND_HOST, plus a port saved as
+    // docs/onecli-upgrades.md says; the running app has none of them.
+    const paths = tempPaths(`${env}ONECLI_APP_PORT=10254\n`);
+    const docker = fakeDocker(paths, { envFile: true });
+    expect(rotateDefaultPassword(paths, docker.exec)).toEqual({ status: 'rotated' });
+    expect(docker.state.ups).toBe(1);
+  });
+
+  it.each([
+    ['an app setting', 'SECRET_ENCRYPTION_KEY'],
+    ['a database setting the compose file also interpolates', 'POSTGRES_USER'],
+  ])('refuses, changing nothing, when .env adds %s', (_label, key) => {
+    const content = `${env}${key}=x\n`;
+    const paths = tempPaths(content);
+    const docker = fakeDocker(paths, { envFile: true });
+    expect(rotateDefaultPassword(paths, docker.exec)).toEqual({ status: 'refused', detail: `onecli would add ${key}` });
+    expect(fs.readFileSync(paths.envFile, 'utf8')).toBe(content);
+    expect(docker.state).toMatchObject({ alters: 0, ups: 0 });
+  });
+
   it('does nothing on a second run', () => {
     const paths = tempPaths(env);
     const docker = fakeDocker(paths);
@@ -391,5 +424,35 @@ describe('rotateDefaultPassword (existing installs)', () => {
     expect(docker.state).toMatchObject({ alters: 0, ups: 1, containerPassword: password });
     expect(rotateDefaultPassword(paths, docker.exec)).toEqual({ status: 'own-password' });
     expect(docker.state.ups).toBe(1);
+  });
+});
+
+describe('running the script directly', () => {
+  it('runs from a checkout path with a space', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'onecli pg '));
+    roots.push(dir);
+    fs.copyFileSync(new URL('./postgres-password.ts', import.meta.url), path.join(dir, 'postgres-password.ts'));
+    fs.writeFileSync(path.join(dir, 'package.json'), '{"type":"module"}\n');
+    // A Docker with no OneCLI containers, so the run stops at "no database".
+    fs.mkdirSync(path.join(dir, 'bin'));
+    fs.writeFileSync(path.join(dir, 'bin', 'docker'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    const result = spawnSync(process.execPath, ['--import', 'tsx', path.join(dir, 'postgres-password.ts')], {
+      encoding: 'utf8',
+      env: { ...process.env, HOME: dir, PATH: `${path.join(dir, 'bin')}${path.delimiter}${process.env.PATH}` },
+    });
+    expect(result.stdout).toContain('No OneCLI database on this machine');
+    expect(result.status).toBe(0);
+  });
+
+  it('does nothing when imported, even when argv[1] is not a file', () => {
+    const script = new URL('./postgres-password.ts', import.meta.url).href;
+    const result = spawnSync(
+      process.execPath,
+      ['--import', 'tsx', '--input-type=module', '-e', `import ${JSON.stringify(script)}`, '--', 'not-a-file'],
+      { encoding: 'utf8' },
+    );
+    expect(result.stderr).toBe('');
+    expect(result.stdout).toBe('');
+    expect(result.status).toBe(0);
   });
 });
