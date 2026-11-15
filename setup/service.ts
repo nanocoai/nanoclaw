@@ -1,6 +1,5 @@
 /**
  * Step: service — Generate and load service manager config.
- * Replaces 08-setup-service.sh
  *
  * Fixes: Root→system systemd, WSL nohup fallback, no `|| true` swallowing errors.
  */

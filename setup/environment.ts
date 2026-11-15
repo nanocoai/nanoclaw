@@ -1,6 +1,5 @@
 /**
  * Step: environment — Detect OS, Node, container runtimes, existing config.
- * Replaces 01-check-environment.sh
  */
 import fs from 'fs';
 import path from 'path';

@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Run a command suggested by claude-assist, giving the user a chance to
-# edit it first. Same pattern as setup/register-claude-token.sh: bash 4+
-# pre-fills readline so Enter literally submits; bash 3.x (macOS default
-# /bin/bash) shows the command and waits for Enter.
+# edit it first. bash 4+ pre-fills readline so Enter literally submits;
+# bash 3.x (macOS default /bin/bash) shows the command and waits for Enter.
 #
 # This script is the allowlisted unit — the `eval` happens inside. The
 # caller has already shown the command to the user and gotten confirmation.

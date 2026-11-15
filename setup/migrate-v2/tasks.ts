@@ -15,7 +15,7 @@ import path from 'path';
 
 import Database from 'better-sqlite3';
 
-import { CENTRAL_DB_PATH, DATA_DIR } from '../../src/config.js';
+import { CENTRAL_DB_PATH } from '../../src/config.js';
 import { initDb, closeDb } from '../../src/db/connection.js';
 import { getAgentGroupByFolder } from '../../src/db/agent-groups.js';
 import { getMessagingGroupByPlatform } from '../../src/db/messaging-groups.js';
