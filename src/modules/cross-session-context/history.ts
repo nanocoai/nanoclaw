@@ -17,7 +17,13 @@ import { getSession } from '../../db/sessions.js';
 import { withExistingMailboxSession } from '../../session-manager.js';
 import { formatLocalStamp } from '../../timezone.js';
 import type { CallerContext } from '../../cli/frame.js';
-import { ECHO_CHANNEL_TYPE, ECHO_SIBLING_SURFACE, ECHO_TASK_SURFACE } from './config.js';
+import {
+  BACKFILL_LAST_MAX_CHARS,
+  ECHO_CHANNEL_TYPE,
+  ECHO_SIBLING_SURFACE,
+  ECHO_TASK_SURFACE,
+  ECHO_TEXT_MAX_CHARS,
+} from './config.js';
 
 export const HISTORY_DEFAULT_LIMIT = 50;
 /** Per-line text cap in the human pipe-separated rendering. */
@@ -30,11 +36,11 @@ const DELIVERED_SURFACES = new Set<string>([ECHO_SIBLING_SURFACE, ECHO_TASK_SURF
  * Marks an inbound row that is a cross-session copy ('session-echo'), not a
  * message this session received. Without it a copy of a sibling session's
  * delivered reply reads as an incoming message nobody answered. Every field
- * comes from what the echo writer recorded (fan.ts, backfill.ts); nothing is
- * inferred from the text.
+ * comes from what the echo writer recorded (fan.ts, backfill.ts); only copies
+ * written before writers recorded `truncated` fall back to the old cut shapes.
  */
 export interface HistoryEcho {
-  /** The session the original appeared in; null for backfilled timeline copies. */
+  /** The session the original appeared in (null only on copies written before backfill recorded it). */
   fromSession: string | null;
   /** The writer's description of where it came from, e.g. "another thread with Alex". */
   label: string | null;
@@ -42,8 +48,17 @@ export interface HistoryEcho {
   self: boolean;
   /** The agent's own message, copied by the delivery hook after it was delivered. */
   delivered: boolean;
-  /** The writer cut the text; the full text is in the original conversation. */
+  /** The writer cut the text; the full text is in `fromSession`'s history (`--json`). */
   truncated: boolean;
+}
+
+/**
+ * Human `kind` cell for a copy. The kind column comes from the row, never
+ * from message text, so it is the field to trust: anyone can type a
+ * "[from …]" prefix into a real message, but not a `copy-*` kind.
+ */
+export function echoKind(echo: HistoryEcho): string {
+  return echo.delivered ? 'copy-delivered' : echo.self ? 'copy-earlier' : 'copy-received';
 }
 
 export interface HistoryRow {
@@ -73,7 +88,8 @@ interface ParsedContent {
   text: string;
   sender: string | null;
   self: boolean;
-  echo: { surface: string | null; label: string | null; truncated: boolean } | null;
+  /** `truncated` is null when the writer did not record it (copies written before it did). */
+  echo: { surface: string | null; label: string | null; truncated: boolean | null } | null;
 }
 
 function parseText(raw: string): ParsedContent {
@@ -94,13 +110,23 @@ function parseText(raw: string): ParsedContent {
         ? {
             surface: typeof e.surface === 'string' ? e.surface : null,
             label: typeof e.label === 'string' && e.label.length > 0 ? e.label : null,
-            truncated: e.truncated === true,
+            truncated: typeof e.truncated === 'boolean' ? e.truncated : null,
           }
         : null,
     };
   } catch {
     return { text: raw, sender: null, self: false, echo: null };
   }
+}
+
+/**
+ * Copies written before writers recorded `truncated` carry no flag. They used
+ * exactly two cut shapes: the echo cap plus '…' (fan.ts, earlier backfill
+ * entries) and the newest backfill entry cut at BACKFILL_LAST_MAX_CHARS with
+ * no '…'. Such copies age out within ECHO_MAX_AGE_DAYS.
+ */
+function legacyTruncated(text: string): boolean {
+  return (text.length === ECHO_TEXT_MAX_CHARS + 1 && text.endsWith('…')) || text.length === BACKFILL_LAST_MAX_CHARS;
 }
 
 function toHistoryEcho(content: ParsedContent, sourceSessionId: string | null): HistoryEcho {
@@ -110,22 +136,29 @@ function toHistoryEcho(content: ParsedContent, sourceSessionId: string | null): 
     label: content.echo?.label ?? null,
     self: content.self,
     delivered: content.self && surface !== null && DELIVERED_SURFACES.has(surface),
-    truncated: content.echo?.truncated ?? false,
+    truncated: content.echo?.truncated ?? legacyTruncated(content.text),
   };
 }
 
-/** Bracketed prefix for an echo row in the human rendering. Kept outside the text cap. */
+/**
+ * Bracketed "where from" prefix for an echo row's text. The status lives in
+ * the kind column (echoKind); this only says where the copy came from and
+ * whether it was shortened. Brackets in the label are neutralised so a chat
+ * name cannot close the marker early, and the cap counts code points so it
+ * never splits a character. Kept outside the text cap.
+ */
 function echoMarker(echo: HistoryEcho): string {
-  const full = oneLine([echo.fromSession, echo.label].filter(Boolean).join(', ')) || 'another conversation';
-  // Cap only the variable part, so the status, "; cut" and the closing bracket always survive.
-  const where = full.length > ECHO_WHERE_MAX_CHARS ? `${full.slice(0, ECHO_WHERE_MAX_CHARS)}…` : full;
-  const what = echo.delivered
-    ? 'copy of your message, already delivered'
-    : echo.self
-      ? 'copy of an earlier message of yours'
-      : 'copy of a message received';
-  const cut = echo.truncated ? (echo.fromSession ? `; cut, full text in ${echo.fromSession}'s history` : '; cut') : '';
-  return `[${what} — ${where}${cut}]`;
+  const full =
+    oneLine([echo.fromSession, echo.label].filter(Boolean).join(', ')).replace(/\[/g, '(').replace(/\]/g, ')') ||
+    'another conversation';
+  const chars = Array.from(full);
+  const where = chars.length > ECHO_WHERE_MAX_CHARS ? `${chars.slice(0, ECHO_WHERE_MAX_CHARS).join('')}…` : full;
+  const cut = echo.truncated
+    ? echo.fromSession
+      ? '; copy shortened, full text in that session (--json)'
+      : '; copy shortened'
+    : '';
+  return `[from ${where}${cut}]`;
 }
 
 /**
@@ -182,16 +215,18 @@ export async function sessionHistory(args: Record<string, unknown>, ctx: CallerC
  * Human rendering: pipe-separated lines
  *   timestamp|direction(in/out)|kind|sender|text(first 200 chars)
  * with the timestamp in the install timezone (`timezone` injectable for
- * deterministic tests). A cross-session copy's text starts with a bracketed
- * marker saying where it came from; the marker does not count against the
- * text cap. `--json` bypasses this and gets the raw rows, where copies carry
- * an `echo` object instead.
+ * deterministic tests). A cross-session copy shows `copy-delivered`,
+ * `copy-earlier` or `copy-received` in the kind column, and its text starts
+ * with a "[from …]" marker that does not count against the text cap.
+ * `--json` bypasses this and gets the raw rows, where copies carry an `echo`
+ * object instead.
  */
 export function formatHistoryLines(rows: HistoryRow[], timezone: string = TIMEZONE): string {
   return rows
     .map((r) => {
-      const marker = r.echo ? `${oneLine(echoMarker(r.echo))} ` : '';
-      return `${formatLocalStamp(new Date(r.timestamp), timezone)}|${r.direction}|${r.kind}|${cell(r.sender)}|${marker}${cell(r.text)}`;
+      const kind = r.echo ? echoKind(r.echo) : r.kind;
+      const marker = r.echo ? `${echoMarker(r.echo)} ` : '';
+      return `${formatLocalStamp(new Date(r.timestamp), timezone)}|${r.direction}|${kind}|${cell(r.sender)}|${marker}${cell(r.text)}`;
     })
     .join('\n');
 }

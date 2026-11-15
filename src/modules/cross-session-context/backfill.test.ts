@@ -67,8 +67,9 @@ vi.mock('../../db/sessions.js', () => ({
   isTaskThread: (t: string | null) => typeof t === 'string' && t.startsWith('system:tasks'),
 }));
 
-const { backfillSession, BACKFILL_LIMIT, BACKFILL_LAST_MAX_CHARS } = await import('./backfill.js');
-const { ECHO_MAX_AGE_MS, ECHO_TEXT_MAX_CHARS, HOT_SESSION_LIMIT } = await import('./config.js');
+const { backfillSession, BACKFILL_LIMIT } = await import('./backfill.js');
+const { BACKFILL_LAST_MAX_CHARS, ECHO_MAX_AGE_MS, ECHO_TEXT_MAX_CHARS, HOT_SESSION_LIMIT } =
+  await import('./config.js');
 
 const NOW = Date.parse('2026-08-01T20:00:00.000Z');
 const AG = { id: 'ag-1', name: 'Pete', folder: 'pete', agent_provider: null, created_at: '' } as never;
@@ -142,6 +143,11 @@ describe('backfillSession — truncation is recorded, not left to guesswork', ()
     // The newest entry keeps up to its own cap and is cut WITHOUT '…' — only the flag says so.
     expect(newest.text).toBe('p'.repeat(BACKFILL_LAST_MAX_CHARS));
     expect(newest.echo.truncated).toBe(true);
+  });
+
+  it('records the sibling session each entry was read from, so readers can find the full text', async () => {
+    await backfillSession(AG, NEW_SESSION, DM_MG, { created: true, now: NOW });
+    expect(written.map((w) => w.sourceSessionId)).toEqual(['sess-old', 'sess-old']);
   });
 
   it('leaves the flag off entries it did not cut', async () => {

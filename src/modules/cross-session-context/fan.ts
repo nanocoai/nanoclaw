@@ -75,10 +75,14 @@ export function truncateEchoText(text: string): string {
  * payload (`echo.truncated`) so readers such as `ncl sessions history` never
  * have to guess from length or a trailing '…'.
  */
-export function capEchoText(text: string): { text: string; truncated: boolean } {
-  return text.length <= ECHO_TEXT_MAX_CHARS
-    ? { text, truncated: false }
-    : { text: `${text.slice(0, ECHO_TEXT_MAX_CHARS)}…`, truncated: true };
+export function capEchoText(
+  text: string,
+  max: number = ECHO_TEXT_MAX_CHARS,
+  ellipsis = true,
+): { text: string; truncated: boolean } {
+  if (text.length <= max) return { text, truncated: false };
+  const head = text.slice(0, max);
+  return { text: ellipsis ? `${head}…` : head, truncated: true };
 }
 
 /** Echo-row id: namespaced by target session so the same source message can
