@@ -47,6 +47,40 @@ export function keepCommandsAsMessages(adapter: ReturnType<typeof createTelegram
   if (typeof a.handleSlashCommandUpdate === 'function') a.handleSlashCommandUpdate = () => false;
 }
 
+type TelegramAttachment = { type: string; fetchMetadata?: { fileId?: string } };
+
+/**
+ * Type a recorded voice note 'voice', as WhatsApp and iMessage do. The adapter
+ * types it 'audio', like a music file. An adapter without extractAttachments
+ * is left as it is.
+ */
+export function markVoiceNotes(adapter: ReturnType<typeof createTelegramAdapter>): void {
+  const a = adapter as unknown as {
+    extractAttachments?: (raw: { voice?: { file_id?: string } }) => TelegramAttachment[];
+  };
+  if (typeof a.extractAttachments !== 'function') return;
+  const extract = a.extractAttachments.bind(adapter);
+  a.extractAttachments = (raw) => {
+    const voiceId = raw?.voice?.file_id;
+    return extract(raw).map((att) =>
+      voiceId && att.fetchMetadata?.fileId === voiceId ? { ...att, type: 'voice' } : att,
+    );
+  };
+}
+
+const isVoice = (att: unknown): boolean => (att as { type?: unknown } | null)?.type === 'voice';
+
+/** The bridge forwards an attachment's type and drops other fields, so flag voice notes on the way to the host. */
+export function flagVoiceNotes(onInbound: ChannelSetup['onInbound']): ChannelSetup['onInbound'] {
+  return (platformId, threadId, message) => {
+    const content = message.content as { attachments?: unknown } | null;
+    const attachments = content?.attachments;
+    if (!Array.isArray(attachments) || !attachments.some(isVoice)) return onInbound(platformId, threadId, message);
+    const flagged = attachments.map((att) => (isVoice(att) ? { ...att, isVoiceNote: true } : att));
+    return onInbound(platformId, threadId, { ...message, content: { ...content, attachments: flagged } });
+  };
+}
+
 const TELEGRAM_MESSAGE_LIMIT = 4096;
 
 /**
@@ -464,6 +498,7 @@ export function createTelegramBridge(options: TelegramBridgeOptions = {}): Chann
     mode: 'polling',
   });
   keepCommandsAsMessages(telegramAdapter);
+  markVoiceNotes(telegramAdapter);
   refuseCutCards(telegramAdapter);
   const bridge = createChatSdkBridge({
     // refuseCutCards owns title encoding before measuring the actual wire text.
@@ -509,7 +544,12 @@ export function createTelegramBridge(options: TelegramBridgeOptions = {}): Chann
     async setup(hostConfig: ChannelSetup) {
       const intercepted: ChannelSetup = {
         ...hostConfig,
-        onInbound: createTelegramInboundInterceptor(botUsernamePromise, hostConfig.onInbound, token, instanceKey),
+        onInbound: createTelegramInboundInterceptor(
+          botUsernamePromise,
+          flagVoiceNotes(hostConfig.onInbound),
+          token,
+          instanceKey,
+        ),
       };
       return withRetry(() => bridge.setup(intercepted), 'bridge.setup');
     },
