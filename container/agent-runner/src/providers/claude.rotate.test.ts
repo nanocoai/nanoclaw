@@ -147,6 +147,20 @@ describe('claude maybeRotateContinuation', () => {
     expect(fs.readdirSync(path.dirname(other))).toEqual(['sess-other.jsonl']);
   });
 
+  it('rotates a session whose transcript is gone when a plain file sits in the projects dir', () => {
+    const projects = path.join(tmp, '.claude', 'projects');
+    fs.mkdirSync(projects, { recursive: true });
+    fs.writeFileSync(path.join(projects, '.DS_Store'), '');
+    const provider = createProvider('claude');
+    expect(provider.maybeRotateContinuation!('does-not-exist', CWD)).toBe('transcript not found');
+  });
+
+  it('rotates a session whose transcript is gone when the projects dir does not exist', () => {
+    expect(fs.existsSync(path.join(tmp, '.claude', 'projects'))).toBe(false);
+    const provider = createProvider('claude');
+    expect(provider.maybeRotateContinuation!('does-not-exist', CWD)).toBe('transcript not found');
+  });
+
   it('keeps resuming when the projects dir cannot be listed', () => {
     writeTranscript('sess-hidden', 4096);
     const readdirSpy = spyOn(fs, 'readdirSync').mockImplementation(() => {
