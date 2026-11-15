@@ -11,7 +11,7 @@ import path from 'path';
 
 import { findByName, getAllDestinations } from '../destinations.js';
 import { getMessageIdBySeq, getRoutingBySeq, writeMessageOut } from '../db/messages-out.js';
-import { getCurrentInReplyTo, getCurrentReplyRoute } from '../db/session-state.js';
+import { getCurrentReplyRoute } from '../db/session-state.js';
 import { resolveDestinationThread } from '../db/session-routing.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
@@ -41,16 +41,18 @@ function destinationList(): string {
 /**
  * Resolve a destination name to routing fields.
  *
- * Routing matches the poll loop's explicit deliveries (`sendToDestination`):
- * the thread and `in_reply_to` come from the message being answered (the
- * published reply stamp) when it came from that destination, else from that
- * destination's latest inbound row. An agent destination never carries a
- * thread.
+ * A channel destination is threaded like the poll loop's explicit deliveries:
+ * the thread of the message being answered (the published reply stamp) when it
+ * came from that channel, else that channel's latest inbound thread. Its
+ * `in_reply_to` stays the turn's stamp: adapters read it to thread mail and to
+ * quote, and must never inherit an unrelated conversation.
  *
- * `in_reply_to` is per destination, not the batch's: when a turn started by
- * agent C's message sends to agent A, the stamp must reference A's latest
- * message — the host routes the a2a reply back to the session that sent it —
- * never C's, which points the host at a session of C.
+ * An agent destination never carries a thread. Its `in_reply_to` is the host's
+ * a2a return address (src/modules/agent-to-agent/agent-route.ts), so it is the
+ * turn's stamp only when the turn is answering that same agent. Otherwise it is
+ * null and the host picks the session by peer affinity: a relay (A asks B, B
+ * asks C, B passes C's answer to A) must never name C's message, which points
+ * the host at a session of C.
  */
 function resolveRouting(to: string):
   | {
@@ -63,14 +65,22 @@ function resolveRouting(to: string):
   | { error: string } {
   const dest = findByName(to);
   if (!dest) return { error: `Unknown destination "${to}". Known: ${destinationList()}` };
-  const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
-  const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
-  const destRouting = resolveDestinationThread(channelType, platformId, getCurrentReplyRoute());
+  const route = getCurrentReplyRoute();
+  if (dest.type === 'channel') {
+    return {
+      channel_type: dest.channelType!,
+      platform_id: dest.platformId!,
+      thread_id: resolveDestinationThread(dest.channelType!, dest.platformId!, route)?.threadId ?? null,
+      in_reply_to: route?.inReplyTo ?? null,
+      resolvedName: to,
+    };
+  }
+  const answeringThisAgent = route?.channelType === 'agent' && route.platformId === dest.agentGroupId;
   return {
-    channel_type: channelType,
-    platform_id: platformId,
-    thread_id: dest.type === 'channel' ? (destRouting?.threadId ?? null) : null,
-    in_reply_to: destRouting?.inReplyTo ?? getCurrentInReplyTo(),
+    channel_type: 'agent',
+    platform_id: dest.agentGroupId!,
+    thread_id: null,
+    in_reply_to: answeringThisAgent ? route.inReplyTo : null,
     resolvedName: to,
   };
 }
