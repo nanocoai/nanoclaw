@@ -11,8 +11,9 @@ vi.mock('./channel-registry.js', () => ({
     fixture.registrations.set(name, registration),
 }));
 vi.mock('../env.js', () => ({ readEnvFile: () => ({ WHATSAPP_ENABLED: 'true', ASSISTANT_HAS_OWN_NUMBER: 'true' }) }));
-vi.mock('fs', () => ({ default: { existsSync: () => false, mkdirSync: vi.fn() } }));
+vi.mock('fs', () => ({ default: { existsSync: () => false, mkdirSync: vi.fn(), writeFileSync: vi.fn() } }));
 vi.mock('@whiskeysockets/baileys', () => ({
+  downloadMediaMessage: async () => Buffer.from('ogg'),
   makeWASocket: () => ({
     ev: {
       on: (event: string, handler: (event: Record<string, unknown>) => unknown) => fixture.handlers.set(event, handler),
@@ -31,6 +32,7 @@ vi.mock('@whiskeysockets/baileys', () => ({
 import './whatsapp.js';
 
 afterEach(() => {
+  fixture.handlers.clear();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -95,6 +97,38 @@ it('dispatches the whole real upsert batch while two host decisions are pending'
     await vi.waitFor(() => expect(fixture.send).toHaveBeenCalledTimes(2));
   } finally {
     decisions.forEach((resolve) => resolve('accepted'));
+    await adapter.teardown();
+  }
+});
+
+it('marks a push-to-talk voice note as a voice note, and leaves other audio alone', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () => new Response('2.3000.123456')),
+  );
+  vi.spyOn(globalThis, 'setInterval').mockImplementation(() => 0 as never);
+  const adapter = (await fixture.registrations.get('whatsapp')!.factory())!;
+  const onInbound = vi.fn<ChannelSetup['onInbound']>();
+  const setup = adapter.setup({ onAction: vi.fn(), onInbound, onMetadata: vi.fn() } as unknown as ChannelSetup);
+  await vi.waitFor(() => expect(fixture.handlers.has('messages.upsert')).toBe(true));
+  fixture.handlers.get('connection.update')!({ connection: 'open' });
+  await setup;
+  try {
+    await fixture.handlers.get('messages.upsert')!({
+      messages: [{ ptt: true }, { ptt: false }].map((audioMessage, i) => ({
+        key: { remoteJid: 'c@g.us', participant: 'owner@s.whatsapp.net', id: `${i}` },
+        messageTimestamp: 1,
+        message: { audioMessage },
+      })),
+    });
+    const attachments = onInbound.mock.calls.map(
+      ([, , message]) => (message.content as { attachments?: unknown[] }).attachments,
+    );
+    expect(attachments).toStrictEqual([
+      [{ type: 'voice', name: expect.stringMatching(/^voice-/), localPath: expect.any(String), isVoiceNote: true }],
+      [{ type: 'audio', name: expect.stringMatching(/^audio-/), localPath: expect.any(String) }],
+    ]);
+  } finally {
     await adapter.teardown();
   }
 });

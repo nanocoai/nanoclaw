@@ -607,7 +607,7 @@ registerChannelAdapter('whatsapp', {
       msg: WAMessage,
       normalized: any,
     ): Promise<{
-      attachments: Array<{ type: string; name: string; localPath: string }>;
+      attachments: Array<{ type: string; name: string; localPath: string; isVoiceNote?: boolean }>;
       failures: string[];
     }> {
       const mediaTypes: Array<{ key: string; type: string; ext: string }> = [
@@ -616,10 +616,14 @@ registerChannelAdapter('whatsapp', {
         { key: 'audioMessage', type: 'audio', ext: '.ogg' },
         { key: 'documentMessage', type: 'document', ext: '' },
       ];
-      const results: Array<{ type: string; name: string; localPath: string }> = [];
+      const results: Array<{ type: string; name: string; localPath: string; isVoiceNote?: boolean }> = [];
       const failures: string[] = [];
-      for (const { key, type, ext } of mediaTypes) {
+      for (const { key, type: mediaType, ext } of mediaTypes) {
         if (!normalized[key]) continue;
+        // Push-to-talk audio is a voice note: typed 'voice' as iMessage does, and
+        // flagged for transcription modules that read isVoiceNote.
+        const isVoiceNote = key === 'audioMessage' && normalized[key].ptt === true;
+        const type = isVoiceNote ? 'voice' : mediaType;
         try {
           // Pass reuploadRequest so Baileys can ask WhatsApp to re-upload the
           // media when the direct CDN fetch fails or the media URL has expired
@@ -647,7 +651,12 @@ registerChannelAdapter('whatsapp', {
           fs.mkdirSync(attachDir, { recursive: true });
           const filePath = path.join(attachDir, filename);
           fs.writeFileSync(filePath, buffer);
-          results.push({ type, name: filename, localPath: `attachments/${filename}` });
+          results.push({
+            type,
+            name: filename,
+            localPath: `attachments/${filename}`,
+            ...(isVoiceNote && { isVoiceNote }),
+          });
           log.info('Media downloaded', { type, filename });
         } catch (err) {
           log.warn('Failed to download media', { type, err });
