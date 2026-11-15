@@ -63,6 +63,27 @@ function withNoNode(write: () => void): void {
   }
 }
 
+/** Run `write` with the installed helper owned by someone this user may not hand files to. */
+function withForeignOwner(write: () => void): void {
+  const stat = fs.lstatSync.bind(fs);
+  const metadata = vi.spyOn(fs, 'lstatSync').mockImplementation((...args) => {
+    const result = stat(...args);
+    return path.basename(String(args[0])) === HELPER_BINARY_NAME
+      ? Object.assign(result, { uid: result.uid + 1 })
+      : result;
+  });
+  const chown = vi.spyOn(fs, 'chownSync').mockImplementation(() => {
+    throw Object.assign(new Error('Not permitted'), { code: 'EPERM' });
+  });
+  try {
+    write();
+    expect(chown).toHaveBeenCalled();
+  } finally {
+    metadata.mockRestore();
+    chown.mockRestore();
+  }
+}
+
 /** Start the helper as docker does: by path, with nothing but this PATH to find a node on. */
 function version(helper: string, pathDir: string): { status: number | null; stdout: string; stderr: string } {
   return spawnSync(helper, ['version'], { encoding: 'utf-8', env: { PATH: pathDir } });
@@ -242,27 +263,15 @@ describe('refreshInstalledCredentialHelper', () => {
     expect(fs.readFileSync(helper, 'utf-8')).toBe(renderHelper(SOURCE, process.execPath));
   });
 
-  it('leaves the original intact if its ownership cannot be preserved', () => {
+  it('still replaces a helper whose owner it cannot keep, as a file of its own', () => {
     const { binDir, helper, dockerConfigPath } = install(olderSetup);
-    const target = fs.realpathSync(helper);
-    const stat = fs.lstatSync.bind(fs);
-    const metadata = vi.spyOn(fs, 'lstatSync').mockImplementation((...args) => {
-      const result = stat(...args);
-      if (String(args[0]) === target) return Object.assign(result, { uid: result.uid + 1 });
-      return result;
-    });
-    const chown = vi.spyOn(fs, 'chownSync').mockImplementation(() => {
-      throw Object.assign(new Error('Not permitted'), { code: 'EPERM' });
-    });
-    try {
-      refreshInstalledCredentialHelper({ binDir, dockerConfigPath });
-      expect(chown).toHaveBeenCalled();
-      expect(fs.readFileSync(helper, 'utf-8')).toBe(olderSetup);
-      expect(fs.readdirSync(binDir)).toEqual([HELPER_BINARY_NAME]);
-    } finally {
-      metadata.mockRestore();
-      chown.mockRestore();
-    }
+    fs.chmodSync(helper, 0o710);
+
+    withForeignOwner(() => refreshInstalledCredentialHelper({ binDir, dockerConfigPath }));
+
+    expect(fs.readFileSync(helper, 'utf-8')).toBe(renderHelper(SOURCE, process.execPath));
+    expect(fs.statSync(helper).mode & 0o7777).toBe(0o755);
+    expect(fs.readdirSync(binDir)).toEqual([HELPER_BINARY_NAME]);
   });
 
   it('does not write through a link that now points at a file that is not the helper', () => {
@@ -307,6 +316,17 @@ describe('refreshInstalledCredentialHelper', () => {
 });
 
 describe('installCredentialHelper', () => {
+  it('installs over a helper whose owner it cannot keep', () => {
+    const binDir = scratchDir();
+    const dockerConfigPath = path.join(scratchDir(), 'config.json');
+    const helper = writeHelper(binDir, `#!${GONE_NODE}\n${SOURCE.slice(SOURCE.indexOf('\n') + 1)}`);
+
+    withForeignOwner(() => installCredentialHelper({ binDir, dockerConfigPath, registryHost: HOST }));
+
+    expect(fs.readFileSync(helper, 'utf-8')).toBe(renderHelper(SOURCE, process.execPath));
+    expect(JSON.parse(fs.readFileSync(dockerConfigPath, 'utf-8')).credHelpers).toEqual({ [HOST]: 'nanoclaw' });
+  });
+
   it('refuses to wire docker to a helper that does not start', () => {
     const binDir = scratchDir();
     const dockerConfigPath = path.join(scratchDir(), 'config.json');

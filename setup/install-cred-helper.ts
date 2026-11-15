@@ -183,15 +183,17 @@ function writeExecutable(dest: string, contents: string): void {
   const tmp = `${dest}.tmp-${process.pid}`;
   try {
     fs.writeFileSync(tmp, contents, { mode: 0o600 });
+    // The old file's owner and mode are kept where this user may keep them.
+    // Where it may not, the helper is still replaced, as a plain file of this
+    // user's own: a stale helper nobody here can rewrite helps no one.
+    let mode = 0o755;
     if (previous) {
       const created = fs.statSync(tmp);
-      if (created.uid !== previous.uid || created.gid !== previous.gid) {
-        // If this is not permitted, keep the original file rather than changing its owner.
-        fs.chownSync(tmp, previous.uid, previous.gid);
-      }
+      const sameOwner = created.uid === previous.uid && created.gid === previous.gid;
+      if (sameOwner || gaveTo(tmp, previous.uid, previous.gid)) mode = previous.mode & 0o7777;
     }
-    // chown can clear mode bits, so restore permissions after ownership.
-    fs.chmodSync(tmp, previous ? previous.mode & 0o7777 : 0o755);
+    // chown can clear mode bits, so permissions are set after ownership.
+    fs.chmodSync(tmp, mode);
     fs.renameSync(tmp, dest);
   } catch (err) {
     try {
@@ -199,6 +201,17 @@ function writeExecutable(dest: string, contents: string): void {
     } catch (_cleanupErr) {
       // Nothing more to do; the original error is the one that matters.
     }
+    throw err;
+  }
+}
+
+/** False when this user may not hand the file to that owner. Any other failure is a real one. */
+function gaveTo(file: string, uid: number, gid: number): boolean {
+  try {
+    fs.chownSync(file, uid, gid);
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EPERM') return false;
     throw err;
   }
 }
