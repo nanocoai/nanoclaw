@@ -216,6 +216,11 @@ function gaveTo(file: string, uid: number, gid: number): boolean {
   }
 }
 
+/** A text's first line without its line ending, whichever kind the file uses. */
+function firstLine(text: string): string {
+  return text.split(/\r?\n/, 1)[0];
+}
+
 function isOurBinary(file: string): boolean {
   try {
     return fs.readFileSync(file, 'utf-8').includes(HELPER_MARKER);
@@ -352,14 +357,14 @@ export function refreshInstalledCredentialHelper(options: CredHelperOptions = {}
     // The target is checked itself: the link can point elsewhere by now.
     const target = fs.realpathSync(helper.helperPath);
     if (!isOurBinary(target)) return;
+    const installed = fs.readFileSync(target, 'utf-8');
     // Already what this setup would write: writing it again changes nothing.
-    if (fs.readFileSync(target, 'utf-8') === currentHelper()) return;
-    const installed = fs.statSync(target);
-    const source = fs.statSync(helperSourcePath());
-    // A developer may link the installed helper straight to this checkout.
-    // Replace that link with a standalone copy, never rewrite the source.
-    const pointsToSource = installed.dev === source.dev && installed.ino === source.ino;
-    writeHelper(pointsToSource ? helper.helperPath : target);
+    if (installed === currentHelper()) return;
+    // A link may lead to a helper source that a checkout tracks, this one's or
+    // another's. That file was never installed, so it still begins with the
+    // source's own first line: replace the link, never write the source.
+    const isSource = firstLine(installed) === firstLine(fs.readFileSync(helperSourcePath(), 'utf-8'));
+    writeHelper(isSource ? helper.helperPath : target);
   } catch (err) {
     log.warn('Could not re-install the docker credential helper', { helperPath: helper.helperPath, err });
   }

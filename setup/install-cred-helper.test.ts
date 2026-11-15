@@ -260,6 +260,26 @@ describe('refreshInstalledCredentialHelper', () => {
     }
   });
 
+  it.each([
+    ['as it is here', (text: string) => text],
+    ['with CRLF line endings', (text: string) => text.replace(/\n/g, '\r\n')],
+  ])("replaces a link to another checkout's helper source, %s, without changing that source", (_case, as) => {
+    const { binDir, helper, dockerConfigPath } = install('');
+    const elsewhere = path.join(scratchDir(), 'setup', 'registry');
+    fs.mkdirSync(elsewhere, { recursive: true });
+    const otherSource = path.join(elsewhere, 'credential-helper.mjs');
+    const tracked = as(`${SOURCE}// an older release of the same helper\n`);
+    fs.writeFileSync(otherSource, tracked, { mode: 0o755 });
+    fs.rmSync(helper);
+    fs.symlinkSync(otherSource, helper);
+
+    refreshInstalledCredentialHelper({ binDir, dockerConfigPath });
+
+    expect(fs.readFileSync(otherSource, 'utf-8')).toBe(tracked);
+    expect(fs.lstatSync(helper).isSymbolicLink()).toBe(false);
+    expect(fs.readFileSync(helper, 'utf-8')).toBe(renderHelper(SOURCE, process.execPath));
+  });
+
   it('preserves the existing helper permissions and ownership on refresh', () => {
     const { binDir, helper, dockerConfigPath } = install(olderSetup);
     fs.chmodSync(helper, 0o710);
