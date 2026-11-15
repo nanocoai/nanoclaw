@@ -150,13 +150,16 @@ describe('backfillSession — truncation is recorded, not left to guesswork', ()
     expect(written.map((w) => w.sourceSessionId)).toEqual(['sess-old', 'sess-old']);
   });
 
-  it('leaves the flag off entries it did not cut', async () => {
+  it('records truncated: false on entries it did not cut, including a newest entry of exactly its cap', async () => {
+    siblings = {
+      'sess-old': {
+        root: { timestamp: iso(NOW - 50 * 60_000), content: chat('hello there') },
+        outbound: [{ timestamp: iso(NOW - 46 * 60_000), content: post('e'.repeat(BACKFILL_LAST_MAX_CHARS)) }],
+      },
+    };
     await backfillSession(AG, NEW_SESSION, DM_MG, { created: true, now: NOW });
-    for (const w of written) {
-      expect((JSON.parse(w.content as string) as { echo: Record<string, unknown> }).echo).not.toHaveProperty(
-        'truncated',
-      );
-    }
+    const echoes = written.map((w) => (JSON.parse(w.content as string) as { echo: Record<string, unknown> }).echo);
+    expect(echoes.map((e) => e.truncated)).toEqual([false, false]);
   });
 });
 

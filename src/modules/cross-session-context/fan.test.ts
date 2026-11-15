@@ -271,6 +271,7 @@ describe('fanInboundMessage', () => {
     expect(sibContent.echo).toEqual({
       surface: ECHO_SIBLING_SURFACE,
       label: 'another conversation with Alex',
+      truncated: false,
     });
 
     // Nothing else in the group hears it: not task sessions, not rooms, not
@@ -303,6 +304,7 @@ describe('fanInboundMessage', () => {
     expect(JSON.parse(rows[0].content as string).echo).toEqual({
       surface: ECHO_SIBLING_SURFACE,
       label: 'another conversation in #pixel-room room',
+      truncated: false,
     });
     // The retired v1 targets stay silent.
     expect(readEchoRows('s-dm')).toHaveLength(0);
@@ -503,6 +505,7 @@ describe('fanOutboundMessage', () => {
     expect(sibContent.echo).toEqual({
       surface: ECHO_SIBLING_SURFACE,
       label: 'another conversation with Alex',
+      truncated: false,
     });
   });
 
@@ -575,6 +578,7 @@ describe('fanOutboundMessage', () => {
     expect(JSON.parse(readEchoRows('s-sib-zulu')[0].content as string).echo).toEqual({
       surface: ECHO_SIBLING_SURFACE,
       label: 'this DM, posted by you from another conversation',
+      truncated: false,
     });
     expect(readEchoRows('s-task')).toHaveLength(0);
     expect(written).toBe(1);
@@ -625,6 +629,7 @@ describe('fanOutboundMessage', () => {
       expect(content.echo).toEqual({
         surface: ECHO_TASK_SURFACE,
         label: 'this DM, posted by your scheduled task',
+        truncated: false,
       });
     }
     // Never other DMs, rooms, or task sessions.
@@ -651,6 +656,7 @@ describe('fanOutboundMessage', () => {
     expect(JSON.parse(rows[0].content as string).echo).toEqual({
       surface: ECHO_TASK_SURFACE,
       label: 'this room, posted by your scheduled task',
+      truncated: false,
     });
     expect(readEchoRows('s-dm')).toHaveLength(0);
     expect(readEchoRows('s-dm-t2')).toHaveLength(0);

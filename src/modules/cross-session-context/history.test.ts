@@ -192,7 +192,7 @@ describe('sessionHistory — cross-session copies (session-echo rows)', () => {
         echo: {
           surface: opts.surface ?? ECHO_SIBLING_SURFACE,
           label: opts.label ?? 'another thread with Alex',
-          ...(!opts.legacy && capped.truncated ? { truncated: true } : {}),
+          ...(opts.legacy ? {} : { truncated: capped.truncated }),
         },
       }),
       trigger: false,
@@ -264,6 +264,19 @@ describe('sessionHistory — cross-session copies (session-echo rows)', () => {
     expect(formatHistoryLines(rows, 'UTC')).toContain(
       `[from ${SIBLING}, another thread with Alex; copy shortened, full text in that session (--json)] xxx`,
     );
+  });
+
+  it('trusts a recorded truncated: false, even for a current uncut copy of exactly the legacy cap length', async () => {
+    await writeEcho('backfill-exact', '2026-08-01T10:00:00.000Z', 'e'.repeat(BACKFILL_LAST_MAX_CHARS), {
+      self: true,
+      rawText: true,
+      surface: ECHO_TIMELINE_SURFACE,
+      label: 'this DM, while this conversation was idle',
+    });
+
+    const rows = await sessionHistory({ id: SESS }, HOST);
+    expect(rows[0].echo?.truncated).toBe(false);
+    expect(formatHistoryLines(rows, 'UTC')).not.toContain('copy shortened');
   });
 
   it('reads both legacy cut shapes as shortened when a copy predates the recorded flag', async () => {

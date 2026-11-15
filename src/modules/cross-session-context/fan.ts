@@ -71,9 +71,10 @@ export function truncateEchoText(text: string): string {
 }
 
 /**
- * truncateEchoText plus whether it cut. Writers record the flag in the echo
- * payload (`echo.truncated`) so readers such as `ncl sessions history` never
- * have to guess from length or a trailing '…'.
+ * truncateEchoText plus whether it cut. Writers always record the flag in the
+ * echo payload (`echo.truncated`, true or false) so readers such as `ncl
+ * sessions history` never guess from length or a trailing '…'; only copies
+ * written before the flag existed lack it.
  */
 export function capEchoText(
   text: string,
@@ -274,7 +275,7 @@ async function fanEcho(input: EchoFanInput): Promise<number> {
     sender: input.sender,
     senderId: input.senderId,
     ...(input.self ? { self: true } : {}),
-    echo: { surface: input.surface, label: input.label, ...(capped.truncated ? { truncated: true } : {}) },
+    echo: { surface: input.surface, label: input.label, truncated: capped.truncated },
   });
 
   const results = await mapConcurrent(targets, ECHO_CONCURRENCY, (target) => writeEcho(input, target.id, content));

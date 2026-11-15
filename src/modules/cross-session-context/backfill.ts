@@ -208,7 +208,7 @@ export async function backfillSession(
             sender: row.sender,
             senderId: row.senderId,
             ...(row.self ? { self: true } : {}),
-            echo: { surface, label, ...(capped.truncated ? { truncated: true } : {}) },
+            echo: { surface, label, truncated: capped.truncated },
           }),
           processAfter: null,
           recurrence: null,
