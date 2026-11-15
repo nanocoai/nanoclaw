@@ -54,6 +54,7 @@ import type {
   AgentMailbox,
   InboundMailbox,
   MailboxHistoryMessage,
+  MailboxInboundHistoryMessage,
   MailboxSession,
   MailboxSessionKey,
   MailboxTimelineMessage,
@@ -288,8 +289,11 @@ export function wrapSqliteInbound(db: Database.Database, nextSequence = () => ne
     getInboundHistory: (limit) =>
       (
         db
-          .prepare('SELECT timestamp, kind, content FROM messages_in ORDER BY seq DESC LIMIT ?')
-          .all(limit) as MailboxHistoryMessage[]
+          .prepare(
+            'SELECT timestamp, kind, content, channel_type AS channelType, source_session_id AS sourceSessionId ' +
+              'FROM messages_in ORDER BY seq DESC LIMIT ?',
+          )
+          .all(limit) as MailboxInboundHistoryMessage[]
       ).map((row) => ({ ...row, timestamp: sqliteTimestamp(row.timestamp) })),
     getConversationRoot: () => {
       const row = db

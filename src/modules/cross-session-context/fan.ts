@@ -67,7 +67,18 @@ const CHAT_KINDS = new Set(['chat', 'chat-sdk']);
 
 /** Head-truncate to the cap, appending '…' when cut (contract: ≤500 chars). */
 export function truncateEchoText(text: string): string {
-  return text.length <= ECHO_TEXT_MAX_CHARS ? text : `${text.slice(0, ECHO_TEXT_MAX_CHARS)}…`;
+  return capEchoText(text).text;
+}
+
+/**
+ * truncateEchoText plus whether it cut. Writers record the flag in the echo
+ * payload (`echo.truncated`) so readers such as `ncl sessions history` never
+ * have to guess from length or a trailing '…'.
+ */
+export function capEchoText(text: string): { text: string; truncated: boolean } {
+  return text.length <= ECHO_TEXT_MAX_CHARS
+    ? { text, truncated: false }
+    : { text: `${text.slice(0, ECHO_TEXT_MAX_CHARS)}…`, truncated: true };
 }
 
 /** Echo-row id: namespaced by target session so the same source message can
@@ -253,12 +264,13 @@ async function fanEcho(input: EchoFanInput): Promise<number> {
   const targets = selectEchoTargets(candidates, input.sourceSessionId, input.sourceMessagingGroupId);
   if (targets.length === 0) return 0;
 
+  const capped = capEchoText(input.text);
   const content = JSON.stringify({
-    text: truncateEchoText(input.text),
+    text: capped.text,
     sender: input.sender,
     senderId: input.senderId,
     ...(input.self ? { self: true } : {}),
-    echo: { surface: input.surface, label: input.label },
+    echo: { surface: input.surface, label: input.label, ...(capped.truncated ? { truncated: true } : {}) },
   });
 
   const results = await mapConcurrent(targets, ECHO_CONCURRENCY, (target) => writeEcho(input, target.id, content));

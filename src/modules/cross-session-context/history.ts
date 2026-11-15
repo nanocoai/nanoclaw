@@ -17,10 +17,34 @@ import { getSession } from '../../db/sessions.js';
 import { withExistingMailboxSession } from '../../session-manager.js';
 import { formatLocalStamp } from '../../timezone.js';
 import type { CallerContext } from '../../cli/frame.js';
+import { ECHO_CHANNEL_TYPE, ECHO_SIBLING_SURFACE, ECHO_TASK_SURFACE } from './config.js';
 
 export const HISTORY_DEFAULT_LIMIT = 50;
 /** Per-line text cap in the human pipe-separated rendering. */
 export const HISTORY_TEXT_MAX_CHARS = 200;
+
+/** Echo surfaces written by the delivery hook (fan.ts), i.e. only after markDelivered. */
+const DELIVERED_SURFACES = new Set<string>([ECHO_SIBLING_SURFACE, ECHO_TASK_SURFACE]);
+
+/**
+ * Marks an inbound row that is a cross-session copy ('session-echo'), not a
+ * message this session received. Without it a copy of a sibling session's
+ * delivered reply reads as an incoming message nobody answered. Every field
+ * comes from what the echo writer recorded (fan.ts, backfill.ts); nothing is
+ * inferred from the text.
+ */
+export interface HistoryEcho {
+  /** The session the original appeared in; null for backfilled timeline copies. */
+  fromSession: string | null;
+  /** The writer's description of where it came from, e.g. "another thread with Alex". */
+  label: string | null;
+  /** The agent's own message (shown to it as "you"). */
+  self: boolean;
+  /** The agent's own message, copied by the delivery hook after it was delivered. */
+  delivered: boolean;
+  /** The writer cut the text; the full text is in the original conversation. */
+  truncated: boolean;
+}
 
 export interface HistoryRow {
   /** ISO-8601 UTC on the wire; the human renderer localizes. */
@@ -29,6 +53,8 @@ export interface HistoryRow {
   kind: string;
   sender: string;
   text: string;
+  /** Present only on cross-session copies. */
+  echo?: HistoryEcho;
 }
 
 function cell(value: string): string {
@@ -37,7 +63,14 @@ function cell(value: string): string {
   return value.replace(/\s+/g, ' ').replace(/\|/g, '/').trim().slice(0, HISTORY_TEXT_MAX_CHARS);
 }
 
-function parseText(raw: string): { text: string; sender: string | null } {
+interface ParsedContent {
+  text: string;
+  sender: string | null;
+  self: boolean;
+  echo: { surface: string | null; label: string | null; truncated: boolean } | null;
+}
+
+function parseText(raw: string): ParsedContent {
   try {
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     const text =
@@ -46,10 +79,45 @@ function parseText(raw: string): { text: string; sender: string | null } {
         : typeof parsed.action === 'string'
           ? `[${parsed.action}]`
           : '';
-    return { text, sender: typeof parsed.sender === 'string' ? parsed.sender : null };
+    const e = parsed.echo && typeof parsed.echo === 'object' ? (parsed.echo as Record<string, unknown>) : null;
+    return {
+      text,
+      sender: typeof parsed.sender === 'string' ? parsed.sender : null,
+      self: parsed.self === true,
+      echo: e
+        ? {
+            surface: typeof e.surface === 'string' ? e.surface : null,
+            label: typeof e.label === 'string' && e.label.length > 0 ? e.label : null,
+            truncated: e.truncated === true,
+          }
+        : null,
+    };
   } catch {
-    return { text: raw, sender: null };
+    return { text: raw, sender: null, self: false, echo: null };
   }
+}
+
+function toHistoryEcho(content: ParsedContent, sourceSessionId: string | null): HistoryEcho {
+  const surface = content.echo?.surface ?? null;
+  return {
+    fromSession: sourceSessionId,
+    label: content.echo?.label ?? null,
+    self: content.self,
+    delivered: content.self && surface !== null && DELIVERED_SURFACES.has(surface),
+    truncated: content.echo?.truncated ?? false,
+  };
+}
+
+/** Bracketed prefix for an echo row in the human rendering. Kept outside the text cap. */
+function echoMarker(echo: HistoryEcho): string {
+  const where = [echo.fromSession, echo.label].filter(Boolean).join(', ') || 'another conversation';
+  const what = echo.delivered
+    ? 'copy of your message, already delivered'
+    : echo.self
+      ? 'copy of an earlier message of yours'
+      : 'copy of a message received';
+  const cut = echo.truncated ? (echo.fromSession ? `; cut, full text in ${echo.fromSession}'s history` : '; cut') : '';
+  return `[${what} — ${where}${cut}]`;
 }
 
 /**
@@ -81,8 +149,16 @@ export async function sessionHistory(args: Record<string, unknown>, ctx: CallerC
 
   if (history) {
     for (const r of history.inbound) {
-      const { text, sender } = parseText(r.content);
-      rows.push({ timestamp: r.timestamp, direction: 'in', kind: r.kind, sender: sender ?? '', text });
+      const content = parseText(r.content);
+      const row: HistoryRow = {
+        timestamp: r.timestamp,
+        direction: 'in',
+        kind: r.kind,
+        sender: content.sender ?? '',
+        text: content.text,
+      };
+      if (r.channelType === ECHO_CHANNEL_TYPE) row.echo = toHistoryEcho(content, r.sourceSessionId);
+      rows.push(row);
     }
     for (const r of history.outbound) {
       const { text } = parseText(r.content);
@@ -98,13 +174,16 @@ export async function sessionHistory(args: Record<string, unknown>, ctx: CallerC
  * Human rendering: pipe-separated lines
  *   timestamp|direction(in/out)|kind|sender|text(first 200 chars)
  * with the timestamp in the install timezone (`timezone` injectable for
- * deterministic tests). `--json` bypasses this and gets the raw rows.
+ * deterministic tests). A cross-session copy's text starts with a bracketed
+ * marker saying where it came from; the marker does not count against the
+ * text cap. `--json` bypasses this and gets the raw rows, where copies carry
+ * an `echo` object instead.
  */
 export function formatHistoryLines(rows: HistoryRow[], timezone: string = TIMEZONE): string {
   return rows
-    .map(
-      (r) =>
-        `${formatLocalStamp(new Date(r.timestamp), timezone)}|${r.direction}|${r.kind}|${cell(r.sender)}|${cell(r.text)}`,
-    )
+    .map((r) => {
+      const marker = r.echo ? `${cell(echoMarker(r.echo))} ` : '';
+      return `${formatLocalStamp(new Date(r.timestamp), timezone)}|${r.direction}|${r.kind}|${cell(r.sender)}|${marker}${cell(r.text)}`;
+    })
     .join('\n');
 }

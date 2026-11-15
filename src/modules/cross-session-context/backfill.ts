@@ -32,10 +32,12 @@ import {
   ECHO_MAX_AGE_MS,
   ECHO_TIMELINE_SURFACE,
 } from './config.js';
-import { loadHotCandidates, selectEchoTargets, selectHotSessions, truncateEchoText } from './fan.js';
+import { capEchoText, loadHotCandidates, selectEchoTargets, selectHotSessions } from './fan.js';
 import { mapConcurrent } from './parallel.js';
 
 export const BACKFILL_LIMIT = 12;
+/** The newest backfilled entry is kept (nearly) whole: up to this many chars, cut without '…'. */
+export const BACKFILL_LAST_MAX_CHARS = 4000;
 
 interface BackfillRow {
   timestamp: string;
@@ -190,6 +192,9 @@ export async function backfillSession(
         // The most recent entry is what a short opener ("sure") is usually
         // answering — deliver it whole; earlier entries get the normal cap.
         const isLast = i === newest.length - 1;
+        const capped = isLast
+          ? { text: row.text.slice(0, BACKFILL_LAST_MAX_CHARS), truncated: row.text.length > BACKFILL_LAST_MAX_CHARS }
+          : capEchoText(row.text);
         await mailbox.insertMessage({
           id: `${session.id}:backfill:${batch}:${i}`,
           kind: 'chat',
@@ -198,11 +203,11 @@ export async function backfillSession(
           channelType: ECHO_CHANNEL_TYPE,
           threadId: null,
           content: JSON.stringify({
-            text: isLast ? row.text.slice(0, 4000) : truncateEchoText(row.text),
+            text: capped.text,
             sender: row.sender,
             senderId: row.senderId,
             ...(row.self ? { self: true } : {}),
-            echo: { surface, label },
+            echo: { surface, label, ...(capped.truncated ? { truncated: true } : {}) },
           }),
           processAfter: null,
           recurrence: null,

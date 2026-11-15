@@ -67,8 +67,8 @@ vi.mock('../../db/sessions.js', () => ({
   isTaskThread: (t: string | null) => typeof t === 'string' && t.startsWith('system:tasks'),
 }));
 
-const { backfillSession, BACKFILL_LIMIT } = await import('./backfill.js');
-const { ECHO_MAX_AGE_MS, HOT_SESSION_LIMIT } = await import('./config.js');
+const { backfillSession, BACKFILL_LIMIT, BACKFILL_LAST_MAX_CHARS } = await import('./backfill.js');
+const { ECHO_MAX_AGE_MS, ECHO_TEXT_MAX_CHARS, HOT_SESSION_LIMIT } = await import('./config.js');
 
 const NOW = Date.parse('2026-08-01T20:00:00.000Z');
 const AG = { id: 'ag-1', name: 'Pete', folder: 'pete', agent_provider: null, created_at: '' } as never;
@@ -124,6 +124,34 @@ beforeEach(() => {
   };
   recentSessions = [sess('sess-old', 'mg-dm', null)];
   topLevelSession = recentSessions[0];
+});
+
+describe('backfillSession — truncation is recorded, not left to guesswork', () => {
+  it('flags an earlier entry cut at the echo cap and the newest entry cut at its own longer cap', async () => {
+    siblings = {
+      'sess-old': {
+        root: { timestamp: iso(NOW - 50 * 60_000), content: chat('r'.repeat(ECHO_TEXT_MAX_CHARS + 10)) },
+        outbound: [{ timestamp: iso(NOW - 46 * 60_000), content: post('p'.repeat(BACKFILL_LAST_MAX_CHARS + 10)) }],
+      },
+    };
+    await backfillSession(AG, NEW_SESSION, DM_MG, { created: true, now: NOW });
+
+    const [earlier, newest] = written.map((w) => JSON.parse(w.content as string) as Record<string, any>);
+    expect(earlier.text).toBe(`${'r'.repeat(ECHO_TEXT_MAX_CHARS)}…`);
+    expect(earlier.echo.truncated).toBe(true);
+    // The newest entry keeps up to its own cap and is cut WITHOUT '…' — only the flag says so.
+    expect(newest.text).toBe('p'.repeat(BACKFILL_LAST_MAX_CHARS));
+    expect(newest.echo.truncated).toBe(true);
+  });
+
+  it('leaves the flag off entries it did not cut', async () => {
+    await backfillSession(AG, NEW_SESSION, DM_MG, { created: true, now: NOW });
+    for (const w of written) {
+      expect((JSON.parse(w.content as string) as { echo: Record<string, unknown> }).echo).not.toHaveProperty(
+        'truncated',
+      );
+    }
+  });
 });
 
 describe('backfillSession — new session', () => {

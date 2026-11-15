@@ -222,6 +222,25 @@ describe('selectHotSessions (bounded audience)', () => {
 });
 
 describe('fanInboundMessage', () => {
+  it('records echo.truncated when it cuts the text at the echo cap (readers never guess from the text)', async () => {
+    await fanInboundMessage({
+      session: SRC_DM,
+      mg: DM_MG,
+      messageId: 'msg-long:ag-1',
+      kind: 'chat',
+      channelType: 'slack',
+      content: chatContent('y'.repeat(ECHO_TEXT_MAX_CHARS + 50)),
+      timestamp: NOW,
+    });
+    const content = JSON.parse(readEchoRows('s-dm-t2')[0].content as string);
+    expect(content.text).toHaveLength(ECHO_TEXT_MAX_CHARS + 1);
+    expect(content.echo).toEqual({
+      surface: ECHO_SIBLING_SURFACE,
+      label: 'another conversation with Alex',
+      truncated: true,
+    });
+  });
+
   it('fans a DM trigger into same-mg sibling threads ONLY — never rooms, other DMs, or task sessions', async () => {
     const written = await fanInboundMessage({
       session: SRC_DM,
