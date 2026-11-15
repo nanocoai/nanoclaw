@@ -1032,9 +1032,6 @@ async function askLine(prompt: string): Promise<string | undefined> {
  * this pair exists to prevent. Until then there is nothing to protect, so the
  * wording stays on v1 and gets edited in place.
  *
- * Written as lines and joined for the record, so the text a person reads and
- * the text stored against their answer cannot drift apart.
- *
  * Echo is named because they are a second sender: somebody agreeing to hear
  * from NanoClaw has not thereby agreed to hear from whoever builds the image.
  */
@@ -1044,7 +1041,6 @@ const CONSENT_LINES = [
   'and project updates. I can unsubscribe at any time.',
   'What we do with your address: https://nanoclaw.dev/privacy',
 ];
-const CONSENT_TEXT = CONSENT_LINES.join(' ');
 
 /**
  * Ask once per account.
