@@ -26,7 +26,7 @@ vi.mock('pino', () => ({ pino: () => ({}) }));
 vi.mock('./status.js', () => ({ emitStatus: vi.fn() }));
 
 const { run } = await import('./whatsapp-auth.js');
-const { makeWASocket } = await import('@whiskeysockets/baileys');
+const { makeWASocket, useMultiFileAuthState } = await import('@whiskeysockets/baileys');
 const { emitStatus } = await import('./status.js');
 
 class Exit extends Error {
@@ -36,6 +36,26 @@ class Exit extends Error {
 }
 
 const blocks = () => vi.mocked(emitStatus).mock.calls;
+
+const DEVICE = '14155551234:7@s.whatsapp.net';
+const closedWith = (statusCode: number, message: string) =>
+  Object.assign(new Error(message), { output: { statusCode } });
+
+/** WhatsApp closes with 515 and the step reconnects; `savedId` is the device the reconnect reads from disk. */
+async function reconnectedAfter515(savedId?: string): Promise<(typeof sockets)[number]> {
+  const first = await connected();
+  const creds = savedId ? { me: { id: savedId } } : {};
+  vi.mocked(useMultiFileAuthState).mockResolvedValueOnce({ state: { creds, keys: {} }, saveCreds: vi.fn() } as never);
+  expect(() =>
+    first.ev.emit('connection.update', {
+      connection: 'close',
+      lastDisconnect: { error: closedWith(515, 'Stream Errored (restart required)') },
+    }),
+  ).not.toThrow();
+  await vi.waitFor(() => expect(makeWASocket).toHaveBeenCalledTimes(2));
+  expect(blocks()).toEqual([]);
+  return sockets[1];
+}
 
 async function connected(): Promise<(typeof sockets)[number]> {
   void run(['--method', 'qr']).catch(() => {});
@@ -95,5 +115,37 @@ describe('whatsapp-auth step', () => {
     expect(sock.end).toHaveBeenCalled();
     expect(blocks()).toEqual([['WHATSAPP_AUTH', { STATUS: 'success', PHONE: '14155551234' }]]);
     expect(() => vi.advanceTimersByTime(1000)).toThrow('process.exit(0)');
+  });
+
+  it('reconnects after a 515 and reports the link once the new socket opens', async () => {
+    const sock = await reconnectedAfter515(DEVICE);
+
+    sock.ev.emit('connection.update', { connection: 'open' });
+
+    expect(blocks()).toEqual([['WHATSAPP_AUTH', { STATUS: 'success', PHONE: '14155551234' }]]);
+    expect(() => vi.advanceTimersByTime(1000)).toThrow('process.exit(0)');
+  });
+
+  it.each([
+    [
+      'keeps the saved link when the reconnected socket closes after pairing',
+      DEVICE,
+      'WhatsApp closed the connection after pairing (428 Connection Closed). The link is saved in store/auth/, so run the step again to use it.',
+    ],
+    [
+      'still says before linking when the reconnect finds no saved device',
+      undefined,
+      'WhatsApp closed the connection before linking (428 Connection Closed). Clear store/auth/ and run the step again.',
+    ],
+  ])('%s', async (_name, savedId, error) => {
+    const sock = await reconnectedAfter515(savedId);
+
+    expect(() =>
+      sock.ev.emit('connection.update', {
+        connection: 'close',
+        lastDisconnect: { error: closedWith(428, 'Connection Closed') },
+      }),
+    ).toThrow('process.exit(1)');
+    expect(blocks()).toEqual([['WHATSAPP_AUTH', { STATUS: 'failed', ERROR: error }]]);
   });
 });

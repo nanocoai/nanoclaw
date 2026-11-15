@@ -189,6 +189,11 @@ If the handshake fails (`logged_out` or a timeout), the code expired — clear
 `store/auth/` and run the step again for a fresh one. See Troubleshooting.
 If it fails with `WhatsApp closed the connection before linking`, also clear
 `store/auth/` first: a requested pairing code leaves credentials behind.
+If it fails with `WhatsApp closed the connection after pairing`, keep
+`store/auth/`: the paired device is saved there, and running the step again
+reports it as already linked (it does not reconnect to check). If the phone does
+not list the device under Linked Devices, or the service later reports
+`logged_out`, clear `store/auth/` and link again.
 
 A successful link reports the number back as `bot_phone`. If it came back empty,
 the device never confirmed (an expired QR or pairing code), so don't restart or
