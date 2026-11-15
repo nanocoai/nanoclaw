@@ -279,9 +279,14 @@ function writeDockerConfig(file: string, config: DockerConfig): void {
   fs.renameSync(tmp, file);
 }
 
+/** What this setup installs: the helper source behind a header naming the node setup is running on. */
+function currentHelper(): string {
+  return renderHelper(fs.readFileSync(helperSourcePath(), 'utf-8'), process.execPath);
+}
+
 /** Write the helper binary and nothing else: docker's config is not this function's to touch. */
 function writeHelper(helperPath: string): void {
-  writeExecutable(helperPath, renderHelper(fs.readFileSync(helperSourcePath(), 'utf-8'), process.execPath));
+  writeExecutable(helperPath, currentHelper());
 
   // Proves the header resolves and that this binary is the one uninstall will
   // recognize — both silent failures otherwise, discovered mid-pull.
@@ -332,10 +337,11 @@ export function installCredentialHelper(options: CredHelperOptions = {}): CredHe
 }
 
 /**
- * Rewrite a helper docker is wired to, where it already is, so one written by
- * an older setup gets the current header before a pull needs it: sign-in is
- * skipped on a machine already signed in. Only the binary is written, never
- * docker's config. Not fatal: the pull that follows reports its own failure.
+ * Bring a helper docker is wired to up to date, where it already is: one from
+ * an older setup gets the current header before a pull needs it, since sign-in
+ * is skipped on a machine already signed in. One that is already current is
+ * left alone. Only the binary is written, never docker's config. Not fatal:
+ * the pull that follows reports its own failure.
  */
 export function refreshInstalledCredentialHelper(options: CredHelperOptions = {}): void {
   const helper = credentialHelperStatus(options);
@@ -346,6 +352,8 @@ export function refreshInstalledCredentialHelper(options: CredHelperOptions = {}
     // The target is checked itself: the link can point elsewhere by now.
     const target = fs.realpathSync(helper.helperPath);
     if (!isOurBinary(target)) return;
+    // Already what this setup would write: writing it again changes nothing.
+    if (fs.readFileSync(target, 'utf-8') === currentHelper()) return;
     const installed = fs.statSync(target);
     const source = fs.statSync(helperSourcePath());
     // A developer may link the installed helper straight to this checkout.

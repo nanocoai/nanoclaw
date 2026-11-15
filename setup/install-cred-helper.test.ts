@@ -191,6 +191,16 @@ describe('refreshInstalledCredentialHelper', () => {
     expect(version(helper, nodeDir('broken')).status).toBe(0);
   });
 
+  it('does not rewrite a helper that is already what this setup writes', () => {
+    const { binDir, helper, dockerConfigPath } = install(renderHelper(SOURCE, process.execPath));
+    const before = fs.statSync(helper);
+
+    refreshInstalledCredentialHelper({ binDir, dockerConfigPath });
+
+    // A rewrite goes through a rename, which gives the path a new inode.
+    expect(fs.statSync(helper).ino).toBe(before.ino);
+  });
+
   it('leaves the helper and docker alone when the registry is wired to something else', () => {
     const { binDir, helper, dockerConfigPath } = install(olderSetup, 'ecr-login');
     const config = fs.readFileSync(dockerConfigPath, 'utf-8');
