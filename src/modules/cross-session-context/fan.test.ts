@@ -31,6 +31,7 @@ import {
   selectHotSessions,
   settleEchoFans,
   truncateEchoText,
+  capEchoText,
 } from './fan.js';
 import {
   ECHO_CHANNEL_TYPE,
@@ -222,6 +223,14 @@ describe('selectHotSessions (bounded audience)', () => {
 });
 
 describe('fanInboundMessage', () => {
+  it('capEchoText never leaves half an emoji at the cut', () => {
+    const text = `${'a'.repeat(ECHO_TEXT_MAX_CHARS - 1)}😀tail`;
+    const capped = capEchoText(text);
+    expect(capped.truncated).toBe(true);
+    expect(capped.text).toBe(`${'a'.repeat(ECHO_TEXT_MAX_CHARS - 1)}…`);
+    expect(capEchoText(text, ECHO_TEXT_MAX_CHARS + 1, false).text).toBe(`${'a'.repeat(ECHO_TEXT_MAX_CHARS - 1)}😀`);
+  });
+
   it('records echo.truncated when it cuts the text at the echo cap (readers never guess from the text)', async () => {
     await fanInboundMessage({
       session: SRC_DM,
@@ -238,6 +247,7 @@ describe('fanInboundMessage', () => {
       surface: ECHO_SIBLING_SURFACE,
       label: 'another conversation with Alex',
       truncated: true,
+      delivered: false,
     });
   });
 
@@ -272,6 +282,7 @@ describe('fanInboundMessage', () => {
       surface: ECHO_SIBLING_SURFACE,
       label: 'another conversation with Alex',
       truncated: false,
+      delivered: false,
     });
 
     // Nothing else in the group hears it: not task sessions, not rooms, not
@@ -305,6 +316,7 @@ describe('fanInboundMessage', () => {
       surface: ECHO_SIBLING_SURFACE,
       label: 'another conversation in #pixel-room room',
       truncated: false,
+      delivered: false,
     });
     // The retired v1 targets stay silent.
     expect(readEchoRows('s-dm')).toHaveLength(0);
@@ -506,6 +518,7 @@ describe('fanOutboundMessage', () => {
       surface: ECHO_SIBLING_SURFACE,
       label: 'another conversation with Alex',
       truncated: false,
+      delivered: true,
     });
   });
 
@@ -579,6 +592,7 @@ describe('fanOutboundMessage', () => {
       surface: ECHO_SIBLING_SURFACE,
       label: 'this DM, posted by you from another conversation',
       truncated: false,
+      delivered: true,
     });
     expect(readEchoRows('s-task')).toHaveLength(0);
     expect(written).toBe(1);
@@ -630,6 +644,7 @@ describe('fanOutboundMessage', () => {
         surface: ECHO_TASK_SURFACE,
         label: 'this DM, posted by your scheduled task',
         truncated: false,
+        delivered: true,
       });
     }
     // Never other DMs, rooms, or task sessions.
@@ -657,6 +672,7 @@ describe('fanOutboundMessage', () => {
       surface: ECHO_TASK_SURFACE,
       label: 'this room, posted by your scheduled task',
       truncated: false,
+      delivered: true,
     });
     expect(readEchoRows('s-dm')).toHaveLength(0);
     expect(readEchoRows('s-dm-t2')).toHaveLength(0);

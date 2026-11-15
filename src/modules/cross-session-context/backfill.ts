@@ -208,7 +208,8 @@ export async function backfillSession(
             sender: row.sender,
             senderId: row.senderId,
             ...(row.self ? { self: true } : {}),
-            echo: { surface, label, truncated: capped.truncated },
+            // Read from sibling outboxes, which hold undelivered and failed sends too.
+            echo: { surface, label, truncated: capped.truncated, delivered: false },
           }),
           processAfter: null,
           recurrence: null,

@@ -145,6 +145,12 @@ describe('backfillSession — truncation is recorded, not left to guesswork', ()
     expect(newest.echo.truncated).toBe(true);
   });
 
+  it('records delivered: false — sibling outboxes also hold undelivered sends', async () => {
+    await backfillSession(AG, NEW_SESSION, DM_MG, { created: true, now: NOW });
+    const echoes = written.map((w) => (JSON.parse(w.content as string) as { echo: Record<string, unknown> }).echo);
+    expect(echoes.map((e) => e.delivered)).toEqual([false, false]);
+  });
+
   it('records the sibling session each entry was read from, so readers can find the full text', async () => {
     await backfillSession(AG, NEW_SESSION, DM_MG, { created: true, now: NOW });
     expect(written.map((w) => w.sourceSessionId)).toEqual(['sess-old', 'sess-old']);

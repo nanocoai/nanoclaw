@@ -174,6 +174,7 @@ describe('sessionHistory — cross-session copies (session-echo rows)', () => {
       source?: string | null;
       legacy?: boolean;
       rawText?: boolean;
+      delivered?: boolean;
     } = {},
   ) {
     const capped = opts.rawText ? { text, truncated: false } : capEchoText(text);
@@ -192,7 +193,13 @@ describe('sessionHistory — cross-session copies (session-echo rows)', () => {
         echo: {
           surface: opts.surface ?? ECHO_SIBLING_SURFACE,
           label: opts.label ?? 'another thread with Alex',
-          ...(opts.legacy ? {} : { truncated: capped.truncated }),
+          // As the writers record it: fan.ts sets delivered = self; backfill (timeline surfaces) always false.
+          ...(opts.legacy
+            ? {}
+            : {
+                truncated: capped.truncated,
+                delivered: opts.delivered ?? (opts.self === true && opts.surface !== ECHO_TIMELINE_SURFACE),
+              }),
         },
       }),
       trigger: false,
@@ -277,6 +284,52 @@ describe('sessionHistory — cross-session copies (session-echo rows)', () => {
     const rows = await sessionHistory({ id: SESS }, HOST);
     expect(rows[0].echo?.truncated).toBe(false);
     expect(formatHistoryLines(rows, 'UTC')).not.toContain('copy shortened');
+  });
+
+  it("trusts the writer's recorded delivered: false over the legacy surface inference", async () => {
+    await writeEcho('own-undelivered', '2026-08-01T10:00:00.000Z', 'sent but not delivered', {
+      self: true,
+      delivered: false,
+    });
+
+    const rows = await sessionHistory({ id: SESS }, HOST);
+    expect(rows[0].echo).toMatchObject({ self: true, delivered: false });
+    expect(formatHistoryLines(rows, 'UTC')).toContain('|copy-earlier|');
+  });
+
+  it('infers delivered for a legacy copy only from the delivery-hook surfaces', async () => {
+    await writeEcho('legacy-delivered', '2026-08-01T10:00:00.000Z', 'old delivered reply', {
+      self: true,
+      legacy: true,
+    });
+    await writeEcho('legacy-timeline', '2026-08-01T10:01:00.000Z', 'old catch-up', {
+      self: true,
+      legacy: true,
+      surface: ECHO_TIMELINE_SURFACE,
+      label: 'this DM, while this conversation was idle',
+    });
+
+    const rows = await sessionHistory({ id: SESS }, HOST);
+    expect(rows.map((r) => r.echo?.delivered)).toEqual([true, false]);
+  });
+
+  it('applies the legacy 4000-char cut shape only to backfill copies', async () => {
+    await writeEcho('legacy-4000-dm', '2026-08-01T10:00:00.000Z', 's'.repeat(4000), {
+      self: true,
+      legacy: true,
+      rawText: true,
+    });
+
+    const rows = await sessionHistory({ id: SESS }, HOST);
+    expect(rows[0].echo?.truncated).toBe(false);
+  });
+
+  it('never splits an emoji when the human view caps the text at 200 characters', async () => {
+    await writeInbound('in-emoji', '2026-08-01T10:00:00.000Z', `${'a'.repeat(HISTORY_TEXT_MAX_CHARS - 1)}😀tail`);
+
+    const line = formatHistoryLines(await sessionHistory({ id: SESS }, HOST), 'UTC');
+    expect(line.endsWith(`${'a'.repeat(HISTORY_TEXT_MAX_CHARS - 1)}😀`)).toBe(true);
+    expect(line).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
   });
 
   it('reads both legacy cut shapes as shortened when a copy predates the recorded flag', async () => {

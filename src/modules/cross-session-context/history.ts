@@ -18,26 +18,39 @@ import { withExistingMailboxSession } from '../../session-manager.js';
 import { formatLocalStamp } from '../../timezone.js';
 import type { CallerContext } from '../../cli/frame.js';
 import {
-  BACKFILL_LAST_MAX_CHARS,
+  ECHO_CHANNEL_TIMELINE_SURFACE,
   ECHO_CHANNEL_TYPE,
   ECHO_SIBLING_SURFACE,
   ECHO_TASK_SURFACE,
-  ECHO_TEXT_MAX_CHARS,
+  ECHO_TIMELINE_SURFACE,
 } from './config.js';
 
 export const HISTORY_DEFAULT_LIMIT = 50;
 /** Per-line text cap in the human pipe-separated rendering. */
 export const HISTORY_TEXT_MAX_CHARS = 200;
 
-/** Echo surfaces written by the delivery hook (fan.ts), i.e. only after markDelivered. */
-const DELIVERED_SURFACES = new Set<string>([ECHO_SIBLING_SURFACE, ECHO_TASK_SURFACE]);
+/**
+ * Legacy inference, for copies written before writers recorded `delivered`
+ * and `truncated`. Consumed echo rows are never pruned (prunePendingMessages
+ * removes only pending ones), so such copies can stay in a mailbox
+ * indefinitely and this fallback must stay. The caps are the values those
+ * writers used, fixed here on purpose: they must not follow later changes to
+ * ECHO_TEXT_MAX_CHARS or BACKFILL_LAST_MAX_CHARS.
+ */
+const LEGACY_ECHO_TEXT_MAX_CHARS = 500;
+const LEGACY_BACKFILL_LAST_MAX_CHARS = 4000;
+/** Surfaces only the delivery hook (fan.ts, after markDelivered) wrote with `self`. */
+const LEGACY_DELIVERED_SURFACES = new Set<string>([ECHO_SIBLING_SURFACE, ECHO_TASK_SURFACE]);
+/** Surfaces only backfill writes (where the newest entry was cut without '…'). */
+const BACKFILL_SURFACES = new Set<string>([ECHO_TIMELINE_SURFACE, ECHO_CHANNEL_TIMELINE_SURFACE]);
 
 /**
  * Marks an inbound row that is a cross-session copy ('session-echo'), not a
  * message this session received. Without it a copy of a sibling session's
  * delivered reply reads as an incoming message nobody answered. Every field
  * comes from what the echo writer recorded (fan.ts, backfill.ts); only copies
- * written before writers recorded `truncated` fall back to the old cut shapes.
+ * written before writers recorded `delivered`/`truncated` fall back to
+ * inference (see LEGACY_*).
  */
 export interface HistoryEcho {
   /** The session the original appeared in (null only on copies written before backfill recorded it). */
@@ -77,8 +90,14 @@ function oneLine(value: string): string {
   return value.replace(/\s+/g, ' ').replace(/\|/g, '/').trim();
 }
 
+/** Cap by code points, so a cut never splits a character such as an emoji. */
+function capChars(value: string, max: number): string {
+  const chars = Array.from(value);
+  return chars.length > max ? chars.slice(0, max).join('') : value;
+}
+
 function cell(value: string): string {
-  return oneLine(value).slice(0, HISTORY_TEXT_MAX_CHARS);
+  return capChars(oneLine(value), HISTORY_TEXT_MAX_CHARS);
 }
 
 /** Cap on the marker's source description (session id + label; a label can carry a long chat name). */
@@ -88,8 +107,13 @@ interface ParsedContent {
   text: string;
   sender: string | null;
   self: boolean;
-  /** `truncated` is null when the writer did not record it (copies written before it did). */
-  echo: { surface: string | null; label: string | null; truncated: boolean | null } | null;
+  /** `truncated` / `delivered` are null when the writer did not record them (older copies). */
+  echo: {
+    surface: string | null;
+    label: string | null;
+    truncated: boolean | null;
+    delivered: boolean | null;
+  } | null;
 }
 
 function parseText(raw: string): ParsedContent {
@@ -111,6 +135,7 @@ function parseText(raw: string): ParsedContent {
             surface: typeof e.surface === 'string' ? e.surface : null,
             label: typeof e.label === 'string' && e.label.length > 0 ? e.label : null,
             truncated: typeof e.truncated === 'boolean' ? e.truncated : null,
+            delivered: typeof e.delivered === 'boolean' ? e.delivered : null,
           }
         : null,
     };
@@ -120,13 +145,13 @@ function parseText(raw: string): ParsedContent {
 }
 
 /**
- * Copies written before writers recorded `truncated` carry no flag. They used
- * exactly two cut shapes: the echo cap plus '…' (fan.ts, earlier backfill
- * entries) and the newest backfill entry cut at BACKFILL_LAST_MAX_CHARS with
- * no '…'. Such copies age out within ECHO_MAX_AGE_DAYS.
+ * Older copies carry no `truncated` flag. Their writers used exactly two cut
+ * shapes: the echo cap plus '…' (fan.ts, earlier backfill entries), and the
+ * newest backfill entry cut at its cap with no '…' (backfill surfaces only).
  */
-function legacyTruncated(text: string): boolean {
-  return (text.length === ECHO_TEXT_MAX_CHARS + 1 && text.endsWith('…')) || text.length === BACKFILL_LAST_MAX_CHARS;
+function legacyTruncated(text: string, surface: string | null): boolean {
+  if (text.length === LEGACY_ECHO_TEXT_MAX_CHARS + 1 && text.endsWith('…')) return true;
+  return surface !== null && BACKFILL_SURFACES.has(surface) && text.length === LEGACY_BACKFILL_LAST_MAX_CHARS;
 }
 
 function toHistoryEcho(content: ParsedContent, sourceSessionId: string | null): HistoryEcho {
@@ -135,8 +160,8 @@ function toHistoryEcho(content: ParsedContent, sourceSessionId: string | null): 
     fromSession: sourceSessionId,
     label: content.echo?.label ?? null,
     self: content.self,
-    delivered: content.self && surface !== null && DELIVERED_SURFACES.has(surface),
-    truncated: content.echo?.truncated ?? legacyTruncated(content.text),
+    delivered: content.echo?.delivered ?? (content.self && surface !== null && LEGACY_DELIVERED_SURFACES.has(surface)),
+    truncated: content.echo?.truncated ?? legacyTruncated(content.text, surface),
   };
 }
 

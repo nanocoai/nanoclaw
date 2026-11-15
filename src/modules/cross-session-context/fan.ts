@@ -82,7 +82,9 @@ export function capEchoText(
   ellipsis = true,
 ): { text: string; truncated: boolean } {
   if (text.length <= max) return { text, truncated: false };
-  const head = text.slice(0, max);
+  // Never end on the first half of a surrogate pair (an emoji straddling the cap).
+  const last = text.charCodeAt(max - 1);
+  const head = text.slice(0, last >= 0xd800 && last <= 0xdbff ? max - 1 : max);
   return { text: ellipsis ? `${head}…` : head, truncated: true };
 }
 
@@ -275,7 +277,8 @@ async function fanEcho(input: EchoFanInput): Promise<number> {
     sender: input.sender,
     senderId: input.senderId,
     ...(input.self ? { self: true } : {}),
-    echo: { surface: input.surface, label: input.label, truncated: capped.truncated },
+    // `delivered`: only the delivery hook (fanOutbound, after markDelivered) sets `self`.
+    echo: { surface: input.surface, label: input.label, truncated: capped.truncated, delivered: input.self === true },
   });
 
   const results = await mapConcurrent(targets, ECHO_CONCURRENCY, (target) => writeEcho(input, target.id, content));
