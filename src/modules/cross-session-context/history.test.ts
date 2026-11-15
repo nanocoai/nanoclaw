@@ -272,6 +272,17 @@ describe('sessionHistory — cross-session copies (session-echo rows)', () => {
     );
   });
 
+  it('keeps "; cut" and the closing bracket when the label is very long (a long chat name)', async () => {
+    await writeEcho('out-sib-4', '2026-08-01T10:00:00.000Z', 'v'.repeat(ECHO_TEXT_MAX_CHARS + 10), {
+      self: true,
+      label: `another conversation with ${'L'.repeat(250)}`,
+    });
+
+    const line = formatHistoryLines(await sessionHistory({ id: SESS }, HOST), 'UTC');
+    expect(line).toContain(`…; cut, full text in ${SIBLING}'s history] vvv`);
+    expect(line).not.toContain('L'.repeat(100));
+  });
+
   it('keeps the marker outside the text cap, so a copy shows as much text as any other row', async () => {
     await writeEcho('out-sib-3', '2026-08-01T10:00:00.000Z', 'w'.repeat(300), { self: true });
 

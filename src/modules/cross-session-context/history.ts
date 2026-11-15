@@ -57,11 +57,17 @@ export interface HistoryRow {
   echo?: HistoryEcho;
 }
 
-function cell(value: string): string {
-  // Keep the one-line-per-message format intact: newlines and pipes in
-  // message text would shred downstream line/field parsing.
-  return value.replace(/\s+/g, ' ').replace(/\|/g, '/').trim().slice(0, HISTORY_TEXT_MAX_CHARS);
+/** Keep the one-line-per-message format intact: newlines and pipes would shred line/field parsing. */
+function oneLine(value: string): string {
+  return value.replace(/\s+/g, ' ').replace(/\|/g, '/').trim();
 }
+
+function cell(value: string): string {
+  return oneLine(value).slice(0, HISTORY_TEXT_MAX_CHARS);
+}
+
+/** Cap on the marker's source description (session id + label; a label can carry a long chat name). */
+const ECHO_WHERE_MAX_CHARS = 80;
 
 interface ParsedContent {
   text: string;
@@ -110,7 +116,9 @@ function toHistoryEcho(content: ParsedContent, sourceSessionId: string | null): 
 
 /** Bracketed prefix for an echo row in the human rendering. Kept outside the text cap. */
 function echoMarker(echo: HistoryEcho): string {
-  const where = [echo.fromSession, echo.label].filter(Boolean).join(', ') || 'another conversation';
+  const full = oneLine([echo.fromSession, echo.label].filter(Boolean).join(', ')) || 'another conversation';
+  // Cap only the variable part, so the status, "; cut" and the closing bracket always survive.
+  const where = full.length > ECHO_WHERE_MAX_CHARS ? `${full.slice(0, ECHO_WHERE_MAX_CHARS)}…` : full;
   const what = echo.delivered
     ? 'copy of your message, already delivered'
     : echo.self
@@ -182,7 +190,7 @@ export async function sessionHistory(args: Record<string, unknown>, ctx: CallerC
 export function formatHistoryLines(rows: HistoryRow[], timezone: string = TIMEZONE): string {
   return rows
     .map((r) => {
-      const marker = r.echo ? `${cell(echoMarker(r.echo))} ` : '';
+      const marker = r.echo ? `${oneLine(echoMarker(r.echo))} ` : '';
       return `${formatLocalStamp(new Date(r.timestamp), timezone)}|${r.direction}|${r.kind}|${cell(r.sender)}|${marker}${cell(r.text)}`;
     })
     .join('\n');
