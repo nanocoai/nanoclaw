@@ -9,6 +9,7 @@ import { setTimeout as sleep } from 'timers/promises';
 
 import { log } from '../src/log.js';
 import { getDefaultContainerImage } from '../src/install-slug.js';
+import { refreshInstalledCredentialHelper } from './install-cred-helper.js';
 import { commandExists, getPlatform } from './platform.js';
 import { emitStatus } from './status.js';
 
@@ -295,6 +296,7 @@ export async function run(args: string[]): Promise<void> {
   let errorCode = '';
   if (source === 'pull') {
     log.info('Acquiring container image from registry', { image });
+    refreshInstalledCredentialHelper();
     const pullRes = spawnSync('bash', [path.join(projectRoot, 'container', 'pull.sh')], {
       cwd: projectRoot,
       stdio: 'inherit',
