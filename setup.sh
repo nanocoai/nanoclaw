@@ -102,6 +102,37 @@ install_jq() {
 
 # --- pnpm install ---
 
+# Sets PNPM_STATE to:
+#   ok        pnpm runs
+#   missing   no pnpm on PATH
+#   broken    on PATH but fails to run, e.g. a shim from an older corepack that
+#             doesn't know npm's current signing key ("Cannot find matching keyid")
+#   rejected  corepack refused the download because its signature or checksum
+#             is wrong — a sign of tampering, so nothing else may install pnpm
+# Each probe starts pnpm, so re-run it only after a step that can change it.
+probe_pnpm() {
+  local out
+  hash -r 2>/dev/null || true
+  if ! command -v pnpm >/dev/null 2>&1; then
+    PNPM_STATE="missing"
+  elif out=$(pnpm --version 2>&1); then
+    PNPM_STATE="ok"
+  else
+    case "$out" in
+      *"Signature does not match"* | *"Mismatch hashes"*) PNPM_STATE="rejected" ;;
+      *) PNPM_STATE="broken" ;;
+    esac
+  fi
+  if [ -n "${out:-}" ]; then
+    printf '%s\n' "$out" >> "$LOG_FILE"
+  fi
+  log "pnpm: $PNPM_STATE"
+}
+
+pnpm_installable() {
+  [ "$PNPM_STATE" = "missing" ] || [ "$PNPM_STATE" = "broken" ]
+}
+
 install_deps() {
   DEPS_OK="false"
   NATIVE_OK="false"
@@ -118,31 +149,40 @@ install_deps() {
   # is invisible but corepack still blocks on stdin. Auto-accept.
   export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 
+  probe_pnpm
+
   # A previous run (or the manual recovery printed below) may have left pnpm
   # in ~/.local/bin, which a fresh login shell doesn't always have on PATH.
-  if ! command -v pnpm >/dev/null 2>&1 && [ -x "$HOME/.local/bin/pnpm" ]; then
+  if pnpm_installable && [ -x "$HOME/.local/bin/pnpm" ]; then
     export PATH="$HOME/.local/bin:$PATH"
     log "Found pnpm in $HOME/.local/bin — prepended to PATH"
+    probe_pnpm
   fi
 
   # Preferred path: enable corepack so `pnpm` shim lands on PATH.
   if command -v corepack >/dev/null 2>&1; then
     log "Enabling corepack"
     corepack enable >> "$LOG_FILE" 2>&1 || true
+    probe_pnpm
+
+    # The two retries below fix a shim corepack could not write. A shim that
+    # was written but fails to run is corepack itself failing, which the same
+    # corepack can't fix from another directory, so that case goes straight
+    # to the npm fallback.
 
     # With system-wide Node (e.g. apt-installed to /usr/bin), corepack puts
     # its shims next to the node binary, so a non-root user gets EACCES on
     # /usr/bin/pnpm. Retry into ~/.local/bin, which needs no root — nanoclaw.sh
     # and the service unit already carry it on PATH.
-    if ! command -v pnpm >/dev/null 2>&1; then
+    if [ "$PNPM_STATE" = "missing" ]; then
       local user_bin="$HOME/.local/bin"
       log "pnpm not on PATH after corepack enable — retrying into $user_bin"
       if mkdir -p "$user_bin" >> "$LOG_FILE" 2>&1 \
           && corepack enable --install-directory "$user_bin" pnpm >> "$LOG_FILE" 2>&1 \
           && [ -x "$user_bin/pnpm" ]; then
         export PATH="$user_bin:$PATH"
-        hash -r 2>/dev/null || true
         log "corepack pnpm shim installed in $user_bin"
+        probe_pnpm
       else
         log "corepack enable into $user_bin failed"
       fi
@@ -154,10 +194,12 @@ install_deps() {
     # land in a user-writable prefix, and a sudo retry there would create
     # root-owned shims inside /opt/homebrew that later break brew — so the
     # retry is Linux-only.
-    if ! command -v pnpm >/dev/null 2>&1 && [ "$PLATFORM" = "linux" ] \
+    if [ "$PNPM_STATE" = "missing" ] && [ "$PLATFORM" = "linux" ] \
         && command -v sudo >/dev/null 2>&1; then
       log "pnpm still not on PATH — retrying corepack enable with sudo -n"
-      if ! sudo -n corepack enable >> "$LOG_FILE" 2>&1; then
+      if sudo -n corepack enable >> "$LOG_FILE" 2>&1; then
+        probe_pnpm
+      else
         log "sudo -n corepack enable failed (sudo needs a password, or corepack errored)"
       fi
     fi
@@ -168,7 +210,10 @@ install_deps() {
   # Fallback: some Node installs (older nvm, node@22 keg-only, minimal
   # distro packages) don't include corepack. Install pnpm directly at the
   # version pinned via package.json's `packageManager` field.
-  if ! command -v pnpm >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+  if pnpm_installable && command -v npm >/dev/null 2>&1; then
+    if [ "$PNPM_STATE" = "broken" ]; then
+      log "pnpm at $(command -v pnpm) fails to run — falling back to npm"
+    fi
     local pinned
     pinned=$(grep -E '"packageManager"' "$PROJECT_ROOT/package.json" 2>/dev/null \
       | head -1 \
@@ -189,6 +234,7 @@ install_deps() {
         log "pnpm install via user-owned prefix also failed"
       fi
     fi
+    probe_pnpm
   fi
 
   # `npm install -g` writes to npm's global prefix, which isn't always on the
@@ -196,19 +242,28 @@ install_deps() {
   # ~/.npm-global` to avoid sudo, or on Linux where /usr/local/bin isn't in
   # PATH. Discover the prefix and prepend its bin dir so `command -v pnpm`
   # sees the new install.
-  if ! command -v pnpm >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+  if pnpm_installable && command -v npm >/dev/null 2>&1; then
     local npm_prefix
-    npm_prefix=$(npm config get prefix 2>/dev/null)
+    npm_prefix=$(npm config get prefix 2>/dev/null) || true
     if [ -n "$npm_prefix" ] && [ -x "$npm_prefix/bin/pnpm" ]; then
       export PATH="$npm_prefix/bin:$PATH"
       log "Prepended npm prefix bin to PATH: $npm_prefix/bin"
+      probe_pnpm
     fi
   fi
 
-  if ! command -v pnpm >/dev/null 2>&1; then
-    log "pnpm not on PATH after corepack + npm fallback"
+  if [ "$PNPM_STATE" = "rejected" ]; then
+    log "corepack rejected the pnpm download — not falling back to npm"
+    echo "Corepack refused the pnpm download: its signature or checksum did not verify."
+    echo "Setup won't install pnpm another way. Check COREPACK_NPM_REGISTRY and any proxy"
+    echo "between this machine and registry.npmjs.org, then re-run setup."
+    return
+  fi
+
+  if [ "$PNPM_STATE" != "ok" ]; then
+    log "pnpm not runnable after corepack + npm fallback"
     echo "Could not install pnpm without root. Run this, then re-run setup:"
-    if command -v corepack >/dev/null 2>&1; then
+    if [ "$PNPM_STATE" = "missing" ] && command -v corepack >/dev/null 2>&1; then
       echo "  mkdir -p ~/.local/bin && corepack enable --install-directory ~/.local/bin pnpm"
     else
       echo "  npm install -g pnpm@${pinned:-<version from package.json packageManager>} --prefix ~/.local"

@@ -68,6 +68,17 @@ function run(args: string[], env: Record<string, string> = {}): { status: number
 const calls = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n') : []);
 const field = (out: string, name: string) => out.match(new RegExp(`^${name}: (.*)$`, 'm'))?.[1];
 
+function setupFn(name: string): string {
+  const source = fs.readFileSync(path.join(ROOT, 'setup.sh'), 'utf8');
+  const start = source.indexOf(`${name}() {`);
+  expect(start, `${name}() not found in setup.sh`).toBeGreaterThanOrEqual(0);
+  return source.slice(start, source.indexOf('\n}', start) + 2);
+}
+
+function addTools(...tools: string[]): void {
+  for (const tool of tools) fs.symlinkSync(which(tool), path.join(bin, tool));
+}
+
 describe('node-version.sh', () => {
   it.each([
     ['22.23.4', true, '22'],
@@ -138,6 +149,29 @@ describe('setup/install-node.sh', () => {
     expect(calls()).toContain('brew install node@22');
   });
 
+  it.each([
+    ['24.22.1', true],
+    ['26.13.0', false],
+  ])('links Node %s corepack into ~/.local/bin only when it ships one (%s)', (version, shipsCorepack) => {
+    const home = path.join(tmp, 'home');
+    const localBin = path.join(home, '.local', 'bin');
+    const lts = path.join(tmp, 'lts', 'bin');
+    fakeNode(bin, '20.19.5');
+    stub(bin, 'uname', 'echo Linux');
+    fakeNode(lts, version);
+    for (const tool of ['npm', 'npx', ...(shipsCorepack ? ['corepack'] : [])]) stub(lts, tool, 'exit 0');
+    // node runs through the ~/.local/bin symlink, so fakeNode reads its version from there.
+    fs.mkdirSync(localBin, { recursive: true });
+    fs.writeFileSync(path.join(localBin, '.node-version'), `v${version}\n`);
+    stub(bin, 'uvx', `ln -s ${path.dirname(lts)} "$5"`);
+    const r = run([INSTALL_NODE]);
+    expect(field(r.out, 'STATUS')).toBe('installed');
+    expect(fs.readdirSync(localBin).includes('corepack')).toBe(shipsCorepack);
+    if (shipsCorepack) {
+      expect(fs.readlinkSync(path.join(localBin, 'corepack'))).toBe(path.join(home, 'node', 'bin', 'corepack'));
+    }
+  });
+
   it('prints no NOTE on macOS when the old Node is the keg node@22 that brew upgrades', () => {
     stub(bin, 'uname', 'echo Darwin');
     fakeNode(keg, '22.20.0');
@@ -154,17 +188,14 @@ describe('setup/install-node.sh', () => {
 
 describe('setup.sh ensure_node', () => {
   function ensureNode(): string {
-    const source = fs.readFileSync(path.join(ROOT, 'setup.sh'), 'utf8');
-    const fn = (name: string) => {
-      const start = source.indexOf(`${name}() {`);
-      expect(start, `${name}() not found in setup.sh`).toBeGreaterThanOrEqual(0);
-      return source.slice(start, source.indexOf('\n}', start) + 2);
-    };
     const project = path.join(tmp, 'project');
     stub(path.join(project, 'setup'), 'install-node.sh', `echo install-node >> ${log}; exit 1`);
-    for (const tool of ['bash', 'sed', 'tee']) fs.symlinkSync(which(tool), path.join(bin, tool));
+    addTools('bash', 'sed', 'tee');
     const prelude = `source ${LIB}; PROJECT_ROOT=${project}; LOG_FILE=${tmp}/boot.log; log() { :; }`;
-    return run(['-c', `${prelude}\n${fn('check_node')}\n${fn('ensure_node')}\nensure_node; echo "NODE_OK=$NODE_OK"`])
+    return run([
+      '-c',
+      `${prelude}\n${setupFn('check_node')}\n${setupFn('ensure_node')}\nensure_node; echo "NODE_OK=$NODE_OK"`,
+    ])
       .out.trim()
       .split('\n')
       .pop() as string;
@@ -184,6 +215,152 @@ describe('setup.sh ensure_node', () => {
     expect(ensureNode()).toBe('NODE_OK=false');
     expect(calls()).toEqual(['install-node']);
   });
+});
+
+// What corepack prints when it can't verify the pnpm it downloaded, by cause.
+const SHIM_ERRORS = {
+  bad: 'Cannot find matching keyid',
+  tampered: 'Signature does not match',
+  corrupt: 'Mismatch hashes. Expected abc, got def',
+};
+type ShimKind = 'ok' | keyof typeof SHIM_ERRORS;
+
+describe('setup.sh install_deps', () => {
+  let home: string;
+  let localBin: string;
+  const shim = (kind: ShimKind) => path.join(tmp, 'shims', `pnpm-${kind}`);
+
+  beforeEach(() => {
+    home = path.join(tmp, 'home');
+    localBin = path.join(home, '.local', 'bin');
+    fs.mkdirSync(path.join(tmp, 'project'));
+    fs.writeFileSync(path.join(tmp, 'project', 'package.json'), '{\n  "packageManager": "pnpm@10.34.5"\n}\n');
+    const shims = path.join(tmp, 'shims');
+    stub(shims, 'pnpm-ok', `echo "pnpm $*" >> ${log}; [ "$1" = --version ] && echo 10.34.5; exit 0`);
+    for (const [kind, error] of Object.entries(SHIM_ERRORS)) {
+      stub(shims, `pnpm-${kind}`, `echo "pnpm $*" >> ${log}; echo 'Internal Error: ${error}' >&2; exit 1`);
+    }
+    addTools('grep', 'head', 'sed');
+  });
+
+  /** `corepack enable` links a pnpm shim next to itself, or into --install-directory; `.readonly` there fails it. */
+  function fakeCorepack(dir: string, kind: ShimKind): void {
+    stub(
+      dir,
+      'corepack',
+      [
+        `echo "corepack $*" >> ${log}`,
+        '[ "$1" = enable ] || exit 0',
+        'dir="${0%/*}"',
+        '[ "${2:-}" = --install-directory ] && dir="$3"',
+        '[ -e "$dir/.readonly" ] && { echo "EACCES: permission denied" >&2; exit 1; }',
+        `ln -sf ${shim(kind)} "$dir/pnpm"`,
+      ].join('\n'),
+    );
+  }
+
+  /** `npm install -g pnpm@x [--prefix p]` links a working pnpm into `<prefix>/bin`. */
+  function fakeNpm(dir: string, prefix: string, fails = false): void {
+    stub(
+      dir,
+      'npm',
+      [
+        `echo "npm $*" >> ${log}`,
+        fails ? 'exit 1' : '',
+        'case "$1" in',
+        `  config) echo ${prefix} ;;`,
+        `  install) p=${prefix}; [ "\${4:-}" = --prefix ] && p="$5"; mkdir -p "$p/bin" && ln -sf ${shim('ok')} "$p/bin/pnpm" ;;`,
+        'esac',
+      ].join('\n'),
+    );
+  }
+
+  function installDeps(pathDirs: string[]): { out: string; deps: string | undefined } {
+    const prelude =
+      `set -euo pipefail; PROJECT_ROOT=${tmp}/project; LOG_FILE=${tmp}/boot.log; ` +
+      'PLATFORM=linux; NODE_OK=true; log() { :; }';
+    const fns = ['probe_pnpm', 'pnpm_installable', 'install_deps'].map(setupFn).join('\n');
+    const script = `${prelude}\n${fns}\ninstall_deps; echo "DEPS_OK=$DEPS_OK"`;
+    const r = run(['-c', script], { PATH: [...pathDirs, bin].join(':') });
+    return { out: r.out, deps: r.out.trim().split('\n').pop() };
+  }
+
+  const npmCalls = () => calls().filter((c) => c.startsWith('npm '));
+
+  it('probes a working pnpm twice and leaves it in place', () => {
+    const nodeBin = path.join(tmp, 'node', 'bin');
+    fakeCorepack(nodeBin, 'ok');
+    fs.symlinkSync(shim('ok'), path.join(nodeBin, 'pnpm'));
+    fakeNpm(nodeBin, path.join(tmp, 'node'));
+    expect(installDeps([nodeBin]).deps).toBe('DEPS_OK=true');
+    expect(calls().filter((c) => c === 'pnpm --version')).toHaveLength(2);
+    expect(npmCalls()).toEqual([]);
+  });
+
+  it("uses the new Node's corepack ahead of an older one later on PATH", () => {
+    const stale = path.join(tmp, 'usr-local', 'bin');
+    fakeCorepack(stale, 'bad');
+    fakeCorepack(localBin, 'ok');
+    fakeNpm(localBin, path.join(home, 'node'));
+    expect(installDeps([localBin, stale]).deps).toBe('DEPS_OK=true');
+    expect(calls()).toContain('pnpm install --frozen-lockfile');
+    expect(npmCalls()).toEqual([]);
+  });
+
+  it('falls back to npm, without re-running corepack, when its pnpm shim fails to run', () => {
+    const stale = path.join(tmp, 'usr-local', 'bin');
+    const nodePnpm = path.join(home, 'node', 'bin', 'pnpm');
+    fakeCorepack(stale, 'bad');
+    fakeNpm(localBin, path.join(home, 'node'));
+    // install-node.sh links ~/.local/bin/pnpm before the target exists.
+    fs.symlinkSync(nodePnpm, path.join(localBin, 'pnpm'));
+    expect(installDeps([localBin, stale]).deps).toBe('DEPS_OK=true');
+    expect(calls().filter((c) => c.startsWith('corepack '))).toEqual(['corepack enable']);
+    expect(npmCalls()).toContain('npm install -g pnpm@10.34.5');
+    // nanoclaw.sh runs ~/.local/bin/pnpm next, so it must not be a broken corepack shim.
+    expect(fs.readlinkSync(path.join(localBin, 'pnpm'))).toBe(nodePnpm);
+  });
+
+  it("puts npm's global prefix on PATH when the npm install lands outside it", () => {
+    const nodeBin = path.join(tmp, 'node', 'bin');
+    fakeNpm(nodeBin, path.join(tmp, 'npm-global'));
+    expect(installDeps([nodeBin]).deps).toBe('DEPS_OK=true');
+    expect(npmCalls()).toEqual(['npm install -g pnpm@10.34.5', 'npm config get prefix']);
+  });
+
+  it('retries corepack into ~/.local/bin when it cannot write next to itself', () => {
+    const sysBin = path.join(tmp, 'usr', 'bin');
+    fakeCorepack(sysBin, 'ok');
+    fs.writeFileSync(path.join(sysBin, '.readonly'), '');
+    expect(installDeps([sysBin]).deps).toBe('DEPS_OK=true');
+    expect(calls()).toContain(`corepack enable --install-directory ${localBin} pnpm`);
+    expect(fs.readlinkSync(path.join(localBin, 'pnpm'))).toBe(shim('ok'));
+  });
+
+  it('prints the npm recovery command instead of aborting when pnpm is broken and npm fails', () => {
+    const stale = path.join(tmp, 'usr-local', 'bin');
+    fs.mkdirSync(stale, { recursive: true });
+    fs.symlinkSync(shim('bad'), path.join(stale, 'pnpm'));
+    fakeNpm(stale, path.join(tmp, 'usr-local'), true);
+    const r = installDeps([stale]);
+    expect(r.deps).toBe('DEPS_OK=false');
+    expect(r.out).toContain('  npm install -g pnpm@10.34.5 --prefix ~/.local');
+  });
+
+  it.each(['tampered', 'corrupt'] as const)(
+    'stops without npm or corepack retries when corepack rejects a %s pnpm download',
+    (kind) => {
+      const nodeBin = path.join(tmp, 'node', 'bin');
+      fakeCorepack(nodeBin, kind);
+      fakeNpm(nodeBin, path.join(tmp, 'node'));
+      const r = installDeps([nodeBin]);
+      expect(r.deps).toBe('DEPS_OK=false');
+      expect(r.out).toContain('Corepack refused the pnpm download: its signature or checksum did not verify.');
+      expect(calls().filter((c) => c.startsWith('corepack '))).toEqual(['corepack enable']);
+      expect(npmCalls()).toEqual([]);
+      expect(fs.readFileSync(path.join(tmp, 'boot.log'), 'utf8')).toContain(SHIM_ERRORS[kind]);
+    },
+  );
 });
 
 describe('node_use_patched', () => {
@@ -210,20 +387,31 @@ describe('node_use_patched', () => {
 });
 
 describe('nanoclaw.sh hand-off', () => {
-  it('hands setup:auto the keg-only node@22 over an older PATH Node on macOS', () => {
-    // The PATH recovery before `exec pnpm ... setup:auto`, which registers the
-    // service with `command -v node`; the exec is swapped for a print of it.
+  // The PATH recovery before `exec pnpm ... setup:auto`; the exec is swapped for a print.
+  function handOff(): string {
     const source = fs.readFileSync(path.join(ROOT, 'nanoclaw.sh'), 'utf8');
     const start = source.indexOf('# setup.sh may have just installed Node/npm/pnpm');
     const end = source.indexOf('exec pnpm --silent run setup:auto "$@"');
     expect(start, 'hand-off section not found in nanoclaw.sh').toBeGreaterThanOrEqual(0);
+    const prelude = `set -euo pipefail; PROJECT_ROOT=${ROOT}; red() { printf '%s' "$1"; }; write_abort_entry() { :; }`;
+    return run(['-c', `${prelude}\n${source.slice(start, end)}echo "HANDOFF $(command -v node)"`]).out.trim();
+  }
+
+  it('hands setup:auto the keg-only node@22 over an older PATH Node on macOS', () => {
+    // setup:auto registers the service with `command -v node`.
     fakeNode(bin, '24.10.0');
     fakeNode(keg, '22.23.4');
     stub(bin, 'uname', 'echo Darwin');
     stub(bin, 'brew', `[ "$1" = --prefix ] && echo ${path.dirname(keg)}`);
-    const prelude = `set -euo pipefail; PROJECT_ROOT=${ROOT}; red() { printf '%s' "$1"; }; write_abort_entry() { :; }`;
-    const r = run(['-c', `${prelude}\n${source.slice(start, end)}echo "HANDOFF $(command -v node)"`]);
-    expect(r.out.trim()).toBe(`HANDOFF ${keg}/node`);
+    expect(handOff()).toBe(`HANDOFF ${keg}/node`);
+  });
+
+  it('reaches the hand-off when npm cannot report its global prefix', () => {
+    fakeNode(bin, '22.23.4');
+    stub(bin, 'uname', 'echo Linux');
+    stub(bin, 'npm', `echo "npm $*" >> ${log}; exit 1`);
+    expect(handOff()).toBe(`HANDOFF ${bin}/node`);
+    expect(calls()).toEqual(['npm config get prefix']);
   });
 });
 
