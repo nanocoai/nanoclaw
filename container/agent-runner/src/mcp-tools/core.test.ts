@@ -205,3 +205,56 @@ describe('send_message / send_file — thread for a channel destination', () => 
     expect(await sendBoth()).toEqual([null, null]);
   });
 });
+
+describe('send_message / send_file — in_reply_to for an agent destination', () => {
+  // The host routes an a2a message back to the session that sent the row
+  // named by in_reply_to (src/modules/agent-to-agent/agent-route.ts), so the
+  // stamp must reference a message *from the destination agent*.
+  let fsSpies: Array<{ mockRestore(): void }> = [];
+
+  beforeEach(() => {
+    fsSpies = [
+      spyOn(fs, 'existsSync').mockReturnValue(true),
+      spyOn(fs, 'mkdirSync').mockReturnValue(undefined),
+      spyOn(fs, 'copyFileSync').mockReturnValue(undefined),
+    ];
+  });
+
+  afterEach(() => {
+    for (const spy of fsSpies) spy.mockRestore();
+  });
+
+  async function sendBothToPeer(): Promise<Array<string | null>> {
+    await sendMessage.handler({ to: 'peer', text: 'hello' });
+    const file = (await sendFile.handler({ to: 'peer', path: '/tmp/report.txt' })) as { isError?: boolean };
+    expect(file.isError).toBeUndefined();
+    return getUndeliveredMessages().map((m) => m.in_reply_to);
+  }
+
+  it("relay: a turn started by another agent's message stamps the destination agent's own latest message", async () => {
+    // peer asked us; we asked a third agent; its answer started this turn and
+    // we pass the answer on to peer. Stamping the third agent's message sent
+    // the host to one of the third agent's sessions, and the answer landed in
+    // peer's newest session instead of the one that asked.
+    seedInbound('a2a-from-peer', 'agent', 'ag-peer', null);
+    seedInbound('a2a-from-third', 'agent', 'ag-third', null);
+    publishReplyRoute({ inReplyTo: 'a2a-from-third', channelType: 'agent', platformId: 'ag-third' });
+
+    expect(await sendBothToPeer()).toEqual(['a2a-from-peer', 'a2a-from-peer']);
+  });
+
+  it('a reply to the agent whose message started the turn stamps that message, even if a newer one arrived mid-turn', async () => {
+    seedInbound('a2a-question', 'agent', 'ag-peer', null);
+    seedInbound('a2a-followup', 'agent', 'ag-peer', null);
+    publishReplyRoute({ inReplyTo: 'a2a-question', channelType: 'agent', platformId: 'ag-peer' });
+
+    expect(await sendBothToPeer()).toEqual(['a2a-question', 'a2a-question']);
+  });
+
+  it('falls back to the batch stamp for an agent that has never messaged this session', async () => {
+    seedInbound('chat-1', 'slack', 'C999', null);
+    publishReplyRoute({ inReplyTo: 'chat-1', channelType: 'slack', platformId: 'C999' });
+
+    expect(await sendBothToPeer()).toEqual(['chat-1', 'chat-1']);
+  });
+});
