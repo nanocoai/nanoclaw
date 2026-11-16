@@ -613,9 +613,9 @@ interface SplitProgress {
 /**
  * How many parts of one split reply are posted, kept in the bridge's state
  * store so a delivery retry, even after a restart, resumes there. Kept after
- * the last part too, for a retry after a failed delivery ack. The digest makes
- * a changed text, limit or file set start over. Best effort: on a store error
- * the retry posts from part 1, as before.
+ * the last part too, for a retry after a failed delivery ack (the outbox files
+ * are gone by then, so they stay out of the digest). A changed text or limit
+ * starts over. Best effort: on a store error the retry posts from part 1.
  */
 class SplitProgressStore {
   private readonly key: string;
@@ -626,12 +626,10 @@ class SplitProgressStore {
     deliveryId: string,
     threadId: string,
     chunks: string[],
-    files: { filename: string; data: Buffer }[] | undefined,
   ) {
     this.key = `split-progress:${deliveryId}`;
-    const fileSet = (files ?? []).map((f) => [f.filename, f.data.length]);
     this.digest = createHash('sha256')
-      .update(JSON.stringify([threadId, chunks, fileSet]))
+      .update(JSON.stringify([threadId, chunks]))
       .digest('hex');
   }
 
@@ -1339,7 +1337,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         // posting from part 1 again repeats what the user already has.
         const progress =
           chunks.length > 1 && message.deliveryId && state
-            ? new SplitProgressStore(state, message.deliveryId, tid, chunks, fileUploads)
+            ? new SplitProgressStore(state, message.deliveryId, tid, chunks)
             : undefined;
         const resumed = await progress?.read();
         let firstId = resumed?.firstId;

@@ -257,24 +257,20 @@ describe('createChatSdkBridge.deliver — retry after a failed part', () => {
     expect(markdownOf(posts)).toEqual(['part one', 'part two', 'first', 'second', 'third']);
   });
 
-  it('starts over, with the files, when the file set differs from the failed attempt', async () => {
-    const { adapter, posts } = fakeAdapter((call) => call === 2);
+  it('a retry after the delivery ack failed posts nothing, though the outbox files are gone by then', async () => {
+    const { adapter, posts } = fakeAdapter();
     const bridge = await splitBridge(adapter, LIMIT);
     const data = Buffer.from('file bytes');
 
-    await expect(bridge.deliver('stub:C1', null, textMessage(TEXT, { deliveryId: 'out-1' }))).rejects.toThrow();
     await bridge.deliver(
       'stub:C1',
       null,
       textMessage(TEXT, { files: [{ filename: 'report.pdf', data }], deliveryId: 'out-1' }),
     );
+    const id = await bridge.deliver('stub:C1', null, textMessage(TEXT, { deliveryId: 'out-1' }));
 
-    expect(posts.map((p) => p.message)).toEqual([
-      { markdown: 'first part' },
-      { markdown: 'first part', files: [{ data, filename: 'report.pdf' }] },
-      { markdown: 'second part' },
-      { markdown: 'third part' },
-    ]);
+    expect(posts).toHaveLength(3);
+    expect(id).toBe('id-1');
   });
 
   it('posts from part 1 on every attempt when the send has no delivery id', async () => {
