@@ -58,14 +58,18 @@ function phoneFromId(id?: string | null): string {
   return id.split(':')[0].split('@')[0];
 }
 
+/** Saved credentials, or undefined when creds.json is missing or not valid JSON. */
+function savedCreds(): { account?: unknown } | undefined {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(AUTH_DIR, 'creds.json'), 'utf-8')) as { account?: unknown };
+  } catch {
+    return undefined;
+  }
+}
+
 /** True when saved credentials hold a finished pairing (only a real pairing writes `account`). */
 function pairingSaved(): boolean {
-  try {
-    const creds = JSON.parse(fs.readFileSync(path.join(AUTH_DIR, 'creds.json'), 'utf-8')) as { account?: unknown };
-    return Boolean(creds.account);
-  } catch {
-    return false;
-  }
+  return Boolean(savedCreds()?.account);
 }
 
 /** Read the linked number from saved credentials (the skipped / already-authed path). */
@@ -160,6 +164,12 @@ function parseArgs(args: string[]): { method: AuthMethod; phone?: string } {
 export async function run(args: string[]): Promise<void> {
   const { method, phone } = parseArgs(args);
 
+  // Baileys rewrites creds.json in place, so a running service can leave it half
+  // written for a moment: read it again before judging it.
+  const credsFile = path.join(AUTH_DIR, 'creds.json');
+  for (let tries = 0; tries < 5 && fs.existsSync(credsFile) && !savedCreds(); tries++) {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
   if (pairingSaved()) {
     emitStatus('WHATSAPP_AUTH', {
       STATUS: 'skipped',
@@ -171,7 +181,7 @@ export async function run(args: string[]): Promise<void> {
   }
   // Creds without `account` are not a link, and can't be reused: a requested pairing
   // code saves `me`, and Baileys then logs in as that `me` instead of linking.
-  if (fs.existsSync(path.join(AUTH_DIR, 'creds.json'))) {
+  if (fs.existsSync(credsFile)) {
     emitStatus('WHATSAPP_AUTH', {
       STATUS: 'failed',
       ERROR:

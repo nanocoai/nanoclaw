@@ -167,10 +167,29 @@ describe('whatsapp-auth step', () => {
     vi.mocked(fs.existsSync).mockReturnValue(true);
     disk = saved;
 
-    await expect(run(['--method', 'pairing-code', '--phone', PHONE])).rejects.toThrow('process.exit(1)');
+    const result = run(['--method', 'pairing-code', '--phone', PHONE]).catch((err: unknown) => err);
+    await vi.advanceTimersByTimeAsync(1000);
 
+    expect(await result).toBeInstanceOf(Exit);
     expect(makeWASocket).not.toHaveBeenCalled();
     expect(blocks()).toEqual(failed(NO_LINK));
+  });
+
+  it('reads a creds.json that a running service is rewriting again before judging it', async () => {
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    // Baileys rewrites creds.json in place: for a moment it is empty.
+    disk = '';
+
+    const result = run(['--method', 'qr']);
+    await vi.advanceTimersByTimeAsync(100);
+    disk = JSON.stringify(PAIRED);
+    await vi.advanceTimersByTimeAsync(200);
+    await result;
+
+    expect(makeWASocket).not.toHaveBeenCalled();
+    expect(blocks()).toEqual([
+      ['WHATSAPP_AUTH', { STATUS: 'skipped', REASON: 'already-authenticated', AUTH_DIR: expect.any(String), PHONE }],
+    ]);
   });
 
   it.each(METHODS)('%s: fails at once with the reason when WhatsApp refuses the connection', async (method) => {
