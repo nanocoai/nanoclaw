@@ -284,6 +284,21 @@ describe('createChatSdkBridge.deliver — retry after a failed part', () => {
     expect(await progressRows()).toBe(0);
   });
 
+  it('a failed progress read does not overwrite the progress it could not see', async () => {
+    const { adapter, posts } = fakeAdapter((call) => call === 7);
+    const bridge = await splitBridge(adapter, FIVE_LIMIT);
+    const message = textMessage(FIVE, { deliveryId: 'out-1' });
+
+    await bridge.deliver('stub:C1', null, message);
+    // Retry after a failed ack: the read fails, so part 1 goes out again, then part 2 fails.
+    vi.spyOn(SqliteStateAdapter.prototype, 'get').mockRejectedValueOnce(new Error('db locked'));
+    await expect(bridge.deliver('stub:C1', null, message)).rejects.toThrow('post 7 failed');
+    const id = await bridge.deliver('stub:C1', null, message);
+
+    expect(markdownOf(posts)).toEqual([...ALL_FIVE, 'part one']);
+    expect(id).toBe('id-1');
+  });
+
   it('still delivers, from part 1, when the state store fails', async () => {
     const { adapter, posts } = fakeAdapter();
     const bridge = await splitBridge(adapter, FIVE_LIMIT);

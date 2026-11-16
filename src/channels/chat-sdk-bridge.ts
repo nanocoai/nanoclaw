@@ -620,6 +620,8 @@ interface SplitProgress {
 class SplitProgressStore {
   private readonly key: string;
   private readonly digest: string;
+  /** Set when the read failed: saving then could overwrite progress this attempt never saw. */
+  private unread = false;
 
   constructor(
     private readonly state: SqliteStateAdapter,
@@ -635,12 +637,14 @@ class SplitProgressStore {
 
   async read(): Promise<SplitProgress | undefined> {
     const saved = await this.attempt('read', () => this.state.get<SplitProgress>(this.key));
+    if (saved === undefined) this.unread = true; // a missing key reads as null
     if (!saved || saved.digest !== this.digest) return undefined;
     log.info('Resuming a split reply after the parts already posted', { key: this.key, posted: saved.posted });
     return saved;
   }
 
   async save(posted: number, firstId: string | undefined): Promise<void> {
+    if (this.unread) return;
     const progress: SplitProgress = { digest: this.digest, posted, firstId };
     await this.attempt('save', () => this.state.set(this.key, progress, SPLIT_PROGRESS_TTL_MS));
   }
