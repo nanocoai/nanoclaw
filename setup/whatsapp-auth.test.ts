@@ -193,7 +193,7 @@ describe('whatsapp-auth step', () => {
   async function pairedWithPendingWrites(method: Method) {
     const writes: Array<{ resolve: () => void; reject: (err: Error) => void }> = [];
     const creds: Creds = {};
-    // Each write saves the creds as they are when it is called.
+    // Each write saves the creds as they are when it starts.
     const saveCreds = () => {
       const snapshot = JSON.stringify(creds);
       return new Promise<void>((resolve, reject) =>
@@ -249,6 +249,12 @@ describe('whatsapp-auth step', () => {
       (w: Writes) => (w[0].resolve(), w[1].reject(enospc)),
       NOT_SAVED,
     ],
+    [
+      'pairing-code',
+      'the pairing write cuts creds.json short and fails',
+      (w: Writes) => (w[0].resolve(), (disk = '{"me":'), w[1].reject(enospc)),
+      NOT_SAVED,
+    ],
   ] as const)('%s: after pairing, reports by the creds writes when %s', async (method, _name, settle, message) => {
     const writes = await closedAfterPairing(method);
 
@@ -268,6 +274,20 @@ describe('whatsapp-auth step', () => {
 
     await vi.waitFor(() => expect(process.exit).toHaveBeenCalledWith(1));
     expect(blocks()).toEqual(failed(AFTER('428 Connection Closed')));
+  });
+
+  it('qr: a write still running after 5 s means the link may not be saved', async () => {
+    const { sock, writes } = await pairedWithPendingWrites('qr');
+    writes[0].resolve();
+    // A later creds update starts a write that hangs; it could still overwrite creds.json.
+    sock.ev.emit('creds.update', { me: { id: `${PHONE}:7@s.whatsapp.net`, lid: '123456:7@lid' } });
+    expect(writes).toHaveLength(2);
+
+    close(sock, 428, 'Connection Closed')();
+    await vi.advanceTimersByTimeAsync(5000);
+
+    await vi.waitFor(() => expect(process.exit).toHaveBeenCalledWith(1));
+    expect(blocks()).toEqual(failed(NOT_SAVED('428 Connection Closed')));
   });
 
   it('qr: a pairing write that failed before the close is still reported as not saved', async () => {

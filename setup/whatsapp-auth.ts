@@ -114,14 +114,15 @@ function printPairingCard(code: string): void {
   );
 }
 
-/** Resolves once `work` settles, or after `ms` if it hangs. */
-function settled(work: Promise<unknown>, ms: number): Promise<void> {
+/** True once `work` settles; false if it is still running after `ms`. */
+function settled(work: Promise<unknown>, ms: number): Promise<boolean> {
   return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    void work.finally(() => {
+    const timer = setTimeout(() => resolve(false), ms);
+    const done = (): void => {
       clearTimeout(timer);
-      resolve();
-    });
+      resolve(true);
+    };
+    void work.then(done, done);
   });
 }
 
@@ -301,10 +302,11 @@ export async function run(args: string[]): Promise<void> {
               );
             } else {
               // A paired device stays in store/auth/ for the next run, so once the
-              // creds writes settle, report what creds.json actually holds.
-              void settled(saving, 5000).then(() =>
+              // creds writes settle, report what creds.json actually holds. A write
+              // still running after 5 s could yet overwrite it, so that counts as not saved.
+              void settled(saving, 5000).then((done) =>
                 fail(
-                  pairingSaved()
+                  done && pairingSaved()
                     ? `WhatsApp closed the connection after pairing (${detail}). The link is saved in store/auth/, so run the step again to use it.`
                     : `WhatsApp closed the connection after pairing (${detail}), but the link was not saved. Clear store/auth/ and run the step again.`,
                 ),
