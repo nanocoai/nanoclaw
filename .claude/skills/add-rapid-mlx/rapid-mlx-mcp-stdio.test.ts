@@ -3,13 +3,13 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
 const requests: Array<{ path: string; body?: unknown }> = [];
-let fail = false;
+let failure: { status: number; body: string } | undefined;
 const http = Bun.serve({
   port: 0,
   async fetch(req) {
     const path = new URL(req.url).pathname;
     requests.push({ path, body: req.method === 'POST' ? await req.json() : undefined });
-    if (fail) return new Response('private server diagnostic', { status: 503 });
+    if (failure) return new Response(failure.body, { status: failure.status });
     if (path === '/v1/models') return Response.json({ data: [{ id: 'test-model', context_window: 8192 }] });
     if (path === '/v1/chat/completions') return Response.json({ choices: [{ message: { content: 'Paris' } }] });
     if (path === '/health') return Response.json({ status: 'ok' });
@@ -87,14 +87,39 @@ describe('Rapid-MLX MCP transport and tools', () => {
     expect(result.isError).toBe(true);
     expect(requests.length).toBe(count);
   });
-  test('reports HTTP errors without exposing response bodies', async () => {
-    fail = true;
+  test.each([
+    { status: 400, body: 'Invalid host header', detail: 'HTTP 400' },
+    { status: 503, body: 'private server diagnostic', detail: 'HTTP 503' },
+    {
+      status: 404,
+      body: JSON.stringify({ error: { code: 'model_not_found', message: 'private prompt and reply' } }),
+      detail: 'HTTP 404 model_not_found',
+    },
+    {
+      status: 404,
+      body: JSON.stringify({ detail: { error: { code: 'model_not_found', message: 'private prompt and reply' } } }),
+      detail: 'HTTP 404 model_not_found',
+    },
+    { status: 500, body: '{malformed private diagnostic', detail: 'HTTP 500' },
+    { status: 500, body: JSON.stringify({ error: { code: 42 } }), detail: 'HTTP 500' },
+    { status: 500, body: JSON.stringify({ error: { code: 'private prompt and reply' } }), detail: 'HTTP 500' },
+    { status: 500, body: JSON.stringify({ error: { code: 'x'.repeat(65) } }), detail: 'HTTP 500' },
+  ])('reports only status and a machine code for $status / $body', async ({ status, body, detail }) => {
+    failure = { status, body };
     try {
-      const result = await client.callTool({ name: 'rapid_mlx_list_models', arguments: {} });
+      const result = await client.callTool({
+        name: 'rapid_mlx_chat',
+        arguments: { model: 'test-model', message: 'private prompt and reply' },
+      });
       expect(result.isError).toBe(true);
-      expect(JSON.stringify(result)).not.toContain('private server diagnostic');
+      expect(result.content).toEqual([
+        {
+          type: 'text',
+          text: `Rapid-MLX request failed (${detail}). Check the server, model ID and configured base URL.`,
+        },
+      ]);
     } finally {
-      fail = false;
+      failure = undefined;
     }
   });
 });

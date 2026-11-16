@@ -5,6 +5,12 @@ import { z } from 'zod';
 
 const baseUrl = (process.env.RAPID_MLX_BASE_URL || 'http://localhost:8000/v1').replace(/\/$/, '');
 
+class HttpError extends Error {
+  constructor(status: number, code?: string) {
+    super(`HTTP ${status}${code ? ` ${code}` : ''}`);
+  }
+}
+
 // Keep the deadline active through response-body consumption as well as headers.
 async function request(url: string, body?: unknown): Promise<unknown> {
   const response = await fetch(url, {
@@ -13,7 +19,18 @@ async function request(url: string, body?: unknown): Promise<unknown> {
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     signal: AbortSignal.timeout(120_000),
   });
-  if (!response.ok) throw new Error(`Rapid-MLX HTTP ${response.status}`);
+  if (!response.ok) {
+    let code: string | undefined;
+    try {
+      const data = await response.json();
+      const candidate = data?.error?.code ?? data?.detail?.error?.code;
+      // Only a bounded machine code may leave the response body.
+      if (typeof candidate === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(candidate)) code = candidate;
+    } catch {
+      // Plain-text errors (including host rejection) still report their status.
+    }
+    throw new HttpError(response.status, code);
+  }
   return response.json();
 }
 
@@ -26,10 +43,12 @@ function toolResult(text: string) {
 async function run(action: () => Promise<string>) {
   try {
     return toolResult(await action());
-  } catch {
+  } catch (error) {
     // Do not echo server error bodies, URLs or prompts into tool errors.
     return {
-      ...toolResult('Rapid-MLX request failed. Check the server, model ID and configured base URL.'),
+      ...toolResult(
+        `Rapid-MLX request failed${error instanceof HttpError ? ` (${error.message})` : ''}. Check the server, model ID and configured base URL.`,
+      ),
       isError: true,
     };
   }

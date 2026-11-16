@@ -13,13 +13,21 @@ description: Add Rapid-MLX local model MCP tools so a NanoClaw agent can list mo
 
 ## Pre-flight
 
-Check the host's server at the default OpenAI base URL, `http://localhost:8000/v1`:
+Check the host's server at `http://localhost:8000/v1`, sending the Host header the agent container uses:
 
 ```bash
-curl --fail http://localhost:8000/v1/models
+curl --fail -H 'Host: host.docker.internal:8000' http://localhost:8000/v1/models
 ```
 
-If installation is needed, use `brew install rapid-mlx`. Start a model with `rapid-mlx serve qwen3.5-4b-4bit`. When the port is omitted, Rapid-MLX picks the first free port in 8000–8009; use the port printed by the server. An explicit `--port 8000` keeps the port fixed. Reuse an existing server when one is running.
+If installation is needed, use `brew install rapid-mlx`. Start a model with:
+
+```bash
+rapid-mlx serve qwen3.5-4b-4bit --port 8000 --trusted-hosts localhost 127.0.0.1 '[::1]' host.docker.internal
+```
+
+The port must stay 8000 because the registration below uses it. Without an explicit port, Rapid-MLX can select another free port. Reuse an existing server only if it uses port 8000 and trusts `host.docker.internal`; rerun the pre-flight check. The quoted IPv6 host works in zsh. `--trusted-hosts` replaces the defaults (`localhost`, `127.0.0.1`, `[::1]`, `*.localhost`); the command retains the explicit loopback hosts and adds Docker's host name. Host checking is enabled by default since Rapid-MLX 0.16.1.
+
+Rapid-MLX sends anonymous usage telemetry by default. To turn it off, run `rapid-mlx telemetry off`.
 
 Ask which agent group should receive the tools. Use `ncl groups list` and `ncl groups config get --id <group-id>` to inspect its current configuration. Preserve all other MCP servers. Record this skill after any skill that configures the same group, so recipe replay can register its tools last.
 
@@ -67,6 +75,7 @@ The standalone MCP test does not verify group registration, a running agent rest
 ## Troubleshooting
 
 - **Connection failure:** verify the host's `/v1/models`, the actual server port, and reachability of `host.docker.internal` from the agent container. Set `RAPID_MLX_BASE_URL` to that reachable base URL and re-register.
+- **400 Invalid host header:** start Rapid-MLX with `--trusted-hosts` including `host.docker.internal`, as in Pre-flight, and retry the Host-header check.
 - **Unauthorized:** configure the selected credential gateway for the server origin, then retry.
 - **Model not found:** list served models and use the exact ID, such as `mlx-community/Qwen3.5-4B-MLX-4bit`.
 - **Tools absent:** inspect the group's `rapid_mlx` MCP config, confirm the copied source exists, and restart that group.
