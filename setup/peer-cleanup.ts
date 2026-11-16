@@ -20,9 +20,10 @@
  * unload and delete the orphaned config file outright.
  *
  * Healthy peers are left alone — multiple installs can coexist fine now that
- * container-reaper is label-scoped. The exception is a registration that starts
+ * container-reaper is label-scoped. The exception is a service setup wrote for
  * this same checkout under another name, left behind when NANOCLAW_INSTALL_ID
  * changes: one checkout runs one host, so it is retired like a dead one.
+ * Hand-written services are left alone.
  */
 import { execFileSync } from 'child_process';
 import fs from 'fs';
@@ -73,7 +74,7 @@ export function cleanupUnhealthyPeers(projectRoot: string = process.cwd()): Peer
  */
 function reapPeer(
   result: PeerCleanupResult,
-  peer: { label: string; configPath: string },
+  peer: { label: string; configPath: string; dropIns?: string },
   unload: () => void,
   kind: string,
   missingTarget?: string,
@@ -94,13 +95,15 @@ function reapPeer(
     return;
   }
   try {
+    // A systemd unit's drop-in folder goes first, so a failure never leaves it orphaned.
+    if (peer.dropIns) fs.rmSync(peer.dropIns, { recursive: true, force: true });
     fs.rmSync(peer.configPath, { force: true });
     log.info(`Removed ${what}`, {
       label: peer.label,
       configPath: peer.configPath,
       ...(missingTarget ? { missingTarget } : {}),
     });
-    (missingTarget ? result.removed : result.retired).push(peer);
+    (missingTarget ? result.removed : result.retired).push({ label: peer.label, configPath: peer.configPath });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log.warn(`Failed to remove ${what}`, { label: peer.label, err: message });
@@ -133,7 +136,7 @@ function cleanupLaunchdPeers(projectRoot: string): PeerCleanupResult {
     if (label === ownLabel) continue;
 
     const missingTarget = deadLaunchdTarget(plistPath);
-    if (missingTarget || launchdStartsEntry(plistPath, entry)) {
+    if (missingTarget || (isSetupName(label, 'com.nanoclaw-v2-') && launchdStartsEntry(plistPath, entry))) {
       reapPeer(
         result,
         { label, configPath: plistPath },
@@ -234,11 +237,11 @@ function cleanupSystemdPeers(projectRoot: string): PeerCleanupResult {
     if (unit === ownUnit) continue;
 
     const unitPath = path.join(unitDir, `${unit}.service`);
-    const missingTarget = deadSystemdTarget(unitPath);
-    if (missingTarget || systemdStartsEntry(unitPath, entry)) {
+    const missingTarget = deadSystemdTarget(unitPath, unit);
+    if (missingTarget || (isSetupName(unit, 'nanoclaw-v2-') && systemdStartsEntry(unitPath, unit, entry))) {
       reapPeer(
         result,
-        { label: unit, configPath: unitPath },
+        { label: unit, configPath: unitPath, dropIns: `${unitPath}.d` },
         () => {
           execFileSync('systemctl', ['--user', 'disable', '--now', `${unit}.service`], { stdio: 'pipe' });
           execFileSync('systemctl', ['--user', 'daemon-reload'], { stdio: 'pipe' });
@@ -296,33 +299,86 @@ function probeSystemdPeer(unit: string): PeerStatus | null {
 /**
  * Returns the program path a systemd unit launches when that program no longer
  * exists on disk (a dead registration), or undefined when the unit is
- * unreadable, has an unrecognized shape, or its target still exists.
+ * unreadable, has an unrecognized shape, or its target still exists. Its
+ * drop-ins (`systemctl edit`) count too, so do drop-ins elsewhere through the
+ * ExecStart systemd loaded.
  */
-function deadSystemdTarget(unitPath: string): string | undefined {
-  let unit: string;
-  try {
-    unit = fs.readFileSync(unitPath, 'utf-8');
-  } catch {
-    return undefined;
+function deadSystemdTarget(unitPath: string, unit: string): string | undefined {
+  const files = dropInFiles(unitPath);
+  if (!files) return undefined;
+  const lines: string[] = [];
+  for (const file of [unitPath, ...files]) {
+    const text = readConfig(file);
+    if (text === undefined) return undefined;
+    lines.push(...text.split('\n'));
   }
-  // ExecStart=<nodePath> <projectRoot>/dist/index.js
-  const target = /^ExecStart=\S+\s+(\S+\/dist\/index\.js)\s*$/m.exec(unit)?.[1];
-  if (!target) return undefined;
-  return fs.existsSync(target) ? undefined : target;
+  const target = missingEntry(lines);
+  return target && loadedExecStarts(unit).every((line) => missingEntry([line])) ? target : undefined;
+}
+
+/** The entry when every ExecStart is `<nodePath> <projectRoot>/dist/index.js` and that file is gone. */
+function missingEntry(lines: string[]): string | undefined {
+  // A bare `ExecStart=` only resets the list; any other shape could still run.
+  const targets = lines
+    .filter((line) => /^\s*ExecStart\s*=\s*\S/.test(line))
+    .map((line) => /^ExecStart=\S+\s+(\S+\/dist\/index\.js)\s*$/.exec(line)?.[1]);
+  return targets.some((target) => !target || fs.existsSync(target)) ? undefined : targets[0];
+}
+
+/** `<unit>.service.d/*.conf`, the files systemd reads; [] without the folder, undefined when it can't be listed. */
+function dropInFiles(unitPath: string): string[] | undefined {
+  const dir = `${unitPath}.d`;
+  try {
+    return fs
+      .readdirSync(dir)
+      .filter((f) => f.endsWith('.conf'))
+      .map((f) => path.join(dir, f));
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'ENOENT' ? [] : undefined;
+  }
+}
+
+/** ExecStart as systemd loaded it, drop-ins from any folder included; none when systemctl can't say. */
+function loadedExecStarts(unit: string): string[] {
+  try {
+    const output = execFileSync('systemctl', ['--user', 'show', '--property=ExecStart', '--value', `${unit}.service`], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      encoding: 'utf-8',
+    });
+    // systemctl-show.c prints argv[] unescaped, then " ; ignore_errors="; a path may hold " ; ".
+    const starts = [...output.matchAll(/argv\[\]=(.*?) ; ignore_errors=/g)].map((m) => `ExecStart=${m[1].trim()}`);
+    // Output it can't read might start anything.
+    return starts.length > 0 || output.trim() === '' ? starts : ['ExecStart=?'];
+  } catch {
+    return [];
+  }
 }
 
 // ---- same checkout under another name ----------------------------------------
+
+/** The install id charset in src/install-slug.ts; the 8-hex hash fits it too. */
+const SETUP_SLUG = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+
+/** Setup writes `<prefix><slug>` only; other names were written by hand. */
+function isSetupName(name: string, prefix: string): boolean {
+  return name.startsWith(prefix) && SETUP_SLUG.test(name.slice(prefix.length));
+}
 
 /** ProgramArguments holds the entry point as its own <string>. */
 function launchdStartsEntry(plistPath: string, entry: string): boolean {
   return readConfig(plistPath)?.includes(`<string>${entry}</string>`) ?? false;
 }
 
-/** ExecStart=<nodePath> <entry>; the leading space keeps the match exact. */
-function systemdStartsEntry(unitPath: string, entry: string): boolean {
-  return (readConfig(unitPath) ?? '')
-    .split('\n')
-    .some((line) => line.startsWith('ExecStart=') && line.trimEnd().endsWith(` ${entry}`));
+/**
+ * ExecStart=<nodePath> <entry>; the leading space keeps the match exact. Setup
+ * writes no drop-ins; the `<unit>.service.d/` that `systemctl edit` writes may
+ * point ExecStart elsewhere, so it rules the unit out, and so does any other
+ * ExecStart systemd loaded.
+ */
+function systemdStartsEntry(unitPath: string, unit: string, entry: string): boolean {
+  if (fs.existsSync(`${unitPath}.d`)) return false;
+  const starts = (line: string) => line.startsWith('ExecStart=') && line.trimEnd().endsWith(` ${entry}`);
+  return (readConfig(unitPath) ?? '').split('\n').some(starts) && loadedExecStarts(unit).every(starts);
 }
 
 function launchdLoaded(label: string, uid: number): boolean {
