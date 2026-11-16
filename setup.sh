@@ -201,7 +201,9 @@ install_deps() {
   # sees the new install.
   if ! command -v pnpm >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
     local npm_prefix
-    npm_prefix=$(npm config get prefix 2>/dev/null)
+    # Guarded: under `set -e` a failing npm would end the bootstrap right here,
+    # before the lines below say why pnpm is missing.
+    npm_prefix=$(npm config get prefix 2>/dev/null) || log "npm config get prefix failed"
     if [ -n "$npm_prefix" ] && [ -x "$npm_prefix/bin/pnpm" ]; then
       export PATH="$PATH:$npm_prefix/bin"
       log "Appended npm prefix bin to PATH: $npm_prefix/bin"
