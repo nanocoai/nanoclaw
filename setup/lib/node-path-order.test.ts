@@ -1,6 +1,7 @@
 /**
- * Which node setup.sh and nanoclaw.sh leave first on PATH. Runs the real
- * scripts under bash on a PATH holding only stubs and a few coreutils.
+ * Which node setup.sh, nanoclaw.sh and migrate-v2.sh leave first on PATH, and
+ * where they find pnpm. Runs the real scripts under bash on a PATH holding
+ * only stubs and a few coreutils.
  */
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -25,7 +26,7 @@ function which(cmd: string): string {
 }
 
 const BASH = which('bash');
-const TOOLS = ['bash', 'grep', 'head', 'sed', 'tee'].map((tool) => [tool, which(tool)] as const);
+const TOOLS = ['bash', 'cp', 'grep', 'head', 'mkdir', 'sed', 'tee'].map((tool) => [tool, which(tool)] as const);
 
 let tmp: string;
 let bin: string;
@@ -116,15 +117,57 @@ describe('node_use_patched', () => {
 });
 
 describe('setup.sh install_deps', () => {
+  const OLDER = '22.20.0';
+  const pnpmStub = () => `echo "pnpm $1 node=$(node --version)" >> ${log}`;
+
+  // Under setup.sh's own shell options, with the package.json it reads the pnpm pin from.
+  function installDeps(): { status: number | null; out: string } {
+    fs.writeFileSync(path.join(tmp, 'package.json'), '{\n  "packageManager": "pnpm@10.0.0"\n}\n');
+    return run(`set -euo pipefail
+PROJECT_ROOT=${tmp}; LOG_FILE=${tmp}/boot.log; PLATFORM=linux NODE_OK=true
+log() { echo "$*" >> "$LOG_FILE"; }
+${setupFunction('install_deps')}
+install_deps
+echo "DEPS_OK=$DEPS_OK"`);
+  }
+
   it("runs pnpm install with the checked Node, not an npm prefix's older one", () => {
     const prefix = path.join(tmp, 'npm-prefix');
     fakeNode(bin, '24.22.1');
-    fakeNode(path.join(prefix, 'bin'), '22.20.0');
-    stub(path.join(prefix, 'bin'), 'pnpm', `echo "pnpm $1 node=$(node --version)" >> ${log}`);
+    fakeNode(path.join(prefix, 'bin'), OLDER);
+    stub(path.join(prefix, 'bin'), 'pnpm', pnpmStub());
     stub(bin, 'npm', `[ "$*" = "config get prefix" ] && echo ${prefix} || :`);
-    run(`PROJECT_ROOT=${tmp}; LOG_FILE=${tmp}/boot.log; PLATFORM=linux NODE_OK=true; log() { :; }
-${setupFunction('install_deps')}
-install_deps`);
+    installDeps();
+    expect(calls()).toEqual(['pnpm install node=v24.22.1']);
+  });
+
+  it('keeps the checked Node first when pnpm is found in ~/.local/bin', () => {
+    fakeNode(bin, '24.22.1');
+    fakeNode(localBin, OLDER);
+    stub(localBin, 'pnpm', pnpmStub());
+    installDeps();
+    expect(calls()).toEqual(['pnpm install node=v24.22.1']);
+  });
+
+  it('keeps the checked Node first when corepack puts its shim in ~/.local/bin', () => {
+    const shim = path.join(tmp, 'shim');
+    fakeNode(bin, '24.22.1');
+    fakeNode(localBin, OLDER);
+    stub(shim, 'pnpm', pnpmStub());
+    // A corepack that can only write where it is told to, as next to a root-owned node.
+    stub(bin, 'corepack', `if [ "$2" = --install-directory ]; then cp -p ${shim}/pnpm "$3/pnpm"; fi`);
+    installDeps();
+    expect(calls()).toEqual(['pnpm install node=v24.22.1']);
+  });
+
+  it('keeps the checked Node first when npm installs pnpm under ~/.local', () => {
+    const shim = path.join(tmp, 'shim');
+    fakeNode(bin, '24.22.1');
+    fakeNode(localBin, OLDER);
+    stub(shim, 'pnpm', pnpmStub());
+    // An npm whose own global prefix is not writable.
+    stub(bin, 'npm', `[ "$1 $2 $4" = "install -g --prefix" ] && mkdir -p "$5/bin" && cp -p ${shim}/pnpm "$5/bin/pnpm"`);
+    installDeps();
     expect(calls()).toEqual(['pnpm install node=v24.22.1']);
   });
 });
@@ -149,6 +192,13 @@ describe('nanoclaw.sh hand-off', () => {
     fakeNode(path.join(prefix, 'bin'), '22.20.0');
     stub(path.join(prefix, 'bin'), 'pnpm', ':');
     stub(bin, 'npm', `[ "$*" = "config get prefix" ] && echo ${prefix}`);
+    expect(handoff()).toEqual({ status: 0, out: `HANDOFF ${bin}/node` });
+  });
+
+  it('still hands off when npm cannot report its prefix', () => {
+    platform('Linux');
+    fakeNode(bin, '24.22.1');
+    stub(bin, 'npm', 'exit 1');
     expect(handoff()).toEqual({ status: 0, out: `HANDOFF ${bin}/node` });
   });
 
@@ -182,5 +232,31 @@ describe('nanoclaw.sh hand-off', () => {
     expect(r.status).toBe(1);
     expect(r.out).toContain('No Node on PATH meets the minimum (22.23.4 / 24.22.1 / 26.12.1).');
     expect(r.out).not.toContain('HANDOFF');
+  });
+});
+
+describe('migrate-v2.sh after bootstrap', () => {
+  // From the end of the setup.sh run to the search for the v1 install: the
+  // PATH recovery every later step, and the service they register, runs on.
+  function afterBootstrap(): { status: number | null; out: string } {
+    const source = fs.readFileSync(path.join(ROOT, 'migrate-v2.sh'), 'utf8');
+    const end = source.indexOf('# ─── phase 0b');
+    const bootstrapEnd = 'abort "bootstrap"\nfi\n';
+    const start = source.lastIndexOf(bootstrapEnd, end);
+    expect(end, 'phase 0b not found in migrate-v2.sh').toBeGreaterThanOrEqual(0);
+    expect(start, 'end of the bootstrap step not found in migrate-v2.sh').toBeGreaterThanOrEqual(0);
+    const prelude = `set -uo pipefail; PROJECT_ROOT=${ROOT}; step_fail() { echo "FAIL $1"; }; abort() { echo "ABORT $1"; exit 1; }`;
+    const section = source.slice(start + bootstrapEnd.length, end);
+    return run(`${prelude}\n${section}echo "NODE $(command -v node)"; echo "PNPM $(command -v pnpm)"`);
+  }
+
+  it("keeps the checked Node ahead of an npm prefix's older one", () => {
+    platform('Linux');
+    fakeNode(bin, '24.22.1');
+    const prefix = path.join(tmp, 'npm-prefix');
+    fakeNode(path.join(prefix, 'bin'), '22.20.0');
+    stub(path.join(prefix, 'bin'), 'pnpm', ':');
+    stub(bin, 'npm', `[ "$*" = "config get prefix" ] && echo ${prefix}`);
+    expect(afterBootstrap()).toEqual({ status: 0, out: `NODE ${bin}/node\nPNPM ${prefix}/bin/pnpm` });
   });
 });
