@@ -51,20 +51,45 @@ detect_platform() {
   log "Platform: $PLATFORM, WSL: $IS_WSL, Root: $IS_ROOT"
 }
 
+# --- Why a tool failed ---
+
+# first_error_line: of a tool's output on stdin, the first line that names an
+# error, else the first line with anything on it. Short enough to show on
+# screen; the whole output goes to the log.
+first_error_line() {
+  local line first=""
+  while IFS= read -r line; do
+    [ -n "$first" ] || first="$line"
+    case "$line" in
+      *[Ee]rror* | *ERR!*) printf '%s\n' "$line"; return ;;
+    esac
+  done
+  printf '%s\n' "$first"
+}
+
 # --- Node.js check ---
 
 check_node() {
   NODE_OK="false"
   NODE_VERSION="not_found"
   NODE_PATH_FOUND=""
+  NODE_START_ERROR=""
 
   if command -v node >/dev/null 2>&1; then
-    NODE_VERSION=$(node --version 2>/dev/null | sed 's/^v//')
     NODE_PATH_FOUND=$(command -v node)
-    if node_meets_minimum "$NODE_VERSION"; then
-      NODE_OK="true"
+    # Guarded: under `set -e` a Node that cannot start (built for another
+    # libc, a broken download) would end the bootstrap here with nothing said.
+    if NODE_VERSION=$(node --version 2>/dev/null); then
+      NODE_VERSION="${NODE_VERSION#v}"
+      if node_meets_minimum "$NODE_VERSION"; then
+        NODE_OK="true"
+      fi
+      log "Node $NODE_VERSION at $NODE_PATH_FOUND (ok=$NODE_OK)"
+    else
+      NODE_VERSION="cannot_start"
+      NODE_START_ERROR=$(node --version 2>&1 | first_error_line) || true
+      log "Node at $NODE_PATH_FOUND cannot start: ${NODE_START_ERROR:-it printed nothing}"
     fi
-    log "Node $NODE_VERSION at $NODE_PATH_FOUND (ok=$NODE_OK)"
   else
     log "Node not found"
   fi
@@ -78,7 +103,9 @@ ensure_node() {
   if [ "$NODE_OK" = "false" ] && node_use_patched; then
     check_node
   fi
-  if [ "$NODE_OK" = "false" ]; then
+  # install-node.sh decides what to install from the version of the PATH Node.
+  # One that cannot start has none to give, so nothing is installed over it.
+  if [ "$NODE_OK" = "false" ] && [ "$NODE_VERSION" != "cannot_start" ]; then
     log "Node missing or too old — running setup/install-node.sh"
     echo "Node is missing or below the minimum (${NODE_MINIMUMS// / / }) — installing via setup/install-node.sh"
     if bash "$PROJECT_ROOT/setup/install-node.sh" 2>&1 | tee -a "$LOG_FILE"; then
@@ -87,6 +114,12 @@ ensure_node() {
     else
       log "install-node.sh failed"
     fi
+  fi
+  # Say why and what to do; the status block ends the run as node_missing.
+  if [ "$NODE_VERSION" = "cannot_start" ]; then
+    echo "Node at $NODE_PATH_FOUND cannot start:"
+    echo "  ${NODE_START_ERROR:-it printed nothing}"
+    echo "Remove it, or put a Node that works (${NODE_MINIMUMS// / / } or newer) ahead of it on PATH, then re-run setup."
   fi
 }
 

@@ -184,6 +184,89 @@ describe('setup.sh ensure_node', () => {
     expect(ensureNode()).toBe('NODE_OK=false');
     expect(calls()).toEqual(['install-node']);
   });
+
+  // setup.sh runs under `set -euo pipefail`, where a Node that cannot start used
+  // to end the script inside check_node with nothing said.
+  function ensureNodeStrict(installed = 'exit 1'): { status: number | null; out: string; log: string } {
+    // Every function setup.sh defines, without the main part that calls them.
+    const source = fs.readFileSync(path.join(ROOT, 'setup.sh'), 'utf8');
+    const fns = source.slice(source.indexOf('# --- Platform detection ---'), source.indexOf('# --- Main ---'));
+    expect(fns).toContain('ensure_node() {');
+    const project = path.join(tmp, 'project');
+    // What install-node.sh does here: fail, unless the case says what it leaves behind.
+    stub(path.join(project, 'setup'), 'install-node.sh', `echo install-node >> ${log}; ${installed}`);
+    for (const tool of ['bash', 'chmod', 'sed', 'tee']) fs.symlinkSync(which(tool), path.join(bin, tool));
+    const bootLog = path.join(tmp, 'boot.log');
+    const prelude = `set -euo pipefail; source ${LIB}; PROJECT_ROOT=${project}; LOG_FILE=${bootLog}; log() { echo "$*" >> "$LOG_FILE"; }`;
+    const r = run(['-c', `${prelude}\n${fns}\nensure_node; echo "NODE_OK=$NODE_OK NODE_VERSION=$NODE_VERSION"`]);
+    return { ...r, log: fs.existsSync(bootLog) ? fs.readFileSync(bootLog, 'utf8') : '' };
+  }
+
+  it.each([
+    // What the loader prints for a Node built against a newer glibc.
+    ['its libraries do not match', 'echo "node: version GLIBC_2.28 not found (required by node)" >&2; exit 1'],
+    ['it crashes with a stack', 'printf "node:internal/x:1\\n  throw err;\\nError: boom\\n" >&2; exit 1'],
+  ])('says why and what to do when the only Node cannot start: %s', (_case, body) => {
+    stub(bin, 'uname', 'echo Linux');
+    stub(bin, 'node', body);
+
+    const r = ensureNodeStrict();
+
+    expect(r.out).toContain(`Node at ${bin}/node cannot start:`);
+    expect(r.out).toMatch(/^ {2}(node: version GLIBC_2\.28 not found \(required by node\)|Error: boom)$/m);
+    expect(r.out).toContain('Remove it, or put a Node that works (22.23.4 / 24.22.1 / 26.12.1 or newer) ahead of it');
+    expect(r.out).toContain('NODE_OK=false NODE_VERSION=cannot_start');
+    expect(r.status).toBe(0);
+    expect(r.log).toContain(`Node at ${bin}/node cannot start: `);
+    // install-node.sh asks the PATH Node for its version; it has none to give.
+    expect(calls()).toEqual([]);
+  });
+
+  it('says so when the only Node is a file that cannot be executed at all', () => {
+    stub(bin, 'uname', 'echo Linux');
+    fs.writeFileSync(path.join(bin, 'node'), '#!/nonexistent/interpreter\n', { mode: 0o755 });
+
+    const r = ensureNodeStrict();
+
+    expect(r.out).toContain(`Node at ${bin}/node cannot start:`);
+    expect(r.out).toContain('NODE_OK=false NODE_VERSION=cannot_start');
+    expect(calls()).toEqual([]);
+  });
+
+  it('says so when the Node an install leaves behind cannot start', () => {
+    stub(bin, 'uname', 'echo Linux');
+    const r = ensureNodeStrict(
+      `printf '#!${BASH}\\necho "node: version GLIBC_2.28 not found" >&2; exit 1\\n' > ${bin}/node; chmod +x ${bin}/node`,
+    );
+
+    expect(calls()).toEqual(['install-node']);
+    expect(r.out).toContain(`Node at ${bin}/node cannot start:`);
+    expect(r.out).toMatch(/^ {2}node: version GLIBC_2\.28 not found$/m);
+    expect(r.out).toContain('NODE_OK=false NODE_VERSION=cannot_start');
+  });
+
+  it('uses a Node that works from a known place when the PATH one cannot start', () => {
+    stub(bin, 'uname', 'echo Linux');
+    stub(bin, 'node', 'echo "node: version GLIBC_2.28 not found (required by node)" >&2; exit 1');
+    fakeNode(path.join(tmp, 'sys'), '22.23.4');
+
+    const r = ensureNodeStrict();
+
+    expect(r.out).toContain('NODE_OK=true NODE_VERSION=22.23.4');
+    expect(r.out).not.toContain('cannot start');
+    expect(r.log).toContain(`Node at ${bin}/node cannot start: `);
+    expect(calls()).toEqual([]);
+  });
+
+  it('still installs under strict mode when the PATH Node is only too old', () => {
+    stub(bin, 'uname', 'echo Linux');
+    fakeNode(bin, '22.20.0');
+
+    const r = ensureNodeStrict();
+
+    expect(r.out).toContain('NODE_OK=false NODE_VERSION=22.20.0');
+    expect(calls()).toEqual(['install-node']);
+  });
 });
 
 describe('node_use_patched', () => {
