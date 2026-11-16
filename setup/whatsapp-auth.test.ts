@@ -67,6 +67,10 @@ const NOT_SAVED = (detail: string) =>
   `WhatsApp closed the connection after pairing (${detail}), but the link was not saved. Clear store/auth/ and run the step again.`;
 const NO_LINK =
   'store/auth/ has WhatsApp credentials but no linked device (for example, from a pairing code that was never entered). Clear store/auth/ and run the step again.';
+const UNREADABLE =
+  'store/auth/creds.json could not be read (it may be mid-write). Stop the NanoClaw service if it is running, then run the step again.';
+const UNREADABLE_AFTER = (detail: string) =>
+  `WhatsApp closed the connection after pairing (${detail}), but store/auth/creds.json could not be read (it may be mid-write). Run the step again to check the saved link.`;
 
 const PHONE = '14155551234';
 const METHODS = ['qr', 'pairing-code'] as const;
@@ -161,9 +165,11 @@ describe('whatsapp-auth step', () => {
   });
 
   it.each([
-    ['a pairing code that was never entered', JSON.stringify(REQUESTED_CODE)],
-    ['a creds.json cut short', '{"me":'],
-  ])('%s in store/auth/ is not reported as linked', async (_name, saved) => {
+    // Only a creds.json that parses and lacks a pairing may be cleared.
+    ['a pairing code that was never entered', JSON.stringify(REQUESTED_CODE), NO_LINK],
+    // One still cut short after 1 s may yet hold a link, so it is not cleared.
+    ['a creds.json cut short', '{"me":', UNREADABLE],
+  ])('%s in store/auth/ is not reported as linked', async (_name, saved, error) => {
     vi.mocked(fs.existsSync).mockReturnValue(true);
     disk = saved;
 
@@ -172,7 +178,26 @@ describe('whatsapp-auth step', () => {
 
     expect(await result).toBeInstanceOf(Exit);
     expect(makeWASocket).not.toHaveBeenCalled();
-    expect(blocks()).toEqual(failed(NO_LINK));
+    expect(blocks()).toEqual(failed(error));
+  });
+
+  it('judges creds.json by one read, even if a running service rewrites it right after', async () => {
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    disk = JSON.stringify(PAIRED);
+    const read = vi.mocked(fs.readFileSync).getMockImplementation()!;
+    vi.mocked(fs.readFileSync).mockImplementation(((file: fs.PathOrFileDescriptor, options?: never) => {
+      const data = read(file, options);
+      // The service truncates creds.json to rewrite it just after the step reads it.
+      if (String(file).endsWith('creds.json')) disk = '';
+      return data;
+    }) as typeof fs.readFileSync);
+
+    await run(['--method', 'qr']);
+
+    expect(makeWASocket).not.toHaveBeenCalled();
+    expect(blocks()).toEqual([
+      ['WHATSAPP_AUTH', { STATUS: 'skipped', REASON: 'already-authenticated', AUTH_DIR: expect.any(String), PHONE }],
+    ]);
   });
 
   it('reads a creds.json that a running service is rewriting again before judging it', async () => {
@@ -304,11 +329,18 @@ describe('whatsapp-auth step', () => {
       (w: Writes) => (w[0].resolve(), w[1].reject(enospc)),
       NOT_SAVED,
     ],
+    // A creds.json that can't be parsed may still be mid-write, so it is never cleared.
     [
       'pairing-code',
       'the pairing write cuts creds.json short and fails',
       (w: Writes) => (w[0].resolve(), (disk = '{"me":'), w[1].reject(enospc)),
-      NOT_SAVED,
+      UNREADABLE_AFTER,
+    ],
+    [
+      'qr',
+      'the pairing write has emptied creds.json and is still running after 5 s',
+      () => ((disk = ''), vi.advanceTimersByTimeAsync(5000)),
+      UNREADABLE_AFTER,
     ],
   ] as const)('%s: after pairing, reports by the creds writes when %s', async (method, _name, settle, message) => {
     const writes = await closedAfterPairing(method);

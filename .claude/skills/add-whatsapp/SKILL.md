@@ -143,11 +143,13 @@ reports the already-linked number and moves on. This prints `linked` only for a
 finished pairing:
 
 ```bash
-node -e "let c={};try{c=JSON.parse(require('fs').readFileSync('store/auth/creds.json','utf-8'))}catch{};console.log(c.account?'linked':'not linked')"
+node -e "let s='not linked';try{s=JSON.parse(require('fs').readFileSync('store/auth/creds.json','utf-8'))?.account?'linked':'not linked'}catch(e){if(e.code!=='ENOENT')s='unreadable'};console.log(s)"
 ```
 
 A `creds.json` without a finished pairing (a pairing code that was never entered
-leaves one behind) is not a link: clear `store/auth/` and link below.
+leaves one behind) is not a link: clear `store/auth/` and link below. If it
+prints `unreadable`, a running service may be rewriting it: keep `store/auth/`,
+stop the NanoClaw service and check again.
 
 Pick how to link the device. `qr` shows a rotating QR you scan with your phone's
 camera; `pairing-code` shows an 8-character code you type into WhatsApp (no camera
@@ -199,12 +201,18 @@ If it fails with `WhatsApp closed the connection before linking`, also clear
 `store/auth/` first: a requested pairing code leaves credentials behind. For
 the same reason, if it fails with `store/auth/ has WhatsApp credentials but no
 linked device`, clear `store/auth/` and run the step again.
+If it fails with `store/auth/creds.json could not be read`, keep `store/auth/`:
+stop the NanoClaw service and run the step again. If it still says that with the
+service stopped, the file is damaged and Baileys can't read it either, so remove
+the device under Linked Devices, clear `store/auth/` and link again.
 If it fails with `WhatsApp closed the connection after pairing` and says the link
 is saved (or probably saved), keep `store/auth/`: the paired device is saved
 there, and running the step again reports it as already linked (it does not
 reconnect to check). If the phone does not list the device under Linked Devices,
 or the service later reports `logged_out`, clear `store/auth/` and link again.
 If it says the link was not saved, clear `store/auth/` and run the step again.
+If it says `store/auth/creds.json could not be read`, keep `store/auth/` and run
+the step again: it checks the saved link.
 
 A successful link reports the number back as `bot_phone`. If it came back empty,
 the device never confirmed (an expired QR or pairing code), so don't restart or

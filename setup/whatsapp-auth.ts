@@ -58,21 +58,29 @@ function phoneFromId(id?: string | null): string {
   return id.split(':')[0].split('@')[0];
 }
 
-/** Saved credentials, or undefined when creds.json is missing or not valid JSON. */
-function savedCreds(): { account?: unknown } | undefined {
+/** Saved credentials. Only a finished pairing writes `account`. */
+type SavedCreds = { account?: unknown; me?: { id?: string } };
+
+/**
+ * One read of creds.json: the saved creds, 'missing', or 'unreadable' (not valid
+ * JSON, for example while a write is rewriting it). Decide from one read only.
+ */
+function readSavedCreds(): SavedCreds | 'missing' | 'unreadable' {
+  let raw: string;
   try {
-    return JSON.parse(fs.readFileSync(path.join(AUTH_DIR, 'creds.json'), 'utf-8')) as { account?: unknown };
+    raw = fs.readFileSync(path.join(AUTH_DIR, 'creds.json'), 'utf-8');
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'unreadable';
+  }
+  try {
+    const creds: unknown = JSON.parse(raw);
+    return typeof creds === 'object' && creds !== null ? (creds as SavedCreds) : {};
   } catch {
-    return undefined;
+    return 'unreadable';
   }
 }
 
-/** True when saved credentials hold a finished pairing (only a real pairing writes `account`). */
-function pairingSaved(): boolean {
-  return Boolean(savedCreds()?.account);
-}
-
-/** Read the linked number from saved credentials (the skipped / already-authed path). */
+/** Read the linked number from saved credentials (the success path's fallback). */
 function readAuthedPhoneFromFile(): string {
   try {
     const raw = fs.readFileSync(path.join(AUTH_DIR, 'creds.json'), 'utf-8');
@@ -165,23 +173,33 @@ export async function run(args: string[]): Promise<void> {
   const { method, phone } = parseArgs(args);
 
   // Baileys rewrites creds.json in place, so a running service can leave it half
-  // written for a moment: read it again before judging it.
-  const credsFile = path.join(AUTH_DIR, 'creds.json');
-  for (let tries = 0; tries < 5 && fs.existsSync(credsFile) && !savedCreds(); tries++) {
+  // written for a moment: read it again, for up to 1 s, before judging it.
+  let saved = readSavedCreds();
+  for (let tries = 0; tries < 5 && saved === 'unreadable'; tries++) {
     await new Promise((resolve) => setTimeout(resolve, 200));
+    saved = readSavedCreds();
   }
-  if (pairingSaved()) {
+  // A file still unreadable after 1 s may yet hold a link, so never say to clear it.
+  if (saved === 'unreadable') {
+    emitStatus('WHATSAPP_AUTH', {
+      STATUS: 'failed',
+      ERROR:
+        'store/auth/creds.json could not be read (it may be mid-write). Stop the NanoClaw service if it is running, then run the step again.',
+    });
+    process.exit(1);
+  }
+  if (saved !== 'missing' && saved.account) {
     emitStatus('WHATSAPP_AUTH', {
       STATUS: 'skipped',
       REASON: 'already-authenticated',
       AUTH_DIR,
-      PHONE: readAuthedPhoneFromFile(),
+      PHONE: phoneFromId(saved.me?.id),
     });
     return;
   }
   // Creds without `account` are not a link, and can't be reused: a requested pairing
   // code saves `me`, and Baileys then logs in as that `me` instead of linking.
-  if (fs.existsSync(credsFile)) {
+  if (saved !== 'missing') {
     emitStatus('WHATSAPP_AUTH', {
       STATUS: 'failed',
       ERROR:
@@ -327,7 +345,12 @@ export async function run(args: string[]): Promise<void> {
               // still running the file could yet change, so the link is only probably saved.
               void settled(saving, 5000).then((done) => {
                 const after = `WhatsApp closed the connection after pairing (${detail})`;
-                if (!pairingSaved()) {
+                const saved = readSavedCreds();
+                if (saved === 'unreadable') {
+                  fail(
+                    `${after}, but store/auth/creds.json could not be read (it may be mid-write). Run the step again to check the saved link.`,
+                  );
+                } else if (saved === 'missing' || !saved.account) {
                   fail(`${after}, but the link was not saved. Clear store/auth/ and run the step again.`);
                 } else if (done) {
                   fail(`${after}. The link is saved in store/auth/, so run the step again to use it.`);
