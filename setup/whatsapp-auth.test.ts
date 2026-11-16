@@ -61,6 +61,8 @@ const BEFORE = (detail: string) =>
   `WhatsApp closed the connection before linking (${detail}). Clear store/auth/ and run the step again.`;
 const AFTER = (detail: string) =>
   `WhatsApp closed the connection after pairing (${detail}). The link is saved in store/auth/, so run the step again to use it.`;
+const PROBABLY_SAVED = (detail: string) =>
+  `WhatsApp closed the connection after pairing (${detail}). The link is probably saved in store/auth/ (a creds write had not finished), so run the step again to use it.`;
 const NOT_SAVED = (detail: string) =>
   `WhatsApp closed the connection after pairing (${detail}), but the link was not saved. Clear store/auth/ and run the step again.`;
 
@@ -234,6 +236,13 @@ describe('whatsapp-auth step', () => {
   it.each([
     ['qr', 'the pairing write fails', (w: Writes) => w[0].reject(enospc), NOT_SAVED],
     ['qr', 'the pairing write never lands', () => vi.advanceTimersByTimeAsync(5000), NOT_SAVED],
+    // The file can already hold the pairing while its write has not returned.
+    [
+      'qr',
+      'the pairing is on disk but its write is still running after 5 s',
+      () => ((disk = JSON.stringify(PAIRED)), vi.advanceTimersByTimeAsync(5000)),
+      PROBABLY_SAVED,
+    ],
     // The code request's write is still pending too. The last write holds the whole creds, so it decides.
     [
       'pairing-code',
@@ -276,10 +285,10 @@ describe('whatsapp-auth step', () => {
     expect(blocks()).toEqual(failed(AFTER('428 Connection Closed')));
   });
 
-  it('qr: a write still running after 5 s means the link may not be saved', async () => {
+  it('qr: a later write still running after 5 s leaves the saved link as probably saved', async () => {
     const { sock, writes } = await pairedWithPendingWrites('qr');
     writes[0].resolve();
-    // A later creds update starts a write that hangs; it could still overwrite creds.json.
+    // A later creds update starts a write that hangs, so the step cannot be sure of creds.json.
     sock.ev.emit('creds.update', { me: { id: `${PHONE}:7@s.whatsapp.net`, lid: '123456:7@lid' } });
     expect(writes).toHaveLength(2);
 
@@ -287,7 +296,7 @@ describe('whatsapp-auth step', () => {
     await vi.advanceTimersByTimeAsync(5000);
 
     await vi.waitFor(() => expect(process.exit).toHaveBeenCalledWith(1));
-    expect(blocks()).toEqual(failed(NOT_SAVED('428 Connection Closed')));
+    expect(blocks()).toEqual(failed(PROBABLY_SAVED('428 Connection Closed')));
   });
 
   it('qr: a pairing write that failed before the close is still reported as not saved', async () => {

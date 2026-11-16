@@ -301,16 +301,21 @@ export async function run(args: string[]): Promise<void> {
                 `WhatsApp closed the connection before linking (${detail}). Clear store/auth/ and run the step again.`,
               );
             } else {
-              // A paired device stays in store/auth/ for the next run, so once the
-              // creds writes settle, report what creds.json actually holds. A write
-              // still running after 5 s could yet overwrite it, so that counts as not saved.
-              void settled(saving, 5000).then((done) =>
-                fail(
-                  done && pairingSaved()
-                    ? `WhatsApp closed the connection after pairing (${detail}). The link is saved in store/auth/, so run the step again to use it.`
-                    : `WhatsApp closed the connection after pairing (${detail}), but the link was not saved. Clear store/auth/ and run the step again.`,
-                ),
-              );
+              // A paired device stays in store/auth/ for the next run, so once the creds
+              // writes settle (at most 5 s), report what creds.json holds. With a write
+              // still running the file could yet change, so the link is only probably saved.
+              void settled(saving, 5000).then((done) => {
+                const after = `WhatsApp closed the connection after pairing (${detail})`;
+                if (!pairingSaved()) {
+                  fail(`${after}, but the link was not saved. Clear store/auth/ and run the step again.`);
+                } else if (done) {
+                  fail(`${after}. The link is saved in store/auth/, so run the step again to use it.`);
+                } else {
+                  fail(
+                    `${after}. The link is probably saved in store/auth/ (a creds write had not finished), so run the step again to use it.`,
+                  );
+                }
+              });
             }
           }
         }
