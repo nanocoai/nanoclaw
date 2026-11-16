@@ -264,15 +264,16 @@ echo "DEPS_OK=$DEPS_OK"`);
     expect(logged()).toContain(`Could not create ${home}/.local: ${home}/.local is a file, not a folder\n`);
   });
 
-  it('names a link that leads nowhere at ~/.local as the file in the way', () => {
+  it('names a link at ~/.local that leads nowhere, and does not call it a file', () => {
     fakeNode(bin, '24.22.1');
     fs.mkdirSync(home, { recursive: true });
     fs.symlinkSync(path.join(tmp, 'gone'), path.join(home, '.local'));
     npmThatNeedsRoot();
     const r = installDeps();
     expect(r.out).toContain(
-      `Could not install pnpm: ${home}/.local cannot be created:\n  ${home}/.local is a file, not a folder\nMove or rename that file, then re-run setup.\n`,
+      `Could not install pnpm: ${home}/.local cannot be created:\n  ${home}/.local is a link that cannot be followed\nFix or remove that link, then re-run setup.\n`,
     );
+    expect(r.out).not.toMatch(/is a file|mkdir:/);
   });
 
   it("keeps mkdir's own error line when no file is in the way", () => {

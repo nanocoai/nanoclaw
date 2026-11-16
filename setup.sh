@@ -75,21 +75,27 @@ first_error_line() {
 }
 
 # folder_error DIR SAID: why mkdir could not make DIR, for the screen. mkdir's
-# own words differ by system and may name no path, so when a file sits where
-# DIR or one of its parents has to be, ERROR_LINE names that file. Otherwise it
-# is mkdir's own error line from SAID. ERROR_TODO says what to do.
+# own words differ by system and may name no path, so when a file or a link
+# that cannot be followed sits where DIR or one of its parents has to be,
+# ERROR_LINE names it. Otherwise it is mkdir's own error line from SAID.
+# ERROR_TODO says what to do.
 folder_error() {
   local at="$1" said="$2"
   first_error_line "$said"
   ERROR_TODO="Fix that, then re-run setup."
-  # Up to the nearest part of the path that exists; -L also sees a dead link.
+  # Up to the nearest part of the path that exists; -L also sees a link that
+  # -e cannot follow.
   while [ ! -e "$at" ] && [ ! -L "$at" ]; do
     case "$at" in
       */*) at="${at%/*}" ;;
       *) return 0 ;;
     esac
   done
-  if [ ! -d "$at" ]; then
+  if [ ! -e "$at" ]; then
+    # Its target is gone, or is somewhere this user may not look.
+    ERROR_LINE="$at is a link that cannot be followed"
+    ERROR_TODO="Fix or remove that link, then re-run setup."
+  elif [ ! -d "$at" ]; then
     ERROR_LINE="$at is a file, not a folder"
     ERROR_TODO="Move or rename that file, then re-run setup."
   fi
