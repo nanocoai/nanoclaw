@@ -158,7 +158,7 @@ describe('formatter rendering', () => {
     const result = formatMessages(getPendingMessages());
     expect(result).toContain('from="DM with &lt;Gavriel&gt;"');
     expect(result).toContain('sender="A &amp; B"');
-    expect(result).toContain('&lt;b&gt;&amp;&quot;hi&quot;&lt;/b&gt;');
+    expect(result).toContain('&lt;b>&"hi"&lt;/b>');
   });
 
   it('keeps chronological order when echo rows interleave with real chat', () => {

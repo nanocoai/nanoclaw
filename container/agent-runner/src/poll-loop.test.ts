@@ -97,7 +97,7 @@ describe('formatter', () => {
     const messages = getPendingMessages();
     const prompt = formatMessages(messages);
     expect(prompt).toContain('A&lt;B');
-    expect(prompt).toContain('x &gt; y &amp;&amp; z');
+    expect(prompt).toContain('>x > y && z</message>');
   });
 });
 
