@@ -124,9 +124,16 @@ describe('node_use_patched', () => {
 describe('setup.sh install_deps', () => {
   const OLDER = '22.20.0';
   const pnpmStub = () => `echo "pnpm $1 node=$(node --version)" >> ${log}`;
-  // What mkdir says differs by system and may not name the folder, so setup names it.
+  // What mkdir says differs by system and may name no path, so setup names the
+  // folder and any file in its way. mkdir's own line always goes to the log.
   const MKDIR_SAID = /^mkdir: .+$/m;
   const logged = () => fs.readFileSync(path.join(tmp, 'boot.log'), 'utf8');
+  const npmThatNeedsRoot = () =>
+    stub(
+      bin,
+      'npm',
+      `case "$1" in --version) echo 10.9.0 ;; config) echo ${tmp}/prefix ;; install) echo "npm error code EACCES" >&2; exit 1 ;; esac`,
+    );
 
   // Under setup.sh's own shell options, with the package.json it reads the pnpm pin from.
   function installDeps(): { status: number | null; out: string } {
@@ -242,24 +249,44 @@ echo "DEPS_OK=$DEPS_OK"`);
     expect(fs.readFileSync(path.join(tmp, 'boot.log'), 'utf8')).toContain('npm error the log had it');
   });
 
-  it('names ~/.local, not npm, when ~/.local cannot be made', () => {
+  it('names the file in the way, not npm, when ~/.local is a file', () => {
     fakeNode(bin, '24.22.1');
     fs.mkdirSync(home, { recursive: true });
     fs.writeFileSync(path.join(home, '.local'), 'a file where the folder should be\n');
-    stub(
-      bin,
-      'npm',
-      `case "$1" in --version) echo 10.9.0 ;; config) echo ${tmp}/prefix ;; install) echo "npm error code EACCES" >&2; exit 1 ;; esac`,
-    );
+    npmThatNeedsRoot();
     const r = installDeps();
-    expect(r.out).toContain(`Could not install pnpm: ${home}/.local cannot be created:`);
-    expect(r.out).toMatch(/^ {2}mkdir: .+$/m);
-    expect(r.out).toContain('Fix that, then re-run setup.');
-    expect(r.out).not.toContain('npm failed');
-    expect(r.out).not.toContain('without root');
+    expect(r.out).toContain(
+      `Could not install pnpm: ${home}/.local cannot be created:\n  ${home}/.local is a file, not a folder\nMove or rename that file, then re-run setup.\n`,
+    );
+    expect(r.out).not.toMatch(/mkdir:|npm failed|without root|Fix that/);
     expect(r.out).toContain('DEPS_OK=false');
     expect(logged()).toMatch(MKDIR_SAID);
-    expect(logged()).toContain(`Could not create ${home}/.local\n`);
+    expect(logged()).toContain(`Could not create ${home}/.local: ${home}/.local is a file, not a folder\n`);
+  });
+
+  it('names a link that leads nowhere at ~/.local as the file in the way', () => {
+    fakeNode(bin, '24.22.1');
+    fs.mkdirSync(home, { recursive: true });
+    fs.symlinkSync(path.join(tmp, 'gone'), path.join(home, '.local'));
+    npmThatNeedsRoot();
+    const r = installDeps();
+    expect(r.out).toContain(
+      `Could not install pnpm: ${home}/.local cannot be created:\n  ${home}/.local is a file, not a folder\nMove or rename that file, then re-run setup.\n`,
+    );
+  });
+
+  it("keeps mkdir's own error line when no file is in the way", () => {
+    fakeNode(bin, '24.22.1');
+    npmThatNeedsRoot();
+    // A mkdir that fails and names no path, as the one on Ubuntu 26.04 does.
+    fs.rmSync(path.join(bin, 'mkdir'));
+    stub(bin, 'mkdir', 'echo "mkdir: Permission denied" >&2; exit 1');
+    const r = installDeps();
+    expect(r.out).toContain(
+      `Could not install pnpm: ${home}/.local cannot be created:\n  mkdir: Permission denied\nFix that, then re-run setup.\n`,
+    );
+    expect(r.out).not.toMatch(/is a file|npm failed|without root/);
+    expect(logged()).toContain(`Could not create ${home}/.local: mkdir: Permission denied\n`);
   });
 
   it('says so plainly when npm fails without printing anything', () => {
@@ -306,18 +333,18 @@ echo "DEPS_OK=$DEPS_OK"`);
     expect(fs.readFileSync(path.join(tmp, 'boot.log'), 'utf8')).toContain('Error: the log had it');
   });
 
-  it('names ~/.local/bin, not corepack, when ~/.local/bin cannot be made', () => {
+  it('names the file at ~/.local, not corepack, when ~/.local/bin cannot be made', () => {
     fakeNode(bin, '24.22.1');
     fs.mkdirSync(home, { recursive: true });
     fs.writeFileSync(path.join(home, '.local'), 'a file where the folder should be\n');
     stub(bin, 'corepack', 'echo "should not get as far as corepack into ~/.local/bin" >&2; exit 1');
     const r = installDeps();
-    expect(r.out).toContain(`Could not install pnpm: ${localBin} cannot be created:`);
-    expect(r.out).toMatch(/^ {2}mkdir: .+$/m);
-    expect(r.out).not.toContain('corepack could not');
-    expect(r.out).not.toContain('without root');
+    expect(r.out).toContain(
+      `Could not install pnpm: ${localBin} cannot be created:\n  ${home}/.local is a file, not a folder\nMove or rename that file, then re-run setup.\n`,
+    );
+    expect(r.out).not.toMatch(/mkdir:|corepack could not|without root|Fix that/);
     expect(logged()).toMatch(MKDIR_SAID);
-    expect(logged()).toContain(`Could not create ${localBin}\n`);
+    expect(logged()).toContain(`Could not create ${localBin}: ${home}/.local is a file, not a folder\n`);
   });
 
   it('gives the last failure when corepack and then npm both fail without root', () => {

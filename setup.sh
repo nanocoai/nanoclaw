@@ -74,6 +74,27 @@ first_error_line() {
   done
 }
 
+# folder_error DIR SAID: why mkdir could not make DIR, for the screen. mkdir's
+# own words differ by system and may name no path, so when a file sits where
+# DIR or one of its parents has to be, ERROR_LINE names that file. Otherwise it
+# is mkdir's own error line from SAID. ERROR_TODO says what to do.
+folder_error() {
+  local at="$1" said="$2"
+  first_error_line "$said"
+  ERROR_TODO="Fix that, then re-run setup."
+  # Up to the nearest part of the path that exists; -L also sees a dead link.
+  while [ ! -e "$at" ] && [ ! -L "$at" ]; do
+    case "$at" in
+      */*) at="${at%/*}" ;;
+      *) return 0 ;;
+    esac
+  done
+  if [ ! -d "$at" ]; then
+    ERROR_LINE="$at is a file, not a folder"
+    ERROR_TODO="Move or rename that file, then re-run setup."
+  fi
+}
+
 # --- Node.js check ---
 
 check_node() {
@@ -190,10 +211,10 @@ install_deps() {
       if ! said=$(mkdir -p "$user_bin" 2>&1); then
         printf '%s\n' "$said" >> "$LOG_FILE"
         pnpm_why="$user_bin cannot be created"
-        first_error_line "$said"
+        folder_error "$user_bin" "$said"
         pnpm_error="$ERROR_LINE"
-        pnpm_todo="Fix that, then re-run setup."
-        log "Could not create $user_bin"
+        pnpm_todo="$ERROR_TODO"
+        log "Could not create $user_bin: $pnpm_error"
       # tee: the log gets corepack's output as it comes, not when corepack ends.
       elif said=$(corepack enable --install-directory "$user_bin" pnpm 2>&1 | tee -a "$LOG_FILE") \
           && [ -x "$user_bin/pnpm" ]; then
@@ -246,10 +267,10 @@ install_deps() {
       if ! said=$(mkdir -p "$NPM_LOCAL_PREFIX" 2>&1); then
         printf '%s\n' "$said" >> "$LOG_FILE"
         pnpm_why="$NPM_LOCAL_PREFIX cannot be created"
-        first_error_line "$said"
+        folder_error "$NPM_LOCAL_PREFIX" "$said"
         pnpm_error="$ERROR_LINE"
-        pnpm_todo="Fix that, then re-run setup."
-        log "Could not create $NPM_LOCAL_PREFIX"
+        pnpm_todo="$ERROR_TODO"
+        log "Could not create $NPM_LOCAL_PREFIX: $pnpm_error"
       # tee: the log gets npm's output as it comes, not when npm ends.
       elif said=$(npm install -g "pnpm@${pinned}" --prefix "$NPM_LOCAL_PREFIX" 2>&1 | tee -a "$LOG_FILE"); then
         export PATH="$PATH:$NPM_LOCAL_PREFIX/bin"

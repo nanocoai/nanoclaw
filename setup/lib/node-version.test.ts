@@ -317,6 +317,35 @@ describe('setup.sh first_error_line', () => {
   });
 });
 
+describe('setup.sh folder_error', () => {
+  const FIX = 'Fix that, then re-run setup.';
+  const MOVE = 'Move or rename that file, then re-run setup.';
+
+  // Under setup.sh's own shell options; `dir` may hold $T for the temp dir.
+  function folderError(dir: string): string {
+    const source = fs.readFileSync(path.join(ROOT, 'setup.sh'), 'utf8');
+    const start = source.indexOf('first_error_line() {');
+    const last = source.indexOf('folder_error() {');
+    expect(last, 'folder_error() not found in setup.sh').toBeGreaterThan(start);
+    const fns = source.slice(start, source.indexOf('\n}', last) + 2);
+    fs.writeFileSync(path.join(tmp, 'file'), '');
+    fs.symlinkSync(path.join(tmp, 'gone'), path.join(tmp, 'dead-link'));
+    const script = `set -euo pipefail\nT=${tmp}\n${fns}\nfolder_error "${dir}" "mkdir: Not a directory"\necho "[$ERROR_LINE][$ERROR_TODO]"`;
+    return run(['-c', script]).out.replaceAll(tmp, '$T');
+  }
+
+  it.each([
+    ['the file where the folder has to be', '$T/file', '$T/file is a file, not a folder', MOVE],
+    ['the file under which the folder has to be', '$T/file/a/b', '$T/file is a file, not a folder', MOVE],
+    ['a link that leads nowhere', '$T/dead-link/a', '$T/dead-link is a file, not a folder', MOVE],
+    ["mkdir's own line under a folder that exists", '$T/bin/a/b', 'mkdir: Not a directory', FIX],
+    ["mkdir's own line when nothing on the path exists", '/ncl-no-such-top/a', 'mkdir: Not a directory', FIX],
+    ["mkdir's own line for a path with no slash left", 'ncl-no-such-dir/a', 'mkdir: Not a directory', FIX],
+  ])('gives %s', (_case, dir, line, todo) => {
+    expect(folderError(dir)).toBe(`[${line}][${todo}]\n`);
+  });
+});
+
 describe('node_use_patched', () => {
   it('skips an old ~/.local/bin node for the keg-only node@22 on macOS', () => {
     const localBin = path.join(tmp, 'home', '.local', 'bin');
