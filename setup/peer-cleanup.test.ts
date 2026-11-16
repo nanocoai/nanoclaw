@@ -265,6 +265,22 @@ describe('cleanupUnhealthyPeers — dead systemd registrations', () => {
     expectKept(cleanupUnhealthyPeers(projectRoot), unit);
   });
 
+  // systemd reads only *.conf from the folder.
+  it('removes a dead unit and its drop-in folder despite a live ExecStart in a file systemd skips', () => {
+    const { unitDir, projectRoot } = setup();
+    const { unit, dropIns } = editedDeadUnit(unitDir, '[Service]\nEnvironment=NODE_ENV=production\n');
+    fs.writeFileSync(
+      path.join(dropIns, 'override.conf.bak'),
+      `[Service]\nExecStart=\nExecStart=/usr/bin/node ${liveEntry(unitDir)}\n`,
+    );
+
+    const result = cleanupUnhealthyPeers(projectRoot);
+
+    expect(fs.existsSync(unit)).toBe(false);
+    expect(fs.existsSync(dropIns)).toBe(false);
+    expect(result.removed.map((r) => r.label)).toEqual(['nanoclaw-v2-edited']);
+  });
+
   it.each([
     ['changes no ExecStart', () => '[Service]\nEnvironment=NODE_ENV=production\n'],
     [
@@ -493,6 +509,30 @@ describe('cleanupUnhealthyPeers — another name for this checkout', () => {
     expect(execFileSync).not.toHaveBeenCalledWith(
       'systemctl',
       ['--user', 'disable', '--now', `${name}.service`],
+      expect.anything(),
+    );
+    expect(fs.existsSync(unit)).toBe(true);
+    expect(result.retired).toEqual([]);
+  });
+
+  // A drop-in outside <unit>.service.d/, such as nanoclaw-v2-.service.d/, shows only in what systemd loaded.
+  it('leaves a systemd unit alone when the ExecStart systemd loaded starts something else', () => {
+    const { home, projectRoot, entry } = checkout('linux');
+    const unit = path.join(home, '.config', 'systemd', 'user', 'nanoclaw-v2-old.service');
+    fs.mkdirSync(path.dirname(unit), { recursive: true });
+    writeUnit(unit, entry);
+    const other = otherEntry(home, projectRoot);
+    vi.mocked(execFileSync).mockImplementation((_cmd, args) =>
+      args?.includes('--property=ExecStart')
+        ? `{ path=/usr/bin/node ; argv[]=/usr/bin/node ${other} ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }\n`
+        : '',
+    );
+
+    const result = cleanupUnhealthyPeers(projectRoot);
+
+    expect(execFileSync).not.toHaveBeenCalledWith(
+      'systemctl',
+      ['--user', 'disable', '--now', 'nanoclaw-v2-old.service'],
       expect.anything(),
     );
     expect(fs.existsSync(unit)).toBe(true);

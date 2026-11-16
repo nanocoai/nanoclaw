@@ -238,7 +238,7 @@ function cleanupSystemdPeers(projectRoot: string): PeerCleanupResult {
 
     const unitPath = path.join(unitDir, `${unit}.service`);
     const missingTarget = deadSystemdTarget(unitPath, unit);
-    if (missingTarget || (isSetupName(unit, 'nanoclaw-v2-') && systemdStartsEntry(unitPath, entry))) {
+    if (missingTarget || (isSetupName(unit, 'nanoclaw-v2-') && systemdStartsEntry(unitPath, unit, entry))) {
       reapPeer(
         result,
         { label: unit, configPath: unitPath, dropIns: `${unitPath}.d` },
@@ -325,11 +325,14 @@ function missingEntry(lines: string[]): string | undefined {
   return targets.some((target) => !target || fs.existsSync(target)) ? undefined : targets[0];
 }
 
-/** Every file in `<unit>.service.d/`; [] without the folder, undefined when it can't be listed. */
+/** `<unit>.service.d/*.conf`, the files systemd reads; [] without the folder, undefined when it can't be listed. */
 function dropInFiles(unitPath: string): string[] | undefined {
   const dir = `${unitPath}.d`;
   try {
-    return fs.readdirSync(dir).map((f) => path.join(dir, f));
+    return fs
+      .readdirSync(dir)
+      .filter((f) => f.endsWith('.conf'))
+      .map((f) => path.join(dir, f));
   } catch (err) {
     return (err as NodeJS.ErrnoException).code === 'ENOENT' ? [] : undefined;
   }
@@ -366,13 +369,13 @@ function launchdStartsEntry(plistPath: string, entry: string): boolean {
 /**
  * ExecStart=<nodePath> <entry>; the leading space keeps the match exact. Setup
  * writes no drop-ins; the `<unit>.service.d/` that `systemctl edit` writes may
- * point ExecStart elsewhere, so it rules the unit out.
+ * point ExecStart elsewhere, so it rules the unit out, and so does any other
+ * ExecStart systemd loaded.
  */
-function systemdStartsEntry(unitPath: string, entry: string): boolean {
+function systemdStartsEntry(unitPath: string, unit: string, entry: string): boolean {
   if (fs.existsSync(`${unitPath}.d`)) return false;
-  return (readConfig(unitPath) ?? '')
-    .split('\n')
-    .some((line) => line.startsWith('ExecStart=') && line.trimEnd().endsWith(` ${entry}`));
+  const starts = (line: string) => line.startsWith('ExecStart=') && line.trimEnd().endsWith(` ${entry}`);
+  return (readConfig(unitPath) ?? '').split('\n').some(starts) && loadedExecStarts(unit).every(starts);
 }
 
 function launchdLoaded(label: string, uid: number): boolean {
