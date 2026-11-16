@@ -151,7 +151,6 @@ describe('createChatSdkBridge.deliver — reply split loop', () => {
 
     expect(posts).toHaveLength(500);
     expect(markdownOf(posts).join('')).toBe(text);
-    expect(await progressRows()).toBe(0);
   });
 });
 
@@ -168,7 +167,19 @@ describe('createChatSdkBridge.deliver — retry after a failed part', () => {
 
     expect(markdownOf(posts)).toEqual(ALL_FIVE);
     expect(id).toBe('id-1');
-    expect(await progressRows()).toBe(0);
+  });
+
+  it('a retry after every part landed (the delivery ack failed) posts nothing and returns part 1 id', async () => {
+    const { adapter, posts } = fakeAdapter();
+    const bridge = await splitBridge(adapter, FIVE_LIMIT);
+    const message = textMessage(FIVE, { deliveryId: 'out-1' });
+
+    await bridge.deliver('stub:C1', null, message);
+    const id = await bridge.deliver('stub:C1', null, message);
+
+    expect(markdownOf(posts)).toEqual(ALL_FIVE);
+    expect(id).toBe('id-1');
+    expect(await progressRows()).toBe(1);
   });
 
   it('part 3 of 5 failing on every attempt: parts 1 and 2 go out once, part 3 is retried each time', async () => {
@@ -244,6 +255,26 @@ describe('createChatSdkBridge.deliver — retry after a failed part', () => {
     await bridge.deliver('stub:C1', null, textMessage(TEXT.replace(/ part/g, ''), { deliveryId: 'out-1' }));
 
     expect(markdownOf(posts)).toEqual(['part one', 'part two', 'first', 'second', 'third']);
+  });
+
+  it('starts over, with the files, when the file set differs from the failed attempt', async () => {
+    const { adapter, posts } = fakeAdapter((call) => call === 2);
+    const bridge = await splitBridge(adapter, LIMIT);
+    const data = Buffer.from('file bytes');
+
+    await expect(bridge.deliver('stub:C1', null, textMessage(TEXT, { deliveryId: 'out-1' }))).rejects.toThrow();
+    await bridge.deliver(
+      'stub:C1',
+      null,
+      textMessage(TEXT, { files: [{ filename: 'report.pdf', data }], deliveryId: 'out-1' }),
+    );
+
+    expect(posts.map((p) => p.message)).toEqual([
+      { markdown: 'first part' },
+      { markdown: 'first part', files: [{ data, filename: 'report.pdf' }] },
+      { markdown: 'second part' },
+      { markdown: 'third part' },
+    ]);
   });
 
   it('posts from part 1 on every attempt when the send has no delivery id', async () => {
