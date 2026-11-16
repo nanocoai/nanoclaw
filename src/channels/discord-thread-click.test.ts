@@ -77,6 +77,8 @@ const cardWrites: string[] = [];
 /** Card edits Discord has not answered yet, and whether a button removal arrived during one. */
 let editsInFlight = 0;
 let removedDuringEdit = false;
+/** The buttons each card shows now. Discord keeps a message's buttons when an edit sends no components. */
+const buttons = new Map<string, unknown>();
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 
@@ -105,6 +107,7 @@ vi.stubGlobal(
     const message = /^\/channels\/([^/]+)\/messages(?:\/([^/]+))?$/.exec(path);
     if (message && method === 'POST') {
       posts.push({ channel: message[1], id: `card-${posts.length + 1}`, body });
+      buttons.set(posts.at(-1)!.id, body.components ?? []);
       return json({ id: posts.at(-1)!.id, channel_id: message[1] });
     }
     if (message && method === 'PATCH') {
@@ -115,10 +118,13 @@ vi.stubGlobal(
       await new Promise((resolve) => setTimeout(resolve, 20));
       editsInFlight--;
       if (cardEditsFail) return json({ message: 'Internal Server Error' }, 500);
+      if ('components' in body) buttons.set(message[2]!, body.components);
       return json({ id: message[2], channel_id: message[1] });
     }
-    if (method === 'PATCH' && path.endsWith('/messages/@original')) {
+    const original = /^\/webhooks\/[^/]+\/token-([^/]+)\/messages\/@original$/.exec(path);
+    if (original && method === 'PATCH') {
       interactionEdits.push(body);
+      if ('components' in body) buttons.set(original[1], body.components);
       cardWrites.push('buttons removed');
       if (editsInFlight > 0) removedDuringEdit = true;
     }
@@ -132,6 +138,8 @@ afterAll(() => {
 });
 
 let decide: (request: GatewayApprovalRequest) => Promise<GatewayApprovalDecision>;
+/** The gateway reports a request it ended itself. */
+let endAtGateway: (requestId: string) => Promise<void>;
 const submitted: Array<[string, string]> = [];
 
 /** A gateway whose approvals outlive a restart: the coordinator then checks where a click came from. */
@@ -151,8 +159,9 @@ function durableGateway(): GatewayProviderDefinition {
         return true;
       },
       listPending: async () => [],
-      async subscribe(callback, signal) {
+      async subscribe(callback, signal, resolved) {
         decide = callback;
+        endAtGateway = resolved!;
         await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }));
       },
     },
@@ -196,7 +205,7 @@ describe('a Discord thread, from the raw message to the raw click on its approva
     return {
       type: 3,
       id: 'i1',
-      token: 'interaction-token',
+      token: `token-${card.id}`,
       application_id: 'bot-app',
       guild_id: 'G1',
       channel_id: card.channel,
@@ -208,7 +217,7 @@ describe('a Discord thread, from the raw message to the raw click on its approva
   };
 
   /** The message arrives, and a card for a gateway request goes to the chat and thread it arrived in. */
-  const messageThenCard = async (message: Record<string, unknown>) => {
+  const messageThenCard = async (message: Record<string, unknown>, request: Partial<GatewayApprovalRequest> = {}) => {
     await forward('GATEWAY_MESSAGE_CREATE', message);
     await vi.waitFor(() => expect(inbound).toHaveLength(1));
     const { platformId, threadId } = inbound[0];
@@ -236,6 +245,7 @@ describe('a Discord thread, from the raw message to the raw click on its approva
       audit: { method: 'POST', host: 'api.example.test' },
       approverUserId: 'discord:U1',
       delivery: { messagingGroupId: 'mg-thread', ...(threadId ? { threadId } : {}) },
+      ...request,
     });
     await vi.waitFor(() => expect(posts).toHaveLength(1));
     const [card] = posts;
@@ -260,6 +270,7 @@ describe('a Discord thread, from the raw message to the raw click on its approva
   beforeEach(async () => {
     inbound.length = posts.length = edits.length = outcomes.length = submitted.length = 0;
     interactionEdits.length = cardWrites.length = editsInFlight = 0;
+    buttons.clear();
     removedDuringEdit = false;
     channelLookupFails = cardEditsFail = false;
     channels = { C1: { type: 0 }, T1: { type: 11, parent_id: 'C1' } };
@@ -328,16 +339,43 @@ describe('a Discord thread, from the raw message to the raw click on its approva
     await vi.waitFor(() => expect(edits.map((edit) => `${edit.channel}/${edit.id}`)).toContain('T1/card-1'));
   });
 
-  // The host redraws a gateway card itself, and the adapter sends no components
-  // on that edit. The click removes the buttons once the host has accepted.
+  // The host redraws a gateway card itself, and that edit clears the buttons:
+  // the same edit closes a card nobody clicked. The click still removes them
+  // once the host has accepted, for a redraw Discord refused.
   it("removes a decided gateway card's buttons through the click, after the host's redraw", async () => {
     const { outcome } = await messageThenCardThenClick(rawMessage('T1', { channel_type: 11 }));
     expect(outcome).toBe('accepted');
     await vi.waitFor(() => expect(cardWrites).toEqual(['edit', 'buttons removed']));
     expect(removedDuringEdit).toBe(false);
-    expect(edits[0].body).not.toHaveProperty('components');
+    expect(edits[0].body.components).toEqual([]);
     expect(JSON.stringify(edits[0].body.embeds)).toContain('Approved');
     expect(interactionEdits).toEqual([{ components: [] }]);
+    expect(buttons.get('card-1')).toEqual([]);
+  });
+
+  // Nobody clicks, so there is no interaction to remove the buttons through:
+  // the host's own closing edit has to.
+  it.each([
+    {
+      name: 'times out',
+      request: (): Partial<GatewayApprovalRequest> => ({ expiresAt: new Date(Date.now() + 1_800).toISOString() }),
+      close: async () => {},
+      resolution: 'Timed out',
+    },
+    {
+      name: 'is ended at the gateway',
+      request: (): Partial<GatewayApprovalRequest> => ({}),
+      close: () => endAtGateway('native-request'),
+      resolution: 'Request ended at the gateway',
+    },
+  ])("removes a gateway card's buttons when the request $name with nobody clicking", async (c) => {
+    const { card, decision } = await messageThenCard(rawMessage('T1', { channel_type: 11 }), c.request());
+    expect(buttons.get(card.id)).not.toEqual([]);
+    await c.close();
+    expect(await decision).not.toBe('approve');
+    await vi.waitFor(() => expect(JSON.stringify(edits.at(-1)?.body.embeds)).toContain(c.resolution));
+    expect(interactionEdits).toEqual([]);
+    expect(buttons.get(card.id)).toEqual([]);
   });
 
   it("still removes a decided gateway card's buttons when Discord refuses the host's redraw", async () => {
