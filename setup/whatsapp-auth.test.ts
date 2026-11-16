@@ -12,9 +12,13 @@ type MockSocket = {
 
 // Baileys and pino are installed by /add-whatsapp, not by trunk, so both are mocked.
 const sockets: MockSocket[] = [];
+// store/auth/creds.json as the step would read it; a creds write that lands updates it.
+let disk: string | undefined;
 vi.mock('@whiskeysockets/baileys', () => ({
   makeWASocket: vi.fn((config: { auth: { creds: Creds } }) => {
     const ev = new EventEmitter();
+    // Like Baileys, merge each creds update into the creds before other listeners see it.
+    ev.on('creds.update', (update: Creds) => Object.assign(config.auth.creds, update));
     // Like Baileys, end() emits the close synchronously.
     const end = vi.fn(() =>
       ev.emit('connection.update', { connection: 'close', lastDisconnect: { error: undefined } }),
@@ -33,11 +37,12 @@ vi.mock('@whiskeysockets/baileys', () => ({
   DisconnectReason: { loggedOut: 401, timedOut: 408 },
   fetchLatestWaWebVersion: vi.fn(async () => ({ version: [2, 3000, 1049214511], isLatest: true })),
   makeCacheableSignalKeyStore: vi.fn(() => ({})),
-  useMultiFileAuthState: vi.fn(async () => ({ state: { creds: {}, keys: {} }, saveCreds: vi.fn(async () => {}) })),
+  useMultiFileAuthState: vi.fn(async () => {
+    const creds = {};
+    return { state: { creds, keys: {} }, saveCreds: vi.fn(async () => void (disk = JSON.stringify(creds))) };
+  }),
 }));
 vi.mock('pino', () => ({ pino: () => ({}) }));
-// Loaded by setup/index.ts in a real run: its unhandledRejection handler logs and keeps going.
-await import('../src/log.js');
 vi.mock('./status.js', () => ({ emitStatus: vi.fn() }));
 
 const { run } = await import('./whatsapp-auth.js');
@@ -66,7 +71,7 @@ type Method = (typeof METHODS)[number];
 const PAIRED: Creds = { me: { id: `${PHONE}:7@s.whatsapp.net` }, account: { details: 'signed-device-identity' } };
 const REQUESTED_CODE: Creds = { me: { id: `${PHONE}@s.whatsapp.net`, name: '~' } };
 
-const authState = (creds: Creds, saveCreds: () => Promise<void> = vi.fn(async () => {})) =>
+const authState = (creds: Creds, saveCreds: () => Promise<void> = async () => void (disk = JSON.stringify(creds))) =>
   ({ state: { creds, keys: {} }, saveCreds }) as never;
 
 const close = (sock: MockSocket, statusCode: number, message: string) => () =>
@@ -95,17 +100,21 @@ async function connected(method: Method = 'qr'): Promise<MockSocket> {
 }
 
 /** WhatsApp restarts the stream (515) and the step reconnects; `saved` is what it reads from store/auth/. */
-async function reconnectedAfter515(method: Method, saved: Creds): Promise<MockSocket> {
+async function reconnectedAfter515(method: Method, saved: Creds, saveCreds?: () => Promise<void>): Promise<MockSocket> {
   const first = await connected(method);
-  vi.mocked(useMultiFileAuthState).mockResolvedValueOnce(authState(saved));
+  disk = JSON.stringify(saved);
+  vi.mocked(useMultiFileAuthState).mockResolvedValueOnce(authState({ ...saved }, saveCreds));
   expect(close(first, 515, 'Stream Errored (restart required)')).not.toThrow();
   await vi.waitFor(() => expect(makeWASocket).toHaveBeenCalledTimes(2));
   expect(blocks()).toEqual([]);
   return sockets[1];
 }
 
+const realReadFileSync = fs.readFileSync;
+
 beforeEach(() => {
   sockets.length = 0;
+  disk = undefined;
   vi.clearAllMocks();
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
   // Nothing reaches the network: any tracker fetch fails and the mocked Baileys lookup answers.
@@ -118,6 +127,11 @@ beforeEach(() => {
   vi.spyOn(fs, 'existsSync').mockReturnValue(false);
   vi.spyOn(fs, 'mkdirSync').mockReturnValue(undefined);
   vi.spyOn(fs, 'writeFileSync').mockReturnValue(undefined);
+  vi.spyOn(fs, 'readFileSync').mockImplementation(((file: fs.PathOrFileDescriptor, options?: never) => {
+    if (!String(file).endsWith('creds.json')) return realReadFileSync(file, options);
+    if (disk === undefined) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    return disk;
+  }) as typeof fs.readFileSync);
   vi.spyOn(process, 'exit').mockImplementation((code) => {
     throw new Exit(code);
   });
@@ -178,9 +192,15 @@ describe('whatsapp-auth step', () => {
   /** Pair on the first socket; its creds writes stay pending until the test settles them. */
   async function pairedWithPendingWrites(method: Method) {
     const writes: Array<{ resolve: () => void; reject: (err: Error) => void }> = [];
-    // A plain function, not vi.fn: vi.fn handles the promises it returns, which would hide an unhandled failed write.
-    const saveCreds = () => new Promise<void>((resolve, reject) => writes.push({ resolve, reject }));
-    vi.mocked(useMultiFileAuthState).mockResolvedValueOnce(authState({}, saveCreds));
+    const creds: Creds = {};
+    // Each write saves the creds as they are when it is called.
+    const saveCreds = () => {
+      const snapshot = JSON.stringify(creds);
+      return new Promise<void>((resolve, reject) =>
+        writes.push({ resolve: () => ((disk = snapshot), resolve()), reject }),
+      );
+    };
+    vi.mocked(useMultiFileAuthState).mockResolvedValueOnce(authState(creds, saveCreds));
     const sock = await connected(method);
     vi.mocked(process.exit).mockImplementation(() => undefined as never);
     pair(sock);
@@ -222,6 +242,13 @@ describe('whatsapp-auth step', () => {
       AFTER,
     ],
     ['pairing-code', 'both writes fail', (w: Writes) => (w[0].reject(enospc), w[1].reject(enospc)), NOT_SAVED],
+    // creds.json then holds only the requested code's `me`, not a finished pairing.
+    [
+      'pairing-code',
+      'only the code request write lands',
+      (w: Writes) => (w[0].resolve(), w[1].reject(enospc)),
+      NOT_SAVED,
+    ],
   ] as const)('%s: after pairing, reports by the creds writes when %s', async (method, _name, settle, message) => {
     const writes = await closedAfterPairing(method);
 
@@ -231,10 +258,20 @@ describe('whatsapp-auth step', () => {
     expect(blocks()).toEqual(failed(message('428 Connection Closed')));
   });
 
+  it('pairing-code: a failed write after the 515 reconnect keeps the saved link', async () => {
+    const sock = await reconnectedAfter515('pairing-code', PAIRED, () => Promise.reject(new Error('EACCES')));
+    vi.mocked(process.exit).mockImplementation(() => undefined as never);
+    // Baileys updates creds again after login (e.g. the device's lid); this write fails.
+    sock.ev.emit('creds.update', { me: { id: `${PHONE}:7@s.whatsapp.net`, lid: '123456:7@lid' } });
+
+    close(sock, 428, 'Connection Closed')();
+
+    await vi.waitFor(() => expect(process.exit).toHaveBeenCalledWith(1));
+    expect(blocks()).toEqual(failed(AFTER('428 Connection Closed')));
+  });
+
   it('qr: a pairing write that failed before the close is still reported as not saved', async () => {
     const { sock, writes } = await pairedWithPendingWrites('qr');
-    // The step runs under setup/index.ts, whose src/log.ts only logs an unhandled
-    // rejection, so the step keeps running until the close.
     writes[0].reject(enospc);
     await new Promise((resolve) => setImmediate(resolve));
 

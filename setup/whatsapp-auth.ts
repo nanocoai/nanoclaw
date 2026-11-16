@@ -57,6 +57,16 @@ function phoneFromId(id?: string | null): string {
   return id.split(':')[0].split('@')[0];
 }
 
+/** True when saved credentials hold a finished pairing (only a real pairing writes `account`). */
+function pairingSaved(): boolean {
+  try {
+    const creds = JSON.parse(fs.readFileSync(path.join(AUTH_DIR, 'creds.json'), 'utf-8')) as { account?: unknown };
+    return Boolean(creds.account);
+  } catch {
+    return false;
+  }
+}
+
 /** Read the linked number from saved credentials (the skipped / already-authed path). */
 function readAuthedPhoneFromFile(): string {
   try {
@@ -104,15 +114,14 @@ function printPairingCard(code: string): void {
   );
 }
 
-/** True once `write` resolves; false if it rejects or takes longer than `ms`. */
-function landed(write: Promise<void>, ms: number): Promise<boolean> {
+/** Resolves once `work` settles, or after `ms` if it hangs. */
+function settled(work: Promise<unknown>, ms: number): Promise<void> {
   return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve(false), ms);
-    const settle = (saved: boolean) => () => {
+    const timer = setTimeout(resolve, ms);
+    void work.finally(() => {
       clearTimeout(timer);
-      resolve(saved);
-    };
-    write.then(settle(true), settle(false));
+      resolve();
+    });
   });
 }
 
@@ -205,7 +214,7 @@ export async function run(args: string[]): Promise<void> {
       // saves `me`), so a 515 reconnect finds it on disk; this socket's own
       // pairing shows up as isNewLogin below.
       let paired = Boolean(state.creds.account);
-      let saving: Promise<void> = Promise.resolve();
+      let saving: Promise<unknown> = Promise.resolve();
 
       const sock = makeWASocket({
         version,
@@ -291,11 +300,11 @@ export async function run(args: string[]): Promise<void> {
                 `WhatsApp closed the connection before linking (${detail}). Clear store/auth/ and run the step again.`,
               );
             } else {
-              // A paired device stays in store/auth/ for the next run, so report
-              // only once the pairing's creds write has landed (or failed).
-              void landed(saving, 5000).then((saved) =>
+              // A paired device stays in store/auth/ for the next run, so once the
+              // creds writes settle, report what creds.json actually holds.
+              void settled(saving, 5000).then(() =>
                 fail(
-                  saved
+                  pairingSaved()
                     ? `WhatsApp closed the connection after pairing (${detail}). The link is saved in store/auth/, so run the step again to use it.`
                     : `WhatsApp closed the connection after pairing (${detail}), but the link was not saved. Clear store/auth/ and run the step again.`,
                 ),
@@ -305,11 +314,9 @@ export async function run(args: string[]): Promise<void> {
         }
       });
 
-      // A close after pairing waits for every write; the last one holds the whole
-      // creds, so its result decides whether the link is saved.
+      // A close after pairing waits for every write to settle before it reads creds.json.
       sock.ev.on('creds.update', () => {
-        const write = saveCreds();
-        saving = Promise.allSettled([saving, write]).then(() => write);
+        saving = Promise.allSettled([saving, saveCreds()]);
       });
     }
 
