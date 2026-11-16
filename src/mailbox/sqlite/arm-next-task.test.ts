@@ -196,11 +196,16 @@ describe('armNextTask content compaction', () => {
 
   it('touches no other series and no non-task rows', async () => {
     const db = freshDb();
+    // A finished chat row in the series, older than every occurrence.
+    db.prepare(
+      "INSERT INTO messages_in (id, seq, kind, timestamp, status, series_id, content) VALUES ('chat-1', 1, 'chat', datetime('now'), 'completed', 'occ-0', ?)",
+    ).run(PAYLOAD);
     insertTaskRow(db, { id: 'other', seriesId: 'other', processAfter: future(), recurrence: null, content: PAYLOAD });
     finish(db, 'other', 'completed');
     await runSeries(db, ['completed', 'completed']);
 
     expect(content(db, 'other')).toBe(PAYLOAD);
+    expect(content(db, 'chat-1')).toBe(PAYLOAD);
   });
 
   it('rolls the compaction back with the pair when the insert fails', async () => {
