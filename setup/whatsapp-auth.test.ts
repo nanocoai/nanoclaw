@@ -3,16 +3,29 @@ import fs from 'fs';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+type Creds = Record<string, unknown>;
+type MockSocket = {
+  ev: EventEmitter;
+  end: ReturnType<typeof vi.fn>;
+  requestPairingCode: ReturnType<typeof vi.fn>;
+};
+
 // Baileys and pino are installed by /add-whatsapp, not by trunk, so both are mocked.
-const sockets: Array<{ ev: EventEmitter; end: ReturnType<typeof vi.fn> }> = [];
+const sockets: MockSocket[] = [];
 vi.mock('@whiskeysockets/baileys', () => ({
-  makeWASocket: vi.fn(() => {
+  makeWASocket: vi.fn((config: { auth: { creds: Creds } }) => {
     const ev = new EventEmitter();
     // Like Baileys, end() emits the close synchronously.
     const end = vi.fn(() =>
       ev.emit('connection.update', { connection: 'close', lastDisconnect: { error: undefined } }),
     );
-    const sock = { ev, end, user: { id: '14155551234:7@s.whatsapp.net' } };
+    // Like Baileys, a requested code stores a placeholder `me` before any pairing.
+    const requestPairingCode = vi.fn(async (phone: string) => {
+      config.auth.creds.me = { id: `${phone}@s.whatsapp.net`, name: '~' };
+      ev.emit('creds.update', config.auth.creds);
+      return 'ABCD1234';
+    });
+    const sock = { ev, end, requestPairingCode, user: { id: '14155551234:7@s.whatsapp.net' } };
     sockets.push(sock);
     return sock;
   }),
@@ -20,7 +33,7 @@ vi.mock('@whiskeysockets/baileys', () => ({
   DisconnectReason: { loggedOut: 401, timedOut: 408 },
   fetchLatestWaWebVersion: vi.fn(async () => ({ version: [2, 3000, 1049214511], isLatest: true })),
   makeCacheableSignalKeyStore: vi.fn(() => ({})),
-  useMultiFileAuthState: vi.fn(async () => ({ state: { creds: {}, keys: {} }, saveCreds: vi.fn() })),
+  useMultiFileAuthState: vi.fn(async () => ({ state: { creds: {}, keys: {} }, saveCreds: vi.fn(async () => {}) })),
 }));
 vi.mock('pino', () => ({ pino: () => ({}) }));
 vi.mock('./status.js', () => ({ emitStatus: vi.fn() }));
@@ -36,31 +49,55 @@ class Exit extends Error {
 }
 
 const blocks = () => vi.mocked(emitStatus).mock.calls;
+const failed = (error: string) => [['WHATSAPP_AUTH', { STATUS: 'failed', ERROR: error }]];
+const BEFORE = (detail: string) =>
+  `WhatsApp closed the connection before linking (${detail}). Clear store/auth/ and run the step again.`;
+const AFTER = (detail: string) =>
+  `WhatsApp closed the connection after pairing (${detail}). The link is saved in store/auth/, so run the step again to use it.`;
 
-const DEVICE = '14155551234:7@s.whatsapp.net';
-const closedWith = (statusCode: number, message: string) =>
-  Object.assign(new Error(message), { output: { statusCode } });
+const PHONE = '14155551234';
+const METHODS = ['qr', 'pairing-code'] as const;
+type Method = (typeof METHODS)[number];
+// A finished pairing saves the device and its `account`; a requested code saves only `me`.
+const PAIRED: Creds = { me: { id: `${PHONE}:7@s.whatsapp.net` }, account: { details: 'signed-device-identity' } };
+const REQUESTED_CODE: Creds = { me: { id: `${PHONE}@s.whatsapp.net`, name: '~' } };
 
-/** WhatsApp closes with 515 and the step reconnects; `savedId` is the device the reconnect reads from disk. */
-async function reconnectedAfter515(savedId?: string): Promise<(typeof sockets)[number]> {
-  const first = await connected();
-  const creds = savedId ? { me: { id: savedId } } : {};
-  vi.mocked(useMultiFileAuthState).mockResolvedValueOnce({ state: { creds, keys: {} }, saveCreds: vi.fn() } as never);
-  expect(() =>
-    first.ev.emit('connection.update', {
-      connection: 'close',
-      lastDisconnect: { error: closedWith(515, 'Stream Errored (restart required)') },
-    }),
-  ).not.toThrow();
+const authState = (creds: Creds, saveCreds: () => Promise<void> = vi.fn(async () => {})) =>
+  ({ state: { creds, keys: {} }, saveCreds }) as never;
+
+const close = (sock: MockSocket, statusCode: number, message: string) => () =>
+  sock.ev.emit('connection.update', {
+    connection: 'close',
+    lastDisconnect: { error: Object.assign(new Error(message), { output: { statusCode } }) },
+  });
+
+/** What Baileys emits on pair-success: the new device's creds, then isNewLogin. */
+function pair(sock: MockSocket): void {
+  sock.ev.emit('creds.update', PAIRED);
+  sock.ev.emit('connection.update', { isNewLogin: true, qr: undefined });
+}
+
+/** Start the step; for a pairing code, wait until the code is shown. */
+async function connected(method: Method = 'qr'): Promise<MockSocket> {
+  const args = method === 'qr' ? ['--method', 'qr'] : ['--method', 'pairing-code', '--phone', PHONE];
+  void run(args).catch(() => {});
+  await vi.waitFor(() => expect(makeWASocket).toHaveBeenCalledTimes(1));
+  if (method === 'pairing-code') {
+    await vi.advanceTimersByTimeAsync(3000);
+    await vi.waitFor(() => expect(blocks()).toEqual([['WHATSAPP_AUTH_PAIRING_CODE', { CODE: 'ABCD1234' }]]));
+    vi.mocked(emitStatus).mockClear();
+  }
+  return sockets[0];
+}
+
+/** WhatsApp restarts the stream (515) and the step reconnects; `saved` is what it reads from store/auth/. */
+async function reconnectedAfter515(method: Method, saved: Creds): Promise<MockSocket> {
+  const first = await connected(method);
+  vi.mocked(useMultiFileAuthState).mockResolvedValueOnce(authState(saved));
+  expect(close(first, 515, 'Stream Errored (restart required)')).not.toThrow();
   await vi.waitFor(() => expect(makeWASocket).toHaveBeenCalledTimes(2));
   expect(blocks()).toEqual([]);
   return sockets[1];
-}
-
-async function connected(): Promise<(typeof sockets)[number]> {
-  void run(['--method', 'qr']).catch(() => {});
-  await vi.waitFor(() => expect(makeWASocket).toHaveBeenCalledTimes(1));
-  return sockets[0];
 }
 
 beforeEach(() => {
@@ -76,6 +113,7 @@ beforeEach(() => {
   );
   vi.spyOn(fs, 'existsSync').mockReturnValue(false);
   vi.spyOn(fs, 'mkdirSync').mockReturnValue(undefined);
+  vi.spyOn(fs, 'writeFileSync').mockReturnValue(undefined);
   vi.spyOn(process, 'exit').mockImplementation((code) => {
     throw new Exit(code);
   });
@@ -88,23 +126,11 @@ afterEach(() => {
 });
 
 describe('whatsapp-auth step', () => {
-  it('fails at once with the reason when WhatsApp refuses the connection', async () => {
-    const sock = await connected();
-    const refused = Object.assign(new Error('Connection Failure'), { output: { statusCode: 405 } });
+  it.each(METHODS)('%s: fails at once with the reason when WhatsApp refuses the connection', async (method) => {
+    const sock = await connected(method);
 
-    expect(() =>
-      sock.ev.emit('connection.update', { connection: 'close', lastDisconnect: { error: refused } }),
-    ).toThrow('process.exit(1)');
-    expect(blocks()).toEqual([
-      [
-        'WHATSAPP_AUTH',
-        {
-          STATUS: 'failed',
-          ERROR:
-            'WhatsApp closed the connection before linking (405 Connection Failure). Clear store/auth/ and run the step again.',
-        },
-      ],
-    ]);
+    expect(close(sock, 405, 'Connection Failure')).toThrow('process.exit(1)');
+    expect(blocks()).toEqual(failed(BEFORE('405 Connection Failure')));
   });
 
   it('does not report its own close after a successful link as a failure', async () => {
@@ -113,39 +139,52 @@ describe('whatsapp-auth step', () => {
     sock.ev.emit('connection.update', { connection: 'open' });
 
     expect(sock.end).toHaveBeenCalled();
-    expect(blocks()).toEqual([['WHATSAPP_AUTH', { STATUS: 'success', PHONE: '14155551234' }]]);
+    expect(blocks()).toEqual([['WHATSAPP_AUTH', { STATUS: 'success', PHONE }]]);
     expect(() => vi.advanceTimersByTime(1000)).toThrow('process.exit(0)');
   });
 
-  it('reconnects after a 515 and reports the link once the new socket opens', async () => {
-    const sock = await reconnectedAfter515(DEVICE);
+  it.each(METHODS)('%s: reconnects after a 515 and reports the link once the new socket opens', async (method) => {
+    const sock = await reconnectedAfter515(method, PAIRED);
+    // A pairing code is requested on the first connect only.
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(sock.requestPairingCode).not.toHaveBeenCalled();
 
     sock.ev.emit('connection.update', { connection: 'open' });
 
-    expect(blocks()).toEqual([['WHATSAPP_AUTH', { STATUS: 'success', PHONE: '14155551234' }]]);
+    expect(blocks()).toEqual([['WHATSAPP_AUTH', { STATUS: 'success', PHONE }]]);
     expect(() => vi.advanceTimersByTime(1000)).toThrow('process.exit(0)');
   });
 
   it.each([
-    [
-      'keeps the saved link when the reconnected socket closes after pairing',
-      DEVICE,
-      'WhatsApp closed the connection after pairing (428 Connection Closed). The link is saved in store/auth/, so run the step again to use it.',
-    ],
-    [
-      'still says before linking when the reconnect finds no saved device',
-      undefined,
-      'WhatsApp closed the connection before linking (428 Connection Closed). Clear store/auth/ and run the step again.',
-    ],
-  ])('%s', async (_name, savedId, error) => {
-    const sock = await reconnectedAfter515(savedId);
+    ['qr', 'a paired device', PAIRED, AFTER('428 Connection Closed')],
+    ['pairing-code', 'a paired device', PAIRED, AFTER('428 Connection Closed')],
+    ['qr', 'nothing', {}, BEFORE('428 Connection Closed')],
+    ['pairing-code', 'only a requested code', REQUESTED_CODE, BEFORE('428 Connection Closed')],
+  ] as const)('%s: a close after the 515 reconnect, with %s saved', async (method, _saved, creds, error) => {
+    const sock = await reconnectedAfter515(method, creds);
+    // After pairing, the step exits once the creds write lands, not at once.
+    vi.mocked(process.exit).mockImplementation(() => undefined as never);
 
-    expect(() =>
-      sock.ev.emit('connection.update', {
-        connection: 'close',
-        lastDisconnect: { error: closedWith(428, 'Connection Closed') },
-      }),
-    ).toThrow('process.exit(1)');
-    expect(blocks()).toEqual([['WHATSAPP_AUTH', { STATUS: 'failed', ERROR: error }]]);
+    close(sock, 428, 'Connection Closed')();
+
+    expect(blocks()).toEqual(failed(error));
+    await vi.waitFor(() => expect(process.exit).toHaveBeenCalledWith(1));
+  });
+
+  it.each(METHODS)('%s: a close after pairing but before the 515 waits for the new creds', async (method) => {
+    let written = (): void => {};
+    const saveCreds = vi.fn(() => new Promise<void>((resolve) => (written = resolve)));
+    vi.mocked(useMultiFileAuthState).mockResolvedValueOnce(authState({}, saveCreds));
+    const sock = await connected(method);
+    vi.mocked(process.exit).mockImplementation(() => undefined as never);
+
+    pair(sock);
+    close(sock, 428, 'Connection Closed')();
+
+    expect(blocks()).toEqual(failed(AFTER('428 Connection Closed')));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(process.exit).not.toHaveBeenCalled();
+    written();
+    await vi.waitFor(() => expect(process.exit).toHaveBeenCalledWith(1));
   });
 });

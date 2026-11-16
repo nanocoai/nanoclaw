@@ -189,9 +189,11 @@ export async function run(args: string[]): Promise<void> {
 
     async function connectSocket(isReconnect = false): Promise<void> {
       const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
-      // Read from disk before Baileys updates creds in memory: only a 515
-      // reconnect finds a device here, paired and saved by the first socket.
-      const paired = Boolean(state.creds.me?.id);
+      // Only a finished pairing saves `account` (a requested pairing code already
+      // saves `me`), so a 515 reconnect finds it on disk; this socket's own
+      // pairing shows up as isNewLogin below.
+      let paired = Boolean(state.creds.account);
+      let saving: Promise<void> = Promise.resolve();
 
       const sock = makeWASocket({
         version,
@@ -223,7 +225,8 @@ export async function run(args: string[]): Promise<void> {
       }
 
       sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect, qr } = update;
+        const { connection, lastDisconnect, qr, isNewLogin } = update;
+        if (isNewLogin) paired = true;
 
         // QR method: render each rotation as plain stdout lines so a streaming
         // parent (hostExecStream) tees the live QR straight to the operator's
@@ -274,12 +277,16 @@ export async function run(args: string[]): Promise<void> {
                 ? `WhatsApp closed the connection after pairing (${detail}). The link is saved in store/auth/, so run the step again to use it.`
                 : `WhatsApp closed the connection before linking (${detail}). Clear store/auth/ and run the step again.`,
             });
-            process.exit(1);
+            // The pairing's creds write may still be running; exit once it lands.
+            if (paired) void saving.finally(() => process.exit(1));
+            else process.exit(1);
           }
         }
       });
 
-      sock.ev.on('creds.update', saveCreds);
+      sock.ev.on('creds.update', () => {
+        saving = saveCreds();
+      });
     }
 
     connectSocket();
