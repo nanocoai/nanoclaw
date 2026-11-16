@@ -185,6 +185,102 @@ describe('cleanupUnhealthyPeers — dead systemd registrations', () => {
     expect(fs.existsSync(own)).toBe(true);
     expect(result.removed).toHaveLength(0);
   });
+
+  // A dead unit file with a `systemctl edit` drop-in (<unit>.service.d/override.conf).
+  function editedDeadUnit(unitDir: string, overrideConf: string): { unit: string; dropIns: string } {
+    const unit = path.join(unitDir, 'nanoclaw-v2-edited.service');
+    writeUnit(unit, path.join(unitDir, 'gone', 'dist', 'index.js'));
+    const dropIns = `${unit}.d`;
+    fs.mkdirSync(dropIns);
+    fs.writeFileSync(path.join(dropIns, 'override.conf'), overrideConf);
+    return { unit, dropIns };
+  }
+
+  function liveEntry(unitDir: string): string {
+    const entry = path.join(unitDir, 'live', 'dist', 'index.js');
+    fs.mkdirSync(path.dirname(entry), { recursive: true });
+    fs.writeFileSync(entry, '// host entry');
+    return entry;
+  }
+
+  function expectKept(result: ReturnType<typeof cleanupUnhealthyPeers>, ...paths: string[]): void {
+    expect(execFileSync).not.toHaveBeenCalledWith(
+      'systemctl',
+      ['--user', 'disable', '--now', 'nanoclaw-v2-edited.service'],
+      expect.anything(),
+    );
+    for (const p of paths) expect(fs.existsSync(p)).toBe(true);
+    expect(result.removed).toEqual([]);
+  }
+
+  it('keeps a dead unit whose drop-in starts a live entry', () => {
+    const { unitDir, projectRoot } = setup();
+    const { unit, dropIns } = editedDeadUnit(
+      unitDir,
+      `[Service]\nExecStart=\nExecStart=/usr/bin/node ${liveEntry(unitDir)}\n`,
+    );
+
+    expectKept(cleanupUnhealthyPeers(projectRoot), unit, dropIns);
+  });
+
+  it.each(['ExecStart=/usr/local/bin/my-host', 'ExecStart = /usr/bin/node /srv/gone/dist/index.js'])(
+    'keeps a dead unit whose drop-in sets %s',
+    (line) => {
+      const { unitDir, projectRoot } = setup();
+      const { unit, dropIns } = editedDeadUnit(unitDir, `[Service]\nExecStart=\n${line}\n`);
+
+      expectKept(cleanupUnhealthyPeers(projectRoot), unit, dropIns);
+    },
+  );
+
+  it("keeps a dead unit whose drop-in can't be read", () => {
+    const { unitDir, projectRoot } = setup();
+    const { unit, dropIns } = editedDeadUnit(unitDir, '[Service]\n');
+    fs.mkdirSync(path.join(dropIns, 'other.conf'));
+
+    expectKept(cleanupUnhealthyPeers(projectRoot), unit, dropIns);
+  });
+
+  it("keeps a dead unit whose drop-in folder can't be listed", () => {
+    const { unitDir, projectRoot } = setup();
+    const unit = path.join(unitDir, 'nanoclaw-v2-edited.service');
+    writeUnit(unit, path.join(unitDir, 'gone', 'dist', 'index.js'));
+    fs.writeFileSync(`${unit}.d`, '');
+
+    expectKept(cleanupUnhealthyPeers(projectRoot), unit, `${unit}.d`);
+  });
+
+  // Drop-ins outside <unit>.service.d/ reach systemd too; its loaded ExecStart has them all.
+  it("keeps a dead unit when systemd's loaded ExecStart is live", () => {
+    const { unitDir, projectRoot } = setup();
+    const unit = path.join(unitDir, 'nanoclaw-v2-edited.service');
+    writeUnit(unit, path.join(unitDir, 'gone', 'dist', 'index.js'));
+    const live = liveEntry(unitDir);
+    vi.mocked(execFileSync).mockImplementation((_cmd, args) =>
+      args?.includes('--property=ExecStart')
+        ? `{ path=/usr/bin/node ; argv[]=/usr/bin/node ${live} ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }\n`
+        : '',
+    );
+
+    expectKept(cleanupUnhealthyPeers(projectRoot), unit);
+  });
+
+  it.each([
+    ['changes no ExecStart', () => '[Service]\nEnvironment=NODE_ENV=production\n'],
+    [
+      'starts another missing entry',
+      (unitDir: string) => `[Service]\nExecStart=\nExecStart=/usr/bin/node ${unitDir}/gone2/dist/index.js\n`,
+    ],
+  ])('removes a dead unit and its drop-in folder when the drop-in %s', (_name, overrideConf) => {
+    const { unitDir, projectRoot } = setup();
+    const { unit, dropIns } = editedDeadUnit(unitDir, overrideConf(unitDir));
+
+    const result = cleanupUnhealthyPeers(projectRoot);
+
+    expect(fs.existsSync(unit)).toBe(false);
+    expect(fs.existsSync(dropIns)).toBe(false);
+    expect(result.removed).toEqual([{ label: 'nanoclaw-v2-edited', configPath: unit }]);
+  });
 });
 
 // A changed NANOCLAW_INSTALL_ID gives this checkout a new service name. The old

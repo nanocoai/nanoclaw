@@ -74,7 +74,7 @@ export function cleanupUnhealthyPeers(projectRoot: string = process.cwd()): Peer
  */
 function reapPeer(
   result: PeerCleanupResult,
-  peer: { label: string; configPath: string },
+  peer: { label: string; configPath: string; dropIns?: string },
   unload: () => void,
   kind: string,
   missingTarget?: string,
@@ -95,13 +95,15 @@ function reapPeer(
     return;
   }
   try {
+    // A systemd unit's drop-in folder goes first, so a failure never leaves it orphaned.
+    if (peer.dropIns) fs.rmSync(peer.dropIns, { recursive: true, force: true });
     fs.rmSync(peer.configPath, { force: true });
     log.info(`Removed ${what}`, {
       label: peer.label,
       configPath: peer.configPath,
       ...(missingTarget ? { missingTarget } : {}),
     });
-    (missingTarget ? result.removed : result.retired).push(peer);
+    (missingTarget ? result.removed : result.retired).push({ label: peer.label, configPath: peer.configPath });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log.warn(`Failed to remove ${what}`, { label: peer.label, err: message });
@@ -235,11 +237,11 @@ function cleanupSystemdPeers(projectRoot: string): PeerCleanupResult {
     if (unit === ownUnit) continue;
 
     const unitPath = path.join(unitDir, `${unit}.service`);
-    const missingTarget = deadSystemdTarget(unitPath);
+    const missingTarget = deadSystemdTarget(unitPath, unit);
     if (missingTarget || (isSetupName(unit, 'nanoclaw-v2-') && systemdStartsEntry(unitPath, entry))) {
       reapPeer(
         result,
-        { label: unit, configPath: unitPath },
+        { label: unit, configPath: unitPath, dropIns: `${unitPath}.d` },
         () => {
           execFileSync('systemctl', ['--user', 'disable', '--now', `${unit}.service`], { stdio: 'pipe' });
           execFileSync('systemctl', ['--user', 'daemon-reload'], { stdio: 'pipe' });
@@ -297,19 +299,53 @@ function probeSystemdPeer(unit: string): PeerStatus | null {
 /**
  * Returns the program path a systemd unit launches when that program no longer
  * exists on disk (a dead registration), or undefined when the unit is
- * unreadable, has an unrecognized shape, or its target still exists.
+ * unreadable, has an unrecognized shape, or its target still exists. Its
+ * drop-ins (`systemctl edit`) count too, so do drop-ins elsewhere through the
+ * ExecStart systemd loaded.
  */
-function deadSystemdTarget(unitPath: string): string | undefined {
-  let unit: string;
-  try {
-    unit = fs.readFileSync(unitPath, 'utf-8');
-  } catch {
-    return undefined;
+function deadSystemdTarget(unitPath: string, unit: string): string | undefined {
+  const files = dropInFiles(unitPath);
+  if (!files) return undefined;
+  const lines: string[] = [];
+  for (const file of [unitPath, ...files]) {
+    const text = readConfig(file);
+    if (text === undefined) return undefined;
+    lines.push(...text.split('\n'));
   }
-  // ExecStart=<nodePath> <projectRoot>/dist/index.js
-  const target = /^ExecStart=\S+\s+(\S+\/dist\/index\.js)\s*$/m.exec(unit)?.[1];
-  if (!target) return undefined;
-  return fs.existsSync(target) ? undefined : target;
+  const target = missingEntry(lines);
+  return target && loadedExecStarts(unit).every((line) => missingEntry([line])) ? target : undefined;
+}
+
+/** The entry when every ExecStart is `<nodePath> <projectRoot>/dist/index.js` and that file is gone. */
+function missingEntry(lines: string[]): string | undefined {
+  // A bare `ExecStart=` only resets the list; any other shape could still run.
+  const targets = lines
+    .filter((line) => /^\s*ExecStart\s*=\s*\S/.test(line))
+    .map((line) => /^ExecStart=\S+\s+(\S+\/dist\/index\.js)\s*$/.exec(line)?.[1]);
+  return targets.some((target) => !target || fs.existsSync(target)) ? undefined : targets[0];
+}
+
+/** Every file in `<unit>.service.d/`; [] without the folder, undefined when it can't be listed. */
+function dropInFiles(unitPath: string): string[] | undefined {
+  const dir = `${unitPath}.d`;
+  try {
+    return fs.readdirSync(dir).map((f) => path.join(dir, f));
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'ENOENT' ? [] : undefined;
+  }
+}
+
+/** ExecStart as systemd loaded it, drop-ins from any folder included; none when systemctl can't say. */
+function loadedExecStarts(unit: string): string[] {
+  try {
+    const output = execFileSync('systemctl', ['--user', 'show', '--property=ExecStart', '--value', `${unit}.service`], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      encoding: 'utf-8',
+    });
+    return [...output.matchAll(/argv\[\]=([^;]*)/g)].map((match) => `ExecStart=${match[1].trim()}`);
+  } catch {
+    return [];
+  }
 }
 
 // ---- same checkout under another name ----------------------------------------
