@@ -48,7 +48,7 @@ vi.mock('./lib/setup-config-parse.js', () => ({
   applyToEnv: vi.fn(),
 }));
 vi.mock('./environment.js', () => ({ readEnvKey: () => undefined }));
-vi.mock('./logs.js', () => ({ userInput: vi.fn() }));
+vi.mock('./logs.js', () => ({ userInput: vi.fn(), redactBootstrapLog: vi.fn() }));
 vi.mock('./lib/diagnostics.js', () => ({ emit: vi.fn() }));
 vi.mock('./lib/runner.js', async (original) => ({
   ...(await original<typeof import('./lib/runner.js')>()),

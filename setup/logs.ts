@@ -23,6 +23,8 @@
 import fs from 'fs';
 import path from 'path';
 
+import { createLineRedactor, isSecretName, redactSecrets, SECRET_MASK } from '../src/secret-redaction.js';
+
 const LOGS_DIR = 'logs';
 const STEPS_DIR = path.join(LOGS_DIR, 'setup-steps');
 const PROGRESS_LOG = path.join(LOGS_DIR, 'setup.log');
@@ -38,6 +40,10 @@ const completedInRun = new Set<string>();
 
 export function completedStepNames(): string[] {
   return [...completedInRun];
+}
+
+function append(text: string): void {
+  fs.appendFileSync(PROGRESS_LOG, redactSecrets(text));
 }
 
 /** Wipe prior logs and write a header. Called once per fresh run (by nanoclaw.sh or as a fallback by auto.ts if invoked standalone). */
@@ -59,7 +65,7 @@ export function header(meta: Record<string, string>): void {
     lines.push(`  ${k}: ${v}`);
   }
   lines.push('');
-  fs.appendFileSync(PROGRESS_LOG, lines.join('\n') + '\n');
+  append(lines.join('\n') + '\n');
 }
 
 /** Append one step entry to the progression log. */
@@ -80,7 +86,7 @@ export function step(
   }
   if (rawRel) lines.push(`  raw: ${rawRel}`);
   lines.push('');
-  fs.appendFileSync(PROGRESS_LOG, lines.join('\n') + '\n');
+  append(lines.join('\n') + '\n');
 
   if (status === 'success' || status === 'skipped') {
     completedInRun.add(name);
@@ -91,19 +97,31 @@ export function step(
 export function userInput(key: string, value: string): void {
   fs.mkdirSync(LOGS_DIR, { recursive: true });
   const ts = new Date().toISOString();
-  fs.appendFileSync(PROGRESS_LOG, `=== [${ts}] user-input → ${key} ===\n  value: ${value}\n\n`);
+  append(`=== [${ts}] user-input → ${key} ===\n  value: ${isSecretName(key) ? SECRET_MASK : value}\n\n`);
 }
 
 /** Append the success footer. */
 export function complete(totalMs: number): void {
   const ts = new Date().toISOString();
-  fs.appendFileSync(PROGRESS_LOG, `## ${ts} · completed (total ${formatDurationTotal(totalMs)})\n`);
+  append(`## ${ts} · completed (total ${formatDurationTotal(totalMs)})\n`);
 }
 
 /** Append the failure footer. Keep error short — full context lives in the failing step's raw log. */
 export function abort(stepName: string, error: string): void {
   const ts = new Date().toISOString();
-  fs.appendFileSync(PROGRESS_LOG, `## ${ts} · aborted at ${stepName} (${error})\n`);
+  append(`## ${ts} · aborted at ${stepName} (${error})\n`);
+}
+
+/**
+ * The shell bootstrap writes its raw log before Node can redact it; clean it
+ * once setup:auto starts. A failed bootstrap never gets here, so its log stays raw.
+ */
+export function redactBootstrapLog(): void {
+  if (!fs.existsSync(STEPS_DIR)) return;
+  for (const name of fs.readdirSync(STEPS_DIR).filter((n) => /^\d+-bootstrap\.log$/.test(n))) {
+    const file = path.join(STEPS_DIR, name);
+    fs.writeFileSync(file, createLineRedactor()(fs.readFileSync(file, 'utf-8')));
+  }
 }
 
 /**
