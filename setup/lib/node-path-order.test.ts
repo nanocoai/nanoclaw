@@ -170,6 +170,16 @@ echo "DEPS_OK=$DEPS_OK"`);
     installDeps();
     expect(calls()).toEqual(['pnpm install node=v24.22.1']);
   });
+
+  it('says pnpm could not be installed when npm fails, instead of stopping without a word', () => {
+    fakeNode(bin, '24.22.1');
+    stub(bin, 'npm', 'exit 1');
+    const r = installDeps();
+    expect(r.out).toContain('Could not install pnpm without root.');
+    expect(r.out).toContain('DEPS_OK=false');
+    expect(r.status).toBe(0);
+    expect(fs.readFileSync(path.join(tmp, 'boot.log'), 'utf8')).toContain('npm config get prefix failed');
+  });
 });
 
 describe('nanoclaw.sh hand-off', () => {
