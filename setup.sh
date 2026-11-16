@@ -138,6 +138,7 @@ install_jq() {
 install_deps() {
   DEPS_OK="false"
   NATIVE_OK="false"
+  local npm_output="" npm_failed="false"
 
   if [ "$NODE_OK" = "false" ]; then
     log "Skipping pnpm install — Node not available"
@@ -218,10 +219,14 @@ install_deps() {
       log "npm install -g failed — retrying with a user-owned prefix"
       NPM_LOCAL_PREFIX="$HOME/.local"
       if mkdir -p "$NPM_LOCAL_PREFIX" \
-          && npm install -g "pnpm@${pinned}" --prefix "$NPM_LOCAL_PREFIX" >> "$LOG_FILE" 2>&1; then
+          && npm_output=$(npm install -g "pnpm@${pinned}" --prefix "$NPM_LOCAL_PREFIX" 2>&1); then
+        printf '%s\n' "$npm_output" >> "$LOG_FILE"
         export PATH="$PATH:$NPM_LOCAL_PREFIX/bin"
         log "Installed pnpm@${pinned} to user-owned prefix: $NPM_LOCAL_PREFIX"
       else
+        # This attempt needs no root, so what npm said is why pnpm is missing.
+        printf '%s\n' "$npm_output" >> "$LOG_FILE"
+        npm_failed="true"
         log "pnpm install via user-owned prefix also failed"
       fi
     fi
@@ -245,6 +250,22 @@ install_deps() {
 
   if ! command -v pnpm >/dev/null 2>&1; then
     log "pnpm not on PATH after corepack + npm fallback"
+    if [ "$npm_failed" = "true" ]; then
+      # Root is not what is missing, and the npm command suggested below would
+      # fail the same way. Show npm's own reason instead.
+      local npm_why
+      npm_why=$(first_error_line <<<"$npm_output")
+      if npm --version >/dev/null 2>&1; then
+        echo "Could not install pnpm: npm failed, also when installing into ~/.local:"
+        echo "  ${npm_why:-it printed nothing}"
+        echo "Fix that, then re-run setup. npm's full output is in $LOG_FILE"
+      else
+        echo "Could not install pnpm: npm at $(command -v npm) cannot run:"
+        echo "  ${npm_why:-it printed nothing}"
+        echo "Reinstall Node.js to get a working npm, then re-run setup."
+      fi
+      return
+    fi
     echo "Could not install pnpm without root. Run this, then re-run setup:"
     if command -v corepack >/dev/null 2>&1; then
       echo "  mkdir -p ~/.local/bin && corepack enable --install-directory ~/.local/bin pnpm"

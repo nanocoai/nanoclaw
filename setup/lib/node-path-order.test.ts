@@ -77,11 +77,14 @@ function run(script: string): { status: number | null; out: string } {
 const calls = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n') : []);
 
 /** A function's source from setup.sh, so it runs without the rest of the bootstrap. */
-function setupFunction(name: string): string {
+/** Every function setup.sh defines, without the main part that calls them. */
+function setupFunctions(): string {
   const source = fs.readFileSync(path.join(ROOT, 'setup.sh'), 'utf8');
-  const start = source.indexOf(`${name}() {`);
-  expect(start, `${name}() not found in setup.sh`).toBeGreaterThanOrEqual(0);
-  return source.slice(start, source.indexOf('\n}', start) + 2);
+  const start = source.indexOf('# --- Platform detection ---');
+  const end = source.indexOf('# --- Main ---');
+  expect(start, 'the functions of setup.sh were not found').toBeGreaterThanOrEqual(0);
+  expect(end).toBeGreaterThan(start);
+  return source.slice(start, end);
 }
 
 describe('node_use_patched', () => {
@@ -126,7 +129,7 @@ describe('setup.sh install_deps', () => {
     return run(`set -euo pipefail
 PROJECT_ROOT=${tmp}; LOG_FILE=${tmp}/boot.log; PLATFORM=linux NODE_OK=true
 log() { echo "$*" >> "$LOG_FILE"; }
-${setupFunction('install_deps')}
+${setupFunctions()}
 install_deps
 echo "DEPS_OK=$DEPS_OK"`);
   }
@@ -166,19 +169,76 @@ echo "DEPS_OK=$DEPS_OK"`);
     fakeNode(localBin, OLDER);
     stub(shim, 'pnpm', pnpmStub());
     // An npm whose own global prefix is not writable.
-    stub(bin, 'npm', `[ "$1 $2 $4" = "install -g --prefix" ] && mkdir -p "$5/bin" && cp -p ${shim}/pnpm "$5/bin/pnpm"`);
+    stub(
+      bin,
+      'npm',
+      `[ "$1 $2 $4" = "install -g --prefix" ] && mkdir -p "$5/bin" && cp -p ${shim}/pnpm "$5/bin/pnpm" && echo "added 1 package"`,
+    );
     installDeps();
     expect(calls()).toEqual(['pnpm install node=v24.22.1']);
+    expect(fs.readFileSync(path.join(tmp, 'boot.log'), 'utf8')).toContain('added 1 package');
   });
 
-  it('says pnpm could not be installed when npm fails, instead of stopping without a word', () => {
+  it('names an npm that cannot run as the reason, with its own error, instead of blaming root', () => {
+    fakeNode(bin, '24.22.1');
+    // What a half-removed npm prints: the first line is not the one that says why.
+    stub(
+      bin,
+      'npm',
+      `printf "node:internal/x:1\\n  throw err;\\nError: Cannot find module 'npm-cli.js'\\n" >&2; exit 1`,
+    );
+    const r = installDeps();
+    expect(r.out).toContain(`Could not install pnpm: npm at ${bin}/npm cannot run:`);
+    expect(r.out).toMatch(/^ {2}Error: Cannot find module 'npm-cli\.js'$/m);
+    expect(r.out).toContain('Reinstall Node.js to get a working npm, then re-run setup.');
+    expect(r.out).not.toContain('without root');
+    expect(r.out).not.toContain('npm install -g');
+    expect(r.out).toContain('DEPS_OK=false');
+    expect(r.status).toBe(0);
+    const bootLog = fs.readFileSync(path.join(tmp, 'boot.log'), 'utf8');
+    expect(bootLog).toContain('npm config get prefix failed');
+    expect(bootLog).toContain("Error: Cannot find module 'npm-cli.js'");
+  });
+
+  it('shows why npm failed when it runs but cannot install pnpm, also without root', () => {
+    fakeNode(bin, '24.22.1');
+    // The global prefix is not writable; the try into ~/.local fails for another reason.
+    const install = `if [ "$4" = --prefix ]; then echo "npm error code ENOTFOUND" >&2; echo "npm error network request failed" >&2; else echo "npm error code EACCES" >&2; fi; exit 1`;
+    stub(
+      bin,
+      'npm',
+      `case "$1" in --version) echo 10.9.0 ;; config) echo ${tmp}/prefix ;; install) ${install} ;; esac`,
+    );
+    const r = installDeps();
+    expect(r.out).toContain('Could not install pnpm: npm failed, also when installing into ~/.local:');
+    expect(r.out).toMatch(/^ {2}npm error code ENOTFOUND$/m);
+    expect(r.out).toContain(`Fix that, then re-run setup. npm's full output is in ${tmp}/boot.log`);
+    expect(r.out).not.toContain('without root');
+    expect(r.out).not.toContain('cannot run');
+    expect(r.out).not.toContain('EACCES');
+    expect(r.out).toContain('DEPS_OK=false');
+    const bootLog = fs.readFileSync(path.join(tmp, 'boot.log'), 'utf8');
+    expect(bootLog).toContain('npm error code EACCES');
+    expect(bootLog).toContain('npm error network request failed');
+  });
+
+  it('says so plainly when npm fails without printing anything', () => {
     fakeNode(bin, '24.22.1');
     stub(bin, 'npm', 'exit 1');
     const r = installDeps();
-    expect(r.out).toContain('Could not install pnpm without root.');
+    expect(r.out).toContain(`Could not install pnpm: npm at ${bin}/npm cannot run:`);
+    expect(r.out).toMatch(/^ {2}it printed nothing$/m);
     expect(r.out).toContain('DEPS_OK=false');
     expect(r.status).toBe(0);
-    expect(fs.readFileSync(path.join(tmp, 'boot.log'), 'utf8')).toContain('npm config get prefix failed');
+  });
+
+  it('still points at corepack when corepack is there, fails, and there is no npm', () => {
+    fakeNode(bin, '24.22.1');
+    stub(bin, 'corepack', 'exit 1');
+    const r = installDeps();
+    expect(r.out).toContain('Could not install pnpm without root. Run this, then re-run setup:');
+    expect(r.out).toContain('corepack enable --install-directory ~/.local/bin pnpm');
+    expect(r.out).toContain('DEPS_OK=false');
   });
 });
 
