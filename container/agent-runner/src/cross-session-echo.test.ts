@@ -177,6 +177,19 @@ describe('formatter rendering', () => {
     expect(result).not.toContain('Earlier talk in this thread');
   });
 
+  it('says how many thread lines were left out, even when no line is shown', () => {
+    insertMessage(
+      'th-2',
+      'chat',
+      { text: 'Earlier talk in this thread (0 lines, 2 left out)', lines: [], withheld: 2, echo: { surface: 'thread-history', label: 'this thread' } },
+      { trigger: 0, channelType: 'session-echo' },
+    );
+
+    expect(formatMessages(getPendingMessages())).toContain(
+      '<thread-history>\n2 earlier lines from senders not admitted in this chat left out.\n</thread-history>',
+    );
+  });
+
   it('XML-escapes label, sender, and text', () => {
     insertEcho('e1', { text: '<b>&"hi"</b>', sender: 'A & B', label: 'DM with <Gavriel>' });
 

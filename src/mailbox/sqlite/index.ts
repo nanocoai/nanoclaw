@@ -325,6 +325,13 @@ export function wrapSqliteOutbound(
   delivered?: Database.Database,
 ): OutboundMailbox {
   const readable = () => (typeof source === 'function' ? source() : source);
+  const platformIds = (): ((id: string) => { platformMessageId?: string }) => {
+    const lookup = delivered?.prepare('SELECT platform_message_id FROM delivered WHERE message_out_id = ?');
+    return (id) => {
+      const found = lookup?.get(id) as { platform_message_id: string | null } | undefined;
+      return found?.platform_message_id ? { platformMessageId: found.platform_message_id } : {};
+    };
+  };
   return {
     getTerminalProcessingAcks: () =>
       (
@@ -418,12 +425,19 @@ export function wrapSqliteOutbound(
         )
         .run(record);
     },
-    getOutboundHistory: (limit) =>
-      (
+    getOutboundHistory: (limit) => {
+      const platformIdOf = platformIds();
+      return (
         readable()
-          .prepare('SELECT timestamp, kind, content FROM messages_out ORDER BY seq DESC LIMIT ?')
-          .all(limit) as MailboxHistoryMessage[]
-      ).map((row) => ({ ...row, timestamp: sqliteTimestamp(row.timestamp) })),
+          .prepare('SELECT id, timestamp, kind, content FROM messages_out ORDER BY seq DESC LIMIT ?')
+          .all(limit) as Array<{ id: string; timestamp: string; kind: string; content: string }>
+      ).map(({ id, timestamp, kind, content }) => ({
+        timestamp: sqliteTimestamp(timestamp),
+        kind,
+        content,
+        ...platformIdOf(id),
+      }));
+    },
     getTopLevelOutbound: (limit) => {
       const rows = readable()
         .prepare(
@@ -433,12 +447,12 @@ export function wrapSqliteOutbound(
             'ORDER BY seq DESC LIMIT ?',
         )
         .all(limit) as Array<{ id: string; timestamp: string; content: string }>;
-      const platformIdOf = delivered?.prepare('SELECT platform_message_id FROM delivered WHERE message_out_id = ?');
-      return rows.map(({ id, timestamp, content }): MailboxTimelineMessage => {
-        const platformMessageId = (platformIdOf?.get(id) as { platform_message_id: string | null } | undefined)
-          ?.platform_message_id;
-        return { timestamp: sqliteTimestamp(timestamp), content, ...(platformMessageId ? { platformMessageId } : {}) };
-      });
+      const platformIdOf = platformIds();
+      return rows.map(({ id, timestamp, content }): MailboxTimelineMessage => ({
+        timestamp: sqliteTimestamp(timestamp),
+        content,
+        ...platformIdOf(id),
+      }));
     },
     hasMessagesToOtherAgents: (selfAgentGroupId) =>
       readable()

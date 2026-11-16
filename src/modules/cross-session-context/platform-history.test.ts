@@ -33,7 +33,7 @@ import { settleEchoFans } from './fan.js';
 import { backfillPlatformHistory } from './platform-history.js';
 
 const TEST_DIR = '/tmp/nanoclaw-test-platform-history';
-const flags = vi.hoisted(() => ({ on: true }));
+const flags = vi.hoisted(() => ({ channels: ['testchat'] }));
 
 vi.mock('../../container-runner.js', () => ({
   wakeContainer: vi.fn().mockResolvedValue(true),
@@ -44,10 +44,21 @@ vi.mock('../../container-runner.js', () => ({
 vi.mock('../../config.js', async () => ({
   ...(await vi.importActual<object>('../../config.js')),
   DATA_DIR: '/tmp/nanoclaw-test-platform-history',
-  get PLATFORM_HISTORY() {
-    return flags.on;
+  get PLATFORM_HISTORY_CHANNELS() {
+    return new Set(flags.channels);
   },
 }));
+const admission = vi.hoisted(() => ({ hang: false, release: [] as Array<() => void> }));
+vi.mock('../permissions/access.js', async () => {
+  const actual = await vi.importActual<typeof import('../permissions/access.js')>('../permissions/access.js');
+  return {
+    ...actual,
+    wouldAdmitSender: (...args: Parameters<typeof actual.wouldAdmitSender>) =>
+      admission.hang
+        ? new Promise<boolean>((resolve) => admission.release.push(() => resolve(false)))
+        : actual.wouldAdmitSender(...args),
+  };
+});
 vi.mock('./config.js', async () => ({
   ...(await vi.importActual<object>('./config.js')),
   PLATFORM_HISTORY_BUDGET_MS: 50,
@@ -101,6 +112,7 @@ async function seed(
     engagePattern?: string;
     ignoredMessagePolicy?: 'drop' | 'accumulate';
     unknownSenderPolicy?: 'strict' | 'public';
+    senderScope?: 'all' | 'known';
   } = {},
 ): Promise<void> {
   await createAgentGroup({ id: 'ag-1', name: 'Pip', folder: 'pip', agent_provider: null, created_at: at(0) });
@@ -120,7 +132,7 @@ async function seed(
     agent_group_id: 'ag-1',
     engage_mode: options.engageMode ?? 'mention',
     engage_pattern: options.engagePattern ?? null,
-    sender_scope: 'all',
+    sender_scope: options.senderScope ?? 'all',
     ignored_message_policy: options.ignoredMessagePolicy ?? 'drop',
     session_mode: 'per-thread',
     priority: 0,
@@ -148,7 +160,7 @@ async function send(
     message: {
       id,
       kind: 'chat-sdk',
-      content: JSON.stringify({ sender: 'Alex', senderId: 'U1', text: `message ${id}` }),
+      content: JSON.stringify({ id, sender: 'Alex', senderId: 'U1', text: `message ${id}` }),
       timestamp: at(minutes),
       isMention: options.isMention ?? true,
       isGroup: options.isGroup ?? true,
@@ -178,12 +190,16 @@ async function rows(threadId = THREAD): Promise<Row[]> {
   }
 }
 
-function blocks(all: Row[]): Array<{ lines: Array<{ sender: string; text: string; self?: boolean }> }> {
+function blocks(
+  all: Row[],
+): Array<{ withheld: number; lines: Array<{ sender: string; text: string; self?: boolean }> }> {
   return all.map((r) => JSON.parse(r.content)).filter((c) => c.echo?.surface === 'thread-history');
 }
 
 beforeEach(async () => {
-  flags.on = true;
+  flags.channels = ['testchat'];
+  admission.hang = false;
+  admission.release = [];
   readHistory.mockReset();
   fs.rmSync(TEST_DIR, { recursive: true, force: true });
   fs.mkdirSync(TEST_DIR, { recursive: true });
@@ -198,15 +214,17 @@ afterEach(async () => {
 });
 
 describe('thread history read from the platform', () => {
-  it('with the switch off reads nothing and writes only the trigger', async () => {
-    flags.on = false;
+  it('with the switch off, or naming other channels, reads nothing and writes only the trigger', async () => {
+    flags.channels = [];
     await seed();
     readHistory.mockResolvedValue([line('L1', 1, 'earlier')]);
 
     await send('m1', 5);
+    flags.channels = ['otherchat'];
+    await send('m2', 6);
 
     expect(readHistory).not.toHaveBeenCalled();
-    expect((await rows()).map((r) => r.id)).toEqual(['m1:ag-1']);
+    expect((await rows()).map((r) => r.id)).toEqual(['m1:ag-1', 'm2:ag-1']);
   });
 
   it('gives a new thread session the earlier lines as ONE row before the trigger', async () => {
@@ -220,7 +238,7 @@ describe('thread history read from the platform', () => {
 
     await send('m1', 5);
 
-    expect(readHistory).toHaveBeenCalledWith('testchat:C1', THREAD, { limit: 101 });
+    expect(readHistory).toHaveBeenCalledWith('testchat:C1', THREAD, { limit: 100 });
     const all = await rows();
     expect(all.map((r) => r.trigger)).toEqual([0, 1]);
     expect(all[0].channel_type).toBe('session-echo');
@@ -242,13 +260,33 @@ describe('thread history read from the platform', () => {
       `INSERT INTO messages_in (id, seq, kind, timestamp, status, channel_type, content, trigger)
        VALUES ('echo-1', 100, 'chat', ?, 'pending', 'session-echo', ?, 0)`,
     ).run(at(9), JSON.stringify({ text: 'elsewhere', echo: { surface: 'dm-thread', label: 'x' } }));
+    // A host note to the agent (an approval result) after the untagged reply.
+    db.prepare(
+      `INSERT INTO messages_in (id, seq, kind, timestamp, status, channel_type, content, trigger)
+       VALUES ('note-1', 102, 'chat', ?, 'completed', 'agent', ?, 1)`,
+    ).run(at(9.5), JSON.stringify({ text: 'Your request was approved.' }));
+    // This session's own answer, delivered as platform message A1.
+    db.prepare(
+      "INSERT INTO delivered (message_out_id, platform_message_id, status, delivered_at) VALUES ('out-1', 'A1', 'delivered', ?)",
+    ).run(at(6));
     db.close();
+    const outbound = new Database(
+      sessionMailboxPath({ agentGroupId: 'ag-1', sessionId: await sessionId() }, 'outbound'),
+    );
+    outbound
+      .prepare(
+        `INSERT INTO messages_out (id, seq, timestamp, kind, platform_id, channel_type, thread_id, content)
+         VALUES ('out-1', 1, ?, 'chat', 'testchat:C1', 'testchat', ?, ?)`,
+      )
+      .run(at(6), THREAD, JSON.stringify({ text: 'my answer' }));
+    outbound.close();
 
     readHistory.mockResolvedValueOnce([
       line('L1', 1, 'first'),
       line('m1', 5, 'message m1', { senderId: 'U1', senderName: 'Alex' }),
+      line('A1', 6, 'my answer', { isSelf: true, isBot: true, senderName: 'Pip' }),
       line('L2', 7, 'untagged reply'),
-      line('L3', 8, 'you replied', { isSelf: true, isBot: true, senderName: 'Pip' }),
+      line('L3', 8, 'posted as Pip from elsewhere', { isSelf: true, isBot: true, senderName: 'Pip' }),
       line('L4', 10, 'another untagged reply'),
       line('m2', 12, 'message m2', { senderId: 'U1', senderName: 'Alex' }),
     ]);
@@ -256,31 +294,109 @@ describe('thread history read from the platform', () => {
 
     const found = blocks(await rows());
     expect(found).toHaveLength(2);
-    expect(found[1].lines.map((l) => l.text)).toEqual(['untagged reply', 'you replied', 'another untagged reply']);
+    expect(found[1].lines.map((l) => l.text)).toEqual([
+      'untagged reply',
+      'posted as Pip from elsewhere',
+      'another untagged reply',
+    ]);
     expect(found[1].lines[1].self).toBe(true);
   });
 
-  it('does not read when every message of the thread already reaches the session', async () => {
-    await seed({ engageMode: 'mention-sticky' });
+  it('gives a tag that arrives while an earlier read is running its own read', async () => {
+    await seed();
+    let finish: (lines: HistoryLine[]) => void = () => {};
+    readHistory.mockReturnValueOnce(new Promise<HistoryLine[]>((resolve) => (finish = resolve)));
+    readHistory.mockResolvedValueOnce([
+      line('m1', 5, 'message m1', { senderId: 'U1', senderName: 'Alex' }),
+      line('L2', 7, 'a correction nobody tagged'),
+      line('m2', 8, 'message m2', { senderId: 'U1', senderName: 'Alex' }),
+    ]);
+
+    const first = send('m1', 5);
+    await send('m2', 8);
+    await first;
+    finish([]);
+
+    expect(readHistory).toHaveBeenCalledTimes(2);
+    expect(blocks(await rows()).flatMap((b) => b.lines.map((l) => l.text))).toContain('a correction nobody tagged');
+  });
+
+  it.each([
+    ['mention-sticky', { engageMode: 'mention-sticky' as const }, false],
+    ['accumulate', { engageMode: 'mention' as const, ignoredMessagePolicy: 'accumulate' as const }, true],
+    ["pattern '.'", { engageMode: 'pattern' as const, engagePattern: '.' }, false],
+  ])('does not read again when every message already reaches the session (%s)', async (_name, wiring, mention) => {
+    await seed(wiring);
     readHistory.mockResolvedValue([]);
 
     await send('m1', 5); // creates the session: one read
-    await send('m2', 6, { isMention: false }); // sticky follow-up: no read
+    await send('m2', 6, { isMention: mention }); // reaches the session anyway: no read
 
     expect(readHistory).toHaveBeenCalledTimes(1);
   });
 
-  it('falls back when the read runs past its budget, and a second tag does not start another read', async () => {
+  it("writes a slow read's block when it lands, and starts no second read of the thread meanwhile", async () => {
+    await seed({ engageMode: 'mention-sticky' });
+    let finish: (lines: HistoryLine[]) => void = () => {};
+    readHistory.mockReturnValueOnce(new Promise<HistoryLine[]>((resolve) => (finish = resolve)));
+
+    await send('m1', 5); // over budget: the message goes on without the block
+    expect((await rows()).map((r) => r.id)).toEqual(['m1:ag-1']);
+
+    finish([line('L1', 1, 'said before the tag'), line('m1', 5, 'message m1', { senderId: 'U1' })]);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(blocks(await rows())[0].lines.map((l) => l.text)).toEqual(['said before the tag']);
+    expect(readHistory).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not start a second read of a thread while a slow one is still running', async () => {
     await seed();
     let finish: (lines: HistoryLine[]) => void = () => {};
-    readHistory.mockReturnValue(new Promise<HistoryLine[]>((resolve) => (finish = resolve)));
+    readHistory.mockReturnValueOnce(new Promise<HistoryLine[]>((resolve) => (finish = resolve)));
 
     await send('m1', 5);
     await send('m2', 6);
-
-    expect((await rows()).map((r) => r.id)).toEqual(['m1:ag-1', 'm2:ag-1']);
     expect(readHistory).toHaveBeenCalledTimes(1);
+
     finish([]);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    readHistory.mockResolvedValueOnce([]);
+    await send('m3', 7);
+    expect(readHistory).toHaveBeenCalledTimes(2);
+  });
+
+  it('makes up a failed look on the next tag', async () => {
+    await seed();
+    readHistory.mockRejectedValueOnce(new Error('platform said no'));
+    await send('m1', 5);
+
+    readHistory.mockResolvedValueOnce([
+      line('L1', 1, 'said before the first tag'),
+      line('m1', 5, 'message m1', { senderId: 'U1' }),
+      line('L2', 7, 'said between the tags'),
+      line('m2', 8, 'message m2', { senderId: 'U1' }),
+    ]);
+    await send('m2', 8);
+
+    expect(blocks(await rows())[0].lines.map((l) => l.text)).toEqual([
+      'said before the first tag',
+      'said between the tags',
+    ]);
+  });
+
+  it('keeps the sender checks inside the same budget', async () => {
+    await seed({ unknownSenderPolicy: 'strict' });
+    admission.hang = true;
+    readHistory.mockResolvedValue([line('L1', 1, 'earlier')]);
+
+    const started = Date.now();
+    await send('m1', 5);
+
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect((await rows()).map((r) => r.id)).toEqual(['m1:ag-1']);
+    admission.release.forEach((release) => release());
+    await new Promise((resolve) => setTimeout(resolve, 20));
   });
 
   it('falls back when the read fails', async () => {
@@ -304,10 +420,55 @@ describe('thread history read from the platform', () => {
 
     await send('m1', 5);
 
-    expect(blocks(await rows())[0].lines.map((l) => l.text)).toEqual(['from a member', 'from the bot itself']);
+    const [block] = blocks(await rows());
+    expect(block.lines.map((l) => l.text)).toEqual(['from a member', 'from the bot itself']);
+    expect(block.withheld).toBe(1);
     expect(await getUser('testchat:U9')).toBeUndefined();
     expect(await getDb().all("SELECT * FROM unregistered_senders WHERE user_id = 'testchat:U9'")).toHaveLength(0);
     expect(await getDb().all('SELECT * FROM pending_sender_approvals')).toHaveLength(0);
+  });
+
+  it('says how many lines it left out even when nothing else remains, and counts each line once', async () => {
+    await seed({ senderScope: 'known' }); // a public chat whose wiring takes known senders only
+    readHistory.mockResolvedValueOnce([
+      line('L1', 1, 'from a stranger', { senderId: 'U9' }),
+      line('L2', 2, 'from an alert bot', { senderId: 'B7', isBot: true }),
+    ]);
+    await send('m1', 5);
+
+    readHistory.mockResolvedValueOnce([
+      line('L1', 1, 'from a stranger', { senderId: 'U9' }),
+      line('L2', 2, 'from an alert bot', { senderId: 'B7', isBot: true }),
+      line('m1', 5, 'message m1', { senderId: 'U1' }),
+      line('L3', 6, 'another stranger', { senderId: 'U8' }),
+    ]);
+    await send('m2', 7);
+
+    expect(blocks(await rows()).map((b) => [b.lines.length, b.withheld])).toEqual([
+      [0, 2],
+      [0, 1],
+    ]);
+  });
+
+  it('shows the newest lines whole at the ends and capped between, and skips a window that misses the trigger', async () => {
+    await seed();
+    const earlier = Array.from({ length: 99 }, (_, i) => line(`L${i}`, i / 100, `line ${i}`));
+    earlier[0].text = 'a'.repeat(5000);
+    earlier[50].text = 'b'.repeat(600);
+    earlier[98].text = 'c'.repeat(600);
+    readHistory.mockResolvedValueOnce([...earlier, line('m1', 5, 'message m1', { senderId: 'U1' })]);
+    await send('m1', 5);
+
+    const [block] = blocks(await rows());
+    expect(block.lines).toHaveLength(99);
+    expect(block.lines[0].text).toHaveLength(4000);
+    expect(block.lines[50].text).toBe(`${'b'.repeat(500)}…`);
+    expect(block.lines[98].text).toHaveLength(600);
+
+    // A full window that does not reach the trigger is an old window, not the latest.
+    readHistory.mockResolvedValueOnce(Array.from({ length: 100 }, (_, i) => line(`old${i}`, i / 100, `old ${i}`)));
+    await send('m2', 9, { threadId: 'testchat:C1:200' });
+    expect(blocks(await rows('testchat:C1:200'))).toHaveLength(0);
   });
 
   it('writes one block per trigger, so a redelivered trigger adds no second block', async () => {

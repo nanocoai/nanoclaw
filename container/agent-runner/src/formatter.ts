@@ -292,6 +292,10 @@ function formatEchoMessage(msg: MessageInRow): string {
       const time = formatLocalStamp(new Date(line.time ?? msg.timestamp), TIMEZONE);
       return `<line sender="${escapeXml(sender)}" time="${escapeXml(time)}">${escapeXml(line.text || '')}</line>`;
     });
+    const withheld = Number(content.withheld) || 0;
+    if (withheld > 0) {
+      lines.push(`${withheld} earlier ${withheld === 1 ? 'line' : 'lines'} from senders not admitted in this chat left out.`);
+    }
     return `<thread-history>\n${lines.join('\n')}\n</thread-history>`;
   }
   const label = content.echo?.label || 'another conversation';

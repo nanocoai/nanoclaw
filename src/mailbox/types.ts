@@ -82,6 +82,8 @@ export interface MailboxHistoryMessage {
   timestamp: string;
   kind: string;
   content: string;
+  /** Outbound only: the platform's id for the delivered message, when known. */
+  platformMessageId?: string;
 }
 
 export interface MailboxTimelineMessage {
