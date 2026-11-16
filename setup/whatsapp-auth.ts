@@ -17,6 +17,7 @@
  *   WHATSAPP_AUTH_PAIRING_CODE   { CODE: "XXXX-XXXX" }        — one-shot
  *   WHATSAPP_AUTH                { STATUS: success }          — terminal
  *                                { STATUS: skipped, AUTH_DIR, REASON }
+ *                                  only when creds.json holds a finished pairing
  *                                { STATUS: failed, ERROR: <reason> }
  *                                  also sent at once, with the status code,
  *                                  for any close that nothing reconnects (405)
@@ -159,7 +160,7 @@ function parseArgs(args: string[]): { method: AuthMethod; phone?: string } {
 export async function run(args: string[]): Promise<void> {
   const { method, phone } = parseArgs(args);
 
-  if (fs.existsSync(path.join(AUTH_DIR, 'creds.json'))) {
+  if (pairingSaved()) {
     emitStatus('WHATSAPP_AUTH', {
       STATUS: 'skipped',
       REASON: 'already-authenticated',
@@ -167,6 +168,16 @@ export async function run(args: string[]): Promise<void> {
       PHONE: readAuthedPhoneFromFile(),
     });
     return;
+  }
+  // Creds without `account` are not a link, and can't be reused: a requested pairing
+  // code saves `me`, and Baileys then logs in as that `me` instead of linking.
+  if (fs.existsSync(path.join(AUTH_DIR, 'creds.json'))) {
+    emitStatus('WHATSAPP_AUTH', {
+      STATUS: 'failed',
+      ERROR:
+        'store/auth/ has WhatsApp credentials but no linked device (for example, from a pairing code that was never entered). Clear store/auth/ and run the step again.',
+    });
+    process.exit(1);
   }
 
   // Once, before connecting: a failure is reported as this step's own block,

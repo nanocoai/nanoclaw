@@ -137,9 +137,17 @@ from your phone. The adapter is installed and registered, but its factory return
 `null` (and the channel stays dark) until `store/auth/creds.json` exists.
 
 The number safety check above is still required even when credentials already
-exist. If `store/auth/creds.json` exists, skip ahead to "Dedicated vs personal
-number" after completing the safety check — the link step below reports the
-already-linked number and moves on.
+exist. If `store/auth/` already holds a linked device, skip ahead to "Dedicated
+vs personal number" after completing the safety check — the link step below
+reports the already-linked number and moves on. This prints `linked` only for a
+finished pairing:
+
+```bash
+node -e "let c={};try{c=JSON.parse(require('fs').readFileSync('store/auth/creds.json','utf-8'))}catch{};console.log(c.account?'linked':'not linked')"
+```
+
+A `creds.json` without a finished pairing (a pairing code that was never entered
+leaves one behind) is not a link: clear `store/auth/` and link below.
 
 Pick how to link the device. `qr` shows a rotating QR you scan with your phone's
 camera; `pairing-code` shows an 8-character code you type into WhatsApp (no camera
@@ -188,7 +196,9 @@ pnpm exec tsx setup/index.ts --step whatsapp-auth -- --method pairing-code --pho
 If the handshake fails (`logged_out` or a timeout), the code expired — clear
 `store/auth/` and run the step again for a fresh one. See Troubleshooting.
 If it fails with `WhatsApp closed the connection before linking`, also clear
-`store/auth/` first: a requested pairing code leaves credentials behind.
+`store/auth/` first: a requested pairing code leaves credentials behind. For
+the same reason, if it fails with `store/auth/ has WhatsApp credentials but no
+linked device`, clear `store/auth/` and run the step again.
 If it fails with `WhatsApp closed the connection after pairing` and says the link
 is saved (or probably saved), keep `store/auth/`: the paired device is saved
 there, and running the step again reports it as already linked (it does not

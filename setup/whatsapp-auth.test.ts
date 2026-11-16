@@ -65,6 +65,8 @@ const PROBABLY_SAVED = (detail: string) =>
   `WhatsApp closed the connection after pairing (${detail}). The link is probably saved in store/auth/ (a creds write had not finished), so run the step again to use it.`;
 const NOT_SAVED = (detail: string) =>
   `WhatsApp closed the connection after pairing (${detail}), but the link was not saved. Clear store/auth/ and run the step again.`;
+const NO_LINK =
+  'store/auth/ has WhatsApp credentials but no linked device (for example, from a pairing code that was never entered). Clear store/auth/ and run the step again.';
 
 const PHONE = '14155551234';
 const METHODS = ['qr', 'pairing-code'] as const;
@@ -146,6 +148,31 @@ afterEach(() => {
 });
 
 describe('whatsapp-auth step', () => {
+  it('reports a finished pairing in store/auth/ as already linked', async () => {
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    disk = JSON.stringify(PAIRED);
+
+    await run(['--method', 'qr']);
+
+    expect(makeWASocket).not.toHaveBeenCalled();
+    expect(blocks()).toEqual([
+      ['WHATSAPP_AUTH', { STATUS: 'skipped', REASON: 'already-authenticated', AUTH_DIR: expect.any(String), PHONE }],
+    ]);
+  });
+
+  it.each([
+    ['a pairing code that was never entered', JSON.stringify(REQUESTED_CODE)],
+    ['a creds.json cut short', '{"me":'],
+  ])('%s in store/auth/ is not reported as linked', async (_name, saved) => {
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    disk = saved;
+
+    await expect(run(['--method', 'pairing-code', '--phone', PHONE])).rejects.toThrow('process.exit(1)');
+
+    expect(makeWASocket).not.toHaveBeenCalled();
+    expect(blocks()).toEqual(failed(NO_LINK));
+  });
+
   it.each(METHODS)('%s: fails at once with the reason when WhatsApp refuses the connection', async (method) => {
     const sock = await connected(method);
 
