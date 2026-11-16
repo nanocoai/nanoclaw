@@ -124,6 +124,9 @@ describe('node_use_patched', () => {
 describe('setup.sh install_deps', () => {
   const OLDER = '22.20.0';
   const pnpmStub = () => `echo "pnpm $1 node=$(node --version)" >> ${log}`;
+  // What mkdir says differs by system and may not name the folder, so setup names it.
+  const MKDIR_SAID = /^mkdir: .+$/m;
+  const logged = () => fs.readFileSync(path.join(tmp, 'boot.log'), 'utf8');
 
   // Under setup.sh's own shell options, with the package.json it reads the pnpm pin from.
   function installDeps(): { status: number | null; out: string } {
@@ -250,12 +253,13 @@ echo "DEPS_OK=$DEPS_OK"`);
     );
     const r = installDeps();
     expect(r.out).toContain(`Could not install pnpm: ${home}/.local cannot be created:`);
-    expect(r.out).toMatch(/^ {2}mkdir: .*\.local.*$/m);
+    expect(r.out).toMatch(/^ {2}mkdir: .+$/m);
     expect(r.out).toContain('Fix that, then re-run setup.');
     expect(r.out).not.toContain('npm failed');
     expect(r.out).not.toContain('without root');
     expect(r.out).toContain('DEPS_OK=false');
-    expect(fs.readFileSync(path.join(tmp, 'boot.log'), 'utf8')).toMatch(/^mkdir: .*\.local/m);
+    expect(logged()).toMatch(MKDIR_SAID);
+    expect(logged()).toContain(`Could not create ${home}/.local\n`);
   });
 
   it('says so plainly when npm fails without printing anything', () => {
@@ -309,10 +313,11 @@ echo "DEPS_OK=$DEPS_OK"`);
     stub(bin, 'corepack', 'echo "should not get as far as corepack into ~/.local/bin" >&2; exit 1');
     const r = installDeps();
     expect(r.out).toContain(`Could not install pnpm: ${localBin} cannot be created:`);
-    expect(r.out).toMatch(/^ {2}mkdir: .*\.local.*$/m);
+    expect(r.out).toMatch(/^ {2}mkdir: .+$/m);
     expect(r.out).not.toContain('corepack could not');
     expect(r.out).not.toContain('without root');
-    expect(fs.readFileSync(path.join(tmp, 'boot.log'), 'utf8')).toMatch(/^mkdir: .*\.local/m);
+    expect(logged()).toMatch(MKDIR_SAID);
+    expect(logged()).toContain(`Could not create ${localBin}\n`);
   });
 
   it('gives the last failure when corepack and then npm both fail without root', () => {
