@@ -195,7 +195,7 @@ function writeExecutable(dest: string, contents: string): void {
     if (previous) {
       const created = fs.statSync(tmp);
       const sameOwner = created.uid === previous.uid && created.gid === previous.gid;
-      if (sameOwner || gaveTo(tmp, previous.uid, previous.gid)) mode = previous.mode & 0o7777;
+      if (sameOwner || gaveTo(tmp, previous.uid, previous.gid)) mode = runnable(previous.mode);
     }
     // chown can clear mode bits, so permissions are set after ownership.
     fs.chmodSync(tmp, mode);
@@ -219,6 +219,16 @@ function gaveTo(file: string, uid: number, gid: number): boolean {
     if ((err as NodeJS.ErrnoException).code === 'EPERM') return false;
     throw err;
   }
+}
+
+/**
+ * The old file's mode, as a helper needs it: its owner may run it, and so may
+ * anyone else who could read it. The old file may never have been executable,
+ * as when it is a hard link to a checkout's helper source.
+ */
+function runnable(mode: number): number {
+  const kept = mode & 0o7777;
+  return kept | 0o500 | ((kept & 0o044) >> 2);
 }
 
 /**

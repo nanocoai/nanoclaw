@@ -368,6 +368,36 @@ describe('refreshInstalledCredentialHelper', () => {
     expect(fs.readdirSync(binDir)).toEqual([HELPER_BINARY_NAME]);
   });
 
+  it.each([
+    ['0644', 0o644, 0o755],
+    ['0640', 0o640, 0o750],
+    ['0600', 0o600, 0o700],
+  ])('makes a helper that was mode %s one that runs', (_case, was, becomes) => {
+    const { binDir, helper, dockerConfigPath } = install(olderSetup);
+    fs.chmodSync(helper, was);
+
+    refreshInstalledCredentialHelper({ binDir, dockerConfigPath });
+
+    expect(fs.statSync(helper).mode & 0o7777).toBe(becomes);
+    expect(version(helper, nodeDir('broken')).status).toBe(0);
+  });
+
+  it('gives a helper hard-linked to a source that is not executable a copy that runs', () => {
+    const { binDir, helper, dockerConfigPath } = install('');
+    const source = path.join(scratchDir(), 'credential-helper.mjs');
+    fs.writeFileSync(source, SOURCE, { mode: 0o644 });
+    fs.rmSync(helper);
+    fs.linkSync(source, helper);
+
+    refreshInstalledCredentialHelper({ binDir, dockerConfigPath });
+
+    expect(fs.readFileSync(helper, 'utf-8')).toBe(renderHelper(SOURCE, process.execPath));
+    expect(fs.statSync(helper).mode & 0o7777).toBe(0o755);
+    expect(version(helper, nodeDir('broken')).status).toBe(0);
+    expect(fs.readFileSync(source, 'utf-8')).toBe(SOURCE);
+    expect(fs.statSync(source).mode & 0o7777).toBe(0o644);
+  });
+
   it('does not write through a link that now points at a file that is not the helper', () => {
     const { binDir, dockerConfigPath } = install(olderSetup);
     const other = path.join(scratchDir(), 'notes.txt');
@@ -433,6 +463,18 @@ describe('installCredentialHelper', () => {
     expect(fs.readFileSync(helper, 'utf-8')).toBe(old);
     expect(fs.readdirSync(binDir)).toEqual([HELPER_BINARY_NAME]);
     expect(fs.existsSync(dockerConfigPath)).toBe(false);
+  });
+
+  it('installs a helper that runs over one that was not executable', () => {
+    const binDir = scratchDir();
+    const dockerConfigPath = path.join(scratchDir(), 'config.json');
+    const helper = writeHelper(binDir, `#!${GONE_NODE}\n${BODY}`);
+    fs.chmodSync(helper, 0o644);
+
+    installCredentialHelper({ binDir, dockerConfigPath, registryHost: HOST });
+
+    expect(fs.statSync(helper).mode & 0o7777).toBe(0o755);
+    expect(version(helper, nodeDir('broken')).status).toBe(0);
   });
 
   it('refuses to wire docker to a helper that does not start', () => {
