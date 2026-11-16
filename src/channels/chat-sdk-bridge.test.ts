@@ -83,6 +83,40 @@ describe('splitForLimit', () => {
     for (const c of chunks) expect(c.length).toBeLessThanOrEqual(30);
     expect(chunks.join('')).toBe(text);
   });
+
+  it('never hard-cuts through a surrogate pair', () => {
+    // The leading 'a' puts a cut at 30 between an emoji's two halves.
+    const text = 'a' + '😀'.repeat(50);
+    const chunks = splitForLimit(text, 30);
+    for (const c of chunks) {
+      expect(c.length).toBeLessThanOrEqual(30);
+      // Slack's client form-encodes the text; a lone half throws "URI malformed".
+      expect(() => encodeURIComponent(c)).not.toThrow();
+    }
+    expect(chunks.join('')).toBe(text);
+  });
+
+  it('still ends when the limit is too short to hold one emoji', () => {
+    // Only the end is promised: a 1-character part can't hold an emoji whole.
+    // The smallest limit any channel sets is 2,000.
+    expect(splitForLimit('😀😀', 1).join('')).toBe('😀😀');
+  });
+
+  it('delivers a long emoji reply as parts that each encode', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+      maxTextLength: 30,
+    });
+    const text = 'a' + '😀'.repeat(50);
+    await bridge.deliver('slack:C1', null, { kind: 'chat-sdk', content: { text } });
+
+    const parts = calls.map((call) => (call.message as { markdown: string }).markdown);
+    expect(parts.length).toBeGreaterThan(1);
+    for (const part of parts) expect(() => encodeURIComponent(part)).not.toThrow();
+    expect(parts.join('')).toBe(text);
+  });
 });
 
 describe('attachmentBytesToBase64', () => {

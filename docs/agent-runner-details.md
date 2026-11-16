@@ -257,7 +257,7 @@ SDK message (so the idle timer stays honest) and maps recognized messages to `Pr
 - **PreToolUse hook** records the current tool + its declared timeout to `container_state` (so the host sweep widens its stuck tolerance while a long Bash runs) and, as defense-in-depth, blocks any `SDK_DISALLOWED_TOOLS` call that slips through. It does **not** sanitize bash env vars — there is no such hook.
 - **PostToolUse / PostToolUseFailure** hooks clear the in-flight tool
 - **PreCompact** hook archives the transcript to `conversations/` before compaction
-- `maybeRotateContinuation` drops an oversized/aged transcript (default caps 12 MB / 14 days, both operator-overridable) so a cold container isn't killed reloading days of `.jsonl` before the host idle ceiling; `isSessionInvalid` clears a continuation whose transcript is gone
+- `maybeRotateContinuation` drops a continuation whose transcript is gone (Claude Code deletes transcripts after `cleanupPeriodDays`, 30 by default) or oversized/aged (default caps 12 MB / 14 days, both operator-overridable), so a cold container neither resumes into a deleted transcript nor is killed reloading days of `.jsonl` before the host idle ceiling; `isSessionInvalid` clears a continuation whose resume still fails
 - `additionalDirectories` for multi-directory access
 
 ### Codex Provider
@@ -843,9 +843,10 @@ The agent-runner tracks a single opaque `continuation` token per provider:
 
 Because it lives in the session folder's `outbound.db`, the continuation survives container
 teardown and restart — a fresh container reads it back and resumes. `/clear` deletes the row
-to start a clean session. Before resuming, `maybeRotateContinuation` may archive and drop an
-oversized/aged transcript (so a cold container isn't killed reloading it), and
-`isSessionInvalid` clears a continuation whose backing transcript has gone missing.
+to start a clean session. Before resuming, `maybeRotateContinuation` drops a continuation whose
+transcript is gone (so the turn starts fresh instead of failing with "No conversation found"),
+and may archive and drop an oversized/aged transcript (so a cold container isn't killed
+reloading it). `isSessionInvalid` clears a continuation whose resume still fails.
 
 ### Container Startup
 

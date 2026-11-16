@@ -209,9 +209,9 @@ function formatTranscriptMarkdown(
 }
 
 /**
- * Before resuming, drop a transcript that has grown too large or too old to
- * cold-resume within the host's idle ceiling. Archives what it can, moves the
- * `.jsonl` aside, and returns the reason; null keeps resuming.
+ * Before resuming, drop a transcript that is gone or has grown too large or too
+ * old to cold-resume within the host's idle ceiling. Archives what it can, moves
+ * the `.jsonl` aside, and returns the reason; null keeps resuming.
  */
 export function rotateClaudeContinuation(
   input: ClaudeContinuationRotationInput,
@@ -221,7 +221,11 @@ export function rotateClaudeContinuation(
     path.join(claudeConfigDirectory(), 'projects'),
     `${input.continuation}.jsonl`,
   );
-  if (!transcriptPath) return null;
+  // A failed lookup proves nothing, so keep resuming.
+  if (transcriptPath === undefined) return null;
+  // Claude Code deletes old transcripts (cleanupPeriodDays, 30 by default).
+  // Resuming one fails the turn with "No conversation found", so start fresh.
+  if (transcriptPath === null) return 'transcript not found';
 
   try {
     const size = fs.statSync(transcriptPath).size;
@@ -285,16 +289,23 @@ function decideContinuationRotation(
   return null;
 }
 
-function findContinuationFile(root: string, fileName: string): string | null {
+/** The transcript's path, null when it does not exist, undefined when the lookup itself failed. */
+function findContinuationFile(root: string, fileName: string): string | null | undefined {
   let directories: string[];
   try {
     directories = fs.readdirSync(root);
-  } catch {
-    return null;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? null : undefined;
   }
   for (const directory of directories) {
     const candidate = path.join(root, directory, fileName);
-    if (fs.existsSync(candidate)) return candidate;
+    try {
+      fs.statSync(candidate);
+      return candidate;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') return undefined;
+    }
   }
   return null;
 }
