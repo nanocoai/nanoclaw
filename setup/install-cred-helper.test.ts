@@ -25,6 +25,14 @@ const GONE_NODE = '/nonexistent/node/1.0.0/bin/node';
 const HOST = 'reg.example.com';
 const BODY = SOURCE.slice(SOURCE.indexOf('\n') + 1);
 
+/**
+ * The header as setup has written it since 15 Nov 2026. For some days it also
+ * went, through a link, into the helper source of another checkout.
+ */
+function mainHeader(node: string): string {
+  return `#!/bin/sh\n':' //; N='${node}'; [ -x "$N" ] && "$N" -v </dev/null >/dev/null 2>&1 || { if command -v node >/dev/null 2>&1; then N=node; fi; }; exec "$N" "$0" "$@"\n`;
+}
+
 const scratch: string[] = [];
 afterEach(() => {
   for (const dir of scratch.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
@@ -158,6 +166,15 @@ describe('renderHelper', () => {
     expect(res.stderr).not.toContain('node: not found');
   });
 
+  it('writes one header, also from a source an earlier setup wrote a header into', () => {
+    const rewritten = mainHeader('/opt/other/node') + BODY;
+
+    expect(renderHelper(rewritten, process.execPath)).toBe(renderHelper(SOURCE, process.execPath));
+    expect(renderHelper(renderHelper(rewritten, GONE_NODE), process.execPath)).toBe(
+      renderHelper(SOURCE, process.execPath),
+    );
+  });
+
   it('leaves stdin for the helper, where docker sends its request', () => {
     // A stand-in node that would swallow stdin during the start test, if it were handed it.
     const standIn = path.join(scratchDir(), 'node');
@@ -226,10 +243,13 @@ describe('refreshInstalledCredentialHelper', () => {
     expect(fs.readFileSync(helper, 'utf-8')).toBe(renderHelper(SOURCE, process.execPath));
   });
 
-  it('rewrites a linked helper at its target and keeps the link', () => {
+  it.each([
+    ['from before the header', olderSetup],
+    ['with a header naming another node', mainHeader('/opt/other/node') + BODY],
+  ])('rewrites a linked helper %s at its target and keeps the link', (_case, installed) => {
     const { binDir, helper: link, dockerConfigPath } = install('');
     const target = path.join(scratchDir(), 'helper');
-    fs.writeFileSync(target, olderSetup, { mode: 0o755 });
+    fs.writeFileSync(target, installed, { mode: 0o755 });
     fs.rmSync(link);
     fs.symlinkSync(target, link);
 
@@ -264,22 +284,52 @@ describe('refreshInstalledCredentialHelper', () => {
     }
   });
 
+  /** The installed helper as a link to a helper source someone keeps, by default where a checkout has it. */
+  function linkedToSource(
+    contents: string,
+    at = path.join('setup', 'registry', 'credential-helper.mjs'),
+  ): { binDir: string; helper: string; dockerConfigPath: string; source: string } {
+    const installed = install('');
+    const source = path.join(scratchDir(), at);
+    fs.mkdirSync(path.dirname(source), { recursive: true });
+    fs.writeFileSync(source, contents, { mode: 0o755 });
+    fs.rmSync(installed.helper);
+    fs.symlinkSync(source, installed.helper);
+    return { ...installed, source };
+  }
+
+  // Every shape a checkout's helper source can have by now.
+  const olderSource = `${SOURCE}// an older release of the same helper\n`;
+  const olderBody = olderSource.slice(olderSource.indexOf('\n') + 1);
   it.each([
-    ['as it is here', (text: string) => text],
-    ['with CRLF line endings', (text: string) => text.replace(/\n/g, '\r\n')],
-  ])("replaces a link to another checkout's helper source, %s, without changing that source", (_case, as) => {
-    const { binDir, helper, dockerConfigPath } = install('');
-    const elsewhere = path.join(scratchDir(), 'setup', 'registry');
-    fs.mkdirSync(elsewhere, { recursive: true });
-    const otherSource = path.join(elsewhere, 'credential-helper.mjs');
-    const tracked = as(`${SOURCE}// an older release of the same helper\n`);
-    fs.writeFileSync(otherSource, tracked, { mode: 0o755 });
-    fs.rmSync(helper);
-    fs.symlinkSync(otherSource, helper);
+    ['as it is here', olderSource],
+    ['with CRLF line endings', olderSource.replace(/\n/g, '\r\n')],
+    ['that an earlier setup wrote its header into', mainHeader('/opt/other/node') + olderBody],
+    [
+      'that an earlier setup wrote its header into, in a CRLF checkout',
+      mainHeader('/opt/other/node') + olderBody.replace(/\n/g, '\r\n'),
+    ],
+    ['that already reads as this setup would write it', renderHelper(SOURCE, process.execPath)],
+  ])("replaces a link to another checkout's helper source %s, without changing that source", (_case, tracked) => {
+    const { binDir, helper, dockerConfigPath, source } = linkedToSource(tracked);
+    const before = fs.statSync(source);
 
     refreshInstalledCredentialHelper({ binDir, dockerConfigPath });
 
-    expect(fs.readFileSync(otherSource, 'utf-8')).toBe(tracked);
+    expect(fs.readFileSync(source, 'utf-8')).toBe(tracked);
+    // A rewrite goes through a rename, which gives the path a new inode.
+    expect(fs.statSync(source).ino).toBe(before.ino);
+    expect(fs.lstatSync(helper).isSymbolicLink()).toBe(false);
+    expect(fs.readFileSync(helper, 'utf-8')).toBe(renderHelper(SOURCE, process.execPath));
+    expect(version(helper, nodeDir('broken')).status).toBe(0);
+  });
+
+  it('replaces a link to a copy of the source kept under another name, without changing that copy', () => {
+    const { binDir, helper, dockerConfigPath, source } = linkedToSource(olderSource, 'my-helper.mjs');
+
+    refreshInstalledCredentialHelper({ binDir, dockerConfigPath });
+
+    expect(fs.readFileSync(source, 'utf-8')).toBe(olderSource);
     expect(fs.lstatSync(helper).isSymbolicLink()).toBe(false);
     expect(fs.readFileSync(helper, 'utf-8')).toBe(renderHelper(SOURCE, process.execPath));
   });

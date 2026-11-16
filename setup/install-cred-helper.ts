@@ -35,6 +35,9 @@ export const HELPER_BINARY_NAME = `docker-credential-${CRED_HELPER_NAME}`;
  */
 const HELPER_MARKER = 'nanoclaw-docker-credential-helper';
 
+/** How `setup/registry/credential-helper.mjs` begins in every release, before any install. */
+const SOURCE_FIRST_LINE = '#!/usr/bin/env node';
+
 /** Preferred first; `~/.local/bin` is the unprivileged fallback used by installable gateways. */
 const BIN_DIRS = ['/usr/local/bin', path.join(os.homedir(), '.local', 'bin')];
 
@@ -159,9 +162,11 @@ function chooseBinDir(override?: string): string {
  * string and a comment to node, and a command to sh: run this file on
  * `nodePath` while that binary starts, else on the node on PATH. The start
  * test gets no stdin: docker's request on it is for the helper, not the test.
+ * A header already there goes too: an earlier setup wrote one into a source
+ * it reached through a link.
  */
 export function renderHelper(source: string, nodePath: string): string {
-  const body = source.startsWith('#!') ? source.slice(source.indexOf('\n') + 1) : source;
+  const body = source.replace(/^(?:#!.*\r?\n)?(?:':' \/\/;.*\r?\n)*/, '');
   const pinned = `'${nodePath.replace(/'/g, `'\\''`)}'`;
   const starts = `[ -x "$N" ] && "$N" -v </dev/null >/dev/null 2>&1`;
   return `#!/bin/sh\n':' //; N=${pinned}; ${starts} || { if command -v node >/dev/null 2>&1; then N=node; fi; }; exec "$N" "$0" "$@"\n${body}`;
@@ -216,9 +221,15 @@ function gaveTo(file: string, uid: number, gid: number): boolean {
   }
 }
 
-/** A text's first line without its line ending, whichever kind the file uses. */
-function firstLine(text: string): string {
-  return text.split(/\r?\n/, 1)[0];
+/**
+ * True for a helper source someone keeps, which is never the file to write.
+ * One that was never installed still begins with the source's own first line.
+ * One in a checkout may not: for some days in Nov 2026 setup wrote its header
+ * into such a file through a link. So in a checkout the place decides.
+ */
+function isHelperSource(file: string, contents: string): boolean {
+  const place = (p: string): string => p.split(path.sep).slice(-3).join('/');
+  return contents.split(/\r?\n/, 1)[0] === SOURCE_FIRST_LINE || place(file) === place(helperSourcePath());
 }
 
 function isOurBinary(file: string): boolean {
@@ -358,12 +369,11 @@ export function refreshInstalledCredentialHelper(options: CredHelperOptions = {}
     const target = fs.realpathSync(helper.helperPath);
     if (!isOurBinary(target)) return;
     const installed = fs.readFileSync(target, 'utf-8');
+    // A link may lead to a helper source, this checkout's or another's:
+    // replace the link with a helper of its own, never write the source.
+    const isSource = isHelperSource(target, installed);
     // Already what this setup would write: writing it again changes nothing.
-    if (installed === currentHelper()) return;
-    // A link may lead to a helper source that a checkout tracks, this one's or
-    // another's. That file was never installed, so it still begins with the
-    // source's own first line: replace the link, never write the source.
-    const isSource = firstLine(installed) === firstLine(fs.readFileSync(helperSourcePath(), 'utf-8'));
+    if (!isSource && installed === currentHelper()) return;
     writeHelper(isSource ? helper.helperPath : target);
   } catch (err) {
     log.warn('Could not re-install the docker credential helper', { helperPath: helper.helperPath, err });
