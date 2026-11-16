@@ -12,6 +12,7 @@ const DOCS = [
   '.claude/skills/debug/SKILL.md',
   '.claude/skills/add-dial-tool/SKILL.md',
   '.claude/skills/add-dial-tool/container-skills/dial-cli/SKILL.md',
+  '.claude/skills/add-onecli/payload/container/skills/onecli-gateway/SKILL.md',
 ];
 
 describe.each(DOCS)('%s', (file) => {
