@@ -266,9 +266,14 @@ describe('full system upgrade question (nanoclaw.sh)', { timeout: 20_000 }, () =
     expect(r.sudo).toContain('-v -p   [sudo] password for %p: ');
   });
 
+  it.each(['Y', 'yes', 'YES'])('takes %s as a yes', (answer) => {
+    expect(run({ ...arch, interactive: true, input: `${answer}\n` }).upgrade).toBe('1');
+  });
+
   it.each([
     ['Enter', '\n'],
     ['n', 'n\n'],
+    ['an answer that only starts with y', 'yikes, no\n'],
     ['no answer at all', ''],
   ])('takes %s as a no: no upgrade, and no sudo ask for jq', (_name, input) => {
     const r = run({ ...arch, interactive: true, input });

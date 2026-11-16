@@ -74,12 +74,13 @@ pacman_upgrade_preflight() {
   fi
 }
 
-# [y/N]: only y or Y is a yes. stdin is the terminal here (sudo_preflight_interactive).
+# [y/N]: only y or yes, in any case, is a yes. stdin is the terminal here
+# (sudo_preflight_interactive).
 pacman_upgrade_confirm() {
   local answer=""
   read -r -p "  $(bold 'Run the full system upgrade now?') [y/N] " answer || true
   case "$answer" in
-    [Yy]*) return 0 ;;
+    [Yy] | [Yy][Ee][Ss]) return 0 ;;
     *) return 1 ;;
   esac
 }
