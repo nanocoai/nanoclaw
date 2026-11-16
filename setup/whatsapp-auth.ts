@@ -62,21 +62,22 @@ function phoneFromId(id?: string | null): string {
 type SavedCreds = { account?: unknown; me?: { id?: string } };
 
 /**
- * One read of creds.json: the saved creds, 'missing', or 'unreadable' (not valid
- * JSON, for example while a write is rewriting it). Decide from one read only.
+ * One read of creds.json: the saved creds, 'missing', 'not-json' (for example
+ * while a write is rewriting it), or the error that kept it from being opened.
+ * Decide from one read only.
  */
-function readSavedCreds(): SavedCreds | 'missing' | 'unreadable' {
+function readSavedCreds(): SavedCreds | 'missing' | 'not-json' | NodeJS.ErrnoException {
   let raw: string;
   try {
     raw = fs.readFileSync(path.join(AUTH_DIR, 'creds.json'), 'utf-8');
   } catch (err) {
-    return (err as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'unreadable';
+    return (err as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : (err as NodeJS.ErrnoException);
   }
   try {
     const creds: unknown = JSON.parse(raw);
     return typeof creds === 'object' && creds !== null ? (creds as SavedCreds) : {};
   } catch {
-    return 'unreadable';
+    return 'not-json';
   }
 }
 
@@ -175,16 +176,23 @@ export async function run(args: string[]): Promise<void> {
   // Baileys rewrites creds.json in place, so a running service can leave it half
   // written for a moment: read it again, for up to 1 s, before judging it.
   let saved = readSavedCreds();
-  for (let tries = 0; tries < 5 && saved === 'unreadable'; tries++) {
+  for (let tries = 0; tries < 5 && saved === 'not-json'; tries++) {
     await new Promise((resolve) => setTimeout(resolve, 200));
     saved = readSavedCreds();
   }
-  // A file still unreadable after 1 s may yet hold a link, so never say to clear it.
-  if (saved === 'unreadable') {
+  // A file this step can't read may yet hold a link, so never say to clear it.
+  if (saved instanceof Error) {
+    emitStatus('WHATSAPP_AUTH', {
+      STATUS: 'failed',
+      ERROR: `store/auth/creds.json could not be opened (${saved.code ?? saved.message}). Make it readable by the user running setup, then run the step again.`,
+    });
+    process.exit(1);
+  }
+  if (saved === 'not-json') {
     emitStatus('WHATSAPP_AUTH', {
       STATUS: 'failed',
       ERROR:
-        'store/auth/creds.json could not be read (it may be mid-write). Stop the NanoClaw service if it is running, then run the step again.',
+        'store/auth/creds.json is not valid JSON (it may be mid-write). Stop the NanoClaw service if it is running, then run the step again.',
     });
     process.exit(1);
   }
@@ -346,9 +354,9 @@ export async function run(args: string[]): Promise<void> {
               void settled(saving, 5000).then((done) => {
                 const after = `WhatsApp closed the connection after pairing (${detail})`;
                 const saved = readSavedCreds();
-                if (saved === 'unreadable') {
+                if (saved === 'not-json' || saved instanceof Error) {
                   fail(
-                    `${after}, but store/auth/creds.json could not be read (it may be mid-write). Run the step again to check the saved link.`,
+                    `${after}, but store/auth/creds.json could not be read. Run the step again to check the saved link.`,
                   );
                 } else if (saved === 'missing' || !saved.account) {
                   fail(`${after}, but the link was not saved. Clear store/auth/ and run the step again.`);

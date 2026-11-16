@@ -67,10 +67,12 @@ const NOT_SAVED = (detail: string) =>
   `WhatsApp closed the connection after pairing (${detail}), but the link was not saved. Clear store/auth/ and run the step again.`;
 const NO_LINK =
   'store/auth/ has WhatsApp credentials but no linked device (for example, from a pairing code that was never entered). Clear store/auth/ and run the step again.';
-const UNREADABLE =
-  'store/auth/creds.json could not be read (it may be mid-write). Stop the NanoClaw service if it is running, then run the step again.';
+const NOT_JSON =
+  'store/auth/creds.json is not valid JSON (it may be mid-write). Stop the NanoClaw service if it is running, then run the step again.';
+const CANNOT_OPEN = (code: string) =>
+  `store/auth/creds.json could not be opened (${code}). Make it readable by the user running setup, then run the step again.`;
 const UNREADABLE_AFTER = (detail: string) =>
-  `WhatsApp closed the connection after pairing (${detail}), but store/auth/creds.json could not be read (it may be mid-write). Run the step again to check the saved link.`;
+  `WhatsApp closed the connection after pairing (${detail}), but store/auth/creds.json could not be read. Run the step again to check the saved link.`;
 
 const PHONE = '14155551234';
 const METHODS = ['qr', 'pairing-code'] as const;
@@ -168,7 +170,7 @@ describe('whatsapp-auth step', () => {
     // Only a creds.json that parses and lacks a pairing may be cleared.
     ['a pairing code that was never entered', JSON.stringify(REQUESTED_CODE), NO_LINK],
     // One still cut short after 1 s may yet hold a link, so it is not cleared.
-    ['a creds.json cut short', '{"me":', UNREADABLE],
+    ['a creds.json cut short', '{"me":', NOT_JSON],
   ])('%s in store/auth/ is not reported as linked', async (_name, saved, error) => {
     vi.mocked(fs.existsSync).mockReturnValue(true);
     disk = saved;
@@ -179,6 +181,22 @@ describe('whatsapp-auth step', () => {
     expect(await result).toBeInstanceOf(Exit);
     expect(makeWASocket).not.toHaveBeenCalled();
     expect(blocks()).toEqual(failed(error));
+  });
+
+  it('does not call a creds.json it may not open damaged', async () => {
+    const read = vi.mocked(fs.readFileSync).getMockImplementation()!;
+    vi.mocked(fs.readFileSync).mockImplementation(((file: fs.PathOrFileDescriptor, options?: never) => {
+      // For example, store/auth/ belongs to the service's user.
+      if (String(file).endsWith('creds.json')) throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+      return read(file, options);
+    }) as typeof fs.readFileSync);
+
+    const result = run(['--method', 'qr']).catch((err: unknown) => err);
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(await result).toBeInstanceOf(Exit);
+    expect(makeWASocket).not.toHaveBeenCalled();
+    expect(blocks()).toEqual(failed(CANNOT_OPEN('EACCES')));
   });
 
   it('judges creds.json by one read, even if a running service rewrites it right after', async () => {
