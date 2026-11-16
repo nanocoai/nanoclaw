@@ -601,6 +601,64 @@ export function splitForLimit(text: string, limit: number): string[] {
   return chunks;
 }
 
+/** How long split-reply progress waits for a retry; delivery gives up on a row well before this. */
+const SPLIT_PROGRESS_TTL_MS = 24 * 60 * 60_000;
+
+interface SplitProgress {
+  digest: string;
+  posted: number;
+  firstId?: string;
+}
+
+/**
+ * How many parts of one split reply are posted, kept in the bridge's state
+ * store so a delivery retry, even after a restart, resumes there. Keyed by the
+ * delivery id; the digest makes a changed text or limit start over. The store
+ * is best effort: if it fails, the retry posts from part 1, as before.
+ */
+class SplitProgressStore {
+  private readonly key: string;
+  private readonly digest: string;
+
+  constructor(
+    private readonly state: SqliteStateAdapter,
+    deliveryId: string,
+    threadId: string,
+    chunks: string[],
+  ) {
+    this.key = `split-progress:${deliveryId}`;
+    this.digest = createHash('sha256')
+      .update(JSON.stringify([threadId, chunks]))
+      .digest('hex');
+  }
+
+  async read(): Promise<SplitProgress | undefined> {
+    const saved = await this.attempt('read', () => this.state.get<SplitProgress>(this.key));
+    if (!saved || saved.digest !== this.digest) return undefined;
+    log.info('Resuming a split reply at the part that failed', { key: this.key, posted: saved.posted });
+    return saved;
+  }
+
+  async save(posted: number, firstId: string | undefined): Promise<void> {
+    const progress: SplitProgress = { digest: this.digest, posted, firstId };
+    await this.attempt('save', () => this.state.set(this.key, progress, SPLIT_PROGRESS_TTL_MS));
+  }
+
+  async clear(): Promise<void> {
+    await this.attempt('clear', () => this.state.delete(this.key));
+  }
+
+  private async attempt<T>(op: string, run: () => Promise<T>): Promise<T | undefined> {
+    try {
+      return await run();
+      // eslint-disable-next-line no-catch-all/no-catch-all -- progress is best effort; the send goes on without it
+    } catch (err) {
+      log.warn('Split reply progress unavailable', { op, key: this.key, err });
+      return undefined;
+    }
+  }
+}
+
 /**
  * Append platform-rescued text to the serialized body, before `raw` is dropped.
  * No extractor, or nothing recovered, leaves the body byte-identical.
@@ -1278,8 +1336,15 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           config.maxTextLength && text.length > config.maxTextLength
             ? splitForLimit(text, config.maxTextLength)
             : [text];
-        let firstId: string | undefined;
-        for (let i = 0; i < chunks.length; i++) {
+        // A retry of a reply that failed mid-split starts at the failed part:
+        // posting from part 1 again repeats what the user already has.
+        const progress =
+          chunks.length > 1 && message.deliveryId && state
+            ? new SplitProgressStore(state, message.deliveryId, tid, chunks)
+            : undefined;
+        const resumed = await progress?.read();
+        let firstId = resumed?.firstId;
+        for (let i = resumed?.posted ?? 0; i < chunks.length; i++) {
           const chunk = chunks[i];
           const attachFiles = i === 0 && fileUploads && fileUploads.length > 0;
           const result = await adapter.postMessage(
@@ -1287,7 +1352,9 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
             attachFiles ? { markdown: chunk, files: fileUploads } : { markdown: chunk },
           );
           if (i === 0) firstId = result?.id;
+          if (i + 1 < chunks.length) await progress?.save(i + 1, firstId);
         }
+        await progress?.clear();
         return firstId;
       } else if (message.files && message.files.length > 0) {
         // Files only, no text

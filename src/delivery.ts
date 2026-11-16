@@ -167,6 +167,8 @@ export interface ChannelDeliveryAdapter {
     /** Delivering adapter instance (defaults to channelType downstream).
      *  Host-internal only — containers never see instance. */
     instance?: string,
+    /** Outbound row id, the same on every retry: lets a split reply resume. */
+    deliveryId?: string,
   ): Promise<string | undefined>;
   setTyping?(
     channelType: string,
@@ -723,6 +725,7 @@ async function deliverMessage(
     deliveredContent,
     files,
     deliverInstance,
+    msg.id,
   );
   log.info('Message delivered', {
     id: msg.id,

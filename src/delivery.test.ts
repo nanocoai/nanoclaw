@@ -265,6 +265,26 @@ describe('deliverSessionMessages — retry and permanent failure', () => {
     expect(delivered.has('out-flaky')).toBe(true);
   });
 
+  it('gives the adapter the outbound row id, the same on the retry, so a split reply can resume', async () => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertOutbound('ag-1', session.id, 'out-split');
+
+    const ids: Array<string | undefined> = [];
+    setDeliveryAdapter({
+      async deliver(_channelType, _platformId, _threadId, _kind, _content, _files, _instance, deliveryId) {
+        ids.push(deliveryId);
+        if (ids.length === 1) throw new Error('part 3 failed');
+        return 'plat-msg-1';
+      },
+    });
+
+    await deliverSessionMessages(session);
+    await deliverSessionMessages(session);
+
+    expect(ids).toEqual(['out-split', 'out-split']);
+  });
+
   it('does not acknowledge a message when no channel adapter is registered (#2995)', async () => {
     // Regression: the real bridge used to return undefined when the exact
     // adapter lookup missed, and drainSession marked the row delivered with
