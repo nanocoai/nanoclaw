@@ -382,6 +382,17 @@ describe('refreshInstalledCredentialHelper', () => {
     expect(version(helper, nodeDir('broken')).status).toBe(0);
   });
 
+  it('rewrites a helper that reads as this setup would write it, yet cannot run', () => {
+    // What main's setup of Nov 2026 left where the old helper was not executable.
+    const { binDir, helper, dockerConfigPath } = install(renderHelper(SOURCE, process.execPath));
+    fs.chmodSync(helper, 0o644);
+
+    refreshInstalledCredentialHelper({ binDir, dockerConfigPath });
+
+    expect(fs.statSync(helper).mode & 0o7777).toBe(0o755);
+    expect(version(helper, nodeDir('broken')).status).toBe(0);
+  });
+
   it('gives a helper hard-linked to a source that is not executable a copy that runs', () => {
     const { binDir, helper, dockerConfigPath } = install('');
     const source = path.join(scratchDir(), 'credential-helper.mjs');

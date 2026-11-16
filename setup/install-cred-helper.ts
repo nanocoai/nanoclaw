@@ -382,8 +382,10 @@ export function refreshInstalledCredentialHelper(options: CredHelperOptions = {}
     // A link may lead to a helper source, this checkout's or another's:
     // replace the link with a helper of its own, never write the source.
     const isSource = isHelperSource(target, installed);
-    // Already what this setup would write: writing it again changes nothing.
-    if (!isSource && installed === currentHelper()) return;
+    // Already what this setup would write, and able to run: writing it again
+    // changes nothing.
+    const mode = fs.statSync(target).mode & 0o7777;
+    if (!isSource && installed === currentHelper() && mode === runnable(mode)) return;
     writeHelper(isSource ? helper.helperPath : target);
   } catch (err) {
     log.warn('Could not re-install the docker credential helper', { helperPath: helper.helperPath, err });
