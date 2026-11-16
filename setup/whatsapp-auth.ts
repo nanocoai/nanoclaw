@@ -104,6 +104,18 @@ function printPairingCard(code: string): void {
   );
 }
 
+/** True once `write` resolves; false if it rejects or takes longer than `ms`. */
+function landed(write: Promise<void>, ms: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), ms);
+    const settle = (saved: boolean) => () => {
+      clearTimeout(timer);
+      resolve(saved);
+    };
+    write.then(settle(true), settle(false));
+  });
+}
+
 function parseArgs(args: string[]): { method: AuthMethod; phone?: string } {
   let method: AuthMethod = 'qr';
   let phone: string | undefined;
@@ -268,24 +280,34 @@ export async function run(args: string[]): Promise<void> {
           } else {
             // Nothing reconnects after any other close (405 = WhatsApp refused this
             // WhatsApp Web version), so waiting would only end in a misleading timeout.
-            // A saved, paired device stays in store/auth/ for the next run to report.
             clearTimeout(timeout);
             const detail = `${reason ?? 'no status'} ${err?.message ?? ''}`.replace(/\s+/g, ' ').trim();
-            emitStatus('WHATSAPP_AUTH', {
-              STATUS: 'failed',
-              ERROR: paired
-                ? `WhatsApp closed the connection after pairing (${detail}). The link is saved in store/auth/, so run the step again to use it.`
-                : `WhatsApp closed the connection before linking (${detail}). Clear store/auth/ and run the step again.`,
-            });
-            // The pairing's creds write may still be running; exit once it lands.
-            if (paired) void saving.finally(() => process.exit(1));
-            else process.exit(1);
+            const fail = (error: string): void => {
+              emitStatus('WHATSAPP_AUTH', { STATUS: 'failed', ERROR: error });
+              process.exit(1);
+            };
+            if (!paired) {
+              fail(
+                `WhatsApp closed the connection before linking (${detail}). Clear store/auth/ and run the step again.`,
+              );
+            } else {
+              // A paired device stays in store/auth/ for the next run, so report
+              // only once the pairing's creds write has landed (or failed).
+              void landed(saving, 5000).then((saved) =>
+                fail(
+                  saved
+                    ? `WhatsApp closed the connection after pairing (${detail}). The link is saved in store/auth/, so run the step again to use it.`
+                    : `WhatsApp closed the connection after pairing (${detail}), but the link was not saved. Clear store/auth/ and run the step again.`,
+                ),
+              );
+            }
           }
         }
       });
 
+      // Chain every write, so a close after pairing waits for (and sees a failure of) all of them.
       sock.ev.on('creds.update', () => {
-        saving = saveCreds();
+        saving = Promise.all([saving, saveCreds()]).then(() => {});
       });
     }
 

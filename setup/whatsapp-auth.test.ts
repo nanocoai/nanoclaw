@@ -54,6 +54,8 @@ const BEFORE = (detail: string) =>
   `WhatsApp closed the connection before linking (${detail}). Clear store/auth/ and run the step again.`;
 const AFTER = (detail: string) =>
   `WhatsApp closed the connection after pairing (${detail}). The link is saved in store/auth/, so run the step again to use it.`;
+const NOT_SAVED = (detail: string) =>
+  `WhatsApp closed the connection after pairing (${detail}), but the link was not saved. Clear store/auth/ and run the step again.`;
 
 const PHONE = '14155551234';
 const METHODS = ['qr', 'pairing-code'] as const;
@@ -167,13 +169,14 @@ describe('whatsapp-auth step', () => {
 
     close(sock, 428, 'Connection Closed')();
 
-    expect(blocks()).toEqual(failed(error));
     await vi.waitFor(() => expect(process.exit).toHaveBeenCalledWith(1));
+    expect(blocks()).toEqual(failed(error));
   });
 
-  it.each(METHODS)('%s: a close after pairing but before the 515 waits for the new creds', async (method) => {
-    let written = (): void => {};
-    const saveCreds = vi.fn(() => new Promise<void>((resolve) => (written = resolve)));
+  /** Pair on the first socket, then close it before the 515; creds writes stay pending until settled. */
+  async function closedAfterPairing(method: Method) {
+    const writes: Array<{ resolve: () => void; reject: (err: Error) => void }> = [];
+    const saveCreds = vi.fn(() => new Promise<void>((resolve, reject) => writes.push({ resolve, reject })));
     vi.mocked(useMultiFileAuthState).mockResolvedValueOnce(authState({}, saveCreds));
     const sock = await connected(method);
     vi.mocked(process.exit).mockImplementation(() => undefined as never);
@@ -181,10 +184,35 @@ describe('whatsapp-auth step', () => {
     pair(sock);
     close(sock, 428, 'Connection Closed')();
 
-    expect(blocks()).toEqual(failed(AFTER('428 Connection Closed')));
+    // Nothing is reported, and the step does not exit, while the pairing's write runs.
     await new Promise((resolve) => setImmediate(resolve));
+    expect(blocks()).toEqual([]);
     expect(process.exit).not.toHaveBeenCalled();
-    written();
+    return writes;
+  }
+
+  it.each(METHODS)('%s: a close after pairing but before the 515 waits for the new creds', async (method) => {
+    const writes = await closedAfterPairing(method);
+
+    // Like Baileys' per-file lock, the writes land in order.
+    for (const write of writes) write.resolve();
+
     await vi.waitFor(() => expect(process.exit).toHaveBeenCalledWith(1));
+    expect(blocks()).toEqual(failed(AFTER('428 Connection Closed')));
+  });
+
+  type Writes = Awaited<ReturnType<typeof closedAfterPairing>>;
+  it.each([
+    ['qr', 'the pairing write fails', (writes: Writes) => writes.at(-1)!.reject(new Error('ENOSPC'))],
+    ['qr', 'the pairing write never lands', () => vi.advanceTimersByTimeAsync(5000)],
+    // The code request's write is still pending too; it fails first.
+    ['pairing-code', 'an earlier write fails', (writes: Writes) => writes[0].reject(new Error('ENOSPC'))],
+  ] as const)('%s: says the link was not saved when %s', async (method, _name, settle) => {
+    const writes = await closedAfterPairing(method);
+
+    await settle(writes);
+
+    await vi.waitFor(() => expect(process.exit).toHaveBeenCalledWith(1));
+    expect(blocks()).toEqual(failed(NOT_SAVED('428 Connection Closed')));
   });
 });
