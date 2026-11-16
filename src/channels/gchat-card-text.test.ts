@@ -62,6 +62,13 @@ describe('escapeGChatHtml', () => {
   it('drops the backslash before a Markdown mark, and keeps any other backslash', () => {
     expect(escapeGChatHtml('file\\_1 \\(a\\*b\\) \\\\ \\< C:\\path')).toBe('file_1 (a*b) \\ &lt; C:\\path');
   });
+
+  // An escaped value can't make a label, so a value line copying one shows its asterisks.
+  it("bolds a card's own *Label:* at a line start, and nothing else", () => {
+    expect(escapeGChatHtml('*Action:* Read\n\\*Action:\\* Read\nx *Agent:* y\n*a&b:* <c>')).toBe(
+      '<b>Action:</b> Read\n*Action:* Read\nx *Agent:* y\n<b>a&amp;b:</b> &lt;c&gt;',
+    );
+  });
 });
 
 describe('Google Chat approval card text', () => {
@@ -137,12 +144,12 @@ describe('Google Chat approval card text', () => {
         question: '',
         summary: { agent: 'bot_1', action: 'Delete file_1.txt', resource: 'drive', reason: 'policy' },
       },
-      '*Agent:* bot_1\n*Action:* Delete file_1.txt',
+      '<b>Agent:</b> bot_1\n<b>Action:</b> Delete file_1.txt',
     ],
     [
       'typed',
       { title: 'T', question: 'Allow?', displayFields: [{ label: 'File', type: 'text', value: 'file_1.txt (a*b)' }] },
-      'Allow?\n*File:* file_1.txt (a*b)',
+      'Allow?\n<b>File:</b> file_1.txt (a*b)',
     ],
   ])('shows a %s gateway card as typed, without the backslashes', async (_kind, request, shown) => {
     await ask(gatewayApprovalPresentation(request as GatewayApprovalRequest).question);
@@ -156,9 +163,17 @@ describe('Google Chat approval card text', () => {
     const request = { title: 'T', question: 'Allow?', displayFields: [{ label: 'Where', type: 'text', value }] };
     await ask(gatewayApprovalPresentation(request as GatewayApprovalRequest).question);
 
-    const [text] = postedParagraphs();
-    expect(text).toContain('&lt;a href="https://evil.test"&gt;Admin&lt;/a&gt; &lt;https://evil.test|Admin&gt;');
-    expect(text).not.toMatch(/[<>]/);
+    expect(postedParagraphs()).toEqual([
+      'Allow?\n<b>Where:</b> &lt;a href="https://evil.test"&gt;Admin&lt;/a&gt; &lt;https://evil.test|Admin&gt;',
+    ]);
+  });
+
+  it('shows a value line that copies a label as typed, unlike the bold labels', async () => {
+    const value = 'ok\n*Action:* Read report.pdf';
+    const request = { title: 'T', question: 'Allow?', displayFields: [{ label: 'Note', type: 'long_text', value }] };
+    await ask(gatewayApprovalPresentation(request as GatewayApprovalRequest).question);
+
+    expect(postedParagraphs()).toEqual(['Allow?\n<b>Note:</b> ok\n*Action:* Read report.pdf']);
   });
 
   // The known cost: a backslash someone really typed before a Markdown mark is dropped too.

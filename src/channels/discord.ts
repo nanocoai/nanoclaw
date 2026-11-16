@@ -24,6 +24,10 @@ const DISCORD_DEFAULTS: ChannelDefaults = {
   mentions: 'platform',
 };
 
+// A card's own *Label:* at a line start, which Discord closes on that line,
+// stays. Otherwise a mark, with any backslashes before it to count.
+const LABEL_OR_MARK = /(?<=^|\n)\*(?![\s*])(?:\\[^\n]|[^\\*`\n])*?:\*(?!\*)|(\\*)([`[*_~])/g;
+
 /**
  * Discord renders card text as Markdown: `[text](url)` shows any text for a
  * link, `<@id>` shows another user's name and `||text||` hides text. A word
@@ -36,15 +40,15 @@ export function escapeDiscordCardText(card: string): string {
   const text = card.replace(/\r\n?/g, '\n').replace(/\f/g, '');
   // Code is already literal on Discord. Keep commands inside matched code
   // spans/fences byte-for-byte, and escape only the surrounding prose. Its
-  // backticks and [ get a backslash: Discord pairs a backtick, or ends a link,
+  // backticks, [ and * _ ~ get a backslash: Discord pairs them, or ends a link,
   // past code and across the blocks of one embed, which are escaped one by one.
   const escape = (prose: string) =>
     prose
       .replace(/\]\(/g, ']\u2060(')
       .replace(/</g, '<\u2060')
       .replace(/\|{2,}/g, (pipes) => pipes.split('').join('\u2060') + '\u2060')
-      .replace(/(\\*)([`[])/g, (match, slashes: string, mark: string) =>
-        slashes.length % 2 ? match : `${slashes}\\${mark}`,
+      .replace(LABEL_OR_MARK, (match: string, slashes?: string, mark?: string) =>
+        mark === undefined || slashes!.length % 2 ? match : `${slashes}\\${mark}`,
       );
   let result = '';
   let offset = 0;
