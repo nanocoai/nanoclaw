@@ -58,9 +58,12 @@ https://www.onecli.sh/docs/guides/credential-stubs/general-app
 Check the `error` code in the response before the status. The gateway keeps
 the service's status, which can be 400, 401 or 403.
 
-**`app_not_connected` or `credential_not_found`: nothing is stored yet.**
-Show the user the link from the response: `connect_url` for an app,
-`secret_url` for an API key (the response says how to finish the link).
+**`app_not_connected` or `credential_not_found`: no stored credential matched
+this request.** Usually none is stored yet. Show the user the link from the
+response: `connect_url` for an app, `secret_url` for an API key (the response
+says how to finish the link). If the user says a key is already saved, its
+host or path pattern may not cover this URL: ask them to check it in the
+OneCLI dashboard instead of saving another.
 
 > To connect [service], open this link:
 > [link from the error response]

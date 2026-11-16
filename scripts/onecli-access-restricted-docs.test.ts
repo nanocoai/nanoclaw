@@ -1,6 +1,7 @@
 // The OneCLI gateway answers a request it injected nothing into with the
 // upstream status (401, 403, or 400) plus a code: `access_restricted` (not
-// attached), `credential_not_found` or `app_not_connected` (nothing stored).
+// attached), `credential_not_found` or `app_not_connected` (nothing stored
+// matched the request).
 // Docs that explain auth errors must key on the code, never on the status.
 
 import fs from 'node:fs';
