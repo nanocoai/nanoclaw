@@ -42,7 +42,7 @@ Registry copies explicitly fetch `+refs/heads/<b>:refs/remotes/<remote>/<b>` fro
 
 ### `append to:<file> [at:<marker>]`
 
-Body: the line(s) to add. Without `at:`, appends at end of file. With `at:<marker>`, inserts before the `// <<< <marker>` closing line of a dormant marker region (see `setup/index.ts`). **Idempotency: skip if already present.**
+Body: the line(s) to add. Without `at:`, appends at end of file. With `at:<marker>`, inserts before the `// <<< <marker>` closing line of a dormant marker region (see `setup/index.ts`). **Idempotency: each line is skipped if already present**, so a block that gained a line since the install still adds it.
 
 ### `dep [manager:pnpm|bun] [cwd:<dir>]`
 

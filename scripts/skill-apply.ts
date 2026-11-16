@@ -168,10 +168,11 @@ function selfStatus(
     }
     case 'append': {
       const to = String(d.attrs.to ?? '');
-      const line = d.body[0] ?? '';
-      return fileHasLine(root, to, line)
-        ? { status: 'skip', detail: `${to} already has the line` }
-        : { status: 'apply', detail: `add to ${to}: ${line}` };
+      // Each line counts on its own, so a block that gained a line since the install still adds it.
+      const missing = d.body.filter((line) => !fileHasLine(root, to, line));
+      return missing.length
+        ? { status: 'apply', detail: `add to ${to}: ${missing.join(' ')}` }
+        : { status: 'skip', detail: `${to} already has ${d.body.length > 1 ? 'every line' : 'the line'}` };
     }
     case 'dep': {
       if (mode === 'refresh') {
@@ -706,12 +707,14 @@ async function applyOne(
       const to = String(d.attrs.to);
       const marker = typeof d.attrs.at === 'string' ? d.attrs.at : undefined;
       const target = join(root, to);
+      // Only the lines the file lacks: the rest are already there once.
+      const missing = d.body.filter((line) => !fileHasLine(root, to, line));
       if (marker) {
         // Insert before the `// <<< <marker>` closing line of a dormant marker
         // region, matching that line's indentation. removeSkill still deletes
         // by line (position-agnostic), so the journal entry is unchanged.
         const close = `<<< ${marker}`;
-        for (const line of d.body) {
+        for (const line of missing) {
           const lines = read(target).split('\n');
           const idx = lines.findIndex((l) => l.includes(close));
           if (idx === -1) throw new Error(`append marker "${marker}" not found in ${to}`);
@@ -721,7 +724,7 @@ async function applyOne(
           journal.push({ op: 'appended', path: to, line });
         }
       } else {
-        for (const line of d.body) {
+        for (const line of missing) {
           appendFileSync(target, (read(target).endsWith('\n') || read(target) === '' ? '' : '\n') + line + '\n');
           journal.push({ op: 'appended', path: to, line });
         }
