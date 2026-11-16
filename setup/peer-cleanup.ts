@@ -345,8 +345,10 @@ function loadedExecStarts(unit: string): string[] {
       stdio: ['ignore', 'pipe', 'pipe'],
       encoding: 'utf-8',
     });
-    // Fields end in " ; "; a bare ";" may be part of a path.
-    return [...output.matchAll(/argv\[\]=(.*?) ; /g)].map((match) => `ExecStart=${match[1].trim()}`);
+    // systemctl-show.c prints argv[] unescaped, then " ; ignore_errors="; a path may hold " ; ".
+    const starts = [...output.matchAll(/argv\[\]=(.*?) ; ignore_errors=/g)].map((m) => `ExecStart=${m[1].trim()}`);
+    // Output it can't read might start anything.
+    return starts.length > 0 || output.trim() === '' ? starts : ['ExecStart=?'];
   } catch {
     return [];
   }

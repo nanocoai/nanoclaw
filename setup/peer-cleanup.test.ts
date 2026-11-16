@@ -251,17 +251,22 @@ describe('cleanupUnhealthyPeers — dead systemd registrations', () => {
   });
 
   // Drop-ins outside <unit>.service.d/ reach systemd too; its loaded ExecStart has them all.
-  it("keeps a dead unit when systemd's loaded ExecStart is live, ';' in its path included", () => {
+  it.each([
+    [
+      'is live, " ; " in its path included',
+      (live: string) =>
+        `{ path=/usr/bin/node ; argv[]=/usr/bin/node ${live} ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }\n`,
+    ],
+    ['comes in a format setup cannot read', () => 'ExecStart=/usr/bin/node /srv/gone/dist/index.js\n'],
+  ])("keeps a dead unit when systemd's loaded ExecStart %s", (_name, show) => {
     const { unitDir, projectRoot } = setup();
     const unit = path.join(unitDir, 'nanoclaw-v2-edited.service');
     writeUnit(unit, path.join(unitDir, 'gone', 'dist', 'index.js'));
-    const live = path.join(unitDir, 'gone', 'dist', 'index.js;live', 'dist', 'index.js');
+    const live = path.join(unitDir, 'gone', 'dist', 'index.js ; live', 'dist', 'index.js');
     fs.mkdirSync(path.dirname(live), { recursive: true });
     fs.writeFileSync(live, '// host entry');
     vi.mocked(execFileSync).mockImplementation((_cmd, args) =>
-      args?.includes('--property=ExecStart')
-        ? `{ path=/usr/bin/node ; argv[]=/usr/bin/node ${live} ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }\n`
-        : '',
+      args?.includes('--property=ExecStart') ? show(live) : '',
     );
 
     expectKept(cleanupUnhealthyPeers(projectRoot), unit);
