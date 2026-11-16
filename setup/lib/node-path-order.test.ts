@@ -269,4 +269,12 @@ describe('migrate-v2.sh after bootstrap', () => {
     stub(bin, 'npm', `[ "$*" = "config get prefix" ] && echo ${prefix}`);
     expect(afterBootstrap()).toEqual({ status: 0, out: `NODE ${bin}/node\nPNPM ${prefix}/bin/pnpm` });
   });
+
+  it('finds the pnpm setup.sh left in ~/.local/bin, behind the checked Node', () => {
+    platform('Linux');
+    fakeNode(bin, '24.22.1');
+    fakeNode(localBin, '22.20.0');
+    stub(localBin, 'pnpm', ':');
+    expect(afterBootstrap()).toEqual({ status: 0, out: `NODE ${bin}/node\nPNPM ${localBin}/pnpm` });
+  });
 });

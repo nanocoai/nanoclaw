@@ -176,6 +176,14 @@ else
   abort "bootstrap"
 fi
 
+# setup.sh may have left pnpm in ~/.local/bin, and its PATH changes stay in
+# its own shell. Appended as in nanoclaw.sh, so node_use_patched below decides
+# which node leads.
+case ":$PATH:" in
+  *":$HOME/.local/bin:"*) ;;
+  *) export PATH="$PATH:$HOME/.local/bin" ;;
+esac
+
 # Later steps, and the service they register, use this shell's node, which can
 # be an older one ahead of the keg-only node@22 setup.sh used.
 # shellcheck source=setup/lib/node-version.sh
