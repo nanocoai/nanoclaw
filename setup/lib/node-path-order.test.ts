@@ -26,7 +26,9 @@ function which(cmd: string): string {
 }
 
 const BASH = which('bash');
-const TOOLS = ['bash', 'cp', 'grep', 'head', 'mkdir', 'sed', 'tee'].map((tool) => [tool, which(tool)] as const);
+const TOOLS = ['bash', 'cp', 'grep', 'head', 'mkdir', 'sed', 'sleep', 'tee'].map(
+  (tool) => [tool, which(tool)] as const,
+);
 
 let tmp: string;
 let bin: string;
@@ -220,6 +222,21 @@ echo "DEPS_OK=$DEPS_OK"`);
     const bootLog = fs.readFileSync(path.join(tmp, 'boot.log'), 'utf8');
     expect(bootLog).toContain('npm error code EACCES');
     expect(bootLog).toContain('npm error network request failed');
+  });
+
+  it("puts npm's output in the log while npm is still running", () => {
+    fakeNode(bin, '24.22.1');
+    // The try into ~/.local says one line, then looks for it in the log before it ends.
+    const waits = `i=0; until grep -q "npm error still trying" ${tmp}/boot.log || [ $i -ge 30 ]; do sleep 0.1; i=$((i + 1)); done`;
+    const install = `[ "$4" = --prefix ] || exit 1; echo "npm error still trying" >&2; ${waits}; grep -q "npm error still trying" ${tmp}/boot.log && echo "npm error the log had it" >&2; exit 1`;
+    stub(
+      bin,
+      'npm',
+      `case "$1" in --version) echo 10.9.0 ;; config) echo ${tmp}/prefix ;; install) ${install} ;; esac`,
+    );
+    const r = installDeps();
+    expect(r.out).toContain('Could not install pnpm: npm failed, also when installing into ~/.local:');
+    expect(fs.readFileSync(path.join(tmp, 'boot.log'), 'utf8')).toContain('npm error the log had it');
   });
 
   it('names ~/.local, not npm, when ~/.local cannot be made', () => {

@@ -238,13 +238,12 @@ install_deps() {
         pnpm_error="$ERROR_LINE"
         pnpm_todo="Fix that, then re-run setup."
         log "Could not create $NPM_LOCAL_PREFIX"
-      elif said=$(npm install -g "pnpm@${pinned}" --prefix "$NPM_LOCAL_PREFIX" 2>&1); then
-        printf '%s\n' "$said" >> "$LOG_FILE"
+      # tee: the log gets npm's output as it comes, not when npm ends.
+      elif said=$(npm install -g "pnpm@${pinned}" --prefix "$NPM_LOCAL_PREFIX" 2>&1 | tee -a "$LOG_FILE"); then
         export PATH="$PATH:$NPM_LOCAL_PREFIX/bin"
         log "Installed pnpm@${pinned} to user-owned prefix: $NPM_LOCAL_PREFIX"
       else
         # This try needs no root, so what npm said is why pnpm is missing.
-        printf '%s\n' "$said" >> "$LOG_FILE"
         first_error_line "$said"
         pnpm_error="$ERROR_LINE"
         if npm --version >/dev/null 2>&1; then
