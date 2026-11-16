@@ -5,7 +5,17 @@ import path from 'path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { ensureLocalGatewayHostAccess, nonLoopbackBindings, withLinuxHostGateway, withLoopbackAdmin } from './setup.js';
+import {
+  adminBindingsOffLoopback,
+  ensureLocalGatewayHostAccess,
+  nonLoopbackBindings,
+  withLinuxHostGateway,
+  withLoopbackAdmin,
+} from './setup.js';
+
+const pin = JSON.parse(fs.readFileSync(path.join(import.meta.dirname, '..', 'versions.json'), 'utf8'))[
+  'onecli-gateway'
+];
 
 // `ip` reports docker0 at 172.17.0.1; every other call (docker) is recorded.
 vi.mock('child_process', () => ({
@@ -71,6 +81,46 @@ describe('nonLoopbackBindings', () => {
   });
 });
 
+describe('adminBindingsOffLoopback', () => {
+  const dirs: string[] = [];
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+    for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  // `dotenv` is the NanoClaw .env in the working directory.
+  function check(opts: { exported?: string; dotenv?: string; fail?: boolean }) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-'));
+    dirs.push(dir);
+    if (opts.dotenv) fs.writeFileSync(path.join(dir, '.env'), `ONECLI_GATEWAY_CONTAINER=${opts.dotenv}\n`);
+    vi.spyOn(process, 'cwd').mockReturnValue(dir);
+    vi.stubEnv('ONECLI_GATEWAY_CONTAINER', opts.exported);
+    vi.mocked(execFileSync).mockClear();
+    vi.mocked(execFileSync).mockImplementationOnce(() => {
+      if (opts.fail) throw new Error('No such container');
+      return '172.17.0.1:10254\n';
+    });
+    const bindings = adminBindingsOffLoopback();
+    return { bindings, args: vi.mocked(execFileSync).mock.calls.map(([cmd, args]) => [cmd, ...(args ?? [])]) };
+  }
+
+  it.each<[string, { exported?: string; dotenv?: string }, string]>([
+    ['the default name', {}, 'onecli'],
+    ['an exported ONECLI_GATEWAY_CONTAINER', { exported: 'gw-1', dotenv: 'gw-2' }, 'gw-1'],
+    ['ONECLI_GATEWAY_CONTAINER in .env', { dotenv: 'gw-2' }, 'gw-2'],
+  ])('checks the container with %s', (_name, opts, container) => {
+    const { bindings, args } = check(opts);
+    expect(args).toEqual([['docker', 'port', container, '10254/tcp']]);
+    expect(bindings).toEqual(['172.17.0.1:10254']);
+  });
+
+  it('reports nothing when there is no local gateway container', () => {
+    expect(check({ fail: true }).bindings).toEqual([]);
+  });
+});
+
 describe('ensureLocalGatewayHostAccess', () => {
   const platform = process.platform;
   const homes: string[] = [];
@@ -93,21 +143,23 @@ describe('ensureLocalGatewayHostAccess', () => {
     vi.spyOn(os, 'homedir').mockReturnValue(home);
     Object.defineProperty(process, 'platform', { value: opts.platform ?? 'linux' });
     vi.stubEnv('ONECLI_BIND_HOST', opts.bind);
+    // A stale shell value that the recreate must not use.
+    vi.stubEnv('ONECLI_VERSION', '0.0.1');
     vi.mocked(execFileSync).mockClear();
     const url = ensureLocalGatewayHostAccess(installerUrl);
-    const docker = vi
-      .mocked(execFileSync)
-      .mock.calls.filter(([cmd]) => cmd === 'docker')
-      .map(([, args]) => args);
-    return { url, compose: fs.readFileSync(file, 'utf8'), docker, up: [['compose', '-f', file, 'up', '-d']] };
+    const calls = vi.mocked(execFileSync).mock.calls.filter(([cmd]) => cmd === 'docker');
+    const docker = calls.map(([, args]) => args);
+    const versions = calls.map(([, , o]) => (o as { env?: NodeJS.ProcessEnv } | undefined)?.env?.ONECLI_VERSION);
+    return { url, compose: fs.readFileSync(file, 'utf8'), docker, versions, up: [['compose', '-f', file, 'up', '-d']] };
   }
 
   it('moves the docker0 bind the installer picked to loopback and recreates the stack', () => {
-    const { url, compose, docker, up } = run('http://172.17.0.1:10254');
+    const { url, compose, docker, versions, up } = run('http://172.17.0.1:10254');
     expect(url).toBe('http://127.0.0.1:10254');
     expect(compose).toContain(adminLoopback);
     expect(compose).toContain(gatewayLine);
     expect(docker).toEqual(up);
+    expect(versions).toEqual([pin]);
   });
 
   it.each<[string, string, { bind?: string; compose?: string }]>([
@@ -119,11 +171,12 @@ describe('ensureLocalGatewayHostAccess', () => {
       { compose: stock.replace('${ONECLI_APP_PORT:-10254}:10254"', '9000:10254"') },
     ],
   ])('keeps the installer bind for %s', (_name, installerUrl, opts) => {
-    const { url, compose, docker, up } = run(installerUrl, opts);
+    const { url, compose, docker, versions, up } = run(installerUrl, opts);
     expect(url).toBe(installerUrl);
     // Only the host mapping is added.
     expect(compose).toBe(withLinuxHostGateway(opts.compose ?? stock, 'linux'));
     expect(docker).toEqual(up);
+    expect(versions).toEqual([pin]);
   });
 
   it('leaves a non-Linux install as installed, even on a docker0-like address', () => {

@@ -18,6 +18,7 @@ import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
+import { envValue } from '../../../../src/env.js';
 import { log } from '../../../../src/log.js';
 import { emitStatus } from '../../../../setup/status.js';
 import { login } from './secret-input.js';
@@ -246,6 +247,22 @@ export function nonLoopbackBindings(dockerPortOutput: string): string[] {
     .filter((line) => line && !/^(127\.\d+\.\d+\.\d+|\[::1\]):\d+$/.test(line));
 }
 
+/** Admin API bindings off loopback on the local gateway container, named as the provider names it. */
+export function adminBindingsOffLoopback(): string[] {
+  const container = process.env.ONECLI_GATEWAY_CONTAINER || envValue('ONECLI_GATEWAY_CONTAINER') || 'onecli';
+  try {
+    return nonLoopbackBindings(
+      execFileSync('docker', ['port', container, '10254/tcp'], {
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }),
+    );
+  } catch {
+    // No local gateway container (a remote gateway) or no Docker access.
+    return [];
+  }
+}
+
 /** The docker0 address, which the installer picks on bare-metal Linux. */
 function docker0Address(): string | null {
   try {
@@ -280,8 +297,10 @@ export function ensureLocalGatewayHostAccess(gatewayUrl: string): string {
   }
   if (next !== current) {
     fs.writeFileSync(composeFile, next);
+    // An exported ONECLI_VERSION would beat the pin written to .env.
     execFileSync('docker', ['compose', '-f', composeFile, 'up', '-d'], {
       cwd: path.dirname(composeFile),
+      env: { ...process.env, ONECLI_VERSION: ONECLI_GATEWAY_VERSION },
       stdio: 'ignore',
     });
   }
@@ -559,17 +578,7 @@ export async function run(args: string[]): Promise<void> {
     writeEnvOnecliUrl(url);
     log.info('Reusing existing OneCLI', { url });
     // Report only: other apps may use the reused gateway's current binds.
-    let adminBindings: string[] = [];
-    try {
-      adminBindings = nonLoopbackBindings(
-        execFileSync('docker', ['port', 'onecli', '10254/tcp'], {
-          encoding: 'utf-8',
-          stdio: ['ignore', 'pipe', 'ignore'],
-        }),
-      );
-    } catch {
-      // No local onecli container (a remote gateway) or no Docker access.
-    }
+    const adminBindings = adminBindingsOffLoopback();
     if (adminBindings.length) log.warn('OneCLI admin API is published off loopback', { adminBindings });
     const healthy = await pollHealth(url, 5000);
     const v1Status = await verifyGatewayV1(url);
