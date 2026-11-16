@@ -441,6 +441,16 @@ describe('append at:<marker>', () => {
     expect([one, two].map((line) => lines.filter((l) => l === line).length)).toEqual([1, 1]);
     expect(res.journal).toEqual([{ op: 'appended', path: 'setup/index.ts', line: two }]);
   });
+
+  it('adds the whole block when its first line is absent, even a line the file already has', async () => {
+    writeFileSync(
+      join(askill, 'SKILL.md'),
+      ['# block', '```nc:append to:setup/index.ts', 'const extra = {', 'on: true,', '};', '```', ''].join('\n'),
+    );
+    // MARKER_FILE already closes its STEPS object with `};`.
+    await applySkill(askill, aroot, { exec: () => {} });
+    expect(readFileSync(join(aroot, 'setup/index.ts'), 'utf8').endsWith('const extra = {\non: true,\n};\n')).toBe(true);
+  });
 });
 
 // nc:run substitutes prompted {{vars}} — this is what lets wiring be "collect

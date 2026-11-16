@@ -118,6 +118,15 @@ function fileHasLine(root: string, rel: string, line: string): boolean {
     .split('\n')
     .some((l) => l.trim() === line.trim());
 }
+// The lines an nc:append still has to add. A file without the block's first line
+// gets the whole block as written; one with it gets only the later lines it lacks,
+// so a block that gained a line since the install still adds it.
+function linesToAppend(root: string, d: Directive): string[] {
+  const to = String(d.attrs.to ?? '');
+  const [first, ...rest] = d.body;
+  if (first === undefined || !fileHasLine(root, to, first)) return d.body;
+  return rest.filter((line) => !fileHasLine(root, to, line));
+}
 function pkgHasDep(root: string, name: string, cwd = ''): boolean {
   try {
     const pkg = JSON.parse(read(join(root, cwd, 'package.json')) || '{}');
@@ -168,8 +177,7 @@ function selfStatus(
     }
     case 'append': {
       const to = String(d.attrs.to ?? '');
-      // Each line counts on its own, so a block that gained a line since the install still adds it.
-      const missing = d.body.filter((line) => !fileHasLine(root, to, line));
+      const missing = linesToAppend(root, d);
       return missing.length
         ? { status: 'apply', detail: `add to ${to}: ${missing.join(' ')}` }
         : { status: 'skip', detail: `${to} already has ${d.body.length > 1 ? 'every line' : 'the line'}` };
@@ -707,8 +715,7 @@ async function applyOne(
       const to = String(d.attrs.to);
       const marker = typeof d.attrs.at === 'string' ? d.attrs.at : undefined;
       const target = join(root, to);
-      // Only the lines the file lacks: the rest are already there once.
-      const missing = d.body.filter((line) => !fileHasLine(root, to, line));
+      const missing = linesToAppend(root, d);
       if (marker) {
         // Insert before the `// <<< <marker>` closing line of a dormant marker
         // region, matching that line's indentation. removeSkill still deletes
