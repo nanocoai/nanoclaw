@@ -329,7 +329,8 @@ function launchdStartsEntry(plistPath: string, entry: string): boolean {
 
 /**
  * ExecStart=<nodePath> <entry>; the leading space keeps the match exact. Setup
- * writes no drop-ins, and one could point ExecStart elsewhere, so they rule it out.
+ * writes no drop-ins; the `<unit>.service.d/` that `systemctl edit` writes may
+ * point ExecStart elsewhere, so it rules the unit out.
  */
 function systemdStartsEntry(unitPath: string, entry: string): boolean {
   if (fs.existsSync(`${unitPath}.d`)) return false;
