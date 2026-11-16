@@ -51,6 +51,16 @@ function fakeDocker(
     containerPassword?: string;
     volumes?: string[];
     configImage?: string;
+    configPullPolicy?: string;
+    configPlatform?: string;
+    // `platform:` on every service.
+    configPlatformAll?: string;
+    imageArch?: { Architecture: string; Variant?: string };
+    // The tag the running app was made from, and the image it runs.
+    containerImage?: string;
+    containerImageId?: string;
+    // Tags pulled on this machine, beyond the two the stack uses.
+    images?: Record<string, string>;
     configHostIp?: string;
     configVolume?: string;
     configService?: string;
@@ -93,6 +103,11 @@ function fakeDocker(
         ];
   const imageEnv = (service: string) =>
     service === 'postgres' ? ['PATH=/usr/bin', 'PGDATA=/var/lib/postgresql/18/docker'] : ['PATH=/usr/bin'];
+  const images: Record<string, string> = {
+    'postgres:18-alpine': 'sha256:postgres',
+    'ghcr.io/onecli/onecli:1.45.0': 'sha256:onecli',
+    ...opts.images,
+  };
   // What compose would set now: the password from .env, everything else as the file says.
   const configEnv = (service: string) => {
     const pw = envValue(fs.readFileSync(paths.envFile, 'utf8'), 'POSTGRES_PASSWORD') || COMPOSE_DEFAULT_PASSWORD;
@@ -120,7 +135,12 @@ function fakeDocker(
       return opts.running !== false || opts.stopped ? 'pg1\n' : '';
     }
     if (line.startsWith('ps -aq')) return 'pg1\napp1\n';
-    if (line.startsWith('image inspect')) return JSON.stringify([{ Config: { Env: imageEnv(args[2].slice(7)) } }]);
+    if (line.startsWith('image inspect')) {
+      const id = args[2].startsWith('sha256:') ? args[2] : images[args[2]];
+      if (!id) throw new Error(`Error: No such image: ${args[2]}`);
+      const arch = opts.imageArch ?? { Architecture: 'amd64' };
+      return JSON.stringify([{ Id: id, Os: 'linux', ...arch, Config: { Env: imageEnv(id.slice(7)) } }]);
+    }
     if (line.startsWith('volume ls')) return (opts.volumes ?? []).join('\n');
     if (args[0] === 'exec' && input?.startsWith('SELECT')) {
       state.reads++;
@@ -143,6 +163,9 @@ function fakeDocker(
           {
             environment: configEnv(c.service),
             image: c.service === 'onecli' ? (opts.configImage ?? c.image) : c.image,
+            ...(c.service === 'onecli' && opts.configPullPolicy ? { pull_policy: opts.configPullPolicy } : {}),
+            ...(c.service === 'onecli' && opts.configPlatform ? { platform: opts.configPlatform } : {}),
+            ...(opts.configPlatformAll ? { platform: opts.configPlatformAll } : {}),
             ports: [{ host_ip: opts.configHostIp ?? '127.0.0.1', published: String(c.port), target: c.port }],
             volumes: [
               {
@@ -160,8 +183,12 @@ function fakeDocker(
     if (args[0] === 'inspect') {
       return JSON.stringify(
         containers.map((c) => ({
-          Image: `sha256:${c.service}`,
-          Config: { Image: c.image, Labels: { 'com.docker.compose.service': c.service }, Env: env(c.service) },
+          Image: (c.service === 'onecli' && opts.containerImageId) || `sha256:${c.service}`,
+          Config: {
+            Image: (c.service === 'onecli' && opts.containerImage) || c.image,
+            Labels: { 'com.docker.compose.service': c.service },
+            Env: env(c.service),
+          },
           HostConfig: { PortBindings: { [`${c.port}/tcp`]: [{ HostIp: '127.0.0.1', HostPort: String(c.port) }] } },
           Mounts: [
             { Type: 'volume', Name: `onecli_${c.volume}`, Source: `/v/onecli_${c.volume}`, Destination: c.target },
@@ -297,6 +324,72 @@ describe('rotateDefaultPassword (existing installs)', () => {
     expect(docker.state.ups).toBe(1);
   });
 
+  it('moves an install whose app was made from another tag of the same image', () => {
+    // Made from `latest` before setup pinned ONECLI_VERSION; both tags name the same local image.
+    const paths = tempPaths(env);
+    const docker = fakeDocker(paths, {
+      envFile: true,
+      containerImage: 'ghcr.io/onecli/onecli:latest',
+      images: { 'ghcr.io/onecli/onecli:latest': 'sha256:onecli' },
+    });
+    expect(rotateDefaultPassword(paths, docker.exec)).toEqual({ status: 'rotated' });
+    expect(docker.state.ups).toBe(1);
+  });
+
+  it.each([
+    ['pull_policy missing', { configPullPolicy: 'missing' }],
+    ['pull_policy never', { configPullPolicy: 'never' }],
+    ['the platform of its image', { configPlatform: 'linux/amd64' }],
+    ['linux/arm64 for an arm64 image', { configPlatform: 'linux/arm64', imageArch: { Architecture: 'arm64' } }],
+    ['linux/arm64/v8 for an arm64 image', { configPlatform: 'linux/arm64/v8', imageArch: { Architecture: 'arm64' } }],
+    [
+      'linux/arm64 for an arm64/v8 image',
+      { configPlatform: 'linux/arm64', imageArch: { Architecture: 'arm64', Variant: 'v8' } },
+    ],
+    [
+      'linux/amd64 for an amd64/v1 image',
+      { configPlatform: 'linux/amd64', imageArch: { Architecture: 'amd64', Variant: 'v1' } },
+    ],
+  ])('moves an install whose compose file sets %s', (_label, opts) => {
+    const paths = tempPaths(env);
+    const docker = fakeDocker(paths, opts);
+    expect(rotateDefaultPassword(paths, docker.exec)).toEqual({ status: 'rotated' });
+  });
+
+  it.each([
+    ['matches its images', 'linux/amd64', {}],
+    ['matches its images, written as compose also reads it', "'linux/amd64' # x86", {}],
+    ['is overridden by each service', 'linux/arm64', { configPlatformAll: 'linux/amd64' }],
+  ])('moves an install whose .env DOCKER_DEFAULT_PLATFORM %s', (_label, platform, opts) => {
+    const paths = tempPaths(`${env}export DOCKER_DEFAULT_PLATFORM=${platform}\n`);
+    const docker = fakeDocker(paths, opts);
+    expect(rotateDefaultPassword(paths, docker.exec)).toEqual({ status: 'rotated' });
+  });
+
+  it.each([
+    'DOCKER_DEFAULT_PLATFORM=linux/arm64',
+    'export DOCKER_DEFAULT_PLATFORM=linux/arm64',
+    'DOCKER_DEFAULT_PLATFORM = "linux/arm64" # Apple Silicon',
+  ])("refuses, changing nothing, when .env's %s is not its images' platform", (line) => {
+    const content = `${env}${line}\n`;
+    const paths = tempPaths(content);
+    const docker = fakeDocker(paths);
+    expect(rotateDefaultPassword(paths, docker.exec)).toMatchObject({
+      status: 'refused',
+      detail: 'postgres would need postgres:18-alpine for linux/arm64, which is not on this machine',
+    });
+    expect(fs.readFileSync(paths.envFile, 'utf8')).toBe(content);
+    expect(docker.state).toMatchObject({ alters: 0, ups: 0 });
+  });
+
+  it('moves an install whose tag now names a newer image, as any restart would', () => {
+    // e.g. another project pulled a newer postgres:18-alpine; refusing would leave the default in place.
+    const paths = tempPaths(env);
+    const docker = fakeDocker(paths, { containerImageId: 'sha256:onecli-older' });
+    expect(rotateDefaultPassword(paths, docker.exec)).toEqual({ status: 'rotated' });
+    expect(docker.state.ups).toBe(1);
+  });
+
   it.each([
     ['an app setting', 'SECRET_ENCRYPTION_KEY'],
     ['a database setting the compose file also interpolates', 'POSTGRES_USER'],
@@ -362,8 +455,53 @@ describe('rotateDefaultPassword (existing installs)', () => {
   it.each([
     [
       'an image change (no ONECLI_VERSION saved)',
-      { configImage: 'ghcr.io/onecli/onecli:latest' },
-      /onecli would switch/,
+      {
+        configImage: 'ghcr.io/onecli/onecli:latest',
+        images: { 'ghcr.io/onecli/onecli:latest': 'sha256:onecli-newer' },
+      },
+      /onecli would switch from ghcr\.io\/onecli\/onecli:1\.45\.0 to ghcr\.io\/onecli\/onecli:latest/,
+    ],
+    [
+      'another image under another tag, even one both tags name now',
+      {
+        containerImage: 'ghcr.io/onecli/onecli:latest',
+        containerImageId: 'sha256:onecli-older',
+        images: { 'ghcr.io/onecli/onecli:latest': 'sha256:onecli' },
+      },
+      /onecli would switch from ghcr\.io\/onecli\/onecli:latest to ghcr\.io\/onecli\/onecli:1\.45\.0/,
+    ],
+    [
+      'a tag that is not on this machine',
+      { configImage: 'ghcr.io/onecli/onecli:1.46.0' },
+      /onecli would need ghcr\.io\/onecli\/onecli:1\.46\.0, which is not on this machine/,
+    ],
+    [
+      'its own tag, removed from this machine',
+      { images: { 'ghcr.io/onecli/onecli:1.45.0': '' } },
+      /onecli would need ghcr\.io\/onecli\/onecli:1\.45\.0, which is not on this machine/,
+    ],
+    [
+      'a pull_policy that fetches an image already here',
+      { configPullPolicy: 'always' },
+      /onecli has pull_policy always, so a restart could change its image/,
+    ],
+    ['a pull_policy that rebuilds the image', { configPullPolicy: 'build' }, /onecli has pull_policy build/],
+    [
+      'another platform than its image',
+      { configPlatform: 'linux/arm64' },
+      /onecli would need ghcr\.io\/onecli\/onecli:1\.45\.0 for linux\/arm64, which is not on this machine/,
+    ],
+    [
+      'linux/arm, which means v7, for an arm/v6 image',
+      { configPlatform: 'linux/arm', imageArch: { Architecture: 'arm', Variant: 'v6' } },
+      /for linux\/arm, which is not on this machine/,
+    ],
+    ['a platform with an extra part', { configPlatform: 'linux/amd64/v1/extra' }, /for linux\/amd64\/v1\/extra, which/],
+    ['a platform with an empty part', { configPlatform: 'linux//amd64' }, /for linux\/\/amd64, which/],
+    [
+      'linux/amd64 for an amd64/v3 image',
+      { configPlatform: 'linux/amd64', imageArch: { Architecture: 'amd64', Variant: 'v3' } },
+      /for linux\/amd64, which is not on this machine/,
     ],
     ['a bind change', { configHostIp: '172.17.0.1' }, /would move from 127\.0\.0\.1/],
     ['a different data volume', { configVolume: 'other' }, /postgres would mount onecli_other/],
@@ -428,20 +566,48 @@ describe('rotateDefaultPassword (existing installs)', () => {
 });
 
 describe('running the script directly', () => {
-  it('runs from a checkout path with a space', () => {
+  // From a checkout path with a space, against a Docker with no OneCLI containers that logs what it gets.
+  function runFromSpacedPath(extraEnv: Record<string, string> = {}) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'onecli pg '));
     roots.push(dir);
     fs.copyFileSync(new URL('./postgres-password.ts', import.meta.url), path.join(dir, 'postgres-password.ts'));
     fs.writeFileSync(path.join(dir, 'package.json'), '{"type":"module"}\n');
-    // A Docker with no OneCLI containers, so the run stops at "no database".
     fs.mkdirSync(path.join(dir, 'bin'));
-    fs.writeFileSync(path.join(dir, 'bin', 'docker'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    const log = path.join(dir, 'docker-env');
+    const vars = ['POSTGRES_PASSWORD', 'ONECLI_VERSION', 'DOCKER_DEFAULT_PLATFORM', 'COMPOSE_ENV_FILES'];
+    const record = vars.map((v) => `${v}=\${${v}-unset}`).join(' ');
+    fs.writeFileSync(path.join(dir, 'bin', 'docker'), `#!/bin/sh\necho "${record}" >> '${log}'\nexit 0\n`, {
+      mode: 0o755,
+    });
     const result = spawnSync(process.execPath, ['--import', 'tsx', path.join(dir, 'postgres-password.ts')], {
       encoding: 'utf8',
-      env: { ...process.env, HOME: dir, PATH: `${path.join(dir, 'bin')}${path.delimiter}${process.env.PATH}` },
+      env: {
+        ...process.env,
+        ...extraEnv,
+        HOME: dir,
+        PATH: `${path.join(dir, 'bin')}${path.delimiter}${process.env.PATH}`,
+      },
     });
+    return { result, dockerEnv: fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : '' };
+  }
+
+  it('runs from a checkout path with a space', () => {
+    const { result } = runFromSpacedPath();
     expect(result.stdout).toContain('No OneCLI database on this machine');
     expect(result.status).toBe(0);
+  });
+
+  it("keeps the caller's settings that change what compose runs away from Docker", () => {
+    const { result, dockerEnv } = runFromSpacedPath({
+      POSTGRES_PASSWORD: 'x',
+      ONECLI_VERSION: '9.9.9',
+      DOCKER_DEFAULT_PLATFORM: 'linux/arm64',
+      COMPOSE_ENV_FILES: '/elsewhere/platform.env',
+    });
+    expect(result.status).toBe(0);
+    expect(dockerEnv).toMatch(
+      /^(POSTGRES_PASSWORD=unset ONECLI_VERSION=unset DOCKER_DEFAULT_PLATFORM=unset COMPOSE_ENV_FILES=unset\n)+$/,
+    );
   });
 
   it('does nothing when imported, even when argv[1] is not a file', () => {

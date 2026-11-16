@@ -13,14 +13,18 @@ import { pathToFileURL } from 'url';
 export const COMPOSE_DEFAULT_PASSWORD = 'onecli';
 const PROJECT = 'onecli';
 const VAR = 'POSTGRES_PASSWORD';
-// Shell exports beat .env in compose interpolation; the upgrade guide drops these too.
-const SHADOWING_VARS = [VAR, 'ONECLI_VERSION'];
+// Shell exports beat .env in compose interpolation (the upgrade guide drops these too), and COMPOSE_*
+// settings such as COMPOSE_ENV_FILES make compose read files the checks below do not. A default
+// platform from .env is checked below.
+const SHADOWING_VARS = [VAR, 'ONECLI_VERSION', 'DOCKER_DEFAULT_PLATFORM'];
 
 export type Exec = (cmd: string, args: string[], input?: string) => string;
 
 const realExec: Exec = (cmd, args, input) => {
   const env = { ...process.env };
-  for (const name of SHADOWING_VARS) delete env[name];
+  for (const name of Object.keys(env)) {
+    if (SHADOWING_VARS.includes(name) || name.startsWith('COMPOSE_')) delete env[name];
+  }
   return execFileSync(cmd, args, {
     encoding: 'utf8',
     env,
@@ -141,6 +145,8 @@ function psql(exec: Exec, container: string, sql: string): string {
 
 interface ComposeService {
   image?: string;
+  pull_policy?: string;
+  platform?: string;
   ports?: Array<{ host_ip?: string; published?: string | number; target: number }>;
   volumes?: Array<{ type: string; source?: string; target: string }>;
   environment?: Record<string, string | null>;
@@ -163,6 +169,32 @@ const IMAGE_AND_PORT_SETTINGS = [
   'POSTGRES_PORT',
 ];
 
+// Pull policies under which `up` uses an image already on this machine.
+const LOCAL_IMAGE_POLICIES = [undefined, 'missing', 'if_not_present', 'never'];
+
+// os/arch/variant, normalized as compose's platform matcher does.
+const DEFAULT_VARIANT: Record<string, string> = { arm64: 'v8', arm: 'v7' };
+function platformKey(system: string, arch: string, variant = ''): string {
+  const v = variant || DEFAULT_VARIANT[arch] || '';
+  return [system, arch, arch === 'amd64' && v === 'v1' ? '' : v].filter(Boolean).join('/');
+}
+
+// The local image a tag names and its platform; null if it is not on this machine.
+function localImage(exec: Exec, image: string | undefined): { id: string; platform: string } | null {
+  if (!image) return null;
+  try {
+    const [img] = JSON.parse(exec('docker', ['image', 'inspect', image])) as Array<{
+      Id: string;
+      Os: string;
+      Architecture: string;
+      Variant?: string;
+    }>;
+    return { id: img.Id, platform: platformKey(img.Os, img.Architecture, img.Variant) };
+  } catch {
+    return null;
+  }
+}
+
 function projectContainers(exec: Exec): Container[] {
   const ids = exec('docker', ['ps', '-aq', '--filter', `label=com.docker.compose.project=${PROJECT}`])
     .split('\n')
@@ -178,6 +210,15 @@ export function recreateDrift(exec: Exec, paths: Paths, containers: Container[])
     volumes?: Record<string, { name?: string }>;
   };
   const show = (list: string[]) => list.join(' ') || 'none';
+  // Compose creates a service without its own platform for this one (the shell's is dropped). Read as
+  // loosely as compose does; an odd value then fails the platform check instead of slipping past it.
+  const defaultPlatform = [
+    ...readEnv(paths.envFile).matchAll(/^\s*(?:export\s+)?DOCKER_DEFAULT_PLATFORM\s*[=:]\s*(.*)$/gm),
+  ]
+    .at(-1)?.[1]
+    .replace(/\s+#.*$/, '')
+    .trim()
+    .replace(/^(['"])(.*)\1$/, '$2');
   const seen = new Set<string>();
   const imageEnv = new Map<string, string[]>();
   for (const c of containers) {
@@ -187,7 +228,26 @@ export function recreateDrift(exec: Exec, paths: Paths, containers: Container[])
     // Left running, it would keep the old password; compose would not replace it.
     if (!svc) return `${name} is not in ${paths.composeFile}`;
     seen.add(name);
-    if (svc.image !== c.Config.Image) return `${name} would switch from ${c.Config.Image} to ${svc.image}`;
+    // Compose would need a missing image, or one for another platform, after the password changed.
+    // Another tag of the same image is no change, e.g. `latest` from before setup pinned ONECLI_VERSION;
+    // the same tag is what any `up` runs.
+    if (!LOCAL_IMAGE_POLICIES.includes(svc.pull_policy)) {
+      return `${name} has pull_policy ${svc.pull_policy}, so a restart could change its image`;
+    }
+    const image = localImage(exec, svc.image);
+    const platform = svc.platform || defaultPlatform;
+    // A platform not written as lowercase os/arch[/variant] never matches, so it refuses.
+    const parts = platform?.split('/') ?? [];
+    const wanted =
+      parts.length >= 2 && parts.length <= 3 && parts.every((part) => /^[a-z0-9_.-]+$/.test(part))
+        ? platformKey(parts[0], parts[1], parts[2])
+        : null;
+    if (!image || (platform && wanted !== image.platform)) {
+      return `${name} would need ${svc.image}${platform ? ` for ${platform}` : ''}, which is not on this machine`;
+    }
+    if (svc.image !== c.Config.Image && image.id !== c.Image) {
+      return `${name} would switch from ${c.Config.Image} to ${svc.image}`;
+    }
     const want = (svc.ports ?? []).map((p) => `${p.host_ip ?? ''}:${p.published}->${p.target}`).sort();
     const have = Object.entries(c.HostConfig.PortBindings ?? {})
       .flatMap(([port, binds]) => (binds ?? []).map((b) => `${b.HostIp}:${b.HostPort}->${parseInt(port, 10)}`))
