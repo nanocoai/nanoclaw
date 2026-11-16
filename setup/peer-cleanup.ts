@@ -345,7 +345,8 @@ function loadedExecStarts(unit: string): string[] {
       stdio: ['ignore', 'pipe', 'pipe'],
       encoding: 'utf-8',
     });
-    return [...output.matchAll(/argv\[\]=([^;]*)/g)].map((match) => `ExecStart=${match[1].trim()}`);
+    // Fields end in " ; "; a bare ";" may be part of a path.
+    return [...output.matchAll(/argv\[\]=(.*?) ; /g)].map((match) => `ExecStart=${match[1].trim()}`);
   } catch {
     return [];
   }
