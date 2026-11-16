@@ -30,7 +30,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { getLaunchdLabel, getSystemdUnit, INSTALL_ID_PATTERN } from '../src/install-slug.js';
+import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
 import { log } from '../src/log.js';
 
 const UNHEALTHY_RUNS_THRESHOLD = 10;
@@ -314,9 +314,12 @@ function deadSystemdTarget(unitPath: string): string | undefined {
 
 // ---- same checkout under another name ----------------------------------------
 
+/** The install id charset in src/install-slug.ts; the 8-hex hash fits it too. */
+const SETUP_SLUG = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+
 /** Setup writes `<prefix><slug>` only; other names were written by hand. */
 function isSetupName(name: string, prefix: string): boolean {
-  return name.startsWith(prefix) && INSTALL_ID_PATTERN.test(name.slice(prefix.length));
+  return name.startsWith(prefix) && SETUP_SLUG.test(name.slice(prefix.length));
 }
 
 /** ProgramArguments holds the entry point as its own <string>. */

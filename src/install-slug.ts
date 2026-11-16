@@ -14,7 +14,7 @@
  */
 import { createHash } from 'crypto';
 
-export const INSTALL_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+const INSTALL_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 
 export function getInstallSlug(projectRoot: string = process.cwd()): string {
   const override = process.env.NANOCLAW_INSTALL_ID;
