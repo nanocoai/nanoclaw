@@ -24,6 +24,7 @@ import {
   parseWhatsAppMentions,
   resolveSharedMode,
   rewriteBotLidMention,
+  slashCommandOf,
 } from './whatsapp.js';
 
 const BOT_PHONE_JID = '15550009999@s.whatsapp.net';
@@ -214,6 +215,33 @@ describe('answerPendingQuestion', () => {
     expect(await answerPendingQuestion(fresh(), 'chat@g.us', '/later', 'u', onAction, vi.fn())).toBeUndefined();
     expect(await answerPendingQuestion(new Map(), 'chat@g.us', '/approve', 'u', onAction, vi.fn())).toBeUndefined();
     expect(onAction).not.toHaveBeenCalled();
+  });
+
+  it('answers from a command followed by a note, or typed after an RTL mark', async () => {
+    for (const text of ['/approve \nlooks fine', '\u200e/Approve', '\u200f /approve now']) {
+      const questions = fresh();
+      const onAction = vi.fn(async () => 'accepted' as const);
+      const answered = await answerPendingQuestion(questions, 'chat@g.us', text, 'u', onAction, vi.fn());
+      expect(answered?.value).toBe('approve');
+      expect(questions.has('chat@g.us')).toBe(false);
+    }
+  });
+});
+
+describe('slashCommandOf', () => {
+  it('reads the first word as the command, lowercased, without bidi marks', () => {
+    expect(slashCommandOf('/approve')).toBe('/approve');
+    expect(slashCommandOf('  /Approve  ')).toBe('/approve');
+    expect(slashCommandOf('/approve\nand one more thing')).toBe('/approve');
+    expect(slashCommandOf('\u200e/approve')).toBe('/approve');
+    expect(slashCommandOf('\u2067/reject\u2069 later')).toBe('/reject');
+  });
+
+  it('is undefined for text that does not start with a command', () => {
+    expect(slashCommandOf('approve')).toBeUndefined();
+    expect(slashCommandOf('please /approve')).toBeUndefined();
+    expect(slashCommandOf('/')).toBeUndefined();
+    expect(slashCommandOf('')).toBeUndefined();
   });
 });
 
