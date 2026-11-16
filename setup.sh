@@ -150,7 +150,7 @@ install_deps() {
   DEPS_OK="false"
   NATIVE_OK="false"
   # Set where a try that needs no root fails: why pnpm is missing, the tool's
-  # own error line and what to do. The message at the end prints them.
+  # own error line and what to do. The message at the end prints the last one.
   local said="" pnpm_why="" pnpm_error="" pnpm_todo=""
 
   if [ "$NODE_OK" = "false" ]; then
@@ -187,13 +187,25 @@ install_deps() {
     if ! command -v pnpm >/dev/null 2>&1; then
       local user_bin="$HOME/.local/bin"
       log "pnpm not on PATH after corepack enable — retrying into $user_bin"
-      if mkdir -p "$user_bin" >> "$LOG_FILE" 2>&1 \
-          && corepack enable --install-directory "$user_bin" pnpm >> "$LOG_FILE" 2>&1 \
+      if ! said=$(mkdir -p "$user_bin" 2>&1); then
+        printf '%s\n' "$said" >> "$LOG_FILE"
+        pnpm_why="$user_bin cannot be created"
+        first_error_line "$said"
+        pnpm_error="$ERROR_LINE"
+        pnpm_todo="Fix that, then re-run setup."
+        log "Could not create $user_bin"
+      # tee: the log gets corepack's output as it comes, not when corepack ends.
+      elif said=$(corepack enable --install-directory "$user_bin" pnpm 2>&1 | tee -a "$LOG_FILE") \
           && [ -x "$user_bin/pnpm" ]; then
         export PATH="$PATH:$user_bin"
         hash -r 2>/dev/null || true
         log "corepack pnpm shim installed in $user_bin"
       else
+        # This try needs no root, so what corepack said is why pnpm is missing.
+        pnpm_why="corepack could not put pnpm into $user_bin"
+        first_error_line "$said"
+        pnpm_error="$ERROR_LINE"
+        pnpm_todo="Fix that, then re-run setup. corepack's full output is in $LOG_FILE"
         log "corepack enable into $user_bin failed"
       fi
     fi
@@ -284,12 +296,15 @@ install_deps() {
       echo "$pnpm_todo"
       return
     fi
-    echo "Could not install pnpm without root. Run this, then re-run setup:"
-    if command -v corepack >/dev/null 2>&1; then
-      echo "  mkdir -p ~/.local/bin && corepack enable --install-directory ~/.local/bin pnpm"
-    else
-      echo "  npm install -g pnpm@${pinned:-<version from package.json packageManager>} --prefix ~/.local"
+    if ! command -v corepack >/dev/null 2>&1 && ! command -v npm >/dev/null 2>&1; then
+      echo "Could not install pnpm: there is no corepack and no npm on PATH to install it with."
+      echo "Reinstall Node.js, which brings npm, then re-run setup."
+      return
     fi
+    # Left: npm's global install reported success, yet pnpm is nowhere this
+    # script looks. The try into ~/.local was not made, so suggest it.
+    echo "Could not install pnpm without root. Run this, then re-run setup:"
+    echo "  npm install -g pnpm@${pinned:-<version from package.json packageManager>} --prefix ~/.local"
     return
   fi
 

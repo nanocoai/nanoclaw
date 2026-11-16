@@ -268,13 +268,84 @@ echo "DEPS_OK=$DEPS_OK"`);
     expect(r.status).toBe(0);
   });
 
-  it('still points at corepack when corepack is there, fails, and there is no npm', () => {
+  it('shows why corepack failed when it is the only installer, instead of blaming root', () => {
     fakeNode(bin, '24.22.1');
-    stub(bin, 'corepack', 'exit 1');
+    stub(bin, 'corepack', 'echo "Error: corepack cannot reach the registry" >&2; exit 1');
+    const r = installDeps();
+    expect(r.out).toContain(`Could not install pnpm: corepack could not put pnpm into ${localBin}:`);
+    expect(r.out).toMatch(/^ {2}Error: corepack cannot reach the registry$/m);
+    expect(r.out).toContain(`Fix that, then re-run setup. corepack's full output is in ${tmp}/boot.log`);
+    expect(r.out).not.toContain('without root');
+    expect(r.out).not.toContain('corepack enable');
+    expect(r.out).toContain('DEPS_OK=false');
+    expect(r.status).toBe(0);
+  });
+
+  it('says so when corepack reports success but leaves no pnpm', () => {
+    fakeNode(bin, '24.22.1');
+    stub(bin, 'corepack', 'exit 0');
+    const r = installDeps();
+    expect(r.out).toContain(`Could not install pnpm: corepack could not put pnpm into ${localBin}:`);
+    expect(r.out).toMatch(/^ {2}it printed nothing$/m);
+    expect(r.out).not.toContain('without root');
+  });
+
+  it("puts corepack's output in the log while corepack is still running", () => {
+    fakeNode(bin, '24.22.1');
+    const waits = `i=0; until grep -q "corepack still trying" ${tmp}/boot.log || [ $i -ge 30 ]; do sleep 0.1; i=$((i + 1)); done`;
+    stub(
+      bin,
+      'corepack',
+      `[ "$2" = --install-directory ] || exit 1; echo "corepack still trying" >&2; ${waits}; grep -q "corepack still trying" ${tmp}/boot.log && echo "Error: the log had it" >&2; exit 1`,
+    );
+    installDeps();
+    expect(fs.readFileSync(path.join(tmp, 'boot.log'), 'utf8')).toContain('Error: the log had it');
+  });
+
+  it('names ~/.local/bin, not corepack, when ~/.local/bin cannot be made', () => {
+    fakeNode(bin, '24.22.1');
+    fs.mkdirSync(home, { recursive: true });
+    fs.writeFileSync(path.join(home, '.local'), 'a file where the folder should be\n');
+    stub(bin, 'corepack', 'echo "should not get as far as corepack into ~/.local/bin" >&2; exit 1');
+    const r = installDeps();
+    expect(r.out).toContain(`Could not install pnpm: ${localBin} cannot be created:`);
+    expect(r.out).toMatch(/^ {2}mkdir: .*\.local.*$/m);
+    expect(r.out).not.toContain('corepack could not');
+    expect(r.out).not.toContain('without root');
+    expect(fs.readFileSync(path.join(tmp, 'boot.log'), 'utf8')).toMatch(/^mkdir: .*\.local/m);
+  });
+
+  it('gives the last failure when corepack and then npm both fail without root', () => {
+    fakeNode(bin, '24.22.1');
+    stub(bin, 'corepack', 'echo "Error: corepack is broken" >&2; exit 1');
+    stub(
+      bin,
+      'npm',
+      `case "$1" in --version) echo 10.9.0 ;; config) echo ${tmp}/prefix ;; install) echo "npm error code ENOTFOUND" >&2; exit 1 ;; esac`,
+    );
+    const r = installDeps();
+    expect(r.out).toContain('Could not install pnpm: npm failed, also when installing into ~/.local:');
+    expect(r.out).toMatch(/^ {2}npm error code ENOTFOUND$/m);
+    expect(r.out).not.toContain('corepack is broken');
+  });
+
+  it('says there is nothing to install pnpm with when corepack and npm are both missing', () => {
+    fakeNode(bin, '24.22.1');
+    const r = installDeps();
+    expect(r.out).toContain('Could not install pnpm: there is no corepack and no npm on PATH to install it with.');
+    expect(r.out).toContain('Reinstall Node.js, which brings npm, then re-run setup.');
+    expect(r.out).not.toContain('without root');
+    expect(r.out).not.toContain('npm install -g');
+    expect(r.out).toContain('DEPS_OK=false');
+  });
+
+  it('still suggests the try into ~/.local when npm installed pnpm where it cannot be found', () => {
+    fakeNode(bin, '24.22.1');
+    // The global install reports success, yet pnpm is nowhere this script looks.
+    stub(bin, 'npm', `case "$1" in config) echo ${tmp}/prefix ;; esac`);
     const r = installDeps();
     expect(r.out).toContain('Could not install pnpm without root. Run this, then re-run setup:');
-    expect(r.out).toContain('corepack enable --install-directory ~/.local/bin pnpm');
-    expect(r.out).toContain('DEPS_OK=false');
+    expect(r.out).toContain('npm install -g pnpm@10.0.0 --prefix ~/.local');
   });
 });
 
