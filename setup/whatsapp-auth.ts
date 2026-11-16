@@ -201,7 +201,7 @@ export async function run(args: string[]): Promise<void> {
       STATUS: 'skipped',
       REASON: 'already-authenticated',
       AUTH_DIR,
-      PHONE: phoneFromId(saved.me?.id),
+      PHONE: typeof saved.me?.id === 'string' ? phoneFromId(saved.me.id) : '',
     });
     return;
   }

@@ -166,6 +166,19 @@ describe('whatsapp-auth step', () => {
     ]);
   });
 
+  it('reports a finished pairing with an odd `me` as linked, with no number', async () => {
+    disk = JSON.stringify({ ...PAIRED, me: { id: 14155551234 } });
+
+    await run(['--method', 'qr']);
+
+    expect(blocks()).toEqual([
+      [
+        'WHATSAPP_AUTH',
+        { STATUS: 'skipped', REASON: 'already-authenticated', AUTH_DIR: expect.any(String), PHONE: '' },
+      ],
+    ]);
+  });
+
   it.each([
     // Only a creds.json that parses and lacks a pairing may be cleared.
     ['a pairing code that was never entered', JSON.stringify(REQUESTED_CODE), NO_LINK],
