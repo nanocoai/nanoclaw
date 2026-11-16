@@ -222,6 +222,22 @@ describe('setup.sh ensure_node', () => {
     expect(calls()).toEqual([]);
   });
 
+  it("keeps the Node's whole error in the log and shows one line of it", () => {
+    stub(bin, 'uname', 'echo Linux');
+    // No newline at the end, as some loaders print.
+    stub(
+      bin,
+      'node',
+      `printf 'dyld: Library not loaded\\n  Referenced from: node\\n  Reason: image not found' >&2; exit 1`,
+    );
+
+    const r = ensureNodeStrict();
+
+    expect(r.out).toMatch(/^ {2}dyld: Library not loaded$/m);
+    expect(r.out).not.toContain('Reason: image not found');
+    expect(r.log).toContain('  Referenced from: node\n  Reason: image not found\n');
+  });
+
   it('says so when the only Node is a file that cannot be executed at all', () => {
     stub(bin, 'uname', 'echo Linux');
     fs.writeFileSync(path.join(bin, 'node'), '#!/nonexistent/interpreter\n', { mode: 0o755 });
@@ -266,6 +282,29 @@ describe('setup.sh ensure_node', () => {
 
     expect(r.out).toContain('NODE_OK=false NODE_VERSION=22.20.0');
     expect(calls()).toEqual(['install-node']);
+  });
+});
+
+describe('setup.sh first_error_line', () => {
+  it.each([
+    ['the first line that names an error', 'node:internal/x:1\\n  throw err;\\nError: boom\\n  at y\\n', 'Error: boom'],
+    ['an npm error line', '\\nnpm error code EACCES\\nnpm error syscall mkdir\\n', 'npm error code EACCES'],
+    [
+      'the first line with anything on it when none names an error',
+      '\\n\\nlibfoo.so.1: not found\\nmore\\n',
+      'libfoo.so.1: not found',
+    ],
+    ['a last line that has no newline', 'loader: missing lib', 'loader: missing lib'],
+    ['nothing for no output', '', ''],
+  ])('gives %s', (_case, said, line) => {
+    const source = fs.readFileSync(path.join(ROOT, 'setup.sh'), 'utf8');
+    const start = source.indexOf('first_error_line() {');
+    expect(start, 'first_error_line() not found in setup.sh').toBeGreaterThanOrEqual(0);
+    const fn = source.slice(start, source.indexOf('\n}', start) + 2);
+
+    const r = run(['-c', `set -euo pipefail\n${fn}\nprintf '${said}' | first_error_line`]);
+
+    expect(r).toEqual({ status: 0, out: `${line}\n` });
   });
 });
 

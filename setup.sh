@@ -55,10 +55,11 @@ detect_platform() {
 
 # first_error_line: of a tool's output on stdin, the first line that names an
 # error, else the first line with anything on it. Short enough to show on
-# screen; the whole output goes to the log.
+# screen; callers put the whole output in the log.
 first_error_line() {
   local line first=""
-  while IFS= read -r line; do
+  # `|| [ -n "$line" ]`: a last line without a newline still counts.
+  while IFS= read -r line || [ -n "$line" ]; do
     [ -n "$first" ] || first="$line"
     case "$line" in
       *[Ee]rror* | *ERR!*) printf '%s\n' "$line"; return ;;
@@ -86,9 +87,12 @@ check_node() {
       fi
       log "Node $NODE_VERSION at $NODE_PATH_FOUND (ok=$NODE_OK)"
     else
+      local said
       NODE_VERSION="cannot_start"
-      NODE_START_ERROR=$(node --version 2>&1 | first_error_line) || true
+      said=$(node --version 2>&1) || true
+      NODE_START_ERROR=$(first_error_line <<<"$said")
       log "Node at $NODE_PATH_FOUND cannot start: ${NODE_START_ERROR:-it printed nothing}"
+      printf '%s\n' "$said" >> "$LOG_FILE"
     fi
   else
     log "Node not found"
@@ -138,7 +142,9 @@ install_jq() {
 install_deps() {
   DEPS_OK="false"
   NATIVE_OK="false"
-  local npm_output="" npm_failed="false"
+  # Set where a try that needs no root fails: why pnpm is missing, the tool's
+  # own error line and what to do. The message at the end prints them.
+  local said="" pnpm_why="" pnpm_error="" pnpm_todo=""
 
   if [ "$NODE_OK" = "false" ]; then
     log "Skipping pnpm install — Node not available"
@@ -218,15 +224,27 @@ install_deps() {
       # and the service unit already have on PATH.
       log "npm install -g failed — retrying with a user-owned prefix"
       NPM_LOCAL_PREFIX="$HOME/.local"
-      if mkdir -p "$NPM_LOCAL_PREFIX" \
-          && npm_output=$(npm install -g "pnpm@${pinned}" --prefix "$NPM_LOCAL_PREFIX" 2>&1); then
-        printf '%s\n' "$npm_output" >> "$LOG_FILE"
+      if ! said=$(mkdir -p "$NPM_LOCAL_PREFIX" 2>&1); then
+        printf '%s\n' "$said" >> "$LOG_FILE"
+        pnpm_why="$NPM_LOCAL_PREFIX cannot be created"
+        pnpm_error=$(first_error_line <<<"$said")
+        pnpm_todo="Fix that, then re-run setup."
+        log "Could not create $NPM_LOCAL_PREFIX"
+      elif said=$(npm install -g "pnpm@${pinned}" --prefix "$NPM_LOCAL_PREFIX" 2>&1); then
+        printf '%s\n' "$said" >> "$LOG_FILE"
         export PATH="$PATH:$NPM_LOCAL_PREFIX/bin"
         log "Installed pnpm@${pinned} to user-owned prefix: $NPM_LOCAL_PREFIX"
       else
-        # This attempt needs no root, so what npm said is why pnpm is missing.
-        printf '%s\n' "$npm_output" >> "$LOG_FILE"
-        npm_failed="true"
+        # This try needs no root, so what npm said is why pnpm is missing.
+        printf '%s\n' "$said" >> "$LOG_FILE"
+        pnpm_error=$(first_error_line <<<"$said")
+        if npm --version >/dev/null 2>&1; then
+          pnpm_why="npm failed, also when installing into ~/.local"
+          pnpm_todo="Fix that, then re-run setup. npm's full output is in $LOG_FILE"
+        else
+          pnpm_why="npm at $(command -v npm) cannot run"
+          pnpm_todo="Reinstall Node.js to get a working npm, then re-run setup."
+        fi
         log "pnpm install via user-owned prefix also failed"
       fi
     fi
@@ -250,20 +268,12 @@ install_deps() {
 
   if ! command -v pnpm >/dev/null 2>&1; then
     log "pnpm not on PATH after corepack + npm fallback"
-    if [ "$npm_failed" = "true" ]; then
-      # Root is not what is missing, and the npm command suggested below would
-      # fail the same way. Show npm's own reason instead.
-      local npm_why
-      npm_why=$(first_error_line <<<"$npm_output")
-      if npm --version >/dev/null 2>&1; then
-        echo "Could not install pnpm: npm failed, also when installing into ~/.local:"
-        echo "  ${npm_why:-it printed nothing}"
-        echo "Fix that, then re-run setup. npm's full output is in $LOG_FILE"
-      else
-        echo "Could not install pnpm: npm at $(command -v npm) cannot run:"
-        echo "  ${npm_why:-it printed nothing}"
-        echo "Reinstall Node.js to get a working npm, then re-run setup."
-      fi
+    if [ -n "$pnpm_why" ]; then
+      # Root is not what is missing here, and the command suggested below
+      # would fail the same way. Show the real reason instead.
+      echo "Could not install pnpm: $pnpm_why:"
+      echo "  ${pnpm_error:-it printed nothing}"
+      echo "$pnpm_todo"
       return
     fi
     echo "Could not install pnpm without root. Run this, then re-run setup:"

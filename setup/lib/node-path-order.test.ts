@@ -222,6 +222,25 @@ echo "DEPS_OK=$DEPS_OK"`);
     expect(bootLog).toContain('npm error network request failed');
   });
 
+  it('names ~/.local, not npm, when ~/.local cannot be made', () => {
+    fakeNode(bin, '24.22.1');
+    fs.mkdirSync(home, { recursive: true });
+    fs.writeFileSync(path.join(home, '.local'), 'a file where the folder should be\n');
+    stub(
+      bin,
+      'npm',
+      `case "$1" in --version) echo 10.9.0 ;; config) echo ${tmp}/prefix ;; install) echo "npm error code EACCES" >&2; exit 1 ;; esac`,
+    );
+    const r = installDeps();
+    expect(r.out).toContain(`Could not install pnpm: ${home}/.local cannot be created:`);
+    expect(r.out).toMatch(/^ {2}mkdir: .*\.local.*$/m);
+    expect(r.out).toContain('Fix that, then re-run setup.');
+    expect(r.out).not.toContain('npm failed');
+    expect(r.out).not.toContain('without root');
+    expect(r.out).toContain('DEPS_OK=false');
+    expect(fs.readFileSync(path.join(tmp, 'boot.log'), 'utf8')).toMatch(/^mkdir: .*\.local/m);
+  });
+
   it('says so plainly when npm fails without printing anything', () => {
     fakeNode(bin, '24.22.1');
     stub(bin, 'npm', 'exit 1');
