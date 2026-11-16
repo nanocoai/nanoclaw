@@ -781,20 +781,94 @@ describe('lifecycle', () => {
     });
   });
 
-  it('logs Docker’s own error under the opaqueRef a failed stop throws', async () => {
-    const handle = await driver().prepare(fixtureSpec());
-    cli.responses.unshift(
-      { match: /^rm --force ncl-spike-s1$/, throws: new Error('Error response from daemon: device or resource busy') },
-      { match: /^inspect --type container /, output: 'running' },
-    );
+  describe('teardown error logging', () => {
+    const busy = 'Error response from daemon: device or resource busy';
+    const inProgress = 'Error response from daemon: removal of container ncl-spike-s1 is already in progress';
 
-    const failure = await handle.stop('absolute-ceiling').catch((error: unknown) => error);
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
 
-    expect(failure).toMatchObject({ kind: 'unknown', opaqueRef: expect.stringMatching(/^docker-/) });
-    expect(log.warn).toHaveBeenCalledWith('Docker teardown failed', {
-      containerName: 'ncl-spike-s1',
-      opaqueRef: (failure as { opaqueRef: string }).opaqueRef,
-      dockerError: 'Error response from daemon: device or resource busy',
+    /** The stop throws an unknown failure, and the log names what failed under the same opaqueRef. */
+    async function expectLogged(stopped: Promise<void>, resource: Record<string, string>, dockerError: string) {
+      const failure = await stopped.catch((error: unknown) => error);
+      expect(failure).toMatchObject({ kind: 'unknown', opaqueRef: expect.stringMatching(/^docker-/) });
+      expect(log.warn).toHaveBeenCalledWith('Docker teardown failed', {
+        ...resource,
+        opaqueRef: (failure as { opaqueRef: string }).opaqueRef,
+        dockerError,
+      });
+    }
+
+    it('logs a failed rm of a container that is still there', async () => {
+      const handle = await driver().prepare(fixtureSpec());
+      cli.responses.unshift(
+        { match: /^rm --force ncl-spike-s1$/, throws: new Error(busy) },
+        { match: /^inspect --type container /, output: 'running' },
+      );
+
+      await expectLogged(handle.stop('absolute-ceiling'), { containerName: 'ncl-spike-s1' }, busy);
+    });
+
+    it('logs a failed existence probe', async () => {
+      const handle = await driver().prepare(fixtureSpec());
+      await handle.start();
+      const deadline = 'Error response from daemon: context deadline exceeded';
+      cli.responses = [
+        { match: /^rm /, throws: new Error(busy) },
+        { match: /^inspect --type container /, throws: new Error(deadline) },
+      ];
+
+      await expectLogged(handle.stop('sweep-kill'), { containerName: 'ncl-spike-s1' }, deadline);
+    });
+
+    it('logs a retried rm that fails for another reason', async () => {
+      const handle = await driver().prepare(fixtureSpec());
+      await handle.start();
+      cli.responses = [
+        { match: /^rm /, throws: new Error(inProgress), once: true },
+        { match: /^rm /, throws: new Error(busy) },
+        { match: /^inspect --type container /, output: 'dead\n' },
+      ];
+
+      await expectLogged(handle.stop('sweep-kill'), { containerName: 'ncl-spike-s1' }, busy);
+    });
+
+    it('logs a removal that outlasts the wait budget', async () => {
+      const handle = await driver().prepare(fixtureSpec());
+      await handle.start();
+      cli.responses = [
+        { match: /^rm /, throws: new Error(inProgress) },
+        { match: /^inspect --type container /, output: 'removing\n' },
+      ];
+
+      const logged = expectLogged(handle.stop('sweep-kill'), { containerName: 'ncl-spike-s1' }, inProgress);
+      await vi.advanceTimersByTimeAsync(16_000);
+      await logged;
+    });
+
+    it('names the auxiliary container whose removal failed', async () => {
+      const handle = await driver().prepare(fixtureSpecWithAux());
+      await handle.start();
+      cli.responses = [
+        { match: /^rm --force ncl-spike-s1-egress-proxy$/, throws: new Error(busy) },
+        { match: /^inspect --type container .* ncl-spike-s1-egress-proxy$/, output: 'running\n' },
+      ];
+
+      await expectLogged(handle.stop('sweep-kill'), { containerName: 'ncl-spike-s1-egress-proxy' }, busy);
+    });
+
+    it('names the session network when its removal fails', async () => {
+      const handle = await driver().prepare(fixtureSpecWithAux());
+      await handle.start();
+      const inUse =
+        'Error response from daemon: error while removing network: network ncl-spike-s1-private has active endpoints';
+      cli.responses = [{ match: /^network rm /, throws: new Error(inUse) }];
+
+      await expectLogged(handle.stop('sweep-kill'), { networkName: 'ncl-spike-s1-private' }, inUse);
     });
   });
 

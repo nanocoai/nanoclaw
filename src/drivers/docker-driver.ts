@@ -680,7 +680,9 @@ class DockerHandle implements SessionHandle {
       try {
         this.cli.run(['network', 'rm', this.privateNetwork]);
       } catch (error) {
-        if (!NETWORK_NOT_FOUND.test(errorMessage(error))) throw this.#teardownError(error);
+        if (!NETWORK_NOT_FOUND.test(errorMessage(error))) {
+          throw this.#teardownError(error, { networkName: this.privateNetwork });
+        }
       }
       this.#privateNetworkRemoved = true;
     }
@@ -694,7 +696,7 @@ class DockerHandle implements SessionHandle {
         .trim();
     } catch (probeError) {
       if (CONTAINER_NOT_FOUND.test(errorMessage(probeError))) return null;
-      throw this.#teardownError(probeError);
+      throw this.#teardownError(probeError, { containerName: name });
     }
   }
 
@@ -707,7 +709,7 @@ class DockerHandle implements SessionHandle {
     if (CONTAINER_NOT_FOUND.test(message)) return;
     if (!REMOVAL_IN_PROGRESS.test(message)) {
       if (this.#probeStatus(name) === null) return;
-      throw this.#teardownError(error);
+      throw this.#teardownError(error, { containerName: name });
     }
     // Monotonic elapsed-time deadline: Docker call latency counts against the budget, not just the sleeps.
     const deadline = performance.now() + REMOVAL_WAIT_BUDGET_MS;
@@ -722,7 +724,7 @@ class DockerHandle implements SessionHandle {
         } catch (retryError) {
           const retryMessage = errorMessage(retryError);
           if (CONTAINER_NOT_FOUND.test(retryMessage)) return;
-          if (!REMOVAL_IN_PROGRESS.test(retryMessage)) throw this.#teardownError(retryError);
+          if (!REMOVAL_IN_PROGRESS.test(retryMessage)) throw this.#teardownError(retryError, { containerName: name });
         }
       }
       // The loop also probes once at the full budget, so a removal that finishes during the last sleep is seen.
@@ -731,15 +733,21 @@ class DockerHandle implements SessionHandle {
       const scheduledInterval = REMOVAL_WAIT_INTERVALS_MS[Math.min(step, REMOVAL_WAIT_INTERVALS_MS.length - 1)]!;
       await new Promise((resolve) => setTimeout(resolve, Math.min(scheduledInterval, remainingMs)));
     }
-    throw this.#teardownError(error);
+    throw this.#teardownError(error, { containerName: name });
   }
 
-  /** `unknown` drops Docker's words from the error, so log them under the same opaqueRef. */
-  #teardownError(error: unknown): Error & SessionFailure {
+  /**
+   * `unknown` drops Docker's words from the error, so log them under the same
+   * opaqueRef, naming the container or network that failed.
+   */
+  #teardownError(
+    error: unknown,
+    resource: { containerName: string } | { networkName: string },
+  ): Error & SessionFailure {
     const failure = normalizeDockerError(error);
     if (failure.kind === 'unknown') {
       log.warn('Docker teardown failed', {
-        containerName: this.name,
+        ...resource,
         opaqueRef: failure.opaqueRef,
         dockerError: errorMessage(error).trim(),
       });
