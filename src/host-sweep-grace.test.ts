@@ -39,7 +39,7 @@ vi.mock('./container-runner.js', () => ({
 
 import { initTestDb, closeDb, runMigrations, createAgentGroup } from './db/index.js';
 import { createSession } from './db/sessions.js';
-import { isContainerRunning, killContainer, wakeContainer } from './container-runner.js';
+import { getContainerStartedAtMs, isContainerRunning, killContainer, wakeContainer } from './container-runner.js';
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
 import { log } from './log.js';
 import { getAgentMailbox } from './mailbox/index.js';
@@ -91,6 +91,9 @@ async function runSweepTick(): Promise<void> {
 }
 
 beforeEach(async () => {
+  vi.mocked(getContainerStartedAtMs)
+    .mockReset()
+    .mockImplementation(() => Date.now());
   vi.mocked(isContainerRunning).mockReset().mockReturnValue(false);
   vi.mocked(killContainer).mockReset();
   vi.mocked(wakeContainer)
@@ -214,5 +217,50 @@ describe('host sweep incarnation-gated grace period', () => {
     await runSweepTick();
     expect(killContainer).toHaveBeenCalledTimes(1);
     expect(killContainer).toHaveBeenCalledWith(SESS, 'claim-stuck');
+  });
+});
+
+describe('absolute-ceiling kill logging', () => {
+  // The ceiling mostly reaps idle containers; only a kill that cuts off a
+  // claimed message is worth a warning.
+  beforeEach(() => {
+    vi.mocked(isContainerRunning).mockReturnValue(true);
+    vi.mocked(getContainerStartedAtMs).mockImplementation(() => Date.now() - 31 * 60 * 1000);
+  });
+
+  it('logs an idle reap at info', async () => {
+    const db = new Database(outboundDbPath(AG, SESS));
+    db.prepare('DELETE FROM processing_ack').run();
+    db.close();
+    const info = vi.spyOn(log, 'info');
+    const warn = vi.spyOn(log, 'warn');
+
+    try {
+      await runSweepTick();
+      expect(killContainer).toHaveBeenCalledWith(SESS, 'absolute-ceiling');
+      expect(info).toHaveBeenCalledWith(
+        'Stopping idle container past absolute ceiling',
+        expect.objectContaining({ sessionId: SESS }),
+      );
+      expect(warn).not.toHaveBeenCalledWith('Killing container past absolute ceiling', expect.anything());
+    } finally {
+      info.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it('keeps the warning when a message is in flight', async () => {
+    const warn = vi.spyOn(log, 'warn');
+
+    try {
+      await runSweepTick();
+      expect(killContainer).toHaveBeenCalledWith(SESS, 'absolute-ceiling');
+      expect(warn).toHaveBeenCalledWith(
+        'Killing container past absolute ceiling',
+        expect.objectContaining({ sessionId: SESS, claimsInFlight: 1 }),
+      );
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

@@ -781,6 +781,23 @@ describe('lifecycle', () => {
     });
   });
 
+  it('logs Docker’s own error under the opaqueRef a failed stop throws', async () => {
+    const handle = await driver().prepare(fixtureSpec());
+    cli.responses.unshift(
+      { match: /^rm --force ncl-spike-s1$/, throws: new Error('Error response from daemon: device or resource busy') },
+      { match: /^inspect --type container /, output: 'running' },
+    );
+
+    const failure = await handle.stop('absolute-ceiling').catch((error: unknown) => error);
+
+    expect(failure).toMatchObject({ kind: 'unknown', opaqueRef: expect.stringMatching(/^docker-/) });
+    expect(log.warn).toHaveBeenCalledWith('Docker teardown failed', {
+      containerName: 'ncl-spike-s1',
+      opaqueRef: (failure as { opaqueRef: string }).opaqueRef,
+      dockerError: 'Error response from daemon: device or resource busy',
+    });
+  });
+
   it('kills the attach process when docker stop fails, so supervision cannot hang', async () => {
     const handle = await driver().prepare(fixtureSpec());
     await handle.start();
