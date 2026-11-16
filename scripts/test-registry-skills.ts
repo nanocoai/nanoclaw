@@ -335,14 +335,24 @@ export function selectCombinedProviders(
   ) as Array<RegistrySkill & { provider: string }>;
 }
 
-/** The channel adapters `--combined-channels` loads together, plus branch-only companions like slack-agent-flow. */
+/**
+ * The channel adapters `--combined-channels` loads together, plus branch-only companions like
+ * slack-agent-flow. Every one must apply: `/add-<name>` cannot install a skill whose channels
+ * files are missing, and skipping it would pass with that adapter untested.
+ */
 export function selectCombinedChannels(skills: RegistrySkill[], hasSource: RegistrySourceCheck): RegistrySkill[] {
-  return requireAvailable(
-    'channel',
+  const { available, unavailable } = partitionRegistryAvailability(
     skills.filter((skill) => skill.channel || skill.branches.includes('channels')),
     hasSource,
-    "Ship the adapters in each skill's payload/ (or pin REGISTRY_CHANNELS_SHA to a commit that carries them) before this core lands.",
   );
+  if (unavailable.length) {
+    throw new Error(
+      'FAIL: the channels registry lacks files these channel skills copy:\n' +
+        unavailable.map(({ skill, missing }) => `  ${skill.skill} (missing: ${missing.join(', ')})`).join('\n') +
+        "\nShip the adapters in each skill's payload/ (or pin REGISTRY_CHANNELS_SHA to a commit that carries them) before this core lands.",
+    );
+  }
+  return available;
 }
 
 function requireAvailable(

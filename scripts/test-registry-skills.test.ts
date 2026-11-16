@@ -97,14 +97,13 @@ describe('--combined-channels selection', () => {
   const channels = new Set(['channels:src/channels/slack.ts']);
   const hasChannel = (branch: string, path: string) => channels.has(`${branch}:${path}`);
 
-  it('fails loudly when trunk carries channel skills but none can be applied', () => {
-    const warn = vi.spyOn(console, 'error').mockImplementation(() => {});
+  it('fails on any channel skill it cannot apply, even next to ones it can', () => {
     const gchat = channelSkill('add-gchat', ['src/channels/gchat.ts']);
-    expect(() => selectCombinedChannels([gchat], hasChannel)).toThrow(
-      /FAIL: trunk carries channel skills \(add-gchat\) but none is available/,
-    );
-    expect(warn).toHaveBeenCalledWith(
-      'WARN: add-gchat unavailable in registry (missing: channels:src/channels/gchat.ts)',
+    const slack = channelSkill('add-slack', ['src/channels/slack.ts']);
+    // Ships its own payload, like slack-a2a-rooms, so the registry never lacks it.
+    const local = skill('add-local', [], { branches: [], channel: true });
+    expect(() => selectCombinedChannels([gchat, slack, local], hasChannel)).toThrow(
+      /FAIL: the channels registry lacks files these channel skills copy:\n {2}add-gchat \(missing: channels:src\/channels\/gchat\.ts\)/,
     );
   });
 
