@@ -294,7 +294,7 @@ describe('setup.sh first_error_line', () => {
       '\\n\\nlibfoo.so.1: not found\\nmore\\n',
       'libfoo.so.1: not found',
     ],
-    ['a last line that has no newline', 'loader: missing lib', 'loader: missing lib'],
+    ['a single line that has no newline', 'loader: missing lib', 'loader: missing lib'],
     ['nothing for no output', '', ''],
   ])('gives %s', (_case, said, line) => {
     const source = fs.readFileSync(path.join(ROOT, 'setup.sh'), 'utf8');
@@ -302,9 +302,18 @@ describe('setup.sh first_error_line', () => {
     expect(start, 'first_error_line() not found in setup.sh').toBeGreaterThanOrEqual(0);
     const fn = source.slice(start, source.indexOf('\n}', start) + 2);
 
-    const r = run(['-c', `set -euo pipefail\n${fn}\nprintf '${said}' | first_error_line`]);
+    const r = run(['-c', `set -euo pipefail\n${fn}\nfirst_error_line $'${said}'\necho "[$ERROR_LINE]"`]);
 
-    expect(r).toEqual({ status: 0, out: `${line}\n` });
+    expect(r).toEqual({ status: 0, out: `[${line}]\n` });
+  });
+
+  // bash 3.2 writes a here-string to a temp file, so with no temp space the
+  // report itself would end the script under `set -e`.
+  it('is used without a here-string or a pipe anywhere in setup.sh', () => {
+    const source = fs.readFileSync(path.join(ROOT, 'setup.sh'), 'utf8');
+    const uses = source.split('\n').filter((l) => /first_error_line/.test(l) && !/^\s*#|\(\) \{/.test(l));
+    expect(uses.length).toBeGreaterThan(0);
+    for (const use of uses) expect(use).toMatch(/^\s*first_error_line "\$said"$/);
   });
 });
 

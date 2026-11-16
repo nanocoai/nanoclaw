@@ -53,19 +53,25 @@ detect_platform() {
 
 # --- Why a tool failed ---
 
-# first_error_line: of a tool's output on stdin, the first line that names an
-# error, else the first line with anything on it. Short enough to show on
-# screen; callers put the whole output in the log.
+# first_error_line TEXT: sets ERROR_LINE to the first line of a tool's output
+# that names an error, else to its first line with anything on it. One line
+# fits the screen; callers put the whole output in the log. No subshell and no
+# here-string (bash 3.2 needs a temp file for one), so it cannot fail under
+# `set -e`.
 first_error_line() {
-  local line first=""
-  # `|| [ -n "$line" ]`: a last line without a newline still counts.
-  while IFS= read -r line || [ -n "$line" ]; do
-    [ -n "$first" ] || first="$line"
+  local rest="$1" line nl=$'\n'
+  ERROR_LINE=""
+  while [ -n "$rest" ]; do
+    line=${rest%%"$nl"*}
+    case "$rest" in
+      *"$nl"*) rest=${rest#*"$nl"} ;;
+      *) rest="" ;;
+    esac
+    [ -n "$ERROR_LINE" ] || ERROR_LINE="$line"
     case "$line" in
-      *[Ee]rror* | *ERR!*) printf '%s\n' "$line"; return ;;
+      *[Ee]rror* | *ERR!*) ERROR_LINE="$line"; return 0 ;;
     esac
   done
-  printf '%s\n' "$first"
 }
 
 # --- Node.js check ---
@@ -90,7 +96,8 @@ check_node() {
       local said
       NODE_VERSION="cannot_start"
       said=$(node --version 2>&1) || true
-      NODE_START_ERROR=$(first_error_line <<<"$said")
+      first_error_line "$said"
+      NODE_START_ERROR="$ERROR_LINE"
       log "Node at $NODE_PATH_FOUND cannot start: ${NODE_START_ERROR:-it printed nothing}"
       printf '%s\n' "$said" >> "$LOG_FILE"
     fi
@@ -227,7 +234,8 @@ install_deps() {
       if ! said=$(mkdir -p "$NPM_LOCAL_PREFIX" 2>&1); then
         printf '%s\n' "$said" >> "$LOG_FILE"
         pnpm_why="$NPM_LOCAL_PREFIX cannot be created"
-        pnpm_error=$(first_error_line <<<"$said")
+        first_error_line "$said"
+        pnpm_error="$ERROR_LINE"
         pnpm_todo="Fix that, then re-run setup."
         log "Could not create $NPM_LOCAL_PREFIX"
       elif said=$(npm install -g "pnpm@${pinned}" --prefix "$NPM_LOCAL_PREFIX" 2>&1); then
@@ -237,7 +245,8 @@ install_deps() {
       else
         # This try needs no root, so what npm said is why pnpm is missing.
         printf '%s\n' "$said" >> "$LOG_FILE"
-        pnpm_error=$(first_error_line <<<"$said")
+        first_error_line "$said"
+        pnpm_error="$ERROR_LINE"
         if npm --version >/dev/null 2>&1; then
           pnpm_why="npm failed, also when installing into ~/.local"
           pnpm_todo="Fix that, then re-run setup. npm's full output is in $LOG_FILE"
