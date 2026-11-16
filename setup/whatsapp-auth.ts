@@ -189,6 +189,9 @@ export async function run(args: string[]): Promise<void> {
 
     async function connectSocket(isReconnect = false): Promise<void> {
       const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+      // Read from disk before Baileys updates creds in memory: only a 515
+      // reconnect finds a device here, paired and saved by the first socket.
+      const paired = Boolean(state.creds.me?.id);
 
       const sock = makeWASocket({
         version,
@@ -262,11 +265,14 @@ export async function run(args: string[]): Promise<void> {
           } else {
             // Nothing reconnects after any other close (405 = WhatsApp refused this
             // WhatsApp Web version), so waiting would only end in a misleading timeout.
+            // A saved, paired device stays in store/auth/ for the next run to report.
             clearTimeout(timeout);
             const detail = `${reason ?? 'no status'} ${err?.message ?? ''}`.replace(/\s+/g, ' ').trim();
             emitStatus('WHATSAPP_AUTH', {
               STATUS: 'failed',
-              ERROR: `WhatsApp closed the connection before linking (${detail}). Clear store/auth/ and run the step again.`,
+              ERROR: paired
+                ? `WhatsApp closed the connection after pairing (${detail}). The link is saved in store/auth/, so run the step again to use it.`
+                : `WhatsApp closed the connection before linking (${detail}). Clear store/auth/ and run the step again.`,
             });
             process.exit(1);
           }
