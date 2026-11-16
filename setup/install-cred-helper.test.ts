@@ -23,6 +23,15 @@ const SOURCE = fs.readFileSync(path.join(here, 'registry', 'credential-helper.mj
 const HELPER_ID = 'nanoclaw-docker-credential-helper';
 const GONE_NODE = '/nonexistent/node/1.0.0/bin/node';
 const HOST = 'reg.example.com';
+const BODY = SOURCE.slice(SOURCE.indexOf('\n') + 1);
+
+/**
+ * The header as setup has written it since 15 Nov 2026. For some days it also
+ * went, through a link, into the helper source of another checkout.
+ */
+function mainHeader(node: string): string {
+  return `#!/bin/sh\n':' //; N='${node}'; [ -x "$N" ] && "$N" -v </dev/null >/dev/null 2>&1 || { if command -v node >/dev/null 2>&1; then N=node; fi; }; exec "$N" "$0" "$@"\n`;
+}
 
 const scratch: string[] = [];
 afterEach(() => {
@@ -60,6 +69,30 @@ function withNoNode(write: () => void): void {
   } finally {
     Object.defineProperty(process, 'execPath', { value: execPath, configurable: true });
     process.env.PATH = PATH;
+  }
+}
+
+/**
+ * Run `write` with the installed helper owned by someone else, and the chown
+ * that would keep that owner failing: as not permitted, unless told otherwise.
+ */
+function withForeignOwner(write: () => void, code = 'EPERM'): void {
+  const stat = fs.lstatSync.bind(fs);
+  const metadata = vi.spyOn(fs, 'lstatSync').mockImplementation((...args) => {
+    const result = stat(...args);
+    return path.basename(String(args[0])) === HELPER_BINARY_NAME
+      ? Object.assign(result, { uid: result.uid + 1 })
+      : result;
+  });
+  const chown = vi.spyOn(fs, 'chownSync').mockImplementation(() => {
+    throw Object.assign(new Error(`${code}: chown`), { code });
+  });
+  try {
+    write();
+    expect(chown).toHaveBeenCalled();
+  } finally {
+    metadata.mockRestore();
+    chown.mockRestore();
   }
 }
 
@@ -133,6 +166,15 @@ describe('renderHelper', () => {
     expect(res.stderr).not.toContain('node: not found');
   });
 
+  it('writes one header, also from a source an earlier setup wrote a header into', () => {
+    const rewritten = mainHeader('/opt/other/node') + BODY;
+
+    expect(renderHelper(rewritten, process.execPath)).toBe(renderHelper(SOURCE, process.execPath));
+    expect(renderHelper(renderHelper(rewritten, GONE_NODE), process.execPath)).toBe(
+      renderHelper(SOURCE, process.execPath),
+    );
+  });
+
   it('leaves stdin for the helper, where docker sends its request', () => {
     // A stand-in node that would swallow stdin during the start test, if it were handed it.
     const standIn = path.join(scratchDir(), 'node');
@@ -170,6 +212,16 @@ describe('refreshInstalledCredentialHelper', () => {
     expect(version(helper, nodeDir('broken')).status).toBe(0);
   });
 
+  it('does not rewrite a helper that is already what this setup writes', () => {
+    const { binDir, helper, dockerConfigPath } = install(renderHelper(SOURCE, process.execPath));
+    const before = fs.statSync(helper);
+
+    refreshInstalledCredentialHelper({ binDir, dockerConfigPath });
+
+    // A rewrite goes through a rename, which gives the path a new inode.
+    expect(fs.statSync(helper).ino).toBe(before.ino);
+  });
+
   it('leaves the helper and docker alone when the registry is wired to something else', () => {
     const { binDir, helper, dockerConfigPath } = install(olderSetup, 'ecr-login');
     const config = fs.readFileSync(dockerConfigPath, 'utf-8');
@@ -191,10 +243,13 @@ describe('refreshInstalledCredentialHelper', () => {
     expect(fs.readFileSync(helper, 'utf-8')).toBe(renderHelper(SOURCE, process.execPath));
   });
 
-  it('rewrites a linked helper at its target and keeps the link', () => {
+  it.each([
+    ['from before the header', olderSetup],
+    ['with a header naming another node', mainHeader('/opt/other/node') + BODY],
+  ])('rewrites a linked helper %s at its target and keeps the link', (_case, installed) => {
     const { binDir, helper: link, dockerConfigPath } = install('');
     const target = path.join(scratchDir(), 'helper');
-    fs.writeFileSync(target, olderSetup, { mode: 0o755 });
+    fs.writeFileSync(target, installed, { mode: 0o755 });
     fs.rmSync(link);
     fs.symlinkSync(target, link);
 
@@ -229,6 +284,56 @@ describe('refreshInstalledCredentialHelper', () => {
     }
   });
 
+  /** The installed helper as a link to a helper source someone keeps, by default where a checkout has it. */
+  function linkedToSource(
+    contents: string,
+    at = path.join('setup', 'registry', 'credential-helper.mjs'),
+  ): { binDir: string; helper: string; dockerConfigPath: string; source: string } {
+    const installed = install('');
+    const source = path.join(scratchDir(), at);
+    fs.mkdirSync(path.dirname(source), { recursive: true });
+    fs.writeFileSync(source, contents, { mode: 0o755 });
+    fs.rmSync(installed.helper);
+    fs.symlinkSync(source, installed.helper);
+    return { ...installed, source };
+  }
+
+  // Every shape a checkout's helper source can have by now.
+  const olderSource = `${SOURCE}// an older release of the same helper\n`;
+  const olderBody = olderSource.slice(olderSource.indexOf('\n') + 1);
+  it.each([
+    ['as it is here', olderSource],
+    ['with CRLF line endings', olderSource.replace(/\n/g, '\r\n')],
+    ['that an earlier setup wrote its header into', mainHeader('/opt/other/node') + olderBody],
+    [
+      'that an earlier setup wrote its header into, in a CRLF checkout',
+      mainHeader('/opt/other/node') + olderBody.replace(/\n/g, '\r\n'),
+    ],
+    ['that already reads as this setup would write it', renderHelper(SOURCE, process.execPath)],
+  ])("replaces a link to another checkout's helper source %s, without changing that source", (_case, tracked) => {
+    const { binDir, helper, dockerConfigPath, source } = linkedToSource(tracked);
+    const before = fs.statSync(source);
+
+    refreshInstalledCredentialHelper({ binDir, dockerConfigPath });
+
+    expect(fs.readFileSync(source, 'utf-8')).toBe(tracked);
+    // A rewrite goes through a rename, which gives the path a new inode.
+    expect(fs.statSync(source).ino).toBe(before.ino);
+    expect(fs.lstatSync(helper).isSymbolicLink()).toBe(false);
+    expect(fs.readFileSync(helper, 'utf-8')).toBe(renderHelper(SOURCE, process.execPath));
+    expect(version(helper, nodeDir('broken')).status).toBe(0);
+  });
+
+  it('replaces a link to a copy of the source kept under another name, without changing that copy', () => {
+    const { binDir, helper, dockerConfigPath, source } = linkedToSource(olderSource, 'my-helper.mjs');
+
+    refreshInstalledCredentialHelper({ binDir, dockerConfigPath });
+
+    expect(fs.readFileSync(source, 'utf-8')).toBe(olderSource);
+    expect(fs.lstatSync(helper).isSymbolicLink()).toBe(false);
+    expect(fs.readFileSync(helper, 'utf-8')).toBe(renderHelper(SOURCE, process.execPath));
+  });
+
   it('preserves the existing helper permissions and ownership on refresh', () => {
     const { binDir, helper, dockerConfigPath } = install(olderSetup);
     fs.chmodSync(helper, 0o710);
@@ -242,27 +347,66 @@ describe('refreshInstalledCredentialHelper', () => {
     expect(fs.readFileSync(helper, 'utf-8')).toBe(renderHelper(SOURCE, process.execPath));
   });
 
-  it('leaves the original intact if its ownership cannot be preserved', () => {
+  it('still replaces a helper whose owner it cannot keep, as a file of its own', () => {
     const { binDir, helper, dockerConfigPath } = install(olderSetup);
-    const target = fs.realpathSync(helper);
-    const stat = fs.lstatSync.bind(fs);
-    const metadata = vi.spyOn(fs, 'lstatSync').mockImplementation((...args) => {
-      const result = stat(...args);
-      if (String(args[0]) === target) return Object.assign(result, { uid: result.uid + 1 });
-      return result;
-    });
-    const chown = vi.spyOn(fs, 'chownSync').mockImplementation(() => {
-      throw Object.assign(new Error('Not permitted'), { code: 'EPERM' });
-    });
-    try {
-      refreshInstalledCredentialHelper({ binDir, dockerConfigPath });
-      expect(chown).toHaveBeenCalled();
-      expect(fs.readFileSync(helper, 'utf-8')).toBe(olderSetup);
-      expect(fs.readdirSync(binDir)).toEqual([HELPER_BINARY_NAME]);
-    } finally {
-      metadata.mockRestore();
-      chown.mockRestore();
-    }
+    fs.chmodSync(helper, 0o710);
+
+    withForeignOwner(() => refreshInstalledCredentialHelper({ binDir, dockerConfigPath }));
+
+    expect(fs.readFileSync(helper, 'utf-8')).toBe(renderHelper(SOURCE, process.execPath));
+    expect(fs.statSync(helper).mode & 0o7777).toBe(0o755);
+    expect(fs.readdirSync(binDir)).toEqual([HELPER_BINARY_NAME]);
+  });
+
+  it.each(['EIO', 'EINVAL'])('keeps the old helper when keeping its owner fails with %s', (code) => {
+    const { binDir, helper, dockerConfigPath } = install(olderSetup);
+    const refresh = (): void => refreshInstalledCredentialHelper({ binDir, dockerConfigPath });
+
+    expect(() => withForeignOwner(refresh, code)).not.toThrow();
+
+    expect(fs.readFileSync(helper, 'utf-8')).toBe(olderSetup);
+    expect(fs.readdirSync(binDir)).toEqual([HELPER_BINARY_NAME]);
+  });
+
+  it.each([
+    ['0644', 0o644, 0o755],
+    ['0640', 0o640, 0o750],
+    ['0600', 0o600, 0o700],
+  ])('makes a helper that was mode %s one that runs', (_case, was, becomes) => {
+    const { binDir, helper, dockerConfigPath } = install(olderSetup);
+    fs.chmodSync(helper, was);
+
+    refreshInstalledCredentialHelper({ binDir, dockerConfigPath });
+
+    expect(fs.statSync(helper).mode & 0o7777).toBe(becomes);
+    expect(version(helper, nodeDir('broken')).status).toBe(0);
+  });
+
+  it('rewrites a helper that reads as this setup would write it, yet cannot run', () => {
+    // What main's setup of Nov 2026 left where the old helper was not executable.
+    const { binDir, helper, dockerConfigPath } = install(renderHelper(SOURCE, process.execPath));
+    fs.chmodSync(helper, 0o644);
+
+    refreshInstalledCredentialHelper({ binDir, dockerConfigPath });
+
+    expect(fs.statSync(helper).mode & 0o7777).toBe(0o755);
+    expect(version(helper, nodeDir('broken')).status).toBe(0);
+  });
+
+  it('gives a helper hard-linked to a source that is not executable a copy that runs', () => {
+    const { binDir, helper, dockerConfigPath } = install('');
+    const source = path.join(scratchDir(), 'credential-helper.mjs');
+    fs.writeFileSync(source, SOURCE, { mode: 0o644 });
+    fs.rmSync(helper);
+    fs.linkSync(source, helper);
+
+    refreshInstalledCredentialHelper({ binDir, dockerConfigPath });
+
+    expect(fs.readFileSync(helper, 'utf-8')).toBe(renderHelper(SOURCE, process.execPath));
+    expect(fs.statSync(helper).mode & 0o7777).toBe(0o755);
+    expect(version(helper, nodeDir('broken')).status).toBe(0);
+    expect(fs.readFileSync(source, 'utf-8')).toBe(SOURCE);
+    expect(fs.statSync(source).mode & 0o7777).toBe(0o644);
   });
 
   it('does not write through a link that now points at a file that is not the helper', () => {
@@ -307,6 +451,43 @@ describe('refreshInstalledCredentialHelper', () => {
 });
 
 describe('installCredentialHelper', () => {
+  it('installs over a helper whose owner it cannot keep', () => {
+    const binDir = scratchDir();
+    const dockerConfigPath = path.join(scratchDir(), 'config.json');
+    const helper = writeHelper(binDir, `#!${GONE_NODE}\n${SOURCE.slice(SOURCE.indexOf('\n') + 1)}`);
+
+    withForeignOwner(() => installCredentialHelper({ binDir, dockerConfigPath, registryHost: HOST }));
+
+    expect(fs.readFileSync(helper, 'utf-8')).toBe(renderHelper(SOURCE, process.execPath));
+    expect(JSON.parse(fs.readFileSync(dockerConfigPath, 'utf-8')).credHelpers).toEqual({ [HOST]: 'nanoclaw' });
+  });
+
+  it.each(['EIO', 'EINVAL'])('fails, and wires nothing, when keeping the old owner fails with %s', (code) => {
+    const binDir = scratchDir();
+    const dockerConfigPath = path.join(scratchDir(), 'config.json');
+    const old = `#!${GONE_NODE}\n${BODY}`;
+    const helper = writeHelper(binDir, old);
+    const install = (): unknown => installCredentialHelper({ binDir, dockerConfigPath, registryHost: HOST });
+
+    expect(() => withForeignOwner(install, code)).toThrow(code);
+
+    expect(fs.readFileSync(helper, 'utf-8')).toBe(old);
+    expect(fs.readdirSync(binDir)).toEqual([HELPER_BINARY_NAME]);
+    expect(fs.existsSync(dockerConfigPath)).toBe(false);
+  });
+
+  it('installs a helper that runs over one that was not executable', () => {
+    const binDir = scratchDir();
+    const dockerConfigPath = path.join(scratchDir(), 'config.json');
+    const helper = writeHelper(binDir, `#!${GONE_NODE}\n${BODY}`);
+    fs.chmodSync(helper, 0o644);
+
+    installCredentialHelper({ binDir, dockerConfigPath, registryHost: HOST });
+
+    expect(fs.statSync(helper).mode & 0o7777).toBe(0o755);
+    expect(version(helper, nodeDir('broken')).status).toBe(0);
+  });
+
   it('refuses to wire docker to a helper that does not start', () => {
     const binDir = scratchDir();
     const dockerConfigPath = path.join(scratchDir(), 'config.json');

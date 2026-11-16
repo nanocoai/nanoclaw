@@ -35,6 +35,9 @@ export const HELPER_BINARY_NAME = `docker-credential-${CRED_HELPER_NAME}`;
  */
 const HELPER_MARKER = 'nanoclaw-docker-credential-helper';
 
+/** How `setup/registry/credential-helper.mjs` begins in every release, before any install. */
+const SOURCE_FIRST_LINE = '#!/usr/bin/env node';
+
 /** Preferred first; `~/.local/bin` is the unprivileged fallback used by installable gateways. */
 const BIN_DIRS = ['/usr/local/bin', path.join(os.homedir(), '.local', 'bin')];
 
@@ -159,9 +162,11 @@ function chooseBinDir(override?: string): string {
  * string and a comment to node, and a command to sh: run this file on
  * `nodePath` while that binary starts, else on the node on PATH. The start
  * test gets no stdin: docker's request on it is for the helper, not the test.
+ * A header already there goes too: an earlier setup wrote one into a source
+ * it reached through a link.
  */
 export function renderHelper(source: string, nodePath: string): string {
-  const body = source.startsWith('#!') ? source.slice(source.indexOf('\n') + 1) : source;
+  const body = source.replace(/^(?:#!.*\r?\n)?(?:':' \/\/;.*\r?\n)*/, '');
   const pinned = `'${nodePath.replace(/'/g, `'\\''`)}'`;
   const starts = `[ -x "$N" ] && "$N" -v </dev/null >/dev/null 2>&1`;
   return `#!/bin/sh\n':' //; N=${pinned}; ${starts} || { if command -v node >/dev/null 2>&1; then N=node; fi; }; exec "$N" "$0" "$@"\n${body}`;
@@ -183,15 +188,17 @@ function writeExecutable(dest: string, contents: string): void {
   const tmp = `${dest}.tmp-${process.pid}`;
   try {
     fs.writeFileSync(tmp, contents, { mode: 0o600 });
+    // The old file's owner and mode are kept where this user may keep them.
+    // Where it may not, the helper is still replaced, as a plain file of this
+    // user's own: a stale helper nobody here can rewrite helps no one.
+    let mode = 0o755;
     if (previous) {
       const created = fs.statSync(tmp);
-      if (created.uid !== previous.uid || created.gid !== previous.gid) {
-        // If this is not permitted, keep the original file rather than changing its owner.
-        fs.chownSync(tmp, previous.uid, previous.gid);
-      }
+      const sameOwner = created.uid === previous.uid && created.gid === previous.gid;
+      if (sameOwner || gaveTo(tmp, previous.uid, previous.gid)) mode = runnable(previous.mode);
     }
-    // chown can clear mode bits, so restore permissions after ownership.
-    fs.chmodSync(tmp, previous ? previous.mode & 0o7777 : 0o755);
+    // chown can clear mode bits, so permissions are set after ownership.
+    fs.chmodSync(tmp, mode);
     fs.renameSync(tmp, dest);
   } catch (err) {
     try {
@@ -201,6 +208,38 @@ function writeExecutable(dest: string, contents: string): void {
     }
     throw err;
   }
+}
+
+/** False when this user may not hand the file to that owner. Any other failure is a real one. */
+function gaveTo(file: string, uid: number, gid: number): boolean {
+  try {
+    fs.chownSync(file, uid, gid);
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EPERM') return false;
+    throw err;
+  }
+}
+
+/**
+ * The old file's mode, as a helper needs it: its owner may run it, and so may
+ * anyone else who could read it. The old file may never have been executable,
+ * as when it is a hard link to a checkout's helper source.
+ */
+function runnable(mode: number): number {
+  const kept = mode & 0o7777;
+  return kept | 0o500 | ((kept & 0o044) >> 2);
+}
+
+/**
+ * True for a helper source someone keeps, which is never the file to write.
+ * One that was never installed still begins with the source's own first line.
+ * One in a checkout may not: for some days in Nov 2026 setup wrote its header
+ * into such a file through a link. So in a checkout the place decides.
+ */
+function isHelperSource(file: string, contents: string): boolean {
+  const place = (p: string): string => p.split(path.sep).slice(-3).join('/');
+  return contents.split(/\r?\n/, 1)[0] === SOURCE_FIRST_LINE || place(file) === place(helperSourcePath());
 }
 
 function isOurBinary(file: string): boolean {
@@ -266,9 +305,14 @@ function writeDockerConfig(file: string, config: DockerConfig): void {
   fs.renameSync(tmp, file);
 }
 
+/** What this setup installs: the helper source behind a header naming the node setup is running on. */
+function currentHelper(): string {
+  return renderHelper(fs.readFileSync(helperSourcePath(), 'utf-8'), process.execPath);
+}
+
 /** Write the helper binary and nothing else: docker's config is not this function's to touch. */
 function writeHelper(helperPath: string): void {
-  writeExecutable(helperPath, renderHelper(fs.readFileSync(helperSourcePath(), 'utf-8'), process.execPath));
+  writeExecutable(helperPath, currentHelper());
 
   // Proves the header resolves and that this binary is the one uninstall will
   // recognize — both silent failures otherwise, discovered mid-pull.
@@ -319,10 +363,11 @@ export function installCredentialHelper(options: CredHelperOptions = {}): CredHe
 }
 
 /**
- * Rewrite a helper docker is wired to, where it already is, so one written by
- * an older setup gets the current header before a pull needs it: sign-in is
- * skipped on a machine already signed in. Only the binary is written, never
- * docker's config. Not fatal: the pull that follows reports its own failure.
+ * Bring a helper docker is wired to up to date, where it already is: one from
+ * an older setup gets the current header before a pull needs it, since sign-in
+ * is skipped on a machine already signed in. One that is already current is
+ * left alone. Only the binary is written, never docker's config. Not fatal:
+ * the pull that follows reports its own failure.
  */
 export function refreshInstalledCredentialHelper(options: CredHelperOptions = {}): void {
   const helper = credentialHelperStatus(options);
@@ -333,12 +378,15 @@ export function refreshInstalledCredentialHelper(options: CredHelperOptions = {}
     // The target is checked itself: the link can point elsewhere by now.
     const target = fs.realpathSync(helper.helperPath);
     if (!isOurBinary(target)) return;
-    const installed = fs.statSync(target);
-    const source = fs.statSync(helperSourcePath());
-    // A developer may link the installed helper straight to this checkout.
-    // Replace that link with a standalone copy, never rewrite the source.
-    const pointsToSource = installed.dev === source.dev && installed.ino === source.ino;
-    writeHelper(pointsToSource ? helper.helperPath : target);
+    const installed = fs.readFileSync(target, 'utf-8');
+    // A link may lead to a helper source, this checkout's or another's:
+    // replace the link with a helper of its own, never write the source.
+    const isSource = isHelperSource(target, installed);
+    // Already what this setup would write, and able to run: writing it again
+    // changes nothing.
+    const mode = fs.statSync(target).mode & 0o7777;
+    if (!isSource && installed === currentHelper() && mode === runnable(mode)) return;
+    writeHelper(isSource ? helper.helperPath : target);
   } catch (err) {
     log.warn('Could not re-install the docker credential helper', { helperPath: helper.helperPath, err });
   }
