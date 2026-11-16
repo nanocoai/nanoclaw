@@ -36,6 +36,8 @@ vi.mock('@whiskeysockets/baileys', () => ({
   useMultiFileAuthState: vi.fn(async () => ({ state: { creds: {}, keys: {} }, saveCreds: vi.fn(async () => {}) })),
 }));
 vi.mock('pino', () => ({ pino: () => ({}) }));
+// Loaded by setup/index.ts in a real run: its unhandledRejection handler logs and keeps going.
+await import('../src/log.js');
 vi.mock('./status.js', () => ({ emitStatus: vi.fn() }));
 
 const { run } = await import('./whatsapp-auth.js');
@@ -173,15 +175,21 @@ describe('whatsapp-auth step', () => {
     expect(blocks()).toEqual(failed(error));
   });
 
-  /** Pair on the first socket, then close it before the 515; creds writes stay pending until settled. */
-  async function closedAfterPairing(method: Method) {
+  /** Pair on the first socket; its creds writes stay pending until the test settles them. */
+  async function pairedWithPendingWrites(method: Method) {
     const writes: Array<{ resolve: () => void; reject: (err: Error) => void }> = [];
-    const saveCreds = vi.fn(() => new Promise<void>((resolve, reject) => writes.push({ resolve, reject })));
+    // A plain function, not vi.fn: vi.fn handles the promises it returns, which would hide an unhandled failed write.
+    const saveCreds = () => new Promise<void>((resolve, reject) => writes.push({ resolve, reject }));
     vi.mocked(useMultiFileAuthState).mockResolvedValueOnce(authState({}, saveCreds));
     const sock = await connected(method);
     vi.mocked(process.exit).mockImplementation(() => undefined as never);
-
     pair(sock);
+    return { sock, writes };
+  }
+
+  /** ...then close it before the 515. */
+  async function closedAfterPairing(method: Method) {
+    const { sock, writes } = await pairedWithPendingWrites(method);
     close(sock, 428, 'Connection Closed')();
 
     // Nothing is reported, and the step does not exit, while the pairing's write runs.
@@ -202,15 +210,35 @@ describe('whatsapp-auth step', () => {
   });
 
   type Writes = Awaited<ReturnType<typeof closedAfterPairing>>;
+  const enospc = new Error('ENOSPC');
   it.each([
-    ['qr', 'the pairing write fails', (writes: Writes) => writes.at(-1)!.reject(new Error('ENOSPC'))],
-    ['qr', 'the pairing write never lands', () => vi.advanceTimersByTimeAsync(5000)],
-    // The code request's write is still pending too; it fails first.
-    ['pairing-code', 'an earlier write fails', (writes: Writes) => writes[0].reject(new Error('ENOSPC'))],
-  ] as const)('%s: says the link was not saved when %s', async (method, _name, settle) => {
+    ['qr', 'the pairing write fails', (w: Writes) => w[0].reject(enospc), NOT_SAVED],
+    ['qr', 'the pairing write never lands', () => vi.advanceTimersByTimeAsync(5000), NOT_SAVED],
+    // The code request's write is still pending too. The last write holds the whole creds, so it decides.
+    [
+      'pairing-code',
+      'an earlier write fails but the pairing write lands',
+      (w: Writes) => (w[0].reject(enospc), w[1].resolve()),
+      AFTER,
+    ],
+    ['pairing-code', 'both writes fail', (w: Writes) => (w[0].reject(enospc), w[1].reject(enospc)), NOT_SAVED],
+  ] as const)('%s: after pairing, reports by the creds writes when %s', async (method, _name, settle, message) => {
     const writes = await closedAfterPairing(method);
 
     await settle(writes);
+
+    await vi.waitFor(() => expect(process.exit).toHaveBeenCalledWith(1));
+    expect(blocks()).toEqual(failed(message('428 Connection Closed')));
+  });
+
+  it('qr: a pairing write that failed before the close is still reported as not saved', async () => {
+    const { sock, writes } = await pairedWithPendingWrites('qr');
+    // The step runs under setup/index.ts, whose src/log.ts only logs an unhandled
+    // rejection, so the step keeps running until the close.
+    writes[0].reject(enospc);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    close(sock, 428, 'Connection Closed')();
 
     await vi.waitFor(() => expect(process.exit).toHaveBeenCalledWith(1));
     expect(blocks()).toEqual(failed(NOT_SAVED('428 Connection Closed')));

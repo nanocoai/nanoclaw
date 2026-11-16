@@ -305,9 +305,11 @@ export async function run(args: string[]): Promise<void> {
         }
       });
 
-      // Chain every write, so a close after pairing waits for (and sees a failure of) all of them.
+      // A close after pairing waits for every write; the last one holds the whole
+      // creds, so its result decides whether the link is saved.
       sock.ev.on('creds.update', () => {
-        saving = Promise.all([saving, saveCreds()]).then(() => {});
+        const write = saveCreds();
+        saving = Promise.allSettled([saving, write]).then(() => write);
       });
     }
 
