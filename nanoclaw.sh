@@ -369,8 +369,10 @@ fi
 # The Node installer calls sudo behind the bootstrap spinner, where its
 # password prompt can't be seen. Ask here instead; setup:auto asks for Docker
 # before its own step. Root, passwordless sudo and non-terminal runs skip it.
+# A never-synced Arch is asked first whether jq may cost a full system upgrade.
 # shellcheck source=setup/lib/sudo-preflight.sh
 source "$PROJECT_ROOT/setup/lib/sudo-preflight.sh"
+pacman_upgrade_preflight
 if ! sudo_preflight; then
   ph_event setup_sudo_aborted
   write_abort_entry sudo-preflight sudo-refused

@@ -32,7 +32,21 @@ jq_install_command() {
 jq_needs_sudo() {
   [ "$(uname -s 2>/dev/null)" = "Linux" ] || return 1
   [ "$(id -u 2>/dev/null)" != "0" ] || return 1
-  [ -n "$(jq_install_command)" ]
+  [ -n "$(jq_install_command)" ] && ! jq_waits_on_upgrade
+}
+
+# True when pacman can install jq only after a full system upgrade (-Syu).
+jq_needs_pacman_upgrade() {
+  case "$(jq_install_command)" in
+    pacman*) pacman_never_synced ;;
+    *) return 1 ;;
+  esac
+}
+
+# nanoclaw.sh asks before that upgrade and exports NANOCLAW_PACMAN_UPGRADE=1
+# on a yes. Without one, setup installs nothing and goes on without jq.
+jq_waits_on_upgrade() {
+  jq_needs_pacman_upgrade && [ "${NANOCLAW_PACMAN_UPGRADE:-}" != 1 ]
 }
 
 # True when pacman has never synced its package lists (container and cloud images).
@@ -57,6 +71,7 @@ ensure_jq() {
   jq_present && return 0
   cmd=$(jq_install_command)
   [ -n "$cmd" ] || return 1
+  jq_waits_on_upgrade && return 1
   if jq_needs_sudo; then
     command -v sudo >/dev/null 2>&1 || return 1
     sudo="sudo -n"
@@ -67,7 +82,7 @@ ensure_jq() {
     case "$cmd" in
       apt-get*) $sudo apt-get update -qq && $sudo env DEBIAN_FRONTEND=noninteractive $cmd || return 1 ;;
       # pacman -Sy alone is a partial upgrade, which Arch doesn't support: sync with a full -Syu,
-      # and only on a host that never synced, so setup never upgrades a system someone maintains.
+      # only on a host that never synced and only after the user said yes (jq_waits_on_upgrade).
       pacman*) pacman_never_synced && $sudo pacman -Syu --noconfirm --needed jq || return 1 ;;
       *) return 1 ;;
     esac

@@ -1,7 +1,8 @@
 # sudo-preflight.sh — ask for the sudo password before setup hides it.
 #
-# Source after defining dim/red (nanoclaw.sh's status-line helpers):
+# Source after defining dim/red/bold (nanoclaw.sh's status-line helpers):
 #
+#   pacman_upgrade_preflight
 #   if ! sudo_preflight; then exit 1; fi
 #
 # On Linux, the bootstrap installs Node and jq with sudo behind its spinner,
@@ -53,6 +54,34 @@ sudo_preflight_needs() {
 # old behaviour rather than wait on a prompt nobody will see.
 sudo_preflight_interactive() {
   [ -t 0 ] && (exec </dev/tty) 2>/dev/null
+}
+
+# On a never-synced Arch, pacman can install jq only after a full system
+# upgrade. Asks first and exports NANOCLAW_PACMAN_UPGRADE=1 on a yes; No is
+# the default, and with no one at a terminal nothing is asked or upgraded.
+pacman_upgrade_preflight() {
+  export NANOCLAW_PACMAN_UPGRADE=0
+  jq_needs_pacman_upgrade || return 0
+  sudo_preflight_interactive || return 0
+  printf '  %s\n' "$(dim "jq isn't installed, and this Arch system has never synced its package lists.")"
+  printf '  %s\n' "$(dim 'To install jq, setup must first run a full system upgrade (pacman -Syu), which updates every package on this machine.')"
+  printf '  %s\n\n' "$(dim 'NanoClaw works without jq, but many skills need it.')"
+  if pacman_upgrade_confirm; then
+    NANOCLAW_PACMAN_UPGRADE=1
+    printf '\n'
+  else
+    printf '\n  %s\n\n' "$(dim 'Skipped. Setup goes on without jq.')"
+  fi
+}
+
+# [y/N]: only y or Y is a yes. stdin is the terminal here (sudo_preflight_interactive).
+pacman_upgrade_confirm() {
+  local answer=""
+  read -r -p "  $(bold 'Run the full system upgrade now?') [y/N] " answer || true
+  case "$answer" in
+    [Yy]*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # Returns 1 only when sudo was needed and the user couldn't get it.

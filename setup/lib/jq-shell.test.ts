@@ -28,6 +28,8 @@ interface Machine {
   noPacmanConf?: boolean;
   /** This user can't list pacman's lists: the sync folder, or the DBPath above it, is root-only. */
   pacmanLocked?: 'sync' | 'dbpath';
+  /** The user said yes to the full system upgrade (nanoclaw.sh exports NANOCLAW_PACMAN_UPGRADE=1). */
+  upgradeOk?: boolean;
 }
 
 let dir: string;
@@ -92,7 +94,7 @@ function run(m: Machine): { rc: number; log: string[] } {
     '/bin/bash',
     ['-c', `set -euo pipefail; source '${LIB}'; if ensure_jq; then echo rc=0; else echo rc=1; fi`],
     {
-      env: { PATH: bin, HOME: dir },
+      env: { PATH: bin, HOME: dir, ...(m.upgradeOk ? { NANOCLAW_PACMAN_UPGRADE: '1' } : {}) },
       encoding: 'utf8',
     },
   );
@@ -121,8 +123,8 @@ describe('jq install (setup/lib/jq.sh)', { timeout: 20_000 }, () => {
   });
 
   // A never-synced pacman has no lists, and -Sy alone would be an Arch partial upgrade.
-  it('syncs a never-synced pacman with a full -Syu, then installs jq', () => {
-    const r = run({ pkg: 'pacman', sudo: 'cached', staleLists: true });
+  it('after a yes, syncs a never-synced pacman with a full -Syu, then installs jq', () => {
+    const r = run({ pkg: 'pacman', sudo: 'cached', staleLists: true, upgradeOk: true });
     expect(r.rc).toBe(0);
     expect(r.log.filter((l) => l.startsWith('pacman'))).toEqual([
       'pacman -S --noconfirm --needed jq',
@@ -131,20 +133,24 @@ describe('jq install (setup/lib/jq.sh)', { timeout: 20_000 }, () => {
     expect(r.log).toContain('sudo -n pacman -Syu --noconfirm --needed jq');
   });
 
+  it('without a yes, runs nothing on a never-synced pacman', () => {
+    expect(run({ pkg: 'pacman', sudo: 'cached', staleLists: true })).toEqual({ rc: 1, log: [] });
+  });
+
   it.each<[string, Machine]>([
     ['has synced before', { pacmanSynced: true }],
     ['has no pacman-conf to say where its lists are', { noPacmanConf: true }],
     ['synced into a sync folder this user cannot list', { pacmanSynced: true, pacmanLocked: 'sync' }],
     ['synced under a DBPath this user cannot enter', { pacmanSynced: true, pacmanLocked: 'dbpath' }],
-  ])('never upgrades a pacman system that %s', (_name, m) => {
-    const r = run({ pkg: 'pacman', sudo: 'cached', staleLists: true, ...m });
+  ])('never upgrades a pacman system that %s, even after a yes', (_name, m) => {
+    const r = run({ pkg: 'pacman', sudo: 'cached', staleLists: true, upgradeOk: true, ...m });
     expect(r.rc).toBe(1);
     expect(r.log.filter((l) => l.startsWith('pacman'))).toEqual(['pacman -S --noconfirm --needed jq']);
   });
 
   // A stub can't check a manager's flags, only that setup finds it and runs it with sudo -n.
   it.each(['dnf', 'yum', 'zypper', 'pacman', 'apk'])('installs jq with %s on distros without apt', (pkg) => {
-    const r = run({ pkg, sudo: 'cached' });
+    const r = run({ pkg, sudo: 'cached', pacmanSynced: true });
     expect(r.rc).toBe(0);
     expect(r.log[0]).toMatch(new RegExp(`^sudo -n env .* ${pkg} .*jq$`));
   });
@@ -234,6 +240,16 @@ describe.skipIf(onGce)('bootstrap (nanoclaw.sh + setup.sh)', { timeout: 30_000 }
     const r = bootstrap({});
     expect(r.rc).toBe(0);
     expect(r.jqOk).toBe('false');
+    expect(r.out).toMatch(/Basics ready.*\n.*Couldn't install jq\./);
+  });
+
+  // The question needs a terminal; without one, setup keeps going without jq.
+  it('asks nothing and upgrades nothing on a never-synced Arch without a terminal', () => {
+    const r = bootstrap({ pkg: 'pacman', sudo: 'cached', staleLists: true });
+    expect(r.rc).toBe(0);
+    expect(r.jqOk).toBe('false');
+    expect(r.log.filter((l) => /pacman/.test(l))).toEqual([]);
+    expect(r.out).not.toContain('full system upgrade');
     expect(r.out).toMatch(/Basics ready.*\n.*Couldn't install jq\./);
   });
 
