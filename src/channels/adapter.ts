@@ -136,6 +136,19 @@ export interface ResolvedConversation {
   participantIds?: string[];
 }
 
+/** One earlier line of a conversation, read back from the platform. */
+export interface HistoryLine {
+  /** Platform message id, the same id an inbound message of that line carries. */
+  id: string;
+  timestamp: string;
+  senderId: string;
+  senderName: string;
+  text: string;
+  isBot: boolean;
+  /** Written by this adapter's own bot user. */
+  isSelf: boolean;
+}
+
 /** Wiring/mg defaults for one conversation context (DM vs group/channel). */
 export interface ChannelContextDefaults {
   /** Default engage_mode for wirings created in this context. */
@@ -283,6 +296,13 @@ export interface ChannelAdapter {
    * treats absence as a no-op.
    */
   subscribe?(platformId: string, threadId: string): Promise<void>;
+
+  /**
+   * Read a thread's newest `limit` lines from the platform, oldest first.
+   * Rejects a threadId that does not belong to platformId. Adapters whose
+   * platform has no way to read earlier messages omit this.
+   */
+  readHistory?(platformId: string, threadId: string, options: { limit: number }): Promise<HistoryLine[]>;
 
   /**
    * Open (or fetch) a DM with this user, returning the platform_id of the

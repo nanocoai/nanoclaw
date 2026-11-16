@@ -10,8 +10,10 @@
  * Backlog capped by the host-sweep pruner.
  *
  * Pull layer: a new or long-idle session is seeded from the hot set at wake
- * (backfill.ts); `ncl sessions history` gives full-depth catch-up on demand
- * (registered by src/cli/resources/sessions.ts).
+ * (backfill.ts), then, when the install opts in, with the thread's lines it
+ * has not seen, read back from the platform (platform-history.ts);
+ * `ncl sessions history` gives full-depth catch-up on demand (registered by
+ * src/cli/resources/sessions.ts).
  *
  * No import-time registration — the hooks are direct calls from
  * router.ts / delivery.ts / reconcile-session.ts, kept modular.
@@ -52,3 +54,4 @@ export {
   type HistoryRow,
 } from './history.js';
 export { backfillSession, BACKFILL_LIMIT, type BackfillOptions } from './backfill.js';
+export { backfillPlatformHistory, type PlatformHistoryOptions } from './platform-history.js';

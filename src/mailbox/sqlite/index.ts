@@ -321,6 +321,8 @@ export function wrapSqliteOutbound(
   source: Database.Database | (() => Database.Database),
   writable: () => Database.Database = () => (typeof source === 'function' ? source() : source),
   nextSequence = () => nextEvenAcross(undefined, writable()),
+  /** The inbound DB, whose delivered table gives a top-level post its platform message id. */
+  delivered?: Database.Database,
 ): OutboundMailbox {
   const readable = () => (typeof source === 'function' ? source() : source);
   return {
@@ -422,17 +424,22 @@ export function wrapSqliteOutbound(
           .prepare('SELECT timestamp, kind, content FROM messages_out ORDER BY seq DESC LIMIT ?')
           .all(limit) as MailboxHistoryMessage[]
       ).map((row) => ({ ...row, timestamp: sqliteTimestamp(row.timestamp) })),
-    getTopLevelOutbound: (limit) =>
-      (
-        readable()
-          .prepare(
-            "SELECT timestamp, content FROM messages_out WHERE kind NOT IN ('system','task_log') " +
-              "AND (channel_type IS NULL OR channel_type != 'agent') " +
-              "AND (thread_id IS NULL OR thread_id = '' OR thread_id LIKE '%:') " +
-              'ORDER BY seq DESC LIMIT ?',
-          )
-          .all(limit) as MailboxTimelineMessage[]
-      ).map((row) => ({ ...row, timestamp: sqliteTimestamp(row.timestamp) })),
+    getTopLevelOutbound: (limit) => {
+      const rows = readable()
+        .prepare(
+          "SELECT id, timestamp, content FROM messages_out WHERE kind NOT IN ('system','task_log') " +
+            "AND (channel_type IS NULL OR channel_type != 'agent') " +
+            "AND (thread_id IS NULL OR thread_id = '' OR thread_id LIKE '%:') " +
+            'ORDER BY seq DESC LIMIT ?',
+        )
+        .all(limit) as Array<{ id: string; timestamp: string; content: string }>;
+      const platformIdOf = delivered?.prepare('SELECT platform_message_id FROM delivered WHERE message_out_id = ?');
+      return rows.map(({ id, timestamp, content }): MailboxTimelineMessage => {
+        const platformMessageId = (platformIdOf?.get(id) as { platform_message_id: string | null } | undefined)
+          ?.platform_message_id;
+        return { timestamp: sqliteTimestamp(timestamp), content, ...(platformMessageId ? { platformMessageId } : {}) };
+      });
+    },
     hasMessagesToOtherAgents: (selfAgentGroupId) =>
       readable()
         .prepare("SELECT 1 FROM messages_out WHERE channel_type = 'agent' AND platform_id != ? LIMIT 1")
@@ -494,7 +501,7 @@ export class SqliteAgentMailbox implements AgentMailbox {
       // two-DB split exists to avoid exactly that cross-mount coupling.
       return await action({
         ...wrapSqliteInbound(inbound),
-        ...wrapSqliteOutbound(readableOutbound, writableOutbound),
+        ...wrapSqliteOutbound(readableOutbound, writableOutbound, undefined, inbound),
       });
     } finally {
       inbound.close();

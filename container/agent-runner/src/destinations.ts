@@ -75,8 +75,8 @@ export function buildSystemPromptAddendum(assistantName?: string, mode: SessionM
 
 /**
  * What the inbound blocks are. Chat only: task runs have no messaging group, so they
- * never receive echo or history rows. The three tags are the ones
- * formatter.ts emits; keep the two in step.
+ * never receive echo or history rows. The tags are the ones formatter.ts
+ * emits; keep the two in step.
  */
 function buildReadingSection(): string {
   return [
@@ -85,6 +85,7 @@ function buildReadingSection(): string {
     'Chat turns can include:',
     '',
     '- `<message>` — the message you are answering. `<dm-history>` and `<channel-history>` are this thread\'s own earlier timeline.',
+    '- `<thread-history>` — earlier lines of this thread that did not reach you, read from the chat; `sender="you"` marks your own. Context for the message you are answering.',
     '- `<cross-session-context>` — a copy of something from elsewhere in this conversation: another thread, or a message you or a scheduled task posted here. Its `from` says where; `sender="you"` marks your own. If you can\'t tell whether the current message refers to it or to this thread, ask.',
   ].join('\n');
 }

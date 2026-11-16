@@ -87,6 +87,8 @@ export interface MailboxHistoryMessage {
 export interface MailboxTimelineMessage {
   timestamp: string;
   content: string;
+  /** The platform's id for the message, when known. Lets a read of the platform's history skip it. */
+  platformMessageId?: string;
 }
 
 /** Host-visible inbound mailbox behavior. Storage layout and lifecycle are implementation-private. */

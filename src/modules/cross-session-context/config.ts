@@ -60,3 +60,13 @@ export const ECHO_TIMELINE_SURFACE = 'dm-timeline';
  *  per-thread too, so a new thread session is seeded with the channel's
  *  top-level timeline — same messaging group means the same audience. */
 export const ECHO_CHANNEL_TIMELINE_SURFACE = 'channel-timeline';
+
+/** Platform history: a thread's earlier lines, read back from the chat when
+ *  an agent wakes there without having seen them. Rendered as <thread-history>. */
+export const THREAD_HISTORY_SURFACE = 'thread-history';
+
+/** Newest thread lines one block carries. */
+export const THREAD_HISTORY_LIMIT = 100;
+
+/** Longest a platform history read may hold up the message that woke the agent. */
+export const PLATFORM_HISTORY_BUDGET_MS = 1500;

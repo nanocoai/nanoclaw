@@ -152,6 +152,31 @@ describe('formatter rendering', () => {
     expect(result).not.toContain('<message');
   });
 
+  it('renders a thread-history row as ONE <thread-history> block of escaped lines', () => {
+    insertMessage(
+      'th-1',
+      'chat',
+      {
+        text: 'Earlier talk in this thread (2 lines)',
+        lines: [
+          { sender: 'Dana & co', senderId: 'U2', time: '2026-11-01T10:01:00.000Z', text: 'is it <green>?' },
+          { sender: 'Pip', senderId: 'B1', time: '2026-11-01T10:02:00.000Z', text: 'not yet', self: true },
+        ],
+        echo: { surface: 'thread-history', label: 'this thread' },
+      },
+      { trigger: 0, channelType: 'session-echo' },
+    );
+
+    const result = formatMessages(getPendingMessages());
+    const first = formatLocalStamp(new Date('2026-11-01T10:01:00.000Z'), TIMEZONE);
+    expect(result).toContain(
+      `<thread-history>\n<line sender="Dana &amp; co" time="${first}">is it &lt;green&gt;?</line>\n<line sender="you"`,
+    );
+    expect(result).toContain('>not yet</line>\n</thread-history>');
+    expect(result).not.toContain('<message');
+    expect(result).not.toContain('Earlier talk in this thread');
+  });
+
   it('XML-escapes label, sender, and text', () => {
     insertEcho('e1', { text: '<b>&"hi"</b>', sender: 'A & B', label: 'DM with <Gavriel>' });
 

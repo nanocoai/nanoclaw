@@ -29,7 +29,7 @@ import {
   getMessagingGroupWithAgentCount,
 } from './db/messaging-groups.js';
 import { findSessionForAgent } from './db/sessions.js';
-import { backfillSession, fanInboundMessage } from './modules/cross-session-context/index.js';
+import { backfillPlatformHistory, backfillSession, fanInboundMessage } from './modules/cross-session-context/index.js';
 import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
 import { resolveSession, withExistingMailboxSession, writeSessionMessage } from './session-manager.js';
@@ -615,6 +615,7 @@ async function deliverToAgent(
     // in view. Bounded (K sources, read concurrently); a hot session is a
     // one-query no-op. Never throws.
     await backfillSession(agentGroup, session, mg, { created });
+    await backfillPlatformHistory(agentGroup, session, mg, { created, trigger: event.message });
   }
 
   const messageId = messageIdForAgent(event.message.id, agent.agent_group_id);

@@ -14,6 +14,7 @@ const envConfig = readEnvFile([
   'DEFAULT_AGENT_PROVIDER',
   'NANOCLAW_DEFAULT_MODEL',
   'NANOCLAW_FAST_MODE',
+  'NANOCLAW_PLATFORM_HISTORY',
   'CONTAINER_CPU_LIMIT',
   'CONTAINER_MEMORY_LIMIT',
   'CONTAINER_PIDS_LIMIT',
@@ -55,6 +56,12 @@ export const DEFAULT_MODEL = process.env.NANOCLAW_DEFAULT_MODEL || envConfig.NAN
 // a typo must not silently start charging the faster rate.
 export const FAST_MODE = ['1', 'true'].includes(
   (process.env.NANOCLAW_FAST_MODE || envConfig.NANOCLAW_FAST_MODE || '').toLowerCase(),
+);
+
+// Read a thread's earlier lines back from the chat platform when an agent is
+// tagged there, so it sees what was said without it. Off unless '1' or 'true'.
+export const PLATFORM_HISTORY = ['1', 'true'].includes(
+  (process.env.NANOCLAW_PLATFORM_HISTORY || envConfig.NANOCLAW_PLATFORM_HISTORY || '').toLowerCase(),
 );
 
 /**

@@ -285,6 +285,15 @@ function formatSingleChat(msg: MessageInRow): string {
  */
 function formatEchoMessage(msg: MessageInRow): string {
   const content = parseContent(msg.content);
+  // Earlier lines of this thread, read back from the chat by the host: one row, many lines.
+  if (content.echo?.surface === 'thread-history' && Array.isArray(content.lines)) {
+    const lines = content.lines.map((line: { sender?: string; time?: string; text?: string; self?: boolean }) => {
+      const sender = line.self ? 'you' : line.sender || 'Unknown';
+      const time = formatLocalStamp(new Date(line.time ?? msg.timestamp), TIMEZONE);
+      return `<line sender="${escapeXml(sender)}" time="${escapeXml(time)}">${escapeXml(line.text || '')}</line>`;
+    });
+    return `<thread-history>\n${lines.join('\n')}\n</thread-history>`;
+  }
   const label = content.echo?.label || 'another conversation';
   // `self` marks the agent's own post; the host sets it in backfill and the outbound fan.
   const sender = content.self ? 'you' : content.sender || 'Unknown';

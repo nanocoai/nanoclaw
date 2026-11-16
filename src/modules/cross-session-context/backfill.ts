@@ -44,6 +44,8 @@ interface BackfillRow {
   text: string;
   /** Row authored by the agent itself — rendered as "you" in the prelude. */
   self: boolean;
+  /** The platform's id for it, kept on the seeded row so a platform read can skip it. */
+  platformMessageId?: string;
 }
 
 function parseContent(raw: string): { text?: string; sender?: string; senderId?: string; echo?: unknown } {
@@ -103,6 +105,7 @@ async function collectSiblingTopLevel(
       senderId: agentGroup.id,
       text: c.text,
       self: true,
+      platformMessageId: r.platformMessageId,
     });
   }
   return rows;
@@ -202,6 +205,7 @@ export async function backfillSession(
             sender: row.sender,
             senderId: row.senderId,
             ...(row.self ? { self: true } : {}),
+            ...(row.platformMessageId ? { platformMessageId: row.platformMessageId } : {}),
             echo: { surface, label },
           }),
           processAfter: null,
