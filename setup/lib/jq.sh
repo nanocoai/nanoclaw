@@ -82,8 +82,11 @@ ensure_jq() {
     case "$cmd" in
       apt-get*) $sudo apt-get update -qq && $sudo env DEBIAN_FRONTEND=noninteractive $cmd || return 1 ;;
       # pacman -Sy alone is a partial upgrade, which Arch doesn't support: sync with a full -Syu,
-      # only on a host that never synced and only after the user said yes (jq_waits_on_upgrade).
-      pacman*) pacman_never_synced && $sudo pacman -Syu --noconfirm --needed jq || return 1 ;;
+      # only after the user said yes, and only on a host that never synced. The yes is checked
+      # here too, since the lists can change after jq_waits_on_upgrade looked.
+      pacman*)
+        [ "${NANOCLAW_PACMAN_UPGRADE:-}" = 1 ] && pacman_never_synced &&
+          $sudo pacman -Syu --noconfirm --needed jq || return 1 ;;
       *) return 1 ;;
     esac
   fi

@@ -30,6 +30,8 @@ interface Machine {
   pacmanLocked?: 'sync' | 'dbpath';
   /** The user said yes to the full system upgrade (nanoclaw.sh exports NANOCLAW_PACMAN_UPGRADE=1). */
   upgradeOk?: boolean;
+  /** pacman's lists are gone after its first run, as if something cleared them meanwhile. */
+  pacmanForgetsLists?: boolean;
 }
 
 let dir: string;
@@ -60,6 +62,7 @@ function stubs(m: Machine): { bin: string; log: string } {
       [
         `echo "${m.pkg} $*" >> '${log}'`,
         `case "$*" in *update*) : > '${dir}/updated'; exit 0 ;; -Sy*) : > '${dir}/updated' ;; esac`,
+        m.pacmanForgetsLists ? `/bin/rm -f '${dir}/pacman/sync/core.db'` : '',
         m.staleLists ? `[ -e '${dir}/updated' ] || exit 100` : '',
         `printf '#!/bin/sh\\n' > '${bin}/jq' && /bin/chmod +x '${bin}/jq'`,
       ].join('\n'),
@@ -135,6 +138,12 @@ describe('jq install (setup/lib/jq.sh)', { timeout: 20_000 }, () => {
 
   it('without a yes, runs nothing on a never-synced pacman', () => {
     expect(run({ pkg: 'pacman', sudo: 'cached', staleLists: true })).toEqual({ rc: 1, log: [] });
+  });
+
+  it('without a yes, never upgrades, even when the lists go before the retry', () => {
+    const r = run({ pkg: 'pacman', sudo: 'cached', staleLists: true, pacmanSynced: true, pacmanForgetsLists: true });
+    expect(r.rc).toBe(1);
+    expect(r.log.filter((l) => l.startsWith('pacman'))).toEqual(['pacman -S --noconfirm --needed jq']);
   });
 
   it.each<[string, Machine]>([
