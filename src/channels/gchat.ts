@@ -56,7 +56,8 @@ const GCHAT_DEFAULTS: ChannelDefaults = {
  * Card text reaches Google Chat as textParagraph HTML, where `<` and `&` start
  * tags and entities and Markdown shows as typed. Drop the backslash a gateway
  * card puts before a Markdown mark, entity-escape the rest, and bold the card's
- * own *Label:* at a line start: no escaped value can make one.
+ * own *Label:* at a line start outside a code fence: no escaped value can make
+ * one, and a fence holds request text, such as an agent's message.
  */
 export function escapeGChatHtml(text: string): string {
   const html = (s: string) =>
@@ -65,10 +66,13 @@ export function escapeGChatHtml(text: string): string {
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;');
+  // The bridge closes and reopens a fence that spans two blocks, so each block balances.
+  let fenced = false;
   return text
     .split('\n')
     .map((line) => {
-      const label = /^\*((?:\\[\s\S]|[^\\*])+?:)\*(?!\*)/.exec(line);
+      if (/^ {0,3}```/.test(line)) fenced = !fenced;
+      const label = !fenced && /^\*((?:\\[\s\S]|[^\\*])+?:)\*(?!\*)/.exec(line);
       return label ? `<b>${html(label[1])}</b>${html(line.slice(label[0].length))}` : html(line);
     })
     .join('\n');
