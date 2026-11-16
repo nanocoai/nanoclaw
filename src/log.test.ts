@@ -190,3 +190,67 @@ describe('log never throws on unserializable data', () => {
     expect(written.join('')).toContain('[log data unserializable]');
   });
 });
+
+describe('log prints errors in full', () => {
+  let written: string[];
+
+  beforeEach(() => {
+    written = [];
+    const capture = (chunk: string | Uint8Array) => {
+      written.push(String(chunk));
+      return true;
+    };
+    vi.spyOn(process.stderr, 'write').mockImplementation(capture);
+    vi.spyOn(process.stdout, 'write').mockImplementation(capture);
+  });
+
+  afterEach(() => vi.restoreAllMocks());
+
+  const refused = () =>
+    Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:8080'), {
+      code: 'ECONNREFUSED',
+      syscall: 'connect',
+      config: { headers: { Authorization: 'Bearer SECRET' } },
+    });
+
+  it('prints the cause chain and diagnostic fields of `err`', () => {
+    log.error('Delivery failed', { err: new Error('adapter send failed', { cause: refused() }) });
+    const out = written.join('');
+    expect(out).toContain('message: "adapter send failed"');
+    expect(out).toContain('caused by: { type: "Error", message: "connect ECONNREFUSED 127.0.0.1:8080"');
+    expect(out).toContain('"code":"ECONNREFUSED"');
+    expect(out).toMatch(/at .*log\.test\.ts/);
+  });
+
+  it('prints an Error under any other key, or nested, instead of {}', () => {
+    log.warn('Fallback failed', { fallbackErr: refused(), result: { error: new Error('deep reason') } });
+    const out = written.join('');
+    expect(out).toContain('connect ECONNREFUSED');
+    expect(out).toContain('deep reason');
+    expect(out).not.toMatch(/fallbackErr\S*=\{\}/);
+  });
+
+  it('lists AggregateError members', () => {
+    log.error('All attempts failed', {
+      err: new AggregateError([new Error('first'), new Error('second')], 'all failed'),
+    });
+    const out = written.join('');
+    expect(out).toContain('error[0]: { type: "Error", message: "first"');
+    expect(out).toContain('error[1]: { type: "Error", message: "second"');
+  });
+
+  it('never prints fields outside the allowlist, or secret-looking keys inside them', () => {
+    const err = Object.assign(new Error('rejected'), { status: { code: 401, apiKey: 'SECRET' } });
+    log.error('Request failed', { err, other: refused() });
+    const out = written.join('');
+    expect(out).not.toContain('SECRET');
+    expect(out).toContain('"apiKey":"[redacted]"');
+  });
+
+  it('stops on a cause cycle', () => {
+    const a = new Error('a');
+    const b = new Error('b', { cause: a });
+    (a as { cause?: unknown }).cause = b;
+    expect(() => log.error('cycle', { err: a, nested: { a } })).not.toThrow();
+  });
+});
