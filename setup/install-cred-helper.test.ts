@@ -23,6 +23,7 @@ const SOURCE = fs.readFileSync(path.join(here, 'registry', 'credential-helper.mj
 const HELPER_ID = 'nanoclaw-docker-credential-helper';
 const GONE_NODE = '/nonexistent/node/1.0.0/bin/node';
 const HOST = 'reg.example.com';
+const BODY = SOURCE.slice(SOURCE.indexOf('\n') + 1);
 
 const scratch: string[] = [];
 afterEach(() => {
@@ -63,8 +64,11 @@ function withNoNode(write: () => void): void {
   }
 }
 
-/** Run `write` with the installed helper owned by someone this user may not hand files to. */
-function withForeignOwner(write: () => void): void {
+/**
+ * Run `write` with the installed helper owned by someone else, and the chown
+ * that would keep that owner failing: as not permitted, unless told otherwise.
+ */
+function withForeignOwner(write: () => void, code = 'EPERM'): void {
   const stat = fs.lstatSync.bind(fs);
   const metadata = vi.spyOn(fs, 'lstatSync').mockImplementation((...args) => {
     const result = stat(...args);
@@ -73,7 +77,7 @@ function withForeignOwner(write: () => void): void {
       : result;
   });
   const chown = vi.spyOn(fs, 'chownSync').mockImplementation(() => {
-    throw Object.assign(new Error('Not permitted'), { code: 'EPERM' });
+    throw Object.assign(new Error(`${code}: chown`), { code });
   });
   try {
     write();
@@ -304,6 +308,16 @@ describe('refreshInstalledCredentialHelper', () => {
     expect(fs.readdirSync(binDir)).toEqual([HELPER_BINARY_NAME]);
   });
 
+  it.each(['EIO', 'EINVAL'])('keeps the old helper when keeping its owner fails with %s', (code) => {
+    const { binDir, helper, dockerConfigPath } = install(olderSetup);
+    const refresh = (): void => refreshInstalledCredentialHelper({ binDir, dockerConfigPath });
+
+    expect(() => withForeignOwner(refresh, code)).not.toThrow();
+
+    expect(fs.readFileSync(helper, 'utf-8')).toBe(olderSetup);
+    expect(fs.readdirSync(binDir)).toEqual([HELPER_BINARY_NAME]);
+  });
+
   it('does not write through a link that now points at a file that is not the helper', () => {
     const { binDir, dockerConfigPath } = install(olderSetup);
     const other = path.join(scratchDir(), 'notes.txt');
@@ -355,6 +369,20 @@ describe('installCredentialHelper', () => {
 
     expect(fs.readFileSync(helper, 'utf-8')).toBe(renderHelper(SOURCE, process.execPath));
     expect(JSON.parse(fs.readFileSync(dockerConfigPath, 'utf-8')).credHelpers).toEqual({ [HOST]: 'nanoclaw' });
+  });
+
+  it.each(['EIO', 'EINVAL'])('fails, and wires nothing, when keeping the old owner fails with %s', (code) => {
+    const binDir = scratchDir();
+    const dockerConfigPath = path.join(scratchDir(), 'config.json');
+    const old = `#!${GONE_NODE}\n${BODY}`;
+    const helper = writeHelper(binDir, old);
+    const install = (): unknown => installCredentialHelper({ binDir, dockerConfigPath, registryHost: HOST });
+
+    expect(() => withForeignOwner(install, code)).toThrow(code);
+
+    expect(fs.readFileSync(helper, 'utf-8')).toBe(old);
+    expect(fs.readdirSync(binDir)).toEqual([HELPER_BINARY_NAME]);
+    expect(fs.existsSync(dockerConfigPath)).toBe(false);
   });
 
   it('refuses to wire docker to a helper that does not start', () => {
