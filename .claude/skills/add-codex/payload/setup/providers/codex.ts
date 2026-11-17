@@ -164,14 +164,14 @@ export function codexInstallCommands(version?: string): string[] {
 }
 
 type CodexCli =
-  | { ok: true; command: string; argv: (codexArgs: string[]) => string[]; cwd?: string }
-  | { ok: false; error: string; message: string; detail?: string[]; install: string[] };
+  { ok: true; command: string } | { ok: false; error: string; message: string; detail?: string[]; install: string[] };
 
 /**
  * The host's `codex` when it runs; otherwise the version pinned for the image,
- * run through npx from the user's npm cache (no global install, no sudo). The
- * spec goes to `npx --yes`, which runs on the host, so only an exact pin is used.
- * `scratch` is a private throwaway dir: the probes' CODEX_HOME and npx's project.
+ * fetched by npx into the user's npm cache (no global install, no sudo) and run
+ * from there. The spec goes to `npx --yes`, which runs on the host, so only an
+ * exact pin is used. `scratch` is a private throwaway dir: the probes'
+ * CODEX_HOME and npx's project.
  */
 export function resolveCodexCli(root: string, scratch: string): CodexCli {
   // Any codex run, even `--version`, creates its CODEX_HOME (default ~/.codex).
@@ -182,7 +182,7 @@ export function resolveCodexCli(root: string, scratch: string): CodexCli {
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-  if (probe('codex', ['--version']).status === 0) return { ok: true, command: 'codex', argv: (codexArgs) => codexArgs };
+  if (probe('codex', ['--version']).status === 0) return { ok: true, command: 'codex' };
 
   const version = readPinnedCodexVersion(root);
   if (!version) {
@@ -201,15 +201,25 @@ export function resolveCodexCli(root: string, scratch: string): CodexCli {
   const npxDir = path.join(scratch, 'npx');
   fs.mkdirSync(npxDir, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(npxDir, 'package.json'), '{ "private": true }\n');
-  // --ignore-scripts matches the image install (codex ships none); --loglevel
-  // keeps npm's notices, such as its update nag, off the sign-in screen.
-  const npx = ['--yes', '--ignore-scripts', '--loglevel=error', '--package', `@openai/codex@${version}`];
-  // `exec` makes codex npm's own child: npm passes SIGINT and SIGTERM to its
-  // child, and an intermediate shell would stop them there.
-  const argv = (codexArgs: string[]): string[] => [...npx, '-c', ['exec', 'codex', ...codexArgs].join(' ')];
   p.log.step(brandBody(`Preparing the pinned Codex CLI (${version}) for sign-in…`));
   console.log(k.dim('   (no Codex CLI on this machine: npx fetches it once into your npm cache, no global install)'));
-  const fetched = probe('npx', argv(['--version']), npxDir);
+  // npx names the binary it fetched for the pin, and the login runs that binary
+  // directly, so a stop signal reaches Codex instead of ending at npm.
+  // --ignore-scripts matches the image install (codex ships none); --loglevel
+  // keeps npm's notices, such as its update nag, off the sign-in screen.
+  const fetched = probe(
+    'npx',
+    [
+      '--yes',
+      '--ignore-scripts',
+      '--loglevel=error',
+      '--package',
+      `@openai/codex@${version}`,
+      '-c',
+      'command -v codex',
+    ],
+    npxDir,
+  );
   if ((fetched.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') {
     return {
       ok: false,
@@ -218,21 +228,35 @@ export function resolveCodexCli(root: string, scratch: string): CodexCli {
       install: codexInstallCommands(version),
     };
   }
-  if (fetched.status !== 0) {
-    return {
-      ok: false,
-      error: 'codex_npx_failed',
-      message: `Couldn't run the pinned Codex CLI ${version} with npx (details below). Check that this machine can reach the npm registry, or install the Codex CLI (below), then re-run setup — or choose the API key option instead.`,
-      install: codexInstallCommands(version),
-      // npm's own error lines, or the spawn error, name the actual cause.
-      detail: (fetched.error ? fetched.error.message : String(fetched.stderr ?? ''))
-        .split('\n')
-        .map((line) => line.trim().slice(0, 300))
-        .filter(Boolean)
-        .slice(0, 12),
-    };
+  const failed = (lines: string): CodexCli => ({
+    ok: false,
+    error: 'codex_npx_failed',
+    message: `Couldn't run the pinned Codex CLI ${version} with npx (details below). Check that this machine can reach the npm registry, or install the Codex CLI (below), then re-run setup — or choose the API key option instead.`,
+    install: codexInstallCommands(version),
+    detail: lines
+      .split('\n')
+      .map((line) => line.trim().slice(0, 300))
+      .filter(Boolean)
+      .slice(0, 12),
+  });
+  // npm's own error lines, or the spawn error, name the actual cause.
+  if (fetched.status !== 0) return failed(fetched.error ? fetched.error.message : String(fetched.stderr ?? ''));
+  const bin =
+    String(fetched.stdout ?? '')
+      .trim()
+      .split('\n')
+      .pop() ?? '';
+  const ran = path.isAbsolute(bin) ? probe(bin, ['--version']) : undefined;
+  if (
+    ran?.status !== 0 ||
+    !String(ran.stdout ?? '')
+      .trim()
+      .split(/\s+/)
+      .includes(version)
+  ) {
+    return failed(`npx gave "${bin}" for @openai/codex@${version}, and it did not report that version.`);
   }
-  return { ok: true, command: 'npx', argv, cwd: npxDir };
+  return { ok: true, command: bin };
 }
 
 export async function runCodexLoginAuth(
@@ -252,28 +276,39 @@ export async function runCodexLoginAuth(
   // skips finally), and the signal hook for Ctrl-C, SIGTERM and a hangup.
   const removeLoginHome = (): void => fs.rmSync(loginHome, { recursive: true, force: true });
   let login: ChildProcess | undefined;
-  const onSignal = (signal: NodeJS.Signals): void => {
-    detach();
-    let timer: NodeJS.Timeout | undefined;
-    let done = false;
-    const finish = (): void => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      removeLoginHome();
-      process.kill(process.pid, signal);
-    };
-    if (!login || login.exitCode !== null || login.signalCode !== null) return finish();
-    // A signal sent to setup alone never reaches the login, so stop it and let
-    // it exit before its home goes.
-    login.once('close', finish);
-    login.kill('SIGTERM');
-    timer = setTimeout(finish, 3000);
-  };
+  let stopping = false;
+  let finished = false;
+  let timer: NodeJS.Timeout | undefined;
   const detach = (): void => {
     process.off('exit', removeLoginHome);
     for (const signal of LOGIN_SIGNALS) process.off(signal, onSignal);
   };
+  const finish = (signal: NodeJS.Signals): void => {
+    if (finished) return;
+    finished = true;
+    clearTimeout(timer);
+    detach();
+    removeLoginHome();
+    process.kill(process.pid, signal);
+  };
+  // A signal sent to setup alone never reaches the login, so stop it first:
+  // the home goes once it has exited, or once it is killed after 3s or on a
+  // second signal. The hooks stay attached until then.
+  function onSignal(signal: NodeJS.Signals): void {
+    const child = login;
+    if (!child || child.exitCode !== null || child.signalCode !== null) return finish(signal);
+    if (stopping) {
+      child.kill('SIGKILL');
+      return finish(signal);
+    }
+    stopping = true;
+    child.once('close', () => finish(signal));
+    child.kill('SIGTERM');
+    timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      finish(signal);
+    }, 3000);
+  }
   process.on('exit', removeLoginHome);
   for (const signal of LOGIN_SIGNALS) process.on(signal, onSignal);
   try {
@@ -344,11 +379,7 @@ async function signIn(
 
   const args = method === 'device' ? ['login', '--device-auth'] : ['login'];
   const start = Date.now();
-  const code = await runInherit(cli.command, cli.argv(args), {
-    env: { CODEX_HOME: loginHome },
-    cwd: cli.cwd,
-    onSpawn,
-  });
+  const code = await runInherit(cli.command, args, { env: { CODEX_HOME: loginHome }, onSpawn });
   const durationMs = Date.now() - start;
   console.log();
 
@@ -396,11 +427,10 @@ async function signIn(
 function runInherit(
   cmd: string,
   args: string[],
-  opts: { env?: Record<string, string>; cwd?: string; onSpawn?: (child: ChildProcess) => void } = {},
+  opts: { env?: Record<string, string>; onSpawn?: (child: ChildProcess) => void } = {},
 ): Promise<number> {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, {
-      cwd: opts.cwd,
       stdio: 'inherit',
       env: opts.env ? { ...process.env, ...opts.env } : process.env,
     });
