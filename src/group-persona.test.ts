@@ -50,6 +50,16 @@ describe('readGroupPersona', () => {
     );
   });
 
+  it('warns when the prepend file is not a regular file', () => {
+    // A directory opens without blocking, so this runs in-process.
+    fs.mkdirSync(path.join(TMP, PERSONA_PREPEND_FILE));
+
+    expect(readGroupPersona(TMP)).toBeNull();
+    expect(log.warn).toHaveBeenCalledWith('Group standing instructions are not a regular file; omitting persona', {
+      file: path.join(TMP, PERSONA_PREPEND_FILE),
+    });
+  });
+
   it('refuses a FIFO without blocking', () => {
     execFileSync('mkfifo', [path.join(TMP, PERSONA_PREPEND_FILE)]);
     // Run in a child with a timeout: a blocking open would hang this worker

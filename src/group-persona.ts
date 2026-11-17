@@ -33,7 +33,10 @@ export function readGroupPersona(groupDir: string): string | null {
     // writer-less FIFO here would stall the host on every spawn. The isFile
     // check below then refuses anything that is not a regular file.
     fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
-    if (!fs.fstatSync(fd).isFile()) return null;
+    if (!fs.fstatSync(fd).isFile()) {
+      log.warn('Group standing instructions are not a regular file; omitting persona', { file });
+      return null;
+    }
     const content = fs.readFileSync(fd, 'utf-8').trim();
     return content || null;
   } catch (err) {
