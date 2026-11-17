@@ -164,7 +164,7 @@ export function codexInstallCommands(version?: string): string[] {
 }
 
 type CodexCli =
-  | { ok: true; command: string; args: string[]; cwd?: string }
+  | { ok: true; command: string; argv: (codexArgs: string[]) => string[]; cwd?: string }
   | { ok: false; error: string; message: string; detail?: string[]; install: string[] };
 
 /**
@@ -182,7 +182,7 @@ export function resolveCodexCli(root: string, scratch: string): CodexCli {
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-  if (probe('codex', ['--version']).status === 0) return { ok: true, command: 'codex', args: [] };
+  if (probe('codex', ['--version']).status === 0) return { ok: true, command: 'codex', argv: (codexArgs) => codexArgs };
 
   const version = readPinnedCodexVersion(root);
   if (!version) {
@@ -203,18 +203,13 @@ export function resolveCodexCli(root: string, scratch: string): CodexCli {
   fs.writeFileSync(path.join(npxDir, 'package.json'), '{ "private": true }\n');
   // --ignore-scripts matches the image install (codex ships none); --loglevel
   // keeps npm's notices, such as its update nag, off the sign-in screen.
-  const args = [
-    '--yes',
-    '--ignore-scripts',
-    '--loglevel=error',
-    '--package',
-    `@openai/codex@${version}`,
-    '--',
-    'codex',
-  ];
+  const npx = ['--yes', '--ignore-scripts', '--loglevel=error', '--package', `@openai/codex@${version}`];
+  // `exec` makes codex npm's own child: npm passes SIGINT and SIGTERM to its
+  // child, and an intermediate shell would stop them there.
+  const argv = (codexArgs: string[]): string[] => [...npx, '-c', ['exec', 'codex', ...codexArgs].join(' ')];
   p.log.step(brandBody(`Preparing the pinned Codex CLI (${version}) for sign-in…`));
   console.log(k.dim('   (no Codex CLI on this machine: npx fetches it once into your npm cache, no global install)'));
-  const fetched = probe('npx', [...args, '--version'], npxDir);
+  const fetched = probe('npx', argv(['--version']), npxDir);
   if ((fetched.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') {
     return {
       ok: false,
@@ -237,7 +232,7 @@ export function resolveCodexCli(root: string, scratch: string): CodexCli {
         .slice(0, 12),
     };
   }
-  return { ok: true, command: 'npx', args, cwd: npxDir };
+  return { ok: true, command: 'npx', argv, cwd: npxDir };
 }
 
 export async function runCodexLoginAuth(
@@ -259,9 +254,21 @@ export async function runCodexLoginAuth(
   let login: ChildProcess | undefined;
   const onSignal = (signal: NodeJS.Signals): void => {
     detach();
-    login?.kill(signal);
-    removeLoginHome();
-    process.kill(process.pid, signal);
+    let timer: NodeJS.Timeout | undefined;
+    let done = false;
+    const finish = (): void => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      removeLoginHome();
+      process.kill(process.pid, signal);
+    };
+    if (!login || login.exitCode !== null || login.signalCode !== null) return finish();
+    // A signal sent to setup alone never reaches the login, so stop it and let
+    // it exit before its home goes.
+    login.once('close', finish);
+    login.kill('SIGTERM');
+    timer = setTimeout(finish, 3000);
   };
   const detach = (): void => {
     process.off('exit', removeLoginHome);
@@ -337,7 +344,7 @@ async function signIn(
 
   const args = method === 'device' ? ['login', '--device-auth'] : ['login'];
   const start = Date.now();
-  const code = await runInherit(cli.command, [...cli.args, ...args], {
+  const code = await runInherit(cli.command, cli.argv(args), {
     env: { CODEX_HOME: loginHome },
     cwd: cli.cwd,
     onSpawn,

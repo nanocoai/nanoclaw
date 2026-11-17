@@ -230,54 +230,59 @@ describe('runCodexLoginAuth', () => {
     expect(fs.readdirSync(base)).toEqual(['login-recent']);
   });
 
-  it('on SIGTERM stops the login, removes the home, and re-raises the signal', async () => {
-    const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
-    vi.spyOn(process, 'exit').mockImplementation((() => {
-      throw new Error('setup stopped');
-    }) as typeof process.exit);
-    const before = { term: process.listeners('SIGTERM'), int: process.listenerCount('SIGINT') };
-    const exitListeners = process.listenerCount('exit');
-    let home: string | undefined;
-    const child = Object.assign(new EventEmitter(), {
-      kill: vi.fn(() => {
-        setImmediate(() => child.emit('close', null));
-        return true;
-      }),
-    });
-    mockSpawn.mockImplementation((...args: unknown[]) => {
-      home = (args[2] as { env?: NodeJS.ProcessEnv }).env!.CODEX_HOME;
-      // Deliver it to the login's own handler only, not the test runner's.
-      const added = process.listeners('SIGTERM').filter((l) => !before.term.includes(l));
-      setImmediate(() => added.forEach((listener) => (listener as (s: NodeJS.Signals) => void)('SIGTERM')));
-      return child;
-    });
+  // Ctrl-C and a hangup reach the whole terminal job; a signal sent to setup
+  // alone reaches only setup, which stops the login before removing its home.
+  it.each(['SIGTERM', 'SIGHUP'] as const)(
+    'on %s stops the login, then removes the home and re-raises the signal',
+    async (signal) => {
+      const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+      vi.spyOn(process, 'exit').mockImplementation((() => {
+        throw new Error('setup stopped');
+      }) as typeof process.exit);
+      const listeners = () => ['exit', 'SIGINT', 'SIGTERM', 'SIGHUP'].map((event) => process.listeners(event));
+      const before = listeners();
+      const runnerOwn = process.listeners(signal);
+      let home: string | undefined;
+      let homeWhileStopping: boolean | undefined;
+      const child = Object.assign(new EventEmitter(), {
+        exitCode: null,
+        signalCode: null,
+        kill: vi.fn(() => {
+          // Still there while the login shuts down, until it closes.
+          setImmediate(() => {
+            homeWhileStopping = fs.existsSync(home!);
+            child.emit('close', null);
+          });
+          return true;
+        }),
+      });
+      mockSpawn.mockImplementation((...args: unknown[]) => {
+        home = (args[2] as { env?: NodeJS.ProcessEnv }).env!.CODEX_HOME;
+        // Deliver it to the login's own handler only, not the test runner's.
+        const added = process.listeners(signal).filter((listener) => !runnerOwn.includes(listener));
+        setImmediate(() => added.forEach((listener) => (listener as (s: NodeJS.Signals) => void)(signal)));
+        return child;
+      });
 
-    await expect(runCodexLoginAuth('device', { has: async () => false, save: vi.fn() }, root)).rejects.toThrow(
-      'setup stopped',
-    );
+      await expect(runCodexLoginAuth('device', { has: async () => false, save: vi.fn() }, root)).rejects.toThrow(
+        'setup stopped',
+      );
 
-    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
-    expect(kill).toHaveBeenCalledWith(process.pid, 'SIGTERM');
-    expect(fs.existsSync(home!)).toBe(false);
-    expect(process.listeners('SIGTERM')).toEqual(before.term);
-    expect(process.listenerCount('SIGINT')).toBe(before.int);
-    expect(process.listenerCount('exit')).toBe(exitListeners);
-  });
+      // npm passes SIGTERM on to codex, but not SIGHUP.
+      expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+      expect(homeWhileStopping).toBe(true);
+      expect(kill).toHaveBeenCalledWith(process.pid, signal);
+      expect(fs.existsSync(home!)).toBe(false);
+      expect(listeners()).toEqual(before);
+    },
+  );
 });
 
 // #3791: a host without `codex` runs the image's pinned CLI through npx
 // instead of asking for a global install, which fails for users without
 // write access to the npm prefix.
 describe('runCodexLoginAuth without a host Codex CLI', () => {
-  const NPX_PREFIX = [
-    '--yes',
-    '--ignore-scripts',
-    '--loglevel=error',
-    '--package',
-    '@openai/codex@0.169.0',
-    '--',
-    'codex',
-  ];
+  const NPX_PREFIX = ['--yes', '--ignore-scripts', '--loglevel=error', '--package', '@openai/codex@0.169.0', '-c'];
   const PINNED_INSTALL = [
     'curl -fsSL https://chatgpt.com/codex/install.sh | sh -s -- --release 0.169.0',
     'npm install -g @openai/codex@0.169.0',
@@ -374,13 +379,13 @@ describe('runCodexLoginAuth without a host Codex CLI', () => {
       const npxDir = path.join(codexHome!, 'npx');
       expect(mockSpawnSync).toHaveBeenCalledWith(
         'npx',
-        [...NPX_PREFIX, '--version'],
+        [...NPX_PREFIX, 'exec codex --version'],
         expect.objectContaining({ cwd: npxDir }),
       );
       expect(host.npxProject()).toBe('{ "private": true }\n');
       expect(mockSpawn).toHaveBeenCalledWith(
         'npx',
-        [...NPX_PREFIX, ...loginArgs],
+        [...NPX_PREFIX, ['exec', 'codex', ...loginArgs].join(' ')],
         expect.objectContaining({ cwd: npxDir, stdio: 'inherit' }),
       );
       // Even `codex --version` creates its CODEX_HOME: both probes use the
