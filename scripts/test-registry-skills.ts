@@ -335,14 +335,24 @@ export function selectCombinedProviders(
   ) as Array<RegistrySkill & { provider: string }>;
 }
 
-/** The channel adapters `--combined-channels` loads together, plus branch-only companions like slack-agent-flow. */
+/**
+ * The channel adapters `--combined-channels` loads together, plus branch-only companions like
+ * slack-agent-flow. Every one must apply: `/add-<name>` cannot install a skill whose channels
+ * files are missing, and skipping it would pass with that adapter untested.
+ */
 export function selectCombinedChannels(skills: RegistrySkill[], hasSource: RegistrySourceCheck): RegistrySkill[] {
-  return requireAvailable(
-    'channel',
+  const { available, unavailable } = partitionRegistryAvailability(
     skills.filter((skill) => skill.channel || skill.branches.includes('channels')),
     hasSource,
-    "Ship the adapters in each skill's payload/ (or pin REGISTRY_CHANNELS_SHA to a commit that carries them) before this core lands.",
   );
+  if (unavailable.length) {
+    throw new Error(
+      'FAIL: the channels registry lacks files these channel skills copy:\n' +
+        unavailable.map(({ skill, missing }) => `  ${skill.skill} (missing: ${missing.join(', ')})`).join('\n') +
+        "\nShip the adapters in each skill's payload/ (or pin REGISTRY_CHANNELS_SHA to a commit that carries them) before this core lands.",
+    );
+  }
+  return available;
 }
 
 function requireAvailable(
@@ -578,17 +588,13 @@ async function channelRefreshProblems(
   refs: Record<string, string>,
   installed: RegistrySkill[],
 ): Promise<string[]> {
-  // update-skills finds an install through its barrel import, so it never refreshes a skill without one.
-  const visible = installed.filter(addsBarrelImport);
-  for (const meta of installed.filter((candidate) => !visible.includes(candidate))) {
-    console.error(`WARN: update-skills cannot refresh ${meta.skill}: it adds no ${CHANNEL_BARREL} import`);
-  }
-  for (const meta of visible) {
+  // update-skills must find every install, slack-agent-flow included; one it misses is a problem below.
+  for (const meta of installed) {
     const lines = guardedDirectives(meta);
     if (lines.length) console.error(`WARN: ${meta.skill}'s when: directives (lines ${lines}) are not checked`);
   }
   // A trailing newline changes the blob and stays valid text. Patch files are left alone: pnpm re-checks them on every add.
-  for (const { dest } of visible.flatMap(copySources)) {
+  for (const { dest } of installed.flatMap(copySources)) {
     if (!dest.endsWith('.patch') && existsSync(join(root, dest))) appendFileSync(join(root, dest), '\n');
   }
   pinRegistryRef(root, 'channels', refs.channels);
@@ -596,7 +602,7 @@ async function channelRefreshProblems(
   git(['remote', 'remove', 'origin'], root);
   git(['remote', 'add', 'skill-ci', '.'], root);
   const report = await refreshInstalledSkills(root, 'all', { exec: (cmd, cwd) => command(cmd, cwd) });
-  const expected = visible.map(({ skill }) => skill);
+  const expected = installed.map(({ skill }) => skill);
   const actual = report.skills.map(({ skillName }) => skillName);
   const problems = [
     ...actual.filter((name) => !expected.includes(name)).map((name) => `update-skills selected ${name}, not installed`),
@@ -605,7 +611,7 @@ async function channelRefreshProblems(
       .filter(({ status }) => status === 'failed')
       .map((skill) => `update-skills could not refresh ${skill.skillName}: ${skill.errors.join('; ')}`),
   ];
-  for (const meta of visible) {
+  for (const meta of installed) {
     for (const { dest, branch, source } of copySources(meta)) {
       const want = branch ? git(['rev-parse', `${refs[branch]}:${source}`], root) : hashFile(join(meta.dir, source));
       if (hashFile(join(root, dest)) !== want) {

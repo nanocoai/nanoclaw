@@ -87,9 +87,9 @@ describe('skill-directives parser, on the converted add-slack', () => {
       'src/channels/index.ts',
       'src/channels/index.ts',
     ]);
-    // The adapter and the guard are SEPARATE fences (idempotency is keyed on a
-    // fence's first line): an install that already has `import './slack.js';`
-    // from the pre-payload skill still gains the guard on a re-run.
+    // The adapter and the guard are separate fences. A re-run on an install
+    // that already has `import './slack.js';` from the pre-payload skill still
+    // gains the guard.
     expect(appends[0].body).toEqual(["import './slack.js';"]);
     expect(appends[1].body).toEqual(["import './slack-a2a-guard.js';"]);
     // The agents-feature module/tool barrel appends live in /slack-agent-flow;

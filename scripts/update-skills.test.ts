@@ -135,6 +135,22 @@ describe('installed skill detection', () => {
 
     expect(detectInstalledSkills(root)).toEqual([{ name: 'discord', skillName: 'add-discord', kind: 'channel' }]);
   });
+
+  it('finds a channels-branch companion with no barrel import through a line only it appends', () => {
+    const root = temp('nanoclaw-skills-detect-branch-companion-');
+    write(root, 'src/channels/index.ts', "import './cli.js';\nimport './slack.js';\n");
+    write(root, 'src/modules/index.ts', "import './shared.js';\nimport './slack-agent-flow/index.js';\n");
+    const companion = (line: string) =>
+      `\`\`\`nc:copy from-branch:channels\nsrc/modules/x.ts\n\`\`\`\n\`\`\`nc:append to:src/modules/index.ts\nimport './shared.js';\n${line}\n\`\`\`\n`;
+    write(root, '.claude/skills/slack-agent-flow/SKILL.md', companion("import './slack-agent-flow/index.js';"));
+    // Not installed: the one line it shares with slack-agent-flow is no proof.
+    write(root, '.claude/skills/other-flow/SKILL.md', companion("import './other-flow/index.js';"));
+
+    expect(detectInstalledSkills(root)).toEqual([
+      { name: 'slack', skillName: 'add-slack', kind: 'channel' },
+      { name: 'slack-agent-flow', skillName: 'slack-agent-flow', kind: 'channel' },
+    ]);
+  });
 });
 
 describe('registry refresh end to end', () => {

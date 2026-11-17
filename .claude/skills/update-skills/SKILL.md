@@ -30,6 +30,8 @@ pnpm exec tsx scripts/update-skills.ts --skills all
 ```
 
 The helper detects installed skills from the real channel/provider barrels.
+A channels-branch companion with no barrel import, such as
+`slack-agent-flow`, is found through a line only it appends.
 Provider skills refresh from their own `payload/` in this checkout and need
 no remote; a provider first installed from the old `providers` branch is
 rewritten from the payload the same way. For channel skills it resolves the
