@@ -285,6 +285,8 @@ function formatSingleChat(msg: MessageInRow): string {
  */
 function formatEchoMessage(msg: MessageInRow): string {
   const content = parseContent(msg.content);
+  const block = formatContextBlock(content.block, msg.timestamp);
+  if (block) return block;
   const label = content.echo?.label || 'another conversation';
   // `self` marks the agent's own post; the host sets it in backfill and the outbound fan.
   const sender = content.self ? 'you' : content.sender || 'Unknown';
@@ -299,6 +301,34 @@ function formatEchoMessage(msg: MessageInRow): string {
     return `<${tag} sender="${escapeXml(sender)}" time="${escapeXml(time)}">${escapeXml(content.text || '')}</${tag}>`;
   }
   return `<cross-session-context from="${escapeXml(label)}" sender="${escapeXml(sender)}" time="${escapeXml(time)}">${escapeXml(content.text || '')}</cross-session-context>`;
+}
+
+/** Element names a context block may use: nothing that could close or open other markup. */
+const CONTEXT_BLOCK_TAG = /^[a-z][a-z-]{0,39}$/;
+
+interface ContextBlockContent {
+  tag?: unknown;
+  about?: unknown;
+  lines?: Array<{ sender?: string; time?: string; text?: string; self?: boolean }>;
+}
+
+/**
+ * Render a host-written context block (one row, many lines) as
+ * `<tag about="...">` with one line element per line. The block says what it
+ * holds in `about`, so no block needs its own branch here. Null when the row
+ * carries no valid block.
+ */
+function formatContextBlock(block: ContextBlockContent | undefined, fallbackTime: string): string | null {
+  if (!block || typeof block.tag !== 'string' || !CONTEXT_BLOCK_TAG.test(block.tag) || !Array.isArray(block.lines)) {
+    return null;
+  }
+  const lines = block.lines.map((line) => {
+    const sender = line.self ? 'you' : String(line.sender || 'Unknown');
+    const time = formatLocalStamp(new Date(line.time ?? fallbackTime), TIMEZONE);
+    return `<line sender="${escapeXml(sender)}" time="${escapeXml(time)}">${escapeXml(String(line.text ?? ''))}</line>`;
+  });
+  const about = typeof block.about === 'string' ? block.about : '';
+  return `<${block.tag} about="${escapeXml(about)}">\n${lines.join('\n')}\n</${block.tag}>`;
 }
 
 /**
