@@ -13,7 +13,7 @@ vi.mock('./platform.js', () => ({
 }));
 vi.mock('../src/log.js', () => ({ log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() } }));
 vi.mock('../src/upgrade-state.js', () => ({ writeUpgradeState: () => ({ version: 'fixture' }) }));
-vi.mock('./peer-cleanup.js', () => ({ cleanupUnhealthyPeers: () => ({ unloaded: [], removed: [] }) }));
+vi.mock('./peer-cleanup.js', () => ({ cleanupUnhealthyPeers: () => ({ unloaded: [], removed: [], retired: [] }) }));
 vi.mock('./lib/systemd-linger.js', () => ({ ensureUserLinger: vi.fn() }));
 vi.mock('./status.js', () => ({ emitStatus: vi.fn() }));
 
@@ -34,7 +34,7 @@ afterEach(() => {
   fs.rmSync(root, { recursive: true, force: true });
 });
 
-describe.runIf(process.platform === 'linux')('systemd service linger status', () => {
+describe('systemd service linger status', () => {
   it.each([true, false])('reports the verified linger value %s independently of service startup', async (enabled) => {
     vi.mocked(ensureUserLinger).mockReturnValue(enabled);
     await run([]);

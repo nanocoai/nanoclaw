@@ -14,6 +14,9 @@ let sudoCanEnable: boolean;
 let succeedsWithoutEnabling: boolean;
 let calls: { command: string; args: string[] }[];
 
+/** execFileSync's failure shape: the child's stderr rides on the error. */
+const failed = (stderr: string) => Object.assign(new Error('Command failed'), { stderr: Buffer.from(stderr) });
+
 beforeEach(() => {
   vi.clearAllMocks();
   enabled = false;
@@ -41,10 +44,10 @@ beforeEach(() => {
     expect(args.at(-1)).toBe('1000');
     if (command === 'sudo') {
       expect(args.slice(0, 2)).toEqual(['-n', 'loginctl']);
-      if (!sudoCanEnable && !succeedsWithoutEnabling) throw new Error('sudo: password required');
+      if (!sudoCanEnable && !succeedsWithoutEnabling) throw failed('sudo: a password is required\n');
       if (sudoCanEnable) enabled = true;
     } else if (command === 'loginctl') {
-      if (!userCanEnable && !succeedsWithoutEnabling) throw new Error('access denied');
+      if (!userCanEnable && !succeedsWithoutEnabling) throw failed('Could not enable linger: Access denied\n');
       if (userCanEnable) enabled = true;
     } else {
       throw new Error('unexpected executable');
@@ -78,6 +81,7 @@ describe('verified systemd user linger', () => {
   it('reports failure with recovery guidance when neither path is permitted', () => {
     expect(ensureUserLinger(1000)).toBe(false);
     expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('may stop on logout'), {
+      failures: ['loginctl: Could not enable linger: Access denied', 'sudo: sudo: a password is required'],
       hint: expect.stringContaining('sudo loginctl enable-linger 1000'),
     });
   });
