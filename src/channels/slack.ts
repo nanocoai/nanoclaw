@@ -186,6 +186,29 @@ export function escapeCardTitles(adapter: Pick<SlackAdapter, 'webClient'>): void
   chat.update = (args) => update(safeNotification(args));
 }
 
+/**
+ * Agent-DM decoration: pinned suggested prompts and per-thread titles. Ids go
+ * through the SDK's own codec (`slack:<channel>[:<ts>]`), as delivery does.
+ * Slack errors reject so callers can log or retry (titles fail until the
+ * assistant thread exists).
+ */
+export function slackAgentDmDecorations(
+  slackAdapter: Pick<SlackAdapter, 'decodeThreadId' | 'setSuggestedPrompts' | 'setAssistantTitle'>,
+): Required<Pick<ChannelAdapter, 'setSuggestedPrompts' | 'setThreadTitle'>> {
+  return {
+    async setSuggestedPrompts(platformId, prompts, title) {
+      const { channel } = slackAdapter.decodeThreadId(platformId);
+      // No thread_ts: under agent_view the prompts pin to the top of the DM.
+      await slackAdapter.setSuggestedPrompts(channel, undefined, prompts, title);
+    },
+    async setThreadTitle(_platformId, threadId, title) {
+      const { channel, threadTs } = slackAdapter.decodeThreadId(threadId);
+      if (!threadTs) throw new Error(`Slack thread title needs a thread ts: ${threadId}`);
+      await slackAdapter.setAssistantTitle(channel, threadTs, title);
+    },
+  };
+}
+
 /** Construction knobs for one Slack bot identity. */
 export interface SlackBridgeOptions {
   /**
@@ -260,6 +283,7 @@ export function createSlackBridge(options: SlackBridgeOptions = {}): ChannelAdap
   // rides on the returned object until the core seam lands.
   return Object.assign(bridge, {
     resolveConversation: (platformId: string) => resolveSlackConversation(slackAdapter, platformId),
+    ...slackAgentDmDecorations(slackAdapter),
   });
 }
 
