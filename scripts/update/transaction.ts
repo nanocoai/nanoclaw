@@ -427,6 +427,27 @@ function hasChanged(state: UpdateState, prefix: string): boolean {
   return state.changedFiles.some((file) => file === prefix || file.startsWith(`${prefix}/`));
 }
 
+const SKILL_ERROR_HEAD = 200;
+const SKILL_ERROR_TAIL = 300;
+
+// Long text keeps its start (which step failed) and its end: a failed command
+// reads "Command failed: <command>" and then its stderr, so the reason is last.
+function excerpt(text: string): string {
+  const chars = Array.from(text);
+  if (chars.length <= SKILL_ERROR_HEAD + SKILL_ERROR_TAIL) return text;
+  return `${chars.slice(0, SKILL_ERROR_HEAD).join('')}…${chars.slice(-SKILL_ERROR_TAIL).join('')}`;
+}
+
+// One flattened line per failed skill: a failed run can carry a whole build
+// log, and its own newlines must not read as another skill's line.
+// The full text stays in state.skillRefresh, which `status` prints.
+function skillRefreshFailure(report: SkillsRefreshReport, heading = 'Installed skills failed to refresh:'): string {
+  const lines = report.skills
+    .filter((skill) => skill.status === 'failed')
+    .map((skill) => `- ${skill.name}: ${excerpt(skill.errors.join('; ').replace(/\s*\n\s*/g, ' '))}`);
+  return [heading, ...lines].join('\n');
+}
+
 export async function validateUpdate(
   projectRoot: string,
   id: string,
@@ -439,7 +460,7 @@ export async function validateUpdate(
 
   try {
     state.skillRefresh = await refreshInstalledSkills(state.stageRoot);
-    if (!state.skillRefresh.success) throw new Error('One or more installed skills failed to refresh');
+    if (!state.skillRefresh.success) throw new Error(skillRefreshFailure(state.skillRefresh));
     commitStageChanges(state, runtime, 'chore: refresh installed skill payloads');
     refreshPreparedState(state, runtime);
 
@@ -479,11 +500,7 @@ export async function validateUpdate(
         state.skillRefresh.skills.push(...report.skills);
         state.skillRefresh.selected.push(...report.selected);
         state.skillRefresh.success &&= report.success;
-        if (!report.success) {
-          throw new Error(
-            `Gateway skill did not fully apply: ${report.skills.flatMap((skill) => skill.errors).join('; ')}`,
-          );
-        }
+        if (!report.success) throw new Error(skillRefreshFailure(report, 'Gateway skill did not fully apply:'));
         commitStageChanges(state, runtime, 'chore: materialize selected gateway');
         refreshPreparedState(state, runtime);
       }

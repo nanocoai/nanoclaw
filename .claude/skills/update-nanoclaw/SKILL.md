@@ -174,6 +174,14 @@ Bun dependencies does not require Bun on the host: refresh runs the exact Bun
 version pinned by `container/Dockerfile` through pnpm. Any selected skill
 refresh or validation failure blocks cutover and the completion stamp.
 
+A refresh failure names each failed skill and its error, shortened. The full
+text is under `skillRefresh` in:
+
+```bash
+pnpm exec tsx "$controller_dir/scripts/update-nanoclaw.ts" status \
+  --project-root "$PWD" --id "$id"
+```
+
 Fix only failures caused by the staged update, inside `stageRoot`, commit the
 fix, and re-run validation. Do not mutate the live checkout to repair staging.
 
