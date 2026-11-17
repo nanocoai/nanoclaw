@@ -121,6 +121,12 @@ function scratchRoot(): string {
     ['const STEPS = {', '  // >>> nanoclaw:setup-steps', '  // <<< nanoclaw:setup-steps', '};', ''].join('\n'),
   );
   writeFileSync(join(root, 'container/cli-tools.json'), '[]\n');
+  writeFileSync(
+    join(root, 'container/Dockerfile'),
+    ['FROM node:22-slim', '# >>> nanoclaw:provider-binaries', '# <<< nanoclaw:provider-binaries', 'USER node', ''].join(
+      '\n',
+    ),
+  );
   return root;
 }
 
