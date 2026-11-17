@@ -4,7 +4,7 @@
  * ~/.codex/auth.json is copied: rotating one session from two consumers
  * would invalidate it. Both setup entry points use this provider hook.
  */
-import { spawn, spawnSync } from 'child_process';
+import { type ChildProcess, spawn, spawnSync } from 'child_process';
 import { getCredentialStore, type ProviderCredentialStore } from '../gateways/credential-store.js';
 import fs from 'fs';
 import os from 'os';
@@ -153,9 +153,19 @@ export function readPinnedCodexVersion(root: string): string | undefined {
   }
 }
 
+/** OpenAI's installer (no sudo, into ~/.local/bin), then npm for a prefix it can write. */
+export function codexInstallCommands(version?: string): string[] {
+  return version
+    ? [
+        `curl -fsSL https://chatgpt.com/codex/install.sh | sh -s -- --release ${version}`,
+        `npm install -g @openai/codex@${version}`,
+      ]
+    : ['curl -fsSL https://chatgpt.com/codex/install.sh | sh', 'npm install -g @openai/codex'];
+}
+
 type CodexCli =
   | { ok: true; command: string; args: string[]; cwd?: string }
-  | { ok: false; error: string; message: string; detail?: string[] };
+  | { ok: false; error: string; message: string; detail?: string[]; install: string[] };
 
 /**
  * The host's `codex` when it runs; otherwise the version pinned for the image,
@@ -180,7 +190,8 @@ export function resolveCodexCli(root: string, scratch: string): CodexCli {
       ok: false,
       error: 'codex_cli_missing',
       message:
-        "The Codex CLI isn't installed on this machine, and container/cli-tools.json has no exact @openai/codex version to run instead. Run the /add-codex skill again, then re-run setup — or choose the API key option instead.",
+        "The Codex CLI isn't installed on this machine, and container/cli-tools.json has no exact @openai/codex version to run instead. Install the Codex CLI (below) or run the /add-codex skill again, then re-run setup — or choose the API key option instead.",
+      install: codexInstallCommands(),
     };
   }
 
@@ -208,14 +219,16 @@ export function resolveCodexCli(root: string, scratch: string): CodexCli {
     return {
       ok: false,
       error: 'codex_npx_missing',
-      message: `The Codex CLI isn't installed on this machine, and npx isn't available to run the pinned version ${version}. Install npm, then re-run setup — or choose the API key option instead.`,
+      message: `The Codex CLI isn't installed on this machine, and npx isn't available to run the pinned version ${version}. Install the Codex CLI (below), then re-run setup in a new terminal — or choose the API key option instead.`,
+      install: codexInstallCommands(version),
     };
   }
   if (fetched.status !== 0) {
     return {
       ok: false,
       error: 'codex_npx_failed',
-      message: `Couldn't run the pinned Codex CLI ${version} with npx (details below). Check that this machine can reach the npm registry, then re-run setup — or choose the API key option instead.`,
+      message: `Couldn't run the pinned Codex CLI ${version} with npx (details below). Check that this machine can reach the npm registry, or install the Codex CLI (below), then re-run setup — or choose the API key option instead.`,
+      install: codexInstallCommands(version),
       // npm's own error lines, or the spawn error, name the actual cause.
       detail: (fetched.error ? fetched.error.message : String(fetched.stderr ?? ''))
         .split('\n')
@@ -238,17 +251,72 @@ export async function runCodexLoginAuth(
   // Session-isolation invariant: the login runs under a
   // throwaway CODEX_HOME so the vaulted session is dedicated to the gateway
   // and never shared with the user's personal ~/.codex.
-  const loginHome = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-vault-login-'));
-  // Holds a live credential after login — must go on every exit path. The
-  // failure branches call process.exit, which skips finally blocks, so each
-  // removes it explicitly.
+  const loginHome = makeLoginHome(root);
+  // Holds a live credential after login, so it goes on every exit path:
+  // `finally` for returns and throws, the exit hook for process.exit (which
+  // skips finally), and the signal hook for Ctrl-C, SIGTERM and a hangup.
   const removeLoginHome = (): void => fs.rmSync(loginHome, { recursive: true, force: true });
+  let login: ChildProcess | undefined;
+  const onSignal = (signal: NodeJS.Signals): void => {
+    detach();
+    login?.kill(signal);
+    removeLoginHome();
+    process.kill(process.pid, signal);
+  };
+  const detach = (): void => {
+    process.off('exit', removeLoginHome);
+    for (const signal of LOGIN_SIGNALS) process.off(signal, onSignal);
+  };
+  process.on('exit', removeLoginHome);
+  for (const signal of LOGIN_SIGNALS) process.on(signal, onSignal);
+  try {
+    await signIn(method, store, root, loginHome, (child) => (login = child));
+  } finally {
+    detach();
+    removeLoginHome();
+  }
+}
 
+const LOGIN_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const;
+const STALE_LOGIN_MS = 60 * 60 * 1000;
+
+/**
+ * A private throwaway CODEX_HOME under the install's git-ignored data/, not the
+ * system temp dir: Codex won't set up its helper binaries there and warns on
+ * every sign-in (#4449). A sign-in killed outright can't clean up and may leave
+ * a token behind, so leftovers over an hour old go first.
+ */
+function makeLoginHome(root: string): string {
+  const base = path.join(root, 'data', 'codex-login');
+  fs.mkdirSync(path.join(root, 'data'), { recursive: true });
+  fs.mkdirSync(base, { recursive: true, mode: 0o700 });
+  fs.chmodSync(base, 0o700);
+  for (const name of fs.readdirSync(base)) {
+    const dir = path.join(base, name);
+    try {
+      if (Date.now() - fs.statSync(dir).mtimeMs > STALE_LOGIN_MS) fs.rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // Gone already, or not ours to remove; the new home doesn't depend on it.
+    }
+  }
+  return fs.mkdtempSync(path.join(base, 'login-'));
+}
+
+async function signIn(
+  method: 'browser' | 'device',
+  store: ProviderCredentialStore,
+  root: string,
+  loginHome: string,
+  onSpawn: (child: ChildProcess) => void,
+): Promise<void> {
   const cli = resolveCodexCli(root, loginHome);
   if (!cli.ok) {
-    removeLoginHome();
     p.log.error(brandBody(cli.message));
     for (const line of cli.detail ?? []) console.log(k.dim(`   ${line}`));
+    console.log(k.dim("   Install the Codex CLI with OpenAI's installer (no sudo, into ~/.local/bin):"));
+    console.log(`     ${cli.install[0]}`);
+    console.log(k.dim('   or with npm, if it can install globally:'));
+    console.log(`     ${cli.install[1]}`);
     setupLog.step('auth', 'failed', 0, {
       PROVIDER: 'codex',
       METHOD: method,
@@ -269,12 +337,15 @@ export async function runCodexLoginAuth(
 
   const args = method === 'device' ? ['login', '--device-auth'] : ['login'];
   const start = Date.now();
-  const code = await runInherit(cli.command, [...cli.args, ...args], { CODEX_HOME: loginHome }, cli.cwd);
+  const code = await runInherit(cli.command, [...cli.args, ...args], {
+    env: { CODEX_HOME: loginHome },
+    cwd: cli.cwd,
+    onSpawn,
+  });
   const durationMs = Date.now() - start;
   console.log();
 
   if (code !== 0) {
-    removeLoginHome();
     setupLog.step('auth', 'failed', durationMs, { PROVIDER: 'codex', METHOD: method, EXIT_CODE: String(code) });
     p.log.error(
       brandBody(
@@ -286,7 +357,6 @@ export async function runCodexLoginAuth(
 
   const authJsonPath = path.join(loginHome, 'auth.json');
   if (!fs.existsSync(authJsonPath)) {
-    removeLoginHome();
     setupLog.step('auth', 'failed', durationMs, { PROVIDER: 'codex', METHOD: method, ERROR: 'auth_json_not_found' });
     p.log.error(
       brandBody('Codex login succeeded but no auth.json was written. Try again, or paste an API key instead.'),
@@ -297,7 +367,6 @@ export async function runCodexLoginAuth(
   try {
     await store.save('codex', { kind: 'oauth', file: authJsonPath });
   } catch (err) {
-    removeLoginHome();
     const message = storeFailureMessage(err);
     setupLog.step('auth', 'failed', durationMs, {
       PROVIDER: 'codex',
@@ -311,20 +380,24 @@ export async function runCodexLoginAuth(
     console.log(k.dim(`   ${message}`));
     process.exit(1);
   }
-  removeLoginHome();
   setupLog.step('auth', 'success', durationMs, { PROVIDER: 'codex', METHOD: method });
   p.log.success(
     brandBody('OpenAI account connected — credentials live in your selected gateway, never in the container.'),
   );
 }
 
-function runInherit(cmd: string, args: string[], extraEnv?: Record<string, string>, cwd?: string): Promise<number> {
+function runInherit(
+  cmd: string,
+  args: string[],
+  opts: { env?: Record<string, string>; cwd?: string; onSpawn?: (child: ChildProcess) => void } = {},
+): Promise<number> {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, {
-      cwd,
+      cwd: opts.cwd,
       stdio: 'inherit',
-      env: extraEnv ? { ...process.env, ...extraEnv } : process.env,
+      env: opts.env ? { ...process.env, ...opts.env } : process.env,
     });
+    opts.onSpawn?.(child);
     child.on('close', (code) => resolve(code ?? 1));
     child.on('error', () => resolve(1));
   });

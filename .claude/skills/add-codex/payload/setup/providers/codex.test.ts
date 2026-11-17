@@ -147,27 +147,42 @@ describe('offerCodexFailureAssist', () => {
 // session across two consumers gets the whole family invalidated server-side
 // when refresh tokens rotate (see the header of codex.ts).
 describe('runCodexLoginAuth', () => {
-  it('logs in under an isolated CODEX_HOME, vaults from it, and deletes it', async () => {
+  let root: string;
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-login-root-'));
     mockSpawnSync.mockReturnValue({ status: 0, stdout: '', stderr: '' });
-    mockExecFileSync.mockReturnValue('');
+  });
+  afterEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+    mockSpawn.mockReset();
+    mockSpawnSync.mockReset();
+    vi.restoreAllMocks();
+  });
 
-    let loginEnv: NodeJS.ProcessEnv | undefined;
+  /** Plays `codex login`: records its env and its home's mode, writes auth.json. */
+  function playLogin(): { env: () => NodeJS.ProcessEnv | undefined; mode: () => number | undefined } {
+    let env: NodeJS.ProcessEnv | undefined;
+    let mode: number | undefined;
     mockSpawn.mockImplementation((...args: unknown[]) => {
-      const opts = args[2] as { env?: NodeJS.ProcessEnv };
-      loginEnv = opts.env;
-      fs.writeFileSync(path.join(opts.env!.CODEX_HOME!, 'auth.json'), '{"tokens":{}}');
+      env = (args[2] as { env?: NodeJS.ProcessEnv }).env;
+      mode = fs.statSync(env!.CODEX_HOME!).mode & 0o777;
+      fs.writeFileSync(path.join(env!.CODEX_HOME!, 'auth.json'), '{"tokens":{}}');
       const child = new EventEmitter();
       setImmediate(() => child.emit('close', 0));
       return child;
     });
+    return { env: () => env, mode: () => mode };
+  }
 
+  it('logs in under an isolated CODEX_HOME, vaults from it, and deletes it', async () => {
+    const login = playLogin();
     const save = vi.fn(async (_provider, credential) => {
       expect(fs.existsSync(credential.file)).toBe(true);
     });
-    await runCodexLoginAuth('browser', { has: async () => false, save });
+    await runCodexLoginAuth('browser', { has: async () => false, save }, root);
 
     // The login spawn ran under a CODEX_HOME that is not the personal one.
-    const codexHome = loginEnv?.CODEX_HOME;
+    const codexHome = login.env()?.CODEX_HOME;
     expect(codexHome).toBeDefined();
     expect(codexHome).not.toBe(path.join(os.homedir(), '.codex'));
 
@@ -180,6 +195,73 @@ describe('runCodexLoginAuth', () => {
     // A host codex that runs is used as is; npx never comes into it.
     expect(mockSpawn.mock.calls[0].slice(0, 2)).toEqual(['codex', ['login']]);
     expect(mockSpawnSync.mock.calls.map((call: unknown[]) => call[0])).toEqual(['codex']);
+  });
+
+  // #4449: Codex won't set up its helper binaries under the system temp dir
+  // and warns on every sign-in, so the home lives in the install's data/.
+  it('keeps the throwaway home private, under data/codex-login', async () => {
+    const login = playLogin();
+    const listeners = () => ['exit', 'SIGINT', 'SIGTERM', 'SIGHUP'].map((event) => process.listenerCount(event));
+    const before = listeners();
+    await runCodexLoginAuth('device', { has: async () => false, save: vi.fn() }, root);
+
+    // The cleanup hooks last only as long as the sign-in.
+    expect(listeners()).toEqual(before);
+
+    const base = path.join(root, 'data', 'codex-login');
+    expect(path.dirname(login.env()!.CODEX_HOME!)).toBe(base);
+    expect(login.mode()).toBe(0o700);
+    expect(fs.statSync(base).mode & 0o777).toBe(0o700);
+    expect(fs.readdirSync(base)).toEqual([]);
+  });
+
+  it('removes a home that a killed sign-in left over an hour ago, and keeps a newer one', async () => {
+    const base = path.join(root, 'data', 'codex-login');
+    const stale = path.join(base, 'login-stale');
+    fs.mkdirSync(stale, { recursive: true });
+    fs.writeFileSync(path.join(stale, 'auth.json'), '{}');
+    fs.mkdirSync(path.join(base, 'login-recent'));
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    fs.utimesSync(stale, twoHoursAgo, twoHoursAgo);
+    playLogin();
+
+    await runCodexLoginAuth('device', { has: async () => false, save: vi.fn() }, root);
+
+    expect(fs.readdirSync(base)).toEqual(['login-recent']);
+  });
+
+  it('on SIGTERM stops the login, removes the home, and re-raises the signal', async () => {
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+    vi.spyOn(process, 'exit').mockImplementation((() => {
+      throw new Error('setup stopped');
+    }) as typeof process.exit);
+    const before = { term: process.listeners('SIGTERM'), int: process.listenerCount('SIGINT') };
+    const exitListeners = process.listenerCount('exit');
+    let home: string | undefined;
+    const child = Object.assign(new EventEmitter(), {
+      kill: vi.fn(() => {
+        setImmediate(() => child.emit('close', null));
+        return true;
+      }),
+    });
+    mockSpawn.mockImplementation((...args: unknown[]) => {
+      home = (args[2] as { env?: NodeJS.ProcessEnv }).env!.CODEX_HOME;
+      // Deliver it to the login's own handler only, not the test runner's.
+      const added = process.listeners('SIGTERM').filter((l) => !before.term.includes(l));
+      setImmediate(() => added.forEach((listener) => (listener as (s: NodeJS.Signals) => void)('SIGTERM')));
+      return child;
+    });
+
+    await expect(runCodexLoginAuth('device', { has: async () => false, save: vi.fn() }, root)).rejects.toThrow(
+      'setup stopped',
+    );
+
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(kill).toHaveBeenCalledWith(process.pid, 'SIGTERM');
+    expect(fs.existsSync(home!)).toBe(false);
+    expect(process.listeners('SIGTERM')).toEqual(before.term);
+    expect(process.listenerCount('SIGINT')).toBe(before.int);
+    expect(process.listenerCount('exit')).toBe(exitListeners);
   });
 });
 
@@ -195,6 +277,10 @@ describe('runCodexLoginAuth without a host Codex CLI', () => {
     '@openai/codex@0.169.0',
     '--',
     'codex',
+  ];
+  const PINNED_INSTALL = [
+    'curl -fsSL https://chatgpt.com/codex/install.sh | sh -s -- --release 0.169.0',
+    'npm install -g @openai/codex@0.169.0',
   ];
   const enoent = (cmd: string): NodeJS.ErrnoException =>
     Object.assign(new Error(`spawnSync ${cmd} ENOENT`), { code: 'ENOENT' });
@@ -275,7 +361,7 @@ describe('runCodexLoginAuth without a host Codex CLI', () => {
 
       const codexHome = login.env()?.CODEX_HOME;
       expect(codexHome).toBeDefined();
-      expect(codexHome).not.toBe(path.join(os.homedir(), '.codex'));
+      expect(path.dirname(codexHome!)).toBe(path.join(root, 'data', 'codex-login'));
       expect(save).toHaveBeenCalledWith('codex', { kind: 'oauth', file: path.join(codexHome!, 'auth.json') });
       expect(fs.existsSync(codexHome!)).toBe(false);
       expect(setupLog.step).toHaveBeenCalledWith('auth', 'success', expect.any(Number), {
@@ -329,6 +415,11 @@ describe('runCodexLoginAuth without a host Codex CLI', () => {
 
     expect(result).toMatchObject({ ok: false, error: 'codex_cli_missing' });
     expect(!result.ok && result.message).toContain('API key');
+    // No pin to name, so the install commands take the latest release.
+    expect(!result.ok && result.install).toEqual([
+      'curl -fsSL https://chatgpt.com/codex/install.sh | sh',
+      'npm install -g @openai/codex',
+    ]);
     expect(mockSpawnSync.mock.calls.map((call: unknown[]) => call[0])).toEqual(['codex']);
     expect(probeHomes()).toEqual([scratch]);
   });
@@ -339,7 +430,7 @@ describe('runCodexLoginAuth without a host Codex CLI', () => {
 
     const result = resolveCodexCli(root, scratch);
 
-    expect(result).toMatchObject({ ok: false, error: 'codex_npx_missing' });
+    expect(result).toMatchObject({ ok: false, error: 'codex_npx_missing', install: PINNED_INSTALL });
     expect(!result.ok && result.message).toMatch(/npx.*API key/);
   });
 
@@ -365,10 +456,12 @@ describe('runCodexLoginAuth without a host Codex CLI', () => {
       ok: false,
       error: 'codex_npx_failed',
       detail: ['npm error code ENOTFOUND', 'npm error network request failed'],
+      install: PINNED_INSTALL,
     });
     expect(!result.ok && result.message).toContain('API key');
 
-    // The same lines reach the terminal and logs/setup.log.
+    // npm's lines reach the terminal and logs/setup.log; the install
+    // commands only the terminal.
     vi.spyOn(process, 'exit').mockImplementation((() => {
       throw new Error('setup stopped');
     }) as typeof process.exit);
@@ -376,7 +469,9 @@ describe('runCodexLoginAuth without a host Codex CLI', () => {
     await expect(runCodexLoginAuth('device', { has: async () => false, save: vi.fn() }, root)).rejects.toThrow(
       'setup stopped',
     );
-    expect(log.mock.calls.some((call: unknown[]) => String(call[0]).includes('npm error code ENOTFOUND'))).toBe(true);
+    const printed = log.mock.calls.map((call: unknown[]) => String(call[0])).join('\n');
+    expect(printed).toContain('npm error code ENOTFOUND');
+    for (const command of PINNED_INSTALL) expect(printed).toContain(command);
     expect(setupLog.step).toHaveBeenCalledWith('auth', 'failed', 0, {
       PROVIDER: 'codex',
       METHOD: 'device',
@@ -444,7 +539,14 @@ describe('gateway store failures name their cause', () => {
     const save = vi.fn(async () => {
       throw failure;
     });
-    await expect(runCodexLoginAuth('device', { has: async () => false, save })).rejects.toThrow('setup stopped');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-store-root-'));
+    try {
+      await expect(runCodexLoginAuth('device', { has: async () => false, save }, root)).rejects.toThrow(
+        'setup stopped',
+      );
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
 
     expect(exit).toHaveBeenCalledWith(1);
     expect(setupLog.step).toHaveBeenCalledWith(
