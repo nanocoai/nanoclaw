@@ -151,6 +151,26 @@ describe('installed skill detection', () => {
       { name: 'slack-agent-flow', skillName: 'slack-agent-flow', kind: 'channel' },
     ]);
   });
+
+  it('reports no channel skill on a clean checkout, though trunk has add-dial and add-telegram setup lines', () => {
+    // The real skills and setup/index.ts, with the barrel as trunk ships it.
+    const repo = path.resolve(import.meta.dirname, '..');
+    const root = temp('nanoclaw-skills-detect-clean-');
+    fs.cpSync(path.join(repo, '.claude/skills'), path.join(root, '.claude/skills'), {
+      recursive: true,
+      filter: (src) => fs.statSync(src).isDirectory() || path.basename(src) === 'SKILL.md',
+    });
+    fs.cpSync(path.join(repo, 'setup/index.ts'), path.join(root, 'setup/index.ts'));
+    write(root, 'src/channels/index.ts', "import './cli.js';\n");
+    // Each skill appends a setup line trunk already has, so only the missing barrel import says it is not installed.
+    for (const name of ['dial', 'telegram']) {
+      const line = `'pair-${name}': () => import('./pair-${name}.js'),`;
+      expect(fs.readFileSync(path.join(root, `.claude/skills/add-${name}/SKILL.md`), 'utf8')).toContain(line);
+      expect(fs.readFileSync(path.join(root, 'setup/index.ts'), 'utf8')).toContain(line);
+    }
+
+    expect(detectInstalledSkills(root)).toEqual([]);
+  });
 });
 
 describe('registry refresh end to end', () => {
