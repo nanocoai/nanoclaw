@@ -347,6 +347,7 @@ echo "DEPS_OK=$DEPS_OK"`);
     cannotBeCreated(r.out, localBin);
     expect(r.out).not.toMatch(/not the reason|corepack could not|without root|corepack enable/);
     expect(logged()).toContain('Error: not the reason pnpm is missing\n');
+    expect(logged()).toMatch(/^mkdir: .+\nCould not create .+\/\.local\/bin: mkdir: .+$/m);
   });
 
   it('gives the last failure when corepack and then npm both fail without root', () => {
