@@ -46,6 +46,7 @@ import { ensureContainerConfig, getContainerConfig } from '../../db/container-co
 import { restartAgentGroupContainers } from '../../container-restart.js';
 import { configFromDb } from '../../container-config.js';
 import type { ContainerConfig } from '../../container-config.js';
+import { mountPolicy } from '../../drivers/index.js';
 // Side-effect import: registers the `groups-*` commands (including delete).
 import './groups.js';
 // Side-effect import: registers Claude's host contract (the `--speed` vocabulary source).
@@ -443,11 +444,15 @@ describe('groups config (host-only)', () => {
     expect(JSON.parse((await getContainerConfig(GID))!.additional_mounts)).toEqual([]);
   });
 
-  // Stored, these would make the driver refuse every start of the group.
+  // Stored, these would make the driver refuse every start of the group. A copy
+  // is fine advice for install content, never for keys and certificates.
   it.each([
-    ['the runner source', () => path.join(process.cwd(), 'container', 'agent-runner', 'src')],
-    ["the group's stamped plugins", () => path.join(GROUPS_DIR, 'p', 'plugins')],
-  ])('refuses to add a mount of %s, naming why', async (_label, host) => {
+    ['the runner source', () => path.join(process.cwd(), 'container', 'agent-runner', 'src'), 'install-surface', true],
+    ['the base instructions', () => path.join(process.cwd(), 'container', 'CLAUDE.md'), 'install-surface', true],
+    ["the group's stamped plugins", () => path.join(GROUPS_DIR, 'p', 'plugins'), 'install-surface', true],
+    ['the session materials', () => mountPolicy().materialsRoot, 'identity-material', false],
+    ['the gateway trust root', () => mountPolicy().gatewayTrustRoot, 'gateway-trust', false],
+  ])('refuses to add a mount of %s, naming why', async (_label, host, reserved, advisesCopy) => {
     const GID = 'ag-mount-protected';
     await createAgentGroup({ id: GID, name: 'p', folder: 'p', agent_provider: null, created_at: now() });
     await ensureContainerConfig(GID);
@@ -456,7 +461,9 @@ describe('groups config (host-only)', () => {
       { caller: 'host' },
     );
     expect(resp.ok).toBe(false);
-    expect((resp as { ok: false; error: { message: string } }).error.message).toMatch(/install-surface/);
+    const message = (resp as { ok: false; error: { message: string } }).error.message;
+    expect(message).toContain(reserved);
+    expect(/cop(y|ies)/i.test(message)).toBe(advisesCopy);
     expect(JSON.parse((await getContainerConfig(GID))!.additional_mounts)).toEqual([]);
   });
 
