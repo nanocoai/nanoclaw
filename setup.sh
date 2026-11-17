@@ -241,6 +241,7 @@ install_deps() {
     if ! command -v pnpm >/dev/null 2>&1; then
       local user_bin="$HOME/.local/bin"
       log "pnpm not on PATH after corepack enable — retrying into $user_bin"
+      log_mark
       if ! said=$(mkdir -p "$user_bin" 2>&1); then
         printf '%s\n' "$said" >> "$LOG_FILE"
         pnpm_why="$user_bin cannot be created"
@@ -248,8 +249,7 @@ install_deps() {
         pnpm_error="$ERROR_LINE"
         pnpm_todo="$ERROR_TODO"
         log "Could not create $user_bin: $pnpm_error"
-      # tee: the log gets corepack's output as it comes, not when corepack ends.
-      elif said=$(corepack enable --install-directory "$user_bin" pnpm 2>&1 | tee -a "$LOG_FILE") \
+      elif corepack enable --install-directory "$user_bin" pnpm >> "$LOG_FILE" 2>&1 \
           && [ -x "$user_bin/pnpm" ]; then
         export PATH="$PATH:$user_bin"
         hash -r 2>/dev/null || true
@@ -257,7 +257,7 @@ install_deps() {
       else
         # This try needs no root, so what corepack said is why pnpm is missing.
         pnpm_why="corepack could not put pnpm into $user_bin"
-        first_error_line "$said"
+        log_error_line
         pnpm_error="$ERROR_LINE"
         pnpm_todo="Fix that, then re-run setup. corepack's full output is in $LOG_FILE"
         log "corepack enable into $user_bin failed"
@@ -297,6 +297,7 @@ install_deps() {
       # and the service unit already have on PATH.
       log "npm install -g failed — retrying with a user-owned prefix"
       NPM_LOCAL_PREFIX="$HOME/.local"
+      log_mark
       if ! said=$(mkdir -p "$NPM_LOCAL_PREFIX" 2>&1); then
         printf '%s\n' "$said" >> "$LOG_FILE"
         pnpm_why="$NPM_LOCAL_PREFIX cannot be created"
@@ -304,13 +305,12 @@ install_deps() {
         pnpm_error="$ERROR_LINE"
         pnpm_todo="$ERROR_TODO"
         log "Could not create $NPM_LOCAL_PREFIX: $pnpm_error"
-      # tee: the log gets npm's output as it comes, not when npm ends.
-      elif said=$(npm install -g "pnpm@${pinned}" --prefix "$NPM_LOCAL_PREFIX" 2>&1 | tee -a "$LOG_FILE"); then
+      elif npm install -g "pnpm@${pinned}" --prefix "$NPM_LOCAL_PREFIX" >> "$LOG_FILE" 2>&1; then
         export PATH="$PATH:$NPM_LOCAL_PREFIX/bin"
         log "Installed pnpm@${pinned} to user-owned prefix: $NPM_LOCAL_PREFIX"
       else
         # This try needs no root, so what npm said is why pnpm is missing.
-        first_error_line "$said"
+        log_error_line
         pnpm_error="$ERROR_LINE"
         if npm --version >/dev/null 2>&1; then
           pnpm_why="npm failed, also when installing into ~/.local"

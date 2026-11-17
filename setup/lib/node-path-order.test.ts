@@ -26,7 +26,7 @@ function which(cmd: string): string {
 }
 
 const BASH = which('bash');
-const TOOLS = ['bash', 'cp', 'grep', 'head', 'mkdir', 'sed', 'sleep', 'tee'].map(
+const TOOLS = ['bash', 'cp', 'grep', 'head', 'mkdir', 'sed', 'sleep', 'tail', 'wc'].map(
   (tool) => [tool, which(tool)] as const,
 );
 
@@ -311,6 +311,19 @@ echo "DEPS_OK=$DEPS_OK"`);
     expect(r.out).not.toContain('corepack enable');
     expect(r.out).toContain('DEPS_OK=false');
     expect(r.status).toBe(0);
+  });
+
+  it("shows the error of corepack's try into ~/.local/bin, not of its first try", () => {
+    fakeNode(bin, '24.22.1');
+    stub(
+      bin,
+      'corepack',
+      'if [ "$2" = --install-directory ]; then echo "Error: the shim folder is full" >&2; else echo "Error: EACCES next to node" >&2; fi; exit 1',
+    );
+    const r = installDeps();
+    expect(r.out).toMatch(/^ {2}Error: the shim folder is full$/m);
+    expect(r.out).not.toContain('EACCES next to node');
+    expect(logged()).toContain('Error: EACCES next to node\n');
   });
 
   it('says so when corepack reports success but leaves no pnpm', () => {
