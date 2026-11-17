@@ -1,9 +1,10 @@
 /**
  * A group with extra packages runs its own image, built FROM the agent image.
  * When the agent image is rebuilt (update, setup, manual build), the group's
- * image is rebuilt before it spawns again. A stub `docker` on PATH plays the
+ * image is rebuilt at host start or when the group next spawns. A stub `docker` on PATH plays the
  * daemon: it reports the agent image id and the group image's derived-from
  * label, and a build stamps the current agent image id, as the real one does.
+ * A `build-hold` file keeps a build running until the test removes it.
  */
 import fs from 'fs';
 import path from 'path';
@@ -76,6 +77,11 @@ function failBuilds(fail: boolean): void {
   if (fail) fs.writeFileSync(file, '');
   else fs.rmSync(file, { force: true });
 }
+function holdBuilds(hold: boolean): void {
+  const file = path.join(stateDir, 'build-hold');
+  if (hold) fs.writeFileSync(file, '');
+  else fs.rmSync(file, { force: true });
+}
 function builds(): string[][] {
   return fs
     .readdirSync(callsDir)
@@ -100,6 +106,7 @@ if [ "$1" = image ]; then
   cat "${stateDir}/label"; exit 0
 fi
 if [ "$1" = build ]; then
+  while [ -f "${stateDir}/build-hold" ]; do sleep 0.05; done
   [ -f "${stateDir}/build-fails" ] && { echo "E: Unable to locate package curl" >&2; exit 1; }
   cp "${stateDir}/base-id" "${stateDir}/label"
 fi
@@ -121,6 +128,7 @@ beforeEach(async () => {
   setAgentImage('sha256:new');
   setGroupImageBuiltOn('sha256:old');
   failBuilds(false);
+  holdBuilds(false);
   capabilities.mockReturnValue({ imageBuild: true });
   vi.mocked(log.warn).mockClear();
   const db = await initTestDb();
@@ -172,6 +180,22 @@ describe('refreshStaleGroupImage', () => {
     expect(fs.readdirSync(callsDir)).toHaveLength(0);
   });
 
+  it('skips a group re-pinned to another image after the check was queued', async () => {
+    await updateContainerConfigScalars('ag-1', { image_tag: 'registry.example/custom:1' });
+    await refreshStaleGroupImage('ag-1', GROUP_TAG);
+    expect(builds()).toHaveLength(0);
+  });
+
+  it('keeps a re-pin made while the rebuild runs', async () => {
+    holdBuilds(true);
+    const refresh = refreshStaleGroupImage('ag-1', GROUP_TAG);
+    await vi.waitFor(() => expect(builds()).toHaveLength(1));
+    await updateContainerConfigScalars('ag-1', { image_tag: 'registry.example/custom:1' });
+    holdBuilds(false);
+    await refresh;
+    expect((await getContainerConfig('ag-1'))?.image_tag).toBe('registry.example/custom:1');
+  });
+
   it('builds once when several spawns of the same group check at the same time', async () => {
     await Promise.all([1, 2, 3].map(() => refreshStaleGroupImage('ag-1', GROUP_TAG)));
     expect(builds()).toHaveLength(1);
@@ -217,22 +241,20 @@ describe('spawn', () => {
   };
 
   beforeEach(() => {
-    let built = 0;
     prepare.mockReset();
-    prepare.mockImplementation(async (spec: SessionSpec) => {
-      built = builds().length;
-      return {
-        key: spec.key,
-        name: 'nanoclaw-v2-sess-1',
-        async start() {},
-        async stop() {},
-        async status() {
-          return { phase: 'running' };
-        },
-        onTerminal() {},
-        buildsBeforePrepare: () => built,
-      } as unknown as SupervisedHandle;
-    });
+    prepare.mockImplementation(
+      async (spec: SessionSpec) =>
+        ({
+          key: spec.key,
+          name: 'nanoclaw-v2-sess-1',
+          async start() {},
+          async stop() {},
+          async status() {
+            return { phase: 'running' };
+          },
+          onTerminal() {},
+        }) as unknown as SupervisedHandle,
+    );
     resetGatewayProvider({
       kind: 'fixture',
       agentSkills: [],
@@ -242,6 +264,7 @@ describe('spawn', () => {
   });
 
   afterEach(async () => {
+    holdBuilds(false);
     if (isContainerRunning('sess-1')) {
       killContainer('sess-1', 'test-teardown');
       await vi.waitFor(() => expect(isContainerRunning('sess-1')).toBe(false));
@@ -249,12 +272,14 @@ describe('spawn', () => {
     resetGatewayProvider();
   });
 
-  it('rebuilds a stale group image before the session container is prepared', async () => {
+  it('starts the rebuild of a stale group image without holding the spawn', async () => {
+    holdBuilds(true);
     await createSession(session);
     expect(await wakeContainer(session)).toBe(true);
-    const handle = (await prepare.mock.results[0]?.value) as { buildsBeforePrepare(): number };
-    expect(handle.buildsBeforePrepare()).toBe(1);
     const spec = prepare.mock.calls[0]?.[0] as SessionSpec;
     expect(spec.containers.find((c) => c.role === 'agent')?.image).toBe(GROUP_TAG);
+    await vi.waitFor(() => expect(builds()).toHaveLength(1));
+    holdBuilds(false);
+    await vi.waitFor(() => expect(fs.readFileSync(path.join(stateDir, 'label'), 'utf8')).toBe('sha256:new'));
   });
 });

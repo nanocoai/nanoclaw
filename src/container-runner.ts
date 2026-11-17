@@ -458,8 +458,10 @@ async function spawnContainer(session: Session): Promise<void> {
   // the config object, threaded through provider resolution, buildMounts,
   // and buildContainerArgs so we don't re-read.
   const containerConfig = await materializeContainerJson(agentGroup.id);
-  // A rebuild keeps the group's tag, so containerConfig needs no re-read.
-  await refreshStaleGroupImage(agentGroup.id, containerConfig.imageTag);
+  // Not awaited: a rebuild can take minutes, and callers (the sweep, inbound
+  // routing) wait on this spawn. This container may start on the old image;
+  // the next spawn gets the new one.
+  void refreshStaleGroupImage(agentGroup.id, containerConfig.imageTag);
 
   const providerName = resolveProviderName(session.agent_provider, containerConfig.provider);
   await initGroupFilesystem(agentGroup, { provider: providerName });
@@ -1620,7 +1622,10 @@ const failedGroupImageRefreshes = new Map<string, string>();
 
 async function inspectImage(ref: string, format: string): Promise<string | null> {
   try {
-    const { stdout } = await execFileAsync(CONTAINER_RUNTIME_BIN, ['image', 'inspect', '--format', format, ref]);
+    // Bounded: a hung daemon must not hold the group's job queue forever.
+    const { stdout } = await execFileAsync(CONTAINER_RUNTIME_BIN, ['image', 'inspect', '--format', format, ref], {
+      timeout: 30_000,
+    });
     return stdout.trim();
   } catch {
     return null;
@@ -1641,6 +1646,8 @@ export async function refreshStaleGroupImage(agentGroupId: string, imageTag: str
   try {
     if (!getSessionDriver().capabilities().imageBuild) return;
     await runGroupImageJob(agentGroupId, async () => {
+      // Re-read: a queued job can run after the operator re-pinned the group.
+      if ((await getContainerConfig(agentGroupId))?.image_tag !== derivedTag) return;
       const baseId = await inspectImage(CONTAINER_IMAGE, '{{.Id}}');
       if (!baseId) return;
       const builtOn = await inspectImage(derivedTag, `{{index .Config.Labels "${DERIVED_FROM_LABEL}"}}`);
@@ -1652,7 +1659,8 @@ export async function refreshStaleGroupImage(agentGroupId: string, imageTag: str
         baseId,
       });
       try {
-        await buildAgentGroupImageNow(agentGroupId);
+        // The pin already names this tag; writing it again could undo a re-pin made during the build.
+        await buildAgentGroupImageNow(agentGroupId, { pin: false });
         failedGroupImageRefreshes.delete(agentGroupId);
       } catch (err) {
         failedGroupImageRefreshes.set(agentGroupId, baseId);
@@ -1680,7 +1688,7 @@ export async function refreshStaleGroupImages(): Promise<void> {
   for (const row of rows) await refreshStaleGroupImage(row.agent_group_id, row.image_tag);
 }
 
-async function buildAgentGroupImageNow(agentGroupId: string): Promise<void> {
+async function buildAgentGroupImageNow(agentGroupId: string, { pin = true } = {}): Promise<void> {
   const agentGroup = await getAgentGroup(agentGroupId);
   if (!agentGroup) throw new Error('Agent group not found');
 
@@ -1760,7 +1768,7 @@ async function buildAgentGroupImageNow(agentGroupId: string): Promise<void> {
   }
 
   // Store the image tag in the DB
-  await updateContainerConfigScalars(agentGroup.id, { image_tag: imageTag });
+  if (pin) await updateContainerConfigScalars(agentGroup.id, { image_tag: imageTag });
 
   log.info('Per-agent-group image built', { agentGroupId, imageTag });
 }
