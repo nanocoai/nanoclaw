@@ -131,6 +131,8 @@ pnpm exec tsx setup/index.ts --step provider-auth codex
 
 The same walk-through fresh installs get from the setup picker: ChatGPT subscription (browser login or device pairing) or an OpenAI API key, landed in the selected gateway’s vault. Idempotent — it short-circuits when a matching secret already exists. It finishes with the install check.
 
+The ChatGPT sign-in needs no Codex CLI on the host: it uses the host's `codex` when one runs, and otherwise runs the exact version pinned in `container/cli-tools.json` through npx, from the user's npm cache, with no global install.
+
 ## Use it
 
 After applying the steps above by hand on a running NanoClaw host, restart it first so it loads the Codex registration: `bash setup/lib/restart.sh`. The provider-auth shortcut already did this. A host still on the old build doesn't know Codex, and Codex groups fail on their first message.

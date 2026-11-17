@@ -3,7 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Mock child_process so runCodexLoginAuth never spawns a real codex CLI; the
 // spawn stand-in plays `codex login` writing auth.json into whatever
@@ -34,6 +34,7 @@ import * as setupLog from '../logs.js';
 import {
   buildCodexFailurePrompt,
   offerCodexFailureAssist,
+  resolveCodexCli,
   runCodexApiKeyAuth,
   runCodexInstallCheck,
   runCodexLoginAuth,
@@ -175,6 +176,173 @@ describe('runCodexLoginAuth', () => {
 
     // The isolated dir holds a live credential — gone once vaulted.
     expect(fs.existsSync(codexHome!)).toBe(false);
+
+    // A host codex that runs is used as is; npx never comes into it.
+    expect(mockSpawn.mock.calls[0].slice(0, 2)).toEqual(['codex', ['login']]);
+    expect(mockSpawnSync.mock.calls.map((call: unknown[]) => call[0])).toEqual(['codex']);
+  });
+});
+
+// #3791: a host without `codex` runs the image's pinned CLI through npx
+// instead of asking for a global install, which fails for users without
+// write access to the npm prefix.
+describe('runCodexLoginAuth without a host Codex CLI', () => {
+  const NPX_PREFIX = [
+    '--yes',
+    '--ignore-scripts',
+    '--loglevel=error',
+    '--package',
+    '@openai/codex@0.169.0',
+    '--',
+    'codex',
+  ];
+  const enoent = (cmd: string): NodeJS.ErrnoException =>
+    Object.assign(new Error(`spawnSync ${cmd} ENOENT`), { code: 'ENOENT' });
+
+  let root: string;
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-npx-root-'));
+    fs.mkdirSync(path.join(root, 'container'));
+  });
+  afterEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+    mockSpawn.mockReset();
+    mockSpawnSync.mockReset();
+    vi.mocked(setupLog.step).mockClear();
+    vi.restoreAllMocks();
+  });
+
+  function writeManifest(tools: unknown): void {
+    fs.writeFileSync(path.join(root, 'container', 'cli-tools.json'), JSON.stringify(tools));
+  }
+
+  /** `codex` is not on PATH; `npx` behaves as given. */
+  function hostWithoutCodex(npx: { status: number | null; error?: Error }): void {
+    mockSpawnSync.mockImplementation((cmd: string) => {
+      if (cmd === 'codex') return { status: null, stdout: '', stderr: '', error: enoent('codex') };
+      if (cmd === 'npx') return { status: npx.status, stdout: 'codex-cli 0.169.0\n', stderr: '', error: npx.error };
+      throw new Error(`unexpected spawnSync ${cmd}`);
+    });
+  }
+
+  function playLogin(): { env: () => NodeJS.ProcessEnv | undefined } {
+    let env: NodeJS.ProcessEnv | undefined;
+    mockSpawn.mockImplementation((...args: unknown[]) => {
+      env = (args[2] as { env?: NodeJS.ProcessEnv }).env;
+      fs.writeFileSync(path.join(env!.CODEX_HOME!, 'auth.json'), '{"tokens":{}}');
+      const child = new EventEmitter();
+      setImmediate(() => child.emit('close', 0));
+      return child;
+    });
+    return { env: () => env };
+  }
+
+  it.each([
+    ['device', ['login', '--device-auth']],
+    ['browser', ['login']],
+  ] as const)(
+    'signs in (%s) with the pinned CLI through npx, under an isolated CODEX_HOME',
+    async (method, loginArgs) => {
+      writeManifest([
+        { name: 'agent-browser', version: '0.27.1' },
+        { name: '@openai/codex', version: '0.169.0' },
+      ]);
+      hostWithoutCodex({ status: 0 });
+      const login = playLogin();
+      // Production passes no root: the manifest is read from the cwd setup.sh set.
+      vi.spyOn(process, 'cwd').mockReturnValue(root);
+      const stdout = vi.spyOn(process.stdout, 'write');
+
+      const save = vi.fn(async (_provider, credential) => {
+        expect(fs.existsSync(credential.file)).toBe(true);
+      });
+      await runCodexLoginAuth(method, { has: async () => false, save });
+
+      expect(mockSpawnSync).toHaveBeenCalledWith(
+        'npx',
+        [...NPX_PREFIX, '--version'],
+        expect.objectContaining({ cwd: root }),
+      );
+      expect(mockSpawn).toHaveBeenCalledWith(
+        'npx',
+        [...NPX_PREFIX, ...loginArgs],
+        expect.objectContaining({ cwd: root, stdio: 'inherit' }),
+      );
+
+      const codexHome = login.env()?.CODEX_HOME;
+      expect(codexHome).toBeDefined();
+      expect(codexHome).not.toBe(path.join(os.homedir(), '.codex'));
+      expect(save).toHaveBeenCalledWith('codex', { kind: 'oauth', file: path.join(codexHome!, 'auth.json') });
+      expect(fs.existsSync(codexHome!)).toBe(false);
+      expect(setupLog.step).toHaveBeenCalledWith('auth', 'success', expect.any(Number), {
+        PROVIDER: 'codex',
+        METHOD: method,
+      });
+      // The e2e wizard harness proves the fallback ran by this exact line.
+      const printed = stdout.mock.calls.map((call: unknown[]) => String(call[0])).join('');
+      expect(printed).toContain('Preparing the pinned Codex CLI (0.169.0) for sign-in');
+    },
+  );
+
+  // The spec goes to `npx --yes`, which runs on the host: anything but an
+  // exact pin fails closed before npx is ever spawned.
+  it.each([
+    ['no manifest', undefined],
+    ['no codex entry', [{ name: 'agent-browser', version: '0.27.1' }]],
+    ['a range', [{ name: '@openai/codex', version: '^0.169.0' }]],
+    ['latest', [{ name: '@openai/codex', version: 'latest' }]],
+    ['not a list', { name: '@openai/codex', version: '0.169.0' }],
+  ])('refuses to fetch anything with %s', async (_label, tools) => {
+    if (tools !== undefined) writeManifest(tools);
+    hostWithoutCodex({ status: 0 });
+    playLogin();
+
+    const result = resolveCodexCli(root);
+
+    expect(result).toMatchObject({ ok: false, error: 'codex_cli_missing' });
+    expect(!result.ok && result.message).toContain('API key');
+    expect(mockSpawnSync.mock.calls.map((call: unknown[]) => call[0])).toEqual(['codex']);
+  });
+
+  it('names npx and the API key option when npx is not installed', () => {
+    writeManifest([{ name: '@openai/codex', version: '0.169.0' }]);
+    hostWithoutCodex({ status: null, error: enoent('npx') });
+
+    const result = resolveCodexCli(root);
+
+    expect(result).toMatchObject({ ok: false, error: 'codex_npx_missing' });
+    expect(!result.ok && result.message).toMatch(/npx.*API key/);
+  });
+
+  it('names the API key option when the pinned CLI fails to run', () => {
+    writeManifest([{ name: '@openai/codex', version: '0.169.0' }]);
+    hostWithoutCodex({ status: 1 });
+
+    const result = resolveCodexCli(root);
+
+    expect(result).toMatchObject({ ok: false, error: 'codex_npx_failed' });
+    expect(!result.ok && result.message).toContain('API key');
+  });
+
+  it('stops setup before any login when the pinned CLI fails to run', async () => {
+    writeManifest([{ name: '@openai/codex', version: '0.169.0' }]);
+    hostWithoutCodex({ status: 1 });
+    playLogin();
+    const exit = vi.spyOn(process, 'exit').mockImplementation((() => {
+      throw new Error('setup stopped');
+    }) as typeof process.exit);
+
+    await expect(runCodexLoginAuth('device', { has: async () => false, save: vi.fn() }, root)).rejects.toThrow(
+      'setup stopped',
+    );
+
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(setupLog.step).toHaveBeenCalledWith('auth', 'failed', 0, {
+      PROVIDER: 'codex',
+      METHOD: 'device',
+      ERROR: 'codex_npx_failed',
+    });
+    expect(mockSpawn).not.toHaveBeenCalled();
   });
 });
 
