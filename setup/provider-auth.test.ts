@@ -60,8 +60,9 @@ vi.mock('./lib/container-build.js', () => ({
     return fixture.build;
   },
 }));
-vi.mock('./lib/host-restart.js', () => ({
-  HOST_RESTART_COMMAND: 'pnpm run build && bash setup/lib/restart.sh',
+// The real HOST_RESTART_COMMAND, so these tests check the command operators see.
+vi.mock('./lib/host-restart.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./lib/host-restart.js')>()),
   restartHost: () => {
     fixture.order.push('restart-host');
     return fixture.restart;
@@ -192,7 +193,7 @@ describe('standalone provider setup flow', () => {
     expect(fixture.order).toEqual(['install', 'build', 'restart-host', 'load-contracts', 'auth']);
     expect(fixture.check).toHaveBeenCalledTimes(1);
     expect(error).toHaveBeenCalledTimes(1);
-    expect(error.mock.calls[0][0]).toContain('pnpm run build && bash setup/lib/restart.sh');
+    expect(error.mock.calls[0][0]).toContain('run: pnpm run build --noEmitOnError && bash setup/lib/restart.sh');
     expect(process.exitCode).toBe(1);
   });
 
@@ -202,7 +203,7 @@ describe('standalone provider setup flow', () => {
     await run(['opencode', '--refresh']);
     expect(error).toHaveBeenCalledTimes(1);
     expect(error.mock.calls[0][0]).toMatch(
-      /stays on its last build.*Fix the build errors above, then run: pnpm run build/,
+      /stays on its last build.*Fix the build errors above, then run: pnpm run build --noEmitOnError && bash setup\/lib\/restart\.sh$/,
     );
     expect(process.exitCode).toBe(1);
   });

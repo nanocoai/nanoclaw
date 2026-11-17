@@ -1,8 +1,14 @@
 // The service runs the dist/ it loaded at start; rebuild and restart it after setup adds host code.
 import { spawnSync } from 'child_process';
 
-/** What an operator runs by hand when the automatic reload fails. */
-export const HOST_RESTART_COMMAND = 'pnpm run build && bash setup/lib/restart.sh';
+// A build with type errors must not leave new JS in dist/ for the next restart to load.
+const STEPS: ReadonlyArray<['build' | 'restart', string, string[]]> = [
+  ['build', 'pnpm', ['run', 'build', '--noEmitOnError']],
+  ['restart', 'bash', ['setup/lib/restart.sh']],
+];
+
+/** What an operator runs by hand when the automatic reload fails: the same steps. */
+export const HOST_RESTART_COMMAND = STEPS.map(([, command, args]) => [command, ...args].join(' ')).join(' && ');
 
 /** `no-service`: nothing runs this checkout's host, so there is nothing to reload. */
 export type HostRestartResult =
@@ -12,12 +18,7 @@ export type HostRestartResult =
 
 /** Rebuild the host and restart its service. Prints only what the build and restart.sh print. */
 export function restartHost(projectRoot: string = process.cwd()): HostRestartResult {
-  // A build with type errors must not leave new JS in dist/ for the next restart to load.
-  const steps: Array<['build' | 'restart', string, string[]]> = [
-    ['build', 'pnpm', ['run', 'build', '--noEmitOnError']],
-    ['restart', 'bash', ['setup/lib/restart.sh']],
-  ];
-  for (const [name, command, args] of steps) {
+  for (const [name, command, args] of STEPS) {
     // restart.sh's stderr is held back: on no-service the caller says it, so its own line would repeat.
     const stderr = name === 'restart' ? 'pipe' : 'inherit';
     const res = spawnSync(command, args, { cwd: projectRoot, stdio: ['ignore', 'inherit', stderr], encoding: 'utf8' });

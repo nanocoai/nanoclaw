@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { restartHost } from './host-restart.js';
+import { HOST_RESTART_COMMAND, restartHost } from './host-restart.js';
 
 const roots: string[] = [];
 const tempRoot = () => {
@@ -23,6 +23,24 @@ function checkout(buildExit: number, restartExit: number, restartSays = ''): str
   fs.writeFileSync(path.join(root, 'bin/pnpm'), record('build:$*', buildExit), { mode: 0o755 });
   fs.writeFileSync(path.join(root, 'setup/lib/restart.sh'), record('restart', restartExit, restartSays));
   vi.stubEnv('PATH', `${path.join(root, 'bin')}:${process.env.PATH}`);
+  return root;
+}
+/** A checkout with a last good dist/ and a type error in src/; `pnpm run build <flags>` is `tsc <flags>`. */
+function typeErrorCheckout(): string {
+  const root = tempRoot();
+  // Never a real pnpm in a temp dir: it can prune a linked node_modules.
+  fs.mkdirSync(path.join(root, 'bin'));
+  const tsc = path.resolve('node_modules/.bin/tsc');
+  fs.writeFileSync(path.join(root, 'bin/pnpm'), `#!/bin/sh\nshift 2\nexec '${tsc}' "$@"\n`, { mode: 0o755 });
+  vi.stubEnv('PATH', `${path.join(root, 'bin')}:${process.env.PATH}`);
+  fs.mkdirSync(path.join(root, 'setup/lib'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'setup/lib/restart.sh'), `echo restart >> "${root}/ran"\n`);
+  const compilerOptions = { outDir: 'dist', rootDir: 'src', types: [], skipLibCheck: true };
+  fs.writeFileSync(path.join(root, 'tsconfig.json'), JSON.stringify({ compilerOptions, include: ['src'] }));
+  fs.mkdirSync(path.join(root, 'src'));
+  fs.writeFileSync(path.join(root, 'src/index.ts'), "export const port: number = 'not a number';\n");
+  fs.mkdirSync(path.join(root, 'dist'));
+  fs.writeFileSync(path.join(root, 'dist/index.js'), '// last good build\n');
   return root;
 }
 const ran = (root: string) => fs.readFileSync(path.join(root, 'ran'), 'utf8').trim().split('\n');
@@ -62,20 +80,17 @@ describe.runIf(process.platform !== 'win32')('host restart', () => {
   });
 
   it('keeps the last good dist/ when the build has a type error', () => {
-    const root = tempRoot();
-    // `pnpm run build <flags>` is `tsc <flags>` here. Never a real pnpm in a temp dir: it can prune a linked node_modules.
-    fs.mkdirSync(path.join(root, 'bin'));
-    const tsc = path.resolve('node_modules/.bin/tsc');
-    fs.writeFileSync(path.join(root, 'bin/pnpm'), `#!/bin/sh\nshift 2\nexec '${tsc}' "$@"\n`, { mode: 0o755 });
-    vi.stubEnv('PATH', `${path.join(root, 'bin')}:${process.env.PATH}`);
-    const compilerOptions = { outDir: 'dist', rootDir: 'src', types: [], skipLibCheck: true };
-    fs.writeFileSync(path.join(root, 'tsconfig.json'), JSON.stringify({ compilerOptions, include: ['src'] }));
-    fs.mkdirSync(path.join(root, 'src'));
-    fs.writeFileSync(path.join(root, 'src/index.ts'), "export const port: number = 'not a number';\n");
-    fs.mkdirSync(path.join(root, 'dist'));
-    fs.writeFileSync(path.join(root, 'dist/index.js'), '// last good build\n');
+    const root = typeErrorCheckout();
     const result = restartHost(root);
     expect(fs.readFileSync(path.join(root, 'dist/index.js'), 'utf8')).toBe('// last good build\n');
     expect(result).toMatchObject({ status: 'failed', step: 'build' });
+  });
+
+  it('prints a command that keeps the last good dist/ too, run by hand before the type error is fixed', () => {
+    const root = typeErrorCheckout();
+    const res = spawnSync('/bin/sh', ['-c', HOST_RESTART_COMMAND], { cwd: root, encoding: 'utf8' });
+    expect(res.status).not.toBe(0);
+    expect(fs.readFileSync(path.join(root, 'dist/index.js'), 'utf8')).toBe('// last good build\n');
+    expect(fs.existsSync(path.join(root, 'ran'))).toBe(false);
   });
 });
