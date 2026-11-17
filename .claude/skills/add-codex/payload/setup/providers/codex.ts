@@ -154,75 +154,77 @@ export function readPinnedCodexVersion(root: string): string | undefined {
 }
 
 type CodexCli =
-  { ok: true; command: string; args: string[] } | { ok: false; error: string; message: string; detail?: string[] };
+  | { ok: true; command: string; args: string[]; cwd?: string }
+  | { ok: false; error: string; message: string; detail?: string[] };
 
 /**
  * The host's `codex` when it runs; otherwise the version pinned for the image,
  * run through npx from the user's npm cache (no global install, no sudo). The
  * spec goes to `npx --yes`, which runs on the host, so only an exact pin is used.
+ * `scratch` is a private throwaway dir: the probes' CODEX_HOME and npx's project.
  */
-export function resolveCodexCli(root: string): CodexCli {
-  // Any codex run, even `--version`, creates its CODEX_HOME (default
-  // ~/.codex), so the probes get a throwaway one like the login does.
-  const probeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-probe-'));
-  const probe = (cmd: string, args: string[]) =>
+export function resolveCodexCli(root: string, scratch: string): CodexCli {
+  // Any codex run, even `--version`, creates its CODEX_HOME (default ~/.codex).
+  const probe = (cmd: string, args: string[], cwd?: string) =>
     spawnSync(cmd, args, {
-      cwd: root,
-      env: { ...process.env, CODEX_HOME: probeHome },
+      cwd,
+      env: { ...process.env, CODEX_HOME: scratch },
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-  try {
-    if (probe('codex', ['--version']).status === 0) return { ok: true, command: 'codex', args: [] };
+  if (probe('codex', ['--version']).status === 0) return { ok: true, command: 'codex', args: [] };
 
-    const version = readPinnedCodexVersion(root);
-    if (!version) {
-      return {
-        ok: false,
-        error: 'codex_cli_missing',
-        message:
-          "The Codex CLI isn't installed on this machine, and container/cli-tools.json has no exact @openai/codex version to run instead. Run the /add-codex skill again, then re-run setup — or choose the API key option instead.",
-      };
-    }
-
-    // --ignore-scripts matches the image install (codex ships none); --loglevel
-    // keeps npm 11's warnings about the repo's pnpm-only .npmrc keys off the login.
-    const args = [
-      '--yes',
-      '--ignore-scripts',
-      '--loglevel=error',
-      '--package',
-      `@openai/codex@${version}`,
-      '--',
-      'codex',
-    ];
-    p.log.step(brandBody(`Preparing the pinned Codex CLI (${version}) for sign-in…`));
-    console.log(k.dim('   (no Codex CLI on this machine: npx fetches it once into your npm cache, no global install)'));
-    const fetched = probe('npx', [...args, '--version']);
-    if ((fetched.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') {
-      return {
-        ok: false,
-        error: 'codex_npx_missing',
-        message: `The Codex CLI isn't installed on this machine, and npx isn't available to run the pinned version ${version}. Install npm, then re-run setup — or choose the API key option instead.`,
-      };
-    }
-    if (fetched.status !== 0) {
-      return {
-        ok: false,
-        error: 'codex_npx_failed',
-        message: `Couldn't run the pinned Codex CLI ${version} with npx. Check that this machine can reach the npm registry, then re-run setup — or choose the API key option instead.`,
-        // npm's own error lines name the cause (network, registry, cache).
-        detail: String(fetched.stderr ?? '')
-          .split('\n')
-          .map((line) => line.trim().slice(0, 300))
-          .filter(Boolean)
-          .slice(0, 12),
-      };
-    }
-    return { ok: true, command: 'npx', args };
-  } finally {
-    fs.rmSync(probeHome, { recursive: true, force: true });
+  const version = readPinnedCodexVersion(root);
+  if (!version) {
+    return {
+      ok: false,
+      error: 'codex_cli_missing',
+      message:
+        "The Codex CLI isn't installed on this machine, and container/cli-tools.json has no exact @openai/codex version to run instead. Run the /add-codex skill again, then re-run setup — or choose the API key option instead.",
+    };
   }
+
+  // npx treats a matching package anywhere in its project's node_modules as
+  // installed and then runs whatever `codex` that tree exposes, so it runs in
+  // an empty private project rather than the repo.
+  const npxDir = path.join(scratch, 'npx');
+  fs.mkdirSync(npxDir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(npxDir, 'package.json'), '{ "private": true }\n');
+  // --ignore-scripts matches the image install (codex ships none); --loglevel
+  // keeps npm's notices, such as its update nag, off the sign-in screen.
+  const args = [
+    '--yes',
+    '--ignore-scripts',
+    '--loglevel=error',
+    '--package',
+    `@openai/codex@${version}`,
+    '--',
+    'codex',
+  ];
+  p.log.step(brandBody(`Preparing the pinned Codex CLI (${version}) for sign-in…`));
+  console.log(k.dim('   (no Codex CLI on this machine: npx fetches it once into your npm cache, no global install)'));
+  const fetched = probe('npx', [...args, '--version'], npxDir);
+  if ((fetched.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') {
+    return {
+      ok: false,
+      error: 'codex_npx_missing',
+      message: `The Codex CLI isn't installed on this machine, and npx isn't available to run the pinned version ${version}. Install npm, then re-run setup — or choose the API key option instead.`,
+    };
+  }
+  if (fetched.status !== 0) {
+    return {
+      ok: false,
+      error: 'codex_npx_failed',
+      message: `Couldn't run the pinned Codex CLI ${version} with npx (details below). Check that this machine can reach the npm registry, then re-run setup — or choose the API key option instead.`,
+      // npm's own error lines, or the spawn error, name the actual cause.
+      detail: (fetched.error ? fetched.error.message : String(fetched.stderr ?? ''))
+        .split('\n')
+        .map((line) => line.trim().slice(0, 300))
+        .filter(Boolean)
+        .slice(0, 12),
+    };
+  }
+  return { ok: true, command: 'npx', args, cwd: npxDir };
 }
 
 export async function runCodexLoginAuth(
@@ -232,8 +234,19 @@ export async function runCodexLoginAuth(
   root = process.cwd(),
 ): Promise<void> {
   store ??= await getCredentialStore();
-  const cli = resolveCodexCli(root);
+
+  // Session-isolation invariant: the login runs under a
+  // throwaway CODEX_HOME so the vaulted session is dedicated to the gateway
+  // and never shared with the user's personal ~/.codex.
+  const loginHome = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-vault-login-'));
+  // Holds a live credential after login — must go on every exit path. The
+  // failure branches call process.exit, which skips finally blocks, so each
+  // removes it explicitly.
+  const removeLoginHome = (): void => fs.rmSync(loginHome, { recursive: true, force: true });
+
+  const cli = resolveCodexCli(root, loginHome);
   if (!cli.ok) {
+    removeLoginHome();
     p.log.error(brandBody(cli.message));
     for (const line of cli.detail ?? []) console.log(k.dim(`   ${line}`));
     setupLog.step('auth', 'failed', 0, {
@@ -254,18 +267,9 @@ export async function runCodexLoginAuth(
   }
   console.log();
 
-  // Session-isolation invariant: the login runs under a
-  // throwaway CODEX_HOME so the vaulted session is dedicated to the gateway
-  // and never shared with the user's personal ~/.codex.
-  const loginHome = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-vault-login-'));
-  // Holds a live credential after login — must go on every exit path. The
-  // failure branches call process.exit, which skips finally blocks, so each
-  // removes it explicitly.
-  const removeLoginHome = (): void => fs.rmSync(loginHome, { recursive: true, force: true });
-
   const args = method === 'device' ? ['login', '--device-auth'] : ['login'];
   const start = Date.now();
-  const code = await runInherit(cli.command, [...cli.args, ...args], { CODEX_HOME: loginHome }, root);
+  const code = await runInherit(cli.command, [...cli.args, ...args], { CODEX_HOME: loginHome }, cli.cwd);
   const durationMs = Date.now() - start;
   console.log();
 
