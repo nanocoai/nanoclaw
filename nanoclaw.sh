@@ -71,6 +71,9 @@ for arg in "$@"; do
     export NANOCLAW_PROJECT_ROOT="$PROJECT_ROOT"
     # shellcheck source=setup/lib/install-slug.sh
     source "$PROJECT_ROOT/setup/lib/install-slug.sh"
+    # An invalid NANOCLAW_INSTALL_ID fails the helper. Stop here: `echo` would
+    # hide that failure and print cleanup commands with an empty slug.
+    UNINSTALL_SLUG="$(_nanoclaw_install_slug)" || exit 1
     UNINSTALL_RUNTIME="${CONTAINER_RUNTIME:-docker}"
     echo "Can't run the uninstaller: dependencies are missing (node_modules/)."
     echo "Either re-run 'bash nanoclaw.sh' once to restore them, or clean up manually:"
@@ -82,10 +85,10 @@ for arg in "$@"; do
       echo "  systemctl --user disable --now $(systemd_unit).service"
       echo "  rm -f ~/.config/systemd/user/$(systemd_unit).service && systemctl --user daemon-reload"
     fi
-    echo "  $UNINSTALL_RUNTIME ps -aq --filter label=nanoclaw-install=$(_nanoclaw_install_slug) | xargs -r $UNINSTALL_RUNTIME rm -f"
+    echo "  $UNINSTALL_RUNTIME ps -aq --filter label=nanoclaw-install=$UNINSTALL_SLUG | xargs -r $UNINSTALL_RUNTIME rm -f"
     echo "  $UNINSTALL_RUNTIME rmi $(container_image_base):latest"
     echo "  rm -f ~/.local/bin/ncl    # only if it points at this folder"
-    echo "  rm -rf \"$(dirname "$PROJECT_ROOT")/.nanoclaw-updates/$(_nanoclaw_install_slug)\""
+    echo "  rm -rf \"$(dirname "$PROJECT_ROOT")/.nanoclaw-updates/$UNINSTALL_SLUG\""
     echo ""
     echo "Then back up $PROJECT_ROOT/.env if you need the keys, and delete the folder."
     exit 1
@@ -362,6 +365,18 @@ if [ "$(uname -s)" = "Darwin" ] && ! command -v brew >/dev/null 2>&1; then
   esac
 fi
 
+# ─── pre-flight: sudo password on Linux ────────────────────────────────
+# The Node installer calls sudo behind the bootstrap spinner, where its
+# password prompt can't be seen. Ask here instead; setup:auto asks for Docker
+# before its own step. Root, passwordless sudo and non-terminal runs skip it.
+# shellcheck source=setup/lib/sudo-preflight.sh
+source "$PROJECT_ROOT/setup/lib/sudo-preflight.sh"
+if ! sudo_preflight; then
+  ph_event setup_sudo_aborted
+  write_abort_entry sudo-preflight sudo-refused
+  exit 1
+fi
+
 # ─── first step: install the basics (Node + pnpm + native modules) ─────
 
 BOOTSTRAP_RAW="${STEPS_DIR}/01-bootstrap.log"
@@ -401,6 +416,10 @@ BOOTSTRAP_DUR=$(( $(date +%s) - BOOTSTRAP_START ))
 if [ "$BOOTSTRAP_RC" -eq 0 ]; then
   spinner_success "Basics ready" "$BOOTSTRAP_DUR"
   write_bootstrap_entry success "$BOOTSTRAP_DUR" "$BOOTSTRAP_RAW"
+  # Only channel skills need jq, so setup carries on; say it now, not at the first one.
+  if [ "$(grep_field JQ_OK "$BOOTSTRAP_RAW")" = "false" ]; then
+    printf '  %s\n' "$(dim "Couldn't install jq. Adding Slack, Discord, Telegram, Teams or Dial needs it, so install jq first.")"
+  fi
 else
   spinner_failure "Couldn't install the basics" "$BOOTSTRAP_DUR"
   write_bootstrap_entry failed "$BOOTSTRAP_DUR" "$BOOTSTRAP_RAW"
@@ -425,10 +444,11 @@ export NANOCLAW_BOOTSTRAPPED=1
 # setup.sh may have just installed Node/npm/pnpm under ~/.local/bin via
 # uvx-nodeenv. Its PATH mutation doesn't propagate back to this parent shell,
 # so make that standard user bin directory discoverable before probing npm.
-# Keep an existing PATH entry in place rather than adding duplicates.
+# Keep an existing PATH entry in place rather than adding duplicates. Appended,
+# so node_use_patched below decides which node leads.
 case ":$PATH:" in
   *":$HOME/.local/bin:"*) ;;
-  *) export PATH="$HOME/.local/bin:$PATH" ;;
+  *) export PATH="$PATH:$HOME/.local/bin" ;;
 esac
 
 # setup:auto registers the service with this shell's node, which can be an
@@ -444,11 +464,12 @@ if ! node_use_patched; then
 fi
 
 # pnpm may instead have landed in npm's configured global prefix. Replay that
-# lookup here as a second recovery path before the final exec.
+# lookup here as a second recovery path before the final exec. Appended, so a
+# node in that prefix can't shadow the one checked above.
 if ! command -v pnpm >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
-  NPM_PREFIX="$(npm config get prefix 2>/dev/null)"
+  NPM_PREFIX="$(npm config get prefix 2>/dev/null || true)"
   if [ -n "$NPM_PREFIX" ] && [ -x "$NPM_PREFIX/bin/pnpm" ]; then
-    export PATH="$NPM_PREFIX/bin:$PATH"
+    export PATH="$PATH:$NPM_PREFIX/bin"
   fi
 fi
 

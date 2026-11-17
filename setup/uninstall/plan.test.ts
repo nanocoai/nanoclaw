@@ -160,4 +160,12 @@ describe('buildRemovalPlan conditional actions', () => {
     const rm = actions.find((a) => a.kind === 'rm-containers');
     expect(rm && rm.kind === 'rm-containers' ? rm.labelFilter : '').toBe('nanoclaw-install=abcd1234');
   });
+
+  it('escapes and bounds the install path in the pkill pattern', () => {
+    const actions = buildRemovalPlan(inventory({ projectRoot: '/srv/my (nano)[claw]+ app' }), allYes());
+    expect(actions.find((a) => a.kind === 'pkill-host')).toEqual({
+      kind: 'pkill-host',
+      pattern: '(^|[[:space:]])/srv/my \\(nano\\)\\[claw\\]\\+ app/dist/index\\.js([[:space:]]|$)',
+    });
+  });
 });

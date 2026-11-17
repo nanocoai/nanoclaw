@@ -4,6 +4,7 @@
  * Channel adapters bridge NanoClaw with messaging platforms (Discord, Slack, etc.).
  * Two patterns: native adapters (implement directly) or Chat SDK bridge (wrap a Chat SDK adapter).
  */
+import type { ResponseOutcome } from '../response-registry.js';
 
 /** Passed to the adapter at setup time. */
 export interface ChannelSetup {
@@ -21,7 +22,10 @@ export interface ChannelSetup {
   /** Called when the adapter discovers metadata about a conversation. */
   onMetadata(platformId: string, name?: string, isGroup?: boolean): void;
 
-  /** Called when a user clicks a button/action in a card (e.g., ask_user_question response). */
+  /**
+   * Called when a user clicks a button/action in a card (e.g., ask_user_question response).
+   * Resolves with what the host did: a card shows a resolution only for 'accepted'.
+   */
   onAction(
     questionId: string,
     selectedOption: string,
@@ -32,7 +36,7 @@ export interface ChannelSetup {
       platformId?: string;
       threadId?: string | null;
     },
-  ): void;
+  ): void | Promise<ResponseOutcome>;
 }
 
 /** Delivery address used for reply-to overrides and (normally) the inbound's own origin. */
@@ -113,6 +117,8 @@ export interface OutboundMessage {
   kind: string;
   content: unknown; // parsed JSON from messages_out
   files?: OutboundFile[]; // file attachments from the session outbox
+  /** Unique host-wide (session and outbound row id), the same on every retry of this message. */
+  deliveryId?: string;
 }
 
 /** Discovered conversation info (from syncConversations). */
@@ -130,6 +136,23 @@ export interface ResolvedConversation {
   participantNames?: string[];
   /** Parallel to participantNames (same length and order) when both are present. */
   participantIds?: string[];
+}
+
+/** One earlier line of a conversation, read back from the platform. */
+export interface HistoryLine {
+  /** Platform message id, the same id an inbound message of that line carries. */
+  id: string;
+  timestamp: string;
+  senderId: string;
+  senderName: string;
+  text: string;
+  isBot: boolean;
+  /** Written by this adapter's own bot user. */
+  isSelf: boolean;
+  /** The thread the line belongs to, when the platform says; a thread's opener carries its own thread's id. */
+  threadId?: string;
+  /** The platform's own message, as the adapter received it, for readers that need a platform-specific field. */
+  raw?: unknown;
 }
 
 /** Wiring/mg defaults for one conversation context (DM vs group/channel). */
@@ -279,6 +302,14 @@ export interface ChannelAdapter {
    * treats absence as a no-op.
    */
   subscribe?(platformId: string, threadId: string): Promise<void>;
+
+  /**
+   * Read the newest `limit` lines of a thread, or of the chat's top level when
+   * threadId is null, oldest first. Rejects a threadId that does not belong to
+   * platformId. Adapters whose platform has no way to read earlier messages
+   * omit this.
+   */
+  readHistory?(platformId: string, threadId: string | null, options: { limit: number }): Promise<HistoryLine[]>;
 
   /**
    * Open (or fetch) a DM with this user, returning the platform_id of the

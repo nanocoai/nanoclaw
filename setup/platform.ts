@@ -49,45 +49,6 @@ export function hasSystemd(): boolean {
   }
 }
 
-/**
- * Open a URL in the default browser, cross-platform.
- * Returns true if the command was attempted, false if no method available.
- */
-export function openBrowser(url: string): boolean {
-  try {
-    const platform = getPlatform();
-    if (platform === 'macos') {
-      execSync(`open ${JSON.stringify(url)}`, { stdio: 'ignore' });
-      return true;
-    }
-    if (platform === 'linux') {
-      // Try xdg-open first, then wslview for WSL
-      if (commandExists('xdg-open')) {
-        execSync(`xdg-open ${JSON.stringify(url)}`, { stdio: 'ignore' });
-        return true;
-      }
-      if (isWSL() && commandExists('wslview')) {
-        execSync(`wslview ${JSON.stringify(url)}`, { stdio: 'ignore' });
-        return true;
-      }
-      // WSL without wslview: try cmd.exe
-      if (isWSL()) {
-        try {
-          execSync(`cmd.exe /c start "" ${JSON.stringify(url)}`, {
-            stdio: 'ignore',
-          });
-          return true;
-        } catch {
-          // cmd.exe not available
-        }
-      }
-    }
-  } catch {
-    // Command failed
-  }
-  return false;
-}
-
 export function getServiceManager(): ServiceManager {
   const platform = getPlatform();
   if (platform === 'macos') return 'launchd';

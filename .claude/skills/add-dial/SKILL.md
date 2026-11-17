@@ -253,7 +253,7 @@ Rewriting `phoneNumber`/`phoneNumberId` in the auth file makes the no-flag path
 land on the wired line, so an agent that forgets the selector is still correct:
 
 ```nc:run effect:external
-f="${XDG_DATA_HOME:-$HOME/.local/share}/dial/auth.v1.json"; i=$(DIAL_USER_AGENT={{dial_ua}} dial number list --json | jq -er --arg n '{{platform_id}}' '.numbers[]|select(.number==$n)|.id') && jq --arg n '{{platform_id}}' --arg i "$i" '.phoneNumber=$n|.phoneNumberId=$i' "$f" > "$f.new" && mv -f "$f.new" "$f" && chmod 600 "$f" && echo "default sender pinned to {{platform_id}}"
+f="${XDG_DATA_HOME:-$HOME/.local/share}/dial/auth.v1.json"; i=$(DIAL_USER_AGENT={{dial_ua}} dial number list --json | jq -er --arg n '{{platform_id}}' '.numbers[]|select(.number==$n)|.id') && (umask 077 && rm -f "$f.new" && jq --arg n '{{platform_id}}' --arg i "$i" '.phoneNumber=$n|.phoneNumberId=$i' "$f" > "$f.new") && mv -f "$f.new" "$f" && chmod 600 "$f" && echo "default sender pinned to {{platform_id}}"
 ```
 
 ## Choose who may text the line

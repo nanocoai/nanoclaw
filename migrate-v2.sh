@@ -176,6 +176,14 @@ else
   abort "bootstrap"
 fi
 
+# setup.sh may have left pnpm in ~/.local/bin, and its PATH changes stay in
+# its own shell. Appended as in nanoclaw.sh, so node_use_patched below decides
+# which node leads.
+case ":$PATH:" in
+  *":$HOME/.local/bin:"*) ;;
+  *) export PATH="$PATH:$HOME/.local/bin" ;;
+esac
+
 # Later steps, and the service they register, use this shell's node, which can
 # be an older one ahead of the keg-only node@22 setup.sh used.
 # shellcheck source=setup/lib/node-version.sh
@@ -186,11 +194,11 @@ if ! node_use_patched; then
 fi
 
 # setup.sh may have installed pnpm to a prefix not on our PATH — replay
-# the same lookup nanoclaw.sh does.
+# the same lookup nanoclaw.sh does, appended like there.
 if ! command -v pnpm >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
-  NPM_PREFIX="$(npm config get prefix 2>/dev/null)"
+  NPM_PREFIX="$(npm config get prefix 2>/dev/null || true)"
   if [ -n "$NPM_PREFIX" ] && [ -x "$NPM_PREFIX/bin/pnpm" ]; then
-    export PATH="$NPM_PREFIX/bin:$PATH"
+    export PATH="$PATH:$NPM_PREFIX/bin"
   fi
 fi
 

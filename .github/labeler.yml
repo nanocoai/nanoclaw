@@ -273,7 +273,6 @@
           - "scripts/init-cli-agent*"
           - "scripts/delete-cli-agent*"
           - "scripts/migrate*"
-          - "scripts/run-migrations*"
           - "docs/setup-flow.md"
           - "docs/setup-wiring.md"
           - "docs/migration-dev.md"

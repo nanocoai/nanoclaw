@@ -220,6 +220,19 @@ export function wrapSqliteInbound(db: Database.Database, nextSequence = () => ne
       db
         .prepare("SELECT 1 FROM messages_in WHERE channel_type = 'agent' AND platform_id != ? LIMIT 1")
         .get(selfAgentGroupId) !== undefined,
+    wakeEvidence: () => {
+      // Two LIMIT 1 probes, both answered from idx_messages_in_trigger_seq. Only
+      // channel traffic counts, as for the conversation root: channel_type
+      // 'agent' is host notes and agent-to-agent mail.
+      const channelRow = "(channel_type IS NULL OR channel_type NOT IN ('session-echo', 'agent'))";
+      if (db.prepare(`SELECT 1 FROM messages_in WHERE trigger = 1 AND ${channelRow} LIMIT 1`).get()) return 'woken';
+      const chatter = db
+        .prepare(
+          `SELECT 1 FROM messages_in WHERE trigger = 0 AND kind IN ('chat', 'chat-sdk') AND ${channelRow} LIMIT 1`,
+        )
+        .get();
+      return chatter ? 'chatter' : 'none';
+    },
     insertTask: async (task) => insertTaskRow(db, task, nextSequence()),
     armNextTask: async (originalId, task) => {
       const sequence = nextSequence();
@@ -308,8 +321,16 @@ export function wrapSqliteOutbound(
   source: Database.Database | (() => Database.Database),
   writable: () => Database.Database = () => (typeof source === 'function' ? source() : source),
   nextSequence = () => nextEvenAcross(undefined, writable()),
+  /** The inbound DB: its delivered table holds the platform's id for each delivered post. */
+  inbound?: Database.Database,
 ): OutboundMailbox {
   const readable = () => (typeof source === 'function' ? source() : source);
+  let deliveredLookup: Database.Statement | undefined;
+  const platformMessageId = (outboundId: string): string | undefined => {
+    deliveredLookup ??= inbound?.prepare('SELECT platform_message_id FROM delivered WHERE message_out_id = ?');
+    const row = deliveredLookup?.get(outboundId) as { platform_message_id: string | null } | undefined;
+    return row?.platform_message_id ?? undefined;
+  };
   return {
     getTerminalProcessingAcks: () =>
       (
@@ -406,20 +427,28 @@ export function wrapSqliteOutbound(
     getOutboundHistory: (limit) =>
       (
         readable()
-          .prepare('SELECT timestamp, kind, content FROM messages_out ORDER BY seq DESC LIMIT ?')
-          .all(limit) as MailboxHistoryMessage[]
-      ).map((row) => ({ ...row, timestamp: sqliteTimestamp(row.timestamp) })),
+          .prepare('SELECT id, timestamp, kind, content FROM messages_out ORDER BY seq DESC LIMIT ?')
+          .all(limit) as Array<MailboxHistoryMessage & { id: string }>
+      ).map(({ id, ...row }) => ({
+        ...row,
+        timestamp: sqliteTimestamp(row.timestamp),
+        platformMessageId: platformMessageId(id),
+      })),
     getTopLevelOutbound: (limit) =>
       (
         readable()
           .prepare(
-            "SELECT timestamp, content FROM messages_out WHERE kind NOT IN ('system','task_log') " +
+            "SELECT id, timestamp, content FROM messages_out WHERE kind NOT IN ('system','task_log') " +
               "AND (channel_type IS NULL OR channel_type != 'agent') " +
               "AND (thread_id IS NULL OR thread_id = '' OR thread_id LIKE '%:') " +
               'ORDER BY seq DESC LIMIT ?',
           )
-          .all(limit) as MailboxTimelineMessage[]
-      ).map((row) => ({ ...row, timestamp: sqliteTimestamp(row.timestamp) })),
+          .all(limit) as Array<MailboxTimelineMessage & { id: string }>
+      ).map(({ id, ...row }) => ({
+        ...row,
+        timestamp: sqliteTimestamp(row.timestamp),
+        platformMessageId: platformMessageId(id),
+      })),
     hasMessagesToOtherAgents: (selfAgentGroupId) =>
       readable()
         .prepare("SELECT 1 FROM messages_out WHERE channel_type = 'agent' AND platform_id != ? LIMIT 1")
@@ -481,7 +510,7 @@ export class SqliteAgentMailbox implements AgentMailbox {
       // two-DB split exists to avoid exactly that cross-mount coupling.
       return await action({
         ...wrapSqliteInbound(inbound),
-        ...wrapSqliteOutbound(readableOutbound, writableOutbound),
+        ...wrapSqliteOutbound(readableOutbound, writableOutbound, undefined, inbound),
       });
     } finally {
       inbound.close();

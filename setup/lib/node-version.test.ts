@@ -184,6 +184,171 @@ describe('setup.sh ensure_node', () => {
     expect(ensureNode()).toBe('NODE_OK=false');
     expect(calls()).toEqual(['install-node']);
   });
+
+  // setup.sh runs under `set -euo pipefail`, where a Node that cannot start used
+  // to end the script inside check_node with nothing said.
+  function ensureNodeStrict(installed = 'exit 1'): { status: number | null; out: string; log: string } {
+    // Every function setup.sh defines, without the main part that calls them.
+    const source = fs.readFileSync(path.join(ROOT, 'setup.sh'), 'utf8');
+    const fns = source.slice(source.indexOf('# --- Platform detection ---'), source.indexOf('# --- Main ---'));
+    expect(fns).toContain('ensure_node() {');
+    const project = path.join(tmp, 'project');
+    // What install-node.sh does here: fail, unless the case says what it leaves behind.
+    stub(path.join(project, 'setup'), 'install-node.sh', `echo install-node >> ${log}; ${installed}`);
+    for (const tool of ['bash', 'chmod', 'sed', 'tee']) fs.symlinkSync(which(tool), path.join(bin, tool));
+    const bootLog = path.join(tmp, 'boot.log');
+    const prelude = `set -euo pipefail; source ${LIB}; PROJECT_ROOT=${project}; LOG_FILE=${bootLog}; log() { echo "$*" >> "$LOG_FILE"; }`;
+    const r = run(['-c', `${prelude}\n${fns}\nensure_node; echo "NODE_OK=$NODE_OK NODE_VERSION=$NODE_VERSION"`]);
+    return { ...r, log: fs.existsSync(bootLog) ? fs.readFileSync(bootLog, 'utf8') : '' };
+  }
+
+  it.each([
+    // What the loader prints for a Node built against a newer glibc.
+    ['its libraries do not match', 'echo "node: version GLIBC_2.28 not found (required by node)" >&2; exit 1'],
+    ['it crashes with a stack', 'printf "node:internal/x:1\\n  throw err;\\nError: boom\\n" >&2; exit 1'],
+  ])('says why and what to do when the only Node cannot start: %s', (_case, body) => {
+    stub(bin, 'uname', 'echo Linux');
+    stub(bin, 'node', body);
+
+    const r = ensureNodeStrict();
+
+    expect(r.out).toContain(`Node at ${bin}/node cannot start:`);
+    expect(r.out).toMatch(/^ {2}(node: version GLIBC_2\.28 not found \(required by node\)|Error: boom)$/m);
+    expect(r.out).toContain('Remove it, or put a Node that works (22.23.4 / 24.22.1 / 26.12.1 or newer) ahead of it');
+    expect(r.out).toContain('NODE_OK=false NODE_VERSION=cannot_start');
+    expect(r.status).toBe(0);
+    expect(r.log).toContain(`Node at ${bin}/node cannot start: `);
+    // install-node.sh asks the PATH Node for its version; it has none to give.
+    expect(calls()).toEqual([]);
+  });
+
+  it("keeps the Node's whole error in the log and shows one line of it", () => {
+    stub(bin, 'uname', 'echo Linux');
+    // No newline at the end, as some loaders print.
+    stub(
+      bin,
+      'node',
+      `printf 'dyld: Library not loaded\\n  Referenced from: node\\n  Reason: image not found' >&2; exit 1`,
+    );
+
+    const r = ensureNodeStrict();
+
+    expect(r.out).toMatch(/^ {2}dyld: Library not loaded$/m);
+    expect(r.out).not.toContain('Reason: image not found');
+    expect(r.log).toContain('  Referenced from: node\n  Reason: image not found\n');
+  });
+
+  it('says so when the only Node is a file that cannot be executed at all', () => {
+    stub(bin, 'uname', 'echo Linux');
+    fs.writeFileSync(path.join(bin, 'node'), '#!/nonexistent/interpreter\n', { mode: 0o755 });
+
+    const r = ensureNodeStrict();
+
+    expect(r.out).toContain(`Node at ${bin}/node cannot start:`);
+    expect(r.out).toContain('NODE_OK=false NODE_VERSION=cannot_start');
+    expect(calls()).toEqual([]);
+  });
+
+  it('says so when the Node an install leaves behind cannot start', () => {
+    stub(bin, 'uname', 'echo Linux');
+    const r = ensureNodeStrict(
+      `printf '#!${BASH}\\necho "node: version GLIBC_2.28 not found" >&2; exit 1\\n' > ${bin}/node; chmod +x ${bin}/node`,
+    );
+
+    expect(calls()).toEqual(['install-node']);
+    expect(r.out).toContain(`Node at ${bin}/node cannot start:`);
+    expect(r.out).toMatch(/^ {2}node: version GLIBC_2\.28 not found$/m);
+    expect(r.out).toContain('NODE_OK=false NODE_VERSION=cannot_start');
+  });
+
+  it('uses a Node that works from a known place when the PATH one cannot start', () => {
+    stub(bin, 'uname', 'echo Linux');
+    stub(bin, 'node', 'echo "node: version GLIBC_2.28 not found (required by node)" >&2; exit 1');
+    fakeNode(path.join(tmp, 'sys'), '22.23.4');
+
+    const r = ensureNodeStrict();
+
+    expect(r.out).toContain('NODE_OK=true NODE_VERSION=22.23.4');
+    expect(r.out).not.toContain('cannot start');
+    expect(r.log).toContain(`Node at ${bin}/node cannot start: `);
+    expect(calls()).toEqual([]);
+  });
+
+  it('still installs under strict mode when the PATH Node is only too old', () => {
+    stub(bin, 'uname', 'echo Linux');
+    fakeNode(bin, '22.20.0');
+
+    const r = ensureNodeStrict();
+
+    expect(r.out).toContain('NODE_OK=false NODE_VERSION=22.20.0');
+    expect(calls()).toEqual(['install-node']);
+  });
+});
+
+describe('setup.sh first_error_line', () => {
+  it.each([
+    ['the first line that names an error', 'node:internal/x:1\\n  throw err;\\nError: boom\\n  at y\\n', 'Error: boom'],
+    ['an npm error line', '\\nnpm error code EACCES\\nnpm error syscall mkdir\\n', 'npm error code EACCES'],
+    [
+      'the first line with anything on it when none names an error',
+      '\\n\\nlibfoo.so.1: not found\\nmore\\n',
+      'libfoo.so.1: not found',
+    ],
+    ['a single line that has no newline', 'loader: missing lib', 'loader: missing lib'],
+    ['nothing for no output', '', ''],
+  ])('gives %s', (_case, said, line) => {
+    const source = fs.readFileSync(path.join(ROOT, 'setup.sh'), 'utf8');
+    const start = source.indexOf('first_error_line() {');
+    expect(start, 'first_error_line() not found in setup.sh').toBeGreaterThanOrEqual(0);
+    const fn = source.slice(start, source.indexOf('\n}', start) + 2);
+
+    const r = run(['-c', `set -euo pipefail\n${fn}\nfirst_error_line $'${said}'\necho "[$ERROR_LINE]"`]);
+
+    expect(r).toEqual({ status: 0, out: `[${line}]\n` });
+  });
+
+  // bash 3.2 writes a here-string to a temp file, so with no temp space the
+  // report itself would end the script under `set -e`.
+  it('is used without a here-string or a pipe anywhere in setup.sh', () => {
+    const source = fs.readFileSync(path.join(ROOT, 'setup.sh'), 'utf8');
+    const uses = source.split('\n').filter((l) => /first_error_line/.test(l) && !/^\s*#|\(\) \{/.test(l));
+    expect(uses.length).toBeGreaterThan(0);
+    for (const use of uses) expect(use).toMatch(/^\s*first_error_line "\$said"$/);
+  });
+});
+
+describe('setup.sh folder_error', () => {
+  const FIX = 'Fix that, then re-run setup.';
+  const MOVE = 'Move or rename that file, then re-run setup.';
+  const LINK = 'Fix or remove that link, then re-run setup.';
+
+  // Under setup.sh's own shell options; `dir` may hold $T for the temp dir.
+  function folderError(dir: string): string {
+    const source = fs.readFileSync(path.join(ROOT, 'setup.sh'), 'utf8');
+    const start = source.indexOf('first_error_line() {');
+    const last = source.indexOf('folder_error() {');
+    expect(last, 'folder_error() not found in setup.sh').toBeGreaterThan(start);
+    const fns = source.slice(start, source.indexOf('\n}', last) + 2);
+    fs.writeFileSync(path.join(tmp, 'file'), '');
+    fs.symlinkSync(path.join(tmp, 'gone'), path.join(tmp, 'dead-link'));
+    fs.symlinkSync(path.join(tmp, 'file'), path.join(tmp, 'file-link'));
+    fs.symlinkSync(bin, path.join(tmp, 'folder-link'));
+    const script = `set -euo pipefail\nT=${tmp}\n${fns}\nfolder_error "${dir}" "mkdir: Not a directory"\necho "[$ERROR_LINE][$ERROR_TODO]"`;
+    return run(['-c', script]).out.replaceAll(tmp, '$T');
+  }
+
+  it.each([
+    ['the file where the folder has to be', '$T/file', '$T/file is a file, not a folder', MOVE],
+    ['the file under which the folder has to be', '$T/file/a/b', '$T/file is a file, not a folder', MOVE],
+    ['a link that leads nowhere', '$T/dead-link/a', '$T/dead-link is a link that cannot be followed', LINK],
+    ['a link to a file as a file', '$T/file-link/a', '$T/file-link is a file, not a folder', MOVE],
+    ["mkdir's own line under a link to a folder", '$T/folder-link/a/b', 'mkdir: Not a directory', FIX],
+    ["mkdir's own line under a folder that exists", '$T/bin/a/b', 'mkdir: Not a directory', FIX],
+    ["mkdir's own line when nothing on the path exists", '/ncl-no-such-top/a', 'mkdir: Not a directory', FIX],
+    ["mkdir's own line for a path with no slash left", 'ncl-no-such-dir/a', 'mkdir: Not a directory', FIX],
+  ])('gives %s', (_case, dir, line, todo) => {
+    expect(folderError(dir)).toBe(`[${line}][${todo}]\n`);
+  });
 });
 
 describe('node_use_patched', () => {
