@@ -43,7 +43,7 @@ afterEach(() => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-function run(m: Machine): { rc: number; out: string; sudo: string[]; upgrade?: string } {
+function run(m: Machine): { rc: number; out: string; sudo: string[]; upgrade?: string; logged: string[] } {
   // A fresh machine per run, so stubs from an earlier run in the same test don't leak.
   const machine = fs.mkdtempSync(path.join(dir, 'machine-'));
   const bin = path.join(machine, 'bin');
@@ -51,6 +51,7 @@ function run(m: Machine): { rc: number; out: string; sudo: string[]; upgrade?: s
   const system = path.join(machine, 'usr', 'bin');
   const manager = path.join(machine, '.nvm', 'bin');
   const sudoLog = path.join(machine, 'sudo.log');
+  const progressLog = path.join(machine, 'progress.log');
   const stub = (name: string, body: string, where = bin): void => {
     fs.mkdirSync(where, { recursive: true });
     fs.writeFileSync(path.join(where, name), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
@@ -85,6 +86,7 @@ function run(m: Machine): { rc: number; out: string; sudo: string[]; upgrade?: s
     'dim() { printf "%s" "$1"; }',
     'red() { printf "%s" "$1"; }',
     'bold() { printf "%s" "$1"; }',
+    `write_user_input() { echo "$1=$2" >> '${progressLog}'; }`,
     `source '${LIB}'`,
     m.interactive ? 'sudo_preflight_interactive() { return 0; }' : '',
     'pacman_upgrade_preflight',
@@ -106,7 +108,8 @@ function run(m: Machine): { rc: number; out: string; sudo: string[]; upgrade?: s
   const out = res.stdout;
   const [, rc, upgrade] = /rc=(\d) upgrade=(\w+)\n$/.exec(out) ?? [];
   const sudo = fs.existsSync(sudoLog) ? fs.readFileSync(sudoLog, 'utf8').split('\n').filter(Boolean) : [];
-  return { rc: Number(rc), out: out.replace(/rc=\d upgrade=\w+\n$/, ''), sudo, upgrade };
+  const logged = fs.existsSync(progressLog) ? fs.readFileSync(progressLog, 'utf8').split('\n').filter(Boolean) : [];
+  return { rc: Number(rc), out: out.replace(/rc=\d upgrade=\w+\n$/, ''), sudo, upgrade, logged };
 }
 
 const needsPassword = { cached: false, validates: true };
@@ -155,6 +158,7 @@ describe('sudo pre-flight (nanoclaw.sh)', { timeout: 20_000 }, () => {
     const r = run({ sudo: needsPassword, interactive: true, ...m });
     expect(r.out).toBe('');
     expect(r.sudo).toEqual([]);
+    expect(r.logged).toEqual([]);
   });
 
   it('stops with a clear message when sudo is refused', () => {
@@ -264,6 +268,7 @@ describe('full system upgrade question (nanoclaw.sh)', { timeout: 20_000 }, () =
     expect(r.out).toContain(`${warning}, which updates every package on this machine.`);
     expect(r.out).toContain('Setup needs to install jq, so it will ask for your Linux password');
     expect(r.sudo).toContain('-v -p   [sudo] password for %p: ');
+    expect(r.logged).toEqual(['pacman_upgrade=yes']);
   });
 
   it.each(['Y', 'yes', 'YES'])('takes %s as a yes', (answer) => {
@@ -282,6 +287,7 @@ describe('full system upgrade question (nanoclaw.sh)', { timeout: 20_000 }, () =
     expect(r.out).toContain('Skipped. Setup goes on without jq.');
     expect(r.out).not.toContain('Setup needs to install jq');
     expect(r.sudo).toEqual([]);
+    expect(r.logged).toEqual(['pacman_upgrade=no']);
   });
 
   it('asks root too, who needs no sudo for the upgrade', () => {
@@ -306,5 +312,21 @@ describe('full system upgrade question (nanoclaw.sh)', { timeout: 20_000 }, () =
     const r = run({ node: 'v22.23.4', sudo: needsPassword, interactive: true, input: 'y\n', ...m });
     expect(r.upgrade).toBe('0');
     expect(r.out).not.toContain('full system upgrade');
+    expect(r.logged).toEqual([]);
+  });
+
+  it("logs the answer in nanoclaw.sh's progression log, as setup:auto logs its own", () => {
+    const entrypoint = fs.readFileSync(path.join(process.cwd(), 'nanoclaw.sh'), 'utf8');
+    const writer = /^write_user_input\(\) \{\n[\s\S]*?\n\}\n/m.exec(entrypoint)?.[0] ?? '';
+    expect(writer).not.toBe('');
+    expect(entrypoint.indexOf(writer)).toBeLessThan(entrypoint.indexOf('\npacman_upgrade_preflight\n'));
+    const log = path.join(dir, 'setup.log');
+    const script = `set -euo pipefail\nts_utc() { echo 2026-11-17T13:46:34Z; }\nPROGRESS_LOG='${log}'\n${writer}write_user_input pacman_upgrade no`;
+    const res = spawnSync('/bin/bash', ['-c', script], { encoding: 'utf8' });
+    expect(res.stderr).toBe('');
+    // The entry setup/logs.ts userInput() writes.
+    expect(fs.readFileSync(log, 'utf8')).toBe(
+      '=== [2026-11-17T13:46:34Z] user-input → pacman_upgrade ===\n  value: no\n\n',
+    );
   });
 });

@@ -1,6 +1,7 @@
 # sudo-preflight.sh — ask for the sudo password before setup hides it.
 #
-# Source after defining dim/red/bold (nanoclaw.sh's status-line helpers):
+# Source after defining dim/red/bold (nanoclaw.sh's status-line helpers) and
+# write_user_input (its progression-log entry for an answer):
 #
 #   pacman_upgrade_preflight
 #   if ! sudo_preflight; then exit 1; fi
@@ -68,8 +69,10 @@ pacman_upgrade_preflight() {
   printf '  %s\n\n' "$(dim 'NanoClaw works without jq, but many skills need it.')"
   if pacman_upgrade_confirm; then
     NANOCLAW_PACMAN_UPGRADE=1
+    write_user_input pacman_upgrade yes
     printf '\n'
   else
+    write_user_input pacman_upgrade no
     printf '\n  %s\n\n' "$(dim 'Skipped. Setup goes on without jq.')"
   fi
 }

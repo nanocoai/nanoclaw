@@ -166,6 +166,11 @@ write_abort_entry() {
   echo "## ${ts} · aborted at ${step} (${error})" >> "$PROGRESS_LOG"
 }
 
+# An answer the setup path depends on, as its own entry (setup/logs.ts userInput).
+write_user_input() {
+  printf '=== [%s] user-input → %s ===\n  value: %s\n\n' "$(ts_utc)" "$1" "$2" >> "$PROGRESS_LOG"
+}
+
 # ─── bash-side "clack-alike" status line ────────────────────────────────
 
 use_ansi() { [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; }
