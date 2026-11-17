@@ -268,6 +268,7 @@ register({
   handler: async (args) => ({ echo: args }),
 });
 
+import { MAX_CARD_QUESTION_LENGTH } from '../channels/ask-question.js';
 import { dispatch } from './dispatch.js';
 import type { CallerContext } from './frame.js';
 
@@ -434,6 +435,15 @@ describe('CLI scope enforcement', () => {
       const data = resp.data as { echo: Record<string, unknown> };
       expect(data.echo.id).toBe('g1');
     }
+  });
+
+  it('group: denies when the scope changes to group after dispatch skipped the auto-fill', async () => {
+    // Dispatch reads `global` (no auto-fill), the guard then reads `group`.
+    mockGetContainerConfig.mockReturnValueOnce({ cli_scope: 'global' }).mockReturnValue({ cli_scope: 'group' });
+
+    const resp = await dispatch({ id: '1', command: 'destinations-list', args: {} }, agentCtx());
+
+    expect(resp).toMatchObject({ ok: false, error: { code: 'forbidden' } });
   });
 
   it('group: allows members, auto-fills --group', async () => {
@@ -745,6 +755,32 @@ describe('CLI scope enforcement', () => {
     );
 
     expect(resp.ok).toBe(true);
+  });
+
+  it('group: filters rows even if the scope changes after the auto-fill', async () => {
+    // Dispatch and the guard read `group`; a later read would say `disabled`.
+    mockGetContainerConfig
+      .mockReturnValueOnce({ cli_scope: 'group' })
+      .mockReturnValueOnce({ cli_scope: 'group' })
+      .mockReturnValue({ cli_scope: 'disabled' });
+
+    const resp = await dispatch({ id: '1', command: 'groups-list-data', args: {} }, agentCtx());
+
+    expect(resp.ok).toBe(true);
+    if (resp.ok) expect((resp.data as Array<{ id: string }>).map((g) => g.id)).toEqual(['g1']);
+  });
+
+  it('group: filters rows when the scope changes from disabled to group mid-request', async () => {
+    // Dispatch reads `disabled` (no auto-fill), the guard then reads `group`.
+    mockGetContainerConfig.mockReturnValueOnce({ cli_scope: 'disabled' }).mockReturnValue({ cli_scope: 'group' });
+
+    const resp = await dispatch(
+      { id: '1', command: 'groups-list-data', args: { id: 'g1', agent_group_id: 'g1', group: 'g1' } },
+      agentCtx(),
+    );
+
+    expect(resp.ok).toBe(true);
+    if (resp.ok) expect((resp.data as Array<{ id: string }>).map((g) => g.id)).toEqual(['g1']);
   });
 
   it('global: no post-handler filtering', async () => {
@@ -1097,5 +1133,91 @@ describe('formatHuman hook', () => {
 
     expect(resp.ok).toBe(true);
     if (resp.ok) expect(resp.human).toBeUndefined();
+  });
+});
+
+describe('approval card question', () => {
+  function heldQuestionLines(): string[] {
+    const request = approvalState.requestApproval.mock.calls[0][0] as { question: string };
+    return request.question.split('\n');
+  }
+
+  beforeEach(() => {
+    mockGetSession.mockReturnValue({ id: 's1', agent_group_id: 'g1', messaging_group_id: 'mg1' });
+    mockGetAgentGroup.mockReturnValue({ id: 'g1', name: 'Group One' });
+  });
+
+  it('shows each argument JSON-encoded in a code fence that an argument cannot close', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+    await dispatch(
+      {
+        id: '1',
+        command: 'wirings-update',
+        args: { engage_mode: 'pattern', engage_pattern: 'a` --role owner\n*b*' },
+      },
+      agentCtx(),
+    );
+
+    const lines = heldQuestionLines();
+    expect(lines).toEqual(['Agent "Group One" wants to run:', '```', expect.any(String), '```']);
+    expect(lines[2]).toContain('--engage_mode "pattern" --engage_pattern "a\\u0060 --role owner\\n*b*"');
+    expect(lines[2]).not.toContain('`');
+  });
+
+  it('keeps the fence intact when the agent name contains one', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+    mockGetAgentGroup.mockReturnValue({ id: 'g1', name: 'helper\n```\n' });
+    await dispatch({ id: '1', command: 'wirings-update', args: { engage_mode: 'pattern' } }, agentCtx());
+
+    const lines = heldQuestionLines();
+    expect(lines).toHaveLength(4);
+    expect(lines[0]).toBe('Agent "helper\\n\\u0060\\u0060\\u0060\\n" wants to run:');
+  });
+
+  it('quotes a flag name that is not a plain word', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+    await dispatch({ id: '1', command: 'wirings-update', args: { 'a b': 'owner' } }, agentCtx());
+
+    expect(heldQuestionLines()[2]).toContain('--"a b" "owner"');
+  });
+
+  it('refuses a command too long to show in full instead of carding it', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+    const resp = await dispatch(
+      { id: '1', command: 'wirings-update', args: { engage_pattern: 'x'.repeat(MAX_CARD_QUESTION_LENGTH) } },
+      agentCtx(),
+    );
+
+    expect(resp.ok).toBe(false);
+    if (!resp.ok) {
+      expect(resp.error.code).toBe('invalid-args');
+      expect(resp.error.message).toMatch(/too long to show in full/);
+    }
+    expect(approvalState.requestApproval).not.toHaveBeenCalled();
+  });
+
+  it('measures the escaped command, not the raw arguments', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+    // 400 zero-width spaces: short raw, but each shows as a 6-character \u200b.
+    const resp = await dispatch(
+      { id: '1', command: 'wirings-update', args: { engage_pattern: '\u200b'.repeat(400) } },
+      agentCtx(),
+    );
+
+    expect(resp.ok).toBe(false);
+    expect(approvalState.requestApproval).not.toHaveBeenCalled();
+  });
+
+  it('still cards a long command that fits', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+    const resp = await dispatch(
+      { id: '1', command: 'wirings-update', args: { engage_pattern: 'x'.repeat(1500) } },
+      agentCtx(),
+    );
+
+    expect(resp.ok).toBe(false);
+    if (!resp.ok) expect(resp.error.code).toBe('approval-pending');
+    expect(approvalState.requestApproval).toHaveBeenCalledTimes(1);
+    expect(heldQuestionLines()[2]).toContain('x'.repeat(1500));
   });
 });

@@ -9,6 +9,8 @@ console.log(
   JSON.stringify({
     host: listProviderHostContractNames().sort(),
     hostProviders: listProviderContainerConfigNames().sort(),
-    setupProviders: listSetupProviders().map((provider) => provider.value).sort(),
+    setupProviders: listSetupProviders()
+      .map((provider) => provider.value)
+      .sort(),
   }),
 );

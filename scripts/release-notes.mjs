@@ -218,7 +218,8 @@ export function renderDraftChangelog({ groups, missing }, meta = {}) {
     );
     for (const entry of missing) {
       const kind = entry.kind ? ` \`${entry.kind}\`` : '';
-      out.push(`- ${attribution(entry)}${kind} — ${entry.title}`);
+      const warning = entry.breaking ? '[BREAKING] ' : '';
+      out.push(`- ${warning}${attribution(entry)}${kind} — ${entry.title}`);
     }
     out.push('');
   }

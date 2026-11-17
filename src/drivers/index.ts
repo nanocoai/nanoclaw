@@ -40,7 +40,7 @@ import os from 'os';
 import path from 'path';
 
 import { DATA_DIR, GROUPS_DIR } from '../config.js';
-import { EGRESS_NETWORK, egressNetworkArgs, ensureEgressNetwork } from '../egress-lockdown.js';
+import { EGRESS_NETWORK, egressNetworkArgs, ensureEgressNetwork, onEgressNetworkOnly } from '../egress-lockdown.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 import '../provider-contracts/index.js';
@@ -78,16 +78,28 @@ export function readSetting(key: (typeof SETTINGS)[number], env: NodeJS.ProcessE
  * states the intent, this realizes it, and nothing rides between them.
  */
 function dockerNetworkArgs(spec: SessionSpec): string[] {
-  if (ensureEgressNetwork()) {
+  if (spec.networkAccess.target.kind === 'session-container') return [];
+  if (ensureEgressNetwork(spec.networkAccess)) {
     log.info('Egress lockdown active', { containerName: agentContainerName(spec), network: EGRESS_NETWORK });
     return egressNetworkArgs();
   }
-  return os.platform() === 'linux' ? ['--add-host=host.docker.internal:host-gateway'] : [];
+  return os.platform() === 'linux' ? [`--add-host=${spec.networkAccess.endpoint}:host-gateway`] : [];
 }
 
 registerSessionDriver(
   DEFAULT_DRIVER_KIND,
-  (policy) => new DockerSessionDriver({ ...policy, networkArgsFor: dockerNetworkArgs }),
+  (policy) =>
+    new DockerSessionDriver({
+      ...policy,
+      networkArgsFor: dockerNetworkArgs,
+      // An adopted container keeps the network it was spawned with. Under
+      // lockdown it must match what dockerNetworkArgs gives a new one.
+      reconcileNetworkAccess: (access, attachedNetworks) => {
+        if (access.target.kind === 'session-container') return 'kept';
+        if (!ensureEgressNetwork(access)) return 'kept';
+        return onEgressNetworkOnly(attachedNetworks()) ? 'kept' : 'restart';
+      },
+    }),
 );
 
 export function configuredDriverKind(env: NodeJS.ProcessEnv = process.env): DriverKind {
@@ -123,6 +135,7 @@ export function mountPolicy(env: NodeJS.ProcessEnv = process.env): MountPolicy {
     // identity-material mount is denied by a policy naming a path that looks
     // correct.
     materialsRoot: readSetting('NANOCLAW_SESSION_MATERIAL_ROOT', env) || path.join(DATA_DIR, 'session-materials'),
+    gatewayTrustRoot: path.join(DATA_DIR, 'gateway-trust'),
   };
 }
 

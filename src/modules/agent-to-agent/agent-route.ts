@@ -18,11 +18,10 @@
  * `channel_type === 'agent'` check. When the module is absent the check in
  * core throws with a "module not installed" message so retry → mark failed.
  */
-import fs from 'fs';
-import path from 'path';
-
-import { isSafeAttachmentName } from '../../attachment-safety.js';
-import { ensureContainedInboxDir, isPathInside } from '../../inbox-safety.js';
+import { AnchoredDir, copyRegularFile } from '../../anchored-dir.js';
+import { fenceForCard, quoteForCard } from '../../card-text.js';
+import { MAX_CARD_QUESTION_LENGTH } from '../../channels/ask-question.js';
+import { inboxFolderName, isSafeAttachmentName } from '../../attachment-safety.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { getSession } from '../../db/sessions.js';
 import { requestWake } from '../../request-wake.js';
@@ -64,107 +63,75 @@ export function forwardAttachedFiles(
     log.warn('agent-route: rejecting unsafe source outbox message id', { sourceMsgId: source.messageId });
     return [];
   }
-
-  const sourceDir = path.join(sessionDir(source.agentGroupId, source.sessionId), 'outbox', source.messageId);
-  if (!fs.existsSync(sourceDir)) {
-    log.warn('agent-route: source outbox dir missing, no files forwarded', {
-      sourceMsgId: source.messageId,
-      sourceDir,
-    });
+  const targetFolder = inboxFolderName(target.messageId);
+  if (targetFolder === null) {
+    log.warn('agent-route: rejecting unsafe target inbox message id', { targetMsgId: target.messageId });
     return [];
   }
 
-  let realSourceDir: string;
+  // Both agents can write their own session folders, so either could turn
+  // `outbox`, `inbox` or a message dir into a symlink at any time. Each side is
+  // opened as an AnchoredDir (symlinks refused) and used only through it, the
+  // same way as the channel-inbound path (#2828, CWE-59).
+  let sourceDir: AnchoredDir | null;
   try {
-    const sourceDirStat = fs.lstatSync(sourceDir);
-    if (!sourceDirStat.isDirectory() || sourceDirStat.isSymbolicLink()) {
-      log.warn('agent-route: rejecting unsafe source outbox dir', {
-        sourceMsgId: source.messageId,
-        sourceDir,
-      });
-      return [];
-    }
-    realSourceDir = fs.realpathSync(sourceDir);
+    sourceDir = AnchoredDir.open(sessionDir(source.agentGroupId, source.sessionId), ['outbox', source.messageId]);
   } catch (err) {
-    log.warn('agent-route: failed to inspect source outbox dir', {
-      sourceMsgId: source.messageId,
-      sourceDir,
+    log.warn('agent-route: rejecting unsafe source outbox dir', { sourceMsgId: source.messageId, err });
+    return [];
+  }
+  if (!sourceDir) {
+    log.warn('agent-route: source outbox dir missing, no files forwarded', { sourceMsgId: source.messageId });
+    return [];
+  }
+
+  let targetDir: AnchoredDir | null = null;
+  try {
+    targetDir = AnchoredDir.open(sessionDir(target.agentGroupId, target.sessionId), ['inbox', targetFolder], true);
+  } catch (err) {
+    log.warn('agent-route: rejecting unsafe target inbox dir', {
+      targetGroup: target.agentGroupId,
+      targetSession: target.sessionId,
+      targetMsgId: target.messageId,
       err,
     });
-    return [];
-  }
-
-  // Target-side containment — shared with the channel-inbound path. A
-  // compromised target agent can write inside its own session dir, so it could
-  // pre-place `inbox` (or `inbox/<future-msgId>`) as a symlink pointing
-  // anywhere host-writable; ensureContainedInboxDir refuses the symlink before
-  // any copy lands outside the sandbox (#2828, CWE-59).
-  const inboxRoot = path.join(sessionDir(target.agentGroupId, target.sessionId), 'inbox');
-  const targetInboxDir = ensureContainedInboxDir(inboxRoot, target.messageId, {
-    targetGroup: target.agentGroupId,
-    targetSession: target.sessionId,
-    targetMsgId: target.messageId,
-  });
-  if (!targetInboxDir) {
-    return [];
   }
 
   const attachments: ForwardedAttachment[] = [];
-  for (const filename of source.filenames) {
-    if (!isSafeAttachmentName(filename)) {
-      log.warn('agent-route: rejecting unsafe attachment filename (path traversal attempt?)', {
-        sourceMsgId: source.messageId,
-        filename,
-      });
-      continue;
-    }
-    const src = path.join(sourceDir, filename);
-    let realSrc: string;
-    try {
-      const srcStat = fs.lstatSync(src);
-      if (!srcStat.isFile() || srcStat.isSymbolicLink()) {
-        log.warn('agent-route: rejecting unsafe source outbox file', {
+  try {
+    if (!targetDir) return [];
+    for (const filename of source.filenames) {
+      if (!isSafeAttachmentName(filename)) {
+        log.warn('agent-route: rejecting unsafe attachment filename (path traversal attempt?)', {
           sourceMsgId: source.messageId,
           filename,
         });
         continue;
       }
-      realSrc = fs.realpathSync(src);
-    } catch {
-      log.warn('agent-route: referenced file missing in source outbox, skipped', {
-        sourceMsgId: source.messageId,
+      try {
+        // Stream source → target through both descriptors. Exclusive create on
+        // the target never follows or overwrites a pre-placed entry; neither
+        // side is addressed by path after its dir was opened.
+        copyRegularFile(sourceDir, filename, targetDir, filename);
+      } catch (err) {
+        log.warn('agent-route: skipped forwarding file (missing, unsafe, or already present)', {
+          sourceMsgId: source.messageId,
+          targetMsgId: target.messageId,
+          filename,
+          err,
+        });
+        continue;
+      }
+      attachments.push({
+        name: filename,
         filename,
+        type: 'file',
+        localPath: `inbox/${targetFolder}/${filename}`,
       });
-      continue;
     }
-    if (!isPathInside(realSourceDir, realSrc)) {
-      log.warn('agent-route: rejecting source file outside source outbox dir', {
-        sourceMsgId: source.messageId,
-        filename,
-      });
-      continue;
-    }
-    const dst = path.join(targetInboxDir, filename);
-    try {
-      // COPYFILE_EXCL: fail with EEXIST rather than follow or overwrite a
-      // pre-placed symlink / existing file at dst — the host is the sole
-      // writer of these attachments.
-      fs.copyFileSync(realSrc, dst, fs.constants.COPYFILE_EXCL);
-    } catch (err) {
-      log.warn('agent-route: refusing to write target inbox file', {
-        sourceMsgId: source.messageId,
-        targetMsgId: target.messageId,
-        filename,
-        err,
-      });
-      continue;
-    }
-    attachments.push({
-      name: filename,
-      filename,
-      type: 'file',
-      localPath: `inbox/${target.messageId}/${filename}`,
-    });
+  } finally {
+    sourceDir.close();
+    targetDir?.close();
   }
   return attachments;
 }
@@ -270,7 +237,7 @@ export async function routeAgentMessage(
       agentName: sourceName,
       action: A2A_MESSAGE_GATE_ACTION,
       approverUserId: decision.approverUserId,
-      title: 'Message approval',
+      title: GATE_CARD_TITLE,
       question: buildGateQuestion(sourceName, targetName, msg.content),
       payload: {
         id: msg.id,
@@ -291,6 +258,7 @@ export async function routeAgentMessage(
 }
 
 const GATE_CARD_BODY_MAX = 1500;
+const GATE_CARD_TITLE = 'Message approval';
 
 function parseMessageContent(contentStr: string): { text: string; files: string[] } {
   try {
@@ -304,16 +272,22 @@ function parseMessageContent(contentStr: string): { text: string; files: string[
   }
 }
 
-function buildGateQuestion(sourceName: string, targetName: string, contentStr: string): string {
+/** Exported for tests. */
+export function buildGateQuestion(sourceName: string, targetName: string, contentStr: string): string {
   const { text, files } = parseMessageContent(contentStr);
-  const body = text.length > GATE_CARD_BODY_MAX ? `${text.slice(0, GATE_CARD_BODY_MAX)}… (truncated)` : text;
-  const lines = [`Agent "${sourceName}" wants to send a message to "${targetName}":`, '', body];
-  if (files.length > 0) lines.push('', `Attachments: ${files.join(', ')}`);
-  lines.push(
+  const source = quoteForCard(sourceName);
+  const head = `Agent ${source} wants to send a message to ${quoteForCard(targetName)}:\n\n`;
+  const tailLines = files.length > 0 ? ['', `Attachments: ${files.map(quoteForCard).join(', ')}`] : [];
+  tailLines.push(
     '',
-    `Approve, Reject, or "Reject with reason…" to decline and then type a short reason I'll relay to "${sourceName}".`,
+    `Approve, Reject, or "Reject with reason…" to decline and then type a short reason I'll relay to ${source}.`,
   );
-  return lines.join('\n');
+  const tail = `\n${tailLines.join('\n')}`;
+  // The body gets whatever the card limit leaves once title, frame and fence
+  // count; escaping can grow text several times, so the cap is on escaped text.
+  const room = MAX_CARD_QUESTION_LENGTH - GATE_CARD_TITLE.length - head.length - tail.length - fenceForCard('').length;
+  const budget = Math.max(0, Math.min(GATE_CARD_BODY_MAX, room));
+  return head + fenceForCard(text, budget) + tail;
 }
 
 /**
@@ -327,35 +301,53 @@ async function performAgentRoute(
   session: Session,
   targetAgentGroupId: string,
 ): Promise<void> {
-  const targetSession = await resolveTargetSession(msg, session, targetAgentGroupId);
-  const a2aMsgId = `a2a-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  // A chat delete can remove the target session while the write is landing, which
+  // leaves the message in an inbox nothing reads; route it once more if so.
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const targetSession = await resolveTargetSession(msg, session, targetAgentGroupId);
+    const a2aMsgId = `a2a-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-  // If the source message references files (via `send_file`), forward the
-  // bytes from the source's outbox into the target's inbox so the target
-  // agent can actually see and re-send them. Without this, agent-to-agent
-  // file attachments look like they arrive but the target has no way to
-  // read the bytes — they live in a session dir it doesn't mount.
-  const forwardedContent = forwardFileAttachments(msg, a2aMsgId, session, targetAgentGroupId, targetSession.id);
+    // If the source message references files (via `send_file`), forward the
+    // bytes from the source's outbox into the target's inbox so the target
+    // agent can actually see and re-send them. Without this, agent-to-agent
+    // file attachments look like they arrive but the target has no way to
+    // read the bytes — they live in a session dir it doesn't mount.
+    const forwardedContent = forwardFileAttachments(msg, a2aMsgId, session, targetAgentGroupId, targetSession.id);
 
-  await writeSessionMessage(targetAgentGroupId, targetSession.id, {
-    id: a2aMsgId,
-    kind: 'chat',
-    timestamp: new Date().toISOString(),
-    platformId: session.agent_group_id,
-    channelType: 'agent',
-    threadId: null,
-    content: forwardedContent,
-    sourceSessionId: session.id,
-  });
-  log.info('Agent message routed', {
-    from: session.agent_group_id,
-    to: targetAgentGroupId,
-    targetSession: targetSession.id,
-    a2aMsgId,
-    forwardedFileCount: countForwardedFiles(forwardedContent),
-  });
-  const fresh = await getSession(targetSession.id);
-  if (fresh) await requestWake(fresh, 'inbound-message');
+    await writeSessionMessage(targetAgentGroupId, targetSession.id, {
+      id: a2aMsgId,
+      kind: 'chat',
+      timestamp: new Date().toISOString(),
+      platformId: session.agent_group_id,
+      channelType: 'agent',
+      threadId: null,
+      content: forwardedContent,
+      sourceSessionId: session.id,
+    });
+    log.info('Agent message routed', {
+      from: session.agent_group_id,
+      to: targetAgentGroupId,
+      targetSession: targetSession.id,
+      a2aMsgId,
+      forwardedFileCount: countForwardedFiles(forwardedContent),
+    });
+    const fresh = await getSession(targetSession.id);
+    if (fresh) {
+      await requestWake(fresh, 'inbound-message');
+      return;
+    }
+    log.warn('Agent message target session was deleted while routing', {
+      to: targetAgentGroupId,
+      targetSession: targetSession.id,
+      a2aMsgId,
+      attempt,
+    });
+    // Its container may still poll that inbox until the sweep stops it; fail the copy so
+    // only the re-routed one runs.
+    await withExistingMailboxSession(targetAgentGroupId, targetSession.id, (m) => m.markMessageFailed(a2aMsgId));
+  }
+  // Throwing leaves the source message undelivered, so delivery retries it.
+  throw new Error(`agent-to-agent message ${msg.id}: target session deleted on every routing attempt`);
 }
 
 /**

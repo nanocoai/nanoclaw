@@ -5,11 +5,13 @@
  * with a question card, then polls messages_in for the response.
  */
 import { AjvJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/ajv';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 import { findQuestionResponse, markCompleted } from '../db/messages-in.js';
-import { writeMessageOut } from '../db/messages-out.js';
+import { getDeliveryStatus, writeMessageOut } from '../db/messages-out.js';
 import { getSessionRouting, resolveDestinationThread } from '../db/session-routing.js';
 import { getCurrentReplyRoute } from '../db/session-state.js';
+import { cardProblems } from './card-parts.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
 
@@ -68,9 +70,15 @@ export const LINK_ACTION_SCHEMA = Object.freeze({
     // gives, and the anchors reject whitespace, which would otherwise break out
     // of '[label](url)' on an adapter that degrades a card to markdown.
     // Rejected: '#', '/docs', 'localhost:3000', 'javascript:', 'mailto:'.
+    // Printable-ASCII ranges stand in for \s and \S: llama.cpp's
+    // schema-to-grammar converter rejects those escapes and fails every request
+    // that carries this tool. The classes also leave out '"' and '\\', which
+    // the converter would otherwise copy into the JSON string rule. The first
+    // host character excludes '#', '/' and '?'. Non-ASCII URLs are normalized
+    // with `new URL()` before validation (see normalizeLinkUrl).
     url: {
       type: 'string' as const,
-      pattern: '^[hH][tT][tT][pP][sS]?://[^\\s/?#]\\S*$',
+      pattern: '^[hH][tT][tT][pP][sS]?://[!$-.0->@-[\\]-~][!#-[\\]-~]*$',
       description: "Web link (http or https), e.g. 'https://example.com'.",
     },
     style: {
@@ -88,15 +96,53 @@ const validateLinkAction = new AjvJsonSchemaValidator().getValidator<Record<stri
  * the ones it would drop. Invalid entries — including `null`, which would
  * crash the bridge's property reads — never reach the payload.
  */
+const NON_ASCII = /[^\x00-\x7F]/;
+
+/**
+ * The pattern is ASCII-only, so a link like `https://de.wikipedia.org/wiki/München`
+ * would be dropped. `new URL()` percent-encodes the path and punycodes the host,
+ * which keeps such links. Only non-ASCII URLs are rewritten; everything else is
+ * validated exactly as the agent sent it.
+ */
+function normalizeLinkUrl(action: unknown): unknown {
+  if (typeof action !== 'object' || action === null) return action;
+  const url = (action as { url?: unknown }).url;
+  if (typeof url !== 'string' || !NON_ASCII.test(url)) return action;
+  try {
+    return { ...action, url: new URL(url).href };
+  } catch {
+    return action;
+  }
+}
+
 function partitionActions(card: Record<string, unknown>): { card: Record<string, unknown>; dropped: number } {
   const actions = card.actions;
   if (!Array.isArray(actions)) return { card, dropped: 0 };
 
-  const valid = actions.filter((action) => validateLinkAction(action).valid);
-  if (valid.length === actions.length) return { card, dropped: 0 };
+  const normalized = actions.map(normalizeLinkUrl);
+  const valid = normalized.filter((action) => validateLinkAction(action).valid);
+  const changed = normalized.some((action, index) => action !== actions[index]);
+  if (valid.length === actions.length && !changed) return { card, dropped: 0 };
 
   return { card: { ...card, actions: valid }, dropped: actions.length - valid.length };
 }
+
+/**
+ * A part as the tool advertises it: its name, not its fields. The send_card
+ * schema reaches every provider on every request, so it stays small and plain;
+ * the fields are in the tool's instructions, and a refusal names what to fix.
+ */
+const CARD_PART_SCHEMA = Object.freeze({
+  type: 'object' as const,
+  description:
+    'A card part: { type, props } (Fields: { type, children: Field parts }). Fields per part are in the send_card instructions.',
+  properties: {
+    type: { type: 'string' as const, enum: ['Text', 'Fields', 'Table', 'Chart', 'Divider'] },
+    props: { type: 'object' as const },
+    children: { type: 'array' as const, items: { type: 'object' as const } },
+  },
+  required: ['type'],
+});
 
 function ok(text: string) {
   return { content: [{ type: 'text' as const, text }] };
@@ -106,9 +152,8 @@ function err(text: string) {
   return { content: [{ type: 'text' as const, text: `Error: ${text}` }], isError: true };
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+/** Same as MAX_CARD_QUESTION_LENGTH in the host's src/channels/ask-question.ts. */
+export const MAX_CARD_QUESTION_LENGTH = 2000;
 
 export const askUserQuestion: McpToolDefinition = {
   tool: {
@@ -119,7 +164,10 @@ export const askUserQuestion: McpToolDefinition = {
       type: 'object' as const,
       properties: {
         title: { type: 'string', description: 'Short card title shown above the question' },
-        question: { type: 'string', description: 'The question to ask' },
+        question: {
+          type: 'string',
+          description: 'The question to ask. Title and question together: at most 2000 characters',
+        },
         options: {
           type: 'array',
           items: {
@@ -143,13 +191,20 @@ export const askUserQuestion: McpToolDefinition = {
       required: ['title', 'question', 'options'],
     },
   },
-  async handler(args) {
+  async handler(args, context) {
+    if (context?.signal.aborted) return err('Question cancelled');
     const title = args.title as string;
     const question = args.question as string;
     const rawOptions = args.options as unknown[];
     const timeout = ((args.timeout as number) || 300) * 1000;
     if (!title || !question || !rawOptions?.length) {
       return err('title, question, and options are required');
+    }
+    // The host refuses longer cards; say so now instead of waiting out the timeout.
+    if (title.length + question.length > MAX_CARD_QUESTION_LENGTH) {
+      return err(
+        `title and question are too long to show in full on a card (${title.length + question.length} characters, limit ${MAX_CARD_QUESTION_LENGTH}). Shorten the question.`,
+      );
     }
 
     const options = rawOptions.map((o) => {
@@ -186,6 +241,10 @@ export const askUserQuestion: McpToolDefinition = {
     // Poll for response in inbound.db (host writes the response there)
     const deadline = Date.now() + timeout;
     while (Date.now() < deadline) {
+      if (context?.signal.aborted) return err('Question cancelled');
+      // Read the delivery outcome before the answer, so an answer that lands
+      // between the two reads still wins.
+      const deliveryFailed = getDeliveryStatus(questionId) === 'failed';
       const response = findQuestionResponse(questionId);
 
       if (response) {
@@ -197,7 +256,20 @@ export const askUserQuestion: McpToolDefinition = {
         return ok(parsed.selectedOption);
       }
 
-      await sleep(1000);
+      // The host gave up delivering the card: stop waiting for an answer.
+      if (deliveryFailed) {
+        log(`ask_user_question undeliverable: ${questionId}`);
+        return err(
+          'The question card could not be delivered, so no answer will be collected. Shorten the title, question or option labels, or ask in a plain message.',
+        );
+      }
+
+      try {
+        await sleep(1000, undefined, { signal: context?.signal });
+      } catch (error) {
+        if (context?.signal.aborted) return err('Question cancelled');
+        throw error;
+      }
     }
 
     log(`ask_user_question timeout: ${questionId}`);
@@ -215,14 +287,14 @@ export const sendCard: McpToolDefinition = {
         card: {
           type: 'object',
           description:
-            'Display card with optional title, description, text children, and URL link actions. Each action requires a non-empty label and a url that is a web link (http or https); invalid actions are dropped. Callback buttons are unsupported; use ask_user_question for choices.',
+            'Display card with optional title, description, children (text and card parts) and URL link actions. Each action requires a non-empty label and a url that is a web link (http or https); invalid actions are dropped. Callback buttons are unsupported; use ask_user_question for choices.',
           properties: {
             title: { type: 'string' },
             description: { type: 'string' },
             children: {
               type: 'array',
               description:
-                'Text content only: strings or objects with a text field. Nested action blocks are unsupported.',
+                'Text (strings or objects with a text field) and card parts: Text, Fields, Table, Chart, Divider. At most 10 parts, 1 Table (30 rows, 6 columns) and 2 Charts per card. A card with an invalid part is not sent; the result says what to fix. Nested action blocks are unsupported.',
               items: {
                 anyOf: [
                   { type: 'string' },
@@ -231,6 +303,7 @@ export const sendCard: McpToolDefinition = {
                     properties: { text: { type: 'string' } },
                     required: ['text'],
                   },
+                  CARD_PART_SCHEMA,
                 ],
               },
             },
@@ -256,6 +329,8 @@ export const sendCard: McpToolDefinition = {
     const id = generateId();
     const r = routing();
     const { card: renderable, dropped } = partitionActions(card);
+    const problems = cardProblems(renderable);
+    if (problems.length > 0) return err(`Card not sent. Fix these and send it again: ${problems.join('; ')}`);
 
     await writeMessageOut({
       id,

@@ -7,7 +7,10 @@
  *   inbound.db  — host writes new messages here; container opens READ-ONLY
  *   outbound.db — container writes responses + acks here; host opens read-only
  *
- * Each file has exactly one writer, so no cross-process lock contention.
+ * Each file has one writing side while a container runs, so host and
+ * container do not contend for its write lock. Inside the container, the
+ * runner, the MCP server and each `ncl` call all write outbound.db, so its
+ * opener must wait for the lock.
  *
  * ⚠ Cross-mount visibility: inbound.db MUST be journal_mode=DELETE (set by
  * the host when the file is created). WAL's `-shm` is memory-mapped and
@@ -26,58 +29,60 @@ let _inbound: Database | null = null;
 let _outbound: Database | null = null;
 let _testMode = false;
 
+// A VM file share such as Docker Desktop's does not carry the host's SQLite
+// locks into the container, so a read can land mid host write: the host's live
+// journal then looks like one needing rollback, or a page reads torn. Both
+// clear once the host commits; anything else, or a lasting one, throws.
+const MID_WRITE_ERRORS = new Set(['SQLITE_READONLY_ROLLBACK', 'SQLITE_CORRUPT']);
+const MID_WRITE_RETRY_MS = 1000;
+const MID_WRITE_BACKOFF_MS = 10;
+
 /**
- * Avoid all cached db reads; open inbound.db read-only with mmap and page cache disabled.
+ * Run `read` against a fresh read-only inbound.db connection, closed after.
  *
- * Use this (not getInboundDb) for readers that need to see host-written rows
- * promptly — e.g. messages_in polling. Caller must .close() the returned
- * connection (try/finally).
- *
- * Needed for mounts where host writes don't reliably invalidate
- * SQLite's caches: virtiofs (Colima, Lima, Podman Machine, Apple
- * Container), NFS.
- *
- * Cost is microseconds per query, so safe for universal use.
+ * Fresh every time because host writes don't reliably invalidate SQLite's
+ * caches across virtiofs/NFS mounts; opening costs microseconds. `read` must
+ * return materialized rows (`.get()`/`.all()`), and may run more than once.
  */
-export function openInboundDb(): Database {
-  // In test mode return a thin wrapper over the in-memory singleton.
-  // Callers do try/finally { db.close() } — the wrapper no-ops close()
-  // so the singleton survives for the rest of the test.
-  if (_testMode && _inbound) {
-    const db = _inbound;
-    return {
-      prepare: (sql: string) => db.prepare(sql),
-      exec: (sql: string) => db.exec(sql),
-      close: () => {},
-    } as unknown as Database;
+export function readInbound<T>(read: (db: Database) => T, path = DEFAULT_INBOUND_PATH): T {
+  if (_testMode && _inbound && path === DEFAULT_INBOUND_PATH) return read(_inbound);
+  const deadline = Date.now() + MID_WRITE_RETRY_MS;
+  for (;;) {
+    const db = new Database(path, { readonly: true });
+    try {
+      db.exec('PRAGMA busy_timeout = 5000');
+      db.exec('PRAGMA mmap_size = 0');
+      return read(db);
+    } catch (error) {
+      const code = (error as { code?: unknown }).code;
+      if (typeof code !== 'string' || !MID_WRITE_ERRORS.has(code) || Date.now() >= deadline) throw error;
+    } finally {
+      db.close();
+    }
+    Bun.sleepSync(MID_WRITE_BACKOFF_MS);
   }
-  const db = new Database(DEFAULT_INBOUND_PATH, { readonly: true });
-  db.exec('PRAGMA busy_timeout = 5000');
-  db.exec('PRAGMA mmap_size = 0');
-  return db;
 }
 
 /**
- * Inbound DB — long-lived singleton, OK for tables the host writes once
- * at spawn and never again (destinations, session_routing). For
- * messages_in polling — where the host writes continuously and a stale
- * view causes the pollHandle hang — use `openInboundDb()` instead.
+ * Tests only: the in-memory inbound DB from `initTestSessionDb()`, for seeding rows.
+ * Keep it exported: provider test files already installed from older payloads import it.
  */
 export function getInboundDb(): Database {
-  if (!_inbound) {
-    _inbound = new Database(DEFAULT_INBOUND_PATH, { readonly: true });
-    _inbound.exec('PRAGMA busy_timeout = 5000');
-    _inbound.exec('PRAGMA mmap_size = 0');
-  }
+  if (!_testMode || !_inbound) throw new Error('getInboundDb() is test-only; read through readInbound()');
   return _inbound;
 }
 
-/** Outbound DB — container owns this file (sole writer). */
-export function getOutboundDb(): Database {
+/**
+ * Outbound DB, written by several container processes: the runner, the MCP
+ * server and each `ncl` call. `path` (tests only) applies to the first open.
+ */
+export function getOutboundDb(path = DEFAULT_OUTBOUND_PATH): Database {
   if (!_outbound) {
-    _outbound = new Database(DEFAULT_OUTBOUND_PATH);
-    _outbound.exec('PRAGMA journal_mode = DELETE');
+    _outbound = new Database(path);
+    // busy_timeout first: bun:sqlite defaults it to 0, and the first schema
+    // read (journal_mode) fails at once while one of those writers holds the lock.
     _outbound.exec('PRAGMA busy_timeout = 5000');
+    _outbound.exec('PRAGMA journal_mode = DELETE');
     _outbound.exec('PRAGMA foreign_keys = ON');
     // Lightweight forward-compat: session_state was added after the initial
     // v2 schema, so older session DBs don't have it. Create it on demand

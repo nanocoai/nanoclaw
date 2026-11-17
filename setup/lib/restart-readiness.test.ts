@@ -1,0 +1,278 @@
+import { execFile, execFileSync, spawnSync } from 'node:child_process';
+import {
+  copyFileSync,
+  linkSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { promisify } from 'node:util';
+import { setTimeout as delay } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+
+import { queryHost, waitForHost } from './host-status.mjs';
+
+const execFileAsync = promisify(execFile);
+const sourceLib = dirname(fileURLToPath(import.meta.url));
+const fixtureHost = `
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const net = require('node:net');
+
+fs.mkdirSync('data', { recursive: true });
+const socketPath = 'data/ncl.sock';
+if (fs.existsSync(socketPath)) fs.unlinkSync(socketPath);
+const instanceId = crypto.randomUUID();
+const server = net.createServer((socket) => {
+  let request = '';
+  socket.on('error', () => {});
+  socket.on('data', (chunk) => {
+    request += chunk.toString('utf8');
+    if (!request.includes('\\n')) return;
+    const frame = JSON.parse(request.slice(0, request.indexOf('\\n')));
+    if (fs.existsSync('fail-status-once')) {
+      fs.unlinkSync('fail-status-once');
+      socket.end(JSON.stringify({ id: frame.id, ok: false }) + '\\n');
+      return;
+    }
+    const reply = () => socket.end(JSON.stringify({
+      id: frame.id,
+      ok: true,
+      data: {
+        pid: process.pid,
+        started_at: new Date(performance.timeOrigin).toISOString(),
+        instance_id: instanceId,
+        project_root: process.cwd(),
+        channels: [{ instance: 'mattermost', type: 'mattermost', connected: true }],
+      },
+    }) + '\\n');
+    // A loaded runner answering after the caller's budget, made deterministic.
+    if (fs.existsSync('slow-status')) setTimeout(reply, 200);
+    else reply();
+  });
+});
+server.listen(socketPath);
+process.on('SIGTERM', () => server.close(() => process.exit(0)));
+`;
+
+const shellQuote = (value: string): string => `'${value.replaceAll("'", `'"'"'`)}'`;
+
+// Root-relative, so one file hardlinked into each test root serves every test.
+const launcher = `#!/bin/bash
+set -eu
+cd "$(dirname "$0")"
+[[ -f dist/index.js ]]
+old_pid="$(cat nanoclaw.pid 2>/dev/null || true)"
+if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
+  kill "$old_pid"
+  while kill -0 "$old_pid" 2>/dev/null; do sleep 0.02; done
+fi
+${shellQuote(process.execPath)} dist/index.js >> logs/nanoclaw.log 2>> logs/nanoclaw.error.log < /dev/null &
+echo $! > nanoclaw.pid
+`;
+
+let root: string;
+let shared: string;
+let binDir: string;
+let ownedPids: Set<number>;
+
+function resetStubs(): void {
+  writeFileSync(join(binDir, 'uname'), '#!/bin/sh\necho Linux\n', { mode: 0o755 });
+  writeFileSync(join(binDir, 'systemctl'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+  writeFileSync(join(binDir, 'launchctl'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+}
+
+beforeAll(() => {
+  // macOS checks the first exec of every new script (~200 ms, queued across a
+  // parallel run). Create the stubs and launcher once and exec them here; the
+  // tests rewrite them in place or hardlink them, which reuses that check.
+  shared = realpathSync(mkdtempSync(join(tmpdir(), 'ncl-rst-bin-')));
+  binDir = join(shared, 'bin');
+  mkdirSync(binDir);
+  symlinkSync(process.execPath, join(binDir, 'node'));
+  writeFileSync(join(shared, 'start-nanoclaw.sh'), launcher, { mode: 0o755 });
+  resetStubs();
+  for (const file of ['bin/uname', 'bin/systemctl', 'bin/launchctl', 'start-nanoclaw.sh']) {
+    spawnSync(join(shared, file));
+  }
+});
+
+afterAll(() => {
+  rmSync(shared, { recursive: true, force: true });
+});
+
+beforeEach(() => {
+  // Keep the fixture's Unix socket path below macOS's 104-byte limit.
+  root = realpathSync(mkdtempSync(join(tmpdir(), 'ncl-rst-')));
+  ownedPids = new Set();
+  mkdirSync(join(root, 'setup/lib'), { recursive: true });
+  mkdirSync(join(root, 'dist'));
+  mkdirSync(join(root, 'logs'));
+  for (const name of ['host-status.mjs', 'restart.sh', 'install-slug.sh']) {
+    copyFileSync(join(sourceLib, name), join(root, 'setup/lib', name));
+  }
+  writeFileSync(join(root, 'dist/index.js'), fixtureHost);
+  resetStubs();
+  linkSync(join(shared, 'start-nanoclaw.sh'), join(root, 'start-nanoclaw.sh'));
+});
+
+afterEach(async () => {
+  try {
+    ownedPids.add(Number(readFileSync(join(root, 'nanoclaw.pid'), 'utf8').trim()));
+  } catch {
+    // No host was started.
+  }
+  for (const pid of ownedPids) {
+    if (!Number.isInteger(pid) || pid <= 0) continue;
+    try {
+      process.kill(pid, 'SIGTERM');
+    } catch {
+      // Already exited.
+    }
+  }
+  await delay(50);
+  rmSync(root, { recursive: true, force: true });
+});
+
+function env(): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    PATH: `${binDir}:${process.env.PATH}`,
+    NANOCLAW_READY_TIMEOUT_MS: '1000',
+  };
+}
+
+async function startHost(): Promise<{ pid: number; instance_id: string }> {
+  execFileSync('/bin/bash', [join(root, 'start-nanoclaw.sh')], { env: env(), stdio: 'pipe' });
+  const pid = Number(readFileSync(join(root, 'nanoclaw.pid'), 'utf8').trim());
+  ownedPids.add(pid);
+  try {
+    return await waitForHost(root, { pid, timeoutMs: 1000 });
+  } catch (error) {
+    const stderr = readFileSync(join(root, 'logs/nanoclaw.error.log'), 'utf8').trim();
+    throw new Error(`${error instanceof Error ? error.message : String(error)}${stderr ? `: ${stderr}` : ''}`);
+  }
+}
+
+describe('restart host identity and readiness', () => {
+  it('restarts the fallback from another directory and requires the requested channel', async () => {
+    const first = await startHost();
+    writeFileSync(join(binDir, 'systemctl'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+
+    await execFileAsync('bash', [join(root, 'setup/lib/restart.sh'), '--channel', 'mattermost'], {
+      cwd: tmpdir(),
+      env: { ...env(), NANOCLAW_PROJECT_ROOT: '/wrong-checkout' },
+    });
+
+    const nextPid = Number(readFileSync(join(root, 'nanoclaw.pid'), 'utf8').trim());
+    ownedPids.add(nextPid);
+    const next = await queryHost(root);
+    expect(next.pid).toBe(nextPid);
+    expect(next.instance_id).not.toBe(first.instance_id);
+  });
+
+  it('rejects an old live host, the wrong process, and a missing adapter', async () => {
+    const status = await startHost();
+    await expect(waitForHost(root, { previous: status.instance_id, timeoutMs: 100 })).rejects.toThrow('previous host');
+    await expect(waitForHost(root, { pid: process.pid, timeoutMs: 100 })).rejects.toThrow('different process');
+    await expect(waitForHost(root, { channel: 'missing', timeoutMs: 100 })).rejects.toThrow('not connected');
+  });
+
+  it('judges a host that answers after the readiness budget by its answer, not by the clock', async () => {
+    const status = await startHost();
+    writeFileSync(join(root, 'slow-status'), '');
+    await expect(waitForHost(root, { previous: status.instance_id, timeoutMs: 50 })).rejects.toThrow('previous host');
+  });
+
+  it('propagates a failed systemd restart despite a healthy old host', async () => {
+    const status = await startHost();
+    writeFileSync(join(binDir, 'systemctl'), '#!/bin/sh\ncase "$*" in *"--user cat"*) exit 0;; *) exit 5;; esac\n', {
+      mode: 0o755,
+    });
+
+    expect(() => execFileSync('bash', [join(root, 'setup/lib/restart.sh')], { env: env(), stdio: 'pipe' })).toThrow();
+    expect(await queryHost(root)).toMatchObject({ pid: status.pid, instance_id: status.instance_id });
+  });
+
+  it('rejects a successful manager no-op when the initial status query fails', async () => {
+    await startHost();
+    writeFileSync(join(root, 'fail-status-once'), '');
+    writeFileSync(
+      join(binDir, 'systemctl'),
+      `#!/bin/sh
+case "$*" in
+  *show*) cat ${shellQuote(join(root, 'nanoclaw.pid'))};;
+  *) exit 0;;
+esac
+`,
+      { mode: 0o755 },
+    );
+    await expect(execFileAsync('bash', [join(root, 'setup/lib/restart.sh')], { env: env() })).rejects.toThrow(
+      'did not start after the restart request',
+    );
+  });
+
+  it('recovers from a failed status query when the launcher actually replaces the process', async () => {
+    const old = await startHost();
+    writeFileSync(join(root, 'fail-status-once'), '');
+    writeFileSync(join(binDir, 'systemctl'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    await execFileAsync('bash', [join(root, 'setup/lib/restart.sh')], { env: env() });
+    expect((await queryHost(root)).instance_id).not.toBe(old.instance_id);
+  });
+
+  it.each(['bootstrap', 'kickstart'])(
+    'propagates launchd %s failure through the complete shell without falling back',
+    async (action) => {
+      await startHost();
+      writeFileSync(join(binDir, 'uname'), '#!/bin/sh\necho Darwin\n', { mode: 0o755 });
+      // Use this script's actual slug computation, with an isolated HOME.
+      const label = execFileSync(
+        'bash',
+        ['-c', `source ${shellQuote(join(root, 'setup/lib/install-slug.sh'))}; launchd_label`],
+        {
+          env: { ...env(), NANOCLAW_PROJECT_ROOT: root },
+          encoding: 'utf8',
+        },
+      ).trim();
+      mkdirSync(join(root, 'Library/LaunchAgents'), { recursive: true });
+      writeFileSync(join(root, 'Library/LaunchAgents', `${label}.plist`), '<plist/>');
+      const calls = join(root, 'launchctl-calls');
+      writeFileSync(
+        join(binDir, 'launchctl'),
+        `#!/bin/sh
+printf '%s\\n' "$1" >> ${shellQuote(calls)}
+[ "$1" = print ] && exit 113
+[ "$1" = ${action} ] && exit 5
+exit 0
+`,
+        { mode: 0o755 },
+      );
+      const old = readFileSync(join(root, 'nanoclaw.pid'), 'utf8');
+      await expect(
+        execFileAsync('bash', [join(root, 'setup/lib/restart.sh')], { env: { ...env(), HOME: root } }),
+      ).rejects.toMatchObject({ code: 5 });
+      expect(readFileSync(join(root, 'nanoclaw.pid'), 'utf8')).toBe(old);
+      if (action === 'bootstrap') expect(readFileSync(calls, 'utf8')).not.toContain('kickstart');
+    },
+  );
+
+  it('fails when no service manager or fallback launcher is installed', () => {
+    rmSync(join(root, 'start-nanoclaw.sh'));
+    writeFileSync(join(binDir, 'systemctl'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    expect(() => execFileSync('bash', [join(root, 'setup/lib/restart.sh')], { env: env(), stdio: 'pipe' })).toThrow();
+  });
+
+  it('rejects malformed channel arguments before attempting a restart', () => {
+    writeFileSync(join(binDir, 'systemctl'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    expect(() =>
+      execFileSync('bash', [join(root, 'setup/lib/restart.sh'), '--channel'], { env: env(), stdio: 'pipe' }),
+    ).toThrow();
+  });
+});

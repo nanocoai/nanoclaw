@@ -164,16 +164,21 @@ const SKILLS_HOST_SUBPATH = path.join('container', 'skills');
  * the group has switched on. Deterministic: same inputs, same file.
  *
  * Reads nothing the agent can author except `instructions.prepend.md`, which
- * `readGroupPersona` opens with O_NOFOLLOW.
+ * `readGroupPersona` opens with O_NOFOLLOW | O_NONBLOCK.
  */
-export async function composeGroupProjectDoc(group: AgentGroup, groupDir: string, spec: ProjectDocSpec): Promise<void> {
+export async function composeGroupProjectDoc(
+  group: AgentGroup,
+  groupDir: string,
+  spec: ProjectDocSpec,
+  runtimeSkills?: readonly string[],
+): Promise<void> {
   if (!fs.existsSync(groupDir)) fs.mkdirSync(groupDir, { recursive: true });
 
   const configRow = await getContainerConfig(group.id);
   // Re-validated rather than cast: these `instructions` strings are the only
   // stored, agent-influenced text copied verbatim into the system prompt.
   const mcpServers = sanitizeStoredMcpServers(configRow ? JSON.parse(configRow.mcp_servers) : {}, group.name);
-  const selectedSkills = parseSkillSelection(configRow?.skills, group.name);
+  const selectedSkills = runtimeSkills ?? parseSkillSelection(configRow?.skills, group.name);
 
   const sections: ProjectDocSection[] = [];
   const push = (name: string, body: string, droppable = false): void => {

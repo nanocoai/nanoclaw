@@ -5,9 +5,9 @@
  * The helper is a standalone script, not a repo module: docker execs it from an
  * arbitrary cwd, and uninstalling NanoClaw deletes this checkout while the
  * helper stays on PATH. So installing means copying the source out of the tree
- * and stamping an absolute shebang onto the copy — `#!/usr/bin/env node` would
- * resolve through whatever nvm/asdf shim happens to be in the spawning
- * process's PATH, which is not reliably anything when the spawner is docker.
+ * behind a `/bin/sh` header that starts it on the node setup ran on, or on the
+ * node on PATH once that binary is gone or cannot run. A bare `#!<node>` line
+ * stops working at the next node upgrade and cannot hold a path with a space.
  *
  * Wiring is one `credHelpers` key in `~/.docker/config.json`, read-modify-write
  * around every other key. That key is a pointer — no secret is written there,
@@ -35,7 +35,10 @@ export const HELPER_BINARY_NAME = `docker-credential-${CRED_HELPER_NAME}`;
  */
 const HELPER_MARKER = 'nanoclaw-docker-credential-helper';
 
-/** Preferred first; `~/.local/bin` is the unprivileged fallback, as in setup/onecli.ts. */
+/** How `setup/registry/credential-helper.mjs` begins in every release, before any install. */
+const SOURCE_FIRST_LINE = '#!/usr/bin/env node';
+
+/** Preferred first; `~/.local/bin` is the unprivileged fallback used by installable gateways. */
 const BIN_DIRS = ['/usr/local/bin', path.join(os.homedir(), '.local', 'bin')];
 
 /**
@@ -154,10 +157,19 @@ function chooseBinDir(override?: string): string {
   return fallback;
 }
 
-/** Swap the source's shebang for one naming this exact node binary. */
+/**
+ * Swap the source's shebang for a `/bin/sh` header. Its second line is a bare
+ * string and a comment to node, and a command to sh: run this file on
+ * `nodePath` while that binary starts, else on the node on PATH. The start
+ * test gets no stdin: docker's request on it is for the helper, not the test.
+ * A header already there goes too: an earlier setup wrote one into a source
+ * it reached through a link.
+ */
 export function renderHelper(source: string, nodePath: string): string {
-  const body = source.startsWith('#!') ? source.slice(source.indexOf('\n') + 1) : source;
-  return `#!${nodePath}\n${body}`;
+  const body = source.replace(/^(?:#!.*\r?\n)?(?:':' \/\/;.*\r?\n)*/, '');
+  const pinned = `'${nodePath.replace(/'/g, `'\\''`)}'`;
+  const starts = `[ -x "$N" ] && "$N" -v </dev/null >/dev/null 2>&1`;
+  return `#!/bin/sh\n':' //; N=${pinned}; ${starts} || { if command -v node >/dev/null 2>&1; then N=node; fi; }; exec "$N" "$0" "$@"\n${body}`;
 }
 
 /**
@@ -166,10 +178,27 @@ export function renderHelper(source: string, nodePath: string): string {
  * in flight; a rename is atomic and gives the old inode to whoever holds it.
  */
 function writeExecutable(dest: string, contents: string): void {
+  let previous: fs.Stats | undefined;
+  try {
+    const entry = fs.lstatSync(dest);
+    if (entry.isFile()) previous = entry;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
   const tmp = `${dest}.tmp-${process.pid}`;
   try {
-    fs.writeFileSync(tmp, contents, { mode: 0o755 });
-    fs.chmodSync(tmp, 0o755);
+    fs.writeFileSync(tmp, contents, { mode: 0o600 });
+    // The old file's owner and mode are kept where this user may keep them.
+    // Where it may not, the helper is still replaced, as a plain file of this
+    // user's own: a stale helper nobody here can rewrite helps no one.
+    let mode = 0o755;
+    if (previous) {
+      const created = fs.statSync(tmp);
+      const sameOwner = created.uid === previous.uid && created.gid === previous.gid;
+      if (sameOwner || gaveTo(tmp, previous.uid, previous.gid)) mode = runnable(previous.mode);
+    }
+    // chown can clear mode bits, so permissions are set after ownership.
+    fs.chmodSync(tmp, mode);
     fs.renameSync(tmp, dest);
   } catch (err) {
     try {
@@ -179,6 +208,38 @@ function writeExecutable(dest: string, contents: string): void {
     }
     throw err;
   }
+}
+
+/** False when this user may not hand the file to that owner. Any other failure is a real one. */
+function gaveTo(file: string, uid: number, gid: number): boolean {
+  try {
+    fs.chownSync(file, uid, gid);
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EPERM') return false;
+    throw err;
+  }
+}
+
+/**
+ * The old file's mode, as a helper needs it: its owner may run it, and so may
+ * anyone else who could read it. The old file may never have been executable,
+ * as when it is a hard link to a checkout's helper source.
+ */
+function runnable(mode: number): number {
+  const kept = mode & 0o7777;
+  return kept | 0o500 | ((kept & 0o044) >> 2);
+}
+
+/**
+ * True for a helper source someone keeps, which is never the file to write.
+ * One that was never installed still begins with the source's own first line.
+ * One in a checkout may not: for some days in Nov 2026 setup wrote its header
+ * into such a file through a link. So in a checkout the place decides.
+ */
+function isHelperSource(file: string, contents: string): boolean {
+  const place = (p: string): string => p.split(path.sep).slice(-3).join('/');
+  return contents.split(/\r?\n/, 1)[0] === SOURCE_FIRST_LINE || place(file) === place(helperSourcePath());
 }
 
 function isOurBinary(file: string): boolean {
@@ -244,6 +305,25 @@ function writeDockerConfig(file: string, config: DockerConfig): void {
   fs.renameSync(tmp, file);
 }
 
+/** What this setup installs: the helper source behind a header naming the node setup is running on. */
+function currentHelper(): string {
+  return renderHelper(fs.readFileSync(helperSourcePath(), 'utf-8'), process.execPath);
+}
+
+/** Write the helper binary and nothing else: docker's config is not this function's to touch. */
+function writeHelper(helperPath: string): void {
+  writeExecutable(helperPath, currentHelper());
+
+  // Proves the header resolves and that this binary is the one uninstall will
+  // recognize — both silent failures otherwise, discovered mid-pull.
+  const check = spawnSync(helperPath, ['version'], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] });
+  if (check.status !== 0 || !(check.stdout ?? '').includes(HELPER_MARKER)) {
+    throw new Error(
+      `${helperPath} did not run after install (exit ${check.status}): ${(check.stderr ?? check.error?.message ?? '').trim()}`,
+    );
+  }
+}
+
 export function installCredentialHelper(options: CredHelperOptions = {}): CredHelperInstallResult {
   const registryHost = resolveRegistryHost(options.registryHost);
 
@@ -254,16 +334,7 @@ export function installCredentialHelper(options: CredHelperOptions = {}): CredHe
 
   const binDir = chooseBinDir(options.binDir);
   const helperPath = path.join(binDir, HELPER_BINARY_NAME);
-  writeExecutable(helperPath, renderHelper(fs.readFileSync(helperSourcePath(), 'utf-8'), process.execPath));
-
-  // Proves the shebang resolves and that this binary is the one uninstall will
-  // recognize — both silent failures otherwise, discovered mid-pull.
-  const check = spawnSync(helperPath, ['version'], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] });
-  if (check.status !== 0 || !(check.stdout ?? '').includes(HELPER_MARKER)) {
-    throw new Error(
-      `${helperPath} did not run after install (exit ${check.status}): ${(check.stderr ?? check.error?.message ?? '').trim()}`,
-    );
-  }
+  writeHelper(helperPath);
 
   const credHelpers = config.credHelpers ?? {};
   const dockerConfigChanged = credHelpers[registryHost] !== CRED_HELPER_NAME;
@@ -289,6 +360,36 @@ export function installCredentialHelper(options: CredHelperOptions = {}): CredHe
   }
 
   return { helperPath, registryHost, dockerConfigPath: configFile, dockerConfigChanged, onPath: reachable };
+}
+
+/**
+ * Bring a helper docker is wired to up to date, where it already is: one from
+ * an older setup gets the current header before a pull needs it, since sign-in
+ * is skipped on a machine already signed in. One that is already current is
+ * left alone. Only the binary is written, never docker's config. Not fatal:
+ * the pull that follows reports its own failure.
+ */
+export function refreshInstalledCredentialHelper(options: CredHelperOptions = {}): void {
+  const helper = credentialHelperStatus(options);
+  // With no registry wired to the helper, docker never starts it.
+  if (!helper.helperPath || helper.wiredHosts.length === 0) return;
+  try {
+    // A linked helper is rewritten at its target, so the link stays a link.
+    // The target is checked itself: the link can point elsewhere by now.
+    const target = fs.realpathSync(helper.helperPath);
+    if (!isOurBinary(target)) return;
+    const installed = fs.readFileSync(target, 'utf-8');
+    // A link may lead to a helper source, this checkout's or another's:
+    // replace the link with a helper of its own, never write the source.
+    const isSource = isHelperSource(target, installed);
+    // Already what this setup would write, and able to run: writing it again
+    // changes nothing.
+    const mode = fs.statSync(target).mode & 0o7777;
+    if (!isSource && installed === currentHelper() && mode === runnable(mode)) return;
+    writeHelper(isSource ? helper.helperPath : target);
+  } catch (err) {
+    log.warn('Could not re-install the docker credential helper', { helperPath: helper.helperPath, err });
+  }
 }
 
 /**
@@ -364,12 +465,15 @@ export function credentialHelperStatus(options: CredHelperOptions = {}): CredHel
   return { installed: helperPath !== undefined, helperPath, wiredHosts, dockerConfigPath: configFile };
 }
 
-function parseArgs(args: string[]): { mode: 'install' | 'uninstall' | 'status'; options: CredHelperOptions } {
+type Mode = 'install' | 'uninstall' | 'status' | 'refresh';
+
+function parseArgs(args: string[]): { mode: Mode; options: CredHelperOptions } {
   const options: CredHelperOptions = {};
-  let mode: 'install' | 'uninstall' | 'status' = 'install';
+  let mode: Mode = 'install';
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--uninstall') mode = 'uninstall';
     else if (args[i] === '--status') mode = 'status';
+    else if (args[i] === '--refresh-installed') mode = 'refresh';
     else if (args[i] === '--registry-host' && args[i + 1]) options.registryHost = args[++i];
     else if (args[i] === '--bin-dir' && args[i + 1]) options.binDir = args[++i];
     else if (args[i] === '--docker-config' && args[i + 1]) options.dockerConfigPath = args[++i];
@@ -381,7 +485,10 @@ function parseArgs(args: string[]): { mode: 'install' | 'uninstall' | 'status'; 
 export async function run(args: string[]): Promise<void> {
   const { mode, options } = parseArgs(args);
 
-  if (mode === 'status') {
+  if (mode === 'status' || mode === 'refresh') {
+    // `--refresh-installed` is for container/pull.sh: re-install what is
+    // there, never a first install, then report as `--status` does.
+    if (mode === 'refresh') refreshInstalledCredentialHelper(options);
     const status = credentialHelperStatus(options);
     emitStatus('CRED_HELPER', {
       INSTALLED: status.installed,

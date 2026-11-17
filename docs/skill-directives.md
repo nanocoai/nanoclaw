@@ -28,7 +28,7 @@ Two invariants follow, and both are non-negotiable:
 - `key:value` tokens are attributes.
 - The body's meaning is per-kind.
 
-`prompt` only *acquires* a value and binds it to a name; a separate directive *applies* it, referenced as `{{name}}`. That keeps "ask the human" decoupled from "what you do with the answer" (env, `ncl`, the OneCLI vault, a file).
+`prompt` only *acquires* a value and binds it to a name; a separate directive *applies* it, referenced as `{{name}}`. That keeps "ask the human" decoupled from "what you do with the answer" (env, `ncl`, the credential gateway, a file).
 
 ## The eight kinds
 
@@ -42,7 +42,7 @@ Registry copies explicitly fetch `+refs/heads/<b>:refs/remotes/<remote>/<b>` fro
 
 ### `append to:<file> [at:<marker>]`
 
-Body: the line(s) to add. Without `at:`, appends at end of file. With `at:<marker>`, inserts before the `// <<< <marker>` closing line of a dormant marker region (see `setup/index.ts`). **Idempotency: skip if already present.**
+Body: the line(s) to add. Without `at:`, appends at end of file. With `at:<marker>`, inserts before the `// <<< <marker>` closing line of a dormant marker region (see `setup/index.ts`). **Idempotency: skip if already present.** When the file already has the block's first line, only the later lines it lacks are added, so a block that gained a line since the install still adds it. Each body line must stand on its own, like an import or a list entry: remove deletes by line, and a line a block gains later lands at the end of the file or the marker, not inside other code.
 
 ### `dep [manager:pnpm|bun] [cwd:<dir>]`
 

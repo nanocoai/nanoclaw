@@ -14,8 +14,8 @@ import { CONTROL_CHANNEL, MAX_CELL_FRAME_CHARS, Mux, type Frame } from './mux.js
  * host sends nothing but hello, ping, and error/close on a data channel. A
  * close with 4403 (device forgotten) means "sign in required": the link stops
  * dialling until it is started again; 4008/4009 are the host's own protocol
- * bugs and are logged before the ordinary backoff. The socket constructor is
- * injectable for tests.
+ * bugs and are logged before the ordinary backoff. A dial that errors before
+ * it opens is dropped at once. The socket constructor is injectable for tests.
  */
 export interface CellTicket {
   ticket: string;
@@ -249,7 +249,14 @@ export class CellLink {
       const frame = mux.receive(event.data);
       if (frame) this.handleFrame(mux, frame);
     });
-    socket.addEventListener('error', () => {});
+    // Before `open`, an error is a failed dial. Node 22 fires it for a refused
+    // upgrade but never fires `close` (#4427), so drop here; a later `close`
+    // finds the socket gone. After `open`, `close` carries the code and drops.
+    socket.addEventListener('error', () => {
+      if (this.socket !== socket || this.connected) return;
+      this.log({ event: 'dial_failed' });
+      this.drop(socket);
+    });
     socket.addEventListener('close', (event) => this.drop(socket, event.code));
   }
 

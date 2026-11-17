@@ -218,6 +218,7 @@ deliberate:
 | No iMessage line assigned               | The line comes back on your user row — re-run the wizard with `--phone` so the row is created, then `… photon-setup.ts status` |
 | Inbound stops arriving (hosted)         | The adapter re-subscribes automatically; if it persists it's usually upstream — restart to force a fresh stream       |
 | Local: no inbound                       | Confirm Full Disk Access is granted to the Node binary NanoClaw runs under, and that it runs on the signed-in Mac     |
+| Local: `Could not locate the bindings file` | The `chat.db` reader's `better-sqlite3` has no binary (an install from before `/add-imessage` set its pnpm override). Re-run `/add-imessage` with the `local` backend; it sets the override, reinstalls and restarts |
 | Bot silent (hosted)                     | Check `grep "Photon channel connected" logs/nanoclaw.log`, that the channel is wired, and that the service is running |
 
 [photon]: https://photon.codes/

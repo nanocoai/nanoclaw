@@ -44,11 +44,12 @@ export function resolveRuntimeConfiguration(
   inputs: Partial<RuntimeConfigurationInputs>,
   environment: NodeJS.ProcessEnv = process.env,
 ): ResolvedRuntimeConfiguration {
-  const { executionPolicy, inference, mcpServers } = contract.configuration;
+  const { executionPolicy, inference, mcpServers, tone } = contract.configuration;
   return {
     executionPolicy: resolveCapability(executionPolicy, undefined, environment),
     inference: inference ? resolveCapability(inference, inputs.inference ?? {}, environment) : undefined,
     mcpServers: mcpServers ? resolveCapability(mcpServers, inputs.mcpServers ?? {}, environment) : undefined,
+    ...(tone ? { tone: tone.toSettings(tone.default) } : {}),
   };
 }
 

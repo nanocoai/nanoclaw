@@ -28,8 +28,12 @@ vi.mock('../log.js', () => ({
 
 // The Docker realization re-checks that mount sources exist (a missing source
 // would silently become a fresh empty directory); fixture paths are not real
-// files on the test host.
-vi.mock('fs', () => ({ default: { existsSync: (): boolean => true } }));
+// files on the test host. `constants` stays real: modules on the import path
+// (anchored-dir) read open flags at load time.
+vi.mock('fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('fs')>();
+  return { default: { constants: actual.constants, existsSync: (): boolean => true } };
+});
 
 /**
  * What a driver realized, in vocabulary no runtime owns. This is the
@@ -67,9 +71,8 @@ function dockerHarness(): Harness {
     cli,
     async realize(spec) {
       await driver.prepare(spec);
-      // The Docker realization refuses specs carrying auxiliary containers
-      // (capabilities().auxiliaryContainers is false), so the one create per
-      // prepare IS the whole session; read back what it emitted.
+      // Agent-only conformance cases emit one container; multi-container
+      // behavior is covered separately below.
       const create = cli.callMatching(/^create /)!.args;
       const env: Record<string, string> = {};
       const mounts: Realized['containers'][number]['mounts'] = [];
@@ -192,12 +195,34 @@ describe('conformance: mount and env policy', () => {
         }),
     ],
     [
+      'private material relabeled as gateway trust',
+      (spec) =>
+        spec.containers[0].mounts.push({
+          class: 'gateway-trust',
+          hostPath: '/install/data/session-materials/c/session-key.pem',
+          containerPath: '/run/gateway/ca.crt',
+          mode: 'ro',
+          groupScope: 'g1',
+        }),
+    ],
+    [
       'a writable install surface',
       (spec) =>
         spec.containers[0].mounts.push({
           class: 'install-surface',
           hostPath: '/install/container/skills',
           containerPath: '/app/skills',
+          mode: 'rw',
+          groupScope: 'g1',
+        }),
+    ],
+    [
+      'a writable gateway trust anchor',
+      (spec) =>
+        spec.containers[0].mounts.push({
+          class: 'gateway-trust',
+          hostPath: '/install/data/gateway-trust/fixture/ca.crt',
+          containerPath: '/run/gateway/ca.crt',
           mode: 'rw',
           groupScope: 'g1',
         }),
@@ -227,6 +252,18 @@ describe('conformance: mount and env policy', () => {
 });
 
 describe('conformance: the multi-container contract (validateSpec is the shared layer)', () => {
+  it('accepts a pinned public gateway trust anchor in the agent container', () => {
+    const spec = fixtureSpec();
+    spec.containers[0].mounts.push({
+      class: 'gateway-trust',
+      hostPath: '/install/data/gateway-trust/fixture/ca.crt',
+      containerPath: '/run/gateway/ca.crt',
+      mode: 'ro',
+      groupScope: 'g1',
+    });
+    expect(() => validateSpec(spec, FIXTURE_POLICY)).not.toThrow();
+  });
+
   // Multi-container specs are contract-legal; this tree's Docker realization
   // refuses to REALIZE them (the last case), so the validation rules over
   // auxiliary containers are asserted at the shared layer every driver runs
@@ -285,6 +322,17 @@ describe('conformance: the multi-container contract (validateSpec is the shared 
       retryable: false,
     });
     expect(h.cli.calls.some((c) => c.args[0] === 'create')).toBe(false);
+  });
+});
+
+describe('conformance: session labels and network intent', () => {
+  eachDriver('realizes session labels and network intent', async (h) => {
+    const spec = fixtureSpec({
+      labels: { ...fixtureSpec().labels, 'gateway-lineage': 'lineage-1' },
+      networkAccess: { endpoint: 'gateway.internal', target: { kind: 'host' } },
+    });
+    await expect(h.driver.prepare(spec)).resolves.toBeDefined();
+    expect(h.cli.calls.flatMap((call) => call.args)).toContain('gateway-lineage=lineage-1');
   });
 });
 
@@ -732,8 +780,7 @@ describe('conformance: capabilities are honest', () => {
     expect(capabilities.admissionEnforced).toBe(false);
     expect(capabilities.networkPolicy).toBe('topology');
     expect(capabilities.sharedNetworkNamespace).toBe(false);
-    // Realizes the agent container only — and refuses, never drops, the rest.
-    expect(capabilities.auxiliaryContainers).toBe(false);
+    expect(capabilities.auxiliaryContainers).toBe(true);
     // The session daemon doubles as the build daemon: rebuild-in-place works.
     expect(capabilities.imageBuild).toBe(true);
   });

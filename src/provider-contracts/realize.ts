@@ -1,10 +1,10 @@
 import fs from 'fs';
 import path from 'path';
 
+import { AnchoredDir } from '../anchored-dir.js';
 import { DATA_DIR } from '../config.js';
 import { materializeTemplateSkills } from '../group-skills.js';
 import { log } from '../log.js';
-import { writeAtomic } from '../migrate-claude-memory-settings.js';
 import { BASE_INSTRUCTIONS_PATH, type ProjectDocSpec } from '../project-doc-compose.js';
 
 import {
@@ -141,13 +141,15 @@ export async function realizeProviderSpawnSurfaces(
     const backingRoot = skillBackingPath(backing.location, volumes, agentGroupId, groupDir, sessionDirectory);
     const skillsPath = resolveWithinRoot(backingRoot, backing.skillsSubdirectory);
     paths.set(backing.id, backingRoot);
-    ensureDirectoryWithinRoot(
-      skillBackingContainmentRoot(backing.location, volumes, agentGroupId, groupDir, sessionDirectory),
-      skillsPath,
-    );
-    syncSharedSkillLinks(skillsPath, selectedSkills, backing.conflictDiagnostics === 'warn');
-    if (backing.templateCopies === 'copy') {
-      materializeTemplateSkills(agentGroupId, skillsPath);
+    // Anchor at the host-owned base (the group's parent / the volume root),
+    // never at an intermediate the container can swap, then treat every
+    // component below it as untrusted. A state volume's own `directory` sits
+    // inside a writable mount, so it is a segment here, not the root.
+    const anchorRoot = skillBackingAnchorRoot(backing.location, volumes, agentGroupId, groupDir, sessionDirectory);
+    const segments = segmentsWithinRoot(anchorRoot, skillsPath);
+    const linked = syncSharedSkillLinks(anchorRoot, segments, selectedSkills, backing.conflictDiagnostics === 'warn');
+    if (linked && backing.templateCopies === 'copy') {
+      materializeTemplateSkills(agentGroupId, anchorRoot, segments);
     }
   }
 
@@ -166,28 +168,60 @@ function initializeFile(
 ): void {
   const volume = volumes.get(file.volumeId);
   if (!volume) throw new Error(`Provider prepared file references unknown volume '${file.volumeId}'`);
-  const volumePath = providerStateVolumePath(volume, agentGroupId);
-  const filePath = resolveWithinRoot(volumePath, file.relativePath);
-  if (!fs.existsSync(filePath)) {
-    if (file.prepare.operation !== 'create-if-missing') return;
-    fs.writeFileSync(filePath, file.prepare.content, { flag: 'wx' });
-    initialized.push(file.relativePath);
+  const root = providerStateVolumeRoot(volume, agentGroupId);
+  const filePath = resolveWithinRoot(providerStateVolumePath(volume, agentGroupId), file.relativePath);
+  // The volume is a read-write mount, so every name below `root` belongs to
+  // the container: the file is reached through its directory's descriptor and
+  // a symlink or FIFO planted under its name is refused, never followed.
+  const name = path.basename(filePath);
+  let dir: AnchoredDir | null;
+  try {
+    dir = AnchoredDir.open(root, segmentsWithinRoot(root, path.dirname(filePath)));
+  } catch (err) {
+    log.warn('Provider file not prepared: unsafe directory', { path: filePath, err });
     return;
   }
-  // Reconciliation runs at the moment the file is prepared, so the prepare
-  // variant is the only schedule there is.
-  if (file.reconcile === undefined || file.prepare.when !== 'group-init') return;
-  const transformerProvider = file.reconcile.transformerProvider ?? provider;
-  const transformer = providerFileTransformer(file.reconcile.transformer);
+  if (!dir) {
+    log.warn('Provider file not prepared: directory missing', { path: filePath });
+    return;
+  }
   try {
-    const result = transformer.transform(fs.readFileSync(filePath, 'utf-8'), filePath);
-    emitDiagnostics(result.diagnostics);
-    if (result.kind === 'replace') {
-      writeAtomic(filePath, result.content);
-      initialized.push(`${file.relativePath} (reconciled ${providerName(transformerProvider)} settings)`);
+    let present = true;
+    try {
+      dir.lstat(name);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      present = false;
     }
-  } catch (err) {
-    emitDiagnostic(transformer.mapIoFailure(err, filePath));
+    if (!present) {
+      if (file.prepare.operation !== 'create-if-missing') return;
+      try {
+        dir.writeNewFile(name, Buffer.from(file.prepare.content));
+      } catch (err) {
+        // Something took the name since the lstat; it is the container's entry, not ours.
+        log.warn('Provider file not prepared: unsafe entry', { path: filePath, err });
+        return;
+      }
+      initialized.push(file.relativePath);
+      return;
+    }
+    // Reconciliation runs at the moment the file is prepared, so the prepare
+    // variant is the only schedule there is.
+    if (file.reconcile === undefined || file.prepare.when !== 'group-init') return;
+    const transformerProvider = file.reconcile.transformerProvider ?? provider;
+    const transformer = providerFileTransformer(file.reconcile.transformer);
+    try {
+      const result = transformer.transform(dir.readFile(name).toString('utf-8'), filePath);
+      emitDiagnostics(result.diagnostics);
+      if (result.kind === 'replace') {
+        dir.replaceFile(name, result.content);
+        initialized.push(`${file.relativePath} (reconciled ${providerName(transformerProvider)} settings)`);
+      }
+    } catch (err) {
+      emitDiagnostic(transformer.mapIoFailure(err, filePath));
+    }
+  } finally {
+    dir.close();
   }
 }
 
@@ -212,9 +246,37 @@ function prepareSpawnFile(
   const volumePath = providerStateVolumePath(volume, agentGroupId, sessionDirectory);
   const filePath = resolveWithinRoot(volumePath, file.relativePath);
   if (file.prepare.operation === 'append-open-close') {
-    const flags = fs.constants.O_APPEND | fs.constants.O_CREAT | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW;
-    fs.closeSync(fs.openSync(filePath, flags));
+    // O_NONBLOCK: the volume is container-writable, and a blocking open of a
+    // reader-less FIFO here would stall the host. It fails with ENXIO instead.
+    const { O_APPEND, O_CREAT, O_WRONLY, O_NOFOLLOW, O_NONBLOCK } = fs.constants;
+    let fd: number;
+    try {
+      fd = fs.openSync(filePath, O_APPEND | O_CREAT | O_WRONLY | O_NOFOLLOW | O_NONBLOCK);
+    } catch (err) {
+      if (NOT_REGULAR_FILE_OPEN_ERRORS.has((err as NodeJS.ErrnoException).code ?? '')) {
+        throw notRegularSpawnFile(filePath, err);
+      }
+      throw err;
+    }
+    try {
+      // A FIFO that something already reads opens fine; refuse it all the same.
+      if (!fs.fstatSync(fd).isFile()) throw notRegularSpawnFile(filePath);
+    } finally {
+      fs.closeSync(fd);
+    }
   }
+}
+
+// What a non-blocking, no-follow open reports when the name is not a regular
+// file: a symlink (ELOOP), a FIFO with no reader or a socket (ENXIO; a socket
+// is EOPNOTSUPP on macOS), a directory (EISDIR).
+const NOT_REGULAR_FILE_OPEN_ERRORS = new Set(['ELOOP', 'ENXIO', 'EOPNOTSUPP', 'EISDIR']);
+
+function notRegularSpawnFile(filePath: string, cause?: unknown): Error {
+  return new Error(
+    `Provider file ${filePath} is not a regular file; remove it and the next start creates it again`,
+    cause === undefined ? undefined : { cause },
+  );
 }
 
 function providerSkillDirectory(
@@ -258,45 +320,91 @@ function skillBackingContainmentRoot(
 }
 
 /**
- * Reconcile the shared-skill symlinks in one skills directory: drop links no
+ * The host-owned directory the skills sync anchors to: a dir the container
+ * cannot swap, so AnchoredDir can safely follow it as a root and treat every
+ * component below as untrusted. The group's entry (its parent is unmounted)
+ * and the state-volume root (`data/v2-sessions/<group>` or the session dir)
+ * both qualify; the volume's own `directory` does not — it lives inside a
+ * writable mount — so it becomes a path segment, not the anchor.
+ */
+function skillBackingAnchorRoot(
+  location: ProviderSkillBackingLocation,
+  volumes: ReadonlyMap<string, ProviderStateVolume>,
+  agentGroupId: string,
+  groupDir: string,
+  sessionDirectory?: string,
+): string {
+  if (location.kind === 'group-directory') return path.resolve(groupDir);
+  const volume = volumes.get(location.volumeId);
+  if (!volume) throw new Error(`Provider skill backing references unknown volume '${location.volumeId}'`);
+  return providerStateVolumeRoot(volume, agentGroupId, sessionDirectory);
+}
+
+/**
+ * Reconcile the shared-skill symlinks in `root/segments...`: drop links no
  * longer selected, add missing ones pointing at the container's /app/skills.
  * Also the body of the legacy Claude path (`syncSkillSymlinks` in
- * container-runner.ts), which wraps it with mkdir + skill-selection lookup.
+ * container-runner.ts).
+ *
+ * `root` is a mount point and every name below it belongs to the container,
+ * so the skills dir is opened as an AnchoredDir. A symlinked component is
+ * refused with a warning and nothing is synced: returns false.
  */
 export function syncSharedSkillLinks(
-  skillsDir: string,
+  root: string,
+  segments: readonly string[],
   desiredSkills: readonly string[],
   warnOnConflict: boolean,
-): void {
-  const desired = new Set(desiredSkills);
-  for (const entry of fs.readdirSync(skillsDir)) {
-    const entryPath = path.join(skillsDir, entry);
-    let isSymlink = false;
-    try {
-      isSymlink = fs.lstatSync(entryPath).isSymbolicLink();
-    } catch {
-      continue;
-    }
-    if (isSymlink && !desired.has(entry)) fs.unlinkSync(entryPath);
+): boolean {
+  const skillsPath = path.join(root, ...segments);
+  let skillsDir: AnchoredDir | null;
+  try {
+    skillsDir = AnchoredDir.open(root, segments, true);
+  } catch (err) {
+    log.warn('Shared skills not synced: unsafe skills directory', { path: skillsPath, err });
+    return false;
   }
+  if (!skillsDir) return false;
 
-  for (const skill of desiredSkills) {
-    const linkPath = path.join(skillsDir, skill);
-    let entry: fs.Stats | undefined;
-    try {
-      entry = fs.lstatSync(linkPath);
-    } catch {
-      /* missing */
+  try {
+    const desired = new Set(desiredSkills);
+    for (const entry of skillsDir.entries()) {
+      let isSymlink = false;
+      try {
+        isSymlink = skillsDir.lstat(entry).isSymbolicLink();
+      } catch {
+        continue;
+      }
+      if (isSymlink && !desired.has(entry)) skillsDir.unlink(entry);
     }
-    if (!entry) {
-      fs.symlinkSync(`/app/skills/${skill}`, linkPath);
-    } else if (!entry.isSymbolicLink() && warnOnConflict) {
-      log.warn(
-        'Shared skill not symlinked: real entry occupies the path (template overlay or stale pre-refactor copy)',
-        { skill, path: linkPath },
-      );
+
+    for (const skill of desiredSkills) {
+      let entry: fs.Stats | undefined;
+      try {
+        entry = skillsDir.lstat(skill);
+      } catch {
+        /* missing */
+      }
+      if (!entry) {
+        skillsDir.symlink(`/app/skills/${skill}`, skill);
+      } else if (!entry.isSymbolicLink() && warnOnConflict) {
+        log.warn(
+          'Shared skill not symlinked: real entry occupies the path (template overlay or stale pre-refactor copy)',
+          { skill, path: path.join(skillsPath, skill) },
+        );
+      }
     }
+  } finally {
+    skillsDir.close();
   }
+  return true;
+}
+
+/** `directory` as path segments below `root`; throws if it lexically escapes. */
+function segmentsWithinRoot(root: string, directory: string): string[] {
+  const relative = path.relative(path.resolve(root), path.resolve(directory));
+  resolveWithinRoot(root, relative);
+  return relative.split(path.sep).filter(Boolean);
 }
 
 function resolveWithinRoot(root: string, ...segments: string[]): string {
@@ -311,7 +419,8 @@ function resolveWithinRoot(root: string, ...segments: string[]): string {
 
 function ensureDirectoryWithinRoot(root: string, directory: string): void {
   // Lexical containment only: like the legacy path, symlinks placed by the
-  // operator (relocated state, shared skills) are followed, not rejected.
+  // operator (relocated state) are followed, not rejected. The spawn-time
+  // skills sync is the exception: it refuses them (syncSharedSkillLinks).
   resolveWithinRoot(root, path.relative(path.resolve(root), path.resolve(directory)));
   fs.mkdirSync(directory, { recursive: true });
 }

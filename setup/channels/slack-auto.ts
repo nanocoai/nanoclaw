@@ -52,6 +52,7 @@ import {
   writeImageSource,
 } from '../lib/registry-state.js';
 import { ensureAnswer } from '../lib/runner.js';
+import { warnSetupCommit, withSetupCommit } from '../lib/setup-commit.js';
 import { portalEnabled, runSlackPortal } from '../portal.js';
 import { wrapForGutter } from '../lib/theme.js';
 
@@ -204,10 +205,24 @@ export async function loadProvisioningCore(deps: BootstrapDeps = {}): Promise<Pr
   const start = Date.now();
   try {
     if (!fs.existsSync(modulePath)) {
-      const remote = resolveChannelsRemote(exec);
-      exec(gitFetchBranchCommand(remote, CHANNELS_BRANCH));
-      fs.mkdirSync(path.dirname(modulePath), { recursive: true });
-      exec(gitShowToFileCommand(`refs/remotes/${remote}/${CHANNELS_BRANCH}`, PROVISIONING_MODULE, PROVISIONING_MODULE));
+      const remote = await withSetupCommit(
+        root,
+        'slack provisioning core',
+        async () => {
+          const resolved = resolveChannelsRemote(exec);
+          exec(gitFetchBranchCommand(resolved, CHANNELS_BRANCH));
+          fs.mkdirSync(path.dirname(modulePath), { recursive: true });
+          exec(
+            gitShowToFileCommand(
+              `refs/remotes/${resolved}/${CHANNELS_BRANCH}`,
+              PROVISIONING_MODULE,
+              PROVISIONING_MODULE,
+            ),
+          );
+          return resolved;
+        },
+        warnSetupCommit,
+      );
       setupLog.step('slack-provision-bootstrap', 'success', Date.now() - start, { REMOTE: remote });
     }
     return await importModule(pathToFileURL(modulePath).href);

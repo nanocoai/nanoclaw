@@ -185,9 +185,12 @@ CREATE TABLE pending_questions (
   thread_id      TEXT,
   title          TEXT NOT NULL,
   options_json   TEXT NOT NULL,
-  created_at     TEXT NOT NULL
+  created_at     TEXT NOT NULL,
+  question       TEXT NOT NULL DEFAULT ''        -- added by migration 026
 );
 ```
+
+`question` holds the card body so the answered card can keep it (`getAskQuestionRender`).
 
 ### 1.10 `agent_destinations`
 
@@ -214,7 +217,7 @@ Access layer: `src/db/agent-destinations.ts`.
 Two workflows share this table:
 
 - **Session-bound MCP approvals** — `install_packages`, `add_mcp_server`. `session_id` is set.
-- **OneCLI credential approvals** — `session_id` may be NULL; `agent_group_id` + `channel_type` + `platform_id` route the admin card.
+- **Gateway credential approvals** — `session_id` may be NULL; `agent_group_id` + `channel_type` + `platform_id` route the admin card.
 
 ```sql
 CREATE TABLE pending_approvals (
@@ -239,7 +242,7 @@ CREATE INDEX idx_pending_approvals_action_status ON pending_approvals(action, st
 
 - `status`: `pending` | `approved` | `rejected` | `expired`.
 - `platform_message_id` lets the host edit the admin card in place after a decision.
-- Access layer: `src/db/sessions.ts`; sweep + delivery: `src/onecli-approvals.ts`.
+- Access layer: `src/db/sessions.ts`; sweep + delivery: `src/gateway-approval-coordinator.ts`.
 
 ### 1.12 `unregistered_senders`
 
@@ -422,7 +425,7 @@ Several early migrations were later renamed/retired and replaced by "module" fil
 |---|---|------|------------|
 | 1 | `initial-v2-schema` | `001-initial.ts` | Core tables: `agent_groups`, `messaging_groups`, `messaging_group_agents` (with the original `trigger_rules`/`response_scope` columns — see v10), `users`, `user_roles`, `agent_group_members`, `user_dms`, `sessions`, `pending_questions` |
 | 2 | `chat-sdk-state` | `002-chat-sdk-state.ts` | `chat_sdk_kv`, `chat_sdk_subscriptions`, `chat_sdk_locks`, `chat_sdk_lists` |
-| 3 | `pending-approvals` | `module-approvals-pending-approvals.ts` | `pending_approvals` (session-bound + OneCLI fields) |
+| 3 | `pending-approvals` | `module-approvals-pending-approvals.ts` | `pending_approvals` (session-bound + gateway fields) |
 | 4 | `agent-destinations` | `module-agent-to-agent-destinations.ts` | `agent_destinations` + backfill from existing `messaging_group_agents` wirings |
 | 7 | `pending-approvals-title-options` | `module-approvals-title-options.ts` | Retroactive `ALTER TABLE pending_approvals` add `title`, `options_json` for DBs that ran migration 3 before its `CREATE TABLE` was edited to include those columns |
 | 8 | `dropped-messages` | `008-dropped-messages.ts` | `unregistered_senders` |
@@ -440,6 +443,7 @@ Several early migrations were later renamed/retired and replaced by "module" fil
 | 20 | `container-config-timezone` | `020-container-config-timezone.ts` | `container_configs.timezone` — per-agent-group timezone override (NULL = install-global) |
 | 21 | `approval-question-render-metadata` | `021-approval-question.ts` | `question` card-body column on all three approval tables so terminal edits retain the original request |
 | 22 | `messaging-group-detached-at` | `022-messaging-group-detached.ts` | `messaging_groups.detached_at` — records when the bot left a channel without deleting its wiring |
+| 26 | `pending-question-body` | `026-pending-question-body.ts` | `pending_questions.question` — the card body, so an answered ask_user_question card keeps its question |
 
 Numbers 5 and 6 are intentionally absent — migrations were renumbered during early development.
 

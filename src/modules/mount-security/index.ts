@@ -67,7 +67,7 @@ const DEFAULT_BLOCKED_PATTERNS = [
   // directory to a container as a mount root would undo the whole arrangement.
   // It is also where host credentials land as they are added.
   '.config/nanoclaw',
-  // Host-executed helper binaries. Setup installs onecli and claude here and
+  // Host-executed helper binaries. Setup may install gateway/provider CLIs here and
   // then invokes them by name as the operator, so a read-write mount of this
   // directory is a container-to-host code-execution primitive: drop a file,
   // wait for the host to run it.
@@ -435,37 +435,4 @@ export function validateAdditionalMounts(
   }
 
   return validatedMounts;
-}
-
-/**
- * Generate a template allowlist file for users to customize
- */
-export function generateAllowlistTemplate(): string {
-  const template: MountAllowlist = {
-    allowedRoots: [
-      {
-        path: '~/projects',
-        allowReadWrite: true,
-        description: 'Development projects',
-      },
-      {
-        path: '~/repos',
-        allowReadWrite: true,
-        description: 'Git repositories',
-      },
-      {
-        path: '~/Documents/work',
-        allowReadWrite: false,
-        description: 'Work documents (read-only)',
-      },
-    ],
-    blockedPatterns: [
-      // Additional patterns beyond defaults
-      'password',
-      'secret',
-      'token',
-    ],
-  };
-
-  return JSON.stringify(template, null, 2);
 }

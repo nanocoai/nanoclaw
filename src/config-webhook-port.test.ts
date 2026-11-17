@@ -5,6 +5,8 @@ import path from 'path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { allocateFreePort } from './test-utils/free-port.js';
+
 // Use real .env files, as in #2977, and exercise the shared listener as well
 // as #3148's configuration lookup. Each test owns its cwd and environment.
 describe('WEBHOOK_PORT configuration (#2901)', () => {
@@ -16,6 +18,7 @@ describe('WEBHOOK_PORT configuration (#2901)', () => {
     directory = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-webhook-port-'));
     process.chdir(directory);
     vi.stubEnv('WEBHOOK_PORT', undefined);
+    vi.stubEnv('WEBHOOK_HOST', undefined);
     vi.resetModules();
     stopWebhookServer = undefined;
   });
@@ -73,7 +76,7 @@ describe('WEBHOOK_PORT configuration (#2901)', () => {
         }),
       ).toThrow(/Invalid WEBHOOK_PORT/);
 
-      const port = 21000 + Math.floor(Math.random() * 20000);
+      const port = await allocateFreePort();
       vi.stubEnv('WEBHOOK_PORT', String(port));
       webhook.registerWebhookHandler('recovered-port', (_req, res) => {
         res.end('ready');
@@ -92,39 +95,61 @@ describe('WEBHOOK_PORT configuration (#2901)', () => {
 
   it('recovers after the configured port is already in use', async () => {
     const occupied = http.createServer();
-    await new Promise<void>((resolve) => occupied.listen(0, '0.0.0.0', resolve));
+    await new Promise<void>((resolve) => occupied.listen(0, '127.0.0.1', resolve));
     const address = occupied.address();
     if (!address || typeof address === 'string') throw new Error('Expected an allocated TCP port');
 
     vi.stubEnv('WEBHOOK_PORT', String(address.port));
     const webhook = await import('./webhook-server.js');
     stopWebhookServer = webhook.stopWebhookServer;
+    const { log } = await import('./log.js');
+    const failed = vi.spyOn(log, 'error');
+    const started = vi.spyOn(log, 'info');
     webhook.registerWebhookHandler('busy-port', (_req, res) => {
       res.end('busy');
     });
 
-    const recoveryPort = 21000 + Math.floor(Math.random() * 20000);
-    vi.stubEnv('WEBHOOK_PORT', String(recoveryPort));
     try {
+      await vi.waitFor(() =>
+        expect(failed).toHaveBeenCalledWith(
+          'Webhook server error',
+          expect.objectContaining({
+            port: address.port,
+            err: expect.objectContaining({ code: 'EADDRINUSE' }),
+          }),
+        ),
+      );
+      // Release the port this test owns, then retry that same port. A random
+      // second port can belong to another test (or an ephemeral HTTP client),
+      // which turns a recovery test into a permanent EADDRINUSE failure.
+      await new Promise<void>((resolve, reject) => occupied.close((err) => (err ? reject(err) : resolve())));
       await vi.waitFor(
-        async () => {
+        () => {
           webhook.registerWebhookHandler('recovered-port', (_req, res) => {
             res.end('ready');
           });
-          const response = await fetch(`http://127.0.0.1:${recoveryPort}/webhook/recovered-port`, {
-            signal: AbortSignal.timeout(500),
-          });
-          expect(await response.text()).toBe('ready');
+          // Wait for listen before opening an HTTP client; the connection's
+          // ephemeral source port must not steal the port we are about to bind.
+          expect(started).toHaveBeenCalledWith(
+            'Webhook server started',
+            expect.objectContaining({ port: address.port }),
+          );
         },
         { timeout: 2000, interval: 25 },
       );
+      const response = await fetch(`http://127.0.0.1:${address.port}/webhook/recovered-port`, {
+        signal: AbortSignal.timeout(500),
+      });
+      expect(await response.text()).toBe('ready');
     } finally {
-      await new Promise<void>((resolve, reject) => occupied.close((err) => (err ? reject(err) : resolve())));
+      started.mockRestore();
+      failed.mockRestore();
+      if (occupied.listening) await new Promise<void>((resolve) => occupied.close(() => resolve()));
     }
   });
 
   it.each(['.env', 'late process override'])('serves HTTP on the port selected by %s', async (source) => {
-    const port = 21000 + Math.floor(Math.random() * 20000);
+    const port = await allocateFreePort();
     fs.writeFileSync(path.join(directory, '.env'), `WEBHOOK_PORT=${source === '.env' ? port : 3097}\n`);
     const { getWebhookPort } = await import('./config.js');
     if (source === 'late process override') vi.stubEnv('WEBHOOK_PORT', String(port));

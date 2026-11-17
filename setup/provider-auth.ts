@@ -9,23 +9,31 @@
  * Same walk-through, same vault-only invariant, idempotent (each provider's
  * runAuth short-circuits when its secret already exists) — and unlike
  * re-running full setup, it touches nothing else: no install-wide default
- * provider rewrite, no service changes. Provider install skills call this as
- * their auth step so there is exactly one auth implementation per provider.
+ * provider rewrite. An install also rebuilds the host and restarts the
+ * service, so the running host knows the provider. Provider install skills
+ * call this as their auth step so there is exactly one auth implementation
+ * per provider.
+ * Pass --refresh to intentionally replace the installed payload and update its
+ * dependency pins before authentication.
  */
 import { buildContainerImage } from './lib/container-build.js';
+import { HOST_RESTART_COMMAND, restartHost } from './lib/host-restart.js';
+import * as p from '@clack/prompts';
+import { HARDENED_IMAGE_ENV_KEY, readImageSource, writeImageSource } from './lib/registry-state.js';
 import { getSetupProvider, listSetupProviders } from './providers/registry.js';
-import { applyProviderSkill } from './providers/install.js';
-import { getInstallableProviderDescriptor } from './providers/skill-descriptor.js';
+import { applyProviderSkill, loadHostContractModules } from './providers/install.js';
+import { getInstallableProviderDescriptor, providerImagePolicy } from './providers/skill-descriptor.js';
 // Provider payloads self-register on import.
 import './providers/index.js';
 
 export async function run(args: string[]): Promise<void> {
   const name = args[0]?.trim().toLowerCase();
+  const refresh = args.slice(1).includes('--refresh');
   const withAuth = listSetupProviders().filter((entry) => entry.runAuth);
 
-  if (!name) {
+  if (!name || args.slice(1).some((arg) => arg !== '--refresh')) {
     console.error(
-      `Usage: pnpm exec tsx setup/index.ts --step provider-auth <provider>\n` +
+      `Usage: pnpm exec tsx setup/index.ts --step provider-auth <provider> [--refresh]\n` +
         `Providers with an auth step: ${withAuth.map((entry) => entry.value).join(', ') || '(none installed)'}`,
     );
     process.exit(1);
@@ -33,19 +41,34 @@ export async function run(args: string[]): Promise<void> {
 
   let entry = getSetupProvider(name);
   const skillDir = getInstallableProviderDescriptor(name)?.skillDir;
-  if (skillDir) {
-    // Install OR refresh: the skill is idempotent and is also the upgrade path
-    // — payload files resync and a bumped CLI-manifest pin replaces the local
-    // one. Applied in-process via the directive engine; build + auth are this
-    // flow's job (the engine's build/test/auth run directives are skipped), so
-    // we rebuild the image whenever the install mutated anything (the container
-    // CLI manifest is baked into the image, unlike the mounted payload code).
-    console.log(`${entry ? 'Refreshing' : 'Installing'} ${name}…`);
-    const { changed, blockers } = await applyProviderSkill(skillDir, process.cwd());
+  if (refresh && !skillDir) throw new Error(`Provider '${name}' has no install skill to refresh.`);
+  if (skillDir && (!entry || refresh)) {
+    const switchToLocal = providerImagePolicy(name) === 'local-required' && readImageSource() === 'hardened';
+    if (switchToLocal) {
+      if (process.env[HARDENED_IMAGE_ENV_KEY]?.trim().toLowerCase() === 'true') {
+        throw new Error(
+          `Unset exported ${HARDENED_IMAGE_ENV_KEY} before installing a provider that requires a local image.`,
+        );
+      }
+      const local = await p.confirm({
+        message: `${name} needs a sandbox image built on this machine. Stop using the pre-built one?`,
+        initialValue: true,
+      });
+      if (p.isCancel(local) || !local)
+        throw new Error('Provider installation cancelled; the existing image and payload are unchanged.');
+    }
+    // Already registered providers authenticate directly unless refresh was
+    // requested. That keeps reauthentication usable without registry/build
+    // access and preserves the operator's installed payload and pins.
+    console.log(`${refresh ? 'Refreshing' : 'Installing'} ${name}…`);
+    const { changed, blockers, hostContractModules } = await applyProviderSkill(skillDir, process.cwd(), {
+      mode: refresh ? 'refresh' : 'install',
+    });
     if (blockers.length) {
       console.error(`Couldn't install ${name}: ${blockers.join('; ')}`);
       process.exit(1);
     }
+    if (switchToLocal) writeImageSource('local');
     if (changed) {
       console.log('Provider payload installed — rebuilding the container image…');
       const rebuild = buildContainerImage();
@@ -56,9 +79,20 @@ export async function run(args: string[]): Promise<void> {
         if (rebuild.hint) console.error(rebuild.hint);
         process.exit(1);
       }
+      // Before auth: a failed sign-in exits the process, and a re-run finds the
+      // provider registered and only re-authenticates, so it never restarts.
+      restartHostFor(name);
     }
+    // This process imported src/provider-contracts/index.ts at startup, and
+    // ESM caches the barrel, so a line appended to it now never evaluates
+    // here; load the contract module directly before the auth step asks the
+    // gateway store for model endpoints.
+    await loadHostContractModules(hostContractModules);
     if (!entry) {
-      await import(`./providers/${name}.js`);
+      // Resolve after installation; a bundler's static glob cannot include a
+      // provider module that was absent when this setup module first loaded.
+      const installedModule = `./providers/${name}.js`;
+      await import(installedModule);
       entry = getSetupProvider(name);
     }
     if (!entry) {
@@ -80,4 +114,25 @@ export async function run(args: string[]): Promise<void> {
 
   await entry.runAuth();
   await entry.runInstallCheck?.();
+}
+
+const SERVICE_STEP_COMMAND = 'pnpm exec tsx setup/index.ts --step service';
+
+function restartHostFor(name: string): void {
+  console.log(`Restarting NanoClaw so the running host loads ${name}…`);
+  const restart = restartHost();
+  if (restart.status === 'restarted') return;
+  if (restart.status === 'no-service') {
+    // Nothing failed: the service step starts the build made above.
+    console.log(
+      `No NanoClaw service is installed, so nothing was restarted. To use ${name}, start one with ${SERVICE_STEP_COMMAND} (or restart a host you started by hand).`,
+    );
+    return;
+  }
+  // Auth only talks to the gateway, so it still runs; the exit code reports
+  // the restart the operator has to finish by hand.
+  console.error(
+    `Couldn't restart NanoClaw (${restart.message}); it runs without ${name} until you run: ${HOST_RESTART_COMMAND}`,
+  );
+  process.exitCode = 1;
 }

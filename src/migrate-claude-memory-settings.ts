@@ -1,8 +1,10 @@
-import fs from 'fs';
+import path from 'path';
 
+import { AnchoredDir } from './anchored-dir.js';
 import { log } from './log.js';
 import type { ProviderFileDiagnostic, ProviderFileTransformer } from './provider-contracts/registry.js';
 
+const CLAUDE_SETTINGS_FILE = 'settings.json';
 const PRE_COMPACT_COMMAND = 'bun /app/src/compact-instructions.ts';
 const LEGACY_MEMORY_SESSION_START_COMMAND = 'bun /app/src/memory-hook.ts';
 
@@ -31,17 +33,36 @@ export const CLAUDE_DEFAULT_SETTINGS =
     2,
   ) + '\n';
 
-/** Reconcile existing Claude settings with NanoClaw's shared memory system. */
-export function migrateClaudeMemorySettings(settingsFile: string): boolean {
+/**
+ * Seed or reconcile `settings.json` in the Claude state directory. The
+ * directory is a read-write mount, so the file is reached through the
+ * directory's descriptor: a symlink or FIFO planted under its name is refused
+ * and the settings are left alone. Returns what was done.
+ */
+export function prepareClaudeMemorySettings(claudeDir: string): 'created' | 'reconciled' | 'unchanged' {
+  const settingsFile = path.join(claudeDir, CLAUDE_SETTINGS_FILE);
+  let dir: AnchoredDir | null = null;
   try {
-    const result = claudeSettingsTransformer.transform(fs.readFileSync(settingsFile, 'utf-8'), settingsFile);
+    dir = AnchoredDir.open(claudeDir, [], true);
+    if (!dir) throw new Error(`Claude settings directory is missing: '${claudeDir}'`);
+    let current: string;
+    try {
+      current = dir.readFile(CLAUDE_SETTINGS_FILE).toString('utf-8');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      dir.writeNewFile(CLAUDE_SETTINGS_FILE, Buffer.from(CLAUDE_DEFAULT_SETTINGS));
+      return 'created';
+    }
+    const result = claudeSettingsTransformer.transform(current, settingsFile);
     emitDiagnostics(result.diagnostics);
-    if (result.kind === 'unchanged') return false;
-    writeAtomic(settingsFile, result.content);
-    return true;
+    if (result.kind === 'unchanged') return 'unchanged';
+    dir.replaceFile(CLAUDE_SETTINGS_FILE, result.content);
+    return 'reconciled';
   } catch (err) {
     emitDiagnostic(claudeSettingsTransformer.mapIoFailure(err, settingsFile));
-    return false;
+    return 'unchanged';
+  } finally {
+    dir?.close();
   }
 }
 
@@ -138,21 +159,6 @@ function removeLegacyNanoClawMemoryHook(value: unknown): unknown {
     return hook.command !== LEGACY_MEMORY_SESSION_START_COMMAND;
   });
   return remaining.length > 0 ? { ...value, hooks: remaining } : undefined;
-}
-
-/** Write via a fresh temp file + rename so readers never see a partial file. */
-export function writeAtomic(filePath: string, content: string): void {
-  const tmp = `${filePath}.tmp-${process.pid}-${Date.now()}`;
-  try {
-    fs.writeFileSync(tmp, content, { flag: 'wx' });
-    fs.renameSync(tmp, filePath);
-  } finally {
-    try {
-      fs.unlinkSync(tmp);
-    } catch {
-      // The rename consumed the temp file, or creation failed before it existed.
-    }
-  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

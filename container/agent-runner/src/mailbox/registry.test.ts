@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+import { getDeliveryStatus } from '../db/messages-out.js';
 import { getAgentMailbox, readMailboxContext, registerAgentMailbox, resetAgentMailboxForTesting } from './index.js';
 import { SqliteAgentMailbox } from './sqlite/index.js';
 import type { AgentMailbox } from './types.js';
@@ -34,6 +35,11 @@ describe('agent mailbox registry', () => {
     const mailbox = fakeMailbox();
     registerAgentMailbox(() => mailbox);
     expect(getAgentMailbox()).toBe(mailbox);
+  });
+
+  test('reports no delivery outcome from an implementation without getDeliveryStatus', () => {
+    registerAgentMailbox(() => ({ operations: {} }) as AgentMailbox);
+    expect(getDeliveryStatus('msg-1')).toBeNull();
   });
 
   test('rejects two implementations for the same capability', () => {
