@@ -582,5 +582,9 @@ export async function run(args: string[]): Promise<void> {
 }
 
 if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
-  void run(process.argv.slice(2));
+  void run(process.argv.slice(2)).catch((err) => {
+    log.error('OneCLI setup failed', { err });
+    // The shared logger handles unhandled rejections without failing the process.
+    process.exitCode = 1;
+  });
 }
