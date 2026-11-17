@@ -164,7 +164,7 @@ describe('setup.sh ensure_node', () => {
     stub(path.join(project, 'setup'), 'install-node.sh', `echo install-node >> ${log}; exit 1`);
     for (const tool of ['bash', 'sed', 'tail', 'tee', 'wc']) fs.symlinkSync(which(tool), path.join(bin, tool));
     const prelude = `source ${LIB}; PROJECT_ROOT=${project}; LOG_FILE=${tmp}/boot.log; log() { :; }`;
-    const fns = ['log_mark', 'log_error_line', 'check_node', 'ensure_node'].map(fn).join('\n');
+    const fns = ['log_end_line', 'log_mark', 'log_error_line', 'check_node', 'ensure_node'].map(fn).join('\n');
     return run(['-c', `${prelude}\n${fns}\nensure_node; echo "NODE_OK=$NODE_OK"`])
       .out.trim()
       .split('\n')
@@ -340,9 +340,9 @@ describe('setup.sh log_error_line', () => {
   // `said` is what a tool then writes to it.
   function logErrorLine(said: string, before: string | null = ''): { status: number | null; out: string; log: string } {
     const source = fs.readFileSync(path.join(ROOT, 'setup.sh'), 'utf8');
-    const start = source.indexOf('log_mark() {');
+    const start = source.indexOf('log_end_line() {');
     const last = source.indexOf('log_error_line() {');
-    expect(start, 'log_mark() not found in setup.sh').toBeGreaterThanOrEqual(0);
+    expect(start, 'log_end_line() not found in setup.sh').toBeGreaterThanOrEqual(0);
     expect(last, 'log_error_line() not found in setup.sh').toBeGreaterThan(start);
     const fns = source.slice(start, source.indexOf('\n}', last) + 2);
     for (const tool of ['tail', 'wc']) fs.symlinkSync(which(tool), path.join(bin, tool));
@@ -376,9 +376,15 @@ describe('setup.sh log_error_line', () => {
     expect(r.out).toBe('[Error: the real one]\n');
   });
 
-  it('reads on from a log whose last line had no newline at the mark', () => {
-    const r = logErrorLine('npm error code E1\\n', 'one\ntwo');
-    expect(r.out).toBe('[twonpm error code E1]\n');
+  it('keeps a last log line that had no newline at the mark out of what it reads', () => {
+    const r = logErrorLine('npm error code E1\\n', 'one\nError: old, with no newline');
+    expect(r.out).toBe('[npm error code E1]\n');
+    expect(r.log).toBe('one\nError: old, with no newline\nnpm error code E1\n');
+  });
+
+  it('gives nothing when the tool printed nothing, whatever the log held', () => {
+    const r = logErrorLine('', 'Error: old, with no newline');
+    expect(r.out).toBe('[]\n');
   });
 
   it('ends a last line that has no newline, so the next log line starts on its own', () => {

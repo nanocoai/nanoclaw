@@ -54,8 +54,17 @@ detect_platform() {
 # --- Why a tool failed ---
 
 # Tools write straight to the log, and the one line for the screen is read
-# back from it. log_mark: LOG_MARK is how many lines the log holds now.
+# back from it.
+
+# log_end_line: a tool may end without a newline; what the log gets next
+# must start on a line of its own.
+log_end_line() {
+  [ -z "$(tail -c 1 "$LOG_FILE" 2>/dev/null)" ] || echo >> "$LOG_FILE"
+}
+
+# log_mark: LOG_MARK is how many lines the log holds now.
 log_mark() {
+  log_end_line
   LOG_MARK=$(wc -l 2>/dev/null < "$LOG_FILE") || LOG_MARK=0
   LOG_MARK=$((LOG_MARK))
 }
@@ -66,8 +75,7 @@ log_error_line() {
   local line n=0
   ERROR_LINE=""
   [ -r "$LOG_FILE" ] || return 0
-  # A tool may end without a newline; the next log line must not join it.
-  [ -z "$(tail -c 1 "$LOG_FILE" 2>/dev/null)" ] || echo >> "$LOG_FILE"
+  log_end_line
   while IFS= read -r line; do
     n=$((n + 1))
     [ "$n" -gt "$LOG_MARK" ] || continue
