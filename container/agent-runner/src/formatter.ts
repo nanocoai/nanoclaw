@@ -310,7 +310,6 @@ interface ContextBlockContent {
   tag?: unknown;
   about?: unknown;
   lines?: Array<{ sender?: string; time?: string; text?: string; self?: boolean }>;
-  withheldIds?: unknown[];
 }
 
 /**
@@ -328,8 +327,6 @@ function formatContextBlock(block: ContextBlockContent | undefined, fallbackTime
     const time = formatLocalStamp(new Date(line.time ?? fallbackTime), TIMEZONE);
     return `<line sender="${escapeXml(sender)}" time="${escapeXml(time)}">${escapeXml(String(line.text ?? ''))}</line>`;
   });
-  const withheld = Array.isArray(block.withheldIds) ? block.withheldIds.length : 0;
-  if (withheld > 0) lines.push(`${withheld} ${withheld === 1 ? 'line' : 'lines'} left out.`);
   const about = typeof block.about === 'string' ? block.about : '';
   return `<${block.tag} about="${escapeXml(about)}">\n${lines.join('\n')}\n</${block.tag}>`;
 }

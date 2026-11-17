@@ -1351,17 +1351,22 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         threadId === null
           ? await chat.history.channel.listMessages(platformId, { limit })
           : await chat.history.thread.list(threadId, { limit });
-      return messages.map((m) => ({
-        id: m.id,
-        timestamp: m.metadata.dateSent.toISOString(),
-        senderId: m.author.userId,
-        senderName: m.author.fullName || m.author.userName,
-        text: m.text,
-        isBot: m.author.isBot === true,
-        isSelf: m.author.isMe,
-        threadId: m.threadId,
-        raw: m.raw,
-      }));
+      return messages.map((m) => {
+        // The text an inbound message of this line would carry.
+        const read = { text: m.text };
+        if (m.raw) appendRawText(read, m.raw as Record<string, unknown>, config.extractRawText);
+        return {
+          id: m.id,
+          timestamp: m.metadata.dateSent.toISOString(),
+          senderId: m.author.userId,
+          senderName: m.author.fullName || m.author.userName,
+          text: read.text,
+          isBot: m.author.isBot === true,
+          isSelf: m.author.isMe,
+          threadId: m.threadId,
+          raw: m.raw,
+        };
+      });
     },
   };
 

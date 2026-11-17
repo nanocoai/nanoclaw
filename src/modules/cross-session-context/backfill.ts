@@ -213,7 +213,7 @@ export async function backfillSession(
             sender: row.sender,
             senderId: row.senderId,
             ...(row.self ? { self: true } : {}),
-            ...(row.platformMessageId ? { platformMessageId: row.platformMessageId } : {}),
+            platformMessageId: row.platformMessageId,
             echo: { surface, label },
           }),
           processAfter: null,

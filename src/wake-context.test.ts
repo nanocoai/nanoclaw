@@ -16,6 +16,7 @@ import {
   createMessagingGroupAgent,
   getAgentGroup,
   getMessagingGroup,
+  getMessagingGroupAgentByPair,
   initTestDb,
   runMigrations,
 } from './db/index.js';
@@ -23,7 +24,13 @@ import { findSessionForAgent } from './db/sessions.js';
 import { inboundDbPath } from './mailbox/sqlite/paths.js';
 import { settleEchoFans } from './modules/cross-session-context/index.js';
 import { routeInbound } from './router.js';
-import { gatherWakeContext, registerWakeContext, type ContextBlock, type WakeContextInput } from './wake-context.js';
+import {
+  gatherWakeContext,
+  registerWakeContext,
+  type ContextBlock,
+  type ContextLine,
+  type WakeContextInput,
+} from './wake-context.js';
 
 const TEST_DIR = '/tmp/nanoclaw-test-wake-context';
 
@@ -41,16 +48,17 @@ vi.mock('./config.js', async () => ({
 type Provider = (input: WakeContextInput) => Promise<ContextBlock[]>;
 const providers: { first: Provider; second: Provider } = { first: async () => [], second: async () => [] };
 const calls = { first: 0, second: 0 };
-registerWakeContext((input) => {
+registerWakeContext('first', (input) => {
   calls.first++;
   return providers.first(input);
 });
-registerWakeContext((input) => {
+registerWakeContext('second', (input) => {
   calls.second++;
   return providers.second(input);
 });
 
-const at = (minutes: number) => new Date(Date.now() - 60 * 60 * 1000 + minutes * 60_000).toISOString();
+const T0 = Date.now() - 60 * 60 * 1000;
+const at = (minutes: number) => new Date(T0 + minutes * 60_000).toISOString();
 const THREAD = 'testchat:C1:100';
 
 function block(key: string, tag: string, text: string): ContextBlock {
@@ -76,7 +84,7 @@ function adapter(): ChannelAdapter {
   };
 }
 
-async function send(id: string, minutes: number): Promise<void> {
+async function send(id: string, minutes: number, text = `message ${id}`): Promise<void> {
   await routeInbound({
     channelType: 'testchat',
     platformId: 'testchat:C1',
@@ -84,7 +92,7 @@ async function send(id: string, minutes: number): Promise<void> {
     message: {
       id,
       kind: 'chat-sdk',
-      content: JSON.stringify({ id, sender: 'Alex', senderId: 'U1', text: `message ${id}` }),
+      content: JSON.stringify({ id, sender: 'Alex', senderId: 'U1', text }),
       timestamp: at(minutes),
       isMention: true,
       isGroup: true,
@@ -97,12 +105,13 @@ async function input(triggerId: string): Promise<WakeContextInput> {
     agentGroup: (await getAgentGroup('ag-1'))!,
     session: (await findSessionForAgent('ag-1', 'mg-1', THREAD))!,
     mg: (await getMessagingGroup('mg-1'))!,
+    wiring: (await getMessagingGroupAgentByPair('mg-1', 'ag-1'))!,
     created: false,
     trigger: { id: triggerId, timestamp: at(30) },
   };
 }
 
-async function rows(): Promise<string[]> {
+async function stored(): Promise<Array<{ id: string; block?: ContextBlock }>> {
   const session = (await findSessionForAgent('ag-1', 'mg-1', THREAD))!;
   const db = new Database(inboundDbPath('ag-1', session.id), { readonly: true });
   try {
@@ -110,10 +119,15 @@ async function rows(): Promise<string[]> {
       id: string;
       content: string;
     }>;
-    return found.map((r) => (JSON.parse(r.content).block?.tag as string) ?? r.id);
+    return found.map((r) => ({ id: r.id, block: JSON.parse(r.content).block as ContextBlock | undefined }));
   } finally {
     db.close();
   }
+}
+
+/** The session's rows in order: a block by its tag, a message by its id. */
+async function rows(): Promise<string[]> {
+  return (await stored()).map((r) => r.block?.tag ?? r.id);
 }
 
 beforeEach(async () => {
@@ -198,6 +212,75 @@ describe('wake context', () => {
     expect(await rows()).toEqual(['m1:ag-1', 'beta', 'beta', 'alpha']);
   });
 
+  it('writes a later message after an earlier one still waiting for its context', async () => {
+    providers.first = async (wake) => {
+      if (wake.trigger.id !== 'm1') return [];
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      return [block('a', 'alpha', 'for the first message')];
+    };
+
+    const first = send('m1', 5);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await send('m2', 6);
+    await first;
+
+    expect(await rows()).toEqual(['alpha', 'm1:ag-1', 'm2:ag-1']);
+  });
+
+  it("stores only the block's contract: a line's raw or any other extra field never reaches the row, and a malformed block or line costs only itself", async () => {
+    providers.first = async () => [
+      { key: 'broken', tag: 'broken' } as ContextBlock,
+      {
+        key: 'a',
+        tag: 'alpha',
+        about: 'what alpha holds',
+        debug: 'not stored',
+        lines: [
+          { id: 'L1', sender: 'Dana', time: at(1), text: 'kept', raw: { files: ['private'] }, senderId: 'U2' },
+          null,
+        ] as unknown as ContextLine[],
+        state: { left: ['L0'] },
+      } as ContextBlock,
+    ];
+    providers.second = async () => [block('b', 'beta', 'also kept')];
+
+    await send('m1', 5);
+
+    expect((await stored()).flatMap((r) => (r.block ? [r.block] : []))).toEqual([
+      {
+        key: 'a',
+        tag: 'alpha',
+        about: 'what alpha holds',
+        lines: [{ id: 'L1', sender: 'Dana', time: at(1), text: 'kept' }],
+        state: { left: ['L0'] },
+      },
+      {
+        key: 'b',
+        tag: 'beta',
+        about: 'what beta holds',
+        lines: [{ id: 'b-1', sender: 'Dana', time: at(1), text: 'also kept' }],
+      },
+    ]);
+  });
+
+  it('runs no provider for a slash command, so the runner still takes it as one', async () => {
+    providers.first = async () => [block('a', 'alpha', 'never ahead of a command')];
+
+    await send('m1', 5, '/mycmd hello');
+
+    expect(calls.first).toBe(0);
+    expect(await rows()).toEqual(['m1:ag-1']);
+  });
+
+  it("keeps two providers' blocks apart even when they use the same key", async () => {
+    providers.first = async () => [block('recent', 'alpha', 'from the first')];
+    providers.second = async () => [block('recent', 'beta', 'from the second')];
+
+    await send('m1', 5);
+
+    expect(await rows()).toEqual(['alpha', 'beta', 'm1:ag-1']);
+  });
+
   it('keeps one provider failing, at once or later, from costing the other its block', async () => {
     providers.first = (() => {
       throw new Error('broken at once');
@@ -216,7 +299,7 @@ describe('wake context', () => {
   it('writes a block once per message, and drops a block whose tag could carry markup', async () => {
     await send('m1', 5);
     providers.first = async () => [block('a', 'alpha', 'once')];
-    providers.second = async () => [block('x', 'x"><injected', 'never shown')];
+    providers.second = async () => [block('x', 'x"><injected', 'never shown'), block('y:z', 'gamma', 'bad key')];
 
     await gatherWakeContext(await input('m2'));
     await gatherWakeContext(await input('m2'));

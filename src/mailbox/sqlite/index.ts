@@ -321,16 +321,15 @@ export function wrapSqliteOutbound(
   source: Database.Database | (() => Database.Database),
   writable: () => Database.Database = () => (typeof source === 'function' ? source() : source),
   nextSequence = () => nextEvenAcross(undefined, writable()),
-  /** The inbound DB, whose delivered table gives a top-level post its platform message id. */
-  delivered?: Database.Database,
+  /** The inbound DB: its delivered table holds the platform's id for each delivered post. */
+  inbound?: Database.Database,
 ): OutboundMailbox {
   const readable = () => (typeof source === 'function' ? source() : source);
-  const platformIds = (): ((id: string) => { platformMessageId?: string }) => {
-    const lookup = delivered?.prepare('SELECT platform_message_id FROM delivered WHERE message_out_id = ?');
-    return (id) => {
-      const found = lookup?.get(id) as { platform_message_id: string | null } | undefined;
-      return found?.platform_message_id ? { platformMessageId: found.platform_message_id } : {};
-    };
+  let deliveredLookup: Database.Statement | undefined;
+  const platformMessageId = (outboundId: string): string | undefined => {
+    deliveredLookup ??= inbound?.prepare('SELECT platform_message_id FROM delivered WHERE message_out_id = ?');
+    const row = deliveredLookup?.get(outboundId) as { platform_message_id: string | null } | undefined;
+    return row?.platform_message_id ?? undefined;
   };
   return {
     getTerminalProcessingAcks: () =>
@@ -425,35 +424,31 @@ export function wrapSqliteOutbound(
         )
         .run(record);
     },
-    getOutboundHistory: (limit) => {
-      const platformIdOf = platformIds();
-      return (
+    getOutboundHistory: (limit) =>
+      (
         readable()
           .prepare('SELECT id, timestamp, kind, content FROM messages_out ORDER BY seq DESC LIMIT ?')
-          .all(limit) as Array<{ id: string; timestamp: string; kind: string; content: string }>
-      ).map(({ id, timestamp, kind, content }) => ({
-        timestamp: sqliteTimestamp(timestamp),
-        kind,
-        content,
-        ...platformIdOf(id),
-      }));
-    },
-    getTopLevelOutbound: (limit) => {
-      const rows = readable()
-        .prepare(
-          "SELECT id, timestamp, content FROM messages_out WHERE kind NOT IN ('system','task_log') " +
-            "AND (channel_type IS NULL OR channel_type != 'agent') " +
-            "AND (thread_id IS NULL OR thread_id = '' OR thread_id LIKE '%:') " +
-            'ORDER BY seq DESC LIMIT ?',
-        )
-        .all(limit) as Array<{ id: string; timestamp: string; content: string }>;
-      const platformIdOf = platformIds();
-      return rows.map(({ id, timestamp, content }): MailboxTimelineMessage => ({
-        timestamp: sqliteTimestamp(timestamp),
-        content,
-        ...platformIdOf(id),
-      }));
-    },
+          .all(limit) as Array<MailboxHistoryMessage & { id: string }>
+      ).map(({ id, ...row }) => ({
+        ...row,
+        timestamp: sqliteTimestamp(row.timestamp),
+        platformMessageId: platformMessageId(id),
+      })),
+    getTopLevelOutbound: (limit) =>
+      (
+        readable()
+          .prepare(
+            "SELECT id, timestamp, content FROM messages_out WHERE kind NOT IN ('system','task_log') " +
+              "AND (channel_type IS NULL OR channel_type != 'agent') " +
+              "AND (thread_id IS NULL OR thread_id = '' OR thread_id LIKE '%:') " +
+              'ORDER BY seq DESC LIMIT ?',
+          )
+          .all(limit) as Array<MailboxTimelineMessage & { id: string }>
+      ).map(({ id, ...row }) => ({
+        ...row,
+        timestamp: sqliteTimestamp(row.timestamp),
+        platformMessageId: platformMessageId(id),
+      })),
     hasMessagesToOtherAgents: (selfAgentGroupId) =>
       readable()
         .prepare("SELECT 1 FROM messages_out WHERE channel_type = 'agent' AND platform_id != ? LIMIT 1")

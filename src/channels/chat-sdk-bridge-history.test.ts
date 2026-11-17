@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Adapter } from 'chat';
 
 import type { ChannelSetup } from './adapter.js';
-import { createChatSdkBridge } from './chat-sdk-bridge.js';
+import { createChatSdkBridge, type RawTextExtractor } from './chat-sdk-bridge.js';
 
 vi.mock('../webhook-server.js', () => ({
   registerWebhookAdapter: vi.fn(),
@@ -52,6 +52,7 @@ function message(
 async function bridgeOver(
   fetchMessages: (threadId: string, options: unknown) => Promise<unknown>,
   fetchChannelMessages?: (channelId: string, options: unknown) => Promise<unknown>,
+  extractRawText?: RawTextExtractor,
 ) {
   const adapter = {
     name: 'testchat',
@@ -60,7 +61,7 @@ async function bridgeOver(
     fetchMessages,
     fetchChannelMessages,
   } as unknown as Adapter;
-  const bridge = createChatSdkBridge({ adapter, supportsThreads: true });
+  const bridge = createChatSdkBridge({ adapter, supportsThreads: true, extractRawText });
   await bridge.setup(hostConfig);
   return bridge;
 }
@@ -115,6 +116,18 @@ describe('chat-sdk bridge readHistory', () => {
     expect(fetchMessages).not.toHaveBeenCalled();
     expect(lines.map((line) => line.text)).toEqual(['standup in 5']);
     expect(lines[0].raw).toEqual({ ts: 'm3', subtype: undefined });
+  });
+
+  it('gives a line the text an inbound message of it gets, with what the channel recovers from raw', async () => {
+    const shared = message('m4', 'see the report', { userId: 'U2', fullName: 'Dana', isBot: false, isMe: false });
+    const fetchMessages = vi.fn(async () => ({ messages: [{ ...shared, raw: { ts: 'm4', file: 'q3.pdf' } }] }));
+    const bridge = await bridgeOver(fetchMessages, undefined, (raw) =>
+      typeof raw.file === 'string' ? `[file: ${raw.file}]` : null,
+    );
+
+    const lines = await bridge.readHistory!('testchat:C1', 'testchat:C1:100', { limit: 10 });
+
+    expect(lines[0].text).toBe('see the report\n\n[file: q3.pdf]');
   });
 
   it('refuses a thread that belongs to another chat, without reading it', async () => {

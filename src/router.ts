@@ -30,12 +30,13 @@ import {
 } from './db/messaging-groups.js';
 import { findSessionForAgent } from './db/sessions.js';
 import { backfillSession, fanInboundMessage } from './modules/cross-session-context/index.js';
-import { gatherWakeContext } from './wake-context.js';
+import { gatherWakeContext, takeWriteTurn } from './wake-context.js';
 import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
 import { resolveSession, withExistingMailboxSession, writeSessionMessage } from './session-manager.js';
 import { requestWake } from './request-wake.js';
 import { getSession } from './db/sessions.js';
+import { commandText, slashCommandName } from './slash-command.js';
 import type { AgentGroup, MessagingGroup, MessagingGroupAgent, Session } from './types.js';
 import type { WakeEvidence } from './mailbox/types.js';
 import type { InboundEvent } from './channels/adapter.js';
@@ -607,6 +608,8 @@ async function deliverToAgent(
     effectiveThreadId,
     effectiveSessionMode,
   );
+  // In arrival order: a message waiting for wake context is not overtaken.
+  const turn = takeWriteTurn(session.id);
 
   if (wake) {
     // Cross-session context backfill: a just-born or long-idle session is
@@ -616,20 +619,28 @@ async function deliverToAgent(
     // in view. Bounded (K sources, read concurrently); a hot session is a
     // one-query no-op. Never throws.
     await backfillSession(agentGroup, session, mg, { created });
-    await gatherWakeContext({ agentGroup, session, mg, created, trigger: event.message });
+    // The runner runs a command only when nothing comes before it.
+    if (slashCommandName(commandText(event.message.content)) === null) {
+      await gatherWakeContext({ agentGroup, session, mg, wiring: agent, created, trigger: event.message });
+    }
   }
 
   const messageId = messageIdForAgent(event.message.id, agent.agent_group_id);
-  await writeSessionMessage(session.agent_group_id, session.id, {
-    id: messageId,
-    kind: event.message.kind,
-    timestamp: event.message.timestamp,
-    platformId: deliveryAddr.platformId,
-    channelType: deliveryAddr.channelType,
-    threadId: deliveryAddr.threadId,
-    content: event.message.content,
-    trigger: wake,
-  });
+  await turn.previous;
+  try {
+    await writeSessionMessage(session.agent_group_id, session.id, {
+      id: messageId,
+      kind: event.message.kind,
+      timestamp: event.message.timestamp,
+      platformId: deliveryAddr.platformId,
+      channelType: deliveryAddr.channelType,
+      threadId: deliveryAddr.threadId,
+      content: event.message.content,
+      trigger: wake,
+    });
+  } finally {
+    turn.release();
+  }
 
   if (wake && created) {
     // A brand-new engaged session: notify registered modules with the

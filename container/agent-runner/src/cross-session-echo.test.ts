@@ -152,13 +152,12 @@ describe('formatter rendering', () => {
     expect(result).not.toContain('<message');
   });
 
-  it('renders a context block row as ONE tagged block of escaped lines, saying what it holds', () => {
+  it('renders a context block row as ONE tagged block of escaped lines, saying what it holds and nothing it keeps', () => {
     insertMessage(
       'cb-1',
       'chat',
       {
         text: 'what these lines are',
-        triggerId: 'm1',
         block: {
           key: 'k',
           tag: 'notes',
@@ -167,7 +166,7 @@ describe('formatter rendering', () => {
             { sender: 'Dana & co', time: '2026-11-01T10:01:00.000Z', text: 'is it <green>?' },
             { sender: 'Pip', time: '2026-11-01T10:02:00.000Z', text: 'not yet', self: true },
           ],
-          withheldIds: ['x1', 'x2'],
+          state: { withheldIds: ['x1', 'x2'] },
         },
       },
       { trigger: 0, channelType: 'session-echo' },
@@ -178,7 +177,8 @@ describe('formatter rendering', () => {
     expect(result).toContain(
       `<notes about="what &lt;these&gt; lines are">\n<line sender="Dana &amp; co" time="${first}">is it &lt;green&gt;?</line>\n<line sender="you"`,
     );
-    expect(result).toContain('>not yet</line>\n2 lines left out.\n</notes>');
+    expect(result).toContain('>not yet</line>\n</notes>');
+    expect(result).not.toContain('x1');
     expect(result).not.toContain('<message');
   });
 

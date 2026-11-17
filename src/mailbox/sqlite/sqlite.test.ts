@@ -235,7 +235,7 @@ describe('SQLite mailbox canonical serialization', () => {
     ]);
   });
 
-  it("gives a top-level post the platform's message id from the delivered table", () => {
+  it("gives an outbound post the platform's message id from the delivered table", () => {
     const inboundDb = new Database(':memory:');
     const outboundDb = new Database(':memory:');
     databases.push(inboundDb, outboundDb);
@@ -261,5 +261,7 @@ describe('SQLite mailbox canonical serialization', () => {
         platformMessageId: '1767225601.000100',
       },
     ]);
+    const history = wrapSqliteOutbound(outboundDb, undefined, undefined, inboundDb).getOutboundHistory(10);
+    expect(history.map((row) => row.platformMessageId)).toEqual([undefined, '1767225601.000100']);
   });
 });
