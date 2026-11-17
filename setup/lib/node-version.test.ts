@@ -199,7 +199,10 @@ describe('setup.sh ensure_node', () => {
     const project = path.join(tmp, 'project');
     // What install-node.sh does here: fail, unless the case says what it leaves behind.
     stub(path.join(project, 'setup'), 'install-node.sh', `echo install-node >> ${log}; ${installed}`);
-    for (const tool of ['bash', 'chmod', 'sed', 'tail', 'tee', 'wc']) fs.symlinkSync(which(tool), path.join(bin, tool));
+    for (const tool of ['bash', 'chmod', 'sed', 'tail', 'tee', 'wc']) {
+      // A case may have put its own stub of a tool there.
+      if (!fs.existsSync(path.join(bin, tool))) fs.symlinkSync(which(tool), path.join(bin, tool));
+    }
     const bootLog = path.join(tmp, 'boot.log');
     const prelude = `set -euo pipefail; source ${LIB}; PROJECT_ROOT=${project}; LOG_FILE=${bootLog}; log() { echo "$*" >> "$LOG_FILE"; }`;
     const r = run(['-c', `${prelude}\n${fns}\n${call}; echo "NODE_OK=$NODE_OK NODE_VERSION=$NODE_VERSION"`]);
@@ -276,6 +279,20 @@ describe('setup.sh ensure_node', () => {
     expect(r.out).not.toContain('earlier step');
   });
 
+  it('does not show an older error when the log lines cannot be counted', () => {
+    stub(bin, 'uname', 'echo Linux');
+    stub(bin, 'node', 'exit 1');
+    stub(bin, 'wc', 'exit 1');
+    fs.writeFileSync(path.join(tmp, 'boot.log'), 'Error: left by an earlier step\n');
+
+    const r = ensureNodeStrict();
+
+    expect(r.out).toContain(`Node at ${bin}/node cannot start:`);
+    expect(r.out).not.toContain('earlier step');
+    expect(r.out).toContain('NODE_OK=false NODE_VERSION=cannot_start');
+    expect(r.status).toBe(0);
+  });
+
   it('takes the version of a Node that works and also prints on stderr', () => {
     stub(bin, 'uname', 'echo Linux');
     stub(bin, 'node', `echo "ERROR: ld.so: object 'x.so' cannot be preloaded: ignored." >&2; echo v22.23.4`);
@@ -338,20 +355,28 @@ describe('setup.sh ensure_node', () => {
 describe('setup.sh log_error_line', () => {
   // Under setup.sh's own shell options. `before` is in the log at the mark;
   // `said` is what a tool then writes to it.
-  function logErrorLine(said: string, before: string | null = ''): { status: number | null; out: string; log: string } {
+  // `wc`, when given, is the body of a stub that stands in for the real one.
+  function logErrorLine(
+    said: string,
+    before: string | null = '',
+    wc?: string,
+    mark = 'log_mark',
+  ): { status: number | null; out: string; log: string } {
     const source = fs.readFileSync(path.join(ROOT, 'setup.sh'), 'utf8');
     const start = source.indexOf('log_end_line() {');
     const last = source.indexOf('log_error_line() {');
     expect(start, 'log_end_line() not found in setup.sh').toBeGreaterThanOrEqual(0);
     expect(last, 'log_error_line() not found in setup.sh').toBeGreaterThan(start);
     const fns = source.slice(start, source.indexOf('\n}', last) + 2);
-    for (const tool of ['tail', 'wc']) fs.symlinkSync(which(tool), path.join(bin, tool));
+    fs.symlinkSync(which('tail'), path.join(bin, 'tail'));
+    if (wc === undefined) fs.symlinkSync(which('wc'), path.join(bin, 'wc'));
+    else stub(bin, 'wc', wc);
     const bootLog = path.join(tmp, 'boot.log');
     if (before !== null) fs.writeFileSync(bootLog, before);
     const writes = said ? `printf '%s' $'${said}' >> "$LOG_FILE"` : ':';
     const r = run([
       '-c',
-      `set -euo pipefail\nLOG_FILE=${bootLog}\n${fns}\nlog_mark\n${writes}\nlog_error_line\necho "[$ERROR_LINE]"`,
+      `set -euo pipefail\nLOG_FILE=${bootLog}\n${fns}\n${mark}\n${writes}\nlog_error_line\necho "[$ERROR_LINE]"`,
     ]);
     return { ...r, log: fs.existsSync(bootLog) ? fs.readFileSync(bootLog, 'utf8') : '' };
   }
@@ -396,6 +421,32 @@ describe('setup.sh log_error_line', () => {
   it('gives nothing, and does not stop the script, when there is no log', () => {
     const r = logErrorLine('', null);
     expect({ status: r.status, out: r.out }).toEqual({ status: 0, out: '[]\n' });
+  });
+
+  it('reads a log the tool made, when there was none at the mark', () => {
+    const r = logErrorLine('loader: missing lib\\n', null);
+    expect(r.out).toBe('[loader: missing lib]\n');
+  });
+
+  // No count is not line 0: from there the whole log would read as this step's.
+  it.each([
+    ['fails', 'exit 1', ''],
+    ['fails, also for a step that printed', 'exit 1', 'npm error code E1\\n'],
+    ['prints a count, then fails', 'echo 0; exit 1', ''],
+    ['prints no count', 'echo "wc: cannot count"', ''],
+  ])('gives nothing, not an older error line, when wc %s', (_case, wc, said) => {
+    const r = logErrorLine(said, 'Error: old unrelated step\n', wc);
+    expect({ status: r.status, out: r.out }).toEqual({ status: 0, out: '[]\n' });
+  });
+
+  it('gives nothing, and does not stop the script, when no mark was taken', () => {
+    const r = logErrorLine('', 'Error: old unrelated step\n', undefined, ':');
+    expect({ status: r.status, out: r.out }).toEqual({ status: 0, out: '[]\n' });
+  });
+
+  it('takes the count as BSD wc prints it, padded with spaces', () => {
+    const r = logErrorLine('npm error code E1\\n', 'Error: old unrelated step\n', 'echo "       1"');
+    expect(r.out).toBe('[npm error code E1]\n');
   });
 });
 

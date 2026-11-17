@@ -62,11 +62,21 @@ log_end_line() {
   [ -z "$(tail -c 1 "$LOG_FILE" 2>/dev/null)" ] || echo >> "$LOG_FILE"
 }
 
-# log_mark: LOG_MARK is how many lines the log holds now.
+# log_mark: LOG_MARK is how many lines the log holds now. It is left empty
+# when they cannot be counted, and log_error_line then gives nothing: better
+# no line than one from an earlier step.
 log_mark() {
   log_end_line
-  LOG_MARK=$(wc -l 2>/dev/null < "$LOG_FILE") || LOG_MARK=0
-  LOG_MARK=$((LOG_MARK))
+  if [ -e "$LOG_FILE" ]; then
+    LOG_MARK=$(wc -l 2>/dev/null < "$LOG_FILE") || LOG_MARK=""
+  else
+    LOG_MARK=0
+  fi
+  # BSD wc pads the count with spaces.
+  LOG_MARK="${LOG_MARK//[[:space:]]/}"
+  case "$LOG_MARK" in
+    *[!0-9]*) LOG_MARK="" ;;
+  esac
 }
 
 # log_error_line: sets ERROR_LINE to the first line the log gained since
@@ -74,6 +84,7 @@ log_mark() {
 log_error_line() {
   local line n=0
   ERROR_LINE=""
+  [ -n "${LOG_MARK:-}" ] || return 0
   [ -r "$LOG_FILE" ] || return 0
   log_end_line
   while IFS= read -r line; do
