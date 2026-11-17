@@ -50,6 +50,8 @@ This integration supports exactly the gateway version pinned in `.claude/skills/
 pnpm exec tsx .claude/skills/add-onecli/scripts/setup.ts
 ```
 
+Setup gives OneCLI's database its own random password in `~/.onecli/.env`. A local gateway still on the compose default gets one in place: its data stays, and OneCLI restarts once. To do only that on an existing install, run `pnpm exec tsx .claude/skills/add-onecli/scripts/postgres-password.ts`.
+
 ## Provider credentials
 
 Provider skills such as `/add-opencode` store model credentials here through the
