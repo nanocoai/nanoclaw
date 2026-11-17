@@ -42,6 +42,10 @@ interface ChannelAdapter {
   setTyping?(platformId: string, threadId: string | null): Promise<void>;
   syncConversations?(): Promise<ConversationInfo[]>;
   updateConversations?(conversations: ConversationConfig[]): void;
+  // The newest `limit` lines of a thread, or of the chat's top level when threadId
+  // is null, oldest first. Rejects a thread of another chat. The Chat SDK bridge
+  // implements it with the chat library's history API.
+  readHistory?(platformId: string, threadId: string | null, options: { limit: number }): Promise<HistoryLine[]>;
 }
 
 // Inbound message from adapter to host
@@ -381,6 +385,31 @@ function createWhatsAppChannel(): ChannelAdapter {
 ```json
 { "action": "reset_session", "payload": { "session_id": "sess-123", "reason": "Skills updated" } }
 ```
+
+## Wake Context
+
+`src/wake-context.ts` lets a module add context to a session that an engaged message is waking, without editing the router. A module calls `registerWakeContext(provider)` at import. The router calls `gatherWakeContext` once in the wake branch, after the cross-session backfill and before the message is written. With nothing registered it returns at once.
+
+```typescript
+type WakeContextProvider = (input: WakeContextInput) => Promise<ContextBlock[]>;
+interface WakeContextInput { agentGroup; session; mg; created: boolean; trigger: { id: string; timestamp: string } }
+interface ContextBlock { key: string; tag: string; about: string; lines: ContextLine[]; withheldIds?: string[] }
+interface ContextLine { id?: string; sender: string; time: string; text: string; self?: boolean }
+```
+
+What core guarantees every provider:
+
+- **One budget** (`WAKE_CONTEXT_BUDGET_MS`, 1.5 s) for all providers together, because a person is waiting for the reply. A block that is ready in time is written before the message; one that is not is written when it lands and reaches the agent with the next message.
+- **Isolation.** A provider that throws or rejects costs only its own blocks. One still running from an earlier wake of the same session is skipped until it ends (at most 30 s).
+- **One row per block per message.** The row id is `<session>:wake-context:<key>:<message id>`, a `session-echo` row with `trigger=0`, so it never wakes a container and is never fanned out. Its content is `{ text, triggerId, block }`.
+- **The write.** Blocks go into the waking session only, in the order providers registered.
+
+The container renders a block as `<tag about="...">` with one `<line sender="..." time="...">` per line, and `N lines left out.` when `withheldIds` is set. The tag must match `/^[a-z][a-z-]{0,39}$/`; core drops a block that does not, and the container never renders one. The agent learns what a block holds from `about`, so a new block needs no change to the formatter or the prompt.
+
+Two helpers serve providers that show the chat's own messages:
+
+- `MailboxTimelineMessage.platformMessageId` (`getTopLevelOutbound`) and `MailboxHistoryMessage.platformMessageId` (`getOutboundHistory`) carry the platform's id for a delivered message when known, and the backfill keeps it on the rows it seeds, so a provider can tell exactly which messages a session already has. Both are optional: a mailbox implementation that omits them still compiles.
+- `wouldAdmitSender(userId, mg, wiring)` (`src/modules/permissions/access.ts`) answers whether the chat's access rules (the access gate plus the wiring's `sender_scope`) would let a sender reach the agent. It reads only: no dropped-message row, no approval.
 
 ## Host Delivery Logic
 

@@ -61,6 +61,7 @@ For ad-hoc central queries from skills or scripts, use the in-tree wrapper rathe
 |------|---------|
 | `src/index.ts` | Entry point: init DB, migrations, channel adapters, delivery polls, sweep, shutdown |
 | `src/router.ts` | Inbound routing: messaging group → agent group → session → `inbound.db` → wake |
+| `src/wake-context.ts` | Wake-context seam: modules register providers whose context blocks are written before an engaged message, under one budget ([docs/api-details.md](docs/api-details.md#wake-context)) |
 | `src/delivery.ts` | Polls `outbound.db`, delivers via adapter, handles system actions (schedule, approvals, etc.) |
 | `src/delivery-guard.ts` | `DeliveryGuardSpec` + `runGuarded` — the guard-consult pipeline for privileged delivery actions (registry stays in `delivery.ts`) |
 | `src/host-sweep.ts` + `src/reconcile-session.ts` | 60s resync floor; the per-session pass (`reconcileSession`: `processing_ack` sync, stuck detection, due-message wake, recurrence) runs through the keyed queue in `src/reconcile-queue.ts` |

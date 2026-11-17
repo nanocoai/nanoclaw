@@ -33,7 +33,7 @@ import { SqliteStateAdapter } from '../state-sqlite.js';
 import { registerWebhookAdapter } from '../webhook-server.js';
 import { cardProblems, isCardPart, isRecord, type CardPart } from './card-parts.js';
 import { CardTooLongError, cardQuestionTooLong, normalizeOptions, type NormalizedOption } from './ask-question.js';
-import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage } from './adapter.js';
+import type { ChannelAdapter, ChannelDefaults, ChannelSetup, HistoryLine, InboundMessage } from './adapter.js';
 import { INSTANCE_KEY_RE } from './channel-registry.js';
 import { resolveQuestionRender, dispatchQuestionAction } from './question-render-registry.js';
 
@@ -1335,6 +1335,33 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       // is the SDK's thread id, which is what the router already has from
       // the original inbound event.
       await state.subscribe(threadId);
+    },
+
+    async readHistory(
+      platformId: string,
+      threadId: string | null,
+      { limit }: { limit: number },
+    ): Promise<HistoryLine[]> {
+      if (threadId !== null && adapter.channelIdFromThreadId(threadId) !== platformId) {
+        throw new Error('History read refused: thread is not in this chat');
+      }
+      // The library reads the platform, or its own cache on platforms without
+      // server-side history.
+      const { messages } =
+        threadId === null
+          ? await chat.history.channel.listMessages(platformId, { limit })
+          : await chat.history.thread.list(threadId, { limit });
+      return messages.map((m) => ({
+        id: m.id,
+        timestamp: m.metadata.dateSent.toISOString(),
+        senderId: m.author.userId,
+        senderName: m.author.fullName || m.author.userName,
+        text: m.text,
+        isBot: m.author.isBot === true,
+        isSelf: m.author.isMe,
+        threadId: m.threadId,
+        raw: m.raw,
+      }));
     },
   };
 
