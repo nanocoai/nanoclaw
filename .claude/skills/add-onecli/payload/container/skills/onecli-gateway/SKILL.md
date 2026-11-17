@@ -71,12 +71,20 @@ OneCLI dashboard instead of saving another.
 If the response has no link, tell the user to open the OneCLI dashboard and
 connect the service there.
 
-**`access_restricted`: the credential is stored, but not for this agent.**
-Saving a key or connecting an app through a link does not give it to you.
-An admin must attach it to this agent, which the OneCLI dashboard names
-after this agent group. For an app, the response's `manage_url` opens the
-account's agent access; for an API key, the admin turns it on from this
-agent's page. Until then every retry gets the same error.
+**`access_restricted`: OneCLI holds a credential for this host, but none this
+agent can use for this request.** That does not prove the service you
+called is connected, whatever the response's message says. Several apps can
+share one host: Gmail, Google Calendar and Google Drive all use
+`www.googleapis.com`, so a Calendar request gets `access_restricted` when only
+Drive is connected. Ask an admin to check in the OneCLI dashboard that the
+service you called is connected, to connect it if it is not, and then to
+attach it to this agent, which the dashboard names after this agent group.
+If it is already attached, its sign-in may have stopped working: ask them to
+reconnect it. For an app, the response's `manage_url` opens that app's page:
+it offers to connect the app when no account is there, and each connected
+account has its agent access. For an API key, the admin turns it on from this
+agent's page. Saving a key or connecting an app through a link does not give
+it to you. Until then, every retry gets the same error.
 
 **Retry once the user confirms.** After a connect link, tell the user up
 front that the first retry may return `access_restricted` until the
