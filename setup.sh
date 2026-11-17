@@ -53,6 +53,32 @@ detect_platform() {
 
 # --- Why a tool failed ---
 
+# Tools write straight to the log, and the one line for the screen is read
+# back from it. log_mark: LOG_MARK is how many lines the log holds now.
+log_mark() {
+  LOG_MARK=$(wc -l 2>/dev/null < "$LOG_FILE") || LOG_MARK=0
+  LOG_MARK=$((LOG_MARK))
+}
+
+# log_error_line: sets ERROR_LINE to the first line the log gained since
+# log_mark that names an error, else to the first with anything on it.
+log_error_line() {
+  local line n=0
+  ERROR_LINE=""
+  [ -r "$LOG_FILE" ] || return 0
+  # A tool may end without a newline; the next log line must not join it.
+  [ -z "$(tail -c 1 "$LOG_FILE" 2>/dev/null)" ] || echo >> "$LOG_FILE"
+  while IFS= read -r line; do
+    n=$((n + 1))
+    [ "$n" -gt "$LOG_MARK" ] || continue
+    [ -n "$ERROR_LINE" ] || ERROR_LINE="$line"
+    case "$line" in
+      *[Ee]rror* | *ERR!*) ERROR_LINE="$line"; return 0 ;;
+    esac
+  done < "$LOG_FILE"
+  return 0
+}
+
 # first_error_line TEXT: sets ERROR_LINE to the first line of a tool's output
 # that names an error, else to its first line with anything on it. One line
 # fits the screen; callers put the whole output in the log. No subshell and no
@@ -113,20 +139,21 @@ check_node() {
     NODE_PATH_FOUND=$(command -v node)
     # Guarded: under `set -e` a Node that cannot start (built for another
     # libc, a broken download) would end the bootstrap here with nothing said.
-    if NODE_VERSION=$(node --version 2>/dev/null); then
+    # Run once: what it prints on stderr goes to the log.
+    log_mark
+    if NODE_VERSION=$(node --version 2>>"$LOG_FILE"); then
       NODE_VERSION="${NODE_VERSION#v}"
       if node_meets_minimum "$NODE_VERSION"; then
         NODE_OK="true"
       fi
       log "Node $NODE_VERSION at $NODE_PATH_FOUND (ok=$NODE_OK)"
     else
-      local said
+      # Its stdout may hold the error too.
+      [ -z "$NODE_VERSION" ] || printf '\n%s\n' "$NODE_VERSION" >> "$LOG_FILE"
       NODE_VERSION="cannot_start"
-      said=$(node --version 2>&1) || true
-      first_error_line "$said"
+      log_error_line
       NODE_START_ERROR="$ERROR_LINE"
       log "Node at $NODE_PATH_FOUND cannot start: ${NODE_START_ERROR:-it printed nothing}"
-      printf '%s\n' "$said" >> "$LOG_FILE"
     fi
   else
     log "Node not found"

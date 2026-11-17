@@ -162,9 +162,10 @@ describe('setup.sh ensure_node', () => {
     };
     const project = path.join(tmp, 'project');
     stub(path.join(project, 'setup'), 'install-node.sh', `echo install-node >> ${log}; exit 1`);
-    for (const tool of ['bash', 'sed', 'tee']) fs.symlinkSync(which(tool), path.join(bin, tool));
+    for (const tool of ['bash', 'sed', 'tail', 'tee', 'wc']) fs.symlinkSync(which(tool), path.join(bin, tool));
     const prelude = `source ${LIB}; PROJECT_ROOT=${project}; LOG_FILE=${tmp}/boot.log; log() { :; }`;
-    return run(['-c', `${prelude}\n${fn('check_node')}\n${fn('ensure_node')}\nensure_node; echo "NODE_OK=$NODE_OK"`])
+    const fns = ['log_mark', 'log_error_line', 'check_node', 'ensure_node'].map(fn).join('\n');
+    return run(['-c', `${prelude}\n${fns}\nensure_node; echo "NODE_OK=$NODE_OK"`])
       .out.trim()
       .split('\n')
       .pop() as string;
@@ -187,7 +188,10 @@ describe('setup.sh ensure_node', () => {
 
   // setup.sh runs under `set -euo pipefail`, where a Node that cannot start used
   // to end the script inside check_node with nothing said.
-  function ensureNodeStrict(installed = 'exit 1'): { status: number | null; out: string; log: string } {
+  function ensureNodeStrict(
+    installed = 'exit 1',
+    call = 'ensure_node',
+  ): { status: number | null; out: string; log: string } {
     // Every function setup.sh defines, without the main part that calls them.
     const source = fs.readFileSync(path.join(ROOT, 'setup.sh'), 'utf8');
     const fns = source.slice(source.indexOf('# --- Platform detection ---'), source.indexOf('# --- Main ---'));
@@ -195,10 +199,10 @@ describe('setup.sh ensure_node', () => {
     const project = path.join(tmp, 'project');
     // What install-node.sh does here: fail, unless the case says what it leaves behind.
     stub(path.join(project, 'setup'), 'install-node.sh', `echo install-node >> ${log}; ${installed}`);
-    for (const tool of ['bash', 'chmod', 'sed', 'tee']) fs.symlinkSync(which(tool), path.join(bin, tool));
+    for (const tool of ['bash', 'chmod', 'sed', 'tail', 'tee', 'wc']) fs.symlinkSync(which(tool), path.join(bin, tool));
     const bootLog = path.join(tmp, 'boot.log');
     const prelude = `set -euo pipefail; source ${LIB}; PROJECT_ROOT=${project}; LOG_FILE=${bootLog}; log() { echo "$*" >> "$LOG_FILE"; }`;
-    const r = run(['-c', `${prelude}\n${fns}\nensure_node; echo "NODE_OK=$NODE_OK NODE_VERSION=$NODE_VERSION"`]);
+    const r = run(['-c', `${prelude}\n${fns}\n${call}; echo "NODE_OK=$NODE_OK NODE_VERSION=$NODE_VERSION"`]);
     return { ...r, log: fs.existsSync(bootLog) ? fs.readFileSync(bootLog, 'utf8') : '' };
   }
 
@@ -236,6 +240,52 @@ describe('setup.sh ensure_node', () => {
     expect(r.out).toMatch(/^ {2}dyld: Library not loaded$/m);
     expect(r.out).not.toContain('Reason: image not found');
     expect(r.log).toContain('  Referenced from: node\n  Reason: image not found\n');
+  });
+
+  it('runs a Node that cannot start once, not a second time to read its error', () => {
+    stub(bin, 'uname', 'echo Linux');
+    stub(bin, 'node', `echo node-run >> ${log}; echo "node: version GLIBC_2.28 not found" >&2; exit 1`);
+
+    const r = ensureNodeStrict('exit 1', 'check_node');
+
+    expect(calls()).toEqual(['node-run']);
+    expect(r.out).toContain('NODE_OK=false NODE_VERSION=cannot_start');
+    expect(r.log).toContain(
+      `node: version GLIBC_2.28 not found\nNode at ${bin}/node cannot start: node: version GLIBC_2.28`,
+    );
+  });
+
+  it('shows what a Node that cannot start printed on stdout', () => {
+    stub(bin, 'uname', 'echo Linux');
+    stub(bin, 'node', 'echo "node: this build cannot run here"; exit 1');
+
+    const r = ensureNodeStrict();
+
+    expect(r.out).toMatch(/^ {2}node: this build cannot run here$/m);
+    expect(r.log).toContain('node: this build cannot run here\n');
+  });
+
+  it('does not show an error the log already held', () => {
+    stub(bin, 'uname', 'echo Linux');
+    stub(bin, 'node', 'echo "node: cannot run here" >&2; exit 1');
+    fs.writeFileSync(path.join(tmp, 'boot.log'), 'Error: left by an earlier step\n');
+
+    const r = ensureNodeStrict();
+
+    expect(r.out).toMatch(/^ {2}node: cannot run here$/m);
+    expect(r.out).not.toContain('earlier step');
+  });
+
+  it('takes the version of a Node that works and also prints on stderr', () => {
+    stub(bin, 'uname', 'echo Linux');
+    stub(bin, 'node', `echo "ERROR: ld.so: object 'x.so' cannot be preloaded: ignored." >&2; echo v22.23.4`);
+
+    const r = ensureNodeStrict();
+
+    expect(r.out).toContain('NODE_OK=true NODE_VERSION=22.23.4');
+    expect(r.out).not.toContain('cannot start');
+    expect(r.log).toContain("ERROR: ld.so: object 'x.so' cannot be preloaded: ignored.\n");
+    expect(calls()).toEqual([]);
   });
 
   it('says so when the only Node is a file that cannot be executed at all', () => {
@@ -282,6 +332,64 @@ describe('setup.sh ensure_node', () => {
 
     expect(r.out).toContain('NODE_OK=false NODE_VERSION=22.20.0');
     expect(calls()).toEqual(['install-node']);
+  });
+});
+
+describe('setup.sh log_error_line', () => {
+  // Under setup.sh's own shell options. `before` is in the log at the mark;
+  // `said` is what a tool then writes to it.
+  function logErrorLine(said: string, before: string | null = ''): { status: number | null; out: string; log: string } {
+    const source = fs.readFileSync(path.join(ROOT, 'setup.sh'), 'utf8');
+    const start = source.indexOf('log_mark() {');
+    const last = source.indexOf('log_error_line() {');
+    expect(start, 'log_mark() not found in setup.sh').toBeGreaterThanOrEqual(0);
+    expect(last, 'log_error_line() not found in setup.sh').toBeGreaterThan(start);
+    const fns = source.slice(start, source.indexOf('\n}', last) + 2);
+    for (const tool of ['tail', 'wc']) fs.symlinkSync(which(tool), path.join(bin, tool));
+    const bootLog = path.join(tmp, 'boot.log');
+    if (before !== null) fs.writeFileSync(bootLog, before);
+    const writes = said ? `printf '%s' $'${said}' >> "$LOG_FILE"` : ':';
+    const r = run([
+      '-c',
+      `set -euo pipefail\nLOG_FILE=${bootLog}\n${fns}\nlog_mark\n${writes}\nlog_error_line\necho "[$ERROR_LINE]"`,
+    ]);
+    return { ...r, log: fs.existsSync(bootLog) ? fs.readFileSync(bootLog, 'utf8') : '' };
+  }
+
+  it.each([
+    ['the first line that names an error', 'node:internal/x:1\\n  throw err;\\nError: boom\\n  at y\\n', 'Error: boom'],
+    ['an npm error line', '\\nnpm error code EACCES\\nnpm error syscall mkdir\\n', 'npm error code EACCES'],
+    [
+      'the first line with anything on it when none names an error',
+      '\\n\\nlibfoo.so.1: not found\\nmore\\n',
+      'libfoo.so.1: not found',
+    ],
+    ['a single line that has no newline', 'loader: missing lib', 'loader: missing lib'],
+    ['nothing for no output', '', ''],
+  ])('gives %s', (_case, said, line) => {
+    const r = logErrorLine(said, '[a time] an earlier log line\n');
+    expect({ status: r.status, out: r.out }).toEqual({ status: 0, out: `[${line}]\n` });
+  });
+
+  it('reads only what the log gained after the mark', () => {
+    const r = logErrorLine('loader: missing lib\\nError: the real one\\n', 'Error: from an earlier step\nmore\n');
+    expect(r.out).toBe('[Error: the real one]\n');
+  });
+
+  it('reads on from a log whose last line had no newline at the mark', () => {
+    const r = logErrorLine('npm error code E1\\n', 'one\ntwo');
+    expect(r.out).toBe('[twonpm error code E1]\n');
+  });
+
+  it('ends a last line that has no newline, so the next log line starts on its own', () => {
+    const r = logErrorLine('loader: missing lib');
+    expect(r.out).toBe('[loader: missing lib]\n');
+    expect(r.log).toBe('loader: missing lib\n');
+  });
+
+  it('gives nothing, and does not stop the script, when there is no log', () => {
+    const r = logErrorLine('', null);
+    expect({ status: r.status, out: r.out }).toEqual({ status: 0, out: '[]\n' });
   });
 });
 
