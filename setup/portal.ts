@@ -5,10 +5,10 @@ import * as p from '@clack/prompts';
 import { brightSelect } from './lib/bright-select.js';
 import { openUrl } from './lib/browser.js';
 import {
-  clearImageSource,
-  imageSourceDecided,
-  readImageSource,
+  HARDENED_IMAGE_ENV_KEY,
   readRegistryAccount,
+  restoreImageSetting,
+  savedImageSetting,
   writeImageSource,
   type RegistryAccount,
 } from './lib/registry-state.js';
@@ -21,6 +21,7 @@ import {
   readInstallIdentity,
   type DeviceKey,
   type InstallIdentity,
+  type SetupState,
 } from '../src/community-portal/index.js';
 import type { ProvisioningCore } from './channels/slack-auto.js';
 import { readSlackJob } from '../src/community-portal/slack-job.js';
@@ -90,10 +91,23 @@ async function registerDevice(client: SetupClient): Promise<boolean> {
   }
 }
 
-/** A sign-in that did not happen is a skipped stage, worded as the sign-in driver words it. */
-function skippedSignIn(error: unknown): void {
+/**
+ * Why a stage handed back no client. `skipped` is an answer: a no, or a perk
+ * this machine is not offered. `unfinished` is a sign-in or registration that
+ * failed or ran out; it answers nothing, so the question stays open (#4426).
+ */
+export type PortalSkip = 'skipped' | 'unfinished';
+
+/**
+ * A sign-in that did not happen is a skipped stage, worded as the sign-in
+ * driver words it. Only a decline in the browser is an answer; `declinedHint`
+ * replaces the driver's "re-run" hint where a re-run would not ask again.
+ */
+function skippedSignIn(error: unknown, declinedHint?: string): PortalSkip {
   if (!(error instanceof LoginError)) throw error;
-  p.log.warn([error.message, error.hint, 'Skipping this step for now.'].filter(Boolean).join(' '));
+  const hint = (error.declined && declinedHint) || error.hint;
+  p.log.warn([error.message, hint, 'Skipping this step for now.'].filter(Boolean).join(' '));
+  return error.declined ? 'skipped' : 'unfinished';
 }
 
 /**
@@ -101,16 +115,20 @@ function skippedSignIn(error: unknown): void {
  * start the stage anonymously with the user code, print the single portal link
  * and the code, open the link, wait for the sign-in, persist it, then register
  * and claim.
- * Declined, expired or failed → null; the stage is skipped and nothing else
+ * Declined, expired or failed → why; the stage is skipped and nothing else
  * happens.
  */
-async function signInThroughPortal(client: SetupClient, stage: PortalStage, name: string): Promise<boolean> {
+async function signInThroughPortal(
+  client: SetupClient,
+  stage: PortalStage,
+  name: string,
+  declinedHint?: string,
+): Promise<true | PortalSkip> {
   let flow: DeviceFlow;
   try {
     flow = await startDeviceFlow();
   } catch (error) {
-    skippedSignIn(error);
-    return false;
+    return skippedSignIn(error, declinedHint);
   }
   const verificationUri = flow.device.verificationUriComplete ?? flow.device.verificationUri;
   const setup = await client.start(stage, name, { verification: { userCode: flow.device.userCode, verificationUri } });
@@ -122,19 +140,22 @@ async function signInThroughPortal(client: SetupClient, stage: PortalStage, name
   // sign-in link would leave the perk undecided.
   process.stdout.write(`\n${setup.url}\n\n`);
   // The code lets the user check that the sign-in page belongs to this terminal.
-  process.stdout.write(`Code: ${flow.device.userCode} — approve only if the sign-in page shows this code.\n\n`);
+  const minutes = Math.max(1, Math.round(flow.device.expiresInS / 60));
+  process.stdout.write(
+    `Code: ${flow.device.userCode} — approve only if the sign-in page shows this code. ` +
+      `It expires in about ${minutes} minute${minutes === 1 ? '' : 's'}.\n\n`,
+  );
   openUrl(setup.url);
   let credential;
   try {
     credential = await finishDeviceFlow(flow);
   } catch (error) {
-    skippedSignIn(error);
-    return false;
+    return skippedSignIn(error, declinedHint);
   }
   const { identity, deviceKey } = await portalIdentity();
   client.identity = identity;
   client.deviceKey = deviceKey;
-  if (!(await registerDevice(client))) return false;
+  if (!(await registerDevice(client))) return 'unfinished';
   await client.claim();
   p.log.info(`Signed in as ${credential.email ?? credential.account_id}. Choose your perk in the browser.`);
   return true;
@@ -230,22 +251,22 @@ export async function offerPortalReminder(stage: 'echo' | 'slack', enable: () =>
 export async function beginPortal(
   stage: PortalStage,
   name = 'Nano',
-  { browserConsent = false } = {},
-): Promise<SetupClient | null> {
+  { browserConsent = false, declinedHint }: { browserConsent?: boolean; declinedHint?: string } = {},
+): Promise<SetupClient | PortalSkip> {
   const account = readRegistryAccount();
   const choice = account ? await chooseAccount(account) : 'keep';
   if (choice === 'skip') {
     p.log.info('Skipped for now. You can enable it later.');
-    return null;
+    return 'skipped';
   }
   const enrolled = Boolean(account) && choice === 'keep';
   const client = await portalClient(enrolled ? await portalIdentity() : {}).initialize();
-  const skip = async (): Promise<null> => {
+  const skip = async (why: PortalSkip = 'skipped'): Promise<PortalSkip> => {
     await client.stop();
-    return null;
+    return why;
   };
   try {
-    if (enrolled && !(await registerDevice(client))) return await skip();
+    if (enrolled && !(await registerDevice(client))) return await skip('unfinished');
     if (stage === 'slack') {
       const job = await readSlackJob();
       if (job?.status === 'complete' && job.app.appId === client.local.slackSetup?.app?.appId) {
@@ -275,7 +296,8 @@ export async function beginPortal(
       return await skip();
     }
     if (!enrolled) {
-      if (!(await signInThroughPortal(client, stage, name))) return await skip();
+      const signedIn = await signInThroughPortal(client, stage, name, declinedHint);
+      if (signedIn !== true) return await skip(signedIn);
       accountChosen = true;
       return client;
     }
@@ -294,26 +316,53 @@ export async function beginPortal(
 export async function runImagePortal(
   options: { browserConsent?: boolean; apply?: () => Promise<void> } = {},
 ): Promise<void> {
-  // "Previous" includes "not decided yet": a failed late download must put
+  // "Saved" includes "not decided yet": a failed late download must put
   // the question back, not answer it — the wizard's reminder is only for a
   // run whose question is still open, and the retry has to reach it.
-  const previous = imageSourceDecided() ? readImageSource() : undefined;
-  const client = await beginPortal('echo', 'Nano', options);
-  if (!client) {
+  const saved = savedImageSetting();
+  const restore = (): void => restoreImageSetting(saved);
+  let client: SetupClient | PortalSkip;
+  try {
+    client = await beginPortal('echo', 'Nano', {
+      browserConsent: options.browserConsent,
+      // Without `apply` a decline is saved below, so a re-run no longer asks.
+      declinedHint: options.apply
+        ? undefined
+        : `To change that, remove ${HARDENED_IMAGE_ENV_KEY} from .env and re-run setup.`,
+    });
+  } catch (error) {
+    restore();
+    throw error;
+  }
+  // A sign-in that failed or ran out answers nothing (#4426). Saving the
+  // credential also saved "pull", so a registration that fails after it
+  // must put the setting back: the next run asks again.
+  if (client === 'unfinished') {
+    restore();
+    return;
+  }
+  if (client === 'skipped') {
     if (!options.apply) writeImageSource('local');
     return;
   }
   try {
-    const result = await client.wait();
-    await client.reconcile();
+    let result: SetupState;
+    try {
+      result = await client.wait();
+      await client.reconcile();
+    } catch (error) {
+      // Cancelled, failed or timed out in the browser says "restart this
+      // step", so the question has to be open again.
+      restore();
+      throw error;
+    }
     if (result.status === 'skipped' && options.apply) return;
     writeImageSource(result.choice.imageSource || 'local');
     if (result.status !== 'skipped') {
       try {
         await options.apply?.();
       } catch (error) {
-        if (previous) writeImageSource(previous);
-        else clearImageSource();
+        restore();
         await client.complete('failed').catch(() => {});
         throw error;
       }
@@ -332,7 +381,7 @@ export async function runSlackPortal(
   options: { browserConsent?: boolean } = {},
 ): Promise<Record<string, string>> {
   const client = await beginPortal('slack', name, options);
-  if (!client) return { __portal_skip: 'slack' };
+  if (typeof client === 'string') return { __portal_skip: 'slack' };
   try {
     const setup = await client.wait(),
       choice = setup.choice;

@@ -155,6 +155,8 @@ export class LoginError extends Error {
   constructor(
     message: string,
     readonly hint?: string,
+    /** The person said no in the browser: an answer, unlike a sign-in that failed or ran out. */
+    readonly declined = false,
   ) {
     super(message);
     this.name = 'LoginError';
@@ -863,7 +865,7 @@ export async function pollForIdpToken(cfg: IdpConfig, device: DeviceAuthorizatio
       case 'expired_token':
         throw new LoginError('That sign-in code expired before it was approved.', 'Re-run setup to get a fresh code.');
       case 'access_denied':
-        throw new LoginError('The sign-in was declined in the browser.', 'Re-run setup if that was a mistake.');
+        throw new LoginError('The sign-in was declined in the browser.', 'Re-run setup if that was a mistake.', true);
       case 'invalid_client':
       case 'unauthorized_client':
         throw misconfiguredClient();
