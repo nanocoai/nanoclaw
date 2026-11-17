@@ -51,20 +51,83 @@ detect_platform() {
   log "Platform: $PLATFORM, WSL: $IS_WSL, Root: $IS_ROOT"
 }
 
+# --- Why a tool failed ---
+
+# first_error_line TEXT: sets ERROR_LINE to the first line of a tool's output
+# that names an error, else to its first line with anything on it. One line
+# fits the screen; callers put the whole output in the log. No subshell and no
+# here-string (bash 3.2 needs a temp file for one), so it cannot fail under
+# `set -e`.
+first_error_line() {
+  local rest="$1" line nl=$'\n'
+  ERROR_LINE=""
+  while [ -n "$rest" ]; do
+    line=${rest%%"$nl"*}
+    case "$rest" in
+      *"$nl"*) rest=${rest#*"$nl"} ;;
+      *) rest="" ;;
+    esac
+    [ -n "$ERROR_LINE" ] || ERROR_LINE="$line"
+    case "$line" in
+      *[Ee]rror* | *ERR!*) ERROR_LINE="$line"; return 0 ;;
+    esac
+  done
+}
+
+# folder_error DIR SAID: why mkdir could not make DIR, for the screen. mkdir's
+# own words differ by system and may name no path, so when a file or a link
+# that cannot be followed sits where DIR or one of its parents has to be,
+# ERROR_LINE names it. Otherwise it is mkdir's own error line from SAID.
+# ERROR_TODO says what to do.
+folder_error() {
+  local at="$1" said="$2"
+  first_error_line "$said"
+  ERROR_TODO="Fix that, then re-run setup."
+  # Up to the nearest part of the path that exists; -L also sees a link that
+  # -e cannot follow.
+  while [ ! -e "$at" ] && [ ! -L "$at" ]; do
+    case "$at" in
+      */*) at="${at%/*}" ;;
+      *) return 0 ;;
+    esac
+  done
+  if [ ! -e "$at" ]; then
+    # Its target is gone, or is somewhere this user may not look.
+    ERROR_LINE="$at is a link that cannot be followed"
+    ERROR_TODO="Fix or remove that link, then re-run setup."
+  elif [ ! -d "$at" ]; then
+    ERROR_LINE="$at is a file, not a folder"
+    ERROR_TODO="Move or rename that file, then re-run setup."
+  fi
+}
+
 # --- Node.js check ---
 
 check_node() {
   NODE_OK="false"
   NODE_VERSION="not_found"
   NODE_PATH_FOUND=""
+  NODE_START_ERROR=""
 
   if command -v node >/dev/null 2>&1; then
-    NODE_VERSION=$(node --version 2>/dev/null | sed 's/^v//')
     NODE_PATH_FOUND=$(command -v node)
-    if node_meets_minimum "$NODE_VERSION"; then
-      NODE_OK="true"
+    # Guarded: under `set -e` a Node that cannot start (built for another
+    # libc, a broken download) would end the bootstrap here with nothing said.
+    if NODE_VERSION=$(node --version 2>/dev/null); then
+      NODE_VERSION="${NODE_VERSION#v}"
+      if node_meets_minimum "$NODE_VERSION"; then
+        NODE_OK="true"
+      fi
+      log "Node $NODE_VERSION at $NODE_PATH_FOUND (ok=$NODE_OK)"
+    else
+      local said
+      NODE_VERSION="cannot_start"
+      said=$(node --version 2>&1) || true
+      first_error_line "$said"
+      NODE_START_ERROR="$ERROR_LINE"
+      log "Node at $NODE_PATH_FOUND cannot start: ${NODE_START_ERROR:-it printed nothing}"
+      printf '%s\n' "$said" >> "$LOG_FILE"
     fi
-    log "Node $NODE_VERSION at $NODE_PATH_FOUND (ok=$NODE_OK)"
   else
     log "Node not found"
   fi
@@ -78,7 +141,9 @@ ensure_node() {
   if [ "$NODE_OK" = "false" ] && node_use_patched; then
     check_node
   fi
-  if [ "$NODE_OK" = "false" ]; then
+  # install-node.sh decides what to install from the version of the PATH Node.
+  # One that cannot start has none to give, so nothing is installed over it.
+  if [ "$NODE_OK" = "false" ] && [ "$NODE_VERSION" != "cannot_start" ]; then
     log "Node missing or too old — running setup/install-node.sh"
     echo "Node is missing or below the minimum (${NODE_MINIMUMS// / / }) — installing via setup/install-node.sh"
     if bash "$PROJECT_ROOT/setup/install-node.sh" 2>&1 | tee -a "$LOG_FILE"; then
@@ -87,6 +152,12 @@ ensure_node() {
     else
       log "install-node.sh failed"
     fi
+  fi
+  # Say why and what to do; the status block ends the run as node_missing.
+  if [ "$NODE_VERSION" = "cannot_start" ]; then
+    echo "Node at $NODE_PATH_FOUND cannot start:"
+    echo "  ${NODE_START_ERROR:-it printed nothing}"
+    echo "Remove it, or put a Node that works (${NODE_MINIMUMS// / / } or newer) ahead of it on PATH, then re-run setup."
   fi
 }
 
@@ -105,6 +176,9 @@ install_jq() {
 install_deps() {
   DEPS_OK="false"
   NATIVE_OK="false"
+  # Set where a try that needs no root fails: why pnpm is missing, the tool's
+  # own error line and what to do. The message at the end prints the last one.
+  local said="" pnpm_why="" pnpm_error="" pnpm_todo=""
 
   if [ "$NODE_OK" = "false" ]; then
     log "Skipping pnpm install — Node not available"
@@ -140,13 +214,25 @@ install_deps() {
     if ! command -v pnpm >/dev/null 2>&1; then
       local user_bin="$HOME/.local/bin"
       log "pnpm not on PATH after corepack enable — retrying into $user_bin"
-      if mkdir -p "$user_bin" >> "$LOG_FILE" 2>&1 \
-          && corepack enable --install-directory "$user_bin" pnpm >> "$LOG_FILE" 2>&1 \
+      if ! said=$(mkdir -p "$user_bin" 2>&1); then
+        printf '%s\n' "$said" >> "$LOG_FILE"
+        pnpm_why="$user_bin cannot be created"
+        folder_error "$user_bin" "$said"
+        pnpm_error="$ERROR_LINE"
+        pnpm_todo="$ERROR_TODO"
+        log "Could not create $user_bin: $pnpm_error"
+      # tee: the log gets corepack's output as it comes, not when corepack ends.
+      elif said=$(corepack enable --install-directory "$user_bin" pnpm 2>&1 | tee -a "$LOG_FILE") \
           && [ -x "$user_bin/pnpm" ]; then
         export PATH="$PATH:$user_bin"
         hash -r 2>/dev/null || true
         log "corepack pnpm shim installed in $user_bin"
       else
+        # This try needs no root, so what corepack said is why pnpm is missing.
+        pnpm_why="corepack could not put pnpm into $user_bin"
+        first_error_line "$said"
+        pnpm_error="$ERROR_LINE"
+        pnpm_todo="Fix that, then re-run setup. corepack's full output is in $LOG_FILE"
         log "corepack enable into $user_bin failed"
       fi
     fi
@@ -184,11 +270,28 @@ install_deps() {
       # and the service unit already have on PATH.
       log "npm install -g failed — retrying with a user-owned prefix"
       NPM_LOCAL_PREFIX="$HOME/.local"
-      if mkdir -p "$NPM_LOCAL_PREFIX" \
-          && npm install -g "pnpm@${pinned}" --prefix "$NPM_LOCAL_PREFIX" >> "$LOG_FILE" 2>&1; then
+      if ! said=$(mkdir -p "$NPM_LOCAL_PREFIX" 2>&1); then
+        printf '%s\n' "$said" >> "$LOG_FILE"
+        pnpm_why="$NPM_LOCAL_PREFIX cannot be created"
+        folder_error "$NPM_LOCAL_PREFIX" "$said"
+        pnpm_error="$ERROR_LINE"
+        pnpm_todo="$ERROR_TODO"
+        log "Could not create $NPM_LOCAL_PREFIX: $pnpm_error"
+      # tee: the log gets npm's output as it comes, not when npm ends.
+      elif said=$(npm install -g "pnpm@${pinned}" --prefix "$NPM_LOCAL_PREFIX" 2>&1 | tee -a "$LOG_FILE"); then
         export PATH="$PATH:$NPM_LOCAL_PREFIX/bin"
         log "Installed pnpm@${pinned} to user-owned prefix: $NPM_LOCAL_PREFIX"
       else
+        # This try needs no root, so what npm said is why pnpm is missing.
+        first_error_line "$said"
+        pnpm_error="$ERROR_LINE"
+        if npm --version >/dev/null 2>&1; then
+          pnpm_why="npm failed, also when installing into ~/.local"
+          pnpm_todo="Fix that, then re-run setup. npm's full output is in $LOG_FILE"
+        else
+          pnpm_why="npm at $(command -v npm) cannot run"
+          pnpm_todo="Reinstall Node.js to get a working npm, then re-run setup."
+        fi
         log "pnpm install via user-owned prefix also failed"
       fi
     fi
@@ -212,12 +315,23 @@ install_deps() {
 
   if ! command -v pnpm >/dev/null 2>&1; then
     log "pnpm not on PATH after corepack + npm fallback"
-    echo "Could not install pnpm without root. Run this, then re-run setup:"
-    if command -v corepack >/dev/null 2>&1; then
-      echo "  mkdir -p ~/.local/bin && corepack enable --install-directory ~/.local/bin pnpm"
-    else
-      echo "  npm install -g pnpm@${pinned:-<version from package.json packageManager>} --prefix ~/.local"
+    if [ -n "$pnpm_why" ]; then
+      # Root is not what is missing here, and the command suggested below
+      # would fail the same way. Show the real reason instead.
+      echo "Could not install pnpm: $pnpm_why:"
+      echo "  ${pnpm_error:-it printed nothing}"
+      echo "$pnpm_todo"
+      return
     fi
+    if ! command -v corepack >/dev/null 2>&1 && ! command -v npm >/dev/null 2>&1; then
+      echo "Could not install pnpm: there is no corepack and no npm on PATH to install it with."
+      echo "Reinstall Node.js, which brings npm, then re-run setup."
+      return
+    fi
+    # Left: npm's global install reported success, yet pnpm is nowhere this
+    # script looks. The try into ~/.local was not made, so suggest it.
+    echo "Could not install pnpm without root. Run this, then re-run setup:"
+    echo "  npm install -g pnpm@${pinned:-<version from package.json packageManager>} --prefix ~/.local"
     return
   fi
 
