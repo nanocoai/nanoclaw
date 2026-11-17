@@ -181,6 +181,15 @@ describe('refreshStaleGroupImage', () => {
     expect(fs.readdirSync(callsDir)).toHaveLength(0);
   });
 
+  it('leaves a group pinned to its own image alone once all its packages are removed', async () => {
+    // Its own agent image id: if this ever regresses, the failed-build memo must not skip later tests.
+    setAgentImage('sha256:no-packages');
+    await updateContainerConfigJson('ag-1', 'packages_apt', []);
+    await refreshStaleGroupImage('ag-1', GROUP_TAG);
+    expect(fs.readdirSync(callsDir)).toHaveLength(0);
+    expect(log.warn).not.toHaveBeenCalled();
+  });
+
   it('skips a group re-pinned to another image after the check was queued', async () => {
     await updateContainerConfigScalars('ag-1', { image_tag: 'registry.example/custom:1' });
     await refreshStaleGroupImage('ag-1', GROUP_TAG);

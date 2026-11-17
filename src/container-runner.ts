@@ -1660,7 +1660,16 @@ async function refreshGroupImageNow(agentGroupId: string, derivedTag: string): P
     await runGroupImageJob(agentGroupId, async () => {
       queuedGroupImageRefreshes.delete(agentGroupId);
       // Re-read: a queued job can run after the operator re-pinned the group.
-      if ((await getContainerConfig(agentGroupId))?.image_tag !== derivedTag) return;
+      const row = await getContainerConfig(agentGroupId);
+      if (row?.image_tag !== derivedTag) return;
+      // All packages removed but the pin kept: the build would refuse on every
+      // agent image change, so the group keeps its image as before this check.
+      if (
+        (JSON.parse(row.packages_apt) as string[]).length === 0 &&
+        (JSON.parse(row.packages_npm) as string[]).length === 0
+      ) {
+        return;
+      }
       const baseId = await inspectImage(CONTAINER_IMAGE, '{{.Id}}');
       if (!baseId) return;
       const builtOn = await inspectImage(derivedTag, `{{index .Config.Labels "${DERIVED_FROM_LABEL}"}}`);
