@@ -67,7 +67,25 @@ const CHAT_KINDS = new Set(['chat', 'chat-sdk']);
 
 /** Head-truncate to the cap, appending '…' when cut (contract: ≤500 chars). */
 export function truncateEchoText(text: string): string {
-  return text.length <= ECHO_TEXT_MAX_CHARS ? text : `${text.slice(0, ECHO_TEXT_MAX_CHARS)}…`;
+  return capEchoText(text).text;
+}
+
+/**
+ * truncateEchoText plus whether it cut. Writers always record the flag in the
+ * echo payload (`echo.truncated`, true or false) so readers such as `ncl
+ * sessions history` never guess from length or a trailing '…'; only copies
+ * written before the flag existed lack it.
+ */
+export function capEchoText(
+  text: string,
+  max: number = ECHO_TEXT_MAX_CHARS,
+  ellipsis = true,
+): { text: string; truncated: boolean } {
+  if (text.length <= max) return { text, truncated: false };
+  // Never end on the first half of a surrogate pair (an emoji straddling the cap).
+  const last = text.charCodeAt(max - 1);
+  const head = text.slice(0, last >= 0xd800 && last <= 0xdbff ? max - 1 : max);
+  return { text: ellipsis ? `${head}…` : head, truncated: true };
 }
 
 /** Echo-row id: namespaced by target session so the same source message can
@@ -253,12 +271,14 @@ async function fanEcho(input: EchoFanInput): Promise<number> {
   const targets = selectEchoTargets(candidates, input.sourceSessionId, input.sourceMessagingGroupId);
   if (targets.length === 0) return 0;
 
+  const capped = capEchoText(input.text);
   const content = JSON.stringify({
-    text: truncateEchoText(input.text),
+    text: capped.text,
     sender: input.sender,
     senderId: input.senderId,
     ...(input.self ? { self: true } : {}),
-    echo: { surface: input.surface, label: input.label },
+    // `delivered`: only the delivery hook (fanOutbound, after markDelivered) sets `self`.
+    echo: { surface: input.surface, label: input.label, truncated: capped.truncated, delivered: input.self === true },
   });
 
   const results = await mapConcurrent(targets, ECHO_CONCURRENCY, (target) => writeEcho(input, target.id, content));

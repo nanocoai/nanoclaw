@@ -26,13 +26,14 @@ import { log } from '../../log.js';
 import { withExistingMailboxSession, withMailboxSession } from '../../session-manager.js';
 import type { AgentGroup, MessagingGroup, Session } from '../../types.js';
 import {
+  BACKFILL_LAST_MAX_CHARS,
   ECHO_CHANNEL_TIMELINE_SURFACE,
   ECHO_CHANNEL_TYPE,
   ECHO_CONCURRENCY,
   ECHO_MAX_AGE_MS,
   ECHO_TIMELINE_SURFACE,
 } from './config.js';
-import { loadHotCandidates, selectEchoTargets, selectHotSessions, truncateEchoText } from './fan.js';
+import { capEchoText, loadHotCandidates, selectEchoTargets, selectHotSessions } from './fan.js';
 import { mapConcurrent } from './parallel.js';
 
 export const BACKFILL_LIMIT = 12;
@@ -44,6 +45,8 @@ interface BackfillRow {
   text: string;
   /** Row authored by the agent itself — rendered as "you" in the prelude. */
   self: boolean;
+  /** The sibling session the row was read from; recorded so readers can find the full text. */
+  sourceSessionId: string;
 }
 
 function parseContent(raw: string): { text?: string; sender?: string; senderId?: string; echo?: unknown } {
@@ -90,6 +93,7 @@ async function collectSiblingTopLevel(
         senderId: c.senderId ?? '',
         text: c.text,
         self: false,
+        sourceSessionId: sessionId,
       });
     }
   }
@@ -103,6 +107,7 @@ async function collectSiblingTopLevel(
       senderId: agentGroup.id,
       text: c.text,
       self: true,
+      sourceSessionId: sessionId,
     });
   }
   return rows;
@@ -190,6 +195,7 @@ export async function backfillSession(
         // The most recent entry is what a short opener ("sure") is usually
         // answering — deliver it whole; earlier entries get the normal cap.
         const isLast = i === newest.length - 1;
+        const capped = isLast ? capEchoText(row.text, BACKFILL_LAST_MAX_CHARS, false) : capEchoText(row.text);
         await mailbox.insertMessage({
           id: `${session.id}:backfill:${batch}:${i}`,
           kind: 'chat',
@@ -198,16 +204,17 @@ export async function backfillSession(
           channelType: ECHO_CHANNEL_TYPE,
           threadId: null,
           content: JSON.stringify({
-            text: isLast ? row.text.slice(0, 4000) : truncateEchoText(row.text),
+            text: capped.text,
             sender: row.sender,
             senderId: row.senderId,
             ...(row.self ? { self: true } : {}),
-            echo: { surface, label },
+            // Read from sibling outboxes, which hold undelivered and failed sends too.
+            echo: { surface, label, truncated: capped.truncated, delivered: false },
           }),
           processAfter: null,
           recurrence: null,
           trigger: false,
-          sourceSessionId: null,
+          sourceSessionId: row.sourceSessionId,
           onWake: false,
         });
       }

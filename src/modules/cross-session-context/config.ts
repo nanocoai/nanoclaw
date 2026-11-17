@@ -24,6 +24,8 @@ export const ECHO_TASK_SURFACE = 'task-delivery';
 
 /** Per-message text cap on echo rows: head-truncated, '…' appended when cut. */
 export const ECHO_TEXT_MAX_CHARS = 500;
+/** The newest backfilled entry is kept (nearly) whole: up to this many chars, cut without '…'. */
+export const BACKFILL_LAST_MAX_CHARS = 4000;
 
 /** Pending echo rows the sweep pruner keeps per session (newest first).
  *  One cap for all sessions: under the same-conversation audience rule,

@@ -84,6 +84,14 @@ export interface MailboxHistoryMessage {
   content: string;
 }
 
+/** An inbound history row: also says where the row came from. */
+export interface MailboxInboundHistoryMessage extends MailboxHistoryMessage {
+  /** The row's channel ('session-echo' marks a cross-session copy). */
+  channelType: string | null;
+  /** The session that sent or originated the row (live echoes, a2a); null otherwise. */
+  sourceSessionId: string | null;
+}
+
 export interface MailboxTimelineMessage {
   timestamp: string;
   content: string;
@@ -133,7 +141,7 @@ export interface InboundMailbox {
   armNextTask(originalId: string, task: Task): Promise<void>;
   countLiveTasks(): number;
   prunePendingMessages(channelType: string, before: string, keep: number): number;
-  getInboundHistory(limit: number): MailboxHistoryMessage[];
+  getInboundHistory(limit: number): MailboxInboundHistoryMessage[];
   getConversationRoot(): MailboxTimelineMessage | undefined;
   findTaskBySeriesSlug(slug: string): TaskRecord | undefined;
 }
