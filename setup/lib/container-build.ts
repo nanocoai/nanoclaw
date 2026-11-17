@@ -18,6 +18,8 @@ import { spawnSync } from 'child_process';
 import path from 'path';
 
 import { HARDENED_IMAGE_ENV_KEY, readImageSource } from './registry-state.js';
+import type { SpinnerLabels } from './runner.js';
+import { runWindowedChild } from './windowed-runner.js';
 
 /**
  * Discriminated so a caller that has checked `ok` gets a `message` typed
@@ -33,24 +35,58 @@ export type ContainerBuildResult =
       hint?: string;
     };
 
+/** How the build child ended, in the shape both runners can report. */
+type BuildExit = { error?: Error; signal?: NodeJS.Signals | null; status: number | null };
+
 /**
  * Rebuild the agent container image, refusing when the image is pinned.
  *
  * Synchronous with inherited stdio — docker's own output is the progress
- * indicator. Callers must inspect the result.
+ * indicator. For the standalone `provider-auth` step; the wizard uses
+ * `buildContainerImageWindowed`. Callers must inspect the result.
  */
 export function buildContainerImage(projectRoot: string = process.cwd()): ContainerBuildResult {
-  if (readImageSource() === 'hardened') {
-    return {
-      ok: false,
-      message: `This install runs a pinned agent image (${HARDENED_IMAGE_ENV_KEY}=true in .env), and a local build would overwrite it under the same tag.`,
-      hint: `Run \`./container/build.sh pull\` to refresh the pinned image, or remove ${HARDENED_IMAGE_ENV_KEY} from .env to go back to locally built ones.`,
-    };
-  }
+  const refusal = pinnedImageRefusal();
+  if (refusal) return refusal;
 
-  const script = path.join(projectRoot, 'container', 'build.sh');
-  const res = spawnSync(script, [], { cwd: projectRoot, stdio: 'inherit' });
+  const script = buildScript(projectRoot);
+  return buildOutcome(script, spawnSync(script, [], { cwd: projectRoot, stdio: 'inherit' }));
+}
 
+/**
+ * The same rebuild for the setup wizard: docker's output goes to the rolling
+ * progress window and `logs/setup-steps/`, like the first image build, instead
+ * of flooding the terminal. `rawLog` is set whenever the build ran.
+ */
+export async function buildContainerImageWindowed(
+  labels: SpinnerLabels,
+  projectRoot: string = process.cwd(),
+): Promise<ContainerBuildResult & { rawLog?: string }> {
+  const refusal = pinnedImageRefusal();
+  if (refusal) return refusal;
+
+  const script = buildScript(projectRoot);
+  const res = await runWindowedChild('container-rebuild', script, [], labels, { cwd: projectRoot });
+  return {
+    ...buildOutcome(script, { error: res.error, signal: res.signal, status: res.exitCode }),
+    rawLog: res.rawLog,
+  };
+}
+
+function pinnedImageRefusal(): ContainerBuildResult | null {
+  if (readImageSource() !== 'hardened') return null;
+  return {
+    ok: false,
+    message: `This install runs a pinned agent image (${HARDENED_IMAGE_ENV_KEY}=true in .env), and a local build would overwrite it under the same tag.`,
+    hint: `Run \`./container/build.sh pull\` to refresh the pinned image, or remove ${HARDENED_IMAGE_ENV_KEY} from .env to go back to locally built ones.`,
+  };
+}
+
+function buildScript(projectRoot: string): string {
+  return path.join(projectRoot, 'container', 'build.sh');
+}
+
+function buildOutcome(script: string, res: BuildExit): ContainerBuildResult {
   if (res.error) {
     return {
       ok: false,

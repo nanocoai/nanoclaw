@@ -8,6 +8,7 @@ const fixture = vi.hoisted(() => ({
   brightSelect: vi.fn(),
   applyProviderSkill: vi.fn(),
   loadHostContractModules: vi.fn(),
+  buildContainerImageWindowed: vi.fn(),
   order: [] as string[],
   opencodeInstalled: true,
 }));
@@ -32,10 +33,7 @@ vi.mock('./providers/install.js', () => ({
   loadHostContractModules: fixture.loadHostContractModules,
 }));
 vi.mock('./lib/container-build.js', () => ({
-  buildContainerImage: () => {
-    fixture.order.push('build');
-    return { ok: true };
-  },
+  buildContainerImageWindowed: fixture.buildContainerImageWindowed,
 }));
 vi.mock('./lib/bright-select.js', () => ({ brightSelect: fixture.brightSelect }));
 vi.mock('./lib/registry-state.js', async (original) => ({
@@ -83,6 +81,10 @@ beforeEach(() => {
   fixture.applyProviderSkill.mockRejectedValue(new Error('installation boundary'));
   fixture.loadHostContractModules.mockImplementation(async () => {
     fixture.order.push('load-contracts');
+  });
+  fixture.buildContainerImageWindowed.mockImplementation(async () => {
+    fixture.order.push('build');
+    return { ok: true, rawLog: 'logs/setup-steps/07-container-rebuild.log' };
   });
   fixture.order = [];
 });
@@ -208,5 +210,31 @@ describe('setup wizard interactive provider choice', () => {
     expect(fixture.runAuth).not.toHaveBeenCalled();
     expect(fixture.upsertEnvVar).not.toHaveBeenCalled();
     expect(process.exit).toHaveBeenCalledWith(1);
+  });
+
+  it('rebuilds in the progress window and stops on a failed rebuild with its message, hint and log', async () => {
+    fixture.opencodeInstalled = false;
+    fixture.applyProviderSkill.mockResolvedValue({ blockers: [], changed: true, hostContractModules: [] });
+    fixture.buildContainerImageWindowed.mockResolvedValue({
+      ok: false,
+      message: 'The container image build failed (exit 1).',
+      hint: 'The build output above has the reason.',
+      rawLog: 'logs/setup-steps/07-container-rebuild.log',
+    });
+
+    await runWizardUntilExit();
+
+    expect(fixture.buildContainerImageWindowed).toHaveBeenCalledWith(
+      expect.objectContaining({ running: expect.stringContaining('opencode') }),
+    );
+    expect(fixture.fail).toHaveBeenCalledWith(
+      'add-opencode',
+      "Couldn't rebuild the container image for opencode. The container image build failed (exit 1).",
+      'The build output above has the reason.',
+      'logs/setup-steps/07-container-rebuild.log',
+    );
+    expect(fixture.loadHostContractModules).not.toHaveBeenCalled();
+    expect(fixture.runAuth).not.toHaveBeenCalled();
+    expect(fixture.upsertEnvVar).not.toHaveBeenCalled();
   });
 });

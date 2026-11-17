@@ -20,8 +20,8 @@ import k from 'kleur';
 
 import { offerClaudeOnFailure } from './claude-handoff.js';
 import { emit as phEmit } from './diagnostics.js';
-import type { StepResult, SpinnerLabels } from './runner.js';
-import { dumpTranscriptOnFailure, spawnStep, writeStepEntry } from './runner.js';
+import type { QuietChildResult, StepResult, SpinnerLabels } from './runner.js';
+import { dumpTranscriptOnFailure, spawnQuiet, spawnStep, writeStepEntry } from './runner.js';
 import * as setupLog from '../logs.js';
 import { brandBody, fitToWidth, fmtDuration } from './theme.js';
 
@@ -45,7 +45,9 @@ export async function runWindowedStep(
   const start = Date.now();
   phEmit('step_started', { step: stepName });
 
-  const result = await runUnderWindow(stepName, labels, extra, rawLog);
+  const result = await runUnderWindow(stepName, labels, rawLog, (onLine) =>
+    spawnStep(stepName, extra, () => {}, rawLog, onLine),
+  );
 
   const durationMs = Date.now() - start;
   writeStepEntry(stepName, result, durationMs, rawLog);
@@ -57,7 +59,37 @@ export async function runWindowedStep(
   return { ...result, rawLog, durationMs };
 }
 
-function outcomeStatus(result: StepResult): 'success' | 'skipped' | 'failed' {
+/**
+ * Run an arbitrary command in the same window: the windowed twin of
+ * `runQuietChild`, for long commands that are not setup steps (e.g. the
+ * provider rebuild's `container/build.sh`).
+ */
+export async function runWindowedChild(
+  logName: string,
+  cmd: string,
+  args: string[],
+  labels: SpinnerLabels,
+  opts?: { cwd?: string },
+): Promise<QuietChildResult & { rawLog: string; durationMs: number }> {
+  const rawLog = setupLog.stepRawLog(logName);
+  const start = Date.now();
+  phEmit('step_started', { step: logName });
+
+  const result = await runUnderWindow(logName, labels, rawLog, (onLine) =>
+    spawnQuiet(cmd, args, rawLog, undefined, { cwd: opts?.cwd, onLine }),
+  );
+
+  const durationMs = Date.now() - start;
+  writeStepEntry(logName, result, durationMs, rawLog);
+  phEmit('step_completed', {
+    step: logName,
+    status: outcomeStatus(result),
+    duration_ms: durationMs,
+  });
+  return { ...result, rawLog, durationMs };
+}
+
+function outcomeStatus(result: { ok: boolean; terminal: StepResult['terminal'] }): 'success' | 'skipped' | 'failed' {
   const rawStatus = result.terminal?.fields.STATUS;
   if (!result.ok) return 'failed';
   return rawStatus === 'skipped' ? 'skipped' : 'success';
@@ -68,12 +100,12 @@ function outcomeStatus(result: StepResult): 'success' | 'skipped' | 'failed' {
  * the logging bookkeeping (writeStepEntry, phEmit) lives with the
  * public-facing wrapper and this function stays focused on terminal IO.
  */
-async function runUnderWindow(
+async function runUnderWindow<T extends { ok: boolean; transcript: string; terminal: StepResult['terminal'] }>(
   stepName: string,
   labels: SpinnerLabels,
-  extra: string[],
   rawLog: string,
-): Promise<StepResult> {
+  spawnChild: (onLine: (line: string) => void) => Promise<T>,
+): Promise<T> {
   const out = process.stdout;
   const start = Date.now();
   const actions: string[] = [];
@@ -155,7 +187,7 @@ async function runUnderWindow(
     redraw();
   };
 
-  const result = await spawnStep(stepName, extra, () => {}, rawLog, onLine);
+  const result = await spawnChild(onLine);
 
   clearInterval(frameTick);
   clearInterval(stallCheck);

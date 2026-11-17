@@ -40,6 +40,10 @@ export type QuietChildResult = {
   transcript: string;
   terminal: Block | null;
   blocks: Block[];
+  /** Set when the child was killed by a signal. */
+  signal?: NodeJS.Signals;
+  /** Set when the child could not be started at all. */
+  error?: Error;
 };
 
 export type SpinnerLabels = {
@@ -125,22 +129,7 @@ export function spawnStep(
     const raw = fs.createWriteStream(rawLogPath, { flags: 'w' });
     raw.write(`# ${stepName} — ${new Date().toISOString()}\n\n`);
 
-    // Per-line forwarder for the optional onLine callback. We keep our own
-    // buffer (separate from StatusStream's) so the parser still gets raw
-    // chunks and isn't forced through a line-by-line path it doesn't need.
-    let lineBuf = '';
-    const pushLines = (chunk: string): void => {
-      if (!onLine) return;
-      lineBuf += chunk;
-      let idx: number;
-      while ((idx = lineBuf.indexOf('\n')) !== -1) {
-        const line = lineBuf.slice(0, idx).replace(/\r/g, '');
-        lineBuf = lineBuf.slice(idx + 1);
-        if (line.startsWith('=== NANOCLAW SETUP:')) continue;
-        if (line.startsWith('=== END ===')) continue;
-        if (line.trim()) onLine(line);
-      }
-    };
+    const pushLines = lineFeed(onLine);
 
     child.stdout.on('data', (chunk: Buffer) => {
       const s = chunk.toString('utf-8');
@@ -171,36 +160,77 @@ export function spawnStep(
   });
 }
 
+/**
+ * Per-line forwarder for an optional onLine callback: CR stripped, blank and
+ * status-block control lines dropped. It keeps its own buffer, apart from
+ * StatusStream's, so the parser still gets raw chunks.
+ */
+function lineFeed(onLine?: (line: string) => void): (chunk: string) => void {
+  let lineBuf = '';
+  return (chunk) => {
+    if (!onLine) return;
+    lineBuf += chunk;
+    let idx: number;
+    while ((idx = lineBuf.indexOf('\n')) !== -1) {
+      const line = lineBuf.slice(0, idx).replace(/\r/g, '');
+      lineBuf = lineBuf.slice(idx + 1);
+      if (line.startsWith('=== NANOCLAW SETUP:')) continue;
+      if (line.startsWith('=== END ===')) continue;
+      if (line.trim()) onLine(line);
+    }
+  };
+}
+
 export function spawnQuiet(
   cmd: string,
   args: string[],
   rawLogPath: string,
   envOverride?: NodeJS.ProcessEnv,
+  opts?: { cwd?: string; onLine?: (line: string) => void },
 ): Promise<QuietChildResult> {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, {
+      cwd: opts?.cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: envOverride ? { ...process.env, ...envOverride } : process.env,
     });
     let transcript = '';
+    let spawnError: Error | undefined;
     const raw = fs.createWriteStream(rawLogPath, { flags: 'w' });
     raw.write(`# ${[cmd, ...args].join(' ')} — ${new Date().toISOString()}\n\n`);
     const blocks: Block[] = [];
     const stream = new StatusStream((b) => blocks.push(b));
+    const pushLines = lineFeed(opts?.onLine);
     child.stdout.on('data', (c: Buffer) => {
       const s = c.toString('utf-8');
       transcript += s;
       stream.write(s);
       raw.write(c);
+      pushLines(s);
     });
     child.stderr.on('data', (c: Buffer) => {
-      transcript += c.toString('utf-8');
+      const s = c.toString('utf-8');
+      transcript += s;
       raw.write(c);
+      pushLines(s);
     });
-    child.on('close', (code) => {
+    // A command that cannot start emits 'error' and then 'close'. Without a
+    // listener the 'error' would crash setup instead of failing the step.
+    child.on('error', (err) => {
+      spawnError = err;
+    });
+    child.on('close', (code, signal) => {
       raw.end();
       const terminal = [...blocks].reverse().find((b) => b.fields.STATUS) ?? null;
-      resolve({ ok: code === 0, exitCode: code ?? 1, transcript, terminal, blocks });
+      resolve({
+        ok: code === 0 && !spawnError,
+        exitCode: code ?? 1,
+        transcript,
+        terminal,
+        blocks,
+        ...(signal ? { signal } : {}),
+        ...(spawnError ? { error: spawnError } : {}),
+      });
     });
   });
 }
