@@ -117,6 +117,8 @@ export interface OutboundMessage {
   kind: string;
   content: unknown; // parsed JSON from messages_out
   files?: OutboundFile[]; // file attachments from the session outbox
+  /** Unique host-wide (session and outbound row id), the same on every retry of this message. */
+  deliveryId?: string;
 }
 
 /** Discovered conversation info (from syncConversations). */
