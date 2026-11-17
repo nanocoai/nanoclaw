@@ -60,9 +60,11 @@ sudo_preflight_interactive() {
 # On a never-synced Arch, pacman can install jq only after a full system
 # upgrade. Asks first and exports NANOCLAW_PACMAN_UPGRADE=1 on a yes; No is
 # the default, and with no one at a terminal nothing is asked or upgraded.
+# Nor is a user without sudo: ensure_jq couldn't run the upgrade after a yes.
 pacman_upgrade_preflight() {
   export NANOCLAW_PACMAN_UPGRADE=0
   jq_needs_pacman_upgrade || return 0
+  [ "$(id -u 2>/dev/null)" = "0" ] || command -v sudo >/dev/null 2>&1 || return 0
   sudo_preflight_interactive || return 0
   printf '  %s\n' "$(dim "jq isn't installed, and this Arch system has never synced its package lists.")"
   printf '  %s\n' "$(dim 'To install jq, setup must first run a full system upgrade (pacman -Syu), which updates every package on this machine.')"

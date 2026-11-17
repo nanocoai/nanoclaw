@@ -290,8 +290,11 @@ describe('full system upgrade question (nanoclaw.sh)', { timeout: 20_000 }, () =
     expect(r.logged).toEqual(['pacman_upgrade=no']);
   });
 
-  it('asks root too, who needs no sudo for the upgrade', () => {
-    const r = run({ ...arch, uid: 0, interactive: true, input: 'y\n' });
+  it.each<[string, Machine['sudo']]>([
+    ['with sudo', needsPassword],
+    ['without sudo', undefined],
+  ])('asks root too (%s), who needs no sudo for the upgrade', (_name, sudo) => {
+    const r = run({ ...arch, uid: 0, sudo, interactive: true, input: 'y\n' });
     expect(r.upgrade).toBe('1');
     expect(r.out).toContain(warning);
     expect(r.sudo).toEqual([]);
@@ -308,6 +311,7 @@ describe('full system upgrade question (nanoclaw.sh)', { timeout: 20_000 }, () =
     ['a pacman that has synced (or has no pacman-conf to say)', { pkg: 'pacman' }],
     ['jq already there', { jq: true, pkg: 'pacman', pacmanNeverSynced: true }],
     ['apt-get', { pkg: 'apt-get' }],
+    ['a user without sudo, where a yes could not run it', { pkg: 'pacman', pacmanNeverSynced: true, sudo: undefined }],
   ])('does not ask with %s', (_name, m) => {
     const r = run({ node: 'v22.23.4', sudo: needsPassword, interactive: true, input: 'y\n', ...m });
     expect(r.upgrade).toBe('0');
