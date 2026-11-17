@@ -152,8 +152,8 @@ Per-agent-group container runtime config (provider, model, packages, MCP servers
 | Value | Behavior |
 |-------|----------|
 | `disabled` | Agent never learns about ncl (instructions excluded from CLAUDE.md). Host dispatch rejects any `cli_request`. |
-| `group` (default) | Agent can access `groups`, `sessions`, `destinations`, `members`, `tasks`, `templates` only, scoped to its own agent group. `--id` and group args are auto-filled. Cross-group access rejected. `cli_scope` changes blocked. |
-| `global` | Every resource, across groups, except host-only commands (`groups config add-mount`/`remove-mount`), which no container can run. `tasks`, `groups connect` and `sessions history` still act only on the caller's own group. Set automatically for owner agent groups via `init-first-agent`. |
+| `group` (default) | Agent can access `groups`, `sessions`, `destinations`, `members`, `tasks`, `templates` only, scoped to its own agent group, plus `wirings get`/`update` on the wiring for its session's chat (an `agent-shared` session keeps at most one chat, which may not be the one it is answering); `update` can change only `engage_mode` and `engage_pattern`. `--id` and group args are auto-filled. Cross-group access rejected. `cli_scope` changes blocked. |
+| `global` | Every resource, across groups, except host-only commands (`status`, `groups config add-mount`/`remove-mount`), which no container can run. `tasks`, `groups connect` and `sessions history` still act only on the caller's own group. Commands that need approval still wait for an admin, as at `group` scope. Set automatically for owner agent groups via `init-first-agent`. |
 
 Key files: `src/db/container-configs.ts`, `src/container-config.ts`, `src/cli/guard.ts` (scope decision; group-scope list in `src/cli/registry.ts`), `src/cli/dispatch.ts` (arg auto-fill, row filtering), `src/project-doc-compose.ts` (instructions exclusion).
 
