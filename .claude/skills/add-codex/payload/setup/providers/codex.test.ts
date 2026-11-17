@@ -291,6 +291,11 @@ describe('runCodexLoginAuth without a host Codex CLI', () => {
     ['no codex entry', [{ name: 'agent-browser', version: '0.27.1' }]],
     ['a range', [{ name: '@openai/codex', version: '^0.169.0' }]],
     ['latest', [{ name: '@openai/codex', version: 'latest' }]],
+    // Loose-semver shapes that npm parses as dist-tags.
+    ['an empty prerelease part', [{ name: '@openai/codex', version: '0.169.0-..' }]],
+    ['a double dot', [{ name: '@openai/codex', version: '0.169.0-a..b' }]],
+    ['a number past 2^53', [{ name: '@openai/codex', version: '9007199254740992.0.0' }]],
+    ['an oversized prerelease', [{ name: '@openai/codex', version: `0.169.0-${'a'.repeat(300)}` }]],
     ['not a list', { name: '@openai/codex', version: '0.169.0' }],
   ])('refuses to fetch anything with %s', async (_label, tools) => {
     if (tools !== undefined) writeManifest(tools);

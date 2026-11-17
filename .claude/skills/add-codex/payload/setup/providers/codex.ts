@@ -13,7 +13,6 @@ import path from 'path';
 import * as p from '@clack/prompts';
 import k from 'kleur';
 
-import { EXACT_SEMVER } from '../../scripts/skill-directives.js';
 import { brightSelect } from '../lib/bright-select.js';
 import { type AssistContext, BIG_PICTURE_FILES, STEP_FILES } from '../lib/claude-assist.js';
 import { brandBody, note } from '../lib/theme.js';
@@ -134,6 +133,12 @@ export async function runCodexApiKeyAuth(store: ProviderCredentialStore): Promis
   p.log.success(brandBody('OpenAI account connected.'));
 }
 
+// semver.org's strict grammar, with bounded numbers and no build metadata.
+// npm reads anything it can't parse as a version (`0.169.0-..`, numbers past
+// 2^53, specs over 256 chars) as a dist-tag, which can point anywhere.
+const EXACT_VERSION =
+  /^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})(?:-(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*)?$/;
+
 /** The exact `@openai/codex` version in the CLI manifest, or undefined when absent or not an exact pin. */
 export function readPinnedCodexVersion(root: string): string | undefined {
   try {
@@ -142,7 +147,7 @@ export function readPinnedCodexVersion(root: string): string | undefined {
     const version = (tools as Array<{ name?: unknown; version?: unknown } | null>).find(
       (t) => t?.name === '@openai/codex',
     )?.version;
-    return typeof version === 'string' && EXACT_SEMVER.test(version) ? version : undefined;
+    return typeof version === 'string' && version.length <= 64 && EXACT_VERSION.test(version) ? version : undefined;
   } catch {
     return undefined;
   }
