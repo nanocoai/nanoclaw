@@ -156,9 +156,11 @@ async function runUnderWindow<T extends { ok: boolean; transcript: string; termi
   };
   process.once('exit', restoreCursorOnExit);
   // A signal kills Node without an 'exit' event: show the cursor, then
-  // re-raise so the process still dies the default way.
+  // re-raise so the process still dies the default way. Node's own handler
+  // would also leave raw mode (the stall prompt's); the re-raise skips it.
   const restoreCursorOnSignal = (signal: NodeJS.Signals): void => {
     out.write(SHOW_CURSOR);
+    if (process.stdin.isTTY && process.stdin.isRaw) process.stdin.setRawMode(false);
     process.kill(process.pid, signal);
   };
   process.once('SIGINT', restoreCursorOnSignal);

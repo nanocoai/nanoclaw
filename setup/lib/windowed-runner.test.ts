@@ -119,6 +119,25 @@ describe('runWindowedChild', () => {
     expect([process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')]).toEqual([int, term]);
   });
 
+  it('on a signal, shows the cursor and leaves raw mode before re-raising it', async () => {
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+    const stdin = process.stdin as unknown as Record<string, unknown>;
+    const saved = { isTTY: stdin.isTTY, isRaw: stdin.isRaw, setRawMode: stdin.setRawMode };
+    const setRawMode = vi.fn();
+    Object.assign(stdin, { isTTY: true, isRaw: true, setRawMode });
+    try {
+      const run = runWindowedChild('container-rebuild', process.execPath, ['-e', 'setTimeout(() => {}, 200)'], LABELS);
+      terminal = '';
+      process.emit('SIGTERM', 'SIGTERM');
+      expect(terminal).toBe('\x1b[?25h');
+      expect(setRawMode).toHaveBeenCalledWith(false);
+      expect(kill).toHaveBeenCalledWith(process.pid, 'SIGTERM');
+      await run;
+    } finally {
+      Object.assign(stdin, saved);
+    }
+  });
+
   // The stall prompt reads stdin. Left open after the step ends, it would
   // take the next step's keypresses, and "Keep waiting" would redraw a window
   // over that step's prompt.
