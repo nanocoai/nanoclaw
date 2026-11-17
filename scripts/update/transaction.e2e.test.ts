@@ -919,7 +919,7 @@ describe('update-nanoclaw transaction end to end', () => {
     expect(reloaded.snapshot).toBeUndefined();
   });
 
-  it('names each skill that failed to refresh and its error, capped in length (#4429)', async () => {
+  it('names each skill that failed to refresh and its error, keeping both ends of a long one (#4429)', async () => {
     const fixture = createForkFixture();
     previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
     process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
@@ -927,7 +927,7 @@ describe('update-nanoclaw transaction end to end', () => {
     write(
       fixture.install,
       'src/channels/index.ts',
-      `import './cli.js';\nimport './baz.js';\nimport './foo.js';\nimport './${long}.js';\n`,
+      `import './cli.js';\nimport './baz.js';\nimport './foo.js';\nimport './qux.js';\nimport './${long}.js';\n`,
     );
     write(
       fixture.install,
@@ -935,6 +935,12 @@ describe('update-nanoclaw transaction end to end', () => {
       "---\nname: add-baz\n---\n\n```nc:run effect:refresh\nprintf 'first\\n- bar: not a skill\\n' >&2; exit 3\n```\n",
     );
     write(fixture.install, '.claude/skills/add-foo/SKILL.md', '---\nname: add-foo\n---\n');
+    // A command longer than the excerpt, with a short reason on stderr.
+    write(
+      fixture.install,
+      '.claude/skills/add-qux/SKILL.md',
+      `---\nname: add-qux\n---\n\n\`\`\`nc:run effect:refresh\n: ${'y'.repeat(600)}; printf 'fatal: missing %s\\n' compiler >&2; exit 1\n\`\`\`\n`,
+    );
     commit(fixture.install, 'local channels the refresh cannot handle');
     const { runtime } = fakeRuntime(fixture.install);
 
@@ -945,12 +951,16 @@ describe('update-nanoclaw transaction end to end', () => {
     );
 
     const lines = failure.split('\n');
-    expect(lines).toHaveLength(4);
+    expect(lines).toHaveLength(5);
     expect(lines[0]).toBe('Installed skills failed to refresh:');
     // Multi-line command output stays on its skill's line.
     expect(lines[1]).toMatch(/^- baz: .*first - bar: not a skill/);
     expect(lines[2]).toBe('- foo: Skill has no structured apply directives and cannot be refreshed headlessly');
-    expect(lines[3]).toBe(`- ${long}: ${`Missing .claude/skills/add-${long}/SKILL.md`.slice(0, 500)}…`);
+    // The start names the command; the end keeps its stderr reason.
+    expect(lines[3]).toMatch(/^- qux: .*Command failed: : y+…y+; printf .*fatal: missing compiler/);
+    expect(lines[3]).toHaveLength('- qux: '.length + 501);
+    const missing = `Missing .claude/skills/add-${long}/SKILL.md`;
+    expect(lines[4]).toBe(`- ${long}: ${missing.slice(0, 200)}…${missing.slice(-300)}`);
     const reloaded = loadState(fixture.install, state.id);
     expect(reloaded.lastError).toBe(failure);
     expect(reloaded.phase).toBe('prepared');

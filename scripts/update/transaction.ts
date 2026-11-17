@@ -427,18 +427,24 @@ function hasChanged(state: UpdateState, prefix: string): boolean {
   return state.changedFiles.some((file) => file === prefix || file.startsWith(`${prefix}/`));
 }
 
-const SKILL_ERROR_LIMIT = 500;
+const SKILL_ERROR_HEAD = 200;
+const SKILL_ERROR_TAIL = 300;
 
-// One flattened, capped line per failed skill: a failed run can carry a whole
-// build log, and its own newlines must not read as another skill's line.
+// Long text keeps its start (which step failed) and its end: a failed command
+// reads "Command failed: <command>" and then its stderr, so the reason is last.
+function excerpt(text: string): string {
+  const chars = Array.from(text);
+  if (chars.length <= SKILL_ERROR_HEAD + SKILL_ERROR_TAIL) return text;
+  return `${chars.slice(0, SKILL_ERROR_HEAD).join('')}…${chars.slice(-SKILL_ERROR_TAIL).join('')}`;
+}
+
+// One flattened line per failed skill: a failed run can carry a whole build
+// log, and its own newlines must not read as another skill's line.
 // The full text stays in state.skillRefresh, which `status` prints.
 function skillRefreshFailure(report: SkillsRefreshReport, heading = 'Installed skills failed to refresh:'): string {
   const lines = report.skills
     .filter((skill) => skill.status === 'failed')
-    .map((skill) => {
-      const text = skill.errors.join('; ').replace(/\s*\n\s*/g, ' ');
-      return `- ${skill.name}: ${text.length > SKILL_ERROR_LIMIT ? `${text.slice(0, SKILL_ERROR_LIMIT)}…` : text}`;
-    });
+    .map((skill) => `- ${skill.name}: ${excerpt(skill.errors.join('; ').replace(/\s*\n\s*/g, ' '))}`);
   return [heading, ...lines].join('\n');
 }
 
