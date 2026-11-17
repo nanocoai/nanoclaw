@@ -203,7 +203,9 @@ export function slackAgentDmDecorations(
     },
     async setThreadTitle(_platformId, threadId, title) {
       const { channel, threadTs } = slackAdapter.decodeThreadId(threadId);
-      if (!threadTs) throw new Error(`Slack thread title needs a thread ts: ${threadId}`);
+      // A DM-level id (the welcome session's) has no thread to title; skip it
+      // like the SDK's startTyping does, instead of a warn on every install.
+      if (!threadTs) return;
       await slackAdapter.setAssistantTitle(channel, threadTs, title);
     },
   };

@@ -157,10 +157,16 @@ describe('errors reject, so the onboarding module can log and retry', () => {
 
   it.each([
     ['a non-Slack platform id', () => registry.setSuggestedPrompts('slack', 'discord:123', PROMPTS)],
-    ['a thread id with an empty ts', () => registry.setThreadTitle('slack', 'slack:D0', 'slack:D0:', 'Title')],
-    ['a thread id with no ts', () => registry.setThreadTitle('slack', 'slack:D0', 'slack:D0', 'Title')],
+    ['a non-Slack thread id', () => registry.setThreadTitle('slack', 'slack:D0', 'discord:D0:1700000000.000100', 'T')],
   ])('rejects %s without calling Slack', async (_label, call) => {
     await expect(call()).rejects.toThrow();
+    expect(slackCalls).toEqual([]);
+  });
+});
+
+describe('DM-level thread ids (the welcome session)', () => {
+  it.each(['slack:D0DEFAULT', 'slack:D0DEFAULT:'])('%s has no thread to title: no Slack call, no error', async (id) => {
+    await expect(registry.setThreadTitle('slack', 'slack:D0DEFAULT', id, 'Title')).resolves.toBeUndefined();
     expect(slackCalls).toEqual([]);
   });
 });
