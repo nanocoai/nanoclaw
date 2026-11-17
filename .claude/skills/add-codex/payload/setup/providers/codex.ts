@@ -153,7 +153,8 @@ export function readPinnedCodexVersion(root: string): string | undefined {
   }
 }
 
-type CodexCli = { ok: true; command: string; args: string[] } | { ok: false; error: string; message: string };
+type CodexCli =
+  { ok: true; command: string; args: string[] } | { ok: false; error: string; message: string; detail?: string[] };
 
 /**
  * The host's `codex` when it runs; otherwise the version pinned for the image,
@@ -161,53 +162,67 @@ type CodexCli = { ok: true; command: string; args: string[] } | { ok: false; err
  * spec goes to `npx --yes`, which runs on the host, so only an exact pin is used.
  */
 export function resolveCodexCli(root: string): CodexCli {
-  const installed = spawnSync('codex', ['--version'], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] });
-  if (installed.status === 0) return { ok: true, command: 'codex', args: [] };
+  // Any codex run, even `--version`, creates its CODEX_HOME (default
+  // ~/.codex), so the probes get a throwaway one like the login does.
+  const probeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-probe-'));
+  const probe = (cmd: string, args: string[]) =>
+    spawnSync(cmd, args, {
+      cwd: root,
+      env: { ...process.env, CODEX_HOME: probeHome },
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  try {
+    if (probe('codex', ['--version']).status === 0) return { ok: true, command: 'codex', args: [] };
 
-  const version = readPinnedCodexVersion(root);
-  if (!version) {
-    return {
-      ok: false,
-      error: 'codex_cli_missing',
-      message:
-        "The Codex CLI isn't installed on this machine, and container/cli-tools.json has no exact @openai/codex version to run instead. Run the /add-codex skill again, then re-run setup — or choose the API key option instead.",
-    };
-  }
+    const version = readPinnedCodexVersion(root);
+    if (!version) {
+      return {
+        ok: false,
+        error: 'codex_cli_missing',
+        message:
+          "The Codex CLI isn't installed on this machine, and container/cli-tools.json has no exact @openai/codex version to run instead. Run the /add-codex skill again, then re-run setup — or choose the API key option instead.",
+      };
+    }
 
-  // --ignore-scripts matches the image install (codex ships none); --loglevel
-  // keeps npm's warnings about the repo's pnpm-only .npmrc keys off the login.
-  const args = [
-    '--yes',
-    '--ignore-scripts',
-    '--loglevel=error',
-    '--package',
-    `@openai/codex@${version}`,
-    '--',
-    'codex',
-  ];
-  p.log.step(brandBody(`Preparing the pinned Codex CLI (${version}) for sign-in…`));
-  console.log(k.dim('   (no Codex CLI on this machine: npx fetches it once into your npm cache, no global install)'));
-  // stderr is inherited so npm's own error shows above ours.
-  const probe = spawnSync('npx', [...args, '--version'], {
-    cwd: root,
-    encoding: 'utf-8',
-    stdio: ['ignore', 'pipe', 'inherit'],
-  });
-  if ((probe.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') {
-    return {
-      ok: false,
-      error: 'codex_npx_missing',
-      message: `The Codex CLI isn't installed on this machine, and npx isn't available to run the pinned version ${version}. Install npm, then re-run setup — or choose the API key option instead.`,
-    };
+    // --ignore-scripts matches the image install (codex ships none); --loglevel
+    // keeps npm 11's warnings about the repo's pnpm-only .npmrc keys off the login.
+    const args = [
+      '--yes',
+      '--ignore-scripts',
+      '--loglevel=error',
+      '--package',
+      `@openai/codex@${version}`,
+      '--',
+      'codex',
+    ];
+    p.log.step(brandBody(`Preparing the pinned Codex CLI (${version}) for sign-in…`));
+    console.log(k.dim('   (no Codex CLI on this machine: npx fetches it once into your npm cache, no global install)'));
+    const fetched = probe('npx', [...args, '--version']);
+    if ((fetched.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') {
+      return {
+        ok: false,
+        error: 'codex_npx_missing',
+        message: `The Codex CLI isn't installed on this machine, and npx isn't available to run the pinned version ${version}. Install npm, then re-run setup — or choose the API key option instead.`,
+      };
+    }
+    if (fetched.status !== 0) {
+      return {
+        ok: false,
+        error: 'codex_npx_failed',
+        message: `Couldn't run the pinned Codex CLI ${version} with npx. Check that this machine can reach the npm registry, then re-run setup — or choose the API key option instead.`,
+        // npm's own error lines name the cause (network, registry, cache).
+        detail: String(fetched.stderr ?? '')
+          .split('\n')
+          .map((line) => line.trim().slice(0, 300))
+          .filter(Boolean)
+          .slice(0, 12),
+      };
+    }
+    return { ok: true, command: 'npx', args };
+  } finally {
+    fs.rmSync(probeHome, { recursive: true, force: true });
   }
-  if (probe.status !== 0) {
-    return {
-      ok: false,
-      error: 'codex_npx_failed',
-      message: `Couldn't run the pinned Codex CLI ${version} with npx. Check that this machine can reach the npm registry, then re-run setup — or choose the API key option instead.`,
-    };
-  }
-  return { ok: true, command: 'npx', args };
 }
 
 export async function runCodexLoginAuth(
@@ -220,7 +235,13 @@ export async function runCodexLoginAuth(
   const cli = resolveCodexCli(root);
   if (!cli.ok) {
     p.log.error(brandBody(cli.message));
-    setupLog.step('auth', 'failed', 0, { PROVIDER: 'codex', METHOD: method, ERROR: cli.error });
+    for (const line of cli.detail ?? []) console.log(k.dim(`   ${line}`));
+    setupLog.step('auth', 'failed', 0, {
+      PROVIDER: 'codex',
+      METHOD: method,
+      ERROR: cli.error,
+      ...(cli.detail?.length ? { MESSAGE: storeFailureMessage(cli.detail.join(' | ')) } : {}),
+    });
     process.exit(1);
   }
 

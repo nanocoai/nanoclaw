@@ -217,12 +217,26 @@ describe('runCodexLoginAuth without a host Codex CLI', () => {
   }
 
   /** `codex` is not on PATH; `npx` behaves as given. */
-  function hostWithoutCodex(npx: { status: number | null; error?: Error }): void {
+  function hostWithoutCodex(npx: { status: number | null; error?: Error; stderr?: string }): void {
     mockSpawnSync.mockImplementation((cmd: string) => {
       if (cmd === 'codex') return { status: null, stdout: '', stderr: '', error: enoent('codex') };
-      if (cmd === 'npx') return { status: npx.status, stdout: 'codex-cli 0.169.0\n', stderr: '', error: npx.error };
+      if (cmd === 'npx') {
+        return { status: npx.status, stdout: 'codex-cli 0.169.0\n', stderr: npx.stderr ?? '', error: npx.error };
+      }
       throw new Error(`unexpected spawnSync ${cmd}`);
     });
+  }
+
+  /** CODEX_HOME of every probe: one throwaway dir, never ~/.codex, gone afterwards. */
+  function expectThrowawayProbeHome(): void {
+    const homes = mockSpawnSync.mock.calls.map(
+      (call: unknown[]) => (call[2] as { env?: NodeJS.ProcessEnv }).env?.CODEX_HOME,
+    );
+    expect(homes.length).toBeGreaterThan(0);
+    expect(new Set(homes).size).toBe(1);
+    expect(homes[0]).toBeDefined();
+    expect(homes[0]).not.toBe(path.join(os.homedir(), '.codex'));
+    expect(fs.existsSync(homes[0]!)).toBe(false);
   }
 
   function playLogin(): { env: () => NodeJS.ProcessEnv | undefined } {
@@ -281,6 +295,10 @@ describe('runCodexLoginAuth without a host Codex CLI', () => {
       // The e2e wizard harness proves the fallback ran by this exact line.
       const printed = stdout.mock.calls.map((call: unknown[]) => String(call[0])).join('');
       expect(printed).toContain('Preparing the pinned Codex CLI (0.169.0) for sign-in');
+      // Even `codex --version` creates its home: the probes never touch ~/.codex.
+      expect(mockSpawnSync.mock.calls.map((call: unknown[]) => call[0])).toEqual(['codex', 'npx']);
+      expectThrowawayProbeHome();
+      expect(mockSpawnSync.mock.calls[0][2]).not.toHaveProperty('env.CODEX_HOME', codexHome);
     },
   );
 
@@ -307,6 +325,7 @@ describe('runCodexLoginAuth without a host Codex CLI', () => {
     expect(result).toMatchObject({ ok: false, error: 'codex_cli_missing' });
     expect(!result.ok && result.message).toContain('API key');
     expect(mockSpawnSync.mock.calls.map((call: unknown[]) => call[0])).toEqual(['codex']);
+    expectThrowawayProbeHome();
   });
 
   it('names npx and the API key option when npx is not installed', () => {
@@ -319,14 +338,35 @@ describe('runCodexLoginAuth without a host Codex CLI', () => {
     expect(!result.ok && result.message).toMatch(/npx.*API key/);
   });
 
-  it('names the API key option when the pinned CLI fails to run', () => {
+  it("names the API key option and keeps npm's error when the pinned CLI fails to run", async () => {
     writeManifest([{ name: '@openai/codex', version: '0.169.0' }]);
-    hostWithoutCodex({ status: 1 });
+    hostWithoutCodex({ status: 1, stderr: 'npm error code ENOTFOUND\n\nnpm error network request failed\n' });
 
     const result = resolveCodexCli(root);
 
-    expect(result).toMatchObject({ ok: false, error: 'codex_npx_failed' });
+    expect(result).toMatchObject({
+      ok: false,
+      error: 'codex_npx_failed',
+      detail: ['npm error code ENOTFOUND', 'npm error network request failed'],
+    });
     expect(!result.ok && result.message).toContain('API key');
+    expectThrowawayProbeHome();
+
+    // The same lines reach the terminal and logs/setup.log.
+    vi.spyOn(process, 'exit').mockImplementation((() => {
+      throw new Error('setup stopped');
+    }) as typeof process.exit);
+    const log = vi.spyOn(console, 'log');
+    await expect(runCodexLoginAuth('device', { has: async () => false, save: vi.fn() }, root)).rejects.toThrow(
+      'setup stopped',
+    );
+    expect(log.mock.calls.some((call: unknown[]) => String(call[0]).includes('npm error code ENOTFOUND'))).toBe(true);
+    expect(setupLog.step).toHaveBeenCalledWith('auth', 'failed', 0, {
+      PROVIDER: 'codex',
+      METHOD: 'device',
+      ERROR: 'codex_npx_failed',
+      MESSAGE: 'npm error code ENOTFOUND | npm error network request failed',
+    });
   });
 
   it('stops setup before any login when the pinned CLI fails to run', async () => {
