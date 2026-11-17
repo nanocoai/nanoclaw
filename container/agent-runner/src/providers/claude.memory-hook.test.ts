@@ -120,6 +120,26 @@ describe('Claude memory SessionStart registration', () => {
     expect(fs.statSync(settingsFile).isDirectory()).toBe(true);
   });
 
+  it('leaves a settings.json with broken JSON alone instead of throwing', () => {
+    const settingsFile = path.join(configDir, 'settings.json');
+    fs.writeFileSync(settingsFile, '{"hooks": ');
+    expect(() =>
+      registerProviderMemorySessionHook('claude', createProvider('claude'), MEMORY_SESSION_HOOK),
+    ).not.toThrow();
+    expect(fs.readFileSync(settingsFile, 'utf-8')).toBe('{"hooks": ');
+  });
+
+  it.skipIf(process.getuid?.() === 0)('leaves an unreadable settings.json alone instead of throwing', () => {
+    const settingsFile = path.join(configDir, 'settings.json');
+    fs.writeFileSync(settingsFile, '{}');
+    fs.chmodSync(settingsFile, 0o000);
+    expect(() =>
+      registerProviderMemorySessionHook('claude', createProvider('claude'), MEMORY_SESSION_HOOK),
+    ).not.toThrow();
+    fs.chmodSync(settingsFile, 0o600);
+    expect(fs.readFileSync(settingsFile, 'utf-8')).toBe('{}');
+  });
+
   it('does not rewrite settings.json when nothing changed', () => {
     const settingsFile = path.join(configDir, 'settings.json');
     const provider = createProvider('claude');

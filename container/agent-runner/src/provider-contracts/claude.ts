@@ -62,8 +62,18 @@ export const claudeRuntimeContract: ProviderRuntimeContract = {
 
 registerProviderContract(provider, claudeRuntimeContract);
 
+// Like the host's prepareClaudeMemorySettings, never let a bad settings.json
+// (unreadable, a socket, broken JSON) stop the session: Claude Code skips it too.
 function writeMemorySessionHook(hook: RuntimeMemoryHookInput): void {
   const filePath = path.join(claudeConfigDirectory(), 'settings.json');
+  try {
+    updateMemorySessionHook(filePath, hook);
+  } catch (err) {
+    console.error(`[claude] Not registering the memory hook: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+function updateMemorySessionHook(filePath: string, hook: RuntimeMemoryHookInput): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const text = readSettingsFile(filePath);
   if (text === null) return;
