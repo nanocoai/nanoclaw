@@ -353,6 +353,29 @@ describe('update-nanoclaw transaction end to end', () => {
     expect(state.phase).toBe('complete');
   });
 
+  it('names the gateway and its flattened error when the gateway refresh fails (#4429)', async () => {
+    const fixture = createForkFixture({ gatewayPayloadOnly: true });
+    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    fs.appendFileSync(
+      path.join(fixture.install, '.claude/skills/add-onecli/SKILL.md'),
+      "\n```nc:run effect:refresh\nprintf 'local\\nhook\\n' >&2; exit 3\n```\n",
+    );
+    commit(fixture.install, 'local gateway refresh hook');
+    const { runtime } = fakeRuntime(fixture.install);
+
+    const state = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+    const failure = await validateUpdate(fixture.install, state.id, runtime).then(
+      () => 'resolved',
+      (err: Error) => err.message,
+    );
+
+    const lines = failure.split('\n');
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toBe('Gateway skill did not fully apply:');
+    expect(lines[1]).toMatch(/^- onecli: .*local hook/);
+  });
+
   it('skips a payload-only gateway refresh when the install has no gateway selected', async () => {
     const fixture = createForkFixture({ gatewayPayloadOnly: true });
     write(fixture.install, '.env', 'EXAMPLE=old\n');
@@ -894,6 +917,47 @@ describe('update-nanoclaw transaction end to end', () => {
     const reloaded = loadState(fixture.install, state.id);
     expect(reloaded.phase).toBe('prepared');
     expect(reloaded.snapshot).toBeUndefined();
+  });
+
+  it('names each skill that failed to refresh and its error, capped in length (#4429)', async () => {
+    const fixture = createForkFixture();
+    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    const long = 'x'.repeat(600);
+    write(
+      fixture.install,
+      'src/channels/index.ts',
+      `import './cli.js';\nimport './baz.js';\nimport './foo.js';\nimport './${long}.js';\n`,
+    );
+    write(
+      fixture.install,
+      '.claude/skills/add-baz/SKILL.md',
+      "---\nname: add-baz\n---\n\n```nc:run effect:refresh\nprintf 'first\\n- bar: not a skill\\n' >&2; exit 3\n```\n",
+    );
+    write(fixture.install, '.claude/skills/add-foo/SKILL.md', '---\nname: add-foo\n---\n');
+    commit(fixture.install, 'local channels the refresh cannot handle');
+    const { runtime } = fakeRuntime(fixture.install);
+
+    const state = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+    const failure = await validateUpdate(fixture.install, state.id, runtime).then(
+      () => 'resolved',
+      (err: Error) => err.message,
+    );
+
+    const lines = failure.split('\n');
+    expect(lines).toHaveLength(4);
+    expect(lines[0]).toBe('Installed skills failed to refresh:');
+    // Multi-line command output stays on its skill's line.
+    expect(lines[1]).toMatch(/^- baz: .*first - bar: not a skill/);
+    expect(lines[2]).toBe('- foo: Skill has no structured apply directives and cannot be refreshed headlessly');
+    expect(lines[3]).toBe(`- ${long}: ${`Missing .claude/skills/add-${long}/SKILL.md`.slice(0, 500)}…`);
+    const reloaded = loadState(fixture.install, state.id);
+    expect(reloaded.lastError).toBe(failure);
+    expect(reloaded.phase).toBe('prepared');
+    // The full text stays in the report.
+    expect(reloaded.skillRefresh?.skills.find((skill) => skill.name === long)?.errors).toEqual([
+      `Missing .claude/skills/add-${long}/SKILL.md`,
+    ]);
   });
 
   it('prunes only older terminal transactions and keeps the selected rollback point', async () => {
