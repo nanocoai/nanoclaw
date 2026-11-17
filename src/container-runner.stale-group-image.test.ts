@@ -82,13 +82,14 @@ function holdBuilds(hold: boolean): void {
   if (hold) fs.writeFileSync(file, '');
   else fs.rmSync(file, { force: true });
 }
-function builds(): string[][] {
+function dockerCalls(command: 'build' | 'image'): string[][] {
   return fs
     .readdirSync(callsDir)
     .sort((a, b) => Number(a) - Number(b))
     .map((name) => fs.readFileSync(path.join(callsDir, name), 'utf8').replace(/\n$/, '').split('\n'))
-    .filter((argv) => argv[0] === 'build');
+    .filter((argv) => argv[0] === command);
 }
+const builds = () => dockerCalls('build');
 
 beforeAll(() => {
   fs.mkdirSync(fixture.dataDir, { recursive: true });
@@ -196,9 +197,11 @@ describe('refreshStaleGroupImage', () => {
     expect((await getContainerConfig('ag-1'))?.image_tag).toBe('registry.example/custom:1');
   });
 
-  it('builds once when several spawns of the same group check at the same time', async () => {
+  it('runs one check when several spawns of the same group ask at the same time', async () => {
     await Promise.all([1, 2, 3].map(() => refreshStaleGroupImage('ag-1', GROUP_TAG)));
     expect(builds()).toHaveLength(1);
+    // Agent image and label for the check, agent image again for the build's label.
+    expect(dockerCalls('image')).toHaveLength(3);
   });
 
   it('keeps the old image on a failed build and retries only once the agent image changes', async () => {

@@ -1619,6 +1619,7 @@ const DERIVED_FROM_LABEL = 'dev.nanoclaw.derived-from';
 
 /** Agent image id a group's rebuild last failed on, so each spawn does not retry the same failing build. */
 const failedGroupImageRefreshes = new Map<string, string>();
+const queuedGroupImageRefreshes = new Map<string, Promise<void>>();
 
 async function inspectImage(ref: string, format: string): Promise<string | null> {
   try {
@@ -1639,13 +1640,25 @@ async function inspectImage(ref: string, format: string): Promise<string | null>
  * under new agent-runner source. Never throws: on failure the group keeps its
  * current image, as it did before this check existed.
  */
-export async function refreshStaleGroupImage(agentGroupId: string, imageTag: string | null | undefined): Promise<void> {
+export function refreshStaleGroupImage(agentGroupId: string, imageTag: string | null | undefined): Promise<void> {
   const derivedTag = `${CONTAINER_IMAGE_BASE}:${agentGroupId}`;
   // A pin to any other image is the operator's choice, not something this host built.
-  if (imageTag !== derivedTag) return;
+  if (imageTag !== derivedTag) return Promise.resolve();
+  // A check that has not started yet reads the newest state anyway, so share it.
+  const queued = queuedGroupImageRefreshes.get(agentGroupId);
+  if (queued) return queued;
+  const refresh = refreshGroupImageNow(agentGroupId, derivedTag).finally(() => {
+    if (queuedGroupImageRefreshes.get(agentGroupId) === refresh) queuedGroupImageRefreshes.delete(agentGroupId);
+  });
+  queuedGroupImageRefreshes.set(agentGroupId, refresh);
+  return refresh;
+}
+
+async function refreshGroupImageNow(agentGroupId: string, derivedTag: string): Promise<void> {
   try {
     if (!getSessionDriver().capabilities().imageBuild) return;
     await runGroupImageJob(agentGroupId, async () => {
+      queuedGroupImageRefreshes.delete(agentGroupId);
       // Re-read: a queued job can run after the operator re-pinned the group.
       if ((await getContainerConfig(agentGroupId))?.image_tag !== derivedTag) return;
       const baseId = await inspectImage(CONTAINER_IMAGE, '{{.Id}}');
@@ -1711,19 +1724,8 @@ async function buildAgentGroupImageNow(agentGroupId: string, { pin = true } = {}
   // can tell which base a group's packages were layered onto — the image id
   // rather than a RepoDigest, because a locally built base has no RepoDigest at
   // all and an id is unambiguous either way.
-  let baseId = '';
-  try {
-    const { stdout } = await execFileAsync(CONTAINER_RUNTIME_BIN, [
-      'image',
-      'inspect',
-      '--format',
-      '{{.Id}}',
-      CONTAINER_IMAGE,
-    ]);
-    baseId = stdout.trim();
-  } catch {
-    // Non-fatal: the build below fails on its own if the base is really absent.
-  }
+  // Empty is non-fatal: the build below fails on its own if the base is really absent.
+  const baseId = (await inspectImage(CONTAINER_IMAGE, '{{.Id}}')) ?? '';
 
   let dockerfile = `FROM ${CONTAINER_IMAGE}\nUSER root\n`;
   if (aptPackages.length > 0) {
