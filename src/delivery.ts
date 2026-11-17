@@ -167,7 +167,7 @@ export interface ChannelDeliveryAdapter {
     /** Delivering adapter instance (defaults to channelType downstream).
      *  Host-internal only — containers never see instance. */
     instance?: string,
-    /** Outbound row id, the same on every retry: lets a split reply resume. */
+    /** Session and outbound row id, unique host-wide and the same on every retry: lets a split reply resume. */
     deliveryId?: string,
   ): Promise<string | undefined>;
   setTyping?(
@@ -717,6 +717,8 @@ async function deliverMessage(
     content.type === 'ask_question'
       ? JSON.stringify({ ...content, fromAgent: true })
       : withPlatformMessageId(content, msg.content, session.agent_group_id);
+  // A row id is unique only within its session's mailbox; the session id makes it unique host-wide.
+  const deliveryId = `${session.id}:${msg.id}`;
   const platformMsgId = await deliveryAdapter.deliver(
     msg.channelType,
     msg.platformId,
@@ -725,7 +727,7 @@ async function deliverMessage(
     deliveredContent,
     files,
     deliverInstance,
-    msg.id,
+    deliveryId,
   );
   log.info('Message delivered', {
     id: msg.id,

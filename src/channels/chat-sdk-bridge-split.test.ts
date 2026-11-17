@@ -3,11 +3,15 @@
  * adapter: a text over `maxTextLength` goes out as several posts, and a
  * delivery retry after a failed part resumes at that part.
  */
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Adapter, AdapterPostableMessage, RawMessage } from 'chat';
 
-import { closeDb, getDb, initTestDb } from '../db/connection.js';
+import { closeDb, getDb, initDb, initTestDb } from '../db/connection.js';
 import { runMigrations } from '../db/migrations/index.js';
 import { SqliteStateAdapter } from '../state-sqlite.js';
 import type { ChannelAdapter, OutboundFile, OutboundMessage } from './adapter.js';
@@ -227,24 +231,36 @@ describe('createChatSdkBridge.deliver — retry after a failed part', () => {
     expect(id).toBe('id-1');
   });
 
-  it('resumes after a host restart, from the progress kept in the state store', async () => {
-    const first = fakeAdapter((call) => call === 3);
-    await expect(
-      (await splitBridge(first.adapter, FIVE_LIMIT)).deliver(
-        'stub:C1',
-        null,
-        textMessage(FIVE, { deliveryId: 'out-1' }),
-      ),
-    ).rejects.toThrow();
+  it('resumes after a host restart, from the progress saved in the database file', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-split-progress-'));
+    const file = path.join(dir, 'v2.db');
+    try {
+      await closeDb();
+      await runMigrations(await initDb(file, { role: 'test' }));
+      const first = fakeAdapter((call) => call === 3);
+      await expect(
+        (await splitBridge(first.adapter, FIVE_LIMIT)).deliver(
+          'stub:C1',
+          null,
+          textMessage(FIVE, { deliveryId: 'out-1' }),
+        ),
+      ).rejects.toThrow();
 
-    const second = fakeAdapter();
-    const id = await (
-      await splitBridge(second.adapter, FIVE_LIMIT)
-    ).deliver('stub:C1', null, textMessage(FIVE, { deliveryId: 'out-1' }));
+      // The restart: the database closes, then a new bridge opens the same file.
+      await closeDb();
+      await runMigrations(await initDb(file, { role: 'test' }));
+      const second = fakeAdapter();
+      const id = await (
+        await splitBridge(second.adapter, FIVE_LIMIT)
+      ).deliver('stub:C1', null, textMessage(FIVE, { deliveryId: 'out-1' }));
 
-    expect(markdownOf(first.posts)).toEqual(['part one', 'part two']);
-    expect(markdownOf(second.posts)).toEqual(['part three', 'part four', 'part five']);
-    expect(id).toBe('id-1');
+      expect(markdownOf(first.posts)).toEqual(['part one', 'part two']);
+      expect(markdownOf(second.posts)).toEqual(['part three', 'part four', 'part five']);
+      expect(id).toBe('id-1');
+    } finally {
+      await closeDb();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('starts over when the parts differ from the failed attempt', async () => {
