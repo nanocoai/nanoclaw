@@ -40,6 +40,20 @@ vi.mock('./container-runner.js', () => ({
   getActiveContainerCount: vi.fn().mockReturnValue(0),
   killContainer: vi.fn(),
 }));
+// Lets a test make the backfill throw: an exit between taking the write turn and the write.
+const backfill = vi.hoisted(() => ({ fail: false }));
+vi.mock('./modules/cross-session-context/index.js', async () => {
+  const actual = await vi.importActual<typeof import('./modules/cross-session-context/index.js')>(
+    './modules/cross-session-context/index.js',
+  );
+  return {
+    ...actual,
+    backfillSession: (async (...args: Parameters<typeof actual.backfillSession>) => {
+      if (backfill.fail) throw new Error('left before the write');
+      return actual.backfillSession(...args);
+    }) as typeof actual.backfillSession,
+  };
+});
 vi.mock('./config.js', async () => ({
   ...(await vi.importActual<object>('./config.js')),
   DATA_DIR: '/tmp/nanoclaw-test-wake-context',
@@ -135,6 +149,7 @@ beforeEach(async () => {
   providers.second = async () => [];
   calls.first = 0;
   calls.second = 0;
+  backfill.fail = false;
   fs.rmSync(TEST_DIR, { recursive: true, force: true });
   fs.mkdirSync(TEST_DIR, { recursive: true });
   await runMigrations(await initTestDb());
@@ -225,6 +240,16 @@ describe('wake context', () => {
     await first;
 
     expect(await rows()).toEqual(['alpha', 'm1:ag-1', 'm2:ag-1']);
+  });
+
+  it("lets the session's next message through when an earlier one leaves before its write", async () => {
+    backfill.fail = true;
+    await send('m1', 5).catch(() => {});
+    backfill.fail = false;
+
+    await send('m2', 6);
+
+    expect(await rows()).toEqual(['m2:ag-1']);
   });
 
   it("stores only the block's contract: a line's raw or any other extra field never reaches the row, and a malformed block or line costs only itself", async () => {

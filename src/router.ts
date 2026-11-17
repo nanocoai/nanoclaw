@@ -611,23 +611,24 @@ async function deliverToAgent(
   // In arrival order: a message waiting for wake context is not overtaken.
   const turn = takeWriteTurn(session.id);
 
-  if (wake) {
-    // Cross-session context backfill: a just-born or long-idle session is
-    // seeded with its conversation's recent top-level timeline from the
-    // conversation's hot set BEFORE the triggering message is written, so
-    // replying to something said in another thread lands with that context
-    // in view. Bounded (K sources, read concurrently); a hot session is a
-    // one-query no-op. Never throws.
-    await backfillSession(agentGroup, session, mg, { created });
-    // The runner runs a command only when nothing comes before it.
-    if (slashCommandName(commandText(event.message.content)) === null) {
-      await gatherWakeContext({ agentGroup, session, mg, wiring: agent, created, trigger: event.message });
-    }
-  }
-
-  const messageId = messageIdForAgent(event.message.id, agent.agent_group_id);
-  await turn.previous;
+  // Released on every way out below, so no exit can hold the session's next message.
   try {
+    if (wake) {
+      // Cross-session context backfill: a just-born or long-idle session is
+      // seeded with its conversation's recent top-level timeline from the
+      // conversation's hot set BEFORE the triggering message is written, so
+      // replying to something said in another thread lands with that context
+      // in view. Bounded (K sources, read concurrently); a hot session is a
+      // one-query no-op. Never throws.
+      await backfillSession(agentGroup, session, mg, { created });
+      // The runner runs a command only when nothing comes before it.
+      if (slashCommandName(commandText(event.message.content)) === null) {
+        await gatherWakeContext({ agentGroup, session, mg, wiring: agent, created, trigger: event.message });
+      }
+    }
+
+    const messageId = messageIdForAgent(event.message.id, agent.agent_group_id);
+    await turn.previous;
     await writeSessionMessage(session.agent_group_id, session.id, {
       id: messageId,
       kind: event.message.kind,
@@ -638,76 +639,78 @@ async function deliverToAgent(
       content: event.message.content,
       trigger: wake,
     });
-  } finally {
+    // Written: the session's next message need not wait for this one's wake below.
     turn.release();
-  }
 
-  if (wake && created) {
-    // A brand-new engaged session: notify registered modules with the
-    // resolved wiring context (fire-and-forget — see dispatchSessionCreated).
-    dispatchSessionCreated({
-      session,
-      mg,
-      platformId: event.platformId,
-      threadId: effectiveThreadId,
-      sessionMode: effectiveSessionMode,
-      message: {
-        id: event.message.id,
-        kind: event.message.kind,
-        content: event.message.content,
-        timestamp: event.message.timestamp,
-      },
-    });
-  }
-
-  log.info('Message routed', {
-    sessionId: session.id,
-    agentGroup: agent.agent_group_id,
-    engage_mode: agent.engage_mode,
-    kind: event.message.kind,
-    userId,
-    wake,
-    created,
-    agentGroupName: agentGroup.name,
-  });
-
-  if (wake) {
-    // Typing indicator + wake are only for the engaged branch; accumulated
-    // messages sit silently until a real trigger fires.
-    // Typing fires via the adapter instance that owns this chat's row.
-    startTypingRefresh(
-      session.id,
-      session.agent_group_id,
-      event.channelType,
-      event.platformId,
-      effectiveThreadId,
-      mg.instance,
-    );
-    const freshSession = await getSession(session.id);
-    if (freshSession) {
-      const woke = await requestWake(freshSession, 'inbound-message');
-      // requestWake never throws — it returns false on transient spawn
-      // failure (host-sweep retries). Stop the typing indicator we just
-      // started so it doesn't leak; the inbound row stays pending.
-      if (!woke) stopTypingRefresh(freshSession.id);
+    if (wake && created) {
+      // A brand-new engaged session: notify registered modules with the
+      // resolved wiring context (fire-and-forget — see dispatchSessionCreated).
+      dispatchSessionCreated({
+        session,
+        mg,
+        platformId: event.platformId,
+        threadId: effectiveThreadId,
+        sessionMode: effectiveSessionMode,
+        message: {
+          id: event.message.id,
+          kind: event.message.kind,
+          content: event.message.content,
+          timestamp: event.message.timestamp,
+        },
+      });
     }
 
-    // Cross-session context: fan the triggering message into the
-    // conversation's recently active sibling sessions as trigger=0
-    // 'session-echo' rows. Only the engaged branch fans — the accumulate
-    // branch (trigger=0) never does, so ambient backlog is never copied
-    // twice. Fired AFTER the wake and left unawaited: echoes are ambient
-    // context for OTHER sessions and must never sit between a user's message
-    // and its container. Bounded audience + concurrent writes; never throws.
-    void fanInboundMessage({
-      session,
-      mg,
-      messageId,
+    log.info('Message routed', {
+      sessionId: session.id,
+      agentGroup: agent.agent_group_id,
+      engage_mode: agent.engage_mode,
       kind: event.message.kind,
-      channelType: deliveryAddr.channelType,
-      content: event.message.content,
-      timestamp: event.message.timestamp,
+      userId,
+      wake,
+      created,
+      agentGroupName: agentGroup.name,
     });
+
+    if (wake) {
+      // Typing indicator + wake are only for the engaged branch; accumulated
+      // messages sit silently until a real trigger fires.
+      // Typing fires via the adapter instance that owns this chat's row.
+      startTypingRefresh(
+        session.id,
+        session.agent_group_id,
+        event.channelType,
+        event.platformId,
+        effectiveThreadId,
+        mg.instance,
+      );
+      const freshSession = await getSession(session.id);
+      if (freshSession) {
+        const woke = await requestWake(freshSession, 'inbound-message');
+        // requestWake never throws — it returns false on transient spawn
+        // failure (host-sweep retries). Stop the typing indicator we just
+        // started so it doesn't leak; the inbound row stays pending.
+        if (!woke) stopTypingRefresh(freshSession.id);
+      }
+
+      // Cross-session context: fan the triggering message into the
+      // conversation's recently active sibling sessions as trigger=0
+      // 'session-echo' rows. Only the engaged branch fans — the accumulate
+      // branch (trigger=0) never does, so ambient backlog is never copied
+      // twice. Fired AFTER the wake and left unawaited: echoes are ambient
+      // context for OTHER sessions and must never sit between a user's message
+      // and its container. Bounded audience + concurrent writes; never throws.
+      void fanInboundMessage({
+        session,
+        mg,
+        messageId,
+        kind: event.message.kind,
+        channelType: deliveryAddr.channelType,
+        content: event.message.content,
+        timestamp: event.message.timestamp,
+      });
+    }
+  } finally {
+    turn.release();
   }
 }
 
