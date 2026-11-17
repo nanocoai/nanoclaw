@@ -10,11 +10,17 @@ const fixture = vi.hoisted(() => ({
   emit: vi.fn(),
   logSuccess: vi.fn(),
   logError: vi.fn(),
+  brightSelect: vi.fn(),
 }));
 vi.mock('../logs.js', () => ({ stepRawLog: () => fixture.rawLog, step: fixture.step }));
 vi.mock('./diagnostics.js', () => ({ emit: fixture.emit }));
 vi.mock('./claude-handoff.js', () => ({ offerClaudeOnFailure: vi.fn() }));
-vi.mock('@clack/prompts', () => ({ log: { success: fixture.logSuccess, error: fixture.logError, warn: vi.fn() } }));
+vi.mock('./bright-select.js', () => ({ brightSelect: fixture.brightSelect }));
+vi.mock('@clack/prompts', () => ({
+  log: { success: fixture.logSuccess, error: fixture.logError, warn: vi.fn() },
+  isCancel: (value: unknown) => typeof value === 'symbol',
+  cancel: vi.fn(),
+}));
 
 import { runWindowedChild } from './windowed-runner.js';
 
@@ -35,6 +41,7 @@ beforeEach(() => {
   });
 });
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.clearAllMocks();
   fs.rmSync(dir, { recursive: true, force: true });
@@ -102,5 +109,49 @@ describe('runWindowedChild', () => {
     expect(res.ok).toBe(false);
     expect(res.error).toBeInstanceOf(Error);
     expect(fixture.logError).toHaveBeenCalledWith(expect.stringContaining('Rebuild failed.'));
+  });
+
+  it('restores the cursor on Ctrl-C only while the window is up', async () => {
+    const [int, term] = [process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')];
+    const run = runWindowedChild('container-rebuild', process.execPath, ['-e', 'setTimeout(() => {}, 200)'], LABELS);
+    expect([process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')]).toEqual([int + 1, term + 1]);
+    await run;
+    expect([process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')]).toEqual([int, term]);
+  });
+
+  // The stall prompt reads stdin. Left open after the step ends, it would
+  // take the next step's keypresses, and "Keep waiting" would redraw a window
+  // over that step's prompt.
+  it('closes an unanswered stall prompt when the step ends', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    let promptSignal: AbortSignal | undefined;
+    fixture.brightSelect.mockImplementation(
+      ({ signal }: { signal: AbortSignal }) =>
+        new Promise((resolve) => {
+          promptSignal = signal;
+          signal.addEventListener('abort', () => resolve(Symbol('clack:cancel')));
+        }),
+    );
+    const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as typeof process.exit);
+    // Silent until the test creates the gate file; gives up after 20 s so a
+    // failing run leaves no process behind.
+    const gate = path.join(dir, 'go');
+    const script =
+      `setTimeout(() => process.exit(1), 20000);` +
+      `setInterval(() => { if (require('fs').existsSync(${JSON.stringify(gate)})) process.exit(0); }, 20);`;
+    const run = runWindowedChild('container-rebuild', process.execPath, ['-e', script], LABELS);
+
+    await vi.advanceTimersByTimeAsync(65_000);
+    for (let i = 0; i < 200 && !promptSignal; i++) await new Promise((r) => setTimeout(r, 10));
+    expect(promptSignal?.aborted).toBe(false);
+    fs.writeFileSync(gate, '');
+    const res = await run;
+
+    expect(res.ok).toBe(true);
+    expect(promptSignal?.aborted).toBe(true);
+    expect(exit).not.toHaveBeenCalled();
+    expect(fixture.logSuccess).toHaveBeenCalledWith(expect.stringContaining('Rebuilt.'));
+    // Nothing hides the cursor or redraws the window after the final cursor restore.
+    expect(terminal.slice(terminal.lastIndexOf('\x1b[?25h'))).toBe('\x1b[?25h');
   });
 });

@@ -113,6 +113,10 @@ async function runUnderWindow<T extends { ok: boolean; transcript: string; termi
   let lastLineAt = Date.now();
   let stallPromptActive = false;
   let handledStall = false;
+  let windowShown = true;
+  let finished = false;
+  let stall: Promise<void> | undefined;
+  const closeStallPrompt = new AbortController();
 
   const redraw = (): void => {
     if (stallPromptActive) return;
@@ -151,6 +155,14 @@ async function runUnderWindow<T extends { ok: boolean; transcript: string; termi
     out.write(SHOW_CURSOR);
   };
   process.once('exit', restoreCursorOnExit);
+  // A signal kills Node without an 'exit' event: show the cursor, then
+  // re-raise so the process still dies the default way.
+  const restoreCursorOnSignal = (signal: NodeJS.Signals): void => {
+    out.write(SHOW_CURSOR);
+    process.kill(process.pid, signal);
+  };
+  process.once('SIGINT', restoreCursorOnSignal);
+  process.once('SIGTERM', restoreCursorOnSignal);
 
   const frameTick = setInterval(() => {
     frameIdx++;
@@ -161,13 +173,17 @@ async function runUnderWindow<T extends { ok: boolean; transcript: string; termi
     if (handledStall || stallPromptActive) return;
     if (Date.now() - lastLineAt < STALL_THRESHOLD_MS) return;
     handledStall = true;
-    void handleStall(stepName, rawLog, {
+    stall = handleStall(stepName, rawLog, closeStallPrompt.signal, {
       pauseRender: () => {
         stallPromptActive = true;
         clearBlock();
+        windowShown = false;
         out.write(SHOW_CURSOR);
       },
       resumeRender: () => {
+        // The step ended while the prompt was open: its result line replaces the window.
+        if (finished) return;
+        windowShown = true;
         out.write(HIDE_CURSOR);
         for (let i = 0; i < WINDOW_SIZE + 1; i++) out.write('\n');
         stallPromptActive = false;
@@ -189,11 +205,18 @@ async function runUnderWindow<T extends { ok: boolean; transcript: string; termi
 
   const result = await spawnChild(onLine);
 
+  finished = true;
   clearInterval(frameTick);
   clearInterval(stallCheck);
-  clearBlock();
+  // An unanswered stall prompt would keep reading stdin into the next step's
+  // prompt. Close it, and wait out a Claude look the user already asked for.
+  closeStallPrompt.abort();
+  await stall;
+  if (windowShown) clearBlock();
   out.write(SHOW_CURSOR);
   process.off('exit', restoreCursorOnExit);
+  process.off('SIGINT', restoreCursorOnSignal);
+  process.off('SIGTERM', restoreCursorOnSignal);
 
   const suffix = ` (${fmtDuration(Date.now() - start)})`;
   if (result.ok) {
@@ -211,6 +234,7 @@ async function runUnderWindow<T extends { ok: boolean; transcript: string; termi
 async function handleStall(
   stepName: string,
   rawLog: string,
+  stepEnded: AbortSignal,
   render: { pauseRender: () => void; resumeRender: () => void },
 ): Promise<void> {
   render.pauseRender();
@@ -220,23 +244,26 @@ async function handleStall(
   const { ensureAnswer } = await import('./runner.js');
   const { brightSelect } = await import('./bright-select.js');
 
-  const choice = ensureAnswer(
-    await brightSelect<'wait' | 'help'>({
-      message: 'What now?',
-      options: [
-        {
-          value: 'wait',
-          label: 'Keep waiting',
-          hint: 'large images can take 5–10 minutes',
-        },
-        {
-          value: 'help',
-          label: 'Ask Claude to take a look',
-          hint: 'reads the raw build log and suggests a fix',
-        },
-      ],
-    }),
-  );
+  const answer = await brightSelect<'wait' | 'help'>({
+    message: 'What now?',
+    options: [
+      {
+        value: 'wait',
+        label: 'Keep waiting',
+        hint: 'large images can take 5–10 minutes',
+      },
+      {
+        value: 'help',
+        label: 'Ask Claude to take a look',
+        hint: 'reads the raw build log and suggests a fix',
+      },
+    ],
+    signal: stepEnded,
+    abortedLabel: () => 'It finished on its own.',
+  });
+  // Closed because the step ended, not by the user: nothing left to decide.
+  if (stepEnded.aborted) return;
+  const choice = ensureAnswer(answer);
 
   if (choice === 'help') {
     // offerClaudeAssist runs its own spinner and may propose a fix command.
