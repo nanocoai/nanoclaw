@@ -234,6 +234,37 @@ describe('runWindowedChild', () => {
     }
   });
 
+  it('re-raises at once a signal that arrives after the build ended, during a Claude look', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    fixture.brightSelect.mockResolvedValueOnce('help');
+    let endLook!: () => void;
+    fixture.offerClaude.mockImplementationOnce(() => new Promise<void>((resolve) => (endLook = resolve)));
+    // Silent until the test creates the gate file, so the stall prompt opens.
+    const gate = path.join(dir, 'go');
+    const pidFile = path.join(dir, 'child.pid');
+    const script =
+      `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));` +
+      `setTimeout(() => process.exit(1), 20000);` +
+      `setInterval(() => { if (require('fs').existsSync(${JSON.stringify(gate)})) process.exit(0); }, 20);`;
+    const pids = (): number[] => (fs.existsSync(pidFile) ? [Number(fs.readFileSync(pidFile, 'utf-8'))] : []);
+    trees.push(pids);
+    const reraised = spyOnSelfKill({ pids });
+    const run = runWindowedChild('container-rebuild', process.execPath, ['-e', script], LABELS);
+    try {
+      await until(() => pids().length === 1);
+      await vi.advanceTimersByTimeAsync(65_000);
+      await until(() => fixture.offerClaude.mock.calls.length === 1);
+      fs.writeFileSync(gate, '');
+      await until(() => !isRunning(pids()[0]));
+      await realSleep(200);
+      process.emit('SIGTERM', 'SIGTERM');
+      expect(reraised).toEqual([{ signal: 'SIGTERM', treeRunning: false }]);
+    } finally {
+      endLook?.();
+      await run;
+    }
+  });
+
   // At the stall prompt stdin is in raw mode, so Ctrl-C arrives as a key and
   // cancels the prompt; no signal reaches the build. Esc cancels the same way.
   it.each([

@@ -183,7 +183,8 @@ async function runUnderWindow<T extends { ok: boolean; transcript: string; termi
     stopChild?.abort(signal);
     out.write(SHOW_CURSOR);
     if (process.stdin.isTTY && process.stdin.isRaw) process.stdin.setRawMode(false);
-    if (stopChild) return;
+    // The main flow re-raises once the child is gone; after that, do it here.
+    if (stopChild && !finished) return;
     stopListening();
     process.kill(process.pid, signal);
   };
