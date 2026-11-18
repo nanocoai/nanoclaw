@@ -7,7 +7,7 @@
   Self-hosted, open source, and small enough to read. Each agent runs in its own container on your machine, on the harness you choose.
 </p>
 
-**[Quick start](#quick-start)** · [See examples](#usage) · [Supported channels](#what-it-supports) · [Privacy](#accounts-and-what-leaves-your-machine) · [Telemetry](#telemetry)
+<p align="center"><strong><a href="#quick-start">🚀 Quick start</a></strong> · <a href="#usage">💬 Examples</a> · <a href="#what-it-supports">🔌 Channels</a> · <a href="#accounts-and-what-leaves-your-machine">🔒 Privacy</a> · <a href="#telemetry">📊 Telemetry</a></p>
 
 <p align="center">
   <a href="https://nanoclaw.dev">nanoclaw.dev</a>&nbsp; • &nbsp;
@@ -19,7 +19,9 @@
   <a href="repo-tokens"><img src="repo-tokens/badge.svg" alt="repo tokens" valign="middle"></a>
 </p>
 
-## The Always-On Agent You Own
+<a name="the-always-on-agent-you-own"></a>
+
+## 🩵 The Always-On Agent You Own
 
 Always-on assistants are a product category now. The big labs will run one for you: on their cloud, on their model, holding your credentials, behind code you can't read. NanoClaw has been doing this since January 2026, before the category had a name, and it does it the other way around.
 
@@ -52,7 +54,9 @@ Spawn teammates from chat: every one gets its own bot identity, container, and m
 
 </details>
 
-## Quick Start
+<a name="quick-start"></a>
+
+## 🚀 Quick Start
 
 Runs on macOS, Linux, and Windows via WSL2. [Check requirements](#requirements).
 
@@ -64,9 +68,11 @@ bash nanoclaw.sh
 
 `nanoclaw.sh` walks you from a fresh machine to a named agent you can message. It installs Node, pnpm, and Docker if missing, installs a credential gateway, lets you pick the agent provider (Claude, Codex, Cursor or OpenCode) and registers its credential with the gateway, builds the agent container, and pairs your first channel (Slack, Telegram, Discord, WhatsApp, iMessage, or a local CLI).
 
-Once paired, try sending a message like this one.
+Once paired, try a reminder. This example mentions an agent named Scout.
 
-> @Andy remind me every Friday at 4pm to write my weekly update
+```text
+@Scout remind me every Friday at 4pm to write my weekly update
+```
 
 [More usage examples](#usage)
 
@@ -95,7 +101,9 @@ See [docs/v1-to-v2-changes.md](docs/v1-to-v2-changes.md) for what's different an
 
 </details>
 
-## Philosophy
+<a name="philosophy"></a>
+
+## 🧭 Philosophy
 
 **Small enough to understand.** One host process and no microservices. If you want to understand the full NanoClaw codebase, just ask your coding agent to walk you through it.
 
@@ -111,7 +119,9 @@ See [docs/v1-to-v2-changes.md](docs/v1-to-v2-changes.md) for what's different an
 
 **Your pick of harness and model.** Each agent group runs on the provider you choose: Claude Code via Anthropic's Claude Agent SDK (the built-in default), OpenAI's Codex (ChatGPT subscription or API key), Cursor's local Agent SDK (Cursor account or API key), OpenCode for OpenRouter, Google, DeepSeek and more (including any local OpenAI-compatible endpoint), or local open-weight models through Ollama. These are the vendors' own harnesses, so you get each one's full toolset, session handling and model updates as they ship. Setup asks which one to start with; `/add-codex`, `/add-cursor`, `/add-opencode` and `/add-ollama-provider` add the others later. Provider is configurable per agent group, so different agents can run on different backends in the same install.
 
-## What It Supports
+<a name="what-it-supports"></a>
+
+## 🔌 What It Supports
 
 - **Multi-channel messaging** — WhatsApp (personal or Business Cloud API), Telegram, Discord, Slack, Microsoft Teams, iMessage, Signal, Matrix, Mattermost, Google Chat, Webex, Linear, GitHub, WeChat, DeltaChat, Emacs, phone and SMS via Dial, and email via Resend. Installed on demand with `/add-<channel>` skills. Run one or many at the same time.
 - **Flexible isolation** — connect each channel to its own agent for full privacy, share one agent across many channels for unified memory with separate conversations, or fold multiple channels into a single shared session so one conversation spans many surfaces. Pick per channel via `/manage-channels`. See [docs/isolation-model.md](docs/isolation-model.md).
@@ -122,7 +132,9 @@ See [docs/v1-to-v2-changes.md](docs/v1-to-v2-changes.md) for what's different an
 - **Credential security** — agents never hold raw API keys. Outbound requests route through a credential gateway that injects credentials at request time and can enforce per-agent policies and rate limits. Which gateway is yours to pick: setup installs one behind a provider seam ([OneCLI's Agent Vault](https://github.com/onecli/onecli) by default, Iron Proxy as the alternative).
 - **Agent templates**: stamp a ready-to-run agent (instructions + MCP tools + skills, no secrets) from a reusable bundle via `ncl groups create --template <ref>`. Templates load from the local `templates/` folder; populate it by hand or by copying from the [public library](https://github.com/nanocoai/nanoclaw-templates). See [docs/templates.md](docs/templates.md).
 
-## Accounts and what leaves your machine
+<a name="accounts-and-what-leaves-your-machine"></a>
+
+## 🔒 Accounts and what leaves your machine
 
 You can build and run NanoClaw locally without a NanoClaw account. Your model provider sees what your agents read and write, and each channel you connect sees the messages sent through it.
 
@@ -132,7 +144,9 @@ you ask for an image — nothing about your agents, and nothing after the image 
 locally needs no account and contacts nothing, and is the default. The same account unlocks the
 [perks](#perks) below.
 
-## Telemetry
+<a name="telemetry"></a>
+
+## 📊 Telemetry
 
 **Setup diagnostics.** NanoClaw sends setup diagnostics to PostHog. These include which
 install steps ran, how long they took, whether they worked (with the error message when setup
@@ -146,7 +160,9 @@ export NANOCLAW_NO_DIAGNOSTICS=1
 
 **README page views.** This README on GitHub loads a [Scarf](https://scarf.sh) pixel that counts page views.
 
-## Perks
+<a name="perks"></a>
+
+## 🎁 Perks
 
 The free account also opens the **community portal** at [portal.nanoclaw.dev](https://portal.nanoclaw.dev),
 a dashboard where you switch on what the account offers. Today that is Echo's hardened agent
@@ -171,23 +187,27 @@ Revisit a step with `pnpm exec tsx setup/portal.ts --stage echo` or `--stage sla
 machine out, forget it under **Devices** in the portal: its token stops working and the host
 disconnects. Files, recovery commands and troubleshooting: [docs/community-portal.md](docs/community-portal.md).
 
-## Usage
+<a name="usage"></a>
 
-Talk to your assistant with the trigger word (default: `@Andy`):
+## 💬 Usage
+
+These examples use an agent named Scout. If your channel requires a mention, mention your own agent.
 
 ```
-@Andy send an overview of the sales pipeline every weekday morning at 9am (has access to my Obsidian vault folder)
-@Andy review the git history for the past week each Friday and update the README if there's drift
-@Andy every Monday at 8am, compile news on AI developments from Hacker News and TechCrunch and message me a briefing
+@Scout send an overview of the sales pipeline every weekday morning at 9am (has access to my Obsidian vault folder)
+@Scout review the git history for the past week each Friday and update the README if there's drift
+@Scout every Monday at 8am, compile news on AI developments from Hacker News and TechCrunch and message me a briefing
 ```
 
 From a channel you own or administer, you can manage groups and tasks:
 ```
-@Andy list all scheduled tasks across groups
-@Andy pause the Monday briefing task
+@Scout list all scheduled tasks across groups
+@Scout pause the Monday briefing task
 ```
 
-## Customizing
+<a name="customizing"></a>
+
+## 🛠️ Customizing
 
 NanoClaw avoids configuration sprawl. To make changes, just tell your coding agent what you want:
 
@@ -200,7 +220,9 @@ Or run `/customize` for guided changes.
 
 The codebase is small enough that a coding agent can safely modify it.
 
-## Contributing
+<a name="contributing"></a>
+
+## 🤝 Contributing
 
 **Don't add features. Add skills.**
 
@@ -208,11 +230,15 @@ If you want to add a new channel or agent provider, don't add it to trunk. New c
 
 This keeps trunk as pure registry and infra, and every fork stays lean — users get the channels and providers they asked for and nothing else.
 
-### RFS (Request for Skills)
+<a name="rfs-request-for-skills"></a>
+
+### 💡 RFS (Request for Skills)
 
 No channel or provider skills are currently requested — propose one via an issue.
 
-## Requirements
+<a name="requirements"></a>
+
+## 📋 Requirements
 
 - macOS or Linux (Windows via WSL2)
 - Node.js 22.23.4+, 24.22.1+ or 26.12.1+ and pnpm 10+ (the installer will install or update both if needed)
@@ -220,7 +246,9 @@ No channel or provider skills are currently requested — propose one via an iss
 - [Docker Desktop](https://docker.com/products/docker-desktop) (macOS/Windows) or Docker Engine (Linux)
 - A coding agent on the host for `/customize`, `/debug`, error recovery during setup, and the `/add-<name>` skills. Skills ship in the [Claude Code](https://claude.ai/download) skills format, so Claude Code runs them as slash commands; the steps are plain prose any coding agent can follow
 
-## Architecture
+<a name="architecture"></a>
+
+## 🏗️ Architecture
 
 ![A channel message flows through the host router and inbound.db to the session container. The reply returns through outbound.db and host delivery to the same channel. Hosted model calls pass through the credential gateway.](assets/nanoclaw-message-flow.svg)
 
@@ -243,15 +271,23 @@ Key files:
 - `container/agent-runner/` — Bun agent-runner: poll loop, MCP tools, provider abstraction
 - `groups/<folder>/` — per-agent-group folder (standing instructions, memory, and the generated project doc and container config)
 
-## FAQ
+<a name="faq"></a>
+
+## ❓ FAQ
+
+<a name="why-docker"></a>
 
 ### Why Docker?
 
 Docker provides cross-platform support (macOS, Linux and Windows via WSL2) and a mature ecosystem.
 
+<a name="can-i-run-this-on-linux-or-windows"></a>
+
 ### Can I run this on Linux or Windows?
 
 Yes. Docker is the default runtime and works on macOS, Linux, and Windows (via WSL2). Just run `bash nanoclaw.sh`.
+
+<a name="is-this-secure"></a>
 
 ### Is this secure?
 
@@ -259,9 +295,13 @@ Agents run in containers, not behind application-level permission checks. They c
 
 Found a vulnerability? Please don't open a public issue. [SECURITY.md](SECURITY.md) explains how to report it privately.
 
+<a name="why-so-little-configuration"></a>
+
 ### Why so little configuration?
 
 We don't want configuration sprawl. Every user should customize NanoClaw so that the code does exactly what they want, rather than configuring a generic system. If you prefer having config files, you can ask your coding agent to add them.
+
+<a name="can-i-use-third-party-or-open-source-models"></a>
 
 ### Can I use third-party or open-source models?
 
@@ -276,13 +316,19 @@ ANTHROPIC_BASE_URL=https://your-api-endpoint.com
 ANTHROPIC_AUTH_TOKEN=your-token-here
 ```
 
+<a name="how-do-i-debug-issues"></a>
+
 ### How do I debug issues?
 
 Ask your coding agent. "Why isn't the scheduler running?" "What's in the recent logs?" "Why did this message not get a response?" That's the AI-native approach that underlies NanoClaw.
 
+<a name="why-isnt-the-setup-working-for-me"></a>
+
 ### Why isn't the setup working for me?
 
 If a step fails, `nanoclaw.sh` offers to hand off to a coding agent to diagnose and resume. If that doesn't resolve it, open your coding agent in the checkout and run `/debug`. If it identifies an issue likely to affect other users, open a PR against the relevant setup step or skill.
+
+<a name="how-do-i-uninstall-nanoclaw"></a>
 
 ### How do I uninstall NanoClaw?
 
@@ -292,6 +338,8 @@ bash nanoclaw.sh --uninstall
 
 Every install is tagged with a per-checkout id, so the uninstaller removes only what belongs to that copy: the background service, containers and image, app data and logs, your agents' files, and this copy's gateway agents. Shared things — the gateway service and your credentials, other NanoClaw copies on the machine — are left alone. It shows exactly what it found and asks for confirmation per group; nothing is deleted until you say yes. Use `--dry-run` to preview without changing anything, or `--yes` to skip the prompts. Your `.env` is backed up before removal. To finish, delete the checkout folder itself.
 
+<a name="what-changes-will-be-accepted-into-the-codebase"></a>
+
 ### What changes will be accepted into the codebase?
 
 Only security fixes, bug fixes, and clear improvements will be accepted to the base configuration. That's all.
@@ -300,15 +348,21 @@ Everything else (new capabilities, OS compatibility, hardware support, enhanceme
 
 This keeps the base system minimal and lets every user customize their installation without inheriting features they don't want.
 
-## Community
+<a name="community"></a>
+
+## 👥 Community
 
 Questions? Ideas? [Join the Discord](https://discord.gg/VDdww8qS42).
 
-## Changelog
+<a name="changelog"></a>
+
+## 📝 Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for breaking changes, or the [full release history](https://docs.nanoclaw.dev/changelog) on the documentation site.
 
-## License
+<a name="license"></a>
+
+## 📄 License
 
 MIT
 
