@@ -197,7 +197,7 @@ describe('jq install (setup/lib/jq.sh)', { timeout: 20_000 }, () => {
 
 // The real nanoclaw.sh and setup.sh in a copy of the repo, with Node and pnpm stubbed.
 const COPIED = ['nanoclaw.sh', 'setup.sh', 'assets/setup-splash.txt'].concat(
-  ['diagnostics', 'jq', 'node-version', 'sudo-preflight'].map((lib) => `setup/lib/${lib}.sh`),
+  ['diagnostics', 'jq', 'node-version', 'release-checkout', 'sudo-preflight'].map((lib) => `setup/lib/${lib}.sh`),
 );
 const TOOLS = ['bash', 'cat', 'date', 'dirname', 'grep', 'head', 'mkdir', 'mktemp', 'rm', 'sed', 'sleep', 'tail'];
 
