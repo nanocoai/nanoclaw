@@ -9,9 +9,22 @@ Install [rtk](https://github.com/rtk-ai/rtk) — a CLI proxy delivering 60–90%
 
 ## What this sets up
 
-- `rtk` binary at `~/.local/bin/rtk` on the host
-- `~/.local/bin/rtk` mounted read-only at `/usr/local/bin/rtk` inside the target agent group's containers
+- `rtk` binary at `~/.nanoclaw-bin/rtk` on the host
+- `~/.nanoclaw-bin` mounted read-only at `/workspace/extra/rtk-bin` inside the target agent group's containers
 - `PreToolUse` hook in the agent group's `settings.json` so every Bash call is automatically filtered through rtk — no CLAUDE.md instructions needed
+
+**Why not `~/.local/bin`, where rtk installs itself.** Mount-security blocks that
+directory outright (`DEFAULT_BLOCKED_PATTERNS`, merged into every allowlist and
+not configurable away): setup installs `onecli` and `claude` there and the host
+runs them by name, so handing it to a container is a container-to-host
+code-execution path. The check is on the mount root and does not look at the
+mode, so even a read-only mount of it is rejected — at spawn, as a `log.warn`
+nobody reads. A dedicated directory holding only rtk keeps the guard intact.
+
+**Why not an absolute `--container` path.** Additional mounts always land under
+`/workspace/extra/`; an absolute container path is rejected. That means rtk
+cannot be put on the container's `PATH` this way, so the hook below invokes it
+by its full mounted path.
 
 ## Integration tests
 
@@ -23,18 +36,25 @@ This skill has **no in-tree integration test** by design. Its only functional re
 curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
 ```
 
-If the script put the binary elsewhere, move it:
+The installer drops the binary in `~/.local/bin`, which cannot be mounted (see
+above). Move it into a directory that holds nothing else:
+
+```bash
+mkdir -p ~/.nanoclaw-bin
+mv "$(command -v rtk || echo ~/.local/bin/rtk)" ~/.nanoclaw-bin/rtk
+```
+
+If the installer put it somewhere else entirely:
 
 ```bash
 find ~/.local ~/.cargo/bin ~/bin -name rtk 2>/dev/null
-mv "$(which rtk 2>/dev/null)" ~/.local/bin/rtk
 ```
 
 Verify:
 
 ```bash
-~/.local/bin/rtk --version
-chmod +x ~/.local/bin/rtk   # if needed
+~/.nanoclaw-bin/rtk --version
+chmod +x ~/.nanoclaw-bin/rtk   # if needed
 ```
 
 ## Step 2 — Identify the target agent group
@@ -47,24 +67,24 @@ Note the group ID (e.g. `ag-1776342942165-ptgddd`). Repeat Steps 3–5 for each 
 
 ## Step 3 — Mount rtk into the container config
 
-Mount the host rtk binary read-only into the container with the host-only `add-mount` verb. It is idempotent — re-running skips the entry if it is already present:
+Mount the host rtk binary read-only into the container with the host-only `add-mount` verb. Re-running is safe: an existing entry for the same host and container path is updated to the mode you pass rather than duplicated.
 
 ```bash
 ncl groups config add-mount --id <group-id> \
-  --host ~/.local/bin/rtk \
-  --container /usr/local/bin/rtk \
+  --host "$HOME/.nanoclaw-bin" \
+  --container rtk-bin \
   --ro
 ```
 
 This verb is operator-only and runs host-side (via `/setup`, `/customize`, or `/manage-mounts`); it is rejected from inside a container.
 
-The host root (`~/.local/bin`) must also be in the external mount allowlist at `~/.config/nanoclaw/mount-allowlist.json` for the mount to take effect at spawn. Add it there if it isn't already.
+The host root (`~/.nanoclaw-bin`) must also be in the external mount allowlist at `~/.config/nanoclaw/mount-allowlist.json` for the mount to take effect at spawn. Add it there if it isn't already — `allowReadWrite` can stay `false`, this mount is read-only.
 
 Verify:
 
 ```bash
 ncl groups config get --id <group-id>
-# Look for the /usr/local/bin/rtk mount
+# Look for the rtk-bin mount
 ```
 
 ## Step 4 — Add the PreToolUse hook to settings.json
@@ -77,16 +97,22 @@ data/v2-sessions/<group-id>/.claude-shared/settings.json
 
 This file is mounted at `/home/node/.claude/settings.json` inside the container and is read by Claude Code for hooks, env, and model config.
 
-Add the `PreToolUse` entry with `jq`. This drops any existing rtk Bash hook first, then appends a fresh one, so it is safe to re-run without creating duplicates:
+Add the `PreToolUse` entry with `jq`. The command is the full mounted path — rtk
+is not on the container's `PATH` (Step 3). This drops any existing rtk Bash hook
+first, then appends a fresh one, so it is safe to re-run without creating
+duplicates:
 
 ```bash
 SETTINGS="data/v2-sessions/<group-id>/.claude-shared/settings.json"
 
 jq '.hooks.PreToolUse = ((.hooks.PreToolUse // [])
-      | map(select((.hooks // []) | any(.command == "rtk hook claude") | not)))
-    + [{"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook claude"}]}]' \
+      | map(select((.hooks // []) | any(.command | test("rtk hook claude")) | not)))
+    + [{"matcher":"Bash","hooks":[{"type":"command","command":"/workspace/extra/rtk-bin/rtk hook claude"}]}]' \
   "$SETTINGS" > /tmp/rtk-settings.json && mv /tmp/rtk-settings.json "$SETTINGS"
 ```
+
+The `test(...)` match rather than an equality check is deliberate: it also clears
+the hook written by an earlier version of this skill, which invoked a bare `rtk`.
 
 ## Step 5 — Restart the container
 
@@ -99,26 +125,36 @@ ncl groups restart --id <group-id>
 Confirm the binary is executable inside the container so a missing or non-executable mount surfaces immediately rather than as a silent hook failure:
 
 ```bash
-docker exec "$(docker ps --filter "name=<group-id>" --format '{{.Names}}' | head -1)" rtk --version
+docker exec "$(docker ps --filter "name=<group-id>" --format '{{.Names}}' | head -1)" /workspace/extra/rtk-bin/rtk --version
 ```
 
 Then ask the agent to run `git status` or any other supported command. rtk intercepts it silently. Check savings with:
 
 ```bash
-~/.local/bin/rtk gain
+~/.nanoclaw-bin/rtk gain
 ```
 
 ## Troubleshooting
 
-### `rtk: command not found` inside the container
+### `/workspace/extra/rtk-bin/rtk: not found` inside the container
 
 Mount wasn't applied or container wasn't restarted:
 
 ```bash
 ncl groups config get --id <group-id>
-# Look for the /usr/local/bin/rtk mount
+# Look for the rtk-bin mount
 ncl groups restart --id <group-id>
 ```
+
+If the entry is in the config but the path is still missing inside the
+container, the mount was rejected at spawn. That is only reported host-side:
+
+```bash
+grep -i 'mount REJECTED' logs/nanoclaw.log | tail
+```
+
+The usual cause is `~/.nanoclaw-bin` not being under a root in
+`~/.config/nanoclaw/mount-allowlist.json`.
 
 ### Hook not firing
 
@@ -133,5 +169,5 @@ If missing, re-run Step 4.
 ### Binary won't execute — permission denied
 
 ```bash
-chmod +x ~/.local/bin/rtk
+chmod +x ~/.nanoclaw-bin/rtk
 ```

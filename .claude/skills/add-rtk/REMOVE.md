@@ -8,6 +8,15 @@ Remove the rtk mount with the host-only `remove-mount` verb. It is idempotent â€
 
 ```bash
 ncl groups config remove-mount --id <group-id> \
+  --host "$HOME/.nanoclaw-bin" \
+  --container rtk-bin
+```
+
+If this group was wired by an earlier version of this skill, drop that entry too
+â€” it never mounted, but it is still in the config:
+
+```bash
+ncl groups config remove-mount --id <group-id> \
   --host ~/.local/bin/rtk \
   --container /usr/local/bin/rtk
 ```
@@ -22,9 +31,13 @@ Delete the rtk Bash hook entry (not comment it out). This leaves any other `PreT
 SETTINGS="data/v2-sessions/<group-id>/.claude-shared/settings.json"
 
 jq '.hooks.PreToolUse = ((.hooks.PreToolUse // [])
-      | map(select((.hooks // []) | any(.command == "rtk hook claude") | not)))' \
+      | map(select((.hooks // []) | any(.command | test("rtk hook claude")) | not)))' \
   "$SETTINGS" > /tmp/rtk-settings.json && mv /tmp/rtk-settings.json "$SETTINGS"
 ```
+
+The `test(...)` match clears both the current hook (`/workspace/extra/rtk-bin/rtk
+hook claude`) and the bare `rtk hook claude` an earlier version of this skill
+wrote.
 
 ## 3. Restart the container
 
@@ -37,5 +50,6 @@ ncl groups restart --id <group-id>
 Once no group mounts rtk anymore, remove the binary:
 
 ```bash
-rm -f ~/.local/bin/rtk
+rm -f ~/.nanoclaw-bin/rtk
+rmdir ~/.nanoclaw-bin 2>/dev/null   # only if nothing else was put there
 ```

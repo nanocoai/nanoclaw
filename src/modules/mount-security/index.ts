@@ -272,8 +272,15 @@ function findAllowedRoot(realPath: string, allowedRoots: AllowedRoot[]): Allowed
 
 /**
  * Validate the container path to prevent escaping /workspace/extra/
+ *
+ * Exported so `ncl groups config add-mount` can refuse a container path at add
+ * time rather than storing an entry every future spawn re-rejects. This is the
+ * only rejection reason that is a property of the command itself: unlike a
+ * missing host path or an allowlist that does not cover it yet, no later change
+ * on any host can make a bad container path valid. Callers must not duplicate
+ * the rule — there is one definition, and it is this one.
  */
-function isValidContainerPath(containerPath: string): boolean {
+export function isValidContainerPath(containerPath: string): boolean {
   // Must not contain .. to prevent path traversal
   if (containerPath.includes('..')) {
     return false;
