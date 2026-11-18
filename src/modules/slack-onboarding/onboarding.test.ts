@@ -274,6 +274,33 @@ describe('welcome vs first conversation, through both hooks', () => {
     expect(registry.setSuggestedPrompts.mock.calls).toEqual([['slack', 'slack:D1', []]]);
   });
 
+  it('a conversation that starts while the welcome set is in flight still ends cleared', async () => {
+    const { postDelivery, sessionCreated, registry, getMessagingGroupByPlatform, getActiveSessions } =
+      await loadModule();
+    getMessagingGroupByPlatform.mockReturnValue(dmMg());
+    getActiveSessions.mockReturnValue([]);
+    let finishSet!: () => void;
+    const pendingSet = new Promise<void>((resolve) => {
+      finishSet = resolve;
+    });
+    registry.setSuggestedPrompts.mockReturnValueOnce(pendingSet);
+
+    postDelivery(welcomeMsg(), { id: 'sess-1' }, { firstDelivery: true });
+    await flush();
+    getActiveSessions.mockReturnValue([conversationSession]);
+    await sessionCreated(conversationStarted); // its clear lands before the welcome set
+    await flush();
+    expect(registry.setSuggestedPrompts).toHaveBeenCalledTimes(2);
+
+    finishSet();
+    await flush();
+    expect(registry.setSuggestedPrompts.mock.calls).toEqual([
+      ['slack', 'slack:D1', EXPECTED_PROMPTS, 'Get started'],
+      ['slack', 'slack:D1', []],
+      ['slack', 'slack:D1', []],
+    ]);
+  });
+
   it('the usual order still sets, then clears', async () => {
     const { postDelivery, sessionCreated, registry, getMessagingGroupByPlatform, getActiveSessions } =
       await loadModule();
