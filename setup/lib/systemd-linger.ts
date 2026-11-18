@@ -31,7 +31,8 @@ export function ensureUserLinger(uid: number): boolean {
   if (isEnabled()) return true;
 
   // With a controlling terminal, loginctl forks pkttyagent onto it even when
-  // stdin is ignored (systemd 257); without polkit that prints an exec error.
+  // stdin is ignored (systemd 257.x stable, e.g. Debian 13's 257.13); without
+  // polkit that prints an exec error.
   let loginctlError = '';
   try {
     execFileSync('loginctl', ['--no-ask-password', 'enable-linger', user], {

@@ -9,6 +9,7 @@ import { ensureUserLinger } from './systemd-linger.js';
 
 let enabled: boolean;
 let queryFails: boolean;
+let failedQueries: number;
 let userCanEnable: boolean;
 let sudoCanEnable: boolean;
 let succeedsWithoutEnabling: boolean;
@@ -21,6 +22,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   enabled = false;
   queryFails = false;
+  failedQueries = 0;
   userCanEnable = false;
   sudoCanEnable = false;
   succeedsWithoutEnabling = false;
@@ -32,7 +34,7 @@ beforeEach(() => {
   ) => {
     calls.push({ command, args, options });
     if (command === 'loginctl' && args[0] === 'show-user') {
-      if (queryFails) throw new Error('user state unavailable');
+      if (queryFails || failedQueries-- > 0) throw new Error('user state unavailable');
       return enabled ? 'yes\n' : 'no\n';
     }
     if (command === 'sudo') {
@@ -123,6 +125,15 @@ describe('verified systemd user linger', () => {
     expect(log.warn).toHaveBeenCalledWith(
       expect.stringContaining('may stop on logout'),
       expect.objectContaining({ loginctl: 'exited 0', linger: 'Error: user state unavailable' }),
+    );
+  });
+
+  it('reports the last state read, not an earlier failed one', () => {
+    failedQueries = 1;
+    expect(ensureUserLinger(1000)).toBe(false);
+    expect(log.warn).toHaveBeenLastCalledWith(
+      expect.stringContaining('may stop on logout'),
+      expect.objectContaining({ linger: 'off' }),
     );
   });
 });
