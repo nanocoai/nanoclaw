@@ -185,36 +185,51 @@ function lineFeed(onLine?: (line: string) => void): (chunk: string) => void {
 export const STOP_GRACE_MS = 5_000;
 
 /**
- * On `stop`, send its reason (a signal name) to the child's whole process
- * group, then SIGKILL what is left after STOP_GRACE_MS. Returns the cleanup
- * to run once the child has closed.
+ * Stop handling for a child in its own process group. `stop` sends its reason
+ * (a signal name) to the whole group, then SIGKILL after STOP_GRACE_MS. Setup
+ * exiting first SIGKILLs the group at once: nothing can wait during 'exit'.
+ * `settled()`, run once the child has closed, waits for a stopped group to go.
  */
-function stopGroupOnAbort(child: ChildProcess, stop: AbortSignal): () => void {
+function watchGroup(child: ChildProcess, stop: AbortSignal): { settled: () => Promise<void> } {
   let grace: NodeJS.Timeout | undefined;
-  const killGroup = (signal: NodeJS.Signals): void => {
+  /** Signal 0 checks the group still exists. */
+  const signalGroup = (signal: NodeJS.Signals | 0): boolean => {
+    if (!child.pid) return false;
     try {
-      if (child.pid) process.kill(-child.pid, signal);
-    } catch {
-      // The group has already exited.
+      process.kill(-child.pid, signal);
+      return true;
+    } catch (err) {
+      return (err as NodeJS.ErrnoException).code === 'EPERM';
     }
   };
   const onStop = (): void => {
-    killGroup(typeof stop.reason === 'string' ? (stop.reason as NodeJS.Signals) : 'SIGTERM');
-    grace = setTimeout(() => killGroup('SIGKILL'), STOP_GRACE_MS);
+    signalGroup(typeof stop.reason === 'string' ? (stop.reason as NodeJS.Signals) : 'SIGTERM');
+    grace = setTimeout(() => signalGroup('SIGKILL'), STOP_GRACE_MS);
   };
+  const onExit = (): void => void signalGroup('SIGKILL');
   if (stop.aborted) onStop();
   else stop.addEventListener('abort', onStop, { once: true });
-  return () => {
-    stop.removeEventListener('abort', onStop);
-    clearTimeout(grace);
+  process.once('exit', onExit);
+
+  return {
+    settled: async () => {
+      // Closed pipes don't prove the group is gone: a descendant may have its
+      // own stdio. Bounded, in case a member never gets reaped.
+      for (let i = 0; i < (STOP_GRACE_MS + 1_000) / 50 && stop.aborted && signalGroup(0); i++) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      stop.removeEventListener('abort', onStop);
+      process.off('exit', onExit);
+      clearTimeout(grace);
+    },
   };
 }
 
 /**
  * `opts.stop` puts the child in its own process group (and session) so that
- * aborting it stops every process the command started; the promise still
- * resolves only once they have all closed the output pipes. Such a child no
- * longer gets the terminal's Ctrl-C or hangup: the caller forwards them.
+ * aborting it stops every process the command started; the promise then
+ * resolves only once that group is gone. Such a child no longer gets the
+ * terminal's Ctrl-C or hangup: the caller forwards them.
  */
 export function spawnQuiet(
   cmd: string,
@@ -230,7 +245,7 @@ export function spawnQuiet(
       env: envOverride ? { ...process.env, ...envOverride } : process.env,
       detached: opts?.stop !== undefined,
     });
-    const stopCleanup = opts?.stop ? stopGroupOnAbort(child, opts.stop) : undefined;
+    const group = opts?.stop ? watchGroup(child, opts.stop) : undefined;
     let transcript = '';
     let spawnError: Error | undefined;
     const raw = fs.createWriteStream(rawLogPath, { flags: 'w' });
@@ -256,9 +271,9 @@ export function spawnQuiet(
     child.on('error', (err) => {
       spawnError = err;
     });
-    child.on('close', (code, signal) => {
-      stopCleanup?.();
+    child.on('close', async (code, signal) => {
       raw.end();
+      await group?.settled();
       const terminal = [...blocks].reverse().find((b) => b.fields.STATUS) ?? null;
       resolve({
         ok: code === 0 && !spawnError,

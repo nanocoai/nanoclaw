@@ -164,10 +164,7 @@ async function runUnderWindow<T extends { ok: boolean; transcript: string; termi
   for (let i = 0; i < WINDOW_SIZE + 1; i++) out.write('\n');
   redraw();
 
-  // A process.exit elsewhere (e.g. a prompt inside the Claude look) must not
-  // leave a stoppable child running; there is no waiting on 'exit'.
   const restoreCursorOnExit = (): void => {
-    stopChild?.abort('SIGTERM');
     out.write(SHOW_CURSOR);
   };
   process.once('exit', restoreCursorOnExit);
@@ -176,14 +173,21 @@ async function runUnderWindow<T extends { ok: boolean; transcript: string; termi
   // would also leave raw mode (the stall prompt's); the re-raise skips it.
   // A stoppable child gets the signal first and the re-raise waits for it.
   let reraise: NodeJS.Signals | undefined;
+  const stopListening = (): void => {
+    for (const signal of FORWARDED_SIGNALS) process.off(signal, restoreCursorOnSignal);
+  };
   const restoreCursorOnSignal = (signal: NodeJS.Signals): void => {
+    // Still listening: a second Ctrl-C must not kill setup before the child is gone.
+    if (reraise) return;
+    reraise = signal;
     stopChild?.abort(signal);
     out.write(SHOW_CURSOR);
     if (process.stdin.isTTY && process.stdin.isRaw) process.stdin.setRawMode(false);
-    if (stopChild) reraise = signal;
-    else process.kill(process.pid, signal);
+    if (stopChild) return;
+    stopListening();
+    process.kill(process.pid, signal);
   };
-  for (const signal of FORWARDED_SIGNALS) process.once(signal, restoreCursorOnSignal);
+  for (const signal of FORWARDED_SIGNALS) process.on(signal, restoreCursorOnSignal);
 
   const frameTick = setInterval(() => {
     frameIdx++;
@@ -242,7 +246,7 @@ async function runUnderWindow<T extends { ok: boolean; transcript: string; termi
   if (windowShown) clearBlock();
   out.write(SHOW_CURSOR);
   process.off('exit', restoreCursorOnExit);
-  for (const signal of FORWARDED_SIGNALS) process.off(signal, restoreCursorOnSignal);
+  stopListening();
   // The child has exited; no listener is left, so this dies the default way.
   if (reraise) process.kill(process.pid, reraise);
 

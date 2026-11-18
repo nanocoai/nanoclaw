@@ -81,8 +81,12 @@ function isRunning(pid: number): boolean {
   return stat !== '' && !stat.startsWith('Z');
 }
 
+// Captured before any test fakes timers.
+const realSetTimeout = globalThis.setTimeout;
+const realSleep = (ms: number): Promise<void> => new Promise((r) => realSetTimeout(r, ms));
+
 async function until(check: () => boolean): Promise<void> {
-  for (let i = 0; i < 500 && !check(); i++) await new Promise((r) => setTimeout(r, 10));
+  for (let i = 0; i < 500 && !check(); i++) await realSleep(10);
   expect(check()).toBe(true);
 }
 
@@ -184,18 +188,25 @@ describe('runWindowedChild', () => {
     const saved = { isTTY: stdin.isTTY, isRaw: stdin.isRaw, setRawMode: stdin.setRawMode };
     const setRawMode = vi.fn();
     Object.assign(stdin, { isTTY: true, isRaw: true, setRawMode });
+    const sigterms = process.listenerCount('SIGTERM');
+    const run = runWindowedChild('container-rebuild', process.execPath, ['-e', tree.script], LABELS);
     try {
-      const run = runWindowedChild('container-rebuild', process.execPath, ['-e', tree.script], LABELS);
       await until(() => tree.pids().length === 2);
       terminal = '';
       process.emit('SIGTERM', 'SIGTERM');
       expect(terminal).toBe('\x1b[?25h');
       expect(setRawMode).toHaveBeenCalledWith(false);
       expect(reraised).toEqual([]);
+      // Still listening, so a second signal can't kill setup (Node's default) while the tree stops.
+      expect(process.listenerCount('SIGTERM')).toBe(sigterms + 1);
+      process.emit('SIGTERM', 'SIGTERM');
       const res = await run;
       expect(res.signal).toBe('SIGTERM');
       expect(reraised).toEqual([{ signal: 'SIGTERM', treeRunning: false }]);
     } finally {
+      // Let the re-raise land on the spy even when an assertion failed.
+      killTrees();
+      await run;
       Object.assign(stdin, saved);
     }
   });
@@ -285,5 +296,63 @@ describe('spawnQuiet stop', () => {
     await sawIgnore;
     await vi.advanceTimersByTimeAsync(STOP_GRACE_MS);
     expect(await run).toMatchObject({ ok: false, signal: 'SIGKILL' });
+  });
+
+  it('resolves only once a descendant that left the output pipes is gone too', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const stop = new AbortController();
+    // The grandchild has its own stdio and ignores SIGINT; its parent dies on SIGINT.
+    const ready = path.join(dir, 'grandchild.pid');
+    const grandchild =
+      `process.on('SIGINT', () => {}); require('fs').writeFileSync(${JSON.stringify(ready)}, String(process.pid));` +
+      `setTimeout(() => {}, 20000);`;
+    const script =
+      `require('child_process').spawn(process.execPath, ['-e', ${JSON.stringify(grandchild)}], { stdio: 'ignore' });` +
+      `console.log('child ' + process.pid); setTimeout(() => process.exit(1), 20000);`;
+    let childPid = 0;
+    let grandchildRunningAtResolve: boolean | undefined;
+    const run = spawnQuiet(process.execPath, ['-e', script], fixture.rawLog, undefined, {
+      stop: stop.signal,
+      onLine: (line) => {
+        if (line.startsWith('child ')) childPid = Number(line.slice(6));
+      },
+    });
+    await until(() => childPid > 0 && fs.existsSync(ready) && fs.readFileSync(ready, 'utf-8') !== '');
+    const grandchildPid = Number(fs.readFileSync(ready, 'utf-8'));
+    trees.push(() => [childPid, grandchildPid]);
+    void run.then(() => (grandchildRunningAtResolve = isRunning(grandchildPid)));
+
+    stop.abort('SIGINT');
+    await until(() => !isRunning(childPid));
+    expect(isRunning(grandchildPid)).toBe(true);
+    for (let i = 0; i < 100 && grandchildRunningAtResolve === undefined; i++) {
+      await vi.advanceTimersByTimeAsync(100);
+      await realSleep(5);
+    }
+    expect(grandchildRunningAtResolve).toBe(false);
+    expect(await run).toMatchObject({ ok: false, signal: 'SIGINT' });
+  });
+
+  it('SIGKILLs the group at once when setup exits while it runs', async () => {
+    const stop = new AbortController();
+    const exitListeners = process.listeners('exit');
+    const script =
+      `process.on('SIGINT', () => {}); process.on('SIGTERM', () => {});` +
+      `console.log('ready ' + process.pid); setTimeout(() => process.exit(1), 20000);`;
+    let pid = 0;
+    const run = spawnQuiet(process.execPath, ['-e', script], fixture.rawLog, undefined, {
+      stop: stop.signal,
+      onLine: (line) => {
+        if (line.startsWith('ready ')) pid = Number(line.slice(6));
+      },
+    });
+    await until(() => pid > 0);
+    trees.push(() => [pid]);
+    // Call only this child's listener: emitting 'exit' would reach vitest's own.
+    const onExit = process.listeners('exit').find((listener) => !exitListeners.includes(listener));
+    onExit?.(0);
+
+    expect(await run).toMatchObject({ ok: false, signal: 'SIGKILL' });
+    expect(process.listeners('exit')).toEqual(exitListeners);
   });
 });
