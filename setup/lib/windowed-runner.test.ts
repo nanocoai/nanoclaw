@@ -115,6 +115,27 @@ function killTrees(): void {
   }
 }
 
+/** The rows a terminal shows for the window's output: text, \r, \n, cursor up and erase line. */
+function screenRows(output: string): string[] {
+  const rows = [''];
+  let row = 0;
+  let col = 0;
+  // eslint-disable-next-line no-control-regex
+  for (const [, n, cmd, text] of output.matchAll(/\x1b\[\??([\d;]*)([A-Za-z])|(\r|\n|[^\x1b\r\n]+)/g)) {
+    if (cmd === 'A') row = Math.max(0, row - Number(n || 1));
+    else if (cmd === 'K') rows[row] = '';
+    else if (text === '\r') col = 0;
+    else if (text === '\n') [row, col] = [row + 1, 0];
+    else if (text) {
+      const line = (rows[row] ?? '').padEnd(col);
+      rows[row] = line.slice(0, col) + text + line.slice(col + text.length);
+      col += text.length;
+    }
+    rows[row] ??= '';
+  }
+  return rows;
+}
+
 describe('runWindowedChild', () => {
   it('keeps the full output in the raw log and shows only a rolling tail on the terminal', async () => {
     const [cmd, args] = noisyChild(12);
@@ -209,6 +230,30 @@ describe('runWindowedChild', () => {
       killTrees();
       await run;
       Object.assign(stdin, saved);
+    }
+  });
+
+  it("clears the tty's ^C echo along with the window before re-raising", async () => {
+    const tree = buildTree();
+    const realKill = process.kill.bind(process);
+    let atReraise: string[] | undefined;
+    vi.spyOn(process, 'kill').mockImplementation((pid, signal) => {
+      if (pid !== process.pid) return realKill(pid, signal);
+      atReraise = screenRows(terminal).filter(Boolean); // a real process dies here
+      return true;
+    });
+    const run = runWindowedChild('container-rebuild', process.execPath, ['-e', tree.script], LABELS);
+    try {
+      await until(() => tree.pids().length === 2);
+      expect(screenRows(terminal).join('\n')).toContain('Rebuilding…');
+      // What a tty writes at the cursor on Ctrl-C; SIGTERM stands in for the SIGINT, as above.
+      terminal += '^C';
+      process.emit('SIGTERM', 'SIGTERM');
+      await run;
+      expect(atReraise).toEqual([]);
+    } finally {
+      killTrees();
+      await run;
     }
   });
 

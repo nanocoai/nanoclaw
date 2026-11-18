@@ -153,7 +153,8 @@ async function runUnderWindow<T extends { ok: boolean; transcript: string; termi
   };
 
   const clearBlock = (): void => {
-    out.write(`\x1b[${WINDOW_SIZE + 1}A`);
+    // The cursor rests on the line under the window, where the tty echoes a Ctrl-C's ^C.
+    out.write(`\r\x1b[2K\x1b[${WINDOW_SIZE + 1}A`);
     for (let i = 0; i < WINDOW_SIZE + 1; i++) {
       out.write('\x1b[2K\n');
     }
