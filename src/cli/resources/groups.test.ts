@@ -594,4 +594,50 @@ describe('groups config (host-only)', () => {
       expect(await speedOf()).toBe('turbo');
     });
   });
+
+  // Bug #4150: No setting to override readonly default
+  //
+  // Replacing useless `--ro` argument with `--rw` to flip `readonly: false`
+  it('stores an explicit read-write mount', async () => {
+    const GID = 'ag-mount-rw';
+    await createAgentGroup({ id: GID, name: 'm', folder: 'm', agent_provider: null, created_at: now() });
+    await ensureContainerConfig(GID);
+
+    const result = await dispatch(
+      {
+        id: 'r1',
+        command: 'groups-config-add-mount',
+        args: { id: GID, host: TEST_DIR, container: 'project', rw: true },
+      },
+      { caller: 'host' },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(JSON.parse((await getContainerConfig(GID))!.additional_mounts)).toEqual([
+      { hostPath: TEST_DIR, containerPath: 'project', readonly: false },
+    ]);
+  });
+
+  // Bug #4150: No setting to override readonly default
+  //
+  // Ignoring legacy `--ro` argument
+  it('ignores legacy readonly argument for mount', async () => {
+    const GID = 'ag-mount-ignore-ro';
+    await createAgentGroup({ id: GID, name: 'm', folder: 'm', agent_provider: null, created_at: now() });
+    await ensureContainerConfig(GID);
+
+    const result = await dispatch(
+      {
+        id: 'r1',
+        command: 'groups-config-add-mount',
+        args: { id: GID, host: TEST_DIR, container: 'project', ro: false },
+      },
+      { caller: 'host' },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(JSON.parse((await getContainerConfig(GID))!.additional_mounts)).toEqual([
+      { hostPath: TEST_DIR, containerPath: 'project', readonly: true },
+    ]);
+  });
 });
