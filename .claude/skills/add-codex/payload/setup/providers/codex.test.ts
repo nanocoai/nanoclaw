@@ -192,7 +192,7 @@ describe('runCodexLoginAuth', () => {
     // The isolated dir holds a live credential — gone once vaulted.
     expect(fs.existsSync(codexHome!)).toBe(false);
 
-    // A host codex that runs is used as is; npx never comes into it.
+    // A host codex that runs is used as is; pnpm never comes into it.
     expect(mockSpawn.mock.calls[0].slice(0, 2)).toEqual(['codex', ['login']]);
     expect(mockSpawnSync.mock.calls.map((call: unknown[]) => call[0])).toEqual(['codex']);
   });
@@ -348,38 +348,26 @@ describe('runCodexLoginAuth', () => {
   });
 });
 
-// #3791: a host without `codex` runs the image's pinned CLI through npx
+// #3791: a host without `codex` runs the image's pinned CLI through pnpm dlx
 // instead of asking for a global install, which fails for users without
 // write access to the npm prefix.
 describe('runCodexLoginAuth without a host Codex CLI', () => {
-  const NPX_RESOLVE = [
-    '--yes',
-    '--ignore-scripts',
-    '--loglevel=error',
-    '--color=false',
-    '--package',
-    '@openai/codex@0.169.0',
-    '-c',
-    'command -v codex',
-  ];
-  // Where npx put the pinned CLI in the user's npm cache.
-  const BIN = '/home/user/.npm/_npx/0123abcd/node_modules/.bin/codex';
+  const DLX = ['--package=@openai/codex@0.169.0', 'dlx', 'codex'];
   const PINNED_INSTALL = [
     'curl -fsSL https://chatgpt.com/codex/install.sh | sh -s -- --release 0.169.0',
     'npm install -g @openai/codex@0.169.0',
   ];
   const enoent = (cmd: string): NodeJS.ErrnoException =>
     Object.assign(new Error(`spawnSync ${cmd} ENOENT`), { code: 'ENOENT' });
-  // What npm 11 prints when a stop signal lands mid-install.
-  const npmStopped = (signal: string): string =>
-    `npm error process terminated\nnpm error signal ${signal}\nnpm error A complete log of this run can be found in: /x.log\n`;
 
   let root: string;
   let scratch: string;
   beforeEach(() => {
-    root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-npx-root-'));
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-pnpm-root-'));
     fs.mkdirSync(path.join(root, 'container'));
-    scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-npx-scratch-'));
+    scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-pnpm-scratch-'));
+    // `codex` is not on PATH.
+    mockSpawnSync.mockReturnValue({ status: null, signal: null, stdout: '', stderr: '', error: enoent('codex') });
   });
   afterEach(() => {
     fs.rmSync(root, { recursive: true, force: true });
@@ -394,69 +382,46 @@ describe('runCodexLoginAuth without a host Codex CLI', () => {
     fs.writeFileSync(path.join(root, 'container', 'cli-tools.json'), JSON.stringify(tools));
   }
 
-  /**
-   * `codex` is not on PATH; `npx` behaves as given and names `bin`, which
-   * reports `binVersion` (or is ended by `binSignal`). Records what npx's
-   * cwd held.
-   */
-  function hostWithoutCodex(npx: {
-    status: number | null;
-    signal?: NodeJS.Signals;
-    error?: Error;
-    stderr?: string;
-    bin?: string;
-    binVersion?: string;
-    binSignal?: NodeJS.Signals;
-  }): { npxProject: () => string | undefined } {
-    let npxProject: string | undefined;
-    const bin = npx.bin ?? BIN;
-    mockSpawnSync.mockImplementation((cmd: string, _args: string[], opts: { cwd?: string }) => {
-      if (cmd === 'codex') return { status: null, stdout: '', stderr: '', error: enoent('codex') };
-      if (cmd === 'npx') {
-        npxProject = fs.readFileSync(path.join(opts.cwd!, 'package.json'), 'utf-8');
-        return {
-          status: npx.status,
-          signal: npx.signal ?? null,
-          stdout: `${bin}\n`,
-          stderr: npx.stderr ?? '',
-          error: npx.error,
-        };
-      }
-      if (cmd === bin && npx.binSignal) return { status: null, signal: npx.binSignal, stdout: '', stderr: '' };
-      if (cmd === bin) return { status: 0, stdout: `codex-cli ${npx.binVersion ?? '0.169.0'}\n`, stderr: '' };
-      throw new Error(`unexpected spawnSync ${cmd}`);
-    });
-    return { npxProject: () => npxProject };
-  }
-
   /** The CODEX_HOME every probe ran under. */
   function probeHomes(): Array<string | undefined> {
     return mockSpawnSync.mock.calls.map((call: unknown[]) => (call[2] as { env?: NodeJS.ProcessEnv }).env?.CODEX_HOME);
   }
 
-  function playLogin(): { env: () => NodeJS.ProcessEnv | undefined } {
+  /** Plays the login: writes auth.json into its CODEX_HOME when `code` is 0, then closes with `code`. */
+  function playLogin(code = 0): { env: () => NodeJS.ProcessEnv | undefined } {
     let env: NodeJS.ProcessEnv | undefined;
     mockSpawn.mockImplementation((...args: unknown[]) => {
       env = (args[2] as { env?: NodeJS.ProcessEnv }).env;
-      fs.writeFileSync(path.join(env!.CODEX_HOME!, 'auth.json'), '{"tokens":{}}');
+      if (code === 0) fs.writeFileSync(path.join(env!.CODEX_HOME!, 'auth.json'), '{"tokens":{}}');
       const child = new EventEmitter();
-      setImmediate(() => child.emit('close', 0));
+      setImmediate(() => child.emit('close', code));
       return child;
     });
     return { env: () => env };
   }
 
+  function stopOnExit(): ReturnType<typeof vi.spyOn> {
+    return vi.spyOn(process, 'exit').mockImplementation((() => {
+      throw new Error('setup stopped');
+    }) as typeof process.exit);
+  }
+
+  const printedBy = (...spies: Array<ReturnType<typeof vi.spyOn>>): string =>
+    spies
+      .flatMap((spy) => spy.mock.calls)
+      .map((call: unknown[]) => String(call[0]))
+      .join('\n');
+
   it.each([
     ['device', ['login', '--device-auth']],
     ['browser', ['login']],
   ] as const)(
-    'signs in (%s) with the pinned CLI through npx, under an isolated CODEX_HOME',
+    'signs in (%s) with the pinned CLI through pnpm dlx, under an isolated CODEX_HOME',
     async (method, loginArgs) => {
       writeManifest([
         { name: 'agent-browser', version: '0.27.1' },
         { name: '@openai/codex', version: '0.169.0' },
       ]);
-      const host = hostWithoutCodex({ status: 0 });
       const login = playLogin();
       // Production passes no root: the manifest is read from the cwd setup.sh set.
       vi.spyOn(process, 'cwd').mockReturnValue(root);
@@ -477,36 +442,28 @@ describe('runCodexLoginAuth without a host Codex CLI', () => {
         METHOD: method,
       });
 
-      // npx resolves the pin in an empty private project, never the repo,
-      // whose node_modules could otherwise supply a different `codex`; the
-      // login then runs the binary it named, with no npm in between.
-      expect(mockSpawnSync).toHaveBeenCalledWith(
-        'npx',
-        NPX_RESOLVE,
-        expect.objectContaining({ cwd: path.join(codexHome!, 'npx') }),
-      );
-      expect(host.npxProject()).toBe('{ "private": true }\n');
-      expect(mockSpawnSync).toHaveBeenCalledWith(BIN, ['--version'], expect.anything());
-      expect(mockSpawn).toHaveBeenCalledWith(BIN, loginArgs, expect.objectContaining({ stdio: 'inherit' }));
-      // Even `codex --version` creates its CODEX_HOME: every probe uses the
+      // pnpm fetches the exact pin and runs its `codex` as the login itself.
+      expect(mockSpawn.mock.calls).toEqual([
+        ['pnpm', [...DLX, ...loginArgs], expect.objectContaining({ stdio: 'inherit' })],
+      ]);
+      // Even `codex --version` creates its CODEX_HOME: the probe uses the
       // throwaway one, so ~/.codex is never touched.
-      expect(mockSpawnSync.mock.calls.map((call: unknown[]) => call[0])).toEqual(['codex', 'npx', BIN]);
-      expect(probeHomes()).toEqual([codexHome, codexHome, codexHome]);
+      expect(mockSpawnSync.mock.calls.map((call: unknown[]) => call[0])).toEqual(['codex']);
+      expect(probeHomes()).toEqual([codexHome]);
 
       // The e2e wizard harness proves the fallback ran by this exact line.
-      const printed = stdout.mock.calls.map((call: unknown[]) => String(call[0])).join('');
-      expect(printed).toContain('Preparing the pinned Codex CLI (0.169.0) for sign-in');
+      expect(printedBy(stdout)).toContain('Preparing the pinned Codex CLI (0.169.0) for sign-in');
     },
   );
 
-  // The spec goes to `npx --yes`, which runs on the host: anything but an
-  // exact pin fails closed before npx is ever spawned.
+  // The spec goes to pnpm, which runs it on the host: anything but an exact
+  // pin fails closed before pnpm is ever spawned.
   it.each([
     ['no manifest', undefined],
     ['no codex entry', [{ name: 'agent-browser', version: '0.27.1' }]],
     ['a range', [{ name: '@openai/codex', version: '^0.169.0' }]],
     ['latest', [{ name: '@openai/codex', version: 'latest' }]],
-    // Loose-semver shapes that npm parses as dist-tags.
+    // Loose-semver shapes that npm and pnpm parse as dist-tags.
     ['an empty prerelease part', [{ name: '@openai/codex', version: '0.169.0-..' }]],
     ['a double dot', [{ name: '@openai/codex', version: '0.169.0-a..b' }]],
     ['a number past 2^53', [{ name: '@openai/codex', version: '9007199254740992.0.0' }]],
@@ -514,14 +471,15 @@ describe('runCodexLoginAuth without a host Codex CLI', () => {
     ['not a list', { name: '@openai/codex', version: '0.169.0' }],
   ])('refuses to fetch anything with %s', async (_label, tools) => {
     if (tools !== undefined) writeManifest(tools);
-    hostWithoutCodex({ status: 0 });
 
     const result = resolveCodexCli(root, scratch);
 
     expect(result).toMatchObject({
       ok: false,
       error: 'codex_cli_missing',
-      message: expect.stringContaining('API key'),
+      // OpenAI's installer puts ~/.local/bin on PATH through the shell
+      // profile, which the shell setup runs in hasn't read.
+      message: expect.stringMatching(/re-run setup in a new terminal.*API key/),
       // No pin to name, so the install commands take the latest release.
       install: ['curl -fsSL https://chatgpt.com/codex/install.sh | sh', 'npm install -g @openai/codex'],
     });
@@ -529,182 +487,118 @@ describe('runCodexLoginAuth without a host Codex CLI', () => {
     expect(probeHomes()).toEqual([scratch]);
   });
 
-  it.each([
-    ['another version', { binVersion: '0.170.0' }],
-    ['a relative path', { bin: 'codex' }],
-    ['nothing', { bin: '' }],
-  ])('refuses to sign in when npx names %s', (_label, named) => {
-    writeManifest([{ name: '@openai/codex', version: '0.169.0' }]);
-    hostWithoutCodex({ status: 0, ...named });
-
-    const result = resolveCodexCli(root, scratch);
-
-    expect(result).toMatchObject({
-      ok: false,
-      error: 'codex_npx_failed',
-      install: PINNED_INSTALL,
-      detail: [expect.stringContaining('did not report that version')],
-    });
-  });
-
-  it('names npx and the API key option when npx is not installed', () => {
-    writeManifest([{ name: '@openai/codex', version: '0.169.0' }]);
-    hostWithoutCodex({ status: null, error: enoent('npx') });
-
-    const result = resolveCodexCli(root, scratch);
-
-    expect(result).toMatchObject({
-      ok: false,
-      error: 'codex_npx_missing',
-      install: PINNED_INSTALL,
-      message: expect.stringMatching(/npx.*API key/),
-    });
-  });
-
-  it('names the spawn error when npx exists but cannot start', () => {
-    writeManifest([{ name: '@openai/codex', version: '0.169.0' }]);
-    const eacces = Object.assign(new Error('spawnSync npx EACCES'), { code: 'EACCES' });
-    hostWithoutCodex({ status: null, error: eacces });
-
-    expect(resolveCodexCli(root, scratch)).toMatchObject({
-      ok: false,
-      error: 'codex_npx_failed',
-      detail: ['spawnSync npx EACCES'],
-    });
-  });
-
-  it("names the API key option and keeps npm's error when the pinned CLI fails to run", async () => {
-    writeManifest([{ name: '@openai/codex', version: '0.169.0' }]);
-    hostWithoutCodex({ status: 1, stderr: 'npm error code ENOTFOUND\n\nnpm error network request failed\n' });
-
-    const result = resolveCodexCli(root, scratch);
-
-    expect(result).toMatchObject({
-      ok: false,
-      error: 'codex_npx_failed',
-      detail: ['npm error code ENOTFOUND', 'npm error network request failed'],
-      install: PINNED_INSTALL,
-      message: expect.stringContaining('API key'),
-    });
-
-    // npm's lines reach the terminal and logs/setup.log; the install
-    // commands only the terminal.
-    vi.spyOn(process, 'exit').mockImplementation((() => {
-      throw new Error('setup stopped');
-    }) as typeof process.exit);
+  it('with no pin, prints both install commands and stops before any login', async () => {
+    const exit = stopOnExit();
     const log = vi.spyOn(console, 'log');
-    await expect(runCodexLoginAuth('device', { has: async () => false, save: vi.fn() }, root)).rejects.toThrow(
-      'setup stopped',
-    );
-    const printed = log.mock.calls.map((call: unknown[]) => String(call[0])).join('\n');
-    expect(printed).toContain('npm error code ENOTFOUND');
-    for (const command of PINNED_INSTALL) expect(printed).toContain(command);
-    expect(setupLog.step).toHaveBeenCalledWith('auth', 'failed', 0, {
-      PROVIDER: 'codex',
-      METHOD: 'device',
-      ERROR: 'codex_npx_failed',
-      MESSAGE: 'npm error code ENOTFOUND | npm error network request failed',
-    });
-  });
-
-  it('stops setup before any login, and removes its throwaway home, when the pinned CLI fails to run', async () => {
-    writeManifest([{ name: '@openai/codex', version: '0.169.0' }]);
-    hostWithoutCodex({ status: 1 });
-    playLogin();
-    const exit = vi.spyOn(process, 'exit').mockImplementation((() => {
-      throw new Error('setup stopped');
-    }) as typeof process.exit);
 
     await expect(runCodexLoginAuth('device', { has: async () => false, save: vi.fn() }, root)).rejects.toThrow(
       'setup stopped',
     );
 
     expect(exit).toHaveBeenCalledWith(1);
+    expect(mockSpawn).not.toHaveBeenCalled();
+    expect(printedBy(log)).toContain('curl -fsSL https://chatgpt.com/codex/install.sh | sh');
     expect(setupLog.step).toHaveBeenCalledWith('auth', 'failed', 0, {
       PROVIDER: 'codex',
       METHOD: 'device',
-      ERROR: 'codex_npx_failed',
+      ERROR: 'codex_cli_missing',
     });
-    expect(mockSpawn).not.toHaveBeenCalled();
     const [home] = probeHomes();
-    expect(home).toBeDefined();
     expect(home).not.toBe(path.join(os.homedir(), '.codex'));
     expect(fs.existsSync(home!)).toBe(false);
   });
 
-  // OpenAI's installer puts ~/.local/bin on PATH through the shell profile,
-  // which the shell setup runs in hasn't read.
+  // pnpm prints its own fetch error to the terminal, above this message.
   it.each([
-    ['codex_cli_missing', undefined, { status: 0 }],
-    ['codex_npx_missing', '0.169.0', { status: null, error: enoent('npx') }],
-    ['codex_npx_failed', '0.169.0', { status: 1 }],
-  ] as const)('%s says to re-run setup in a new terminal', (error, version, npx) => {
-    if (version) writeManifest([{ name: '@openai/codex', version }]);
-    hostWithoutCodex(npx);
+    ['pnpm exits non-zero', () => playLogin(1)],
+    [
+      'pnpm cannot start',
+      () =>
+        mockSpawn.mockImplementation(() => {
+          const child = new EventEmitter();
+          setImmediate(() => child.emit('error', Object.assign(new Error('spawn pnpm ENOENT'), { code: 'ENOENT' })));
+          return child;
+        }),
+    ],
+  ])('when %s, names the installer, a new terminal and the API key option', async (_label, play) => {
+    writeManifest([{ name: '@openai/codex', version: '0.169.0' }]);
+    play();
+    const exit = stopOnExit();
+    const log = vi.spyOn(console, 'log');
+    const stdout = vi.spyOn(process.stdout, 'write');
+    const save = vi.fn();
 
-    expect(resolveCodexCli(root, scratch)).toMatchObject({
-      error,
-      message: expect.stringContaining('re-run setup in a new terminal'),
+    await expect(runCodexLoginAuth('device', { has: async () => false, save }, root)).rejects.toThrow('setup stopped');
+
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(save).not.toHaveBeenCalled();
+    const printed = printedBy(log, stdout);
+    expect(printed).toMatch(/pinned Codex CLI 0\.169\.0.*re-run setup in a new terminal.*API key/s);
+    for (const command of PINNED_INSTALL) expect(printed).toContain(command);
+    expect(setupLog.step).toHaveBeenCalledWith('auth', 'failed', expect.any(Number), {
+      PROVIDER: 'codex',
+      METHOD: 'device',
+      EXIT_CODE: '1',
+      CLI: 'pnpm dlx @openai/codex@0.169.0',
+    });
+    expect(fs.readdirSync(path.join(root, 'data', 'codex-login'))).toEqual([]);
+  });
+
+  it('when a host Codex login fails, says to retry, with no install commands', async () => {
+    mockSpawnSync.mockReturnValue({ status: 0, signal: null, stdout: 'codex-cli 0.169.0', stderr: '' });
+    playLogin(1);
+    stopOnExit();
+    const log = vi.spyOn(console, 'log');
+    const stdout = vi.spyOn(process.stdout, 'write');
+
+    await expect(runCodexLoginAuth('device', { has: async () => false, save: vi.fn() }, root)).rejects.toThrow(
+      'setup stopped',
+    );
+
+    const printed = printedBy(log, stdout);
+    expect(printed).toContain('Re-run setup and try again');
+    expect(printed).not.toContain('install.sh');
+    expect(setupLog.step).toHaveBeenCalledWith('auth', 'failed', expect.any(Number), {
+      PROVIDER: 'codex',
+      METHOD: 'device',
+      EXIT_CODE: '1',
     });
   });
 
   // Ctrl-C reaches the probe too, and setup's own handler runs only once the
   // probe returns: a probe a stop signal ended means setup is stopping.
-  it.each([
-    ['the host probe', 'SIGINT', 'host', ['codex']],
-    ['the npx fetch', 'SIGINT', 'npx', ['codex', 'npx']],
-    ['the npx fetch', 'SIGTERM', 'npx', ['codex', 'npx']],
-    ["npm's install, which exits 1 naming it,", 'SIGINT', 'npm', ['codex', 'npx']],
-    ['npm under a custom log heading', 'SIGTERM', 'npm-heading', ['codex', 'npx']],
-    ['the pinned CLI check', 'SIGHUP', 'bin', ['codex', 'npx', BIN]],
-  ] as const)('reports a stop, not a failure, when %s ends on %s', (_label, signal, where, probed) => {
-    writeManifest([{ name: '@openai/codex', version: '0.169.0' }]);
-    if (where === 'host') mockSpawnSync.mockReturnValue({ status: null, signal, stdout: '', stderr: '' });
-    else if (where === 'npm') hostWithoutCodex({ status: 1, stderr: npmStopped(signal) });
-    else if (where === 'npm-heading')
-      hostWithoutCodex({ status: 1, stderr: npmStopped(signal).replaceAll('npm error', 'Acme Build error') });
-    else hostWithoutCodex(where === 'npx' ? { status: null, signal } : { status: 0, binSignal: signal });
+  it.each(['SIGINT', 'SIGTERM', 'SIGHUP'] as const)(
+    'reports a stop, not a failure, when the probe ends on %s',
+    (signal) => {
+      writeManifest([{ name: '@openai/codex', version: '0.169.0' }]);
+      mockSpawnSync.mockReturnValue({ status: null, signal, stdout: '', stderr: '' });
 
-    expect(resolveCodexCli(root, scratch)).toEqual({ ok: false, stoppedBy: signal });
-    expect(mockSpawnSync.mock.calls.map((call: unknown[]) => call[0])).toEqual(probed);
-  });
+      expect(resolveCodexCli(root, scratch)).toEqual({ ok: false, stoppedBy: signal });
+    },
+  );
 
   it.each([
-    ['npx dies of any other signal', { status: null, signal: 'SIGKILL' as const }],
-    ['npm names any other signal', { status: 1, stderr: npmStopped('SIGKILL') }],
+    ['dies of any other signal', { status: null, signal: 'SIGKILL' }],
     // spawnSync kills a child that overflows its buffer, and says so.
     [
-      'Node kills an overflowing npx',
+      'is killed by Node for overflowing',
       {
         status: null,
-        signal: 'SIGTERM' as const,
-        error: Object.assign(new Error('spawnSync npx ENOBUFS'), { code: 'ENOBUFS' }),
+        signal: 'SIGTERM',
+        error: Object.assign(new Error('spawnSync codex ENOBUFS'), { code: 'ENOBUFS' }),
       },
     ],
-  ])('still reports a failure when %s', (_label, npx) => {
+    ['fails', { status: 2, signal: null }],
+  ])('runs the pin through pnpm when the probe %s', (_label, probed) => {
     writeManifest([{ name: '@openai/codex', version: '0.169.0' }]);
-    hostWithoutCodex(npx);
+    mockSpawnSync.mockReturnValue({ stdout: '', stderr: '', ...probed });
 
-    expect(resolveCodexCli(root, scratch)).toMatchObject({ ok: false, error: 'codex_npx_failed' });
+    expect(resolveCodexCli(root, scratch)).toEqual({ ok: true, command: 'pnpm', prefix: DLX, pinned: '0.169.0' });
   });
 
-  it('resolves to the npx binary when npx succeeds, whatever its stderr says', () => {
+  it('on Ctrl-C during the probe, removes the home and re-raises the signal, with no error', async () => {
     writeManifest([{ name: '@openai/codex', version: '0.169.0' }]);
-    hostWithoutCodex({ status: 0, stderr: npmStopped('SIGTERM') });
-
-    expect(resolveCodexCli(root, scratch)).toEqual({ ok: true, command: BIN });
-  });
-
-  it("reads npm's interruption line only from npx", () => {
-    mockSpawnSync.mockReturnValue({ status: 2, signal: null, stdout: '', stderr: 'launcher error signal SIGTERM\n' });
-
-    expect(resolveCodexCli(root, scratch)).toMatchObject({ ok: false, error: 'codex_cli_missing' });
-  });
-
-  it('on Ctrl-C during the npx fetch, removes the home and re-raises the signal, with no error', async () => {
-    writeManifest([{ name: '@openai/codex', version: '0.169.0' }]);
-    hostWithoutCodex({ status: 1, stderr: npmStopped('SIGINT') });
-    playLogin();
+    mockSpawnSync.mockReturnValue({ status: null, signal: 'SIGINT', stdout: '', stderr: '' });
     const listeners = () => ['exit', 'SIGINT', 'SIGTERM', 'SIGHUP'].map((event) => process.listenerCount(event));
     const before = listeners();
     let homeAtKill: boolean | undefined;
@@ -712,9 +606,7 @@ describe('runCodexLoginAuth without a host Codex CLI', () => {
       homeAtKill = fs.existsSync(probeHomes()[0]!);
       return true;
     });
-    const exit = vi.spyOn(process, 'exit').mockImplementation((() => {
-      throw new Error('setup stopped');
-    }) as typeof process.exit);
+    const exit = stopOnExit();
     const stdout = vi.spyOn(process.stdout, 'write');
     const log = vi.spyOn(console, 'log');
 
@@ -728,10 +620,61 @@ describe('runCodexLoginAuth without a host Codex CLI', () => {
     expect(kill.mock.invocationCallOrder[0]).toBeLessThan(exit.mock.invocationCallOrder[0]);
     expect(mockSpawn).not.toHaveBeenCalled();
     expect(setupLog.step).not.toHaveBeenCalled();
-    const printed = [...stdout.mock.calls, ...log.mock.calls].map((call: unknown[]) => String(call[0])).join('\n');
+    const printed = printedBy(stdout, log);
     expect(printed).not.toContain("Couldn't");
     expect(printed).not.toContain(PINNED_INSTALL[0]);
     expect(listeners()).toEqual(before);
+  });
+
+  // The fetch runs inside the login spawn, so setup's own handler is live:
+  // Ctrl-C mid-fetch stops pnpm like any login, with no error.
+  it('on Ctrl-C while pnpm fetches, stops pnpm, then removes the home and re-raises the signal', async () => {
+    writeManifest([{ name: '@openai/codex', version: '0.169.0' }]);
+    const runnerOwn = process.listeners('SIGINT');
+    const log = vi.spyOn(console, 'log');
+    // The re-raised signal ends setup there, so what counts is what was printed by then.
+    let printedAtKill: string | undefined;
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => {
+      printedAtKill = printedBy(log);
+      return true;
+    });
+    stopOnExit();
+    let home: string | undefined;
+    let homeWhileStopping: boolean | undefined;
+    const child = Object.assign(new EventEmitter(), {
+      exitCode: null,
+      signalCode: null,
+      kill: vi.fn(() => {
+        setImmediate(() => {
+          homeWhileStopping = fs.existsSync(home!);
+          child.emit('close', null);
+        });
+        return true;
+      }),
+    });
+    mockSpawn.mockImplementation((...args: unknown[]) => {
+      home = (args[2] as { env?: NodeJS.ProcessEnv }).env!.CODEX_HOME;
+      setImmediate(() =>
+        process
+          .listeners('SIGINT')
+          .filter((listener) => !runnerOwn.includes(listener))
+          .forEach((listener) => (listener as (s: NodeJS.Signals) => void)('SIGINT')),
+      );
+      return child;
+    });
+
+    await expect(runCodexLoginAuth('device', { has: async () => false, save: vi.fn() }, root)).rejects.toThrow(
+      'setup stopped',
+    );
+
+    expect(mockSpawn.mock.calls[0][0]).toBe('pnpm');
+    expect(child.kill.mock.calls).toEqual([['SIGTERM']]);
+    expect(homeWhileStopping).toBe(true);
+    expect(kill).toHaveBeenCalledWith(process.pid, 'SIGINT');
+    expect(fs.existsSync(home!)).toBe(false);
+    expect(printedAtKill).toContain('pnpm fetches it once');
+    expect(printedAtKill).not.toContain("Couldn't");
+    expect(printedAtKill).not.toContain(PINNED_INSTALL[0]);
   });
 });
 

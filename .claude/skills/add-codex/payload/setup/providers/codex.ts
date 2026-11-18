@@ -4,7 +4,7 @@
  * ~/.codex/auth.json is copied: rotating one session from two consumers
  * would invalidate it. Both setup entry points use this provider hook.
  */
-import { type ChildProcess, spawn, spawnSync, type SpawnSyncReturns } from 'child_process';
+import { type ChildProcess, spawn, spawnSync } from 'child_process';
 import { getCredentialStore, type ProviderCredentialStore } from '../gateways/credential-store.js';
 import fs from 'fs';
 import os from 'os';
@@ -134,8 +134,8 @@ export async function runCodexApiKeyAuth(store: ProviderCredentialStore): Promis
 }
 
 // semver.org's strict grammar, with bounded numbers and no build metadata.
-// npm reads anything it can't parse as a version (`0.169.0-..`, numbers past
-// 2^53, specs over 256 chars) as a dist-tag, which can point anywhere.
+// npm and pnpm read anything they can't parse as a version (`0.169.0-..`,
+// numbers past 2^53, specs over 256 chars) as a dist-tag, which can point anywhere.
 const EXACT_VERSION =
   /^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})(?:-(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*)?$/;
 
@@ -164,35 +164,28 @@ export function codexInstallCommands(version?: string): string[] {
 }
 
 type CodexCli =
-  | { ok: true; command: string }
+  | { ok: true; command: string; prefix: string[]; pinned?: string }
   | { ok: false; stoppedBy: NodeJS.Signals }
-  | { ok: false; error: string; message: string; detail?: string[]; install: string[] };
+  | { ok: false; error: string; message: string; install: string[] };
 
 /**
  * The host's `codex` when it runs; otherwise the version pinned for the image,
- * fetched by npx into the user's npm cache (no global install, no sudo) and run
- * from there. The spec goes to `npx --yes`, which runs on the host, so only an
- * exact pin is used. `scratch` is a private throwaway dir: the probes'
- * CODEX_HOME and npx's project.
- *
- * Ctrl-C reaches these probes too, and setup's own handler can't run until
- * this returns, so a probe ended by a stop signal gives `stoppedBy`: setup
- * is stopping, nothing failed. Under the tsx CLI a Ctrl-C mid-fetch may
- * instead get setup SIGKILLed by tsx, whose relay can't reach a blocked
- * child; that home holds no token yet, and a later sign-in sweeps it.
+ * run by pnpm dlx from pnpm's cache (no global install, no sudo), the way setup
+ * runs the pinned Bun. The spec runs on the host, so only an exact pin is used.
+ * `home` is the probe's CODEX_HOME.
  */
-export function resolveCodexCli(root: string, scratch: string): CodexCli {
+export function resolveCodexCli(root: string, home: string): CodexCli {
   // Any codex run, even `--version`, creates its CODEX_HOME (default ~/.codex).
-  const probe = (cmd: string, args: string[], cwd?: string) =>
-    spawnSync(cmd, args, {
-      cwd,
-      env: { ...process.env, CODEX_HOME: scratch },
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-  const host = probe('codex', ['--version']);
-  if (host.status === 0) return { ok: true, command: 'codex' };
-  let stoppedBy = stopSignalOf(host);
+  const host = spawnSync('codex', ['--version'], {
+    env: { ...process.env, CODEX_HOME: home },
+    encoding: 'utf-8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  if (host.status === 0) return { ok: true, command: 'codex', prefix: [] };
+  // Ctrl-C reaches this probe too, before setup's own handler can run: setup
+  // is stopping, nothing failed. Node's own kill on a buffer overflow comes
+  // with an error and isn't a stop.
+  const stoppedBy = host.error ? undefined : LOGIN_SIGNALS.find((signal) => signal === host.signal);
   if (stoppedBy) return { ok: false, stoppedBy };
 
   const version = readPinnedCodexVersion(root);
@@ -205,75 +198,7 @@ export function resolveCodexCli(root: string, scratch: string): CodexCli {
       install: codexInstallCommands(),
     };
   }
-
-  // npx treats a matching package anywhere in its project's node_modules as
-  // installed and then runs whatever `codex` that tree exposes, so it runs in
-  // an empty private project rather than the repo.
-  const npxDir = path.join(scratch, 'npx');
-  fs.mkdirSync(npxDir, { recursive: true, mode: 0o700 });
-  fs.writeFileSync(path.join(npxDir, 'package.json'), '{ "private": true }\n');
-  p.log.step(brandBody(`Preparing the pinned Codex CLI (${version}) for sign-in…`));
-  console.log(k.dim('   (no Codex CLI on this machine: npx fetches it once into your npm cache, no global install)'));
-  // npx names the binary it fetched for the pin, and the login runs that binary
-  // directly, so a stop signal reaches Codex instead of ending at npm.
-  // --ignore-scripts matches the image install (codex ships none); --loglevel
-  // keeps npm's notices, such as its update nag, off the sign-in screen;
-  // --color=false keeps its error lines plain even when color is forced.
-  const fetched = probe(
-    'npx',
-    [
-      '--yes',
-      '--ignore-scripts',
-      '--loglevel=error',
-      '--color=false',
-      '--package',
-      `@openai/codex@${version}`,
-      '-c',
-      'command -v codex',
-    ],
-    npxDir,
-  );
-  stoppedBy = stopSignalOf(fetched, { npm: true });
-  if (stoppedBy) return { ok: false, stoppedBy };
-  if ((fetched.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') {
-    return {
-      ok: false,
-      error: 'codex_npx_missing',
-      message: `The Codex CLI isn't installed on this machine, and npx isn't available to run the pinned version ${version}. Install the Codex CLI (below), then re-run setup in a new terminal — or choose the API key option instead.`,
-      install: codexInstallCommands(version),
-    };
-  }
-  const failed = (lines: string): CodexCli => ({
-    ok: false,
-    error: 'codex_npx_failed',
-    message: `Couldn't run the pinned Codex CLI ${version} with npx (details below). Check that this machine can reach the npm registry, or install the Codex CLI (below), then re-run setup in a new terminal — or choose the API key option instead.`,
-    install: codexInstallCommands(version),
-    detail: lines
-      .split('\n')
-      .map((line) => line.trim().slice(0, 300))
-      .filter(Boolean)
-      .slice(0, 12),
-  });
-  // npm's own error lines, or the spawn error, name the actual cause.
-  if (fetched.status !== 0) return failed(fetched.error ? fetched.error.message : String(fetched.stderr ?? ''));
-  const bin =
-    String(fetched.stdout ?? '')
-      .trim()
-      .split('\n')
-      .pop() ?? '';
-  const ran = path.isAbsolute(bin) ? probe(bin, ['--version']) : undefined;
-  stoppedBy = ran && stopSignalOf(ran);
-  if (stoppedBy) return { ok: false, stoppedBy };
-  if (
-    ran?.status !== 0 ||
-    !String(ran.stdout ?? '')
-      .trim()
-      .split(/\s+/)
-      .includes(version)
-  ) {
-    return failed(`npx gave "${bin}" for @openai/codex@${version}, and it did not report that version.`);
-  }
-  return { ok: true, command: bin };
+  return { ok: true, command: 'pnpm', prefix: [`--package=@openai/codex@${version}`, 'dlx', 'codex'], pinned: version };
 }
 
 export async function runCodexLoginAuth(
@@ -308,9 +233,10 @@ export async function runCodexLoginAuth(
     removeLoginHome();
     process.kill(process.pid, signal);
   };
-  // A signal sent to setup alone never reaches the login, so stop it first:
-  // the home goes once it has exited, or once it is killed after 3s or on a
-  // second signal. The hooks stay attached until then.
+  // A signal sent to setup alone never reaches the login, so stop it first
+  // (pnpm passes the stop on to Codex): the home goes once it has exited, or
+  // once it is killed after 3s or on a second signal. The hooks stay attached
+  // until then.
   function onSignal(signal: NodeJS.Signals): void {
     const child = login;
     if (!child || child.exitCode !== null || child.signalCode !== null) return finish(signal);
@@ -338,22 +264,6 @@ export async function runCodexLoginAuth(
 
 const LOGIN_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const;
 const STALE_LOGIN_MS = 60 * 60 * 1000;
-
-/**
- * The stop signal that ended a probe, if one did. npm dies of it early on but
- * exits 1 naming it mid-install (after its configurable heading), so for npx
- * that line counts too. Node's own kill on a buffer overflow comes with an
- * error and isn't a stop; neither is anything a probe that succeeded printed.
- */
-function stopSignalOf(
-  probed: SpawnSyncReturns<string>,
-  { npm = false } = {},
-): (typeof LOGIN_SIGNALS)[number] | undefined {
-  if (probed.error || probed.status === 0) return undefined;
-  const named = npm ? / (?:error|ERR!) signal (SIG[A-Z]+)$/m.exec(String(probed.stderr ?? ''))?.[1] : undefined;
-  const signal = probed.signal ?? named;
-  return LOGIN_SIGNALS.find((stop) => stop === signal);
-}
 
 /**
  * A private throwaway CODEX_HOME under the install's git-ignored data/, not the
@@ -394,18 +304,13 @@ async function signIn(
   }
   if (!cli.ok) {
     p.log.error(brandBody(cli.message));
-    for (const line of cli.detail ?? []) console.log(k.dim(`   ${line}`));
-    console.log(k.dim("   Install the Codex CLI with OpenAI's installer (no sudo, into ~/.local/bin):"));
-    console.log(`     ${cli.install[0]}`);
-    console.log(k.dim('   or with npm, if it can install globally:'));
-    console.log(`     ${cli.install[1]}`);
-    setupLog.step('auth', 'failed', 0, {
-      PROVIDER: 'codex',
-      METHOD: method,
-      ERROR: cli.error,
-      ...(cli.detail?.length ? { MESSAGE: storeFailureMessage(cli.detail.join(' | ')) } : {}),
-    });
+    printInstallCommands(cli.install);
+    setupLog.step('auth', 'failed', 0, { PROVIDER: 'codex', METHOD: method, ERROR: cli.error });
     process.exit(1);
+  }
+  if (cli.pinned) {
+    p.log.step(brandBody(`Preparing the pinned Codex CLI (${cli.pinned}) for sign-in…`));
+    console.log(k.dim('   (no Codex CLI on this machine: pnpm fetches it once into its cache, no global install)'));
   }
 
   if (method === 'browser') {
@@ -419,17 +324,31 @@ async function signIn(
 
   const args = method === 'device' ? ['login', '--device-auth'] : ['login'];
   const start = Date.now();
-  const code = await runInherit(cli.command, args, { env: { CODEX_HOME: loginHome }, onSpawn });
+  const code = await runInherit(cli.command, [...cli.prefix, ...args], { env: { CODEX_HOME: loginHome }, onSpawn });
   const durationMs = Date.now() - start;
   console.log();
 
   if (code !== 0) {
-    setupLog.step('auth', 'failed', durationMs, { PROVIDER: 'codex', METHOD: method, EXIT_CODE: String(code) });
+    setupLog.step('auth', 'failed', durationMs, {
+      PROVIDER: 'codex',
+      METHOD: method,
+      EXIT_CODE: String(code),
+      ...(cli.pinned ? { CLI: `pnpm dlx @openai/codex@${cli.pinned}` } : {}),
+    });
+    if (!cli.pinned) {
+      p.log.error(
+        brandBody(
+          "Couldn't complete the Codex sign-in. Re-run setup and try again, or choose the API key option instead.",
+        ),
+      );
+      process.exit(1);
+    }
     p.log.error(
       brandBody(
-        "Couldn't complete the Codex sign-in. Re-run setup and try again, or choose the API key option instead.",
+        `Couldn't complete the Codex sign-in with the pinned Codex CLI ${cli.pinned}. If pnpm couldn't fetch it (see above), check that this machine can reach the npm registry, or install the Codex CLI (below), then re-run setup in a new terminal — or choose the API key option instead.`,
       ),
     );
+    printInstallCommands(codexInstallCommands(cli.pinned));
     process.exit(1);
   }
 
@@ -462,6 +381,14 @@ async function signIn(
   p.log.success(
     brandBody('OpenAI account connected — credentials live in your selected gateway, never in the container.'),
   );
+}
+
+/** OpenAI's installer first: npm works only where it can install globally. */
+function printInstallCommands(install: string[]): void {
+  console.log(k.dim("   Install the Codex CLI with OpenAI's installer (no sudo, into ~/.local/bin):"));
+  console.log(`     ${install[0]}`);
+  console.log(k.dim('   or with npm, if it can install globally:'));
+  console.log(`     ${install[1]}`);
 }
 
 function runInherit(
