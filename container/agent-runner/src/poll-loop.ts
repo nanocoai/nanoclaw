@@ -456,7 +456,7 @@ export async function processQuery(
   // A retry is another provider input, behind any follow-ups already pushed.
   // Preserve its original route, prompt and retry guards until it is answered.
   const pushRetry = (prompt: string, retryOf?: SeqWindow): void => {
-    const inputId = query.push(prompt) || undefined;
+    const inputId = inputIdOf(query.push(prompt));
     queuedTurns.push({ routing: { ...routing }, unwrappedNudged, taskBlockNudged, nudgedWindow: retryOf, inputId });
     archivePrompts.push(archivePrompts[0] ?? initialPrompt);
   };
@@ -581,7 +581,7 @@ export async function processQuery(
         const keptIds = keep.map((m) => m.id);
         const prompt = formatMessages(keep);
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
-        const inputId = query.push(prompt) || undefined;
+        const inputId = inputIdOf(query.push(prompt));
         archivePrompts.push(prompt);
         const next: QueuedTurn = {
           routing: extractRouting(keep),
@@ -891,6 +891,11 @@ function sameNoticeRoute(a: RoutingContext, b: RoutingContext): boolean {
     a.threadId === b.threadId &&
     (b.channelType !== 'agent' || a.inReplyTo === b.inReplyTo)
   );
+}
+
+/** The id a provider's push gave an input: any string it returns, else none. */
+function inputIdOf(pushed: string | void): string | undefined {
+  return typeof pushed === 'string' ? pushed : undefined;
 }
 
 /** Send the dedicated provider error or a generic failure notice. */
