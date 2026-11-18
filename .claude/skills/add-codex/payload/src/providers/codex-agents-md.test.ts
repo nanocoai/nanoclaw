@@ -127,9 +127,11 @@ describe('Codex project-doc cap', () => {
       new URL('../../container/agent-runner/src/providers/codex-app-server.ts', import.meta.url),
       'utf-8',
     );
-    const match = source.match(/^const CODEX_PROJECT_DOC_MAX_BYTES = (\d+(?:\s*\*\s*\d+)*);$/m);
+    const match = source.match(/^const CODEX_PROJECT_DOC_MAX_BYTES = ([\d_]+(?:\s*\*\s*[\d_]+)*);$/m);
     expect(match, 'CODEX_PROJECT_DOC_MAX_BYTES not found in codex-app-server.ts').not.toBeNull();
-    const containerCap = match![1].split('*').reduce((product, factor) => product * Number(factor.trim()), 1);
+    const containerCap = match![1]
+      .split('*')
+      .reduce((product, factor) => product * Number(factor.replace(/_/g, '').trim()), 1);
     expect(containerCap).toBe(CODEX_PROJECT_DOC_MAX_BYTES);
   });
 });
