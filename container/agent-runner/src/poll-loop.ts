@@ -507,6 +507,7 @@ export async function processQuery(
       // wrote; its window is checked on its own, per thread (see
       // repeatsAbsorbedRetry), never merged into this turn's.
       if (turn.nudgedWindow) absorbedWindows.push(turn.nudgedWindow);
+      absorbedWindows.push(...(turn.carriedWindows ?? []));
       // A new message absorbed into a retry turn has not been nudged: its
       // answer may still need one (bounded, as the retry it pushes is guarded).
       if (!turn.retry) unwrappedNudged = false;
