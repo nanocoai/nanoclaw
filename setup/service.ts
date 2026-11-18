@@ -13,10 +13,11 @@ import { readEnvFile } from '../src/env.js';
 import { log } from '../src/log.js';
 import { getInstallSlug, getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
 import { writeUpgradeState } from '../src/upgrade-state.js';
+import { sudoNonInteractive } from './lib/sudo-noninteractive.js';
+import { ensureUserLinger } from './lib/systemd-linger.js';
 import { cleanupUnhealthyPeers } from './peer-cleanup.js';
 import { commandExists, getPlatform, getNodePath, getServiceManager, isRoot } from './platform.js';
 import { emitStatus } from './status.js';
-import { ensureUserLinger } from './lib/systemd-linger.js';
 
 export async function run(_args: string[]): Promise<void> {
   const projectRoot = process.cwd();
@@ -491,19 +492,6 @@ function checkDockerGroupStale(): boolean {
 const DOCKER_SOCKET = '/var/run/docker.sock';
 // A fresh VM's first-boot apt run can hold the dpkg lock for a while.
 const APT_INSTALL_ACL = 'env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq -o DPkg::Lock::Timeout=60 acl';
-
-// Steps run with stdin ignored, but sudo prompts on /dev/tty, which would hang
-// out of sight under the wizard spinner. -n uses a cached ticket or fails fast.
-function sudoNonInteractive(args: string[], timeout: number): boolean {
-  try {
-    execFileSync('sudo', ['-n', ...args], { stdio: ['ignore', 'pipe', 'pipe'], timeout });
-    return true;
-  } catch (err) {
-    const stderr = (err as { stderr?: Buffer }).stderr?.toString().trim();
-    log.warn('sudo command failed', { command: args.join(' '), stderr: stderr || String(err) });
-    return false;
-  }
-}
 
 interface DockerAccess {
   stale: boolean;

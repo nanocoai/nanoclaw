@@ -1,6 +1,7 @@
 import { execFileSync } from 'child_process';
 
 import { log } from '../../src/log.js';
+import { sudoNonInteractive } from './sudo-noninteractive.js';
 
 const COMMAND_TIMEOUT_MS = 5_000;
 
@@ -27,31 +28,27 @@ export function ensureUserLinger(uid: number): boolean {
   // With a controlling terminal, loginctl forks pkttyagent onto it even when
   // stdin is ignored (systemd 257); without polkit that prints an exec error.
   const enableArgs = ['--no-ask-password', 'enable-linger', user];
-  const attempts: [string, string[]][] = [
-    ['loginctl', enableArgs],
-    // Without polkit only root may set linger. Use sudo only if it needs no password.
-    ['sudo', ['-n', 'loginctl', ...enableArgs]],
-  ];
-  const failures: string[] = [];
-  for (const [command, args] of attempts) {
-    try {
-      execFileSync(command, args, {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        timeout: COMMAND_TIMEOUT_MS,
-      });
-    } catch (err) {
-      // The exit status doesn't decide; the state read below does.
-      const stderr = (err as { stderr?: Buffer }).stderr?.toString().trim();
-      failures.push(`${command}: ${stderr || String(err)}`);
-    }
-    if (isEnabled()) {
-      log.info('Verified systemd linger for current user', { uid });
-      return true;
-    }
+  let loginctlError = '';
+  try {
+    execFileSync('loginctl', enableArgs, { stdio: ['ignore', 'pipe', 'pipe'], timeout: COMMAND_TIMEOUT_MS });
+  } catch (err) {
+    const stderr = (err as { stderr?: Buffer }).stderr?.toString().trim();
+    loginctlError = stderr || String(err);
+  }
+  // Exit statuses don't decide; the state reads do. Without polkit only root
+  // may set linger, so try sudo next, which fails rather than prompts.
+  let enabled = isEnabled();
+  if (!enabled) {
+    sudoNonInteractive(['loginctl', ...enableArgs], COMMAND_TIMEOUT_MS);
+    enabled = isEnabled();
+  }
+  if (enabled) {
+    log.info('Verified systemd linger for current user', { uid });
+    return true;
   }
 
   log.warn('Systemd linger could not be verified — service may stop on logout', {
-    failures,
+    loginctl: loginctlError || 'exited 0, Linger still off',
     hint: `Run sudo loginctl enable-linger ${user}, then check loginctl show-user ${user} --property=Linger`,
   });
   return false;
