@@ -93,11 +93,14 @@ describe('wakeContainer when the driver refuses the start', () => {
   });
 
   it('keeps the retry warning for a failure a retry can clear', async () => {
-    prepare.mockRejectedValue(asFailureError({ kind: 'runtime-unavailable', retryable: true }));
+    const err = asFailureError({ kind: 'runtime-unavailable', retryable: true });
+    prepare.mockRejectedValue(err);
 
     expect(await wakeContainer(session())).toBe(false);
 
-    expect(log.warn).toHaveBeenCalledWith(RETRY_WARNING, expect.objectContaining({ sessionId: 'sess-1' }));
+    // Without these, an unrelated failure before the driver was reached would pass too.
+    expect(prepare).toHaveBeenCalledTimes(1);
+    expect(log.warn).toHaveBeenCalledWith(RETRY_WARNING, expect.objectContaining({ sessionId: 'sess-1', err }));
     expect(log.error).not.toHaveBeenCalledWith(expect.stringMatching(/refused/i), expect.anything());
   });
 });

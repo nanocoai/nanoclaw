@@ -11,7 +11,7 @@ import os from 'os';
 import path from 'path';
 import { MOUNT_ALLOWLIST_PATH } from '../../config.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
-import { mountPolicy } from '../../drivers/index.js';
+import { sessionMountPolicy } from '../../drivers/index.js';
 import { GROUP_FOLDER_LABEL, requiredMountClass, type MountClass } from '../../drivers/types.js';
 import { log } from '../../log.js';
 
@@ -229,7 +229,7 @@ export async function reservedMountClass(agentGroupId: string, hostPath: string)
   const group = await getAgentGroup(agentGroupId);
   const labels: Record<string, string> = group ? { [GROUP_FOLDER_LABEL]: group.folder } : {};
   const expanded = expandPath(hostPath);
-  return requiredMountClass(getRealPath(expanded) ?? expanded, { labels }, mountPolicy());
+  return requiredMountClass(getRealPath(expanded) ?? expanded, { labels }, sessionMountPolicy());
 }
 
 /**

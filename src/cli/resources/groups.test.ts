@@ -46,7 +46,7 @@ import { ensureContainerConfig, getContainerConfig } from '../../db/container-co
 import { restartAgentGroupContainers } from '../../container-restart.js';
 import { configFromDb } from '../../container-config.js';
 import type { ContainerConfig } from '../../container-config.js';
-import { mountPolicy } from '../../drivers/index.js';
+import { getSessionDriver, mountPolicy, resetSessionDriver } from '../../drivers/index.js';
 // Side-effect import: registers the `groups-*` commands (including delete).
 import './groups.js';
 // Side-effect import: registers Claude's host contract (the `--speed` vocabulary source).
@@ -465,6 +465,36 @@ describe('groups config (host-only)', () => {
     expect(message).toContain(reserved);
     expect(/cop(y|ies)/i.test(message)).toBe(advisesCopy);
     expect(JSON.parse((await getContainerConfig(GID))!.additional_mounts)).toEqual([]);
+  });
+
+  // The running driver checks every start against the policy it was built
+  // with; a later `.env` edit only applies on restart. add-mount must agree.
+  it('judges a path by the policy the running driver enforces, not a later .env edit', async () => {
+    const KEY = 'NANOCLAW_SESSION_MATERIAL_ROOT';
+    const saved = process.env[KEY];
+    const atStart = path.join(TEST_DIR, 'materials-at-start');
+    const edited = path.join(TEST_DIR, 'materials-edited');
+    const GID = 'ag-mount-snapshot';
+    await createAgentGroup({ id: GID, name: 's', folder: 's', agent_provider: null, created_at: now() });
+    await ensureContainerConfig(GID);
+    const add = (host: string) =>
+      dispatch(
+        { id: `r-${host}`, command: 'groups-config-add-mount', args: { id: GID, host, container: 'x' } },
+        { caller: 'host' },
+      );
+    try {
+      process.env[KEY] = atStart;
+      resetSessionDriver();
+      getSessionDriver();
+      process.env[KEY] = edited;
+
+      expect((await add(atStart)).ok).toBe(false);
+      expect((await add(edited)).ok).toBe(true);
+    } finally {
+      if (saved === undefined) delete process.env[KEY];
+      else process.env[KEY] = saved;
+      resetSessionDriver();
+    }
   });
 
   describe("--speed validates against the tiers the group's provider declares", () => {
