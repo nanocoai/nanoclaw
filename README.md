@@ -13,9 +13,9 @@
   Self-hosted, open source, and small enough to read. Each agent runs in its own container on your machine, on the harness you choose.
 </p>
 
-<p align="center"><strong><a href="#quick-start">Quick start</a></strong> &nbsp;·&nbsp; <strong><a href="https://docs.nanoclaw.dev">Documentation</a></strong> &nbsp;·&nbsp; <a href="#usage">Examples</a> &nbsp;·&nbsp; <a href="#what-it-supports">Channels</a></p>
+<p align="center"><strong><a href="#quick-start">🚀 Quick start</a></strong> &nbsp;·&nbsp; <strong><a href="https://docs.nanoclaw.dev">📚 Documentation</a></strong> &nbsp;·&nbsp; <a href="#usage">💬 Examples</a> &nbsp;·&nbsp; <a href="#what-it-supports">🔌 Channels</a></p>
 
-## Why NanoClaw?
+## 🩵 Why NanoClaw?
 
 - **It runs on your machine or your server.** One host process, plus a container per agent session. Nothing to sign up for.
 - **You can read it and change it.** MIT-licensed, and small enough that a coding agent can walk you through all of it. Your fork is your product.
@@ -41,7 +41,7 @@ Self-hosted doesn't mean nothing leaves your machine. Your messages still go to 
 <a name="can-i-run-this-on-linux-or-windows"></a>
 <a name="why-docker"></a>
 
-## Requirements
+## 📋 Requirements
 
 - **System:** macOS, Linux, or Windows with WSL2. Setup is the same on all three: `bash nanoclaw.sh`. The commands below use Git and Bash.
 - **Containers:** Docker Desktop on macOS or Windows, or Docker Engine on Linux. Docker is the default runtime on all three, for its cross-platform support and mature ecosystem.
@@ -61,7 +61,7 @@ Self-hosted doesn't mean nothing leaves your machine. Your messages still go to 
 
 <a name="quick-start"></a>
 
-## Quick Start
+## 🚀 Quick Start
 
 ```bash
 git clone https://github.com/nanocoai/nanoclaw.git
@@ -104,7 +104,7 @@ See [docs/v1-to-v2-changes.md](docs/v1-to-v2-changes.md) for what's different an
 
 <a name="usage"></a>
 
-## Usage
+## 💬 Usage
 
 These examples use an agent named Scout. If your channel requires a mention, mention your own agent.
 
@@ -131,7 +131,7 @@ In this Slack example, Maya asks Scout what customers requested. Once she confir
 <a name="philosophy"></a>
 <a name="customizing"></a>
 
-## Customizing
+## 🛠️ Customizing
 
 NanoClaw avoids configuration sprawl. Customize your fork to fit how you work: just tell your coding agent what you want.
 
@@ -148,7 +148,7 @@ When you need another channel or provider, add it with a skill such as `/add-tel
 
 <a name="what-it-supports"></a>
 
-## What It Supports
+## 🔌 What It Supports
 
 - **Multi-channel messaging** — WhatsApp (personal or Business Cloud API), Telegram, Discord, Slack, Microsoft Teams, iMessage, Signal, Matrix, Mattermost, Google Chat, Webex, Linear, GitHub, WeChat, DeltaChat, Emacs, phone and SMS via Dial, and email via Resend. Installed on demand with `/add-<channel>` skills. Run one or many at the same time.
 - **Flexible isolation** — connect each channel to its own agent for full privacy, share one agent across many channels for unified memory with separate conversations, or fold multiple channels into a single shared session so one conversation spans many surfaces. Pick per channel via `/manage-channels`. See [docs/isolation-model.md](docs/isolation-model.md).
@@ -161,7 +161,7 @@ When you need another channel or provider, add it with a skill such as `/add-tel
 
 <a name="accounts-and-what-leaves-your-machine"></a>
 
-## Accounts and what leaves your machine
+## 🔒 Accounts and what leaves your machine
 
 You can build and run NanoClaw locally without a NanoClaw account. Your model provider sees what your agents read and write, and each channel you connect sees the messages sent through it.
 
@@ -173,7 +173,7 @@ locally needs no account and contacts nothing, and is the default. The same acco
 
 <a name="telemetry"></a>
 
-## Telemetry
+## 📊 Telemetry
 
 **Setup diagnostics.** NanoClaw sends setup diagnostics to PostHog. These include which
 install steps ran, how long they took, whether they worked (with the error message when setup
@@ -189,7 +189,7 @@ export NANOCLAW_NO_DIAGNOSTICS=1
 
 <a name="perks"></a>
 
-## Perks
+## 🎁 Perks
 
 The free account also opens the **community portal** at [portal.nanoclaw.dev](https://portal.nanoclaw.dev), where you switch on what the account offers: a hardened agent image from [Echo](https://echo.ai), who rebuild the software inside the agent's container from scratch and patch it, and a managed Slack app for your agent, with no tokens to paste.
 Setup opens the portal once; everything else in NanoClaw works without it.
@@ -198,7 +198,7 @@ The files and tokens kept on your machine, the `--stage` commands to revisit a s
 <a name="contributing"></a>
 <a name="what-changes-will-be-accepted-into-the-codebase"></a>
 
-## Contributing
+## 🤝 Contributing
 
 **Don't add features. Add skills.**
 
@@ -210,7 +210,7 @@ This keeps trunk as pure registry and infra, and every fork stays lean — users
 
 <a name="architecture"></a>
 
-## Architecture
+## 🏗️ Architecture
 
 ![A channel message flows through the host router and inbound.db to the session container. The reply returns through outbound.db and host delivery to the same channel. Hosted model calls pass through the credential gateway.](assets/nanoclaw-message-flow.svg)
 
@@ -235,7 +235,7 @@ Key files:
 
 <a name="faq"></a>
 
-## FAQ
+## ❓ FAQ
 
 <a name="is-this-secure"></a>
 
@@ -294,7 +294,7 @@ Every install is tagged with a per-checkout id, so the uninstaller removes only 
 
 <a name="community"></a>
 
-## Community
+## 👥 Community
 
 Thank you to the [130+ contributors](https://github.com/nanocoai/nanoclaw/graphs/contributors) who have helped build NanoClaw.
 
@@ -304,13 +304,13 @@ Thank you to the [130+ contributors](https://github.com/nanocoai/nanoclaw/graphs
 
 <a name="changelog"></a>
 
-## Changelog
+## 📝 Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for breaking changes, or the [full release history](https://docs.nanoclaw.dev/changelog) on the documentation site.
 
 <a name="license"></a>
 
-## License
+## 📄 License
 
 [MIT License](LICENSE)
 
