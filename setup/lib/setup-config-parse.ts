@@ -152,6 +152,17 @@ export function applyToEnv(values: ConfigValues, env: NodeJS.ProcessEnv = proces
   }
 }
 
+/**
+ * Errors that stop setup before it starts. A flag overrides its env var, so a bad env value
+ * counts only when it would be used; uninstall reads no setup value, so it is never blocked.
+ */
+export function startupErrors(flags: FlagParseResult, env: NodeJS.ProcessEnv = process.env): string[] {
+  const merged = { ...env };
+  applyToEnv(flags.values, merged);
+  if (readFromEnv(merged).uninstall === true) return flags.errors;
+  return [...flags.errors, ...envErrors(merged)];
+}
+
 export function printHelp(stream: NodeJS.WritableStream = process.stdout): void {
   const lines: string[] = [];
   lines.push('Usage: bash nanoclaw.sh [flags...]');

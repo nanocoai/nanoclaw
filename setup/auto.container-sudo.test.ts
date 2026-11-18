@@ -27,7 +27,7 @@ vi.mock('./lib/registry-state.js', async (original) => ({
 vi.mock('./lib/setup-config-parse.js', () => ({
   parseFlags: () => ({ help: false, errors: [], values: {} }),
   readFromEnv: () => ({}),
-  envErrors: () => [],
+  startupErrors: () => [],
   applyToEnv: vi.fn(),
 }));
 vi.mock('./environment.js', () => ({

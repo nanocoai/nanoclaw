@@ -5,7 +5,7 @@ import path from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { AheadOfReleaseError, resolveUpdateTarget } from '../../scripts/update/channel.js';
+import { AheadOfReleaseError, readChannelSetting, resolveUpdateTarget } from '../../scripts/update/channel.js';
 import { isUpgradeCurrent, writeUpgradeState } from '../../src/upgrade-state.js';
 import { commitSetupChanges, snapshotTree } from './setup-commit.js';
 
@@ -41,16 +41,17 @@ function commit(root: string, message: string): string {
 }
 
 /** Runs one helper function the way nanoclaw.sh does: sourced, under `set -euo pipefail`. */
-function helper(fn: string, ...args: string[]): { status: number; stdout: string } {
+function helper(fn: string, ...args: string[]): { status: number; stdout: string; stderr: string } {
   try {
     const stdout = execFileSync('bash', ['-c', 'set -euo pipefail; source "$0"; "$@"', HELPER, fn, ...args], {
       encoding: 'utf8',
       env: GIT_ENV,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    return { status: 0, stdout: stdout.trim() };
+    return { status: 0, stdout: stdout.trim(), stderr: '' };
   } catch (err) {
-    return { status: (err as { status: number }).status, stdout: '' };
+    const failure = err as { status: number; stderr: string };
+    return { status: failure.status, stdout: '', stderr: failure.stderr };
   }
 }
 
@@ -140,6 +141,14 @@ describe('release checkout decision', () => {
     expect(decide(install, 'stable')).toBe('notice v2.4.0');
   });
 
+  it('reads the last non-empty assignment, as the updater does', () => {
+    const { install } = freshClone();
+    fs.writeFileSync(path.join(install, '.env'), 'NANOCLAW_UPDATE_CHANNEL=edge\nNANOCLAW_UPDATE_CHANNEL=\n');
+    expect(readChannelSetting(install)).toBe('edge');
+    expect(helper('release_checkout_saved_channel', install).stdout).toBe('edge');
+    expect(decide(install)).toBe('none');
+  });
+
   it('ignores a .env without the channel', () => {
     const { install } = freshClone();
     fs.writeFileSync(path.join(install, '.env'), 'OTHER=1\n');
@@ -219,11 +228,13 @@ describe('release checkout switch', () => {
     expect(resolveStable(install)).toMatchObject({ channel: 'stable', tag: 'v2.4.0' });
   });
 
-  it('fails without moving HEAD when the branch name is taken', () => {
+  it('fails without moving HEAD when the branch name is taken, and says why', () => {
     const { install } = freshClone();
     git(install, ['branch', 'stable']);
     const head = git(install, ['rev-parse', 'HEAD']);
-    expect(helper('release_checkout_switch', install, 'v2.4.0').status).not.toBe(0);
+    const result = helper('release_checkout_switch', install, 'v2.4.0');
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/'stable' already exists/);
     expect(git(install, ['rev-parse', 'HEAD'])).toBe(head);
     expect(git(install, ['symbolic-ref', '--short', 'HEAD'])).toBe('main');
   });
@@ -255,6 +266,8 @@ function entrypointClone() {
 
   const install = path.join(temp('entry-install-'), 'nanoclaw');
   git(path.dirname(install), ['clone', '-q', seed, install]);
+  // Official, so only the missing terminal keeps these runs on main.
+  markOfficial(install, seed);
   const bin = temp('entry-bin-');
   fs.writeFileSync(
     path.join(bin, 'pnpm'),

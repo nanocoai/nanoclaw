@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest';
 
 import { CHANNELS } from '../../scripts/update/channel.js';
 import { CONFIG } from './setup-config.js';
-import { applyToEnv, envErrors, parseFlags, readFromEnv } from './setup-config-parse.js';
+import { applyToEnv, envErrors, parseFlags, readFromEnv, startupErrors } from './setup-config-parse.js';
 
 describe('public setup flags', () => {
   it('forwards nanoclaw.sh arguments without an end-of-options marker', () => {
@@ -98,5 +98,22 @@ describe('update channel setting', () => {
   it('still accepts any gateway kind, whose options are filled in at runtime', () => {
     expect(parseFlags(['--gateway-provider', 'anything']).errors).toEqual([]);
     expect(envErrors({ NANOCLAW_GATEWAY_PROVIDER: 'anything' })).toEqual([]);
+  });
+
+  it('stops setup on a bad env value only when no flag overrides it', () => {
+    const env = { NANOCLAW_UPDATE_CHANNEL: 'nightly' };
+    expect(startupErrors(parseFlags([]), env)).toEqual([
+      'Invalid value for NANOCLAW_UPDATE_CHANNEL: nightly (use one of: stable, beta, edge)',
+    ]);
+    expect(startupErrors(parseFlags(['--update-channel', 'edge']), env)).toEqual([]);
+    expect(env).toEqual({ NANOCLAW_UPDATE_CHANNEL: 'nightly' });
+  });
+
+  it('never blocks uninstall on a bad env value, and still reports bad flags', () => {
+    const env = { NANOCLAW_UPDATE_CHANNEL: 'nightly' };
+    expect(startupErrors(parseFlags(['--uninstall', '--dry-run']), env)).toEqual([]);
+    expect(startupErrors(parseFlags(['--update-channel', 'nightly']), {})).toEqual([
+      'Invalid enum for --update-channel: nightly (use one of: stable, beta, edge)',
+    ]);
   });
 });

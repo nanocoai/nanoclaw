@@ -9,11 +9,12 @@
 # git, since it runs before Node is installed.
 
 # release_checkout_saved_channel <root> — NANOCLAW_UPDATE_CHANNEL from .env, if any.
+# The last non-empty assignment wins, as in the updater's reader.
 release_checkout_saved_channel() {
   [ -f "$1/.env" ] || return 0
   # `|| true`: no assignment is a normal answer, and callers run under pipefail.
   { grep -E '^[[:space:]]*NANOCLAW_UPDATE_CHANNEL[[:space:]]*=' "$1/.env" 2>/dev/null || true; } \
-    | tail -1 | cut -d= -f2- | tr -d "\"'[:space:]" | tr 'A-Z' 'a-z'
+    | cut -d= -f2- | tr -d "\"' \t\r" | tr 'A-Z' 'a-z' | { grep -v '^$' || true; } | tail -1
 }
 
 # release_checkout_official_head <root> — true when HEAD is on a branch of the
@@ -85,6 +86,7 @@ release_checkout_decide() {
 }
 
 # release_checkout_switch <root> <tag> — put the install on its own branch at the release.
+# Git's own error stays visible: it names the cause, e.g. an existing `stable` branch.
 release_checkout_switch() {
-  git -C "$1" checkout --quiet -b stable "refs/tags/$2^{commit}" 2>/dev/null
+  git -C "$1" checkout --quiet -b stable "refs/tags/$2^{commit}"
 }
