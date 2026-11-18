@@ -35,6 +35,10 @@ Self-hosted doesn't mean nothing leaves your machine. Your messages still go to 
 Setup provisions each agent its own Slack app: manifest, avatar, and workspace install, no tokens to paste.
 Spawn teammates from chat: every one gets its own bot identity, container, and memory, with shared rooms and canvases.
 
+![In a shared Slack channel, Scout summarizes requests for a channel filter. Maya confirms it shipped and asks Writer to draft the release note.](assets/scout-and-writer.png)
+
+*Example conversation in a shared Slack channel.*
+
 <details>
 <summary>Why we built NanoClaw</summary>
 
@@ -218,9 +222,7 @@ No channel or provider skills are currently requested — propose one via an iss
 
 ## Architecture
 
-```
-messaging apps → host process (router) → inbound.db → container (Bun, agent provider) → outbound.db → host process (delivery) → messaging apps
-```
+![A channel message flows through the host router and inbound.db to the session container. The reply returns through outbound.db and host delivery to the same channel. Hosted model calls pass through the credential gateway.](assets/nanoclaw-message-flow.svg)
 
 A single Node host orchestrates per-session agent containers. When a message arrives, the host routes it via the entity model (user → messaging group → agent group → session), writes it to the session's `inbound.db`, and wakes the container. The agent-runner inside the container polls `inbound.db`, runs the agent, and writes responses to `outbound.db`. The host polls `outbound.db` and delivers back through the channel adapter.
 
