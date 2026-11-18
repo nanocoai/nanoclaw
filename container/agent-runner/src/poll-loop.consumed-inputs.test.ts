@@ -317,6 +317,34 @@ describe('inputs answered together in one turn (#4033)', () => {
     expect(pushes.filter((p) => p.prompt.includes('not delivered'))).toHaveLength(2);
   });
 
+  it('a second nudge in a retry chain still suppresses what the first nudged turn sent', async () => {
+    const { rows, pushes } = await run(async function* ({ arrive }) {
+      yield { type: 'init', continuation: 's1' };
+      // m1's turn sends "Done" with a tool, then ends unwrapped: retry 1.
+      await writeMessageOut({
+        id: 'tool-send',
+        in_reply_to: 'm1',
+        kind: 'chat',
+        platform_id: 'chan-1',
+        channel_type: 'discord',
+        thread_id: null,
+        content: JSON.stringify({ text: 'Done' }),
+      });
+      yield { type: 'result', text: 'unwrapped' };
+      // Retry 1's turn absorbs m2, writes nothing and ends unwrapped: retry 2.
+      const b = await arrive('m2', 'second question');
+      yield { type: 'consumed', ids: [b!] };
+      yield { type: 'result', text: 'unwrapped again' };
+      // Retry 2's turn re-sends m1's "Done" and answers m2.
+      yield say('Done');
+      yield say('answer to m2');
+      yield result;
+    });
+    expect(pushes.filter((p) => p.prompt.includes('not delivered'))).toHaveLength(2);
+    expect(rows.filter((r) => r.text === 'Done')).toHaveLength(1);
+    expect(rows.some((r) => r.text === 'answer to m2')).toBe(true);
+  });
+
   describe('an absorbed wrap-nudge retry’s echo window', () => {
     // Turn A (thread t1) sends "Done" with a tool, then ends unwrapped, so a
     // wrap-nudge retry is queued behind follow-up B, and B's turn absorbs it.

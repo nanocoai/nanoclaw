@@ -436,6 +436,8 @@ export async function processQuery(
     inputId?: string;
     /** A wrap-nudge or task-block retry, not a new message. */
     retry: boolean;
+    /** A retry's earlier echo windows (see absorbedWindows), carried into its turn. */
+    carriedWindows?: SeqWindow[];
   };
   const queuedTurns: QueuedTurn[] = [];
   // On a wrap-nudge retry: the rows the nudged turn wrote. The turn boundary
@@ -443,8 +445,9 @@ export async function processQuery(
   // skip exact repeats. Follow-ups queued in between keep their own window.
   let nudgedWindow: SeqWindow | undefined;
   // Inputs absorbed into the running turn (absorbConsumed): the echo windows
-  // of absorbed wrap-nudge retries, and the routes of every absorbed input for
-  // the failure notice if the stream breaks. Both end with the turn.
+  // of absorbed wrap-nudge retries (plus any a retry carried in from earlier
+  // nudges), and the routes of every absorbed input for the failure notice if
+  // the stream breaks. Both end with the turn.
   let absorbedWindows: SeqWindow[] = [];
   let absorbedRoutes: RoutingContext[] = [];
   const adoptTurn = (next: QueuedTurn): void => {
@@ -452,6 +455,7 @@ export async function processQuery(
     unwrappedNudged = next.unwrappedNudged;
     taskBlockNudged = next.taskBlockNudged;
     nudgedWindow = next.nudgedWindow;
+    absorbedWindows = next.carriedWindows ?? [];
     publishReplyRoute(routing);
     answering = true;
   };
@@ -466,6 +470,9 @@ export async function processQuery(
       nudgedWindow: retryOf,
       inputId,
       retry: true,
+      // A retry chain (possible once a retry turn absorbed a new message)
+      // still suppresses what the earlier nudged turns sent.
+      carriedWindows: [...(nudgedWindow ? [nudgedWindow] : []), ...absorbedWindows],
     });
     archivePrompts.push(archivePrompts[0] ?? initialPrompt);
   };
