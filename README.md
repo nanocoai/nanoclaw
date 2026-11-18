@@ -140,9 +140,7 @@ NanoClaw avoids configuration sprawl. Customize your fork to fit how you work: j
 - "Add a custom greeting when I say good morning"
 - "Store conversation summaries weekly"
 
-Or run `/customize` for guided changes. The codebase is small enough that a coding agent can safely modify it.
-
-Start with an agent's instructions or model using the [agent customization guide](https://docs.nanoclaw.dev/guides/customize-an-agent).
+Or run `/customize` for guided changes, or start with an agent's instructions or model using the [agent customization guide](https://docs.nanoclaw.dev/guides/customize-an-agent). The codebase is small enough that a coding agent can safely modify it.
 
 When you need another channel or provider, add it with a skill such as `/add-telegram` or `/add-codex`. [How skills extend NanoClaw](https://docs.nanoclaw.dev/extend/overview) explains what gets copied into your checkout.
 
@@ -253,7 +251,7 @@ Found a vulnerability? Please don't open a public issue. [SECURITY.md](SECURITY.
 
 ### Why so little configuration?
 
-We don't want configuration sprawl. Every user should customize NanoClaw so that the code does exactly what they want, rather than configuring a generic system. If you prefer having config files, you can ask your coding agent to add them.
+By design: you change the code itself rather than configure a generic system. See [Customizing](#customizing).
 
 <a name="can-i-use-third-party-or-open-source-models"></a>
 
