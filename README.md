@@ -3,7 +3,8 @@
 </p>
 
 <p align="center">
-  An AI assistant that runs agents securely in their own containers. Lightweight, built to be easily understood and completely customized for your needs.
+  <strong>The always-on agent you own.</strong><br>
+  Self-hosted, open source, and small enough to read. Each agent runs in its own container on your machine, on the harness you choose.
 </p>
 
 <p align="center">
@@ -36,6 +37,17 @@ Spawn teammates from chat: every one gets its own bot identity, container, and m
 [OpenClaw](https://github.com/openclaw/openclaw) is an impressive project, but I wouldn't have been able to sleep if I had given complex software I didn't understand full access to my life. Its security is at the application level (allowlists, pairing codes) rather than OS-level isolation.
 
 NanoClaw provides that same core functionality, but in a codebase small enough to understand: one host process, no microservices. Agents run in their own Linux containers with filesystem isolation, not merely behind permission checks.
+
+## The Always-On Agent You Own
+
+Always-on assistants are a product category now. The big labs will run one for you: on their cloud, on their model, holding your credentials, behind code you can't read. NanoClaw is the same idea, turned around.
+
+- **It runs on your machine or your server.** One host process, plus a container per agent session. Nothing to sign up for.
+- **You can read it and change it.** MIT-licensed, and small enough that a coding agent can walk you through all of it. Your fork is your product.
+- **You pick the harness and the model.** Claude Code, Codex, Cursor or OpenCode, each running the vendor's own agent harness, not a reimplementation. Or point it at a local model.
+- **Your credentials stay in a gateway you run.** Agents never hold raw API keys.
+
+Self-hosted doesn't mean nothing leaves your machine. Your messages still go to the model provider you choose, unless you run a local model. [What leaves your machine](#accounts-and-what-leaves-your-machine) has the full list.
 
 ## Quick Start
 
@@ -84,7 +96,7 @@ See [docs/v1-to-v2-changes.md](docs/v1-to-v2-changes.md) for what's different an
 
 **Skills over features.** Trunk ships the registry and infrastructure, not specific channel adapters or alternative agent providers. Channels (Discord, Slack, Telegram, WhatsApp, …) live on a long-lived `channels` branch; alternative providers (OpenCode, Codex, Cursor) ship inside their own skill's `payload/` folder. You run `/add-telegram`, `/add-opencode`, etc. and the skill copies exactly the module(s) you need into your fork. No feature you didn't ask for.
 
-**Your pick of harness and model.** Each agent group runs on the provider you choose: Claude Code via Anthropic's Claude Agent SDK (the built-in default), OpenAI's Codex (ChatGPT subscription or API key), Cursor's local Agent SDK (Cursor account or API key), OpenCode for OpenRouter, Google, DeepSeek and more (including any local OpenAI-compatible endpoint), or local open-weight models through Ollama. Setup asks which one to start with; `/add-codex`, `/add-cursor`, `/add-opencode` and `/add-ollama-provider` add the others later. Provider is configurable per agent group, so different agents can run on different backends in the same install.
+**Your pick of harness and model.** Each agent group runs on the provider you choose: Claude Code via Anthropic's Claude Agent SDK (the built-in default), OpenAI's Codex (ChatGPT subscription or API key), Cursor's local Agent SDK (Cursor account or API key), OpenCode for OpenRouter, Google, DeepSeek and more (including any local OpenAI-compatible endpoint), or local open-weight models through Ollama. These are the vendors' own harnesses, so you get each one's full toolset, session handling and model updates as they ship. Setup asks which one to start with; `/add-codex`, `/add-cursor`, `/add-opencode` and `/add-ollama-provider` add the others later. Provider is configurable per agent group, so different agents can run on different backends in the same install.
 
 ## What It Supports
 
