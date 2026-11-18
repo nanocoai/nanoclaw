@@ -26,7 +26,9 @@ function which(cmd: string): string {
 }
 
 const BASH = which('bash');
-const TOOLS = ['bash', 'cp', 'grep', 'head', 'mkdir', 'sed', 'tee'].map((tool) => [tool, which(tool)] as const);
+const TOOLS = ['bash', 'cp', 'grep', 'head', 'mkdir', 'sed', 'sleep', 'tee'].map(
+  (tool) => [tool, which(tool)] as const,
+);
 
 let tmp: string;
 let bin: string;
@@ -77,11 +79,14 @@ function run(script: string): { status: number | null; out: string } {
 const calls = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n') : []);
 
 /** A function's source from setup.sh, so it runs without the rest of the bootstrap. */
-function setupFunction(name: string): string {
+/** Every function setup.sh defines, without the main part that calls them. */
+function setupFunctions(): string {
   const source = fs.readFileSync(path.join(ROOT, 'setup.sh'), 'utf8');
-  const start = source.indexOf(`${name}() {`);
-  expect(start, `${name}() not found in setup.sh`).toBeGreaterThanOrEqual(0);
-  return source.slice(start, source.indexOf('\n}', start) + 2);
+  const start = source.indexOf('# --- Platform detection ---');
+  const end = source.indexOf('# --- Main ---');
+  expect(start, 'the functions of setup.sh were not found').toBeGreaterThanOrEqual(0);
+  expect(end).toBeGreaterThan(start);
+  return source.slice(start, end);
 }
 
 describe('node_use_patched', () => {
@@ -119,6 +124,16 @@ describe('node_use_patched', () => {
 describe('setup.sh install_deps', () => {
   const OLDER = '22.20.0';
   const pnpmStub = () => `echo "pnpm $1 node=$(node --version)" >> ${log}`;
+  // What mkdir says differs by system and may name no path, so setup names the
+  // folder and any file in its way. mkdir's own line always goes to the log.
+  const MKDIR_SAID = /^mkdir: .+$/m;
+  const logged = () => fs.readFileSync(path.join(tmp, 'boot.log'), 'utf8');
+  const npmThatNeedsRoot = () =>
+    stub(
+      bin,
+      'npm',
+      `case "$1" in --version) echo 10.9.0 ;; config) echo ${tmp}/prefix ;; install) echo "npm error code EACCES" >&2; exit 1 ;; esac`,
+    );
 
   // Under setup.sh's own shell options, with the package.json it reads the pnpm pin from.
   function installDeps(): { status: number | null; out: string } {
@@ -126,7 +141,7 @@ describe('setup.sh install_deps', () => {
     return run(`set -euo pipefail
 PROJECT_ROOT=${tmp}; LOG_FILE=${tmp}/boot.log; PLATFORM=linux NODE_OK=true
 log() { echo "$*" >> "$LOG_FILE"; }
-${setupFunction('install_deps')}
+${setupFunctions()}
 install_deps
 echo "DEPS_OK=$DEPS_OK"`);
   }
@@ -166,19 +181,204 @@ echo "DEPS_OK=$DEPS_OK"`);
     fakeNode(localBin, OLDER);
     stub(shim, 'pnpm', pnpmStub());
     // An npm whose own global prefix is not writable.
-    stub(bin, 'npm', `[ "$1 $2 $4" = "install -g --prefix" ] && mkdir -p "$5/bin" && cp -p ${shim}/pnpm "$5/bin/pnpm"`);
+    stub(
+      bin,
+      'npm',
+      `[ "$1 $2 $4" = "install -g --prefix" ] && mkdir -p "$5/bin" && cp -p ${shim}/pnpm "$5/bin/pnpm" && echo "added 1 package"`,
+    );
     installDeps();
     expect(calls()).toEqual(['pnpm install node=v24.22.1']);
+    expect(fs.readFileSync(path.join(tmp, 'boot.log'), 'utf8')).toContain('added 1 package');
   });
 
-  it('says pnpm could not be installed when npm fails, instead of stopping without a word', () => {
+  it('names an npm that cannot run as the reason, with its own error, instead of blaming root', () => {
+    fakeNode(bin, '24.22.1');
+    // What a half-removed npm prints: the first line is not the one that says why.
+    stub(
+      bin,
+      'npm',
+      `printf "node:internal/x:1\\n  throw err;\\nError: Cannot find module 'npm-cli.js'\\n" >&2; exit 1`,
+    );
+    const r = installDeps();
+    expect(r.out).toContain(`Could not install pnpm: npm at ${bin}/npm cannot run:`);
+    expect(r.out).toMatch(/^ {2}Error: Cannot find module 'npm-cli\.js'$/m);
+    expect(r.out).toContain('Reinstall Node.js to get a working npm, then re-run setup.');
+    expect(r.out).not.toContain('without root');
+    expect(r.out).not.toContain('npm install -g');
+    expect(r.out).toContain('DEPS_OK=false');
+    expect(r.status).toBe(0);
+    const bootLog = fs.readFileSync(path.join(tmp, 'boot.log'), 'utf8');
+    expect(bootLog).toContain('npm config get prefix failed');
+    expect(bootLog).toContain("Error: Cannot find module 'npm-cli.js'");
+  });
+
+  it('shows why npm failed when it runs but cannot install pnpm, also without root', () => {
+    fakeNode(bin, '24.22.1');
+    // The global prefix is not writable; the try into ~/.local fails for another reason.
+    const install = `if [ "$4" = --prefix ]; then echo "npm error code ENOTFOUND" >&2; echo "npm error network request failed" >&2; else echo "npm error code EACCES" >&2; fi; exit 1`;
+    stub(
+      bin,
+      'npm',
+      `case "$1" in --version) echo 10.9.0 ;; config) echo ${tmp}/prefix ;; install) ${install} ;; esac`,
+    );
+    const r = installDeps();
+    expect(r.out).toContain('Could not install pnpm: npm failed, also when installing into ~/.local:');
+    expect(r.out).toMatch(/^ {2}npm error code ENOTFOUND$/m);
+    expect(r.out).toContain(`Fix that, then re-run setup. npm's full output is in ${tmp}/boot.log`);
+    expect(r.out).not.toContain('without root');
+    expect(r.out).not.toContain('cannot run');
+    expect(r.out).not.toContain('EACCES');
+    expect(r.out).toContain('DEPS_OK=false');
+    const bootLog = fs.readFileSync(path.join(tmp, 'boot.log'), 'utf8');
+    expect(bootLog).toContain('npm error code EACCES');
+    expect(bootLog).toContain('npm error network request failed');
+  });
+
+  it("puts npm's output in the log while npm is still running", () => {
+    fakeNode(bin, '24.22.1');
+    // The try into ~/.local says one line, then looks for it in the log before it ends.
+    const waits = `i=0; until grep -q "npm error still trying" ${tmp}/boot.log || [ $i -ge 30 ]; do sleep 0.1; i=$((i + 1)); done`;
+    const install = `[ "$4" = --prefix ] || exit 1; echo "npm error still trying" >&2; ${waits}; grep -q "npm error still trying" ${tmp}/boot.log && echo "npm error the log had it" >&2; exit 1`;
+    stub(
+      bin,
+      'npm',
+      `case "$1" in --version) echo 10.9.0 ;; config) echo ${tmp}/prefix ;; install) ${install} ;; esac`,
+    );
+    const r = installDeps();
+    expect(r.out).toContain('Could not install pnpm: npm failed, also when installing into ~/.local:');
+    expect(fs.readFileSync(path.join(tmp, 'boot.log'), 'utf8')).toContain('npm error the log had it');
+  });
+
+  it('names the file in the way, not npm, when ~/.local is a file', () => {
+    fakeNode(bin, '24.22.1');
+    fs.mkdirSync(home, { recursive: true });
+    fs.writeFileSync(path.join(home, '.local'), 'a file where the folder should be\n');
+    npmThatNeedsRoot();
+    const r = installDeps();
+    expect(r.out).toContain(
+      `Could not install pnpm: ${home}/.local cannot be created:\n  ${home}/.local is a file, not a folder\nMove or rename that file, then re-run setup.\n`,
+    );
+    expect(r.out).not.toMatch(/mkdir:|npm failed|without root|Fix that/);
+    expect(r.out).toContain('DEPS_OK=false');
+    expect(logged()).toMatch(MKDIR_SAID);
+    expect(logged()).toContain(`Could not create ${home}/.local: ${home}/.local is a file, not a folder\n`);
+  });
+
+  it('names a link at ~/.local that leads nowhere, and does not call it a file', () => {
+    fakeNode(bin, '24.22.1');
+    fs.mkdirSync(home, { recursive: true });
+    fs.symlinkSync(path.join(tmp, 'gone'), path.join(home, '.local'));
+    npmThatNeedsRoot();
+    const r = installDeps();
+    expect(r.out).toContain(
+      `Could not install pnpm: ${home}/.local cannot be created:\n  ${home}/.local is a link that cannot be followed\nFix or remove that link, then re-run setup.\n`,
+    );
+    expect(r.out).not.toMatch(/is a file|mkdir:/);
+  });
+
+  it("keeps mkdir's own error line when no file is in the way", () => {
+    fakeNode(bin, '24.22.1');
+    npmThatNeedsRoot();
+    // A mkdir that fails and names no path, as the one on Ubuntu 26.04 does.
+    fs.rmSync(path.join(bin, 'mkdir'));
+    stub(bin, 'mkdir', 'echo "mkdir: Permission denied" >&2; exit 1');
+    const r = installDeps();
+    expect(r.out).toContain(
+      `Could not install pnpm: ${home}/.local cannot be created:\n  mkdir: Permission denied\nFix that, then re-run setup.\n`,
+    );
+    expect(r.out).not.toMatch(/is a file|npm failed|without root/);
+    expect(logged()).toContain(`Could not create ${home}/.local: mkdir: Permission denied\n`);
+  });
+
+  it('says so plainly when npm fails without printing anything', () => {
     fakeNode(bin, '24.22.1');
     stub(bin, 'npm', 'exit 1');
     const r = installDeps();
-    expect(r.out).toContain('Could not install pnpm without root.');
+    expect(r.out).toContain(`Could not install pnpm: npm at ${bin}/npm cannot run:`);
+    expect(r.out).toMatch(/^ {2}it printed nothing$/m);
     expect(r.out).toContain('DEPS_OK=false');
     expect(r.status).toBe(0);
-    expect(fs.readFileSync(path.join(tmp, 'boot.log'), 'utf8')).toContain('npm config get prefix failed');
+  });
+
+  it('shows why corepack failed when it is the only installer, instead of blaming root', () => {
+    fakeNode(bin, '24.22.1');
+    stub(bin, 'corepack', 'echo "Error: corepack cannot reach the registry" >&2; exit 1');
+    const r = installDeps();
+    expect(r.out).toContain(`Could not install pnpm: corepack could not put pnpm into ${localBin}:`);
+    expect(r.out).toMatch(/^ {2}Error: corepack cannot reach the registry$/m);
+    expect(r.out).toContain(`Fix that, then re-run setup. corepack's full output is in ${tmp}/boot.log`);
+    expect(r.out).not.toContain('without root');
+    expect(r.out).not.toContain('corepack enable');
+    expect(r.out).toContain('DEPS_OK=false');
+    expect(r.status).toBe(0);
+  });
+
+  it('says so when corepack reports success but leaves no pnpm', () => {
+    fakeNode(bin, '24.22.1');
+    stub(bin, 'corepack', 'exit 0');
+    const r = installDeps();
+    expect(r.out).toContain(`Could not install pnpm: corepack could not put pnpm into ${localBin}:`);
+    expect(r.out).toMatch(/^ {2}it printed nothing$/m);
+    expect(r.out).not.toContain('without root');
+  });
+
+  it("puts corepack's output in the log while corepack is still running", () => {
+    fakeNode(bin, '24.22.1');
+    const waits = `i=0; until grep -q "corepack still trying" ${tmp}/boot.log || [ $i -ge 30 ]; do sleep 0.1; i=$((i + 1)); done`;
+    stub(
+      bin,
+      'corepack',
+      `[ "$2" = --install-directory ] || exit 1; echo "corepack still trying" >&2; ${waits}; grep -q "corepack still trying" ${tmp}/boot.log && echo "Error: the log had it" >&2; exit 1`,
+    );
+    installDeps();
+    expect(fs.readFileSync(path.join(tmp, 'boot.log'), 'utf8')).toContain('Error: the log had it');
+  });
+
+  it('names the file at ~/.local, not corepack, when ~/.local/bin cannot be made', () => {
+    fakeNode(bin, '24.22.1');
+    fs.mkdirSync(home, { recursive: true });
+    fs.writeFileSync(path.join(home, '.local'), 'a file where the folder should be\n');
+    stub(bin, 'corepack', 'echo "should not get as far as corepack into ~/.local/bin" >&2; exit 1');
+    const r = installDeps();
+    expect(r.out).toContain(
+      `Could not install pnpm: ${localBin} cannot be created:\n  ${home}/.local is a file, not a folder\nMove or rename that file, then re-run setup.\n`,
+    );
+    expect(r.out).not.toMatch(/mkdir:|corepack could not|without root|Fix that/);
+    expect(logged()).toMatch(MKDIR_SAID);
+    expect(logged()).toContain(`Could not create ${localBin}: ${home}/.local is a file, not a folder\n`);
+  });
+
+  it('gives the last failure when corepack and then npm both fail without root', () => {
+    fakeNode(bin, '24.22.1');
+    stub(bin, 'corepack', 'echo "Error: corepack is broken" >&2; exit 1');
+    stub(
+      bin,
+      'npm',
+      `case "$1" in --version) echo 10.9.0 ;; config) echo ${tmp}/prefix ;; install) echo "npm error code ENOTFOUND" >&2; exit 1 ;; esac`,
+    );
+    const r = installDeps();
+    expect(r.out).toContain('Could not install pnpm: npm failed, also when installing into ~/.local:');
+    expect(r.out).toMatch(/^ {2}npm error code ENOTFOUND$/m);
+    expect(r.out).not.toContain('corepack is broken');
+  });
+
+  it('says there is nothing to install pnpm with when corepack and npm are both missing', () => {
+    fakeNode(bin, '24.22.1');
+    const r = installDeps();
+    expect(r.out).toContain('Could not install pnpm: there is no corepack and no npm on PATH to install it with.');
+    expect(r.out).toContain('Reinstall Node.js, which brings npm, then re-run setup.');
+    expect(r.out).not.toContain('without root');
+    expect(r.out).not.toContain('npm install -g');
+    expect(r.out).toContain('DEPS_OK=false');
+  });
+
+  it('still suggests the try into ~/.local when npm installed pnpm where it cannot be found', () => {
+    fakeNode(bin, '24.22.1');
+    // The global install reports success, yet pnpm is nowhere this script looks.
+    stub(bin, 'npm', `case "$1" in config) echo ${tmp}/prefix ;; esac`);
+    const r = installDeps();
+    expect(r.out).toContain('Could not install pnpm without root. Run this, then re-run setup:');
+    expect(r.out).toContain('npm install -g pnpm@10.0.0 --prefix ~/.local');
   });
 });
 

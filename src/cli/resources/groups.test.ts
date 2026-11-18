@@ -13,6 +13,7 @@
  */
 import Database from 'better-sqlite3';
 import fs from 'fs';
+import path from 'path';
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 
 vi.mock('../../container-runner.js', () => ({
@@ -34,6 +35,7 @@ vi.mock('../../config.js', async () => {
 
 const TEST_DIR = '/tmp/nanoclaw-test-cli-groups';
 
+import { GROUPS_DIR } from '../../config.js';
 import { initTestDb, closeDb, runMigrations, createAgentGroup, getDb } from '../../db/index.js';
 import { createSession } from '../../db/sessions.js';
 import { inboundDbPath } from '../../mailbox/sqlite/paths.js';
@@ -44,6 +46,7 @@ import { ensureContainerConfig, getContainerConfig } from '../../db/container-co
 import { restartAgentGroupContainers } from '../../container-restart.js';
 import { configFromDb } from '../../container-config.js';
 import type { ContainerConfig } from '../../container-config.js';
+import { getSessionDriver, mountPolicy, resetSessionDriver } from '../../drivers/index.js';
 // Side-effect import: registers the `groups-*` commands (including delete).
 import './groups.js';
 // Side-effect import: registers Claude's host contract (the `--speed` vocabulary source).
@@ -439,6 +442,59 @@ describe('groups config (host-only)', () => {
     );
     expect(rm.ok).toBe(true);
     expect(JSON.parse((await getContainerConfig(GID))!.additional_mounts)).toEqual([]);
+  });
+
+  // Stored, these would make the driver refuse every start of the group. A copy
+  // is fine advice for install content, never for keys and certificates.
+  it.each([
+    ['the runner source', () => path.join(process.cwd(), 'container', 'agent-runner', 'src'), 'install-surface', true],
+    ['the base instructions', () => path.join(process.cwd(), 'container', 'CLAUDE.md'), 'install-surface', true],
+    ["the group's stamped plugins", () => path.join(GROUPS_DIR, 'p', 'plugins'), 'install-surface', true],
+    ['the session materials', () => mountPolicy().materialsRoot, 'identity-material', false],
+    ['the gateway trust root', () => mountPolicy().gatewayTrustRoot, 'gateway-trust', false],
+  ])('refuses to add a mount of %s, naming why', async (_label, host, reserved, advisesCopy) => {
+    const GID = 'ag-mount-protected';
+    await createAgentGroup({ id: GID, name: 'p', folder: 'p', agent_provider: null, created_at: now() });
+    await ensureContainerConfig(GID);
+    const resp = await dispatch(
+      { id: 'r-protected', command: 'groups-config-add-mount', args: { id: GID, host: host(), container: 'x' } },
+      { caller: 'host' },
+    );
+    expect(resp.ok).toBe(false);
+    const message = (resp as { ok: false; error: { message: string } }).error.message;
+    expect(message).toContain(reserved);
+    expect(/cop(y|ies)/i.test(message)).toBe(advisesCopy);
+    expect(JSON.parse((await getContainerConfig(GID))!.additional_mounts)).toEqual([]);
+  });
+
+  // The running driver checks every start against the policy it was built
+  // with; a later `.env` edit only applies on restart. add-mount must agree.
+  it('judges a path by the policy the running driver enforces, not a later .env edit', async () => {
+    const KEY = 'NANOCLAW_SESSION_MATERIAL_ROOT';
+    const saved = process.env[KEY];
+    const atStart = path.join(TEST_DIR, 'materials-at-start');
+    const edited = path.join(TEST_DIR, 'materials-edited');
+    const GID = 'ag-mount-snapshot';
+    await createAgentGroup({ id: GID, name: 's', folder: 's', agent_provider: null, created_at: now() });
+    await ensureContainerConfig(GID);
+    const add = (host: string) =>
+      dispatch(
+        { id: `r-${host}`, command: 'groups-config-add-mount', args: { id: GID, host, container: 'x' } },
+        { caller: 'host' },
+      );
+    try {
+      process.env[KEY] = atStart;
+      resetSessionDriver();
+      getSessionDriver();
+      process.env[KEY] = edited;
+
+      expect((await add(atStart)).ok).toBe(false);
+      expect((await add(edited)).ok).toBe(true);
+    } finally {
+      if (saved === undefined) delete process.env[KEY];
+      else process.env[KEY] = saved;
+      resetSessionDriver();
+    }
   });
 
   describe("--speed validates against the tiers the group's provider declares", () => {

@@ -50,6 +50,8 @@ This integration supports exactly the gateway version pinned in `.claude/skills/
 pnpm exec tsx .claude/skills/add-onecli/scripts/setup.ts
 ```
 
+Setup gives OneCLI's database its own random password in `~/.onecli/.env`. A local gateway still on the compose default gets one in place: its data stays, and OneCLI restarts once. To do only that on an existing install, run `pnpm exec tsx .claude/skills/add-onecli/scripts/postgres-password.ts`.
+
 ## Provider credentials
 
 Provider skills such as `/add-opencode` store model credentials here through the
@@ -94,10 +96,17 @@ The pinned gateway has no hand-written rules. Access is set per agent:
   tools, every tool you did not list, and every tool added to the catalog
   later, is Never. Full access (attach with no `--allow` or `--ask`) keeps new
   tools allowed; setting every tool back to Allow in the console after
-  customizing does not. The gateway tells tools apart only by host, method and
-  path, so tools that share one (GitHub's GraphQL query and mutation tools are
-  both `POST /graphql`) all get the most permissive of their settings: Allow
-  beats Ask, Ask beats Never.
+  customizing does not. The gateway knows a tool only by its host, method and
+  path pattern, and it checks Allow tools first, then Ask, then Never. A
+  request that fits any Allow tool's pattern goes through even when it is also
+  a tool you set to Ask or Never, and one that fits an Ask tool is held even
+  when its own tool is Never. Patterns overlap often, because one ending in
+  `*` also matches deeper paths: with GitHub's `get_repo` (`GET /repos/*/*`)
+  on Allow, `list_issues` (`GET /repos/*/*/issues`) on Ask is never held, and
+  the GraphQL query and mutation tools are both `POST /graphql`.
+  `permission-definition` shows only tool IDs; each tool's patterns are in
+  OneCLI's [app catalog](https://github.com/onecli/onecli/tree/v1.45.0/packages/api/src/apps/app-permissions).
+  Check them before you rely on an Ask or a Never.
 - **Plain vault keys** (HubSpot, Dial, Exa, any host with no catalog app): on
   or off per agent, nothing more. Use `attach-secret` (above) or the switch on
   the agent's page. The key's host and path patterns decide which requests get

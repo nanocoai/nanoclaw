@@ -168,11 +168,22 @@ and provider, and of the selected gateway when gateway core or that gateway's
 own skill changed. On a skill-only change, a gateway it cannot resolve is
 skipped and named in the validation checks. It commits refreshed payloads in
 the staging branch, installs frozen dependencies, runs the host build and full
-host tests, and runs the container dependency/typecheck leg when Bun is
-available. A provider skill that declares
+host tests, and, when `container/agent-runner` changed, installs its
+dependencies and typechecks it. That leg uses host Bun, or else the exact Bun
+version pinned by `container/Dockerfile` through pnpm. If neither can run, the
+update is not blocked, but the validation checks say the agent-runner source
+was NOT typechecked and why; tell the user. A provider skill that declares
 Bun dependencies does not require Bun on the host: refresh runs the exact Bun
 version pinned by `container/Dockerfile` through pnpm. Any selected skill
 refresh or validation failure blocks cutover and the completion stamp.
+
+A refresh failure names each failed skill and its error, shortened. The full
+text is under `skillRefresh` in:
+
+```bash
+pnpm exec tsx "$controller_dir/scripts/update-nanoclaw.ts" status \
+  --project-root "$PWD" --id "$id"
+```
 
 Fix only failures caused by the staged update, inside `stageRoot`, commit the
 fix, and re-run validation. Do not mutate the live checkout to repair staging.

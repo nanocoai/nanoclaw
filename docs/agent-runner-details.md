@@ -770,7 +770,9 @@ admin approval, applied host-side):
 
 - **`install_packages`** — `{ apt?: string[], npm?: string[], reason?: string }`. Package
   names are validated at the tool boundary and re-validated on the host. On approval the
-  host rebuilds the per-agent image and restarts the container.
+  host rebuilds the per-agent image and restarts the container. When the shared agent image
+  changes later (an update or a manual rebuild), the host rebuilds the per-agent image on top
+  of it at the next start or spawn (`refreshStaleGroupImage`).
 - **`add_mcp_server`** — `{ name, command, args?, env? }`. Wires an existing third-party MCP
   server into the agent's `container.json`; on approval the host updates the config and
   restarts (no rebuild — Bun runs the TS directly).

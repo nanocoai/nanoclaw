@@ -13,8 +13,9 @@
  * the URL offer, the prose-derived validation message.
  */
 import { execSync, spawn } from 'node:child_process';
-import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import * as p from '@clack/prompts';
 
@@ -648,7 +649,11 @@ export function unknownInputKeys(skillDir: string, inputs: Record<string, string
 }
 
 // CLI: pnpm exec tsx setup/lib/skill-driver.ts <skillDir>   — apply a skill interactively.
-if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
+if (
+  process.argv[1] &&
+  existsSync(process.argv[1]) &&
+  import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href
+) {
   void (async () => {
     const usage = (msg: string): never => {
       console.error(`${msg}\nusage: skill-driver <skill-dir> [--input key=value]...`);

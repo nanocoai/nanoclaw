@@ -246,9 +246,37 @@ function prepareSpawnFile(
   const volumePath = providerStateVolumePath(volume, agentGroupId, sessionDirectory);
   const filePath = resolveWithinRoot(volumePath, file.relativePath);
   if (file.prepare.operation === 'append-open-close') {
-    const flags = fs.constants.O_APPEND | fs.constants.O_CREAT | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW;
-    fs.closeSync(fs.openSync(filePath, flags));
+    // O_NONBLOCK: the volume is container-writable, and a blocking open of a
+    // reader-less FIFO here would stall the host. It fails with ENXIO instead.
+    const { O_APPEND, O_CREAT, O_WRONLY, O_NOFOLLOW, O_NONBLOCK } = fs.constants;
+    let fd: number;
+    try {
+      fd = fs.openSync(filePath, O_APPEND | O_CREAT | O_WRONLY | O_NOFOLLOW | O_NONBLOCK);
+    } catch (err) {
+      if (NOT_REGULAR_FILE_OPEN_ERRORS.has((err as NodeJS.ErrnoException).code ?? '')) {
+        throw notRegularSpawnFile(filePath, err);
+      }
+      throw err;
+    }
+    try {
+      // A FIFO that something already reads opens fine; refuse it all the same.
+      if (!fs.fstatSync(fd).isFile()) throw notRegularSpawnFile(filePath);
+    } finally {
+      fs.closeSync(fd);
+    }
   }
+}
+
+// What a non-blocking, no-follow open reports when the name is not a regular
+// file: a symlink (ELOOP), a FIFO with no reader or a socket (ENXIO; a socket
+// is EOPNOTSUPP on macOS), a directory (EISDIR).
+const NOT_REGULAR_FILE_OPEN_ERRORS = new Set(['ELOOP', 'ENXIO', 'EOPNOTSUPP', 'EISDIR']);
+
+function notRegularSpawnFile(filePath: string, cause?: unknown): Error {
+  return new Error(
+    `Provider file ${filePath} is not a regular file; remove it and the next start creates it again`,
+    cause === undefined ? undefined : { cause },
+  );
 }
 
 function providerSkillDirectory(

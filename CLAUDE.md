@@ -61,6 +61,7 @@ For ad-hoc central queries from skills or scripts, use the in-tree wrapper rathe
 |------|---------|
 | `src/index.ts` | Entry point: init DB, migrations, channel adapters, delivery polls, sweep, shutdown |
 | `src/router.ts` | Inbound routing: messaging group → agent group → session → `inbound.db` → wake |
+| `src/wake-context.ts` | Wake-context seam: modules register providers whose context blocks are written before an engaged message, under one budget ([docs/api-details.md](docs/api-details.md#wake-context)) |
 | `src/delivery.ts` | Polls `outbound.db`, delivers via adapter, handles system actions (schedule, approvals, etc.) |
 | `src/delivery-guard.ts` | `DeliveryGuardSpec` + `runGuarded` — the guard-consult pipeline for privileged delivery actions (registry stays in `delivery.ts`) |
 | `src/host-sweep.ts` + `src/reconcile-session.ts` | 60s resync floor; the per-session pass (`reconcileSession`: `processing_ack` sync, stuck detection, due-message wake, recurrence) runs through the keyed queue in `src/reconcile-queue.ts` |
@@ -151,8 +152,8 @@ Per-agent-group container runtime config (provider, model, packages, MCP servers
 | Value | Behavior |
 |-------|----------|
 | `disabled` | Agent never learns about ncl (instructions excluded from CLAUDE.md). Host dispatch rejects any `cli_request`. |
-| `group` (default) | Agent can access `groups`, `sessions`, `destinations`, `members`, `tasks`, `templates` only, scoped to its own agent group. `--id` and group args are auto-filled. Cross-group access rejected. `cli_scope` changes blocked. |
-| `global` | Every resource, across groups, except host-only commands (`groups config add-mount`/`remove-mount`), which no container can run. `tasks`, `groups connect` and `sessions history` still act only on the caller's own group. Set automatically for owner agent groups via `init-first-agent`. |
+| `group` (default) | Agent can access `groups`, `sessions`, `destinations`, `members`, `tasks`, `templates` only, scoped to its own agent group, plus `wirings get`/`update` on the wiring for its session's chat (an `agent-shared` session keeps at most one chat, which may not be the one it is answering); `update` can change only `engage_mode` and `engage_pattern`. `--id` and group args are auto-filled. Cross-group access rejected. `cli_scope` changes blocked. |
+| `global` | Every resource, across groups, except host-only commands (`status`, `groups config add-mount`/`remove-mount`), which no container can run. `tasks`, `groups connect` and `sessions history` still act only on the caller's own group. Commands that need approval still wait for an admin, as at `group` scope. Set automatically for owner agent groups via `init-first-agent`. |
 
 Key files: `src/db/container-configs.ts`, `src/container-config.ts`, `src/cli/guard.ts` (scope decision; group-scope list in `src/cli/registry.ts`), `src/cli/dispatch.ts` (arg auto-fill, row filtering), `src/project-doc-compose.ts` (instructions exclusion).
 

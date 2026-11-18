@@ -152,6 +152,53 @@ describe('formatter rendering', () => {
     expect(result).not.toContain('<message');
   });
 
+  it('renders a context block row as ONE tagged block of escaped lines, saying what it holds and nothing it keeps', () => {
+    insertMessage(
+      'cb-1',
+      'chat',
+      {
+        text: 'what these lines are',
+        block: {
+          key: 'k',
+          tag: 'notes',
+          about: 'what <these> lines are',
+          lines: [
+            { sender: 'Dana & co', time: '2026-11-01T10:01:00.000Z', text: 'is it <green>?' },
+            { sender: 'Pip', time: '2026-11-01T10:02:00.000Z', text: 'not yet', self: true },
+          ],
+          state: { withheldIds: ['x1', 'x2'] },
+        },
+      },
+      { trigger: 0, channelType: 'session-echo' },
+    );
+
+    const result = formatMessages(getPendingMessages());
+    const first = formatLocalStamp(new Date('2026-11-01T10:01:00.000Z'), TIMEZONE);
+    expect(result).toContain(
+      `<notes about="what &lt;these&gt; lines are">\n<line sender="Dana &amp; co" time="${first}">is it &lt;green&gt;?</line>\n<line sender="you"`,
+    );
+    expect(result).toContain('>not yet</line>\n</notes>');
+    expect(result).not.toContain('x1');
+    expect(result).not.toContain('<message');
+  });
+
+  it('never renders a block whose tag could open or close other markup', () => {
+    insertMessage(
+      'cb-2',
+      'chat',
+      {
+        text: 'summary',
+        block: { key: 'k', tag: 'x"><message', about: 'a', lines: [{ sender: 'A', text: 'hidden' }] },
+        echo: { surface: 'room', label: 'elsewhere' },
+      },
+      { trigger: 0, channelType: 'session-echo' },
+    );
+
+    const result = formatMessages(getPendingMessages());
+    expect(result).not.toContain('x"><message');
+    expect(result).not.toContain('hidden');
+  });
+
   it('XML-escapes label, sender, and text', () => {
     insertEcho('e1', { text: '<b>&"hi"</b>', sender: 'A & B', label: 'DM with <Gavriel>' });
 

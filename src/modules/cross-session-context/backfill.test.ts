@@ -157,6 +157,18 @@ describe('backfillSession — new session', () => {
     expect(opened).toEqual(['sess-old', 'sess-new']);
   });
 
+  it('keeps the platform id on the rows it seeds, so a later read of the platform can skip them', async () => {
+    siblings['sess-old'] = {
+      root: {
+        timestamp: iso(NOW - 50 * 60_000),
+        content: JSON.stringify({ id: 'P0', text: 'hello there', sender: 'Alex', senderId: 'U1' }),
+      },
+      outbound: [{ timestamp: iso(NOW - 46 * 60_000), content: post('a post'), platformMessageId: 'P1' } as Row],
+    };
+    await backfillSession(AG, NEW_SESSION, DM_MG, { created: true, now: NOW });
+    expect(written.map((w) => JSON.parse(w.content as string).platformMessageId)).toEqual(['P0', 'P1']);
+  });
+
   it('reads the semantic conversation timeline operations', async () => {
     await backfillSession(AG, NEW_SESSION, DM_MG, { created: true, now: NOW });
     expect(inboundSql).toEqual(['getConversationRoot:sess-old']);
