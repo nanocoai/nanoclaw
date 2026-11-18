@@ -699,17 +699,28 @@ export async function processQuery(
             // Only the provider's dedicated error field is channel content;
             // unwrapped model output and raw diagnostics remain private.
             const notice = event.error ?? GENERIC_FAILURE_NOTICE;
-            if (sendsFailureNotice(routing)) await deliverErrorResult(routing, notice);
+            // Only a route whose notice was written covers a later one.
+            const noticed: RoutingContext[] = [];
+            if (sendsFailureNotice(routing)) {
+              await deliverErrorResult(routing, notice);
+              noticed.push(routing);
+            }
             // Keep the reason in the runner log, since the skipped notice may
             // be the only place it would have been recorded.
             else log(`Error result — notice not sent on this route: ${notice}`);
             // Inputs this turn absorbed failed with it. They were acked at
-            // push, so the notice is the only word their senders get.
-            const noticed = [routing];
+            // push, so the notice is the only word their senders get. A failed
+            // write is logged and the rest still go, as on the stream-failure path.
             for (const target of absorbedRoutes) {
               if (!sendsFailureNotice(target) || noticed.some((prior) => sameNoticeRoute(prior, target))) continue;
-              noticed.push(target);
-              await deliverErrorResult(target, notice);
+              try {
+                await deliverErrorResult(target, notice);
+                noticed.push(target);
+              } catch (noticeError) {
+                log(
+                  `Failed to deliver error notice to an absorbed input: ${noticeError instanceof Error ? noticeError.message : String(noticeError)}`,
+                );
+              }
             }
           }
           // An unwrapped final text only warrants the wrap-nudge when no

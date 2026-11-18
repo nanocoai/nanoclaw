@@ -270,6 +270,20 @@ describe('inputs answered together in one turn (#4033)', () => {
     ]);
   });
 
+  it('a running route that sends no notice does not stand in for an absorbed input on its thread', async () => {
+    // The turn was woken only by a failure notice, so its own route gets none.
+    const { rows } = await run(
+      async function* ({ arrive }) {
+        yield { type: 'init', continuation: 's1' };
+        const b = await arrive('m2', 'real question', { thread: 't1' });
+        yield { type: 'consumed', ids: [b!] };
+        yield { type: 'result', text: null, isError: true, error: 'Provider unavailable.' };
+      },
+      { ...CHANNEL, threadId: 't1', failureNoticeWake: true },
+    );
+    expect(rows.map((r) => [r.threadId, r.inReplyTo, r.text])).toEqual([['t1', 'm2', 'Provider unavailable.']]);
+  });
+
   describe('an absorbed wrap-nudge retry’s echo window', () => {
     // Turn A (thread t1) sends "Done" with a tool, then ends unwrapped, so a
     // wrap-nudge retry is queued behind follow-up B, and B's turn absorbs it.
