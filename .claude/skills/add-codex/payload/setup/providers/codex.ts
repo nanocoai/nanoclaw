@@ -164,7 +164,9 @@ export function codexInstallCommands(version?: string): string[] {
 }
 
 type CodexCli =
-  { ok: true; command: string } | { ok: false; error: string; message: string; detail?: string[]; install: string[] };
+  | { ok: true; command: string }
+  | { ok: false; stoppedBy: NodeJS.Signals }
+  | { ok: false; error: string; message: string; detail?: string[]; install: string[] };
 
 /**
  * The host's `codex` when it runs; otherwise the version pinned for the image,
@@ -172,6 +174,12 @@ type CodexCli =
  * from there. The spec goes to `npx --yes`, which runs on the host, so only an
  * exact pin is used. `scratch` is a private throwaway dir: the probes'
  * CODEX_HOME and npx's project.
+ *
+ * Ctrl-C reaches these probes too, and setup's own handler can't run until
+ * this returns, so a probe ended by a stop signal gives `stoppedBy`: setup
+ * is stopping, nothing failed. Under the tsx CLI a Ctrl-C mid-fetch may
+ * instead get setup SIGKILLed by tsx, whose relay can't reach a blocked
+ * child; that home holds no token yet, and a later sign-in sweeps it.
  */
 export function resolveCodexCli(root: string, scratch: string): CodexCli {
   // Any codex run, even `--version`, creates its CODEX_HOME (default ~/.codex).
@@ -182,7 +190,9 @@ export function resolveCodexCli(root: string, scratch: string): CodexCli {
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-  if (probe('codex', ['--version']).status === 0) return { ok: true, command: 'codex' };
+  const host = probe('codex', ['--version']);
+  if (host.status === 0) return { ok: true, command: 'codex' };
+  if (isStopSignal(host.signal)) return { ok: false, stoppedBy: host.signal };
 
   const version = readPinnedCodexVersion(root);
   if (!version) {
@@ -190,7 +200,7 @@ export function resolveCodexCli(root: string, scratch: string): CodexCli {
       ok: false,
       error: 'codex_cli_missing',
       message:
-        "The Codex CLI isn't installed on this machine, and container/cli-tools.json has no exact @openai/codex version to run instead. Install the Codex CLI (below) or run the /add-codex skill again, then re-run setup — or choose the API key option instead.",
+        "The Codex CLI isn't installed on this machine, and container/cli-tools.json has no exact @openai/codex version to run instead. Install the Codex CLI (below) or run the /add-codex skill again, then re-run setup in a new terminal — or choose the API key option instead.",
       install: codexInstallCommands(),
     };
   }
@@ -220,6 +230,9 @@ export function resolveCodexCli(root: string, scratch: string): CodexCli {
     ],
     npxDir,
   );
+  // npm dies of the signal early on, but exits 1 naming it mid-install.
+  const npxStop = fetched.signal ?? /^npm (?:error|ERR!) signal (SIG[A-Z]+)$/m.exec(String(fetched.stderr ?? ''))?.[1];
+  if (isStopSignal(npxStop)) return { ok: false, stoppedBy: npxStop };
   if ((fetched.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') {
     return {
       ok: false,
@@ -231,7 +244,7 @@ export function resolveCodexCli(root: string, scratch: string): CodexCli {
   const failed = (lines: string): CodexCli => ({
     ok: false,
     error: 'codex_npx_failed',
-    message: `Couldn't run the pinned Codex CLI ${version} with npx (details below). Check that this machine can reach the npm registry, or install the Codex CLI (below), then re-run setup — or choose the API key option instead.`,
+    message: `Couldn't run the pinned Codex CLI ${version} with npx (details below). Check that this machine can reach the npm registry, or install the Codex CLI (below), then re-run setup in a new terminal — or choose the API key option instead.`,
     install: codexInstallCommands(version),
     detail: lines
       .split('\n')
@@ -247,6 +260,7 @@ export function resolveCodexCli(root: string, scratch: string): CodexCli {
       .split('\n')
       .pop() ?? '';
   const ran = path.isAbsolute(bin) ? probe(bin, ['--version']) : undefined;
+  if (ran && isStopSignal(ran.signal)) return { ok: false, stoppedBy: ran.signal };
   if (
     ran?.status !== 0 ||
     !String(ran.stdout ?? '')
@@ -312,7 +326,7 @@ export async function runCodexLoginAuth(
   process.on('exit', removeLoginHome);
   for (const signal of LOGIN_SIGNALS) process.on(signal, onSignal);
   try {
-    await signIn(method, store, root, loginHome, (child) => (login = child));
+    await signIn(method, store, root, loginHome, (child) => (login = child), onSignal);
   } finally {
     detach();
     removeLoginHome();
@@ -321,6 +335,10 @@ export async function runCodexLoginAuth(
 
 const LOGIN_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const;
 const STALE_LOGIN_MS = 60 * 60 * 1000;
+
+function isStopSignal(signal: string | null | undefined): signal is (typeof LOGIN_SIGNALS)[number] {
+  return (LOGIN_SIGNALS as readonly string[]).includes(signal ?? '');
+}
 
 /**
  * A private throwaway CODEX_HOME under the install's git-ignored data/, not the
@@ -350,8 +368,15 @@ async function signIn(
   root: string,
   loginHome: string,
   onSpawn: (child: ChildProcess) => void,
+  stop: (signal: NodeJS.Signals) => void,
 ): Promise<void> {
   const cli = resolveCodexCli(root, loginHome);
+  if (!cli.ok && 'stoppedBy' in cli) {
+    // Stop as the queued signal would, with no error. The exit is a backstop
+    // in case the re-raised signal doesn't end setup.
+    stop(cli.stoppedBy);
+    process.exit(1);
+  }
   if (!cli.ok) {
     p.log.error(brandBody(cli.message));
     for (const line of cli.detail ?? []) console.log(k.dim(`   ${line}`));
