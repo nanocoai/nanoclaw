@@ -32,12 +32,6 @@ Spawn teammates from chat: every one gets its own bot identity, container, and m
 
 ---
 
-## Why I Built NanoClaw
-
-[OpenClaw](https://github.com/openclaw/openclaw) is an impressive project, but I wouldn't have been able to sleep if I had given complex software I didn't understand full access to my life. Its security is at the application level (allowlists, pairing codes) rather than OS-level isolation.
-
-NanoClaw provides that same core functionality, but in a codebase small enough to understand: one host process, no microservices. Agents run in their own Linux containers with filesystem isolation, not merely behind permission checks.
-
 ## The Always-On Agent You Own
 
 Always-on assistants are a product category now. The big labs will run one for you: on their cloud, on their model, holding your credentials, behind code you can't read. NanoClaw has been doing this since January 2026, before the category had a name, and it does it the other way around.
@@ -48,6 +42,16 @@ Always-on assistants are a product category now. The big labs will run one for y
 - **Your credentials stay in a gateway you run.** Agents never hold raw API keys.
 
 Self-hosted doesn't mean nothing leaves your machine. Your messages still go to the model provider you choose, unless you run a local model. [What leaves your machine](#accounts-and-what-leaves-your-machine) has the full list.
+
+### Where it started
+
+This is what Gavriel wrote in the README a few weeks after NanoClaw started. The numbers describe OpenClaw back then.
+
+> [OpenClaw](https://github.com/openclaw/openclaw) is an impressive project, but I wouldn't have been able to sleep if I had given complex software I didn't understand full access to my life. OpenClaw has nearly half a million lines of code, 53 config files, and 70+ dependencies. Its security is at the application level (allowlists, pairing codes) rather than true OS-level isolation. Everything runs in one Node process with shared memory.
+>
+> NanoClaw provides that same core functionality, but in a codebase small enough to understand: one process and a handful of files. Agents run in their own Linux containers with filesystem isolation, not merely behind permission checks.
+
+Gavriel Cohen, February 2026
 
 ## Quick Start
 
