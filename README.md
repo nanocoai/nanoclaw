@@ -11,13 +11,11 @@
   Self-hosted, open source, and small enough to read. Each agent runs in its own container on your machine, on the harness you choose.
 </p>
 
-<p align="center"><strong><a href="#quick-start">🚀 Quick start</a></strong> &nbsp;·&nbsp; <a href="#usage">💬 Examples</a> &nbsp;·&nbsp; <a href="#what-it-supports">🔌 Channels</a> &nbsp;·&nbsp; <a href="https://docs.nanoclaw.dev">Documentation</a></p>
+<p align="center"><strong><a href="#quick-start">🚀 Quick start</a></strong> &nbsp;·&nbsp; <strong><a href="https://docs.nanoclaw.dev">📚 Documentation</a></strong> &nbsp;·&nbsp; <a href="#usage">💬 Examples</a> &nbsp;·&nbsp; <a href="#what-it-supports">🔌 Channels</a></p>
 
 <a name="the-always-on-agent-you-own"></a>
 
 ## 🩵 Why NanoClaw?
-
-Always-on assistants are a product category now. The big labs will run one for you: on their cloud, on their model, holding your credentials, behind code you can't read. NanoClaw has been doing this since January 2026, before the category had a name, and it does it the other way around.
 
 - **It runs on your machine or your server.** One host process, plus a container per agent session. Nothing to sign up for.
 - **You can read it and change it.** MIT-licensed, and small enough that a coding agent can walk you through all of it. Your fork is your product.
@@ -25,15 +23,6 @@ Always-on assistants are a product category now. The big labs will run one for y
 - **Your credentials stay in a gateway you run.** Agents never hold raw API keys.
 
 Self-hosted doesn't mean nothing leaves your machine. Your messages still go to the model provider you choose, unless you run a local model. [What leaves your machine](#accounts-and-what-leaves-your-machine) has the full list.
-
-**New in Slack · One app per agent**
-
-Setup provisions each agent its own Slack app: manifest, avatar, and workspace install, no tokens to paste.
-Spawn teammates from chat: every one gets its own bot identity, container, and memory, with shared rooms and canvases.
-
-![In a shared Slack channel, Scout summarizes requests for a channel filter. Maya confirms it shipped and asks Writer to draft the release note.](assets/scout-and-writer.png)
-
-*Example conversation in a shared Slack channel.*
 
 <details>
 <summary>Why we built NanoClaw</summary>
@@ -48,11 +37,29 @@ Spawn teammates from chat: every one gets its own bot identity, container, and m
 
 </details>
 
+<a name="requirements"></a>
+
+## 📋 Requirements
+
+- **System:** macOS, Linux, or Windows with WSL2. The commands below use Git and Bash.
+- **Containers:** Docker Desktop on macOS or Windows, or Docker Engine on Linux.
+- **Runtime:** Node.js 22.23.4+, 24.22.1+, or 26.12.1+, pnpm 10+, and jq. Setup installs or updates Node.js and pnpm and adds jq if needed.
+- **Coding agent:** Use a coding agent such as Claude Code, Codex, Cursor, or OpenCode on the host to customize NanoClaw, debug issues, or add skills.
+
+> [!TIP]
+> Unsure whether you’re ready to install? Paste this prompt into your coding agent on the computer where you’ll run NanoClaw.
+>
+> ```text
+> I want to install NanoClaw, a self-hosted assistant that runs agents in containers and connects them to messaging apps. The official repository is https://github.com/nanocoai/nanoclaw. Check whether this computer is ready to run its setup script, nanoclaw.sh. Use read-only checks.
+>
+> Read the requirements for my checkout, or use https://docs.nanoclaw.dev/installation if I haven’t cloned it yet. Check the OS (including WSL2 on Windows), Git, Bash, Node.js, pnpm, and jq. Check whether Docker is installed and whether my user can reach its daemon.
+>
+> Tell me whether I’m ready to run setup, what the installer will handle, and what I need to fix first. Give the smallest next step for each blocker. Flag anything you couldn’t verify.
+> ```
+
 <a name="quick-start"></a>
 
 ## 🚀 Quick Start
-
-Runs on macOS, Linux, and Windows via WSL2. [Check requirements](#requirements).
 
 ```bash
 git clone https://github.com/nanocoai/nanoclaw.git
@@ -60,19 +67,15 @@ cd nanoclaw
 bash nanoclaw.sh
 ```
 
-**Release channels.** The clone above follows the repository’s default branch. For the latest stable version, see [Latest release](https://github.com/nanocoai/nanoclaw/releases/latest). Beta and release candidate builds appear under [Releases](https://github.com/nanocoai/nanoclaw/releases) when available. Check out a specific release tag to pin your install.
-
-`nanoclaw.sh` walks you from a fresh machine to a named agent you can message. It installs Node, pnpm, and Docker if missing, installs a credential gateway, lets you pick the agent provider (Claude, Codex, Cursor or OpenCode) and registers its credential with the gateway, builds the agent container, and pairs your first channel (Slack, Telegram, Discord, WhatsApp, iMessage, or a local CLI).
-
-Once paired, try a reminder. This example mentions an agent named Scout.
+The [setup wizard](https://docs.nanoclaw.dev/quickstart) prepares your machine, connects a model provider, and pairs your first channel. Try a reminder using your agent’s name.
 
 ```text
 @Scout remind me every Friday at 4pm to write my weekly update
 ```
 
-[More usage examples](#usage)
+[More usage examples](#usage) · [Installation details](https://docs.nanoclaw.dev/installation)
 
-If a step fails, setup offers to hand off to a coding agent (your provider's CLI, or Claude Code) to diagnose and resume from where it broke.
+**Release channels.** The clone above follows the repository’s default branch. For the latest stable version, see [Latest release](https://github.com/nanocoai/nanoclaw/releases/latest). Beta and release candidate builds appear under [Releases](https://github.com/nanocoai/nanoclaw/releases) when available. Check out a specific release tag to pin your install.
 
 <details>
 <summary><strong>Migrating from NanoClaw v1?</strong></summary>
@@ -101,19 +104,9 @@ See [docs/v1-to-v2-changes.md](docs/v1-to-v2-changes.md) for what's different an
 
 ## 🧭 Philosophy
 
-**Small enough to understand.** One host process and no microservices. If you want to understand the full NanoClaw codebase, just ask your coding agent to walk you through it.
+Customize your fork to fit how you work. Start with an agent’s instructions or model using the [agent customization guide](https://docs.nanoclaw.dev/guides/customize-an-agent).
 
-**Secure by isolation.** Agents run in Linux containers and they can only see what's explicitly mounted. Bash commands run inside the container, not on your host.
-
-**Built for the individual user.** NanoClaw isn't a monolithic framework; it's software that fits each user's exact needs. Instead of becoming bloatware, NanoClaw is designed to be bespoke. You make your own fork and have your coding agent modify it to match your needs.
-
-**Customization = code changes.** No configuration sprawl. Want different behavior? Modify the code. The codebase is small enough that it's safe to make changes.
-
-**AI-native, hybrid by design.** The install and onboarding flow is an optimized scripted path, fast and deterministic. When a step needs judgment, whether a failed install, a guided decision, or a customization, control hands off to a coding agent. Beyond setup there's no monitoring dashboard or debugging UI either: describe the problem to your coding agent and it handles it.
-
-**Skills over features.** Trunk ships the registry and infrastructure, not specific channel adapters or alternative agent providers. Channels (Discord, Slack, Telegram, WhatsApp, …) live on a long-lived `channels` branch; alternative providers (OpenCode, Codex, Cursor) ship inside their own skill's `payload/` folder. You run `/add-telegram`, `/add-opencode`, etc. and the skill copies exactly the module(s) you need into your fork. No feature you didn't ask for.
-
-**Your pick of harness and model.** Each agent group runs on the provider you choose: Claude Code via Anthropic's Claude Agent SDK (the built-in default), OpenAI's Codex (ChatGPT subscription or API key), Cursor's local Agent SDK (Cursor account or API key), OpenCode for OpenRouter, Google, DeepSeek and more (including any local OpenAI-compatible endpoint), or local open-weight models through Ollama. These are the vendors' own harnesses, so you get each one's full toolset, session handling and model updates as they ship. Setup asks which one to start with; `/add-codex`, `/add-cursor`, `/add-opencode` and `/add-ollama-provider` add the others later. Provider is configurable per agent group, so different agents can run on different backends in the same install.
+When you need another channel or provider, add it with a skill such as `/add-telegram` or `/add-codex`. [How skills extend NanoClaw](https://docs.nanoclaw.dev/extend/overview) explains what gets copied into your checkout.
 
 <a name="what-it-supports"></a>
 
@@ -201,6 +194,14 @@ From a channel you own or administer, you can manage groups and tasks:
 @Scout pause the Monday briefing task
 ```
 
+### From customer feedback to release notes
+
+In this Slack example, Maya asks Scout what customers requested. Once she confirms the feature shipped, Writer uses Scout’s summary to draft the release note.
+
+![In a shared Slack channel, Scout summarizes requests for a channel filter. Maya confirms it shipped and asks Writer to draft the release note.](assets/scout-and-writer.png)
+
+[Set up agents in Slack](https://docs.nanoclaw.dev/channels/slack).
+
 <a name="customizing"></a>
 
 ## 🛠️ Customizing
@@ -231,16 +232,6 @@ This keeps trunk as pure registry and infra, and every fork stays lean — users
 ### 💡 RFS (Request for Skills)
 
 No channel or provider skills are currently requested — propose one via an issue.
-
-<a name="requirements"></a>
-
-## 📋 Requirements
-
-- macOS or Linux (Windows via WSL2)
-- Node.js 22.23.4+, 24.22.1+ or 26.12.1+ and pnpm 10+ (the installer will install or update both if needed)
-- jq (the installer adds it if missing; channel skills use it)
-- [Docker Desktop](https://docker.com/products/docker-desktop) (macOS/Windows) or Docker Engine (Linux)
-- A coding agent on the host for `/customize`, `/debug`, error recovery during setup, and the `/add-<name>` skills. Skills ship in the [Claude Code](https://claude.ai/download) skills format, so Claude Code runs them as slash commands; the steps are plain prose any coding agent can follow
 
 <a name="architecture"></a>
 
@@ -348,6 +339,8 @@ This keeps the base system minimal and lets every user customize their installat
 
 ## 👥 Community
 
+Thank you to the [130+ contributors](https://github.com/nanocoai/nanoclaw/graphs/contributors) who have helped build NanoClaw.
+
 [Website](https://nanoclaw.dev) · [Discord](https://discord.gg/VDdww8qS42) · [Repository token count](repo-tokens)
 
 **Read in another language** · [中文](README_zh.md) · [日本語](README_ja.md) · [한국어](README_ko.md)
@@ -362,6 +355,6 @@ See [CHANGELOG.md](CHANGELOG.md) for breaking changes, or the [full release hist
 
 ## 📄 License
 
-MIT
+[MIT License](LICENSE)
 
 <img referrerpolicy="no-referrer-when-downgrade" src="https://static.scarf.sh/a.png?x-pxid=47894bd5-353b-42fe-bb97-74144e6df0bf" />
