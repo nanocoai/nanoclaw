@@ -913,6 +913,29 @@ export interface MidTurnScanResult {
   tail: string;
 }
 
+const MESSAGE_ENTITIES: ReadonlyArray<[RegExp, string]> = [
+  [/&lt;/g, '<'],
+  [/&gt;/g, '>'],
+  [/&quot;/g, '"'],
+  [/&#39;|&apos;/g, "'"],
+  [/&amp;/g, '&'],
+];
+
+/**
+ * Undo the formatter's escapeXml on a <message> body bound for delivery.
+ * Inbound text reaches the model escaped, so a reply that echoes user text
+ * copies the escaped form (`&amp;` in a URL opens the wrong address).
+ * Decodes exactly the entities escapeXml produces, `&amp;` last, so one
+ * escaping pass is undone and no more (`&amp;lt;` → `&lt;`); a plain `&`
+ * and any other entity pass through untouched.
+ */
+export function decodeMessageEntities(text: string): string {
+  if (!text.includes('&')) return text;
+  let out = text;
+  for (const [pattern, char] of MESSAGE_ENTITIES) out = out.replace(pattern, char);
+  return out;
+}
+
 export async function deliverMidTurnBlocks(
   text: string,
   routing: RoutingContext,
@@ -942,7 +965,7 @@ export async function deliverMidTurnBlocks(
   while ((match = MESSAGE_RE.exec(visible)) !== null) {
     const toName = match[1];
     const rawBody = match[2];
-    const body = stripHarnessTagArtifacts(rawBody.trim());
+    const body = decodeMessageEntities(stripHarnessTagArtifacts(rawBody.trim()));
     const dest = findByName(toName);
     if (!dest) continue;
     // Never deliver a blank message: a body that is empty (or was only
@@ -1204,7 +1227,7 @@ export async function dispatchResultText(
       scratchpadParts.push(text.slice(lastIndex, match.index));
     }
     const toName = match[1];
-    const body = stripHarnessTagArtifacts(match[2].trim());
+    const body = decodeMessageEntities(stripHarnessTagArtifacts(match[2].trim()));
     lastIndex = MESSAGE_RE.lastIndex;
 
     // One-door delivery in task sessions: only the send_message tool delivers.
