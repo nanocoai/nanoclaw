@@ -10,19 +10,21 @@
 <h1 align="center">The always-on agent you own.</h1>
 
 <p align="center">
-  Self-hosted, open source, and small enough to read. Each agent runs in its own container on your machine, on the harness you choose.
+  An open-source assistant you run on your own machine. Message your agent from the apps you already use.
 </p>
 
 <p align="center"><strong><a href="#quick-start">🚀 Quick start</a></strong> &nbsp;·&nbsp; <strong><a href="https://docs.nanoclaw.dev">📚 Documentation</a></strong> &nbsp;·&nbsp; <a href="#usage">💬 Examples</a> &nbsp;·&nbsp; <a href="#what-it-supports">🔌 Channels</a></p>
 
+---
+
 ## 🩵 Why NanoClaw?
 
-- **It runs on your machine or your server.** One host process, plus a container per agent session. Nothing to sign up for.
-- **You can read it and change it.** MIT-licensed, and small enough that a coding agent can walk you through all of it. Your fork is your product.
-- **You pick the harness and the model.** Claude Code, Codex, Cursor or OpenCode, each running the vendor's own agent harness, not a reimplementation. Or point it at a local model.
-- **Your credentials stay in a gateway you run.** Agents never hold raw API keys.
+- **You run it.** NanoClaw runs on your computer or server. Each agent session runs in a container, an isolated environment on that machine.
+- **You can change it.** The code is MIT-licensed. Ask your coding agent to walk you through a feature or change it in your fork.
+- **You choose how your agent runs.** Use Claude Code, Codex, Cursor, or OpenCode. You can also connect a local model.
+- **You control your API keys.** A credential gateway on your machine adds the key when it forwards a request.
 
-Self-hosted doesn't mean nothing leaves your machine. Your messages still go to the model provider you choose, unless you run a local model. [What leaves your machine](#accounts-and-what-leaves-your-machine) has the full list.
+If you use a hosted model, its provider receives the content your agent sends in a request. See [what leaves your machine](#accounts-and-what-leaves-your-machine).
 
 <details>
 <summary>Why we built NanoClaw</summary>
@@ -69,10 +71,10 @@ cd nanoclaw
 bash nanoclaw.sh
 ```
 
-The [setup wizard](https://docs.nanoclaw.dev/quickstart) prepares your machine, connects a model provider, and pairs your first channel. Try a reminder using your agent's name.
+The [setup wizard](https://docs.nanoclaw.dev/quickstart) prepares your machine, connects a model provider, and pairs your first channel. Once paired, send your agent a reminder. If your channel requires a mention, add your agent's name first.
 
 ```text
-@Scout remind me every Friday at 4pm to write my weekly update
+Remind me every Friday at 4pm to write my weekly update.
 ```
 
 [More usage examples](#usage) · [Installation details](https://docs.nanoclaw.dev/installation)
@@ -106,19 +108,12 @@ See [docs/v1-to-v2-changes.md](docs/v1-to-v2-changes.md) for what's different an
 
 ## 💬 Usage
 
-These examples use an agent named Scout. If your channel requires a mention, mention your own agent.
+Send a request in your own words. In channels that require a mention, start with your agent's name.
 
-```
-@Scout send an overview of the sales pipeline every weekday morning at 9am (has access to my Obsidian vault folder)
-@Scout review the git history for the past week each Friday and update the README if there's drift
-@Scout every Monday at 8am, compile news on AI developments from Hacker News and TechCrunch and message me a briefing
-```
-
-From a channel you own or administer, you can manage groups and tasks:
-```
-@Scout list all scheduled tasks across groups
-@Scout pause the Monday briefing task
-```
+<picture>
+  <source media="(prefers-reduced-motion: reduce)" srcset="assets/telegram-reminder-still.png">
+  <img src="assets/telegram-reminder.gif" width="460" alt="Simulated Telegram chat. The user asks for a weekly update reminder. The agent confirms and lists the reminder for Fridays at 4 pm.">
+</picture>
 
 ### From customer feedback to release notes
 
@@ -133,14 +128,14 @@ In this Slack example, Maya asks Scout what customers requested. Once she confir
 
 ## 🛠️ Customizing
 
-NanoClaw avoids configuration sprawl. Customize your fork to fit how you work: just tell your coding agent what you want.
+Tell your coding agent what you want to change in your fork. For example:
 
 - "Change the trigger word to @Bob"
 - "Remember in the future to make responses shorter and more direct"
 - "Add a custom greeting when I say good morning"
 - "Store conversation summaries weekly"
 
-Or run `/customize` for guided changes, or start with an agent's instructions or model using the [agent customization guide](https://docs.nanoclaw.dev/guides/customize-an-agent). The codebase is small enough that a coding agent can safely modify it.
+Run `/customize` for a guided change. To adjust instructions or switch models, see [Customize an agent](https://docs.nanoclaw.dev/guides/customize-an-agent).
 
 When you need another channel or provider, add it with a skill such as `/add-telegram` or `/add-codex`. [How skills extend NanoClaw](https://docs.nanoclaw.dev/extend/overview) explains what gets copied into your checkout.
 
@@ -149,25 +144,21 @@ When you need another channel or provider, add it with a skill such as `/add-tel
 ## 🔌 What It Supports
 
 - **Multi-channel messaging** — WhatsApp (personal or Business Cloud API), Telegram, Discord, Slack, Microsoft Teams, iMessage, Signal, Matrix, Mattermost, Google Chat, Webex, Linear, GitHub, WeChat, DeltaChat, Emacs, phone and SMS via Dial, and email via Resend. Installed on demand with `/add-<channel>` skills. Run one or many at the same time.
-- **Flexible isolation** — connect each channel to its own agent for full privacy, share one agent across many channels for unified memory with separate conversations, or fold multiple channels into a single shared session so one conversation spans many surfaces. Pick per channel via `/manage-channels`. See [docs/isolation-model.md](docs/isolation-model.md).
+- **Conversation sharing** — Give a channel its own agent, share one agent’s memory across separate conversations, or continue the same conversation across channels. Choose with `/manage-channels`. See [how isolation works](docs/isolation-model.md).
 - **Per-agent workspace** — each agent group has its own instructions, its own memory, its own container, and only the mounts you allow. Nothing crosses the boundary unless you wire it to.
 - **Scheduled tasks** — recurring jobs executed by the agent, with optional [script gates](docs/scheduled-tasks.md) that avoid waking it when there is no work.
 - **Web access** — search and fetch content from the web.
 - **Container isolation** — one Docker container per agent session (macOS/Linux/WSL2). How it contains an agent: [Is this secure?](#is-this-secure).
-- **Credential security** — a credential gateway you run, covered under [Is this secure?](#is-this-secure). Which gateway is yours to pick: setup installs one behind a provider seam ([OneCLI's Agent Vault](https://github.com/onecli/onecli) by default, Iron Proxy as the alternative).
-- **Agent templates** — stamp a ready-to-run agent (instructions + MCP tools + skills, no secrets) from a reusable bundle via `ncl groups create --template <ref>`. Templates load from the local `templates/` folder; populate it by hand or by copying from the [public library](https://github.com/nanocoai/nanoclaw-templates). See [docs/templates.md](docs/templates.md).
+- **Credential gateway** — Setup installs [OneCLI’s Agent Vault](https://github.com/onecli/onecli) by default. You can choose Iron Proxy instead. See [how the gateway handles keys](#is-this-secure).
+- **Agent templates** — Create an agent with `ncl groups create --template <ref>`. A template bundles instructions, MCP tools, and skills. Keep secrets out of templates. Use a template in `templates/` or copy one from the [public library](https://github.com/nanocoai/nanoclaw-templates). See the [template guide](docs/templates.md).
 
 <a name="accounts-and-what-leaves-your-machine"></a>
 
 ## 🔒 Accounts and what leaves your machine
 
-You can build and run NanoClaw locally without a NanoClaw account. Your model provider sees what your agents read and write, and each channel you connect sees the messages sent through it.
+You can build and run NanoClaw without a NanoClaw account. A hosted model provider receives what your agent sends it. Each messaging service you connect receives the messages you send through it.
 
-You can also [fetch a prebuilt agent image](docs/hardened-image.md) instead of
-building it locally. Fetching ours needs a free account, so we see your email address and when
-you ask for an image — nothing about your agents, and nothing after the image lands. Building
-locally needs no account and contacts nothing, and is the default. The same account unlocks the
-[perks](#perks) below.
+By default, setup builds the agent image on your machine. If you [download our prebuilt image](docs/hardened-image.md), you need a free account. NanoClaw receives your email address and the time you request the image. The same account gives you access to the optional [community perks](#perks).
 
 <a name="telemetry"></a>
 
@@ -198,13 +189,13 @@ The files and tokens kept on your machine, the `--stage` commands to revisit a s
 
 ## 🤝 Contributing
 
-**Don't add features. Add skills.**
+**Add new capabilities as skills.**
 
 Only security fixes, bug fixes, and clear improvements will be accepted to the base configuration. Everything else (new capabilities, OS compatibility, hardware support, enhancements) should be contributed as skills.
 
 If you want to add a new channel or agent provider, don't add it to trunk. New channel adapters land on the `channels` branch; a new agent provider keeps its code in its skill's `payload/` folder on `main`. Users install them in their own fork with `/add-<name>` skills, which copy the relevant module(s) into the standard paths, wire the registration, and pin dependencies. See [docs/customizing.md](docs/customizing.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
 
-This keeps trunk as pure registry and infra, and every fork stays lean — users get the channels and providers they asked for and nothing else.
+People can then install the channels and providers they use in their own fork.
 
 <a name="architecture"></a>
 
@@ -212,9 +203,9 @@ This keeps trunk as pure registry and infra, and every fork stays lean — users
 
 ![A channel message flows through the host router and inbound.db to the session container. The reply returns through outbound.db and host delivery to the same channel. Hosted model calls pass through the credential gateway.](assets/nanoclaw-message-flow.svg)
 
-A single Node host orchestrates per-session agent containers. When a message arrives, the host routes it via the entity model (user → messaging group → agent group → session), writes it to the session's `inbound.db`, and wakes the container. The agent-runner inside the container polls `inbound.db`, runs the agent, and writes responses to `outbound.db`. The host polls `outbound.db` and delivers back through the channel adapter.
+When you send a message, the Node.js host finds the right session, writes the message to `inbound.db`, and wakes the container. Inside the container, the agent runner reads the message and writes its reply to `outbound.db`. The host sends the reply back to your channel.
 
-Two SQLite files per session, each with exactly one writer — no cross-mount contention, no IPC, no stdin piping. Channels and alternative providers self-register at startup; trunk ships the registry and the Chat SDK bridge, while the adapters themselves are skill-installed per fork.
+Each session has two SQLite files. Only the host writes incoming messages, and only the agent runner writes replies. Channel adapters and model providers register with the host at startup.
 
 For the full architecture writeup see [docs/architecture.md](docs/architecture.md); for the three-level isolation model see [docs/isolation-model.md](docs/isolation-model.md).
 
@@ -245,7 +236,7 @@ Agents run in containers, not behind application-level permission checks. They c
 
 You should still review what you're running, and you can ask your coding agent to walk you through any part of it. See the [security documentation](https://docs.nanoclaw.dev/concepts/security) for the full security model.
 
-Found a vulnerability? Please don't open a public issue. [SECURITY.md](SECURITY.md) explains how to report it privately.
+Found a vulnerability? Follow the [private reporting instructions](SECURITY.md).
 
 <a name="why-so-little-configuration"></a>
 
@@ -272,7 +263,7 @@ ANTHROPIC_AUTH_TOKEN=your-token-here
 
 ### How do I debug issues?
 
-Ask your coding agent. "Why isn't the scheduler running?" "What's in the recent logs?" "Why did this message not get a response?" That's the AI-native approach that underlies NanoClaw.
+Start with one symptom and tell your coding agent what you expected. For example: “My Monday briefing didn’t arrive. Check the task schedule and the host logs for its last run.”
 
 <a name="why-isnt-the-setup-working-for-me"></a>
 
@@ -283,6 +274,14 @@ If a step fails, `nanoclaw.sh` offers to hand off to a coding agent to diagnose 
 <a name="how-do-i-uninstall-nanoclaw"></a>
 
 ### How do I uninstall NanoClaw?
+
+First, preview what the uninstaller would remove for this checkout.
+
+```bash
+bash nanoclaw.sh --uninstall --dry-run
+```
+
+To continue, run the uninstaller and review each confirmation.
 
 ```bash
 bash nanoclaw.sh --uninstall
