@@ -9,12 +9,16 @@
 # git, since it runs before Node is installed.
 
 # release_checkout_saved_channel <root> — NANOCLAW_UPDATE_CHANNEL from .env, if any.
-# The last non-empty assignment wins, as in the updater's reader.
+# Read as the updater reads it: trimmed, one pair of outer quotes removed, last
+# non-empty assignment wins.
 release_checkout_saved_channel() {
   [ -f "$1/.env" ] || return 0
   # `|| true`: no assignment is a normal answer, and callers run under pipefail.
   { grep -E '^[[:space:]]*NANOCLAW_UPDATE_CHANNEL[[:space:]]*=' "$1/.env" 2>/dev/null || true; } \
-    | cut -d= -f2- | tr -d "\"' \t\r" | tr 'A-Z' 'a-z' | { grep -v '^$' || true; } | tail -1
+    | cut -d= -f2- \
+    | sed -E -e 's/^[[:space:]]+|[[:space:]]+$//g' -e 's/^"(.*)"$/\1/' -e "s/^'(.*)'\$/\\1/" \
+      -e 's/^[[:space:]]+|[[:space:]]+$//g' \
+    | tr 'A-Z' 'a-z' | { grep -v '^$' || true; } | tail -1
 }
 
 # release_checkout_official_head <root> — true when HEAD is on a branch of the

@@ -112,8 +112,10 @@ describe('update channel setting', () => {
   it('never blocks uninstall on a bad env value, and still reports bad flags', () => {
     const env = { NANOCLAW_UPDATE_CHANNEL: 'nightly' };
     expect(startupErrors(parseFlags(['--uninstall', '--dry-run']), env)).toEqual([]);
-    expect(startupErrors(parseFlags(['--update-channel', 'nightly']), {})).toEqual([
-      'Invalid enum for --update-channel: nightly (use one of: stable, beta, edge)',
-    ]);
+    const badFlag = ['Invalid enum for --update-channel: nightly (use one of: stable, beta, edge)'];
+    expect(startupErrors(parseFlags(['--uninstall', '--dry-run', '--update-channel', 'nightly']), env)).toEqual(
+      badFlag,
+    );
+    expect(startupErrors(parseFlags(['--update-channel', 'nightly']), {})).toEqual(badFlag);
   });
 });

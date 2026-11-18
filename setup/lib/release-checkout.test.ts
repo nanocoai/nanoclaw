@@ -141,12 +141,24 @@ describe('release checkout decision', () => {
     expect(decide(install, 'stable')).toBe('notice v2.4.0');
   });
 
-  it('reads the last non-empty assignment, as the updater does', () => {
+  it.each([
+    ['NANOCLAW_UPDATE_CHANNEL=edge\nNANOCLAW_UPDATE_CHANNEL=\n', 'edge'],
+    ['NANOCLAW_UPDATE_CHANNEL=stable\nNANOCLAW_UPDATE_CHANNEL=edge\n', 'edge'],
+    ["  NANOCLAW_UPDATE_CHANNEL = 'Edge'\r\n", 'edge'],
+  ])('reads %j as the updater does', (env, channel) => {
     const { install } = freshClone();
-    fs.writeFileSync(path.join(install, '.env'), 'NANOCLAW_UPDATE_CHANNEL=edge\nNANOCLAW_UPDATE_CHANNEL=\n');
-    expect(readChannelSetting(install)).toBe('edge');
-    expect(helper('release_checkout_saved_channel', install).stdout).toBe('edge');
+    fs.writeFileSync(path.join(install, '.env'), env);
+    expect(readChannelSetting(install)).toBe(channel);
+    expect(helper('release_checkout_saved_channel', install).stdout).toBe(channel);
     expect(decide(install)).toBe('none');
+  });
+
+  it('does not read a value the updater rejects as edge', () => {
+    const { install } = freshClone();
+    fs.writeFileSync(path.join(install, '.env'), 'NANOCLAW_UPDATE_CHANNEL="ed ge"\n');
+    expect(() => readChannelSetting(install)).toThrow('Unknown update channel');
+    expect(helper('release_checkout_saved_channel', install).stdout).toBe('ed ge');
+    expect(decide(install)).toBe('offer v2.4.0');
   });
 
   it('ignores a .env without the channel', () => {
@@ -234,7 +246,8 @@ describe('release checkout switch', () => {
     const head = git(install, ['rev-parse', 'HEAD']);
     const result = helper('release_checkout_switch', install, 'v2.4.0');
     expect(result.status).not.toBe(0);
-    expect(result.stderr).toMatch(/'stable' already exists/);
+    // Git's wording depends on the locale; the branch name does not.
+    expect(result.stderr).toContain('stable');
     expect(git(install, ['rev-parse', 'HEAD'])).toBe(head);
     expect(git(install, ['symbolic-ref', '--short', 'HEAD'])).toBe('main');
   });
