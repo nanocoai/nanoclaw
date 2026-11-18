@@ -10,7 +10,7 @@
 <h1 align="center">The always-on agent you own.</h1>
 
 <p align="center">
-  An open-source assistant you run on your own machine. Message your agent from the apps you already use.
+  Run an open-source agent on your own machine and chat with it in the apps you already use.
 </p>
 
 <p align="center"><strong><a href="#quick-start">🚀 Quick start</a></strong> &nbsp;·&nbsp; <strong><a href="https://docs.nanoclaw.dev">📚 Documentation</a></strong> &nbsp;·&nbsp; <a href="#usage">💬 Examples</a> &nbsp;·&nbsp; <a href="#what-it-supports">🔌 Channels</a></p>
@@ -19,10 +19,10 @@
 
 ## 🩵 Why NanoClaw?
 
+- **Your API keys stay with you.** Your gateway adds the key to each request it forwards. Your agent never sees that key.
 - **You run it.** NanoClaw runs on your computer or server. Each agent session runs in a container, an isolated environment on that machine.
 - **You can change it.** The code is MIT-licensed. Ask your coding agent to walk you through a feature or change it in your fork.
 - **You choose how your agent runs.** Use Claude Code, Codex, Cursor, or OpenCode. You can also connect a local model.
-- **You control your API keys.** A credential gateway on your machine adds the key when it forwards a request.
 
 If you use a hosted model, its provider receives the content your agent sends in a request. See [what leaves your machine](#accounts-and-what-leaves-your-machine).
 
