@@ -442,6 +442,11 @@ export async function processQuery(
   // moved past them, so both doors check retry blocks against this window and
   // skip exact repeats. Follow-ups queued in between keep their own window.
   let nudgedWindow: SeqWindow | undefined;
+  // Inputs absorbed into the running turn (absorbConsumed): the echo windows
+  // of absorbed wrap-nudge retries, and the routes of every absorbed input for
+  // the failure notice if the stream breaks. Both end with the turn.
+  let absorbedWindows: SeqWindow[] = [];
+  let absorbedRoutes: RoutingContext[] = [];
   const adoptTurn = (next: QueuedTurn): void => {
     Object.assign(routing, next.routing);
     unwrappedNudged = next.unwrappedNudged;
@@ -468,19 +473,26 @@ export async function processQuery(
   // messages answers under its first message's routing (extractRouting).
   // Their prompts are archived with this turn. archivePrompts holds the
   // running turn's prompt then one per queued turn, in the same order, so
-  // the absorbed prompts are the ones right after the running turn's.
+  // queued turn i's prompt is archivePrompts[i + 1].
   const absorbConsumed = (ids: string[]): void => {
     const consumed = new Set(ids);
-    let absorbed = 0;
-    while (absorbed < queuedTurns.length && consumed.has(queuedTurns[absorbed].inputId)) absorbed++;
-    if (absorbed === 0) return;
-    const turns = queuedTurns.splice(0, absorbed);
-    // An absorbed wrap-nudge retry re-sends what its nudged turn already wrote;
-    // keep its echo window unless this turn has one of its own.
-    if (!nudgedWindow) for (const turn of turns) nudgedWindow = turn.nudgedWindow ?? nudgedWindow;
-    const prompts = archivePrompts.splice(0, absorbed + 1);
-    archivePrompts.unshift(prompts.join('\n\n'));
-    log(`Provider answered ${absorbed + 1} inputs in one turn: ${absorbed} queued turn(s) absorbed`);
+    // By id, not by position: the contract names inputs, it does not promise
+    // they are taken in push order.
+    const absorbed: number[] = [];
+    for (let i = 0; i < queuedTurns.length; i++) if (consumed.has(queuedTurns[i].inputId)) absorbed.push(i);
+    if (absorbed.length === 0) return;
+    const prompts = [archivePrompts[0]];
+    for (const i of absorbed.reverse()) {
+      const [turn] = queuedTurns.splice(i, 1);
+      prompts.splice(1, 0, ...archivePrompts.splice(i + 1, 1));
+      absorbedRoutes.push(turn.routing);
+      // An absorbed wrap-nudge retry re-sends what its nudged turn already
+      // wrote; its window is checked on its own, per thread (see
+      // repeatsAbsorbedRetry), never merged into this turn's.
+      if (turn.nudgedWindow) absorbedWindows.push(turn.nudgedWindow);
+    }
+    archivePrompts[0] = prompts.filter((prompt) => prompt !== undefined).join('\n\n');
+    log(`Provider answered ${absorbed.length + 1} inputs in one turn: ${absorbed.length} queued turn(s) absorbed`);
   };
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
@@ -638,7 +650,14 @@ export async function processQuery(
         // delivery the result stays the only delivery door, so a stray text
         // event must not open a second one.
         if (midTurnCompleteDelivery) {
-          const scan = await deliverMidTurnBlocks(event.text, routing, turnStartSeq, midTurnTail, nudgedWindow);
+          const scan = await deliverMidTurnBlocks(
+            event.text,
+            routing,
+            turnStartSeq,
+            midTurnTail,
+            nudgedWindow,
+            absorbedWindows,
+          );
           midTurnSent += scan.delivered;
           midTurnReplied += scan.replied;
           midTurnTail = scan.tail;
@@ -659,6 +678,7 @@ export async function processQuery(
             midTurnReplied,
             turnStartSeq,
             nudgedWindow,
+            absorbedWindows,
             // For mid-turn delivery providers the result door NEVER delivers
             // content: mid-turn streaming is the single content door. The
             // result door's remaining job is the nudge decision.
@@ -743,6 +763,8 @@ export async function processQuery(
         turnStartSeq = maxOutboundSeq();
         midTurnTail = '';
         nudgedWindow = undefined;
+        absorbedWindows = [];
+        absorbedRoutes = [];
         const next = queuedTurns.shift();
         if (next) adoptTurn(next);
         else answering = false;
@@ -766,7 +788,12 @@ export async function processQuery(
       // Retrying the same route or several queued turns in one thread needs
       // only one notice. The host picks an a2a reply's session by in_reply_to,
       // so agent routes also compare it.
-      const failedRoutes = [...(answering ? [routing] : []), ...queuedTurns.map((turn) => turn.routing)];
+      // Inputs absorbed into the unfinished turn were acknowledged at push and
+      // will not be redelivered, so they get a notice too.
+      const failedRoutes = [
+        ...(answering ? [routing, ...absorbedRoutes] : []),
+        ...queuedTurns.map((turn) => turn.routing),
+      ];
       const noticed: RoutingContext[] = [];
       for (const target of failedRoutes) {
         if (!sendsFailureNotice(target)) continue;
@@ -885,6 +912,8 @@ interface ResultDispatchCounts {
   midTurnReplied?: number;
   /** On a wrap-nudge retry: rows the nudged turn wrote. An exact repeat of one is not sent again. */
   nudgedWindow?: SeqWindow;
+  /** Windows of wrap-nudge retries absorbed into this turn; see repeatsAbsorbedRetry. */
+  absorbedWindows?: SeqWindow[];
   /**
    * Providers declaring `textDelivery: 'mid-turn-complete'`: the result door NEVER delivers
    * content. Mid-turn streaming (parse-time block delivery plus cross-
@@ -954,6 +983,7 @@ export async function deliverMidTurnBlocks(
   turnStartSeq?: number,
   carry = '',
   nudgedWindow?: SeqWindow,
+  absorbedWindows?: SeqWindow[],
 ): Promise<MidTurnScanResult> {
   if (routing.taskRun) return { delivered: 0, replied: 0, tail: '' };
   const input = carry + text;
@@ -999,7 +1029,7 @@ export async function deliverMidTurnBlocks(
       log(`Mid-turn <message to="${toName}"> is a verbatim repeat of a message already sent this turn — skipped`);
       continue;
     }
-    if (wasWrittenInWindow(dest, body, nudgedWindow)) {
+    if (wasWrittenInWindow(dest, body, nudgedWindow) || repeatsAbsorbedRetry(dest, body, absorbedWindows, routing)) {
       log(`Mid-turn <message to="${toName}"> repeats a message the nudged turn already sent — skipped`);
       continue;
     }
@@ -1194,15 +1224,46 @@ function wasWrittenInWindow(dest: DestinationEntry, body: string, window: SeqWin
   if (!window) return false;
   const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
   const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
-  return chatRowsInWindow(window.after, window.upto).some((message) => {
-    if (message.platform_id !== platformId || message.channel_type !== channelType) return false;
-    try {
-      const content = JSON.parse(message.content) as { text?: unknown; operation?: unknown };
-      return content.operation === undefined && typeof content.text === 'string' && content.text.trim() === body;
-    } catch {
-      return false;
-    }
-  });
+  return chatRowsInWindow(window.after, window.upto).some(
+    (message) => message.platform_id === platformId && message.channel_type === channelType && sendsText(message, body),
+  );
+}
+
+/**
+ * Did a wrap-nudge retry absorbed into this turn already send this body to
+ * the thread this send would go to? Each absorbed window is checked on its
+ * own, and only rows on the same thread count: the absorbed retry belonged to
+ * another input, so a matching reply to a different thread is a fresh one.
+ */
+function repeatsAbsorbedRetry(
+  dest: DestinationEntry,
+  body: string,
+  windows: SeqWindow[] | undefined,
+  routing: RoutingContext,
+): boolean {
+  if (!windows?.length) return false;
+  const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
+  const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
+  const threadId = resolveDestinationThread(channelType, platformId, routing)?.threadId ?? null;
+  return windows.some((window) =>
+    chatRowsInWindow(window.after, window.upto).some(
+      (message) =>
+        message.platform_id === platformId &&
+        message.channel_type === channelType &&
+        (message.thread_id ?? null) === threadId &&
+        sendsText(message, body),
+    ),
+  );
+}
+
+/** A chat row whose trimmed text is `body` (a tool send keeps whitespace a block loses). */
+function sendsText(message: MessageOutRow, body: string): boolean {
+  try {
+    const content = JSON.parse(message.content) as { text?: unknown; operation?: unknown };
+    return content.operation === undefined && typeof content.text === 'string' && content.text.trim() === body;
+  } catch {
+    return false;
+  }
 }
 
 export async function dispatchResultText(
@@ -1282,6 +1343,7 @@ export async function dispatchResultText(
       // Exact match, so a streamed delegation can't hide an unstreamed answer.
       const repeat =
         wasWrittenInWindow(dest, body, options.nudgedWindow) ||
+        repeatsAbsorbedRetry(dest, body, options.absorbedWindows, routing) ||
         wasWrittenInSeqWindow(dest, body, options.turnStartSeq, maxOutboundSeq());
       if (repeat) {
         log(`<message to="${toName}"> in final result after a same-turn delivery — repeat, result door does not send`);
@@ -1292,7 +1354,10 @@ export async function dispatchResultText(
       }
       continue;
     }
-    if (wasWrittenInWindow(dest, body, options?.nudgedWindow)) {
+    if (
+      wasWrittenInWindow(dest, body, options?.nudgedWindow) ||
+      repeatsAbsorbedRetry(dest, body, options?.absorbedWindows, routing)
+    ) {
       log(`<message to="${toName}"> repeats a message the nudged turn already sent — not sent again`);
       continue;
     }

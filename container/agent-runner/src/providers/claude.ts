@@ -80,6 +80,14 @@ interface SDKUserMessage {
 }
 
 type Uuid = `${string}-${string}-${string}-${string}-${string}`;
+
+/** The `consumed` event for an SDK frame's user_message_uuids, if it has any. */
+function consumedInputs(message: unknown): { type: 'consumed'; ids: string[] } | null {
+  const list = (message as { user_message_uuids?: unknown }).user_message_uuids;
+  if (!Array.isArray(list)) return null;
+  const ids = list.filter((id): id is string => typeof id === 'string');
+  return ids.length > 0 ? { type: 'consumed', ids } : null;
+}
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
@@ -348,10 +356,8 @@ export class ClaudeProvider implements AgentProvider {
           // waiting together at a turn boundary in one turn with one result,
           // so the poll-loop cannot count results to know which input a turn
           // answers. Subagent frames carry no list.
-          const consumed = (message as { user_message_uuids?: unknown }).user_message_uuids;
-          if (Array.isArray(consumed) && consumed.length > 0) {
-            yield { type: 'consumed', ids: consumed.filter((id): id is string => typeof id === 'string') };
-          }
+          const consumed = consumedInputs(message);
+          if (consumed) yield consumed;
           // Surface each assistant message's text as it streams in. The final
           // `result` event only carries the LAST assistant text — a wrapped
           // <message> block composed between tool calls would otherwise be
@@ -378,6 +384,11 @@ export class ClaudeProvider implements AgentProvider {
             if (text) yield { type: 'text', text };
           }
         } else if (message.type === 'result') {
+          // The result frame carries the same list; it is the only one that
+          // does when a turn ends before another assistant frame names a
+          // folded input. Reported before the result closes the turn.
+          const consumed = consumedInputs(message);
+          if (consumed) yield consumed;
           // `result` text exists only on subtype:"success"; error subtypes
           // (e.g. a non-retryable 403 billing_error) carry their message in
           // `errors[]` instead. Keep that actionable notice separate from

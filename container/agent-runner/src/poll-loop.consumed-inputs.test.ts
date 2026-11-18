@@ -12,7 +12,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 
-import { getUndeliveredMessages } from './db/messages-out.js';
+import { getUndeliveredMessages, writeMessageOut } from './db/messages-out.js';
 import { closeSessionDb, getInboundDb, initTestSessionDb } from './mailbox/sqlite/connection.js';
 import { processQuery } from './poll-loop.js';
 import type { RoutingContext } from './formatter.js';
@@ -26,8 +26,13 @@ const CHANNEL: RoutingContext = {
   taskRun: false,
 };
 
+// The host writes inbound rows with even, increasing seq; lookups such as a
+// destination's latest inbound row order by it.
+let nextSeq = 2;
+
 beforeEach(() => {
   initTestSessionDb();
+  nextSeq = 2;
   getInboundDb().exec(
     `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id) VALUES
        ('main', 'main', 'channel', 'discord', 'chan-1', NULL),
@@ -37,18 +42,22 @@ beforeEach(() => {
 });
 afterEach(() => closeSessionDb());
 
-function insertMessage(id: string, text: string, from?: { agent: string }): void {
+function insertMessage(id: string, text: string, from?: { agent?: string; thread?: string }): void {
+  const seq = nextSeq;
+  nextSeq += 2;
   getInboundDb()
     .prepare(
-      `INSERT INTO messages_in (id, kind, timestamp, status, process_after, trigger, on_wake, platform_id, channel_type, content)
-       VALUES (?, 'chat', ?, 'pending', NULL, 1, 0, ?, ?, ?)`,
+      `INSERT INTO messages_in (id, seq, kind, timestamp, status, process_after, trigger, on_wake, platform_id, channel_type, thread_id, content)
+       VALUES (?, ?, 'chat', ?, 'pending', NULL, 1, 0, ?, ?, ?, ?)`,
     )
     .run(
       id,
+      seq,
       new Date().toISOString(),
-      from ? from.agent : 'chan-1',
-      from ? 'agent' : 'discord',
-      JSON.stringify({ sender: from ? from.agent : 'User', text }),
+      from?.agent ?? 'chan-1',
+      from?.agent ? 'agent' : 'discord',
+      from?.thread ?? null,
+      JSON.stringify({ sender: from?.agent ?? 'User', text }),
     );
 }
 
@@ -56,17 +65,22 @@ type Push = { prompt: string; inputId?: string };
 type Script = (ctx: {
   pushes: Push[];
   /** Insert a message and wait until the poll-loop has pushed it; returns its input id. */
-  arrive: (id: string, text: string, from?: { agent: string }) => Promise<string | undefined>;
+  arrive: (id: string, text: string, from?: { agent?: string; thread?: string }) => Promise<string | undefined>;
 }) => AsyncGenerator<ProviderEvent>;
 
 async function run(
   script: Script,
   routing: RoutingContext = CHANNEL,
   first = 'm1',
-): Promise<{ stamps: Record<string, string | null>; pushes: Push[]; exchanges: ProviderExchange[] }> {
+): Promise<{
+  stamps: Record<string, string | null>;
+  rows: Array<{ text: string; threadId: string | null; inReplyTo: string | null }>;
+  pushes: Push[];
+  exchanges: ProviderExchange[];
+}> {
   const pushes: Push[] = [];
   const exchanges: ProviderExchange[] = [];
-  const arrive = async (id: string, text: string, from?: { agent: string }) => {
+  const arrive = async (id: string, text: string, from?: { agent?: string; thread?: string }) => {
     const before = pushes.length;
     insertMessage(id, text, from);
     const deadline = Date.now() + 5000;
@@ -82,11 +96,18 @@ async function run(
     events: script({ pushes, arrive }),
     abort: () => {},
   };
-  await processQuery(query, routing, [first], 'claude', (e) => exchanges.push(e), 'prompt-1', undefined, true);
-  const stamps = Object.fromEntries(
-    getUndeliveredMessages().map((r) => [JSON.parse(r.content).text as string, r.in_reply_to ?? null]),
-  );
-  return { stamps, pushes, exchanges };
+  try {
+    await processQuery(query, routing, [first], 'claude', (e) => exchanges.push(e), 'prompt-1', undefined, true);
+  } catch {
+    // A script that throws tests the failure path; its notices are in the rows.
+  }
+  const rows = getUndeliveredMessages().map((r) => ({
+    text: JSON.parse(r.content).text as string,
+    threadId: r.thread_id ?? null,
+    inReplyTo: r.in_reply_to ?? null,
+  }));
+  const stamps = Object.fromEntries(rows.map((r) => [r.text, r.inReplyTo]));
+  return { stamps, rows, pushes, exchanges };
 }
 
 const say = (text: string, to = 'main'): ProviderEvent => ({
@@ -193,6 +214,77 @@ describe('inputs answered together in one turn (#4033)', () => {
     // The retry was pushed behind m2 but carries m1's routing; absorbing it must not take m2's answer back to m1.
     expect(stamps['answer to m1 and m2']).toBe('m2');
     expect(stamps['answer to m3']).toBe('m3');
+  });
+
+  it('absorbs by id: an input taken ahead of an earlier queued one leaves that one queued', async () => {
+    const { stamps } = await run(async function* ({ arrive }) {
+      yield { type: 'init', continuation: 's1' };
+      await arrive('m2', 'second question');
+      const c = await arrive('m3', 'third question');
+      yield { type: 'consumed', ids: [c!] };
+      yield say('answer to m1');
+      yield result;
+      yield say('answer to m2');
+      yield result;
+      const d = await arrive('m4', 'fourth question');
+      yield { type: 'consumed', ids: [d!] };
+      yield say('answer to m4');
+      yield result;
+    });
+    expect(stamps).toEqual({ 'answer to m1': 'm1', 'answer to m2': 'm2', 'answer to m4': 'm4' });
+  });
+
+  it('a stream failure after absorbing still sends a notice to the absorbed input’s thread', async () => {
+    const { rows } = await run(
+      async function* ({ arrive }) {
+        yield { type: 'init', continuation: 's1' };
+        const b = await arrive('m2', 'question in another thread', { thread: 't2' });
+        yield { type: 'consumed', ids: [b!] };
+        throw new Error('stream broke');
+      },
+      { ...CHANNEL, threadId: 't1' },
+    );
+    expect(rows.map((r) => [r.threadId, r.inReplyTo]).sort()).toEqual([
+      ['t1', 'm1'],
+      ['t2', 'm2'],
+    ]);
+  });
+
+  describe('an absorbed wrap-nudge retry’s echo window', () => {
+    // Turn A (thread t1) sends "Done" with a tool, then ends unwrapped, so a
+    // wrap-nudge retry is queued behind follow-up B, and B's turn absorbs it.
+    function absorbedRetry(bThread: string): Script {
+      return async function* ({ arrive, pushes }) {
+        yield { type: 'init', continuation: 's1' };
+        await writeMessageOut({
+          id: 'tool-send',
+          in_reply_to: 'm1',
+          kind: 'chat',
+          platform_id: 'chan-1',
+          channel_type: 'discord',
+          thread_id: 't1',
+          content: JSON.stringify({ text: 'Done' }),
+        });
+        const b = await arrive('m2', 'second question', { thread: bThread });
+        yield { type: 'result', text: 'unwrapped' };
+        const retry = pushes[pushes.length - 1].inputId;
+        yield { type: 'consumed', ids: [b!, retry!] };
+        yield say('Done');
+        yield result;
+      };
+    }
+    const sendsOfDone = (rows: Array<{ text: string; threadId: string | null }>) =>
+      rows.filter((r) => r.text === 'Done').map((r) => r.threadId);
+
+    it('suppresses a repeat to the retry’s own thread', async () => {
+      const { rows } = await run(absorbedRetry('t1'), { ...CHANNEL, threadId: 't1' });
+      expect(sendsOfDone(rows)).toEqual(['t1']);
+    });
+
+    it('does not suppress the same text as a fresh reply in another thread', async () => {
+      const { rows } = await run(absorbedRetry('t2'), { ...CHANNEL, threadId: 't1' });
+      expect(sendsOfDone(rows).sort()).toEqual(['t1', 't2']);
+    });
   });
 });
 

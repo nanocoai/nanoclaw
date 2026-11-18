@@ -98,6 +98,18 @@ describe('inputs a turn consumed', () => {
     expect(recorded.frame.user_message_uuids).toHaveLength(2);
   });
 
+  it('reports a list carried by the result frame, before the result', async () => {
+    sdkMessages.push(
+      { type: 'assistant', message: { content: [{ type: 'text', text: 'a' }] } },
+      { type: 'result', subtype: 'success', result: 'a', user_message_uuids: ['input-4'] },
+    );
+    const events: Array<{ type: string; ids?: string[] }> = [];
+    for await (const e of startQuery().events) events.push(e as { type: string; ids?: string[] });
+    const kinds = events.map((e) => e.type).filter((t) => t !== 'activity');
+    expect(kinds).toEqual(['text', 'consumed', 'result']);
+    expect(events.find((e) => e.type === 'consumed')?.ids).toEqual(['input-4']);
+  });
+
   it('emits nothing for frames without a list (older CLI, subagent frames)', async () => {
     sdkMessages.push(
       { type: 'assistant', message: { content: [{ type: 'text', text: 'a' }] } },
