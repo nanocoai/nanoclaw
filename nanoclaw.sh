@@ -132,45 +132,42 @@ unset _take_channel _past_options
 
 RELEASE_TTY=0
 if [ -t 0 ] && [ -t 1 ]; then RELEASE_TTY=1; fi
-read -r RELEASE_ACTION RELEASE_TAG <<<"$(release_checkout_decide "$PROJECT_ROOT" "$REQUESTED_CHANNEL" "$RELEASE_TTY")"
+read -r RELEASE_ACTION RELEASE_REST <<<"$(release_checkout_decide "$PROJECT_ROOT" "$REQUESTED_CHANNEL" "$RELEASE_TTY")"
 
 if [ "$RELEASE_ACTION" = invalid ]; then
-  echo "error: unknown update channel \"$RELEASE_TAG\". Use one of: stable, beta, edge"
+  echo "error: unknown update channel \"$RELEASE_REST\". Use one of: stable, beta, edge"
   exit 1
 fi
 
 if [ "$RELEASE_ACTION" = offer ]; then
+  # shellcheck disable=SC2086 # two tags, split on purpose
+  release_checkout_menu $RELEASE_REST
+  read -r -p "  Choose [1/2/3]: " RELEASE_ANS </dev/tty
   echo ""
-  echo "  This copy is on main, which is newer than the latest release ($RELEASE_TAG)."
-  echo ""
-  echo "  1) Install the latest release $RELEASE_TAG (recommended)"
-  echo "  2) Install the newest code from main"
-  echo ""
-  read -r -p "  Choose [1/2]: " RELEASE_ANS </dev/tty
-  case "${RELEASE_ANS:-1}" in
-    2)
-      # Setup saves this, so the updater follows main instead of stopping
-      # later because the install is ahead of the release.
-      export NANOCLAW_UPDATE_CHANNEL=edge
-      ;;
-    *) RELEASE_ACTION=switch ;;
-  esac
-  echo ""
+  RELEASE_CHANNEL=$(release_checkout_answer "${RELEASE_ANS:-}")
+  # Saved now, so the choice holds even if the release predates this setting
+  # or setup stops before its first step.
+  release_checkout_save_channel "$PROJECT_ROOT" "$RELEASE_CHANNEL"
+  export NANOCLAW_UPDATE_CHANNEL=$RELEASE_CHANNEL
+  read -r RELEASE_ACTION RELEASE_REST <<<"$(release_checkout_decide "$PROJECT_ROOT" "$RELEASE_CHANNEL" 1)"
 fi
 
 if [ "$RELEASE_ACTION" = switch ]; then
-  if release_checkout_switch "$PROJECT_ROOT" "$RELEASE_TAG"; then
-    echo "  Installing release $RELEASE_TAG (branch: stable)."
-    # The release may predate --update-channel; the env var carries the choice.
-    if [ -n "$REQUESTED_CHANNEL" ]; then export NANOCLAW_UPDATE_CHANNEL="$REQUESTED_CHANNEL"; fi
+  read -r RELEASE_CHANNEL RELEASE_TAG <<<"$RELEASE_REST"
+  if release_checkout_switch "$PROJECT_ROOT" "$RELEASE_CHANNEL" "$RELEASE_TAG"; then
+    release_checkout_save_channel "$PROJECT_ROOT" "$RELEASE_CHANNEL"
+    echo "  Installing $RELEASE_TAG (branch: $RELEASE_CHANNEL)."
+    # The release may predate --update-channel; .env and the env var carry the choice.
+    export NANOCLAW_UPDATE_CHANNEL=$RELEASE_CHANNEL
     exec bash "$PROJECT_ROOT/nanoclaw.sh" ${_release_args[@]+"${_release_args[@]}"}
   fi
-  echo "  Couldn't switch to release $RELEASE_TAG; continuing with main."
+  echo "  Couldn't switch to $RELEASE_TAG; continuing with main."
   RELEASE_ACTION=notice
 fi
 
 if [ "$RELEASE_ACTION" = notice ]; then
-  echo "  This copy is on main, which is newer than the latest release ($RELEASE_TAG). Updates follow releases."
+  read -r RELEASE_CHANNEL RELEASE_TAG <<<"$RELEASE_REST"
+  echo "  This copy is on main, which is newer than the latest $RELEASE_CHANNEL release ($RELEASE_TAG). Updates follow releases."
   echo "  To follow main instead: pnpm exec tsx scripts/update-nanoclaw.ts set-channel --channel edge"
 fi
 unset _release_args
